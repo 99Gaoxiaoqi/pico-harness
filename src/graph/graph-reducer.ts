@@ -1,5 +1,5 @@
 import type { RuntimeEvent } from "../engine/session-runtime-event.js";
-import type { RuntimeEventStoreEntry } from "../storage/runtime-event-store.js";
+import type { RuntimeEventStoreEntry } from "../storage/runtime-event-store-contracts.js";
 import {
   GraphConflictError,
   type GraphProjection,
@@ -207,14 +207,19 @@ function conflict(message: string): never {
  * Folds the graph.* event slice of one session into a {@link GraphProjection}.
  * The graphId is supplied by the caller (it is the active graph handle for the
  * session). Entries belonging to other graphs are ignored.
+ *
+ * `sessionSequence` 默认取传入 entries 的末条 sequence;票 04 起消费方可以用
+ * kind 切片查询替代全量读,此时显式传入 `headSequence`(全会话水位)保持
+ * settle CAS 语义与全量口径一致。折叠规则本身不变。
  */
 export function projectGraphEntries(
   graphId: string,
   entries: readonly RuntimeEventStoreEntry[],
+  headSequence?: number,
 ): GraphProjection {
   let state: GraphProjection = {
     graphId,
-    sessionSequence: entries.at(-1)?.sequence ?? 0,
+    sessionSequence: headSequence ?? entries.at(-1)?.sequence ?? 0,
     works: [],
     records: [],
     status: "active",

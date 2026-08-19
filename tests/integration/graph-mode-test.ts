@@ -23,7 +23,7 @@ import {
   RUNTIME_EVENT_SCHEMA_VERSION,
   type RuntimeEvent,
 } from "../../src/storage/runtime-event.js";
-import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
+import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
 
 const AT = new Date("2026-08-11T00:00:00.000Z");
 const SESSION_ID = "graph-session-1";
@@ -31,7 +31,7 @@ const GRAPH_ID = `graph:${SESSION_ID}`;
 
 interface Fixture {
   root: string;
-  store: RuntimeEventStore;
+  store: SqliteRuntimeEventStore;
   context: GraphToolContext;
 }
 
@@ -39,7 +39,7 @@ async function setupFixture(): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), "pico-graph-mode-"));
   const workDir = join(root, "work");
   await mkdir(workDir);
-  const store = new RuntimeEventStore({ storageRoot: join(root, "state") });
+  const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "state") });
   await store.initializeSession({ sessionId: SESSION_ID, workDir });
   const context: GraphToolContext = {
     store,
@@ -52,7 +52,7 @@ async function setupFixture(): Promise<Fixture> {
   return { root, store, context };
 }
 
-function projectionSnapshot(store: RuntimeEventStore): Promise<ReturnType<typeof projectGraphEntries>> {
+function projectionSnapshot(store: SqliteRuntimeEventStore): Promise<ReturnType<typeof projectGraphEntries>> {
   return store.readSessionEntries(SESSION_ID).then((entries) => projectGraphEntries(GRAPH_ID, entries));
 }
 
@@ -109,7 +109,10 @@ test("graphOperationFingerprint is stable for identical semantic input", () => {
 
 test("AddWorkTool writes graph.work.added and dispatches when inputs are ready", async (t) => {
   const { root, store, context } = await setupFixture();
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => {
+    store.close();
+    return rm(root, { recursive: true, force: true });
+  });
 
   let dispatched: { workId: string; instruction: string; mode: string } | undefined;
   const tool = new AddWorkTool(
@@ -138,7 +141,10 @@ test("AddWorkTool writes graph.work.added and dispatches when inputs are ready",
 
 test("AddWorkTool with unmet input_ids stays waiting", async (t) => {
   const { root, store, context } = await setupFixture();
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => {
+    store.close();
+    return rm(root, { recursive: true, force: true });
+  });
 
   let dispatched = false;
   const tool = new AddWorkTool(
@@ -168,7 +174,10 @@ test("AddWorkTool with unmet input_ids stays waiting", async (t) => {
 
 test("AddWorkTool rejects new work on a closed graph", async (t) => {
   const { root, store, context } = await setupFixture();
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => {
+    store.close();
+    return rm(root, { recursive: true, force: true });
+  });
 
   const closeTool = new CloseGraphTool(context, () => AT);
   await closeTool.execute("{}");
@@ -186,8 +195,11 @@ test("AddWorkTool rejects new work on a closed graph", async (t) => {
 });
 
 test("AddWorkTool dispatch result stays consistent after upstream commit", async (t) => {
-  const { root, context } = await setupFixture();
-  t.after(() => rm(root, { recursive: true, force: true }));
+  const { root, store, context } = await setupFixture();
+  t.after(() => {
+    store.close();
+    return rm(root, { recursive: true, force: true });
+  });
 
   const tool = new AddWorkTool(context, async () => "delegation-ok", () => AT);
   const result = JSON.parse(await tool.execute(JSON.stringify({ instruction: "Plain work" }))) as {
@@ -199,8 +211,11 @@ test("AddWorkTool dispatch result stays consistent after upstream commit", async
 });
 
 test("ViewGraphTool exposes missingInputIds for waiting works", async (t) => {
-  const { root, context } = await setupFixture();
-  t.after(() => rm(root, { recursive: true, force: true }));
+  const { root, store, context } = await setupFixture();
+  t.after(() => {
+    store.close();
+    return rm(root, { recursive: true, force: true });
+  });
 
   const addTool = new AddWorkTool(context, async () => "delegation-1", () => AT);
   await addTool.execute(
@@ -216,8 +231,11 @@ test("ViewGraphTool exposes missingInputIds for waiting works", async (t) => {
 });
 
 test("CloseGraphTool reports pending works when closing un-converged graph", async (t) => {
-  const { root, context } = await setupFixture();
-  t.after(() => rm(root, { recursive: true, force: true }));
+  const { root, store, context } = await setupFixture();
+  t.after(() => {
+    store.close();
+    return rm(root, { recursive: true, force: true });
+  });
 
   // A requested work with an unresolvable input (deadlock case from real-LLM run).
   const addTool = new AddWorkTool(context, async () => "delegation-1", () => AT);
@@ -239,8 +257,11 @@ test("CloseGraphTool reports pending works when closing un-converged graph", asy
 });
 
 test("CloseGraphTool warning distinguishes dispatched from requested pending", async (t) => {
-  const { root, context } = await setupFixture();
-  t.after(() => rm(root, { recursive: true, force: true }));
+  const { root, store, context } = await setupFixture();
+  t.after(() => {
+    store.close();
+    return rm(root, { recursive: true, force: true });
+  });
 
   // A dispatched work (backing delegation still running) and a requested one.
   const dispatchedTool = new AddWorkTool(context, async () => "delegation-running", () => AT);
@@ -268,7 +289,10 @@ test("CloseGraphTool warning distinguishes dispatched from requested pending", a
 
 test("dispatched work settles after close_graph still commits its record", async (t) => {
   const { root, store, context } = await setupFixture();
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => {
+    store.close();
+    return rm(root, { recursive: true, force: true });
+  });
 
   // add_work with no inputs → dispatched (delegation in flight).
   const instruction = "In-flight work";
@@ -359,8 +383,11 @@ test("reduceGraphEvent ignores added events on a closed projection (defense-in-d
 });
 
 test("AddWorkTool deduplicates identical work on replay (idempotent)", async (t) => {
-  const { root, context } = await setupFixture();
-  t.after(() => rm(root, { recursive: true, force: true }));
+  const { root, store, context } = await setupFixture();
+  t.after(() => {
+    store.close();
+    return rm(root, { recursive: true, force: true });
+  });
 
   const tool = new AddWorkTool(
     context,
@@ -388,7 +415,10 @@ test("AddWorkTool deduplicates identical work on replay (idempotent)", async (t)
 
 test("AddWorkTool dispatches after upstream record is committed (DAG dependency)", async (t) => {
   const { root, store, context } = await setupFixture();
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => {
+    store.close();
+    return rm(root, { recursive: true, force: true });
+  });
 
   // First, add an upstream work with no inputs and let it produce a record.
   const upstreamInstruction = "Produce artifact A";
@@ -427,8 +457,11 @@ test("AddWorkTool dispatches after upstream record is committed (DAG dependency)
 });
 
 test("ViewGraphTool renders works and records", async (t) => {
-  const { root, context } = await setupFixture();
-  t.after(() => rm(root, { recursive: true, force: true }));
+  const { root, store, context } = await setupFixture();
+  t.after(() => {
+    store.close();
+    return rm(root, { recursive: true, force: true });
+  });
 
   const addTool = new AddWorkTool(context, async () => "delegation-1", () => AT);
   await addTool.execute(JSON.stringify({ instruction: "Work one" }));
@@ -446,8 +479,11 @@ test("ViewGraphTool renders works and records", async (t) => {
 });
 
 test("ViewGraphTool hides records when include_records is false", async (t) => {
-  const { root, context } = await setupFixture();
-  t.after(() => rm(root, { recursive: true, force: true }));
+  const { root, store, context } = await setupFixture();
+  t.after(() => {
+    store.close();
+    return rm(root, { recursive: true, force: true });
+  });
 
   const addTool = new AddWorkTool(context, async () => "delegation-1", () => AT);
   await addTool.execute(JSON.stringify({ instruction: "Work one" }));
@@ -461,7 +497,10 @@ test("ViewGraphTool hides records when include_records is false", async (t) => {
 
 test("CloseGraphTool marks the graph closed", async (t) => {
   const { root, store, context } = await setupFixture();
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => {
+    store.close();
+    return rm(root, { recursive: true, force: true });
+  });
 
   const closeTool = new CloseGraphTool(context, () => AT);
   const result = JSON.parse(await closeTool.execute("{}")) as { status: string };
@@ -472,8 +511,11 @@ test("CloseGraphTool marks the graph closed", async (t) => {
 });
 
 test("CloseGraphTool rejects unknown result_record_ids", async (t) => {
-  const { root, context } = await setupFixture();
-  t.after(() => rm(root, { recursive: true, force: true }));
+  const { root, store, context } = await setupFixture();
+  t.after(() => {
+    store.close();
+    return rm(root, { recursive: true, force: true });
+  });
 
   const closeTool = new CloseGraphTool(context, () => AT);
   await assert.rejects(
@@ -483,8 +525,11 @@ test("CloseGraphTool rejects unknown result_record_ids", async (t) => {
 });
 
 test("CloseGraphTool is idempotent on already-closed graph", async (t) => {
-  const { root, context } = await setupFixture();
-  t.after(() => rm(root, { recursive: true, force: true }));
+  const { root, store, context } = await setupFixture();
+  t.after(() => {
+    store.close();
+    return rm(root, { recursive: true, force: true });
+  });
 
   const closeTool = new CloseGraphTool(context, () => AT);
   await closeTool.execute("{}");
@@ -606,7 +651,10 @@ test("reduceGraphEvent replays idempotently for duplicate graph.work.added", () 
 
 test("findOrphanGraphWorks flags dispatched works whose delegation is not live", async (t) => {
   const { root, store, context } = await setupFixture();
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => {
+    store.close();
+    return rm(root, { recursive: true, force: true });
+  });
 
   const addTool = new AddWorkTool(context, async () => "delegation-orphan", () => AT);
   await addTool.execute(JSON.stringify({ instruction: "orphaned work" }));
@@ -627,7 +675,10 @@ test("findOrphanGraphWorks flags dispatched works whose delegation is not live",
 
 test("findOrphanGraphWorks excludes works whose delegation is still live", async (t) => {
   const { root, store, context } = await setupFixture();
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => {
+    store.close();
+    return rm(root, { recursive: true, force: true });
+  });
 
   const addTool = new AddWorkTool(context, async () => "delegation-live", () => AT);
   await addTool.execute(JSON.stringify({ instruction: "live work" }));
@@ -644,7 +695,10 @@ test("findOrphanGraphWorks excludes works whose delegation is still live", async
 
 test("orphan recovery marks a lost delegation's dispatched work as failed", async (t) => {
   const { root, store, context } = await setupFixture();
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => {
+    store.close();
+    return rm(root, { recursive: true, force: true });
+  });
 
   const instruction = "crashed work";
   const workId = workIdFor(GRAPH_ID, instruction, []);
@@ -686,8 +740,11 @@ test("orphan recovery marks a lost delegation's dispatched work as failed", asyn
 });
 
 test("appendGraphOperation CAS rejects conflicting fingerprint for same operationId", async (t) => {
-  const { root, context } = await setupFixture();
-  t.after(() => rm(root, { recursive: true, force: true }));
+  const { root, store, context } = await setupFixture();
+  t.after(() => {
+    store.close();
+    return rm(root, { recursive: true, force: true });
+  });
 
   const tool = new AddWorkTool(context, async () => "delegation-1", () => AT);
   await tool.execute(JSON.stringify({ instruction: "first", operationId: "op-shared" }));
@@ -699,7 +756,7 @@ test("appendGraphOperation CAS rejects conflicting fingerprint for same operatio
 });
 
 async function commitRecord(
-  store: RuntimeEventStore,
+  store: SqliteRuntimeEventStore,
   context: GraphToolContext,
   workId: string,
   recordId: string,
@@ -741,7 +798,7 @@ async function commitRecord(
 }
 
 async function commitFailed(
-  store: RuntimeEventStore,
+  store: SqliteRuntimeEventStore,
   context: GraphToolContext,
   workId: string,
   error: string,

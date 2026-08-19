@@ -3,7 +3,7 @@ import type { ToolDefinition } from "../schema/message.js";
 import { TaskRegistry } from "../tasks/task-registry.js";
 import { SUBAGENT_OUTPUT_BUDGET } from "./subagent-budget.js";
 import { ChildRunLimiter, resolveChildRunCapacity } from "./child-run-limiter.js";
-import type { RuntimeStore } from "../tasks/runtime-store.js";
+import type { SqliteRuntimeControlStore } from "../storage/sqlite/sqlite-runtime-control-store.js";
 import {
   acquireGraphWorkLease,
   graphWorkLeaseKey,
@@ -67,7 +67,7 @@ export interface DelegationManagerOptions {
    * `graph-work:${workId}` lease 做执行主权去重（替代内存 records 扫描），settle
    * 链完成时释放；orphan 恢复按 lease 活性判定。未注入时去重降级为不拦截。
    */
-  runtimeStore?: RuntimeStore;
+  runtimeStore?: SqliteRuntimeControlStore;
   onCompletion?: (completion: DelegationCompletionEnvelope) => void;
   /** Called when a delegation carrying planStepId settles, regardless of completionPolicy. */
   onPlanStepSettled?: (planStepId: string, status: DelegationRecordStatus) => Promise<void> | void;
@@ -208,7 +208,7 @@ export class DelegationManager {
   private readonly onCompletion?: DelegationManagerOptions["onCompletion"];
   private readonly onPlanStepSettled?: DelegationManagerOptions["onPlanStepSettled"];
   private readonly onGraphWorkSettled?: DelegationManagerOptions["onGraphWorkSettled"];
-  private readonly runtimeStore?: RuntimeStore;
+  private readonly runtimeStore?: SqliteRuntimeControlStore;
   private nextCompletionSeq = 1;
   readonly taskRegistry?: TaskRegistry;
 

@@ -1,14 +1,16 @@
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import {
   RuntimeConflictError,
-  RuntimeStore,
+  SqliteRuntimeControlStore,
+} from "../storage/sqlite/sqlite-runtime-control-store.js";
+import {
   generateRuntimeId,
   type FinishJobResult,
   type RecoverableJobTerminalStatus,
   type RuntimeStoreOptions,
   type SettleRecoverableJobAfterTaskTerminalResult,
   type StartRecoverableJobSuccessorResult,
-} from "./runtime-store.js";
+} from "./runtime-store-contracts.js";
 import {
   isTerminalJobStatus,
   type CompletionOutboxRecord,
@@ -28,6 +30,7 @@ import {
   type UsageLedgerFilter,
   type UsageLedgerSummary,
 } from "./runtime-types.js";
+import { resolveWorkspaceSqliteStorageRoot } from "../storage/sqlite/workspace-scopes.js";
 
 export interface JobServiceOptions extends RuntimeStoreOptions {
   ownerId?: string;
@@ -124,12 +127,15 @@ export interface CancelJobResult {
  * leases, attempts, commands and exactly-once completion identifiers.
  */
 export class JobService {
-  readonly store: RuntimeStore;
+  readonly store: SqliteRuntimeControlStore;
   readonly ownerId: string;
   private readonly generateId: NonNullable<JobServiceOptions["generateId"]>;
 
   constructor(options: JobServiceOptions) {
-    this.store = new RuntimeStore(options);
+    this.store = new SqliteRuntimeControlStore({
+      storageRoot: resolveWorkspaceSqliteStorageRoot(options),
+      ...(options.now ? { now: options.now } : {}),
+    });
     this.ownerId = options.ownerId ?? `host:${process.pid}`;
     this.generateId = options.generateId ?? generateRuntimeId;
   }

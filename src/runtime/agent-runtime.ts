@@ -25,7 +25,7 @@ import { SkillLoader, type Skill } from "../context/skill.js";
 import { ToolDisclosure, type ToolGroupLoadedEventLike } from "../tools/tool-disclosure.js";
 import { isToolSupportedForHost, type ToolHostKind } from "../tools/tool-surface.js";
 import { RUNTIME_EVENT_SCHEMA_VERSION } from "../engine/session-runtime-event.js";
-import { createRuntimeEventId } from "../storage/runtime-event-store.js";
+import { createRuntimeEventId } from "../storage/runtime-event-store-contracts.js";
 import {
   createProvider,
   createRawProvider,
@@ -64,7 +64,7 @@ import {
   type GraphToolContext,
 } from "../tools/graph-tools.js";
 import { normalizeDelegateTasks } from "../tools/delegation-contract.js";
-import { projectGraphEntries } from "../graph/graph-reducer.js";
+import { GRAPH_EVENT_KINDS, projectGraphEntries } from "../graph/graph-reducer.js";
 import { computeReadyWorks, missingInputIdsFor } from "../graph/graph-reconcile.js";
 import { CostTracker, type CostTrackerOptions } from "../observability/tracker.js";
 import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
@@ -124,7 +124,7 @@ import { createIsolatedPicoConfig, loadPicoConfig } from "../input/pico-config.j
 import type { YoloSandboxConfig } from "../safety/yolo-sandbox.js";
 import { resolveCliSession, type CliSessionSelection } from "../cli/session-resolver.js";
 import type { WorktreeSupervisor } from "../tasks/worktree-supervisor.js";
-import { RuntimeStore } from "../tasks/runtime-store.js";
+import { SqliteRuntimeControlStore } from "../storage/sqlite/sqlite-runtime-control-store.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import {
   BackgroundPolicyViolationError,
@@ -146,9 +146,10 @@ import {
 import { registerPluginCapabilityTools } from "../plugins/plugin-tool-activation.js";
 import { activatePluginProviderCapabilities } from "../plugins/plugin-provider-activation.js";
 import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
-import { RuntimeEventStore } from "../storage/runtime-event-store.js";
+import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 import { currentRuntimeRun, isRuntimeRunLive, RuntimeRun } from "./runtime-run.js";
 import { PlanCoordinator } from "../plan/coordinator.js";
+import { PLAN_EVENT_KINDS } from "../plan/events.js";
 import { projectActivePlanEntries } from "../plan/reducer.js";
 import { PlanConflictError, type PlanProjection, type PlanProposal } from "../plan/contract.js";
 import { RuntimeCleanupScope } from "./runtime-cleanup.js";
@@ -180,7 +181,7 @@ import type {
 } from "./runtime-contract.js";
 import { MemoryContextBuilder } from "../memory/context-builder.js";
 import { buildMemoryTriggerTools, type MemoryTriggerSlot } from "../memory/memory-trigger-tools.js";
-import { MemoryRepository } from "../memory/memory-repository.js";
+import { SqliteMemoryRepository } from "../storage/sqlite/sqlite-memory-repository.js";
 import { MemoryProposalEngine, MemoryRepositoryProposalStore } from "../memory/proposal-engine.js";
 import type { MemoryProposalProcessResult, TerminalMemoryEvidenceRef } from "../memory/proposal-contracts.js";
 import { RuntimeMemoryEvidenceReader } from "../memory/runtime-evidence-reader.js";
@@ -424,7 +425,7 @@ export class AgentRuntime {
   async readPlanProjection(input: PlanSessionRequest): Promise<PlanProjection> {
     const picoHome = resolvePicoHome({ picoHome: input.picoHome, env: input.env ?? process.env });
     const workDir = await resolveWorkDir(input.dir);
-    const store = new RuntimeEventStore({
+    const store = new SqliteRuntimeEventStore({
       storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
     });
     try {
@@ -682,10 +683,15 @@ function planControlContext(sessionId: string, operationId: string) {
 }
 
 async function reconcileOrphanedPlanExecution(
-  store: RuntimeEventStore,
+  store: SqliteRuntimeEventStore,
   sessionId: string,
 ): Promise<PlanProjection> {
-  const entries = await store.readSessionEntries(sessionId);
+  // plan.* + run.started 事件切片(票 04):本函数只消费 plan 事件与
+  // transition 之后的 run.started 准入事实,不再全量读。
+  const { entries } = await store.readSessionEntriesOfKinds(sessionId, [
+    ...PLAN_EVENT_KINDS,
+    "run.started",
+  ]);
   const coordinator = new PlanCoordinator(store, planControlContext(sessionId, "reconcile"));
   const projection = await coordinator.project();
   if (projection.execution?.status !== "active") return projection;
@@ -863,10 +869,10 @@ export async function executeAgentRuntime(
   const ownsRuntimeState = dependencies.runtimeState === undefined;
   let sessionLeaseTransferred = false;
   let cleanupRuntimeState: SessionRuntime | undefined;
-  let ownedUsageStore: RuntimeStore | undefined;
+  let ownedUsageStore: SqliteRuntimeControlStore | undefined;
   let ownsMcpManager = false;
   let cleanupMcpManager: McpConnectionManager | undefined;
-  let memoryRepository: MemoryRepository | undefined;
+  let memoryRepository: SqliteMemoryRepository | undefined;
   let memoryContextBuilder: MemoryContextBuilder | undefined;
   let memoryReviewScheduler: MemoryReviewSchedulerPort | undefined;
   let memoryReviewMode: string | undefined;
@@ -969,8 +975,8 @@ export async function executeAgentRuntime(
         const canonicalMemoryWorkspace = await memoryTrustStore.canonicalize(workDir);
         if (await memoryTrustStore.isTrusted(canonicalMemoryWorkspace)) {
           const memoryPaths = resolvePicoPaths(canonicalMemoryWorkspace, { picoHome });
-          memoryRepository = new MemoryRepository({
-            storageRoot: memoryPaths.workspace.memory,
+          memoryRepository = new SqliteMemoryRepository({
+            storageRoot: memoryPaths.workspace.root,
             workspaceId: memoryPaths.workspace.id,
           });
           memoryContextBuilder = new MemoryContextBuilder(memoryRepository);
@@ -982,8 +988,8 @@ export async function executeAgentRuntime(
                 // This callback runs in RuntimeRunExecutor's detached host task, after the
                 // foreground result is available. Own the connection so AgentRuntime cleanup
                 // cannot close it before the durable enqueue begins.
-                const schedulerRepository = new MemoryRepository({
-                  storageRoot: memoryPaths.workspace.memory,
+                const schedulerRepository = new SqliteMemoryRepository({
+                  storageRoot: memoryPaths.workspace.root,
                   workspaceId: memoryPaths.workspace.id,
                 });
                 try {
@@ -1106,7 +1112,9 @@ export async function executeAgentRuntime(
     // graph work lease 源（注入 DelegationManager）与 usage ledger。
     if (dependencies.runtimeState === undefined && !ownedUsageStore) {
       try {
-        ownedUsageStore = new RuntimeStore({ workDir, picoHome });
+        ownedUsageStore = new SqliteRuntimeControlStore({
+          storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
+        });
       } catch (error) {
         logger.error(
           { workDir, error: error instanceof Error ? error.message : String(error) },
@@ -1162,9 +1170,8 @@ export async function executeAgentRuntime(
     }
     if (!runtimeState.taskHostRuntime && !ownedUsageStore) {
       try {
-        ownedUsageStore = new RuntimeStore({
-          workDir,
-          picoHome,
+        ownedUsageStore = new SqliteRuntimeControlStore({
+          storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
         });
       } catch (error) {
         logger.error(
@@ -1212,7 +1219,7 @@ export async function executeAgentRuntime(
       currentConfig = { ...providerConfig, apiKey: credentialPool.getNext() };
     }
     const providerDependencies: ProviderRuntimeDependencies = {
-      promptCachePrewarm: PromptCachePrewarmCoordinator.shared(workspaceStatePaths.control),
+      promptCachePrewarm: PromptCachePrewarmCoordinator.shared(workspaceStatePaths.root),
     };
     const providerFactory = dependencies.providerFactory ?? createRawProvider;
     const providerDecorator = (provider: LLMProvider): LLMProvider => {
@@ -1306,7 +1313,9 @@ export async function executeAgentRuntime(
       dependencies.memoryProposalModelFactory ??
       (dependencies.provider === undefined
         ? async () => {
-            const ledger = new RuntimeStore({ workDir, picoHome });
+            const ledger = new SqliteRuntimeControlStore({
+              storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
+            });
             const billingRoute = billingRouteForProvider(kind, currentConfig);
             const provider = new CostTracker(
               providerFactory(kind, currentConfig, undefined, providerDependencies),
@@ -1332,7 +1341,6 @@ export async function executeAgentRuntime(
             new MemoryReviewWorker({
               workDir,
               workspaceId: memoryPaths.workspace.id,
-              memoryStorageRoot: memoryPaths.workspace.memory,
               runtimeStorageRoot: memoryPaths.workspace.root,
               trustStore: memoryTrustStore,
               modelFactory: memoryModelFactory,
@@ -1428,7 +1436,12 @@ export async function executeAgentRuntime(
     // run 切换 / crash recovery 后已加载组自动恢复，模型无需重新 load_tools。
     if (session.runtimeEventStore) {
       try {
-        const priorEntries = await session.runtimeEventStore.readSessionEntries(session.id);
+        // kind 切片(票 04):披露恢复只消费 tool.group.loaded 事实。
+        const priorEntries = (
+          await session.runtimeEventStore.readSessionEntriesOfKinds(session.id, [
+            "tool.group.loaded",
+          ])
+        ).entries;
         toolDisclosure.seedFromEvents(
           priorEntries.map((entry) => entry.event as ToolGroupLoadedEventLike),
         );
@@ -1564,7 +1577,7 @@ export async function executeAgentRuntime(
       const memoryModel = memoryModelFactory;
       const rememberHandler = memoryRepo && memoryModel
         ? async (ref: TerminalMemoryEvidenceRef): Promise<MemoryProposalProcessResult> => {
-            const repo = new MemoryRepository({
+            const repo = new SqliteMemoryRepository({
               storageRoot: memoryRepo.storageRoot,
               workspaceId: memoryRepo.workspaceId,
             });
@@ -1747,10 +1760,15 @@ export async function executeAgentRuntime(
         ? {
             graphReconcile: async () => {
               try {
-                const entries = await session.runtimeEventStore!.readSessionEntries(session.id);
+                // graph.* 事件切片 + 全会话水位(票 04):折叠输入只含 graph 事件。
+                const slice = await session.runtimeEventStore!.readSessionEntriesOfKinds(
+                  session.id,
+                  GRAPH_EVENT_KINDS,
+                );
                 const projection = projectGraphEntries(
                   runtimeState.graphContext.graphId,
-                  entries,
+                  slice.entries,
+                  slice.headSequence,
                 );
                 if (projection.status !== "active") return { pending: 0, ready: 0 };
                 const pendingWorks = projection.works.filter(
@@ -2184,9 +2202,37 @@ async function acquireRuntimeSession({
   resumeExistingSession: boolean;
   planMode: boolean;
 }): Promise<SessionManagerLease> {
-  const runtimeEventStore = new RuntimeEventStore({
+  const runtimeEventStore = new SqliteRuntimeEventStore({
     storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
   });
+  // 临时探测 store:manifest/fork 校验完成后立即归还 lease(连接句柄随 lease
+  // 存活,泄漏会占住 pico.sqlite;Session 自带独立 store)。
+  try {
+    return await acquireRuntimeSessionWithStore(
+      runtimeEventStore,
+      { sessionSelection, workDir, picoHome, resumeExistingSession, planMode },
+    );
+  } finally {
+    runtimeEventStore.close();
+  }
+}
+
+async function acquireRuntimeSessionWithStore(
+  runtimeEventStore: SqliteRuntimeEventStore,
+  {
+    sessionSelection,
+    workDir,
+    picoHome,
+    resumeExistingSession,
+    planMode,
+  }: {
+    sessionSelection: CliSessionSelection;
+    workDir: string;
+    picoHome: string;
+    resumeExistingSession: boolean;
+    planMode: boolean;
+  },
+): Promise<SessionManagerLease> {
   let targetManifest = await runtimeEventStore.readSessionManifest(sessionSelection.sessionId);
   if (sessionSelection.mode === "fork" && sessionSelection.sourceSessionId) {
     const sourceManifest = await runtimeEventStore.readSessionManifest(
@@ -2215,23 +2261,31 @@ async function acquireRuntimeSession({
         await RuntimeRun.repairSessionProjection(sourceLease.session, {
           capability: sourceCapability,
         });
-        await new SessionForkService({
+        const forkService = new SessionForkService({
           workDir,
           picoHome,
           runtimePort: createSessionForkRuntimePort(),
-        }).fork({
-          sourceSessionId: sessionSelection.sourceSessionId,
-          targetSessionId: sessionSelection.sessionId,
-          targetMode: planMode ? "plan" : DEFAULT_INTERACTION_MODE,
         });
+        try {
+          await forkService.fork({
+            sourceSessionId: sessionSelection.sourceSessionId,
+            targetSessionId: sessionSelection.sessionId,
+            targetMode: planMode ? "plan" : DEFAULT_INTERACTION_MODE,
+          });
+        } finally {
+          forkService.close();
+        }
         targetManifest = await runtimeEventStore.readSessionManifest(sessionSelection.sessionId);
       } finally {
         sourceLease.release();
       }
     }
-    const forkEvent = (await runtimeEventStore.readSession(sessionSelection.sessionId)).findLast(
-      (event) => event.kind === "session.forked",
+    // by_kind 末条点查(票 04):不再为找 fork 标记全量读会话事件。
+    const forkEntry = await runtimeEventStore.readLastSessionEntryOfKind(
+      sessionSelection.sessionId,
+      "session.forked",
     );
+    const forkEvent = forkEntry?.event.kind === "session.forked" ? forkEntry.event : undefined;
     if (!targetManifest || !forkEvent) {
       throw new Error(`fork target ${sessionSelection.sessionId} 缺少完整的 RuntimeEvent 历史`);
     }

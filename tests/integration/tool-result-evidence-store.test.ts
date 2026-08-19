@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
@@ -16,6 +17,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import {
   EvidenceArchive,
   formatEvidenceUri,
@@ -24,7 +26,6 @@ import {
   type RuntimeToolResultEvidenceManifestV2,
   type SubagentReportEvidenceManifestV2,
 } from "../../src/context/evidence-archive.js";
-import type { RuntimeEvidenceReference } from "../../src/engine/tool-result-contract.js";
 import { buildDefaultToolRegistry } from "../../src/tools/default-registry.js";
 import { DelegationManager } from "../../src/tools/delegation-manager.js";
 import { createSubagentRegistryFactory } from "../../src/tools/delegation-registry.js";
@@ -65,10 +66,13 @@ test("Runtime Evidence v2 stores one immutable blob and no inline raw copy", asy
   assert.equal(await fixture.archive.readRuntimeToolOutput(first), canary);
   assert.equal(await fixture.archive.readRuntimeToolOutput(second), canary);
 
+  // 票 08:清单进 evidence_records 行,清单 JSON 文件不再产生;raw 正文只存
+  // 一份 immutable blob(清单行内不得出现 canary)。
   const manifestPath = pathForManifest(fixture.evidenceRoot, first);
-  const serializedManifest = await readFile(manifestPath, "utf8");
-  assert.doesNotMatch(serializedManifest, /canary-/u);
-  assert.doesNotMatch(serializedManifest, /modelVisibleOutput/u);
+  assert.equal(existsSync(manifestPath), false);
+  const recordRow = readEvidenceRecordRow(fixture, first);
+  assert.doesNotMatch(recordRow.content_json, /canary-/u);
+  assert.doesNotMatch(recordRow.content_json, /modelVisibleOutput/u);
   const v2Manifest = firstManifest as RuntimeToolResultEvidenceManifestV2;
   const blobPath = pathForBlob(fixture.evidenceRoot, v2Manifest.content.rawOutput.digest);
   assert.equal(await readFile(blobPath, "utf8"), canary);
@@ -101,7 +105,6 @@ test("Runtime Evidence v2 stores one immutable blob and no inline raw copy", asy
       ).mode & 0o777,
       0o700,
     );
-    assert.equal((await stat(manifestPath)).mode & 0o777, 0o600);
   }
 });
 
@@ -136,55 +139,34 @@ test("Subagent reports use the same Evidence URI reader and immutable blob CAS",
     await readFile(pathForBlob(fixture.evidenceRoot, typedManifest.content.report.digest), "utf8"),
     report,
   );
-  assert.doesNotMatch(
-    await readFile(pathForManifest(fixture.evidenceRoot, reference), "utf8"),
-    /证据行/u,
-  );
+  // 票 08:清单行内不得出现报告正文;清单 JSON 文件不再产生。
+  assert.doesNotMatch(readEvidenceRecordRow(fixture, reference).content_json, /证据行/u);
+  assert.equal(existsSync(pathForManifest(fixture.evidenceRoot, reference)), false);
 });
 
-test("Runtime Evidence rejects legacy v1 manifests", async (context) => {
-  const fixture = await evidenceFixture(context, "pico-evidence-v1-");
-  const sessionId = "legacy/session";
-  const contentHash = "a".repeat(64);
-  const manifestPath = join(
-    fixture.evidenceRoot,
-    sanitizeFilePart(sessionId),
-    `${contentHash}.json`,
-  );
-  await mkdir(join(fixture.evidenceRoot, sanitizeFilePart(sessionId)), {
-    recursive: true,
-    mode: 0o700,
+test("Runtime Evidence rejects rows whose kind column disagrees with the content", async (context) => {
+  const fixture = await evidenceFixture(context, "pico-evidence-kind-mismatch-");
+  const reference = await fixture.archive.archiveRuntimeToolResult({
+    sessionId: "kind-mismatch-session",
+    toolCallId: "call-1",
+    toolName: "bash",
+    rawArguments: "{}",
+    rawOutput: "kind mismatch canary",
+    isError: false,
   });
-  await writeFile(
-    manifestPath,
-    `${JSON.stringify({
-      schemaVersion: 1,
-      contentHash,
-      archivedAt: "2026-07-28T00:00:00.000Z",
-      kind: "tool-exchange",
-      content: {
-        kind: "tool-exchange",
-        sessionId,
-        toolCallId: "legacy-call",
-        toolName: "read_file",
-        arguments: '{"path":"legacy.txt"}',
-        rawOutput: "legacy raw output",
-        modelVisibleOutput: "legacy projected output",
-        isError: false,
-      },
-    })}\n`,
-    { encoding: "utf8", mode: 0o600 },
-  );
-  const reference: RuntimeEvidenceReference = {
-    schemaVersion: 2,
-    contentHash,
-    sessionId,
-    kind: "tool-exchange",
-  };
 
+  // 直连库把 kind 列改写为另一类:重建 manifest 时 content.kind 与信封不匹配。
+  const database = new DatabaseSync(join(fixture.root, "pico.sqlite"));
+  try {
+    database
+      .prepare("UPDATE evidence_records SET kind = 'subagent-report' WHERE content_hash = ?")
+      .run(reference.contentHash);
+  } finally {
+    database.close();
+  }
   await assert.rejects(
     fixture.archive.readRuntimeToolExchange(reference),
-    /invalid schema version/u,
+    /invalid content|does not match manifest/u,
   );
 });
 
@@ -215,17 +197,25 @@ test("Runtime Evidence rejects manifest and blob tampering", async (context) => 
     rawOutput: "separate body",
     isError: false,
   });
-  const secondPath = pathForManifest(fixture.evidenceRoot, second);
-  const secondValue = JSON.parse(await readFile(secondPath, "utf8")) as {
-    content: { toolName: string };
-  };
-  secondValue.content.toolName = "forged";
-  await writeFile(secondPath, `${JSON.stringify(secondValue)}\n`, "utf8");
+  // 票 08:清单行篡改(直连库改写 toolName)→ 内容哈希失配 fail-closed。
+  const database = new DatabaseSync(join(fixture.root, "pico.sqlite"));
+  try {
+    const row = database
+      .prepare("SELECT content_json FROM evidence_records WHERE content_hash = ?")
+      .get(second.contentHash) as { content_json: string };
+    const content = JSON.parse(row.content_json) as { toolName: string };
+    content.toolName = "forged";
+    database
+      .prepare("UPDATE evidence_records SET content_json = ? WHERE content_hash = ?")
+      .run(JSON.stringify(content), second.contentHash);
+  } finally {
+    database.close();
+  }
   await assert.rejects(fixture.archive.readRuntimeToolExchange(second), /content hash mismatch/u);
 });
 
 test(
-  "Runtime Evidence rejects symlink manifests and blobs",
+  "Runtime Evidence rejects symlink blobs",
   { skip: process.platform === "win32" },
   async (context) => {
     const fixture = await evidenceFixture(context, "pico-evidence-symlink-");
@@ -245,23 +235,6 @@ test(
     await symlink(realBlobPath, blobPath);
     await assert.rejects(
       fixture.archive.readRuntimeToolOutput(blobReference),
-      /regular non-symlink file/u,
-    );
-
-    const manifestReference = await fixture.archive.archiveRuntimeToolResult({
-      sessionId: "manifest-link-session",
-      toolCallId: "manifest-call",
-      toolName: "grep",
-      rawArguments: "{}",
-      rawOutput: "manifest symlink canary",
-      isError: false,
-    });
-    const manifestPath = pathForManifest(fixture.evidenceRoot, manifestReference);
-    const realManifestPath = `${manifestPath}.real`;
-    await rename(manifestPath, realManifestPath);
-    await symlink(realManifestPath, manifestPath);
-    await assert.rejects(
-      fixture.archive.readRuntimeToolExchange(manifestReference),
       /regular non-symlink file/u,
     );
   },
@@ -311,15 +284,6 @@ test(
             recursive: true,
             mode: 0o700,
           });
-        },
-      },
-      {
-        name: "session directory",
-        linkPath(evidenceRoot: string) {
-          return join(evidenceRoot, "ancestor-session");
-        },
-        async prepare(evidenceRoot: string) {
-          await mkdir(evidenceRoot, { mode: 0o700 });
         },
       },
     ] as const;
@@ -624,6 +588,25 @@ function pathForManifest(
   reference: { readonly sessionId: string; readonly contentHash: string },
 ): string {
   return join(evidenceRoot, sanitizeFilePart(reference.sessionId), `${reference.contentHash}.json`);
+}
+
+/** 直连 pico.sqlite 读取 evidence_records 行(清单在库,不在 FS)。 */
+function readEvidenceRecordRow(
+  fixture: EvidenceFixture,
+  reference: { readonly sessionId: string; readonly contentHash: string },
+): { content_json: string } {
+  const database = new DatabaseSync(join(fixture.root, "pico.sqlite"), { readOnly: true });
+  try {
+    const row = database
+      .prepare("SELECT content_json FROM evidence_records WHERE session_id = ? AND content_hash = ?")
+      .get(reference.sessionId, reference.contentHash) as
+      | { content_json: string }
+      | undefined;
+    assert.ok(row, "evidence_records 行必须存在");
+    return row;
+  } finally {
+    database.close();
+  }
 }
 
 function pathForBlob(evidenceRoot: string, digest: string): string {

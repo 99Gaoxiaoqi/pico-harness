@@ -1,3 +1,4 @@
+import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -11,10 +12,11 @@ import { AgentEngine } from "../../src/engine/loop.js";
 import { SilentReporter } from "../../src/engine/reporter.js";
 import { Session } from "../../src/engine/session.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
+import { closeAllOperationalDatabasesForTest } from "../../src/storage/sqlite/sqlite-database.js";
 import { ContextOverflowError } from "../../src/provider/errors.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
 import { executeAgentRuntime } from "../../src/runtime/agent-runtime.js";
-import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
+
 import type { Message } from "../../src/schema/message.js";
 import { ToolRegistry } from "../../src/tools/registry-impl.js";
 
@@ -23,7 +25,10 @@ test("dynamic prompt state stays in the current user request copy across runs an
   const workDir = join(root, "workspace");
   const picoHome = join(root, "pico-home");
   await mkdir(workDir, { recursive: true });
-  context.after(() => rm(root, { recursive: true, force: true }));
+  context.after(async () => {
+    closeAllOperationalDatabasesForTest();
+    await rm(root, { recursive: true, force: true });
+  });
 
   await writeFile(join(workDir, "AGENTS.md"), "stable-agent-instruction", "utf8");
 
@@ -126,7 +131,10 @@ test("dynamic prompt state stays in the current user request copy across runs an
 
 test("grace call receives the frozen turn tail without persisting it", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-turn-tail-grace-"));
-  context.after(() => rm(root, { recursive: true, force: true }));
+  context.after(async () => {
+    closeAllOperationalDatabasesForTest();
+    await rm(root, { recursive: true, force: true });
+  });
   const requests: Message[][] = [];
   const provider: LLMProvider = {
     async generate(messages) {
@@ -188,7 +196,10 @@ test("grace call receives the frozen turn tail without persisting it", async (co
 
 test("provider overflow compaction retry preserves one frozen turn tail", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-turn-tail-overflow-"));
-  context.after(() => rm(root, { recursive: true, force: true }));
+  context.after(async () => {
+    closeAllOperationalDatabasesForTest();
+    await rm(root, { recursive: true, force: true });
+  });
   const requests: Message[][] = [];
   const compactionRequests: Message[][] = [];
   let mainCalls = 0;
@@ -257,7 +268,10 @@ test("AgentRuntime puts schedule intent in the current turn tail, not durable ev
   const picoHome = join(root, "pico-home");
   const sessionId = "turn-tail-runtime";
   await mkdir(workDir, { recursive: true });
-  context.after(() => rm(root, { recursive: true, force: true }));
+  context.after(async () => {
+    closeAllOperationalDatabasesForTest();
+    await rm(root, { recursive: true, force: true });
+  });
 
   const requests: Message[][] = [];
   const provider: LLMProvider = {
@@ -293,7 +307,7 @@ test("AgentRuntime puts schedule intent in the current turn tail, not durable ev
   assert.match(currentUser?.content ?? "", new RegExp(`^${userPrompt}`, "u"));
   assert.match(currentUser?.content ?? "", /schedule-task-intent/u);
 
-  const runtimeEvents = await new RuntimeEventStore({
+  const runtimeEvents = await new SqliteRuntimeEventStore({
     storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
   }).readSession(sessionId);
   assert.doesNotMatch(JSON.stringify(runtimeEvents), /schedule-task-intent|current-turn-context/u);
@@ -304,7 +318,10 @@ test("isolated headless runtime adds the autonomous completion contract only to 
   const workDir = join(root, "workspace");
   const picoHome = join(root, "pico-home");
   await mkdir(workDir, { recursive: true });
-  context.after(() => rm(root, { recursive: true, force: true }));
+  context.after(async () => {
+    closeAllOperationalDatabasesForTest();
+    await rm(root, { recursive: true, force: true });
+  });
 
   const systemPrompts: string[] = [];
   const userPrompts: string[] = [];
@@ -368,7 +385,10 @@ test("user-level AGENTS.md loads before project-level AGENTS.md", async (context
   const picoHome = join(root, "pico-home");
   await mkdir(workDir, { recursive: true });
   await mkdir(picoHome, { recursive: true });
-  context.after(() => rm(root, { recursive: true, force: true }));
+  context.after(async () => {
+    closeAllOperationalDatabasesForTest();
+    await rm(root, { recursive: true, force: true });
+  });
 
   await writeFile(join(picoHome, "AGENTS.md"), "user-level-preference", "utf8");
   await writeFile(join(workDir, "AGENTS.md"), "project-level-preference", "utf8");
@@ -390,7 +410,10 @@ test("user-level AGENTS.md is skipped without picoHome", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-no-user-agents-"));
   const workDir = join(root, "workspace");
   await mkdir(workDir, { recursive: true });
-  context.after(() => rm(root, { recursive: true, force: true }));
+  context.after(async () => {
+    closeAllOperationalDatabasesForTest();
+    await rm(root, { recursive: true, force: true });
+  });
 
   await writeFile(join(workDir, "AGENTS.md"), "project-level-only", "utf8");
 

@@ -5,7 +5,8 @@ import { join } from "node:path";
 import test from "node:test";
 import { DesktopMemoryService } from "../../src/daemon/desktop-memory-service.js";
 import type { RuntimeEvent } from "../../src/engine/session-runtime-event.js";
-import { MemoryRepository } from "../../src/memory/memory-repository.js";
+import { SqliteMemoryRepository } from "../../src/storage/sqlite/sqlite-memory-repository.js";
+import { closeAllOperationalDatabasesForTest } from "../../src/storage/sqlite/sqlite-database.js";
 import {
   MemoryProposalEngine,
   MemoryRepositoryProposalStore,
@@ -24,7 +25,7 @@ import {
 } from "../../src/memory/runtime-evidence-reader.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import type { Message } from "../../src/schema/message.js";
-import type { RuntimeEventStoreEntry } from "../../src/storage/runtime-event-store.js";
+import type { RuntimeEventStoreEntry } from "../../src/storage/runtime-event-store-contracts.js";
 import {
   assertMemoryQualityThresholds,
   MEMORY_QUALITY_CASES,
@@ -131,7 +132,7 @@ test("memory quality corpus meets precision, recall and zero sensitive-misstore 
       repositorySnapshot(fixture.repository),
       sensitiveCanaries,
     );
-    await assertNoSensitiveMemoryFiles(paths.workspace.memory, sensitiveCanaries);
+    await assertNoSensitiveMemoryFiles(join(paths.workspace.root, "memory"), sensitiveCanaries);
     fixture.repository.close();
 
     const notifications: unknown[] = [];
@@ -172,8 +173,8 @@ test("memory quality corpus meets precision, recall and zero sensitive-misstore 
     assertNoSensitiveCanaries("desktop-api", apiResults, sensitiveCanaries);
     assertNoSensitiveCanaries("desktop-notifications", notifications, sensitiveCanaries);
 
-    const inspection = new MemoryRepository({
-      storageRoot: paths.workspace.memory,
+    const inspection = new SqliteMemoryRepository({
+      storageRoot: paths.workspace.root,
       workspaceId: paths.workspace.id,
     });
     try {
@@ -186,9 +187,10 @@ test("memory quality corpus meets precision, recall and zero sensitive-misstore 
       inspection.close();
     }
 
-    await assertNoSensitiveMemoryFiles(paths.workspace.memory, sensitiveCanaries);
+    await assertNoSensitiveMemoryFiles(join(paths.workspace.root, "memory"), sensitiveCanaries);
   } finally {
-    await rm(fixture.root, { recursive: true, force: true });
+    fixture.repository.close();
+    await rmRetry(fixture.root);
   }
 });
 
@@ -234,7 +236,7 @@ test("disabled and autoPropose=false create no jobs and make no proposal-model c
     assert.equal(fixture.repository.listJobs().length, 0);
   } finally {
     fixture.repository.close();
-    await rm(fixture.root, { recursive: true, force: true });
+    await rmRetry(fixture.root);
   }
 });
 
@@ -336,7 +338,7 @@ function runtimeEvidenceStore(
   };
 }
 
-function repositorySnapshot(repository: MemoryRepository): unknown {
+function repositorySnapshot(repository: SqliteMemoryRepository): unknown {
   return {
     facts: repository.listFacts({ limit: 500 }),
     proposals: repository.listProposals({ limit: 500 }),
@@ -376,11 +378,36 @@ function assertNoSensitiveBytes(
   }
 }
 
+async function rmRetry(target: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await rm(target, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EBUSY') throw error;
+      if (attempt === 0) {
+        // 文件纪元的测试可以不关句柄直接 rm;SQLite 纪元先强制放掉本进程
+        // 全部 pico.sqlite owner(事后各 close() 钩子对已释放 lease 静默空转)。
+        closeAllOperationalDatabasesForTest();
+      }
+      if (attempt >= 50) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+}
+
 async function assertNoSensitiveMemoryFiles(
   memoryRoot: string,
   canaries: readonly string[],
 ): Promise<void> {
-  const entries = await readdir(memoryRoot, { recursive: true, withFileTypes: true });
+  let entries;
+  try {
+    // SQLite 纪元 memory 不再有独立目录;目录缺失本身即"无明文残留"。
+    entries = await readdir(memoryRoot, { recursive: true, withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
   for (const entry of entries) {
     if (!entry.isFile()) continue;
     const filePath = join(entry.parentPath, entry.name);
@@ -392,7 +419,7 @@ async function createFixture(label: string): Promise<{
   readonly root: string;
   readonly workspace: string;
   readonly picoHome: string;
-  readonly repository: MemoryRepository;
+  readonly repository: SqliteMemoryRepository;
 }> {
   const root = await mkdtemp(join(tmpdir(), `pico-memory-quality-${label}-`));
   const workspace = join(root, "workspace");
@@ -403,8 +430,8 @@ async function createFixture(label: string): Promise<{
     root,
     workspace,
     picoHome,
-    repository: new MemoryRepository({
-      storageRoot: paths.workspace.memory,
+    repository: new SqliteMemoryRepository({
+      storageRoot: paths.workspace.root,
       workspaceId: paths.workspace.id,
     }),
   };

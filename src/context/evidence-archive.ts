@@ -1,12 +1,10 @@
-import { createHash, randomUUID } from "node:crypto";
-import type { FileHandle } from "node:fs/promises";
-import { resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { dirname, resolve } from "node:path";
 import type { RuntimeEvidenceReference } from "../engine/tool-result-contract.js";
+import { withWorkspaceSqliteLease } from "../storage/sqlite/workspace-scopes.js";
 import {
   assertEvidenceBlobRef,
   EvidenceBlobStore,
-  type VerifiedEvidenceDirectory,
-  withVerifiedEvidenceDirectory,
   type EvidenceBlobRef,
 } from "./evidence-blob-store.js";
 
@@ -100,6 +98,12 @@ export interface EvidencePage {
 
 export interface EvidenceArchiveOptions {
   readonly baseDir: string;
+  /**
+   * 清单索引(evidence_records/evidence_blobs)所在的 workspace 存储根。
+   * 省略时取 baseDir 的父目录——pico-paths 布局里 evidence 根恒为
+   * `<storageRoot>/evidence`,三个装配点与测试夹具都符合该布局。
+   */
+  readonly storageRoot?: string;
   readonly now?: () => Date;
 }
 
@@ -113,11 +117,14 @@ export class EvidenceArchiveIntegrityError extends Error {
 /** Immutable, content-addressed evidence for ToolResults and subagent reports. */
 export class EvidenceArchive {
   private readonly baseDir: string;
+  private readonly storageRoot: string;
   private readonly now: () => Date;
   private readonly blobs: EvidenceBlobStore;
 
   constructor(options: EvidenceArchiveOptions) {
     this.baseDir = resolve(options.baseDir);
+    // blob CAS 留在 baseDir;清单行进 workspace pico.sqlite(票 08,ADR §4.6)。
+    this.storageRoot = resolve(options.storageRoot ?? dirname(this.baseDir));
     this.now = options.now ?? (() => new Date());
     this.blobs = new EvidenceBlobStore(this.baseDir);
   }
@@ -126,12 +133,9 @@ export class EvidenceArchive {
     input: ArchiveRuntimeToolResultInput,
   ): Promise<RuntimeEvidenceReference> {
     assertRuntimeToolResultInput(input);
-    await withVerifiedEvidenceDirectory(
-      this.baseDir,
-      [sanitizeFilePart(input.sessionId)],
-      { create: true },
-      async () => undefined,
-    );
+    // 先确保 storageRoot + pico.sqlite 就绪:evidence 根(<storageRoot>/evidence)
+    // 的自举创建语义保持,之后 blob 目录才能在其下 mkdir。
+    this.prepareStorage();
     const rawOutput = (await this.blobs.putUtf8(input.rawOutput)).ref;
     const content: RuntimeToolResultEvidenceV2 = {
       kind: "tool-exchange",
@@ -163,13 +167,7 @@ export class EvidenceArchive {
       kind: "tool-exchange",
       content,
     };
-    const created = await writeImmutableJson(
-      this.baseDir,
-      [sanitizeFilePart(input.sessionId)],
-      `${contentHash}.json`,
-      manifest,
-    );
-    if (!created) await this.readRuntimeToolExchange(reference);
+    await this.publishEvidenceRecord(manifest, rawOutput);
     return reference;
   }
 
@@ -177,12 +175,7 @@ export class EvidenceArchive {
     input: ArchiveSubagentReportInput,
   ): Promise<SubagentReportEvidenceReference> {
     assertSubagentReportInput(input);
-    await withVerifiedEvidenceDirectory(
-      this.baseDir,
-      [sanitizeFilePart(input.sessionId)],
-      { create: true },
-      async () => undefined,
-    );
+    this.prepareStorage();
     const report = (await this.blobs.putUtf8(input.report)).ref;
     const content: SubagentReportEvidenceV2 = {
       kind: "subagent-report",
@@ -211,13 +204,7 @@ export class EvidenceArchive {
       kind: "subagent-report",
       content,
     };
-    const created = await writeImmutableJson(
-      this.baseDir,
-      [sanitizeFilePart(input.sessionId)],
-      `${contentHash}.json`,
-      manifest,
-    );
-    if (!created) await this.readSubagentReportEvidence(reference);
+    await this.publishEvidenceRecord(manifest, report);
     return reference;
   }
 
@@ -291,13 +278,35 @@ export class EvidenceArchive {
     reference: EvidenceUriReference,
   ): Promise<BlobEvidenceManifest> {
     assertEvidenceUriReference(reference);
-    const manifest = await readImmutableJson(
-      this.baseDir,
-      [sanitizeFilePart(reference.sessionId)],
-      `${reference.contentHash}.json`,
-      decodeBlobEvidenceManifest,
-      "Evidence blob manifest",
-    );
+    const record = withWorkspaceSqliteLease(this.storageRoot, (lease) =>
+      lease.transaction("read", () =>
+        lease.database
+          .prepare(
+            `SELECT kind, archived_at, content_json FROM evidence_records
+             WHERE session_id = ? AND content_hash = ?`,
+          )
+          .get(reference.sessionId, reference.contentHash),
+      ),
+    ) as { kind: unknown; archived_at: unknown; content_json: unknown } | undefined;
+    if (record === undefined || typeof record.content_json !== "string") {
+      throw missingEvidenceError(reference);
+    }
+    let content: unknown;
+    try {
+      content = JSON.parse(record.content_json) as unknown;
+    } catch (error) {
+      throw new EvidenceArchiveIntegrityError(
+        `Evidence manifest content is invalid JSON: ${errorMessage(error)}`,
+      );
+    }
+    // 重建 manifest 信封后走既有 decode 全量校验(含 blobRef 形状)。
+    const manifest = decodeBlobEvidenceManifest({
+      schemaVersion: BLOB_EVIDENCE_MANIFEST_SCHEMA_VERSION,
+      contentHash: reference.contentHash,
+      archivedAt: typeof record.archived_at === "string" ? record.archived_at : "",
+      kind: record.kind,
+      content,
+    });
     if (
       manifest.contentHash !== reference.contentHash ||
       manifest.content.sessionId !== reference.sessionId ||
@@ -309,6 +318,64 @@ export class EvidenceArchive {
       throw new EvidenceArchiveIntegrityError("Evidence content hash mismatch");
     }
     return manifest;
+  }
+
+  /** 幂等确保 storageRoot 与库 schema 就绪(空操作只为 prepare 副作用)。 */
+  private prepareStorage(): void {
+    withWorkspaceSqliteLease(this.storageRoot, () => undefined);
+  }
+
+  /**
+   * 清单发布:evidence_records 单事务 UPSERT。并发/重复写(同
+   * <sessionId,contentHash>)保留既有行的 archived_at 并回读校验——与旧
+   * tmp+fsync+link 独占发布的幂等语义等价(immutable 内容由 contentHash 锚定)。
+   */
+  private async publishEvidenceRecord(
+    manifest: BlobEvidenceManifest,
+    blob: EvidenceBlobRef,
+  ): Promise<void> {
+    const contentJson = JSON.stringify(manifest.content);
+    const existing = withWorkspaceSqliteLease(this.storageRoot, (lease) =>
+      lease.transaction("write", () => {
+        lease.database
+          .prepare(
+            `INSERT INTO evidence_records (session_id, content_hash, kind, archived_at, content_json)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT (session_id, content_hash) DO NOTHING`,
+          )
+          .run(
+            manifest.content.sessionId,
+            manifest.contentHash,
+            manifest.kind,
+            manifest.archivedAt,
+            contentJson,
+          );
+        // FS blob 索引行(evidence_blobs):本体仍在 blobs/sha256/<xx>/<digest>。
+        lease.database
+          .prepare(
+            `INSERT INTO evidence_blobs (digest, size_bytes, created_at)
+             VALUES (?, ?, ?)
+             ON CONFLICT (digest) DO NOTHING`,
+          )
+          .run(blob.digest, blob.sizeBytes, manifest.archivedAt);
+        return lease.database
+          .prepare(
+            `SELECT kind, archived_at, content_json FROM evidence_records
+             WHERE session_id = ? AND content_hash = ?`,
+          )
+          .get(manifest.content.sessionId, manifest.contentHash) as
+          | { kind: unknown; archived_at: unknown; content_json: unknown }
+          | undefined;
+      }),
+    );
+    if (existing === undefined || typeof existing.content_json !== "string") {
+      throw new EvidenceArchiveIntegrityError(
+        "Evidence manifest row disappeared right after publication",
+      );
+    }
+    if (existing.content_json !== contentJson) {
+      throw new EvidenceArchiveIntegrityError("Evidence manifest conflict");
+    }
   }
 }
 
@@ -482,10 +549,6 @@ function stableJson(value: unknown): string {
   throw new EvidenceArchiveIntegrityError("Evidence archive content must be JSON serializable");
 }
 
-function sanitizeFilePart(value: string): string {
-  return value.replaceAll(/[^a-zA-Z0-9_-]/gu, "_");
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -528,32 +591,13 @@ function isValidEvidenceUriReference(reference: EvidenceUriReference): boolean {
   );
 }
 
-async function readImmutableJson<T>(
-  baseDir: string,
-  directoryParts: readonly string[],
-  fileName: string,
-  decoder: (value: unknown) => T,
-  label: string,
-): Promise<T> {
-  let raw: Buffer;
-  try {
-    raw = await withVerifiedEvidenceDirectory(
-      baseDir,
-      directoryParts,
-      { create: false },
-      (directory) => directory.readRegularFile(fileName, label),
-    );
-  } catch (error) {
-    if (isMissing(error)) throw error;
-    throw new EvidenceArchiveIntegrityError(`${label} is unreadable: ${errorMessage(error)}`);
-  }
-  let value: unknown;
-  try {
-    value = JSON.parse(raw.toString("utf8")) as unknown;
-  } catch (error) {
-    throw new EvidenceArchiveIntegrityError(`${label} is invalid JSON: ${errorMessage(error)}`);
-  }
-  return decoder(value);
+/** 清单行缺失时保持 JSONL 纪元的 ENOENT 错误形状(调用方按 code 判定幂等)。 */
+function missingEvidenceError(reference: EvidenceUriReference): NodeJS.ErrnoException {
+  const error = new Error(
+    `Evidence manifest is missing: ${reference.sessionId}/${reference.contentHash}`,
+  ) as NodeJS.ErrnoException;
+  error.code = "ENOENT";
+  return error;
 }
 
 function pageInteger(
@@ -570,67 +614,6 @@ function pageInteger(
     );
   }
   return value;
-}
-
-async function writeImmutableJson(
-  baseDir: string,
-  directoryParts: readonly string[],
-  fileName: string,
-  value: unknown,
-): Promise<boolean> {
-  return withVerifiedEvidenceDirectory(
-    baseDir,
-    directoryParts,
-    { create: true },
-    async (directory) => writeImmutableJsonInDirectory(directory, fileName, value),
-  );
-}
-
-async function writeImmutableJsonInDirectory(
-  directory: VerifiedEvidenceDirectory,
-  fileName: string,
-  value: unknown,
-): Promise<boolean> {
-  const temporaryName = `.${fileName}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
-  let handle: FileHandle | undefined;
-  try {
-    handle = await directory.createExclusiveFile(temporaryName, 0o600);
-    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
-    await handle.sync();
-    const temporaryIdentity = await handle.stat({ bigint: true });
-    try {
-      await directory.linkFile(temporaryName, fileName);
-    } catch (error) {
-      if (isAlreadyExists(error)) return false;
-      throw error;
-    }
-
-    let finalHandle: FileHandle | undefined;
-    try {
-      finalHandle = await directory.openRegularFile(fileName, "Evidence archive manifest");
-      const finalIdentity = await finalHandle.stat({ bigint: true });
-      if (
-        temporaryIdentity.dev !== finalIdentity.dev ||
-        temporaryIdentity.ino !== finalIdentity.ino
-      ) {
-        await directory.unlinkFile(fileName).catch(() => undefined);
-        throw new EvidenceArchiveIntegrityError(
-          "Evidence archive manifest changed while it was published",
-        );
-      }
-    } finally {
-      await finalHandle?.close().catch(() => undefined);
-    }
-    await directory.sync();
-    return true;
-  } finally {
-    await handle?.close().catch(() => undefined);
-    await directory.unlinkFile(temporaryName).catch(() => undefined);
-  }
-}
-
-function isAlreadyExists(error: unknown): boolean {
-  return (error as NodeJS.ErrnoException).code === "EEXIST";
 }
 
 function errorMessage(error: unknown): string {

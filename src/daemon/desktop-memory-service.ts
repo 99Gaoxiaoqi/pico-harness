@@ -19,8 +19,8 @@ import {
   MemoryConflictError,
   MemoryIdempotencyConflictError,
   MemoryNotFoundError,
-  MemoryRepository,
 } from "../memory/memory-repository.js";
+import { SqliteMemoryRepository } from "../storage/sqlite/sqlite-memory-repository.js";
 import { sanitizeMemoryProposalCandidate } from "../memory/proposal-sanitizer.js";
 import {
   MEMORY_PROPOSAL_EXTRACTOR_VERSION,
@@ -71,7 +71,7 @@ const MEMORY_LIFECYCLE_BATCH_SIZE = 250;
 
 /** Host-owned workspace repository boundary. Private storage paths never cross this service. */
 export class DesktopMemoryService {
-  private readonly repositories = new Map<string, MemoryRepository>();
+  private readonly repositories = new Map<string, SqliteMemoryRepository>();
   private readonly preparedLifecycleJobs = new Set<string>();
 
   constructor(private readonly options: DesktopMemoryServiceOptions) {}
@@ -302,6 +302,14 @@ export class DesktopMemoryService {
     params: RuntimeParams<"memory.settings.update">,
   ): RuntimeResult<"memory.settings.update"> {
     return this.safely(() => {
+      // 协议契约是 autoCommit?: false——只能在用户侧关闭,禁止经协议重新开启。
+      // (运行时防护:wire 层之外的直接调用可能携带 true,类型系统拦不住。)
+      if ((params as { autoCommit?: boolean }).autoCommit === true) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.INVALID_PARAMS,
+          "memory.settings.update 不接受 autoCommit: true(只能关闭,不能重新开启)",
+        );
+      }
       const repository = this.repository(workspacePath);
       const replay = hasIdempotentMutation(
         repository,
@@ -448,18 +456,18 @@ export class DesktopMemoryService {
     this.repositories.clear();
   }
 
-  private repository(workspacePath: string): MemoryRepository {
+  private repository(workspacePath: string): SqliteMemoryRepository {
     const repository = this.repositoryWithoutMaintenance(workspacePath);
     this.runMaintenance(repository, workspacePath);
     return repository;
   }
 
-  private repositoryWithoutMaintenance(workspacePath: string): MemoryRepository {
+  private repositoryWithoutMaintenance(workspacePath: string): SqliteMemoryRepository {
     const existing = this.repositories.get(workspacePath);
     if (existing) return existing;
     const paths = resolvePicoPaths(workspacePath, { picoHome: this.options.picoHome });
-    const repository = new MemoryRepository({
-      storageRoot: paths.workspace.memory,
+    const repository = new SqliteMemoryRepository({
+      storageRoot: paths.workspace.root,
       workspaceId: paths.workspace.id,
       ...(this.options.repositoryBusyTimeoutMs !== undefined
         ? { busyTimeoutMs: this.options.repositoryBusyTimeoutMs }
@@ -469,7 +477,7 @@ export class DesktopMemoryService {
     return repository;
   }
 
-  private runMaintenance(repository: MemoryRepository, workspacePath: string): void {
+  private runMaintenance(repository: SqliteMemoryRepository, workspacePath: string): void {
     this.deliverForgottenNotificationsBestEffort(repository, workspacePath);
     this.deliverSourceNotificationsBestEffort(repository, workspacePath);
     try {
@@ -486,7 +494,7 @@ export class DesktopMemoryService {
   }
 
   private deliverForgottenNotificationsBestEffort(
-    repository: MemoryRepository,
+    repository: SqliteMemoryRepository,
     workspacePath: string,
   ): void {
     try {
@@ -501,7 +509,7 @@ export class DesktopMemoryService {
     }
   }
 
-  private deliverForgottenNotifications(repository: MemoryRepository, workspacePath: string): void {
+  private deliverForgottenNotifications(repository: SqliteMemoryRepository, workspacePath: string): void {
     while (true) {
       const jobs = repository.listJobs({
         statuses: ["queued"],
@@ -539,7 +547,7 @@ export class DesktopMemoryService {
   }
 
   private deliverSourceNotificationsBestEffort(
-    repository: MemoryRepository,
+    repository: SqliteMemoryRepository,
     workspacePath: string,
   ): void {
     try {
@@ -554,7 +562,7 @@ export class DesktopMemoryService {
     }
   }
 
-  private deliverSourceNotifications(repository: MemoryRepository, workspacePath: string): void {
+  private deliverSourceNotifications(repository: SqliteMemoryRepository, workspacePath: string): void {
     while (true) {
       const jobs = repository.listJobs({
         statuses: ["queued"],
@@ -597,7 +605,7 @@ export class DesktopMemoryService {
     }
   }
 
-  private reconcileLifecycleJobs(repository: MemoryRepository): void {
+  private reconcileLifecycleJobs(repository: SqliteMemoryRepository): void {
     while (true) {
       const jobs = [
         ...repository.listJobs({
@@ -622,7 +630,7 @@ export class DesktopMemoryService {
    * `unavailable` (used by deleteSession, which really does destroy the RuntimeEvent ledger).
    * Pending proposals anchored on those Sources are deleted; user-approved Facts are retained.
    */
-  private applyLifecycleJob(repository: MemoryRepository, job: Job): void {
+  private applyLifecycleJob(repository: SqliteMemoryRepository, job: Job): void {
     if (job.extractorVersion !== MEMORY_LIFECYCLE_UNAVAILABLE_VERSION) {
       repository.updateJob({
         jobId: job.jobId,
@@ -738,7 +746,7 @@ export function mapMemoryError(error: unknown): RuntimeProtocolError {
   return new RuntimeProtocolError(RUNTIME_ERROR_CODES.INTERNAL_ERROR, "记忆服务暂时不可用");
 }
 
-function projectFact(repository: MemoryRepository, fact: Fact): RuntimeMemoryFact {
+function projectFact(repository: SqliteMemoryRepository, fact: Fact): RuntimeMemoryFact {
   const source = fact.sourceId ? repository.getSource(fact.sourceId) : undefined;
   return {
     factId: fact.factId,
@@ -807,7 +815,7 @@ function runtimeSettings(settings: Settings): RuntimeMemorySettings {
 
 function runtimeReviewBudget(
   settings: Settings,
-  repository: MemoryRepository,
+  repository: SqliteMemoryRepository,
   now: Date,
 ): RuntimeMemoryReviewBudget {
   const decision = evaluateMemoryReviewBudgetForJobs(
@@ -837,7 +845,7 @@ function runtimeReviewBudget(
 }
 
 function hasIdempotentMutation(
-  repository: MemoryRepository,
+  repository: SqliteMemoryRepository,
   entityType: "fact" | "proposal" | "settings",
   entityId: string,
   idempotencyKey: string,

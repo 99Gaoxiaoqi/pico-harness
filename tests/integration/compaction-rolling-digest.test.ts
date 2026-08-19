@@ -11,6 +11,7 @@
 
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -251,4 +252,68 @@ test("findLastCompactionCheckpoint 返回上一个 checkpoint 的摘要正文", 
   assert.ok(after, "压缩后应返回上一个 checkpoint");
   assert.ok(after.summaryText.includes("findLast 测试"), "摘要正文应不含 REFERENCE-ONLY 包装");
   assert.ok(!after.summaryText.includes("[上下文压缩"), "摘要正文应去掉 SUMMARY_PREFIX");
+});
+
+test("findLastCompactionCheckpoint:末条为 hard-reset checkpoint 时增量基线失效(票 04 by_kind 末条查询)", async (t) => {
+  const root = await mkTestDir("pico-hard-reset-last-");
+  const session = new Session("hard-reset-last", join(root, "workspace"), {
+    persistence: true,
+    picoHome: join(root, "pico-home"),
+  });
+  t.after(async () => {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await session.recover();
+
+  const history = paddedHistory();
+  const seedRun = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  await seedRun.run(async () => {
+    await seedRun.commitMessages(session, history);
+  });
+
+  // 先落一个正常 checkpoint:末条查找命中它。
+  const compactRun = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  await compactRun.run(() =>
+    recordRuntimeCompactionCheckpoint({
+      session,
+      runtimeRun: compactRun,
+      compactor: new FullCompactor({
+        provider: mockProvider("## 任务目标\nhard-reset 基线\n\n## 关键上下文\n- 文件 a.ts"),
+        maxAttempts: 1,
+      }),
+      request: { inputBudgetTokens: 4_000, targetRetainedTokens: 1, trigger: "manual" },
+    }),
+  );
+  const probeBefore = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const before = await probeBefore.findLastCompactionCheckpoint();
+  assert.ok(before, "正常 checkpoint 应作为增量基线");
+  assert.ok(before.summaryText.includes("hard-reset 基线"));
+
+  // 再落一个 hard-reset checkpoint(引擎 loop.ts 硬重置路径的持久化形态):
+  // 末条即 hard-reset,之前的 checkpoint 全部失效 → findLast 返回 undefined。
+  const resetRun = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  await resetRun.run(async () => {
+    await resetRun.recordCheckpoint({
+      checkpointId: `hard-reset:${randomUUID()}`,
+      // decode 契约要求 coveredEventCount ≥ 1 且 digest 为受支持格式;
+      // 本测试只���证 findLast 的末条判定,不重放该 checkpoint。
+      coveredEventCount: 1,
+      sourceDigest: computeCheckpointSourceDigest([
+        {
+          eventId: `${session.id}-hard-reset-anchor`,
+          message: { role: "user", content: "hard reset anchor" },
+        },
+      ]),
+      throughEventId: `${session.id}-hard-reset-anchor`,
+      summary: { role: "assistant", content: "context hard reset" },
+    });
+  });
+
+  const probeAfter = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  assert.equal(
+    await probeAfter.findLastCompactionCheckpoint(),
+    undefined,
+    "末条为 hard-reset 时不得把旧 checkpoint 当增量基线",
+  );
 });

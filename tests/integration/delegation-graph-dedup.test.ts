@@ -8,16 +8,22 @@ import {
   type DelegationBatchResult,
   type DelegationManagerOptions,
 } from "../../src/tools/delegation-manager.js";
-import { RuntimeStore } from "../../src/tasks/runtime-store.js";
+import { SqliteRuntimeControlStore } from "../../src/storage/sqlite/sqlite-runtime-control-store.js";
 
 /** 建一个临时目录的 RuntimeStore 并注入 DelegationManager，用完清理。 */
 function createDelegationManager(
   options: DelegationManagerOptions = {},
 ): { manager: DelegationManager; cleanup: () => void } {
   const root = mkdtempSync(join(tmpdir(), "pico-delegation-dedup-"));
-  const runtimeStore = new RuntimeStore({ workDir: root, storageRoot: root });
+  const runtimeStore = new SqliteRuntimeControlStore({ storageRoot: root });
   const manager = new DelegationManager({ ...options, runtimeStore });
-  return { manager, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+  return {
+    manager,
+    cleanup: () => {
+      runtimeStore.close();
+      rmSync(root, { recursive: true, force: true });
+    },
+  };
 }
 
 test("DelegationManager rejects a duplicate graphWorkId dispatch while the first is in-flight", () => {

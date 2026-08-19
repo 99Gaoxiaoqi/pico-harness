@@ -2,10 +2,12 @@ import { realpathSync } from "node:fs";
 import type { CredentialRef } from "../provider/credential-vault.js";
 import {
   RuntimeConflictError,
-  RuntimeStore,
+  SqliteRuntimeControlStore,
+} from "../storage/sqlite/sqlite-runtime-control-store.js";
+import {
   generateRuntimeId,
   type RuntimeStoreOptions,
-} from "./runtime-store.js";
+} from "./runtime-store-contracts.js";
 import {
   type CronJobRecord,
   type CronRunRecord,
@@ -14,6 +16,7 @@ import {
   type TerminalCronRunStatus,
   type YoloPolicySnapshot,
 } from "./runtime-types.js";
+import { resolveWorkspaceSqliteStorageRoot } from "../storage/sqlite/workspace-scopes.js";
 
 export interface CronPolicyDecision {
   allowed: boolean;
@@ -61,14 +64,17 @@ export interface ClaimCronRunResult {
  * tick 只考虑调用时所在分钟，因此宕机期间的 trigger 不会被补跑。
  */
 export class CronService {
-  readonly store: RuntimeStore;
+  readonly store: SqliteRuntimeControlStore;
   readonly ownerId: string;
   private readonly now: () => number;
   private readonly policyGuard?: CronPolicyGuard;
   private readonly generateId: NonNullable<CronServiceOptions["generateId"]>;
 
   constructor(options: CronServiceOptions) {
-    this.store = new RuntimeStore(options);
+    this.store = new SqliteRuntimeControlStore({
+      storageRoot: resolveWorkspaceSqliteStorageRoot(options),
+      ...(options.now ? { now: options.now } : {}),
+    });
     this.ownerId = options.ownerId ?? `cron:${process.pid}`;
     this.now = options.now ?? Date.now;
     this.policyGuard = options.policyGuard;

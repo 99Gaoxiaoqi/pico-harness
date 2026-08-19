@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { isAbortError } from "../provider/errors.js";
 import { LeaseConflictError } from "../storage/owner-lease.js";
+import { RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX } from "../engine/session-summary.js";
 import { canonicalizeWorkspacePath } from "../paths/pico-paths.js";
 import type { CommitReceipt } from "../engine/session-persistence.js";
 import type { Session } from "../engine/session.js";
@@ -59,14 +60,17 @@ import {
   type RuntimeToolResultRecordedEvent,
   type RuntimeTranscriptEventRecordedEvent,
 } from "../storage/runtime-event.js";
-import type { RuntimeHistoryProjectionEntry } from "../engine/session-runtime-read-model.js";
 import {
-  RuntimeEventStore,
+  RUNTIME_HISTORY_EVENT_KINDS,
+  RUNTIME_MODEL_MESSAGE_EVENT_KINDS,
+  type RuntimeHistoryProjectionEntry,
+} from "../engine/session-runtime-read-model.js";
+import {
   RuntimeEventStoreIntegrityError,
   createRuntimeEventId,
   type RuntimeEventStoreAppendResult,
   type RuntimeEventStoreEntry,
-} from "../storage/runtime-event-store.js";
+} from "../storage/runtime-event-store-contracts.js";
 import {
   projectRuntimeSessionMessageEntries,
   projectRuntimeSessionMessages,
@@ -75,6 +79,7 @@ import {
   projectRuntimeSessionTranscriptEventEntries,
   type RuntimeSessionForkSeedEntry,
 } from "../engine/session-runtime-projection.js";
+import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 
 interface RuntimeRunContext {
   readonly run: RuntimeRun;
@@ -87,7 +92,6 @@ const liveRuntimeRuns = new Set<string>();
 const externalMessageCommitTails = new Map<string, Promise<void>>();
 const forkBootstrapTails = new Map<string, Promise<void>>();
 
-export const RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX = "fork-bootstrap:";
 
 interface RuntimeRunBaseOptions {
   readonly sessionId: string;
@@ -110,12 +114,12 @@ export interface RuntimeRunStartOptions extends Omit<
 }
 
 type DetachedRuntimeRunStartOptions = RuntimeRunBaseOptions & {
-  readonly store: RuntimeEventStore;
+  readonly store: SqliteRuntimeEventStore;
   readonly writeGuard: RuntimeEventWriteGuard;
 };
 
 type RuntimeRunConstructionOptions = RuntimeRunBaseOptions & {
-  readonly store: RuntimeEventStore;
+  readonly store: SqliteRuntimeEventStore;
   readonly writeGuard: RuntimeEventWriteGuard;
   readonly runtimeCapability?: EngineRuntimeCapability;
 };
@@ -151,7 +155,7 @@ export interface RuntimeForkBootstrapSeed {
   readonly sourceThroughEventId?: string;
   readonly statePublication?: RuntimeForkStatePublication;
   readonly workDir: string;
-  readonly store: RuntimeEventStore;
+  readonly store: SqliteRuntimeEventStore;
 }
 
 export interface RuntimeForkStatePublication {
@@ -285,7 +289,7 @@ export function runWithRuntimeToolCall<Result>(toolCallId: string, run: () => Re
 export class RuntimeRun {
   readonly runId: string;
   readonly invocationId: string;
-  readonly store: RuntimeEventStore;
+  readonly store: SqliteRuntimeEventStore;
   readonly runtimeCapability?: EngineRuntimeCapability;
   private readonly canonicalWorkDir: string;
   private readonly now: () => Date;
@@ -362,9 +366,11 @@ export class RuntimeRun {
     const manifest = await store.readSessionManifest(sessionId);
     if (!manifest) return [];
     const activeMessageEventIds = new Set(
-      projectRuntimeSessionMessageEntries(await store.readSession(sessionId)).map(
-        ({ eventId }) => eventId,
-      ),
+      projectRuntimeSessionMessageEntries(
+        (
+          await store.readSessionEntriesOfKinds(sessionId, RUNTIME_MODEL_MESSAGE_EVENT_KINDS)
+        ).entries.map(({ event }) => event),
+      ).map(({ eventId }) => eventId),
     );
 
     const reconciled: string[] = [];
@@ -398,7 +404,14 @@ export class RuntimeRun {
         buildInterruptedToolResultEvent(events, pending, recoveryAt),
       );
       const syntheticToolStarts = buildInterruptedTranscriptToolStartEvents({
-        entries: await store.readSessionEntries(sessionId),
+        // kind 切片(票 04):该函数只消费 transcript.event.recorded 与
+        // tool.result.recorded(工具起点配对 + 幂等 id 探测)。
+        entries: (
+          await store.readSessionEntriesOfKinds(sessionId, [
+            "transcript.event.recorded",
+            "tool.result.recorded",
+          ])
+        ).entries,
         pendingToolCalls,
         toolResults: syntheticToolResults,
         at: recoveryAt,
@@ -653,7 +666,7 @@ export class RuntimeRun {
 
   private static async ensureForkTerminal(
     options: BootstrapRuntimeForkOptions,
-    store: RuntimeEventStore,
+    store: SqliteRuntimeEventStore,
     events: readonly RuntimeEvent[],
     identity: RuntimeForkBootstrapIdentity,
     writeGuard: RuntimeEventWriteGuard,
@@ -697,7 +710,7 @@ export class RuntimeRun {
   private static async ensureForkState(
     targetSessionId: string,
     publication: RuntimeForkStatePublication | undefined,
-    store: RuntimeEventStore,
+    store: SqliteRuntimeEventStore,
     writeGuard: RuntimeEventWriteGuard,
   ): Promise<void> {
     if (!publication) return;
@@ -790,7 +803,13 @@ export class RuntimeRun {
 
   async readModelHistory(): Promise<Message[]> {
     const { materializeRuntimeHistory } = await import("../engine/session-runtime-read-model.js");
-    return materializeRuntimeHistory(await this.store.readSession(this.sessionId));
+    // kind 切片查询(票 04):read-model 只消费 message/tool-result/checkpoint 三类,
+    // 其余 kind 只产 soft 诊断,不进输出——折叠规则不变,数据来源窄化。
+    const { entries } = await this.store.readSessionEntriesOfKinds(
+      this.sessionId,
+      RUNTIME_HISTORY_EVENT_KINDS,
+    );
+    return materializeRuntimeHistory(entries.map(({ event }) => event));
   }
 
   /** True only when this run owns the Session's canonical workspace and durable store. */
@@ -816,37 +835,50 @@ export class RuntimeRun {
   async readModelHistoryEntries(): Promise<RuntimeHistoryProjectionEntry[]> {
     const { materializeRuntimeHistoryEntries } =
       await import("../engine/session-runtime-read-model.js");
-    return materializeRuntimeHistoryEntries(await this.store.readSession(this.sessionId));
+    const { entries } = await this.store.readSessionEntriesOfKinds(
+      this.sessionId,
+      RUNTIME_HISTORY_EVENT_KINDS,
+    );
+    return materializeRuntimeHistoryEntries(entries.map(({ event }) => event));
   }
 
   /** Raw model-message facts for Session/UI projection, intentionally without checkpoint replacement. */
   async readSessionProjectionEntries(): Promise<RuntimeHistoryProjectionEntry[]> {
-    return projectRuntimeSessionMessageEntries(await this.store.readSession(this.sessionId));
+    const { entries } = await this.store.readSessionEntriesOfKinds(
+      this.sessionId,
+      RUNTIME_MODEL_MESSAGE_EVENT_KINDS,
+    );
+    return projectRuntimeSessionMessageEntries(entries.map(({ event }) => event));
   }
 
   /**
    * 查找最后一个正常的压缩 checkpoint，用于滚动摘要增量更新。
    * 遇到 hard-reset checkpoint 时立即返回 undefined——硬重置物理上重置了上下文，
    * 其之前的 checkpoint 都已失效，不能再作为增量更新的基线。
+   *
+   * 票 04:末条 context.checkpoint.recorded 经 by_kind 索引点查,不再全量读——
+   * 原反向扫描在遇到首个 checkpoint 事件时必然返回(值或 undefined),因此末条
+   * 单点判定与全量口径等价。
    */
   async findLastCompactionCheckpoint(): Promise<LastCompactionCheckpoint | undefined> {
-    const events = await this.store.readSession(this.sessionId);
-    for (let i = events.length - 1; i >= 0; i--) {
-      const event = events[i]!;
-      if (event.kind !== "context.checkpoint.recorded") continue;
-      const data = event.data;
-      // 硬重置 checkpoint 之前的所有 checkpoint 都已失效，不再向前查找。
-      if (data.checkpointId.startsWith("hard-reset:")) return undefined;
-      const content = data.summary.content;
-      // 用结构化标签精确定位正文边界。
-      const startIdx = content.indexOf(COMPACTION_SUMMARY_OPEN_TAG);
-      const endIdx = content.indexOf(COMPACTION_SUMMARY_CLOSE_TAG);
-      // 标签缺失时返回 undefined，避免把 REFERENCE-ONLY 包装当 previousSummary 喂模型。
-      if (startIdx === -1 || endIdx === -1 || startIdx >= endIdx) return undefined;
-      const summaryText = content.slice(startIdx + COMPACTION_SUMMARY_OPEN_TAG.length, endIdx).trim();
-      return { checkpointId: data.checkpointId, summaryText };
+    const lastCheckpoint = await this.store.readLastSessionEntryOfKind(
+      this.sessionId,
+      "context.checkpoint.recorded",
+    );
+    if (!lastCheckpoint || lastCheckpoint.event.kind !== "context.checkpoint.recorded") {
+      return undefined;
     }
-    return undefined;
+    const data = lastCheckpoint.event.data;
+    // 硬重置 checkpoint 之前的所有 checkpoint 都已失效，不再向前查找。
+    if (data.checkpointId.startsWith("hard-reset:")) return undefined;
+    const content = data.summary.content;
+    // 用结构化标签精确定位正文边界。
+    const startIdx = content.indexOf(COMPACTION_SUMMARY_OPEN_TAG);
+    const endIdx = content.indexOf(COMPACTION_SUMMARY_CLOSE_TAG);
+    // 标签缺失时返回 undefined，避免把 REFERENCE-ONLY 包装当 previousSummary 喂模型。
+    if (startIdx === -1 || endIdx === -1 || startIdx >= endIdx) return undefined;
+    const summaryText = content.slice(startIdx + COMPACTION_SUMMARY_OPEN_TAG.length, endIdx).trim();
+    return { checkpointId: data.checkpointId, summaryText };
   }
 
   run<Result>(execute: () => Promise<Result>, signal?: AbortSignal): Promise<Result> {
@@ -1709,9 +1741,9 @@ function serializeForkBootstrap<Result>(
   });
 }
 
-function runtimeEventStoreFromCapability(capability: EngineRuntimeCapability): RuntimeEventStore {
+function runtimeEventStoreFromCapability(capability: EngineRuntimeCapability): SqliteRuntimeEventStore {
   assertIssuedEngineRuntimeCapability(capability);
-  if (!(capability.runtimeAuthority instanceof RuntimeEventStore)) {
+  if (!(capability.runtimeAuthority instanceof SqliteRuntimeEventStore)) {
     throw new Error(`Runtime capability for Session ${capability.sessionId} has no event store`);
   }
   return capability.runtimeAuthority;

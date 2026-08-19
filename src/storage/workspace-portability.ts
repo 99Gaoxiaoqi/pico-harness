@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import {
   constants,
   closeSync,
@@ -11,16 +11,26 @@ import {
   type Stats,
 } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { recoverFileTransactionSync, withFileLockSync } from "./local-file-storage.js";
-import {
-  assertWorkspaceStorageRootIdentitySync,
-  readWorkspaceStorageRootIdentitySync,
-  type WorkspaceStorageRootIdentity,
-  WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
-  WORKSPACE_STORAGE_LOCK_DIRECTORY,
-} from "./workspace-storage-layout.js";
+import { OPERATIONAL_DATABASE_FILENAME } from "./sqlite/sqlite-database.js";
+import { readWorkspaceSqliteStorageRootIdentitySync } from "./sqlite/sqlite-workspace-storage.js";
+import type { WorkspaceStorageRootIdentity } from "./sqlite/sqlite-workspace-storage.js";
 
-export const WORKSPACE_PORTABILITY_PLAN_SCHEMA_VERSION = 1 as const;
+/**
+ * SQLite 纪元的 workspace 导出计划(票 09 重写,ADR 24 §5/M6 + 决策 5)。
+ *
+ * 分类策略(2026-08-19 用户裁定):
+ * - pico.sqlite = **protected**——会话历史(旧 portable)与 memory 敏感数据
+ *   (旧 protected)合并进了同一个文件,原 memory protected 语义落到库整体:
+ *   不哈希、不进导出集。迁移工作区应使用 SQLite backup(VACUUM INTO 自包含
+ *   副本),而不是文件级导出计划。
+ * - portable 集 = blob 目录(evidence/blobs/sha256 CAS)与 traces;host_bound =
+ *   WAL/SHM 边车、fork-staging、plugins/hooks workspace 态、恢复 intent;
+ * - 旧 JSONL 纪元条目(sessions/task-runs/control/.storage/memory/
+ *   storage-operations/todo.json)按 legacy 归类,不再是 canonical 载体;
+ * - 未知条目仍 fail-closed:新增持久面必须显式登记分类。
+ */
+
+export const WORKSPACE_PORTABILITY_PLAN_SCHEMA_VERSION = 2 as const;
 
 export const WORKSPACE_PORTABILITY_CLASSIFICATIONS = [
   "portable",
@@ -31,20 +41,20 @@ export type WorkspacePortabilityClassification =
   (typeof WORKSPACE_PORTABILITY_CLASSIFICATIONS)[number];
 
 export const WORKSPACE_PORTABILITY_REASONS = [
-  "canonical_runtime_history",
-  "durable_task_history",
   "portable_evidence",
   "portable_trace",
-  "workspace_transaction_state",
-  "runtime_control_state",
-  "legacy_runtime_state",
-  "legacy_task_state",
+  "workspace_database_with_memory",
+  "legacy_runtime_history",
+  "legacy_task_history",
+  "legacy_control_state",
+  "legacy_memory_state",
+  "legacy_storage_operation_state",
+  "legacy_workspace_todo_state",
+  "legacy_pre_v2_state",
   "ephemeral_fork_state",
-  "storage_operation_state",
-  "workspace_todo_state",
   "workspace_plugin_state",
   "workspace_hook_state",
-  "memory_state_may_contain_sensitive_data",
+  "agent_recovery_intent_state",
   "debug_log_may_contain_sensitive_data",
   "credential_or_secret_material",
   "database_or_journal_file",
@@ -59,7 +69,6 @@ export const WORKSPACE_PORTABILITY_ERROR_CODES = [
   "symbolic_link",
   "special_file",
   "unknown_top_level_entry",
-  "unknown_memory_entry",
   "invalid_ledger_entry",
   "file_changed_during_scan",
   "file_too_large",
@@ -104,21 +113,16 @@ interface PathPolicy {
   readonly reason: WorkspacePortabilityReason;
 }
 
+/**
+ * pico.sqlite 携带 memory 敏感数据(旧 memory/state.json 的 protected 语义
+ * 落到库整体):不哈希、不进 portable 导出集;迁移用 SQLite backup。
+ */
+const WORKSPACE_DATABASE_POLICY = Object.freeze({
+  classification: "protected",
+  reason: "workspace_database_with_memory",
+}) satisfies PathPolicy;
+
 const PORTABLE_TOP_LEVEL_POLICIES = new Map<string, PathPolicy>([
-  [
-    "sessions",
-    {
-      classification: "portable",
-      reason: "canonical_runtime_history",
-    },
-  ],
-  [
-    "task-runs",
-    {
-      classification: "portable",
-      reason: "durable_task_history",
-    },
-  ],
   [
     "evidence",
     {
@@ -134,77 +138,37 @@ const PORTABLE_TOP_LEVEL_POLICIES = new Map<string, PathPolicy>([
     },
   ],
 ]);
-const LEDGER_DIRECTORY_PATTERN = /^[a-f0-9]{64}$/u;
-const SESSION_LEDGER_FILES = new Set(["session.jsonl", "manifest.json"]);
-const TASK_RUN_LEDGER_FILES = new Set(["task.jsonl", "manifest.json"]);
 
-const HOST_BOUND_TOP_LEVEL_POLICIES = new Map<string, PathPolicy>([
+const HOST_BOUND_TOP_LEVEL_DIRECTORIES = new Map<string, PathPolicy>([
+  ["fork-staging", { classification: "host_bound", reason: "ephemeral_fork_state" }],
   [
-    ".storage",
-    {
-      classification: "host_bound",
-      reason: "workspace_transaction_state",
-    },
-  ],
-  [
-    "control",
-    {
-      classification: "host_bound",
-      reason: "runtime_control_state",
-    },
-  ],
-  [
-    "runtime",
-    {
-      classification: "host_bound",
-      reason: "legacy_runtime_state",
-    },
-  ],
-  [
-    "tasks",
-    {
-      classification: "host_bound",
-      reason: "legacy_task_state",
-    },
-  ],
-  [
-    "fork-staging",
-    {
-      classification: "host_bound",
-      reason: "ephemeral_fork_state",
-    },
-  ],
-  [
-    "storage-operations",
-    {
-      classification: "host_bound",
-      reason: "storage_operation_state",
-    },
+    "agent-recovery-launch-intents",
+    { classification: "host_bound", reason: "agent_recovery_intent_state" },
   ],
 ]);
 
+/** 旧 session-centric(JSONL)纪元的 canonical 条目:已知 legacy,不再 fail-closed。 */
+const LEGACY_TOP_LEVEL_DIRECTORIES = new Map<string, PathPolicy>([
+  ["sessions", { classification: "host_bound", reason: "legacy_runtime_history" }],
+  ["task-runs", { classification: "host_bound", reason: "legacy_task_history" }],
+  ["control", { classification: "host_bound", reason: "legacy_control_state" }],
+  ["memory", { classification: "protected", reason: "legacy_memory_state" }],
+  [
+    "storage-operations",
+    { classification: "host_bound", reason: "legacy_storage_operation_state" },
+  ],
+  [".storage", { classification: "host_bound", reason: "legacy_control_state" }],
+  ["runtime", { classification: "host_bound", reason: "legacy_pre_v2_state" }],
+  ["tasks", { classification: "host_bound", reason: "legacy_pre_v2_state" }],
+]);
+
+const LEGACY_TOP_LEVEL_FILES = new Map<string, PathPolicy>([
+  ["todo.json", { classification: "host_bound", reason: "legacy_workspace_todo_state" }],
+]);
+
 const HOST_BOUND_TOP_LEVEL_FILES = new Map<string, PathPolicy>([
-  [
-    "todo.json",
-    {
-      classification: "host_bound",
-      reason: "workspace_todo_state",
-    },
-  ],
-  [
-    "plugins.json",
-    {
-      classification: "host_bound",
-      reason: "workspace_plugin_state",
-    },
-  ],
-  [
-    "hooks-state.json",
-    {
-      classification: "host_bound",
-      reason: "workspace_hook_state",
-    },
-  ],
+  ["plugins.json", { classification: "host_bound", reason: "workspace_plugin_state" }],
+  ["hooks-state.json", { classification: "host_bound", reason: "workspace_hook_state" }],
   [
     "tui-debug.log",
     {
@@ -214,10 +178,6 @@ const HOST_BOUND_TOP_LEVEL_FILES = new Map<string, PathPolicy>([
   ],
 ]);
 
-const PROTECTED_MEMORY_STATE_POLICY = Object.freeze({
-  classification: "protected",
-  reason: "memory_state_may_contain_sensitive_data",
-}) satisfies PathPolicy;
 const LOCK_OR_COMMIT_POLICY = Object.freeze({
   classification: "host_bound",
   reason: "lock_or_commit_state",
@@ -238,10 +198,10 @@ const PROTECTED_DATABASE_POLICY = Object.freeze({
 /**
  * Builds a deterministic, read-only export plan for one Pico workspace storage root.
  *
- * The function never copies data and never follows symbolic links. It does recover an already
- * published workspace transaction under the shared lock before hashing a consistent snapshot.
- * Unknown top-level entries, ledger descendants, and direct children under memory/ fail closed so
- * adding a new persistence surface requires an explicit portability decision.
+ * The function never copies data and never follows symbolic links. It verifies the
+ * pico.sqlite workspace binding before hashing a consistent snapshot. Unknown
+ * top-level entries fail closed so adding a new persistence surface requires an
+ * explicit portability decision.
  */
 export function buildWorkspacePortabilityPlanSync(storageRoot: string): WorkspacePortabilityPlan {
   const requestedRoot = resolve(storageRoot);
@@ -267,7 +227,7 @@ export function buildWorkspacePortabilityPlanSync(storageRoot: string): Workspac
   }
   let rootIdentity: WorkspaceStorageRootIdentity | undefined;
   try {
-    rootIdentity = readWorkspaceStorageRootIdentitySync(root);
+    rootIdentity = readWorkspaceSqliteStorageRootIdentitySync(root);
   } catch (error) {
     throw planError(
       "invalid_storage_root",
@@ -280,20 +240,11 @@ export function buildWorkspacePortabilityPlanSync(storageRoot: string): Workspac
     throw planError(
       "invalid_storage_root",
       ".",
-      `Workspace storage layout marker is required before export planning: ${root}`,
+      `Workspace pico.sqlite binding is required before export planning: ${root}`,
     );
   }
   try {
-    return withFileLockSync(
-      join(root, WORKSPACE_STORAGE_LOCK_DIRECTORY),
-      `workspace-portability-plan:${process.pid}:${randomUUID()}`,
-      () => {
-        assertWorkspaceStorageRootIdentitySync(root, rootIdentity);
-        recoverFileTransactionSync(root, WORKSPACE_RUNTIME_TRANSACTION_OPTIONS);
-        assertWorkspaceStorageRootIdentitySync(root, rootIdentity);
-        return scanWorkspacePortabilityPlan(root);
-      },
-    );
+    return scanWorkspacePortabilityPlan(root);
   } catch (error) {
     if (error instanceof WorkspacePortabilityPlanError) throw error;
     throw planError(
@@ -313,40 +264,26 @@ function scanWorkspacePortabilityPlan(root: string): WorkspacePortabilityPlan {
     const metadata = lstatPath(absolutePath, relativePath);
     assertSupportedNode(metadata, relativePath);
 
-    if (name === "memory") {
-      if (!metadata.isDirectory()) {
+    if (name === OPERATIONAL_DATABASE_FILENAME) {
+      if (!metadata.isFile()) {
         throw planError(
           "special_file",
           relativePath,
-          `Workspace memory entry must be a real directory: ${relativePath}`,
+          `Workspace database entry must be a regular file: ${relativePath}`,
         );
       }
-      scanMemoryRoot(root, absolutePath, relativePath, entries);
-      continue;
-    }
-
-    if (name === "sessions" || name === "task-runs") {
-      if (!metadata.isDirectory()) {
-        throw planError(
-          "special_file",
-          relativePath,
-          `Workspace ${name} entry must be a real directory: ${relativePath}`,
-        );
-      }
-      scanPortableLedgerRoot(
-        root,
-        absolutePath,
-        relativePath,
-        PORTABLE_TOP_LEVEL_POLICIES.get(name)!,
-        name === "sessions" ? SESSION_LEDGER_FILES : TASK_RUN_LEDGER_FILES,
-        entries,
+      entries.push(
+        planEntry(relativePath, metadata, WORKSPACE_DATABASE_POLICY, undefined),
       );
       continue;
     }
 
     const directoryPolicy =
-      PORTABLE_TOP_LEVEL_POLICIES.get(name) ?? HOST_BOUND_TOP_LEVEL_POLICIES.get(name);
-    const filePolicy = HOST_BOUND_TOP_LEVEL_FILES.get(name);
+      PORTABLE_TOP_LEVEL_POLICIES.get(name) ??
+      HOST_BOUND_TOP_LEVEL_DIRECTORIES.get(name) ??
+      LEGACY_TOP_LEVEL_DIRECTORIES.get(name);
+    const filePolicy =
+      HOST_BOUND_TOP_LEVEL_FILES.get(name) ?? LEGACY_TOP_LEVEL_FILES.get(name);
     const policy = denylistedPolicy(relativePath) ?? directoryPolicy ?? filePolicy;
     if (!policy) {
       throw planError(
@@ -388,92 +325,6 @@ function scanWorkspacePortabilityPlan(root: string): WorkspacePortabilityPlan {
     excludedFileCount: entries.length - portableFileCount,
     portableBytes,
   };
-}
-
-function scanPortableLedgerRoot(
-  root: string,
-  ledgerRoot: string,
-  ledgerRelativePath: string,
-  policy: PathPolicy,
-  allowedFileNames: ReadonlySet<string>,
-  entries: WorkspacePortabilityPlanEntry[],
-): void {
-  assertCanonicalPathInsideRoot(root, ledgerRoot, ledgerRelativePath);
-  for (const digest of readDirectoryNames(ledgerRoot)) {
-    const digestRoot = join(ledgerRoot, digest);
-    const digestRelativePath = toPortablePath(join(ledgerRelativePath, digest));
-    const digestMetadata = lstatPath(digestRoot, digestRelativePath);
-    assertSupportedNode(digestMetadata, digestRelativePath);
-    if (!LEDGER_DIRECTORY_PATTERN.test(digest)) {
-      throw planError(
-        "invalid_ledger_entry",
-        digestRelativePath,
-        `Workspace ledger directory must use a full SHA-256 digest: ${digestRelativePath}`,
-      );
-    }
-    if (!digestMetadata.isDirectory()) {
-      throw planError(
-        "special_file",
-        digestRelativePath,
-        `Workspace ledger digest entry must be a real directory: ${digestRelativePath}`,
-      );
-    }
-    assertCanonicalPathInsideRoot(root, digestRoot, digestRelativePath);
-    for (const fileName of readDirectoryNames(digestRoot)) {
-      const absolutePath = join(digestRoot, fileName);
-      const relativePath = toPortablePath(join(digestRelativePath, fileName));
-      const metadata = lstatPath(absolutePath, relativePath);
-      assertSupportedNode(metadata, relativePath);
-      if (!allowedFileNames.has(fileName)) {
-        throw planError(
-          "invalid_ledger_entry",
-          relativePath,
-          `Unknown workspace ledger descendant has no portability policy: ${relativePath}`,
-        );
-      }
-      if (!metadata.isFile()) {
-        throw planError(
-          "special_file",
-          relativePath,
-          `Workspace ledger descendant must be a regular file: ${relativePath}`,
-        );
-      }
-      scanNode(root, absolutePath, relativePath, policy, entries);
-    }
-  }
-}
-
-function scanMemoryRoot(
-  root: string,
-  memoryRoot: string,
-  memoryRelativePath: string,
-  entries: WorkspacePortabilityPlanEntry[],
-): void {
-  assertCanonicalPathInsideRoot(root, memoryRoot, memoryRelativePath);
-  for (const name of readDirectoryNames(memoryRoot)) {
-    const absolutePath = join(memoryRoot, name);
-    const relativePath = toPortablePath(join(memoryRelativePath, name));
-    const metadata = lstatPath(absolutePath, relativePath);
-    assertSupportedNode(metadata, relativePath);
-    const denylisted = denylistedPolicy(relativePath);
-    const policy =
-      denylisted ?? (name === "state.json" ? PROTECTED_MEMORY_STATE_POLICY : undefined);
-    if (!policy) {
-      throw planError(
-        "unknown_memory_entry",
-        relativePath,
-        `Unknown memory storage entry has no portability policy: ${relativePath}`,
-      );
-    }
-    if (name === "state.json" && !metadata.isFile()) {
-      throw planError(
-        "special_file",
-        relativePath,
-        `Memory state entry must be a regular file: ${relativePath}`,
-      );
-    }
-    scanNode(root, absolutePath, relativePath, policy, entries);
-  }
 }
 
 function scanNode(
@@ -518,13 +369,22 @@ function scanNode(
     policy.classification === "portable"
       ? hashStablePortableFile(absolutePath, relativePath)
       : undefined;
-  entries.push({
+  entries.push(planEntry(relativePath, metadata, policy, digest));
+}
+
+function planEntry(
+  relativePath: string,
+  metadata: Stats,
+  policy: PathPolicy,
+  digest: { readonly size: number; readonly sha256: string } | undefined,
+): WorkspacePortabilityPlanEntry {
+  return {
     relativePath,
     size: digest?.size ?? metadata.size,
     sha256: digest?.sha256 ?? null,
     classification: policy.classification,
     reason: policy.reason,
-  });
+  };
 }
 
 function hashStablePortableFile(

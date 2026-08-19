@@ -1,9 +1,8 @@
-import { createHash, randomUUID } from "node:crypto";
-import { readFile, readdir } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import type { DatabaseSync } from "node:sqlite";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
-import { writeJsonAtomic } from "./atomic-json.js";
-import { OwnerLease } from "./owner-lease.js";
+import { FileStorageIntegrityError } from "./local-file-storage.js";
+import { withWorkspaceSqliteLease } from "./sqlite/workspace-scopes.js";
 
 const STORAGE_OPERATION_VERSION = 1 as const;
 const SAFE_OPERATION_ID = /^[A-Za-z0-9._-]+$/u;
@@ -114,14 +113,23 @@ export interface OperationJournalOptions {
   now?: () => Date;
 }
 
+/**
+ * fork/rewind Saga 的耐久 journal(票 08 起:workspace pico.sqlite 的
+ * `storage_operations` 单表,ADR 24 §4.5)。
+ *
+ * 旧 `<storageRoot>/storage-operations/<operationId>.json` 每步整文件原子重写
+ * → 单行 `operation_json` UPSERT;状态机(prepared→…→completed/aborted/
+ * needs_attention)与 version CAS 在 BEGIN IMMEDIATE 写事务内逐条校验,跨进程
+ * 互斥由 SQLite 单写者接管,`.disposition-leases` 目录锁随之退役。
+ */
 export class StorageOperationJournal {
-  readonly directory: string;
+  private readonly storageRoot: string;
   private readonly now: () => Date;
 
   constructor(options: OperationJournalOptions) {
-    this.directory = resolvePicoPaths(resolve(options.workDir), {
-      picoHome: options.picoHome,
-    }).workspace.storageOperations;
+    this.storageRoot = resolvePicoPaths(options.workDir, {
+      ...(options.picoHome !== undefined ? { picoHome: options.picoHome } : {}),
+    }).workspace.root;
     this.now = options.now ?? (() => new Date());
   }
 
@@ -141,20 +149,14 @@ export class StorageOperationJournal {
     } as StorageOperation;
     const parsed = parseStorageOperation(operation);
     if (!parsed) throw new Error("Invalid storage operation");
-    await this.write(parsed);
+    await this.write(parsed, "insert");
     return parsed;
   }
 
   async get(operationId: string): Promise<StorageOperation | undefined> {
-    const path = this.operationPath(operationId);
-    try {
-      const parsed = parseStorageOperation(JSON.parse(await readFile(path, "utf8")) as unknown);
-      if (!parsed) throw new Error(`Invalid storage operation journal: ${path}`);
-      return parsed;
-    } catch (error) {
-      if (isNodeCode(error, "ENOENT")) return undefined;
-      throw error;
-    }
+    return withWorkspaceSqliteLease(this.storageRoot, (lease) =>
+      lease.transaction("read", () => readOperationLocked(lease.database, operationId)),
+    );
   }
 
   async advance(input: {
@@ -163,33 +165,31 @@ export class StorageOperationJournal {
     nextState: StorageOperationState;
     error?: StorageOperationError;
   }): Promise<StorageOperation> {
-    const current = await this.get(input.operationId);
-    if (!current) throw new Error(`Storage operation not found: ${input.operationId}`);
-    if (current.version !== input.expectedVersion) {
-      throw new Error(
-        `Storage operation version conflict: expected ${input.expectedVersion}, actual ${current.version}`,
-      );
-    }
-    if (!canTransition(current.state, input.nextState)) {
-      throw new Error(
-        `Invalid storage operation transition: ${current.state} -> ${input.nextState}`,
-      );
-    }
-    const next = {
-      ...current,
-      version: current.version + 1,
-      state: input.nextState,
-      updatedAt: this.now().toISOString(),
-      ...(input.error ? { error: input.error } : {}),
-    } satisfies StorageOperation;
-    await this.write(next);
-    return next;
+    return withWorkspaceSqliteLease(this.storageRoot, (lease) =>
+      lease.transaction("write", () => {
+        const current = requireOperationLocked(lease.database, input.operationId);
+        assertVersionMatch(current, input.expectedVersion);
+        if (!canTransition(current.state, input.nextState)) {
+          throw new Error(
+            `Invalid storage operation transition: ${current.state} -> ${input.nextState}`,
+          );
+        }
+        const next = {
+          ...current,
+          version: current.version + 1,
+          state: input.nextState,
+          updatedAt: this.now().toISOString(),
+          ...(input.error ? { error: input.error } : {}),
+        } satisfies StorageOperation;
+        updateOperationLocked(lease.database, next);
+        return next;
+      }),
+    );
   }
 
   /** 人工 retry 只能恢复到 journal 记录的失败 phase，不能由调用方猜测。 */
   async retryNeedsAttention(input: StorageOperationDispositionInput): Promise<StorageOperation> {
-    return this.withDispositionLease(input.operationId, async () => {
-      const current = await this.getDispositionCandidate(input);
+    return this.applyDisposition(input, (current, at) => {
       const failedPhase = current.error?.phase;
       if (!failedPhase || !isRetryableOperationState(failedPhase)) {
         throw new Error(
@@ -199,120 +199,235 @@ export class StorageOperationJournal {
       const next = structuredClone(current);
       next.version += 1;
       next.state = failedPhase;
-      next.updatedAt = this.now().toISOString();
+      next.updatedAt = at;
       next.dispositions = [
         ...(current.dispositions ?? []),
-        createDisposition("retry", current, input.reason, next.updatedAt),
+        createDisposition("retry", current, input.reason, at),
       ];
       delete next.error;
-      await this.write(next);
       return next;
     });
   }
 
   /** 人工 abort 是不可逆终态。 */
   async abortNeedsAttention(input: StorageOperationDispositionInput): Promise<StorageOperation> {
-    return this.withDispositionLease(input.operationId, async () => {
-      const current = await this.getDispositionCandidate(input);
+    return this.applyDisposition(input, (current, at) => {
       const next = structuredClone(current);
       next.version += 1;
       next.state = "aborted";
-      next.updatedAt = this.now().toISOString();
+      next.updatedAt = at;
       next.dispositions = [
         ...(current.dispositions ?? []),
-        createDisposition("abort", current, input.reason, next.updatedAt),
+        createDisposition("abort", current, input.reason, at),
       ];
-      await this.write(next);
       return next;
     });
   }
 
   async listUnfinished(): Promise<StorageOperation[]> {
-    return (await this.list()).filter((operation) => !isTerminal(operation.state));
-  }
-
-  async listNeedsAttention(): Promise<StorageOperation[]> {
-    return (await this.list()).filter((operation) => operation.state === "needs_attention");
-  }
-
-  /** Doctor / TUI handoff 使用的全量只读视图；损坏记录由 Doctor 单独报告。 */
-  async list(): Promise<StorageOperation[]> {
-    let names: string[];
-    try {
-      names = await readdir(this.directory);
-    } catch (error) {
-      if (isNodeCode(error, "ENOENT")) return [];
-      throw error;
-    }
-
-    const operations: StorageOperation[] = [];
-    for (const name of names.toSorted()) {
-      if (!name.endsWith(".json")) continue;
-      try {
-        const parsed = parseStorageOperation(
-          JSON.parse(await readFile(join(this.directory, name), "utf8")) as unknown,
-        );
-        if (parsed) operations.push(parsed);
-      } catch {
-        // Doctor reports malformed journals separately. Normal startup cannot guess their intent.
-      }
-    }
-    return operations.toSorted(
-      (left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt),
+    return withWorkspaceSqliteLease(this.storageRoot, (lease) =>
+      lease.transaction("read", () =>
+        listOperationsLocked(
+          lease.database.prepare(
+            `SELECT operation_json FROM storage_operations
+             WHERE state NOT IN ('completed','aborted','needs_attention')`,
+          ),
+        ),
+      ),
     );
   }
 
-  private async write(operation: StorageOperation): Promise<void> {
-    await writeJsonAtomic(this.operationPath(operation.operationId), operation);
+  async listNeedsAttention(): Promise<StorageOperation[]> {
+    return withWorkspaceSqliteLease(this.storageRoot, (lease) =>
+      lease.transaction("read", () =>
+        listOperationsLocked(
+          lease.database.prepare(
+            "SELECT operation_json FROM storage_operations WHERE state = 'needs_attention'",
+          ),
+        ),
+      ),
+    );
   }
 
-  private async getDispositionCandidate(
+  /**
+   * Doctor / TUI handoff 使用的全量只读视图。行内 operation_json 无法解析视作
+   * 库被外部改写:fail-closed 抛错而不是像 JSONL 纪元那样静默跳过(行只能由
+   * 本 journal 在校验后写入,畸形行不存在自然路径)。
+   */
+  async list(): Promise<StorageOperation[]> {
+    return withWorkspaceSqliteLease(this.storageRoot, (lease) =>
+      lease.transaction("read", () =>
+        listOperationsLocked(
+          lease.database.prepare(
+            "SELECT operation_json FROM storage_operations ORDER BY created_at, operation_id",
+          ),
+        ),
+      ),
+    );
+  }
+
+  /**
+   * session-resolver fork 发布判定(session-resolver.ts indexForkTargetOperations
+   * 的单查询化):kind='fork' 且非 aborted 的目标会话 → hasCompleted 聚合。
+   */
+  async listForkTargets(): Promise<Map<string, { hasCompleted: boolean }>> {
+    return withWorkspaceSqliteLease(this.storageRoot, (lease) =>
+      lease.transaction("read", () => {
+        const rows = lease.database
+          .prepare(
+            `SELECT target_session_id, state FROM storage_operations
+             WHERE kind = 'fork' AND state <> 'aborted' AND target_session_id IS NOT NULL`,
+          )
+          .all() as Array<{ target_session_id: unknown; state: unknown }>;
+        const targets = new Map<string, { hasCompleted: boolean }>();
+        for (const row of rows) {
+          if (typeof row.target_session_id !== "string") continue;
+          const existing = targets.get(row.target_session_id);
+          targets.set(row.target_session_id, {
+            hasCompleted: existing?.hasCompleted === true || row.state === "completed",
+          });
+        }
+        return targets;
+      }),
+    );
+  }
+
+  private async applyDisposition(
     input: StorageOperationDispositionInput,
+    build: (current: StorageOperation, at: string) => StorageOperation,
   ): Promise<StorageOperation> {
     const reason = input.reason.trim();
     if (!reason || reason.length > 2_000) {
       throw new Error("Storage operation disposition reason must contain 1-2000 characters");
     }
-    const current = await this.get(input.operationId);
-    if (!current) throw new Error(`Storage operation not found: ${input.operationId}`);
-    if (current.version !== input.expectedVersion) {
-      throw new Error(
-        `Storage operation version conflict: expected ${input.expectedVersion}, actual ${current.version}`,
-      );
+    if (!SAFE_OPERATION_ID.test(input.operationId)) {
+      throw new Error(`Invalid operation ID: ${input.operationId}`);
     }
-    if (current.state !== "needs_attention") {
-      throw new Error(
-        `Storage operation ${current.operationId} is ${current.state}, not needs_attention`,
-      );
-    }
-    return current;
+    return withWorkspaceSqliteLease(this.storageRoot, (lease) =>
+      lease.transaction("write", () => {
+        const current = requireOperationLocked(lease.database, input.operationId);
+        assertVersionMatch(current, input.expectedVersion);
+        if (current.state !== "needs_attention") {
+          throw new Error(
+            `Storage operation ${current.operationId} is ${current.state}, not needs_attention`,
+          );
+        }
+        const next = build(current, this.now().toISOString());
+        updateOperationLocked(lease.database, next);
+        return next;
+      }),
+    );
   }
 
-  private async withDispositionLease<T>(operationId: string, action: () => Promise<T>): Promise<T> {
-    if (!SAFE_OPERATION_ID.test(operationId)) {
-      throw new Error(`Invalid operation ID: ${operationId}`);
-    }
-    const operationDigest = createHash("sha256").update(operationId).digest("hex");
-    const lease = await OwnerLease.acquire({
-      leaseDirectory: join(this.directory, ".disposition-leases", operationDigest),
-      ownerId: `operation-disposition:${operationId}:${process.pid}`,
-    });
-    try {
-      return await action();
-    } finally {
-      await lease.release();
-    }
-  }
-
-  private operationPath(operationId: string): string {
-    if (!SAFE_OPERATION_ID.test(operationId))
-      throw new Error(`Invalid operation ID: ${operationId}`);
-    return join(this.directory, `${operationId}.json`);
+  private write(operation: StorageOperation, mode: "insert" | "update"): Promise<void> {
+    return Promise.resolve(
+      withWorkspaceSqliteLease(this.storageRoot, (lease) =>
+        lease.transaction("write", () => {
+          if (mode === "insert") {
+            insertOperationLocked(lease.database, operation);
+          } else {
+            updateOperationLocked(lease.database, operation);
+          }
+        }),
+      ),
+    );
   }
 }
 
 export function isTerminalStorageOperation(state: StorageOperationState): boolean {
   return isTerminal(state);
+}
+
+function insertOperationLocked(database: DatabaseSync, operation: StorageOperation): void {
+  database
+    .prepare(
+      `INSERT INTO storage_operations
+         (operation_id, kind, version, state, session_id, target_session_id,
+          operation_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      operation.operationId,
+      operation.kind,
+      operation.version,
+      operation.state,
+      operation.sessionId,
+      operation.kind === "fork" ? operation.targetSessionId : null,
+      canonicalJson(operation),
+      operation.createdAt,
+      operation.updatedAt,
+    );
+}
+
+function updateOperationLocked(database: DatabaseSync, operation: StorageOperation): void {
+  database
+    .prepare(
+      `UPDATE storage_operations
+       SET kind = ?, version = ?, state = ?, session_id = ?, target_session_id = ?,
+           operation_json = ?, updated_at = ?
+       WHERE operation_id = ?`,
+    )
+    .run(
+      operation.kind,
+      operation.version,
+      operation.state,
+      operation.sessionId,
+      operation.kind === "fork" ? operation.targetSessionId : null,
+      canonicalJson(operation),
+      operation.updatedAt,
+      operation.operationId,
+    );
+}
+
+function readOperationLocked(
+  database: DatabaseSync,
+  operationId: string,
+): StorageOperation | undefined {
+  if (!SAFE_OPERATION_ID.test(operationId)) {
+    throw new Error(`Invalid operation ID: ${operationId}`);
+  }
+  const row = database
+    .prepare("SELECT operation_json FROM storage_operations WHERE operation_id = ?")
+    .get(operationId) as { operation_json?: unknown } | undefined;
+  if (row === undefined) return undefined;
+  return parseOperationRow(row.operation_json, operationId);
+}
+
+function requireOperationLocked(database: DatabaseSync, operationId: string): StorageOperation {
+  const current = readOperationLocked(database, operationId);
+  if (!current) throw new Error(`Storage operation not found: ${operationId}`);
+  return current;
+}
+
+function listOperationsLocked(
+  statement: { all(): unknown[] },
+): StorageOperation[] {
+  const rows = statement.all() as Array<{ operation_json?: unknown }>;
+  return rows.map((row, index) => parseOperationRow(row.operation_json, `row #${index + 1}`));
+}
+
+function parseOperationRow(value: unknown, identity: string): StorageOperation {
+  const parsed = parseStorageOperation(
+    typeof value === "string" ? (JSON.parse(value) as unknown) : undefined,
+  );
+  if (!parsed) {
+    throw new FileStorageIntegrityError(
+      `Storage operation journal row is malformed: ${identity}`,
+    );
+  }
+  return parsed;
+}
+
+function assertVersionMatch(current: StorageOperation, expectedVersion: number): void {
+  if (current.version !== expectedVersion) {
+    throw new Error(
+      `Storage operation version conflict: expected ${expectedVersion}, actual ${current.version}`,
+    );
+  }
+}
+
+function canonicalJson(operation: StorageOperation): string {
+  return JSON.stringify(operation);
 }
 
 function canTransition(from: StorageOperationState, to: StorageOperationState): boolean {
@@ -528,10 +643,6 @@ function isNonNegativeInteger(value: unknown): value is number {
 
 function isPositiveInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
-}
-
-function isNodeCode(error: unknown, code: string): boolean {
-  return error instanceof Error && "code" in error && error.code === code;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -20,9 +20,10 @@ import {
   formatModelUsageReport,
 } from "../../src/provider/model-runtime-report.js";
 import { resolveModelRouteCapabilities } from "../../src/provider/model-capabilities.js";
-import { RuntimeStore } from "../../src/tasks/runtime-store.js";
+import { SqliteRuntimeControlStore } from "../../src/storage/sqlite/sqlite-runtime-control-store.js";
 import { createEmptyUsageSnapshot } from "../../src/engine/session-runtime.js";
 import type { ProviderCallRecord } from "../../src/tasks/runtime-types.js";
+import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 
 test("cache effectiveness only uses detailed calls for ratios and classifies cache misses", () => {
   const firstCapture = preparedCapture("first");
@@ -322,7 +323,7 @@ test("usage.get excludes baselines from cache ratios and honors the call time ra
   const workspacePath = await mkdtemp(join(tmpdir(), "pico-cache-effectiveness-"));
   const picoHome = join(workspacePath, "pico-home");
   const env = { PICO_HOME: picoHome };
-  const store = new RuntimeStore({ workDir: workspacePath, picoHome });
+  const store = new SqliteRuntimeControlStore({ storageRoot: resolvePicoPaths(workspacePath, { picoHome }).workspace.root });
   store.recordProviderCall({
     ...providerCall(
       "old",

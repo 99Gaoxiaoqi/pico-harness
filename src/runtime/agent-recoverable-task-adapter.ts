@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { canonicalizeWorkspacePath } from "../paths/pico-paths.js";
@@ -10,18 +10,20 @@ import {
   type RecoverableTaskResumeContext,
 } from "../tasks/recoverable-task.js";
 import {
+  FileStorageIntegrityError,
+  mkdirPrivateSync,
   readJsonFileSync,
   withFileLock,
   writeJsonAtomicSync,
 } from "../storage/local-file-storage.js";
-import {
-  assertWorkspaceStorageRootIdentitySync,
-  ensurePrivateWorkspaceStorageDirectorySync,
-  prepareWorkspaceStorageLayoutSync,
-  type WorkspaceStorageRootIdentity,
-} from "../storage/workspace-storage-layout.js";
 import { RUNTIME_EVENT_SCHEMA_VERSION, type RuntimeRunStartedEvent } from "../storage/runtime-event.js";
-import type { RuntimeEventStore } from "../storage/runtime-event-store.js";
+import type { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
+import {
+  assertWorkspaceSqliteStorageRootIdentitySync,
+  readWorkspaceSqliteStorageRootIdentitySync,
+  type WorkspaceStorageRootIdentity,
+} from "../storage/sqlite/sqlite-workspace-storage.js";
+import { ALL_WORKSPACE_SQLITE_SCOPES } from "../storage/sqlite/workspace-scopes.js";
 
 export const AGENT_RECOVERABLE_TASK_ADAPTER_ID = "pico.core-agent";
 export const AGENT_RECOVERABLE_TASK_ADAPTER_VERSION = 1 as const;
@@ -200,16 +202,26 @@ export class FileAgentRecoveryLaunchIntentPort implements AgentRecoveryLaunchInt
     if (!options.storageRootId.trim()) {
       throw new Error("Agent recovery launch-intent storageRootId must not be empty");
     }
-    const preparation = prepareWorkspaceStorageLayoutSync(options.storageRoot);
-    if (preparation.rootIdentity.storageRootId !== options.storageRootId) {
+    const rootIdentity = readWorkspaceSqliteStorageRootIdentitySync(
+      options.storageRoot,
+      ALL_WORKSPACE_SQLITE_SCOPES,
+    );
+    if (!rootIdentity) {
       throw new Error(
-        `Agent recovery launch-intent storage root mismatch: expected ${options.storageRootId}, got ${preparation.rootIdentity.storageRootId}`,
+        `Agent recovery launch-intent storage root is not initialized: ${options.storageRoot}`,
       );
     }
-    this.rootIdentity = preparation.rootIdentity;
-    this.storageRoot = preparation.rootIdentity.canonicalPath;
-    this.storageRootId = preparation.rootIdentity.storageRootId;
-    this.intentsRoot = join(this.storageRoot, "control", INTENT_DIRECTORY_NAME);
+    if (rootIdentity.storageRootId !== options.storageRootId) {
+      throw new Error(
+        `Agent recovery launch-intent storage root mismatch: expected ${options.storageRootId}, got ${rootIdentity.storageRootId}`,
+      );
+    }
+    this.rootIdentity = rootIdentity;
+    this.storageRoot = rootIdentity.canonicalPath;
+    this.storageRootId = rootIdentity.storageRootId;
+    // SQLite 纪元:claim 文件不得落在 legacy marker 目录(control/ 会触发旧纪元
+    // fail-closed 门禁),与 memory/、evidence/ 同级的并存目录。
+    this.intentsRoot = join(this.storageRoot, INTENT_DIRECTORY_NAME);
     this.ownerId =
       options.ownerId?.trim() || `agent-recovery-intent:${process.pid}:${randomUUID()}`;
     this.claimTtlMs = positiveDuration(options.claimTtlMs ?? 30_000, "claimTtlMs");
@@ -219,7 +231,7 @@ export class FileAgentRecoveryLaunchIntentPort implements AgentRecoveryLaunchInt
     );
     this.contentionPollMs = positiveDuration(options.contentionPollMs ?? 25, "contentionPollMs");
     this.now = options.now ?? (() => new Date());
-    ensurePrivateWorkspaceStorageDirectorySync(this.intentsRoot);
+    ensurePrivateIntentDirectorySync(this.intentsRoot);
   }
 
   async installOrConfirm(
@@ -486,9 +498,9 @@ export class FileAgentRecoveryLaunchIntentPort implements AgentRecoveryLaunchInt
     if (!INTENT_DIRECTORY_PATTERN.test(digest)) {
       throw new Error(`Agent recovery launch-intent digest is invalid: ${digest}`);
     }
-    assertWorkspaceStorageRootIdentitySync(this.storageRoot, this.rootIdentity);
-    ensurePrivateWorkspaceStorageDirectorySync(this.intentsRoot);
-    ensurePrivateWorkspaceStorageDirectorySync(this.intentDirectory(digest));
+    assertWorkspaceSqliteStorageRootIdentitySync(this.storageRoot, this.rootIdentity, ALL_WORKSPACE_SQLITE_SCOPES);
+    ensurePrivateIntentDirectorySync(this.intentsRoot);
+    ensurePrivateIntentDirectorySync(this.intentDirectory(digest));
   }
 
   private intentDirectory(digest: string): string {
@@ -503,7 +515,7 @@ export class FileAgentRecoveryLaunchIntentPort implements AgentRecoveryLaunchInt
 export interface CreateAgentRecoverableTaskAdapterOptions {
   readonly workspacePath: string;
   readonly storageRootId: string;
-  readonly runtimeEventStore: RuntimeEventStore;
+  readonly runtimeEventStore: SqliteRuntimeEventStore;
   readonly launchIntents: AgentRecoveryLaunchIntentPort;
 }
 
@@ -526,9 +538,15 @@ export function createAgentRecoverableTaskAdapter(
 ): RecoverableTaskAdapter {
   const workspacePath = canonicalizeWorkspacePath(options.workspacePath);
   assertIdentifier(options.storageRootId, "storageRootId");
-  const storageIdentity = prepareWorkspaceStorageLayoutSync(
+  const storageIdentity = readWorkspaceSqliteStorageRootIdentitySync(
     options.runtimeEventStore.storageRoot,
-  ).rootIdentity;
+    ALL_WORKSPACE_SQLITE_SCOPES,
+  );
+  if (!storageIdentity) {
+    throw new Error(
+      `Agent recoverable adapter storage root is not initialized: ${options.runtimeEventStore.storageRoot}`,
+    );
+  }
   if (storageIdentity.storageRootId !== options.storageRootId) {
     throw new Error(
       `Agent recoverable adapter storage root mismatch: expected ${options.storageRootId}, got ${storageIdentity.storageRootId}`,
@@ -675,7 +693,7 @@ function assertResumeContext(
 }
 
 async function admitSuccessorRuntimeRun(
-  store: RuntimeEventStore,
+  store: SqliteRuntimeEventStore,
   input: AgentRecoverableTaskInput,
   context: RecoverableTaskResumeContext,
 ): Promise<{ readonly sequence: number; readonly invocationId: string; readonly at: string }> {
@@ -1097,4 +1115,12 @@ function hasExactKeys(
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+}
+
+function ensurePrivateIntentDirectorySync(path: string): void {
+  const metadata = existsSync(path) ? lstatSync(path) : undefined;
+  if (metadata && (!metadata.isDirectory() || metadata.isSymbolicLink())) {
+    throw new FileStorageIntegrityError(`Agent recovery intent directory must be a real directory: ${path}`);
+  }
+  mkdirPrivateSync(path);
 }

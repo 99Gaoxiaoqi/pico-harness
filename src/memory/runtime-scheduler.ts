@@ -1,5 +1,5 @@
 import type { Job } from "./domain.js";
-import { MemoryConflictError, type MemoryRepository } from "./memory-repository.js";
+import { MemoryConflictError, type MemoryRepositoryContract } from "./memory-repository.js";
 import {
   MEMORY_PROPOSAL_EXTRACTOR_VERSION,
   MEMORY_PROPOSAL_JOB_TYPE,
@@ -29,7 +29,7 @@ export interface MemoryReviewSchedulerPort {
 export class MemoryReviewScheduler implements MemoryReviewSchedulerPort {
   constructor(
     private readonly repository: Pick<
-      MemoryRepository,
+      MemoryRepositoryContract,
       "createJob" | "listJobs" | "getSettings" | "rescheduleQueuedJobs" | "updateJob"
     >,
     private readonly options: MemoryReviewSchedulerOptions = {},

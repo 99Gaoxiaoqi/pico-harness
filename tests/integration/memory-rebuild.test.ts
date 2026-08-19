@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
-  MemoryRepository,
   MEMORY_SOURCE_NOTIFICATION_JOB_TYPE,
 } from "../../src/memory/memory-repository.js";
+import { SqliteMemoryRepository } from "../../src/storage/sqlite/sqlite-memory-repository.js";
 import { SOURCE_AVAILABILITIES } from "../../src/memory/domain.js";
 import {
   MEMORY_PROPOSAL_JOB_TYPE,
@@ -14,7 +14,7 @@ import {
 } from "../../src/memory/proposal-contracts.js";
 import { rebuildDerivedFromRuntimeEvent } from "../../src/memory/memory-rebuild.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
-import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
+import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
 
 // Lifecycle invalidation Job identity — kept private in desktop-memory-service.ts because new
 // call sites must not produce rewound Jobs (Phase 1 made rewind a non-destructive fork). We mirror
@@ -26,7 +26,7 @@ test("rebuildDerivedFromRuntimeEvent enqueues missing extraction Jobs without to
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
 
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const runtimeStore = new RuntimeEventStore({ storageRoot: paths.workspace.root });
+  const runtimeStore = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
   const sessionId = "memory-rebuild-session";
   const runId = "run-rebuild";
   const at = "2026-08-10T00:00:00.000Z";
@@ -92,8 +92,8 @@ test("rebuildDerivedFromRuntimeEvent enqueues missing extraction Jobs without to
   ]);
   runtimeStore.close();
 
-  const repository = new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  const repository = new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
   // Overlay layer: a user-curated manual Fact and a disabled proposal — rebuild must not touch these.
@@ -113,7 +113,7 @@ test("rebuildDerivedFromRuntimeEvent enqueues missing extraction Jobs without to
     idempotencyKey: "rebuild-enable-memory",
   });
 
-  const store = new RuntimeEventStore({ storageRoot: paths.workspace.root });
+  const store = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
   const report = await rebuildDerivedFromRuntimeEvent(repository, store, paths.workspace.root);
   store.close();
 
@@ -151,7 +151,7 @@ test("rebuildDerivedFromRuntimeEvent is idempotent — a second call skips exist
   const sessionId = "memory-rebuild-idempotent-session";
   const runId = "run-rebuild-idempotent";
   const at = "2026-08-10T00:00:00.000Z";
-  const store = new RuntimeEventStore({ storageRoot: paths.workspace.root });
+  const store = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
   await store.initializeSession({ sessionId, workDir: fixture.workspace });
   await store.appendBatch([
     {
@@ -208,8 +208,8 @@ test("rebuildDerivedFromRuntimeEvent is idempotent — a second call skips exist
     },
   ]);
 
-  const repository = new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  const repository = new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
   repository.updateSettings({
@@ -246,7 +246,7 @@ test("rebuildDerivedFromRuntimeEvent does not reset a Job that already reached a
   const sessionId = "memory-rebuild-suppressed";
   const runId = "run-suppressed";
   const at = "2026-08-10T00:00:00.000Z";
-  const store = new RuntimeEventStore({ storageRoot: paths.workspace.root });
+  const store = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
   await store.initializeSession({ sessionId, workDir: fixture.workspace });
   await store.appendBatch([
     {
@@ -303,8 +303,8 @@ test("rebuildDerivedFromRuntimeEvent does not reset a Job that already reached a
     },
   ]);
 
-  const repository = new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  const repository = new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
   repository.updateSettings({
@@ -354,8 +354,8 @@ test("a fork leaves the source Session's Memory Sources available — no lifecyc
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
 
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const repository = new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  const repository = new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
   // Source Session has a Memory Source derived from one of its completed turns.
@@ -396,7 +396,7 @@ test("rebuildDerivedFromRuntimeEvent skips work when Memory autoPropose is disab
   const sessionId = "memory-rebuild-disabled-session";
   const runId = "run-disabled";
   const at = "2026-08-10T00:00:00.000Z";
-  const store = new RuntimeEventStore({ storageRoot: paths.workspace.root });
+  const store = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
   await store.initializeSession({ sessionId, workDir: fixture.workspace });
   await store.appendBatch([
     {
@@ -453,8 +453,8 @@ test("rebuildDerivedFromRuntimeEvent skips work when Memory autoPropose is disab
     },
   ]);
 
-  const repository = new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  const repository = new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
   // Overlay-disabled: enabled stays true but autoPropose is false — worker would no-op.

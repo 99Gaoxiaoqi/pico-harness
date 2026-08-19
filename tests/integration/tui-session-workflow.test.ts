@@ -1,3 +1,4 @@
+import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -7,7 +8,7 @@ import { resolveCliStartupSession } from "../../src/cli/session-args.js";
 import { createPicoCommandRegistry } from "../../src/input/pico-command-registry.js";
 import { processUserInput } from "../../src/input/process-user-input.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
-import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
+
 import { StorageOperationJournal } from "../../src/storage/operation-journal.js";
 
 test("--session and -S reject a missing session in the current workspace", async (context) => {
@@ -145,14 +146,14 @@ async function createFixture(name: string): Promise<{
   readonly root: string;
   readonly workspace: string;
   readonly picoHome: string;
-  readonly store: RuntimeEventStore;
+  readonly store: SqliteRuntimeEventStore;
   dispose(): Promise<void>;
 }> {
   const root = await mkdtemp(join(tmpdir(), `pico-${name}-`));
   const workspace = join(root, "workspace");
   const picoHome = join(root, "pico-home");
   await mkdir(workspace, { recursive: true });
-  const store = new RuntimeEventStore({
+  const store = new SqliteRuntimeEventStore({
     storageRoot: resolvePicoPaths(workspace, { picoHome }).workspace.root,
   });
   return {

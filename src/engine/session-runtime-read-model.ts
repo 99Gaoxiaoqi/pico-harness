@@ -19,6 +19,23 @@ export interface RuntimeHistoryProjectionEntry {
 }
 
 /**
+ * read-model 投影实际消费的事件 kind 集(票 04 数据来源窄化):
+ * 折叠规则不变,消费方用 kind 切片查询替代全量 readSession——其余 kind 在
+ * materializePrefix 里只产 soft 诊断(被 entries 丢弃),不影响输出。
+ */
+export const RUNTIME_HISTORY_EVENT_KINDS = [
+  "message.committed",
+  "tool.result.recorded",
+  "context.checkpoint.recorded",
+] as const;
+
+/** raw model-message 投影(无 checkpoint 替换)消费的 kind 集。 */
+export const RUNTIME_MODEL_MESSAGE_EVENT_KINDS = [
+  "message.committed",
+  "tool.result.recorded",
+] as const;
+
+/**
  * 投影结果：entries + 结构化诊断。
  * hard 诊断在 materializeRuntimeHistoryProjection 内已 throw（fail-closed），
  * 这里的 diagnostics 只含 soft 诊断（unclaimed_control_fact / partial_event_skipped）。

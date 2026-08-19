@@ -23,9 +23,8 @@ import {
 import type { Message } from "../../src/schema/message.js";
 import {
   createRuntimeEventId,
-  RuntimeEventStore,
   type RuntimeEventStoreEntry,
-} from "../../src/storage/runtime-event-store.js";
+} from "../../src/storage/runtime-event-store-contracts.js";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION,
   type RuntimeEvent,
@@ -33,6 +32,7 @@ import {
   type RuntimeModelCallSettledEvent,
   type RuntimeToolResultRecordedEvent,
 } from "../../src/storage/runtime-event.js";
+import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
 
 const SESSION_ID = "projection-service-equivalence";
 const WORK_DIR = join(tmpdir(), "projection-service-workdir");
@@ -61,9 +61,12 @@ const INVOCATION_ID = "invocation-1";
  */
 test("RuntimeProjectionService outputs are deepStrictEqual with the underlying projection functions", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-projection-service-"));
-  context.after(() => rm(root, { recursive: true, force: true }));
+  context.after(() => {
+    store.close();
+    return rm(root, { recursive: true, force: true });
+  });
 
-  const store = new RuntimeEventStore({ storageRoot: root });
+  const store = new SqliteRuntimeEventStore({ storageRoot: root });
   await store.initializeSession({ sessionId: SESSION_ID, workDir: WORK_DIR });
 
   // 构造一组多样化的 RuntimeEvent：user -> assistant(toolCall) -> toolResult -> state -> usage -> transcript
@@ -323,9 +326,12 @@ test("RuntimeProjectionService outputs are deepStrictEqual with the underlying p
  */
 test("RuntimeProjectionService propagates underlying projection failures", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-projection-service-fail-"));
-  context.after(() => rm(root, { recursive: true, force: true }));
+  context.after(() => {
+    store.close();
+    return rm(root, { recursive: true, force: true });
+  });
 
-  const store = new RuntimeEventStore({ storageRoot: root });
+  const store = new SqliteRuntimeEventStore({ storageRoot: root });
   await store.initializeSession({ sessionId: SESSION_ID, workDir: WORK_DIR });
 
   // 一个悬空 tool result（没有前置 assistant toolCall batch）→ assertToolCallPairing 抛错

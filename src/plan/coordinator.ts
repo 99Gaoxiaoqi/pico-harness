@@ -10,9 +10,9 @@ import {
   type RuntimePlanEvent,
 } from "../engine/session-runtime-event.js";
 import {
-  RuntimeEventStore,
   RuntimeEventStorePlanOperationConflictError,
-} from "../storage/runtime-event-store.js";
+  type RuntimeEventStoreEntry,
+} from "../storage/runtime-event-store-contracts.js";
 import {
   PlanConflictError,
   normalizePlanProposalInput,
@@ -23,6 +23,8 @@ import {
   type PlanStepStatus,
 } from "./contract.js";
 import { projectActivePlanEntries, projectPlanEntries, reducePlanEvent } from "./reducer.js";
+import { PLAN_EVENT_KINDS } from "./events.js";
+import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 
 export interface PlanCoordinatorContext {
   readonly sessionId: string;
@@ -39,16 +41,34 @@ export type PlanOperationStatus = "missing" | "matching";
 
 export class PlanCoordinator {
   constructor(
-    private readonly store: RuntimeEventStore,
+    private readonly store: SqliteRuntimeEventStore,
     private readonly context: PlanCoordinatorContext,
     private readonly now: () => Date = () => new Date(),
   ) {}
 
-  async project(): Promise<PlanProjection> {
-    return projectPlanEntries(
+  /**
+   * plan.* 事件切片 + 全会话水位(票 04):折叠输入只含 plan 事件,
+   * sessionSequence 由水位显式传入,保持 CAS 口径与全量读一致。
+   */
+  private async readPlanEntries(): Promise<{
+    readonly entries: readonly RuntimeEventStoreEntry[];
+    readonly headSequence: number;
+  }> {
+    const slice = await this.store.readSessionEntriesOfKinds(
       this.context.sessionId,
-      await this.store.readSessionEntries(this.context.sessionId),
+      PLAN_EVENT_KINDS,
     );
+    return slice;
+  }
+
+  private projectPlan(
+    slice: Awaited<ReturnType<PlanCoordinator["readPlanEntries"]>>,
+  ): PlanProjection {
+    return projectPlanEntries(this.context.sessionId, slice.entries, slice.headSequence);
+  }
+
+  async project(): Promise<PlanProjection> {
+    return this.projectPlan(await this.readPlanEntries());
   }
 
   async operationStatus(
@@ -58,7 +78,7 @@ export class PlanCoordinator {
   ): Promise<PlanOperationStatus> {
     const fingerprint = planOperationFingerprint(kind, semantic);
     const replay = projectActivePlanEntries(
-      await this.store.readSessionEntries(this.context.sessionId),
+      (await this.readPlanEntries()).entries,
     ).find(
       ({ event }) =>
         event.kind.startsWith("plan.") &&
@@ -348,7 +368,7 @@ export class PlanCoordinator {
         step,
         {
           ...this.baseEvent(input.operationId, "plan.execution.completed", at),
-          eventId: `plan:${input.operationId}:completed`,
+              eventId: `plan:${this.context.sessionId}:${input.operationId}:completed`,
           kind: "plan.execution.completed" as const,
           data: { ...fact, planId: input.planId },
         },
@@ -380,8 +400,8 @@ export class PlanCoordinator {
       projection: PlanProjection,
     ) => RuntimeEvent[],
   ): Promise<PlanProjection> {
-    const entries = await this.store.readSessionEntries(this.context.sessionId);
-    const replay = projectActivePlanEntries(entries).find(
+    const slice = await this.readPlanEntries();
+    const replay = projectActivePlanEntries(slice.entries).find(
       ({ event }) =>
         event.kind.startsWith("plan.") &&
         "operationId" in event.data &&
@@ -391,9 +411,9 @@ export class PlanCoordinator {
     if (replay) {
       if (!("fingerprint" in replay.event.data) || replay.event.data.fingerprint !== fingerprint)
         throw new RuntimeEventStorePlanOperationConflictError(input.operationId);
-      return projectPlanEntries(this.context.sessionId, entries);
+      return this.projectPlan(slice);
     }
-    const projection = projectPlanEntries(this.context.sessionId, entries);
+    const projection = this.projectPlan(slice);
     const events = build(
       { operationId: input.operationId, fingerprint },
       this.now().toISOString(),
@@ -414,7 +434,10 @@ export class PlanCoordinator {
   private baseEvent(operationId: string, suffix: string, at: string) {
     return {
       schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
-      eventId: `plan:${operationId}:${suffix}`,
+      // 事件 id 需在库级唯一(runtime_events.event_id 是 pico.sqlite 主键):
+      // 同一 operationId 在不同会话重试时必须命中各自会话的幂等分支,
+      // 因此把 sessionId 织入 id;同会话同 operationId 的重试仍得到相同 id。
+      eventId: `plan:${this.context.sessionId}:${operationId}:${suffix}`,
       sessionId: this.context.sessionId,
       invocationId: this.context.invocationId,
       runId: this.context.runId,

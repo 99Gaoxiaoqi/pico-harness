@@ -43,6 +43,7 @@ import {
 } from "./session-runtime.js";
 import {
   createFileHistoryState,
+  type FileHistoryIo,
   type FileHistoryState,
   type FileHistoryDiffStat,
   fileHistoryBeginRewindPoint,
@@ -81,12 +82,12 @@ import {
 } from "./runtime-model-message.js";
 import { materializeRuntimeHistoryEntries } from "./session-runtime-read-model.js";
 import {
-  RuntimeEventStore,
   type RuntimeEventStoreAppendResult,
   type RuntimeEventStoreEntry,
   type RuntimeSessionManifest,
   type RuntimeSessionProjectionSnapshot,
-} from "../storage/runtime-event-store.js";
+} from "../storage/runtime-event-store-contracts.js";
+import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 import {
   projectRuntimeSessionMessageEntries,
   projectRuntimeSessionMessages,
@@ -196,6 +197,8 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
   readonly picoHome: string;
   /** Frozen File History root shared by the Session and AgentEngine journals. */
   readonly fileHistoryBaseDir: string;
+  /** File History 持久化落点(blob CAS 根 + manifest 行所在的 workspace 库根)。 */
+  readonly fileHistoryIo: FileHistoryIo;
   createdAt: Date;
   updatedAt: Date;
 
@@ -239,10 +242,10 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
   conversationId: string;
 
   /**
-   * RuntimeEventStore 是唯一 durable 会话真源。undefined 表示持久化关闭。
-   * 默认开启；PICO_PERSISTENCE=0 关闭。
+   * SqliteRuntimeEventStore(pico.sqlite)是唯一 durable 会话真源。undefined 表示
+   * 持久化关闭。默认开启;PICO_PERSISTENCE=0 关闭。
    */
-  private store?: RuntimeEventStore;
+  private store?: SqliteRuntimeEventStore;
   private runtimeInitialization?: Promise<RuntimeSessionManifest>;
   private runtimeOwnership?: OwnerLease;
   private runtimeOwnershipPromise?: Promise<OwnerLease>;
@@ -282,6 +285,12 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     this.fileHistoryBaseDir = options?.picoHome
       ? resolvePicoPaths(workDir, { picoHome: this.picoHome }).home.fileHistory
       : fileHistoryDefaultBaseDir();
+    // manifest 行与 Session 事件同库(票 08 方案 a):storageRoot 与 initPersistence
+    // 的 RuntimeEventStore 解析口径一致。
+    this.fileHistoryIo = {
+      baseDir: this.fileHistoryBaseDir,
+      storageRoot: resolvePicoPaths(workDir, { picoHome: this.picoHome }).workspace.root,
+    };
     this.identity =
       options?.identity ??
       createSessionIdentity({
@@ -310,7 +319,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
   private initPersistence(explicit?: boolean): void {
     const enabled = explicit ?? process.env.PICO_PERSISTENCE !== "0";
     if (!enabled) return;
-    this.store = new RuntimeEventStore({
+    this.store = new SqliteRuntimeEventStore({
       storageRoot: resolvePicoPaths(this.workDir, { picoHome: this.picoHome }).workspace.root,
     });
   }
@@ -326,17 +335,28 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     if (!this.store) return;
     try {
       const manifest = await this.ensureRuntimeSession();
-      const projection = await this.store.readSessionProjection(this.id);
-      if (!projection) throw new Error(`Runtime session ${this.id} disappeared during recovery`);
-      const entries = projection.entries;
-      const events = entries.map(({ event }) => event);
-      const runtime = projectRuntimeSessionState(events);
+      // SQLite 纪元:恢复直读 session_messages 物化投影 + by_kind 状态事件,
+      // 不再全量重放事件账本(票 03;投影 delta 语义在流式路径保留)。
+      const recovery = await this.store.readSessionRecovery(this.id);
+      if (!recovery) throw new Error(`Runtime session ${this.id} disappeared during recovery`);
+      if (recovery.manifest.createdAt !== manifest.createdAt) {
+        throw new Error(`Runtime session ${this.id} manifest changed during recovery`);
+      }
+      const runtime = projectRuntimeSessionState(
+        recovery.stateEntries.map(({ event }) => event),
+      );
       this.createdAt = new Date(manifest.createdAt);
       this.persistedSettings = runtime.settings;
       this.persistedGoal = runtime.goal;
       this.persistedPromptCache = runtime.promptCache;
       this.restoreUsage(runtime.usage);
-      this.applyRuntimeHistoryProjection(projection);
+      this.messageLedger.replace(structuredClone(recovery.messages));
+      const cursor = recovery.cursor;
+      this.runtimeProjectionCursor = cursor ? { ...cursor } : undefined;
+      this.conversationId = cursor ? `${cursor.logId}:${cursor.epoch}` : this.id;
+      this.updatedAt = recovery.lastEventAt
+        ? new Date(recovery.lastEventAt)
+        : this.createdAt;
     } catch (error) {
       this.markWriteUncertain("Runtime session initialize/replay failed", error);
       throw error;
@@ -445,7 +465,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
   }
 
   private async recoverFileHistory(): Promise<void> {
-    await fileHistoryLoadState(this.fileHistory, this.id, this.fileHistoryBaseDir);
+    await fileHistoryLoadState(this.fileHistory, this.id, this.fileHistoryIo);
     if (!this.fileHistory.roots.has("workspace")) {
       fileHistoryRegisterRoot(this.fileHistory, "workspace", resolve(this.workDir));
     }
@@ -1163,7 +1183,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
         ...(input.prePlanMode !== undefined ? { prePlanMode: input.prePlanMode } : {}),
       },
       this.id,
-      this.fileHistoryBaseDir,
+      this.fileHistoryIo,
     );
     return messageId;
   }
@@ -1362,7 +1382,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
   }
 
   /** Durable event authority; undefined only for explicitly in-memory sessions. */
-  get runtimeEventStore(): RuntimeEventStore | undefined {
+  get runtimeEventStore(): SqliteRuntimeEventStore | undefined {
     return this.store;
   }
 
@@ -1549,7 +1569,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
   /** Session 发起的 durable 操作共用一条队列。 */
   private enqueuePersistence<Result>(
     kind: string,
-    write: (store: RuntimeEventStore) => Promise<Result>,
+    write: (store: SqliteRuntimeEventStore) => Promise<Result>,
   ): Promise<Result> {
     this.assertWritable();
     const store = this.store;
@@ -1726,17 +1746,18 @@ function commitReceiptFromAppend(result: RuntimeEventStoreAppendResult): CommitR
 }
 
 async function resolveRuntimeRootSessionId(
-  store: RuntimeEventStore,
+  store: SqliteRuntimeEventStore,
   sessionId: string,
 ): Promise<string> {
   const visited = new Set<string>();
   let current = sessionId;
   while (!visited.has(current)) {
     visited.add(current);
-    const fork = (await store.readSession(current)).find(
-      (event) => event.kind === "session.forked",
-    );
-    if (!fork || fork.kind !== "session.forked") return current;
+    // by_kind 首条点查(票 04):沿 fork 父链逐会话取首个 session.forked 标记,
+    // 不再为找标记全量读会话事件。
+    const forkEntry = await store.readFirstSessionEntryOfKind(current, "session.forked");
+    const fork = forkEntry?.event.kind === "session.forked" ? forkEntry.event : undefined;
+    if (!fork) return current;
     current = fork.data.parentSessionId;
   }
   throw new Error(`Runtime session lineage contains a cycle at ${current}`);

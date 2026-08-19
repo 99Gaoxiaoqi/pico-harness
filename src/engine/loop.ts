@@ -564,7 +564,7 @@ async function commitFileJournal(
       journal,
       messageId,
       session.id,
-      session.fileHistoryBaseDir,
+      session.fileHistoryIo,
     );
     if (commit.incomplete) {
       logger.warn({ warnings: commit.warnings }, "[FileHistory] 本轮文件 journal 覆盖不完整");
@@ -1679,7 +1679,7 @@ export class AgentEngine implements AgentRunner {
                 resolvedPath,
                 userRewindPointId,
                 session.id,
-                session.fileHistoryBaseDir,
+                session.fileHistoryIo,
               );
             }
           } catch {

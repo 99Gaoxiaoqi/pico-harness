@@ -21,12 +21,12 @@ import {
   RUNTIME_EVENT_SCHEMA_VERSION,
 } from "../../src/storage/runtime-event.js";
 import {
-  RuntimeEventStore,
   RuntimeEventStoreHighWaterConflictError,
   RuntimeEventStorePlanOperationConflictError,
-} from "../../src/storage/runtime-event-store.js";
+} from "../../src/storage/runtime-event-store-contracts.js";
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 import { createSessionForkRuntimePort } from "../../src/runtime/session-fork-runtime-port-adapter.js";
+import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
 
 const AT = new Date("2026-08-05T00:00:00.000Z");
 const SETTINGS: PersistedSessionSettings = {
@@ -46,8 +46,12 @@ test("Plan coordinator persists revisions, atomic approval and terminal executio
   const root = await mkdtemp(join(tmpdir(), "pico-plan-mode-"));
   const workDir = join(root, "work");
   await mkdir(workDir);
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const store = new RuntimeEventStore({ storageRoot: join(root, "state") });
+  t.after(() => {
+    store.close();
+    reopenedStore?.close();
+    return rm(root, { recursive: true, force: true });
+  });
+  const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "state") });
   await store.initializeSession({ sessionId: "session-1", workDir });
   const coordinator = new PlanCoordinator(
     store,
@@ -128,8 +132,9 @@ test("Plan coordinator persists revisions, atomic approval and terminal executio
   assert.equal(runtime.settings?.permissionMode, "auto");
   assert.equal(runtime.settings?.permissionMode, "auto");
 
+  const reopenedStore = new SqliteRuntimeEventStore({ storageRoot: join(root, "state") });
   const reopened = new PlanCoordinator(
-    new RuntimeEventStore({ storageRoot: join(root, "state") }),
+    reopenedStore,
     { sessionId: "session-1", invocationId: "inv-1", runId: "run-1", turnId: "turn-1" },
     () => AT,
   );
@@ -140,8 +145,11 @@ test("Plan operation retries are idempotent and conflicting reuse is rejected", 
   const root = await mkdtemp(join(tmpdir(), "pico-plan-idempotency-"));
   const workDir = join(root, "work");
   await mkdir(workDir);
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const store = new RuntimeEventStore({ storageRoot: join(root, "state") });
+  t.after(() => {
+    store.close();
+    return rm(root, { recursive: true, force: true });
+  });
+  const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "state") });
   await store.initializeSession({ sessionId: "session-1", workDir });
   const coordinator = new PlanCoordinator(
     store,
@@ -171,8 +179,12 @@ test("revision requests and interrupted controls are durable CAS operations", as
   const workDir = join(root, "work");
   const storageRoot = join(root, "state");
   await mkdir(workDir);
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const store = new RuntimeEventStore({ storageRoot });
+  t.after(() => {
+    store.close();
+    reopenedStore?.close();
+    return rm(root, { recursive: true, force: true });
+  });
+  const store = new SqliteRuntimeEventStore({ storageRoot });
   await store.initializeSession({ sessionId: "session-1", workDir });
   const coordinator = new PlanCoordinator(
     store,
@@ -243,8 +255,9 @@ test("revision requests and interrupted controls are durable CAS operations", as
     }),
     RuntimeEventStorePlanOperationConflictError,
   );
+  const reopenedStore = new SqliteRuntimeEventStore({ storageRoot });
   const reopened = new PlanCoordinator(
-    new RuntimeEventStore({ storageRoot }),
+    reopenedStore,
     { sessionId: "session-1", invocationId: "reopen", runId: "run", turnId: "turn" },
     () => AT,
   );
@@ -352,8 +365,11 @@ test("reject and exit atomically preserves permission mode", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-plan-reject-"));
   const workDir = join(root, "work");
   await mkdir(workDir);
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const store = new RuntimeEventStore({ storageRoot: join(root, "state") });
+  t.after(() => {
+    store.close();
+    return rm(root, { recursive: true, force: true });
+  });
+  const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "state") });
   await store.initializeSession({ sessionId: "session-1", workDir });
   const coordinator = new PlanCoordinator(
     store,
@@ -391,8 +407,11 @@ test("Plan reducer enforces review, step and rewind invariants", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-plan-invariants-"));
   const workDir = join(root, "work");
   await mkdir(workDir);
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const store = new RuntimeEventStore({ storageRoot: join(root, "state") });
+  t.after(() => {
+    store.close();
+    return rm(root, { recursive: true, force: true });
+  });
+  const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "state") });
   await store.initializeSession({ sessionId: "s", workDir });
   const coordinator = new PlanCoordinator(
     store,
@@ -537,7 +556,13 @@ test("Session fork inherits pending plans and interrupts active execution", asyn
   const workDir = join(root, "work");
   const picoHome = join(root, "home");
   await mkdir(workDir);
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(async () => {
+    for (const sessionId of ["source", "pending-target", "active-target"]) {
+      const released = manager.delete(sessionId, workDir, { picoHome });
+      await released?.close();
+    }
+    await rm(root, { recursive: true, force: true });
+  });
   const manager = new SessionManager({
     createSession: (id, cwd, options) => new Session(id, cwd, options),
   });

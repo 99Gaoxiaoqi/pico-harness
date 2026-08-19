@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { DesktopMemoryService, mapMemoryError } from "../../src/daemon/desktop-memory-service.js";
 import { RUNTIME_ERROR_CODES, RuntimeProtocolError } from "../../src/daemon/protocol.js";
-import { MemoryRepository } from "../../src/memory/memory-repository.js";
+import { SqliteMemoryRepository } from "../../src/storage/sqlite/sqlite-memory-repository.js";
+import { closeAllOperationalDatabasesForTest } from "../../src/storage/sqlite/sqlite-database.js";
+import { withWorkspaceSqliteLease } from "../../src/storage/sqlite/workspace-scopes.js";
 import {
   MEMORY_PROPOSAL_EXTRACTOR_VERSION,
   MEMORY_PROPOSAL_JOB_TYPE,
@@ -14,10 +16,13 @@ import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 
 test("Desktop memory service preserves CAS/idempotency and never exposes storage paths", async (context) => {
   const fixture = await createFixture("writes");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(async () => {
+    closeAllOperationalDatabasesForTest();
+    await rm(fixture.root, { recursive: true, force: true });
+  });
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const repository = new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  const repository = new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
   const source = repository.createSource({
@@ -142,11 +147,14 @@ test("Desktop memory service preserves CAS/idempotency and never exposes storage
 
 test("Desktop memory settings expose only rolling actual terminal review usage", async (context) => {
   const fixture = await createFixture("review-budget");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(async () => {
+    closeAllOperationalDatabasesForTest();
+    await rm(fixture.root, { recursive: true, force: true });
+  });
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
   let clock = new Date("2026-07-21T11:00:00.000Z");
-  const repository = new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  const repository = new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
     now: () => clock,
   });
@@ -202,10 +210,13 @@ test("Desktop memory settings expose only rolling actual terminal review usage",
 
 test("edited approval is one atomic CAS and never activates the original body", async (context) => {
   const fixture = await createFixture("atomic-review");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(async () => {
+    closeAllOperationalDatabasesForTest();
+    await rm(fixture.root, { recursive: true, force: true });
+  });
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const repository = new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  const repository = new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
   const proposal = repository.createProposal({
@@ -270,8 +281,8 @@ test("edited approval is one atomic CAS and never activates the original body", 
   );
   disconnect = false;
 
-  const verify = new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  const verify = new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
   context.after(() => verify.close());
@@ -297,10 +308,13 @@ test("edited approval is one atomic CAS and never activates the original body", 
 
 test("Desktop review approval replaces a conflict fact instead of creating a duplicate", async (context) => {
   const fixture = await createFixture("conflict-review");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(async () => {
+    closeAllOperationalDatabasesForTest();
+    await rm(fixture.root, { recursive: true, force: true });
+  });
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const repository = new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  const repository = new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
   const fact = repository.createFact({
@@ -346,10 +360,13 @@ test("Desktop review approval replaces a conflict fact instead of creating a dup
 
 test("session deletion invalidates sources and pending proposals but retains facts", async (context) => {
   const fixture = await createFixture("lifecycle");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(async () => {
+    closeAllOperationalDatabasesForTest();
+    await rm(fixture.root, { recursive: true, force: true });
+  });
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const repository = new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  const repository = new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
   const deletedSource = repository.createSource({
@@ -402,8 +419,8 @@ test("session deletion invalidates sources and pending proposals but retains fac
   );
   service.close();
 
-  const verify = new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  const verify = new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
   context.after(() => verify.close());
@@ -418,10 +435,13 @@ test("session deletion invalidates sources and pending proposals but retains fac
 
 test("session lifecycle compensation invalidates more than 500 sources without overriding success", async (context) => {
   const fixture = await createFixture("lifecycle-pagination");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(async () => {
+    closeAllOperationalDatabasesForTest();
+    await rm(fixture.root, { recursive: true, force: true });
+  });
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const repository = new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  const repository = new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
   for (let index = 0; index < 510; index++) {
@@ -465,38 +485,40 @@ test("session lifecycle compensation invalidates more than 500 sources without o
 
   // Any later memory access retries the durable lifecycle job.
   service.list(fixture.workspace, { workspacePath: fixture.workspace, limit: 1 });
-  const state = JSON.parse(await readFile(paths.workspace.memoryState, "utf8")) as {
-    sources: Record<string, { sessionId: string; availability: string }>;
-    proposals: Record<string, { proposalId: string; status: string }>;
-    jobs: Record<string, { type: string; status: string }>;
-  };
-  assert.equal(
-    Object.values(state.sources).filter(
-      (source) => source.sessionId === "bulk-session" && source.availability === "unavailable",
-    ).length,
-    510,
-  );
-  assert.equal(
-    Object.values(state.proposals).filter(
-      (proposal) =>
-        proposal.proposalId.startsWith("bulk-proposal-") && proposal.status === "deleted",
-    ).length,
-    510,
-  );
-  assert.equal(
-    Object.values(state.jobs).filter(
-      (job) => job.type === "source-lifecycle-invalidation" && job.status === "succeeded",
-    ).length,
-    1,
-  );
+  const state = withWorkspaceSqliteLease(paths.workspace.root, (lease) => ({
+    sources: lease.database
+      .prepare(
+        `SELECT COUNT(*) AS n FROM memory_sources
+         WHERE session_id = ? AND availability = 'unavailable'`,
+      )
+      .get("bulk-session") as { n: number },
+    proposals: lease.database
+      .prepare(
+        `SELECT COUNT(*) AS n FROM memory_proposals
+         WHERE proposal_id LIKE 'bulk-proposal-%' AND status = 'deleted'`,
+      )
+      .get() as { n: number },
+    jobs: lease.database
+      .prepare(
+        `SELECT COUNT(*) AS n FROM memory_jobs
+         WHERE type = 'source-lifecycle-invalidation' AND status = 'succeeded'`,
+      )
+      .get() as { n: number },
+  }));
+  assert.equal(state.sources.n, 510);
+  assert.equal(state.proposals.n, 510);
+  assert.equal(state.jobs.n, 1);
 });
 
 test("file-backed forget durably outboxes a body-free notification", async (context) => {
   const fixture = await createFixture("forget-outbox");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(async () => {
+    closeAllOperationalDatabasesForTest();
+    await rm(fixture.root, { recursive: true, force: true });
+  });
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const repository = new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  const repository = new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
   const secret = "forget-outbox-sensitive-body";
@@ -536,8 +558,8 @@ test("file-backed forget durably outboxes a body-free notification", async (cont
     idempotencyKey: "forget-outbox-request",
   });
   assert.equal(replay.fact.state, "forgotten");
-  const inspection = new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  const inspection = new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
   context.after(() => inspection.close());
@@ -549,10 +571,13 @@ test("file-backed forget durably outboxes a body-free notification", async (cont
 
 test("context preview reuses query-aware recall and reports the 3-fact/320-token hard budget", async (context) => {
   const fixture = await createFixture("preview");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(async () => {
+    closeAllOperationalDatabasesForTest();
+    await rm(fixture.root, { recursive: true, force: true });
+  });
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const repository = new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  const repository = new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
   repository.createFact({

@@ -1,7 +1,7 @@
 import type { SessionForkRuntimePort } from "../engine/session-fork-runtime-port.js";
 import { materializeRuntimeHistory } from "../engine/session-runtime-read-model.js";
 import { deriveRuntimeForkBootstrapRunId, RuntimeRun } from "./runtime-run.js";
-import { RuntimeEventStore } from "../storage/runtime-event-store.js";
+import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 import { createEngineRuntimePort } from "./engine-runtime-port-adapter.js";
 
 /** Runtime-owned implementation of the narrow fork lifecycle contract. */
@@ -59,8 +59,8 @@ export function createSessionForkRuntimePort(): SessionForkRuntimePort {
   };
 }
 
-function requireRuntimeEventStore(authority: object): RuntimeEventStore {
-  if (!(authority instanceof RuntimeEventStore)) {
+function requireRuntimeEventStore(authority: object): SqliteRuntimeEventStore {
+  if (!(authority instanceof SqliteRuntimeEventStore)) {
     throw new Error("Session fork Runtime authority is not a RuntimeEventStore");
   }
   return authority;

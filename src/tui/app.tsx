@@ -15,6 +15,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useWindowSize } from "ink";
 import { appendFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { InputBox, type InputBoxStateSnapshot, type InputBoxSubmission } from "./input-box.js";
 import type { SlashArgumentSuggestionSource, SuggestionSource } from "./input-controller.js";
 import { pickFocusedDialog, type DialogRequest } from "./dialog-arbiter.js";
@@ -72,7 +73,7 @@ function dbg(workDir: string, msg: string): void {
   if (process.env.TUI_DEBUG) {
     const paths = resolvePicoPaths(workDir);
     mkdirSync(paths.workspace.root, { recursive: true });
-    appendFileSync(paths.workspace.debugLog, `${new Date().toISOString()} ${msg}\n`);
+    appendFileSync(join(paths.workspace.root, "tui-debug.log"), `${new Date().toISOString()} ${msg}\n`);
   }
 }
 

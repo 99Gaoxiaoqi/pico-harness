@@ -19,12 +19,43 @@ import type {
   RuntimeToolResultRecordedEvent,
 } from "./session-runtime-event.js";
 import type { RuntimeHistoryProjectionEntry } from "./session-runtime-read-model.js";
+import { RUNTIME_MODEL_MESSAGE_EVENT_KINDS } from "./session-runtime-read-model.js";
 import type { ToolResultEnvelope } from "./tool-result-contract.js";
 
 export interface SequencedRuntimeEvent {
   readonly sequence: number;
   readonly event: RuntimeEvent;
 }
+
+// ---------------------------------------------------------------------------
+// 票 04 数据来源窄化:下列 kind 集精确描述各投影函数消费的事件子集,
+// 消费方以此做 kind 切片查询替代全量 readSession;投影折叠规则不变。
+// ---------------------------------------------------------------------------
+
+/** projectRuntimeSessionState 消费的 kind 集(state patch + usage)。 */
+export const RUNTIME_SESSION_STATE_EVENT_KINDS = [
+  "session.state.committed",
+  "model.call.settled",
+] as const;
+
+/** projectRuntimeSessionUsage 消费的 kind 集。 */
+export const RUNTIME_SESSION_USAGE_EVENT_KINDS = ["model.call.settled"] as const;
+
+/** projectRuntimeSessionTranscriptEventEntries 消费的 kind 集。 */
+export const RUNTIME_SESSION_TRANSCRIPT_EVENT_KINDS = ["transcript.event.recorded"] as const;
+
+/** transcript 读模型(desktop-transcript)消费的完整 kind 集。 */
+export const RUNTIME_TRANSCRIPT_READ_MODEL_EVENT_KINDS = [
+  ...RUNTIME_MODEL_MESSAGE_EVENT_KINDS,
+  "transcript.event.recorded",
+  ...RUNTIME_SESSION_STATE_EVENT_KINDS,
+] as const;
+
+/** fork seed 投影(model + transcript 事实)消费的 kind 集。 */
+export const RUNTIME_SESSION_FORK_SEED_EVENT_KINDS = [
+  ...RUNTIME_MODEL_MESSAGE_EVENT_KINDS,
+  "transcript.event.recorded",
+] as const;
 
 export interface RuntimeSessionSequencedMessageEntry extends RuntimeHistoryProjectionEntry {
   readonly sequence: number;

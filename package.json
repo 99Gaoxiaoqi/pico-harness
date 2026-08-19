@@ -58,7 +58,7 @@
     "format": "prettier --check src scripts tests apps packages .github/workflows docs README.md AGENTS.md package.json package-lock.json tsconfig.json tsconfig.build.json"
   },
   "engines": {
-    "node": ">=22.13 <23 || >=24.3 <25 || >=26 <27"
+    "node": ">=22.19 <23 || >=24.3 <25 || >=26 <27"
   },
   "dependencies": {
     "@pico/protocol": "*",

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { SilentReporter } from "../../src/engine/reporter.js";
 import { globalSessionManager } from "../../src/engine/session.js";
-import { MemoryRepository } from "../../src/memory/memory-repository.js";
+import { SqliteMemoryRepository } from "../../src/storage/sqlite/sqlite-memory-repository.js";
 import {
   MemoryProposalEngine,
   MemoryRepositoryProposalStore,
@@ -52,8 +52,8 @@ realModelTest(
       mkdir(picoHome, { recursive: true }),
     ]);
     const paths = resolvePicoPaths(workspace, { picoHome });
-    const repository = new MemoryRepository({
-      storageRoot: paths.workspace.memory,
+    const repository = new SqliteMemoryRepository({
+      storageRoot: paths.workspace.root,
       workspaceId: paths.workspace.id,
     });
     // 此用例验证审批制下的提取质量，关掉 autoCommit 保持 pending 语义。
@@ -349,10 +349,10 @@ function runtimeRequest(
   };
 }
 
-function openMemoryRepository(workspace: string, picoHome: string): MemoryRepository {
+function openMemoryRepository(workspace: string, picoHome: string): SqliteMemoryRepository {
   const paths = resolvePicoPaths(workspace, { picoHome });
-  return new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  return new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
 }

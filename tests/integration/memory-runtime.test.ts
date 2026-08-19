@@ -17,8 +17,9 @@ import {
 } from "../../src/memory/context-builder.js";
 import {
   MEMORY_PROPOSED_NOTIFICATION_JOB_TYPE,
-  MemoryRepository,
 } from "../../src/memory/memory-repository.js";
+import { SqliteMemoryRepository } from "../../src/storage/sqlite/sqlite-memory-repository.js";
+import { closeAllOperationalDatabasesForTest } from "../../src/storage/sqlite/sqlite-database.js";
 import { MemoryRepositoryProposalStore } from "../../src/memory/proposal-engine.js";
 import {
   MEMORY_PROPOSAL_EXTRACTOR_VERSION,
@@ -43,17 +44,38 @@ import {
 } from "../../src/runtime/memory-review-recovery.js";
 import {
   RUNTIME_EVENT_STORE_MAX_PAGE_SIZE,
-  RuntimeEventStore,
-} from "../../src/storage/runtime-event-store.js";
+} from "../../src/storage/runtime-event-store-contracts.js";
 import { createSessionRuntime } from "../../src/runtime/session-runtime.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
-import { RuntimeStore } from "../../src/tasks/runtime-store.js";
+import { SqliteRuntimeControlStore } from "../../src/storage/sqlite/sqlite-runtime-control-store.js";
 import { publishDesktopMemoryProposal } from "../../src/daemon/production-host.js";
 import { WorkspaceRuntimeService } from "../../src/daemon/workspace-runtime-service.js";
+import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
+
+
+/** Windows:分离的 memory review worker 可能仍持有 pico.sqlite 句柄,
+ * 删除临时目录按 EBUSY 有界重试,等待 drain 归还 lease。 */
+async function rmRetry(target: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await rm(target, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EBUSY") throw error;
+      if (attempt === 0) {
+        // 文件纪元的测试可以不关句柄直接 rm;SQLite 纪元先强制放掉本进程
+        // 全部 pico.sqlite owner(事后各 close() 钩子对已释放 lease 静默空转)。
+        closeAllOperationalDatabasesForTest();
+      }
+      if (attempt >= 50) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+}
 
 test("memory recall is deterministic, filtered, bounded and ephemeral across Sessions", async (context) => {
   const fixture = await createFixture("recall");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(() => rmRetry(fixture.root));
   const repository = openRepository(fixture);
   context.after(() => repository.close());
   const now = new Date("2026-07-20T12:00:00.000Z");
@@ -99,8 +121,8 @@ test("memory recall is deterministic, filtered, bounded and ephemeral across Ses
 
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
   repository.close();
-  const reopened = new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  const reopened = new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
   const acrossSession = await new MemoryContextBuilder(reopened, () => now).build(
@@ -112,8 +134,8 @@ test("memory recall is deterministic, filtered, bounded and ephemeral across Ses
   const otherWorkspace = join(fixture.root, "other-workspace");
   await mkdir(otherWorkspace);
   const otherPaths = resolvePicoPaths(otherWorkspace, { picoHome: fixture.picoHome });
-  const other = new MemoryRepository({
-    storageRoot: otherPaths.workspace.memory,
+  const other = new SqliteMemoryRepository({
+    storageRoot: otherPaths.workspace.root,
     workspaceId: otherPaths.workspace.id,
   });
   assert.equal((await new MemoryContextBuilder(other, () => now).build()).block, "");
@@ -122,7 +144,7 @@ test("memory recall is deterministic, filtered, bounded and ephemeral across Ses
 
 test("memory recall uses CJK bigrams and does not expand short confirmations or slash commands", async (context) => {
   const fixture = await createFixture("recall-query-signals");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(() => rmRetry(fixture.root));
   const repository = openRepository(fixture);
   context.after(() => repository.close());
 
@@ -167,7 +189,7 @@ test("memory recall uses CJK bigrams and does not expand short confirmations or 
 
 test("memory recall keeps one stable preference without displacing every query-aware fact", async (context) => {
   const fixture = await createFixture("recall-resident-preference");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(() => rmRetry(fixture.root));
   const repository = openRepository(fixture);
   context.after(() => repository.close());
 
@@ -215,7 +237,7 @@ test("memory recall keeps one stable preference without displacing every query-a
 
 test("foreground Runtime injects trusted recall ephemerally and schedules only completed enabled runs", async (context) => {
   const fixture = await createFixture("runtime");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(() => rmRetry(fixture.root));
   const trustStore = await trustFixture(fixture);
   const repository = openRepository(fixture);
   createFact(repository, "runtime-fact", "project_fact", {
@@ -267,9 +289,11 @@ test("foreground Runtime injects trusted recall ephemerally and schedules only c
     false,
   );
   const runtimePaths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const runtimeEvents = await new RuntimeEventStore({
+  const runtimeEventStore = new SqliteRuntimeEventStore({
     storageRoot: runtimePaths.workspace.root,
-  }).readSession("memory-runtime-session");
+  });
+  const runtimeEvents = await runtimeEventStore.readSession("memory-runtime-session");
+  runtimeEventStore.close();
   assert.equal(
     JSON.stringify(runtimeEvents).includes("hidden-recall-policy"),
     false,
@@ -421,10 +445,18 @@ test("the second turn in one Session schedules Memory only when it carries a sta
 
 test("startup rebuilds a Memory job lost after a durable completed terminal", async (context) => {
   const fixture = await createFixture("terminal-job-gap-recovery");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(async () => {
+    // executeAgentRuntime(mode:new) 会把会话留在 globalSessionManager;其
+    // SqliteRuntimeEventStore 持有 pico.sqlite 句柄,清理前先删除并关闭。
+    const leftover = globalSessionManager.delete("memory-gap-restart-trigger", fixture.workspace, {
+      picoHome: fixture.picoHome,
+    });
+    await leftover?.close();
+    await rmRetry(fixture.root);
+  });
   const trustStore = await trustFixture(fixture);
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const runtimeStore = new RuntimeEventStore({ storageRoot: paths.workspace.root });
+  const runtimeStore = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
   const sessionId = "memory-terminal-job-gap";
   const runId = "run-before-crash";
   const at = "2026-07-22T00:00:00.000Z";
@@ -529,7 +561,7 @@ test("startup rebuilds a Memory job lost after a durable completed terminal", as
 
 test("a direct enqueue failure invalidates a successful scan so the next Run rebuilds it", async (context) => {
   const fixture = await createFixture("terminal-job-gap-cache-invalidation");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(() => rmRetry(fixture.root));
   const trustStore = await trustFixture(fixture);
   const provider: LLMProvider = {
     async generate() {
@@ -564,7 +596,7 @@ test("a direct enqueue failure invalidates a successful scan so the next Run reb
   assert.equal(repository.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE }).length, 0);
   repository.close();
 
-  const runtimeStore = new RuntimeEventStore({
+  const runtimeStore = new SqliteRuntimeEventStore({
     storageRoot: resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome }).workspace.root,
   });
   const failedTerminal = (await runtimeStore.readSession(failedSessionId)).find(
@@ -588,9 +620,9 @@ test("a direct enqueue failure invalidates a successful scan so the next Run reb
 
 test("an invalidated in-flight recovery continues with the current generation", async (context) => {
   const fixture = await createFixture("recovery-generation-handoff");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(() => rmRetry(fixture.root));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const store = new RuntimeEventStore({ storageRoot: paths.workspace.root });
+  const store = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
   const sessionId = "memory-recovery-generation-handoff";
   await store.initializeSession({ sessionId, workDir: fixture.workspace });
   const appendCompletedRun = async (suffix: string): Promise<void> => {
@@ -682,9 +714,9 @@ test("an invalidated in-flight recovery continues with the current generation", 
 
 test("manifest pages keep a fixed upper bound and DESC keyset across concurrent mutations", async (context) => {
   const fixture = await createFixture("manifest-keyset");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(() => rmRetry(fixture.root));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const store = new RuntimeEventStore({ storageRoot: paths.workspace.root });
+  const store = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
   const originalIds = Array.from(
     { length: 30 },
     (_, index) => `keyset-${String(index).padStart(2, "0")}`,
@@ -729,9 +761,9 @@ test("manifest pages keep a fixed upper bound and DESC keyset across concurrent 
 
 test("recovery yields to the host after each fixed enqueue batch", async (context) => {
   const fixture = await createFixture("review-enqueue-batch-yield");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(() => rmRetry(fixture.root));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const store = new RuntimeEventStore({ storageRoot: paths.workspace.root });
+  const store = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
   const sessionId = "memory-review-enqueue-batch-yield";
   await store.initializeSession({ sessionId, workDir: fixture.workspace });
   const at = "2026-07-22T00:00:00.000Z";
@@ -824,10 +856,10 @@ function appendLegacyRuntimeLedger(
 
 test("startup does not recover a crash-gap terminal removed by a paged rewind", async (context) => {
   const fixture = await createFixture("terminal-job-gap-rewind");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(() => rmRetry(fixture.root));
   const trustStore = await trustFixture(fixture);
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const runtimeStore = new RuntimeEventStore({ storageRoot: paths.workspace.root });
+  const runtimeStore = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
   const sessionId = "memory-terminal-job-gap-rewound";
   const at = "2026-07-22T00:00:00.000Z";
   const base = (eventId: string, runId: string, visibility: "internal" | "model") => ({
@@ -921,9 +953,9 @@ test("startup does not recover a crash-gap terminal removed by a paged rewind", 
 
 test("compact recovery restores an active Run at a rewind target before its terminal", async (context) => {
   const fixture = await createFixture("compact-recovery-preterminal-rewind");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(() => rmRetry(fixture.root));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const store = new RuntimeEventStore({ storageRoot: paths.workspace.root });
+  const store = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
   const sessionId = "memory-compact-preterminal-rewind";
   const runId = "memory-compact-replayed-run";
   const base = (eventId: string, visibility: "internal" | "model") => ({
@@ -984,7 +1016,7 @@ test("compact recovery restores an active Run at a rewind target before its term
 
 test("an ordinary question wakes an existing durable review without enqueueing another", async (context) => {
   const fixture = await createFixture("ordinary-recovery-kick");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(() => rmRetry(fixture.root));
   const trustStore = await trustFixture(fixture);
   await enqueueCompletedReview(fixture, trustStore, "memory-recovery-before-ordinary");
 
@@ -1028,7 +1060,7 @@ test("an ordinary question wakes an existing durable review without enqueueing a
 
 test("proposal notification outbox retries across workers without repeating extraction", async (context) => {
   const fixture = await createFixture("worker");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(() => rmRetry(fixture.root));
   const trustStore = await trustFixture(fixture);
   const foregroundProvider: LLMProvider = {
     async generate() {
@@ -1069,9 +1101,9 @@ test("proposal notification outbox retries across workers without repeating extr
   } satisfies BillingRoute;
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
   const modelFactory = () => {
-    const ledger = new RuntimeStore({
-      workDir: fixture.workspace,
-      picoHome: fixture.picoHome,
+    const ledger = new SqliteRuntimeControlStore({
+      storageRoot: resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome }).workspace
+        .root,
     });
     const provider = new CostTracker(
       {
@@ -1121,7 +1153,6 @@ test("proposal notification outbox retries across workers without repeating extr
   const worker = new MemoryReviewWorker({
     workDir: fixture.workspace,
     workspaceId: paths.workspace.id,
-    memoryStorageRoot: paths.workspace.memory,
     runtimeStorageRoot: paths.workspace.root,
     trustStore,
     modelFactory,
@@ -1151,7 +1182,10 @@ test("proposal notification outbox retries across workers without repeating extr
   assert.equal(JSON.stringify(queuedNotice).includes("Use npm run build-memory"), false);
   assert.equal(JSON.stringify(queuedNotice).includes("Build command"), false);
   repository.close();
-  const usageLedger = new RuntimeStore({ workDir: fixture.workspace, picoHome: fixture.picoHome });
+  const usageLedger = new SqliteRuntimeControlStore({
+    storageRoot: resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome }).workspace
+      .root,
+  });
   const memoryCall = usageLedger
     .listProviderCalls()
     .find((call) => call.purpose === "memory_review");
@@ -1165,7 +1199,6 @@ test("proposal notification outbox retries across workers without repeating extr
   const recoveredWorker = new MemoryReviewWorker({
     workDir: fixture.workspace,
     workspaceId: paths.workspace.id,
-    memoryStorageRoot: paths.workspace.memory,
     runtimeStorageRoot: paths.workspace.root,
     trustStore,
     modelFactory,
@@ -1228,7 +1261,7 @@ test("production adapter publishes a durable body-free memory.proposed notificat
 
 test("explicit single-fact review commits without acquiring a model lease", async (context) => {
   const fixture = await createFixture("worker-deterministic");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(() => rmRetry(fixture.root));
   const trustStore = await trustFixture(fixture);
   await executeAgentRuntime(
     {
@@ -1256,7 +1289,6 @@ test("explicit single-fact review commits without acquiring a model lease", asyn
   const worker = new MemoryReviewWorker({
     workDir: fixture.workspace,
     workspaceId: paths.workspace.id,
-    memoryStorageRoot: paths.workspace.memory,
     runtimeStorageRoot: paths.workspace.root,
     trustStore,
     modelFactory: () => {
@@ -1280,7 +1312,7 @@ test("explicit single-fact review commits without acquiring a model lease", asyn
 
 test("supported queued and stale-running reviews are not starved by over 500 unsupported jobs", async (context) => {
   const fixture = await createFixture("worker-recovery");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(() => rmRetry(fixture.root));
   const trustStore = await trustFixture(fixture);
   await enqueueCompletedReview(fixture, trustStore, "memory-recovery-stale-session");
   await enqueueCompletedReview(fixture, trustStore, "memory-recovery-queued-session");
@@ -1332,7 +1364,6 @@ test("supported queued and stale-running reviews are not starved by over 500 uns
   const worker = new MemoryReviewWorker({
     workDir: fixture.workspace,
     workspaceId: paths.workspace.id,
-    memoryStorageRoot: paths.workspace.memory,
     runtimeStorageRoot: paths.workspace.root,
     trustStore,
     now: () => new Date(Date.parse(running.updatedAt) + MEMORY_REVIEW_LEASE_TTL_MS + 1),
@@ -1361,7 +1392,7 @@ test("supported queued and stale-running reviews are not starved by over 500 uns
 
 test("two workers racing the same queued review have one model call and one proposal", async (context) => {
   const fixture = await createFixture("worker-cas-race");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(() => rmRetry(fixture.root));
   const trusted = await trustFixture(fixture);
   await enqueueCompletedReview(fixture, trusted, "memory-race-session");
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
@@ -1374,8 +1405,7 @@ test("two workers racing the same queued review have one model call and one prop
     new MemoryReviewWorker({
       workDir: fixture.workspace,
       workspaceId: paths.workspace.id,
-      memoryStorageRoot: paths.workspace.memory,
-      runtimeStorageRoot: paths.workspace.root,
+        runtimeStorageRoot: paths.workspace.root,
       trustStore: new SecondCanonicalizeBarrierTrustStore(
         { userStateDirectory: fixture.picoHome },
         rendezvous,
@@ -1394,7 +1424,7 @@ test("two workers racing the same queued review have one model call and one prop
 
 test("one drain reuses its model lease and a failed extraction does not advance another job", async (context) => {
   const fixture = await createFixture("worker-shared-lease");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(() => rmRetry(fixture.root));
   const trustStore = await trustFixture(fixture);
   await enqueueCompletedReview(fixture, trustStore, "memory-shared-lease-a");
   await enqueueCompletedReview(fixture, trustStore, "memory-shared-lease-b");
@@ -1436,7 +1466,6 @@ test("one drain reuses its model lease and a failed extraction does not advance 
   const worker = new MemoryReviewWorker({
     workDir: fixture.workspace,
     workspaceId: paths.workspace.id,
-    memoryStorageRoot: paths.workspace.memory,
     runtimeStorageRoot: paths.workspace.root,
     trustStore,
     modelFactory: () => {
@@ -1468,7 +1497,7 @@ test("one drain reuses its model lease and a failed extraction does not advance 
 
 test("an in-flight review cannot commit after its rewind job is cancelled", async (context) => {
   const fixture = await createFixture("worker-rewind-cancel");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(() => rmRetry(fixture.root));
   const trustStore = await trustFixture(fixture);
   const sessionId = "memory-rewind-cancel-session";
   await enqueueCompletedReview(fixture, trustStore, sessionId);
@@ -1484,7 +1513,6 @@ test("an in-flight review cannot commit after its rewind job is cancelled", asyn
   const worker = new MemoryReviewWorker({
     workDir: fixture.workspace,
     workspaceId: paths.workspace.id,
-    memoryStorageRoot: paths.workspace.memory,
     runtimeStorageRoot: paths.workspace.root,
     trustStore,
     modelFactory: () => ({
@@ -1551,7 +1579,7 @@ test("an in-flight review cannot commit after its rewind job is cancelled", asyn
 
 test("one provider call microbatches fuzzy reviews and isolates one malformed evidence", async (context) => {
   const fixture = await createFixture("worker-model-microbatch");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(() => rmRetry(fixture.root));
   const trustStore = await trustFixture(fixture);
   for (const [index, command] of ["alpha", "beta", "gamma"].entries()) {
     await enqueueCompletedReview(
@@ -1611,7 +1639,6 @@ test("one provider call microbatches fuzzy reviews and isolates one malformed ev
   const worker = new MemoryReviewWorker({
     workDir: fixture.workspace,
     workspaceId: paths.workspace.id,
-    memoryStorageRoot: paths.workspace.memory,
     runtimeStorageRoot: paths.workspace.root,
     trustStore,
     modelFactory: () => ({
@@ -1656,7 +1683,7 @@ test("one provider call microbatches fuzzy reviews and isolates one malformed ev
 
 test("eco review mode resolves fuzzy evidence without acquiring a model", async (context) => {
   const fixture = await createFixture("worker-eco-mode");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(() => rmRetry(fixture.root));
   const trustStore = await trustFixture(fixture);
   await enqueueCompletedReview(fixture, trustStore, "memory-eco-mode");
   const repository = openRepository(fixture);
@@ -1673,7 +1700,6 @@ test("eco review mode resolves fuzzy evidence without acquiring a model", async 
   const results = await new MemoryReviewWorker({
     workDir: fixture.workspace,
     workspaceId: paths.workspace.id,
-    memoryStorageRoot: paths.workspace.memory,
     runtimeStorageRoot: paths.workspace.root,
     trustStore,
     modelFactory: () => {
@@ -1694,7 +1720,7 @@ test("eco review mode resolves fuzzy evidence without acquiring a model", async 
 
 test("exhausted workspace review budget defers fuzzy jobs without consuming an attempt", async (context) => {
   const fixture = await createFixture("worker-review-budget");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(() => rmRetry(fixture.root));
   const trustStore = await trustFixture(fixture);
   await enqueueCompletedReview(fixture, trustStore, "memory-review-budget");
   const repository = openRepository(fixture);
@@ -1724,7 +1750,6 @@ test("exhausted workspace review budget defers fuzzy jobs without consuming an a
   const results = await new MemoryReviewWorker({
     workDir: fixture.workspace,
     workspaceId: paths.workspace.id,
-    memoryStorageRoot: paths.workspace.memory,
     runtimeStorageRoot: paths.workspace.root,
     trustStore,
     modelFactory: () => {
@@ -1747,7 +1772,7 @@ test("exhausted workspace review budget defers fuzzy jobs without consuming an a
 
 test("/memory command uses trust, sanitizer, idempotency, CAS and executable undo", async (context) => {
   const fixture = await createFixture("command");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
+  context.after(() => rmRetry(fixture.root));
   const trustStore = await trustFixture(fixture);
   const registry = await createPicoCommandRegistry({
     workDir: fixture.workspace,
@@ -1977,14 +2002,14 @@ class SecondCanonicalizeBarrierTrustStore extends WorkspaceTrustStore {
 
 function openRepository(fixture: { workspace: string; picoHome: string }) {
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  return new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  return new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
 }
 
 function createFact(
-  repository: MemoryRepository,
+  repository: SqliteMemoryRepository,
   factId: string,
   kind: "preference" | "correction" | "project_fact" | "reference",
   overrides: {

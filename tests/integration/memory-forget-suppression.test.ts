@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { MemoryRepository } from "../../src/memory/memory-repository.js";
+import { SqliteMemoryRepository } from "../../src/storage/sqlite/sqlite-memory-repository.js";
 import {
   MemoryProposalEngine,
   MemoryRepositoryProposalStore,
@@ -14,7 +14,7 @@ import {
 } from "../../src/memory/proposal-contracts.js";
 import { RuntimeMemoryEvidenceReader } from "../../src/memory/runtime-evidence-reader.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
-import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
+import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
 
 // D11 forget 复活链收口：forgetFact 后账本仍保留原始证据（append-only），
 // 同证据重提取（extractor 版本升级模拟派生重建补 Job 的复活路径）必须在
@@ -41,8 +41,8 @@ test("forgetFact 抑制同证据重提取：Job 取消、零模型调用、无�
     at,
   );
 
-  const repository = new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  const repository = new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
   repository.updateSettings({
@@ -55,13 +55,12 @@ test("forgetFact 抑制同证据重提取：Job 取消、零模型调用、无�
   });
 
   // 第一轮：正常提取 → autoCommit 落 Fact（带 sourceId）。
+  const eventStore = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
   let modelCalls = 0;
   const engine = (extractorVersion: string) =>
     new MemoryProposalEngine({
       store: new MemoryRepositoryProposalStore(repository),
-      evidenceReader: new RuntimeMemoryEvidenceReader(
-        new RuntimeEventStore({ storageRoot: paths.workspace.root }),
-      ),
+      evidenceReader: new RuntimeMemoryEvidenceReader(eventStore),
       model: countingModel(() => modelCalls++),
       extractorVersion,
     });
@@ -112,6 +111,7 @@ test("forgetFact 抑制同证据重提取：Job 取消、零模型调用、无�
   );
   assert.equal(repository.listProposals({ statuses: ["pending"], limit: 10 }).length, 0);
   repository.close();
+  eventStore.close();
 });
 
 async function appendCompletedRun(
@@ -123,7 +123,7 @@ async function appendCompletedRun(
   terminalEventId: string,
   at: string,
 ): Promise<void> {
-  const store = new RuntimeEventStore({ storageRoot: paths.workspace.root });
+  const store = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
   await store.initializeSession({ sessionId, workDir });
   await store.appendBatch([
     {

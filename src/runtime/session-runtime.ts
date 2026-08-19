@@ -10,7 +10,7 @@ import { FileIndex } from "../input/file-index.js";
 import { logger } from "../observability/logger.js";
 import { TaskRegistry } from "../tasks/task-registry.js";
 import type { TaskHostRuntime } from "../tasks/task-runtime.js";
-import type { RuntimeStore } from "../tasks/runtime-store.js";
+import type { SqliteRuntimeControlStore } from "../storage/sqlite/sqlite-runtime-control-store.js";
 import type { CompletionOutboxRecord } from "../tasks/runtime-types.js";
 import { BackgroundManager } from "../tools/background-manager.js";
 import {
@@ -21,7 +21,7 @@ import {
 } from "../tools/delegation-manager.js";
 import { recordIdFor } from "../graph/contract.js";
 import { computeReadyWorks } from "../graph/graph-reconcile.js";
-import { projectGraphEntries } from "../graph/graph-reducer.js";
+import { GRAPH_EVENT_KINDS, projectGraphEntries } from "../graph/graph-reducer.js";
 import { graphOperationFingerprint } from "../tools/graph-tools.js";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION,
@@ -70,7 +70,7 @@ export interface SessionRuntimeOptions {
    * Durable RuntimeStore（graph work lease 源）。taskHostRuntime 不可达时（headless/folder
    * 模式）由调用方注入；DelegationManager 用它做执行主权去重与 orphan 活性判定。
    */
-  runtimeStore?: RuntimeStore;
+  runtimeStore?: SqliteRuntimeControlStore;
   /** Durable completion outbox 的活态发现间隔。 */
   completionPollIntervalMs?: number;
   sessionStartSource?: "startup" | "resume";
@@ -826,8 +826,10 @@ export async function settleGraphWork(
   const kind = completed ? "graph.work.recorded" : "graph.work.failed";
   const fingerprint = graphOperationFingerprint(kind, semantic);
   for (let attempt = 0; attempt < 3; attempt++) {
-    const entries = await store.readSessionEntries(context.sessionId);
-    const projection = projectGraphEntries(context.graphId, entries);
+    // graph.* 事件切片 + 全会话水位(票 04):CAS 的 expectedSessionSequence
+    // 由水位显式传入,与全量读口径一致。
+    const slice = await store.readSessionEntriesOfKinds(context.sessionId, GRAPH_EVENT_KINDS);
+    const projection = projectGraphEntries(context.graphId, slice.entries, slice.headSequence);
     // Idempotent: if the work is already recorded/failed for this delegation,
     // the reducer treated the replay and we only need to chain downstream.
     const work = projection.works.find((candidate) => candidate.workId === workId);
@@ -886,9 +888,14 @@ export async function settleGraphWork(
     // Chain downstream ready works regardless of whether we wrote the fact.
     const dispatcher = resolveDispatcher();
     if (!dispatcher) return;
+    const refreshedSlice = await store.readSessionEntriesOfKinds(
+      context.sessionId,
+      GRAPH_EVENT_KINDS,
+    );
     const refreshed = projectGraphEntries(
       context.graphId,
-      await store.readSessionEntries(context.sessionId),
+      refreshedSlice.entries,
+      refreshedSlice.headSequence,
     );
     const ready = computeReadyWorks(refreshed);
     for (const candidate of ready) {

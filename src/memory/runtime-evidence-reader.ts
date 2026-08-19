@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { RuntimeEvent } from "../engine/session-runtime-event.js";
 import { isRuntimeMessageEvent } from "../engine/session-runtime-event.js";
-import type { RuntimeEventStoreEntry } from "../storage/runtime-event-store.js";
+import type { RuntimeEventStoreEntry } from "../storage/runtime-event-store-contracts.js";
 import { isMessageHiddenFromTranscript, type Message } from "../schema/message.js";
 import {
   EVIDENCE_REF_SCHEMA_VERSION,
@@ -17,6 +17,14 @@ import type {
 export interface RuntimeEvidenceStorePort {
   readSessionEvent(sessionId: string, eventId: string): Promise<RuntimeEventStoreEntry | undefined>;
   readSessionEntries?(sessionId: string): Promise<readonly RuntimeEventStoreEntry[]>;
+  /**
+   * 有界消息快照(票 07 读路径查询化):message.committed 全可见性口径,截至
+   * maxSequence(含端),经 kind 索引;提供时优先于 readSessionEntries 全量读。
+   */
+  readSessionMessageEventsUpTo?(
+    sessionId: string,
+    maxSequence: number,
+  ): Promise<readonly RuntimeEventStoreEntry[]>;
 }
 
 export class MemoryEvidenceError extends Error {
@@ -55,16 +63,20 @@ export class RuntimeMemoryEvidenceReader implements MemoryEvidenceReaderPort {
     const digestHex = createHash("sha256").update(digestPayload).digest("hex");
     // 读取源对话消息快照（截止 terminal sequence），让提取模型看到完整上下文。
     let sourceMessages: readonly Message[] | undefined;
-    if (this.store.readSessionEntries) {
-      try {
-        const entries = await this.store.readSessionEntries(ref.sessionId);
+    try {
+      const entries = this.store.readSessionMessageEventsUpTo
+        ? await this.store.readSessionMessageEventsUpTo(ref.sessionId, terminalEntry.sequence)
+        : this.store.readSessionEntries
+          ? await this.store.readSessionEntries(ref.sessionId)
+          : undefined;
+      if (entries) {
         sourceMessages = entries
           .filter((e) => e.sequence <= terminalEntry.sequence && isRuntimeMessageEvent(e.event))
           .map((e) => (e.event as { data: { message: Message } }).data.message)
           .filter((m) => !isMessageHiddenFromTranscript(m));
-      } catch {
-        // 读取失败不阻断提取，回退到无 sourceMessages 的独立请求。
       }
+    } catch {
+      // 读取失败不阻断提取，回退到无 sourceMessages 的独立请求。
     }
     // 构造统一溯源 overlay：把离散 eventId 升级为带流身份的区间 cursor。
     // sequence 是 session 级全局 append 序号（runtime-event-store.ts:496），

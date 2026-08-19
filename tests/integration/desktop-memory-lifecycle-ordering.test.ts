@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync } from "node:fs";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import {
   createRuntimeRequest,
   DesktopConversationStateStore,
@@ -14,7 +14,7 @@ import {
   WorkspaceRuntimeService,
   type PreparedMemorySourceInvalidation,
 } from "../../src/daemon/index.js";
-import { MemoryRepository } from "../../src/memory/memory-repository.js";
+import { SqliteMemoryRepository } from "../../src/storage/sqlite/sqlite-memory-repository.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 
@@ -73,7 +73,7 @@ test("session delete succeeds after prepare while failed lifecycle apply stays d
       publish: () => undefined,
       onDegraded: (event) => degraded.push(event.code),
     },
-    join(paths.workspace.memory, "lock"),
+    join(paths.workspace.root, "pico.sqlite"),
   );
   const runtime = new WorkspaceRuntimeService({
     env: fixture.env,
@@ -92,8 +92,8 @@ test("session delete succeeds after prepare while failed lifecycle apply stays d
   });
 
   const sessionId = await createSession(desktop, fixture.workspace);
-  const repository = new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  const repository = new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
   const source = repository.createSource({
@@ -125,8 +125,8 @@ test("session delete succeeds after prepare while failed lifecycle apply stays d
   );
   memory.releaseCommitBlock();
 
-  const durable = new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  const durable = new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
   assert.equal(
@@ -137,8 +137,8 @@ test("session delete succeeds after prepare while failed lifecycle apply stays d
   assert.deepEqual(degraded, ["lifecycle_deferred"]);
 
   memory.list(fixture.workspace, { workspacePath: fixture.workspace, limit: 1 });
-  const settled = new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  const settled = new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
   context.after(() => settled.close());
@@ -180,8 +180,8 @@ test("a delete failure after destructive work starts still commits lifecycle inv
 
   const sessionId = await createSession(desktop, fixture.workspace);
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const repository = new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  const repository = new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
   const source = repository.createSource({
@@ -205,8 +205,8 @@ test("a delete failure after destructive work starts still commits lifecycle inv
     ),
     /clear queued failed/u,
   );
-  const verify = new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  const verify = new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
   context.after(() => verify.close());
@@ -222,8 +222,8 @@ test("a prepared lifecycle job is recovered after service restart with privacy-f
   const fixture = await createFixture("prepared-recovery");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const repository = new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  const repository = new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
   const source = repository.createSource({
@@ -264,8 +264,8 @@ test("a prepared lifecycle job is recovered after service restart with privacy-f
   });
   context.after(() => restarted.close());
   restarted.list(fixture.workspace, { workspacePath: fixture.workspace, limit: 1 });
-  const verify = new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  const verify = new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
   context.after(() => verify.close());
@@ -284,10 +284,17 @@ class PrepareFailingMemoryService extends DesktopMemoryService {
   }
 }
 
+/**
+ * SQLite 纪元的提交阻塞替身:旧实现用 memory/lock 目录卡住文件锁;现在用一条
+ * 独立连接持有 pico.sqlite 的 BEGIN IMMEDIATE 写锁,让后续 memory 写事务撞
+ * busy 超时——同一个"commit 无法落盘 → 降级为可重试的持久任务"语义。
+ */
 class CommitDeferringMemoryService extends DesktopMemoryService {
+  private blockedDatabase: DatabaseSync | undefined;
+
   constructor(
     options: ConstructorParameters<typeof DesktopMemoryService>[0],
-    private readonly blockedLockPath: string,
+    private readonly databasePath: string,
   ) {
     super(options);
   }
@@ -296,12 +303,22 @@ class CommitDeferringMemoryService extends DesktopMemoryService {
     ...args: Parameters<DesktopMemoryService["prepareSessionSourceInvalidation"]>
   ): PreparedMemorySourceInvalidation {
     const prepared = super.prepareSessionSourceInvalidation(...args);
-    mkdirSync(this.blockedLockPath, { recursive: true, mode: 0o700 });
+    const database = new DatabaseSync(this.databasePath);
+    database.exec("PRAGMA busy_timeout = 20000");
+    database.exec("BEGIN IMMEDIATE");
+    this.blockedDatabase = database;
     return prepared;
   }
 
   releaseCommitBlock(): void {
-    rmSync(this.blockedLockPath, { recursive: true, force: true });
+    const database = this.blockedDatabase;
+    this.blockedDatabase = undefined;
+    if (!database) return;
+    try {
+      database.exec("ROLLBACK");
+    } finally {
+      database.close();
+    }
   }
 }
 

@@ -1,443 +1,189 @@
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { test } from "node:test";
-import {
-  commitFileTransactionSync,
-  withFileLockSync,
-} from "../../src/storage/local-file-storage.js";
+import { join } from "node:path";
+import test from "node:test";
 import {
   buildWorkspacePortabilityPlanSync,
   WorkspacePortabilityPlanError,
+  type WorkspacePortabilityPlanEntry,
 } from "../../src/storage/workspace-portability.js";
-import {
-  prepareWorkspaceStorageLayoutSync,
-  WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
-  WORKSPACE_STORAGE_COMMIT_FILE,
-  WORKSPACE_STORAGE_LOCK_DIRECTORY,
-} from "../../src/storage/workspace-storage-layout.js";
+import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { closeAllOperationalDatabasesForTest } from "../../src/storage/sqlite/sqlite-database.js";
 
-test("workspace portability builds a deterministic allowlisted export plan", async (t) => {
-  const fixture = await createFixture("pico-portability-plan-");
-  t.after(() => rm(fixture.root, { recursive: true, force: true }));
-  const sessionDigest = "a".repeat(64);
-  const taskRunDigest = "b".repeat(64);
-  const layoutMarker = await readFile(join(fixture.storageRoot, ".storage", "layout.json"), "utf8");
+/**
+ * 票 09 验收:SQLite 纪元的 workspace 导出计划。
+ * 1) pico.sqlite = protected(memory 敏感语义落到库整体),不哈希、不进导出集;
+ * 2) evidence blob 目录与 traces 是 portable 集(带 sha256);
+ * 3) WAL/SHM 边车、fork-staging、plugins/hooks 态、恢复 intent 是 host_bound;
+ * 4) 旧 JSONL 纪元条目按 legacy 归类;未知条目仍 fail-closed。
+ */
 
-  const portableFiles = new Map([
-    [`sessions/${sessionDigest}/session.jsonl`, '{"type":"session"}\n'],
-    [`sessions/${sessionDigest}/manifest.json`, '{"sessionId":"session-1"}\n'],
-    [`task-runs/${taskRunDigest}/task.jsonl`, '{"type":"task-run"}\n'],
-    [`task-runs/${taskRunDigest}/manifest.json`, '{"taskRunId":"task-1"}\n'],
-    ["evidence/tool.json", '{"ok":true}\n'],
-    ["traces/run.jsonl", '{"event":"finish"}\n'],
-  ]);
-  const excludedFiles = new Map([
-    [".storage/layout.json", layoutMarker],
-    ["control/state.json", '{"jobs":[]}\n'],
-    ["runtime/lock/owner.json", '{"legacy":true}\n'],
-    ["tasks/legacy.json", '{"legacy":true}\n'],
-    ["fork-staging/run/draft.json", '{"draft":true}\n'],
-    ["storage-operations/op.json", '{"state":"pending"}\n'],
-    ["memory/state.json", '{"fact":"local private text"}\n'],
-    ["memory/commit.json", '{"transactionId":"tx"}\n'],
-    ["todo.json", '{"items":[]}\n'],
-    ["plugins.json", '{"plugins":[]}\n'],
-    ["hooks-state.json", '{"hooks":[]}\n'],
-    ["tui-debug.log", "private prompt\n"],
-    ["evidence/.env", "API_KEY=secret\n"],
-    ["evidence/runtime.sqlite", "not exported\n"],
-    ["evidence/evidence.sqlite-journal", "rollback journal\n"],
-    ["traces/trace.db-journal", "rollback journal\n"],
-    ["traces/run.sqlite-wal", "not exported either\n"],
-  ]);
-  for (const [relativePath, content] of [...portableFiles, ...excludedFiles]) {
-    await writeFixtureFile(fixture.storageRoot, relativePath, content);
-  }
-
-  const first = buildWorkspacePortabilityPlanSync(fixture.storageRoot);
-  const second = buildWorkspacePortabilityPlanSync(fixture.storageRoot);
-  assert.deepEqual(second, first);
-  assert.deepEqual(
-    first.entries.map((entry) => entry.relativePath),
-    first.entries.map((entry) => entry.relativePath).toSorted(),
-  );
-  assert.equal(first.portableFileCount, portableFiles.size);
-  assert.equal(first.excludedFileCount, excludedFiles.size + 1);
-  assert.equal(
-    first.portableBytes,
-    [...portableFiles.values()].reduce((total, content) => total + Buffer.byteLength(content), 0),
-  );
-
-  const byPath = new Map(first.entries.map((entry) => [entry.relativePath, entry]));
-  for (const [relativePath, content] of portableFiles) {
-    assert.deepEqual(byPath.get(relativePath), {
-      relativePath,
-      size: Buffer.byteLength(content),
-      sha256: createHash("sha256").update(content).digest("hex"),
-      classification: "portable",
-      reason: expectedPortableReason(relativePath),
-    });
-  }
-  for (const relativePath of excludedFiles.keys()) {
-    assert.equal(byPath.get(relativePath)?.sha256, null);
-    assert.notEqual(byPath.get(relativePath)?.classification, "portable");
-  }
-  assert.deepEqual(pickEntry(byPath, "memory/state.json"), {
-    classification: "protected",
-    reason: "memory_state_may_contain_sensitive_data",
-    sha256: null,
-  });
-  assert.deepEqual(pickEntry(byPath, "evidence/.env"), {
-    classification: "protected",
-    reason: "credential_or_secret_material",
-    sha256: null,
-  });
-  assert.deepEqual(pickEntry(byPath, "evidence/runtime.sqlite"), {
-    classification: "protected",
-    reason: "database_or_journal_file",
-    sha256: null,
-  });
-  for (const relativePath of ["evidence/evidence.sqlite-journal", "traces/trace.db-journal"]) {
-    assert.deepEqual(pickEntry(byPath, relativePath), {
-      classification: "protected",
-      reason: "database_or_journal_file",
-      sha256: null,
-    });
-  }
-  assert.deepEqual(pickEntry(byPath, ".storage/layout.json"), {
-    classification: "host_bound",
-    reason: "workspace_transaction_state",
-    sha256: null,
-  });
-  assert.deepEqual(pickEntry(byPath, ".storage/lock/owner.json"), {
-    classification: "host_bound",
-    reason: "lock_or_commit_state",
-    sha256: null,
-  });
-});
-
-test("workspace portability recovers one pending cross-Session transaction before hashing", async (t) => {
-  const fixture = await createFixture("pico-portability-recovery-");
-  t.after(() => rm(fixture.root, { recursive: true, force: true }));
-  const leftDigest = "a".repeat(64);
-  const rightDigest = "b".repeat(64);
-  const leftPath = `sessions/${leftDigest}/session.jsonl`;
-  const rightPath = `sessions/${rightDigest}/session.jsonl`;
-  const leftHeader = '{"type":"session","sessionId":"left"}\n';
-  const rightHeader = '{"type":"session","sessionId":"right"}\n';
-  const leftBatch = '{"type":"event-batch","txId":"cross-session"}\n';
-  const rightBatch = '{"type":"event-batch","txId":"cross-session"}\n';
-  await writeFixtureFile(fixture.storageRoot, leftPath, leftHeader);
-  await writeFixtureFile(fixture.storageRoot, rightPath, rightHeader);
-
-  assert.throws(
-    () =>
-      withFileLockSync(
-        join(fixture.storageRoot, WORKSPACE_STORAGE_LOCK_DIRECTORY),
-        "workspace-portability-pending-transaction",
-        () =>
-          commitFileTransactionSync(
-            fixture.storageRoot,
-            {
-              appends: [
-                { relativePath: leftPath, content: leftBatch },
-                { relativePath: rightPath, content: rightBatch },
-              ],
-            },
-            {
-              ...WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
-              transactionId: "cross-session",
-              onStage(stage) {
-                if (stage === "commit-published") {
-                  throw new Error("simulated cross-Session writer crash");
-                }
-              },
-            },
-          ),
-      ),
-    /simulated cross-Session writer crash/u,
-  );
-
-  await stat(join(fixture.storageRoot, WORKSPACE_STORAGE_COMMIT_FILE));
-  const plan = buildWorkspacePortabilityPlanSync(fixture.storageRoot);
-  const entries = new Map(plan.entries.map((entry) => [entry.relativePath, entry]));
-  for (const [relativePath, content] of [
-    [leftPath, leftHeader + leftBatch],
-    [rightPath, rightHeader + rightBatch],
-  ] as const) {
-    assert.deepEqual(entries.get(relativePath), {
-      relativePath,
-      size: Buffer.byteLength(content),
-      sha256: createHash("sha256").update(content).digest("hex"),
-      classification: "portable",
-      reason: "canonical_runtime_history",
-    });
-  }
-  assert.equal(entries.has(WORKSPACE_STORAGE_COMMIT_FILE), false);
-  await assert.rejects(stat(join(fixture.storageRoot, WORKSPACE_STORAGE_COMMIT_FILE)), {
-    code: "ENOENT",
-  });
-});
-
-test("workspace portability waits for the shared writer lock before scanning", async (t) => {
-  const fixture = await createFixture("pico-portability-lock-");
-  t.after(() => rm(fixture.root, { recursive: true, force: true }));
-  const evidencePath = join(fixture.storageRoot, "evidence", "concurrent.txt");
-  await writeFixtureFile(fixture.storageRoot, "evidence/concurrent.txt", "before writer\n");
-  const childScript = `
-    import { writeFileSync } from "node:fs";
-    import { withFileLockSync } from "./src/storage/local-file-storage.ts";
-    withFileLockSync(process.env.TEST_LOCK_PATH, "portability-concurrent-writer", () => {
-      console.log("locked");
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400);
-      writeFileSync(process.env.TEST_EVIDENCE_PATH, "after writer\\n", { mode: 0o600 });
-    });
-  `;
-  const child = spawn(
-    process.execPath,
-    ["--import", "tsx", "--input-type=module", "--eval", childScript],
-    {
-      cwd: process.cwd(),
-      env: {
-        ...process.env,
-        TEST_EVIDENCE_PATH: evidencePath,
-        TEST_LOCK_PATH: join(fixture.storageRoot, WORKSPACE_STORAGE_LOCK_DIRECTORY),
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  );
-  t.after(() => {
-    if (child.exitCode === null) child.kill();
-  });
-  let childStderr = "";
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk: string) => {
-    childStderr += chunk;
-  });
-  const childExit = new Promise<number | null>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("exit", resolve);
-  });
-  await waitForOutput(child, "locked");
-
-  const plan = buildWorkspacePortabilityPlanSync(fixture.storageRoot);
-  const exitCode = await childExit;
-  assert.equal(exitCode, 0, childStderr);
-  const content = "after writer\n";
-  assert.deepEqual(
-    plan.entries.find((entry) => entry.relativePath === "evidence/concurrent.txt"),
-    {
-      relativePath: "evidence/concurrent.txt",
-      size: Buffer.byteLength(content),
-      sha256: createHash("sha256").update(content).digest("hex"),
-      classification: "portable",
-      reason: "portable_evidence",
-    },
-  );
-});
-
-test("workspace portability fails closed for unknown storage surfaces", async (t) => {
-  const fixture = await createFixture("pico-portability-unknown-");
-  t.after(() => rm(fixture.root, { recursive: true, force: true }));
-  await writeFixtureFile(fixture.storageRoot, "new-store/state.json", "{}\n");
-
-  assert.throws(
-    () => buildWorkspacePortabilityPlanSync(fixture.storageRoot),
-    (error: unknown) =>
-      error instanceof WorkspacePortabilityPlanError &&
-      error.code === "unknown_top_level_entry" &&
-      error.relativePath === "new-store",
-  );
-
-  await rm(join(fixture.storageRoot, "new-store"), { recursive: true, force: true });
-  await writeFixtureFile(fixture.storageRoot, "artifacts/legacy.txt", "obsolete\n");
-  assert.throws(
-    () => buildWorkspacePortabilityPlanSync(fixture.storageRoot),
-    (error: unknown) =>
-      error instanceof WorkspacePortabilityPlanError &&
-      error.code === "unknown_top_level_entry" &&
-      error.relativePath === "artifacts",
-  );
-
-  await rm(join(fixture.storageRoot, "artifacts"), { recursive: true, force: true });
-  await writeFixtureFile(fixture.storageRoot, "memory/unreviewed.json", "{}\n");
-  assert.throws(
-    () => buildWorkspacePortabilityPlanSync(fixture.storageRoot),
-    (error: unknown) =>
-      error instanceof WorkspacePortabilityPlanError &&
-      error.code === "unknown_memory_entry" &&
-      error.relativePath === "memory/unreviewed.json",
-  );
-
-  await rm(join(fixture.storageRoot, "memory"), { recursive: true, force: true });
-  await writeFixtureFile(fixture.storageRoot, "sessions", "not a directory\n");
-  assert.throws(
-    () => buildWorkspacePortabilityPlanSync(fixture.storageRoot),
-    (error: unknown) =>
-      error instanceof WorkspacePortabilityPlanError &&
-      error.code === "special_file" &&
-      error.relativePath === "sessions",
-  );
-});
-
-test("workspace portability rejects unknown Session and TaskRun ledger descendants", async (t) => {
-  const fixture = await createFixture("pico-portability-ledger-shape-");
-  t.after(() => rm(fixture.root, { recursive: true, force: true }));
-  const sessionDigest = "a".repeat(64);
-  await writeFixtureFile(
-    fixture.storageRoot,
-    `sessions/${sessionDigest}/session.jsonl`,
-    '{"type":"session"}\n',
-  );
-  await writeFixtureFile(
-    fixture.storageRoot,
-    `sessions/${sessionDigest}/private-notes.txt`,
-    "must not export\n",
-  );
-
-  assert.throws(
-    () => buildWorkspacePortabilityPlanSync(fixture.storageRoot),
-    (error: unknown) =>
-      error instanceof WorkspacePortabilityPlanError &&
-      error.code === "invalid_ledger_entry" &&
-      error.relativePath === `sessions/${sessionDigest}/private-notes.txt`,
-  );
-
-  await rm(join(fixture.storageRoot, "sessions"), { recursive: true, force: true });
-  await writeFixtureFile(
-    fixture.storageRoot,
-    "task-runs/not-a-sha256/task.jsonl",
-    '{"type":"task-run"}\n',
-  );
-  assert.throws(
-    () => buildWorkspacePortabilityPlanSync(fixture.storageRoot),
-    (error: unknown) =>
-      error instanceof WorkspacePortabilityPlanError &&
-      error.code === "invalid_ledger_entry" &&
-      error.relativePath === "task-runs/not-a-sha256",
-  );
-});
-
-test("workspace portability rejects symbolic links instead of following path escapes", async (t) => {
-  const fixture = await createFixture("pico-portability-symlink-");
-  t.after(() => rm(fixture.root, { recursive: true, force: true }));
-  const outside = join(fixture.root, "outside.txt");
-  await writeFile(outside, "outside\n", { mode: 0o600 });
-  await mkdir(join(fixture.storageRoot, "evidence"), { mode: 0o700 });
-  await symlink(outside, join(fixture.storageRoot, "evidence", "escape"));
-
-  assert.throws(
-    () => buildWorkspacePortabilityPlanSync(fixture.storageRoot),
-    (error: unknown) =>
-      error instanceof WorkspacePortabilityPlanError &&
-      error.code === "symbolic_link" &&
-      error.relativePath === "evidence/escape",
-  );
-});
-
-test(
-  "workspace portability rejects special files",
-  { skip: process.platform === "win32" },
-  async (t) => {
-    const fixture = await createFixture("pico-portability-special-");
-    t.after(() => rm(fixture.root, { recursive: true, force: true }));
-    const evidence = join(fixture.storageRoot, "evidence");
-    const fifo = join(evidence, "stream");
-    await mkdir(evidence, { mode: 0o700 });
-    const result = spawnSync("mkfifo", [fifo], { encoding: "utf8" });
-    assert.equal(result.status, 0, result.stderr);
-
-    assert.throws(
-      () => buildWorkspacePortabilityPlanSync(fixture.storageRoot),
-      (error: unknown) =>
-        error instanceof WorkspacePortabilityPlanError &&
-        error.code === "special_file" &&
-        error.relativePath === "evidence/stream",
-    );
-  },
-);
-
-async function createFixture(prefix: string): Promise<{
+interface Fixture {
   readonly root: string;
   readonly storageRoot: string;
-}> {
-  const root = await mkdtemp(join(tmpdir(), prefix));
-  const storageRoot = join(root, "workspace");
-  await mkdir(storageRoot, { mode: 0o700 });
-  prepareWorkspaceStorageLayoutSync(storageRoot);
-  return { root, storageRoot };
 }
 
-async function waitForOutput(child: ReturnType<typeof spawn>, expected: string): Promise<void> {
-  const stdout = child.stdout;
-  if (!stdout) throw new Error("Child stdout pipe is unavailable");
-  stdout.setEncoding("utf8");
-  await new Promise<void>((resolve, reject) => {
-    let output = "";
-    const timeout = setTimeout(
-      () => reject(new Error(`Timed out waiting for child output: ${expected}`)),
-      5_000,
-    );
-    stdout.on("data", (chunk: string) => {
-      output += chunk;
-      if (!output.includes(expected)) return;
-      clearTimeout(timeout);
-      resolve();
-    });
-    child.once("error", (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    });
-    child.once("exit", (code) => {
-      if (output.includes(expected)) return;
-      clearTimeout(timeout);
-      reject(new Error(`Child exited with code ${String(code)} before output: ${expected}`));
-    });
+function createFixture(prefix: string): Fixture {
+  const root = mkdtempSync(join(tmpdir(), prefix));
+  const workspace = join(root, "workspace");
+  mkdirSync(workspace, { recursive: true });
+  return { root, storageRoot: join(root, "storage") };
+}
+
+function cleanupFixture(fixture: Fixture): void {
+  closeAllOperationalDatabasesForTest();
+  rmSync(fixture.root, { recursive: true, force: true });
+}
+
+function writeWorkspaceSurfaces(fixture: Fixture): void {
+  mkdirSync(join(fixture.storageRoot, "evidence", "blobs", "sha256", "ab"), {
+    recursive: true,
   });
+  writeFileSync(
+    join(fixture.storageRoot, "evidence", "blobs", "sha256", "ab", "a".repeat(64)),
+    "evidence blob body",
+  );
+  mkdirSync(join(fixture.storageRoot, "traces"), { recursive: true });
+  writeFileSync(join(fixture.storageRoot, "traces", "run.jsonl"), "trace body");
+  mkdirSync(join(fixture.storageRoot, "fork-staging"), { recursive: true });
+  writeFileSync(join(fixture.storageRoot, "fork-staging", "bundle.json"), "{}");
+  mkdirSync(join(fixture.storageRoot, "agent-recovery-launch-intents"), { recursive: true });
+  writeFileSync(
+    join(fixture.storageRoot, "agent-recovery-launch-intents", "intent.json"),
+    "{}",
+  );
+  writeFileSync(join(fixture.storageRoot, "plugins.json"), "{}");
+  writeFileSync(join(fixture.storageRoot, "hooks-state.json"), "{}");
+  writeFileSync(join(fixture.storageRoot, "tui-debug.log"), "debug");
 }
 
-async function writeFixtureFile(
-  storageRoot: string,
+function entryByPath(
+  entries: readonly WorkspacePortabilityPlanEntry[],
   relativePath: string,
-  content: string,
-): Promise<void> {
-  const path = join(storageRoot, relativePath);
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await writeFile(path, content, { mode: 0o600 });
+): WorkspacePortabilityPlanEntry {
+  const entry = entries.find((candidate) => candidate.relativePath === relativePath);
+  assert.ok(entry, `missing plan entry: ${relativePath}`);
+  return entry;
 }
 
-function expectedPortableReason(
-  relativePath: string,
-): "canonical_runtime_history" | "durable_task_history" | "portable_evidence" | "portable_trace" {
-  if (relativePath.startsWith("sessions/")) return "canonical_runtime_history";
-  if (relativePath.startsWith("task-runs/")) return "durable_task_history";
-  if (relativePath.startsWith("evidence/")) return "portable_evidence";
-  return "portable_trace";
-}
+test("pico.sqlite 归 protected,blob 目录与 traces 构成 portable 集", () => {
+  const fixture = createFixture("pico-portability-sqlite-");
+  try {
+    // 初始化 sqlite 纪元存储(建库 + binding),随后关闭句柄。
+    const store = new SqliteRuntimeEventStore({ storageRoot: fixture.storageRoot });
+    store.close();
+    writeWorkspaceSurfaces(fixture);
+    const plan = buildWorkspacePortabilityPlanSync(fixture.storageRoot);
 
-function pickEntry(
-  entries: ReadonlyMap<
-    string,
-    {
-      readonly classification: string;
-      readonly reason: string;
-      readonly sha256: string | null;
+    const database = entryByPath(plan.entries, "pico.sqlite");
+    assert.equal(database.classification, "protected");
+    assert.equal(database.reason, "workspace_database_with_memory");
+    assert.equal(database.sha256, null, "protected 条目不得持久化指纹");
+
+    const evidence = entryByPath(
+      plan.entries,
+      `evidence/blobs/sha256/ab/${"a".repeat(64)}`,
+    );
+    assert.equal(evidence.classification, "portable");
+    assert.equal(evidence.reason, "portable_evidence");
+    assert.match(evidence.sha256 ?? "", /^[a-f0-9]{64}$/u);
+    assert.equal(evidence.size, "evidence blob body".length);
+
+    const trace = entryByPath(plan.entries, "traces/run.jsonl");
+    assert.equal(trace.classification, "portable");
+    assert.equal(trace.reason, "portable_trace");
+    assert.match(trace.sha256 ?? "", /^[a-f0-9]{64}$/u);
+
+    const staging = entryByPath(plan.entries, "fork-staging/bundle.json");
+    assert.equal(staging.classification, "host_bound");
+    assert.equal(staging.reason, "ephemeral_fork_state");
+    assert.equal(staging.sha256, null);
+
+    const intents = entryByPath(plan.entries, "agent-recovery-launch-intents/intent.json");
+    assert.equal(intents.classification, "host_bound");
+    assert.equal(intents.reason, "agent_recovery_intent_state");
+
+    for (const [name, reason] of [
+      ["plugins.json", "workspace_plugin_state"],
+      ["hooks-state.json", "workspace_hook_state"],
+    ] as const) {
+      const entry = entryByPath(plan.entries, name);
+      assert.equal(entry.classification, "host_bound");
+      assert.equal(entry.reason, reason);
     }
-  >,
-  relativePath: string,
-): {
-  readonly classification: string | undefined;
-  readonly reason: string | undefined;
-  readonly sha256: string | null | undefined;
-} {
-  const entry = entries.get(relativePath);
-  return {
-    classification: entry?.classification,
-    reason: entry?.reason,
-    sha256: entry?.sha256,
-  };
-}
+    const debugLog = entryByPath(plan.entries, "tui-debug.log");
+    assert.equal(debugLog.classification, "protected");
+    assert.equal(debugLog.reason, "debug_log_may_contain_sensitive_data");
+
+    assert.equal(plan.schemaVersion, 2);
+    assert.equal(plan.portableFileCount, 2);
+    assert.equal(
+      plan.portableBytes,
+      "evidence blob body".length + "trace body".length,
+    );
+    assert.equal(plan.excludedFileCount, plan.entries.length - 2);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("WAL/SHM 边车按 database_or_journal_file 保护,legacy 条目按 legacy 归类", () => {
+  const fixture = createFixture("pico-portability-legacy-");
+  try {
+    const store = new SqliteRuntimeEventStore({ storageRoot: fixture.storageRoot });
+    store.close();
+    writeFileSync(join(fixture.storageRoot, "pico.sqlite-wal"), "wal");
+    writeFileSync(join(fixture.storageRoot, "pico.sqlite-shm"), "shm");
+    mkdirSync(join(fixture.storageRoot, "sessions", "digest"), { recursive: true });
+    writeFileSync(join(fixture.storageRoot, "sessions", "digest", "session.jsonl"), "[]");
+    writeFileSync(join(fixture.storageRoot, "todo.json"), "{}");
+    const plan = buildWorkspacePortabilityPlanSync(fixture.storageRoot);
+
+    for (const name of ["pico.sqlite-wal", "pico.sqlite-shm"]) {
+      const entry = entryByPath(plan.entries, name);
+      assert.equal(entry.classification, "protected");
+      assert.equal(entry.reason, "database_or_journal_file");
+      assert.equal(entry.sha256, null);
+    }
+    const legacySession = entryByPath(plan.entries, "sessions/digest/session.jsonl");
+    assert.equal(legacySession.classification, "host_bound");
+    assert.equal(legacySession.reason, "legacy_runtime_history");
+    const legacyTodo = entryByPath(plan.entries, "todo.json");
+    assert.equal(legacyTodo.classification, "host_bound");
+    assert.equal(legacyTodo.reason, "legacy_workspace_todo_state");
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("缺少 pico.sqlite binding 与未知顶层条目均 fail-closed", () => {
+  const unbound = createFixture("pico-portability-unbound-");
+  try {
+    mkdirSync(unbound.storageRoot, { recursive: true });
+    assert.throws(
+      () => buildWorkspacePortabilityPlanSync(unbound.storageRoot),
+      (error: unknown) =>
+        error instanceof WorkspacePortabilityPlanError &&
+        error.code === "invalid_storage_root",
+    );
+  } finally {
+    cleanupFixture(unbound);
+  }
+
+  const unknown = createFixture("pico-portability-unknown-");
+  try {
+    const store = new SqliteRuntimeEventStore({ storageRoot: unknown.storageRoot });
+    store.close();
+    mkdirSync(join(unknown.storageRoot, "brand-new-surface"), { recursive: true });
+    assert.throws(
+      () => buildWorkspacePortabilityPlanSync(unknown.storageRoot),
+      (error: unknown) =>
+        error instanceof WorkspacePortabilityPlanError &&
+        error.code === "unknown_top_level_entry" &&
+        error.relativePath === "brand-new-surface",
+    );
+  } finally {
+    cleanupFixture(unknown);
+  }
+});

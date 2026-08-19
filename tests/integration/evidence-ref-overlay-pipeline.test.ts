@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { RuntimeMemoryEvidenceReader } from "../../src/memory/runtime-evidence-reader.js";
-import { MemoryRepository } from "../../src/memory/memory-repository.js";
+import { SqliteMemoryRepository } from "../../src/storage/sqlite/sqlite-memory-repository.js";
+import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { withWorkspaceSqliteLease } from "../../src/storage/sqlite/workspace-scopes.js";
 import { MemoryProposalEngine, MemoryRepositoryProposalStore } from "../../src/memory/proposal-engine.js";
-import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { validateEvidenceRef } from "../../src/engine/evidence-ref.js";
 import type {
@@ -35,7 +36,7 @@ test("EvidenceRef overlay 从事件账本到 Source 落盘端到端贯通", asyn
 
   try {
     // 1. 写入真实 RuntimeEvent 到 RuntimeEventStore
-    const eventStore = new RuntimeEventStore({ storageRoot: root });
+    const eventStore = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
     await eventStore.initializeSession({ sessionId, workDir: workspace });
 
     const userMessageEventId = "evt-user-msg-001";
@@ -93,8 +94,8 @@ test("EvidenceRef overlay 从事件账本到 Source 落盘端到端贯通", asyn
     }
 
     // 4. 通过 proposal-engine 落盘 Source
-    const repository = new MemoryRepository({
-      storageRoot: paths.workspace.memory,
+    const repository = new SqliteMemoryRepository({
+      storageRoot: paths.workspace.root,
       workspaceId: paths.workspace.id,
     });
     repository.updateSettings({
@@ -153,13 +154,13 @@ test("EvidenceRef overlay 从事件账本到 Source 落盘端到端贯通", asyn
     }
 
     repository.close();
+    eventStore.close();
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
 test("assertSource soft 降级：损坏的 evidenceRef 被剥离，Source 仍能正常加载", async () => {
-  const { writeFileSync, readFileSync } = await import("node:fs");
   const root = await mkdtemp(join(tmpdir(), "pico-evidence-ref-degrade-"));
   const workspace = join(root, "workspace");
   await mkdir(workspace, { recursive: true });
@@ -168,8 +169,8 @@ test("assertSource soft 降级：损坏的 evidenceRef 被剥离，Source 仍能
 
   try {
     // 1. 正常创建一个 Source（带合法 evidenceRef）
-    const repository = new MemoryRepository({
-      storageRoot: paths.workspace.memory,
+    const repository = new SqliteMemoryRepository({
+      storageRoot: paths.workspace.root,
       workspaceId: paths.workspace.id,
     });
     repository.createSource({
@@ -195,16 +196,22 @@ test("assertSource soft 降级：损坏的 evidenceRef 被剥离，Source 仍能
     });
     repository.close();
 
-    // 2. 手动篡改 state.json 里的 evidenceRef（破坏 schemaVersion）
-    const statePath = join(paths.workspace.memory, "state.json");
-    const raw = JSON.parse(readFileSync(statePath, "utf8")) as Record<string, unknown>;
-    const sources = raw.sources as Record<string, Record<string, unknown>>;
-    (sources["source:degrade-test"]!.evidenceRef as Record<string, unknown>)["schemaVersion"] = "pico.evidence_ref.v999";
-    writeFileSync(statePath, JSON.stringify(raw, null, 2));
+    // 2. 直接篡改库内 evidence_ref_json（破坏 schemaVersion）——SQLite 纪元
+    // 等价于旧测试对 state.json 的手工改写。
+    withWorkspaceSqliteLease(paths.workspace.root, (lease) => {
+      const row = lease.database
+        .prepare(`SELECT evidence_ref_json FROM memory_sources WHERE source_id = ?`)
+        .get("source:degrade-test") as { evidence_ref_json?: unknown } | undefined;
+      const evidenceRef = JSON.parse(String(row?.evidence_ref_json)) as Record<string, unknown>;
+      evidenceRef["schemaVersion"] = "pico.evidence_ref.v999";
+      lease.database
+        .prepare(`UPDATE memory_sources SET evidence_ref_json = ? WHERE source_id = ?`)
+        .run(JSON.stringify(evidenceRef), "source:degrade-test");
+    });
 
     // 3. 重新打开——assertSource 应 soft 降级（剥离 evidenceRef），不 throw
-    const repo2 = new MemoryRepository({
-      storageRoot: paths.workspace.memory,
+    const repo2 = new SqliteMemoryRepository({
+      storageRoot: paths.workspace.root,
       workspaceId: paths.workspace.id,
     });
     const source = repo2.getSource("source:degrade-test");

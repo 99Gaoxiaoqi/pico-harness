@@ -1,8 +1,10 @@
 import { isMessageHiddenFromTranscript } from "../schema/message.js";
-import type { RuntimeEventStoreEntry, RuntimeSessionManifest } from "../storage/runtime-event-store.js";
-import { RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX } from "../runtime/runtime-run.js";
+import type { RuntimeEventStoreEntry, RuntimeSessionManifest } from "../storage/runtime-event-store-contracts.js";
 import { projectRuntimeSessionState } from "./session-runtime-projection.js";
 import type { RuntimeEvent } from "./session-runtime-event.js";
+
+/** fork bootstrap 运行的 runId 前缀(engine 层契约;runtime 层从此导入)。 */
+export const RUNTIME_FORK_BOOTSTRAP_RUN_PREFIX = "fork-bootstrap:";
 
 /**
  * 会话摘要的引擎层实现：cli 的 session-resolver 与 storage 的会话目录

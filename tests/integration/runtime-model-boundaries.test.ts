@@ -1,3 +1,5 @@
+import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { closeAllOperationalDatabasesForTest } from "../../src/storage/sqlite/sqlite-database.js";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -9,7 +11,7 @@ import { DefaultHookExecutor } from "../../src/hooks/executors/index.js";
 import type { HookInput, ResolvedHookHandler } from "../../src/hooks/types.js";
 import { CostTracker } from "../../src/observability/tracker.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
-import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
+
 import { RuntimeRun } from "../../src/runtime/runtime-run.js";
 import { projectRuntimeSessionUsage } from "../../src/engine/session-runtime-projection.js";
 
@@ -36,6 +38,7 @@ test("durable CostTracker requires and records the matching host RuntimeRun", as
   const session = new Session("cost-tracker-boundary", workDir, { persistence: true, picoHome });
   context.after(async () => {
     await session.close();
+    closeAllOperationalDatabasesForTest();
     await rm(root, { recursive: true, force: true });
   });
   await session.recover();
@@ -75,9 +78,10 @@ test("durable CostTracker requires and records the matching host RuntimeRun", as
     }),
     /was not issued/u,
   );
-  const foreignStore = new RuntimeEventStore({
+  const foreignStore = new SqliteRuntimeEventStore({
     storageRoot: join(root, "foreign-runtime"),
   });
+  context.after(() => foreignStore.close());
   assert.throws(
     () =>
       createEngineRuntimeCapability({

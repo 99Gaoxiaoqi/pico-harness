@@ -19,7 +19,12 @@ import {
   FileHistoryBlobStore,
   type FileHistoryBlobRef,
 } from "../storage/file-history-blob-store.js";
-import { writeJsonAtomic } from "../storage/atomic-json.js";
+import {
+  insertFileHistoryManifestRowIfAbsent,
+  type FileHistoryManifestRow,
+  readFileHistoryManifestRow,
+  writeFileHistoryManifestRow,
+} from "../storage/sqlite/file-history-manifest-store.js";
 import { withFileHistoryMutationLease } from "../storage/file-history-mutation-lease.js";
 import {
   addFileChangeJournalWarning,
@@ -36,6 +41,18 @@ import {
 
 const MAX_SNAPSHOTS = 100;
 const FILE_HISTORY_MANIFEST_VERSION = 2 as const;
+
+/**
+ * File History 的持久化落点(票 08):
+ * - `baseDir`(PICO_HOME/file-history):blob CAS 与 legacy 备份文件,目录结构不变;
+ * - `storageRoot`(workspace 存储根):manifest v2 拆行进 pico.sqlite 的
+ *   file_history/file_history_snapshots(方案 a:sessionId 全局唯一且归属单一
+ *   workspace,行与会话事实同库同生死)。
+ */
+export interface FileHistoryIo {
+  readonly baseDir: string;
+  readonly storageRoot: string;
+}
 
 export function fileHistoryDefaultBaseDir(): string {
   return resolve(process.env.PICO_FILE_HISTORY_DIR ?? join(resolvePicoHome(), "file-history"));
@@ -220,13 +237,6 @@ export function resolveBackupPath(
   return join(baseDir, getSessionDirName(sessionId), backupFileName);
 }
 
-function resolveManifestPath(
-  sessionId: string,
-  baseDir: string = fileHistoryDefaultBaseDir(),
-): string {
-  return join(baseDir, getSessionDirName(sessionId), "manifest.json");
-}
-
 /**
  * 在工具批次开始前创建写前镜像。COPYFILE_FICLONE 在支持的文件系统上使用
  * copy-on-write，其他文件系统自动回退为普通 copy。镜像位于工作区外，
@@ -357,7 +367,7 @@ export async function fileHistoryTrackEdit(
   filePath: string,
   messageId: string,
   sessionId: string,
-  baseDir: string = fileHistoryDefaultBaseDir(),
+  io: FileHistoryIo,
 ): Promise<void> {
   const rewindPoint = requireCanonicalRewindPoint(state, messageId);
   if (rewindPoint.editedFilePaths.has(filePath)) return;
@@ -369,7 +379,7 @@ export async function fileHistoryTrackEdit(
     let backup: FileHistoryBackup;
     try {
       const srcStat = await stat(filePath);
-      const backupFileName = await createBackup(filePath, version, sessionId, baseDir);
+      const backupFileName = await createBackup(filePath, version, sessionId, io.baseDir);
       backup = {
         backupFileName,
         version,
@@ -389,7 +399,7 @@ export async function fileHistoryTrackEdit(
 
   state.trackedFiles.add(filePath);
   rewindPoint.editedFilePaths.add(filePath);
-  await saveFileHistoryState(state, sessionId, baseDir);
+  await saveFileHistoryState(state, sessionId, io);
 }
 
 /**
@@ -401,7 +411,7 @@ export async function fileHistoryCommitJournal(
   journal: FileHistoryJournal,
   messageId: string,
   sessionId: string,
-  baseDir: string = fileHistoryDefaultBaseDir(),
+  io: FileHistoryIo,
 ): Promise<FileHistoryJournalCommitResult> {
   requireCanonicalRewindPoint(state, messageId);
   let changed = false;
@@ -460,7 +470,7 @@ export async function fileHistoryCommitJournal(
       }
       try {
         changedPaths.add(filePath);
-        if (await recordJournalChange(state, filePath, undefined, messageId, sessionId, baseDir)) {
+        if (await recordJournalChange(state, filePath, undefined, messageId, sessionId, io.baseDir)) {
           changed = true;
         }
       } catch (error) {
@@ -474,7 +484,7 @@ export async function fileHistoryCommitJournal(
     for (const [filePath, preimage] of changedPreimages) {
       try {
         changedPaths.add(filePath);
-        if (await recordJournalChange(state, filePath, preimage, messageId, sessionId, baseDir)) {
+        if (await recordJournalChange(state, filePath, preimage, messageId, sessionId, io.baseDir)) {
           changed = true;
         }
       } catch (error) {
@@ -488,7 +498,7 @@ export async function fileHistoryCommitJournal(
     const warnings = fileChangeJournalWarnings(journal);
     attachJournalWarnings(state, messageId, warnings);
     if (changed || warnings.length > 0) {
-      await saveFileHistoryState(state, sessionId, baseDir);
+      await saveFileHistoryState(state, sessionId, io);
     }
     return {
       incomplete: warnings.length > 0,
@@ -651,7 +661,7 @@ export async function fileHistoryBeginRewindPoint(
     prePlanMode?: string;
   },
   sessionId: string,
-  baseDir: string = fileHistoryDefaultBaseDir(),
+  io: FileHistoryIo,
 ): Promise<void> {
   assertCanonicalUserBoundary(input);
   if (state.snapshots.some((snapshot) => snapshot.messageId === input.messageId)) {
@@ -696,7 +706,7 @@ export async function fileHistoryBeginRewindPoint(
       snapshot.trackedFileBackups.set(filePath, lastBackup);
     } else {
       const version = (state.fileVersions.get(filePath) ?? 0) + 1;
-      const backupFileName = await createBackup(filePath, version, sessionId, baseDir);
+      const backupFileName = await createBackup(filePath, version, sessionId, io.baseDir);
       state.fileVersions.set(filePath, version);
       snapshot.trackedFileBackups.set(filePath, {
         backupFileName,
@@ -716,11 +726,11 @@ export async function fileHistoryBeginRewindPoint(
   if (state.snapshots.length > MAX_SNAPSHOTS) {
     const removed = state.snapshots.shift();
     if (removed) {
-      await cleanupExclusiveBackups(state, removed, sessionId, baseDir);
+      await cleanupExclusiveBackups(state, removed, sessionId, io.baseDir);
     }
   }
 
-  await saveFileHistoryState(state, sessionId, baseDir);
+  await saveFileHistoryState(state, sessionId, io);
 }
 
 function assertCanonicalUserBoundary(input: {
@@ -772,13 +782,13 @@ export async function fileHistoryDiscardFrom(
   state: FileHistoryState,
   messageId: string,
   sessionId: string,
-  baseDir: string = fileHistoryDefaultBaseDir(),
+  io: FileHistoryIo,
 ): Promise<void> {
   const targetIndex = state.snapshots.findIndex((snapshot) => snapshot.messageId === messageId);
   if (targetIndex === -1) return;
   state.snapshots = state.snapshots.slice(0, targetIndex);
   state.currentMessageId = undefined;
-  await saveFileHistoryState(state, sessionId, baseDir);
+  await saveFileHistoryState(state, sessionId, io);
 }
 
 export async function fileHistoryRewind(
@@ -1453,29 +1463,94 @@ interface PersistedFileHistoryStateV2 {
   fileVersions: Array<{ location: PersistedFileLocationV2; version: number }>;
 }
 
+/** manifest v2 → file_history/file_history_snapshots 行(票 08 拆行编码)。 */
+function manifestToRow(
+  manifest: PersistedFileHistoryStateV2,
+  updatedAt: string,
+): FileHistoryManifestRow {
+  return {
+    sessionId: manifest.sessionId,
+    revision: manifest.revision,
+    snapshotSequence: manifest.snapshotSequence,
+    stateJson: JSON.stringify({
+      schemaVersion: manifest.schemaVersion,
+      sessionId: manifest.sessionId,
+      roots: manifest.roots,
+      trackedFiles: manifest.trackedFiles,
+      fileVersions: manifest.fileVersions,
+    }),
+    updatedAt,
+    snapshots: manifest.snapshots.map((snapshot, ordinal) => ({
+      ordinal,
+      beforeSessionSeq: snapshot.beforeSessionSeq,
+      messageId: snapshot.messageId,
+      sourceMessageEventId: snapshot.sourceMessageEventId,
+      messageIndex: snapshot.messageIndex,
+      userPrompt: snapshot.userPrompt,
+      timestamp: snapshot.timestamp,
+      snapshotJson: JSON.stringify({
+        trackedFileBackups: snapshot.trackedFileBackups,
+        editedFilePaths: snapshot.editedFilePaths,
+        ...(snapshot.transcriptIndex !== undefined
+          ? { transcriptIndex: snapshot.transcriptIndex }
+          : {}),
+        ...(snapshot.interactionMode !== undefined
+          ? { interactionMode: snapshot.interactionMode }
+          : {}),
+        ...(snapshot.prePlanMode !== undefined ? { prePlanMode: snapshot.prePlanMode } : {}),
+        ...(snapshot.journalWarnings !== undefined
+          ? { journalWarnings: snapshot.journalWarnings }
+          : {}),
+      }),
+    })),
+  };
+}
+
+/** 行 → manifest v2;重建结果一律再走 parseFileHistoryManifestV2 全量校验。 */
+function manifestFromRow(row: FileHistoryManifestRow): unknown {
+  const state = JSON.parse(row.stateJson) as Record<string, unknown>;
+  return {
+    schemaVersion: FILE_HISTORY_MANIFEST_VERSION,
+    revision: row.revision,
+    sessionId: row.sessionId,
+    roots: state["roots"],
+    trackedFiles: state["trackedFiles"],
+    snapshotSequence: row.snapshotSequence,
+    fileVersions: state["fileVersions"],
+    snapshots: row.snapshots.map((snapshot) => ({
+      messageId: snapshot.messageId,
+      sourceMessageEventId: snapshot.sourceMessageEventId,
+      beforeSessionSeq: snapshot.beforeSessionSeq,
+      messageIndex: snapshot.messageIndex,
+      userPrompt: snapshot.userPrompt,
+      timestamp: snapshot.timestamp,
+      ...JSON.parse(snapshot.snapshotJson),
+    })),
+  };
+}
+
 async function saveFileHistoryState(
   state: FileHistoryState,
   sessionId: string,
-  baseDir: string,
+  io: FileHistoryIo,
 ): Promise<void> {
   await withFileHistoryMutationLease(
-    baseDir,
+    io.baseDir,
     `file-history-save:${sessionId}:${process.pid}`,
-    async () => saveFileHistoryStateUnlocked(state, sessionId, baseDir),
+    async () => saveFileHistoryStateUnlocked(state, sessionId, io),
   );
 }
 
 async function saveFileHistoryStateUnlocked(
   state: FileHistoryState,
   sessionId: string,
-  baseDir: string,
+  io: FileHistoryIo,
 ): Promise<void> {
   if (state.storageStatus === "degraded") {
     throw new FileHistoryDegradedError(state.storageError ?? "File History 处于只读降级状态");
   }
-  const manifestPath = resolveManifestPath(sessionId, baseDir);
   try {
-    await materializeFileHistoryBlobs(state, sessionId, baseDir);
+    await materializeFileHistoryBlobs(state, sessionId, io.baseDir);
   } catch (error) {
     state.storageStatus = "degraded";
     state.storageError = `File History backup 物化失败: ${errorMessage(error)}`;
@@ -1526,7 +1601,7 @@ async function saveFileHistoryStateUnlocked(
   };
 
   try {
-    await writeJsonAtomic(manifestPath, manifest);
+    writeFileHistoryManifestRow(io.storageRoot, manifestToRow(manifest, new Date().toISOString()));
     state.revision = nextRevision;
     state.storageStatus = "healthy";
     state.storageError = undefined;
@@ -1557,19 +1632,13 @@ function encodeBackupV2(backup: FileHistoryBackup): PersistedFileHistoryBackupV2
 export async function fileHistoryLoadState(
   state: FileHistoryState,
   sessionId: string,
-  baseDir: string = fileHistoryDefaultBaseDir(),
+  io: FileHistoryIo,
 ): Promise<boolean> {
-  let raw: string;
-  try {
-    raw = await readFile(resolveManifestPath(sessionId, baseDir), "utf8");
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") return false;
-    throw err;
-  }
+  const row = readFileHistoryManifestRow(io.storageRoot, sessionId);
+  if (row === undefined) return false;
 
   try {
-    hydrateFileHistoryV2(state, parseFileHistoryManifestV2(JSON.parse(raw) as unknown, sessionId));
+    hydrateFileHistoryV2(state, parseFileHistoryManifestV2(manifestFromRow(row), sessionId));
     state.storageStatus = "healthy";
     state.storageError = undefined;
     return true;
@@ -1581,28 +1650,28 @@ export async function fileHistoryLoadState(
 }
 
 /**
- * Fork 仅发布一份新 manifest，不复制不可变 CAS blob。这个 API 刻意
+ * Fork 仅发布一份新 manifest 行集，不复制不可变 CAS blob。这个 API 刻意
  * 不暴露 FileHistoryState，避免调用方在 clone 期间意外改写源会话。
  */
 export async function fileHistoryCloneSession(
   sourceSessionId: string,
   targetSessionId: string,
-  baseDir: string = fileHistoryDefaultBaseDir(),
+  io: FileHistoryIo,
 ): Promise<FileHistoryCloneResult> {
   return withFileHistoryMutationLease(
-    baseDir,
+    io.baseDir,
     `file-history-clone:${sourceSessionId}:${targetSessionId}:${process.pid}`,
-    async () => fileHistoryCloneSessionUnlocked(sourceSessionId, targetSessionId, baseDir),
+    async () => fileHistoryCloneSessionUnlocked(sourceSessionId, targetSessionId, io),
   );
 }
 
 async function fileHistoryCloneSessionUnlocked(
   sourceSessionId: string,
   targetSessionId: string,
-  baseDir: string,
+  io: FileHistoryIo,
 ): Promise<FileHistoryCloneResult> {
   const state = createFileHistoryState();
-  const loaded = await fileHistoryLoadState(state, sourceSessionId, baseDir);
+  const loaded = await fileHistoryLoadState(state, sourceSessionId, io);
   if (!loaded) {
     return {
       sourceSessionId,
@@ -1615,53 +1684,48 @@ async function fileHistoryCloneSessionUnlocked(
     throw new FileHistoryDegradedError(state.storageError ?? "File History 源会话处于只读降级状态");
   }
 
-  const sourceManifestPath = resolveManifestPath(sourceSessionId, baseDir);
-  const targetManifestPath = resolveManifestPath(targetSessionId, baseDir);
-  const sourceManifest = parseFileHistoryManifestV2(
-    JSON.parse(await readFile(sourceManifestPath, "utf8")) as unknown,
-    sourceSessionId,
-  );
+  const sourceRow = readFileHistoryManifestRow(io.storageRoot, sourceSessionId);
+  if (!sourceRow) {
+    throw new FileHistoryDegradedError("File History 源 manifest 行在克隆期间消失");
+  }
+  const sourceManifest = parseFileHistoryManifestV2(manifestFromRow(sourceRow), sourceSessionId);
   const targetManifest: PersistedFileHistoryStateV2 = {
     ...sourceManifest,
     sessionId: targetSessionId,
   };
   const blobRefs = collectManifestBlobRefs(sourceManifest);
-  const blobStore = new FileHistoryBlobStore({ baseDir });
+  const blobStore = new FileHistoryBlobStore({ baseDir: io.baseDir });
   await Promise.all([...blobRefs.values()].map((ref) => blobStore.read(ref)));
 
   if (sourceSessionId === targetSessionId) {
     return {
       sourceSessionId,
       targetSessionId,
-      sourceManifestPath,
-      targetManifestPath,
       created: false,
       blobCount: blobRefs.size,
     };
   }
 
-  try {
-    const existing = parseFileHistoryManifestV2(
-      JSON.parse(await readFile(targetManifestPath, "utf8")) as unknown,
-      targetSessionId,
-    );
-    if (!isDeepStrictEqual(existing, targetManifest)) {
-      throw new FileHistoryCloneConflictError(
-        sourceSessionId,
-        targetSessionId,
-        `File History 目标会话已存在不同 manifest: ${targetManifestPath}`,
-      );
-    }
-    return {
-      sourceSessionId,
-      targetSessionId,
-      sourceManifestPath,
-      targetManifestPath,
-      created: false,
-      blobCount: blobRefs.size,
-    };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+  const existingRow = readFileHistoryManifestRow(io.storageRoot, targetSessionId);
+  if (existingRow !== undefined || !insertFileHistoryManifestRowIfAbsent(
+    io.storageRoot,
+    manifestToRow(targetManifest, new Date().toISOString()),
+  )) {
+    // 目标已存在(或并发发布):回读比对,幂等相同/冲突不同。
+    const finalRow = readFileHistoryManifestRow(io.storageRoot, targetSessionId);
+    try {
+      if (!finalRow) {
+        throw new Error("File History 目标 manifest 行在克隆期间消失");
+      }
+      const existing = parseFileHistoryManifestV2(manifestFromRow(finalRow), targetSessionId);
+      if (!isDeepStrictEqual(existing, targetManifest)) {
+        throw new FileHistoryCloneConflictError(
+          sourceSessionId,
+          targetSessionId,
+          `File History 目标会话已存在不同 manifest: ${targetSessionId}`,
+        );
+      }
+    } catch (error) {
       if (error instanceof FileHistoryCloneConflictError) throw error;
       throw new FileHistoryCloneConflictError(
         sourceSessionId,
@@ -1669,14 +1733,17 @@ async function fileHistoryCloneSessionUnlocked(
         `File History 目标 manifest 无法作为幂等 fork 结果: ${errorMessage(error)}`,
       );
     }
+    return {
+      sourceSessionId,
+      targetSessionId,
+      created: false,
+      blobCount: blobRefs.size,
+    };
   }
 
-  await writeJsonAtomic(targetManifestPath, targetManifest);
   return {
     sourceSessionId,
     targetSessionId,
-    sourceManifestPath,
-    targetManifestPath,
     created: true,
     blobCount: blobRefs.size,
   };

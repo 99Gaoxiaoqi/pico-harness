@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { findCliSessionSummary, listCliSessionSummaries } from "../../src/cli/session-resolver.js";
-import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
+import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import type { RuntimeEvent } from "../../src/engine/session-runtime-event.js";
 
@@ -18,12 +18,11 @@ test("findCliSessionSummary 单会话直读与全列表摘要一致", async () =
   const workspace = join(root, "workspace");
   await mkdir(workspace, { recursive: true });
   const picoHome = join(root, "pico-home");
+  const eventStore = new SqliteRuntimeEventStore({
+    storageRoot: resolvePicoPaths(workspace, { picoHome }).workspace.root,
+  });
 
   try {
-    const eventStore = new RuntimeEventStore({
-      storageRoot: resolvePicoPaths(workspace, { picoHome }).workspace.root,
-    });
-
     const sessionIds = ["resolver-session-a", "resolver-session-b"];
     for (const [index, sessionId] of sessionIds.entries()) {
       await eventStore.initializeSession({ sessionId, workDir: workspace });
@@ -82,6 +81,7 @@ test("findCliSessionSummary 单会话直读与全列表摘要一致", async () =
       "不存在的会话应返回 undefined（requireSession 据此抛 NOT_FOUND）",
     );
   } finally {
+    eventStore.close();
     await rm(root, { recursive: true, force: true });
   }
 });

@@ -12,6 +12,7 @@ import {
 import { AgentEngine } from "../../src/engine/loop.js";
 import { SilentReporter } from "../../src/engine/reporter.js";
 import { Session } from "../../src/engine/session.js";
+import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
 import type { Message } from "../../src/schema/message.js";
@@ -29,7 +30,7 @@ const READ_EVIDENCE_CALL_ID = "call:read-evidence";
 
 test("large Runtime ToolResult persists one Evidence fact and replays its bounded projection", async (context) => {
   const sessionId = "runtime-tool-result-evidence";
-  const fixture = await createFixture("pico-runtime-tool-result-evidence-", sessionId);
+  const fixture = await createFixture("pico-runtime-tool-result-evidence-");
   context.after(async () => {
     await fixture.activeSession?.close();
     await rm(fixture.root, { recursive: true, force: true });
@@ -76,7 +77,15 @@ test("large Runtime ToolResult persists one Evidence fact and replays its bounde
           /pico:\/\/evidence\/[^\s"]+\/[a-f0-9]{64}/u,
         )?.[0];
         assert.ok(evidenceUri, "large ToolResult projection must expose an Evidence URI");
-        ledgerBeforeReadback = await readFile(fixture.sessionLedgerPath, "utf8");
+        // SQLite 纪元:断言对象从 session.jsonl 换成 runtime_events 物化载荷。
+        const ledgerStore = new SqliteRuntimeEventStore({
+          storageRoot: fixture.paths.workspace.root,
+        });
+        try {
+          ledgerBeforeReadback = JSON.stringify(await ledgerStore.readSession(sessionId));
+        } finally {
+          ledgerStore.close();
+        }
         return {
           role: "assistant",
           content: "",
@@ -165,12 +174,8 @@ test("large Runtime ToolResult persists one Evidence fact and replays its bounde
   assert.equal(manifest.content.rawOutput.digest, rawSha256);
   assert.equal(manifest.content.rawOutput.sizeBytes, rawSizeBytes);
   assert.equal(await evidenceArchive.readRuntimeToolOutput(evidenceRef), rawOutput);
-  const manifestPath = join(
-    fixture.paths.workspace.evidence,
-    sanitizeFilePart(session.id),
-    `${evidenceRef.contentHash}.json`,
-  );
-  const serializedManifest = await readFile(manifestPath, "utf8");
+  // 票 08 起 manifest 行在 pico.sqlite(evidence_records);明文 canary 不得进清单正文。
+  const serializedManifest = JSON.stringify(manifest);
   assert.doesNotMatch(serializedManifest, new RegExp(canary, "u"));
   const blobPath = join(
     fixture.paths.workspace.evidence,
@@ -211,7 +216,7 @@ test("large Runtime ToolResult persists one Evidence fact and replays its bounde
 
 test("Evidence ENOSPC keeps one complete inline fact but a bounded model projection", async (context) => {
   const sessionId = "runtime-tool-result-fail-open";
-  const fixture = await createFixture("pico-runtime-tool-result-fail-open-", sessionId);
+  const fixture = await createFixture("pico-runtime-tool-result-fail-open-");
   context.after(async () => {
     await fixture.activeSession?.close();
     await rm(fixture.root, { recursive: true, force: true });
@@ -303,7 +308,7 @@ test("Evidence ENOSPC keeps one complete inline fact but a bounded model project
 
 test("subagent Runtime preserves complete raw ToolResult before transcript Evidence projection", async (context) => {
   const sessionId = "runtime-subagent-tool-result-evidence";
-  const fixture = await createFixture("pico-runtime-subagent-tool-result-", sessionId);
+  const fixture = await createFixture("pico-runtime-subagent-tool-result-");
   context.after(async () => {
     await fixture.activeSession?.close();
     await rm(fixture.root, { recursive: true, force: true });
@@ -421,11 +426,10 @@ interface RuntimeFixture {
   readonly workDir: string;
   readonly picoHome: string;
   readonly paths: ReturnType<typeof resolvePicoPaths>;
-  readonly sessionLedgerPath: string;
   activeSession?: Session;
 }
 
-async function createFixture(prefix: string, sessionId: string): Promise<RuntimeFixture> {
+async function createFixture(prefix: string): Promise<RuntimeFixture> {
   const root = await mkdtemp(join(tmpdir(), prefix));
   const workDir = join(root, "workspace");
   const picoHome = join(root, "pico-home");
@@ -437,7 +441,6 @@ async function createFixture(prefix: string, sessionId: string): Promise<Runtime
     workDir,
     picoHome,
     paths,
-    sessionLedgerPath: join(paths.workspace.sessions, sha256(sessionId), "session.jsonl"),
   };
 }
 
@@ -489,10 +492,6 @@ function buildLargeOutput(canary: string): string {
   );
   rows[Math.floor(rows.length / 2)] = canary;
   return `HEAD_BOUNDARY\n${rows.join("\n")}\nTAIL_BOUNDARY`;
-}
-
-function sanitizeFilePart(value: string): string {
-  return value.replaceAll(/[^a-zA-Z0-9_-]/gu, "_");
 }
 
 function sha256(content: string): string {
