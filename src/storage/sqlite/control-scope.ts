@@ -128,5 +128,44 @@ export const CONTROL_SCOPE: SqliteSchemaScope = {
       );
       `,
     ],
+    [
+      2,
+      `
+      -- desktop conversation state(ADR 28):原 $PICO_HOME/desktop/conversation-state.json
+      -- 三类状态收编。库按 workspace 分片,但 workspace_path 仍作为列保留:
+      -- 同一分片内路径大小写变体各自成行,与旧 JSON 匹配语义一致。
+      CREATE TABLE desktop_idempotency (
+        workspace_path TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        request_fingerprint TEXT NOT NULL,
+        result_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (workspace_path, idempotency_key)
+      );
+      CREATE INDEX desktop_idempotency_by_recency
+        ON desktop_idempotency(created_at DESC);
+
+      CREATE TABLE desktop_input_queue (
+        queue_id TEXT PRIMARY KEY,
+        workspace_path TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        input_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX desktop_input_queue_by_session
+        ON desktop_input_queue(workspace_path, session_id, created_at, queue_id);
+
+      CREATE TABLE desktop_first_send_claims (
+        workspace_path TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        request_fingerprint TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (workspace_path, idempotency_key)
+      );
+      CREATE INDEX desktop_first_send_claims_by_recency
+        ON desktop_first_send_claims(created_at DESC);
+      `,
+    ],
   ]),
 };
