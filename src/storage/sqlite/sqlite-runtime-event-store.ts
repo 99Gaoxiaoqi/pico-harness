@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -35,12 +35,15 @@ import {
   RuntimeEventStoreHighWaterConflictError,
   RuntimeEventStoreIntegrityError,
   RuntimeEventStorePlanOperationConflictError,
+  RuntimeEventStoreRunSealedError,
   SessionCatalogIntegrityError,
   createRuntimeEventId,
   type AppendRuntimeEventBatchOptions,
   type AppendRuntimeSessionStateOptions,
   type AppendRuntimeTranscriptEventOptions,
   type InitializeRuntimeSessionOptions,
+  type RuntimeContinuationClaim,
+  type RuntimeContinuationClaimOutcome,
   type RuntimeEventStoreAppendResult,
   type RuntimeEventStoreEntry,
   type RuntimeEventStoreEntryPageOptions,
@@ -335,6 +338,145 @@ export class SqliteRuntimeEventStore {
       entries: this.readRunEntriesLocked(sessionId, runId),
       headSequence: this.readHeadSequenceLocked(sessionId),
     }));
+  }
+
+  // ------------------------------------------------------------------
+  // runtime_continuation_claims:ADR 29 continuation claim(中断 run 续跑锚)
+  // ------------------------------------------------------------------
+
+  /**
+   * ADR 29:claim 一个 interrupted 终态的 source run 作为续跑前缀锚。
+   *
+   * 全部步骤在单个 BEGIN IMMEDIATE 写事务内完成(与并发 append/claim 串行化,
+   * 事务内预查即终局,不依赖捕获 UNIQUE 约束异常):
+   * 1. 预查 (source_session_id, source_run_id) 既有 claim → already_claimed
+   *    (C1 冲突返回类型化结果,不抛裸 SqliteError);target run 已被占用 →
+   *    rejected(target_conflict);
+   * 2. 读源 run 账本(run 索引):无事件 → run_not_found;无 run.terminal →
+   *    run_active(活跃 run 不可被 claim);终态非 interrupted →
+   *    run_not_interrupted(C2 前半);
+   * 3. source_high_water = 该 run 全部事件的 seq 上界(末条 run 事件的
+   *    event_seq);digest 覆盖会话账本 seq∈[1..high_water] 的**全部**事件
+   *    (含 interleaved 的其他 run 事件——会话账本是单一序列,续跑锚引用的是
+   *    会话前缀,与模型上下文"同 session 事件流天然含前缀"的口径一致);
+   * 4. INSERT claim 行(C3:claim 事务只读源账本、只写 claims 行)。
+   *
+   * 源封口(C4)不由本方法承担:interrupted 终态本身即触发 appendBatchLocked
+   * 的 run seal 防线,claim 只需终态校验。
+   */
+  async claimContinuation(
+    sourceSessionId: string,
+    sourceRunId: string,
+    targetRunId: string,
+    options: { readonly now?: () => Date } = {},
+  ): Promise<RuntimeContinuationClaimOutcome> {
+    return this.write(() => {
+      const existingBySource = this.readContinuationClaimRowLocked(
+        "SELECT " + CONTINUATION_CLAIM_ROW_COLUMNS + " FROM runtime_continuation_claims WHERE source_session_id = ? AND source_run_id = ?",
+        [sourceSessionId, sourceRunId],
+      );
+      if (existingBySource) {
+        return { status: "already_claimed" as const, claim: existingBySource };
+      }
+      const existingByTarget = this.readContinuationClaimRowLocked(
+        "SELECT " + CONTINUATION_CLAIM_ROW_COLUMNS + " FROM runtime_continuation_claims WHERE target_session_id = ? AND target_run_id = ?",
+        [sourceSessionId, targetRunId],
+      );
+      if (existingByTarget) {
+        return { status: "rejected" as const, reason: "target_conflict" as const };
+      }
+
+      const runEntries = this.readRunEntriesLocked(sourceSessionId, sourceRunId);
+      if (runEntries.length === 0) {
+        return { status: "rejected" as const, reason: "run_not_found" as const };
+      }
+      const terminal = runEntries
+        .map(({ event }) => event)
+        .find(
+          (event): event is Extract<RuntimeEvent, { kind: "run.terminal" }> =>
+            event.kind === "run.terminal",
+        );
+      if (!terminal) {
+        return { status: "rejected" as const, reason: "run_active" as const };
+      }
+      if (terminal.data.status !== "interrupted") {
+        return { status: "rejected" as const, reason: "run_not_interrupted" as const };
+      }
+      // 前缀 = 该 run 全部事件的 seq 上界:run 事件按 event_seq 升序读出,末条即上界。
+      const highWater = runEntries.at(-1)!.sequence;
+      const prefixRows = this.lease.database
+        .prepare(
+          "SELECT event_seq, event_id, payload_json FROM runtime_events WHERE session_id = ? AND event_seq <= ? ORDER BY event_seq ASC",
+        )
+        .all(sourceSessionId, highWater) as Array<Record<string, unknown>>;
+      // 账本 seq 由 MAX+1 稠密分配且不删行;前缀缺洞即 digest 不完整,fail-closed。
+      if (prefixRows.length !== highWater) {
+        throw new RuntimeEventStoreIntegrityError(
+          `Runtime session ${sourceSessionId} prefix up to ${highWater} is not dense`,
+        );
+      }
+      const claim: RuntimeContinuationClaim = {
+        claimId: createRuntimeEventId("continuation-claim"),
+        sourceSessionId,
+        sourceRunId,
+        sourceHighWater: highWater,
+        sourcePrefixDigest: continuationPrefixDigest(prefixRows),
+        // ADR 29:跨 session 续跑不在本决策——target 与 source 同 session。
+        targetSessionId: sourceSessionId,
+        targetRunId,
+        createdAt: (options.now ?? (() => new Date()))().toISOString(),
+      };
+      this.lease.database
+        .prepare(
+          `INSERT INTO runtime_continuation_claims (
+             claim_id, source_session_id, source_run_id, source_high_water,
+             source_prefix_digest, target_session_id, target_run_id, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          claim.claimId,
+          claim.sourceSessionId,
+          claim.sourceRunId,
+          claim.sourceHighWater,
+          claim.sourcePrefixDigest,
+          claim.targetSessionId,
+          claim.targetRunId,
+          claim.createdAt,
+        );
+      return { status: "claimed" as const, claim };
+    });
+  }
+
+  /** 按 source run 点查既有 claim(claim 结果读回/对账用,只读事务)。 */
+  async findContinuationClaimBySourceRun(
+    sessionId: string,
+    runId: string,
+  ): Promise<RuntimeContinuationClaim | undefined> {
+    return this.read(() =>
+      this.readContinuationClaimRowLocked(
+        "SELECT " + CONTINUATION_CLAIM_ROW_COLUMNS + " FROM runtime_continuation_claims WHERE source_session_id = ? AND source_run_id = ?",
+        [sessionId, runId],
+      ),
+    );
+  }
+
+  private readContinuationClaimRowLocked(
+    sql: string,
+    params: readonly SQLInputValue[],
+  ): RuntimeContinuationClaim | undefined {
+    const row = this.lease.database.prepare(sql).get(...params);
+    return row === undefined ? undefined : continuationClaimFromRow(row as Record<string, unknown>);
+  }
+
+  /** run seal 点查(runtime_events_by_run 索引);只在写事务内调用。 */
+  private hasRunTerminalLocked(sessionId: string, runId: string): boolean {
+    return (
+      this.lease.database
+        .prepare(
+          "SELECT 1 FROM runtime_events WHERE session_id = ? AND run_id = ? AND kind = 'run.terminal' LIMIT 1",
+        )
+        .get(sessionId, runId) !== undefined
+    );
   }
 
   private async readSessionEntryOfKindLocked(
@@ -1144,6 +1286,9 @@ export class SqliteRuntimeEventStore {
          partial, tx_id, tool_call_id, provider_call_id, operation_id, payload_json, at, committed_at
        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
+    // ADR 29 §4 run seal 缓存:key `${sessionId}\0${runId}`;批内一旦插入终态即视为
+    // 封口,同批后续该 run 的新事件同样被拒(终态必须是其 run 的最后一条新事实)。
+    const runSealCache = new Map<string, boolean>();
     for (const event of canonicalEvents) {
       const context = contexts.get(event.sessionId)!;
       const existing = existingRows.get(event.eventId);
@@ -1158,6 +1303,19 @@ export class SqliteRuntimeEventStore {
           ),
         );
         continue;
+      }
+      // ADR 29 §4 源封口(fail-closed):已终态的 run 拒收新的非恢复类事件。
+      // 幂等重放(上方 existing 分支)不受影响——崩溃后重试同 eventId 永远合法。
+      if (!isRecoveryClassSealedAppend(event)) {
+        const sealKey = `${event.sessionId}\u0000${event.runId}`;
+        let sealed = runSealCache.get(sealKey);
+        if (sealed === undefined) {
+          sealed = this.hasRunTerminalLocked(event.sessionId, event.runId);
+          runSealCache.set(sealKey, sealed);
+        }
+        if (sealed) {
+          throw new RuntimeEventStoreRunSealedError(event.sessionId, event.runId, event.eventId);
+        }
       }
       const sequence = context.nextSequence;
       context.nextSequence += 1;
@@ -1182,6 +1340,9 @@ export class SqliteRuntimeEventStore {
       );
       context.appendedCount += 1;
       context.appendedBytes += payloadJson.length;
+      if (event.kind === "run.terminal") {
+        runSealCache.set(`${event.sessionId}\u0000${event.runId}`, true);
+      }
       // 增量折叠只吃本批真正 INSERT 的事件(幂等重放不折叠,防 headSequence 超前)。
       context.fold = foldSessionSummaryEvent(context.fold, event);
       context.lastAppendedAt = event.at;
@@ -1666,6 +1827,67 @@ function sortKeysDeep(value: unknown): unknown {
     return sorted;
   }
   return value;
+}
+
+// ---------------------------------------------------------------------------
+// ADR 29 continuation claim:行 decode、前缀 digest、run seal 恢复类豁免
+// ---------------------------------------------------------------------------
+
+const CONTINUATION_CLAIM_ROW_COLUMNS =
+  "claim_id, source_session_id, source_run_id, source_high_water, source_prefix_digest, target_session_id, target_run_id, created_at";
+
+function continuationClaimFromRow(row: Record<string, unknown>): RuntimeContinuationClaim {
+  const claimId = requireRowString(row["claim_id"], "runtime_continuation_claims.claim_id");
+  const label = `runtime_continuation_claims[${claimId}]`;
+  return {
+    claimId,
+    sourceSessionId: requireRowString(row["source_session_id"], `${label}.source_session_id`),
+    sourceRunId: requireRowString(row["source_run_id"], `${label}.source_run_id`),
+    sourceHighWater: requireRowSafeInteger(
+      row["source_high_water"],
+      `${label}.source_high_water`,
+    ),
+    sourcePrefixDigest: requireRowString(
+      row["source_prefix_digest"],
+      `${label}.source_prefix_digest`,
+    ),
+    targetSessionId: requireRowString(row["target_session_id"], `${label}.target_session_id`),
+    targetRunId: requireRowString(row["target_run_id"], `${label}.target_run_id`),
+    createdAt: requireRowString(row["created_at"], `${label}.created_at`),
+  };
+}
+
+/**
+ * ADR 29 前缀 digest(确定性序列化,与 run.started 的
+ * continuationOf.prefixDigest 同一口径):
+ * - 输入 = 会话账本 seq∈[1..high_water] 的行,按 event_seq 升序;
+ * - 每行序列化为一层 `JSON.stringify({ seq, eventId, payload })`,其中 payload
+ *   为库内 canonical payload JSON **字符串**(键排序 stringify 的完整事件对象,
+ *   不再做二次解析/重排序);
+ * - 逐行后跟换行符 "\n"(含末行),对全文取 sha256,输出 64 位小写 hex。
+ */
+function continuationPrefixDigest(rows: readonly Record<string, unknown>[]): string {
+  const hash = createHash("sha256");
+  for (const row of rows) {
+    const line = JSON.stringify({
+      seq: row["event_seq"],
+      eventId: row["event_id"],
+      payload: row["payload_json"],
+    });
+    hash.update(line, "utf8");
+    hash.update("\n", "utf8");
+  }
+  return hash.digest("hex");
+}
+
+/**
+ * ADR 29 §4 恢复类豁免:携带 ADR 27 P0 恢复标记(data.recovery)的合成
+ * tool.result.recorded 允许落在已终态 run 上。现状恢复写入
+ * (reconcileIncompleteRuns)均发生在无终态 run(同批先补合成结果、末尾补终态)
+ * 或全新恢复 run 上,本豁免当前无生产触发路径,仅为 ADR 语义保留的显式通道。
+ */
+function isRecoveryClassSealedAppend(event: RuntimeEvent): boolean {
+  return event.kind === "tool.result.recorded" && event.data.recovery !== undefined;
 }
 
 /** plan/graph 操作身份投影(与旧事件索引的提取规则一致)。 */

@@ -53,6 +53,7 @@ import {
   type RuntimeMessageCommittedEvent,
   type RuntimeModelCallSettledEvent,
   type RuntimeRunStartedEvent,
+  type RuntimeRunContinuationOf,
   type RuntimeRunTerminalEvent,
   type RuntimeSessionForkedEvent,
   type RuntimeTerminalStatus,
@@ -108,6 +109,12 @@ interface RuntimeRunBaseOptions {
   readonly parentRunId?: string;
   readonly parentToolCallId?: string;
   readonly now?: () => Date;
+  /**
+   * ADR 29 续跑声明(可选):调用方在 claimContinuation 成功后传入,写入
+   * run.started 的 data.continuationOf。前缀事件同 session 事件流天然可见,
+   * 模型上下文无需特判;跨 session 续跑不在 ADR 29 范围。
+   */
+  readonly continuationOf?: RuntimeRunContinuationOf;
 }
 
 export interface RuntimeRunStartOptions extends Omit<
@@ -302,6 +309,7 @@ export class RuntimeRun {
   private readonly now: () => Date;
   private readonly runStartedEventId?: string;
   private readonly terminalEventId?: string;
+  private readonly continuationOf?: RuntimeRunContinuationOf;
   private readonly writeGuard: RuntimeEventWriteGuard;
   private readonly parentRefs?: Pick<RuntimeEventRefs, "parentRunId" | "parentToolCallId">;
   private readonly pendingToolResults = new Map<string, PendingRegisteredToolResult[]>();
@@ -324,6 +332,9 @@ export class RuntimeRun {
     this.now = options.now ?? (() => new Date());
     this.runStartedEventId = options.runStartedEventId;
     this.terminalEventId = options.terminalEventId;
+    this.continuationOf = options.continuationOf
+      ? structuredClone(options.continuationOf)
+      : undefined;
     this.writeGuard = options.writeGuard;
     this.parentRefs = compactRefs({
       ...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),
@@ -1292,7 +1303,13 @@ export class RuntimeRun {
         "internal",
       ),
       kind: "run.started",
-      data: { workDir: this.canonicalWorkDir },
+      data: {
+        workDir: this.canonicalWorkDir,
+        // ADR 29:续跑目标 run 的确定性前缀锚(claimContinuation 成功后由调用方声明)。
+        ...(this.continuationOf
+          ? { continuationOf: structuredClone(this.continuationOf) }
+          : {}),
+      },
     };
     await this.append(event);
   }
