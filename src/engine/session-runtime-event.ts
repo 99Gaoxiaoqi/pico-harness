@@ -70,6 +70,17 @@ export interface RuntimeToolGroupLoadedEvent extends RuntimeEventBase {
   };
 }
 
+/**
+ * ADR 27 P0 恢复分类标记：悬空 tool call 的合成 tool.result.recorded
+ * 携带的半执行判定。`indeterminate` = 已派发（tool.started 已落库）但结果未知，
+ * 副作用可能已发生；`not_dispatched` = 从未派发，无副作用。
+ */
+export type RuntimeToolRecoveryClassification = "indeterminate" | "not_dispatched";
+
+export interface RuntimeToolResultRecoveryMarker {
+  readonly classification: RuntimeToolRecoveryClassification;
+}
+
 export interface RuntimeToolResultRecordedEvent extends RuntimeEventBase {
   readonly kind: "tool.result.recorded";
   readonly refs: RuntimeEventRefs & {
@@ -81,6 +92,8 @@ export interface RuntimeToolResultRecordedEvent extends RuntimeEventBase {
     readonly status: RuntimeToolResultStatus;
     readonly body: RuntimeToolResultBody;
     readonly projection: RuntimeToolResultProjection;
+    /** 仅恢复期合成结果携带；正常执行路径不得设置。 */
+    readonly recovery?: RuntimeToolResultRecoveryMarker;
   };
 }
 
