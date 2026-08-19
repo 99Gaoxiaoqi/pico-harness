@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { AgentEngine } from "../../src/engine/loop.js";
 import { ToolRegistry } from "../../src/tools/registry-impl.js";
+import { MAX_TOOL_RESULT_BYTES } from "../../src/tools/tool-result-observation.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
 
 // D10④ 内容级熔断：子代理 loop 的"完成"是模型自报（不再调工具 + 可用总结），
@@ -53,4 +54,16 @@ test("正文中段的失败字样不误伤：正常总结保持 completed", asyn
   const result = await makeEngine(normalSummary).runSub("修复测试", new ToolRegistry());
   assert.equal(result.status, "completed");
   assert.equal(result.error, undefined);
+});
+
+test("超限报告被入口上限门拒绝：终态按失败语义结算 error（第 1 轮审查问题 3）", async () => {
+  // 报告超过 MAX_TOOL_RESULT_BYTES → 原文被上限门丢弃,summary 替换为合成错误。
+  // 终态结算与工具结果入口门对齐(超限=失败),不再以 completed 收场。
+  const overLimitSummary = `结论：${"x".repeat(MAX_TOOL_RESULT_BYTES + 1024)}`;
+  const result = await makeEngine(overLimitSummary).runSub("汇报超大结果", new ToolRegistry());
+  assert.equal(result.status, "error");
+  assert.ok(result.error?.includes("入口上限"), "error 字段携带上限门拒绝原因");
+  assert.match(result.summary, /输出超限/u, "summary 保留统一拒绝文案(重取指引)");
+  assert.ok(!result.summary.includes("结论："), "超限原文不得外泄");
+  assert.deepEqual(result.evidenceRefs, []);
 });

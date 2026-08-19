@@ -38,8 +38,16 @@ export function hydrateCanonicalTranscriptEvents(
     runtimeSequence: input.transcriptEventSequences[index]!,
     ordinal: index,
   }));
+  // 预算窗口(ADR 26 票 E2)可截掉窗口头之前的早期 transcript 事件,使首事件
+  // sequence 不为 1;严格 reducer 只关心相对顺序,这里对喂入副本重定基。
+  // toolCalls 键为 toolCallId 与 sequence 无关,全量读路径(序列本从 1 起)下
+  // 重定基为恒等,无行为变化。
   const activeToolCallIds = new Set(
-    Object.keys(projectTranscriptEvents(input.transcriptEvents).toolCalls),
+    Object.keys(
+      projectTranscriptEvents(
+        input.transcriptEvents.map((event, index) => ({ ...event, sequence: index + 1 })),
+      ).toolCalls,
+    ),
   );
   const resultQueues = indexCanonicalToolResults(input.toolResults);
   const synthetic: Array<{

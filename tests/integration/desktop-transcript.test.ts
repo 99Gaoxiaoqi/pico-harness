@@ -432,6 +432,30 @@ test("Desktop transcript binds duplicate reasoning text to the nearest structure
   assert.equal(thinking[1]?.turnId, "turn-new");
 });
 
+test("Desktop transcript ids stay stable when the budget window shifts（第 1 轮审查问题 2）", () => {
+  const late: Message = { role: "assistant", content: "稳定回答" };
+  // 窄窗口:只含尾部消息;宽窗口:多含一条更早消息。同一全账本水位(5)下,
+  // 同一消息的 item id 与 revision 都不得随窗口起点漂移。
+  const narrowPage = projectRuntimeTranscript(
+    { ...snapshot([late]), messageSequences: [4], persistenceSequence: 5 },
+    {},
+  );
+  const widePage = projectRuntimeTranscript(
+    {
+      ...snapshot([{ role: "user", content: "早期输入" }, late]),
+      messageSequences: [1, 4],
+      persistenceSequence: 5,
+    },
+    {},
+  );
+  const narrowItem = narrowPage.items.find((item) => item.kind === "assistantMessage");
+  const wideItem = widePage.items.find((item) => item.kind === "assistantMessage");
+  assert.equal(narrowItem?.id, wideItem?.id);
+  assert.match(narrowItem?.id ?? "", /^item_[0-9a-f]{20}$/u);
+  assert.equal(narrowPage.revision, widePage.revision);
+  assert.equal(narrowPage.revision, "5");
+});
+
 function toolResultEnvelope(
   toolCallId: string,
   toolName: string,

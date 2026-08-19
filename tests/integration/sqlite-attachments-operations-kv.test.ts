@@ -6,11 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import {
-  EvidenceArchive,
-  formatEvidenceUri,
-  parseEvidenceUri,
-} from "../../src/context/evidence-archive.js";
+import { EvidenceArchive, formatEvidenceUri, parseEvidenceUri } from "../../src/context/evidence-archive.js";
+import { seedRuntimeToolExchange } from "./helpers/legacy-evidence-fixture.js";
 import { TodoStore } from "../../src/context/todo-store.js";
 import {
   createFileHistoryState,
@@ -240,13 +237,14 @@ test("operation journal serves fork publication lookup as one query", async (con
 
 test("evidence manifests live in sqlite; blobs keep the FS CAS layout", async (context) => {
   const fixture = await workspaceFixture(context, "pico-evidence-sqlite-");
-  const archive = new EvidenceArchive({
-    baseDir: fixture.evidenceRoot,
-    now: () => new Date("2026-08-19T00:00:00.000Z"),
-  });
+  const archive = new EvidenceArchive({ baseDir: fixture.evidenceRoot });
 
+  // 票 E3:生产写路径已退役,清单行由 legacy 夹具直建(存储层行为不变)。
   const output = "工具原始输出".repeat(50);
-  const reference = await archive.archiveRuntimeToolResult({
+  const reference = await seedRuntimeToolExchange({
+    evidenceRoot: fixture.evidenceRoot,
+    storageRoot: fixture.storageRoot,
+    archivedAt: "2026-08-19T00:00:00.000Z",
     sessionId: "evidence-session",
     toolCallId: "call-1",
     toolName: "bash",
@@ -261,7 +259,10 @@ test("evidence manifests live in sqlite; blobs keep the FS CAS layout", async (c
   assert.equal(await archive.readRuntimeToolOutput(reference), output);
 
   // 幂等重档:同 content → 同引用,不新增行。
-  const again = await archive.archiveRuntimeToolResult({
+  const again = await seedRuntimeToolExchange({
+    evidenceRoot: fixture.evidenceRoot,
+    storageRoot: fixture.storageRoot,
+    archivedAt: "2026-08-19T00:00:00.000Z",
     sessionId: "evidence-session",
     toolCallId: "call-1",
     toolName: "bash",

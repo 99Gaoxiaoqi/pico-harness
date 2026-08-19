@@ -53,6 +53,85 @@ export class RuntimeEventReadModelIntegrityError extends Error {
 }
 
 /**
+ * ADR 26 §2.3(票 E2):读取侧上下文预算 gate——组装出的 provider 消息总字节上限。
+ * 取值对齐入口上限门 MAX_TOOL_RESULT_BYTES 的量级(1MB):高于常规压缩水位
+ * (inputBudgetTokens 的 75% ≈ 数百 KB),因此正常会话仍由 token 维度的
+ * checkpoint 压缩主导,本 gate 只拦截"两条压缩之间被大全文撑爆"的病态穿透,
+ * 不与压缩机制互相打架。
+ */
+export const MAX_MODEL_HISTORY_BYTES = 1024 * 1024;
+
+/**
+ * 预算裁剪永不触及的末尾(当前工作集)消息条数。覆盖最坏并行工具批次
+ * (MAX_TOOL_CONCURRENCY=8:assistant 批次 + 8 条结果)+ 当前用户输入与余量。
+ */
+export const MODEL_HISTORY_PRESERVED_TAIL_MESSAGES = 12;
+
+/** 小于此字节的消息不参与降级:裁掉节省无几,却会无谓丢失上下文针脚。 */
+const MIN_DEGRADABLE_MESSAGE_BYTES = 2048;
+
+export interface ModelHistoryByteBudgetOptions {
+  readonly maxTotalBytes: number;
+  /** 末尾永不裁剪的消息条数,缺省 {@link MODEL_HISTORY_PRESERVED_TAIL_MESSAGES}。 */
+  readonly preservedTailMessages?: number;
+}
+
+/**
+ * 读取侧上下文预算 gate(ADR 26 §2.3,票 E2)。写入侧全文 inline 入库后,
+ * provider 消息组装在此按总字节预算裁剪:超预算时从最旧的大内容开始降级为
+ * 带诊断标记的截断视图(标记内嵌原始字节数与事件定位,不静默),末尾工作集
+ * 永不裁剪。降级只替换 content 并保留 role/toolCallId/toolCalls,配对不变量
+ * (assertToolCallPairing)在投影阶段已校验,这里不破坏它。
+ *
+ * 纯读取视图:不回写事件;预算内原样返回(同一数组引用)。
+ */
+export function applyModelHistoryByteBudget(
+  entries: readonly RuntimeHistoryProjectionEntry[],
+  options: ModelHistoryByteBudgetOptions,
+): readonly RuntimeHistoryProjectionEntry[] {
+  if (!Number.isSafeInteger(options.maxTotalBytes) || options.maxTotalBytes < 1) {
+    throw new Error("Model history byte budget requires a positive safe integer maxTotalBytes");
+  }
+  const preservedTailMessages = options.preservedTailMessages ?? MODEL_HISTORY_PRESERVED_TAIL_MESSAGES;
+  if (
+    !Number.isSafeInteger(preservedTailMessages) ||
+    preservedTailMessages < 0
+  ) {
+    throw new Error("Model history byte budget requires a non-negative preservedTailMessages");
+  }
+  const sizes = entries.map(({ message }) => messageBytes(message));
+  let totalBytes = sizes.reduce((sum, size) => sum + size, 0);
+  if (totalBytes <= options.maxTotalBytes) return entries;
+
+  const budgeted = [...entries];
+  const oldestDegradeIndex = Math.max(0, budgeted.length - preservedTailMessages);
+  for (let index = 0; index < oldestDegradeIndex && totalBytes > options.maxTotalBytes; index++) {
+    const originalBytes = sizes[index]!;
+    if (originalBytes < MIN_DEGRADABLE_MESSAGE_BYTES) continue;
+    const entry = budgeted[index]!;
+    const marker = degradedHistoryContentMarker(entry.message, entry.eventId, originalBytes);
+    budgeted[index] = { eventId: entry.eventId, message: { ...entry.message, content: marker } };
+    totalBytes += Buffer.byteLength(marker, "utf8") - Buffer.byteLength(entry.message.content, "utf8");
+  }
+  return budgeted;
+}
+
+function degradedHistoryContentMarker(
+  message: Message,
+  eventId: string,
+  originalBytes: number,
+): string {
+  return (
+    `[历史输出已按上下文预算裁剪:原文约 ${originalBytes} 字节,完整内容见事件 ${eventId}` +
+    `${message.toolCallId ? `(工具调用 ${message.toolCallId})` : ""}]`
+  );
+}
+
+function messageBytes(message: Message): number {
+  return Buffer.byteLength(JSON.stringify(message), "utf8");
+}
+
+/**
  * Engine-owned pure read model for Session durable facts. The Runtime adapter
  * re-exports this implementation for existing callers, but no Runtime value
  * is imported by this module.

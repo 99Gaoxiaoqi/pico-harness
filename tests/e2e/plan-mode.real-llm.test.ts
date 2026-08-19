@@ -266,7 +266,6 @@ function planningRequest(
     interactionMode: "plan",
     allowedTools: [
       "read_file",
-      "read_evidence",
       "glob",
       "grep",
       ...(includeAskUser ? ["ask_user"] : []),

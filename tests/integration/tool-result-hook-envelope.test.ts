@@ -3,7 +3,6 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { EvidenceArchive } from "../../src/context/evidence-archive.js";
 import { AgentEngine } from "../../src/engine/loop.js";
 import { SilentReporter } from "../../src/engine/reporter.js";
 import { Session } from "../../src/engine/session.js";
@@ -14,7 +13,6 @@ import {
   type HookSnapshot,
   type ResolvedHookHandler,
 } from "../../src/hooks/types.js";
-import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 import type { BaseTool } from "../../src/tools/registry.js";
@@ -82,7 +80,6 @@ test("PostToolUse receives one bounded envelope only after canonical commit", as
         return { role: "assistant", content: "done" };
       },
     };
-    const evidenceBaseDir = resolvePicoPaths(workDir, { picoHome }).workspace.evidence;
     const engine = new AgentEngine({
       provider,
       registry,
@@ -90,7 +87,6 @@ test("PostToolUse receives one bounded envelope only after canonical commit", as
       runtimePort,
       reporter: new SilentReporter(),
       hookService,
-      runtimeEvidenceArchive: new EvidenceArchive({ baseDir: evidenceBaseDir }),
       maxTurns: 3,
     });
 
@@ -103,17 +99,20 @@ test("PostToolUse receives one bounded envelope only after canonical commit", as
     );
     const postUse = inputs[0]! as HookInput<"PostToolUse">;
     assert.equal(Object.hasOwn(postUse, "tool_response"), false);
+    // ADR 26(E1):大结果全文 inline;envelope 投影受 16KiB 送达上限约束,
+    // 中段 canary 超出上限被截断,Hook 输入保持有界。
     assert.equal(JSON.stringify(postUse).includes(canary), false);
-    assert.ok(JSON.stringify(postUse).length < 16 * 1024);
+    assert.ok(JSON.stringify(postUse).length < 20 * 1024);
     if (postUse.hook_event_name !== "PostToolUse") assert.fail("expected PostToolUse");
     const envelope = postUse.payload.tool_result;
     assert.equal(envelope.toolCallId, "call:large-hook-fixture");
     assert.equal(envelope.toolName, "large_hook_fixture");
     assert.equal(envelope.status, "succeeded");
     assert.equal(envelope.rawSizeBytes, Buffer.byteLength(rawOutput, "utf8"));
-    assert.equal(envelope.projection.mode, "preview");
-    assert.equal(envelope.projection.truncated, true);
-    assert.ok(envelope.evidence?.uri.startsWith("pico://evidence/"));
+    assert.equal(envelope.projection.mode, "full");
+    assert.equal(envelope.projection.truncated, false);
+    assert.equal(envelope.deliveryTruncated, true);
+    assert.equal(envelope.evidence, undefined);
 
     const batch = inputs[1]! as HookInput<"PostToolBatch">;
     if (batch.hook_event_name !== "PostToolBatch") assert.fail("expected PostToolBatch");

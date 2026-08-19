@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { EvidenceArchive } from "../../src/context/evidence-archive.js";
+import { seedRuntimeToolExchange } from "./helpers/legacy-evidence-fixture.js";
 import { DesktopReporter } from "../../src/daemon/desktop-reporter.js";
 import type { SessionHydrationSnapshot } from "../../src/engine/session-runtime.js";
 import {
@@ -87,9 +87,11 @@ test("TUI projects a Runtime-owned tool start without persisting it twice", asyn
 test("TUI Inspector pages canonical Evidence retained from a fork source Session", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-tool-result-inspector-"));
   context.after(() => rm(root, { recursive: true, force: true }));
-  const archive = new EvidenceArchive({ baseDir: root });
+  // pico-paths 布局:<storageRoot>/evidence,清单行落 <storageRoot>/pico.sqlite。
+  const evidenceRoot = join(root, "evidence");
   const raw = "第一行\nsecond line\n";
-  const reference = await archive.archiveRuntimeToolResult({
+  const reference = await seedRuntimeToolExchange({
+    evidenceRoot,
     sessionId: "session-a",
     toolCallId: "call-evidence",
     toolName: "bash",
@@ -125,7 +127,7 @@ test("TUI Inspector pages canonical Evidence retained from a fork source Session
   const contextA = createEvidenceInspectorContext({
     workDir: "/unused",
     sessionId: "session-a",
-    evidenceBaseDir: root,
+    evidenceBaseDir: evidenceRoot,
   });
   const source = createToolInspectorSource(tool, contextA);
   assert.equal(source?.kind, "evidence");
@@ -136,7 +138,7 @@ test("TUI Inspector pages canonical Evidence retained from a fork source Session
     createEvidenceInspectorContext({
       workDir: "/unused",
       sessionId: "session-b",
-      evidenceBaseDir: root,
+      evidenceBaseDir: evidenceRoot,
     }),
   );
   assert.equal(forkSource?.kind, "evidence");

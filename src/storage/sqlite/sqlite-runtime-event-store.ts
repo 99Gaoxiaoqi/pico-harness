@@ -317,6 +317,113 @@ export class SqliteRuntimeEventStore {
     return this.readSessionEntryOfKindLocked(sessionId, kind, "ASC");
   }
 
+  /**
+   * 两段式预算切片(ADR 26 §2.3,票 E2;参考 maka readTranscriptPage):
+   * 第一段 SQL 只测长(length(CAST(payload_json AS BLOB)),不取 payload 不解码),
+   * 从最新事件倒序累加直到耗尽 maxPayloadBytes 预算,得出 fromSequence 水位;
+   * 第二段只取该水位之后的事件 payload。alwaysIncludeKinds(累积语义的小事件,
+   * 如 state/usage)不占预算、永远全取。两段在同一读事务内完成,与 headSequence
+   * 快照一致;最新一条预算内事件即使单独超预算也保证入选(进度保证)。
+   *
+   * 配对安全扩展(第 1 轮审查问题 1 修复,默认开启):水位确定后向前检查工具
+   * 配对——窗口内 model 可见 tool.result.recorded 的 FIFO 配对 start
+   * (transcript.event.recorded 卡片)落在窗口外时,水位回退把 start 包含进来
+   * (见 retreatBoundaryForToolPairingLocked)。预算因此是软目标:窗口可为
+   * 配对完整小幅超出 maxPayloadBytes。唯一生产消费方(desktop transcript 深读)
+   * 的水合投影依赖此不变量(rejectUnmatchedResults fail-closed);kinds 不含
+   * 两种事件时扩展自动失效,纯预算语义(如 E2 状态/消息切片)不受影响。
+   */
+  async readSessionEventSliceWithinBudget(
+    sessionId: string,
+    kinds: readonly string[],
+    options: SqliteEventSliceBudgetOptions,
+  ): Promise<SqliteSessionBudgetedEventSlice> {
+    const normalizedKinds = [...new Set(kinds)];
+    if (normalizedKinds.length === 0 || normalizedKinds.some((kind) => !kind.trim())) {
+      throw new Error("SqliteRuntimeEventStore budgeted slice requires non-empty event kinds");
+    }
+    if (!Number.isSafeInteger(options.maxPayloadBytes) || options.maxPayloadBytes < 1) {
+      throw new Error("SqliteRuntimeEventStore budgeted slice requires a positive maxPayloadBytes");
+    }
+    const alwaysInclude = [...new Set(options.alwaysIncludeKinds ?? [])];
+    if (alwaysInclude.some((kind) => !normalizedKinds.includes(kind))) {
+      throw new Error("SqliteRuntimeEventStore budgeted slice alwaysIncludeKinds must be a subset of kinds");
+    }
+    const kindPlaceholders = normalizedKinds.map(() => "?").join(", ");
+    return this.read(() => {
+      // 第一段:只测长。payload_json 不进结果列,SQLite 无需把正文物化进 JS。
+      const sizeRows = this.lease.database
+        .prepare(
+          `SELECT event_seq, kind, length(CAST(payload_json AS BLOB)) AS payload_bytes FROM runtime_events
+           WHERE session_id = ? AND kind IN (${kindPlaceholders})
+           ORDER BY event_seq ASC`,
+        )
+        .all(sessionId, ...normalizedKinds) as unknown[];
+      const sizes = sizeRows.map((row) => assertSliceSizeRow(row as Record<string, unknown>));
+      const budgetedIndexes = sizes
+        .map((size, index) => ({ index, always: alwaysInclude.includes(size.kind) }))
+        .filter(({ always }) => !always);
+      let fromSequence: number | null = null;
+      let truncated = false;
+      if (budgetedIndexes.length > 0) {
+        let acceptedBytes = 0;
+        let oldestAccepted: number | undefined;
+        for (let position = budgetedIndexes.length - 1; position >= 0; position -= 1) {
+          const { index } = budgetedIndexes[position]!;
+          // 进度保证:最新一条预算内事件即使单独超预算也入选(acceptedBytes===0 时放行)。
+          if (acceptedBytes > 0 && acceptedBytes + sizes[index]!.payloadBytes > options.maxPayloadBytes) {
+            break;
+          }
+          oldestAccepted = index;
+          acceptedBytes += sizes[index]!.payloadBytes;
+          if (acceptedBytes >= options.maxPayloadBytes) break;
+        }
+        fromSequence = sizes[oldestAccepted!]!.sequence;
+        truncated = oldestAccepted! > budgetedIndexes[0]!.index;
+      }
+      if (truncated) {
+        // 配对安全回退(见 retreatBoundaryForToolPairingLocked):水位可能落在
+        // transcript tool.started 卡片与其 tool.result.recorded 之间,先回退再定窗。
+        fromSequence = this.retreatBoundaryForToolPairingLocked(
+          sessionId,
+          normalizedKinds,
+          fromSequence!,
+        );
+        truncated = sizes[budgetedIndexes[0]!.index]!.sequence < fromSequence;
+      }
+      // 第二段:按水位取 payload;全量装入预算时 fromSequence 为首条事件 seq。
+      const clauses = ["session_id = ?", `kind IN (${kindPlaceholders})`];
+      const params: SQLInputValue[] = [sessionId, ...normalizedKinds];
+      if (fromSequence !== null) {
+        if (alwaysInclude.length > 0) {
+          const alwaysPlaceholders = alwaysInclude.map(() => "?").join(", ");
+          clauses.push(`(event_seq >= ? OR kind IN (${alwaysPlaceholders}))`);
+          params.push(fromSequence, ...alwaysInclude);
+        } else {
+          clauses.push("event_seq >= ?");
+          params.push(fromSequence);
+        }
+      }
+      const entries = (
+        this.lease.database
+          .prepare(
+            `SELECT event_id, session_id, event_seq, payload_json, at FROM runtime_events
+             WHERE ${clauses.join(" AND ")}
+             ORDER BY event_seq ASC`,
+          )
+          .all(...params) as unknown[]
+      ).map((row) => entryFromRow(assertEventRow(row as Record<string, unknown>)));
+      return {
+        entries,
+        headSequence: this.readHeadSequenceLocked(sessionId),
+        budgetWindow: {
+          ...(fromSequence !== null ? { fromSequence } : {}),
+          truncated,
+        },
+      };
+    });
+  }
+
   /** 按 kind 取末条(经 kind 索引;压缩 checkpoint 末条查找等反向点查消费方)。 */
   async readLastSessionEntryOfKind(
     sessionId: string,
@@ -609,16 +716,22 @@ export class SqliteRuntimeEventStore {
   }
 
   /**
-   * evidence reader 的消息快照直读:message.committed 全可见性口径,截至
-   * maxSequence(含端),替代 readSessionEntries 全量读后过滤。
+   * evidence reader 的源对话快照直读:message.committed(全可见性口径)+
+   * tool.result.recorded(model 可见性),截至 maxSequence(含端),按 sequence
+   * 归并——reader 把后者投影为 inline 正文消息(票 E3,ADR 26 §2.4)。
    */
   async readSessionMessageEventsUpTo(
     sessionId: string,
     maxSequence: number,
   ): Promise<RuntimeEventStoreEntry[]> {
-    return this.readSessionEventsByKind(sessionId, "message.committed", {
+    const messages = await this.readSessionEventsByKind(sessionId, "message.committed", {
       upToSequence: maxSequence,
     });
+    const toolResults = await this.readSessionEventsByKind(sessionId, "tool.result.recorded", {
+      upToSequence: maxSequence,
+      modelOnly: true,
+    });
+    return [...messages, ...toolResults].sort((left, right) => left.sequence - right.sequence);
   }
 
   async readSessionManifest(sessionId: string): Promise<RuntimeSessionManifest | undefined> {
@@ -1501,6 +1614,66 @@ export class SqliteRuntimeEventStore {
     return typeof row?.event_seq === "number" ? row.event_seq : 0;
   }
 
+  /**
+   * 预算窗口的配对安全回退(第 1 轮审查问题 1 修复):窗口是后缀,水位按字节
+   * 倒序累加,可能落在 transcript tool.started 卡片(transcript.event.recorded)
+   * 与其配对的 tool.result.recorded 之间——transcript 深读的水合投影
+   * (hydrateCanonicalTranscriptEvents,rejectUnmatchedResults)对"窗口内有
+   * result 无配对 start"fail-closed,窗口必须保持工具配对完整。
+   *
+   * 语义:窗口内每条 model 可见 tool.result.recorded(水合队列的输入口径)按
+   * FIFO 与同 toolCallId 的第 j 条 start 配对;若其配对 start 落在窗口外,把
+   * 水位回退到该 start 的 event_seq(经 provider_call_id 投影列定位,循环直到
+   * 边界配对安全)。字节预算由此成为软目标:允许为配对完整小幅超出。
+   * 仅在 kinds 同时包含 tool.result.recorded 与 transcript.event.recorded 时
+   * 生效(缺任一种,窗口本就不承载该配对);result 无任何 start 的账本级
+   * 不一致不属于窗口问题,不在此修复(全量读同样 fail-closed)。
+   */
+  private retreatBoundaryForToolPairingLocked(
+    sessionId: string,
+    kinds: readonly string[],
+    fromSequence: number,
+  ): number {
+    if (!kinds.includes("tool.result.recorded") || !kinds.includes("transcript.event.recorded")) {
+      return fromSequence;
+    }
+    for (;;) {
+      const countRows = this.lease.database
+        .prepare(
+          `SELECT tool_call_id, COUNT(*) AS total,
+                  SUM(CASE WHEN event_seq >= ? THEN 1 ELSE 0 END) AS in_window
+           FROM runtime_events
+           WHERE session_id = ? AND kind = 'tool.result.recorded' AND visibility = 'model'
+             AND tool_call_id IS NOT NULL
+           GROUP BY tool_call_id`,
+        )
+        .all(fromSequence, sessionId) as Array<Record<string, unknown>>;
+      let retreatTo: number | undefined;
+      for (const row of countRows) {
+        const counts = assertPairingCountRow(row);
+        if (counts.inWindow === 0) continue;
+        // FIFO:第 j 条 result 配第 j 条 start;窗口内最旧 result 是第
+        // total-inWindow+1 条,其配对 start 必须已在窗口内。
+        const startOrdinal = counts.total - counts.inWindow + 1;
+        const startRow = this.lease.database
+          .prepare(
+            `SELECT event_seq FROM runtime_events
+             WHERE session_id = ? AND kind = 'transcript.event.recorded' AND provider_call_id = ?
+             ORDER BY event_seq ASC LIMIT 1 OFFSET ?`,
+          )
+          .get(sessionId, counts.toolCallId, startOrdinal - 1) as
+          | { event_seq?: unknown }
+          | undefined;
+        const startSequence =
+          typeof startRow?.event_seq === "number" ? startRow.event_seq : undefined;
+        if (startSequence === undefined || startSequence >= fromSequence) continue;
+        if (retreatTo === undefined || startSequence < retreatTo) retreatTo = startSequence;
+      }
+      if (retreatTo === undefined) return fromSequence;
+      fromSequence = retreatTo;
+    }
+  }
+
   private listSessionManifestsLocked(): RuntimeSessionManifest[] {
     const rows = this.lease.database
       .prepare("SELECT session_id, work_dir, created_at FROM sessions")
@@ -1766,6 +1939,49 @@ function assertEventRow(row: Record<string, unknown>): RuntimeEventRow {
 
 function entryFromRow(row: RuntimeEventRow): RuntimeEventStoreEntry {
   return { sequence: row.event_seq, event: decodeStoredEvent(row.payload_json) };
+}
+
+/** 两段式切片第一段(测长行)的窄解析:只含 seq/kind/字节数,不触碰 payload。 */
+function assertSliceSizeRow(row: Record<string, unknown>): {
+  readonly sequence: number;
+  readonly kind: string;
+  readonly payloadBytes: number;
+} {
+  return {
+    sequence: requireSafeInteger(row["event_seq"], "runtime_events.event_seq"),
+    kind: requireString(row["kind"], "runtime_events.kind"),
+    payloadBytes: requireSafeInteger(row["payload_bytes"], "runtime_events.payload_bytes"),
+  };
+}
+
+/** 配对回退计数行(GROUP BY tool_call_id)的窄解析。 */
+function assertPairingCountRow(row: Record<string, unknown>): {
+  readonly toolCallId: string;
+  readonly total: number;
+  readonly inWindow: number;
+} {
+  const toolCallId = row["tool_call_id"];
+  if (typeof toolCallId !== "string" || !toolCallId) {
+    throw new RuntimeEventStoreIntegrityError(
+      "Runtime event pairing count row tool_call_id is invalid",
+    );
+  }
+  const total = row["total"];
+  const inWindow = row["in_window"];
+  if (
+    typeof total !== "number" ||
+    !Number.isSafeInteger(total) ||
+    total < 1 ||
+    typeof inWindow !== "number" ||
+    !Number.isSafeInteger(inWindow) ||
+    inWindow < 0 ||
+    inWindow > total
+  ) {
+    throw new RuntimeEventStoreIntegrityError(
+      `Runtime event pairing counts for tool call ${toolCallId} are invalid`,
+    );
+  }
+  return { toolCallId, total, inWindow };
 }
 
 /** decode = JSON.parse 后走既有校验;库内损坏 fail-closed 为 store 完整性错误。 */
@@ -2093,6 +2309,26 @@ export interface SqliteSessionEventSlice {
   readonly headSequence: number;
 }
 
+/** 两段式预算切片选项(票 E2):maxPayloadBytes 为预算内事件 payload 的总字节上限。 */
+export interface SqliteEventSliceBudgetOptions {
+  readonly maxPayloadBytes: number;
+  /**
+   * 累积语义的小事件 kind(如 state/usage):不占预算、无论水位如何永远全取。
+   * 必须是 kinds 的子集。
+   */
+  readonly alwaysIncludeKinds?: readonly string[];
+}
+
+/** 两段式预算切片结果:budgetWindow 记录窗口水位与是否发生了截断(诊断,不静默)。 */
+export interface SqliteSessionBudgetedEventSlice extends SqliteSessionEventSlice {
+  readonly budgetWindow: {
+    /** 窗口内最旧事件的 event_seq(配对回退后);无预算内事件时缺省。 */
+    readonly fromSequence?: number;
+    /** true 表示存在因预算未取的更旧事件(配对回退抵达首条事件时为 false)。 */
+    readonly truncated: boolean;
+  };
+}
+
 /** kind 索引扫描选项(票 07):afterSequence 排他,upToSequence 含端。 */
 export interface SqliteEventKindScanOptions {
   readonly afterSequence?: number;
@@ -2384,6 +2620,39 @@ export async function readExistingSqliteSessionEventSlice(options: {
     const manifest = await store.readSessionManifest(options.sessionId);
     if (!manifest) return undefined;
     const slice = await store.readSessionEntriesOfKinds(options.sessionId, options.kinds);
+    return { manifest, slice };
+  } finally {
+    store.close();
+  }
+}
+
+/**
+ * 读取既有会话的两段式预算切片(票 E2 transcript 深读):SQL 先测长、按
+ * maxPayloadBytes 预算取事件 payload,替代整切片全读。非创建语义与
+ * {@link readExistingSqliteSessionEventSlice} 一致。
+ */
+export async function readExistingSqliteSessionEventSliceWithinBudget(options: {
+  readonly storageRoot: string;
+  readonly sessionId: string;
+  readonly kinds: readonly string[];
+  readonly maxPayloadBytes: number;
+  readonly alwaysIncludeKinds?: readonly string[];
+}): Promise<
+  { readonly manifest: RuntimeSessionManifest; readonly slice: SqliteSessionBudgetedEventSlice } | undefined
+> {
+  if (!options.storageRoot.trim()) {
+    throw new Error("SqliteRuntimeEventStore requires storageRoot");
+  }
+  const root = resolve(options.storageRoot);
+  if (!existsSync(operationalDatabasePath(root))) return undefined;
+  const store = new SqliteRuntimeEventStore({ storageRoot: root });
+  try {
+    const manifest = await store.readSessionManifest(options.sessionId);
+    if (!manifest) return undefined;
+    const slice = await store.readSessionEventSliceWithinBudget(options.sessionId, options.kinds, {
+      maxPayloadBytes: options.maxPayloadBytes,
+      ...(options.alwaysIncludeKinds ? { alwaysIncludeKinds: options.alwaysIncludeKinds } : {}),
+    });
     return { manifest, slice };
   } finally {
     store.close();

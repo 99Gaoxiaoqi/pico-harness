@@ -3,7 +3,6 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { EvidenceArchive } from "../../src/context/evidence-archive.js";
 import { RecoveryManager } from "../../src/context/recovery.js";
 import { AgentEngine } from "../../src/engine/loop.js";
 import { SilentReporter } from "../../src/engine/reporter.js";
@@ -1089,9 +1088,6 @@ test("host ToolResult redaction precedes streaming, recovery, Evidence, hooks, a
     ["PostToolUseFailure", "PostToolBatch"],
     hookInputs,
   );
-  const evidenceArchive = new EvidenceArchive({
-    baseDir: join(root, "evidence"),
-  });
   const tracer = new Tracer({ picoHome });
   const recoveryInputs: string[] = [];
   const recovery = new (class extends RecoveryManager {
@@ -1111,7 +1107,6 @@ test("host ToolResult redaction precedes streaming, recovery, Evidence, hooks, a
       runtimePort,
       reporter,
       hookService,
-      runtimeEvidenceArchive: evidenceArchive,
       tracer,
       recovery,
       toolResultRedactionSecrets: [proxyUrl, token],
@@ -1135,14 +1130,16 @@ test("host ToolResult redaction precedes streaming, recovery, Evidence, hooks, a
     );
     assert.ok(recorded);
     assert.equal(recorded.data.status, "failed");
-    assert.equal(recorded.data.body.storage, "evidence");
-    assert.ok(recorded.refs.evidence);
-    const archivedOutput = await evidenceArchive.readRuntimeToolOutput(recorded.refs.evidence);
+    assert.equal(recorded.data.body.storage, "inline");
+    if (recorded.data.body.storage !== "inline") {
+      assert.fail("redacted ToolResult must stay inline");
+    }
+    const inlineOutput = recorded.data.body.content;
 
     for (const serialized of [
       providerToolResult?.content ?? "",
       JSON.stringify(recorded),
-      archivedOutput,
+      inlineOutput,
       JSON.stringify(reported),
       JSON.stringify(hookInputs),
       JSON.stringify(tracer.snapshot()),

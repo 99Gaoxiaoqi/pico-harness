@@ -24,14 +24,13 @@ function def(name: string, description = `${name} fixture`): ToolDefinition {
   return { name, description, inputSchema: { type: "object", properties: {} } };
 }
 
-test("headless 宿主派生与原 13 工具白名单完全一致", () => {
+test("headless 宿主派生与白名单完全一致（read_evidence 已随 E3 退役）", () => {
   const expected = new Set([
     "bash",
     "edit_file",
     "fetch_url",
     "glob",
     "grep",
-    "read_evidence",
     "read_file",
     "task_list",
     "task_output",
@@ -41,9 +40,10 @@ test("headless 宿主派生与原 13 工具白名单完全一致", () => {
     "write_file",
   ]);
   const derived = getSupportedToolNames("headless");
-  assert.equal(derived.size, 13);
+  assert.equal(derived.size, 12);
   for (const name of expected) assert.ok(derived.has(name), `missing ${name}`);
   for (const name of derived) assert.ok(expected.has(name), `extra ${name}`);
+  assert.equal(isToolSupportedForHost("read_evidence", "headless"), false);
 });
 
 test("background 宿主亲和性收编原 UNSAFE_BACKGROUND_TOOLS 语义", () => {

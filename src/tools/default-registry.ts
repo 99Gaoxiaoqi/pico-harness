@@ -34,7 +34,6 @@ import { WorkspaceRoots, buildWorkspaceBoundaryMiddleware } from "./workspace-ro
 import type { CodeIntelligenceService } from "../code-intelligence/types.js";
 import { createCodeIntelligenceTools } from "./code-intelligence.js";
 import type { YoloSandboxConfig } from "../safety/yolo-sandbox.js";
-import { ReadEvidenceTool } from "./evidence-read.js";
 import { ExploreRepoTool } from "./explore-repo.js";
 
 export interface DefaultToolRegistryOptions {
@@ -97,8 +96,6 @@ export interface DefaultToolRegistryOptions {
     mode: "planning" | "execution";
     planId?: string;
   };
-  /** Host-owned durable Evidence root shared by Runtime and read_evidence. */
-  evidenceBaseDir?: string;
   /** Host-owned process environment for tools that intentionally inherit it. */
   env?: NodeJS.ProcessEnv;
   /** Host-owned foreground Bash deadline; omitted callers retain the 30s default. */
@@ -120,7 +117,6 @@ export function buildDefaultToolRegistry(
     activateSkillHooks,
     skillLoader,
     plan,
-    evidenceBaseDir,
     env,
     bashTimeoutMs,
     workspaceRoots,
@@ -134,7 +130,6 @@ export function buildDefaultToolRegistry(
   // 必须先于 host 后续挂载的审批中间件,避免一次审批扩大文件系统边界。
   if (!deferWorkspaceBoundary) registry.useRequest(buildWorkspaceBoundaryMiddleware(roots));
   registry.register(new ReadFileTool(roots));
-  registry.register(new ReadEvidenceTool(workDir, evidenceBaseDir));
   registry.register(new WriteFileTool(roots));
   registry.register(new EditFileTool(roots));
   registry.register(

@@ -56,8 +56,9 @@ export type { SubagentMode, SubagentRole } from "./delegation-contract.js";
  */
 /**
  * 子智能体执行结果。
- * - summary: 最终纯文本总结汇报(主 Agent 直接可见)
- * - evidenceRefs: 完整报告的受校验 pico://evidence 引用。
+ * - summary: 最终纯文本总结汇报(主 Agent 直接可见;ADR 26 起报告全文 inline)
+ * - evidenceRefs: 仅旧账本重放可能携带的 legacy pico://evidence 引用(已退役,
+ *   新运行恒为空数组)。
  */
 export interface SubagentResult {
   /**
@@ -71,17 +72,6 @@ export interface SubagentResult {
   /** status=error 时的熔断原因（非子代理崩溃栈）。 */
   error?: string;
 }
-
-export interface SubagentReportEvidenceInput {
-  taskPrompt: string;
-  report: string;
-  status: "completed" | "partial";
-}
-
-/** 宿主注入的完整子代理报告写入器；返回可供主 Agent 安全回查的 Evidence URI。 */
-export type SubagentReportEvidenceWriter = (
-  input: SubagentReportEvidenceInput,
-) => Promise<string | undefined>;
 
 export interface AgentRunner {
   /**
@@ -975,14 +965,15 @@ export { SpawnSubagentTool as SubagentTool };
 
 /**
  * 把子智能体执行结果格式化为回传给主 Agent 的文本。
- * summary 是轻量总结；完整报告只通过受校验 Evidence URI 回查。
+ * ADR 26 起报告全文已随 summary inline;evidenceRefs 只在重放旧账本时出现,
+ * 回读协议已退役,仅原样展示引用。
  */
 function formatSubagentReport(header: string, result: SubagentResult): string {
   const lines = [`${header}:`, result.summary];
   if (result.evidenceRefs.length > 0) {
     lines.push(
       "",
-      "[完整报告 Evidence，可用 read_evidence 分页回查]:",
+      "[完整报告 Evidence 引用（回读协议已退役，仅保留引用记录）]:",
       ...result.evidenceRefs.map((ref) => `  - ${ref}`),
     );
   }

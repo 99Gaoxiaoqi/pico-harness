@@ -120,6 +120,11 @@ export function projectRuntimeToolResultEnvelope(
   });
 }
 
+/**
+ * 旧账本 `storage:"evidence"` 事件的只读投影(ADR 26 §2.5):decode 容忍、
+ * 预览仍在,但回读协议已退役——投影明示"不可回读",不再指引模型调用
+ * 已不存在的 read_evidence。
+ */
 function renderEvidenceProjection(
   event: RuntimeToolResultRecordedEvent,
   evidenceUri: string,
@@ -130,7 +135,7 @@ function renderEvidenceProjection(
     `原始输出: ${event.data.body.sizeBytes} bytes`,
     `SHA-256: ${event.data.body.sha256}`,
     `Evidence: ${evidenceUri}`,
-    `需要完整原文时调用 read_evidence(ref="${evidenceUri}", offsetBytes?, limitBytes?)。`,
+    "Evidence 回读协议已退役(ADR 26):完整原文不可回读,以下仅为入库预览。",
   ].join("\n");
   return event.data.projection.text
     ? `${metadata}\n\n预览:\n${event.data.projection.text}`

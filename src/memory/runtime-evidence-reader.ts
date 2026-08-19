@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import type { RuntimeEvent } from "../engine/session-runtime-event.js";
-import { isRuntimeMessageEvent } from "../engine/session-runtime-event.js";
 import type { RuntimeEventStoreEntry } from "../storage/runtime-event-store-contracts.js";
 import { isMessageHiddenFromTranscript, type Message } from "../schema/message.js";
 import {
@@ -18,8 +17,9 @@ export interface RuntimeEvidenceStorePort {
   readSessionEvent(sessionId: string, eventId: string): Promise<RuntimeEventStoreEntry | undefined>;
   readSessionEntries?(sessionId: string): Promise<readonly RuntimeEventStoreEntry[]>;
   /**
-   * 有界消息快照(票 07 读路径查询化):message.committed 全可见性口径,截至
-   * maxSequence(含端),经 kind 索引;提供时优先于 readSessionEntries 全量读。
+   * 有界源对话快照(票 07 读路径查询化):message.committed(全可见性口径)+
+   * tool.result.recorded(model 可见性),截至 maxSequence(含端),经 kind 索引;
+   * 提供时优先于 readSessionEntries 全量读。
    */
   readSessionMessageEventsUpTo?(
     sessionId: string,
@@ -71,8 +71,8 @@ export class RuntimeMemoryEvidenceReader implements MemoryEvidenceReaderPort {
           : undefined;
       if (entries) {
         sourceMessages = entries
-          .filter((e) => e.sequence <= terminalEntry.sequence && isRuntimeMessageEvent(e.event))
-          .map((e) => (e.event as { data: { message: Message } }).data.message)
+          .filter((e) => e.sequence <= terminalEntry.sequence)
+          .flatMap((e) => projectSourceMessage(e.event))
           .filter((m) => !isMessageHiddenFromTranscript(m));
       }
     } catch {
@@ -116,6 +116,28 @@ export class RuntimeMemoryEvidenceReader implements MemoryEvidenceReaderPort {
       ...(sourceMessages ? { sourceMessages } : {}),
     };
   }
+}
+
+/**
+ * 源对话快照的单事件投影(票 E3,ADR 26 §2.4):
+ * - message.committed → 原样消息(既有口径);
+ * - tool.result.recorded(仅 model 可见)→ 以 inline body.content 为正文的
+ *   ToolResult 消息——memory worker 不再依赖 Evidence CAS;
+ * - 旧 `storage:"evidence"` 形态 → 不可回读标记 + 入库预览(优雅降级,不炸 worker)。
+ */
+function projectSourceMessage(event: RuntimeEvent): readonly Message[] {
+  if (event.kind === "message.committed") return [event.data.message];
+  if (event.kind !== "tool.result.recorded") return [];
+  if (event.visibility !== "model" || event.partial) return [];
+  const body = event.data.body;
+  const content =
+    body.storage === "inline"
+      ? body.content
+      : [
+          `[工具 ${event.data.toolName} 的结果原文不可回读:Evidence 引用已退役(ADR 26),仅预览保留]`,
+          ...(event.data.projection.text ? ["", "预览:", event.data.projection.text] : []),
+        ].join("\n");
+  return [{ role: "user", content, toolCallId: event.refs.toolCallId }];
 }
 
 function assertTerminal(event: RuntimeEvent, ref: TerminalMemoryEvidenceRef): void {

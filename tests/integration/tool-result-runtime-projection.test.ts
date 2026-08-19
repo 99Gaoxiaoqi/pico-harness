@@ -1,14 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import {
-  EvidenceArchive,
-  formatEvidenceUri,
-  parseEvidenceUri,
-} from "../../src/context/evidence-archive.js";
 import { AgentEngine } from "../../src/engine/loop.js";
 import { SilentReporter } from "../../src/engine/reporter.js";
 import { Session } from "../../src/engine/session.js";
@@ -20,44 +16,40 @@ import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-a
 import type { RuntimeToolResultRecordedEvent } from "../../src/storage/runtime-event.js";
 import { DelegationManager } from "../../src/tools/delegation-manager.js";
 import { createSubagentRegistryFactory } from "../../src/tools/delegation-registry.js";
-import { ReadEvidenceTool } from "../../src/tools/evidence-read.js";
 import { NO_FILE_SIDE_EFFECTS, type BaseTool } from "../../src/tools/registry.js";
 import { ToolRegistry } from "../../src/tools/registry-impl.js";
+import { ToolDisclosure } from "../../src/tools/tool-disclosure.js";
+import { MAX_TOOL_RESULT_BYTES } from "../../src/tools/tool-result-observation.js";
 
 const LARGE_TOOL_NAME = "large_fixture";
 const LARGE_TOOL_CALL_ID = "call:large-fixture";
-const READ_EVIDENCE_CALL_ID = "call:read-evidence";
 
-test("large Runtime ToolResult persists one Evidence fact and replays its bounded projection", async (context) => {
-  const sessionId = "runtime-tool-result-evidence";
-  const fixture = await createFixture("pico-runtime-tool-result-evidence-");
+test("large Runtime ToolResult (2048 token < size < 1MB) persists full inline without Evidence", async (context) => {
+  const sessionId = "runtime-tool-result-inline";
+  const fixture = await createFixture("pico-runtime-tool-result-inline-");
   context.after(async () => {
     await fixture.activeSession?.close();
     await rm(fixture.root, { recursive: true, force: true });
   });
-  const canary = "PICO_MIDDLE_CANARY_ONLY_IN_RAW_EVIDENCE";
+  const canary = "PICO_MIDDLE_CANARY_ONLY_IN_RAW_OUTPUT";
   const rawOutput = buildLargeOutput(canary);
   const rawSizeBytes = Buffer.byteLength(rawOutput, "utf8");
   const rawSha256 = sha256(rawOutput);
-  const canaryOffsetBytes = Buffer.byteLength(
-    rawOutput.slice(0, rawOutput.indexOf(canary)),
-    "utf8",
-  );
-  const evidenceArchive = new EvidenceArchive({
-    baseDir: fixture.paths.workspace.evidence,
-  });
   const registry = new ToolRegistry();
   registry.register(outputTool(LARGE_TOOL_NAME, rawOutput));
-  registry.register(new ReadEvidenceTool(fixture.workDir, fixture.paths.workspace.evidence));
+
+  // 渐进披露开启:read_evidence 已随回读协议退役(E3),工具面不披露、不注册。
+  const toolDisclosure = new ToolDisclosure();
+  toolDisclosure.discloseTools([LARGE_TOOL_NAME]);
 
   const providerMessages: Message[][] = [];
-  let ledgerBeforeReadback: string | undefined;
+  const availableToolsByTurn: string[][] = [];
   const provider: LLMProvider = {
     async generate(messages, availableTools) {
       providerMessages.push(structuredClone(messages));
+      availableToolsByTurn.push(availableTools.map((tool) => tool.name));
       if (providerMessages.length === 1) {
         assert.ok(availableTools.some((tool) => tool.name === LARGE_TOOL_NAME));
-        assert.ok(availableTools.some((tool) => tool.name === "read_evidence"));
         return {
           role: "assistant",
           content: "",
@@ -70,44 +62,7 @@ test("large Runtime ToolResult persists one Evidence fact and replays its bounde
           ],
         };
       }
-      if (providerMessages.length === 2) {
-        const projected = messages.find((message) => message.toolCallId === LARGE_TOOL_CALL_ID);
-        assert.ok(projected, "second Provider request must contain the large ToolResult");
-        const evidenceUri = projected.content.match(
-          /pico:\/\/evidence\/[^\s"]+\/[a-f0-9]{64}/u,
-        )?.[0];
-        assert.ok(evidenceUri, "large ToolResult projection must expose an Evidence URI");
-        // SQLite 纪元:断言对象从 session.jsonl 换成 runtime_events 物化载荷。
-        const ledgerStore = new SqliteRuntimeEventStore({
-          storageRoot: fixture.paths.workspace.root,
-        });
-        try {
-          ledgerBeforeReadback = JSON.stringify(await ledgerStore.readSession(sessionId));
-        } finally {
-          ledgerStore.close();
-        }
-        return {
-          role: "assistant",
-          content: "",
-          toolCalls: [
-            {
-              id: READ_EVIDENCE_CALL_ID,
-              name: "read_evidence",
-              arguments: JSON.stringify({
-                ref: evidenceUri,
-                offsetBytes: canaryOffsetBytes,
-                limitBytes: 256,
-              }),
-            },
-          ],
-        };
-      }
-      if (providerMessages.length === 3) {
-        const readback = messages.find((message) => message.toolCallId === READ_EVIDENCE_CALL_ID);
-        assert.match(readback?.content ?? "", new RegExp(canary, "u"));
-        return { role: "assistant", content: "done" };
-      }
-      throw new Error("unexpected Provider turn");
+      return { role: "assistant", content: "done" };
     },
   };
   const runtimePort = createEngineRuntimePort();
@@ -124,78 +79,65 @@ test("large Runtime ToolResult persists one Evidence fact and replays its bounde
     registry,
     workDir: fixture.workDir,
     runtimePort,
-    runtimeEvidenceArchive: evidenceArchive,
+    toolDisclosure,
     reporter: new SilentReporter(),
-    maxTurns: 4,
+    maxTurns: 3,
   });
 
   await engine.run(session);
 
-  assert.equal(providerMessages.length, 3);
+  assert.equal(providerMessages.length, 2);
+  // 验收 4(E3):read_evidence 已退役,工具面永不披露。
+  assert.equal(availableToolsByTurn[1]?.includes("read_evidence"), false);
+  assert.equal(toolDisclosure.getDisclosedTools().includes("read_evidence"), false);
+
+  // 验收 1:全文 inline 入库,无引用事件。
   const events = await session.runtimeEventStore!.readSession(session.id);
   const toolResults = events.filter(
     (event): event is RuntimeToolResultRecordedEvent => event.kind === "tool.result.recorded",
   );
-  assert.equal(toolResults.length, 2);
+  assert.equal(toolResults.length, 1);
   const largeResult = requireToolResult(toolResults, LARGE_TOOL_CALL_ID);
   assert.equal(largeResult.data.status, "succeeded");
-  assert.equal(largeResult.data.body.storage, "evidence");
+  assert.equal(largeResult.refs.evidence, undefined);
+  assert.equal(largeResult.data.body.storage, "inline");
+  if (largeResult.data.body.storage !== "inline") {
+    assert.fail("large ToolResult must stay inline");
+  }
+  assert.equal(largeResult.data.body.content, rawOutput);
   assert.equal(largeResult.data.body.sha256, rawSha256);
   assert.equal(largeResult.data.body.sizeBytes, rawSizeBytes);
-  assert.equal("content" in largeResult.data.body, false);
-  assert.equal(largeResult.data.projection.mode, "preview");
-  assert.equal(largeResult.data.projection.truncated, true);
-  assert.ok(largeResult.data.projection.text.length <= 1_600);
-  assert.match(largeResult.data.projection.text, /HEAD_BOUNDARY/u);
-  assert.match(largeResult.data.projection.text, /TAIL_BOUNDARY/u);
-  assert.doesNotMatch(largeResult.data.projection.text, new RegExp(canary, "u"));
-  assert.ok(largeResult.refs.evidence);
+  assert.deepEqual(largeResult.data.projection, {
+    version: 1,
+    mode: "full",
+    text: rawOutput,
+    strategy: "original",
+    truncated: false,
+  });
 
-  const evidenceRef = largeResult.refs.evidence;
-  const evidenceUri = formatEvidenceUri(evidenceRef);
+  // 验收 1:无 blob 写——Evidence blob 目录从未产生。
+  assert.equal(existsSync(join(fixture.paths.workspace.evidence, "blobs")), false);
+
+  const ledgerStore = new SqliteRuntimeEventStore({
+    storageRoot: fixture.paths.workspace.root,
+  });
+  let ledger: string;
+  try {
+    ledger = JSON.stringify(await ledgerStore.readSession(sessionId));
+  } finally {
+    ledgerStore.close();
+  }
+  assert.match(ledger, new RegExp(canary, "u"));
+  // JSON 转义后的全文(换行 → \n)仍完整在账本里。
+  assert.equal(ledger.includes(JSON.stringify(rawOutput).slice(1, -1)), true);
+
+  // Provider 收到的就是全文投影。
   const secondProviderResult = providerMessages[1]?.find(
     (message) => message.toolCallId === LARGE_TOOL_CALL_ID,
   );
   assert.ok(secondProviderResult);
-  assert.match(secondProviderResult.content, /HEAD_BOUNDARY/u);
-  assert.match(secondProviderResult.content, /TAIL_BOUNDARY/u);
-  assert.match(secondProviderResult.content, new RegExp(escapeRegExp(evidenceUri), "u"));
-  assert.doesNotMatch(secondProviderResult.content, new RegExp(canary, "u"));
-  assert.ok(secondProviderResult.content.length < 4_000);
+  assert.equal(secondProviderResult.content, rawOutput);
   assert.equal(secondProviderResult.providerData, undefined);
-
-  assert.ok(ledgerBeforeReadback);
-  assert.doesNotMatch(ledgerBeforeReadback, new RegExp(canary, "u"));
-  assert.equal(ledgerBeforeReadback.includes(rawOutput), false);
-
-  const manifest = await evidenceArchive.readRuntimeToolExchange(evidenceRef);
-  assert.equal(manifest.schemaVersion, 2);
-  if (manifest.schemaVersion !== 2) assert.fail("expected Runtime Evidence v2");
-  assert.equal(manifest.content.rawOutput.digest, rawSha256);
-  assert.equal(manifest.content.rawOutput.sizeBytes, rawSizeBytes);
-  assert.equal(await evidenceArchive.readRuntimeToolOutput(evidenceRef), rawOutput);
-  // 票 08 起 manifest 行在 pico.sqlite(evidence_records);明文 canary 不得进清单正文。
-  const serializedManifest = JSON.stringify(manifest);
-  assert.doesNotMatch(serializedManifest, new RegExp(canary, "u"));
-  const blobPath = join(
-    fixture.paths.workspace.evidence,
-    "blobs",
-    "sha256",
-    rawSha256.slice(0, 2),
-    rawSha256,
-  );
-  assert.equal(await readFile(blobPath, "utf8"), rawOutput);
-
-  const readbackResult = requireToolResult(toolResults, READ_EVIDENCE_CALL_ID);
-  assert.equal(readbackResult.refs.evidence, undefined);
-  assert.equal(readbackResult.data.body.storage, "inline");
-  if (readbackResult.data.body.storage !== "inline") {
-    assert.fail("read_evidence output must remain inline");
-  }
-  assert.match(readbackResult.data.body.content, new RegExp(canary, "u"));
-  assert.equal(readbackResult.data.projection.mode, "full");
-  assert.equal(readbackResult.data.projection.strategy, "bounded-readback");
-  assert.equal(readbackResult.data.projection.truncated, false);
 
   const expectedReplay = structuredClone(session.getModelContext());
   await session.close();
@@ -214,17 +156,18 @@ test("large Runtime ToolResult persists one Evidence fact and replays its bounde
   assert.deepEqual(replayedLargeResult, secondProviderResult);
 });
 
-test("Evidence ENOSPC keeps one complete inline fact but a bounded model projection", async (context) => {
-  const sessionId = "runtime-tool-result-fail-open";
-  const fixture = await createFixture("pico-runtime-tool-result-fail-open-");
+test("over-limit Runtime ToolResult (>1MB) is rejected as a synthetic error with refetch guidance", async (context) => {
+  const sessionId = "runtime-tool-result-over-limit";
+  const fixture = await createFixture("pico-runtime-tool-result-over-limit-");
   context.after(async () => {
     await fixture.activeSession?.close();
     await rm(fixture.root, { recursive: true, force: true });
   });
-  const canary = "PICO_FAIL_OPEN_MIDDLE_CANARY";
-  const rawOutput = buildLargeOutput(canary);
+  const canary = "PICO_OVER_LIMIT_CANARY_MUST_NOT_PERSIST";
+  const rawOutput = `HEAD_BOUNDARY\n${canary}\n${"O".repeat(MAX_TOOL_RESULT_BYTES + 1)}`;
+  assert.ok(Buffer.byteLength(rawOutput, "utf8") > MAX_TOOL_RESULT_BYTES);
   const registry = new ToolRegistry();
-  registry.register(outputTool("fail_open_fixture", rawOutput));
+  registry.register(outputTool("over_limit_fixture", rawOutput));
   const providerMessages: Message[][] = [];
   const provider: LLMProvider = {
     async generate(messages) {
@@ -235,17 +178,14 @@ test("Evidence ENOSPC keeps one complete inline fact but a bounded model project
           content: "",
           toolCalls: [
             {
-              id: "call:fail-open",
-              name: "fail_open_fixture",
+              id: "call:over-limit",
+              name: "over_limit_fixture",
               arguments: "{}",
             },
           ],
         };
       }
-      if (providerMessages.length === 2) {
-        return { role: "assistant", content: "done" };
-      }
-      throw new Error("unexpected Provider turn");
+      return { role: "assistant", content: "done" };
     },
   };
   const runtimePort = createEngineRuntimePort();
@@ -256,15 +196,12 @@ test("Evidence ENOSPC keeps one complete inline fact but a bounded model project
   });
   fixture.activeSession = session;
   await session.recover();
-  await session.commitMessages({ role: "user", content: "Run the fail-open fixture." });
+  await session.commitMessages({ role: "user", content: "Run the over-limit fixture." });
   const engine = new AgentEngine({
     provider,
     registry,
     workDir: fixture.workDir,
     runtimePort,
-    runtimeEvidenceArchive: new EnospcEvidenceArchive({
-      baseDir: fixture.paths.workspace.evidence,
-    }),
     reporter: new SilentReporter(),
     maxTurns: 3,
   });
@@ -277,28 +214,54 @@ test("Evidence ENOSPC keeps one complete inline fact but a bounded model project
     events.filter(
       (event): event is RuntimeToolResultRecordedEvent => event.kind === "tool.result.recorded",
     ),
-    "call:fail-open",
+    "call:over-limit",
   );
+  // 验收 2:调用本身照常入账(状态 rejected),模型收到合成错误。
+  assert.equal(result.data.status, "rejected");
   assert.equal(result.refs.evidence, undefined);
-  assert.equal(result.data.status, "succeeded");
   assert.equal(result.data.body.storage, "inline");
   if (result.data.body.storage !== "inline") {
-    assert.fail("fail-open ToolResult must be inline");
+    assert.fail("over-limit ToolResult must be an inline synthetic fact");
   }
-  assert.equal(result.data.body.content, rawOutput);
-  assert.equal(result.data.body.sha256, sha256(rawOutput));
-  assert.equal(result.data.body.sizeBytes, Buffer.byteLength(rawOutput, "utf8"));
-  assert.equal(result.data.projection.mode, "preview");
-  assert.equal(result.data.projection.truncated, true);
-  assert.equal(result.data.projection.text.includes(canary), false);
-  assert.match(result.data.projection.strategy, /evidence-write-failed/u);
+  const synthetic = result.data.body.content;
+  assert.match(synthetic, /输出超限/u);
+  assert.match(synthetic, /grep .*head/u);
+  assert.match(synthetic, /tail/u);
+  assert.match(synthetic, /read_file/u);
+  assert.equal(synthetic.includes(canary), false);
+  assert.equal(result.data.body.sha256, sha256(synthetic));
+  assert.equal(result.data.body.sizeBytes, Buffer.byteLength(synthetic, "utf8"));
+  assert.deepEqual(
+    { ...result.data.projection, text: "..." },
+    {
+      version: 1,
+      mode: "synthetic",
+      text: "...",
+      strategy: "output-limit-gate",
+      truncated: true,
+    },
+  );
+  assert.equal(result.data.projection.text, synthetic);
+
+  // 原文永久丢弃:全账本不含 canary。
+  const ledgerStore = new SqliteRuntimeEventStore({
+    storageRoot: fixture.paths.workspace.root,
+  });
+  let ledger: string;
+  try {
+    ledger = JSON.stringify(await ledgerStore.readSession(sessionId));
+  } finally {
+    ledgerStore.close();
+  }
+  assert.equal(ledger.includes(canary), false);
+  assert.equal(existsSync(join(fixture.paths.workspace.evidence, "blobs")), false);
 
   const secondProviderResult = providerMessages[1]?.find(
-    (message) => message.toolCallId === "call:fail-open",
+    (message) => message.toolCallId === "call:over-limit",
   );
   assert.ok(secondProviderResult);
-  assert.equal(secondProviderResult.content, result.data.projection.text);
-  assert.equal(secondProviderResult.content.includes(canary), false);
+  assert.equal(secondProviderResult.content, synthetic);
+
   const terminal = events.find(
     (event) => event.kind === "run.terminal" && event.runId === result.runId,
   );
@@ -306,8 +269,8 @@ test("Evidence ENOSPC keeps one complete inline fact but a bounded model project
   assert.equal(terminal.data.status, "completed");
 });
 
-test("subagent Runtime preserves complete raw ToolResult before transcript Evidence projection", async (context) => {
-  const sessionId = "runtime-subagent-tool-result-evidence";
+test("subagent Runtime ToolResult persists full inline before the transcript projection", async (context) => {
+  const sessionId = "runtime-subagent-tool-result-inline";
   const fixture = await createFixture("pico-runtime-subagent-tool-result-");
   context.after(async () => {
     await fixture.activeSession?.close();
@@ -315,15 +278,12 @@ test("subagent Runtime preserves complete raw ToolResult before transcript Evide
   });
   const toolName = "subagent_large_fixture";
   const toolCallId = "call:subagent-large-fixture";
-  const canary = "PICO_SUBAGENT_MIDDLE_CANARY_ONLY_IN_RAW_EVIDENCE";
+  const canary = "PICO_SUBAGENT_MIDDLE_CANARY_IN_INLINE_BODY";
   const rawOutput = buildLargeOutput(canary);
   assert.ok(rawOutput.length > 8_000);
-  const evidenceArchive = new EvidenceArchive({
-    baseDir: fixture.paths.workspace.evidence,
-  });
   const providerMessages: Message[][] = [];
   const fullReport =
-    "已完成子代理大型工具结果核验，原始证据保持完整且模型上下文仅接收有界投影。\n".repeat(120);
+    "已完成子代理大型工具结果核验，原始结果全文 inline 且模型上下文接收完整投影。\n".repeat(120);
   const provider: LLMProvider = {
     async generate(messages, availableTools) {
       providerMessages.push(structuredClone(messages));
@@ -338,8 +298,7 @@ test("subagent Runtime preserves complete raw ToolResult before transcript Evide
       if (providerMessages.length === 2) {
         const projected = messages.find((message) => message.toolCallId === toolCallId);
         assert.ok(projected);
-        assert.match(projected.content, /pico:\/\/evidence\/[^\s"]+\/[a-f0-9]{64}/u);
-        assert.doesNotMatch(projected.content, new RegExp(canary, "u"));
+        assert.equal(projected.content, rawOutput);
         return { role: "assistant", content: fullReport };
       }
       throw new Error("unexpected subagent Provider turn");
@@ -358,23 +317,12 @@ test("subagent Runtime preserves complete raw ToolResult before transcript Evide
     registry: new ToolRegistry(),
     workDir: fixture.workDir,
     runtimePort,
-    runtimeEvidenceArchive: evidenceArchive,
-    subagentReportEvidenceWriter: async (input) =>
-      formatEvidenceUri(
-        await evidenceArchive.archiveSubagentReport({
-          sessionId,
-          taskPrompt: input.taskPrompt,
-          report: input.report,
-          status: input.status,
-        }),
-      ),
     reporter: new SilentReporter(),
   });
   const subagentRegistry = createSubagentRegistryFactory({
     workDir: fixture.workDir,
     runner: engine,
     manager: new DelegationManager(),
-    evidenceBaseDir: fixture.paths.workspace.evidence,
   })({
     mode: "explore",
     role: "leaf",
@@ -394,14 +342,11 @@ test("subagent Runtime preserves complete raw ToolResult before transcript Evide
   );
 
   assert.equal(result.status, "completed");
-  assert.ok(result.summary.length <= 2_000);
-  assert.match(result.summary, /\[完整子代理报告已归档为 Evidence\]/u);
-  assert.equal(result.evidenceRefs.length, 1);
-  const reportReference = {
-    ...parseEvidenceUri(result.evidenceRefs[0]!),
-    kind: "subagent-report" as const,
-  };
-  assert.equal(await evidenceArchive.readSubagentReport(reportReference), fullReport);
+  // 票 E3:报告全文 inline 进 summary/事件,不再外部化为 Evidence 引用。
+  assert.ok(result.summary.length > 2_000);
+  assert.equal(result.summary, fullReport);
+  assert.deepEqual(result.evidenceRefs, []);
+  assert.equal(existsSync(join(fixture.paths.workspace.evidence, "blobs")), false);
   assert.equal(providerMessages.length, 2);
   const events = await session.runtimeEventStore!.readSession(session.id);
   const recorded = requireToolResult(
@@ -411,13 +356,25 @@ test("subagent Runtime preserves complete raw ToolResult before transcript Evide
     toolCallId,
   );
   assert.equal(recorded.visibility, "transcript");
-  assert.equal(recorded.data.body.storage, "evidence");
+  assert.equal(recorded.refs.evidence, undefined);
+  assert.equal(recorded.data.body.storage, "inline");
+  if (recorded.data.body.storage !== "inline") {
+    assert.fail("subagent large ToolResult must be inline");
+  }
+  assert.equal(recorded.data.body.content, rawOutput);
   assert.equal(recorded.data.body.sha256, sha256(rawOutput));
   assert.equal(recorded.data.body.sizeBytes, Buffer.byteLength(rawOutput, "utf8"));
-  assert.equal(recorded.data.projection.mode, "preview");
-  assert.doesNotMatch(recorded.data.projection.text, new RegExp(canary, "u"));
-  assert.ok(recorded.refs.evidence);
-  assert.equal(await evidenceArchive.readRuntimeToolOutput(recorded.refs.evidence), rawOutput);
+  assert.equal(recorded.data.projection.mode, "full");
+  assert.equal(recorded.data.projection.truncated, false);
+  // subagent_report transcript 消息携带全文(E3:报告全文 inline 进事件)。
+  const reportMessage = events.find(
+    (event) =>
+      event.kind === "message.committed" &&
+      (event as { data: { message: Message } }).data.message.providerData?.["picoKind"] ===
+      "subagent_report",
+  ) as unknown as { data: { message: Message } } | undefined;
+  assert.ok(reportMessage);
+  assert.equal(reportMessage.data.message.content, fullReport);
   assert.deepEqual(session.getModelContext(), []);
 });
 
@@ -442,18 +399,6 @@ async function createFixture(prefix: string): Promise<RuntimeFixture> {
     picoHome,
     paths,
   };
-}
-
-class EnospcEvidenceArchive extends EvidenceArchive {
-  override async archiveRuntimeToolResult(): Promise<never> {
-    throw enospc();
-  }
-}
-
-function enospc(): NodeJS.ErrnoException {
-  const error = new Error("fixture Evidence volume is full") as NodeJS.ErrnoException;
-  error.code = "ENOSPC";
-  return error;
 }
 
 function outputTool(name: string, output: string): BaseTool {
@@ -496,8 +441,4 @@ function buildLargeOutput(canary: string): string {
 
 function sha256(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }

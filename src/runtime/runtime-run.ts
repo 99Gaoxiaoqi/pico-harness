@@ -820,14 +820,23 @@ export class RuntimeRun {
   }
 
   async readModelHistory(): Promise<Message[]> {
-    const { materializeRuntimeHistory } = await import("../engine/session-runtime-read-model.js");
+    const {
+      applyModelHistoryByteBudget,
+      MAX_MODEL_HISTORY_BYTES,
+      materializeRuntimeHistoryEntries,
+    } = await import("../engine/session-runtime-read-model.js");
     // kind 切片查询(票 04):read-model 只消费 message/tool-result/checkpoint 三类,
     // 其余 kind 只产 soft 诊断,不进输出——折叠规则不变,数据来源窄化。
     const { entries } = await this.store.readSessionEntriesOfKinds(
       this.sessionId,
       RUNTIME_HISTORY_EVENT_KINDS,
     );
-    return materializeRuntimeHistory(entries.map(({ event }) => event));
+    // ADR 26 §2.3(票 E2):全文 inline 入库后,provider 消息组装按字节预算 gate,
+    // 超预算的最旧大内容在 read-model 层降级为带标记的截断视图,末尾工作集不裁。
+    const materialized = materializeRuntimeHistoryEntries(entries.map(({ event }) => event));
+    return applyModelHistoryByteBudget(materialized, {
+      maxTotalBytes: MAX_MODEL_HISTORY_BYTES,
+    }).map(({ message }) => message);
   }
 
   /** True only when this run owns the Session's canonical workspace and durable store. */
