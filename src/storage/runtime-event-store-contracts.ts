@@ -126,9 +126,10 @@ export class RuntimeEventStorePlanOperationConflictError extends RuntimeEventSto
 }
 
 /**
- * ADR 29 §4 源封口(fail-closed):已终态(run.terminal 落库)的 run 拒收新的
- * 非恢复类 append。确定性拒绝(事务未提交),读回仲裁不得翻案——继承
- * RuntimeEventStoreIntegrityError 即自动落入 isDeterministicStoreRefusal。
+ * ADR 29 §4(修订:claim-scoped) 源封口(fail-closed):已被 continuation claim
+ * 的 source run 拒收新的非恢复类 append(claim 存在 ⇒ claim 时已终态)。
+ * 未被 claim 的终态 run 保持开放语义。确定性拒绝(事务未提交),读回仲裁
+ * 不得翻案——继承 RuntimeEventStoreIntegrityError 即自动落入 isDeterministicStoreRefusal。
  */
 export class RuntimeEventStoreRunSealedError extends RuntimeEventStoreIntegrityError {
   constructor(
@@ -137,7 +138,7 @@ export class RuntimeEventStoreRunSealedError extends RuntimeEventStoreIntegrityE
     readonly eventId: string,
   ) {
     super(
-      `Runtime run ${runId} in session ${sessionId} is already terminal; event ${eventId} cannot be appended`,
+      `Runtime run ${runId} in session ${sessionId} has a continuation claim (sealed source); event ${eventId} cannot be appended`,
     );
     this.name = "RuntimeEventStoreRunSealedError";
   }

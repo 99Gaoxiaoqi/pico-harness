@@ -468,12 +468,12 @@ export class SqliteRuntimeEventStore {
     return row === undefined ? undefined : continuationClaimFromRow(row as Record<string, unknown>);
   }
 
-  /** run seal 点查(runtime_events_by_run 索引);只在写事务内调用。 */
-  private hasRunTerminalLocked(sessionId: string, runId: string): boolean {
+  /** ADR 29 §4(claim-scoped) 源封口点查;只在写事务内调用。 */
+  private hasContinuationClaimLocked(sessionId: string, runId: string): boolean {
     return (
       this.lease.database
         .prepare(
-          "SELECT 1 FROM runtime_events WHERE session_id = ? AND run_id = ? AND kind = 'run.terminal' LIMIT 1",
+          "SELECT 1 FROM runtime_continuation_claims WHERE source_session_id = ? AND source_run_id = ? LIMIT 1",
         )
         .get(sessionId, runId) !== undefined
     );
@@ -1286,8 +1286,9 @@ export class SqliteRuntimeEventStore {
          partial, tx_id, tool_call_id, provider_call_id, operation_id, payload_json, at, committed_at
        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
-    // ADR 29 §4 run seal 缓存:key `${sessionId}\0${runId}`;批内一旦插入终态即视为
-    // 封口,同批后续该 run 的新事件同样被拒(终态必须是其 run 的最后一条新事实)。
+    // ADR 29 §4(修订:claim-scoped) 源封口缓存:key `${sessionId}\0${runId}`。
+    // 仅对已被 continuation claim 的 source run 拒收——claim 存在 ⇒ claim 时该 run 已终态。
+    // 终态但未被 claim 的 run 保持历史开放语义(fork 工作流/记忆通道存在合法的终态后写入路径)。
     const runSealCache = new Map<string, boolean>();
     for (const event of canonicalEvents) {
       const context = contexts.get(event.sessionId)!;
@@ -1304,16 +1305,16 @@ export class SqliteRuntimeEventStore {
         );
         continue;
       }
-      // ADR 29 §4 源封口(fail-closed):已终态的 run 拒收新的非恢复类事件。
+      // ADR 29 §4 源封口(fail-closed):已被 claim 的 source run 拒收新的非恢复类事件。
       // 幂等重放(上方 existing 分支)不受影响——崩溃后重试同 eventId 永远合法。
       if (!isRecoveryClassSealedAppend(event)) {
         const sealKey = `${event.sessionId}\u0000${event.runId}`;
-        let sealed = runSealCache.get(sealKey);
-        if (sealed === undefined) {
-          sealed = this.hasRunTerminalLocked(event.sessionId, event.runId);
-          runSealCache.set(sealKey, sealed);
+        let claimed = runSealCache.get(sealKey);
+        if (claimed === undefined) {
+          claimed = this.hasContinuationClaimLocked(event.sessionId, event.runId);
+          runSealCache.set(sealKey, claimed);
         }
-        if (sealed) {
+        if (claimed) {
           throw new RuntimeEventStoreRunSealedError(event.sessionId, event.runId, event.eventId);
         }
       }
