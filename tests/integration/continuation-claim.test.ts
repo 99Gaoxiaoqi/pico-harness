@@ -199,7 +199,7 @@ test("C2 前半：活跃 run / completed run / 不存在 run 的 claim 被类型
   );
 });
 
-test("C4 源封口：已 claim（interrupted）与已终态（completed）的 run 追加新事件被拒，幂等重放不受影响", async (context) => {
+test("C4 源封口（claim-scoped）：已 claim 的 run 追加新事件被拒；未 claim 终态 run 保持开放；幂等重放不受影响", async (context) => {
   const scene = await createScene(context, "claim-source-seal");
   const claimedSource = await createTerminatedRun(scene, "interrupted", ["sealed-prefix"]);
   const claim = await scene.store.claimContinuation(
@@ -231,17 +231,14 @@ test("C4 源封口：已 claim（interrupted）与已终态（completed）的 ru
       error.sessionId === scene.session.id,
   );
 
-  // 未被 claim 的 completed run 同样封口(终态即封口,与 claim 无关)。
+  // 未被 claim 的终态 run 保持开放语义(fork 工作流/记忆通道的合法终态后写入路径)。
   const completed = await createTerminatedRun(scene, "completed");
-  await assert.rejects(
-    scene.store.append({
-      ...sealedAppend,
-      eventId: "seal-probe:after-completed",
-      runId: completed.runId,
-    } as RuntimeEvent),
-    (error: unknown) =>
-      error instanceof RuntimeEventStoreRunSealedError && error.runId === completed.runId,
-  );
+  const openAppend = await scene.store.append({
+    ...sealedAppend,
+    eventId: "seal-probe:after-completed",
+    runId: completed.runId,
+  } as RuntimeEvent);
+  assert.equal(openAppend.inserted, true, "unclaimed terminal run stays appendable");
 
   // 幂等重放不受封口影响:重放已落库的终态事件(同 eventId 同载荷)合法且不新增。
   const before = await scene.store.readSession(scene.session.id);

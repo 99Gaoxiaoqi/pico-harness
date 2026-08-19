@@ -26,9 +26,12 @@ claim 成功 seal source）。
 3. **目标 run 关联**：`run.started` 事件 data 增加
    `continuationOf?: { runId, highWater, prefixDigest }`（复用既有 kind，data 扩展）。
    模型上下文无需特判——同 session 事件流天然包含前缀；跨 session 续跑不在本决策。
-4. **源的不可追改**：依赖"终态事件后拒收后续 append"。若现状无此防线（对照 maka
-   `assertRunNotSealed`），本决策在 store 层补齐：对已有 run.terminal 的 run 拒绝非恢复
-   类 append（fail-closed）。
+4. **源的不可追改（claim-scoped，2026-08-19 实测修订）**：原设计"对一切已终态 run
+   拒收后续 append"被全量回归否决——fork 工作流（`SessionForkService.publishForkWorkflowEntries`）
+   与记忆仓储（`readCanonicalRecoveryRefs` 构造路径）存在合法的终态后写入路径，且 digest
+   覆盖的是前缀 [1..high_water]，终态后追加不改变前缀、不影响 claim 完整性。修订为：
+   **仅对已被 continuation claim 的 source run 拒收非恢复类 append**（claim 存在 ⇒ claim
+   时已终态，fail-closed）；未被 claim 的终态 run 保持历史开放语义。
 5. **定位收窄**：本协议只做"确定性续跑锚"（防双续跑 + 前缀完整性 + 源封口）。调度接入
    （goal/cron 自动续跑）不在本决策内，届时复评 API 形状。
 
@@ -37,7 +40,8 @@ claim 成功 seal source）。
 - C1 同一 source run 至多一个 claim（DB UNIQUE 约束，冲突返回类型化结果）。
 - C2 claim 成功隐含：claim 时刻源为 interrupted 终态、digest 与账本一致。
 - C3 claim 事务只读源账本，只写 claims 行；目标关联只经 run.started。
-- C4 已 claim 的源 run 追加事件被拒（源封口，若 §4 防线为本决策新增则一并测试）。
+- C4 已 claim 的源 run 追加非恢复类事件被拒（源封口，claim-scoped）；未 claim 的终态
+   run 保持开放（fork/记忆通道兼容）；幂等重放不受影响。
 
 集成测试：interrupted run → claim 成功（digest/high_water 正确）→ 二次 claim 冲突 →
 源追加被拒 → 目标 run.started 携带 continuationOf。
