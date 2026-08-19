@@ -53,9 +53,11 @@ import {
   type RuntimeMessageCommittedEvent,
   type RuntimeModelCallSettledEvent,
   type RuntimeRunStartedEvent,
+  type RuntimeRunContinuationOf,
   type RuntimeRunTerminalEvent,
   type RuntimeSessionForkedEvent,
   type RuntimeTerminalStatus,
+  type RuntimeToolRecoveryClassification,
   type RuntimeToolStartedEvent,
   type RuntimeToolResultRecordedEvent,
   type RuntimeTranscriptEventRecordedEvent,
@@ -79,7 +81,11 @@ import {
   projectRuntimeSessionTranscriptEventEntries,
   type RuntimeSessionForkSeedEntry,
 } from "../engine/session-runtime-projection.js";
-import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
+import {
+  appendRuntimeEventBatchWithArbitration,
+  appendRuntimeEventWithArbitration,
+  SqliteRuntimeEventStore,
+} from "../storage/sqlite/sqlite-runtime-event-store.js";
 
 interface RuntimeRunContext {
   readonly run: RuntimeRun;
@@ -103,6 +109,12 @@ interface RuntimeRunBaseOptions {
   readonly parentRunId?: string;
   readonly parentToolCallId?: string;
   readonly now?: () => Date;
+  /**
+   * ADR 29 续跑声明(可选):调用方在 claimContinuation 成功后传入,写入
+   * run.started 的 data.continuationOf。前缀事件同 session 事件流天然可见,
+   * 模型上下文无需特判;跨 session 续跑不在 ADR 29 范围。
+   */
+  readonly continuationOf?: RuntimeRunContinuationOf;
 }
 
 export interface RuntimeRunStartOptions extends Omit<
@@ -222,6 +234,8 @@ interface PendingRuntimeToolCall {
   readonly toolCall: ToolCall;
   readonly callIndex: number;
   resolved: boolean;
+  /** 派发事实（ADR 27 P0）：run 账本内存在配对的 tool.started（先于 execute 落库）。 */
+  dispatched: boolean;
 }
 
 interface PendingRegisteredToolResult {
@@ -295,6 +309,7 @@ export class RuntimeRun {
   private readonly now: () => Date;
   private readonly runStartedEventId?: string;
   private readonly terminalEventId?: string;
+  private readonly continuationOf?: RuntimeRunContinuationOf;
   private readonly writeGuard: RuntimeEventWriteGuard;
   private readonly parentRefs?: Pick<RuntimeEventRefs, "parentRunId" | "parentToolCallId">;
   private readonly pendingToolResults = new Map<string, PendingRegisteredToolResult[]>();
@@ -317,6 +332,9 @@ export class RuntimeRun {
     this.now = options.now ?? (() => new Date());
     this.runStartedEventId = options.runStartedEventId;
     this.terminalEventId = options.terminalEventId;
+    this.continuationOf = options.continuationOf
+      ? structuredClone(options.continuationOf)
+      : undefined;
     this.writeGuard = options.writeGuard;
     this.parentRefs = compactRefs({
       ...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),
@@ -1285,7 +1303,13 @@ export class RuntimeRun {
         "internal",
       ),
       kind: "run.started",
-      data: { workDir: this.canonicalWorkDir },
+      data: {
+        workDir: this.canonicalWorkDir,
+        // ADR 29:续跑目标 run 的确定性前缀锚(claimContinuation 成功后由调用方声明)。
+        ...(this.continuationOf
+          ? { continuationOf: structuredClone(this.continuationOf) }
+          : {}),
+      },
     };
     await this.append(event);
   }
@@ -1331,13 +1355,15 @@ export class RuntimeRun {
   }
 
   private append(event: RuntimeEvent): Promise<RuntimeEventStoreAppendResult> {
-    return this.writeCanonicalEvent(() => this.store.append(event));
+    return this.writeCanonicalEvent(() => appendRuntimeEventWithArbitration(this.store, event));
   }
 
   private appendBatch(
     events: readonly RuntimeEvent[],
   ): Promise<readonly RuntimeEventStoreAppendResult[]> {
-    return this.writeCanonicalEvent(() => this.store.appendBatch(events));
+    return this.writeCanonicalEvent(() =>
+      appendRuntimeEventBatchWithArbitration(this.store, events),
+    );
   }
 
   /** Checks the live Session lease on both sides of every canonical write attempt. */
@@ -1423,6 +1449,17 @@ function findDanglingRuntimeToolCalls(
   const unresolvedByToolCallId = new Map<string, PendingRuntimeToolCall[]>();
 
   for (const event of events) {
+    // ADR 27 P0（F1/F2 判定边界）：tool.started 在 registry.execute 之前落库
+    // （src/engine/loop.ts runOneTool / 子代理并发循环均如此），因此它的存在
+    // 即“已派发”的 durable 事实。按 toolCallId 与 pending 队列保持与 result
+    // 相同的 FIFO 配对口径（多 result/多 start 的重试场景逐个配对）。
+    if (event.kind === "tool.started") {
+      const startedCallId = event.refs?.toolCallId;
+      const unresolved = startedCallId ? unresolvedByToolCallId.get(startedCallId) : undefined;
+      const dispatchedEntry = unresolved?.find((entry) => !entry.dispatched);
+      if (dispatchedEntry) dispatchedEntry.dispatched = true;
+      continue;
+    }
     if (!runtimeEventHasModelHistoryEntry(event)) continue;
     // Rewind keeps canonical facts but removes them from the active Session projection.
     // Both a call and its result must be matched inside that same active projection.
@@ -1436,6 +1473,7 @@ function findDanglingRuntimeToolCalls(
           toolCall,
           callIndex,
           resolved: false,
+          dispatched: false,
         };
         pending.push(entry);
         const unresolved = unresolvedByToolCallId.get(toolCall.id) ?? [];
@@ -1571,7 +1609,15 @@ function buildInterruptedToolResultEvent(
     ...(toolContext?.refs ?? {}),
     toolCallId: pending.toolCall.id,
   });
-  const content = "工具执行已中断: 运行进程在该工具结果持久化前终止；该调用未获得可用结果。";
+  // ADR 27 P0 恢复决策表：tool.started 已落库（dispatched）→ indeterminate
+  // （副作用可能已发生，结果未知）；否则 → not_dispatched（从未交给执行器）。
+  // 模型可见文案（projection.text）必须与分类如实一致。
+  const classification: RuntimeToolRecoveryClassification = pending.dispatched
+    ? "indeterminate"
+    : "not_dispatched";
+  const content = pending.dispatched
+    ? "工具执行状态未知：该工具调用已被派发，但运行进程在结果持久化前终止。该工具可能已实际执行，其副作用（例如文件写入、外部请求）可能已经发生，实际执行结果未知。请勿假定该调用未执行；如需确认实际效果，请先用只读工具核查。"
+    : "工具未执行：运行进程在该工具派发前终止，该调用从未交给执行器执行，未发生任何副作用。";
   const { evidence: _evidence, ...inlineRefs } = refs ?? {};
   return {
     schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
@@ -1610,6 +1656,7 @@ function buildInterruptedToolResultEvent(
         strategy: "runtime-interruption-recovery",
         truncated: false,
       },
+      recovery: { classification },
     },
   };
 }

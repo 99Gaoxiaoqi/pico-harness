@@ -143,7 +143,8 @@ import type {
   RuntimeNotificationCursor,
   ShutdownOwnershipFence,
 } from "./service.js";
-import { DesktopConversationStateStore } from "./desktop-conversation-state.js";
+import type { DesktopConversationStateStoreLike } from "./desktop-conversation-state.js";
+import { SqliteDesktopConversationStateStore } from "../storage/sqlite/sqlite-desktop-conversation-state-store.js";
 import type { PlanControlPort } from "./plan-control-port.js";
 import { PlanCoordinator } from "../plan/coordinator.js";
 import { createDesktopProviderRequestHandlers } from "./desktop-provider-request-handlers.js";
@@ -238,7 +239,7 @@ export interface DesktopRuntimeServiceOptions {
   readonly runtimeService: WorkspaceRuntimeService;
   readonly registrationStore?: WorkspaceRegistrationStore;
   readonly trustStore?: WorkspaceTrustStore;
-  readonly conversationStateStore?: DesktopConversationStateStore;
+  readonly conversationStateStore?: DesktopConversationStateStoreLike;
   readonly interactions?: DesktopRuntimeInteractions;
   readonly planControl?: PlanControlPort;
   readonly automations?: DesktopAutomationService;
@@ -298,7 +299,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private readonly userConfigRevisionTokenKey = randomBytes(32);
   private readonly registrationStore: WorkspaceRegistrationStore;
   private readonly trustStore: WorkspaceTrustStore;
-  private readonly conversationStateStore: DesktopConversationStateStore;
+  private readonly conversationStateStore: DesktopConversationStateStoreLike;
   private readonly env: Readonly<Record<string, string | undefined>>;
   private readonly picoHome: string;
   private readonly providerFactory: typeof createProvider;
@@ -348,7 +349,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       options.trustStore ?? new WorkspaceTrustStore({ userStateDirectory: this.picoHome });
     this.conversationStateStore =
       options.conversationStateStore ??
-      new DesktopConversationStateStore({ picoHome: this.picoHome });
+      new SqliteDesktopConversationStateStore({ picoHome: this.picoHome });
     this.providerFactory = options.providerFactory ?? createProvider;
     this.userConfigStore =
       options.userConfigStore ?? new UserConfigStore({ picoHome: this.picoHome });
@@ -1923,7 +1924,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       inputKey: next.queueId,
       runStartKey: desktopRunStartIdempotencyKey("queue", next.queueId),
     });
-    await this.conversationStateStore.removeQueued(next.queueId);
+    await this.conversationStateStore.removeQueued(workspacePath, next.queueId);
   }
 
   private async persistRuntimeNotification(event: RuntimeNotification): Promise<void> {

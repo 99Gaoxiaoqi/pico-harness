@@ -9,6 +9,7 @@ import { resolvePicoPaths } from "../paths/pico-paths.js";
 import type { CliSessionSelection } from "../cli/session-resolver.js";
 import { logger } from "../observability/logger.js";
 import { RuntimeRun } from "./runtime-run.js";
+import type { RuntimeRunContinuationOf } from "../engine/session-runtime-event.js";
 import type { MemoryReviewSchedulerPort } from "../memory/runtime-scheduler.js";
 import type { PlanHandoffController } from "../engine/plan-handoff.js";
 import type { PlanCoordinator } from "../plan/coordinator.js";
@@ -43,6 +44,12 @@ export interface RuntimeRunExecutorInput {
    * RuntimeRun.start reuses this exact fact; it must not create another run.started.
    */
   readonly prestartedRun?: PrestartedRuntimeRun;
+  /**
+   * ADR 29 续跑声明(可选):声明本次 run 是某个 interrupted run 的续跑。
+   * 调用方须先 store.claimContinuation 成功;三元组写入 run.started 的
+   * data.continuationOf(与 prestartedRun 互斥:prestarted 事实已定形)。
+   */
+  readonly continuationOf?: RuntimeRunContinuationOf;
   readonly traceEnabled: boolean;
   readonly options: RuntimeRunOptions;
   readonly signal?: AbortSignal;
@@ -121,6 +128,9 @@ export class RuntimeRunExecutor {
               parentRunId: prestartedRun.parentRunId,
               now: prestartedRunClock(prestartedRun.runStartedAt),
             }
+          : {}),
+        ...(this.input.continuationOf && !prestartedRun
+          ? { continuationOf: this.input.continuationOf }
           : {}),
       });
       let submittedUserMessage =

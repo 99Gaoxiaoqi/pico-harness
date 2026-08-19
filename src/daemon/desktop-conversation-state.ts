@@ -6,9 +6,9 @@ import { writeJsonAtomic } from "../storage/atomic-json.js";
 import type { JsonObject, RuntimeUserInput } from "./protocol.js";
 
 const DESKTOP_CONVERSATION_STATE_VERSION = 2 as const;
-const MAX_IDEMPOTENCY_RECORDS = 500;
-const MAX_FIRST_SEND_CLAIMS = 500;
-const FIRST_SEND_CLAIM_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
+export const MAX_IDEMPOTENCY_RECORDS = 500;
+export const MAX_FIRST_SEND_CLAIMS = 500;
+export const FIRST_SEND_CLAIM_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 
 export interface DesktopQueuedInput {
   readonly queueId: string;
@@ -18,13 +18,14 @@ export interface DesktopQueuedInput {
   readonly createdAt: number;
 }
 
-interface DesktopIdempotencyRecord {
+export interface DesktopIdempotencyRecord {
   readonly workspacePath: string;
   readonly key: string;
   readonly requestFingerprint: string;
   readonly result: JsonObject;
   readonly createdAt: number;
 }
+
 
 export interface DesktopFirstSendClaim {
   readonly workspacePath: string;
@@ -34,7 +35,7 @@ export interface DesktopFirstSendClaim {
   readonly createdAt: number;
 }
 
-interface DesktopConversationStateFile {
+export interface DesktopConversationStateFile {
   readonly version: typeof DESKTOP_CONVERSATION_STATE_VERSION;
   readonly queuedInputs: readonly DesktopQueuedInput[];
   readonly idempotency: readonly DesktopIdempotencyRecord[];
@@ -49,8 +50,47 @@ export interface DesktopConversationStateStoreOptions {
   readonly generateId?: () => string;
 }
 
-/** Durable desktop control state. Conversation facts remain exclusively in the RuntimeEvent ledger. */
-export class DesktopConversationStateStore {
+/**
+ * 对外契约(ADR 28):JSON 与 SQLite 两个实现共同满足的形状,调用方
+ * (DesktopRuntimeService)只依赖本接口。`removeQueued` 携带 workspacePath:
+ * SQLite 实现按 workspace 库分片,queueId 只有在 workspace 上下文内才可定位。
+ */
+export interface DesktopConversationStateStoreLike {
+  listQueued(workspacePath: string, sessionId: string): Promise<DesktopQueuedInput[]>;
+  enqueue(
+    workspacePath: string,
+    sessionId: string,
+    input: RuntimeUserInput,
+  ): Promise<DesktopQueuedInput>;
+  removeQueued(workspacePath: string, queueId: string): Promise<void>;
+  clearQueued(workspacePath: string, sessionId: string): Promise<void>;
+  getIdempotent(
+    workspacePath: string,
+    key: string,
+  ): Promise<Pick<DesktopIdempotencyRecord, "requestFingerprint" | "result"> | undefined>;
+  getFirstSendClaim(
+    workspacePath: string,
+    key: string,
+  ): Promise<DesktopFirstSendClaim | undefined>;
+  claimFirstSend(
+    workspacePath: string,
+    key: string,
+    sessionId: string,
+    requestFingerprint: string,
+  ): Promise<DesktopFirstSendClaim>;
+  rememberIdempotent(
+    workspacePath: string,
+    key: string,
+    requestFingerprint: string,
+    result: JsonObject,
+  ): Promise<void>;
+}
+
+/**
+ * Legacy JSON 实现($PICO_HOME/desktop/conversation-state.json,writeJsonAtomic)。
+ * ADR 28 后默认装配切到 SQLite 实现;本类保留为兼容读取面与一次性迁移的格式基准。
+ */
+export class DesktopConversationStateStore implements DesktopConversationStateStoreLike {
   readonly filePath: string;
   private readonly now: () => number;
   private readonly generateId: () => string;
@@ -97,11 +137,14 @@ export class DesktopConversationStateStore {
     return queued;
   }
 
-  async removeQueued(queueId: string): Promise<void> {
+  async removeQueued(workspacePath: string, queueId: string): Promise<void> {
+    const canonical = normalizeWorkspacePath(workspacePath);
     const normalized = requireNonEmpty(queueId, "queueId");
     await this.mutate((state) => ({
       ...state,
-      queuedInputs: state.queuedInputs.filter((input) => input.queueId !== normalized),
+      queuedInputs: state.queuedInputs.filter(
+        (input) => input.workspacePath !== canonical || input.queueId !== normalized,
+      ),
     }));
   }
 
@@ -228,7 +271,10 @@ export class DesktopConversationStateStore {
 
   private async read(): Promise<DesktopConversationStateFile> {
     try {
-      return parseState(JSON.parse(await readFile(this.filePath, "utf8")), this.filePath);
+      return parseDesktopConversationStateFile(
+        JSON.parse(await readFile(this.filePath, "utf8")),
+        this.filePath,
+      );
     } catch (error) {
       if (isNodeCode(error, "ENOENT")) return emptyState();
       throw error;
@@ -245,7 +291,11 @@ function emptyState(): DesktopConversationStateFile {
   };
 }
 
-function parseState(value: unknown, filePath: string): DesktopConversationStateFile {
+/** Legacy JSON 文件的 fail-closed 解析(供 SQLite 一次性迁移复用)。 */
+export function parseDesktopConversationStateFile(
+  value: unknown,
+  filePath: string,
+): DesktopConversationStateFile {
   if (
     !isRecord(value) ||
     value["version"] !== DESKTOP_CONVERSATION_STATE_VERSION ||
@@ -320,6 +370,14 @@ function parseStoredInput(value: Record<string, unknown>, filePath: string): Run
   throw new Error(`Desktop conversation queue contains an invalid input: ${filePath}`);
 }
 
+/** 已存储队列 input 的 fail-closed 形状校验(SQLite 实现读回时复用)。 */
+export function parseDesktopQueuedInputRecord(value: unknown): RuntimeUserInput {
+  if (!isRecord(value)) {
+    throw new Error("Desktop conversation queue row contains an invalid input payload");
+  }
+  return parseStoredInput({ input: value }, "desktop_input_queue");
+}
+
 function parseIdempotency(value: unknown, filePath: string): DesktopIdempotencyRecord {
   if (
     !isRecord(value) ||
@@ -378,11 +436,11 @@ function retainFirstSendClaims(
     .slice(0, MAX_FIRST_SEND_CLAIMS);
 }
 
-function normalizeWorkspacePath(workspacePath: string): string {
+export function normalizeWorkspacePath(workspacePath: string): string {
   return resolve(requireNonEmpty(workspacePath, "workspacePath")).normalize("NFC");
 }
 
-function requireNonEmpty(value: string, field: string): string {
+export function requireNonEmpty(value: string, field: string): string {
   const normalized = value.trim();
   if (!normalized) throw new Error(`${field} must be a non-empty string`);
   return normalized;

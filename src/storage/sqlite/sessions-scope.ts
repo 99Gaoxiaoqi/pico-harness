@@ -26,6 +26,12 @@ import type { SqliteSchemaScope } from "./sqlite-schema.js";
  * - `session_messages`:message.committed / tool.result.recorded(visibility=model
  *   且非 partial)的同事务物化;payload_json 为投影 Message canonical JSON,
  *   可从事件全量重建,启动恢复直读本表。
+ *
+ * migration 3(ADR 29):continuation claim 表。`runtime_continuation_claims` 是
+ * 中断 run 的确定性续跑锚——(source_session_id, source_run_id) UNIQUE 保证一个
+ * source run 至多被 claim 一次(C1);source_high_water/source_prefix_digest 冻结
+ * claim 时刻的源前缀完整性;claim 由 store 单 BEGIN IMMEDIATE 事务写入
+ * (claimContinuation),与源账本读取同事务快照。
  */
 
 export const SESSIONS_SCOPE_NAME = "sessions";
@@ -129,6 +135,25 @@ export const SESSIONS_SCOPE: SqliteSchemaScope = {
             activity_at = COALESCE(NEW.last_event_at, NEW.created_at)
         WHERE session_id = OLD.session_id;
       END;
+      `,
+    ],
+    [
+      3,
+      `
+      CREATE TABLE runtime_continuation_claims (
+        claim_id TEXT PRIMARY KEY,
+        source_session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+        source_run_id TEXT NOT NULL,
+        source_high_water INTEGER NOT NULL CHECK (source_high_water > 0),
+        source_prefix_digest TEXT NOT NULL CHECK (length(source_prefix_digest) = 64),
+        target_session_id TEXT NOT NULL,
+        target_run_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (source_session_id, source_run_id),
+        UNIQUE (target_session_id, target_run_id)
+      );
+      CREATE INDEX continuation_claims_by_target_run
+        ON runtime_continuation_claims(target_session_id, target_run_id);
       `,
     ],
   ]),

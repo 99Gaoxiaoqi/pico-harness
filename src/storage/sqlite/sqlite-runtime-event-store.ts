@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -35,12 +35,15 @@ import {
   RuntimeEventStoreHighWaterConflictError,
   RuntimeEventStoreIntegrityError,
   RuntimeEventStorePlanOperationConflictError,
+  RuntimeEventStoreRunSealedError,
   SessionCatalogIntegrityError,
   createRuntimeEventId,
   type AppendRuntimeEventBatchOptions,
   type AppendRuntimeSessionStateOptions,
   type AppendRuntimeTranscriptEventOptions,
   type InitializeRuntimeSessionOptions,
+  type RuntimeContinuationClaim,
+  type RuntimeContinuationClaimOutcome,
   type RuntimeEventStoreAppendResult,
   type RuntimeEventStoreEntry,
   type RuntimeEventStoreEntryPageOptions,
@@ -53,6 +56,7 @@ import {
   type WorkspaceRuntimeSessionSnapshot,
 } from "../runtime-event-store-contracts.js";
 import { operationalDatabasePath, type OperationalDatabaseLease } from "./sqlite-database.js";
+import { logger } from "../../observability/logger.js";
 import { ALL_WORKSPACE_SQLITE_SCOPES } from "./workspace-scopes.js";
 import { prepareWorkspaceSqliteStorageSync } from "./sqlite-workspace-storage.js";
 
@@ -168,7 +172,7 @@ export class SqliteRuntimeEventStore {
     if (!sessionId || events.some((event) => event.sessionId !== sessionId)) {
       throw new Error("Plan operation events must belong to one session");
     }
-    return this.appendBatch(events, {
+    return appendRuntimeEventBatchWithArbitration(this, events, {
       expectedSessionHighWater: { [sessionId]: operation.expectedSessionSequence },
       planOperation: operation,
     });
@@ -190,7 +194,7 @@ export class SqliteRuntimeEventStore {
     if (!sessionId || events.some((event) => event.sessionId !== sessionId)) {
       throw new Error("Graph operation events must belong to one session");
     }
-    return this.appendBatch(events, {
+    return appendRuntimeEventBatchWithArbitration(this, events, {
       expectedSessionHighWater: { [sessionId]: operation.expectedSessionSequence },
       planOperation: operation,
     });
@@ -203,23 +207,10 @@ export class SqliteRuntimeEventStore {
   ): Promise<RuntimeEventStoreAppendResult> {
     const normalized = normalizeSessionRuntimeStateWritePatch(patch);
     if (!normalized) throw new Error("Runtime session state write patch is invalid");
-    const at = (options.now ?? (() => new Date()))().toISOString();
-    return this.append({
-      schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
-      eventId: options.eventId ?? createRuntimeEventId("session-state"),
-      sessionId,
-      invocationId: `session:${sessionId}:state`,
-      runId: "session-state",
-      turnId: "session-state",
-      at,
-      partial: false,
-      visibility: "internal",
-      kind: "session.state.committed",
-      data: {
-        stateVersion: SESSION_RUNTIME_STATE_VERSION,
-        patch: structuredClone(normalized),
-      },
-    });
+    return appendRuntimeEventWithArbitration(
+      this,
+      sessionStateRuntimeEventOf(sessionId, normalized, options),
+    );
   }
 
   async appendTranscriptEvent(
@@ -227,19 +218,10 @@ export class SqliteRuntimeEventStore {
     event: DurableTranscriptEvent,
     options: AppendRuntimeTranscriptEventOptions = {},
   ): Promise<RuntimeEventStoreAppendResult> {
-    return this.append({
-      schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
-      eventId: options.eventId ?? `transcript:${event.eventId}`,
-      sessionId,
-      invocationId: `session:${sessionId}:transcript`,
-      runId: "session-transcript",
-      turnId: "transcript",
-      at: new Date(event.createdAt).toISOString(),
-      partial: false,
-      visibility: "transcript",
-      kind: "transcript.event.recorded",
-      data: { event: structuredClone(event) },
-    });
+    return appendRuntimeEventWithArbitration(
+      this,
+      transcriptRuntimeEventOf(sessionId, event, options),
+    );
   }
 
   async readRun(sessionId: string, runId: string): Promise<RuntimeEvent[]> {
@@ -263,6 +245,34 @@ export class SqliteRuntimeEventStore {
         )
         .get(sessionId, eventId);
       return row === undefined ? undefined : entryFromRow(assertEventRow(row));
+    });
+  }
+
+  /**
+   * event_id 批量点查(单读事务,只读)。ADR 27 P1 写失败读回仲裁专用:
+   * 与 appendBatchLocked 幂等分支同一条 event_id 主键点查路径(readEventRow),
+   * canonical 载荷比较沿用 payload_json 字符串口径,不引入第二种比较。
+   */
+  async readEventRowsByEventIds(
+    eventIds: readonly string[],
+  ): Promise<ReadonlyMap<string, RuntimeEventPointRead>> {
+    return this.read(() => {
+      const rows = new Map<string, RuntimeEventPointRead>();
+      for (const eventId of eventIds) {
+        const row = this.readEventRow(eventId);
+        if (!row) continue;
+        rows.set(
+          row.event_id,
+          {
+            eventId: row.event_id,
+            sessionId: row.session_id,
+            eventSeq: row.event_seq,
+            payloadJson: row.payload_json,
+            at: row.at,
+          },
+        );
+      }
+      return rows;
     });
   }
 
@@ -328,6 +338,145 @@ export class SqliteRuntimeEventStore {
       entries: this.readRunEntriesLocked(sessionId, runId),
       headSequence: this.readHeadSequenceLocked(sessionId),
     }));
+  }
+
+  // ------------------------------------------------------------------
+  // runtime_continuation_claims:ADR 29 continuation claim(中断 run 续跑锚)
+  // ------------------------------------------------------------------
+
+  /**
+   * ADR 29:claim 一个 interrupted 终态的 source run 作为续跑前缀锚。
+   *
+   * 全部步骤在单个 BEGIN IMMEDIATE 写事务内完成(与并发 append/claim 串行化,
+   * 事务内预查即终局,不依赖捕获 UNIQUE 约束异常):
+   * 1. 预查 (source_session_id, source_run_id) 既有 claim → already_claimed
+   *    (C1 冲突返回类型化结果,不抛裸 SqliteError);target run 已被占用 →
+   *    rejected(target_conflict);
+   * 2. 读源 run 账本(run 索引):无事件 → run_not_found;无 run.terminal →
+   *    run_active(活跃 run 不可被 claim);终态非 interrupted →
+   *    run_not_interrupted(C2 前半);
+   * 3. source_high_water = 该 run 全部事件的 seq 上界(末条 run 事件的
+   *    event_seq);digest 覆盖会话账本 seq∈[1..high_water] 的**全部**事件
+   *    (含 interleaved 的其他 run 事件——会话账本是单一序列,续跑锚引用的是
+   *    会话前缀,与模型上下文"同 session 事件流天然含前缀"的口径一致);
+   * 4. INSERT claim 行(C3:claim 事务只读源账本、只写 claims 行)。
+   *
+   * 源封口(C4)不由本方法承担:interrupted 终态本身即触发 appendBatchLocked
+   * 的 run seal 防线,claim 只需终态校验。
+   */
+  async claimContinuation(
+    sourceSessionId: string,
+    sourceRunId: string,
+    targetRunId: string,
+    options: { readonly now?: () => Date } = {},
+  ): Promise<RuntimeContinuationClaimOutcome> {
+    return this.write(() => {
+      const existingBySource = this.readContinuationClaimRowLocked(
+        "SELECT " + CONTINUATION_CLAIM_ROW_COLUMNS + " FROM runtime_continuation_claims WHERE source_session_id = ? AND source_run_id = ?",
+        [sourceSessionId, sourceRunId],
+      );
+      if (existingBySource) {
+        return { status: "already_claimed" as const, claim: existingBySource };
+      }
+      const existingByTarget = this.readContinuationClaimRowLocked(
+        "SELECT " + CONTINUATION_CLAIM_ROW_COLUMNS + " FROM runtime_continuation_claims WHERE target_session_id = ? AND target_run_id = ?",
+        [sourceSessionId, targetRunId],
+      );
+      if (existingByTarget) {
+        return { status: "rejected" as const, reason: "target_conflict" as const };
+      }
+
+      const runEntries = this.readRunEntriesLocked(sourceSessionId, sourceRunId);
+      if (runEntries.length === 0) {
+        return { status: "rejected" as const, reason: "run_not_found" as const };
+      }
+      const terminal = runEntries
+        .map(({ event }) => event)
+        .find(
+          (event): event is Extract<RuntimeEvent, { kind: "run.terminal" }> =>
+            event.kind === "run.terminal",
+        );
+      if (!terminal) {
+        return { status: "rejected" as const, reason: "run_active" as const };
+      }
+      if (terminal.data.status !== "interrupted") {
+        return { status: "rejected" as const, reason: "run_not_interrupted" as const };
+      }
+      // 前缀 = 该 run 全部事件的 seq 上界:run 事件按 event_seq 升序读出,末条即上界。
+      const highWater = runEntries.at(-1)!.sequence;
+      const prefixRows = this.lease.database
+        .prepare(
+          "SELECT event_seq, event_id, payload_json FROM runtime_events WHERE session_id = ? AND event_seq <= ? ORDER BY event_seq ASC",
+        )
+        .all(sourceSessionId, highWater) as Array<Record<string, unknown>>;
+      // 账本 seq 由 MAX+1 稠密分配且不删行;前缀缺洞即 digest 不完整,fail-closed。
+      if (prefixRows.length !== highWater) {
+        throw new RuntimeEventStoreIntegrityError(
+          `Runtime session ${sourceSessionId} prefix up to ${highWater} is not dense`,
+        );
+      }
+      const claim: RuntimeContinuationClaim = {
+        claimId: createRuntimeEventId("continuation-claim"),
+        sourceSessionId,
+        sourceRunId,
+        sourceHighWater: highWater,
+        sourcePrefixDigest: continuationPrefixDigest(prefixRows),
+        // ADR 29:跨 session 续跑不在本决策——target 与 source 同 session。
+        targetSessionId: sourceSessionId,
+        targetRunId,
+        createdAt: (options.now ?? (() => new Date()))().toISOString(),
+      };
+      this.lease.database
+        .prepare(
+          `INSERT INTO runtime_continuation_claims (
+             claim_id, source_session_id, source_run_id, source_high_water,
+             source_prefix_digest, target_session_id, target_run_id, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          claim.claimId,
+          claim.sourceSessionId,
+          claim.sourceRunId,
+          claim.sourceHighWater,
+          claim.sourcePrefixDigest,
+          claim.targetSessionId,
+          claim.targetRunId,
+          claim.createdAt,
+        );
+      return { status: "claimed" as const, claim };
+    });
+  }
+
+  /** 按 source run 点查既有 claim(claim 结果读回/对账用,只读事务)。 */
+  async findContinuationClaimBySourceRun(
+    sessionId: string,
+    runId: string,
+  ): Promise<RuntimeContinuationClaim | undefined> {
+    return this.read(() =>
+      this.readContinuationClaimRowLocked(
+        "SELECT " + CONTINUATION_CLAIM_ROW_COLUMNS + " FROM runtime_continuation_claims WHERE source_session_id = ? AND source_run_id = ?",
+        [sessionId, runId],
+      ),
+    );
+  }
+
+  private readContinuationClaimRowLocked(
+    sql: string,
+    params: readonly SQLInputValue[],
+  ): RuntimeContinuationClaim | undefined {
+    const row = this.lease.database.prepare(sql).get(...params);
+    return row === undefined ? undefined : continuationClaimFromRow(row as Record<string, unknown>);
+  }
+
+  /** ADR 29 §4(claim-scoped) 源封口点查;只在写事务内调用。 */
+  private hasContinuationClaimLocked(sessionId: string, runId: string): boolean {
+    return (
+      this.lease.database
+        .prepare(
+          "SELECT 1 FROM runtime_continuation_claims WHERE source_session_id = ? AND source_run_id = ? LIMIT 1",
+        )
+        .get(sessionId, runId) !== undefined
+    );
   }
 
   private async readSessionEntryOfKindLocked(
@@ -1137,6 +1286,10 @@ export class SqliteRuntimeEventStore {
          partial, tx_id, tool_call_id, provider_call_id, operation_id, payload_json, at, committed_at
        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
+    // ADR 29 §4(修订:claim-scoped) 源封口缓存:key `${sessionId}\0${runId}`。
+    // 仅对已被 continuation claim 的 source run 拒收——claim 存在 ⇒ claim 时该 run 已终态。
+    // 终态但未被 claim 的 run 保持历史开放语义(fork 工作流/记忆通道存在合法的终态后写入路径)。
+    const runSealCache = new Map<string, boolean>();
     for (const event of canonicalEvents) {
       const context = contexts.get(event.sessionId)!;
       const existing = existingRows.get(event.eventId);
@@ -1151,6 +1304,19 @@ export class SqliteRuntimeEventStore {
           ),
         );
         continue;
+      }
+      // ADR 29 §4 源封口(fail-closed):已被 claim 的 source run 拒收新的非恢复类事件。
+      // 幂等重放(上方 existing 分支)不受影响——崩溃后重试同 eventId 永远合法。
+      if (!isRecoveryClassSealedAppend(event)) {
+        const sealKey = `${event.sessionId}\u0000${event.runId}`;
+        let claimed = runSealCache.get(sealKey);
+        if (claimed === undefined) {
+          claimed = this.hasContinuationClaimLocked(event.sessionId, event.runId);
+          runSealCache.set(sealKey, claimed);
+        }
+        if (claimed) {
+          throw new RuntimeEventStoreRunSealedError(event.sessionId, event.runId, event.eventId);
+        }
       }
       const sequence = context.nextSequence;
       context.nextSequence += 1;
@@ -1175,6 +1341,9 @@ export class SqliteRuntimeEventStore {
       );
       context.appendedCount += 1;
       context.appendedBytes += payloadJson.length;
+      if (event.kind === "run.terminal") {
+        runSealCache.set(`${event.sessionId}\u0000${event.runId}`, true);
+      }
       // 增量折叠只吃本批真正 INSERT 的事件(幂等重放不折叠,防 headSequence 超前)。
       context.fold = foldSessionSummaryEvent(context.fold, event);
       context.lastAppendedAt = event.at;
@@ -1365,6 +1534,138 @@ export class SqliteRuntimeEventStore {
   }
 }
 
+/** 读回仲裁点查行(ADR 27 P1):event_id 主键命中行的原始列快照。 */
+export interface RuntimeEventPointRead {
+  readonly eventId: string;
+  readonly sessionId: string;
+  readonly eventSeq: number;
+  readonly payloadJson: string;
+  readonly at: string;
+}
+
+/**
+ * ADR 27 P1 写失败读回仲裁:包装一次 durable appendBatch,异常时点查该批全部
+ * event_id(复用幂等读路径的 event_id 主键点查 + canonical payload 口径):
+ * - 全部落地且载荷等价 → 判定实际已成功,用读回结果等价正常返回(inserted:false),
+ *   会话保持可写,不进 write_uncertain;
+ * - 任一缺失/载荷不等价/属于另一会话 → 重抛原始异常(照旧保守失败);
+ * - 读回自身失败(存储不可用) → 同样重抛(仲裁异常等价于不仲裁)。
+ *
+ * 只仲裁"结果模糊"的失败。store 的确定性拒绝(完整性错误、plan/graph
+ * fingerprint CAS 冲突、高水位 CAS 冲突)不模糊——事务确定没有提交,且读回
+ * 载荷相等不代表 options 信封(CAS/fingerprint)语义成立,一律原样重抛。
+ * 仲裁路径只读,不产生任何新写入(A2)。owner lease 检查在调用方守卫层
+ * (writeWithRuntimeEventGuard / Session.enqueuePersistence),不经过本函数:
+ * lease 丢失仍直接 fail-closed(P1.2)。
+ */
+export async function appendRuntimeEventBatchWithArbitration(
+  store: SqliteRuntimeEventStore,
+  events: readonly RuntimeEvent[],
+  options: AppendRuntimeEventBatchOptions = {},
+): Promise<readonly RuntimeEventStoreAppendResult[]> {
+  try {
+    return await store.appendBatch(events, options);
+  } catch (error) {
+    if (isDeterministicStoreRefusal(error)) throw error;
+    const recovered = await arbitrateDurableAppendFailure(store, events).catch(
+      () => undefined,
+    );
+    if (!recovered) throw error;
+    logger.warn(
+      { eventIds: [...new Set(events.map((event) => event.eventId))] },
+      "[runtime-event-store] durable append 失败但读回仲裁确认全部落地,按已成功继续",
+    );
+    return recovered;
+  }
+}
+
+/** store 契约层确定性拒绝(事务未提交,读回翻案会掩盖 CAS/完整性语义)。 */
+function isDeterministicStoreRefusal(error: unknown): boolean {
+  return (
+    error instanceof RuntimeEventStoreIntegrityError ||
+    error instanceof RuntimeEventStorePlanOperationConflictError ||
+    error instanceof RuntimeEventStoreHighWaterConflictError
+  );
+}
+
+/** 单事件 append 的读回仲裁同构包装(append ≡ appendBatch([event]) 首元素)。 */
+export async function appendRuntimeEventWithArbitration(
+  store: SqliteRuntimeEventStore,
+  event: RuntimeEvent,
+): Promise<RuntimeEventStoreAppendResult> {
+  const results = await appendRuntimeEventBatchWithArbitration(store, [event]);
+  return results[0]!;
+}
+
+/**
+ * 仲裁本体:逐事件点查。任一 event_id 缺失、绑定到另一会话、或 canonical
+ * payload 不等价(与 appendBatchLocked 幂等分支同一条比较)即返回 undefined,
+ * 只允许"确认全部落地"一种翻案(A1)。读回抛错由调用方 catch 为不仲裁(A3)。
+ */
+async function arbitrateDurableAppendFailure(
+  store: SqliteRuntimeEventStore,
+  events: readonly RuntimeEvent[],
+): Promise<readonly RuntimeEventStoreAppendResult[] | undefined> {
+  const rows = await store.readEventRowsByEventIds(
+    [...new Set(events.map((event) => event.eventId))],
+  );
+  const results: RuntimeEventStoreAppendResult[] = [];
+  for (const event of events) {
+    const row = rows.get(event.eventId);
+    if (!row) return undefined;
+    if (row.sessionId !== event.sessionId) return undefined;
+    if (row.payloadJson !== canonicalJson(canonicalizeRuntimeEvent(event))) {
+      return undefined;
+    }
+    results.push(appendResultFor(event.sessionId, row.eventSeq, row.eventId, row.at, false));
+  }
+  return results;
+}
+
+function sessionStateRuntimeEventOf(
+  sessionId: string,
+  normalized: SessionRuntimeStateWritePatch,
+  options: AppendRuntimeSessionStateOptions,
+): RuntimeEvent {
+  const at = (options.now ?? (() => new Date()))().toISOString();
+  return {
+    schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
+    eventId: options.eventId ?? createRuntimeEventId("session-state"),
+    sessionId,
+    invocationId: `session:${sessionId}:state`,
+    runId: "session-state",
+    turnId: "session-state",
+    at,
+    partial: false,
+    visibility: "internal",
+    kind: "session.state.committed",
+    data: {
+      stateVersion: SESSION_RUNTIME_STATE_VERSION,
+      patch: structuredClone(normalized),
+    },
+  };
+}
+
+function transcriptRuntimeEventOf(
+  sessionId: string,
+  event: DurableTranscriptEvent,
+  options: AppendRuntimeTranscriptEventOptions,
+): RuntimeEvent {
+  return {
+    schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
+    eventId: options.eventId ?? `transcript:${event.eventId}`,
+    sessionId,
+    invocationId: `session:${sessionId}:transcript`,
+    runId: "session-transcript",
+    turnId: "transcript",
+    at: new Date(event.createdAt).toISOString(),
+    partial: false,
+    visibility: "transcript",
+    kind: "transcript.event.recorded",
+    data: { event: structuredClone(event) },
+  };
+}
+
 interface SessionRow {
   readonly session_id: string;
   readonly work_dir: string;
@@ -1527,6 +1828,67 @@ function sortKeysDeep(value: unknown): unknown {
     return sorted;
   }
   return value;
+}
+
+// ---------------------------------------------------------------------------
+// ADR 29 continuation claim:行 decode、前缀 digest、run seal 恢复类豁免
+// ---------------------------------------------------------------------------
+
+const CONTINUATION_CLAIM_ROW_COLUMNS =
+  "claim_id, source_session_id, source_run_id, source_high_water, source_prefix_digest, target_session_id, target_run_id, created_at";
+
+function continuationClaimFromRow(row: Record<string, unknown>): RuntimeContinuationClaim {
+  const claimId = requireRowString(row["claim_id"], "runtime_continuation_claims.claim_id");
+  const label = `runtime_continuation_claims[${claimId}]`;
+  return {
+    claimId,
+    sourceSessionId: requireRowString(row["source_session_id"], `${label}.source_session_id`),
+    sourceRunId: requireRowString(row["source_run_id"], `${label}.source_run_id`),
+    sourceHighWater: requireRowSafeInteger(
+      row["source_high_water"],
+      `${label}.source_high_water`,
+    ),
+    sourcePrefixDigest: requireRowString(
+      row["source_prefix_digest"],
+      `${label}.source_prefix_digest`,
+    ),
+    targetSessionId: requireRowString(row["target_session_id"], `${label}.target_session_id`),
+    targetRunId: requireRowString(row["target_run_id"], `${label}.target_run_id`),
+    createdAt: requireRowString(row["created_at"], `${label}.created_at`),
+  };
+}
+
+/**
+ * ADR 29 前缀 digest(确定性序列化,与 run.started 的
+ * continuationOf.prefixDigest 同一口径):
+ * - 输入 = 会话账本 seq∈[1..high_water] 的行,按 event_seq 升序;
+ * - 每行序列化为一层 `JSON.stringify({ seq, eventId, payload })`,其中 payload
+ *   为库内 canonical payload JSON **字符串**(键排序 stringify 的完整事件对象,
+ *   不再做二次解析/重排序);
+ * - 逐行后跟换行符 "\n"(含末行),对全文取 sha256,输出 64 位小写 hex。
+ */
+function continuationPrefixDigest(rows: readonly Record<string, unknown>[]): string {
+  const hash = createHash("sha256");
+  for (const row of rows) {
+    const line = JSON.stringify({
+      seq: row["event_seq"],
+      eventId: row["event_id"],
+      payload: row["payload_json"],
+    });
+    hash.update(line, "utf8");
+    hash.update("\n", "utf8");
+  }
+  return hash.digest("hex");
+}
+
+/**
+ * ADR 29 §4 恢复类豁免:携带 ADR 27 P0 恢复标记(data.recovery)的合成
+ * tool.result.recorded 允许落在已终态 run 上。现状恢复写入
+ * (reconcileIncompleteRuns)均发生在无终态 run(同批先补合成结果、末尾补终态)
+ * 或全新恢复 run 上,本豁免当前无生产触发路径,仅为 ADR 语义保留的显式通道。
+ */
+function isRecoveryClassSealedAppend(event: RuntimeEvent): boolean {
+  return event.kind === "tool.result.recorded" && event.data.recovery !== undefined;
 }
 
 /** plan/graph 操作身份投影(与旧事件索引的提取规则一致)。 */
