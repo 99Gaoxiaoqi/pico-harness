@@ -36,8 +36,9 @@ export interface RuntimeTranscriptProjectionOptions {
   readonly maxBytes?: number;
   /**
    * 源账本水位(票 04):kind 切片读取代全量读后,revision 的
-   * persistenceSequence 不能取切片末条,必须显式传入全会话水位;
-   * 缺省时回退 entries 末条 sequence(全量读口径)。
+   * persistenceSequence 不能取切片末条,必须显式传入全会话水位
+   * (revision 即该水位的字符串形态,窗口无关);缺省时回退 entries
+   * 末条 sequence(全量读口径)。
    */
   readonly persistenceSequence?: number;
 }
@@ -94,7 +95,7 @@ export function projectRuntimeTranscript(
   options: RuntimeTranscriptProjectionOptions,
 ): RuntimeTranscriptPage {
   const items = projectVisibleItems(snapshot);
-  const revision = transcriptRevision(snapshot, items);
+  const revision = transcriptRevision(snapshot);
   if (options.expectedRevision !== undefined && options.expectedRevision !== revision) {
     throw new TranscriptRevisionConflict(options.expectedRevision, revision);
   }
@@ -159,7 +160,7 @@ function projectVisibleItems(snapshot: RuntimeTranscriptSnapshot): RuntimeConver
       if (content) {
         append(
           {
-            id: stableItemId(snapshot.sessionId, messageIndex, "user", content),
+            id: stableItemId(snapshot.sessionId, sequence, "user", content),
             kind: "userMessage",
             content,
           },
@@ -184,14 +185,14 @@ function projectVisibleItems(snapshot: RuntimeTranscriptSnapshot): RuntimeConver
         const item: RuntimeConversationItem =
           runId && turnId
             ? {
-                id: stableItemId(snapshot.sessionId, messageIndex, "thinking", reasoning),
+                id: stableItemId(snapshot.sessionId, sequence, "thinking", reasoning),
                 kind: "thinking",
                 content: reasoning,
                 runId,
                 turnId,
               }
             : {
-                id: stableItemId(snapshot.sessionId, messageIndex, "thinking", reasoning),
+                id: stableItemId(snapshot.sessionId, sequence, "thinking", reasoning),
                 kind: "thinking",
                 content: reasoning,
               };
@@ -203,14 +204,14 @@ function projectVisibleItems(snapshot: RuntimeTranscriptSnapshot): RuntimeConver
       const item: RuntimeConversationItem =
         runId && turnId
           ? {
-              id: stableItemId(snapshot.sessionId, messageIndex, "assistant", content),
+              id: stableItemId(snapshot.sessionId, sequence, "assistant", content),
               kind: "assistantMessage",
               content,
               runId,
               turnId,
             }
           : {
-              id: stableItemId(snapshot.sessionId, messageIndex, "assistant", content),
+              id: stableItemId(snapshot.sessionId, sequence, "assistant", content),
               kind: "assistantMessage",
               content,
             };
@@ -506,22 +507,23 @@ function structuredItemKey(
   return typeof value === "string" && value ? `${kind}:${value}` : undefined;
 }
 
-function transcriptRevision(
-  snapshot: RuntimeTranscriptSnapshot,
-  items: readonly RuntimeConversationItem[],
-): string {
-  const digest = createHash("sha256").update(JSON.stringify(items)).digest("hex").slice(0, 16);
-  return `${snapshot.persistenceSequence ?? 0}.${digest}`;
+function transcriptRevision(snapshot: RuntimeTranscriptSnapshot): string {
+  // 第 1 轮审查问题 2 修复:revision 只基于全账本水位(窗口无关的稳定值)。
+  // 账本是 append-only:head 相�� ⇒ 全账本相同 ⇒ 全量投影相同;窗口内容随
+  // 读取预算漂移不该改变 revision(否则同 head 的分页游标会被误判冲突)。
+  return `${snapshot.persistenceSequence ?? 0}`;
 }
 
 function stableItemId(
   sessionId: string,
-  messageIndex: number,
+  ledgerSequence: number,
   kind: string,
   content: string,
 ): string {
+  // 锚定事件 seq(绝对值)而非窗口内 messageIndex:预算窗口前后移动时,
+  // 同一条消息的 item id 保持稳定,不因窗口起点漂移而变化。
   const digest = createHash("sha256")
-    .update(`${sessionId}\0${messageIndex}\0${kind}\0${content}`)
+    .update(`${sessionId}\0${ledgerSequence}\0${kind}\0${content}`)
     .digest("hex")
     .slice(0, 20);
   return `item_${digest}`;

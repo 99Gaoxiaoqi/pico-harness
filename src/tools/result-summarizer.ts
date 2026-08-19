@@ -1,13 +1,9 @@
 /**
  * Tool Result 摘要器:统一 head-tail 截断。
  *
- * 超过 2048 token 的工具结果原文写入 Evidence CAS（SHA-256 寻址），
- * 模型只收到一份有界预览，需要完整原文时调用 read_evidence 分页回读。
- * 因此预览不需要按工具类型做智能提取——head-tail 足够让模型了解大致内容，
- * 精确细节通过 read_evidence 按需获取。
- *
- * 原文永不丢失（CAS 兜底 + 写失败时 inline 保留），所以"预览不够精确"的代价
- * 只是模型多一次 read_evidence 调用，是按需支付的边际成本。
+ * ADR 26(票 E1/E3)起工具结果全文 inline 入库(入口 1MB 上限门),Evidence
+ * CAS 与 read_evidence 回读协议已退役;本摘要器仅服务宿主侧有界展示,
+ * 不再承担"模型按需回读原文"的前置角色。
  */
 
 export interface ToolResultSummaryInput {

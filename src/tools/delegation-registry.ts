@@ -36,8 +36,6 @@ import { bashCommandFromArgs } from "../approval/bash-paths.js";
 import { buildMinimalChildProcessEnv } from "../os/child-process-env.js";
 import { TodoTool } from "./todo.js";
 import type { HookService } from "../hooks/service.js";
-import { ReadEvidenceTool } from "./evidence-read.js";
-import { resolvePicoPaths } from "../paths/pico-paths.js";
 import type { SubagentModelCatalog } from "../runtime/subagent-model-catalog.js";
 import type { CodeIntelligenceService } from "../code-intelligence/types.js";
 import { createCodeIntelligenceTools } from "./code-intelligence.js";
@@ -65,8 +63,6 @@ export interface SubagentRegistryFactoryConfig {
   hookService?: HookService;
   /** 持久 Agent 按每次运行激活内联 Hook 的租约工厂。 */
   activateAgentHooks?: (profile: AgentProfile) => Promise<() => void | Promise<void>>;
-  /** 父会话的受信 Evidence 根；worker worktree 不得改变此边界。 */
-  evidenceBaseDir?: string;
   /** Runtime host environment used only by tools that intentionally consume host config. */
   env?: Readonly<Record<string, string | undefined>>;
   /** 与父会话一致的脱敏、不可变模型目录快照。 */
@@ -117,7 +113,6 @@ export function createSubagentRegistryFactory(
   const resolvedConfig: ResolvedSubagentRegistryFactoryConfig = {
     ...config,
     workspaceRoots: config.workspaceRoots ?? WorkspaceRoots.createSync(config.workDir),
-    evidenceBaseDir: config.evidenceBaseDir ?? resolvePicoPaths(config.workDir).workspace.evidence,
   };
   const profiles = resolvedConfig.profiles ?? [];
 
@@ -164,7 +159,6 @@ export function createSubagentRegistryFactory(
 
 interface ResolvedSubagentRegistryFactoryConfig extends SubagentRegistryFactoryConfig {
   workspaceRoots: WorkspaceRoots;
-  evidenceBaseDir: string;
 }
 
 /** 按 profile.tools 构造自定义角色的 registry */
@@ -174,7 +168,6 @@ function buildProfileRegistry(
   profile: AgentProfile,
 ): ToolRegistry {
   const registry = new ToolRegistry();
-  registry.register(new ReadEvidenceTool(config.workDir, config.evidenceBaseDir));
   const codeTools = new Map(
     (config.codeIntelligence
       ? createCodeIntelligenceTools(config.workDir, config.codeIntelligence)
@@ -223,7 +216,6 @@ function buildModeRegistry(
   registry: ToolRegistry,
 ): ToolRegistry {
   registry.register(new ReadFileTool(config.workspaceRoots));
-  registry.register(new ReadEvidenceTool(config.workDir, config.evidenceBaseDir));
   registry.register(
     new SkillViewTool(
       config.skillLoaderFactory?.(config.workDir) ?? new SkillLoader(config.workDir),

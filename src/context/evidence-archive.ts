@@ -64,22 +64,6 @@ export type BlobEvidenceManifest =
   | RuntimeToolResultEvidenceManifestV2
   | SubagentReportEvidenceManifestV2;
 
-export interface ArchiveRuntimeToolResultInput {
-  readonly sessionId: string;
-  readonly toolCallId: string;
-  readonly toolName: string;
-  readonly rawArguments: string;
-  readonly rawOutput: string;
-  readonly isError: boolean;
-}
-
-export interface ArchiveSubagentReportInput {
-  readonly sessionId: string;
-  readonly taskPrompt: string;
-  readonly report: string;
-  readonly status: "completed" | "partial";
-}
-
 export interface EvidencePageOptions {
   readonly offsetBytes?: number;
   readonly limitBytes?: number;
@@ -101,10 +85,9 @@ export interface EvidenceArchiveOptions {
   /**
    * 清单索引(evidence_records/evidence_blobs)所在的 workspace 存储根。
    * 省略时取 baseDir 的父目录——pico-paths 布局里 evidence 根恒为
-   * `<storageRoot>/evidence`,三个装配点与测试夹具都符合该布局。
+   * `<storageRoot>/evidence`,装配点与测试夹具都符合该布局。
    */
   readonly storageRoot?: string;
-  readonly now?: () => Date;
 }
 
 export class EvidenceArchiveIntegrityError extends Error {
@@ -114,98 +97,20 @@ export class EvidenceArchiveIntegrityError extends Error {
   }
 }
 
-/** Immutable, content-addressed evidence for ToolResults and subagent reports. */
+/**
+ * Legacy Evidence 只读档案(ADR 26 §2.4,票 E3):写入路径已退役,本类仅服务
+ * SQLite 纪元存量 `storage:"evidence"` 事件的预览/诊断分页回读(桌面 Inspector、
+ * `session.evidence.read` 诊断 RPC)。不再产生任何 blob 或 evidence_records 行。
+ */
 export class EvidenceArchive {
-  private readonly baseDir: string;
   private readonly storageRoot: string;
-  private readonly now: () => Date;
   private readonly blobs: EvidenceBlobStore;
 
   constructor(options: EvidenceArchiveOptions) {
-    this.baseDir = resolve(options.baseDir);
+    const baseDir = resolve(options.baseDir);
     // blob CAS 留在 baseDir;清单行进 workspace pico.sqlite(票 08,ADR §4.6)。
-    this.storageRoot = resolve(options.storageRoot ?? dirname(this.baseDir));
-    this.now = options.now ?? (() => new Date());
-    this.blobs = new EvidenceBlobStore(this.baseDir);
-  }
-
-  async archiveRuntimeToolResult(
-    input: ArchiveRuntimeToolResultInput,
-  ): Promise<RuntimeEvidenceReference> {
-    assertRuntimeToolResultInput(input);
-    // 先确保 storageRoot + pico.sqlite 就绪:evidence 根(<storageRoot>/evidence)
-    // 的自举创建语义保持,之后 blob 目录才能在其下 mkdir。
-    this.prepareStorage();
-    const rawOutput = (await this.blobs.putUtf8(input.rawOutput)).ref;
-    const content: RuntimeToolResultEvidenceV2 = {
-      kind: "tool-exchange",
-      sessionId: input.sessionId,
-      toolCallId: input.toolCallId,
-      toolName: input.toolName,
-      arguments: input.rawArguments,
-      rawOutput,
-      isError: input.isError,
-    };
-    const contentHash = hashContent(content);
-    const reference: RuntimeEvidenceReference = {
-      schemaVersion: EVIDENCE_URI_REFERENCE_SCHEMA_VERSION,
-      contentHash,
-      sessionId: input.sessionId,
-      kind: "tool-exchange",
-    };
-    try {
-      await this.readRuntimeToolExchange(reference);
-      return reference;
-    } catch (error) {
-      if (!isMissing(error)) throw error;
-    }
-
-    const manifest: RuntimeToolResultEvidenceManifestV2 = {
-      schemaVersion: BLOB_EVIDENCE_MANIFEST_SCHEMA_VERSION,
-      contentHash,
-      archivedAt: this.now().toISOString(),
-      kind: "tool-exchange",
-      content,
-    };
-    await this.publishEvidenceRecord(manifest, rawOutput);
-    return reference;
-  }
-
-  async archiveSubagentReport(
-    input: ArchiveSubagentReportInput,
-  ): Promise<SubagentReportEvidenceReference> {
-    assertSubagentReportInput(input);
-    this.prepareStorage();
-    const report = (await this.blobs.putUtf8(input.report)).ref;
-    const content: SubagentReportEvidenceV2 = {
-      kind: "subagent-report",
-      sessionId: input.sessionId,
-      taskPrompt: input.taskPrompt,
-      status: input.status,
-      report,
-    };
-    const contentHash = hashContent(content);
-    const reference: SubagentReportEvidenceReference = {
-      schemaVersion: EVIDENCE_URI_REFERENCE_SCHEMA_VERSION,
-      contentHash,
-      sessionId: input.sessionId,
-      kind: "subagent-report",
-    };
-    try {
-      await this.readSubagentReportEvidence(reference);
-      return reference;
-    } catch (error) {
-      if (!isMissing(error)) throw error;
-    }
-    const manifest: SubagentReportEvidenceManifestV2 = {
-      schemaVersion: BLOB_EVIDENCE_MANIFEST_SCHEMA_VERSION,
-      contentHash,
-      archivedAt: this.now().toISOString(),
-      kind: "subagent-report",
-      content,
-    };
-    await this.publishEvidenceRecord(manifest, report);
-    return reference;
+    this.storageRoot = resolve(options.storageRoot ?? dirname(baseDir));
+    this.blobs = new EvidenceBlobStore(baseDir);
   }
 
   async readRuntimeToolOutput(reference: RuntimeEvidenceReference): Promise<string> {
@@ -319,64 +224,6 @@ export class EvidenceArchive {
     }
     return manifest;
   }
-
-  /** 幂等确保 storageRoot 与库 schema 就绪(空操作只为 prepare 副作用)。 */
-  private prepareStorage(): void {
-    withWorkspaceSqliteLease(this.storageRoot, () => undefined);
-  }
-
-  /**
-   * 清单发布:evidence_records 单事务 UPSERT。并发/重复写(同
-   * <sessionId,contentHash>)保留既有行的 archived_at 并回读校验——与旧
-   * tmp+fsync+link 独占发布的幂等语义等价(immutable 内容由 contentHash 锚定)。
-   */
-  private async publishEvidenceRecord(
-    manifest: BlobEvidenceManifest,
-    blob: EvidenceBlobRef,
-  ): Promise<void> {
-    const contentJson = JSON.stringify(manifest.content);
-    const existing = withWorkspaceSqliteLease(this.storageRoot, (lease) =>
-      lease.transaction("write", () => {
-        lease.database
-          .prepare(
-            `INSERT INTO evidence_records (session_id, content_hash, kind, archived_at, content_json)
-             VALUES (?, ?, ?, ?, ?)
-             ON CONFLICT (session_id, content_hash) DO NOTHING`,
-          )
-          .run(
-            manifest.content.sessionId,
-            manifest.contentHash,
-            manifest.kind,
-            manifest.archivedAt,
-            contentJson,
-          );
-        // FS blob 索引行(evidence_blobs):本体仍在 blobs/sha256/<xx>/<digest>。
-        lease.database
-          .prepare(
-            `INSERT INTO evidence_blobs (digest, size_bytes, created_at)
-             VALUES (?, ?, ?)
-             ON CONFLICT (digest) DO NOTHING`,
-          )
-          .run(blob.digest, blob.sizeBytes, manifest.archivedAt);
-        return lease.database
-          .prepare(
-            `SELECT kind, archived_at, content_json FROM evidence_records
-             WHERE session_id = ? AND content_hash = ?`,
-          )
-          .get(manifest.content.sessionId, manifest.contentHash) as
-          | { kind: unknown; archived_at: unknown; content_json: unknown }
-          | undefined;
-      }),
-    );
-    if (existing === undefined || typeof existing.content_json !== "string") {
-      throw new EvidenceArchiveIntegrityError(
-        "Evidence manifest row disappeared right after publication",
-      );
-    }
-    if (existing.content_json !== contentJson) {
-      throw new EvidenceArchiveIntegrityError("Evidence manifest conflict");
-    }
-  }
 }
 
 export function formatEvidenceUri(reference: EvidenceUriReference): string {
@@ -434,40 +281,6 @@ function decodeBlobEvidenceManifest(value: unknown): BlobEvidenceManifest {
     kind: "subagent-report",
     content: decodeSubagentReportEvidenceV2(value["content"]),
   };
-}
-
-function assertRuntimeToolResultInput(
-  input: ArchiveRuntimeToolResultInput,
-): asserts input is ArchiveRuntimeToolResultInput {
-  if (!isNonEmptyString(input.sessionId)) {
-    throw new EvidenceArchiveIntegrityError("Runtime tool-exchange session ID must be non-empty");
-  }
-  if (!isNonEmptyString(input.toolCallId)) {
-    throw new EvidenceArchiveIntegrityError("Runtime tool-exchange call ID must be non-empty");
-  }
-  if (!isNonEmptyString(input.toolName)) {
-    throw new EvidenceArchiveIntegrityError("Runtime tool-exchange tool name must be non-empty");
-  }
-  if (
-    typeof input.rawArguments !== "string" ||
-    typeof input.rawOutput !== "string" ||
-    typeof input.isError !== "boolean"
-  ) {
-    throw new EvidenceArchiveIntegrityError("Runtime tool-exchange payload is invalid");
-  }
-}
-
-function assertSubagentReportInput(
-  input: ArchiveSubagentReportInput,
-): asserts input is ArchiveSubagentReportInput {
-  if (
-    !isNonEmptyString(input.sessionId) ||
-    typeof input.taskPrompt !== "string" ||
-    typeof input.report !== "string" ||
-    (input.status !== "completed" && input.status !== "partial")
-  ) {
-    throw new EvidenceArchiveIntegrityError("Subagent report evidence payload is invalid");
-  }
 }
 
 function decodeRuntimeToolResultEvidenceV2(value: unknown): RuntimeToolResultEvidenceV2 {
@@ -561,10 +374,6 @@ function isContentHash(value: string): boolean {
   return /^[a-f0-9]{64}$/u.test(value);
 }
 
-function isMissing(error: unknown): boolean {
-  return (error as NodeJS.ErrnoException).code === "ENOENT";
-}
-
 function assertRuntimeEvidenceReference(reference: RuntimeEvidenceReference): void {
   if (!isValidEvidenceUriReference(reference) || reference.kind !== "tool-exchange") {
     throw new EvidenceArchiveIntegrityError("Runtime tool-exchange evidence reference is invalid");
@@ -591,7 +400,7 @@ function isValidEvidenceUriReference(reference: EvidenceUriReference): boolean {
   );
 }
 
-/** 清单行缺失时保持 JSONL 纪元的 ENOENT 错误形状(调用方按 code 判定幂等)。 */
+/** 清单行缺失时保持 JSONL 纪元的 ENOENT 错误形状(Inspector/RPC 按 code 判定缺失)。 */
 function missingEvidenceError(reference: EvidenceUriReference): NodeJS.ErrnoException {
   const error = new Error(
     `Evidence manifest is missing: ${reference.sessionId}/${reference.contentHash}`,

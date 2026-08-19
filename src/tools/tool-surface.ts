@@ -119,13 +119,6 @@ export const PICO_TOOL_GROUPS: readonly ToolGroupDef[] = [
     economy: "deferred",
   },
   {
-    id: "evidence",
-    label: "Evidence",
-    description: "回读归档的工具输出和完整子代理报告",
-    toolNames: ["read_evidence"],
-    economy: "deferred",
-  },
-  {
     id: "skill",
     label: "Skill",
     description: "查看 Skill 具体执行指南",
@@ -158,8 +151,8 @@ const TOOL_HOST_AFFINITY: Readonly<Record<string, Partial<Record<ToolHostKind, T
   spawn_subagent: { background: "unsupported" },
   memory_remember: { background: "unsupported" },
   memory_extract: { background: "unsupported" },
-  // headless 显式白名单（fail-closed，与原 HEADLESS_TOOL_NAMES 13 工具一致）。
-  // code_*/goal/skill/graph 等未列工具对 headless 默认 unsupported。
+  // headless 显式白名单（fail-closed）。read_evidence 已随 Evidence 回读协议
+  // 退役（ADR 26，票 E3）；code_*/goal/skill/graph 等未列工具默认 unsupported。
   read_file: { headless: "supported" },
   write_file: { headless: "supported" },
   edit_file: { headless: "supported" },
@@ -172,7 +165,6 @@ const TOOL_HOST_AFFINITY: Readonly<Record<string, Partial<Record<ToolHostKind, T
   task_stop: { headless: "supported" },
   fetch_url: { headless: "supported" },
   web_search: { headless: "supported" },
-  read_evidence: { headless: "supported" },
 };
 
 const TOOL_TO_GROUP = new Map<string, ToolGroupDef>();
@@ -251,7 +243,6 @@ export function getSupportedToolNames(host: ToolHostKind): Set<string> {
  */
 export const PLAN_MODE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "read_file",
-  "read_evidence",
   "glob",
   "grep",
   "skill_view",

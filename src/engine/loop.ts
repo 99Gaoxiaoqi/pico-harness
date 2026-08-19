@@ -25,7 +25,6 @@ import type { Registry, ToolFileSideEffects } from "../tools/registry.js";
 import type {
   AgentRunner,
   SubagentModelSelectionRequest,
-  SubagentReportEvidenceWriter,
   SubagentRunOptions,
   SubagentResult,
 } from "../tools/subagent.js";
@@ -41,7 +40,6 @@ import {
   recordRuntimeCompactionCheckpoint,
   computeCheckpointSourceDigest,
 } from "../context/runtime-compaction-checkpoint.js";
-import type { EvidenceArchive } from "../context/evidence-archive.js";
 import type { ContextBudget } from "../context/context-budget.js";
 import {
   CHARS_PER_TOKEN,
@@ -73,18 +71,20 @@ import { safeResolve } from "../tools/registry-impl.js";
 import type { WorkspaceRoots } from "../tools/workspace-roots.js";
 import type { Session } from "./session.js";
 import type {
-  EngineRuntimeEvidenceReference,
   EngineRuntimePort,
   EngineRuntimeRun,
   EngineRuntimeToolResultInput,
-  EngineRuntimeToolResultBody,
   EngineRuntimeToolResultStatus,
 } from "./runtime-port.js";
 import { createToolResultEnvelope, type ToolResultEnvelope } from "./tool-result-contract.js";
 import type { CanonicalTranscriptToolStart } from "./transcript-tool-start.js";
 import { PlanHandoffController } from "./plan-handoff.js";
 import type { HookService } from "../hooks/service.js";
-import { buildRuntimeToolResultProjection } from "../tools/tool-result-observation.js";
+import {
+  buildOverLimitRejectionText,
+  buildRuntimeToolResultProjection,
+  MAX_TOOL_RESULT_BYTES,
+} from "../tools/tool-result-observation.js";
 import { ToolAccesses } from "../tools/tool-access.js";
 import { ToolScheduler } from "../tools/tool-scheduler.js";
 import { SUBAGENT_OUTPUT_BUDGET } from "../tools/subagent-budget.js";
@@ -172,7 +172,7 @@ const SUBAGENT_FINALIZE_PROMPT =
   "1) 结论；2) 已确认的事实与文件:行号证据；3) 未完成或未验证风险；4) 主 Agent 可直接采取的下一步。通常控制在 1000–2000 字符，简单任务可更短，不要重放原始日志。" +
   "若任务整体无法完成，结论必须以「无法完成：原因」开头如实声明，不要用完成口吻收场。";
 const SUBAGENT_EMPTY_SUMMARY_FALLBACK =
-  "子代理未能生成可用的最终总结；请主 Agent 根据已回传的工具证据和 Evidence 继续收口。";
+  "子代理未能生成可用的最终总结；请主 Agent 根据已回传的工具证据继续收口。";
 
 /** 子代理总结开篇的引导性标签（"总结：" / "- 结论：" / "1. Report:" 等），判定失败宣言前剥离。 */
 const SUBAGENT_SUMMARY_LEAD_RE =
@@ -680,10 +680,6 @@ export interface AgentEngineOptions {
   onPlanExit?: () => void;
   /** 输出 Reporter;默认静默 (第 09 讲) */
   reporter?: Reporter;
-  /** 完整原始工具交换的不可变归档；仅 RuntimeEvent 主链启用。 */
-  runtimeEvidenceArchive?: EvidenceArchive;
-  /** 子代理完整报告写入器；超过常规摘要目标时写入 Evidence，再回灌有界预览。 */
-  subagentReportEvidenceWriter?: SubagentReportEvidenceWriter;
   /**
    * 链路追踪器：记录决策树到 workspace traces 目录（第 19 讲）。
    * 未提供则不追踪。
@@ -824,8 +820,6 @@ export class AgentEngine implements AgentRunner {
   /** Plan Mode 退出回调(ExitPlanMode 审批通过后触发),供 host 监听 */
   private readonly onPlanExit?: () => void;
   private readonly reporter: Reporter;
-  private readonly runtimeEvidenceArchive?: EvidenceArchive;
-  private readonly subagentReportEvidenceWriter?: SubagentReportEvidenceWriter;
   private readonly tracer?: Tracer;
   /**
    * Steer 队列(运行时注入引导文本)。host 持有同一实例在 run 期间 push。
@@ -885,8 +879,6 @@ export class AgentEngine implements AgentRunner {
     );
     this.onPlanExit = opts.onPlanExit;
     this.reporter = opts.reporter ?? new SilentReporter();
-    this.runtimeEvidenceArchive = opts.runtimeEvidenceArchive;
-    this.subagentReportEvidenceWriter = opts.subagentReportEvidenceWriter;
     this.tracer = opts.tracer;
     this.steerQueue = opts.steerQueue;
     this.waitAtSafeBoundary = opts.waitAtSafeBoundary;
@@ -2925,93 +2917,52 @@ export class AgentEngine implements AgentRunner {
     modelOutput: string,
     status: EngineRuntimeToolResultStatus,
   ): Promise<{ message: Message; envelope: ToolResultEnvelope }> {
-    const prepared = await this.prepareRuntimeToolResult(
-      runtimeRun,
-      toolCall,
-      result,
-      modelOutput,
-      status,
-    );
+    const built = this.buildRuntimeToolResultInput(toolCall, result, modelOutput, status);
     return {
-      message: runtimeRun.registerToolResult(prepared.input),
-      envelope: prepared.envelope,
+      message: runtimeRun.registerToolResult(built.input),
+      envelope: built.envelope,
     };
   }
 
-  private async prepareRuntimeToolResult(
-    runtimeRun: EngineRuntimeRun,
+  /**
+   * ADR 26(票 E1):工具结果全文 inline 入库,无 Evidence 归档分叉。
+   * 超过 MAX_TOOL_RESULT_BYTES 的结果在门口拒绝——inline 正文与投影替换为
+   * 合成错误(指引模型用 grep/head/tail 管道或 read_file 分段重取),事件
+   * 状态记为 rejected,调用本身照常入账。
+   */
+  private buildRuntimeToolResultInput(
     toolCall: ToolCall,
     result: ToolResult,
     modelOutput: string,
     status: EngineRuntimeToolResultStatus,
-  ): Promise<{ input: EngineRuntimeToolResultInput; envelope: ToolResultEnvelope }> {
+  ): { input: EngineRuntimeToolResultInput; envelope: ToolResultEnvelope } {
     const built = buildRuntimeToolResultProjection({
       toolCall,
       result,
       modelOutput,
     });
-    let body: EngineRuntimeToolResultBody = {
-      storage: "inline",
-      content: result.output,
-      sha256: built.rawSha256,
-      sizeBytes: built.rawSizeBytes,
-    };
-    let projection = built.projection;
-    let evidence: EngineRuntimeEvidenceReference | undefined;
-
-    if (built.shouldArchive) {
-      try {
-        if (!this.runtimeEvidenceArchive) {
-          throw new Error("Runtime EvidenceArchive is not configured");
-        }
-        const archived = await this.runtimeEvidenceArchive.archiveRuntimeToolResult({
-          sessionId: runtimeRun.sessionId,
+    if (built.overLimit) {
+      logger.warn(
+        {
+          tool: toolCall.name,
           toolCallId: toolCall.id,
-          toolName: toolCall.name,
-          rawArguments: toolCall.arguments,
-          rawOutput: result.output,
-          isError: result.isError,
-        });
-        if (!archived) {
-          throw new Error("Runtime EvidenceArchive returned no reference");
-        }
-        evidence = archived;
-        // Evidence 预览会明确要求下一轮调用 read_evidence；同步披露其 schema，
-        // 避免渐进式工具列表让模型只能看到引用却无法执行回读。
-        this.toolDisclosure?.discloseTools(["read_evidence"]);
-        body = {
-          storage: "evidence",
-          sha256: built.rawSha256,
-          sizeBytes: built.rawSizeBytes,
-        };
-      } catch (error) {
-        logger.warn(
-          { error: String(error), tool: toolCall.name, toolCallId: toolCall.id },
-          "[ToolResult] Evidence 归档失败，完整结果以内联事实继续执行",
-        );
-        evidence = undefined;
-        body = {
-          storage: "inline",
-          content: result.output,
-          sha256: built.rawSha256,
-          sizeBytes: built.rawSizeBytes,
-        };
-        // Evidence 写失败不能让大正文重新穿透模型和宿主边界。原文仍作为
-        // canonical inline body 持久化，但继续使用已经算好的有界投影。
-        projection = {
-          ...built.projection,
-          strategy: `${built.projection.strategy}:evidence-write-failed`,
-        };
-      }
+          rawSizeBytes: Buffer.byteLength(result.output, "utf8"),
+          maxToolResultBytes: MAX_TOOL_RESULT_BYTES,
+        },
+        "[ToolResult] 输出超限,结果已被入口上限门拒绝并替换为合成错误",
+      );
     }
-
     const input: EngineRuntimeToolResultInput = {
       toolCallId: toolCall.id,
       toolName: toolCall.name,
-      status,
-      body,
-      projection,
-      ...(evidence ? { evidence } : {}),
+      status: built.overLimit ? "rejected" : status,
+      body: {
+        storage: "inline",
+        content: built.inlineContent,
+        sha256: built.rawSha256,
+        sizeBytes: built.rawSizeBytes,
+      },
+      projection: built.projection,
     };
     return {
       input,
@@ -3025,30 +2976,14 @@ export class AgentEngine implements AgentRunner {
     modelOutput: string,
     status: EngineRuntimeToolResultStatus,
   ): { message: Message; envelope: ToolResultEnvelope } {
-    const built = buildRuntimeToolResultProjection({
-      toolCall,
-      result,
-      modelOutput,
-    });
-    const input = {
-      toolCallId: toolCall.id,
-      toolName: toolCall.name,
-      status,
-      body: {
-        storage: "inline" as const,
-        content: result.output,
-        sha256: built.rawSha256,
-        sizeBytes: built.rawSizeBytes,
-      },
-      projection: built.projection,
-    };
+    const built = this.buildRuntimeToolResultInput(toolCall, result, modelOutput, status);
     return {
       message: {
         role: "user",
-        content: built.projection.text,
+        content: built.input.projection.text,
         toolCallId: toolCall.id,
       },
-      envelope: createToolResultEnvelope(input),
+      envelope: built.envelope,
     };
   }
 
@@ -3418,7 +3353,7 @@ export class AgentEngine implements AgentRunner {
    * - maxSubTurns 最后一轮预留为 tools=[] FINALIZE，耗尽时以 partial 返回证据
    * - 正常退出条件:不调工具且生成非空总结
    *
-   * @returns 子智能体的纯文本总结汇报及完整报告 Evidence 引用
+   * @returns 子智能体的纯文本总结汇报（ADR 26 起报告全文 inline，无 Evidence 引用）
    */
   private async reportMessage(
     reporter: Reporter,
@@ -3761,7 +3696,7 @@ export class AgentEngine implements AgentRunner {
         );
         // D10④ 内容级熔断：自报 completed 但总结开篇明确声明失败 → 降级 error，
         // 宿主按失败结算（graph.work.failed / plan step 不落 completed）。
-        // 放在 finalize 之后：Evidence 归档与 summary 截断照常，只改终态。
+        // 放在 finalize 之后：报告 inline 收口与上限门照常，只改终态。
         if (finalized.status === "completed" && subagentDeclaresFailure(finalized.summary)) {
           logger.warn(
             { turns: turnCount, summaryHead: finalized.summary.slice(0, 80) },
@@ -3807,8 +3742,7 @@ export class AgentEngine implements AgentRunner {
               finalOutput = this.recovery.analyzeAndInject(tc.name, result.output);
             }
             if (runtimeRun) {
-              const builtResult = await this.prepareRuntimeToolResult(
-                runtimeRun,
+              const builtResult = this.buildRuntimeToolResultInput(
                 tc,
                 result,
                 finalOutput,
@@ -3874,45 +3808,36 @@ export class AgentEngine implements AgentRunner {
     }
   }
 
+  /**
+   * ADR 26(票 E3):子代理报告不再外部化进 Evidence CAS——全文 inline 进
+   * subagent_report transcript 事件与回传 summary,与工具结果入口上限门同款
+   * 语义:超过 MAX_TOOL_RESULT_BYTES 时替换为指引主 Agent 有界重取的合成错误。
+   *
+   * 第 1 轮审查问题 3 修复:报告被上限门拒绝时,原始报告已永久丢弃,交付物
+   * 只剩合成错误文本——终态结算与工具结果入口门对齐(超限工具结果按
+   * isError/failed 结算),status 落 "error"(既有失败语义,宿主铸
+   * graph.work.failed / plan step 不落 completed),不再以 completed/partial
+   * 收场掩盖"报告不可用"的事实。拒绝文本保留在 summary 供主 Agent 重取。
+   */
   private async finalizeSubagentResult(
     status: "completed" | "partial",
     report: string,
-    taskPrompt: string,
+    _taskPrompt: string,
   ): Promise<SubagentResult> {
-    const evidenceRefs: string[] = [];
-    let summary = report;
-
-    if (
-      report.length > SUBAGENT_OUTPUT_BUDGET.summary.softMax &&
-      this.subagentReportEvidenceWriter
-    ) {
-      try {
-        const evidenceRef = await this.subagentReportEvidenceWriter({
-          taskPrompt,
-          report,
-          status,
-        });
-        if (evidenceRef) {
-          evidenceRefs.push(evidenceRef);
-          summary = buildExternalizedSubagentPreview(
-            report,
-            evidenceRef,
-            SUBAGENT_OUTPUT_BUDGET.summary.softMax,
-          );
-        }
-      } catch (error) {
-        logger.warn(
-          { error: error instanceof Error ? error.message : String(error) },
-          "[Subagent] 完整报告 Evidence 归档失败，回退到单次硬上限。",
-        );
-      }
+    const rawSizeBytes = Buffer.byteLength(report, "utf8");
+    if (rawSizeBytes > MAX_TOOL_RESULT_BYTES) {
+      logger.warn(
+        { status, rawSizeBytes, maxToolResultBytes: MAX_TOOL_RESULT_BYTES },
+        "[Subagent] 完整报告超过入口上限,已被上限门拒绝并替换为合成错误,终态按失败结算",
+      );
+      return {
+        status: "error",
+        summary: buildOverLimitRejectionText("子代理完整报告 ", rawSizeBytes),
+        evidenceRefs: [],
+        error: `子代理完整报告 ${rawSizeBytes} 字节超过入口上限 ${MAX_TOOL_RESULT_BYTES} 字节,已被上限门拒绝（原文未保存）`,
+      };
     }
-
-    return {
-      status,
-      summary: truncateSubagentSummary(summary, SUBAGENT_OUTPUT_BUDGET.summary.hardMax),
-      evidenceRefs,
-    };
+    return { status, summary: report, evidenceRefs: [] };
   }
 }
 
@@ -3974,59 +3899,6 @@ function usableSummary(summary: string): boolean {
 
 function buildSubagentPartialSummary(contextHistory: readonly Message[]): string {
   return buildSubagentEvidenceSnapshot(contextHistory) ?? SUBAGENT_EMPTY_SUMMARY_FALLBACK;
-}
-
-function truncateSubagentSummary(summary: string, maxChars: number): string {
-  if (summary.length <= maxChars) return summary;
-  const marker = `\n[子代理总结已截断：原始 ${summary.length} 字符，上限 ${maxChars} 字符]`;
-  return `${sliceUtf16Safe(summary, Math.max(0, maxChars - marker.length))}${marker}`;
-}
-
-function buildExternalizedSubagentPreview(
-  report: string,
-  evidenceRef: string,
-  maxChars: number,
-): string {
-  const marker = [
-    "",
-    "[完整子代理报告已归档为 Evidence]",
-    `Evidence: ${evidenceRef}`,
-    `originalChars: ${report.length}`,
-    `需要完整原文时调用 read_evidence(ref="${evidenceRef}", offsetBytes?, limitBytes?)。`,
-  ].join("\n");
-  if (marker.length >= maxChars) {
-    return truncateSubagentSummary(marker, maxChars);
-  }
-
-  const previewBudget = maxChars - marker.length;
-  const separator = "\n…\n";
-  if (report.length <= previewBudget) return `${report}${marker}`;
-  const headBudget = Math.max(0, Math.floor((previewBudget - separator.length) * 0.75));
-  const tailBudget = Math.max(0, previewBudget - separator.length - headBudget);
-  return `${sliceUtf16Safe(report, headBudget)}${separator}${sliceUtf16TailSafe(
-    report,
-    tailBudget,
-  )}${marker}`;
-}
-
-function sliceUtf16Safe(value: string, maxChars: number): string {
-  let end = Math.max(0, Math.min(value.length, maxChars));
-  if (end > 0 && end < value.length) {
-    const previous = value.charCodeAt(end - 1);
-    const next = value.charCodeAt(end);
-    if (previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end--;
-  }
-  return value.slice(0, end);
-}
-
-function sliceUtf16TailSafe(value: string, maxChars: number): string {
-  let start = Math.max(0, value.length - Math.max(0, maxChars));
-  if (start > 0 && start < value.length) {
-    const previous = value.charCodeAt(start - 1);
-    const next = value.charCodeAt(start);
-    if (previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) start++;
-  }
-  return value.slice(start);
 }
 
 /**

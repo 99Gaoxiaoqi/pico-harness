@@ -13,7 +13,6 @@ import {
 import { TerminalReporter, type Reporter } from "../engine/reporter.js";
 import { Compactor } from "../context/compactor.js";
 import { FullCompactor } from "../context/full-compactor.js";
-import { EvidenceArchive, formatEvidenceUri } from "../context/evidence-archive.js";
 import {
   createContextBudget,
   estimateTokenBudgetAsChars,
@@ -55,7 +54,6 @@ import {
   type DelegatePlanStepCoordinator,
   SpawnSubagentTool,
   type SubagentModelSelectionRequest,
-  type SubagentReportEvidenceWriter,
 } from "../tools/subagent.js";
 import {
   AddWorkTool,
@@ -1206,12 +1204,6 @@ export async function executeAgentRuntime(
     const workspaceStatePaths = resolvePicoPaths(workDir, {
       picoHome: session.picoHome,
     }).workspace;
-    const evidenceBaseDir = workspaceStatePaths.evidence;
-    const evidenceArchive = new EvidenceArchive({ baseDir: evidenceBaseDir });
-    const subagentReportEvidenceWriter = buildSubagentReportEvidenceWriter(
-      session.id,
-      evidenceArchive,
-    );
     // 凭证轮换(4.2):多 key 时从池取首个 key 覆盖 config.apiKey,并构建轮换回调。
     // 单 key / 注入 provider 时跳过(向后兼容)。pool 注入点集中在此,便于追踪 currentKey。
     let currentConfig: ProviderConfig = providerConfig;
@@ -1386,7 +1378,6 @@ export async function executeAgentRuntime(
             workspaceRoots,
             usageSession: session,
             goalManager: runtimeState.goalManager,
-            runtimeEvidenceArchive: evidenceArchive,
             ...(dependencies.toolResultRedactionSecrets
               ? { toolResultRedactionSecrets: dependencies.toolResultRedactionSecrets }
               : {}),
@@ -1399,7 +1390,6 @@ export async function executeAgentRuntime(
             maxSpawnDepth: 0,
             yoloSandbox: { config: picoConfig.sandbox },
             ownerSessionId: session.id,
-            evidenceBaseDir,
             env: runtimeEnv,
             codeIntelligence: runtimeState.codeIntelligence,
           })({ mode: "explore", role: "leaf", depth: 0, maxSpawnDepth: 0 });
@@ -1551,7 +1541,6 @@ export async function executeAgentRuntime(
           }
         : undefined,
       skillLoaderFactory(workDir),
-      evidenceBaseDir,
       runtimeEnv,
       dependencies.bashTimeoutMs,
       collaborationMode() === "plan" || options.approvedPlan ? planRegistryOptions : undefined,
@@ -1729,8 +1718,6 @@ export async function executeAgentRuntime(
         ...(auxProvider ? { auxProvider } : {}),
         ...(activeHookService ? { hookService: activeHookService } : {}),
       }),
-      runtimeEvidenceArchive: evidenceArchive,
-      subagentReportEvidenceWriter,
       reporter,
       tracer: traceEnabled
         ? new Tracer({
@@ -1859,7 +1846,6 @@ export async function executeAgentRuntime(
       skillLoaderFactory,
       activeHookService,
       subagentModelCatalog,
-      evidenceBaseDir,
       runtimeEnv,
       runtimeState.codeIntelligence,
       activeHookService
@@ -1918,7 +1904,6 @@ export async function executeAgentRuntime(
           skillLoaderFactory,
           ...(activeHookService ? { hookService: activeHookService } : {}),
           ...(subagentModelCatalog ? { modelCatalog: subagentModelCatalog } : {}),
-          ...(evidenceBaseDir ? { evidenceBaseDir } : {}),
           ...(runtimeEnv ? { env: runtimeEnv } : {}),
           ...(runtimeState.codeIntelligence
             ? { codeIntelligence: runtimeState.codeIntelligence }
@@ -2064,7 +2049,7 @@ export async function executeAgentRuntime(
         );
       }
       // 与命令级 allowlist 对称：Job 显式授权的存活工具必须对模型可见——
-      // 否则 deferred 组成员（web_search/task_list/read_evidence 等）会被
+      // 否则 deferred 组成员（web_search/task_list 等）会被
       // 渐进披露层藏掉，而 background 下 load_tools/search_tools 可能已被
       // 剪枝，模型没有激活路径，永远看不到它已授权的工具。
       toolDisclosure.discloseTools([...backgroundPolicy.allowedTools]);
@@ -2346,7 +2331,6 @@ function buildRegistry(
   yoloSandbox?: { config?: Partial<YoloSandboxConfig> },
   activateSkillHooks?: (skill: Skill) => void | Promise<void>,
   skillLoader?: SkillLoader,
-  evidenceBaseDir?: string,
   env?: NodeJS.ProcessEnv,
   bashTimeoutMs?: number,
   plan?: DefaultToolRegistryOptions["plan"],
@@ -2367,7 +2351,6 @@ function buildRegistry(
     ...(activateSkillHooks !== undefined ? { activateSkillHooks } : {}),
     ...(skillLoader !== undefined ? { skillLoader } : {}),
     ...(plan !== undefined ? { plan } : {}),
-    ...(evidenceBaseDir !== undefined ? { evidenceBaseDir } : {}),
     ...(env !== undefined ? { env } : {}),
     ...(bashTimeoutMs !== undefined ? { bashTimeoutMs } : {}),
     ...(hostKind !== undefined ? { hostKind } : {}),
@@ -2543,7 +2526,6 @@ function registerDelegationTools(
   skillLoaderFactory?: (workDir: string) => SkillLoader,
   hookService?: HookService,
   modelCatalog?: SubagentModelCatalog,
-  evidenceBaseDir?: string,
   env?: Readonly<Record<string, string | undefined>>,
   codeIntelligence?: SessionRuntime["codeIntelligence"],
   activateAgentHooks?: (profile: AgentProfile) => Promise<() => void | Promise<void>>,
@@ -2561,7 +2543,6 @@ function registerDelegationTools(
     ...(skillLoaderFactory ? { skillLoaderFactory } : {}),
     ...(hookService ? { hookService } : {}),
     ...(modelCatalog ? { modelCatalog } : {}),
-    ...(evidenceBaseDir ? { evidenceBaseDir } : {}),
     ...(env ? { env } : {}),
     ...(codeIntelligence ? { codeIntelligence } : {}),
     ...(activateAgentHooks ? { activateAgentHooks } : {}),
@@ -2717,21 +2698,6 @@ function loadAuxProvider(
     session,
     trackerOptions,
   );
-}
-
-function buildSubagentReportEvidenceWriter(
-  sessionId: string,
-  archive: EvidenceArchive,
-): SubagentReportEvidenceWriter {
-  return async (input) => {
-    const reference = await archive.archiveSubagentReport({
-      sessionId,
-      taskPrompt: input.taskPrompt,
-      report: input.report,
-      status: input.status,
-    });
-    return formatEvidenceUri(reference);
-  };
 }
 
 export function buildApprovalMiddleware(

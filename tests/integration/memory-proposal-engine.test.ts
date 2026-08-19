@@ -224,6 +224,103 @@ test("runtime evidence reader accepts only the exact completed run user message"
   }
 });
 
+test("runtime evidence reader reads tool results from inline body and degrades legacy evidence refs", async () => {
+  const ref = eventRef("inline-body");
+  const userMessage = { role: "user" as const, content: "记住：构建命令是 npm run build" };
+  const inlineEvent: RuntimeEvent = {
+    ...eventBase(ref, "tool-result-inline", "model"),
+    refs: { toolCallId: "call-inline" },
+    kind: "tool.result.recorded",
+    data: {
+      toolName: "bash",
+      status: "succeeded",
+      body: {
+        storage: "inline",
+        content: "INLINE_BODY_CANARY 构建输出全文",
+        sha256: "a".repeat(64),
+        sizeBytes: 64,
+      },
+      projection: {
+        version: 1,
+        mode: "full",
+        text: "INLINE_BODY_CANARY 构建输出全文",
+        strategy: "original",
+        truncated: false,
+      },
+    },
+  };
+  // 旧账本形态:storage:"evidence" —— 正文不可回读,reader 必须优雅降级为
+  // 不可用标记 + 入库预览,不炸 worker(票 E3,ADR 26 §2.5)。
+  const legacyEvidenceEvent: RuntimeEvent = {
+    ...eventBase(ref, "tool-result-legacy", "model"),
+    refs: { toolCallId: "call-legacy" },
+    kind: "tool.result.recorded",
+    data: {
+      toolName: "grep",
+      status: "succeeded",
+      body: { storage: "evidence", sha256: "b".repeat(64), sizeBytes: 4_096 },
+      projection: {
+        version: 1,
+        mode: "preview",
+        text: "LEGACY_PREVIEW_CANARY",
+        strategy: "legacy-preview",
+        truncated: true,
+      },
+    },
+  };
+  // transcript 可见性的子代理内部工具结果不进入源快照。
+  const transcriptOnlyEvent: RuntimeEvent = {
+    ...eventBase(ref, "tool-result-transcript", "transcript"),
+    refs: { toolCallId: "call-transcript" },
+    kind: "tool.result.recorded",
+    data: {
+      toolName: "grep",
+      status: "succeeded",
+      body: {
+        storage: "inline",
+        content: "TRANSCRIPT_ONLY_CANARY",
+        sha256: "c".repeat(64),
+        sizeBytes: 32,
+      },
+      projection: {
+        version: 1,
+        mode: "full",
+        text: "TRANSCRIPT_ONLY_CANARY",
+        strategy: "original",
+        truncated: false,
+      },
+    },
+  };
+  const terminal = entry(9, terminalEvent(ref));
+  const user = entry(2, messageEvent(ref, userMessage));
+  const reader = new RuntimeMemoryEvidenceReader({
+    async readSessionEvent(_sessionId, eventId) {
+      if (eventId === ref.terminalEventId) return terminal;
+      if (eventId === ref.userMessageEventId) return user;
+      return undefined;
+    },
+    async readSessionMessageEventsUpTo(_sessionId, maxSequence) {
+      return [user, entry(3, inlineEvent), entry(4, legacyEvidenceEvent), entry(5, transcriptOnlyEvent)]
+        .filter((candidate) => candidate.sequence <= maxSequence);
+    },
+  });
+
+  const evidence = await reader.read(ref);
+  assert.equal(evidence.content, "记住:构建命令是 npm run build");
+  const sourceMessages = evidence.sourceMessages ?? [];
+  assert.equal(sourceMessages.length, 3);
+  assert.deepEqual(sourceMessages[0], userMessage);
+  assert.equal(sourceMessages[1]?.toolCallId, "call-inline");
+  assert.equal(sourceMessages[1]?.content, "INLINE_BODY_CANARY 构建输出全文");
+  assert.equal(sourceMessages[2]?.toolCallId, "call-legacy");
+  assert.match(sourceMessages[2]?.content ?? "", /不可回读/u);
+  assert.match(sourceMessages[2]?.content ?? "", /LEGACY_PREVIEW_CANARY/u);
+  assert.equal(
+    sourceMessages.some((message) => message.content.includes("TRANSCRIPT_ONLY_CANARY")),
+    false,
+  );
+});
+
 test("JSON-text parser accepts empty arrays and plain prose, rejects extra fields and invented evidence", () => {
   // Empty proposals JSON is now a legitimate "nothing durable" response.
   assert.deepEqual(
@@ -546,7 +643,7 @@ function messageEvent(ref: TerminalMemoryEvidenceRef, message: Message): Runtime
 function eventBase(
   ref: TerminalMemoryEvidenceRef,
   eventId: string,
-  visibility: "model" | "internal",
+  visibility: "model" | "transcript" | "internal",
 ) {
   return {
     schemaVersion: 2 as const,
