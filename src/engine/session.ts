@@ -87,7 +87,10 @@ import {
   type RuntimeSessionManifest,
   type RuntimeSessionProjectionSnapshot,
 } from "../storage/runtime-event-store-contracts.js";
-import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
+import {
+  appendRuntimeEventBatchWithArbitration,
+  SqliteRuntimeEventStore,
+} from "../storage/sqlite/sqlite-runtime-event-store.js";
 import {
   projectRuntimeSessionMessageEntries,
   projectRuntimeSessionMessages,
@@ -1561,7 +1564,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
           ...(batch.refs ? { refs: batch.refs } : {}),
         }),
       );
-      await store.appendBatch(events);
+      await appendRuntimeEventBatchWithArbitration(store, events);
       return structuredClone(starts);
     });
   }

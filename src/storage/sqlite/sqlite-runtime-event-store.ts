@@ -53,6 +53,7 @@ import {
   type WorkspaceRuntimeSessionSnapshot,
 } from "../runtime-event-store-contracts.js";
 import { operationalDatabasePath, type OperationalDatabaseLease } from "./sqlite-database.js";
+import { logger } from "../../observability/logger.js";
 import { ALL_WORKSPACE_SQLITE_SCOPES } from "./workspace-scopes.js";
 import { prepareWorkspaceSqliteStorageSync } from "./sqlite-workspace-storage.js";
 
@@ -168,7 +169,7 @@ export class SqliteRuntimeEventStore {
     if (!sessionId || events.some((event) => event.sessionId !== sessionId)) {
       throw new Error("Plan operation events must belong to one session");
     }
-    return this.appendBatch(events, {
+    return appendRuntimeEventBatchWithArbitration(this, events, {
       expectedSessionHighWater: { [sessionId]: operation.expectedSessionSequence },
       planOperation: operation,
     });
@@ -190,7 +191,7 @@ export class SqliteRuntimeEventStore {
     if (!sessionId || events.some((event) => event.sessionId !== sessionId)) {
       throw new Error("Graph operation events must belong to one session");
     }
-    return this.appendBatch(events, {
+    return appendRuntimeEventBatchWithArbitration(this, events, {
       expectedSessionHighWater: { [sessionId]: operation.expectedSessionSequence },
       planOperation: operation,
     });
@@ -203,23 +204,10 @@ export class SqliteRuntimeEventStore {
   ): Promise<RuntimeEventStoreAppendResult> {
     const normalized = normalizeSessionRuntimeStateWritePatch(patch);
     if (!normalized) throw new Error("Runtime session state write patch is invalid");
-    const at = (options.now ?? (() => new Date()))().toISOString();
-    return this.append({
-      schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
-      eventId: options.eventId ?? createRuntimeEventId("session-state"),
-      sessionId,
-      invocationId: `session:${sessionId}:state`,
-      runId: "session-state",
-      turnId: "session-state",
-      at,
-      partial: false,
-      visibility: "internal",
-      kind: "session.state.committed",
-      data: {
-        stateVersion: SESSION_RUNTIME_STATE_VERSION,
-        patch: structuredClone(normalized),
-      },
-    });
+    return appendRuntimeEventWithArbitration(
+      this,
+      sessionStateRuntimeEventOf(sessionId, normalized, options),
+    );
   }
 
   async appendTranscriptEvent(
@@ -227,19 +215,10 @@ export class SqliteRuntimeEventStore {
     event: DurableTranscriptEvent,
     options: AppendRuntimeTranscriptEventOptions = {},
   ): Promise<RuntimeEventStoreAppendResult> {
-    return this.append({
-      schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
-      eventId: options.eventId ?? `transcript:${event.eventId}`,
-      sessionId,
-      invocationId: `session:${sessionId}:transcript`,
-      runId: "session-transcript",
-      turnId: "transcript",
-      at: new Date(event.createdAt).toISOString(),
-      partial: false,
-      visibility: "transcript",
-      kind: "transcript.event.recorded",
-      data: { event: structuredClone(event) },
-    });
+    return appendRuntimeEventWithArbitration(
+      this,
+      transcriptRuntimeEventOf(sessionId, event, options),
+    );
   }
 
   async readRun(sessionId: string, runId: string): Promise<RuntimeEvent[]> {
@@ -263,6 +242,34 @@ export class SqliteRuntimeEventStore {
         )
         .get(sessionId, eventId);
       return row === undefined ? undefined : entryFromRow(assertEventRow(row));
+    });
+  }
+
+  /**
+   * event_id 批量点查(单读事务,只读)。ADR 27 P1 写失败读回仲裁专用:
+   * 与 appendBatchLocked 幂等分支同一条 event_id 主键点查路径(readEventRow),
+   * canonical 载荷比较沿用 payload_json 字符串口径,不引入第二种比较。
+   */
+  async readEventRowsByEventIds(
+    eventIds: readonly string[],
+  ): Promise<ReadonlyMap<string, RuntimeEventPointRead>> {
+    return this.read(() => {
+      const rows = new Map<string, RuntimeEventPointRead>();
+      for (const eventId of eventIds) {
+        const row = this.readEventRow(eventId);
+        if (!row) continue;
+        rows.set(
+          row.event_id,
+          {
+            eventId: row.event_id,
+            sessionId: row.session_id,
+            eventSeq: row.event_seq,
+            payloadJson: row.payload_json,
+            at: row.at,
+          },
+        );
+      }
+      return rows;
     });
   }
 
@@ -1363,6 +1370,138 @@ export class SqliteRuntimeEventStore {
   private assertNotClosed(): void {
     if (this.closed) throw new Error("SqliteRuntimeEventStore is closed");
   }
+}
+
+/** 读回仲裁点查行(ADR 27 P1):event_id 主键命中行的原始列快照。 */
+export interface RuntimeEventPointRead {
+  readonly eventId: string;
+  readonly sessionId: string;
+  readonly eventSeq: number;
+  readonly payloadJson: string;
+  readonly at: string;
+}
+
+/**
+ * ADR 27 P1 写失败读回仲裁:包装一次 durable appendBatch,异常时点查该批全部
+ * event_id(复用幂等读路径的 event_id 主键点查 + canonical payload 口径):
+ * - 全部落地且载荷等价 → 判定实际已成功,用读回结果等价正常返回(inserted:false),
+ *   会话保持可写,不进 write_uncertain;
+ * - 任一缺失/载荷不等价/属于另一会话 → 重抛原始异常(照旧保守失败);
+ * - 读回自身失败(存储不可用) → 同样重抛(仲裁异常等价于不仲裁)。
+ *
+ * 只仲裁"结果模糊"的失败。store 的确定性拒绝(完整性错误、plan/graph
+ * fingerprint CAS 冲突、高水位 CAS 冲突)不模糊——事务确定没有提交,且读回
+ * 载荷相等不代表 options 信封(CAS/fingerprint)语义成立,一律原样重抛。
+ * 仲裁路径只读,不产生任何新写入(A2)。owner lease 检查在调用方守卫层
+ * (writeWithRuntimeEventGuard / Session.enqueuePersistence),不经过本函数:
+ * lease 丢失仍直接 fail-closed(P1.2)。
+ */
+export async function appendRuntimeEventBatchWithArbitration(
+  store: SqliteRuntimeEventStore,
+  events: readonly RuntimeEvent[],
+  options: AppendRuntimeEventBatchOptions = {},
+): Promise<readonly RuntimeEventStoreAppendResult[]> {
+  try {
+    return await store.appendBatch(events, options);
+  } catch (error) {
+    if (isDeterministicStoreRefusal(error)) throw error;
+    const recovered = await arbitrateDurableAppendFailure(store, events).catch(
+      () => undefined,
+    );
+    if (!recovered) throw error;
+    logger.warn(
+      { eventIds: [...new Set(events.map((event) => event.eventId))] },
+      "[runtime-event-store] durable append 失败但读回仲裁确认全部落地,按已成功继续",
+    );
+    return recovered;
+  }
+}
+
+/** store 契约层确定性拒绝(事务未提交,读回翻案会掩盖 CAS/完整性语义)。 */
+function isDeterministicStoreRefusal(error: unknown): boolean {
+  return (
+    error instanceof RuntimeEventStoreIntegrityError ||
+    error instanceof RuntimeEventStorePlanOperationConflictError ||
+    error instanceof RuntimeEventStoreHighWaterConflictError
+  );
+}
+
+/** 单事件 append 的读回仲裁同构包装(append ≡ appendBatch([event]) 首元素)。 */
+export async function appendRuntimeEventWithArbitration(
+  store: SqliteRuntimeEventStore,
+  event: RuntimeEvent,
+): Promise<RuntimeEventStoreAppendResult> {
+  const results = await appendRuntimeEventBatchWithArbitration(store, [event]);
+  return results[0]!;
+}
+
+/**
+ * 仲裁本体:逐事件点查。任一 event_id 缺失、绑定到另一会话、或 canonical
+ * payload 不等价(与 appendBatchLocked 幂等分支同一条比较)即返回 undefined,
+ * 只允许"确认全部落地"一种翻案(A1)。读回抛错由调用方 catch 为不仲裁(A3)。
+ */
+async function arbitrateDurableAppendFailure(
+  store: SqliteRuntimeEventStore,
+  events: readonly RuntimeEvent[],
+): Promise<readonly RuntimeEventStoreAppendResult[] | undefined> {
+  const rows = await store.readEventRowsByEventIds(
+    [...new Set(events.map((event) => event.eventId))],
+  );
+  const results: RuntimeEventStoreAppendResult[] = [];
+  for (const event of events) {
+    const row = rows.get(event.eventId);
+    if (!row) return undefined;
+    if (row.sessionId !== event.sessionId) return undefined;
+    if (row.payloadJson !== canonicalJson(canonicalizeRuntimeEvent(event))) {
+      return undefined;
+    }
+    results.push(appendResultFor(event.sessionId, row.eventSeq, row.eventId, row.at, false));
+  }
+  return results;
+}
+
+function sessionStateRuntimeEventOf(
+  sessionId: string,
+  normalized: SessionRuntimeStateWritePatch,
+  options: AppendRuntimeSessionStateOptions,
+): RuntimeEvent {
+  const at = (options.now ?? (() => new Date()))().toISOString();
+  return {
+    schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
+    eventId: options.eventId ?? createRuntimeEventId("session-state"),
+    sessionId,
+    invocationId: `session:${sessionId}:state`,
+    runId: "session-state",
+    turnId: "session-state",
+    at,
+    partial: false,
+    visibility: "internal",
+    kind: "session.state.committed",
+    data: {
+      stateVersion: SESSION_RUNTIME_STATE_VERSION,
+      patch: structuredClone(normalized),
+    },
+  };
+}
+
+function transcriptRuntimeEventOf(
+  sessionId: string,
+  event: DurableTranscriptEvent,
+  options: AppendRuntimeTranscriptEventOptions,
+): RuntimeEvent {
+  return {
+    schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
+    eventId: options.eventId ?? `transcript:${event.eventId}`,
+    sessionId,
+    invocationId: `session:${sessionId}:transcript`,
+    runId: "session-transcript",
+    turnId: "transcript",
+    at: new Date(event.createdAt).toISOString(),
+    partial: false,
+    visibility: "transcript",
+    kind: "transcript.event.recorded",
+    data: { event: structuredClone(event) },
+  };
 }
 
 interface SessionRow {

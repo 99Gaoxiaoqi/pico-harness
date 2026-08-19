@@ -79,7 +79,11 @@ import {
   projectRuntimeSessionTranscriptEventEntries,
   type RuntimeSessionForkSeedEntry,
 } from "../engine/session-runtime-projection.js";
-import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
+import {
+  appendRuntimeEventBatchWithArbitration,
+  appendRuntimeEventWithArbitration,
+  SqliteRuntimeEventStore,
+} from "../storage/sqlite/sqlite-runtime-event-store.js";
 
 interface RuntimeRunContext {
   readonly run: RuntimeRun;
@@ -1331,13 +1335,15 @@ export class RuntimeRun {
   }
 
   private append(event: RuntimeEvent): Promise<RuntimeEventStoreAppendResult> {
-    return this.writeCanonicalEvent(() => this.store.append(event));
+    return this.writeCanonicalEvent(() => appendRuntimeEventWithArbitration(this.store, event));
   }
 
   private appendBatch(
     events: readonly RuntimeEvent[],
   ): Promise<readonly RuntimeEventStoreAppendResult[]> {
-    return this.writeCanonicalEvent(() => this.store.appendBatch(events));
+    return this.writeCanonicalEvent(() =>
+      appendRuntimeEventBatchWithArbitration(this.store, events),
+    );
   }
 
   /** Checks the live Session lease on both sides of every canonical write attempt. */
