@@ -122,7 +122,7 @@ test("sqlite engine: read-only connection is query_only and version-gated", () =
   }
 });
 
-test("sqlite engine: schema drift is refused by the in-memory shape assertion", () => {
+test("sqlite engine: shape assertion gates migration only; drift is caught explicitly and by doctor", () => {
   const root = freshRoot();
   try {
     const preparation = prepareWorkspaceSqliteStorageSync(root, TEST_SCOPES);
@@ -132,6 +132,32 @@ test("sqlite engine: schema drift is refused by the in-memory shape assertion", 
       tamper.exec("DROP INDEX test_rows_by_value");
     } finally {
       tamper.close();
+    }
+    // 断言降频:版本未推进时常规重开只做注册表检查,不付 ~25ms 的 DDL 重放。
+    const reopened = prepareWorkspaceSqliteStorageSync(root, TEST_SCOPES);
+    try {
+      try {
+        assertCurrentOperationalTargetSchemaSync(
+          reopened.lease.database,
+          withWorkspaceBindingScope(TEST_SCOPES),
+        );
+        assert.fail("explicit shape assertion must catch the dropped index");
+      } catch (error) {
+        assert.match(error instanceof Error ? error.message : String(error), /schema drifted/);
+      }
+    } finally {
+      reopened.lease.release();
+    }
+    // 版本推进路径(升级)仍会强制断言:注入一个 migration 无法自愈的漂移
+    // (多余对象),再把注册表版本回退,重开时迁移重跑也消不掉它。
+    const regression = new DatabaseSync(operationalDatabasePath(root));
+    try {
+      regression.exec("CREATE TABLE rogue_tamper (id INTEGER PRIMARY KEY)");
+      regression.exec(
+        "UPDATE operational_schema_migrations SET version = 1 WHERE scope = 'test_domain'",
+      );
+    } finally {
+      regression.close();
     }
     assert.throws(
       () => prepareWorkspaceSqliteStorageSync(root, TEST_SCOPES),

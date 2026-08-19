@@ -596,10 +596,14 @@ async function readUtf8PageFromHandle(
     };
   }
 
-  const remaining = ref.sizeBytes - offsetBytes;
-  const readLength = Math.min(remaining, limitBytes + 1);
-  const window = Buffer.allocUnsafe(readLength);
-  const { bytesRead } = await handle.read(window, 0, readLength, offsetBytes);
+  // 主读先行:正常路径(边界对齐)零额外 IO;仅当 offsetBytes 落在多字节
+  // UTF-8 字符中间时才回退到该字符起点重读——内容零丢失,返回的
+  // offsetBytes 报告对齐后的真实起点,续读自洽。与页尾的回退对齐对称。
+  let start = offsetBytes;
+  let remaining = ref.sizeBytes - start;
+  let readLength = Math.min(remaining, limitBytes + 1);
+  let window = Buffer.allocUnsafe(readLength);
+  let { bytesRead } = await handle.read(window, 0, readLength, start);
   if (bytesRead !== readLength) {
     throw new EvidenceBlobIntegrityError(
       ref.digest,
@@ -608,11 +612,32 @@ async function readUtf8PageFromHandle(
     );
   }
   if (isUtf8ContinuationByte(window[0]!)) {
-    throw new EvidenceBlobIntegrityError(
-      ref.digest,
-      blobPath,
-      `offsetBytes ${offsetBytes} is not a UTF-8 code point boundary`,
-    );
+    const probeLength = Math.min(3, offsetBytes);
+    const probe = Buffer.allocUnsafe(probeLength);
+    const probeRead = await handle.read(probe, 0, probeLength, offsetBytes - probeLength);
+    if (probeRead.bytesRead !== probeLength) {
+      throw new EvidenceBlobIntegrityError(
+        ref.digest,
+        blobPath,
+        `expected ${probeLength} boundary-probe bytes, read ${probeRead.bytesRead}`,
+      );
+    }
+    let back = 1;
+    while (back < probeLength && isUtf8ContinuationByte(probe[probeLength - back]!)) {
+      back++;
+    }
+    start = offsetBytes - back;
+    remaining = ref.sizeBytes - start;
+    readLength = Math.min(remaining, limitBytes + 1);
+    window = Buffer.allocUnsafe(readLength);
+    ({ bytesRead } = await handle.read(window, 0, readLength, start));
+    if (bytesRead !== readLength) {
+      throw new EvidenceBlobIntegrityError(
+        ref.digest,
+        blobPath,
+        `expected ${readLength} page bytes, read ${bytesRead}`,
+      );
+    }
   }
 
   let contentLength = Math.min(limitBytes, remaining);
@@ -630,8 +655,8 @@ async function readUtf8PageFromHandle(
   }
   return {
     bytes: window.subarray(0, contentLength),
-    offsetBytes,
-    endOffsetBytes: offsetBytes + contentLength,
+    offsetBytes: start,
+    endOffsetBytes: start + contentLength,
     totalBytes: ref.sizeBytes,
   };
 }

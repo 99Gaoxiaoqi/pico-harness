@@ -33,15 +33,21 @@ CREATE TABLE IF NOT EXISTS operational_schema_migrations (
  * Migrates every scope to its current version inside a single write
  * transaction. The version is re-read after BEGIN IMMEDIATE so concurrent
  * processes cannot double-run the same migration level.
+ *
+ * Returns whether any migration level actually ran (fresh database or schema
+ * upgrade) — callers use this to gate the expensive :memory: shape assertion,
+ * which must not run on every connection reopen (~25ms of DDL replay).
  */
 export function migrateOperationalDatabaseSync(
   database: DatabaseSync,
   scopes: readonly SqliteSchemaScope[],
-): void {
-  if (isCurrent(database, scopes)) return;
+): boolean {
+  if (isCurrent(database, scopes)) return false;
+  let migrated = false;
   database.exec("BEGIN IMMEDIATE");
   try {
     if (!isCurrent(database, scopes)) {
+      migrated = true;
       database.exec(REGISTRY_TABLE_SQL);
       for (const scope of scopes) {
         const target = scopeCurrentVersion(scope);
@@ -66,6 +72,7 @@ export function migrateOperationalDatabaseSync(
       }
     }
     database.exec("COMMIT");
+    return migrated;
   } catch (error) {
     try {
       database.exec("ROLLBACK");
