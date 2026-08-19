@@ -48,6 +48,8 @@ export type {
   RuntimeSessionForkedEvent,
   RuntimeSessionStateCommittedEvent,
   RuntimeTerminalStatus,
+  RuntimeToolRecoveryClassification,
+  RuntimeToolResultRecoveryMarker,
   RuntimeToolStartedEvent,
   RuntimeToolResultRecordedEvent,
   RuntimeTranscriptEventRecordedEvent,
@@ -521,11 +523,16 @@ function assertToolResultRecordedEvent(value: Record<string, unknown>): void {
   if (!isRecord(data)) {
     throw new RuntimeEventIntegrityError("Runtime tool result data must be an object");
   }
-  assertOnlyKeys(data, ["toolName", "status", "body", "projection"], "tool.result.recorded.data");
+  assertOnlyKeys(
+    data,
+    ["toolName", "status", "body", "projection", "recovery"],
+    "tool.result.recorded.data",
+  );
   assertString(data["toolName"], "tool.result.recorded.toolName");
   if (!isToolResultStatus(data["status"])) {
     throw new RuntimeEventIntegrityError("Runtime tool result status is invalid");
   }
+  assertRuntimeToolResultRecoveryMarker(data["recovery"]);
 
   const body = data["body"];
   if (!isRecord(body)) {
@@ -603,6 +610,18 @@ function assertToolResultRecordedEvent(value: Record<string, unknown>): void {
     throw new RuntimeEventIntegrityError(
       "Runtime tool result projection truncated must be boolean",
     );
+  }
+}
+
+/** ADR 27 P0：恢复期合成结果可携带 recovery.classification；正常结果不得设置。 */
+function assertRuntimeToolResultRecoveryMarker(value: unknown): void {
+  if (value === undefined) return;
+  if (!isRecord(value)) {
+    throw new RuntimeEventIntegrityError("Runtime tool result recovery must be an object");
+  }
+  assertOnlyKeys(value, ["classification"], "tool.result.recorded.data.recovery");
+  if (value["classification"] !== "indeterminate" && value["classification"] !== "not_dispatched") {
+    throw new RuntimeEventIntegrityError("Runtime tool result recovery classification is invalid");
   }
 }
 

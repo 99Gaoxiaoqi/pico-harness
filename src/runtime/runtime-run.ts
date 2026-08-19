@@ -56,6 +56,7 @@ import {
   type RuntimeRunTerminalEvent,
   type RuntimeSessionForkedEvent,
   type RuntimeTerminalStatus,
+  type RuntimeToolRecoveryClassification,
   type RuntimeToolStartedEvent,
   type RuntimeToolResultRecordedEvent,
   type RuntimeTranscriptEventRecordedEvent,
@@ -226,6 +227,8 @@ interface PendingRuntimeToolCall {
   readonly toolCall: ToolCall;
   readonly callIndex: number;
   resolved: boolean;
+  /** 派发事实（ADR 27 P0）：run 账本内存在配对的 tool.started（先于 execute 落库）。 */
+  dispatched: boolean;
 }
 
 interface PendingRegisteredToolResult {
@@ -1429,6 +1432,17 @@ function findDanglingRuntimeToolCalls(
   const unresolvedByToolCallId = new Map<string, PendingRuntimeToolCall[]>();
 
   for (const event of events) {
+    // ADR 27 P0（F1/F2 判定边界）：tool.started 在 registry.execute 之前落库
+    // （src/engine/loop.ts runOneTool / 子代理并发循环均如此），因此它的存在
+    // 即“已派发”的 durable 事实。按 toolCallId 与 pending 队列保持与 result
+    // 相同的 FIFO 配对口径（多 result/多 start 的重试场景逐个配对）。
+    if (event.kind === "tool.started") {
+      const startedCallId = event.refs?.toolCallId;
+      const unresolved = startedCallId ? unresolvedByToolCallId.get(startedCallId) : undefined;
+      const dispatchedEntry = unresolved?.find((entry) => !entry.dispatched);
+      if (dispatchedEntry) dispatchedEntry.dispatched = true;
+      continue;
+    }
     if (!runtimeEventHasModelHistoryEntry(event)) continue;
     // Rewind keeps canonical facts but removes them from the active Session projection.
     // Both a call and its result must be matched inside that same active projection.
@@ -1442,6 +1456,7 @@ function findDanglingRuntimeToolCalls(
           toolCall,
           callIndex,
           resolved: false,
+          dispatched: false,
         };
         pending.push(entry);
         const unresolved = unresolvedByToolCallId.get(toolCall.id) ?? [];
@@ -1577,7 +1592,15 @@ function buildInterruptedToolResultEvent(
     ...(toolContext?.refs ?? {}),
     toolCallId: pending.toolCall.id,
   });
-  const content = "工具执行已中断: 运行进程在该工具结果持久化前终止；该调用未获得可用结果。";
+  // ADR 27 P0 恢复决策表：tool.started 已落库（dispatched）→ indeterminate
+  // （副作用可能已发生，结果未知）；否则 → not_dispatched（从未交给执行器）。
+  // 模型可见文案（projection.text）必须与分类如实一致。
+  const classification: RuntimeToolRecoveryClassification = pending.dispatched
+    ? "indeterminate"
+    : "not_dispatched";
+  const content = pending.dispatched
+    ? "工具执行状态未知：该工具调用已被派发，但运行进程在结果持久化前终止。该工具可能已实际执行，其副作用（例如文件写入、外部请求）可能已经发生，实际执行结果未知。请勿假定该调用未执行；如需确认实际效果，请先用只读工具核查。"
+    : "工具未执行：运行进程在该工具派发前终止，该调用从未交给执行器执行，未发生任何副作用。";
   const { evidence: _evidence, ...inlineRefs } = refs ?? {};
   return {
     schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
@@ -1616,6 +1639,7 @@ function buildInterruptedToolResultEvent(
         strategy: "runtime-interruption-recovery",
         truncated: false,
       },
+      recovery: { classification },
     },
   };
 }
