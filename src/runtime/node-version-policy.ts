@@ -1,7 +1,7 @@
-export const NODE_RUNTIME_SUPPORT_LABEL = "Node 22.13+、24.3+ 或 26.x";
+export const NODE_RUNTIME_SUPPORT_LABEL = "Node 22.19+、24.3+ 或 26.x";
 
 const SUPPORTED_NODE_RELEASES = new Map([
-  [22, 13],
+  [22, 19],
   [24, 3],
   [26, 0],
 ]);

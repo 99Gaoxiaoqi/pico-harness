@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { SlashCommand } from "../input/types.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
-import { MemoryRepository } from "./memory-repository.js";
+import { SqliteMemoryRepository } from "../storage/sqlite/sqlite-memory-repository.js";
 import { evaluateMemoryReviewBudgetForJobs } from "./memory-review-policy.js";
 import { sanitizeMemoryProposalCandidate } from "./proposal-sanitizer.js";
 
@@ -57,7 +57,7 @@ export function createMemoryCommand(options: MemoryCommandOptions): SlashCommand
   };
 }
 
-function remember(repository: MemoryRepository, raw: string) {
+function remember(repository: SqliteMemoryRepository, raw: string) {
   const text = raw.normalize("NFKC").replaceAll(/\s+/gu, " ").trim();
   if (!text) return message("Usage: /memory remember <text>");
   const sanitized = sanitizeMemoryProposalCandidate({
@@ -95,7 +95,7 @@ function remember(repository: MemoryRepository, raw: string) {
   return message(`Remembered workspace fact ${fact.factId}. Undo: /memory undo ${token}`);
 }
 
-function status(repository: MemoryRepository) {
+function status(repository: SqliteMemoryRepository) {
   const settings = repository.getSettings();
   const reviewBudget = evaluateMemoryReviewBudgetForJobs(
     settings.reviewMode,
@@ -131,7 +131,7 @@ function status(repository: MemoryRepository) {
   );
 }
 
-function setEnabled(repository: MemoryRepository, enabled: boolean) {
+function setEnabled(repository: SqliteMemoryRepository, enabled: boolean) {
   const current = repository.getSettings();
   if (current.enabled === enabled && current.injectionEnabled === enabled) {
     return message(`Memory is already ${enabled ? "on" : "off"}.`);
@@ -151,7 +151,7 @@ function setEnabled(repository: MemoryRepository, enabled: boolean) {
   );
 }
 
-function undo(repository: MemoryRepository, encoded: string | undefined) {
+function undo(repository: SqliteMemoryRepository, encoded: string | undefined) {
   if (!encoded) return message("Usage: /memory undo <token>");
   const payload = decodeUndo(encoded);
   const fact = repository.getFact(payload.factId);
@@ -168,7 +168,7 @@ function undo(repository: MemoryRepository, encoded: string | undefined) {
   return message(`Undone: workspace fact ${updated.factId} is disabled.`);
 }
 
-async function openTrustedRepository(options: MemoryCommandOptions): Promise<MemoryRepository> {
+async function openTrustedRepository(options: MemoryCommandOptions): Promise<SqliteMemoryRepository> {
   const trustStore =
     options.trustStore ?? new WorkspaceTrustStore({ userStateDirectory: options.picoHome });
   const canonical = await trustStore.canonicalize(options.workDir);
@@ -176,8 +176,8 @@ async function openTrustedRepository(options: MemoryCommandOptions): Promise<Mem
     throw new Error(`workspace is not trusted: ${canonical}`);
   }
   const paths = resolvePicoPaths(canonical, { picoHome: options.picoHome });
-  return new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  return new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
 }

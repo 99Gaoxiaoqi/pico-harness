@@ -1,20 +1,19 @@
 // TodoStore:结构化任务清单的持久化存储层。
 //
-// 对应 pico-harness "状态外部化" 哲学的结构化落地:用 JSON 维护一个有
-// id/状态/优先级的任务清单,供 TodoTool 程序化增删改查,并把当前进度
-// 渲染成 Markdown 注入 system prompt。
+// 对应 pico-harness "状态外部化" 哲学的结构化落地:维护一个有 id/状态/优先级
+// 的任务清单,供 TodoTool 程序化增删改查,并把当前进度渲染成 Markdown 注入
+// system prompt。
 //
-// 设计借鉴:构造时固定 workspace state 路径(杜绝穿越) + 内存缓存 +
-// 每次变更即刻落盘 + IO 错误降级。
+// 票 08 起:清单状态迁入 workspace pico.sqlite 的 `workspace_kv`(key="todo"),
+// 顺带获得单事务原子性;旧 todo.json 裸 writeFile(无原子性)不再产生。
 //
 // 错误处理约定:所有 IO 错误降级不阻断主流程。
-//   - load 失败(ENOENT/权限/畸形 JSON)→ 返回空 state,不抛
+//   - load 失败(缺行/权限/畸形 JSON)→ 返回空 state,不抛
 //   - save 失败(权限/磁盘满)→ 只记 warn 不抛,内存缓存仍生效
 
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
 import { logger } from "../observability/logger.js";
 import { resolvePicoPaths, type ResolvePicoPathsOptions } from "../paths/pico-paths.js";
+import { withWorkspaceSqliteLease } from "../storage/sqlite/workspace-scopes.js";
 
 /** 任务状态 */
 export type TodoStatus = "pending" | "in_progress" | "completed";
@@ -30,12 +29,14 @@ export interface TodoItem {
   priority: TodoPriority;
 }
 
-/** 完整清单状态(序列化到磁盘的结构) */
+/** 完整清单状态(序列化到 workspace_kv 的结构) */
 export interface TodoState {
   items: TodoItem[];
   /** 下一个自增 id,避免删除后 id 重叠 */
   nextId: number;
 }
+
+const WORKSPACE_KV_TODO_KEY = "todo";
 
 /** 优先级排序权重(高→中→低),用于 list/buildTodoContext 稳定排序 */
 const PRIORITY_WEIGHT: Record<TodoPriority, number> = {
@@ -45,64 +46,67 @@ const PRIORITY_WEIGHT: Record<TodoPriority, number> = {
 };
 
 /**
- * 结构化 TodoList 存储层,绑定到固定工作区路径。
+ * 结构化 TodoList 存储层,绑定到固定工作区。
  *
- * 路径在构造时固定为 workspace state 下的 todo.json,外部无法变更,
- * 从源头杜绝路径穿越风险(无需额外防护)。
+ * 存储位置在构造时固定为 workspace pico.sqlite 的 workspace_kv 行,外部无法
+ * 变更,从源头杜绝路径穿越风险(无需额外防护)。
  */
 export class TodoStore {
-  private readonly todoPath: string;
+  private readonly storageRoot: string;
 
   /** 内存缓存:所有变更先落到内存,再异步落盘 */
   private state: TodoState = { items: [], nextId: 1 };
 
-  /** 是否已加载过磁盘状态(避免每次操作都重读文件) */
+  /** 是否已加载过磁盘状态(避免每次操作都重读) */
   private loaded = false;
 
   constructor(workDir: string, options: ResolvePicoPathsOptions = {}) {
-    this.todoPath = resolvePicoPaths(workDir, options).workspace.todo;
+    this.storageRoot = resolvePicoPaths(workDir, options).workspace.root;
   }
 
   /**
-   * 从磁盘加载清单状态到内存缓存。
-   * - 文件不存在(ENOENT):返回空 state,不抛
-   * - 权限不足(EACCES):返回空 state,不抛
+   * 从 workspace_kv 加载清单状态到内存缓存。
+   * - 行不存在(全新工作区):返回空 state,不抛
    * - 畸形 JSON:返回空 state,不抛
-   * 幂等:多次调用安全,仅首次真正读盘。
+   * 幂等:多次调用安全,仅首次真正读库。
    *
-   * 注意:首次加载后内存缓存被冻结,本实例看不到磁盘上的后续变化。
+   * 注意:首次加载后内存缓存被冻结,本实例看不到库里的后续变化。
    * 跨实例实时可见性靠 host 注入同一 TodoStore 单例(对标 GoalManager),
    * 本类的 reload() 仅作跨进程/兜底场景的强制重读入口。
    */
   async load(): Promise<TodoState> {
     if (this.loaded) return this.state;
 
-    let raw: string;
+    let raw: string | undefined;
     try {
-      raw = await readFile(this.todoPath, "utf8");
+      const row = withWorkspaceSqliteLease(this.storageRoot, (lease) =>
+        lease.transaction("read", () =>
+          lease.database
+            .prepare("SELECT value_json FROM workspace_kv WHERE key = ?")
+            .get(WORKSPACE_KV_TODO_KEY),
+        ),
+      ) as { value_json?: unknown } | undefined;
+      raw = typeof row?.["value_json"] === "string" ? row["value_json"] : undefined;
     } catch (err) {
-      // ENOENT/EACCES:全新工作区或无权限,静默返回空 state
-      if (isErrnoException(err, "ENOENT") || isErrnoException(err, "EACCES")) {
-        this.loaded = true;
-        return this.state;
-      }
-      // 其他 IO 错误:记 warn 后返回空 state,不阻断
-      logger.warn({ err, path: this.todoPath }, "读取 todo.json 失败,降级为空清单");
+      // 库打开/读取失败:记 warn 后返回空 state,不阻断
+      logger.warn({ err, storageRoot: this.storageRoot }, "读取 workspace_kv todo 失败,降级为空清单");
       this.loaded = true;
       return this.state;
     }
 
-    try {
-      const parsed = JSON.parse(raw) as Partial<TodoState>;
-      // 防御畸形 JSON:字段缺失或类型错乱时回退到空 state
-      if (parsed && Array.isArray(parsed.items) && typeof parsed.nextId === "number") {
-        this.state = normalizeState(parsed as TodoState);
-      } else {
-        logger.warn({ path: this.todoPath }, "todo.json 结构非法,降级为空清单");
+    if (typeof raw === "string") {
+      try {
+        const parsed = JSON.parse(raw) as Partial<TodoState>;
+        // 防御畸形行:字段缺失或类型错乱时回退到空 state
+        if (parsed && Array.isArray(parsed.items) && typeof parsed.nextId === "number") {
+          this.state = normalizeState(parsed as TodoState);
+        } else {
+          logger.warn({ storageRoot: this.storageRoot }, "workspace_kv todo 结构非法,降级为空清单");
+        }
+      } catch (err) {
+        // JSON.parse 失败:降级为空 state,不抛
+        logger.warn({ err, storageRoot: this.storageRoot }, "workspace_kv todo 解析失败,降级为空清单");
       }
-    } catch (err) {
-      // JSON.parse 失败:降级为空 state,不抛
-      logger.warn({ err, path: this.todoPath }, "todo.json 解析失败,降级为空清单");
     }
 
     this.loaded = true;
@@ -110,11 +114,11 @@ export class TodoStore {
   }
 
   /**
-   * 强制重读磁盘,忽略已加载的内存缓存。
+   * 强制重读存储,忽略已加载的内存缓存。
    *
-   * 用途:跨进程读取场景(如 CLI 新进程读取旧 todo.json)或兜底排查。
-   * 单进程内的实时可见性应由 host 注入同一 TodoStore 单例保证(对标 GoalManager),
-   * 不应依赖 reload 轮询——否则并发写存在竞态窗口。
+   * 用途:跨进程读取场景或兜底排查。单进程内的实时可见性应由 host 注入同一
+   * TodoStore 单例保证(对标 GoalManager),不应依赖 reload 轮询——否则并发写
+   * 存在竞态窗口。
    *
    * 副作用:丢弃当前内存缓存中未落盘的改动(正常运行链路里 save 先于 reload,故无影响)。
    */
@@ -124,20 +128,26 @@ export class TodoStore {
   }
 
   /**
-   * 把内存缓存落盘。
-   * mkdir recursive 保证 workspace state 目录存在;失败只记 warn 不抛,
-   * 内存缓存仍保持最新值,后续操作不受影响。
+   * 把内存缓存落盘:workspace_kv 单行 UPSERT,单 BEGIN IMMEDIATE 事务原子提交
+   * (旧 todo.json 裸 writeFile 在崩溃时可留半截文件,该风险随迁移消失)。
+   * 失败只记 warn 不抛,内存缓存仍保持最新值,后续操作不受影响。
    */
   async save(): Promise<void> {
     try {
-      await mkdir(dirname(this.todoPath), { recursive: true, mode: 0o700 });
-      await chmod(dirname(this.todoPath), 0o700);
       const json = JSON.stringify(this.state, null, 2);
-      await writeFile(this.todoPath, json, { encoding: "utf8", mode: 0o600 });
-      await chmod(this.todoPath, 0o600);
+      withWorkspaceSqliteLease(this.storageRoot, (lease) =>
+        lease.transaction("write", () =>
+          lease.database
+            .prepare(
+              `INSERT INTO workspace_kv (key, value_json) VALUES (?, ?)
+               ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json`,
+            )
+            .run(WORKSPACE_KV_TODO_KEY, json),
+        ),
+      );
     } catch (err) {
       // 持久化失败记 warn 但不抛出异常(优雅降级)
-      logger.warn({ err, path: this.todoPath }, "todo.json 持久化失败");
+      logger.warn({ err, storageRoot: this.storageRoot }, "workspace_kv todo 持久化失败");
     }
   }
 
@@ -289,14 +299,4 @@ function normalizeState(state: TodoState): TodoState {
   // nextId 不能小于现有最大 id + 1,否则会复用已删除/已存在的 id
   const nextId = Math.max(state.nextId, maxId + 1);
   return { items, nextId };
-}
-
-/** 判断异常是否为指定 code 的 Node ErrnoException */
-function isErrnoException(err: unknown, code: string): boolean {
-  return (
-    typeof err === "object" &&
-    err !== null &&
-    "code" in err &&
-    (err as { code: unknown }).code === code
-  );
 }

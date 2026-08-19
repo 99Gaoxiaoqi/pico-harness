@@ -1,8 +1,6 @@
-import { createHash } from "node:crypto";
-import type { Stats } from "node:fs";
-import { lstat, readFile, readdir } from "node:fs/promises";
+import { existsSync, type Stats } from "node:fs";
+import { lstat, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { isDeepStrictEqual } from "node:util";
 import { RuntimeProjectionService } from "../engine/runtime-projection-service.js";
 import { createFileHistoryState, fileHistoryLoadState } from "../safety/file-history.js";
 import { FileHistoryBlobStore } from "./file-history-blob-store.js";
@@ -13,35 +11,42 @@ import {
 } from "./operation-journal.js";
 import { canonicalizeWorkspacePath, resolvePicoPaths } from "../paths/pico-paths.js";
 import type { WorkspaceId } from "../paths/pico-paths.js";
-import { decodeMemoryFileState } from "../memory/memory-file-state.js";
 import {
-  decodeRuntimeControlState,
-  decodeRuntimeEvents,
-  decodeUsageLedger,
-} from "../tasks/runtime-store.js";
-import { TaskRunStore } from "../tasks/task-run-store.js";
-import {
-  decodeRuntimeSessionManifestProjection,
-  RuntimeEventStore,
-} from "./runtime-event-store.js";
-import {
-  inspectFileTransactionMarkerSync,
-  readJsonLinesSync,
-  withFileLock,
-} from "./local-file-storage.js";
-import {
-  decodeWorkspaceStorageLayout,
-  readWorkspaceStorageRootIdentitySync,
-  WORKSPACE_LAYOUT_TRANSACTION_OPTIONS,
-  WORKSPACE_STORAGE_COMMIT_FILE,
-  WORKSPACE_STORAGE_LAYOUT_FILE,
-  WORKSPACE_STORAGE_LOCK_DIRECTORY,
-} from "./workspace-storage-layout.js";
+  SqliteRuntimeEventStore,
+} from "./sqlite/sqlite-runtime-event-store.js";
+import type { RuntimeSessionManifest } from "./runtime-event-store-contracts.js";
+import { SqliteTaskRunStore } from "./sqlite/sqlite-task-run-store.js";
+import { operationalDatabasePath, openOperationalDatabaseReadOnly } from "./sqlite/sqlite-database.js";
+import { listFileHistorySessionIds } from "./sqlite/file-history-manifest-store.js";
+import { readWorkspaceSqliteStorageRootIdentitySync } from "./sqlite/sqlite-workspace-storage.js";
+import type { WorkspaceStorageRootIdentity } from "./sqlite/sqlite-workspace-storage.js";
 
-const SAFE_OPERATION_ID_RE = /^[A-Za-z0-9._-]+$/u;
+/**
+ * SQLite 纪元的跨持久层只读诊断器(票 09 重写,ADR 24 §5/M6)。
+ *
+ * scan = PRAGMA 一致性(integrity_check/foreign_key_check)+ workspace binding
+ * 身份校验 + 各 scope 行扫描(sessions 投影重放、task_runs 巡检、memory
+ * workspaceId 绑定、operations journal、file-history manifest+blob 对账)。
+ * JSONL 纪元的锁仪式、commit.json WAL 与 manifest.json 投影重建已随旧存储面
+ * 退役;旧布局(.storage/sessions/task-runs/control/memory/storage-operations/
+ * todo.json)按 legacy 残留报告——SQLite 纪元不迁移历史,pico.sqlite 是当前
+ * 唯一事实载体。scan 从不修复/删除权威数据,也不为扫描初始化新库。
+ */
+
 const LEGACY_LOCK_TOMBSTONE_RE = /^\.lock\.tombstone-[a-f0-9]{64}$/u;
 const LEGACY_LOCK_CANDIDATE_RE =
   /^\.lock\.candidate-[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
+
+/** v2 JSONL 纪元的 canonical 目录与协调器:出现任意一个即为旧纪元残留。 */
+const LEGACY_SESSION_CENTRIC_ENTRIES = [
+  ".storage",
+  "sessions",
+  "task-runs",
+  "control",
+  "memory",
+  "storage-operations",
+  "todo.json",
+] as const;
 
 export const STORAGE_DOCTOR_SEVERITIES = ["info", "warning", "error", "critical"] as const;
 export type StorageDoctorSeverity = (typeof STORAGE_DOCTOR_SEVERITIES)[number];
@@ -88,10 +93,6 @@ export interface StorageDoctorOptions {
 export interface StorageDoctorRepairOptions {
   /** 投影具体实现由组装层提供，Doctor 不反向修改真源。 */
   readonly rebuildDerivedProjections?: () => void | Promise<void>;
-  /** 从 canonical Session JSONL 重建可丢弃的 manifest.json 投影。 */
-  readonly rebuildRuntimeManifests?: boolean;
-  /** 从 canonical TaskRun JSONL 重建可丢弃的 manifest.json 投影。 */
-  readonly rebuildTaskRunManifests?: boolean;
   /** 显式请求协调时，forwarder 必须完成真实副作用及 journal 推进。 */
   readonly reconcileOperations?: {
     readonly forward: (
@@ -103,22 +104,15 @@ export interface StorageDoctorRepairOptions {
 
 export interface StorageDoctorRepairResult {
   readonly rebuiltDerivedProjections: boolean;
-  readonly rebuiltRuntimeManifests: boolean;
-  readonly rebuiltTaskRunManifests: boolean;
   readonly reconciledOperationIds: readonly string[];
   readonly needsAttentionOperationIds: readonly string[];
 }
 
-/**
- * 跨持久层的只读诊断器。scan 从不修复/删除权威数据；repair 也只执行
- * 调用方明确开启的安全动作。
- */
 export class StorageDoctor {
   private readonly workDir: string;
   private readonly picoHome?: string;
   private readonly fileHistoryDir: string;
   private readonly runtimeStorageRoot: string;
-  private readonly memoryStorageRoot: string;
   private readonly workspaceId: WorkspaceId;
   private readonly legacyStoragePaths: readonly string[];
   private readonly legacyJsonRuntimePath: string;
@@ -133,18 +127,17 @@ export class StorageDoctor {
     });
     this.fileHistoryDir = resolve(options.fileHistoryDir ?? join(paths.home.root, "file-history"));
     this.runtimeStorageRoot = resolve(options.runtimeStorageRoot ?? paths.workspace.root);
-    this.memoryStorageRoot = resolve(paths.workspace.memory);
     this.workspaceId = paths.workspace.id;
     this.legacyStoragePaths = [
       ...["", "-wal", "-shm"].map((suffix) =>
         resolve(paths.workspace.root, `runtime.sqlite${suffix}`),
       ),
       ...["", "-wal", "-shm"].map((suffix) =>
-        resolve(paths.workspace.memory, `memory.sqlite${suffix}`),
+        resolve(paths.workspace.root, `memory.sqlite${suffix}`),
       ),
     ];
-    this.legacyJsonRuntimePath = resolve(paths.workspace.legacyRuntime);
-    this.legacyTasksPath = resolve(paths.workspace.tasks);
+    this.legacyJsonRuntimePath = resolve(paths.workspace.root, "runtime");
+    this.legacyTasksPath = resolve(paths.workspace.root, "tasks");
     this.now = options.now ?? (() => new Date());
   }
 
@@ -156,13 +149,6 @@ export class StorageDoctor {
     await this.scanLegacyStorage(findings);
     const runtimeRootMetadata = await lstatIfExists(this.runtimeStorageRoot);
     if (runtimeRootMetadata) {
-      const scanRuntime = async () => {
-        const runtimeAvailable = await this.scanRuntime(findings, scanned);
-        if (runtimeAvailable) {
-          await this.scanSessions(findings, scanned);
-          await this.scanTaskRuns(findings, scanned);
-        }
-      };
       if (!isRealDirectory(runtimeRootMetadata)) {
         findings.push(
           invalidStorageDirectoryFinding(this.runtimeStorageRoot, "runtime", runtimeRootMetadata),
@@ -181,34 +167,8 @@ export class StorageDoctor {
             ),
           );
         }
-        const coordinatorPath = join(this.runtimeStorageRoot, ".storage");
-        const coordinatorMetadata = await lstatIfExists(coordinatorPath);
-        if (!coordinatorMetadata) {
-          await scanRuntime();
-        } else if (!isRealDirectory(coordinatorMetadata)) {
-          findings.push(
-            invalidStorageDirectoryFinding(coordinatorPath, "runtime", coordinatorMetadata),
-          );
-        } else {
-          await withFileLock(
-            join(this.runtimeStorageRoot, WORKSPACE_STORAGE_LOCK_DIRECTORY),
-            `storage-doctor:${process.pid}:runtime`,
-            scanRuntime,
-          );
-        }
+        await this.scanRuntimeDatabase(findings, scanned);
       }
-    }
-    const memoryRootMetadata = await lstatIfExists(this.memoryStorageRoot);
-    if (memoryRootMetadata && !isRealDirectory(memoryRootMetadata)) {
-      findings.push(
-        invalidStorageDirectoryFinding(this.memoryStorageRoot, "memory", memoryRootMetadata),
-      );
-    } else if (memoryRootMetadata) {
-      await withFileLock(
-        join(this.memoryStorageRoot, "lock"),
-        `storage-doctor:${process.pid}:memory`,
-        async () => this.scanMemory(findings, scanned),
-      );
     }
     await this.scanOperations(findings, scanned);
     await this.scanFileHistory(findings, scanned);
@@ -216,7 +176,7 @@ export class StorageDoctor {
     return {
       scannedAt: this.now().toISOString(),
       healthy: !findings.some(
-        (finding) => finding.severity === "error" || finding.severity === "critical",
+        (item) => item.severity === "error" || item.severity === "critical",
       ),
       findings,
       scanned,
@@ -228,37 +188,6 @@ export class StorageDoctor {
     if (options.rebuildDerivedProjections) {
       await options.rebuildDerivedProjections();
       rebuiltDerivedProjections = true;
-    }
-    let rebuiltRuntimeManifests = false;
-    if (options.rebuildRuntimeManifests === true) {
-      await new RuntimeEventStore(
-        { storageRoot: this.runtimeStorageRoot },
-        { repairIncompleteTails: false },
-      ).listSessionManifests();
-      rebuiltRuntimeManifests = true;
-    }
-    let rebuiltTaskRunManifests = false;
-    if (options.rebuildTaskRunManifests === true) {
-      const inspection = await new TaskRunStore(
-        { storageRoot: this.runtimeStorageRoot },
-        {
-          repairManifests: false,
-          repairIncompleteTails: false,
-          readOnly: true,
-        },
-      ).inspectTaskRuns();
-      if (inspection.storageRootMismatches.length > 0) {
-        throw new Error(
-          `StorageDoctor refuses to rebuild TaskRun manifests across storage roots: ${inspection.storageRootMismatches
-            .map(({ taskRunId }) => taskRunId)
-            .join(", ")}`,
-        );
-      }
-      await new TaskRunStore(
-        { storageRoot: this.runtimeStorageRoot },
-        { repairIncompleteTails: false },
-      ).listTaskRunProjections();
-      rebuiltTaskRunManifests = true;
     }
 
     const reconciledOperationIds: string[] = [];
@@ -298,92 +227,221 @@ export class StorageDoctor {
 
     return {
       rebuiltDerivedProjections,
-      rebuiltRuntimeManifests,
-      rebuiltTaskRunManifests,
       reconciledOperationIds: reconciledOperationIds.toSorted(),
       needsAttentionOperationIds: needsAttentionOperationIds.toSorted(),
     };
+  }
+
+  /**
+   * pico.sqlite 是当前纪元的唯一事实载体:PRAGMA 一致性 + binding 身份 +
+   * 私有模式。库不存在(空工作区)时无行可扫,不得为扫描初始化新库。
+   */
+  private async scanRuntimeDatabase(
+    findings: StorageDoctorFinding[],
+    scanned: Record<StorageDoctorComponent, number>,
+  ): Promise<void> {
+    if (!existsSync(operationalDatabasePath(this.runtimeStorageRoot))) return;
+    scanned.runtime++;
+    const databasePath = operationalDatabasePath(this.runtimeStorageRoot);
+    await this.scanPrivateModes(this.runtimeStorageRoot, "runtime", findings, new Set([
+      "evidence",
+      "traces",
+      "fork-staging",
+      "agent-recovery-launch-intents",
+    ]));
+
+    let database: ReturnType<typeof openOperationalDatabaseReadOnly> | undefined;
+    try {
+      database = openOperationalDatabaseReadOnly(this.runtimeStorageRoot);
+      const integrity = database.prepare("PRAGMA integrity_check").all() as unknown[];
+      const integrityMessages = integrity
+        .map((row) => Object.values(row as Record<string, unknown>)[0])
+        .filter((value): value is string => typeof value === "string" && value !== "ok");
+      if (integrityMessages.length > 0) {
+        findings.push(
+          finding(
+            "runtime_integrity_check_failed",
+            "critical",
+            "runtime",
+            databasePath,
+            integrityMessages.join("; "),
+            "Preserve pico.sqlite unchanged and restore the workspace from a verified backup",
+            "authoritative",
+          ),
+        );
+      }
+      const foreignKeys = database.prepare("PRAGMA foreign_key_check").all() as unknown[];
+      if (foreignKeys.length > 0) {
+        findings.push(
+          finding(
+            "runtime_foreign_key_violation",
+            "critical",
+            "runtime",
+            databasePath,
+            `${foreignKeys.length} foreign key violation(s): ${safeJson(foreignKeys.slice(0, 5))}`,
+            "Preserve pico.sqlite unchanged and restore the workspace from a verified backup",
+            "authoritative",
+          ),
+        );
+      }
+    } catch (error) {
+      findings.push(
+        finding(
+          "runtime_database_unreadable",
+          "critical",
+          "runtime",
+          databasePath,
+          errorMessage(error),
+          "Preserve pico.sqlite unchanged; verify file permissions and Node/SQLite availability before retrying",
+          "authoritative",
+        ),
+      );
+      return;
+    } finally {
+      database?.close();
+    }
+
+    let rootIdentity: WorkspaceStorageRootIdentity | undefined;
+    try {
+      rootIdentity = readWorkspaceSqliteStorageRootIdentitySync(this.runtimeStorageRoot);
+    } catch (error) {
+      findings.push(
+        finding(
+          "runtime_root_identity_invalid",
+          "critical",
+          "runtime",
+          databasePath,
+          errorMessage(error),
+          "Preserve the root and use explicit storage adoption only after verifying its origin",
+          "authoritative",
+        ),
+      );
+      return;
+    }
+    if (!rootIdentity) {
+      findings.push(
+        finding(
+          "runtime_workspace_binding_missing",
+          "critical",
+          "runtime",
+          databasePath,
+          "pico.sqlite exists without a workspace_storage_binding row",
+          "Preserve the database and re-initialize the workspace only after verifying its origin",
+          "authoritative",
+        ),
+      );
+      return;
+    }
+
+    // 混合状态(pico.sqlite + 旧 JSONL/pre-v2 标记):store 构造器会 fail-closed
+    // 拒开,scope 行扫描无法进行——legacy 残留已由 scanLegacyStorage 报告,
+    // 这里不再叠加误导性 finding。
+    if (this.hasLegacyStorageMarkers()) return;
+
+    this.scanMemoryBinding(findings, scanned);
+    await this.scanSessions(findings, scanned);
+    await this.scanTaskRuns(findings, scanned);
+  }
+
+  private hasLegacyStorageMarkers(): boolean {
+    return LEGACY_SESSION_CENTRIC_ENTRIES.some((marker) =>
+      existsSync(join(this.runtimeStorageRoot, marker)),
+    );
+  }
+
+  private scanMemoryBinding(
+    findings: StorageDoctorFinding[],
+    scanned: Record<StorageDoctorComponent, number>,
+  ): void {
+    const databasePath = operationalDatabasePath(this.runtimeStorageRoot);
+    let workspaceId: string | undefined;
+    try {
+      const database = openOperationalDatabaseReadOnly(this.runtimeStorageRoot);
+      try {
+        const row = database
+          .prepare("SELECT value_json FROM memory_metadata WHERE key = 'workspaceId'")
+          .get() as { value_json?: unknown } | undefined;
+        if (typeof row?.["value_json"] === "string") {
+          const decoded = JSON.parse(row["value_json"]) as unknown;
+          if (typeof decoded === "string") workspaceId = decoded;
+        }
+      } finally {
+        database.close();
+      }
+    } catch (error) {
+      // memory scope 未迁移(schema 版本落后)时只报告,不阻断其余扫描。
+      findings.push(
+        finding(
+          "memory_scope_unreadable",
+          "error",
+          "memory",
+          databasePath,
+          errorMessage(error),
+          "Open the workspace with the current pico build to migrate the memory schema, then re-run the doctor",
+          "authoritative",
+        ),
+      );
+      return;
+    }
+    if (workspaceId === undefined) return;
+    scanned.memory++;
+    if (workspaceId !== this.workspaceId) {
+      findings.push(
+        finding(
+          "memory_workspace_mismatch",
+          "critical",
+          "memory",
+          databasePath,
+          `Memory storage is bound to workspace ${workspaceId}, but this doctor scanned ${this.workspaceId}`,
+          "Preserve the database; memory facts are workspace-private and must not be read across workspaces",
+          "authoritative",
+        ),
+      );
+    }
   }
 
   private async scanSessions(
     findings: StorageDoctorFinding[],
     scanned: Record<StorageDoctorComponent, number>,
   ): Promise<void> {
-    const store = new RuntimeEventStore(
-      { storageRoot: this.runtimeStorageRoot },
-      {
-        repairManifests: false,
-        repairIncompleteTails: false,
-        readOnly: true,
-      },
-    );
-    const projectionService = new RuntimeProjectionService(store);
-    let manifests;
+    const databasePath = operationalDatabasePath(this.runtimeStorageRoot);
+    let store: SqliteRuntimeEventStore;
     try {
-      manifests = await store.listSessionManifests();
+      store = new SqliteRuntimeEventStore({ storageRoot: this.runtimeStorageRoot });
     } catch (error) {
-      findings.push(sessionReplayFinding(this.runtimeStorageRoot, error));
+      // 混合状态(旧 JSONL 标记 + pico.sqlite)会让 prepare fail-closed 拒开。
+      findings.push(sessionReplayFinding(databasePath, error));
       return;
     }
-
-    for (const manifest of manifests) {
-      scanned.session++;
-      const sessionPath = join(
-        this.runtimeStorageRoot,
-        "sessions",
-        createHash("sha256").update(manifest.sessionId).digest("hex"),
-        "session.jsonl",
-      );
-      const manifestPath = join(
-        this.runtimeStorageRoot,
-        "sessions",
-        createHash("sha256").update(manifest.sessionId).digest("hex"),
-        "manifest.json",
-      );
+    try {
+      const projectionService = new RuntimeProjectionService(store);
+      let manifests: readonly RuntimeSessionManifest[];
       try {
-        if (canonicalizeWorkspacePath(manifest.workDir) !== this.workDir) {
-          throw new Error(
-            `session ${manifest.sessionId} belongs to unexpected workspace ${manifest.workDir}`,
-          );
-        }
-        const canonicalManifest = await store.readSessionManifest(manifest.sessionId);
-        if (!canonicalManifest) {
-          throw new Error(`session ${manifest.sessionId} disappeared during scan`);
-        }
-        // 统一投影入口验证：通过 RuntimeProjectionService 重算 state / raw messages / checkpoint
-        // 视图，任一投影抛出（fail-closed 诊断）都会被外层 try/catch 记录为 session replay 异常。
-        await projectionService.getState(manifest.sessionId);
-        await projectionService.getMessages(manifest.sessionId, { checkpoint: false });
-        await projectionService.getMessages(manifest.sessionId);
-        let persistedManifest;
-        try {
-          persistedManifest = decodeRuntimeSessionManifestProjection(
-            parseJson(await readFile(manifestPath, "utf8"), "Runtime session manifest"),
-            manifestPath,
-          );
-        } catch {
-          persistedManifest = undefined;
-        }
-        if (
-          !persistedManifest ||
-          !isDeepStrictEqual(persistedManifest.manifest, canonicalManifest) ||
-          persistedManifest.ledger.byteLength !== (await lstat(sessionPath)).size
-        ) {
-          findings.push(
-            finding(
-              "runtime_manifest_rebuild_required",
-              "warning",
-              "projection",
-              manifestPath,
-              "Session manifest is missing, malformed, or stale",
-              "Run StorageDoctor repair with rebuildRuntimeManifests enabled",
-              "derived",
-            ),
-          );
-        }
+        manifests = await store.listSessionManifests();
       } catch (error) {
-        findings.push(sessionReplayFinding(sessionPath, error));
+        findings.push(sessionReplayFinding(databasePath, error));
+        return;
       }
+
+      for (const manifest of manifests) {
+        scanned.session++;
+        try {
+          if (canonicalizeWorkspacePath(manifest.workDir) !== this.workDir) {
+            throw new Error(
+              `session ${manifest.sessionId} belongs to unexpected workspace ${manifest.workDir}`,
+            );
+          }
+          // 统一投影入口验证:重算 state / raw messages / checkpoint 视图,
+          // 任一投影 fail-closed 抛出都会被记录为 session replay 异常。
+          await projectionService.getState(manifest.sessionId);
+          await projectionService.getMessages(manifest.sessionId, { checkpoint: false });
+          await projectionService.getMessages(manifest.sessionId);
+        } catch (error) {
+          findings.push(sessionReplayFinding(databasePath, error));
+        }
+      }
+    } finally {
+      store.close();
     }
   }
 
@@ -391,17 +449,26 @@ export class StorageDoctor {
     findings: StorageDoctorFinding[],
     scanned: Record<StorageDoctorComponent, number>,
   ): Promise<void> {
-    const taskRunsRoot = join(this.runtimeStorageRoot, "task-runs");
-    if (!(await pathExists(taskRunsRoot))) return;
+    const databasePath = operationalDatabasePath(this.runtimeStorageRoot);
+    let store: SqliteTaskRunStore;
     try {
-      const inspection = await new TaskRunStore(
-        { storageRoot: this.runtimeStorageRoot },
-        {
-          repairManifests: false,
-          repairIncompleteTails: false,
-          readOnly: true,
-        },
-      ).inspectTaskRuns();
+      store = new SqliteTaskRunStore({ storageRoot: this.runtimeStorageRoot });
+    } catch (error) {
+      findings.push(
+        finding(
+          "task_run_ledger_invalid",
+          "critical",
+          "task",
+          databasePath,
+          errorMessage(error),
+          "Preserve pico.sqlite unchanged and recover the workspace from a verified backup",
+          "authoritative",
+        ),
+      );
+      return;
+    }
+    try {
+      const inspection = await store.inspectTaskRuns();
       scanned.task += inspection.projections.length;
       for (const mismatch of inspection.storageRootMismatches) {
         findings.push(
@@ -409,23 +476,10 @@ export class StorageDoctor {
             "task_run_storage_root_mismatch",
             "error",
             "task",
-            mismatch.ledgerPath,
+            databasePath,
             `TaskRun ${mismatch.taskRunId} belongs to storage root ${mismatch.taskRunStorageRootId}, not ${mismatch.currentStorageRootId}`,
-            "Preserve the ledger and explicitly import it into this workspace before recovery",
+            "Preserve the database and explicitly import the TaskRun into this workspace before recovery",
             "authoritative",
-          ),
-        );
-      }
-      for (const manifestPath of inspection.staleManifestPaths) {
-        findings.push(
-          finding(
-            "task_run_manifest_rebuild_required",
-            "warning",
-            "projection",
-            manifestPath,
-            "TaskRun manifest is missing, malformed, or stale",
-            "Run StorageDoctor repair with rebuildTaskRunManifests enabled",
-            "derived",
           ),
         );
       }
@@ -435,447 +489,73 @@ export class StorageDoctor {
           "task_run_ledger_invalid",
           "critical",
           "task",
-          taskRunsRoot,
+          databasePath,
           errorMessage(error),
-          "Preserve the append-only TaskRun ledger and recover it from a verified copy",
+          "Preserve pico.sqlite unchanged and recover the workspace from a verified backup",
           "authoritative",
         ),
       );
+    } finally {
+      store.close();
     }
-  }
-
-  private async scanRuntime(
-    findings: StorageDoctorFinding[],
-    scanned: Record<StorageDoctorComponent, number>,
-  ): Promise<boolean> {
-    if (!(await pathExists(this.runtimeStorageRoot))) return false;
-    scanned.runtime++;
-    for (const [relativePath, exclusions] of [
-      ["sessions", new Set<string>()],
-      ["task-runs", new Set<string>()],
-      ["control", new Set<string>()],
-      [".storage", new Set(["lock"])],
-    ] as const) {
-      const path = join(this.runtimeStorageRoot, relativePath);
-      if (await pathExists(path)) {
-        await this.scanPrivateModes(path, "runtime", findings, exclusions);
-      }
-    }
-
-    const layoutPath = join(this.runtimeStorageRoot, WORKSPACE_STORAGE_LAYOUT_FILE);
-    let layoutSupported = true;
-    if (await pathExists(layoutPath)) {
-      try {
-        decodeWorkspaceStorageLayout(
-          parseJson(await readFile(layoutPath, "utf8"), "Workspace storage layout"),
-          layoutPath,
-        );
-      } catch (error) {
-        const message = errorMessage(error);
-        const unsupported = message.includes(
-          "Unsupported workspace storage layout schema version 1",
-        );
-        findings.push(
-          finding(
-            unsupported ? "runtime_layout_unsupported" : "runtime_layout_invalid",
-            "critical",
-            "runtime",
-            layoutPath,
-            message,
-            unsupported
-              ? "Back up or delete the unsupported development state, then initialize a fresh version 2 workspace"
-              : "Preserve the marker and restore it from a verified copy",
-            "authoritative",
-          ),
-        );
-        layoutSupported = false;
-      }
-      if (layoutSupported) {
-        try {
-          readWorkspaceStorageRootIdentitySync(this.runtimeStorageRoot);
-        } catch (error) {
-          findings.push(
-            finding(
-              "runtime_root_identity_invalid",
-              "critical",
-              "runtime",
-              layoutPath,
-              errorMessage(error),
-              "Preserve the root and use explicit storage adoption only after verifying its origin",
-              "authoritative",
-            ),
-          );
-          return false;
-        }
-      }
-    }
-
-    const commitPath = join(this.runtimeStorageRoot, WORKSPACE_STORAGE_COMMIT_FILE);
-    if (await pathExists(commitPath)) {
-      let inspection;
-      try {
-        inspection = inspectFileTransactionMarkerSync(
-          this.runtimeStorageRoot,
-          WORKSPACE_LAYOUT_TRANSACTION_OPTIONS,
-        );
-      } catch (error) {
-        findings.push(
-          finding(
-            "runtime_commit_invalid",
-            "critical",
-            "runtime",
-            commitPath,
-            errorMessage(error),
-            "Preserve the marker and target files for manual transaction recovery",
-            "authoritative",
-          ),
-        );
-        return false;
-      }
-      findings.push(
-        finding(
-          "runtime_commit_pending",
-          "error",
-          "runtime",
-          commitPath,
-          `A durable Runtime file transaction is awaiting recovery (${inspection.status})`,
-          "Open the workspace with the current pico build to complete the idempotent transaction",
-          "authoritative",
-        ),
-      );
-      return false;
-    }
-    if (!layoutSupported) return false;
-
-    const statePath = join(this.runtimeStorageRoot, "control", "state.json");
-    let stateNextSequence: number | undefined;
-    if (await pathExists(statePath)) {
-      try {
-        const state = decodeRuntimeControlState(
-          parseJson(await readFile(statePath, "utf8"), "Runtime control state"),
-          statePath,
-        );
-        stateNextSequence = state.nextRuntimeEventSequence;
-      } catch (error) {
-        findings.push(
-          finding(
-            "runtime_state_invalid",
-            "critical",
-            "runtime",
-            statePath,
-            errorMessage(error),
-            "Preserve the file and restore it from a verified backup or transaction artifact",
-            "authoritative",
-          ),
-        );
-      }
-    }
-
-    const daemonPath = join(this.runtimeStorageRoot, "control", "daemon-events.jsonl");
-    if (await pathExists(daemonPath)) {
-      try {
-        const events = decodeRuntimeEvents(readJsonLinesSync(daemonPath));
-        const eventIds = new Set<string>();
-        for (const envelope of events) {
-          if (eventIds.has(envelope.event.eventId)) {
-            throw new Error(`Duplicate Runtime event ID ${envelope.event.eventId}`);
-          }
-          eventIds.add(envelope.event.eventId);
-        }
-        if (stateNextSequence !== undefined && stateNextSequence !== events.length + 1) {
-          throw new Error(
-            `Runtime event ledger ends at ${events.length}, but state expects ${stateNextSequence - 1}`,
-          );
-        }
-      } catch (error) {
-        findings.push(
-          finding(
-            "runtime_event_ledger_invalid",
-            "critical",
-            "runtime",
-            daemonPath,
-            errorMessage(error),
-            "Preserve the append-only ledger and recover it from a verified copy",
-            "authoritative",
-          ),
-        );
-      }
-    }
-
-    const usagePath = join(this.runtimeStorageRoot, "control", "usage-ledger.jsonl");
-    if (await pathExists(usagePath)) {
-      try {
-        const calls = new Set<string>();
-        const baselines = new Set<string>();
-        for (const envelope of decodeUsageLedger(readJsonLinesSync(usagePath))) {
-          const identities =
-            envelope.type === "provider-call"
-              ? ([calls, envelope.record.callId, "callId"] as const)
-              : ([baselines, envelope.record.baselineId, "baselineId"] as const);
-          if (identities[0].has(identities[1])) {
-            throw new Error(`Duplicate usage ${identities[2]} ${identities[1]}`);
-          }
-          identities[0].add(identities[1]);
-        }
-      } catch (error) {
-        findings.push(
-          finding(
-            "runtime_usage_ledger_invalid",
-            "critical",
-            "runtime",
-            usagePath,
-            errorMessage(error),
-            "Preserve the append-only ledger and recover it from a verified copy",
-            "authoritative",
-          ),
-        );
-      }
-    }
-    return true;
-  }
-
-  private async scanMemory(
-    findings: StorageDoctorFinding[],
-    scanned: Record<StorageDoctorComponent, number>,
-  ): Promise<void> {
-    if (!(await pathExists(this.memoryStorageRoot))) return;
-    const statePath = join(this.memoryStorageRoot, "state.json");
-    const commitPath = join(this.memoryStorageRoot, "commit.json");
-    if (!(await pathExists(statePath)) && !(await pathExists(commitPath))) return;
-    scanned.memory++;
-    await this.scanPrivateModes(this.memoryStorageRoot, "memory", findings, new Set(["lock"]));
-
-    if (await pathExists(commitPath)) {
-      try {
-        const inspection = inspectFileTransactionMarkerSync(this.memoryStorageRoot);
-        findings.push(
-          finding(
-            "memory_commit_pending",
-            "error",
-            "memory",
-            commitPath,
-            `A durable Memory file transaction is awaiting recovery (${inspection.status})`,
-            "Open the workspace with the current pico build to complete the idempotent transaction",
-            "authoritative",
-          ),
-        );
-      } catch (error) {
-        findings.push(
-          finding(
-            "memory_commit_invalid",
-            "critical",
-            "memory",
-            commitPath,
-            errorMessage(error),
-            "Preserve the marker and state file for manual transaction recovery",
-            "authoritative",
-          ),
-        );
-      }
-      return;
-    }
-    if (!(await pathExists(statePath))) {
-      findings.push(
-        finding(
-          "memory_state_missing",
-          "critical",
-          "memory",
-          statePath,
-          "Memory storage exists without state.json",
-          "Rebuild derived sources from RuntimeEvent, then restore user overlay from verified backup",
-          "authoritative",
-        ),
-      );
-      return;
-    }
-    try {
-      decodeMemoryFileState(
-        parseJson(await readFile(statePath, "utf8"), "Memory state"),
-        this.workspaceId,
-      );
-    } catch (error) {
-      findings.push(
-        finding(
-          "memory_state_invalid",
-          "critical",
-          "memory",
-          statePath,
-          errorMessage(error),
-          "Rebuild derived sources from RuntimeEvent, then restore user overlay from verified backup",
-          "authoritative",
-        ),
-      );
-    }
-  }
-
-  private async scanLegacyStorage(findings: StorageDoctorFinding[]): Promise<void> {
-    for (const path of this.legacyStoragePaths) {
-      if (!(await pathExists(path))) continue;
-      findings.push(
-        finding(
-          path.endsWith("runtime.sqlite")
-            ? "legacy_runtime_sqlite_ignored"
-            : "legacy_sqlite_file_ignored",
-          "warning",
-          "runtime",
-          path,
-          `Legacy SQLite file ${path} exists but is not read by the file storage backend`,
-          "Keep it as a manual rollback artifact or remove it only after explicit backup approval",
-          "sidecar",
-        ),
-      );
-    }
-    const legacyRuntimeEntries = await readDirectoryEntries(this.legacyJsonRuntimePath);
-    if (
-      legacyRuntimeEntries.some(
-        (entry) =>
-          entry.name !== "lock" &&
-          !LEGACY_LOCK_TOMBSTONE_RE.test(entry.name) &&
-          !LEGACY_LOCK_CANDIDATE_RE.test(entry.name),
-      )
-    ) {
-      findings.push(
-        finding(
-          "legacy_runtime_json_unsupported",
-          "critical",
-          "runtime",
-          this.legacyJsonRuntimePath,
-          "Pre-v2 Runtime JSON exists, but current stores do not read, migrate, or rewrite it",
-          "Back it up for manual inspection or delete it before initializing fresh Runtime v2 state",
-          "authoritative",
-        ),
-      );
-    }
-    const legacyTaskEntries = await readDirectoryEntries(this.legacyTasksPath);
-    if (legacyTaskEntries.length > 0) {
-      findings.push(
-        finding(
-          "legacy_task_storage_ignored",
-          "warning",
-          "runtime",
-          this.legacyTasksPath,
-          "Legacy task files exist but are not read by the RuntimeStore",
-          "Keep them unchanged for manual inspection; no automatic import or deletion is performed",
-          "sidecar",
-        ),
-      );
-    }
-  }
-
-  private async scanPrivateModes(
-    root: string,
-    component: Extract<StorageDoctorComponent, "runtime" | "memory">,
-    findings: StorageDoctorFinding[],
-    excludedRootEntries: ReadonlySet<string>,
-  ): Promise<void> {
-    if (process.platform === "win32") return;
-    const visit = async (path: string, isRoot: boolean): Promise<void> => {
-      let metadata;
-      try {
-        metadata = await lstat(path);
-      } catch (error) {
-        findings.push(
-          finding(
-            "storage_permissions_unreadable",
-            "error",
-            component,
-            path,
-            errorMessage(error),
-            "Restore private ownership and permissions before opening this storage",
-            "authoritative",
-          ),
-        );
-        return;
-      }
-      if (metadata.isSymbolicLink()) {
-        findings.push(
-          finding(
-            "storage_symlink_rejected",
-            "critical",
-            component,
-            path,
-            "Storage data must not be reached through a symbolic link",
-            "Move the data to a private local directory and preserve this path for inspection",
-            "authoritative",
-          ),
-        );
-        return;
-      }
-      const expectedMode = metadata.isDirectory() ? 0o700 : metadata.isFile() ? 0o600 : undefined;
-      if (expectedMode === undefined || (metadata.mode & 0o777) !== expectedMode) {
-        findings.push(
-          finding(
-            "storage_permissions_invalid",
-            "error",
-            component,
-            path,
-            `Expected ${expectedMode?.toString(8) ?? "a regular file/directory"}, found mode ${(metadata.mode & 0o777).toString(8)}`,
-            "Restrict directories to 0700 and data files to 0600 before opening this storage",
-            "authoritative",
-          ),
-        );
-      }
-      if (!metadata.isDirectory()) return;
-      for (const entry of await readDirectoryEntries(path)) {
-        if (isRoot && excludedRootEntries.has(entry.name)) continue;
-        await visit(join(path, entry.name), false);
-      }
-    };
-    await visit(root, true);
   }
 
   private async scanOperations(
     findings: StorageDoctorFinding[],
     scanned: Record<StorageDoctorComponent, number>,
   ): Promise<void> {
+    // journal 是 pico.sqlite 的 storage_operations 行;库不存在时无行可扫,
+    // 不得为扫描而初始化新库。混合状态(legacy 标记)下 prepare 拒开,由
+    // legacy finding 说明,这里不叠加误导性 operation finding。
+    if (!existsSync(operationalDatabasePath(this.runtimeStorageRoot))) return;
+    if (this.hasLegacyStorageMarkers()) return;
     const journal = new StorageOperationJournal({
       workDir: this.workDir,
       ...(this.picoHome ? { picoHome: this.picoHome } : {}),
       now: this.now,
     });
-    for (const entry of await readDirectoryEntries(journal.directory)) {
-      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-      const path = join(journal.directory, entry.name);
+    // 畸形行由 journal.list() fail-closed 抛错,进入 operation_malformed 分支。
+    let operations: StorageOperation[];
+    try {
+      operations = await journal.list();
+    } catch (error) {
+      findings.push(
+        finding(
+          "operation_malformed",
+          "critical",
+          "operation",
+          operationalDatabasePath(this.runtimeStorageRoot),
+          errorMessage(error),
+          "Do not quarantine automatically; preserve the journal for manual intent recovery",
+          "authoritative",
+        ),
+      );
+      return;
+    }
+    for (const operation of operations) {
       scanned.operation++;
-      const operationId = entry.name.slice(0, -5);
-      try {
-        if (!SAFE_OPERATION_ID_RE.test(operationId)) throw new Error("invalid operation filename");
-        const operation = await journal.get(operationId);
-        if (!operation) throw new Error("operation disappeared during scan");
-        if (operation.state === "needs_attention") {
-          findings.push(
-            finding(
-              "operation_needs_attention",
-              "error",
-              "operation",
-              path,
-              `Operation ${operation.operationId} v${operation.version} needs attention at ${operation.error?.phase ?? "unknown phase"}: ${operation.error?.message ?? "no failure reason was recorded"}`,
-              `Inspect with /operations show ${operation.operationId}; then use /operations retry ${operation.operationId} ${operation.version} or /operations abort ${operation.operationId} ${operation.version}`,
-              "authoritative",
-            ),
-          );
-        } else if (!isTerminalStorageOperation(operation.state)) {
-          findings.push(
-            finding(
-              "operation_unfinished",
-              "warning",
-              "operation",
-              path,
-              `Operation ${operation.operationId} is ${operation.state}`,
-              "Run explicit repair with an operation-specific idempotent forward coordinator",
-              "authoritative",
-            ),
-          );
-        }
-      } catch (error) {
+      const path = operationalDatabasePath(this.runtimeStorageRoot);
+      if (operation.state === "needs_attention") {
         findings.push(
           finding(
-            "operation_malformed",
-            "critical",
+            "operation_needs_attention",
+            "error",
             "operation",
             path,
-            errorMessage(error),
-            "Do not quarantine automatically; preserve the journal for manual intent recovery",
+            `Operation ${operation.operationId} v${operation.version} needs attention at ${operation.error?.phase ?? "unknown phase"}: ${operation.error?.message ?? "no failure reason was recorded"}`,
+            `Inspect with /operations show ${operation.operationId}; then use /operations retry ${operation.operationId} ${operation.version} or /operations abort ${operation.operationId} ${operation.version}`,
+            "authoritative",
+          ),
+        );
+      } else if (!isTerminalStorageOperation(operation.state)) {
+        findings.push(
+          finding(
+            "operation_unfinished",
+            "warning",
+            "operation",
+            path,
+            `Operation ${operation.operationId} is ${operation.state}`,
+            "Run explicit repair with an operation-specific idempotent forward coordinator",
             "authoritative",
           ),
         );
@@ -887,31 +567,37 @@ export class StorageDoctor {
     findings: StorageDoctorFinding[],
     scanned: Record<StorageDoctorComponent, number>,
   ): Promise<void> {
+    // manifest 行在本 workspace 的 pico.sqlite;库不存在时无行可扫(不初始化
+    // 新库)。PICO_HOME 侧只保留 blob CAS 与 legacy 备份文件。混合状态下
+    // prepare 拒开,同 scanOperations。
+    if (!existsSync(operationalDatabasePath(this.runtimeStorageRoot))) return;
+    if (this.hasLegacyStorageMarkers()) return;
     const blobStore = new FileHistoryBlobStore({ baseDir: this.fileHistoryDir });
-    for (const entry of await readDirectoryEntries(this.fileHistoryDir)) {
-      if (!entry.isDirectory() || entry.name === "blobs" || entry.name === ".leases") continue;
-      const path = join(this.fileHistoryDir, entry.name, "manifest.json");
-      if (!(await pathExists(path))) continue;
+    const io = { baseDir: this.fileHistoryDir, storageRoot: this.runtimeStorageRoot };
+    let sessionIds: readonly string[];
+    try {
+      sessionIds = listFileHistorySessionIds(this.runtimeStorageRoot);
+    } catch (error) {
+      findings.push(
+        finding(
+          "file_history_integrity_failed",
+          "critical",
+          "file_history",
+          operationalDatabasePath(this.runtimeStorageRoot),
+          errorMessage(error),
+          "Keep the manifest and blobs unchanged; recover from a verified manifest revision",
+          "authoritative",
+        ),
+      );
+      return;
+    }
+    for (const sessionId of sessionIds) {
       scanned.file_history++;
+      const path = operationalDatabasePath(this.runtimeStorageRoot);
       try {
-        const value = parseJson(await readFile(path, "utf8"), "File History manifest");
-        if (
-          !isRecord(value) ||
-          value["schemaVersion"] !== 2 ||
-          typeof value["sessionId"] !== "string"
-        ) {
-          throw new Error("manifest is not v2");
-        }
-        const expectedDirectory = createHash("sha256")
-          .update(value["sessionId"])
-          .digest("hex")
-          .slice(0, 32);
-        if (entry.name !== expectedDirectory) {
-          throw new Error("manifest directory/sessionId mismatch");
-        }
         const state = createFileHistoryState();
-        if (!(await fileHistoryLoadState(state, value["sessionId"], this.fileHistoryDir))) {
-          throw new Error("manifest disappeared during scan");
+        if (!(await fileHistoryLoadState(state, sessionId, io))) {
+          throw new Error("manifest row disappeared during scan");
         }
         for (const snapshot of state.snapshots) {
           for (const backup of snapshot.trackedFileBackups.values()) {
@@ -936,6 +622,149 @@ export class StorageDoctor {
       }
     }
   }
+
+  private async scanLegacyStorage(findings: StorageDoctorFinding[]): Promise<void> {
+    for (const path of this.legacyStoragePaths) {
+      if (!(await pathExists(path))) continue;
+      findings.push(
+        finding(
+          path.endsWith("runtime.sqlite")
+            ? "legacy_runtime_sqlite_ignored"
+            : "legacy_sqlite_file_ignored",
+          "warning",
+          "runtime",
+          path,
+          `Legacy SQLite file ${path} exists but is not read by the file storage backend`,
+          "Keep it as a manual rollback artifact or remove it only after explicit backup approval",
+          "sidecar",
+        ),
+      );
+    }
+    for (const marker of LEGACY_SESSION_CENTRIC_ENTRIES) {
+      const path = join(this.runtimeStorageRoot, marker);
+      if (!(await pathExists(path))) continue;
+      findings.push(
+        finding(
+          "legacy_session_centric_storage_present",
+          "warning",
+          "runtime",
+          path,
+          `Legacy session-centric (JSONL) storage entry ${marker} exists; the SQLite era does not migrate history`,
+          "Move the legacy state away (or back it up) before initializing this workspace for pico.sqlite",
+          "sidecar",
+        ),
+      );
+    }
+    const legacyRuntimeEntries = await readDirectoryEntries(this.legacyJsonRuntimePath);
+    if (
+      legacyRuntimeEntries.some(
+        (entry) =>
+          entry.name !== "lock" &&
+          !LEGACY_LOCK_TOMBSTONE_RE.test(entry.name) &&
+          !LEGACY_LOCK_CANDIDATE_RE.test(entry.name),
+      )
+    ) {
+      findings.push(
+        finding(
+          "legacy_runtime_json_unsupported",
+          "critical",
+          "runtime",
+          this.legacyJsonRuntimePath,
+          "Pre-v2 Runtime JSON exists, but current stores do not read, migrate, or rewrite it",
+          "Back it up for manual inspection or delete it before initializing fresh Runtime state",
+          "authoritative",
+        ),
+      );
+    }
+    const legacyTaskEntries = await readDirectoryEntries(this.legacyTasksPath);
+    if (legacyTaskEntries.length > 0) {
+      findings.push(
+        finding(
+          "legacy_task_storage_ignored",
+          "warning",
+          "runtime",
+          this.legacyTasksPath,
+          "Legacy task files exist but are not read by the RuntimeStore",
+          "Keep them unchanged for manual inspection; no automatic import or deletion is performed",
+          "sidecar",
+        ),
+      );
+    }
+  }
+
+  /**
+   * 只巡查当前纪元仍存活的文件面(pico.sqlite、evidence/traces/fork-staging、
+   * agent-recovery intents);legacy 目录已由 scanLegacyStorage 报告,不重复噪声。
+   */
+  private async scanPrivateModes(
+    root: string,
+    component: Extract<StorageDoctorComponent, "runtime" | "memory">,
+    findings: StorageDoctorFinding[],
+    allowedRootEntries: ReadonlySet<string>,
+  ): Promise<void> {
+    if (process.platform === "win32") return;
+    const databasePath = join(root, "pico.sqlite");
+    if (existsSync(databasePath)) {
+      await this.assertPrivateNode(databasePath, component, findings);
+    }
+    for (const entry of allowedRootEntries) {
+      const path = join(root, entry);
+      if (!(await pathExists(path))) continue;
+      await this.assertPrivateNode(path, component, findings);
+    }
+  }
+
+  private async assertPrivateNode(
+    path: string,
+    component: Extract<StorageDoctorComponent, "runtime" | "memory">,
+    findings: StorageDoctorFinding[],
+  ): Promise<void> {
+    let metadata;
+    try {
+      metadata = await lstat(path);
+    } catch (error) {
+      findings.push(
+        finding(
+          "storage_permissions_unreadable",
+          "error",
+          component,
+          path,
+          errorMessage(error),
+          "Restore private ownership and permissions before opening this storage",
+          "authoritative",
+        ),
+      );
+      return;
+    }
+    if (metadata.isSymbolicLink()) {
+      findings.push(
+        finding(
+          "storage_symlink_rejected",
+          "critical",
+          component,
+          path,
+          "Storage data must not be reached through a symbolic link",
+          "Move the data to a private local directory and preserve this path for inspection",
+          "authoritative",
+        ),
+      );
+      return;
+    }
+    const expectedMode = metadata.isDirectory() ? 0o700 : metadata.isFile() ? 0o600 : undefined;
+    if (expectedMode === undefined || (metadata.mode & 0o777) !== expectedMode) {
+      findings.push(
+        finding(
+          "storage_permissions_invalid",
+          "error",
+          component,
+          path,
+          `Expected ${expectedMode?.toString(8) ?? "a regular file/directory"}, found mode ${(metadata.mode & 0o777).toString(8)}`,
+          "Restrict directories to 0700 and data files to 0600 before opening this storage",
+          "authoritative",
+        ),
+      );
+    }
+  }
 }
 
 function sessionReplayFinding(path: string, error: unknown): StorageDoctorFinding {
@@ -945,7 +774,7 @@ function sessionReplayFinding(path: string, error: unknown): StorageDoctorFindin
     "session",
     path,
     errorMessage(error),
-    "Keep the Session ledger unchanged and restore it from a verified backup",
+    "Keep pico.sqlite unchanged and restore the workspace from a verified backup",
     "authoritative",
   );
 }
@@ -972,11 +801,11 @@ function compareFindings(left: StorageDoctorFinding, right: StorageDoctorFinding
   );
 }
 
-function parseJson(raw: string, label: string): unknown {
+function safeJson(value: unknown): string {
   try {
-    return JSON.parse(raw) as unknown;
-  } catch (error) {
-    throw new Error(`Invalid ${label}: ${errorMessage(error)}`, { cause: error });
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
   }
 }
 
@@ -1032,10 +861,6 @@ function invalidStorageDirectoryFinding(
 
 function isNodeCode(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && error.code === code;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function errorMessage(error: unknown): string {

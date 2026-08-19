@@ -1,3 +1,4 @@
+import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -13,7 +14,7 @@ import {
   type RunAgentCliOptions,
 } from "../../src/runtime/agent-runtime.js";
 import type { RuntimeEvent } from "../../src/storage/runtime-event.js";
-import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
+
 import { configuredUserDefaultRealModel } from "./real-llm-user-model.js";
 
 const TEST_TIMEOUT_MS = 5 * 60_000;
@@ -63,7 +64,7 @@ realModelTest(
       } satisfies RunAgentCliDependencies,
     );
 
-    const store = new RuntimeEventStore({
+    const store = new SqliteRuntimeEventStore({
       storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
     });
     let events: RuntimeEvent[];

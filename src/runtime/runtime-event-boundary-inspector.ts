@@ -1,5 +1,6 @@
 import type { RuntimeEvent } from "../storage/runtime-event.js";
-import type { RuntimeEventStore, RuntimeEventStoreEntry } from "../storage/runtime-event-store.js";
+import type { RuntimeEventStoreEntry } from "../storage/runtime-event-store-contracts.js";
+import type { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 import { canonicalizeWorkspacePath } from "../paths/pico-paths.js";
 import type {
   RuntimeBoundaryInspection,
@@ -13,7 +14,16 @@ import {
 } from "../tasks/task-run-contract.js";
 
 export interface RuntimeEventBoundaryInspectorOptions {
-  readonly store: Pick<RuntimeEventStore, "readSessionEntries" | "readSessionManifest">;
+  /**
+   * 票 04:inspect 走 run 索引直读(run 内任意 kind 都要可见——源 run 终态后的
+   * 任何新事件都是 fence 信号,kind 切片表达不了),单读事务内附带全会话水位;
+   * reconcileLaunch 保留显式全量读——它本身是账本完整性校验器,前缀身份绑定
+   * 扫描就是其语义。
+   */
+  readonly store: Pick<
+    SqliteRuntimeEventStore,
+    "readSessionEntries" | "readSessionRunBoundary" | "readSessionManifest"
+  >;
   /**
    * RuntimeEvent cannot prove whether host-owned background work has settled. Missing evidence
    * therefore defaults to false and parks recovery.
@@ -44,8 +54,12 @@ export class RuntimeEventBoundaryInspector implements RuntimeBoundaryInspector {
     if (!manifest) {
       return { status: "session_missing", sessionId: boundary.sessionId };
     }
-    const entries = await this.options.store.readSessionEntries(boundary.sessionId);
-    const runEntries = entries.filter(({ event }) => event.runId === boundary.runId);
+    // run 索引直读 + 全会话水位(票 04):run 事件与水位在 store 单读事务内
+    // 取得,保持快照一致。
+    const { entries: runEntries, headSequence } = await this.options.store.readSessionRunBoundary(
+      boundary.sessionId,
+      boundary.runId,
+    );
     const startedEntries = runEntries.filter(
       (
         entry,
@@ -116,7 +130,7 @@ export class RuntimeEventBoundaryInspector implements RuntimeBoundaryInspector {
       runId: boundary.runId,
       sessionWorkspacePath,
       runWorkspacePath,
-      eventHighWater: entries.at(-1)?.sequence ?? 0,
+      eventHighWater: headSequence,
       sourceRunLastSequence: runEntries.at(-1)!.sequence,
       ...(terminals[0] ? { terminalSequence: terminals[0].sequence } : {}),
       ...(terminal
@@ -248,8 +262,7 @@ export class RuntimeEventBoundaryInspector implements RuntimeBoundaryInspector {
   }
 }
 
-function pendingApprovals(entries: readonly RuntimeEventStoreEntry[]): string[] {
-  const pending = new Set<string>();
+function pendingApprovals(entries: readonly RuntimeEventStoreEntry[]): string[] {  const pending = new Set<string>();
   for (const { event } of entries) {
     if (event.kind === "approval.requested") {
       pending.add(event.data.approvalId);

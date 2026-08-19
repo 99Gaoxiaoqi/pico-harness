@@ -22,18 +22,36 @@ import {
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 import { createSessionRuntime } from "../../src/runtime/session-runtime.js";
 import {
-  RuntimeEventStore,
   RuntimeEventStorePlanOperationConflictError,
-} from "../../src/storage/runtime-event-store.js";
+} from "../../src/storage/runtime-event-store-contracts.js";
 import { SubmitPlanTool } from "../../src/tools/plan-exit.js";
 import { buildDefaultToolRegistry } from "../../src/tools/default-registry.js";
+import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
+
+
+/** Windows:分离的后台任务(memory recovery 等)可能短暂持有 pico.sqlite 句柄,
+ * 删除临时目录按 EBUSY 有界重试,等待分离 drain 归还 lease。 */
+async function rmRetry(target: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await rm(target, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (attempt >= 50 || (error as NodeJS.ErrnoException).code !== "EBUSY") throw error;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+}
 
 test("submit_plan persists a proposal and marks a machine-readable handoff", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-submit-plan-"));
   const workDir = join(root, "work");
   await mkdir(workDir);
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const store = new RuntimeEventStore({ storageRoot: join(root, "state") });
+  t.after(() => {
+    store.close();
+    return rmRetry(root);
+  });
+  const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "state") });
   await store.initializeSession({ sessionId: "session-1", workDir });
   const coordinator = new PlanCoordinator(store, {
     sessionId: "session-1",
@@ -139,7 +157,11 @@ test("Plan provider projection always exposes submit_plan through tool disclosur
   const workDir = join(root, "work");
   const picoHome = join(root, "home");
   await mkdir(workDir);
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(async () => {
+    const released = globalSessionManager.delete("plan-disclosure", workDir, { picoHome });
+    await released?.close();
+    await rmRetry(root);
+  });
   let providerCalls = 0;
   const provider: LLMProvider = {
     async generate(_messages, tools) {
@@ -189,7 +211,7 @@ test("Plan runtime records a verified proposal before an atomic handoff", async 
   t.after(async () => {
     const released = globalSessionManager.delete(sessionId, workDir, { picoHome });
     await released?.close();
-    await rm(root, { recursive: true, force: true });
+    await rmRetry(root);
   });
   let providerCalls = 0;
   const provider: LLMProvider = {
@@ -241,7 +263,7 @@ test("Plan runtime records a verified proposal before an atomic handoff", async 
   );
   assert.ok(result.handoff);
 
-  const store = new RuntimeEventStore({
+  const store = new SqliteRuntimeEventStore({
     storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
   });
   const events = await store.readSession(sessionId);
@@ -259,7 +281,7 @@ test("Plan accepts a workspace-local absolute read_file path when planning", asy
   await writeFile(targetPath, "export const target = true;\n", "utf8");
   t.after(async () => {
     globalSessionManager.delete(sessionId, workDir, { picoHome })?.close();
-    await rm(root, { recursive: true, force: true });
+    await rmRetry(root);
   });
   let calls = 0;
   const provider: LLMProvider = {
@@ -334,7 +356,7 @@ test("a failed Plan Run rejects and never proposes", async (t) => {
   t.after(async () => {
     const released = globalSessionManager.delete(sessionId, workDir, { picoHome });
     await released?.close();
-    await rm(root, { recursive: true, force: true });
+    await rmRetry(root);
   });
   let providerCalls = 0;
   const provider: LLMProvider = {
@@ -372,7 +394,7 @@ test("a failed Plan Run rejects and never proposes", async (t) => {
     ),
     /synthetic provider failure/u,
   );
-  const store = new RuntimeEventStore({
+  const store = new SqliteRuntimeEventStore({
     storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
   });
   const events = await store.readSession(sessionId);
@@ -436,7 +458,7 @@ test("resumeExistingSession injects durable revision feedback into the provider 
     await runtimeState.dispose();
     const released = globalSessionManager.delete(sessionId, workDir, { picoHome });
     await released?.close();
-    await rm(root, { recursive: true, force: true });
+    await rmRetry(root);
   });
   let providerCalls = 0;
   const revisionProvider: LLMProvider = {
@@ -510,7 +532,7 @@ test("Plan Run isolates and restores code intelligence owned by an injected Sess
     await runtimeState.dispose();
     const released = globalSessionManager.delete(sessionId, workDir, { picoHome });
     await released?.close();
-    await rm(root, { recursive: true, force: true });
+    await rmRetry(root);
   });
   const manager = runtimeState.codeIntelligenceManager;
   const originalClose = manager.close.bind(manager);
@@ -609,7 +631,11 @@ test("Plan runtime suppresses injected hooks and their filesystem side effects",
   const hookOutput = join(workDir, "malicious-hook-output");
   const mcpOutput = join(workDir, "malicious-mcp-output");
   await mkdir(workDir);
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(async () => {
+    const released = globalSessionManager.delete("plan-hook-isolation", workDir, { picoHome });
+    await released?.close();
+    await rmRetry(root);
+  });
   let hookCalls = 0;
   const hookService = new HookService({
     workDir,
@@ -719,7 +745,14 @@ test("approval recovers its crash gap and replay never starts a second execution
   const picoHome = join(root, "home");
   const sessionId = "plan-approval-replay";
   await mkdir(workDir);
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(async () => {
+    const released = globalSessionManager.delete(sessionId, workDir, { picoHome });
+    await released?.close();
+    store.close();
+    resumeStore.close();
+    crashedResumeStore.close();
+    await rmRetry(root);
+  });
   const planningProvider: LLMProvider = {
     async generate() {
       return {
@@ -760,7 +793,7 @@ test("approval recovers its crash gap and replay never starts a second execution
     handoff.planId,
   );
 
-  const store = new RuntimeEventStore({
+  const store = new SqliteRuntimeEventStore({
     storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
   });
   const settings = projectRuntimeSessionState(await store.readSession(sessionId)).settings;
@@ -821,7 +854,7 @@ test("approval recovers its crash gap and replay never starts a second execution
     "replay reconciles but never restarts execution implicitly",
   );
 
-  const resumeStore = new RuntimeEventStore({
+  const resumeStore = new SqliteRuntimeEventStore({
     storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
   });
   const resumeCoordinator = new PlanCoordinator(
@@ -846,7 +879,7 @@ test("approval recovers its crash gap and replay never starts a second execution
   });
   assert.equal(executionProviderCalls, 1, "a new explicit resume operation starts one Run");
 
-  const crashedResumeStore = new RuntimeEventStore({
+  const crashedResumeStore = new SqliteRuntimeEventStore({
     storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
   });
   const crashedResumeCoordinator = new PlanCoordinator(
@@ -921,7 +954,11 @@ test("concurrent approval replay preserves a live pre-Run admission", async (t) 
   const picoHome = join(root, "home");
   const sessionId = "plan-live-admission";
   await mkdir(workDir);
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(async () => {
+    const released = globalSessionManager.delete(sessionId, workDir, { picoHome });
+    await released?.close();
+    await rmRetry(root);
+  });
   const runtime = new AgentRuntime();
   const planned = await runtime.execute(
     {

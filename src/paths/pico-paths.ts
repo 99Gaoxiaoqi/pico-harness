@@ -40,32 +40,13 @@ export interface PicoHomePaths {
 export interface PicoWorkspacePaths {
   readonly id: WorkspaceId;
   readonly root: string;
-  /** Canonical Session RuntimeEvent ledgers and their rebuildable projections. */
-  readonly sessions: string;
-  /** Durable TaskRun/Attempt fact ledgers. Legacy tasks/ remains diagnostic-only. */
-  readonly taskRuns: string;
-  /** Jobs, attempts, leases, Cron/daemon state, and usage ledgers. */
-  readonly control: string;
-  /** Shared file-transaction coordinator for Session, TaskRun, and control storage. */
-  readonly storage: string;
-  readonly storageCommit: string;
-  readonly storageLock: string;
-  /** Unsupported pre-v2 JSON layout. Current stores never read or migrate this directory. */
-  readonly legacyRuntime: string;
-  readonly memory: string;
-  /** Workspace-private structured long-term memory authority. */
-  readonly memoryState: string;
-  /** Immutable raw tool outputs and subagent reports. */
+  /** Immutable raw tool outputs and subagent reports (blob CAS; index rows live in pico.sqlite). */
   readonly evidence: string;
   readonly traces: string;
-  /** Preserved legacy task files. Current stores never read or migrate this directory. */
-  readonly tasks: string;
+  /** Ephemeral fork staging directories owned by the fork operation coordinator. */
   readonly forkStaging: string;
-  readonly storageOperations: string;
-  readonly todo: string;
   readonly pluginState: string;
   readonly hookState: string;
-  readonly debugLog: string;
 }
 
 export interface PicoPaths {
@@ -150,24 +131,11 @@ export function resolvePicoPaths(
     workspace: {
       id: workspaceId,
       root: workspaceRoot,
-      sessions: join(workspaceRoot, "sessions"),
-      taskRuns: join(workspaceRoot, "task-runs"),
-      control: join(workspaceRoot, "control"),
-      storage: join(workspaceRoot, ".storage"),
-      storageCommit: join(workspaceRoot, ".storage", "commit.json"),
-      storageLock: join(workspaceRoot, ".storage", "lock"),
-      legacyRuntime: join(workspaceRoot, "runtime"),
-      memory: join(workspaceRoot, "memory"),
-      memoryState: join(workspaceRoot, "memory", "state.json"),
       evidence: join(workspaceRoot, "evidence"),
       traces: join(workspaceRoot, "traces"),
-      tasks: join(workspaceRoot, "tasks"),
       forkStaging: join(workspaceRoot, "fork-staging"),
-      storageOperations: join(workspaceRoot, "storage-operations"),
-      todo: join(workspaceRoot, "todo.json"),
       pluginState: join(workspaceRoot, "plugins.json"),
       hookState: join(workspaceRoot, "hooks-state.json"),
-      debugLog: join(workspaceRoot, "tui-debug.log"),
     },
   };
 }

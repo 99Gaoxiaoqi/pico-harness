@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { logger } from "../observability/logger.js";
-import { resolvePicoHome } from "../paths/pico-paths.js";
+import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
 import {
   WorkspaceTaskRuntime,
   type WorkspaceRunContext,
@@ -33,9 +33,9 @@ import type {
 } from "./service.js";
 import {
   RuntimeConflictError,
-  RuntimeStore,
-  type DaemonIdempotentCommandResult,
-} from "../tasks/runtime-store.js";
+  SqliteRuntimeControlStore,
+} from "../storage/sqlite/sqlite-runtime-control-store.js";
+import { type DaemonIdempotentCommandResult } from "../tasks/runtime-store-contracts.js";
 import type { DaemonRunRecord, RuntimeEventRecord } from "../tasks/runtime-types.js";
 import {
   canonicalizeWorkspacePath,
@@ -111,7 +111,7 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
   private readonly listeners = new Set<(notification: RuntimeNotification) => void>();
   private readonly terminalLiveStreams = new Set<string>();
   private readonly unsubscribers = new Map<string, () => void>();
-  private readonly eventStores = new Map<string, RuntimeStore>();
+  private readonly eventStores = new Map<string, SqliteRuntimeControlStore>();
   private readonly registrationStore: WorkspaceRegistrationStore;
   private readonly picoHome: string;
   private registrationChanged?: () => Promise<void>;
@@ -672,16 +672,15 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
     }
   }
 
-  private eventStore(workspacePath: string): RuntimeStore {
+  private eventStore(workspacePath: string): SqliteRuntimeControlStore {
     const store = this.eventStores.get(workspacePath);
     if (store) return store;
     if (this.lifecycleState !== "open") {
       throw new Error("Workspace Runtime 已关闭，不能重新打开 RuntimeStore");
     }
-    const created = new RuntimeStore({
-      workDir: workspacePath,
-      picoHome: this.picoHome,
-      now: this.options.now,
+    const created = new SqliteRuntimeControlStore({
+      storageRoot: resolvePicoPaths(workspacePath, { picoHome: this.picoHome }).workspace.root,
+      ...(this.options.now ? { now: this.options.now } : {}),
     });
     try {
       created.recoverInterruptedDaemonRuns(

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Fact, Job, Proposal } from "./domain.js";
-import { MemoryConflictError, MemoryRepository } from "./memory-repository.js";
+import { MemoryConflictError, type MemoryRepositoryContract } from "./memory-repository.js";
 import {
   MEMORY_PROPOSAL_EXTRACTOR_VERSION,
   MEMORY_PROPOSAL_JOB_TYPE,
@@ -178,11 +178,11 @@ function stabilizeCandidateKind(
   return { ...candidate, kind: "reference" };
 }
 
-/** Foundation adapter. No model/runtime concern enters MemoryRepository. */
+/** Foundation adapter. No model/runtime concern enters the memory repository. */
 export class MemoryRepositoryProposalStore implements MemoryProposalStorePort {
   readonly workspaceId;
 
-  constructor(private readonly repository: MemoryRepository) {
+  constructor(private readonly repository: MemoryRepositoryContract) {
     this.workspaceId = repository.workspaceId;
   }
 

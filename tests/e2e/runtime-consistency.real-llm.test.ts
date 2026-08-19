@@ -1,3 +1,4 @@
+import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -22,9 +23,9 @@ import type { ModelRoute } from "../../src/provider/model-router.js";
 import type { ToolCall } from "../../src/schema/message.js";
 import { AgentRuntime, type RunAgentCliOptions } from "../../src/runtime/agent-runtime.js";
 import type { RuntimeEvent } from "../../src/storage/runtime-event.js";
-import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
+
 import { projectRuntimeSessionUsage } from "../../src/engine/session-runtime-projection.js";
-import { RuntimeStore } from "../../src/tasks/runtime-store.js";
+import { SqliteRuntimeControlStore } from "../../src/storage/sqlite/sqlite-runtime-control-store.js";
 import type { ProviderCallRecord } from "../../src/tasks/runtime-types.js";
 import { ReadFileTool } from "../../src/tools/registry-impl.js";
 import {
@@ -196,9 +197,9 @@ realModelTest(
     assert.ok(projectedUsage.totalPromptTokens > 0);
     assert.ok(projectedUsage.totalCompletionTokens > 0);
 
-    const usageStore = new RuntimeStore({
-      workDir: sandbox.workDir,
-      picoHome: sandbox.picoHome,
+    const usageStore = new SqliteRuntimeControlStore({
+      storageRoot: resolvePicoPaths(sandbox.workDir, { picoHome: sandbox.picoHome }).workspace
+        .root,
     });
     const providerCalls = usageStore
       .listProviderCalls({ sessionId: sandbox.sessionId })
@@ -436,7 +437,7 @@ function supportsThinkingOff(route: ModelRoute): boolean {
 }
 
 async function readRuntimeEvents(sandbox: TestSandbox): Promise<RuntimeEvent[]> {
-  const store = new RuntimeEventStore({
+  const store = new SqliteRuntimeEventStore({
     storageRoot: resolvePicoPaths(sandbox.workDir, { picoHome: sandbox.picoHome }).workspace.root,
   });
   try {

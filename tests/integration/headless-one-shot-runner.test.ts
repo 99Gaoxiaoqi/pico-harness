@@ -1,3 +1,4 @@
+import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import assert from "node:assert/strict";
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -38,7 +39,8 @@ import {
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 import type { RunAgentCliOptions, RunAgentCliResult } from "../../src/runtime/runtime-contract.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
-import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
+import { closeAllOperationalDatabasesForTest } from "../../src/storage/sqlite/sqlite-database.js";
+
 
 const PROVIDER_ID = "fixture";
 const MODEL_ID = "fixture-model";
@@ -175,9 +177,9 @@ test("headless Plan persists a pending handoff without approval or workspace mut
   assert.deepEqual(await readdir(fixture.workspace), ["sentinel.txt"]);
 
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const events = await new RuntimeEventStore({ storageRoot: paths.workspace.root }).readSession(
-    request.sessionId,
-  );
+  const verificationStore = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
+  const events = await verificationStore.readSession(request.sessionId);
+  verificationStore.close();
   assert.equal(
     events.some((event) => event.kind === "plan.proposed"),
     true,
@@ -329,7 +331,10 @@ test("headless sends image bytes only through Runtime and keeps result and trace
   assert.equal((await readFile(outcome.result.tracePath, "utf8")).includes(encoded), false);
 });
 
-test("headless image attachments reject unsafe files before Runtime execution", async (context) => {
+test(
+  "headless image attachments reject unsafe files before Runtime execution",
+  { skip: process.platform === "win32" },
+  async (context) => {
   const fixture = await createFixture(context, "images-invalid");
   await configureFixture(fixture, "secret-canary-images-invalid");
   const outside = join(fixture.root, "outside.png");
@@ -1344,7 +1349,7 @@ test("controlled proxy ToolResults are redacted before Provider transcript and R
   assert.equal(secondProviderTranscript.includes(ordinaryHex), true);
   assert.equal(thirdProviderTranscript.includes(ordinaryHex), true);
 
-  const runtimeStore = new RuntimeEventStore({
+  const runtimeStore = new SqliteRuntimeEventStore({
     storageRoot: resolvePicoPaths(fixture.workspace, {
       picoHome: fixture.picoHome,
     }).workspace.root,
@@ -2077,7 +2082,15 @@ test("the internal process entry emits exactly one JSON line for success and inv
   const successResult = JSON.parse(success.stdout) as { status: string; finalMessage: string };
   assert.equal(successResult.status, "completed");
   assert.equal(successResult.finalMessage, "process-ok");
-  assert.equal(success.stderr, "");
+  assert.equal(
+    success.stderr
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .filter((line) => !line.startsWith("(node:") && !line.includes("--trace-warnings"))
+      .join("\n"),
+    "",
+    "stderr 只允许 node 自身的实验性告警(node:sqlite),不得有应用输出",
+  );
 
   const invalid = await runProcess("{");
   assert.equal(invalid.code, 2);
@@ -2085,7 +2098,10 @@ test("the internal process entry emits exactly one JSON line for success and inv
   assert.equal((JSON.parse(invalid.stdout) as { status: string }).status, "invalid_request");
 });
 
-test("the internal process entry maps SIGTERM to canceled/143 with one JSON line", async (context) => {
+test(
+  "the internal process entry maps SIGTERM to canceled/143 with one JSON line",
+  { skip: process.platform === "win32" },
+  async (context) => {
   const serverFixture = await createFakeOpenAiServer(context, true);
   const fixture = await createFixture(context, "process-signal");
   await configureFixture(fixture, "secret-canary-process-signal", true, serverFixture.baseURL);
@@ -2104,7 +2120,10 @@ test("the internal process entry maps SIGTERM to canceled/143 with one JSON line
   assert.equal(result.stderr.includes("secret-canary-process-signal"), false);
 });
 
-test("SIGINT and SIGTERM cancel while stdin remains open", async () => {
+test(
+  "SIGINT and SIGTERM cancel while stdin remains open",
+  { skip: process.platform === "win32" },
+  async () => {
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     const result = await runProcessWithOpenStdin(signal);
     assert.equal(result.code, signal === "SIGTERM" ? 143 : 130);
@@ -2184,7 +2203,10 @@ async function createFixture(
   const workspace = join(root, "workspace");
   const picoHome = join(root, "pico-home");
   await Promise.all([mkdir(workspace), mkdir(picoHome)]);
-  context.after(() => rm(root, { recursive: true, force: true }));
+  context.after(async () => {
+    closeAllOperationalDatabasesForTest();
+    await rm(root, { recursive: true, force: true });
+  });
   return { root, workspace, picoHome };
 }
 

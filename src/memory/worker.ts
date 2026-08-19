@@ -4,14 +4,16 @@ import type { Message } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
 import { estimateCost, type BillingRoute } from "../observability/pricing.js";
 import type { WorkspaceId } from "../paths/pico-paths.js";
-import { RuntimeEventStore } from "../storage/runtime-event-store.js";
+import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 import type { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import type { Job } from "./domain.js";
 import {
   MEMORY_PROPOSED_NOTIFICATION_JOB_TYPE,
   MEMORY_PROPOSED_NOTIFICATION_VERSION_PREFIX,
-  MemoryRepository,
+  type MemoryRepositoryContract,
+  type UpdateJobInput,
 } from "./memory-repository.js";
+import { SqliteMemoryRepository } from "../storage/sqlite/sqlite-memory-repository.js";
 import { MemoryProposalEngine, MemoryRepositoryProposalStore } from "./proposal-engine.js";
 import type {
   MemoryProposalExtractionRequest,
@@ -123,7 +125,10 @@ function commonAbortSignal(batch: readonly PendingModelExtraction[]): AbortSigna
 export interface MemoryReviewWorkerOptions {
   readonly workDir: string;
   readonly workspaceId: WorkspaceId;
-  readonly memoryStorageRoot: string;
+  /**
+   * Workspace storage root(pico.sqlite 所在):memory 六表与 runtime events 同库,
+   * 票 07 起 memory 不再有独立 storage root。
+   */
   readonly runtimeStorageRoot: string;
   readonly trustStore: WorkspaceTrustStore;
   readonly modelFactory: MemoryProposalModelFactory;
@@ -145,8 +150,8 @@ export class MemoryReviewWorker {
   async drain(): Promise<readonly MemoryProposalProcessResult[]> {
     this.nextWakeAt = undefined;
     if (!(await isTrusted(this.options.trustStore, this.options.workDir))) return [];
-    const repository = new MemoryRepository({
-      storageRoot: this.options.memoryStorageRoot,
+    const repository = new SqliteMemoryRepository({
+      storageRoot: this.options.runtimeStorageRoot,
       workspaceId: this.options.workspaceId,
     });
     try {
@@ -163,7 +168,7 @@ export class MemoryReviewWorker {
       });
       const jobs = [...scheduler.pending()];
       const results: Array<MemoryProposalProcessResult | undefined> = new Array(jobs.length);
-      const eventStore = new RuntimeEventStore({ storageRoot: this.options.runtimeStorageRoot });
+      const eventStore = new SqliteRuntimeEventStore({ storageRoot: this.options.runtimeStorageRoot });
       let sharedLease: MemoryProposalModelLease | undefined;
       let batchedModel: MemoryProposalModelPort | undefined;
       try {
@@ -341,7 +346,7 @@ export class MemoryReviewWorker {
     }
   }
 
-  private captureNextWakeAt(repository: MemoryRepository): void {
+  private captureNextWakeAt(repository: MemoryRepositoryContract): void {
     const settings = repository.getSettings();
     if (!settings.enabled || !settings.autoPropose) return;
     const now = (this.options.now?.() ?? new Date()).getTime();
@@ -547,7 +552,7 @@ async function isTrusted(store: WorkspaceTrustStore, workDir: string): Promise<b
 }
 
 function failUnprocessableJob(
-  repository: MemoryRepository,
+  repository: MemoryRepositoryContract,
   job: Job,
   errorCode: string,
   incrementAttempt: boolean,
@@ -566,7 +571,7 @@ function failUnprocessableJob(
 }
 
 function tryFailUnprocessableJob(
-  repository: MemoryRepository,
+  repository: MemoryRepositoryContract,
   job: Job,
   errorCode: string,
   incrementAttempt: boolean,
@@ -596,7 +601,7 @@ function safeErrorCode(error: unknown): string {
 }
 
 async function deliverProposalNotices(
-  repository: MemoryRepository,
+  repository: MemoryRepositoryContract,
   sink: MemoryProposalPublishedSink | undefined,
   attemptedJobIds: Set<string>,
 ): Promise<void> {
@@ -651,10 +656,10 @@ function proposalNoticeForJob(job: Job): MemoryProposalPublishedNotice | undefin
 }
 
 function tryUpdateNotificationJob(
-  repository: MemoryRepository,
+  repository: MemoryRepositoryContract,
   job: Job,
   patch: Pick<
-    Parameters<MemoryRepository["updateJob"]>[0],
+    UpdateJobInput,
     "status" | "errorCode" | "idempotencyKey"
   >,
 ): void {

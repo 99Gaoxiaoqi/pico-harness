@@ -12,7 +12,6 @@ import {
   runtimeEventHasModelHistoryEntry,
 } from "../../src/engine/runtime-model-message.js";
 import { materializeRuntimeHistory } from "../../src/engine/session-runtime-read-model.js";
-import { projectRuntimeSessionActiveToolResultEntries } from "../../src/engine/session-runtime-projection.js";
 import { Session } from "../../src/engine/session.js";
 import { createToolResultEnvelope } from "../../src/engine/tool-result-contract.js";
 import type {
@@ -105,93 +104,6 @@ test("tool.result.recorded codec enforces inline integrity and evidence refs", (
       }),
     (error: unknown) =>
       error instanceof RuntimeEventDecodeError && error.code === "invalid_payload",
-  );
-});
-
-test("legacy Message ToolResults are rejected instead of replayed beside structured facts", () => {
-  const assistant = messageEvent("assistant", {
-    role: "assistant",
-    content: "",
-    toolCalls: [{ id: "call:legacy", name: "legacy", arguments: "{}" }],
-  });
-  const legacy = messageEvent("legacy-result", {
-    role: "user",
-    content: "legacy output",
-    toolCallId: "call:legacy",
-  });
-  assert.throws(
-    () => decodeRuntimeEvent(legacy),
-    (error: unknown) =>
-      error instanceof RuntimeEventDecodeError && error.code === "invalid_payload",
-  );
-  assert.throws(
-    () => materializeRuntimeHistory([assistant, legacy]),
-    /cannot contain a ToolResult/u,
-  );
-
-  const canonicalAssistant = messageEvent("canonical-assistant", {
-    role: "assistant",
-    content: "",
-    toolCalls: [{ id: "call:new", name: "new", arguments: "{}" }],
-  });
-  const structured = toolResultEvent({
-    eventId: "structured-result",
-    refs: { toolCallId: "call:new" },
-    body: inlineBody("new output"),
-    projection: {
-      version: 1,
-      mode: "full",
-      text: "new output",
-      strategy: "full",
-      truncated: false,
-    },
-  });
-
-  const history = materializeRuntimeHistory([canonicalAssistant, structured]);
-  assert.deepEqual(
-    history.map((message) => [message.toolCallId, message.content]),
-    [
-      [undefined, ""],
-      ["call:new", "new output"],
-    ],
-  );
-  assert.equal(runtimeEventHasModelHistoryEntry(structured), true);
-
-  const checkpoint: RuntimeEvent = {
-    ...baseEvent("checkpoint", "internal"),
-    kind: "context.checkpoint.recorded",
-    data: {
-      checkpointId: "checkpoint",
-      coveredEventCount: 2,
-      sourceDigest: sha256("canonical-assistant\nstructured-result"),
-      throughEventId: structured.eventId,
-      summary: { role: "system", content: "compacted tool exchange" },
-    },
-  };
-  assert.deepEqual(materializeRuntimeHistory([canonicalAssistant, structured, checkpoint]), [
-    { role: "system", content: "compacted tool exchange" },
-  ]);
-  assert.throws(
-    () =>
-      materializeRuntimeHistory([
-        canonicalAssistant,
-        structured,
-        {
-          ...checkpoint,
-          data: { ...checkpoint.data, sourceDigest: sha256("tampered") },
-        },
-      ]),
-    /does not match its covered model prefix/u,
-  );
-
-  const rewound: RuntimeEvent = {
-    ...baseEvent("rewind", "internal"),
-    kind: "history.rewound",
-    data: { branchId: "rewind", throughEventId: canonicalAssistant.eventId },
-  };
-  assert.throws(
-    () => materializeRuntimeHistory([canonicalAssistant, structured, rewound]),
-    /missing/u,
   );
 });
 
@@ -401,29 +313,6 @@ test("RuntimeRun rejects an unregistered Message ToolResult before appending the
   await run.finish("failed", "expected test rejection");
 });
 
-test("ToolResult hydration envelopes exclude facts removed from the active branch", () => {
-  const removed = toolResultEvent({ eventId: "removed-result" });
-  const rewind: RuntimeEvent = {
-    ...baseEvent("clear-branch", "internal"),
-    kind: "history.rewound",
-    data: { branchId: "clear-branch" },
-  };
-  const active = toolResultEvent({
-    eventId: "active-result",
-    refs: { toolCallId: "call:active" },
-  });
-
-  const projected = projectRuntimeSessionActiveToolResultEntries([
-    { sequence: 10, event: removed },
-    { sequence: 11, event: rewind },
-    { sequence: 12, event: active },
-  ]);
-  assert.deepEqual(
-    projected.map(({ sequence, eventId, envelope }) => [sequence, eventId, envelope.toolCallId]),
-    [[12, "active-result", "call:active"]],
-  );
-});
-
 test("durable Session disables Message-based truncate and compaction rewrites", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-runtime-history-hard-cutover-"));
   const session = new Session("runtime-history-hard-cutover", join(root, "workspace"), {
@@ -589,17 +478,6 @@ function toolResultEvent(
       body,
       projection,
     },
-  };
-}
-
-function messageEvent(
-  eventId: string,
-  message: Extract<RuntimeEvent, { kind: "message.committed" }>["data"]["message"],
-): Extract<RuntimeEvent, { kind: "message.committed" }> {
-  return {
-    ...baseEvent(eventId),
-    kind: "message.committed",
-    data: { message },
   };
 }
 

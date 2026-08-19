@@ -1,10 +1,13 @@
-import type { RuntimeEventStore } from "../storage/runtime-event-store.js";
+import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 import type { Message } from "../schema/message.js";
+import type { RuntimeEvent } from "./session-runtime-event.js";
 import type {
   RuntimeHistoryProjection,
   RuntimeHistoryProjectionEntry,
 } from "./session-runtime-read-model.js";
 import {
+  RUNTIME_HISTORY_EVENT_KINDS,
+  RUNTIME_MODEL_MESSAGE_EVENT_KINDS,
   materializeRuntimeHistory,
   materializeRuntimeHistoryEntries,
   materializeRuntimeHistoryProjection,
@@ -16,6 +19,10 @@ import type {
   SequencedRuntimeEvent,
 } from "./session-runtime-projection.js";
 import {
+  RUNTIME_SESSION_FORK_SEED_EVENT_KINDS,
+  RUNTIME_SESSION_STATE_EVENT_KINDS,
+  RUNTIME_SESSION_TRANSCRIPT_EVENT_KINDS,
+  RUNTIME_SESSION_USAGE_EVENT_KINDS,
   projectRuntimeSessionForkSeedEntries,
   projectRuntimeSessionMessages,
   projectRuntimeSessionSequencedMessageEntries,
@@ -58,7 +65,8 @@ export interface GetMessagesOptions {
  * 而不是直接引用底层投影函数。底层投影函数的导出保持不变，仅作为 service 的实现细节。
  *
  * 纯包装契约：本 service 不改变任何投影语义，每个方法仅做两件事：
- *   1. `this.store.readSession(sessionId)`（或 readSessionEntries）拿到 events / entries
+ *   1. 按该投影实际消费的 kind 集做切片查询（票 04：替代 readSession 全量读，
+ *      折叠函数不动，只换数据来源 = 按 kind+seq 排序的事件子集）
  *   2. 调用对应底层投影函数并原样返回结果
  *
  * 不在本 service 范围内的路径：
@@ -67,13 +75,17 @@ export interface GetMessagesOptions {
  * - 实时流式 provider callback —— 不经过事件存储重算，由 Runtime 流式管线直接处理。
  */
 export class RuntimeProjectionService {
-  constructor(private readonly store: RuntimeEventStore) {}
+  constructor(private readonly store: SqliteRuntimeEventStore) {}
 
   /**
    * 主投影入口：从 RuntimeEvent 重算完整 session 视图。
    * 含 checkpoint 替换 + fail-closed 诊断。
    *
    * 等价于：materializeRuntimeHistoryProjection(await store.readSession(sessionId))。
+   *
+   * 票 04 注:本方法保持显式全量读——它的返回值含 soft 诊断(unclaimed
+   * control fact 覆盖全部控制 kind),kind 切片会改变可观测输出;诊断与
+   * entries 的全量口径以 readSession 为准。
    */
   async getSessionView(sessionId: string): Promise<SessionView> {
     const events = await this.store.readSession(sessionId);
@@ -92,7 +104,12 @@ export class RuntimeProjectionService {
     sessionId: string,
     options?: GetMessagesOptions,
   ): Promise<Message[]> {
-    const events = await this.store.readSession(sessionId);
+    const events = await this.readEventsOfKinds(
+      sessionId,
+      options?.checkpoint === false
+        ? RUNTIME_MODEL_MESSAGE_EVENT_KINDS
+        : RUNTIME_HISTORY_EVENT_KINDS,
+    );
     if (options?.checkpoint === false) {
       return projectRuntimeSessionMessages(events);
     }
@@ -107,7 +124,7 @@ export class RuntimeProjectionService {
   async getMessageEntries(
     sessionId: string,
   ): Promise<RuntimeHistoryProjectionEntry[]> {
-    const events = await this.store.readSession(sessionId);
+    const events = await this.readEventsOfKinds(sessionId, RUNTIME_HISTORY_EVENT_KINDS);
     return materializeRuntimeHistoryEntries(events);
   }
 
@@ -117,7 +134,7 @@ export class RuntimeProjectionService {
    * 等价于：projectRuntimeSessionState(events)。
    */
   async getState(sessionId: string): Promise<SessionRuntimeStateSnapshot> {
-    const events = await this.store.readSession(sessionId);
+    const events = await this.readEventsOfKinds(sessionId, RUNTIME_SESSION_STATE_EVENT_KINDS);
     return projectRuntimeSessionState(events);
   }
 
@@ -127,7 +144,7 @@ export class RuntimeProjectionService {
    * 等价于：projectRuntimeSessionUsage(events)。
    */
   async getUsage(sessionId: string): Promise<SessionUsageSnapshot> {
-    const events = await this.store.readSession(sessionId);
+    const events = await this.readEventsOfKinds(sessionId, RUNTIME_SESSION_USAGE_EVENT_KINDS);
     return projectRuntimeSessionUsage(events);
   }
 
@@ -139,7 +156,10 @@ export class RuntimeProjectionService {
   async getTranscriptEntries(
     sessionId: string,
   ): Promise<RuntimeSessionTranscriptEventEntry[]> {
-    const entries = await this.readSequencedEntries(sessionId);
+    const entries = await this.readSequencedEntries(
+      sessionId,
+      RUNTIME_SESSION_TRANSCRIPT_EVENT_KINDS,
+    );
     return projectRuntimeSessionTranscriptEventEntries(entries);
   }
 
@@ -151,7 +171,7 @@ export class RuntimeProjectionService {
   async getSequencedMessages(
     sessionId: string,
   ): Promise<RuntimeSessionSequencedMessageEntry[]> {
-    const entries = await this.readSequencedEntries(sessionId);
+    const entries = await this.readSequencedEntries(sessionId, RUNTIME_MODEL_MESSAGE_EVENT_KINDS);
     return projectRuntimeSessionSequencedMessageEntries(entries);
   }
 
@@ -162,19 +182,36 @@ export class RuntimeProjectionService {
    * 等价于：projectRuntimeSessionForkSeedEntries(entries)。
    */
   async getForkSeed(sessionId: string): Promise<RuntimeSessionForkSeedEntry[]> {
-    const entries = await this.readSequencedEntries(sessionId);
+    const entries = await this.readSequencedEntries(
+      sessionId,
+      RUNTIME_SESSION_FORK_SEED_EVENT_KINDS,
+    );
     return projectRuntimeSessionForkSeedEntries(entries);
   }
 
   /**
-   * 读取 session 并按 RuntimeEventStoreEntry → SequencedRuntimeEvent 结构映射。
+   * 按 kind 子集读取事件（票 04 切片查询），映射为 RuntimeEvent 数组。
+   */
+  private async readEventsOfKinds(
+    sessionId: string,
+    kinds: readonly string[],
+  ): Promise<RuntimeEvent[]> {
+    const { entries } = await this.store.readSessionEntriesOfKinds(sessionId, kinds);
+    return entries.map(({ event }) => event);
+  }
+
+  /**
+   * 按 kind 子集读取并按 RuntimeEventStoreEntry → SequencedRuntimeEvent 结构映射。
    *
    * 两种类型结构同构（都只含 `{ sequence: number; event: RuntimeEvent }`），
    * 这里仅做 readonly 化转换，避免在调用方暴露结构同构这一实现细节。
    */
   private async readSequencedEntries(
     sessionId: string,
+    kinds: readonly string[],
   ): Promise<readonly SequencedRuntimeEvent[]> {
-    return this.store.readSessionEntries(sessionId);
+    return this.store.readSessionEntriesOfKinds(sessionId, kinds).then(
+      ({ entries }) => entries,
+    );
   }
 }

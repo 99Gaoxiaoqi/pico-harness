@@ -44,7 +44,7 @@ import type { PlanHandoff } from "../engine/plan-handoff.js";
 import { getSupportedToolNames } from "../tools/tool-surface.js";
 import type { ImagePart } from "../schema/message.js";
 import { LeaseConflictError, OwnerLease } from "../storage/owner-lease.js";
-import { RuntimeEventStore } from "../storage/runtime-event-store.js";
+import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 import { ensureWorkspaceTrusted, WorkspaceTrustStore } from "../security/workspace-trust.js";
 
 const SCHEMA_VERSION = 1 as const;
@@ -1389,14 +1389,18 @@ async function assertNewSession(
   workDir: string,
   picoHome: string,
 ): Promise<void> {
-  const store = new RuntimeEventStore({
+  const store = new SqliteRuntimeEventStore({
     storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
   });
-  if (await store.readSessionManifest(sessionId)) {
-    throw new HeadlessRequestError(
-      "SESSION_ALREADY_EXISTS",
-      "The internal one-shot runner only accepts a unique new Session ID.",
-    );
+  try {
+    if (await store.readSessionManifest(sessionId)) {
+      throw new HeadlessRequestError(
+        "SESSION_ALREADY_EXISTS",
+        "The internal one-shot runner only accepts a unique new Session ID.",
+      );
+    }
+  } finally {
+    store.close();
   }
 }
 

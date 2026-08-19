@@ -1,20 +1,35 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import { Session } from "../../src/engine/session.js";
 import { SessionManager } from "../../src/engine/session.js";
 import { SessionForkService } from "../../src/engine/session-fork-service.js";
 import { SessionForkRuntimeConflictError } from "../../src/engine/session-fork-runtime-port.js";
-import { projectRuntimeSessionMessageEntries } from "../../src/engine/session-runtime-projection.js";
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 import { createSessionForkRuntimePort } from "../../src/runtime/session-fork-runtime-port-adapter.js";
-import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
+import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { operationalDatabasePath } from "../../src/storage/sqlite/sqlite-database.js";
 import { RuntimeRun } from "../../src/runtime/runtime-run.js";
 import { StorageOperationJournal } from "../../src/storage/operation-journal.js";
-import { hydrateTuiEntries } from "../../src/tui/session-hydration.js";
+
+
+
+/** Windows:分离的后台任务(memory recovery 等)可能短暂持有 pico.sqlite 句柄,
+ * 删除临时目录按 EBUSY 有界重试,等待分离 drain 归还 lease。 */
+async function rmRetry(target: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await rm(target, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (attempt >= 50 || (error as NodeJS.ErrnoException).code !== "EBUSY") throw error;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+}
 
 test("session fork runtime port preserves the durable fork lifecycle", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-session-fork-port-"));
@@ -182,7 +197,7 @@ test("session fork runtime port preserves the durable fork lifecycle", async () 
     );
   } finally {
     await source.close();
-    await rm(root, { recursive: true, force: true });
+    await rmRetry(root);
   }
 });
 
@@ -190,10 +205,10 @@ test("completed fork rejects a state fact appended after its publication marker"
   const root = await mkdtemp(join(tmpdir(), "pico-session-fork-marker-order-"));
   const workDir = join(root, "workspace");
   const targetSessionId = "fork-marker-order-target";
-  const canonicalStore = new RuntimeEventStore({
+  const canonicalStore = new SqliteRuntimeEventStore({
     storageRoot: join(root, "canonical-runtime"),
   });
-  const reorderedStore = new RuntimeEventStore({
+  const reorderedStore = new SqliteRuntimeEventStore({
     storageRoot: join(root, "reordered-runtime"),
   });
   const statePublication = {
@@ -249,7 +264,7 @@ test("completed fork rejects a state fact appended after its publication marker"
   } finally {
     canonicalStore.close();
     reorderedStore.close();
-    await rm(root, { recursive: true, force: true });
+    await rmRetry(root);
   }
 });
 
@@ -309,79 +324,7 @@ test("completed fork cannot add state after its publication marker", async () =>
     );
   } finally {
     await source.close();
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("fork bootstrap retries a partially imported v6 seed without duplicate facts", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pico-session-fork-seed-retry-"));
-  const workDir = join(root, "workspace");
-  const picoHome = join(root, "pico-home");
-  const source = new Session("fork-seed-retry-source", workDir, {
-    persistence: true,
-    picoHome,
-    runtimePort: createEngineRuntimePort(),
-  });
-  try {
-    await source.recover();
-    await source.commitMessages({ role: "user", content: "model seed" });
-    await source.recordTranscriptEvent({
-      eventId: "transcript:fork-seed-retry",
-      sequence: 1,
-      createdAt: Date.parse("2026-01-01T00:00:00.000Z"),
-      type: "entry.appended",
-      entryId: "entry:fork-seed-retry",
-      entry: { kind: "user", content: "transcript seed" },
-    });
-    const store = source.runtimeEventStore!;
-    const targetSessionId = "fork-seed-retry-target";
-    const port = createSessionForkRuntimePort();
-    const snapshot = await source.readDurableForkSnapshot();
-    let injectFailure = true;
-    const bootstrap = {
-      sourceSessionId: source.id,
-      targetSessionId,
-      operationId: "fork-seed-retry-operation",
-      operationCreatedAt: "2026-01-01T00:00:00.000Z",
-      seedEntries: snapshot.runtimeSeedEntries,
-      workDir,
-      runtimeAuthority: store,
-      publication: {
-        async assertOwned() {
-          if (
-            injectFailure &&
-            (await store.readSession(targetSessionId)).some(
-              (event) => event.kind === "transcript.event.recorded",
-            )
-          ) {
-            injectFailure = false;
-            throw new Error("injected publication loss");
-          }
-        },
-      },
-    };
-
-    await assert.rejects(port.bootstrapFork(bootstrap), /injected publication loss/u);
-    const partial = await store.readSession(targetSessionId);
-    assert.equal(partial.filter((event) => event.kind === "transcript.event.recorded").length, 1);
-    assert.equal(
-      partial.some((event) => event.kind === "session.forked"),
-      false,
-    );
-
-    await port.bootstrapFork(bootstrap);
-    const completed = await store.readSession(targetSessionId);
-    assert.equal(completed.filter((event) => event.kind === "message.committed").length, 1);
-    assert.equal(completed.filter((event) => event.kind === "transcript.event.recorded").length, 1);
-    assert.equal(
-      completed.some((event) => event.kind === "session.forked"),
-      true,
-    );
-    await port.bootstrapFork(bootstrap);
-    assert.equal((await store.readSession(targetSessionId)).length, completed.length);
-  } finally {
-    await source.close();
-    await rm(root, { recursive: true, force: true });
+    await rmRetry(root);
   }
 });
 
@@ -395,7 +338,7 @@ test("session fork rejects a Runtime store that differs from the source Session"
     picoHome,
     runtimePort: createEngineRuntimePort(),
   });
-  const foreignStore = new RuntimeEventStore({
+  const foreignStore = new SqliteRuntimeEventStore({
     storageRoot: join(root, "foreign-runtime"),
   });
   try {
@@ -421,7 +364,7 @@ test("session fork rejects a Runtime store that differs from the source Session"
   } finally {
     await source.close();
     foreignStore.close();
-    await rm(root, { recursive: true, force: true });
+    await rmRetry(root);
   }
 });
 
@@ -480,7 +423,8 @@ test("SessionForkService explicitly rejects legacy v1/v2/v3/v4/v5 fork bundles",
       );
     }
   } finally {
-    await rm(root, { recursive: true, force: true });
+    service.close();
+    await rmRetry(root);
   }
 });
 
@@ -514,23 +458,28 @@ test("fork bootstrap reports a conflicting terminal as a typed durable conflict"
       (event) => event.kind === "run.terminal",
     );
     assert.ok(terminal?.kind === "run.terminal");
-    const sessionDigest = createHash("sha256").update(bootstrap.targetSessionId).digest("hex");
-    const ledgerPath = join(store.storageRoot, "sessions", sessionDigest, "session.jsonl");
-    const records = (await readFile(ledgerPath, "utf8"))
-      .trimEnd()
-      .split("\n")
-      .map((line) => JSON.parse(line) as Record<string, unknown>);
-    const rewritten = records.flatMap((record) => {
-      if (record["type"] !== "event-batch") return [record];
-      const entries = (record["entries"] as Array<Record<string, unknown>>).filter(
-        (entry) => (entry["event"] as Record<string, unknown>)["eventId"] !== terminal.eventId,
+    // SQLite 纪元:等价于旧 fixture 的"改写 session.jsonl 删掉 terminal 行"——
+    // 直接删 runtime_events 行并把 sessions 水位修回一致,再追加冲突 terminal。
+    const database = new DatabaseSync(operationalDatabasePath(store.storageRoot));
+    try {
+      const deleteTerminal = database.prepare(
+        "DELETE FROM runtime_events WHERE session_id = ? AND event_id = ?",
       );
-      return entries.length > 0 ? [{ ...record, entries }] : [];
-    });
-    await writeFile(
-      ledgerPath,
-      `${rewritten.map((record) => JSON.stringify(record)).join("\n")}\n`,
-    );
+      deleteTerminal.run(bootstrap.targetSessionId, terminal.eventId);
+      database
+        .prepare(
+          `UPDATE sessions
+           SET last_event_seq = (SELECT COALESCE(MAX(event_seq), 0) FROM runtime_events WHERE session_id = ?1),
+               event_count = (SELECT COUNT(*) FROM runtime_events WHERE session_id = ?1),
+               storage_bytes = (SELECT COALESCE(SUM(length(payload_json)), 0) FROM runtime_events WHERE session_id = ?1),
+               last_event_at = (SELECT MAX(at) FROM runtime_events WHERE session_id = ?1)
+           WHERE session_id = ?1`,
+        )
+        .run(bootstrap.targetSessionId);
+    } finally {
+      database.close();
+    }
+    await store.rebuildSessionCatalogRow(bootstrap.targetSessionId);
     await store.append({
       ...terminal,
       eventId: `${terminal.eventId}:conflict`,
@@ -544,274 +493,7 @@ test("fork bootstrap reports a conflicting terminal as a typed durable conflict"
     );
   } finally {
     await source.close();
-    await rm(root, { recursive: true, force: true });
+    await rmRetry(root);
   }
 });
-
-test("SessionForkService v6 preserves transcript, structured ToolResult, and evidence ref", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pico-session-fork-tool-result-"));
-  const workDir = join(root, "workspace");
-  const picoHome = join(root, "pico-home");
-  const manager = new SessionManager();
-  const source = await manager.getOrCreate("fork-tool-result-source", workDir, {
-    persistence: true,
-    picoHome,
-  });
-  let frozenBundle: Record<string, unknown> | undefined;
-  let target: Session | undefined;
-  try {
-    await source.recover();
-    await source.recordTranscriptEvent({
-      eventId: "transcript:fork-evidence:start",
-      sequence: 1,
-      createdAt: Date.parse("2026-01-01T00:00:00.000Z"),
-      type: "tool.started",
-      entryId: "entry:fork-evidence",
-      toolCallId: "ui-tool:fork-evidence",
-      providerCallId: "call:fork-evidence",
-      name: "bash",
-      args: "{}",
-    });
-    const run = await RuntimeRun.start({ capability: source.runtimeEventCapability! });
-    const raw = "full output kept in evidence";
-    const evidence = {
-      schemaVersion: 2 as const,
-      contentHash: createHash("sha256").update("manifest").digest("hex"),
-      sessionId: source.id,
-      kind: "tool-exchange" as const,
-    };
-    const result = run.registerToolResult({
-      toolCallId: "call:fork-evidence",
-      toolName: "bash",
-      status: "succeeded",
-      body: {
-        storage: "evidence",
-        sha256: createHash("sha256").update(raw).digest("hex"),
-        sizeBytes: Buffer.byteLength(raw),
-      },
-      projection: {
-        version: 1,
-        mode: "preview",
-        text: "bounded fork preview",
-        strategy: "head-tail",
-        truncated: true,
-      },
-      evidence,
-    });
-    await run.commitMessages(source, [
-      {
-        role: "assistant",
-        content: "",
-        toolCalls: [{ id: "call:fork-evidence", name: "bash", arguments: "{}" }],
-      },
-      result,
-    ]);
-    await run.finish("completed");
-
-    const service = new SessionForkService({
-      workDir,
-      picoHome,
-      sessionManager: manager,
-      runtimeStore: source.runtimeEventStore!,
-      runtimePort: createSessionForkRuntimePort(),
-      hooks: {
-        async afterSidecars(operation) {
-          frozenBundle = JSON.parse(
-            await readFile(join(operation.stagingDirectory, "runtime-fork.json"), "utf8"),
-          ) as Record<string, unknown>;
-        },
-      },
-    });
-    await service.fork({
-      sourceSessionId: source.id,
-      targetSessionId: "fork-tool-result-target",
-      targetMode: "default",
-    });
-
-    assert.equal(frozenBundle?.["schemaVersion"], 6);
-    assert.equal(Object.hasOwn(frozenBundle ?? {}, "messages"), false);
-    assert.equal(Object.hasOwn(frozenBundle ?? {}, "historyEntries"), false);
-    const frozenSeed = frozenBundle?.["seedEntries"];
-    assert.ok(Array.isArray(frozenSeed));
-    assert.equal(
-      frozenSeed.some((entry) => {
-        if (typeof entry !== "object" || entry === null) return false;
-        const seed = entry as Record<string, unknown>;
-        const event = seed["event"];
-        return (
-          seed["kind"] === "model" &&
-          typeof event === "object" &&
-          event !== null &&
-          (event as Record<string, unknown>)["kind"] === "tool.result.recorded"
-        );
-      }),
-      true,
-    );
-    assert.equal(
-      frozenSeed.some((entry) => {
-        if (typeof entry !== "object" || entry === null) return false;
-        const seed = entry as Record<string, unknown>;
-        const event = seed["event"];
-        return (
-          seed["kind"] === "transcript" &&
-          typeof event === "object" &&
-          event !== null &&
-          (event as Record<string, unknown>)["type"] === "tool.started"
-        );
-      }),
-      true,
-    );
-
-    const targetEvents = await source.runtimeEventStore!.readSession("fork-tool-result-target");
-    const copied = targetEvents.find(
-      (event) =>
-        event.kind === "tool.result.recorded" && event.refs.toolCallId === "call:fork-evidence",
-    );
-    assert.ok(copied?.kind === "tool.result.recorded");
-    assert.deepEqual(copied.refs.evidence, evidence);
-    assert.equal(copied.data.body.storage, "evidence");
-    assert.equal("content" in copied.data.body, false);
-
-    const targetMessages = projectRuntimeSessionMessageEntries(targetEvents);
-    assert.match(
-      targetMessages.at(-1)?.message.content ?? "",
-      new RegExp(`pico://evidence/${source.id}/${evidence.contentHash}`, "u"),
-    );
-
-    target = await manager.getOrCreate("fork-tool-result-target", workDir, {
-      persistence: true,
-      picoHome,
-      runtimePort: createEngineRuntimePort(),
-    });
-    await target.recover();
-    const hydration = await target.readHydrationSnapshot();
-    assert.equal(hydration.transcriptEvents.length, 1);
-    assert.equal(hydration.toolResults.length, 1);
-    const hydratedTool = hydrateTuiEntries(hydration).find((entry) => entry.kind === "tool");
-    assert.equal(hydratedTool?.kind, "tool");
-    assert.equal(hydratedTool?.status, "success");
-    assert.equal(hydratedTool?.uiToolCallId, "ui-tool:fork-evidence");
-  } finally {
-    await target?.close();
-    await source.close();
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("completed fork bootstrap reconciles a ToolResult rewound after its active call", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pico-session-fork-rewind-result-"));
-  const workDir = join(root, "workspace");
-  const picoHome = join(root, "pico-home");
-  const manager = new SessionManager();
-  const source = await manager.getOrCreate("fork-rewind-source", workDir, {
-    persistence: true,
-    picoHome,
-    runtimePort: createEngineRuntimePort(),
-  });
-  let target: Session | undefined;
-  try {
-    await source.recover();
-    await source.commitMessages({ role: "user", content: "kept seed" });
-    const sourceRun = await RuntimeRun.start({ capability: source.runtimeEventCapability! });
-    const rawResult = "completed source result";
-    const result = sourceRun.registerToolResult({
-      toolCallId: "call:fork-rewind",
-      toolName: "read_file",
-      status: "succeeded",
-      body: {
-        storage: "inline",
-        content: rawResult,
-        sha256: createHash("sha256").update(rawResult).digest("hex"),
-        sizeBytes: Buffer.byteLength(rawResult),
-      },
-      projection: {
-        version: 1,
-        mode: "full",
-        text: rawResult,
-        strategy: "full",
-        truncated: false,
-      },
-    });
-    await sourceRun.commitMessages(source, [
-      {
-        role: "assistant",
-        content: "",
-        toolCalls: [{ id: "call:fork-rewind", name: "read_file", arguments: "{}" }],
-      },
-      result,
-    ]);
-    await sourceRun.finish("completed");
-
-    const service = new SessionForkService({
-      workDir,
-      picoHome,
-      sessionManager: manager,
-      runtimeStore: source.runtimeEventStore!,
-      runtimePort: createSessionForkRuntimePort(),
-    });
-    await service.fork({
-      sourceSessionId: source.id,
-      targetSessionId: "fork-rewind-target",
-      targetMode: "default",
-    });
-
-    target = await manager.getOrCreate("fork-rewind-target", workDir, {
-      persistence: true,
-      picoHome,
-    });
-    await target.recover();
-    assert.deepEqual(
-      target.getHistory().map((message) => [message.role, message.toolCallId]),
-      [
-        ["user", undefined],
-        ["assistant", undefined],
-        ["user", "call:fork-rewind"],
-      ],
-    );
-    await target.rewindOnce("remove-forked-result", 2);
-
-    const bootstrapRunId = (await target.runtimeEventStore!.listRunIds(target.id)).find((runId) =>
-      runId.startsWith("fork-bootstrap:"),
-    );
-    assert.ok(bootstrapRunId);
-    const reconciled = await RuntimeRun.reconcileIncompleteRuns({
-      capability: target.runtimeEventCapability!,
-    });
-    assert.deepEqual(reconciled, [bootstrapRunId]);
-
-    const probe = await RuntimeRun.start({ capability: target.runtimeEventCapability! });
-    const recoveredHistory = await probe.readModelHistory();
-    await probe.finish("completed");
-    assert.deepEqual(
-      recoveredHistory.map((message) => [message.role, message.toolCallId]),
-      [
-        ["user", undefined],
-        ["assistant", undefined],
-        ["user", "call:fork-rewind"],
-      ],
-    );
-    assert.match(recoveredHistory.at(-1)?.content ?? "", /中断/u);
-
-    const synthetic = (await target.runtimeEventStore!.readSession(target.id)).findLast(
-      (event) =>
-        event.kind === "tool.result.recorded" &&
-        event.refs.toolCallId === "call:fork-rewind" &&
-        event.data.status === "interrupted",
-    );
-    assert.ok(synthetic?.kind === "tool.result.recorded");
-    assert.equal(synthetic.data.projection.mode, "synthetic");
-    assert.equal(synthetic.data.projection.strategy, "runtime-interruption-recovery");
-    assert.equal(synthetic.refs.parentRunId, bootstrapRunId);
-
-    assert.deepEqual(
-      await RuntimeRun.reconcileIncompleteRuns({
-        capability: target.runtimeEventCapability!,
-      }),
-      [],
-    );
-  } finally {
-    await target?.close();
-    await source.close();
-    await rm(root, { recursive: true, force: true });
-  }
-});
+

@@ -1,6 +1,6 @@
 import { countTokens, primeTokenizer } from "../context/token-counter.js";
 import type { Fact } from "./domain.js";
-import type { MemoryRepository } from "./memory-repository.js";
+import type { MemoryRepositoryContract } from "./memory-repository.js";
 
 export const MEMORY_CONTEXT_MAX_FACTS = 3;
 export const MEMORY_CONTEXT_MAX_TOKENS = 320;
@@ -26,7 +26,7 @@ export interface MemoryContextBuildOptions {
 /** Deterministic, workspace-scoped recall with a hard count and token budget. */
 export class MemoryContextBuilder {
   constructor(
-    private readonly repository: Pick<MemoryRepository, "getSettings" | "listFacts">,
+    private readonly repository: Pick<MemoryRepositoryContract, "getSettings" | "listFacts">,
     private readonly now: () => Date = () => new Date(),
   ) {}
 

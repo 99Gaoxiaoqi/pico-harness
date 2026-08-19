@@ -31,7 +31,7 @@ test("workspace memory methods are explicit Desktop capabilities with strict wri
     assert.equal(DESKTOP_RUNTIME_METHODS.includes(method), true);
     assert.equal(isRuntimeMethod(method), true);
   }
-  assert.equal(isRuntimeMethod("memory.create"), false);
+  assert.equal(isRuntimeMethod("memory.not-a-method"), false);
 
   assert.deepEqual(
     parseStrictRuntimeParams("memory.update", {

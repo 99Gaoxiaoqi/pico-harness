@@ -1,31 +1,12 @@
-import { createHash, randomUUID } from "node:crypto";
-import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { canonicalizeWorkspacePath } from "../paths/pico-paths.js";
+import { canonicalizeWorkspacePath } from "../../paths/pico-paths.js";
 import {
-  commitFileTransactionSync,
-  FileStorageIntegrityError,
-  readFirstJsonLineSync,
-  readJsonFileSync,
-  readJsonLinesSync,
-  writeJsonAtomicSync,
-} from "../storage/local-file-storage.js";
+  deriveRecoverableTaskLaunchId,
+  deriveRecoverableTaskRuntimeLaunchIdentity,
+  validateRecoverableTaskLaunchReceipt,
+} from "../../tasks/recoverable-task.js";
 import {
-  assertWorkspaceStorageRootIdentitySync,
-  ensurePrivateWorkspaceStorageDirectorySync,
-  prepareWorkspaceStorageLayoutSync,
-  readWorkspaceStorageRootIdentitySync,
-  WORKSPACE_RUNTIME_TRANSACTION_OPTIONS,
-  WORKSPACE_STORAGE_LOCK_DIRECTORY,
-  type WorkspaceStorageRootIdentity,
-} from "../storage/workspace-storage-layout.js";
-import {
-  createFileStorageErrorMapper,
-  withLedgerStoreLock,
-} from "../storage/ledger-store-lock.js";
-import {
-  RECOVERABLE_TASK_LAUNCH_RECEIPT_SCHEMA_VERSION,
   TASK_ATTEMPT_TERMINAL_STATUSES,
   TASK_RESUME_PARK_REASONS,
   TASK_RUN_EVENT_SCHEMA_VERSION,
@@ -39,92 +20,39 @@ import {
   type TaskAttemptTerminalStatus,
   type TaskResumeParkReason,
   type TaskRunEvent,
-  type TaskRunEventBatch,
   type TaskRunEventEntry,
   type TaskRunFileHeader,
   type TaskRunProjection,
   type TaskRunTerminalStatus,
   type TaskSafeBoundary,
-} from "./task-run-contract.js";
+} from "../../tasks/task-run-contract.js";
 import {
-  deriveRecoverableTaskLaunchId,
-  deriveRecoverableTaskRuntimeLaunchIdentity,
-} from "./recoverable-task.js";
+  hashTaskRunInput,
+  TaskRunStoreIntegrityError,
+  TaskRunStoreRevisionConflictError,
+  type AppendTaskRunBatchOptions,
+  type InitializeTaskRunOptions,
+  type TaskRunAppendResult,
+  type TaskRunSnapshot,
+  type TaskRunStoreInspection,
+  type TaskRunStoreOptions,
+  type TaskRunStorageRootMismatch,
+} from "../../tasks/task-run-store-contracts.js";
+import { operationalDatabasePath, type OperationalDatabaseLease } from "./sqlite-database.js";
+import { prepareWorkspaceSqliteStorageSync } from "./sqlite-workspace-storage.js";
+import { ALL_WORKSPACE_SQLITE_SCOPES } from "./workspace-scopes.js";
 
-const TASK_RUNS_DIRECTORY_NAME = "task-runs";
-const TASK_RUN_FILE_NAME = "task.jsonl";
-const TASK_RUN_MANIFEST_FILE_NAME = "manifest.json";
-const TASK_RUN_DIRECTORY_PATTERN = /^[a-f0-9]{64}$/u;
+/**
+ * SQLite 版 TaskRunStore(票 05,ADR 24 §4.2)。
+ *
+ * 语义对齐旧 JSONL 实现(src/tasks/task-run-store.ts,票 09 退役):header 不可变、
+ * 事件批原子提交、transactionId 请求级幂等、expectedRevision CAS、逐事件重放投影、
+ * 重启恢复 = SQL 查询。事实全部住在 pico.sqlite 的 task_runs/task_run_events 两表,
+ * task-runs/ 目录与 manifest.json 不再产生。错误类型与选项/结果形状直接复用旧 store
+ * 的导出,装配替换(票 03)时消费方零改动。
+ */
+
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
-const TASK_RUN_MANIFEST_SCHEMA_VERSION = 1 as const;
-
-export const TASK_RUN_TRANSACTION_OPTIONS = WORKSPACE_RUNTIME_TRANSACTION_OPTIONS;
-
-export interface TaskRunStoreOptions {
-  /** Canonical Pico workspace state root containing task-runs/ and .storage/. */
-  readonly storageRoot: string;
-  readonly now?: () => Date;
-}
-
-export interface TaskRunStoreRecoveryPolicy {
-  readonly repairManifests?: boolean;
-  readonly repairIncompleteTails?: boolean;
-  readonly readOnly?: boolean;
-}
-
-export interface InitializeTaskRunOptions {
-  readonly taskRunId: string;
-  readonly workDir: string;
-  /** Optional assertion; the persisted header always uses the Store's verified root identity. */
-  readonly storageRootId?: string;
-  readonly adapter: RecoverableTaskAdapterIdentity;
-  readonly maxAttempts: number;
-  readonly now?: () => Date;
-}
-
-export interface AppendTaskRunBatchOptions {
-  /** Stable caller-supplied transaction identity for crash-safe request replay. */
-  readonly transactionId?: string;
-  /** Optional compare-and-swap boundary checked under the workspace lock. */
-  readonly expectedRevision?: number;
-  readonly now?: () => Date;
-}
-
-export interface TaskRunAppendResult {
-  readonly inserted: boolean;
-  readonly entry: TaskRunEventEntry;
-  readonly revision: number;
-  readonly transactionId: string;
-}
-
-export interface TaskRunSnapshot {
-  readonly projection: TaskRunProjection;
-  readonly events: readonly TaskRunEventEntry[];
-}
-
-export interface TaskRunStoreInspection {
-  readonly projections: readonly TaskRunProjection[];
-  readonly staleManifestPaths: readonly string[];
-  readonly storageRootMismatches: readonly TaskRunStorageRootMismatch[];
-}
-
-export interface TaskRunStorageRootMismatch {
-  readonly taskRunId: string;
-  readonly ledgerPath: string;
-  readonly taskRunStorageRootId: string;
-  readonly currentStorageRootId: string;
-}
-
-export interface TaskRunManifestProjection {
-  readonly type: "task-run-manifest";
-  readonly schemaVersion: typeof TASK_RUN_MANIFEST_SCHEMA_VERSION;
-  readonly projection: TaskRunProjection;
-  readonly ledger: {
-    readonly byteLength: number;
-    readonly lastSequence: number;
-    readonly lastTxId?: string;
-  };
-}
 
 interface LoadedTaskRunEvent {
   readonly entry: TaskRunEventEntry;
@@ -133,11 +61,10 @@ interface LoadedTaskRunEvent {
 }
 
 interface LoadedTaskRun {
+  readonly header: TaskRunFileHeader;
   readonly projection: TaskRunProjection;
   readonly events: readonly LoadedTaskRunEvent[];
   readonly transactions: ReadonlyMap<string, readonly LoadedTaskRunEvent[]>;
-  readonly manifestPath: string;
-  readonly manifestStale: boolean;
 }
 
 interface MutableTaskAttempt {
@@ -180,71 +107,31 @@ interface ProjectionIndexes {
   readonly claimIds: Set<string>;
 }
 
-export class TaskRunStoreIntegrityError extends Error {
-  constructor(message: string, options?: ErrorOptions) {
-    super(message, options);
-    this.name = "TaskRunStoreIntegrityError";
-  }
-}
-
-export class TaskRunStoreRevisionConflictError extends TaskRunStoreIntegrityError {
-  constructor(readonly projection: TaskRunProjection) {
-    super(`TaskRun ${projection.header.taskRunId} revision changed to ${projection.revision}`);
-    this.name = "TaskRunStoreRevisionConflictError";
-  }
-}
-
-/**
- * Append-only durable TaskRun/Attempt fact ledger.
- *
- * Session RuntimeEvent remains the canonical Agent execution log. This store only records task
- * ownership, Attempt transitions, safe-boundary references, resume claims, and terminal facts.
- */
-export class TaskRunStore {
+export class SqliteTaskRunStore {
   readonly storageRoot: string;
   readonly storageRootId: string;
-  private readonly taskRunsRoot: string;
-  private readonly lockDirectory: string;
+  private readonly lease: OperationalDatabaseLease;
   private readonly now: () => Date;
-  private readonly rootIdentity?: WorkspaceStorageRootIdentity;
-  private readonly repairManifests: boolean;
-  private readonly repairIncompleteTails: boolean;
-  private readonly readOnly: boolean;
-  private readonly ownerId = `task-run-store:${process.pid}:${randomUUID()}`;
+  private open = true;
 
-  constructor(options: TaskRunStoreOptions, recoveryPolicy: TaskRunStoreRecoveryPolicy = {}) {
-    if (!options.storageRoot.trim()) throw new Error("TaskRunStore requires storageRoot");
-    const requestedStorageRoot = resolve(options.storageRoot);
-    if (existsSync(requestedStorageRoot)) {
-      const metadata = lstatSync(requestedStorageRoot);
-      if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
-        throw new FileStorageIntegrityError(
-          `Storage root must be a real directory: ${requestedStorageRoot}`,
-        );
-      }
-    }
-
-    this.readOnly = recoveryPolicy.readOnly ?? false;
-    this.repairManifests = recoveryPolicy.repairManifests ?? !this.readOnly;
-    this.repairIncompleteTails = recoveryPolicy.repairIncompleteTails ?? !this.readOnly;
-    if (this.readOnly && (this.repairManifests || this.repairIncompleteTails)) {
-      throw new Error("TaskRunStore readOnly mode cannot enable repairs");
-    }
-    this.rootIdentity = this.readOnly
-      ? readWorkspaceStorageRootIdentitySync(requestedStorageRoot)
-      : prepareWorkspaceStorageLayoutSync(requestedStorageRoot).rootIdentity;
-    this.storageRoot = existsSync(requestedStorageRoot)
-      ? realpathSync.native(requestedStorageRoot)
-      : requestedStorageRoot;
-    this.storageRootId = this.rootIdentity?.storageRootId ?? "";
-    this.taskRunsRoot = join(this.storageRoot, TASK_RUNS_DIRECTORY_NAME);
-    this.lockDirectory = join(this.storageRoot, WORKSPACE_STORAGE_LOCK_DIRECTORY);
+  constructor(options: TaskRunStoreOptions) {
+    if (!options.storageRoot.trim()) throw new Error("SqliteTaskRunStore requires storageRoot");
+    const preparation = prepareWorkspaceSqliteStorageSync(options.storageRoot, ALL_WORKSPACE_SQLITE_SCOPES);
+    this.lease = preparation.lease;
+    this.storageRoot = preparation.rootIdentity.canonicalPath;
+    this.storageRootId = preparation.rootIdentity.storageRootId;
     this.now = options.now ?? (() => new Date());
-    if (!this.readOnly) ensurePrivateWorkspaceStorageDirectorySync(this.taskRunsRoot);
+  }
+
+  /** Releases the process-wide database lease; the store must not be used afterwards. */
+  close(): void {
+    if (!this.open) return;
+    this.open = false;
+    this.lease.release();
   }
 
   async initializeTaskRun(options: InitializeTaskRunOptions): Promise<TaskRunProjection> {
-    this.assertWritable();
+    this.assertOpen();
     if (options.storageRootId !== undefined && options.storageRootId !== this.storageRootId) {
       throw new TaskRunStoreIntegrityError(
         `TaskRun ${options.taskRunId} storageRootId does not match the verified workspace root`,
@@ -254,49 +141,39 @@ export class TaskRunStore {
       { ...options, storageRootId: this.storageRootId },
       options.now ?? this.now,
     );
-    return this.withStoreLock(() => {
-      const existing = this.loadTaskRun(options.taskRunId);
+    return this.lease.transaction("write", () => {
+      const existing = this.loadTaskRun(requestedHeader.taskRunId);
       if (existing) {
-        this.assertTaskRunStorageRoot(existing.projection);
-        if (!sameImmutableHeader(existing.projection.header, requestedHeader)) {
+        this.assertTaskRunStorageRoot(existing);
+        if (!sameImmutableHeader(existing.header, requestedHeader)) {
           throw new TaskRunStoreIntegrityError(
-            `TaskRun ${options.taskRunId} is already bound to different immutable metadata`,
+            `TaskRun ${requestedHeader.taskRunId} is already bound to different immutable metadata`,
           );
         }
         return cloneProjection(existing.projection);
       }
-
-      const directory = this.taskRunDirectory(options.taskRunId);
-      if (existsSync(directory)) {
-        throw new TaskRunStoreIntegrityError(
-          `TaskRun ${options.taskRunId} directory exists without a valid ledger`,
-        );
-      }
       const projection = initialProjection(requestedHeader);
-      const headerLine = encodeJsonLine(requestedHeader);
-      const manifest = createManifestProjection(projection, Buffer.byteLength(headerLine), 0);
-      commitFileTransactionSync(
-        this.storageRoot,
-        {
-          replacements: [
-            {
-              relativePath: this.taskRunRelativePath(options.taskRunId, TASK_RUN_FILE_NAME),
-              content: headerLine,
-            },
-            {
-              relativePath: this.taskRunRelativePath(
-                options.taskRunId,
-                TASK_RUN_MANIFEST_FILE_NAME,
-              ),
-              content: encodeJsonDocument(manifest),
-            },
-          ],
-        },
-        {
-          ...TASK_RUN_TRANSACTION_OPTIONS,
-          transactionId: randomUUID(),
-        },
-      );
+      this.lease.database
+        .prepare(
+          `INSERT INTO task_runs (
+             task_run_id, work_dir, storage_root_id, adapter_id, adapter_version,
+             adapter_input_json, input_hash, max_attempts, created_at,
+             last_event_seq, last_tx_id, revision, status, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 0, ?, ?)`,
+        )
+        .run(
+          requestedHeader.taskRunId,
+          requestedHeader.workDir,
+          requestedHeader.storageRootId,
+          requestedHeader.adapter.id,
+          requestedHeader.adapter.version,
+          canonicalJson(requestedHeader.adapter.input),
+          requestedHeader.adapter.inputHash,
+          requestedHeader.maxAttempts,
+          requestedHeader.createdAt,
+          projection.status,
+          requestedHeader.createdAt,
+        );
       return cloneProjection(projection);
     });
   }
@@ -319,16 +196,16 @@ export class TaskRunStore {
     events: readonly TaskRunEvent[],
     options: AppendTaskRunBatchOptions = {},
   ): Promise<readonly TaskRunAppendResult[]> {
-    this.assertWritable();
+    this.assertOpen();
     if (!taskRunId) throw new Error("TaskRun ID must not be empty");
     if (events.length === 0) return [];
     const canonicalEvents = events.map((event) => decodeTaskRunEvent(toCanonicalJson(event)));
     assertUniqueRequestedEventIds(canonicalEvents);
     assertResumeBatchPairs(canonicalEvents, `TaskRun ${taskRunId} append request`);
 
-    return this.withStoreLock(() => {
+    return this.lease.transaction("write", () => {
       const loaded = this.requireTaskRun(taskRunId);
-      this.assertTaskRunStorageRoot(loaded.projection);
+      this.assertTaskRunStorageRoot(loaded);
       const requestedTransactionId = options.transactionId;
       if (requestedTransactionId !== undefined) {
         assertNonEmptyIdentifier(requestedTransactionId, "transactionId");
@@ -419,45 +296,41 @@ export class TaskRunStore {
           event,
         }),
       );
-      const batch: TaskRunEventBatch = {
-        type: "task-event-batch",
-        schemaVersion: TASK_RUN_FILE_SCHEMA_VERSION,
-        txId: transactionId,
-        entries,
-      };
 
-      const nextProjection = replayProjection(loaded.projection.header, [
+      const nextProjection = replayProjection(loaded.header, [
         ...loaded.events,
         ...entries.map((entry) => ({ entry, transactionId, revision })),
       ]);
-      const batchLine = encodeJsonLine(batch);
-      const ledgerPath = this.taskRunFilePath(taskRunId);
-      const manifest = createManifestProjection(
-        nextProjection,
-        statSync(ledgerPath).size + Buffer.byteLength(batchLine),
-        loaded.events.length + entries.length,
+      const insertEvent = this.lease.database.prepare(
+        `INSERT INTO task_run_events (
+           event_id, task_run_id, event_seq, kind, tx_id, payload_json, committed_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       );
-      commitFileTransactionSync(
-        this.storageRoot,
-        {
-          appends: [
-            {
-              relativePath: this.taskRunRelativePath(taskRunId, TASK_RUN_FILE_NAME),
-              content: batchLine,
-            },
-          ],
-          replacements: [
-            {
-              relativePath: this.taskRunRelativePath(taskRunId, TASK_RUN_MANIFEST_FILE_NAME),
-              content: encodeJsonDocument(manifest),
-            },
-          ],
-        },
-        {
-          ...TASK_RUN_TRANSACTION_OPTIONS,
+      for (const entry of entries) {
+        insertEvent.run(
+          entry.event.eventId,
+          taskRunId,
+          entry.sequence,
+          entry.event.kind,
           transactionId,
-        },
-      );
+          canonicalJson(entry.event),
+          entry.committedAt,
+        );
+      }
+      this.lease.database
+        .prepare(
+          `UPDATE task_runs
+           SET last_event_seq = ?, last_tx_id = ?, revision = ?, status = ?, updated_at = ?
+           WHERE task_run_id = ?`,
+        )
+        .run(
+          loaded.events.length + entries.length,
+          transactionId,
+          revision,
+          nextProjection.status,
+          committedAt,
+          taskRunId,
+        );
 
       let newEntryIndex = 0;
       return results.map((result): TaskRunAppendResult => {
@@ -474,15 +347,17 @@ export class TaskRunStore {
   }
 
   async readTaskRunProjection(taskRunId: string): Promise<TaskRunProjection | undefined> {
-    return this.withStoreLock(() => {
+    this.assertOpen();
+    return this.lease.transaction("read", () => {
       const loaded = this.loadTaskRun(taskRunId);
       return loaded ? cloneProjection(loaded.projection) : undefined;
     });
   }
 
-  /** Reads projection and canonical facts under one lock for recovery planning. */
+  /** Reads projection and canonical facts under one read transaction for recovery planning. */
   async readTaskRun(taskRunId: string): Promise<TaskRunSnapshot | undefined> {
-    return this.withStoreLock(() => {
+    this.assertOpen();
+    return this.lease.transaction("read", () => {
       const loaded = this.loadTaskRun(taskRunId);
       return loaded
         ? {
@@ -494,35 +369,32 @@ export class TaskRunStore {
   }
 
   async readTaskRunEvents(taskRunId: string): Promise<readonly TaskRunEventEntry[]> {
-    return this.withStoreLock(() =>
+    this.assertOpen();
+    return this.lease.transaction("read", () =>
       this.requireTaskRun(taskRunId).events.map(({ entry }) => structuredClone(entry)),
     );
   }
 
   async listTaskRunProjections(): Promise<readonly TaskRunProjection[]> {
-    return this.withStoreLock(() =>
+    this.assertOpen();
+    return this.lease.transaction("read", () =>
       this.loadAllTaskRuns().map(({ projection }) => cloneProjection(projection)),
     );
   }
 
   async inspectTaskRuns(): Promise<TaskRunStoreInspection> {
-    return this.withStoreLock(() => {
+    this.assertOpen();
+    return this.lease.transaction("read", () => {
       const loaded = this.loadAllTaskRuns();
       return {
         projections: loaded.map(({ projection }) => cloneProjection(projection)),
-        staleManifestPaths: loaded
-          .filter(
-            ({ manifestStale, projection }) =>
-              manifestStale && this.isTaskRunBoundToStorageRoot(projection),
-          )
-          .map(({ manifestPath }) => manifestPath)
-          .sort(),
+        staleManifestPaths: [],
         storageRootMismatches: loaded
-          .filter(({ projection }) => !this.isTaskRunBoundToStorageRoot(projection))
-          .map(({ projection }) => ({
-            taskRunId: projection.header.taskRunId,
-            ledgerPath: this.taskRunFilePath(projection.header.taskRunId),
-            taskRunStorageRootId: projection.header.storageRootId,
+          .filter(({ header }) => header.storageRootId !== this.storageRootId)
+          .map(({ header }): TaskRunStorageRootMismatch => ({
+            taskRunId: header.taskRunId,
+            ledgerPath: operationalDatabasePath(this.storageRoot),
+            taskRunStorageRootId: header.storageRootId,
             currentStorageRootId: this.storageRootId,
           }))
           .sort((left, right) => left.taskRunId.localeCompare(right.taskRunId)),
@@ -530,48 +402,14 @@ export class TaskRunStore {
     });
   }
 
-  close(): void {
-    // File-backed operations do not retain handles.
+  private assertOpen(): void {
+    if (!this.open) throw new Error("SqliteTaskRunStore is closed");
   }
 
-  private assertWritable(): void {
-    if (this.readOnly) throw new Error("TaskRunStore is read-only");
-  }
-
-  private isTaskRunBoundToStorageRoot(projection: TaskRunProjection): boolean {
-    return this.storageRootId.length > 0 && projection.header.storageRootId === this.storageRootId;
-  }
-
-  private assertTaskRunStorageRoot(projection: TaskRunProjection): void {
-    if (this.isTaskRunBoundToStorageRoot(projection)) return;
+  private assertTaskRunStorageRoot(loaded: LoadedTaskRun): void {
+    if (loaded.header.storageRootId === this.storageRootId) return;
     throw new TaskRunStoreIntegrityError(
-      `TaskRun ${projection.header.taskRunId} storageRootId ${projection.header.storageRootId} does not match the verified workspace root ${this.storageRootId}`,
-    );
-  }
-
-  private async withStoreLock<Result>(operation: () => Result): Promise<Result> {
-    const preLockAssert = () => {
-      if (this.rootIdentity) {
-        assertWorkspaceStorageRootIdentitySync(this.storageRoot, this.rootIdentity);
-      }
-      this.assertTaskRunsBoundary();
-    };
-    return withLedgerStoreLock(
-      {
-        lockDirectory: this.lockDirectory,
-        storageRoot: this.storageRoot,
-        ownerId: this.ownerId,
-        transactionOptions: TASK_RUN_TRANSACTION_OPTIONS,
-        readOnly: this.readOnly,
-        preLockAssert,
-        postLockAssert: preLockAssert,
-        postRecoverAssert: () => this.assertTaskRunsBoundary(),
-        mapError: createFileStorageErrorMapper(
-          TaskRunStoreIntegrityError,
-          "TaskRun",
-        ),
-      },
-      operation,
+      `TaskRun ${loaded.header.taskRunId} storageRootId ${loaded.header.storageRootId} does not match the verified workspace root ${this.storageRootId}`,
     );
   }
 
@@ -584,175 +422,142 @@ export class TaskRunStore {
   }
 
   private loadTaskRun(taskRunId: string): LoadedTaskRun | undefined {
-    this.assertTaskRunDigestBoundary(taskRunDigest(taskRunId));
-    const ledgerPath = this.taskRunFilePath(taskRunId);
-    if (!existsSync(ledgerPath)) return undefined;
-    const header = decodeTaskRunHeader(readFirstJsonLineSync(ledgerPath), ledgerPath);
-    const boundToStorageRoot =
-      this.storageRootId.length > 0 && header.storageRootId === this.storageRootId;
-    const records = readJsonLinesSync(ledgerPath, this.repairIncompleteTails && boundToStorageRoot);
-    if (records.length === 0) {
-      throw new TaskRunStoreIntegrityError(`TaskRun ${taskRunId} ledger is empty`);
-    }
-    if (
-      header.taskRunId !== taskRunId ||
-      taskRunDigest(header.taskRunId) !== taskRunDigest(taskRunId)
-    ) {
-      throw new TaskRunStoreIntegrityError(`TaskRun ${taskRunId} does not match its ledger header`);
+    const row = this.lease.database
+      .prepare(
+        `SELECT task_run_id, work_dir, storage_root_id, adapter_id, adapter_version,
+                adapter_input_json, input_hash, max_attempts, created_at,
+                last_event_seq, last_tx_id, revision, status, updated_at
+         FROM task_runs WHERE task_run_id = ?`,
+      )
+      .get(taskRunId) as Record<string, unknown> | undefined;
+    if (!row) return undefined;
+    const header = decodeTaskRunRowHeader(row, taskRunId);
+    const lastEventSeq = requireNonNegativeInteger(
+      row["last_event_seq"],
+      "last_event_seq",
+      taskRunId,
+    );
+    const revision = requireNonNegativeInteger(row["revision"], "revision", taskRunId);
+    const lastTxId = row["last_tx_id"];
+    if (lastTxId != null && !isNonEmptyString(lastTxId)) {
+      throw new TaskRunStoreIntegrityError(`TaskRun ${taskRunId} last_tx_id is invalid`);
     }
 
+    const eventRows = this.lease.database
+      .prepare(
+        `SELECT event_id, event_seq, kind, tx_id, payload_json, committed_at
+         FROM task_run_events WHERE task_run_id = ? ORDER BY event_seq ASC`,
+      )
+      .all(taskRunId) as Array<Record<string, unknown>>;
     const events: LoadedTaskRunEvent[] = [];
-    const eventIds = new Set<string>();
     const transactions = new Map<string, readonly LoadedTaskRunEvent[]>();
-    for (let index = 1; index < records.length; index++) {
-      const batch = decodeTaskRunEventBatch(records[index], ledgerPath, index + 1);
-      if (transactions.has(batch.txId)) {
+    let currentTxId: string | undefined;
+    let batchRevision = 0;
+    for (const eventRow of eventRows) {
+      const eventId = requireNonEmptyString(eventRow["event_id"], "event_id", taskRunId);
+      const eventSeq = requirePositiveInteger(eventRow["event_seq"], "event_seq", taskRunId);
+      const kind = requireNonEmptyString(eventRow["kind"], "kind", taskRunId);
+      const txId = requireNonEmptyString(eventRow["tx_id"], "tx_id", taskRunId);
+      const committedAt = eventRow["committed_at"];
+      if (!isCanonicalTimestamp(committedAt)) {
         throw new TaskRunStoreIntegrityError(
-          `TaskRun ${taskRunId} transaction ${batch.txId} is duplicated`,
+          `TaskRun ${taskRunId} event ${eventId} committedAt is invalid`,
         );
       }
-      const revision = index;
-      const transactionEvents = batch.entries.map((entry): LoadedTaskRunEvent => {
-        const expectedSequence = events.length + 1;
-        if (entry.sequence !== expectedSequence) {
+      const payloadJson = eventRow["payload_json"];
+      if (typeof payloadJson !== "string") {
+        throw new TaskRunStoreIntegrityError(
+          `TaskRun ${taskRunId} event ${eventId} payload is missing`,
+        );
+      }
+      let decoded: unknown;
+      try {
+        decoded = JSON.parse(payloadJson);
+      } catch {
+        throw new TaskRunStoreIntegrityError(
+          `TaskRun ${taskRunId} event ${eventId} payload is not valid JSON`,
+        );
+      }
+      const event = decodeTaskRunEvent(decoded);
+      if (event.eventId !== eventId) {
+        throw new TaskRunStoreIntegrityError(
+          `TaskRun ${taskRunId} event ${eventId} does not match its payload projection`,
+        );
+      }
+      if (event.kind !== kind) {
+        throw new TaskRunStoreIntegrityError(
+          `TaskRun ${taskRunId} event ${eventId} does not match its kind projection`,
+        );
+      }
+      if (event.taskRunId !== taskRunId) {
+        throw new TaskRunStoreIntegrityError(
+          `TaskRun event ${eventId} belongs to another TaskRun`,
+        );
+      }
+      const expectedSequence = events.length + 1;
+      if (eventSeq !== expectedSequence) {
+        throw new TaskRunStoreIntegrityError(
+          `TaskRun ${taskRunId} sequence ${eventSeq} is not contiguous`,
+        );
+      }
+      if (txId !== currentTxId) {
+        if (transactions.has(txId)) {
           throw new TaskRunStoreIntegrityError(
-            `TaskRun ${taskRunId} sequence ${entry.sequence} is not contiguous`,
+            `TaskRun ${taskRunId} transaction ${txId} is duplicated`,
           );
         }
-        if (entry.event.taskRunId !== taskRunId) {
-          throw new TaskRunStoreIntegrityError(
-            `TaskRun event ${entry.event.eventId} belongs to another TaskRun`,
-          );
-        }
-        if (eventIds.has(entry.event.eventId)) {
-          throw new TaskRunStoreIntegrityError(
-            `TaskRun event ID ${entry.event.eventId} is duplicated in ${taskRunId}`,
-          );
-        }
-        eventIds.add(entry.event.eventId);
-        const persisted = { entry, transactionId: batch.txId, revision };
-        events.push(persisted);
-        return persisted;
-      });
-      transactions.set(batch.txId, transactionEvents);
+        batchRevision += 1;
+        currentTxId = txId;
+        transactions.set(txId, []);
+      }
+      const persisted: LoadedTaskRunEvent = {
+        entry: { sequence: eventSeq, committedAt, event },
+        transactionId: txId,
+        revision: batchRevision,
+      };
+      events.push(persisted);
+      (transactions.get(txId) as LoadedTaskRunEvent[]).push(persisted);
+    }
+    for (const [txId, transactionEvents] of transactions) {
+      assertResumeBatchPairs(
+        transactionEvents.map(({ entry }) => entry.event),
+        `TaskRun ${taskRunId} transaction ${txId}`,
+      );
+    }
+    if (
+      lastEventSeq !== events.length ||
+      revision !== batchRevision ||
+      (events.length > 0 ? lastTxId !== events[events.length - 1]!.transactionId : lastTxId != null)
+    ) {
+      throw new TaskRunStoreIntegrityError(
+        `TaskRun ${taskRunId} watermark does not match its event ledger`,
+      );
     }
 
     const projection = replayProjection(header, events);
-    const derivedManifest = createManifestProjection(
-      projection,
-      statSync(ledgerPath).size,
-      events.length,
-    );
-    const manifestPath = this.taskRunManifestFilePath(taskRunId);
-    let persistedManifest: unknown;
-    if (existsSync(manifestPath)) {
-      try {
-        persistedManifest = readJsonFileSync(manifestPath);
-      } catch (error) {
-        if (!(error instanceof SyntaxError)) throw error;
-      }
+    const status = row["status"];
+    if (status != null && status !== projection.status) {
+      throw new TaskRunStoreIntegrityError(
+        `TaskRun ${taskRunId} status projection does not match its event ledger`,
+      );
     }
-    const manifestStale = !isDeepStrictEqual(persistedManifest, derivedManifest);
-    if (manifestStale && this.repairManifests && boundToStorageRoot) {
-      writeJsonAtomicSync(manifestPath, derivedManifest);
-    }
-    return {
-      projection,
-      events,
-      transactions,
-      manifestPath,
-      manifestStale: manifestStale && !this.repairManifests,
-    };
+    return { header, projection, events, transactions };
   }
 
   private loadAllTaskRuns(): LoadedTaskRun[] {
-    if (!existsSync(this.taskRunsRoot)) return [];
+    const rows = this.lease.database
+      .prepare("SELECT task_run_id FROM task_runs ORDER BY created_at DESC, task_run_id DESC")
+      .all() as Array<Record<string, unknown>>;
     const loaded: LoadedTaskRun[] = [];
-    for (const entry of readdirSync(this.taskRunsRoot, { withFileTypes: true })) {
-      if (!entry.isDirectory() || !TASK_RUN_DIRECTORY_PATTERN.test(entry.name)) {
-        throw new TaskRunStoreIntegrityError(
-          `Unexpected entry in TaskRun storage: ${join(this.taskRunsRoot, entry.name)}`,
-        );
+    for (const row of rows) {
+      const taskRunId = row["task_run_id"];
+      if (!isNonEmptyString(taskRunId)) {
+        throw new TaskRunStoreIntegrityError("TaskRun row has an invalid task_run_id");
       }
-      this.assertTaskRunDigestBoundary(entry.name);
-      const ledgerPath = join(this.taskRunsRoot, entry.name, TASK_RUN_FILE_NAME);
-      if (!existsSync(ledgerPath)) {
-        throw new TaskRunStoreIntegrityError(`TaskRun directory ${entry.name} has no ledger`);
-      }
-      const header = decodeTaskRunHeader(readFirstJsonLineSync(ledgerPath), ledgerPath);
-      if (taskRunDigest(header.taskRunId) !== entry.name) {
-        throw new TaskRunStoreIntegrityError(
-          `TaskRun directory ${entry.name} does not match its ledger header`,
-        );
-      }
-      loaded.push(this.requireTaskRun(header.taskRunId));
+      loaded.push(this.requireTaskRun(taskRunId));
     }
-    return loaded.sort((left, right) => {
-      return (
-        right.projection.header.createdAt.localeCompare(left.projection.header.createdAt) ||
-        right.projection.header.taskRunId.localeCompare(left.projection.header.taskRunId)
-      );
-    });
+    return loaded;
   }
-
-  private taskRunDirectory(taskRunId: string): string {
-    return join(this.taskRunsRoot, taskRunDigest(taskRunId));
-  }
-
-  private assertTaskRunsBoundary(): void {
-    const metadata = lstatIfExists(this.taskRunsRoot);
-    if (!metadata) {
-      if (this.readOnly) return;
-      throw new FileStorageIntegrityError(
-        `TaskRun storage directory disappeared: ${this.taskRunsRoot}`,
-      );
-    }
-    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
-      throw new FileStorageIntegrityError(
-        `TaskRun storage must be a real directory: ${this.taskRunsRoot}`,
-      );
-    }
-  }
-
-  private assertTaskRunDigestBoundary(digest: string): void {
-    this.assertTaskRunsBoundary();
-    const directory = join(this.taskRunsRoot, digest);
-    const directoryMetadata = lstatIfExists(directory);
-    if (!directoryMetadata) return;
-    if (!directoryMetadata.isDirectory() || directoryMetadata.isSymbolicLink()) {
-      throw new FileStorageIntegrityError(
-        `TaskRun directory must be a real directory: ${directory}`,
-      );
-    }
-    for (const fileName of [TASK_RUN_FILE_NAME, TASK_RUN_MANIFEST_FILE_NAME]) {
-      const path = join(directory, fileName);
-      const metadata = lstatIfExists(path);
-      if (metadata && (!metadata.isFile() || metadata.isSymbolicLink())) {
-        throw new FileStorageIntegrityError(`TaskRun data must be a regular file: ${path}`);
-      }
-    }
-  }
-
-  private taskRunFilePath(taskRunId: string): string {
-    return join(this.taskRunDirectory(taskRunId), TASK_RUN_FILE_NAME);
-  }
-
-  private taskRunManifestFilePath(taskRunId: string): string {
-    return join(this.taskRunDirectory(taskRunId), TASK_RUN_MANIFEST_FILE_NAME);
-  }
-
-  private taskRunRelativePath(taskRunId: string, fileName: string): string {
-    return join(TASK_RUNS_DIRECTORY_NAME, taskRunDigest(taskRunId), fileName);
-  }
-}
-
-export function taskRunDigest(taskRunId: string): string {
-  assertNonEmptyIdentifier(taskRunId, "taskRunId");
-  return createHash("sha256").update(taskRunId).digest("hex");
-}
-
-export function hashTaskRunInput(input: Readonly<Record<string, unknown>>): string {
-  return createHash("sha256").update(canonicalJson(input)).digest("hex");
 }
 
 function createTaskRunHeader(
@@ -782,35 +587,53 @@ function createTaskRunHeader(
   };
 }
 
-function decodeTaskRunHeader(value: unknown, path: string): TaskRunFileHeader {
+function decodeTaskRunRowHeader(row: Record<string, unknown>, taskRunId: string): TaskRunFileHeader {
+  const context = `TaskRun ${taskRunId} row`;
   if (
-    !isRecord(value) ||
-    value["type"] !== "task-run" ||
-    value["schemaVersion"] !== TASK_RUN_FILE_SCHEMA_VERSION ||
-    !isNonEmptyString(value["taskRunId"]) ||
-    !isNonEmptyString(value["workDir"]) ||
-    !isNonEmptyString(value["storageRootId"]) ||
-    !isPositiveSafeInteger(value["maxAttempts"]) ||
-    !isCanonicalTimestamp(value["createdAt"])
+    !isNonEmptyString(row["task_run_id"]) ||
+    !isNonEmptyString(row["work_dir"]) ||
+    !isNonEmptyString(row["storage_root_id"]) ||
+    !isNonEmptyString(row["adapter_id"]) ||
+    !isPositiveSafeInteger(row["adapter_version"]) ||
+    !isPositiveSafeInteger(row["max_attempts"]) ||
+    !isCanonicalTimestamp(row["created_at"]) ||
+    !isNonEmptyString(row["input_hash"])
   ) {
-    throw new TaskRunStoreIntegrityError(`TaskRun header is invalid in ${path}`);
+    throw new TaskRunStoreIntegrityError(`${context} header is invalid`);
   }
-  if (canonicalizeWorkspacePath(value["workDir"]) !== value["workDir"]) {
-    throw new TaskRunStoreIntegrityError(`TaskRun header workDir is not canonical in ${path}`);
+  const workDir = row["work_dir"] as string;
+  if (canonicalizeWorkspacePath(workDir) !== workDir) {
+    throw new TaskRunStoreIntegrityError(`${context} workDir is not canonical`);
   }
-  const adapter = decodeTaskAdapter(value["adapter"], `TaskRun header in ${path}`);
-  if (hashTaskRunInput(adapter.input) !== adapter.inputHash) {
-    throw new TaskRunStoreIntegrityError(`TaskRun adapter inputHash is invalid in ${path}`);
+  const inputHash = row["input_hash"] as string;
+  if (!SHA256_PATTERN.test(inputHash)) {
+    throw new TaskRunStoreIntegrityError(`${context} inputHash is invalid`);
+  }
+  if (typeof row["adapter_input_json"] !== "string") {
+    throw new TaskRunStoreIntegrityError(`${context} adapter input is missing`);
+  }
+  let adapterInput: unknown;
+  try {
+    adapterInput = JSON.parse(row["adapter_input_json"] as string);
+  } catch {
+    throw new TaskRunStoreIntegrityError(`${context} adapter input is not valid JSON`);
+  }
+  const adapter = decodeTaskAdapter(
+    { id: row["adapter_id"], version: row["adapter_version"], input: adapterInput, inputHash },
+    `${context} adapter`,
+  );
+  if (hashTaskRunInput(adapter.input) !== inputHash) {
+    throw new TaskRunStoreIntegrityError(`${context} adapter inputHash does not match its input`);
   }
   return {
     type: "task-run",
     schemaVersion: TASK_RUN_FILE_SCHEMA_VERSION,
-    taskRunId: value["taskRunId"],
-    workDir: value["workDir"],
-    storageRootId: value["storageRootId"],
+    taskRunId: row["task_run_id"] as string,
+    workDir,
+    storageRootId: row["storage_root_id"] as string,
     adapter,
-    maxAttempts: value["maxAttempts"],
-    createdAt: value["createdAt"],
+    maxAttempts: row["max_attempts"] as number,
+    createdAt: row["created_at"] as string,
   };
 }
 
@@ -831,45 +654,6 @@ function decodeTaskAdapter(value: unknown, context: string): RecoverableTaskAdap
     version: value["version"],
     input,
     inputHash: value["inputHash"],
-  };
-}
-
-function decodeTaskRunEventBatch(value: unknown, path: string, line: number): TaskRunEventBatch {
-  if (
-    !isRecord(value) ||
-    value["type"] !== "task-event-batch" ||
-    value["schemaVersion"] !== TASK_RUN_FILE_SCHEMA_VERSION ||
-    !isNonEmptyString(value["txId"]) ||
-    !Array.isArray(value["entries"]) ||
-    value["entries"].length === 0
-  ) {
-    throw new TaskRunStoreIntegrityError(`TaskRun event batch at ${path}:${line} is invalid`);
-  }
-  const entries = value["entries"].map((entry, index): TaskRunEventEntry => {
-    if (
-      !isRecord(entry) ||
-      !isPositiveSafeInteger(entry["sequence"]) ||
-      !isCanonicalTimestamp(entry["committedAt"])
-    ) {
-      throw new TaskRunStoreIntegrityError(
-        `TaskRun event batch entry ${index + 1} at ${path}:${line} is invalid`,
-      );
-    }
-    return {
-      sequence: entry["sequence"],
-      committedAt: entry["committedAt"],
-      event: decodeTaskRunEvent(entry["event"]),
-    };
-  });
-  assertResumeBatchPairs(
-    entries.map(({ event }) => event),
-    `TaskRun event batch at ${path}:${line}`,
-  );
-  return {
-    type: "task-event-batch",
-    schemaVersion: TASK_RUN_FILE_SCHEMA_VERSION,
-    txId: value["txId"],
-    entries,
   };
 }
 
@@ -1198,33 +982,11 @@ function decodeTaskSafeBoundary(value: unknown): TaskSafeBoundary {
 }
 
 function decodeLaunchReceipt(value: unknown): RecoverableTaskLaunchReceipt {
-  if (
-    !isRecord(value) ||
-    !hasExactKeys(value, [
-      "launchId",
-      "runId",
-      "runStartedEventId",
-      "runStartedSequence",
-      "schemaVersion",
-      "sessionId",
-    ]) ||
-    value["schemaVersion"] !== RECOVERABLE_TASK_LAUNCH_RECEIPT_SCHEMA_VERSION ||
-    !isNonEmptyString(value["launchId"]) ||
-    !isNonEmptyString(value["sessionId"]) ||
-    !isNonEmptyString(value["runId"]) ||
-    !isNonEmptyString(value["runStartedEventId"]) ||
-    !isPositiveSafeInteger(value["runStartedSequence"])
-  ) {
+  try {
+    return validateRecoverableTaskLaunchReceipt(value);
+  } catch {
     throw new TaskRunStoreIntegrityError("TaskRun launch receipt is invalid");
   }
-  return {
-    schemaVersion: RECOVERABLE_TASK_LAUNCH_RECEIPT_SCHEMA_VERSION,
-    launchId: value["launchId"],
-    sessionId: value["sessionId"],
-    runId: value["runId"],
-    runStartedEventId: value["runStartedEventId"],
-    runStartedSequence: value["runStartedSequence"],
-  };
 }
 
 function replayProjection(
@@ -1728,23 +1490,6 @@ function cloneProjection(projection: TaskRunProjection): TaskRunProjection {
   return structuredClone(projection);
 }
 
-function createManifestProjection(
-  projection: TaskRunProjection,
-  byteLength: number,
-  lastSequence: number,
-): TaskRunManifestProjection {
-  return {
-    type: "task-run-manifest",
-    schemaVersion: TASK_RUN_MANIFEST_SCHEMA_VERSION,
-    projection: cloneProjection(projection),
-    ledger: {
-      byteLength,
-      lastSequence,
-      ...(projection.lastTransactionId ? { lastTxId: projection.lastTransactionId } : {}),
-    },
-  };
-}
-
 function sameImmutableHeader(left: TaskRunFileHeader, right: TaskRunFileHeader): boolean {
   return (
     left.taskRunId === right.taskRunId &&
@@ -1847,6 +1592,31 @@ function assertResumeBatchPairs(events: readonly TaskRunEvent[], context: string
   }
 }
 
+function requireNonEmptyString(
+  value: unknown,
+  field: string,
+  taskRunId: string,
+): string {
+  if (!isNonEmptyString(value)) {
+    throw new TaskRunStoreIntegrityError(`TaskRun ${taskRunId} ${field} is invalid`);
+  }
+  return value;
+}
+
+function requirePositiveInteger(value: unknown, field: string, taskRunId: string): number {
+  if (!isPositiveSafeInteger(value)) {
+    throw new TaskRunStoreIntegrityError(`TaskRun ${taskRunId} ${field} is invalid`);
+  }
+  return value;
+}
+
+function requireNonNegativeInteger(value: unknown, field: string, taskRunId: string): number {
+  if (!isNonNegativeSafeInteger(value)) {
+    throw new TaskRunStoreIntegrityError(`TaskRun ${taskRunId} ${field} is invalid`);
+  }
+  return value;
+}
+
 function canonicalTimestamp(date: Date, field: string): string {
   const value = date.toISOString();
   if (!isCanonicalTimestamp(value)) throw new Error(`TaskRun ${field} is invalid`);
@@ -1897,23 +1667,8 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
-function hasExactKeys(
-  value: Readonly<Record<string, unknown>>,
-  expected: readonly string[],
-): boolean {
-  const actual = Object.keys(value).sort();
-  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
-}
-
-function lstatIfExists(path: string): ReturnType<typeof lstatSync> | undefined {
-  try {
-    return lstatSync(path);
-  } catch (error) {
-    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
-      return undefined;
-    }
-    throw error;
-  }
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function toCanonicalJson(value: unknown): unknown {
@@ -1952,16 +1707,4 @@ function canonicalJson(value: unknown): string {
         `TaskRun JSON contains unsupported ${typeof value} data`,
       );
   }
-}
-
-function encodeJsonLine(value: unknown): string {
-  return `${JSON.stringify(value)}\n`;
-}
-
-function encodeJsonDocument(value: unknown): string {
-  return `${JSON.stringify(value, null, 2)}\n`;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

@@ -6,7 +6,7 @@ import {
   type TranscriptToolCallStatus,
 } from "../presentation/transcript-event-store.js";
 import { hydrateCanonicalTranscriptEvents } from "../presentation/transcript-tool-result-hydration.js";
-import type { RuntimeEventStoreEntry } from "../storage/runtime-event-store.js";
+import type { RuntimeEventStoreEntry } from "../storage/runtime-event-store-contracts.js";
 import {
   projectRuntimeSessionSequencedMessageEntries,
   projectRuntimeSessionState,
@@ -34,6 +34,12 @@ export interface RuntimeTranscriptProjectionOptions {
   readonly limit?: number;
   readonly expectedRevision?: string;
   readonly maxBytes?: number;
+  /**
+   * 源账本水位(票 04):kind 切片读取代全量读后,revision 的
+   * persistenceSequence 不能取切片末条,必须显式传入全会话水位;
+   * 缺省时回退 entries 末条 sequence(全量读口径)。
+   */
+  readonly persistenceSequence?: number;
 }
 
 type RuntimeTranscriptSnapshot = Pick<
@@ -68,7 +74,7 @@ export function projectRuntimeTranscriptEntries(
   const transcript = projectRuntimeSessionTranscriptEventEntries(entries);
   return projectRuntimeTranscript(
     {
-      persistenceSequence: entries.at(-1)?.sequence ?? null,
+      persistenceSequence: options.persistenceSequence ?? entries.at(-1)?.sequence ?? null,
       sessionId,
       messages: messages.map(({ message }) => message),
       messageSequences: messages.map(({ sequence }) => sequence),

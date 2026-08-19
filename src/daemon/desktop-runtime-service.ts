@@ -5,8 +5,8 @@ import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { listRewindPointSummaries } from "../cli/file-history.js";
 import {
   createCliSessionId,
-  findCliSessionSummary,
-  listCliSessionSummaries,
+  findCliSessionCatalogEntry,
+  listCliSessionCatalogEntries,
   removeCliSessionFile,
 } from "../cli/session-resolver.js";
 import { createContextBudget, estimateMessagesTokens } from "../context/context-budget.js";
@@ -18,7 +18,10 @@ import { findAgentProfile, loadAgentCatalog } from "../agents/catalog.js";
 import { ResourceDoctor, renderResourceDoctorReport } from "../diagnostics/resource-doctor.js";
 import { runWorkspaceDoctor } from "../diagnostics/workspace-doctor.js";
 import { SessionForkService } from "../engine/session-fork-service.js";
-import { projectRuntimeSessionActiveToolResultEntries } from "../engine/session-runtime-projection.js";
+import {
+  projectRuntimeSessionActiveToolResultEntries,
+  RUNTIME_TRANSCRIPT_READ_MODEL_EVENT_KINDS,
+} from "../engine/session-runtime-projection.js";
 import { globalSessionManager, Session } from "../engine/session.js";
 import {
   DEFAULT_INTERACTION_MODE,
@@ -94,9 +97,12 @@ import {
   resolvePicoPaths,
 } from "../paths/pico-paths.js";
 import {
-  readExistingRuntimeSessionProjection,
-  RuntimeEventStoreIntegrityError,
-} from "../storage/runtime-event-store.js";
+  readExistingSqliteSessionEventSlice,
+  SqliteRuntimeEventStore,
+  type SqliteSessionCatalogEntry,
+} from "../storage/sqlite/sqlite-runtime-event-store.js";
+import { SqliteRuntimeControlStore } from "../storage/sqlite/sqlite-runtime-control-store.js";
+import { RuntimeEventStoreIntegrityError } from "../storage/runtime-event-store-contracts.js";
 import { RuntimeRun } from "../runtime/runtime-run.js";
 import { AgentRuntime } from "../runtime/agent-runtime.js";
 import { createEngineRuntimePort } from "../runtime/engine-runtime-port-adapter.js";
@@ -108,7 +114,6 @@ import {
   fileHistoryRestoreFile,
   type FileHistoryChanges,
 } from "../safety/file-history.js";
-import { RuntimeStore } from "../tasks/runtime-store.js";
 import type {
   ProviderCallRecord,
   UsageBaselineRecord,
@@ -138,7 +143,6 @@ import type {
   RuntimeNotificationCursor,
   ShutdownOwnershipFence,
 } from "./service.js";
-import { DesktopSessionStateStore } from "./desktop-session-state.js";
 import { DesktopConversationStateStore } from "./desktop-conversation-state.js";
 import type { PlanControlPort } from "./plan-control-port.js";
 import { PlanCoordinator } from "../plan/coordinator.js";
@@ -234,7 +238,6 @@ export interface DesktopRuntimeServiceOptions {
   readonly runtimeService: WorkspaceRuntimeService;
   readonly registrationStore?: WorkspaceRegistrationStore;
   readonly trustStore?: WorkspaceTrustStore;
-  readonly sessionStateStore?: DesktopSessionStateStore;
   readonly conversationStateStore?: DesktopConversationStateStore;
   readonly interactions?: DesktopRuntimeInteractions;
   readonly planControl?: PlanControlPort;
@@ -295,7 +298,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private readonly userConfigRevisionTokenKey = randomBytes(32);
   private readonly registrationStore: WorkspaceRegistrationStore;
   private readonly trustStore: WorkspaceTrustStore;
-  private readonly sessionStateStore: DesktopSessionStateStore;
   private readonly conversationStateStore: DesktopConversationStateStore;
   private readonly env: Readonly<Record<string, string | undefined>>;
   private readonly picoHome: string;
@@ -344,11 +346,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       new WorkspaceRegistrationStore(join(this.picoHome, "daemon-workspaces.json"));
     this.trustStore =
       options.trustStore ?? new WorkspaceTrustStore({ userStateDirectory: this.picoHome });
-    this.sessionStateStore =
-      options.sessionStateStore ??
-      new DesktopSessionStateStore({
-        picoHome: this.picoHome,
-      });
     this.conversationStateStore =
       options.conversationStateStore ??
       new DesktopConversationStateStore({ picoHome: this.picoHome });
@@ -880,12 +877,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private async listSessions(workspacePath: string, includeArchived = false): Promise<JsonValue> {
     const canonical = await canonicalizeWorkspacePath(workspacePath);
-    const metadata = await this.sessionStateStore.list(canonical);
-    const summaries = await listCliSessionSummaries(canonical, { picoHome: this.picoHome });
-    const metadataById = new Map(metadata.map((entry) => [entry.sessionId, entry]));
-    const sessions = summaries
-      .map((summary) => sessionPayload(summary, metadataById.get(summary.id)))
-      .filter((session) => includeArchived || session.status !== "archived");
+    // 归档/置顶已并入 sessions 表(catalog 投影行),desktop session-state.json 退役。
+    const entries = await listCliSessionCatalogEntries(canonical, { picoHome: this.picoHome });
+    const sessions = entries
+      .filter((entry) => includeArchived || !entry.isArchived)
+      .map((entry) => sessionPayload(entry));
     return { sessions };
   }
 
@@ -931,7 +927,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   ): Promise<JsonValue> {
     const canonical = await canonicalizeWorkspacePath(workspacePath);
     await this.requireSession(canonical, sessionId);
-    await this.sessionStateStore.update(canonical, sessionId, { archived });
+    await this.withWorkspaceSessionStore(canonical, (store) =>
+      store.setSessionArchived(sessionId, archived, this.now),
+    );
     const session = await this.requireSession(canonical, sessionId);
     this.publishSession(session);
     return { session };
@@ -944,7 +942,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   ): Promise<JsonValue> {
     const canonical = await canonicalizeWorkspacePath(workspacePath);
     await this.requireSession(canonical, sessionId);
-    await this.sessionStateStore.update(canonical, sessionId, { pinned });
+    await this.withWorkspaceSessionStore(canonical, (store) =>
+      store.setSessionPinned(sessionId, pinned, this.now),
+    );
     const session = await this.requireSession(canonical, sessionId);
     this.publishSession(session);
     return { session };
@@ -964,7 +964,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       await managed?.close();
       await Promise.all([
         removeCliSessionFile(canonical, sessionId, { picoHome: this.picoHome }),
-        this.sessionStateStore.remove(canonical, sessionId),
         this.conversationStateStore.clearQueued(canonical, sessionId),
       ]);
     } catch (error) {
@@ -1256,7 +1255,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       const active = effective.router.providerConfig(settings.modelRouteId);
       const pluginSnapshot = await this.pluginRuntimeSnapshotRegistry.get(canonical);
       const pluginActivationScope = new PluginCapabilityActivationScope();
-      let ledger: RuntimeStore | undefined;
+      let ledger: SqliteRuntimeControlStore | undefined;
       let compactResult:
         | { readonly beforeMessageCount: number; readonly afterMessageCount: number }
         | undefined;
@@ -1268,9 +1267,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           this.providerFactory(active.provider, active.config),
           pluginActivationScope,
         );
-        ledger = new RuntimeStore({
-          workDir: canonical,
-          picoHome: this.picoHome,
+        ledger = new SqliteRuntimeControlStore({
+          storageRoot: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
           now: this.now,
         });
         const runtimeCapability = session.runtimeEventCapability;
@@ -1619,17 +1617,20 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const canonical = await canonicalizeWorkspacePath(params.workspacePath);
     await this.transcriptPersistenceTail;
     const session = await this.requireSession(canonical, params.sessionId);
-    const projection = await readExistingRuntimeSessionProjection({
+    // 票 04:transcript 深读改 kind 切片(读模型只消费 message/tool-result/
+    // transcript/state 五类事件),不再全量投影;revision 水位显式传全会话 headSequence。
+    const sliceSnapshot = await readExistingSqliteSessionEventSlice({
       storageRoot: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
       sessionId: params.sessionId,
+      kinds: RUNTIME_TRANSCRIPT_READ_MODEL_EVENT_KINDS,
     });
-    if (!projection) {
+    if (!sliceSnapshot) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.NOT_FOUND,
         `Session ${params.sessionId} 不存在于工作区 ${canonical}`,
       );
     }
-    if (projection.manifest.workDir !== manifestWorkspaceForm(canonical)) {
+    if (sliceSnapshot.manifest.workDir !== manifestWorkspaceForm(canonical)) {
       throw new RuntimeEventStoreIntegrityError(
         `Runtime session ${params.sessionId} belongs to another workspace`,
       );
@@ -1659,9 +1660,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     }
     let page;
     try {
-      page = projectRuntimeTranscriptEntries(params.sessionId, projection.entries, {
+      page = projectRuntimeTranscriptEntries(params.sessionId, sliceSnapshot.slice.entries, {
         ...params,
         maxBytes: transcriptBudget,
+        persistenceSequence: sliceSnapshot.slice.headSequence,
       });
     } catch (error) {
       if (error instanceof TranscriptRevisionConflict) {
@@ -1701,11 +1703,17 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   ): Promise<JsonValue> {
     const canonical = await canonicalizeWorkspacePath(params.workspacePath);
     await this.requireSession(canonical, params.sessionId);
-    const projection = await readExistingRuntimeSessionProjection({
+    // 票 04:evidence 授权点查只消费 tool.result.recorded(跨可见度的 active
+    // ToolResult 投影),kind 切片 + manifest,不再全量投影。
+    const sliceSnapshot = await readExistingSqliteSessionEventSlice({
       storageRoot: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
       sessionId: params.sessionId,
+      kinds: ["tool.result.recorded"],
     });
-    if (!projection || projection.manifest.workDir !== manifestWorkspaceForm(canonical)) {
+    if (
+      !sliceSnapshot ||
+      sliceSnapshot.manifest.workDir !== manifestWorkspaceForm(canonical)
+    ) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.NOT_FOUND,
         `Session ${params.sessionId} 不属于工作区 ${canonical}`,
@@ -1723,7 +1731,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     }
     // Fork 会保留 source-session Evidence ref。授权边界不是 URI 内的 sessionId，
     // 而是当前 active branch 是否确实包含引用它的 canonical ToolResult。
-    const reference = projectRuntimeSessionActiveToolResultEntries(projection.entries)
+    const reference = projectRuntimeSessionActiveToolResultEntries(sliceSnapshot.slice.entries)
       .map(({ envelope }) => envelope.evidence?.ref)
       .find(
         (candidate) =>
@@ -2023,16 +2031,31 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   }
 
   private async requireSession(workspacePath: string, sessionId: string): Promise<JsonValue> {
-    const summary = await findCliSessionSummary(workspacePath, sessionId, {
+    const entry = await findCliSessionCatalogEntry(workspacePath, sessionId, {
       picoHome: this.picoHome,
     });
-    if (!summary) {
+    if (!entry) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.NOT_FOUND,
         `Session ${sessionId} 不存在于工作区 ${workspacePath}`,
       );
     }
-    return sessionPayload(summary, await this.sessionStateStore.get(workspacePath, sessionId));
+    return sessionPayload(entry);
+  }
+
+  /** 归档/置顶等 sessions 表级写:短生命周期打开 workspace 级 SqliteRuntimeEventStore。 */
+  private async withWorkspaceSessionStore<Result>(
+    workspacePath: string,
+    write: (store: SqliteRuntimeEventStore) => Result | Promise<Result>,
+  ): Promise<Result> {
+    const store = new SqliteRuntimeEventStore({
+      storageRoot: resolvePicoPaths(workspacePath, { picoHome: this.picoHome }).workspace.root,
+    });
+    try {
+      return await write(store);
+    } finally {
+      store.close();
+    }
   }
 
   private async getConfig(workspacePath: string): Promise<JsonValue> {
@@ -3223,7 +3246,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         "usage.get 的 from 不能晚于 to",
       );
     }
-    const store = new RuntimeStore({ workDir: canonical, picoHome: this.picoHome });
+    const store = new SqliteRuntimeControlStore({
+      storageRoot: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
+    });
     try {
       const filter = params.sessionId ? { sessionId: params.sessionId } : {};
       const calls = store
@@ -4161,18 +4186,16 @@ function desktopRunStartIdempotencyKey(source: "send" | "queue", key: string): s
   return `desktop-${source}-run:${digest}`;
 }
 
-function sessionPayload(
-  summary: Awaited<ReturnType<typeof listCliSessionSummaries>>[number],
-  metadata: Awaited<ReturnType<DesktopSessionStateStore["get"]>>,
-): JsonObject {
+function sessionPayload(entry: SqliteSessionCatalogEntry): JsonObject {
+  const summary = entry.summary;
   return {
     sessionId: summary.id,
     workspacePath: summary.cwd,
     title: summary.title ?? summary.firstMessage ?? "未命名会话",
-    status: metadata?.archivedAt === undefined ? "active" : "archived",
-    pinned: metadata?.pinnedAt !== undefined,
+    status: entry.isArchived ? "archived" : "active",
+    pinned: entry.isPinned,
     createdAt: summary.createdAt.getTime(),
-    updatedAt: Math.max(summary.updatedAt.getTime(), metadata?.updatedAt ?? 0),
+    updatedAt: summary.updatedAt.getTime(),
     ...(summary.messageCount !== undefined ? { messageCount: summary.messageCount } : {}),
     ...(summary.lastMessage ? { lastMessage: summary.lastMessage } : {}),
     ...(summary.forkFrom ? { forkFrom: summary.forkFrom } : {}),

@@ -2,9 +2,13 @@ import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { resolvePicoHome, resolvePicoPaths, type PicoWorkspacePaths } from "../paths/pico-paths.js";
-import { RuntimeEventStore } from "../storage/runtime-event-store.js";
+import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 import { sessionOwnerLeaseDirectory } from "../storage/session-owner-lease.js";
-import { fileHistoryCloneSession, fileHistoryDefaultBaseDir } from "../safety/file-history.js";
+import {
+  fileHistoryCloneSession,
+  fileHistoryDefaultBaseDir,
+  type FileHistoryIo,
+} from "../safety/file-history.js";
 import type { Message } from "../schema/message.js";
 import { readVersionedJson, writeJsonAtomic } from "../storage/atomic-json.js";
 import {
@@ -80,7 +84,7 @@ export interface SessionForkServiceOptions {
   readonly picoHome?: string;
   readonly sessionManager?: SessionManager;
   readonly journal?: StorageOperationJournal;
-  readonly runtimeStore?: RuntimeEventStore;
+  readonly runtimeStore?: SqliteRuntimeEventStore;
   readonly fileHistoryBaseDir?: string;
   readonly hooks?: SessionForkServiceHooks;
   readonly createOperationId?: () => string;
@@ -154,8 +158,9 @@ export class SessionForkService {
   private readonly picoHome: string;
   private readonly workspacePaths: PicoWorkspacePaths;
   private readonly sessionManager: SessionManager;
-  private readonly runtimeStore: RuntimeEventStore;
-  private readonly fileHistoryBaseDir: string;
+  private readonly runtimeStore: SqliteRuntimeEventStore;
+  private readonly ownsRuntimeStore: boolean;
+  private readonly fileHistoryIo: FileHistoryIo;
   private readonly hooks?: SessionForkServiceHooks;
   private readonly createOperationId: () => string;
   private readonly runtimePort: SessionForkRuntimePort;
@@ -171,10 +176,15 @@ export class SessionForkService {
       options.journal ??
       new StorageOperationJournal({ workDir: this.workDir, picoHome: this.picoHome });
     this.runtimeStore =
-      options.runtimeStore ?? new RuntimeEventStore({ storageRoot: this.workspacePaths.root });
-    this.fileHistoryBaseDir =
-      options.fileHistoryBaseDir ??
-      (options.picoHome ? paths.home.fileHistory : fileHistoryDefaultBaseDir());
+      options.runtimeStore ?? new SqliteRuntimeEventStore({ storageRoot: this.workspacePaths.root });
+    this.ownsRuntimeStore = options.runtimeStore === undefined;
+    this.fileHistoryIo = {
+      baseDir:
+        options.fileHistoryBaseDir ??
+        (options.picoHome ? paths.home.fileHistory : fileHistoryDefaultBaseDir()),
+      // manifest 行与 RuntimeEvent/journal 同库(票 08 方案 a)。
+      storageRoot: this.workspacePaths.root,
+    };
     this.hooks = options.hooks;
     this.createOperationId = options.createOperationId ?? randomUUID;
     this.runtimePort = options.runtimePort;
@@ -186,13 +196,21 @@ export class SessionForkService {
     });
   }
 
+  /**
+   * 归还自建的 runtime store lease(SQLite 纪元:连接句柄随 lease 存活,
+   * 短生命周期调用方——如启动期 fork 恢复——必须显式关闭;注入的 store
+   * 归调用方所有,不在此释放)。
+   */
+  close(): void {
+    if (this.ownsRuntimeStore) this.runtimeStore.close();
+  }
+
   async fork(input: ForkSessionInput): Promise<ForkSessionResult> {
     assertSafeSessionId(input.sourceSessionId);
     assertSafeSessionId(input.targetSessionId);
     if (input.sourceSessionId === input.targetSessionId) {
       throw new Error("Fork source 与 target sessionId 不能相同");
-    }
-    const source = await this.sessionManager.getOrCreate(input.sourceSessionId, this.workDir, {
+    }    const source = await this.sessionManager.getOrCreate(input.sourceSessionId, this.workDir, {
       persistence: true,
       picoHome: this.picoHome,
       runtimePort: this.runtimePort.engineRuntimePort,
@@ -343,7 +361,7 @@ export class SessionForkService {
       await fileHistoryCloneSession(
         operation.sourceSessionId,
         operation.targetSessionId,
-        this.fileHistoryBaseDir,
+        this.fileHistoryIo,
       );
     } catch (error) {
       throw new ForkOperationConflictError(
@@ -678,11 +696,16 @@ export async function reconcileUnfinishedSessionForks(
   },
 ): Promise<ForkReconciliationResult[]> {
   const { picoHome, ...reconciliation } = options;
-  return new SessionForkService({
+  const service = new SessionForkService({
     workDir,
     picoHome,
     runtimePort: options.runtimePort,
-  }).reconcileUnfinished(reconciliation);
+  });
+  try {
+    return await service.reconcileUnfinished(reconciliation);
+  } finally {
+    service.close();
+  }
 }
 
 export async function reconcileUnfinishedSessionForksOrThrow(
@@ -1084,7 +1107,7 @@ function runtimeStateEventId(operationId: string): string {
 }
 
 async function resolveFrozenSourceThroughEventId(
-  store: RuntimeEventStore,
+  store: SqliteRuntimeEventStore,
   frozen: FrozenForkBundle,
 ): Promise<string | undefined> {
   const entries = await store.readSessionEntries(frozen.sourceSessionId);
@@ -1143,7 +1166,7 @@ function assertSafeSessionId(sessionId: string): void {
 }
 
 async function assertTargetNotPublished(
-  runtimeStore: RuntimeEventStore,
+  runtimeStore: SqliteRuntimeEventStore,
   targetSessionId: string,
 ): Promise<void> {
   if (await runtimeStore.readSessionManifest(targetSessionId)) {

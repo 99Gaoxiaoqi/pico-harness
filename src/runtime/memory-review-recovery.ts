@@ -1,13 +1,10 @@
 import { resolve } from "node:path";
 import { setImmediate as yieldToHost } from "node:timers/promises";
 import type { Message } from "../schema/message.js";
-import type { RuntimeEventStoreEntry } from "../storage/runtime-event-store.js";
-import {
-  RUNTIME_EVENT_STORE_MAX_PAGE_SIZE,
-  RuntimeEventStore,
-} from "../storage/runtime-event-store.js";
+import type { RuntimeEventStoreEntry } from "../storage/runtime-event-store-contracts.js";
 import type { MemoryReviewSchedulerPort } from "../memory/runtime-scheduler.js";
 import type { TerminalMemoryEvidenceRef } from "../memory/proposal-contracts.js";
+import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 
 export interface RecoverMemoryReviewJobsInput {
   readonly runtimeStorageRoot: string;
@@ -73,7 +70,7 @@ export function recoverMemoryReviewJobs(input: RecoverMemoryReviewJobsInput): Pr
 }
 
 async function scanRuntimeLedger(input: RecoverMemoryReviewJobsInput): Promise<number> {
-  const store = new RuntimeEventStore({ storageRoot: input.runtimeStorageRoot });
+  const store = new SqliteRuntimeEventStore({ storageRoot: input.runtimeStorageRoot });
   let recovered = 0;
   try {
     const upperBound = await store.getSessionManifestScanUpperBound();
@@ -111,31 +108,32 @@ async function scanRuntimeLedger(input: RecoverMemoryReviewJobsInput): Promise<n
 }
 
 /**
- * Reads the canonical completed-turn {@link TerminalMemoryEvidenceRef}s for one Session by replaying
- * its RuntimeEvent ledger through the same compact projection used by the daemon.
+ * Reads the canonical completed-turn {@link TerminalMemoryEvidenceRef}s for one Session.
+ *
+ * Query-based (票 07):terminal 事件经 kind 索引一次取出;每个 completed terminal
+ * 用 run 索引做三次有界查询(run.started 定界、run 内模型消息、必要时 run 前
+ * 最近一条桌面输入),不再全量重放会话账本。"什么是一个完成的 turn" 的定义与
+ * 旧 CompactRecoveryProjection 逐事件重放完全一致:
+ * - run.started 时刻捕获 priorDesktopEvidence(run 前最后一条模型消息携带的
+ *   desktop_user_input;displayText 之外的消息会清除该状态);
+ * - run 内首条合格直述用户消息(directUser)优��于 priorDesktopEvidence;
+ * - terminal 必须为 completed 且非 recovered,且 run 内出现过 assistant 消息。
  *
  * Shared by crash-recovery (`recoverMemoryReviewJobs`) and Memory derived-layer rebuild
- * (`rebuildDerivedFromRuntimeEvent`) so both paths converge on the same "what is a completed turn?"
- * definition. The result is the canonical set of terminals whose extraction Jobs are eligible.
+ * (`rebuildDerivedFromRuntimeEvent`) so both paths converge on the same definition.
  */
 export async function readCanonicalRecoveryRefs(
-  store: RuntimeEventStore,
+  store: SqliteRuntimeEventStore,
   sessionId: string,
 ): Promise<TerminalMemoryEvidenceRef[]> {
-  const projection = new CompactRecoveryProjection(sessionId);
-  let afterSequence = 0;
-  while (true) {
-    const entries = await store.readSessionEntriesPage(sessionId, {
-      afterSequence,
-      limit: RUNTIME_EVENT_STORE_MAX_PAGE_SIZE,
-    });
-    if (entries.length === 0) break;
-    for (const entry of entries) projection.append(entry);
-    afterSequence = entries.at(-1)!.sequence;
-    await yieldToHost();
-    if (entries.length < RUNTIME_EVENT_STORE_MAX_PAGE_SIZE) break;
+  const terminals = await store.readSessionEventsByKind(sessionId, "run.terminal");
+  const refs: TerminalMemoryEvidenceRef[] = [];
+  for (const [index, terminal] of terminals.entries()) {
+    const ref = await resolveCompletedTerminalRef(store, sessionId, terminal);
+    if (ref) refs.push(ref);
+    if ((index + 1) % RECOVERY_ENQUEUE_BATCH_SIZE === 0) await yieldToHost();
   }
-  return projection.refs();
+  return refs;
 }
 
 interface CompactEvidence {
@@ -143,88 +141,77 @@ interface CompactEvidence {
   readonly content: string;
 }
 
-interface CompactRunState {
-  readonly priorDesktopEvidence?: CompactEvidence;
-  readonly directUser?: CompactEvidence;
-  readonly hasAssistantResponse: boolean;
-}
-
-interface RecoveryRefNode {
-  readonly ref: TerminalMemoryEvidenceRef;
-  readonly previous?: RecoveryRefNode;
+async function resolveCompletedTerminalRef(
+  store: SqliteRuntimeEventStore,
+  sessionId: string,
+  terminalEntry: RuntimeEventStoreEntry,
+): Promise<TerminalMemoryEvidenceRef | undefined> {
+  const terminal = terminalEntry.event;
+  if (terminal.kind !== "run.terminal") return undefined;
+  if (terminal.data.status !== "completed" || terminal.data.recovered === true) return undefined;
+  // 旧投影只认 run.started 之后进入 runs 表的 run;取 terminal 前最后一条 run.started。
+  const startedEntries = await store.readSessionEventsForRun(sessionId, terminal.runId, {
+    kind: "run.started",
+    beforeSequence: terminalEntry.sequence,
+    order: "desc",
+    limit: 1,
+  });
+  const startedEntry = startedEntries[0];
+  if (!startedEntry) return undefined;
+  const runMessages = await store.readSessionEventsForRun(sessionId, terminal.runId, {
+    kind: "message.committed",
+    afterSequence: startedEntry.sequence,
+    beforeSequence: terminalEntry.sequence,
+    modelOnly: true,
+  });
+  let directUser: CompactEvidence | undefined;
+  let hasAssistantResponse = false;
+  for (const { event } of runMessages) {
+    if (event.kind !== "message.committed") continue;
+    const message = event.data.message;
+    if (
+      directUser === undefined &&
+      message.role === "user" &&
+      message.toolCallId === undefined &&
+      message.providerData?.["picoKind"] === undefined &&
+      message.providerData?.["picoHiddenFromTranscript"] !== true
+    ) {
+      directUser = { eventId: event.eventId, content: message.content };
+    }
+    if (message.role === "assistant") hasAssistantResponse = true;
+  }
+  if (!hasAssistantResponse) return undefined;
+  const evidence = directUser ?? (await readPriorDesktopEvidence(store, sessionId, startedEntry.sequence));
+  if (!evidence) return undefined;
+  return {
+    sessionId,
+    runId: terminal.runId,
+    terminalEventId: terminal.eventId,
+    userMessageEventId: evidence.eventId,
+    terminalSequence: terminalEntry.sequence,
+  };
 }
 
 /**
- * Compact projection that retains only active runs and accumulated evidence refs as the
- * RuntimeEvent ledger is replayed. The destructive rewind/branch snapshot-restore logic that
- * previously lived here has been removed (rewind is now a non-destructive fork).
+ * run.started 之前最后一条模型消息:若它是合格 desktop_user_input(与投影内
+ * strictDesktopInputText 同口径)则为 priorDesktopEvidence,否则该状态被清除。
  */
-class CompactRecoveryProjection {
-  private latestDesktopEvidence: CompactEvidence | undefined;
-  private runs = new Map<string, CompactRunState>();
-  private refsTail: RecoveryRefNode | undefined;
-
-  constructor(private readonly sessionId: string) {}
-
-  append(entry: RuntimeEventStoreEntry): void {
-    const { event } = entry;
-    if (event.kind === "run.started") {
-      this.runs.set(event.runId, {
-        ...(this.latestDesktopEvidence ? { priorDesktopEvidence: this.latestDesktopEvidence } : {}),
-        hasAssistantResponse: false,
-      });
-    } else if (isModelMessage(entry) && event.kind === "message.committed") {
-      const current = this.runs.get(event.runId);
-      if (current) {
-        const directUser =
-          current.directUser ??
-          (isModelUserMessage(entry) &&
-          event.data.message.providerData?.["picoKind"] === undefined &&
-          event.data.message.providerData?.["picoHiddenFromTranscript"] !== true
-            ? { eventId: event.eventId, content: event.data.message.content }
-            : undefined);
-        this.runs.set(event.runId, {
-          ...(current.priorDesktopEvidence
-            ? { priorDesktopEvidence: current.priorDesktopEvidence }
-            : {}),
-          ...(directUser ? { directUser } : {}),
-          hasAssistantResponse:
-            current.hasAssistantResponse || event.data.message.role === "assistant",
-        });
-      }
-      const desktopContent = strictDesktopInputText(event.data.message);
-      this.latestDesktopEvidence = desktopContent
-        ? { eventId: event.eventId, content: desktopContent }
-        : undefined;
-    } else if (event.kind === "run.terminal") {
-      const run = this.runs.get(event.runId);
-      if (
-        run?.hasAssistantResponse &&
-        event.data.status === "completed" &&
-        event.data.recovered !== true
-      ) {
-        const evidence = run.directUser ?? run.priorDesktopEvidence;
-        if (evidence) {
-          const ref: TerminalMemoryEvidenceRef = {
-            sessionId: this.sessionId,
-            runId: event.runId,
-            terminalEventId: event.eventId,
-            userMessageEventId: evidence.eventId,
-            terminalSequence: entry.sequence,
-          };
-          this.refsTail = { ref, ...(this.refsTail ? { previous: this.refsTail } : {}) };
-        }
-      }
-      // A terminal Run can no longer receive canonical messages.
-      this.runs.delete(event.runId);
-    }
-  }
-
-  refs(): TerminalMemoryEvidenceRef[] {
-    const reversed: TerminalMemoryEvidenceRef[] = [];
-    for (let node = this.refsTail; node; node = node.previous) reversed.push(node.ref);
-    return reversed.reverse();
-  }
+async function readPriorDesktopEvidence(
+  store: SqliteRuntimeEventStore,
+  sessionId: string,
+  startedSequence: number,
+): Promise<CompactEvidence | undefined> {
+  if (startedSequence <= 1) return undefined;
+  const entries = await store.readSessionEventsByKind(sessionId, "message.committed", {
+    upToSequence: startedSequence - 1,
+    order: "desc",
+    limit: 1,
+    modelOnly: true,
+  });
+  const entry = entries[0];
+  if (!entry || entry.event.kind !== "message.committed") return undefined;
+  const content = strictDesktopInputText(entry.event.data.message);
+  return content ? { eventId: entry.event.eventId, content } : undefined;
 }
 
 export function findPrecommittedDesktopMemoryEvidence(
@@ -243,15 +230,6 @@ export function findPrecommittedDesktopMemoryEvidence(
   if (latestModelMessage?.event.kind !== "message.committed") return undefined;
   const content = strictDesktopInputText(latestModelMessage.event.data.message, prompt);
   return content ? { eventId: latestModelMessage.event.eventId, content } : undefined;
-}
-
-function isModelUserMessage(entry: RuntimeEventStoreEntry): boolean {
-  return (
-    isModelMessage(entry) &&
-    entry.event.kind === "message.committed" &&
-    entry.event.data.message.role === "user" &&
-    entry.event.data.message.toolCallId === undefined
-  );
 }
 
 function isModelMessage(entry: RuntimeEventStoreEntry): boolean {

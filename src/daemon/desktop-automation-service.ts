@@ -15,7 +15,7 @@ import {
   filterBackgroundEligibleTools,
 } from "../safety/background-yolo-policy.js";
 import { CronService } from "../tasks/cron-service.js";
-import { RuntimeConflictError } from "../tasks/runtime-store.js";
+import { RuntimeConflictError } from "../storage/sqlite/sqlite-runtime-control-store.js";
 import type { CronJobRecord, CronRunRecord, YoloPolicySnapshot } from "../tasks/runtime-types.js";
 import {
   RUNTIME_ERROR_CODES,

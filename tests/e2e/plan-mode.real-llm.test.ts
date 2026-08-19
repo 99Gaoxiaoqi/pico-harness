@@ -1,3 +1,4 @@
+import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -15,7 +16,7 @@ import {
   type RunAgentCliOptions,
 } from "../../src/runtime/agent-runtime.js";
 import type { RuntimeEvent } from "../../src/storage/runtime-event.js";
-import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
+
 import { AskUserHandler } from "../../src/tools/ask-user.js";
 import { configuredUserDefaultRealModel, type RealModel } from "./real-llm-user-model.js";
 
@@ -367,7 +368,7 @@ async function cleanupSandbox(sandbox: TestSandbox): Promise<void> {
 }
 
 async function readRuntimeEvents(sandbox: TestSandbox): Promise<RuntimeEvent[]> {
-  const store = new RuntimeEventStore({
+  const store = new SqliteRuntimeEventStore({
     storageRoot: resolvePicoPaths(sandbox.workDir, { picoHome: sandbox.picoHome }).workspace.root,
   });
   try {

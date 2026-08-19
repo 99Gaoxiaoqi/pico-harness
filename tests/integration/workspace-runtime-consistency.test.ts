@@ -14,7 +14,8 @@ import {
   WorkspaceRuntimeService,
 } from "../../src/daemon/index.js";
 import type { WorkspaceTaskRuntime } from "../../src/runtime/workspace-runtime.js";
-import { RuntimeStore } from "../../src/tasks/runtime-store.js";
+import { SqliteRuntimeControlStore } from "../../src/storage/sqlite/sqlite-runtime-control-store.js";
+import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { TaskHostRuntime } from "../../src/tasks/task-runtime.js";
 import { DesktopRuntimeService } from "../../src/daemon/desktop-runtime-service.js";
 
@@ -315,9 +316,9 @@ test(
 test("Run projection and Runtime event roll back together when event append fails", async (context) => {
   const fixture = await createFixture("atomic-run-event");
   const canonicalWorkspace = await realpath(fixture.workspace);
-  const store = new RuntimeStore({
-    workDir: canonicalWorkspace,
-    picoHome: fixture.picoHome,
+  const store = new SqliteRuntimeControlStore({
+    storageRoot: resolvePicoPaths(canonicalWorkspace, { picoHome: fixture.picoHome }).workspace
+      .root,
     now: () => 2_000,
   });
   context.after(async () => {
@@ -504,9 +505,11 @@ test(
   async (context) => {
     const fixture = await createFixture("recovery-event");
     const canonicalWorkspace = await realpath(fixture.workspace);
-    const seed = new RuntimeStore({
-      workDir: canonicalWorkspace,
-      picoHome: fixture.picoHome,
+    // SQLite 纪元:崩溃残留用 SqliteRuntimeControlStore 播种(旧 RuntimeStore
+    // 会在同一根上建 legacy .storage/ 目录,触发新纪元 fail-closed 门禁)。
+    const seed = new SqliteRuntimeControlStore({
+      storageRoot: resolvePicoPaths(canonicalWorkspace, { picoHome: fixture.picoHome }).workspace
+        .root,
       now: () => 1_000,
     });
     seed.upsertDaemonRun({

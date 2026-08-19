@@ -23,7 +23,8 @@ import {
   deriveRecoverableTaskRuntimeLaunchIdentity,
   type RecoverableTaskResumeContext,
 } from "../../src/tasks/recoverable-task.js";
-import { readWorkspaceStorageRootIdentitySync } from "../../src/storage/workspace-storage-layout.js";
+import { readWorkspaceSqliteStorageRootIdentitySync } from "../../src/storage/sqlite/sqlite-workspace-storage.js";
+import { ALL_WORKSPACE_SQLITE_SCOPES } from "../../src/storage/sqlite/workspace-scopes.js";
 
 test("core Agent adapter reuses one deterministic admission and never synthesizes a user prompt", async (context) => {
   const fixture = await createFixture(context, "cold-continuation");
@@ -340,7 +341,7 @@ async function createFixture(context: test.TestContext, suffix: string): Promise
     sourceTerminal?.event.kind === "run.terminal" ? sourceTerminal.event.data.status : undefined,
     "interrupted",
   );
-  const rootIdentity = readWorkspaceStorageRootIdentitySync(store.storageRoot);
+  const rootIdentity = readWorkspaceSqliteStorageRootIdentitySync(store.storageRoot, ALL_WORKSPACE_SQLITE_SCOPES);
   assert.ok(rootIdentity);
 
   const taskRunId = `task-run:${suffix}`;

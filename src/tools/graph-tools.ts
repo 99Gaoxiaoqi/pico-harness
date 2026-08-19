@@ -8,9 +8,9 @@ import {
   type GraphWork,
 } from "../graph/contract.js";
 import { computeReadyWorks, hasPendingWorks, missingInputIdsFor } from "../graph/graph-reconcile.js";
-import { projectGraphEntries } from "../graph/graph-reducer.js";
+import { GRAPH_EVENT_KINDS, projectGraphEntries } from "../graph/graph-reducer.js";
 import { RUNTIME_EVENT_SCHEMA_VERSION, type RuntimeEvent } from "../engine/session-runtime-event.js";
-import type { RuntimeEventStore } from "../storage/runtime-event-store.js";
+import type { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 import type { ToolDefinition } from "../schema/message.js";
 import { ToolAccesses } from "./tool-access.js";
 import type { BaseTool, ToolExecutionContext } from "./registry.js";
@@ -39,7 +39,7 @@ function stableJson(value: unknown): string {
 
 /** Context shared by all three Graph Mode tools for one active graph. */
 export interface GraphToolContext {
-  readonly store: RuntimeEventStore;
+  readonly store: SqliteRuntimeEventStore;
   readonly sessionId: string;
   readonly graphId: string;
   readonly invocationId: string;
@@ -81,8 +81,12 @@ function graphBaseEvent(context: GraphToolContext, operationId: string, suffix: 
 }
 
 async function readGraphProjection(context: GraphToolContext): Promise<GraphProjection> {
-  const entries = await context.store.readSessionEntries(context.sessionId);
-  return projectGraphEntries(context.graphId, entries);
+  // graph.* 事件切片 + 全会话水位(票 04):折叠输入只含 graph 事件。
+  const slice = await context.store.readSessionEntriesOfKinds(
+    context.sessionId,
+    GRAPH_EVENT_KINDS,
+  );
+  return projectGraphEntries(context.graphId, slice.entries, slice.headSequence);
 }
 
 /**

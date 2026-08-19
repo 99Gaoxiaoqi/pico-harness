@@ -4,10 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { RUNTIME_EVENT_SCHEMA_VERSION } from "../../src/engine/session-runtime-event.js";
-import {
-  RuntimeEventStore,
-  createRuntimeEventId,
-} from "../../src/storage/runtime-event-store.js";
+import { createRuntimeEventId } from "../../src/storage/runtime-event-store-contracts.js";
+import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import { LoadToolsTool, renderGroupCatalog } from "../../src/tools/load-tools.js";
 import { SearchToolsTool } from "../../src/tools/search-tools.js";
 import { ToolDisclosure } from "../../src/tools/tool-disclosure.js";
@@ -219,7 +217,7 @@ test("Plan 模式工具面从 surface 单源导出", () => {
 test("durable 往返：store append tool.group.loaded → readSessionEntries → seedFromEvents 恢复", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-tool-surface-durable-"));
   try {
-    const store = new RuntimeEventStore({ storageRoot: join(root, "state") });
+    const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "state") });
     await store.initializeSession({ sessionId: "sess-durable", workDir: root });
     await store.append({
       schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,

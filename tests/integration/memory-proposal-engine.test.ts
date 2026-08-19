@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { RuntimeEvent } from "../../src/engine/session-runtime-event.js";
-import { MemoryRepository } from "../../src/memory/memory-repository.js";
+import { SqliteMemoryRepository } from "../../src/storage/sqlite/sqlite-memory-repository.js";
 import {
   MemoryProposalEngine,
   MemoryRepositoryProposalStore,
@@ -29,7 +29,7 @@ import type {
 } from "../../src/memory/proposal-contracts.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import type { Message } from "../../src/schema/message.js";
-import type { RuntimeEventStoreEntry } from "../../src/storage/runtime-event-store.js";
+import type { RuntimeEventStoreEntry } from "../../src/storage/runtime-event-store-contracts.js";
 
 test("proposal engine uses the model for explicit preferences and one-time requests", async (context) => {
   const fixture = await createFixture("signals");
@@ -494,8 +494,8 @@ async function createFixture(label: string) {
   const picoHome = join(root, "pico-home");
   await mkdir(workspace);
   const paths = resolvePicoPaths(workspace, { picoHome });
-  const repository = new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  const repository = new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
   // 显式保留审批制语义：这些用例断言 pending 提案行为，

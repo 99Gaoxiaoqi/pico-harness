@@ -3,7 +3,8 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { MemoryRepository } from "../../src/memory/memory-repository.js";
+import { SqliteMemoryRepository } from "../../src/storage/sqlite/sqlite-memory-repository.js";
+import { closeAllOperationalDatabasesForTest } from "../../src/storage/sqlite/sqlite-database.js";
 import {
   MEMORY_PROPOSAL_EXTRACTOR_VERSION,
   MEMORY_PROPOSAL_JOB_TYPE,
@@ -16,16 +17,35 @@ import {
 } from "../../src/memory/runtime-scheduler.js";
 import { resolvePicoPaths, type WorkspaceId } from "../../src/paths/pico-paths.js";
 
+/** Windows:WAL/SHM 句柄释放有窗口期,rm 按 EBUSY 有界重试。 */
+async function rmRetry(target: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await rm(target, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EBUSY") throw error;
+      if (attempt === 0) {
+        // 文件纪元的测试可以不关句柄直接 rm;SQLite 纪元先强制放掉本进程
+        // 全部 pico.sqlite owner(事后各 close() 钩子对已释放 lease 静默空转)。
+        closeAllOperationalDatabasesForTest();
+      }
+      if (attempt >= 50) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+}
+
 test("memory review enqueue applies the durable workspace debounce", async (context) => {
   const fixture = await createFixture("enqueue-debounce");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
   let now = new Date("2026-07-22T00:00:00.000Z");
-  const repository = new MemoryRepository({
+  const repository = new SqliteMemoryRepository({
     storageRoot: fixture.storageRoot,
     workspaceId: fixture.workspaceId,
     now: () => now,
   });
   context.after(() => repository.close());
+  context.after(() => rmRetry(fixture.root));
   const scheduler = new MemoryReviewScheduler(repository, { now: () => now });
   scheduler.enqueue({
     sessionId: "debounce-session",
@@ -54,14 +74,14 @@ test("memory review enqueue applies the durable workspace debounce", async (cont
 
 test("workspace debounce has a durable maximum wait", async (context) => {
   const fixture = await createFixture("debounce-max-wait");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
   let now = new Date("2026-07-22T00:00:00.000Z");
-  const repository = new MemoryRepository({
+  const repository = new SqliteMemoryRepository({
     storageRoot: fixture.storageRoot,
     workspaceId: fixture.workspaceId,
     now: () => now,
   });
   context.after(() => repository.close());
+  context.after(() => rmRetry(fixture.root));
   const scheduler = new MemoryReviewScheduler(repository, { now: () => now });
   scheduler.enqueue({
     sessionId: "max-wait-session",
@@ -86,14 +106,14 @@ test("workspace debounce has a durable maximum wait", async (context) => {
 
 test("workspace debounce preserves a budget recovery deadline", async (context) => {
   const fixture = await createFixture("debounce-budget-deferred");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
   let now = new Date("2026-07-22T00:00:00.000Z");
-  const repository = new MemoryRepository({
+  const repository = new SqliteMemoryRepository({
     storageRoot: fixture.storageRoot,
     workspaceId: fixture.workspaceId,
     now: () => now,
   });
   context.after(() => repository.close());
+  context.after(() => rmRetry(fixture.root));
   const deferred = createExtractionJob(repository, "budget-deferred", {
     nextAttemptAt: "2026-07-23T00:00:00.000Z",
   });
@@ -114,14 +134,14 @@ test("workspace debounce preserves a budget recovery deadline", async (context) 
 
 test("memory review scheduling is due-aware, oldest-first and type isolated", async (context) => {
   const fixture = await createFixture("due-order");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
   let now = new Date("2026-07-22T00:00:00.000Z");
-  const repository = new MemoryRepository({
+  const repository = new SqliteMemoryRepository({
     storageRoot: fixture.storageRoot,
     workspaceId: fixture.workspaceId,
     now: () => now,
   });
   context.after(() => repository.close());
+  context.after(() => rmRetry(fixture.root));
 
   const oldest = createExtractionJob(repository, "oldest");
   now = new Date("2026-07-22T00:00:01.000Z");
@@ -175,15 +195,15 @@ test("memory review scheduling is due-aware, oldest-first and type isolated", as
 
 test("memory review scheduling fairly pages an oldest-first backlog of more than 500 jobs", async (context) => {
   const fixture = await createFixture("backlog");
-  context.after(() => rm(fixture.root, { recursive: true, force: true }));
   let tick = 0;
   const epoch = Date.parse("2026-07-22T01:00:00.000Z");
-  const repository = new MemoryRepository({
+  const repository = new SqliteMemoryRepository({
     storageRoot: fixture.storageRoot,
     workspaceId: fixture.workspaceId,
     now: () => new Date(epoch + tick++),
   });
   context.after(() => repository.close());
+  context.after(() => rmRetry(fixture.root));
 
   for (let index = 0; index < MEMORY_REVIEW_PENDING_LIMIT + 2; index++) {
     createExtractionJob(repository, String(index).padStart(3, "0"));
@@ -211,7 +231,7 @@ test("memory review scheduling fairly pages an oldest-first backlog of more than
 });
 
 function createExtractionJob(
-  repository: MemoryRepository,
+  repository: SqliteMemoryRepository,
   suffix: string,
   options: { readonly nextAttemptAt?: string } = {},
 ) {
@@ -237,7 +257,7 @@ async function createFixture(name: string): Promise<{
   const paths = resolvePicoPaths(workspace, { picoHome });
   return {
     root,
-    storageRoot: paths.workspace.memory,
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   };
 }

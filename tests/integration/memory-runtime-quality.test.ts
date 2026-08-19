@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
+import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { SilentReporter } from "../../src/engine/reporter.js";
 import { globalSessionManager } from "../../src/engine/session.js";
-import { MemoryRepository } from "../../src/memory/memory-repository.js";
+import { SqliteMemoryRepository } from "../../src/storage/sqlite/sqlite-memory-repository.js";
 import {
   MEMORY_PROPOSAL_JOB_TYPE,
   type MemoryProposalExtractionRequest,
@@ -19,10 +20,9 @@ import {
   executeAgentRuntime,
   type RunAgentProviderFactory,
 } from "../../src/runtime/agent-runtime.js";
-import { RuntimeEventStore } from "../../src/storage/runtime-event-store.js";
 import type { Message } from "../../src/schema/message.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
-import { RuntimeStore } from "../../src/tasks/runtime-store.js";
+import { SqliteRuntimeControlStore } from "../../src/storage/sqlite/sqlite-runtime-control-store.js";
 
 const MEMORY_CANARY = "npm run reviewed-memory-canary";
 
@@ -326,7 +326,7 @@ test("memory reviewer failure cannot replace foreground terminal success", async
     );
     assert.equal(reviewCalls, 1);
     const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-    const eventStore = new RuntimeEventStore({ storageRoot: paths.workspace.root });
+    const eventStore = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
     try {
       const events = await eventStore.readSession(sessionId);
       assert.equal(
@@ -437,7 +437,10 @@ test("default priced worker records one memory_review without changing main Sess
     assert.deepEqual(usageAfterReview, usageBeforeReview);
     assert.equal(usageAfterReview.totalProviderCalls, 1);
 
-    const ledger = new RuntimeStore({ workDir: fixture.workspace, picoHome: fixture.picoHome });
+    const ledger = new SqliteRuntimeControlStore({
+      storageRoot: resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome }).workspace
+        .root,
+    });
     try {
       const calls = ledger.listProviderCalls();
       assert.equal(calls.length, 2);
@@ -593,10 +596,10 @@ function extractEvidenceEventId(messages: Message[]): string {
   return parsed.evidenceEventId as string;
 }
 
-function openRepository(workspace: string, picoHome: string): MemoryRepository {
+function openRepository(workspace: string, picoHome: string): SqliteMemoryRepository {
   const paths = resolvePicoPaths(workspace, { picoHome });
-  return new MemoryRepository({
-    storageRoot: paths.workspace.memory,
+  return new SqliteMemoryRepository({
+    storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   });
 }
@@ -612,7 +615,7 @@ function openJobStatus(fixture: RuntimeFixture): string | undefined {
 
 async function waitForMemoryState<Result>(
   fixture: RuntimeFixture,
-  read: (repository: MemoryRepository) => Result | undefined,
+  read: (repository: SqliteMemoryRepository) => Result | undefined,
 ): Promise<Result> {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
@@ -631,7 +634,10 @@ async function waitForMemoryState<Result>(
 async function waitForProviderCalls(fixture: RuntimeFixture, expected: number): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
-    const ledger = new RuntimeStore({ workDir: fixture.workspace, picoHome: fixture.picoHome });
+    const ledger = new SqliteRuntimeControlStore({
+      storageRoot: resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome }).workspace
+        .root,
+    });
     try {
       if (ledger.listProviderCalls().length === expected) return;
     } finally {

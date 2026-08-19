@@ -1,5 +1,5 @@
 import type { RuntimeEvent } from "../engine/session-runtime-event.js";
-import type { RuntimeEventStoreEntry } from "../storage/runtime-event-store.js";
+import type { RuntimeEventStoreEntry } from "../storage/runtime-event-store-contracts.js";
 import { isPlanEventKind } from "./events.js";
 import {
   PlanConflictError,
@@ -9,13 +9,20 @@ import {
   type PlanStep,
 } from "./contract.js";
 
+/**
+ * 折叠 plan.* 事件切片为 {@link PlanProjection}。
+ * `sessionSequence` 默认取传入 entries 的末条 sequence;票 04 起消费方可以用
+ * kind 切片查询替代全量读,此时显式传入 `headSequence`(全会话水位)保持
+ * CAS 语义与全量口径一致。折叠规则本身不变。
+ */
 export function projectPlanEntries(
   sessionId: string,
   entries: readonly RuntimeEventStoreEntry[],
+  headSequence?: number,
 ): PlanProjection {
   let state: PlanProjection = {
     sessionId,
-    sessionSequence: entries.at(-1)?.sequence ?? 0,
+    sessionSequence: headSequence ?? entries.at(-1)?.sequence ?? 0,
     proposals: [],
   };
   for (const entry of entries) {

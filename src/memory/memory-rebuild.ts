@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { setImmediate as yieldToHost } from "node:timers/promises";
-import type { MemoryRepository } from "./memory-repository.js";
+import type { MemoryRepositoryContract } from "./memory-repository.js";
 import type { TerminalMemoryEvidenceRef } from "./proposal-contracts.js";
 import { MEMORY_PROPOSAL_EXTRACTOR_VERSION, MEMORY_PROPOSAL_JOB_TYPE } from "./proposal-contracts.js";
 import {
@@ -9,10 +9,8 @@ import {
 } from "../runtime/memory-review-recovery.js";
 import {
   RUNTIME_EVENT_STORE_MAX_PAGE_SIZE,
-  RuntimeEventStore,
-} from "../storage/runtime-event-store.js";
-
-const REBUILD_BATCH_SIZE = 25;
+} from "../storage/runtime-event-store-contracts.js";
+import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 
 /**
  * 从 RuntimeEventStore 重建 Memory 的派生层（Source + extraction Jobs）。
@@ -49,8 +47,8 @@ export interface MemoryRebuildOptions {
 }
 
 export async function rebuildDerivedFromRuntimeEvent(
-  repository: MemoryRepository,
-  runtimeEventStore: RuntimeEventStore,
+  repository: MemoryRepositoryContract,
+  runtimeEventStore: SqliteRuntimeEventStore,
   workspaceRoot: string,
   options: MemoryRebuildOptions = {},
 ): Promise<MemoryRebuildReport> {
@@ -151,14 +149,17 @@ interface EnqueueTerminalOutcome {
  * worker. `rebuiltSources` in the report is therefore reserved for future use and currently always 0.
  */
 function enqueueTerminalIfMissing(
-  repository: MemoryRepository,
+  repository: MemoryRepositoryContract,
   ref: TerminalMemoryEvidenceRef,
   extractorVersion: string,
 ): EnqueueTerminalOutcome {
+  // (terminalEventId, extractorVersion) 点查:命中 UNIQUE 索引,不再拉一批 listJobs
+  // 后在内存里找。
   const existing = repository.listJobs({
     type: MEMORY_PROPOSAL_JOB_TYPE,
     extractorVersion,
-    limit: REBUILD_BATCH_SIZE,
+    terminalEventId: ref.terminalEventId,
+    limit: 1,
   });
   const matched = existing.find((job) => job.terminalEventId === ref.terminalEventId);
   if (matched) {

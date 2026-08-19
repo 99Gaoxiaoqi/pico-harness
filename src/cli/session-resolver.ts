@@ -1,21 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { rememberResolvedCliSession } from "../input/session-settings.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
+import { SqliteRuntimeEventStore, type SqliteSessionCatalogEntry } from "../storage/sqlite/sqlite-runtime-event-store.js";
 import {
-  RuntimeEventStore,
-  type RuntimeEventStoreEntry,
-} from "../storage/runtime-event-store.js";
-import {
-  SessionCatalogIntegrityError,
-  type SessionCatalogRow,
-} from "../storage/session-catalog.js";
-import {
-  computeSessionPublicationFlags,
   isPublishedSession,
-  summaryFromRuntimeSession,
   type CliSessionSummary,
   type ForkTargetOperations,
-  type SequencedCliSessionSummary,
+  type SessionPublicationFlags,
 } from "../engine/session-summary.js";
 import { StorageOperationJournal } from "../storage/operation-journal.js";
 
@@ -102,69 +93,58 @@ export function createCliSessionId(): string {
 }
 
 /**
- * 单会话点查：优先读会话目录（catalog）行并做 statSync 水位校验；
- * catalog 缺行、损坏或水位不符（deleteSession 崩溃窗口、手工篡改）时
- * 回落单会话 ledger 直读——该回落也是水位漂移的自愈路径。
+ * 单会话点查:catalog 投影行单条 SQL;行缺失/损坏/水位失配由 store 内的
+ * 全量重建阀门自愈(票 03)。发布判定的 journal 部分永远读时补查。
+ * daemon 侧(requireSession)用 entry 形态拿归档/置顶;CLI 侧只要 summary。
  */
+export async function findCliSessionCatalogEntry(
+  workDir: string,
+  sessionId: string,
+  options: ListCliSessionSummariesOptions = {},
+): Promise<SqliteSessionCatalogEntry | undefined> {
+  const store = createRuntimeEventStore(workDir, options.picoHome);
+  const forkTargets = await indexForkTargetOperations(workDir, options.picoHome);
+  try {
+    const entry = await store.findSessionCatalogEntry(sessionId);
+    if (!entry) return undefined;
+    return isPublishedSession(sessionId, entry.fold, forkTargets) ? entry : undefined;
+  } finally {
+    store.close();
+  }
+}
+
 export async function findCliSessionSummary(
   workDir: string,
   sessionId: string,
   options: ListCliSessionSummariesOptions = {},
 ): Promise<CliSessionSummary | undefined> {
-  const runtimeEventStore = createRuntimeEventStore(workDir, options.picoHome);
-  const forkTargets = await indexForkTargetOperations(workDir, options.picoHome);
-  try {
-    const row = runtimeEventStore.readSessionCatalog()?.rows.get(sessionId);
-    if (row && runtimeEventStore.sessionLedgerSizeMatches(sessionId, row.ledgerByteLength)) {
-      return isPublishedSession(sessionId, row.fold, forkTargets) ? row.summary : undefined;
-    }
-  } catch (error) {
-    if (!(error instanceof SessionCatalogIntegrityError)) throw error;
-  }
-  const manifest = await runtimeEventStore.readSessionManifest(sessionId);
-  if (!manifest) return undefined;
-  const entries = await runtimeEventStore.readSessionEntries(sessionId);
-  if (!isPublishedRuntimeSession(sessionId, entries, forkTargets)) return undefined;
-  return summaryFromRuntimeSession(manifest, entries).summary;
+  return (await findCliSessionCatalogEntry(workDir, sessionId, options))?.summary;
 }
 
-/**
- * 会话列表：读会话目录（catalog）单文件 + fork journal 发布过滤。
- * catalog 缺失/损坏/版本不符时锁内从 ledger 全量重建（可写 store 顺手落盘，
- * readOnly 只重建内存态）。发布判定的 journal 部分永远读时补查。
- */
+/** 会话列表(catalog entry 形态,含归档/置顶):单条 keyset SQL + 发布过滤。 */
+export async function listCliSessionCatalogEntries(
+  workDir: string,
+  options: ListCliSessionSummariesOptions = {},
+): Promise<readonly SqliteSessionCatalogEntry[]> {
+  const store = createRuntimeEventStore(workDir, options.picoHome);
+  const forkTargets = await indexForkTargetOperations(workDir, options.picoHome);
+  try {
+    const entries = await store.listSessionCatalogEntries();
+    return entries.filter((entry) =>
+      isPublishedSession(entry.summary.id, entry.fold, forkTargets),
+    );
+  } finally {
+    store.close();
+  }
+}
+
+/** 会话列表:catalog 单条 keyset SQL(activity_at DESC, session_id ASC)+ 发布过滤。 */
 export async function listCliSessionSummaries(
   workDir: string,
   options: ListCliSessionSummariesOptions = {},
 ): Promise<CliSessionSummary[]> {
-  const runtimeEventStore = createRuntimeEventStore(workDir, options.picoHome);
-  const forkTargets = await indexForkTargetOperations(workDir, options.picoHome);
-  let rows: readonly SessionCatalogRow[] | undefined;
-  try {
-    const catalog = runtimeEventStore.readSessionCatalogForListing();
-    rows = catalog ? [...catalog.rows.values()] : undefined;
-  } catch (error) {
-    if (!(error instanceof SessionCatalogIntegrityError)) throw error;
-  }
-  if (!rows) {
-    rows = [...(await runtimeEventStore.rebuildSessionCatalog()).rows.values()];
-  }
-
-  const published = rows
-    .filter((row) => isPublishedSession(row.summary.id, row.fold, forkTargets))
-    .map((row): SequencedCliSessionSummary => ({
-      summary: row.summary,
-      headSequence: row.fold.headSequence,
-    }));
-
-  published.sort(
-    (a, b) =>
-      b.summary.updatedAt.getTime() - a.summary.updatedAt.getTime() ||
-      b.headSequence - a.headSequence ||
-      b.summary.createdAt.getTime() - a.summary.createdAt.getTime() ||
-      b.summary.id.localeCompare(a.summary.id),
-  );
-  return published.map(({ summary }) => summary);
+  const entries = await listCliSessionCatalogEntries(workDir, options);
+  return entries.map((entry) => entry.summary);
 }
 
 function assertSingleSessionMode(options: ResolveCliSessionOptions): void {
@@ -195,13 +175,19 @@ async function assertRuntimeSessionExists(
 ): Promise<void> {
   const prefix = action === "fork" ? "无法 fork" : "无法恢复";
   const store = createRuntimeEventStore(workDir, picoHome);
-  const manifest = await store.readSessionManifest(sessionId);
-  if (!manifest) {
-    throw new Error(`${prefix} session ${sessionId}: RuntimeEvent 日志中不存在`);
+  let flags: SessionPublicationFlags | undefined;
+  try {
+    const manifest = await store.readSessionManifest(sessionId);
+    if (!manifest) {
+      throw new Error(`${prefix} session ${sessionId}: RuntimeEvent 日志中不存在`);
+    }
+    const entry = await store.findSessionCatalogEntry(sessionId);
+    flags = entry?.fold;
+  } finally {
+    store.close();
   }
-  const entries = await store.readSessionEntries(sessionId);
   const forkTargets = await indexForkTargetOperations(workDir, picoHome);
-  if (isPublishedRuntimeSession(sessionId, entries, forkTargets)) return;
+  if (flags && isPublishedSession(sessionId, flags, forkTargets)) return;
   throw new Error(`${prefix} session ${sessionId}: fork 尚未完成发布`);
 }
 
@@ -209,24 +195,8 @@ async function indexForkTargetOperations(
   workDir: string,
   picoHome?: string,
 ): Promise<ReadonlyMap<string, ForkTargetOperations>> {
-  const operations = await new StorageOperationJournal({ workDir, picoHome }).list();
-  const targets = new Map<string, ForkTargetOperations>();
-  for (const operation of operations) {
-    if (operation.kind !== "fork" || operation.state === "aborted") continue;
-    const existing = targets.get(operation.targetSessionId);
-    targets.set(operation.targetSessionId, {
-      hasCompleted: existing?.hasCompleted === true || operation.state === "completed",
-    });
-  }
-  return targets;
-}
-
-function isPublishedRuntimeSession(
-  sessionId: string,
-  entries: readonly RuntimeEventStoreEntry[],
-  forkTargets: ReadonlyMap<string, ForkTargetOperations>,
-): boolean {
-  return isPublishedSession(sessionId, computeSessionPublicationFlags(entries), forkTargets);
+  // 票 08:全目录扫描变 storage_operations 单查询(kind='fork' AND state<>'aborted')。
+  return new StorageOperationJournal({ workDir, picoHome }).listForkTargets();
 }
 
 /** 仅用于新 fork 构建失败时清理尚未公布的目标会话。 */
@@ -235,11 +205,19 @@ export async function removeCliSessionFile(
   sessionId: string,
   options: { readonly picoHome?: string } = {},
 ): Promise<void> {
-  await createRuntimeEventStore(workDir, options.picoHome).deleteSession(sessionId);
+  const store = createRuntimeEventStore(workDir, options.picoHome);
+  try {
+    await store.deleteSession(sessionId);
+  } finally {
+    store.close();
+  }
 }
 
-function createRuntimeEventStore(workDir: string, picoHome?: string): RuntimeEventStore {
-  return new RuntimeEventStore({
+function createRuntimeEventStore(
+  workDir: string,
+  picoHome?: string,
+): SqliteRuntimeEventStore {
+  return new SqliteRuntimeEventStore({
     storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
   });
 }
