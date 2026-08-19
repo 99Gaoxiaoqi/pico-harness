@@ -44,6 +44,7 @@ export type {
   RuntimePlanStepUpdatedEvent,
   RuntimePlanEvent,
   RuntimeRunStartedEvent,
+  RuntimeRunContinuationOf,
   RuntimeRunTerminalEvent,
   RuntimeSessionForkedEvent,
   RuntimeSessionStateCommittedEvent,
@@ -198,6 +199,9 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
   switch (value["kind"]) {
     case "run.started":
       assertString(value["data"]["workDir"], "run.started.workDir");
+      if (value["data"]["continuationOf"] !== undefined) {
+        assertRunContinuationOf(value["data"]["continuationOf"]);
+      }
       return;
     case "message.committed":
       assertMessage(value["data"]["message"]);
@@ -611,6 +615,23 @@ function assertToolResultRecordedEvent(value: Record<string, unknown>): void {
       "Runtime tool result projection truncated must be boolean",
     );
   }
+}
+
+/**
+ * ADR 29 续跑锚校验:run.started 可选 continuationOf 必须是恰好三字段的
+ * { runId, highWater, prefixDigest };digest 为裸 sha256 hex(与
+ * runtime_continuation_claims.source_prefix_digest / store 前缀 digest 同口径)。
+ */
+function assertRunContinuationOf(value: unknown): void {
+  if (!isRecord(value)) {
+    throw new RuntimeEventIntegrityError("Runtime run.started continuationOf must be an object");
+  }
+  assertOnlyKeys(value, ["runId", "highWater", "prefixDigest"], "run.started.continuationOf");
+  assertString(value["runId"], "run.started.continuationOf.runId");
+  if (!isNonNegativeInteger(value["highWater"]) || (value["highWater"] as number) === 0) {
+    throw new RuntimeEventIntegrityError("Runtime run.started continuationOf highWater is invalid");
+  }
+  assertSha256(value["prefixDigest"], "run.started.continuationOf.prefixDigest");
 }
 
 /** ADR 27 P0：恢复期合成结果可携带 recovery.classification；正常结果不得设置。 */

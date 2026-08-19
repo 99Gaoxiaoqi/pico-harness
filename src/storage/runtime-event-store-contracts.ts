@@ -125,6 +125,54 @@ export class RuntimeEventStorePlanOperationConflictError extends RuntimeEventSto
   }
 }
 
+/**
+ * ADR 29 §4 源封口(fail-closed):已终态(run.terminal 落库)的 run 拒收新的
+ * 非恢复类 append。确定性拒绝(事务未提交),读回仲裁不得翻案——继承
+ * RuntimeEventStoreIntegrityError 即自动落入 isDeterministicStoreRefusal。
+ */
+export class RuntimeEventStoreRunSealedError extends RuntimeEventStoreIntegrityError {
+  constructor(
+    readonly sessionId: string,
+    readonly runId: string,
+    readonly eventId: string,
+  ) {
+    super(
+      `Runtime run ${runId} in session ${sessionId} is already terminal; event ${eventId} cannot be appended`,
+    );
+    this.name = "RuntimeEventStoreRunSealedError";
+  }
+}
+
+/** ADR 29:sessions scope `runtime_continuation_claims` 行的读取形态。 */
+export interface RuntimeContinuationClaim {
+  readonly claimId: string;
+  readonly sourceSessionId: string;
+  readonly sourceRunId: string;
+  /** 源前缀末事件 seq(claim 时刻该 run 全部事件的 seq 上界)。 */
+  readonly sourceHighWater: number;
+  /** seq∈[1..high_water] 的 {seq, eventId, canonical payload} 序列化 sha256(hex)。 */
+  readonly sourcePrefixDigest: string;
+  readonly targetSessionId: string;
+  readonly targetRunId: string;
+  readonly createdAt: string;
+}
+
+/** claim 被类型化拒绝的原因(不抛裸 SqliteError)。 */
+export type RuntimeContinuationClaimRejection =
+  | "run_not_found"
+  /** 源 run 无终态事实——活跃 run 不得被 claim(ADR 29 弃案:软中断续跑)。 */
+  | "run_active"
+  /** 源 run 终态非 interrupted(completed/failed/cancelled 不可续)。 */
+  | "run_not_interrupted"
+  /** target run 已作为其他 claim 的续跑目标。 */
+  | "target_conflict";
+
+/** claimContinuation 结果:成功 / 已被 claim(C1 冲突)/ 类型化拒绝。 */
+export type RuntimeContinuationClaimOutcome =
+  | { readonly status: "claimed"; readonly claim: RuntimeContinuationClaim }
+  | { readonly status: "already_claimed"; readonly claim: RuntimeContinuationClaim }
+  | { readonly status: "rejected"; readonly reason: RuntimeContinuationClaimRejection };
+
 export function createRuntimeEventId(prefix = "runtime-event"): string {
   return `${prefix}:${randomUUID()}`;
 }
