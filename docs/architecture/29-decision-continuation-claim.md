@@ -46,6 +46,13 @@ claim 成功 seal source）。
    调用方显式 `continuationOf` 与 `prestartedRun` 优先于自动锚定；claim 失败/无候选
    则普通起跑（info 日志）。goal/cron 上层若需差异化续跑策略（如选择性续跑、
    跨会话），届时在调用方显式声明路径上扩展。
+   **终态新鲜度门（2026-08-20 对抗审查 F2 修订）**：自动锚定要求 interrupted 终态
+   距今超过 `continuationTerminalMinAgeMs`（缺省 10 分钟，测试可传 0）。动机：run
+   活性检测是进程内的，跨进程并发执行同一会话时 reconcile 可能把存活 run 误判补
+   interrupted 终态——立即 claim 会封死对方（连终态都写不进）。门内不 claim，
+   未 claim 的终态 run 保持开放语义、存活方继续可写；代价是真实崩溃后的锚定延迟到
+   窗口期后的下一次 run 起跑（锚定是簿记，延迟无害）。已知残留：超长存活 run
+   （>窗口）仍可能被误封口——根治需 reconcile 的跨进程活性检测，另立决策。
 
 ## 验收不变量
 

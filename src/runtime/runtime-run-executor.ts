@@ -25,6 +25,9 @@ import type {
   RunAgentUsage,
 } from "./runtime-contract.js";
 
+/** 自动锚定的终态新鲜度窗口缺省(审查 F2):跨进程存活保护的等待期。 */
+const DEFAULT_CONTINUATION_TERMINAL_MIN_AGE_MS = 10 * 60_000;
+
 /**
  * The narrow, already-assembled boundary for one foreground/background Agent turn.
  *
@@ -51,6 +54,13 @@ export interface RuntimeRunExecutorInput {
    * data.continuationOf(与 prestartedRun 互斥:prestarted 事实已定形)。
    */
   readonly continuationOf?: RuntimeRunContinuationOf;
+  /**
+   * 自动锚定的终态新鲜度门(审查 F2,毫秒,缺省 10 分钟):interrupted 终态
+   * 距今不足该窗口时不锚定不封口——防跨进程 reconcile 把存活 run 误判补终态
+   * 后被立即 claim 封死(未 claim 的终态 run 保持开放语义,存活方可继续写)。
+   * 测试可传 0 关闭窗口。
+   */
+  readonly continuationTerminalMinAgeMs?: number;
   readonly traceEnabled: boolean;
   readonly options: RuntimeRunOptions;
   readonly signal?: AbortSignal;
@@ -305,6 +315,11 @@ export class RuntimeRunExecutor {
    * 锚定续跑(返回 target runId + continuationOf 三元组)。claim 失败/无候选/
    * 调用方已显式声明 continuationOf 或使用 prestartedRun 时返回 undefined,
    * 本次 run 以普通身份起跑。claim 成功但 start 前崩溃的窗口由孤儿改绑兜底。
+   *
+   * 新鲜度门(审查 F2):终态事件 at 距今不足 continuationTerminalMinAgeMs
+   * (缺省 10 分钟)时跳过锚定——跨进程 reconcile 可能误判存活 run 补了新鲜
+   * interrupted 终态,立即 claim 会封死对方;未 claim 的终态 run 保持开放语义,
+   * 对方可继续写。代价是真实崩溃后的锚定延迟到窗口期后的下一次 run 起跑。
    */
   private async claimAutomaticContinuation(
     session: Session,
@@ -312,13 +327,22 @@ export class RuntimeRunExecutor {
     if (this.input.continuationOf || this.input.prestartedRun) return undefined;
     const store = session.runtimeEventStore;
     if (!store) return undefined;
-    const sourceRunId = await store.findLatestInterruptedUnclaimedRun(session.id);
-    if (!sourceRunId) return undefined;
+    const candidate = await store.findLatestInterruptedUnclaimedRun(session.id);
+    if (!candidate) return undefined;
+    const minAgeMs = this.input.continuationTerminalMinAgeMs ?? DEFAULT_CONTINUATION_TERMINAL_MIN_AGE_MS;
+    const terminalAgeMs = Date.now() - Date.parse(candidate.terminalAt);
+    if (!Number.isFinite(terminalAgeMs) || terminalAgeMs < minAgeMs) {
+      logger.info(
+        { sessionId: session.id, sourceRunId: candidate.runId, terminalAgeMs, minAgeMs },
+        "[Continuation] interrupted 终态过于新鲜,暂不锚定(跨进程存活保护),普通起跑",
+      );
+      return undefined;
+    }
     const targetRunId = randomUUID();
-    const outcome = await store.claimContinuation(session.id, sourceRunId, targetRunId);
+    const outcome = await store.claimContinuation(session.id, candidate.runId, targetRunId);
     if (outcome.status !== "claimed") {
       logger.info(
-        { sessionId: session.id, sourceRunId, status: outcome.status },
+        { sessionId: session.id, sourceRunId: candidate.runId, status: outcome.status },
         "[Continuation] interrupted run 未锚定自动续跑(已被续跑或状态变化),普通起跑",
       );
       return undefined;
@@ -326,7 +350,7 @@ export class RuntimeRunExecutor {
     return {
       runId: targetRunId,
       continuationOf: {
-        runId: sourceRunId,
+        runId: candidate.runId,
         highWater: outcome.claim.sourceHighWater,
         prefixDigest: outcome.claim.sourcePrefixDigest,
       },
