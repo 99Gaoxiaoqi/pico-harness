@@ -23,13 +23,18 @@
 >
 > **推送（2026-08-20）**：main 已推送远端（96cb5cae..e4da9ccf，114 提交），与 origin 同步。
 >
+> **六维差距审计轮（2026-08-20）**：只读审计子代理盘点，结论分级见对话；本轮已落地——
+> B-2 C4 批内封口三场景测试（0b4e60c5，6/6 绿）；m-5 ADR 编号消歧，session-catalog 让号 24a、24 归 SQLite 迁移总纲（098edeea，源码"ADR 24 §4.x"均指总纲无需改）；i-5 ADR 29 复评条件精确化（goal/cron 差异化策略仍挂账，基础锚定已落地）；扫跑器加固（36c0e94d：保留 -prev.log/拒绝非清单入参/trim）。
+> **m-4 JSON 版 conversation-state store 退役并入族C**：该类耦合两个模块私有 helper（retainFirstSendClaims/emptyState），且被 desktop-conversation-state / desktop-runtime-close / desktop-memory-lifecycle-ordering 三个测试引用，后两者正是族C 清理对象——族C 重写这两个测试时一并把类降级为 tests fixture 或改用 SQLite 实现，避免现在动它打架。
+> 审计遗留（未动）：B-1 全量回归未扫完（换机）、M-1 reconcile 跨进程活性检测（待立 ADR 30）、M-2 ARCHITECTURE.md 漂移、M-3 daemon 全局并发闸门无书面出处、M-5 provider fallback/compaction fail-open 需对账（文档显示已拍板）、m-1/m-2/m-3 挂账、findOrphanGraphWorks 已接入（旧记忆有误，审计 i-4 实证）。
+>
 > ## 预存红集中清理计划（未执行，2026-08-20 本机过卡中断，换机续跑）
 >
 > 验证法已备好：`node .scratch/run-integration-sweep.mjs .scratch/all-tests.txt`（逐文件扫跑器，单文件 300s 超时防 Windows hang；all-tests.txt 用 `dir /b tests\integration\*.test.ts > .scratch\all-tests.txt` 重新生成）。失败集经三次全量扫跑交叉验证，稳定 27 文件。按五族并行派工（文件面不相交），已知根因线索：
 >
 > - **族A 过时/结构性**：architecture-invariants（2 挂=ENOENT 读已删的旧 runtime-event-store.ts，断言迁到 sqlite-runtime-event-store.ts，口径反映新架构）、projection-diagnostics-evidence-ref（21/1）、session-runtime-dispose（3/1）、plugin-runtime-snapshot-registry（3/1）、plugin-hook-trust（0/1）、workspace-runtime-consistency（11/1，git rev-parse 正斜杠 vs realpath 反斜杠的 Windows 路径断言）。
 > - **族B memory 家族**：memory-quality（1/1）、memory-runtime-quality（2/3）、memory-runtime（**300s 挂起**）、runtime-run-executor 的 Memory 调度 4 条（其余用例绿）。历史实锤：过时 toolCall fake，修法=JSON content 形状；engine 门控变更。源面 src/memory/**。
-> - **族C desktop 环境族**：desktop-runtime-close（2/1）、desktop-plugin-parity（3/1）、desktop-memory-lifecycle-ordering（0/4）、desktop-memory-ui（6/1）。线索：隔离 fixture 报"没有可用模型路由"（基座就挂，与 ADR 28 无关）；~/.pico/config.json 有 lez-claude。源面 src/daemon/desktop-*，不动 src/memory。
+> - **族C desktop 环境族**：desktop-runtime-close（2/1）、desktop-plugin-parity（3/1）、desktop-memory-lifecycle-ordering（0/4）、desktop-memory-ui（6/1）。线索：隔离 fixture 报"没有可用模型路由"（基座就挂，与 ADR 28 无关）；~/.pico/config.json 有 lez-claude。源面 src/daemon/desktop-*，不动 src/memory。**附加任务 m-4**：重写 desktop-runtime-close / desktop-memory-lifecycle-ordering 时，把 src/daemon/desktop-conversation-state.ts 里的 JSON 版 DesktopConversationStateStore 类（生产零实例化）一并降级为 tests fixture 或删除（它耦合私有 helper retainFirstSendClaims/emptyState，迁移时同搬）。
 > - **族D terminal-bench 族（8 文件）**：normalizer（0/**33**，优先查——像 schema/快照漂移非环境）、container-policy（3 挂）、captured-process（2）、runtime-controls（2）、docker-cleanup（2）、bundle-lock（1）、task-timeout-preflight（1）。先探 `docker --version`。源面 scripts/terminal-bench/**。
 > - **族E 杂项**：hook-full-flow（0/3，137s）、path-read-boundaries（0/4）、file-write-safety（5/2）、user-config-temp-recovery（1/3）、lifecycle-races（18/3，负载敏感恶化）、headless-one-shot-runner（**300s 挂起**，bootstrap 同类是绿的可对照）。线索：hooks 08-17 shell 化后现存 hooks 需 re-trust；win32 bash 语义须 skip。
 > - 规矩：单文件测试禁全量；每条失败分类可修/环境依赖（有 env-gate 先例才 skip）/真缺陷；不许为绿删断言；逐族提交。
