@@ -34,7 +34,9 @@ test("executor 自动锚定 interrupted 续跑：claim→targetRunId 起跑→�
     await crashed.recordTurnStarted(1);
     await crashed.commitMessages(session, [{ role: "user", content: "崩溃前的输入" }]);
 
-    const result = await newExecutor(session, workDir, picoHome).execute();
+    const result = await newExecutor(session, workDir, picoHome, {
+      continuationTerminalMinAgeMs: 0,
+    }).execute();
     assert.equal(result.finalMessage, "answer");
 
     const store = session.runtimeEventStore!;
@@ -80,7 +82,7 @@ test("executor 自动锚定 interrupted 续跑：claim→targetRunId 起跑→�
     );
 
     // 二次 executor:无未 claim 的 interrupted → 普通起跑,不携带 continuationOf。
-    await newExecutor(session, workDir, picoHome).execute();
+    await newExecutor(session, workDir, picoHome, { continuationTerminalMinAgeMs: 0 }).execute();
     const secondEvents = await store.readSession(session.id);
     const starts = secondEvents.filter(
       (event): event is Extract<RuntimeEvent, { kind: "run.started" }> =>
@@ -93,6 +95,36 @@ test("executor 自动锚定 interrupted 续跑：claim→targetRunId 起跑→�
     // claim 不因二次起跑变化。
     const reread = await store.findContinuationClaimBySourceRun(session.id, crashed.runId);
     assert.deepEqual(reread, claim);
+
+    // 新鲜度门(审查 F2):新崩溃 run 的终态刚被 reconcile 补写,默认窗口(10 分钟)
+    // 内不锚定不封口——跨进程存活保护;窗口 0 后的下一轮 executor 正常锚定。
+    const crashed2 = await RuntimeRun.start({ capability });
+    await crashed2.recordTurnStarted(1);
+    await crashed2.commitMessages(session, [{ role: "user", content: "第二次崩溃" }]);
+    await newExecutor(session, workDir, picoHome).execute();
+    assert.equal(
+      await store.findContinuationClaimBySourceRun(session.id, crashed2.runId),
+      undefined,
+      "fresh interrupted terminal must not be claimed within the default window",
+    );
+    // 未被 claim 的终态 run 保持开放语义:追加不被 seal 拒绝。
+    const openAppend = await store.append({
+      schemaVersion: 2,
+      eventId: `fresh-open-probe:${crashed2.runId}`,
+      sessionId: session.id,
+      invocationId: "inv-fresh-open-probe",
+      runId: crashed2.runId,
+      turnId: "turn-fresh-open-probe",
+      at: new Date().toISOString(),
+      partial: false,
+      visibility: "internal",
+      kind: "message.committed",
+      data: { message: { role: "user", content: "开放语义探针" } },
+    } as RuntimeEvent);
+    assert.equal(openAppend.inserted, true, "unclaimed terminal run stays appendable");
+    await newExecutor(session, workDir, picoHome, { continuationTerminalMinAgeMs: 0 }).execute();
+    const claim2 = await store.findContinuationClaimBySourceRun(session.id, crashed2.runId);
+    assert.ok(claim2, "zero-window executor must anchor the aged-in terminal");
   } finally {
     await session.close();
     await rm(root, { recursive: true, force: true });
@@ -103,6 +135,7 @@ function newExecutor(
   session: Session,
   workDir: string,
   picoHome: string,
+  extra?: { continuationTerminalMinAgeMs?: number },
 ): RuntimeRunExecutor {
   const runtimeState = {
     dispatchHook: async (): Promise<HookOutput> => ({ decision: "allow" }),
@@ -127,5 +160,6 @@ function newExecutor(
     traceEnabled: false,
     options,
     onEvent: (event) => lifecycleEvents.push(event),
+    ...extra,
   });
 }

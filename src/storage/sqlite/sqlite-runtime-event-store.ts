@@ -472,11 +472,13 @@ export class SqliteRuntimeEventStore {
    * 的 run seal 防线,claim 只需终态校验。
    */
   /**
-   * ADR 29 调度接入辅助(2026-08-20):最新 interrupted 终态且未被 claim 的 run。
-   * executor 在 reconcile 后调用,为本次 run 自动锚定续跑关系;无候选返回 undefined。
-   * 只扫最近 32 条终态事件(kind 索引),payload 在 JS 侧解码。
+   * ADR 29 调度接入辅助(2026-08-20):最新 interrupted 终态且未被 claim 的 run
+   * (含终态事件的 at 时间戳,供 executor 做新鲜度门——审查 F2)。无候选返回
+   * undefined。只扫最近 32 条终态事件(kind 索引),payload 在 JS 侧解码。
    */
-  async findLatestInterruptedUnclaimedRun(sessionId: string): Promise<string | undefined> {
+  async findLatestInterruptedUnclaimedRun(
+    sessionId: string,
+  ): Promise<{ runId: string; terminalAt: string } | undefined> {
     return this.read(() => {
       const rows = this.lease.database
         .prepare(
@@ -488,7 +490,7 @@ export class SqliteRuntimeEventStore {
       for (const row of rows) {
         const payload = JSON.parse(
           requireRowString(row["payload_json"], "runtime_events.payload_json"),
-        ) as { data?: { status?: unknown } };
+        ) as { at?: unknown; data?: { status?: unknown } };
         if (payload?.data?.status !== "interrupted") continue;
         const runId = requireRowString(row["run_id"], "runtime_events.run_id");
         const claimed =
@@ -497,7 +499,9 @@ export class SqliteRuntimeEventStore {
               "SELECT 1 FROM runtime_continuation_claims WHERE source_session_id = ? AND source_run_id = ? LIMIT 1",
             )
             .get(sessionId, runId) !== undefined;
-        if (!claimed) return runId;
+        if (!claimed) {
+          return { runId, terminalAt: requireRowString(payload["at"], "run.terminal.at") };
+        }
       }
       return undefined;
     });
