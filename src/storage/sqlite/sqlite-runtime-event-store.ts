@@ -471,6 +471,38 @@ export class SqliteRuntimeEventStore {
    * 源封口(C4)不由本方法承担:interrupted 终态本身即触发 appendBatchLocked
    * 的 run seal 防线,claim 只需终态校验。
    */
+  /**
+   * ADR 29 调度接入辅助(2026-08-20):最新 interrupted 终态且未被 claim 的 run。
+   * executor 在 reconcile 后调用,为本次 run 自动锚定续跑关系;无候选返回 undefined。
+   * 只扫最近 32 条终态事件(kind 索引),payload 在 JS 侧解码。
+   */
+  async findLatestInterruptedUnclaimedRun(sessionId: string): Promise<string | undefined> {
+    return this.read(() => {
+      const rows = this.lease.database
+        .prepare(
+          `SELECT run_id, payload_json FROM runtime_events
+           WHERE session_id = ? AND kind = 'run.terminal'
+           ORDER BY event_seq DESC LIMIT 32`,
+        )
+        .all(sessionId) as Array<Record<string, unknown>>;
+      for (const row of rows) {
+        const payload = JSON.parse(
+          requireRowString(row["payload_json"], "runtime_events.payload_json"),
+        ) as { data?: { status?: unknown } };
+        if (payload?.data?.status !== "interrupted") continue;
+        const runId = requireRowString(row["run_id"], "runtime_events.run_id");
+        const claimed =
+          this.lease.database
+            .prepare(
+              "SELECT 1 FROM runtime_continuation_claims WHERE source_session_id = ? AND source_run_id = ? LIMIT 1",
+            )
+            .get(sessionId, runId) !== undefined;
+        if (!claimed) return runId;
+      }
+      return undefined;
+    });
+  }
+
   async claimContinuation(
     sourceSessionId: string,
     sourceRunId: string,
