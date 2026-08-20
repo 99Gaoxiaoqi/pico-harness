@@ -483,7 +483,39 @@ export class SqliteRuntimeEventStore {
         [sourceSessionId, sourceRunId],
       );
       if (existingBySource) {
-        return { status: "already_claimed" as const, claim: existingBySource };
+        // 同 target 幂等重放:纯幂等,维持 already_claimed。
+        if (existingBySource.targetRunId === targetRunId) {
+          return { status: "already_claimed" as const, claim: existingBySource };
+        }
+        // 孤儿 claim 幂等改绑(对抗审查 Finding 1):claim 成功后 target 的
+        // run.started 写入前崩溃时,锚点不可逆地占着 source 封口与 target 槽位。
+        // 旧 target 在账本中不存在(从未起跑)→ 允许改绑到新 target;源封口、
+        // digest/high_water/claimId/createdAt 均不变。旧 target 已起跑则维持
+        // already_claimed——续跑事实已定形,不可换绑。整个判定在写事务内完成。
+        const oldTargetStarted =
+          this.lease.database
+            .prepare(
+              "SELECT 1 FROM runtime_events WHERE session_id = ? AND run_id = ? AND kind = 'run.started' LIMIT 1",
+            )
+            .get(existingBySource.targetSessionId, existingBySource.targetRunId) !== undefined;
+        if (oldTargetStarted) {
+          return { status: "already_claimed" as const, claim: existingBySource };
+        }
+        const newTargetTaken =
+          existingBySource.targetRunId !== targetRunId &&
+          this.lease.database
+            .prepare(
+              "SELECT 1 FROM runtime_continuation_claims WHERE target_session_id = ? AND target_run_id = ? LIMIT 1",
+            )
+            .get(sourceSessionId, targetRunId) !== undefined;
+        if (newTargetTaken) {
+          return { status: "rejected" as const, reason: "target_conflict" as const };
+        }
+        const rebound: RuntimeContinuationClaim = { ...existingBySource, targetRunId };
+        this.lease.database
+          .prepare("UPDATE runtime_continuation_claims SET target_run_id = ? WHERE claim_id = ?")
+          .run(targetRunId, existingBySource.claimId);
+        return { status: "claimed" as const, claim: rebound, rebound: true as const };
       }
       const existingByTarget = this.readContinuationClaimRowLocked(
         "SELECT " + CONTINUATION_CLAIM_ROW_COLUMNS + " FROM runtime_continuation_claims WHERE target_session_id = ? AND target_run_id = ?",

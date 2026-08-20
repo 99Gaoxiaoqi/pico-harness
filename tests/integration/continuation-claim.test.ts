@@ -144,11 +144,12 @@ test("C2+ C1：interrupted run claim 成功（digest/high_water 手工重算对�
   assert.equal(after.length, before.length);
   assert.equal(after.at(-1)!.event.eventId, before.at(-1)!.event.eventId);
 
-  // C1:同一 source run 二次 claim(即使换 target)→ already_claimed,不抛裸 SqliteError。
+  // C1:同一 source run 二次 claim(同 target 幂等重放)→ already_claimed,不抛裸 SqliteError。
+  // 异 target 的孤儿改绑语义(Finding 1)另测:未起跑可改绑,起跑后不可。
   const second = await scene.store.claimContinuation(
     scene.session.id,
     source.runId,
-    "run-continuation-target-2",
+    "run-continuation-target-1",
   );
   assert.equal(second.status, "already_claimed");
   assert.equal(second.claim.claimId, claim.claimId);
@@ -157,6 +158,54 @@ test("C2+ C1：interrupted run claim 成功（digest/high_water 手工重算对�
   // 读回通道:按 source run 点查同一行。
   const reread = await scene.store.findContinuationClaimBySourceRun(scene.session.id, source.runId);
   assert.deepEqual(reread, claim);
+});
+
+test("C1+ 孤儿 claim 幂等改绑（Finding 1）：旧 target 未起跑可换绑，起跑后不可", async (context) => {
+  const scene = await createScene(context, "claim-orphan-rebind");
+  const source = await createTerminatedRun(scene, "interrupted", ["孤儿改绑前缀"]);
+
+  // 首次 claim 成功,但 target 的 run.started 写入前"崩溃"(不写任何 target 事件)。
+  const first = await scene.store.claimContinuation(
+    scene.session.id,
+    source.runId,
+    "run-target-crashed",
+  );
+  assert.equal(first.status, "claimed");
+
+  // 重试以新 runId 再 claim:旧 target 账本中不存在 → 幂等改绑,锚点信息不变。
+  const retry = await scene.store.claimContinuation(
+    scene.session.id,
+    source.runId,
+    "run-target-retry",
+  );
+  assert.equal(retry.status, "claimed");
+  assert.equal(retry.rebound, true);
+  assert.equal(retry.claim.targetRunId, "run-target-retry");
+  assert.equal(retry.claim.claimId, first.claim.claimId, "改绑不换锚点身份");
+  assert.equal(retry.claim.sourcePrefixDigest, first.claim.sourcePrefixDigest);
+  assert.equal(retry.claim.sourceHighWater, first.claim.sourceHighWater);
+  const reread = await scene.store.findContinuationClaimBySourceRun(scene.session.id, source.runId);
+  assert.equal(reread?.targetRunId, "run-target-retry");
+
+  // 换绑后的 target 真正起跑(以 claim 的 targetRunId 起,调度接入的契约)并终态后,
+  // 再换 target → already_claimed(续跑事实已定形)。
+  const target = await RuntimeRun.start({
+    capability: scene.session.runtimeEventCapability!,
+    runId: "run-target-retry",
+    continuationOf: {
+      runId: retry.claim.sourceRunId,
+      highWater: retry.claim.sourceHighWater,
+      prefixDigest: retry.claim.sourcePrefixDigest,
+    },
+  });
+  await target.finish("completed", "rebound-target-done");
+  const third = await scene.store.claimContinuation(
+    scene.session.id,
+    source.runId,
+    "run-target-third",
+  );
+  assert.equal(third.status, "already_claimed");
+  assert.equal(third.claim.targetRunId, "run-target-retry");
 });
 
 test("C2 前半：活跃 run / completed run / 不存在 run 的 claim 被类型化拒绝；target 重复占用被拒", async (context) => {
