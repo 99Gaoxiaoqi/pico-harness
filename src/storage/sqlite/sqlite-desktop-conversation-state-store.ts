@@ -20,6 +20,7 @@ import {
 } from "../../daemon/desktop-conversation-state.js";
 import { resolveWorkspaceSqliteStorageRoot, withWorkspaceSqliteLease } from "./workspace-scopes.js";
 import type { OperationalDatabaseLease } from "./sqlite-database.js";
+import { logger } from "../../observability/logger.js";
 
 /**
  * desktop conversation state 的 SQLite 实现(ADR 28)。
@@ -289,6 +290,13 @@ interface LegacyWorkspaceImport {
 /**
  * 一次性迁移(ADR 28 决策 3)。进程内幂等:任一步失败即中止且不改名,
  * 下次打开重试;已导入的库凭 control_metadata 标记跳过。
+ *
+ * 失败分类(对抗审查 Finding 6,防 poison-pill):解析阶段失败(JSON 语法/形状)
+ * 与导入阶段约束冲突(源数据内重复键)是永久损坏——重试永不可能成功,原本会
+ * 让"每次进程重启后的首个会话操作"必抛。此类失败记 error 日志后将原文件
+ * 改名 .failed 隔离(数据保留不删)并放行,store 以空态起步;其余失败(IO/锁)
+ * 视为瞬态,保留原 JSON 维持重试语义。多分片场景下永久失败隔离时,已提交的
+ * 分片保留其导入,未提交分片以空态起步(日志中说明)。
  */
 export function migrateLegacyDesktopConversationStateSync(options: {
   readonly picoHome?: string;
@@ -298,10 +306,16 @@ export function migrateLegacyDesktopConversationStateSync(options: {
   const markerPath = `${legacyPath}.migrated`;
   if (existsSync(markerPath)) return;
   if (!existsSync(legacyPath)) return;
-  const state: DesktopConversationStateFile = parseDesktopConversationStateFile(
-    JSON.parse(readFileSync(legacyPath, "utf8")),
-    legacyPath,
-  );
+  let state: DesktopConversationStateFile;
+  try {
+    state = parseDesktopConversationStateFile(
+      JSON.parse(readFileSync(legacyPath, "utf8")),
+      legacyPath,
+    );
+  } catch (error) {
+    isolatePermanentlyFailedLegacyJson(legacyPath, error, "legacy JSON 解析失败(语法/形状损坏)");
+    return;
+  }
 
   const groups = new Map<string, LegacyWorkspaceImport>();
   const groupFor = (workspacePath: string): LegacyWorkspaceImport => {
@@ -323,22 +337,50 @@ export function migrateLegacyDesktopConversationStateSync(options: {
     groupFor(claim.workspacePath).firstSendClaims.push(claim);
   }
 
-  for (const group of groups.values()) {
-    withWorkspaceSqliteLease(group.storageRoot, (lease) => {
-      lease.transaction("write", () => {
-        // 库内已有导入标记则不再导入(防双导入);标记先写,行导入失败连同标记一起回滚。
-        if (readControlMetadata(lease.database, LEGACY_IMPORT_MARKER_KEY) !== undefined) return;
-        writeControlMetadata(lease.database, LEGACY_IMPORT_MARKER_KEY, {
-          legacyVersion: state.version,
-          importedAt: new Date().toISOString(),
+  try {
+    for (const group of groups.values()) {
+      withWorkspaceSqliteLease(group.storageRoot, (lease) => {
+        lease.transaction("write", () => {
+          // 库内已有导入标记则不再导入(防双导入);标记先写,行导入失败连同标记一起回滚。
+          if (readControlMetadata(lease.database, LEGACY_IMPORT_MARKER_KEY) !== undefined) return;
+          writeControlMetadata(lease.database, LEGACY_IMPORT_MARKER_KEY, {
+            legacyVersion: state.version,
+            importedAt: new Date().toISOString(),
+          });
+          for (const queued of group.queuedInputs) insertQueueRow(lease.database, queued);
+          for (const record of group.idempotency) insertIdempotencyRow(lease.database, record);
+          for (const claim of group.firstSendClaims) insertClaimRow(lease.database, claim);
         });
-        for (const queued of group.queuedInputs) insertQueueRow(lease.database, queued);
-        for (const record of group.idempotency) insertIdempotencyRow(lease.database, record);
-        for (const claim of group.firstSendClaims) insertClaimRow(lease.database, claim);
       });
-    });
+    }
+  } catch (error) {
+    if (isPermanentImportFailure(error)) {
+      isolatePermanentlyFailedLegacyJson(legacyPath, error, "导入约束冲突(源数据内重复键)");
+      return;
+    }
+    throw error;
   }
   if (!existsSync(markerPath)) renameSync(legacyPath, markerPath);
+}
+
+/**
+ * 永久失败隔离:error 日志 + 改名 .failed(数据保留),让后续操作以空态起步。
+ * 注意多分片场景:此前已提交的分片保留导入,未提交分片空态起步。
+ */
+function isolatePermanentlyFailedLegacyJson(legacyPath: string, error: unknown, reason: string): void {
+  logger.error(
+    { err: error, legacyPath, reason },
+    "[ConversationState] legacy JSON 永久损坏,已隔离为 .failed 并跳过迁移(已提交分片保留)",
+  );
+  renameSync(legacyPath, `${legacyPath}.failed`);
+}
+
+/** 导入阶段的永久失败:约束冲突=源数据自身重复,重试不可救;其余(IO/锁)按瞬态重试。 */
+function isPermanentImportFailure(error: unknown): boolean {
+  const message = String((error as { message?: unknown } | null)?.message ?? "");
+  return /UNIQUE constraint failed|PRIMARY KEY constraint failed|CHECK constraint failed/u.test(
+    message,
+  );
 }
 
 function insertQueueRow(database: DatabaseSync, queued: DesktopQueuedInput): void {

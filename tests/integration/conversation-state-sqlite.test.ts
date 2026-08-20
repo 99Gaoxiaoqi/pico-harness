@@ -277,7 +277,7 @@ test("sqlite conversation state: legacy json migrates once per workspace shard a
   }
 });
 
-test("sqlite conversation state: failed legacy import rolls back fully and keeps the json in place (B1)", async () => {
+test("sqlite conversation state: permanently corrupt legacy import is isolated to .failed and the store starts empty (B1, Finding 6)", async () => {
   const fixture = createFixture("pico-conversation-state-sqlite-import-rollback-");
   try {
     const canonicalA = normalizeWorkspacePath(fixture.workspaceA);
@@ -312,17 +312,32 @@ test("sqlite conversation state: failed legacy import rolls back fully and keeps
     });
 
     const store = new SqliteDesktopConversationStateStore({ picoHome: fixture.picoHome });
-    await assert.rejects(
-      store.listQueued(fixture.workspaceA, "session-1"),
-      /UNIQUE constraint failed/u,
-    );
-    assert.equal(existsSync(fixture.legacyJsonPath), true);
+    // 导入约束冲突=永久损坏:不再让首个操作抛错(poison-pill),而是隔离 .failed 空态起步。
+    assert.deepEqual(await store.listQueued(fixture.workspaceA, "session-1"), []);
+    assert.equal(existsSync(fixture.legacyJsonPath), false);
+    assert.equal(existsSync(`${fixture.legacyJsonPath}.failed`), true);
     assert.equal(existsSync(`${fixture.legacyJsonPath}.migrated`), false);
     const counts = readWorkspaceRowCounts(fixture, fixture.workspaceA);
     assert.deepEqual(
       [counts.queue, counts.idempotency, counts.claims, counts.legacyImportMarker],
       [0, 0, 0, undefined],
     );
+    // 隔离后 store 可用:新写入正常落库。
+    await store.enqueue(fixture.workspaceA, "session-1", { kind: "text", text: "after isolation" });
+    assert.equal((await store.listQueued(fixture.workspaceA, "session-1")).length, 1);
+  } finally {
+    cleanupFixture(fixture.root);
+  }
+});
+
+test("sqlite conversation state: syntactically corrupt legacy JSON is isolated to .failed (B1, Finding 6)", async () => {
+  const fixture = createFixture("pico-conversation-state-sqlite-import-syntax-");
+  try {
+    writeFileSync(fixture.legacyJsonPath, "{ not valid json", "utf8");
+    const store = new SqliteDesktopConversationStateStore({ picoHome: fixture.picoHome });
+    assert.deepEqual(await store.listQueued(fixture.workspaceA, "session-1"), []);
+    assert.equal(existsSync(`${fixture.legacyJsonPath}.failed`), true);
+    assert.equal(existsSync(fixture.legacyJsonPath), false);
   } finally {
     cleanupFixture(fixture.root);
   }
