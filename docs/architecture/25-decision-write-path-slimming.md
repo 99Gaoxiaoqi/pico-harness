@@ -22,7 +22,7 @@ eventId+载荷等价性）、planOperation 查重（需要操作身份索引）�
    sequence/CAS/去重/planOp 全部从水位与索引取；**payload 等价性由哈希承载**
    （canonicalizeRuntimeEvent 输出序列化确定，写入与校验两侧自洽）——同 id 异载荷
    仍然 fail-closed，语义不变。
-3. **catalog 行转增量折叠**（决策 24 的预留路径）：行内持久化折叠状态
+3. **catalog 行转增量折叠**（决策 24a 的预留路径）：行内持久化折叠状态
    （`SessionSummaryFold`，schemaVersion 2），追加只折叠新事件；全量口径与增量口径
    共用同一折叠器（`engine/session-summary.ts`），等价性由构造保证。行水位与
    ledger 水位不符时全量重建该行（防漂移阀门）。
