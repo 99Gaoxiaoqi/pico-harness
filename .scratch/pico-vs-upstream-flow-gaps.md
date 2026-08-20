@@ -15,6 +15,11 @@
 > 验证：六文件 29/29 绿+守护 1/1；typecheck 曾因整机内存耗尽（tsc Zone OOM）阻塞，**2026-08-20 内存缓解后已补跑通过（含全部审查修复+调度接入）**。
 >
 > **P3 调度接入落地（2026-08-20）**：executor 级自动锚定——reconcile 后自动 claim 最新未 claim 的 interrupted run，新 run 以 targetRunId 起跑携带 continuationOf（前台/goal/cron 统一生效；显式声明与 prestartedRun 优先）。store 新增 findLatestInterruptedUnclaimedRun。测试 continuation-auto-wiring.test.ts（claim→起跑→源封口→二次不重复锚定，1/1）；executor 面 33 过 4 挂全为预存 Memory 调度家族（stash 对照逐条复现）。ADR 29 §5 已更新。
+>
+> **第二轮对抗审查（2026-08-20，审 4df98341..3af702af 四笔）**：主攻面（自动封口×fork/记忆）攻不破（fork 写目标会话 bootstrap run/记忆写自有表/恢复写走独立 run 或幂等豁免；cancel≠interrupted 分界安全）；2 major 已修——
+> F1 迁移隔离误吞瞬态 IO（readFileSync 在 try 内，EBUSY/EPERM 会永久隔离好文件）→ 4aa2f41f：读取移出 try，永久分类=SyntaxError+"Desktop conversation*"形状错，附 F4 .failed 不覆盖历次副本（9/9 绿）；
+> F2 调度接入把跨进程 reconcile 盲区升级为致命封口 → a709f479：终态新鲜度门（缺省 10 分钟，门内不 claim 不封口、存活方继续可写；真实崩溃锚定延迟到窗口后），超长存活 run 残留记录 ADR 29（根治需 reconcile 跨进程活性检测，另立决策）。
+> minor 未修：F3 claim→start 跨进程窗口锚点脱钩（无生产读方，账面失真）、F5 LIMIT 32 滑窗死区（≥33 同批 interrupted 才触发）。审查者事故（junction 误删 node_modules）已恢复，desktop 依赖缺失后经 npm ci 补全，typecheck 全量通过。
 
 ---
 
