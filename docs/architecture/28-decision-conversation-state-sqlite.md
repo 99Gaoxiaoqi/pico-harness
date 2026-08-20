@@ -38,7 +38,17 @@ writeJsonAtomic）：原子性靠 rename 不靠 WAL，daemon 崩溃窗口无事�
 
 - control scope migration +1；旧 JSON 成为一次性兼容读取面。
 - 多客户端并发写竞争现阶段不存在（单 daemon），分表粒度从简。
+- **迁移失败分类（2026-08-20 对抗审查 Finding 6 修订）**：解析损坏/导入约束冲突属
+  永久失败——error 日志 + 原文件改名 `.failed` 隔离（数据保留）后放行，store 空态
+  起步，消除"每次重启首个会话操作必抛"的 poison-pill；瞬态失败（IO/锁）保留原 JSON
+  维持重试。多分片场景下永久失败隔离时已提交分片保留导入。
+- **分片键与行键归一化口径不对称（对抗审查 Finding 7，记录为陷阱）**：库路由用
+  realpath+normalize+win32 小写，行键用 resolve+NFC 保留大小写——大小写变体进同一库
+  但成不同行。单 daemon + workspace registration 统一拼写下不触发；多入口写入成为
+  现实时须先收敛（store 落列前过 canonicalizeWorkspacePath 或行键同口径小写）。
+- **队列同刻 tie-break 与 JSON 版漂移（Finding 8，接受）**：同毫秒入队顺序在
+  localeCompare（ICU）与 SQLite BINARY 排序间可能不同；排队语义对同刻 tie 无依赖。
 
 ## 复评条件
 
-- desktop 多客户端并发成为现实 → 复评表粒度与争用。
+- desktop 多客户端并发成为现实 → 复评表粒度与争用，并一并处理分片/行键口径收敛。

@@ -65,11 +65,12 @@ test("真实引擎账本序:message.committed(toolCall) < tool.started < tool.re
       "message.committed declaring the tool call",
     );
     const started = indexOf(
-      (event) => event.kind === "tool.started" && event.refs.toolCallId === "call:order-guard",
+      (event) => event.kind === "tool.started" && event.refs?.toolCallId === "call:order-guard",
       "tool.started",
     );
     const recorded = indexOf(
-      (event) => event.kind === "tool.result.recorded" && event.refs.toolCallId === "call:order-guard",
+      (event) =>
+        event.kind === "tool.result.recorded" && event.refs?.toolCallId === "call:order-guard",
       "tool.result.recorded",
     );
     assert.ok(
