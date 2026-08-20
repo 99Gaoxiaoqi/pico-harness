@@ -22,7 +22,13 @@ claim 成功 seal source）。
    `claimContinuation(sourceSessionId, sourceRunId, targetRunId)`：
    - 校验 source run 存在且终态为 interrupted（活跃 run 拒绝被 claim）；
    - 读源 ledger 头水位，计算前缀 digest；
-   - INSERT（UNIQUE 冲突 → 返回类型化冲突，不抛裸错）。
+   - INSERT（UNIQUE 冲突 → 返回类型化冲突，不抛裸错）；
+   - **孤儿 claim 幂等改绑（2026-08-20 对抗审查 Finding 1 修订）**：同 target 重复
+     claim → `already_claimed`（纯幂等）；异 target 且旧 target 在账本中无 `run.started`
+     （claim 成功但 target 起跑前崩溃）→ 改绑到新 target，返回 `claimed` +
+     `rebound:true`，锚点身���/digest/high_water/created_at 不变——否则该崩溃窗口会
+     不可逆烧死 source 封口与 target 槽位。旧 target 已起跑则不可换绑。**调度接入
+     契约：目标 run 须以 claim 的 targetRunId 起跑（RuntimeRun.start 传入 runId）。**
 3. **目标 run 关联**：`run.started` 事件 data 增加
    `continuationOf?: { runId, highWater, prefixDigest }`（复用既有 kind，data 扩展）。
    模型上下文无需特判——同 session 事件流天然包含前缀；跨 session 续跑不在本决策。
@@ -37,11 +43,14 @@ claim 成功 seal source）。
 
 ## 验收不变量
 
-- C1 同一 source run 至多一个 claim（DB UNIQUE 约束，冲突返回类型化结果）。
+- C1 同一 source run 至多一个 claim（DB UNIQUE 约束，冲突返回类型化结果）；
+  孤儿改绑（§决策 2 修订）只改 target_run_id，锚点唯一性不破。
 - C2 claim 成功隐含：claim 时刻源为 interrupted 终态、digest 与账本一致。
-- C3 claim 事务只读源账本，只写 claims 行；目标关联只经 run.started。
+- C3 claim 事务只读源账本，只写 claims 行（含改绑 UPDATE）；目标关联只经 run.started。
 - C4 已 claim 的源 run 追加非恢复类事件被拒（源封口，claim-scoped）；未 claim 的终态
-   run 保持开放（fork/记忆通道兼容）；幂等重放不受影响。
+   run 保持开放（fork/记忆通道兼容）；幂等重放不受影响。**批内语义**：同一 append 批内
+   `run.terminal` 插入后，同 run 的后续新事件同样被拒（终态必须是该 run 批内最后一条
+   新事实）——2026-08-20 对抗审查补记，现有批形天然满足。
 
 集成测试：interrupted run → claim 成功（digest/high_water 正确）→ 二次 claim 冲突 →
 源追加被拒 → 目标 run.started 携带 continuationOf。
@@ -49,7 +58,9 @@ claim 成功 seal source）。
 ## 弃案
 
 - **digest 覆盖投影（复算消息投影）**：投影逻辑随版本演进，只 digest 原始事件
-  （与 maka 同一理由）。
+  （与 maka 同一理由）。**附注（对抗审查 Finding 9）**：`canonicalJson` 本身也是代码、
+  可随版本演进——未来任何 digest 验证者必须对**库内已存 payload_json 字节**计算/比对，
+  禁止对事件重新 canonical 化后再摘要，否则跨版本会误判旧库。
 - **continuation 物化全部祖先事件**：链长增长 O(n²) 存储 + 身份重复。弃。
 - **活跃 run 可被 claim（软中断续跑）**：与"终态事实先于终态状态"冲突，仅终态可续。弃。
 

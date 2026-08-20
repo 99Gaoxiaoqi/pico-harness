@@ -168,9 +168,14 @@ export type RuntimeContinuationClaimRejection =
   /** target run 已作为其他 claim 的续跑目标。 */
   | "target_conflict";
 
-/** claimContinuation 结果:成功 / 已被 claim(C1 冲突)/ 类型化拒绝。 */
+/** claimContinuation 结果:成功(含孤儿改绑)/ 已被 claim(C1 冲突)/ 类型化拒绝。 */
 export type RuntimeContinuationClaimOutcome =
-  | { readonly status: "claimed"; readonly claim: RuntimeContinuationClaim }
+  | {
+      readonly status: "claimed";
+      readonly claim: RuntimeContinuationClaim;
+      /** true=本次为孤儿 claim 幂等改绑(旧 target 从未起跑,锚点换绑到新 target)。 */
+      readonly rebound?: boolean;
+    }
   | { readonly status: "already_claimed"; readonly claim: RuntimeContinuationClaim }
   | { readonly status: "rejected"; readonly reason: RuntimeContinuationClaimRejection };
 
