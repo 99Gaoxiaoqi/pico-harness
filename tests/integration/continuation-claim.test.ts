@@ -300,6 +300,121 @@ test("C4 源封口（claim-scoped）：已 claim 的 run 追加新事件被拒�
   assert.equal(afterReplay.length, before.length, "sealed-run replay must not append anything");
 });
 
+test("C4 批内封口（ADR 29 §C4）：批模式追加被拒整批不落；批内终态后的新事件同样被拒；recovery 豁免通道可用", async (context) => {
+  const scene = await createScene(context, "claim-batch-seal");
+  const claimedSource = await createTerminatedRun(scene, "interrupted", ["batch-seal-prefix"]);
+  const claim = await scene.store.claimContinuation(
+    scene.session.id,
+    claimedSource.runId,
+    "run-batch-seal-target",
+  );
+  assert.equal(claim.status, "claimed");
+  const baseline = await scene.store.readSession(scene.session.id);
+
+  // 场景一:批模式(appendBatch)追加新事件到已 claim 的源 run → RunSealedError,
+  // 整批原子回滚——批中所有新事件都不落库。
+  const batchedA: RuntimeEvent = {
+    schemaVersion: 2,
+    eventId: "batch-seal-a",
+    sessionId: scene.session.id,
+    invocationId: "inv-batch-seal",
+    runId: claimedSource.runId,
+    turnId: "turn-batch-seal",
+    at: new Date().toISOString(),
+    partial: false,
+    visibility: "model",
+    kind: "message.committed",
+    data: { message: { role: "user", content: "批模式追改一" } },
+  } as RuntimeEvent;
+  const batchedB: RuntimeEvent = { ...batchedA, eventId: "batch-seal-b" } as RuntimeEvent;
+  await assert.rejects(
+    scene.store.appendBatch([batchedA, batchedB]),
+    (error: unknown) => error instanceof RuntimeEventStoreRunSealedError,
+  );
+  const afterBatch = await scene.store.readSession(scene.session.id);
+  assert.equal(afterBatch.length, baseline.length, "rejected batch must land nothing");
+  assert.equal(
+    afterBatch.some((event) => event.eventId === "batch-seal-a" || event.eventId === "batch-seal-b"),
+    false,
+  );
+
+  // 场景二:单批内先插入 run.terminal、后跟同 run 的新事件 → 批内封口生效,
+  // 新事件被拒且终态本身也不落地(整批原子回滚);终态必须是其 run 批内最后一条新事实。
+  const freshRunId = "run-inbatch-terminal";
+  const inBatchStart: RuntimeEvent = {
+    schemaVersion: 2,
+    eventId: "inbatch:start",
+    sessionId: scene.session.id,
+    invocationId: "inv-inbatch",
+    runId: freshRunId,
+    turnId: "turn-inbatch",
+    at: new Date().toISOString(),
+    partial: false,
+    visibility: "internal",
+    kind: "run.started",
+    data: { workDir: scene.session.workDir },
+  } as RuntimeEvent;
+  const inBatchTerminal: RuntimeEvent = {
+    ...inBatchStart,
+    eventId: "inbatch:terminal",
+    kind: "run.terminal",
+    data: { status: "completed" },
+  } as RuntimeEvent;
+  const inBatchAfter: RuntimeEvent = {
+    ...inBatchStart,
+    eventId: "inbatch:after-terminal",
+    kind: "message.committed",
+    visibility: "model",
+    data: { message: { role: "user", content: "批内终态之后" } },
+  } as RuntimeEvent;
+  await assert.rejects(
+    scene.store.appendBatch([inBatchStart, inBatchTerminal, inBatchAfter]),
+    (error: unknown) => error instanceof RuntimeEventStoreRunSealedError,
+  );
+  const afterInBatch = await scene.store.readSession(scene.session.id);
+  assert.equal(afterInBatch.length, baseline.length, "in-batch terminal rejection rolls back the whole batch");
+  // 对照组:同样的前两事件(无批内尾随新事件)正常落地。
+  await scene.store.appendBatch([inBatchStart, inBatchTerminal]);
+  const control = await scene.store.readSession(scene.session.id);
+  assert.equal(control.length, baseline.length + 2);
+
+  // 场景三:recovery 类事件(tool.result.recorded + data.recovery)是批内/claim
+  // 封口的显式豁免通道(ADR 29 §决策 4;当前无生产触发路径,测试钉住语义)。
+  const recoveryContent = "recovery-exempt synthetic tool result";
+  const recoveryAppend = await scene.store.append({
+    schemaVersion: 2,
+    eventId: "batch-seal-recovery-exempt",
+    sessionId: scene.session.id,
+    invocationId: "inv-batch-seal",
+    runId: claimedSource.runId,
+    turnId: "turn-batch-seal",
+    at: new Date().toISOString(),
+    partial: false,
+    visibility: "model",
+    refs: { toolCallId: "call-batch-seal-recovery" },
+    kind: "tool.result.recorded",
+    data: {
+      toolName: "batch_seal_recovery",
+      status: "interrupted",
+      recovery: { classification: "indeterminate" },
+      body: {
+        storage: "inline",
+        content: recoveryContent,
+        sha256: createHash("sha256").update(recoveryContent, "utf8").digest("hex"),
+        sizeBytes: Buffer.byteLength(recoveryContent, "utf8"),
+      },
+      projection: {
+        version: 1,
+        mode: "synthetic",
+        text: recoveryContent,
+        strategy: "interruption-recovery",
+        truncated: false,
+      },
+    },
+  } as RuntimeEvent);
+  assert.equal(recoveryAppend.inserted, true, "recovery-class append stays exempt from claim seal");
+});
+
 test("C3+ 目标关联：run.started 携带 continuationOf 落库可读回；目标 run 正常写事件不受源封口影响", async (context) => {
   const scene = await createScene(context, "claim-target-association");
   const source = await createTerminatedRun(scene, "interrupted", ["源前缀"]);
