@@ -2844,6 +2844,9 @@ export class AgentEngine implements AgentRunner {
         runtimeStatus = "rejected";
       } else {
         signal?.throwIfAborted();
+        // ADR 27 决策 4 写序不变量:tool.started 必须先于 registry.execute 落库——
+        // 它是恢复期 F1/F2 分类(not_dispatched vs indeterminate)的判定边界。
+        // 守护测试:tests/integration/tool-dispatch-order-guard.test.ts。
         await runtimeRun?.recordToolStarted(toolCall.id, toolCall.name, toolCall.arguments);
         result = await this.registry.execute(toolCall, {
           signal,
