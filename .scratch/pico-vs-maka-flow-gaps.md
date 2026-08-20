@@ -20,6 +20,19 @@
 > F1 迁移隔离误吞瞬态 IO（readFileSync 在 try 内，EBUSY/EPERM 会永久隔离好文件）→ 4aa2f41f：读取移出 try，永久分类=SyntaxError+"Desktop conversation*"形状错，附 F4 .failed 不覆盖历次副本（9/9 绿）；
 > F2 调度接入把跨进程 reconcile 盲区升级为致命封口 → a709f479：终态新鲜度门（缺省 10 分钟，门内不 claim 不封口、存活方继续可写；真实崩溃锚定延迟到窗口后），超长存活 run 残留记录 ADR 29（根治需 reconcile 跨进程活性检测，另立决策）。
 > minor 未修：F3 claim→start 跨进程窗口锚点脱钩（无生产读方，账面失真）、F5 LIMIT 32 滑窗死区（≥33 同批 interrupted 才触发）。审查者事故（junction 误删 node_modules）已恢复，desktop 依赖缺失后经 npm ci 补全，typecheck 全量通过。
+>
+> **推送（2026-08-20）**：main 已推送远端（96cb5cae..e4da9ccf，114 提交），与 origin 同步。
+>
+> ## 预存红集中清理计划（未执行，2026-08-20 本机过卡中断，换机续跑）
+>
+> 验证法已备好：`node .scratch/run-integration-sweep.mjs .scratch/all-tests.txt`（逐文件扫跑器，单文件 300s 超时防 Windows hang；all-tests.txt 用 `dir /b tests\integration\*.test.ts > .scratch\all-tests.txt` 重新生成）。失败集经三次全量扫跑交叉验证，稳定 27 文件。按五族并行派工（文件面不相交），已知根因线索：
+>
+> - **族A 过时/结构性**：architecture-invariants（2 挂=ENOENT 读已删的旧 runtime-event-store.ts，断言迁到 sqlite-runtime-event-store.ts，口径反映新架构）、projection-diagnostics-evidence-ref（21/1）、session-runtime-dispose（3/1）、plugin-runtime-snapshot-registry（3/1）、plugin-hook-trust（0/1）、workspace-runtime-consistency（11/1，git rev-parse 正斜杠 vs realpath 反斜杠的 Windows 路径断言）。
+> - **族B memory 家族**：memory-quality（1/1）、memory-runtime-quality（2/3）、memory-runtime（**300s 挂起**）、runtime-run-executor 的 Memory 调度 4 条（其余用例绿）。历史实锤：过时 toolCall fake，修法=JSON content 形状；engine 门控变更。源面 src/memory/**。
+> - **族C desktop 环境族**：desktop-runtime-close（2/1）、desktop-plugin-parity（3/1）、desktop-memory-lifecycle-ordering（0/4）、desktop-memory-ui（6/1）。线索：隔离 fixture 报"没有可用模型路由"（基座就挂，与 ADR 28 无关）；~/.pico/config.json 有 lez-claude。源面 src/daemon/desktop-*，不动 src/memory。
+> - **族D terminal-bench 族（8 文件）**：normalizer（0/**33**，优先查——像 schema/快照漂移非环境）、container-policy（3 挂）、captured-process（2）、runtime-controls（2）、docker-cleanup（2）、bundle-lock（1）、task-timeout-preflight（1）。先探 `docker --version`。源面 scripts/terminal-bench/**。
+> - **族E 杂项**：hook-full-flow（0/3，137s）、path-read-boundaries（0/4）、file-write-safety（5/2）、user-config-temp-recovery（1/3）、lifecycle-races（18/3，负载敏感恶化）、headless-one-shot-runner（**300s 挂起**，bootstrap 同类是绿的可对照）。线索：hooks 08-17 shell 化后现存 hooks 需 re-trust；win32 bash 语义须 skip。
+> - 规矩：单文件测试禁全量；每条失败分类可修/环境依赖（有 env-gate 先例才 skip）/真缺陷；不许为绿删断言；逐族提交。
 
 ---
 
