@@ -38,7 +38,20 @@ pico 前提：事件即事实（无第二状态机）；event_id 库级主键 + 
    （避免 assertRuntimeEvent/schema 注册面扩大）；若实现中发现 data 校验不容纳，按最小
    扩展改 schema，仍不新增 kind。
 4. **派发顺序硬约束**：`tool.started` 必须先于 `registry.execute` 落库（现状即如此，
-   实现须以断言或测试固定该顺序——它 是 F1/F2 分类的判定边界）。
+   它 是 F1/F2 分类的判定边界）。守护测试（2026-08-20 对抗审查 Finding 2 补）：
+   `tests/integration/tool-dispatch-order-guard.test.ts` 走真实 AgentEngine 断言账本序
+   `message.committed(toolCall) < tool.started < tool.result.recorded`；派发点
+   （src/engine/loop.ts runOneTool）带不变量注释。
+
+### P0 已知盲区（2026-08-20 对抗审查确认，接受不改）
+
+- **子代理 transcript-only 工具调用**：子代理循环向父 run 写 `tool.started`
+  （src/engine/loop.ts 子代理并发路径），但子代理 assistant 消息走 transcript 可见性、
+  不产生 model-history pending entry——这类调用的悬空 `tool.started` 无恢复事实
+  （孤儿 start）。外层 agent 调用的 indeterminate 分类在语义上覆盖内层副作用，
+  属设计取舍；若未来子代理消息转 model-history 投影，此盲区自动消失。
+- FIFO 多 start/多 result 交错推演安全（错分只会偏 indeterminate），以写序不变量成立
+  为前提（见决策 4）。
 
 ### P0 验收不变量
 
