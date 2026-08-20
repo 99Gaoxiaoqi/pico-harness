@@ -1,4 +1,10 @@
-# 决策记录 24：工作区会话目录（session catalog）（2026-08-18）
+# 决策记录 24a：工作区会话目录（session catalog）（2026-08-18）
+
+> 编号说明：本记录与 SQLite 迁移总纲（决策记录 24）原同号冲突，2026-08-20 审计后
+> 消歧为 24a；源码中"ADR 24 §4.x"一律指 SQLite 迁移总纲，catalog 相关引用本文。
+> 实现形态说明：本文决策时的 JSONL 载体（session-catalog.ts / runtime-event-store.ts）
+> 已随 SQLite 迁移（决策记录 24）退役，catalog 现为 sessions scope 的
+> `session_catalog_projection` 表（增量折叠口径由决策 25 第 3 条落地）。
 
 > 分支：`feat/session-catalog`。本文记录决策动机与边界，实现见
 > `src/storage/session-catalog.ts`、`src/storage/runtime-event-store.ts` 的
