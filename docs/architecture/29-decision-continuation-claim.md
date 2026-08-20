@@ -84,5 +84,7 @@ claim 成功 seal source）。
 
 ## 复评条件
 
-- goal/cron 自动续跑接入 → 复评 API 与调度边界。
+- goal/cron 差异化续跑策略（选择性续跑、`prestartedRun` 与 `continuationOf` 的交互边界）
+  → 复评。基础 executor 级自动锚定已落地（2026-08-20，§决策 5），前台/goal/cron 统一生效；
+  可恢复任务走 `prestartedRun` 路径时显式跳过自动锚定（事实已定形），该交互如有新需求再议。
 - 前缀 digest 成为启动瓶颈 → 复评缓存/增量 digest。
