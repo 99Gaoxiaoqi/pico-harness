@@ -16,8 +16,8 @@ const readSource = (relativePath: string): string =>
 
 test("事件账本无事件级 GC（append-only 不变量）", () => {
   // 19 文档 1.8：事件账本内没有事件级 GC，无 prune/trim/prune。
-  // 唯一删除是 deleteSession 的整目录级联，不是事件级回收。
-  const store = readSource("src/storage/runtime-event-store.ts");
+  // 唯一删除是 deleteSession 的整会话级联（SQLite 迁移后为删行），不是事件级回收。
+  const store = readSource("src/storage/sqlite/sqlite-runtime-event-store.ts");
   // 排除 recover/repair（崩溃恢复，不是 GC）；只针对 GC 语义的回收动词。
   assert.doesNotMatch(
     store,
@@ -28,8 +28,8 @@ test("事件账本无事件级 GC（append-only 不变量）", () => {
 
 test("appendBatch 是 RuntimeEventStore 内唯一写原语", () => {
   // 19 文档 1.2：append/appendSessionState/appendTranscriptEvent/appendPlanOperation/
-  // appendGraphOperation 全是 appendBatch 的包装。
-  const store = readSource("src/storage/runtime-event-store.ts");
+  // appendGraphOperation 全是 appendBatch 的包装（SQLite 迁移后契约不变，ADR 24）。
+  const store = readSource("src/storage/sqlite/sqlite-runtime-event-store.ts");
   assert.match(store, /\bappendBatch\b/, "appendBatch 必须存在为唯一写原语");
   // 文档声称的写包装都应存在（委托 appendBatch）。
   for (const wrapper of [

@@ -353,7 +353,9 @@ test("adversarial: 无 throughEventId 的 rewound 产 soft 诊断，不与空输
   ] as unknown as RuntimeEvent[];
 
   const { entries, diagnostics } = materializeRuntimeHistoryProjection(events);
-  assert.equal(entries.length, 0);
+  // rewound 截断语义已随破坏性 rewind 一并删除（d4f15ebe，rewind 现为非破坏性 fork）：
+  // rewound 前的 message.committed 正常投影，不再被清空。
+  assert.equal(entries.length, 1);
   // rewound 产 soft 诊断——与空输入（diagnostics=[]）可区分
   const rewoundDiags = diagnostics.filter((d) => d.code === "unclaimed_control_fact");
   assert.ok(rewoundDiags.length > 0);
