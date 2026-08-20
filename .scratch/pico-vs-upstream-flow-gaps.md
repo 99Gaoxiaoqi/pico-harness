@@ -7,6 +7,12 @@
 > 落地顺序：ADR 27/28/29（53a3961a）→ P1（2c7f4477）+ P2（69bb4bdc）并行 → P0（ec58298e）→ P3（914da1c6）→ seal 收窄修订（8c29c6c5）。
 > 各项落地记录见 §2 对应小节。全量集成回归：166 文件扫跑 + 基座 19cca177 对照，27 预存/2 回归，回归已由 8c29c6c5 清零。
 > e2e 真机（RUN_LLM_E2E=1，lez-claude）：runtime-consistency 4/5、graph-mode 0/3（hookFailed）、tui-matrix 0/6——三文件失败均在基座 19cca177 完整复现（缓存计因断言漂移/hook 环境失败），零新增回归。
+>
+> **对抗审查轮（2026-08-20，main 上直审 17a6cb83）**：无 blocker；2 major + 6 minor + 5 info，"必须先修"三项已全部落地——
+> F2 写序守护（4df98341，真实引擎账本序测试+ADR 27 决策 4 兑现+子代理盲区补记）、F6 迁移 poison-pill（6780b568，永久失败隔离 .failed）、F1 孤儿 claim 改绑（5965bbd8，ADR 29 修订+调度契约）。
+> info 级已记 ADR：digest 验证者必须摘要库内字节（ADR 29 弃案附注）、批内 terminal 拒收语义（C4 补记）、分片/行键口径不对称+tie-break（ADR 28 已知局限）。
+> 未修遗留（minor，后续迭代）：P1 HighWater 豁免/lease 丢失不仲裁测试缺口、P0 已终态 run 重复检测效率债、P2 poison-pill 已修但裁剪竞态等未动。
+> 验证：六文件 29/29 绿+守护 1/1；**typecheck 因整机内存耗尽（8GB 云桌 ~1GB 空闲，tsc Zone OOM）未能完成全量跑**——改动已逐文件人工类型复核（refs 可选链实错已修，b46b9a00），内存释放后需补跑 `node node_modules\typescript\lib\tsc.js -p tsconfig.json`。
 
 ---
 
