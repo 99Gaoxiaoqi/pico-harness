@@ -13,6 +13,8 @@
 > info 级已记 ADR：digest 验证者必须摘要库内字节（ADR 29 弃案附注）、批内 terminal 拒收语义（C4 补记）、分片/行键口径不对称+tie-break（ADR 28 已知局限）。
 > 未修遗留（minor，后续迭代）：P1 HighWater 豁免/lease 丢失不仲裁测试缺口、P0 已终态 run 重复检测效率债、P2 poison-pill 已修但裁剪竞态等未动。
 > 验证：六文件 29/29 绿+守护 1/1；**typecheck 因整机内存耗尽（8GB 云桌 ~1GB 空闲，tsc Zone OOM）未能完成全量跑**——改动已逐文件人工类型复核（refs 可选链实错已修，b46b9a00），内存释放后需补跑 `node node_modules\typescript\lib\tsc.js -p tsconfig.json`。
+>
+> **P3 调度接入落地（2026-08-20）**：executor 级自动锚定——reconcile 后自动 claim 最新未 claim 的 interrupted run，新 run 以 targetRunId 起跑携带 continuationOf（前台/goal/cron 统一生效；显式声明与 prestartedRun 优先）。store 新增 findLatestInterruptedUnclaimedRun。测试 continuation-auto-wiring.test.ts（claim→起跑→源封口→二次不重复锚定，1/1）；executor 面 33 过 4 挂全为预存 Memory 调度家族（stash 对照逐条复现）。ADR 29 §5 已更新。
 
 ---
 

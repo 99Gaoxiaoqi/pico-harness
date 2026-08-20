@@ -38,8 +38,14 @@ claim 成功 seal source）。
    覆盖的是前缀 [1..high_water]，终态后追加不改变前缀、不影响 claim 完整性。修订为：
    **仅对已被 continuation claim 的 source run 拒收非恢复类 append**（claim 存在 ⇒ claim
    时已终态，fail-closed）；未被 claim 的终态 run 保持历史开放语义。
-5. **定位收窄**：本协议只做"确定性续跑锚"（防双续跑 + 前缀完整性 + 源封口）。调度接入
-   （goal/cron 自动续跑）不在本决策内，届时复评 API 形状。
+5. **定位与接入**：本协议做"确定性续跑锚"（防双续跑 + 前缀完整性 + 源封口）。
+   **executor 级自动接入已落地（2026-08-20）**：`RuntimeRunExecutor` 在 reconcile/
+   repair 之后、`RuntimeRun.start` 之前自动锚定最新未 claim 的 interrupted run
+   （`findLatestInterruptedUnclaimedRun` + `claimContinuation`），本次 run 以 claim
+   的 targetRunId 起跑并携带 continuationOf——前台 send、goal、cron 统一生效；
+   调用方显式 `continuationOf` 与 `prestartedRun` 优先于自动锚定；claim 失败/无候选
+   则普通起跑（info 日志）。goal/cron 上层若需差异化续跑策略（如选择性续跑、
+   跨会话），届时在调用方显式声明路径上扩展。
 
 ## 验收不变量
 

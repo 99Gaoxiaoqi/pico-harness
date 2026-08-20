@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { AgentEngine } from "../engine/loop.js";
@@ -118,6 +119,10 @@ export class RuntimeRunExecutor {
         capability: runtimeCapability,
       });
       await this.recoverOrphanGraphWorks(session, runtimeState);
+      // ADR 29 调度接入(2026-08-20):reconcile 把崩溃 run 定形为 interrupted 后,
+      // 自动锚定最新未 claim 的 interrupted run——本次 run 以其续跑身份起跑
+      // (goal/cron/前台统一生效;显式 continuationOf 与 prestartedRun 优先)。
+      const autoContinuation = await this.claimAutomaticContinuation(session);
       const runtimeRun = await RuntimeRun.start({
         capability: runtimeCapability,
         ...(prestartedRun
@@ -128,7 +133,9 @@ export class RuntimeRunExecutor {
               parentRunId: prestartedRun.parentRunId,
               now: prestartedRunClock(prestartedRun.runStartedAt),
             }
-          : {}),
+          : autoContinuation
+            ? { runId: autoContinuation.runId, continuationOf: autoContinuation.continuationOf }
+            : {}),
         ...(this.input.continuationOf && !prestartedRun
           ? { continuationOf: this.input.continuationOf }
           : {}),
@@ -293,6 +300,39 @@ export class RuntimeRunExecutor {
    * works then surface as deadlocked via the existing missingInputIds
    * continuation diagnostics.
    */
+  /**
+   * ADR 29 调度接入:最新 interrupted 终态且未被 claim 的 run → 为本次 run
+   * 锚定续跑(返回 target runId + continuationOf 三元组)。claim 失败/无候选/
+   * 调用方已显式声明 continuationOf 或使用 prestartedRun 时返回 undefined,
+   * 本次 run 以普通身份起跑。claim 成功但 start 前崩溃的窗口由孤儿改绑兜底。
+   */
+  private async claimAutomaticContinuation(
+    session: Session,
+  ): Promise<{ runId: string; continuationOf: RuntimeRunContinuationOf } | undefined> {
+    if (this.input.continuationOf || this.input.prestartedRun) return undefined;
+    const store = session.runtimeEventStore;
+    if (!store) return undefined;
+    const sourceRunId = await store.findLatestInterruptedUnclaimedRun(session.id);
+    if (!sourceRunId) return undefined;
+    const targetRunId = randomUUID();
+    const outcome = await store.claimContinuation(session.id, sourceRunId, targetRunId);
+    if (outcome.status !== "claimed") {
+      logger.info(
+        { sessionId: session.id, sourceRunId, status: outcome.status },
+        "[Continuation] interrupted run 未锚定自动续跑(已被续跑或状态变化),普通起跑",
+      );
+      return undefined;
+    }
+    return {
+      runId: targetRunId,
+      continuationOf: {
+        runId: sourceRunId,
+        highWater: outcome.claim.sourceHighWater,
+        prefixDigest: outcome.claim.sourcePrefixDigest,
+      },
+    };
+  }
+
   private async recoverOrphanGraphWorks(
     session: Session,
     runtimeState: SessionRuntime,
