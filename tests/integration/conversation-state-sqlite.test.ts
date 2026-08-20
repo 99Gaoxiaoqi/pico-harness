@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -338,6 +338,41 @@ test("sqlite conversation state: syntactically corrupt legacy JSON is isolated t
     assert.deepEqual(await store.listQueued(fixture.workspaceA, "session-1"), []);
     assert.equal(existsSync(`${fixture.legacyJsonPath}.failed`), true);
     assert.equal(existsSync(fixture.legacyJsonPath), false);
+  } finally {
+    cleanupFixture(fixture.root);
+  }
+});
+
+test("sqlite conversation state: transient IO read failure is not isolated and keeps retrying (B1, 审查 F1)", async () => {
+  const fixture = createFixture("pico-conversation-state-sqlite-import-transient-");
+  try {
+    // 目录占位注入读取期 IO 错误(EISDIR):非语法/形状错误 → 不隔离、原样上抛维持重试。
+    mkdirSync(fixture.legacyJsonPath);
+    const store = new SqliteDesktopConversationStateStore({ picoHome: fixture.picoHome });
+    await assert.rejects(store.listQueued(fixture.workspaceA, "session-1"), /EISDIR/u);
+    assert.equal(existsSync(fixture.legacyJsonPath), true, "transient failure must not rename");
+    assert.equal(existsSync(`${fixture.legacyJsonPath}.failed`), false);
+  } finally {
+    cleanupFixture(fixture.root);
+  }
+});
+
+test("sqlite conversation state: isolation never overwrites a previous .failed copy (审查 F4)", async () => {
+  const fixture = createFixture("pico-conversation-state-sqlite-import-failed-keep-");
+  try {
+    writeFileSync(`${fixture.legacyJsonPath}.failed`, "previous isolated copy", "utf8");
+    writeFileSync(fixture.legacyJsonPath, "{ not valid json", "utf8");
+    const store = new SqliteDesktopConversationStateStore({ picoHome: fixture.picoHome });
+    assert.deepEqual(await store.listQueued(fixture.workspaceA, "session-1"), []);
+    assert.equal(
+      readFileSync(`${fixture.legacyJsonPath}.failed`, "utf8"),
+      "previous isolated copy",
+      "existing .failed copy must be preserved",
+    );
+    const timestamped = readdirSync(join(fixture.picoHome, "desktop")).filter((name) =>
+      /\.failed$/u.test(name) && name !== "conversation-state.json.failed",
+    );
+    assert.equal(timestamped.length, 1, "new isolation goes to a timestamped suffix");
   } finally {
     cleanupFixture(fixture.root);
   }

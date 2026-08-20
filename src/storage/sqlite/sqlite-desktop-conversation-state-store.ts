@@ -306,13 +306,14 @@ export function migrateLegacyDesktopConversationStateSync(options: {
   const markerPath = `${legacyPath}.migrated`;
   if (existsSync(markerPath)) return;
   if (!existsSync(legacyPath)) return;
+  // 读取阶段不在 try 内:IO 错误(锁/权限/瞬态)原样上抛维持重试(ADR 28;
+  // 对抗审查 F1——readFileSync 进 try 会把 EBUSY/EPERM 误判为永久损坏)。
+  const raw = readFileSync(legacyPath, "utf8");
   let state: DesktopConversationStateFile;
   try {
-    state = parseDesktopConversationStateFile(
-      JSON.parse(readFileSync(legacyPath, "utf8")),
-      legacyPath,
-    );
+    state = parseDesktopConversationStateFile(JSON.parse(raw), legacyPath);
   } catch (error) {
+    if (!isPermanentParseFailure(error)) throw error;
     isolatePermanentlyFailedLegacyJson(legacyPath, error, "legacy JSON 解析失败(语法/形状损坏)");
     return;
   }
@@ -366,13 +367,29 @@ export function migrateLegacyDesktopConversationStateSync(options: {
 /**
  * 永久失败隔离:error 日志 + 改名 .failed(数据保留),让后续操作以空态起步。
  * 注意多分片场景:此前已提交的分片保留导入,未提交分片空态起步。
+ * .failed 已存在时不覆盖(Windows renameSync 会静默替换):带毫秒时间戳后缀
+ * 保留历次隔离副本(对抗审查 F4)。
  */
 function isolatePermanentlyFailedLegacyJson(legacyPath: string, error: unknown, reason: string): void {
   logger.error(
     { err: error, legacyPath, reason },
     "[ConversationState] legacy JSON 永久损坏,已隔离为 .failed 并跳过迁移(已提交分片保留)",
   );
-  renameSync(legacyPath, `${legacyPath}.failed`);
+  const failedPath = existsSync(`${legacyPath}.failed`)
+    ? `${legacyPath}.${Date.now()}.failed`
+    : `${legacyPath}.failed`;
+  renameSync(legacyPath, failedPath);
+}
+
+/**
+ * 解析阶段的永久失败:JSON 语法错(SyntaxError)或形状校验错("Desktop conversation*"
+ * 前缀的显式校验消息);其余(带 code 的 IO 错误等)按瞬态处理 rethrow 维持重试。
+ */
+function isPermanentParseFailure(error: unknown): boolean {
+  if (error instanceof SyntaxError) return true;
+  return String((error as { message?: unknown } | null)?.message ?? "").startsWith(
+    "Desktop conversation",
+  );
 }
 
 /** 导入阶段的永久失败:约束冲突=源数据自身重复,重试不可救;其余(IO/锁)按瞬态重试。 */
