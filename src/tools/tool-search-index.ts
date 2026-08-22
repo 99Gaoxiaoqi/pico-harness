@@ -67,9 +67,7 @@ export function searchTools(
     const nameHit = nameTokenHit(doc.tool, queryTokens);
     // 名称命中保底 0.8，再用 tf-idf 作 0.2 区间的 tiebreaker——
     // 同前缀家族（mcp__git__*）按内容相关度排序，不再是注册顺序。
-    const score = nameHit
-      ? 0.8 + 0.2 * tfidf
-      : tfidf * TFIDF_WEIGHT + keyword * KEYWORD_WEIGHT;
+    const score = nameHit ? 0.8 + 0.2 * tfidf : tfidf * TFIDF_WEIGHT + keyword * KEYWORD_WEIGHT;
     return { tool: doc.tool, score };
   });
 

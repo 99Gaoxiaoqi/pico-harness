@@ -16,9 +16,7 @@ test("goal stall detection: fingerprint reset on different tool calls", () => {
   manager.create("测试目标", "描述", undefined);
 
   // 第一次工具调用
-  const calls1: ToolCall[] = [
-    { id: "c1", name: "bash", arguments: '{"command":"ls"}' },
-  ];
+  const calls1: ToolCall[] = [{ id: "c1", name: "bash", arguments: '{"command":"ls"}' }];
   manager.recordToolCallProgress(calls1);
   assert.equal(manager.getActive()?.consecutiveNoProgress, 0, "首次调用应重置为 0");
 
@@ -27,9 +25,7 @@ test("goal stall detection: fingerprint reset on different tool calls", () => {
   assert.equal(manager.getActive()?.consecutiveNoProgress, 1, "相同指纹应递增");
 
   // 不同工具调用 → 重置
-  const calls2: ToolCall[] = [
-    { id: "c2", name: "bash", arguments: '{"command":"pwd"}' },
-  ];
+  const calls2: ToolCall[] = [{ id: "c2", name: "bash", arguments: '{"command":"pwd"}' }];
   manager.recordToolCallProgress(calls2);
   assert.equal(manager.getActive()?.consecutiveNoProgress, 0, "不同指纹应重置为 0");
 });
@@ -50,7 +46,7 @@ test("goal stall detection: warn threshold triggers warning", () => {
   manager.create("测试目标", "描述", undefined);
 
   // 第一次调用建立基线指纹（consecutiveNoProgress=0），后续 STALL_WARN_THRESHOLD 次相同调用递增
-  const calls: ToolCall[] = [{ id: "c1", name: "bash", arguments: '{}' }];
+  const calls: ToolCall[] = [{ id: "c1", name: "bash", arguments: "{}" }];
   for (let i = 0; i <= STALL_WARN_THRESHOLD; i++) {
     manager.recordToolCallProgress(calls);
   }
@@ -65,7 +61,7 @@ test("goal stall detection: block threshold triggers budget decision", () => {
   manager.create("测试目标", "描述", undefined);
 
   // 第一次建立基线，后续 STALL_BLOCK_THRESHOLD 次递增
-  const calls: ToolCall[] = [{ id: "c1", name: "bash", arguments: '{}' }];
+  const calls: ToolCall[] = [{ id: "c1", name: "bash", arguments: "{}" }];
   for (let i = 0; i <= STALL_BLOCK_THRESHOLD; i++) {
     manager.recordToolCallProgress(calls);
   }

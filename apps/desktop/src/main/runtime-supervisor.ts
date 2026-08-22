@@ -39,8 +39,7 @@ const DEFAULT_MAX_CONSECUTIVE_FAILURES = 3;
 export function startRuntimeSupervisor(options: RuntimeSupervisorOptions): () => void {
   const intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const maxConsecutiveFailures =
-    options.maxConsecutiveFailures ?? DEFAULT_MAX_CONSECUTIVE_FAILURES;
+  const maxConsecutiveFailures = options.maxConsecutiveFailures ?? DEFAULT_MAX_CONSECUTIVE_FAILURES;
   let consecutiveFailures = 0;
   let degraded = false;
   let stopped = false;

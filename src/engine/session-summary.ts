@@ -1,5 +1,8 @@
 import { isMessageHiddenFromTranscript } from "../schema/message.js";
-import type { RuntimeEventStoreEntry, RuntimeSessionManifest } from "../storage/runtime-event-store-contracts.js";
+import type {
+  RuntimeEventStoreEntry,
+  RuntimeSessionManifest,
+} from "../storage/runtime-event-store-contracts.js";
 import { projectRuntimeSessionState } from "./session-runtime-projection.js";
 import type { RuntimeEvent } from "./session-runtime-event.js";
 
@@ -77,7 +80,10 @@ export function createInitialSessionSummaryFold(): SessionSummaryFold {
 }
 
 /** 单事件折叠。事件必须按 sequence 顺序进入。 */
-export function foldSessionSummaryEvent(fold: SessionSummaryFold, event: RuntimeEvent): SessionSummaryFold {
+export function foldSessionSummaryEvent(
+  fold: SessionSummaryFold,
+  event: RuntimeEvent,
+): SessionSummaryFold {
   const next: SessionSummaryFold = {
     ...fold,
     pendingForkRuns: [...fold.pendingForkRuns],

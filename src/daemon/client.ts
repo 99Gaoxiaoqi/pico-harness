@@ -168,10 +168,7 @@ export class LocalRuntimeClient implements RuntimeClient {
   private readonly runtimeHostRootPath?: string;
   private closed = false;
 
-  constructor(
-    _endpoint?: unknown,
-    options: LocalRuntimeClientOptions = {},
-  ) {
+  constructor(_endpoint?: unknown, options: LocalRuntimeClientOptions = {}) {
     if (_endpoint !== undefined && _endpoint !== null) {
       throw new Error(
         "显式 endpoint 注入已退役（3-D Phase 5）：LocalRuntimeClient 唯一承载是 runtime-host kernel，用 options.runtimeHostRootPath 指定根路径。",

@@ -77,8 +77,7 @@ export const PICO_TOOL_GROUPS: readonly ToolGroupDef[] = [
   {
     id: "code-intelligence",
     label: "Code Intelligence",
-    description:
-      "LSP 代码智能：定义跳转、引用查找、符号搜索、诊断、调用层次、仓库地图、仓库探索",
+    description: "LSP 代码智能：定义跳转、引用查找、符号搜索、诊断、调用层次、仓库地图、仓库探索",
     toolNames: [
       "code_definition",
       "code_references",
@@ -143,29 +142,30 @@ export const PICO_TOOL_GROUPS: readonly ToolGroupDef[] = [
  *   fail-closed 姿势）——入组 ≠ headless 资格，新工具必须显式声明才能
  *   进入隔离 one-shot 环境。
  */
-const TOOL_HOST_AFFINITY: Readonly<Record<string, Partial<Record<ToolHostKind, ToolHostSupport>>>> = {
-  ask_user: { background: "unsupported" },
-  schedule_task: { background: "unsupported" },
-  delegate_task: { background: "unsupported" },
-  delegate_status: { background: "unsupported" },
-  spawn_subagent: { background: "unsupported" },
-  memory_remember: { background: "unsupported" },
-  memory_extract: { background: "unsupported" },
-  // headless 显式白名单（fail-closed）。read_evidence 已随 Evidence 回读协议
-  // 退役（ADR 26，票 E3）；code_*/goal/skill/graph 等未列工具默认 unsupported。
-  read_file: { headless: "supported" },
-  write_file: { headless: "supported" },
-  edit_file: { headless: "supported" },
-  bash: { headless: "supported" },
-  glob: { headless: "supported" },
-  grep: { headless: "supported" },
-  todo: { headless: "supported" },
-  task_list: { headless: "supported" },
-  task_output: { headless: "supported" },
-  task_stop: { headless: "supported" },
-  fetch_url: { headless: "supported" },
-  web_search: { headless: "supported" },
-};
+const TOOL_HOST_AFFINITY: Readonly<Record<string, Partial<Record<ToolHostKind, ToolHostSupport>>>> =
+  {
+    ask_user: { background: "unsupported" },
+    schedule_task: { background: "unsupported" },
+    delegate_task: { background: "unsupported" },
+    delegate_status: { background: "unsupported" },
+    spawn_subagent: { background: "unsupported" },
+    memory_remember: { background: "unsupported" },
+    memory_extract: { background: "unsupported" },
+    // headless 显式白名单（fail-closed）。read_evidence 已随 Evidence 回读协议
+    // 退役（ADR 26，票 E3）；code_*/goal/skill/graph 等未列工具默认 unsupported。
+    read_file: { headless: "supported" },
+    write_file: { headless: "supported" },
+    edit_file: { headless: "supported" },
+    bash: { headless: "supported" },
+    glob: { headless: "supported" },
+    grep: { headless: "supported" },
+    todo: { headless: "supported" },
+    task_list: { headless: "supported" },
+    task_output: { headless: "supported" },
+    task_stop: { headless: "supported" },
+    fetch_url: { headless: "supported" },
+    web_search: { headless: "supported" },
+  };
 
 const TOOL_TO_GROUP = new Map<string, ToolGroupDef>();
 const GROUP_IDS = new Set<string>();
@@ -220,8 +220,7 @@ export function isToolSupportedForHost(toolName: string, host: ToolHostKind): bo
 export function getAvailableDeferredGroups(host: ToolHostKind): ToolGroupDef[] {
   return PICO_TOOL_GROUPS.filter(
     (g) =>
-      g.economy === "deferred" &&
-      g.toolNames.some((name) => isToolSupportedForHost(name, host)),
+      g.economy === "deferred" && g.toolNames.some((name) => isToolSupportedForHost(name, host)),
   );
 }
 

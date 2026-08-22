@@ -198,8 +198,7 @@ realModelTest(
     assert.ok(projectedUsage.totalCompletionTokens > 0);
 
     const usageStore = new SqliteRuntimeControlStore({
-      storageRoot: resolvePicoPaths(sandbox.workDir, { picoHome: sandbox.picoHome }).workspace
-        .root,
+      storageRoot: resolvePicoPaths(sandbox.workDir, { picoHome: sandbox.picoHome }).workspace.root,
     });
     const providerCalls = usageStore
       .listProviderCalls({ sessionId: sandbox.sessionId })

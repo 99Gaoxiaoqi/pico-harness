@@ -231,8 +231,8 @@ export class RuntimeHostConnectionSession {
    * reconnect and replay from its durable cursor, never silently skip them.
    */
   pushEvent(event: Record<string, unknown>): Promise<void> {
-    const push = this.#eventPushChain.then(() =>
-      this.#writer.enqueue({ kind: "event", event } satisfies HostEventFrame).flushed,
+    const push = this.#eventPushChain.then(
+      () => this.#writer.enqueue({ kind: "event", event } satisfies HostEventFrame).flushed,
     );
     // The chain itself must never reject (a rejected head would poison every
     // later push); failures fence the connection instead. Attaching this catch

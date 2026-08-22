@@ -330,12 +330,22 @@ export class DelegationManager {
         record.completionSeq ??= this.nextCompletionSeq++;
         this.settleTaskRegistry(record, legacyResultWithoutStatus ? result : normalizedResult);
         if (record.planStepId) {
-          try { await this.onPlanStepSettled?.(record.planStepId, record.status); } catch { /* best-effort */ }
+          try {
+            await this.onPlanStepSettled?.(record.planStepId, record.status);
+          } catch {
+            /* best-effort */
+          }
         }
         if (record.graphWorkId) {
           try {
-            await this.onGraphWorkSettled?.(record.graphWorkId, record.status, this.outputSummary(record));
-          } catch { /* best-effort */ }
+            await this.onGraphWorkSettled?.(
+              record.graphWorkId,
+              record.status,
+              this.outputSummary(record),
+            );
+          } catch {
+            /* best-effort */
+          }
         }
         this.publishCompletion(record);
       })
@@ -347,12 +357,22 @@ export class DelegationManager {
         record.completionSeq ??= this.nextCompletionSeq++;
         this.settleTaskRegistry(record);
         if (record.planStepId) {
-          try { await this.onPlanStepSettled?.(record.planStepId, record.status); } catch { /* best-effort */ }
+          try {
+            await this.onPlanStepSettled?.(record.planStepId, record.status);
+          } catch {
+            /* best-effort */
+          }
         }
         if (record.graphWorkId) {
           try {
-            await this.onGraphWorkSettled?.(record.graphWorkId, record.status, this.outputSummary(record));
-          } catch { /* best-effort */ }
+            await this.onGraphWorkSettled?.(
+              record.graphWorkId,
+              record.status,
+              this.outputSummary(record),
+            );
+          } catch {
+            /* best-effort */
+          }
         }
         this.publishCompletion(record);
       })

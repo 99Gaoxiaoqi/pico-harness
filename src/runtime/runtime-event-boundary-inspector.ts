@@ -262,7 +262,8 @@ export class RuntimeEventBoundaryInspector implements RuntimeBoundaryInspector {
   }
 }
 
-function pendingApprovals(entries: readonly RuntimeEventStoreEntry[]): string[] {  const pending = new Set<string>();
+function pendingApprovals(entries: readonly RuntimeEventStoreEntry[]): string[] {
+  const pending = new Set<string>();
   for (const { event } of entries) {
     if (event.kind === "approval.requested") {
       pending.add(event.data.approvalId);

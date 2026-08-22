@@ -74,7 +74,10 @@ export async function recordRuntimeCompactionCheckpoint(
 
   // 滚动摘要:读取上一个 checkpoint,启用增量更新而非重算全部前缀。
   const lastCheckpoint = await runtimeRun.findLastCompactionCheckpoint().catch((err: unknown) => {
-    logger.warn({ err: String(err), sessionId: session.id }, "[RuntimeCompaction] findLastCompactionCheckpoint 失败,退回全量摘要");
+    logger.warn(
+      { err: String(err), sessionId: session.id },
+      "[RuntimeCompaction] findLastCompactionCheckpoint 失败,退回全量摘要",
+    );
     return undefined;
   });
 

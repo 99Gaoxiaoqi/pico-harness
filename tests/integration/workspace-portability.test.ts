@@ -49,10 +49,7 @@ function writeWorkspaceSurfaces(fixture: Fixture): void {
   mkdirSync(join(fixture.storageRoot, "fork-staging"), { recursive: true });
   writeFileSync(join(fixture.storageRoot, "fork-staging", "bundle.json"), "{}");
   mkdirSync(join(fixture.storageRoot, "agent-recovery-launch-intents"), { recursive: true });
-  writeFileSync(
-    join(fixture.storageRoot, "agent-recovery-launch-intents", "intent.json"),
-    "{}",
-  );
+  writeFileSync(join(fixture.storageRoot, "agent-recovery-launch-intents", "intent.json"), "{}");
   writeFileSync(join(fixture.storageRoot, "plugins.json"), "{}");
   writeFileSync(join(fixture.storageRoot, "hooks-state.json"), "{}");
   writeFileSync(join(fixture.storageRoot, "tui-debug.log"), "debug");
@@ -81,10 +78,7 @@ test("pico.sqlite 归 protected,blob 目录与 traces 构成 portable 集", () =
     assert.equal(database.reason, "workspace_database_with_memory");
     assert.equal(database.sha256, null, "protected 条目不得持久化指纹");
 
-    const evidence = entryByPath(
-      plan.entries,
-      `evidence/blobs/sha256/ab/${"a".repeat(64)}`,
-    );
+    const evidence = entryByPath(plan.entries, `evidence/blobs/sha256/ab/${"a".repeat(64)}`);
     assert.equal(evidence.classification, "portable");
     assert.equal(evidence.reason, "portable_evidence");
     assert.match(evidence.sha256 ?? "", /^[a-f0-9]{64}$/u);
@@ -118,10 +112,7 @@ test("pico.sqlite 归 protected,blob 目录与 traces 构成 portable 集", () =
 
     assert.equal(plan.schemaVersion, 2);
     assert.equal(plan.portableFileCount, 2);
-    assert.equal(
-      plan.portableBytes,
-      "evidence blob body".length + "trace body".length,
-    );
+    assert.equal(plan.portableBytes, "evidence blob body".length + "trace body".length);
     assert.equal(plan.excludedFileCount, plan.entries.length - 2);
   } finally {
     cleanupFixture(fixture);
@@ -164,8 +155,7 @@ test("缺少 pico.sqlite binding 与未知顶层条目均 fail-closed", () => {
     assert.throws(
       () => buildWorkspacePortabilityPlanSync(unbound.storageRoot),
       (error: unknown) =>
-        error instanceof WorkspacePortabilityPlanError &&
-        error.code === "invalid_storage_root",
+        error instanceof WorkspacePortabilityPlanError && error.code === "invalid_storage_root",
     );
   } finally {
     cleanupFixture(unbound);

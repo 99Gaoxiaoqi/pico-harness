@@ -9,13 +9,18 @@ import type { BaseTool } from "../tools/registry.js";
 import { NO_FILE_SIDE_EFFECTS } from "../tools/registry.js";
 import type { ToolDefinition } from "../schema/message.js";
 import { ToolAccesses, type ToolAccesses as ToolAccessSet } from "../tools/tool-access.js";
-import type { MemoryProposalProcessResult, TerminalMemoryEvidenceRef } from "./proposal-contracts.js";
+import type {
+  MemoryProposalProcessResult,
+  TerminalMemoryEvidenceRef,
+} from "./proposal-contracts.js";
 
 /**
  * 前台同步提取回调：接收当前 turn 的引用，直接跑提取引擎，等结果返回。
  * 由 runtime 层构造，注入 memoryRepository + model。
  */
-export type MemoryRememberHandler = (ref: TerminalMemoryEvidenceRef) => Promise<MemoryProposalProcessResult>;
+export type MemoryRememberHandler = (
+  ref: TerminalMemoryEvidenceRef,
+) => Promise<MemoryProposalProcessResult>;
 
 /**
  * 每轮记忆触发标记：memory_extract 置位，executor 在 turn 终结后检查。
@@ -40,10 +45,7 @@ export function buildMemoryTriggerTools(
   context: MemoryTriggerContext,
   resolveContext: () => TerminalMemoryEvidenceRef | undefined,
 ): readonly BaseTool[] {
-  return [
-    new MemoryRememberTool(context, resolveContext),
-    new MemoryExtractTool(context.slot),
-  ];
+  return [new MemoryRememberTool(context, resolveContext), new MemoryExtractTool(context.slot)];
 }
 
 /** 用户明确要求记忆时调用（前台同步，返回具体记了什么）。 */

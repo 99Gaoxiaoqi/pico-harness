@@ -1,8 +1,8 @@
 import {
   resolveExistingStorageRoot,
   tryAcquireInteractiveRootOwner,
-} from '../control/root-authority.js';
-import { RuntimeHostKernel } from './host-kernel.js';
+} from "../control/root-authority.js";
+import { RuntimeHostKernel } from "./host-kernel.js";
 
 export interface RuntimeHostCandidateOptions {
   rootPath: string;
@@ -14,24 +14,24 @@ export interface RuntimeHostCandidateOptions {
 }
 
 export type RuntimeHostCandidateResult =
-  | { kind: 'loser' }
-  | { kind: 'winner'; host: RuntimeHostKernel };
+  | { kind: "loser" }
+  | { kind: "winner"; host: RuntimeHostKernel };
 
 export async function startRuntimeHostCandidate(
   options: RuntimeHostCandidateOptions,
 ): Promise<RuntimeHostCandidateResult> {
   const capability = await resolveExistingStorageRoot({
     path: options.rootPath,
-    kind: 'interactive',
+    kind: "interactive",
     expectedRootId: options.expectedRootId,
   });
   const owner = await tryAcquireInteractiveRootOwner(capability);
-  if (!owner) return { kind: 'loser' };
+  if (!owner) return { kind: "loser" };
   const host = await RuntimeHostKernel.start({
     owner,
     idleGraceMs: options.idleGraceMs,
     handshakeTimeoutMs: options.handshakeTimeoutMs,
     operationDeadlineMs: options.operationDeadlineMs,
   });
-  return { kind: 'winner', host };
+  return { kind: "winner", host };
 }

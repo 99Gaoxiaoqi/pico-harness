@@ -89,7 +89,10 @@ export class TodoStore {
       raw = typeof row?.["value_json"] === "string" ? row["value_json"] : undefined;
     } catch (err) {
       // 库打开/读取失败:记 warn 后返回空 state,不阻断
-      logger.warn({ err, storageRoot: this.storageRoot }, "读取 workspace_kv todo 失败,降级为空清单");
+      logger.warn(
+        { err, storageRoot: this.storageRoot },
+        "读取 workspace_kv todo 失败,降级为空清单",
+      );
       this.loaded = true;
       return this.state;
     }
@@ -105,7 +108,10 @@ export class TodoStore {
         }
       } catch (err) {
         // JSON.parse 失败:降级为空 state,不抛
-        logger.warn({ err, storageRoot: this.storageRoot }, "workspace_kv todo 解析失败,降级为空清单");
+        logger.warn(
+          { err, storageRoot: this.storageRoot },
+          "workspace_kv todo 解析失败,降级为空清单",
+        );
       }
     }
 

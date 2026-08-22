@@ -329,10 +329,7 @@ function currentPhysicalIdentity(root: string): WorkspacePhysicalIdentity {
   };
 }
 
-function requireBindingSync(
-  database: DatabaseSync,
-  root: string,
-): WorkspaceStorageBindingRow {
+function requireBindingSync(database: DatabaseSync, root: string): WorkspaceStorageBindingRow {
   const binding = readBindingSync(database);
   if (!binding) {
     throw new FileStorageIntegrityError(
@@ -344,7 +341,9 @@ function requireBindingSync(
 
 function readBindingSync(database: DatabaseSync): WorkspaceStorageBindingRow | undefined {
   const row = database
-    .prepare("SELECT layout, storage_root_id, canonical_path, device, inode, created_at, adopted_at FROM workspace_storage_binding WHERE singleton = 1")
+    .prepare(
+      "SELECT layout, storage_root_id, canonical_path, device, inode, created_at, adopted_at FROM workspace_storage_binding WHERE singleton = 1",
+    )
     .get() as Record<string, unknown> | undefined;
   if (!row) return undefined;
   if (

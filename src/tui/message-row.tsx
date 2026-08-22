@@ -126,10 +126,7 @@ function MessageRowImpl({
       if (entry.status !== "failed" || !entry.error) return null;
       return renderErrorRows(
         clipRows(
-          buildErrorFrameRows(
-            { kind: "error", message: entry.error, retryable: true },
-            wrapWidth,
-          ),
+          buildErrorFrameRows({ kind: "error", message: entry.error, retryable: true }, wrapWidth),
           toolStartOffsetRows,
           toolVisibleRows,
         ),

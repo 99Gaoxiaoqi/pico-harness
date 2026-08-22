@@ -67,7 +67,10 @@ test("quoteShellWord：POSIX 单引号包裹并转义内嵌引号；PowerShell �
   assert.equal(quoteShellWord("bash", "a'b"), `'a'\\''b'`);
   assert.equal(quoteShellWord("sh", "plain-word"), "'plain-word'");
   assert.equal(quoteShellWord("pwsh", "a'b"), `'a''b'`);
-  assert.equal(quoteShellWord("powershell", "C:\\Program Files\\x.exe"), `'C:\\Program Files\\x.exe'`);
+  assert.equal(
+    quoteShellWord("powershell", "C:\\Program Files\\x.exe"),
+    `'C:\\Program Files\\x.exe'`,
+  );
 });
 
 test("resolveCommandHookExecution：command + args 按 shell 方言拼成命令串", async (context) => {
@@ -79,14 +82,14 @@ test("resolveCommandHookExecution：command + args 按 shell 方言拼成命令�
   };
   const bash = { kind: "bash", path: "/bin/bash", argsPrefix: ["-c"] } as const;
   const invocation = await resolveCommandHookExecution(handler, fixture.root, {}, bash);
-  assert.equal(invocation.commandString, [ "'npm'", "'run'", "'lint --fix'" ].join(" "));
+  assert.equal(invocation.commandString, ["'npm'", "'run'", "'lint --fix'"].join(" "));
   assert.equal(invocation.command, "npm");
   assert.deepEqual(invocation.args, ["run", "lint --fix"]);
 
   // PowerShell 方言：quoted string 在命令位不被执行，需调用运算符 & 前缀。
   const pwsh = { kind: "pwsh", path: "pwsh.exe", argsPrefix: ["-c"] } as const;
   const psInvocation = await resolveCommandHookExecution(handler, fixture.root, {}, pwsh);
-  assert.equal(psInvocation.commandString, `& ${[ "'npm'", "'run'", "'lint --fix'" ].join(" ")}`);
+  assert.equal(psInvocation.commandString, `& ${["'npm'", "'run'", "'lint --fix'"].join(" ")}`);
 });
 
 test("resolveCommandHookExecution：无 args 时命令串原样保留（shell 全权解释）", async (context) => {
@@ -212,7 +215,10 @@ test("一次性迁移：带 scriptHashes 的旧静态信任记录被剪除并落
   assert.deepEqual(afterTrust.records[0]!.scriptHashes, {});
 });
 
-async function createFixture(context: { after: (fn: () => void | Promise<void>) => void }, label: string) {
+async function createFixture(
+  context: { after: (fn: () => void | Promise<void>) => void },
+  label: string,
+) {
   const root = await mkdtemp(join(tmpdir(), `pico-hook-command-shell-${label}-`));
   const picoHome = join(root, "pico-home");
   await mkdir(picoHome, { recursive: true });

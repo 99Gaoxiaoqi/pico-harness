@@ -1,23 +1,23 @@
-import type { RuntimeHostCandidateOptions } from './server/candidate.js';
-import { isAbsolute } from 'node:path';
+import type { RuntimeHostCandidateOptions } from "./server/candidate.js";
+import { isAbsolute } from "node:path";
 
 export function parseRuntimeHostCandidateArguments(
   args: readonly string[],
 ): RuntimeHostCandidateOptions {
   const allowedKeys = new Set([
-    'root',
-    'expected-root-id',
-    'idle-grace-ms',
-    'handshake-timeout-ms',
-    'operation-deadline-ms',
-    'legacy-configuration-root',
+    "root",
+    "expected-root-id",
+    "idle-grace-ms",
+    "handshake-timeout-ms",
+    "operation-deadline-ms",
+    "legacy-configuration-root",
   ]);
   const values = new Map<string, string>();
   for (let index = 0; index < args.length; index += 2) {
     const key = args[index];
     const value = args[index + 1];
-    if (!key?.startsWith('--') || value === undefined) {
-      throw new Error('Invalid Runtime Host candidate arguments');
+    if (!key?.startsWith("--") || value === undefined) {
+      throw new Error("Invalid Runtime Host candidate arguments");
     }
     const name = key.slice(2);
     if (!allowedKeys.has(name) || values.has(name)) {
@@ -25,23 +25,23 @@ export function parseRuntimeHostCandidateArguments(
     }
     values.set(name, value);
   }
-  const rootPath = values.get('root');
-  if (!rootPath) throw new Error('Runtime Host candidate requires --root');
-  const expectedRootId = values.get('expected-root-id');
+  const rootPath = values.get("root");
+  if (!rootPath) throw new Error("Runtime Host candidate requires --root");
+  const expectedRootId = values.get("expected-root-id");
   if (!expectedRootId || !/^[a-f0-9]{64}$/.test(expectedRootId)) {
-    throw new Error('Runtime Host candidate requires a valid --expected-root-id');
+    throw new Error("Runtime Host candidate requires a valid --expected-root-id");
   }
   return {
     rootPath,
     expectedRootId,
-    ...(values.has('legacy-configuration-root')
+    ...(values.has("legacy-configuration-root")
       ? {
-          legacyConfigurationRoot: readOptionalAbsolutePath(values, 'legacy-configuration-root'),
+          legacyConfigurationRoot: readOptionalAbsolutePath(values, "legacy-configuration-root"),
         }
       : {}),
-    idleGraceMs: readOptionalInteger(values, 'idle-grace-ms'),
-    handshakeTimeoutMs: readOptionalInteger(values, 'handshake-timeout-ms'),
-    operationDeadlineMs: readOptionalInteger(values, 'operation-deadline-ms'),
+    idleGraceMs: readOptionalInteger(values, "idle-grace-ms"),
+    handshakeTimeoutMs: readOptionalInteger(values, "handshake-timeout-ms"),
+    operationDeadlineMs: readOptionalInteger(values, "operation-deadline-ms"),
   };
 }
 

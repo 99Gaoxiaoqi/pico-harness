@@ -92,9 +92,9 @@ test("client session runtime over a real spawned daemon: send + lifecycle + reco
   assert.ok(settled, "run 终态（死端点快速失败）应驱动 running=false");
   const reconciled = await waitForCondition(
     () =>
-      reporter.getProjection().entries.some(
-        ({ entry }) => entry.kind === "run-boundary" && entry.status !== "running",
-      ),
+      reporter
+        .getProjection()
+        .entries.some(({ entry }) => entry.kind === "run-boundary" && entry.status !== "running"),
     90_000,
   );
   assert.ok(reconciled, "transcript reload 对账应带回终态 runBoundary（内容性断言）");
@@ -143,9 +143,9 @@ test("client commands over a real spawned daemon: slash chains (dead-endpoint mo
   assert.ok(runtime.activeSessionId);
   const runSettled = await waitForCondition(
     () =>
-      reporter.getProjection().entries.some(
-        ({ entry }) => entry.kind === "run-boundary" && entry.status !== "running",
-      ),
+      reporter
+        .getProjection()
+        .entries.some(({ entry }) => entry.kind === "run-boundary" && entry.status !== "running"),
     90_000,
   );
   assert.ok(runSettled, "死端点 run 终态后 transcript 对账应带回终态 runBoundary");
@@ -230,10 +230,7 @@ async function killDaemonFor(picoHome: string, client: LocalRuntimeClient): Prom
   }
 }
 
-async function waitForCondition(
-  condition: () => boolean,
-  timeoutMs: number,
-): Promise<boolean> {
+async function waitForCondition(condition: () => boolean, timeoutMs: number): Promise<boolean> {
   const deadline = performance.now() + timeoutMs;
   while (!condition()) {
     if (performance.now() > deadline) return false;

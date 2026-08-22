@@ -69,7 +69,7 @@ test("buildApprovalRequestedPayload omits absent optionals and keeps plan shape"
     toolNotice({
       toolName: "exit_plan_mode",
       providerCallId: "",
-      ...( {
+      ...({
         kind: "plan",
         planId: "plan_42",
         expectedRevision: 3,

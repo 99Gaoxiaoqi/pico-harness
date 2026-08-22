@@ -99,7 +99,11 @@ test("SpawnSubagentTool 直跑路径过全局闸：容量 1 时并发执行串�
     ),
   );
 
-  assert.equal(maxObservedRunning, 1, `容量 1 时三个并发子代理应串行执行，实测峰值 ${maxObservedRunning}`);
+  assert.equal(
+    maxObservedRunning,
+    1,
+    `容量 1 时三个并发子代理应串行执行，实测峰值 ${maxObservedRunning}`,
+  );
   assert.equal(limiter.activeCount, 0, "全部结束后名额应归还");
 });
 

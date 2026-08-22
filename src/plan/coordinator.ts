@@ -77,9 +77,7 @@ export class PlanCoordinator {
     semantic: unknown,
   ): Promise<PlanOperationStatus> {
     const fingerprint = planOperationFingerprint(kind, semantic);
-    const replay = projectActivePlanEntries(
-      (await this.readPlanEntries()).entries,
-    ).find(
+    const replay = projectActivePlanEntries((await this.readPlanEntries()).entries).find(
       ({ event }) =>
         event.kind.startsWith("plan.") &&
         "operationId" in event.data &&
@@ -97,28 +95,23 @@ export class PlanCoordinator {
   ): Promise<PlanProjection> {
     const proposalInput = normalizePlanProposalInput(input.proposal);
     const semantic = { proposal: proposalInput };
-    return this.commit(
-      input,
-      "plan.proposed",
-      semantic,
-      (fact, at) => [
-        {
-          ...this.baseEvent(input.operationId, "plan.proposed", at),
-          kind: "plan.proposed",
-          data: {
-            ...fact,
-            proposal: {
-              ...proposalInput,
-              planId: proposalInput.planId ?? randomUUID(),
-              revision: 1,
-              steps: proposalInput.steps.map((step) => ({ ...step, status: "pending" as const })),
-              status: "pending" as const,
-              proposedAt: at,
-            },
+    return this.commit(input, "plan.proposed", semantic, (fact, at) => [
+      {
+        ...this.baseEvent(input.operationId, "plan.proposed", at),
+        kind: "plan.proposed",
+        data: {
+          ...fact,
+          proposal: {
+            ...proposalInput,
+            planId: proposalInput.planId ?? randomUUID(),
+            revision: 1,
+            steps: proposalInput.steps.map((step) => ({ ...step, status: "pending" as const })),
+            status: "pending" as const,
+            proposedAt: at,
           },
         },
-      ],
-    );
+      },
+    ]);
   }
 
   async revise(
@@ -134,30 +127,25 @@ export class PlanCoordinator {
       expectedRevision: input.expectedRevision,
       proposal: proposalInput,
     };
-    return this.commit(
-      input,
-      "plan.revised",
-      semantic,
-      (fact, at) => [
-        {
-          ...this.baseEvent(input.operationId, "plan.revised", at),
-          kind: "plan.revised",
-          data: {
-            ...fact,
+    return this.commit(input, "plan.revised", semantic, (fact, at) => [
+      {
+        ...this.baseEvent(input.operationId, "plan.revised", at),
+        kind: "plan.revised",
+        data: {
+          ...fact,
+          planId: input.planId,
+          expectedRevision: input.expectedRevision,
+          proposal: {
+            ...proposalInput,
             planId: input.planId,
-            expectedRevision: input.expectedRevision,
-            proposal: {
-              ...proposalInput,
-              planId: input.planId,
-              revision: input.expectedRevision + 1,
-              steps: proposalInput.steps.map((step) => ({ ...step, status: "pending" as const })),
-              status: "pending" as const,
-              proposedAt: at,
-            },
+            revision: input.expectedRevision + 1,
+            steps: proposalInput.steps.map((step) => ({ ...step, status: "pending" as const })),
+            status: "pending" as const,
+            proposedAt: at,
           },
         },
-      ],
-    );
+      },
+    ]);
   }
 
   async requestRevision(
@@ -368,7 +356,7 @@ export class PlanCoordinator {
         step,
         {
           ...this.baseEvent(input.operationId, "plan.execution.completed", at),
-              eventId: `plan:${this.context.sessionId}:${input.operationId}:completed`,
+          eventId: `plan:${this.context.sessionId}:${input.operationId}:completed`,
           kind: "plan.execution.completed" as const,
           data: { ...fact, planId: input.planId },
         },

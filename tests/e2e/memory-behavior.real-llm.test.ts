@@ -277,16 +277,15 @@ class RealProposalModel implements MemoryProposalModelPort {
     const evidenceText = `Evidence event id: ${request.evidence.eventIds[0]}\nUser-authored evidence: ${request.evidence.content}`;
     const sourceMessages = request.evidence.sourceMessages;
     const messages = sourceMessages
-      ? [...sourceMessages, { role: "user" as const, content: `${extractionPrompt}\n\n${evidenceText}` }]
+      ? [
+          ...sourceMessages,
+          { role: "user" as const, content: `${extractionPrompt}\n\n${evidenceText}` },
+        ]
       : [
           { role: "system" as const, content: extractionPrompt },
           { role: "user" as const, content: evidenceText },
         ];
-    const response = await this.provider.generate(
-      messages,
-      [],
-      { signal },
-    );
+    const response = await this.provider.generate(messages, [], { signal });
     return {
       response,
       inputTokens: response.usage?.promptTokens,

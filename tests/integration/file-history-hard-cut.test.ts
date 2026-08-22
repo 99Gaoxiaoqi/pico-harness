@@ -60,11 +60,7 @@ function tamperSnapshotRow(
   }
 }
 
-function tamperStateJson(
-  fixture: FileHistoryFixture,
-  sessionId: string,
-  stateJson: string,
-): void {
+function tamperStateJson(fixture: FileHistoryFixture, sessionId: string, stateJson: string): void {
   const database = new DatabaseSync(join(fixture.storageRoot, "pico.sqlite"));
   try {
     database

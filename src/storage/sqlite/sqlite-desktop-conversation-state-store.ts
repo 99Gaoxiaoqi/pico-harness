@@ -48,9 +48,7 @@ export interface SqliteDesktopConversationStateStoreOptions {
   readonly generateId?: () => string;
 }
 
-export class SqliteDesktopConversationStateStore
-  implements DesktopConversationStateStoreLike
-{
+export class SqliteDesktopConversationStateStore implements DesktopConversationStateStoreLike {
   readonly legacyJsonPath: string;
   private readonly picoHome: string;
   private readonly now: () => number;
@@ -370,7 +368,11 @@ export function migrateLegacyDesktopConversationStateSync(options: {
  * .failed 已存在时不覆盖(Windows renameSync 会静默替换):带毫秒时间戳后缀
  * 保留历次隔离副本(对抗审查 F4)。
  */
-function isolatePermanentlyFailedLegacyJson(legacyPath: string, error: unknown, reason: string): void {
+function isolatePermanentlyFailedLegacyJson(
+  legacyPath: string,
+  error: unknown,
+  reason: string,
+): void {
   logger.error(
     { err: error, legacyPath, reason },
     "[ConversationState] legacy JSON 永久损坏,已隔离为 .failed 并跳过迁移(已提交分片保留)",
@@ -526,13 +528,10 @@ function pruneIdempotency(database: DatabaseSync): void {
     .run(MAX_IDEMPOTENCY_RECORDS);
 }
 
-function readControlMetadata(
-  database: DatabaseSync,
-  key: string,
-): unknown {
-  const row = database
-    .prepare(`SELECT value_json FROM control_metadata WHERE key = ?`)
-    .get(key) as { value_json?: unknown } | undefined;
+function readControlMetadata(database: DatabaseSync, key: string): unknown {
+  const row = database.prepare(`SELECT value_json FROM control_metadata WHERE key = ?`).get(key) as
+    | { value_json?: unknown }
+    | undefined;
   if (row === undefined) return undefined;
   try {
     return JSON.parse(requireRowString(row, "value_json"));

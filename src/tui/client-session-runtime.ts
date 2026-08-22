@@ -73,7 +73,16 @@ export interface ClientSessionRuntimeOptions {
   readonly onRunStateChanged?: (running: boolean) => void;
   /** 会话设置快照（启动/切换/settingsUpdated 后推送——宿主喂状态栏）。 */
   readonly onSettingsSnapshot?: (
-    settings: Partial<Record<"modelRouteId" | "thinkingEffort" | "collaborationMode" | "permissionMode" | "orchestrationMode", string>>,
+    settings: Partial<
+      Record<
+        | "modelRouteId"
+        | "thinkingEffort"
+        | "collaborationMode"
+        | "permissionMode"
+        | "orchestrationMode",
+        string
+      >
+    >,
   ) => void;
   /**
    * BYOK 旗标合并（Phase 3 首批）：--model 经 config.effective.get 解析为
@@ -238,7 +247,11 @@ export class ClientSessionRuntime {
         workspacePath: this.workspacePath,
         approvalId: taskId,
         decision:
-          action === "approve" ? "allow_once" : action === "approve-session" ? "allow_session" : "deny",
+          action === "approve"
+            ? "allow_once"
+            : action === "approve-session"
+              ? "allow_session"
+              : "deny",
       });
       return true;
     } catch {
@@ -370,9 +383,7 @@ export class ClientSessionRuntime {
       limit: 200,
     });
     if (this.sessionId !== sessionId) return;
-    this.reporter.replaceTranscriptEvents(
-      transcriptEventsFromRuntimeItems(page.items, sessionId),
-    );
+    this.reporter.replaceTranscriptEvents(transcriptEventsFromRuntimeItems(page.items, sessionId));
     // 恢复活跃 run 相位（对抗评审 P1：/resume 进运行中会话须点亮 running、
     // /interrupt 才有目标）——双向对账：无活跃 run 时清掉误亮的相位。活跃口径
     // 经 isActiveRunStatus（水化对账口径，含 paused/cancelling）。
@@ -399,11 +410,21 @@ export class ClientSessionRuntime {
         sessionId: this.sessionId,
       });
       this.options.onSettingsSnapshot?.({
-        ...(typeof settings.modelRouteId === "string" ? { modelRouteId: settings.modelRouteId } : {}),
-        ...(typeof settings.thinkingEffort === "string" ? { thinkingEffort: settings.thinkingEffort } : {}),
-        ...(typeof settings.collaborationMode === "string" ? { collaborationMode: settings.collaborationMode } : {}),
-        ...(typeof settings.permissionMode === "string" ? { permissionMode: settings.permissionMode } : {}),
-        ...(typeof settings.orchestrationMode === "string" ? { orchestrationMode: settings.orchestrationMode } : {}),
+        ...(typeof settings.modelRouteId === "string"
+          ? { modelRouteId: settings.modelRouteId }
+          : {}),
+        ...(typeof settings.thinkingEffort === "string"
+          ? { thinkingEffort: settings.thinkingEffort }
+          : {}),
+        ...(typeof settings.collaborationMode === "string"
+          ? { collaborationMode: settings.collaborationMode }
+          : {}),
+        ...(typeof settings.permissionMode === "string"
+          ? { permissionMode: settings.permissionMode }
+          : {}),
+        ...(typeof settings.orchestrationMode === "string"
+          ? { orchestrationMode: settings.orchestrationMode }
+          : {}),
       });
     } catch {
       // 设置快照尽力而为：失败不影响主流程，下一次事件再补。
@@ -482,9 +503,7 @@ export class ClientSessionRuntime {
     }
   }
 
-  private handleApprovalRequested(
-    payload: RuntimeNotificationMap["approval.requested"],
-  ): void {
+  private handleApprovalRequested(payload: RuntimeNotificationMap["approval.requested"]): void {
     // wire 语义读取经 @pico/protocol parseApprovalRequestedPayload（与 Desktop
     // renderer 同源：planId 不回退 approvalId 的兜底语义一处收口）。
     const approval = parseApprovalRequestedPayload(payload);
@@ -509,10 +528,7 @@ export class ClientSessionRuntime {
   }
 
   /** ask-user 对话框动作 → prompt.respond RPC（幂等键新生成；answer=optionId/label/自由文本）。 */
-  readonly respondPrompt = async (
-    promptId: string,
-    answer: string,
-  ): Promise<boolean> => {
+  readonly respondPrompt = async (promptId: string, answer: string): Promise<boolean> => {
     try {
       await this.client.request("prompt.respond", {
         workspacePath: this.workspacePath,
@@ -527,9 +543,7 @@ export class ClientSessionRuntime {
     }
   };
 
-  private handlePromptRequested(
-    payload: RuntimeNotificationMap["prompt.requested"],
-  ): void {
+  private handlePromptRequested(payload: RuntimeNotificationMap["prompt.requested"]): void {
     const prompt =
       typeof payload.prompt === "object" && payload.prompt !== null
         ? (payload.prompt as Record<string, unknown>)

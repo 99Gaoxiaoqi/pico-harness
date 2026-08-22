@@ -272,9 +272,7 @@ function scanWorkspacePortabilityPlan(root: string): WorkspacePortabilityPlan {
           `Workspace database entry must be a regular file: ${relativePath}`,
         );
       }
-      entries.push(
-        planEntry(relativePath, metadata, WORKSPACE_DATABASE_POLICY, undefined),
-      );
+      entries.push(planEntry(relativePath, metadata, WORKSPACE_DATABASE_POLICY, undefined));
       continue;
     }
 
@@ -282,8 +280,7 @@ function scanWorkspacePortabilityPlan(root: string): WorkspacePortabilityPlan {
       PORTABLE_TOP_LEVEL_POLICIES.get(name) ??
       HOST_BOUND_TOP_LEVEL_DIRECTORIES.get(name) ??
       LEGACY_TOP_LEVEL_DIRECTORIES.get(name);
-    const filePolicy =
-      HOST_BOUND_TOP_LEVEL_FILES.get(name) ?? LEGACY_TOP_LEVEL_FILES.get(name);
+    const filePolicy = HOST_BOUND_TOP_LEVEL_FILES.get(name) ?? LEGACY_TOP_LEVEL_FILES.get(name);
     const policy = denylistedPolicy(relativePath) ?? directoryPolicy ?? filePolicy;
     if (!policy) {
       throw planError(

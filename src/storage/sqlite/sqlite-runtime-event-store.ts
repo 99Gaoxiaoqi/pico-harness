@@ -85,7 +85,10 @@ export class SqliteRuntimeEventStore {
       throw new Error("SqliteRuntimeEventStore requires storageRoot");
     }
     // 单一 scope 组合点:prepare 永远传全量,形状断言按全集 fail-closed。
-    const preparation = prepareWorkspaceSqliteStorageSync(options.storageRoot, ALL_WORKSPACE_SQLITE_SCOPES);
+    const preparation = prepareWorkspaceSqliteStorageSync(
+      options.storageRoot,
+      ALL_WORKSPACE_SQLITE_SCOPES,
+    );
     this.storageRoot = preparation.lease.storageRoot;
     this.lease = preparation.lease;
   }
@@ -261,16 +264,13 @@ export class SqliteRuntimeEventStore {
       for (const eventId of eventIds) {
         const row = this.readEventRow(eventId);
         if (!row) continue;
-        rows.set(
-          row.event_id,
-          {
-            eventId: row.event_id,
-            sessionId: row.session_id,
-            eventSeq: row.event_seq,
-            payloadJson: row.payload_json,
-            at: row.at,
-          },
-        );
+        rows.set(row.event_id, {
+          eventId: row.event_id,
+          sessionId: row.session_id,
+          eventSeq: row.event_seq,
+          payloadJson: row.payload_json,
+          at: row.at,
+        });
       }
       return rows;
     });
@@ -347,7 +347,9 @@ export class SqliteRuntimeEventStore {
     }
     const alwaysInclude = [...new Set(options.alwaysIncludeKinds ?? [])];
     if (alwaysInclude.some((kind) => !normalizedKinds.includes(kind))) {
-      throw new Error("SqliteRuntimeEventStore budgeted slice alwaysIncludeKinds must be a subset of kinds");
+      throw new Error(
+        "SqliteRuntimeEventStore budgeted slice alwaysIncludeKinds must be a subset of kinds",
+      );
     }
     const kindPlaceholders = normalizedKinds.map(() => "?").join(", ");
     return this.read(() => {
@@ -371,7 +373,10 @@ export class SqliteRuntimeEventStore {
         for (let position = budgetedIndexes.length - 1; position >= 0; position -= 1) {
           const { index } = budgetedIndexes[position]!;
           // 进度保证:最新一条预算内事件即使单独超预算也入选(acceptedBytes===0 时放行)。
-          if (acceptedBytes > 0 && acceptedBytes + sizes[index]!.payloadBytes > options.maxPayloadBytes) {
+          if (
+            acceptedBytes > 0 &&
+            acceptedBytes + sizes[index]!.payloadBytes > options.maxPayloadBytes
+          ) {
             break;
           }
           oldestAccepted = index;
@@ -437,10 +442,7 @@ export class SqliteRuntimeEventStore {
    * 消费方直读——run 内任意 kind 的事件(含 run.started/终态后新进事件)都要
    * 可见,kind 切片表达不了"该 run 的全部事件",故走 run 索引整读。
    */
-  async readSessionRunBoundary(
-    sessionId: string,
-    runId: string,
-  ): Promise<SqliteSessionEventSlice> {
+  async readSessionRunBoundary(sessionId: string, runId: string): Promise<SqliteSessionEventSlice> {
     return this.read(() => ({
       entries: this.readRunEntriesLocked(sessionId, runId),
       headSequence: this.readHeadSequenceLocked(sessionId),
@@ -515,7 +517,9 @@ export class SqliteRuntimeEventStore {
   ): Promise<RuntimeContinuationClaimOutcome> {
     return this.write(() => {
       const existingBySource = this.readContinuationClaimRowLocked(
-        "SELECT " + CONTINUATION_CLAIM_ROW_COLUMNS + " FROM runtime_continuation_claims WHERE source_session_id = ? AND source_run_id = ?",
+        "SELECT " +
+          CONTINUATION_CLAIM_ROW_COLUMNS +
+          " FROM runtime_continuation_claims WHERE source_session_id = ? AND source_run_id = ?",
         [sourceSessionId, sourceRunId],
       );
       if (existingBySource) {
@@ -554,7 +558,9 @@ export class SqliteRuntimeEventStore {
         return { status: "claimed" as const, claim: rebound, rebound: true as const };
       }
       const existingByTarget = this.readContinuationClaimRowLocked(
-        "SELECT " + CONTINUATION_CLAIM_ROW_COLUMNS + " FROM runtime_continuation_claims WHERE target_session_id = ? AND target_run_id = ?",
+        "SELECT " +
+          CONTINUATION_CLAIM_ROW_COLUMNS +
+          " FROM runtime_continuation_claims WHERE target_session_id = ? AND target_run_id = ?",
         [sourceSessionId, targetRunId],
       );
       if (existingByTarget) {
@@ -629,7 +635,9 @@ export class SqliteRuntimeEventStore {
   ): Promise<RuntimeContinuationClaim | undefined> {
     return this.read(() =>
       this.readContinuationClaimRowLocked(
-        "SELECT " + CONTINUATION_CLAIM_ROW_COLUMNS + " FROM runtime_continuation_claims WHERE source_session_id = ? AND source_run_id = ?",
+        "SELECT " +
+          CONTINUATION_CLAIM_ROW_COLUMNS +
+          " FROM runtime_continuation_claims WHERE source_session_id = ? AND source_run_id = ?",
         [sessionId, runId],
       ),
     );
@@ -669,7 +677,9 @@ export class SqliteRuntimeEventStore {
            WHERE session_id = ? AND kind = ? ORDER BY event_seq ${direction} LIMIT 1`,
         )
         .get(sessionId, kind);
-      return row === undefined ? undefined : entryFromRow(assertEventRow(row as Record<string, unknown>));
+      return row === undefined
+        ? undefined
+        : entryFromRow(assertEventRow(row as Record<string, unknown>));
     });
   }
 
@@ -855,9 +865,7 @@ export class SqliteRuntimeEventStore {
       return {
         manifest: manifestFromRow(row),
         entries,
-        ...(head
-          ? { cursor: cursorFor(sessionId, head.sequence, head.event.eventId) }
-          : {}),
+        ...(head ? { cursor: cursorFor(sessionId, head.sequence, head.event.eventId) } : {}),
       };
     });
   }
@@ -874,11 +882,7 @@ export class SqliteRuntimeEventStore {
     after: SessionCursor,
     through: SessionCursor,
   ): Promise<RuntimeSessionProjectionDelta | undefined> {
-    if (
-      after.logId !== sessionId ||
-      through.logId !== sessionId ||
-      through.seq <= after.seq
-    ) {
+    if (after.logId !== sessionId || through.logId !== sessionId || through.seq <= after.seq) {
       return undefined;
     }
     return this.read(() => {
@@ -887,17 +891,11 @@ export class SqliteRuntimeEventStore {
           "SELECT event_seq, event_id FROM runtime_events WHERE session_id = ? ORDER BY event_seq DESC LIMIT 1",
         )
         .get(sessionId) as { event_seq?: unknown; event_id?: unknown } | undefined;
-      if (
-        !headRow ||
-        headRow.event_seq !== through.seq ||
-        headRow.event_id !== through.eventId
-      ) {
+      if (!headRow || headRow.event_seq !== through.seq || headRow.event_id !== through.eventId) {
         return undefined;
       }
       const cursorRow = this.lease.database
-        .prepare(
-          "SELECT event_id FROM runtime_events WHERE session_id = ? AND event_seq = ?",
-        )
+        .prepare("SELECT event_id FROM runtime_events WHERE session_id = ? AND event_seq = ?")
         .get(sessionId, after.seq) as { event_id?: unknown } | undefined;
       if (!cursorRow || cursorRow.event_id !== after.eventId) {
         return undefined;
@@ -911,11 +909,7 @@ export class SqliteRuntimeEventStore {
         .all(sessionId, after.seq, through.seq);
       const sliced = rows.map((row) => entryFromRow(assertEventRow(row)));
       const last = sliced.at(-1);
-      if (
-        !last ||
-        last.sequence !== through.seq ||
-        last.event.eventId !== through.eventId
-      ) {
+      if (!last || last.sequence !== through.seq || last.event.eventId !== through.eventId) {
         return undefined;
       }
       return { entries: sliced, cursor: { ...through } };
@@ -943,11 +937,7 @@ export class SqliteRuntimeEventStore {
           "SELECT event_seq, event_id FROM runtime_events WHERE session_id = ? ORDER BY event_seq DESC LIMIT 1",
         )
         .get(sessionId) as { event_seq?: unknown; event_id?: unknown } | undefined;
-      if (
-        !row ||
-        typeof row.event_seq !== "number" ||
-        typeof row.event_id !== "string"
-      ) {
+      if (!row || typeof row.event_seq !== "number" || typeof row.event_id !== "string") {
         return undefined;
       }
       return cursorFor(sessionId, row.event_seq, row.event_id);
@@ -958,13 +948,9 @@ export class SqliteRuntimeEventStore {
     return this.write(() => {
       const row = this.readSessionRow(sessionId);
       if (!row) return false;
-      this.lease.database
-        .prepare("DELETE FROM runtime_events WHERE session_id = ?")
-        .run(sessionId);
+      this.lease.database.prepare("DELETE FROM runtime_events WHERE session_id = ?").run(sessionId);
       // session_catalog_projection / session_messages 经 FK ON DELETE CASCADE 同事务删除。
-      this.lease.database
-        .prepare("DELETE FROM sessions WHERE session_id = ?")
-        .run(sessionId);
+      this.lease.database.prepare("DELETE FROM sessions WHERE session_id = ?").run(sessionId);
       return true;
     });
   }
@@ -980,9 +966,13 @@ export class SqliteRuntimeEventStore {
 
   private readSessionMessagesLocked(sessionId: string): Message[] {
     const rows = this.lease.database
-      .prepare("SELECT payload_json FROM session_messages WHERE session_id = ? ORDER BY sequence ASC")
+      .prepare(
+        "SELECT payload_json FROM session_messages WHERE session_id = ? ORDER BY sequence ASC",
+      )
       .all(sessionId) as Array<{ payload_json?: unknown }>;
-    return rows.map((row) => decodeStoredMessage(requireRowString(row["payload_json"], "payload_json"), sessionId));
+    return rows.map((row) =>
+      decodeStoredMessage(requireRowString(row["payload_json"], "payload_json"), sessionId),
+    );
   }
 
   private insertSessionMessageLocked(
@@ -1031,9 +1021,7 @@ export class SqliteRuntimeEventStore {
         )
         .get(sessionId) as { event_seq?: unknown; event_id?: unknown } | undefined;
       const cursor =
-        headRow &&
-        typeof headRow.event_seq === "number" &&
-        typeof headRow.event_id === "string"
+        headRow && typeof headRow.event_seq === "number" && typeof headRow.event_id === "string"
           ? cursorFor(sessionId, headRow.event_seq, headRow.event_id)
           : undefined;
       return {
@@ -1066,7 +1054,9 @@ export class SqliteRuntimeEventStore {
            ORDER BY activity_at DESC, session_id ASC
            LIMIT ?`;
       const rows = after
-        ? this.lease.database.prepare(sql).all(after.activityAt, after.activityAt, after.sessionId, limit + 1)
+        ? this.lease.database
+            .prepare(sql)
+            .all(after.activityAt, after.activityAt, after.sessionId, limit + 1)
         : this.lease.database.prepare(sql).all(limit + 1);
       return rows.map((row) => assertCatalogRow(row));
     });
@@ -1214,7 +1204,7 @@ export class SqliteRuntimeEventStore {
       );
     }
     const { summary } = finalizeSessionSummary(manifest, fold);
-    const updatedAt = (fold.lastEventAt ?? manifest.createdAt);
+    const updatedAt = fold.lastEventAt ?? manifest.createdAt;
     this.lease.database
       .prepare(
         `INSERT INTO session_catalog_projection (
@@ -1253,7 +1243,7 @@ export class SqliteRuntimeEventStore {
         summary.messageCount ?? 0,
         summary.forkFrom ?? null,
         fold.forkEventId ?? null,
-        (!fold.hasForkFacts || fold.completedBootstrap) ? 1 : 0,
+        !fold.hasForkFacts || fold.completedBootstrap ? 1 : 0,
         fold.headSequence,
         watermark.eventCount,
         watermark.storageBytes,
@@ -1284,9 +1274,7 @@ export class SqliteRuntimeEventStore {
     for (const { event } of entries) {
       fold = foldSessionSummaryEvent(fold, event);
     }
-    this.lease.database
-      .prepare("DELETE FROM session_messages WHERE session_id = ?")
-      .run(sessionId);
+    this.lease.database.prepare("DELETE FROM session_messages WHERE session_id = ?").run(sessionId);
     for (const { sequence, event } of entries) {
       if (!runtimeEventHasModelHistoryEntry(event)) continue;
       const message = projectRuntimeModelMessage(event);
@@ -1536,7 +1524,13 @@ export class SqliteRuntimeEventStore {
             `Runtime event ${event.eventId} lost its model history message during projection`,
           );
         }
-        this.insertSessionMessageLocked(event.sessionId, sequence, event.eventId, event.at, message);
+        this.insertSessionMessageLocked(
+          event.sessionId,
+          sequence,
+          event.eventId,
+          event.at,
+          message,
+        );
       }
       // 与旧 store 的批内语义对齐:本批刚插入的事件立刻进入幂等视图,
       // 同批后续同 id 同载荷副本走重放分支(inserted:false,同 sequence),
@@ -1597,7 +1591,9 @@ export class SqliteRuntimeEventStore {
       );
     }
     const maxRow = this.lease.database
-      .prepare("SELECT COALESCE(MAX(event_seq), 0) AS max_seq FROM runtime_events WHERE session_id = ?")
+      .prepare(
+        "SELECT COALESCE(MAX(event_seq), 0) AS max_seq FROM runtime_events WHERE session_id = ?",
+      )
       .get(sessionId) as { max_seq?: unknown } | undefined;
     const maxSeq = typeof maxRow?.max_seq === "number" ? maxRow.max_seq : 0;
     if (maxSeq !== row.last_event_seq) {
@@ -1808,9 +1804,7 @@ export async function appendRuntimeEventBatchWithArbitration(
     return await store.appendBatch(events, options);
   } catch (error) {
     if (isDeterministicStoreRefusal(error)) throw error;
-    const recovered = await arbitrateDurableAppendFailure(store, events).catch(
-      () => undefined,
-    );
+    const recovered = await arbitrateDurableAppendFailure(store, events).catch(() => undefined);
     if (!recovered) throw error;
     logger.warn(
       { eventIds: [...new Set(events.map((event) => event.eventId))] },
@@ -1847,9 +1841,9 @@ async function arbitrateDurableAppendFailure(
   store: SqliteRuntimeEventStore,
   events: readonly RuntimeEvent[],
 ): Promise<readonly RuntimeEventStoreAppendResult[] | undefined> {
-  const rows = await store.readEventRowsByEventIds(
-    [...new Set(events.map((event) => event.eventId))],
-  );
+  const rows = await store.readEventRowsByEventIds([
+    ...new Set(events.map((event) => event.eventId)),
+  ]);
   const results: RuntimeEventStoreAppendResult[] = [];
   for (const event of events) {
     const row = rows.get(event.eventId);
@@ -1977,7 +1971,10 @@ function assertSessionRow(row: Record<string, unknown>, sessionId: string): Sess
     session_id: requireString(row["session_id"], `sessions[?].session_id`),
     work_dir: requireString(row["work_dir"], `sessions[${sessionId}].work_dir`),
     created_at: requireString(row["created_at"], `sessions[${sessionId}].created_at`),
-    last_event_seq: requireSafeInteger(row["last_event_seq"], `sessions[${sessionId}].last_event_seq`),
+    last_event_seq: requireSafeInteger(
+      row["last_event_seq"],
+      `sessions[${sessionId}].last_event_seq`,
+    ),
     last_tx_id: lastTxId,
     event_count: requireSafeInteger(row["event_count"], `sessions[${sessionId}].event_count`),
     storage_bytes: requireSafeInteger(row["storage_bytes"], `sessions[${sessionId}].storage_bytes`),
@@ -2058,10 +2055,9 @@ function decodeStoredEvent(payloadJson: string): RuntimeEvent {
     return decodeRuntimeEventJson(payloadJson);
   } catch (error) {
     if (error instanceof RuntimeEventStoreIntegrityError) throw error;
-    throw new RuntimeEventStoreIntegrityError(
-      "Runtime event payload in pico.sqlite is invalid",
-      { cause: error },
-    );
+    throw new RuntimeEventStoreIntegrityError("Runtime event payload in pico.sqlite is invalid", {
+      cause: error,
+    });
   }
 }
 
@@ -2128,10 +2124,7 @@ function continuationClaimFromRow(row: Record<string, unknown>): RuntimeContinua
     claimId,
     sourceSessionId: requireRowString(row["source_session_id"], `${label}.source_session_id`),
     sourceRunId: requireRowString(row["source_run_id"], `${label}.source_run_id`),
-    sourceHighWater: requireRowSafeInteger(
-      row["source_high_water"],
-      `${label}.source_high_water`,
-    ),
+    sourceHighWater: requireRowSafeInteger(row["source_high_water"], `${label}.source_high_water`),
     sourcePrefixDigest: requireRowString(
       row["source_prefix_digest"],
       `${label}.source_prefix_digest`,
@@ -2435,7 +2428,10 @@ function assertCatalogRow(row: Record<string, unknown>): CatalogRow {
     title: optionalRowString(row["title"], `catalog[${sessionId}].title`),
     first_message: optionalRowString(row["first_message"], `catalog[${sessionId}].first_message`),
     last_message: optionalRowString(row["last_message"], `catalog[${sessionId}].last_message`),
-    message_count: requireRowSafeInteger(row["message_count"], `catalog[${sessionId}].message_count`),
+    message_count: requireRowSafeInteger(
+      row["message_count"],
+      `catalog[${sessionId}].message_count`,
+    ),
     fork_parent_session_id: optionalRowString(
       row["fork_parent_session_id"],
       `catalog[${sessionId}].fork_parent_session_id`,
@@ -2443,9 +2439,15 @@ function assertCatalogRow(row: Record<string, unknown>): CatalogRow {
     fork_event_id: optionalRowString(row["fork_event_id"], `catalog[${sessionId}].fork_event_id`),
     is_archived: requireRowFlag(row["is_archived"], `catalog[${sessionId}].is_archived`),
     is_pinned: requireRowFlag(row["is_pinned"], `catalog[${sessionId}].is_pinned`),
-    head_sequence: requireRowSafeInteger(row["head_sequence"], `catalog[${sessionId}].head_sequence`),
+    head_sequence: requireRowSafeInteger(
+      row["head_sequence"],
+      `catalog[${sessionId}].head_sequence`,
+    ),
     event_count: requireRowSafeInteger(row["event_count"], `catalog[${sessionId}].event_count`),
-    storage_bytes: requireRowSafeInteger(row["storage_bytes"], `catalog[${sessionId}].storage_bytes`),
+    storage_bytes: requireRowSafeInteger(
+      row["storage_bytes"],
+      `catalog[${sessionId}].storage_bytes`,
+    ),
     fold_json: requireRowString(row["fold_json"], `catalog[${sessionId}].fold_json`),
   };
 }
@@ -2493,7 +2495,9 @@ function decodeFoldJson(json: string, sessionId: string): SessionSummaryFold {
     );
   }
   if (!isRecord(value)) {
-    throw new SessionCatalogIntegrityError(`Session catalog fold for ${sessionId} is not an object`);
+    throw new SessionCatalogIntegrityError(
+      `Session catalog fold for ${sessionId} is not an object`,
+    );
   }
   const label = `catalog[${sessionId}].fold`;
   const pendingForkRuns = value["pendingForkRuns"];
@@ -2512,7 +2516,10 @@ function decodeFoldJson(json: string, sessionId: string): SessionSummaryFold {
     ...optionalCatalogString(value["forkEventParent"], "forkEventParent"),
     ...optionalCatalogString(value["forkEventId"], "forkEventId"),
     hasForkFacts: requireCatalogBoolean(value["hasForkFacts"], `${label}.hasForkFacts`),
-    completedBootstrap: requireCatalogBoolean(value["completedBootstrap"], `${label}.completedBootstrap`),
+    completedBootstrap: requireCatalogBoolean(
+      value["completedBootstrap"],
+      `${label}.completedBootstrap`,
+    ),
     pendingForkRuns: pendingForkRuns as readonly string[],
     ...optionalCatalogString(value["lastEventAt"], "lastEventAt"),
     headSequence: requireCatalogNonNegative(value["headSequence"], `${label}.headSequence`),
@@ -2583,9 +2590,7 @@ function normalizeCatalogCursor(
 
 function normalizeCatalogPageLimit(value = CATALOG_PAGE_SIZE): number {
   if (!Number.isSafeInteger(value) || value < 1 || value > CATALOG_MAX_PAGE_SIZE) {
-    throw new Error(
-      `Session catalog page limit must be between 1 and ${CATALOG_MAX_PAGE_SIZE}`,
-    );
+    throw new Error(`Session catalog page limit must be between 1 and ${CATALOG_MAX_PAGE_SIZE}`);
   }
   return value;
 }
@@ -2621,7 +2626,9 @@ function requireRowFlag(value: unknown, field: string): number {
 
 function requireCatalogNonNegative(value: unknown, label: string): number {
   if (!Number.isSafeInteger(value) || (value as number) < 0) {
-    throw new SessionCatalogIntegrityError(`Session catalog field ${label} must be a non-negative integer`);
+    throw new SessionCatalogIntegrityError(
+      `Session catalog field ${label} must be a non-negative integer`,
+    );
   }
   return value as number;
 }
@@ -2706,7 +2713,8 @@ export async function readExistingSqliteSessionEventSliceWithinBudget(options: {
   readonly maxPayloadBytes: number;
   readonly alwaysIncludeKinds?: readonly string[];
 }): Promise<
-  { readonly manifest: RuntimeSessionManifest; readonly slice: SqliteSessionBudgetedEventSlice } | undefined
+  | { readonly manifest: RuntimeSessionManifest; readonly slice: SqliteSessionBudgetedEventSlice }
+  | undefined
 > {
   if (!options.storageRoot.trim()) {
     throw new Error("SqliteRuntimeEventStore requires storageRoot");

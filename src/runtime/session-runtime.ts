@@ -822,7 +822,12 @@ export async function settleGraphWork(
   const operationId = `settle-graph:${workId}:${Date.now()}`;
   const semantic = completed
     ? { kind: "graph.work.recorded", graphId: context.graphId, workId, recordId, outputSummary }
-    : { kind: "graph.work.failed", graphId: context.graphId, workId, error: outputSummary || status };
+    : {
+        kind: "graph.work.failed",
+        graphId: context.graphId,
+        workId,
+        error: outputSummary || status,
+      };
   const kind = completed ? "graph.work.recorded" : "graph.work.failed";
   const fingerprint = graphOperationFingerprint(kind, semantic);
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -962,7 +967,9 @@ class DefaultSessionRuntime implements SessionRuntime {
   readonly steerQueue: SteerQueue;
   readonly codeIntelligenceManager: CodeIntelligenceManager;
   readonly graphContext: SessionGraphContext;
-  private readonly setGraphWorkDispatcherBound: (dispatcher: GraphWorkDispatcher | undefined) => void;
+  private readonly setGraphWorkDispatcherBound: (
+    dispatcher: GraphWorkDispatcher | undefined,
+  ) => void;
   private _hookService?: HookService;
   private readonly hookRuntime?: SessionHookRuntime;
   private readonly pendingHookEvents = new Set<Promise<unknown>>();

@@ -1359,7 +1359,14 @@ export type RuntimeMethodMap = {
   /** 插件管理面（BLOCKED 收口：/plugin 镜像——list/inspect/install/trust 两阶段/enable/disable）。 */
   readonly "plugin.manage": {
     readonly params: WorkspaceParams & {
-      readonly action: "list" | "inspect" | "install" | "trust.prepare" | "trust.confirm" | "enable" | "disable";
+      readonly action:
+        | "list"
+        | "inspect"
+        | "install"
+        | "trust.prepare"
+        | "trust.confirm"
+        | "enable"
+        | "disable";
       readonly id?: string;
       readonly scope?: "user" | "project" | "local";
       readonly path?: string;
@@ -1474,8 +1481,8 @@ export const RUNTIME_METHODS = [
   "rewind.changes",
   "rewind.restoreFile",
   "memory.list",
-"memory.get",
-    "memory.create",
+  "memory.get",
+  "memory.create",
   "memory.update",
   "memory.forget",
   "memory.review.list",
@@ -1590,8 +1597,8 @@ export const DESKTOP_RUNTIME_METHODS = [
   "rewind.changes",
   "rewind.restoreFile",
   "memory.list",
-"memory.get",
-    "memory.create",
+  "memory.get",
+  "memory.create",
   "memory.update",
   "memory.forget",
   "memory.review.list",
@@ -2737,7 +2744,15 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
   "plugin.manage": exactParamShape(
     {
       workspacePath: stringParam,
-      action: oneOfParam(["list", "inspect", "install", "trust.prepare", "trust.confirm", "enable", "disable"] as const),
+      action: oneOfParam([
+        "list",
+        "inspect",
+        "install",
+        "trust.prepare",
+        "trust.confirm",
+        "enable",
+        "disable",
+      ] as const),
     },
     {
       id: boundedNonEmptyStringParam(256),

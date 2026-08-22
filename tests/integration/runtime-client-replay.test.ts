@@ -147,7 +147,8 @@ test("Runtime client keeps a recovery fence after replay overflow", async (conte
   await kernel.close();
   await owner.close().catch(() => undefined);
   owner = (await tryAcquireInteractiveRootOwner(capability))!;
-  assert.ok(owner, "重启后应能重新选主");  kernel = await RuntimeHostKernel.start({ owner, compositionFactory });
+  assert.ok(owner, "重启后应能重新选主");
+  kernel = await RuntimeHostKernel.start({ owner, compositionFactory });
   await waitFor(() => service.replayCalls >= 2, 10_000);
   service.emitDurable("during-recovery-fence");
   await waitFor(

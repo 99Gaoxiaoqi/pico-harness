@@ -6,7 +6,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import { EvidenceArchive, formatEvidenceUri, parseEvidenceUri } from "../../src/context/evidence-archive.js";
+import {
+  EvidenceArchive,
+  formatEvidenceUri,
+  parseEvidenceUri,
+} from "../../src/context/evidence-archive.js";
 import { seedRuntimeToolExchange } from "./helpers/legacy-evidence-fixture.js";
 import { TodoStore } from "../../src/context/todo-store.js";
 import {
@@ -39,10 +43,7 @@ interface WorkspaceFixture {
   readonly fileHistory: FileHistoryIo;
 }
 
-async function workspaceFixture(
-  context: TestContext,
-  prefix: string,
-): Promise<WorkspaceFixture> {
+async function workspaceFixture(context: TestContext, prefix: string): Promise<WorkspaceFixture> {
   const root = await mkdtemp(join(tmpdir(), prefix));
   context.after(() => rm(root, { recursive: true, force: true }));
   const workDir = join(root, "workspace");
@@ -82,7 +83,10 @@ function forkOperationInput(overrides: Record<string, unknown> = {}) {
 
 test("operation journal advances the saga state machine with CAS and recovers interrupts", async (context) => {
   const fixture = await workspaceFixture(context, "pico-ops-journal-");
-  const journal = new StorageOperationJournal({ workDir: fixture.workDir, picoHome: fixture.picoHome });
+  const journal = new StorageOperationJournal({
+    workDir: fixture.workDir,
+    picoHome: fixture.picoHome,
+  });
 
   const created = await journal.create(forkOperationInput({ operationId: "fork-op-1" }));
   assert.equal(created.state, "prepared");
@@ -154,7 +158,10 @@ test("operation journal advances the saga state machine with CAS and recovers in
 
 test("operation journal dispositions recover needs_attention with recorded phase", async (context) => {
   const fixture = await workspaceFixture(context, "pico-ops-disposition-");
-  const journal = new StorageOperationJournal({ workDir: fixture.workDir, picoHome: fixture.picoHome });
+  const journal = new StorageOperationJournal({
+    workDir: fixture.workDir,
+    picoHome: fixture.picoHome,
+  });
   await journal.create(forkOperationInput({ operationId: "fork-op-2" }));
   const failed = await journal.advance({
     operationId: "fork-op-2",
@@ -204,20 +211,47 @@ test("operation journal dispositions recover needs_attention with recorded phase
 
 test("operation journal serves fork publication lookup as one query", async (context) => {
   const fixture = await workspaceFixture(context, "pico-ops-fork-targets-");
-  const journal = new StorageOperationJournal({ workDir: fixture.workDir, picoHome: fixture.picoHome });
+  const journal = new StorageOperationJournal({
+    workDir: fixture.workDir,
+    picoHome: fixture.picoHome,
+  });
+  await journal.create(forkOperationInput({ operationId: "fork-a", targetSessionId: "target-a" }));
+  await journal.create(forkOperationInput({ operationId: "fork-b", targetSessionId: "target-b" }));
   await journal.create(
-    forkOperationInput({ operationId: "fork-a", targetSessionId: "target-a" }),
-  );
-  await journal.create(
-    forkOperationInput({ operationId: "fork-b", targetSessionId: "target-b" }),
-  );
-  await journal.create(
-    forkOperationInput({ operationId: "rewind-1", kind: "rewind", mode: "both", precondition: { sessionLastSeq: 3, effectiveHistoryDigest: "d".repeat(8), fileHistoryRevision: 2 }, target: { messageId: "m1", sourceMessageEventId: "user-message:m1", messageIndex: 0, userPrompt: "p" }, files: [] }),
+    forkOperationInput({
+      operationId: "rewind-1",
+      kind: "rewind",
+      mode: "both",
+      precondition: {
+        sessionLastSeq: 3,
+        effectiveHistoryDigest: "d".repeat(8),
+        fileHistoryRevision: 2,
+      },
+      target: {
+        messageId: "m1",
+        sourceMessageEventId: "user-message:m1",
+        messageIndex: 0,
+        userPrompt: "p",
+      },
+      files: [],
+    }),
   );
   // completed 需走完整 Saga 链(prepared→…→completed),单步直达 completed 非法。
-  await journal.advance({ operationId: "fork-a", expectedVersion: 1, nextState: "workspace_applied" });
-  await journal.advance({ operationId: "fork-a", expectedVersion: 2, nextState: "session_committed" });
-  await journal.advance({ operationId: "fork-a", expectedVersion: 3, nextState: "sidecars_committed" });
+  await journal.advance({
+    operationId: "fork-a",
+    expectedVersion: 1,
+    nextState: "workspace_applied",
+  });
+  await journal.advance({
+    operationId: "fork-a",
+    expectedVersion: 2,
+    nextState: "session_committed",
+  });
+  await journal.advance({
+    operationId: "fork-a",
+    expectedVersion: 3,
+    nextState: "sidecars_committed",
+  });
   await journal.advance({ operationId: "fork-a", expectedVersion: 4, nextState: "completed" });
   await journal.advance({
     operationId: "fork-b",
@@ -300,20 +334,18 @@ test("evidence manifests live in sqlite; blobs keep the FS CAS layout", async (c
   // 行篡改 → 内容哈希失配 fail-closed。
   const database = new DatabaseSync(join(fixture.storageRoot, "pico.sqlite"));
   try {
-    database
-      .prepare("UPDATE evidence_records SET content_json = ? WHERE content_hash = ?")
-      .run(
-        JSON.stringify({
-          kind: "tool-exchange",
-          sessionId: "evidence-session",
-          toolCallId: "call-1",
-          toolName: "forged",
-          arguments: '{"cmd":"fixture"}',
-          rawOutput: manifest.content.rawOutput,
-          isError: false,
-        }),
-        reference.contentHash,
-      );
+    database.prepare("UPDATE evidence_records SET content_json = ? WHERE content_hash = ?").run(
+      JSON.stringify({
+        kind: "tool-exchange",
+        sessionId: "evidence-session",
+        toolCallId: "call-1",
+        toolName: "forged",
+        arguments: '{"cmd":"fixture"}',
+        rawOutput: manifest.content.rawOutput,
+        isError: false,
+      }),
+      reference.contentHash,
+    );
   } finally {
     database.close();
   }
@@ -321,7 +353,10 @@ test("evidence manifests live in sqlite; blobs keep the FS CAS layout", async (c
 
   // 目录断言:清单 JSON 与会话目录不再产生;blob CAS 目录保持。
   assert.equal(existsSync(join(fixture.evidenceRoot, "evidence-session")), false);
-  assert.equal(existsSync(join(fixture.evidenceRoot, "evidence-session", `${reference.contentHash}.json`)), false);
+  assert.equal(
+    existsSync(join(fixture.evidenceRoot, "evidence-session", `${reference.contentHash}.json`)),
+    false,
+  );
   const blobPath = join(
     fixture.evidenceRoot,
     "blobs",
@@ -445,10 +480,14 @@ test("todo store persists atomically in workspace_kv without todo.json", async (
   assert.equal(existsSync(join(fixture.storageRoot, "todo.json")), false);
   const database = new DatabaseSync(join(fixture.storageRoot, "pico.sqlite"), { readOnly: true });
   try {
-    const rows = database
-      .prepare("SELECT key, value_json FROM workspace_kv")
-      .all() as Array<{ key: string; value_json: string }>;
-    assert.deepEqual(rows.map((row) => row.key), ["todo"]);
+    const rows = database.prepare("SELECT key, value_json FROM workspace_kv").all() as Array<{
+      key: string;
+      value_json: string;
+    }>;
+    assert.deepEqual(
+      rows.map((row) => row.key),
+      ["todo"],
+    );
     const value = JSON.parse(rows[0]!.value_json) as { items: unknown[]; nextId: number };
     assert.equal(value.items.length, 2);
     assert.equal(value.nextId, 3);
@@ -459,9 +498,7 @@ test("todo store persists atomically in workspace_kv without todo.json", async (
   // 畸形行 → 降级空清单不抛。
   const writer = new DatabaseSync(join(fixture.storageRoot, "pico.sqlite"));
   try {
-    writer
-      .prepare("UPDATE workspace_kv SET value_json = ? WHERE key = 'todo'")
-      .run("{broken json");
+    writer.prepare("UPDATE workspace_kv SET value_json = ? WHERE key = 'todo'").run("{broken json");
   } finally {
     writer.close();
   }

@@ -45,7 +45,11 @@ import type { AskUserHandler } from "../tools/ask-user.js";
 import { WorkspaceRoots, workspaceAccessesFromCall } from "../tools/workspace-roots.js";
 import type { DefaultToolRegistryOptions } from "../tools/default-registry.js";
 import { FetchURLTool } from "../tools/web.js";
-import { DelegationManager, DelegateStatusTool, aggregateDelegationStatus } from "../tools/delegation-manager.js";
+import {
+  DelegationManager,
+  DelegateStatusTool,
+  aggregateDelegationStatus,
+} from "../tools/delegation-manager.js";
 import { createSubagentRegistryFactory } from "../tools/delegation-registry.js";
 import type { AgentProfile } from "../tools/agent-profile.js";
 import { loadAgentCatalog, type AgentExternalCatalogSource } from "../agents/catalog.js";
@@ -181,7 +185,10 @@ import { MemoryContextBuilder } from "../memory/context-builder.js";
 import { buildMemoryTriggerTools, type MemoryTriggerSlot } from "../memory/memory-trigger-tools.js";
 import { SqliteMemoryRepository } from "../storage/sqlite/sqlite-memory-repository.js";
 import { MemoryProposalEngine, MemoryRepositoryProposalStore } from "../memory/proposal-engine.js";
-import type { MemoryProposalProcessResult, TerminalMemoryEvidenceRef } from "../memory/proposal-contracts.js";
+import type {
+  MemoryProposalProcessResult,
+  TerminalMemoryEvidenceRef,
+} from "../memory/proposal-contracts.js";
 import { RuntimeMemoryEvidenceReader } from "../memory/runtime-evidence-reader.js";
 import {
   MemoryReviewScheduler,
@@ -644,9 +651,7 @@ function approvedPlanExecutionPrompt(proposal: PlanProposal): string {
     `Plan: ${proposal.title} (${proposal.planId}@${proposal.revision})`,
     proposal.overview ? `Overview: ${proposal.overview}` : undefined,
     "Steps:",
-    ...proposal.steps.map(
-      (step) => `- ${step.id}: ${step.title}\n  ${step.description}`,
-    ),
+    ...proposal.steps.map((step) => `- ${step.id}: ${step.title}\n  ${step.description}`),
     proposal.risks?.length
       ? `Risks:\n${proposal.risks.map((risk) => `- ${risk}`).join("\n")}`
       : undefined,
@@ -964,11 +969,7 @@ export async function executeAgentRuntime(
     }
     const memoryTrustStore =
       dependencies.memoryTrustStore ?? new WorkspaceTrustStore({ userStateDirectory: picoHome });
-    if (
-      !backgroundPolicy &&
-      !dependencies.isolatedHeadless &&
-      collaborationMode() !== "plan"
-    ) {
+    if (!backgroundPolicy && !dependencies.isolatedHeadless && collaborationMode() !== "plan") {
       try {
         const canonicalMemoryWorkspace = await memoryTrustStore.canonicalize(workDir);
         if (await memoryTrustStore.isTrusted(canonicalMemoryWorkspace)) {
@@ -1137,9 +1138,7 @@ export async function executeAgentRuntime(
           sessionSelection.mode === "resume" || sessionSelection.mode === "continue"
             ? "resume"
             : "startup",
-        ...(backgroundPolicy ||
-        dependencies.isolatedHeadless ||
-        collaborationMode() === "plan"
+        ...(backgroundPolicy || dependencies.isolatedHeadless || collaborationMode() === "plan"
           ? { hooks: false as const }
           : {}),
         ...(collaborationMode() !== "plan" && dependencies.hookService
@@ -1158,8 +1157,7 @@ export async function executeAgentRuntime(
     if (collaborationMode() !== "plan" && dependencies.hookService) {
       runtimeState.attachHookService(dependencies.hookService);
     }
-    const activeHookService =
-      collaborationMode() === "plan" ? undefined : runtimeState.hookService;
+    const activeHookService = collaborationMode() === "plan" ? undefined : runtimeState.hookService;
     if (
       dependencies.toolDisclosure !== undefined &&
       dependencies.toolDisclosure !== runtimeState.toolDisclosure
@@ -1355,8 +1353,7 @@ export async function executeAgentRuntime(
         )
         .finally(kickMemoryWorker);
     }
-    let activeMcpManager =
-      collaborationMode() === "plan" ? undefined : dependencies.mcpManager;
+    let activeMcpManager = collaborationMode() === "plan" ? undefined : dependencies.mcpManager;
     runtimeState.bindHookRuntime({
       provider: trackedProvider,
       modelRuntime: {
@@ -1564,37 +1561,39 @@ export async function executeAgentRuntime(
       // its guard narrowing would be lost inside the async closure.
       const memoryRepo = memoryRepository;
       const memoryModel = memoryModelFactory;
-      const rememberHandler = memoryRepo && memoryModel
-        ? async (ref: TerminalMemoryEvidenceRef): Promise<MemoryProposalProcessResult> => {
-            const repo = new SqliteMemoryRepository({
-              storageRoot: memoryRepo.storageRoot,
-              workspaceId: memoryRepo.workspaceId,
-            });
-            try {
-              const store = new MemoryRepositoryProposalStore(repo);
-              const evidenceReader = new RuntimeMemoryEvidenceReader({
-                readSessionEvent: (sid, eid) => session.runtimeEventStore!.readSessionEvent(sid, eid),
-                readSessionEntries: (sid) => session.runtimeEventStore!.readSessionEntries(sid),
+      const rememberHandler =
+        memoryRepo && memoryModel
+          ? async (ref: TerminalMemoryEvidenceRef): Promise<MemoryProposalProcessResult> => {
+              const repo = new SqliteMemoryRepository({
+                storageRoot: memoryRepo.storageRoot,
+                workspaceId: memoryRepo.workspaceId,
               });
-              // lease 必须收口：默认 factory 的 dispose 关闭 CostTracker 的
-              // RuntimeStore ledger，漏放会每次调用泄漏一个打开的 ledger 句柄
-              //（worker.ts 后台提取的 sharedLease?.dispose?.() 是正确范式）。
-              const lease = await memoryModel();
               try {
-                const engine = new MemoryProposalEngine({
-                  store,
-                  evidenceReader,
-                  model: lease.model,
+                const store = new MemoryRepositoryProposalStore(repo);
+                const evidenceReader = new RuntimeMemoryEvidenceReader({
+                  readSessionEvent: (sid, eid) =>
+                    session.runtimeEventStore!.readSessionEvent(sid, eid),
+                  readSessionEntries: (sid) => session.runtimeEventStore!.readSessionEntries(sid),
                 });
-                return await engine.process(ref);
+                // lease 必须收口：默认 factory 的 dispose 关闭 CostTracker 的
+                // RuntimeStore ledger，漏放会每次调用泄漏一个打开的 ledger 句柄
+                //（worker.ts 后台提取的 sharedLease?.dispose?.() 是正确范式）。
+                const lease = await memoryModel();
+                try {
+                  const engine = new MemoryProposalEngine({
+                    store,
+                    evidenceReader,
+                    model: lease.model,
+                  });
+                  return await engine.process(ref);
+                } finally {
+                  await lease.dispose?.();
+                }
               } finally {
-                await lease.dispose?.();
+                repo.close();
               }
-            } finally {
-              repo.close();
             }
-          }
-        : undefined;
+          : undefined;
       for (const tool of buildMemoryTriggerTools(
         { rememberHandler, slot: memoryTriggerSlot },
         () => memoryTriggerSlot.ref,
@@ -1961,7 +1960,6 @@ export async function executeAgentRuntime(
       runtimeState.setGraphWorkDispatcher(undefined);
     }
 
-
     // MCP 服务器:加载配置 → 并行连接 → 自动注册工具到 registry。
     // per-server 失败隔离,一个 server 挂了不影响其他。
     const planMcpDisabled = collaborationMode() === "plan";
@@ -2193,10 +2191,13 @@ async function acquireRuntimeSession({
   // 临时探测 store:manifest/fork 校验完成后立即归还 lease(连接句柄随 lease
   // 存活,泄漏会占住 pico.sqlite;Session 自带独立 store)。
   try {
-    return await acquireRuntimeSessionWithStore(
-      runtimeEventStore,
-      { sessionSelection, workDir, picoHome, resumeExistingSession, planMode },
-    );
+    return await acquireRuntimeSessionWithStore(runtimeEventStore, {
+      sessionSelection,
+      workDir,
+      picoHome,
+      resumeExistingSession,
+      planMode,
+    });
   } finally {
     runtimeEventStore.close();
   }

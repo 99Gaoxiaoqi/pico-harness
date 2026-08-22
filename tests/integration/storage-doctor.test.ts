@@ -4,17 +4,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { resolvePicoPaths, workspaceIdForPath } from "../../src/paths/pico-paths.js";
-import {
-  StorageDoctor,
-  type StorageDoctorFinding,
-} from "../../src/storage/storage-doctor.js";
+import { StorageDoctor, type StorageDoctorFinding } from "../../src/storage/storage-doctor.js";
 import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import { SqliteMemoryRepository } from "../../src/storage/sqlite/sqlite-memory-repository.js";
 import {
   closeAllOperationalDatabasesForTest,
   operationalDatabasePath,
 } from "../../src/storage/sqlite/sqlite-database.js";
-import { RUNTIME_EVENT_SCHEMA_VERSION, type RuntimeEvent } from "../../src/engine/session-runtime-event.js";
+import {
+  RUNTIME_EVENT_SCHEMA_VERSION,
+  type RuntimeEvent,
+} from "../../src/engine/session-runtime-event.js";
 import { createRuntimeEventId } from "../../src/storage/runtime-event-store-contracts.js";
 
 /**
@@ -189,9 +189,7 @@ test("doctor 对跨 workspace 会话与 memory 绑定错位 fail-closed", async 
       report.findings.map((finding) => finding.code).join(","),
     );
     assert.ok(
-      report.findings.some(
-        (finding) => finding.code === "memory_workspace_mismatch",
-      ),
+      report.findings.some((finding) => finding.code === "memory_workspace_mismatch"),
       report.findings.map((finding) => finding.code).join(","),
     );
   } finally {

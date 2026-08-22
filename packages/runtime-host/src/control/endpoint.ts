@@ -1,10 +1,10 @@
-import { chmod, lstat, mkdtemp, readdir, rm, rmdir, unlink } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { chmod, lstat, mkdtemp, readdir, rm, rmdir, unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-const FALLBACK_ENDPOINT_ROOT = '/tmp';
+const FALLBACK_ENDPOINT_ROOT = "/tmp";
 const PORTABLE_UNIX_SOCKET_PATH_LIMIT = 100;
-const ENDPOINT_SOCKET_NAME = 'h.sock';
+const ENDPOINT_SOCKET_NAME = "h.sock";
 const MKDTEMP_SUFFIX_LENGTH = 6;
 
 export interface RuntimeHostEndpointInput {
@@ -20,11 +20,11 @@ export interface RuntimeHostEndpoint {
 
 export class RuntimeHostEndpointError extends Error {
   constructor(
-    readonly code: 'insecure_endpoint_directory' | 'endpoint_path_too_long',
+    readonly code: "insecure_endpoint_directory" | "endpoint_path_too_long",
     message: string,
   ) {
     super(message);
-    this.name = 'RuntimeHostEndpointError';
+    this.name = "RuntimeHostEndpointError";
   }
 }
 
@@ -32,7 +32,7 @@ export async function prepareRuntimeHostEndpoint(
   input: RuntimeHostEndpointInput,
 ): Promise<RuntimeHostEndpoint> {
   assertValidRootId(input.rootId);
-  if (process.platform === 'win32') {
+  if (process.platform === "win32") {
     const path = `\\\\.\\pipe\\pico-runtime-host-${input.rootId.slice(0, 16)}-${input.hostEpoch}`;
     return {
       path,
@@ -49,9 +49,9 @@ export async function prepareRuntimeHostEndpoint(
   try {
     await ensurePrivateEndpointDirectory(directory);
     const path = join(directory, ENDPOINT_SOCKET_NAME);
-    if (Buffer.byteLength(path, 'utf8') > PORTABLE_UNIX_SOCKET_PATH_LIMIT) {
+    if (Buffer.byteLength(path, "utf8") > PORTABLE_UNIX_SOCKET_PATH_LIMIT) {
       throw new RuntimeHostEndpointError(
-        'endpoint_path_too_long',
+        "endpoint_path_too_long",
         `Runtime Host endpoint path exceeds the portable Unix socket limit: ${path}`,
       );
     }
@@ -66,17 +66,17 @@ export async function prepareRuntimeHostEndpoint(
           (endpointStat.mode & 0o077) !== 0
         ) {
           throw new RuntimeHostEndpointError(
-            'insecure_endpoint_directory',
+            "insecure_endpoint_directory",
             `Runtime Host endpoint is not a private current-user socket: ${path}`,
           );
         }
       },
       async cleanup() {
         await unlink(path).catch((error: unknown) => {
-          if (!isNodeError(error, 'ENOENT')) throw error;
+          if (!isNodeError(error, "ENOENT")) throw error;
         });
         await rmdir(directory).catch((error: unknown) => {
-          if (!isNodeError(error, 'ENOENT')) throw error;
+          if (!isNodeError(error, "ENOENT")) throw error;
         });
       },
     };
@@ -96,10 +96,10 @@ function resolveEndpointRoot(prefix: string): string {
   const candidate = tmpdir();
   const worstCasePath = join(
     candidate,
-    `${prefix}${'X'.repeat(MKDTEMP_SUFFIX_LENGTH)}`,
+    `${prefix}${"X".repeat(MKDTEMP_SUFFIX_LENGTH)}`,
     ENDPOINT_SOCKET_NAME,
   );
-  if (Buffer.byteLength(worstCasePath, 'utf8') <= PORTABLE_UNIX_SOCKET_PATH_LIMIT) return candidate;
+  if (Buffer.byteLength(worstCasePath, "utf8") <= PORTABLE_UNIX_SOCKET_PATH_LIMIT) return candidate;
   return FALLBACK_ENDPOINT_ROOT;
 }
 
@@ -116,14 +116,14 @@ function endpointDirectoryPrefix(rootPrefix: string, pid: number): string {
 }
 
 function endpointRootTag(rootId: string): string {
-  return Buffer.from(rootId, 'hex').toString('base64url');
+  return Buffer.from(rootId, "hex").toString("base64url");
 }
 
 function assertValidRootId(rootId: string): void {
   if (!/^[a-f0-9]{64}$/.test(rootId)) {
     throw new RuntimeHostEndpointError(
-      'insecure_endpoint_directory',
-      'Runtime Host endpoint requires a valid storage root identity',
+      "insecure_endpoint_directory",
+      "Runtime Host endpoint requires a valid storage root identity",
     );
   }
 }
@@ -149,7 +149,7 @@ async function removeDeadEndpointDirectories(root: string, rootPrefix: string): 
           const path = join(endpointRoot, entry.name);
           const directoryStat = await lstat(path).catch(() => undefined);
           if (!directoryStat?.isDirectory() || directoryStat.uid !== currentUid()) return;
-          const pid = Number.parseInt(match[1] ?? '', 36);
+          const pid = Number.parseInt(match[1] ?? "", 36);
           if (!Number.isSafeInteger(pid) || pid <= 0 || processIsAlive(pid)) return;
           await rm(path, { recursive: true, force: true });
         }),
@@ -165,12 +165,12 @@ function processIsAlive(pid: number): boolean {
   } catch (error) {
     // EPERM means the pid exists but belongs to someone we cannot signal:
     // treat as alive so the sweep stays conservative.
-    return isNodeError(error, 'EPERM');
+    return isNodeError(error, "EPERM");
   }
 }
 
 function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 async function ensurePrivateEndpointDirectory(path: string): Promise<void> {
@@ -182,17 +182,17 @@ async function ensurePrivateEndpointDirectory(path: string): Promise<void> {
     (directoryStat.mode & 0o077) !== 0
   ) {
     throw new RuntimeHostEndpointError(
-      'insecure_endpoint_directory',
+      "insecure_endpoint_directory",
       `Runtime Host endpoint parent is not a private current-user directory: ${path}`,
     );
   }
 }
 
 function currentUid(): number {
-  if (typeof process.getuid !== 'function') {
+  if (typeof process.getuid !== "function") {
     throw new RuntimeHostEndpointError(
-      'insecure_endpoint_directory',
-      'Runtime Host POSIX endpoints require a current-user identity',
+      "insecure_endpoint_directory",
+      "Runtime Host POSIX endpoints require a current-user identity",
     );
   }
   return process.getuid();
@@ -200,6 +200,6 @@ function currentUid(): number {
 
 function isNodeError(error: unknown, code: string): boolean {
   return (
-    error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === code
+    error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code
   );
 }

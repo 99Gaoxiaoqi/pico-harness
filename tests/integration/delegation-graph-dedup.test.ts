@@ -11,9 +11,10 @@ import {
 import { SqliteRuntimeControlStore } from "../../src/storage/sqlite/sqlite-runtime-control-store.js";
 
 /** 建一个临时目录的 RuntimeStore 并注入 DelegationManager，用完清理。 */
-function createDelegationManager(
-  options: DelegationManagerOptions = {},
-): { manager: DelegationManager; cleanup: () => void } {
+function createDelegationManager(options: DelegationManagerOptions = {}): {
+  manager: DelegationManager;
+  cleanup: () => void;
+} {
   const root = mkdtempSync(join(tmpdir(), "pico-delegation-dedup-"));
   const runtimeStore = new SqliteRuntimeControlStore({ storageRoot: root });
   const manager = new DelegationManager({ ...options, runtimeStore });

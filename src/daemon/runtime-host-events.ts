@@ -157,13 +157,8 @@ function deliverLiveEvent(
   disposeSubscription: () => void,
 ): void {
   try {
-    const safe = transportSafeRuntimeNotificationWithin(
-      event,
-      BRIDGE_EVENT_MAX_SERIALIZED_BYTES,
-    );
-    void pushEvent(safe as unknown as Record<string, unknown>).catch(() =>
-      disposeSubscription(),
-    );
+    const safe = transportSafeRuntimeNotificationWithin(event, BRIDGE_EVENT_MAX_SERIALIZED_BYTES);
+    void pushEvent(safe as unknown as Record<string, unknown>).catch(() => disposeSubscription());
   } catch {
     // 裁剪失败（超预算的 live 事件）：fence 该连接，绝不静默跳过。
     disposeSubscription();
@@ -221,8 +216,7 @@ export function packReplayPageForBridge(page: RuntimeNotificationPage): {
     nextAfterEventId = event.eventId;
   }
   const highWatermarkEventId = page.highWatermarkEventId;
-  const hasMore =
-    highWatermarkEventId !== undefined && nextAfterEventId !== highWatermarkEventId;
+  const hasMore = highWatermarkEventId !== undefined && nextAfterEventId !== highWatermarkEventId;
   return {
     events: packed,
     hasMore,
