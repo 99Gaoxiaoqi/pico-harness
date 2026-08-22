@@ -666,33 +666,28 @@ function deleteSessionOwnedRowsLocked(database: DatabaseSync, sessionId: string)
   database.prepare("DELETE FROM desktop_input_queue WHERE session_id = ?").run(sessionId);
   database.prepare("DELETE FROM desktop_first_send_claims WHERE session_id = ?").run(sessionId);
 
+  // Job/Attempt/command/outbox/merge rows belong to the independent control
+  // ledger. Retention may detach their weak Session pointers after terminal,
+  // but must not erase those facts just because the referenced Session expires.
   database
     .prepare(
-      `DELETE FROM job_commands WHERE job_id IN (
-         SELECT job_id FROM jobs WHERE owner_session_id = ? OR child_session_id = ?
-       )`,
+      `UPDATE jobs SET
+         owner_session_id = CASE WHEN owner_session_id = ? THEN NULL ELSE owner_session_id END,
+         child_session_id = CASE WHEN child_session_id = ? THEN NULL ELSE child_session_id END
+       WHERE owner_session_id = ? OR child_session_id = ?`,
     )
-    .run(sessionId, sessionId);
+    .run(sessionId, sessionId, sessionId, sessionId);
+  database
+    .prepare("UPDATE daemon_runs SET session_id = NULL, checkpoint_id = NULL WHERE session_id = ?")
+    .run(sessionId);
   database
     .prepare(
-      `DELETE FROM completion_outbox WHERE job_id IN (
-         SELECT job_id FROM jobs WHERE owner_session_id = ? OR child_session_id = ?
-       )`,
+      "UPDATE usage_provider_calls SET session_id = NULL, conversation_id = NULL WHERE session_id = ?",
     )
-    .run(sessionId, sessionId);
+    .run(sessionId);
   database
-    .prepare(
-      `DELETE FROM merge_requests WHERE job_id IN (
-         SELECT job_id FROM jobs WHERE owner_session_id = ? OR child_session_id = ?
-       )`,
-    )
-    .run(sessionId, sessionId);
-  database
-    .prepare("DELETE FROM jobs WHERE owner_session_id = ? OR child_session_id = ?")
-    .run(sessionId, sessionId);
-  database.prepare("DELETE FROM daemon_runs WHERE session_id = ?").run(sessionId);
-  database.prepare("DELETE FROM usage_provider_calls WHERE session_id = ?").run(sessionId);
-  database.prepare("DELETE FROM usage_baselines WHERE session_id = ?").run(sessionId);
+    .prepare("UPDATE usage_baselines SET session_id = NULL WHERE session_id = ?")
+    .run(sessionId);
   database
     .prepare("DELETE FROM storage_operations WHERE session_id = ? OR target_session_id = ?")
     .run(sessionId, sessionId);
@@ -840,15 +835,118 @@ function readBlobGcIntentRows(rows: readonly Record<string, unknown>[]): EventLo
 }
 
 function readUnattributedControlBytes(database: DatabaseSync): number {
-  const row = database
-    .prepare(
-      `SELECT COALESCE(SUM(${["intent_id", "blob_kind", "digest", "status", "last_error"]
-        .map(textBytes)
-        .join(" + ")}), 0) AS logical_bytes
-       FROM retention_gc_intents`,
-    )
-    .get() as Record<string, unknown>;
-  return requireNonNegativeInteger(row["logical_bytes"], "retention_gc_intents.logical_bytes");
+  const queries = [
+    unattributedTextQuery(
+      "jobs",
+      [
+        "job_id",
+        "type",
+        "status",
+        "execution_class",
+        "completion_policy",
+        "description",
+        "tool_use_id",
+        "output_path",
+        "data_json",
+        "error",
+      ],
+      "owner_session_id IS NULL AND child_session_id IS NULL",
+    ),
+    unattributedJobChildTextQuery("job_attempts", [
+      "attempt_id",
+      "job_id",
+      "status",
+      "owner_id",
+      "output_path",
+      "error",
+      "result_json",
+    ]),
+    unattributedJobChildTextQuery("job_commands", ["command_id", "job_id", "kind", "payload_json"]),
+    unattributedJobChildTextQuery("completion_outbox", [
+      "completion_id",
+      "job_id",
+      "attempt_id",
+      "policy",
+      "status",
+      "payload_json",
+    ]),
+    unattributedJobChildTextQuery("merge_requests", [
+      "merge_request_id",
+      "job_id",
+      "attempt_id",
+      "source_branch",
+      "source_worktree",
+      "target_branch",
+      "target_worktree",
+      "source_head",
+      "status",
+      "error",
+    ]),
+    unattributedTextQuery(
+      "daemon_runs",
+      [
+        "run_id",
+        "workspace_path",
+        "checkpoint_id",
+        "description",
+        "status",
+        "result_json",
+        "error",
+      ],
+      "session_id IS NULL",
+    ),
+    unattributedTextQuery(
+      "usage_provider_calls",
+      [
+        "call_id",
+        "tx_id",
+        "conversation_id",
+        "goal_id",
+        "job_id",
+        "attempt_id",
+        "purpose",
+        "provider",
+        "model",
+        "route",
+        "status",
+        "reported_json",
+      ],
+      "session_id IS NULL",
+    ),
+    unattributedTextQuery(
+      "usage_baselines",
+      ["baseline_id", "goal_id", "source_json"],
+      "session_id IS NULL",
+    ),
+    unattributedTextQuery("retention_gc_intents", [
+      "intent_id",
+      "blob_kind",
+      "digest",
+      "status",
+      "last_error",
+    ]),
+  ];
+  return queries.reduce((total, query) => {
+    const row = database.prepare(query).get() as Record<string, unknown>;
+    return safeAdd(
+      total,
+      requireNonNegativeInteger(row["logical_bytes"], "unattributed control logical_bytes"),
+      "unattributed control bytes",
+    );
+  }, 0);
+}
+
+function unattributedTextQuery(table: string, columns: readonly string[], where?: string): string {
+  return `SELECT COALESCE(SUM(${columns.map(textBytes).join(" + ")}), 0) AS logical_bytes
+          FROM ${table}${where ? ` WHERE ${where}` : ""}`;
+}
+
+function unattributedJobChildTextQuery(table: string, columns: readonly string[]): string {
+  return `SELECT COALESCE(SUM(${columns
+    .map((column) => textBytes(`${table}.${column}`))
+    .join(" + ")}), 0) AS logical_bytes
+          FROM ${table} JOIN jobs ON jobs.job_id = ${table}.job_id
+          WHERE jobs.owner_session_id IS NULL AND jobs.child_session_id IS NULL`;
 }
 
 function readBlobReferences(database: DatabaseSync): BlobReferenceSnapshot {
@@ -1009,7 +1107,12 @@ function addGroupedBytes(
   for (const query of queries) {
     const rows = database.prepare(query).all() as Array<Record<string, unknown>>;
     for (const row of rows) {
-      const sessionId = requireString(row["session_id"], "logical_bytes.session_id");
+      const rawSessionId = row["session_id"];
+      // Independent control facts survive Session retention with their weak
+      // reference cleared. Their bytes become workspace-level unattributed
+      // control overhead and must not make the status decoder fail.
+      if (rawSessionId === null || rawSessionId === undefined) continue;
+      const sessionId = requireString(rawSessionId, "logical_bytes.session_id");
       const breakdown = breakdowns.get(sessionId);
       if (!breakdown) continue;
       breakdown[field] = safeAdd(
