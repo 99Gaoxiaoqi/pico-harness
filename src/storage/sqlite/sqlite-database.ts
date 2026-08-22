@@ -245,6 +245,17 @@ function configureOperationalDatabase(database: DatabaseSync): void {
   ensureWalJournalMode(database);
   database.exec("PRAGMA synchronous = FULL");
   database.exec("PRAGMA foreign_keys = ON");
+  ensureSecureDelete(database);
+}
+
+function ensureSecureDelete(database: DatabaseSync): void {
+  database.exec("PRAGMA secure_delete = ON");
+  const row = database.prepare("PRAGMA secure_delete").get() as
+    | { secure_delete?: unknown }
+    | undefined;
+  if (row?.secure_delete !== 1) {
+    throw new FileStorageIntegrityError("Failed to enable SQLite secure_delete");
+  }
 }
 
 /**
