@@ -69,6 +69,10 @@ test("sqlite engine: prepare initializes database with PRAGMAs and binding", () 
         (db.prepare("PRAGMA synchronous").get() as { synchronous: number }).synchronous,
         2,
       );
+      assert.equal(
+        (db.prepare("PRAGMA secure_delete").get() as { secure_delete: number }).secure_delete,
+        1,
+      );
       assert.ok(preparation.rootIdentity.storageRootId.length > 0);
       assert.ok(preparation.rootIdentity.canonicalPath.length > 0);
     } finally {
