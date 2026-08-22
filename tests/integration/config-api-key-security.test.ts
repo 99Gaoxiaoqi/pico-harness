@@ -319,6 +319,27 @@ test("bare LLM environment is not a route while configured env and Keychain cred
     configuredEnvironmentSecret,
   );
 
+  const firstRotatingSecret = syntheticSecret("configured-environment-first");
+  const secondRotatingSecret = syntheticSecret("configured-environment-second");
+  const rotatingRuntime = await loadEffectiveModelRuntime({
+    workDir: workspace,
+    projectTrusted: false,
+    legacyProvider: "openai",
+    legacyModel: "unused-legacy-model",
+    legacyModelExplicit: false,
+    env: {
+      [API_KEY_ENV]: `${firstRotatingSecret}, ${secondRotatingSecret}`,
+      LLM_API_KEYS: syntheticSecret("unrelated-bare-environment"),
+    },
+    userConfigStore: configuredEnvironmentStore,
+    configResolver: new EffectiveConfigResolver({ userConfigStore: configuredEnvironmentStore }),
+    credentialVault: unavailableVault(),
+  });
+  assert.deepEqual(rotatingRuntime.router.credentialCandidates(`${PROVIDER_ID}/${MODEL_ID}`), [
+    firstRotatingSecret,
+    secondRotatingSecret,
+  ]);
+
   const keychainSecret = syntheticSecret("legacy-keychain");
   const keychainStore = new UserConfigStore({ picoHome: join(picoHome, "keychain") });
   await keychainStore.write(userConfigWithoutKey(), {
