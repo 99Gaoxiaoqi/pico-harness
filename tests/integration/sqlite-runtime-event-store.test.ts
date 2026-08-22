@@ -503,6 +503,56 @@ test("sqlite sessions: same-tx replay does not double-write + conflicting eventI
   }
 });
 
+test("sqlite sessions: partial RuntimeEvents never enter the canonical ledger", async () => {
+  const fixture = createFixture("pico-sqlite-sessions-partial-lane-");
+  try {
+    const sessionId = "sqlite-partial-lane";
+    await fixture.store.initializeSession({ sessionId, workDir: fixture.workspace });
+    const partial = {
+      ...userMessage(`${sessionId}-partial`, sessionId, "2026-08-18T00:00:01.000Z", "streaming"),
+      partial: true,
+    } as RuntimeEvent;
+
+    await assert.rejects(
+      () => fixture.store.append(partial),
+      (error: unknown) =>
+        error instanceof RuntimeEventStoreIntegrityError &&
+        /use the mutable partial lane/u.test(error.message),
+    );
+    await assert.rejects(
+      () => fixture.store.appendBatch([partial]),
+      (error: unknown) =>
+        error instanceof RuntimeEventStoreIntegrityError &&
+        /use the mutable partial lane/u.test(error.message),
+    );
+
+    assert.equal(await fixture.store.getHeadCursor(sessionId), undefined);
+    assert.deepEqual(await fixture.store.readSession(sessionId), []);
+    const db = new DatabaseSync(operationalDatabasePath(fixture.storage));
+    try {
+      const row = db
+        .prepare(
+          "SELECT last_event_seq, event_count, storage_bytes, (SELECT COUNT(*) FROM runtime_events WHERE session_id = ?1) AS rows FROM sessions WHERE session_id = ?1",
+        )
+        .get(sessionId) as Record<string, unknown>;
+      assert.deepEqual(
+        { ...row },
+        {
+          last_event_seq: 0,
+          event_count: 0,
+          storage_bytes: 0,
+          rows: 0,
+        },
+      );
+    } finally {
+      db.close();
+    }
+  } finally {
+    closeFixture(fixture);
+    cleanupFixture(fixture);
+  }
+});
+
 test("sqlite sessions: fork target conflict detection and session.forked maintenance", async () => {
   const fixture = createFixture("pico-sqlite-sessions-fork-");
   try {

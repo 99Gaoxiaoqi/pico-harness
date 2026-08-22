@@ -137,14 +137,38 @@ export function advanceRuntimeTranscriptPagingState(
   };
   const completed: RuntimeConversationItem[] = [];
   for (const fragment of page.fragments ?? []) {
-    const parts = [...(fragments[fragment.itemId] ?? []), fragment].toSorted(
-      (left, right) => left.byteOffset - right.byteOffset,
+    if (
+      fragment.byteLength !== Buffer.byteLength(fragment.json, "utf8") ||
+      fragment.byteOffset + fragment.byteLength > fragment.totalBytes
+    ) {
+      throw new Error("Session transcript fragment byte range is invalid");
+    }
+    const prior = fragments[fragment.itemId] ?? [];
+    for (const part of prior) {
+      if (
+        part.totalBytes !== fragment.totalBytes ||
+        part.position !== fragment.position ||
+        part.ordinal !== fragment.ordinal
+      ) {
+        throw new Error("Session transcript fragments disagree on item metadata");
+      }
+      const sameRange =
+        part.byteOffset === fragment.byteOffset && part.byteLength === fragment.byteLength;
+      if (sameRange && part.json !== fragment.json) {
+        throw new Error("Session transcript fragments disagree on range content");
+      }
+      const overlaps =
+        part.byteOffset < fragment.byteOffset + fragment.byteLength &&
+        fragment.byteOffset < part.byteOffset + part.byteLength;
+      if (overlaps && !sameRange) {
+        throw new Error("Session transcript fragment ranges overlap");
+      }
+    }
+    const duplicate = prior.some(
+      (part) => part.byteOffset === fragment.byteOffset && part.byteLength === fragment.byteLength,
     );
-    const unique = parts.filter(
-      (part, index) =>
-        index === 0 ||
-        part.byteOffset !== parts[index - 1]!.byteOffset ||
-        part.byteLength !== parts[index - 1]!.byteLength,
+    const unique = [...prior, ...(duplicate ? [] : [fragment])].toSorted(
+      (left, right) => left.byteOffset - right.byteOffset,
     );
     fragments[fragment.itemId] = unique;
     let offset = 0;

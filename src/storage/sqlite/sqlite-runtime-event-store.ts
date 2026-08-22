@@ -3218,6 +3218,14 @@ function canonicalizeRuntimeEvent(event: RuntimeEvent): RuntimeEvent {
   }
   try {
     const canonical = decodeRuntimeEvent(JSON.parse(encoded) as unknown);
+    // Current SQLite EventLog epochs only admit immutable, complete facts. Streaming
+    // progress belongs to runtime_partial_snapshots/runtime_partial_segments and must
+    // never consume a canonical sequence (or enter checkpoint/continuation digests).
+    if (canonical.partial) {
+      throw new RuntimeEventStoreIntegrityError(
+        `Runtime event ${canonical.eventId} is partial; use the mutable partial lane`,
+      );
+    }
     if (isLegacyDecodeOnlyKind(canonical.kind)) {
       throw new RuntimeEventStoreIntegrityError(
         `Runtime event kind ${canonical.kind} is legacy-only and cannot be appended`,
