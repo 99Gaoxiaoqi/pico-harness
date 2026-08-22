@@ -81,5 +81,6 @@ Continuation：冻结 source prefix digest + claim + target run.started（同事
 - `npm run build`、根 typecheck、Desktop typecheck、lint、format 与 `git diff --check` 均通过。
 - 独立对抗审查未发现 P0，发现的 4 个 P1 均已修复并回归：canonical partial 入口、Transcript 整数 ordinal、Session-derived memory 删除/计费及其高容量回收边界；同时补齐了冲突 fragment 的 fail-closed 校验。Memory 计费由 SQLite 按 owner 聚合，仅向 Node 返回 `O(Session 数 + 1)` 行，不再物化正文或展开 source ID 参数。
 - 已知后续优化：daemon 为复用跨事实 projector，会在单次固定水位读取中累计分页结果；协议正确性和单帧预算已闭环，但极长 Session 的峰值内存可进一步改造成 checkpointed reducer。
+- Memory 计费已保持 `O(Session 数 + 1)` 返回行，但实际删除闭包仍会在 Node 中持有候选实体 ID 及 job/idempotency marker 元数据；极端海量小行场景可继续改造成 SQL set-delete 或有界 keyset 批次。
 - `runtime_events` 的 append-only 由 typed store API 和事务边界保证，暂未增加阻止同库代码直接执行 `UPDATE` 的 SQLite trigger；新增直接 SQL 写路径仍需架构审查。
 - 未执行真实用户数据库硬切、发布或真实模型验收；这些动作仍需单独批准。
