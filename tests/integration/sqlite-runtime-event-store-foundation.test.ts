@@ -14,7 +14,10 @@ import {
   type RuntimeOwnerFence,
 } from "../../src/storage/runtime-event-store-contracts.js";
 import { operationalDatabasePath } from "../../src/storage/sqlite/sqlite-database.js";
-import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import {
+  readExistingSqliteMaterializedTranscript,
+  SqliteRuntimeEventStore,
+} from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
 
 interface Fixture {
   readonly root: string;
@@ -422,11 +425,10 @@ test("transcript pages freeze throughSequence and resume by sequence/chunk/byte 
     const sessionId = "transcript-session";
     const ownerFence = await initializeAndFence(value, sessionId);
     await value.store.appendBatch(
-      [
-        message("e01", sessionId, "one"),
-        message("e02", sessionId, "two"),
-        message("e03", sessionId, "three"),
-      ],
+      ["e01", "e02", "e03"].map((eventId, index) => ({
+        ...started(eventId, sessionId, value.workspace),
+        runId: `source-run-${index + 1}`,
+      })),
       { ownerFence },
     );
     for (const [index, text] of ["abcdef", "gh", "ij"].entries()) {
@@ -453,7 +455,10 @@ test("transcript pages freeze throughSequence and resume by sequence/chunk/byte 
     );
     assert.deepEqual(first.nextCursor, { sequence: 1, chunkIndex: 0, byteOffset: 3 });
 
-    await value.store.append(message("e04", sessionId, "four"), { ownerFence });
+    await value.store.append(
+      { ...started("e04", sessionId, value.workspace), runId: "source-run-4" },
+      { ownerFence },
+    );
     await value.store.appendTranscriptRecord({
       recordId: "record-4",
       sessionId,
@@ -488,6 +493,99 @@ test("transcript pages freeze throughSequence and resume by sequence/chunk/byte 
       ["ij"],
     );
     assert.deepEqual(backward.nextCursor, { sequence: 2, chunkIndex: 0, byteOffset: 2 });
+  } finally {
+    cleanup(value);
+  }
+});
+
+test("canonical append atomically materializes fixed-water transcript facts", async () => {
+  const value = fixture("pico-eventlog-transcript-materialized-");
+  try {
+    const sessionId = "materialized-session";
+    const ownerFence = await initializeAndFence(value, sessionId);
+    await value.store.appendBatch(
+      [
+        message("e01", sessionId, `one-${"😀".repeat(40)}`),
+        message("e02", sessionId, `two-${"😀".repeat(40)}`),
+        message("e03", sessionId, `three-${"😀".repeat(40)}`),
+      ],
+      { ownerFence },
+    );
+    const first = await value.store.readTranscriptPage({
+      sessionId,
+      direction: "backward",
+      maxBytes: 31,
+    });
+    assert.equal(first.revisionSequence, 3);
+    assert.equal(first.throughSequence, 3);
+
+    await value.store.append(message("e04", sessionId, "late"), { ownerFence });
+    const textByRecord = new Map<string, string>();
+    let page = first;
+    for (;;) {
+      for (const item of page.items) {
+        textByRecord.set(item.recordId, item.text + (textByRecord.get(item.recordId) ?? ""));
+      }
+      if (!page.nextCursor) break;
+      page = await value.store.readTranscriptPage({
+        sessionId,
+        throughSequence: first.throughSequence,
+        direction: "backward",
+        cursor: page.nextCursor,
+        maxBytes: 31,
+      });
+      assert.equal(page.throughSequence, 3);
+    }
+    assert.deepEqual(
+      [...textByRecord.values()]
+        .map((json) => JSON.parse(json) as RuntimeEvent)
+        .map((event) => event.eventId)
+        .sort(),
+      ["e01", "e02", "e03"],
+    );
+    const replay = await readExistingSqliteMaterializedTranscript({
+      storageRoot: value.storage,
+      sessionId,
+      throughSequence: 3,
+      pageBytes: 31,
+    });
+    assert.deepEqual(
+      replay?.entries.map(({ event }) => event.eventId),
+      ["e01", "e02", "e03"],
+    );
+    assert.equal(replay?.throughSequence, 3);
+    assert.equal(replay?.revisionSequence, 4);
+    const db = new DatabaseSync(operationalDatabasePath(value.storage));
+    try {
+      assert.equal(
+        db.prepare("SELECT COUNT(*) AS count FROM runtime_transcript_records").get()?.count,
+        4,
+      );
+      assert.deepEqual(
+        JSON.parse(
+          String(
+            db
+              .prepare(
+                "SELECT payload_json FROM runtime_transcript_records WHERE source_event_id = 'e01'",
+              )
+              .get()?.payload_json,
+          ),
+        ),
+        { codec: "runtime-event-json-v1" },
+      );
+    } finally {
+      db.close();
+    }
+    await assert.rejects(
+      value.store.readTranscriptPage({
+        sessionId,
+        throughSequence: 3,
+        direction: "backward",
+        cursor: { sequence: 2, chunkIndex: 99, byteOffset: 0 },
+        maxBytes: 31,
+      }),
+      RuntimeEventStoreIntegrityError,
+    );
   } finally {
     cleanup(value);
   }

@@ -428,6 +428,17 @@ export type RuntimeTranscriptCursor = JsonObject & {
   readonly direction: RuntimeTranscriptDirection;
 };
 
+/** One UTF-8-safe byte range of a serialized RuntimeConversationItem. */
+export type RuntimeTranscriptFragment = JsonObject & {
+  readonly itemId: string;
+  readonly position: number;
+  readonly ordinal: number;
+  readonly byteOffset: number;
+  readonly byteLength: number;
+  readonly totalBytes: number;
+  readonly json: string;
+};
+
 export function isRuntimeTranscriptCursor(value: unknown): value is RuntimeTranscriptCursor {
   if (!isJsonObject(value)) return false;
   const keys = Object.keys(value);
@@ -793,6 +804,7 @@ export type RuntimeMethodMap = {
     readonly result: {
       readonly session: RuntimeSession;
       readonly items: readonly RuntimeConversationItem[];
+      readonly fragments?: readonly RuntimeTranscriptFragment[];
       readonly activeRun?: RuntimeRun;
       readonly queuedInputs: readonly RuntimeQueuedInput[];
       readonly planProjection?: RuntimePlanProjection;
@@ -3252,6 +3264,24 @@ const runtimeTranscriptCursorResult: RuntimeResultRule = (value, path) => {
     direction: resultOneOf(["older", "newer"]),
   })(value, path);
 };
+const runtimeTranscriptFragmentResult: RuntimeResultRule = (value, path) => {
+  exactResultShape({
+    itemId: resultNonEmptyString,
+    position: resultNonNegativeInteger,
+    ordinal: resultNonNegativeInteger,
+    byteOffset: resultNonNegativeInteger,
+    byteLength: resultPositiveInteger,
+    totalBytes: resultPositiveInteger,
+    json: resultNonEmptyString,
+  })(value, path);
+  const fragment = value as RuntimeTranscriptFragment;
+  if (fragment.byteOffset + fragment.byteLength > fragment.totalBytes) {
+    throw invalidResult(`${path} 字节范围超过完整条目`);
+  }
+  if (new TextEncoder().encode(fragment.json).byteLength !== fragment.byteLength) {
+    throw invalidResult(`${path}.byteLength 与 UTF-8 正文不一致`);
+  }
+};
 const resultJsonObject: RuntimeResultRule = (value, path) => {
   if (!isJsonObject(value)) throw invalidResult(`${path} 必须是 JSON 对象`);
 };
@@ -3839,6 +3869,7 @@ const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
     },
     {
       activeRun: runtimeRunResult,
+      fragments: resultArray(runtimeTranscriptFragmentResult),
       nextCursor: runtimeTranscriptCursorResult,
       nextBefore: resultString,
       planProjection: resultJsonObject,

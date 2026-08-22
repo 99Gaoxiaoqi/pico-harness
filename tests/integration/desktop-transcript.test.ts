@@ -6,6 +6,7 @@ import { createElement } from "react";
 import { MarkdownText } from "../../apps/desktop/src/renderer/conversation/MarkdownText.js";
 import { projectRuntimeTranscript } from "../../src/daemon/desktop-transcript.js";
 import { createEmptyUsageSnapshot } from "../../src/engine/session-runtime.js";
+import { advanceRuntimeTranscriptPagingState } from "../../src/tui/client-session-runtime.js";
 import {
   createToolResultEnvelope,
   type ToolResultEnvelope,
@@ -481,7 +482,10 @@ test("Desktop transcript pages older and newer through one fixed watermark curso
   assert.ok(first.nextBefore, "legacy service response 必须仍可以只返回 nextBefore");
 
   const advancedHead = projectRuntimeTranscript(
-    { ...snapshot([...messages, { role: "assistant", content: "message-6" }]), persistenceSequence: 6 },
+    {
+      ...snapshot([...messages, { role: "assistant", content: "message-6" }]),
+      persistenceSequence: 6,
+    },
     { cursor: first.nextCursor, limit: 2 },
   );
   assert.equal(advancedHead.revision, "5", "翻页期间新事件不得推进已捕获水位");
@@ -530,6 +534,67 @@ test("Desktop transcript pages older and newer through one fixed watermark curso
       }),
     /revision changed/u,
   );
+});
+
+test("oversized transcript item crosses UTF-8 pages and reassembles before id de-duplication", () => {
+  const content = `prefix-${"😀".repeat(2_000)}-suffix`;
+  const source = snapshot([{ role: "assistant", content }]);
+  let page = projectRuntimeTranscript(source, { maxBytes: 1_024 });
+  let state = { items: [] } as ReturnType<typeof advanceRuntimeTranscriptPagingState>;
+  let pageCount = 0;
+  for (;;) {
+    pageCount += 1;
+    state = advanceRuntimeTranscriptPagingState(state, {
+      session: {} as never,
+      queuedInputs: [],
+      ...page,
+    });
+    if (!page.nextCursor) break;
+    page = projectRuntimeTranscript(source, { cursor: page.nextCursor, maxBytes: 1_024 });
+  }
+  assert.ok(pageCount > 2);
+  assert.equal(state.items.length, 1);
+  assert.equal(state.items[0]?.kind, "assistantMessage");
+  assert.equal(
+    state.items[0]?.kind === "assistantMessage" ? state.items[0].content : undefined,
+    content,
+  );
+});
+
+test("newer cursor resumes an oversized item then advances to its following item", () => {
+  const huge = `huge-${"😀".repeat(2_000)}`;
+  const source = snapshot([
+    { role: "user", content: "first" },
+    { role: "assistant", content: huge },
+    { role: "assistant", content: "last" },
+  ]);
+  let page = projectRuntimeTranscript(source, {
+    cursor: {
+      revision: "3",
+      throughTranscriptSequence: 3,
+      position: 1,
+      ordinal: 0,
+      byteOffset: 0,
+      direction: "newer",
+    },
+    maxBytes: 1_024,
+  });
+  const parts: Array<{ readonly byteOffset: number; readonly json: string }> = [];
+  for (;;) {
+    parts.push(...(page.fragments ?? []));
+    if (page.items.some((item) => item.kind === "assistantMessage" && item.content === "last")) {
+      break;
+    }
+    assert.ok(page.nextCursor, "newer traversal must not stop after the large item");
+    page = projectRuntimeTranscript(source, { cursor: page.nextCursor, maxBytes: 1_024 });
+  }
+  const reconstructed = JSON.parse(
+    parts
+      .toSorted((left, right) => left.byteOffset - right.byteOffset)
+      .map((part) => part.json)
+      .join(""),
+  ) as { content?: unknown };
+  assert.equal(reconstructed.content, huge);
 });
 
 test("session transcript cursor validators fail closed", () => {
@@ -582,6 +647,17 @@ test("session transcript cursor validators fail closed", () => {
     queuedInputs: [],
     revision: "9",
     nextCursor: cursor,
+    fragments: [
+      {
+        itemId: "item-1",
+        position: 4,
+        ordinal: 2,
+        byteOffset: 0,
+        byteLength: 4,
+        totalBytes: 8,
+        json: "😀",
+      },
+    ],
   };
   assert.deepEqual(parseDesktopRuntimeResult("session.transcript", result), result);
   assert.throws(
@@ -599,6 +675,14 @@ test("session transcript cursor validators fail closed", () => {
         nextCursor: { ...cursor, direction: "sideways" },
       }),
     /older \| newer/u,
+  );
+  assert.throws(
+    () =>
+      parseDesktopRuntimeResult("session.transcript", {
+        ...result,
+        fragments: [{ ...result.fragments[0], byteLength: 5 }],
+      }),
+    /UTF-8/u,
   );
 });
 

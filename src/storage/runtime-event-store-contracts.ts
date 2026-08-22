@@ -222,6 +222,8 @@ export interface RuntimeTranscriptPageItem {
 }
 
 export interface RuntimeTranscriptPage {
+  /** Canonical ledger head captured in the same read transaction as this page. */
+  readonly revisionSequence: number;
   /** Fixed read waterline; pass unchanged to every subsequent page request. */
   readonly throughSequence: number;
   readonly items: readonly RuntimeTranscriptPageItem[];

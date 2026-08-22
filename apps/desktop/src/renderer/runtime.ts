@@ -29,6 +29,13 @@ type RuntimeTranscriptCursor = {
   readonly byteOffset: number;
   readonly direction: "older" | "newer";
 };
+type RuntimeTranscriptFragment = {
+  readonly itemId: string;
+  readonly byteOffset: number;
+  readonly byteLength: number;
+  readonly totalBytes: number;
+  readonly json: string;
+};
 import {
   emptyData,
   folderWorkspaceCapabilities,
@@ -519,6 +526,7 @@ function parseConversation(
   value: unknown,
   workspacePath: string,
   sessionId: string,
+  fragmentParts?: Map<string, RuntimeTranscriptFragment[]>,
 ): ParsedConversation {
   const result = isRecord(value) ? value : {};
   const nextCursor = transcriptCursor(result.nextCursor);
@@ -526,7 +534,10 @@ function parseConversation(
   return {
     workspacePath,
     sessionId,
-    items: recordArray(result.items)
+    items: [
+      ...assembleConversationFragments(result.fragments, fragmentParts),
+      ...recordArray(result.items),
+    ]
       .map(conversationItem)
       .filter((item): item is ConversationItemView => item !== undefined),
     revision: stringValue(result.revision) || undefined,
@@ -537,6 +548,43 @@ function parseConversation(
     queuedCount: recordArray(result.queuedInputs).length,
     discoveryItem: discoveryItemFromProjection(result.discoveryProjection),
   };
+}
+
+function assembleConversationFragments(
+  value: unknown,
+  fragmentParts: Map<string, RuntimeTranscriptFragment[]> | undefined,
+): JsonRecord[] {
+  if (!fragmentParts) return [];
+  const completed: JsonRecord[] = [];
+  for (const candidate of recordArray(value)) {
+    const itemId = stringValue(candidate.itemId);
+    const json = stringValue(candidate.json);
+    const byteOffset = numberValue(candidate.byteOffset);
+    const byteLength = numberValue(candidate.byteLength);
+    const totalBytes = numberValue(candidate.totalBytes);
+    if (!itemId || !json || byteOffset < 0 || byteLength < 1 || totalBytes < 1) continue;
+    const fragment = { itemId, json, byteOffset, byteLength, totalBytes };
+    const parts = [...(fragmentParts.get(itemId) ?? []), fragment]
+      .toSorted((left, right) => left.byteOffset - right.byteOffset)
+      .filter(
+        (part, index, all) =>
+          index === 0 ||
+          part.byteOffset !== all[index - 1]!.byteOffset ||
+          part.byteLength !== all[index - 1]!.byteLength,
+      );
+    fragmentParts.set(itemId, parts);
+    let offset = 0;
+    for (const part of parts) {
+      if (part.byteOffset !== offset) break;
+      offset += part.byteLength;
+    }
+    if (offset !== totalBytes) continue;
+    const parsed: unknown = JSON.parse(parts.map((part) => part.json).join(""));
+    if (!isRecord(parsed) || parsed.id !== itemId) continue;
+    completed.push(parsed);
+    fragmentParts.delete(itemId);
+  }
+  return completed;
 }
 
 function discoveryItemFromProjection(value: unknown): ConversationItemView | undefined {
@@ -1426,6 +1474,9 @@ export function useRuntimeStore(): RuntimeStore {
   const memoryLoadGenerationRef = useRef(0);
   const conversationLoadTracker = useRef(new ConversationLoadTracker());
   const transcriptCursorByConversation = useRef(new Map<string, RuntimeTranscriptCursor>());
+  const transcriptFragmentsByConversation = useRef(
+    new Map<string, Map<string, RuntimeTranscriptFragment[]>>(),
+  );
   const pendingSendRef = useRef<
     | {
         readonly identity: string;
@@ -1872,7 +1923,9 @@ export function useRuntimeStore(): RuntimeStore {
         optionalInvoke(bridge, "goal.get", { workspacePath, sessionId }),
       ]);
       if (!isCurrentLoad()) return;
-      const parsedConversation = parseConversation(record, workspacePath, sessionId);
+      const fragments = new Map<string, RuntimeTranscriptFragment[]>();
+      transcriptFragmentsByConversation.current.set(conversationKey, fragments);
+      const parsedConversation = parseConversation(record, workspacePath, sessionId, fragments);
       if (parsedConversation.nextCursor) {
         transcriptCursorByConversation.current.set(conversationKey, parsedConversation.nextCursor);
       } else {
@@ -2561,7 +2614,11 @@ export function useRuntimeStore(): RuntimeStore {
             }
             throw error;
           }
-          const page = parseConversation(value, workspacePath, sessionId);
+          const fragments =
+            transcriptFragmentsByConversation.current.get(conversationKey) ??
+            new Map<string, RuntimeTranscriptFragment[]>();
+          transcriptFragmentsByConversation.current.set(conversationKey, fragments);
+          const page = parseConversation(value, workspacePath, sessionId, fragments);
           if (
             page.revision !== expectedRevision ||
             dataRef.current.conversations[conversationKey]?.revision !== expectedRevision

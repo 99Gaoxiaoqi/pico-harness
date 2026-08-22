@@ -9,6 +9,7 @@ import {
   normalizeSessionRuntimeStateWritePatch,
   type SessionRuntimeStateWritePatch,
 } from "../../engine/session-runtime.js";
+import { RUNTIME_TRANSCRIPT_READ_MODEL_EVENT_KINDS } from "../../engine/session-runtime-projection.js";
 import {
   createInitialSessionSummaryFold,
   finalizeSessionSummary,
@@ -79,6 +80,10 @@ import {
 import { operationalDatabasePath, type OperationalDatabaseLease } from "./sqlite-database.js";
 import { logger } from "../../observability/logger.js";
 import { prepareCurrentWorkspaceSqliteStorageSync } from "./workspace-scopes.js";
+
+const MATERIALIZED_TRANSCRIPT_EVENT_KINDS = new Set<string>(
+  RUNTIME_TRANSCRIPT_READ_MODEL_EVENT_KINDS,
+);
 
 /**
  * SQLite 纪元的会话账本(ADR 24 §4.1,票 02)。
@@ -1953,6 +1958,15 @@ export class SqliteRuntimeEventStore {
          partial, tx_id, tool_call_id, provider_call_id, operation_id, payload_json, at, committed_at
        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
+    const insertTranscriptRecord = this.lease.database.prepare(
+      `INSERT INTO runtime_transcript_records (
+         record_id, session_id, source_event_id, source_sequence, kind, payload_json, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const insertTranscriptChunk = this.lease.database.prepare(
+      `INSERT INTO runtime_transcript_chunks (record_id, chunk_index, text_value, byte_length)
+       VALUES (?, 0, ?, ?)`,
+    );
     // run.terminal 是单 run 唯一 immutable tail；精确幂等重放已在上方 existing
     // 分支放行，任何新的 eventId 都必须在未封口状态写入。
     const runSealCache = new Map<string, boolean>();
@@ -2002,6 +2016,22 @@ export class SqliteRuntimeEventStore {
         event.at,
         event.at,
       );
+      // Transcript materialization is part of the canonical fact transaction.  The
+      // projection stores the canonical RuntimeEvent bytes (not a mutable UI card),
+      // so cross-fact folds such as tool start/result remain replayable and factual.
+      if (MATERIALIZED_TRANSCRIPT_EVENT_KINDS.has(event.kind)) {
+        const recordId = `runtime-event:${event.eventId}`;
+        insertTranscriptRecord.run(
+          recordId,
+          event.sessionId,
+          event.eventId,
+          sequence,
+          event.kind,
+          canonicalJson({ codec: "runtime-event-json-v1" }),
+          event.at,
+        );
+        insertTranscriptChunk.run(recordId, payloadJson, Buffer.byteLength(payloadJson, "utf8"));
+      }
       context.appendedCount += 1;
       context.appendedBytes += payloadJson.length;
       if (event.kind === "run.terminal") {
@@ -2361,32 +2391,171 @@ export class SqliteRuntimeEventStore {
     assertNonEmpty(options.sessionId, "transcript sessionId");
     assertPositiveInteger(options.maxBytes, "transcript maxBytes");
     const limit = normalizePageLimit(options.limit);
-    const current = this.lease.database
-      .prepare(
-        "SELECT COALESCE(MAX(source_sequence), 0) AS sequence FROM runtime_transcript_records WHERE session_id = ?",
-      )
-      .get(options.sessionId) as { sequence?: unknown } | undefined;
-    const currentSequence = requireSafeInteger(current?.sequence ?? 0, "transcript head sequence");
-    const throughSequence = options.throughSequence ?? currentSequence;
-    assertNonNegativeInteger(throughSequence, "transcript throughSequence");
-    if (throughSequence > currentSequence) {
+    const session = this.readSessionRow(options.sessionId);
+    if (!session) {
       throw new RuntimeEventStoreIntegrityError(
-        `Runtime transcript throughSequence ${throughSequence} is ahead of materialized head ${currentSequence}`,
+        `Runtime transcript session ${options.sessionId} does not exist`,
       );
     }
-    const rows = this.lease.database
+    const revisionSequence = session.last_event_seq;
+    const throughSequence = options.throughSequence ?? revisionSequence;
+    assertNonNegativeInteger(throughSequence, "transcript throughSequence");
+    if (throughSequence > revisionSequence) {
+      throw new RuntimeEventStoreIntegrityError(
+        `Runtime transcript throughSequence ${throughSequence} is ahead of ledger head ${revisionSequence}`,
+      );
+    }
+    const cursor = options.cursor;
+    if (cursor) {
+      assertPositiveInteger(cursor.sequence, "transcript cursor sequence");
+      assertNonNegativeInteger(cursor.chunkIndex, "transcript cursor chunkIndex");
+      assertNonNegativeInteger(cursor.byteOffset, "transcript cursor byteOffset");
+      if (cursor.sequence > throughSequence) {
+        throw new RuntimeEventStoreIntegrityError(
+          "Runtime transcript cursor exceeds fixed waterline",
+        );
+      }
+      const boundary = this.lease.database
+        .prepare(
+          `SELECT chunks.byte_length
+           FROM runtime_transcript_records AS records
+           JOIN runtime_transcript_chunks AS chunks ON chunks.record_id = records.record_id
+           WHERE records.session_id = ? AND records.source_sequence = ?
+             AND chunks.chunk_index = ?`,
+        )
+        .get(options.sessionId, cursor.sequence, cursor.chunkIndex) as
+        | { byte_length?: unknown }
+        | undefined;
+      const boundaryBytes = boundary
+        ? requireSafeInteger(boundary.byte_length, "transcript cursor byteLength")
+        : undefined;
+      if (boundaryBytes === undefined || cursor.byteOffset > boundaryBytes) {
+        throw new RuntimeEventStoreIntegrityError("Runtime transcript cursor does not exist");
+      }
+    }
+    const selected = this.readTranscriptChunkWindowLocked({
+      ...options,
+      throughSequence,
+      limit,
+    });
+    return {
+      revisionSequence,
+      throughSequence,
+      items: selected.items,
+      ...(selected.nextCursor ? { nextCursor: selected.nextCursor } : {}),
+    };
+  }
+
+  private readTranscriptChunkWindowLocked(
+    options: RuntimeTranscriptPageOptions & {
+      readonly throughSequence: number;
+      readonly limit: number;
+    },
+  ): Pick<RuntimeTranscriptPage, "items" | "nextCursor"> {
+    const forward = options.direction === "forward";
+    const cursor = options.cursor;
+    const relation = forward ? ">" : "<";
+    const order = forward ? "ASC" : "DESC";
+    const cursorClause = cursor
+      ? `AND (records.source_sequence ${relation} ? OR
+             (records.source_sequence = ? AND chunks.chunk_index ${relation} ?))`
+      : "";
+    const params: SQLInputValue[] = [options.sessionId, options.throughSequence];
+    if (cursor) params.push(cursor.sequence, cursor.sequence, cursor.chunkIndex);
+    params.push(options.limit + 1);
+    const metadata = this.lease.database
       .prepare(
         `SELECT records.record_id, records.source_event_id, records.source_sequence,
                 records.kind, records.payload_json, records.created_at,
-                chunks.chunk_index, chunks.text_value, chunks.byte_length
+                chunks.chunk_index, chunks.byte_length
          FROM runtime_transcript_records AS records
          JOIN runtime_transcript_chunks AS chunks ON chunks.record_id = records.record_id
-         WHERE records.session_id = ? AND records.source_sequence <= ?
-         ORDER BY records.source_sequence ASC, chunks.chunk_index ASC`,
+         WHERE records.session_id = ? AND records.source_sequence <= ? ${cursorClause}
+         ORDER BY records.source_sequence ${order}, chunks.chunk_index ${order}
+         LIMIT ?`,
       )
-      .all(options.sessionId, throughSequence)
-      .map((row) => transcriptChunkFromRow(row));
-    return paginateTranscriptChunks(rows, { ...options, throughSequence, limit });
+      .all(...params)
+      .map((row) => transcriptChunkMetadataFromRow(row));
+
+    // The cursor row is an inclusive byte boundary even though subsequent rows use
+    // keyset ordering. Fetch it explicitly so one oversized chunk resumes exactly.
+    if (cursor) {
+      const boundary = this.lease.database
+        .prepare(
+          `SELECT records.record_id, records.source_event_id, records.source_sequence,
+                  records.kind, records.payload_json, records.created_at,
+                  chunks.chunk_index, chunks.byte_length
+           FROM runtime_transcript_records AS records
+           JOIN runtime_transcript_chunks AS chunks ON chunks.record_id = records.record_id
+           WHERE records.session_id = ? AND records.source_sequence = ?
+             AND chunks.chunk_index = ?`,
+        )
+        .get(options.sessionId, cursor.sequence, cursor.chunkIndex);
+      const boundaryMetadata = transcriptChunkMetadataFromRow(boundary!);
+      const atTerminalEdge = forward
+        ? cursor.byteOffset === boundaryMetadata.byteLength
+        : cursor.byteOffset === 0;
+      if (!atTerminalEdge) metadata.unshift(boundaryMetadata);
+    }
+
+    const items: RuntimeTranscriptPage["items"][number][] = [];
+    let remaining = options.maxBytes;
+    let nextCursor: RuntimeTranscriptPage["nextCursor"];
+    for (const row of metadata.slice(0, options.limit)) {
+      if (remaining <= 0) break;
+      const boundaryOffset =
+        cursor && row.sequence === cursor.sequence && row.chunkIndex === cursor.chunkIndex
+          ? cursor.byteOffset
+          : undefined;
+      const end = forward ? row.byteLength : (boundaryOffset ?? row.byteLength);
+      const start = forward ? (boundaryOffset ?? 0) : Math.max(0, end - remaining - 4);
+      const blob = this.lease.database
+        .prepare(
+          `SELECT substr(CAST(text_value AS BLOB), ?, ?) AS value
+           FROM runtime_transcript_chunks WHERE record_id = ? AND chunk_index = ?`,
+        )
+        .get(
+          start + 1,
+          forward ? Math.min(end - start, remaining + 4) : end - start,
+          row.recordId,
+          row.chunkIndex,
+        ) as { value?: unknown } | undefined;
+      const bounded = Buffer.from(blob?.value as Uint8Array);
+      let sliceStart = 0;
+      let sliceEnd = bounded.length;
+      if (forward) sliceEnd = utf8ForwardEnd(bounded, 0, remaining);
+      else sliceStart = utf8BackwardStart(bounded, bounded.length, remaining);
+      const absoluteStart = start + sliceStart;
+      const bytes = bounded.subarray(sliceStart, sliceEnd);
+      items.push(transcriptPageItemFromMetadata(row, absoluteStart, bytes));
+      remaining -= bytes.length;
+      const absoluteEnd = absoluteStart + bytes.length;
+      if (forward && absoluteEnd < row.byteLength) {
+        nextCursor = {
+          sequence: row.sequence,
+          chunkIndex: row.chunkIndex,
+          byteOffset: absoluteEnd,
+        };
+        break;
+      }
+      if (!forward && absoluteStart > 0) {
+        nextCursor = {
+          sequence: row.sequence,
+          chunkIndex: row.chunkIndex,
+          byteOffset: absoluteStart,
+        };
+        break;
+      }
+    }
+    if (!nextCursor && metadata.length > items.length) {
+      const next = metadata[items.length]!;
+      nextCursor = {
+        sequence: next.sequence,
+        chunkIndex: next.chunkIndex,
+        byteOffset: forward ? 0 : next.byteLength,
+      };
+    }
+    return { items, ...(nextCursor ? { nextCursor } : {}) };
   }
 
   /** appendBatch 专用:sessions 行 + MAX(event_seq) 水位一致性断言 + catalog fold 装载。 */
@@ -2589,14 +2758,13 @@ interface TranscriptRecordWithChunks {
   readonly at: string;
 }
 
-interface TranscriptChunkRow {
+interface TranscriptChunkMetadataRow {
   readonly recordId: string;
   readonly sourceEventId: string;
   readonly sequence: number;
   readonly kind: string;
   readonly payload: unknown;
   readonly chunkIndex: number;
-  readonly text: string;
   readonly byteLength: number;
   readonly at: string;
 }
@@ -2654,7 +2822,7 @@ function toolOperationFromRow(row: Record<string, unknown>): RuntimeToolOperatio
   };
 }
 
-function transcriptChunkFromRow(row: Record<string, unknown>): TranscriptChunkRow {
+function transcriptChunkMetadataFromRow(row: Record<string, unknown>): TranscriptChunkMetadataRow {
   return {
     recordId: requireString(row["record_id"], "transcript_records.record_id"),
     sourceEventId: requireString(row["source_event_id"], "transcript_records.source_event_id"),
@@ -2662,157 +2830,13 @@ function transcriptChunkFromRow(row: Record<string, unknown>): TranscriptChunkRo
     kind: requireString(row["kind"], "transcript_records.kind"),
     payload: decodeProjectionJson(row["payload_json"], "transcript_records.payload_json"),
     chunkIndex: requireSafeInteger(row["chunk_index"], "transcript_chunks.chunk_index"),
-    text: requireStringAllowEmpty(row["text_value"], "transcript_chunks.text_value"),
     byteLength: requireSafeInteger(row["byte_length"], "transcript_chunks.byte_length"),
     at: requireString(row["created_at"], "transcript_records.created_at"),
   };
 }
 
-function paginateTranscriptChunks(
-  rows: readonly TranscriptChunkRow[],
-  options: RuntimeTranscriptPageOptions & {
-    readonly throughSequence: number;
-    readonly limit: number;
-  },
-): RuntimeTranscriptPage {
-  const cursor = options.cursor;
-  if (cursor) {
-    assertPositiveInteger(cursor.sequence, "transcript cursor sequence");
-    assertNonNegativeInteger(cursor.chunkIndex, "transcript cursor chunkIndex");
-    assertNonNegativeInteger(cursor.byteOffset, "transcript cursor byteOffset");
-    if (cursor.sequence > options.throughSequence) {
-      throw new RuntimeEventStoreIntegrityError(
-        "Runtime transcript cursor exceeds fixed waterline",
-      );
-    }
-  }
-  const selected =
-    options.direction === "forward"
-      ? paginateTranscriptForward(rows, cursor, options.maxBytes, options.limit)
-      : paginateTranscriptBackward(rows, cursor, options.maxBytes, options.limit);
-  return {
-    throughSequence: options.throughSequence,
-    items: selected.items,
-    ...(selected.nextCursor ? { nextCursor: selected.nextCursor } : {}),
-  };
-}
-
-function paginateTranscriptForward(
-  rows: readonly TranscriptChunkRow[],
-  cursor: RuntimeTranscriptPageOptions["cursor"],
-  maxBytes: number,
-  limit: number,
-): Pick<RuntimeTranscriptPage, "items" | "nextCursor"> {
-  let index = 0;
-  let startOffset = 0;
-  if (cursor) {
-    index = rows.findIndex(
-      (row) =>
-        row.sequence > cursor.sequence ||
-        (row.sequence === cursor.sequence && row.chunkIndex >= cursor.chunkIndex),
-    );
-    if (index < 0) return { items: [] };
-    const row = rows[index]!;
-    if (row.sequence === cursor.sequence && row.chunkIndex === cursor.chunkIndex) {
-      startOffset = cursor.byteOffset;
-      if (startOffset > row.byteLength) {
-        throw new RuntimeEventStoreIntegrityError(
-          "Runtime transcript cursor byteOffset is invalid",
-        );
-      }
-      if (startOffset === row.byteLength) {
-        index += 1;
-        startOffset = 0;
-      }
-    }
-  }
-  const items: RuntimeTranscriptPage["items"][number][] = [];
-  let usedBytes = 0;
-  let nextCursor: RuntimeTranscriptPage["nextCursor"];
-  for (; index < rows.length && items.length < limit && usedBytes < maxBytes; index += 1) {
-    const row = rows[index]!;
-    const bytes = Buffer.from(row.text);
-    const offset = startOffset;
-    if (offset > bytes.length) {
-      throw new RuntimeEventStoreIntegrityError("Runtime transcript cursor byteOffset is invalid");
-    }
-    const end = utf8ForwardEnd(bytes, offset, maxBytes - usedBytes);
-    const slice = bytes.subarray(offset, end);
-    items.push(transcriptPageItem(row, offset, slice));
-    usedBytes += slice.length;
-    if (end < bytes.length) {
-      nextCursor = { sequence: row.sequence, chunkIndex: row.chunkIndex, byteOffset: end };
-      break;
-    }
-    const next = rows[index + 1];
-    nextCursor = next
-      ? { sequence: next.sequence, chunkIndex: next.chunkIndex, byteOffset: 0 }
-      : undefined;
-    startOffset = 0;
-  }
-  return { items, ...(nextCursor ? { nextCursor } : {}) };
-}
-
-function paginateTranscriptBackward(
-  rows: readonly TranscriptChunkRow[],
-  cursor: RuntimeTranscriptPageOptions["cursor"],
-  maxBytes: number,
-  limit: number,
-): Pick<RuntimeTranscriptPage, "items" | "nextCursor"> {
-  let index = rows.length - 1;
-  let endOffset: number | undefined;
-  if (cursor) {
-    index = findLastIndex(
-      rows,
-      (row) =>
-        row.sequence < cursor.sequence ||
-        (row.sequence === cursor.sequence && row.chunkIndex <= cursor.chunkIndex),
-    );
-    if (index < 0) return { items: [] };
-    const row = rows[index]!;
-    if (row.sequence === cursor.sequence && row.chunkIndex === cursor.chunkIndex) {
-      endOffset = cursor.byteOffset;
-      if (endOffset > row.byteLength) {
-        throw new RuntimeEventStoreIntegrityError(
-          "Runtime transcript cursor byteOffset is invalid",
-        );
-      }
-      if (endOffset === 0) {
-        index -= 1;
-        endOffset = undefined;
-      }
-    }
-  }
-  const items: RuntimeTranscriptPage["items"][number][] = [];
-  let usedBytes = 0;
-  let nextCursor: RuntimeTranscriptPage["nextCursor"];
-  for (; index >= 0 && items.length < limit && usedBytes < maxBytes; index -= 1) {
-    const row = rows[index]!;
-    const bytes = Buffer.from(row.text);
-    const end = endOffset ?? bytes.length;
-    const start = utf8BackwardStart(bytes, end, maxBytes - usedBytes);
-    const slice = bytes.subarray(start, end);
-    items.push(transcriptPageItem(row, start, slice));
-    usedBytes += slice.length;
-    if (start > 0) {
-      nextCursor = { sequence: row.sequence, chunkIndex: row.chunkIndex, byteOffset: start };
-      break;
-    }
-    const previous = rows[index - 1];
-    nextCursor = previous
-      ? {
-          sequence: previous.sequence,
-          chunkIndex: previous.chunkIndex,
-          byteOffset: previous.byteLength,
-        }
-      : undefined;
-    endOffset = undefined;
-  }
-  return { items, ...(nextCursor ? { nextCursor } : {}) };
-}
-
-function transcriptPageItem(
-  row: TranscriptChunkRow,
+function transcriptPageItemFromMetadata(
+  row: TranscriptChunkMetadataRow,
   byteOffset: number,
   bytes: Buffer,
 ): RuntimeTranscriptPage["items"][number] {
@@ -2850,13 +2874,6 @@ function utf8BackwardStart(bytes: Buffer, end: number, budget: number): number {
   return start;
 }
 
-function findLastIndex<T>(values: readonly T[], predicate: (value: T) => boolean): number {
-  for (let index = values.length - 1; index >= 0; index -= 1) {
-    if (predicate(values[index]!)) return index;
-  }
-  return -1;
-}
-
 function decodeProjectionJson(value: unknown, field: string): unknown {
   if (typeof value !== "string") {
     throw new RuntimeEventStoreIntegrityError(`SQLite sessions row ${field} is invalid`);
@@ -2888,13 +2905,6 @@ function requirePositiveInteger(value: unknown, field: string): number {
     throw new RuntimeEventStoreIntegrityError(`SQLite sessions row ${field} is invalid`);
   }
   return result;
-}
-
-function requireStringAllowEmpty(value: unknown, field: string): string {
-  if (typeof value !== "string") {
-    throw new RuntimeEventStoreIntegrityError(`SQLite sessions row ${field} is invalid`);
-  }
-  return value;
 }
 
 /** 读回仲裁点查行(ADR 27 P1):event_id 主键命中行的原始列快照。 */
@@ -3850,6 +3860,65 @@ export async function readExistingSqliteSessionEventSliceWithinBudget(options: {
       ...(options.alwaysIncludeKinds ? { alwaysIncludeKinds: options.alwaysIncludeKinds } : {}),
     });
     return { manifest, slice };
+  } finally {
+    store.close();
+  }
+}
+
+/**
+ * Replays the transactionally materialized transcript fact stream at one immutable
+ * ledger waterline. Each store page is SQL-keyset bounded; a large canonical event
+ * may span pages and is reassembled before strict RuntimeEvent decoding.
+ */
+export async function readExistingSqliteMaterializedTranscript(options: {
+  readonly storageRoot: string;
+  readonly sessionId: string;
+  readonly throughSequence?: number;
+  readonly pageBytes?: number;
+}): Promise<
+  | {
+      readonly manifest: RuntimeSessionManifest;
+      readonly entries: readonly RuntimeEventStoreEntry[];
+      readonly revisionSequence: number;
+      readonly throughSequence: number;
+    }
+  | undefined
+> {
+  const root = resolve(options.storageRoot);
+  if (!existsSync(operationalDatabasePath(root))) return undefined;
+  const store = new SqliteRuntimeEventStore({ storageRoot: root });
+  try {
+    const manifest = await store.readSessionManifest(options.sessionId);
+    if (!manifest) return undefined;
+    const textByRecord = new Map<string, { readonly sequence: number; readonly parts: string[] }>();
+    let cursor: RuntimeTranscriptPage["nextCursor"];
+    let throughSequence = options.throughSequence;
+    let revisionSequence = 0;
+    do {
+      const page = await store.readTranscriptPage({
+        sessionId: options.sessionId,
+        ...(throughSequence === undefined ? {} : { throughSequence }),
+        direction: "forward",
+        ...(cursor ? { cursor } : {}),
+        maxBytes: options.pageBytes ?? 256 * 1024,
+        limit: RUNTIME_EVENT_STORE_MAX_PAGE_SIZE,
+      });
+      throughSequence ??= page.throughSequence;
+      revisionSequence = page.revisionSequence;
+      for (const item of page.items) {
+        const record = textByRecord.get(item.recordId) ?? {
+          sequence: item.sequence,
+          parts: [],
+        };
+        record.parts.push(item.text);
+        textByRecord.set(item.recordId, record);
+      }
+      cursor = page.nextCursor;
+    } while (cursor);
+    const entries = [...textByRecord.values()]
+      .map(({ sequence, parts }) => ({ sequence, event: decodeRuntimeEventJson(parts.join("")) }))
+      .sort((left, right) => left.sequence - right.sequence);
+    return { manifest, entries, revisionSequence, throughSequence: throughSequence ?? 0 };
   } finally {
     store.close();
   }
