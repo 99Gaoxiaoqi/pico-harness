@@ -358,7 +358,7 @@ test("Desktop review approval replaces a conflict fact instead of creating a dup
   );
 });
 
-test("session deletion invalidates sources and pending proposals but retains facts", async (context) => {
+test("session deletion invalidates sources and tombstones proposal bodies but retains facts", async (context) => {
   const fixture = await createFixture("lifecycle");
   context.after(async () => {
     closeAllOperationalDatabasesForTest();
@@ -388,6 +388,33 @@ test("session deletion invalidates sources and pending proposals but retains fac
     content: "Pending body",
     reason: "Pending reason",
     sourceId: deletedSource.sourceId,
+  });
+  const acceptedProposal = repository.createProposal({
+    proposalId: "accepted-delete",
+    kind: "project_fact",
+    title: "Accepted",
+    content: "Accepted body",
+    reason: "Accepted reason",
+    sourceId: deletedSource.sourceId,
+  });
+  repository.resolveProposal({
+    proposalId: acceptedProposal.proposalId,
+    expectedVersion: acceptedProposal.version,
+    resolution: "accepted",
+    factId: "accepted-fact",
+  });
+  const rejectedProposal = repository.createProposal({
+    proposalId: "rejected-delete",
+    kind: "project_fact",
+    title: "Rejected",
+    content: "Rejected body",
+    reason: "Rejected reason",
+    sourceId: deletedSource.sourceId,
+  });
+  repository.resolveProposal({
+    proposalId: rejectedProposal.proposalId,
+    expectedVersion: rejectedProposal.version,
+    resolution: "rejected",
   });
   const deletedJob = repository.createJob({
     jobId: "pending-delete-job",
@@ -426,8 +453,14 @@ test("session deletion invalidates sources and pending proposals but retains fac
   context.after(() => verify.close());
   assert.equal(verify.getSource("source-delete")?.availability, "unavailable");
   assert.equal(verify.getProposal("pending-delete")?.status, "deleted");
+  assert.equal(verify.getProposal("accepted-delete")?.status, "deleted");
+  assert.equal(verify.getProposal("accepted-delete")?.content, null);
+  assert.equal(verify.getProposal("rejected-delete")?.status, "deleted");
+  assert.equal(verify.getProposal("rejected-delete")?.content, null);
   assert.equal(verify.getFact("approved-fact")?.state, "active");
   assert.equal(verify.getFact("approved-fact")?.content, "Use npm run build");
+  assert.equal(verify.getFact("accepted-fact")?.state, "active");
+  assert.equal(verify.getFact("accepted-fact")?.content, "Accepted body");
   assert.equal(verify.getJob("pending-delete-job")?.status, "cancelled");
   assert.equal(events.length, 1);
   assert.ok(events.every((event) => !("content" in event.payload) && !("reason" in event.payload)));

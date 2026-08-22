@@ -37,6 +37,7 @@ import {
 } from "../memory/context-builder.js";
 import { evaluateMemoryReviewBudgetForJobs } from "../memory/memory-review-policy.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
+import { withWorkspaceSqliteLease } from "../storage/sqlite/workspace-scopes.js";
 
 type MemoryNotificationTopic = Extract<RuntimeNotificationTopic, `memory.${string}`>;
 type MemoryNotificationPublisher = <Topic extends MemoryNotificationTopic>(
@@ -624,9 +625,6 @@ export class DesktopMemoryService {
           .filter((job) => !this.preparedLifecycleJobs.has(job.jobId)),
       ];
       if (jobs.length === 0) return;
-      // A running lifecycle job not owned by this process survived a cross-store crash.
-      // Recover fail-closed for privacy: pending proposals may be deleted and sources marked
-      // unavailable, while user-approved Facts are deliberately retained.
       for (const job of jobs) this.applyLifecycleJob(repository, job);
     }
   }
@@ -634,7 +632,7 @@ export class DesktopMemoryService {
   /**
    * Drains one queued/running lifecycle invalidation Job by marking the Session's Sources
    * `unavailable` (used by deleteSession, which really does destroy the RuntimeEvent ledger).
-   * Pending proposals anchored on those Sources are deleted; user-approved Facts are retained.
+   * Proposals anchored on those Sources become body-free tombstones; committed Facts are retained.
    */
   private applyLifecycleJob(repository: SqliteMemoryRepository, job: Job): void {
     if (job.extractorVersion !== MEMORY_LIFECYCLE_UNAVAILABLE_VERSION) {
@@ -658,6 +656,19 @@ export class DesktopMemoryService {
       });
       return;
     }
+    // A prepared lifecycle job is durable before Runtime deletion starts. Recovery may
+    // therefore observe it even though the destructive Session transaction never committed.
+    // The surviving Session row is the authority: never invalidate its provenance.
+    if (this.runtimeSessionExists(repository, job.cursor.sessionId)) {
+      repository.updateJob({
+        jobId: job.jobId,
+        expectedVersion: job.version,
+        status: "cancelled",
+        errorCode: "lifecycle_prepare_aborted",
+        idempotencyKey: `${job.jobId}:session-retained:${job.version}`,
+      });
+      return;
+    }
 
     repository.cancelSessionJobs({
       sessionId: job.cursor.sessionId,
@@ -676,7 +687,7 @@ export class DesktopMemoryService {
       });
       if (sources.length === 0) break;
       repository.transaction(() => {
-        const proposals = repository.listPendingProposalsForSources(
+        const proposals = repository.listProposalsForSources(
           sources.map((source) => source.sourceId),
         );
         for (const proposal of proposals) {
@@ -712,6 +723,14 @@ export class DesktopMemoryService {
       errorCode: null,
       idempotencyKey: `${current.jobId}:complete:${current.version}`,
     });
+  }
+
+  private runtimeSessionExists(repository: SqliteMemoryRepository, sessionId: string): boolean {
+    return withWorkspaceSqliteLease(repository.storageRoot, (lease) =>
+      lease.database
+        .prepare("SELECT 1 FROM sessions WHERE session_id = ? LIMIT 1")
+        .get(sessionId) !== undefined,
+    );
   }
 
   private reportDegraded(

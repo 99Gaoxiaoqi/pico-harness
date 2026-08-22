@@ -17,6 +17,7 @@ import {
 } from "../../src/daemon/index.js";
 import type { JsonObject, RuntimeUserInput } from "../../src/daemon/protocol.js";
 import { SqliteMemoryRepository } from "../../src/storage/sqlite/sqlite-memory-repository.js";
+import { withWorkspaceSqliteLease } from "../../src/storage/sqlite/workspace-scopes.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 import { writeDesktopModelRouting } from "../fixtures/desktop-model-routing.js";
@@ -222,10 +223,21 @@ test("a delete failure after destructive work starts still commits lifecycle inv
   );
 });
 
-test("a prepared lifecycle job is recovered after service restart with privacy-first semantics", async (context) => {
+test("a prepared lifecycle job does not invalidate a Session whose deletion never committed", async (context) => {
   const fixture = await createFixture("prepared-recovery");
   context.after(() => rm(fixture.root, { recursive: true, force: true }));
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  withWorkspaceSqliteLease(paths.workspace.root, (lease) =>
+    lease.transaction("write", () => {
+      lease.database
+        .prepare(
+          `INSERT INTO sessions (
+             session_id, work_dir, created_at, updated_at
+           ) VALUES ('recovery-session', ?, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+        )
+        .run(fixture.workspace);
+    }),
+  );
   const repository = new SqliteMemoryRepository({
     storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
@@ -273,12 +285,17 @@ test("a prepared lifecycle job is recovered after service restart with privacy-f
     workspaceId: paths.workspace.id,
   });
   context.after(() => verify.close());
-  assert.equal(verify.getSource(source.sourceId)?.availability, "unavailable");
-  assert.equal(verify.getProposal("pending-recovery-proposal")?.status, "deleted");
+  assert.equal(verify.getSource(source.sourceId)?.availability, "available");
+  assert.equal(verify.getProposal("pending-recovery-proposal")?.status, "pending");
   assert.equal(verify.getFact("approved-recovery-fact")?.state, "active");
   assert.equal(
     verify.getFact("approved-recovery-fact")?.content,
     "Retained after source invalidation",
+  );
+  assert.equal(
+    verify.listJobs({ type: "source-lifecycle-invalidation", statuses: ["cancelled"] })[0]
+      ?.errorCode,
+    "lifecycle_prepare_aborted",
   );
 });
 

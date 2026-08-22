@@ -84,6 +84,7 @@ export interface MemoryRepositoryContract {
   createProposal(input: CreateProposalInput): Proposal;
   getProposal(proposalId: string): Proposal | undefined;
   listProposals(options?: ProposalListOptions): Proposal[];
+  listProposalsForSources(sourceIds: readonly string[]): Proposal[];
   listPendingProposalsForSources(sourceIds: readonly string[]): Proposal[];
   updateProposal(input: UpdateProposalInput): Proposal;
   deleteProposal(input: DeleteProposalInput): Proposal;
