@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { resolveCliStartupSession } from "../../src/cli/session-args.js";
+import { Session } from "../../src/engine/session.js";
 import { createPicoCommandRegistry } from "../../src/input/pico-command-registry.js";
 import { processUserInput } from "../../src/input/process-user-input.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
@@ -61,6 +62,44 @@ test("/new requests an idle atomic switch without creating a session eagerly", a
   assert.deepEqual(processed.result.data, { mode: "new" });
   assert.equal(processed.result.action, "resume");
   assert.deepEqual(await fixture.store.listSessionManifests(), []);
+});
+
+test("/compact refuses legacy environment credentials without a user model router", async (context) => {
+  const fixture = await createFixture("compact-user-model-route");
+  context.after(() => fixture.dispose());
+  const session = new Session("compact-user-model-route", fixture.workspace, {
+    persistence: false,
+    picoHome: fixture.picoHome,
+  });
+  context.after(() => session.close());
+
+  const legacyEnvironment = {
+    LLM_BASE_URL: process.env.LLM_BASE_URL,
+    LLM_API_KEY: process.env.LLM_API_KEY,
+    LLM_MODEL: process.env.LLM_MODEL,
+  };
+  process.env.LLM_BASE_URL = "https://legacy-provider.invalid/v1";
+  process.env.LLM_API_KEY = "legacy-key-must-not-be-used";
+  process.env.LLM_MODEL = "legacy-model";
+  context.after(() => {
+    restoreEnvironment("LLM_BASE_URL", legacyEnvironment.LLM_BASE_URL);
+    restoreEnvironment("LLM_API_KEY", legacyEnvironment.LLM_API_KEY);
+    restoreEnvironment("LLM_MODEL", legacyEnvironment.LLM_MODEL);
+  });
+
+  const registry = await createPicoCommandRegistry({
+    workDir: fixture.workspace,
+    picoHome: fixture.picoHome,
+    provider: "openai",
+    model: "legacy-model",
+    modelRouteId: "legacy/legacy-model",
+    session,
+    tools: [],
+  });
+  const processed = await processUserInput("/compact", { registry });
+  assert.equal(processed.type, "local-command");
+  if (processed.type !== "local-command") return;
+  assert.match(processed.result.message ?? "", /user model configuration is not available/u);
 });
 
 test("/plan and legacy mode commands keep collaboration and permission independent", async (context) => {
