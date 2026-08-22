@@ -154,7 +154,7 @@ export function coordinateEventLogHardCut(
     const cutoverId = randomUUID();
     const candidates = collectGcCandidates(database);
     persistGcIntents(database, cutoverId, committedAt, candidates);
-    clearMemoryWeakReferences(database, sessionIds);
+    invalidateMemorySessionReferences(database, cutoverId, committedAt);
     clearControlWeakReferences(database);
     database.prepare("DELETE FROM storage_operations").run();
     clearAttachmentRows(database);
@@ -372,45 +372,132 @@ function collectMemoryJobBlockers(
   ];
 }
 
-function clearMemoryWeakReferences(database: DatabaseSync, sessionIds: readonly string[]): void {
-  const sessionSet = new Set(sessionIds);
-  const sourceIds = readStringColumn(
-    database,
-    "SELECT source_id AS id FROM memory_sources ORDER BY source_id",
-    "id",
+/**
+ * The EventLog epoch owns transcripts and Session projections, not committed Memory facts.
+ * Preserve every Fact and its provenance identity while making the deleted evidence impossible
+ * to dereference. Source-bound proposal bodies are no longer reviewable without that evidence,
+ * and retryable failed extraction jobs must not replay against the new epoch.
+ */
+function invalidateMemorySessionReferences(
+  database: DatabaseSync,
+  cutoverId: string,
+  at: string,
+): void {
+  const sourceMutations = sqliteChanges(
+    database
+      .prepare(
+        `INSERT INTO memory_mutations (
+           sequence, mutation_id, entity_type, entity_id, action,
+           from_version, to_version, idempotency_key_hash, created_at
+         )
+         SELECT
+           (SELECT COALESCE(MAX(sequence), 0) FROM memory_mutations)
+             + ROW_NUMBER() OVER (ORDER BY source_id),
+           ? || source_id, 'source', source_id, 'source.updated',
+           version, version + 1, NULL, ?
+         FROM memory_sources
+         WHERE availability <> 'unavailable'
+            OR evidence_ref_json IS NOT NULL
+            OR invalidated_at IS NULL
+            OR invalidation_code IS NULL
+         ORDER BY source_id`,
+      )
+      .run(`event-log-hard-cut:${cutoverId}:source:`, at),
   );
-  const factIds = readStringColumn(
-    database,
-    "SELECT fact_id AS id FROM memory_facts WHERE source_id IS NOT NULL ORDER BY fact_id",
-    "id",
+  const sourceUpdates = sqliteChanges(
+    database
+      .prepare(
+        `UPDATE memory_sources SET
+         evidence_ref_json = NULL,
+         availability = 'unavailable',
+         invalidated_at = COALESCE(invalidated_at, ?),
+         invalidation_code = CASE
+           WHEN availability = 'available' OR invalidation_code IS NULL
+             THEN 'event_log_hard_cut'
+           ELSE invalidation_code
+         END,
+         version = version + 1,
+         updated_at = ?
+       WHERE availability <> 'unavailable'
+          OR evidence_ref_json IS NOT NULL
+          OR invalidated_at IS NULL
+          OR invalidation_code IS NULL`,
+      )
+      .run(at, at),
   );
-  const proposalIds = readStringColumn(
-    database,
-    "SELECT proposal_id AS id FROM memory_proposals WHERE source_id IS NOT NULL ORDER BY proposal_id",
-    "id",
+  assertMutationProjectionParity("Source", sourceMutations, sourceUpdates);
+
+  const proposalMutations = sqliteChanges(
+    database
+      .prepare(
+        `INSERT INTO memory_mutations (
+           sequence, mutation_id, entity_type, entity_id, action,
+           from_version, to_version, idempotency_key_hash, created_at
+         )
+         SELECT
+           (SELECT COALESCE(MAX(sequence), 0) FROM memory_mutations)
+             + ROW_NUMBER() OVER (ORDER BY proposal_id),
+           ? || proposal_id, 'proposal', proposal_id, 'proposal.deleted',
+           version, version + 1, NULL, ?
+         FROM memory_proposals
+         WHERE source_id IS NOT NULL AND status <> 'deleted'
+         ORDER BY proposal_id`,
+      )
+      .run(`event-log-hard-cut:${cutoverId}:proposal:`, at),
   );
-  const jobIds = readAffectedMemoryJobs(database, sessionSet).map((job) => job.jobId);
-  let changes = 0;
-  changes += clearMemoryMutationRows(database, "source", sourceIds);
-  changes += clearMemoryMutationRows(database, "fact", factIds);
-  changes += clearMemoryMutationRows(database, "proposal", proposalIds);
-  changes += clearMemoryMutationRows(database, "job", jobIds);
-  changes += runForIds(
-    database,
-    "UPDATE memory_proposals SET conflict_fact_id = NULL WHERE conflict_fact_id = ?",
-    factIds,
+  const proposalUpdates = sqliteChanges(
+    database
+      .prepare(
+        `UPDATE memory_proposals SET
+           title = NULL,
+           content = NULL,
+           reason = NULL,
+           status = 'deleted',
+           version = version + 1,
+           updated_at = ?,
+           deleted_at = ?
+         WHERE source_id IS NOT NULL AND status <> 'deleted'`,
+      )
+      .run(at, at),
   );
-  changes += runForIds(
-    database,
-    "UPDATE memory_proposals SET resolved_fact_id = NULL WHERE resolved_fact_id = ?",
-    factIds,
+  assertMutationProjectionParity("Proposal", proposalMutations, proposalUpdates);
+
+  const jobMutations = sqliteChanges(
+    database
+      .prepare(
+        `INSERT INTO memory_mutations (
+           sequence, mutation_id, entity_type, entity_id, action,
+           from_version, to_version, idempotency_key_hash, created_at
+         )
+         SELECT
+           (SELECT COALESCE(MAX(sequence), 0) FROM memory_mutations)
+             + ROW_NUMBER() OVER (ORDER BY job_id),
+           ? || job_id, 'job', job_id, 'job.updated',
+           version, version + 1, NULL, ?
+         FROM memory_jobs
+         WHERE type = 'terminal-extraction' AND status = 'failed'
+         ORDER BY job_id`,
+      )
+      .run(`event-log-hard-cut:${cutoverId}:job:`, at),
   );
-  changes += runForIds(database, "DELETE FROM memory_jobs WHERE job_id = ?", jobIds);
-  changes += runForIds(database, "DELETE FROM memory_proposals WHERE proposal_id = ?", proposalIds);
-  changes += runForIds(database, "DELETE FROM memory_facts WHERE fact_id = ?", factIds);
-  changes += runForIds(database, "DELETE FROM memory_sources WHERE source_id = ?", sourceIds);
-  changes += sqliteChanges(database.prepare("DELETE FROM memory_idempotency").run());
-  if (changes > 0) bumpJsonRevision(database, "memory_metadata");
+  const jobUpdates = sqliteChanges(
+    database
+      .prepare(
+        `UPDATE memory_jobs SET
+           status = 'cancelled',
+           next_attempt_at = NULL,
+           error_code = 'memory_source_unavailable',
+           version = version + 1,
+           updated_at = ?,
+           terminal_at = ?
+         WHERE type = 'terminal-extraction' AND status = 'failed'`,
+      )
+      .run(at, at),
+  );
+  assertMutationProjectionParity("Memory Job", jobMutations, jobUpdates);
+
+  if (sourceUpdates + proposalUpdates + jobUpdates === 0) return;
+  bumpJsonRevision(database, "memory_metadata");
 }
 
 function clearControlWeakReferences(database: DatabaseSync): void {
@@ -614,18 +701,23 @@ function readAffectedMemoryJobs(
   sessionIds: ReadonlySet<string>,
 ): Array<{ readonly jobId: string; readonly status: string }> {
   const rows = database
-    .prepare("SELECT job_id, status, source_id, cursor_json FROM memory_jobs ORDER BY job_id")
+    .prepare("SELECT job_id, type, status, source_id, cursor_json FROM memory_jobs ORDER BY job_id")
     .all() as Array<Record<string, unknown>>;
   const affected: Array<{ jobId: string; status: string }> = [];
   for (const row of rows) {
     const jobId = requireString(row["job_id"], "memory_jobs.job_id");
+    const type = requireString(row["type"], `memory_jobs[${jobId}].type`);
     const status = requireString(row["status"], `memory_jobs[${jobId}].status`);
     const cursor = parseJsonRecord(row["cursor_json"], `memory_jobs[${jobId}].cursor_json`);
     const cursorSessionId = requireString(
       cursor["sessionId"],
       `memory_jobs[${jobId}].cursor.sessionId`,
     );
-    if (row["source_id"] !== null || sessionIds.has(cursorSessionId)) {
+    if (
+      type === "terminal-extraction" ||
+      row["source_id"] !== null ||
+      sessionIds.has(cursorSessionId)
+    ) {
       affected.push({ jobId, status });
     }
   }
@@ -715,26 +807,6 @@ function readJsonColumn(database: DatabaseSync, sql: string): unknown[] {
   return (database.prepare(sql).all() as Array<Record<string, unknown>>).map((row, index) =>
     parseJson(row["json"], `JSON row ${index + 1}`),
   );
-}
-
-function clearMemoryMutationRows(
-  database: DatabaseSync,
-  entityType: string,
-  ids: readonly string[],
-): number {
-  const statement = database.prepare(
-    "DELETE FROM memory_mutations WHERE entity_type = ? AND entity_id = ?",
-  );
-  let changes = 0;
-  for (const id of ids) changes += sqliteChanges(statement.run(entityType, id));
-  return changes;
-}
-
-function runForIds(database: DatabaseSync, sql: string, ids: readonly string[]): number {
-  const statement = database.prepare(sql);
-  let changes = 0;
-  for (const id of ids) changes += sqliteChanges(statement.run(id));
-  return changes;
 }
 
 function bumpJsonRevision(
@@ -848,6 +920,18 @@ function requireFlag(value: unknown, field: string): boolean {
 
 function sqliteChanges(result: { readonly changes: number | bigint }): number {
   return typeof result.changes === "number" ? result.changes : Number(result.changes);
+}
+
+function assertMutationProjectionParity(
+  entity: string,
+  mutationCount: number,
+  projectionCount: number,
+): void {
+  if (mutationCount !== projectionCount) {
+    throw new FileStorageIntegrityError(
+      `${entity} mutation count ${mutationCount} does not match projection count ${projectionCount}`,
+    );
+  }
 }
 
 function canonicalTimestamp(value: Date): string {
