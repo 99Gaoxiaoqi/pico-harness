@@ -92,3 +92,30 @@ test("用户级未配置默认时项目 model 也不注入（不再回落到项�
     "用户级无默认且无 legacy env 时，项目 model 不得注入默认路由",
   );
 });
+
+test("裸 LLM 环境变量不再注入 provider 或默认路由", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-legacy-env-retired-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const picoHome = join(root, "pico-home");
+  const workDir = join(root, "workspace");
+  await mkdir(workDir, { recursive: true });
+
+  const store = new UserConfigStore({ picoHome });
+  const effective = await new EffectiveConfigResolver({ userConfigStore: store }).resolve({
+    workDir,
+    projectTrusted: false,
+    env: {
+      LLM_BASE_URL: "https://legacy.invalid/v1",
+      LLM_MODEL: "legacy-model",
+      LLM_MODELS: "legacy-model,legacy-model-2",
+      LLM_API_KEY: "legacy-secret",
+    },
+    legacyProvider: "openai",
+  });
+
+  assert.deepEqual(effective.providers, {});
+  assert.deepEqual(effective.defaults, {});
+  assert.equal(effective.defaultModelRouteId, undefined);
+  assert.equal(effective.sources["providers.legacy"], undefined);
+  assert.equal(effective.sources["defaults.modelRouteId"], undefined);
+});

@@ -40,9 +40,11 @@ export interface ModelRoute {
 export interface LoadModelRouterOptions {
   config: ModelRoutingConfig;
   env?: Readonly<Record<string, string | undefined>>;
+  /** @deprecated Retained for host-call compatibility; bare legacy routes are no longer built. */
   legacyProvider: ProviderKind;
+  /** @deprecated Retained for host-call compatibility; bare legacy routes are no longer built. */
   legacyModel: string;
-  /** True only for an explicit --model value; protocol defaults are not trusted route catalog data. */
+  /** @deprecated Retained for host-call compatibility; bare legacy routes are no longer built. */
   legacyModelExplicit?: boolean;
   fetch?: typeof fetch;
   discoveryTimeoutMs?: number;
@@ -63,7 +65,6 @@ export interface ResolvedModelSecrets {
 interface ProviderSource {
   id: string;
   config: ModelProviderConfig;
-  source: "config" | "legacy";
   explicitModels: boolean;
 }
 
@@ -109,7 +110,7 @@ export class ModelRouter {
   require(query: string | undefined): ModelRoute {
     if (this.routes.length === 0) {
       throw new Error(
-        "没有可用模型路由。请在 .pico/config.json 配置 providers.*.models，或设置 LLM_BASE_URL、LLM_API_KEY[S] 和 LLM_MODEL。",
+        "没有可用模型路由。请在用户级 .pico/config.json 配置 providers.*.models，或先使用 /provider import-env 导入环境变量配置。",
       );
     }
     const route = this.resolve(query);
@@ -135,7 +136,7 @@ export class ModelRouter {
     if (!route.baseURL) {
       return {
         ok: false,
-        message: `模型路由 ${route.id} 缺少 baseURL。请检查 .pico/config.json 或 LLM_BASE_URL。`,
+        message: `模型路由 ${route.id} 缺少 baseURL。请检查用户级 .pico/config.json。`,
       };
     }
     if (!this.readCredential(route)) {
@@ -153,9 +154,7 @@ export class ModelRouter {
   ): { provider: ProviderKind; config: ProviderConfig; route: ModelRoute } {
     const route = this.require(routeId);
     if (!route.baseURL) {
-      throw new Error(
-        `模型路由 ${route.id} 缺少 baseURL。请检查 .pico/config.json 或 LLM_BASE_URL。`,
-      );
+      throw new Error(`模型路由 ${route.id} 缺少 baseURL。请检查用户级 .pico/config.json。`);
     }
     const apiKey = this.readCredential(route);
     if (!apiKey) {
@@ -197,10 +196,6 @@ export class ModelRouter {
 export async function loadModelRouter(options: LoadModelRouterOptions): Promise<ModelRouter> {
   const env = options.env ?? process.env;
   const providers = configuredProviders(options.config);
-  if (!providers.some((provider) => provider.id === "legacy")) {
-    const legacy = legacyProvider(options, env);
-    if (legacy) providers.push(legacy);
-  }
 
   const discovered = await Promise.all(
     providers.map((provider) => discoverProviderModels(provider, env, options)),
@@ -219,61 +214,24 @@ export async function loadModelRouter(options: LoadModelRouterOptions): Promise<
         provider.config.modelCapabilities?.[model],
         { baseURL: provider.config.baseURL },
       ),
-      source:
-        provider.source === "legacy"
-          ? "legacy"
-          : provider.explicitModels
-            ? "config"
-            : discoveredModels.has(model)
-              ? "discovered"
-              : "config",
+      source: provider.explicitModels
+        ? "config"
+        : discoveredModels.has(model)
+          ? "discovered"
+          : "config",
     })),
   );
 
   const configuredDefault = options.config.model?.trim();
-  const legacyDefault = routes.find(
-    (route) => route.provider === options.legacyProvider && route.model === options.legacyModel,
-  )?.id;
-  return new ModelRouter(routes, env, configuredDefault || legacyDefault, options.resolvedSecrets);
+  return new ModelRouter(routes, env, configuredDefault, options.resolvedSecrets);
 }
 
 function configuredProviders(config: ModelRoutingConfig): ProviderSource[] {
   return Object.entries(config.providers).map(([id, provider]) => ({
     id,
     config: provider,
-    source: "config",
     explicitModels: provider.models.length > 0,
   }));
-}
-
-function legacyProvider(
-  options: LoadModelRouterOptions,
-  env: Readonly<Record<string, string | undefined>>,
-): ProviderSource | undefined {
-  const baseURL = env["LLM_BASE_URL"]?.trim() ?? "";
-  const models = unique([
-    ...(options.legacyModelExplicit ? [options.legacyModel] : []),
-    env["LLM_MODEL"] ?? "",
-    ...splitModels(env["LLM_MODELS"]),
-  ]);
-  const canDiscover =
-    options.legacyProvider === "openai" &&
-    baseURL.length > 0 &&
-    readApiKey(env, env["LLM_API_KEYS"]?.trim() ? "LLM_API_KEYS" : "LLM_API_KEY") !== undefined;
-  if (models.length === 0 && !canDiscover) return undefined;
-
-  return {
-    id: "legacy",
-    source: "legacy",
-    explicitModels: false,
-    config: {
-      protocol: options.legacyProvider,
-      baseURL,
-      apiKeyEnv: env["LLM_API_KEYS"]?.trim() ? "LLM_API_KEYS" : "LLM_API_KEY",
-      models,
-      discoverModels: options.legacyProvider === "openai",
-    },
-  };
 }
 
 async function discoverProviderModels(
@@ -361,15 +319,6 @@ function secretMap(
 function normalizedSecret(value: string | undefined): string | undefined {
   const normalized = value?.trim();
   return normalized || undefined;
-}
-
-function splitModels(value: string | undefined): string[] {
-  return value
-    ? value
-        .split(",")
-        .map((model) => model.trim())
-        .filter(Boolean)
-    : [];
 }
 
 function unique(values: readonly string[]): string[] {
