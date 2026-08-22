@@ -76,8 +76,7 @@ import {
 } from "../runtime-event-store-contracts.js";
 import { operationalDatabasePath, type OperationalDatabaseLease } from "./sqlite-database.js";
 import { logger } from "../../observability/logger.js";
-import { ALL_WORKSPACE_SQLITE_SCOPES } from "./workspace-scopes.js";
-import { prepareWorkspaceSqliteStorageSync } from "./sqlite-workspace-storage.js";
+import { prepareCurrentWorkspaceSqliteStorageSync } from "./workspace-scopes.js";
 
 /**
  * SQLite 纪元的会话账本(ADR 24 §4.1,票 02)。
@@ -104,10 +103,7 @@ export class SqliteRuntimeEventStore {
       throw new Error("SqliteRuntimeEventStore requires storageRoot");
     }
     // 单一 scope 组合点:prepare 永远传全量,形状断言按全集 fail-closed。
-    const preparation = prepareWorkspaceSqliteStorageSync(
-      options.storageRoot,
-      ALL_WORKSPACE_SQLITE_SCOPES,
-    );
+    const preparation = prepareCurrentWorkspaceSqliteStorageSync(options.storageRoot);
     this.storageRoot = preparation.lease.storageRoot;
     this.lease = preparation.lease;
   }

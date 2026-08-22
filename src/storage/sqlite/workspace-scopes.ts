@@ -1,12 +1,20 @@
 import { resolvePicoPaths } from "../../paths/pico-paths.js";
+import {
+  EventLogHardCutBlockedError,
+  coordinateEventLogHardCut,
+} from "../event-log-hard-cut-coordinator.js";
 import { ATTACHMENTS_SCOPE } from "./attachments-scope.js";
 import { CONTROL_SCOPE } from "./control-scope.js";
+import { EVENT_LOG_HARD_CUT_SCOPE } from "./event-log-hard-cut-scope.js";
 import { KV_SCOPE } from "./kv-scope.js";
 import { MEMORY_SCOPE } from "./memory-scope.js";
 import { OPERATIONS_SCOPE } from "./operations-scope.js";
 import { SESSIONS_SCOPE } from "./sessions-scope.js";
 import { TASK_RUNS_SCOPE } from "./task-runs-scope.js";
-import { prepareWorkspaceSqliteStorageSync } from "./sqlite-workspace-storage.js";
+import {
+  prepareWorkspaceSqliteStorageSync,
+  type WorkspaceSqliteStoragePreparation,
+} from "./sqlite-workspace-storage.js";
 import type { OperationalDatabaseLease } from "./sqlite-database.js";
 import type { SqliteSchemaScope } from "./sqlite-schema.js";
 
@@ -27,6 +35,7 @@ export const ALL_WORKSPACE_SQLITE_SCOPES: readonly SqliteSchemaScope[] = [
   OPERATIONS_SCOPE,
   ATTACHMENTS_SCOPE,
   KV_SCOPE,
+  EVENT_LOG_HARD_CUT_SCOPE,
 ];
 
 export interface WorkspaceSqliteStorageRootOptions {
@@ -67,10 +76,31 @@ export function withWorkspaceSqliteLease<T>(
   storageRoot: string,
   operation: (lease: OperationalDatabaseLease) => T,
 ): T {
-  const preparation = prepareWorkspaceSqliteStorageSync(storageRoot, ALL_WORKSPACE_SQLITE_SCOPES);
+  const preparation = prepareCurrentWorkspaceSqliteStorageSync(storageRoot);
   try {
     return operation(preparation.lease);
   } finally {
     preparation.lease.release();
+  }
+}
+
+/**
+ * The only writable workspace-store prepare path. Schema migration makes the
+ * coordinator tables available, then the hard cut either commits the current
+ * epoch or throws before any store can expose a legacy reader/writer.
+ */
+export function prepareCurrentWorkspaceSqliteStorageSync(
+  storageRoot: string,
+): WorkspaceSqliteStoragePreparation {
+  const preparation = prepareWorkspaceSqliteStorageSync(storageRoot, ALL_WORKSPACE_SQLITE_SCOPES);
+  try {
+    const result = coordinateEventLogHardCut(preparation.lease.database);
+    if (result.status === "blocked") {
+      throw new EventLogHardCutBlockedError(result.blockers);
+    }
+    return preparation;
+  } catch (error) {
+    preparation.lease.release();
+    throw error;
   }
 }

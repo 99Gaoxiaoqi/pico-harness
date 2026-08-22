@@ -46,11 +46,8 @@ import type {
   StartRecoverableJobSuccessorResult,
   UpdateCronJobInput,
 } from "../../tasks/runtime-store-contracts.js";
-import { ALL_WORKSPACE_SQLITE_SCOPES } from "./workspace-scopes.js";
-import {
-  prepareWorkspaceSqliteStorageSync,
-  type WorkspaceStorageRootIdentity,
-} from "./sqlite-workspace-storage.js";
+import { prepareCurrentWorkspaceSqliteStorageSync } from "./workspace-scopes.js";
+import { type WorkspaceStorageRootIdentity } from "./sqlite-workspace-storage.js";
 import type { OperationalDatabaseLease } from "./sqlite-database.js";
 
 export type {
@@ -132,10 +129,7 @@ export class SqliteRuntimeControlStore {
     this.now = options.now ?? Date.now;
     // 单一 scope 组合点:与同库其它 store 一致传全量(引擎只在首开连接时迁移,
     // 组合打开若少传 scope,后开的 store 会看到缺表的库)。
-    const preparation = prepareWorkspaceSqliteStorageSync(
-      resolve(options.storageRoot),
-      ALL_WORKSPACE_SQLITE_SCOPES,
-    );
+    const preparation = prepareCurrentWorkspaceSqliteStorageSync(resolve(options.storageRoot));
     this.lease = preparation.lease;
     this.rootIdentity = preparation.rootIdentity;
     this.storageRoot = this.lease.storageRoot;
