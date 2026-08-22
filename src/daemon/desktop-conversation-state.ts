@@ -1,8 +1,4 @@
-import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
-import { resolvePicoHome } from "../paths/pico-paths.js";
-import { writeJsonAtomic } from "../storage/atomic-json.js";
+import { resolve } from "node:path";
 import type { JsonObject, RuntimeUserInput } from "./protocol.js";
 
 const DESKTOP_CONVERSATION_STATE_VERSION = 2 as const;
@@ -26,7 +22,6 @@ export interface DesktopIdempotencyRecord {
   readonly createdAt: number;
 }
 
-
 export interface DesktopFirstSendClaim {
   readonly workspacePath: string;
   readonly key: string;
@@ -40,14 +35,6 @@ export interface DesktopConversationStateFile {
   readonly queuedInputs: readonly DesktopQueuedInput[];
   readonly idempotency: readonly DesktopIdempotencyRecord[];
   readonly firstSendClaims: readonly DesktopFirstSendClaim[];
-}
-
-export interface DesktopConversationStateStoreOptions {
-  readonly filePath?: string;
-  readonly env?: Readonly<Record<string, string | undefined>>;
-  readonly picoHome?: string;
-  readonly now?: () => number;
-  readonly generateId?: () => string;
 }
 
 /**
@@ -68,10 +55,7 @@ export interface DesktopConversationStateStoreLike {
     workspacePath: string,
     key: string,
   ): Promise<Pick<DesktopIdempotencyRecord, "requestFingerprint" | "result"> | undefined>;
-  getFirstSendClaim(
-    workspacePath: string,
-    key: string,
-  ): Promise<DesktopFirstSendClaim | undefined>;
+  getFirstSendClaim(workspacePath: string, key: string): Promise<DesktopFirstSendClaim | undefined>;
   claimFirstSend(
     workspacePath: string,
     key: string,
@@ -84,211 +68,6 @@ export interface DesktopConversationStateStoreLike {
     requestFingerprint: string,
     result: JsonObject,
   ): Promise<void>;
-}
-
-/**
- * Legacy JSON 实现($PICO_HOME/desktop/conversation-state.json,writeJsonAtomic)。
- * ADR 28 后默认装配切到 SQLite 实现;本类保留为兼容读取面与一次性迁移的格式基准。
- */
-export class DesktopConversationStateStore implements DesktopConversationStateStoreLike {
-  readonly filePath: string;
-  private readonly now: () => number;
-  private readonly generateId: () => string;
-  private mutationQueue: Promise<void> = Promise.resolve();
-
-  constructor(options: DesktopConversationStateStoreOptions = {}) {
-    this.filePath =
-      options.filePath ??
-      join(
-        resolvePicoHome({ env: options.env, picoHome: options.picoHome }),
-        "desktop",
-        "conversation-state.json",
-      );
-    this.now = options.now ?? Date.now;
-    this.generateId = options.generateId ?? (() => `queued_${randomUUID()}`);
-  }
-
-  async listQueued(workspacePath: string, sessionId: string): Promise<DesktopQueuedInput[]> {
-    const canonical = normalizeWorkspacePath(workspacePath);
-    return (await this.read()).queuedInputs
-      .filter((input) => input.workspacePath === canonical && input.sessionId === sessionId)
-      .sort(
-        (left, right) =>
-          left.createdAt - right.createdAt || left.queueId.localeCompare(right.queueId),
-      );
-  }
-
-  async enqueue(
-    workspacePath: string,
-    sessionId: string,
-    input: RuntimeUserInput,
-  ): Promise<DesktopQueuedInput> {
-    const queued: DesktopQueuedInput = {
-      queueId: this.generateId(),
-      workspacePath: normalizeWorkspacePath(workspacePath),
-      sessionId: requireNonEmpty(sessionId, "sessionId"),
-      input,
-      createdAt: this.now(),
-    };
-    await this.mutate((state) => ({
-      ...state,
-      queuedInputs: [...state.queuedInputs, queued],
-    }));
-    return queued;
-  }
-
-  async removeQueued(workspacePath: string, queueId: string): Promise<void> {
-    const canonical = normalizeWorkspacePath(workspacePath);
-    const normalized = requireNonEmpty(queueId, "queueId");
-    await this.mutate((state) => ({
-      ...state,
-      queuedInputs: state.queuedInputs.filter(
-        (input) => input.workspacePath !== canonical || input.queueId !== normalized,
-      ),
-    }));
-  }
-
-  async clearQueued(workspacePath: string, sessionId: string): Promise<void> {
-    const canonical = normalizeWorkspacePath(workspacePath);
-    const normalizedSessionId = requireNonEmpty(sessionId, "sessionId");
-    await this.mutate((state) => ({
-      ...state,
-      queuedInputs: state.queuedInputs.filter(
-        (input) => input.workspacePath !== canonical || input.sessionId !== normalizedSessionId,
-      ),
-    }));
-  }
-
-  async getIdempotent(
-    workspacePath: string,
-    key: string,
-  ): Promise<Pick<DesktopIdempotencyRecord, "requestFingerprint" | "result"> | undefined> {
-    const canonical = normalizeWorkspacePath(workspacePath);
-    const normalized = requireNonEmpty(key, "idempotencyKey");
-    const record = (await this.read()).idempotency.find(
-      (record) => record.workspacePath === canonical && record.key === normalized,
-    );
-    return record
-      ? {
-          requestFingerprint: record.requestFingerprint,
-          result: record.result,
-        }
-      : undefined;
-  }
-
-  async getFirstSendClaim(
-    workspacePath: string,
-    key: string,
-  ): Promise<DesktopFirstSendClaim | undefined> {
-    const canonical = normalizeWorkspacePath(workspacePath);
-    const normalized = requireNonEmpty(key, "idempotencyKey");
-    const state = await this.read();
-    const retained = retainFirstSendClaims(state.firstSendClaims, this.now());
-    if (retained.length !== state.firstSendClaims.length) {
-      await this.mutate((current) => ({
-        ...current,
-        firstSendClaims: retainFirstSendClaims(current.firstSendClaims, this.now()),
-      }));
-    }
-    return retained.find((claim) => claim.workspacePath === canonical && claim.key === normalized);
-  }
-
-  async claimFirstSend(
-    workspacePath: string,
-    key: string,
-    sessionId: string,
-    requestFingerprint: string,
-  ): Promise<DesktopFirstSendClaim> {
-    const canonical = normalizeWorkspacePath(workspacePath);
-    const normalizedKey = requireNonEmpty(key, "idempotencyKey");
-    const normalizedSessionId = requireNonEmpty(sessionId, "sessionId");
-    const normalizedFingerprint = requireNonEmpty(requestFingerprint, "requestFingerprint");
-    let claimed: DesktopFirstSendClaim | undefined;
-    await this.mutate((state) => {
-      const now = this.now();
-      const retained = retainFirstSendClaims(state.firstSendClaims, now);
-      const existing = retained.find(
-        (claim) => claim.workspacePath === canonical && claim.key === normalizedKey,
-      );
-      claimed = existing ?? {
-        workspacePath: canonical,
-        key: normalizedKey,
-        sessionId: normalizedSessionId,
-        requestFingerprint: normalizedFingerprint,
-        createdAt: now,
-      };
-      if (existing) return { ...state, firstSendClaims: retained };
-      return {
-        ...state,
-        firstSendClaims: [claimed, ...retained].slice(0, MAX_FIRST_SEND_CLAIMS),
-      };
-    });
-    if (!claimed) throw new Error("Desktop first-send claim did not produce a result");
-    return claimed;
-  }
-
-  async rememberIdempotent(
-    workspacePath: string,
-    key: string,
-    requestFingerprint: string,
-    result: JsonObject,
-  ): Promise<void> {
-    const canonical = normalizeWorkspacePath(workspacePath);
-    const normalized = requireNonEmpty(key, "idempotencyKey");
-    await this.mutate((state) => ({
-      ...state,
-      firstSendClaims: retainFirstSendClaims(state.firstSendClaims, this.now()).filter(
-        (claim) => claim.workspacePath !== canonical || claim.key !== normalized,
-      ),
-      idempotency: [
-        ...state.idempotency.filter(
-          (record) => record.workspacePath !== canonical || record.key !== normalized,
-        ),
-        {
-          workspacePath: canonical,
-          key: normalized,
-          requestFingerprint: requireNonEmpty(requestFingerprint, "requestFingerprint"),
-          result,
-          createdAt: this.now(),
-        },
-      ]
-        .sort((left, right) => right.createdAt - left.createdAt)
-        .slice(0, MAX_IDEMPOTENCY_RECORDS),
-    }));
-  }
-
-  private async mutate(
-    operation: (state: DesktopConversationStateFile) => DesktopConversationStateFile,
-  ): Promise<void> {
-    const execute = async () => writeJsonAtomic(this.filePath, operation(await this.read()));
-    const queued = this.mutationQueue.then(execute, execute);
-    this.mutationQueue = queued.then(
-      () => undefined,
-      () => undefined,
-    );
-    await queued;
-  }
-
-  private async read(): Promise<DesktopConversationStateFile> {
-    try {
-      return parseDesktopConversationStateFile(
-        JSON.parse(await readFile(this.filePath, "utf8")),
-        this.filePath,
-      );
-    } catch (error) {
-      if (isNodeCode(error, "ENOENT")) return emptyState();
-      throw error;
-    }
-  }
-}
-
-function emptyState(): DesktopConversationStateFile {
-  return {
-    version: DESKTOP_CONVERSATION_STATE_VERSION,
-    queuedInputs: [],
-    idempotency: [],
-    firstSendClaims: [],
-  };
 }
 
 /** Legacy JSON 文件的 fail-closed 解析(供 SQLite 一次性迁移复用)。 */
@@ -420,22 +199,6 @@ function parseFirstSendClaim(value: unknown, filePath: string): DesktopFirstSend
   };
 }
 
-function retainFirstSendClaims(
-  claims: readonly DesktopFirstSendClaim[],
-  now: number,
-): DesktopFirstSendClaim[] {
-  const cutoff = now - FIRST_SEND_CLAIM_RETENTION_MS;
-  return claims
-    .filter((claim) => claim.createdAt >= cutoff)
-    .toSorted(
-      (left, right) =>
-        right.createdAt - left.createdAt ||
-        left.workspacePath.localeCompare(right.workspacePath) ||
-        left.key.localeCompare(right.key),
-    )
-    .slice(0, MAX_FIRST_SEND_CLAIMS);
-}
-
 export function normalizeWorkspacePath(workspacePath: string): string {
   return resolve(requireNonEmpty(workspacePath, "workspacePath")).normalize("NFC");
 }
@@ -448,8 +211,4 @@ export function requireNonEmpty(value: string, field: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isNodeCode(error: unknown, code: string): boolean {
-  return error instanceof Error && "code" in error && error.code === code;
 }
