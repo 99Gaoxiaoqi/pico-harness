@@ -75,9 +75,11 @@ Continuation：冻结 source prefix digest + claim + target run.started（同事
 
 ## 实施结果与验收证据
 
-- 最终 HEAD 的 EventLog/continuation/transcript/fence/retention/Plan/TUI 定向组合测试：76/76 通过。
+- 最终 HEAD 的 EventLog/continuation/transcript/fence/retention/memory/Plan/Desktop/TUI 定向组合测试：90/90 通过。
 - 全量集成测试分段覆盖完成：首段 635 通过、10 跳过；剩余段 397 通过、15 跳过。`runtime-host-spawn` 首次出现一次时序抖动，独立复跑 6/6 通过。
 - 一项与本改造无差异的基线失败仍存在：`terminal-bench-bundle-lock.test.ts` 要求根依赖声明 `@pico/runtime-host: "*"`；基线到本分支的三个 package manifest/lockfile 均无改动。
 - `npm run build`、根 typecheck、Desktop typecheck、lint、format 与 `git diff --check` 均通过。
+- 独立对抗审查未发现 P0，发现的 3 个 P1 均已修复并回归：canonical partial 入口、Transcript 整数 ordinal、Session-derived memory 删除与计费；同时补齐了冲突 fragment 的 fail-closed 校验。
 - 已知后续优化：daemon 为复用跨事实 projector，会在单次固定水位读取中累计分页结果；协议正确性和单帧预算已闭环，但极长 Session 的峰值内存可进一步改造成 checkpointed reducer。
+- `runtime_events` 的 append-only 由 typed store API 和事务边界保证，暂未增加阻止同库代码直接执行 `UPDATE` 的 SQLite trigger；新增直接 SQL 写路径仍需架构审查。
 - 未执行真实用户数据库硬切、发布或真实模型验收；这些动作仍需单独批准。
