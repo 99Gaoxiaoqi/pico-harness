@@ -103,12 +103,28 @@ git clone <repo-url> pico-harness
 cd pico-harness
 npm ci
 
-# OpenAI 兼容入口示例；也可改用共享 Provider 配置
-export LLM_BASE_URL=https://your-provider.example/v1
+# 先在 $PICO_HOME/config.json（默认 ~/.pico/config.json）配置用户 Provider、默认路由和凭证
 export LLM_API_KEY=your-api-key
-export LLM_MODEL=your-model
 
 npm run dev
+```
+
+最小的 `~/.pico/config.json` 示例（`LLM_API_KEY` 只有被该用户 Provider 显式引用后才会使用）：
+
+```json
+{
+  "version": 1,
+  "defaults": { "modelRouteId": "my-provider/my-model" },
+  "providers": {
+    "my-provider": {
+      "protocol": "openai",
+      "baseURL": "https://your-provider.example/v1",
+      "apiKeyEnv": "LLM_API_KEY",
+      "models": ["my-model"],
+      "discoverModels": false
+    }
+  }
+}
 ```
 
 Runtime、Memory 和 usage 使用本地 JSON/JSONL，不依赖 Node/Electron 原生数据库模块。`PICO_HOME` 必须位于支持原子 `mkdir`、同目录 `rename` 与 `fsync` 的本地文件系统；`npm run check:storage` 会在启动和验证前探测这些能力。
@@ -132,7 +148,7 @@ cd /path/to/project
 pico
 ```
 
-仓库内 `npm run dev` 会在存在时读取仓库根目录 `.env`；已安装的 `pico` 不会自动读取目标工作区 `.env`。生产密钥不要写入仓库，请通过进程环境或可用的凭证后端提供。
+仓库内 `npm run dev` 会在存在时读取仓库根目录 `.env`，但裸 `LLM_*` 不再自动生成模型路由；这些变量只作为 `/provider import-env` 的迁移输入，或由用户 Provider 的 `apiKeyEnv` 显式引用。生产密钥不要写入仓库。
 
 ### 启动 Desktop
 
@@ -148,29 +164,27 @@ TUI 与 Desktop 共用 `$PICO_HOME`，默认是 `~/.pico`：
 
 | 路径/变量                            | 用途                                                           |
 | ------------------------------------ | -------------------------------------------------------------- |
-| `$PICO_HOME/config.json`             | 设备级 Provider 元数据、模型列表和默认路由，不保存 API Key     |
+| `$PICO_HOME/config.json`             | 设备级 Provider、模型列表、默认路由及可选 API Key（权限 0600） |
 | `$PICO_HOME/trusted-workspaces.json` | 按 `realpath` 记录的工作区信任                                 |
-| `.pico/config.json`                  | 受信项目的 Provider、模型、兼容项、LSP 与沙箱配置              |
+| `.pico/config.json`                  | 受信项目的命令、兼容项、LSP 与沙箱配置                         |
 | `.pico/mcp.json`                     | 受信项目的 MCP 配置；`.claw/mcp.json` 仅作旧版只读回退         |
 | `PICO_HOME`                          | 切换整套配置、Session、daemon endpoint 与本地 Runtime 命名空间 |
 
-非秘密模型路由优先级为：当前 Session/CLI 显式选择 → 受信项目配置 → 用户默认 → 旧环境变量。Provider ID 若在不同来源指向冲突的协议或 Endpoint，会 fail-closed。
+模型路由必须来自用户配置；当前 Session/CLI 只能在用户配置提供的路由中显式选择。裸环境变量和项目配置不再注入 Provider 或默认模型。
 
-常用的旧环境变量入口仍可用：
+以下环境变量只用于显式导入、用户 Provider 的 `apiKeyEnv` 或非模型服务，不会自行创建模型路由：
 
-| 变量                                                     | 说明                                                     |
-| -------------------------------------------------------- | -------------------------------------------------------- |
-| `LLM_BASE_URL`                                           | 旧 Provider Endpoint；协议由 `--provider` 决定           |
-| `LLM_API_KEY` / `LLM_API_KEYS`                           | 单 Key / 多 Key 轮换                                     |
-| `LLM_MODEL` / `LLM_MODELS`                               | 默认模型 / 额外模型列表                                  |
-| `SEARCH_API_BASE` / `SEARCH_API_KEY`                     | 可选的 `web_search` 服务                                 |
-| `AUX_LLM_PROVIDER` / `AUX_LLM_BASE_URL` / `...KEY/MODEL` | 可选的 Compaction 辅助模型；URL、Key、Model 必须同时配置 |
-| `PICO_TRACE`                                             | 开启运行追踪                                             |
-| `PICO_SHELL_PATH`                                        | 覆盖 Bash 可执行文件；Windows 必须指向 Bash              |
+| 变量                                 | 说明                                                |
+| ------------------------------------ | --------------------------------------------------- |
+| `LLM_BASE_URL` / `LLM_MODEL(S)`      | `/provider import-env` 的一次性迁移输入             |
+| `LLM_API_KEY` / `LLM_API_KEYS`       | 迁移输入，或由用户 Provider 的 `apiKeyEnv` 显式引用 |
+| `SEARCH_API_BASE` / `SEARCH_API_KEY` | 可选的 `web_search` 服务                            |
+| `PICO_TRACE`                         | 开启运行追踪                                        |
+| `PICO_SHELL_PATH`                    | 覆盖 Bash 可执行文件；Windows 必须指向 Bash         |
 
 TUI 为避免 Pino 输出破坏 Ink 画面，会把进程日志级别固定为 `silent`；用户可见错误仍通过 UI Reporter 呈现。
 
-密钥与 JSON 配置、Session、IPC 响应和日志分离。当前发布构建默认禁用不安全的持久密钥兼容后端；没有受支持的凭证后端时，应使用前台进程环境，也不能创建依赖持久密钥的 Automation。详见[部署与凭证边界](./docs/deployment.md)。
+密钥不会进入 Session、IPC 响应或日志。用户级 `config.json` 可在 0600 文件中保存 `apiKey`；也可通过 `apiKeyEnv` 或可用的系统凭证后端解析。详见[部署与凭证边界](./docs/deployment.md)。
 
 ## 安全模型
 

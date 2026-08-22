@@ -1,5 +1,4 @@
-// Provider 共享配置:从环境变量读取 BaseURL / API Key / 模型名。
-// 受支持的 Node 运行时通过 `node --env-file=.env` 或 `tsx --env-file=.env` 加载 .env。
+// Provider 共享配置。网络参数必须由用户模型路由或受信宿主显式注入。
 
 import type { ReasoningLevel } from "./reasoning-capability.js";
 import type { RateLimitInfo } from "./ratelimit.js";
@@ -9,7 +8,7 @@ export interface ProviderConfig {
   baseURL: string;
   apiKey: string;
   model: string;
-  /** Route-owned capability metadata. Legacy/direct callers may omit it. */
+  /** Route-owned capability metadata. Explicit test/host callers may omit it. */
   capabilities?: ModelRouteCapabilities;
   /** Stable providerID/modelID identity for diagnostics and usage display. */
   routeId?: string;
@@ -28,19 +27,16 @@ export interface ProviderConfig {
 }
 
 /**
- * 读取所有可用 API key:
- * - 优先读 LLM_API_KEYS(逗号分隔,复数,支持多凭证轮换);
- * - 回退到 LLM_API_KEY(单数,向后兼容单 key);
- * - 过滤空段(逗号分隔可能产生空字符串)。
- * 返回值:无 key 时返回空数组。
+ * @deprecated Migration-only compatibility helper. Values returned here do not create a model
+ * route; production callers must resolve a user Provider before constructing a model client.
  */
 export function loadApiKeys(): string[] {
   const multi = process.env.LLM_API_KEYS;
   if (multi && multi.trim().length > 0) {
     const keys = multi
       .split(",")
-      .map((k) => k.trim())
-      .filter((k) => k.length > 0);
+      .map((key) => key.trim())
+      .filter(Boolean);
     if (keys.length > 0) return keys;
   }
   const single = process.env.LLM_API_KEY;

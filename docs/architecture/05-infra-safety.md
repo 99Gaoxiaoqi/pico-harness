@@ -208,9 +208,8 @@ Cron 关闭先停止新 tick 与定时器，再有界等待活动 tick；超时�
 ### 环境变量
 
 - `PICO_HOME`（用户状态根，默认 `~/.pico`）
-- `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL`（兼容环境配置入口）
-- `LLM_API_KEYS`（复数，逗号分隔，429 自动轮换）
-- `AUX_LLM_*`（辅助廉价模型，FullCompactor 用）
+- `LLM_BASE_URL` / `LLM_MODEL(S)`（仅作为 `/provider import-env` 迁移输入）
+- `LLM_API_KEY(S)`（迁移输入，或由用户 Provider 的 `apiKeyEnv` 显式引用）
 - `PICO_TRACE=1`（每轮导出 trace JSON）
 - `LOG_LEVEL`（默认 info）
 - `SEARCH_API_BASE` / `SEARCH_API_KEY`（WebSearch）

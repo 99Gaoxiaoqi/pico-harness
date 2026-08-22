@@ -291,7 +291,7 @@ test("bare LLM environment is not a route while configured env and Keychain cred
   assert.equal(environmentRuntime.config.defaultModelRouteId, undefined);
   assert.throws(
     () => environmentRuntime.router.providerConfig(undefined),
-    /user-level \.pico\/config\.json|\u7528\u6237\u7ea7 \.pico\/config\.json/u,
+    /user-level .*config\.json|\u7528\u6237\u7ea7 \$PICO_HOME\/config\.json/u,
   );
 
   const configuredEnvironmentSecret = syntheticSecret("configured-environment");

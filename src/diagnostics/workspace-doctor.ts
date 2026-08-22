@@ -52,16 +52,14 @@ export interface WorkspaceConfigurationDiagnostic {
 export async function runWorkspaceDoctor(
   options: WorkspaceDoctorOptions,
 ): Promise<WorkspaceDoctorReport> {
-  const env = options.env ?? process.env;
   const envPath = join(options.workDir, ".env");
   const nodeOk = isSupportedNodeVersion(process.versions.node);
   const nodeSummary = `${process.version} (${nodeOk ? "ok" : `requires ${NODE_RUNTIME_SUPPORT_LABEL}`})`;
   const cwdOk = existsSync(options.workDir);
-  const apiKeys = readApiKeys(env);
   const effectiveProviderCount = Object.keys(options.configuration?.providerSources ?? {}).length;
   const effectiveCredentialCount = Object.values(
     options.configuration?.credentialStates ?? {},
-  ).filter((state) => state === "environment" || state === "keychain").length;
+  ).filter((state) => state === "config" || state === "environment" || state === "keychain").length;
   const storage = await scanStorage(options);
   const checks: WorkspaceDiagnosticCheck[] = [
     check("cwd", "CWD", cwdOk ? "ok" : "error", `${options.workDir} (${cwdOk ? "ok" : "missing"})`),
@@ -76,23 +74,17 @@ export async function runWorkspaceDoctor(
     configurationCheck(options.configuration),
     check(
       "base-url",
-      "LLM_BASE_URL",
-      env["LLM_BASE_URL"] || effectiveProviderCount > 0 ? "ok" : "warning",
-      env["LLM_BASE_URL"]
-        ? "set in environment"
-        : effectiveProviderCount > 0
-          ? "provided by effective configuration"
-          : "missing",
+      "Provider routes",
+      effectiveProviderCount > 0 ? "ok" : "warning",
+      effectiveProviderCount > 0 ? "provided by user configuration" : "missing",
     ),
     check(
       "api-key",
-      "LLM_API_KEY[S]",
-      apiKeys.length > 0 || effectiveCredentialCount > 0 ? "ok" : "warning",
-      apiKeys.length > 0
-        ? `${apiKeys.length} configured in environment`
-        : effectiveCredentialCount > 0
-          ? `${effectiveCredentialCount} available from effective configuration`
-          : "missing",
+      "Provider credentials",
+      effectiveCredentialCount > 0 ? "ok" : "warning",
+      effectiveCredentialCount > 0
+        ? `${effectiveCredentialCount} available from user configuration`
+        : "missing",
     ),
     check("node", "Node", nodeOk ? "ok" : "error", nodeSummary),
     runtimeLedgerCheck(storage.report, storage.error),
@@ -109,21 +101,13 @@ export async function runWorkspaceDoctor(
     `CWD: ${options.workDir} (${cwdOk ? "ok" : "missing"})`,
     `.env: ${existsSync(envPath) ? "found" : "missing"}`,
     `Provider: ${options.provider}`,
-    `Model: ${options.model}${env["LLM_MODEL"] && env["LLM_MODEL"] !== options.model ? ` (env: ${env["LLM_MODEL"]})` : ""}`,
+    `Model: ${options.model}`,
     ...renderConfiguration(options.configuration),
-    `LLM_BASE_URL: ${
-      env["LLM_BASE_URL"]
-        ? "set in environment"
-        : effectiveProviderCount > 0
-          ? "provided by effective configuration"
-          : "missing"
-    }`,
-    `LLM_API_KEY[S]: ${
-      apiKeys.length > 0
-        ? `${apiKeys.length} configured in environment`
-        : effectiveCredentialCount > 0
-          ? `${effectiveCredentialCount} available from effective configuration`
-          : "missing"
+    `Provider routes: ${effectiveProviderCount > 0 ? "provided by user configuration" : "missing"}`,
+    `Provider credentials: ${
+      effectiveCredentialCount > 0
+        ? `${effectiveCredentialCount} available from user configuration`
+        : "missing"
     }`,
     `Node: ${nodeSummary}`,
     ...renderRuntimeLedger(storage.report, storage.error),
@@ -144,7 +128,7 @@ export async function runWorkspaceDoctor(
 function configurationCheck(
   configuration: WorkspaceConfigurationDiagnostic | undefined,
 ): WorkspaceDiagnosticCheck {
-  if (!configuration) return check("configuration", "Configuration", "unavailable", "legacy");
+  if (!configuration) return check("configuration", "Configuration", "unavailable", "missing");
   const providerCount = Object.keys(configuration.providerSources).length;
   return check(
     "configuration",
@@ -157,7 +141,7 @@ function configurationCheck(
 function renderConfiguration(
   configuration: WorkspaceConfigurationDiagnostic | undefined,
 ): string[] {
-  if (!configuration) return ["Configuration sources: legacy environment diagnostics only"];
+  if (!configuration) return ["Configuration sources: unavailable"];
   const providers = Object.entries(configuration.providerSources);
   return [
     `Configuration default: ${configuration.defaultModelRouteId ?? "none"} (source=${configuration.defaultSource ?? "built-in"})`,
@@ -320,14 +304,4 @@ function countStorageFindings(
   severity: StorageDoctorFinding["severity"],
 ): number {
   return findings.filter((finding) => finding.severity === severity).length;
-}
-
-function readApiKeys(env: Readonly<Record<string, string | undefined>>): string[] {
-  const multi = env["LLM_API_KEYS"]
-    ?.split(",")
-    .map((key) => key.trim())
-    .filter(Boolean);
-  if (multi && multi.length > 0) return multi;
-  const single = env["LLM_API_KEY"]?.trim();
-  return single ? [single] : [];
 }

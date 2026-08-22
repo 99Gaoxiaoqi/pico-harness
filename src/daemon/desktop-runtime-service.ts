@@ -3660,7 +3660,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       workDir: workspacePath,
       projectTrusted: true,
       legacyProvider: settings?.provider ?? "openai",
-      legacyModel: this.env["LLM_MODEL"]?.trim() ?? settings?.model ?? "",
+      legacyModel: settings?.model ?? "",
       legacyModelExplicit: false,
       env: this.env,
       credentialVault: this.credentialVault,

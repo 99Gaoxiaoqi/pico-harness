@@ -4,7 +4,7 @@ pico-harness 内网部署包
 【环境要求】
   - Windows x64
   - Node.js v22+
-  - 依赖已安装，并已配置 .env
+  - 依赖已安装，并已配置用户级 %USERPROFILE%\.pico\config.json
 
 【唯一启动方式】
   双击 启动TUI.bat，进入交互式 TUI。
@@ -23,10 +23,9 @@ pico-harness 内网部署包
   运行 pico --help 查看当前受支持的 TUI 启动参数。
 
 【大模型配置】
-  在 .env 中配置:
-    LLM_BASE_URL=https://...
-    LLM_API_KEY=...
-    LLM_MODEL=...
+  Provider、模型和默认路由必须配置在用户级 config.json。
+  API Key 可写入权限受保护的 config.json，或由 Provider 的 apiKeyEnv 显式引用。
+  裸 LLM_* 环境变量不会自动创建模型路由，只能作为 /provider import-env 的迁移输入。
 
 【注意】
   - 中文乱码时先执行: chcp 65001

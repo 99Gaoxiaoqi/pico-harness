@@ -35,9 +35,9 @@ pico
 
 ## 共享配置与凭证
 
-TUI 和 Desktop 从同一个 `PICO_HOME`（默认 `~/.pico`）读取设备级配置。`config.json` 只保存 Provider 元数据和默认值；密钥与配置分离。发布构建当前没有可用的持久凭证后端：macOS 的 `/usr/bin/security` 兼容实现默认 fail-closed，仅可用 `PICO_UNSAFE_KEYCHAIN_CLI=1` 显式开启本地开发模式。正式分发必须使用 Developer ID 签名的 Pico Credential Broker/XPC；在此之前只能使用前台环境变量，不能创建依赖持久密钥的 Automation。Desktop 的 Provider 页和 TUI `/provider` 命令修改的是同一份配置。
+TUI 和 Desktop 从同一个 `PICO_HOME`（默认 `~/.pico`）读取设备级配置。`config.json` 保存 Provider、默认路由，以及可选的明文 `apiKey`；目录和文件会分别收紧到 0700/0600。也可以让用户 Provider 通过 `apiKeyEnv` 或可用的系统凭证后端解析密钥。Desktop 的 Provider 页和 TUI `/provider` 命令修改的是同一份配置。
 
-`PICO_HOME` 也参与本地 daemon endpoint 命名；两个不同的 `PICO_HOME` 不会误连到对方的 Runtime。工作区 `.pico/config.json` 只在信任后读取，并可覆盖用户默认模型。MCP 默认读取 `.pico/mcp.json`；旧 `.claw/mcp.json` 仅作兼容回退。
+`PICO_HOME` 也参与本地 daemon endpoint 命名；两个不同的 `PICO_HOME` 不会误连到对方的 Runtime。模型 Provider 与默认路由只来自用户级 `config.json`；工作区 `.pico/config.json` 不再覆盖它们。MCP 默认读取 `.pico/mcp.json`；旧 `.claw/mcp.json` 仅作兼容回退。
 
 每个 workspace 的 Session、TaskRun 账本和控制面分别位于 `sessions/`、`task-runs/` 与 `control/`；同级
 `.storage/layout.json`、`.storage/commit.json` 和 `.storage/lock/` 负责布局标记与跨文件事务协调。
@@ -69,15 +69,15 @@ lock、tombstone、candidate、control 和 sessions，都会阻止 v2 初始化�
 
 运行中的 Run 固定使用启动时的配置快照，不会中途热换模型或凭证。TUI 在下一轮发送前重新解析配置；Desktop 通过 Runtime 事件刷新，并在窗口重新聚焦时补一次读取。损坏配置、revision 冲突或 Provider authority 冲突都会 fail-closed。
 
-## 环境变量兼容
+## 环境变量迁移
 
-如尚未配置共享 Provider，仍可用旧环境变量启动：
+裸 `LLM_*` 不再自动生成模型路由。它们只能作为 `/provider import-env <id>` 的一次性迁移输入，或在用户 Provider 已显式声明 `apiKeyEnv` 时提供凭证：
 
-| 变量                           | 说明                            |
-| ------------------------------ | ------------------------------- |
-| `LLM_BASE_URL`                 | OpenAI 兼容端点或 provider 端点 |
-| `LLM_API_KEY` / `LLM_API_KEYS` | 单 key 或多 key 轮换            |
-| `LLM_MODEL`                    | 默认模型名                      |
+| 变量                           | 说明                                  |
+| ------------------------------ | ------------------------------------- |
+| `LLM_BASE_URL`                 | `/provider import-env` 的端点输入     |
+| `LLM_API_KEY` / `LLM_API_KEYS` | 导入输入或 `apiKeyEnv` 指向的凭证     |
+| `LLM_MODEL`                    | `/provider import-env` 的默认模型输入 |
 
 可选：
 

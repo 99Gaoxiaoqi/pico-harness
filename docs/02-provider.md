@@ -259,7 +259,7 @@ export function createProvider(
 Factory 做三件事：
 
 1. **协议选择**：根据 `kind` 参数分派到对应实现。
-2. **配置加载**：如果没传 config，自动从环境变量读取（`LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL`）。
+2. **显式配置**：调用方必须传入已由用户模型路由解析出的 Provider config；Factory 不读取环境变量。
 3. **模型兜底**：OpenAI 兼容协议下，如果主模型挂了，自动切换到备用模型。
 
 模型兜底是后来加上的。有一次 Ark（火山方舟）的 DeepSeek V4 Pro 实例宕机了，Agent 直接挂掉。我问自己：为什么引擎不能自动切模型？
