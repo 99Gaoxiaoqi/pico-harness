@@ -218,7 +218,7 @@ test("sqlite EventLog retention: observes Memory bytes without charging the Even
   }
 });
 
-test("sqlite EventLog retention: Memory over the cap neither prunes Sessions nor blocks admission", async () => {
+test("sqlite EventLog retention: Memory and retained control over the cap do not affect admission", async () => {
   const { root, storageRoot } = await fixture("memory-quota-independent");
   try {
     seedSession(storageRoot, "archived");
@@ -252,6 +252,14 @@ test("sqlite EventLog retention: Memory over the cap neither prunes Sessions nor
              )`,
           )
           .run("memory".repeat(policy.hardLimitBytes));
+        lease.database
+          .prepare(
+            `INSERT INTO daemon_runs (
+               run_id, workspace_path, session_id, description, status,
+               started_at, updated_at, finished_at, version
+             ) VALUES ('large-control', '/workspace', 'archived', ?, 'succeeded', 1, 1, 1, 1)`,
+          )
+          .run("control".repeat(policy.hardLimitBytes));
       }),
     );
 
@@ -263,6 +271,11 @@ test("sqlite EventLog retention: Memory over the cap neither prunes Sessions nor
     assert.equal(measured.logicalBytes, before.logicalBytes);
     assert.equal(
       measured.sessions.find(({ sessionId }) => sessionId === "archived")!.breakdown.memoryBytes >
+        policy.hardLimitBytes,
+      true,
+    );
+    assert.equal(
+      measured.sessions.find(({ sessionId }) => sessionId === "archived")!.breakdown.controlBytes >
         policy.hardLimitBytes,
       true,
     );
