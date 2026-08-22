@@ -162,7 +162,7 @@ function projectVisibleItems(snapshot: RuntimeTranscriptSnapshot): OrderedConver
   let ordinal = 0;
 
   const append = (item: RuntimeConversationItem, sequence: number): void => {
-    items.push({ item, sequence, ordinal: ordinal++ });
+    items.push({ item, sequence, ordinal: transcriptItemOrdinal(ordinal++) });
   };
 
   snapshot.messages.forEach((message, messageIndex) => {
@@ -208,7 +208,7 @@ function projectVisibleItems(snapshot: RuntimeTranscriptSnapshot): OrderedConver
         // structured entry ID while anchoring matched reasoning before its assistant answer.
         structuredThinkingPlacements.set(structuredMatch.item.id, {
           sequence,
-          ordinal: ordinal - 0.5,
+          ordinal: precedingTranscriptItemOrdinal(ordinal),
           ...reasoningIdentity,
         });
       } else {
@@ -341,6 +341,26 @@ interface StructuredConversationProjection {
   readonly items: readonly OrderedConversationItem[];
 }
 
+// The wire cursor contract requires a non-negative safe integer ordinal. Reserve
+// the even slot immediately before every ordinary item for a matched structured
+// thinking entry: ordinary n => 2n+1, matched thinking => 2n. This preserves the
+// former n-0.5 ordering without emitting fractional cursors/fragments.
+function transcriptItemOrdinal(index: number): number {
+  const ordinal = index * 2 + 1;
+  if (!Number.isSafeInteger(ordinal)) {
+    throw new Error("Session transcript item ordinal exceeds the safe integer range");
+  }
+  return ordinal;
+}
+
+function precedingTranscriptItemOrdinal(index: number): number {
+  const ordinal = index * 2;
+  if (!Number.isSafeInteger(ordinal)) {
+    throw new Error("Session transcript item ordinal exceeds the safe integer range");
+  }
+  return ordinal;
+}
+
 function projectStructuredItems(
   snapshot: RuntimeTranscriptSnapshot,
 ): StructuredConversationProjection {
@@ -377,7 +397,7 @@ function projectStructuredItems(
     const ordered = (item: RuntimeConversationItem): OrderedConversationItem => ({
       item,
       sequence,
-      ordinal: projectedIndex,
+      ordinal: transcriptItemOrdinal(projectedIndex),
     });
     switch (entry.kind) {
       case "plan":

@@ -550,7 +550,7 @@ function parseConversation(
   };
 }
 
-function assembleConversationFragments(
+export function assembleConversationFragments(
   value: unknown,
   fragmentParts: Map<string, RuntimeTranscriptFragment[]> | undefined,
 ): JsonRecord[] {
@@ -564,14 +564,33 @@ function assembleConversationFragments(
     const totalBytes = numberValue(candidate.totalBytes);
     if (!itemId || !json || byteOffset < 0 || byteLength < 1 || totalBytes < 1) continue;
     const fragment = { itemId, json, byteOffset, byteLength, totalBytes };
-    const parts = [...(fragmentParts.get(itemId) ?? []), fragment]
-      .toSorted((left, right) => left.byteOffset - right.byteOffset)
-      .filter(
-        (part, index, all) =>
-          index === 0 ||
-          part.byteOffset !== all[index - 1]!.byteOffset ||
-          part.byteLength !== all[index - 1]!.byteLength,
-      );
+    if (
+      byteLength !== new TextEncoder().encode(json).byteLength ||
+      byteOffset + byteLength > totalBytes
+    ) {
+      throw new Error("Session transcript fragment byte range is invalid");
+    }
+    const prior = fragmentParts.get(itemId) ?? [];
+    for (const part of prior) {
+      if (part.totalBytes !== totalBytes) {
+        throw new Error("Session transcript fragments disagree on total bytes");
+      }
+      const sameRange = part.byteOffset === byteOffset && part.byteLength === byteLength;
+      if (sameRange && part.json !== json) {
+        throw new Error("Session transcript fragments disagree on range content");
+      }
+      const overlaps =
+        part.byteOffset < byteOffset + byteLength && byteOffset < part.byteOffset + part.byteLength;
+      if (overlaps && !sameRange) {
+        throw new Error("Session transcript fragment ranges overlap");
+      }
+    }
+    const duplicate = prior.some(
+      (part) => part.byteOffset === byteOffset && part.byteLength === byteLength,
+    );
+    const parts = [...prior, ...(duplicate ? [] : [fragment])].toSorted(
+      (left, right) => left.byteOffset - right.byteOffset,
+    );
     fragmentParts.set(itemId, parts);
     let offset = 0;
     for (const part of parts) {

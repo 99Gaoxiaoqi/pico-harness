@@ -406,6 +406,49 @@ test("transcript paging state: reassembles out-of-order UTF-8 fragments before i
   assert.deepEqual(tailFirst.items, []);
   assert.equal(tailFirst.fragments?.[item.id]?.length, 1);
 
+  assert.throws(
+    () =>
+      advanceRuntimeTranscriptPagingState(tailFirst, {
+        session: {} as never,
+        items: [],
+        queuedInputs: [],
+        revision: "7",
+        fragments: [
+          {
+            itemId: item.id,
+            position: 1,
+            ordinal: 0,
+            byteOffset: firstBytes,
+            byteLength: secondBytes,
+            totalBytes,
+            json: `${secondJson.slice(0, -1)}x`,
+          },
+        ],
+      }),
+    /range content/u,
+  );
+  assert.throws(
+    () =>
+      advanceRuntimeTranscriptPagingState(tailFirst, {
+        session: {} as never,
+        items: [],
+        queuedInputs: [],
+        revision: "7",
+        fragments: [
+          {
+            itemId: item.id,
+            position: 1,
+            ordinal: 0,
+            byteOffset: 0,
+            byteLength: firstBytes,
+            totalBytes: totalBytes + 1,
+            json: firstJson,
+          },
+        ],
+      }),
+    /item metadata/u,
+  );
+
   const complete = advanceRuntimeTranscriptPagingState(tailFirst, {
     session: {} as never,
     items: [],

@@ -4,6 +4,7 @@ import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createElement } from "react";
 import { MarkdownText } from "../../apps/desktop/src/renderer/conversation/MarkdownText.js";
+import { assembleConversationFragments } from "../../apps/desktop/src/renderer/runtime.js";
 import { projectRuntimeTranscript } from "../../src/daemon/desktop-transcript.js";
 import { createEmptyUsageSnapshot } from "../../src/engine/session-runtime.js";
 import { advanceRuntimeTranscriptPagingState } from "../../src/tui/client-session-runtime.js";
@@ -141,6 +142,60 @@ test("Desktop transcript restores structured thinking, Skill and system entries 
     ["skill-entry", "system-entry", "thinking-entry"],
   );
   assert.match(page.items[3]?.id ?? "", /^item_[0-9a-f]{20}$/);
+});
+
+test("Desktop transcript pages matched structured thinking with integer ordinals before its answer", () => {
+  const events: DurableTranscriptEvent[] = [
+    {
+      eventId: "thinking-start",
+      sequence: 1,
+      createdAt: 1,
+      type: "assistant.stream.started",
+      entryId: "thinking-entry",
+      streamId: "thinking-stream",
+      entryKind: "thinking",
+      delta: "先检查配置。",
+    },
+    {
+      eventId: "thinking-complete",
+      sequence: 2,
+      createdAt: 2,
+      type: "assistant.stream.completed",
+      entryId: "thinking-entry",
+      streamId: "thinking-stream",
+      content: "先检查配置。",
+    },
+  ];
+  const source = snapshot(
+    [{ role: "assistant", content: "完成。", reasoning: "先检查配置。" }],
+    events,
+  );
+
+  const answerPage = projectRuntimeTranscript(source, { limit: 1 });
+  assert.deepEqual(
+    answerPage.items.map((item) => item.kind),
+    ["assistantMessage"],
+  );
+  assert.deepEqual(answerPage.nextCursor, {
+    revision: "3",
+    throughTranscriptSequence: 3,
+    position: 3,
+    ordinal: 1,
+    byteOffset: 0,
+    direction: "older",
+  });
+  assert.equal(Number.isSafeInteger(answerPage.nextCursor?.ordinal), true);
+
+  const thinkingPage = projectRuntimeTranscript(source, {
+    cursor: answerPage.nextCursor,
+    limit: 1,
+  });
+  assert.deepEqual(
+    thinkingPage.items.map((item) => item.kind),
+    ["thinking"],
+  );
+  assert.equal(thinkingPage.items[0]?.id, "thinking-entry");
+  assert.equal(thinkingPage.nextCursor, undefined);
 });
 
 test("Desktop transcript places repeated identical reasoning before its matching answer", () => {
@@ -475,7 +530,7 @@ test("Desktop transcript pages older and newer through one fixed watermark curso
     revision: "5",
     throughTranscriptSequence: 5,
     position: 4,
-    ordinal: 3,
+    ordinal: 7,
     byteOffset: 0,
     direction: "older",
   });
@@ -508,7 +563,7 @@ test("Desktop transcript pages older and newer through one fixed watermark curso
       revision: "5",
       throughTranscriptSequence: 5,
       position: 2,
-      ordinal: 1,
+      ordinal: 3,
       byteOffset: 0,
       direction: "newer",
     },
@@ -573,7 +628,7 @@ test("newer cursor resumes an oversized item then advances to its following item
       revision: "3",
       throughTranscriptSequence: 3,
       position: 1,
-      ordinal: 0,
+      ordinal: 1,
       byteOffset: 0,
       direction: "newer",
     },
@@ -683,6 +738,81 @@ test("session transcript cursor validators fail closed", () => {
         fragments: [{ ...result.fragments[0], byteLength: 5 }],
       }),
     /UTF-8/u,
+  );
+});
+
+test("Desktop fragment reducer rejects conflicting ranges and total byte counts", () => {
+  const item = { id: "desktop-fragment", kind: "assistantMessage", content: "large answer" };
+  const json = JSON.stringify(item);
+  const splitAt = Math.floor(json.length / 2);
+  const head = json.slice(0, splitAt);
+  const tail = json.slice(splitAt);
+  const headBytes = Buffer.byteLength(head, "utf8");
+  const tailBytes = Buffer.byteLength(tail, "utf8");
+  const totalBytes = headBytes + tailBytes;
+  const parts = new Map();
+
+  assert.deepEqual(
+    assembleConversationFragments(
+      [
+        {
+          itemId: item.id,
+          byteOffset: 0,
+          byteLength: headBytes,
+          totalBytes,
+          json: head,
+        },
+      ],
+      parts,
+    ),
+    [],
+  );
+  assert.throws(
+    () =>
+      assembleConversationFragments(
+        [
+          {
+            itemId: item.id,
+            byteOffset: 0,
+            byteLength: headBytes,
+            totalBytes,
+            json: `${head.slice(0, -1)}x`,
+          },
+        ],
+        parts,
+      ),
+    /range content/u,
+  );
+  assert.throws(
+    () =>
+      assembleConversationFragments(
+        [
+          {
+            itemId: item.id,
+            byteOffset: headBytes,
+            byteLength: tailBytes,
+            totalBytes: totalBytes + 1,
+            json: tail,
+          },
+        ],
+        parts,
+      ),
+    /total bytes/u,
+  );
+  assert.deepEqual(
+    assembleConversationFragments(
+      [
+        {
+          itemId: item.id,
+          byteOffset: headBytes,
+          byteLength: tailBytes,
+          totalBytes,
+          json: tail,
+        },
+      ],
+      parts,
+    ),
+    [item],
   );
 });
 
