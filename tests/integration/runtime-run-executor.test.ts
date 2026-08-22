@@ -16,6 +16,7 @@ import {
   RuntimeRunExecutor,
 } from "../../src/runtime/runtime-run-executor.js";
 import { recoverMemoryReviewJobs } from "../../src/runtime/memory-review-recovery.js";
+import type { MemoryTriggerSlot } from "../../src/memory/memory-trigger-tools.js";
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 import { RuntimeRun } from "../../src/runtime/runtime-run.js";
 
@@ -160,11 +161,15 @@ test("Memory enqueue failure cannot replace completed terminal state or streamed
     } as unknown as SessionRuntime;
     const engine = {
       run: async (target: Session) => {
+        memoryTriggerSlot.trigger = "extract";
         await target.commitMessages({ role: "assistant", content: "streamed answer" });
         return target.getHistory();
       },
     } as unknown as AgentEngine;
     let enqueued = 0;
+    // 模拟模型在 turn 内调用了 memory_extract 置位触发标记
+    //（记忆调度门控已从 prompt 内容分类改为模型工具触发）。
+    const memoryTriggerSlot: MemoryTriggerSlot = { trigger: undefined };
     const result = await new RuntimeRunExecutor({
       session,
       runtimeState,
@@ -176,6 +181,7 @@ test("Memory enqueue failure cannot replace completed terminal state or streamed
       resumeExistingSession: false,
       traceEnabled: false,
       options: {},
+      memoryTriggerSlot,
       memoryReviewScheduler: {
         enqueue(input) {
           enqueued++;
@@ -277,8 +283,12 @@ test("a precommitted Desktop user message schedules once while an idle resume do
       },
     });
     const enqueued: Array<{ readonly userMessageEventId: string }> = [];
+    // 记忆调度门控现为模型工具触发（memory_extract 置位），
+    // fake engine 在 run 内置位模拟模型调用。
+    const memoryTriggerSlot: MemoryTriggerSlot = { trigger: undefined };
     const engine = {
       run: async (target: Session) => {
+        memoryTriggerSlot.trigger = "extract";
         await target.commitMessages({ role: "assistant", content: "done" });
         return target.getHistory();
       },
@@ -298,6 +308,7 @@ test("a precommitted Desktop user message schedules once while an idle resume do
         resumeExistingSession: true,
         traceEnabled: false,
         options: {},
+        memoryTriggerSlot,
         memoryReviewScheduler: {
           enqueue: (input) => void enqueued.push(input),
         },
@@ -464,6 +475,8 @@ test("RuntimeRunExecutor returns before a synchronously slow and blocked Memory 
     markSchedulerStarted = resolve;
   });
   const blocked = new Promise<void>(() => undefined);
+  // 记忆调度门控现为模型工具触发（memory_extract 置位），fake engine 置位模拟。
+  const memoryTriggerSlot: MemoryTriggerSlot = { trigger: undefined };
   try {
     await session.recover();
     const runtimeState = {
@@ -471,6 +484,7 @@ test("RuntimeRunExecutor returns before a synchronously slow and blocked Memory 
     } as unknown as SessionRuntime;
     const engine = {
       run: async (target: Session) => {
+        memoryTriggerSlot.trigger = "extract";
         await target.commitMessages({ role: "assistant", content: "fast foreground" });
         return target.getHistory();
       },
@@ -487,6 +501,7 @@ test("RuntimeRunExecutor returns before a synchronously slow and blocked Memory 
       resumeExistingSession: false,
       traceEnabled: false,
       options: {},
+      memoryTriggerSlot,
       memoryReviewScheduler: {
         enqueue() {
           schedulerStarted = true;

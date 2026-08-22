@@ -18,7 +18,6 @@ import type {
   RawMemoryProposalCandidate,
   TerminalMemoryEvidenceRef,
 } from "../../src/memory/proposal-contracts.js";
-import { MEMORY_PROPOSAL_TOOL } from "../../src/memory/proposal-parser.js";
 import {
   RuntimeMemoryEvidenceReader,
   type RuntimeEvidenceStorePort,
@@ -261,16 +260,11 @@ class FixedProposalModel implements MemoryProposalModelPort {
 }
 
 function toolResponse(candidates: readonly RawMemoryProposalCandidate[]): Message {
+  // ADR 26 工具结果全文 inline：提案以 JSON 文本作为 assistant content 返回，
+  // 不再走结构化 toolCall 形状。
   return {
     role: "assistant",
-    content: "",
-    toolCalls: [
-      {
-        id: "memory-quality-proposals",
-        name: MEMORY_PROPOSAL_TOOL.name,
-        arguments: JSON.stringify({ proposals: candidates }),
-      },
-    ],
+    content: JSON.stringify({ proposals: candidates }),
   };
 }
 
@@ -384,7 +378,7 @@ async function rmRetry(target: string): Promise<void> {
       await rm(target, { recursive: true, force: true });
       return;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EBUSY') throw error;
+      if ((error as NodeJS.ErrnoException).code !== "EBUSY") throw error;
       if (attempt === 0) {
         // 文件纪元的测试可以不关句柄直接 rm;SQLite 纪元先强制放掉本进程
         // 全部 pico.sqlite owner(事后各 close() 钩子对已释放 lease 静默空转)。

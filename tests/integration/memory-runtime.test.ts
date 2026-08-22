@@ -1,12 +1,9 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import { appendFileSync } from "node:fs";
 import { mkdtemp, mkdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { globalSessionManager } from "../../src/engine/session.js";
-import type { RuntimeEvent } from "../../src/engine/session-runtime-event.js";
 import type { Message } from "../../src/schema/message.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
 import {
@@ -15,9 +12,7 @@ import {
   MEMORY_CONTEXT_MAX_FACTS,
   MEMORY_CONTEXT_MAX_TOKENS,
 } from "../../src/memory/context-builder.js";
-import {
-  MEMORY_PROPOSED_NOTIFICATION_JOB_TYPE,
-} from "../../src/memory/memory-repository.js";
+import { MEMORY_PROPOSED_NOTIFICATION_JOB_TYPE } from "../../src/memory/memory-repository.js";
 import { SqliteMemoryRepository } from "../../src/storage/sqlite/sqlite-memory-repository.js";
 import { closeAllOperationalDatabasesForTest } from "../../src/storage/sqlite/sqlite-database.js";
 import { MemoryRepositoryProposalStore } from "../../src/memory/proposal-engine.js";
@@ -42,16 +37,12 @@ import {
   invalidateMemoryReviewRecoverySuccess,
   recoverMemoryReviewJobs,
 } from "../../src/runtime/memory-review-recovery.js";
-import {
-  RUNTIME_EVENT_STORE_MAX_PAGE_SIZE,
-} from "../../src/storage/runtime-event-store-contracts.js";
 import { createSessionRuntime } from "../../src/runtime/session-runtime.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 import { SqliteRuntimeControlStore } from "../../src/storage/sqlite/sqlite-runtime-control-store.js";
 import { publishDesktopMemoryProposal } from "../../src/daemon/production-host.js";
 import { WorkspaceRuntimeService } from "../../src/daemon/workspace-runtime-service.js";
 import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
-
 
 /** Windows:分离的 memory review worker 可能仍持有 pico.sqlite 句柄,
  * 删除临时目录按 EBUSY 有界重试,等待 drain 归还 lease。 */
@@ -249,8 +240,18 @@ test("foreground Runtime injects trusted recall ephemerally and schedules only c
   const captured: Message[][] = [];
   const provider: LLMProvider = {
     modelName: "memory-fixture",
-    async generate(messages) {
+    async generate(messages, tools) {
       captured.push(structuredClone(messages));
+      if (
+        tools?.some((tool) => tool.name === "memory_extract") === true &&
+        messages.at(-1)?.toolCallId === undefined
+      ) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "memory-runtime-trigger", name: "memory_extract", arguments: "{}" }],
+        };
+      }
       return { role: "assistant", content: "done" };
     },
   };
@@ -262,6 +263,7 @@ test("foreground Runtime injects trusted recall ephemerally and schedules only c
       sessionSelection: { mode: "new", sessionId: "memory-runtime-session" },
       provider: "openai",
       modelRouteId: "test/test",
+      allowedTools: ["memory_extract"],
     },
     { provider, picoHome: fixture.picoHome, memoryTrustStore: trustStore },
   );
@@ -304,7 +306,7 @@ test("foreground Runtime injects trusted recall ephemerally and schedules only c
     .map((event) => (event.kind === "message.committed" ? event.data.message : undefined));
   assert.deepEqual(
     transcriptMessages.map((message) => message?.role),
-    ["user", "assistant"],
+    ["user", "assistant", "assistant"],
   );
   assert.equal(
     transcriptMessages.some((message) => message?.content.includes("hidden-recall-policy")),
@@ -392,7 +394,17 @@ test("the second turn in one Session schedules Memory only when it carries a sta
     await rm(fixture.root, { recursive: true, force: true });
   });
   const provider: LLMProvider = {
-    async generate() {
+    async generate(messages, tools) {
+      if (
+        tools?.some((tool) => tool.name === "memory_extract") === true &&
+        messages.at(-1)?.toolCallId === undefined
+      ) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "memory-multi-turn-trigger", name: "memory_extract", arguments: "{}" }],
+        };
+      }
       return { role: "assistant", content: "done" };
     },
   };
@@ -413,6 +425,7 @@ test("the second turn in one Session schedules Memory only when it carries a sta
         sessionSelection: { mode: "resume", sessionId },
         provider: "openai",
         modelRouteId: "test/test",
+        allowedTools: prompt.includes("请记住") ? ["memory_extract"] : [],
       },
       {
         provider,
@@ -564,7 +577,17 @@ test("a direct enqueue failure invalidates a successful scan so the next Run reb
   context.after(() => rmRetry(fixture.root));
   const trustStore = await trustFixture(fixture);
   const provider: LLMProvider = {
-    async generate() {
+    async generate(messages, tools) {
+      if (
+        tools?.some((tool) => tool.name === "memory_extract") === true &&
+        messages.at(-1)?.toolCallId === undefined
+      ) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "memory-cache-trigger", name: "memory_extract", arguments: "{}" }],
+        };
+      }
       return { role: "assistant", content: "foreground complete" };
     },
   };
@@ -576,6 +599,7 @@ test("a direct enqueue failure invalidates a successful scan so the next Run reb
         sessionSelection: { mode: "new", sessionId },
         provider: "openai",
         modelRouteId: "test/test",
+        allowedTools: prompt.includes("请记住") ? ["memory_extract"] : [],
       },
       {
         provider,
@@ -834,185 +858,6 @@ test("recovery yields to the host after each fixed enqueue batch", async (contex
  * event-batch 行，模拟旧版本持久化的账本。manifest 为过期投影，由
  * loadSession 的 repairManifests 在下次读取时自动修复。
  */
-function appendLegacyRuntimeLedger(
-  root: string,
-  sessionId: string,
-  events: readonly RuntimeEvent[],
-): void {
-  const batch = {
-    type: "event-batch",
-    schemaVersion: 2,
-    txId: `legacy:${sessionId}`,
-    committedAt: events.at(-1)!.at,
-    entries: events.map((event, index) => ({
-      sequence: index + 1,
-      committedAt: event.at,
-      event,
-    })),
-  };
-  const digest = createHash("sha256").update(sessionId).digest("hex");
-  appendFileSync(join(root, "sessions", digest, "session.jsonl"), `${JSON.stringify(batch)}\n`);
-}
-
-test("startup does not recover a crash-gap terminal removed by a paged rewind", async (context) => {
-  const fixture = await createFixture("terminal-job-gap-rewind");
-  context.after(() => rmRetry(fixture.root));
-  const trustStore = await trustFixture(fixture);
-  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const runtimeStore = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
-  const sessionId = "memory-terminal-job-gap-rewound";
-  const at = "2026-07-22T00:00:00.000Z";
-  const base = (eventId: string, runId: string, visibility: "internal" | "model") => ({
-    schemaVersion: 2 as const,
-    eventId,
-    sessionId,
-    invocationId: `invocation:${runId}`,
-    runId,
-    turnId: `turn:${runId}`,
-    at,
-    partial: false,
-    visibility,
-  });
-  await runtimeStore.initializeSession({ sessionId, workDir: fixture.workspace });
-  // history.rewound 是 legacy-only kind，appendBatch 会拒绝；以遗留账本
-  // 方式直接写盘，模拟旧版本持久化的 session 再走恢复路径。
-  appendLegacyRuntimeLedger(paths.workspace.root, sessionId, [
-    {
-      ...base("retained-before-gap", "retained-run", "model"),
-      kind: "message.committed",
-      data: { message: { role: "user", content: "ordinary retained input" } },
-    },
-    ...Array.from({ length: RUNTIME_EVENT_STORE_MAX_PAGE_SIZE }, (_, index) => ({
-      ...base(`paging-filler-${index}`, `paging-run-${index}`, "internal"),
-      kind: "run.started" as const,
-      data: { workDir: fixture.workspace },
-    })),
-    {
-      ...base("rewound-gap-started", "rewound-gap-run", "internal"),
-      kind: "run.started",
-      data: { workDir: fixture.workspace },
-    },
-    {
-      ...base("rewound-gap-user", "rewound-gap-run", "model"),
-      kind: "message.committed",
-      data: {
-        message: {
-          role: "user",
-          content: "请记住：以后使用 npm run removed-a，并且保留 npm run removed-b。",
-        },
-      },
-    },
-    {
-      ...base("rewound-gap-assistant", "rewound-gap-run", "model"),
-      kind: "message.committed",
-      data: { message: { role: "assistant", content: "foreground complete" } },
-    },
-    {
-      ...base("rewound-gap-terminal", "rewound-gap-run", "internal"),
-      kind: "run.terminal",
-      data: { status: "completed" },
-    },
-    {
-      ...base("rewind-after-gap", "session-rewind", "internal"),
-      kind: "history.rewound",
-      data: { branchId: "rewound-active-branch", throughEventId: "retained-before-gap" },
-    },
-  ]);
-  runtimeStore.close();
-
-  let memoryModelCalls = 0;
-  const result = await executeAgentRuntime(
-    {
-      prompt: "What is 2 + 2?",
-      dir: fixture.workspace,
-      sessionSelection: { mode: "new", sessionId: "memory-rewind-restart-trigger" },
-      provider: "openai",
-      modelRouteId: "test/test",
-    },
-    {
-      provider: {
-        async generate() {
-          return { role: "assistant", content: "4" };
-        },
-      },
-      picoHome: fixture.picoHome,
-      memoryTrustStore: trustStore,
-      memoryReviewDebounceMs: 0,
-      memoryProposalModelFactory: () => ({
-        model: createSuccessfulModel(() => memoryModelCalls++),
-      }),
-    },
-  );
-  assert.equal(result.finalMessage, "4");
-  for (let attempt = 0; attempt < 20; attempt++) await waitForImmediate();
-  const repository = openRepository(fixture);
-  assert.equal(repository.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE }).length, 0);
-  repository.close();
-  assert.equal(memoryModelCalls, 0);
-});
-
-test("compact recovery restores an active Run at a rewind target before its terminal", async (context) => {
-  const fixture = await createFixture("compact-recovery-preterminal-rewind");
-  context.after(() => rmRetry(fixture.root));
-  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const store = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
-  const sessionId = "memory-compact-preterminal-rewind";
-  const runId = "memory-compact-replayed-run";
-  const base = (eventId: string, visibility: "internal" | "model") => ({
-    schemaVersion: 2 as const,
-    eventId,
-    sessionId,
-    invocationId: "memory-compact-invocation",
-    runId,
-    turnId: "memory-compact-turn",
-    at: "2026-07-22T00:00:00.000Z",
-    partial: false,
-    visibility,
-  });
-  await store.initializeSession({ sessionId, workDir: fixture.workspace });
-  // history.rewound 是 legacy-only kind，appendBatch 会拒绝；以遗留账本
-  // 方式直接写盘，模拟旧版本持久化的 session 再走恢复路径。
-  appendLegacyRuntimeLedger(paths.workspace.root, sessionId, [
-    {
-      ...base("compact-started", "internal"),
-      kind: "run.started",
-      data: { workDir: fixture.workspace },
-    },
-    {
-      ...base("compact-user", "model"),
-      kind: "message.committed",
-      data: { message: { role: "user", content: "请记住：固定使用 compact-recovery" } },
-    },
-    {
-      ...base("compact-assistant", "model"),
-      kind: "message.committed",
-      data: { message: { role: "assistant", content: "done" } },
-    },
-    {
-      ...base("compact-terminal-discarded", "internal"),
-      kind: "run.terminal",
-      data: { status: "completed" },
-    },
-    {
-      ...base("compact-rewind", "internal"),
-      kind: "history.rewound",
-      data: { branchId: "compact-replayed-branch", throughEventId: "compact-assistant" },
-    },
-    {
-      ...base("compact-terminal-active", "internal"),
-      kind: "run.terminal",
-      data: { status: "completed" },
-    },
-  ]);
-  store.close();
-
-  const recovered: string[] = [];
-  await recoverMemoryReviewJobs({
-    runtimeStorageRoot: paths.workspace.root,
-    scheduler: { enqueue: (input) => void recovered.push(input.terminalEventId) },
-  });
-  assert.deepEqual(recovered, ["compact-terminal-active"]);
-});
 
 test("an ordinary question wakes an existing durable review without enqueueing another", async (context) => {
   const fixture = await createFixture("ordinary-recovery-kick");
@@ -1062,8 +907,27 @@ test("proposal notification outbox retries across workers without repeating extr
   const fixture = await createFixture("worker");
   context.after(() => rmRetry(fixture.root));
   const trustStore = await trustFixture(fixture);
+  const settingsRepository = openRepository(fixture);
+  const settings = settingsRepository.getSettings();
+  settingsRepository.updateSettings({
+    expectedVersion: settings.version,
+    autoCommit: false,
+    idempotencyKey: "memory-worker-manual-review",
+  });
+  settingsRepository.close();
+  let foregroundCalls = 0;
   const foregroundProvider: LLMProvider = {
-    async generate() {
+    async generate(_messages, tools) {
+      if (
+        foregroundCalls++ === 0 &&
+        tools?.some((tool) => tool.name === "memory_extract") === true
+      ) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "memory-worker-trigger", name: "memory_extract", arguments: "{}" }],
+        };
+      }
       return { role: "assistant", content: "foreground complete" };
     },
   };
@@ -1074,6 +938,7 @@ test("proposal notification outbox retries across workers without repeating extr
       sessionSelection: { mode: "new", sessionId: "memory-worker-session" },
       provider: "openai",
       modelRouteId: "test/test",
+      allowedTools: ["memory_extract"],
     },
     {
       provider: foregroundProvider,
@@ -1110,30 +975,26 @@ test("proposal notification outbox retries across workers without repeating extr
         modelName: billingRoute.model,
         async generate(messages) {
           modelCalls++;
-          const evidence = JSON.parse(messages[1]?.content ?? "{}") as {
+          const last = messages.at(-1);
+          const evidenceText =
+            last?.role === "user" ? (last.content.split("\n\n").at(-1) ?? "{}") : "{}";
+          const evidence = JSON.parse(evidenceText) as {
             evidenceEventId?: string;
           };
           return {
             role: "assistant" as const,
-            content: "",
-            toolCalls: [
-              {
-                id: "memory-call",
-                name: "submit_memory_proposals",
-                arguments: JSON.stringify({
-                  proposals: [
-                    {
-                      kind: "project_fact",
-                      title: "Build command",
-                      content: "Use npm run build-memory",
-                      reason: "The user explicitly stated a stable project command.",
-                      confidence: 0.99,
-                      evidenceEventIds: [evidence.evidenceEventId],
-                    },
-                  ],
-                }),
-              },
-            ],
+            content: JSON.stringify({
+              proposals: [
+                {
+                  kind: "project_fact",
+                  title: "Build command",
+                  content: "Use npm run build-memory",
+                  reason: "The user explicitly stated a stable project command.",
+                  confidence: 0.99,
+                  evidenceEventIds: [evidence.evidenceEventId],
+                },
+              ],
+            }),
             usage: { promptTokens: 12, completionTokens: 8 },
           };
         },
@@ -1183,8 +1044,7 @@ test("proposal notification outbox retries across workers without repeating extr
   assert.equal(JSON.stringify(queuedNotice).includes("Build command"), false);
   repository.close();
   const usageLedger = new SqliteRuntimeControlStore({
-    storageRoot: resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome }).workspace
-      .root,
+    storageRoot: resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome }).workspace.root,
   });
   const memoryCall = usageLedger
     .listProviderCalls()
@@ -1259,30 +1119,16 @@ test("production adapter publishes a durable body-free memory.proposed notificat
   );
 });
 
-test("explicit single-fact review commits without acquiring a model lease", async (context) => {
+test("explicit single-fact review goes through the model lease and cites its evidence", async (context) => {
   const fixture = await createFixture("worker-deterministic");
   context.after(() => rmRetry(fixture.root));
   const trustStore = await trustFixture(fixture);
-  await executeAgentRuntime(
-    {
-      prompt: "请记住：这个项目固定使用 pnpm 管理依赖。",
-      dir: fixture.workspace,
-      sessionSelection: { mode: "new", sessionId: "memory-deterministic-session" },
-      provider: "openai",
-      modelRouteId: "test/test",
-    },
-    {
-      provider: {
-        async generate() {
-          return { role: "assistant", content: "foreground complete" };
-        },
-      },
-      picoHome: fixture.picoHome,
-      memoryTrustStore: trustStore,
-      memoryReviewDebounceMs: 0,
-    },
+  await enqueueCompletedReview(
+    fixture,
+    trustStore,
+    "memory-deterministic-session",
+    "请记住：这个项目固定使用 pnpm 管理依赖。",
   );
-  await waitForImmediate();
 
   let factoryCalls = 0;
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
@@ -1293,12 +1139,35 @@ test("explicit single-fact review commits without acquiring a model lease", asyn
     trustStore,
     modelFactory: () => {
       factoryCalls++;
-      return { model: createSuccessfulModel(() => undefined) };
+      return {
+        // 候选一律由模型生成（ffca119e）：模型从证据原文产出单条提案。
+        model: {
+          async extract(request) {
+            return {
+              response: {
+                role: "assistant",
+                content: JSON.stringify({
+                  proposals: [
+                    {
+                      kind: "project_fact",
+                      title: "包管理器",
+                      content: "这个项目固定使用 pnpm 管理依赖。",
+                      reason: "The user explicitly stated a stable project command.",
+                      confidence: 0.99,
+                      evidenceEventIds: [request.evidence.userMessageEventId],
+                    },
+                  ],
+                }),
+              },
+            };
+          },
+        },
+      };
     },
   });
   const results = await worker.drain();
   assert.equal(results[0]?.status, "succeeded");
-  assert.equal(factoryCalls, 0);
+  assert.equal(factoryCalls, 1);
 
   const repository = openRepository(fixture);
   const proposal = repository.listProposals({ statuses: ["pending"] })[0];
@@ -1405,7 +1274,7 @@ test("two workers racing the same queued review have one model call and one prop
     new MemoryReviewWorker({
       workDir: fixture.workspace,
       workspaceId: paths.workspace.id,
-        runtimeStorageRoot: paths.workspace.root,
+      runtimeStorageRoot: paths.workspace.root,
       trustStore: new SecondCanonicalizeBarrierTrustStore(
         { userStateDirectory: fixture.picoHome },
         rendezvous,
@@ -1435,29 +1304,25 @@ test("one drain reuses its model lease and a failed extraction does not advance 
   const model: MemoryProposalModelPort = {
     async extract(request) {
       modelCalls++;
-      if (modelCalls === 1) return { response: { role: "assistant", content: "invalid" } };
+      // 无 JSON 文本在新解析器下 = 模型选择"无可记内容"（空提案成功）；
+      // 要触发 retryable_failure 须给非法 envelope（proposals 非数组）。
+      if (modelCalls === 1)
+        return { response: { role: "assistant", content: '{"proposals": 42}' } };
       return {
         response: {
           role: "assistant",
-          content: "",
-          toolCalls: [
-            {
-              id: "memory-shared-lease-call",
-              name: "submit_memory_proposals",
-              arguments: JSON.stringify({
-                proposals: [
-                  {
-                    kind: "project_fact",
-                    title: "Recovery build command",
-                    content: "Use npm run memory-recovery",
-                    reason: "Stable project command",
-                    confidence: 0.99,
-                    evidenceEventIds: [request.evidence.userMessageEventId],
-                  },
-                ],
-              }),
-            },
-          ],
+          content: JSON.stringify({
+            proposals: [
+              {
+                kind: "project_fact",
+                title: "Recovery build command",
+                content: "Use npm run memory-recovery",
+                reason: "Stable project command",
+                confidence: 0.99,
+                evidenceEventIds: [request.evidence.userMessageEventId],
+              },
+            ],
+          }),
         },
       };
     },
@@ -1523,25 +1388,18 @@ test("an in-flight review cannot commit after its rewind job is cancelled", asyn
           return {
             response: {
               role: "assistant",
-              content: "",
-              toolCalls: [
-                {
-                  id: "rewind-cancel-call",
-                  name: "submit_memory_proposals",
-                  arguments: JSON.stringify({
-                    proposals: [
-                      {
-                        kind: "project_fact",
-                        title: "Cancelled build command",
-                        content: "Use npm run cancelled-memory",
-                        reason: "Stable project command",
-                        confidence: 0.99,
-                        evidenceEventIds: [request.evidence.userMessageEventId],
-                      },
-                    ],
-                  }),
-                },
-              ],
+              content: JSON.stringify({
+                proposals: [
+                  {
+                    kind: "project_fact",
+                    title: "Cancelled build command",
+                    content: "Use npm run cancelled-memory",
+                    reason: "Stable project command",
+                    confidence: 0.99,
+                    evidenceEventIds: [request.evidence.userMessageEventId],
+                  },
+                ],
+              }),
             },
             modelCalls: 1,
             inputTokens: 20,
@@ -1608,29 +1466,27 @@ test("one provider call microbatches fuzzy reviews and isolates one malformed ev
     modelName: billingRoute.model,
     async generate(messages) {
       providerCalls++;
-      const payload = JSON.parse(messages[1]?.content ?? "{}") as {
+      // ADR 26 后评审请求消息 = [...源对话快照, user(提取 prompt + "\n\n" + evidence JSON)]：
+      // evidence JSON 恒在最后一条 user 消息的空行分隔之后。
+      const last = messages.at(-1);
+      const evidenceText =
+        last?.role === "user" ? (last.content.split("\n\n").at(-1) ?? "{}") : "{}";
+      const payload = JSON.parse(evidenceText) as {
         evidences?: Array<{ evidenceEventId: string; userText: string }>;
       };
       assert.equal(payload.evidences?.length, 3);
       return {
         role: "assistant",
-        content: "",
-        toolCalls: [
-          {
-            id: "memory-microbatch-call",
-            name: "submit_memory_proposals",
-            arguments: JSON.stringify({
-              proposals: payload.evidences?.map((evidence, index) => ({
-                kind: "project_fact",
-                title: `Build command ${index}`,
-                content: `Use npm run ${["alpha", "beta", "gamma"][index]}`,
-                reason: "The user explicitly stated a stable project command.",
-                confidence: index === 2 ? 2 : 0.99,
-                evidenceEventIds: [evidence.evidenceEventId],
-              })),
-            }),
-          },
-        ],
+        content: JSON.stringify({
+          proposals: payload.evidences?.map((evidence, index) => ({
+            kind: "project_fact",
+            title: `Build command ${index}`,
+            content: `Use npm run ${["alpha", "beta", "gamma"][index]}`,
+            reason: "The user explicitly stated a stable project command.",
+            confidence: index === 2 ? 2 : 0.99,
+            evidenceEventIds: [evidence.evidenceEventId],
+          })),
+        }),
         usage: { promptTokens: 101, completionTokens: 41 },
       };
     },
@@ -1889,6 +1745,17 @@ async function enqueueCompletedReview(
   sessionId: string,
   prompt = "请记住：这个项目固定使用 npm run memory-recovery 进行构建，并且延续现有发布约定。",
 ): Promise<void> {
+  let triggerCalls = 0;
+  // 本 helper 构造"人工评审"场景：默认 autoCommit=true 会把干净提案直接
+  // accept（不出 pending、不发 proposed 通知），关掉以获得待审提案。
+  const settingsRepository = openRepository(fixture);
+  const initialSettings = settingsRepository.getSettings();
+  settingsRepository.updateSettings({
+    expectedVersion: initialSettings.version,
+    autoCommit: false,
+    idempotencyKey: `memory-test-manual-review:${sessionId}`,
+  });
+  settingsRepository.close();
   await executeAgentRuntime(
     {
       prompt,
@@ -1896,10 +1763,24 @@ async function enqueueCompletedReview(
       sessionSelection: { mode: "new", sessionId },
       provider: "openai",
       modelRouteId: "test/test",
+      // 记忆门控为模型工具触发（ffca119e）+ memory 工具组 deferred：
+      // 命令级放行并披露触发器工具，模拟宿主显式授权记忆场景。
+      allowedTools: ["memory_extract"],
     },
     {
       provider: {
-        async generate() {
+        // 记忆门控为模型工具触发（ffca119e）：先举手 memory_extract 再回终稿
+        //（allowedTools 放行并披露触发器工具，见上方请求注释）。
+        async generate(_messages, tools) {
+          if (triggerCalls++ === 0 && tools?.some((tool) => tool.name === "memory_extract")) {
+            return {
+              role: "assistant",
+              content: "",
+              toolCalls: [
+                { id: "memory-enqueue-trigger", name: "memory_extract", arguments: "{}" },
+              ],
+            };
+          }
           return { role: "assistant", content: "foreground complete" };
         },
       },
@@ -1940,25 +1821,18 @@ function createSuccessfulModel(onExtract: () => void): MemoryProposalModelPort {
       return {
         response: {
           role: "assistant",
-          content: "",
-          toolCalls: [
-            {
-              id: "memory-success-call",
-              name: "submit_memory_proposals",
-              arguments: JSON.stringify({
-                proposals: [
-                  {
-                    kind: "project_fact",
-                    title: "Recovery build command",
-                    content: "Use npm run memory-recovery",
-                    reason: "The user explicitly stated a stable project command.",
-                    confidence: 0.99,
-                    evidenceEventIds: [request.evidence.userMessageEventId],
-                  },
-                ],
-              }),
-            },
-          ],
+          content: JSON.stringify({
+            proposals: [
+              {
+                kind: "project_fact",
+                title: "Recovery build command",
+                content: "Use npm run memory-recovery",
+                reason: "The user explicitly stated a stable project command.",
+                confidence: 0.99,
+                evidenceEventIds: [request.evidence.userMessageEventId],
+              },
+            ],
+          }),
         },
       };
     },

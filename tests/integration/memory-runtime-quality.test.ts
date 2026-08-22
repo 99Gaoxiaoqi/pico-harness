@@ -35,11 +35,22 @@ test("accepted Session A memory reaches Session B AgentRuntime prompt but not an
   let reviewCalls = 0;
 
   try {
+    // 本测试走人工评审流：默认 autoCommit=true 会把干净提案直接 accept，
+    // 关掉以获得 pending 提案供手动 resolve。
+    const settingsRepository = openRepository(fixture.workspace, fixture.picoHome);
+    const initialSettings = settingsRepository.getSettings();
+    settingsRepository.updateSettings({
+      expectedVersion: initialSettings.version,
+      autoCommit: false,
+      idempotencyKey: "quality-cross-session-manual-review",
+    });
+    settingsRepository.close();
     await executeAgentRuntime(
       runtimeRequest(
         fixture.workspace,
         sessionIds[0]!,
         `请记住：这个项目固定使用 ${MEMORY_CANARY} 验证记忆。`,
+        { allowMemoryTrigger: true },
       ),
       {
         picoHome: fixture.picoHome,
@@ -110,7 +121,9 @@ test("accepted Session A memory reaches Session B AgentRuntime prompt but not an
       },
     );
     assert.equal(currentVisibleUserContent(otherPrompts[0] ?? []).includes(MEMORY_CANARY), false);
-    assert.equal(reviewCalls, 0);
+    // Session A 自身评审恰好一次（候选一律由模型生成，ffca119e）；
+    // Session B（autoPropose=false）与其他工作区不得再触发评审。
+    assert.equal(reviewCalls, 1);
   } finally {
     await closeSessions(
       sessionIds,
@@ -129,6 +142,8 @@ test("memory settings independently gate recall and review work", async (context
       expectedRecall: false,
       expectedReviewCalls: 0,
       expectedJobs: 0,
+      // 记忆关闭时触发器工具不注册，模型单趟直答
+      expectedMainCalls: 1,
     },
     {
       name: "autoPropose=false",
@@ -136,13 +151,18 @@ test("memory settings independently gate recall and review work", async (context
       expectedRecall: true,
       expectedReviewCalls: 0,
       expectedJobs: 0,
+      // 调度器不建（autoPropose=false），触发器工具不注册，单趟直答
+      expectedMainCalls: 1,
     },
     {
       name: "injectionEnabled=false",
       settings: { injectionEnabled: false },
       expectedRecall: false,
-      expectedReviewCalls: 0,
+      // 注入关闭只 gate 召回，不 gate 评审：job 正常走完（succeeded 必然调过模型）
+      expectedReviewCalls: 1,
       expectedJobs: 1,
+      // 调度器在（enabled+autoPropose）：模型先举手 memory_extract 再回终稿，两趟
+      expectedMainCalls: 2,
     },
   ] as const;
 
@@ -175,14 +195,28 @@ test("memory settings independently gate recall and review work", async (context
             fixture.workspace,
             sessionId,
             "请记住：本项目固定使用 npm run settings-review。",
+            { allowMemoryTrigger: settingCase.expectedJobs > 0 },
           ),
           {
             picoHome: fixture.picoHome,
             memoryTrustStore: trustStore,
             provider: {
-              async generate(messages) {
+              async generate(messages, tools) {
                 mainCalls++;
                 prompts.push(structuredClone(messages));
+                // 模拟真实模型：memory_extract 可用时先举手（模型工具触发门控）
+                if (
+                  mainCalls === 1 &&
+                  tools?.some((tool) => tool.name === "memory_extract") === true
+                ) {
+                  return {
+                    role: "assistant",
+                    content: "",
+                    toolCalls: [
+                      { id: "memory-settings-trigger", name: "memory_extract", arguments: "{}" },
+                    ],
+                  };
+                }
                 return { role: "assistant", content: "foreground complete" };
               },
             },
@@ -193,7 +227,7 @@ test("memory settings independently gate recall and review work", async (context
             reporter: new SilentReporter(),
           },
         );
-        assert.equal(mainCalls, 1);
+        assert.equal(mainCalls, settingCase.expectedMainCalls);
         assert.equal(prompts[0]?.[0]?.content.includes(MEMORY_CANARY), false);
         assert.equal(
           currentVisibleUserContent(prompts[0] ?? []).includes(MEMORY_CANARY),
@@ -232,13 +266,23 @@ test("foreground streaming completion does not wait for a blocked memory reviewe
   const reviewStarted = createDeferred<void>();
   const reporter = new DeltaReporter();
   let reviewCalls = 0;
+  let streamCalls = 0;
   const streamingProvider: LLMProvider = {
     async generate() {
       throw new Error("streaming provider must use generateStream");
     },
     async generateStream(_messages, _tools, onDelta) {
-      onDelta("stream");
-      onDelta("ed");
+      streamCalls++;
+      if (streamCalls === 1) {
+        // 模型先举手 memory_extract（模型工具触发门控），工具结果回来后第二趟再流式终稿
+        onDelta("stream");
+        onDelta("ed");
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "memory-streaming-trigger", name: "memory_extract", arguments: "{}" }],
+        };
+      }
       return {
         role: "assistant",
         content: "streamed",
@@ -253,6 +297,7 @@ test("foreground streaming completion does not wait for a blocked memory reviewe
         fixture.workspace,
         sessionId,
         "请记住：本项目固定使用前面提到的 npm run stream-memory 流程。",
+        { allowMemoryTrigger: true },
       ),
       {
         picoHome: fixture.picoHome,
@@ -301,6 +346,7 @@ test("memory reviewer failure cannot replace foreground terminal success", async
         fixture.workspace,
         sessionId,
         "请记住：本项目固定使用前面提到的 npm run failing-review 流程。",
+        { allowMemoryTrigger: true },
       ),
       {
         picoHome: fixture.picoHome,
@@ -347,33 +393,39 @@ test("default priced worker records one memory_review without changing main Sess
   const trustStore = await trustWorkspaces(fixture.picoHome, fixture.workspace);
   const sessionId = "quality-priced-worker";
   let providerInstances = 0;
+  let generateCalls = 0;
   const providerFactory: RunAgentProviderFactory = () => {
     providerInstances++;
     return {
       async generate(_messages, tools) {
-        if (tools.some((tool) => tool.name === "submit_memory_proposals")) {
+        // 评审模型路径：ADR 26 后 review 调用 tools=[]，靠提取 prompt 识别；
+        // 提案 JSON 作为 content 返回（inline 哲学）。
+        if (isMemoryReviewRequest(_messages)) {
+          return {
+            role: "assistant",
+            content: JSON.stringify({
+              proposals: [
+                {
+                  kind: "project_fact",
+                  title: "Priced review command",
+                  content: "Use npm run priced-review",
+                  reason: "Stable project command from user evidence",
+                  confidence: 0.99,
+                  evidenceEventIds: [extractEvidenceEventId(_messages)],
+                },
+              ],
+            }),
+            usage: { promptTokens: 40, completionTokens: 20 },
+          };
+        }
+        // 主对话：memory_extract 可用时先举手（模型工具触发门控），再回终稿
+        generateCalls++;
+        if (generateCalls === 1 && tools.some((tool) => tool.name === "memory_extract")) {
           return {
             role: "assistant",
             content: "",
-            toolCalls: [
-              {
-                id: "quality-priced-memory-review",
-                name: "submit_memory_proposals",
-                arguments: JSON.stringify({
-                  proposals: [
-                    {
-                      kind: "project_fact",
-                      title: "Priced review command",
-                      content: "Use npm run priced-review",
-                      reason: "Stable project command from user evidence",
-                      confidence: 0.99,
-                      evidenceEventIds: [extractEvidenceEventId(_messages)],
-                    },
-                  ],
-                }),
-              },
-            ],
-            usage: { promptTokens: 40, completionTokens: 20 },
+            toolCalls: [{ id: "quality-priced-trigger", name: "memory_extract", arguments: "{}" }],
+            usage: { promptTokens: 100, completionTokens: 50 },
           };
         }
         return {
@@ -406,6 +458,7 @@ test("default priced worker records one memory_review without changing main Sess
           fixture.workspace,
           sessionId,
           "请记住：这个项目固定使用前面提到的 npm run priced-review 流程。",
+          { allowMemoryTrigger: true },
         ),
         baseURL: "https://quality.example.test/v1",
         apiKey: "quality-priced-key",
@@ -432,10 +485,11 @@ test("default priced worker records one memory_review without changing main Sess
         ? true
         : undefined,
     );
-    await waitForProviderCalls(fixture, 2);
+    await waitForProviderCalls(fixture, 3);
     const usageAfterReview = session.getRuntimeStateSnapshot().usage;
     assert.deepEqual(usageAfterReview, usageBeforeReview);
-    assert.equal(usageAfterReview.totalProviderCalls, 1);
+    // 模型举手 memory_extract 的工具往返是主对话正常两趟
+    assert.equal(usageAfterReview.totalProviderCalls, 2);
 
     const ledger = new SqliteRuntimeControlStore({
       storageRoot: resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome }).workspace
@@ -443,9 +497,9 @@ test("default priced worker records one memory_review without changing main Sess
     });
     try {
       const calls = ledger.listProviderCalls();
-      assert.equal(calls.length, 2);
-      assert.deepEqual(calls.map((call) => call.purpose).sort(), ["main", "memory_review"]);
-      assert.equal(calls.filter((call) => call.purpose === "main").length, 1);
+      assert.equal(calls.length, 3);
+      assert.deepEqual(calls.map((call) => call.purpose).sort(), ["main", "main", "memory_review"]);
+      assert.equal(calls.filter((call) => call.purpose === "main").length, 2);
       const review = calls.find((call) => call.purpose === "memory_review");
       assert.ok(review);
       assert.ok(review.cost > 0);
@@ -492,28 +546,22 @@ function proposalExtractionResult(
   request: MemoryProposalExtractionRequest,
   content: string,
 ): MemoryProposalExtractionResult {
+  // ADR 26 工具结果全文 inline：提案 JSON 作为 assistant content 返回，不走 toolCall 形状。
   return {
     response: {
       role: "assistant",
-      content: "",
-      toolCalls: [
-        {
-          id: "quality-runtime-review",
-          name: "submit_memory_proposals",
-          arguments: JSON.stringify({
-            proposals: [
-              {
-                kind: "project_fact",
-                title: "Reviewed build command",
-                content,
-                reason: "Stable project command explicitly provided by the user",
-                confidence: 0.99,
-                evidenceEventIds: [request.evidence.userMessageEventId],
-              },
-            ],
-          }),
-        },
-      ],
+      content: JSON.stringify({
+        proposals: [
+          {
+            kind: "project_fact",
+            title: "Reviewed build command",
+            content,
+            reason: "Stable project command explicitly provided by the user",
+            confidence: 0.99,
+            evidenceEventIds: [request.evidence.userMessageEventId],
+          },
+        ],
+      }),
       usage: { promptTokens: 12, completionTokens: 8 },
     },
     inputTokens: 12,
@@ -526,14 +574,7 @@ function emptyExtractionResult(): MemoryProposalExtractionResult {
   return {
     response: {
       role: "assistant",
-      content: "",
-      toolCalls: [
-        {
-          id: "quality-runtime-empty-review",
-          name: "submit_memory_proposals",
-          arguments: JSON.stringify({ proposals: [] }),
-        },
-      ],
+      content: JSON.stringify({ proposals: [] }),
       usage: { promptTokens: 4, completionTokens: 1 },
     },
     inputTokens: 4,
@@ -543,8 +584,19 @@ function emptyExtractionResult(): MemoryProposalExtractionResult {
 }
 
 function finalAnswerProvider(content: string): LLMProvider {
+  // 记忆调度门控为模型工具触发（memory_extract 举手，ffca119e）：
+  // 模拟真实模型——看到 memory_extract 工具且对话含"请记住"时先举手，再回终稿。
+  let calls = 0;
   return {
-    async generate() {
+    async generate(_messages, tools) {
+      calls++;
+      if (calls === 1 && tools?.some((tool) => tool.name === "memory_extract") === true) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "memory-quality-trigger", name: "memory_extract", arguments: "{}" }],
+        };
+      }
       return {
         role: "assistant",
         content,
@@ -578,20 +630,37 @@ function currentVisibleUserContent(messages: readonly Message[]): string {
   );
 }
 
-function runtimeRequest(workspace: string, sessionId: string, prompt: string) {
+function runtimeRequest(
+  workspace: string,
+  sessionId: string,
+  prompt: string,
+  options: { readonly allowMemoryTrigger?: boolean } = {},
+) {
   return {
     prompt,
     dir: workspace,
     sessionSelection: { mode: "new" as const, sessionId },
     provider: "openai" as const,
     modelRouteId: "test/test",
-    allowedTools: [] as const,
+    // 记忆门控为模型工具触发（ffca119e）：记忆场景须放行触发器工具，
+    // 与 e2e memory-behavior 的 allowedTools 口径一致。
+    // 注意命令级 allowlist 对未注册工具 fail-fast：仅调度器会存在的场景才放行
+    //（enabled/autoPropose=false 时工具不注册，须传空）。
+    allowedTools: (options.allowMemoryTrigger ? ["memory_extract"] : []) as readonly string[],
   };
 }
 
+function isMemoryReviewRequest(messages: readonly Message[]): boolean {
+  // ADR 26 后评审调用 tools=[]，请求末尾是提取 prompt + evidence JSON。
+  const last = messages.at(-1);
+  return last?.role === "user" && last.content.includes("Extract only stable workspace facts");
+}
+
 function extractEvidenceEventId(messages: Message[]): string {
-  const user = messages.find((message) => message.role === "user")?.content ?? "";
-  const parsed = JSON.parse(user) as { readonly evidenceEventId?: unknown };
+  // evidence JSON 附在提取 prompt 之后（prompt 与 JSON 以空行分隔）
+  const last = messages.at(-1);
+  const payload = last?.role === "user" ? (last.content.split("\n\n").at(-1) ?? "") : "";
+  const parsed = JSON.parse(payload) as { readonly evidenceEventId?: unknown };
   assert.equal(typeof parsed.evidenceEventId, "string");
   return parsed.evidenceEventId as string;
 }
