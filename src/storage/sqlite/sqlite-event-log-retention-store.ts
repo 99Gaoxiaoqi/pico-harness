@@ -28,6 +28,7 @@ export interface EventLogSessionStorageBreakdown {
   readonly transcriptBytes: number;
   readonly checkpointAndMetadataBytes: number;
   readonly attachmentManifestBytes: number;
+  /** Memory bytes attributed to this Session for observation only; excluded from EventLog quota. */
   readonly memoryBytes: number;
   readonly controlBytes: number;
   /** Blob bytes reclaimable only when this session is their sole remaining owner. */
@@ -40,7 +41,8 @@ export interface EventLogSessionStorageStatus extends EventLogRetentionCandidate
 
 export interface EventLogStorageStatus {
   /**
-   * UTF-8 text/blob payload bytes plus explicit external blob byte lengths.
+   * EventLog UTF-8 text/blob payload bytes plus explicit external blob byte lengths.
+   * Long-term Memory bytes are reported separately and excluded from this admission total.
    * SQLite integer encodings, row headers, indexes, free pages and WAL bytes are intentionally excluded.
    */
   readonly logicalBytes: number;
@@ -543,7 +545,7 @@ function readStorageStatusLocked(
     const hasUnfinishedOperation = hasUnfinishedOperationLocked(database, sessionId);
     return {
       sessionId,
-      logicalBytes: sumBreakdown(breakdown),
+      logicalBytes: sumEventLogBreakdown(breakdown),
       archivedAt: optionalNonNegativeInteger(row["archived_at"], "sessions.archived_at"),
       activityAt: requireString(row["activity_at"], "sessions.activity_at"),
       pinned: row["pinned_at"] !== null && row["pinned_at"] !== undefined,
@@ -558,11 +560,7 @@ function readStorageStatusLocked(
   );
   const unattributedControlBytes = readUnattributedControlBytes(database);
   const logicalBytes = safeAdd(
-    safeAdd(
-      safeAdd(sessionLogicalBytes, blobTotals.sharedBytes, "workspace logical bytes"),
-      memoryTotals.unattributedBytes,
-      "workspace logical bytes",
-    ),
+    safeAdd(sessionLogicalBytes, blobTotals.sharedBytes, "workspace logical bytes"),
     unattributedControlBytes,
     "workspace logical bytes",
   );
@@ -672,7 +670,7 @@ function hasUnfinishedOperationLocked(database: DatabaseSync, sessionId: string)
 }
 
 function deleteSessionOwnedRowsLocked(database: DatabaseSync, sessionId: string): void {
-  deleteSessionOwnedMemoryRowsLocked(database, sessionId);
+  invalidateSessionMemoryRowsLocked(database, sessionId);
 
   const claimKeys = database
     .prepare(
@@ -736,172 +734,132 @@ function deleteSessionOwnedRowsLocked(database: DatabaseSync, sessionId: string)
   }
 }
 
-interface SessionOwnedMemoryClosure {
-  readonly sourceIds: ReadonlySet<string>;
-  readonly factIds: ReadonlySet<string>;
-  readonly proposalIds: ReadonlySet<string>;
-  readonly jobIds: ReadonlySet<string>;
-}
-
-function deleteSessionOwnedMemoryRowsLocked(database: DatabaseSync, sessionId: string): void {
-  const closure = readSessionOwnedMemoryClosure(database, sessionId);
-  if (
-    closure.sourceIds.size === 0 &&
-    closure.factIds.size === 0 &&
-    closure.proposalIds.size === 0 &&
-    closure.jobIds.size === 0
-  ) {
-    return;
-  }
-
+function invalidateSessionMemoryRowsLocked(database: DatabaseSync, sessionId: string): void {
+  const at = new Date().toISOString();
   let changes = 0;
-  for (const factId of closure.factIds) {
-    changes += sqliteChangeCount(
-      database
-        .prepare("UPDATE memory_proposals SET conflict_fact_id = NULL WHERE conflict_fact_id = ?")
-        .run(factId).changes,
-    );
-    changes += sqliteChangeCount(
-      database
-        .prepare("UPDATE memory_proposals SET resolved_fact_id = NULL WHERE resolved_fact_id = ?")
-        .run(factId).changes,
-    );
-  }
 
-  changes += deleteMemoryIdempotencyRowsLocked(database, closure);
-  changes += deleteMemoryMutationRowsLocked(database, "job", closure.jobIds);
-  changes += deleteMemoryMutationRowsLocked(database, "proposal", closure.proposalIds);
-  changes += deleteMemoryMutationRowsLocked(database, "fact", closure.factIds);
-  changes += deleteMemoryMutationRowsLocked(database, "source", closure.sourceIds);
-  changes += deleteRowsByIdsLocked(database, "memory_jobs", "job_id", closure.jobIds);
-  changes += deleteRowsByIdsLocked(
+  const sourceTargets = `session_id = ? AND availability = 'available'`;
+  recordBulkMemoryMutationsLocked(
+    database,
+    "memory_sources",
+    "source_id",
+    "source",
+    "source.updated",
+    sourceTargets,
+    [sessionId],
+    at,
+  );
+  changes += sqliteChangeCount(
+    database
+      .prepare(
+        `UPDATE memory_sources
+         SET availability = 'unavailable', invalidated_at = ?, invalidation_code = 'session_deleted',
+             version = version + 1, updated_at = ?
+         WHERE ${sourceTargets}`,
+      )
+      .run(at, at, sessionId).changes,
+  );
+
+  const proposalTargets = `source_id IN (
+    SELECT source_id FROM memory_sources WHERE session_id = ?
+  ) AND status <> 'deleted'`;
+  recordBulkMemoryMutationsLocked(
     database,
     "memory_proposals",
     "proposal_id",
-    closure.proposalIds,
+    "proposal",
+    "proposal.deleted",
+    proposalTargets,
+    [sessionId],
+    at,
   );
-  changes += deleteRowsByIdsLocked(database, "memory_facts", "fact_id", closure.factIds);
-  changes += deleteRowsByIdsLocked(database, "memory_sources", "source_id", closure.sourceIds);
+  changes += sqliteChangeCount(
+    database
+      .prepare(
+        `UPDATE memory_proposals
+         SET title = NULL, content = NULL, reason = NULL, status = 'deleted',
+             version = version + 1, updated_at = ?, deleted_at = ?
+         WHERE ${proposalTargets}`,
+      )
+      .run(at, at, sessionId).changes,
+  );
+
+  // A job with an explicit Source is owned by that Source. Source-less extraction
+  // and lifecycle jobs may instead point at the Session or one of its Memory entities.
+  const jobTargets = `status IN ('queued','running','failed') AND (
+    source_id IN (SELECT source_id FROM memory_sources WHERE session_id = ?)
+    OR (source_id IS NULL AND (
+      json_extract(cursor_json, '$.sessionId') = ?
+      OR json_extract(cursor_json, '$.eventId') IN (
+        SELECT source_id FROM memory_sources WHERE session_id = ?
+      )
+      OR json_extract(cursor_json, '$.eventId') IN (
+        SELECT fact_id FROM memory_facts WHERE source_id IN (
+          SELECT source_id FROM memory_sources WHERE session_id = ?
+        )
+      )
+      OR json_extract(cursor_json, '$.eventId') IN (
+        SELECT proposal_id FROM memory_proposals WHERE source_id IN (
+          SELECT source_id FROM memory_sources WHERE session_id = ?
+        )
+      )
+    ))
+  )`;
+  const jobTargetParams = [sessionId, sessionId, sessionId, sessionId, sessionId] as const;
+  recordBulkMemoryMutationsLocked(
+    database,
+    "memory_jobs",
+    "job_id",
+    "job",
+    "job.updated",
+    jobTargets,
+    jobTargetParams,
+    at,
+  );
+  changes += sqliteChangeCount(
+    database
+      .prepare(
+        `UPDATE memory_jobs
+         SET status = 'cancelled', next_attempt_at = NULL,
+             error_code = 'memory_source_unavailable', version = version + 1,
+             updated_at = ?, terminal_at = ?
+         WHERE ${jobTargets}`,
+      )
+      .run(at, at, ...jobTargetParams).changes,
+  );
+
   if (changes > 0) bumpMemoryRevisionLocked(database);
 }
 
-function readSessionOwnedMemoryClosure(
+function recordBulkMemoryMutationsLocked(
   database: DatabaseSync,
-  sessionId: string,
-): SessionOwnedMemoryClosure {
-  const sourceIds = new Set(
-    (
-      database
-        .prepare("SELECT source_id FROM memory_sources WHERE session_id = ?")
-        .all(sessionId) as Array<Record<string, unknown>>
-    ).map((row) => requireString(row["source_id"], "memory_sources.source_id")),
-  );
-  const factIds = readMemoryEntityIdsForSession(database, "memory_facts", "fact_id", sessionId);
-  const proposalIds = readMemoryEntityIdsForSession(
-    database,
-    "memory_proposals",
-    "proposal_id",
-    sessionId,
-  );
-  const jobIds = new Set<string>();
-  const jobs = database
-    .prepare("SELECT job_id, source_id, cursor_json FROM memory_jobs")
-    .all() as Array<Record<string, unknown>>;
-  for (const row of jobs) {
-    const jobId = requireString(row["job_id"], "memory_jobs.job_id");
-    const sourceId = optionalStringValue(row["source_id"], `memory_jobs[${jobId}].source_id`);
-    const cursor = parseMemoryJobCursor(row["cursor_json"], jobId);
-    const owned =
-      sourceId !== null
-        ? sourceIds.has(sourceId)
-        : cursor.sessionId === sessionId ||
-          sourceIds.has(cursor.eventId) ||
-          factIds.has(cursor.eventId) ||
-          proposalIds.has(cursor.eventId);
-    if (owned) {
-      jobIds.add(jobId);
-    }
-  }
-  return { sourceIds, factIds, proposalIds, jobIds };
-}
-
-function readMemoryEntityIdsForSession(
-  database: DatabaseSync,
-  table: "memory_facts" | "memory_proposals",
-  idColumn: "fact_id" | "proposal_id",
-  sessionId: string,
-): Set<string> {
-  const rows = database
+  table: "memory_sources" | "memory_proposals" | "memory_jobs",
+  idColumn: "source_id" | "proposal_id" | "job_id",
+  entityType: "source" | "proposal" | "job",
+  action: "source.updated" | "proposal.deleted" | "job.updated",
+  where: string,
+  parameters: readonly string[],
+  at: string,
+): void {
+  database
     .prepare(
-      `SELECT entity.${idColumn} AS entity_id
-       FROM ${table} AS entity
-       JOIN memory_sources AS source ON source.source_id = entity.source_id
-       WHERE source.session_id = ?`,
+      `WITH mutation_base AS (
+         SELECT COALESCE(MAX(sequence), 0) AS base_sequence FROM memory_mutations
+       ), targets AS (
+         SELECT ${idColumn} AS entity_id, version,
+                ROW_NUMBER() OVER (ORDER BY ${idColumn}) AS offset
+         FROM ${table} WHERE ${where}
+       )
+       INSERT INTO memory_mutations (
+         sequence, mutation_id, entity_type, entity_id, action, from_version, to_version,
+         idempotency_key_hash, created_at
+       )
+       SELECT mutation_base.base_sequence + targets.offset,
+              'mutation:' || lower(hex(randomblob(16))), ?, targets.entity_id, ?,
+              targets.version, targets.version + 1, NULL, ?
+       FROM targets CROSS JOIN mutation_base`,
     )
-    .all(sessionId) as Array<Record<string, unknown>>;
-  return new Set(rows.map((row) => requireString(row["entity_id"], `${table}.${idColumn}`)));
-}
-
-function deleteMemoryIdempotencyRowsLocked(
-  database: DatabaseSync,
-  closure: SessionOwnedMemoryClosure,
-): number {
-  const rows = database
-    .prepare("SELECT operation_key, marker_json FROM memory_idempotency")
-    .all() as Array<Record<string, unknown>>;
-  const remove = database.prepare("DELETE FROM memory_idempotency WHERE operation_key = ?");
-  let changes = 0;
-  for (const row of rows) {
-    const operationKey = requireString(row["operation_key"], "memory_idempotency.operation_key");
-    const marker = parseJson(row["marker_json"], `memory_idempotency[${operationKey}].marker_json`);
-    if (!isRecord(marker)) {
-      throw new Error(`memory_idempotency[${operationKey}].marker_json is not an object`);
-    }
-    if (
-      memoryMarkerReferences(marker, "sourceId", closure.sourceIds) ||
-      memoryMarkerReferences(marker, "factId", closure.factIds) ||
-      memoryMarkerReferences(marker, "proposalId", closure.proposalIds) ||
-      memoryMarkerReferences(marker, "jobId", closure.jobIds)
-    ) {
-      changes += sqliteChangeCount(remove.run(operationKey).changes);
-    }
-  }
-  return changes;
-}
-
-function memoryMarkerReferences(
-  marker: Readonly<Record<string, unknown>>,
-  key: string,
-  ids: ReadonlySet<string>,
-): boolean {
-  return typeof marker[key] === "string" && ids.has(marker[key]);
-}
-
-function deleteMemoryMutationRowsLocked(
-  database: DatabaseSync,
-  entityType: "source" | "fact" | "proposal" | "job",
-  entityIds: ReadonlySet<string>,
-): number {
-  const remove = database.prepare(
-    "DELETE FROM memory_mutations WHERE entity_type = ? AND entity_id = ?",
-  );
-  let changes = 0;
-  for (const entityId of entityIds) {
-    changes += sqliteChangeCount(remove.run(entityType, entityId).changes);
-  }
-  return changes;
-}
-
-function deleteRowsByIdsLocked(
-  database: DatabaseSync,
-  table: "memory_sources" | "memory_facts" | "memory_proposals" | "memory_jobs",
-  idColumn: "source_id" | "fact_id" | "proposal_id" | "job_id",
-  ids: ReadonlySet<string>,
-): number {
-  const remove = database.prepare(`DELETE FROM ${table} WHERE ${idColumn} = ?`);
-  let changes = 0;
-  for (const id of ids) changes += sqliteChangeCount(remove.run(id).changes);
-  return changes;
+    .run(...parameters, entityType, action, at);
 }
 
 function bumpMemoryRevisionLocked(database: DatabaseSync): void {
@@ -1150,8 +1108,9 @@ function readUnattributedControlBytes(database: DatabaseSync): number {
 
 /**
  * Memory is a mixed workspace/session ledger. Rows reachable from a Source are
- * charged to that Source's Session exactly once; settings and source-less manual
- * overlays remain workspace-level bytes and therefore survive Session retention.
+ * attributed to that Source's Session exactly once for observation; settings and
+ * source-less manual overlays remain workspace-level observations. Neither group
+ * contributes to EventLog admission or reclaim accounting.
  * SQLite performs the ownership joins and aggregation; Node receives at most one
  * row per Session plus one unattributed row, never the memory bodies themselves.
  */
@@ -1424,18 +1383,6 @@ function memoryByteAggregationQuery(): string {
 
 function memoryTextBytes(alias: string, columns: readonly string[]): string {
   return columns.map((column) => textBytes(`${alias}.${column}`)).join(" + ");
-}
-
-function parseMemoryJobCursor(
-  value: unknown,
-  jobId: string,
-): { readonly sessionId: string; readonly eventId: string } {
-  const cursor = parseJson(value, `memory_jobs[${jobId}].cursor_json`);
-  if (!isRecord(cursor)) throw new Error(`memory_jobs[${jobId}].cursor_json is not an object`);
-  return {
-    sessionId: requireString(cursor["sessionId"], `memory_jobs[${jobId}].cursor.sessionId`),
-    eventId: requireString(cursor["eventId"], `memory_jobs[${jobId}].cursor.eventId`),
-  };
 }
 
 function unattributedTextQuery(table: string, columns: readonly string[], where?: string): string {
@@ -1789,8 +1736,12 @@ function textBytes(column: string): string {
   return `length(CAST(COALESCE(${column}, '') AS BLOB))`;
 }
 
-function sumBreakdown(value: MutableBreakdown): number {
-  return Object.values(value).reduce((sum, bytes) => safeAdd(sum, bytes, "session breakdown"), 0);
+function sumEventLogBreakdown(value: MutableBreakdown): number {
+  return Object.entries(value).reduce(
+    (sum, [kind, bytes]) =>
+      kind === "memoryBytes" ? sum : safeAdd(sum, bytes, "session breakdown"),
+    0,
+  );
 }
 
 function normalizeCurrentSessionId(value: string | null | undefined): string | null {
@@ -1825,11 +1776,6 @@ function requireDigest(value: unknown, field: string): string {
 function requireString(value: unknown, field: string): string {
   if (typeof value !== "string" || value.length === 0) throw new Error(`${field} is invalid`);
   return value;
-}
-
-function optionalStringValue(value: unknown, field: string): string | null {
-  if (value === null || value === undefined) return null;
-  return requireString(value, field);
 }
 
 function requireNonNegativeInteger(value: unknown, field: string): number {
