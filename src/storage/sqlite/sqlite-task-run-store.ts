@@ -39,8 +39,7 @@ import {
   type TaskRunStorageRootMismatch,
 } from "../../tasks/task-run-store-contracts.js";
 import { operationalDatabasePath, type OperationalDatabaseLease } from "./sqlite-database.js";
-import { prepareWorkspaceSqliteStorageSync } from "./sqlite-workspace-storage.js";
-import { ALL_WORKSPACE_SQLITE_SCOPES } from "./workspace-scopes.js";
+import { prepareCurrentWorkspaceSqliteStorageSync } from "./workspace-scopes.js";
 
 /**
  * SQLite 版 TaskRunStore(票 05,ADR 24 §4.2)。
@@ -116,10 +115,7 @@ export class SqliteTaskRunStore {
 
   constructor(options: TaskRunStoreOptions) {
     if (!options.storageRoot.trim()) throw new Error("SqliteTaskRunStore requires storageRoot");
-    const preparation = prepareWorkspaceSqliteStorageSync(
-      options.storageRoot,
-      ALL_WORKSPACE_SQLITE_SCOPES,
-    );
+    const preparation = prepareCurrentWorkspaceSqliteStorageSync(options.storageRoot);
     this.lease = preparation.lease;
     this.storageRoot = preparation.rootIdentity.canonicalPath;
     this.storageRootId = preparation.rootIdentity.storageRootId;

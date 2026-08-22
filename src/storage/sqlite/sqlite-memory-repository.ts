@@ -60,8 +60,7 @@ import {
   type UpdateSourceAvailabilityInput,
 } from "../../memory/memory-repository.js";
 import type { OperationalDatabaseLease } from "./sqlite-database.js";
-import { prepareWorkspaceSqliteStorageSync } from "./sqlite-workspace-storage.js";
-import { ALL_WORKSPACE_SQLITE_SCOPES } from "./workspace-scopes.js";
+import { prepareCurrentWorkspaceSqliteStorageSync } from "./workspace-scopes.js";
 
 /**
  * SQLite 纪元的 memory 事实权威(ADR 24 §4.4,票 07)。
@@ -124,10 +123,7 @@ export class SqliteMemoryRepository implements MemoryRepositoryContract {
     this.workspaceId = options.workspaceId;
     this.now = options.now ?? (() => new Date());
     // 单一 scope 组合点:与同库其它 store 一致传全量(少传 scope 会漏迁移)。
-    const preparation = prepareWorkspaceSqliteStorageSync(
-      resolve(options.storageRoot),
-      ALL_WORKSPACE_SQLITE_SCOPES,
-    );
+    const preparation = prepareCurrentWorkspaceSqliteStorageSync(resolve(options.storageRoot));
     this.lease = preparation.lease;
     this.storageRoot = this.lease.storageRoot;
     try {
