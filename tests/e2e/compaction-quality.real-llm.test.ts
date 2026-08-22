@@ -4,10 +4,7 @@
  * 门控:RUN_COMPACTION_E2E=1(独立于 RUN_LLM_E2E,避免污染主套件)。
  * 用真实模型生成压缩摘要,用 anchor 匹配评分验证保真度。
  *
- * Provider 配置(环境变量,默认指向 jlcops OpenAI 兼容端点):
- *   COMPACTION_E2E_BASE_URL  默认 https://claude.jlcops.com/api/v1
- *   COMPACTION_E2E_API_KEY   必填
- *   COMPACTION_E2E_MODEL     默认 deepseek-v4-flash-0731
+ * Provider 配置来自用户级 $PICO_HOME/config.json 的默认模型路由。
  *
  * 三层验收:
  * - L2 单步摘要质量:FullCompactor.preview 生成摘要 → scoreCompactionQuality recall >= 0.8
@@ -25,25 +22,15 @@ import { scoreCompactionQuality } from "../fixtures/compaction-quality.js";
 import { compactionQualityCases } from "../fixtures/compaction-quality-cases.js";
 import type { Message } from "../../src/schema/message.js";
 import { createProvider } from "../../src/provider/factory.js";
-import type { ProviderConfig } from "../../src/provider/config.js";
+import { configuredUserDefaultRealModel } from "./real-llm-user-model.js";
 
 const RUN_COMPACTION_E2E = process.env.RUN_COMPACTION_E2E === "1";
 const compactionTest = RUN_COMPACTION_E2E ? test : test.skip;
 const TEST_TIMEOUT_MS = 10 * 60_000;
 
-function resolveProviderConfig(): ProviderConfig {
-  const apiKey = process.env.COMPACTION_E2E_API_KEY;
-  if (!apiKey) {
-    throw new Error(
-      "COMPACTION_E2E_API_KEY 未设置。压缩质量 e2e 测试需要真实模型凭证。\n" +
-        "用法:COMPACTION_E2E_API_KEY=xxx RUN_COMPACTION_E2E=1 npm run test:compaction-e2e",
-    );
-  }
-  return {
-    baseURL: process.env.COMPACTION_E2E_BASE_URL ?? "https://claude.jlcops.com/api/v1",
-    apiKey,
-    model: process.env.COMPACTION_E2E_MODEL ?? "deepseek-v4-flash-0731",
-  };
+async function createUserConfiguredProvider() {
+  const configured = await configuredUserDefaultRealModel();
+  return createProvider(configured.provider, configured.config);
 }
 
 /** 构造内存 Session(无持久化,避免 fsync 限制)。preview 只读 Session 标识。 */
@@ -55,8 +42,7 @@ compactionTest(
   "L2: 真实模型生成的 6 段摘要保留关键事实(recall >= 0.8)",
   { timeout: TEST_TIMEOUT_MS },
   async () => {
-    const config = resolveProviderConfig();
-    const provider = createProvider("openai", config);
+    const provider = await createUserConfiguredProvider();
     const compactor = new FullCompactor({ provider, maxAttempts: 1 });
     const session = createInMemorySession();
 
@@ -94,8 +80,7 @@ compactionTest(
   "L3: 滚动摘要增量更新保留第一次的关键 anchor(recall >= 0.7)",
   { timeout: TEST_TIMEOUT_MS },
   async () => {
-    const config = resolveProviderConfig();
-    const provider = createProvider("openai", config);
+    const provider = await createUserConfiguredProvider();
     const compactor = new FullCompactor({ provider, maxAttempts: 1 });
     const session = createInMemorySession();
 
@@ -147,8 +132,7 @@ compactionTest(
   "L3-deep: 3 轮滚动摘要后核心 anchor 仍存活(recall >= 0.5)",
   { timeout: TEST_TIMEOUT_MS },
   async () => {
-    const config = resolveProviderConfig();
-    const provider = createProvider("openai", config);
+    const provider = await createUserConfiguredProvider();
     const compactor = new FullCompactor({ provider, maxAttempts: 1 });
     const session = createInMemorySession();
 
