@@ -756,6 +756,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
               isolatedWorktrees: false,
               branchMerge: false,
             },
+            eventLog: null,
           } satisfies WorkspaceStatusResult;
         }
         const runtime = await this.options.runtimeService.getWorkspaceRuntime(workspacePath);
