@@ -55,7 +55,6 @@ import {
   resolveAutomationCredentialTarget,
   type AutomationCredentialTarget,
 } from "../provider/automation-credential.js";
-import { loadApiKeys } from "../provider/config.js";
 import { initializeProjectEntrypoints } from "./project-initializer.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
 import {
@@ -601,43 +600,40 @@ function createCompactCommand(
       }
       const session = options.session;
 
-      let activeProvider = options.provider;
-      let activeConfig: { baseURL: string; apiKey: string; model: string } | undefined;
       const modelRouter = await resolveCommandModelRouter(
         options.modelRouter,
         options.modelRouterProvider,
       );
-      if (modelRouter) {
-        try {
-          const resolved = modelRouter.providerConfig(
-            settings.modelRouteId,
-            effectiveSessionReasoningLevel(settings, modelRouter),
-          );
-          activeProvider = resolved.provider;
-          activeConfig = resolved.config;
-        } catch (error) {
-          return {
-            type: "local",
-            action: "message",
-            message: `Compact unavailable: ${error instanceof Error ? error.message : String(error)}`,
-          };
-        }
-      }
-      const baseURL = activeConfig?.baseURL ?? process.env.LLM_BASE_URL;
-      const apiKey = activeConfig?.apiKey ?? loadApiKeys()[0];
-      if (!baseURL || !apiKey) {
+      if (!modelRouter) {
         return {
           type: "local",
           action: "message",
-          message:
-            "Compact unavailable: missing LLM_BASE_URL or LLM_API_KEY[S], so FullCompactor cannot call the summary model.",
+          message: "Compact unavailable: user model configuration is not available.",
         };
       }
+
+      let activeProvider: ProviderKind;
+      let activeConfig: { baseURL: string; apiKey: string; model: string };
+      try {
+        const resolved = modelRouter.providerConfig(
+          settings.modelRouteId,
+          effectiveSessionReasoningLevel(settings, modelRouter),
+        );
+        activeProvider = resolved.provider;
+        activeConfig = resolved.config;
+      } catch (error) {
+        return {
+          type: "local",
+          action: "message",
+          message: `Compact unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+
+      const { baseURL, apiKey, model } = activeConfig;
 
       const pluginActivationScope = new PluginCapabilityActivationScope();
       try {
         const before = session.length;
-        const model = activeConfig?.model ?? settings.model;
         const profile = resolveProviderProfile(
           activeProvider === "openai" ? "openai" : activeProvider,
           model,
