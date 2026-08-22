@@ -1870,6 +1870,17 @@ export type TypedRuntimeNotification = {
   [Topic in RuntimeNotificationTopic]: RuntimeNotification<Topic>;
 }[RuntimeNotificationTopic];
 
+export interface EventLogStorageStatusResult extends JsonObject {
+  readonly logicalBytes: number;
+  readonly hardLimitBytes: number;
+  readonly lowWatermarkBytes: number;
+  readonly status: "within_limit" | "retention_required" | "quota_blocked";
+  readonly canStartNewWork: boolean;
+  readonly canWriteClosure: boolean;
+  readonly plannedSessionCount: number;
+  readonly estimatedLogicalBytesReclaimed: number;
+}
+
 export interface WorkspaceStatusResult extends JsonObject {
   workspacePath: string;
   registered: boolean;
@@ -1882,6 +1893,7 @@ export interface WorkspaceStatusResult extends JsonObject {
     readonly isolatedWorktrees: boolean;
     readonly branchMerge: boolean;
   };
+  eventLog: EventLogStorageStatusResult | null;
 }
 
 export type RuntimeRequest<Method extends RuntimeMethod = RuntimeMethod> =
@@ -2520,18 +2532,14 @@ function assertNestedShape(
 }
 
 const runtimeTranscriptCursorParam: RuntimeParamRule = (value, path) => {
-  assertNestedShape(
-    value,
-    path,
-    {
-      revision: boundedNonEmptyStringParam(512),
-      throughTranscriptSequence: positiveIntegerParam,
-      position: nonNegativeIntegerParam,
-      ordinal: nonNegativeIntegerParam,
-      byteOffset: nonNegativeIntegerParam,
-      direction: oneOfParam(["older", "newer"] as const),
-    },
-  );
+  assertNestedShape(value, path, {
+    revision: boundedNonEmptyStringParam(512),
+    throughTranscriptSequence: positiveIntegerParam,
+    position: nonNegativeIntegerParam,
+    ordinal: nonNegativeIntegerParam,
+    byteOffset: nonNegativeIntegerParam,
+    direction: oneOfParam(["older", "newer"] as const),
+  });
 };
 
 const runtimeTranscriptParams = exactParamShape(
@@ -3509,19 +3517,35 @@ const runtimeRunResult = resultShape(
   { sessionId: resultString, finishedAt: resultFiniteNumber, error: resultString },
 );
 
-const workspaceStatusResultRule = resultShape({
-  workspacePath: resultString,
-  registered: resultBoolean,
-  schedulerStatus: resultOneOf(["unknown"]),
-  mode: resultOneOf(["folder", "git"]),
-  branch: resultString,
-  capabilities: resultShape({
-    foregroundRuns: resultBoolean,
-    fileHistory: resultBoolean,
-    isolatedWorktrees: resultBoolean,
-    branchMerge: resultBoolean,
-  }),
-});
+const workspaceStatusResultRule = resultShape(
+  {
+    workspacePath: resultString,
+    registered: resultBoolean,
+    schedulerStatus: resultOneOf(["unknown"]),
+    mode: resultOneOf(["folder", "git"]),
+    branch: resultString,
+    capabilities: resultShape({
+      foregroundRuns: resultBoolean,
+      fileHistory: resultBoolean,
+      isolatedWorktrees: resultBoolean,
+      branchMerge: resultBoolean,
+    }),
+  },
+  {
+    eventLog: resultNullable(
+      resultShape({
+        logicalBytes: resultNonNegativeInteger,
+        hardLimitBytes: resultNonNegativeInteger,
+        lowWatermarkBytes: resultNonNegativeInteger,
+        status: resultOneOf(["within_limit", "retention_required", "quota_blocked"]),
+        canStartNewWork: resultBoolean,
+        canWriteClosure: resultBoolean,
+        plannedSessionCount: resultNonNegativeInteger,
+        estimatedLogicalBytesReclaimed: resultNonNegativeInteger,
+      }),
+    ),
+  },
+);
 
 const runtimeToolResultEnvelopeResult: RuntimeResultRule = (value, path) => {
   exactResultShape(

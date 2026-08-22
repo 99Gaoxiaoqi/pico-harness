@@ -132,6 +132,8 @@ export interface EventLogRetentionResult {
   readonly maintenance: EventLogRetentionMaintenanceOutcome;
 }
 
+export type AdmitEventLogNewWorkOptions = ReadEventLogStorageStatusOptions;
+
 interface MutableBreakdown {
   eventLogBytes: number;
   projectionBytes: number;
@@ -210,6 +212,21 @@ export function assertEventLogWriteAllowed(
     throw new EventLogQuotaBlockedError(status.logicalBytes, policy.hardLimitBytes);
   }
   return status;
+}
+
+/**
+ * Runs deterministic retention before admitting a new Runtime run. Closure writes
+ * deliberately bypass this gate so an already-started operation can always settle.
+ */
+export function admitEventLogNewWork(
+  options: AdmitEventLogNewWorkOptions,
+): EventLogRetentionResult {
+  const result = enforceEventLogRetention(options);
+  const policy = options.policy ?? DEFAULT_EVENT_LOG_RETENTION_POLICY;
+  if (!allowsEventLogWrite(result.after.logicalBytes, "new_work", policy)) {
+    throw new EventLogQuotaBlockedError(result.after.logicalBytes, policy.hardLimitBytes);
+  }
+  return result;
 }
 
 export function readPendingEventLogBlobGcIntents(

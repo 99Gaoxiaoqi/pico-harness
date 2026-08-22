@@ -7,6 +7,7 @@ import { EVENT_LOG_CLOSURE_WRITE_INTENTS } from "../../src/storage/event-log-ret
 import { closeAllOperationalDatabasesForTest } from "../../src/storage/sqlite/sqlite-database.js";
 import {
   EventLogQuotaBlockedError,
+  admitEventLogNewWork,
   assertEventLogWriteAllowed,
   enforceEventLogRetention,
   readEventLogStorageStatus,
@@ -449,6 +450,53 @@ test("sqlite EventLog retention: blocks only new work at the hard limit", async 
         assertEventLogWriteAllowed({ storageRoot, intent, policy: TINY_POLICY }),
       );
     }
+  } finally {
+    await cleanup(root);
+  }
+});
+
+test("sqlite EventLog retention: new-work admission prunes first and blocks only when still full", async () => {
+  const { root, storageRoot } = await fixture("admission");
+  try {
+    seedSession(storageRoot, "archived");
+    seedSession(storageRoot, "current", { archived: false });
+    withWorkspaceSqliteLease(storageRoot, (lease) =>
+      lease.transaction("write", () => {
+        lease.database
+          .prepare(
+            `INSERT INTO runtime_storage_assets (
+               asset_id, session_id, asset_kind, storage_uri, content_digest,
+               byte_length, metadata_json, created_at
+             ) VALUES ('large', 'archived', 'tool', 'cas://large', ?, 1000, '{}', '2026')`,
+          )
+          .run(ASSET_DIGEST);
+      }),
+    );
+    const measured = readEventLogStorageStatus({ storageRoot });
+    const currentBytes = measured.sessions.find(
+      ({ sessionId }) => sessionId === "current",
+    )!.logicalBytes;
+    const policy = {
+      hardLimitBytes: currentBytes + 500,
+      lowWatermarkBytes: currentBytes + 400,
+    } as const;
+
+    const admitted = admitEventLogNewWork({
+      storageRoot,
+      currentSessionId: "current",
+      policy,
+    });
+    assert.deepEqual(admitted.deletedSessionIds, ["archived"]);
+    assert.equal(admitted.after.plan.canStartNewWork, true);
+    assert.equal(
+      admitted.after.sessions.some(({ sessionId }) => sessionId === "archived"),
+      false,
+    );
+
+    assert.throws(
+      () => admitEventLogNewWork({ storageRoot, currentSessionId: "current", policy: TINY_POLICY }),
+      EventLogQuotaBlockedError,
+    );
   } finally {
     await cleanup(root);
   }
