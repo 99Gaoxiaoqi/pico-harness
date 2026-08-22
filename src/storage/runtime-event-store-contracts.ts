@@ -250,12 +250,12 @@ export interface RuntimeSessionProjectionDelta {
   readonly cursor: SessionCursor;
 }
 
-export interface AppendRuntimeSessionStateOptions {
+export interface AppendRuntimeSessionStateOptions extends RuntimeFencedWriteOptions {
   readonly eventId?: string;
   readonly now?: () => Date;
 }
 
-export interface AppendRuntimeTranscriptEventOptions {
+export interface AppendRuntimeTranscriptEventOptions extends RuntimeFencedWriteOptions {
   readonly eventId?: string;
 }
 
