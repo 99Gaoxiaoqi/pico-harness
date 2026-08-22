@@ -35,7 +35,6 @@ test("workspace.list tolerates registrations whose directory no longer exists", 
   const liveDir = await realpath(liveSeed);
   const ghostDir = await realpath(ghostSeed);
   process.env.PICO_HOME = picoHome;
-  process.env.LLM_BASE_URL = process.env.LLM_BASE_URL ?? "http://127.0.0.1:9";
   t.after(() => {
     delete process.env.PICO_HOME;
   });
