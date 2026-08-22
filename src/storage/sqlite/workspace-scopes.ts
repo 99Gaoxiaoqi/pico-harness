@@ -9,6 +9,7 @@ import { EVENT_LOG_HARD_CUT_SCOPE } from "./event-log-hard-cut-scope.js";
 import { KV_SCOPE } from "./kv-scope.js";
 import { MEMORY_SCOPE } from "./memory-scope.js";
 import { OPERATIONS_SCOPE } from "./operations-scope.js";
+import { RETENTION_SCOPE } from "./retention-scope.js";
 import { SESSIONS_SCOPE } from "./sessions-scope.js";
 import { TASK_RUNS_SCOPE } from "./task-runs-scope.js";
 import {
@@ -34,6 +35,7 @@ export const ALL_WORKSPACE_SQLITE_SCOPES: readonly SqliteSchemaScope[] = [
   MEMORY_SCOPE,
   OPERATIONS_SCOPE,
   ATTACHMENTS_SCOPE,
+  RETENTION_SCOPE,
   KV_SCOPE,
   EVENT_LOG_HARD_CUT_SCOPE,
 ];
