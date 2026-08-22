@@ -15,6 +15,8 @@ export interface WorkspaceRuntimeFactory<T extends WorkspaceRuntime> {
   create(workspacePath: string): Promise<T>;
 }
 
+export type WorkspacePathCanonicalizer = (workspacePath: string) => Promise<string>;
+
 /** Owns one runtime per canonical Git worktree or physical folder. */
 export class WorkspaceRuntimeRegistry<T extends WorkspaceRuntime> {
   private readonly runtimes = new Map<string, Promise<T>>();
@@ -23,11 +25,14 @@ export class WorkspaceRuntimeRegistry<T extends WorkspaceRuntime> {
   private closePromise?: Promise<void>;
   private readonly pendingOwnershipReleases = new Set<Promise<void>>();
 
-  constructor(private readonly factory: WorkspaceRuntimeFactory<T>) {}
+  constructor(
+    private readonly factory: WorkspaceRuntimeFactory<T>,
+    private readonly canonicalize: WorkspacePathCanonicalizer = canonicalizeWorkspacePath,
+  ) {}
 
   async get(workspacePath: string): Promise<T> {
     this.assertOpen();
-    const canonicalPath = await canonicalizeWorkspacePath(workspacePath);
+    const canonicalPath = await this.canonicalize(workspacePath);
     const activeRelease = this.releases.get(canonicalPath);
     if (activeRelease) await activeRelease;
     this.assertOpen();
@@ -59,7 +64,7 @@ export class WorkspaceRuntimeRegistry<T extends WorkspaceRuntime> {
     this.assertOpen();
     let canonicalPath: string;
     try {
-      canonicalPath = await canonicalizeWorkspacePath(workspacePath);
+      canonicalPath = await this.canonicalize(workspacePath);
     } catch (error) {
       if (!isNodeCode(error, "ENOENT")) throw error;
       // Registrations store canonical absolute paths. A workspace may be deleted
