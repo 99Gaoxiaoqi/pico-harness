@@ -410,7 +410,9 @@ export class SqliteRuntimeEventStore {
           input.dispatchEvent.runId,
           input.toolCallId,
           input.dispatchEvent.eventId,
-          canonicalJson({ providerEventIds: (input.providerEvents ?? []).map(({ eventId }) => eventId) }),
+          canonicalJson({
+            providerEventIds: (input.providerEvents ?? []).map(({ eventId }) => eventId),
+          }),
           at,
         );
       return {
@@ -1881,7 +1883,8 @@ export class SqliteRuntimeEventStore {
       const sealKey = `${event.sessionId}\u0000${event.runId}`;
       let sealed = runSealCache.get(sealKey);
       if (sealed === undefined) {
-        sealed = this.readRunProjectionLocked(event.sessionId, event.runId)?.terminalEventId !== undefined;
+        sealed =
+          this.readRunProjectionLocked(event.sessionId, event.runId)?.terminalEventId !== undefined;
         runSealCache.set(sealKey, sealed);
       }
       if (sealed) {
@@ -2061,7 +2064,9 @@ export class SqliteRuntimeEventStore {
       runId: requireString(record["run_id"], "run_projection.run_id"),
       ...(startedEventId ? { startedEventId } : {}),
       ...(record["started_sequence"] != null
-        ? { startedSequence: requirePositiveInteger(record["started_sequence"], "started_sequence") }
+        ? {
+            startedSequence: requirePositiveInteger(record["started_sequence"], "started_sequence"),
+          }
         : {}),
       ...(terminalEventId ? { terminalEventId } : {}),
       ...(record["terminal_sequence"] != null
@@ -2206,7 +2211,8 @@ export class SqliteRuntimeEventStore {
     }
     if (
       events.some(
-        (event) => event.sessionId !== dispatchEvent.sessionId || event.runId !== dispatchEvent.runId,
+        (event) =>
+          event.sessionId !== dispatchEvent.sessionId || event.runId !== dispatchEvent.runId,
       )
     ) {
       throw new RuntimeEventStoreIntegrityError(
@@ -2248,10 +2254,7 @@ export class SqliteRuntimeEventStore {
     return {
       recordId: requireString(row["record_id"], "transcript_records.record_id"),
       sessionId: requireString(row["session_id"], "transcript_records.session_id"),
-      sourceEventId: requireString(
-        row["source_event_id"],
-        "transcript_records.source_event_id",
-      ),
+      sourceEventId: requireString(row["source_event_id"], "transcript_records.source_event_id"),
       sequence: requirePositiveInteger(
         row["source_sequence"],
         "transcript_records.source_sequence",
@@ -2553,10 +2556,7 @@ function toolOperationFromRow(row: Record<string, unknown>): RuntimeToolOperatio
     argumentsHash: requireString(row["arguments_hash"], "tool_operations.arguments_hash"),
     state,
     version: requirePositiveInteger(row["version"], "tool_operations.version"),
-    preparedEventId: requireString(
-      row["prepared_event_id"],
-      "tool_operations.prepared_event_id",
-    ),
+    preparedEventId: requireString(row["prepared_event_id"], "tool_operations.prepared_event_id"),
     ...(outcomeEventId ? { outcomeEventId } : {}),
     preparedAt: requireString(row["prepared_at"], "tool_operations.prepared_at"),
     ...(settledAt ? { settledAt } : {}),
@@ -2567,10 +2567,7 @@ function transcriptChunkFromRow(row: Record<string, unknown>): TranscriptChunkRo
   return {
     recordId: requireString(row["record_id"], "transcript_records.record_id"),
     sourceEventId: requireString(row["source_event_id"], "transcript_records.source_event_id"),
-    sequence: requirePositiveInteger(
-      row["source_sequence"],
-      "transcript_records.source_sequence",
-    ),
+    sequence: requirePositiveInteger(row["source_sequence"], "transcript_records.source_sequence"),
     kind: requireString(row["kind"], "transcript_records.kind"),
     payload: decodeProjectionJson(row["payload_json"], "transcript_records.payload_json"),
     chunkIndex: requireSafeInteger(row["chunk_index"], "transcript_chunks.chunk_index"),
@@ -2582,7 +2579,10 @@ function transcriptChunkFromRow(row: Record<string, unknown>): TranscriptChunkRo
 
 function paginateTranscriptChunks(
   rows: readonly TranscriptChunkRow[],
-  options: RuntimeTranscriptPageOptions & { readonly throughSequence: number; readonly limit: number },
+  options: RuntimeTranscriptPageOptions & {
+    readonly throughSequence: number;
+    readonly limit: number;
+  },
 ): RuntimeTranscriptPage {
   const cursor = options.cursor;
   if (cursor) {
@@ -2590,7 +2590,9 @@ function paginateTranscriptChunks(
     assertNonNegativeInteger(cursor.chunkIndex, "transcript cursor chunkIndex");
     assertNonNegativeInteger(cursor.byteOffset, "transcript cursor byteOffset");
     if (cursor.sequence > options.throughSequence) {
-      throw new RuntimeEventStoreIntegrityError("Runtime transcript cursor exceeds fixed waterline");
+      throw new RuntimeEventStoreIntegrityError(
+        "Runtime transcript cursor exceeds fixed waterline",
+      );
     }
   }
   const selected =
@@ -2623,7 +2625,9 @@ function paginateTranscriptForward(
     if (row.sequence === cursor.sequence && row.chunkIndex === cursor.chunkIndex) {
       startOffset = cursor.byteOffset;
       if (startOffset > row.byteLength) {
-        throw new RuntimeEventStoreIntegrityError("Runtime transcript cursor byteOffset is invalid");
+        throw new RuntimeEventStoreIntegrityError(
+          "Runtime transcript cursor byteOffset is invalid",
+        );
       }
       if (startOffset === row.byteLength) {
         index += 1;
@@ -2678,7 +2682,9 @@ function paginateTranscriptBackward(
     if (row.sequence === cursor.sequence && row.chunkIndex === cursor.chunkIndex) {
       endOffset = cursor.byteOffset;
       if (endOffset > row.byteLength) {
-        throw new RuntimeEventStoreIntegrityError("Runtime transcript cursor byteOffset is invalid");
+        throw new RuntimeEventStoreIntegrityError(
+          "Runtime transcript cursor byteOffset is invalid",
+        );
       }
       if (endOffset === 0) {
         index -= 1;
