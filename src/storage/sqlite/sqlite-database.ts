@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { existsSync } from "node:fs";
+import { chmodSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { FileStorageIntegrityError } from "../local-file-storage.js";
@@ -107,6 +107,10 @@ export function acquireOperationalDatabase(
   let database: DatabaseSync | undefined;
   try {
     database = new DatabaseSync(databasePath);
+    // node:sqlite creates a new database using the process umask (commonly 0644).
+    // Tighten the authority file before WAL is enabled so SQLite sidecars inherit
+    // the same private mode and sensitive runtime/memory state is never world-readable.
+    chmodSync(databasePath, 0o600);
     configureOperationalDatabase(database);
     options.migrate?.(database);
   } catch (error) {
