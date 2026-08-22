@@ -1,6 +1,6 @@
 # EventLog Maka 语义对齐交付计划
 
-状态：实施中。基线：`4b0813c3`。授权终点：实现、验证并准备交付，不执行用户真实 workspace 迁移或发布。
+状态：实现与代码验收完成，待真实迁移/发布审批。基线：`4b0813c3`。授权终点：实现、验证并准备交付，不执行用户真实 workspace 迁移或发布。
 
 ## 已决策边界
 
@@ -19,6 +19,46 @@
 5. 实现 logical-byte accounting、archived-session retention、Evidence/File History GC 与存储状态协议。
 6. 运行 failpoint、并发、完整性、性能、Desktop/TUI 与真实模型验收，并完成独立审查。
 
+## 改造前后的数据流
+
+改造前：
+
+```text
+Host 请求
+  -> RuntimeRun / Plan / Graph / recovery 各自写事件或投影
+  -> runtime_events
+  -> 最近尾部按字节预算读取 -> Desktop/TUI transcript
+
+Tool 调用：事件、外部副作用、结果日志分散提交
+Continuation：先 claim，再启动目标 Run（两个事务）
+存储维护：没有统一 epoch 硬切、准入配额和物理回收闭环
+```
+
+主要后果是 owner 被接管后旧写入仍可能竞态提交，Tool 崩溃窗口无法可靠区分“未执行”和“执行但未记账”，长 transcript 的旧记录或超大记录不可达，continuation 可能只留下 claim，事实、投影和资产也没有共同的生命周期边界。
+
+改造后：
+
+```text
+Host 请求
+  -> Session owner lease + fence epoch
+  -> 新工作 retention admission（闭环写入不受阻）
+  -> RuntimeRun
+       -> BEGIN IMMEDIATE appendBatch
+            -> immutable runtime_events facts
+            -> projections + transcript records/chunks（同事务）
+       -> Tool T1 prepare -> 外部副作用 -> Tool T2 settle
+       -> mutable partial lane -> terminal seal 同事务清空 partial
+  -> Desktop/TUI 固定水位 H + keyset cursor
+       -> UTF-8 fragments 重组 -> itemId 去重 -> 展示
+
+崩溃恢复：prepared operation -> interrupted T2，不自动重放不确定副作用
+Continuation：冻结 source prefix digest + claim + target run.started（同事务）
+生命周期：eventlog epoch hard cut / archived retention
+          -> GC outbox -> secure_delete + WAL truncate + 门槛 vacuum
+```
+
+事实不变性边界：当前 epoch 内的 `runtime_events` 只追加且不可改写；同一 eventId 仅允许 canonical payload 完全相同的精确重放。projection、partial 和 transcript materialization 是可重建的派生状态。硬切与 retention 是显式、受约束的生命周期删除例外；Session 删除时，独立终态控制事实继续保留，仅将弱引用置空，手工 overlay 不被级联删除。
+
 ## 验收不变量
 
 - eventId/operationId 重放只有 canonical payload 全等才能幂等成功。
@@ -32,3 +72,12 @@
 ## 证据口径
 
 每个切片记录实际执行的定向集成测试、typecheck/lint/format 和最终全量验证；未执行的检查不标记为通过。发布和真实数据迁移需另行人工批准。
+
+## 实施结果与验收证据
+
+- EventLog/continuation/transcript/fence/retention 定向组合测试：49/49 通过；TUI transcript/fragment 测试：12/12 通过。
+- 全量集成测试分段覆盖完成：首段 635 通过、10 跳过；剩余段 397 通过、15 跳过。`runtime-host-spawn` 首次出现一次时序抖动，独立复跑 6/6 通过。
+- 一项与本改造无差异的基线失败仍存在：`terminal-bench-bundle-lock.test.ts` 要求根依赖声明 `@pico/runtime-host: "*"`；基线到本分支的三个 package manifest/lockfile 均无改动。
+- `npm run build`、根 typecheck、Desktop typecheck、lint、format 与 `git diff --check` 均通过。
+- 已知后续优化：daemon 为复用跨事实 projector，会在单次固定水位读取中累计分页结果；协议正确性和单帧预算已闭环，但极长 Session 的峰值内存可进一步改造成 checkpointed reducer。
+- 未执行真实用户数据库硬切、发布或真实模型验收；这些动作仍需单独批准。
