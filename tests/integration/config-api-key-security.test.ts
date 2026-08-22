@@ -262,7 +262,7 @@ test("effective provider assembly resolves a config key with an empty environmen
   assertSecretAbsent("model route metadata", configured.route, secret);
 });
 
-test("legacy environment and Keychain credentials remain compatible fallbacks", async (context) => {
+test("bare LLM environment is not a route while configured env and Keychain credentials work", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-config-key-legacy-"));
   const picoHome = join(root, "pico-home");
   const workspace = join(root, "workspace");
@@ -286,10 +286,37 @@ test("legacy environment and Keychain credentials remain compatible fallbacks", 
     configResolver: new EffectiveConfigResolver({ userConfigStore: emptyStore }),
     credentialVault: unavailableVault(),
   });
+  assert.deepEqual(environmentRuntime.router.routes, []);
+  assert.deepEqual(environmentRuntime.config.providers, {});
+  assert.equal(environmentRuntime.config.defaultModelRouteId, undefined);
+  assert.throws(
+    () => environmentRuntime.router.providerConfig(undefined),
+    /user-level \.pico\/config\.json|\u7528\u6237\u7ea7 \.pico\/config\.json/u,
+  );
+
+  const configuredEnvironmentSecret = syntheticSecret("configured-environment");
+  const configuredEnvironmentStore = new UserConfigStore({
+    picoHome: join(picoHome, "configured-environment"),
+  });
+  await configuredEnvironmentStore.write(userConfigWithoutKey(), {
+    expectedRevision: EMPTY_USER_CONFIG_REVISION,
+  });
+  const configuredEnvironmentRuntime = await loadEffectiveModelRuntime({
+    workDir: workspace,
+    projectTrusted: false,
+    legacyProvider: "openai",
+    legacyModel: "unused-legacy-model",
+    legacyModelExplicit: false,
+    env: { [API_KEY_ENV]: configuredEnvironmentSecret },
+    userConfigStore: configuredEnvironmentStore,
+    configResolver: new EffectiveConfigResolver({ userConfigStore: configuredEnvironmentStore }),
+    credentialVault: unavailableVault(),
+  });
+  assert.equal(configuredEnvironmentRuntime.credentials[PROVIDER_ID]?.state, "environment");
   assertSecretMatches(
-    "legacy environment provider config",
-    environmentRuntime.router.providerConfig(undefined).config.apiKey,
-    environmentSecret,
+    "configured provider environment credential",
+    configuredEnvironmentRuntime.router.providerConfig(`${PROVIDER_ID}/${MODEL_ID}`).config.apiKey,
+    configuredEnvironmentSecret,
   );
 
   const keychainSecret = syntheticSecret("legacy-keychain");
