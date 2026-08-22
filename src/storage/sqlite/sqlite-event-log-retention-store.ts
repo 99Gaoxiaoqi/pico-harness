@@ -28,6 +28,7 @@ export interface EventLogSessionStorageBreakdown {
   readonly transcriptBytes: number;
   readonly checkpointAndMetadataBytes: number;
   readonly attachmentManifestBytes: number;
+  readonly memoryBytes: number;
   readonly controlBytes: number;
   /** Blob bytes reclaimable only when this session is their sole remaining owner. */
   readonly exclusiveBlobBytes: number;
@@ -44,6 +45,8 @@ export interface EventLogStorageStatus {
    */
   readonly logicalBytes: number;
   readonly unattributedSharedBlobBytes: number;
+  /** Workspace settings and manual memory overlays that have no Session-owned source. */
+  readonly unattributedMemoryBytes: number;
   readonly unattributedControlBytes: number;
   readonly sessions: readonly EventLogSessionStorageStatus[];
   readonly plan: EventLogRetentionPlan;
@@ -142,6 +145,7 @@ interface MutableBreakdown {
   transcriptBytes: number;
   checkpointAndMetadataBytes: number;
   attachmentManifestBytes: number;
+  memoryBytes: number;
   controlBytes: number;
   exclusiveBlobBytes: number;
 }
@@ -178,6 +182,7 @@ const EMPTY_BREAKDOWN = Object.freeze({
   transcriptBytes: 0,
   checkpointAndMetadataBytes: 0,
   attachmentManifestBytes: 0,
+  memoryBytes: 0,
   controlBytes: 0,
   exclusiveBlobBytes: 0,
 } satisfies EventLogSessionStorageBreakdown);
@@ -526,6 +531,7 @@ function readStorageStatusLocked(
       "snapshot_json",
     ]),
   ]);
+  const memoryTotals = attributeMemoryBytes(database, breakdowns);
   addGroupedBytes(database, breakdowns, "controlBytes", controlByteQueries());
 
   const blobRefs = readBlobReferences(database);
@@ -552,13 +558,18 @@ function readStorageStatusLocked(
   );
   const unattributedControlBytes = readUnattributedControlBytes(database);
   const logicalBytes = safeAdd(
-    safeAdd(sessionLogicalBytes, blobTotals.sharedBytes, "workspace logical bytes"),
+    safeAdd(
+      safeAdd(sessionLogicalBytes, blobTotals.sharedBytes, "workspace logical bytes"),
+      memoryTotals.unattributedBytes,
+      "workspace logical bytes",
+    ),
     unattributedControlBytes,
     "workspace logical bytes",
   );
   return {
     logicalBytes,
     unattributedSharedBlobBytes: blobTotals.sharedBytes,
+    unattributedMemoryBytes: memoryTotals.unattributedBytes,
     unattributedControlBytes,
     sessions,
     plan: planEventLogRetention({
@@ -661,6 +672,8 @@ function hasUnfinishedOperationLocked(database: DatabaseSync, sessionId: string)
 }
 
 function deleteSessionOwnedRowsLocked(database: DatabaseSync, sessionId: string): void {
+  deleteSessionOwnedMemoryRowsLocked(database, sessionId);
+
   const claimKeys = database
     .prepare(
       "SELECT workspace_path, idempotency_key FROM desktop_first_send_claims WHERE session_id = ?",
@@ -721,6 +734,188 @@ function deleteSessionOwnedRowsLocked(database: DatabaseSync, sessionId: string)
   if (deleted.changes !== 1) {
     throw new Error(`Retention lost session ${sessionId} during its write transaction`);
   }
+}
+
+interface SessionOwnedMemoryClosure {
+  readonly sourceIds: ReadonlySet<string>;
+  readonly factIds: ReadonlySet<string>;
+  readonly proposalIds: ReadonlySet<string>;
+  readonly jobIds: ReadonlySet<string>;
+}
+
+function deleteSessionOwnedMemoryRowsLocked(database: DatabaseSync, sessionId: string): void {
+  const closure = readSessionOwnedMemoryClosure(database, sessionId);
+  if (
+    closure.sourceIds.size === 0 &&
+    closure.factIds.size === 0 &&
+    closure.proposalIds.size === 0 &&
+    closure.jobIds.size === 0
+  ) {
+    return;
+  }
+
+  let changes = 0;
+  for (const factId of closure.factIds) {
+    changes += sqliteChangeCount(
+      database
+        .prepare("UPDATE memory_proposals SET conflict_fact_id = NULL WHERE conflict_fact_id = ?")
+        .run(factId).changes,
+    );
+    changes += sqliteChangeCount(
+      database
+        .prepare("UPDATE memory_proposals SET resolved_fact_id = NULL WHERE resolved_fact_id = ?")
+        .run(factId).changes,
+    );
+  }
+
+  changes += deleteMemoryIdempotencyRowsLocked(database, closure);
+  changes += deleteMemoryMutationRowsLocked(database, "job", closure.jobIds);
+  changes += deleteMemoryMutationRowsLocked(database, "proposal", closure.proposalIds);
+  changes += deleteMemoryMutationRowsLocked(database, "fact", closure.factIds);
+  changes += deleteMemoryMutationRowsLocked(database, "source", closure.sourceIds);
+  changes += deleteRowsByIdsLocked(database, "memory_jobs", "job_id", closure.jobIds);
+  changes += deleteRowsByIdsLocked(
+    database,
+    "memory_proposals",
+    "proposal_id",
+    closure.proposalIds,
+  );
+  changes += deleteRowsByIdsLocked(database, "memory_facts", "fact_id", closure.factIds);
+  changes += deleteRowsByIdsLocked(database, "memory_sources", "source_id", closure.sourceIds);
+  if (changes > 0) bumpMemoryRevisionLocked(database);
+}
+
+function readSessionOwnedMemoryClosure(
+  database: DatabaseSync,
+  sessionId: string,
+): SessionOwnedMemoryClosure {
+  const sourceIds = new Set(
+    (
+      database
+        .prepare("SELECT source_id FROM memory_sources WHERE session_id = ?")
+        .all(sessionId) as Array<Record<string, unknown>>
+    ).map((row) => requireString(row["source_id"], "memory_sources.source_id")),
+  );
+  const factIds = readMemoryEntityIdsForSources(database, "memory_facts", "fact_id", sourceIds);
+  const proposalIds = readMemoryEntityIdsForSources(
+    database,
+    "memory_proposals",
+    "proposal_id",
+    sourceIds,
+  );
+  const jobIds = new Set<string>();
+  const jobs = database
+    .prepare("SELECT job_id, source_id, cursor_json FROM memory_jobs")
+    .all() as Array<Record<string, unknown>>;
+  for (const row of jobs) {
+    const jobId = requireString(row["job_id"], "memory_jobs.job_id");
+    const sourceId = optionalStringValue(row["source_id"], `memory_jobs[${jobId}].source_id`);
+    const cursor = parseMemoryJobCursor(row["cursor_json"], jobId);
+    const owned =
+      sourceId !== null
+        ? sourceIds.has(sourceId)
+        : cursor.sessionId === sessionId ||
+          sourceIds.has(cursor.eventId) ||
+          factIds.has(cursor.eventId) ||
+          proposalIds.has(cursor.eventId);
+    if (owned) {
+      jobIds.add(jobId);
+    }
+  }
+  return { sourceIds, factIds, proposalIds, jobIds };
+}
+
+function readMemoryEntityIdsForSources(
+  database: DatabaseSync,
+  table: "memory_facts" | "memory_proposals",
+  idColumn: "fact_id" | "proposal_id",
+  sourceIds: ReadonlySet<string>,
+): Set<string> {
+  if (sourceIds.size === 0) return new Set();
+  const values = [...sourceIds];
+  const rows = database
+    .prepare(
+      `SELECT ${idColumn} AS entity_id FROM ${table}
+       WHERE source_id IN (${values.map(() => "?").join(",")})`,
+    )
+    .all(...values) as Array<Record<string, unknown>>;
+  return new Set(rows.map((row) => requireString(row["entity_id"], `${table}.${idColumn}`)));
+}
+
+function deleteMemoryIdempotencyRowsLocked(
+  database: DatabaseSync,
+  closure: SessionOwnedMemoryClosure,
+): number {
+  const rows = database
+    .prepare("SELECT operation_key, marker_json FROM memory_idempotency")
+    .all() as Array<Record<string, unknown>>;
+  const remove = database.prepare("DELETE FROM memory_idempotency WHERE operation_key = ?");
+  let changes = 0;
+  for (const row of rows) {
+    const operationKey = requireString(row["operation_key"], "memory_idempotency.operation_key");
+    const marker = parseJson(row["marker_json"], `memory_idempotency[${operationKey}].marker_json`);
+    if (!isRecord(marker)) {
+      throw new Error(`memory_idempotency[${operationKey}].marker_json is not an object`);
+    }
+    if (
+      memoryMarkerReferences(marker, "sourceId", closure.sourceIds) ||
+      memoryMarkerReferences(marker, "factId", closure.factIds) ||
+      memoryMarkerReferences(marker, "proposalId", closure.proposalIds) ||
+      memoryMarkerReferences(marker, "jobId", closure.jobIds)
+    ) {
+      changes += sqliteChangeCount(remove.run(operationKey).changes);
+    }
+  }
+  return changes;
+}
+
+function memoryMarkerReferences(
+  marker: Readonly<Record<string, unknown>>,
+  key: string,
+  ids: ReadonlySet<string>,
+): boolean {
+  return typeof marker[key] === "string" && ids.has(marker[key]);
+}
+
+function deleteMemoryMutationRowsLocked(
+  database: DatabaseSync,
+  entityType: "source" | "fact" | "proposal" | "job",
+  entityIds: ReadonlySet<string>,
+): number {
+  const remove = database.prepare(
+    "DELETE FROM memory_mutations WHERE entity_type = ? AND entity_id = ?",
+  );
+  let changes = 0;
+  for (const entityId of entityIds) {
+    changes += sqliteChangeCount(remove.run(entityType, entityId).changes);
+  }
+  return changes;
+}
+
+function deleteRowsByIdsLocked(
+  database: DatabaseSync,
+  table: "memory_sources" | "memory_facts" | "memory_proposals" | "memory_jobs",
+  idColumn: "source_id" | "fact_id" | "proposal_id" | "job_id",
+  ids: ReadonlySet<string>,
+): number {
+  const remove = database.prepare(`DELETE FROM ${table} WHERE ${idColumn} = ?`);
+  let changes = 0;
+  for (const id of ids) changes += sqliteChangeCount(remove.run(id).changes);
+  return changes;
+}
+
+function bumpMemoryRevisionLocked(database: DatabaseSync): void {
+  const row = database
+    .prepare("SELECT value_json FROM memory_metadata WHERE key = 'revision'")
+    .get() as Record<string, unknown> | undefined;
+  if (!row) throw new Error("memory_metadata.revision is missing during EventLog retention");
+  const revision = parseJson(row["value_json"], "memory_metadata.revision");
+  if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) {
+    throw new Error("memory_metadata.revision is invalid during EventLog retention");
+  }
+  database
+    .prepare("UPDATE memory_metadata SET value_json = ? WHERE key = 'revision'")
+    .run(JSON.stringify(safeAdd(revision, 1, "memory revision")));
 }
 
 function collectOrphanGcIntents(
@@ -951,6 +1146,232 @@ function readUnattributedControlBytes(database: DatabaseSync): number {
       "unattributed control bytes",
     );
   }, 0);
+}
+
+interface MemoryEntityOwnership {
+  readonly sources: ReadonlyMap<string, string | null>;
+  readonly facts: ReadonlyMap<string, string | null>;
+  readonly proposals: ReadonlyMap<string, string | null>;
+  readonly jobs: ReadonlyMap<string, string | null>;
+}
+
+/**
+ * Memory is a mixed workspace/session ledger. Rows reachable from a Source are
+ * charged to that Source's Session exactly once; settings and source-less manual
+ * overlays remain workspace-level bytes and therefore survive Session retention.
+ */
+function attributeMemoryBytes(
+  database: DatabaseSync,
+  breakdowns: Map<string, MutableBreakdown>,
+): { readonly unattributedBytes: number } {
+  let unattributedBytes = 0;
+  const add = (sessionId: string | null | undefined, bytes: number): void => {
+    const breakdown = sessionId ? breakdowns.get(sessionId) : undefined;
+    if (!breakdown) {
+      unattributedBytes = safeAdd(unattributedBytes, bytes, "unattributed memory bytes");
+      return;
+    }
+    breakdown.memoryBytes = safeAdd(breakdown.memoryBytes, bytes, "breakdown.memoryBytes");
+  };
+
+  for (const row of readTextRows(database, "memory_metadata", ["key", "value_json"])) {
+    add(null, memoryRowBytes(row));
+  }
+
+  const sources = new Map<string, string | null>();
+  for (const row of readTextRows(database, "memory_sources", [
+    "source_id",
+    "session_id",
+    "run_id",
+    "branch_id",
+    "event_ids_json",
+    "digest",
+    "evidence_ref_json",
+    "availability",
+    "extraction_suppressed_at",
+    "invalidated_at",
+    "invalidation_code",
+    "created_at",
+    "updated_at",
+  ])) {
+    const sourceId = requireString(row["source_id"], "memory_sources.source_id");
+    const sessionId = requireString(row["session_id"], `memory_sources[${sourceId}].session_id`);
+    const owner = breakdowns.has(sessionId) ? sessionId : null;
+    sources.set(sourceId, owner);
+    add(owner, memoryRowBytes(row));
+  }
+
+  const facts = readSourceOwnedMemoryRows(
+    database,
+    "memory_facts",
+    "fact_id",
+    [
+      "fact_id",
+      "kind",
+      "title",
+      "content",
+      "source_id",
+      "state",
+      "expires_at",
+      "last_used_at",
+      "created_at",
+      "updated_at",
+      "forgotten_at",
+    ],
+    sources,
+    add,
+  );
+  const proposals = readSourceOwnedMemoryRows(
+    database,
+    "memory_proposals",
+    "proposal_id",
+    [
+      "proposal_id",
+      "kind",
+      "title",
+      "content",
+      "reason",
+      "source_id",
+      "status",
+      "conflict_status",
+      "conflict_fact_id",
+      "resolved_fact_id",
+      "created_at",
+      "updated_at",
+      "reviewed_at",
+      "deleted_at",
+    ],
+    sources,
+    add,
+  );
+
+  const jobs = new Map<string, string | null>();
+  for (const row of readTextRows(database, "memory_jobs", [
+    "job_id",
+    "type",
+    "status",
+    "terminal_event_id",
+    "extractor_version",
+    "cursor_json",
+    "source_id",
+    "next_attempt_at",
+    "error_code",
+    "created_at",
+    "updated_at",
+    "terminal_at",
+  ])) {
+    const jobId = requireString(row["job_id"], "memory_jobs.job_id");
+    const sourceId = optionalStringValue(row["source_id"], `memory_jobs[${jobId}].source_id`);
+    const cursor = parseMemoryJobCursor(row["cursor_json"], jobId);
+    const owner =
+      sourceId !== null
+        ? (sources.get(sourceId) ?? null)
+        : ((breakdowns.has(cursor.sessionId) ? cursor.sessionId : undefined) ??
+          sources.get(cursor.eventId) ??
+          facts.get(cursor.eventId) ??
+          proposals.get(cursor.eventId) ??
+          null);
+    jobs.set(jobId, owner);
+    add(owner, memoryRowBytes(row));
+  }
+
+  const ownership: MemoryEntityOwnership = { sources, facts, proposals, jobs };
+  for (const row of readTextRows(database, "memory_mutations", [
+    "mutation_id",
+    "entity_type",
+    "entity_id",
+    "action",
+    "idempotency_key_hash",
+    "created_at",
+  ])) {
+    add(memoryMutationOwner(row, ownership), memoryRowBytes(row));
+  }
+  for (const row of readTextRows(database, "memory_idempotency", [
+    "operation_key",
+    "request_hash",
+    "marker_json",
+    "created_at",
+  ])) {
+    add(memoryMarkerOwner(row["marker_json"], ownership), memoryRowBytes(row));
+  }
+  return { unattributedBytes };
+}
+
+function readSourceOwnedMemoryRows(
+  database: DatabaseSync,
+  table: "memory_facts" | "memory_proposals",
+  idColumn: "fact_id" | "proposal_id",
+  textColumns: readonly string[],
+  sources: ReadonlyMap<string, string | null>,
+  add: (sessionId: string | null | undefined, bytes: number) => void,
+): Map<string, string | null> {
+  const owners = new Map<string, string | null>();
+  for (const row of readTextRows(database, table, textColumns)) {
+    const entityId = requireString(row[idColumn], `${table}.${idColumn}`);
+    const sourceId = optionalStringValue(row["source_id"], `${table}[${entityId}].source_id`);
+    const owner = sourceId === null ? null : (sources.get(sourceId) ?? null);
+    owners.set(entityId, owner);
+    add(owner, memoryRowBytes(row));
+  }
+  return owners;
+}
+
+function readTextRows(
+  database: DatabaseSync,
+  table: string,
+  columns: readonly string[],
+): Array<Record<string, unknown>> {
+  return database
+    .prepare(`SELECT *, ${columns.map(textBytes).join(" + ")} AS logical_bytes FROM ${table}`)
+    .all() as Array<Record<string, unknown>>;
+}
+
+function memoryRowBytes(row: Record<string, unknown>): number {
+  return requireNonNegativeInteger(row["logical_bytes"], "memory logical_bytes");
+}
+
+function parseMemoryJobCursor(
+  value: unknown,
+  jobId: string,
+): { readonly sessionId: string; readonly eventId: string } {
+  const cursor = parseJson(value, `memory_jobs[${jobId}].cursor_json`);
+  if (!isRecord(cursor)) throw new Error(`memory_jobs[${jobId}].cursor_json is not an object`);
+  return {
+    sessionId: requireString(cursor["sessionId"], `memory_jobs[${jobId}].cursor.sessionId`),
+    eventId: requireString(cursor["eventId"], `memory_jobs[${jobId}].cursor.eventId`),
+  };
+}
+
+function memoryMutationOwner(
+  row: Record<string, unknown>,
+  ownership: MemoryEntityOwnership,
+): string | null {
+  const entityType = requireString(row["entity_type"], "memory_mutations.entity_type");
+  const entityId = requireString(row["entity_id"], "memory_mutations.entity_id");
+  if (entityType === "source") return ownership.sources.get(entityId) ?? null;
+  if (entityType === "fact") return ownership.facts.get(entityId) ?? null;
+  if (entityType === "proposal") return ownership.proposals.get(entityId) ?? null;
+  if (entityType === "job") return ownership.jobs.get(entityId) ?? null;
+  if (entityType === "settings") return null;
+  throw new Error(`memory_mutations.entity_type ${entityType} is invalid`);
+}
+
+function memoryMarkerOwner(value: unknown, ownership: MemoryEntityOwnership): string | null {
+  const marker = parseJson(value, "memory_idempotency.marker_json");
+  if (!isRecord(marker)) throw new Error("memory_idempotency.marker_json is not an object");
+  const candidates = new Set<string>();
+  for (const [key, owners] of [
+    ["sourceId", ownership.sources],
+    ["factId", ownership.facts],
+    ["proposalId", ownership.proposals],
+    ["jobId", ownership.jobs],
+  ] as const) {
+    const id = marker[key];
+    if (typeof id !== "string") continue;
+    const owner = owners.get(id);
+    if (owner) candidates.add(owner);
+  }
+  return candidates.size === 1 ? [...candidates][0]! : null;
 }
 
 function unattributedTextQuery(table: string, columns: readonly string[], where?: string): string {
@@ -1342,6 +1763,11 @@ function requireString(value: unknown, field: string): string {
   return value;
 }
 
+function optionalStringValue(value: unknown, field: string): string | null {
+  if (value === null || value === undefined) return null;
+  return requireString(value, field);
+}
+
 function requireNonNegativeInteger(value: unknown, field: string): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
     throw new Error(`${field} is not a non-negative safe integer`);
@@ -1358,6 +1784,11 @@ function safeAdd(left: number, right: number, field: string): number {
   const sum = left + right;
   if (!Number.isSafeInteger(sum)) throw new RangeError(`${field} exceeds safe integer range`);
   return sum;
+}
+
+function sqliteChangeCount(value: number | bigint): number {
+  const count = typeof value === "bigint" ? Number(value) : value;
+  return requireNonNegativeInteger(count, "sqlite changes");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
