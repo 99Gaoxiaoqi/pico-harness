@@ -625,7 +625,13 @@ export class DesktopMemoryService {
           .filter((job) => !this.preparedLifecycleJobs.has(job.jobId)),
       ];
       if (jobs.length === 0) return;
-      for (const job of jobs) this.applyLifecycleJob(repository, job);
+      let progressed = false;
+      for (const job of jobs) {
+        progressed = this.applyLifecycleJob(repository, job) || progressed;
+      }
+      // Another process may still own a durable `running` prepare while the Session
+      // exists. Leave it recoverable instead of spinning or cancelling its work.
+      if (!progressed) return;
     }
   }
 
@@ -634,7 +640,7 @@ export class DesktopMemoryService {
    * `unavailable` (used by deleteSession, which really does destroy the RuntimeEvent ledger).
    * Proposals anchored on those Sources become body-free tombstones; committed Facts are retained.
    */
-  private applyLifecycleJob(repository: SqliteMemoryRepository, job: Job): void {
+  private applyLifecycleJob(repository: SqliteMemoryRepository, job: Job): boolean {
     if (job.extractorVersion !== MEMORY_LIFECYCLE_UNAVAILABLE_VERSION) {
       repository.updateJob({
         jobId: job.jobId,
@@ -643,7 +649,7 @@ export class DesktopMemoryService {
         errorCode: "lifecycle_job_invalid",
         idempotencyKey: `${job.jobId}:invalid:${job.version}`,
       });
-      return;
+      return true;
     }
     const invalidationCode = job.cursor.eventId;
     if (!invalidationCode) {
@@ -654,20 +660,22 @@ export class DesktopMemoryService {
         errorCode: "lifecycle_job_invalid",
         idempotencyKey: `${job.jobId}:invalid:${job.version}`,
       });
-      return;
+      return true;
     }
-    // A prepared lifecycle job is durable before Runtime deletion starts. Recovery may
-    // therefore observe it even though the destructive Session transaction never committed.
-    // The surviving Session row is the authority: never invalidate its provenance.
+    // A `running` job is a durable prepare and may still be owned by another service
+    // instance. While the Session exists, defer it; after the Session disappears it is
+    // safe to recover. A `queued` job claims deletion committed, so a surviving Session
+    // is contradictory and the job must not invalidate its provenance.
     if (this.runtimeSessionExists(repository, job.cursor.sessionId)) {
+      if (job.status === "running") return false;
       repository.updateJob({
         jobId: job.jobId,
         expectedVersion: job.version,
         status: "cancelled",
-        errorCode: "lifecycle_prepare_aborted",
+        errorCode: "lifecycle_commit_without_delete",
         idempotencyKey: `${job.jobId}:session-retained:${job.version}`,
       });
-      return;
+      return true;
     }
 
     repository.cancelSessionJobs({
@@ -715,7 +723,7 @@ export class DesktopMemoryService {
     }
 
     const current = repository.getJob(job.jobId);
-    if (!current || (current.status !== "queued" && current.status !== "running")) return;
+    if (!current || (current.status !== "queued" && current.status !== "running")) return true;
     repository.updateJob({
       jobId: current.jobId,
       expectedVersion: current.version,
@@ -723,6 +731,7 @@ export class DesktopMemoryService {
       errorCode: null,
       idempotencyKey: `${current.jobId}:complete:${current.version}`,
     });
+    return true;
   }
 
   private runtimeSessionExists(repository: SqliteMemoryRepository, sessionId: string): boolean {

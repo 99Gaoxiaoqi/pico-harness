@@ -42,7 +42,8 @@ export interface EventLogSessionStorageStatus extends EventLogRetentionCandidate
 export interface EventLogStorageStatus {
   /**
    * EventLog UTF-8 text/blob payload bytes plus explicit external blob byte lengths.
-   * Long-term Memory bytes are reported separately and excluded from this admission total.
+   * Long-term Memory and independent control-ledger bytes are reported separately and excluded
+   * from this admission total because Session retention cannot reclaim those authorities.
    * SQLite integer encodings, row headers, indexes, free pages and WAL bytes are intentionally excluded.
    */
   readonly logicalBytes: number;
@@ -560,8 +561,8 @@ function readStorageStatusLocked(
   );
   const unattributedControlBytes = readUnattributedControlBytes(database);
   const logicalBytes = safeAdd(
-    safeAdd(sessionLogicalBytes, blobTotals.sharedBytes, "workspace logical bytes"),
-    unattributedControlBytes,
+    sessionLogicalBytes,
+    blobTotals.sharedBytes,
     "workspace logical bytes",
   );
   return {
@@ -1739,7 +1740,9 @@ function textBytes(column: string): string {
 function sumEventLogBreakdown(value: MutableBreakdown): number {
   return Object.entries(value).reduce(
     (sum, [kind, bytes]) =>
-      kind === "memoryBytes" ? sum : safeAdd(sum, bytes, "session breakdown"),
+      kind === "memoryBytes" || kind === "controlBytes"
+        ? sum
+        : safeAdd(sum, bytes, "session breakdown"),
     0,
   );
 }
