@@ -312,7 +312,7 @@ export const MEMORY_QUALITY_CASES: readonly MemoryQualityCase[] = [
     evidence: { role: "assistant", content: "用户以后总是喜欢中文回复" },
     candidates: [],
     gold: [],
-    expectedModelCalls: 1,
+    expectedModelCalls: 0,
   },
   {
     id: "assistant-hallucination-en",
@@ -321,7 +321,7 @@ export const MEMORY_QUALITY_CASES: readonly MemoryQualityCase[] = [
     evidence: { role: "assistant", content: "The user always prefers terse answers" },
     candidates: [],
     gold: [],
-    expectedModelCalls: 1,
+    expectedModelCalls: 0,
   },
   {
     id: "tool-output-zh",
@@ -330,7 +330,7 @@ export const MEMORY_QUALITY_CASES: readonly MemoryQualityCase[] = [
     evidence: { role: "user", content: "记住：项目使用 yarn", toolCallId: "tool-quality-zh" },
     candidates: [],
     gold: [],
-    expectedModelCalls: 1,
+    expectedModelCalls: 0,
   },
   {
     id: "tool-output-en",
@@ -343,7 +343,7 @@ export const MEMORY_QUALITY_CASES: readonly MemoryQualityCase[] = [
     },
     candidates: [],
     gold: [],
-    expectedModelCalls: 1,
+    expectedModelCalls: 0,
   },
   {
     id: "secret-known-token",
