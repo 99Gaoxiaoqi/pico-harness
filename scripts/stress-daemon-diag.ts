@@ -27,6 +27,7 @@ import {
   RUNTIME_HOST_PROTOCOL_VERSION,
 } from "@pico/runtime-host";
 import { LocalRuntimeClient } from "../src/daemon/index.js";
+import { UserConfigStore } from "../src/input/user-config-store.js";
 import { ClientSessionRuntime } from "../src/tui/client-session-runtime.js";
 import { TuiReporter } from "../src/tui/tui-reporter.js";
 
@@ -82,9 +83,7 @@ async function main(): Promise<void> {
   await mkdir(workspaceSeed, { recursive: true });
   const workspaceDir = await realpath(workspaceSeed);
   process.env.PICO_HOME = picoHome;
-  process.env.LLM_BASE_URL = DEAD_ENDPOINT;
-  process.env.LLM_API_KEY = "diag-key";
-  process.env.LLM_MODEL = "diag-model";
+  await configureDeadEndpointModel(picoHome);
 
   // 长驻基准客户端：全程并发 ping（探测"其他连接不受影响"还是"整宿主卡死"）。
   const baselineClient = new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome });
@@ -170,6 +169,28 @@ async function main(): Promise<void> {
   await rm(root, { recursive: true, force: true }).catch(() => undefined);
   console.log("\n完成。退出码 = failures 数 > 0 ? 2 : 0");
   process.exitCode = failures.length > 0 ? 2 : 0;
+}
+
+async function configureDeadEndpointModel(picoHome: string): Promise<void> {
+  const store = new UserConfigStore({ picoHome });
+  const current = await store.read();
+  await store.write(
+    {
+      version: 1,
+      defaults: { modelRouteId: "daemon-diag/diag-model" },
+      providers: {
+        "daemon-diag": {
+          protocol: "openai",
+          baseURL: DEAD_ENDPOINT,
+          apiKeyEnv: "PICO_DAEMON_DIAG_API_KEY",
+          apiKey: "diag-key",
+          models: ["diag-model"],
+          discoverModels: false,
+        },
+      },
+    },
+    { expectedRevision: current.revision },
+  );
 }
 
 function countPidChanges(): number {

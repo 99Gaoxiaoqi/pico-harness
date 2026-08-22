@@ -10,6 +10,7 @@ import {
   resolveStorageRoot,
 } from "@pico/runtime-host";
 import { LocalRuntimeClient } from "../../src/daemon/index.js";
+import { UserConfigStore } from "../../src/input/user-config-store.js";
 import { ClientSessionRuntime } from "../../src/tui/client-session-runtime.js";
 import { createClientCommandRegistry, processClientInput } from "../../src/tui/client-commands.js";
 import { TuiReporter } from "../../src/tui/tui-reporter.js";
@@ -38,13 +39,9 @@ test("client session runtime over a real spawned daemon: send + lifecycle + reco
   await mkdir(workspaceSeed, { recursive: true });
   const workspaceDir = await realpath(workspaceSeed);
   process.env.PICO_HOME = picoHome;
-  process.env.LLM_BASE_URL = DEAD_ENDPOINT;
-  process.env.LLM_API_KEY = "smoke-test-key";
-  process.env.LLM_MODEL = "smoke-test-model";
+  await configureDeadEndpointModel(picoHome);
   t.after(() => {
-    delete process.env.LLM_BASE_URL;
-    delete process.env.LLM_API_KEY;
-    delete process.env.LLM_MODEL;
+    delete process.env.PICO_HOME;
   });
 
   const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome });
@@ -110,13 +107,9 @@ test("client commands over a real spawned daemon: slash chains (dead-endpoint mo
   await mkdir(workspaceSeed, { recursive: true });
   const workspaceDir = await realpath(workspaceSeed);
   process.env.PICO_HOME = picoHome;
-  process.env.LLM_BASE_URL = DEAD_ENDPOINT;
-  process.env.LLM_API_KEY = "smoke-test-key";
-  process.env.LLM_MODEL = "smoke-test-model";
+  await configureDeadEndpointModel(picoHome);
   t.after(() => {
-    delete process.env.LLM_BASE_URL;
-    delete process.env.LLM_API_KEY;
-    delete process.env.LLM_MODEL;
+    delete process.env.PICO_HOME;
   });
 
   const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome });
@@ -210,6 +203,28 @@ test("client commands over a real spawned daemon: slash chains (dead-endpoint mo
 
   runtime.dispose();
 });
+
+async function configureDeadEndpointModel(picoHome: string): Promise<void> {
+  const store = new UserConfigStore({ picoHome });
+  const current = await store.read();
+  await store.write(
+    {
+      version: 1,
+      defaults: { modelRouteId: "daemon-smoke/smoke-test-model" },
+      providers: {
+        "daemon-smoke": {
+          protocol: "openai",
+          baseURL: DEAD_ENDPOINT,
+          apiKeyEnv: "PICO_DAEMON_SMOKE_API_KEY",
+          apiKey: "smoke-test-key",
+          models: ["smoke-test-model"],
+          discoverModels: false,
+        },
+      },
+    },
+    { expectedRevision: current.revision },
+  );
+}
 
 async function killDaemonFor(picoHome: string, client: LocalRuntimeClient): Promise<void> {
   // 优雅关停优先（runtime.shutdown 与 SIGTERM 同路径）；失败退回注册表 pid 硬杀。

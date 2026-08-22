@@ -10,6 +10,7 @@ import {
   resolveStorageRoot,
 } from "@pico/runtime-host";
 import { LocalRuntimeClient } from "../../src/daemon/index.js";
+import { UserConfigStore } from "../../src/input/user-config-store.js";
 import { ClientSessionRuntime } from "../../src/tui/client-session-runtime.js";
 import { createClientCommandRegistry, processClientInput } from "../../src/tui/client-commands.js";
 import { TuiReporter } from "../../src/tui/tui-reporter.js";
@@ -70,14 +71,9 @@ test("real daemon: /mcp status + enable/disable round trip over user mcp.json", 
     "utf8",
   );
   process.env.PICO_HOME = picoHome;
-  process.env.LLM_BASE_URL = DEAD_ENDPOINT;
-  process.env.LLM_API_KEY = "mcp-smoke-key";
-  process.env.LLM_MODEL = "mcp-smoke-model";
+  await configureDeadEndpointModel(picoHome);
   t.after(() => {
     delete process.env.PICO_HOME;
-    delete process.env.LLM_BASE_URL;
-    delete process.env.LLM_API_KEY;
-    delete process.env.LLM_MODEL;
   });
 
   const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome });
@@ -199,6 +195,28 @@ test("real daemon: /mcp status + enable/disable round trip over user mcp.json", 
 
   runtime.dispose();
 });
+
+async function configureDeadEndpointModel(picoHome: string): Promise<void> {
+  const store = new UserConfigStore({ picoHome });
+  const current = await store.read();
+  await store.write(
+    {
+      version: 1,
+      defaults: { modelRouteId: "mcp-smoke/mcp-smoke-model" },
+      providers: {
+        "mcp-smoke": {
+          protocol: "openai",
+          baseURL: DEAD_ENDPOINT,
+          apiKeyEnv: "PICO_MCP_SMOKE_API_KEY",
+          apiKey: "mcp-smoke-key",
+          models: ["mcp-smoke-model"],
+          discoverModels: false,
+        },
+      },
+    },
+    { expectedRevision: current.revision },
+  );
+}
 
 async function waitForCondition(
   condition: () => boolean | Promise<boolean>,
