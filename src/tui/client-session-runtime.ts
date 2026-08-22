@@ -18,6 +18,7 @@ import { DaemonEventReporter } from "./daemon-event-reporter.js";
 import { transcriptEventsFromRuntimeItems } from "./transcript-item-hydration.js";
 import type { TuiReporter } from "./tui-reporter.js";
 import type { RuntimeTranscriptCursor } from "../../packages/protocol/src/runtime.js";
+import type { RuntimeTranscriptFragment } from "../../packages/protocol/src/runtime.js";
 
 /**
  * 客户端侧 ask-user 请求（wire prompt 的结构化投影——AskUserRequest 的
@@ -99,6 +100,7 @@ export interface ClientSessionRuntimeOptions {
 
 export interface RuntimeTranscriptPagingState {
   readonly items: readonly RuntimeConversationItem[];
+  readonly fragments?: Readonly<Record<string, readonly RuntimeTranscriptFragment[]>>;
   readonly revision?: string;
   readonly nextCursor?: RuntimeTranscriptCursor;
   readonly nextBefore?: string;
@@ -106,6 +108,7 @@ export interface RuntimeTranscriptPagingState {
 
 type RuntimeTranscriptPage = RuntimeResult<"session.transcript"> & {
   readonly nextCursor?: RuntimeTranscriptCursor;
+  readonly fragments?: readonly RuntimeTranscriptFragment[];
 };
 
 /** Pure page reducer shared by TUI hydration tests and the request loop below. */
@@ -129,10 +132,41 @@ export function advanceRuntimeTranscriptPagingState(
     throw new Error("Session transcript high-watermark changed during hydration");
   }
 
+  const fragments: Record<string, readonly RuntimeTranscriptFragment[]> = {
+    ...(state.fragments ?? {}),
+  };
+  const completed: RuntimeConversationItem[] = [];
+  for (const fragment of page.fragments ?? []) {
+    const parts = [...(fragments[fragment.itemId] ?? []), fragment].toSorted(
+      (left, right) => left.byteOffset - right.byteOffset,
+    );
+    const unique = parts.filter(
+      (part, index) =>
+        index === 0 ||
+        part.byteOffset !== parts[index - 1]!.byteOffset ||
+        part.byteLength !== parts[index - 1]!.byteLength,
+    );
+    fragments[fragment.itemId] = unique;
+    let offset = 0;
+    for (const part of unique) {
+      if (part.byteOffset !== offset) break;
+      offset += part.byteLength;
+    }
+    if (offset === fragment.totalBytes) {
+      const parsed = JSON.parse(
+        unique.map((part) => part.json).join(""),
+      ) as RuntimeConversationItem;
+      if (parsed.id !== fragment.itemId)
+        throw new Error("Session transcript fragment item ID changed");
+      completed.push(parsed);
+      delete fragments[fragment.itemId];
+    }
+  }
   const known = new Set(state.items.map((item) => item.id));
-  const older = page.items.filter((item) => !known.has(item.id));
+  const older = [...completed, ...page.items].filter((item) => !known.has(item.id));
   return {
     items: [...older, ...state.items],
+    ...(Object.keys(fragments).length > 0 ? { fragments } : {}),
     revision: state.revision ?? page.revision,
     ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
     ...(!page.nextCursor && page.nextBefore ? { nextBefore: page.nextBefore } : {}),

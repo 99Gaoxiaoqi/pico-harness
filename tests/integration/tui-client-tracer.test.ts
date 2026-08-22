@@ -362,6 +362,71 @@ test("transcript paging state: prepends older pages and preserves byte continuat
   );
 });
 
+test("transcript paging state: reassembles out-of-order UTF-8 fragments before item de-duplication", () => {
+  const item = {
+    id: "large-assistant",
+    kind: "assistantMessage" as const,
+    content: `prefix-${"😀".repeat(512)}-suffix`,
+  };
+  const json = JSON.stringify(item);
+  const splitAt = json.indexOf("😀") + "😀".length;
+  const firstJson = json.slice(0, splitAt);
+  const secondJson = json.slice(splitAt);
+  const firstBytes = Buffer.byteLength(firstJson, "utf8");
+  const secondBytes = Buffer.byteLength(secondJson, "utf8");
+  const totalBytes = firstBytes + secondBytes;
+  const tailFirst = advanceRuntimeTranscriptPagingState(
+    { items: [] },
+    {
+      session: {} as never,
+      items: [],
+      queuedInputs: [],
+      revision: "7",
+      fragments: [
+        {
+          itemId: item.id,
+          position: 1,
+          ordinal: 0,
+          byteOffset: firstBytes,
+          byteLength: secondBytes,
+          totalBytes,
+          json: secondJson,
+        },
+      ],
+      nextCursor: {
+        revision: "7",
+        throughTranscriptSequence: 7,
+        position: 1,
+        ordinal: 0,
+        byteOffset: firstBytes,
+        direction: "older",
+      },
+    },
+  );
+  assert.deepEqual(tailFirst.items, []);
+  assert.equal(tailFirst.fragments?.[item.id]?.length, 1);
+
+  const complete = advanceRuntimeTranscriptPagingState(tailFirst, {
+    session: {} as never,
+    items: [],
+    queuedInputs: [],
+    revision: "7",
+    fragments: [
+      {
+        itemId: item.id,
+        position: 1,
+        ordinal: 0,
+        byteOffset: 0,
+        byteLength: firstBytes,
+        totalBytes,
+        json: firstJson,
+      },
+    ],
+  });
+  assert.deepEqual(complete.items, [item]);
+  assert.equal(complete.fragments, undefined);
+});
+
 interface FakeClientHarness {
   readonly client: DaemonSessionClient;
   readonly requests: { method: string; params: Record<string, unknown> }[];

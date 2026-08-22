@@ -7,7 +7,10 @@ import {
 } from "../presentation/transcript-event-store.js";
 import { hydrateCanonicalTranscriptEvents } from "../presentation/transcript-tool-result-hydration.js";
 import type { RuntimeEventStoreEntry } from "../storage/runtime-event-store-contracts.js";
-import type { RuntimeTranscriptCursor } from "../../packages/protocol/src/runtime.js";
+import type {
+  RuntimeTranscriptCursor,
+  RuntimeTranscriptFragment,
+} from "../../packages/protocol/src/runtime.js";
 import {
   projectRuntimeSessionSequencedMessageEntries,
   projectRuntimeSessionState,
@@ -26,6 +29,7 @@ const DEFAULT_TRANSCRIPT_PAGE_BYTES = MAX_RUNTIME_FRAME_BYTES - 64 * 1024;
 
 export interface RuntimeTranscriptPage {
   readonly items: readonly RuntimeConversationItem[];
+  readonly fragments?: readonly RuntimeTranscriptFragment[];
   readonly nextCursor?: RuntimeTranscriptCursor;
   readonly nextBefore?: string;
   readonly revision: string;
@@ -99,7 +103,8 @@ export function projectRuntimeTranscript(
 ): RuntimeTranscriptPage {
   const orderedItems = projectVisibleItems(snapshot);
   const currentRevision = transcriptRevision(snapshot);
-  const cursor = options.cursor ?? decodeOptionalCursor(options.before, currentRevision, orderedItems);
+  const cursor =
+    options.cursor ?? decodeOptionalCursor(options.before, currentRevision, orderedItems);
   if (
     cursor &&
     (cursor.position > cursor.throughTranscriptSequence ||
@@ -117,10 +122,10 @@ export function projectRuntimeTranscript(
   }
 
   const limit = normalizeLimit(options.limit);
-  const throughTranscriptSequence = cursor?.throughTranscriptSequence ?? snapshot.persistenceSequence;
+  const throughTranscriptSequence =
+    cursor?.throughTranscriptSequence ?? snapshot.persistenceSequence;
   const items = orderedItems.filter(
-    (item) =>
-      throughTranscriptSequence === null || item.sequence <= throughTranscriptSequence,
+    (item) => throughTranscriptSequence === null || item.sequence <= throughTranscriptSequence,
   );
   return selectPage(
     items,
@@ -579,9 +584,14 @@ function decodeOptionalCursor(
     if (isTranscriptCursor(parsed)) return parsed;
     // Compatibility with schema v12's opaque `{revision, offset}` cursor. It is
     // converted once at the boundary; paging below has only one cursor authority.
-    if (isRecord(parsed) && parsed["revision"] === revision && Number.isSafeInteger(parsed["offset"])) {
+    if (
+      isRecord(parsed) &&
+      parsed["revision"] === revision &&
+      Number.isSafeInteger(parsed["offset"])
+    ) {
       const offset = parsed["offset"] as number;
-      if (offset < 0 || offset > items.length || items.length === 0) throw new Error("stale cursor");
+      if (offset < 0 || offset > items.length || items.length === 0)
+        throw new Error("stale cursor");
       const boundary = items[offset] ?? items.at(-1);
       if (!boundary) throw new Error("stale cursor");
       const throughTranscriptSequence = Number(revision);
@@ -628,6 +638,21 @@ function selectPage(
     return selectNewerPage(items, cursor, limit, revision, throughTranscriptSequence, maxBytes);
   }
 
+  if (cursor && cursor.byteOffset > 0) {
+    const index = items.findIndex((item) => comparePosition(item, cursor) === 0);
+    if (index < 0) throw new TranscriptRevisionConflict(cursor.revision, revision);
+    return selectOversizedFragment(
+      items[index]!,
+      index,
+      items.length,
+      "older",
+      cursor.byteOffset,
+      revision,
+      throughTranscriptSequence,
+      maxBytes,
+    );
+  }
+
   let end =
     cursor === undefined
       ? items.length
@@ -649,8 +674,16 @@ function selectPage(
       continue;
     }
     if (selected.length === 0) {
-      selected = [fitItemToPage(boundary.item, nextCursor, revision, maxBytes)];
-      start = candidateStart;
+      return selectOversizedFragment(
+        boundary,
+        candidateStart,
+        items.length,
+        "older",
+        utf8Bytes(boundary.item),
+        revision,
+        throughTranscriptSequence,
+        maxBytes,
+      );
     }
     break;
   }
@@ -675,6 +708,20 @@ function selectNewerPage(
   throughTranscriptSequence: number,
   maxBytes: number,
 ): RuntimeTranscriptPage {
+  if (cursor.byteOffset > 0) {
+    const continuationIndex = items.findIndex((item) => comparePosition(item, cursor) === 0);
+    if (continuationIndex < 0) throw new TranscriptRevisionConflict(cursor.revision, revision);
+    return selectOversizedFragment(
+      items[continuationIndex]!,
+      continuationIndex,
+      items.length,
+      "newer",
+      cursor.byteOffset,
+      revision,
+      throughTranscriptSequence,
+      maxBytes,
+    );
+  }
   let index = items.findIndex((item) => comparePosition(item, cursor) > 0);
   if (index < 0) return { items: [], revision };
   const selected: RuntimeConversationItem[] = [];
@@ -690,8 +737,16 @@ function selectNewerPage(
       continue;
     }
     if (selected.length === 0) {
-      selected.push(fitItemToPage(items[index]!.item, nextCursor, revision, maxBytes));
-      index += 1;
+      return selectOversizedFragment(
+        items[index]!,
+        index,
+        items.length,
+        "newer",
+        0,
+        revision,
+        throughTranscriptSequence,
+        maxBytes,
+      );
     }
     break;
   }
@@ -701,6 +756,100 @@ function selectNewerPage(
       : undefined;
   return {
     items: selected,
+    ...(nextCursor ? { nextCursor, nextBefore: encodeCursor(nextCursor) } : {}),
+    revision,
+  };
+}
+
+function selectOversizedFragment(
+  ordered: OrderedConversationItem,
+  itemIndex: number,
+  itemCount: number,
+  direction: RuntimeTranscriptCursor["direction"],
+  boundaryOffset: number,
+  revision: string,
+  throughTranscriptSequence: number,
+  maxBytes: number,
+): RuntimeTranscriptPage {
+  const encoded = Buffer.from(JSON.stringify(ordered.item), "utf8");
+  const totalBytes = encoded.length;
+  let start = direction === "older" ? 0 : boundaryOffset;
+  let end = direction === "older" ? boundaryOffset : totalBytes;
+  const fits = (candidateStart: number, candidateEnd: number): boolean => {
+    const fragment: RuntimeTranscriptFragment = {
+      itemId: ordered.item.id,
+      position: ordered.sequence,
+      ordinal: ordered.ordinal,
+      byteOffset: candidateStart,
+      byteLength: candidateEnd - candidateStart,
+      totalBytes,
+      json: encoded.subarray(candidateStart, candidateEnd).toString("utf8"),
+    };
+    const hasSameItem = direction === "older" ? candidateStart > 0 : candidateEnd < totalBytes;
+    const nextCursor = hasSameItem
+      ? {
+          revision,
+          throughTranscriptSequence,
+          position: ordered.sequence,
+          ordinal: ordered.ordinal,
+          byteOffset: direction === "older" ? candidateStart : candidateEnd,
+          direction,
+        }
+      : itemIndex > 0 && direction === "older"
+        ? transcriptCursor(revision, throughTranscriptSequence, ordered, "older")
+        : direction === "newer" && itemIndex + 1 < itemCount
+          ? transcriptCursor(revision, throughTranscriptSequence, ordered, "newer")
+          : undefined;
+    return (
+      utf8Bytes({
+        items: [],
+        fragments: [fragment],
+        ...(nextCursor ? { nextCursor, nextBefore: encodeCursor(nextCursor) } : {}),
+        revision,
+      }) <= maxBytes
+    );
+  };
+  if (direction === "older") {
+    start = utf8BackwardStart(encoded, end, Math.max(1, maxBytes - 512));
+    while (start < end && !fits(start, end)) {
+      start = utf8BackwardStart(encoded, end, Math.max(1, end - start - 64));
+    }
+  } else {
+    end = utf8ForwardEnd(encoded, start, Math.max(1, maxBytes - 512));
+    while (end > start && !fits(start, end)) {
+      end = utf8ForwardEnd(encoded, start, Math.max(1, end - start - 64));
+    }
+  }
+  if (start >= end || !fits(start, end)) {
+    throw new Error("session.transcript byte budget is too small for fragment metadata");
+  }
+  const fragment: RuntimeTranscriptFragment = {
+    itemId: ordered.item.id,
+    position: ordered.sequence,
+    ordinal: ordered.ordinal,
+    byteOffset: start,
+    byteLength: end - start,
+    totalBytes,
+    json: encoded.subarray(start, end).toString("utf8"),
+  };
+  const sameItemContinues = direction === "older" ? start > 0 : end < totalBytes;
+  const nextCursor = sameItemContinues
+    ? {
+        revision,
+        throughTranscriptSequence,
+        position: ordered.sequence,
+        ordinal: ordered.ordinal,
+        byteOffset: direction === "older" ? start : end,
+        direction,
+      }
+    : itemIndex > 0 && direction === "older"
+      ? transcriptCursor(revision, throughTranscriptSequence, ordered, "older")
+      : direction === "newer" && itemIndex + 1 < itemCount
+        ? transcriptCursor(revision, throughTranscriptSequence, ordered, "newer")
+        : undefined;
+  return {
+    items: [],
+    fragments: [fragment],
     ...(nextCursor ? { nextCursor, nextBefore: encodeCursor(nextCursor) } : {}),
     revision,
   };
@@ -722,125 +871,8 @@ function transcriptCursor(
   };
 }
 
-function comparePosition(
-  item: OrderedConversationItem,
-  cursor: RuntimeTranscriptCursor,
-): number {
+function comparePosition(item: OrderedConversationItem, cursor: RuntimeTranscriptCursor): number {
   return item.sequence - cursor.position || item.ordinal - cursor.ordinal;
-}
-
-function fitItemToPage(
-  item: RuntimeConversationItem,
-  nextCursor: RuntimeTranscriptCursor | undefined,
-  revision: string,
-  maxBytes: number,
-): RuntimeConversationItem {
-  const originalBytes = utf8Bytes(item);
-  let low = 0;
-  let high = longestStringLength(item);
-  let fitted = truncateConversationItem(item, 0, originalBytes);
-  if (pageBytes([fitted], nextCursor, revision) > maxBytes) {
-    throw new Error("session.transcript byte budget is too small for item metadata");
-  }
-  while (low <= high) {
-    const middle = Math.floor((low + high) / 2);
-    const candidate = truncateConversationItem(item, middle, originalBytes);
-    if (pageBytes([candidate], nextCursor, revision) <= maxBytes) {
-      fitted = candidate;
-      low = middle + 1;
-    } else {
-      high = middle - 1;
-    }
-  }
-  return fitted;
-}
-
-function truncateConversationItem(
-  item: RuntimeConversationItem,
-  maxCodePoints: number,
-  originalBytes: number,
-): RuntimeConversationItem {
-  const text = (value: string | undefined) =>
-    value === undefined ? undefined : Array.from(value).slice(0, maxCodePoints).join("");
-  const metadata = { truncated: true as const, originalBytes };
-  const id = boundedItemId(item.id);
-  switch (item.kind) {
-    case "userMessage":
-    case "assistantMessage":
-    case "systemNotice":
-    case "error":
-    case "thinking":
-      return { ...item, id, content: text(item.content) ?? "", ...metadata };
-    case "skill":
-      return {
-        ...item,
-        id,
-        name: text(item.name) ?? "",
-        args: text(item.args) ?? "",
-        ...metadata,
-      };
-    case "plan":
-      return {
-        ...item,
-        id,
-        title: text(item.title) ?? "",
-        ...(item.detail === undefined ? {} : { detail: text(item.detail) ?? "" }),
-        ...metadata,
-      };
-    case "tool":
-      return {
-        ...item,
-        id,
-        name: text(item.name) ?? "",
-        args: text(item.args) ?? "",
-        ...(item.summary === undefined ? {} : { summary: text(item.summary) ?? "" }),
-        ...(item.result === undefined
-          ? {}
-          : {
-              result: {
-                ...item.result,
-                projection: {
-                  ...item.result.projection,
-                  text: text(item.result.projection.text) ?? "",
-                  truncated:
-                    item.result.projection.truncated ||
-                    Array.from(item.result.projection.text).length > maxCodePoints,
-                },
-              },
-            }),
-        ...metadata,
-      };
-    case "runBoundary":
-      return {
-        ...item,
-        id,
-        runId: text(item.runId) ?? "",
-        ...(item.error === undefined ? {} : { error: text(item.error) ?? "" }),
-        ...metadata,
-      };
-    case "approval":
-    case "prompt":
-    case "changes":
-    case "subagent":
-    case "goal":
-      return {
-        ...item,
-        id,
-        ...(item.kind === "subagent" && item.name !== undefined
-          ? { name: text(item.name) ?? "" }
-          : {}),
-        title: text(item.title) ?? "",
-        ...(item.detail === undefined ? {} : { detail: text(item.detail) ?? "" }),
-        ...(item.state === undefined ? {} : { state: text(item.state) ?? "" }),
-        data: { truncated: true },
-        ...metadata,
-      };
-  }
-}
-
-function boundedItemId(id: string): string {
-  if (Buffer.byteLength(id, "utf8") <= 256) return id;
-  return `item_truncated_${createHash("sha256").update(id).digest("hex").slice(0, 24)}`;
 }
 
 function pageBytes(
@@ -859,15 +891,16 @@ function utf8Bytes(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value), "utf8");
 }
 
-function longestStringLength(value: unknown): number {
-  if (typeof value === "string") return Array.from(value).length;
-  if (Array.isArray(value))
-    return value.reduce((max, entry) => Math.max(max, longestStringLength(entry)), 0);
-  if (!isRecord(value)) return 0;
-  return Object.values(value).reduce<number>(
-    (max, entry) => Math.max(max, longestStringLength(entry)),
-    0,
-  );
+function utf8ForwardEnd(bytes: Buffer, start: number, budget: number): number {
+  let end = Math.min(bytes.length, start + budget);
+  while (end > start && end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+  return end;
+}
+
+function utf8BackwardStart(bytes: Buffer, end: number, budget: number): number {
+  let start = Math.max(0, end - budget);
+  while (start < end && (bytes[start]! & 0xc0) === 0x80) start += 1;
+  return start;
 }
 
 function normalizeMaxBytes(value: number | undefined): number {

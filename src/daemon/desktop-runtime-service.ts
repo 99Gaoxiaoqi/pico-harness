@@ -18,11 +18,7 @@ import { findAgentProfile, loadAgentCatalog } from "../agents/catalog.js";
 import { ResourceDoctor, renderResourceDoctorReport } from "../diagnostics/resource-doctor.js";
 import { runWorkspaceDoctor } from "../diagnostics/workspace-doctor.js";
 import { SessionForkService } from "../engine/session-fork-service.js";
-import {
-  projectRuntimeSessionActiveToolResultEntries,
-  RUNTIME_SESSION_STATE_EVENT_KINDS,
-  RUNTIME_TRANSCRIPT_READ_MODEL_EVENT_KINDS,
-} from "../engine/session-runtime-projection.js";
+import { projectRuntimeSessionActiveToolResultEntries } from "../engine/session-runtime-projection.js";
 import { globalSessionManager, Session } from "../engine/session.js";
 import {
   DEFAULT_INTERACTION_MODE,
@@ -99,7 +95,7 @@ import {
 } from "../paths/pico-paths.js";
 import {
   readExistingSqliteSessionEventSlice,
-  readExistingSqliteSessionEventSliceWithinBudget,
+  readExistingSqliteMaterializedTranscript,
   SqliteRuntimeEventStore,
   type SqliteSessionCatalogEntry,
 } from "../storage/sqlite/sqlite-runtime-event-store.js";
@@ -1639,44 +1635,34 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         "会话队列元数据已超过单帧预算，请先处理排队输入",
       );
     }
-    // 票 E2(ADR 26 §2.3):transcript 深读改两段式——SQL 先测长,按读取预算取
-    // 事件 payload,不再把整个 kind 切片解码进内存。读取预算 = 输出帧预算 +
-    // 64KB 投影元数据余量(item id/kind/runId 等派生字段无事件 payload 对应物);
-    // state/usage 累积小事件不占预算永远全取,保证 goal 等状态投影不因窗口截断丢失。
-    const sliceSnapshot = await readExistingSqliteSessionEventSliceWithinBudget({
+    // Canonical transcript facts are materialized in the source append transaction.
+    // Every request replays exactly one fixed ledger waterline; later appends cannot
+    // move an in-flight older traversal's source window.
+    const structuredCursor = (
+      params as { readonly cursor?: { readonly throughTranscriptSequence: number } }
+    ).cursor;
+    const transcriptSnapshot = await readExistingSqliteMaterializedTranscript({
       storageRoot: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
       sessionId: params.sessionId,
-      kinds: RUNTIME_TRANSCRIPT_READ_MODEL_EVENT_KINDS,
-      maxPayloadBytes: transcriptBudget + 64 * 1024,
-      alwaysIncludeKinds: RUNTIME_SESSION_STATE_EVENT_KINDS,
+      ...(structuredCursor ? { throughSequence: structuredCursor.throughTranscriptSequence } : {}),
     });
-    if (!sliceSnapshot) {
+    if (!transcriptSnapshot) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.NOT_FOUND,
         `Session ${params.sessionId} 不存在于工作区 ${canonical}`,
       );
     }
-    if (sliceSnapshot.manifest.workDir !== manifestWorkspaceForm(canonical)) {
+    if (transcriptSnapshot.manifest.workDir !== manifestWorkspaceForm(canonical)) {
       throw new RuntimeEventStoreIntegrityError(
         `Runtime session ${params.sessionId} belongs to another workspace`,
       );
     }
-    if (sliceSnapshot.slice.budgetWindow.truncated) {
-      logger.info(
-        {
-          workspacePath: canonical,
-          sessionId: params.sessionId,
-          fromSequence: sliceSnapshot.slice.budgetWindow.fromSequence,
-        },
-        "Session transcript 深读按预算截断,更早事件未载入本次窗口",
-      );
-    }
     let page;
     try {
-      page = projectRuntimeTranscriptEntries(params.sessionId, sliceSnapshot.slice.entries, {
+      page = projectRuntimeTranscriptEntries(params.sessionId, transcriptSnapshot.entries, {
         ...params,
         maxBytes: transcriptBudget,
-        persistenceSequence: sliceSnapshot.slice.headSequence,
+        persistenceSequence: transcriptSnapshot.throughSequence,
       });
     } catch (error) {
       if (error instanceof TranscriptRevisionConflict) {
@@ -1696,14 +1682,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const result = {
       session,
       items: page.items,
+      ...(page.fragments ? { fragments: page.fragments } : {}),
       planProjection: toJsonValue(planProjection),
       ...(activeRun ? { activeRun } : {}),
       queuedInputs,
       ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
       ...(page.nextBefore ? { nextBefore: page.nextBefore } : {}),
-      // 第 1 轮审查问题 2 修复:窗口截断对客户端可见——true 表示预算窗口头之前
-      // 还有未载入的更早事件(读事务内由水位判定,即 budgetWindow.truncated)。
-      hasEarlierEvents: sliceSnapshot.slice.budgetWindow.truncated,
       revision: page.revision,
     };
     if (Buffer.byteLength(JSON.stringify(result), "utf8") > RUNTIME_REQUEST_RESULT_MAX_BYTES) {
