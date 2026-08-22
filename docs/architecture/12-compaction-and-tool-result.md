@@ -399,7 +399,7 @@ RuntimeEvent Ledger（不可变）：
 | L3-deep | e2e 真实模型     | 深度衰减——3 轮"摘要的摘要"后核心 anchor 仍存活（recall ≥ 0.5）   |
 | L4      | e2e 真实模型     | 85% 水位自动触发 + fail-open 不崩溃——`AgentEngine.run` 完整路径  |
 
-L2/L3/L3-deep/L4 用真实模型（默认 `deepseek-v4-flash-0731`，可通过 `COMPACTION_E2E_MODEL` 覆盖）验证，不是 mock。历史实测 recall 多数达到 1.00（包括 3 轮深度衰减后核心 anchor 全部存活的场景），但真实模型存在单次波动，阈值设为 0.8/0.7/0.5 留余量。
+L2/L3/L3-deep/L4 使用 `$PICO_HOME/config.json` 的用户默认真实模型验证，不是 mock。历史实测 recall 多数达到 1.00（包括 3 轮深度衰减后核心 anchor 全部存活的场景），但真实模型存在单次波动，阈值设为 0.8/0.7/0.5 留余量。
 
 ---
 

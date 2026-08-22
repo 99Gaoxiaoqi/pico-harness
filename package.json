@@ -50,7 +50,7 @@
     "pretest:llm-e2e:discovery": "npm run check:storage && npm run build:protocol",
     "test:llm-e2e:discovery": "node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/e2e/discovery-loop.real-llm.test.ts",
     "pretest:compaction-e2e": "npm run check:storage && npm run build:protocol",
-    "test:compaction-e2e": "node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/e2e/compaction-quality.real-llm.test.ts",
+    "test:compaction-e2e": "node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/e2e/compaction-quality.real-llm.test.ts tests/e2e/compaction-auto-trigger.real-llm.test.ts",
     "check:storage": "node --import tsx scripts/check-storage-capability.mjs",
     "check:architecture": "node scripts/check-architecture-boundaries.mjs",
     "check:architecture:strict": "node scripts/check-architecture-boundaries.mjs --strict",

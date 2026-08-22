@@ -164,7 +164,7 @@ Pico 首次打开一个工作区时会先显示信任确认。信任门通过前
 
 ### 设备级 Provider 配置
 
-`$PICO_HOME/config.json`（默认 `~/.pico/config.json`）是 Desktop 与 TUI 共享的用户默认值和 Provider registry。它不存储 API Key；凭证只进入 OS 凭证库。
+`$PICO_HOME/config.json`（默认 `~/.pico/config.json`）是 Desktop 与 TUI 共享的用户默认值和 Provider registry。它可以在权限收紧为 0600 的文件中保存 `apiKey`，也可以通过 `apiKeyEnv` 或 OS 凭证库解析凭证。
 
 ```text
 /provider list
@@ -226,16 +226,16 @@ Pico 会加载项目级 Claude agent profile：
 npx tsx --env-file=/path/to/pico-harness/.env /path/to/pico-harness/src/cli/main.ts
 ```
 
-已安装的 `pico` 命令不会自动加载 `.env`。已在 Desktop 或 `/provider import-env` 中配置共享 Provider 时不需要 `.env`；仅使用旧兼容入口时，需先在 shell 中设置 `LLM_BASE_URL`、`LLM_API_KEY[S]`、`LLM_MODEL`，或用外部工具加载。
+已安装的 `pico` 命令不会自动加载 `.env`。裸 `LLM_*` 不会创建模型路由；设置这些变量只用于 `/provider import-env`，或为用户 Provider 明确声明的 `apiKeyEnv` 提供凭证。
 
 ### Provider 配置缺失
 
-如果看到「缺少 Provider 配置」，先运行 `/provider list` 和 `/doctor`。共享 Provider 应显示配置来源与 `keychain` / `environment` 凭证状态。如仍使用旧环境入口，请检查：
+如果看到「缺少 Provider 配置」，先运行 `/provider list` 和 `/doctor`。共享 Provider 应显示用户配置来源与 `config` / `keychain` / `environment` 凭证状态。使用 `/provider import-env` 时请检查：
 
 - `LLM_BASE_URL` 是否已设置。
 - `LLM_API_KEY` 或 `LLM_API_KEYS` 是否已设置。
 - `LLM_MODEL` 是否符合当前 provider。
-- `--provider`、`--model` 是否传给了正确入口，或环境变量是否已设置。
+- 导入成功后是否已经把目标用户路由设为默认。
 
 ### 未知命令
 
@@ -249,8 +249,8 @@ npx tsx --env-file=/path/to/pico-harness/.env /path/to/pico-harness/src/cli/main
 
 ### Worktree 没有 `.env`
 
-Git worktree 通常不会复制未跟踪的 `.env`。如果你在 `.worktrees/...` 内运行 `npm run dev`，而该 worktree 没有自己的 `.env`，启动会缺少模型配置。可选做法：
+Git worktree 通常不会复制未跟踪的 `.env`。模型路由来自共享的 `$PICO_HOME/config.json`，因此 worktree 不需要复制 Provider 路由配置；只有用户 Provider 的 `apiKeyEnv` 依赖 `.env` 时才需要提供相应变量。可选做法：
 
 - 在 worktree 中复制一份 `.env`。
 - 使用 `--env-file=/主仓库绝对路径/.env`。
-- 直接在 shell 中导出 `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL`。
+- 将凭证写入受保护的用户配置，或只导出该 Provider 的 `apiKeyEnv` 所指变量。

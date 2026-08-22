@@ -110,7 +110,7 @@ export class ModelRouter {
   require(query: string | undefined): ModelRoute {
     if (this.routes.length === 0) {
       throw new Error(
-        "没有可用模型路由。请在用户级 .pico/config.json 配置 providers.*.models，或先使用 /provider import-env 导入环境变量配置。",
+        "没有可用模型路由。请在用户级 $PICO_HOME/config.json 配置 providers.*.models，或先使用 /provider import-env 导入环境变量配置。",
       );
     }
     const route = this.resolve(query);
@@ -136,7 +136,7 @@ export class ModelRouter {
     if (!route.baseURL) {
       return {
         ok: false,
-        message: `模型路由 ${route.id} 缺少 baseURL。请检查用户级 .pico/config.json。`,
+        message: `模型路由 ${route.id} 缺少 baseURL。请检查用户级 $PICO_HOME/config.json。`,
       };
     }
     if (!this.readCredential(route)) {
@@ -154,7 +154,7 @@ export class ModelRouter {
   ): { provider: ProviderKind; config: ProviderConfig; route: ModelRoute } {
     const route = this.require(routeId);
     if (!route.baseURL) {
-      throw new Error(`模型路由 ${route.id} 缺少 baseURL。请检查用户级 .pico/config.json。`);
+      throw new Error(`模型路由 ${route.id} 缺少 baseURL。请检查用户级 $PICO_HOME/config.json。`);
     }
     const apiKey = this.readCredential(route);
     if (!apiKey) {

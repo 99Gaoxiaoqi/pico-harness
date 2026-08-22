@@ -846,7 +846,7 @@ export async function executeAgentRuntime(
       ...(options.resumeSession ? { resumeSession: options.resumeSession } : {}),
       ...(options.forkSession ? { forkSession: options.forkSession } : {}),
     }));
-  const defaultConfigModel = options.model ?? runtimeEnv.LLM_MODEL ?? defaultModel(kind);
+  const defaultConfigModel = options.model ?? defaultModel(kind);
 
   // 阶段 2：获取持久化 Session，并推导会话级有效配置。
   const sessionLease = await acquireRuntimeSession({
@@ -1040,13 +1040,8 @@ export async function executeAgentRuntime(
     };
     const providerConfig = resolveProviderConfig(
       effectiveOptions,
-      runtimeEnv,
       dependencies.provider !== undefined,
     );
-    const credentialPool =
-      effectiveOptions.apiKey === undefined && dependencies.provider === undefined
-        ? createRuntimeCredentialPool(runtimeEnv)
-        : undefined;
     const pluginSnapshot = backgroundPolicy
       ? undefined
       : (dependencies.pluginSnapshot ??
@@ -1194,12 +1189,7 @@ export async function executeAgentRuntime(
     const workspaceStatePaths = resolvePicoPaths(workDir, {
       picoHome: session.picoHome,
     }).workspace;
-    // 凭证轮换(4.2):多 key 时从池取首个 key 覆盖 config.apiKey,并构建轮换回调。
-    // 单 key / 注入 provider 时跳过(向后兼容)。pool 注入点集中在此,便于追踪 currentKey。
-    let currentConfig: ProviderConfig = providerConfig;
-    if (credentialPool && credentialPool.size > 1 && dependencies.provider === undefined) {
-      currentConfig = { ...providerConfig, apiKey: credentialPool.getNext() };
-    }
+    const currentConfig: ProviderConfig = providerConfig;
     const providerDependencies: ProviderRuntimeDependencies = {
       promptCachePrewarm: PromptCachePrewarmCoordinator.shared(workspaceStatePaths.root),
     };
@@ -1287,7 +1277,6 @@ export async function executeAgentRuntime(
       providerFactory,
       providerDecorator,
       providerDependencies,
-      ...(credentialPool ? { credentialPool } : {}),
     });
     const trackedProvider = providerAssembly.provider;
     const rebuildProvider = providerAssembly.rebuildProvider;
@@ -2981,15 +2970,14 @@ async function resolveBackgroundCredential(
 
 function resolveProviderConfig(
   options: RunAgentCliOptions,
-  env: RunAgentEnv,
   allowMissingNetworkConfig: boolean,
 ): ProviderConfig {
-  const baseURL = options.baseURL ?? env.LLM_BASE_URL;
-  const apiKey = options.apiKey ?? firstApiKey(env.LLM_API_KEYS) ?? env.LLM_API_KEY;
-  const model = options.model ?? env.LLM_MODEL ?? defaultModel(options.provider ?? "openai");
+  const baseURL = options.baseURL;
+  const apiKey = options.apiKey;
+  const model = options.model ?? defaultModel(options.provider ?? "openai");
 
   if (!allowMissingNetworkConfig && (!baseURL || !apiKey)) {
-    throw new Error("缺少 Provider 配置:请提供 LLM_BASE_URL / LLM_API_KEY 或对应 CLI 参数");
+    throw new Error("缺少 Provider 配置:宿主必须从用户模型路由注入 baseURL 和 apiKey");
   }
 
   return {
@@ -3002,14 +2990,10 @@ function resolveProviderConfig(
   };
 }
 
-function firstApiKey(value: string | undefined): string | undefined {
-  return value
-    ?.split(",")
-    .map((key) => key.trim())
-    .find(Boolean);
-}
-
-/** @internal Pure runtime-env boundary used by executeAgentRuntime. */
+/**
+ * @deprecated Compatibility helper for explicit test/host assembly. Production Runtime no longer
+ * calls it or derives a model route from bare LLM environment variables.
+ */
 export function createRuntimeCredentialPool(env: RunAgentEnv): CredentialPool | undefined {
   const keys = env.LLM_API_KEYS?.split(",")
     .map((key) => key.trim())

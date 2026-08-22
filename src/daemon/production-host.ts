@@ -1042,7 +1042,7 @@ async function resolveDesktopModelRoute(
       workDir: workspacePath,
       projectTrusted: true,
       legacyProvider,
-      legacyModel: env["LLM_MODEL"]?.trim() ?? "",
+      legacyModel: "",
       legacyModelExplicit: false,
       env,
       credentialVault,
