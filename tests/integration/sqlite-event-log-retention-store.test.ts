@@ -358,6 +358,11 @@ test("sqlite EventLog retention: cascades manifests and durably records only zer
           "desktop_idempotency",
           "desktop_first_send_claims",
           "desktop_input_queue",
+          "storage_operations",
+        ]) {
+          assert.equal(lease.database.prepare(`SELECT 1 FROM ${table}`).get(), undefined, table);
+        }
+        for (const table of [
           "jobs",
           "job_attempts",
           "job_commands",
@@ -366,10 +371,34 @@ test("sqlite EventLog retention: cascades manifests and durably records only zer
           "daemon_runs",
           "usage_provider_calls",
           "usage_baselines",
-          "storage_operations",
         ]) {
-          assert.equal(lease.database.prepare(`SELECT 1 FROM ${table}`).get(), undefined, table);
+          assert.notEqual(lease.database.prepare(`SELECT 1 FROM ${table}`).get(), undefined, table);
         }
+        const job = lease.database
+          .prepare(
+            "SELECT owner_session_id, child_session_id FROM jobs WHERE job_id = 'job-second'",
+          )
+          .get() as Record<string, unknown>;
+        assert.equal(job["owner_session_id"], null);
+        assert.equal(job["child_session_id"], null);
+        const daemonRun = lease.database
+          .prepare(
+            "SELECT session_id, checkpoint_id FROM daemon_runs WHERE run_id = 'daemon-second'",
+          )
+          .get() as Record<string, unknown>;
+        assert.equal(daemonRun["session_id"], null);
+        assert.equal(daemonRun["checkpoint_id"], null);
+        const usage = lease.database
+          .prepare(
+            "SELECT session_id, conversation_id FROM usage_provider_calls WHERE call_id = 'usage-second'",
+          )
+          .get() as Record<string, unknown>;
+        assert.equal(usage["session_id"], null);
+        assert.equal(usage["conversation_id"], null);
+        const baseline = lease.database
+          .prepare("SELECT session_id FROM usage_baselines WHERE baseline_id = 'baseline-second'")
+          .get() as Record<string, unknown>;
+        assert.equal(baseline["session_id"], null);
         assert.equal(
           lease.database.prepare("SELECT COUNT(*) AS count FROM retention_gc_intents").get()![
             "count"
