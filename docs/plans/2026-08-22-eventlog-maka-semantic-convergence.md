@@ -75,7 +75,7 @@ Continuation：冻结 source prefix digest + claim + target run.started（同事
 
 ## 实施结果与验收证据
 
-- EventLog/continuation/transcript/fence/retention 定向组合测试：49/49 通过；TUI transcript/fragment 测试：12/12 通过。
+- 最终 HEAD 的 EventLog/continuation/transcript/fence/retention/Plan/TUI 定向组合测试：76/76 通过。
 - 全量集成测试分段覆盖完成：首段 635 通过、10 跳过；剩余段 397 通过、15 跳过。`runtime-host-spawn` 首次出现一次时序抖动，独立复跑 6/6 通过。
 - 一项与本改造无差异的基线失败仍存在：`terminal-bench-bundle-lock.test.ts` 要求根依赖声明 `@pico/runtime-host: "*"`；基线到本分支的三个 package manifest/lockfile 均无改动。
 - `npm run build`、根 typecheck、Desktop typecheck、lint、format 与 `git diff --check` 均通过。
