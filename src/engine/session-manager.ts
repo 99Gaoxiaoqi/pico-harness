@@ -161,6 +161,30 @@ export class SessionManager {
     for (const key of [...this.entries.keys()]) this.deleteByKey(key);
   }
 
+  /**
+   * Remove every inactive Session and wait until its durable resources are released.
+   * Intended for bounded host shutdown and isolated test cleanup; callers must first
+   * finish all acquisitions so the method cannot silently leave a pinned Session alive.
+   */
+  async clearAndDrain(): Promise<void> {
+    if (this.openingByKey.size > 0 || this.openingPinReservations.size > 0) {
+      throw new Error("SessionManager cannot drain while Session acquisition is in progress");
+    }
+    const pinned = [...this.entries.values()].filter((entry) => entry.pinCount > 0);
+    if (pinned.length > 0) {
+      throw new Error(
+        `SessionManager cannot drain ${pinned.length} pinned Session${pinned.length === 1 ? "" : "s"}`,
+      );
+    }
+
+    const draining: Promise<void>[] = [];
+    for (const key of [...this.entries.keys()]) {
+      const session = this.deleteByKey(key);
+      if (session) draining.push(session.close());
+    }
+    await Promise.all(draining);
+  }
+
   private touch(key: string): void {
     const entry = this.entries.get(key);
     if (!entry) return;
