@@ -114,6 +114,11 @@ export class RuntimeRunExecutor {
         throw new Error("A prestarted RuntimeRun requires resumeExistingSession");
       }
     }
+    if (this.input.continuationOf) {
+      throw new Error(
+        "RuntimeRunExecutor continuationOf is disabled; continuation must be claimed and started atomically",
+      );
+    }
     let prompt = initialPrompt;
 
     const result = await session.serialize(async () => {
@@ -129,27 +134,23 @@ export class RuntimeRunExecutor {
         capability: runtimeCapability,
       });
       await this.recoverOrphanGraphWorks(session, runtimeState);
-      // ADR 29 调度接入(2026-08-20):reconcile 把崩溃 run 定形为 interrupted 后,
-      // 自动锚定最新未 claim 的 interrupted run——本次 run 以其续跑身份起跑
-      // (goal/cron/前台统一生效;显式 continuationOf 与 prestartedRun 优先)。
-      const autoContinuation = await this.claimAutomaticContinuation(session);
-      const runtimeRun = await RuntimeRun.start({
-        capability: runtimeCapability,
-        ...(prestartedRun
-          ? {
-              runId: prestartedRun.runId,
-              invocationId: prestartedRun.invocationId,
-              runStartedEventId: prestartedRun.runStartedEventId,
-              parentRunId: prestartedRun.parentRunId,
-              now: prestartedRunClock(prestartedRun.runStartedAt),
-            }
-          : autoContinuation
-            ? { runId: autoContinuation.runId, continuationOf: autoContinuation.continuationOf }
+      // reconcile 把崩溃 run 定形为 interrupted 后，store 原子落下 claim
+      // 与 target run.started；prestartedRun 走已有的独立 admission 路径。
+      const automaticContinuation = await this.startAutomaticContinuation(session);
+      const runtimeRun =
+        automaticContinuation ??
+        (await RuntimeRun.start({
+          capability: runtimeCapability,
+          ...(prestartedRun
+            ? {
+                runId: prestartedRun.runId,
+                invocationId: prestartedRun.invocationId,
+                runStartedEventId: prestartedRun.runStartedEventId,
+                parentRunId: prestartedRun.parentRunId,
+                now: prestartedRunClock(prestartedRun.runStartedAt),
+              }
             : {}),
-        ...(this.input.continuationOf && !prestartedRun
-          ? { continuationOf: this.input.continuationOf }
-          : {}),
-      });
+        }));
       let submittedUserMessage =
         memoryReviewScheduler && resumeExistingSession
           ? findPrecommittedDesktopMemoryEvidence(
@@ -299,18 +300,17 @@ export class RuntimeRunExecutor {
    */
   /**
    * ADR 29 调度接入:最新 interrupted 终态且未被 claim 的 run → 为本次 run
-   * 锚定续跑(返回 target runId + continuationOf 三元组)。claim 失败/无候选/
-   * 调用方已显式声明 continuationOf 或使用 prestartedRun 时返回 undefined,
-   * 本次 run 以普通身份起跑。claim 成功但 start 前崩溃的窗口由孤儿改绑兜底。
+   * 锚定续跑：store 在单事务内返回已起跑的 target RuntimeRun。
+   * 无候选、候选状态变化或使用 prestartedRun 时返回 undefined，本次
+   * run 以普通身份起跑。
    *
    * 新鲜度门(审查 F2):终态事件 at 距今不足 continuationTerminalMinAgeMs
    * (缺省 10 分钟)时跳过锚定——跨进程 reconcile 可能误判存活 run 补了新鲜
-   * interrupted 终态,立即 claim 会封死对方;未 claim 的终态 run 保持开放语义,
-   * 对方可继续写。代价是真实崩溃后的锚定延迟到窗口期后的下一次 run 起跑。
+   * interrupted 终态后不立即 continuation，避免对仍存活调度者过早接管。
+   * run.terminal 本身仍是 immutable tail；代价是真实崩溃后的锚定延迟到
+   * 窗口期后的下一次 run 起跑。
    */
-  private async claimAutomaticContinuation(
-    session: Session,
-  ): Promise<{ runId: string; continuationOf: RuntimeRunContinuationOf } | undefined> {
+  private async startAutomaticContinuation(session: Session): Promise<RuntimeRun | undefined> {
     if (this.input.continuationOf || this.input.prestartedRun) return undefined;
     const store = session.runtimeEventStore;
     if (!store) return undefined;
@@ -326,23 +326,19 @@ export class RuntimeRunExecutor {
       );
       return undefined;
     }
-    const targetRunId = randomUUID();
-    const outcome = await store.claimContinuation(session.id, candidate.runId, targetRunId);
-    if (outcome.status !== "claimed") {
+    const run = await RuntimeRun.startContinuation({
+      capability: session.runtimeEventCapability!,
+      sourceRunId: candidate.runId,
+      targetRunId: randomUUID(),
+    });
+    if (!run) {
       logger.info(
-        { sessionId: session.id, sourceRunId: candidate.runId, status: outcome.status },
+        { sessionId: session.id, sourceRunId: candidate.runId },
         "[Continuation] interrupted run 未锚定自动续跑(已被续跑或状态变化),普通起跑",
       );
       return undefined;
     }
-    return {
-      runId: targetRunId,
-      continuationOf: {
-        runId: candidate.runId,
-        highWater: outcome.claim.sourceHighWater,
-        prefixDigest: outcome.claim.sourcePrefixDigest,
-      },
-    };
+    return run;
   }
 
   private async recoverOrphanGraphWorks(

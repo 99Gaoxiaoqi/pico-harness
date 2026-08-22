@@ -1,17 +1,3 @@
-// ADR 29 continuation claim 最小协议集成测试——中断 run 的确定性续跑锚。
-//
-// 验收不变量:
-// - C1 同一 source run 至多一个 claim(UNIQUE 约束;冲突返回类型化结果,不抛裸 SqliteError)。
-// - C2 claim 成功隐含:claim 时刻源为 interrupted 终态、digest/high_water 与账本一致;
-//   活跃(无终态)/非 interrupted 终态的 run 被类型化拒绝。
-// - C3 claim 事务只读源账本、只写 claims 行;目标关联只经 run.started 的 continuationOf。
-// - C4 已 claim(=已 interrupted 终态)的源 run 追加新事件被拒(源封口,本次新增防线);
-//   幂等重放不受影响。
-//
-// 前缀 digest 序列化口径(与 store 注释一致,此处独立重算对账):
-//   对 seq∈[1..high_water] 升序的每条事件,取
-//     JSON.stringify({ seq, eventId, payload })   // payload = 键排序 canonical JSON 字符串
-//   逐行后跟 "\n"(含末行),对全文取 sha256 hex。
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -19,22 +5,26 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { Session } from "../../src/engine/session.js";
-import type { Message } from "../../src/schema/message.js";
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 import { RuntimeRun } from "../../src/runtime/runtime-run.js";
+import {
+  RuntimeEventStoreIntegrityError,
+  RuntimeEventStoreOwnerFenceError,
+  RuntimeEventStoreRunSealedError,
+  type StartRuntimeContinuationInput,
+} from "../../src/storage/runtime-event-store-contracts.js";
 import type { RuntimeEvent } from "../../src/storage/runtime-event.js";
-import { RuntimeEventStoreRunSealedError } from "../../src/storage/runtime-event-store-contracts.js";
-import type { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import { closeAllOperationalDatabasesForTest } from "../../src/storage/sqlite/sqlite-database.js";
+import type { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
 
-interface ClaimScene {
+interface Scene {
   readonly session: Session;
   readonly store: SqliteRuntimeEventStore;
 }
 
-async function createScene(context: test.TestContext, sessionId: string): Promise<ClaimScene> {
-  const root = await mkdtemp(join(tmpdir(), `pico-continuation-${sessionId}-`));
-  const session = new Session(sessionId, join(root, "workspace"), {
+async function createScene(context: test.TestContext, name: string): Promise<Scene> {
+  const root = await mkdtemp(join(tmpdir(), `pico-continuation-${name}-`));
+  const session = new Session(name, join(root, "workspace"), {
     persistence: true,
     picoHome: join(root, "pico-home"),
     runtimePort: createEngineRuntimePort(),
@@ -45,31 +35,55 @@ async function createScene(context: test.TestContext, sessionId: string): Promis
     await rm(root, { recursive: true, force: true });
   });
   await session.recover();
-  const store = session.runtimeEventStore;
-  assert.ok(store, "durable session must expose its runtime event store");
-  return { session, store };
+  assert.ok(session.runtimeEventStore);
+  return { session, store: session.runtimeEventStore };
 }
 
-function userMessage(content: string): Message {
-  return { role: "user", content };
+async function interrupted(scene: Scene, content = "source-prefix"): Promise<RuntimeRun> {
+  const run = await RuntimeRun.start({ capability: scene.session.runtimeEventCapability! });
+  await run.recordTurnStarted(1);
+  await run.commitMessages(scene.session, [{ role: "user", content }]);
+  await run.finish("interrupted", "test interruption");
+  return run;
 }
 
-/** 键排序 canonical JSON(独立实现,与 store 的 sortKeysDeep+stringify 对账)。 */
+function startInput(
+  scene: Scene,
+  sourceRunId: string,
+  targetRunId: string,
+): StartRuntimeContinuationInput {
+  return {
+    sessionId: scene.session.id,
+    sourceRunId,
+    targetRunId,
+    invocationId: `invocation:${targetRunId}`,
+    startEventId: `run-started:${targetRunId}`,
+    workDir: scene.session.workDir,
+    startedAt: "2026-08-22T08:00:00.000Z",
+    now: () => new Date("2026-08-22T08:00:00.000Z"),
+  };
+}
+
+async function startContinuation(scene: Scene, input: StartRuntimeContinuationInput) {
+  return scene.store.startContinuation({
+    ...input,
+    ownerFence: await scene.session.assertRuntimeEventWriteAllowed(),
+  });
+}
+
 function sortedKeysJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(sortedKeysJson).join(",")}]`;
   if (typeof value === "object" && value !== null) {
     const record = value as Record<string, unknown>;
-    const body = Object.keys(record)
+    return `{${Object.keys(record)
       .sort()
       .map((key) => `${JSON.stringify(key)}:${sortedKeysJson(record[key])}`)
-      .join(",");
-    return `{${body}}`;
+      .join(",")}}`;
   }
   return JSON.stringify(value);
 }
 
-/** 手工重算 seq∈[1..highWater] 前缀 digest(不经 store 实现)。 */
-function manualPrefixDigest(
+function prefixDigest(
   entries: readonly { sequence: number; event: RuntimeEvent }[],
   highWater: number,
 ): string {
@@ -77,419 +91,191 @@ function manualPrefixDigest(
   for (const entry of entries) {
     if (entry.sequence > highWater) continue;
     hash.update(
-      JSON.stringify({
+      `${JSON.stringify({
         seq: entry.sequence,
         eventId: entry.event.eventId,
         payload: sortedKeysJson(entry.event),
-      }),
-      "utf8",
+      })}\n`,
     );
-    hash.update("\n", "utf8");
   }
   return hash.digest("hex");
 }
 
-/** 构造一个已终态的 run:interrupted(completed 场景传 "completed")。 */
-async function createTerminatedRun(
-  scene: ClaimScene,
-  status: "interrupted" | "completed",
-  messages: readonly string[] = [],
-): Promise<RuntimeRun> {
-  const run = await RuntimeRun.start({ capability: scene.session.runtimeEventCapability! });
-  await run.recordTurnStarted(1);
-  for (const content of messages) {
-    await run.commitMessages(scene.session, [userMessage(content)]);
-  }
-  await run.finish(status, `test-${status}`);
-  return run;
-}
+test("continuation claim 与 target run.started 同事务落库，精确重放幂等", async (context) => {
+  const scene = await createScene(context, "atomic-happy");
+  const source = await interrupted(scene);
+  const before = await scene.store.readSessionEntries(scene.session.id);
+  const input = startInput(scene, source.runId, "target-atomic");
 
-test("C2+ C1：interrupted run claim 成功（digest/high_water 手工重算对账），二次 claim 类型化冲突", async (context) => {
-  const scene = await createScene(context, "claim-happy-path");
-  const source = await createTerminatedRun(scene, "interrupted", ["前缀消息一", "前缀消息二"]);
-
-  const before = (await scene.store.readSessionEntries(scene.session.id)).map(
-    ({ sequence, event }) => ({ sequence, event }),
-  );
-  const boundary = await scene.store.readSessionRunBoundary(scene.session.id, source.runId);
-  assert.ok(boundary.entries.at(-1), "interrupted run must have a terminal event");
-
-  const outcome = await scene.store.claimContinuation(
-    scene.session.id,
-    source.runId,
-    "run-continuation-target-1",
-  );
-  assert.equal(outcome.status, "claimed");
-  const claim = outcome.claim;
-  assert.equal(claim.sourceSessionId, scene.session.id);
-  assert.equal(claim.sourceRunId, source.runId);
-  assert.equal(claim.targetSessionId, scene.session.id, "ADR 29:同 session 续跑");
-  assert.equal(claim.targetRunId, "run-continuation-target-1");
-
-  // C2 后半:high_water = 该 run 全部事件的 seq 上界(末条 run 事件 = 终态)。
-  assert.equal(claim.sourceHighWater, boundary.entries.at(-1)!.sequence);
-  // C2 后半:digest 与账本手工重算一致。
-  assert.equal(
-    claim.sourcePrefixDigest,
-    manualPrefixDigest(before, claim.sourceHighWater),
-    "prefix digest must match an independently recomputed serialization",
-  );
-  // C2 前半已由构造保证:claim 时刻源终态为 interrupted(非 interrupted 场景另测)。
-  const terminal = boundary.entries.at(-1)!.event;
-  assert.equal(terminal.kind, "run.terminal");
-  assert.equal(terminal.data.status, "interrupted");
-
-  // C3 写侧:claim 只写 claims 行——源账本事件数与末条 seq 不变。
-  const after = await scene.store.readSessionEntries(scene.session.id);
-  assert.equal(after.length, before.length);
-  assert.equal(after.at(-1)!.event.eventId, before.at(-1)!.event.eventId);
-
-  // C1:同一 source run 二次 claim(同 target 幂等重放)→ already_claimed,不抛裸 SqliteError。
-  // 异 target 的孤儿改绑语义(Finding 1)另测:未起跑可改绑,起跑后不可。
-  const second = await scene.store.claimContinuation(
-    scene.session.id,
-    source.runId,
-    "run-continuation-target-1",
-  );
-  assert.equal(second.status, "already_claimed");
-  assert.equal(second.claim.claimId, claim.claimId);
-  assert.equal(second.claim.targetRunId, claim.targetRunId);
-
-  // 读回通道:按 source run 点查同一行。
-  const reread = await scene.store.findContinuationClaimBySourceRun(scene.session.id, source.runId);
-  assert.deepEqual(reread, claim);
-});
-
-test("C1+ 孤儿 claim 幂等改绑（Finding 1）：旧 target 未起跑可换绑，起跑后不可", async (context) => {
-  const scene = await createScene(context, "claim-orphan-rebind");
-  const source = await createTerminatedRun(scene, "interrupted", ["孤儿改绑前缀"]);
-
-  // 首次 claim 成功,但 target 的 run.started 写入前"崩溃"(不写任何 target 事件)。
-  const first = await scene.store.claimContinuation(
-    scene.session.id,
-    source.runId,
-    "run-target-crashed",
-  );
-  assert.equal(first.status, "claimed");
-
-  // 重试以新 runId 再 claim:旧 target 账本中不存在 → 幂等改绑,锚点信息不变。
-  const retry = await scene.store.claimContinuation(
-    scene.session.id,
-    source.runId,
-    "run-target-retry",
-  );
-  assert.equal(retry.status, "claimed");
-  assert.equal(retry.rebound, true);
-  assert.equal(retry.claim.targetRunId, "run-target-retry");
-  assert.equal(retry.claim.claimId, first.claim.claimId, "改绑不换锚点身份");
-  assert.equal(retry.claim.sourcePrefixDigest, first.claim.sourcePrefixDigest);
-  assert.equal(retry.claim.sourceHighWater, first.claim.sourceHighWater);
-  const reread = await scene.store.findContinuationClaimBySourceRun(scene.session.id, source.runId);
-  assert.equal(reread?.targetRunId, "run-target-retry");
-
-  // 换绑后的 target 真正起跑(以 claim 的 targetRunId 起,调度接入的契约)并终态后,
-  // 再换 target → already_claimed(续跑事实已定形)。
-  const target = await RuntimeRun.start({
-    capability: scene.session.runtimeEventCapability!,
-    runId: "run-target-retry",
-    continuationOf: {
-      runId: retry.claim.sourceRunId,
-      highWater: retry.claim.sourceHighWater,
-      prefixDigest: retry.claim.sourcePrefixDigest,
-    },
+  const first = await startContinuation(scene, input);
+  assert.equal(first.status, "started");
+  assert.equal(first.append.inserted, true);
+  assert.equal(first.claim.sourceHighWater, before.at(-1)!.sequence);
+  assert.equal(first.claim.sourcePrefixDigest, prefixDigest(before, first.claim.sourceHighWater));
+  assert.deepEqual(first.startEvent.data.continuationOf, {
+    runId: source.runId,
+    highWater: first.claim.sourceHighWater,
+    prefixDigest: first.claim.sourcePrefixDigest,
   });
-  await target.finish("completed", "rebound-target-done");
-  const third = await scene.store.claimContinuation(
-    scene.session.id,
-    source.runId,
-    "run-target-third",
+
+  const replay = await startContinuation(scene, input);
+  assert.equal(replay.status, "replayed");
+  assert.equal(replay.append.inserted, false);
+  assert.deepEqual(replay.claim, first.claim);
+  assert.equal((await scene.store.readSessionEntries(scene.session.id)).length, before.length + 1);
+
+  const attached = await RuntimeRun.startContinuation({
+    capability: scene.session.runtimeEventCapability!,
+    sourceRunId: source.runId,
+    targetRunId: input.targetRunId,
+    invocationId: input.invocationId,
+    runStartedEventId: input.startEventId,
+    startedAt: input.startedAt,
+  });
+  assert.ok(attached, "RuntimeRun must attach the atomically prestarted target");
+  await attached.recordTurnStarted(1);
+  await attached.commitMessages(scene.session, [{ role: "user", content: "continued" }]);
+  await attached.finish("completed");
+  assert.equal(
+    (await scene.store.readRun(scene.session.id, input.targetRunId)).filter(
+      (event) => event.kind === "run.started",
+    ).length,
+    1,
   );
-  assert.equal(third.status, "already_claimed");
-  assert.equal(third.claim.targetRunId, "run-target-retry");
 });
 
-test("C2 前半：活跃 run / completed run / 不存在 run 的 claim 被类型化拒绝；target 重复占用被拒", async (context) => {
-  const scene = await createScene(context, "claim-rejections");
-  const capability = scene.session.runtimeEventCapability!;
+test("continuation 换 target/source/起点载荷均 fail-closed", async (context) => {
+  const scene = await createScene(context, "atomic-conflicts");
+  const sourceA = await interrupted(scene, "source-a");
+  const sourceB = await interrupted(scene, "source-b");
+  const input = startInput(scene, sourceA.runId, "target-a");
+  const started = await startContinuation(scene, input);
+  assert.equal(started.status, "started");
+  const baseline = await scene.store.readSessionEntries(scene.session.id);
 
-  // 活跃 run:已 start 未终态。
-  const active = await RuntimeRun.start({ capability });
-  await active.recordTurnStarted(1);
-  assert.deepEqual(
-    await scene.store.claimContinuation(scene.session.id, active.runId, "target-active"),
-    { status: "rejected", reason: "run_active" },
+  await assert.rejects(
+    startContinuation(scene, { ...input, targetRunId: "target-b" }),
+    RuntimeEventStoreIntegrityError,
   );
-
-  // completed run:有终态但非 interrupted,不可续。
-  const completed = await createTerminatedRun(scene, "completed", ["done"]);
-  assert.deepEqual(
-    await scene.store.claimContinuation(scene.session.id, completed.runId, "target-completed"),
-    { status: "rejected", reason: "run_not_interrupted" },
+  await assert.rejects(
+    startContinuation(scene, { ...input, invocationId: "invocation:forged" }),
+    RuntimeEventStoreIntegrityError,
   );
-
-  // 不存在的 run。
   assert.deepEqual(
-    await scene.store.claimContinuation(scene.session.id, "run-never-existed", "target-void"),
-    { status: "rejected", reason: "run_not_found" },
-  );
-
-  // target run 已被其他 claim 占用 → target_conflict。
-  const firstSource = await createTerminatedRun(scene, "interrupted");
-  const claimed = await scene.store.claimContinuation(
-    scene.session.id,
-    firstSource.runId,
-    "target-shared",
-  );
-  assert.equal(claimed.status, "claimed");
-  const secondSource = await createTerminatedRun(scene, "interrupted");
-  assert.deepEqual(
-    await scene.store.claimContinuation(scene.session.id, secondSource.runId, "target-shared"),
+    await startContinuation(scene, startInput(scene, sourceB.runId, input.targetRunId)),
     { status: "rejected", reason: "target_conflict" },
   );
+  assert.deepEqual(await scene.store.readSessionEntries(scene.session.id), baseline);
 });
 
-test("C4 strict seal：所有终态 run 拒绝新事实，精确幂等重放仍可用", async (context) => {
-  const scene = await createScene(context, "claim-source-seal");
-  const ownerFence = await scene.session.assertRuntimeEventWriteAllowed();
-  const claimedSource = await createTerminatedRun(scene, "interrupted", ["sealed-prefix"]);
-  const claim = await scene.store.claimContinuation(
-    scene.session.id,
-    claimedSource.runId,
-    "run-seal-target",
-  );
-  assert.equal(claim.status, "claimed");
+test("continuation failpoint 不留孤立 claim/start，清洁重试可成功", async (context) => {
+  const scene = await createScene(context, "atomic-rollback");
+  const source = await interrupted(scene);
+  const input = startInput(scene, source.runId, "target-after-crash");
+  const baseline = await scene.store.readSessionEntries(scene.session.id);
 
-  // 向已 claim 的源 run 追加新的非恢复类事件 → 类型化拒绝(fail-closed)。
-  const sealedAppend: RuntimeEvent = {
-    schemaVersion: 2,
-    eventId: "seal-probe:after-claim",
-    sessionId: scene.session.id,
-    invocationId: "inv-seal-probe",
-    runId: claimedSource.runId,
-    turnId: "turn-seal-probe",
-    at: new Date().toISOString(),
-    partial: false,
-    visibility: "model",
-    kind: "message.committed",
-    data: { message: { role: "user", content: "追改已封口的源 run" } },
-  } as RuntimeEvent;
   await assert.rejects(
-    scene.store.append(sealedAppend, { ownerFence }),
-    (error: unknown) =>
-      error instanceof RuntimeEventStoreRunSealedError &&
-      error.runId === claimedSource.runId &&
-      error.sessionId === scene.session.id,
+    startContinuation(scene, {
+      ...input,
+      afterClaimBeforeStart: () => {
+        throw new Error("simulated crash");
+      },
+    }),
+    /simulated crash/u,
   );
-
-  // strict seal 对所有终态 run 生效，不再允许 fork/workflow 在 terminal 后补事实。
-  const completed = await createTerminatedRun(scene, "completed");
-  await assert.rejects(
-    scene.store.append(
-      {
-        ...sealedAppend,
-        eventId: "seal-probe:after-completed",
-        runId: completed.runId,
-      } as RuntimeEvent,
-      { ownerFence },
-    ),
-    (error: unknown) => error instanceof RuntimeEventStoreRunSealedError,
+  assert.equal(
+    await scene.store.findContinuationClaimBySourceRun(scene.session.id, source.runId),
+    undefined,
   );
+  assert.deepEqual(await scene.store.readSessionEntries(scene.session.id), baseline);
 
-  // 幂等重放不受封口影响:重放已落库的终态事件(同 eventId 同载荷)合法且不新增。
-  const before = await scene.store.readSession(scene.session.id);
-  const terminal = before.find(
-    (event) => event.kind === "run.terminal" && event.runId === claimedSource.runId,
-  )!;
-  const replay = await scene.store.append(terminal, { ownerFence });
-  assert.equal(replay.inserted, false);
-  const afterReplay = await scene.store.readSession(scene.session.id);
-  assert.equal(afterReplay.length, before.length, "sealed-run replay must not append anything");
+  const retry = await startContinuation(scene, input);
+  assert.equal(retry.status, "started");
 });
 
-test("C4 批内 strict seal：整批回滚且 recovery 也必须在 terminal 前完成", async (context) => {
-  const scene = await createScene(context, "claim-batch-seal");
-  const ownerFence = await scene.session.assertRuntimeEventWriteAllowed();
-  const claimedSource = await createTerminatedRun(scene, "interrupted", ["batch-seal-prefix"]);
-  const claim = await scene.store.claimContinuation(
-    scene.session.id,
-    claimedSource.runId,
-    "run-batch-seal-target",
-  );
-  assert.equal(claim.status, "claimed");
-  const baseline = await scene.store.readSession(scene.session.id);
+test("continuation 原子事务拒绝 owner takeover 前的陈旧 fence", async (context) => {
+  const scene = await createScene(context, "atomic-stale-fence");
+  const source = await interrupted(scene);
+  const staleFence = await scene.session.assertRuntimeEventWriteAllowed();
+  await scene.store.advanceOwnerFence(scene.session.id, staleFence.epoch);
 
-  // 场景一:批模式(appendBatch)追加新事件到已 claim 的源 run → RunSealedError,
-  // 整批原子回滚——批中所有新事件都不落库。
-  const batchedA: RuntimeEvent = {
-    schemaVersion: 2,
-    eventId: "batch-seal-a",
-    sessionId: scene.session.id,
-    invocationId: "inv-batch-seal",
-    runId: claimedSource.runId,
-    turnId: "turn-batch-seal",
-    at: new Date().toISOString(),
-    partial: false,
-    visibility: "model",
-    kind: "message.committed",
-    data: { message: { role: "user", content: "批模式追改一" } },
-  } as RuntimeEvent;
-  const batchedB: RuntimeEvent = { ...batchedA, eventId: "batch-seal-b" } as RuntimeEvent;
   await assert.rejects(
-    scene.store.appendBatch([batchedA, batchedB], { ownerFence }),
-    (error: unknown) => error instanceof RuntimeEventStoreRunSealedError,
+    scene.store.startContinuation({
+      ...startInput(scene, source.runId, "target-stale-owner"),
+      ownerFence: staleFence,
+    }),
+    RuntimeEventStoreOwnerFenceError,
   );
-  const afterBatch = await scene.store.readSession(scene.session.id);
-  assert.equal(afterBatch.length, baseline.length, "rejected batch must land nothing");
   assert.equal(
-    afterBatch.some(
-      (event) => event.eventId === "batch-seal-a" || event.eventId === "batch-seal-b",
-    ),
-    false,
+    await scene.store.findContinuationClaimBySourceRun(scene.session.id, source.runId),
+    undefined,
   );
+  assert.deepEqual(await scene.store.readRun(scene.session.id, "target-stale-owner"), []);
+});
 
-  // 场景二:单批内先插入 run.terminal、后跟同 run 的新事件 → 批内封口生效,
-  // 新事件被拒且终态本身也不落地(整批原子回滚);终态必须是其 run 批内最后一条新事实。
-  const freshRunId = "run-inbatch-terminal";
-  const inBatchStart: RuntimeEvent = {
-    schemaVersion: 2,
-    eventId: "inbatch:start",
-    sessionId: scene.session.id,
-    invocationId: "inv-inbatch",
-    runId: freshRunId,
-    turnId: "turn-inbatch",
-    at: new Date().toISOString(),
-    partial: false,
-    visibility: "internal",
-    kind: "run.started",
-    data: { workDir: scene.session.workDir },
-  } as RuntimeEvent;
-  const inBatchTerminal: RuntimeEvent = {
-    ...inBatchStart,
-    eventId: "inbatch:terminal",
-    kind: "run.terminal",
-    data: { status: "completed" },
-  } as RuntimeEvent;
-  const inBatchAfter: RuntimeEvent = {
-    ...inBatchStart,
-    eventId: "inbatch:after-terminal",
-    kind: "message.committed",
-    visibility: "model",
-    data: { message: { role: "user", content: "批内终态之后" } },
-  } as RuntimeEvent;
+test("旧两事务路径与伪造 continuationOf 均被拒绝", async (context) => {
+  const scene = await createScene(context, "legacy-fail-closed");
+  const source = await interrupted(scene);
   await assert.rejects(
-    scene.store.appendBatch([inBatchStart, inBatchTerminal, inBatchAfter], { ownerFence }),
-    (error: unknown) => error instanceof RuntimeEventStoreRunSealedError,
+    scene.store.claimContinuation(scene.session.id, source.runId, "legacy-target"),
+    /Standalone continuation claims are disabled/u,
   );
-  const afterInBatch = await scene.store.readSession(scene.session.id);
-  assert.equal(
-    afterInBatch.length,
-    baseline.length,
-    "in-batch terminal rejection rolls back the whole batch",
+  await assert.rejects(
+    RuntimeRun.start({
+      capability: scene.session.runtimeEventCapability!,
+      continuationOf: { runId: source.runId, highWater: 1, prefixDigest: "0".repeat(64) },
+    } as Parameters<typeof RuntimeRun.start>[0]),
+    /startContinuation/u,
   );
-  // 对照组:同样的前两事件(无批内尾随新事件)正常落地。
-  await scene.store.appendBatch([inBatchStart, inBatchTerminal], { ownerFence });
-  const control = await scene.store.readSession(scene.session.id);
-  assert.equal(control.length, baseline.length + 2);
-
-  // 场景三:recovery 类事件也不能越过 immutable terminal；恢复必须先 T2 再 seal。
-  const recoveryContent = "recovery-exempt synthetic tool result";
   await assert.rejects(
     scene.store.append(
       {
         schemaVersion: 2,
-        eventId: "batch-seal-recovery-exempt",
+        eventId: "forged-continuation-start",
         sessionId: scene.session.id,
-        invocationId: "inv-batch-seal",
-        runId: claimedSource.runId,
-        turnId: "turn-batch-seal",
+        invocationId: "invocation:forged",
+        runId: "forged-target",
+        turnId: "turn:forged-target:input",
         at: new Date().toISOString(),
         partial: false,
-        visibility: "model",
-        refs: { toolCallId: "call-batch-seal-recovery" },
-        kind: "tool.result.recorded",
+        visibility: "internal",
+        kind: "run.started",
         data: {
-          toolName: "batch_seal_recovery",
-          status: "interrupted",
-          recovery: { classification: "indeterminate" },
-          body: {
-            storage: "inline",
-            content: recoveryContent,
-            sha256: createHash("sha256").update(recoveryContent, "utf8").digest("hex"),
-            sizeBytes: Buffer.byteLength(recoveryContent, "utf8"),
-          },
-          projection: {
-            version: 1,
-            mode: "synthetic",
-            text: recoveryContent,
-            strategy: "interruption-recovery",
-            truncated: false,
-          },
+          workDir: scene.session.workDir,
+          continuationOf: { runId: source.runId, highWater: 1, prefixDigest: "0".repeat(64) },
         },
       } as RuntimeEvent,
-      { ownerFence },
+      { ownerFence: await scene.session.assertRuntimeEventWriteAllowed() },
     ),
-    RuntimeEventStoreRunSealedError,
+    /must be produced by startContinuation/u,
   );
 });
 
-test("C3+ 目标关联：run.started 携带 continuationOf 落库可读回；目标 run 正常写事件不受源封口影响", async (context) => {
-  const scene = await createScene(context, "claim-target-association");
-  const source = await createTerminatedRun(scene, "interrupted", ["源前缀"]);
-  const claim = await scene.store.claimContinuation(
-    scene.session.id,
-    source.runId,
-    "run-target-with-anchor",
-  );
-  assert.equal(claim.status, "claimed");
-
-  // 目标 run 经最小 API 声明续跑关系:三元组写入 run.started 的 data.continuationOf。
-  const target = await RuntimeRun.start({
-    capability: scene.session.runtimeEventCapability!,
-    continuationOf: {
-      runId: claim.claim.sourceRunId,
-      highWater: claim.claim.sourceHighWater,
-      prefixDigest: claim.claim.sourcePrefixDigest,
-    },
-  });
-  await target.recordTurnStarted(1);
-  await target.commitMessages(scene.session, [userMessage("续跑后的新消息")]);
-  await target.finish("completed");
-
-  const events = await scene.store.readSession(scene.session.id);
-  const targetStarted = events.find(
-    (event) => event.kind === "run.started" && event.runId === target.runId,
-  )!;
-  assert.equal(targetStarted.kind, "run.started");
-  assert.deepEqual(targetStarted.data.continuationOf, {
-    runId: claim.claim.sourceRunId,
-    highWater: claim.claim.sourceHighWater,
-    prefixDigest: claim.claim.sourcePrefixDigest,
-  });
-  // 同 session 事件流天然含前缀:源前缀消息仍在目标 run 可见的会话账本里。
-  assert.ok(
-    events.some(
-      (event) => event.kind === "message.committed" && event.data.message.content === "源前缀",
-    ),
-  );
-
-  // schema 严格校验:continuationOf 缺字段/坏 digest 的 run.started 被 append 校验拒绝。
+test("run.terminal 是严格 immutable tail，仅精确重放可过", async (context) => {
+  const scene = await createScene(context, "strict-terminal");
+  const source = await interrupted(scene);
+  const events = await scene.store.readRun(scene.session.id, source.runId);
+  const terminal = events.at(-1)!;
+  assert.equal(terminal.kind, "run.terminal");
   await assert.rejects(
-    scene.store.append({
-      schemaVersion: 2,
-      eventId: "bad-continuation-start",
-      sessionId: scene.session.id,
-      invocationId: "inv-bad",
-      runId: "run-bad-anchor",
-      turnId: "turn-bad",
-      at: new Date().toISOString(),
-      partial: false,
-      visibility: "internal",
-      kind: "run.started",
-      data: {
-        workDir: scene.session.workDir,
-        continuationOf: { runId: source.runId, highWater: 1, prefixDigest: "not-a-digest" },
-      },
-    } as RuntimeEvent),
-    /is invalid|prefixDigest/u,
+    scene.store.append(
+      {
+        ...terminal,
+        eventId: "after-terminal",
+        kind: "message.committed",
+        visibility: "model",
+        data: { message: { role: "user", content: "late write" } },
+      } as RuntimeEvent,
+      { ownerFence: await scene.session.assertRuntimeEventWriteAllowed() },
+    ),
+    RuntimeEventStoreRunSealedError,
+  );
+  assert.equal(
+    (
+      await scene.store.append(terminal, {
+        ownerFence: await scene.session.assertRuntimeEventWriteAllowed(),
+      })
+    ).inserted,
+    false,
   );
 });

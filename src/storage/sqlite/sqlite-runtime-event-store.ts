@@ -50,6 +50,7 @@ import {
   type PrepareRuntimeToolOperationResult,
   type RuntimeContinuationClaim,
   type RuntimeContinuationClaimOutcome,
+  type RuntimeContinuationStartOutcome,
   type RuntimeEventStoreAppendResult,
   type RuntimeEventStoreEntry,
   type RuntimeEventStoreEntryPageOptions,
@@ -71,6 +72,7 @@ import {
   type RuntimeTranscriptRecordInput,
   type SettleRuntimeToolOperationInput,
   type SettleRuntimeToolOperationResult,
+  type StartRuntimeContinuationInput,
   type UpsertRuntimePartialSnapshotInput,
   type WorkspaceRuntimeSessionSnapshot,
 } from "../runtime-event-store-contracts.js";
@@ -955,12 +957,31 @@ export class SqliteRuntimeEventStore {
   }
 
   async claimContinuation(
-    sourceSessionId: string,
-    sourceRunId: string,
-    targetRunId: string,
-    options: { readonly now?: () => Date } = {},
+    _sourceSessionId: string,
+    _sourceRunId: string,
+    _targetRunId: string,
+    _options: { readonly now?: () => Date } = {},
   ): Promise<RuntimeContinuationClaimOutcome> {
+    throw new RuntimeEventStoreIntegrityError(
+      "Standalone continuation claims are disabled; use startContinuation atomically",
+    );
+  }
+
+  /**
+   * 在一个 BEGIN IMMEDIATE 内冻结 source 前缀、占用唯一 claim，并追加
+   * 由 store 构造的 target run.started。任意一步失败都回滚，不存在孤立
+   * claim 或孤立 continuation start。
+   */
+  async startContinuation(
+    input: StartRuntimeContinuationInput,
+  ): Promise<RuntimeContinuationStartOutcome> {
     return this.write(() => {
+      const sourceSessionId = input.sessionId;
+      const sourceRunId = input.sourceRunId;
+      const targetRunId = input.targetRunId;
+      this.requireSessionAppendContext(sourceSessionId);
+      this.assertOwnerFenceLocked([sourceSessionId], input.ownerFence);
+
       const existingBySource = this.readContinuationClaimRowLocked(
         "SELECT " +
           CONTINUATION_CLAIM_ROW_COLUMNS +
@@ -968,39 +989,25 @@ export class SqliteRuntimeEventStore {
         [sourceSessionId, sourceRunId],
       );
       if (existingBySource) {
-        // 同 target 幂等重放:纯幂等,维持 already_claimed。
-        if (existingBySource.targetRunId === targetRunId) {
-          return { status: "already_claimed" as const, claim: existingBySource };
+        if (existingBySource.targetRunId !== targetRunId) {
+          throw new RuntimeEventStoreIntegrityError(
+            `Runtime continuation source ${sourceRunId} is already bound to target ${existingBySource.targetRunId}`,
+          );
         }
-        // 孤儿 claim 幂等改绑(对抗审查 Finding 1):claim 成功后 target 的
-        // run.started 写入前崩溃时,锚点不可逆地占着 source 封口与 target 槽位。
-        // 旧 target 在账本中不存在(从未起跑)→ 允许改绑到新 target;源封口、
-        // digest/high_water/claimId/createdAt 均不变。旧 target 已起跑则维持
-        // already_claimed——续跑事实已定形,不可换绑。整个判定在写事务内完成。
-        const oldTargetStarted =
-          this.lease.database
-            .prepare(
-              "SELECT 1 FROM runtime_events WHERE session_id = ? AND run_id = ? AND kind = 'run.started' LIMIT 1",
-            )
-            .get(existingBySource.targetSessionId, existingBySource.targetRunId) !== undefined;
-        if (oldTargetStarted) {
-          return { status: "already_claimed" as const, claim: existingBySource };
-        }
-        const newTargetTaken =
-          existingBySource.targetRunId !== targetRunId &&
-          this.lease.database
-            .prepare(
-              "SELECT 1 FROM runtime_continuation_claims WHERE target_session_id = ? AND target_run_id = ? LIMIT 1",
-            )
-            .get(sourceSessionId, targetRunId) !== undefined;
-        if (newTargetTaken) {
-          return { status: "rejected" as const, reason: "target_conflict" as const };
-        }
-        const rebound: RuntimeContinuationClaim = { ...existingBySource, targetRunId };
-        this.lease.database
-          .prepare("UPDATE runtime_continuation_claims SET target_run_id = ? WHERE claim_id = ?")
-          .run(targetRunId, existingBySource.claimId);
-        return { status: "claimed" as const, claim: rebound, rebound: true as const };
+        const replayEvent = this.createContinuationStartEvent(input, existingBySource);
+        const [append] = this.appendBatchLocked(
+          [replayEvent],
+          { ownerFence: input.ownerFence },
+          randomUUID(),
+          new Date().toISOString(),
+          existingBySource,
+        );
+        return {
+          status: "replayed" as const,
+          claim: existingBySource,
+          startEvent: replayEvent,
+          append: append!,
+        };
       }
       const existingByTarget = this.readContinuationClaimRowLocked(
         "SELECT " +
@@ -1050,7 +1057,7 @@ export class SqliteRuntimeEventStore {
         // ADR 29:跨 session 续跑不在本决策——target 与 source 同 session。
         targetSessionId: sourceSessionId,
         targetRunId,
-        createdAt: (options.now ?? (() => new Date()))().toISOString(),
+        createdAt: (input.now ?? (() => new Date()))().toISOString(),
       };
       this.lease.database
         .prepare(
@@ -1069,8 +1076,43 @@ export class SqliteRuntimeEventStore {
           claim.targetRunId,
           claim.createdAt,
         );
-      return { status: "claimed" as const, claim };
+      input.afterClaimBeforeStart?.();
+      const startEvent = this.createContinuationStartEvent(input, claim);
+      const [append] = this.appendBatchLocked(
+        [startEvent],
+        { ownerFence: input.ownerFence },
+        randomUUID(),
+        new Date().toISOString(),
+        claim,
+      );
+      return { status: "started" as const, claim, startEvent, append: append! };
     });
+  }
+
+  private createContinuationStartEvent(
+    input: StartRuntimeContinuationInput,
+    claim: RuntimeContinuationClaim,
+  ): Extract<RuntimeEvent, { kind: "run.started" }> {
+    return canonicalizeRuntimeEvent({
+      schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
+      eventId: input.startEventId,
+      sessionId: input.sessionId,
+      invocationId: input.invocationId,
+      runId: input.targetRunId,
+      turnId: `turn:${input.targetRunId}:input`,
+      at: input.startedAt,
+      partial: false,
+      visibility: "internal",
+      kind: "run.started",
+      data: {
+        workDir: canonicalizeWorkspacePath(input.workDir),
+        continuationOf: {
+          runId: claim.sourceRunId,
+          highWater: claim.sourceHighWater,
+          prefixDigest: claim.sourcePrefixDigest,
+        },
+      },
+    }) as Extract<RuntimeEvent, { kind: "run.started" }>;
   }
 
   /** 按 source run 点查既有 claim(claim 结果读回/对账用,只读事务)。 */
@@ -1759,9 +1801,25 @@ export class SqliteRuntimeEventStore {
     options: AppendRuntimeEventBatchOptions,
     txId: string,
     transactionCommittedAt: string,
+    continuationClaim?: RuntimeContinuationClaim,
   ): readonly RuntimeEventStoreAppendResult[] {
     const contexts = new Map<string, SessionAppendContext>();
     for (const event of canonicalEvents) {
+      if (event.kind === "run.started" && event.data.continuationOf) {
+        if (
+          !continuationClaim ||
+          continuationClaim.sourceSessionId !== event.sessionId ||
+          continuationClaim.targetSessionId !== event.sessionId ||
+          continuationClaim.targetRunId !== event.runId ||
+          continuationClaim.sourceRunId !== event.data.continuationOf.runId ||
+          continuationClaim.sourceHighWater !== event.data.continuationOf.highWater ||
+          continuationClaim.sourcePrefixDigest !== event.data.continuationOf.prefixDigest
+        ) {
+          throw new RuntimeEventStoreIntegrityError(
+            "Runtime continuation run.started must be produced by startContinuation",
+          );
+        }
+      }
       if (contexts.has(event.sessionId)) continue;
       contexts.set(event.sessionId, this.requireSessionAppendContext(event.sessionId));
     }

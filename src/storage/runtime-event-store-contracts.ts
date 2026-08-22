@@ -358,7 +358,34 @@ export type RuntimeContinuationClaimRejection =
   /** target run 已作为其他 claim 的续跑目标。 */
   | "target_conflict";
 
-/** claimContinuation 结果:成功(含孤儿改绑)/ 已被 claim(C1 冲突)/ 类型化拒绝。 */
+/**
+ * 原子续跑起点输入。continuationOf 不在输入面出现：store 在同一
+ * 事务的 source 快照中计算三元组，并构造唯一 canonical run.started。
+ */
+export interface StartRuntimeContinuationInput extends RuntimeFencedWriteOptions {
+  readonly sessionId: string;
+  readonly sourceRunId: string;
+  readonly targetRunId: string;
+  readonly invocationId: string;
+  readonly startEventId: string;
+  readonly workDir: string;
+  /** 精确重放身份的一部分；重试必须传回同一时间。 */
+  readonly startedAt: string;
+  readonly now?: () => Date;
+  /** 仅用于事务回滚测试；抛错时 claim 与 start 必须一起回滚。 */
+  readonly afterClaimBeforeStart?: () => void;
+}
+
+export type RuntimeContinuationStartOutcome =
+  | {
+      readonly status: "started" | "replayed";
+      readonly claim: RuntimeContinuationClaim;
+      readonly startEvent: Extract<RuntimeEvent, { kind: "run.started" }>;
+      readonly append: RuntimeEventStoreAppendResult;
+    }
+  | { readonly status: "rejected"; readonly reason: RuntimeContinuationClaimRejection };
+
+/** 旧两事务 API 的兼容结果；实现已 fail-closed，新代码不得调用。 */
 export type RuntimeContinuationClaimOutcome =
   | {
       readonly status: "claimed";

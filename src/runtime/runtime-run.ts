@@ -53,7 +53,6 @@ import {
   type RuntimeMessageCommittedEvent,
   type RuntimeModelCallSettledEvent,
   type RuntimeRunStartedEvent,
-  type RuntimeRunContinuationOf,
   type RuntimeRunTerminalEvent,
   type RuntimeSessionForkedEvent,
   type RuntimeTerminalStatus,
@@ -114,12 +113,6 @@ interface RuntimeRunBaseOptions {
   readonly parentRunId?: string;
   readonly parentToolCallId?: string;
   readonly now?: () => Date;
-  /**
-   * ADR 29 续跑声明(可选):调用方在 claimContinuation 成功后传入,写入
-   * run.started 的 data.continuationOf。前缀事件同 session 事件流天然可见,
-   * 模型上下文无需特判;跨 session 续跑不在 ADR 29 范围。
-   */
-  readonly continuationOf?: RuntimeRunContinuationOf;
 }
 
 export interface RuntimeRunStartOptions extends Omit<
@@ -140,6 +133,15 @@ type RuntimeRunConstructionOptions = RuntimeRunBaseOptions & {
   readonly writeGuard: RuntimeEventWriteGuard;
   readonly runtimeCapability?: EngineRuntimeCapability;
 };
+
+export interface RuntimeRunContinuationStartOptions {
+  readonly capability: EngineRuntimeCapability;
+  readonly sourceRunId: string;
+  readonly targetRunId?: string;
+  readonly invocationId?: string;
+  readonly runStartedEventId?: string;
+  readonly startedAt?: string;
+}
 
 /** Narrow capability that proves a live Session may still append canonical RuntimeEvents. */
 export interface RuntimeEventWriteGuard {
@@ -317,7 +319,6 @@ export class RuntimeRun {
   private readonly now: () => Date;
   private readonly runStartedEventId?: string;
   private readonly terminalEventId?: string;
-  private readonly continuationOf?: RuntimeRunContinuationOf;
   private readonly writeGuard: RuntimeEventWriteGuard;
   private readonly parentRefs?: Pick<RuntimeEventRefs, "parentRunId" | "parentToolCallId">;
   private readonly pendingToolResults = new Map<string, PendingRegisteredToolResult[]>();
@@ -342,9 +343,6 @@ export class RuntimeRun {
     this.now = options.now ?? (() => new Date());
     this.runStartedEventId = options.runStartedEventId;
     this.terminalEventId = options.terminalEventId;
-    this.continuationOf = options.continuationOf
-      ? structuredClone(options.continuationOf)
-      : undefined;
     this.writeGuard = options.writeGuard;
     this.parentRefs = compactRefs({
       ...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),
@@ -355,6 +353,11 @@ export class RuntimeRun {
   }
 
   static async start(options: RuntimeRunStartOptions): Promise<RuntimeRun> {
+    if ("continuationOf" in options) {
+      throw new RuntimeEventStoreIntegrityError(
+        "RuntimeRun.start continuationOf is disabled; use RuntimeRun.startContinuation",
+      );
+    }
     const { capability, ...metadata } = options;
     const store = runtimeEventStoreFromCapability(capability);
     admitEventLogNewWork({
@@ -369,6 +372,61 @@ export class RuntimeRun {
       writeGuard: capability.writeGuard,
       runtimeCapability: capability,
     });
+  }
+
+  /** claim + canonical run.started 由 store 在同一事务完成；返回的 run 只 attach 已落库起点。 */
+  static async startContinuation(
+    options: RuntimeRunContinuationStartOptions,
+  ): Promise<RuntimeRun | undefined> {
+    const store = runtimeEventStoreFromCapability(options.capability);
+    admitEventLogNewWork({
+      storageRoot: store.storageRoot,
+      currentSessionId: options.capability.sessionId,
+    });
+    const ownerFence = await options.capability.writeGuard.assertRuntimeEventWriteAllowed();
+    if (
+      !ownerFence ||
+      ownerFence.sessionId !== options.capability.sessionId ||
+      ownerFence.epoch <= 0
+    ) {
+      throw new RuntimeEventStoreIntegrityError(
+        `Runtime continuation session ${options.capability.sessionId} has no active owner fence`,
+      );
+    }
+    const targetRunId = options.targetRunId ?? randomUUID();
+    const invocationId = options.invocationId ?? `invocation:${randomUUID()}`;
+    const runStartedEventId = options.runStartedEventId ?? createRuntimeEventId("run-started");
+    const startedAt = options.startedAt ?? new Date().toISOString();
+    const outcome = await writeWithRuntimeEventGuard(
+      options.capability.writeGuard,
+      (guardedFence) =>
+        store.startContinuation({
+          sessionId: options.capability.sessionId,
+          sourceRunId: options.sourceRunId,
+          targetRunId,
+          invocationId,
+          startEventId: runStartedEventId,
+          workDir: options.capability.workDir,
+          startedAt,
+          ownerFence: guardedFence,
+        }),
+      `Runtime continuation ${options.sourceRunId} -> ${targetRunId}`,
+      ownerFence,
+    );
+    if (outcome.status === "rejected") return undefined;
+    const event = outcome.startEvent;
+    const run = new RuntimeRun(options.capability.sessionId, options.capability.workDir, {
+      sessionId: options.capability.sessionId,
+      workDir: options.capability.workDir,
+      store,
+      writeGuard: options.capability.writeGuard,
+      runtimeCapability: options.capability,
+      runId: event.runId,
+      invocationId: event.invocationId,
+      runStartedEventId: event.eventId,
+    });
+    run.ownerFence = ownerFence;
+    return run;
   }
 
   /** Detached writes are confined to the durable fork publication path. */
@@ -1499,8 +1557,6 @@ export class RuntimeRun {
       kind: "run.started",
       data: {
         workDir: this.canonicalWorkDir,
-        // ADR 29:续跑目标 run 的确定性前缀锚(claimContinuation 成功后由调用方声明)。
-        ...(this.continuationOf ? { continuationOf: structuredClone(this.continuationOf) } : {}),
       },
     };
     await this.append(event);
