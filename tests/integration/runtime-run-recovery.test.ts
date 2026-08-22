@@ -6,7 +6,6 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { Session } from "../../src/engine/session.js";
 import { createCanonicalTranscriptToolStart } from "../../src/engine/transcript-tool-start.js";
-import { hydrateCanonicalTranscriptEvents } from "../../src/presentation/transcript-tool-result-hydration.js";
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 import { currentRuntimeRun, RuntimeRun } from "../../src/runtime/runtime-run.js";
 
@@ -41,7 +40,7 @@ test("late async work cannot reuse a terminal RuntimeRun context", async (contex
   await session.flushPersistence();
 });
 
-test("reconciliation reuses a rewritten active model start despite a transcript-only result", async (context) => {
+test("reconciliation fails closed when transcript T2 cannot close the active model tool call", async (context) => {
   const { session } = await createFixture(context, "rewritten-active-start");
   await session.commitMessages({ role: "user", content: "kept" });
   const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
@@ -71,6 +70,7 @@ test("reconciliation reuses a rewritten active model start despite a transcript-
     }),
     { eventId: "fork-rewritten:active-tool-start" },
   );
+  await run.recordToolStarted(toolCall.id, toolCall.name, toolCall.arguments);
   const transcriptOnlyContent = "subagent result with a reused provider call ID";
   await run.recordTranscriptToolResults([
     {
@@ -93,27 +93,31 @@ test("reconciliation reuses a rewritten active model start despite a transcript-
     },
   ]);
 
-  await RuntimeRun.reconcileIncompleteRuns({ capability: session.runtimeEventCapability! });
+  await assert.rejects(
+    RuntimeRun.reconcileIncompleteRuns({ capability: session.runtimeEventCapability! }),
+    /has no active model outcome/u,
+  );
 
   const hydration = await session.readHydrationSnapshot();
   const starts = hydration.transcriptEvents.filter(
     (event) => event.type === "tool.started" && event.providerCallId === toolCall.id,
   );
   assert.equal(starts.length, 1);
-  assert.equal(hydration.toolResults.length, 1);
-  const hydrated = hydrateCanonicalTranscriptEvents({
-    sessionId: hydration.sessionId,
-    updatedAt: hydration.updatedAt,
-    transcriptEvents: hydration.transcriptEvents,
-    transcriptEventSequences: hydration.transcriptEventSequences,
-    toolResults: hydration.toolResults,
-    rejectUnmatchedResults: true,
-  });
-  assert.deepEqual(
-    hydrated
-      .filter((event) => event.type === "tool.completed")
-      .map((event) => (event.type === "tool.completed" ? event.result.toolCallId : undefined)),
-    [toolCall.id],
+  assert.equal(hydration.toolResults.length, 0);
+  const outcomes = (await session.runtimeEventStore!.readRun(session.id, run.runId)).filter(
+    (event) => event.kind === "tool.result.recorded" && event.refs.toolCallId === toolCall.id,
+  );
+  assert.equal(outcomes.length, 1, "one prepared operation owns exactly one immutable outcome");
+  assert.equal(
+    (await session.runtimeEventStore!.readToolOperation(session.id, run.runId, toolCall.id))?.state,
+    "settled",
+  );
+  assert.equal(
+    (await session.runtimeEventStore!.readRun(session.id, run.runId)).some(
+      (event) => event.kind === "run.terminal",
+    ),
+    false,
+    "an inconsistent projection must remain unsealed for explicit repair",
   );
 });
 

@@ -21,6 +21,8 @@ import type { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-e
 import type { ToolDefinition } from "../schema/message.js";
 import { ToolAccesses } from "./tool-access.js";
 import type { BaseTool, ToolExecutionContext } from "./registry.js";
+import type { EngineRuntimeWriteGuard } from "../engine/runtime-port.js";
+import type { RuntimeOwnerFence } from "../storage/runtime-event-store-contracts.js";
 
 /**
  * Stable content fingerprint for a graph operation. Mirrors
@@ -52,6 +54,37 @@ export interface GraphToolContext {
   readonly invocationId: string;
   readonly runId: string;
   readonly turnId: string;
+  readonly writeGuard?: EngineRuntimeWriteGuard;
+}
+
+async function appendGraphOperation(
+  context: GraphToolContext,
+  events: readonly RuntimeEvent[],
+  operation: {
+    readonly operationId: string;
+    readonly fingerprint: string;
+    readonly expectedSessionSequence: number;
+  },
+): Promise<void> {
+  const ownerFence = context.writeGuard
+    ? await context.writeGuard.assertRuntimeEventWriteAllowed()
+    : undefined;
+  await context.store.appendGraphOperation(events, {
+    ...operation,
+    ...(ownerFence ? { ownerFence } : {}),
+  });
+  if (!ownerFence || !context.writeGuard) return;
+  await confirmGraphOwnerFence(context, ownerFence);
+}
+
+async function confirmGraphOwnerFence(
+  context: GraphToolContext,
+  expected: RuntimeOwnerFence,
+): Promise<void> {
+  const actual = await context.writeGuard!.assertRuntimeEventWriteAllowed();
+  if (actual.sessionId !== expected.sessionId || actual.epoch !== expected.epoch) {
+    throw new Error(`Graph owner fence changed during Session ${context.sessionId} write`);
+  }
 }
 
 /**
@@ -200,7 +233,7 @@ export class AddWorkTool implements BaseTool {
           mode: normalized.mode,
         },
       };
-      await this.context.store.appendGraphOperation([addedEvent], {
+      await appendGraphOperation(this.context, [addedEvent], {
         operationId,
         fingerprint,
         expectedSessionSequence: before.sessionSequence,
@@ -283,7 +316,7 @@ export class AddWorkTool implements BaseTool {
       },
     };
     try {
-      await this.context.store.appendGraphOperation([dispatchedEvent], {
+      await appendGraphOperation(this.context, [dispatchedEvent], {
         operationId: dispatchOperationId,
         fingerprint: dispatchFingerprint,
         expectedSessionSequence: refreshed.sessionSequence,
@@ -414,7 +447,7 @@ export class CloseGraphTool implements BaseTool {
         ...(parsed.result_record_ids ? { resultRecordIds: [...parsed.result_record_ids] } : {}),
       },
     };
-    await this.context.store.appendGraphOperation([event], {
+    await appendGraphOperation(this.context, [event], {
       operationId,
       fingerprint,
       expectedSessionSequence: projection.sessionSequence,

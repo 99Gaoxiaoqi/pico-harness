@@ -424,7 +424,7 @@ function buildSyntheticToolObservation(
     },
   };
   const message: Message = runtimeRun
-    ? runtimeRun.registerToolResult(input)
+    ? runtimeRun.registerProtocolClosureToolResult(input)
     : {
         role: "user",
         content,
@@ -465,7 +465,7 @@ function buildRejectedToolResult(
     },
   };
   const message: Message = runtimeRun
-    ? runtimeRun.registerToolResult(input)
+    ? runtimeRun.registerUndispatchedToolResult(input)
     : {
         role: "user",
         content,

@@ -32,6 +32,7 @@ export function createSessionForkRuntimePort(): SessionForkRuntimePort {
           ? { sourceThroughEventId: options.sourceThroughEventId }
           : {}),
         ...(options.statePublication ? { statePublication: options.statePublication } : {}),
+        ...(options.workflowEvents ? { workflowEvents: options.workflowEvents } : {}),
         workDir: options.workDir,
         store,
         writeGuard: {

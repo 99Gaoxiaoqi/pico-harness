@@ -70,6 +70,11 @@ import {
 import {
   RuntimeEventStoreIntegrityError,
   createRuntimeEventId,
+  type RuntimeOwnerFence,
+  type RuntimePartialSegment,
+  type RuntimePartialSnapshot,
+  type RuntimeRunPartials,
+  type RuntimeToolOperation,
   type RuntimeEventStoreAppendResult,
   type RuntimeEventStoreEntry,
 } from "../storage/runtime-event-store-contracts.js";
@@ -137,7 +142,7 @@ type RuntimeRunConstructionOptions = RuntimeRunBaseOptions & {
 
 /** Narrow capability that proves a live Session may still append canonical RuntimeEvents. */
 export interface RuntimeEventWriteGuard {
-  assertRuntimeEventWriteAllowed(): Promise<void>;
+  assertRuntimeEventWriteAllowed(): Promise<RuntimeOwnerFence | void>;
 }
 
 export interface ReconcileRuntimeRunsOptions {
@@ -177,6 +182,7 @@ export interface RuntimeForkStatePublication {
 
 export interface BootstrapRuntimeForkOptions extends RuntimeForkBootstrapSeed {
   readonly writeGuard: RuntimeEventWriteGuard;
+  readonly workflowEvents?: readonly RuntimeEvent[];
 }
 
 export interface RuntimeForkModelCheckpointSeed {
@@ -240,12 +246,14 @@ interface PendingRuntimeToolCall {
 interface PendingRegisteredToolResult {
   readonly event: RuntimeToolResultRecordedEvent;
   readonly message: Message;
+  readonly operationVersion?: number;
 }
 
 interface PendingMessageCommitBatch {
   readonly messages: readonly Message[];
   readonly events: readonly RuntimeEvent[];
   readonly consumedByToolCallId: ReadonlyMap<string, number>;
+  readonly toolOperationVersionByEventId: ReadonlyMap<string, number>;
 }
 
 /** The canonical run bound to the current asynchronous Agent execution. */
@@ -312,11 +320,13 @@ export class RuntimeRun {
   private readonly writeGuard: RuntimeEventWriteGuard;
   private readonly parentRefs?: Pick<RuntimeEventRefs, "parentRunId" | "parentToolCallId">;
   private readonly pendingToolResults = new Map<string, PendingRegisteredToolResult[]>();
+  private readonly toolOperations = new Map<string, RuntimeToolOperation>();
   private pendingMessageCommitBatch?: PendingMessageCommitBatch;
   private turnId: string;
   private stepId: string;
   private terminal?: RuntimeRunTerminalEvent;
   private finishPromise?: Promise<void>;
+  private ownerFence?: RuntimeOwnerFence;
 
   private constructor(
     readonly sessionId: string,
@@ -364,13 +374,19 @@ export class RuntimeRun {
   private static async startInternal(options: RuntimeRunConstructionOptions): Promise<RuntimeRun> {
     const store = options.store;
     const run = new RuntimeRun(options.sessionId, options.workDir, { ...options, store });
-    await run.writeCanonicalEvent(() =>
-      store.initializeSession({
-        sessionId: options.sessionId,
-        workDir: options.workDir,
-        ...(options.now ? { now: options.now } : {}),
-      }),
-    );
+    const guardedFence = await options.writeGuard.assertRuntimeEventWriteAllowed();
+    await store.initializeSession({
+      sessionId: options.sessionId,
+      workDir: options.workDir,
+      ...(options.now ? { now: options.now } : {}),
+    });
+    await options.writeGuard.assertRuntimeEventWriteAllowed();
+    if (guardedFence?.sessionId === options.sessionId && guardedFence.epoch > 0) {
+      run.ownerFence = guardedFence;
+    } else {
+      const currentFence = await store.readOwnerFence(options.sessionId);
+      run.ownerFence = await store.advanceOwnerFence(options.sessionId, currentFence.epoch);
+    }
     await run.recordRunStarted();
     return run;
   }
@@ -414,9 +430,36 @@ export class RuntimeRun {
       const existingTerminal = events.find(
         (event): event is RuntimeRunTerminalEvent => event.kind === "run.terminal",
       );
+      const toolOperations = await store.listRunToolOperations(sessionId, runId);
+      const preparedOperations = toolOperations.filter(
+        (operation) => operation.state === "prepared",
+      );
       const last = events.at(-1) ?? started;
       const recoveryAt = existingTerminal?.at ?? last.at;
       const pendingToolCalls = findDanglingRuntimeToolCalls(events, activeMessageEventIds);
+      const operationsByToolCallId = new Map(
+        toolOperations.map((operation) => [operation.toolCallId, operation]),
+      );
+      for (const pending of pendingToolCalls) {
+        pending.dispatched = operationsByToolCallId.has(pending.toolCall.id);
+      }
+      const settledButPending = pendingToolCalls.find(
+        (pending) => operationsByToolCallId.get(pending.toolCall.id)?.state === "settled",
+      );
+      if (settledButPending) {
+        throw new RuntimeEventStoreIntegrityError(
+          `Settled Runtime tool operation ${settledButPending.toolCall.id} has no active model outcome`,
+        );
+      }
+      const pendingIds = new Set(pendingToolCalls.map((pending) => pending.toolCall.id));
+      const orphanedPrepared = preparedOperations.find(
+        (operation) => !pendingIds.has(operation.toolCallId),
+      );
+      if (orphanedPrepared) {
+        throw new RuntimeEventStoreIntegrityError(
+          `Prepared Runtime tool operation ${orphanedPrepared.toolCallId} has no active tool call`,
+        );
+      }
       const syntheticToolResults = pendingToolCalls.map((pending) =>
         buildInterruptedToolResultEvent(events, pending, recoveryAt),
       );
@@ -434,15 +477,11 @@ export class RuntimeRun {
         at: recoveryAt,
       });
       if (existingTerminal && syntheticToolResults.length === 0) continue;
-      const recoveryEvents = existingTerminal
-        ? buildInterruptedToolRecoveryRun({
-            sourceStarted: started,
-            sourceTerminal: existingTerminal,
-            toolStarts: syntheticToolStarts,
-            toolResults: syntheticToolResults,
-            at: recoveryAt,
-          })
-        : undefined;
+      if (existingTerminal) {
+        throw new RuntimeEventStoreIntegrityError(
+          `Sealed Runtime run ${runId} still has unresolved tool operations`,
+        );
+      }
       const terminal: RuntimeRunTerminalEvent = {
         schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
         eventId: runtimeInterruptionRecoveryEventId("terminal", [sessionId, runId]),
@@ -461,13 +500,39 @@ export class RuntimeRun {
           recovered: true,
         },
       };
-      const results = await writeWithRuntimeEventGuard(
-        capability.writeGuard,
-        () =>
-          store.appendBatch(
-            recoveryEvents ?? [...syntheticToolStarts, ...syntheticToolResults, terminal],
-          ),
-        `Runtime reconciliation for session ${sessionId}`,
+      const nonDispatchedResults = syntheticToolResults.filter(
+        (event) => !operationsByToolCallId.has(event.refs.toolCallId),
+      );
+      const results = [
+        ...(await writeWithRuntimeEventGuard(
+          capability.writeGuard,
+          (ownerFence) =>
+            store.appendBatch([...syntheticToolStarts, ...nonDispatchedResults], { ownerFence }),
+          `Runtime reconciliation for session ${sessionId}`,
+        )),
+      ];
+      for (const event of syntheticToolResults) {
+        const operation = operationsByToolCallId.get(event.refs.toolCallId);
+        if (!operation || operation.state !== "prepared") continue;
+        const settled = await writeWithRuntimeEventGuard(
+          capability.writeGuard,
+          (ownerFence) =>
+            store.settleToolOperation({
+              resultEvent: event,
+              toolCallId: event.refs.toolCallId,
+              expectedVersion: operation.version,
+              ownerFence,
+            }),
+          `Runtime tool recovery ${event.refs.toolCallId}`,
+        );
+        results.push(settled.event);
+      }
+      results.push(
+        await writeWithRuntimeEventGuard(
+          capability.writeGuard,
+          (ownerFence) => store.sealRun(terminal, { ownerFence }),
+          `Runtime reconciliation seal for session ${sessionId}`,
+        ),
       );
       if (results.some((result) => result.inserted)) reconciled.push(runId);
     }
@@ -647,6 +712,7 @@ export class RuntimeRun {
         statePublication,
         store,
         writeGuard,
+        forkRun.requireOwnerFence(),
       );
       const publicationEvents = await store.readSession(options.targetSessionId);
       assertRuntimeForkCheckpoint(publicationEvents, identity, modelCheckpoint, seedEntries);
@@ -666,6 +732,7 @@ export class RuntimeRun {
         completion,
         identity.markerEventId,
       );
+      await forkRun.appendForkWorkflowEvents(options.workflowEvents ?? []);
       await forkRun.finish("completed");
       return true;
     }).catch((error: unknown) => {
@@ -698,6 +765,7 @@ export class RuntimeRun {
           `Runtime fork run ${identity.runId} has a conflicting terminal fact`,
         );
       }
+      assertForkWorkflowEventsPublished(events, options.workflowEvents ?? [], identity.runId);
       return;
     }
 
@@ -721,7 +789,25 @@ export class RuntimeRun {
       store,
       writeGuard,
     });
+    await run.appendForkWorkflowEvents(options.workflowEvents ?? []);
     await run.finish("completed");
+  }
+
+  private async appendForkWorkflowEvents(events: readonly RuntimeEvent[]): Promise<void> {
+    if (events.length === 0) return;
+    for (const event of events) {
+      if (event.sessionId !== this.sessionId || event.runId !== this.runId) {
+        throw runtimeForkConflict(
+          `Runtime fork workflow event ${event.eventId} is outside bootstrap run ${this.runId}`,
+        );
+      }
+      if (!event.kind.startsWith("plan.")) {
+        throw runtimeForkConflict(
+          `Runtime fork workflow event ${event.eventId} is not a Plan fact`,
+        );
+      }
+    }
+    await this.appendBatch(events);
   }
 
   private static async ensureForkState(
@@ -729,6 +815,7 @@ export class RuntimeRun {
     publication: RuntimeForkStatePublication | undefined,
     store: SqliteRuntimeEventStore,
     writeGuard: RuntimeEventWriteGuard,
+    ownerFence: RuntimeOwnerFence,
   ): Promise<void> {
     if (!publication) return;
     const existing = await store.readSessionEvent(targetSessionId, publication.eventId);
@@ -751,8 +838,10 @@ export class RuntimeRun {
         store.appendSessionState(targetSessionId, publication.patch, {
           eventId: publication.eventId,
           now: () => new Date(publication.at),
+          ownerFence,
         }),
       `Runtime fork state publication ${publication.eventId}`,
+      ownerFence,
     );
   }
 
@@ -807,7 +896,7 @@ export class RuntimeRun {
         }
         const persisted = await writeWithRuntimeEventGuard(
           session,
-          () => store.append(existing.event),
+          (ownerFence) => store.append(existing.event, { ownerFence }),
           `Runtime external message ${eventId}`,
         );
         await session.commitRuntimeProjectionBatch([persisted]);
@@ -955,6 +1044,7 @@ export class RuntimeRun {
       }
     } else {
       const consumedByToolCallId = new Map<string, number>();
+      const toolOperationVersionByEventId = new Map<string, number>();
       const events = canonicalMessages.map((canonicalMessage) => {
         const toolCallId = canonicalMessage.toolCallId;
         if (toolCallId) {
@@ -971,6 +1061,12 @@ export class RuntimeRun {
             );
           }
           consumedByToolCallId.set(toolCallId, consumed + 1);
+          if (registered.operationVersion !== undefined) {
+            toolOperationVersionByEventId.set(
+              registered.event.eventId,
+              registered.operationVersion,
+            );
+          }
           return registered.event;
         }
         return this.messageCommittedEvent(createRuntimeEventId("message"), canonicalMessage);
@@ -979,11 +1075,15 @@ export class RuntimeRun {
         messages: structuredClone(canonicalMessages),
         events,
         consumedByToolCallId,
+        toolOperationVersionByEventId,
       };
       this.pendingMessageCommitBatch = batch;
     }
 
-    const persisted = await this.appendBatch(batch.events);
+    const persisted = await this.persistMessageEvents(
+      batch.events,
+      batch.toolOperationVersionByEventId,
+    );
     await session.commitRuntimeProjectionBatch(persisted);
     for (const [toolCallId, consumed] of batch.consumedByToolCallId) {
       const queue = this.pendingToolResults.get(toolCallId);
@@ -1097,6 +1197,15 @@ export class RuntimeRun {
     });
   }
 
+  async recordToolGroupLoaded(groupId: string, toolNames: readonly string[]): Promise<void> {
+    this.assertOpen();
+    await this.append({
+      ...this.base(createRuntimeEventId("tool-group"), true, "internal"),
+      kind: "tool.group.loaded",
+      data: { groupId, toolNames: [...toolNames] },
+    });
+  }
+
   async recordToolStarted(
     toolCallId: string,
     toolName: string,
@@ -1112,7 +1221,24 @@ export class RuntimeRun {
         argumentsHash: createHash("sha256").update(argumentsJson).digest("hex"),
       },
     };
-    await this.append(event);
+    const prepared = await this.writeCanonicalEvent((ownerFence) =>
+      this.store.prepareToolOperation({
+        dispatchEvent: event,
+        toolCallId,
+        ownerFence,
+      }),
+    );
+    if (!prepared.events.at(-1)?.inserted) {
+      throw new RuntimeEventStoreIntegrityError(
+        `Runtime tool operation ${toolCallId} was already prepared; refusing uncertain side-effect retry`,
+      );
+    }
+    if (prepared.operation.state !== "prepared") {
+      throw new Error(
+        `Runtime tool operation ${toolCallId} is already settled; refusing duplicate execution`,
+      );
+    }
+    this.toolOperations.set(toolCallId, prepared.operation);
   }
 
   async recordTranscriptToolStarts(
@@ -1163,13 +1289,54 @@ export class RuntimeRun {
       return event;
     });
     const messages = events.map(projectRuntimeToolResultMessage);
-    await this.appendBatch(events);
+    for (const event of events) {
+      const operation = this.toolOperations.get(event.refs.toolCallId);
+      if (!operation || operation.state !== "prepared") {
+        throw new Error(
+          `Runtime transcript ToolResult ${event.refs.toolCallId} has no prepared operation`,
+        );
+      }
+      const settled = await this.settleToolResult(event, operation.version);
+      this.toolOperations.set(event.refs.toolCallId, settled.operation);
+    }
     return structuredClone(messages);
   }
 
   registerToolResult(input: EngineRuntimeToolResultInput): Message {
+    return this.registerToolResultInternal(input, false);
+  }
+
+  registerUndispatchedToolResult(input: EngineRuntimeToolResultInput): Message {
+    return this.registerToolResultInternal(input, true);
+  }
+
+  registerProtocolClosureToolResult(input: EngineRuntimeToolResultInput): Message {
+    const operation = this.toolOperations.get(input.toolCallId);
+    if (operation?.state === "settled") {
+      throw new RuntimeEventStoreIntegrityError(
+        `Runtime ToolResult ${input.toolCallId} is already settled`,
+      );
+    }
+    return this.registerToolResultInternal(input, operation === undefined);
+  }
+
+  private registerToolResultInternal(
+    input: EngineRuntimeToolResultInput,
+    allowUndispatched: boolean,
+  ): Message {
     this.assertOpen();
     const canonical = canonicalizeRuntimeToolResultInput(input);
+    const operation = this.toolOperations.get(canonical.toolCallId);
+    if (!allowUndispatched && operation?.state !== "prepared") {
+      throw new RuntimeEventStoreIntegrityError(
+        `Runtime ToolResult ${canonical.toolCallId} has no prepared tool operation`,
+      );
+    }
+    if (allowUndispatched && operation) {
+      throw new RuntimeEventStoreIntegrityError(
+        `Runtime ToolResult ${canonical.toolCallId} is dispatched and cannot use the undispatched path`,
+      );
+    }
     const event: RuntimeToolResultRecordedEvent = {
       ...this.base(createRuntimeEventId("tool-result")),
       refs: {
@@ -1191,7 +1358,11 @@ export class RuntimeRun {
       throw new Error(`Runtime tool result ${canonical.toolCallId} has no model projection`);
     }
     const queue = this.pendingToolResults.get(canonical.toolCallId) ?? [];
-    queue.push({ event, message });
+    queue.push({
+      event,
+      message,
+      ...(operation?.state === "prepared" ? { operationVersion: operation.version } : {}),
+    });
     this.pendingToolResults.set(canonical.toolCallId, queue);
     return structuredClone(message);
   }
@@ -1295,7 +1466,17 @@ export class RuntimeRun {
         data: { status, ...(reason ? { reason } : {}) },
       };
       if (!this.terminal) {
-        await this.append(terminal);
+        const pendingOperations = (
+          await this.store.listRunToolOperations(this.sessionId, this.runId)
+        ).filter((operation) => operation.state === "prepared");
+        if (pendingOperations.length > 0) {
+          throw new Error(
+            `Runtime run ${this.runId} has ${pendingOperations.length} prepared tool operation(s) without outcome`,
+          );
+        }
+        await this.writeCanonicalEvent((ownerFence) =>
+          this.store.sealRun(terminal, { ownerFence }),
+        );
         this.terminal = terminal;
       }
       liveRuntimeRuns.delete(runtimeRunLiveKey(this.sessionId, this.runId));
@@ -1361,20 +1542,129 @@ export class RuntimeRun {
   }
 
   private append(event: RuntimeEvent): Promise<RuntimeEventStoreAppendResult> {
-    return this.writeCanonicalEvent(() => appendRuntimeEventWithArbitration(this.store, event));
+    return this.writeCanonicalEvent((ownerFence) =>
+      appendRuntimeEventWithArbitration(this.store, event, { ownerFence }),
+    );
   }
 
   private appendBatch(
     events: readonly RuntimeEvent[],
   ): Promise<readonly RuntimeEventStoreAppendResult[]> {
-    return this.writeCanonicalEvent(() =>
-      appendRuntimeEventBatchWithArbitration(this.store, events),
+    return this.writeCanonicalEvent((ownerFence) =>
+      appendRuntimeEventBatchWithArbitration(this.store, events, { ownerFence }),
+    );
+  }
+
+  async upsertPartialSnapshot(
+    partialId: string,
+    kind: string,
+    expectedVersion: number,
+    payload: unknown,
+  ): Promise<RuntimePartialSnapshot> {
+    this.assertOpen();
+    return this.writeCanonicalEvent((ownerFence) =>
+      this.store.upsertPartialSnapshot({
+        sessionId: this.sessionId,
+        runId: this.runId,
+        partialId,
+        kind,
+        expectedVersion,
+        payload,
+        ownerFence,
+      }),
+    );
+  }
+
+  async appendPartialSegment(
+    partialId: string,
+    segmentIndex: number,
+    payload: unknown,
+  ): Promise<{ readonly inserted: boolean; readonly segment: RuntimePartialSegment }> {
+    this.assertOpen();
+    return this.writeCanonicalEvent((ownerFence) =>
+      this.store.appendPartialSegment({
+        sessionId: this.sessionId,
+        runId: this.runId,
+        partialId,
+        segmentIndex,
+        payload,
+        ownerFence,
+      }),
+    );
+  }
+
+  readPartials(): Promise<RuntimeRunPartials> {
+    return this.store.readRunPartials(this.sessionId, this.runId);
+  }
+
+  async clearPartials(): Promise<number> {
+    return this.writeCanonicalEvent((ownerFence) =>
+      this.store.clearRunPartials({
+        sessionId: this.sessionId,
+        runId: this.runId,
+        ownerFence,
+      }),
+    );
+  }
+
+  private async persistMessageEvents(
+    events: readonly RuntimeEvent[],
+    operationVersions: ReadonlyMap<string, number>,
+  ): Promise<readonly RuntimeEventStoreAppendResult[]> {
+    if (operationVersions.size === 0) return this.appendBatch(events);
+    const persisted: RuntimeEventStoreAppendResult[] = [];
+    for (const event of events) {
+      const operationVersion = operationVersions.get(event.eventId);
+      if (event.kind === "tool.result.recorded" && operationVersion !== undefined) {
+        const settled = await this.settleToolResult(event, operationVersion);
+        this.toolOperations.set(event.refs.toolCallId, settled.operation);
+        persisted.push(settled.event);
+      } else {
+        persisted.push(await this.append(event));
+      }
+    }
+    return persisted;
+  }
+
+  private settleToolResult(event: RuntimeToolResultRecordedEvent, expectedVersion: number) {
+    return this.writeCanonicalEvent((ownerFence) =>
+      this.store.settleToolOperation({
+        resultEvent: event,
+        toolCallId: event.refs.toolCallId,
+        expectedVersion,
+        ownerFence,
+      }),
     );
   }
 
   /** Checks the live Session lease on both sides of every canonical write attempt. */
-  private writeCanonicalEvent<Result>(write: () => Promise<Result>): Promise<Result> {
-    return writeWithRuntimeEventGuard(this.writeGuard, write, `Runtime run ${this.runId}`);
+  private writeCanonicalEvent<Result>(
+    write: (ownerFence: RuntimeOwnerFence) => Promise<Result>,
+  ): Promise<Result> {
+    const ownerFence = this.requireOwnerFence();
+    return writeWithRuntimeEventGuard(
+      this.writeGuard,
+      async () => {
+        const result = await write(ownerFence);
+        const actual = await this.store.readOwnerFence(this.sessionId);
+        if (actual.epoch !== ownerFence.epoch) {
+          throw new LeaseConflictError(
+            `Runtime run ${this.runId} owner fence changed from ${ownerFence.epoch} to ${actual.epoch}`,
+          );
+        }
+        return result;
+      },
+      `Runtime run ${this.runId}`,
+      ownerFence,
+    );
+  }
+
+  private requireOwnerFence(): RuntimeOwnerFence {
+    const ownerFence = this.ownerFence;
+    if (!ownerFence || ownerFence.sessionId !== this.sessionId || ownerFence.epoch <= 0) {
+      throw new Error(`Runtime run ${this.runId} has no active owner fence`);
+    }
+    return ownerFence;
   }
 
   private assertSession(session: Session): void {
@@ -1398,15 +1688,18 @@ function runtimeRunLiveKey(sessionId: string, runId: string): string {
 
 async function writeWithRuntimeEventGuard<Result>(
   guard: RuntimeEventWriteGuard,
-  write: () => Promise<Result>,
+  write: (ownerFence: RuntimeOwnerFence | undefined) => Promise<Result>,
   operation: string,
+  expectedFence?: RuntimeOwnerFence,
 ): Promise<Result> {
   // Windows NTFS 上 lease 校验和原子写偶发瞬时文件系统错误（EPERM/ENOENT/EBUSY）。
   // 只有 LeaseConflictError（leaseId 不匹配 = 真正丢锁）才不可重试；其余重试。
   const GUARD_RETRY_LIMIT = 3;
   for (let attempt = 0; attempt < GUARD_RETRY_LIMIT; attempt += 1) {
+    let guardedFence: RuntimeOwnerFence | undefined;
     try {
-      await guard.assertRuntimeEventWriteAllowed();
+      guardedFence = (await guard.assertRuntimeEventWriteAllowed()) || undefined;
+      assertMatchingRuntimeFence(operation, expectedFence, guardedFence);
     } catch (error) {
       if (error instanceof LeaseConflictError || attempt === GUARD_RETRY_LIMIT - 1) throw error;
       await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
@@ -1414,10 +1707,11 @@ async function writeWithRuntimeEventGuard<Result>(
     }
     let result: Result;
     try {
-      result = await write();
+      result = await write(expectedFence ?? guardedFence);
     } catch (writeError) {
       try {
-        await guard.assertRuntimeEventWriteAllowed();
+        const currentFence = (await guard.assertRuntimeEventWriteAllowed()) || undefined;
+        assertMatchingRuntimeFence(operation, expectedFence, currentFence);
       } catch (guardError) {
         if (
           !(guardError instanceof LeaseConflictError) &&
@@ -1436,7 +1730,8 @@ async function writeWithRuntimeEventGuard<Result>(
       throw writeError;
     }
     try {
-      await guard.assertRuntimeEventWriteAllowed();
+      const currentFence = (await guard.assertRuntimeEventWriteAllowed()) || undefined;
+      assertMatchingRuntimeFence(operation, expectedFence, currentFence);
     } catch (error) {
       if (error instanceof LeaseConflictError || attempt === GUARD_RETRY_LIMIT - 1) throw error;
       await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
@@ -1445,6 +1740,19 @@ async function writeWithRuntimeEventGuard<Result>(
     return result;
   }
   throw new Error(`${operation} write exhausted transient-error retries`);
+}
+
+function assertMatchingRuntimeFence(
+  operation: string,
+  expected: RuntimeOwnerFence | undefined,
+  actual: RuntimeOwnerFence | undefined,
+): void {
+  if (!expected || !actual) return;
+  if (expected.sessionId !== actual.sessionId || expected.epoch !== actual.epoch) {
+    throw new LeaseConflictError(
+      `${operation} owner fence changed from ${expected.sessionId}:${expected.epoch} to ${actual.sessionId}:${actual.epoch}`,
+    );
+  }
 }
 
 function findDanglingRuntimeToolCalls(
@@ -1667,78 +1975,8 @@ function buildInterruptedToolResultEvent(
   };
 }
 
-function buildInterruptedToolRecoveryRun(options: {
-  readonly sourceStarted: RuntimeRunStartedEvent;
-  readonly sourceTerminal: RuntimeRunTerminalEvent;
-  readonly toolStarts: readonly RuntimeTranscriptEventRecordedEvent[];
-  readonly toolResults: readonly RuntimeToolResultRecordedEvent[];
-  readonly at: string;
-}): RuntimeEvent[] {
-  const { sourceStarted, sourceTerminal, toolStarts, toolResults, at } = options;
-  const recoveryRunId = runtimeInterruptionRecoveryEventId("run", [
-    sourceStarted.sessionId,
-    sourceStarted.runId,
-    ...toolResults.map((event) => event.eventId),
-  ]);
-  const invocationId = `invocation:${recoveryRunId}`;
-  const turnId = `turn:${recoveryRunId}:repair`;
-  const parentRefs = { parentRunId: sourceStarted.runId } as const;
-  const started: RuntimeRunStartedEvent = {
-    schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
-    eventId: runtimeInterruptionRecoveryEventId("run-started", [recoveryRunId]),
-    sessionId: sourceStarted.sessionId,
-    invocationId,
-    runId: recoveryRunId,
-    turnId,
-    at,
-    partial: false,
-    visibility: "internal",
-    refs: parentRefs,
-    kind: "run.started",
-    data: { workDir: sourceStarted.data.workDir },
-  };
-  const recoveredResults = toolResults.map(
-    (event): RuntimeToolResultRecordedEvent => ({
-      ...event,
-      invocationId,
-      runId: recoveryRunId,
-      turnId,
-      refs: { ...(event.refs ?? {}), ...parentRefs },
-    }),
-  );
-  const recoveredStarts = toolStarts.map(
-    (event): RuntimeTranscriptEventRecordedEvent => ({
-      ...event,
-      invocationId,
-      runId: recoveryRunId,
-      turnId,
-      at,
-      refs: { ...(event.refs ?? {}), ...parentRefs },
-    }),
-  );
-  const terminal: RuntimeRunTerminalEvent = {
-    schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
-    eventId: runtimeInterruptionRecoveryEventId("terminal", [recoveryRunId]),
-    sessionId: sourceStarted.sessionId,
-    invocationId,
-    runId: recoveryRunId,
-    turnId,
-    at,
-    partial: false,
-    visibility: "internal",
-    refs: parentRefs,
-    kind: "run.terminal",
-    data: {
-      status: "completed",
-      reason: `recovered_interrupted_tool_results_after_${sourceTerminal.data.status}`,
-      recovered: true,
-    },
-  };
-  return [started, ...recoveredStarts, ...recoveredResults, terminal];
-}
-
 function runtimeInterruptionRecoveryEventId(
-  kind: "run" | "run-started" | "terminal" | "tool-result",
+  kind: "terminal" | "tool-result",
   identity: readonly (number | string)[],
 ): string {
   const digest = createHash("sha256")
@@ -2076,6 +2314,22 @@ function assertRuntimeForkPublicationOrder(
     if (terminalIndex <= markerIndex) {
       throw runtimeForkConflict(
         `Runtime fork target ${targetSessionId} reached terminal before publication`,
+      );
+    }
+  }
+}
+
+function assertForkWorkflowEventsPublished(
+  events: readonly RuntimeEvent[],
+  expected: readonly RuntimeEvent[],
+  runId: string,
+): void {
+  const byId = new Map(events.map((event) => [event.eventId, event]));
+  for (const event of expected) {
+    const actual = byId.get(event.eventId);
+    if (!actual || !isDeepStrictEqual(actual, event)) {
+      throw runtimeForkConflict(
+        `Runtime fork run ${runId} has an incomplete or conflicting workflow payload`,
       );
     }
   }

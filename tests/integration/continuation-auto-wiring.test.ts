@@ -68,19 +68,22 @@ test("executor 自动锚定 interrupted 续跑：claim→targetRunId 起跑→�
 
     // 源封口(C4):被 claim 的崩溃 run 拒收新的非恢复类事件。
     await assert.rejects(
-      store.append({
-        schemaVersion: 2,
-        eventId: `seal-probe:${claim.claimId}`,
-        sessionId: session.id,
-        invocationId: "inv-seal-probe",
-        runId: crashed.runId,
-        turnId: "turn-seal-probe",
-        at: new Date().toISOString(),
-        partial: false,
-        visibility: "model",
-        kind: "message.committed",
-        data: { message: { role: "user", content: "追改已封口的源 run" } },
-      } as RuntimeEvent),
+      store.append(
+        {
+          schemaVersion: 2,
+          eventId: `seal-probe:${claim.claimId}`,
+          sessionId: session.id,
+          invocationId: "inv-seal-probe",
+          runId: crashed.runId,
+          turnId: "turn-seal-probe",
+          at: new Date().toISOString(),
+          partial: false,
+          visibility: "model",
+          kind: "message.committed",
+          data: { message: { role: "user", content: "追改已封口的源 run" } },
+        } as RuntimeEvent,
+        { ownerFence: await session.assertRuntimeEventWriteAllowed() },
+      ),
       (error: unknown) => error instanceof RuntimeEventStoreRunSealedError,
     );
 
@@ -110,21 +113,26 @@ test("executor 自动锚定 interrupted 续跑：claim→targetRunId 起跑→�
       undefined,
       "fresh interrupted terminal must not be claimed within the default window",
     );
-    // 未被 claim 的终态 run 保持开放语义:追加不被 seal 拒绝。
-    const openAppend = await store.append({
-      schemaVersion: 2,
-      eventId: `fresh-open-probe:${crashed2.runId}`,
-      sessionId: session.id,
-      invocationId: "inv-fresh-open-probe",
-      runId: crashed2.runId,
-      turnId: "turn-fresh-open-probe",
-      at: new Date().toISOString(),
-      partial: false,
-      visibility: "internal",
-      kind: "message.committed",
-      data: { message: { role: "user", content: "开放语义探针" } },
-    } as RuntimeEvent);
-    assert.equal(openAppend.inserted, true, "unclaimed terminal run stays appendable");
+    // strict seal 与 claim 无关：新鲜但已 terminal 的 run 仍拒绝尾随事实。
+    await assert.rejects(
+      store.append(
+        {
+          schemaVersion: 2,
+          eventId: `fresh-open-probe:${crashed2.runId}`,
+          sessionId: session.id,
+          invocationId: "inv-fresh-open-probe",
+          runId: crashed2.runId,
+          turnId: "turn-fresh-open-probe",
+          at: new Date().toISOString(),
+          partial: false,
+          visibility: "internal",
+          kind: "message.committed",
+          data: { message: { role: "user", content: "开放语义探针" } },
+        } as RuntimeEvent,
+        { ownerFence: await session.assertRuntimeEventWriteAllowed() },
+      ),
+      RuntimeEventStoreRunSealedError,
+    );
     await newExecutor(session, workDir, picoHome, { continuationTerminalMinAgeMs: 0 }).execute();
     const claim2 = await store.findContinuationClaimBySourceRun(session.id, crashed2.runId);
     assert.ok(claim2, "zero-window executor must anchor the aged-in terminal");

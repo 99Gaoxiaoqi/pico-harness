@@ -414,7 +414,7 @@ async function seedRecoveryLedger(
   // (run-a-3 的普通消息已清除旧桌面状态,这里在其后重新建立一条)。
   await store.appendBatch([
     {
-      ...base("run-a-3"),
+      ...base("run-a-4"),
       eventId: "desktop-a-4-pre",
       visibility: "model",
       kind: "message.committed",

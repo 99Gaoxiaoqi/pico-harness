@@ -573,7 +573,13 @@ test("Session fork inherits pending plans and interrupts active execution", asyn
   const store = source.runtimeEventStore!;
   const coordinator = new PlanCoordinator(
     store,
-    { sessionId: "source", invocationId: "i", runId: "r", turnId: "t" },
+    {
+      sessionId: "source",
+      invocationId: "i",
+      runId: "r",
+      turnId: "t",
+      writeGuard: source,
+    },
     () => AT,
   );
   const proposal = { planId: "p", title: "P", steps: [{ id: "a", title: "A", description: "A" }] };
@@ -616,25 +622,28 @@ test("Session fork inherits pending plans and interrupts active execution", asyn
     ),
   );
 
-  await store.append({
-    schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
-    eventId: "source-approved",
-    sessionId: "source",
-    invocationId: "i",
-    runId: "r",
-    turnId: "t",
-    at: AT.toISOString(),
-    partial: false,
-    visibility: "internal",
-    kind: "plan.approved",
-    data: {
-      operationId: "source-approve",
-      fingerprint: `sha256:${"a".repeat(64)}`,
-      planId: "p",
-      expectedRevision: 1,
-      reviewedBy: "user",
+  await store.append(
+    {
+      schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
+      eventId: "source-approved",
+      sessionId: "source",
+      invocationId: "i",
+      runId: "r",
+      turnId: "t",
+      at: AT.toISOString(),
+      partial: false,
+      visibility: "internal",
+      kind: "plan.approved",
+      data: {
+        operationId: "source-approve",
+        fingerprint: `sha256:${"a".repeat(64)}`,
+        planId: "p",
+        expectedRevision: 1,
+        reviewedBy: "user",
+      },
     },
-  });
+    { ownerFence: await source.assertRuntimeEventWriteAllowed() },
+  );
   await coordinator.startExecution({
     operationId: "source-start",
     expectedSessionSequence: sourceStartSequence + 2,
@@ -654,10 +663,12 @@ test("Session fork inherits pending plans and interrupts active execution", asyn
   }).project();
   assert.equal(active.execution?.status, "interrupted");
   assert.match(active.execution?.reason ?? "", /explicit resume/u);
+  const activeEvents = await store.readSession("active-target");
   assert.equal(
-    (await store.readSession("active-target")).some(
-      (event) => event.kind === "plan.execution.started",
-    ),
+    activeEvents.some((event) => event.kind === "plan.execution.started"),
     true,
   );
+  const terminalIndex = activeEvents.findIndex((event) => event.kind === "run.terminal");
+  const workflowTailIndex = activeEvents.findLastIndex((event) => event.kind.startsWith("plan."));
+  assert.ok(workflowTailIndex >= 0 && terminalIndex > workflowTailIndex, "terminal must be last");
 });

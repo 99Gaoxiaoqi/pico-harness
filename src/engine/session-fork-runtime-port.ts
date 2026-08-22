@@ -61,6 +61,7 @@ export interface SessionForkBootstrapSeed {
 
 export interface SessionForkBootstrapOptions extends SessionForkBootstrapSeed {
   readonly publication: SessionForkPublicationCapability;
+  readonly workflowEvents?: readonly RuntimeEvent[];
 }
 
 export interface SessionForkRuntimePort {

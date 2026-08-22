@@ -237,13 +237,20 @@ test("I4 恢复幂等（同 run 分支）：二次 reconcile 走既有幂等分�
   assert.equal(resultEventsFor(secondPassEvents, call.id).length, 1);
 });
 
-test("I4 恢复幂等（确定性 eventId 重放分支）：已有终态的悬空调二次 reconcile 重放同 id，不重复落地", async (context) => {
+test("I4 strict seal 拒绝带 prepared 工具的终态，reconcile 先 T2 再封口且幂等", async (context) => {
   const scene = await createScene(context, "tool-recovery-idempotent-replay");
   const call = toolCall("call:idempotent-replay");
   await scene.run.commitMessages(scene.session, [assistantToolCallMessage(call)]);
   await scene.run.recordToolStarted(call.id, call.name, call.arguments);
-  // 崩溃变体:run 已有终态,但工具调用仍悬空(结果未落库)。
-  await scene.run.finish("completed");
+  await assert.rejects(
+    scene.run.finish("completed"),
+    /prepared tool operation\(s\) without outcome/u,
+  );
+  assert.equal(
+    (await readEvents(scene)).some((event) => event.kind === "run.terminal"),
+    false,
+    "strict seal must leave the run open for recovery T2",
+  );
 
   assert.deepEqual(await reconcile(scene), [scene.run.runId]);
   const firstPassEvents = await readEvents(scene);

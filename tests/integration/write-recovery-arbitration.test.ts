@@ -244,6 +244,7 @@ test("写失败读回仲裁：确定性契约拒绝（fingerprint CAS 冲突）�
     operationId: "op-arbitration",
     fingerprint: "sha256:" + "a".repeat(64),
     expectedSessionSequence: 1,
+    ownerFence: await scene.session.assertRuntimeEventWriteAllowed(),
   });
   assert.deepEqual(
     first.map((result) => [result.inserted, result.cursor.seq]),
@@ -255,6 +256,7 @@ test("写失败读回仲裁：确定性契约拒绝（fingerprint CAS 冲突）�
       operationId: "op-arbitration",
       fingerprint: "sha256:" + "b".repeat(64),
       expectedSessionSequence: 2,
+      ownerFence: await scene.session.assertRuntimeEventWriteAllowed(),
     }),
     /already bound to another fingerprint/u,
   );

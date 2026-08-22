@@ -426,6 +426,39 @@ export class SqliteRuntimeEventStore {
     });
   }
 
+  async readToolOperation(
+    sessionId: string,
+    runId: string,
+    toolCallId: string,
+  ): Promise<RuntimeToolOperation | undefined> {
+    return this.read(() => this.readToolOperationLocked(sessionId, runId, toolCallId));
+  }
+
+  async listRunToolOperations(
+    sessionId: string,
+    runId: string,
+  ): Promise<readonly RuntimeToolOperation[]> {
+    return this.read(() => {
+      const rows = this.lease.database
+        .prepare(
+          `SELECT tool_call_id
+           FROM runtime_tool_operations
+           WHERE session_id = ? AND run_id = ?
+           ORDER BY prepared_at ASC, tool_call_id ASC`,
+        )
+        .all(sessionId, runId) as readonly Record<string, unknown>[];
+      return rows
+        .map((row) =>
+          this.readToolOperationLocked(
+            sessionId,
+            runId,
+            requireString(row["tool_call_id"], "tool_operation.tool_call_id"),
+          ),
+        )
+        .filter((operation): operation is RuntimeToolOperation => operation !== undefined);
+    });
+  }
+
   async settleToolOperation(
     input: SettleRuntimeToolOperationInput,
   ): Promise<SettleRuntimeToolOperationResult> {
@@ -2854,7 +2887,10 @@ function isDeterministicStoreRefusal(error: unknown): boolean {
   return (
     error instanceof RuntimeEventStoreIntegrityError ||
     error instanceof RuntimeEventStorePlanOperationConflictError ||
-    error instanceof RuntimeEventStoreHighWaterConflictError
+    error instanceof RuntimeEventStoreHighWaterConflictError ||
+    error instanceof RuntimeEventStoreOwnerFenceError ||
+    error instanceof RuntimeEventStoreRunSealedError ||
+    error instanceof RuntimeEventStoreVersionConflictError
   );
 }
 

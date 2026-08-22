@@ -173,6 +173,13 @@ test("RuntimeRun registers one structured fact and commits its projected Message
   });
   await session.recover();
   const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const assistant: Message = {
+    role: "assistant",
+    content: "",
+    toolCalls: [{ id: "call:registered", name: "read_file", arguments: "{}" }],
+  };
+  await run.commitMessages(session, [assistant]);
+  await run.recordToolStarted("call:registered", "read_file", "{}");
   const result = run.registerToolResult({
     toolCallId: "call:registered",
     toolName: "read_file",
@@ -186,28 +193,14 @@ test("RuntimeRun registers one structured fact and commits its projected Message
       truncated: false,
     },
   });
-  await run.commitMessages(session, [
-    {
-      role: "assistant",
-      content: "",
-      toolCalls: [{ id: "call:registered", name: "read_file", arguments: "{}" }],
-    },
-    result,
-  ]);
+  await run.commitMessages(session, [result]);
 
   const events = await session.runtimeEventStore!.readRun(session.id, run.runId);
   assert.deepEqual(
     events.filter(runtimeEventHasModelHistoryEntry).map((event) => event.kind),
     ["message.committed", "tool.result.recorded"],
   );
-  assert.deepEqual(session.getHistory().slice(-2), [
-    {
-      role: "assistant",
-      content: "",
-      toolCalls: [{ id: "call:registered", name: "read_file", arguments: "{}" }],
-    },
-    result,
-  ]);
+  assert.deepEqual(session.getHistory().slice(-2), [assistant, result]);
   const hydration = await session.readHydrationSnapshot();
   assert.equal(hydration.toolResults.length, 1);
   assert.equal(hydration.toolResults[0]?.eventId, events.at(-1)?.eventId);
@@ -235,6 +228,13 @@ test("RuntimeRun retries one canonical message batch without duplicating non-too
   });
   await session.recover();
   const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const assistant: Message = {
+    role: "assistant",
+    content: "",
+    toolCalls: [{ id: "call:retry", name: "read_file", arguments: "{}" }],
+  };
+  await run.commitMessages(session, [assistant]);
+  await run.recordToolStarted("call:retry", "read_file", "{}");
   const result = run.registerToolResult({
     toolCallId: "call:retry",
     toolName: "read_file",
@@ -248,14 +248,7 @@ test("RuntimeRun retries one canonical message batch without duplicating non-too
       truncated: false,
     },
   });
-  const batch: Message[] = [
-    {
-      role: "assistant",
-      content: "",
-      toolCalls: [{ id: "call:retry", name: "read_file", arguments: "{}" }],
-    },
-    result,
-  ];
+  const batch: Message[] = [result];
   const commitProjection = session.commitRuntimeProjectionBatch.bind(session);
   let injectProjectionFailure = true;
   session.commitRuntimeProjectionBatch = async (commits) => {
@@ -279,7 +272,7 @@ test("RuntimeRun retries one canonical message batch without duplicating non-too
   );
   assert.equal(modelFacts.filter((event) => event.kind === "message.committed").length, 1);
   assert.equal(modelFacts.filter((event) => event.kind === "tool.result.recorded").length, 1);
-  assert.deepEqual(session.getHistory(), batch);
+  assert.deepEqual(session.getHistory(), [assistant, ...batch]);
 });
 
 test("RuntimeRun rejects an unregistered Message ToolResult before appending the batch", async (t) => {

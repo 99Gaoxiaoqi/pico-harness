@@ -686,6 +686,7 @@ export function createProductionRuntimeServices(
             invocationId: `plan-review:${input.operationId}`,
             runId: `plan-review:${input.operationId}`,
             turnId: `plan-review:${input.operationId}`,
+            writeGuard: lease.session,
           }).rejectAndExit({
             operationId: input.operationId,
             expectedSessionSequence: input.expectedSessionSequence,

@@ -21,6 +21,7 @@ import {
   type RuntimeRunStartedEvent,
 } from "../storage/runtime-event.js";
 import type { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
+import type { EngineRuntimeWriteGuard } from "../engine/runtime-port.js";
 import {
   assertWorkspaceSqliteStorageRootIdentitySync,
   readWorkspaceSqliteStorageRootIdentitySync,
@@ -523,6 +524,7 @@ export interface CreateAgentRecoverableTaskAdapterOptions {
   readonly workspacePath: string;
   readonly storageRootId: string;
   readonly runtimeEventStore: SqliteRuntimeEventStore;
+  readonly runtimeWriteGuard: EngineRuntimeWriteGuard;
   readonly launchIntents: AgentRecoveryLaunchIntentPort;
 }
 
@@ -579,7 +581,12 @@ export function createAgentRecoverableTaskAdapter(
     async resume(raw, context) {
       const input = validateBoundInput(raw);
       assertResumeContext(input, context, workspacePath);
-      const admission = await admitSuccessorRuntimeRun(options.runtimeEventStore, input, context);
+      const admission = await admitSuccessorRuntimeRun(
+        options.runtimeEventStore,
+        options.runtimeWriteGuard,
+        input,
+        context,
+      );
       const intent: AgentRecoveryLaunchIntent = Object.freeze({
         schemaVersion: AGENT_RECOVERY_LAUNCH_INTENT_SCHEMA_VERSION,
         launchId: context.launchId,
@@ -701,6 +708,7 @@ function assertResumeContext(
 
 async function admitSuccessorRuntimeRun(
   store: SqliteRuntimeEventStore,
+  writeGuard: EngineRuntimeWriteGuard,
   input: AgentRecoverableTaskInput,
   context: RecoverableTaskResumeContext,
 ): Promise<{ readonly sequence: number; readonly invocationId: string; readonly at: string }> {
@@ -741,11 +749,19 @@ async function admitSuccessorRuntimeRun(
     kind: "run.started",
     data: { workDir: input.workspacePath },
   };
+  const ownerFence = await writeGuard.assertRuntimeEventWriteAllowed();
   const [result] = await store.appendBatch([started], {
     expectedSessionHighWater: {
       [input.sessionId]: context.expectedSessionHighWater,
     },
+    ownerFence,
   });
+  const confirmedFence = await writeGuard.assertRuntimeEventWriteAllowed();
+  if (confirmedFence.epoch !== ownerFence.epoch) {
+    throw new Error(
+      `Agent recovery owner fence changed during Session ${input.sessionId} admission`,
+    );
+  }
   if (!result || result.cursor.seq !== context.expectedSessionHighWater + 1) {
     throw new Error(
       `Agent recovery run.started did not occupy source high-water + 1 for ${context.launchId}`,

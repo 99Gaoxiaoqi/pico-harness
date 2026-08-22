@@ -72,10 +72,10 @@ function message(eventId: string, sessionId: string, content: string): RuntimeEv
   };
 }
 
-function terminal(eventId: string, sessionId: string): Extract<
-  RuntimeEvent,
-  { kind: "run.terminal" }
-> {
+function terminal(
+  eventId: string,
+  sessionId: string,
+): Extract<RuntimeEvent, { kind: "run.terminal" }> {
   return {
     ...eventBase(eventId, sessionId),
     kind: "run.terminal",
@@ -176,7 +176,10 @@ test("owner fence is epoch-zero compatible then rejects missing and stale owners
       RuntimeEventStoreOwnerFenceError,
     );
     await assert.rejects(
-      () => value.store.append(message("e02", sessionId, "stale"), { ownerFence: { sessionId, epoch: 0 } }),
+      () =>
+        value.store.append(message("e02", sessionId, "stale"), {
+          ownerFence: { sessionId, epoch: 0 },
+        }),
       RuntimeEventStoreOwnerFenceError,
     );
     await value.store.append(message("e02", sessionId, "current"), { ownerFence: fence1 });
@@ -321,6 +324,13 @@ test("tool T1/T2 atomically maintain canonical events, journal, and CAS projecti
     });
     assert.equal(prepared.operation.state, "prepared");
     assert.equal(prepared.operation.version, 1);
+    assert.deepEqual(
+      await value.store.readToolOperation(sessionId, "run-1", "call-1"),
+      prepared.operation,
+    );
+    assert.deepEqual(await value.store.listRunToolOperations(sessionId, "run-1"), [
+      prepared.operation,
+    ]);
     assert.equal(
       (
         await value.store.prepareToolOperation({
@@ -359,6 +369,9 @@ test("tool T1/T2 atomically maintain canonical events, journal, and CAS projecti
     });
     assert.equal(settled.operation.state, "settled");
     assert.equal(settled.operation.version, 2);
+    assert.deepEqual(await value.store.listRunToolOperations(sessionId, "run-1"), [
+      settled.operation,
+    ]);
     assert.equal(
       (
         await value.store.settleToolOperation({
@@ -384,12 +397,15 @@ test("tool T1/T2 atomically maintain canonical events, journal, and CAS projecti
     try {
       assert.equal(
         db
-          .prepare("SELECT COUNT(*) AS count FROM runtime_tool_journal WHERE tool_call_id = 'call-1'")
+          .prepare(
+            "SELECT COUNT(*) AS count FROM runtime_tool_journal WHERE tool_call_id = 'call-1'",
+          )
           .get()?.count,
         2,
       );
       assert.equal(
-        db.prepare("SELECT COUNT(*) AS count FROM runtime_events WHERE event_id = 'e04'").get()?.count,
+        db.prepare("SELECT COUNT(*) AS count FROM runtime_events WHERE event_id = 'e04'").get()
+          ?.count,
         0,
       );
     } finally {
@@ -406,7 +422,11 @@ test("transcript pages freeze throughSequence and resume by sequence/chunk/byte 
     const sessionId = "transcript-session";
     const ownerFence = await initializeAndFence(value, sessionId);
     await value.store.appendBatch(
-      [message("e01", sessionId, "one"), message("e02", sessionId, "two"), message("e03", sessionId, "three")],
+      [
+        message("e01", sessionId, "one"),
+        message("e02", sessionId, "two"),
+        message("e03", sessionId, "three"),
+      ],
       { ownerFence },
     );
     for (const [index, text] of ["abcdef", "gh", "ij"].entries()) {
@@ -427,7 +447,10 @@ test("transcript pages freeze throughSequence and resume by sequence/chunk/byte 
       maxBytes: 3,
     });
     assert.equal(first.throughSequence, 3);
-    assert.deepEqual(first.items.map(({ text }) => text), ["abc"]);
+    assert.deepEqual(
+      first.items.map(({ text }) => text),
+      ["abc"],
+    );
     assert.deepEqual(first.nextCursor, { sequence: 1, chunkIndex: 0, byteOffset: 3 });
 
     await value.store.append(message("e04", sessionId, "four"), { ownerFence });
@@ -448,7 +471,10 @@ test("transcript pages freeze throughSequence and resume by sequence/chunk/byte 
       cursor: first.nextCursor,
       maxBytes: 32,
     });
-    assert.deepEqual(rest.items.map(({ text }) => text), ["def", "gh", "ij"]);
+    assert.deepEqual(
+      rest.items.map(({ text }) => text),
+      ["def", "gh", "ij"],
+    );
     assert.equal(rest.nextCursor, undefined);
 
     const backward = await value.store.readTranscriptPage({
@@ -457,7 +483,10 @@ test("transcript pages freeze throughSequence and resume by sequence/chunk/byte 
       direction: "backward",
       maxBytes: 2,
     });
-    assert.deepEqual(backward.items.map(({ text }) => text), ["ij"]);
+    assert.deepEqual(
+      backward.items.map(({ text }) => text),
+      ["ij"],
+    );
     assert.deepEqual(backward.nextCursor, { sequence: 2, chunkIndex: 0, byteOffset: 2 });
   } finally {
     cleanup(value);

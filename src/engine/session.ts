@@ -80,6 +80,7 @@ import { materializeRuntimeHistoryEntries } from "./session-runtime-read-model.j
 import {
   type RuntimeEventStoreAppendResult,
   type RuntimeEventStoreEntry,
+  type RuntimeOwnerFence,
   type RuntimeSessionManifest,
   type RuntimeSessionProjectionSnapshot,
 } from "../storage/runtime-event-store-contracts.js";
@@ -248,6 +249,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
   private runtimeInitialization?: Promise<RuntimeSessionManifest>;
   private runtimeOwnership?: OwnerLease;
   private runtimeOwnershipPromise?: Promise<OwnerLease>;
+  private runtimeOwnerFence?: RuntimeOwnerFence;
   private runtimeProjectionCursor?: SessionCursor;
   /** Session 发起的 RuntimeEvent 共用一条队列，保留调用顺序。 */
   private persistenceTail: Promise<void> = Promise.resolve();
@@ -362,9 +364,14 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     const store = this.store;
     if (!store) return Promise.reject(new Error("Session persistence is disabled"));
     if (this.runtimeInitialization) return this.runtimeInitialization;
-    const initialization = this.ensureRuntimeOwnership().then(() =>
-      store.initializeSession({ sessionId: this.id, workDir: this.workDir }),
-    );
+    const initialization = (async () => {
+      await this.ensureRuntimeOwnership();
+      const manifest = await store.initializeSession({ sessionId: this.id, workDir: this.workDir });
+      const currentFence = await store.readOwnerFence(this.id);
+      const ownerFence = await store.advanceOwnerFence(this.id, currentFence.epoch);
+      this.runtimeOwnerFence = ownerFence;
+      return manifest;
+    })();
     const tracked = initialization.catch((error: unknown) => {
       if (this.runtimeInitialization === tracked) this.runtimeInitialization = undefined;
       throw error;
@@ -646,9 +653,9 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
 
     if (this.store) {
       const persisted = normalizeSessionRuntimeStateWritePatch(normalized)!;
-      void this.enqueuePersistence("runtime state", async (store) => {
+      void this.enqueuePersistence("runtime state", async (store, ownerFence) => {
         await this.ensureRuntimeSession();
-        return store.appendSessionState(this.id, persisted);
+        return store.appendSessionState(this.id, persisted, { ownerFence });
       }).catch((error: unknown) => {
         logger.error({ error: String(error) }, "[session] runtime state 持久化失败");
       });
@@ -1044,7 +1051,12 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     if (!isDeepStrictEqual(entry.event.data.message, message)) {
       throw new Error(`Runtime event ID ${eventId} is already bound to another payload`);
     }
-    const persisted = await this.store.append(entry.event);
+    const ownerFence = await this.assertRuntimeEventWriteAllowed();
+    const persisted = await this.store.append(entry.event, { ownerFence });
+    const confirmedFence = await this.assertRuntimeEventWriteAllowed();
+    if (confirmedFence.epoch !== ownerFence.epoch) {
+      throw new LeaseConflictError(`Runtime Session ${this.id} owner fence changed during append`);
+    }
     await this.replayRuntimeHistoryProjection();
     return commitReceiptFromAppend(persisted);
   }
@@ -1385,12 +1397,13 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
   }
 
   /** RuntimeRun's only authority over Session ownership; the lease itself stays private here. */
-  async assertRuntimeEventWriteAllowed(): Promise<void> {
+  async assertRuntimeEventWriteAllowed(): Promise<RuntimeOwnerFence> {
     this.assertWritable();
     let ownership: OwnerLease;
     try {
       ownership = await this.ensureRuntimeOwnership();
       await ownership.assertOwnership();
+      await this.ensureRuntimeSession();
     } catch (error) {
       // LeaseConflictError = 真正��了所有权（leaseId 不匹配）→ 标记不可写。
       // 瞬时文件系统错误（EPERM/ENOENT/EBUSY）→ 不标记不可写，直接抛出让调用方重试。
@@ -1400,6 +1413,19 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
       throw this.persistenceFailure ?? error;
     }
     this.assertWritable();
+    const expected = this.runtimeOwnerFence;
+    if (!expected || expected.epoch <= 0) {
+      throw new Error(`Runtime Session ${this.id} has no active owner fence`);
+    }
+    const actual = await this.store!.readOwnerFence(this.id);
+    if (actual.epoch !== expected.epoch) {
+      const error = new LeaseConflictError(
+        `Runtime Session ${this.id} owner fence changed from ${expected.epoch} to ${actual.epoch}`,
+      );
+      this.markWriteUncertain("Runtime Session owner fence validation failed", error);
+      throw this.persistenceFailure ?? error;
+    }
+    return { ...expected };
   }
 
   /** Append one structured transcript fact to the same canonical RuntimeEvent ledger. */
@@ -1408,7 +1434,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     options: { readonly eventId?: string } = {},
   ): Promise<CommitReceipt> {
     let durableEvent = structuredClone(event);
-    return this.enqueuePersistence("transcript event", async (store) => {
+    return this.enqueuePersistence("transcript event", async (store, ownerFence) => {
       await this.ensureRuntimeSession();
       const runtimeEventId = options.eventId ?? `transcript:${durableEvent.eventId}`;
       const entries = await store.readSessionEntries(this.id);
@@ -1426,7 +1452,10 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
         };
       }
       return commitReceiptFromAppend(
-        await store.appendTranscriptEvent(this.id, durableEvent, { eventId: runtimeEventId }),
+        await store.appendTranscriptEvent(this.id, durableEvent, {
+          eventId: runtimeEventId,
+          ownerFence,
+        }),
       );
     });
   }
@@ -1465,7 +1494,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
       }),
     );
 
-    return this.enqueuePersistence("transcript tool start batch", async (store) => {
+    return this.enqueuePersistence("transcript tool start batch", async (store, ownerFence) => {
       await this.ensureRuntimeSession();
       const entries = await store.readSessionEntries(this.id);
       const existing = identities.map(({ runtimeEventId }) =>
@@ -1542,7 +1571,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
           ...(batch.refs ? { refs: batch.refs } : {}),
         }),
       );
-      await appendRuntimeEventBatchWithArbitration(store, events);
+      await appendRuntimeEventBatchWithArbitration(store, events, { ownerFence });
       return structuredClone(starts);
     });
   }
@@ -1550,7 +1579,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
   /** Session 发起的 durable 操作共用一条队列。 */
   private enqueuePersistence<Result>(
     kind: string,
-    write: (store: SqliteRuntimeEventStore) => Promise<Result>,
+    write: (store: SqliteRuntimeEventStore, ownerFence: RuntimeOwnerFence) => Promise<Result>,
   ): Promise<Result> {
     this.assertWritable();
     const store = this.store;
@@ -1558,9 +1587,14 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
 
     const operation = this.persistenceTail.then(() =>
       this.runWithWriteAdmission(async () => {
-        await this.assertRuntimeEventWriteAllowed();
-        const result = await write(store);
-        await this.assertRuntimeEventWriteAllowed();
+        const ownerFence = await this.assertRuntimeEventWriteAllowed();
+        const result = await write(store, ownerFence);
+        const confirmedFence = await this.assertRuntimeEventWriteAllowed();
+        if (confirmedFence.epoch !== ownerFence.epoch) {
+          throw new LeaseConflictError(
+            `Runtime Session ${this.id} owner fence changed during write`,
+          );
+        }
         return result;
       }),
     );
@@ -1622,6 +1656,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
         this.store = undefined;
         this.runtimeOwnership = undefined;
         this.runtimeOwnershipPromise = undefined;
+        this.runtimeOwnerFence = undefined;
         let closeError: unknown;
         try {
           this.goalBinding?.unsubscribe();
