@@ -1610,13 +1610,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return result;
   }
 
-  private async getSessionTranscript(params: {
-    readonly workspacePath: string;
-    readonly sessionId: string;
-    readonly before?: string;
-    readonly limit?: number;
-    readonly expectedRevision?: string;
-  }): Promise<JsonValue> {
+  private async getSessionTranscript(
+    params: RuntimeRequest<"session.transcript">["params"],
+  ): Promise<JsonValue> {
     const canonical = await canonicalizeWorkspacePath(params.workspacePath);
     await this.transcriptPersistenceTail;
     const session = await this.requireSession(canonical, params.sessionId);
@@ -1703,6 +1699,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       planProjection: toJsonValue(planProjection),
       ...(activeRun ? { activeRun } : {}),
       queuedInputs,
+      ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
       ...(page.nextBefore ? { nextBefore: page.nextBefore } : {}),
       // 第 1 轮审查问题 2 修复:窗口截断对客户端可见——true 表示预算窗口头之前
       // 还有未载入的更早事件(读事务内由水位判定,即 budgetWindow.truncated)。
