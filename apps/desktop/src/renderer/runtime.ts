@@ -20,6 +20,15 @@ import {
   type RuntimeUserDefaults,
 } from "@pico/protocol";
 import type { DesktopBridge, DesktopResult } from "../preload/contract.js";
+
+type RuntimeTranscriptCursor = {
+  readonly revision: string;
+  readonly throughTranscriptSequence: number;
+  readonly position: number;
+  readonly ordinal: number;
+  readonly byteOffset: number;
+  readonly direction: "older" | "newer";
+};
 import {
   emptyData,
   folderWorkspaceCapabilities,
@@ -480,12 +489,40 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
   return undefined;
 }
 
+interface ParsedConversation extends ConversationView {
+  readonly nextCursor?: RuntimeTranscriptCursor;
+}
+
+function transcriptCursor(value: unknown): RuntimeTranscriptCursor | undefined {
+  if (!isRecord(value)) return undefined;
+  const cursor = value as Record<string, unknown>;
+  if (
+    Object.keys(cursor).length !== 6 ||
+    typeof cursor.revision !== "string" ||
+    !cursor.revision ||
+    !Number.isSafeInteger(cursor.throughTranscriptSequence) ||
+    (cursor.throughTranscriptSequence as number) < 1 ||
+    !Number.isSafeInteger(cursor.position) ||
+    (cursor.position as number) < 0 ||
+    !Number.isSafeInteger(cursor.ordinal) ||
+    (cursor.ordinal as number) < 0 ||
+    !Number.isSafeInteger(cursor.byteOffset) ||
+    (cursor.byteOffset as number) < 0 ||
+    (cursor.direction !== "older" && cursor.direction !== "newer")
+  ) {
+    return undefined;
+  }
+  return cursor as RuntimeTranscriptCursor;
+}
+
 function parseConversation(
   value: unknown,
   workspacePath: string,
   sessionId: string,
-): ConversationView {
+): ParsedConversation {
   const result = isRecord(value) ? value : {};
+  const nextCursor = transcriptCursor(result.nextCursor);
+  const nextBefore = stringValue(result.nextBefore) || undefined;
   return {
     workspacePath,
     sessionId,
@@ -493,7 +530,10 @@ function parseConversation(
       .map(conversationItem)
       .filter((item): item is ConversationItemView => item !== undefined),
     revision: stringValue(result.revision) || undefined,
-    nextBefore: stringValue(result.nextBefore) || undefined,
+    // ConversationView keeps the legacy field as the UI's "has earlier" flag.
+    // The request path below uses the structured cursor whenever it is present.
+    nextBefore: nextBefore ?? (nextCursor ? "structured-cursor" : undefined),
+    ...(nextCursor ? { nextCursor } : {}),
     queuedCount: recordArray(result.queuedInputs).length,
     discoveryItem: discoveryItemFromProjection(result.discoveryProjection),
   };
@@ -1385,6 +1425,7 @@ export function useRuntimeStore(): RuntimeStore {
   const providerConfigLoadGenerationRef = useRef(0);
   const memoryLoadGenerationRef = useRef(0);
   const conversationLoadTracker = useRef(new ConversationLoadTracker());
+  const transcriptCursorByConversation = useRef(new Map<string, RuntimeTranscriptCursor>());
   const pendingSendRef = useRef<
     | {
         readonly identity: string;
@@ -1831,8 +1872,14 @@ export function useRuntimeStore(): RuntimeStore {
         optionalInvoke(bridge, "goal.get", { workspacePath, sessionId }),
       ]);
       if (!isCurrentLoad()) return;
+      const parsedConversation = parseConversation(record, workspacePath, sessionId);
+      if (parsedConversation.nextCursor) {
+        transcriptCursorByConversation.current.set(conversationKey, parsedConversation.nextCursor);
+      } else {
+        transcriptCursorByConversation.current.delete(conversationKey);
+      }
       let conversation: ConversationView = {
-        ...parseConversation(record, workspacePath, sessionId),
+        ...parsedConversation,
         ...(activeRunId ? { runId: activeRunId } : {}),
         ...(!sessionUsage.error ? { usage: parseUsage(sessionUsage.value) } : {}),
         ...(!settingsResult.error ? { settings: parseSessionSettings(settingsResult.value) } : {}),
@@ -2491,9 +2538,10 @@ export function useRuntimeStore(): RuntimeStore {
         const { workspacePath, sessionId } = ref;
         const conversationKey = workspaceSessionKey(ref);
         const conversation = dataRef.current.conversations[conversationKey];
+        const cursor = transcriptCursorByConversation.current.get(conversationKey);
         const before = conversation?.nextBefore;
         const expectedRevision = conversation?.revision;
-        if (!workspacePath || !before || !expectedRevision) return;
+        if (!workspacePath || (!cursor && !before) || !expectedRevision) return;
         await perform("load-earlier-session", async (bridge) => {
           if (preview) return;
           let value: unknown;
@@ -2501,9 +2549,9 @@ export function useRuntimeStore(): RuntimeStore {
             value = await invoke(bridge, "session.transcript", {
               workspacePath,
               sessionId,
-              before,
+              ...(cursor ? { cursor } : { before }),
               limit: 200,
-              expectedRevision,
+              ...(!cursor ? { expectedRevision } : {}),
             });
           } catch (error) {
             if (error instanceof RuntimeInvocationError && error.code === "CONFLICT") {
@@ -2521,6 +2569,11 @@ export function useRuntimeStore(): RuntimeStore {
             await loadConversation(bridge, workspacePath, sessionId);
             setMessage("会话历史已更新，已从最新版本重新加载。");
             return;
+          }
+          if (page.nextCursor) {
+            transcriptCursorByConversation.current.set(conversationKey, page.nextCursor);
+          } else {
+            transcriptCursorByConversation.current.delete(conversationKey);
           }
           setData((current) => {
             const latest = current.conversations[conversationKey];

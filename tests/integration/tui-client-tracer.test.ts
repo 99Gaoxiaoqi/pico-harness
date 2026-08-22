@@ -5,6 +5,7 @@ import { TranscriptEventStore } from "../../src/presentation/transcript-event-st
 import { DaemonEventReporter } from "../../src/tui/daemon-event-reporter.js";
 import { transcriptEventsFromRuntimeItems } from "../../src/tui/transcript-item-hydration.js";
 import {
+  advanceRuntimeTranscriptPagingState,
   ClientSessionRuntime,
   type DaemonSessionClient,
 } from "../../src/tui/client-session-runtime.js";
@@ -261,17 +262,119 @@ test("transcript item hydration: RPC items convert into a projectable transcript
   ]);
 });
 
+test("transcript item hydration: tool evidence and subagent identity survive RPC hydration", () => {
+  const events = transcriptEventsFromRuntimeItems(
+    [
+      {
+        id: "tool-entry",
+        kind: "tool",
+        name: "read_file",
+        args: '{"path":"README.md"}',
+        status: "success",
+        summary: "bounded preview",
+        result: {
+          version: 1,
+          toolCallId: "provider-call",
+          toolName: "read_file",
+          status: "succeeded",
+          rawSizeBytes: 99,
+          sha256: "a".repeat(64),
+          deliveryTruncated: true,
+          projection: {
+            version: 1,
+            mode: "preview",
+            text: "bounded preview",
+            strategy: "head-tail",
+            truncated: true,
+          },
+          evidence: {
+            uri: "evidence://session/tool-call",
+            ref: {
+              schemaVersion: 2,
+              contentHash: "b".repeat(64),
+              sessionId: "s1",
+              kind: "tool-exchange",
+            },
+          },
+        },
+      },
+      {
+        id: "subagent-entry",
+        kind: "subagent",
+        name: "Explore",
+        title: "检查分页边界",
+        detail: "已完成",
+        state: "done",
+        data: { activityId: "activity-1", mode: "explore" },
+      },
+    ],
+    "s1",
+  );
+  const store = new TranscriptEventStore({ initialEvents: events });
+  const projection = store.getProjection();
+  const tool = Object.values(projection.toolCalls)[0];
+  assert.equal(tool?.resultAvailability, "evidence");
+  assert.equal(tool?.resultEnvelope?.evidence?.uri, "evidence://session/tool-call");
+  assert.equal(projection.subagents["activity-1"]?.activity.agentName, "Explore");
+  assert.equal(projection.subagents["activity-1"]?.activity.mode, "explore");
+  assert.equal(projection.subagents["activity-1"]?.activity.status, "completed");
+});
+
+test("transcript paging state: prepends older pages and preserves byte continuation cursor", () => {
+  const cursor = {
+    revision: "5",
+    throughTranscriptSequence: 5,
+    position: 3,
+    ordinal: 1,
+    byteOffset: 4096,
+    direction: "older" as const,
+  };
+  const first = advanceRuntimeTranscriptPagingState(
+    { items: [] },
+    {
+      session: {} as never,
+      items: [{ id: "new", kind: "assistantMessage", content: "new" }],
+      queuedInputs: [],
+      revision: "5",
+      nextCursor: cursor,
+    },
+  );
+  assert.deepEqual(first.nextCursor, cursor, "large-record byteOffset 必须原样保留");
+  const complete = advanceRuntimeTranscriptPagingState(first, {
+    session: {} as never,
+    items: [{ id: "old", kind: "userMessage", content: "old" }],
+    queuedInputs: [],
+    revision: "5",
+  });
+  assert.deepEqual(
+    complete.items.map((item) => item.id),
+    ["old", "new"],
+  );
+  assert.throws(
+    () =>
+      advanceRuntimeTranscriptPagingState(first, {
+        session: {} as never,
+        items: [],
+        queuedInputs: [],
+        revision: "6",
+      }),
+    /revision changed/u,
+  );
+});
+
 interface FakeClientHarness {
   readonly client: DaemonSessionClient;
   readonly requests: { method: string; params: Record<string, unknown> }[];
   emit(notification: RuntimeNotification): void;
   setTranscriptItems(items: unknown[]): void;
+  setTranscriptPages(pages: readonly Record<string, unknown>[]): void;
 }
 
 function createFakeClient(): FakeClientHarness {
   const requests: { method: string; params: Record<string, unknown> }[] = [];
   let listener: ((notification: RuntimeNotification) => void) | undefined;
   let transcriptItems: unknown[] = [];
+  let transcriptPages: Record<string, unknown>[] = [];
   const session = {
     sessionId: "s1",
     workspacePath: "C:\\ws",
@@ -289,6 +392,8 @@ function createFakeClient(): FakeClientHarness {
         return { session, run: { runId: "run_1", status: "running" }, disposition: "started" };
       }
       if (method === "session.transcript") {
+        const queuedPage = transcriptPages.shift();
+        if (queuedPage) return { session, queuedInputs: [], ...queuedPage };
         return {
           session,
           items: transcriptItems,
@@ -350,8 +455,53 @@ function createFakeClient(): FakeClientHarness {
     setTranscriptItems: (items) => {
       transcriptItems = items;
     },
+    setTranscriptPages: (pages) => {
+      transcriptPages = [...pages];
+    },
   };
 }
+
+test("client session runtime: hydrates every fixed-watermark transcript page", async () => {
+  const harness = createFakeClient();
+  const reporter = new TuiReporter();
+  const cursor = {
+    revision: "2",
+    throughTranscriptSequence: 2,
+    position: 2,
+    ordinal: 0,
+    byteOffset: 8192,
+    direction: "older",
+  } as const;
+  harness.setTranscriptPages([
+    {
+      items: [{ id: "new", kind: "assistantMessage", content: "new" }],
+      revision: "2",
+      nextCursor: cursor,
+    },
+    {
+      items: [{ id: "old", kind: "userMessage", content: "old" }],
+      revision: "2",
+    },
+  ]);
+  const runtime = new ClientSessionRuntime({
+    client: harness.client,
+    workspacePath: "C:\\ws",
+    sessionId: "s1",
+    reporter,
+  });
+  await runtime.start();
+
+  const transcriptRequests = harness.requests.filter(
+    (request) => request.method === "session.transcript",
+  );
+  assert.equal(transcriptRequests.length, 2, "TUI 不得在首页 200 items 处停止");
+  assert.deepEqual(transcriptRequests[1]?.params.cursor, cursor);
+  assert.deepEqual(
+    reporter.getProjection().entries.map(({ entry }) => entry.kind),
+    ["user", "assistant"],
+  );
+  runtime.dispose();
+});
 
 test("client session runtime: start hydrates, send maps to session.send, live events project", async () => {
   const harness = createFakeClient();
