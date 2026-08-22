@@ -53,11 +53,179 @@ export interface RuntimeEventStoreAppendResult {
   readonly committedAt: string;
 }
 
+/**
+ * 数据库持有者代际。epoch=0 是迁移兼容态：尚未启用 fence 的旧调用仍可写入；
+ * 任一 owner 将 epoch 推进到正数后，所有写入都必须携带完全匹配的 fence。
+ */
+export interface RuntimeOwnerFence {
+  readonly sessionId: string;
+  readonly epoch: number;
+}
+
+export interface RuntimeFencedWriteOptions {
+  readonly ownerFence?: RuntimeOwnerFence;
+}
+
 export interface AppendRuntimeEventBatchOptions {
   /** Session sequence CAS checked in the same write transaction as the append. */
   readonly expectedSessionHighWater?: Readonly<Record<string, number>>;
   /** Optional exactly-once identity for one Plan/Graph transition. */
   readonly planOperation?: { readonly operationId: string; readonly fingerprint: string };
+  /**
+   * 单 session 写 fence；提供时 batch 内全部事件必须属于该 session。
+   * 缺省只兼容尚处于 epoch=0 的历史调用方。
+   */
+  readonly ownerFence?: RuntimeOwnerFence;
+}
+
+export interface RuntimeRunProjection {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly startedEventId?: string;
+  readonly startedSequence?: number;
+  readonly terminalEventId?: string;
+  readonly terminalSequence?: number;
+  readonly terminalStatus?: Extract<RuntimeEvent, { kind: "run.terminal" }>["data"]["status"];
+  readonly lastEventSequence: number;
+}
+
+export interface RuntimePartialSnapshot {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly partialId: string;
+  readonly kind: string;
+  readonly version: number;
+  readonly payload: unknown;
+  readonly updatedAt: string;
+}
+
+export interface RuntimePartialSegment {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly partialId: string;
+  readonly segmentIndex: number;
+  readonly payload: unknown;
+  readonly createdAt: string;
+}
+
+export interface UpsertRuntimePartialSnapshotInput extends RuntimeFencedWriteOptions {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly partialId: string;
+  readonly kind: string;
+  /** 0 creates the snapshot; a positive value is the current version CAS. */
+  readonly expectedVersion: number;
+  readonly payload: unknown;
+  readonly at?: string;
+}
+
+export interface AppendRuntimePartialSegmentInput extends RuntimeFencedWriteOptions {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly partialId: string;
+  readonly segmentIndex: number;
+  readonly payload: unknown;
+  readonly at?: string;
+}
+
+export interface ClearRuntimeRunPartialsInput extends RuntimeFencedWriteOptions {
+  readonly sessionId: string;
+  readonly runId: string;
+}
+
+export interface RuntimeRunPartials {
+  readonly snapshots: readonly RuntimePartialSnapshot[];
+  readonly segments: readonly RuntimePartialSegment[];
+}
+
+export type RuntimeToolOperationState = "prepared" | "settled";
+
+export interface RuntimeToolOperation {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly toolCallId: string;
+  readonly providerCallId?: string;
+  readonly toolName: string;
+  readonly argumentsHash: string;
+  readonly state: RuntimeToolOperationState;
+  readonly version: number;
+  readonly preparedEventId: string;
+  readonly outcomeEventId?: string;
+  readonly preparedAt: string;
+  readonly settledAt?: string;
+}
+
+/** T1: provider facts + dispatch fact + prepared journal/projection, one transaction. */
+export interface PrepareRuntimeToolOperationInput extends RuntimeFencedWriteOptions {
+  readonly providerEvents?: readonly RuntimeEvent[];
+  readonly dispatchEvent: Extract<RuntimeEvent, { kind: "tool.started" }>;
+  readonly toolCallId: string;
+  readonly providerCallId?: string;
+}
+
+export interface PrepareRuntimeToolOperationResult {
+  readonly events: readonly RuntimeEventStoreAppendResult[];
+  readonly operation: RuntimeToolOperation;
+}
+
+/** T2: immutable result fact + settled journal + operation CAS, one transaction. */
+export interface SettleRuntimeToolOperationInput extends RuntimeFencedWriteOptions {
+  readonly resultEvent: Extract<RuntimeEvent, { kind: "tool.result.recorded" }>;
+  readonly toolCallId: string;
+  readonly expectedVersion: number;
+}
+
+export interface SettleRuntimeToolOperationResult {
+  readonly event: RuntimeEventStoreAppendResult;
+  readonly operation: RuntimeToolOperation;
+}
+
+export interface RuntimeTranscriptRecordInput extends RuntimeFencedWriteOptions {
+  readonly recordId: string;
+  readonly sessionId: string;
+  readonly sourceEventId: string;
+  readonly sourceSequence: number;
+  readonly kind: string;
+  readonly payload: unknown;
+  /** UTF-8 text chunks; a page may slice one chunk at a byte boundary. */
+  readonly chunks: readonly string[];
+  readonly at?: string;
+}
+
+export interface RuntimeTranscriptCursor {
+  readonly sequence: number;
+  readonly chunkIndex: number;
+  readonly byteOffset: number;
+}
+
+export interface RuntimeTranscriptPageOptions {
+  readonly sessionId: string;
+  /** Omit only on the first page; the returned value must be reused for the whole traversal. */
+  readonly throughSequence?: number;
+  readonly direction: "forward" | "backward";
+  readonly cursor?: RuntimeTranscriptCursor;
+  readonly maxBytes: number;
+  readonly limit?: number;
+}
+
+export interface RuntimeTranscriptPageItem {
+  readonly recordId: string;
+  readonly sourceEventId: string;
+  readonly sequence: number;
+  readonly kind: string;
+  readonly payload: unknown;
+  readonly chunkIndex: number;
+  readonly byteOffset: number;
+  readonly text: string;
+  readonly byteLength: number;
+  readonly at: string;
+}
+
+export interface RuntimeTranscriptPage {
+  /** Fixed read waterline; pass unchanged to every subsequent page request. */
+  readonly throughSequence: number;
+  readonly items: readonly RuntimeTranscriptPageItem[];
+  readonly nextCursor?: RuntimeTranscriptCursor;
 }
 
 export interface RuntimeEventStoreEntry {
@@ -118,6 +286,28 @@ export class RuntimeEventStoreHighWaterConflictError extends RuntimeEventStoreIn
   }
 }
 
+export class RuntimeEventStoreOwnerFenceError extends RuntimeEventStoreIntegrityError {
+  constructor(
+    readonly sessionId: string,
+    readonly expectedEpoch: number | undefined,
+    readonly actualEpoch: number,
+  ) {
+    super(
+      expectedEpoch === undefined
+        ? `Runtime session ${sessionId} requires owner fence epoch ${actualEpoch}`
+        : `Runtime session ${sessionId} owner fence ${expectedEpoch} is stale; current epoch is ${actualEpoch}`,
+    );
+    this.name = "RuntimeEventStoreOwnerFenceError";
+  }
+}
+
+export class RuntimeEventStoreVersionConflictError extends RuntimeEventStoreIntegrityError {
+  constructor(readonly resource: string) {
+    super(`Runtime EventLog resource ${resource} changed concurrently`);
+    this.name = "RuntimeEventStoreVersionConflictError";
+  }
+}
+
 export class RuntimeEventStorePlanOperationConflictError extends RuntimeEventStoreIntegrityError {
   constructor(readonly operationId: string) {
     super(`Plan operation ${operationId} is already bound to another fingerprint`);
@@ -126,10 +316,10 @@ export class RuntimeEventStorePlanOperationConflictError extends RuntimeEventSto
 }
 
 /**
- * ADR 29 §4(修订:claim-scoped) 源封口(fail-closed):已被 continuation claim
- * 的 source run 拒收新的非恢复类 append(claim 存在 ⇒ claim 时已终态)。
- * 未被 claim 的终态 run 保持开放语义。确定性拒绝(事务未提交),读回仲裁
- * 不得翻案——继承 RuntimeEventStoreIntegrityError 即自动落入 isDeterministicStoreRefusal。
+ * run.terminal 是该 run 唯一 immutable tail；封口后只允许同 eventId 且
+ * canonical payload 完全相同的幂等重放。确定性拒绝(事务未提交),读回仲裁
+ * 不得翻案——继承 RuntimeEventStoreIntegrityError 即自动落入
+ * isDeterministicStoreRefusal。
  */
 export class RuntimeEventStoreRunSealedError extends RuntimeEventStoreIntegrityError {
   constructor(
@@ -138,7 +328,7 @@ export class RuntimeEventStoreRunSealedError extends RuntimeEventStoreIntegrityE
     readonly eventId: string,
   ) {
     super(
-      `Runtime run ${runId} in session ${sessionId} has a continuation claim (sealed source); event ${eventId} cannot be appended`,
+      `Runtime run ${runId} in session ${sessionId} is sealed; event ${eventId} cannot be appended`,
     );
     this.name = "RuntimeEventStoreRunSealedError";
   }
