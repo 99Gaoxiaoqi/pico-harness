@@ -113,7 +113,7 @@ test("sqlite EventLog retention: measures UTF-8 payload bytes and shared blobs o
   }
 });
 
-test("sqlite EventLog retention: attributes source-derived memory once and keeps manual memory shared", async () => {
+test("sqlite EventLog retention: observes Memory bytes without charging the EventLog quota", async () => {
   const { root, storageRoot } = await fixture("memory-bytes");
   try {
     seedSession(storageRoot, "one");
@@ -212,13 +212,76 @@ test("sqlite EventLog retention: attributes source-derived memory once and keeps
       0,
     );
     assert.equal(after.unattributedMemoryBytes, expectedShared);
-    assert.equal(after.logicalBytes - before.logicalBytes, expectedOwned + expectedShared);
+    assert.equal(after.logicalBytes, before.logicalBytes);
   } finally {
     await cleanup(root);
   }
 });
 
-test("sqlite EventLog retention: deletes the complete derived-memory closure and preserves manual overlays", async () => {
+test("sqlite EventLog retention: Memory over the cap neither prunes Sessions nor blocks admission", async () => {
+  const { root, storageRoot } = await fixture("memory-quota-independent");
+  try {
+    seedSession(storageRoot, "archived");
+    seedSession(storageRoot, "current", { archived: false });
+    const before = readEventLogStorageStatus({ storageRoot, currentSessionId: "current" });
+    const policy = {
+      hardLimitBytes: before.logicalBytes + 1,
+      lowWatermarkBytes: before.logicalBytes,
+    } as const;
+    withWorkspaceSqliteLease(storageRoot, (lease) =>
+      lease.transaction("write", () => {
+        lease.database
+          .prepare("INSERT INTO memory_metadata (key, value_json) VALUES ('revision', '0')")
+          .run();
+        lease.database
+          .prepare(
+            `INSERT INTO memory_sources (
+               source_id, session_id, event_ids_json, digest, availability,
+               version, created_at, updated_at
+             ) VALUES ('large-source', 'archived', '[]', ?, 'available', 1, '2026', '2026')`,
+          )
+          .run("m".repeat(policy.hardLimitBytes + 1024));
+        lease.database
+          .prepare(
+            `INSERT INTO memory_facts (
+               fact_id, kind, title, content, confidence, source_id, state, pinned,
+               version, created_at, updated_at
+             ) VALUES (
+               'large-fact', 'project_fact', 'large', ?, 1, 'large-source', 'active', 0,
+               1, '2026', '2026'
+             )`,
+          )
+          .run("memory".repeat(policy.hardLimitBytes));
+      }),
+    );
+
+    const measured = readEventLogStorageStatus({
+      storageRoot,
+      currentSessionId: "current",
+      policy,
+    });
+    assert.equal(measured.logicalBytes, before.logicalBytes);
+    assert.equal(
+      measured.sessions.find(({ sessionId }) => sessionId === "archived")!.breakdown.memoryBytes >
+        policy.hardLimitBytes,
+      true,
+    );
+    assert.deepEqual(measured.plan.sessionIdsToDelete, []);
+    assert.equal(measured.plan.canStartNewWork, true);
+
+    const admitted = admitEventLogNewWork({ storageRoot, currentSessionId: "current", policy });
+    assert.deepEqual(admitted.deletedSessionIds, []);
+    assert.equal(admitted.after.plan.canStartNewWork, true);
+    assert.equal(
+      admitted.after.sessions.some(({ sessionId }) => sessionId === "archived"),
+      true,
+    );
+  } finally {
+    await cleanup(root);
+  }
+});
+
+test("sqlite EventLog retention: invalidates sources and preserves committed facts", async () => {
   const { root, storageRoot } = await fixture("memory-delete");
   try {
     seedSession(storageRoot, "candidate");
@@ -349,6 +412,12 @@ test("sqlite EventLog retention: deletes the complete derived-memory closure and
       }),
     );
 
+    const factsBefore = withWorkspaceSqliteLease(storageRoot, (lease) =>
+      lease.transaction("read", () =>
+        lease.database.prepare("SELECT * FROM memory_facts ORDER BY fact_id").all(),
+      ),
+    );
+
     const measured = readEventLogStorageStatus({ storageRoot, currentSessionId: "survivor" });
     const expectedSurvivorMemory =
       byteLength(
@@ -394,25 +463,47 @@ test("sqlite EventLog retention: deletes the complete derived-memory closure and
     assert.deepEqual(result.deletedSessionIds, ["candidate"]);
     withWorkspaceSqliteLease(storageRoot, (lease) =>
       lease.transaction("read", () => {
-        assert.equal(
-          lease.database
-            .prepare("SELECT 1 FROM memory_sources WHERE source_id = 'source-candidate'")
-            .get(),
-          undefined,
-        );
-        assert.notEqual(
-          lease.database
-            .prepare("SELECT 1 FROM memory_sources WHERE source_id = 'source-survivor'")
-            .get(),
-          undefined,
-        );
         assert.deepEqual(
           lease.database
-            .prepare("SELECT fact_id FROM memory_facts ORDER BY fact_id")
+            .prepare(
+              `SELECT source_id, availability, invalidation_code
+               FROM memory_sources ORDER BY source_id`,
+            )
             .all()
-            .map((row) => row["fact_id"]),
-          ["fact-manual", "fact-survivor"],
+            .map((row) => ({ ...row })),
+          [
+            {
+              source_id: "source-candidate",
+              availability: "unavailable",
+              invalidation_code: "session_deleted",
+            },
+            {
+              source_id: "source-survivor",
+              availability: "available",
+              invalidation_code: null,
+            },
+          ],
         );
+        assert.deepEqual(
+          lease.database.prepare("SELECT * FROM memory_facts ORDER BY fact_id").all(),
+          factsBefore,
+          "retention must not rewrite or delete committed Facts",
+        );
+        const derivedProposal = lease.database
+          .prepare(
+            `SELECT title, content, reason, status, source_id, conflict_fact_id,
+                    resolved_fact_id, deleted_at
+             FROM memory_proposals WHERE proposal_id = 'proposal-derived'`,
+          )
+          .get() as Record<string, unknown>;
+        assert.equal(derivedProposal["title"], null);
+        assert.equal(derivedProposal["content"], null);
+        assert.equal(derivedProposal["reason"], null);
+        assert.equal(derivedProposal["status"], "deleted");
+        assert.equal(derivedProposal["source_id"], "source-candidate");
+        assert.equal(derivedProposal["conflict_fact_id"], "fact-derived");
+        assert.equal(derivedProposal["resolved_fact_id"], "fact-derived");
+        assert.equal(typeof derivedProposal["deleted_at"], "string");
         const manualProposal = lease.database
           .prepare(
             `SELECT source_id, conflict_fact_id, resolved_fact_id
@@ -420,28 +511,31 @@ test("sqlite EventLog retention: deletes the complete derived-memory closure and
           )
           .get() as Record<string, unknown>;
         assert.equal(manualProposal["source_id"], null);
-        assert.equal(manualProposal["conflict_fact_id"], null);
-        assert.equal(manualProposal["resolved_fact_id"], null);
+        assert.equal(manualProposal["conflict_fact_id"], "fact-derived");
+        assert.equal(manualProposal["resolved_fact_id"], "fact-derived");
         assert.deepEqual(
           lease.database
-            .prepare("SELECT job_id FROM memory_jobs ORDER BY job_id")
+            .prepare("SELECT job_id, status FROM memory_jobs ORDER BY job_id")
             .all()
-            .map((row) => row["job_id"]),
-          ["job-manual", "job-survivor-source"],
+            .map((row) => [row["job_id"], row["status"]]),
+          [
+            ["job-by-notification", "cancelled"],
+            ["job-by-session", "cancelled"],
+            ["job-by-source", "cancelled"],
+            ["job-manual", "queued"],
+            ["job-survivor-source", "queued"],
+          ],
         );
-        assert.deepEqual(
-          lease.database
-            .prepare("SELECT mutation_id FROM memory_mutations ORDER BY sequence")
-            .all()
-            .map((row) => row["mutation_id"]),
-          ["mutation-manual"],
+        assert.equal(
+          lease.database.prepare("SELECT COUNT(*) AS count FROM memory_mutations").get()!["count"],
+          10,
         );
         assert.deepEqual(
           lease.database
             .prepare("SELECT operation_key FROM memory_idempotency ORDER BY operation_key")
             .all()
             .map((row) => row["operation_key"]),
-          ["manual"],
+          ["derived-fact", "derived-job", "derived-proposal", "derived-source", "manual"],
         );
         assert.equal(
           lease.database
@@ -456,7 +550,7 @@ test("sqlite EventLog retention: deletes the complete derived-memory closure and
   }
 });
 
-test("sqlite EventLog retention: deletes more than 1000 memory sources without host parameters", async () => {
+test("sqlite EventLog retention: invalidates more than 1000 sources without host parameters", async () => {
   const { root, storageRoot } = await fixture("memory-many-sources");
   try {
     seedSession(storageRoot, "candidate");
@@ -515,12 +609,16 @@ test("sqlite EventLog retention: deletes more than 1000 memory sources without h
     withWorkspaceSqliteLease(storageRoot, (lease) =>
       lease.transaction("read", () => {
         assert.equal(
-          lease.database.prepare("SELECT COUNT(*) AS count FROM memory_sources").get()!["count"],
-          0,
+          lease.database
+            .prepare(
+              `SELECT COUNT(*) AS count FROM memory_sources WHERE availability = 'unavailable'`,
+            )
+            .get()!["count"],
+          1105,
         );
         assert.equal(
           lease.database.prepare("SELECT COUNT(*) AS count FROM memory_facts").get()!["count"],
-          0,
+          1105,
         );
         assert.equal(
           lease.database
