@@ -58,6 +58,8 @@ export interface LoadModelRouterOptions {
 export interface ResolvedModelSecrets {
   /** Provider-level credentials, used by user providers and model discovery. */
   readonly providers?: Readonly<Record<string, string>>;
+  /** Provider-scoped rotation candidates resolved only from that user's declared apiKeyEnv. */
+  readonly providerPools?: Readonly<Record<string, readonly string[]>>;
   /** Route-level credentials, used by strict legacy workspace credential references. */
   readonly routes?: Readonly<Record<string, string>>;
 }
@@ -72,6 +74,7 @@ export class ModelRouter {
   readonly defaultRouteId?: string;
   private readonly byId: ReadonlyMap<string, ModelRoute>;
   private readonly providerSecrets: ReadonlyMap<string, string>;
+  private readonly providerPools: ReadonlyMap<string, readonly string[]>;
   private readonly routeSecrets: ReadonlyMap<string, string>;
 
   constructor(
@@ -84,6 +87,7 @@ export class ModelRouter {
     this.byId = new Map(this.routes.map((route) => [route.id, route]));
     this.defaultRouteId = defaultRouteId;
     this.providerSecrets = secretMap(resolvedSecrets.providers);
+    this.providerPools = secretListMap(resolvedSecrets.providerPools);
     this.routeSecrets = secretMap(resolvedSecrets.routes);
   }
 
@@ -119,7 +123,7 @@ export class ModelRouter {
     const requested = query?.trim() || "(empty)";
     const available = this.routes.map((item) => item.id).join(", ") || "none";
     throw new Error(
-      `模型 ${requested} 不在当前可用路由中。可用模型: ${available}。请使用 /model 选择，或检查 .pico/config.json 的 providers 配置。`,
+      `模型 ${requested} 不在当前可用路由中。可用模型: ${available}。请使用 /model 选择，或检查用户级 $PICO_HOME/config.json 的 providers 配置。`,
     );
   }
 
@@ -176,6 +180,21 @@ export class ModelRouter {
     };
   }
 
+  /** Process-local credentials for the selected user route; never persist or log the result. */
+  credentialCandidates(routeId: string | undefined): readonly string[] {
+    const route = this.require(routeId);
+    const routeSecret = this.routeSecrets.get(route.id);
+    if (routeSecret) return Object.freeze([routeSecret]);
+
+    const providerPool = this.providerPools.get(route.providerId);
+    if (providerPool) return providerPool;
+
+    const providerSecret = this.providerSecrets.get(route.providerId);
+    if (providerSecret) return Object.freeze([providerSecret]);
+
+    return Object.freeze(readApiKeys(this.env, route.apiKeyEnv));
+  }
+
   private resolveExact(query: string): ModelRoute | undefined {
     const normalized = query.trim();
     const exact = this.byId.get(normalized);
@@ -185,11 +204,7 @@ export class ModelRouter {
   }
 
   private readCredential(route: ModelRoute): string | undefined {
-    return (
-      this.routeSecrets.get(route.id) ??
-      this.providerSecrets.get(route.providerId) ??
-      readApiKey(this.env, route.apiKeyEnv)
-    );
+    return this.credentialCandidates(route.id)[0];
   }
 }
 
@@ -297,12 +312,11 @@ function readApiKey(
   env: Readonly<Record<string, string | undefined>>,
   name: string,
 ): string | undefined {
-  const value = env[name]?.trim();
-  if (!value) return undefined;
-  return value
-    .split(",")
-    .map((part) => part.trim())
-    .find(Boolean);
+  return readApiKeys(env, name)[0];
+}
+
+function readApiKeys(env: Readonly<Record<string, string | undefined>>, name: string): string[] {
+  return unique(env[name]?.split(",") ?? []);
 }
 
 function secretMap(
@@ -312,6 +326,17 @@ function secretMap(
     Object.entries(values ?? {}).flatMap(([id, value]) => {
       const secret = normalizedSecret(value);
       return id.trim() && secret ? [[id, secret] as const] : [];
+    }),
+  );
+}
+
+function secretListMap(
+  values: Readonly<Record<string, readonly string[]>> | undefined,
+): ReadonlyMap<string, readonly string[]> {
+  return new Map(
+    Object.entries(values ?? {}).flatMap(([id, candidates]) => {
+      const secrets = unique(candidates);
+      return id.trim() && secrets.length > 0 ? [[id, Object.freeze(secrets)] as const] : [];
     }),
   );
 }

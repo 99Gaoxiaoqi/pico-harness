@@ -1190,6 +1190,12 @@ export async function executeAgentRuntime(
       picoHome: session.picoHome,
     }).workspace;
     const currentConfig: ProviderConfig = providerConfig;
+    const routeCredentials =
+      dependencies.provider === undefined && dependencies.modelRouter && currentConfig.routeId
+        ? dependencies.modelRouter.credentialCandidates(currentConfig.routeId)
+        : [];
+    const credentialPool =
+      routeCredentials.length > 1 ? new CredentialPool([...routeCredentials]) : undefined;
     const providerDependencies: ProviderRuntimeDependencies = {
       promptCachePrewarm: PromptCachePrewarmCoordinator.shared(workspaceStatePaths.root),
     };
@@ -1276,6 +1282,7 @@ export async function executeAgentRuntime(
       ...(dependencies.provider !== undefined ? { provider: dependencies.provider } : {}),
       providerFactory,
       providerDecorator,
+      ...(credentialPool ? { credentialPool } : {}),
       providerDependencies,
     });
     const trackedProvider = providerAssembly.provider;

@@ -129,6 +129,7 @@ async function resolveSecrets(
   statuses: Record<string, EffectiveProviderCredentialStatus>;
 }> {
   const providerSecrets: Record<string, string> = {};
+  const providerPools: Record<string, readonly string[]> = {};
   const routeSecrets: Record<string, string> = {};
   const statuses: Record<string, EffectiveProviderCredentialStatus> = {};
 
@@ -189,11 +190,11 @@ async function resolveSecrets(
       // LLM_API_KEY) to an attacker-controlled baseURL. Such providers must never touch env, so
       // they can only be satisfied from the user config or the credential vault above.
       const allowEnvFallback = !(configSource === "project-legacy" && !userProviderMatches);
-      const environmentSecret = allowEnvFallback
-        ? readFirstSecret(env[provider.apiKeyEnv])
-        : undefined;
+      const environmentSecrets = allowEnvFallback ? readSecrets(env[provider.apiKeyEnv]) : [];
+      const environmentSecret = environmentSecrets[0];
       if (environmentSecret) {
         providerSecrets[providerId] = environmentSecret;
+        providerPools[providerId] = environmentSecrets;
         statuses[providerId] = { providerId, configSource, state: "environment" };
         return;
       }
@@ -212,6 +213,7 @@ async function resolveSecrets(
   return {
     secrets: {
       providers: providerSecrets,
+      providerPools,
       routes: routeSecrets,
     },
     statuses,
@@ -246,10 +248,11 @@ function unavailableState(vault: CredentialVault): "missing" | "unsupported" {
 }
 
 function readFirstSecret(value: string | undefined): string | undefined {
-  return value
-    ?.split(",")
-    .map((item) => item.trim())
-    .find(Boolean);
+  return readSecrets(value)[0];
+}
+
+function readSecrets(value: string | undefined): string[] {
+  return [...new Set((value?.split(",") ?? []).map((item) => item.trim()).filter(Boolean))];
 }
 
 function normalizeConfiguredSecret(value: string | undefined): string | undefined {
