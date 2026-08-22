@@ -1,13 +1,13 @@
 # EventLog Maka 语义对齐交付计划
 
-状态：实现与代码验收完成，待真实迁移/发布审批。基线：`4b0813c3`。授权终点：实现、验证并准备交付，不执行用户真实 workspace 迁移或发布。
+状态：实现与代码验收完成，待真实迁移/发布审批。EventLog 改造基线：`4b0813c3`；Session/Memory 语义修正基线：`fa362543`。授权终点：实现、验证并准备交付，不执行用户真实 workspace 迁移或发布。
 
 ## 已决策边界
 
 - 保留 RuntimeEvent v2 与当前 `runtime_events` canonical fact 表，不复制 Maka 的事件信封或 AgentRun 多账本。
-- 单版本硬切：在原 `pico.sqlite` 中清空旧 Session/eventLog，不保留备份；其他 scope 的弱引用清理或 park。
+- 单版本硬切：在原 `pico.sqlite` 中清空旧 Session/eventLog，不保留备份；其他 scope 的弱引用清理或 park。长期 Memory Fact 不属于 EventLog，不随硬切删除。
 - Desktop 与 TUI 同版本切换；不保留 legacy reader。
-- workspace Session-owned 逻辑配额 2 GiB，触发后只删除 archived 且 unpinned Session，回收到 1.5 GiB。
+- workspace EventLog 逻辑配额 2 GiB，触发后只删除 archived 且 unpinned Session，回收到 1.5 GiB；Memory 只单独观测，不参与 EventLog admission 或候选回收量。
 - 删除使用 SQLite `secure_delete`、WAL truncate 和有门槛的 vacuum，不承诺 SSD/备份层的法证擦除。
 
 ## 交付切片
@@ -54,10 +54,12 @@ Host 请求
 崩溃恢复：prepared operation -> interrupted T2，不自动重放不确定副作用
 Continuation：冻结 source prefix digest + claim + target run.started（同事务）
 生命周期：eventlog epoch hard cut / archived retention
+          -> Session/EventLog 删除 + Memory Source unavailable + Proposal 无正文墓碑
+          -> committed Fact 保留
           -> GC outbox -> secure_delete + WAL truncate + 门槛 vacuum
 ```
 
-事实不变性边界：当前 epoch 内的 `runtime_events` 只追加且不可改写；同一 eventId 仅允许 canonical payload 完全相同的精确重放。projection、partial 和 transcript materialization 是可重建的派生状态。硬切与 retention 是显式、受约束的生命周期删除例外；Session 删除时，独立终态控制事实继续保留，仅将弱引用置空，手工 overlay 不被级联删除。
+事实不变性边界：当前 epoch 内的 `runtime_events` 只追加且不可改写；同一 eventId 仅允许 canonical payload 完全相同的精确重放。projection、partial 和 transcript materialization 是可重建的派生状态。硬切与 retention 是显式、受约束的 EventLog 生命周期删除例外。Memory Source 是 provenance 而不是 Fact ownership；普通 Session 删除、自动 retention 和 EventLog hard cut 均不得删除或改写 committed Fact，只将 Source 标记为 `unavailable`、停止相关提取并把 Source-bound Proposal 转为无正文墓碑。真正忘记长期记忆必须走独立的 Memory forget 语义。
 
 ## 验收不变量
 
@@ -68,6 +70,9 @@ Continuation：冻结 source prefix digest + claim + target run.started（同事
 - terminal 唯一且为 run tail；封口后只允许精确幂等重放。
 - transcript 固定水位下可遍历全历史，Desktop/TUI 无缺页、无重复、大记录可分片重组。
 - 无可清理 Session 且超配额时，阻止新工作但允许 T2/recovery/terminal/delete 安全闭环。
+- Memory 字节不进入 EventLog 配额；即使 Memory 单独超过 2 GiB，也不得触发 Session 回收或阻止 EventLog 新工作。
+- 普通 Session 删除、自动 retention 和 EventLog hard cut 后，committed Fact 内容、状态、置顶及版本保持不变；Source `unavailable`，关联 Proposal 不保留正文。
+- prepared lifecycle job 只有在 Session 删除事实已提交后才能失效 Source；仍存在的 Session 必须取消该 intent。
 
 ## 证据口径
 
@@ -75,12 +80,12 @@ Continuation：冻结 source prefix digest + claim + target run.started（同事
 
 ## 实施结果与验收证据
 
-- 最终 HEAD 的 EventLog/continuation/transcript/fence/retention/memory/Plan/Desktop/TUI 定向组合测试：91/91 通过；包含 1105 Sources + 1105 derived Facts 的超参数上限回收用例。
-- 全量集成测试分段覆盖完成：首段 635 通过、10 跳过；剩余段 397 通过、15 跳过。`runtime-host-spawn` 首次出现一次时序抖动，独立复跑 6/6 通过。
+- 原 EventLog 改造 HEAD 的 EventLog/continuation/transcript/fence/retention/memory/Plan/Desktop/TUI 定向组合测试：91/91 通过。Session/Memory 语义修正后的 retention、hard cut、Desktop lifecycle 与 Memory service 定向组合测试：28/28 通过，包含 1105 Sources 的 set-based invalidation、Memory 超配额不回收 Session，以及 hard-cut failpoint 全事务回滚。
+- Session/Memory 语义修正最终状态的全量集成测试：1039 通过、10 跳过、1 项既有基线失败；本次新增和受影响的 retention、hard cut、Desktop lifecycle、Memory repository 测试均通过。
 - 一项与本改造无差异的基线失败仍存在：`terminal-bench-bundle-lock.test.ts` 要求根依赖声明 `@pico/runtime-host: "*"`；基线到本分支的三个 package manifest/lockfile 均无改动。
 - `npm run build`、根 typecheck、Desktop typecheck、lint、format 与 `git diff --check` 均通过。
-- 独立对抗审查未发现 P0，发现的 4 个 P1 均已修复并回归：canonical partial 入口、Transcript 整数 ordinal、Session-derived memory 删除/计费及其高容量回收边界；同时补齐了冲突 fragment 的 fail-closed 校验。Memory 计费由 SQLite 按 owner 聚合，仅向 Node 返回 `O(Session 数 + 1)` 行，不再物化正文或展开 source ID 参数。
+- 后续对抗审查发现并修复一个 P0 语义问题：retention 与 hard cut 原先把 Source-linked Fact 当作 Session-owned 派生行删除。现在三条生命周期路径统一保留 committed Fact；Source 与 Proposal 使用 set-based lifecycle 更新，Memory 计费仍由 SQLite 按 owner 聚合并仅用于观测。
 - 已知后续优化：daemon 为复用跨事实 projector，会在单次固定水位读取中累计分页结果；协议正确性和单帧预算已闭环，但极长 Session 的峰值内存可进一步改造成 checkpointed reducer。
-- Memory 计费已保持 `O(Session 数 + 1)` 返回行，但实际删除闭包仍会在 Node 中持有候选实体 ID 及 job/idempotency marker 元数据；极端海量小行场景可继续改造成 SQL set-delete 或有界 keyset 批次。
+- 独立 Memory quota 尚未实现；当前先保证 Memory 不影响 EventLog quota。Memory 统计查询仍在读取存储状态时执行，后续可按独立 Memory 状态协议拆出。
 - `runtime_events` 的 append-only 由 typed store API 和事务边界保证，暂未增加阻止同库代码直接执行 `UPDATE` 的 SQLite trigger；新增直接 SQL 写路径仍需架构审查。
 - 未执行真实用户数据库硬切、发布或真实模型验收；这些动作仍需单独批准。

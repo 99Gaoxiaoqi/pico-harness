@@ -726,10 +726,12 @@ export class DesktopMemoryService {
   }
 
   private runtimeSessionExists(repository: SqliteMemoryRepository, sessionId: string): boolean {
-    return withWorkspaceSqliteLease(repository.storageRoot, (lease) =>
-      lease.database
-        .prepare("SELECT 1 FROM sessions WHERE session_id = ? LIMIT 1")
-        .get(sessionId) !== undefined,
+    return withWorkspaceSqliteLease(
+      repository.storageRoot,
+      (lease) =>
+        lease.database
+          .prepare("SELECT 1 FROM sessions WHERE session_id = ? LIMIT 1")
+          .get(sessionId) !== undefined,
     );
   }
 
