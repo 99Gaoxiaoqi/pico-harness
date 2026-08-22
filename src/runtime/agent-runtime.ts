@@ -419,17 +419,18 @@ export class AgentRuntime {
   }
 
   async readPlanProjection(input: PlanSessionRequest): Promise<PlanProjection> {
-    const { session, lease } = await acquirePlanControlSession(input, {});
+    const picoHome = resolvePicoHome({ picoHome: input.picoHome, env: input.env ?? process.env });
+    const workDir = await resolveWorkDir(input.dir);
+    const store = new SqliteRuntimeEventStore({
+      storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
+    });
     try {
-      if (!session.runtimeEventStore) throw new Error("Plan projection requires durable storage");
-      const result = await reconcileOrphanedPlanExecution(
-        session.runtimeEventStore,
-        input.sessionId,
-        session,
-      );
-      return result;
+      return await new PlanCoordinator(
+        store,
+        planControlContext(input.sessionId, "read-projection"),
+      ).project();
     } finally {
-      lease.release();
+      store.close();
     }
   }
 
