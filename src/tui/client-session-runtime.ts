@@ -9,6 +9,8 @@ import {
   type RuntimeParams,
   type RuntimeResult,
   type RuntimeConversationItem,
+  type RuntimeTranscriptCursor,
+  type RuntimeTranscriptFragment,
   type RuntimeUserInput,
 } from "@pico/protocol";
 import type { ApprovalNotice } from "../approval/manager.js";
@@ -17,8 +19,6 @@ import type { PlanApprovalControl } from "./approval-dialogs.js";
 import { DaemonEventReporter } from "./daemon-event-reporter.js";
 import { transcriptEventsFromRuntimeItems } from "./transcript-item-hydration.js";
 import type { TuiReporter } from "./tui-reporter.js";
-import type { RuntimeTranscriptCursor } from "../../packages/protocol/src/runtime.js";
-import type { RuntimeTranscriptFragment } from "../../packages/protocol/src/runtime.js";
 
 /**
  * 客户端侧 ask-user 请求（wire prompt 的结构化投影——AskUserRequest 的

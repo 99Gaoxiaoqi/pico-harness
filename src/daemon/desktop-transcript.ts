@@ -7,10 +7,6 @@ import {
 } from "../presentation/transcript-event-store.js";
 import { hydrateCanonicalTranscriptEvents } from "../presentation/transcript-tool-result-hydration.js";
 import type { RuntimeEventStoreEntry } from "../storage/runtime-event-store-contracts.js";
-import type {
-  RuntimeTranscriptCursor,
-  RuntimeTranscriptFragment,
-} from "../../packages/protocol/src/runtime.js";
 import {
   projectRuntimeSessionSequencedMessageEntries,
   projectRuntimeSessionState,
@@ -22,6 +18,8 @@ import {
   MAX_RUNTIME_FRAME_BYTES,
   type JsonObject,
   type RuntimeConversationItem,
+  type RuntimeTranscriptCursor,
+  type RuntimeTranscriptFragment,
   type RuntimeToolResultEnvelope,
 } from "./protocol.js";
 
