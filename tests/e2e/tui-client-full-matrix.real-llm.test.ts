@@ -12,6 +12,8 @@ import {
   resolveStorageRoot,
 } from "@pico/runtime-host";
 import { LocalRuntimeClient } from "../../src/daemon/index.js";
+import { EMPTY_USER_CONFIG_REVISION, UserConfigStore } from "../../src/input/user-config-store.js";
+import { resolvePicoHome } from "../../src/paths/pico-paths.js";
 import {
   ClientSessionRuntime,
   type ClientPromptRequest,
@@ -41,12 +43,16 @@ import { diffStatFromRewindPreview } from "../../src/tui/rewind-client-bridge.js
  */
 
 const TEST_TIMEOUT_MS = 10 * 60_000;
+const DAEMON_CLEANUP_RPC_TIMEOUT_MS = 5_000;
+const DAEMON_SHUTDOWN_TIMEOUT_MS = 5_000;
+const DAEMON_EXIT_TIMEOUT_MS = 2_000;
 const RUN_REAL_MODEL = process.env.RUN_LLM_E2E === "1";
 const realModelTest = RUN_REAL_MODEL ? test : test.skip;
 
 interface ScenarioWorkspace {
   readonly client: LocalRuntimeClient;
   readonly workspaceDir: string;
+  readonly visionSupported: boolean;
   trackSession(sessionId: string | undefined): void;
 }
 
@@ -59,41 +65,55 @@ async function createScenarioWorkspace(
   await mkdir(picoHome, { recursive: true });
   await mkdir(workspaceSeed, { recursive: true });
   const workspaceDir = await realpath(workspaceSeed);
+  const userConfig = (await new UserConfigStore({ picoHome: resolvePicoHome() }).read()).config;
+  await new UserConfigStore({ picoHome }).write(userConfig, {
+    expectedRevision: EMPTY_USER_CONFIG_REVISION,
+  });
+  const routeId = userConfig.defaults?.modelRouteId ?? "";
+  const separator = routeId.indexOf("/");
+  const providerId = separator < 0 ? "" : routeId.slice(0, separator);
+  const model = separator < 0 ? "" : routeId.slice(separator + 1);
+  const visionSupported =
+    userConfig.providers[providerId]?.modelCapabilities?.[model]?.vision !== false;
   const previousPicoHome = process.env.PICO_HOME;
   process.env.PICO_HOME = picoHome;
+  const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome });
+  let trackedSessionId: string | undefined;
+  // node:test 按注册顺序执行同级 after hook，因此必须把依赖 client/注册文件的
+  // 清理合并到同一个 hook，并确保最后才恢复环境、删除临时 root。
   t.after(async () => {
+    if (trackedSessionId) {
+      await settleWithin(
+        client.request("session.delete", {
+          workspacePath: workspaceDir,
+          sessionId: trackedSessionId,
+        }),
+        DAEMON_CLEANUP_RPC_TIMEOUT_MS,
+      );
+    }
+    await settleWithin(
+      client.request("workspace.trust", { workspacePath: workspaceDir, trusted: false }),
+      DAEMON_CLEANUP_RPC_TIMEOUT_MS,
+    );
+    await settleWithin(
+      client.request("workspace.unregister", { workspacePath: workspaceDir }),
+      DAEMON_CLEANUP_RPC_TIMEOUT_MS,
+    );
+    await stopScenarioDaemon(client, picoHome);
+    client.close();
     if (previousPicoHome === undefined) delete process.env.PICO_HOME;
     else process.env.PICO_HOME = previousPicoHome;
     await rm(root, { recursive: true, force: true }).catch(() => undefined);
   });
-  const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome });
-  // 关停专属 daemon：candidate 持常驻 residency 不 idle 自退，不关停会泄漏进程
-  // （真 home 之外的 temp root 孤儿 daemon 正是这么来的）。注册顺序保证在
-  // RPC 清理之后、client.close 之前执行（t.after LIFO）。
-  t.after(() => stopScenarioDaemon(client, picoHome));
-  t.after(() => client.close());
   // 冷启动排水：专属 daemon 每场景冷启动（19-31s 环境），ping 在幂等重试
   // 白名单内（30s 时间预算自动重试），先排水到就绪再 register。
   await client.request("runtime.ping", {});
   await client.request("workspace.register", { workspacePath: workspaceDir });
   await client.request("workspace.trust", { workspacePath: workspaceDir, trusted: true });
-  let trackedSessionId: string | undefined;
-  t.after(async () => {
-    if (trackedSessionId) {
-      await client
-        .request("session.delete", { workspacePath: workspaceDir, sessionId: trackedSessionId })
-        .catch(() => undefined);
-    }
-    await client
-      .request("workspace.trust", { workspacePath: workspaceDir, trusted: false })
-      .catch(() => undefined);
-    await client
-      .request("workspace.unregister", { workspacePath: workspaceDir })
-      .catch(() => undefined);
-  });
   return {
     client,
     workspaceDir,
+    visionSupported,
     trackSession: (sessionId) => {
       if (sessionId) trackedSessionId = sessionId;
     },
@@ -520,6 +540,10 @@ realModelTest(
   { timeout: TEST_TIMEOUT_MS },
   async (t) => {
     const scenario = await createScenarioWorkspace(t);
+    if (!scenario.visionSupported) {
+      t.skip("当前用户默认模型明确声明不支持图片输入");
+      return;
+    }
     const { client, workspaceDir } = scenario;
     const reporter = new TuiReporter();
     const runtime = new ClientSessionRuntime({
@@ -593,15 +617,53 @@ async function stopScenarioDaemon(client: LocalRuntimeClient, picoHome: string):
     // 控制目录不可读 = daemon 未运行。
   }
   if (pid === undefined) return;
+  const shutdownAccepted = await settleWithin(client.shutdownDaemon(), DAEMON_SHUTDOWN_TIMEOUT_MS);
+  if (shutdownAccepted && (await waitForProcessExit(pid, DAEMON_EXIT_TIMEOUT_MS))) return;
   try {
-    await client.shutdownDaemon();
-    return;
+    process.kill(pid, "SIGTERM");
   } catch {
-    // 优雅路径失败（连接已死等）退回硬杀。
+    return;
   }
+  if (await waitForProcessExit(pid, DAEMON_EXIT_TIMEOUT_MS)) return;
   try {
-    process.kill(pid);
+    process.kill(pid, "SIGKILL");
   } catch {
     // 已退出。
+  }
+}
+
+async function settleWithin(task: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      task.then(
+        () => true,
+        () => false,
+      ),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = performance.now() + timeoutMs;
+  while (isProcessAlive(pid)) {
+    if (performance.now() > deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return true;
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
   }
 }

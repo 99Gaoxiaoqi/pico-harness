@@ -184,12 +184,6 @@ import type {
 import { MemoryContextBuilder } from "../memory/context-builder.js";
 import { buildMemoryTriggerTools, type MemoryTriggerSlot } from "../memory/memory-trigger-tools.js";
 import { SqliteMemoryRepository } from "../storage/sqlite/sqlite-memory-repository.js";
-import { MemoryProposalEngine, MemoryRepositoryProposalStore } from "../memory/proposal-engine.js";
-import type {
-  MemoryProposalProcessResult,
-  TerminalMemoryEvidenceRef,
-} from "../memory/proposal-contracts.js";
-import { RuntimeMemoryEvidenceReader } from "../memory/runtime-evidence-reader.js";
 import {
   MemoryReviewScheduler,
   type MemoryReviewSchedulerPort,
@@ -1554,50 +1548,10 @@ export async function executeAgentRuntime(
     if (!backgroundPolicy && dependencies.scheduleDraftCoordinator) {
       registry.register(new ScheduleTaskTool(dependencies.scheduleDraftCoordinator));
     }
-    // 记忆触发器工具：memory_remember 前台同步提取并返回具体内容；memory_extract 后台异步。
+    // 记忆触发器工具只标记意图；executor 在 completed terminal 落盘后统一入队。
     const memoryTriggerSlot: MemoryTriggerSlot = { trigger: undefined };
     if (memoryReviewScheduler && memoryReviewMode !== "eco") {
-      // Capture the narrowed values: memoryRepository is a reassignable `let`, so
-      // its guard narrowing would be lost inside the async closure.
-      const memoryRepo = memoryRepository;
-      const memoryModel = memoryModelFactory;
-      const rememberHandler =
-        memoryRepo && memoryModel
-          ? async (ref: TerminalMemoryEvidenceRef): Promise<MemoryProposalProcessResult> => {
-              const repo = new SqliteMemoryRepository({
-                storageRoot: memoryRepo.storageRoot,
-                workspaceId: memoryRepo.workspaceId,
-              });
-              try {
-                const store = new MemoryRepositoryProposalStore(repo);
-                const evidenceReader = new RuntimeMemoryEvidenceReader({
-                  readSessionEvent: (sid, eid) =>
-                    session.runtimeEventStore!.readSessionEvent(sid, eid),
-                  readSessionEntries: (sid) => session.runtimeEventStore!.readSessionEntries(sid),
-                });
-                // lease 必须收口：默认 factory 的 dispose 关闭 CostTracker 的
-                // RuntimeStore ledger，漏放会每次调用泄漏一个打开的 ledger 句柄
-                //（worker.ts 后台提取的 sharedLease?.dispose?.() 是正确范式）。
-                const lease = await memoryModel();
-                try {
-                  const engine = new MemoryProposalEngine({
-                    store,
-                    evidenceReader,
-                    model: lease.model,
-                  });
-                  return await engine.process(ref);
-                } finally {
-                  await lease.dispose?.();
-                }
-              } finally {
-                repo.close();
-              }
-            }
-          : undefined;
-      for (const tool of buildMemoryTriggerTools(
-        { rememberHandler, slot: memoryTriggerSlot },
-        () => memoryTriggerSlot.ref,
-      )) {
+      for (const tool of buildMemoryTriggerTools(memoryTriggerSlot)) {
         registry.register(tool);
       }
     }

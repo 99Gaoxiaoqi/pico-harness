@@ -368,6 +368,69 @@ test("foreground Runtime injects trusted recall ephemerally and schedules only c
   untrusted.close();
 });
 
+test("memory_remember schedules extraction only after the completed terminal is durable", async (context) => {
+  const fixture = await createFixture("remember-post-terminal");
+  const sessionId = "memory-remember-post-terminal";
+  context.after(async () => {
+    const leftover = globalSessionManager.delete(sessionId, fixture.workspace, {
+      picoHome: fixture.picoHome,
+    });
+    await leftover?.close();
+    await rmRetry(fixture.root);
+  });
+  const trustStore = await trustFixture(fixture);
+  let calls = 0;
+  const provider: LLMProvider = {
+    async generate(_messages, tools) {
+      if (calls++ === 0 && tools?.some((tool) => tool.name === "memory_remember")) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            { id: "memory-remember-post-terminal-call", name: "memory_remember", arguments: "{}" },
+          ],
+        };
+      }
+      return { role: "assistant", content: "done" };
+    },
+  };
+
+  const result = await executeAgentRuntime(
+    {
+      prompt: "请记住：本项目固定运行 npm run post-terminal-memory。",
+      dir: fixture.workspace,
+      sessionSelection: { mode: "new", sessionId },
+      provider: "openai",
+      modelRouteId: "test/test",
+      allowedTools: ["memory_remember"],
+    },
+    {
+      provider,
+      picoHome: fixture.picoHome,
+      memoryTrustStore: trustStore,
+      memoryReviewDebounceMs: 0,
+    },
+  );
+  assert.equal(result.finalMessage, "done");
+  await waitForImmediate();
+
+  const repository = openRepository(fixture);
+  const jobs = repository.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE });
+  repository.close();
+  assert.equal(jobs.length, 1);
+  const job = jobs[0]!;
+  assert.notEqual(job.terminalEventId, job.cursor.eventId);
+
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const eventStore = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
+  const terminal = await eventStore.readSessionEvent(sessionId, job.terminalEventId);
+  eventStore.close();
+  assert.equal(terminal?.event.kind, "run.terminal");
+  if (terminal?.event.kind === "run.terminal") {
+    assert.equal(terminal.event.data.status, "completed");
+  }
+});
+
 test("the second turn in one Session schedules Memory only when it carries a stable signal", async (context) => {
   const fixture = await createFixture("multi-turn-signal-gate");
   const workspace = await realpath(fixture.workspace);

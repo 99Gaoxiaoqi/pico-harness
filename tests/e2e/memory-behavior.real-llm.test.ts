@@ -195,6 +195,7 @@ realModelTest(
       });
       const jobsAfterReview = repository.listJobs().length;
       repository.close();
+      reviewCalls = 0;
 
       const recalled = await executeAgentRuntime(
         runtimeRequest(
@@ -202,6 +203,7 @@ realModelTest(
           sessionIds[1]!,
           "根据工作区记忆，只回答这个项目用于验证构建的完整命令。",
           configured,
+          false,
         ),
         {
           picoHome,
@@ -231,6 +233,7 @@ realModelTest(
           sessionIds[2]!,
           "这是关闭记忆后的普通请求。只回答：done",
           configured,
+          false,
         ),
         {
           picoHome,
@@ -271,6 +274,7 @@ class RealProposalModel implements MemoryProposalModelPort {
       "Never retain secrets, credentials, permission grants, trust changes, provider settings, or tool authorization.",
       "Return JSON only, no markdown fences, no explanation.",
       "When no durable fact exists, return an empty proposals array.",
+      "Reject unresolved references such as 'the previous command', 'as agreed', or 'that setting' when the concrete referent is absent from the supplied evidence.",
       "Each proposal must cite evidenceEventIds from exactly one supplied evidence item; never combine separate items into one proposal.",
       'Return JSON matching this shape: {"proposals":[{"kind":"preference|correction|project_fact|reference","title":"...","content":"...","reason":"...","confidence":0.9,"evidenceEventIds":["..."]}]}',
     ].join(" ");
@@ -333,6 +337,7 @@ function runtimeRequest(
   sessionId: string,
   prompt: string,
   configured: RealModel,
+  memoryTools = true,
 ): RunAgentCliOptions {
   return {
     prompt,
@@ -344,7 +349,7 @@ function runtimeRequest(
     model: configured.config.model,
     modelRouteId: configured.route.id,
     modelCapabilities: configured.route.capabilities,
-    allowedTools: ["memory_remember", "memory_extract"],
+    allowedTools: memoryTools ? ["memory_remember", "memory_extract"] : [],
   };
 }
 

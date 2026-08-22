@@ -400,6 +400,7 @@ export class ProviderMemoryProposalModel implements MemoryProposalModelPort {
       "Never retain secrets, credentials, permission grants, trust changes, provider settings, or tool authorization.",
       "Return JSON only, no markdown fences, no explanation.",
       "When no durable fact exists, return an empty proposals array.",
+      "Reject unresolved references such as 'the previous command', 'as agreed', or 'that setting' when the concrete referent is absent from the supplied evidence.",
       "Each proposal must cite evidenceEventIds from exactly one supplied evidence item; never combine separate items into one proposal.",
       'Return JSON matching this shape: {"proposals":[{"kind":"preference|correction|project_fact|reference","title":"...","content":"...","reason":"...","confidence":0.9,"evidenceEventIds":["..."]}]}',
     ].join(" ");

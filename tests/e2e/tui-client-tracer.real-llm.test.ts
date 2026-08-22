@@ -10,6 +10,8 @@ import {
   resolveStorageRoot,
 } from "@pico/runtime-host";
 import { LocalRuntimeClient } from "../../src/daemon/index.js";
+import { EMPTY_USER_CONFIG_REVISION, UserConfigStore } from "../../src/input/user-config-store.js";
+import { resolvePicoHome } from "../../src/paths/pico-paths.js";
 import { ClientSessionRuntime } from "../../src/tui/client-session-runtime.js";
 import { createClientCommandRegistry, processClientInput } from "../../src/tui/client-commands.js";
 import { TuiReporter } from "../../src/tui/tui-reporter.js";
@@ -17,8 +19,8 @@ import { TuiReporter } from "../../src/tui/tui-reporter.js";
 /**
  * 3-D Phase 3 E2E：TUI 客户端 tracer 挂真实 daemon + 真实模型完整回合。
  *
- * 模型路由：专属 daemon 从继承的进程 env（--env-file 的 .env）解析真实配置
- * （defaults.modelRouteId），走一次真实的 session.send → run.live 流式 →
+ * 模型路由：把用户级 Provider 配置复制到专属临时 pico-home，确保隔离 daemon
+ * 使用同一 defaults.modelRouteId，走一次真实的 session.send → run.live 流式 →
  * run.finished → transcript 对账闭环，再验证 /rename /status 的 slash 真实
  * 链路与 interrupt。
  *
@@ -30,6 +32,9 @@ import { TuiReporter } from "../../src/tui/tui-reporter.js";
  */
 
 const TEST_TIMEOUT_MS = 10 * 60_000;
+const DAEMON_CLEANUP_RPC_TIMEOUT_MS = 5_000;
+const DAEMON_SHUTDOWN_TIMEOUT_MS = 5_000;
+const DAEMON_EXIT_TIMEOUT_MS = 2_000;
 const RUN_REAL_MODEL = process.env.RUN_LLM_E2E === "1";
 const realModelTest = RUN_REAL_MODEL ? test : test.skip;
 
@@ -43,41 +48,13 @@ realModelTest(
     await mkdir(picoHome, { recursive: true });
     await mkdir(workspaceSeed, { recursive: true });
     const workspaceDir = await realpath(workspaceSeed);
+    const userConfig = (await new UserConfigStore({ picoHome: resolvePicoHome() }).read()).config;
+    await new UserConfigStore({ picoHome }).write(userConfig, {
+      expectedRevision: EMPTY_USER_CONFIG_REVISION,
+    });
     const previousPicoHome = process.env.PICO_HOME;
     process.env.PICO_HOME = picoHome;
-    t.after(async () => {
-      if (previousPicoHome === undefined) delete process.env.PICO_HOME;
-      else process.env.PICO_HOME = previousPicoHome;
-      await rm(root, { recursive: true, force: true }).catch(() => undefined);
-    });
-
     const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome });
-    // 关停专属 daemon（candidate 持常驻 residency 不 idle 自退）。注册顺序保证
-    // 在 RPC 清理之后、client.close 之前执行（t.after LIFO）。
-    t.after(() => stopScenarioDaemon(client, picoHome));
-    t.after(() => client.close());
-    // 冷启动排水：专属 daemon 冷启动（慢环境 19-31s），ping 在幂等重试白名单内
-    // （30s 时间预算自动重试）。
-    await client.request("runtime.ping", {});
-    await client.request("workspace.register", { workspacePath: workspaceDir });
-    await client.request("workspace.trust", { workspacePath: workspaceDir, trusted: true });
-    // 清理（对抗评审二轮 P1）：删除测试会话 + 撤销信任 + 注销——不留残留
-    // （unregister 不清信任，trust(false) 才清；session.delete 删真实模型回合）。
-    t.after(async () => {
-      const sessionId = runtime.activeSessionId;
-      if (sessionId) {
-        await client
-          .request("session.delete", { workspacePath: workspaceDir, sessionId })
-          .catch(() => undefined);
-      }
-      await client
-        .request("workspace.trust", { workspacePath: workspaceDir, trusted: false })
-        .catch(() => undefined);
-      await client
-        .request("workspace.unregister", { workspacePath: workspaceDir })
-        .catch(() => undefined);
-    });
-
     const reporter = new TuiReporter();
     const runningStates: boolean[] = [];
     const runtime = new ClientSessionRuntime({
@@ -88,6 +65,35 @@ realModelTest(
         runningStates.push(running);
       },
     });
+    // node:test 按注册顺序执行同级 after hook；清理顺序固定为 RPC → daemon →
+    // client → 环境/目录，避免先删 root 后无法定位并关停 daemon。
+    t.after(async () => {
+      const sessionId = runtime?.activeSessionId;
+      if (sessionId) {
+        await settleWithin(
+          client.request("session.delete", { workspacePath: workspaceDir, sessionId }),
+          DAEMON_CLEANUP_RPC_TIMEOUT_MS,
+        );
+      }
+      await settleWithin(
+        client.request("workspace.trust", { workspacePath: workspaceDir, trusted: false }),
+        DAEMON_CLEANUP_RPC_TIMEOUT_MS,
+      );
+      await settleWithin(
+        client.request("workspace.unregister", { workspacePath: workspaceDir }),
+        DAEMON_CLEANUP_RPC_TIMEOUT_MS,
+      );
+      await stopScenarioDaemon(client, picoHome);
+      client.close();
+      if (previousPicoHome === undefined) delete process.env.PICO_HOME;
+      else process.env.PICO_HOME = previousPicoHome;
+      await rm(root, { recursive: true, force: true }).catch(() => undefined);
+    });
+    // 冷启动排水：专属 daemon 冷启动（慢环境 19-31s），ping 在幂等重试白名单内
+    // （30s 时间预算自动重试）。
+    await client.request("runtime.ping", {});
+    await client.request("workspace.register", { workspacePath: workspaceDir });
+    await client.request("workspace.trust", { workspacePath: workspaceDir, trusted: true });
     const registry = createClientCommandRegistry({ runtime, workspacePath: workspaceDir });
     await runtime.start();
 
@@ -170,15 +176,53 @@ async function stopScenarioDaemon(client: LocalRuntimeClient, picoHome: string):
     // 控制目录不可读 = daemon 未运行。
   }
   if (pid === undefined) return;
+  const shutdownAccepted = await settleWithin(client.shutdownDaemon(), DAEMON_SHUTDOWN_TIMEOUT_MS);
+  if (shutdownAccepted && (await waitForProcessExit(pid, DAEMON_EXIT_TIMEOUT_MS))) return;
   try {
-    await client.shutdownDaemon();
-    return;
+    process.kill(pid, "SIGTERM");
   } catch {
-    // 优雅路径失败（连接已死等）退回硬杀。
+    return;
   }
+  if (await waitForProcessExit(pid, DAEMON_EXIT_TIMEOUT_MS)) return;
   try {
-    process.kill(pid);
+    process.kill(pid, "SIGKILL");
   } catch {
     // 已退出。
+  }
+}
+
+async function settleWithin(task: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      task.then(
+        () => true,
+        () => false,
+      ),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = performance.now() + timeoutMs;
+  while (isProcessAlive(pid)) {
+    if (performance.now() > deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return true;
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
   }
 }
