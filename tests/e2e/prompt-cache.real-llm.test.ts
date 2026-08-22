@@ -4,10 +4,10 @@ import { test } from "node:test";
 import { CostTracker, type ProviderCallLedger } from "../../src/observability/tracker.js";
 import { LLMStatusError } from "../../src/provider/errors.js";
 import { createProvider } from "../../src/provider/factory.js";
-import { resolveModelRouteCapabilities } from "../../src/provider/model-capabilities.js";
 import { toCanonicalUsage } from "../../src/schema/message.js";
 import type { Message, ToolDefinition, Usage } from "../../src/schema/message.js";
 import type { ProviderCallRecord } from "../../src/tasks/runtime-types.js";
+import { configuredUserDefaultRealModel } from "./real-llm-user-model.js";
 
 const TEST_TIMEOUT_MS = 5 * 60_000;
 // Anthropic cache 验证需要专用额度；不随通用 real-model 套件自动消耗。
@@ -18,16 +18,18 @@ realModelTest(
   "real Anthropic multi-turn requests write, read, and extend the prompt cache prefix",
   { timeout: TEST_TIMEOUT_MS },
   async () => {
-    const model = requiredEnvironment("CLAUDE_DEFAULT_MODEL");
-    const provider = createProvider("claude", {
-      baseURL: anthropicBaseUrl(requiredEnvironment("ANTHROPIC_BASE_URL")),
-      apiKey: requiredEnvironment("ANTHROPIC_AUTH_TOKEN"),
-      model,
-      capabilities: resolveModelRouteCapabilities("claude", model, {
-        cache: true,
-        promptCache: { mode: "explicit", ttl: "5m" },
-      }),
-    });
+    const configured = await configuredUserDefaultRealModel();
+    if (configured.provider !== "claude") {
+      throw new Error("Anthropic cache E2E 要求用户默认模型路由使用 claude 协议");
+    }
+    if (
+      configured.route.capabilities.cache !== true ||
+      configured.route.capabilities.promptCache.mode !== "explicit"
+    ) {
+      throw new Error("Anthropic cache E2E 要求用户默认模型路由显式声明 prompt cache 能力");
+    }
+    const model = configured.route.model;
+    const provider = createProvider(configured.provider, configured.config);
     const records: ProviderCallRecord[] = [];
     const ledger: ProviderCallLedger = {
       recordProviderCall(record) {
@@ -201,17 +203,6 @@ function classifyRealAnthropicFailure(
       : "credential_or_quota";
   }
   return statusCode === undefined ? "transport" : "protocol";
-}
-
-function requiredEnvironment(name: string): string {
-  const value = process.env[name]?.trim();
-  if (!value) throw new Error(`真实 Anthropic cache E2E 缺少环境变量 ${name}`);
-  return value;
-}
-
-function anthropicBaseUrl(value: string): string {
-  const normalized = value.replace(/\/+$/u, "");
-  return normalized.endsWith("/v1") ? normalized : `${normalized}/v1`;
 }
 
 function requiredUsage(usage: Usage | undefined, phase: string): Usage {

@@ -16,10 +16,7 @@
  * 注意:内存 Session 下 midTurn(75% 水位)不会触发(它要求 isRuntimeSession)。
  * midTurn 的核心压缩逻辑已被 compaction-quality 的 preview 测试覆盖。
  *
- * Provider 配置(环境变量,与 compaction-quality 共用):
- *   COMPACTION_E2E_BASE_URL  默认 https://claude.jlcops.com/api/v1
- *   COMPACTION_E2E_API_KEY   必填
- *   COMPACTION_E2E_MODEL     默认 deepseek-v4-flash-0731
+ * Provider 配置来自用户级 $PICO_HOME/config.json 的默认模型路由。
  */
 
 import assert from "node:assert/strict";
@@ -31,25 +28,16 @@ import { FullCompactor } from "../../src/context/full-compactor.js";
 import { AgentEngine } from "../../src/engine/loop.js";
 import { Session } from "../../src/engine/session.js";
 import { createProvider } from "../../src/provider/factory.js";
-import type { ProviderConfig } from "../../src/provider/config.js";
 import { ToolRegistry } from "../../src/tools/registry-impl.js";
+import { configuredUserDefaultRealModel } from "./real-llm-user-model.js";
 
 const RUN_COMPACTION_E2E = process.env.RUN_COMPACTION_E2E === "1";
 const autoTest = RUN_COMPACTION_E2E ? test : test.skip;
 const TEST_TIMEOUT_MS = 10 * 60_000;
 
-function resolveProviderConfig(): ProviderConfig {
-  const apiKey = process.env.COMPACTION_E2E_API_KEY;
-  if (!apiKey) {
-    throw new Error(
-      "COMPACTION_E2E_API_KEY 未设置。用法:COMPACTION_E2E_API_KEY=xxx RUN_COMPACTION_E2E=1 npm run test:compaction-e2e",
-    );
-  }
-  return {
-    baseURL: process.env.COMPACTION_E2E_BASE_URL ?? "https://claude.jlcops.com/api/v1",
-    apiKey,
-    model: process.env.COMPACTION_E2E_MODEL ?? "deepseek-v4-flash-0731",
-  };
+async function createUserConfiguredProvider() {
+  const configured = await configuredUserDefaultRealModel();
+  return createProvider(configured.provider, configured.config);
 }
 
 /**
@@ -78,8 +66,7 @@ autoTest(
   "85% 水位自动触发:AgentEngine.run 预灌长 history → 压缩 → 模型仍能回答 marker",
   { timeout: TEST_TIMEOUT_MS },
   async () => {
-    const config = resolveProviderConfig();
-    const provider = createProvider("openai", config);
+    const provider = await createUserConfiguredProvider();
 
     // 极小 contextBudget:12000 token 窗口 - 1024 输出 - 1024 安全余量 = 9952 inputBudget
     // 85% 水位 = 8459 token,预灌的 8 条 history(约 9600 token)会超过此水位触发压缩,
@@ -177,8 +164,7 @@ autoTest(
   "fail-open:fullCompactor 失败时不崩溃,返回 projected 继续运行",
   { timeout: TEST_TIMEOUT_MS },
   async () => {
-    const config = resolveProviderConfig();
-    const provider = createProvider("openai", config);
+    const provider = await createUserConfiguredProvider();
 
     // 一个总是"失败"的 FullCompactor:preview 返回 undefined(模拟摘要生成失败)
     const failingFullCompactor: FullCompactor = {

@@ -10,63 +10,58 @@ import {
   type PreparedRequestChangeReason,
   type PreparedRequestDiagnostic,
 } from "../../src/observability/provider-request-diagnostics.js";
+import { configuredUserDefaultRealModel } from "./real-llm-user-model.js";
 
 const RUN_GATEWAY_CACHE_E2E = process.env.RUN_GATEWAY_CACHE_E2E === "1";
 const gatewayTest = RUN_GATEWAY_CACHE_E2E ? test : test.skip;
 const PROTOCOL_PROBE_TIMEOUT_MS = 15_000;
 const REQUEST_TIMEOUT_MS = 30_000;
-const models = ["gpt-5.6-terra", "claude-sonnet-4-6"] as const;
 const MODEL_SCENARIO_REQUEST_COUNT = 6;
 const MAX_MODEL_SCENARIO_RUNS = 2;
 const EXPLICIT_FIELD_PROBE_COUNT = 2;
-const PROTOCOL_PROBE_COUNT = 2;
+const PROTOCOL_PROBE_COUNT = 1;
 const TIMEOUT_MS =
   REQUEST_TIMEOUT_MS *
-    (1 +
-      models.length * MODEL_SCENARIO_REQUEST_COUNT * MAX_MODEL_SCENARIO_RUNS +
-      EXPLICIT_FIELD_PROBE_COUNT) +
+    (1 + MODEL_SCENARIO_REQUEST_COUNT * MAX_MODEL_SCENARIO_RUNS + EXPLICIT_FIELD_PROBE_COUNT) +
   PROTOCOL_PROBE_TIMEOUT_MS * PROTOCOL_PROBE_COUNT +
   30_000;
 
 gatewayTest(
-  "gateway OpenAI-compatible models expose isolated implicit prompt-cache cold/warm/control results",
+  "user-configured OpenAI-compatible model exposes isolated prompt-cache cold/warm/control results",
   { timeout: TIMEOUT_MS },
   async (context) => {
     const suiteSignal = context.signal;
-    const baseURL = requiredEnv("GATEWAY_CACHE_E2E_BASE_URL");
-    const apiKey = requiredEnv("GATEWAY_CACHE_E2E_API_KEY");
-    const discovered = await listModels(baseURL, apiKey, suiteSignal);
-    for (const model of models) {
-      assert.ok(discovered.has(model), `gateway /models missing required model ${model}`);
+    const configured = await configuredUserDefaultRealModel();
+    if (configured.provider !== "openai") {
+      throw new Error("Gateway cache E2E 要求用户默认模型路由使用 openai 协议");
     }
-    const matrix = await protocolMatrix(baseURL, apiKey, suiteSignal);
-    // This suite intentionally uses only the OpenAI-compatible column. The native Anthropic probe
-    // is reported safely but never treated as Claude prompt-cache verification.
+    const { baseURL, apiKey, model } = configured.config;
+    const discovered = await listModels(baseURL, apiKey, suiteSignal);
+    assert.ok(discovered.has(model), `gateway /models missing user default model ${model}`);
+    const matrix = await protocolMatrix(baseURL, apiKey, model, suiteSignal);
     assert.equal(
       matrix.openaiChat.available,
       true,
       "gateway OpenAI-compatible chat endpoint is unavailable",
     );
 
-    for (const model of models) {
+    suiteSignal.throwIfAborted();
+    let scenario: GatewayScenario;
+    try {
+      scenario = await runModelScenario(baseURL, apiKey, model, suiteSignal);
+    } catch (error) {
       suiteSignal.throwIfAborted();
-      let scenario: GatewayScenario;
-      try {
-        scenario = await runModelScenario(baseURL, apiKey, model, suiteSignal);
-      } catch (error) {
-        suiteSignal.throwIfAborted();
-        if (!(error instanceof GatewayTransportError)) throw error;
-        // A transport failure may leave an ambiguous partial sequence. Restart the complete
-        // scenario once with a fresh marker; never retry an individual warm/control request.
-        scenario = await runModelScenario(baseURL, apiKey, model, suiteSignal);
-      }
-      safeReport({ model, protocol: "openai", matrix, ...scenario });
+      if (!(error instanceof GatewayTransportError)) throw error;
+      // A transport failure may leave an ambiguous partial sequence. Restart the complete
+      // scenario once with a fresh marker; never retry an individual warm/control request.
+      scenario = await runModelScenario(baseURL, apiKey, model, suiteSignal);
     }
+    safeReport({ model, protocol: configured.provider, matrix, ...scenario });
 
     // A gateway may reject provider-specific experimental fields. This is a capability probe only.
     suiteSignal.throwIfAborted();
-    const explicit = await probeExplicitFields(baseURL, apiKey, suiteSignal);
-    safeReport({ model: "gpt-5.6-terra", protocol: "openai", explicit });
+    const explicit = await probeExplicitFields(baseURL, apiKey, model, suiteSignal);
+    safeReport({ model, protocol: configured.provider, explicit });
   },
 );
 
@@ -117,7 +112,6 @@ interface ProtocolProbe {
 
 interface ProtocolMatrix {
   readonly openaiChat: ProtocolProbe;
-  readonly anthropicMessages: ProtocolProbe;
 }
 
 class GatewayTransportError extends Error {
@@ -163,6 +157,7 @@ async function listModels(
 async function protocolMatrix(
   baseURL: string,
   apiKey: string,
+  model: string,
   suiteSignal: AbortSignal,
 ): Promise<ProtocolMatrix> {
   const root = normalizeBaseURL(baseURL);
@@ -173,34 +168,14 @@ async function protocolMatrix(
       method: "POST",
       headers: { ...auth(apiKey), "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "gpt-5.6-terra",
+        model,
         messages: [{ role: "user", content: "Reply PROBE." }],
         max_tokens: 16,
       }),
     },
     suiteSignal,
   );
-  const anthropicMessages = await protocolProbe(
-    `${root}/messages`,
-    {
-      method: "POST",
-      headers: {
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        messages: [{ role: "user", content: "Reply PROBE." }],
-        max_tokens: 16,
-      }),
-    },
-    suiteSignal,
-  );
-  return {
-    openaiChat,
-    anthropicMessages,
-  };
+  return { openaiChat };
 }
 
 async function protocolProbe(
@@ -224,7 +199,7 @@ async function protocolProbe(
 async function runModelScenario(
   baseURL: string,
   apiKey: string,
-  model: (typeof models)[number],
+  model: string,
   suiteSignal: AbortSignal,
 ): Promise<GatewayScenario> {
   const marker = `gateway-cache-${model}-${randomUUID()}`;
@@ -420,16 +395,17 @@ async function chat(
 async function probeExplicitFields(
   baseURL: string,
   apiKey: string,
+  model: string,
   suiteSignal: AbortSignal,
 ): Promise<{
   readonly promptCacheKey: ExplicitFieldProbe;
   readonly promptCacheBreakpoint: ExplicitFieldProbe;
 }> {
-  const promptCacheKey = await probeExplicitField(baseURL, apiKey, suiteSignal, {
+  const promptCacheKey = await probeExplicitField(baseURL, apiKey, model, suiteSignal, {
     key: `pico-cache-probe-${randomUUID()}`,
     expectedField: "prompt_cache_key",
   });
-  const promptCacheBreakpoint = await probeExplicitField(baseURL, apiKey, suiteSignal, {
+  const promptCacheBreakpoint = await probeExplicitField(baseURL, apiKey, model, suiteSignal, {
     explicitBreakpoint: true,
     expectedField: "prompt_cache_breakpoint",
   });
@@ -453,6 +429,7 @@ interface ExplicitFieldProbe {
 async function probeExplicitField(
   baseURL: string,
   apiKey: string,
+  model: string,
   suiteSignal: AbortSignal,
   cacheProbe: ChatCacheProbe,
 ): Promise<ExplicitFieldProbe> {
@@ -460,7 +437,7 @@ async function probeExplicitField(
     const call = await chat(
       baseURL,
       apiKey,
-      "gpt-5.6-terra",
+      model,
       isolatedCorpus(randomUUID()),
       "Reply KEY_READY.",
       suiteSignal,
@@ -634,12 +611,6 @@ function normalizeBaseURL(value: string): string {
   }
   url.pathname = url.pathname.replace(/\/+$/u, "");
   return url.toString().replace(/\/$/u, "");
-}
-
-function requiredEnv(name: string): string {
-  const value = process.env[name]?.trim();
-  if (!value) throw new Error(`gateway cache E2E missing ${name}`);
-  return value;
 }
 
 function sha256(value: string): string {
