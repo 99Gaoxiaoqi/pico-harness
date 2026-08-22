@@ -155,20 +155,26 @@ test("sqlite catalog: incremental fold equals the full fold (title/settings/prev
       settings: { ...FULL_SETTINGS, title: "settings title" },
     });
 
-    // Round 3: a partial and a transcript-only message must NOT fold or materialize;
-    // the long final message exercises the <=96 preview column.
+    // Round 3: mutable partial state and a transcript-only message must NOT fold or
+    // materialize; the long final message exercises the <=96 preview column.
     const longContent = `preview-source-${"x".repeat(200)}`;
+    await fixture.store.upsertPartialSnapshot({
+      sessionId: id,
+      runId: "run-1",
+      partialId: `${id}-draft`,
+      kind: "assistant",
+      expectedVersion: 0,
+      payload: { text: "partial draft" },
+      at: "2026-08-18T00:00:05.000Z",
+    });
     await fixture.store.appendBatch([
-      {
-        ...userMessage(`${id}-e5`, id, "2026-08-18T00:00:05.000Z", "partial draft"),
-        partial: true,
-      },
       {
         ...userMessage(`${id}-e6`, id, "2026-08-18T00:00:06.000Z", "transcript only"),
         visibility: "transcript",
       },
       userMessage(`${id}-e7`, id, "2026-08-18T00:00:07.000Z", longContent),
     ] as RuntimeEvent[]);
+    assert.equal((await fixture.store.readRunPartials(id, "run-1")).snapshots.length, 1);
 
     const entry = await fixture.store.findSessionCatalogEntry(id);
     assert.ok(entry, "catalog entry must exist");
@@ -181,7 +187,7 @@ test("sqlite catalog: incremental fold equals the full fold (title/settings/prev
     assert.equal(entry.summary.lastMessage, longContent);
     assert.equal(entry.summary.messageCount, expected.summary.messageCount);
     assert.equal(entry.summary.updatedAt.toISOString(), "2026-08-18T00:00:07.000Z");
-    assert.equal(entry.fold.headSequence, 7);
+    assert.equal(entry.fold.headSequence, 6);
     assert.equal(entry.activityAt, "2026-08-18T00:00:07.000Z");
 
     const db = new DatabaseSync(operationalDatabasePath(fixture.storage));
@@ -201,8 +207,8 @@ test("sqlite catalog: incremental fold equals the full fold (title/settings/prev
       );
       assert.equal(row["is_archived"], 0);
       assert.equal(row["is_pinned"], 0);
-      assert.equal(row["head_sequence"], 7);
-      assert.equal(row["event_count"], 7);
+      assert.equal(row["head_sequence"], 6);
+      assert.equal(row["event_count"], 6);
       assert.ok(typeof row["storage_bytes"] === "number" && row["storage_bytes"] > 0);
 
       // Materialized messages: exactly the model-visible, non-partial message events.
