@@ -186,7 +186,11 @@ export function validateEvidenceRef(value: unknown): EvidenceRefValidation {
     }
     // eventCount 若存在必须是正整数（0 无意义——highSequence 必填意味着至少覆盖一条）
     if (c.eventCount !== undefined) {
-      if (typeof c.eventCount !== "number" || !Number.isSafeInteger(c.eventCount) || c.eventCount <= 0) {
+      if (
+        typeof c.eventCount !== "number" ||
+        !Number.isSafeInteger(c.eventCount) ||
+        c.eventCount <= 0
+      ) {
         return {
           ok: false,
           code: "zero_event_count",
@@ -226,10 +230,7 @@ export function compareCursors(
     rightIds.length > 0
   ) {
     // 完整比较：长度或任一元素不同 → conflict
-    if (
-      leftIds.length !== rightIds.length ||
-      leftIds.some((id, i) => id !== rightIds[i])
-    ) {
+    if (leftIds.length !== rightIds.length || leftIds.some((id, i) => id !== rightIds[i])) {
       return "conflict";
     }
   }

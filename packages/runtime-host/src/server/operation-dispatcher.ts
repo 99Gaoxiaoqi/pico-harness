@@ -11,14 +11,14 @@ import {
   resolveOperationSpec,
   type ResponseFrame,
   type ResponseFrameFor,
-} from '../protocol/index.js';
-import { HOST_BOOTSTRAP_OPERATION_SPECS } from '../protocol/host-status.js';
+} from "../protocol/index.js";
+import { HOST_BOOTSTRAP_OPERATION_SPECS } from "../protocol/host-status.js";
 
 export interface ConnectionContext {
   hostEpoch: string;
   connectionId: string;
   surface: ClientSurface;
-  principal: 'local_os_user';
+  principal: "local_os_user";
   acquireResidency(): OperationResidency;
   /**
    * Aborted when the operation exceeds its server-side deadline. Cooperative
@@ -54,12 +54,12 @@ export type OperationHandlerMap = {
 export type DomainOperationKey = Exclude<OperationKey, keyof typeof HOST_BOOTSTRAP_OPERATION_SPECS>;
 export type TurnOperationKey = Extract<
   OperationKey,
-  | 'turn.start'
-  | 'turn.query'
-  | 'turn.stop'
-  | 'turn.regenerate'
-  | 'turn.resume.query'
-  | 'turn.resume.start'
+  | "turn.start"
+  | "turn.query"
+  | "turn.stop"
+  | "turn.regenerate"
+  | "turn.resume.query"
+  | "turn.resume.start"
 >;
 export type ContextOperationKey = Extract<OperationKey, `context.${string}`>;
 export type RuntimePolicyOperationKey = Extract<
@@ -71,14 +71,14 @@ export type RuntimePolicyOperationKey = Extract<
 >;
 export type ConnectionEffectOperationKey = Extract<
   OperationKey,
-  | 'connection.models.fetch'
-  | 'connection.test.run'
-  | 'connection.onboarding.verify'
-  | 'connection.onboarding.save'
+  | "connection.models.fetch"
+  | "connection.test.run"
+  | "connection.onboarding.verify"
+  | "connection.onboarding.save"
 >;
 export type MessageOperationKey = Extract<
   OperationKey,
-  'turn.message.submit' | 'queue.retract' | 'turn.interrupt'
+  "turn.message.submit" | "queue.retract" | "turn.interrupt"
 >;
 export type InteractionOperationKey = Extract<OperationKey, `interaction.${string}`>;
 export type GoalOperationKey = Extract<OperationKey, `goal.${string}`>;
@@ -87,17 +87,17 @@ export type ExternalSessionOperationKey = Extract<OperationKey, `external-sessio
 export type AgentGraphOperationKey = Extract<OperationKey, `agent.graph.${string}`>;
 export type SessionContinuityOperationKey = Extract<
   OperationKey,
-  'subscription.open' | 'subscription.close' | 'session.transcript.query'
+  "subscription.open" | "subscription.close" | "session.transcript.query"
 >;
 export type SessionRevisionOperationKey = Extract<
   OperationKey,
-  'session.branch.create' | 'session.revision.create' | 'session.revision.abandon'
+  "session.branch.create" | "session.revision.create" | "session.revision.abandon"
 >;
 export type SessionRetirementOperationKey = Extract<
   OperationKey,
-  'session.lifecycle.set' | 'session.remove'
+  "session.lifecycle.set" | "session.remove"
 >;
-export type SessionEffectOperationKey = Extract<OperationKey, 'session.recap.generate'>;
+export type SessionEffectOperationKey = Extract<OperationKey, "session.recap.generate">;
 export type SessionCatalogOperationKey = Exclude<
   Extract<OperationKey, `session.${string}`>,
   | SessionContinuityOperationKey
@@ -105,10 +105,10 @@ export type SessionCatalogOperationKey = Exclude<
   | SessionRetirementOperationKey
   | SessionEffectOperationKey
 >;
-export type TaskLedgerOperationKey = Extract<OperationKey, 'task.ledger.query'>;
+export type TaskLedgerOperationKey = Extract<OperationKey, "task.ledger.query">;
 export type ArtifactOperationKey = Extract<OperationKey, `artifact.${string}`>;
 export type SkillCatalogOperationKey = Extract<OperationKey, `skill.catalog.${string}`>;
-export type UsagePricingOperationKey = Extract<OperationKey, 'usage.query' | `pricing.${string}`>;
+export type UsagePricingOperationKey = Extract<OperationKey, "usage.query" | `pricing.${string}`>;
 export type MemoryOperationKey = Extract<OperationKey, `memory.${string}`>;
 export type OAuthOperationKey = Extract<OperationKey, `oauth.${string}`>;
 export type RuntimeResourceOperationKey = Extract<OperationKey, `runtime.resource.${string}`>;
@@ -195,7 +195,7 @@ export function composeOperationHandlers(
         throw new Error(`Duplicate Runtime Host operation handler: ${key}`);
       }
       const handler = handlers[key as OperationKey];
-      if (typeof handler !== 'function') {
+      if (typeof handler !== "function") {
         throw new Error(`Invalid Runtime Host operation handler: ${key}`);
       }
       Object.assign(combined, { [key]: handler });
@@ -203,7 +203,7 @@ export function composeOperationHandlers(
   }
   const missing = [...known].filter((key) => !Object.hasOwn(combined, key));
   if (missing.length > 0) {
-    throw new Error(`Missing Runtime Host operation handlers: ${missing.join(', ')}`);
+    throw new Error(`Missing Runtime Host operation handlers: ${missing.join(", ")}`);
   }
   return combined as OperationHandlerMap;
 }
@@ -215,15 +215,15 @@ export function createUnavailableDomainOperationHandlers(): DomainOperationHandl
     const spec = resolveOperationSpec(operation);
     if (!spec) throw new Error(`Unknown Runtime Host operation: ${operation}`);
     const errors = spec.errors as readonly HostOperationErrorCode[];
-    if (!errors.includes('operation_unavailable')) {
+    if (!errors.includes("operation_unavailable")) {
       throw new Error(`${operation} does not declare operation_unavailable`);
     }
     Object.assign(handlers, {
       [operation]: async () => ({
         ok: false,
         error: {
-          code: 'operation_unavailable',
-          message: 'Runtime Host operation is unavailable in this composition',
+          code: "operation_unavailable",
+          message: "Runtime Host operation is unavailable in this composition",
         },
       }),
     });
@@ -274,8 +274,8 @@ async function dispatchTypedOperation<K extends OperationKey>(
   } catch {
     return operationFailureResponse(
       request as RequestFrame,
-      'internal_failure',
-      'Runtime Host operation failed',
+      "internal_failure",
+      "Runtime Host operation failed",
     ) as ResponseFrameFor<K>;
   }
   return outcome.ok

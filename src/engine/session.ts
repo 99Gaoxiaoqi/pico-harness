@@ -14,11 +14,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import {
-  type CanonicalUsage,
-  type Message,
-  type UsageReportedField,
-} from "../schema/message.js";
+import { type CanonicalUsage, type Message, type UsageReportedField } from "../schema/message.js";
 import type { CostStatus } from "../observability/pricing.js";
 import { logger } from "../observability/logger.js";
 import {
@@ -345,9 +341,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
       if (recovery.manifest.createdAt !== manifest.createdAt) {
         throw new Error(`Runtime session ${this.id} manifest changed during recovery`);
       }
-      const runtime = projectRuntimeSessionState(
-        recovery.stateEntries.map(({ event }) => event),
-      );
+      const runtime = projectRuntimeSessionState(recovery.stateEntries.map(({ event }) => event));
       this.createdAt = new Date(manifest.createdAt);
       this.persistedSettings = runtime.settings;
       this.persistedGoal = runtime.goal;
@@ -357,9 +351,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
       const cursor = recovery.cursor;
       this.runtimeProjectionCursor = cursor ? { ...cursor } : undefined;
       this.conversationId = cursor ? `${cursor.logId}:${cursor.epoch}` : this.id;
-      this.updatedAt = recovery.lastEventAt
-        ? new Date(recovery.lastEventAt)
-        : this.createdAt;
+      this.updatedAt = recovery.lastEventAt ? new Date(recovery.lastEventAt) : this.createdAt;
     } catch (error) {
       this.markWriteUncertain("Runtime session initialize/replay failed", error);
       throw error;
@@ -813,9 +805,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     const all = await store.readSessionEntries(this.id);
     const boundaryIndex = all.findIndex((entry) => entry.event.eventId === throughEventId);
     if (boundaryIndex < 0) {
-      throw new Error(
-        `Session ${this.id} 中找不到 fork 边界事件 ${throughEventId}`,
-      );
+      throw new Error(`Session ${this.id} 中找不到 fork 边界事件 ${throughEventId}`);
     }
     const entries = all.slice(0, boundaryIndex + 1);
     const cursor = runtimeCursorForEntry(this.id, all, all[boundaryIndex]!);
@@ -974,20 +964,12 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
       return ordered;
     });
 
-    if (
-      !previousCursor ||
-      this.messageLedger.deferredCount > 0 ||
-      !commitsAreFreshAndOrdered
-    ) {
+    if (!previousCursor || this.messageLedger.deferredCount > 0 || !commitsAreFreshAndOrdered) {
       await this.replayRuntimeHistoryProjection();
       return;
     }
 
-    const delta = await store.readSessionProjectionDelta(
-      this.id,
-      previousCursor,
-      targetCursor,
-    );
+    const delta = await store.readSessionProjectionDelta(this.id, previousCursor, targetCursor);
     if (!delta) {
       await this.replayRuntimeHistoryProjection();
       return;
@@ -1012,11 +994,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
       const message = projectRuntimeModelMessage(entry.event);
       return message ? [message] : [];
     });
-    this.applyRuntimeHistoryProjectionDelta(
-      messages,
-      delta.cursor,
-      delta.entries.at(-1)!.event.at,
-    );
+    this.applyRuntimeHistoryProjectionDelta(messages, delta.cursor, delta.entries.at(-1)!.event.at);
   }
 
   /**

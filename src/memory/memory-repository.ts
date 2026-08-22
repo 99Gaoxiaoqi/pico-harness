@@ -347,4 +347,3 @@ export class MemoryPlaintextVerificationError extends FileStorageIntegrityError 
     this.name = "MemoryPlaintextVerificationError";
   }
 }
-

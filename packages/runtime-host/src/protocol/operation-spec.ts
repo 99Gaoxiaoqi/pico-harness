@@ -1,22 +1,22 @@
-export type OperationMode = 'command' | 'query' | 'control';
-export type OperationAvailability = 'bootstrap' | 'ready';
+export type OperationMode = "command" | "query" | "control";
+export type OperationAvailability = "bootstrap" | "ready";
 
 export type HostOperationErrorCode =
-  | 'host_not_ready'
-  | 'host_draining'
-  | 'operation_unavailable'
-  | 'not_found'
-  | 'session_archived'
-  | 'session_busy'
-  | 'operation_conflict'
-  | 'capability_unavailable'
-  | 'invalid_request'
-  | 'projection_incomplete'
-  | 'persistence_failed'
-  | 'commit_outcome_unknown'
-  | 'already_resolved'
-  | 'outcome_unknown'
-  | 'internal_failure';
+  | "host_not_ready"
+  | "host_draining"
+  | "operation_unavailable"
+  | "not_found"
+  | "session_archived"
+  | "session_busy"
+  | "operation_conflict"
+  | "capability_unavailable"
+  | "invalid_request"
+  | "projection_incomplete"
+  | "persistence_failed"
+  | "commit_outcome_unknown"
+  | "already_resolved"
+  | "outcome_unknown"
+  | "internal_failure";
 
 export interface HostOperationError<C extends HostOperationErrorCode = HostOperationErrorCode> {
   code: C;
@@ -61,8 +61,8 @@ type UnionToIntersection<Union> = (Union extends unknown ? (value: Union) => voi
 export function defineOperation<Input, Output, ErrorCode extends HostOperationErrorCode>(
   spec: OperationSpec<Input, Output, ErrorCode>,
 ): OperationSpec<Input, Output, ErrorCode> {
-  if (!(spec.errors as readonly HostOperationErrorCode[]).includes('internal_failure')) {
-    throw new Error('Every Runtime Host operation must declare internal_failure');
+  if (!(spec.errors as readonly HostOperationErrorCode[]).includes("internal_failure")) {
+    throw new Error("Every Runtime Host operation must declare internal_failure");
   }
   return spec;
 }

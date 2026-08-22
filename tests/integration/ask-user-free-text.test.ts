@@ -60,7 +60,9 @@ test("ask_user 参数校验：省略 options 须 freeText；混合请求 options
     /options 必须包含 2-6 项或省略/,
   );
   await assert.rejects(
-    tool.execute(JSON.stringify({ question: "一个选项不够", options: [{ label: "A" }], freeText: true })),
+    tool.execute(
+      JSON.stringify({ question: "一个选项不够", options: [{ label: "A" }], freeText: true }),
+    ),
     /options 必须包含 2-6 项或省略/,
   );
   await assert.rejects(
@@ -88,7 +90,10 @@ test("submitText 只对声明 freeText 的请求生效（选项请求不受影�
   assert.equal(request.freeText, undefined);
   assert.equal(handler.submitText(request.requestId, "别的"), false, "未声明 freeText 拒绝文本");
   assert.equal(handler.select(request.requestId, "option-1"), true);
-  const result = JSON.parse(await execution) as { status: string; selectedOption?: { label: string } };
+  const result = JSON.parse(await execution) as {
+    status: string;
+    selectedOption?: { label: string };
+  };
   assert.equal(result.status, "answered");
   assert.equal(result.selectedOption?.label, "A");
 });
@@ -219,7 +224,13 @@ test("TUI 客户端：prompt.requested 事件投影（freeText 透传）+ respon
     payload: {
       promptId: "ask_2",
       runId: "run_2",
-      prompt: { question: "别的问题", options: [{ optionId: "option-1", label: "A" }, { optionId: "option-2", label: "B" }] },
+      prompt: {
+        question: "别的问题",
+        options: [
+          { optionId: "option-1", label: "A" },
+          { optionId: "option-2", label: "B" },
+        ],
+      },
     },
   } as unknown as RuntimeNotification);
   assert.equal(prompts.length, 1, "他会有话 prompt 不进本会话");

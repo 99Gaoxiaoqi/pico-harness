@@ -14,13 +14,13 @@ Todo   ← 原子任务清单
 
 核心设计选择：
 
-| 维度 | pico | Claude Code | maka-agent |
-|------|------|------------|-----------|
-| 完成判定 | LLM 评估器（≥3 轮无进展时触发） | `/goal` 外部评估器 | 每轮外部评估器 |
-| 停滞检测 | 工具调用指纹 + 阈值梯度 | Stop hook 8 次拦截 | `blockCap=8` |
-| 延续协调器 | 分层续行（直接续行 / 评估器 / 终止） | `/goal` 续行 | 评估器驱动续行 |
-| 预算维度 | 轮次 / token / 成本 / 墙钟 | — | 同 pico |
-| 预算提醒 | 剩余 ≤20% 时显示 ⚠ | — | 续行提示显示进度 |
+| 维度       | pico                                 | Claude Code        | maka-agent       |
+| ---------- | ------------------------------------ | ------------------ | ---------------- |
+| 完成判定   | LLM 评估器（≥3 轮无进展时触发）      | `/goal` 外部评估器 | 每轮外部评估器   |
+| 停滞检测   | 工具调用指纹 + 阈值梯度              | Stop hook 8 次拦截 | `blockCap=8`     |
+| 延续协调器 | 分层续行（直接续行 / 评估器 / 终止） | `/goal` 续行       | 评估器驱动续行   |
+| 预算维度   | 轮次 / token / 成本 / 墙钟           | —                  | 同 pico          |
+| 预算提醒   | 剩余 ≤20% 时显示 ⚠                   | —                  | 续行提示显示进度 |
 
 ---
 
@@ -58,31 +58,31 @@ Todo   ← 原子任务清单
 type GoalStatus = "active" | "paused" | "blocked" | "complete";
 
 interface Goal {
-  id: string;                        // "goal-1"（自增）
-  title: string;                     // "重构认证模块"
-  description: string;               // 详细描述
-  status: GoalStatus;                // 状态机
-  createdAt: number;                 // 创建时间戳
-  budgetConfig?: BudgetConfig;       // 预算限制（可选）
-  budgetUsage: GoalBudgetUsage;      // 已消耗
-  progress?: string;                 // 模型写的进度文本
-  blockedReason?: string;            // 阻塞原因
-  consecutiveNoProgress?: number;    // 连续无进展轮次
-  lastToolCallHash?: string;         // 上一轮的工具调用指纹
+  id: string; // "goal-1"（自增）
+  title: string; // "重构认证模块"
+  description: string; // 详细描述
+  status: GoalStatus; // 状态机
+  createdAt: number; // 创建时间戳
+  budgetConfig?: BudgetConfig; // 预算限制（可选）
+  budgetUsage: GoalBudgetUsage; // 已消耗
+  progress?: string; // 模型写的进度文本
+  blockedReason?: string; // 阻塞原因
+  consecutiveNoProgress?: number; // 连续无进展轮次
+  lastToolCallHash?: string; // 上一轮的工具调用指纹
 }
 
 interface BudgetConfig {
-  maxTurns?: number;       // 最多多少轮
-  maxTokens?: number;      // 最多多少 token
-  maxCostCNY?: number;     // 最多花多少钱
+  maxTurns?: number; // 最多多少轮
+  maxTokens?: number; // 最多多少 token
+  maxCostCNY?: number; // 最多花多少钱
   maxWallClockMs?: number; // 最多运行多久
 }
 
 interface GoalBudgetUsage {
-  turns: number;           // 已消耗轮次
-  tokens: number;          // 已消耗 token
-  costCNY: number;         // 已消耗成本（人民币）
-  startedAt: number;       // 创建时间戳（墙钟基准，不暂停）
+  turns: number; // 已消耗轮次
+  tokens: number; // 已消耗 token
+  costCNY: number; // 已消耗成本（人民币）
+  startedAt: number; // 创建时间戳（墙钟基准，不暂停）
 }
 ```
 
@@ -108,6 +108,7 @@ interface GoalBudgetUsage {
 ```
 
 **关键规则**：
+
 - 同一时间最多一个 `active` goal
 - 创建新 goal 时，旧的 active 自动降为 `paused`
 - `complete` 的 goal 不能重新激活（必须先 `update` 状态）
@@ -173,6 +174,7 @@ formatRemainingBudget(goal: Goal): string | null {
 
 ```markdown
 ## 🎯 当前 Goal(长程目标)
+
 - 🟢 **重构认证模块** (id: goal-1)
   - 描述: 将旧版 session 认证迁移到 JWT
   - 预算约束: 10 轮 + 50000 tokens + ¥1.5
@@ -191,12 +193,12 @@ formatRemainingBudget(goal: Goal): string | null {
 
 ### 阈值梯度
 
-| 连续轮次 | 动作 | 成本 |
-|---------|------|------|
-| 0-2 | 不干预（模型可能在思考/规划） | 免费 |
-| 3-4 | 触发 LLM 评估器判断是否真的完成 | ~$0.005/次 |
-| 5-7 | 注入 `[SYSTEM REMINDER]` 强提醒 | 免费 |
-| ≥8 | `currentBudgetDecision` 返回 `allowed: false` → Grace Call 终止 | 免费 |
+| 连续轮次 | 动作                                                            | 成本       |
+| -------- | --------------------------------------------------------------- | ---------- |
+| 0-2      | 不干预（模型可能在思考/规划）                                   | 免费       |
+| 3-4      | 触发 LLM 评估器判断是否真的完成                                 | ~$0.005/次 |
+| 5-7      | 注入 `[SYSTEM REMINDER]` 强提醒                                 | 免费       |
+| ≥8       | `currentBudgetDecision` 返回 `allowed: false` → Grace Call 终止 | 免费       |
 
 ### 指纹计算
 
@@ -329,7 +331,7 @@ await session.commitMessages({
   content: "[Goal continuation] 目标尚未完成，请继续推进。",
   providerData: { picoKind: "goal_continuation", picoHiddenFromTranscript: true },
 });
-continue;  // 继续循环
+continue; // 继续循环
 ```
 
 ### 防无限循环
@@ -339,8 +341,8 @@ continue;  // 继续循环
 ```typescript
 const goalTurnBudget = this.goalManager?.startTurn();
 if (!goalTurnBudget.allowed) {
-  exhaustedReason = goalTurnBudget.reason;  // "Goal 已达到最大轮次 20"
-  break;  // 退出 → Grace Call
+  exhaustedReason = goalTurnBudget.reason; // "Goal 已达到最大轮次 20"
+  break; // 退出 → Grace Call
 }
 ```
 
@@ -406,11 +408,11 @@ turnTail（每轮重建，追加到 user 消息）
 
 **文件**：`src/tools/goal.ts`
 
-| 工具 | 操作 | 返回值 |
-|------|------|--------|
+| 工具          | 操作           | 返回值                                       |
+| ------------- | -------------- | -------------------------------------------- |
 | `create_goal` | 创建并激活目标 | `🎯 已创建并激活目标 goal-1:\n` + formatGoal |
-| `get_goal` | 查询目标 | `🎯 当前激活目标:\n` + formatGoal |
-| `update_goal` | 更新目标字段 | `✅ 已更新目标 goal-1:\n` + formatGoal |
+| `get_goal`    | 查询目标       | `🎯 当前激活目标:\n` + formatGoal            |
+| `update_goal` | 更新目标字段   | `✅ 已更新目标 goal-1:\n` + formatGoal       |
 
 ### formatGoal（含 budgetUsage + 停滞状态）
 
@@ -423,7 +425,9 @@ function formatGoal(goal: Goal): string {
     // 预算配置
     lines.push(`  - 预算: ${parts.join(" + ")}`);
     // 已消耗
-    lines.push(`  - 已消耗: ${goal.budgetUsage.turns} 轮 + ${goal.budgetUsage.tokens} tokens + ¥${goal.budgetUsage.costCNY.toFixed(4)}`);
+    lines.push(
+      `  - 已消耗: ${goal.budgetUsage.turns} 轮 + ${goal.budgetUsage.tokens} tokens + ¥${goal.budgetUsage.costCNY.toFixed(4)}`,
+    );
   }
   // 停滞状态
   if (goal.consecutiveNoProgress >= 3) {
@@ -448,6 +452,7 @@ session.jsonl（持久账本）
 ```
 
 重启时：
+
 ```
 session.jsonl → projectRuntimeSessionState(events) → 恢复 goal 快照
     ↓ normalizeGoalManagerSnapshot()（严格校验）
@@ -536,31 +541,31 @@ consecutiveNoProgress = 8
 
 ## 十三、与 TodoList 的对比
 
-| 维度 | Goal | TodoList |
-|------|------|----------|
-| **定位** | 宏观目标 + 预算锚点 + 完成判定 | 原子任务清单 |
-| **状态机** | 4 状态 FSM，单 active 约束 | 每条独立 pending/in_progress/completed |
-| **预算** | ✅ 轮次/token/成本/墙钟 + 停滞硬终止 | ❌ 没有 |
-| **停滞检测** | ✅ 工具指纹 + 阈值梯度 | ❌ 没有 |
-| **完成判定** | ✅ LLM 评估器（≥3 轮无进展时） | ❌ 模型自判 |
-| **延续协调器** | ✅ 分层续行 | ❌ 没有 |
-| **持久化** | Session RuntimeEvent 快照 | todo.json 文件 |
-| **注入位置** | turnTail（每轮重建） | turnTail（每轮重建） |
-| **工具数** | 3 个（create/get/update） | 1 个（todo，5 个 action） |
-| **成本关联** | goalId 挂到 CostTracker | ❌ 没有 |
-| **子代理共享** | ✅ 子代理消耗计入父 goal | ❌ 独立 |
+| 维度           | Goal                                 | TodoList                               |
+| -------------- | ------------------------------------ | -------------------------------------- |
+| **定位**       | 宏观目标 + 预算锚点 + 完成判定       | 原子任务清单                           |
+| **状态机**     | 4 状态 FSM，单 active 约束           | 每条独立 pending/in_progress/completed |
+| **预算**       | ✅ 轮次/token/成本/墙钟 + 停滞硬终止 | ❌ 没有                                |
+| **停滞检测**   | ✅ 工具指纹 + 阈值梯度               | ❌ 没有                                |
+| **完成判定**   | ✅ LLM 评估器（≥3 轮无进展时）       | ❌ 模型自判                            |
+| **延续协调器** | ✅ 分层续行                          | ❌ 没有                                |
+| **持久化**     | Session RuntimeEvent 快照            | todo.json 文件                         |
+| **注入位置**   | turnTail（每轮重建）                 | turnTail（每轮重建）                   |
+| **工具数**     | 3 个（create/get/update）            | 1 个（todo，5 个 action）              |
+| **成本关联**   | goalId 挂到 CostTracker              | ❌ 没有                                |
+| **子代理共享** | ✅ 子代理消耗计入父 goal             | ❌ 独立                                |
 
 ---
 
 ## 十四、相关文件索引
 
-| 文件 | 职责 |
-|------|------|
-| `src/engine/goal-manager.ts` | 状态机 + 预算追踪 + 停滞检测 + buildGoalContext |
-| `src/engine/goal-evaluator.ts` | LLM 评估器（完成判定） |
-| `src/tools/goal.ts` | 3 个工具（create/get/update）+ formatGoal |
-| `src/engine/loop.ts` | 停滞触发 + 延续协调器 + 评估器触发 |
-| `src/engine/session-runtime.ts` | goal 快照校验（含新字段） |
-| `src/engine/budget.ts` | BudgetConfig / BudgetDecision 共享类型 |
-| `tests/e2e/goal-stall-detection.real-llm.test.ts` | 停滞检测单元测试 |
-| `tests/e2e/goal-e2e.real-llm.test.ts` | E2E 集成测试（4 个场景） |
+| 文件                                              | 职责                                            |
+| ------------------------------------------------- | ----------------------------------------------- |
+| `src/engine/goal-manager.ts`                      | 状态机 + 预算追踪 + 停滞检测 + buildGoalContext |
+| `src/engine/goal-evaluator.ts`                    | LLM 评估器（完成判定）                          |
+| `src/tools/goal.ts`                               | 3 个工具（create/get/update）+ formatGoal       |
+| `src/engine/loop.ts`                              | 停滞触发 + 延续协调器 + 评估器触发              |
+| `src/engine/session-runtime.ts`                   | goal 快照校验（含新字段）                       |
+| `src/engine/budget.ts`                            | BudgetConfig / BudgetDecision 共享类型          |
+| `tests/e2e/goal-stall-detection.real-llm.test.ts` | 停滞检测单元测试                                |
+| `tests/e2e/goal-e2e.real-llm.test.ts`             | E2E 集成测试（4 个场景）                        |

@@ -469,7 +469,11 @@ export class DelegateTaskTool implements BaseTool {
     if (completionPolicy === "required") {
       if (planStepId && stepCoordinator) await stepCoordinator.markStarted(planStepId);
       const result = await this.runBudgetedBatch(
-        tasks, activities, depth, maxSpawnDepth, context?.signal,
+        tasks,
+        activities,
+        depth,
+        maxSpawnDepth,
+        context?.signal,
       );
       if (planStepId && stepCoordinator) {
         const completed = result.status === "completed" || result.status === "partial";

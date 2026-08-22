@@ -58,9 +58,7 @@ export async function findOrphanGraphWorks(
     return { orphanWorkIds: [], projection };
   }
   const orphanWorkIds = projection.works
-    .filter(
-      (work) => work.status === "dispatched" && !context.isWorkLeaseLive(work.workId),
-    )
+    .filter((work) => work.status === "dispatched" && !context.isWorkLeaseLive(work.workId))
     .map((work) => work.workId);
   return { orphanWorkIds, projection };
 }

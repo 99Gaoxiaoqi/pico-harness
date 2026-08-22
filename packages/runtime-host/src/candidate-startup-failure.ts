@@ -1,4 +1,4 @@
-import { StorageRootAuthorityError } from './control/root-authority.js';
+import { StorageRootAuthorityError } from "./control/root-authority.js";
 
 /**
  * Candidate 启动失败的退出码协议（移植自参考宿主实现的 fast-fail 机制）：
@@ -10,9 +10,9 @@ import { StorageRootAuthorityError } from './control/root-authority.js';
  * 与内部启动失败不是（旧 daemon 会退、环境会变），只上报不刹车。
  */
 export type CandidateStartupFailureReason =
-  | 'storage_root_incompatible'
-  | 'legacy_daemon_running'
-  | 'internal_startup_failure';
+  | "storage_root_incompatible"
+  | "legacy_daemon_running"
+  | "internal_startup_failure";
 
 export interface CandidateStartupFailure {
   readonly reason: CandidateStartupFailureReason;
@@ -29,10 +29,10 @@ const EXIT_CODE_BY_REASON: Readonly<Record<CandidateStartupFailureReason, number
 
 /** 存储根身份类错误码——marker 与客户端持有的 rootId 失配，重试无效。 */
 const PERMANENT_ROOT_AUTHORITY_CODES: ReadonlySet<string> = new Set([
-  'root_identity_changed',
-  'root_identity_collision',
-  'invalid_marker',
-  'root_kind_mismatch',
+  "root_identity_changed",
+  "root_identity_collision",
+  "invalid_marker",
+  "root_kind_mismatch",
 ]);
 
 export function classifyCandidateStartupFailure(error: unknown): CandidateStartupFailure {
@@ -44,17 +44,17 @@ export function classifyCandidateStartupFailure(error: unknown): CandidateStartu
         PERMANENT_ROOT_AUTHORITY_CODES.has(candidate.code),
     )
   ) {
-    return { reason: 'storage_root_incompatible' };
+    return { reason: "storage_root_incompatible" };
   }
-  return { reason: 'internal_startup_failure' };
+  return { reason: "internal_startup_failure" };
 }
 
 export function isPermanentCandidateStartupFailure(
   failure: CandidateStartupFailure | undefined,
 ): failure is CandidateStartupFailure & {
-  readonly reason: 'storage_root_incompatible';
+  readonly reason: "storage_root_incompatible";
 } {
-  return failure !== undefined && failure.reason === 'storage_root_incompatible';
+  return failure !== undefined && failure.reason === "storage_root_incompatible";
 }
 
 export function candidateStartupFailureExitCode(failure: CandidateStartupFailure): number {
@@ -76,9 +76,9 @@ function primaryErrorChain(root: unknown): unknown[] {
   let value: unknown = root;
   for (;;) {
     chain.push(value);
-    if (typeof value !== 'object' || value === null || visited.has(value)) break;
+    if (typeof value !== "object" || value === null || visited.has(value)) break;
     visited.add(value);
-    if ('cause' in value) {
+    if ("cause" in value) {
       const cause = (value as { cause?: unknown }).cause;
       if (cause !== undefined) {
         value = cause;

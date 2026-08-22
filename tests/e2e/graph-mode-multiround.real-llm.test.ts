@@ -62,7 +62,16 @@ async function readRuntimeEventEntries(sandbox: TestSandbox): Promise<RuntimeEve
 
 function modelRequest(
   model: RealModel,
-): Pick<RunAgentCliOptions, "provider" | "baseURL" | "apiKey" | "model" | "modelRouteId" | "modelCapabilities" | "thinkingEffort"> {
+): Pick<
+  RunAgentCliOptions,
+  | "provider"
+  | "baseURL"
+  | "apiKey"
+  | "model"
+  | "modelRouteId"
+  | "modelCapabilities"
+  | "thinkingEffort"
+> {
   return {
     provider: model.provider,
     baseURL: model.config.baseURL,
@@ -119,7 +128,11 @@ function runOptions(
 // so every run produces a reviewable artifact for analysis.
 // ============================================================
 
-function dumpGraph(label: string, entries: readonly RuntimeEventStoreEntry[], sandbox: TestSandbox): void {
+function dumpGraph(
+  label: string,
+  entries: readonly RuntimeEventStoreEntry[],
+  sandbox: TestSandbox,
+): void {
   const projection = projectGraphEntries(sandbox.graphId, entries);
   console.log(`\n===== [${label}] graph projection =====`);
   console.log(
@@ -158,7 +171,9 @@ function dumpEventStream(events: readonly RuntimeEvent[]): void {
         );
         break;
       case "graph.work.dispatched":
-        console.log(`+ dispatch ${String(data["workId"])} delegation=${String(data["delegationId"])}`);
+        console.log(
+          `+ dispatch ${String(data["workId"])} delegation=${String(data["delegationId"])}`,
+        );
         break;
       case "graph.work.recorded":
         console.log(
@@ -166,7 +181,9 @@ function dumpEventStream(events: readonly RuntimeEvent[]): void {
         );
         break;
       case "graph.work.failed":
-        console.log(`+ failed   ${String(data["workId"])} error="${String(data["error"]).slice(0, 80)}"`);
+        console.log(
+          `+ failed   ${String(data["workId"])} error="${String(data["error"]).slice(0, 80)}"`,
+        );
         break;
       case "graph.closed":
         console.log(`+ closed   result_records=[${String(data["resultRecordIds"])}]`);
@@ -432,10 +449,11 @@ realModelTest(
 
     const works = projection.works;
     const closeIndex = events.findIndex((e) => e.kind === "graph.closed");
-    const addedAfterClose = closeIndex >= 0
-      ? events.slice(closeIndex).filter((e) => e.kind === "graph.work.added")
-      : [];
-    console.log(`[T6] works total: ${works.length}; added events after close: ${addedAfterClose.length}`);
+    const addedAfterClose =
+      closeIndex >= 0 ? events.slice(closeIndex).filter((e) => e.kind === "graph.work.added") : [];
+    console.log(
+      `[T6] works total: ${works.length}; added events after close: ${addedAfterClose.length}`,
+    );
     for (const work of works) {
       console.log(
         `[T6] work ${work.status} input_ids=[${work.inputIds.join(",")}] instr="${work.instruction.slice(0, 40)}"`,
@@ -514,8 +532,12 @@ realModelTest(
     dumpEventStream(events);
 
     const works = projection.works;
-    const postCloseAdded = works.filter((w) => w.status === "requested" || w.status === "dispatched");
-    console.log(`[T3] works after closed graph: ${works.length}, still pending: ${postCloseAdded.length}`);
+    const postCloseAdded = works.filter(
+      (w) => w.status === "requested" || w.status === "dispatched",
+    );
+    console.log(
+      `[T3] works after closed graph: ${works.length}, still pending: ${postCloseAdded.length}`,
+    );
 
     // second.txt should exist one way or another (direct write is acceptable).
     const content = await readFile(join(sandbox.workDir, "second.txt"), "utf8").catch(() => "");
@@ -525,9 +547,7 @@ realModelTest(
     // it would be a lie if the tool claimed it would run.
     const closeIndex = events.findIndex((e) => e.kind === "graph.closed");
     if (closeIndex >= 0) {
-      const addedAfterClose = events
-        .slice(closeIndex)
-        .filter((e) => e.kind === "graph.work.added");
+      const addedAfterClose = events.slice(closeIndex).filter((e) => e.kind === "graph.work.added");
       const dispatchedAfterClose = events
         .slice(closeIndex)
         .filter((e) => e.kind === "graph.work.dispatched");

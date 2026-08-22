@@ -83,12 +83,7 @@ function userMessage(
   } as RuntimeEvent;
 }
 
-function runStarted(
-  eventId: string,
-  sessionId: string,
-  at: string,
-  workDir: string,
-): RuntimeEvent {
+function runStarted(eventId: string, sessionId: string, at: string, workDir: string): RuntimeEvent {
   return {
     schemaVersion: 2,
     eventId,
@@ -161,11 +156,7 @@ test("sqlite sessions: initialize + multi-turn append + readback projections + s
     const r1 = await fixture.store.appendBatch(round1);
     const r2 = await fixture.store.appendBatch(round2);
     const r3 = await fixture.store.appendBatch(round3);
-    const expectedSeqs = [
-      [1, 2, 3],
-      [4, 5],
-      [6],
-    ];
+    const expectedSeqs = [[1, 2, 3], [4, 5], [6]];
     for (const [results, seqs, events] of [
       [r1, expectedSeqs[0]!, round1],
       [r2, expectedSeqs[1]!, round2],
@@ -620,9 +611,7 @@ test("sqlite sessions: kind slice + first/last of kind + run view 索引查询�
     assert.equal(mixed.headSequence, 3);
 
     // 子集切片:只含 message.committed,顺序保持 event_seq 升序。
-    const messagesOnly = await fixture.store.readSessionEntriesOfKinds(id, [
-      "message.committed",
-    ]);
+    const messagesOnly = await fixture.store.readSessionEntriesOfKinds(id, ["message.committed"]);
     assert.deepEqual(
       messagesOnly.entries.map(({ sequence }) => sequence),
       [2, 3],
@@ -670,12 +659,7 @@ test("sqlite sessions: projection delta 校验窄化——锚点/头部点查 + 
     await fixture.store.initializeSession({ sessionId: id, workDir: fixture.workspace });
     const events = [
       ...[1, 2, 3, 4, 5].map((index) =>
-        userMessage(
-          `${id}-e${index}`,
-          id,
-          `2026-08-19T00:00:0${index}.000Z`,
-          `message ${index}`,
-        ),
+        userMessage(`${id}-e${index}`, id, `2026-08-19T00:00:0${index}.000Z`, `message ${index}`),
       ),
     ];
     await fixture.store.appendBatch(events);

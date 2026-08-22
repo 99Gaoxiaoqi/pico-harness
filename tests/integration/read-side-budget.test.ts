@@ -109,7 +109,10 @@ test("applyModelHistoryByteBudget: 降级保留 role/toolCallId 配对字段,小
 test("applyModelHistoryByteBudget: 非法预算参数 fail-closed", () => {
   const entries = [historyEntry("e-1", "x")];
   assert.throws(() => applyModelHistoryByteBudget(entries, { maxTotalBytes: 0 }), /maxTotalBytes/u);
-  assert.throws(() => applyModelHistoryByteBudget(entries, { maxTotalBytes: 1.5 }), /maxTotalBytes/u);
+  assert.throws(
+    () => applyModelHistoryByteBudget(entries, { maxTotalBytes: 1.5 }),
+    /maxTotalBytes/u,
+  );
   assert.throws(
     () => applyModelHistoryByteBudget(entries, { maxTotalBytes: 1024, preservedTailMessages: -1 }),
     /preservedTailMessages/u,
@@ -138,7 +141,7 @@ test("readModelHistory: 大全文会话组装字节有界,末尾工作集完整,
       {
         role: "assistant",
         content: "开始调查",
-        toolCalls: [{ id: "call-big", name: "bash", arguments: "{\"command\":\"cat big.log\"}" }],
+        toolCalls: [{ id: "call-big", name: "bash", arguments: '{"command":"cat big.log"}' }],
       },
     ]);
     const toolResultMessage = run.registerToolResult({
@@ -338,7 +341,9 @@ test("readSessionEventSliceWithinBudget: 先测长按预算取 suffix,累积 sta
   const page = projectRuntimeTranscriptEntries(id, windowed.entries, {
     persistenceSequence: windowed.headSequence,
   });
-  assert.ok(page.items.some((item) => item.kind === "userMessage" && item.content === "small-latest"));
+  assert.ok(
+    page.items.some((item) => item.kind === "userMessage" && item.content === "small-latest"),
+  );
   assert.equal(page.revision, "5");
 
   // 参数校验 fail-closed(async 方法统一走 rejects)。
@@ -456,7 +461,9 @@ test("readSessionEventSliceWithinBudget: 水位拆开工具配对时回退窗口
     "success",
     "窗口内 start+result 配对后,工具项应投影为已完成",
   );
-  assert.ok(page.items.some((item) => item.kind === "userMessage" && item.content.startsWith("tail:")));
+  assert.ok(
+    page.items.some((item) => item.kind === "userMessage" && item.content.startsWith("tail:")),
+  );
   assert.equal(page.revision, "3");
 });
 
@@ -614,12 +621,7 @@ test("readSessionEventSliceWithinBudget: 窗口头截掉早期非工具 transcri
         },
       },
     } as RuntimeEvent,
-    messageEvent(
-      `${id}-tail`,
-      id,
-      "2026-08-19T00:00:04.000Z",
-      `tail:${"t".repeat(8 * 1024)}`,
-    ),
+    messageEvent(`${id}-tail`, id, "2026-08-19T00:00:04.000Z", `tail:${"t".repeat(8 * 1024)}`),
   ]);
 
   const kinds = ["message.committed", "tool.result.recorded", "transcript.event.recorded"];

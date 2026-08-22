@@ -7,10 +7,7 @@
  */
 
 // control: endpoint / registration / storage-root authority
-export {
-  prepareRuntimeHostEndpoint,
-  type RuntimeHostEndpoint,
-} from "./control/endpoint.js";
+export { prepareRuntimeHostEndpoint, type RuntimeHostEndpoint } from "./control/endpoint.js";
 export {
   readHostRegistration,
   removeHostRegistration,

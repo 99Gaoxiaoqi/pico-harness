@@ -78,6 +78,7 @@ pico 的 Tool Result 处理有一条清晰的设计原则——**工具的原始
 ```
 
 这个设计保证了三个性质：
+
 1. **单条大结果永远撑不爆上下文**——模型只持有 1600 字符预览
 2. **原文不丢失**——SHA-256 内容寻址，完整性可校验
 3. **可翻页回读**——模型按需分页获取，不需要一次性全量加载
@@ -86,13 +87,13 @@ pico 的 Tool Result 处理有一条清晰的设计原则——**工具的原始
 
 除了统一的投影机制，每个工具还有自身的输出上限作为第一道防线：
 
-| 工具 | 限制 | 策略 |
-|---|---|---|
-| read_file | 500 行/页、2000 字符/行、16MiB/文件 | 行数分页，行号稳定 |
-| bash | 10MiB 执行缓冲 | 超限杀进程树，保留已捕获头部（按到达顺序的早期输出） |
-| grep | 500 条匹配上限 | 前 N 条 + 截断提示 |
-| glob | 100 条上限 | 前 100 条 |
-| web | 2MiB 响应字节、默认 8K 字符（上限 50K） | 流式到 2MiB 停 |
+| 工具      | 限制                                    | 策略                                                 |
+| --------- | --------------------------------------- | ---------------------------------------------------- |
+| read_file | 500 行/页、2000 字符/行、16MiB/文件     | 行数分页，行号稳定                                   |
+| bash      | 10MiB 执行缓冲                          | 超限杀进程树，保留已捕获头部（按到达顺序的早期输出） |
+| grep      | 500 条匹配上限                          | 前 N 条 + 截断提示                                   |
+| glob      | 100 条上限                              | 前 100 条                                            |
+| web       | 2MiB 响应字节、默认 8K 字符（上限 50K） | 流式到 2MiB 停                                       |
 
 这些自限是工具层的保护，投影决策（2048 token 阈值）是运行时的第二道防线，Evidence CAS 是第三道。三层共同保证：**无论工具返回多大，进入上下文的永远是有界的**。
 
@@ -145,6 +146,7 @@ inputBudgetTokens = contextWindowTokens - maxOutputTokens - safetyMargin(1024)
 例如 128K 窗口、4K 输出：`inputBudgetTokens = 128000 - 4096 - 1024 = 122880`。
 
 两个触发水位：
+
 - **midTurn 75%**（`MID_TURN_COMPACT_TRIGGER_RATIO`）：工具结果落地后立即检查，更激进，提前介入
 - **prepareModelContext 85%**（`DEFAULT_AUTO_COMPACT_TRIGGER_RATIO`）：下一轮 Provider 调用前检查
 
@@ -234,17 +236,22 @@ pico 的滚动摘要机制（对标 maka-agent）：**第二次压缩时，基�
 实现上分两条路径：
 
 **Runtime 持久化路径**（`recordRuntimeCompactionCheckpoint`）：
+
 ```typescript
 // 读取上一个 checkpoint 的摘要
 const lastCheckpoint = await runtimeRun.findLastCompactionCheckpoint();
 // 传给 preview 作为增量基线
 const preview = await compactor.preview(
-  session, messages, request, signal,
-  lastCheckpoint?.summaryText,  // ← previousSummary
+  session,
+  messages,
+  request,
+  signal,
+  lastCheckpoint?.summaryText, // ← previousSummary
 );
 ```
 
 **内存路径**（`compactInMemorySession`）：
+
 ```typescript
 // 从 history 里检测已有的 summary 消息
 const previousSummary = detectExistingCompactionSummary(history);
@@ -363,16 +370,17 @@ RuntimeEvent Ledger（不可变）：
 
 这套系统做了几个明确的选择：
 
-| 取舍 | 选择 | 理由 |
-|---|---|---|
-| 摘要 vs 截断 | LLM 摘要 | 截断丢语义，摘要保留任务上下文 |
-| 何时摘要 | 推迟到必须时 | 先用零成本字符级，LLM 摘像是最后手段 |
-| 单次 vs 滚动 | 滚动增量更新 | 避免重复处理已折叠事件，降成本提正确性 |
-| 失败策略 | fail-open 而非 fail-fast | 给 overflow 紧急压缩多一次机会，不立即丢上下文 |
-| 原文存储 | 内容寻址 CAS | 完整性可校验，分页回读，不丢失 |
-| 预览策略 | 统一 head-tail + Evidence CAS 回读 | 原文不丢，预览精度差的代价只是多一次 read_evidence |
+| 取舍         | 选择                               | 理由                                               |
+| ------------ | ---------------------------------- | -------------------------------------------------- |
+| 摘要 vs 截断 | LLM 摘要                           | 截断丢语义，摘要保留任务上下文                     |
+| 何时摘要     | 推迟到必须时                       | 先用零成本字符级，LLM 摘像是最后手段               |
+| 单次 vs 滚动 | 滚动增量更新                       | 避免重复处理已折叠事件，降成本提正确性             |
+| 失败策略     | fail-open 而非 fail-fast           | 给 overflow 紧急压缩多一次机会，不立即丢上下文     |
+| 原文存储     | 内容寻址 CAS                       | 完整性可校验，分页回读，不丢失                     |
+| 预览策略     | 统一 head-tail + Evidence CAS 回读 | 原文不丢，预览精度差的代价只是多一次 read_evidence |
 
 它也有明确的**不做**：
+
 - 不做多通道并行压缩（pico 是单宿主，不需要 A/B 实验通道）
 - 不做子任务隔离的 TaskRun（pico 的子代理用独立的内存 history）
 - 不改子代理压缩路径（子代理无 Session，用字符级 Compactor）
@@ -383,13 +391,13 @@ RuntimeEvent Ledger（不可变）：
 
 这套系统的测试分四层：
 
-| 层级 | 类型 | 验证内容 |
-|---|---|---|
-| L1 | 集成测试（mock） | 内容哈希正确性、checkpoint 结构、控制流 |
-| L2 | e2e 真实模型 | 6 段摘要的保真度——3 个场景 case，anchor 匹配 recall ≥ 0.8 |
-| L3 | e2e 真实模型 | 滚动摘要增量更新——第二次摘要保留第一次的关键事实（recall ≥ 0.7） |
-| L3-deep | e2e 真实模型 | 深度衰减——3 轮"摘要的摘要"后核心 anchor 仍存活（recall ≥ 0.5） |
-| L4 | e2e 真实模型 | 85% 水位自动触发 + fail-open 不崩溃——`AgentEngine.run` 完整路径 |
+| 层级    | 类型             | 验证内容                                                         |
+| ------- | ---------------- | ---------------------------------------------------------------- |
+| L1      | 集成测试（mock） | 内容哈希正确性、checkpoint 结构、控制流                          |
+| L2      | e2e 真实模型     | 6 段摘要的保真度——3 个场景 case，anchor 匹配 recall ≥ 0.8        |
+| L3      | e2e 真实模型     | 滚动摘要增量更新——第二次摘要保留第一次的关键事实（recall ≥ 0.7） |
+| L3-deep | e2e 真实模型     | 深度衰减——3 轮"摘要的摘要"后核心 anchor 仍存活（recall ≥ 0.5）   |
+| L4      | e2e 真实模型     | 85% 水位自动触发 + fail-open 不崩溃——`AgentEngine.run` 完整路径  |
 
 L2/L3/L3-deep/L4 用真实模型（默认 `deepseek-v4-flash-0731`，可通过 `COMPACTION_E2E_MODEL` 覆盖）验证，不是 mock。历史实测 recall 多数达到 1.00（包括 3 轮深度衰减后核心 anchor 全部存活的场景），但真实模型存在单次波动，阈值设为 0.8/0.7/0.5 留余量。
 

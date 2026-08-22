@@ -60,12 +60,15 @@ test("sqlite engine: prepare initializes database with PRAGMAs and binding", () 
         (db.prepare("PRAGMA journal_mode").get() as { journal_mode: string }).journal_mode,
         "wal",
       );
+      assert.equal((db.prepare("PRAGMA busy_timeout").get() as { timeout: number }).timeout, 5000);
       assert.equal(
-        (db.prepare("PRAGMA busy_timeout").get() as { timeout: number }).timeout,
-        5000,
+        (db.prepare("PRAGMA foreign_keys").get() as { foreign_keys: number }).foreign_keys,
+        1,
       );
-      assert.equal((db.prepare("PRAGMA foreign_keys").get() as { foreign_keys: number }).foreign_keys, 1);
-      assert.equal((db.prepare("PRAGMA synchronous").get() as { synchronous: number }).synchronous, 2);
+      assert.equal(
+        (db.prepare("PRAGMA synchronous").get() as { synchronous: number }).synchronous,
+        2,
+      );
       assert.ok(preparation.rootIdentity.storageRootId.length > 0);
       assert.ok(preparation.rootIdentity.canonicalPath.length > 0);
     } finally {
@@ -109,7 +112,9 @@ test("sqlite engine: read-only connection is query_only and version-gated", () =
     // 版本超前:拒绝只读打开。
     const tamper = new DatabaseSync(operationalDatabasePath(root));
     try {
-      tamper.exec("UPDATE operational_schema_migrations SET version = 99 WHERE scope = 'test_domain'");
+      tamper.exec(
+        "UPDATE operational_schema_migrations SET version = 99 WHERE scope = 'test_domain'",
+      );
     } finally {
       tamper.close();
     }
@@ -159,10 +164,7 @@ test("sqlite engine: shape assertion gates migration only; drift is caught expli
     } finally {
       regression.close();
     }
-    assert.throws(
-      () => prepareWorkspaceSqliteStorageSync(root, TEST_SCOPES),
-      /schema drifted/,
-    );
+    assert.throws(() => prepareWorkspaceSqliteStorageSync(root, TEST_SCOPES), /schema drifted/);
   } finally {
     cleanup(root);
   }
@@ -191,7 +193,10 @@ test("sqlite engine: legacy JSONL-era layouts are refused", () => {
     try {
       setup(root);
       assert.throws(() => prepareWorkspaceSqliteStorageSync(root, TEST_SCOPES), pattern);
-      assert.ok(!existsSync(operationalDatabasePath(root)), "refused open must not create the database");
+      assert.ok(
+        !existsSync(operationalDatabasePath(root)),
+        "refused open must not create the database",
+      );
     } finally {
       cleanup(root);
     }
@@ -242,9 +247,9 @@ test("sqlite engine: transactions — WAL snapshot isolation, busy write, nestin
         second.exec("PRAGMA busy_timeout = 100");
         preparation.lease.transaction("write", () => {
           db.prepare("INSERT INTO test_rows (value) VALUES ('pending')").run();
-          const snapshot = second
-            .prepare("SELECT COUNT(*) AS n FROM test_rows")
-            .get() as { n: number };
+          const snapshot = second.prepare("SELECT COUNT(*) AS n FROM test_rows").get() as {
+            n: number;
+          };
           assert.equal(snapshot.n, 1, "uncommitted write must be invisible to a second reader");
 
           // 写写冲突:第二连接短 busy_timeout 下尝试写 → 抛 SQLITE_BUSY。
@@ -256,7 +261,9 @@ test("sqlite engine: transactions — WAL snapshot isolation, busy write, nestin
             },
           );
         });
-        const visible = second.prepare("SELECT COUNT(*) AS n FROM test_rows").get() as { n: number };
+        const visible = second.prepare("SELECT COUNT(*) AS n FROM test_rows").get() as {
+          n: number;
+        };
         assert.equal(visible.n, 2, "commit must become visible");
       } finally {
         second.close();
@@ -276,11 +283,12 @@ test("sqlite engine: transactions — WAL snapshot isolation, busy write, nestin
       );
 
       // 异常回滚。
-      assert.throws(() =>
-        preparation.lease.transaction("write", () => {
-          db.prepare("INSERT INTO test_rows (value) VALUES ('doomed')").run();
-          throw new Error("boom");
-        }),
+      assert.throws(
+        () =>
+          preparation.lease.transaction("write", () => {
+            db.prepare("INSERT INTO test_rows (value) VALUES ('doomed')").run();
+            throw new Error("boom");
+          }),
         /boom/,
       );
       const final = db.prepare("SELECT COUNT(*) AS n FROM test_rows").get() as { n: number };

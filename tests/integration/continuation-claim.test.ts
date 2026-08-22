@@ -334,7 +334,9 @@ test("C4 批内封口（ADR 29 §C4）：批模式追加被拒整批不落；批
   const afterBatch = await scene.store.readSession(scene.session.id);
   assert.equal(afterBatch.length, baseline.length, "rejected batch must land nothing");
   assert.equal(
-    afterBatch.some((event) => event.eventId === "batch-seal-a" || event.eventId === "batch-seal-b"),
+    afterBatch.some(
+      (event) => event.eventId === "batch-seal-a" || event.eventId === "batch-seal-b",
+    ),
     false,
   );
 
@@ -372,7 +374,11 @@ test("C4 批内封口（ADR 29 §C4）：批模式追加被拒整批不落；批
     (error: unknown) => error instanceof RuntimeEventStoreRunSealedError,
   );
   const afterInBatch = await scene.store.readSession(scene.session.id);
-  assert.equal(afterInBatch.length, baseline.length, "in-batch terminal rejection rolls back the whole batch");
+  assert.equal(
+    afterInBatch.length,
+    baseline.length,
+    "in-batch terminal rejection rolls back the whole batch",
+  );
   // 对照组:同样的前两事件(无批内尾随新事件)正常落地。
   await scene.store.appendBatch([inBatchStart, inBatchTerminal]);
   const control = await scene.store.readSession(scene.session.id);
@@ -451,8 +457,7 @@ test("C3+ 目标关联：run.started 携带 continuationOf 落库可读回；目
   // 同 session 事件流天然含前缀:源前缀消息仍在目标 run 可见的会话账本里。
   assert.ok(
     events.some(
-      (event) =>
-        event.kind === "message.committed" && event.data.message.content === "源前缀",
+      (event) => event.kind === "message.committed" && event.data.message.content === "源前缀",
     ),
   );
 

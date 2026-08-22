@@ -74,9 +74,7 @@ interface PushHarness {
   owner: InteractiveRootOwner;
 }
 
-async function startPushHarness(t: {
-  after(hook: () => unknown): void;
-}): Promise<PushHarness> {
+async function startPushHarness(t: { after(hook: () => unknown): void }): Promise<PushHarness> {
   const root = mkdtempSync(join(tmpdir(), "pico-runtime-host-event-push-"));
   const capability = await resolveStorageRoot({ path: root, kind: "interactive" });
   const owner = await tryAcquireInteractiveRootOwner(capability);
@@ -128,11 +126,7 @@ test("event push: handler-pushed events arrive in wire order before the response
     observed.push(`event:${(event as { seq: number }).seq}`);
   });
 
-  const result = await connection.requestRegistered<{ pushed: boolean }>(
-    PUSH_OPERATION,
-    {},
-    5000,
-  );
+  const result = await connection.requestRegistered<{ pushed: boolean }>(PUSH_OPERATION, {}, 5000);
   assert.equal(result.pushed, true);
   observed.push("response");
 
@@ -167,11 +161,7 @@ test("event push: a captured sink keeps pushing after the request completed", as
   });
 
   // 第一次请求：handler 推 seq 1/2 并捕获 sink。
-  const first = await connection.requestRegistered<{ pushed: boolean }>(
-    PUSH_OPERATION,
-    {},
-    5000,
-  );
+  const first = await connection.requestRegistered<{ pushed: boolean }>(PUSH_OPERATION, {}, 5000);
   assert.equal(first.pushed, true);
   assert.equal(hooks.capturedSinks.length, 1);
   await waitForCondition(() => received.length === 2, 2000);
@@ -207,11 +197,7 @@ test("event push: oversized payload fences the connection", async (t) => {
     received.push(event);
   });
 
-  const first = await connection.requestRegistered<{ pushed: boolean }>(
-    PUSH_OPERATION,
-    {},
-    5000,
-  );
+  const first = await connection.requestRegistered<{ pushed: boolean }>(PUSH_OPERATION, {}, 5000);
   assert.equal(first.pushed, true);
   await waitForCondition(() => received.length === 2, 2000);
 
@@ -221,13 +207,10 @@ test("event push: oversized payload fences the connection", async (t) => {
   };
   const fenceSink = hooks.capturedSinks[0];
   assert.ok(fenceSink, "第一次请求应捕获到 pushEvent sink");
-  await assert.rejects(
-    fenceSink(oversized),
-    (error: unknown) => {
-      assert.ok(error instanceof Error);
-      return true;
-    },
-  );
+  await assert.rejects(fenceSink(oversized), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    return true;
+  });
 
   // fence：连接被 teardown，后续请求失败；host 侧计数归零。
   await assertSettlesWithin(connection.closed, 5000, "超限推送应 teardown 连接");
@@ -257,10 +240,7 @@ async function assertSettlesWithin(
   }
 }
 
-async function waitForCondition(
-  condition: () => boolean,
-  timeoutMs: number,
-): Promise<boolean> {
+async function waitForCondition(condition: () => boolean, timeoutMs: number): Promise<boolean> {
   const deadline = performance.now() + timeoutMs;
   while (!condition()) {
     if (performance.now() > deadline) return false;

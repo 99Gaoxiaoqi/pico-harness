@@ -50,7 +50,9 @@ interface ScenarioWorkspace {
   trackSession(sessionId: string | undefined): void;
 }
 
-async function createScenarioWorkspace(t: import("node:test").TestContext): Promise<ScenarioWorkspace> {
+async function createScenarioWorkspace(
+  t: import("node:test").TestContext,
+): Promise<ScenarioWorkspace> {
   const root = await mkdtemp(join(tmpdir(), "pico-matrix-e2e-"));
   const picoHome = join(root, "pico-home");
   const workspaceSeed = join(root, "workspace");
@@ -109,8 +111,7 @@ async function sendAndDrain(
   if (!accepted) accepted = await runtime.sendText(text);
   if (!accepted) return false;
   const answered = await waitForCondition(
-    () =>
-      reporter.getProjection().entries.some(({ entry }) => entry.kind === "assistant"),
+    () => reporter.getProjection().entries.some(({ entry }) => entry.kind === "assistant"),
     180_000,
   );
   if (!answered) return false;
@@ -124,7 +125,9 @@ realModelTest(
     const scenario = await createScenarioWorkspace(t);
     const { client, workspaceDir } = scenario;
     // 用 daemon 真实默认路由作为 --model 值（验证覆盖桥而非指定任意路由）。
-    const { config } = await client.request("config.effective.get", { workspacePath: workspaceDir });
+    const { config } = await client.request("config.effective.get", {
+      workspacePath: workspaceDir,
+    });
     assert.ok(config.defaultModelRouteId, "daemon 应配置默认路由");
     const route = config.defaultModelRouteId;
 
@@ -132,9 +135,7 @@ realModelTest(
     const overlayErrors: string[] = [];
     const originalPushError = reporter.pushError.bind(reporter);
     reporter.pushError = ((message: string, context?: unknown) => {
-      overlayErrors.push(
-        `${message}${context instanceof Error ? ` (${context.message})` : ""}`,
-      );
+      overlayErrors.push(`${message}${context instanceof Error ? ` (${context.message})` : ""}`);
       return originalPushError(message, context as never);
     }) as typeof reporter.pushError;
     const runtime = new ClientSessionRuntime({
@@ -154,16 +155,13 @@ realModelTest(
     scenario.trackSession(runtime.activeSessionId);
     // 覆盖应用经"回合终态重试"（sendInput 后 run 注册窗口内的 CONFLICT 由
     // onRunStateChanged(false) 触发重试覆盖）——终态断言用有界轮询等生效。
-    const overrideApplied = await waitForCondition(
-      async () => {
-        const { settings } = await client.request("session.settings.get", {
-          workspacePath: workspaceDir,
-          sessionId: runtime.activeSessionId ?? "",
-        });
-        return settings.modelRouteId === route && settings.orchestrationMode === "graph";
-      },
-      30_000,
-    );
+    const overrideApplied = await waitForCondition(async () => {
+      const { settings } = await client.request("session.settings.get", {
+        workspacePath: workspaceDir,
+        sessionId: runtime.activeSessionId ?? "",
+      });
+      return settings.modelRouteId === route && settings.orchestrationMode === "graph";
+    }, 30_000);
     assert.ok(
       overrideApplied,
       `--model/--graph 覆盖应最终写入会话设置（覆盖错误：${overlayErrors.join(" | ") || "无"}）`,
@@ -215,8 +213,7 @@ realModelTest(
         forkReporter
           .getProjection()
           .entries.some(
-            ({ entry }) =>
-              entry.kind === "assistant" && entry.content === sourceAssistant.content,
+            ({ entry }) => entry.kind === "assistant" && entry.content === sourceAssistant.content,
           ),
       60_000,
     );
@@ -224,7 +221,8 @@ realModelTest(
       const forkEntries = forkReporter
         .getProjection()
         .entries.map(
-          ({ entry }) => `${entry.kind}:${(entry as { content?: string }).content?.slice(0, 30) ?? ""}`,
+          ({ entry }) =>
+            `${entry.kind}:${(entry as { content?: string }).content?.slice(0, 30) ?? ""}`,
         );
       assert.fail(
         `fork 会话水化应含源会话回复（源=${sourceAssistant.content.slice(0, 40)}；fork 投影=[${forkEntries.join(" | ")}]）`,
@@ -260,12 +258,9 @@ realModelTest(
     // RPC→FileHistorySnapshotSummary 映射，此处直接消费）。
     const rewind = await processClientInput("/rewind", registry, runtime);
     assert.equal(rewind.kind, "local");
-    assert.equal(
-      (rewind.result?.ui as { selector?: string } | undefined)?.selector,
-      "rewind",
-    );
-    const snapshots = (rewind.result?.data as { snapshots?: { messageId: string }[] })
-      .snapshots ?? [];
+    assert.equal((rewind.result?.ui as { selector?: string } | undefined)?.selector, "rewind");
+    const snapshots =
+      (rewind.result?.data as { snapshots?: { messageId: string }[] }).snapshots ?? [];
     assert.ok(snapshots.length >= 2, `应有 ≥2 个 checkpoint（实际 ${snapshots.length}）`);
     // rewind 语义 = "restore to the point before you sent this message"：选最新
     // checkpoint（二号）→ fork 后保留一号回合、不含二号。
@@ -339,9 +334,9 @@ realModelTest(
       sessionId: applied.sessionId,
       checkpointId: third.checkpointId,
     });
-    const entry = (
-      changesResult.files as unknown as { path: string; fingerprint: string }[]
-    ).find((file) => file.path.endsWith("matrix-changes.txt"));
+    const entry = (changesResult.files as unknown as { path: string; fingerprint: string }[]).find(
+      (file) => file.path.endsWith("matrix-changes.txt"),
+    );
     assert.ok(entry, `rewind.changes 应列出该文件（实际 ${JSON.stringify(changesResult.files)}）`);
     const restored = await client.request("rewind.restoreFile", {
       workspacePath: workspaceDir,
@@ -397,9 +392,7 @@ realModelTest(
     const answeredTurn = await waitForCondition(
       () =>
         !runtime.running &&
-        reporter
-          .getProjection()
-          .entries.some(({ entry }) => entry.kind === "assistant"),
+        reporter.getProjection().entries.some(({ entry }) => entry.kind === "assistant"),
       180_000,
     );
     assert.ok(answeredTurn, "模型应拿到自由文本回答并完成回合");
@@ -491,9 +484,7 @@ realModelTest(
     assert.ok(notice.sessionScope, "wire 应携带 sessionScope（第三选项渲染依据）");
     const scope = notice.sessionScope as Record<string, unknown>;
     assert.ok(
-      scope["type"] === "all-edits" ||
-        scope["type"] === "file" ||
-        scope["type"] === "directories",
+      scope["type"] === "all-edits" || scope["type"] === "file" || scope["type"] === "directories",
       `编辑类 sessionScope 形状（实际 ${String(scope["type"])}）`,
     );
 

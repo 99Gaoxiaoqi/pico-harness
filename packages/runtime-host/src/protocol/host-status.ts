@@ -1,4 +1,4 @@
-import { invalidProtocolFrame } from './errors.js';
+import { invalidProtocolFrame } from "./errors.js";
 import {
   requireCount,
   requireEncodedByteLimit,
@@ -6,10 +6,10 @@ import {
   requireId,
   requireString,
   requireUtf8String,
-} from './codec.js';
-import { defineOperation } from './operation-spec.js';
+} from "./codec.js";
+import { defineOperation } from "./operation-spec.js";
 
-export type HostLifecycleState = 'starting' | 'containing' | 'recovering' | 'ready' | 'draining';
+export type HostLifecycleState = "starting" | "containing" | "recovering" | "ready" | "draining";
 export type HostStatusInput = Record<string, never>;
 export type HostDiagnosticsInput = Record<string, never>;
 
@@ -38,18 +38,18 @@ export interface HostDiagnosticsResult extends HostStatusResult {
 }
 
 export const HOST_BOOTSTRAP_OPERATION_SPECS = {
-  'host.status': defineOperation({
-    mode: 'query',
-    availability: 'bootstrap',
-    errors: ['host_draining', 'internal_failure'] as const,
-    decodeInput: (value) => decodeEmptyHostInput(value, 'host.status input'),
+  "host.status": defineOperation({
+    mode: "query",
+    availability: "bootstrap",
+    errors: ["host_draining", "internal_failure"] as const,
+    decodeInput: (value) => decodeEmptyHostInput(value, "host.status input"),
     decodeOutput: decodeHostStatusResult,
   }),
-  'host.diagnostics.query': defineOperation({
-    mode: 'query',
-    availability: 'bootstrap',
-    errors: ['host_draining', 'internal_failure'] as const,
-    decodeInput: (value) => decodeEmptyHostInput(value, 'host.diagnostics.query input'),
+  "host.diagnostics.query": defineOperation({
+    mode: "query",
+    availability: "bootstrap",
+    errors: ["host_draining", "internal_failure"] as const,
+    decodeInput: (value) => decodeEmptyHostInput(value, "host.diagnostics.query input"),
     decodeOutput: decodeHostDiagnosticsResult,
   }),
 } as const;
@@ -60,12 +60,12 @@ function decodeEmptyHostInput(value: unknown, label: string): HostStatusInput {
 }
 
 function decodeHostStatusResult(value: unknown): HostStatusResult {
-  const record = requireExactRecord(value, 'host.status result', [
-    'hostEpoch',
-    'state',
-    'connections',
-    'activeOperations',
-    'activeResidencies',
+  const record = requireExactRecord(value, "host.status result", [
+    "hostEpoch",
+    "state",
+    "connections",
+    "activeOperations",
+    "activeResidencies",
   ]);
   return decodeHostStatusFields(record);
 }
@@ -73,42 +73,42 @@ function decodeHostStatusResult(value: unknown): HostStatusResult {
 function decodeHostDiagnosticsResult(value: unknown): HostDiagnosticsResult {
   requireEncodedByteLimit(
     value,
-    'host.diagnostics.query result',
+    "host.diagnostics.query result",
     HOST_DIAGNOSTICS_RESULT_MAX_BYTES,
   );
-  const record = requireExactRecord(value, 'host.diagnostics.query result', [
-    'hostEpoch',
-    'state',
-    'connections',
-    'activeOperations',
-    'activeResidencies',
-    'protocolVersion',
-    'compatibilityEpoch',
-    'pid',
-    'processUptimeSeconds',
-    'nodeVersion',
-    'platform',
-    'arch',
-    'osRelease',
-    'logs',
+  const record = requireExactRecord(value, "host.diagnostics.query result", [
+    "hostEpoch",
+    "state",
+    "connections",
+    "activeOperations",
+    "activeResidencies",
+    "protocolVersion",
+    "compatibilityEpoch",
+    "pid",
+    "processUptimeSeconds",
+    "nodeVersion",
+    "platform",
+    "arch",
+    "osRelease",
+    "logs",
   ]);
   if (!Array.isArray(record.logs) || record.logs.length > HOST_DIAGNOSTIC_LOG_MAX_ENTRIES) {
-    throw invalidProtocolFrame('Invalid Runtime Host diagnostic logs');
+    throw invalidProtocolFrame("Invalid Runtime Host diagnostic logs");
   }
   return {
     ...decodeHostStatusFields(record),
-    protocolVersion: requireCount(record.protocolVersion, 'Runtime Host protocol version'),
-    compatibilityEpoch: requireCount(record.compatibilityEpoch, 'Runtime Host compatibility epoch'),
-    pid: requireCount(record.pid, 'Runtime Host pid'),
-    processUptimeSeconds: requireCount(record.processUptimeSeconds, 'Runtime Host process uptime'),
-    nodeVersion: requireString(record.nodeVersion, 'Runtime Host Node version', 64),
+    protocolVersion: requireCount(record.protocolVersion, "Runtime Host protocol version"),
+    compatibilityEpoch: requireCount(record.compatibilityEpoch, "Runtime Host compatibility epoch"),
+    pid: requireCount(record.pid, "Runtime Host pid"),
+    processUptimeSeconds: requireCount(record.processUptimeSeconds, "Runtime Host process uptime"),
+    nodeVersion: requireString(record.nodeVersion, "Runtime Host Node version", 64),
     platform: requirePlatform(record.platform),
-    arch: requireString(record.arch, 'Runtime Host architecture', 64),
-    osRelease: requireString(record.osRelease, 'Runtime Host OS release', 256),
+    arch: requireString(record.arch, "Runtime Host architecture", 64),
+    osRelease: requireString(record.osRelease, "Runtime Host OS release", 256),
     logs: record.logs.map((entry) =>
       requireUtf8String(
         entry,
-        'Runtime Host diagnostic log entry',
+        "Runtime Host diagnostic log entry",
         HOST_DIAGNOSTIC_LOG_MAX_ENTRY_BYTES,
       ),
     ),
@@ -117,42 +117,42 @@ function decodeHostDiagnosticsResult(value: unknown): HostDiagnosticsResult {
 
 function decodeHostStatusFields(record: Record<string, unknown>): HostStatusResult {
   return {
-    hostEpoch: requireId(record.hostEpoch, 'hostEpoch'),
+    hostEpoch: requireId(record.hostEpoch, "hostEpoch"),
     state: requireHostLifecycleState(record.state),
-    connections: requireCount(record.connections, 'connections'),
-    activeOperations: requireCount(record.activeOperations, 'activeOperations'),
-    activeResidencies: requireCount(record.activeResidencies, 'activeResidencies'),
+    connections: requireCount(record.connections, "connections"),
+    activeOperations: requireCount(record.activeOperations, "activeOperations"),
+    activeResidencies: requireCount(record.activeResidencies, "activeResidencies"),
   };
 }
 
 function requirePlatform(value: unknown): NodeJS.Platform {
   if (
-    value === 'aix' ||
-    value === 'android' ||
-    value === 'darwin' ||
-    value === 'freebsd' ||
-    value === 'haiku' ||
-    value === 'linux' ||
-    value === 'openbsd' ||
-    value === 'sunos' ||
-    value === 'win32' ||
-    value === 'cygwin' ||
-    value === 'netbsd'
+    value === "aix" ||
+    value === "android" ||
+    value === "darwin" ||
+    value === "freebsd" ||
+    value === "haiku" ||
+    value === "linux" ||
+    value === "openbsd" ||
+    value === "sunos" ||
+    value === "win32" ||
+    value === "cygwin" ||
+    value === "netbsd"
   ) {
     return value;
   }
-  throw invalidProtocolFrame('Invalid Runtime Host platform');
+  throw invalidProtocolFrame("Invalid Runtime Host platform");
 }
 
 export function requireHostLifecycleState(value: unknown): HostLifecycleState {
   if (
-    value === 'starting' ||
-    value === 'containing' ||
-    value === 'recovering' ||
-    value === 'ready' ||
-    value === 'draining'
+    value === "starting" ||
+    value === "containing" ||
+    value === "recovering" ||
+    value === "ready" ||
+    value === "draining"
   ) {
     return value;
   }
-  throw invalidProtocolFrame('Invalid Host state');
+  throw invalidProtocolFrame("Invalid Host state");
 }

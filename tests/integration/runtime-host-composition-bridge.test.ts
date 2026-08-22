@@ -153,11 +153,7 @@ test("runtime-host bridge: daemon INVALID_PARAMS maps to invalid_request without
 
   // getUsage rejects from > to with RuntimeProtocolError(INVALID_PARAMS).
   await assert.rejects(
-    connection.requestRegistered(
-      "usage.get",
-      { workspacePath, from: 200, to: 100 },
-      10000,
-    ),
+    connection.requestRegistered("usage.get", { workspacePath, from: 200, to: 100 }, 10000),
     (error: unknown) => {
       assert.ok(error instanceof RuntimeHostOperationError);
       assert.equal(error.operation, "usage.get");
@@ -211,7 +207,11 @@ test("runtime-host bridge: malformed handler output is rejected by spec.decodeOu
   const { connection } = await startBridgeHarness(t, { service: brokenService });
 
   await assert.rejects(
-    connection.requestRegistered("workspace.status", { workspacePath: "/tmp/bridge-broken" }, 10000),
+    connection.requestRegistered(
+      "workspace.status",
+      { workspacePath: "/tmp/bridge-broken" },
+      10000,
+    ),
     (error: unknown) => {
       assert.ok(error instanceof RuntimeHostOperationError);
       assert.equal(error.operation, "workspace.status");

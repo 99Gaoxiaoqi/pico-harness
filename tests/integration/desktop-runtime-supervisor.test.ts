@@ -37,10 +37,7 @@ function createHarness(options?: {
   };
 }
 
-async function waitForCondition(
-  condition: () => boolean,
-  timeoutMs: number,
-): Promise<boolean> {
+async function waitForCondition(condition: () => boolean, timeoutMs: number): Promise<boolean> {
   const deadline = performance.now() + timeoutMs;
   while (!condition()) {
     if (performance.now() > deadline) return false;
@@ -56,7 +53,10 @@ test("runtime supervisor: failures degrade and recovery broadcasts unavailable/r
       throw new Error("daemon dead");
     });
     assert.ok(
-      await waitForCondition(() => harness.events.filter((e) => e === "unavailable").length >= 3, 2000),
+      await waitForCondition(
+        () => harness.events.filter((e) => e === "unavailable").length >= 3,
+        2000,
+      ),
       "3 连败后每个失败 tick 都应广播 unavailable（不去重）",
     );
 
@@ -116,10 +116,7 @@ test("runtime supervisor: sub-threshold failures reset without degrading", async
       }
       return undefined;
     });
-    assert.ok(
-      await waitForCondition(() => failBudget === 0, 2000),
-      "两次失败 tick 应已被消费",
-    );
+    assert.ok(await waitForCondition(() => failBudget === 0, 2000), "两次失败 tick 应已被消费");
     await new Promise((resolve) => setTimeout(resolve, 60));
     assert.deepEqual(harness.events, [], "低于阈值的失败不应触发 unavailable");
   } finally {

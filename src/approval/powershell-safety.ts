@@ -106,7 +106,10 @@ function parseConservativeStatements(command: string): ParsedStatements {
       continue;
     }
     if (isUnsupportedShellCharacter(char)) {
-      return { kind: "unsupported", reason: UNSUPPORTED_CHARACTER_REASONS[char] ?? "包含无法静态确认的 shell 语法" };
+      return {
+        kind: "unsupported",
+        reason: UNSUPPORTED_CHARACTER_REASONS[char] ?? "包含无法静态确认的 shell 语法",
+      };
     }
     if (char === "|" && next === "|") {
       // pwsh 7 管道链 || / &&(条件执行),保守拒绝
@@ -162,7 +165,13 @@ function isUnsupportedShellCharacter(char: string): boolean {
 
 function classifyPipelineSegment(tokens: readonly string[]): PowerShellSafetyClassification {
   const head = tokens[0];
-  if (!head || head.includes("\\") || head.includes("/") || head.includes(":") || head.startsWith("-")) {
+  if (
+    !head ||
+    head.includes("\\") ||
+    head.includes("/") ||
+    head.includes(":") ||
+    head.startsWith("-")
+  ) {
     return { kind: "requires-approval", reason: "无法确认实际执行的命令" };
   }
   const name = head.toLowerCase();

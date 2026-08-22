@@ -109,7 +109,6 @@
 - [ ] T1 前崩溃可安全重启；T1 后 T2 前崩溃判为 indeterminate；T2 后恢复不重复工具副作用。
 - [ ] 多进程竞争只产生一个 successor Attempt 和一个 durable launch。
 - [ ] 独立集成 workspace 通过聚焦测试、全量集成、lint、typecheck、build、Desktop typecheck、
-  `check:storage`、架构检查和真实模型 smoke。
+      `check:storage`、架构检查和真实模型 smoke。
 - [ ] 非作者独立审查无未解决高风险发现。
 - [ ] 更新 `main` 后在最终 commit 再次通过同等级验证。
-

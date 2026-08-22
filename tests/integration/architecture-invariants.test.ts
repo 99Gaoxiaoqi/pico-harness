@@ -38,11 +38,7 @@ test("appendBatch 是 RuntimeEventStore 内唯一写原语", () => {
     "appendPlanOperation",
     "appendGraphOperation",
   ]) {
-    assert.match(
-      store,
-      new RegExp(`\\b${wrapper}\\b`),
-      `${wrapper} 应作为 appendBatch 的包装存在`,
-    );
+    assert.match(store, new RegExp(`\\b${wrapper}\\b`), `${wrapper} 应作为 appendBatch 的包装存在`);
   }
 });
 
@@ -137,7 +133,11 @@ test("D9 正向不变量：连接决策在监督器与共享 client，外壳只�
     "渲染层不得自维护 ConnectionState（决策在监督器与共享 client，展示相位为 AppRuntimePhase）",
   );
   // 正向：监督器提供降级/恢复双相位广播；共享 client 保有唯一重连状态机。
-  assert.match(supervisor, /"unavailable" \| "recovered"/, "监督器应广播 unavailable/recovered 双相位");
+  assert.match(
+    supervisor,
+    /"unavailable" \| "recovered"/,
+    "监督器应广播 unavailable/recovered 双相位",
+  );
   assert.match(daemonClient, /\breconnectAttempt\b/, "共享 client 是全仓唯一重连状态机");
 });
 
@@ -172,7 +172,11 @@ test("D12 正向不变量：transcript 分页算法只在 daemon 服务层，ren
   );
   // 正向：护栏模块存在且只做代数判定；分页/游标算法在 daemon 服务层唯一所在。
   assert.match(tracker, /\bisCurrent\b/, "ConversationLoadTracker 提供过期加载判定");
-  assert.match(daemonTranscript, /\bselectPage\b/, "transcript 分页/游标算法在 daemon 服务层唯一实现");
+  assert.match(
+    daemonTranscript,
+    /\bselectPage\b/,
+    "transcript 分页/游标算法在 daemon 服务层唯一实现",
+  );
 });
 
 test("D14 正向不变量：src/tui 零引擎装配，连接���一经共享 client（3-D Phase 5）", () => {
@@ -183,7 +187,10 @@ test("D14 正向不变量：src/tui 零引擎装配，连接���一经共�
   // （与 Desktop/cron 同一实现，全仓连接状态机数 = 1）。
   const tuiDir = join(repositoryRoot, "src", "tui");
   const tuiSources = readdirSync(tuiDir).filter((name) => /\.(ts|tsx)$/.test(name));
-  assert.ok(tuiSources.length > 40, `src/tui 应有大量模块（实际 ${tuiSources.length}），扫描疑似失效`);
+  assert.ok(
+    tuiSources.length > 40,
+    `src/tui 应有大量模块（实际 ${tuiSources.length}），扫描疑似失效`,
+  );
   // 引擎 wire 契约例外：tool-result-contract 是 transcript 数据形状工厂
   // （投影层合法消费），不是引擎装配。
   const ALLOWED_ENGINE_VALUE_IMPORTS = new Set(["../engine/tool-result-contract.js"]);
@@ -208,5 +215,9 @@ test("D14 正向不变量：src/tui 零引擎装配，连接���一经共�
   }
   // 正向：客户端经共享连接入口（LocalRuntimeClient）接入 kernel。
   const clientRepl = readSource("src/tui/client-repl.tsx");
-  assert.match(clientRepl, /\bLocalRuntimeClient\b/, "客户端壳经共享 LocalRuntimeClient 连接（连接状态机唯一）");
+  assert.match(
+    clientRepl,
+    /\bLocalRuntimeClient\b/,
+    "客户端壳经共享 LocalRuntimeClient 连接（连接状态机唯一）",
+  );
 });

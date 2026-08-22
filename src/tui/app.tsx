@@ -73,7 +73,10 @@ function dbg(workDir: string, msg: string): void {
   if (process.env.TUI_DEBUG) {
     const paths = resolvePicoPaths(workDir);
     mkdirSync(paths.workspace.root, { recursive: true });
-    appendFileSync(join(paths.workspace.root, "tui-debug.log"), `${new Date().toISOString()} ${msg}\n`);
+    appendFileSync(
+      join(paths.workspace.root, "tui-debug.log"),
+      `${new Date().toISOString()} ${msg}\n`,
+    );
   }
 }
 

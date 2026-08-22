@@ -21,13 +21,10 @@ import {
 } from "../../src/runtime/agent-runtime.js";
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 import { createSessionRuntime } from "../../src/runtime/session-runtime.js";
-import {
-  RuntimeEventStorePlanOperationConflictError,
-} from "../../src/storage/runtime-event-store-contracts.js";
+import { RuntimeEventStorePlanOperationConflictError } from "../../src/storage/runtime-event-store-contracts.js";
 import { SubmitPlanTool } from "../../src/tools/plan-exit.js";
 import { buildDefaultToolRegistry } from "../../src/tools/default-registry.js";
 import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
-
 
 /** Windows:分离的后台任务(memory recovery 等)可能短暂持有 pico.sqlite 句柄,
  * 删除临时目录按 EBUSY 有界重试,等待分离 drain 归还 lease。 */

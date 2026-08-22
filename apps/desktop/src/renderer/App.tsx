@@ -420,10 +420,7 @@ function Onboarding() {
               </Button>
             )}
             {selected && (
-              <Link
-                style={{ display: "inline-block", fontSize: 13, marginTop: 8 }}
-                to="/providers"
-              >
+              <Link style={{ display: "inline-block", fontSize: 13, marginTop: 8 }} to="/providers">
                 连接模型（配置 Provider 与 API Key）→
               </Link>
             )}
@@ -529,10 +526,7 @@ function AppShell() {
       const isRunning = data.runs.some(
         (run) => run.sessionId === session.id && !isTerminalRun(run.status),
       );
-      if (
-        isRunning &&
-        !window.confirm("该会话正在运行，归档可能导致运行结果丢失。确认归档？")
-      ) {
+      if (isRunning && !window.confirm("该会话正在运行，归档可能导致运行结果丢失。确认归档？")) {
         return;
       }
       void actions.setSessionArchived(

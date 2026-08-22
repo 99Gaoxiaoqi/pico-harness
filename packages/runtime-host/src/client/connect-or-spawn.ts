@@ -1,28 +1,28 @@
-import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import {
   prepareStorageRootControlDirectory,
   resolveStorageRoot,
-} from '../control/root-authority.js';
-import { performance } from 'node:perf_hooks';
+} from "../control/root-authority.js";
+import { performance } from "node:perf_hooks";
 import {
   requireClientInstanceId,
   validateProtocolRange,
   type ClientSurface,
   type HostIncompatible,
   type ProtocolRange,
-} from '../protocol/index.js';
+} from "../protocol/index.js";
 import {
   connectResolvedRuntimeHost,
   type ConnectRuntimeHostResult,
   type RuntimeHostConnection,
-} from './connection.js';
-import { launchDetachedRuntimeHostCandidate, type CandidateLauncher } from './launcher.js';
+} from "./connection.js";
+import { launchDetachedRuntimeHostCandidate, type CandidateLauncher } from "./launcher.js";
 import {
   isPermanentCandidateStartupFailure,
   type CandidateStartupFailure,
   type CandidateStartupFailureReason,
-} from '../candidate-startup-failure.js';
+} from "../candidate-startup-failure.js";
 
 const DEFAULT_ELECTION_DEADLINE_MS = 45_000;
 const DEFAULT_BACKOFF_MIN_MS = 20;
@@ -72,11 +72,11 @@ const defaultDependencies: ConnectOrSpawnRuntimeHostDependencies = {
 };
 
 export type ConnectOrSpawnRuntimeHostResult =
-  | { kind: 'connected'; connection: RuntimeHostConnection }
-  | { kind: 'incompatible'; handshake: HostIncompatible }
+  | { kind: "connected"; connection: RuntimeHostConnection }
+  | { kind: "incompatible"; handshake: HostIncompatible }
   | {
-      kind: 'failed';
-      reason: 'startup_timeout' | 'host_unresponsive' | CandidateStartupFailureReason;
+      kind: "failed";
+      reason: "startup_timeout" | "host_unresponsive" | CandidateStartupFailureReason;
     };
 
 export async function connectOrSpawnRuntimeHost(
@@ -91,14 +91,14 @@ export async function connectOrSpawnRuntimeHostWithDependencies(
 ): Promise<ConnectOrSpawnRuntimeHostResult> {
   const deadlineMs = input.electionDeadlineMs ?? DEFAULT_ELECTION_DEADLINE_MS;
   if (!Number.isSafeInteger(deadlineMs) || deadlineMs <= 0 || deadlineMs > 120_000) {
-    throw new RangeError('electionDeadlineMs must be an integer between 1 and 120000');
+    throw new RangeError("electionDeadlineMs must be an integer between 1 and 120000");
   }
   validateProtocolRange(input.protocol);
-  requireOptionalTimeout(input.connectTimeoutMs, 'connectTimeoutMs', 1);
-  requireOptionalTimeout(input.handshakeTimeoutMs, 'handshakeTimeoutMs', 1);
-  requireOptionalTimeout(input.operationDeadlineMs, 'operationDeadlineMs', 1);
+  requireOptionalTimeout(input.connectTimeoutMs, "connectTimeoutMs", 1);
+  requireOptionalTimeout(input.handshakeTimeoutMs, "handshakeTimeoutMs", 1);
+  requireOptionalTimeout(input.operationDeadlineMs, "operationDeadlineMs", 1);
   const clientInstanceId = requireClientInstanceId(input.clientInstanceId ?? randomUUID());
-  const capability = await resolveStorageRoot({ path: input.rootPath, kind: 'interactive' });
+  const capability = await resolveStorageRoot({ path: input.rootPath, kind: "interactive" });
   const { controlDirectory } = await prepareStorageRootControlDirectory(capability);
   // Root authority initialization must settle before the bounded election window begins.
   const startedAt = performance.now();
@@ -125,19 +125,19 @@ export async function connectOrSpawnRuntimeHostWithDependencies(
       handshakeTimeoutMs: input.handshakeTimeoutMs,
       electionDeadline: deadline,
     });
-    if (result.kind === 'election_deadline_elapsed') {
+    if (result.kind === "election_deadline_elapsed") {
       if (result.endpointConnected) sawUnresponsiveEndpoint = true;
       break;
     }
-    if (result.kind === 'connected') return { kind: 'connected', connection: result.connection };
-    if (result.kind === 'unavailable' && result.reason === 'handshake_failed') {
+    if (result.kind === "connected") return { kind: "connected", connection: result.connection };
+    if (result.kind === "unavailable" && result.reason === "handshake_failed") {
       sawUnresponsiveEndpoint = true;
     }
     if (isBlockingIncompatibility(result)) {
-      return { kind: 'incompatible', handshake: result.handshake };
+      return { kind: "incompatible", handshake: result.handshake };
     }
     if (isPermanentCandidateStartupFailure(startupFailure) && pendingCandidateReports === 0) {
-      return { kind: 'failed', reason: startupFailure.reason };
+      return { kind: "failed", reason: startupFailure.reason };
     }
 
     const now = performance.now();
@@ -162,8 +162,7 @@ export async function connectOrSpawnRuntimeHostWithDependencies(
             ? {}
             : { legacyConfigurationRoot: input.legacyConfigurationRoot }),
           ...(input.env === undefined ? {} : { env: input.env }),
-          logDirectory:
-            input.candidateLogDirectory ?? join(controlDirectory, 'candidate-logs'),
+          logDirectory: input.candidateLogDirectory ?? join(controlDirectory, "candidate-logs"),
         });
         const attempt = await settleBeforeDeadline(launch.spawned, deadline);
         if (attempt.startupFailure) {
@@ -199,21 +198,21 @@ export async function connectOrSpawnRuntimeHostWithDependencies(
     await sleep(Math.min(remaining, Math.max(1, Math.round(backoffMs * jitter))));
     backoffMs = Math.min(DEFAULT_BACKOFF_MAX_MS, backoffMs * 2);
   }
-  if (startupFailure) return { kind: 'failed', reason: startupFailure.reason };
+  if (startupFailure) return { kind: "failed", reason: startupFailure.reason };
   return {
-    kind: 'failed',
-    reason: sawUnresponsiveEndpoint ? 'host_unresponsive' : 'startup_timeout',
+    kind: "failed",
+    reason: sawUnresponsiveEndpoint ? "host_unresponsive" : "startup_timeout",
   };
 }
 
 function isBlockingIncompatibility(
   result: ConnectRuntimeHostResult,
-): result is Extract<ConnectRuntimeHostResult, { kind: 'incompatible' }> {
-  return result.kind === 'incompatible' && result.handshake.replacement === 'blocked_by_residency';
+): result is Extract<ConnectRuntimeHostResult, { kind: "incompatible" }> {
+  return result.kind === "incompatible" && result.handshake.replacement === "blocked_by_residency";
 }
 
 function shouldLaunchCandidate(result: ConnectRuntimeHostResult): boolean {
-  return result.kind === 'unavailable' || result.kind === 'draining';
+  return result.kind === "unavailable" || result.kind === "draining";
 }
 
 function sleep(ms: number): Promise<void> {
@@ -222,10 +221,10 @@ function sleep(ms: number): Promise<void> {
 
 function settleBeforeDeadline<T>(operation: Promise<T>, deadline: number): Promise<T> {
   const remaining = deadline - performance.now();
-  if (remaining <= 0) return Promise.reject(new Error('Runtime Host election deadline elapsed'));
+  if (remaining <= 0) return Promise.reject(new Error("Runtime Host election deadline elapsed"));
   return new Promise((resolve, reject) => {
     const timer = setTimeout(
-      () => reject(new Error('Runtime Host election deadline elapsed')),
+      () => reject(new Error("Runtime Host election deadline elapsed")),
       remaining,
     );
     operation.then(

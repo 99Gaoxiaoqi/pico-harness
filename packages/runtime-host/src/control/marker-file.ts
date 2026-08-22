@@ -1,13 +1,13 @@
-import { randomUUID } from 'node:crypto';
-import { constants as fsConstants, type BigIntStats } from 'node:fs';
-import { link, lstat, open, unlink } from 'node:fs/promises';
-import { join } from 'node:path';
-import { renameWithRetry } from './rename-with-retry.js';
+import { randomUUID } from "node:crypto";
+import { constants as fsConstants, type BigIntStats } from "node:fs";
+import { link, lstat, open, unlink } from "node:fs/promises";
+import { join } from "node:path";
+import { renameWithRetry } from "./rename-with-retry.js";
 
 export interface MarkerFileHandle {
   stat(options: { bigint: true }): Promise<BigIntStats>;
-  readFile(encoding: 'utf8'): Promise<string>;
-  writeFile(data: string, encoding: 'utf8'): Promise<void>;
+  readFile(encoding: "utf8"): Promise<string>;
+  writeFile(data: string, encoding: "utf8"): Promise<void>;
   sync(): Promise<void>;
   close(): Promise<void>;
 }
@@ -48,7 +48,7 @@ export async function readBoundedMarkerFile(
     ) {
       throw input.invalidFile();
     }
-    return await handle.readFile('utf8');
+    return await handle.readFile("utf8");
   } finally {
     await handle.close();
   }
@@ -59,7 +59,7 @@ export interface PublishMarkerFileInput {
   markerFile: string;
   contents: string;
   maxBytes: number;
-  publication: 'create' | 'replace';
+  publication: "create" | "replace";
   beforePublish?(): Promise<void>;
   invalidFile(): Error;
 }
@@ -67,9 +67,9 @@ export interface PublishMarkerFileInput {
 export async function publishMarkerFile(
   input: PublishMarkerFileInput,
   dependencies: Partial<MarkerFileDependencies> = {},
-): Promise<'published' | 'already_exists'> {
+): Promise<"published" | "already_exists"> {
   const deps = { ...defaultDependencies, ...dependencies };
-  if (Buffer.byteLength(input.contents, 'utf8') > input.maxBytes) {
+  if (Buffer.byteLength(input.contents, "utf8") > input.maxBytes) {
     throw input.invalidFile();
   }
 
@@ -77,10 +77,10 @@ export async function publishMarkerFile(
   const tempPath = join(input.root, `${input.markerFile}.${process.pid}.${deps.randomUUID()}.tmp`);
   let tempCreated = false;
   try {
-    const handle = await deps.open(tempPath, 'wx', 0o600);
+    const handle = await deps.open(tempPath, "wx", 0o600);
     tempCreated = true;
     try {
-      await handle.writeFile(input.contents, 'utf8');
+      await handle.writeFile(input.contents, "utf8");
       await handle.sync();
       await handle.close();
     } catch (error) {
@@ -89,19 +89,19 @@ export async function publishMarkerFile(
     }
 
     await input.beforePublish?.();
-    if (input.publication === 'create') {
+    if (input.publication === "create") {
       try {
         await link(tempPath, markerPath);
       } catch (error) {
-        if (!isNodeError(error, 'EEXIST')) throw error;
-        return 'already_exists';
+        if (!isNodeError(error, "EEXIST")) throw error;
+        return "already_exists";
       }
     } else {
       await renameWithRetry(tempPath, markerPath);
       tempCreated = false;
     }
     await syncDirectory(input.root, deps);
-    return 'published';
+    return "published";
   } finally {
     if (tempCreated) await unlinkIfPresent(tempPath);
   }
@@ -111,13 +111,13 @@ async function unlinkIfPresent(path: string): Promise<void> {
   try {
     await unlink(path);
   } catch (error) {
-    if (!isNodeError(error, 'ENOENT')) throw error;
+    if (!isNodeError(error, "ENOENT")) throw error;
   }
 }
 
 async function syncDirectory(path: string, deps: MarkerFileDependencies): Promise<void> {
-  if (process.platform === 'win32') return;
-  const handle = await deps.open(path, 'r');
+  if (process.platform === "win32") return;
+  const handle = await deps.open(path, "r");
   try {
     await handle.sync();
   } finally {
@@ -126,12 +126,12 @@ async function syncDirectory(path: string, deps: MarkerFileDependencies): Promis
 }
 
 function markerReadFlags(): string | number {
-  if (process.platform === 'win32') return 'r';
+  if (process.platform === "win32") return "r";
   return fsConstants.O_RDONLY | fsConstants.O_NONBLOCK | fsConstants.O_NOFOLLOW;
 }
 
 function isNodeError(error: unknown, code: string): boolean {
   return (
-    error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === code
+    error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code
   );
 }

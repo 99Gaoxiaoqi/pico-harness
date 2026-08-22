@@ -4,7 +4,10 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { sanitizeCommandHookEnvironment, resolveHookShell } from "../../../src/hooks/config/command-shell.js";
+import {
+  sanitizeCommandHookEnvironment,
+  resolveHookShell,
+} from "../../../src/hooks/config/command-shell.js";
 import { DefaultHookExecutor } from "../../../src/hooks/executors/executor.js";
 import type { CommandHookHandler, HookOutput } from "../../../src/hooks/types.js";
 
@@ -35,17 +38,12 @@ test(
     // shell 化后 .cmd 不再被拒绝——命令交给 shell 解释。raw 命令按所选 shell
     // 方言书写（本机无可用 Git Bash 时落 PowerShell，调用运算符为 &）。
     const cmdPath = join(fixture.workspace, "greet.cmd");
-    await writeFile(
-      cmdPath,
-      '@echo {"additionalContext":"windows-cmd"}\r\n',
-    );
+    await writeFile(cmdPath, '@echo {"additionalContext":"windows-cmd"}\r\n');
     const shellKind = resolveHookShell().kind;
     const cmdHandler = {
       type: "command",
       command:
-        shellKind === "pwsh" || shellKind === "powershell"
-          ? `& "${cmdPath}"`
-          : `"${cmdPath}"`,
+        shellKind === "pwsh" || shellKind === "powershell" ? `& "${cmdPath}"` : `"${cmdPath}"`,
     } as const satisfies CommandHookHandler;
     const cmdOutput = await executeStopHook(executor, fixture, cmdHandler, "windows-cmd");
     assert.equal(cmdOutput.additionalContext, "windows-cmd", JSON.stringify(cmdOutput));

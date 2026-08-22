@@ -1,4 +1,4 @@
-import type { Socket } from 'node:net';
+import type { Socket } from "node:net";
 import {
   encodeProtocolFrame,
   ProtocolFrameDecoder,
@@ -6,7 +6,7 @@ import {
   RuntimeHostProtocolError,
   type ClientFrame,
   type HostFrame,
-} from '../protocol/index.js';
+} from "../protocol/index.js";
 
 const MAX_QUEUED_FRAMES = 64;
 const MAX_QUEUED_BYTES = 8 * 1024 * 1024;
@@ -26,16 +26,16 @@ interface ReadWaiter {
 export class RuntimeHostTransportError extends Error {
   constructor(
     readonly code:
-      | 'closed'
-      | 'read_eof'
-      | 'read_timeout'
-      | 'concurrent_read'
-      | 'inbound_queue_full',
+      | "closed"
+      | "read_eof"
+      | "read_timeout"
+      | "concurrent_read"
+      | "inbound_queue_full",
     message: string,
     options?: ErrorOptions,
   ) {
     super(message, options);
-    this.name = 'RuntimeHostTransportError';
+    this.name = "RuntimeHostTransportError";
   }
 }
 
@@ -57,17 +57,17 @@ export class FramedTransport {
     this.closed = new Promise((resolve) => {
       this.#resolveClosed = resolve;
     });
-    socket.on('data', (chunk) =>
-      this.#receive(typeof chunk === 'string' ? Buffer.from(chunk) : chunk),
+    socket.on("data", (chunk) =>
+      this.#receive(typeof chunk === "string" ? Buffer.from(chunk) : chunk),
     );
-    socket.once('end', () => {
+    socket.once("end", () => {
       this.#ended = true;
       this.#drainInbound();
     });
-    socket.once('error', (error) => this.#fail(error));
-    socket.once('close', (hadError) => {
+    socket.once("error", (error) => this.#fail(error));
+    socket.once("close", (hadError) => {
       if (!this.#readTerminal || hadError) {
-        this.#fail(new RuntimeHostTransportError('closed', 'Runtime Host transport closed'));
+        this.#fail(new RuntimeHostTransportError("closed", "Runtime Host transport closed"));
       }
       this.#resolveClosed();
     });
@@ -84,8 +84,8 @@ export class FramedTransport {
     if (this.#readTerminal) throw this.#readTerminal;
     if (this.#waiter) {
       throw new RuntimeHostTransportError(
-        'concurrent_read',
-        'Only one Runtime Host frame read may be pending',
+        "concurrent_read",
+        "Only one Runtime Host frame read may be pending",
       );
     }
     return new Promise((resolve, reject) => {
@@ -94,8 +94,8 @@ export class FramedTransport {
         waiter.timer = setTimeout(() => {
           if (this.#waiter !== waiter) return;
           const error = new RuntimeHostTransportError(
-            'read_timeout',
-            'Timed out waiting for Runtime Host frame',
+            "read_timeout",
+            "Timed out waiting for Runtime Host frame",
           );
           this.#fail(error);
           this.socket.destroy();
@@ -151,8 +151,8 @@ export class FramedTransport {
         if (newline === -1) {
           if (this.#buffered.byteLength > RUNTIME_HOST_MAX_FRAME_BYTES) {
             throw new RuntimeHostProtocolError(
-              'frame_too_large',
-              'Runtime Host frame exceeds the byte limit',
+              "frame_too_large",
+              "Runtime Host frame exceeds the byte limit",
             );
           }
           break;
@@ -169,7 +169,7 @@ export class FramedTransport {
         this.#buffered = this.#buffered.subarray(encodedBytes);
         const frames = this.#decoder.push(encoded);
         if (frames.length !== 1) {
-          throw new Error('Runtime Host decoder did not produce one complete frame');
+          throw new Error("Runtime Host decoder did not produce one complete frame");
         }
         this.#deliver(frames[0], encodedBytes);
       }
@@ -222,8 +222,8 @@ export class FramedTransport {
   #failInboundOverflow(): void {
     this.#fail(
       new RuntimeHostTransportError(
-        'inbound_queue_full',
-        'Runtime Host inbound byte buffer is full',
+        "inbound_queue_full",
+        "Runtime Host inbound byte buffer is full",
       ),
     );
     this.socket.destroy();
@@ -232,8 +232,8 @@ export class FramedTransport {
   #endRead(): void {
     if (this.#readTerminal || this.#failure) return;
     this.#readTerminal = new RuntimeHostTransportError(
-      'read_eof',
-      'Runtime Host transport read side ended',
+      "read_eof",
+      "Runtime Host transport read side ended",
     );
     if (!this.#waiter) return;
     const waiter = this.#waiter;
@@ -255,5 +255,5 @@ export class FramedTransport {
 
 function asError(error: unknown): Error {
   if (error instanceof Error) return error;
-  return new RuntimeHostProtocolError('invalid_frame', String(error));
+  return new RuntimeHostProtocolError("invalid_frame", String(error));
 }

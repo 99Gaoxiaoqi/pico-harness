@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,9 +17,7 @@ import {
   normalizeWorkspacePath,
 } from "../../src/daemon/desktop-conversation-state.js";
 import { closeAllOperationalDatabasesForTest } from "../../src/storage/sqlite/sqlite-database.js";
-import {
-  SqliteDesktopConversationStateStore,
-} from "../../src/storage/sqlite/sqlite-desktop-conversation-state-store.js";
+import { SqliteDesktopConversationStateStore } from "../../src/storage/sqlite/sqlite-desktop-conversation-state-store.js";
 import {
   resolveWorkspaceSqliteStorageRoot,
   withWorkspaceSqliteLease,
@@ -369,8 +375,8 @@ test("sqlite conversation state: isolation never overwrites a previous .failed c
       "previous isolated copy",
       "existing .failed copy must be preserved",
     );
-    const timestamped = readdirSync(join(fixture.picoHome, "desktop")).filter((name) =>
-      /\.failed$/u.test(name) && name !== "conversation-state.json.failed",
+    const timestamped = readdirSync(join(fixture.picoHome, "desktop")).filter(
+      (name) => /\.failed$/u.test(name) && name !== "conversation-state.json.failed",
     );
     assert.equal(timestamped.length, 1, "new isolation goes to a timestamped suffix");
   } finally {

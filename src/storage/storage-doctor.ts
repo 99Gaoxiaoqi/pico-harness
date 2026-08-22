@@ -11,12 +11,13 @@ import {
 } from "./operation-journal.js";
 import { canonicalizeWorkspacePath, resolvePicoPaths } from "../paths/pico-paths.js";
 import type { WorkspaceId } from "../paths/pico-paths.js";
-import {
-  SqliteRuntimeEventStore,
-} from "./sqlite/sqlite-runtime-event-store.js";
+import { SqliteRuntimeEventStore } from "./sqlite/sqlite-runtime-event-store.js";
 import type { RuntimeSessionManifest } from "./runtime-event-store-contracts.js";
 import { SqliteTaskRunStore } from "./sqlite/sqlite-task-run-store.js";
-import { operationalDatabasePath, openOperationalDatabaseReadOnly } from "./sqlite/sqlite-database.js";
+import {
+  operationalDatabasePath,
+  openOperationalDatabaseReadOnly,
+} from "./sqlite/sqlite-database.js";
 import { assertCurrentOperationalTargetSchemaSync } from "./sqlite/sqlite-schema.js";
 import { ALL_WORKSPACE_SQLITE_SCOPES } from "./sqlite/workspace-scopes.js";
 import { withWorkspaceBindingScope } from "./sqlite/sqlite-workspace-storage.js";
@@ -178,9 +179,7 @@ export class StorageDoctor {
     findings.sort(compareFindings);
     return {
       scannedAt: this.now().toISOString(),
-      healthy: !findings.some(
-        (item) => item.severity === "error" || item.severity === "critical",
-      ),
+      healthy: !findings.some((item) => item.severity === "error" || item.severity === "critical"),
       findings,
       scanned,
     };
@@ -246,12 +245,12 @@ export class StorageDoctor {
     if (!existsSync(operationalDatabasePath(this.runtimeStorageRoot))) return;
     scanned.runtime++;
     const databasePath = operationalDatabasePath(this.runtimeStorageRoot);
-    await this.scanPrivateModes(this.runtimeStorageRoot, "runtime", findings, new Set([
-      "evidence",
-      "traces",
-      "fork-staging",
-      "agent-recovery-launch-intents",
-    ]));
+    await this.scanPrivateModes(
+      this.runtimeStorageRoot,
+      "runtime",
+      findings,
+      new Set(["evidence", "traces", "fork-staging", "agent-recovery-launch-intents"]),
+    );
 
     let database: ReturnType<typeof openOperationalDatabaseReadOnly> | undefined;
     try {

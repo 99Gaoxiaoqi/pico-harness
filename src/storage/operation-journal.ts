@@ -399,9 +399,7 @@ function requireOperationLocked(database: DatabaseSync, operationId: string): St
   return current;
 }
 
-function listOperationsLocked(
-  statement: { all(): unknown[] },
-): StorageOperation[] {
+function listOperationsLocked(statement: { all(): unknown[] }): StorageOperation[] {
   const rows = statement.all() as Array<{ operation_json?: unknown }>;
   return rows.map((row, index) => parseOperationRow(row.operation_json, `row #${index + 1}`));
 }
@@ -411,9 +409,7 @@ function parseOperationRow(value: unknown, identity: string): StorageOperation {
     typeof value === "string" ? (JSON.parse(value) as unknown) : undefined,
   );
   if (!parsed) {
-    throw new FileStorageIntegrityError(
-      `Storage operation journal row is malformed: ${identity}`,
-    );
+    throw new FileStorageIntegrityError(`Storage operation journal row is malformed: ${identity}`);
   }
   return parsed;
 }

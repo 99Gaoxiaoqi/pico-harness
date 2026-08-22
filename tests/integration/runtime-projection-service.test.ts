@@ -365,17 +365,17 @@ test("RuntimeProjectionService propagates underlying projection failures", async
   const service = new RuntimeProjectionService(store);
   await assert.rejects(
     () => service.getSessionView(SESSION_ID),
-    /tool result|tool-call batch|preceding tool-call batch/ui,
+    /tool result|tool-call batch|preceding tool-call batch/iu,
     "getSessionView must surface assertToolCallPairing failures",
   );
   await assert.rejects(
     () => service.getMessages(SESSION_ID),
-    /tool result|tool-call batch|preceding tool-call batch/ui,
+    /tool result|tool-call batch|preceding tool-call batch/iu,
     "getMessages must surface assertToolCallPairing failures",
   );
   await assert.rejects(
     () => service.getMessageEntries(SESSION_ID),
-    /tool result|tool-call batch|preceding tool-call batch/ui,
+    /tool result|tool-call batch|preceding tool-call batch/iu,
     "getMessageEntries must surface assertToolCallPairing failures",
   );
   store.close();

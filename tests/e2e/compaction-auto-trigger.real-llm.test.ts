@@ -56,7 +56,9 @@ function resolveProviderConfig(): ProviderConfig {
  * 构造一段长 history,内嵌一个唯一 marker,模拟"已有多轮对话、接近上下文窗口"的场景。
  * history 足够长(每条带 padding)让 8000 token 预算的第一轮就超 85% 水位。
  */
-function buildLongHistoryWithMarker(marker: string): import("../../src/schema/message.js").Message[] {
+function buildLongHistoryWithMarker(
+  marker: string,
+): import("../../src/schema/message.js").Message[] {
   // padding 需足够长让 8 条 history 总 token 超 5059(inputBudget 5952 的 85% 水位)。
   // 实测中文 BPE 约 3.3 字/token(repeat(60) 每条约 366 token),需 repeat(200) 才稳妥超水位。
   const padding = "历史对话填充内容用于模拟接近上下文窗口的长会话。".repeat(200);
@@ -146,7 +148,9 @@ autoTest(
       console.log(`摘要包含 marker: ${summaryMsg.content.includes(marker)}`);
     }
     console.log(`response 条数: ${response.length}`);
-    console.log(`最后一条 role: ${response.at(-1)?.role}, content 长度: ${response.at(-1)?.content?.length ?? 0}`);
+    console.log(
+      `最后一条 role: ${response.at(-1)?.role}, content 长度: ${response.at(-1)?.content?.length ?? 0}`,
+    );
     console.log(`\n=== 模型响应 ===\n${response.at(-1)?.content?.slice(0, 500)}\n`);
 
     // 核心断言 1:压缩应该被触发(history 被缩短或出现摘要标记)
@@ -157,11 +161,7 @@ autoTest(
 
     // 核心断言 2:压缩摘要保留了 marker(信息保真度)
     assert.ok(summaryMsg, "应存在压缩摘要消息");
-    assert.match(
-      summaryMsg.content,
-      new RegExp(marker, "u"),
-      `压缩摘要应保留 marker ${marker}`,
-    );
+    assert.match(summaryMsg.content, new RegExp(marker, "u"), `压缩摘要应保留 marker ${marker}`);
 
     // 附加验证:模型回复(如果非空,检查是否提到 marker;空回复不阻断——压缩本身已验证)
     const responseText = response.at(-1)?.content ?? "";
@@ -204,7 +204,10 @@ autoTest(
 
     const padding = "历史填充内容用于模拟长会话以触发压缩水位。".repeat(80);
     for (let i = 0; i < 6; i++) {
-      session.commitMessages({ role: i % 2 === 0 ? "user" : "assistant", content: `msg ${i} ${padding}` });
+      session.commitMessages({
+        role: i % 2 === 0 ? "user" : "assistant",
+        content: `msg ${i} ${padding}`,
+      });
     }
 
     const engine = new AgentEngine({

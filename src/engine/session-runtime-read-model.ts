@@ -1,10 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Message, ToolCall } from "../schema/message.js";
 import type { RuntimeCheckpointRecordedEvent, RuntimeEvent } from "./session-runtime-event.js";
-import {
-  claimKindForEvent,
-  projectRuntimeModelMessage,
-} from "./runtime-model-message.js";
+import { claimKindForEvent, projectRuntimeModelMessage } from "./runtime-model-message.js";
 import {
   computeCheckpointSourceDigest,
   CONTENT_DIGEST_V1_PREFIX,
@@ -92,11 +89,9 @@ export function applyModelHistoryByteBudget(
   if (!Number.isSafeInteger(options.maxTotalBytes) || options.maxTotalBytes < 1) {
     throw new Error("Model history byte budget requires a positive safe integer maxTotalBytes");
   }
-  const preservedTailMessages = options.preservedTailMessages ?? MODEL_HISTORY_PRESERVED_TAIL_MESSAGES;
-  if (
-    !Number.isSafeInteger(preservedTailMessages) ||
-    preservedTailMessages < 0
-  ) {
+  const preservedTailMessages =
+    options.preservedTailMessages ?? MODEL_HISTORY_PRESERVED_TAIL_MESSAGES;
+  if (!Number.isSafeInteger(preservedTailMessages) || preservedTailMessages < 0) {
     throw new Error("Model history byte budget requires a non-negative preservedTailMessages");
   }
   const sizes = entries.map(({ message }) => messageBytes(message));
@@ -111,7 +106,8 @@ export function applyModelHistoryByteBudget(
     const entry = budgeted[index]!;
     const marker = degradedHistoryContentMarker(entry.message, entry.eventId, originalBytes);
     budgeted[index] = { eventId: entry.eventId, message: { ...entry.message, content: marker } };
-    totalBytes += Buffer.byteLength(marker, "utf8") - Buffer.byteLength(entry.message.content, "utf8");
+    totalBytes +=
+      Buffer.byteLength(marker, "utf8") - Buffer.byteLength(entry.message.content, "utf8");
   }
   return budgeted;
 }
@@ -160,7 +156,9 @@ export function materializeRuntimeHistoryEntries(
  * 带诊断的投影入口。hard 诊断仍 throw（fail-closed 不变）；soft 诊断收集到结果里。
  * 这是新增的主投影函数，其余三个旧函数委托它、签名不变——现有消费者零改动。
  */
-export function materializeRuntimeHistoryProjection(events: readonly RuntimeEvent[]): RuntimeHistoryProjection {
+export function materializeRuntimeHistoryProjection(
+  events: readonly RuntimeEvent[],
+): RuntimeHistoryProjection {
   const diagnostics: RuntimeProjectionDiagnostic[] = [];
   const eventIndexes = new Map<string, number>();
   for (const [eventIndex, event] of events.entries()) {
@@ -183,7 +181,10 @@ function materializePrefix(
   events: readonly RuntimeEvent[],
   endExclusive: number,
   eventIndexes: ReadonlyMap<string, number>,
-): { projected: RuntimeHistoryProjectionEntry[]; prefixDiagnostics: RuntimeProjectionDiagnostic[] } {
+): {
+  projected: RuntimeHistoryProjectionEntry[];
+  prefixDiagnostics: RuntimeProjectionDiagnostic[];
+} {
   const prefixDiagnostics: RuntimeProjectionDiagnostic[] = [];
   const projected: RuntimeHistoryProjectionEntry[] = [];
   for (let eventIndex = 0; eventIndex < endExclusive; eventIndex++) {
@@ -214,7 +215,11 @@ function materializePrefix(
       if (event.visibility !== "model") {
         // transcript/internal 可见度的 message 事件不进 model 投影（control 语义）
         prefixDiagnostics.push(
-          makeDiagnostic("unclaimed_control_fact", event.eventId, `${event.kind} visibility=${event.visibility}`),
+          makeDiagnostic(
+            "unclaimed_control_fact",
+            event.eventId,
+            `${event.kind} visibility=${event.visibility}`,
+          ),
         );
         continue;
       }
@@ -227,9 +232,7 @@ function materializePrefix(
       projected.push({ eventId: event.eventId, message: cloneMessage(message) });
     } else {
       // claim === "control"：控制事实无 chat 行是正常的，产 soft 诊断
-      prefixDiagnostics.push(
-        makeDiagnostic("unclaimed_control_fact", event.eventId, event.kind),
-      );
+      prefixDiagnostics.push(makeDiagnostic("unclaimed_control_fact", event.eventId, event.kind));
     }
   }
   return { projected, prefixDiagnostics };
@@ -253,11 +256,10 @@ function replaceProjectedPrefixWithCheckpoint(
   const storedDigest = checkpoint.data.sourceDigest;
   const recomputedDigest = storedDigest.startsWith(CONTENT_DIGEST_V1_PREFIX)
     ? computeCheckpointSourceDigest(covered)
-    : createHash("sha256").update(covered.map(({ eventId }) => eventId).join("\n")).digest("hex");
-  if (
-    checkpoint.data.coveredEventCount !== covered.length ||
-    storedDigest !== recomputedDigest
-  ) {
+    : createHash("sha256")
+        .update(covered.map(({ eventId }) => eventId).join("\n"))
+        .digest("hex");
+  if (checkpoint.data.coveredEventCount !== covered.length || storedDigest !== recomputedDigest) {
     throw new RuntimeEventReadModelIntegrityError(
       `Runtime checkpoint ${checkpoint.eventId} does not match its covered model prefix`,
     );

@@ -65,7 +65,9 @@ export type PicoDaemonCandidateResult =
  * 成对），以及无参自举（旧 LaunchAgent / 手动 `node main.js`）——后者以 canonical
  * PICO_HOME 为交互根推导一切。
  */
-export function parsePicoDaemonCandidateArguments(args: readonly string[]): PicoDaemonCandidateOptions {
+export function parsePicoDaemonCandidateArguments(
+  args: readonly string[],
+): PicoDaemonCandidateOptions {
   if (args.length === 0) {
     const rootPath = resolveCanonicalPicoHome();
     return { rootPath };
@@ -199,10 +201,7 @@ async function createPicoDaemonComposition(
         await daemonHost.stop();
         await legacyLock.release();
       } catch (error) {
-        logger.error(
-          { error },
-          "Pico daemon candidate 关停失败，保留升级守卫锁（fail-closed）",
-        );
+        logger.error({ error }, "Pico daemon candidate 关停失败，保留升级守卫锁（fail-closed）");
         throw error;
       } finally {
         // 无论成败都放掉常驻 residency：成功路径让 kernel 完成收尾；失败路径也已

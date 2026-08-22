@@ -16,10 +16,7 @@ import test from "node:test";
 import type { Message } from "../../src/schema/message.js";
 import { Session } from "../../src/engine/session.js";
 import { RuntimeRun } from "../../src/runtime/runtime-run.js";
-import type {
-  EngineRuntimePort,
-  EngineRuntimeRun,
-} from "../../src/engine/runtime-port.js";
+import type { EngineRuntimePort, EngineRuntimeRun } from "../../src/engine/runtime-port.js";
 import type {
   AppendRuntimeEventBatchOptions,
   RuntimeEventStoreAppendResult,

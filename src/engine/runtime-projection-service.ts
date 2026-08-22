@@ -100,10 +100,7 @@ export class RuntimeProjectionService {
    * - checkpoint 默认/true: materializeRuntimeHistory(events)
    * - checkpoint === false: projectRuntimeSessionMessages(events)
    */
-  async getMessages(
-    sessionId: string,
-    options?: GetMessagesOptions,
-  ): Promise<Message[]> {
+  async getMessages(sessionId: string, options?: GetMessagesOptions): Promise<Message[]> {
     const events = await this.readEventsOfKinds(
       sessionId,
       options?.checkpoint === false
@@ -121,9 +118,7 @@ export class RuntimeProjectionService {
    *
    * 等价于：materializeRuntimeHistoryEntries(events)。
    */
-  async getMessageEntries(
-    sessionId: string,
-  ): Promise<RuntimeHistoryProjectionEntry[]> {
+  async getMessageEntries(sessionId: string): Promise<RuntimeHistoryProjectionEntry[]> {
     const events = await this.readEventsOfKinds(sessionId, RUNTIME_HISTORY_EVENT_KINDS);
     return materializeRuntimeHistoryEntries(events);
   }
@@ -153,9 +148,7 @@ export class RuntimeProjectionService {
    *
    * 等价于：projectRuntimeSessionTranscriptEventEntries(entries)。
    */
-  async getTranscriptEntries(
-    sessionId: string,
-  ): Promise<RuntimeSessionTranscriptEventEntry[]> {
+  async getTranscriptEntries(sessionId: string): Promise<RuntimeSessionTranscriptEventEntry[]> {
     const entries = await this.readSequencedEntries(
       sessionId,
       RUNTIME_SESSION_TRANSCRIPT_EVENT_KINDS,
@@ -168,9 +161,7 @@ export class RuntimeProjectionService {
    *
    * 等价于：projectRuntimeSessionSequencedMessageEntries(entries)。
    */
-  async getSequencedMessages(
-    sessionId: string,
-  ): Promise<RuntimeSessionSequencedMessageEntry[]> {
+  async getSequencedMessages(sessionId: string): Promise<RuntimeSessionSequencedMessageEntry[]> {
     const entries = await this.readSequencedEntries(sessionId, RUNTIME_MODEL_MESSAGE_EVENT_KINDS);
     return projectRuntimeSessionSequencedMessageEntries(entries);
   }
@@ -210,8 +201,6 @@ export class RuntimeProjectionService {
     sessionId: string,
     kinds: readonly string[],
   ): Promise<readonly SequencedRuntimeEvent[]> {
-    return this.store.readSessionEntriesOfKinds(sessionId, kinds).then(
-      ({ entries }) => entries,
-    );
+    return this.store.readSessionEntriesOfKinds(sessionId, kinds).then(({ entries }) => entries);
   }
 }
