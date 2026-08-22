@@ -649,6 +649,12 @@ export class SqliteMemoryRepository implements MemoryRepositoryContract {
   }
 
   listPendingProposalsForSources(sourceIds: readonly string[]): Proposal[] {
+    return this.listProposalsForSources(sourceIds).filter(
+      (proposal) => proposal.status === "pending",
+    );
+  }
+
+  listProposalsForSources(sourceIds: readonly string[]): Proposal[] {
     if (sourceIds.length === 0) return [];
     if (sourceIds.length > MAX_LIST_LIMIT) {
       throw new Error(`sourceIds cannot exceed ${MAX_LIST_LIMIT}`);
@@ -657,7 +663,7 @@ export class SqliteMemoryRepository implements MemoryRepositoryContract {
     return this.read(() =>
       this.allRows(
         `SELECT * FROM memory_proposals
-         WHERE status = 'pending' AND source_id IN (${placeholders(normalized.length)})
+         WHERE status <> 'deleted' AND source_id IN (${placeholders(normalized.length)})
          ORDER BY proposal_id`,
         ...normalized,
       ).map((row) => rowToProposal(row, this.workspaceId)),
