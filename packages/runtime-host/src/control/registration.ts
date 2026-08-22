@@ -1,20 +1,20 @@
-import { randomUUID } from 'node:crypto';
-import { chmod, lstat, open, readFile, unlink } from 'node:fs/promises';
-import { join } from 'node:path';
-import { decodeHostRegistration, type HostRegistration } from '../protocol/index.js';
-import { renameWithRetry } from './rename-with-retry.js';
+import { randomUUID } from "node:crypto";
+import { chmod, lstat, open, readFile, unlink } from "node:fs/promises";
+import { join } from "node:path";
+import { decodeHostRegistration, type HostRegistration } from "../protocol/index.js";
+import { renameWithRetry } from "./rename-with-retry.js";
 
-export const RUNTIME_HOST_REGISTRATION_FILE = 'registration.json';
+export const RUNTIME_HOST_REGISTRATION_FILE = "registration.json";
 const MAX_REGISTRATION_BYTES = 16 * 1024;
 
 export class RuntimeHostRegistrationError extends Error {
   constructor(
-    readonly code: 'invalid_registration' | 'registration_io_failed',
+    readonly code: "invalid_registration" | "registration_io_failed",
     message: string,
     options?: ErrorOptions,
   ) {
     super(message, options);
-    this.name = 'RuntimeHostRegistrationError';
+    this.name = "RuntimeHostRegistrationError";
   }
 }
 
@@ -27,17 +27,17 @@ export async function readHostRegistration(
     const registrationStat = await lstat(path);
     if (!registrationStat.isFile() || registrationStat.size > MAX_REGISTRATION_BYTES) {
       throw new RuntimeHostRegistrationError(
-        'invalid_registration',
-        'Runtime Host registration must be a bounded regular file',
+        "invalid_registration",
+        "Runtime Host registration must be a bounded regular file",
       );
     }
-    contents = await readFile(path, 'utf8');
+    contents = await readFile(path, "utf8");
   } catch (error) {
-    if (isNodeError(error, 'ENOENT')) return undefined;
+    if (isNodeError(error, "ENOENT")) return undefined;
     if (error instanceof RuntimeHostRegistrationError) throw error;
     throw new RuntimeHostRegistrationError(
-      'registration_io_failed',
-      'Unable to read Runtime Host registration',
+      "registration_io_failed",
+      "Unable to read Runtime Host registration",
       { cause: error },
     );
   }
@@ -45,8 +45,8 @@ export async function readHostRegistration(
     return decodeHostRegistration(JSON.parse(contents) as unknown);
   } catch (error) {
     throw new RuntimeHostRegistrationError(
-      'invalid_registration',
-      'Runtime Host registration is invalid',
+      "invalid_registration",
+      "Runtime Host registration is invalid",
       { cause: error },
     );
   }
@@ -64,9 +64,9 @@ export async function writeHostRegistration(
   );
   let replaced = false;
   try {
-    const handle = await open(tempPath, 'wx', 0o600);
+    const handle = await open(tempPath, "wx", 0o600);
     try {
-      await handle.writeFile(`${JSON.stringify(canonical)}\n`, 'utf8');
+      await handle.writeFile(`${JSON.stringify(canonical)}\n`, "utf8");
       await handle.sync();
     } finally {
       await handle.close();
@@ -92,14 +92,14 @@ export async function removeHostRegistration(
   }
   if (current?.hostEpoch !== hostEpoch) return;
   await unlink(join(controlDirectory, RUNTIME_HOST_REGISTRATION_FILE)).catch((error: unknown) => {
-    if (!isNodeError(error, 'ENOENT')) throw error;
+    if (!isNodeError(error, "ENOENT")) throw error;
   });
   await syncDirectory(controlDirectory);
 }
 
 async function syncDirectory(path: string): Promise<void> {
-  if (process.platform === 'win32') return;
-  const handle = await open(path, 'r').catch(() => undefined);
+  if (process.platform === "win32") return;
+  const handle = await open(path, "r").catch(() => undefined);
   if (!handle) return;
   try {
     await handle.sync().catch(() => undefined);
@@ -110,6 +110,6 @@ async function syncDirectory(path: string): Promise<void> {
 
 function isNodeError(error: unknown, code: string): boolean {
   return (
-    error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === code
+    error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code
   );
 }

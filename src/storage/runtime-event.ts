@@ -225,7 +225,9 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
         value["data"]["toolNames"].length === 0 ||
         value["data"]["toolNames"].some((name) => typeof name !== "string")
       ) {
-        throw new RuntimeEventIntegrityError("Runtime tool.group.loaded toolNames is invalid or empty");
+        throw new RuntimeEventIntegrityError(
+          "Runtime tool.group.loaded toolNames is invalid or empty",
+        );
       }
       return;
     case "tool.result.recorded":
@@ -412,7 +414,9 @@ function assertGraphEventData(kind: string, data: unknown): void {
         (!Array.isArray(data["resultRecordIds"]) ||
           !data["resultRecordIds"].every(isNonEmptyString))
       ) {
-        throw new RuntimeEventIntegrityError("Graph closed resultRecordIds must be an array of strings");
+        throw new RuntimeEventIntegrityError(
+          "Graph closed resultRecordIds must be an array of strings",
+        );
       }
       return;
     default:

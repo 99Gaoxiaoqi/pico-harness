@@ -336,7 +336,12 @@ export class GoalManager {
       return;
     }
     const hash = createHash("md5")
-      .update(toolCalls.map((tc) => `${tc.name}:${tc.arguments}`).sort().join("|"))
+      .update(
+        toolCalls
+          .map((tc) => `${tc.name}:${tc.arguments}`)
+          .sort()
+          .join("|"),
+      )
       .digest("hex");
     if (hash === active.lastToolCallHash) {
       active.consecutiveNoProgress = (active.consecutiveNoProgress ?? 0) + 1;

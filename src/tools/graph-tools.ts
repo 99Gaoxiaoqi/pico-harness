@@ -7,9 +7,16 @@ import {
   type GraphProjection,
   type GraphWork,
 } from "../graph/contract.js";
-import { computeReadyWorks, hasPendingWorks, missingInputIdsFor } from "../graph/graph-reconcile.js";
+import {
+  computeReadyWorks,
+  hasPendingWorks,
+  missingInputIdsFor,
+} from "../graph/graph-reconcile.js";
 import { GRAPH_EVENT_KINDS, projectGraphEntries } from "../graph/graph-reducer.js";
-import { RUNTIME_EVENT_SCHEMA_VERSION, type RuntimeEvent } from "../engine/session-runtime-event.js";
+import {
+  RUNTIME_EVENT_SCHEMA_VERSION,
+  type RuntimeEvent,
+} from "../engine/session-runtime-event.js";
 import type { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 import type { ToolDefinition } from "../schema/message.js";
 import { ToolAccesses } from "./tool-access.js";
@@ -66,7 +73,12 @@ export type GraphWorkDispatcher = (input: {
  * invocation/run/turn metadata so events remain consistent with the active
  * RuntimeRun; the store asserts these are stable on append.
  */
-function graphBaseEvent(context: GraphToolContext, operationId: string, suffix: string, at: string) {
+function graphBaseEvent(
+  context: GraphToolContext,
+  operationId: string,
+  suffix: string,
+  at: string,
+) {
   return {
     schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
     eventId: `graph:${operationId}:${suffix}`,
@@ -82,10 +94,7 @@ function graphBaseEvent(context: GraphToolContext, operationId: string, suffix: 
 
 async function readGraphProjection(context: GraphToolContext): Promise<GraphProjection> {
   // graph.* 事件切片 + 全会话水位(票 04):折叠输入只含 graph 事件。
-  const slice = await context.store.readSessionEntriesOfKinds(
-    context.sessionId,
-    GRAPH_EVENT_KINDS,
-  );
+  const slice = await context.store.readSessionEntriesOfKinds(context.sessionId, GRAPH_EVENT_KINDS);
   return projectGraphEntries(context.graphId, slice.entries, slice.headSequence);
 }
 
@@ -231,8 +240,7 @@ export class AddWorkTool implements BaseTool {
         ...(missingInputIds.length > 0
           ? {
               missingInputIds,
-              hint:
-                "input_ids 引用了尚未产出的 recordId。若引用的是 workId 或已失败的上游，该工作将永远不会就绪；用 view_graph 核对 recordId 后再声明。",
+              hint: "input_ids 引用了尚未产出的 recordId。若引用的是 workId 或已失败的上游，该工作将永远不会就绪；用 view_graph 核对 recordId 后再声明。",
             }
           : {}),
         graphId: this.context.graphId,
@@ -377,15 +385,17 @@ export class CloseGraphTool implements BaseTool {
     const parsed = parseCloseGraphArgs(args);
     const projection = await readGraphProjection(this.context);
     if (projection.status === "closed") {
-      return JSON.stringify({ graphId: this.context.graphId, status: "closed", alreadyClosed: true });
+      return JSON.stringify({
+        graphId: this.context.graphId,
+        status: "closed",
+        alreadyClosed: true,
+      });
     }
     if (parsed.result_record_ids) {
       const known = new Set(projection.records.map((record) => record.recordId));
       const missing = parsed.result_record_ids.filter((id) => !known.has(id));
       if (missing.length > 0) {
-        throw new GraphConflictError(
-          `close_graph 引用了未知记录: ${missing.join(", ")}`,
-        );
+        throw new GraphConflictError(`close_graph 引用了未知记录: ${missing.join(", ")}`);
       }
     }
     const operationId = parsed.operationId ?? `close-graph:${this.context.graphId}:${randomUUID()}`;
@@ -401,9 +411,7 @@ export class CloseGraphTool implements BaseTool {
         operationId,
         fingerprint,
         graphId: this.context.graphId,
-        ...(parsed.result_record_ids
-          ? { resultRecordIds: [...parsed.result_record_ids] }
-          : {}),
+        ...(parsed.result_record_ids ? { resultRecordIds: [...parsed.result_record_ids] } : {}),
       },
     };
     await this.context.store.appendGraphOperation([event], {
@@ -512,9 +520,7 @@ function parseCloseGraphArgs(args: string): CloseGraphArgs {
     throw new Error("close_graph result_record_ids 必须是字符串数组");
   }
   return {
-    ...(Array.isArray(resultRecordIds)
-      ? { result_record_ids: resultRecordIds as string[] }
-      : {}),
+    ...(Array.isArray(resultRecordIds) ? { result_record_ids: resultRecordIds as string[] } : {}),
     ...(typeof value["operationId"] === "string" ? { operationId: value["operationId"] } : {}),
   };
 }
@@ -543,10 +549,7 @@ function renderGraphProjection(
   return result;
 }
 
-function renderGraphWork(
-  projection: GraphProjection,
-  work: GraphWork,
-): Record<string, unknown> {
+function renderGraphWork(projection: GraphProjection, work: GraphWork): Record<string, unknown> {
   const missingInputIds = missingInputIdsFor(projection, work);
   return {
     workId: work.workId,
@@ -559,8 +562,7 @@ function renderGraphWork(
     ...(missingInputIds.length > 0
       ? {
           missingInputIds,
-          hint:
-            "引用的 input record 尚未产出。若上游已 failed 或引用的是 workId，该工作永远不会就绪。",
+          hint: "引用的 input record 尚未产出。若上游已 failed 或引用的是 workId，该工作永远不会就绪。",
         }
       : {}),
   };

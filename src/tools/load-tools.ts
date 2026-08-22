@@ -100,9 +100,7 @@ export class LoadToolsTool implements BaseTool {
 
     // 以 registry 实时注册集为准：条件注册未触发（graph 未启用、memory eco
     // 模式等）的成员不披露，避免"已加载"的假承诺被模型下一轮撞 unknown tool。
-    const registered = this.registeredToolNames
-      ? new Set(this.registeredToolNames())
-      : undefined;
+    const registered = this.registeredToolNames ? new Set(this.registeredToolNames()) : undefined;
     const loadable = registered
       ? found.toolNames.filter((name) => registered.has(name))
       : [...found.toolNames];

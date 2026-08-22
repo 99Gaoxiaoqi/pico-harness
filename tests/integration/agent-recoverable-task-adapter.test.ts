@@ -341,7 +341,10 @@ async function createFixture(context: test.TestContext, suffix: string): Promise
     sourceTerminal?.event.kind === "run.terminal" ? sourceTerminal.event.data.status : undefined,
     "interrupted",
   );
-  const rootIdentity = readWorkspaceSqliteStorageRootIdentitySync(store.storageRoot, ALL_WORKSPACE_SQLITE_SCOPES);
+  const rootIdentity = readWorkspaceSqliteStorageRootIdentitySync(
+    store.storageRoot,
+    ALL_WORKSPACE_SQLITE_SCOPES,
+  );
   assert.ok(rootIdentity);
 
   const taskRunId = `task-run:${suffix}`;

@@ -16,7 +16,10 @@ import {
   withFileLock,
   writeJsonAtomicSync,
 } from "../storage/local-file-storage.js";
-import { RUNTIME_EVENT_SCHEMA_VERSION, type RuntimeRunStartedEvent } from "../storage/runtime-event.js";
+import {
+  RUNTIME_EVENT_SCHEMA_VERSION,
+  type RuntimeRunStartedEvent,
+} from "../storage/runtime-event.js";
 import type { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 import {
   assertWorkspaceSqliteStorageRootIdentitySync,
@@ -498,7 +501,11 @@ export class FileAgentRecoveryLaunchIntentPort implements AgentRecoveryLaunchInt
     if (!INTENT_DIRECTORY_PATTERN.test(digest)) {
       throw new Error(`Agent recovery launch-intent digest is invalid: ${digest}`);
     }
-    assertWorkspaceSqliteStorageRootIdentitySync(this.storageRoot, this.rootIdentity, ALL_WORKSPACE_SQLITE_SCOPES);
+    assertWorkspaceSqliteStorageRootIdentitySync(
+      this.storageRoot,
+      this.rootIdentity,
+      ALL_WORKSPACE_SQLITE_SCOPES,
+    );
     ensurePrivateIntentDirectorySync(this.intentsRoot);
     ensurePrivateIntentDirectorySync(this.intentDirectory(digest));
   }
@@ -1120,7 +1127,9 @@ function delay(milliseconds: number): Promise<void> {
 function ensurePrivateIntentDirectorySync(path: string): void {
   const metadata = existsSync(path) ? lstatSync(path) : undefined;
   if (metadata && (!metadata.isDirectory() || metadata.isSymbolicLink())) {
-    throw new FileStorageIntegrityError(`Agent recovery intent directory must be a real directory: ${path}`);
+    throw new FileStorageIntegrityError(
+      `Agent recovery intent directory must be a real directory: ${path}`,
+    );
   }
   mkdirPrivateSync(path);
 }

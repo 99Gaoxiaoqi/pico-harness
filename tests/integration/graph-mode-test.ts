@@ -52,8 +52,12 @@ async function setupFixture(): Promise<Fixture> {
   return { root, store, context };
 }
 
-function projectionSnapshot(store: SqliteRuntimeEventStore): Promise<ReturnType<typeof projectGraphEntries>> {
-  return store.readSessionEntries(SESSION_ID).then((entries) => projectGraphEntries(GRAPH_ID, entries));
+function projectionSnapshot(
+  store: SqliteRuntimeEventStore,
+): Promise<ReturnType<typeof projectGraphEntries>> {
+  return store
+    .readSessionEntries(SESSION_ID)
+    .then((entries) => projectGraphEntries(GRAPH_ID, entries));
 }
 
 test("normalizeGraphWorkInput trims instruction and defaults mode to explore", () => {
@@ -67,10 +71,7 @@ test("normalizeGraphWorkInput trims instruction and defaults mode to explore", (
 });
 
 test("normalizeGraphWorkInput rejects empty instruction", () => {
-  assert.throws(
-    () => normalizeGraphWorkInput({ instruction: "   " }),
-    GraphConflictError,
-  );
+  assert.throws(() => normalizeGraphWorkInput({ instruction: "   " }), GraphConflictError);
 });
 
 test("normalizeGraphWorkInput rejects blank input ids", () => {
@@ -124,7 +125,9 @@ test("AddWorkTool writes graph.work.added and dispatches when inputs are ready",
     () => AT,
   );
 
-  const result = JSON.parse(await tool.execute(JSON.stringify({ instruction: "Explore auth" }))) as {
+  const result = JSON.parse(
+    await tool.execute(JSON.stringify({ instruction: "Explore auth" })),
+  ) as {
     workId: string;
     status: string;
     delegationId: string;
@@ -182,7 +185,11 @@ test("AddWorkTool rejects new work on a closed graph", async (t) => {
   const closeTool = new CloseGraphTool(context, () => AT);
   await closeTool.execute("{}");
 
-  const addTool = new AddWorkTool(context, async () => "delegation-late", () => AT);
+  const addTool = new AddWorkTool(
+    context,
+    async () => "delegation-late",
+    () => AT,
+  );
   await assert.rejects(
     addTool.execute(JSON.stringify({ instruction: "Late work" })),
     GraphConflictError,
@@ -201,7 +208,11 @@ test("AddWorkTool dispatch result stays consistent after upstream commit", async
     return rm(root, { recursive: true, force: true });
   });
 
-  const tool = new AddWorkTool(context, async () => "delegation-ok", () => AT);
+  const tool = new AddWorkTool(
+    context,
+    async () => "delegation-ok",
+    () => AT,
+  );
   const result = JSON.parse(await tool.execute(JSON.stringify({ instruction: "Plain work" }))) as {
     status: string;
     missingInputIds?: string[];
@@ -217,7 +228,11 @@ test("ViewGraphTool exposes missingInputIds for waiting works", async (t) => {
     return rm(root, { recursive: true, force: true });
   });
 
-  const addTool = new AddWorkTool(context, async () => "delegation-1", () => AT);
+  const addTool = new AddWorkTool(
+    context,
+    async () => "delegation-1",
+    () => AT,
+  );
   await addTool.execute(
     JSON.stringify({ instruction: "Consume A", input_ids: ["record_unknown", "record_pending"] }),
   );
@@ -238,7 +253,11 @@ test("CloseGraphTool reports pending works when closing un-converged graph", asy
   });
 
   // A requested work with an unresolvable input (deadlock case from real-LLM run).
-  const addTool = new AddWorkTool(context, async () => "delegation-1", () => AT);
+  const addTool = new AddWorkTool(
+    context,
+    async () => "delegation-1",
+    () => AT,
+  );
   await addTool.execute(
     JSON.stringify({ instruction: "Consume A", input_ids: ["record_never_committed"] }),
   );
@@ -264,9 +283,17 @@ test("CloseGraphTool warning distinguishes dispatched from requested pending", a
   });
 
   // A dispatched work (backing delegation still running) and a requested one.
-  const dispatchedTool = new AddWorkTool(context, async () => "delegation-running", () => AT);
+  const dispatchedTool = new AddWorkTool(
+    context,
+    async () => "delegation-running",
+    () => AT,
+  );
   await dispatchedTool.execute(JSON.stringify({ instruction: "Running work" }));
-  const requestedTool = new AddWorkTool(context, async () => "delegation-other", () => AT);
+  const requestedTool = new AddWorkTool(
+    context,
+    async () => "delegation-other",
+    () => AT,
+  );
   await requestedTool.execute(
     JSON.stringify({ instruction: "Waiting work", input_ids: ["record_missing"] }),
   );
@@ -298,7 +325,11 @@ test("dispatched work settles after close_graph still commits its record", async
   const instruction = "In-flight work";
   const workId = workIdFor(GRAPH_ID, instruction, []);
   const recordId = recordIdFor(GRAPH_ID, workId);
-  const addTool = new AddWorkTool(context, async () => "delegation-inflight", () => AT);
+  const addTool = new AddWorkTool(
+    context,
+    async () => "delegation-inflight",
+    () => AT,
+  );
   await addTool.execute(JSON.stringify({ instruction }));
 
   // Close while the work is dispatched — pendingWorks must report it.
@@ -339,7 +370,10 @@ test("hasPendingWorks reports pending on a closed graph (view_graph honesty)", (
     records: [],
   };
   assert.equal(hasPendingWorks(closed), true);
-  const closedConverged = { ...closed, works: [{ ...closed.works[0]!, status: "recorded" as const }] };
+  const closedConverged = {
+    ...closed,
+    works: [{ ...closed.works[0]!, status: "recorded" as const }],
+  };
   assert.equal(hasPendingWorks(closedConverged), false);
 });
 
@@ -463,7 +497,11 @@ test("ViewGraphTool renders works and records", async (t) => {
     return rm(root, { recursive: true, force: true });
   });
 
-  const addTool = new AddWorkTool(context, async () => "delegation-1", () => AT);
+  const addTool = new AddWorkTool(
+    context,
+    async () => "delegation-1",
+    () => AT,
+  );
   await addTool.execute(JSON.stringify({ instruction: "Work one" }));
 
   const viewTool = new ViewGraphTool(context);
@@ -485,7 +523,11 @@ test("ViewGraphTool hides records when include_records is false", async (t) => {
     return rm(root, { recursive: true, force: true });
   });
 
-  const addTool = new AddWorkTool(context, async () => "delegation-1", () => AT);
+  const addTool = new AddWorkTool(
+    context,
+    async () => "delegation-1",
+    () => AT,
+  );
   await addTool.execute(JSON.stringify({ instruction: "Work one" }));
 
   const viewTool = new ViewGraphTool(context);
@@ -656,7 +698,11 @@ test("findOrphanGraphWorks flags dispatched works whose delegation is not live",
     return rm(root, { recursive: true, force: true });
   });
 
-  const addTool = new AddWorkTool(context, async () => "delegation-orphan", () => AT);
+  const addTool = new AddWorkTool(
+    context,
+    async () => "delegation-orphan",
+    () => AT,
+  );
   await addTool.execute(JSON.stringify({ instruction: "orphaned work" }));
 
   // Simulate a process restart: heartbeats stopped, so the graph-work lease has
@@ -680,7 +726,11 @@ test("findOrphanGraphWorks excludes works whose delegation is still live", async
     return rm(root, { recursive: true, force: true });
   });
 
-  const addTool = new AddWorkTool(context, async () => "delegation-live", () => AT);
+  const addTool = new AddWorkTool(
+    context,
+    async () => "delegation-live",
+    () => AT,
+  );
   await addTool.execute(JSON.stringify({ instruction: "live work" }));
 
   // Same process: the lease is still alive (heartbeat renewing), so NOT an orphan.
@@ -702,7 +752,11 @@ test("orphan recovery marks a lost delegation's dispatched work as failed", asyn
 
   const instruction = "crashed work";
   const workId = workIdFor(GRAPH_ID, instruction, []);
-  const addTool = new AddWorkTool(context, async () => "delegation-crashed", () => AT);
+  const addTool = new AddWorkTool(
+    context,
+    async () => "delegation-crashed",
+    () => AT,
+  );
   await addTool.execute(JSON.stringify({ instruction }));
 
   // Restart: lease elapsed → work flagged as orphan.
@@ -746,7 +800,11 @@ test("appendGraphOperation CAS rejects conflicting fingerprint for same operatio
     return rm(root, { recursive: true, force: true });
   });
 
-  const tool = new AddWorkTool(context, async () => "delegation-1", () => AT);
+  const tool = new AddWorkTool(
+    context,
+    async () => "delegation-1",
+    () => AT,
+  );
   await tool.execute(JSON.stringify({ instruction: "first", operationId: "op-shared" }));
 
   // Same operationId but different semantic payload (different instruction) must conflict.

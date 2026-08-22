@@ -22,10 +22,7 @@ import type {
   MemoryProposalProcessResult,
   UserMemoryEvidence,
 } from "./proposal-contracts.js";
-import {
-  MemoryProposalParseError,
-  splitMemoryProposalBatchResponse,
-} from "./proposal-parser.js";
+import { MemoryProposalParseError, splitMemoryProposalBatchResponse } from "./proposal-parser.js";
 import { RuntimeMemoryEvidenceReader } from "./runtime-evidence-reader.js";
 import { MEMORY_REVIEW_DEBOUNCE_MS, MemoryReviewScheduler } from "./runtime-scheduler.js";
 import { evaluateMemoryReviewBudgetForJobs } from "./memory-review-policy.js";
@@ -168,7 +165,9 @@ export class MemoryReviewWorker {
       });
       const jobs = [...scheduler.pending()];
       const results: Array<MemoryProposalProcessResult | undefined> = new Array(jobs.length);
-      const eventStore = new SqliteRuntimeEventStore({ storageRoot: this.options.runtimeStorageRoot });
+      const eventStore = new SqliteRuntimeEventStore({
+        storageRoot: this.options.runtimeStorageRoot,
+      });
       let sharedLease: MemoryProposalModelLease | undefined;
       let batchedModel: MemoryProposalModelPort | undefined;
       try {
@@ -412,16 +411,15 @@ export class ProviderMemoryProposalModel implements MemoryProposalModelPort {
     // 无快照时回退到独立的 system + user 请求。
     const sourceMessages = requests[0]?.evidence.sourceMessages;
     const messages = sourceMessages
-      ? [...sourceMessages, { role: "user" as const, content: `${extractionPrompt}\n\n${evidenceText}` }]
+      ? [
+          ...sourceMessages,
+          { role: "user" as const, content: `${extractionPrompt}\n\n${evidenceText}` },
+        ]
       : [
           { role: "system" as const, content: extractionPrompt },
           { role: "user" as const, content: evidenceText },
         ];
-    const response = await this.provider.generate(
-      messages,
-      [],
-      signal ? { signal } : undefined,
-    );
+    const response = await this.provider.generate(messages, [], signal ? { signal } : undefined);
     const billingRoute = this.billingRoute ?? this.provider.modelName;
     const inputTokens = nonNegativeUsage(response.usage?.promptTokens);
     const outputTokens = nonNegativeUsage(response.usage?.completionTokens);
@@ -658,10 +656,7 @@ function proposalNoticeForJob(job: Job): MemoryProposalPublishedNotice | undefin
 function tryUpdateNotificationJob(
   repository: MemoryRepositoryContract,
   job: Job,
-  patch: Pick<
-    UpdateJobInput,
-    "status" | "errorCode" | "idempotencyKey"
-  >,
+  patch: Pick<UpdateJobInput, "status" | "errorCode" | "idempotencyKey">,
 ): void {
   try {
     repository.updateJob({

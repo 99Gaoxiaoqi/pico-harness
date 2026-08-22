@@ -83,9 +83,13 @@ test("sqlite TaskRunStore persists a full lifecycle and rebuilds it identically 
       ],
     );
     const boundary = checkpointBoundary(workspace);
-    await store.append(taskRunId, checkpointed(taskRunId, "checkpoint-1", "attempt-1", "owner-1", 1, boundary), {
-      transactionId: "task-transaction-2",
-    });
+    await store.append(
+      taskRunId,
+      checkpointed(taskRunId, "checkpoint-1", "attempt-1", "owner-1", 1, boundary),
+      {
+        transactionId: "task-transaction-2",
+      },
+    );
     const running = await store.readTaskRunProjection(taskRunId);
     assert.equal(running?.status, "running");
     assert.equal(running?.revision, 2);
@@ -152,7 +156,14 @@ test("sqlite TaskRunStore persists a full lifecycle and rebuilds it identically 
 
     const deduplicated = await reopened.append(
       taskRunId,
-      checkpointed(taskRunId, "checkpoint-1", "attempt-1", "owner-1", 1, checkpointBoundary(workspace)),
+      checkpointed(
+        taskRunId,
+        "checkpoint-1",
+        "attempt-1",
+        "owner-1",
+        1,
+        checkpointBoundary(workspace),
+      ),
     );
     assert.equal(deduplicated.inserted, false);
     assert.equal(deduplicated.entry.sequence, 3);
@@ -233,7 +244,14 @@ test("sqlite TaskRunStore enforces expectedRevision CAS and transaction payload 
     await assert.rejects(
       store.append(
         taskRunId,
-        checkpointed(taskRunId, "stale-owner-checkpoint", "attempt-1", "owner-stale", 1, checkpointBoundary(workspace)),
+        checkpointed(
+          taskRunId,
+          "stale-owner-checkpoint",
+          "attempt-1",
+          "owner-stale",
+          1,
+          checkpointBoundary(workspace),
+        ),
         { transactionId: "tx-stale-owner" },
       ),
       /execution lease fence rejected/u,
@@ -265,7 +283,14 @@ test("sqlite TaskRunStore keeps every fact inside pico.sqlite without task-runs 
       [
         attemptStarted(taskRunId, "start", "attempt-1", 1),
         executionClaimed(taskRunId, "execution", "attempt-1", "owner-1", 1),
-        checkpointed(taskRunId, "checkpoint", "attempt-1", "owner-1", 1, checkpointBoundary(workspace)),
+        checkpointed(
+          taskRunId,
+          "checkpoint",
+          "attempt-1",
+          "owner-1",
+          1,
+          checkpointBoundary(workspace),
+        ),
       ],
       { transactionId: "tx-1" },
     );

@@ -159,7 +159,10 @@ test("sqlite catalog: incremental fold equals the full fold (title/settings/prev
     // the long final message exercises the <=96 preview column.
     const longContent = `preview-source-${"x".repeat(200)}`;
     await fixture.store.appendBatch([
-      { ...userMessage(`${id}-e5`, id, "2026-08-18T00:00:05.000Z", "partial draft"), partial: true },
+      {
+        ...userMessage(`${id}-e5`, id, "2026-08-18T00:00:05.000Z", "partial draft"),
+        partial: true,
+      },
       {
         ...userMessage(`${id}-e6`, id, "2026-08-18T00:00:06.000Z", "transcript only"),
         visibility: "transcript",
@@ -190,7 +193,9 @@ test("sqlite catalog: incremental fold equals the full fold (title/settings/prev
         .get(id) as Record<string, unknown>;
       assert.equal(row["title"], "settings title");
       assert.equal(
-        typeof row["last_message_preview"] === "string" ? (row["last_message_preview"] as string).length : 0,
+        typeof row["last_message_preview"] === "string"
+          ? (row["last_message_preview"] as string).length
+          : 0,
         96,
         "preview is capped at 96 chars",
       );
@@ -255,7 +260,10 @@ test("sqlite catalog: keyset pagination over activity_at DESC, session_id ASC", 
     assert.equal(secondPage.hasMore, false);
 
     // Hard cap: limit above 128 is refused; default page size is 32.
-    await assert.rejects(() => fixture.store.readSessionCatalogPage({ limit: 129 }), /between 1 and 128/);
+    await assert.rejects(
+      () => fixture.store.readSessionCatalogPage({ limit: 129 }),
+      /between 1 and 128/,
+    );
     const defaultPage = await fixture.store.readSessionCatalogPage({});
     assert.equal(defaultPage.entries.length, 3);
   } finally {
@@ -278,7 +286,10 @@ test("sqlite catalog: archive/pin live in sessions (session-state.json never wri
 
     // Idempotent set keeps the first timestamp; unset clears the column.
     const firstAt = 1_700_000_000_000;
-    assert.equal(fixture.store.setSessionArchived(id, true, () => firstAt), true);
+    assert.equal(
+      fixture.store.setSessionArchived(id, true, () => firstAt),
+      true,
+    );
     fixture.store.setSessionArchived(id, true, () => firstAt + 5_000);
     entry = await fixture.store.findSessionCatalogEntry(id);
     assert.equal(entry?.isArchived, true);
@@ -286,7 +297,12 @@ test("sqlite catalog: archive/pin live in sessions (session-state.json never wri
     const db = new DatabaseSync(operationalDatabasePath(fixture.storage));
     try {
       assert.equal(
-        (db.prepare("SELECT archived_at FROM sessions WHERE session_id = ?").get(id) as Record<string, unknown>)["archived_at"],
+        (
+          db.prepare("SELECT archived_at FROM sessions WHERE session_id = ?").get(id) as Record<
+            string,
+            unknown
+          >
+        )["archived_at"],
         firstAt,
       );
     } finally {
@@ -304,7 +320,10 @@ test("sqlite catalog: archive/pin live in sessions (session-state.json never wri
     assert.equal(entry?.isPinned, false);
 
     // Unknown session: no throw, reported as not found.
-    assert.equal(fixture.store.setSessionArchived("missing", true, () => firstAt), false);
+    assert.equal(
+      fixture.store.setSessionArchived("missing", true, () => firstAt),
+      false,
+    );
 
     // desktop session-state.json stays retired: nothing in the storage root beyond pico.sqlite*.
     assert.ok(!existsSync(join(fixture.root, "desktop", "session-state.json")));

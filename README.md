@@ -14,11 +14,11 @@
 
 ## 当前产品面
 
-| 入口        | 状态           | 说明                                                                     |
-| ----------- | -------------- | ------------------------------------------------------------------------ |
-| CLI / TUI   | 主要公开入口   | 源码运行使用 `npm run dev`；构建并 `npm link` 后使用 `pico`              |
-| Desktop     | 仓库内开发入口 | macOS、Windows 持续做未签名 smoke 打包；签名、公证候选构建当前仅覆盖 macOS arm64/x64 |
-| 本机 daemon | 内部 Runtime 宿主 | 承载 Desktop 与持久 Cron；通过本机 IPC 通信，自身不监听网络端口       |
+| 入口        | 状态              | 说明                                                                                 |
+| ----------- | ----------------- | ------------------------------------------------------------------------------------ |
+| CLI / TUI   | 主要公开入口      | 源码运行使用 `npm run dev`；构建并 `npm link` 后使用 `pico`                          |
+| Desktop     | 仓库内开发入口    | macOS、Windows 持续做未签名 smoke 打包；签名、公证候选构建当前仅覆盖 macOS arm64/x64 |
+| 本机 daemon | 内部 Runtime 宿主 | 承载 Desktop 与持久 Cron；通过本机 IPC 通信，自身不监听网络端口                      |
 
 当前没有公开的 REST/WebSocket、ACP、one-shot/headless API、Docker 部署或 Linux Desktop 发布入口。根包为 `private: true`，当前安装方式是源码构建与本地链接，不是 npm 公共包。仓库内 benchmark 可使用[内部 Headless One-shot Runner](./docs/internal-headless-one-shot.md)；它同样不是产品入口。
 
@@ -57,8 +57,8 @@ Desktop 进入 daemon 后使用版本化本机 IPC 协议、4 字节长度前缀
 | `src/tasks/`、`src/daemon/`                                        | RuntimeStore、Job、Cron、后台策略、本机 daemon 与通知       |
 | `src/storage/`、`src/memory/`                                      | 原子存储、文件历史、产物与长期记忆                          |
 | `src/input/`、`src/tui/`、`src/cli/`                               | 输入协议、交互式终端和公开 CLI 外壳                         |
-| `apps/desktop/`                       | Electron UI                                              |
-| `packages/protocol/`                  | Desktop、client 与 daemon 的共用协议                     |
+| `apps/desktop/`                                                    | Electron UI                                                 |
+| `packages/protocol/`                                               | Desktop、client 与 daemon 的共用协议                        |
 | `src/paths/`                                                       | `PICO_HOME`、工作区和 Runtime 数据路径的统一解析            |
 
 ### 状态所有权

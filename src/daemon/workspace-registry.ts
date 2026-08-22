@@ -175,7 +175,12 @@ export function resolveGitBranch(workspacePath: string): Promise<string | undefi
           }
           // 与 resolveGitTopLevel 相同的环境拦截降级：git 启动被挂起时按
           // 分支不可知处理，不阻塞 workspace 注册。
-          if (error.killed || error.code === "ETIMEDOUT" || error.code === "EACCES" || error.code === "EPERM") {
+          if (
+            error.killed ||
+            error.code === "ETIMEDOUT" ||
+            error.code === "EACCES" ||
+            error.code === "EPERM"
+          ) {
             resolveResult(undefined);
             return;
           }
@@ -215,7 +220,12 @@ function resolveGitTopLevel(workspacePath: string): Promise<string | undefined> 
           // 启动数秒）、spawn 被拦截（EACCES/EPERM）、显式超时。注意 EACCES/
           // EPERM 是快速确定性失败，归入降级是可���性优先的取舍（fail-loud 会把
           // 整个 daemon 打挂）；快速非零退出（git 可执行但确定性失败）仍 fail-loud。
-          if (error.killed || error.code === "ETIMEDOUT" || error.code === "EACCES" || error.code === "EPERM") {
+          if (
+            error.killed ||
+            error.code === "ETIMEDOUT" ||
+            error.code === "EACCES" ||
+            error.code === "EPERM"
+          ) {
             resolveResult(undefined);
             return;
           }

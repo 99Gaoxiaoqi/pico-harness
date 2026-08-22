@@ -256,11 +256,9 @@ export function AskUserDialog({
       });
   return (
     <Box flexDirection="column">
-      {viewport
-        .split("\n")
-        .map((line, index) => (
-          <Text key={`${index}:${line}`}>{line}</Text>
-        ))}
+      {viewport.split("\n").map((line, index) => (
+        <Text key={`${index}:${line}`}>{line}</Text>
+      ))}
     </Box>
   );
 }

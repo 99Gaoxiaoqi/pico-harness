@@ -131,7 +131,13 @@ test("run.live tool events: started/output/completed route with correct shapes, 
         status: "succeeded",
         rawSizeBytes: 16,
         sha256: "0".repeat(64),
-        projection: { version: 1, mode: "preview", text: "exit 0", strategy: "test", truncated: false },
+        projection: {
+          version: 1,
+          mode: "preview",
+          text: "exit 0",
+          strategy: "test",
+          truncated: false,
+        },
         deliveryTruncated: false,
       },
     }),
@@ -155,8 +161,7 @@ test("run.live tool events: started/output/completed route with correct shapes, 
   // tool.output 不进 timeline（既有语义）。
   assert.ok(
     !recorder.durable.some(
-      (entry) =>
-        (entry.payload["item"] as Record<string, unknown>)?.["operation"] === "append",
+      (entry) => (entry.payload["item"] as Record<string, unknown>)?.["operation"] === "append",
     ),
   );
 });
@@ -174,7 +179,13 @@ test("run.live tool events: failed status maps to failed operation", () => {
         status: "failed",
         rawSizeBytes: 8,
         sha256: "1".repeat(64),
-        projection: { version: 1, mode: "synthetic", text: "boom", strategy: "test", truncated: false },
+        projection: {
+          version: 1,
+          mode: "synthetic",
+          text: "boom",
+          strategy: "test",
+          truncated: false,
+        },
         deliveryTruncated: true,
       },
     }),
@@ -234,13 +245,28 @@ test("ToolLiveCoalescer: window merge, completion flush order, dispose flush", a
   const coalescer = new ToolLiveCoalescer((event) => routed.push(event), { flushMs: 30 });
 
   coalescer.push(
-    reporterEvent("tool.output", { toolName: "bash", stream: "stdout", chunk: "a", providerCallId: "c1" }),
+    reporterEvent("tool.output", {
+      toolName: "bash",
+      stream: "stdout",
+      chunk: "a",
+      providerCallId: "c1",
+    }),
   );
   coalescer.push(
-    reporterEvent("tool.output", { toolName: "bash", stream: "stdout", chunk: "b", providerCallId: "c1" }),
+    reporterEvent("tool.output", {
+      toolName: "bash",
+      stream: "stdout",
+      chunk: "b",
+      providerCallId: "c1",
+    }),
   );
   coalescer.push(
-    reporterEvent("tool.output", { toolName: "bash", stream: "stderr", chunk: "e1", providerCallId: "c1" }),
+    reporterEvent("tool.output", {
+      toolName: "bash",
+      stream: "stderr",
+      chunk: "e1",
+      providerCallId: "c1",
+    }),
   );
   // 窗口内 3 条只应在 flush 后产出 2 条（stdout 合并 / stderr 独立流）。
   assert.equal(routed.length, 0, "窗口内不应立即发布");
@@ -256,7 +282,12 @@ test("ToolLiveCoalescer: window merge, completion flush order, dispose flush", a
 
   // tool.completed 先冲刷对应缓冲，输出增量先于完成标记。
   coalescer.push(
-    reporterEvent("tool.output", { toolName: "bash", stream: "stdout", chunk: "c", providerCallId: "c1" }),
+    reporterEvent("tool.output", {
+      toolName: "bash",
+      stream: "stdout",
+      chunk: "c",
+      providerCallId: "c1",
+    }),
   );
   coalescer.push(
     reporterEvent("tool.completed", {
@@ -272,7 +303,12 @@ test("ToolLiveCoalescer: window merge, completion flush order, dispose flush", a
 
   // dispose：残留缓冲无条件冲刷。
   coalescer.push(
-    reporterEvent("tool.output", { toolName: "bash", stream: "stdout", chunk: "z", providerCallId: "c2" }),
+    reporterEvent("tool.output", {
+      toolName: "bash",
+      stream: "stdout",
+      chunk: "z",
+      providerCallId: "c2",
+    }),
   );
   coalescer.dispose();
   const flushed = routed.at(-1);

@@ -176,7 +176,8 @@ export class SessionForkService {
       options.journal ??
       new StorageOperationJournal({ workDir: this.workDir, picoHome: this.picoHome });
     this.runtimeStore =
-      options.runtimeStore ?? new SqliteRuntimeEventStore({ storageRoot: this.workspacePaths.root });
+      options.runtimeStore ??
+      new SqliteRuntimeEventStore({ storageRoot: this.workspacePaths.root });
     this.ownsRuntimeStore = options.runtimeStore === undefined;
     this.fileHistoryIo = {
       baseDir:
@@ -210,7 +211,8 @@ export class SessionForkService {
     assertSafeSessionId(input.targetSessionId);
     if (input.sourceSessionId === input.targetSessionId) {
       throw new Error("Fork source 与 target sessionId 不能相同");
-    }    const source = await this.sessionManager.getOrCreate(input.sourceSessionId, this.workDir, {
+    }
+    const source = await this.sessionManager.getOrCreate(input.sourceSessionId, this.workDir, {
       persistence: true,
       picoHome: this.picoHome,
       runtimePort: this.runtimePort.engineRuntimePort,

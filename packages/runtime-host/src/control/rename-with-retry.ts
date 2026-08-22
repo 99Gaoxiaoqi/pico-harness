@@ -1,5 +1,5 @@
-import { rename } from 'node:fs/promises';
-import { setTimeout as sleep } from 'node:timers/promises';
+import { rename } from "node:fs/promises";
+import { setTimeout as sleep } from "node:timers/promises";
 
 /**
  * Windows 上安全软件/索引器会间歇性持有刚写入文件的句柄（无 FILE_SHARE_DELETE），
@@ -7,7 +7,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
  * candidate 在 registration 发布时撞上 EPERM 直接崩溃，烧掉整个选举窗口。此类
  * 占用是亚秒级瞬态，有界重试即可穿越；非瞬态错误（如目标目录消失）照常上抛。
  */
-const TRANSIENT_FS_CODES = new Set(['EPERM', 'EACCES', 'EBUSY', 'ENOTEMPTY']);
+const TRANSIENT_FS_CODES = new Set(["EPERM", "EACCES", "EBUSY", "ENOTEMPTY"]);
 const RETRY_DELAYS_MS = [25, 50, 100, 200, 400, 800];
 
 export async function renameWithRetry(from: string, to: string): Promise<void> {
@@ -30,7 +30,7 @@ export async function renameWithRetry(from: string, to: string): Promise<void> {
 function isTransientFsError(error: unknown): boolean {
   return (
     error instanceof Error &&
-    'code' in error &&
-    TRANSIENT_FS_CODES.has((error as NodeJS.ErrnoException).code ?? '')
+    "code" in error &&
+    TRANSIENT_FS_CODES.has((error as NodeJS.ErrnoException).code ?? "")
   );
 }

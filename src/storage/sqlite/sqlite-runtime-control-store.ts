@@ -809,9 +809,9 @@ export class SqliteRuntimeControlStore {
   }
 
   listAttempts(jobId: string): JobAttemptRecord[] {
-    return this
-      .read(() => this.allRows(`SELECT * FROM job_attempts WHERE job_id = ? ORDER BY attempt_number`, jobId))
-      .map(rowToAttempt);
+    return this.read(() =>
+      this.allRows(`SELECT * FROM job_attempts WHERE job_id = ? ORDER BY attempt_number`, jobId),
+    ).map(rowToAttempt);
   }
 
   listJobs(filter: JobListFilter = {}): JobRecord[] {
@@ -820,9 +820,7 @@ export class SqliteRuntimeControlStore {
       const clauses: string[] = [];
       const params: unknown[] = [];
       if (filter.statuses?.length) {
-        clauses.push(
-          `status IN (${filter.statuses.map(() => "?").join(",")})`,
-        );
+        clauses.push(`status IN (${filter.statuses.map(() => "?").join(",")})`);
         params.push(...filter.statuses);
       }
       if (filter.ownerSessionId !== undefined) {
@@ -1104,15 +1102,13 @@ export class SqliteRuntimeControlStore {
   }
 
   listActiveCronRuns(workspacePath: string): CronRunRecord[] {
-    return this
-      .read(() =>
-        this.allRows(
-          `SELECT * FROM cron_runs WHERE workspace_path = ? AND status IN ('queued','running')
+    return this.read(() =>
+      this.allRows(
+        `SELECT * FROM cron_runs WHERE workspace_path = ? AND status IN ('queued','running')
            ORDER BY scheduled_for DESC, cron_run_id DESC`,
-          workspacePath,
-        ),
-      )
-      .map(rowToCronRun);
+        workspacePath,
+      ),
+    ).map(rowToCronRun);
   }
 
   recoverInterruptedCronRuns(reason = "daemon_interrupted_after_lease_expiry"): CronRunRecord[] {
@@ -1297,16 +1293,14 @@ export class SqliteRuntimeControlStore {
   }
 
   listDaemonRunRecoveryEvents(workspacePath: string): RuntimeEventRecord[] {
-    return this
-      .read(() =>
-        this.allRows(
-          `SELECT * FROM daemon_events WHERE workspace_path = ? AND event_id LIKE ?
+    return this.read(() =>
+      this.allRows(
+        `SELECT * FROM daemon_events WHERE workspace_path = ? AND event_id LIKE ?
            ORDER BY sequence`,
-          workspacePath,
-          `${DAEMON_RUN_RECOVERY_EVENT_PREFIX}%`,
-        ),
-      )
-      .map(rowToRuntimeEvent);
+        workspacePath,
+        `${DAEMON_RUN_RECOVERY_EVENT_PREFIX}%`,
+      ),
+    ).map(rowToRuntimeEvent);
   }
 
   appendRuntimeEvent(
@@ -1494,15 +1488,13 @@ export class SqliteRuntimeControlStore {
   }
 
   listPendingCommands(jobId: string): JobCommandRecord[] {
-    return this
-      .read(() =>
-        this.allRows(
-          `SELECT * FROM job_commands WHERE job_id = ? AND delivered_at IS NULL
+    return this.read(() =>
+      this.allRows(
+        `SELECT * FROM job_commands WHERE job_id = ? AND delivered_at IS NULL
            ORDER BY created_at, command_id`,
-          jobId,
-        ),
-      )
-      .map(rowToJobCommand);
+        jobId,
+      ),
+    ).map(rowToJobCommand);
   }
 
   markCommandDelivered(commandId: string): JobCommandRecord {
@@ -1631,18 +1623,14 @@ export class SqliteRuntimeControlStore {
   }
 
   listMergeRequests(jobId?: string): MergeRequestRecord[] {
-    return this
-      .read(() =>
-        jobId === undefined
-          ? this.allRows(
-              `SELECT * FROM merge_requests ORDER BY created_at, merge_request_id`,
-            )
-          : this.allRows(
-              `SELECT * FROM merge_requests WHERE job_id = ? ORDER BY created_at, merge_request_id`,
-              jobId,
-            ),
-      )
-      .map(rowToMerge);
+    return this.read(() =>
+      jobId === undefined
+        ? this.allRows(`SELECT * FROM merge_requests ORDER BY created_at, merge_request_id`)
+        : this.allRows(
+            `SELECT * FROM merge_requests WHERE job_id = ? ORDER BY created_at, merge_request_id`,
+            jobId,
+          ),
+    ).map(rowToMerge);
   }
 
   recordProviderCall(record: Omit<ProviderCallRecord, "createdAt"> & { createdAt?: number }): {
@@ -1887,13 +1875,15 @@ export class SqliteRuntimeControlStore {
   }
 
   private allRows(sql: string, ...params: unknown[]): Array<Record<string, unknown>> {
-    return this.statement(sql).all(...(params as SQLInputValue[])) as Array<Record<string, unknown>>;
+    return this.statement(sql).all(...(params as SQLInputValue[])) as Array<
+      Record<string, unknown>
+    >;
   }
 
   private getRow(sql: string, ...params: unknown[]): Record<string, unknown> | undefined {
-    return this.statement(sql).get(
-      ...(params as SQLInputValue[]),
-    ) as Record<string, unknown> | undefined;
+    return this.statement(sql).get(...(params as SQLInputValue[])) as
+      | Record<string, unknown>
+      | undefined;
   }
 
   private getNumber(sql: string, ...params: unknown[]): number {
@@ -2474,11 +2464,10 @@ function rowToBaseline(row: Row): UsageBaselineRecord {
 
 // ---- 纯函数辅助(与旧实现同语义的小工具) ----
 
-function usageCallFilterClauses(filter: {
-  sessionId?: string;
-  goalId?: string;
-  jobId?: string;
-}): { clauses: string[]; params: unknown[] } {
+function usageCallFilterClauses(filter: { sessionId?: string; goalId?: string; jobId?: string }): {
+  clauses: string[];
+  params: unknown[];
+} {
   const clauses: string[] = [];
   const params: unknown[] = [];
   if (filter.sessionId !== undefined) {

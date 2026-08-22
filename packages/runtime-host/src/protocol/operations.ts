@@ -1,13 +1,13 @@
-import { requireExactRecord, requireId, requireRecord, requireString } from './codec.js';
-import { invalidProtocolFrame } from './errors.js';
-import { HOST_BOOTSTRAP_OPERATION_SPECS } from './host-status.js';
+import { requireExactRecord, requireId, requireRecord, requireString } from "./codec.js";
+import { invalidProtocolFrame } from "./errors.js";
+import { HOST_BOOTSTRAP_OPERATION_SPECS } from "./host-status.js";
 import {
   composeOperationSpecMaps,
   type AnyOperationSpec,
   type HostOperationError,
   type HostOperationErrorCode,
   type OperationSpec,
-} from './operation-spec.js';
+} from "./operation-spec.js";
 
 export type {
   HostDiagnosticsInput,
@@ -15,12 +15,12 @@ export type {
   HostLifecycleState,
   HostStatusInput,
   HostStatusResult,
-} from './host-status.js';
+} from "./host-status.js";
 export type {
   AnyOperationSpec,
   HostOperationError,
   HostOperationErrorCode,
-} from './operation-spec.js';
+} from "./operation-spec.js";
 
 // 3-A 骨架阶段只注册 bootstrap 操作（host.status / host.diagnostics.query）。
 // 领域 operation spec（turn/session/plan/goal 等）在 3-B 接入 pico 业务时补齐。
@@ -134,18 +134,18 @@ export type ResponseFrame =
   | KnownResponseFrameFor;
 
 export function decodeRequestFrame(value: unknown): RequestFrame {
-  const frame = requireExactRecord(value, 'operation request', ['requestId', 'operation', 'input']);
-  const requestId = requireId(frame.requestId, 'requestId');
+  const frame = requireExactRecord(value, "operation request", ["requestId", "operation", "input"]);
+  const requestId = requireId(frame.requestId, "requestId");
   const operation = requireOperationKey(frame.operation);
   const spec = resolveOperationSpec(operation);
-  if (!spec) throw invalidProtocolFrame('Unknown operation key');
+  if (!spec) throw invalidProtocolFrame("Unknown operation key");
   const input = spec.decodeInput(frame.input);
   return { requestId, operation, input } as RequestFrame;
 }
 
 export function decodeResponseFrame(value: unknown): ResponseFrame {
-  const record = requireRecord(value, 'operation response');
-  const requestId = requireId(record.requestId, 'requestId');
+  const record = requireRecord(value, "operation response");
+  const requestId = requireId(record.requestId, "requestId");
   const operation = requireOperationKey(record.operation);
   const outcome = decodeOperationOutcome(operation, omitResponseIdentity(record));
   return { requestId, operation, ...outcome } as ResponseFrame;
@@ -156,56 +156,56 @@ export function decodeOperationOutcome<K extends OperationKey>(
   value: unknown,
 ): OperationOutcome<K> {
   const spec = resolveOperationSpec(operation);
-  if (!spec) throw invalidProtocolFrame('Unknown operation key');
-  const record = requireRecord(value, 'operation outcome');
+  if (!spec) throw invalidProtocolFrame("Unknown operation key");
+  const record = requireRecord(value, "operation outcome");
   if (record.ok === true) {
-    const exact = requireExactRecord(record, 'operation outcome', ['ok', 'result']);
+    const exact = requireExactRecord(record, "operation outcome", ["ok", "result"]);
     return {
       ok: true,
       result: spec.decodeOutput(exact.result),
     } as OperationOutcome<K>;
   }
   if (record.ok === false) {
-    const exact = requireExactRecord(record, 'operation outcome', ['ok', 'error']);
+    const exact = requireExactRecord(record, "operation outcome", ["ok", "error"]);
     return {
       ok: false,
       error: decodeOperationError(exact.error, spec.errors),
     } as OperationOutcome<K>;
   }
-  throw invalidProtocolFrame('Invalid operation outcome');
+  throw invalidProtocolFrame("Invalid operation outcome");
 }
 
 export function isOperationKey(value: unknown): value is OperationKey {
-  return typeof value === 'string' && isKnownOperationKey(value);
+  return typeof value === "string" && isKnownOperationKey(value);
 }
 
 function omitResponseIdentity(record: Record<string, unknown>): Record<string, unknown> {
   if (record.ok === true) {
-    requireExactRecord(record, 'operation response', ['requestId', 'operation', 'ok', 'result']);
+    requireExactRecord(record, "operation response", ["requestId", "operation", "ok", "result"]);
     return { ok: true, result: record.result };
   }
   if (record.ok === false) {
-    requireExactRecord(record, 'operation response', ['requestId', 'operation', 'ok', 'error']);
+    requireExactRecord(record, "operation response", ["requestId", "operation", "ok", "error"]);
     return { ok: false, error: record.error };
   }
-  throw invalidProtocolFrame('Invalid operation response outcome');
+  throw invalidProtocolFrame("Invalid operation response outcome");
 }
 
 function decodeOperationError<C extends HostOperationErrorCode>(
   value: unknown,
   allowedCodes: readonly C[],
 ): HostOperationError<C> {
-  const record = requireExactRecord(value, 'operation error', ['code', 'message']);
-  if (typeof record.code !== 'string' || !allowedCodes.includes(record.code as C)) {
-    throw invalidProtocolFrame('Operation returned an undeclared error code');
+  const record = requireExactRecord(value, "operation error", ["code", "message"]);
+  if (typeof record.code !== "string" || !allowedCodes.includes(record.code as C)) {
+    throw invalidProtocolFrame("Operation returned an undeclared error code");
   }
   return {
     code: record.code as C,
-    message: requireString(record.message, 'operation error message', 1024),
+    message: requireString(record.message, "operation error message", 1024),
   };
 }
 
 function requireOperationKey(value: unknown): OperationKey {
-  if (!isOperationKey(value)) throw invalidProtocolFrame('Unknown operation key');
+  if (!isOperationKey(value)) throw invalidProtocolFrame("Unknown operation key");
   return value;
 }

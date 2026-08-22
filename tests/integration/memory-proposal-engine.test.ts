@@ -9,9 +9,7 @@ import {
   MemoryProposalEngine,
   MemoryRepositoryProposalStore,
 } from "../../src/memory/proposal-engine.js";
-import {
-  parseMemoryProposalResponse,
-} from "../../src/memory/proposal-parser.js";
+import { parseMemoryProposalResponse } from "../../src/memory/proposal-parser.js";
 import { detectStableMemorySignal } from "../../src/memory/proposal-signal.js";
 import {
   MemoryEvidenceError,
@@ -56,7 +54,11 @@ test("proposal engine uses the model for explicit preferences and one-time reque
   const oneTime = await engine.process(runInput("once", "这次先用英文回复"));
   assert.equal(oneTime.status, "succeeded");
   assert.equal(oneTime.proposals.length, 0);
-  assert.equal(model.calls.length, 2, "one-time request also calls the model; empty response = nothing durable");
+  assert.equal(
+    model.calls.length,
+    2,
+    "one-time request also calls the model; empty response = nothing durable",
+  );
 });
 
 test("stable signal gate excludes questions, negation, discussion, and quoted examples", () => {
@@ -300,8 +302,12 @@ test("runtime evidence reader reads tool results from inline body and degrades l
       return undefined;
     },
     async readSessionMessageEventsUpTo(_sessionId, maxSequence) {
-      return [user, entry(3, inlineEvent), entry(4, legacyEvidenceEvent), entry(5, transcriptOnlyEvent)]
-        .filter((candidate) => candidate.sequence <= maxSequence);
+      return [
+        user,
+        entry(3, inlineEvent),
+        entry(4, legacyEvidenceEvent),
+        entry(5, transcriptOnlyEvent),
+      ].filter((candidate) => candidate.sequence <= maxSequence);
     },
   });
 
@@ -324,10 +330,9 @@ test("runtime evidence reader reads tool results from inline body and degrades l
 test("JSON-text parser accepts empty arrays and plain prose, rejects extra fields and invented evidence", () => {
   // Empty proposals JSON is now a legitimate "nothing durable" response.
   assert.deepEqual(
-    parseMemoryProposalResponse(
-      { role: "assistant", content: JSON.stringify({ proposals: [] }) },
-      ["user-1"],
-    ),
+    parseMemoryProposalResponse({ role: "assistant", content: JSON.stringify({ proposals: [] }) }, [
+      "user-1",
+    ]),
     [],
   );
   // Plain prose without JSON (model explained why nothing is durable) → empty candidates.
@@ -520,7 +525,11 @@ test("terminal event and extractor version are idempotent after success", async 
   assert.equal(replay.status, "already_succeeded");
   assert.equal(replay.job.jobId, first.job.jobId);
   assert.equal(replay.proposals.length, 1);
-  assert.equal(model.calls.length, 1, "model is called once on first process; replay uses already_succeeded");
+  assert.equal(
+    model.calls.length,
+    1,
+    "model is called once on first process; replay uses already_succeeded",
+  );
   assert.equal(fixture.repository.listJobs({ type: "terminal-extraction" }).length, 1);
   assert.equal(fixture.repository.listProposals().length, 1);
 });

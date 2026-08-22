@@ -138,7 +138,10 @@ async function appendCompletedRun(
       visibility: "model",
       kind: "message.committed",
       data: {
-        message: { role: "user", content: "请记住：这个项目固定使用 npm run forget-suppression 构建。" },
+        message: {
+          role: "user",
+          content: "请记住：这个项目固定使用 npm run forget-suppression 构建。",
+        },
       },
     },
     {

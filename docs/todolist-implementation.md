@@ -8,13 +8,13 @@ pico 的 TodoList 解决一个问题：**让模型在多轮 ReAct 循环中保�
 
 核心设计选择是**系统注入式**——不依赖模型"自觉"维护列表，而是由 harness 每轮自动把最新状态注入上下文。这与 Claude Code 的"全量替换"模式（模型通过 TodoWrite 工具自己维护列表）是两种不同思路。
 
-| 维度 | pico（系统注入） | Claude Code（全量替换） |
-|------|-----------------|---------------------|
-| 谁维护列表 | 系统（每轮读存储注入） | 模型（每次调工具传完整列表） |
-| 列表出现位置 | user 消息末尾 `<current-turn-context>` | assistant 的 `tool_use` 参数 |
-| 工具操作模式 | 增量（add/update/toggle/remove） | 全量替换（TodoWrite 传整个数组） |
-| 操作返回值 | 操作确认 + 完整列表快照 | 短确认 "Todos updated" |
-| 模型不操作时 | 系统仍每轮注入最新列表 | 靠上下文里的旧 tool_use |
+| 维度         | pico（系统注入）                       | Claude Code（全量替换）          |
+| ------------ | -------------------------------------- | -------------------------------- |
+| 谁维护列表   | 系统（每轮读存储注入）                 | 模型（每次调工具传完整列表）     |
+| 列表出现位置 | user 消息末尾 `<current-turn-context>` | assistant 的 `tool_use` 参数     |
+| 工具操作模式 | 增量（add/update/toggle/remove）       | 全量替换（TodoWrite 传整个数组） |
+| 操作返回值   | 操作确认 + 完整列表快照                | 短确认 "Todos updated"           |
+| 模型不操作时 | 系统仍每轮注入最新列表                 | 靠上下文里的旧 tool_use          |
 
 ---
 
@@ -48,9 +48,9 @@ pico 的 TodoList 解决一个问题：**让模型在多轮 ReAct 循环中保�
 
 ```typescript
 interface TodoItem {
-  id: number;           // 自增 ID，从 1 开始
-  content: string;      // 任务内容
-  status: TodoStatus;   // "pending" | "in_progress" | "completed"
+  id: number; // 自增 ID，从 1 开始
+  content: string; // 任务内容
+  status: TodoStatus; // "pending" | "in_progress" | "completed"
   priority: TodoPriority; // "high" | "medium" | "low"
 }
 
@@ -89,6 +89,7 @@ export class TodoStore {
 ```
 
 **关键设计**：
+
 - **内存优先**：所有变更先落到内存缓存，再异步落盘
 - **幂等加载**：`load()` 只首次真正读盘，之后走缓存
 - **单例共享**：host 注入同一 TodoStore 实例给 TodoTool 和 PromptComposer，保证跨组件实时可见
@@ -129,8 +130,10 @@ async buildTodoContext(): Promise<string> {
 ```
 
 输出示例：
+
 ```markdown
 ## 📋 当前 TodoList
+
 - [~] #1 (high) 实现登录
 - [ ] #2 (medium) 实现注册
 - [x] #3 (low) 写测试
@@ -187,6 +190,7 @@ return `✅ 已切换任务 #${toggled.id} 状态: ${formatItem(toggled)}\n\n${a
 ```
 
 返回示例：
+
 ```
 ✅ 已切换任务 #1 状态: [~] (high) 实现登录
 
@@ -220,6 +224,7 @@ turnTail（每轮重建，追加到 user 消息）
 ```
 
 **为什么 TodoList 放 turnTail 而不是 systemPrompt**：
+
 - TodoList 状态每轮都可能变化
 - 放 systemPrompt 会破坏前缀缓存
 - 放 turnTail（user 消息）不影响 system 前缀缓存
@@ -289,8 +294,10 @@ for (;;) {
 function appendTurnTail(messages: Message[], turnTail: string): Message[] {
   // 找到最后一条可见 user 消息
   const currentUserIndex = messages.findLastIndex(
-    (m) => m.role === "user" && m.toolCallId === undefined
-                    && m.providerData?.picoHiddenFromTranscript !== true,
+    (m) =>
+      m.role === "user" &&
+      m.toolCallId === undefined &&
+      m.providerData?.picoHiddenFromTranscript !== true,
   );
 
   // 把 turnTail 追加到这条消息末尾
@@ -415,12 +422,12 @@ user 消息：  [turnTail 变化] → 不影响 system 前缀缓存
 
 ### 为什么安全
 
-| 层 | 是否变化 | 缓存影响 |
-|----|---------|---------|
-| system prompt | 冻结 | 前缀哈希不变 → 命中 |
-| tool schema | 冻结 | 前缀哈希不变 → 命中 |
-| user 消息末尾 turnTail | 每轮变 | 在 system 之后，不影响前缀 |
-| 对话历史 | 每轮增长 | 在 system 之后，不影响前缀 |
+| 层                     | 是否变化 | 缓存影响                   |
+| ---------------------- | -------- | -------------------------- |
+| system prompt          | 冻结     | 前缀哈希不变 → 命中        |
+| tool schema            | 冻结     | 前缀哈希不变 → 命中        |
+| user 消息末尾 turnTail | 每轮变   | 在 system 之后，不影响前缀 |
+| 对话历史               | 每轮增长 | 在 system 之后，不影响前缀 |
 
 ---
 
@@ -453,11 +460,11 @@ Claude Code：
 
 ### Token 消耗对比
 
-| 场景 | pico | Claude Code |
-|------|------|------------|
-| 10 条任务，20 轮 | 每轮注入 10 条 × 20 = 200 次列表渲染 | 模型每次调 TodoWrite 传 10 条 |
-| toggle 1 条 | `{action:"toggle",id:1}` ≈ 10 token | `{todos:[10条完整列表]}` ≈ 500 token |
-| 不操作时 | 系统注入 10 条 ≈ 200 token/轮 | 零消耗 |
+| 场景             | pico                                 | Claude Code                          |
+| ---------------- | ------------------------------------ | ------------------------------------ |
+| 10 条任务，20 轮 | 每轮注入 10 条 × 20 = 200 次列表渲染 | 模型每次调 TodoWrite 传 10 条        |
+| toggle 1 条      | `{action:"toggle",id:1}` ≈ 10 token  | `{todos:[10条完整列表]}` ≈ 500 token |
+| 不操作时         | 系统注入 10 条 ≈ 200 token/轮        | 零消耗                               |
 
 ---
 
@@ -485,11 +492,11 @@ Claude Code：
 
 ## 十、相关文件索引
 
-| 文件 | 职责 |
-|------|------|
-| `src/context/todo-store.ts` | 存储层：内存缓存 + todo.json 持久化 + Markdown 渲染 |
-| `src/tools/todo.ts` | 工具层：add/update/toggle/remove/list + 返回快照 |
-| `src/context/composer.ts` | 注入层：组装 turnTail（含 TodoList） |
-| `src/engine/loop.ts` | 调度层：每轮重建 turnTail + appendTurnTail |
-| `tests/e2e/prompt-cache-freeze.real-llm.test.ts` | 缓存安全性验证测试 |
-| `tests/e2e/prompt-layering.real-llm.test.ts` | 分层结构验证测试 |
+| 文件                                             | 职责                                                |
+| ------------------------------------------------ | --------------------------------------------------- |
+| `src/context/todo-store.ts`                      | 存储层：内存缓存 + todo.json 持久化 + Markdown 渲染 |
+| `src/tools/todo.ts`                              | 工具层：add/update/toggle/remove/list + 返回快照    |
+| `src/context/composer.ts`                        | 注入层：组装 turnTail（含 TodoList）                |
+| `src/engine/loop.ts`                             | 调度层：每轮重建 turnTail + appendTurnTail          |
+| `tests/e2e/prompt-cache-freeze.real-llm.test.ts` | 缓存安全性验证测试                                  |
+| `tests/e2e/prompt-layering.real-llm.test.ts`     | 分层结构验证测试                                    |

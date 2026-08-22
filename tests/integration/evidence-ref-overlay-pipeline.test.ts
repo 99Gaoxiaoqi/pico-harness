@@ -7,7 +7,10 @@ import { RuntimeMemoryEvidenceReader } from "../../src/memory/runtime-evidence-r
 import { SqliteMemoryRepository } from "../../src/storage/sqlite/sqlite-memory-repository.js";
 import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import { withWorkspaceSqliteLease } from "../../src/storage/sqlite/workspace-scopes.js";
-import { MemoryProposalEngine, MemoryRepositoryProposalStore } from "../../src/memory/proposal-engine.js";
+import {
+  MemoryProposalEngine,
+  MemoryRepositoryProposalStore,
+} from "../../src/memory/proposal-engine.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { validateEvidenceRef } from "../../src/engine/evidence-ref.js";
 import type {
@@ -105,7 +108,9 @@ test("EvidenceRef overlay 从事件账本到 Source 落盘端到端贯通", asyn
     });
 
     const stubModel: MemoryProposalModelPort = {
-      async extract(request: MemoryProposalExtractionRequest): Promise<MemoryProposalExtractionResult> {
+      async extract(
+        request: MemoryProposalExtractionRequest,
+      ): Promise<MemoryProposalExtractionResult> {
         return {
           response: {
             role: "assistant",

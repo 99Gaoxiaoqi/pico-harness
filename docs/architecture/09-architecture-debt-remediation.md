@@ -259,15 +259,15 @@ Desktop 的 MCP 目录查询与执行现在都复用同一个 `PluginRuntimeSnap
 
 本轮架构审计（叙事/调度/机械三态）发现 D1-D6 之外的新结构性债务，完整诊断与治理机制见 [`20-architecture-audit-and-governance.md`](./20-architecture-audit-and-governance.md)：
 
-| 编号 | 债务 | 态 | 级别 | 修复阶段 |
-|---|---|---|---|---|
-| D7 | `DelegationManager.records` 内存事实权威 + 双去重倒挂 | 调度 | P0 | 阶段 2 claim 推广 |
-| D8 | 超时原语全栈散落（3+2+多处） | 机械 | P0 | 阶段 1（已收敛为 raceWithDeadline；`connectWithTimeout`（`src/daemon/client.ts:594`，socket 事件式）除外，属阶段 3 网关层收口） |
-| D9 | 多外壳连接状态/重连三套不互通（缺统一网关层） | 机械 | P0 | 阶段 3 网关层 |
-| D10 | Graph 无真 DAG / 无内容级熔断 / DelegationManager 职责错位 | 调度 | P1 | 阶段 2/3 |
-| D11 | Memory overlay 复活链（forgetFact 后账本保留原始来源，派生重建绕过 forget postcondition） | 叙事 | P1 | 后续 |
-| D12 | `DesktopRuntimeService.close` 截止线外推 + transcript 同步双实现 | 机械 | P1 | 阶段 3 |
-| D13 | `history.rewound`/`branchId` schema 化石、fork 预校验缺口、graph-reducer 注释漂移 | 叙事/调度 | P2 | 清理 |
+| 编号 | 债务                                                                                      | 态        | 级别 | 修复阶段                                                                                                                        |
+| ---- | ----------------------------------------------------------------------------------------- | --------- | ---- | ------------------------------------------------------------------------------------------------------------------------------- |
+| D7   | `DelegationManager.records` 内存事实权威 + 双去重倒挂                                     | 调度      | P0   | 阶段 2 claim 推广                                                                                                               |
+| D8   | 超时原语全栈散落（3+2+多处）                                                              | 机械      | P0   | 阶段 1（已收敛为 raceWithDeadline；`connectWithTimeout`（`src/daemon/client.ts:594`，socket 事件式）除外，属阶段 3 网关层收口） |
+| D9   | 多外壳连接状态/重连三套不互通（缺统一网关层）                                             | 机械      | P0   | 阶段 3 网关层                                                                                                                   |
+| D10  | Graph 无真 DAG / 无内容级熔断 / DelegationManager 职责错位                                | 调度      | P1   | 阶段 2/3                                                                                                                        |
+| D11  | Memory overlay 复活链（forgetFact 后账本保留原始来源，派生重建绕过 forget postcondition） | 叙事      | P1   | 后续                                                                                                                            |
+| D12  | `DesktopRuntimeService.close` 截止线外推 + transcript 同步双实现                          | 机械      | P1   | 阶段 3                                                                                                                          |
+| D13  | `history.rewound`/`branchId` schema 化石、fork 预校验缺口、graph-reducer 注释漂移         | 叙事/调度 | P2   | 清理                                                                                                                            |
 
 核心结论：4 条设计原则在叙事态执行扎实（健康度 4/5），但调度态（2/5）和机械态（2.5/5）退化为"内存权威 + 补丁驱动"。治理机制（不变量测试 [`architecture-invariants.test.ts`](../../tests/integration/architecture-invariants.test.ts) + 架构门禁横切唯一性规则）已建立；阶段 1（超时收敛）已落地；阶段 2（claim 推广）与阶段 3（统一网关层）待启动。
 

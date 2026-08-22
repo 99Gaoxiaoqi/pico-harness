@@ -1,7 +1,4 @@
-import type {
-  FileHistorySnapshotSummary,
-  RewindMode,
-} from "../cli/file-history.js";
+import type { FileHistorySnapshotSummary, RewindMode } from "../cli/file-history.js";
 import type { FileHistoryDiffStat } from "../safety/file-history.js";
 import type { CommandRegistry } from "../input/command-registry.js";
 import type { LocalCommandResult } from "../input/types.js";
@@ -145,16 +142,14 @@ export function handleClientLocalCommand(
       }
     }
     if (result.ui.kind === "open-panel" && result.ui.panel === "help") {
-      context.commands = deps.registry
-        .list({ includeHidden: false })
-        .map((command) => ({
-          name: command.name,
-          description: command.description,
-          usage: command.usage,
-          category: command.category,
-          kind: command.kind ?? "local",
-          aliases: command.aliases ?? [],
-        }));
+      context.commands = deps.registry.list({ includeHidden: false }).map((command) => ({
+        name: command.name,
+        description: command.description,
+        usage: command.usage,
+        category: command.category,
+        kind: command.kind ?? "local",
+        aliases: command.aliases ?? [],
+      }));
     }
     dialog = suppressDialog ? null : createLocalUiDialogRequest(result.ui, context);
   }
@@ -197,7 +192,15 @@ export function clientSlashSuggestions(
   registry: CommandRegistry,
   query: string,
   availabilityState: "idle" | "running",
-): { value: string; description?: string; argumentHint?: string; usage?: string; category?: string; disabled?: boolean; disabledReason?: string }[] {
+): {
+  value: string;
+  description?: string;
+  argumentHint?: string;
+  usage?: string;
+  category?: string;
+  disabled?: boolean;
+  disabledReason?: string;
+}[] {
   return registry
     .commandSuggestions(query, { availabilityState, matchMode: "autocomplete" })
     .map((command) => ({

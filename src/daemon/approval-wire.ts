@@ -15,10 +15,7 @@ import { isJsonObject, isJsonValue, type JsonObject } from "./protocol.js";
  * 单一来源，TUI 客户端与 Desktop renderer 同源）。超限 payload 由
  * transportSafeRuntimeNotification 分级裁剪兜底，无需发射侧截断。
  */
-export function buildApprovalRequestedPayload(
-  notice: ApprovalNotice,
-  runId: string,
-): JsonObject {
+export function buildApprovalRequestedPayload(notice: ApprovalNotice, runId: string): JsonObject {
   const planNotice = notice as ApprovalNotice & {
     readonly kind?: string;
     readonly planId?: string;

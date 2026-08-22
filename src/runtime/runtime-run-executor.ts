@@ -240,11 +240,7 @@ export class RuntimeRunExecutor {
             : {}),
         } satisfies RunAgentCliResult;
       }, signal);
-      if (
-        memoryReviewScheduler &&
-        submittedUserMessage &&
-        this.input.memoryTriggerSlot?.trigger
-      ) {
+      if (memoryReviewScheduler && submittedUserMessage && this.input.memoryTriggerSlot?.trigger) {
         try {
           const terminalEntry = (await runtimeRun.store.readSessionEntries(session.id)).find(
             ({ event }) =>
@@ -329,7 +325,8 @@ export class RuntimeRunExecutor {
     if (!store) return undefined;
     const candidate = await store.findLatestInterruptedUnclaimedRun(session.id);
     if (!candidate) return undefined;
-    const minAgeMs = this.input.continuationTerminalMinAgeMs ?? DEFAULT_CONTINUATION_TERMINAL_MIN_AGE_MS;
+    const minAgeMs =
+      this.input.continuationTerminalMinAgeMs ?? DEFAULT_CONTINUATION_TERMINAL_MIN_AGE_MS;
     const terminalAgeMs = Date.now() - Date.parse(candidate.terminalAt);
     if (!Number.isFinite(terminalAgeMs) || terminalAgeMs < minAgeMs) {
       logger.info(

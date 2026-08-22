@@ -13,10 +13,7 @@ import type {
   SlashCommand,
 } from "../input/types.js";
 import type { ClientSessionRuntime } from "./client-session-runtime.js";
-import {
-  decodeMemoryUndoToken,
-  encodeMemoryUndoToken,
-} from "../memory/memory-command.js";
+import { decodeMemoryUndoToken, encodeMemoryUndoToken } from "../memory/memory-command.js";
 import { snapshotSummariesFromRewindList } from "./rewind-client-bridge.js";
 import { formatRewindSelector } from "../input/rewind-presentation.js";
 
@@ -51,7 +48,11 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
   const needSession = (): string | LocalCommandResult => {
     const id = session();
     return id === undefined
-      ? { type: "local", action: "message", message: "当前没有活跃会话；先发送一条消息或 /resume。" }
+      ? {
+          type: "local",
+          action: "message",
+          message: "当前没有活跃会话；先发送一条消息或 /resume。",
+        }
       : id;
   };
 
@@ -110,9 +111,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
             message: `当前默认路由：${configured.defaultModelRouteId ?? "(未设置)"}`,
           };
         }
-        const matched = routes.find(
-          (route) => route.id === target || route.name === target,
-        );
+        const matched = routes.find((route) => route.id === target || route.name === target);
         if (!matched) {
           return {
             type: "local",
@@ -145,7 +144,10 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       execute: async (input) => {
         const sid = needSession();
         if (typeof sid === "object") return sid;
-        const current = await runtime.request("session.settings.get", { workspacePath, sessionId: sid });
+        const current = await runtime.request("session.settings.get", {
+          workspacePath,
+          sessionId: sid,
+        });
         const levels = current.settings.reasoningLevels ?? [];
         const target = input.argv[0];
         if (target === undefined) {
@@ -187,7 +189,10 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
         if (typeof sid === "object") return sid;
         const target = input.argv[0];
         if (target === undefined) {
-          const current = await runtime.request("session.settings.get", { workspacePath, sessionId: sid });
+          const current = await runtime.request("session.settings.get", {
+            workspacePath,
+            sessionId: sid,
+          });
           return {
             type: "local",
             action: "message",
@@ -195,7 +200,11 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
           };
         }
         if (!["default", "plan", "auto", "yolo"].includes(target)) {
-          return { type: "local", action: "message", message: "Usage: /mode <default|plan|auto|yolo>" };
+          return {
+            type: "local",
+            action: "message",
+            message: "Usage: /mode <default|plan|auto|yolo>",
+          };
         }
         // 与 in-process 语义对齐（对抗评审 P1：此前 agent|plan 分叉）：SessionMode
         // 走 deprecated mode param（RuntimeInteractionMode = default|auto|yolo|plan）
@@ -251,7 +260,10 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
         if (typeof sid === "object") return sid;
         const target = input.argv[0];
         if (target === undefined) {
-          const current = await runtime.request("session.settings.get", { workspacePath, sessionId: sid });
+          const current = await runtime.request("session.settings.get", {
+            workspacePath,
+            sessionId: sid,
+          });
           return {
             type: "local",
             action: "message",
@@ -296,7 +308,10 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
         if (typeof sid === "object") return sid;
         const target = input.argv[0];
         if (target === undefined) {
-          const current = await runtime.request("session.settings.get", { workspacePath, sessionId: sid });
+          const current = await runtime.request("session.settings.get", {
+            workspacePath,
+            sessionId: sid,
+          });
           return {
             type: "local",
             action: "message",
@@ -421,7 +436,11 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       category: "system",
       availability: "idle",
       execute: async (input) => {
-        const msg = (text: string) => ({ type: "local" as const, action: "message" as const, message: text });
+        const msg = (text: string) => ({
+          type: "local" as const,
+          action: "message" as const,
+          message: text,
+        });
         const USAGE =
           "/plugin [list|install <path>|inspect <id>|trust <id>|enable <id>|disable <id>] [--scope user|project|local]";
         // --scope 解析（与 in-process parseScope 同构：默认 project）。
@@ -451,7 +470,10 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
         const rest = args.slice(1);
         try {
           if (action === "list") {
-            const result = await runtime.request("plugin.manage", { workspacePath, action: "list" });
+            const result = await runtime.request("plugin.manage", {
+              workspacePath,
+              action: "list",
+            });
             const plugins = Array.isArray((result.result as Record<string, unknown>)["plugins"])
               ? ((result.result as Record<string, unknown>)["plugins"] as unknown[])
               : [];
@@ -459,13 +481,22 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
               const installed = (raw as Record<string, unknown>)["installed"] as
                 | Record<string, unknown>
                 | undefined;
-              return installed === undefined || installed["scope"] === undefined || installed["scope"] === scope;
+              return (
+                installed === undefined ||
+                installed["scope"] === undefined ||
+                installed["scope"] === scope
+              );
             });
             if (visible.length === 0) {
-              return msg(scope ? `No plugins installed in ${scope} scope.` : "No plugins installed.");
+              return msg(
+                scope ? `No plugins installed in ${scope} scope.` : "No plugins installed.",
+              );
             }
             return msg(
-              ["Plugins", ...visible.map((raw) => formatPluginListItem(raw as Record<string, unknown>))].join("\n"),
+              [
+                "Plugins",
+                ...visible.map((raw) => formatPluginListItem(raw as Record<string, unknown>)),
+              ].join("\n"),
             );
           }
           if (action === "install") {
@@ -498,7 +529,10 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
                 id,
                 scope,
               });
-              const plugin = (result.result as Record<string, unknown>)["plugin"] as Record<string, unknown>;
+              const plugin = (result.result as Record<string, unknown>)["plugin"] as Record<
+                string,
+                unknown
+              >;
               return msg(JSON.stringify(plugin, null, 2));
             }
             // trust 两阶段：prepare 输出确认指引；confirm 校验 fresh proposal 指纹
@@ -554,7 +588,9 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
           }
           return msg(`Unknown Plugin action: ${action}\nUsage: ${USAGE}`);
         } catch (error) {
-          return msg(`Plugin command failed: ${error instanceof Error ? error.message : String(error)}`);
+          return msg(
+            `Plugin command failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
         }
       },
     }),
@@ -573,34 +609,44 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       category: "system",
       availability: "idle",
       execute: async (input) => {
-        const msg = (text: string) => ({ type: "local" as const, action: "message" as const, message: text });
+        const msg = (text: string) => ({
+          type: "local" as const,
+          action: "message" as const,
+          message: text,
+        });
         const [action = "list", operationId, rawVersion, ...rest] = input.argv;
         const known = ["list", "show", "retry", "abort"];
         if (!known.includes(action)) {
-          return msg([
-          "Usage:",
-          "  /operations list",
-          "  /operations show <operation-id>",
-          "  /operations retry <operation-id> <expected-version> [reason]",
-          "  /operations abort <operation-id> <expected-version> [reason]",
-        ].join("\n"));
+          return msg(
+            [
+              "Usage:",
+              "  /operations list",
+              "  /operations show <operation-id>",
+              "  /operations retry <operation-id> <expected-version> [reason]",
+              "  /operations abort <operation-id> <expected-version> [reason]",
+            ].join("\n"),
+          );
         }
         try {
           if (action === "list") {
             if (operationId !== undefined) {
-              return msg([
-          "Usage:",
-          "  /operations list",
-          "  /operations show <operation-id>",
-          "  /operations retry <operation-id> <expected-version> [reason]",
-          "  /operations abort <operation-id> <expected-version> [reason]",
-        ].join("\n"));
+              return msg(
+                [
+                  "Usage:",
+                  "  /operations list",
+                  "  /operations show <operation-id>",
+                  "  /operations retry <operation-id> <expected-version> [reason]",
+                  "  /operations abort <operation-id> <expected-version> [reason]",
+                ].join("\n"),
+              );
             }
             const result = await runtime.request("operations.manage", {
               workspacePath,
               action: "list",
             });
-            const operations = Array.isArray((result.result as Record<string, unknown>)["operations"])
+            const operations = Array.isArray(
+              (result.result as Record<string, unknown>)["operations"],
+            )
               ? ((result.result as Record<string, unknown>)["operations"] as unknown[])
               : [];
             if (operations.length === 0) return msg("No storage operations need attention.");
@@ -622,7 +668,13 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
               action: "show",
               operationId,
             });
-            return msg(JSON.stringify((result.result as Record<string, unknown>)["operation"] ?? {}, null, 2));
+            return msg(
+              JSON.stringify(
+                (result.result as Record<string, unknown>)["operation"] ?? {},
+                null,
+                2,
+              ),
+            );
           }
           const version = Number(rawVersion);
           if (!operationId || !Number.isInteger(version) || version <= 0) {
@@ -643,7 +695,9 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
             `Operation ${operationId} ${action === "retry" ? "已重试" : "已中止"}（state=${state}）。`,
           );
         } catch (error) {
-          return msg(`Operations failed: ${error instanceof Error ? error.message : String(error)}`);
+          return msg(
+            `Operations failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
         }
       },
     }),
@@ -654,7 +708,11 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       category: "system",
       availability: "idle",
       execute: async (input) => {
-        const msg = (text: string) => ({ type: "local" as const, action: "message" as const, message: text });
+        const msg = (text: string) => ({
+          type: "local" as const,
+          action: "message" as const,
+          message: text,
+        });
         const action = input.argv[0] ?? "list";
         const handlerId = input.argv[1];
         const known = ["list", "review", "trust", "enable", "disable", "reload"];
@@ -693,7 +751,9 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
               : "Hook operation failed.",
           );
         } catch (error) {
-          return msg(`Hooks command failed: ${error instanceof Error ? error.message : String(error)}`);
+          return msg(
+            `Hooks command failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
         }
       },
     }),
@@ -705,7 +765,11 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       category: "workspace",
       availability: "idle",
       execute: async (input) => {
-        const msg = (text: string) => ({ type: "local" as const, action: "message" as const, message: text });
+        const msg = (text: string) => ({
+          type: "local" as const,
+          action: "message" as const,
+          message: text,
+        });
         const sid = needSession();
         if (typeof sid === "object") return sid;
         try {
@@ -719,7 +783,9 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
             if (additional.length === 0) {
               return msg("No workspace roots are currently authorized.");
             }
-            return msg(["Authorized workspace roots:", ...additional.map((root) => `- ${root}`)].join("\n"));
+            return msg(
+              ["Authorized workspace roots:", ...additional.map((root) => `- ${root}`)].join("\n"),
+            );
           }
           const result = await runtime.request("session.directories.add", {
             workspacePath,
@@ -730,7 +796,9 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
             ? msg(`Workspace directory added: ${input.args}`)
             : msg("Directory already authorized.");
         } catch (error) {
-          return msg(`Add directory failed: ${error instanceof Error ? error.message : String(error)}`);
+          return msg(
+            `Add directory failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
         }
       },
     }),
@@ -796,7 +864,8 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
           return {
             type: "local",
             action: "message",
-            message: "No user-message checkpoints are available yet. Send a new prompt, then run /rewind again.",
+            message:
+              "No user-message checkpoints are available yet. Send a new prompt, then run /rewind again.",
           };
         }
         // 可选 message-id：预选进选择器（/changes 面板的 w 跳转用）。
@@ -944,7 +1013,8 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       argumentCompleter: sessionCompleter,
       execute: async (input) => {
         const target = input.argv[0];
-        if (!target) return { type: "local", action: "message", message: "Usage: /resume <session-id>" };
+        if (!target)
+          return { type: "local", action: "message", message: "Usage: /resume <session-id>" };
         try {
           await runtime.request("session.get", { workspacePath, sessionId: target });
         } catch {
@@ -964,7 +1034,8 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       argumentCompleter: sessionCompleter,
       execute: async (input) => {
         const target = input.argv[0];
-        if (!target) return { type: "local", action: "message", message: "Usage: /fork <session-id>" };
+        if (!target)
+          return { type: "local", action: "message", message: "Usage: /fork <session-id>" };
         try {
           const result = await runtime.request("session.fork", {
             workspacePath,
@@ -1015,7 +1086,11 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
           return { type: "local", action: "message", message: "Usage: /skill <name> [args]" };
         }
         const args = input.argv.slice(1).join(" ");
-        const sent = await runtime.sendInput({ kind: "skill", name: skillName, ...(args ? { args } : {}) });
+        const sent = await runtime.sendInput({
+          kind: "skill",
+          name: skillName,
+          ...(args ? { args } : {}),
+        });
         return sent
           ? { type: "local", action: "message", message: `技能 ${skillName} 已提交。` }
           : { type: "local", action: "message", message: `技能 ${skillName} 提交失败。` };
@@ -1098,7 +1173,11 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       category: "workspace",
       availability: "idle",
       execute: async (input) => {
-        const msg = (text: string) => ({ type: "local" as const, action: "message" as const, message: text });
+        const msg = (text: string) => ({
+          type: "local" as const,
+          action: "message" as const,
+          message: text,
+        });
         const [operation, ...rest] = input.argv;
         try {
           switch (operation?.toLowerCase()) {
@@ -1114,7 +1193,11 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
               const [settingsResult, facts, reviews] = await Promise.all([
                 runtime.request("memory.settings.get", { workspacePath }),
                 runtime.request("memory.list", { workspacePath, states: ["active"], limit: 500 }),
-                runtime.request("memory.review.list", { workspacePath, statuses: ["pending"], limit: 500 }),
+                runtime.request("memory.review.list", {
+                  workspacePath,
+                  statuses: ["pending"],
+                  limit: 500,
+                }),
               ]);
               return msg(
                 [
@@ -1163,14 +1246,18 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
                 });
                 return msg(`Undone: workspace fact ${payload.factId} is disabled.`);
               } catch (error) {
-                return msg(`Undo unavailable: ${error instanceof Error ? error.message : String(error)}`);
+                return msg(
+                  `Undo unavailable: ${error instanceof Error ? error.message : String(error)}`,
+                );
               }
             }
             default:
               return msg("Usage: /memory remember <text>|status|off|on");
           }
         } catch (error) {
-          return msg(`Memory unavailable: ${error instanceof Error ? error.message : String(error)}`);
+          return msg(
+            `Memory unavailable: ${error instanceof Error ? error.message : String(error)}`,
+          );
         }
       },
     }),
@@ -1183,7 +1270,11 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       category: "model",
       availability: "idle",
       execute: async (input) => {
-        const msg = (text: string) => ({ type: "local" as const, action: "message" as const, message: text });
+        const msg = (text: string) => ({
+          type: "local" as const,
+          action: "message" as const,
+          message: text,
+        });
         const [subcommand = "list", first, confirmation, ...rest] = input.argv;
         if (rest.length > 0) {
           return msg(
@@ -1260,7 +1351,9 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
               secret,
               expectedRevision: listed.revision,
             });
-            return msg(`Provider imported: ${result.provider.id}（credential 已入 OS 凭据库，值不回显）。`);
+            return msg(
+              `Provider imported: ${result.provider.id}（credential 已入 OS 凭据库，值不回显）。`,
+            );
           }
           if (subcommand === "default" && first && confirmation === undefined) {
             if (first === "clear" || first === "none") {
@@ -1285,7 +1378,9 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
             "Usage: /provider [list | import-env <id> [--confirm] | default <provider/model|clear> | delete <id>]",
           );
         } catch (error) {
-          return msg(`Provider command failed: ${error instanceof Error ? error.message : String(error)}`);
+          return msg(
+            `Provider command failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
         }
       },
     }),
@@ -1298,7 +1393,11 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       category: "workspace",
       availability: "idle",
       execute: async (input) => {
-        const msg = (text: string) => ({ type: "local" as const, action: "message" as const, message: text });
+        const msg = (text: string) => ({
+          type: "local" as const,
+          action: "message" as const,
+          message: text,
+        });
         const [operation = "list", ...args] = input.argv;
         try {
           if (operation === "status") {
@@ -1325,7 +1424,12 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
             const { runs } = await runtime.request("jobs.history", { workspacePath, jobId });
             if (runs.length === 0) return msg("没有运行记录。");
             return msg(
-              runs.map((run) => `${run.runId} · ${run.status} · ${new Date(run.startedAt ?? 0).toISOString()}`).join("\n"),
+              runs
+                .map(
+                  (run) =>
+                    `${run.runId} · ${run.status} · ${new Date(run.startedAt ?? 0).toISOString()}`,
+                )
+                .join("\n"),
             );
           }
           if (operation === "add" || operation === "credential") {
@@ -1362,7 +1466,11 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       category: "mcp",
       availability: "always",
       execute: async (input) => {
-        const msg = (text: string) => ({ type: "local" as const, action: "message" as const, message: text });
+        const msg = (text: string) => ({
+          type: "local" as const,
+          action: "message" as const,
+          message: text,
+        });
         const [action, server] = input.argv;
         try {
           // 无参 = 状态：effective 配置面 + config.mcpServers 瞬态探测面拼合。
@@ -1384,9 +1492,18 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
             for (const server of effective.servers) {
               const status = probeByServer.get(server.name);
               const transport =
-                server.transport === "stdio" ? "stdio" : server.transport === "http" ? "http" : "sse";
+                server.transport === "stdio"
+                  ? "stdio"
+                  : server.transport === "http"
+                    ? "http"
+                    : "sse";
               const enabled = server.enabled === false ? " disabled" : "";
-              const source = server.source.scope === "user" ? "用户级" : server.source.scope === "project" ? "项目级" : "插件";
+              const source =
+                server.source.scope === "user"
+                  ? "用户级"
+                  : server.source.scope === "project"
+                    ? "项目级"
+                    : "插件";
               const probeStatus =
                 status && typeof status["status"] === "string"
                   ? ` [${status["status"]}${typeof status["toolCount"] === "number" ? ` · ${status["toolCount"]} tools` : ""}]`
@@ -1410,7 +1527,9 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
               expectedRevision: listed.revision,
               idempotencyKey: randomUUID(),
             });
-            return msg(`MCP server ${result.server.name} 已${action === "enable" ? "启用" : "停用"}（下次 run 生效）。`);
+            return msg(
+              `MCP server ${result.server.name} 已${action === "enable" ? "启用" : "停用"}（下次 run 生效）。`,
+            );
           }
           if (action === "reload") {
             // daemon 无跨 run 常驻连接管理面：reload = 配置快照刷新（下次 run 重读配置）。
@@ -1423,7 +1542,12 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
               `/mcp ${action} 需要 daemon 侧活连接管理面（暂未镜像）：请重启 run 使新配置生效。`,
             );
           }
-          if (action === "resources" || action === "read" || action === "prompts" || action === "prompt") {
+          if (
+            action === "resources" ||
+            action === "read" ||
+            action === "prompts" ||
+            action === "prompt"
+          ) {
             return msg(
               `/mcp ${action} 需要连接 MCP 服务器后查询（暂未镜像）：该能力属运行期工具面，客户端不做直连。`,
             );
@@ -1432,7 +1556,9 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
             "Usage: /mcp [reload|enable|disable|reconnect|resources|read|prompts|prompt|auth]",
           );
         } catch (error) {
-          return msg(`MCP command failed: ${error instanceof Error ? error.message : String(error)}`);
+          return msg(
+            `MCP command failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
         }
       },
     }),
@@ -1441,9 +1567,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
 }
 
 /** /steer /queue /replace /interrupt——运行中输入行为（availability: running）。 */
-function createRunningInputCommands(
-  deps: ClientCommandRegistryDeps,
-): readonly SlashCommand[] {
+function createRunningInputCommands(deps: ClientCommandRegistryDeps): readonly SlashCommand[] {
   const { runtime } = deps;
   const behaviorCommand = (
     name: "steer" | "queue" | "replace",
@@ -1501,7 +1625,11 @@ export async function processClientInput(
       if (!availability.available) {
         return {
           kind: "local",
-          result: { type: "local", action: "message", message: `/${command.name} ${availability.disabledReason ?? "当前不可用。"}` },
+          result: {
+            type: "local",
+            action: "message",
+            message: `/${command.name} ${availability.disabledReason ?? "当前不可用。"}`,
+          },
         };
       }
     }
@@ -1519,7 +1647,11 @@ export async function processClientInput(
         command: parsed?.name ?? "",
         args: parsed?.args ?? "",
         argv: parsed?.argv ?? [],
-        result: { type: "local" as const, action: "message" as const, message: `命令执行失败：${detail}` },
+        result: {
+          type: "local" as const,
+          action: "message" as const,
+          message: `命令执行失败：${detail}`,
+        },
       };
     }
   })();
@@ -1549,9 +1681,7 @@ function rpcCommand(spec: SlashCommand): SlashCommand {
 
 function staticCompleter(values: readonly string[]) {
   return (query: string): readonly { value: string }[] =>
-    values
-      .filter((value) => value.startsWith(query.toLowerCase()))
-      .map((value) => ({ value }));
+    values.filter((value) => value.startsWith(query.toLowerCase())).map((value) => ({ value }));
 }
 
 const ARGUMENT_COMPLETER_CACHE_TTL_MS = 5_000;

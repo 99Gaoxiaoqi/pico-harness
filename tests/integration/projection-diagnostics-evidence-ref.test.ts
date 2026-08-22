@@ -74,10 +74,18 @@ test("投影诊断：partial 消息事件产 soft partial_event_skipped", () => 
 
 test("投影诊断：所有 plan 生命周期 kind 都 claim 为 control，不 throw", () => {
   const planKinds = [
-    "plan.proposed", "plan.revised", "plan.revision.requested",
-    "plan.approved", "plan.rejected", "plan.execution.started",
-    "plan.step.updated", "plan.execution.completed", "plan.execution.cancelled",
-    "plan.execution.interrupted", "plan.execution.resumed", "plan.execution.replanned",
+    "plan.proposed",
+    "plan.revised",
+    "plan.revision.requested",
+    "plan.approved",
+    "plan.rejected",
+    "plan.execution.started",
+    "plan.step.updated",
+    "plan.execution.completed",
+    "plan.execution.cancelled",
+    "plan.execution.interrupted",
+    "plan.execution.resumed",
+    "plan.execution.replanned",
   ];
   const events = planKinds.map((kind, i) =>
     makeEvent({ kind, eventId: `plan-${i}`, data: {} }),
@@ -348,7 +356,11 @@ test("adversarial: compareCursors 两个元素完全相同 → equal", () => {
 
 test("adversarial: 无 throughEventId 的 rewound 产 soft 诊断，不与空输入混淆", () => {
   const events = [
-    makeEvent({ kind: "message.committed", eventId: "e1", data: { message: { role: "user", content: "hello" } } }),
+    makeEvent({
+      kind: "message.committed",
+      eventId: "e1",
+      data: { message: { role: "user", content: "hello" } },
+    }),
     makeEvent({ kind: "history.rewound" as string, eventId: "e2", data: {} }),
   ] as unknown as RuntimeEvent[];
 

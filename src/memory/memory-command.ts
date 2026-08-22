@@ -168,7 +168,9 @@ function undo(repository: SqliteMemoryRepository, encoded: string | undefined) {
   return message(`Undone: workspace fact ${updated.factId} is disabled.`);
 }
 
-async function openTrustedRepository(options: MemoryCommandOptions): Promise<SqliteMemoryRepository> {
+async function openTrustedRepository(
+  options: MemoryCommandOptions,
+): Promise<SqliteMemoryRepository> {
   const trustStore =
     options.trustStore ?? new WorkspaceTrustStore({ userStateDirectory: options.picoHome });
   const canonical = await trustStore.canonicalize(options.workDir);

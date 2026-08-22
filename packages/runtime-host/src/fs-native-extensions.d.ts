@@ -1,4 +1,4 @@
-declare module 'fs-native-extensions' {
+declare module "fs-native-extensions" {
   export interface LockOptions {
     shared?: boolean;
   }

@@ -36,9 +36,7 @@ test("真实引擎账本序:message.committed(toolCall) < tool.started < tool.re
         return {
           role: "assistant",
           content: "",
-          toolCalls: [
-            { id: "call:order-guard", name: "order_guard_fixture", arguments: "{}" },
-          ],
+          toolCalls: [{ id: "call:order-guard", name: "order_guard_fixture", arguments: "{}" }],
         };
       },
     };

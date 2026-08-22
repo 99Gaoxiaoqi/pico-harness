@@ -26,12 +26,12 @@ pico 前提：事件即事实（无第二状态机）；event_id 库级主键 + 
    已含判定所需全部信息。
 2. **恢复决策表**：
 
-   | 崩溃点（failpoint） | 事件流状态 | 分类 | 恢复动作 |
-   |---|---|---|---|
-   | F0 模型输出提交前 | 无 toolCall 事实 | — | 无需处理 |
-   | F1 assistant 已提交、未派发 | message.committed 含 toolCalls，无 tool.started | `not_dispatched` | 合成 result：声明**未执行** |
-   | F2 已派发、无结果 | tool.started 已落库，无 result | `indeterminate` | 合成 result：显式标记**可能已执行、结果未知**，模型可见文案如实 |
-   | F3 结果已落库 | started + result 齐全 | `completed` | 不动，绝不重执行 |
+   | 崩溃点（failpoint）         | 事件流状态                                      | 分类             | 恢复动作                                                        |
+   | --------------------------- | ----------------------------------------------- | ---------------- | --------------------------------------------------------------- |
+   | F0 模型输出提交前           | 无 toolCall 事实                                | —                | 无需处理                                                        |
+   | F1 assistant 已提交、未派发 | message.committed 含 toolCalls，无 tool.started | `not_dispatched` | 合成 result：声明**未执行**                                     |
+   | F2 已派发、无结果           | tool.started 已落库，无 result                  | `indeterminate`  | 合成 result：显式标记**可能已执行、结果未知**，模型可见文案如实 |
+   | F3 结果已落库               | started + result 齐全                           | `completed`      | 不动，绝不重执行                                                |
 
 3. **事件形状**：复用 `tool.result.recorded` kind，data 携带
    `recovery: { classification: "indeterminate" | "not_dispatched" }`。不新增事件 kind

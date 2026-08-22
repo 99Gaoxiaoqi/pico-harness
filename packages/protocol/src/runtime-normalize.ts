@@ -127,8 +127,8 @@ export function parseApprovalRequestedPayload(payload: unknown): ApprovalRequest
     ? plan["steps"]
         .map((step) =>
           typeof step === "object" && step !== null
-            ? stringOrUndefined((step as Record<string, unknown>)["title"]) ??
-              stringOrUndefined((step as Record<string, unknown>)["description"])
+            ? (stringOrUndefined((step as Record<string, unknown>)["title"]) ??
+              stringOrUndefined((step as Record<string, unknown>)["description"]))
             : undefined,
         )
         .filter((step): step is string => step !== undefined)
@@ -163,7 +163,8 @@ export function parseApprovalRequestedPayload(payload: unknown): ApprovalRequest
 export function parseApprovalSessionScope(value: unknown): ApprovalSessionScopeView | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   const record = value as Record<string, unknown>;
-  const access = record["access"] === "edit" ? "edit" : record["access"] === "read" ? "read" : undefined;
+  const access =
+    record["access"] === "edit" ? "edit" : record["access"] === "read" ? "read" : undefined;
   const safety = record["safety"] === true ? true : undefined;
   switch (record["type"]) {
     case "all-edits":
@@ -171,11 +172,18 @@ export function parseApprovalSessionScope(value: unknown): ApprovalSessionScopeV
     case "directories": {
       if (!access) return undefined;
       const directories = Array.isArray(record["directories"])
-        ? record["directories"].filter((item): item is string => typeof item === "string" && item !== "")
+        ? record["directories"].filter(
+            (item): item is string => typeof item === "string" && item !== "",
+          )
         : undefined;
       if (!directories || directories.length === 0) return undefined;
       if (typeof record["enableAutoEdits"] !== "boolean") return undefined;
-      return { type: "directories", directories, access, enableAutoEdits: record["enableAutoEdits"] };
+      return {
+        type: "directories",
+        directories,
+        access,
+        enableAutoEdits: record["enableAutoEdits"],
+      };
     }
     case "file": {
       const path = stringOrUndefined(record["path"]);
@@ -184,9 +192,12 @@ export function parseApprovalSessionScope(value: unknown): ApprovalSessionScopeV
     }
     case "bash-command": {
       const command = stringOrUndefined(record["command"]);
-      const match = record["match"] === "prefix" || record["match"] === "exact" ? record["match"] : undefined;
+      const match =
+        record["match"] === "prefix" || record["match"] === "exact" ? record["match"] : undefined;
       if (!command || !match) return undefined;
-      return safety ? { type: "bash-command", command, match, safety } : { type: "bash-command", command, match };
+      return safety
+        ? { type: "bash-command", command, match, safety }
+        : { type: "bash-command", command, match };
     }
     case "tool": {
       const toolName = stringOrUndefined(record["toolName"]);

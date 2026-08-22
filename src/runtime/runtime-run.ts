@@ -98,7 +98,6 @@ const liveRuntimeRuns = new Set<string>();
 const externalMessageCommitTails = new Map<string, Promise<void>>();
 const forkBootstrapTails = new Map<string, Promise<void>>();
 
-
 interface RuntimeRunBaseOptions {
   readonly sessionId: string;
   readonly workDir: string;
@@ -1315,9 +1314,7 @@ export class RuntimeRun {
       data: {
         workDir: this.canonicalWorkDir,
         // ADR 29:续跑目标 run 的确定性前缀锚(claimContinuation 成功后由调用方声明)。
-        ...(this.continuationOf
-          ? { continuationOf: structuredClone(this.continuationOf) }
-          : {}),
+        ...(this.continuationOf ? { continuationOf: structuredClone(this.continuationOf) } : {}),
       },
     };
     await this.append(event);
@@ -1797,7 +1794,9 @@ function serializeForkBootstrap<Result>(
   });
 }
 
-function runtimeEventStoreFromCapability(capability: EngineRuntimeCapability): SqliteRuntimeEventStore {
+function runtimeEventStoreFromCapability(
+  capability: EngineRuntimeCapability,
+): SqliteRuntimeEventStore {
   assertIssuedEngineRuntimeCapability(capability);
   if (!(capability.runtimeAuthority instanceof SqliteRuntimeEventStore)) {
     throw new Error(`Runtime capability for Session ${capability.sessionId} has no event store`);

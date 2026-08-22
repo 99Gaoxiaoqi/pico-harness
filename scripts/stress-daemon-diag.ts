@@ -48,7 +48,10 @@ const startedAt = performance.now();
 
 async function samplePid(note: string): Promise<number | undefined> {
   try {
-    const capability = await resolveStorageRoot({ path: process.env.PICO_HOME!, kind: "interactive" });
+    const capability = await resolveStorageRoot({
+      path: process.env.PICO_HOME!,
+      kind: "interactive",
+    });
     const registration = await readHostRegistration(
       join(resolveRootControlNamespace(), capability.rootId),
     );
@@ -62,7 +65,9 @@ async function samplePid(note: string): Promise<number | undefined> {
 
 async function trackFailure(round: number, phase: string, error: unknown): Promise<void> {
   const code =
-    typeof error === "object" && error && "code" in error ? String((error as { code: unknown }).code) : "?";
+    typeof error === "object" && error && "code" in error
+      ? String((error as { code: unknown }).code)
+      : "?";
   const message = error instanceof Error ? error.message : String(error);
   const pidAtFailure = await samplePid(`failure@r${round}`);
   failures.push({ round, at: new Date().toISOString(), phase, code, message, pidAtFailure });
@@ -119,9 +124,11 @@ async function main(): Promise<void> {
         }
         const settled = await waitForCondition(
           () =>
-            reporter.getProjection().entries.some(
-              ({ entry }) => entry.kind === "run-boundary" && entry.status !== "running",
-            ),
+            reporter
+              .getProjection()
+              .entries.some(
+                ({ entry }) => entry.kind === "run-boundary" && entry.status !== "running",
+              ),
           90_000,
         );
         if (!settled) await trackFailure(round, `runSettle@t${turn}`, new Error("run 90s 未终态"));
@@ -145,7 +152,9 @@ async function main(): Promise<void> {
   // ---- 报告 ----
   console.log("\n===== 诊断报告 =====");
   console.log(`rounds=${ROUNDS} duration=${((performance.now() - startedAt) / 1000).toFixed(1)}s`);
-  console.log(`pid before=${pidBefore} after=${pidAfter} ${pidBefore === pidAfter ? "（未重生：崩溃假设排除）" : "（重生过：崩溃假设命中）"}`);
+  console.log(
+    `pid before=${pidBefore} after=${pidAfter} ${pidBefore === pidAfter ? "（未重生：崩溃假设排除）" : "（重生过：崩溃假设命中）"}`,
+  );
   const respawns = countPidChanges();
   console.log(`pid 变化次数=${respawns}`);
   console.log(`failures=${failures.length}`);

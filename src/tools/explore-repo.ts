@@ -34,39 +34,108 @@ const MAX_EVIDENCE = 10;
 const MAX_DISCOVERED_FILES = 250;
 
 const PROJECT_MANIFEST_FILES = new Set([
-  "package.json", "pnpm-workspace.yaml", "turbo.json", "tsconfig.json",
-  "vite.config.ts", "vite.config.js",
-  "Cargo.toml", "go.mod", "pyproject.toml", "Package.swift",
-  "pom.xml", "build.gradle", "build.gradle.kts", "CMakeLists.txt",
+  "package.json",
+  "pnpm-workspace.yaml",
+  "turbo.json",
+  "tsconfig.json",
+  "vite.config.ts",
+  "vite.config.js",
+  "Cargo.toml",
+  "go.mod",
+  "pyproject.toml",
+  "Package.swift",
+  "pom.xml",
+  "build.gradle",
+  "build.gradle.kts",
+  "CMakeLists.txt",
 ]);
 
 const DOCUMENTATION_FILES = new Set([
-  "README.md", "AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md", "ARCHITECTURE.md",
+  "README.md",
+  "AGENTS.md",
+  "CLAUDE.md",
+  "CONTRIBUTING.md",
+  "ARCHITECTURE.md",
 ]);
 
 const ENTRYPOINT_NAMES = new Set([
-  "main.ts", "main.tsx", "main.js", "main.jsx",
-  "index.ts", "index.tsx", "index.js", "index.jsx",
-  "server.ts", "server.js", "app.ts", "app.tsx", "app.js", "app.jsx",
-  "main.go", "main.py", "main.rs",
-  "application.java", "main.java", "app.java",
+  "main.ts",
+  "main.tsx",
+  "main.js",
+  "main.jsx",
+  "index.ts",
+  "index.tsx",
+  "index.js",
+  "index.jsx",
+  "server.ts",
+  "server.js",
+  "app.ts",
+  "app.tsx",
+  "app.js",
+  "app.jsx",
+  "main.go",
+  "main.py",
+  "main.rs",
+  "application.java",
+  "main.java",
+  "app.java",
 ]);
 
 const TEXT_EXTENSIONS = new Set([
   ...SUPPORTED_EXTENSIONS,
-  ".md", ".json", ".yaml", ".yml", ".toml", ".sh", ".bash",
-  ".sql", ".html", ".css", ".scss", ".less", ".vue", ".svelte",
-  ".xml", ".ini", ".cfg", ".conf", ".env.example", ".gitignore",
+  ".md",
+  ".json",
+  ".yaml",
+  ".yml",
+  ".toml",
+  ".sh",
+  ".bash",
+  ".sql",
+  ".html",
+  ".css",
+  ".scss",
+  ".less",
+  ".vue",
+  ".svelte",
+  ".xml",
+  ".ini",
+  ".cfg",
+  ".conf",
+  ".env.example",
+  ".gitignore",
 ]);
 
 const SENSITIVE_FILE_PATTERNS = [
-  /\.env$/i, /\.pem$/i, /\.key$/i, /\.p12$/i,
-  /id_rsa/i, /credentials/i, /\.secret/i,
+  /\.env$/i,
+  /\.pem$/i,
+  /\.key$/i,
+  /\.p12$/i,
+  /id_rsa/i,
+  /credentials/i,
+  /\.secret/i,
 ];
 
 const COMMON_WORDS = new Set([
-  "the", "and", "for", "with", "this", "that", "from", "project", "please",
-  "的", "了", "和", "是", "在", "找", "到", "看", "下", "这个", "那个",
+  "the",
+  "and",
+  "for",
+  "with",
+  "this",
+  "that",
+  "from",
+  "project",
+  "please",
+  "的",
+  "了",
+  "和",
+  "是",
+  "在",
+  "找",
+  "到",
+  "看",
+  "下",
+  "这个",
+  "那个",
 ]);
 
 // ============================================================
@@ -76,7 +145,10 @@ const COMMON_WORDS = new Set([
 export class ExploreRepoTool implements BaseTool {
   readonly readOnly = true;
 
-  constructor(private readonly rootDir: string, _service: unknown) {}
+  constructor(
+    private readonly rootDir: string,
+    _service: unknown,
+  ) {}
 
   name(): string {
     return "explore_repo";
@@ -101,10 +173,20 @@ export class ExploreRepoTool implements BaseTool {
           roots: {
             type: "array",
             items: { type: "string" },
-            description: "相对根目录（默认 [\".\"]）",
+            description: '相对根目录（默认 ["."]）',
           },
-          max_files: { type: "number", minimum: 1, maximum: 80, description: "最多读取文件数（默认 30）" },
-          max_matches: { type: "number", minimum: 1, maximum: 120, description: "最多内容命中数（默认 60）" },
+          max_files: {
+            type: "number",
+            minimum: 1,
+            maximum: 80,
+            description: "最多读取文件数（默认 30）",
+          },
+          max_matches: {
+            type: "number",
+            minimum: 1,
+            maximum: 120,
+            description: "最多内容命中数（默认 60）",
+          },
         },
         required: ["objective"],
       },
@@ -117,7 +199,9 @@ export class ExploreRepoTool implements BaseTool {
 
   async execute(args: string, context?: ToolExecutionContext): Promise<string> {
     const input = JSON.parse(args) as Record<string, unknown>;
-    const objective = String(input.objective ?? "").trim().slice(0, 600);
+    const objective = String(input.objective ?? "")
+      .trim()
+      .slice(0, 600);
     if (objective.length < 4) {
       return "错误：objective 至少 4 个字符。";
     }
@@ -128,9 +212,7 @@ export class ExploreRepoTool implements BaseTool {
     );
     const maxFiles = clampInt(input.max_files, DEFAULT_MAX_FILES, 1, 80);
     const maxMatches = clampInt(input.max_matches, DEFAULT_MAX_MATCHES, 1, 120);
-    const rootDirs = Array.isArray(input.roots)
-      ? (input.roots as string[]).map(String)
-      : ["."];
+    const rootDirs = Array.isArray(input.roots) ? (input.roots as string[]).map(String) : ["."];
     const signal = context?.signal;
 
     // Step 1：DFS 文件遍历（自己的遍历，不受 repo_map 字母序限制）
@@ -223,7 +305,9 @@ export class ExploreRepoTool implements BaseTool {
 
     // Step 4：汇总输出
     candidates.sort((a, b) => b.score - a.score || a.filePath.localeCompare(b.filePath));
-    const top = candidates.filter((c) => c.score > 0 || c.matches.length > 0).slice(0, MAX_CANDIDATES);
+    const top = candidates
+      .filter((c) => c.score > 0 || c.matches.length > 0)
+      .slice(0, MAX_CANDIDATES);
     const evidence = buildEvidence(top);
     const report = buildReport(objective, queries, top, evidence, {
       filesDiscovered: discovered.length,
@@ -297,7 +381,10 @@ export interface Candidate {
 /** 从 objective 自动派生搜索词（Unicode 感知切分 + 中英文停用词过滤）。 */
 export function deriveQueries(objective: string, explicit?: string[]): string[] {
   if (explicit && explicit.length > 0) {
-    return explicit.slice(0, 8).map((q) => q.trim()).filter((q) => q.length > 0);
+    return explicit
+      .slice(0, 8)
+      .map((q) => q.trim())
+      .filter((q) => q.length > 0);
   }
   const words = objective
     .split(/[^\p{L}\p{N}_-]+/u)
@@ -325,7 +412,10 @@ export function scoreStructure(filePath: string): { score: number; reasons: stri
     score += 8;
     reasons.push("project entrypoint");
   }
-  if (/\b(__tests__|tests?|specs?|e2e)\b/i.test(filePath) || /\.(test|spec)\.[cm]?[jt]sx?$/i.test(lowerBase)) {
+  if (
+    /\b(__tests__|tests?|specs?|e2e)\b/i.test(filePath) ||
+    /\.(test|spec)\.[cm]?[jt]sx?$/i.test(lowerBase)
+  ) {
     score += 6;
     reasons.push("project test surface");
   }
@@ -342,7 +432,10 @@ function hasIgnoreCase(set: ReadonlySet<string>, value: string): boolean {
 }
 
 /** 路径级 query 匹配：路径包含查询词时加分。 */
-export function scorePathQuery(filePath: string, queries: readonly string[]): { score: number; reasons: string[] } {
+export function scorePathQuery(
+  filePath: string,
+  queries: readonly string[],
+): { score: number; reasons: string[] } {
   const lowerPath = filePath.toLowerCase();
   let score = 0;
   const reasons: string[] = [];
@@ -363,7 +456,9 @@ export function capSnippet(line: string): string {
 }
 
 /** 构造证据锚点：优先内容命中，补候选文件，封顶 10。 */
-export function buildEvidence(candidates: readonly Candidate[]): readonly { path: string; line?: number; label: string }[] {
+export function buildEvidence(
+  candidates: readonly Candidate[],
+): readonly { path: string; line?: number; label: string }[] {
   const evidence: { path: string; line?: number; label: string }[] = [];
   const seen = new Set<string>();
 
@@ -399,7 +494,13 @@ function buildReport(
   queries: readonly string[],
   candidates: readonly Candidate[],
   evidence: readonly { path: string; line?: number; label: string }[],
-  stats: { filesDiscovered: number; filesInspected: number; totalMatches: number; totalBytes: number; sensitiveSkipped: number },
+  stats: {
+    filesDiscovered: number;
+    filesInspected: number;
+    totalMatches: number;
+    totalBytes: number;
+    sensitiveSkipped: number;
+  },
 ): string {
   const lines: string[] = [
     `explore_repo: objective="${objective.slice(0, 80)}"`,
@@ -419,9 +520,14 @@ function buildReport(
   if (candidates.length > 0) {
     lines.push("=== 候选文件（按相关度排序）===");
     for (const c of candidates.slice(0, 10)) {
-      const symbols = c.symbols.map((s) => `${s.kind} ${s.name}`).slice(0, 5).join(", ");
+      const symbols = c.symbols
+        .map((s) => `${s.kind} ${s.name}`)
+        .slice(0, 5)
+        .join(", ");
       const matchInfo = c.matches.length > 0 ? ` | ${c.matches.length} 处命中` : "";
-      lines.push(`${c.filePath} (score=${c.score}) [${c.reasons.join(", ")}]${symbols ? `: ${symbols}` : ""}${matchInfo}`);
+      lines.push(
+        `${c.filePath} (score=${c.score}) [${c.reasons.join(", ")}]${symbols ? `: ${symbols}` : ""}${matchInfo}`,
+      );
     }
     const allMatches = candidates.flatMap((c) => [...c.matches]).slice(0, 5);
     if (allMatches.length > 0) {

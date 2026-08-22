@@ -54,7 +54,17 @@ async function readRuntimeEvents(sandbox: TestSandbox): Promise<RuntimeEvent[]> 
 
 function modelRequest(
   model: RealModel,
-): Pick<RunAgentCliOptions, "provider" | "baseURL" | "apiKey" | "model" | "modelRouteId" | "modelCapabilities" | "thinkingEffort" | "orchestrationMode"> {
+): Pick<
+  RunAgentCliOptions,
+  | "provider"
+  | "baseURL"
+  | "apiKey"
+  | "model"
+  | "modelRouteId"
+  | "modelCapabilities"
+  | "thinkingEffort"
+  | "orchestrationMode"
+> {
   return {
     provider: model.provider,
     baseURL: model.config.baseURL,
@@ -84,16 +94,19 @@ function supportsThinkingOff(route: ModelRoute): boolean {
 function assertMainModelSucceeded(events: readonly RuntimeEvent[]): void {
   const mainCalls = new Set(
     events
-      .filter((e): e is Extract<RuntimeEvent, { kind: "model.call.started" }> =>
-        e.kind === "model.call.started" && e.data.purpose === "main")
+      .filter(
+        (e): e is Extract<RuntimeEvent, { kind: "model.call.started" }> =>
+          e.kind === "model.call.started" && e.data.purpose === "main",
+      )
       .map((e) => e.data.providerCallId),
   );
   assert.ok(mainCalls.size > 0);
   assert.ok(
-    events.some((e) =>
-      e.kind === "model.call.settled" &&
-      e.data.status === "succeeded" &&
-      mainCalls.has(e.data.providerCallId),
+    events.some(
+      (e) =>
+        e.kind === "model.call.settled" &&
+        e.data.status === "succeeded" &&
+        mainCalls.has(e.data.providerCallId),
     ),
   );
 }
@@ -124,7 +137,14 @@ realModelTest(
         dir: sandbox.workDir,
         sessionSelection: { mode: "new", sessionId: sandbox.sessionId },
         interactionMode: "yolo",
-        allowedTools: ["read_file", "write_file", "add_work", "view_graph", "close_graph", "delegate_task"],
+        allowedTools: [
+          "read_file",
+          "write_file",
+          "add_work",
+          "view_graph",
+          "close_graph",
+          "delegate_task",
+        ],
       },
       runtimeHost(sandbox, model),
     );
@@ -179,7 +199,14 @@ realModelTest(
         dir: sandbox.workDir,
         sessionSelection: { mode: "new", sessionId: sandbox.sessionId },
         interactionMode: "yolo",
-        allowedTools: ["read_file", "write_file", "add_work", "view_graph", "close_graph", "delegate_task"],
+        allowedTools: [
+          "read_file",
+          "write_file",
+          "add_work",
+          "view_graph",
+          "close_graph",
+          "delegate_task",
+        ],
       },
       runtimeHost(sandbox, model),
     );
@@ -219,7 +246,14 @@ realModelTest(
         dir: sandbox.workDir,
         sessionSelection: { mode: "new", sessionId: sandbox.sessionId },
         interactionMode: "yolo",
-        allowedTools: ["read_file", "write_file", "add_work", "view_graph", "close_graph", "delegate_task"],
+        allowedTools: [
+          "read_file",
+          "write_file",
+          "add_work",
+          "view_graph",
+          "close_graph",
+          "delegate_task",
+        ],
       },
       runtimeHost(sandbox, model),
     );

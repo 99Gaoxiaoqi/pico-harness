@@ -10,7 +10,10 @@ import type { AgentEngine } from "../../src/engine/loop.js";
 import { Session } from "../../src/engine/session.js";
 import type { HookOutput } from "../../src/hooks/types.js";
 import type { SessionRuntime } from "../../src/runtime/session-runtime.js";
-import type { RuntimeLifecycleEvent, RuntimeRunOptions } from "../../src/runtime/runtime-contract.js";
+import type {
+  RuntimeLifecycleEvent,
+  RuntimeRunOptions,
+} from "../../src/runtime/runtime-contract.js";
 import { RuntimeRunExecutor } from "../../src/runtime/runtime-run-executor.js";
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 import { RuntimeRun } from "../../src/runtime/runtime-run.js";

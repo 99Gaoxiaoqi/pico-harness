@@ -240,7 +240,10 @@ function collectSchemaObjects(database: DatabaseSync): Map<string, string> {
   for (const row of rows) {
     if (typeof row.type !== "string" || typeof row.name !== "string") continue;
     if (row.name === "operational_schema_migrations") continue;
-    objects.set(`${row.type} ${row.name}`, normalizeSql(typeof row.sql === "string" ? row.sql : ""));
+    objects.set(
+      `${row.type} ${row.name}`,
+      normalizeSql(typeof row.sql === "string" ? row.sql : ""),
+    );
   }
   return objects;
 }

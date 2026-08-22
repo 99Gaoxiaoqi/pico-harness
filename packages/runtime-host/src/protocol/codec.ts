@@ -1,7 +1,7 @@
-import { invalidProtocolFrame } from './errors.js';
+import { invalidProtocolFrame } from "./errors.js";
 
 export function requireRecord(value: unknown, label: string): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw invalidProtocolFrame(`Invalid ${label}`);
   }
   return value as Record<string, unknown>;
@@ -49,7 +49,7 @@ export function assertExactKeys(
 }
 
 export function requireString(value: unknown, label: string, maxLength: number): string {
-  if (typeof value !== 'string' || value.length === 0 || value.length > maxLength) {
+  if (typeof value !== "string" || value.length === 0 || value.length > maxLength) {
     throw invalidProtocolFrame(`Invalid ${label}`);
   }
   return value;
@@ -74,9 +74,9 @@ export function requireCount(value: unknown, label: string): number {
 
 export function requireUtf8String(value: unknown, label: string, maxBytes: number): string {
   if (
-    typeof value !== 'string' ||
+    typeof value !== "string" ||
     value.length === 0 ||
-    Buffer.byteLength(value, 'utf8') > maxBytes
+    Buffer.byteLength(value, "utf8") > maxBytes
   ) {
     throw invalidProtocolFrame(`Invalid ${label}`);
   }
@@ -104,7 +104,7 @@ export function requireEncodedByteLimit(value: unknown, label: string, maxBytes:
   if (encoded === undefined) {
     throw invalidProtocolFrame(`Invalid ${label}`);
   }
-  if (Buffer.byteLength(encoded, 'utf8') > maxBytes) {
+  if (Buffer.byteLength(encoded, "utf8") > maxBytes) {
     throw invalidProtocolFrame(`${label} exceeds byte limit`);
   }
 }

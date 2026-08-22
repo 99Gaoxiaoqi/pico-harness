@@ -33,7 +33,10 @@ test("子代理总结开篇失败宣言：自报 completed 降级 error", async 
     "未验证风险：无。",
     "下一步：请确认模块路径后重新派发。",
   ].join("\n");
-  const result = await makeEngine(failureSummary).runSub("实现 src/target 模块", new ToolRegistry());
+  const result = await makeEngine(failureSummary).runSub(
+    "实现 src/target 模块",
+    new ToolRegistry(),
+  );
   assert.equal(result.status, "error");
   assert.ok(result.error?.includes("内容级熔断"), "error 字段携带熔断原因");
   assert.ok(result.summary.includes("无法完成"), "总结原文保留，供宿主读取失败细节");

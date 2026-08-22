@@ -56,9 +56,7 @@ interface EventsHarness {
   listenerCount(): number;
 }
 
-async function startEventsHarness(t: {
-  after(hook: () => unknown): void;
-}): Promise<EventsHarness> {
+async function startEventsHarness(t: { after(hook: () => unknown): void }): Promise<EventsHarness> {
   const root = await mkdtemp(join(tmpdir(), "pico-runtime-host-events-"));
   const picoHome = join(root, "pico-home");
   const workspaceDir = join(root, "workspace");
@@ -96,7 +94,10 @@ async function startEventsHarness(t: {
 
   const kernel = await RuntimeHostKernel.start({
     owner,
-    compositionFactory: createRuntimeHostCompositionFactory({ service: desktopService, eventSource }),
+    compositionFactory: createRuntimeHostCompositionFactory({
+      service: desktopService,
+      eventSource,
+    }),
   });
 
   const { controlDirectory } = await prepareStorageRootControlDirectory(capability);
@@ -126,19 +127,13 @@ async function startEventsHarness(t: {
   return { kernel, connection, desktopService, workspacePath, listenerCount: () => listeners.size };
 }
 
-async function registerWorkspace(
-  harness: EventsHarness,
-  workspacePath: string,
-): Promise<void> {
+async function registerWorkspace(harness: EventsHarness, workspacePath: string): Promise<void> {
   await harness.desktopService.handle(
     createTypedRuntimeRequest("workspace.register", { workspacePath }),
   );
 }
 
-async function unregisterWorkspace(
-  harness: EventsHarness,
-  workspacePath: string,
-): Promise<void> {
+async function unregisterWorkspace(harness: EventsHarness, workspacePath: string): Promise<void> {
   await harness.desktopService.handle(
     createTypedRuntimeRequest("workspace.unregister", { workspacePath }),
   );
@@ -209,11 +204,7 @@ test("events bridge: replay pages through the fixed high-watermark with recomput
     hasMore: boolean;
     nextAfterEventId?: string;
     highWatermarkEventId?: string;
-  }>(
-    "events.replay",
-    { workspacePath, limit: 2 },
-    10_000,
-  );
+  }>("events.replay", { workspacePath, limit: 2 }, 10_000);
   assert.equal(first.events.length, 2, "limit=2 的首页应有 2 条事件");
   assert.equal(first.hasMore, true, "cursor 未达 high-watermark 时应指示还有下一页");
   assert.ok(first.nextAfterEventId, "翻页 cursor 应存在");
@@ -234,7 +225,11 @@ test("events bridge: replay pages through the fixed high-watermark with recomput
     },
     10_000,
   );
-  assert.equal(second.highWatermarkEventId, first.highWatermarkEventId, "翻页期间 high-watermark 应保持固定");
+  assert.equal(
+    second.highWatermarkEventId,
+    first.highWatermarkEventId,
+    "翻页期间 high-watermark 应保持固定",
+  );
   assert.equal(second.events.length, 2);
 
   const third = await connection.requestRegistered<{

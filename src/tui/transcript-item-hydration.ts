@@ -70,7 +70,8 @@ function entryDataFromRuntimeItem(item: RuntimeConversationItem): TranscriptEntr
         kind: "tool",
         name: item.name,
         args: item.args,
-        status: item.status === "running" ? "running" : item.status === "success" ? "success" : "error",
+        status:
+          item.status === "running" ? "running" : item.status === "success" ? "success" : "error",
         ...(item.summary ? { summary: item.summary } : {}),
       };
     case "plan":

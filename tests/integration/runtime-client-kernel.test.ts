@@ -184,10 +184,7 @@ test("kernel client: non-idempotent write does not auto-retry after daemon death
   assert.ok(pidDead, "被杀 daemon 应仍处于死亡状态（无重生实例顶替）");
 });
 
-async function waitForCondition(
-  condition: () => boolean,
-  timeoutMs: number,
-): Promise<boolean> {
+async function waitForCondition(condition: () => boolean, timeoutMs: number): Promise<boolean> {
   const deadline = performance.now() + timeoutMs;
   while (!condition()) {
     if (performance.now() > deadline) return false;

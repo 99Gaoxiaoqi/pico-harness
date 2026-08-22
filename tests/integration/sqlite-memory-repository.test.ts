@@ -200,10 +200,7 @@ test("提案→采纳→遗忘→重开:六表状态一致、mutations 连续、
     idempotencyKey: "settings-after-reopen",
   });
   const afterReopen = reopened.listMutations({ limit: 500 });
-  assert.equal(
-    afterReopen[afterReopen.length - 1]!.sequence,
-    mutationSnapshot.length + 1,
-  );
+  assert.equal(afterReopen[afterReopen.length - 1]!.sequence, mutationSnapshot.length + 1);
   reopened.close();
 });
 
@@ -246,18 +243,10 @@ test("readCanonicalRecoveryRefs 查询化结果与全量重放口径一致(多�
   try {
     await seedRecoveryLedger(store, fixture.workspace);
 
-    for (const sessionId of [
-      "recovery-session-a",
-      "recovery-session-b",
-      "recovery-session-c",
-    ]) {
+    for (const sessionId of ["recovery-session-a", "recovery-session-b", "recovery-session-c"]) {
       const queried = await readCanonicalRecoveryRefs(store, sessionId);
       const replayed = await referenceReplayRefs(store, sessionId);
-      assert.deepEqual(
-        queried,
-        replayed,
-        `session ${sessionId} 查询化口径必须与全量重放一致`,
-      );
+      assert.deepEqual(queried, replayed, `session ${sessionId} 查询化口径必须与全量重放一致`);
     }
 
     // 会话 A:两个直述用户 run + 一个桌面证据复跑 run;失败/恢复/无 assistant 的
@@ -286,7 +275,10 @@ test("readCanonicalRecoveryRefs 查询化结果与全量重放口径一致(多�
   }
 });
 
-async function seedRecoveryLedger(store: SqliteRuntimeEventStore, workspace: string): Promise<void> {
+async function seedRecoveryLedger(
+  store: SqliteRuntimeEventStore,
+  workspace: string,
+): Promise<void> {
   await store.initializeSession({ sessionId: "recovery-session-a", workDir: workspace });
   const base = (runId: string) => ({
     schemaVersion: 2 as const,
@@ -593,9 +585,7 @@ async function referenceReplayRefs(
           });
         }
         const desktop = referenceDesktopText(event.data.message);
-        latestDesktopEvidence = desktop
-          ? { eventId: event.eventId, content: desktop }
-          : undefined;
+        latestDesktopEvidence = desktop ? { eventId: event.eventId, content: desktop } : undefined;
       } else if (event.kind === "run.terminal") {
         const run = runs.get(event.runId);
         if (

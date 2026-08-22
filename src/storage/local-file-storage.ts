@@ -263,10 +263,7 @@ async function waitForLocalLockTurn(
     previous.catch(() => undefined),
     remainingMs,
     () =>
-      new FileLockTimeoutError(
-        `Timed out waiting for in-process file lock ${lockPath}`,
-        lockPath,
-      ),
+      new FileLockTimeoutError(`Timed out waiting for in-process file lock ${lockPath}`, lockPath),
   );
 }
 

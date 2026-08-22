@@ -93,7 +93,7 @@ export class RecoveryManager {
         if (rawError.includes("超时") || lower.includes("timeout") || lower.includes("timed out")) {
           return (
             "该命令执行被超时强杀。如果它是一个常驻服务(如 server 或 watch),请改用 bash 工具的 background 参数后台运行," +
-              "或者拆分为非阻塞的子任务。不要反复重试同一个会卡住的命令。"
+            "或者拆分为非阻塞的子任务。不要反复重试同一个会卡住的命令。"
           );
         }
         if (lower.includes("syntax error") || lower.includes("unexpected token")) {

@@ -1496,7 +1496,8 @@ export function publishDesktopReporterEvent(
     const toolName = typeof envelope?.toolName === "string" ? envelope.toolName : "";
     if (toolCallId && toolName) {
       const status = typeof envelope?.status === "string" ? envelope.status : "";
-      const summary = typeof envelope?.projection?.text === "string" ? envelope.projection.text : "";
+      const summary =
+        typeof envelope?.projection?.text === "string" ? envelope.projection.text : "";
       service.publishEphemeralNotification(
         createRuntimeNotification({
           topic: "run.live",
@@ -1599,7 +1600,11 @@ function liveAssistantStreamId(runId: string, turn: number): string {
 }
 
 /** 3-D Phase 1：工具输出流的 live 标识（与文本流同走 buffer 合流/截断机制）。 */
-function liveToolStreamId(runId: string, providerCallId: string, stream: "stdout" | "stderr"): string {
+function liveToolStreamId(
+  runId: string,
+  providerCallId: string,
+  stream: "stdout" | "stderr",
+): string {
   return `tool:live:${runId}:${providerCallId}:${stream}`;
 }
 
@@ -1611,10 +1616,7 @@ function numberOrUndefined(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) ? value : undefined;
 }
 
-function optionalLiveString(
-  value: unknown,
-  key: string,
-): Readonly<Record<string, string>> {
+function optionalLiveString(value: unknown, key: string): Readonly<Record<string, string>> {
   return typeof value === "string" && value ? { [key]: value } : {};
 }
 

@@ -11,11 +11,7 @@ import {
 } from "./changes-panel.js";
 import { InteractiveHelpPanel, type HelpPanelCommand } from "./help-panel.js";
 import { isLocalUiCommandAction } from "./local-ui-command.js";
-import {
-  InteractiveModelSelector,
-  ModelSelector,
-  type ModelOption,
-} from "./model-selector.js";
+import { InteractiveModelSelector, ModelSelector, type ModelOption } from "./model-selector.js";
 import { RewindCommandDialog } from "./rewind-command-dialog.js";
 import { RewindSelector } from "./rewind-selector.js";
 import {
@@ -93,14 +89,18 @@ export function createLocalUiDialogContent(
         <InteractiveModelSelector
           models={context.models ?? []}
           currentModelId={context.currentModelId}
-          onSelect={(modelId) => context.onModelConfirm?.({ ...(context.models ?? []).find((candidate) => candidate.id === modelId) ?? { id: modelId, name: modelId } })}
+          onSelect={(modelId) =>
+            context.onModelConfirm?.({
+              ...((context.models ?? []).find((candidate) => candidate.id === modelId) ?? {
+                id: modelId,
+                name: modelId,
+              }),
+            })
+          }
           onCancel={() => context.onClose?.(localUiDialogId("model"))}
         />
       ) : (
-        <ModelSelector
-          currentModelId={context.currentModelId}
-          models={context.models ?? []}
-        />
+        <ModelSelector currentModelId={context.currentModelId} models={context.models ?? []} />
       );
     case "session":
       return context.onSessionConfirm ? (

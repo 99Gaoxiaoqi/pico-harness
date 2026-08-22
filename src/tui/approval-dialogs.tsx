@@ -139,7 +139,13 @@ export async function resolvePlanApprovalAction(
 
 function mapPlanActionToProtocol(
   action: PlanApprovalAction,
-): "execute" | "continue_editing" | "reject_exit" | "resume_execution" | "cancel_execution" | "replan_execution" {
+):
+  | "execute"
+  | "continue_editing"
+  | "reject_exit"
+  | "resume_execution"
+  | "cancel_execution"
+  | "replan_execution" {
   return action === "continue-editing"
     ? "continue_editing"
     : action === "resume-execution"
@@ -189,7 +195,9 @@ export function resolveApprovalActionVia(
   const outcome = resolve(action, taskId);
   deps.closeDialog?.(approvalDialogId(taskId));
   if (outcome instanceof Promise) {
-    void outcome.then((ok) => deps.reporter.pushSystemMessage(approvalResolutionMessage(action, ok)));
+    void outcome.then((ok) =>
+      deps.reporter.pushSystemMessage(approvalResolutionMessage(action, ok)),
+    );
     return true;
   }
   deps.reporter.pushSystemMessage(approvalResolutionMessage(action, outcome));

@@ -15,8 +15,6 @@ import { operationalDatabasePath } from "../../src/storage/sqlite/sqlite-databas
 import { RuntimeRun } from "../../src/runtime/runtime-run.js";
 import { StorageOperationJournal } from "../../src/storage/operation-journal.js";
 
-
-
 /** Windows:分离的后台任务(memory recovery 等)可能短暂持有 pico.sqlite 句柄,
  * 删除临时目录按 EBUSY 有界重试,等待分离 drain 归还 lease。 */
 async function rmRetry(target: string): Promise<void> {
@@ -496,4 +494,3 @@ test("fork bootstrap reports a conflicting terminal as a typed durable conflict"
     await rmRetry(root);
   }
 });
-

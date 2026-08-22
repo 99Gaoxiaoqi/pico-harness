@@ -13,45 +13,45 @@
 
 ### A 族：sleep/delay helper（纯延迟，resolve 语义）—— 8 处
 
-| 位置 | 现状 | 收敛目标 |
-|---|---|---|
-| `src/input/user-config-store.ts` | `delay()` helper | `sleep(ms)` |
-| `src/mcp/user-config-store.ts` | `delay()` helper | `sleep(ms)` |
-| `src/provider/provider-operation-journal.ts` | `delay()` helper | `sleep(ms)` |
-| `src/provider/retry.ts` | `sleep`/`abortableSleep`（clearTimeout 范式源头） | `sleep(ms, { signal? })`（abortableSleep 语义并入） |
-| `src/runtime/agent-recoverable-task-adapter.ts` | `delay()` helper | `sleep(ms)` |
-| `src/storage/atomic-json.ts` | `sleep()` helper | `sleep(ms)` |
-| `src/input/cron-daemon-bridge.ts` | daemon 启动重试退避 sleep | `sleep(ms)` |
-| `src/internal/headless-one-shot-runner.ts` | `delay()` helper | `sleep(ms)` |
+| 位置                                            | 现状                                              | 收敛目标                                            |
+| ----------------------------------------------- | ------------------------------------------------- | --------------------------------------------------- |
+| `src/input/user-config-store.ts`                | `delay()` helper                                  | `sleep(ms)`                                         |
+| `src/mcp/user-config-store.ts`                  | `delay()` helper                                  | `sleep(ms)`                                         |
+| `src/provider/provider-operation-journal.ts`    | `delay()` helper                                  | `sleep(ms)`                                         |
+| `src/provider/retry.ts`                         | `sleep`/`abortableSleep`（clearTimeout 范式源头） | `sleep(ms, { signal? })`（abortableSleep 语义并入） |
+| `src/runtime/agent-recoverable-task-adapter.ts` | `delay()` helper                                  | `sleep(ms)`                                         |
+| `src/storage/atomic-json.ts`                    | `sleep()` helper                                  | `sleep(ms)`                                         |
+| `src/input/cron-daemon-bridge.ts`               | daemon 启动重试退避 sleep                         | `sleep(ms)`                                         |
+| `src/internal/headless-one-shot-runner.ts`      | `delay()` helper                                  | `sleep(ms)`                                         |
 
 ### B 族：请求/握手超时包装（reject 语义）—— 15 处
 
-| 位置 | 现状 | 收敛目标 |
-|---|---|---|
-| `src/approval/manager.ts` | 审批等待超时（executor 内 setTimeout reject） | `raceWithDeadlineReject`（errorFactory 产出原错误类型） |
-| `src/code-intelligence/lsp-client.ts` | LSP 请求超时 / SIGKILL 升级（2 处） | `raceWithDeadlineReject` |
-| `src/daemon/client.ts` | `connectWithTimeout`（socket 事件式） | **评估后定**：socket 事件驱动结构特殊，若无法简单并入则保留 + 白名单注明（见 §4 保留清单） |
-| `src/daemon/instance-lock.ts` | runtime.ping 超时包装 | `raceWithDeadlineReject` |
-| `src/daemon/ipc-auth.ts` | Windows 工具执行超时 | `raceWithDeadlineReject` |
-| `src/hooks/executors/executor.ts` | SIGKILL 升级超时 | `raceWithDeadlineReject`（保留 SIGKILL 副作用） |
-| `src/mcp/http-client.ts` | 请求超时包装 | `raceWithDeadlineReject`（保留 sseAbort 副作用） |
-| `src/mcp/stdio-client.ts` | 请求超时 / waitForChildExit（多处） | `raceWithDeadlineReject` |
-| `src/os/process-tree.ts` | waitForExit 超时包装 | `raceWithDeadlineReject` |
-| `src/safety/background-yolo-policy.ts` | hook 超时 fail-closed | `raceWithDeadlineReject`（保留 fail-closed 语义） |
-| `src/tasks/worktree-supervisor.ts` | waitForSettlement 超时 | `raceWithDeadlineReject` |
-| `src/tools/background-manager.ts` | 后台任务等待超时 | `raceWithDeadlineReject` |
-| `src/tools/bash.ts` | bash 执行超时 / 强杀定时器 | `raceWithDeadlineReject`（强杀副作用保留） |
-| `src/tui/system-actions.ts` | 进程执行超时（2 处） | `raceWithDeadlineReject` |
-| `src/tui/terminal-grid.ts` | grid 读取超时 | `raceWithDeadlineReject` |
+| 位置                                   | 现状                                          | 收敛目标                                                                                   |
+| -------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `src/approval/manager.ts`              | 审批等待超时（executor 内 setTimeout reject） | `raceWithDeadlineReject`（errorFactory 产出原错误类型）                                    |
+| `src/code-intelligence/lsp-client.ts`  | LSP 请求超时 / SIGKILL 升级（2 处）           | `raceWithDeadlineReject`                                                                   |
+| `src/daemon/client.ts`                 | `connectWithTimeout`（socket 事件式）         | **评估后定**：socket 事件驱动结构特殊，若无法简单并入则保留 + 白名单注明（见 §4 保留清单） |
+| `src/daemon/instance-lock.ts`          | runtime.ping 超时包装                         | `raceWithDeadlineReject`                                                                   |
+| `src/daemon/ipc-auth.ts`               | Windows 工具执行超时                          | `raceWithDeadlineReject`                                                                   |
+| `src/hooks/executors/executor.ts`      | SIGKILL 升级超时                              | `raceWithDeadlineReject`（保留 SIGKILL 副作用）                                            |
+| `src/mcp/http-client.ts`               | 请求超时包装                                  | `raceWithDeadlineReject`（保留 sseAbort 副作用）                                           |
+| `src/mcp/stdio-client.ts`              | 请求超时 / waitForChildExit（多处）           | `raceWithDeadlineReject`                                                                   |
+| `src/os/process-tree.ts`               | waitForExit 超时包装                          | `raceWithDeadlineReject`                                                                   |
+| `src/safety/background-yolo-policy.ts` | hook 超时 fail-closed                         | `raceWithDeadlineReject`（保留 fail-closed 语义）                                          |
+| `src/tasks/worktree-supervisor.ts`     | waitForSettlement 超时                        | `raceWithDeadlineReject`                                                                   |
+| `src/tools/background-manager.ts`      | 后台任务等待超时                              | `raceWithDeadlineReject`                                                                   |
+| `src/tools/bash.ts`                    | bash 执行超时 / 强杀定时器                    | `raceWithDeadlineReject`（强杀副作用保留）                                                 |
+| `src/tui/system-actions.ts`            | 进程执行超时（2 处）                          | `raceWithDeadlineReject`                                                                   |
+| `src/tui/terminal-grid.ts`             | grid 读取超时                                 | `raceWithDeadlineReject`                                                                   |
 
 ### C 族：重试退避（sleep 的组合语义）—— 4 处
 
-| 位置 | 现状 | 收敛目标 |
-|---|---|---|
-| `src/storage/file-history-mutation-lease.ts` | 租约冲突重试退避 | 基于 `sleep` 组合（不引入新原语）或保留（重试策略是业务逻辑） |
-| `src/storage/local-file-storage.ts` | 租约冲突重试退避 | 同上 |
-| `src/storage/owner-lease.ts` | 租约冲突重试退避 | 同上 |
-| `src/runtime/runtime-run.ts` | 事件写重试退避（3 处） | 同上 |
+| 位置                                         | 现状                   | 收敛目标                                                      |
+| -------------------------------------------- | ---------------------- | ------------------------------------------------------------- |
+| `src/storage/file-history-mutation-lease.ts` | 租约冲突重试退避       | 基于 `sleep` 组合（不引入新原语）或保留（重试策略是业务逻辑） |
+| `src/storage/local-file-storage.ts`          | 租约冲突重试退避       | 同上                                                          |
+| `src/storage/owner-lease.ts`                 | 租约冲突重试退避       | 同上                                                          |
+| `src/runtime/runtime-run.ts`                 | 事件写重试退避（3 处） | 同上                                                          |
 
 ### 保留清单（不收敛，白名单保留 + 理由）
 
@@ -68,7 +68,7 @@
 
 ```ts
 /** 纯延迟：resolve 语义。可传 AbortSignal 提前中断（abortableSleep 语义并入）。 */
-export function sleep(ms: number, options?: { signal?: AbortSignal }): Promise<void>
+export function sleep(ms: number, options?: { signal?: AbortSignal }): Promise<void>;
 ```
 
 - 实现：`setTimeout` resolve + finally clearTimeout（与现有原语一致）+ signal 监听（abort 时 clearTimeout + reject/return）

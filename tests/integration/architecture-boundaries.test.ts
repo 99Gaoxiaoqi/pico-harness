@@ -89,9 +89,9 @@ test("architecture gate flags locally-defined cross-cutting primitives", async (
 
   const violations = scanCrossCuttingDefinitions({ repositoryRoot: fixtureRoot });
   assert.deepEqual(
-    violations.map(({ rule, target }) => ({ rule, target })).sort((a, b) =>
-      a.target.localeCompare(b.target),
-    ),
+    violations
+      .map(({ rule, target }) => ({ rule, target }))
+      .sort((a, b) => a.target.localeCompare(b.target)),
     [
       { rule: "cross-cutting-duplicate-definition", target: "settleWithinDeadline" },
       { rule: "cross-cutting-duplicate-definition", target: "withTimeout" },

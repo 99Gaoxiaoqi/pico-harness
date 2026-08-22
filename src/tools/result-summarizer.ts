@@ -26,10 +26,7 @@ const DEFAULT_MAX_CHARS = 3000;
 export function summarizeToolResult(input: ToolResultSummaryInput): ToolResultSummary {
   const maxChars = normalizeMaxChars(input.maxChars);
   const toolName = input.toolName.trim();
-  const header = [
-    `tool: ${toolName || "(unknown)"}`,
-    `originalChars: ${input.output.length}`,
-  ];
+  const header = [`tool: ${toolName || "(unknown)"}`, `originalChars: ${input.output.length}`];
 
   const { text, truncated } = buildHeadTailText(input.output, header, maxChars);
   const fitted = fitToBudget(text, maxChars);
