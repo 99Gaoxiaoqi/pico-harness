@@ -1,4 +1,5 @@
 import type { RuntimeConversationItem } from "@pico/protocol";
+import type { ToolResultEnvelope } from "../engine/tool-result-contract.js";
 import type {
   TranscriptEntryData,
   TranscriptEvent,
@@ -15,15 +16,6 @@ import type { SubagentActivityEvent } from "../engine/reporter.js";
  * （wire 前向兼容，与 run.live 未知 kind 容忍语义一致）。
  */
 
-const SUBAGENT_ACTIVITY_STATUSES = new Set<string>([
-  "pending",
-  "running",
-  "done",
-  "failed",
-  "timed_out",
-  "cancelled",
-]);
-
 export function transcriptEventsFromRuntimeItems(
   items: readonly RuntimeConversationItem[],
   sessionId: string,
@@ -31,10 +23,59 @@ export function transcriptEventsFromRuntimeItems(
   const events: TranscriptEvent[] = [];
   let sequence = 0;
   for (const item of items) {
+    const at = numberOrUndefined((item as Record<string, unknown>)["at"]);
+    const createdAt = at ?? sequence + 1;
+    if (item.kind === "tool" && item.result) {
+      const toolCallId = `rpc-tool:${sessionId}:${item.id}`;
+      sequence += 1;
+      events.push({
+        type: "tool.started",
+        eventId: `rpc:${sessionId}:${item.id}:started`,
+        sequence,
+        createdAt,
+        entryId: item.id,
+        toolCallId,
+        providerCallId: item.result.toolCallId,
+        name: item.name,
+        args: item.args,
+      });
+      sequence += 1;
+      events.push({
+        type: "tool.completed",
+        eventId: `rpc:${sessionId}:${item.id}:completed`,
+        sequence,
+        createdAt,
+        toolCallId,
+        summary: item.summary ?? item.result.projection.text,
+        result: item.result as unknown as ToolResultEnvelope,
+      });
+      continue;
+    }
+    if (item.kind === "subagent") {
+      const data = item.data as Record<string, unknown> | undefined;
+      const activityId = stringOrUndefined(data?.["activityId"]) ?? item.id;
+      sequence += 1;
+      events.push({
+        type: "subagent.activity.updated",
+        eventId: `rpc:${sessionId}:${item.id}:activity`,
+        sequence,
+        createdAt,
+        entryId: item.id,
+        activityId,
+        activity: {
+          task: item.title,
+          status: subagentStatusOf(item.state),
+          mode: data?.["mode"] === "explore" ? "explore" : "worker",
+          completionPolicy: "required",
+          ...(item.detail ? { summary: item.detail } : {}),
+          ...(item.name ? { agentName: item.name } : {}),
+        },
+      });
+      continue;
+    }
     const entry = entryDataFromRuntimeItem(item);
     if (!entry) continue;
     sequence += 1;
-    const at = numberOrUndefined((item as Record<string, unknown>)["at"]);
     events.push({
       type: "entry.appended",
       eventId: `rpc:${sessionId}:${item.id}`,
@@ -45,6 +86,10 @@ export function transcriptEventsFromRuntimeItems(
     });
   }
   return events;
+}
+
+function stringOrUndefined(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 function numberOrUndefined(value: unknown): number | undefined {
@@ -100,16 +145,6 @@ function entryDataFromRuntimeItem(item: RuntimeConversationItem): TranscriptEntr
         ...(item.finishedAt !== undefined ? { finishedAt: item.finishedAt } : {}),
         ...(item.error ? { error: item.error } : {}),
       };
-    case "subagent":
-      return {
-        kind: "subagent-activity",
-        task: item.title,
-        status: subagentStatusOf(item.state),
-        mode: "worker",
-        completionPolicy: "required",
-        ...(item.detail ? { summary: item.detail } : {}),
-        ...(item.name ? { agentName: item.name } : {}),
-      };
     default:
       // goal 等暂无 TranscriptEntry 对应的 kind：静默跳过（前向兼容）。
       return undefined;
@@ -117,7 +152,9 @@ function entryDataFromRuntimeItem(item: RuntimeConversationItem): TranscriptEntr
 }
 
 function subagentStatusOf(state: string | undefined): SubagentActivityEvent["status"] {
-  return state && SUBAGENT_ACTIVITY_STATUSES.has(state)
-    ? (state as SubagentActivityEvent["status"])
-    : "running";
+  if (state === "pending" || state === "queued") return "queued";
+  if (state === "done" || state === "completed") return "completed";
+  if (state === "partial") return "partial";
+  if (state === "failed" || state === "timed_out" || state === "cancelled") return state;
+  return "running";
 }

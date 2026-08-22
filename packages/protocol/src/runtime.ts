@@ -412,6 +412,51 @@ export type RuntimeQueuedInput = JsonObject & {
   readonly createdAt: number;
 };
 
+export type RuntimeTranscriptDirection = "older" | "newer";
+
+/**
+ * Stable transcript page boundary captured against one fixed high-watermark.
+ * `position`/`ordinal` map to the store record sequence/chunk index; byteOffset
+ * continues an oversized record without replacing the durable ordering key.
+ */
+export type RuntimeTranscriptCursor = JsonObject & {
+  readonly revision: string;
+  readonly throughTranscriptSequence: number;
+  readonly position: number;
+  readonly ordinal: number;
+  readonly byteOffset: number;
+  readonly direction: RuntimeTranscriptDirection;
+};
+
+export function isRuntimeTranscriptCursor(value: unknown): value is RuntimeTranscriptCursor {
+  if (!isJsonObject(value)) return false;
+  const keys = Object.keys(value);
+  return (
+    keys.length === 6 &&
+    keys.every((key) =>
+      [
+        "revision",
+        "throughTranscriptSequence",
+        "position",
+        "ordinal",
+        "byteOffset",
+        "direction",
+      ].includes(key),
+    ) &&
+    typeof value["revision"] === "string" &&
+    value["revision"].length > 0 &&
+    Number.isSafeInteger(value["throughTranscriptSequence"]) &&
+    (value["throughTranscriptSequence"] as number) > 0 &&
+    Number.isSafeInteger(value["position"]) &&
+    (value["position"] as number) >= 0 &&
+    Number.isSafeInteger(value["ordinal"]) &&
+    (value["ordinal"] as number) >= 0 &&
+    Number.isSafeInteger(value["byteOffset"]) &&
+    (value["byteOffset"] as number) >= 0 &&
+    (value["direction"] === "older" || value["direction"] === "newer")
+  );
+}
+
 export type RuntimeToolResultEnvelope = JsonObject & {
   readonly version: 1;
   readonly toolCallId: string;
@@ -739,6 +784,8 @@ export type RuntimeMethodMap = {
   readonly "session.transcript": {
     readonly params: WorkspaceParams & {
       readonly sessionId: SessionId;
+      readonly cursor?: RuntimeTranscriptCursor;
+      /** @deprecated Use the structured fixed-watermark cursor. */
       readonly before?: string;
       readonly limit?: number;
       readonly expectedRevision?: string;
@@ -750,6 +797,8 @@ export type RuntimeMethodMap = {
       readonly queuedInputs: readonly RuntimeQueuedInput[];
       readonly planProjection?: RuntimePlanProjection;
       readonly discoveryProjection?: RuntimeDiscoveryProjection;
+      readonly nextCursor?: RuntimeTranscriptCursor;
+      /** @deprecated Compatibility alias while older clients migrate to nextCursor. */
       readonly nextBefore?: string;
       readonly revision: string;
     };
@@ -2363,6 +2412,11 @@ const positiveIntegerParam: RuntimeParamRule = (value, path) => {
     throw invalidParams(`${path} 必须是正安全整数`);
   }
 };
+const nonNegativeIntegerParam: RuntimeParamRule = (value, path) => {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw invalidParams(`${path} 必须是非负安全整数`);
+  }
+};
 const confidenceParam: RuntimeParamRule = (value, path) => {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
     throw invalidParams(`${path} 必须是 0 到 1 之间的有限数字`);
@@ -2464,6 +2518,38 @@ function assertNestedShape(
     if (Object.hasOwn(value, key)) rule(value[key], `${path}.${key}`);
   }
 }
+
+const runtimeTranscriptCursorParam: RuntimeParamRule = (value, path) => {
+  assertNestedShape(
+    value,
+    path,
+    {
+      revision: boundedNonEmptyStringParam(512),
+      throughTranscriptSequence: positiveIntegerParam,
+      position: nonNegativeIntegerParam,
+      ordinal: nonNegativeIntegerParam,
+      byteOffset: nonNegativeIntegerParam,
+      direction: oneOfParam(["older", "newer"] as const),
+    },
+  );
+};
+
+const runtimeTranscriptParams = exactParamShape(
+  { workspacePath: stringParam, sessionId: stringParam },
+  {
+    cursor: runtimeTranscriptCursorParam,
+    before: stringParam,
+    limit: positiveIntegerParam,
+    expectedRevision: stringParam,
+  },
+);
+
+const runtimeTranscriptParamValidator: RuntimeParamValidator = (value) => {
+  runtimeTranscriptParams(value);
+  if (Object.hasOwn(value, "cursor") && Object.hasOwn(value, "before")) {
+    throw invalidParams("params.cursor 与 params.before 不能同时提供");
+  }
+};
 
 const interactionModeParam = oneOfParam(["default", "plan", "auto", "yolo"] as const);
 const collaborationModeParam = oneOfParam(["agent", "plan"] as const);
@@ -2783,10 +2869,7 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
       expectedRunId: stringParam,
     },
   ),
-  "session.transcript": exactParamShape(
-    { workspacePath: stringParam, sessionId: stringParam },
-    { before: stringParam, limit: finiteNumberParam, expectedRevision: stringParam },
-  ),
+  "session.transcript": runtimeTranscriptParamValidator,
   "session.evidence.read": exactParamShape(
     { workspacePath: stringParam, sessionId: stringParam, evidenceUri: stringParam },
     { offsetBytes: finiteNumberParam, limitBytes: finiteNumberParam },
@@ -3150,6 +3233,16 @@ const resultNonNegativeInteger: RuntimeResultRule = (value, path) => {
 const resultPositiveInteger: RuntimeResultRule = (value, path) => {
   resultNonNegativeInteger(value, path);
   if ((value as number) < 1) throw invalidResult(`${path} 必须是正整数`);
+};
+const runtimeTranscriptCursorResult: RuntimeResultRule = (value, path) => {
+  exactResultShape({
+    revision: resultNonEmptyString,
+    throughTranscriptSequence: resultPositiveInteger,
+    position: resultNonNegativeInteger,
+    ordinal: resultNonNegativeInteger,
+    byteOffset: resultNonNegativeInteger,
+    direction: resultOneOf(["older", "newer"]),
+  })(value, path);
 };
 const resultJsonObject: RuntimeResultRule = (value, path) => {
   if (!isJsonObject(value)) throw invalidResult(`${path} 必须是 JSON 对象`);
@@ -3722,6 +3815,7 @@ const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
     },
     {
       activeRun: runtimeRunResult,
+      nextCursor: runtimeTranscriptCursorResult,
       nextBefore: resultString,
       planProjection: resultJsonObject,
       discoveryProjection: runtimeDiscoveryProjectionResult,

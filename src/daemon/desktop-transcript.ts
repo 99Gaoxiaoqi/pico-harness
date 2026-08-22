@@ -7,6 +7,7 @@ import {
 } from "../presentation/transcript-event-store.js";
 import { hydrateCanonicalTranscriptEvents } from "../presentation/transcript-tool-result-hydration.js";
 import type { RuntimeEventStoreEntry } from "../storage/runtime-event-store-contracts.js";
+import type { RuntimeTranscriptCursor } from "../../packages/protocol/src/runtime.js";
 import {
   projectRuntimeSessionSequencedMessageEntries,
   projectRuntimeSessionState,
@@ -25,11 +26,13 @@ const DEFAULT_TRANSCRIPT_PAGE_BYTES = MAX_RUNTIME_FRAME_BYTES - 64 * 1024;
 
 export interface RuntimeTranscriptPage {
   readonly items: readonly RuntimeConversationItem[];
+  readonly nextCursor?: RuntimeTranscriptCursor;
   readonly nextBefore?: string;
   readonly revision: string;
 }
 
 export interface RuntimeTranscriptProjectionOptions {
+  readonly cursor?: RuntimeTranscriptCursor;
   readonly before?: string;
   readonly limit?: number;
   readonly expectedRevision?: string;
@@ -94,15 +97,39 @@ export function projectRuntimeTranscript(
   snapshot: RuntimeTranscriptSnapshot,
   options: RuntimeTranscriptProjectionOptions,
 ): RuntimeTranscriptPage {
-  const items = projectVisibleItems(snapshot);
-  const revision = transcriptRevision(snapshot);
-  if (options.expectedRevision !== undefined && options.expectedRevision !== revision) {
-    throw new TranscriptRevisionConflict(options.expectedRevision, revision);
+  const orderedItems = projectVisibleItems(snapshot);
+  const currentRevision = transcriptRevision(snapshot);
+  const cursor = options.cursor ?? decodeOptionalCursor(options.before, currentRevision, orderedItems);
+  if (
+    cursor &&
+    (cursor.position > cursor.throughTranscriptSequence ||
+      (snapshot.persistenceSequence !== null &&
+        cursor.throughTranscriptSequence > snapshot.persistenceSequence))
+  ) {
+    throw new TranscriptRevisionConflict(cursor.revision, currentRevision);
+  }
+  const revision = cursor?.revision ?? currentRevision;
+  if (
+    options.expectedRevision !== undefined &&
+    options.expectedRevision !== (cursor?.revision ?? currentRevision)
+  ) {
+    throw new TranscriptRevisionConflict(options.expectedRevision, currentRevision);
   }
 
   const limit = normalizeLimit(options.limit);
-  const end = options.before ? decodeCursor(options.before, revision, items.length) : items.length;
-  return selectPage(items, end, limit, revision, normalizeMaxBytes(options.maxBytes));
+  const throughTranscriptSequence = cursor?.throughTranscriptSequence ?? snapshot.persistenceSequence;
+  const items = orderedItems.filter(
+    (item) =>
+      throughTranscriptSequence === null || item.sequence <= throughTranscriptSequence,
+  );
+  return selectPage(
+    items,
+    cursor,
+    limit,
+    revision,
+    throughTranscriptSequence ?? 0,
+    normalizeMaxBytes(options.maxBytes),
+  );
 }
 
 export class TranscriptRevisionConflict extends Error {
@@ -115,7 +142,7 @@ export class TranscriptRevisionConflict extends Error {
   }
 }
 
-function projectVisibleItems(snapshot: RuntimeTranscriptSnapshot): RuntimeConversationItem[] {
+function projectVisibleItems(snapshot: RuntimeTranscriptSnapshot): OrderedConversationItem[] {
   const structured = projectStructuredItems(snapshot);
   const structuredItems = structured.items;
   const structuredThinkingMatches = matchStructuredThinkingMessages(snapshot, structuredItems);
@@ -230,7 +257,7 @@ function projectVisibleItems(snapshot: RuntimeTranscriptSnapshot): RuntimeConver
         state: activeGoal.status,
         data: { goalId: activeGoal.id },
       },
-      Number.MAX_SAFE_INTEGER,
+      snapshot.persistenceSequence ?? Number.MAX_SAFE_INTEGER,
     );
   }
   items.push(
@@ -250,7 +277,7 @@ function projectVisibleItems(snapshot: RuntimeTranscriptSnapshot): RuntimeConver
     }),
   );
   items.sort((left, right) => left.sequence - right.sequence || left.ordinal - right.ordinal);
-  return items.map(({ item }) => item);
+  return items;
 }
 
 function matchStructuredThinkingMessages(
@@ -537,63 +564,174 @@ function normalizeLimit(limit: number | undefined): number {
   return limit;
 }
 
-function encodeCursor(revision: string, offset: number): string {
-  return Buffer.from(JSON.stringify({ revision, offset }), "utf8").toString("base64url");
+function encodeCursor(cursor: RuntimeTranscriptCursor): string {
+  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
 }
 
-function decodeCursor(cursor: string, revision: string, itemCount: number): number {
+function decodeOptionalCursor(
+  encoded: string | undefined,
+  revision: string,
+  items: readonly OrderedConversationItem[],
+): RuntimeTranscriptCursor | undefined {
+  if (!encoded) return undefined;
   try {
-    const parsed: unknown = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
-    if (
-      !isRecord(parsed) ||
-      parsed["revision"] !== revision ||
-      !Number.isSafeInteger(parsed["offset"]) ||
-      (parsed["offset"] as number) < 0 ||
-      (parsed["offset"] as number) > itemCount
-    ) {
-      throw new Error("stale cursor");
+    const parsed: unknown = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+    if (isTranscriptCursor(parsed)) return parsed;
+    // Compatibility with schema v12's opaque `{revision, offset}` cursor. It is
+    // converted once at the boundary; paging below has only one cursor authority.
+    if (isRecord(parsed) && parsed["revision"] === revision && Number.isSafeInteger(parsed["offset"])) {
+      const offset = parsed["offset"] as number;
+      if (offset < 0 || offset > items.length || items.length === 0) throw new Error("stale cursor");
+      const boundary = items[offset] ?? items.at(-1);
+      if (!boundary) throw new Error("stale cursor");
+      const throughTranscriptSequence = Number(revision);
+      if (!Number.isSafeInteger(throughTranscriptSequence) || throughTranscriptSequence < 1) {
+        throw new Error("stale cursor");
+      }
+      return transcriptCursor(revision, throughTranscriptSequence, boundary, "older");
     }
-    return parsed["offset"] as number;
+    throw new Error("stale cursor");
   } catch {
     throw new TranscriptRevisionConflict("cursor", revision);
   }
 }
 
+function isTranscriptCursor(value: unknown): value is RuntimeTranscriptCursor {
+  if (!isRecord(value)) return false;
+  return (
+    Object.keys(value).length === 6 &&
+    typeof value["revision"] === "string" &&
+    value["revision"].length > 0 &&
+    Number.isSafeInteger(value["throughTranscriptSequence"]) &&
+    (value["throughTranscriptSequence"] as number) > 0 &&
+    Number.isSafeInteger(value["position"]) &&
+    (value["position"] as number) >= 0 &&
+    Number.isSafeInteger(value["ordinal"]) &&
+    (value["ordinal"] as number) >= 0 &&
+    Number.isSafeInteger(value["byteOffset"]) &&
+    (value["byteOffset"] as number) >= 0 &&
+    (value["direction"] === "older" || value["direction"] === "newer")
+  );
+}
+
 function selectPage(
-  items: readonly RuntimeConversationItem[],
-  end: number,
+  items: readonly OrderedConversationItem[],
+  cursor: RuntimeTranscriptCursor | undefined,
   limit: number,
   revision: string,
+  throughTranscriptSequence: number,
   maxBytes: number,
 ): RuntimeTranscriptPage {
+  if (items.length === 0) return { items: [], revision };
+  if (throughTranscriptSequence < 1) return { items: [], revision };
+  if (cursor?.direction === "newer") {
+    return selectNewerPage(items, cursor, limit, revision, throughTranscriptSequence, maxBytes);
+  }
+
+  let end =
+    cursor === undefined
+      ? items.length
+      : items.findIndex((item) => comparePosition(item, cursor) >= 0);
+  if (end < 0) end = items.length;
   let start = end;
   let selected: RuntimeConversationItem[] = [];
   while (start > 0 && selected.length < limit) {
     const candidateStart = start - 1;
-    const nextBefore = candidateStart > 0 ? encodeCursor(revision, candidateStart) : undefined;
-    const candidate = [items[candidateStart]!, ...selected];
-    if (pageBytes(candidate, nextBefore, revision) <= maxBytes) {
+    const boundary = items[candidateStart]!;
+    const nextCursor =
+      candidateStart > 0
+        ? transcriptCursor(revision, throughTranscriptSequence, boundary, "older")
+        : undefined;
+    const candidate = [boundary.item, ...selected];
+    if (pageBytes(candidate, nextCursor, revision) <= maxBytes) {
       selected = candidate;
       start = candidateStart;
       continue;
     }
     if (selected.length === 0) {
-      selected = [fitItemToPage(items[candidateStart]!, nextBefore, revision, maxBytes)];
+      selected = [fitItemToPage(boundary.item, nextCursor, revision, maxBytes)];
       start = candidateStart;
     }
     break;
   }
-  const nextBefore = start > 0 ? encodeCursor(revision, start) : undefined;
+  const nextCursor =
+    start > 0
+      ? transcriptCursor(revision, throughTranscriptSequence, items[start]!, "older")
+      : undefined;
+  const nextBefore = nextCursor ? encodeCursor(nextCursor) : undefined;
   return {
     items: selected,
+    ...(nextCursor ? { nextCursor } : {}),
     ...(nextBefore ? { nextBefore } : {}),
     revision,
   };
 }
 
+function selectNewerPage(
+  items: readonly OrderedConversationItem[],
+  cursor: RuntimeTranscriptCursor,
+  limit: number,
+  revision: string,
+  throughTranscriptSequence: number,
+  maxBytes: number,
+): RuntimeTranscriptPage {
+  let index = items.findIndex((item) => comparePosition(item, cursor) > 0);
+  if (index < 0) return { items: [], revision };
+  const selected: RuntimeConversationItem[] = [];
+  while (index < items.length && selected.length < limit) {
+    const candidate = [...selected, items[index]!.item];
+    const hasMore = index + 1 < items.length;
+    const nextCursor = hasMore
+      ? transcriptCursor(revision, throughTranscriptSequence, items[index]!, "newer")
+      : undefined;
+    if (pageBytes(candidate, nextCursor, revision) <= maxBytes) {
+      selected.push(items[index]!.item);
+      index += 1;
+      continue;
+    }
+    if (selected.length === 0) {
+      selected.push(fitItemToPage(items[index]!.item, nextCursor, revision, maxBytes));
+      index += 1;
+    }
+    break;
+  }
+  const nextCursor =
+    index < items.length
+      ? transcriptCursor(revision, throughTranscriptSequence, items[index - 1]!, "newer")
+      : undefined;
+  return {
+    items: selected,
+    ...(nextCursor ? { nextCursor, nextBefore: encodeCursor(nextCursor) } : {}),
+    revision,
+  };
+}
+
+function transcriptCursor(
+  revision: string,
+  throughTranscriptSequence: number,
+  item: OrderedConversationItem,
+  direction: RuntimeTranscriptCursor["direction"],
+): RuntimeTranscriptCursor {
+  return {
+    revision,
+    throughTranscriptSequence,
+    position: item.sequence,
+    ordinal: item.ordinal,
+    byteOffset: 0,
+    direction,
+  };
+}
+
+function comparePosition(
+  item: OrderedConversationItem,
+  cursor: RuntimeTranscriptCursor,
+): number {
+  return item.sequence - cursor.position || item.ordinal - cursor.ordinal;
+}
+
 function fitItemToPage(
   item: RuntimeConversationItem,
-  nextBefore: string | undefined,
+  nextCursor: RuntimeTranscriptCursor | undefined,
   revision: string,
   maxBytes: number,
 ): RuntimeConversationItem {
@@ -601,13 +739,13 @@ function fitItemToPage(
   let low = 0;
   let high = longestStringLength(item);
   let fitted = truncateConversationItem(item, 0, originalBytes);
-  if (pageBytes([fitted], nextBefore, revision) > maxBytes) {
+  if (pageBytes([fitted], nextCursor, revision) > maxBytes) {
     throw new Error("session.transcript byte budget is too small for item metadata");
   }
   while (low <= high) {
     const middle = Math.floor((low + high) / 2);
     const candidate = truncateConversationItem(item, middle, originalBytes);
-    if (pageBytes([candidate], nextBefore, revision) <= maxBytes) {
+    if (pageBytes([candidate], nextCursor, revision) <= maxBytes) {
       fitted = candidate;
       low = middle + 1;
     } else {
@@ -707,10 +845,14 @@ function boundedItemId(id: string): string {
 
 function pageBytes(
   items: readonly RuntimeConversationItem[],
-  nextBefore: string | undefined,
+  nextCursor: RuntimeTranscriptCursor | undefined,
   revision: string,
 ): number {
-  return utf8Bytes({ items, ...(nextBefore ? { nextBefore } : {}), revision });
+  return utf8Bytes({
+    items,
+    ...(nextCursor ? { nextCursor, nextBefore: encodeCursor(nextCursor) } : {}),
+    revision,
+  });
 }
 
 function utf8Bytes(value: unknown): number {

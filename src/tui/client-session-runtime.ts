@@ -8,6 +8,7 @@ import {
   type RuntimeNotificationMap,
   type RuntimeParams,
   type RuntimeResult,
+  type RuntimeConversationItem,
   type RuntimeUserInput,
 } from "@pico/protocol";
 import type { ApprovalNotice } from "../approval/manager.js";
@@ -16,6 +17,7 @@ import type { PlanApprovalControl } from "./approval-dialogs.js";
 import { DaemonEventReporter } from "./daemon-event-reporter.js";
 import { transcriptEventsFromRuntimeItems } from "./transcript-item-hydration.js";
 import type { TuiReporter } from "./tui-reporter.js";
+import type { RuntimeTranscriptCursor } from "../../packages/protocol/src/runtime.js";
 
 /**
  * 客户端侧 ask-user 请求（wire prompt 的结构化投影——AskUserRequest 的
@@ -93,6 +95,48 @@ export interface ClientSessionRuntimeOptions {
   readonly thinkingOverride?: string;
   /** --graph 启动覆盖（Phase 4）：sessionId 确立后 orchestrationMode=graph 一次。 */
   readonly orchestrationModeOverride?: "graph";
+}
+
+export interface RuntimeTranscriptPagingState {
+  readonly items: readonly RuntimeConversationItem[];
+  readonly revision?: string;
+  readonly nextCursor?: RuntimeTranscriptCursor;
+  readonly nextBefore?: string;
+}
+
+type RuntimeTranscriptPage = RuntimeResult<"session.transcript"> & {
+  readonly nextCursor?: RuntimeTranscriptCursor;
+};
+
+/** Pure page reducer shared by TUI hydration tests and the request loop below. */
+export function advanceRuntimeTranscriptPagingState(
+  state: RuntimeTranscriptPagingState,
+  page: RuntimeTranscriptPage,
+): RuntimeTranscriptPagingState {
+  if (state.revision !== undefined && page.revision !== state.revision) {
+    throw new Error(
+      `Session transcript revision changed during hydration (${state.revision} -> ${page.revision})`,
+    );
+  }
+  if (page.nextCursor && page.nextCursor.revision !== page.revision) {
+    throw new Error("Session transcript cursor revision does not match its page");
+  }
+  if (
+    state.nextCursor &&
+    page.nextCursor &&
+    state.nextCursor.throughTranscriptSequence !== page.nextCursor.throughTranscriptSequence
+  ) {
+    throw new Error("Session transcript high-watermark changed during hydration");
+  }
+
+  const known = new Set(state.items.map((item) => item.id));
+  const older = page.items.filter((item) => !known.has(item.id));
+  return {
+    items: [...older, ...state.items],
+    revision: state.revision ?? page.revision,
+    ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+    ...(!page.nextCursor && page.nextBefore ? { nextBefore: page.nextBefore } : {}),
+  };
 }
 
 export class ClientSessionRuntime {
@@ -377,17 +421,38 @@ export class ClientSessionRuntime {
     // 若已切换（/new 清空或 /resume 换目标）则丢弃——陈旧页不得复活旧 transcript
     // 或重亮已死的 run。
     const sessionId = this.sessionId;
-    const page = await this.client.request("session.transcript", {
+    let state: RuntimeTranscriptPagingState = { items: [] };
+    let page = await this.client.request("session.transcript", {
       workspacePath: this.workspacePath,
       sessionId,
       limit: 200,
     });
+    const activeRun = page.activeRun as { runId?: unknown; status?: unknown } | undefined;
+    const seenBoundaries = new Set<string>();
+    while (true) {
+      state = advanceRuntimeTranscriptPagingState(state, page);
+      const boundary = state.nextCursor ?? state.nextBefore;
+      if (!boundary) break;
+      const boundaryKey =
+        typeof boundary === "string" ? `legacy:${boundary}` : `cursor:${JSON.stringify(boundary)}`;
+      if (seenBoundaries.has(boundaryKey)) {
+        throw new Error("Session transcript pagination cursor did not advance");
+      }
+      seenBoundaries.add(boundaryKey);
+      page = await this.client.request("session.transcript", {
+        workspacePath: this.workspacePath,
+        sessionId,
+        ...(state.nextCursor
+          ? { cursor: state.nextCursor }
+          : { before: state.nextBefore, expectedRevision: state.revision }),
+        limit: 200,
+      });
+    }
     if (this.sessionId !== sessionId) return;
-    this.reporter.replaceTranscriptEvents(transcriptEventsFromRuntimeItems(page.items, sessionId));
+    this.reporter.replaceTranscriptEvents(transcriptEventsFromRuntimeItems(state.items, sessionId));
     // 恢复活跃 run 相位（对抗评审 P1：/resume 进运行中会话须点亮 running、
     // /interrupt 才有目标）——双向对账：无活跃 run 时清掉误亮的相位。活跃口径
     // 经 isActiveRunStatus（水化对账口径，含 paused/cancelling）。
-    const activeRun = page.activeRun as { runId?: unknown; status?: unknown } | undefined;
     const activeRunLive =
       activeRun !== undefined &&
       typeof activeRun.runId === "string" &&

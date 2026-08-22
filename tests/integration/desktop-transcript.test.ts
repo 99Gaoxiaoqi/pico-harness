@@ -12,6 +12,10 @@ import {
 } from "../../src/engine/tool-result-contract.js";
 import type { DurableTranscriptEvent } from "../../src/presentation/transcript-event-store.js";
 import type { Message } from "../../src/schema/message.js";
+import {
+  parseDesktopRuntimeResult,
+  parseStrictRuntimeParams,
+} from "../../packages/protocol/src/runtime.js";
 
 function snapshot(
   messages: readonly Message[],
@@ -454,6 +458,148 @@ test("Desktop transcript ids stay stable when the budget window shifts（第 1 �
   assert.match(narrowItem?.id ?? "", /^item_[0-9a-f]{20}$/u);
   assert.equal(narrowPage.revision, widePage.revision);
   assert.equal(narrowPage.revision, "5");
+});
+
+test("Desktop transcript pages older and newer through one fixed watermark cursor", () => {
+  const messages: Message[] = Array.from({ length: 5 }, (_, index) => ({
+    role: index % 2 === 0 ? "user" : "assistant",
+    content: `message-${index + 1}`,
+  }));
+  const first = projectRuntimeTranscript(snapshot(messages), { limit: 2 });
+  assert.deepEqual(
+    first.items.map((item) => ("content" in item ? item.content : item.kind)),
+    ["message-4", "message-5"],
+  );
+  assert.deepEqual(first.nextCursor, {
+    revision: "5",
+    throughTranscriptSequence: 5,
+    position: 4,
+    ordinal: 3,
+    byteOffset: 0,
+    direction: "older",
+  });
+  assert.ok(first.nextBefore, "legacy service response 必须仍可以只返回 nextBefore");
+
+  const advancedHead = projectRuntimeTranscript(
+    { ...snapshot([...messages, { role: "assistant", content: "message-6" }]), persistenceSequence: 6 },
+    { cursor: first.nextCursor, limit: 2 },
+  );
+  assert.equal(advancedHead.revision, "5", "翻页期间新事件不得推进已捕获水位");
+  assert.deepEqual(
+    advancedHead.items.map((item) => ("content" in item ? item.content : item.kind)),
+    ["message-2", "message-3"],
+  );
+  const legacyPage = projectRuntimeTranscript(snapshot(messages), {
+    before: first.nextBefore,
+    expectedRevision: "5",
+    limit: 2,
+  });
+  assert.deepEqual(
+    legacyPage.items.map((item) => ("content" in item ? item.content : item.kind)),
+    ["message-2", "message-3"],
+  );
+
+  const newer = projectRuntimeTranscript(snapshot(messages), {
+    cursor: {
+      revision: "5",
+      throughTranscriptSequence: 5,
+      position: 2,
+      ordinal: 1,
+      byteOffset: 0,
+      direction: "newer",
+    },
+    limit: 2,
+  });
+  assert.deepEqual(
+    newer.items.map((item) => ("content" in item ? item.content : item.kind)),
+    ["message-3", "message-4"],
+  );
+  assert.equal(newer.nextCursor?.direction, "newer");
+  assert.equal(newer.nextCursor?.position, 4);
+  assert.throws(
+    () =>
+      projectRuntimeTranscript(snapshot(messages), {
+        cursor: {
+          revision: "6",
+          throughTranscriptSequence: 6,
+          position: 6,
+          ordinal: 0,
+          byteOffset: 0,
+          direction: "older",
+        },
+      }),
+    /revision changed/u,
+  );
+});
+
+test("session transcript cursor validators fail closed", () => {
+  const cursor = {
+    revision: "9",
+    throughTranscriptSequence: 9,
+    position: 4,
+    ordinal: 2,
+    byteOffset: 1024,
+    direction: "older" as const,
+  };
+  assert.deepEqual(
+    parseStrictRuntimeParams("session.transcript", {
+      workspacePath: "/workspace",
+      sessionId: "session-1",
+      cursor,
+    }).cursor,
+    cursor,
+  );
+  assert.throws(
+    () =>
+      parseStrictRuntimeParams("session.transcript", {
+        workspacePath: "/workspace",
+        sessionId: "session-1",
+        cursor: { ...cursor, throughTranscriptSequence: 0 },
+      }),
+    /正安全整数/u,
+  );
+  assert.throws(
+    () =>
+      parseStrictRuntimeParams("session.transcript", {
+        workspacePath: "/workspace",
+        sessionId: "session-1",
+        cursor,
+        before: "legacy",
+      }),
+    /不能同时提供/u,
+  );
+
+  const result = {
+    session: {
+      sessionId: "session-1",
+      workspacePath: "/workspace",
+      title: "Session",
+      status: "active",
+      createdAt: 1,
+      updatedAt: 1,
+    },
+    items: [],
+    queuedInputs: [],
+    revision: "9",
+    nextCursor: cursor,
+  };
+  assert.deepEqual(parseDesktopRuntimeResult("session.transcript", result), result);
+  assert.throws(
+    () =>
+      parseDesktopRuntimeResult("session.transcript", {
+        ...result,
+        nextCursor: { ...cursor, byteOffset: -1 },
+      }),
+    /不能为负数/u,
+  );
+  assert.throws(
+    () =>
+      parseDesktopRuntimeResult("session.transcript", {
+        ...result,
+        nextCursor: { ...cursor, direction: "sideways" },
+      }),
+    /older \| newer/u,
+  );
 });
 
 function toolResultEnvelope(
