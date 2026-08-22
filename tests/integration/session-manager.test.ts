@@ -47,6 +47,32 @@ test("SessionManager reuses an entry and drains it after eviction", async () => 
   }
 });
 
+test("SessionManager clearAndDrain releases durable ownership before immediate reuse", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-session-manager-clear-drain-"));
+  const workDir = join(root, "work");
+  const picoHome = join(root, "home");
+  await mkdir(workDir, { recursive: true });
+  const manager = new SessionManager();
+  try {
+    const first = await manager.getOrCreate("clear-drain", workDir, {
+      picoHome,
+      runtimePort: createEngineRuntimePort(),
+    });
+
+    await manager.clearAndDrain();
+    assert.equal(manager.size, 0);
+
+    const reopened = await manager.getOrCreate("clear-drain", workDir, {
+      picoHome,
+      runtimePort: createEngineRuntimePort(),
+    });
+    assert.notStrictEqual(reopened, first);
+  } finally {
+    await manager.clearAndDrain();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("SessionManager publishes a recovered Session with its acquisition pin already held", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-session-manager-pinned-acquire-"));
   const workDir = join(root, "work");

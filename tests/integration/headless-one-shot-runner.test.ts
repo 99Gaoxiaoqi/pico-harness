@@ -29,6 +29,7 @@ import { ClaudeProvider } from "../../src/provider/claude.js";
 import { OpenAIProvider } from "../../src/provider/openai.js";
 import type { Message } from "../../src/schema/message.js";
 import { createToolResultEnvelope } from "../../src/engine/tool-result-contract.js";
+import { globalSessionManager } from "../../src/engine/session.js";
 import { EMPTY_USER_CONFIG_REVISION, UserConfigStore } from "../../src/input/user-config-store.js";
 import {
   runHeadlessOneShotJson,
@@ -40,7 +41,6 @@ import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 import type { RunAgentCliOptions, RunAgentCliResult } from "../../src/runtime/runtime-contract.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { closeAllOperationalDatabasesForTest } from "../../src/storage/sqlite/sqlite-database.js";
-
 
 const PROVIDER_ID = "fixture";
 const MODEL_ID = "fixture-model";
@@ -335,58 +335,59 @@ test(
   "headless image attachments reject unsafe files before Runtime execution",
   { skip: process.platform === "win32" },
   async (context) => {
-  const fixture = await createFixture(context, "images-invalid");
-  await configureFixture(fixture, "secret-canary-images-invalid");
-  const outside = join(fixture.root, "outside.png");
-  const target = join(fixture.workspace, "target.png");
-  const targetSymlink = join(fixture.workspace, "target-link.png");
-  const physicalDirectory = join(fixture.workspace, "physical-directory");
-  const parentSymlink = join(fixture.workspace, "parent-link");
-  const directory = join(fixture.workspace, "directory.png");
-  const fifo = join(fixture.workspace, "pipe.gif");
-  const badMagic = join(fixture.workspace, "bad-magic.webp");
-  await Promise.all([
-    writeFile(outside, imageBytes("image/png", 16)),
-    writeFile(target, imageBytes("image/png", 16)),
-    mkdir(physicalDirectory),
-    mkdir(directory),
-    writeFile(badMagic, Buffer.from("not-a-webp-image", "utf8")),
-  ]);
-  await writeFile(join(physicalDirectory, "nested.png"), imageBytes("image/png", 16));
-  await symlink(target, targetSymlink);
-  await symlink(physicalDirectory, parentSymlink);
-  await execFileAsync("mkfifo", [fifo]);
+    const fixture = await createFixture(context, "images-invalid");
+    await configureFixture(fixture, "secret-canary-images-invalid");
+    const outside = join(fixture.root, "outside.png");
+    const target = join(fixture.workspace, "target.png");
+    const targetSymlink = join(fixture.workspace, "target-link.png");
+    const physicalDirectory = join(fixture.workspace, "physical-directory");
+    const parentSymlink = join(fixture.workspace, "parent-link");
+    const directory = join(fixture.workspace, "directory.png");
+    const fifo = join(fixture.workspace, "pipe.gif");
+    const badMagic = join(fixture.workspace, "bad-magic.webp");
+    await Promise.all([
+      writeFile(outside, imageBytes("image/png", 16)),
+      writeFile(target, imageBytes("image/png", 16)),
+      mkdir(physicalDirectory),
+      mkdir(directory),
+      writeFile(badMagic, Buffer.from("not-a-webp-image", "utf8")),
+    ]);
+    await writeFile(join(physicalDirectory, "nested.png"), imageBytes("image/png", 16));
+    await symlink(target, targetSymlink);
+    await symlink(physicalDirectory, parentSymlink);
+    await execFileAsync("mkfifo", [fifo]);
 
-  const cases = [
-    { name: "outside", path: outside },
-    { name: "missing", path: "missing.png" },
-    { name: "target-symlink", path: "target-link.png" },
-    { name: "parent-symlink", path: join("parent-link", "nested.png") },
-    { name: "directory", path: "directory.png" },
-    { name: "fifo", path: "pipe.gif" },
-    { name: "magic", path: "bad-magic.webp" },
-  ];
-  for (const candidate of cases) {
-    let runtimeCalls = 0;
-    const outcome = await runHeadlessOneShotJson(
-      JSON.stringify({
-        ...requestFor(fixture, `images-invalid-${candidate.name}`),
-        imagePaths: [candidate.path],
-      }),
-      {
-        env: {},
-        executeRuntime: async (options) => {
-          runtimeCalls++;
-          return runtimeResult(options, "must not run");
+    const cases = [
+      { name: "outside", path: outside },
+      { name: "missing", path: "missing.png" },
+      { name: "target-symlink", path: "target-link.png" },
+      { name: "parent-symlink", path: join("parent-link", "nested.png") },
+      { name: "directory", path: "directory.png" },
+      { name: "fifo", path: "pipe.gif" },
+      { name: "magic", path: "bad-magic.webp" },
+    ];
+    for (const candidate of cases) {
+      let runtimeCalls = 0;
+      const outcome = await runHeadlessOneShotJson(
+        JSON.stringify({
+          ...requestFor(fixture, `images-invalid-${candidate.name}`),
+          imagePaths: [candidate.path],
+        }),
+        {
+          env: {},
+          executeRuntime: async (options) => {
+            runtimeCalls++;
+            return runtimeResult(options, "must not run");
+          },
         },
-      },
-    );
-    assert.equal(outcome.exitCode, 2, candidate.name);
-    assert.equal(outcome.result.error?.code, "IMAGE_ATTACHMENT_INVALID", candidate.name);
-    assert.equal(outcome.result.error?.summary.includes(candidate.path), false, candidate.name);
-    assert.equal(runtimeCalls, 0, candidate.name);
-  }
-});
+      );
+      assert.equal(outcome.exitCode, 2, candidate.name);
+      assert.equal(outcome.result.error?.code, "IMAGE_ATTACHMENT_INVALID", candidate.name);
+      assert.equal(outcome.result.error?.summary.includes(candidate.path), false, candidate.name);
+      assert.equal(runtimeCalls, 0, candidate.name);
+    }
+  },
+);
 
 test("headless image attachment inode binding rejects a parent-directory replacement race", async (context) => {
   const fixture = await createFixture(context, "images-parent-race");
@@ -1230,168 +1231,172 @@ test("headless forwards only a complete adapter-gated controlled proxy environme
   assert.equal(JSON.stringify(enabled.outcome.result).includes(token), false);
 });
 
-test("controlled proxy ToolResults are redacted before Provider transcript and Runtime persistence", { skip: process.platform === "win32" }, async (context) => {
-  const fixture = await createFixture(context, "controlled-proxy-bash");
-  await configureFixture(fixture, "secret-canary-controlled-proxy-bash");
-  const token = "b".repeat(64);
-  const ordinaryHex = "0123456789abcdef".repeat(4);
-  const proxyUrl = `http://pico:${token}@pico-egress:8081`;
-  const noProxy = "pico-gateway,main,localhost,127.0.0.1,::1";
-  const safeMarker = "CONTROLLED_PROXY_SAFE_OUTPUT";
-  const env = {
-    PATH: process.env.PATH,
-    HTTP_PROXY: proxyUrl,
-    HTTPS_PROXY: proxyUrl,
-    http_proxy: proxyUrl,
-    https_proxy: proxyUrl,
-    NO_PROXY: noProxy,
-    no_proxy: noProxy,
-  };
-  const controlledProxyCapability =
-    terminalBenchAgentControlledProxyCapability("terminal-bench-agent-v1");
-  assert.ok(controlledProxyCapability);
-  let calls = 0;
-  let secondProviderTranscript = "";
-  let thirdProviderTranscript = "";
-  const outcome = await runHeadlessOneShotJson(
-    JSON.stringify({
-      ...requestFor(fixture, "controlled-proxy-bash"),
-      permissionMode: "yolo",
-      allowedTools: ["bash", "task_output"],
-    }),
-    {
-      env,
-      controlledProxyCapability,
-      providerFactory: () => ({
-        async generate(messages) {
-          calls++;
-          if (calls === 1) {
-            return assistant("", { promptTokens: 5, completionTokens: 2 }, [
-              {
-                id: "proxy-env-background",
-                name: "bash",
-                arguments: JSON.stringify({
-                  command: [
-                    'proxy_token="${HTTP_PROXY#http://pico:}"',
-                    'proxy_token="${proxy_token%@pico-egress:8081}"',
-                    `printf '{"stream":"background","proxy":"%s","token":"%s","marker":"${safeMarker}","ordinary":"${ordinaryHex}"}\\n' "$HTTP_PROXY" "$proxy_token"`,
-                  ].join("; "),
-                  background: true,
-                }),
-              },
-              {
-                id: "proxy-env-success",
-                name: "bash",
-                arguments: JSON.stringify({
-                  command: [
-                    "sleep 0.1",
-                    'proxy_token="${HTTP_PROXY#http://pico:}"',
-                    'proxy_token="${proxy_token%@pico-egress:8081}"',
-                    `printf '{"stream":"stdout","proxy":"%s","token":"%s","noProxy":"%s","marker":"${safeMarker}","ordinary":"${ordinaryHex}"}\\n' "$HTTP_PROXY" "$proxy_token" "$NO_PROXY"`,
-                  ].join("; "),
-                }),
-              },
-            ]);
-          }
-          if (calls === 2) {
-            secondProviderTranscript = JSON.stringify(messages);
-            assert.equal(secondProviderTranscript.includes(proxyUrl), false);
-            assert.equal(secondProviderTranscript.includes(token), false);
-            assert.equal(secondProviderTranscript.includes("[REDACTED]"), true);
-            assert.equal(secondProviderTranscript.includes(noProxy), true);
-            assert.equal(secondProviderTranscript.includes(safeMarker), true);
-            assert.equal(secondProviderTranscript.includes(ordinaryHex), true);
-            assert.equal(secondProviderTranscript.includes("terminal-bench-agent-v1"), false);
-            const foregroundResult = messages.find(
-              (message) => message.toolCallId === "proxy-env-success",
-            );
-            assert.match(foregroundResult?.content ?? "", /\[REDACTED\]/u);
-            assert.match(foregroundResult?.content ?? "", new RegExp(safeMarker, "u"));
-            assert.match(foregroundResult?.content ?? "", new RegExp(ordinaryHex, "u"));
-            const backgroundResult = messages.find(
-              (message) => message.toolCallId === "proxy-env-background",
-            );
-            const taskId = backgroundResult?.content.match(/"taskId":"([^"]+)"/u)?.[1];
-            assert.ok(taskId);
-            return assistant("", { promptTokens: 5, completionTokens: 2 }, [
-              {
-                id: "proxy-background-output",
-                name: "task_output",
-                arguments: JSON.stringify({ taskId }),
-              },
-            ]);
-          }
-          thirdProviderTranscript = JSON.stringify(messages);
-          assert.equal(thirdProviderTranscript.includes(proxyUrl), false);
-          assert.equal(thirdProviderTranscript.includes(token), false);
-          assert.equal(thirdProviderTranscript.includes("[REDACTED]"), true);
-          assert.equal(thirdProviderTranscript.includes(safeMarker), true);
-          assert.equal(thirdProviderTranscript.includes(ordinaryHex), true);
-          const taskOutputResult = messages.find(
-            (message) => message.toolCallId === "proxy-background-output",
-          );
-          assert.match(taskOutputResult?.content ?? "", /\[REDACTED\]/u);
-          assert.match(taskOutputResult?.content ?? "", new RegExp(safeMarker, "u"));
-          assert.match(taskOutputResult?.content ?? "", new RegExp(ordinaryHex, "u"));
-          return assistant("controlled proxy transcript sanitized", {
-            promptTokens: 5,
-            completionTokens: 2,
-          });
-        },
+test(
+  "controlled proxy ToolResults are redacted before Provider transcript and Runtime persistence",
+  { skip: process.platform === "win32" },
+  async (context) => {
+    const fixture = await createFixture(context, "controlled-proxy-bash");
+    await configureFixture(fixture, "secret-canary-controlled-proxy-bash");
+    const token = "b".repeat(64);
+    const ordinaryHex = "0123456789abcdef".repeat(4);
+    const proxyUrl = `http://pico:${token}@pico-egress:8081`;
+    const noProxy = "pico-gateway,main,localhost,127.0.0.1,::1";
+    const safeMarker = "CONTROLLED_PROXY_SAFE_OUTPUT";
+    const env = {
+      PATH: process.env.PATH,
+      HTTP_PROXY: proxyUrl,
+      HTTPS_PROXY: proxyUrl,
+      http_proxy: proxyUrl,
+      https_proxy: proxyUrl,
+      NO_PROXY: noProxy,
+      no_proxy: noProxy,
+    };
+    const controlledProxyCapability =
+      terminalBenchAgentControlledProxyCapability("terminal-bench-agent-v1");
+    assert.ok(controlledProxyCapability);
+    let calls = 0;
+    let secondProviderTranscript = "";
+    let thirdProviderTranscript = "";
+    const outcome = await runHeadlessOneShotJson(
+      JSON.stringify({
+        ...requestFor(fixture, "controlled-proxy-bash"),
+        permissionMode: "yolo",
+        allowedTools: ["bash", "task_output"],
       }),
-    },
-  );
-
-  assert.equal(outcome.result.status, "completed", JSON.stringify(outcome.result));
-  assert.equal(calls, 3);
-  assert.equal(outcome.result.finalMessage, "controlled proxy transcript sanitized");
-  assert.equal(JSON.stringify(outcome.result).includes(token), false);
-  assert.equal(secondProviderTranscript.includes(ordinaryHex), true);
-  assert.equal(thirdProviderTranscript.includes(ordinaryHex), true);
-
-  const runtimeStore = new SqliteRuntimeEventStore({
-    storageRoot: resolvePicoPaths(fixture.workspace, {
-      picoHome: fixture.picoHome,
-    }).workspace.root,
-  });
-  try {
-    const events = await runtimeStore.readSession("session-controlled-proxy-bash");
-    const serializedEvents = JSON.stringify(events);
-    assert.equal(serializedEvents.includes(proxyUrl), false);
-    assert.equal(serializedEvents.includes(token), false);
-    assert.equal(serializedEvents.includes("[REDACTED]"), true);
-    assert.equal(serializedEvents.includes(noProxy), true);
-    assert.equal(serializedEvents.includes(safeMarker), true);
-    assert.equal(serializedEvents.includes(ordinaryHex), true);
-    const toolResults = events.filter((event) => event.kind === "tool.result.recorded");
-    assert.equal(toolResults.length, 3);
-    assert.deepEqual(
-      new Set(toolResults.map((event) => event.data.status)),
-      new Set(["succeeded"]),
+      {
+        env,
+        controlledProxyCapability,
+        providerFactory: () => ({
+          async generate(messages) {
+            calls++;
+            if (calls === 1) {
+              return assistant("", { promptTokens: 5, completionTokens: 2 }, [
+                {
+                  id: "proxy-env-background",
+                  name: "bash",
+                  arguments: JSON.stringify({
+                    command: [
+                      'proxy_token="${HTTP_PROXY#http://pico:}"',
+                      'proxy_token="${proxy_token%@pico-egress:8081}"',
+                      `printf '{"stream":"background","proxy":"%s","token":"%s","marker":"${safeMarker}","ordinary":"${ordinaryHex}"}\\n' "$HTTP_PROXY" "$proxy_token"`,
+                    ].join("; "),
+                    background: true,
+                  }),
+                },
+                {
+                  id: "proxy-env-success",
+                  name: "bash",
+                  arguments: JSON.stringify({
+                    command: [
+                      "sleep 0.1",
+                      'proxy_token="${HTTP_PROXY#http://pico:}"',
+                      'proxy_token="${proxy_token%@pico-egress:8081}"',
+                      `printf '{"stream":"stdout","proxy":"%s","token":"%s","noProxy":"%s","marker":"${safeMarker}","ordinary":"${ordinaryHex}"}\\n' "$HTTP_PROXY" "$proxy_token" "$NO_PROXY"`,
+                    ].join("; "),
+                  }),
+                },
+              ]);
+            }
+            if (calls === 2) {
+              secondProviderTranscript = JSON.stringify(messages);
+              assert.equal(secondProviderTranscript.includes(proxyUrl), false);
+              assert.equal(secondProviderTranscript.includes(token), false);
+              assert.equal(secondProviderTranscript.includes("[REDACTED]"), true);
+              assert.equal(secondProviderTranscript.includes(noProxy), true);
+              assert.equal(secondProviderTranscript.includes(safeMarker), true);
+              assert.equal(secondProviderTranscript.includes(ordinaryHex), true);
+              assert.equal(secondProviderTranscript.includes("terminal-bench-agent-v1"), false);
+              const foregroundResult = messages.find(
+                (message) => message.toolCallId === "proxy-env-success",
+              );
+              assert.match(foregroundResult?.content ?? "", /\[REDACTED\]/u);
+              assert.match(foregroundResult?.content ?? "", new RegExp(safeMarker, "u"));
+              assert.match(foregroundResult?.content ?? "", new RegExp(ordinaryHex, "u"));
+              const backgroundResult = messages.find(
+                (message) => message.toolCallId === "proxy-env-background",
+              );
+              const taskId = backgroundResult?.content.match(/"taskId":"([^"]+)"/u)?.[1];
+              assert.ok(taskId);
+              return assistant("", { promptTokens: 5, completionTokens: 2 }, [
+                {
+                  id: "proxy-background-output",
+                  name: "task_output",
+                  arguments: JSON.stringify({ taskId }),
+                },
+              ]);
+            }
+            thirdProviderTranscript = JSON.stringify(messages);
+            assert.equal(thirdProviderTranscript.includes(proxyUrl), false);
+            assert.equal(thirdProviderTranscript.includes(token), false);
+            assert.equal(thirdProviderTranscript.includes("[REDACTED]"), true);
+            assert.equal(thirdProviderTranscript.includes(safeMarker), true);
+            assert.equal(thirdProviderTranscript.includes(ordinaryHex), true);
+            const taskOutputResult = messages.find(
+              (message) => message.toolCallId === "proxy-background-output",
+            );
+            assert.match(taskOutputResult?.content ?? "", /\[REDACTED\]/u);
+            assert.match(taskOutputResult?.content ?? "", new RegExp(safeMarker, "u"));
+            assert.match(taskOutputResult?.content ?? "", new RegExp(ordinaryHex, "u"));
+            return assistant("controlled proxy transcript sanitized", {
+              promptTokens: 5,
+              completionTokens: 2,
+            });
+          },
+        }),
+      },
     );
-    assert.deepEqual(
-      new Set(toolResults.map((event) => event.data.toolName)),
-      new Set(["bash", "task_output"]),
-    );
-    for (const toolCallId of ["proxy-env-success", "proxy-background-output"]) {
-      const toolResult = toolResults.find((event) => event.refs.toolCallId === toolCallId);
-      const serializedToolResult = JSON.stringify(toolResult);
-      assert.equal(serializedToolResult.includes(proxyUrl), false);
-      assert.equal(serializedToolResult.includes(token), false);
-      assert.equal(serializedToolResult.includes("[REDACTED]"), true);
-      assert.equal(serializedToolResult.includes(safeMarker), true);
-      assert.equal(serializedToolResult.includes(ordinaryHex), true);
+
+    assert.equal(outcome.result.status, "completed", JSON.stringify(outcome.result));
+    assert.equal(calls, 3);
+    assert.equal(outcome.result.finalMessage, "controlled proxy transcript sanitized");
+    assert.equal(JSON.stringify(outcome.result).includes(token), false);
+    assert.equal(secondProviderTranscript.includes(ordinaryHex), true);
+    assert.equal(thirdProviderTranscript.includes(ordinaryHex), true);
+
+    const runtimeStore = new SqliteRuntimeEventStore({
+      storageRoot: resolvePicoPaths(fixture.workspace, {
+        picoHome: fixture.picoHome,
+      }).workspace.root,
+    });
+    try {
+      const events = await runtimeStore.readSession("session-controlled-proxy-bash");
+      const serializedEvents = JSON.stringify(events);
+      assert.equal(serializedEvents.includes(proxyUrl), false);
+      assert.equal(serializedEvents.includes(token), false);
+      assert.equal(serializedEvents.includes("[REDACTED]"), true);
+      assert.equal(serializedEvents.includes(noProxy), true);
+      assert.equal(serializedEvents.includes(safeMarker), true);
+      assert.equal(serializedEvents.includes(ordinaryHex), true);
+      const toolResults = events.filter((event) => event.kind === "tool.result.recorded");
+      assert.equal(toolResults.length, 3);
+      assert.deepEqual(
+        new Set(toolResults.map((event) => event.data.status)),
+        new Set(["succeeded"]),
+      );
+      assert.deepEqual(
+        new Set(toolResults.map((event) => event.data.toolName)),
+        new Set(["bash", "task_output"]),
+      );
+      for (const toolCallId of ["proxy-env-success", "proxy-background-output"]) {
+        const toolResult = toolResults.find((event) => event.refs.toolCallId === toolCallId);
+        const serializedToolResult = JSON.stringify(toolResult);
+        assert.equal(serializedToolResult.includes(proxyUrl), false);
+        assert.equal(serializedToolResult.includes(token), false);
+        assert.equal(serializedToolResult.includes("[REDACTED]"), true);
+        assert.equal(serializedToolResult.includes(safeMarker), true);
+        assert.equal(serializedToolResult.includes(ordinaryHex), true);
+      }
+    } finally {
+      runtimeStore.close();
     }
-  } finally {
-    runtimeStore.close();
-  }
 
-  assert.ok(outcome.result.tracePath);
-  const trace = await readFile(outcome.result.tracePath, "utf8");
-  assert.equal(trace.includes(token), false);
-  assert.equal(trace.includes(proxyUrl), false);
-  assert.equal(trace.includes(ordinaryHex), false);
-});
+    assert.ok(outcome.result.tracePath);
+    const trace = await readFile(outcome.result.tracePath, "utf8");
+    assert.equal(trace.includes(token), false);
+    assert.equal(trace.includes(proxyUrl), false);
+    assert.equal(trace.includes(ordinaryHex), false);
+  },
+);
 
 test("unknown tools fail before provider generation and Session IDs cannot be reused", async (context) => {
   const fixture = await createFixture(context, "invalid-tools");
@@ -1562,65 +1567,69 @@ test("incident-mode policy denial remains recoverable after normal completion", 
   assert.equal(calls, 2);
 });
 
-test("headless hardline summary emits only a fixed reasonKind and no command parameters", { skip: process.platform === "win32" }, async (context) => {
-  const fixture = await createFixture(context, "policy-reason-kind");
-  await configureFixture(fixture, "secret-canary-policy-reason-kind");
-  const commandCanary = "COMMAND_ARGUMENT_MUST_NOT_APPEAR";
-  let calls = 0;
-  const outcome = await runHeadlessOneShotJson(
-    JSON.stringify({
-      ...requestFor(fixture, "policy-reason-kind"),
-      allowedTools: ["bash"],
-      permissionMode: "yolo",
-      policyDenialMode: "incident",
-    }),
-    {
-      env: {},
-      providerFactory: () => ({
-        async generate() {
-          calls++;
-          return calls === 1
-            ? assistant("", undefined, [
-                {
-                  id: "hardline-1",
-                  name: "bash",
-                  arguments: JSON.stringify({
-                    command: `printf blocked > /etc/${commandCanary}`,
-                  }),
-                },
-              ])
-            : assistant("recovered after denial");
-        },
+test(
+  "headless hardline summary emits only a fixed reasonKind and no command parameters",
+  { skip: process.platform === "win32" },
+  async (context) => {
+    const fixture = await createFixture(context, "policy-reason-kind");
+    await configureFixture(fixture, "secret-canary-policy-reason-kind");
+    const commandCanary = "COMMAND_ARGUMENT_MUST_NOT_APPEAR";
+    let calls = 0;
+    const outcome = await runHeadlessOneShotJson(
+      JSON.stringify({
+        ...requestFor(fixture, "policy-reason-kind"),
+        allowedTools: ["bash"],
+        permissionMode: "yolo",
+        policyDenialMode: "incident",
       }),
-    },
-  );
+      {
+        env: {},
+        providerFactory: () => ({
+          async generate() {
+            calls++;
+            return calls === 1
+              ? assistant("", undefined, [
+                  {
+                    id: "hardline-1",
+                    name: "bash",
+                    arguments: JSON.stringify({
+                      command: `printf blocked > /etc/${commandCanary}`,
+                    }),
+                  },
+                ])
+              : assistant("recovered after denial");
+          },
+        }),
+      },
+    );
 
-  assert.equal(outcome.result.status, "completed");
-  assert.deepEqual(outcome.result.policyDenials, {
-    total: 1,
-    byCode: {
-      plan_mode: 0,
-      hardline: 1,
-      hook: 0,
-      approval: 0,
-    },
-    byReasonKind: policyReasonCounts({ protected_redirect: 1 }),
-    first: {
-      source: "safety",
-      code: "hardline",
-      reasonKind: "protected_redirect",
-      toolName: "bash",
-    },
-    last: {
-      source: "safety",
-      code: "hardline",
-      reasonKind: "protected_redirect",
-      toolName: "bash",
-    },
-  });
-  assert.equal(JSON.stringify(outcome.result.policyDenials).includes(commandCanary), false);
-  assert.equal(JSON.stringify(outcome.result.policyDenials).includes("printf blocked"), false);
-});
+    assert.equal(outcome.result.status, "completed");
+    assert.deepEqual(outcome.result.policyDenials, {
+      total: 1,
+      byCode: {
+        plan_mode: 0,
+        hardline: 1,
+        hook: 0,
+        approval: 0,
+      },
+      byReasonKind: policyReasonCounts({ protected_redirect: 1 }),
+      first: {
+        source: "safety",
+        code: "hardline",
+        reasonKind: "protected_redirect",
+        toolName: "bash",
+      },
+      last: {
+        source: "safety",
+        code: "hardline",
+        reasonKind: "protected_redirect",
+        toolName: "bash",
+      },
+    });
+    assert.equal(JSON.stringify(outcome.result.policyDenials).includes(commandCanary), false);
+    assert.equal(JSON.stringify(outcome.result.policyDenials).includes("printf blocked"), false);
+  },
+);
 
 test("policy denial incidents preserve Runtime failure and timeout terminal states", async (context) => {
   const failedFixture = await createFixture(context, "policy-runtime-failure");
@@ -2102,37 +2111,39 @@ test(
   "the internal process entry maps SIGTERM to canceled/143 with one JSON line",
   { skip: process.platform === "win32" },
   async (context) => {
-  const serverFixture = await createFakeOpenAiServer(context, true);
-  const fixture = await createFixture(context, "process-signal");
-  await configureFixture(fixture, "secret-canary-process-signal", true, serverFixture.baseURL);
+    const serverFixture = await createFakeOpenAiServer(context, true);
+    const fixture = await createFixture(context, "process-signal");
+    await configureFixture(fixture, "secret-canary-process-signal", true, serverFixture.baseURL);
 
-  const child = spawnHeadlessProcess();
-  const collected = collectChild(child, JSON.stringify(requestFor(fixture, "process-signal")));
-  await serverFixture.called;
-  child.kill("SIGTERM");
-  const result = await collected;
+    const child = spawnHeadlessProcess();
+    const collected = collectChild(child, JSON.stringify(requestFor(fixture, "process-signal")));
+    await serverFixture.called;
+    child.kill("SIGTERM");
+    const result = await collected;
 
-  assert.equal(result.code, 143);
-  assert.equal(result.stdout.trim().split("\n").length, 1);
-  const payload = JSON.parse(result.stdout) as { status: string; error: { code: string } };
-  assert.equal(payload.status, "canceled");
-  assert.equal(payload.error.code, "SIGTERM");
-  assert.equal(result.stderr.includes("secret-canary-process-signal"), false);
-});
+    assert.equal(result.code, 143);
+    assert.equal(result.stdout.trim().split("\n").length, 1);
+    const payload = JSON.parse(result.stdout) as { status: string; error: { code: string } };
+    assert.equal(payload.status, "canceled");
+    assert.equal(payload.error.code, "SIGTERM");
+    assert.equal(result.stderr.includes("secret-canary-process-signal"), false);
+  },
+);
 
 test(
   "SIGINT and SIGTERM cancel while stdin remains open",
   { skip: process.platform === "win32" },
   async () => {
-  for (const signal of ["SIGINT", "SIGTERM"] as const) {
-    const result = await runProcessWithOpenStdin(signal);
-    assert.equal(result.code, signal === "SIGTERM" ? 143 : 130);
-    assert.equal(result.stdout.trim().split("\n").length, 1);
-    const payload = JSON.parse(result.stdout) as { status: string; error: { code: string } };
-    assert.equal(payload.status, "canceled");
-    assert.equal(payload.error.code, signal);
-  }
-});
+    for (const signal of ["SIGINT", "SIGTERM"] as const) {
+      const result = await runProcessWithOpenStdin(signal);
+      assert.equal(result.code, signal === "SIGTERM" ? 143 : 130);
+      assert.equal(result.stdout.trim().split("\n").length, 1);
+      const payload = JSON.parse(result.stdout) as { status: string; error: { code: string } };
+      assert.equal(payload.status, "canceled");
+      assert.equal(payload.error.code, signal);
+    }
+  },
+);
 
 test("dead CLI owners are recovered after unconfirmed exit and SIGKILL", async (context) => {
   const timeoutFixture = await createFixture(context, "dead-owner-timeout");
@@ -2204,6 +2215,7 @@ async function createFixture(
   const picoHome = join(root, "pico-home");
   await Promise.all([mkdir(workspace), mkdir(picoHome)]);
   context.after(async () => {
+    await globalSessionManager.clearAndDrain();
     closeAllOperationalDatabasesForTest();
     await rm(root, { recursive: true, force: true });
   });
