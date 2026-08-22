@@ -57,7 +57,9 @@ export async function applyTuiRewind(input: {
       input.createTargetSessionId ?? defaultTargetSessionId,
     );
     reporter.pushSystemMessage(formatRewindSuccess(snapshot, mode));
-    return { ...(fork.targetSessionId !== session.id ? { forkedSessionId: fork.targetSessionId } : {}) };
+    return {
+      ...(fork.targetSessionId !== session.id ? { forkedSessionId: fork.targetSessionId } : {}),
+    };
   }
 
   if (snapshot.transcriptIndex === undefined) {

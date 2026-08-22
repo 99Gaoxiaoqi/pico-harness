@@ -116,7 +116,10 @@ test("outputs above MAX_TOOL_RESULT_BYTES are rejected as a deterministic synthe
   assert.match(gated.inlineContent, /read_file/u);
   // 元数据描述 inline 合成事实本身,满足事件完整性校验(sha256/sizeBytes ↔ content)。
   assert.equal(gated.rawSizeBytes, Buffer.byteLength(gated.inlineContent, "utf8"));
-  assert.equal(gated.rawSha256, createHash("sha256").update(gated.inlineContent, "utf8").digest("hex"));
+  assert.equal(
+    gated.rawSha256,
+    createHash("sha256").update(gated.inlineContent, "utf8").digest("hex"),
+  );
   assert.deepEqual(
     { ...gated.projection, text: "..." },
     {

@@ -45,8 +45,7 @@ export const MAX_SUMMARY_CHARS = 1500;
  * 用 XML 风格标签确保弱模型难以改写/省略,detectExistingCompactionSummary 和
  * findLastCompactionCheckpoint 都用此标签做精确匹配。
  */
-const SUMMARY_END_MARKER =
-  `${COMPACTION_SUMMARY_CLOSE_TAG}\n--- 历史摘要结束 — 请回复下方消息,而非上方摘要 ---`;
+const SUMMARY_END_MARKER = `${COMPACTION_SUMMARY_CLOSE_TAG}\n--- 历史摘要结束 — 请回复下方消息,而非上方摘要 ---`;
 
 /** 摘要器系统提示词:约束模型只做摘要、不调用工具 */
 const COMPACTION_SYSTEM_PROMPT =
@@ -317,9 +316,7 @@ export class FullCompactor {
     const fullPrefix = sanitizeToolPairs(history.slice(0, cut.compactedCount));
     const prefix =
       previousSummary && previousSummary.trim().length > 0
-        ? fullPrefix.filter(
-            (msg) => !msg.content.startsWith(FULL_COMPACTION_SUMMARY_MARKER),
-          )
+        ? fullPrefix.filter((msg) => !msg.content.startsWith(FULL_COMPACTION_SUMMARY_MARKER))
         : fullPrefix;
 
     return {
@@ -426,10 +423,10 @@ export class FullCompactor {
     const envPrefix = buildEnvironmentContext(this.workDir, session);
     const fullPrefix = envPrefix ? `${envPrefix}\n\n${serialized}` : serialized;
     if (previousSummary && previousSummary.trim().length > 0) {
-      return COMPACTION_INCREMENTAL_TEMPLATE.replace(
-        "{previousSummary}",
-        previousSummary,
-      ).replace("{prefix}", fullPrefix);
+      return COMPACTION_INCREMENTAL_TEMPLATE.replace("{previousSummary}", previousSummary).replace(
+        "{prefix}",
+        fullPrefix,
+      );
     }
     return COMPACTION_INSTRUCTION_TEMPLATE.replace("{prefix}", fullPrefix);
   }
@@ -490,14 +487,7 @@ export function enforceSummaryCharLimit(summary: string, maxChars: number): stri
   }
 
   // 优先级:任务目标 > 关键上下文 > 已尝试/失败路径 > 关键决策 > 进展 > 下一步
-  const priority = [
-    "任务目标",
-    "关键上下文",
-    "已尝试/失败路径",
-    "关键决策",
-    "进展",
-    "下一步",
-  ];
+  const priority = ["任务目标", "关键上下文", "已尝试/失败路径", "关键决策", "进展", "下一步"];
   // 按优先级逐段加入,超预算的低优先段整体丢弃。
   // title 已含 "## " 前缀(split 产出),不能再前置。
   const kept: string[] = [];
@@ -522,7 +512,10 @@ export function enforceSummaryCharLimit(summary: string, maxChars: number): stri
 /**
  * 构造环境元信息前缀,注入摘要指令让 summarizer 知道任务所在仓库和运行环境。
  */
-function buildEnvironmentContext(workDir: string | undefined, session: Session): string | undefined {
+function buildEnvironmentContext(
+  workDir: string | undefined,
+  session: Session,
+): string | undefined {
   const lines: string[] = [];
   if (workDir) lines.push(`- 工作目录: ${workDir}`);
   lines.push(`- 平台: ${process.platform}`);

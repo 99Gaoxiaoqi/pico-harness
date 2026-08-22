@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { rememberResolvedCliSession } from "../input/session-settings.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
-import { SqliteRuntimeEventStore, type SqliteSessionCatalogEntry } from "../storage/sqlite/sqlite-runtime-event-store.js";
+import {
+  SqliteRuntimeEventStore,
+  type SqliteSessionCatalogEntry,
+} from "../storage/sqlite/sqlite-runtime-event-store.js";
 import {
   isPublishedSession,
   type CliSessionSummary,
@@ -130,9 +133,7 @@ export async function listCliSessionCatalogEntries(
   const forkTargets = await indexForkTargetOperations(workDir, options.picoHome);
   try {
     const entries = await store.listSessionCatalogEntries();
-    return entries.filter((entry) =>
-      isPublishedSession(entry.summary.id, entry.fold, forkTargets),
-    );
+    return entries.filter((entry) => isPublishedSession(entry.summary.id, entry.fold, forkTargets));
   } finally {
     store.close();
   }
@@ -213,10 +214,7 @@ export async function removeCliSessionFile(
   }
 }
 
-function createRuntimeEventStore(
-  workDir: string,
-  picoHome?: string,
-): SqliteRuntimeEventStore {
+function createRuntimeEventStore(workDir: string, picoHome?: string): SqliteRuntimeEventStore {
   return new SqliteRuntimeEventStore({
     storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
   });

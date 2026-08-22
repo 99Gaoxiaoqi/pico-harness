@@ -172,10 +172,7 @@ export function isBashShell(shell: string): boolean {
 export function isPowerShell(shell: string): boolean {
   const name = basename(shell.replaceAll("\\", "/")).toLowerCase();
   return (
-    name === "pwsh" ||
-    name === "pwsh.exe" ||
-    name === "powershell" ||
-    name === "powershell.exe"
+    name === "pwsh" || name === "pwsh.exe" || name === "powershell" || name === "powershell.exe"
   );
 }
 

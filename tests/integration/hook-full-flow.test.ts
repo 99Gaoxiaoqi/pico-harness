@@ -49,8 +49,7 @@ test("shell 化 hook 全链路：deny 场景——决策信封阻断工具并携
   const fixture = await createFixture(context, "flow-deny");
   const target = join(fixture.workspace, "target.txt");
   await writeFile(target, "SHOULD_NOT_BE_READ\n");
-  const command =
-    `node -e 'process.stdout.write(JSON.stringify({decision:"deny",reason:"e2e-blocked-by-hook"}))'`;
+  const command = `node -e 'process.stdout.write(JSON.stringify({decision:"deny",reason:"e2e-blocked-by-hook"}))'`;
   const handler: CommandHookHandler = { type: "command", command };
   const source = projectSource(fixture.workspace);
   await writeHookConfig(fixture.workspace, "PreToolUse", handler);

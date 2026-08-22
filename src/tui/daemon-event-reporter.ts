@@ -122,24 +122,18 @@ export class DaemonEventReporter {
         this.handleLiveItem(payload);
         return;
       case "approval.requested":
-        this.onApprovalRequested?.(
-          payload as RuntimeNotificationMap["approval.requested"],
-          {
-            workspacePath: event.scope.workspacePath,
-            ...(event.scope.runId ? { runId: event.scope.runId } : {}),
-            ...(event.scope.sessionId ? { sessionId: event.scope.sessionId } : {}),
-          },
-        );
+        this.onApprovalRequested?.(payload as RuntimeNotificationMap["approval.requested"], {
+          workspacePath: event.scope.workspacePath,
+          ...(event.scope.runId ? { runId: event.scope.runId } : {}),
+          ...(event.scope.sessionId ? { sessionId: event.scope.sessionId } : {}),
+        });
         return;
       case "prompt.requested":
-        this.onPromptRequested?.(
-          payload as RuntimeNotificationMap["prompt.requested"],
-          {
-            workspacePath: event.scope.workspacePath,
-            ...(event.scope.runId ? { runId: event.scope.runId } : {}),
-            ...(event.scope.sessionId ? { sessionId: event.scope.sessionId } : {}),
-          },
-        );
+        this.onPromptRequested?.(payload as RuntimeNotificationMap["prompt.requested"], {
+          workspacePath: event.scope.workspacePath,
+          ...(event.scope.runId ? { runId: event.scope.runId } : {}),
+          ...(event.scope.sessionId ? { sessionId: event.scope.sessionId } : {}),
+        });
         return;
       default:
         return;

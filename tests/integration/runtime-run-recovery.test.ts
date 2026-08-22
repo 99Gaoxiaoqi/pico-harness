@@ -117,7 +117,6 @@ test("reconciliation reuses a rewritten active model start despite a transcript-
   );
 });
 
-
 async function createFixture(context: test.TestContext, suffix: string) {
   const root = await mkdtemp(join(tmpdir(), `pico-runtime-run-${suffix}-`));
   const session = new Session(`runtime-run-${suffix}`, join(root, "workspace"), {

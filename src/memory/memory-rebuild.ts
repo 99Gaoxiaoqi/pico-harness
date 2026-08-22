@@ -2,14 +2,15 @@ import { resolve } from "node:path";
 import { setImmediate as yieldToHost } from "node:timers/promises";
 import type { MemoryRepositoryContract } from "./memory-repository.js";
 import type { TerminalMemoryEvidenceRef } from "./proposal-contracts.js";
-import { MEMORY_PROPOSAL_EXTRACTOR_VERSION, MEMORY_PROPOSAL_JOB_TYPE } from "./proposal-contracts.js";
+import {
+  MEMORY_PROPOSAL_EXTRACTOR_VERSION,
+  MEMORY_PROPOSAL_JOB_TYPE,
+} from "./proposal-contracts.js";
 import {
   MEMORY_SCAN_SESSION_PAGE_SIZE,
   readCanonicalRecoveryRefs,
 } from "../runtime/memory-review-recovery.js";
-import {
-  RUNTIME_EVENT_STORE_MAX_PAGE_SIZE,
-} from "../storage/runtime-event-store-contracts.js";
+import { RUNTIME_EVENT_STORE_MAX_PAGE_SIZE } from "../storage/runtime-event-store-contracts.js";
 import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 
 /**
@@ -61,7 +62,7 @@ export async function rebuildDerivedFromRuntimeEvent(
 
   let scannedSessions = 0;
   let scannedTerminals = 0;
-  let rebuiltSources = 0;
+  const rebuiltSources = 0;
   let enqueuedJobs = 0;
   let skippedExisting = 0;
   const errors: string[] = [];
@@ -71,12 +72,26 @@ export async function rebuildDerivedFromRuntimeEvent(
   // new extraction jobs would be a no-op (worker returns disabled). Skip the scan entirely so the
   // report reflects reality and we don't churn the jobs ledger for a disabled workspace.
   if (!settings.enabled || !settings.autoPropose) {
-    return { scannedSessions, scannedTerminals, rebuiltSources, enqueuedJobs, skippedExisting, errors };
+    return {
+      scannedSessions,
+      scannedTerminals,
+      rebuiltSources,
+      enqueuedJobs,
+      skippedExisting,
+      errors,
+    };
   }
 
   const upperBound = await runtimeEventStore.getSessionManifestScanUpperBound();
   if (!upperBound) {
-    return { scannedSessions, scannedTerminals, rebuiltSources, enqueuedJobs, skippedExisting, errors };
+    return {
+      scannedSessions,
+      scannedTerminals,
+      rebuiltSources,
+      enqueuedJobs,
+      skippedExisting,
+      errors,
+    };
   }
 
   let before:
@@ -127,7 +142,14 @@ export async function rebuildDerivedFromRuntimeEvent(
     if (manifests.length < sessionPageSize) break;
   }
 
-  return { scannedSessions, scannedTerminals, rebuiltSources, enqueuedJobs, skippedExisting, errors };
+  return {
+    scannedSessions,
+    scannedTerminals,
+    rebuiltSources,
+    enqueuedJobs,
+    skippedExisting,
+    errors,
+  };
 }
 
 interface EnqueueTerminalOutcome {

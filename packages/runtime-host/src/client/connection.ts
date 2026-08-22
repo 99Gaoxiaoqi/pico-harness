@@ -113,8 +113,10 @@ class ElectionDeadlineElapsedError extends Error {
   }
 }
 
-interface ConnectResolvedRuntimeHostInput
-  extends Omit<ConnectRuntimeHostInput, "rootPath" | "clientInstanceId"> {
+interface ConnectResolvedRuntimeHostInput extends Omit<
+  ConnectRuntimeHostInput,
+  "rootPath" | "clientInstanceId"
+> {
   capability: StorageRootCapability<"interactive">;
   clientInstanceId: string;
   controlDirectory: string;

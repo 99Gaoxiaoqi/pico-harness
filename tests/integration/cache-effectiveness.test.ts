@@ -323,7 +323,9 @@ test("usage.get excludes baselines from cache ratios and honors the call time ra
   const workspacePath = await mkdtemp(join(tmpdir(), "pico-cache-effectiveness-"));
   const picoHome = join(workspacePath, "pico-home");
   const env = { PICO_HOME: picoHome };
-  const store = new SqliteRuntimeControlStore({ storageRoot: resolvePicoPaths(workspacePath, { picoHome }).workspace.root });
+  const store = new SqliteRuntimeControlStore({
+    storageRoot: resolvePicoPaths(workspacePath, { picoHome }).workspace.root,
+  });
   store.recordProviderCall({
     ...providerCall(
       "old",

@@ -61,9 +61,9 @@ claim 成功 seal source）。
 - C2 claim 成功隐含：claim 时刻源为 interrupted 终态、digest 与账本一致。
 - C3 claim 事务只读源账本，只写 claims 行（含改绑 UPDATE）；目标关联只经 run.started。
 - C4 已 claim 的源 run 追加非恢复类事件被拒（源封口，claim-scoped）；未 claim 的终态
-   run 保持开放（fork/记忆通道兼容）；幂等重放不受影响。**批内语义**：同一 append 批内
-   `run.terminal` 插入后，同 run 的后续新事件同样被拒（终态必须是该 run 批内最后一条
-   新事实）——2026-08-20 对抗审查补记，现有批形天然满足。
+  run 保持开放（fork/记忆通道兼容）；幂等重放不受影响。**批内语义**：同一 append 批内
+  `run.terminal` 插入后，同 run 的后续新事件同样被拒（终态必须是该 run 批内最后一条
+  新事实）——2026-08-20 对抗审查补记，现有批形天然满足。
 
 集成测试：interrupted run → claim 成功（digest/high_water 正确）→ 二次 claim 冲突 →
 源追加被拒 → 目标 run.started 携带 continuationOf。

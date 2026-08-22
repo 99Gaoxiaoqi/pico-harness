@@ -41,7 +41,10 @@ export function acquireGraphWorkLease(
 }
 
 /** 当前 lease 持有者快照（无 lease 返回 undefined）。 */
-export function readGraphWorkLease(store: SqliteRuntimeControlStore, workId: string): GraphWorkLeaseHolder | undefined {
+export function readGraphWorkLease(
+  store: SqliteRuntimeControlStore,
+  workId: string,
+): GraphWorkLeaseHolder | undefined {
   return store.getLease(graphWorkLeaseKey(workId));
 }
 

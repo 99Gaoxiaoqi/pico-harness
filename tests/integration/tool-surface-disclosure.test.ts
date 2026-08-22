@@ -47,7 +47,13 @@ test("headless 宿主派生与白名单完全一致（read_evidence 已随 E3 �
 });
 
 test("background 宿主亲和性收编原 UNSAFE_BACKGROUND_TOOLS 语义", () => {
-  for (const name of ["ask_user", "schedule_task", "delegate_task", "delegate_status", "spawn_subagent"]) {
+  for (const name of [
+    "ask_user",
+    "schedule_task",
+    "delegate_task",
+    "delegate_status",
+    "spawn_subagent",
+  ]) {
     assert.equal(isToolSupportedForHost(name, "background"), false, name);
   }
   for (const name of ["read_file", "bash", "grep", "task_list"]) {
@@ -140,10 +146,7 @@ test("LoadToolsTool 枚举激活：命中即 discloseGroup + 回调", async () =
   assert.deepEqual(loaded, [["web", ["fetch_url", "web_search"]]]);
 
   // 未知组报错并列出可用组
-  await assert.rejects(
-    () => tool.execute(JSON.stringify({ group: "nope" })),
-    /未知工具组 "nope"/,
-  );
+  await assert.rejects(() => tool.execute(JSON.stringify({ group: "nope" })), /未知工具组 "nope"/);
   // 参数解析失败
   await assert.rejects(() => tool.execute("not json"), /参数解析失败/);
 });
@@ -239,9 +242,9 @@ test("durable 往返：store append tool.group.loaded → readSessionEntries →
     disclosure.seedFromEvents(entries.map((entry) => entry.event as { kind: string }));
     assert.deepEqual(disclosure.getLoadedGroups(), ["web"]);
     assert.deepEqual(
-      disclosure.pickForLLM([def("fetch_url"), def("web_search"), def("read_file")]).map(
-        (t) => t.name,
-      ),
+      disclosure
+        .pickForLLM([def("fetch_url"), def("web_search"), def("read_file")])
+        .map((t) => t.name),
       ["fetch_url", "web_search", "read_file"],
     );
     store.close();
@@ -256,10 +259,7 @@ test("幻影组防御：组成员未注册时 load_tools 拒绝假承诺（审�
   // registry 里只有 web 组成员，graph 组工具未注册（非 graph 模式会话的现实）
   const registered = () => ["fetch_url", "web_search", "read_file"];
   const tool = new LoadToolsTool(groups, disclosure, registered);
-  await assert.rejects(
-    () => tool.execute(JSON.stringify({ group: "graph" })),
-    /在当前环境不可用/,
-  );
+  await assert.rejects(() => tool.execute(JSON.stringify({ group: "graph" })), /在当前环境不可用/);
   assert.deepEqual(disclosure.getLoadedGroups(), [], "拒绝后不得留下任何加载状态");
   // 部分注册：只披露真实存在的成员
   const partial = new LoadToolsTool(groups, disclosure, () => ["fetch_url", "read_file"]);

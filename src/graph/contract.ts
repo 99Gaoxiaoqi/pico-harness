@@ -35,7 +35,11 @@ export class GraphConflictError extends Error {
   }
 }
 
-export function workIdFor(graphId: string, instruction: string, inputIds: readonly string[]): string {
+export function workIdFor(
+  graphId: string,
+  instruction: string,
+  inputIds: readonly string[],
+): string {
   const hash = createHash("sha256")
     .update(`${graphId}:${instruction}:${[...inputIds].sort().join(",")}`)
     .digest("hex");
@@ -59,8 +63,7 @@ export function normalizeGraphWorkInput(input: GraphWorkInput): {
   mode: "explore" | "worker";
 } {
   const instruction = input.instruction?.trim();
-  if (!instruction)
-    throw new GraphConflictError("Graph work instruction must not be empty");
+  if (!instruction) throw new GraphConflictError("Graph work instruction must not be empty");
   const inputIds = input.inputIds ?? [];
   for (const id of inputIds) {
     if (typeof id !== "string" || !id.trim())

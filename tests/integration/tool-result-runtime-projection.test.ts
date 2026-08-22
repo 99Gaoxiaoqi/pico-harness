@@ -371,7 +371,7 @@ test("subagent Runtime ToolResult persists full inline before the transcript pro
     (event) =>
       event.kind === "message.committed" &&
       (event as { data: { message: Message } }).data.message.providerData?.["picoKind"] ===
-      "subagent_report",
+        "subagent_report",
   ) as unknown as { data: { message: Message } } | undefined;
   assert.ok(reportMessage);
   assert.equal(reportMessage.data.message.content, fullReport);

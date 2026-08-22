@@ -114,9 +114,7 @@ export class ChildRunLimiter {
 }
 
 function abortReason(signal: AbortSignal): Error {
-  return signal.reason instanceof Error
-    ? signal.reason
-    : new Error("子代理等待执行容量时被取消");
+  return signal.reason instanceof Error ? signal.reason : new Error("子代理等待执行容量时被取消");
 }
 
 export function resolveChildRunCapacity(

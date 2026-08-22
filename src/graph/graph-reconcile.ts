@@ -22,9 +22,7 @@ export function computeReadyWorks(projection: GraphProjection): GraphWork[] {
  * this stays a pure read of the works slice.
  */
 export function hasPendingWorks(projection: GraphProjection): boolean {
-  return projection.works.some(
-    (w) => w.status === "requested" || w.status === "dispatched",
-  );
+  return projection.works.some((w) => w.status === "requested" || w.status === "dispatched");
 }
 
 /**

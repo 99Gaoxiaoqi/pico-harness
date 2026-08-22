@@ -3,9 +3,7 @@ import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import {
-  MEMORY_SOURCE_NOTIFICATION_JOB_TYPE,
-} from "../../src/memory/memory-repository.js";
+import { MEMORY_SOURCE_NOTIFICATION_JOB_TYPE } from "../../src/memory/memory-repository.js";
 import { SqliteMemoryRepository } from "../../src/storage/sqlite/sqlite-memory-repository.js";
 import { SOURCE_AVAILABILITIES } from "../../src/memory/domain.js";
 import {

@@ -17,9 +17,7 @@ import {
   setSessionMode,
   snapshotSessionSettings,
 } from "../../src/input/session-settings.js";
-import {
-  RUNTIME_EVENT_SCHEMA_VERSION,
-} from "../../src/storage/runtime-event.js";
+import { RUNTIME_EVENT_SCHEMA_VERSION } from "../../src/storage/runtime-event.js";
 import {
   RuntimeEventStoreHighWaterConflictError,
   RuntimeEventStorePlanOperationConflictError,

@@ -509,7 +509,10 @@ export class DesktopMemoryService {
     }
   }
 
-  private deliverForgottenNotifications(repository: SqliteMemoryRepository, workspacePath: string): void {
+  private deliverForgottenNotifications(
+    repository: SqliteMemoryRepository,
+    workspacePath: string,
+  ): void {
     while (true) {
       const jobs = repository.listJobs({
         statuses: ["queued"],
@@ -562,7 +565,10 @@ export class DesktopMemoryService {
     }
   }
 
-  private deliverSourceNotifications(repository: SqliteMemoryRepository, workspacePath: string): void {
+  private deliverSourceNotifications(
+    repository: SqliteMemoryRepository,
+    workspacePath: string,
+  ): void {
     while (true) {
       const jobs = repository.listJobs({
         statuses: ["queued"],
@@ -871,9 +877,10 @@ function lifecycleOperationId(
     .digest("hex");
 }
 
-function assertLifecycleReason(
-  reason: { readonly availability: "unavailable"; readonly code: string },
-): void {
+function assertLifecycleReason(reason: {
+  readonly availability: "unavailable";
+  readonly code: string;
+}): void {
   if (
     reason.code.length === 0 ||
     reason.code.length > 256 ||

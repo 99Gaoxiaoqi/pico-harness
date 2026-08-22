@@ -178,7 +178,7 @@ export interface EventsReplayBridgeInput {
   limit?: number;
 }
 
-export interface EventsReplayBridgeOutput extends BridgeNotificationPage {}
+export type EventsReplayBridgeOutput = BridgeNotificationPage;
 
 export interface RuntimeRequestBridgeInput {
   /** Any daemon RuntimeMethod; validated single-source via parseStrictRuntimeParams. */
@@ -294,13 +294,23 @@ export const PICO_RUNTIME_HOST_SHUTDOWN_OPERATION_SPEC = {
     availability: "ready",
     errors: BRIDGE_ERRORS,
     decodeInput: (value): Record<string, never> => {
-      if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length > 0) {
+      if (
+        !value ||
+        typeof value !== "object" ||
+        Array.isArray(value) ||
+        Object.keys(value).length > 0
+      ) {
         throw invalidProtocolFrame("runtime.shutdown input must be an empty object");
       }
       return {};
     },
     decodeOutput: (value): Record<string, never> => {
-      if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length > 0) {
+      if (
+        !value ||
+        typeof value !== "object" ||
+        Array.isArray(value) ||
+        Object.keys(value).length > 0
+      ) {
         throw invalidProtocolFrame("runtime.shutdown result must be an empty object");
       }
       return {};
@@ -312,27 +322,12 @@ export const PICO_RUNTIME_HOST_SHUTDOWN_OPERATION_SPEC = {
 // 两组 spec map 的具体 Input/Output 各不相同，统一的泛型基类让同一组 Infer*
 // 条件类型可复用于两个 map。
 type BridgeSpec = AnyOperationSpec;
-type InferBridgeInput<S extends BridgeSpec> = S extends OperationSpec<
-  infer Input,
-  unknown,
-  HostOperationErrorCode
->
-  ? Input
-  : never;
-type InferBridgeOutput<S extends BridgeSpec> = S extends OperationSpec<
-  unknown,
-  infer Output,
-  HostOperationErrorCode
->
-  ? Output
-  : never;
-type InferBridgeError<S extends BridgeSpec> = S extends OperationSpec<
-  unknown,
-  unknown,
-  infer ErrorCode
->
-  ? ErrorCode
-  : never;
+type InferBridgeInput<S extends BridgeSpec> =
+  S extends OperationSpec<infer Input, unknown, HostOperationErrorCode> ? Input : never;
+type InferBridgeOutput<S extends BridgeSpec> =
+  S extends OperationSpec<unknown, infer Output, HostOperationErrorCode> ? Output : never;
+type InferBridgeError<S extends BridgeSpec> =
+  S extends OperationSpec<unknown, unknown, infer ErrorCode> ? ErrorCode : never;
 
 /**
  * Per-request capability surface the kernel passes to bridged handlers. A

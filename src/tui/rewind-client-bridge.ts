@@ -23,7 +23,9 @@ interface RewindListResult {
 
 export function snapshotSummariesFromRewindList(result: unknown): FileHistorySnapshotSummary[] {
   const checkpoints =
-    typeof result === "object" && result !== null && Array.isArray((result as RewindListResult).checkpoints)
+    typeof result === "object" &&
+    result !== null &&
+    Array.isArray((result as RewindListResult).checkpoints)
       ? (result as RewindListResult).checkpoints!
       : [];
   return checkpoints.map((checkpoint) => {
@@ -60,7 +62,8 @@ export function diffStatFromRewindPreview(
   result: unknown,
   checkpointId: string,
 ): RewindPreviewProjection {
-  const record = typeof result === "object" && result !== null ? (result as Record<string, unknown>) : {};
+  const record =
+    typeof result === "object" && result !== null ? (result as Record<string, unknown>) : {};
   const changes = Array.isArray(record["changes"]) ? record["changes"] : [];
   const files: FileHistoryDiffFileStat[] = [];
   let addedLines = 0;
@@ -69,7 +72,12 @@ export function diffStatFromRewindPreview(
     if (typeof change !== "object" || change === null) continue;
     const entry = change as Record<string, unknown>;
     const status = readString(entry["status"]);
-    if (status !== "added" && status !== "modified" && status !== "deleted" && status !== "renamed") {
+    if (
+      status !== "added" &&
+      status !== "modified" &&
+      status !== "deleted" &&
+      status !== "renamed"
+    ) {
       continue;
     }
     const additions = readNumber(entry["additions"]) ?? 0;
@@ -78,8 +86,7 @@ export function diffStatFromRewindPreview(
     removedLines += deletions;
     files.push({
       filePath: readString(entry["path"]) ?? "(unknown)",
-      status:
-        status === "added" ? "created" : status === "deleted" ? "deleted" : "modified",
+      status: status === "added" ? "created" : status === "deleted" ? "deleted" : "modified",
       addedLines: additions,
       removedLines: deletions,
     });
@@ -105,7 +112,8 @@ export function diffStatFromRewindPreview(
  * （restoreFile 的 expectedFingerprint 守卫）。
  */
 export function changesModelFromRewindChanges(result: unknown): ChangesPanelModel {
-  const record = typeof result === "object" && result !== null ? (result as Record<string, unknown>) : {};
+  const record =
+    typeof result === "object" && result !== null ? (result as Record<string, unknown>) : {};
   const wireFiles = Array.isArray(record["files"]) ? record["files"] : [];
   const files = wireFiles
     .filter((file): file is Record<string, unknown> => typeof file === "object" && file !== null)
@@ -126,7 +134,10 @@ export function changesModelFromRewindChanges(result: unknown): ChangesPanelMode
     addedLines: readNumber(record["addedLines"]) ?? 0,
     removedLines: readNumber(record["removedLines"]) ?? 0,
     files,
-    patch: files.map((file) => file.patch).filter(Boolean).join("\n\n"),
+    patch: files
+      .map((file) => file.patch)
+      .filter(Boolean)
+      .join("\n\n"),
     ...(record["partial"] === true ? { incomplete: true } : {}),
     ...(warnings.length > 0 ? { warnings } : {}),
   } as FileHistoryChanges;

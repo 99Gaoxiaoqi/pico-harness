@@ -142,9 +142,5 @@ test("runtime-host skeleton: incompatible compatibility epoch is rejected at han
     handshakeTimeoutMs: 5000,
     electionDeadline: performance.now() + 15000,
   });
-  assert.equal(
-    connectResult.kind,
-    "incompatible",
-    "protocol 区间不重叠时应返回 incompatible",
-  );
+  assert.equal(connectResult.kind, "incompatible", "protocol 区间不重叠时应返回 incompatible");
 });

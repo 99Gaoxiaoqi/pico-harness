@@ -1732,10 +1732,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       sessionId: params.sessionId,
       kinds: ["tool.result.recorded"],
     });
-    if (
-      !sliceSnapshot ||
-      sliceSnapshot.manifest.workDir !== manifestWorkspaceForm(canonical)
-    ) {
+    if (!sliceSnapshot || sliceSnapshot.manifest.workDir !== manifestWorkspaceForm(canonical)) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.NOT_FOUND,
         `Session ${params.sessionId} 不属于工作区 ${canonical}`,
@@ -3181,7 +3178,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       const revision = this.projectCapabilityRevision("mcp", "user", result.resultRevision);
       if (!result.replayed) await this.publishCapabilityConfigUpdated("mcp", revision);
       return toJsonValue({
-        server: projectPublicMcpServer({ ...definition, config: result.snapshot.config.mcpServers[params.serverName] ?? definition.config }),
+        server: projectPublicMcpServer({
+          ...definition,
+          config: result.snapshot.config.mcpServers[params.serverName] ?? definition.config,
+        }),
         revision,
       });
     } catch (error) {
@@ -3454,25 +3454,21 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     // Non-destructive rewind: 从 checkpoint 创建新 Session（fork）。
     // 原 Session 完全不变，因此不再需要 Memory Source 失效——fork 不会破坏任何账本。
     const targetSessionId = this.createSessionId();
-    const forkedSessionId = await this.withSession(
-      canonical,
-      params.sessionId,
-      async (session) => {
-        const expectedFingerprints = await projectDesktopRewindFingerprints(
-          session,
-          params.checkpointId,
-          params.expectedFingerprint,
-        );
-        const fork = await session.forkFromCheckpoint(
-          params.checkpointId,
-          params.mode ?? "both",
-          createSessionForkRuntimePort(),
-          () => targetSessionId,
-          expectedFingerprints,
-        );
-        return fork.targetSessionId;
-      },
-    );
+    const forkedSessionId = await this.withSession(canonical, params.sessionId, async (session) => {
+      const expectedFingerprints = await projectDesktopRewindFingerprints(
+        session,
+        params.checkpointId,
+        params.expectedFingerprint,
+      );
+      const fork = await session.forkFromCheckpoint(
+        params.checkpointId,
+        params.mode ?? "both",
+        createSessionForkRuntimePort(),
+        () => targetSessionId,
+        expectedFingerprints,
+      );
+      return fork.targetSessionId;
+    });
     const session = await this.requireSession(canonical, forkedSessionId);
     this.publishSession(session);
     this.publishTranscriptUpdate(canonical, forkedSessionId, "reload");
@@ -3547,9 +3543,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     );
     // wire 的 path 是 displayChangePath 的产物（工作区内正斜杠相对路径，或绝对
     // 路径）；恢复侧必须还原成快照记录的绝对路径。
-    const absolute = isAbsolute(params.path)
-      ? params.path
-      : resolve(canonical, params.path);
+    const absolute = isAbsolute(params.path) ? params.path : resolve(canonical, params.path);
     return this.withSession(canonical, params.sessionId, async (session) => {
       const result = await fileHistoryRestoreFile(
         session.fileHistory,
@@ -3835,7 +3829,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       picoHome: this.picoHome,
       env: this.env,
     });
-    const requireRef = (): { readonly id: string; readonly scope: "user" | "project" | "local" } => {
+    const requireRef = (): {
+      readonly id: string;
+      readonly scope: "user" | "project" | "local";
+    } => {
       if (!params.id || !params.scope) {
         throw new RuntimeProtocolError(
           RUNTIME_ERROR_CODES.INVALID_PARAMS,
@@ -3858,7 +3855,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
             "plugin.manage install 需要 path 与 scope",
           );
         }
-        return toJsonValue({ result: { install: await service.install(params.path, params.scope) } });
+        return toJsonValue({
+          result: { install: await service.install(params.path, params.scope) },
+        });
       }
       case "trust.prepare": {
         const reference = requireRef();
@@ -3885,9 +3884,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       case "enable":
       case "disable": {
         const reference = requireRef();
-        await (params.action === "enable"
-          ? service.enable(reference)
-          : service.disable(reference));
+        await (params.action === "enable" ? service.enable(reference) : service.disable(reference));
         return toJsonValue({ result: { ok: true } });
       }
     }
@@ -5023,9 +5020,7 @@ function normalizeRuntimeUserInput(value: RuntimeUserInput): RuntimeUserInput {
  * 调用方如队列重放）。合法形状原样保留，缺省返回 undefined，malformed 抛
  * INVALID_PARAMS——上限与协议层一致（4 张 / 总 256KB 解码后）。
  */
-function normalizeInputAttachments(
-  value: unknown,
-): readonly RuntimeInputAttachment[] | undefined {
+function normalizeInputAttachments(value: unknown): readonly RuntimeInputAttachment[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value) || value.length === 0) {
     throw new RuntimeProtocolError(

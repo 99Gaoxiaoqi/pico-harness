@@ -13,12 +13,12 @@
 
 **行业调研：坚持 Git Bash 的产品在本机同样会坏。**
 
-| 产品 | Windows 策略 | bash.exe 被删时 |
-|---|---|---|
-| maka | pwsh > powershell > cmd，不用 bash | 免疫 |
-| Claude Code | 强制 Git Bash，找不到直接退出进程 | 完全不可用 |
-| kimi-code | 强制 Git Bash，找不到抛错 | 完全不可用 |
-| pico（旧） | 强制 Git Bash，fail-closed | 完全不可用 |
+| 产品        | Windows 策略                       | bash.exe 被删时 |
+| ----------- | ---------------------------------- | --------------- |
+| maka        | pwsh > powershell > cmd，不用 bash | 免疫            |
+| Claude Code | 强制 Git Bash，找不到直接退出进程  | 完全不可用      |
+| kimi-code   | 强制 Git Bash，找不到抛错          | 完全不可用      |
+| pico（旧）  | 强制 Git Bash，fail-closed         | 完全不可用      |
 
 **安全层调研：Windows 上的 bash 静态红线是纸面承诺。** pico 旧模型依赖
 bash-hardline 静态分类器作为不可绕过的拒绝地板。但调研确认：

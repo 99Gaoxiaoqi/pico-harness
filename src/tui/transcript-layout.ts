@@ -123,7 +123,10 @@ function entryRows(
   }
   if (entry.kind === "run-boundary") {
     if (entry.status === "failed" && entry.error) {
-      return buildErrorEntryRows({ kind: "error", message: entry.error, retryable: true }, wrapWidth).length + 1;
+      return (
+        buildErrorEntryRows({ kind: "error", message: entry.error, retryable: true }, wrapWidth)
+          .length + 1
+      );
     }
     return 1;
   }

@@ -799,7 +799,8 @@ export class SqliteMemoryRepository implements MemoryRepositoryContract {
         const at = this.timestamp();
         const finalKind = patch?.kind ?? current.kind;
         const finalTitle = patch?.title ?? requireStoredText(current.title, "proposal title");
-        const finalContent = patch?.content ?? requireStoredText(current.content, "proposal content");
+        const finalContent =
+          patch?.content ?? requireStoredText(current.content, "proposal content");
         const finalReason = patch?.reason ?? requireStoredText(current.reason, "proposal reason");
         const finalConfidence = patch?.confidence ?? current.confidence;
         let fact: Fact | undefined;
@@ -1096,10 +1097,7 @@ export class SqliteMemoryRepository implements MemoryRepositoryContract {
     const sessionId = requireNonEmpty(input.sessionId, "sessionId", MAX_ID_LENGTH);
     const type = requireNonEmpty(input.type, "type", 128);
     const extractorVersion = requireNonEmpty(input.extractorVersion, "extractorVersion", 128);
-    const afterSequence = normalizeOptionalNonNegativeInteger(
-      input.afterSequence,
-      "afterSequence",
-    );
+    const afterSequence = normalizeOptionalNonNegativeInteger(input.afterSequence, "afterSequence");
     const errorCode = normalizeOptionalCode(input.errorCode, "errorCode");
     if (!errorCode) throw new Error("errorCode is required");
     const prefix = requireNonEmpty(input.idempotencyKeyPrefix, "idempotencyKeyPrefix", 512);
@@ -1277,10 +1275,9 @@ export class SqliteMemoryRepository implements MemoryRepositoryContract {
   }
 
   private getMetadataValueLocked(key: string): unknown {
-    const row = this.getRow(
-      `SELECT value_json FROM memory_metadata WHERE key = ?`,
-      key,
-    ) as { value_json?: unknown } | undefined;
+    const row = this.getRow(`SELECT value_json FROM memory_metadata WHERE key = ?`, key) as
+      | { value_json?: unknown }
+      | undefined;
     if (row === undefined) return undefined;
     const json = row["value_json"];
     if (typeof json !== "string") {
@@ -1692,7 +1689,9 @@ export class SqliteMemoryRepository implements MemoryRepositoryContract {
   }
 
   private getRow(sql: string, ...params: SQLInputValue[]): Record<string, unknown> | undefined {
-    return this.database().prepare(sql).get(...params) as Record<string, unknown> | undefined;
+    return this.database()
+      .prepare(sql)
+      .get(...params) as Record<string, unknown> | undefined;
   }
 
   private getNumber(sql: string, ...params: SQLInputValue[]): number | undefined {
@@ -1707,7 +1706,9 @@ export class SqliteMemoryRepository implements MemoryRepositoryContract {
   }
 
   private mutate(sql: string, ...params: SQLInputValue[]): void {
-    this.database().prepare(sql).run(...params);
+    this.database()
+      .prepare(sql)
+      .run(...params);
     this.markDirty();
   }
 
@@ -1795,7 +1796,10 @@ function rowToSource(row: Record<string, unknown>, workspaceId: WorkspaceId): So
     sourceId,
     workspaceId,
     sessionId: requireRowString(row["session_id"], `memory_sources[${sourceId}].session_id`),
-    ...optionalField(optionalRowString(row["run_id"], `memory_sources[${sourceId}].run_id`), "runId"),
+    ...optionalField(
+      optionalRowString(row["run_id"], `memory_sources[${sourceId}].run_id`),
+      "runId",
+    ),
     ...optionalField(
       optionalRowString(row["branch_id"], `memory_sources[${sourceId}].branch_id`),
       "branchId",
@@ -1828,10 +1832,7 @@ function rowToSource(row: Record<string, unknown>, workspaceId: WorkspaceId): So
       "invalidatedAt",
     ),
     ...optionalField(
-      optionalRowString(
-        row["invalidation_code"],
-        `memory_sources[${sourceId}].invalidation_code`,
-      ),
+      optionalRowString(row["invalidation_code"], `memory_sources[${sourceId}].invalidation_code`),
       "invalidationCode",
     ),
     version: requireRowPositiveInteger(row["version"], `memory_sources[${sourceId}].version`),
@@ -1846,13 +1847,19 @@ function rowToFact(row: Record<string, unknown>, workspaceId: WorkspaceId): Fact
     factId,
     workspaceId,
     kind: requireRowEnum(row["kind"], MEMORY_KINDS, `memory_facts[${factId}].kind`),
-    title: row["title"] === null ? null : requireRowString(row["title"], `memory_facts[${factId}].title`),
+    title:
+      row["title"] === null
+        ? null
+        : requireRowString(row["title"], `memory_facts[${factId}].title`),
     content:
       row["content"] === null
         ? null
         : requireRowString(row["content"], `memory_facts[${factId}].content`),
     confidence: requireRowNumber(row["confidence"], `memory_facts[${factId}].confidence`),
-    ...optionalField(optionalRowString(row["source_id"], `memory_facts[${factId}].source_id`), "sourceId"),
+    ...optionalField(
+      optionalRowString(row["source_id"], `memory_facts[${factId}].source_id`),
+      "sourceId",
+    ),
     state: requireRowEnum(row["state"], FACT_STATES, `memory_facts[${factId}].state`),
     pinned: row["pinned"] === 1,
     ...optionalTimestampField(
@@ -1896,18 +1903,28 @@ function rowToProposal(row: Record<string, unknown>, workspaceId: WorkspaceId): 
       optionalRowString(row["source_id"], `memory_proposals[${proposalId}].source_id`),
       "sourceId",
     ),
-    status: requireRowEnum(row["status"], PROPOSAL_STATUSES, `memory_proposals[${proposalId}].status`),
+    status: requireRowEnum(
+      row["status"],
+      PROPOSAL_STATUSES,
+      `memory_proposals[${proposalId}].status`,
+    ),
     conflictStatus: requireRowEnum(
       row["conflict_status"],
       PROPOSAL_CONFLICT_STATUSES,
       `memory_proposals[${proposalId}].conflict_status`,
     ),
     ...optionalField(
-      optionalRowString(row["conflict_fact_id"], `memory_proposals[${proposalId}].conflict_fact_id`),
+      optionalRowString(
+        row["conflict_fact_id"],
+        `memory_proposals[${proposalId}].conflict_fact_id`,
+      ),
       "conflictFactId",
     ),
     ...optionalField(
-      optionalRowString(row["resolved_fact_id"], `memory_proposals[${proposalId}].resolved_fact_id`),
+      optionalRowString(
+        row["resolved_fact_id"],
+        `memory_proposals[${proposalId}].resolved_fact_id`,
+      ),
       "resolvedFactId",
     ),
     version: requireRowPositiveInteger(row["version"], `memory_proposals[${proposalId}].version`),
@@ -1940,7 +1957,10 @@ function rowToJob(row: Record<string, unknown>, workspaceId: WorkspaceId): Job {
       `memory_jobs[${jobId}].extractor_version`,
     ),
     cursor: decodeJobCursor(row["cursor_json"], jobId),
-    ...optionalField(optionalRowString(row["source_id"], `memory_jobs[${jobId}].source_id`), "sourceId"),
+    ...optionalField(
+      optionalRowString(row["source_id"], `memory_jobs[${jobId}].source_id`),
+      "sourceId",
+    ),
     attemptCount: requireRowNonNegativeInteger(
       row["attempt_count"],
       `memory_jobs[${jobId}].attempt_count`,
@@ -2547,10 +2567,7 @@ function optionalPositiveField(
   return value === undefined ? {} : { [key]: value };
 }
 
-function optionalTimestampField(
-  value: string | undefined,
-  key: string,
-): Record<string, string> {
+function optionalTimestampField(value: string | undefined, key: string): Record<string, string> {
   return value === undefined ? {} : { [key]: value };
 }
 

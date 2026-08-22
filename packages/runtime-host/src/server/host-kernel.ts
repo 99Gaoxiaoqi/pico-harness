@@ -186,11 +186,7 @@ export class RuntimeHostKernel {
       if (host) {
         if (host.#endpoint) {
           host.#requestDrain();
-          try {
-            await host.closed;
-          } catch (shutdownError) {
-            throw shutdownError;
-          }
+          await host.closed;
         } else {
           await host.#abortStartup();
         }
@@ -271,13 +267,9 @@ export class RuntimeHostKernel {
               new Promise<never>((_, reject) => {
                 recoverDeadlineTimer = setTimeout(() => {
                   this.#requestDrain();
-                  this.#appendDiagnosticLog(
-                    "composition recover exceeded the startup deadline",
-                  );
+                  this.#appendDiagnosticLog("composition recover exceeded the startup deadline");
                   reject(
-                    new Error(
-                      "Runtime Host composition recover exceeded the startup deadline",
-                    ),
+                    new Error("Runtime Host composition recover exceeded the startup deadline"),
                   );
                 }, RECOVER_STARTUP_DEADLINE_MS);
               }),

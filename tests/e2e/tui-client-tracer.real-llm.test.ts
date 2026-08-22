@@ -66,7 +66,9 @@ realModelTest(
     t.after(async () => {
       const sessionId = runtime.activeSessionId;
       if (sessionId) {
-        await client.request("session.delete", { workspacePath: workspaceDir, sessionId }).catch(() => undefined);
+        await client
+          .request("session.delete", { workspacePath: workspaceDir, sessionId })
+          .catch(() => undefined);
       }
       await client
         .request("workspace.trust", { workspacePath: workspaceDir, trusted: false })
@@ -146,10 +148,7 @@ realModelTest(
   },
 );
 
-async function waitForCondition(
-  condition: () => boolean,
-  timeoutMs: number,
-): Promise<boolean> {
+async function waitForCondition(condition: () => boolean, timeoutMs: number): Promise<boolean> {
   const deadline = performance.now() + timeoutMs;
   while (!condition()) {
     if (performance.now() > deadline) return false;

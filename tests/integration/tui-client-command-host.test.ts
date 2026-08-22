@@ -92,7 +92,12 @@ test("command host: selector dialogs carry data (model routes / sessions)", () =
       type: "local",
       action: "model",
       ui: { kind: "open-selector", selector: "model" },
-      data: { modelRoutes: [{ id: "p1/m1", name: "m1" }, { id: "p1/m2", name: "m2" }] },
+      data: {
+        modelRoutes: [
+          { id: "p1/m1", name: "m1" },
+          { id: "p1/m2", name: "m2" },
+        ],
+      },
     },
     harness.deps,
   );
@@ -105,7 +110,14 @@ test("command host: selector dialogs carry data (model routes / sessions)", () =
       action: "resume",
       ui: { kind: "open-selector", selector: "session" },
       data: [
-        { id: "s1", cwd: "C:\\ws", createdAt: new Date(1), updatedAt: new Date(2), title: "A", isCurrent: true },
+        {
+          id: "s1",
+          cwd: "C:\\ws",
+          createdAt: new Date(1),
+          updatedAt: new Date(2),
+          title: "A",
+          isCurrent: true,
+        },
         { id: "s2", cwd: "C:\\ws", createdAt: new Date(1), updatedAt: new Date(3), title: "B" },
       ],
     },

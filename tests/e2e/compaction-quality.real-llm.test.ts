@@ -61,11 +61,11 @@ compactionTest(
     const session = createInMemorySession();
 
     for (const testCase of compactionQualityCases) {
-      const preview = await compactor.preview(
-        session,
-        testCase.history,
-        { inputBudgetTokens: 4_000, targetRetainedTokens: 1, trigger: "manual" },
-      );
+      const preview = await compactor.preview(session, testCase.history, {
+        inputBudgetTokens: 4_000,
+        targetRetainedTokens: 1,
+        trigger: "manual",
+      });
       assert.ok(preview, `case ${testCase.id}: 应生成摘要`);
 
       const summary = preview.summary;
@@ -104,11 +104,11 @@ compactionTest(
     const baseHistory = [...testCase.history];
 
     // 第一次压缩
-    const preview1 = await compactor.preview(
-      session,
-      baseHistory,
-      { inputBudgetTokens: 4_000, targetRetainedTokens: 1, trigger: "manual" },
-    );
+    const preview1 = await compactor.preview(session, baseHistory, {
+      inputBudgetTokens: 4_000,
+      targetRetainedTokens: 1,
+      trigger: "manual",
+    });
     assert.ok(preview1, "第一次压缩应成功");
     console.log(`\n=== 第一次摘要 ===\n${preview1.summary}\n`);
 
@@ -156,11 +156,11 @@ compactionTest(
     const baseHistory = [...testCase.history];
 
     // 第 1 轮压缩
-    const preview1 = await compactor.preview(
-      session,
-      baseHistory,
-      { inputBudgetTokens: 4_000, targetRetainedTokens: 1, trigger: "manual" },
-    );
+    const preview1 = await compactor.preview(session, baseHistory, {
+      inputBudgetTokens: 4_000,
+      targetRetainedTokens: 1,
+      trigger: "manual",
+    });
     assert.ok(preview1, "第 1 轮压缩应成功");
     console.log(`\n=== 第 1 轮摘要 ===\n${preview1.summary.slice(0, 200)}...\n`);
 

@@ -51,9 +51,7 @@ const debuggingCase: CompactionQualityCase = {
       ),
     ),
     assistantMessage(
-      padded(
-        "我来帮你排查。先看报错信息,然后定位到具体文件。问题可能出在类型定义上。",
-      ),
+      padded("我来帮你排查。先看报错信息,然后定位到具体文件。问题可能出在类型定义上。"),
     ),
     assistantToolMessage("我先运行 tsc 查看完整报错。", [
       {
@@ -77,18 +75,24 @@ const debuggingCase: CompactionQualityCase = {
           "根因是 readonly Message[] 传给了期望 mutable Message[] 的函数。修复方案是把 findSafeCompactionCut 的参数改成 readonly Message[]。",
       ),
     ),
-    assistantToolMessage("我已确认 safe-compaction-boundary.ts 的 findSafeCompactionCut 签名,修改它的参数类型。", [
-      {
-        id: "call_debug_2",
-        name: "edit",
-        arguments: JSON.stringify({
-          file: "src/context/safe-compaction-boundary.ts",
-          old: "function findSafeCompactionCut(messages: Message[]",
-          new: "function findSafeCompactionCut(messages: readonly Message[]",
-        }),
-      },
-    ]),
-    toolResultMessage(padded("已修改 safe-compaction-boundary.ts:86 的 findSafeCompactionCut 参数类型。", 4), "call_debug_2"),
+    assistantToolMessage(
+      "我已确认 safe-compaction-boundary.ts 的 findSafeCompactionCut 签名,修改它的参数类型。",
+      [
+        {
+          id: "call_debug_2",
+          name: "edit",
+          arguments: JSON.stringify({
+            file: "src/context/safe-compaction-boundary.ts",
+            old: "function findSafeCompactionCut(messages: Message[]",
+            new: "function findSafeCompactionCut(messages: readonly Message[]",
+          }),
+        },
+      ],
+    ),
+    toolResultMessage(
+      padded("已修改 safe-compaction-boundary.ts:86 的 findSafeCompactionCut 参数类型。", 4),
+      "call_debug_2",
+    ),
     assistantMessage(
       padded(
         "修复完成。根因是 findSafeCompactionCut 的参数声明为 Message[] 而非 readonly Message[],导致从 createPreviewPlan 传入 readonly 数组时报 TS2345。" +
@@ -190,7 +194,10 @@ const refactoringCase: CompactionQualityCase = {
       },
     ]),
     toolResultMessage(
-      padded("已重构 evidence-archive.ts:createEvidenceStore 工厂函数已加入,EvidenceArchive.create 标记 deprecated。", 4),
+      padded(
+        "已重构 evidence-archive.ts:createEvidenceStore 工厂函数已加入,EvidenceArchive.create 标记 deprecated。",
+        4,
+      ),
       "call_refac_2",
     ),
     assistantMessage(
@@ -269,7 +276,10 @@ const multiFileCase: CompactionQualityCase = {
       },
     ]),
     toolResultMessage(
-      padded("已实现 tool-result-observation.ts:DEFAULT_RUNTIME_PROJECTION_THRESHOLD_TOKENS = 2048,超过则归档。", 4),
+      padded(
+        "已实现 tool-result-observation.ts:DEFAULT_RUNTIME_PROJECTION_THRESHOLD_TOKENS = 2048,超过则归档。",
+        4,
+      ),
       "call_multi_1",
     ),
     assistantToolMessage("接着在 evidence-archive.ts 新增 archiveRuntimeToolResult 方法。", [
@@ -283,7 +293,10 @@ const multiFileCase: CompactionQualityCase = {
       },
     ]),
     toolResultMessage(
-      padded("已实现 evidence-archive.ts:archiveRuntimeToolResult 写入 SHA-256 内容寻址 blob,返回 pico://evidence URI。", 4),
+      padded(
+        "已实现 evidence-archive.ts:archiveRuntimeToolResult 写入 SHA-256 内容寻址 blob,返回 pico://evidence URI。",
+        4,
+      ),
       "call_multi_2",
     ),
     assistantToolMessage("在 loop.ts 集成归档,工具结果超过阈值时替换 body 并披露 read_evidence。", [

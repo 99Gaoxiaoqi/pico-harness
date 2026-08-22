@@ -127,12 +127,15 @@ test("F1 assistant 已提交未派发 → not_dispatched 合成结果声明未�
   assert.ok(result.data.projection.text.includes("从未交给执行器执行"));
   assert.ok(!result.data.projection.text.includes("可能已实际执行"));
   // 恢复只补齐 transcript start + 合成 result + interrupted 终态,无其他写入。
-  assert.deepEqual(after.map((event) => event.kind), [
-    ...before.map((event) => event.kind),
-    "transcript.event.recorded",
-    "tool.result.recorded",
-    "run.terminal",
-  ]);
+  assert.deepEqual(
+    after.map((event) => event.kind),
+    [
+      ...before.map((event) => event.kind),
+      "transcript.event.recorded",
+      "tool.result.recorded",
+      "run.terminal",
+    ],
+  );
   const terminal = after.at(-1)!;
   assert.equal(terminal.kind, "run.terminal");
   assert.equal(terminal.data.status, "interrupted");
@@ -166,9 +169,7 @@ test("F2 已派发无结果 → indeterminate 合成结果如实声明可能已�
   await RuntimeRun.repairSessionProjection(scene.session, {
     capability: scene.session.runtimeEventCapability!,
   });
-  const visible = scene.session
-    .getModelContext()
-    .find((message) => message.toolCallId === call.id);
+  const visible = scene.session.getModelContext().find((message) => message.toolCallId === call.id);
   assert.ok(visible, "synthetic recovery result must enter the model context");
   assert.ok(visible.content.includes("可能已实际执行"));
 });
@@ -265,11 +266,14 @@ test("I5 分类矩阵：同一 run 内 F1/F2 混合并存，逐调用分类唯�
   const scene = await createScene(context, "tool-recovery-matrix");
   const dispatchedCall = toolCall("call:matrix-dispatched");
   const notDispatchedCall = toolCall("call:matrix-not-dispatched");
-  await scene.run.commitMessages(
-    scene.session,
-    [assistantToolCallMessage(dispatchedCall, notDispatchedCall)],
+  await scene.run.commitMessages(scene.session, [
+    assistantToolCallMessage(dispatchedCall, notDispatchedCall),
+  ]);
+  await scene.run.recordToolStarted(
+    dispatchedCall.id,
+    dispatchedCall.name,
+    dispatchedCall.arguments,
   );
-  await scene.run.recordToolStarted(dispatchedCall.id, dispatchedCall.name, dispatchedCall.arguments);
 
   assert.deepEqual(await reconcile(scene), [scene.run.runId]);
 

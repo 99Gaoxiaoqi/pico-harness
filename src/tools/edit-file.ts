@@ -12,10 +12,7 @@ import { ToolAccesses } from "./tool-access.js";
 import { materializeModelText, toModelTextView } from "./line-endings.js";
 import { findClosestLines, formatCandidateHint } from "./edit-hint.js";
 import type { WorkspaceRoots } from "./workspace-roots.js";
-import {
-  readBoundedFileSnapshot,
-  writeAtomicWorkspaceFile,
-} from "./atomic-workspace-file.js";
+import { readBoundedFileSnapshot, writeAtomicWorkspaceFile } from "./atomic-workspace-file.js";
 import {
   READ_FILE_MAX_BYTES,
   assertSameResolvedTarget,

@@ -116,7 +116,10 @@ export class SqliteTaskRunStore {
 
   constructor(options: TaskRunStoreOptions) {
     if (!options.storageRoot.trim()) throw new Error("SqliteTaskRunStore requires storageRoot");
-    const preparation = prepareWorkspaceSqliteStorageSync(options.storageRoot, ALL_WORKSPACE_SQLITE_SCOPES);
+    const preparation = prepareWorkspaceSqliteStorageSync(
+      options.storageRoot,
+      ALL_WORKSPACE_SQLITE_SCOPES,
+    );
     this.lease = preparation.lease;
     this.storageRoot = preparation.rootIdentity.canonicalPath;
     this.storageRootId = preparation.rootIdentity.storageRootId;
@@ -391,12 +394,14 @@ export class SqliteTaskRunStore {
         staleManifestPaths: [],
         storageRootMismatches: loaded
           .filter(({ header }) => header.storageRootId !== this.storageRootId)
-          .map(({ header }): TaskRunStorageRootMismatch => ({
-            taskRunId: header.taskRunId,
-            ledgerPath: operationalDatabasePath(this.storageRoot),
-            taskRunStorageRootId: header.storageRootId,
-            currentStorageRootId: this.storageRootId,
-          }))
+          .map(
+            ({ header }): TaskRunStorageRootMismatch => ({
+              taskRunId: header.taskRunId,
+              ledgerPath: operationalDatabasePath(this.storageRoot),
+              taskRunStorageRootId: header.storageRootId,
+              currentStorageRootId: this.storageRootId,
+            }),
+          )
           .sort((left, right) => left.taskRunId.localeCompare(right.taskRunId)),
       };
     });
@@ -490,9 +495,7 @@ export class SqliteTaskRunStore {
         );
       }
       if (event.taskRunId !== taskRunId) {
-        throw new TaskRunStoreIntegrityError(
-          `TaskRun event ${eventId} belongs to another TaskRun`,
-        );
+        throw new TaskRunStoreIntegrityError(`TaskRun event ${eventId} belongs to another TaskRun`);
       }
       const expectedSequence = events.length + 1;
       if (eventSeq !== expectedSequence) {
@@ -587,7 +590,10 @@ function createTaskRunHeader(
   };
 }
 
-function decodeTaskRunRowHeader(row: Record<string, unknown>, taskRunId: string): TaskRunFileHeader {
+function decodeTaskRunRowHeader(
+  row: Record<string, unknown>,
+  taskRunId: string,
+): TaskRunFileHeader {
   const context = `TaskRun ${taskRunId} row`;
   if (
     !isNonEmptyString(row["task_run_id"]) ||
@@ -1592,11 +1598,7 @@ function assertResumeBatchPairs(events: readonly TaskRunEvent[], context: string
   }
 }
 
-function requireNonEmptyString(
-  value: unknown,
-  field: string,
-  taskRunId: string,
-): string {
+function requireNonEmptyString(value: unknown, field: string, taskRunId: string): string {
   if (!isNonEmptyString(value)) {
     throw new TaskRunStoreIntegrityError(`TaskRun ${taskRunId} ${field} is invalid`);
   }

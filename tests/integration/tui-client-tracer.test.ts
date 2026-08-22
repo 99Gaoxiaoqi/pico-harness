@@ -50,13 +50,31 @@ test("daemon event reporter: text stream + tool card + run lifecycle drive TuiRe
     notification("run.started", {}, { run: { runId: "run_1", status: "running" } }),
   );
   adapter.handleNotification(
-    liveItem({ kind: "thinking", operation: "append", streamId: "t1", turnId: "turn1", delta: "推理中" }),
+    liveItem({
+      kind: "thinking",
+      operation: "append",
+      streamId: "t1",
+      turnId: "turn1",
+      delta: "推理中",
+    }),
   );
   adapter.handleNotification(
-    liveItem({ kind: "assistantMessage", operation: "append", streamId: "a1", turnId: "turn1", delta: "你好" }),
+    liveItem({
+      kind: "assistantMessage",
+      operation: "append",
+      streamId: "a1",
+      turnId: "turn1",
+      delta: "你好",
+    }),
   );
   adapter.handleNotification(
-    liveItem({ kind: "assistantMessage", operation: "append", streamId: "a1", turnId: "turn1", delta: "，世界" }),
+    liveItem({
+      kind: "assistantMessage",
+      operation: "append",
+      streamId: "a1",
+      turnId: "turn1",
+      delta: "，世界",
+    }),
   );
   let projection = reporter.getProjection();
   const contents = projection.entries
@@ -71,7 +89,13 @@ test("daemon event reporter: text stream + tool card + run lifecycle drive TuiRe
 
   // 工具卡：started(带 args) → output → completed。
   adapter.handleNotification(
-    liveItem({ kind: "tool", toolCallId: "call_1", toolName: "bash", operation: "started", args: "npm test" }),
+    liveItem({
+      kind: "tool",
+      toolCallId: "call_1",
+      toolName: "bash",
+      operation: "started",
+      args: "npm test",
+    }),
   );
   adapter.handleNotification(
     liveItem({
@@ -106,7 +130,13 @@ test("daemon event reporter: text stream + tool card + run lifecycle drive TuiRe
 
   // 子代理活动卡。
   adapter.handleNotification(
-    liveItem({ kind: "subagent", operation: "update", activityId: "act_1", status: "running", task: "扫描" }),
+    liveItem({
+      kind: "subagent",
+      operation: "update",
+      activityId: "act_1",
+      status: "running",
+      task: "扫描",
+    }),
   );
   assert.ok(
     reporter.getProjection().entries.some(({ entry }) => entry.kind === "subagent-activity"),
@@ -122,7 +152,8 @@ test("daemon event reporter: text stream + tool card + run lifecycle drive TuiRe
   assert.ok(runningChanges >= 2, "running 状态变化应透传");
 });
 
-test("daemon event reporter: cancelled run drives onInterrupted; approval events pass through", () => {  const reporter = new TuiReporter();
+test("daemon event reporter: cancelled run drives onInterrupted; approval events pass through", () => {
+  const reporter = new TuiReporter();
   const approvals: ApprovalNotice[] = [];
   const adapter = new DaemonEventReporter({
     reporter,
@@ -134,7 +165,10 @@ test("daemon event reporter: cancelled run drives onInterrupted; approval events
     notification("run.started", {}, { run: { runId: "run_9", status: "running" } }, "run_9"),
   );
   adapter.handleNotification(
-    liveItem({ kind: "tool", toolCallId: "c9", toolName: "write_file", operation: "started", args: "x" }, "run_9"),
+    liveItem(
+      { kind: "tool", toolCallId: "c9", toolName: "write_file", operation: "started", args: "x" },
+      "run_9",
+    ),
   );
   adapter.handleNotification(
     notification("run.finished", {}, { run: { runId: "run_9", status: "cancelled" } }, "run_9"),
@@ -145,7 +179,11 @@ test("daemon event reporter: cancelled run drives onInterrupted; approval events
     notification(
       "approval.requested",
       {},
-      { approvalId: "ap_1", runId: "run_9", request: { toolName: "bash", args: "rm -rf", title: "高危命令" } },
+      {
+        approvalId: "ap_1",
+        runId: "run_9",
+        request: { toolName: "bash", args: "rm -rf", title: "高危命令" },
+      },
       "run_9",
     ),
   );
@@ -197,7 +235,14 @@ test("transcript item hydration: RPC items convert into a projectable transcript
     [
       { id: "i1", kind: "userMessage", content: "帮我跑测试" },
       { id: "i2", kind: "assistantMessage", content: "好的" },
-      { id: "i3", kind: "tool", name: "bash", args: "npm test", status: "success", summary: "exit 0" },
+      {
+        id: "i3",
+        kind: "tool",
+        name: "bash",
+        args: "npm test",
+        status: "success",
+        summary: "exit 0",
+      },
       { id: "i4", kind: "runBoundary", status: "succeeded", startedAt: 1, finishedAt: 2 },
       { id: "i5", kind: "subagent", title: "扫描模块", state: "done" },
       { id: "i6", kind: "goal", title: "目标" },
@@ -206,9 +251,7 @@ test("transcript item hydration: RPC items convert into a projectable transcript
   );
   assert.equal(events.length, 5, "goal 无 TranscriptEntry 对应 kind，应跳过");
   const store = new TranscriptEventStore({ initialEvents: events });
-  const kinds = store
-    .getProjection()
-    .entries.map(({ entry }) => entry.kind);
+  const kinds = store.getProjection().entries.map(({ entry }) => entry.kind);
   assert.deepEqual([...new Set(kinds)].sort(), [
     "assistant",
     "run-boundary",
@@ -342,9 +385,7 @@ test("client session runtime: start hydrates, send maps to session.send, live ev
 
   // 正常文本 → session.send 参数形状（取最后一条——前一步的 /help 直发也在记录里）。
   assert.equal(await runtime.sendText("跑一下构建"), true);
-  const send = harness.requests
-    .filter((entry) => entry.method === "session.send")
-    .at(-1);
+  const send = harness.requests.filter((entry) => entry.method === "session.send").at(-1);
   assert.ok(send, "应发出 session.send");
   const sendInput = send?.params.input as Record<string, unknown>;
   assert.equal(sendInput.kind, "text");
@@ -357,25 +398,29 @@ test("client session runtime: start hydrates, send maps to session.send, live ev
   // 无附件时不携带字段。
   const attachment = { type: "image_base64" as const, mimeType: "image/png", data: "aGl=" };
   assert.equal(await runtime.sendText("看这张图", "auto", [attachment]), true);
-  const sendWithImage = harness.requests
-    .filter((entry) => entry.method === "session.send")
-    .at(-1);
+  const sendWithImage = harness.requests.filter((entry) => entry.method === "session.send").at(-1);
   assert.deepEqual(
     (sendWithImage?.params.input as Record<string, unknown>).attachments,
     [attachment],
     "附件应随 input 上送",
   );
   assert.equal(await runtime.sendText("纯文本"), true);
-  const sendPlain = harness.requests
-    .filter((entry) => entry.method === "session.send")
-    .at(-1);
+  const sendPlain = harness.requests.filter((entry) => entry.method === "session.send").at(-1);
   assert.ok(
     !("attachments" in (sendPlain?.params.input as object)),
     "无附件时不应携带 attachments 字段",
   );
 
   // 事件流：run.live 文本增量直投投影。
-  harness.emit(liveItem({ kind: "assistantMessage", operation: "append", streamId: "a1", turnId: "turn1", delta: "开始" }));
+  harness.emit(
+    liveItem({
+      kind: "assistantMessage",
+      operation: "append",
+      streamId: "a1",
+      turnId: "turn1",
+      delta: "开始",
+    }),
+  );
   assert.ok(
     reporter.getProjection().entries.some(({ entry }) => entry.kind === "assistant"),
     "live 文本应入投影",
@@ -411,17 +456,21 @@ test("client session runtime: approvals map to approval.respond and dialog callb
   await runtime.start();
 
   harness.emit(
-    notification("approval.requested", {}, {
-      approvalId: "ap_1",
-      runId: "run_1",
-      request: {
-        toolName: "bash",
-        args: "rm -rf /tmp/x",
-        title: "高危命令审批",
-        providerCallId: "call_1",
-        sessionScope: { type: "bash-command", command: "rm -rf /tmp/", match: "prefix" },
+    notification(
+      "approval.requested",
+      {},
+      {
+        approvalId: "ap_1",
+        runId: "run_1",
+        request: {
+          toolName: "bash",
+          args: "rm -rf /tmp/x",
+          title: "高危命令审批",
+          providerCallId: "call_1",
+          sessionScope: { type: "bash-command", command: "rm -rf /tmp/", match: "prefix" },
+        },
       },
-    }),
+    ),
   );
   assert.equal(approvals.length, 1);
   assert.equal(approvals[0]?.taskId, "ap_1");
@@ -439,18 +488,22 @@ test("client session runtime: approvals map to approval.respond and dialog callb
 
   // 编辑类审批带 diff：notice 原样携带（面板 formatDiffPreview 消费）。
   harness.emit(
-    notification("approval.requested", {}, {
-      approvalId: "ap_diff",
-      runId: "run_1",
-      request: {
-        toolName: "edit_file",
-        args: JSON.stringify({ path: "a.txt" }),
-        title: "修改 a.txt",
-        providerCallId: "call_2",
-        diff: "--- a.txt\n+++ a.txt\n@@\n-a\n+b",
-        sessionScope: { type: "file", path: "a.txt", access: "edit" },
+    notification(
+      "approval.requested",
+      {},
+      {
+        approvalId: "ap_diff",
+        runId: "run_1",
+        request: {
+          toolName: "edit_file",
+          args: JSON.stringify({ path: "a.txt" }),
+          title: "修改 a.txt",
+          providerCallId: "call_2",
+          diff: "--- a.txt\n+++ a.txt\n@@\n-a\n+b",
+          sessionScope: { type: "file", path: "a.txt", access: "edit" },
+        },
       },
-    }),
+    ),
   );
   const editNotice = approvals.at(-1);
   assert.equal(editNotice?.taskId, "ap_diff");
@@ -470,25 +523,27 @@ test("client session runtime: approvals map to approval.respond and dialog callb
     "deny",
   );
 
-  harness.emit(
-    notification("approval.resolved", {}, { approvalId: "ap_1", decision: "deny" }),
-  );
+  harness.emit(notification("approval.resolved", {}, { approvalId: "ap_1", decision: "deny" }));
   assert.deepEqual(resolved, ["ap_1"], "对端解析应回调清理对话框");
 
   // plan 类审批：wire 元数据映射 + plan.respond 适配器参数形状（Phase 3 首批）。
   harness.emit(
-    notification("approval.requested", {}, {
-      approvalId: "ap_plan",
-      runId: "run_1",
-      request: {
-        kind: "plan",
-        toolName: "exit_plan_mode",
-        title: "计划待审",
-        planId: "plan_42",
-        expectedRevision: 3,
-        expectedSessionSequence: 7,
+    notification(
+      "approval.requested",
+      {},
+      {
+        approvalId: "ap_plan",
+        runId: "run_1",
+        request: {
+          kind: "plan",
+          toolName: "exit_plan_mode",
+          title: "计划待审",
+          planId: "plan_42",
+          expectedRevision: 3,
+          expectedSessionSequence: 7,
+        },
       },
-    }),
+    ),
   );
   const planNotice = approvals.at(-1) as ApprovalNotice & {
     planId?: string;
@@ -556,7 +611,11 @@ test("client session runtime: session scope filtering isolates foreign-session e
 
   // 他会话（wake/cron/另一客户端）的 run 事件不得驱动本会话。
   harness.emit(
-    notification("run.started", { sessionId: "s_other" }, { run: { runId: "r_other", status: "running" } }),
+    notification(
+      "run.started",
+      { sessionId: "s_other" },
+      { run: { runId: "r_other", status: "running" } },
+    ),
   );
   harness.emit(
     notification(
@@ -564,7 +623,13 @@ test("client session runtime: session scope filtering isolates foreign-session e
       { sessionId: "s_other" },
       {
         runId: "r_other",
-        item: { kind: "assistantMessage", operation: "append", streamId: "x", turnId: "t", delta: "他会的流" },
+        item: {
+          kind: "assistantMessage",
+          operation: "append",
+          streamId: "x",
+          turnId: "t",
+          delta: "他会的流",
+        },
       },
       "r_other",
     ),
@@ -577,7 +642,11 @@ test("client session runtime: session scope filtering isolates foreign-session e
 
   // 本会话事件照常。
   harness.emit(
-    notification("run.started", { sessionId: "s_mine" }, { run: { runId: "r_mine", status: "running" } }),
+    notification(
+      "run.started",
+      { sessionId: "s_mine" },
+      { run: { runId: "r_mine", status: "running" } },
+    ),
   );
   assert.equal(runtime.running, true);
 
@@ -592,13 +661,21 @@ test("client session runtime: session scope filtering isolates foreign-session e
     "切换后投影应被新会话水化替换",
   );
   harness.emit(
-    notification("run.started", { sessionId: "s_mine" }, { run: { runId: "r_mine2", status: "running" } }),
+    notification(
+      "run.started",
+      { sessionId: "s_mine" },
+      { run: { runId: "r_mine2", status: "running" } },
+    ),
   );
   assert.equal(runtime.running, false, "切换后旧会话事件应被过滤");
 
   // 新会话事件照常进入。
   harness.emit(
-    notification("run.started", { sessionId: "s_new" }, { run: { runId: "r_new", status: "running" } }),
+    notification(
+      "run.started",
+      { sessionId: "s_new" },
+      { run: { runId: "r_new", status: "running" } },
+    ),
   );
   assert.equal(runtime.running, true);
 

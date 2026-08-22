@@ -23,7 +23,10 @@ function harnessWithRuntime(): DispatchHarness {
   const stderr: string[] = [];
   const stdout: string[] = [];
   const clientCalls: ClientReplOptions[] = [];
-  let sessionSelection: CliStartupSession["sessionSelection"] = { mode: "new", sessionId: "console:x" };
+  let sessionSelection: CliStartupSession["sessionSelection"] = {
+    mode: "new",
+    sessionId: "console:x",
+  };
   const runtime: CliRuntime = {
     env: {},
     version: "test",
@@ -77,12 +80,24 @@ test("cli dispatch: 会话旗标三式传递（-S resume / --continue / --fork�
 
   harness.setSessionSelection({ mode: "continue", sessionId: "latest" });
   await harness.run([]);
-  assert.equal(harness.clientCalls.at(-1)!.sessionId, "latest", "--continue 解析出的 sessionId 直接采纳");
+  assert.equal(
+    harness.clientCalls.at(-1)!.sessionId,
+    "latest",
+    "--continue 解析出的 sessionId 直接采纳",
+  );
 
   harness.setSessionSelection({ mode: "fork", sessionId: "src1" });
   await harness.run([]);
-  assert.equal(harness.clientCalls.at(-1)!.forkFrom, "src1", "--fork 传 forkFrom（连接后 session.fork）");
-  assert.equal(harness.clientCalls.at(-1)!.sessionId, undefined, "fork 启动不带原会话（新会话 fork）");
+  assert.equal(
+    harness.clientCalls.at(-1)!.forkFrom,
+    "src1",
+    "--fork 传 forkFrom（连接后 session.fork）",
+  );
+  assert.equal(
+    harness.clientCalls.at(-1)!.sessionId,
+    undefined,
+    "fork 启动不带原会话（新会话 fork）",
+  );
 });
 
 test("cli dispatch: BYOK/Graph 旗标传递与缺口旗标提示", async () => {

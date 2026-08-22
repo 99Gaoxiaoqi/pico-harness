@@ -16,18 +16,22 @@ import {
  * 经 @pico/protocol（dist）导入：模块身份与生产消费一致。
  */
 
-const RUN_STATUS_CLASSIFICATION: readonly (readonly [RuntimeRunStatus, boolean, boolean, boolean])[] =
-  [
-    // [status, terminal, active(水化对账), streaming(相位灯)]
-    ["queued", false, true, true],
-    ["running", false, true, true],
-    ["pause_requested", false, true, true],
-    ["paused", false, true, false],
-    ["cancelling", false, true, false],
-    ["cancelled", true, false, false],
-    ["failed", true, false, false],
-    ["succeeded", true, false, false],
-  ];
+const RUN_STATUS_CLASSIFICATION: readonly (readonly [
+  RuntimeRunStatus,
+  boolean,
+  boolean,
+  boolean,
+])[] = [
+  // [status, terminal, active(水化对账), streaming(相位灯)]
+  ["queued", false, true, true],
+  ["running", false, true, true],
+  ["pause_requested", false, true, true],
+  ["paused", false, true, false],
+  ["cancelling", false, true, false],
+  ["cancelled", true, false, false],
+  ["failed", true, false, false],
+  ["succeeded", true, false, false],
+];
 
 test("run 状态分类：全枚举值逐一遍历（枚举校真）", () => {
   for (const [status, terminal, active, streaming] of RUN_STATUS_CLASSIFICATION) {
@@ -147,7 +151,12 @@ test("parseApprovalRequestedPayload：diff/sessionScope 直读（3-D 漏账补�
   assert.ok(view);
   assert.equal(view.providerCallId, "call_5");
   assert.equal(view.diff, "--- a\n+++ b\n@@\n-a\n+b");
-  assert.deepEqual(view.sessionScope, { type: "file", path: "a.txt", access: "edit", safety: true });
+  assert.deepEqual(view.sessionScope, {
+    type: "file",
+    path: "a.txt",
+    access: "edit",
+    safety: true,
+  });
 
   // 其余 scope 形状逐一过（all-edits / directories / bash-command / tool）。
   const shapes: readonly unknown[] = [

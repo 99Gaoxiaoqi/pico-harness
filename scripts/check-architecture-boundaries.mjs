@@ -74,7 +74,10 @@ const HANDWRITTEN_TIMEOUT_WHITELIST = new Map([
   ["packages/runtime-host/src/client/connection.ts", "骨架：握手/连接/request 超时"],
   ["packages/runtime-host/src/control/artifact-writer-bootstrap-lock.ts", "骨架：flock 自旋 sleep"],
   ["packages/runtime-host/src/server/host-kernel.ts", "骨架：idle drain / shutdown grace 定时器"],
-  ["packages/runtime-host/src/server/connection-session.ts", "骨架：operation server-side deadline（挂死 handler 防泄漏）"],
+  [
+    "packages/runtime-host/src/server/connection-session.ts",
+    "骨架：operation server-side deadline（挂死 handler 防泄漏）",
+  ],
   ["packages/runtime-host/src/transport/framed-transport.ts", "骨架：帧读超时"],
 ]);
 
@@ -194,10 +197,6 @@ function parseImportsFromSource(source) {
   return imports;
 }
 
-function parseImports(file) {
-  return parseImportsFromSource(stripComments(readFileSync(file, "utf8")));
-}
-
 /**
  * Re-export statements on a file (`export * from`, `export { x } from`,
  * `export type * from`, `export type { x } from`). A neutral file that re-exports
@@ -308,7 +307,8 @@ export function scanCrossCuttingDefinitions({ repositoryRoot = REPOSITORY_ROOT }
     const source = stripComments(readFileSync(file, "utf8"));
     for (const name of CROSS_CUTTING_PRIMITIVES) {
       const pattern = new RegExp(`\\b(?:async\\s+)?function\\s+${name}\\b`, "g");
-      for (const _match of source.matchAll(pattern)) {
+      const occurrenceCount = [...source.matchAll(pattern)].length;
+      for (let occurrence = 0; occurrence < occurrenceCount; occurrence += 1) {
         violations.push({
           rule: "cross-cutting-duplicate-definition",
           source: normalizeRelativePath(file, repositoryRoot),
@@ -419,9 +419,7 @@ function printViolations(title, violations) {
   console.error(`[architecture-boundaries] ${title} (${violations.length})`);
   for (const violation of violations) {
     const specifier = violation.specifier ? ` (${violation.specifier})` : "";
-    console.error(
-      `  - ${violation.rule}: ${violation.source} -> ${violation.target}${specifier}`,
-    );
+    console.error(`  - ${violation.rule}: ${violation.source} -> ${violation.target}${specifier}`);
   }
 }
 

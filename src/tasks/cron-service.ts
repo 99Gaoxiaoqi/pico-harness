@@ -4,10 +4,7 @@ import {
   RuntimeConflictError,
   SqliteRuntimeControlStore,
 } from "../storage/sqlite/sqlite-runtime-control-store.js";
-import {
-  generateRuntimeId,
-  type RuntimeStoreOptions,
-} from "./runtime-store-contracts.js";
+import { generateRuntimeId, type RuntimeStoreOptions } from "./runtime-store-contracts.js";
 import {
   type CronJobRecord,
   type CronRunRecord,

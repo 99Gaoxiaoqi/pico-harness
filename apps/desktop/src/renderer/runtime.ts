@@ -973,9 +973,10 @@ function scopedMcpServer(server: RuntimeScopedMcpServer, index: number): Capabil
 
 function errorMessage(error: unknown): string {
   const raw = error instanceof Error ? error.message : "Runtime 返回了未知错误。";
-  const code = typeof (error as { code?: unknown })?.code === "string"
-    ? (error as { code: string }).code
-    : undefined;
+  const code =
+    typeof (error as { code?: unknown })?.code === "string"
+      ? (error as { code: string }).code
+      : undefined;
   return friendlyRuntimeMessage(raw, code);
 }
 

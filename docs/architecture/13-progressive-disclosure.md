@@ -23,13 +23,13 @@ pico 的应对是贯穿性的：**默认只暴露有界的摘要层,完整层按
 
 ## 二、全景：五套渐进披露机制
 
-| # | 机制 | 摘要层(默认暴露) | 完整层(按需获取) | 触发方式 |
-|---|------|-----------------|-----------------|---------|
-| 1 | 工具分层披露 | CORE_TOOLS 的 10 个 schema | 扩展工具 schema | 模型调 `search_tools` |
-| 2 | Skill 二段式 | name + description(注入 prompt) | body 正文 | 模型调 `skill_view` |
-| 3 | Tool Result 预览 | head-tail 摘要(≤1600 字符) | 完整原文(Evidence CAS) | 模型调 `read_evidence` |
-| 4 | Repo Map 渐进索引 | 首批符号(按字母序) | 全仓符号 | 查询驱动续扫 |
-| 5 | explore_repo 一次性侦察 | top-N 文件结构片段 | (本身即摘要,无完整层) | `max_files` 上限 |
+| #   | 机制                    | 摘要层(默认暴露)                | 完整层(按需获取)       | 触发方式               |
+| --- | ----------------------- | ------------------------------- | ---------------------- | ---------------------- |
+| 1   | 工具分层披露            | CORE_TOOLS 的 10 个 schema      | 扩展工具 schema        | 模型调 `search_tools`  |
+| 2   | Skill 二段式            | name + description(注入 prompt) | body 正文              | 模型调 `skill_view`    |
+| 3   | Tool Result 预览        | head-tail 摘要(≤1600 字符)      | 完整原文(Evidence CAS) | 模型调 `read_evidence` |
+| 4   | Repo Map 渐进索引       | 首批符号(按字母序)              | 全仓符号               | 查询驱动续扫           |
+| 5   | explore_repo 一次性侦察 | top-N 文件结构片段              | (本身即摘要,无完整层)  | `max_files` 上限       |
 
 下面逐个展开。每套机制都有一个共同结构：**摘要/入口工具 + 完整回取工具成对出现,中间靠一个"引用"连接。**
 
@@ -53,6 +53,7 @@ CORE_TOOLS = { read_file, write_file, edit_file, bash,
 判定函数 `getTier(name)`：在集合里是 `"core"`,否则 `"extended"`。
 
 为什么这 10 个进核心组,文件注释给了理由：
+
 - `todo` —— 状态外部化的核心,prompt 已注入 todo 状态,模型频繁同步
 - `delegate_task` —— 主 Agent 的一级编排入口,藏在检索后面会导致多子代理请求不稳定
 - 其余是基础文件/搜索/交互能力,移除任一都会让基本功能受损
@@ -75,6 +76,7 @@ pickForLLM(allTools) = allTools.filter(
 ### 元工具 search_tools
 
 `search-tools.ts` 是模型激活扩展工具的唯一入口：
+
 - 模型用关键词检索,`findMatchingTools` 对 `name + description` 做小写 `includes` 匹配
 - 命中后调 `disclosure.disclose(...)`,**下一轮生效**
 - 自动排除 `search_tools` 自身(它也是 extended,防自激活)
@@ -146,6 +148,7 @@ threshold = 2048 token
 ### head-tail 摘要
 
 `result-summarizer.ts` 的预览策略(默认 1600 字符)：
+
 - 头部一半：保留开头(import、配置、命令开始)
 - 尾部一半：保留结尾(exit code、错误摘要、测试结果)
 - 中间：`...[omitted N chars]...`
@@ -208,12 +211,12 @@ nextFileIndex = 0  ← 初始
 
 不同查询方法触发不同补建策略：
 
-| 查询方法 | 补建策略 | 停止条件 |
-|---------|---------|---------|
-| `definitions(word)` | `scanUntil(找到名为 word 的符号)` | 找到即停 |
-| `symbols(query)` | `scanUntil(已收集够 limit 个)` | 够了即停 |
-| `references(word)` | `scanNext(固定一批)` | 扫一批就在已索引文件里 grep |
-| `repo_map` 工具 | `scanNext(max_files)` | 扫指定批次,返回 `complete` 进度 |
+| 查询方法            | 补建策略                          | 停止条件                        |
+| ------------------- | --------------------------------- | ------------------------------- |
+| `definitions(word)` | `scanUntil(找到名为 word 的符号)` | 找到即停                        |
+| `symbols(query)`    | `scanUntil(已收集够 limit 个)`    | 够了即停                        |
+| `references(word)`  | `scanNext(固定一批)`              | 扫一批就在已索引文件里 grep     |
+| `repo_map` 工具     | `scanNext(max_files)`             | 扫指定批次,返回 `complete` 进度 |
 
 `repo_map` 工具输出明确告诉模型进度：`indexed=200/1500 complete=false limitReason=max_files`——模型看到 `complete=false` 知道还没扫完,可再调一次续建。
 
@@ -229,11 +232,11 @@ Repo Map 服务背后挂了 6 个模型工具(`code-intelligence.ts`)：`repo_ma
 
 ### 与 Repo Map 的关键区别
 
-| 维度 | Repo Map | explore_repo |
-|------|----------|--------------|
-| 状态 | 有状态,索引跨调用累积 | 无状态,每次从头来 |
-| 遍历 | 文件名字母序 | DFS 深度优先 |
-| 输出 | 结构化符号/位置(JSON) | 人类可读报告(候选+证据锚点+片段) |
+| 维度 | Repo Map                     | explore_repo                     |
+| ---- | ---------------------------- | -------------------------------- |
+| 状态 | 有状态,索引跨调用累积        | 无状态,每次从头来                |
+| 遍历 | 文件名字母序                 | DFS 深度优先                     |
+| 输出 | 结构化符号/位置(JSON)        | 人类可读报告(候选+证据锚点+片段) |
 | 用途 | 精确查询("这个符号定义在哪") | 模糊探索("从哪开始理解这个仓库") |
 
 explore_repo 复用 Repo Map 的 `parseSymbols()` 函数解析符号,但**不复用其索引**——它自己做 DFS 遍历(`collectFiles`),叠加项目结构启发式打分(`scoreStructure`:manifest +12、文档 +10、入口 +8、测试 +6),再做行级内容匹配,一次返回带证据锚点的阅读路径报告。
@@ -258,6 +261,7 @@ explore_repo  │ top-N 文件结构片段           │   │ (本身即摘要,
 ### 三条核心原则
 
 **1. 摘要层永不丢失信息。** 每套机制都保证"摘要不全"不等于"信息丢失"：
+
 - 工具有 registry 全集路由兜底(未披露也能执行)
 - Evidence 有 CAS 兜底(原文落盘,SHA-256 寻址)
 - Skill 正文在磁盘上(随时可 view)
@@ -270,6 +274,7 @@ explore_repo  │ top-N 文件结构片段           │   │ (本身即摘要,
 ### 自动旁路披露
 
 除了模型主动激活,代码里还有两处自动 disclose,处理"渐进列表会造成能力断裂"的场景：
+
 - **Evidence 归档时**自动 disclose `read_evidence`(`loop.ts:2798`)——预览给了引用,必须让回读工具可见
 - **Plan 执行态**自动 disclose `update_plan`/`cancel_plan`(`agent-runtime.ts:1378`)——进入执行态需要这两个工具
 
@@ -282,6 +287,7 @@ Plan Mode、explore-synthesis-only、required-first-delegation 这几种会话�
 ## 九、可观测性
 
 渐进披露本身是隐式的(模型感知不到"被隐藏了什么"),所以观测很重要：
+
 - `loop.ts:1714` 在 Action span 里记录 `availableToolCount` vs `totalToolCount`,可算出被隐藏的工具数
 - `repo_map` 工具输出 `indexed/total/cursor/complete/limitReason`,索引进度对模型可见
 - Tool Result 投影带 `mode: full|preview`、`strategy`、`truncated` 标志,模型知道看到的是摘要还是原文

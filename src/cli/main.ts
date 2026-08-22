@@ -153,7 +153,8 @@ export async function runCli(args: readonly string[], runtime: CliRuntime): Prom
     // --continue/--fork/-S 启动会话三式全支持；--graph 经
     // session.settings.update 应用；--client 兼容保留（已是默认）。
     const clientSessionId =
-      sessionSelection && (sessionSelection.mode === "resume" || sessionSelection.mode === "continue")
+      sessionSelection &&
+      (sessionSelection.mode === "resume" || sessionSelection.mode === "continue")
         ? sessionSelection.sessionId
         : undefined;
     const forkFrom = sessionSelection?.mode === "fork" ? sessionSelection.sessionId : undefined;
@@ -163,9 +164,7 @@ export async function runCli(args: readonly string[], runtime: CliRuntime): Prom
       );
     }
     if (options.mcpConfigPath !== undefined || options.addDirs !== undefined) {
-      runtime.writeStderr(
-        "提示：--mcp-config/--add-dir 暂不支持（MCP 归 daemon 侧装配）。\n",
-      );
+      runtime.writeStderr("提示：--mcp-config/--add-dir 暂不支持（MCP 归 daemon 侧装配）。\n");
     }
     await runtime.startClientRepl({
       workDir,

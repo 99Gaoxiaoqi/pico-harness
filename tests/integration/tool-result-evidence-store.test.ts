@@ -318,10 +318,7 @@ test(
         const markerMode = (await stat(markerPath)).mode & 0o777;
         const outsideEntries = await readdir(outside);
         const blobs = new EvidenceBlobStore(evidenceRoot);
-        await assert.rejects(
-          blobs.putUtf8(rawOutput),
-          /regular non-symlink directory|changed/u,
-        );
+        await assert.rejects(blobs.putUtf8(rawOutput), /regular non-symlink directory|changed/u);
 
         assert.equal((await stat(outside)).mode & 0o777, outsideMode);
         assert.equal((await stat(markerPath)).mode & 0o777, markerMode);
@@ -584,10 +581,10 @@ function readEvidenceRecordRow(
   const database = new DatabaseSync(join(fixture.root, "pico.sqlite"), { readOnly: true });
   try {
     const row = database
-      .prepare("SELECT content_json FROM evidence_records WHERE session_id = ? AND content_hash = ?")
-      .get(reference.sessionId, reference.contentHash) as
-      | { content_json: string }
-      | undefined;
+      .prepare(
+        "SELECT content_json FROM evidence_records WHERE session_id = ? AND content_hash = ?",
+      )
+      .get(reference.sessionId, reference.contentHash) as { content_json: string } | undefined;
     assert.ok(row, "evidence_records 行必须存在");
     return row;
   } finally {

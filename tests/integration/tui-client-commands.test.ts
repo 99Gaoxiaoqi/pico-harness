@@ -5,10 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { RuntimeNotification } from "@pico/protocol";
 import { createPicoCommandRegistry } from "../../src/input/pico-command-registry.js";
-import {
-  createClientCommandRegistry,
-  processClientInput,
-} from "../../src/tui/client-commands.js";
+import { createClientCommandRegistry, processClientInput } from "../../src/tui/client-commands.js";
 import {
   ClientSessionRuntime,
   type DaemonSessionClient,
@@ -63,7 +60,12 @@ function createHarness(options?: { readonly sessionId?: string }): Harness {
             disposition: "started",
           };
         case "session.transcript":
-          return { session: sessionRecord(String(params.sessionId ?? "s1")), items: transcriptItems, queuedInputs: [], revision: "v1" };
+          return {
+            session: sessionRecord(String(params.sessionId ?? "s1")),
+            items: transcriptItems,
+            queuedInputs: [],
+            revision: "v1",
+          };
         case "session.get":
           if (params.sessionId === "missing") throw new Error("not found");
           return { session: sessionRecord(String(params.sessionId ?? "s1")) };
@@ -106,7 +108,15 @@ function createHarness(options?: { readonly sessionId?: string }): Harness {
             };
           }
           if (params.action === "review") {
-            return { result: { review: { id: "hook_1", event: "UserPromptSubmit", handler: { command: "echo hi" } } } };
+            return {
+              result: {
+                review: {
+                  id: "hook_1",
+                  event: "UserPromptSubmit",
+                  handler: { command: "echo hi" },
+                },
+              },
+            };
           }
           if (params.action === "reload") return { result: { reloaded: true } };
           return { result: { ok: true } };
@@ -204,7 +214,11 @@ function createHarness(options?: { readonly sessionId?: string }): Harness {
             };
           }
           if (params.action === "install") {
-            return { result: { install: { success: true, message: "Installed reviewer", pluginId: "reviewer" } } };
+            return {
+              result: {
+                install: { success: true, message: "Installed reviewer", pluginId: "reviewer" },
+              },
+            };
           }
           return { result: { ok: true } };
         case "session.settings.update":
@@ -221,7 +235,16 @@ function createHarness(options?: { readonly sessionId?: string }): Harness {
         case "session.create":
           return { session: sessionRecord("s_created") };
         case "goal.get":
-          return { goal: { stateVersion: 1, sequence: 1, activeGoalId: "g1", goals: [{ id: "g1", title: "目标一", description: "d", status: "active", createdAt: 1 }] } };
+          return {
+            goal: {
+              stateVersion: 1,
+              sequence: 1,
+              activeGoalId: "g1",
+              goals: [
+                { id: "g1", title: "目标一", description: "d", status: "active", createdAt: 1 },
+              ],
+            },
+          };
         case "usage.get":
           return {
             usage: {
@@ -235,17 +258,33 @@ function createHarness(options?: { readonly sessionId?: string }): Harness {
         case "diagnostics.resources":
           return { output: ["资源行 1"] };
         case "workspace.init":
-          return { workspacePath: "C:\\ws", files: ["AGENTS.md", "PLAN.md"], message: "初始化完成" };
+          return {
+            workspacePath: "C:\\ws",
+            files: ["AGENTS.md", "PLAN.md"],
+            message: "初始化完成",
+          };
         case "catalog.agents":
           return { agents: [{ name: "explore" }, { name: "review" }] };
         case "skills.effective.list":
-          return { skills: [{ name: "commit" }, { name: "review" }], revisions: { user: "1", project: "1" } };
+          return {
+            skills: [{ name: "commit" }, { name: "review" }],
+            revisions: { user: "1", project: "1" },
+          };
         case "config.effective.get":
           // 真实 wire 形状：config 才是 RuntimeEffectiveConfig（嵌套，对抗评审 P0）。
           return {
             config: {
               defaultModelRouteId: "p1/m1",
-              providers: [{ id: "p1", protocol: "openai", baseURL: "http://x", apiKeyEnv: "K", models: ["m1", "m2"], discoverModels: false }],
+              providers: [
+                {
+                  id: "p1",
+                  protocol: "openai",
+                  baseURL: "http://x",
+                  apiKeyEnv: "K",
+                  models: ["m1", "m2"],
+                  discoverModels: false,
+                },
+              ],
               sources: {},
               revisions: { user: "1", project: "1" },
             },
@@ -255,8 +294,22 @@ function createHarness(options?: { readonly sessionId?: string }): Harness {
         case "rewind.list":
           return {
             checkpoints: [
-              { checkpointId: "msg_1", label: "第一条 prompt", createdAt: 1_000, changedFileCount: 2, additions: 10, deletions: 4 },
-              { checkpointId: "msg_2", label: "第二条 prompt", createdAt: 2_000, changedFileCount: 0, additions: 0, deletions: 0 },
+              {
+                checkpointId: "msg_1",
+                label: "第一条 prompt",
+                createdAt: 1_000,
+                changedFileCount: 2,
+                additions: 10,
+                deletions: 4,
+              },
+              {
+                checkpointId: "msg_2",
+                label: "第二条 prompt",
+                createdAt: 2_000,
+                changedFileCount: 0,
+                additions: 0,
+                deletions: 0,
+              },
             ],
           };
         case "rewind.preview":
@@ -269,53 +322,163 @@ function createHarness(options?: { readonly sessionId?: string }): Harness {
             fingerprint: "fp-1",
           };
         case "rewind.apply":
-          return { applied: true, sessionId: "s_forked", sourceSessionId: String(params.sessionId ?? "s1") };
+          return {
+            applied: true,
+            sessionId: "s_forked",
+            sourceSessionId: String(params.sessionId ?? "s1"),
+          };
         case "provider.list":
           return {
             providers: [
-              { id: "p1", protocol: "openai", origin: "user", baseURL: "http://x", apiKeyEnv: "K", models: ["m1"], discoverModels: false, fingerprint: "f1", credentialStatus: "present", credentialSource: "keychain", storedCredentialPresent: true },
+              {
+                id: "p1",
+                protocol: "openai",
+                origin: "user",
+                baseURL: "http://x",
+                apiKeyEnv: "K",
+                models: ["m1"],
+                discoverModels: false,
+                fingerprint: "f1",
+                credentialStatus: "present",
+                credentialSource: "keychain",
+                storedCredentialPresent: true,
+              },
             ],
             revision: "rev-1",
           };
         case "provider.delete":
           return { deleted: true, revision: "rev-2" };
         case "provider.importEnvironment":
-          return { provider: { id: String((params.provider as { id?: string } | undefined)?.id ?? ""), protocol: "openai", origin: "user", baseURL: "http://x", apiKeyEnv: "K", models: ["m1"], discoverModels: true, fingerprint: "f2", credentialStatus: "present", credentialSource: "keychain", storedCredentialPresent: true }, revision: "rev-3" };
+          return {
+            provider: {
+              id: String((params.provider as { id?: string } | undefined)?.id ?? ""),
+              protocol: "openai",
+              origin: "user",
+              baseURL: "http://x",
+              apiKeyEnv: "K",
+              models: ["m1"],
+              discoverModels: true,
+              fingerprint: "f2",
+              credentialStatus: "present",
+              credentialSource: "keychain",
+              storedCredentialPresent: true,
+            },
+            revision: "rev-3",
+          };
         case "config.user.get":
           return { config: { version: 1, defaults: {}, providers: [] }, revision: "cfg-1" };
         case "config.user.update":
-          return { config: { version: 1, defaults: { modelRouteId: String((params.defaults as { modelRouteId?: string } | undefined)?.modelRouteId ?? "") }, providers: [] }, revision: "cfg-2" };
+          return {
+            config: {
+              version: 1,
+              defaults: {
+                modelRouteId: String(
+                  (params.defaults as { modelRouteId?: string } | undefined)?.modelRouteId ?? "",
+                ),
+              },
+              providers: [],
+            },
+            revision: "cfg-2",
+          };
         case "jobs.list":
           return {
             jobs: [
-              { jobId: "job_1", workspacePath: "C:\\ws", name: "每日构建", prompt: "p", schedule: "0 9 * * *", enabled: true, status: "idle", updatedAt: 1 },
-              { jobId: "job_2", workspacePath: "C:\\ws", name: "报告", prompt: "p", schedule: "0 18 * * 1", enabled: false, status: "idle", updatedAt: 2 },
+              {
+                jobId: "job_1",
+                workspacePath: "C:\\ws",
+                name: "每日构建",
+                prompt: "p",
+                schedule: "0 9 * * *",
+                enabled: true,
+                status: "idle",
+                updatedAt: 1,
+              },
+              {
+                jobId: "job_2",
+                workspacePath: "C:\\ws",
+                name: "报告",
+                prompt: "p",
+                schedule: "0 18 * * 1",
+                enabled: false,
+                status: "idle",
+                updatedAt: 2,
+              },
             ],
           };
         case "jobs.setEnabled":
-          return { job: { jobId: String(params.jobId ?? ""), workspacePath: "C:\\ws", name: "n", prompt: "p", schedule: "0 9 * * *", enabled: params.enabled === true, status: "idle", updatedAt: 3 } };
+          return {
+            job: {
+              jobId: String(params.jobId ?? ""),
+              workspacePath: "C:\\ws",
+              name: "n",
+              prompt: "p",
+              schedule: "0 9 * * *",
+              enabled: params.enabled === true,
+              status: "idle",
+              updatedAt: 3,
+            },
+          };
         case "jobs.delete":
           return { deleted: true };
         case "jobs.history":
           return { runs: [{ runId: "run_9", status: "succeeded", startedAt: 1 } as never] };
         case "memory.create":
-          return { fact: { factId: "manual-fact:abc", version: 1, kind: "project_fact", title: "t", content: "c", confidence: 1, state: "active", createdAt: 1, updatedAt: 1, pinned: false } as never };
+          return {
+            fact: {
+              factId: "manual-fact:abc",
+              version: 1,
+              kind: "project_fact",
+              title: "t",
+              content: "c",
+              confidence: 1,
+              state: "active",
+              createdAt: 1,
+              updatedAt: 1,
+              pinned: false,
+            } as never,
+          };
         case "memory.list":
           return { facts: [{ factId: "manual-fact:abc" }] };
         case "memory.review.list":
           return { proposals: [] };
         case "memory.settings.get":
           return {
-            settings: { enabled: true, autoPropose: false, autoCommit: false, injectionEnabled: true, reviewMode: "balanced", version: 3, updatedAt: "t" },
-            reviewBudget: { allowed: true, budget: { maxCalls: 10, maxInputTokens: 100, maxOutputTokens: 100, maxCostUsd: 1 }, usage: { calls: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 } },
+            settings: {
+              enabled: true,
+              autoPropose: false,
+              autoCommit: false,
+              injectionEnabled: true,
+              reviewMode: "balanced",
+              version: 3,
+              updatedAt: "t",
+            },
+            reviewBudget: {
+              allowed: true,
+              budget: { maxCalls: 10, maxInputTokens: 100, maxOutputTokens: 100, maxCostUsd: 1 },
+              usage: { calls: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 },
+            },
           };
         case "memory.settings.update":
           return {
-            settings: { enabled: params.enabled === true, autoPropose: false, autoCommit: false, injectionEnabled: params.injectionEnabled === true, reviewMode: "balanced", version: 4, updatedAt: "t" },
-            reviewBudget: { allowed: true, budget: { maxCalls: 10, maxInputTokens: 100, maxOutputTokens: 100, maxCostUsd: 1 }, usage: { calls: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 } },
+            settings: {
+              enabled: params.enabled === true,
+              autoPropose: false,
+              autoCommit: false,
+              injectionEnabled: params.injectionEnabled === true,
+              reviewMode: "balanced",
+              version: 4,
+              updatedAt: "t",
+            },
+            reviewBudget: {
+              allowed: true,
+              budget: { maxCalls: 10, maxInputTokens: 100, maxOutputTokens: 100, maxCostUsd: 1 },
+              usage: { calls: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 },
+            },
           };
         case "memory.update":
-          return { fact: { factId: String(params.factId ?? ""), version: 2, state: "disabled" } as never };
+          return {
+            fact: { factId: String(params.factId ?? ""), version: 2, state: "disabled" } as never,
+          };
         case "mcp.effective.list":
           return {
             servers: [
@@ -339,7 +502,9 @@ function createHarness(options?: { readonly sessionId?: string }): Harness {
           };
         case "config.mcpServers":
           return {
-            servers: [{ name: "git-tools", status: "connected", toolCount: 3, toolNames: ["git_diff"] }],
+            servers: [
+              { name: "git-tools", status: "connected", toolCount: 3, toolNames: ["git_diff"] },
+            ],
           };
         case "mcp.user.list":
           return {
@@ -399,7 +564,12 @@ function createHarness(options?: { readonly sessionId?: string }): Harness {
   };
 }
 
-function runEvent(topic: "run.started" | "run.finished", sessionId: string, runId: string, status: string): RuntimeNotification {
+function runEvent(
+  topic: "run.started" | "run.finished",
+  sessionId: string,
+  runId: string,
+  status: string,
+): RuntimeNotification {
   return {
     eventId: `e-${Math.random()}`,
     protocolVersion: 1,
@@ -414,7 +584,16 @@ function runEvent(topic: "run.started" | "run.finished", sessionId: string, runI
 async function run(
   harness: Harness,
   input: string,
-): Promise<{ kind: string; result?: { action?: string; message?: string; ui?: { kind: string; selector?: string; panel?: string }; data?: unknown }; message?: string }> {
+): Promise<{
+  kind: string;
+  result?: {
+    action?: string;
+    message?: string;
+    ui?: { kind: string; selector?: string; panel?: string };
+    data?: unknown;
+  };
+  message?: string;
+}> {
   return processClientInput(input, harness.registry, harness.runtime);
 }
 
@@ -449,7 +628,8 @@ test("client commands: settings-class commands map to session.settings.update", 
   const thinkingSet = await run(harness, "/thinking high");
   void thinkingSet;
   assert.equal(
-    harness.requests.find((entry) => entry.method === "session.settings.update")?.params.thinkingEffort,
+    harness.requests.find((entry) => entry.method === "session.settings.update")?.params
+      .thinkingEffort,
     "high",
   );
   harness.requests.length = 0;
@@ -469,31 +649,27 @@ test("client commands: settings-class commands map to session.settings.update", 
   );
   await run(harness, "/permissions yolo");
   assert.equal(
-    harness.requests
-      .filter((entry) => entry.method === "session.settings.update")
-      .at(-1)?.params.permissionMode,
+    harness.requests.filter((entry) => entry.method === "session.settings.update").at(-1)?.params
+      .permissionMode,
     "yolo",
   );
   // plan 走 deprecated permissions 别名（permissionMode 枚举无 plan——对抗评审 P0）。
   await run(harness, "/permissions plan");
   assert.equal(
-    harness.requests
-      .filter((entry) => entry.method === "session.settings.update")
-      .at(-1)?.params.permissions,
+    harness.requests.filter((entry) => entry.method === "session.settings.update").at(-1)?.params
+      .permissions,
     "plan",
   );
   await run(harness, "/graph on");
   assert.equal(
-    harness.requests
-      .filter((entry) => entry.method === "session.settings.update")
-      .at(-1)?.params.orchestrationMode,
+    harness.requests.filter((entry) => entry.method === "session.settings.update").at(-1)?.params
+      .orchestrationMode,
     "graph",
   );
   await run(harness, "/plan off");
   assert.equal(
-    harness.requests
-      .filter((entry) => entry.method === "session.settings.update")
-      .at(-1)?.params.collaborationMode,
+    harness.requests.filter((entry) => entry.method === "session.settings.update").at(-1)?.params
+      .collaborationMode,
     "agent",
   );
   harness.requests.length = 0;
@@ -545,8 +721,24 @@ test("client commands: session-class commands switch/create/list", async () => {
 
   // /sessions → 选择器 + 列表映射。
   harness.setSessions([
-    { sessionId: "s1", workspacePath: "C:\\ws", title: "当前", status: "active", pinned: false, createdAt: 1, updatedAt: 2 },
-    { sessionId: "s2", workspacePath: "C:\\ws", title: "另一个", status: "active", pinned: false, createdAt: 1, updatedAt: 3 },
+    {
+      sessionId: "s1",
+      workspacePath: "C:\\ws",
+      title: "当前",
+      status: "active",
+      pinned: false,
+      createdAt: 1,
+      updatedAt: 2,
+    },
+    {
+      sessionId: "s2",
+      workspacePath: "C:\\ws",
+      title: "另一个",
+      status: "active",
+      pinned: false,
+      createdAt: 1,
+      updatedAt: 3,
+    },
   ]);
   const sessions = await run(harness, "/sessions");
   assert.equal(sessions.result?.ui?.selector, "session");
@@ -561,7 +753,9 @@ test("client commands: session-class commands switch/create/list", async () => {
   assert.match(String(resume.result?.message), /已切换/);
   assert.equal(harness.runtime.activeSessionId, "s2");
   assert.ok(
-    harness.requests.some((entry) => entry.method === "session.transcript" && entry.params.sessionId === "s2"),
+    harness.requests.some(
+      (entry) => entry.method === "session.transcript" && entry.params.sessionId === "s2",
+    ),
     "切换应触发水化",
   );
 
@@ -589,7 +783,11 @@ test("client commands: running-class behaviors gate on availability and map sess
   for (const blocked of ["/steer 换个方向", "/queue 下一条", "/replace 重来", "/interrupt"]) {
     const outcome = await run(harness, blocked);
     assert.equal(outcome.kind, "local");
-    assert.match(String(outcome.result?.message), /only available while running|不可用/u, `${blocked} 应被 availability 门拦截`);
+    assert.match(
+      String(outcome.result?.message),
+      /only available while running|不可用/u,
+      `${blocked} 应被 availability 门拦截`,
+    );
   }
   assert.ok(!harness.requests.some((entry) => entry.method === "session.send"));
 
@@ -637,9 +835,7 @@ test("client commands: skill/agent inputs use native session.send kinds", async 
 
   const agent = await run(harness, "/agent explore 扫描引擎模块");
   void agent;
-  const agentSend = harness.requests
-    .filter((entry) => entry.method === "session.send")
-    .at(-1);
+  const agentSend = harness.requests.filter((entry) => entry.method === "session.send").at(-1);
   assert.deepEqual(agentSend?.params.input, {
     kind: "agent",
     name: "explore",
@@ -670,13 +866,25 @@ test("client commands: /rewind and /changes map to rewind.* RPC with selector da
   assert.equal(listRequest?.params.sessionId, "s1");
   const data = rewind.result?.data as {
     sessionId: string;
-    snapshots: { messageId: string; userPrompt: string; changedFileCount?: number; incomplete?: boolean }[];
+    snapshots: {
+      messageId: string;
+      userPrompt: string;
+      changedFileCount?: number;
+      incomplete?: boolean;
+    }[];
     viewOnly?: boolean;
   };
   assert.equal(data.sessionId, "s1");
   assert.deepEqual(
-    data.snapshots.map((snapshot) => [snapshot.messageId, snapshot.userPrompt, snapshot.changedFileCount]),
-    [["msg_1", "第一条 prompt", 2], ["msg_2", "第二条 prompt", 0]],
+    data.snapshots.map((snapshot) => [
+      snapshot.messageId,
+      snapshot.userPrompt,
+      snapshot.changedFileCount,
+    ]),
+    [
+      ["msg_1", "第一条 prompt", 2],
+      ["msg_2", "第二条 prompt", 0],
+    ],
   );
   assert.equal(data.viewOnly, undefined, "/rewind 非查看型");
 
@@ -693,10 +901,7 @@ test("client commands: /rewind and /changes map to rewind.* RPC with selector da
   // /changes <id> → 指定 checkpoint；未知 id → 错误提示不发对话框。
   harness.requests.length = 0;
   const changesArg = await run(harness, "/changes msg_1");
-  assert.equal(
-    (changesArg.result?.data as { checkpointId?: string }).checkpointId,
-    "msg_1",
-  );
+  assert.equal((changesArg.result?.data as { checkpointId?: string }).checkpointId, "msg_1");
   const changesBad = await run(harness, "/changes nope");
   assert.match(String(changesBad.result?.message), /was not found/);
   assert.equal(changesBad.result?.ui, undefined);
@@ -723,8 +928,24 @@ test("client commands: /rewind and /changes map to rewind.* RPC with selector da
 test("client commands: dynamic argument completers ride RPCs with TTL cache", async () => {
   const harness = createHarness({ sessionId: "s1" });
   harness.setSessions([
-    { sessionId: "s-alpha", workspacePath: "C:\\ws", title: "甲会话", status: "active", pinned: false, createdAt: 1, updatedAt: 1 },
-    { sessionId: "s-beta", workspacePath: "C:\\ws", title: "乙会话", status: "active", pinned: false, createdAt: 1, updatedAt: 2 },
+    {
+      sessionId: "s-alpha",
+      workspacePath: "C:\\ws",
+      title: "甲会话",
+      status: "active",
+      pinned: false,
+      createdAt: 1,
+      updatedAt: 1,
+    },
+    {
+      sessionId: "s-beta",
+      workspacePath: "C:\\ws",
+      title: "乙会话",
+      status: "active",
+      pinned: false,
+      createdAt: 1,
+      updatedAt: 2,
+    },
   ]);
   const resume = harness.registry.resolve("resume");
   assert.ok(resume?.argumentCompleter, "/resume 应有动态补全（session-id 候选）");
@@ -785,7 +1006,11 @@ test("client commands: tier2 mirrors map memory/provider/cron to RPCs", async ()
   assert.match(String(deleted.result?.message), /deleted: p1|Provider deleted: p1/);
   const deleteRequest = harness.requests.at(-1);
   assert.equal(deleteRequest?.method, "provider.delete");
-  assert.equal(deleteRequest?.params.expectedRevision, "rev-1", "delete 应携带 list 拿到的 revision");
+  assert.equal(
+    deleteRequest?.params.expectedRevision,
+    "rev-1",
+    "delete 应携带 list 拿到的 revision",
+  );
 
   // /cron list/enable/runs → jobs.*。
   harness.requests.length = 0;
@@ -832,7 +1057,11 @@ test("client commands: /mcp status/enable/disable map to mcp.* RPCs with explici
   const disableRequest = harness.requests.at(-1);
   assert.equal(disableRequest?.method, "mcp.user.setEnabled");
   assert.equal(disableRequest?.params.enabled, false);
-  assert.equal(disableRequest?.params.expectedRevision, "mcp-rev-1", "enable/disable 应携带 user.list 的 revision");
+  assert.equal(
+    disableRequest?.params.expectedRevision,
+    "mcp-rev-1",
+    "enable/disable 应携带 user.list 的 revision",
+  );
   assert.equal(typeof disableRequest?.params.idempotencyKey, "string");
   const enabled = await run("/mcp enable git-tools");
   assert.match(String(enabled.result?.message), /已启用/);
@@ -1048,9 +1277,7 @@ test("client commands: /plugin maps to plugin.manage incl. two-phase trust", asy
   const prepareRequest = harness.requests.at(-1);
   assert.equal(prepareRequest?.params.action, "trust.prepare");
   harness.requests.length = 0;
-  const confirmed = await run(
-    "/plugin trust reviewer --confirm=prop_1 --fingerprint=sha-123",
-  );
+  const confirmed = await run("/plugin trust reviewer --confirm=prop_1 --fingerprint=sha-123");
   assert.match(String(confirmed.result?.message), /trusted/);
   const confirmRequest = harness.requests.at(-1);
   assert.equal(confirmRequest?.params.action, "trust.confirm");
@@ -1202,9 +1429,8 @@ test("client commands: local/unknown/prompt routing", async () => {
   // 非 slash → prompt → sendText。
   const sent = await run(harness, "普通消息");
   assert.equal(sent.kind, "sent");
-  const plainInput = harness.requests.find(
-    (entry) => entry.method === "session.send",
-  )?.params.input as Record<string, unknown>;
+  const plainInput = harness.requests.find((entry) => entry.method === "session.send")?.params
+    .input as Record<string, unknown>;
   assert.equal(plainInput.kind, "text");
 
   // 未知命令 → suggestions。

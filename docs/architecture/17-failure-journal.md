@@ -36,14 +36,14 @@
 
 其下是六层：
 
-| 层 | 名称 | 回答的问题 |
-|---|---|---|
-| 1 | 失败边界（Failure Boundary） | 这次**值不值得**记？（hard / gate / semantic / safety 四类判定） |
-| 2 | 失败分类（Failure Classification） | 给失败归类便于召回（tool / retrieval / goal_drift / boundary_leak） |
-| 3 | 证据包（Evidence Packet） | 保存失败当时的三平面快照（Workspace · Narrative · State · Observation） |
-| 4 | 根因与补救（Root Cause & Repair） | 把 symptom / root_cause / repair / lesson **四者分开** |
-| 5 | 召回触发器（Recall Trigger） | 说明下次**何时、在哪类任务**自动想起（task_family · tool · mechanical_keys） |
-| 6 | 留存与审查（Retention & Review） | draft → needs_review → approved → archived，**只有审查过的才进召回库** |
+| 层  | 名称                               | 回答的问题                                                                   |
+| --- | ---------------------------------- | ---------------------------------------------------------------------------- |
+| 1   | 失败边界（Failure Boundary）       | 这次**值不值得**记？（hard / gate / semantic / safety 四类判定）             |
+| 2   | 失败分类（Failure Classification） | 给失败归类便于召回（tool / retrieval / goal_drift / boundary_leak）          |
+| 3   | 证据包（Evidence Packet）          | 保存失败当时的三平面快照（Workspace · Narrative · State · Observation）      |
+| 4   | 根因与补救（Root Cause & Repair）  | 把 symptom / root_cause / repair / lesson **四者分开**                       |
+| 5   | 召回触发器（Recall Trigger）       | 说明下次**何时、在哪类任务**自动想起（task_family · tool · mechanical_keys） |
+| 6   | 留存与审查（Retention & Review）   | draft → needs_review → approved → archived，**只有审查过的才进召回库**       |
 
 底部是一条主流程：失败发生 → 判定边界 → 分类 → 存证 → 写教训 → 下次召回。
 
@@ -57,22 +57,22 @@
 
 判定一次失败是否值得进入失败日记。四类：`hard`（崩溃/硬终止）、`gate`（验证闸门拦截）、`semantic`（语义错误，如用户纠正）、`safety`（安全策略拒绝）。这是失败日记的第一道闸门，也直接回应"不是所有失败都该记"——偶发环境错误（API 超时、一次性脏数据）不应被蒸馏成硬规则，否则 Agent 过拟合、不敢动。
 
-| 项目 | 现状 | 证据 |
-|---|---|---|
-| **pico** | ❌ 无失败识别。最接近的信号是 Goal stall 状态机，但它**不产出失败记录**：`STALL_BLOCK_THRESHOLD=8` 硬终止后走 Grace Call，run 以 `completed` 收尾，不 emit 任何失败事件，goal.status 仍停在 `"active"` | `src/engine/goal-manager.ts:77-79`；`src/engine/loop.ts:2184-2188` |
-| **pico**（信号源可用） | RuntimeRun 有成败判定（`RuntimeTerminalStatus = "completed" \| "failed" \| "cancelled" \| "interrupted"`）；工具失败、审批被拒、模型调用失败都有对应事件 | `src/engine/session-runtime-event.ts:25`；`src/engine/tool-result-contract.ts:1-6`；`approval.settled decision="rejected"` (`runtime-run.ts:1156-1163`)；`model.call.settled status="failed"` |
-| **maka** | ❌ 无独立失败边界。记忆提取的 `deterministicMemoryPolicyRejection` 只做**安全拒绝**（密钥泄漏），不做失败判定 | `packages/runtime/src/memory-extraction-proposal.ts:326` |
-| **claude-code** | ❌ 无独立失败边界事件类型。失败散落在 tool error / approval denial，但没有"这次值得蒸馏"的判定器 | — |
+| 项目                   | 现状                                                                                                                                                                                                   | 证据                                                                                                                                                                                          |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **pico**               | ❌ 无失败识别。最接近的信号是 Goal stall 状态机，但它**不产出失败记录**：`STALL_BLOCK_THRESHOLD=8` 硬终止后走 Grace Call，run 以 `completed` 收尾，不 emit 任何失败事件，goal.status 仍停在 `"active"` | `src/engine/goal-manager.ts:77-79`；`src/engine/loop.ts:2184-2188`                                                                                                                            |
+| **pico**（信号源可用） | RuntimeRun 有成败判定（`RuntimeTerminalStatus = "completed" \| "failed" \| "cancelled" \| "interrupted"`）；工具失败、审批被拒、模型调用失败都有对应事件                                               | `src/engine/session-runtime-event.ts:25`；`src/engine/tool-result-contract.ts:1-6`；`approval.settled decision="rejected"` (`runtime-run.ts:1156-1163`)；`model.call.settled status="failed"` |
+| **maka**               | ❌ 无独立失败边界。记忆提取的 `deterministicMemoryPolicyRejection` 只做**安全拒绝**（密钥泄漏），不做失败判定                                                                                          | `packages/runtime/src/memory-extraction-proposal.ts:326`                                                                                                                                      |
+| **claude-code**        | ❌ 无独立失败边界事件类型。失败散落在 tool error / approval denial，但没有"这次值得蒸馏"的判定器                                                                                                       | —                                                                                                                                                                                             |
 
 **关键约束（pico）**：现有记忆提取管线**显式排除失败 run**。`runtime-run-executor.ts:220-226` 的 post-terminal 调度只认 `event.data.status === "completed"`；`runtime-evidence-reader.ts:109-120` 的 `assertTerminal` 硬要求 `status === "completed"`，否则抛 `terminal_not_completed`。这是**有意为之**：失败 run 的轨迹质量差，提取普通 preference/fact 会产出垃圾。失败日记若要接入，必须绕开或另开一条路径，不能直接放宽门禁（否则污染成功路径）。
 
 ### 层 2：失败分类
 
-| 项目 | kind 体系 | 有无 failure 类 | 证据 |
-|---|---|---|---|
-| **pico** | `["preference", "correction", "project_fact", "reference"]`（4 种，按"用户表达意图"分） | ❌ 无 | `src/memory/domain.ts:4` |
-| **maka** | `["preference", "identity", "context", "knowledge", "failure", "note"]`（6 种，按"知识本体类型"分） | ✅ 有 `failure` | `packages/core/src/long-term-memory.ts:9-16` |
-| **claude-code** | `["user", "feedback", "project", "reference"]`（4 类） | ❌ 无独立 failure（`feedback` 部分承担） | `src/memdir/memoryTypes.ts:14-19` |
+| 项目            | kind 体系                                                                                           | 有无 failure 类                          | 证据                                         |
+| --------------- | --------------------------------------------------------------------------------------------------- | ---------------------------------------- | -------------------------------------------- |
+| **pico**        | `["preference", "correction", "project_fact", "reference"]`（4 种，按"用户表达意图"分）             | ❌ 无                                    | `src/memory/domain.ts:4`                     |
+| **maka**        | `["preference", "identity", "context", "knowledge", "failure", "note"]`（6 种，按"知识本体类型"分） | ✅ 有 `failure`                          | `packages/core/src/long-term-memory.ts:9-16` |
+| **claude-code** | `["user", "feedback", "project", "reference"]`（4 类）                                              | ❌ 无独立 failure（`feedback` 部分承担） | `src/memdir/memoryTypes.ts:14-19`            |
 
 **maka 的 `failure` 不是摆设**：提取 prompt 明确引导模型产出它——
 
@@ -100,11 +100,11 @@ stabilizeCandidateKind 强制改写 (proposal-engine.ts:150)
 
 保存失败当时的三平面快照。失败日记的 L2 载体就是这层——它不是新存事故原始数据，而是给账本里已有的失败区间挂一个"索引指针"。
 
-| 项目 | 证据载体 | 复用价值 |
-|---|---|---|
-| **pico** | `Source` interface 已有 `eventIds / startSequence / endSequence / digest / evidenceRef?`；`EvidenceRef` 是统一溯源 overlay（带流身份的区间 cursor） | ✅ **可直接挂失败快照**——`Source` + `EvidenceRef` 就是为"指向 RuntimeEvent 账本里一段事件"设计的 |
-| **maka** | Local Memory（markdown 文档）；LTM 的 `MemoryItemSource { sessionId, runId, turnId, eventId }` | ✅ LTM 有等价溯源，但 LTM 只写不读（见层 5） |
-| **claude-code** | 每条记忆是独立 `.md` 文件（带 frontmatter + mtime） | ⚠️ 文件粒度，无事件区间指针 |
+| 项目            | 证据载体                                                                                                                                            | 复用价值                                                                                         |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| **pico**        | `Source` interface 已有 `eventIds / startSequence / endSequence / digest / evidenceRef?`；`EvidenceRef` 是统一溯源 overlay（带流身份的区间 cursor） | ✅ **可直接挂失败快照**——`Source` + `EvidenceRef` 就是为"指向 RuntimeEvent 账本里一段事件"设计的 |
+| **maka**        | Local Memory（markdown 文档）；LTM 的 `MemoryItemSource { sessionId, runId, turnId, eventId }`                                                      | ✅ LTM 有等价溯源，但 LTM 只写不读（见层 5）                                                     |
+| **claude-code** | 每条记忆是独立 `.md` 文件（带 frontmatter + mtime）                                                                                                 | ⚠️ 文件粒度，无事件区间指针                                                                      |
 
 **pico 的证据基础是最好的**。`runtime-evidence-reader.ts:56-85` 已经是现成的"按 sequence 截事件组 EvidenceRef"模板（用于成功 run 的 memory 提取）。存储层 `runtime-event-store.ts:677-688` 有 `readSessionEntriesPage(sessionId, { afterSequence, limit })` 做区间读取。失败日记的层 3 几乎是免费搭车——只要把"截至 terminal"换成"截至失败时刻"，就能截出失败区间的证据包。
 
@@ -112,11 +112,11 @@ stabilizeCandidateKind 强制改写 (proposal-engine.ts:150)
 
 把 symptom（症状）/ root_cause（根因）/ repair（补救）/ lesson（教训）四者**结构化分离**。这是失败日记区别于"又一段自然语言笔记"的关键：没有结构，教训就退化成普通 fact，下次能不能被正确理解全凭运气。
 
-| 项目 | 现状 |
-|---|---|
-| **pico** | ❌ Fact 只有扁平的 `title / content / reason`，无结构化字段 |
-| **maka** | ❌ MemoryItem 虽有多维（`statementType / temporalType / scopeType / keys`），但没有 symptom/rootCause/repair/lesson 四元 |
-| **claude-code** | ❌ 记忆是 markdown，无结构化根因分析 |
+| 项目            | 现状                                                                                                                     |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| **pico**        | ❌ Fact 只有扁平的 `title / content / reason`，无结构化字段                                                              |
+| **maka**        | ❌ MemoryItem 虽有多维（`statementType / temporalType / scopeType / keys`），但没有 symptom/rootCause/repair/lesson 四元 |
+| **claude-code** | ❌ 记忆是 markdown，无结构化根因分析                                                                                     |
 
 **三者都缺这层。** 这是失败日记最大的结构化负担，也是各项目都没做的部分。
 
@@ -124,14 +124,14 @@ stabilizeCandidateKind 强制改写 (proposal-engine.ts:150)
 
 说明下次**何时、在哪类任务**自动想起这条教训。结构化匹配键：`task_family / tool / mechanical_keys`。这层是失败日记的核心增值——它不靠模糊语义检索，靠**明确的匹配键**做精准召回，和机械态绑定纪律是同一思路。
 
-| 项目 | 检索方式 | 触发时机 | 是否精准 |
-|---|---|---|---|
-| **pico** | 关键词匹配（token + path + cjkBigram 交集打分） | 每轮被动注入 | ⚠️ 有盲区：query 不命中关键词就召不回 |
-| **maka**（Local Memory） | 全量注入（markdown 全量拼接） | 每轮被动注入 | ❌ 无筛选 |
-| **maka**（LTM） | `searchByKeys`（normalized_key 精确/前缀匹配） | **零调用**——只写不读 | ❌ 未接通 |
-| **claude-code** | **二级 LLM 检索**（Sonnet 当 selector 选 top-5） | 每轮异步预取 | ✅ 语义级，注释明确说"关键词重叠会误判" |
-| **mem0**（业界参照） | 三路并行融合（语义 embedding + BM25 关键词 + 实体图） | 每轮检索注入 | ✅ 最强 |
-| **Letta**（业界参照） | archival memory 向量检索，**模型主动 call tool** | 模型主动召回 | ✅ 按需精准 |
+| 项目                     | 检索方式                                              | 触发时机             | 是否精准                                |
+| ------------------------ | ----------------------------------------------------- | -------------------- | --------------------------------------- |
+| **pico**                 | 关键词匹配（token + path + cjkBigram 交集打分）       | 每轮被动注入         | ⚠️ 有盲区：query 不命中关键词就召不回   |
+| **maka**（Local Memory） | 全量注入（markdown 全量拼接）                         | 每轮被动注入         | ❌ 无筛选                               |
+| **maka**（LTM）          | `searchByKeys`（normalized_key 精确/前缀匹配）        | **零调用**——只写不读 | ❌ 未接通                               |
+| **claude-code**          | **二级 LLM 检索**（Sonnet 当 selector 选 top-5）      | 每轮异步预取         | ✅ 语义级，注释明确说"关键词重叠会误判" |
+| **mem0**（业界参照）     | 三路并行融合（语义 embedding + BM25 关键词 + 实体图） | 每轮检索注入         | ✅ 最强                                 |
+| **Letta**（业界参照）    | archival memory 向量检索，**模型主动 call tool**      | 模型主动召回         | ✅ 按需精准                             |
 
 **关键发现**：maka 的 LTM 体系（带 `keys / kind / keyType / keyOrigin` 的精致 `MemoryItem`）目前是**只写不读**——`searchByKeys` 检索能力和 SQL 排序逻辑都已实现并测过，但 runtime / runtime-host 层**没有任何代码调用它**。`memory-extraction-coordinator.ts:18-26` 的 `Pick` **显式不包含** `searchByKeys / readItem`；威胁模型文档明确把召回列为 v1 之外的未实现功能：
 
@@ -159,11 +159,11 @@ pico 的关键词匹配在当前规模合理（候选池 500、注入上限 3 �
 
 draft → needs_review → approved → archived，**只有审查过的才进召回库**。这层是失败日记的质量闸门——未经审查的教训不应自动影响未来行为，否则失败蒸馏本身就是新的风险面（错误教训会让 Agent 在正常情况下也不敢动）。
 
-| 项目 | 审查机制 | 可复用度 |
-|---|---|---|
-| **pico** | `Proposal` 状态机（`pending / accepted / rejected / deleted`）+ `Fact.state`（`active / disabled / archived / forgotten`） | ✅ **天然可复用**——蒸馏产出 pending proposal，`resolveProposal(accepted)` 后才变 active Fact，context-builder 只查 `states:["active"]`，"审查过才召回"是零代码不变量 |
-| **maka** | Local Memory 有 `draft / review_required / active` 三态；LTM 有 `MemoryLifecycleState = active \| archived` | ✅ Local Memory 有审查流 |
-| **claude-code** | 记忆文件由模型写入 + 后台 fork agent 提取，无显式审查门（信任模型产出） | ⚠️ 无审查 |
+| 项目            | 审查机制                                                                                                                   | 可复用度                                                                                                                                                             |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **pico**        | `Proposal` 状态机（`pending / accepted / rejected / deleted`）+ `Fact.state`（`active / disabled / archived / forgotten`） | ✅ **天然可复用**——蒸馏产出 pending proposal，`resolveProposal(accepted)` 后才变 active Fact，context-builder 只查 `states:["active"]`，"审查过才召回"是零代码不变量 |
+| **maka**        | Local Memory 有 `draft / review_required / active` 三态；LTM 有 `MemoryLifecycleState = active \| archived`                | ✅ Local Memory 有审查流                                                                                                                                             |
+| **claude-code** | 记忆文件由模型写入 + 后台 fork agent 提取，无显式审查门（信任模型产出）                                                    | ⚠️ 无审查                                                                                                                                                            |
 
 **pico 在这层有结构性优势**。`autoCommit` 默认放行干净 proposal（`proposal-engine.ts:290-305`），但可以通过排除特定 kind 关掉自动提交，让 lesson 强制走人工审查。`enqueueProposedNotification` 已经会发 pending 通知。层 6 几乎是 pico 现成的基础设施。
 
@@ -178,15 +178,16 @@ draft → needs_review → approved → archived，**只有审查过的才进召
 - **Letta**：core memory 分 block（human/persona），block 有独立大小上限——这是**按类型分配预算**。
 - **pico**：kind 驱动 priority 排序（`correction=0 > project_fact=1 > 其余=2`，`context-builder.ts:284-288`）+ isStrongCandidate（`correction + pinned`，`:245-247`）。
 
-| 维度 | pico | maka | claude-code | mem0 | Letta |
-|---|---|---|---|---|---|
-| 检索方式 | 关键词 | 全量（LTM 未接） | 二级 LLM | 三路融合 | 向量 + 主动 |
-| 触发 | 每轮被动 | 每轮被动 | 每轮异步预取 | 每轮检索 | 模型主动 call tool |
-| 排序 | kind priority + relevance | 无 | mtime + LLM 选 | 三路分数 + 时间衰减 | — |
-| 预算 | 3 条 + 320 token | 12K 字符 | 5 文件/turn、20KB/turn、60KB/session | top_k | core memory 硬 token 上限 |
-| 注入位置 | turn tail | system prompt | turn tail system-reminder | system prompt | system prompt / 工具返回 |
+| 维度     | pico                      | maka             | claude-code                          | mem0                | Letta                     |
+| -------- | ------------------------- | ---------------- | ------------------------------------ | ------------------- | ------------------------- |
+| 检索方式 | 关键词                    | 全量（LTM 未接） | 二级 LLM                             | 三路融合            | 向量 + 主动               |
+| 触发     | 每轮被动                  | 每轮被动         | 每轮异步预取                         | 每轮检索            | 模型主动 call tool        |
+| 排序     | kind priority + relevance | 无               | mtime + LLM 选                       | 三路分数 + 时间衰减 | —                         |
+| 预算     | 3 条 + 320 token          | 12K 字符         | 5 文件/turn、20KB/turn、60KB/session | top_k               | core memory 硬 token 上限 |
+| 注入位置 | turn tail                 | system prompt    | turn tail system-reminder            | system prompt       | system prompt / 工具返回  |
 
 **触发时机的两个流派**：
+
 - **被动注入派**（pico / maka / claude-code / mem0）：系统每轮自动判断并塞进上下文，模型不操心。
 - **主动召回派**（Letta）：core memory 自动注入，archival memory 要模型主动调用 `memory_search` 工具按需深挖。好处是精准，坏处是依赖模型自觉。
 

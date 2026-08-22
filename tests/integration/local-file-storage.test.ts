@@ -78,7 +78,7 @@ test("writeJsonAtomicSync 原子写 0600 文件并可经 readJsonFileSync 读回
     writeJsonAtomicSync(path, value);
     if (process.platform !== "win32") {
       const metadata = readFileSync(path);
-      assert.equal((metadata.length > 0), true);
+      assert.equal(metadata.length > 0, true);
     }
     assert.deepEqual(readJsonFileSync(path), value);
     writeJsonAtomicSync(path, { schemaVersion: 2 });

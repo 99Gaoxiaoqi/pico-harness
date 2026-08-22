@@ -181,7 +181,8 @@ async function resolveCompletedTerminalRef(
     if (message.role === "assistant") hasAssistantResponse = true;
   }
   if (!hasAssistantResponse) return undefined;
-  const evidence = directUser ?? (await readPriorDesktopEvidence(store, sessionId, startedEntry.sequence));
+  const evidence =
+    directUser ?? (await readPriorDesktopEvidence(store, sessionId, startedEntry.sequence));
   if (!evidence) return undefined;
   return {
     sessionId,

@@ -108,7 +108,10 @@ test("sqlite control store: job 建→claim(lease)→心跳→finish→completio
     assert.equal(finished.completion.deliveredAt, undefined);
 
     const pending = store.listPendingCompletions();
-    assert.deepEqual(pending.map((completion) => completion.completionId), ["completion-1"]);
+    assert.deepEqual(
+      pending.map((completion) => completion.completionId),
+      ["completion-1"],
+    );
 
     now += 10;
     const delivered = store.markCompletionDelivered("completion-1");
@@ -150,7 +153,10 @@ test("sqlite control store: job 建→claim(lease)→心跳→finish→completio
     const reopened = new SqliteRuntimeControlStore({ storageRoot: root, now: () => now });
     try {
       assert.equal(reopened.getJob("job-1")?.status, "succeeded");
-      assert.deepEqual(reopened.listAttempts("job-1").map((a) => a.attemptId), ["attempt-1"]);
+      assert.deepEqual(
+        reopened.listAttempts("job-1").map((a) => a.attemptId),
+        ["attempt-1"],
+      );
       assert.deepEqual(
         reopened.listAttempts("job-1").map((a) => a.result),
         [{ ok: true }],
@@ -180,7 +186,7 @@ test("sqlite control store: job 建→claim(lease)→心跳→finish→completio
 
 test("sqlite control store: 单 BEGIN IMMEDIATE 事务原子性 + revision CAS + 幂等命令", () => {
   const root = freshRoot();
-  let now = 5_000;
+  const now = 5_000;
   const store = new SqliteRuntimeControlStore({ storageRoot: root, now: () => now });
   try {
     // 原子性:事件追加与 daemon run 投影同事务;重复 eventId 让整个事务回滚。
@@ -300,7 +306,11 @@ test("sqlite control store: 单 BEGIN IMMEDIATE 事务原子性 + revision CAS +
     assert.throws(
       () =>
         store.executeIdempotentDaemonCommand(
-          { commandType: "job.create", idempotencyKey: "request-1", request: { description: "two" } },
+          {
+            commandType: "job.create",
+            idempotencyKey: "request-1",
+            request: { description: "two" },
+          },
           () => ({ result: {} as Record<string, unknown> }),
         ),
       /已用于其他参数/u,
@@ -321,9 +331,10 @@ test("sqlite control store: 单 BEGIN IMMEDIATE 事务原子性 + revision CAS +
       store.listRuntimeEvents({ afterEventId: "event-1" }).map((event) => event.eventId),
       ["event-2"],
     );
-    assert.deepEqual(store.listRuntimeEvents({ throughEventId: "event-1" }).map((e) => e.eventId), [
-      "event-1",
-    ]);
+    assert.deepEqual(
+      store.listRuntimeEvents({ throughEventId: "event-1" }).map((e) => e.eventId),
+      ["event-1"],
+    );
     assert.equal(store.hasRuntimeEvent("event-2", root), true);
     assert.equal(store.hasRuntimeEvent("missing", root), false);
     assert.equal(store.getRuntimeEventHighWatermark(root)?.eventId, "event-2");
@@ -350,9 +361,10 @@ test("sqlite control store: cron job/run 生命周期与中断恢复(recoverInte
     });
     assert.equal(job.version, 1);
     assert.equal(job.name, "tick");
-    assert.deepEqual(store.listCronJobs({ enabled: true }).map((entry) => entry.cronJobId), [
-      "cron-1",
-    ]);
+    assert.deepEqual(
+      store.listCronJobs({ enabled: true }).map((entry) => entry.cronJobId),
+      ["cron-1"],
+    );
 
     const scheduledFor = now + 60_000;
     const run = store.createCronRun({

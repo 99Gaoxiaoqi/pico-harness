@@ -419,14 +419,14 @@ CREATE TABLE workspace_kv (key TEXT PRIMARY KEY, value_json TEXT NOT NULL);
 
 每阶段一条集成测试验收;涉及读路径的阶段追加真机 TUI 计时对比(基线:2026-08-18 A/B 后 ~0.85s)。
 
-| 阶段 | 内容 | 验收 |
-|---|---|---|
-| M0 | 本文 ADR 定稿 | 用户批准(已完成) |
-| M1 | `src/storage/sqlite/` 引擎层:Owner/Lease、PRAGMA 组合、migration 框架 + `:memory:` 形状断言、只读连接、backup;workspace-storage-layout v3(`sqlite-centric-v1`)+ 旧布局 fail-closed 门禁;engines 提窗 `>=22.19`;FULL vs NORMAL 写吞吐实测 | 引擎层冒烟 + 旧布局拒绝打开测试 |
-| M2 | 会话纵切片:`sessions`/`runtime_events`/`session_catalog_projection`/`session_messages` 四表 + append/read/summary/keyset 分页全切换;desktop session-state 并入;`appendBatch` 幂等变事件点查 | 建会话→多轮→fork→列表→resume 集成测试 |
-| M3 | 读消费面受益确认:session.list/findCliSessionSummary/compaction/memory 恢复/plan/graph 投影改 SQL 查询;manifest.json 投影退役 | 真机 TUI 计时 + compaction 路径测试 |
-| M4 | `control` + `task_runs` + `memory` scope 切换;崩溃恢复重写(恢复=查询) | 恢复路径集成测试 |
-| M5 | `attachments` + `operations` + `kv`:file-history/evidence 索引入库、journal 入库、todo 迁入 | rewind/fork e2e |
-| M6 | 退役清理:JSONL 写路径、`.storage/lock`/`commit.json`/能力探针、doctor 重写(现 sqlite legacy 检测反转语义)、portability 重写(pico.sqlite 登记为 portable 单文件 + blob 目录) | doctor 干净 + 全链路 e2e |
+| 阶段 | 内容                                                                                                                                                                                                                                     | 验收                                  |
+| ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
+| M0   | 本文 ADR 定稿                                                                                                                                                                                                                            | 用户批准(已完成)                      |
+| M1   | `src/storage/sqlite/` 引擎层:Owner/Lease、PRAGMA 组合、migration 框架 + `:memory:` 形状断言、只读连接、backup;workspace-storage-layout v3(`sqlite-centric-v1`)+ 旧布局 fail-closed 门禁;engines 提窗 `>=22.19`;FULL vs NORMAL 写吞吐实测 | 引擎层冒烟 + 旧布局拒绝打开测试       |
+| M2   | 会话纵切片:`sessions`/`runtime_events`/`session_catalog_projection`/`session_messages` 四表 + append/read/summary/keyset 分页全切换;desktop session-state 并入;`appendBatch` 幂等变事件点查                                              | 建会话→多轮→fork→列表→resume 集成测试 |
+| M3   | 读消费面受益确认:session.list/findCliSessionSummary/compaction/memory 恢复/plan/graph 投影改 SQL 查询;manifest.json 投影退役                                                                                                             | 真机 TUI 计时 + compaction 路径测试   |
+| M4   | `control` + `task_runs` + `memory` scope 切换;崩溃恢复重写(恢复=查询)                                                                                                                                                                    | 恢复路径集成测试                      |
+| M5   | `attachments` + `operations` + `kv`:file-history/evidence 索引入库、journal 入库、todo 迁入                                                                                                                                              | rewind/fork e2e                       |
+| M6   | 退役清理:JSONL 写路径、`.storage/lock`/`commit.json`/能力探针、doctor 重写(现 sqlite legacy 检测反转语义)、portability 重写(pico.sqlite 登记为 portable 单文件 + blob 目录)                                                              | doctor 干净 + 全链路 e2e              |
 
 依赖关系:M1 → M2 → M3 → M4/M5(可并行)→ M6。M2 是最窄也最关键的纵切片——它单独成立即可让 TUI 列表/会话恢复脱离 JSONL。

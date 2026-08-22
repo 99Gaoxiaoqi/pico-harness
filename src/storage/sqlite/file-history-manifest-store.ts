@@ -75,7 +75,12 @@ export function readFileHistoryManifestRow(
            FROM file_history WHERE session_id = ?`,
         )
         .get(sessionId) as
-        | { revision?: unknown; snapshot_sequence?: unknown; state_json?: unknown; updated_at?: unknown }
+        | {
+            revision?: unknown;
+            snapshot_sequence?: unknown;
+            state_json?: unknown;
+            updated_at?: unknown;
+          }
         | undefined;
       if (header === undefined) return undefined;
       const snapshots = lease.database
@@ -88,10 +93,7 @@ export function readFileHistoryManifestRow(
       return {
         sessionId,
         revision: numberOrThrow(header.revision, "file_history.revision"),
-        snapshotSequence: numberOrThrow(
-          header.snapshot_sequence,
-          "file_history.snapshot_sequence",
-        ),
+        snapshotSequence: numberOrThrow(header.snapshot_sequence, "file_history.snapshot_sequence"),
         stateJson: stringOrThrow(header.state_json, "file_history.state_json"),
         updatedAt: stringOrThrow(header.updated_at, "file_history.updated_at"),
         snapshots: snapshots.map((snapshot) => ({
@@ -109,10 +111,7 @@ export function readFileHistoryManifestRow(
             snapshot["message_index"],
             "file_history_snapshots.message_index",
           ),
-          userPrompt: stringOrThrow(
-            snapshot["user_prompt"],
-            "file_history_snapshots.user_prompt",
-          ),
+          userPrompt: stringOrThrow(snapshot["user_prompt"], "file_history_snapshots.user_prompt"),
           timestamp: stringOrThrow(snapshot["timestamp"], "file_history_snapshots.timestamp"),
           snapshotJson: stringOrThrow(
             snapshot["snapshot_json"],

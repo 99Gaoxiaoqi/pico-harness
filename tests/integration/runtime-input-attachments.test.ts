@@ -62,7 +62,11 @@ test("附件上限与形状拒绝：超 4 张 / 非法 type / 缺 mimeType / 超
     () =>
       parseStrictRuntimeParams(
         "session.send",
-        sendParams({ kind: "text", text: "x", attachments: [{ type: "image_url", url: "https://x" }] }),
+        sendParams({
+          kind: "text",
+          text: "x",
+          attachments: [{ type: "image_url", url: "https://x" }],
+        }),
       ),
     /image_base64|attachments/,
   );
@@ -70,7 +74,11 @@ test("附件上限与形状拒绝：超 4 张 / 非法 type / 缺 mimeType / 超
     () =>
       parseStrictRuntimeParams(
         "session.send",
-        sendParams({ kind: "text", text: "x", attachments: [{ type: "image_base64", data: "aGk=" }] }),
+        sendParams({
+          kind: "text",
+          text: "x",
+          attachments: [{ type: "image_base64", data: "aGk=" }],
+        }),
       ),
     /mimeType/,
   );

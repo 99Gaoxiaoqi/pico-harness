@@ -470,7 +470,9 @@ export async function fileHistoryCommitJournal(
       }
       try {
         changedPaths.add(filePath);
-        if (await recordJournalChange(state, filePath, undefined, messageId, sessionId, io.baseDir)) {
+        if (
+          await recordJournalChange(state, filePath, undefined, messageId, sessionId, io.baseDir)
+        ) {
           changed = true;
         }
       } catch (error) {
@@ -484,7 +486,9 @@ export async function fileHistoryCommitJournal(
     for (const [filePath, preimage] of changedPreimages) {
       try {
         changedPaths.add(filePath);
-        if (await recordJournalChange(state, filePath, preimage, messageId, sessionId, io.baseDir)) {
+        if (
+          await recordJournalChange(state, filePath, preimage, messageId, sessionId, io.baseDir)
+        ) {
           changed = true;
         }
       } catch (error) {
@@ -1707,10 +1711,13 @@ async function fileHistoryCloneSessionUnlocked(
   }
 
   const existingRow = readFileHistoryManifestRow(io.storageRoot, targetSessionId);
-  if (existingRow !== undefined || !insertFileHistoryManifestRowIfAbsent(
-    io.storageRoot,
-    manifestToRow(targetManifest, new Date().toISOString()),
-  )) {
+  if (
+    existingRow !== undefined ||
+    !insertFileHistoryManifestRowIfAbsent(
+      io.storageRoot,
+      manifestToRow(targetManifest, new Date().toISOString()),
+    )
+  ) {
     // 目标已存在(或并发发布):回读比对,幂等相同/冲突不同。
     const finalRow = readFileHistoryManifestRow(io.storageRoot, targetSessionId);
     try {

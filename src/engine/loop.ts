@@ -1001,7 +1001,10 @@ export class AgentEngine implements AgentRunner {
    * 注意:全局排序在调用方合并处完成(见下方 availableTools 拼接),本方法
    * 只负责候选筛选 + 去重。
    */
-  private searchToolSchema(allTools: ToolDefinition[], alreadyPicked: ReadonlySet<string>): ToolDefinition[] {
+  private searchToolSchema(
+    allTools: ToolDefinition[],
+    alreadyPicked: ReadonlySet<string>,
+  ): ToolDefinition[] {
     const names = new Set(["load_tools", "search_tools"]);
     return allTools.filter((t) => names.has(t.name) && !alreadyPicked.has(t.name));
   }
@@ -1047,10 +1050,7 @@ export class AgentEngine implements AgentRunner {
    * reporter.onAssistantResponseSuppressed("network-retry") 撤销上一轮已投影的临时流。
    * reporter 未传入(如 compactSubContext 子代理路径)时只打日志,保持原行为。
    */
-  private makeRetryReporter(
-    span?: Span,
-    reporter?: Reporter,
-  ): (info: RetryInfo) => void {
+  private makeRetryReporter(span?: Span, reporter?: Reporter): (info: RetryInfo) => void {
     return (info: RetryInfo) => {
       logger.warn(
         {

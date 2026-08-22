@@ -11,21 +11,12 @@ import { App } from "./app.js";
 import type { UserKeybindingConfig } from "./keybindings/resolver.js";
 import { approvalDialogId } from "./approval-panel.js";
 import { createApprovalDialogRequest } from "./approval-dialogs.js";
-import {
-  askUserDialogId,
-  createAskUserDialogRequest,
-} from "./ask-user-dialog.js";
+import { askUserDialogId, createAskUserDialogRequest } from "./ask-user-dialog.js";
 import type { AskUserRequest } from "../tools/ask-user.js";
 import type { InputBoxSubmission } from "./input-box.js";
 import { ClientSessionRuntime } from "./client-session-runtime.js";
-import {
-  createClientCommandRegistry,
-  processClientInput,
-} from "./client-commands.js";
-import {
-  clientSlashSuggestions,
-  handleClientLocalCommand,
-} from "./client-command-host.js";
+import { createClientCommandRegistry, processClientInput } from "./client-commands.js";
+import { clientSlashSuggestions, handleClientLocalCommand } from "./client-command-host.js";
 import { TuiReporter } from "./tui-reporter.js";
 import { createTuiUpdateScheduler, TUI_RENDER_OPTIONS } from "./update-scheduler.js";
 import {
@@ -72,7 +63,9 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
   );
   const reporter = new TuiReporter({ onProjectionUpdate: scheduleProjection });
 
-  let setDialogRequests: ((update: (items: DialogRequest[]) => DialogRequest[]) => void) | undefined;
+  let setDialogRequests:
+    | ((update: (items: DialogRequest[]) => DialogRequest[]) => void)
+    | undefined;
   // @ 文件补全（tier2 收口）：FileIndex 纯本地（git ls-files + 目录扫描 + TTL
   // 缓存），run 终态与 rewind 应用后 markDirty 失效缓存。
   const fileIndex = FileIndex.create({ cwd: options.workDir });
@@ -106,7 +99,9 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
       ]);
     },
     onApprovalResolved: (approvalId) => {
-      setDialogRequests?.((items) => items.filter((item) => item.id !== approvalDialogId(approvalId)));
+      setDialogRequests?.((items) =>
+        items.filter((item) => item.id !== approvalDialogId(approvalId)),
+      );
     },
     // ask-user：daemon prompt.requested → AskUserDialog（选项 + freeText 文本
     // 输入态）；settle 动作走 prompt.respond RPC（幂等键在 runtime.respondPrompt）。
@@ -131,8 +126,7 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
                 ),
           },
           {
-            onClose: (id) =>
-              setDialogRequests?.((items) => items.filter((item) => item.id !== id)),
+            onClose: (id) => setDialogRequests?.((items) => items.filter((item) => item.id !== id)),
           },
         ),
       ]);
@@ -148,16 +142,31 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
   });
 
   let exitRequested = false;
-  let instanceRef: ReturnType<typeof render> | undefined;
+  const instanceRef: { current: ReturnType<typeof render> | undefined } = { current: undefined };
   // 会话设置快照桥（对抗评审二轮 P1：App 的 permissionMode 默认 "yolo" 会误显；
   // runtime 推快照 → sink → 组件 state，与 projectionSink 同款桥接）。
   const currentSettings: {
-    current: Partial<Record<"modelRouteId" | "thinkingEffort" | "collaborationMode" | "permissionMode" | "orchestrationMode", string>> | undefined;
+    current:
+      | Partial<
+          Record<
+            | "modelRouteId"
+            | "thinkingEffort"
+            | "collaborationMode"
+            | "permissionMode"
+            | "orchestrationMode",
+            string
+          >
+        >
+      | undefined;
   } = { current: undefined };
-  const settingsSink: { current: ((value: NonNullable<typeof currentSettings.current>) => void) | undefined } = { current: undefined };
+  const settingsSink: {
+    current: ((value: NonNullable<typeof currentSettings.current>) => void) | undefined;
+  } = { current: undefined };
   // rewind 后输入回填桥（fork 会话携带原 prompt 供编辑——与 in-process
   // setInputReplacement 同语义，经 App.inputReplacement 通道）。
-  const inputReplacementSink: { current: ((value: { sequence: number; text: string } | undefined) => void) | undefined } = { current: undefined };
+  const inputReplacementSink: {
+    current: ((value: { sequence: number; text: string } | undefined) => void) | undefined;
+  } = { current: undefined };
   let inputReplacementSeq = 0;
   // rewind preview 的指纹缓存（preview→apply 间一致性校验；键 = sessionId/checkpointId）。
   const rewindFingerprints = new Map<string, string>();
@@ -204,7 +213,7 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
   const requestExit = (): void => {
     if (exitRequested) return;
     exitRequested = true;
-    instanceRef?.unmount();
+    instanceRef.current?.unmount();
   };
 
   const closeDialogById = (id: string): void => {
@@ -370,15 +379,13 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
   }
 
   const instance = render(<ClientReplApp />, { ...TUI_RENDER_OPTIONS });
-  instanceRef = instance;
+  instanceRef.current = instance;
   try {
     // 冷启动预算（Phase 4 复核）：慢环境 connectOrSpawn 选举首连可达 24s——
     // UI 先渲染并给出连接提示，避免"敲完命令黑屏数十秒"。
     reporter.pushSystemMessage("正在连接本地 Runtime（冷启动拉起 daemon 可能需要数十秒）…");
     await runtime.start();
-    reporter.pushSystemMessage(
-      `已连接本地 Runtime（客户端模式）。工作区：${options.workDir}`,
-    );
+    reporter.pushSystemMessage(`已连接本地 Runtime（客户端模式）。工作区：${options.workDir}`);
     // 启动 fork（--fork <id>）：连接后从源会话 fork 新会话并切换（原会话不动）。
     if (options.forkFrom) {
       const forked = await runtime.request("session.fork", {
@@ -386,7 +393,9 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
         sessionId: options.forkFrom,
       });
       await runtime.switchSession(forked.session.sessionId);
-      reporter.pushSystemMessage(`已从 ${options.forkFrom} fork 到新会话 ${forked.session.sessionId}。`);
+      reporter.pushSystemMessage(
+        `已从 ${options.forkFrom} fork 到新会话 ${forked.session.sessionId}。`,
+      );
     }
     await instance.waitUntilExit();
   } finally {

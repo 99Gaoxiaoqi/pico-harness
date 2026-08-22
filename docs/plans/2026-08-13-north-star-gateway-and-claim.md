@@ -48,15 +48,15 @@ orphan 恢复（进程重启后）:
 
 ### 2.3 实施步骤（每步独立提交 + 验证）
 
-| 步 | 改动 | 验证 |
-|---|---|---|
-| 1 | 读 `runtime-store.ts` 的 acquireLease/heartbeatLease/releaseLease 签名与 `cron-runtime-scheduler.ts:123` 用法，确认接口契约 | — |
-| 2 | `DelegationManager.dispatch` 去重改读 lease：`acquireLease("graph-work:"+graphWorkId, delegationId, ttl)`，冲突（`RuntimeConflictError`）→ 返回 rejected（不再 `[...records.values()].find`） | `delegation-graph-dedup.test.ts` 全绿（现有 running 窗口 + settle 链窗口测试） |
-| 3 | delegation settle 链完成时 `releaseLease`（onGraphWorkSettled 之后） | 同上 |
-| 4 | orphan 恢复改按 lease 活性：`src/graph/graph-recover.ts` 从"`liveDelegationIds` 空集负信号"改为"lease 活/死判定" | 崩溃恢复集成测试（kill 进程 → 重启 → orphan 标 failed） |
-| 5 | `settleFinalized` 标志移除（durable lease 覆盖了它防的 I/O 窗口）；`records` 可安全 delete（settleFinalized 后移除记录，活跃表/历史表分离——历史查询 `delegate_status` 改走 TaskRegistry 或记录归档） | 门禁 + typecheck + graph 集成测试 |
-| 6 | **活体追踪器反转**：`architecture-invariants.test.ts` D7 测试由"债务表征存在"反转为"records 有 lease 回源路径"的正向断言 | 测试绿 |
-| 7 | e2e：`graph-mode-multiround.real-llm.test.ts`（需真模型 + `RUN_LLM_E2E=1`）验证多轮图调度无回归 | e2e 绿 |
+| 步  | 改动                                                                                                                                                                                                 | 验证                                                                           |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| 1   | 读 `runtime-store.ts` 的 acquireLease/heartbeatLease/releaseLease 签名与 `cron-runtime-scheduler.ts:123` 用法，确认接口契约                                                                          | —                                                                              |
+| 2   | `DelegationManager.dispatch` 去重改读 lease：`acquireLease("graph-work:"+graphWorkId, delegationId, ttl)`，冲突（`RuntimeConflictError`）→ 返回 rejected（不再 `[...records.values()].find`）        | `delegation-graph-dedup.test.ts` 全绿（现有 running 窗口 + settle 链窗口测试） |
+| 3   | delegation settle 链完成时 `releaseLease`（onGraphWorkSettled 之后）                                                                                                                                 | 同上                                                                           |
+| 4   | orphan 恢复改按 lease 活性：`src/graph/graph-recover.ts` 从"`liveDelegationIds` 空集负信号"改为"lease 活/死判定"                                                                                     | 崩溃恢复集成测试（kill 进程 → 重启 → orphan 标 failed）                        |
+| 5   | `settleFinalized` 标志移除（durable lease 覆盖了它防的 I/O 窗口）；`records` 可安全 delete（settleFinalized 后移除记录，活跃表/历史表分离——历史查询 `delegate_status` 改走 TaskRegistry 或记录归档） | 门禁 + typecheck + graph 集成测试                                              |
+| 6   | **活体追踪器反转**：`architecture-invariants.test.ts` D7 测试由"债务表征存在"反转为"records 有 lease 回源路径"的正向断言                                                                             | 测试绿                                                                         |
+| 7   | e2e：`graph-mode-multiround.real-llm.test.ts`（需真模型 + `RUN_LLM_E2E=1`）验证多轮图调度无回归                                                                                                      | e2e 绿                                                                         |
 
 ### 2.4 难点与决策点（执行时拍板，记录在 commit body）
 
@@ -89,6 +89,7 @@ orphan 恢复（进程重启后）:
 ```
 
 **契约抽象**（借鉴 maka 的 runtime-host，仅契约与分层，不照搬传输）：
+
 - `ClientSurface` 枚举（`"desktop" | "tui" | "mobile"`）+ `RuntimeHostConnection` 接口：握手、pending 请求队列、存活检测、订阅复用——**全仓唯一的连接状态机实现**
 - `ClientSessionSubscription.loadTranscript`：统一 transcript 分页（吸收 Desktop `conversationLoadGenerationsRef` 与 Mobile `loadGenerationRef` 双实现）+ `snapshot_expired` 语义
 - `SessionContinuityService`：重连后的会话连续性（投影状态 + 订阅者 + 序列号）
@@ -98,14 +99,14 @@ orphan 恢复（进程重启后）:
 
 ### 3.3 实施步骤（迁移顺序，每步独立提交）
 
-| 步 | 改动 | 验证 |
-|---|---|---|
-| 1 | 定义契约：`ClientSurface` + `RuntimeHostConnection` 接口 + transcript 分页协议（新模块，如 `src/gateway/` 或升级 `src/mobile-gateway/`） | typecheck + 契约单测 |
-| 2 | `mobile-gateway` 升级为通用网关：本地 socket + WS 双传输适配同一契约 | mobile gateway 既有测试 + 新 socket 传输测试 |
-| 3 | Mobile 迁移：`session.tsx` 从自维护状态机改为经契约订阅（吸收重连/退避/认证逻辑进网关客户端） | mobile client 测试（4/4）+ 真机冒烟 |
-| 4 | Desktop 迁移：renderer 从直连 daemon IPC + 自维护 `ConnectionState` 改为经网关客户端；**加自动恢复路径**（transport 恢复 → 自动 re-bootstrap，消除 fail-stuck 错误页） | desktop-runtime-close + 断连恢复测试 |
-| 5 | TUI 迁移（最大，最后）：从进程内装配改为 socket 客户端 | 见 3.4 风险 |
-| 6 | **活体追踪器反转**：D9（三套状态机）/D12（transcript 双实现）测试反转为"外壳只留展示层"的正向断言 | 测试绿 |
+| 步  | 改动                                                                                                                                                                   | 验证                                         |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| 1   | 定义契约：`ClientSurface` + `RuntimeHostConnection` 接口 + transcript 分页协议（新模块，如 `src/gateway/` 或升级 `src/mobile-gateway/`）                               | typecheck + 契约单测                         |
+| 2   | `mobile-gateway` 升级为通用网关：本地 socket + WS 双传输适配同一契约                                                                                                   | mobile gateway 既有测试 + 新 socket 传输测试 |
+| 3   | Mobile 迁移：`session.tsx` 从自维护状态机改为经契约订阅（吸收重连/退避/认证逻辑进网关客户端）                                                                          | mobile client 测试（4/4）+ 真机冒烟          |
+| 4   | Desktop 迁移：renderer 从直连 daemon IPC + 自维护 `ConnectionState` 改为经网关客户端；**加自动恢复路径**（transport 恢复 → 自动 re-bootstrap，消除 fail-stuck 错误页） | desktop-runtime-close + 断连恢复测试         |
+| 5   | TUI 迁移（最大，最后）：从进程内装配改为 socket 客户端                                                                                                                 | 见 3.4 风险                                  |
+| 6   | **活体追踪器反转**：D9（三套状态机）/D12（transcript 双实现）测试反转为"外壳只留展示层"的正向断言                                                                      | 测试绿                                       |
 
 ### 3.4 风险与降级（TUI 迁移，已在 20 文档 §5 评估）
 

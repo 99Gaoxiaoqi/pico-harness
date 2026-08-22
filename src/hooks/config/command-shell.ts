@@ -108,11 +108,7 @@ export async function resolveCommandHookExecution(
  * shell 全权解释）；有 args 时逐词 quote 拼接。PowerShell 的 quoted string
  * 在命令位不会被执行，需要调用运算符 `&` 前缀（POSIX shell 不需要）。
  */
-function buildCommandString(
-  kind: HookShellKind,
-  command: string,
-  args: readonly string[],
-): string {
+function buildCommandString(kind: HookShellKind, command: string, args: readonly string[]): string {
   if (args.length === 0) return command;
   const quoted = [command, ...args].map((word) => quoteShellWord(kind, word)).join(" ");
   return kind === "pwsh" || kind === "powershell" ? `& ${quoted}` : quoted;
@@ -170,7 +166,12 @@ export function resolveHookShell(
     const bashPath = findGitBashPath(environment, probe);
     if (bashPath) return { kind: "bash", path: bashPath, argsPrefix: ["-c"] };
     const pwshPath = findExecutableInPath("pwsh.exe", environment) ?? findWindowsPowerShell();
-    if (pwshPath) return { kind: "pwsh", path: pwshPath, argsPrefix: ["-NoProfile", "-NonInteractive", "-Command"] };
+    if (pwshPath)
+      return {
+        kind: "pwsh",
+        path: pwshPath,
+        argsPrefix: ["-NoProfile", "-NonInteractive", "-Command"],
+      };
     return {
       kind: "powershell",
       path: "powershell.exe",

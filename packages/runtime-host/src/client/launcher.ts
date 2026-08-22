@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn } from "node:child_process";
 import {
   closeSync,
   existsSync,
@@ -8,15 +8,15 @@ import {
   statSync,
   unlinkSync,
   writeSync,
-} from 'node:fs';
-import { randomBytes } from 'node:crypto';
-import { createRequire } from 'node:module';
-import { dirname, isAbsolute, join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+} from "node:fs";
+import { randomBytes } from "node:crypto";
+import { createRequire } from "node:module";
+import { dirname, isAbsolute, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   candidateStartupFailureForExitCode,
   type CandidateStartupFailure,
-} from '../candidate-startup-failure.js';
+} from "../candidate-startup-failure.js";
 
 export interface DetachedCandidateInput {
   rootPath: string;
@@ -56,7 +56,7 @@ export interface DetachedCandidateLaunch {
 }
 
 const CANDIDATE_LOG_KEEP_COUNT = 20;
-const CANDIDATE_LOG_PREFIX = 'candidate-';
+const CANDIDATE_LOG_PREFIX = "candidate-";
 
 export type CandidateLauncher = (input: DetachedCandidateInput) => DetachedCandidateLaunch;
 
@@ -74,9 +74,9 @@ export type CandidateLauncher = (input: DetachedCandidateInput) => DetachedCandi
  *   `startup_timeout`.
  */
 function resolveDefaultEntrypoint(): { path: string; tsxLoaderPath?: string } {
-  const compiledPath = fileURLToPath(new URL('../candidate-main.js', import.meta.url));
+  const compiledPath = fileURLToPath(new URL("../candidate-main.js", import.meta.url));
   if (existsSync(compiledPath)) return { path: compiledPath };
-  const sourcePath = fileURLToPath(new URL('../candidate-main.ts', import.meta.url));
+  const sourcePath = fileURLToPath(new URL("../candidate-main.ts", import.meta.url));
   if (existsSync(sourcePath)) return { path: sourcePath, tsxLoaderPath: resolveTsxLoaderPath() };
   // Let node surface a clear module-not-found rather than the election loop
   // timing out with no information.
@@ -85,14 +85,14 @@ function resolveDefaultEntrypoint(): { path: string; tsxLoaderPath?: string } {
 
 function resolveTsxLoaderPath(): string {
   try {
-    const resolved = createRequire(import.meta.url).resolve('tsx');
+    const resolved = createRequire(import.meta.url).resolve("tsx");
     // node --import 需要 file:// URL（Windows 裸绝对路径会被当作 URL scheme 报
     // ERR_UNSUPPORTED_ESM_URL_SCHEME），故转为 file URL。
     return pathToFileURL(resolved).href;
   } catch {
     // Fall back to the bare specifier; the child then resolves tsx from its own
     // cwd's node_modules (works when spawned from within the workspace).
-    return 'tsx';
+    return "tsx";
   }
 }
 
@@ -107,9 +107,9 @@ export function launchDetachedRuntimeHostCandidate(
   const entrypointPath =
     input.entrypoint === undefined
       ? resolvedDefault.path
-      : typeof input.entrypoint === 'string'
+      : typeof input.entrypoint === "string"
         ? // file:// href 字符串是常见的传参形态；转换为路径而非当作字面脚本路径。
-          input.entrypoint.startsWith('file://')
+          input.entrypoint.startsWith("file://")
           ? fileURLToPath(input.entrypoint)
           : input.entrypoint
         : fileURLToPath(input.entrypoint);
@@ -117,31 +117,31 @@ export function launchDetachedRuntimeHostCandidate(
   // tsx ESM loader——detached node 子进程没有别的 TS 装载途径。
   const tsxLoaderPath = usesDefaultEntrypoint
     ? resolvedDefault.tsxLoaderPath
-    : entrypointPath.endsWith('.ts')
+    : entrypointPath.endsWith(".ts")
       ? resolveTsxLoaderPath()
       : undefined;
   const args = [
     // 源码模式下为 detached node 子进程注册 tsx ESM loader（绝对路径，不依赖子进程 cwd）。
-    ...(tsxLoaderPath ? ['--import', tsxLoaderPath] : []),
+    ...(tsxLoaderPath ? ["--import", tsxLoaderPath] : []),
     entrypointPath,
-    '--root',
+    "--root",
     input.rootPath,
-    '--expected-root-id',
+    "--expected-root-id",
     input.expectedRootId,
   ];
-  appendArgument(args, '--idle-grace-ms', input.idleGraceMs);
-  appendArgument(args, '--handshake-timeout-ms', input.handshakeTimeoutMs);
-  appendArgument(args, '--operation-deadline-ms', input.operationDeadlineMs);
-  appendArgument(args, '--legacy-configuration-root', input.legacyConfigurationRoot);
+  appendArgument(args, "--idle-grace-ms", input.idleGraceMs);
+  appendArgument(args, "--handshake-timeout-ms", input.handshakeTimeoutMs);
+  appendArgument(args, "--operation-deadline-ms", input.operationDeadlineMs);
+  appendArgument(args, "--legacy-configuration-root", input.legacyConfigurationRoot);
 
   // spawn() commits the side effect synchronously; spawned only reports that commit's outcome.
   const logSink = prepareCandidateLogSink(input);
-  let stdio: 'ignore' | ['ignore', number, number] = 'ignore';
+  let stdio: "ignore" | ["ignore", number, number] = "ignore";
   if (logSink) {
     // Header precedes any child output: an empty log still proves a launch happened
     // and records what was launched.
     writeSync(logSink.fd, logSink.header);
-    stdio = ['ignore', logSink.fd, logSink.fd];
+    stdio = ["ignore", logSink.fd, logSink.fd];
   }
   const child = (() => {
     try {
@@ -154,7 +154,7 @@ export function launchDetachedRuntimeHostCandidate(
         windowsHide: true,
         env: {
           ...process.env,
-          ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
+          ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: "1" } : {}),
           ...input.env,
         },
       });
@@ -168,23 +168,21 @@ export function launchDetachedRuntimeHostCandidate(
   const startupFailure = readStartupFailure(child);
   const spawned = new Promise<DetachedCandidateAttempt>((resolve, reject) => {
     const onSpawn = () => {
-      child.off('error', onError);
+      child.off("error", onError);
       const pid = child.pid;
       if (pid === undefined) {
-        reject(new Error('Runtime Host candidate did not receive a process id'));
+        reject(new Error("Runtime Host candidate did not receive a process id"));
         return;
       }
       child.unref();
-      resolve(
-        logFile === undefined ? { pid, startupFailure } : { pid, logFile, startupFailure },
-      );
+      resolve(logFile === undefined ? { pid, startupFailure } : { pid, logFile, startupFailure });
     };
     const onError = (error: Error) => {
-      child.off('spawn', onSpawn);
+      child.off("spawn", onSpawn);
       reject(error);
     };
-    child.once('spawn', onSpawn);
-    child.once('error', onError);
+    child.once("spawn", onSpawn);
+    child.once("error", onError);
   });
   if (logSink) void pruneCandidateLogs(logSink.directory);
   return { spawned };
@@ -199,8 +197,8 @@ function readStartupFailure(
   child: ReturnType<typeof spawn>,
 ): Promise<CandidateStartupFailure | undefined> {
   return new Promise((resolve) => {
-    child.once('exit', (code) => resolve(candidateStartupFailureForExitCode(code)));
-    child.once('error', () => resolve(undefined));
+    child.once("exit", (code) => resolve(candidateStartupFailureForExitCode(code)));
+    child.once("error", () => resolve(undefined));
   });
 }
 
@@ -220,16 +218,16 @@ function prepareCandidateLogSink(input: DetachedCandidateInput): CandidateLogSin
   if (!input.logDirectory) return undefined;
   try {
     mkdirSync(input.logDirectory, { recursive: true });
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 23);
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 23);
     const path = join(
       input.logDirectory,
-      `${CANDIDATE_LOG_PREFIX}${stamp}-${randomBytes(3).toString('hex')}.log`,
+      `${CANDIDATE_LOG_PREFIX}${stamp}-${randomBytes(3).toString("hex")}.log`,
     );
-    const fd = openSync(path, 'a', 0o600);
+    const fd = openSync(path, "a", 0o600);
     const header =
       `# candidate launch ${new Date().toISOString()}\n` +
       `# root=${input.rootPath}\n` +
-      `# entrypoint=${typeof input.entrypoint === 'string' ? input.entrypoint : 'default'}\n`;
+      `# entrypoint=${typeof input.entrypoint === "string" ? input.entrypoint : "default"}\n`;
     return { fd, path, directory: input.logDirectory, header };
   } catch {
     return undefined;
@@ -240,7 +238,7 @@ function prepareCandidateLogSink(input: DetachedCandidateInput): CandidateLogSin
 async function pruneCandidateLogs(directory: string): Promise<void> {
   try {
     const entries = readdirSync(directory)
-      .filter((name) => name.startsWith(CANDIDATE_LOG_PREFIX) && name.endsWith('.log'))
+      .filter((name) => name.startsWith(CANDIDATE_LOG_PREFIX) && name.endsWith(".log"))
       .map((name) => ({ name, mtime: statSync(join(directory, name)).mtimeMs }))
       .sort((left, right) => right.mtime - left.mtime);
     for (const stale of entries.slice(CANDIDATE_LOG_KEEP_COUNT)) {

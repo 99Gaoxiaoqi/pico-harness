@@ -8,10 +8,10 @@
 
 **两个项目都不是"单一存储"。**
 
-| 项目 | 物理 Store 数量 | Store 列表 |
-|------|----------------|-----------|
-| Pico | 4 | RuntimeEventStore、TaskRunStore、RuntimeStore、MemoryRepository |
-| Maka | 5+ | RuntimeEventStore、SessionStore、AgentRunStore、MessageReceiptStore、(可选)InteractionStore，且按 interactive/headless 二分 |
+| 项目 | 物理 Store 数量 | Store 列表                                                                                                                  |
+| ---- | --------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| Pico | 4               | RuntimeEventStore、TaskRunStore、RuntimeStore、MemoryRepository                                                             |
+| Maka | 5+              | RuntimeEventStore、SessionStore、AgentRunStore、MessageReceiptStore、(可选)InteractionStore，且按 interactive/headless 二分 |
 
 差异不在 Store 数量，而在**Store 之间的关系模型**：
 
@@ -78,10 +78,10 @@ RuntimeEventStore (runtime-events.jsonl)  ← 唯一 canonical semantic log
 > non-destructive fork，与下表 Maka 列的行为一致。旧 `history.rewound` /
 > branchId 机制已删除。
 
-| 维度 | Pico（旧机制，已废弃） | 对比项目 |
-|------|------|------|
-| rewind 是什么 | 追加 `history.rewound` 事件 + 切换 branchId + **文件回滚** | 创建新 Session（fork），**旧 ledger 永不修改** |
-| canonical log | 事件仍在但 active branch 切换 | 完全 immutable，从未修改 |
+| 维度             | Pico（旧机制，已废弃）                                                                      | 对比项目                                             |
+| ---------------- | ------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| rewind 是什么    | 追加 `history.rewound` 事件 + 切换 branchId + **文件回滚**                                  | 创建新 Session（fork），**旧 ledger 永不修改**       |
+| canonical log    | 事件仍在但 active branch 切换                                                               | 完全 immutable，从未修改                             |
 | 其他账本怎么响应 | 需要显式协调（Memory lifecycle Job 标记 Source 为 rewound；TaskRunStore **不感知 rewind**） | 天然安全——旧 Session 的投影不变，新 Session 是新对象 |
 
 **Pico 旧 rewind 的风险（已通过改进 3 消除）**：
@@ -93,35 +93,35 @@ RuntimeEventStore (runtime-events.jsonl)  ← 唯一 canonical semantic log
 
 ### 3.2 跨账本一致性
 
-| 维度 | Pico | Maka |
-|------|------|------|
-| 原子提交边界 | 运行态三账本可共享 `.storage/lock` 做串行互斥，但各自独立 commit；Memory 完全隔离 | RuntimeEventStore 一次 append 全有或全无 |
-| 跨域操作 | rewind/delete/fork 需要 2PC 模拟 + fail-closed 补偿 | 不存在跨域——所有状态投影自同一 log |
-| 悬空引用 | Memory Source 的 eventIds、TaskRun boundary 的 terminalEventId 都是弱外键 | 不可能——rewind 不修改旧 log，ref 永远有效 |
+| 维度         | Pico                                                                              | Maka                                      |
+| ------------ | --------------------------------------------------------------------------------- | ----------------------------------------- |
+| 原子提交边界 | 运行态三账本可共享 `.storage/lock` 做串行互斥，但各自独立 commit；Memory 完全隔离 | RuntimeEventStore 一次 append 全有或全无  |
+| 跨域操作     | rewind/delete/fork 需要 2PC 模拟 + fail-closed 补偿                               | 不存在跨域——所有状态投影自同一 log        |
+| 悬空引用     | Memory Source 的 eventIds、TaskRun boundary 的 terminalEventId 都是弱外键         | 不可能——rewind 不修改旧 log，ref 永远有效 |
 
 ### 3.3 schema 演进
 
-| 维度 | Pico | Maka |
-|------|------|------|
-| 版本管理 | 每个账本独立 schemaVersion（Memory 已到 v2，其他 v1） | RuntimeEvent **无版本字段**，靠 closed-domain key/value 校验 + 可选字段 |
-| 加字段的影响范围 | 只影响本账本 | 影响 RuntimeEvent + 所有投影消费者 |
-| 演进独立性 | ✅ 强——Memory v1→v2 不碰 RuntimeEvent | ❌ 弱——加字段要检查所有投影 |
-| 兼容策略 | 每个账本的 `decodeXxx` 严格校验本账本 schemaVersion | V1/V2 共存 fallback（如 compaction checkpoint V1→V2）+ diagnostics |
+| 维度             | Pico                                                  | Maka                                                                    |
+| ---------------- | ----------------------------------------------------- | ----------------------------------------------------------------------- |
+| 版本管理         | 每个账本独立 schemaVersion（Memory 已到 v2，其他 v1） | RuntimeEvent **无版本字段**，靠 closed-domain key/value 校验 + 可选字段 |
+| 加字段的影响范围 | 只影响本账本                                          | 影响 RuntimeEvent + 所有投影消费者                                      |
+| 演进独立性       | ✅ 强——Memory v1→v2 不碰 RuntimeEvent                 | ❌ 弱——加字段要检查所有投影                                             |
+| 兼容策略         | 每个账本的 `decodeXxx` 严格校验本账本 schemaVersion   | V1/V2 共存 fallback（如 compaction checkpoint V1→V2）+ diagnostics      |
 
 ### 3.4 故障隔离
 
-| 维度 | Pico | Maka |
-|------|------|------|
-| 一个账本损坏 | 只影响本账本，其他不受影响（`StorageDoctor` 按账本独立 repair） | canonical log 损坏 → 所有投影失效 |
-| Memory 损坏 | 可从 RuntimeEvent 重新提取 evidence | Memory 是 SQLite 派生存储，损坏可从 RuntimeEvent 重新提取 |
-| RuntimeEvent 损坏 | TaskRun 可独立恢复（有自己的 ledger） | 全部投影失效，但有 `backfillMissingRuntimeEvents` 兜底 |
+| 维度              | Pico                                                            | Maka                                                      |
+| ----------------- | --------------------------------------------------------------- | --------------------------------------------------------- |
+| 一个账本损坏      | 只影响本账本，其他不受影响（`StorageDoctor` 按账本独立 repair） | canonical log 损坏 → 所有投影失效                         |
+| Memory 损坏       | 可从 RuntimeEvent 重新提取 evidence                             | Memory 是 SQLite 派生存储，损坏可从 RuntimeEvent 重新提取 |
+| RuntimeEvent 损坏 | TaskRun 可独立恢复（有自己的 ledger）                           | 全部投影失效，但有 `backfillMissingRuntimeEvents` 兜底    |
 
 ### 3.5 性能隔离
 
-| 维度 | Pico | Maka |
-|------|------|------|
-| 锁竞争 | `.storage/lock` 三账本共享（串行瓶颈）；Memory 独立锁（不竞争） | 取决于 SQLite + JSONL 的实现 |
-| 大查询阻塞 | Memory 大查询不阻塞 RuntimeEvent 写入（不同锁） | 同一 RuntimeEventStore 的读写竞争取决于实现 |
+| 维度       | Pico                                                            | Maka                                        |
+| ---------- | --------------------------------------------------------------- | ------------------------------------------- |
+| 锁竞争     | `.storage/lock` 三账本共享（串行瓶颈）；Memory 独立锁（不竞争） | 取决于 SQLite + JSONL 的实现                |
+| 大查询阻塞 | Memory 大查询不阻塞 RuntimeEvent 写入（不同锁）                 | 同一 RuntimeEventStore 的读写竞争取决于实现 |
 
 ---
 
@@ -174,14 +174,14 @@ RuntimeEventStore (runtime-events.jsonl)  ← 唯一 canonical semantic log
 
 ## 五、总结：两种架构的本质取舍
 
-| 维度 | Pico 四账本 | Maka log-first |
-|------|------------|----------------|
-| **一致性简单度** | 低（需要显式协调） | **高**（投影自动一致） |
-| **schema 演进** | **独立**（各管各的） | 耦合（全局影响） |
-| **故障隔离** | **强**（一个坏不拖累） | 弱（log 坏全部投影失效） |
-| **理解成本** | 高（~14K 行，4 个账本） | 中（一个 log + N 个投影） |
-| **rewind 安全性** | 有风险（需显式协调） | **天然安全**（non-destructive fork） |
-| **适合阶段** | 成熟系统（需独立演进） | 快速迭代（需一致性优先） |
+| 维度              | Pico 四账本             | Maka log-first                       |
+| ----------------- | ----------------------- | ------------------------------------ |
+| **一致性简单度**  | 低（需要显式协调）      | **高**（投影自动一致）               |
+| **schema 演进**   | **独立**（各管各的）    | 耦合（全局影响）                     |
+| **故障隔离**      | **强**（一个坏不拖累）  | 弱（log 坏全部投影失效）             |
+| **理解成本**      | 高（~14K 行，4 个账本） | 中（一个 log + N 个投影）            |
+| **rewind 安全性** | 有风险（需显式协调）    | **天然安全**（non-destructive fork） |
+| **适合阶段**      | 成熟系统（需独立演进）  | 快速迭代（需一致性优先）             |
 
 **Pico 的架构不是"有问题"，而是"用一致性简单度换 schema 独立演进和故障隔离"。** 最值得借鉴 Maka 的不是合并账本，而是：
 
@@ -195,14 +195,14 @@ RuntimeEventStore (runtime-events.jsonl)  ← 唯一 canonical semantic log
 
 ## 附录：关键代码对照
 
-| 概念 | Pico 位置 | Maka 位置 |
-|------|----------|----------|
-| 状态真源声明 | `ARCHITECTURE.md:96-118` | `runtime-core:49, 308-333` |
-| canonical log | `src/storage/runtime-event-store.ts` | `packages/core/src/runtime-event-store.ts` |
-| rewind/fork 实现 | `src/engine/session.ts` (`forkFromCheckpoint`) + `src/engine/session-fork-service.ts` | `session-manager.ts:5032` (`reviseBeforeTurn`) |
-| 跨账本协调 | `desktop-memory-service.ts` (deleteSession lifecycle Job) | 不存在（不需要） |
-| Memory provenance | `src/memory/domain.ts` (Source) | `long-term-memory.ts` (MemoryItemSource) |
-| 投影入口 | `src/engine/runtime-projection-service.ts`（统一） | `runtime-read-model.ts` (`getSessionView`，统一） |
-| 压缩语义 | `src/context/full-compactor.ts`（摘要替换前缀） | `history-compact-checkpoint.ts`（checkpoint 是投影） |
-| schema 版本 | 各账本独立 schemaVersion | RuntimeEvent 无版本（closed-domain 校验） |
-| 故障恢复 | `src/storage/storage-doctor.ts`（按账本独立 repair） | 从 RuntimeEvent 重建投影 |
+| 概念              | Pico 位置                                                                             | Maka 位置                                            |
+| ----------------- | ------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| 状态真源声明      | `ARCHITECTURE.md:96-118`                                                              | `runtime-core:49, 308-333`                           |
+| canonical log     | `src/storage/runtime-event-store.ts`                                                  | `packages/core/src/runtime-event-store.ts`           |
+| rewind/fork 实现  | `src/engine/session.ts` (`forkFromCheckpoint`) + `src/engine/session-fork-service.ts` | `session-manager.ts:5032` (`reviseBeforeTurn`)       |
+| 跨账本协调        | `desktop-memory-service.ts` (deleteSession lifecycle Job)                             | 不存在（不需要）                                     |
+| Memory provenance | `src/memory/domain.ts` (Source)                                                       | `long-term-memory.ts` (MemoryItemSource)             |
+| 投影入口          | `src/engine/runtime-projection-service.ts`（统一）                                    | `runtime-read-model.ts` (`getSessionView`，统一）    |
+| 压缩语义          | `src/context/full-compactor.ts`（摘要替换前缀）                                       | `history-compact-checkpoint.ts`（checkpoint 是投影） |
+| schema 版本       | 各账本独立 schemaVersion                                                              | RuntimeEvent 无版本（closed-domain 校验）            |
+| 故障恢复          | `src/storage/storage-doctor.ts`（按账本独立 repair）                                  | 从 RuntimeEvent 重建投影                             |

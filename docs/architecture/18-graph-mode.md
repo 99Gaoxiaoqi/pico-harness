@@ -24,12 +24,12 @@ Graph Mode 把这两件事显式化:
 
 Graph Mode 由四个角色协作,全部架在 RuntimeEventStore 之上:
 
-| 角色 | 位置 | 职责 |
-|------|------|------|
-| **事件流** | RuntimeEventStore | 5 种 `graph.*` 事件,单 canonical,唯一真相 |
-| **投影** | `graph-reducer.ts` | 从事件流幂等折叠出 `GraphProjection`(works/records/status) |
-| **工具层** | `graph-tools.ts` | `add_work` / `view_graph` / `close_graph`,经事件读写(view_graph 只读,add_work / close_graph 写) |
-| **调度** | `agent-runtime.ts` + `session-runtime.ts` | `graphDispatcher` 派发子代理 + `settleGraphWork` 写终态 + `graphReconcile` 续行 |
+| 角色       | 位置                                      | 职责                                                                                            |
+| ---------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| **事件流** | RuntimeEventStore                         | 5 种 `graph.*` 事件,单 canonical,唯一真相                                                       |
+| **投影**   | `graph-reducer.ts`                        | 从事件流幂等折叠出 `GraphProjection`(works/records/status)                                      |
+| **工具层** | `graph-tools.ts`                          | `add_work` / `view_graph` / `close_graph`,经事件读写(view_graph 只读,add_work / close_graph 写) |
+| **调度**   | `agent-runtime.ts` + `session-runtime.ts` | `graphDispatcher` 派发子代理 + `settleGraphWork` 写终态 + `graphReconcile` 续行                 |
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
@@ -192,11 +192,11 @@ Graph Mode **默认关闭**,需用户显式开启。这是通过一个正交于 
 
 **三端入口**:
 
-| 端 | 入口 | 作用域 |
-|----|------|--------|
-| TUI | `/graph` · `/graph on` · `/graph off` | session 级持久 |
-| CLI | `--graph` flag | 新会话初始模式 |
-| desktop | composer graph toggle + 环境面板显示 | session 级持久 |
+| 端      | 入口                                  | 作用域         |
+| ------- | ------------------------------------- | -------------- |
+| TUI     | `/graph` · `/graph on` · `/graph off` | session 级持久 |
+| CLI     | `--graph` flag                        | 新会话初始模式 |
+| desktop | composer graph toggle + 环境面板显示  | session 级持久 |
 
 **门控三处**(`agent-runtime.ts`),确保 default 模式下模型完全看不到 graph:
 
@@ -253,16 +253,16 @@ close_graph → {
 
 ## 九、关键不变量速查
 
-| 不变量 | 守护位置 |
-|--------|----------|
-| 单 canonical(无跨 store 一致性) | 全部走 RuntimeEventStore |
-| work 声明幂等 | workId 哈希 + reducer `findWork` 短路 |
-| added+dispatched 原子事务 | CAS operationId+fingerprint+expectedSessionSequence |
-| closed 后不得新增 work | AddWorkTool 检查 + reducer added 守卫(双重) |
-| record 存在性 = 下游就绪 | computeReadyWorks(只看存在性,不校验内容) |
-| settle 不依赖 graph.status | settleGraphWork 不检查(closed 后仍写 recorded) |
-| 诊断在决策时刻可见 | 续行消息注入 stuck missingInputIds |
-| closed 图的 pending 如实报告 | hasPendingWorks 不看图状态 + close 返回 pendingWorks |
+| 不变量                          | 守护位置                                             |
+| ------------------------------- | ---------------------------------------------------- |
+| 单 canonical(无跨 store 一致性) | 全部走 RuntimeEventStore                             |
+| work 声明幂等                   | workId 哈希 + reducer `findWork` 短路                |
+| added+dispatched 原子事务       | CAS operationId+fingerprint+expectedSessionSequence  |
+| closed 后不得新增 work          | AddWorkTool 检查 + reducer added 守卫(双重)          |
+| record 存在性 = 下游就绪        | computeReadyWorks(只看存在性,不校验内容)             |
+| settle 不依赖 graph.status      | settleGraphWork 不检查(closed 后仍写 recorded)       |
+| 诊断在决策时刻可见              | 续行消息注入 stuck missingInputIds                   |
+| closed 图的 pending 如实报告    | hasPendingWorks 不看图状态 + close 返回 pendingWorks |
 
 ---
 
@@ -277,23 +277,23 @@ close_graph → {
 
 ## 代码索引
 
-| 模块 | 文件 | 职责 |
-|------|------|------|
-| 类型与 ID | `src/graph/contract.ts` | GraphWork/GraphRecord/GraphProjection + workIdFor/recordIdFor |
-| 投影 | `src/graph/graph-reducer.ts` | projectGraphEntries 幂等折叠 |
-| 依赖解析 | `src/graph/graph-reconcile.ts` | computeReadyWorks/hasPendingWorks/missingInputIdsFor |
-| orphan 检测 | `src/graph/graph-recover.ts` | findOrphanGraphWorks(liveDelegationIds 判定) |
-| 工具 | `src/tools/graph-tools.ts` | AddWorkTool/ViewGraphTool/CloseGraphTool |
-| 派发器 | `src/runtime/agent-runtime.ts` | graphDispatcher + graphReconcile + 三处门控 |
-| settle | `src/runtime/session-runtime.ts` | settleGraphWork + onGraphWorkSettled 回调 |
-| orphan 恢复接入 | `src/runtime/runtime-run-executor.ts` | recoverOrphanGraphWorks(启动恢复序列) |
-| 续行仲裁 | `src/engine/loop.ts` | graphReconcile callback + [Graph continuation] 注入 |
-| 持久化字段 | `src/engine/session-runtime.ts` | PersistedSessionSettings.orchestrationMode |
-| 运行态字段 | `src/input/session-settings.ts` | SessionSettings + setSessionOrchestrationMode |
-| 入口 | `src/input/pico-command-registry.ts` / `src/cli/main.ts` | /graph 命令 + --graph flag |
-| 协议层 | `packages/protocol/src/runtime.ts` | RuntimeOrchestrationMode + session.settings.update RPC |
-| daemon | `src/daemon/desktop-runtime-service.ts` | wire 投影 + updateRuntimeSessionSettings |
-| desktop UI | `apps/desktop/src/renderer/App.tsx` | graph toggle + 环境面板显示 |
+| 模块            | 文件                                                     | 职责                                                          |
+| --------------- | -------------------------------------------------------- | ------------------------------------------------------------- |
+| 类型与 ID       | `src/graph/contract.ts`                                  | GraphWork/GraphRecord/GraphProjection + workIdFor/recordIdFor |
+| 投影            | `src/graph/graph-reducer.ts`                             | projectGraphEntries 幂等折叠                                  |
+| 依赖解析        | `src/graph/graph-reconcile.ts`                           | computeReadyWorks/hasPendingWorks/missingInputIdsFor          |
+| orphan 检测     | `src/graph/graph-recover.ts`                             | findOrphanGraphWorks(liveDelegationIds 判定)                  |
+| 工具            | `src/tools/graph-tools.ts`                               | AddWorkTool/ViewGraphTool/CloseGraphTool                      |
+| 派发器          | `src/runtime/agent-runtime.ts`                           | graphDispatcher + graphReconcile + 三处门控                   |
+| settle          | `src/runtime/session-runtime.ts`                         | settleGraphWork + onGraphWorkSettled 回调                     |
+| orphan 恢复接入 | `src/runtime/runtime-run-executor.ts`                    | recoverOrphanGraphWorks(启动恢复序列)                         |
+| 续行仲裁        | `src/engine/loop.ts`                                     | graphReconcile callback + [Graph continuation] 注入           |
+| 持久化字段      | `src/engine/session-runtime.ts`                          | PersistedSessionSettings.orchestrationMode                    |
+| 运行态字段      | `src/input/session-settings.ts`                          | SessionSettings + setSessionOrchestrationMode                 |
+| 入口            | `src/input/pico-command-registry.ts` / `src/cli/main.ts` | /graph 命令 + --graph flag                                    |
+| 协议层          | `packages/protocol/src/runtime.ts`                       | RuntimeOrchestrationMode + session.settings.update RPC        |
+| daemon          | `src/daemon/desktop-runtime-service.ts`                  | wire 投影 + updateRuntimeSessionSettings                      |
+| desktop UI      | `apps/desktop/src/renderer/App.tsx`                      | graph toggle + 环境面板显示                                   |
 
 ---
 
