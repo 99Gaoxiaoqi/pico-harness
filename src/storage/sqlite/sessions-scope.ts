@@ -354,5 +354,12 @@ export const SESSIONS_SCOPE: SqliteSchemaScope = {
         ON runtime_storage_assets(session_id, run_id, asset_kind, created_at);
       `,
     ],
+    [
+      5,
+      `
+      CREATE UNIQUE INDEX runtime_transcript_records_one_per_sequence
+        ON runtime_transcript_records(session_id, source_sequence);
+      `,
+    ],
   ]),
 };

@@ -34,25 +34,44 @@ import {
   RUNTIME_EVENT_STORE_MAX_PAGE_SIZE,
   RuntimeEventStoreHighWaterConflictError,
   RuntimeEventStoreIntegrityError,
+  RuntimeEventStoreOwnerFenceError,
   RuntimeEventStorePlanOperationConflictError,
   RuntimeEventStoreRunSealedError,
+  RuntimeEventStoreVersionConflictError,
   SessionCatalogIntegrityError,
   createRuntimeEventId,
   type AppendRuntimeEventBatchOptions,
+  type AppendRuntimePartialSegmentInput,
   type AppendRuntimeSessionStateOptions,
   type AppendRuntimeTranscriptEventOptions,
+  type ClearRuntimeRunPartialsInput,
   type InitializeRuntimeSessionOptions,
+  type PrepareRuntimeToolOperationInput,
+  type PrepareRuntimeToolOperationResult,
   type RuntimeContinuationClaim,
   type RuntimeContinuationClaimOutcome,
   type RuntimeEventStoreAppendResult,
   type RuntimeEventStoreEntry,
   type RuntimeEventStoreEntryPageOptions,
   type RuntimeEventStoreOptions,
+  type RuntimeFencedWriteOptions,
+  type RuntimeOwnerFence,
+  type RuntimePartialSegment,
+  type RuntimePartialSnapshot,
+  type RuntimeRunPartials,
+  type RuntimeRunProjection,
   type RuntimeSessionManifest,
   type RuntimeSessionManifestCursor,
   type RuntimeSessionManifestPageOptions,
   type RuntimeSessionProjectionDelta,
   type RuntimeSessionProjectionSnapshot,
+  type RuntimeToolOperation,
+  type RuntimeTranscriptPage,
+  type RuntimeTranscriptPageOptions,
+  type RuntimeTranscriptRecordInput,
+  type SettleRuntimeToolOperationInput,
+  type SettleRuntimeToolOperationResult,
+  type UpsertRuntimePartialSnapshotInput,
   type WorkspaceRuntimeSessionSnapshot,
 } from "../runtime-event-store-contracts.js";
 import { operationalDatabasePath, type OperationalDatabaseLease } from "./sqlite-database.js";
@@ -123,6 +142,12 @@ export class SqliteRuntimeEventStore {
            VALUES (?, ?, ?, ?)`,
         )
         .run(options.sessionId, workDir, createdAt, createdAt);
+      this.lease.database
+        .prepare(
+          `INSERT INTO runtime_owner_fences (session_id, epoch, updated_at)
+           VALUES (?, 0, ?)`,
+        )
+        .run(options.sessionId, createdAt);
       const manifest: RuntimeSessionManifest = {
         schemaVersion: 2,
         sessionId: options.sessionId,
@@ -140,9 +165,172 @@ export class SqliteRuntimeEventStore {
     });
   }
 
-  async append(event: RuntimeEvent): Promise<RuntimeEventStoreAppendResult> {
-    const results = await this.appendBatch([event]);
+  async append(
+    event: RuntimeEvent,
+    options: RuntimeFencedWriteOptions = {},
+  ): Promise<RuntimeEventStoreAppendResult> {
+    const results = await this.appendBatch([event], options);
     return results[0]!;
+  }
+
+  async readOwnerFence(sessionId: string): Promise<RuntimeOwnerFence> {
+    return this.read(() => ({ sessionId, epoch: this.readOwnerFenceEpochLocked(sessionId) }));
+  }
+
+  async advanceOwnerFence(sessionId: string, expectedEpoch: number): Promise<RuntimeOwnerFence> {
+    assertNonNegativeInteger(expectedEpoch, "owner fence expectedEpoch");
+    return this.write(() => {
+      if (!this.readSessionRow(sessionId)) {
+        throw new RuntimeEventStoreIntegrityError(
+          `Runtime session ${sessionId} must be initialized before advancing its owner fence`,
+        );
+      }
+      const now = new Date().toISOString();
+      const result = this.lease.database
+        .prepare(
+          `UPDATE runtime_owner_fences
+           SET epoch = epoch + 1, updated_at = ?
+           WHERE session_id = ? AND epoch = ?`,
+        )
+        .run(now, sessionId, expectedEpoch);
+      if (result.changes !== 1) {
+        throw new RuntimeEventStoreOwnerFenceError(
+          sessionId,
+          expectedEpoch,
+          this.readOwnerFenceEpochLocked(sessionId),
+        );
+      }
+      return { sessionId, epoch: expectedEpoch + 1 };
+    });
+  }
+
+  async readRunProjection(
+    sessionId: string,
+    runId: string,
+  ): Promise<RuntimeRunProjection | undefined> {
+    return this.read(() => this.readRunProjectionLocked(sessionId, runId));
+  }
+
+  async sealRun(
+    terminalEvent: Extract<RuntimeEvent, { kind: "run.terminal" }>,
+    options: RuntimeFencedWriteOptions = {},
+  ): Promise<RuntimeEventStoreAppendResult> {
+    return this.append(terminalEvent, options);
+  }
+
+  async upsertPartialSnapshot(
+    input: UpsertRuntimePartialSnapshotInput,
+  ): Promise<RuntimePartialSnapshot> {
+    return this.write(() => {
+      assertNonEmpty(input.runId, "partial runId");
+      assertNonEmpty(input.partialId, "partial partialId");
+      assertNonEmpty(input.kind, "partial kind");
+      assertNonNegativeInteger(input.expectedVersion, "partial expectedVersion");
+      this.requireSessionAppendContext(input.sessionId);
+      this.assertOwnerFenceLocked([input.sessionId], input.ownerFence);
+      this.assertRunOpenLocked(input.sessionId, input.runId, `partial:${input.partialId}`);
+      const at = input.at ?? new Date().toISOString();
+      const payloadJson = canonicalJson(input.payload);
+      const current = this.readPartialSnapshotLocked(input.sessionId, input.runId, input.partialId);
+      if (!current) {
+        if (input.expectedVersion !== 0) {
+          throw new RuntimeEventStoreVersionConflictError(`partial:${input.partialId}`);
+        }
+        this.lease.database
+          .prepare(
+            `INSERT INTO runtime_partial_snapshots
+               (session_id, run_id, partial_id, kind, version, payload_json, updated_at)
+             VALUES (?, ?, ?, ?, 1, ?, ?)`,
+          )
+          .run(input.sessionId, input.runId, input.partialId, input.kind, payloadJson, at);
+      } else {
+        if (current.version !== input.expectedVersion) {
+          throw new RuntimeEventStoreVersionConflictError(`partial:${input.partialId}`);
+        }
+        this.lease.database
+          .prepare(
+            `UPDATE runtime_partial_snapshots
+             SET kind = ?, version = version + 1, payload_json = ?, updated_at = ?
+             WHERE session_id = ? AND run_id = ? AND partial_id = ? AND version = ?`,
+          )
+          .run(
+            input.kind,
+            payloadJson,
+            at,
+            input.sessionId,
+            input.runId,
+            input.partialId,
+            input.expectedVersion,
+          );
+      }
+      return this.readPartialSnapshotLocked(input.sessionId, input.runId, input.partialId)!;
+    });
+  }
+
+  async appendPartialSegment(
+    input: AppendRuntimePartialSegmentInput,
+  ): Promise<{ readonly inserted: boolean; readonly segment: RuntimePartialSegment }> {
+    return this.write(() => {
+      assertNonEmpty(input.runId, "partial runId");
+      assertNonEmpty(input.partialId, "partial partialId");
+      assertNonNegativeInteger(input.segmentIndex, "partial segmentIndex");
+      this.requireSessionAppendContext(input.sessionId);
+      this.assertOwnerFenceLocked([input.sessionId], input.ownerFence);
+      this.assertRunOpenLocked(input.sessionId, input.runId, `partial:${input.partialId}`);
+      if (!this.readPartialSnapshotLocked(input.sessionId, input.runId, input.partialId)) {
+        throw new RuntimeEventStoreIntegrityError(
+          `Runtime partial ${input.partialId} must have a snapshot before appending segments`,
+        );
+      }
+      const payloadJson = canonicalJson(input.payload);
+      const at = input.at ?? new Date().toISOString();
+      const existing = this.readPartialSegmentLocked(
+        input.sessionId,
+        input.runId,
+        input.partialId,
+        input.segmentIndex,
+      );
+      if (existing) {
+        if (canonicalJson(existing.payload) !== payloadJson) {
+          throw new RuntimeEventStoreIntegrityError(
+            `Runtime partial segment ${input.partialId}:${input.segmentIndex} has conflicting payload`,
+          );
+        }
+        return { inserted: false, segment: existing };
+      }
+      this.lease.database
+        .prepare(
+          `INSERT INTO runtime_partial_segments
+             (session_id, run_id, partial_id, segment_index, payload_json, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(input.sessionId, input.runId, input.partialId, input.segmentIndex, payloadJson, at);
+      return {
+        inserted: true,
+        segment: this.readPartialSegmentLocked(
+          input.sessionId,
+          input.runId,
+          input.partialId,
+          input.segmentIndex,
+        )!,
+      };
+    });
+  }
+
+  async readRunPartials(sessionId: string, runId: string): Promise<RuntimeRunPartials> {
+    return this.read(() => this.readRunPartialsLocked(sessionId, runId));
+  }
+
+  async clearRunPartials(input: ClearRuntimeRunPartialsInput): Promise<number> {
+    return this.write(() => {
+      this.requireSessionAppendContext(input.sessionId);
+      this.assertOwnerFenceLocked([input.sessionId], input.ownerFence);
+      return Number(
+        this.lease.database
+          .prepare("DELETE FROM runtime_partial_snapshots WHERE session_id = ? AND run_id = ?")
+          .run(input.sessionId, input.runId).changes,
+      );
+    });
   }
 
   /**
@@ -163,12 +351,233 @@ export class SqliteRuntimeEventStore {
     );
   }
 
+  async prepareToolOperation(
+    input: PrepareRuntimeToolOperationInput,
+  ): Promise<PrepareRuntimeToolOperationResult> {
+    const events = [...(input.providerEvents ?? []), input.dispatchEvent].map(
+      canonicalizeRuntimeEvent,
+    );
+    return this.write(() => {
+      this.assertToolOperationInput(input, events);
+      const appendResults = this.appendBatchLocked(
+        events,
+        { ownerFence: input.ownerFence },
+        randomUUID(),
+        new Date().toISOString(),
+      );
+      const existing = this.readToolOperationLocked(
+        input.dispatchEvent.sessionId,
+        input.dispatchEvent.runId,
+        input.toolCallId,
+      );
+      if (existing) {
+        if (
+          appendResults.some(({ inserted }) => inserted) ||
+          existing.preparedEventId !== input.dispatchEvent.eventId ||
+          existing.toolName !== input.dispatchEvent.data.toolName ||
+          existing.argumentsHash !== input.dispatchEvent.data.argumentsHash ||
+          existing.providerCallId !== input.providerCallId
+        ) {
+          throw new RuntimeEventStoreIntegrityError(
+            `Runtime tool operation ${input.toolCallId} is already bound to another dispatch`,
+          );
+        }
+        return { events: appendResults, operation: existing };
+      }
+      const at = input.dispatchEvent.at;
+      this.lease.database
+        .prepare(
+          `INSERT INTO runtime_tool_operations (
+             session_id, run_id, tool_call_id, provider_call_id, tool_name, arguments_hash,
+             state, version, prepared_event_id, prepared_at
+           ) VALUES (?, ?, ?, ?, ?, ?, 'prepared', 1, ?, ?)`,
+        )
+        .run(
+          input.dispatchEvent.sessionId,
+          input.dispatchEvent.runId,
+          input.toolCallId,
+          input.providerCallId ?? null,
+          input.dispatchEvent.data.toolName,
+          input.dispatchEvent.data.argumentsHash,
+          input.dispatchEvent.eventId,
+          at,
+        );
+      this.lease.database
+        .prepare(
+          `INSERT INTO runtime_tool_journal (
+             session_id, run_id, tool_call_id, journal_sequence, phase,
+             event_id, payload_json, created_at
+           ) VALUES (?, ?, ?, 1, 'prepared', ?, ?, ?)`,
+        )
+        .run(
+          input.dispatchEvent.sessionId,
+          input.dispatchEvent.runId,
+          input.toolCallId,
+          input.dispatchEvent.eventId,
+          canonicalJson({ providerEventIds: (input.providerEvents ?? []).map(({ eventId }) => eventId) }),
+          at,
+        );
+      return {
+        events: appendResults,
+        operation: this.readToolOperationLocked(
+          input.dispatchEvent.sessionId,
+          input.dispatchEvent.runId,
+          input.toolCallId,
+        )!,
+      };
+    });
+  }
+
+  async settleToolOperation(
+    input: SettleRuntimeToolOperationInput,
+  ): Promise<SettleRuntimeToolOperationResult> {
+    const event = canonicalizeRuntimeEvent(input.resultEvent) as Extract<
+      RuntimeEvent,
+      { kind: "tool.result.recorded" }
+    >;
+    return this.write(() => {
+      if (event.refs.toolCallId !== input.toolCallId) {
+        throw new RuntimeEventStoreIntegrityError(
+          `Runtime tool result ${event.eventId} references another tool call`,
+        );
+      }
+      const current = this.readToolOperationLocked(event.sessionId, event.runId, input.toolCallId);
+      if (!current) {
+        throw new RuntimeEventStoreIntegrityError(
+          `Runtime tool operation ${input.toolCallId} was not prepared`,
+        );
+      }
+      const appendResult = this.appendBatchLocked(
+        [event],
+        { ownerFence: input.ownerFence },
+        randomUUID(),
+        new Date().toISOString(),
+      )[0]!;
+      if (current.state === "settled") {
+        if (current.outcomeEventId !== event.eventId) {
+          throw new RuntimeEventStoreIntegrityError(
+            `Runtime tool operation ${input.toolCallId} is already settled by another result`,
+          );
+        }
+        return { event: appendResult, operation: current };
+      }
+      if (current.version !== input.expectedVersion) {
+        throw new RuntimeEventStoreVersionConflictError(`tool:${input.toolCallId}`);
+      }
+      const result = this.lease.database
+        .prepare(
+          `UPDATE runtime_tool_operations
+           SET state = 'settled', version = version + 1, outcome_event_id = ?, settled_at = ?
+           WHERE session_id = ? AND run_id = ? AND tool_call_id = ?
+             AND state = 'prepared' AND version = ?`,
+        )
+        .run(
+          event.eventId,
+          event.at,
+          event.sessionId,
+          event.runId,
+          input.toolCallId,
+          input.expectedVersion,
+        );
+      if (result.changes !== 1) {
+        throw new RuntimeEventStoreVersionConflictError(`tool:${input.toolCallId}`);
+      }
+      this.lease.database
+        .prepare(
+          `INSERT INTO runtime_tool_journal (
+             session_id, run_id, tool_call_id, journal_sequence, phase,
+             event_id, payload_json, created_at
+           ) VALUES (?, ?, ?, 2, 'settled', ?, ?, ?)`,
+        )
+        .run(
+          event.sessionId,
+          event.runId,
+          input.toolCallId,
+          event.eventId,
+          canonicalJson({ status: event.data.status }),
+          event.at,
+        );
+      return {
+        event: appendResult,
+        operation: this.readToolOperationLocked(event.sessionId, event.runId, input.toolCallId)!,
+      };
+    });
+  }
+
+  async appendTranscriptRecord(input: RuntimeTranscriptRecordInput): Promise<boolean> {
+    return this.write(() => {
+      assertNonEmpty(input.recordId, "transcript recordId");
+      assertNonEmpty(input.sourceEventId, "transcript sourceEventId");
+      assertNonEmpty(input.kind, "transcript kind");
+      if (input.chunks.length === 0) throw new Error("Runtime transcript record requires chunks");
+      assertPositiveInteger(input.sourceSequence, "transcript sourceSequence");
+      this.requireSessionAppendContext(input.sessionId);
+      this.assertOwnerFenceLocked([input.sessionId], input.ownerFence);
+      const source = this.readEventRow(input.sourceEventId);
+      if (
+        !source ||
+        source.session_id !== input.sessionId ||
+        source.event_seq !== input.sourceSequence
+      ) {
+        throw new RuntimeEventStoreIntegrityError(
+          `Runtime transcript record ${input.recordId} source event is not at the declared sequence`,
+        );
+      }
+      const existing = this.readTranscriptRecordLocked(input.recordId);
+      const payloadJson = canonicalJson(input.payload);
+      if (existing) {
+        if (
+          existing.sessionId !== input.sessionId ||
+          existing.sourceEventId !== input.sourceEventId ||
+          existing.sequence !== input.sourceSequence ||
+          existing.kind !== input.kind ||
+          canonicalJson(existing.payload) !== payloadJson ||
+          !isDeepStrictEqual(existing.chunks, input.chunks)
+        ) {
+          throw new RuntimeEventStoreIntegrityError(
+            `Runtime transcript record ${input.recordId} has conflicting payload`,
+          );
+        }
+        return false;
+      }
+      const at = input.at ?? new Date().toISOString();
+      this.lease.database
+        .prepare(
+          `INSERT INTO runtime_transcript_records (
+             record_id, session_id, source_event_id, source_sequence, kind, payload_json, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          input.recordId,
+          input.sessionId,
+          input.sourceEventId,
+          input.sourceSequence,
+          input.kind,
+          payloadJson,
+          at,
+        );
+      const insertChunk = this.lease.database.prepare(
+        `INSERT INTO runtime_transcript_chunks (record_id, chunk_index, text_value, byte_length)
+         VALUES (?, ?, ?, ?)`,
+      );
+      input.chunks.forEach((chunk, chunkIndex) => {
+        insertChunk.run(input.recordId, chunkIndex, chunk, Buffer.byteLength(chunk));
+      });
+      return true;
+    });
+  }
+
+  async readTranscriptPage(options: RuntimeTranscriptPageOptions): Promise<RuntimeTranscriptPage> {
+    return this.read(() => this.readTranscriptPageLocked(options));
+  }
+
   async appendPlanOperation(
     events: readonly RuntimeEvent[],
     operation: {
       readonly operationId: string;
       readonly fingerprint: string;
       readonly expectedSessionSequence: number;
+      readonly ownerFence?: RuntimeOwnerFence;
     },
   ): Promise<readonly RuntimeEventStoreAppendResult[]> {
     const sessionId = events[0]?.sessionId;
@@ -178,6 +587,7 @@ export class SqliteRuntimeEventStore {
     return appendRuntimeEventBatchWithArbitration(this, events, {
       expectedSessionHighWater: { [sessionId]: operation.expectedSessionSequence },
       planOperation: operation,
+      ownerFence: operation.ownerFence,
     });
   }
 
@@ -191,6 +601,7 @@ export class SqliteRuntimeEventStore {
       readonly operationId: string;
       readonly fingerprint: string;
       readonly expectedSessionSequence: number;
+      readonly ownerFence?: RuntimeOwnerFence;
     },
   ): Promise<readonly RuntimeEventStoreAppendResult[]> {
     const sessionId = events[0]?.sessionId;
@@ -200,6 +611,7 @@ export class SqliteRuntimeEventStore {
     return appendRuntimeEventBatchWithArbitration(this, events, {
       expectedSessionHighWater: { [sessionId]: operation.expectedSessionSequence },
       planOperation: operation,
+      ownerFence: operation.ownerFence,
     });
   }
 
@@ -213,6 +625,7 @@ export class SqliteRuntimeEventStore {
     return appendRuntimeEventWithArbitration(
       this,
       sessionStateRuntimeEventOf(sessionId, normalized, options),
+      { ownerFence: options.ownerFence },
     );
   }
 
@@ -224,6 +637,7 @@ export class SqliteRuntimeEventStore {
     return appendRuntimeEventWithArbitration(
       this,
       transcriptRuntimeEventOf(sessionId, event, options),
+      { ownerFence: options.ownerFence },
     );
   }
 
@@ -649,17 +1063,6 @@ export class SqliteRuntimeEventStore {
   ): RuntimeContinuationClaim | undefined {
     const row = this.lease.database.prepare(sql).get(...params);
     return row === undefined ? undefined : continuationClaimFromRow(row as Record<string, unknown>);
-  }
-
-  /** ADR 29 §4(claim-scoped) 源封口点查;只在写事务内调用。 */
-  private hasContinuationClaimLocked(sessionId: string, runId: string): boolean {
-    return (
-      this.lease.database
-        .prepare(
-          "SELECT 1 FROM runtime_continuation_claims WHERE source_session_id = ? AND source_run_id = ? LIMIT 1",
-        )
-        .get(sessionId, runId) !== undefined
-    );
   }
 
   private async readSessionEntryOfKindLocked(
@@ -1344,6 +1747,7 @@ export class SqliteRuntimeEventStore {
         );
       }
     }
+    this.assertOwnerFenceLocked([...contexts.keys()], options.ownerFence);
 
     if (options.planOperation) {
       const { operationId, fingerprint } = options.planOperation;
@@ -1365,6 +1769,11 @@ export class SqliteRuntimeEventStore {
           if (existing.session_id !== event.sessionId) {
             throw new RuntimeEventStoreIntegrityError(
               `Runtime event ID ${event.eventId} belongs to another session`,
+            );
+          }
+          if (existing.payload_json !== canonicalJson(event)) {
+            throw new RuntimeEventStoreIntegrityError(
+              `Runtime event ID ${event.eventId} is already bound to another payload`,
             );
           }
           return appendResultFor(
@@ -1455,9 +1864,8 @@ export class SqliteRuntimeEventStore {
          partial, tx_id, tool_call_id, provider_call_id, operation_id, payload_json, at, committed_at
        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
-    // ADR 29 §4(修订:claim-scoped) 源封口缓存:key `${sessionId}\0${runId}`。
-    // 仅对已被 continuation claim 的 source run 拒收——claim 存在 ⇒ claim 时该 run 已终态。
-    // 终态但未被 claim 的 run 保持历史开放语义(fork 工作流/记忆通道存在合法的终态后写入路径)。
+    // run.terminal 是单 run 唯一 immutable tail；精确幂等重放已在上方 existing
+    // 分支放行，任何新的 eventId 都必须在未封口状态写入。
     const runSealCache = new Map<string, boolean>();
     for (const event of canonicalEvents) {
       const context = contexts.get(event.sessionId)!;
@@ -1474,18 +1882,14 @@ export class SqliteRuntimeEventStore {
         );
         continue;
       }
-      // ADR 29 §4 源封口(fail-closed):已被 claim 的 source run 拒收新的非恢复类事件。
-      // 幂等重放(上方 existing 分支)不受影响——崩溃后重试同 eventId 永远合法。
-      if (!isRecoveryClassSealedAppend(event)) {
-        const sealKey = `${event.sessionId}\u0000${event.runId}`;
-        let claimed = runSealCache.get(sealKey);
-        if (claimed === undefined) {
-          claimed = this.hasContinuationClaimLocked(event.sessionId, event.runId);
-          runSealCache.set(sealKey, claimed);
-        }
-        if (claimed) {
-          throw new RuntimeEventStoreRunSealedError(event.sessionId, event.runId, event.eventId);
-        }
+      const sealKey = `${event.sessionId}\u0000${event.runId}`;
+      let sealed = runSealCache.get(sealKey);
+      if (sealed === undefined) {
+        sealed = this.readRunProjectionLocked(event.sessionId, event.runId)?.terminalEventId !== undefined;
+        runSealCache.set(sealKey, sealed);
+      }
+      if (sealed) {
+        throw new RuntimeEventStoreRunSealedError(event.sessionId, event.runId, event.eventId);
       }
       const sequence = context.nextSequence;
       context.nextSequence += 1;
@@ -1511,7 +1915,16 @@ export class SqliteRuntimeEventStore {
       context.appendedCount += 1;
       context.appendedBytes += payloadJson.length;
       if (event.kind === "run.terminal") {
-        runSealCache.set(`${event.sessionId}\u0000${event.runId}`, true);
+        runSealCache.set(sealKey, true);
+      }
+      this.projectRunEventLocked(event, sequence);
+      if (event.kind === "context.checkpoint.recorded") {
+        this.projectCheckpointEventLocked(event, sequence);
+      }
+      if (event.kind === "run.terminal") {
+        this.lease.database
+          .prepare("DELETE FROM runtime_partial_snapshots WHERE session_id = ? AND run_id = ?")
+          .run(event.sessionId, event.runId);
       }
       // 增量折叠只吃本批真正 INSERT 的事件(幂等重放不折叠,防 headSequence 超前)。
       context.fold = foldSessionSummaryEvent(context.fold, event);
@@ -1580,6 +1993,310 @@ export class SqliteRuntimeEventStore {
       }
     }
     return results;
+  }
+
+  private readOwnerFenceEpochLocked(sessionId: string): number {
+    if (!this.readSessionRow(sessionId)) {
+      throw new RuntimeEventStoreIntegrityError(`Runtime session ${sessionId} does not exist`);
+    }
+    const row = this.lease.database
+      .prepare("SELECT epoch FROM runtime_owner_fences WHERE session_id = ?")
+      .get(sessionId) as { epoch?: unknown } | undefined;
+    if (typeof row?.epoch !== "number" || !Number.isSafeInteger(row.epoch) || row.epoch < 0) {
+      throw new RuntimeEventStoreIntegrityError(
+        `Runtime session ${sessionId} owner fence projection is missing or invalid`,
+      );
+    }
+    return row.epoch;
+  }
+
+  private assertOwnerFenceLocked(
+    sessionIds: readonly string[],
+    ownerFence: RuntimeOwnerFence | undefined,
+  ): void {
+    if (ownerFence) {
+      assertNonNegativeInteger(ownerFence.epoch, "owner fence epoch");
+      if (
+        sessionIds.length !== 1 ||
+        sessionIds[0] !== ownerFence.sessionId ||
+        !ownerFence.sessionId.trim()
+      ) {
+        throw new RuntimeEventStoreIntegrityError(
+          "Runtime owner fence must match the append batch's single session",
+        );
+      }
+    }
+    for (const sessionId of sessionIds) {
+      const actualEpoch = this.readOwnerFenceEpochLocked(sessionId);
+      const expectedEpoch = ownerFence?.sessionId === sessionId ? ownerFence.epoch : undefined;
+      if (actualEpoch > 0 && expectedEpoch === undefined) {
+        throw new RuntimeEventStoreOwnerFenceError(sessionId, undefined, actualEpoch);
+      }
+      if (expectedEpoch !== undefined && expectedEpoch !== actualEpoch) {
+        throw new RuntimeEventStoreOwnerFenceError(sessionId, expectedEpoch, actualEpoch);
+      }
+    }
+  }
+
+  private assertRunOpenLocked(sessionId: string, runId: string, eventId: string): void {
+    if (this.readRunProjectionLocked(sessionId, runId)?.terminalEventId !== undefined) {
+      throw new RuntimeEventStoreRunSealedError(sessionId, runId, eventId);
+    }
+  }
+
+  private readRunProjectionLocked(
+    sessionId: string,
+    runId: string,
+  ): RuntimeRunProjection | undefined {
+    const row = this.lease.database
+      .prepare(
+        `SELECT session_id, run_id, started_event_id, started_sequence,
+                terminal_event_id, terminal_sequence, terminal_status, last_event_sequence
+         FROM runtime_run_projection WHERE session_id = ? AND run_id = ?`,
+      )
+      .get(sessionId, runId);
+    if (!row) return undefined;
+    const record = row as Record<string, unknown>;
+    const startedEventId = optionalString(record["started_event_id"], "started_event_id");
+    const terminalEventId = optionalString(record["terminal_event_id"], "terminal_event_id");
+    const terminalStatus = optionalString(record["terminal_status"], "terminal_status");
+    return {
+      sessionId: requireString(record["session_id"], "run_projection.session_id"),
+      runId: requireString(record["run_id"], "run_projection.run_id"),
+      ...(startedEventId ? { startedEventId } : {}),
+      ...(record["started_sequence"] != null
+        ? { startedSequence: requirePositiveInteger(record["started_sequence"], "started_sequence") }
+        : {}),
+      ...(terminalEventId ? { terminalEventId } : {}),
+      ...(record["terminal_sequence"] != null
+        ? {
+            terminalSequence: requirePositiveInteger(
+              record["terminal_sequence"],
+              "terminal_sequence",
+            ),
+          }
+        : {}),
+      ...(terminalStatus
+        ? {
+            terminalStatus: terminalStatus as RuntimeRunProjection["terminalStatus"] & string,
+          }
+        : {}),
+      lastEventSequence: requirePositiveInteger(
+        record["last_event_sequence"],
+        "last_event_sequence",
+      ),
+    };
+  }
+
+  private projectRunEventLocked(event: RuntimeEvent, sequence: number): void {
+    const current = this.readRunProjectionLocked(event.sessionId, event.runId);
+    if (event.kind === "run.started" && current?.startedEventId) {
+      throw new RuntimeEventStoreIntegrityError(
+        `Runtime run ${event.runId} in session ${event.sessionId} already has a start fact`,
+      );
+    }
+    this.lease.database
+      .prepare(
+        `INSERT INTO runtime_run_projection (
+           session_id, run_id, started_event_id, started_sequence,
+           terminal_event_id, terminal_sequence, terminal_status, last_event_sequence
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(session_id, run_id) DO UPDATE SET
+           started_event_id = COALESCE(runtime_run_projection.started_event_id, excluded.started_event_id),
+           started_sequence = COALESCE(runtime_run_projection.started_sequence, excluded.started_sequence),
+           terminal_event_id = COALESCE(runtime_run_projection.terminal_event_id, excluded.terminal_event_id),
+           terminal_sequence = COALESCE(runtime_run_projection.terminal_sequence, excluded.terminal_sequence),
+           terminal_status = COALESCE(runtime_run_projection.terminal_status, excluded.terminal_status),
+           last_event_sequence = excluded.last_event_sequence`,
+      )
+      .run(
+        event.sessionId,
+        event.runId,
+        event.kind === "run.started" ? event.eventId : null,
+        event.kind === "run.started" ? sequence : null,
+        event.kind === "run.terminal" ? event.eventId : null,
+        event.kind === "run.terminal" ? sequence : null,
+        event.kind === "run.terminal" ? event.data.status : null,
+        sequence,
+      );
+  }
+
+  private projectCheckpointEventLocked(
+    event: Extract<RuntimeEvent, { kind: "context.checkpoint.recorded" }>,
+    sequence: number,
+  ): void {
+    this.lease.database
+      .prepare(
+        `INSERT INTO runtime_checkpoint_projection (
+           checkpoint_id, session_id, run_id, event_id, event_sequence, through_event_id,
+           covered_event_count, source_digest, previous_checkpoint_id, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        event.data.checkpointId,
+        event.sessionId,
+        event.runId,
+        event.eventId,
+        sequence,
+        event.data.throughEventId,
+        event.data.coveredEventCount,
+        event.data.sourceDigest,
+        event.data.previousCheckpointId ?? null,
+        event.at,
+      );
+  }
+
+  private readPartialSnapshotLocked(
+    sessionId: string,
+    runId: string,
+    partialId: string,
+  ): RuntimePartialSnapshot | undefined {
+    const row = this.lease.database
+      .prepare(
+        `SELECT session_id, run_id, partial_id, kind, version, payload_json, updated_at
+         FROM runtime_partial_snapshots
+         WHERE session_id = ? AND run_id = ? AND partial_id = ?`,
+      )
+      .get(sessionId, runId, partialId);
+    return row ? partialSnapshotFromRow(row as Record<string, unknown>) : undefined;
+  }
+
+  private readPartialSegmentLocked(
+    sessionId: string,
+    runId: string,
+    partialId: string,
+    segmentIndex: number,
+  ): RuntimePartialSegment | undefined {
+    const row = this.lease.database
+      .prepare(
+        `SELECT session_id, run_id, partial_id, segment_index, payload_json, created_at
+         FROM runtime_partial_segments
+         WHERE session_id = ? AND run_id = ? AND partial_id = ? AND segment_index = ?`,
+      )
+      .get(sessionId, runId, partialId, segmentIndex);
+    return row ? partialSegmentFromRow(row as Record<string, unknown>) : undefined;
+  }
+
+  private readRunPartialsLocked(sessionId: string, runId: string): RuntimeRunPartials {
+    const snapshots = this.lease.database
+      .prepare(
+        `SELECT session_id, run_id, partial_id, kind, version, payload_json, updated_at
+         FROM runtime_partial_snapshots
+         WHERE session_id = ? AND run_id = ? ORDER BY updated_at ASC, partial_id ASC`,
+      )
+      .all(sessionId, runId)
+      .map((row) => partialSnapshotFromRow(row));
+    const segments = this.lease.database
+      .prepare(
+        `SELECT session_id, run_id, partial_id, segment_index, payload_json, created_at
+         FROM runtime_partial_segments
+         WHERE session_id = ? AND run_id = ? ORDER BY partial_id ASC, segment_index ASC`,
+      )
+      .all(sessionId, runId)
+      .map((row) => partialSegmentFromRow(row));
+    return { snapshots, segments };
+  }
+
+  private assertToolOperationInput(
+    input: PrepareRuntimeToolOperationInput,
+    events: readonly RuntimeEvent[],
+  ): void {
+    assertNonEmpty(input.toolCallId, "tool operation toolCallId");
+    const { dispatchEvent } = input;
+    if (dispatchEvent.refs?.toolCallId !== input.toolCallId) {
+      throw new RuntimeEventStoreIntegrityError(
+        `Runtime tool dispatch ${dispatchEvent.eventId} must reference tool call ${input.toolCallId}`,
+      );
+    }
+    if (
+      events.some(
+        (event) => event.sessionId !== dispatchEvent.sessionId || event.runId !== dispatchEvent.runId,
+      )
+    ) {
+      throw new RuntimeEventStoreIntegrityError(
+        "Runtime tool T1 events must belong to one session and run",
+      );
+    }
+  }
+
+  private readToolOperationLocked(
+    sessionId: string,
+    runId: string,
+    toolCallId: string,
+  ): RuntimeToolOperation | undefined {
+    const row = this.lease.database
+      .prepare(
+        `SELECT session_id, run_id, tool_call_id, provider_call_id, tool_name, arguments_hash,
+                state, version, prepared_event_id, outcome_event_id, prepared_at, settled_at
+         FROM runtime_tool_operations
+         WHERE session_id = ? AND run_id = ? AND tool_call_id = ?`,
+      )
+      .get(sessionId, runId, toolCallId);
+    return row ? toolOperationFromRow(row as Record<string, unknown>) : undefined;
+  }
+
+  private readTranscriptRecordLocked(recordId: string): TranscriptRecordWithChunks | undefined {
+    const row = this.lease.database
+      .prepare(
+        `SELECT record_id, session_id, source_event_id, source_sequence, kind, payload_json, created_at
+         FROM runtime_transcript_records WHERE record_id = ?`,
+      )
+      .get(recordId) as Record<string, unknown> | undefined;
+    if (!row) return undefined;
+    const chunks = this.lease.database
+      .prepare(
+        "SELECT text_value FROM runtime_transcript_chunks WHERE record_id = ? ORDER BY chunk_index ASC",
+      )
+      .all(recordId)
+      .map((chunk) => requireString(chunk["text_value"], "transcript_chunks.text_value"));
+    return {
+      recordId: requireString(row["record_id"], "transcript_records.record_id"),
+      sessionId: requireString(row["session_id"], "transcript_records.session_id"),
+      sourceEventId: requireString(
+        row["source_event_id"],
+        "transcript_records.source_event_id",
+      ),
+      sequence: requirePositiveInteger(
+        row["source_sequence"],
+        "transcript_records.source_sequence",
+      ),
+      kind: requireString(row["kind"], "transcript_records.kind"),
+      payload: decodeProjectionJson(row["payload_json"], "transcript_records.payload_json"),
+      chunks,
+      at: requireString(row["created_at"], "transcript_records.created_at"),
+    };
+  }
+
+  private readTranscriptPageLocked(options: RuntimeTranscriptPageOptions): RuntimeTranscriptPage {
+    assertNonEmpty(options.sessionId, "transcript sessionId");
+    assertPositiveInteger(options.maxBytes, "transcript maxBytes");
+    const limit = normalizePageLimit(options.limit);
+    const current = this.lease.database
+      .prepare(
+        "SELECT COALESCE(MAX(source_sequence), 0) AS sequence FROM runtime_transcript_records WHERE session_id = ?",
+      )
+      .get(options.sessionId) as { sequence?: unknown } | undefined;
+    const currentSequence = requireSafeInteger(current?.sequence ?? 0, "transcript head sequence");
+    const throughSequence = options.throughSequence ?? currentSequence;
+    assertNonNegativeInteger(throughSequence, "transcript throughSequence");
+    if (throughSequence > currentSequence) {
+      throw new RuntimeEventStoreIntegrityError(
+        `Runtime transcript throughSequence ${throughSequence} is ahead of materialized head ${currentSequence}`,
+      );
+    }
+    const rows = this.lease.database
+      .prepare(
+        `SELECT records.record_id, records.source_event_id, records.source_sequence,
+                records.kind, records.payload_json, records.created_at,
+                chunks.chunk_index, chunks.text_value, chunks.byte_length
+         FROM runtime_transcript_records AS records
+         JOIN runtime_transcript_chunks AS chunks ON chunks.record_id = records.record_id
+         WHERE records.session_id = ? AND records.source_sequence <= ?
+         ORDER BY records.source_sequence ASC, chunks.chunk_index ASC`,
+      )
+      .all(options.sessionId, throughSequence)
+      .map((row) => transcriptChunkFromRow(row));
+    return paginateTranscriptChunks(rows, { ...options, throughSequence, limit });
   }
 
   /** appendBatch 专用:sessions 行 + MAX(event_seq) 水位一致性断言 + catalog fold 装载。 */
@@ -1771,6 +2488,322 @@ export class SqliteRuntimeEventStore {
   }
 }
 
+interface TranscriptRecordWithChunks {
+  readonly recordId: string;
+  readonly sessionId: string;
+  readonly sourceEventId: string;
+  readonly sequence: number;
+  readonly kind: string;
+  readonly payload: unknown;
+  readonly chunks: readonly string[];
+  readonly at: string;
+}
+
+interface TranscriptChunkRow {
+  readonly recordId: string;
+  readonly sourceEventId: string;
+  readonly sequence: number;
+  readonly kind: string;
+  readonly payload: unknown;
+  readonly chunkIndex: number;
+  readonly text: string;
+  readonly byteLength: number;
+  readonly at: string;
+}
+
+function partialSnapshotFromRow(row: Record<string, unknown>): RuntimePartialSnapshot {
+  return {
+    sessionId: requireString(row["session_id"], "partial_snapshots.session_id"),
+    runId: requireString(row["run_id"], "partial_snapshots.run_id"),
+    partialId: requireString(row["partial_id"], "partial_snapshots.partial_id"),
+    kind: requireString(row["kind"], "partial_snapshots.kind"),
+    version: requirePositiveInteger(row["version"], "partial_snapshots.version"),
+    payload: decodeProjectionJson(row["payload_json"], "partial_snapshots.payload_json"),
+    updatedAt: requireString(row["updated_at"], "partial_snapshots.updated_at"),
+  };
+}
+
+function partialSegmentFromRow(row: Record<string, unknown>): RuntimePartialSegment {
+  return {
+    sessionId: requireString(row["session_id"], "partial_segments.session_id"),
+    runId: requireString(row["run_id"], "partial_segments.run_id"),
+    partialId: requireString(row["partial_id"], "partial_segments.partial_id"),
+    segmentIndex: requireSafeInteger(row["segment_index"], "partial_segments.segment_index"),
+    payload: decodeProjectionJson(row["payload_json"], "partial_segments.payload_json"),
+    createdAt: requireString(row["created_at"], "partial_segments.created_at"),
+  };
+}
+
+function toolOperationFromRow(row: Record<string, unknown>): RuntimeToolOperation {
+  const state = requireString(row["state"], "tool_operations.state");
+  if (state !== "prepared" && state !== "settled") {
+    throw new RuntimeEventStoreIntegrityError("SQLite tool operation state is invalid");
+  }
+  const providerCallId = optionalString(
+    row["provider_call_id"],
+    "tool_operations.provider_call_id",
+  );
+  const outcomeEventId = optionalString(
+    row["outcome_event_id"],
+    "tool_operations.outcome_event_id",
+  );
+  const settledAt = optionalString(row["settled_at"], "tool_operations.settled_at");
+  return {
+    sessionId: requireString(row["session_id"], "tool_operations.session_id"),
+    runId: requireString(row["run_id"], "tool_operations.run_id"),
+    toolCallId: requireString(row["tool_call_id"], "tool_operations.tool_call_id"),
+    ...(providerCallId ? { providerCallId } : {}),
+    toolName: requireString(row["tool_name"], "tool_operations.tool_name"),
+    argumentsHash: requireString(row["arguments_hash"], "tool_operations.arguments_hash"),
+    state,
+    version: requirePositiveInteger(row["version"], "tool_operations.version"),
+    preparedEventId: requireString(
+      row["prepared_event_id"],
+      "tool_operations.prepared_event_id",
+    ),
+    ...(outcomeEventId ? { outcomeEventId } : {}),
+    preparedAt: requireString(row["prepared_at"], "tool_operations.prepared_at"),
+    ...(settledAt ? { settledAt } : {}),
+  };
+}
+
+function transcriptChunkFromRow(row: Record<string, unknown>): TranscriptChunkRow {
+  return {
+    recordId: requireString(row["record_id"], "transcript_records.record_id"),
+    sourceEventId: requireString(row["source_event_id"], "transcript_records.source_event_id"),
+    sequence: requirePositiveInteger(
+      row["source_sequence"],
+      "transcript_records.source_sequence",
+    ),
+    kind: requireString(row["kind"], "transcript_records.kind"),
+    payload: decodeProjectionJson(row["payload_json"], "transcript_records.payload_json"),
+    chunkIndex: requireSafeInteger(row["chunk_index"], "transcript_chunks.chunk_index"),
+    text: requireStringAllowEmpty(row["text_value"], "transcript_chunks.text_value"),
+    byteLength: requireSafeInteger(row["byte_length"], "transcript_chunks.byte_length"),
+    at: requireString(row["created_at"], "transcript_records.created_at"),
+  };
+}
+
+function paginateTranscriptChunks(
+  rows: readonly TranscriptChunkRow[],
+  options: RuntimeTranscriptPageOptions & { readonly throughSequence: number; readonly limit: number },
+): RuntimeTranscriptPage {
+  const cursor = options.cursor;
+  if (cursor) {
+    assertPositiveInteger(cursor.sequence, "transcript cursor sequence");
+    assertNonNegativeInteger(cursor.chunkIndex, "transcript cursor chunkIndex");
+    assertNonNegativeInteger(cursor.byteOffset, "transcript cursor byteOffset");
+    if (cursor.sequence > options.throughSequence) {
+      throw new RuntimeEventStoreIntegrityError("Runtime transcript cursor exceeds fixed waterline");
+    }
+  }
+  const selected =
+    options.direction === "forward"
+      ? paginateTranscriptForward(rows, cursor, options.maxBytes, options.limit)
+      : paginateTranscriptBackward(rows, cursor, options.maxBytes, options.limit);
+  return {
+    throughSequence: options.throughSequence,
+    items: selected.items,
+    ...(selected.nextCursor ? { nextCursor: selected.nextCursor } : {}),
+  };
+}
+
+function paginateTranscriptForward(
+  rows: readonly TranscriptChunkRow[],
+  cursor: RuntimeTranscriptPageOptions["cursor"],
+  maxBytes: number,
+  limit: number,
+): Pick<RuntimeTranscriptPage, "items" | "nextCursor"> {
+  let index = 0;
+  let startOffset = 0;
+  if (cursor) {
+    index = rows.findIndex(
+      (row) =>
+        row.sequence > cursor.sequence ||
+        (row.sequence === cursor.sequence && row.chunkIndex >= cursor.chunkIndex),
+    );
+    if (index < 0) return { items: [] };
+    const row = rows[index]!;
+    if (row.sequence === cursor.sequence && row.chunkIndex === cursor.chunkIndex) {
+      startOffset = cursor.byteOffset;
+      if (startOffset > row.byteLength) {
+        throw new RuntimeEventStoreIntegrityError("Runtime transcript cursor byteOffset is invalid");
+      }
+      if (startOffset === row.byteLength) {
+        index += 1;
+        startOffset = 0;
+      }
+    }
+  }
+  const items: RuntimeTranscriptPage["items"][number][] = [];
+  let usedBytes = 0;
+  let nextCursor: RuntimeTranscriptPage["nextCursor"];
+  for (; index < rows.length && items.length < limit && usedBytes < maxBytes; index += 1) {
+    const row = rows[index]!;
+    const bytes = Buffer.from(row.text);
+    const offset = startOffset;
+    if (offset > bytes.length) {
+      throw new RuntimeEventStoreIntegrityError("Runtime transcript cursor byteOffset is invalid");
+    }
+    const end = utf8ForwardEnd(bytes, offset, maxBytes - usedBytes);
+    const slice = bytes.subarray(offset, end);
+    items.push(transcriptPageItem(row, offset, slice));
+    usedBytes += slice.length;
+    if (end < bytes.length) {
+      nextCursor = { sequence: row.sequence, chunkIndex: row.chunkIndex, byteOffset: end };
+      break;
+    }
+    const next = rows[index + 1];
+    nextCursor = next
+      ? { sequence: next.sequence, chunkIndex: next.chunkIndex, byteOffset: 0 }
+      : undefined;
+    startOffset = 0;
+  }
+  return { items, ...(nextCursor ? { nextCursor } : {}) };
+}
+
+function paginateTranscriptBackward(
+  rows: readonly TranscriptChunkRow[],
+  cursor: RuntimeTranscriptPageOptions["cursor"],
+  maxBytes: number,
+  limit: number,
+): Pick<RuntimeTranscriptPage, "items" | "nextCursor"> {
+  let index = rows.length - 1;
+  let endOffset: number | undefined;
+  if (cursor) {
+    index = findLastIndex(
+      rows,
+      (row) =>
+        row.sequence < cursor.sequence ||
+        (row.sequence === cursor.sequence && row.chunkIndex <= cursor.chunkIndex),
+    );
+    if (index < 0) return { items: [] };
+    const row = rows[index]!;
+    if (row.sequence === cursor.sequence && row.chunkIndex === cursor.chunkIndex) {
+      endOffset = cursor.byteOffset;
+      if (endOffset > row.byteLength) {
+        throw new RuntimeEventStoreIntegrityError("Runtime transcript cursor byteOffset is invalid");
+      }
+      if (endOffset === 0) {
+        index -= 1;
+        endOffset = undefined;
+      }
+    }
+  }
+  const items: RuntimeTranscriptPage["items"][number][] = [];
+  let usedBytes = 0;
+  let nextCursor: RuntimeTranscriptPage["nextCursor"];
+  for (; index >= 0 && items.length < limit && usedBytes < maxBytes; index -= 1) {
+    const row = rows[index]!;
+    const bytes = Buffer.from(row.text);
+    const end = endOffset ?? bytes.length;
+    const start = utf8BackwardStart(bytes, end, maxBytes - usedBytes);
+    const slice = bytes.subarray(start, end);
+    items.push(transcriptPageItem(row, start, slice));
+    usedBytes += slice.length;
+    if (start > 0) {
+      nextCursor = { sequence: row.sequence, chunkIndex: row.chunkIndex, byteOffset: start };
+      break;
+    }
+    const previous = rows[index - 1];
+    nextCursor = previous
+      ? {
+          sequence: previous.sequence,
+          chunkIndex: previous.chunkIndex,
+          byteOffset: previous.byteLength,
+        }
+      : undefined;
+    endOffset = undefined;
+  }
+  return { items, ...(nextCursor ? { nextCursor } : {}) };
+}
+
+function transcriptPageItem(
+  row: TranscriptChunkRow,
+  byteOffset: number,
+  bytes: Buffer,
+): RuntimeTranscriptPage["items"][number] {
+  return {
+    recordId: row.recordId,
+    sourceEventId: row.sourceEventId,
+    sequence: row.sequence,
+    kind: row.kind,
+    payload: row.payload,
+    chunkIndex: row.chunkIndex,
+    byteOffset,
+    text: bytes.toString("utf8"),
+    byteLength: bytes.length,
+    at: row.at,
+  };
+}
+
+function utf8ForwardEnd(bytes: Buffer, start: number, budget: number): number {
+  if (start >= bytes.length) return start;
+  let end = Math.min(bytes.length, start + budget);
+  while (end > start && end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+  if (end > start) return end;
+  end = start + 1;
+  while (end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end += 1;
+  return end;
+}
+
+function utf8BackwardStart(bytes: Buffer, end: number, budget: number): number {
+  if (end <= 0) return end;
+  let start = Math.max(0, end - budget);
+  while (start < end && (bytes[start]! & 0xc0) === 0x80) start += 1;
+  if (start < end) return start;
+  start = end - 1;
+  while (start > 0 && (bytes[start]! & 0xc0) === 0x80) start -= 1;
+  return start;
+}
+
+function findLastIndex<T>(values: readonly T[], predicate: (value: T) => boolean): number {
+  for (let index = values.length - 1; index >= 0; index -= 1) {
+    if (predicate(values[index]!)) return index;
+  }
+  return -1;
+}
+
+function decodeProjectionJson(value: unknown, field: string): unknown {
+  if (typeof value !== "string") {
+    throw new RuntimeEventStoreIntegrityError(`SQLite sessions row ${field} is invalid`);
+  }
+  try {
+    return JSON.parse(value) as unknown;
+  } catch (error) {
+    throw new RuntimeEventStoreIntegrityError(`SQLite sessions row ${field} is invalid`, {
+      cause: error,
+    });
+  }
+}
+
+function assertNonEmpty(value: string, field: string): void {
+  if (typeof value !== "string" || !value.trim()) throw new Error(`Runtime ${field} is invalid`);
+}
+
+function assertNonNegativeInteger(value: number, field: string): void {
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error(`Runtime ${field} is invalid`);
+}
+
+function assertPositiveInteger(value: number, field: string): void {
+  if (!Number.isSafeInteger(value) || value < 1) throw new Error(`Runtime ${field} is invalid`);
+}
+
+function requirePositiveInteger(value: unknown, field: string): number {
+  const result = requireSafeInteger(value, field);
+  if (result < 1) {
+    throw new RuntimeEventStoreIntegrityError(`SQLite sessions row ${field} is invalid`);
+  }
+  return result;
+}
+
+function requireStringAllowEmpty(value: unknown, field: string): string {
+  if (typeof value !== "string") {
+    throw new RuntimeEventStoreIntegrityError(`SQLite sessions row ${field} is invalid`);
+  }
+  return value;
+}
+
 /** 读回仲裁点查行(ADR 27 P1):event_id 主键命中行的原始列快照。 */
 export interface RuntimeEventPointRead {
   readonly eventId: string;
@@ -1827,8 +2860,9 @@ function isDeterministicStoreRefusal(error: unknown): boolean {
 export async function appendRuntimeEventWithArbitration(
   store: SqliteRuntimeEventStore,
   event: RuntimeEvent,
+  options: AppendRuntimeEventBatchOptions = {},
 ): Promise<RuntimeEventStoreAppendResult> {
-  const results = await appendRuntimeEventBatchWithArbitration(store, [event]);
+  const results = await appendRuntimeEventBatchWithArbitration(store, [event], options);
   return results[0]!;
 }
 
@@ -2156,16 +3190,6 @@ function continuationPrefixDigest(rows: readonly Record<string, unknown>[]): str
     hash.update("\n", "utf8");
   }
   return hash.digest("hex");
-}
-
-/**
- * ADR 29 §4 恢复类豁免:携带 ADR 27 P0 恢复标记(data.recovery)的合成
- * tool.result.recorded 允许落在已终态 run 上。现状恢复写入
- * (reconcileIncompleteRuns)均发生在无终态 run(同批先补合成结果、末尾补终态)
- * 或全新恢复 run 上,本豁免当前无生产触发路径,仅为 ADR 语义保留的显式通道。
- */
-function isRecoveryClassSealedAppend(event: RuntimeEvent): boolean {
-  return event.kind === "tool.result.recorded" && event.data.recovery !== undefined;
 }
 
 /** plan/graph 操作身份投影(与旧事件索引的提取规则一致)。 */
