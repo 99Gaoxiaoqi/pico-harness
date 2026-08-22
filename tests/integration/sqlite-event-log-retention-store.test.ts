@@ -31,6 +31,10 @@ async function cleanup(root: string): Promise<void> {
   await rm(root, { force: true, recursive: true });
 }
 
+function byteLength(...values: readonly string[]): number {
+  return values.reduce((total, value) => total + Buffer.byteLength(value), 0);
+}
+
 function seedSession(
   storageRoot: string,
   sessionId: string,
@@ -103,6 +107,312 @@ test("sqlite EventLog retention: measures UTF-8 payload bytes and shared blobs o
             "{}2026",
         ) +
         1234,
+    );
+  } finally {
+    await cleanup(root);
+  }
+});
+
+test("sqlite EventLog retention: attributes source-derived memory once and keeps manual memory shared", async () => {
+  const { root, storageRoot } = await fixture("memory-bytes");
+  try {
+    seedSession(storageRoot, "one");
+    seedSession(storageRoot, "two");
+    const before = readEventLogStorageStatus({ storageRoot });
+    const digest = "d".repeat(64);
+    const eventIds = '["event"]';
+    const sourceMarker = '{"sourceId":"source-one"}';
+    const manualMarker = '{"factId":"fact-manual"}';
+    withWorkspaceSqliteLease(storageRoot, (lease) =>
+      lease.transaction("write", () => {
+        lease.database
+          .prepare("INSERT INTO memory_metadata (key, value_json) VALUES ('revision', '0')")
+          .run();
+        lease.database
+          .prepare(
+            `INSERT INTO memory_sources (
+               source_id, session_id, event_ids_json, digest, availability,
+               version, created_at, updated_at
+             ) VALUES ('source-one', 'one', ?, ?, 'available', 1, '2026', '2026')`,
+          )
+          .run(eventIds, digest);
+        for (const fact of [
+          { id: "fact-derived", sourceId: "source-one", title: "derived", content: "派生记忆" },
+          { id: "fact-manual", sourceId: null, title: "manual", content: "手工记忆" },
+        ]) {
+          lease.database
+            .prepare(
+              `INSERT INTO memory_facts (
+                 fact_id, kind, title, content, confidence, source_id, state, pinned,
+                 version, created_at, updated_at
+               ) VALUES (?, 'project_fact', ?, ?, 1, ?, 'active', 0, 1, '2026', '2026')`,
+            )
+            .run(fact.id, fact.title, fact.content, fact.sourceId);
+        }
+        lease.database
+          .prepare(
+            `INSERT INTO memory_mutations (
+               sequence, mutation_id, entity_type, entity_id, action,
+               to_version, created_at
+             ) VALUES (1, 'mutation-source', 'source', 'source-one', 'source.created', 1, '2026')`,
+          )
+          .run();
+        lease.database
+          .prepare(
+            `INSERT INTO memory_mutations (
+               sequence, mutation_id, entity_type, entity_id, action,
+               to_version, created_at
+             ) VALUES (2, 'mutation-manual', 'fact', 'fact-manual', 'fact.created', 1, '2026')`,
+          )
+          .run();
+        lease.database
+          .prepare(
+            `INSERT INTO memory_idempotency (
+               operation_key, request_hash, marker_json, created_at
+             ) VALUES ('source-key', 'source-request', ?, '2026')`,
+          )
+          .run(sourceMarker);
+        lease.database
+          .prepare(
+            `INSERT INTO memory_idempotency (
+               operation_key, request_hash, marker_json, created_at
+             ) VALUES ('manual-key', 'manual-request', ?, '2026')`,
+          )
+          .run(manualMarker);
+      }),
+    );
+
+    const after = readEventLogStorageStatus({ storageRoot });
+    const derivedFactBytes = byteLength(
+      "fact-derived",
+      "project_fact",
+      "derived",
+      "派生记忆",
+      "source-one",
+      "active",
+      "2026",
+      "2026",
+    );
+    const expectedOwned =
+      byteLength("source-one", "one", eventIds, digest, "available", "2026", "2026") +
+      derivedFactBytes +
+      byteLength("mutation-source", "source", "source-one", "source.created", "2026") +
+      byteLength("source-key", "source-request", sourceMarker, "2026");
+    const expectedShared =
+      byteLength("revision", "0") +
+      byteLength("fact-manual", "project_fact", "manual", "手工记忆", "active", "2026", "2026") +
+      byteLength("mutation-manual", "fact", "fact-manual", "fact.created", "2026") +
+      byteLength("manual-key", "manual-request", manualMarker, "2026");
+    assert.equal(
+      after.sessions.find(({ sessionId }) => sessionId === "one")!.breakdown.memoryBytes,
+      expectedOwned,
+    );
+    assert.equal(
+      after.sessions.find(({ sessionId }) => sessionId === "two")!.breakdown.memoryBytes,
+      0,
+    );
+    assert.equal(after.unattributedMemoryBytes, expectedShared);
+    assert.equal(after.logicalBytes - before.logicalBytes, expectedOwned + expectedShared);
+  } finally {
+    await cleanup(root);
+  }
+});
+
+test("sqlite EventLog retention: deletes the complete derived-memory closure and preserves manual overlays", async () => {
+  const { root, storageRoot } = await fixture("memory-delete");
+  try {
+    seedSession(storageRoot, "candidate");
+    seedSession(storageRoot, "survivor", { archived: false });
+    withWorkspaceSqliteLease(storageRoot, (lease) =>
+      lease.transaction("write", () => {
+        lease.database
+          .prepare("INSERT INTO memory_metadata (key, value_json) VALUES ('revision', '7')")
+          .run();
+        for (const source of [
+          { id: "source-candidate", sessionId: "candidate" },
+          { id: "source-survivor", sessionId: "survivor" },
+        ]) {
+          lease.database
+            .prepare(
+              `INSERT INTO memory_sources (
+                 source_id, session_id, event_ids_json, digest, availability,
+                 version, created_at, updated_at
+               ) VALUES (?, ?, '[]', ?, 'available', 1, '2026', '2026')`,
+            )
+            .run(source.id, source.sessionId, `${source.id}-digest`);
+        }
+        for (const fact of [
+          { id: "fact-derived", sourceId: "source-candidate", title: "derived" },
+          { id: "fact-survivor", sourceId: "source-survivor", title: "survivor" },
+          { id: "fact-manual", sourceId: null, title: "manual" },
+        ]) {
+          lease.database
+            .prepare(
+              `INSERT INTO memory_facts (
+                 fact_id, kind, title, content, confidence, source_id, state, pinned,
+                 version, created_at, updated_at
+               ) VALUES (?, 'project_fact', ?, 'content', 1, ?, 'active', 0, 1, '2026', '2026')`,
+            )
+            .run(fact.id, fact.title, fact.sourceId);
+        }
+        lease.database
+          .prepare(
+            `INSERT INTO memory_proposals (
+               proposal_id, kind, title, content, reason, confidence, source_id, status,
+               conflict_status, conflict_fact_id, resolved_fact_id, version, created_at, updated_at
+             ) VALUES (
+               'proposal-derived', 'project_fact', 'derived', 'content', 'reason', 1,
+               'source-candidate', 'pending', 'confirmed', 'fact-derived', 'fact-derived',
+               1, '2026', '2026'
+             )`,
+          )
+          .run();
+        lease.database
+          .prepare(
+            `INSERT INTO memory_proposals (
+               proposal_id, kind, title, content, reason, confidence, source_id, status,
+               conflict_status, conflict_fact_id, resolved_fact_id, version, created_at, updated_at
+             ) VALUES (
+               'proposal-manual', 'project_fact', 'manual', 'content', 'reason', 1,
+               NULL, 'pending', 'confirmed', 'fact-derived', 'fact-derived', 1, '2026', '2026'
+             )`,
+          )
+          .run();
+        for (const job of [
+          {
+            id: "job-by-session",
+            sourceId: null,
+            cursor: '{"sessionId":"candidate","eventId":"terminal"}',
+          },
+          {
+            id: "job-by-source",
+            sourceId: "source-candidate",
+            cursor: '{"sessionId":"memory-service","eventId":"unrelated"}',
+          },
+          {
+            id: "job-by-notification",
+            sourceId: null,
+            cursor: '{"sessionId":"memory-service","eventId":"proposal-derived"}',
+          },
+          {
+            id: "job-manual",
+            sourceId: null,
+            cursor: '{"sessionId":"memory-service","eventId":"fact-manual"}',
+          },
+          {
+            id: "job-survivor-source",
+            sourceId: "source-survivor",
+            cursor: '{"sessionId":"candidate","eventId":"old-cursor"}',
+          },
+        ]) {
+          lease.database
+            .prepare(
+              `INSERT INTO memory_jobs (
+                 job_id, type, status, terminal_event_id, extractor_version, cursor_json,
+                 source_id, attempt_count, max_attempts, model_calls, input_tokens,
+                 output_tokens, cost_usd, version, created_at, updated_at
+               ) VALUES (?, 'test', 'queued', ?, 'v1', ?, ?, 0, 3, 0, 0, 0, 0, 1, '2026', '2026')`,
+            )
+            .run(job.id, `terminal-${job.id}`, job.cursor, job.sourceId);
+        }
+        const mutationRows = [
+          [1, "mutation-source", "source", "source-candidate", "source.created"],
+          [2, "mutation-fact", "fact", "fact-derived", "fact.created"],
+          [3, "mutation-proposal", "proposal", "proposal-derived", "proposal.created"],
+          [4, "mutation-job", "job", "job-by-session", "job.created"],
+          [5, "mutation-manual", "fact", "fact-manual", "fact.created"],
+        ] as const;
+        for (const row of mutationRows) {
+          lease.database
+            .prepare(
+              `INSERT INTO memory_mutations (
+                 sequence, mutation_id, entity_type, entity_id, action, to_version, created_at
+               ) VALUES (?, ?, ?, ?, ?, 1, '2026')`,
+            )
+            .run(...row);
+        }
+        for (const replay of [
+          { key: "derived-source", marker: '{"sourceId":"source-candidate"}' },
+          { key: "derived-fact", marker: '{"factId":"fact-derived"}' },
+          { key: "derived-proposal", marker: '{"proposalId":"proposal-derived"}' },
+          { key: "derived-job", marker: '{"jobId":"job-by-session"}' },
+          { key: "manual", marker: '{"factId":"fact-manual"}' },
+        ]) {
+          lease.database
+            .prepare(
+              `INSERT INTO memory_idempotency (
+                 operation_key, request_hash, marker_json, created_at
+               ) VALUES (?, 'request', ?, '2026')`,
+            )
+            .run(replay.key, replay.marker);
+        }
+      }),
+    );
+
+    const result = enforceEventLogRetention({
+      storageRoot,
+      currentSessionId: "survivor",
+      policy: TINY_POLICY,
+    });
+    assert.deepEqual(result.deletedSessionIds, ["candidate"]);
+    withWorkspaceSqliteLease(storageRoot, (lease) =>
+      lease.transaction("read", () => {
+        assert.equal(
+          lease.database
+            .prepare("SELECT 1 FROM memory_sources WHERE source_id = 'source-candidate'")
+            .get(),
+          undefined,
+        );
+        assert.notEqual(
+          lease.database
+            .prepare("SELECT 1 FROM memory_sources WHERE source_id = 'source-survivor'")
+            .get(),
+          undefined,
+        );
+        assert.deepEqual(
+          lease.database
+            .prepare("SELECT fact_id FROM memory_facts ORDER BY fact_id")
+            .all()
+            .map((row) => row["fact_id"]),
+          ["fact-manual", "fact-survivor"],
+        );
+        const manualProposal = lease.database
+          .prepare(
+            `SELECT source_id, conflict_fact_id, resolved_fact_id
+             FROM memory_proposals WHERE proposal_id = 'proposal-manual'`,
+          )
+          .get() as Record<string, unknown>;
+        assert.equal(manualProposal["source_id"], null);
+        assert.equal(manualProposal["conflict_fact_id"], null);
+        assert.equal(manualProposal["resolved_fact_id"], null);
+        assert.deepEqual(
+          lease.database
+            .prepare("SELECT job_id FROM memory_jobs ORDER BY job_id")
+            .all()
+            .map((row) => row["job_id"]),
+          ["job-manual", "job-survivor-source"],
+        );
+        assert.deepEqual(
+          lease.database
+            .prepare("SELECT mutation_id FROM memory_mutations ORDER BY sequence")
+            .all()
+            .map((row) => row["mutation_id"]),
+          ["mutation-manual"],
+        );
+        assert.deepEqual(
+          lease.database
+            .prepare("SELECT operation_key FROM memory_idempotency ORDER BY operation_key")
+            .all()
+            .map((row) => row["operation_key"]),
+          ["manual"],
+        );
+        assert.equal(
+          lease.database
+            .prepare("SELECT value_json FROM memory_metadata WHERE key = 'revision'")
+            .get()!["value_json"],
+          "8",
+        );
+      }),
     );
   } finally {
     await cleanup(root);
