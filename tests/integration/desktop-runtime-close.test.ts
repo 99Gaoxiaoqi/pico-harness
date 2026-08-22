@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate as waitForImmediate } from "node:timers/promises";
 import { test } from "node:test";
 import {
   createRuntimeRequest,
-  DesktopConversationStateStore,
   DesktopRuntimeService,
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
@@ -16,6 +15,8 @@ import {
 import { globalSessionManager } from "../../src/engine/session.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 import type { PluginRuntimeSnapshotRegistry } from "../../src/plugins/plugin-runtime-snapshot-registry.js";
+import { SqliteDesktopConversationStateStore } from "../../src/storage/sqlite/sqlite-desktop-conversation-state-store.js";
+import { writeDesktopModelRouting } from "../fixtures/desktop-model-routing.js";
 
 test("Desktop close aggregates cleanup failures and always reaches the closed state", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-desktop-close-aggregate-"));
@@ -127,31 +128,15 @@ test(
     const root = await mkdtemp(join(tmpdir(), "pico-desktop-close-queue-"));
     const workspace = join(root, "workspace");
     const picoHome = join(root, "pico-home");
-    await mkdir(join(workspace, ".pico"), { recursive: true });
+    await mkdir(workspace, { recursive: true });
     await mkdir(picoHome, { recursive: true });
-    await writeFile(
-      join(workspace, ".pico", "config.json"),
-      JSON.stringify({
-        version: 1,
-        model: "test/coder",
-        providers: {
-          test: {
-            protocol: "openai",
-            baseURL: "https://provider.invalid/v1",
-            apiKeyEnv: "PICO_TEST_TOKEN",
-            discoverModels: false,
-            models: ["coder"],
-          },
-        },
-      }),
-      "utf8",
-    );
+    await writeDesktopModelRouting(picoHome);
     const canonicalWorkspace = await realpath(workspace);
     const env = { PICO_HOME: picoHome, PICO_TEST_TOKEN: "test-token" };
     const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
     await trustStore.trust(canonicalWorkspace);
     let queueSequence = 0;
-    const conversationState = new DesktopConversationStateStore({
+    const conversationState = new SqliteDesktopConversationStateStore({
       picoHome,
       generateId: () => `queue-${++queueSequence}`,
     });

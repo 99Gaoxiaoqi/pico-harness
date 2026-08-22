@@ -54,7 +54,7 @@ test("memory page renders three desktop columns and management actions", () => {
   assert.match(html, /aria-label="归档/);
   assert.match(html, /aria-label="永久删除/);
   assert.match(html, /来源 ID：memory-source-1（详情未提供）/);
-  assert.match(html, /来源已回退/);
+  assert.match(html, /来源不可用/);
 });
 
 test("narrow memory layout exposes keyboard-operated ARIA tabs", () => {

@@ -19,6 +19,7 @@ import {
   type DesktopAutomationAuthorityDependencies,
   type DesktopAutomationService,
 } from "../../src/daemon/desktop-automation-service.js";
+import { writeDesktopModelRouting } from "../fixtures/desktop-model-routing.js";
 
 test("Desktop catalog and session activation share one Plugin snapshot", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-desktop-plugin-parity-"));
@@ -27,26 +28,10 @@ test("Desktop catalog and session activation share one Plugin snapshot", async (
   const skillRoot = join(root, "plugin-skills");
   const agentFile = join(root, "plugin-agents.yaml");
   const mcpMarker = join(root, "mcp-connected");
-  await mkdir(join(workspace, ".pico"), { recursive: true });
+  await mkdir(workspace, { recursive: true });
   await mkdir(join(skillRoot, "plugin-skill"), { recursive: true });
   await mkdir(picoHome, { recursive: true });
-  await writeFile(
-    join(workspace, ".pico", "config.json"),
-    JSON.stringify({
-      version: 1,
-      model: "test/coder",
-      providers: {
-        test: {
-          protocol: "openai",
-          baseURL: "https://provider.invalid/v1",
-          apiKeyEnv: "PICO_TEST_TOKEN",
-          discoverModels: false,
-          models: ["coder"],
-        },
-      },
-    }),
-    "utf8",
-  );
+  await writeDesktopModelRouting(picoHome);
   await writeFile(
     join(skillRoot, "plugin-skill", "SKILL.md"),
     [

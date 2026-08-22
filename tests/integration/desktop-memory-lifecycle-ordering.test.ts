@@ -1,22 +1,25 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { DatabaseSync } from "node:sqlite";
 import {
   createRuntimeRequest,
-  DesktopConversationStateStore,
+  type DesktopConversationStateStoreLike,
+  type DesktopFirstSendClaim,
   DesktopMemoryService,
   DesktopRuntimeService,
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
   WorkspaceRuntimeService,
+  type DesktopQueuedInput,
   type PreparedMemorySourceInvalidation,
 } from "../../src/daemon/index.js";
+import type { JsonObject, RuntimeUserInput } from "../../src/daemon/protocol.js";
 import { SqliteMemoryRepository } from "../../src/storage/sqlite/sqlite-memory-repository.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
+import { writeDesktopModelRouting } from "../fixtures/desktop-model-routing.js";
 
 test("session delete is blocked when lifecycle prepare cannot become durable", async (context) => {
   const fixture = await createFixture("prepare-failure");
@@ -35,6 +38,7 @@ test("session delete is blocked when lifecycle prepare cannot become durable", a
     runtimeService: runtime,
     trustStore,
     memoryService: memory,
+    conversationStateStore: new NoopConversationStateStore(),
     env: fixture.env,
   });
   context.after(async () => {
@@ -66,15 +70,12 @@ test("session delete succeeds after prepare while failed lifecycle apply stays d
   await trustStore.trust(canonical);
   const degraded: string[] = [];
   const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const memory = new CommitDeferringMemoryService(
-    {
-      picoHome: fixture.picoHome,
-      repositoryBusyTimeoutMs: 1,
-      publish: () => undefined,
-      onDegraded: (event) => degraded.push(event.code),
-    },
-    join(paths.workspace.root, "pico.sqlite"),
-  );
+  const memory = new CommitFailingMemoryService({
+    picoHome: fixture.picoHome,
+    repositoryBusyTimeoutMs: 1,
+    publish: () => undefined,
+    onDegraded: (event) => degraded.push(event.code),
+  });
   const runtime = new WorkspaceRuntimeService({
     env: fixture.env,
     execute: async () => undefined,
@@ -83,6 +84,7 @@ test("session delete succeeds after prepare while failed lifecycle apply stays d
     runtimeService: runtime,
     trustStore,
     memoryService: memory,
+    conversationStateStore: new NoopConversationStateStore(),
     env: fixture.env,
   });
   context.after(async () => {
@@ -123,8 +125,6 @@ test("session delete succeeds after prepare while failed lifecycle apply stays d
     (error: unknown) =>
       error instanceof RuntimeProtocolError && error.code === RUNTIME_ERROR_CODES.NOT_FOUND,
   );
-  memory.releaseCommitBlock();
-
   const durable = new SqliteMemoryRepository({
     storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
@@ -136,7 +136,13 @@ test("session delete succeeds after prepare while failed lifecycle apply stays d
   durable.close();
   assert.deepEqual(degraded, ["lifecycle_deferred"]);
 
-  memory.list(fixture.workspace, { workspacePath: fixture.workspace, limit: 1 });
+  memory.close();
+  const restarted = new DesktopMemoryService({
+    picoHome: fixture.picoHome,
+    publish: () => undefined,
+  });
+  restarted.list(fixture.workspace, { workspacePath: fixture.workspace, limit: 1 });
+  restarted.close();
   const settled = new SqliteMemoryRepository({
     storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
@@ -167,9 +173,7 @@ test("a delete failure after destructive work starts still commits lifecycle inv
     runtimeService: runtime,
     trustStore,
     memoryService: memory,
-    conversationStateStore: new FailingClearConversationStateStore({
-      picoHome: fixture.picoHome,
-    }),
+    conversationStateStore: new FailingClearConversationStateStore(),
     env: fixture.env,
   });
   context.after(async () => {
@@ -284,45 +288,69 @@ class PrepareFailingMemoryService extends DesktopMemoryService {
   }
 }
 
-/**
- * SQLite 纪元的提交阻塞替身:旧实现用 memory/lock 目录卡住文件锁;现在用一条
- * 独立连接持有 pico.sqlite 的 BEGIN IMMEDIATE 写锁,让后续 memory 写事务撞
- * busy 超时——同一个"commit 无法落盘 → 降级为可重试的持久任务"语义。
- */
-class CommitDeferringMemoryService extends DesktopMemoryService {
-  private blockedDatabase: DatabaseSync | undefined;
+class CommitFailingMemoryService extends DesktopMemoryService {
+  private readonly reportDeferred: NonNullable<
+    ConstructorParameters<typeof DesktopMemoryService>[0]["onDegraded"]
+  >;
 
-  constructor(
-    options: ConstructorParameters<typeof DesktopMemoryService>[0],
-    private readonly databasePath: string,
-  ) {
+  constructor(options: ConstructorParameters<typeof DesktopMemoryService>[0]) {
     super(options);
+    this.reportDeferred = options.onDegraded ?? (() => undefined);
   }
 
-  override prepareSessionSourceInvalidation(
-    ...args: Parameters<DesktopMemoryService["prepareSessionSourceInvalidation"]>
-  ): PreparedMemorySourceInvalidation {
-    const prepared = super.prepareSessionSourceInvalidation(...args);
-    const database = new DatabaseSync(this.databasePath);
-    database.exec("PRAGMA busy_timeout = 20000");
-    database.exec("BEGIN IMMEDIATE");
-    this.blockedDatabase = database;
-    return prepared;
-  }
-
-  releaseCommitBlock(): void {
-    const database = this.blockedDatabase;
-    this.blockedDatabase = undefined;
-    if (!database) return;
-    try {
-      database.exec("ROLLBACK");
-    } finally {
-      database.close();
-    }
+  override commitSessionSourceInvalidation(prepared: PreparedMemorySourceInvalidation): void {
+    this.reportDeferred({
+      code: "lifecycle_deferred",
+      workspaceId: prepared.workspaceId,
+      operationId: prepared.jobId,
+      error: new Error("simulated lifecycle commit failure"),
+    });
   }
 }
 
-class FailingClearConversationStateStore extends DesktopConversationStateStore {
+class NoopConversationStateStore implements DesktopConversationStateStoreLike {
+  async listQueued(): Promise<DesktopQueuedInput[]> {
+    return [];
+  }
+
+  async enqueue(
+    workspacePath: string,
+    sessionId: string,
+    input: RuntimeUserInput,
+  ): Promise<DesktopQueuedInput> {
+    return { queueId: "unused", workspacePath, sessionId, input, createdAt: 0 };
+  }
+
+  async removeQueued(): Promise<void> {}
+
+  async clearQueued(): Promise<void> {}
+
+  async getIdempotent(): Promise<undefined> {
+    return undefined;
+  }
+
+  async getFirstSendClaim(): Promise<undefined> {
+    return undefined;
+  }
+
+  async claimFirstSend(
+    workspacePath: string,
+    key: string,
+    sessionId: string,
+    requestFingerprint: string,
+  ): Promise<DesktopFirstSendClaim> {
+    return { workspacePath, key, sessionId, requestFingerprint, createdAt: 0 };
+  }
+
+  async rememberIdempotent(
+    _workspacePath: string,
+    _key: string,
+    _requestFingerprint: string,
+    _result: JsonObject,
+  ): Promise<void> {}
+}
+
+class FailingClearConversationStateStore extends NoopConversationStateStore {
   override async clearQueued(): Promise<void> {
     throw new Error("clear queued failed");
   }
@@ -351,27 +379,8 @@ async function createFixture(name: string): Promise<{
   const root = await mkdtemp(join(tmpdir(), `pico-memory-lifecycle-${name}-`));
   const picoHome = join(root, "pico-home");
   const workspace = join(root, "workspace");
-  await Promise.all([
-    mkdir(picoHome, { recursive: true }),
-    mkdir(join(workspace, ".pico"), { recursive: true }),
-  ]);
-  await writeFile(
-    join(workspace, ".pico", "config.json"),
-    JSON.stringify({
-      version: 1,
-      model: "test/coder",
-      providers: {
-        test: {
-          protocol: "openai",
-          baseURL: "https://provider.invalid/v1",
-          apiKeyEnv: "PICO_TEST_TOKEN",
-          discoverModels: false,
-          models: ["coder"],
-        },
-      },
-    }),
-    "utf8",
-  );
+  await Promise.all([mkdir(picoHome, { recursive: true }), mkdir(workspace, { recursive: true })]);
+  await writeDesktopModelRouting(picoHome);
   return {
     root,
     picoHome,
