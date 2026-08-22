@@ -1,5 +1,11 @@
 import type { Message, ToolCall } from "../schema/message.js";
 import type { CommitReceipt } from "./session-persistence.js";
+import type {
+  RuntimeOwnerFence,
+  RuntimePartialSegment,
+  RuntimePartialSnapshot,
+  RuntimeRunPartials,
+} from "../storage/runtime-event-store-contracts.js";
 import { Session } from "./session.js";
 import type { CanonicalTranscriptToolStart } from "./transcript-tool-start.js";
 import type {
@@ -26,7 +32,7 @@ const issuedEngineRuntimeCapabilities = new WeakSet<object>();
 export interface EngineRuntimeWriteGuard {
   /** Bind issuance to the durable authority actually owned by this guard. */
   assertRuntimeEventAuthority(authority: EngineRuntimeAuthority): void;
-  assertRuntimeEventWriteAllowed(): Promise<void>;
+  assertRuntimeEventWriteAllowed(): Promise<RuntimeOwnerFence>;
 }
 
 export interface EngineRuntimeCapability {
@@ -147,10 +153,28 @@ export interface EngineRuntimeRun {
     toolCalls: readonly ToolCall[],
   ): Promise<readonly CanonicalTranscriptToolStart[]>;
   recordTranscriptMessage(message: Message): Promise<void>;
+  recordToolGroupLoaded(groupId: string, toolNames: readonly string[]): Promise<void>;
   recordTranscriptToolResults(
     inputs: readonly EngineRuntimeToolResultInput[],
   ): Promise<readonly Message[]>;
   registerToolResult(input: EngineRuntimeToolResultInput): Message;
+  /** Records an explicit local rejection/interruption that was never dispatched to a tool. */
+  registerUndispatchedToolResult(input: EngineRuntimeToolResultInput): Message;
+  /** Closes an abnormal batch, settling T2 when dispatch already reached T1. */
+  registerProtocolClosureToolResult(input: EngineRuntimeToolResultInput): Message;
+  upsertPartialSnapshot(
+    partialId: string,
+    kind: string,
+    expectedVersion: number,
+    payload: unknown,
+  ): Promise<RuntimePartialSnapshot>;
+  appendPartialSegment(
+    partialId: string,
+    segmentIndex: number,
+    payload: unknown,
+  ): Promise<{ readonly inserted: boolean; readonly segment: RuntimePartialSegment }>;
+  readPartials(): Promise<RuntimeRunPartials>;
+  clearPartials(): Promise<number>;
 }
 
 export interface EngineRuntimeRunStartOptions {

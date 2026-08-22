@@ -10,9 +10,12 @@ import {
   type RuntimePlanEvent,
 } from "../engine/session-runtime-event.js";
 import {
+  RuntimeEventStoreHighWaterConflictError,
   RuntimeEventStorePlanOperationConflictError,
   type RuntimeEventStoreEntry,
+  type RuntimeOwnerFence,
 } from "../storage/runtime-event-store-contracts.js";
+import type { EngineRuntimeWriteGuard } from "../engine/runtime-port.js";
 import {
   PlanConflictError,
   normalizePlanProposalInput,
@@ -31,6 +34,7 @@ export interface PlanCoordinatorContext {
   readonly invocationId: string;
   readonly runId: string;
   readonly turnId: string;
+  readonly writeGuard?: EngineRuntimeWriteGuard;
 }
 interface OperationInput {
   readonly operationId: string;
@@ -388,7 +392,21 @@ export class PlanCoordinator {
       projection: PlanProjection,
     ) => RuntimeEvent[],
   ): Promise<PlanProjection> {
-    const slice = await this.readPlanEntries();
+    const ownerFence = await this.ownerFence();
+    let slice = await this.readPlanEntries();
+    const callerSequence = input.expectedSessionSequence;
+    const assertNoConcurrentPlanMutation = (): void => {
+      if (
+        callerSequence > slice.headSequence ||
+        slice.entries.some(({ sequence }) => sequence > callerSequence)
+      ) {
+        throw new RuntimeEventStoreHighWaterConflictError(
+          this.context.sessionId,
+          callerSequence,
+          slice.headSequence,
+        );
+      }
+    };
     const replay = projectActivePlanEntries(slice.entries).find(
       ({ event }) =>
         event.kind.startsWith("plan.") &&
@@ -401,22 +419,58 @@ export class PlanCoordinator {
         throw new RuntimeEventStorePlanOperationConflictError(input.operationId);
       return this.projectPlan(slice);
     }
-    const projection = this.projectPlan(slice);
-    const events = build(
-      { operationId: input.operationId, fingerprint },
-      this.now().toISOString(),
-      projection,
-    );
-    let candidate = projection;
-    for (const event of events) {
-      candidate = reducePlanEvent(candidate, event);
+    assertNoConcurrentPlanMutation();
+    const at = this.now().toISOString();
+    for (let attempt = 0; ; attempt++) {
+      const projection = this.projectPlan(slice);
+      const events = build({ operationId: input.operationId, fingerprint }, at, projection);
+      let candidate = projection;
+      for (const event of events) {
+        candidate = reducePlanEvent(candidate, event);
+      }
+      try {
+        await this.store.appendPlanOperation(events, {
+          operationId: input.operationId,
+          fingerprint,
+          expectedSessionSequence: slice.headSequence,
+          ...(ownerFence ? { ownerFence } : {}),
+        });
+        break;
+      } catch (error) {
+        if (!(error instanceof RuntimeEventStoreHighWaterConflictError) || attempt >= 7)
+          throw error;
+        slice = await this.readPlanEntries();
+        assertNoConcurrentPlanMutation();
+      }
     }
-    await this.store.appendPlanOperation(events, {
-      operationId: input.operationId,
-      fingerprint,
-      expectedSessionSequence: input.expectedSessionSequence,
-    });
+    await this.confirmOwnerFence(ownerFence);
     return this.project();
+  }
+
+  private async ownerFence(): Promise<RuntimeOwnerFence | undefined> {
+    const writeGuard = this.context.writeGuard;
+    if (!writeGuard) {
+      const current = await this.store.readOwnerFence(this.context.sessionId);
+      if (current.epoch > 0) {
+        throw new Error(
+          `Plan mutation for Session ${this.context.sessionId} requires its Runtime write guard`,
+        );
+      }
+      return undefined;
+    }
+    const ownerFence = await writeGuard.assertRuntimeEventWriteAllowed();
+    if (ownerFence.sessionId !== this.context.sessionId || ownerFence.epoch <= 0) {
+      throw new Error(`Plan write guard is not bound to Session ${this.context.sessionId}`);
+    }
+    return ownerFence;
+  }
+
+  private async confirmOwnerFence(expected: RuntimeOwnerFence | undefined): Promise<void> {
+    if (!expected || !this.context.writeGuard) return;
+    const actual = await this.context.writeGuard.assertRuntimeEventWriteAllowed();
+    if (actual.sessionId !== expected.sessionId || actual.epoch !== expected.epoch) {
+      throw new Error(`Plan owner fence changed during Session ${this.context.sessionId} write`);
+    }
   }
 
   private baseEvent(operationId: string, suffix: string, at: string) {

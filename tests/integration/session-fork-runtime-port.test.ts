@@ -474,15 +474,26 @@ test("fork bootstrap reports a conflicting terminal as a typed durable conflict"
            WHERE session_id = ?1`,
         )
         .run(bootstrap.targetSessionId);
+      database
+        .prepare(
+          `UPDATE runtime_run_projection
+           SET terminal_event_id = NULL, terminal_sequence = NULL, terminal_status = NULL,
+               last_event_sequence = last_event_sequence - 1
+           WHERE session_id = ? AND run_id = ?`,
+        )
+        .run(bootstrap.targetSessionId, terminal.runId);
     } finally {
       database.close();
     }
     await store.rebuildSessionCatalogRow(bootstrap.targetSessionId);
-    await store.append({
-      ...terminal,
-      eventId: `${terminal.eventId}:conflict`,
-      data: { status: "failed", reason: "injected conflict" },
-    });
+    await store.append(
+      {
+        ...terminal,
+        eventId: `${terminal.eventId}:conflict`,
+        data: { status: "failed", reason: "injected conflict" },
+      },
+      { ownerFence: await store.readOwnerFence(bootstrap.targetSessionId) },
+    );
 
     await assert.rejects(
       port.bootstrapFork(bootstrap),

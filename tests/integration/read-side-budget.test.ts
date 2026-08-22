@@ -144,6 +144,7 @@ test("readModelHistory: 大全文会话组装字节有界,末尾工作集完整,
         toolCalls: [{ id: "call-big", name: "bash", arguments: '{"command":"cat big.log"}' }],
       },
     ]);
+    await run.recordToolStarted("call-big", "bash", '{"command":"cat big.log"}');
     const toolResultMessage = run.registerToolResult({
       toolCallId: "call-big",
       toolName: "bash",

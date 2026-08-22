@@ -51,6 +51,7 @@ import type {
 } from "../hooks/types.js";
 import { isTerminalTaskStatus, type TaskSnapshot } from "../tasks/task-registry.js";
 import { resolvePicoHome } from "../paths/pico-paths.js";
+import { RuntimeEventStoreHighWaterConflictError } from "../storage/runtime-event-store-contracts.js";
 
 /** UI-independent services scoped to one persisted session. */
 export interface SessionRuntimeOptions {
@@ -774,6 +775,7 @@ async function settlePlanStepFromDelegation(
       invocationId: `plan-step-settle:${planStepId}`,
       runId: `plan-step-settle:${planStepId}`,
       turnId: `plan-step-settle:${planStepId}`,
+      writeGuard: session,
     });
     const projection = await coordinator.project();
     const execution = projection.execution;
@@ -879,12 +881,19 @@ export async function settleGraphWork(
       // stale 进程。切勿改为包 session.serialize——会改变 CAS 重试的并发语义并引入死锁
       //（参见 delegation graphWorkId 去重因扩大 settle 窗口而致 graph 死锁的教训）。
       try {
+        const ownerFence = await session.assertRuntimeEventWriteAllowed();
         await store.appendGraphOperation([event], {
           operationId,
           fingerprint,
           expectedSessionSequence: projection.sessionSequence,
+          ownerFence,
         });
-      } catch {
+        const confirmedFence = await session.assertRuntimeEventWriteAllowed();
+        if (confirmedFence.epoch !== ownerFence.epoch) {
+          throw new Error(`Graph owner fence changed during Session ${session.id} settle`);
+        }
+      } catch (error) {
+        if (!(error instanceof RuntimeEventStoreHighWaterConflictError)) throw error;
         // CAS conflict — re-read and retry. If the work is already settled by a
         // concurrent settle, the next projection will short-circuit.
         continue;

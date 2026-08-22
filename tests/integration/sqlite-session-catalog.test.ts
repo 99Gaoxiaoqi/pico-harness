@@ -460,14 +460,22 @@ test("session recover: startup reads materialized messages + state events direct
     storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
   });
   try {
-    await store.appendBatch([
-      userMessage(`${id}-e1`, id, "2026-08-18T00:00:01.000Z", "user asks"),
-      assistantMessage(`${id}-e2`, id, "2026-08-18T00:00:02.000Z", "assistant answers"),
-      userMessage(`${id}-e3`, id, "2026-08-18T00:00:03.000Z", "user follows up"),
-    ]);
-    await store.appendSessionState(id, {
-      settings: { ...FULL_SETTINGS, title: "recovered title" },
-    });
+    const ownerFence = await store.readOwnerFence(id);
+    await store.appendBatch(
+      [
+        userMessage(`${id}-e1`, id, "2026-08-18T00:00:01.000Z", "user asks"),
+        assistantMessage(`${id}-e2`, id, "2026-08-18T00:00:02.000Z", "assistant answers"),
+        userMessage(`${id}-e3`, id, "2026-08-18T00:00:03.000Z", "user follows up"),
+      ],
+      { ownerFence },
+    );
+    await store.appendSessionState(
+      id,
+      {
+        settings: { ...FULL_SETTINGS, title: "recovered title" },
+      },
+      { ownerFence },
+    );
     const projected = projectRuntimeSessionMessages(
       (await store.readSessionEntries(id)).map(({ event }) => event),
     );

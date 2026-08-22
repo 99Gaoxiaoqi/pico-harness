@@ -23,8 +23,6 @@ import type { TodoStore } from "../context/todo-store.js";
 import { SkillLoader, type Skill } from "../context/skill.js";
 import { ToolDisclosure, type ToolGroupLoadedEventLike } from "../tools/tool-disclosure.js";
 import { isToolSupportedForHost, type ToolHostKind } from "../tools/tool-surface.js";
-import { RUNTIME_EVENT_SCHEMA_VERSION } from "../engine/session-runtime-event.js";
-import { createRuntimeEventId } from "../storage/runtime-event-store-contracts.js";
 import {
   createRawProvider,
   type ProviderKind,
@@ -355,6 +353,7 @@ export class AgentRuntime {
         invocationId: `approval:${operationId}`,
         runId: `approval:${operationId}`,
         turnId: `turn:approval:${operationId}`,
+        writeGuard: session,
       });
       const approvalSemantic = {
         planId: input.approval.planId,
@@ -390,7 +389,7 @@ export class AgentRuntime {
           revision: proposal.revision,
         })) === "matching"
       ) {
-        await reconcileOrphanedPlanExecution(session.runtimeEventStore, session.id);
+        await reconcileOrphanedPlanExecution(session.runtimeEventStore, session.id, session);
         return replayedPlanControlResult(session.id, workDir, operationId);
       }
       const admission = planAdmissionKey(session.id, executionOperationId);
@@ -420,16 +419,17 @@ export class AgentRuntime {
   }
 
   async readPlanProjection(input: PlanSessionRequest): Promise<PlanProjection> {
-    const picoHome = resolvePicoHome({ picoHome: input.picoHome, env: input.env ?? process.env });
-    const workDir = await resolveWorkDir(input.dir);
-    const store = new SqliteRuntimeEventStore({
-      storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
-    });
+    const { session, lease } = await acquirePlanControlSession(input, {});
     try {
-      const result = await reconcileOrphanedPlanExecution(store, input.sessionId);
+      if (!session.runtimeEventStore) throw new Error("Plan projection requires durable storage");
+      const result = await reconcileOrphanedPlanExecution(
+        session.runtimeEventStore,
+        input.sessionId,
+        session,
+      );
       return result;
     } finally {
-      store.close();
+      lease.release();
     }
   }
 
@@ -442,7 +442,7 @@ export class AgentRuntime {
       if (!session.runtimeEventStore) throw new Error("Plan revision requires durable storage");
       const coordinator = new PlanCoordinator(
         session.runtimeEventStore,
-        planControlContext(session.id, input.operationId),
+        planControlContext(session.id, input.operationId, session),
       );
       const semantic = {
         planId: input.planId,
@@ -477,7 +477,7 @@ export class AgentRuntime {
       if (!session.runtimeEventStore) throw new Error("Plan resume requires durable storage");
       const coordinator = new PlanCoordinator(
         session.runtimeEventStore,
-        planControlContext(session.id, input.operationId),
+        planControlContext(session.id, input.operationId, session),
       );
       const semantic = { planId: input.planId };
       if (
@@ -487,7 +487,7 @@ export class AgentRuntime {
           semantic,
         )) === "matching"
       ) {
-        await reconcileOrphanedPlanExecution(session.runtimeEventStore, session.id);
+        await reconcileOrphanedPlanExecution(session.runtimeEventStore, session.id, session);
         return replayedPlanControlResult(session.id, workDir, input.operationId);
       }
       const projection = await coordinator.project();
@@ -533,7 +533,7 @@ export class AgentRuntime {
       if (!session.runtimeEventStore) throw new Error("Plan cancel requires durable storage");
       return await new PlanCoordinator(
         session.runtimeEventStore,
-        planControlContext(session.id, input.operationId),
+        planControlContext(session.id, input.operationId, session),
       ).cancel({
         operationId: input.operationId,
         expectedSessionSequence: input.expectedSessionSequence,
@@ -554,7 +554,7 @@ export class AgentRuntime {
       if (!session.runtimeEventStore) throw new Error("Plan replan requires durable storage");
       const coordinator = new PlanCoordinator(
         session.runtimeEventStore,
-        planControlContext(session.id, input.operationId),
+        planControlContext(session.id, input.operationId, session),
       );
       const semantic = {
         planId: input.planId,
@@ -668,18 +668,20 @@ function resumedPlanExecutionPrompt(projection: PlanProjection): string {
   ].join("\n\n");
 }
 
-function planControlContext(sessionId: string, operationId: string) {
+function planControlContext(sessionId: string, operationId: string, writeGuard?: Session) {
   return {
     sessionId,
     invocationId: `plan-control:${operationId}`,
     runId: `plan-control:${operationId}`,
     turnId: `turn:plan-control:${operationId}`,
+    ...(writeGuard ? { writeGuard } : {}),
   };
 }
 
 async function reconcileOrphanedPlanExecution(
   store: SqliteRuntimeEventStore,
   sessionId: string,
+  writeGuard?: Session,
 ): Promise<PlanProjection> {
   // plan.* + run.started 事件切片(票 04):本函数只消费 plan 事件与
   // transition 之后的 run.started 准入事实,不再全量读。
@@ -687,7 +689,10 @@ async function reconcileOrphanedPlanExecution(
     ...PLAN_EVENT_KINDS,
     "run.started",
   ]);
-  const coordinator = new PlanCoordinator(store, planControlContext(sessionId, "reconcile"));
+  const coordinator = new PlanCoordinator(
+    store,
+    planControlContext(sessionId, "reconcile", writeGuard),
+  );
   const projection = await coordinator.project();
   if (projection.execution?.status !== "active") return projection;
   const transition = projectActivePlanEntries(entries)
@@ -931,6 +936,7 @@ export async function executeAgentRuntime(
         invocationId: `execution-start:${options.approvedPlan.planId}`,
         runId: `execution-start:${options.approvedPlan.planId}:${options.approvedPlan.revision}`,
         turnId: `turn:execution-start:${options.approvedPlan.planId}`,
+        writeGuard: session,
       });
       const operationId =
         options.approvedPlan.operationId ??
@@ -1433,31 +1439,22 @@ export async function executeAgentRuntime(
     const onToolGroupLoaded: ((groupId: string, toolNames: readonly string[]) => void) | undefined =
       session.runtimeEventStore && !backgroundPolicy
         ? (groupId, toolNames) => {
-            const store = session.runtimeEventStore;
-            if (!store) return;
             const run = currentRuntimeRun();
-            void store
-              .append({
-                schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
-                eventId: createRuntimeEventId("tool-group"),
-                sessionId: session.id,
-                invocationId: run?.invocationId ?? `tool-group:${session.id}`,
-                runId: run?.runId ?? "tool-group",
-                turnId: run ? `turn:${run.runId}` : "tool-group",
-                at: new Date().toISOString(),
-                partial: false,
-                visibility: "internal",
-                kind: "tool.group.loaded",
-                data: { groupId, toolNames: [...toolNames] },
-              })
-              .catch((error) => {
-                // durable 写失败不阻塞激活（内存态已生效），但必须可见——
-                // 静默吞错曾让 assert 层拒绝完全不可发现。
-                logger.warn(
-                  { error: String(error), groupId },
-                  "[ToolDisclosure] tool.group.loaded durable 写入失败",
-                );
-              });
+            if (!run?.claimsSession(session)) {
+              logger.warn(
+                { groupId },
+                "[ToolDisclosure] 没有 active RuntimeRun，跳过 tool.group.loaded durable 写入",
+              );
+              return;
+            }
+            void run.recordToolGroupLoaded(groupId, toolNames).catch((error) => {
+              // durable 写失败不阻塞激活（内存态已生效），但必须可见——
+              // 静默吞错曾让 assert 层拒绝完全不可发现。
+              logger.warn(
+                { error: String(error), groupId },
+                "[ToolDisclosure] tool.group.loaded durable 写入失败",
+              );
+            });
           }
         : undefined;
     const approvalManager = dependencies.approvalManager ?? globalApprovalManager;
@@ -1478,6 +1475,7 @@ export async function executeAgentRuntime(
           invocationId: run.invocationId,
           runId: run.runId,
           turnId: `turn:${run.runId}:plan`,
+          writeGuard: session,
         });
       },
     };
@@ -1587,7 +1585,7 @@ export async function executeAgentRuntime(
       if (collaborationMode() === "plan" && session.runtimeEventStore) {
         const projection = await new PlanCoordinator(
           session.runtimeEventStore,
-          planControlContext(session.id, "revision-turn-tail"),
+          planControlContext(session.id, "revision-turn-tail", session),
         ).project();
         const revisionTail = planRevisionRequestTurnTail(projection);
         if (revisionTail) turnTailParts.push(revisionTail);
@@ -1824,6 +1822,7 @@ export async function executeAgentRuntime(
         invocationId: currentRuntimeRun()?.invocationId ?? "graph-mode",
         runId: currentRuntimeRun()?.runId ?? "graph-mode",
         turnId: "graph-mode",
+        writeGuard: session,
       });
       const graphDispatcher = async (input: {
         readonly workId: string;
@@ -2057,6 +2056,7 @@ export async function executeAgentRuntime(
           invocationId: `projection:${submitted.runId}`,
           runId: submitted.runId,
           turnId: `turn:${submitted.runId}:plan`,
+          writeGuard: session,
         });
       },
     }).execute();

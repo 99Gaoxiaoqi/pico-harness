@@ -31,8 +31,11 @@ test("真实引擎账本序:message.committed(toolCall) < tool.started < tool.re
     await session.commitMessages({ role: "user", content: "Run the fixture." });
     const registry = new ToolRegistry();
     registry.register(outputTool("order_guard_fixture", "deterministic output"));
+    let providerCalls = 0;
     const provider: LLMProvider = {
       async generate() {
+        providerCalls += 1;
+        if (providerCalls > 1) return { role: "assistant", content: "done" };
         return {
           role: "assistant",
           content: "",

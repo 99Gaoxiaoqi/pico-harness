@@ -793,6 +793,11 @@ test("approval recovers its crash gap and replay never starts a second execution
   const store = new SqliteRuntimeEventStore({
     storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
   });
+  const crashLease = await globalSessionManager.getOrCreatePinned(sessionId, workDir, {
+    persistence: true,
+    picoHome,
+    runtimePort: createEngineRuntimePort(),
+  });
   const settings = projectRuntimeSessionState(await store.readSession(sessionId)).settings;
   assert.ok(settings);
   const coordinator = new PlanCoordinator(store, {
@@ -800,6 +805,7 @@ test("approval recovers its crash gap and replay never starts a second execution
     invocationId: "approval-crash",
     runId: "approval-crash",
     turnId: "approval-crash",
+    writeGuard: crashLease.session,
   });
   const approved = await coordinator.approve({
     operationId: "approve-crash-gap",
@@ -879,10 +885,10 @@ test("approval recovers its crash gap and replay never starts a second execution
   const crashedResumeStore = new SqliteRuntimeEventStore({
     storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
   });
-  const crashedResumeCoordinator = new PlanCoordinator(
-    crashedResumeStore,
-    planControlContextForTest(sessionId, "resume-crash-gap"),
-  );
+  const crashedResumeCoordinator = new PlanCoordinator(crashedResumeStore, {
+    ...planControlContextForTest(sessionId, "resume-crash-gap"),
+    writeGuard: crashLease.session,
+  });
   const interruptedAgain = await crashedResumeCoordinator.project();
   assert.equal(interruptedAgain.execution?.status, "interrupted");
   await crashedResumeCoordinator.resume({
@@ -891,6 +897,7 @@ test("approval recovers its crash gap and replay never starts a second execution
     planId: handoff.planId,
   });
   crashedResumeStore.close();
+  crashLease.release();
   const resumeRequest = {
     sessionId,
     dir: workDir,

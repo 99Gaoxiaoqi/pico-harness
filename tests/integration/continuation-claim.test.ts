@@ -248,8 +248,9 @@ test("C2 前半：活跃 run / completed run / 不存在 run 的 claim 被类型
   );
 });
 
-test("C4 源封口（claim-scoped）：已 claim 的 run 追加新事件被拒；未 claim 终态 run 保持开放；幂等重放不受影响", async (context) => {
+test("C4 strict seal：所有终态 run 拒绝新事实，精确幂等重放仍可用", async (context) => {
   const scene = await createScene(context, "claim-source-seal");
+  const ownerFence = await scene.session.assertRuntimeEventWriteAllowed();
   const claimedSource = await createTerminatedRun(scene, "interrupted", ["sealed-prefix"]);
   const claim = await scene.store.claimContinuation(
     scene.session.id,
@@ -273,35 +274,41 @@ test("C4 源封口（claim-scoped）：已 claim 的 run 追加新事件被拒�
     data: { message: { role: "user", content: "追改已封口的源 run" } },
   } as RuntimeEvent;
   await assert.rejects(
-    scene.store.append(sealedAppend),
+    scene.store.append(sealedAppend, { ownerFence }),
     (error: unknown) =>
       error instanceof RuntimeEventStoreRunSealedError &&
       error.runId === claimedSource.runId &&
       error.sessionId === scene.session.id,
   );
 
-  // 未被 claim 的终态 run 保持开放语义(fork 工作流/记忆通道的合法终态后写入路径)。
+  // strict seal 对所有终态 run 生效，不再允许 fork/workflow 在 terminal 后补事实。
   const completed = await createTerminatedRun(scene, "completed");
-  const openAppend = await scene.store.append({
-    ...sealedAppend,
-    eventId: "seal-probe:after-completed",
-    runId: completed.runId,
-  } as RuntimeEvent);
-  assert.equal(openAppend.inserted, true, "unclaimed terminal run stays appendable");
+  await assert.rejects(
+    scene.store.append(
+      {
+        ...sealedAppend,
+        eventId: "seal-probe:after-completed",
+        runId: completed.runId,
+      } as RuntimeEvent,
+      { ownerFence },
+    ),
+    (error: unknown) => error instanceof RuntimeEventStoreRunSealedError,
+  );
 
   // 幂等重放不受封口影响:重放已落库的终态事件(同 eventId 同载荷)合法且不新增。
   const before = await scene.store.readSession(scene.session.id);
   const terminal = before.find(
     (event) => event.kind === "run.terminal" && event.runId === claimedSource.runId,
   )!;
-  const replay = await scene.store.append(terminal);
+  const replay = await scene.store.append(terminal, { ownerFence });
   assert.equal(replay.inserted, false);
   const afterReplay = await scene.store.readSession(scene.session.id);
   assert.equal(afterReplay.length, before.length, "sealed-run replay must not append anything");
 });
 
-test("C4 批内封口（ADR 29 §C4）：批模式追加被拒整批不落；批内终态后的新事件同样被拒；recovery 豁免通道可用", async (context) => {
+test("C4 批内 strict seal：整批回滚且 recovery 也必须在 terminal 前完成", async (context) => {
   const scene = await createScene(context, "claim-batch-seal");
+  const ownerFence = await scene.session.assertRuntimeEventWriteAllowed();
   const claimedSource = await createTerminatedRun(scene, "interrupted", ["batch-seal-prefix"]);
   const claim = await scene.store.claimContinuation(
     scene.session.id,
@@ -328,7 +335,7 @@ test("C4 批内封口（ADR 29 §C4）：批模式追加被拒整批不落；批
   } as RuntimeEvent;
   const batchedB: RuntimeEvent = { ...batchedA, eventId: "batch-seal-b" } as RuntimeEvent;
   await assert.rejects(
-    scene.store.appendBatch([batchedA, batchedB]),
+    scene.store.appendBatch([batchedA, batchedB], { ownerFence }),
     (error: unknown) => error instanceof RuntimeEventStoreRunSealedError,
   );
   const afterBatch = await scene.store.readSession(scene.session.id);
@@ -370,7 +377,7 @@ test("C4 批内封口（ADR 29 §C4）：批模式追加被拒整批不落；批
     data: { message: { role: "user", content: "批内终态之后" } },
   } as RuntimeEvent;
   await assert.rejects(
-    scene.store.appendBatch([inBatchStart, inBatchTerminal, inBatchAfter]),
+    scene.store.appendBatch([inBatchStart, inBatchTerminal, inBatchAfter], { ownerFence }),
     (error: unknown) => error instanceof RuntimeEventStoreRunSealedError,
   );
   const afterInBatch = await scene.store.readSession(scene.session.id);
@@ -380,45 +387,49 @@ test("C4 批内封口（ADR 29 §C4）：批模式追加被拒整批不落；批
     "in-batch terminal rejection rolls back the whole batch",
   );
   // 对照组:同样的前两事件(无批内尾随新事件)正常落地。
-  await scene.store.appendBatch([inBatchStart, inBatchTerminal]);
+  await scene.store.appendBatch([inBatchStart, inBatchTerminal], { ownerFence });
   const control = await scene.store.readSession(scene.session.id);
   assert.equal(control.length, baseline.length + 2);
 
-  // 场景三:recovery 类事件(tool.result.recorded + data.recovery)是批内/claim
-  // 封口的显式豁免通道(ADR 29 §决策 4;当前无生产触发路径,测试钉住语义)。
+  // 场景三:recovery 类事件也不能越过 immutable terminal；恢复必须先 T2 再 seal。
   const recoveryContent = "recovery-exempt synthetic tool result";
-  const recoveryAppend = await scene.store.append({
-    schemaVersion: 2,
-    eventId: "batch-seal-recovery-exempt",
-    sessionId: scene.session.id,
-    invocationId: "inv-batch-seal",
-    runId: claimedSource.runId,
-    turnId: "turn-batch-seal",
-    at: new Date().toISOString(),
-    partial: false,
-    visibility: "model",
-    refs: { toolCallId: "call-batch-seal-recovery" },
-    kind: "tool.result.recorded",
-    data: {
-      toolName: "batch_seal_recovery",
-      status: "interrupted",
-      recovery: { classification: "indeterminate" },
-      body: {
-        storage: "inline",
-        content: recoveryContent,
-        sha256: createHash("sha256").update(recoveryContent, "utf8").digest("hex"),
-        sizeBytes: Buffer.byteLength(recoveryContent, "utf8"),
-      },
-      projection: {
-        version: 1,
-        mode: "synthetic",
-        text: recoveryContent,
-        strategy: "interruption-recovery",
-        truncated: false,
-      },
-    },
-  } as RuntimeEvent);
-  assert.equal(recoveryAppend.inserted, true, "recovery-class append stays exempt from claim seal");
+  await assert.rejects(
+    scene.store.append(
+      {
+        schemaVersion: 2,
+        eventId: "batch-seal-recovery-exempt",
+        sessionId: scene.session.id,
+        invocationId: "inv-batch-seal",
+        runId: claimedSource.runId,
+        turnId: "turn-batch-seal",
+        at: new Date().toISOString(),
+        partial: false,
+        visibility: "model",
+        refs: { toolCallId: "call-batch-seal-recovery" },
+        kind: "tool.result.recorded",
+        data: {
+          toolName: "batch_seal_recovery",
+          status: "interrupted",
+          recovery: { classification: "indeterminate" },
+          body: {
+            storage: "inline",
+            content: recoveryContent,
+            sha256: createHash("sha256").update(recoveryContent, "utf8").digest("hex"),
+            sizeBytes: Buffer.byteLength(recoveryContent, "utf8"),
+          },
+          projection: {
+            version: 1,
+            mode: "synthetic",
+            text: recoveryContent,
+            strategy: "interruption-recovery",
+            truncated: false,
+          },
+        },
+      } as RuntimeEvent,
+      { ownerFence },
+    ),
+    RuntimeEventStoreRunSealedError,
+  );
 });
 
 test("C3+ 目标关联：run.started 携带 continuationOf 落库可读回；目标 run 正常写事件不受源封口影响", async (context) => {

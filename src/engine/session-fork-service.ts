@@ -400,6 +400,14 @@ export class SessionForkService {
         operation.targetMode ?? "yolo",
         operation.createdAt,
       );
+      const workflowEvents = this.buildForkWorkflowEntries(
+        operation,
+        frozen,
+        seedEntries,
+        modelCheckpoint,
+        sourceThroughEventId,
+        runtimePatch,
+      );
       await this.runtimePort.bootstrapFork({
         sourceSessionId: operation.sourceSessionId,
         targetSessionId: operation.targetSessionId,
@@ -411,6 +419,7 @@ export class SessionForkService {
         workDir: this.workDir,
         runtimeAuthority: this.runtimeStore,
         publication,
+        ...(workflowEvents.length > 0 ? { workflowEvents } : {}),
         ...(runtimePatch
           ? {
               statePublication: {
@@ -421,15 +430,6 @@ export class SessionForkService {
             }
           : {}),
       });
-      await publication.assertOwned();
-      await this.publishForkWorkflowEntries(
-        operation,
-        frozen,
-        seedEntries,
-        modelCheckpoint,
-        sourceThroughEventId,
-        runtimePatch,
-      );
     } catch (error) {
       if (error instanceof ForkOperationConflictError) throw error;
       if (error instanceof SessionForkRuntimeConflictError) {
@@ -440,15 +440,15 @@ export class SessionForkService {
     }
   }
 
-  private async publishForkWorkflowEntries(
+  private buildForkWorkflowEntries(
     operation: ForkStorageOperation,
     frozen: FrozenForkBundle,
     seedEntries: readonly RuntimeSessionForkSeedEntry[],
     modelCheckpoint: SessionForkModelCheckpoint | undefined,
     sourceThroughEventId: string | undefined,
     runtimePatch: SessionRuntimeStateWritePatch | undefined,
-  ): Promise<void> {
-    if (frozen.planEntries.length === 0) return;
+  ): readonly RuntimePlanEvent[] {
+    if (frozen.planEntries.length === 0) return [];
     const statePublication = runtimePatch
       ? {
           patch: runtimePatch,
@@ -548,7 +548,7 @@ export class SessionForkService {
       }
       throw error;
     }
-    await this.runtimeStore.appendBatch(rewritten);
+    return rewritten;
   }
 
   private async assertRuntimeTargetOwned(

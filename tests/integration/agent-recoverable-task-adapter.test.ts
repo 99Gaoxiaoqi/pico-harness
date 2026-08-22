@@ -414,6 +414,7 @@ async function createFixture(context: test.TestContext, suffix: string): Promise
         workspacePath: input.workspacePath,
         storageRootId: rootIdentity.storageRootId,
         runtimeEventStore: store,
+        runtimeWriteGuard: session,
         launchIntents: port,
       });
     },
