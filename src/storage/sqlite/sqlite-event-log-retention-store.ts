@@ -796,12 +796,12 @@ function readSessionOwnedMemoryClosure(
         .all(sessionId) as Array<Record<string, unknown>>
     ).map((row) => requireString(row["source_id"], "memory_sources.source_id")),
   );
-  const factIds = readMemoryEntityIdsForSources(database, "memory_facts", "fact_id", sourceIds);
-  const proposalIds = readMemoryEntityIdsForSources(
+  const factIds = readMemoryEntityIdsForSession(database, "memory_facts", "fact_id", sessionId);
+  const proposalIds = readMemoryEntityIdsForSession(
     database,
     "memory_proposals",
     "proposal_id",
-    sourceIds,
+    sessionId,
   );
   const jobIds = new Set<string>();
   const jobs = database
@@ -825,20 +825,20 @@ function readSessionOwnedMemoryClosure(
   return { sourceIds, factIds, proposalIds, jobIds };
 }
 
-function readMemoryEntityIdsForSources(
+function readMemoryEntityIdsForSession(
   database: DatabaseSync,
   table: "memory_facts" | "memory_proposals",
   idColumn: "fact_id" | "proposal_id",
-  sourceIds: ReadonlySet<string>,
+  sessionId: string,
 ): Set<string> {
-  if (sourceIds.size === 0) return new Set();
-  const values = [...sourceIds];
   const rows = database
     .prepare(
-      `SELECT ${idColumn} AS entity_id FROM ${table}
-       WHERE source_id IN (${values.map(() => "?").join(",")})`,
+      `SELECT entity.${idColumn} AS entity_id
+       FROM ${table} AS entity
+       JOIN memory_sources AS source ON source.source_id = entity.source_id
+       WHERE source.session_id = ?`,
     )
-    .all(...values) as Array<Record<string, unknown>>;
+    .all(sessionId) as Array<Record<string, unknown>>;
   return new Set(rows.map((row) => requireString(row["entity_id"], `${table}.${idColumn}`)));
 }
 
@@ -1148,186 +1148,282 @@ function readUnattributedControlBytes(database: DatabaseSync): number {
   }, 0);
 }
 
-interface MemoryEntityOwnership {
-  readonly sources: ReadonlyMap<string, string | null>;
-  readonly facts: ReadonlyMap<string, string | null>;
-  readonly proposals: ReadonlyMap<string, string | null>;
-  readonly jobs: ReadonlyMap<string, string | null>;
-}
-
 /**
  * Memory is a mixed workspace/session ledger. Rows reachable from a Source are
  * charged to that Source's Session exactly once; settings and source-less manual
  * overlays remain workspace-level bytes and therefore survive Session retention.
+ * SQLite performs the ownership joins and aggregation; Node receives at most one
+ * row per Session plus one unattributed row, never the memory bodies themselves.
  */
 function attributeMemoryBytes(
   database: DatabaseSync,
   breakdowns: Map<string, MutableBreakdown>,
 ): { readonly unattributedBytes: number } {
+  assertMemoryAccountingRowsValid(database);
+  const rows = database.prepare(memoryByteAggregationQuery()).all() as Array<
+    Record<string, unknown>
+  >;
   let unattributedBytes = 0;
-  const add = (sessionId: string | null | undefined, bytes: number): void => {
-    const breakdown = sessionId ? breakdowns.get(sessionId) : undefined;
+  for (const row of rows) {
+    const rawSessionId = row["session_id"];
+    const sessionId =
+      rawSessionId === null || rawSessionId === undefined
+        ? null
+        : requireString(rawSessionId, "memory logical_bytes.session_id");
+    const bytes = requireNonNegativeInteger(row["logical_bytes"], "memory logical_bytes");
+    const breakdown = sessionId === null ? undefined : breakdowns.get(sessionId);
     if (!breakdown) {
       unattributedBytes = safeAdd(unattributedBytes, bytes, "unattributed memory bytes");
-      return;
+      continue;
     }
     breakdown.memoryBytes = safeAdd(breakdown.memoryBytes, bytes, "breakdown.memoryBytes");
-  };
-
-  for (const row of readTextRows(database, "memory_metadata", ["key", "value_json"])) {
-    add(null, memoryRowBytes(row));
-  }
-
-  const sources = new Map<string, string | null>();
-  for (const row of readTextRows(database, "memory_sources", [
-    "source_id",
-    "session_id",
-    "run_id",
-    "branch_id",
-    "event_ids_json",
-    "digest",
-    "evidence_ref_json",
-    "availability",
-    "extraction_suppressed_at",
-    "invalidated_at",
-    "invalidation_code",
-    "created_at",
-    "updated_at",
-  ])) {
-    const sourceId = requireString(row["source_id"], "memory_sources.source_id");
-    const sessionId = requireString(row["session_id"], `memory_sources[${sourceId}].session_id`);
-    const owner = breakdowns.has(sessionId) ? sessionId : null;
-    sources.set(sourceId, owner);
-    add(owner, memoryRowBytes(row));
-  }
-
-  const facts = readSourceOwnedMemoryRows(
-    database,
-    "memory_facts",
-    "fact_id",
-    [
-      "fact_id",
-      "kind",
-      "title",
-      "content",
-      "source_id",
-      "state",
-      "expires_at",
-      "last_used_at",
-      "created_at",
-      "updated_at",
-      "forgotten_at",
-    ],
-    sources,
-    add,
-  );
-  const proposals = readSourceOwnedMemoryRows(
-    database,
-    "memory_proposals",
-    "proposal_id",
-    [
-      "proposal_id",
-      "kind",
-      "title",
-      "content",
-      "reason",
-      "source_id",
-      "status",
-      "conflict_status",
-      "conflict_fact_id",
-      "resolved_fact_id",
-      "created_at",
-      "updated_at",
-      "reviewed_at",
-      "deleted_at",
-    ],
-    sources,
-    add,
-  );
-
-  const jobs = new Map<string, string | null>();
-  for (const row of readTextRows(database, "memory_jobs", [
-    "job_id",
-    "type",
-    "status",
-    "terminal_event_id",
-    "extractor_version",
-    "cursor_json",
-    "source_id",
-    "next_attempt_at",
-    "error_code",
-    "created_at",
-    "updated_at",
-    "terminal_at",
-  ])) {
-    const jobId = requireString(row["job_id"], "memory_jobs.job_id");
-    const sourceId = optionalStringValue(row["source_id"], `memory_jobs[${jobId}].source_id`);
-    const cursor = parseMemoryJobCursor(row["cursor_json"], jobId);
-    const owner =
-      sourceId !== null
-        ? (sources.get(sourceId) ?? null)
-        : ((breakdowns.has(cursor.sessionId) ? cursor.sessionId : undefined) ??
-          sources.get(cursor.eventId) ??
-          facts.get(cursor.eventId) ??
-          proposals.get(cursor.eventId) ??
-          null);
-    jobs.set(jobId, owner);
-    add(owner, memoryRowBytes(row));
-  }
-
-  const ownership: MemoryEntityOwnership = { sources, facts, proposals, jobs };
-  for (const row of readTextRows(database, "memory_mutations", [
-    "mutation_id",
-    "entity_type",
-    "entity_id",
-    "action",
-    "idempotency_key_hash",
-    "created_at",
-  ])) {
-    add(memoryMutationOwner(row, ownership), memoryRowBytes(row));
-  }
-  for (const row of readTextRows(database, "memory_idempotency", [
-    "operation_key",
-    "request_hash",
-    "marker_json",
-    "created_at",
-  ])) {
-    add(memoryMarkerOwner(row["marker_json"], ownership), memoryRowBytes(row));
   }
   return { unattributedBytes };
 }
 
-function readSourceOwnedMemoryRows(
-  database: DatabaseSync,
-  table: "memory_facts" | "memory_proposals",
-  idColumn: "fact_id" | "proposal_id",
-  textColumns: readonly string[],
-  sources: ReadonlyMap<string, string | null>,
-  add: (sessionId: string | null | undefined, bytes: number) => void,
-): Map<string, string | null> {
-  const owners = new Map<string, string | null>();
-  for (const row of readTextRows(database, table, textColumns)) {
-    const entityId = requireString(row[idColumn], `${table}.${idColumn}`);
-    const sourceId = optionalStringValue(row["source_id"], `${table}[${entityId}].source_id`);
-    const owner = sourceId === null ? null : (sources.get(sourceId) ?? null);
-    owners.set(entityId, owner);
-    add(owner, memoryRowBytes(row));
+function assertMemoryAccountingRowsValid(database: DatabaseSync): void {
+  const invalidJob = database
+    .prepare(
+      `SELECT job_id FROM memory_jobs
+       WHERE CASE WHEN json_valid(cursor_json) THEN
+         json_type(cursor_json) <> 'object'
+         OR typeof(json_extract(cursor_json, '$.sessionId')) <> 'text'
+         OR length(json_extract(cursor_json, '$.sessionId')) = 0
+         OR typeof(json_extract(cursor_json, '$.eventId')) <> 'text'
+         OR length(json_extract(cursor_json, '$.eventId')) = 0
+       ELSE 1 END
+       LIMIT 1`,
+    )
+    .get() as Record<string, unknown> | undefined;
+  if (invalidJob) {
+    throw new Error(
+      `memory_jobs[${requireString(invalidJob["job_id"], "memory_jobs.job_id")}].cursor_json is invalid`,
+    );
   }
-  return owners;
+  const invalidMarker = database
+    .prepare(
+      `SELECT operation_key FROM memory_idempotency
+       WHERE CASE WHEN json_valid(marker_json)
+         THEN json_type(marker_json) <> 'object'
+         ELSE 1
+       END
+       LIMIT 1`,
+    )
+    .get() as Record<string, unknown> | undefined;
+  if (invalidMarker) {
+    throw new Error(
+      `memory_idempotency[${requireString(
+        invalidMarker["operation_key"],
+        "memory_idempotency.operation_key",
+      )}].marker_json is invalid`,
+    );
+  }
 }
 
-function readTextRows(
-  database: DatabaseSync,
-  table: string,
-  columns: readonly string[],
-): Array<Record<string, unknown>> {
-  return database
-    .prepare(`SELECT *, ${columns.map(textBytes).join(" + ")} AS logical_bytes FROM ${table}`)
-    .all() as Array<Record<string, unknown>>;
+function memoryByteAggregationQuery(): string {
+  return `
+    WITH
+    source_owners AS (
+      SELECT source.source_id,
+             CASE WHEN session.session_id IS NULL THEN NULL ELSE source.session_id END
+               AS owner_session_id
+      FROM memory_sources AS source
+      LEFT JOIN sessions AS session ON session.session_id = source.session_id
+    ),
+    fact_owners AS (
+      SELECT fact.fact_id, source_owner.owner_session_id
+      FROM memory_facts AS fact
+      LEFT JOIN source_owners AS source_owner ON source_owner.source_id = fact.source_id
+    ),
+    proposal_owners AS (
+      SELECT proposal.proposal_id, source_owner.owner_session_id
+      FROM memory_proposals AS proposal
+      LEFT JOIN source_owners AS source_owner ON source_owner.source_id = proposal.source_id
+    ),
+    job_owners AS (
+      SELECT job.job_id,
+             CASE WHEN job.source_id IS NOT NULL
+               THEN source_owner.owner_session_id
+               ELSE COALESCE(
+                 cursor_session.session_id,
+                 source_event.owner_session_id,
+                 fact_event.owner_session_id,
+                 proposal_event.owner_session_id
+               )
+             END AS owner_session_id
+      FROM memory_jobs AS job
+      LEFT JOIN source_owners AS source_owner ON source_owner.source_id = job.source_id
+      LEFT JOIN sessions AS cursor_session
+        ON cursor_session.session_id = json_extract(job.cursor_json, '$.sessionId')
+      LEFT JOIN source_owners AS source_event
+        ON source_event.source_id = json_extract(job.cursor_json, '$.eventId')
+      LEFT JOIN fact_owners AS fact_event
+        ON fact_event.fact_id = json_extract(job.cursor_json, '$.eventId')
+      LEFT JOIN proposal_owners AS proposal_event
+        ON proposal_event.proposal_id = json_extract(job.cursor_json, '$.eventId')
+    ),
+    mutation_owners AS (
+      SELECT mutation.sequence,
+             CASE mutation.entity_type
+               WHEN 'source' THEN source_owner.owner_session_id
+               WHEN 'fact' THEN fact_owner.owner_session_id
+               WHEN 'proposal' THEN proposal_owner.owner_session_id
+               WHEN 'job' THEN job_owner.owner_session_id
+               ELSE NULL
+             END AS owner_session_id
+      FROM memory_mutations AS mutation
+      LEFT JOIN source_owners AS source_owner
+        ON mutation.entity_type = 'source' AND source_owner.source_id = mutation.entity_id
+      LEFT JOIN fact_owners AS fact_owner
+        ON mutation.entity_type = 'fact' AND fact_owner.fact_id = mutation.entity_id
+      LEFT JOIN proposal_owners AS proposal_owner
+        ON mutation.entity_type = 'proposal' AND proposal_owner.proposal_id = mutation.entity_id
+      LEFT JOIN job_owners AS job_owner
+        ON mutation.entity_type = 'job' AND job_owner.job_id = mutation.entity_id
+    ),
+    marker_candidates AS (
+      SELECT replay.operation_key, source_owner.owner_session_id
+      FROM memory_idempotency AS replay
+      JOIN source_owners AS source_owner
+        ON source_owner.source_id = json_extract(replay.marker_json, '$.sourceId')
+      WHERE source_owner.owner_session_id IS NOT NULL
+      UNION ALL
+      SELECT replay.operation_key, fact_owner.owner_session_id
+      FROM memory_idempotency AS replay
+      JOIN fact_owners AS fact_owner
+        ON fact_owner.fact_id = json_extract(replay.marker_json, '$.factId')
+      WHERE fact_owner.owner_session_id IS NOT NULL
+      UNION ALL
+      SELECT replay.operation_key, proposal_owner.owner_session_id
+      FROM memory_idempotency AS replay
+      JOIN proposal_owners AS proposal_owner
+        ON proposal_owner.proposal_id = json_extract(replay.marker_json, '$.proposalId')
+      WHERE proposal_owner.owner_session_id IS NOT NULL
+      UNION ALL
+      SELECT replay.operation_key, job_owner.owner_session_id
+      FROM memory_idempotency AS replay
+      JOIN job_owners AS job_owner
+        ON job_owner.job_id = json_extract(replay.marker_json, '$.jobId')
+      WHERE job_owner.owner_session_id IS NOT NULL
+    ),
+    marker_owners AS (
+      SELECT operation_key,
+             CASE WHEN COUNT(DISTINCT owner_session_id) = 1
+               THEN MIN(owner_session_id)
+               ELSE NULL
+             END AS owner_session_id
+      FROM marker_candidates
+      GROUP BY operation_key
+    ),
+    memory_rows AS (
+      SELECT NULL AS owner_session_id,
+             ${memoryTextBytes("metadata", ["key", "value_json"])} AS logical_bytes
+      FROM memory_metadata AS metadata
+      UNION ALL
+      SELECT owner.owner_session_id,
+             ${memoryTextBytes("source", [
+               "source_id",
+               "session_id",
+               "run_id",
+               "branch_id",
+               "event_ids_json",
+               "digest",
+               "evidence_ref_json",
+               "availability",
+               "extraction_suppressed_at",
+               "invalidated_at",
+               "invalidation_code",
+               "created_at",
+               "updated_at",
+             ])} AS logical_bytes
+      FROM memory_sources AS source
+      JOIN source_owners AS owner ON owner.source_id = source.source_id
+      UNION ALL
+      SELECT owner.owner_session_id,
+             ${memoryTextBytes("fact", [
+               "fact_id",
+               "kind",
+               "title",
+               "content",
+               "source_id",
+               "state",
+               "expires_at",
+               "last_used_at",
+               "created_at",
+               "updated_at",
+               "forgotten_at",
+             ])} AS logical_bytes
+      FROM memory_facts AS fact
+      JOIN fact_owners AS owner ON owner.fact_id = fact.fact_id
+      UNION ALL
+      SELECT owner.owner_session_id,
+             ${memoryTextBytes("proposal", [
+               "proposal_id",
+               "kind",
+               "title",
+               "content",
+               "reason",
+               "source_id",
+               "status",
+               "conflict_status",
+               "conflict_fact_id",
+               "resolved_fact_id",
+               "created_at",
+               "updated_at",
+               "reviewed_at",
+               "deleted_at",
+             ])} AS logical_bytes
+      FROM memory_proposals AS proposal
+      JOIN proposal_owners AS owner ON owner.proposal_id = proposal.proposal_id
+      UNION ALL
+      SELECT owner.owner_session_id,
+             ${memoryTextBytes("job", [
+               "job_id",
+               "type",
+               "status",
+               "terminal_event_id",
+               "extractor_version",
+               "cursor_json",
+               "source_id",
+               "next_attempt_at",
+               "error_code",
+               "created_at",
+               "updated_at",
+               "terminal_at",
+             ])} AS logical_bytes
+      FROM memory_jobs AS job
+      JOIN job_owners AS owner ON owner.job_id = job.job_id
+      UNION ALL
+      SELECT owner.owner_session_id,
+             ${memoryTextBytes("mutation", [
+               "mutation_id",
+               "entity_type",
+               "entity_id",
+               "action",
+               "idempotency_key_hash",
+               "created_at",
+             ])} AS logical_bytes
+      FROM memory_mutations AS mutation
+      JOIN mutation_owners AS owner ON owner.sequence = mutation.sequence
+      UNION ALL
+      SELECT owner.owner_session_id,
+             ${memoryTextBytes("replay", [
+               "operation_key",
+               "request_hash",
+               "marker_json",
+               "created_at",
+             ])} AS logical_bytes
+      FROM memory_idempotency AS replay
+      LEFT JOIN marker_owners AS owner ON owner.operation_key = replay.operation_key
+    )
+    SELECT owner_session_id AS session_id,
+           COALESCE(SUM(logical_bytes), 0) AS logical_bytes
+    FROM memory_rows
+    GROUP BY owner_session_id`;
 }
 
-function memoryRowBytes(row: Record<string, unknown>): number {
-  return requireNonNegativeInteger(row["logical_bytes"], "memory logical_bytes");
+function memoryTextBytes(alias: string, columns: readonly string[]): string {
+  return columns.map((column) => textBytes(`${alias}.${column}`)).join(" + ");
 }
 
 function parseMemoryJobCursor(
@@ -1340,38 +1436,6 @@ function parseMemoryJobCursor(
     sessionId: requireString(cursor["sessionId"], `memory_jobs[${jobId}].cursor.sessionId`),
     eventId: requireString(cursor["eventId"], `memory_jobs[${jobId}].cursor.eventId`),
   };
-}
-
-function memoryMutationOwner(
-  row: Record<string, unknown>,
-  ownership: MemoryEntityOwnership,
-): string | null {
-  const entityType = requireString(row["entity_type"], "memory_mutations.entity_type");
-  const entityId = requireString(row["entity_id"], "memory_mutations.entity_id");
-  if (entityType === "source") return ownership.sources.get(entityId) ?? null;
-  if (entityType === "fact") return ownership.facts.get(entityId) ?? null;
-  if (entityType === "proposal") return ownership.proposals.get(entityId) ?? null;
-  if (entityType === "job") return ownership.jobs.get(entityId) ?? null;
-  if (entityType === "settings") return null;
-  throw new Error(`memory_mutations.entity_type ${entityType} is invalid`);
-}
-
-function memoryMarkerOwner(value: unknown, ownership: MemoryEntityOwnership): string | null {
-  const marker = parseJson(value, "memory_idempotency.marker_json");
-  if (!isRecord(marker)) throw new Error("memory_idempotency.marker_json is not an object");
-  const candidates = new Set<string>();
-  for (const [key, owners] of [
-    ["sourceId", ownership.sources],
-    ["factId", ownership.facts],
-    ["proposalId", ownership.proposals],
-    ["jobId", ownership.jobs],
-  ] as const) {
-    const id = marker[key];
-    if (typeof id !== "string") continue;
-    const owner = owners.get(id);
-    if (owner) candidates.add(owner);
-  }
-  return candidates.size === 1 ? [...candidates][0]! : null;
 }
 
 function unattributedTextQuery(table: string, columns: readonly string[], where?: string): string {

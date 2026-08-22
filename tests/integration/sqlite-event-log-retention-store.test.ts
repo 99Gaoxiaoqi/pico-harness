@@ -349,6 +349,43 @@ test("sqlite EventLog retention: deletes the complete derived-memory closure and
       }),
     );
 
+    const measured = readEventLogStorageStatus({ storageRoot, currentSessionId: "survivor" });
+    const expectedSurvivorMemory =
+      byteLength(
+        "source-survivor",
+        "survivor",
+        "[]",
+        "source-survivor-digest",
+        "available",
+        "2026",
+        "2026",
+      ) +
+      byteLength(
+        "fact-survivor",
+        "project_fact",
+        "survivor",
+        "content",
+        "source-survivor",
+        "active",
+        "2026",
+        "2026",
+      ) +
+      byteLength(
+        "job-survivor-source",
+        "test",
+        "queued",
+        "terminal-job-survivor-source",
+        "v1",
+        '{"sessionId":"candidate","eventId":"old-cursor"}',
+        "source-survivor",
+        "2026",
+        "2026",
+      );
+    assert.equal(
+      measured.sessions.find(({ sessionId }) => sessionId === "survivor")!.breakdown.memoryBytes,
+      expectedSurvivorMemory,
+    );
+
     const result = enforceEventLogRetention({
       storageRoot,
       currentSessionId: "survivor",
@@ -411,6 +448,85 @@ test("sqlite EventLog retention: deletes the complete derived-memory closure and
             .prepare("SELECT value_json FROM memory_metadata WHERE key = 'revision'")
             .get()!["value_json"],
           "8",
+        );
+      }),
+    );
+  } finally {
+    await cleanup(root);
+  }
+});
+
+test("sqlite EventLog retention: deletes more than 1000 memory sources without host parameters", async () => {
+  const { root, storageRoot } = await fixture("memory-many-sources");
+  try {
+    seedSession(storageRoot, "candidate");
+    seedSession(storageRoot, "survivor", { archived: false });
+    withWorkspaceSqliteLease(storageRoot, (lease) =>
+      lease.transaction("write", () => {
+        lease.database
+          .prepare("INSERT INTO memory_metadata (key, value_json) VALUES ('revision', '1')")
+          .run();
+        lease.database
+          .prepare(
+            `WITH RECURSIVE counter(value) AS (
+               SELECT 1
+               UNION ALL
+               SELECT value + 1 FROM counter WHERE value < 1105
+             )
+             INSERT INTO memory_sources (
+               source_id, session_id, event_ids_json, digest, availability,
+               version, created_at, updated_at
+             )
+             SELECT printf('bulk-source-%04d', value), 'candidate', '[]',
+                    printf('digest-%04d', value), 'available', 1, '2026', '2026'
+             FROM counter`,
+          )
+          .run();
+        lease.database
+          .prepare(
+            `WITH RECURSIVE counter(value) AS (
+               SELECT 1
+               UNION ALL
+               SELECT value + 1 FROM counter WHERE value < 1105
+             )
+             INSERT INTO memory_facts (
+               fact_id, kind, title, content, confidence, source_id, state, pinned,
+               version, created_at, updated_at
+             )
+             SELECT printf('bulk-fact-%04d', value), 'project_fact', 'title', 'content', 1,
+                    printf('bulk-source-%04d', value), 'active', 0, 1, '2026', '2026'
+             FROM counter`,
+          )
+          .run();
+      }),
+    );
+
+    const before = readEventLogStorageStatus({ storageRoot, currentSessionId: "survivor" });
+    assert.equal(
+      before.sessions.find(({ sessionId }) => sessionId === "candidate")!.breakdown.memoryBytes > 0,
+      true,
+    );
+    const result = enforceEventLogRetention({
+      storageRoot,
+      currentSessionId: "survivor",
+      policy: TINY_POLICY,
+    });
+    assert.deepEqual(result.deletedSessionIds, ["candidate"]);
+    withWorkspaceSqliteLease(storageRoot, (lease) =>
+      lease.transaction("read", () => {
+        assert.equal(
+          lease.database.prepare("SELECT COUNT(*) AS count FROM memory_sources").get()!["count"],
+          0,
+        );
+        assert.equal(
+          lease.database.prepare("SELECT COUNT(*) AS count FROM memory_facts").get()!["count"],
+          0,
+        );
+        assert.equal(
+          lease.database
+            .prepare("SELECT value_json FROM memory_metadata WHERE key = 'revision'")
+            .get()!["value_json"],
+          "2",
         );
       }),
     );
