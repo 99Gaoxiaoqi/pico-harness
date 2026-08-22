@@ -1,6 +1,8 @@
 import { join } from "node:path";
 import { logger } from "../observability/logger.js";
 import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
+import { DEFAULT_EVENT_LOG_RETENTION_POLICY } from "../storage/event-log-retention-policy.js";
+import { readEventLogStorageStatus } from "../storage/sqlite/sqlite-event-log-retention-store.js";
 import {
   WorkspaceTaskRuntime,
   type WorkspaceRunContext,
@@ -223,6 +225,10 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
         registered,
         runtime.mode === "git" ? await resolveGitBranch(runtime.workspace) : undefined,
       );
+      const eventLog = readEventLogStorageStatus({
+        storageRoot: resolvePicoPaths(runtime.workspace, { picoHome: this.picoHome }).workspace
+          .root,
+      });
       return {
         workspacePath: result.workspacePath,
         registered,
@@ -230,6 +236,16 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
         mode: result.mode,
         capabilities: result.capabilities,
         branch: result.branch,
+        eventLog: {
+          logicalBytes: eventLog.logicalBytes,
+          hardLimitBytes: DEFAULT_EVENT_LOG_RETENTION_POLICY.hardLimitBytes,
+          lowWatermarkBytes: DEFAULT_EVENT_LOG_RETENTION_POLICY.lowWatermarkBytes,
+          status: eventLog.plan.status,
+          canStartNewWork: eventLog.plan.canStartNewWork,
+          canWriteClosure: eventLog.plan.canWriteClosure,
+          plannedSessionCount: eventLog.plan.sessionIdsToDelete.length,
+          estimatedLogicalBytesReclaimed: eventLog.plan.estimatedLogicalBytesReclaimed,
+        },
       };
     }
     if (request.method === "run.start") {
@@ -832,6 +848,7 @@ export function workspaceStatusResult(
     mode: runtime.mode,
     capabilities: { ...runtime.capabilities },
     branch: branch ?? "",
+    eventLog: null,
   };
 }
 

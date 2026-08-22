@@ -122,6 +122,16 @@ test("runtime-host bridge: workspace.status dispatches through the daemon and de
       isolatedWorktrees: boolean;
       branchMerge: boolean;
     };
+    eventLog: {
+      logicalBytes: number;
+      hardLimitBytes: number;
+      lowWatermarkBytes: number;
+      status: "within_limit" | "retention_required" | "quota_blocked";
+      canStartNewWork: boolean;
+      canWriteClosure: boolean;
+      plannedSessionCount: number;
+      estimatedLogicalBytesReclaimed: number;
+    };
   }>("workspace.status", { workspacePath }, 10000);
 
   assert.equal(result.workspacePath, workspacePath);
@@ -133,6 +143,10 @@ test("runtime-host bridge: workspace.status dispatches through the daemon and de
   assert.equal(result.capabilities.fileHistory, true);
   assert.equal(result.capabilities.isolatedWorktrees, false);
   assert.equal(result.capabilities.branchMerge, false);
+  assert.equal(result.eventLog.hardLimitBytes, 2 * 1024 * 1024 * 1024);
+  assert.equal(result.eventLog.lowWatermarkBytes, Math.floor(1.5 * 1024 * 1024 * 1024));
+  assert.equal(result.eventLog.canStartNewWork, true);
+  assert.equal(result.eventLog.canWriteClosure, true);
 });
 
 test("runtime-host bridge: usage.get returns a decoded usage object", async (t) => {

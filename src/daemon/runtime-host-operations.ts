@@ -126,6 +126,16 @@ export interface WorkspaceStatusBridgeOutput {
     isolatedWorktrees: boolean;
     branchMerge: boolean;
   };
+  eventLog?: {
+    logicalBytes: number;
+    hardLimitBytes: number;
+    lowWatermarkBytes: number;
+    status: "within_limit" | "retention_required" | "quota_blocked";
+    canStartNewWork: boolean;
+    canWriteClosure: boolean;
+    plannedSessionCount: number;
+    estimatedLogicalBytesReclaimed: number;
+  } | null;
 }
 
 export interface UsageGetBridgeInput {

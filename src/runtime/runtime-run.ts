@@ -91,6 +91,7 @@ import {
   appendRuntimeEventWithArbitration,
   SqliteRuntimeEventStore,
 } from "../storage/sqlite/sqlite-runtime-event-store.js";
+import { admitEventLogNewWork } from "../storage/sqlite/sqlite-event-log-retention-store.js";
 
 interface RuntimeRunContext {
   readonly run: RuntimeRun;
@@ -356,6 +357,10 @@ export class RuntimeRun {
   static async start(options: RuntimeRunStartOptions): Promise<RuntimeRun> {
     const { capability, ...metadata } = options;
     const store = runtimeEventStoreFromCapability(capability);
+    admitEventLogNewWork({
+      storageRoot: store.storageRoot,
+      currentSessionId: capability.sessionId,
+    });
     return RuntimeRun.startInternal({
       ...metadata,
       sessionId: capability.sessionId,
