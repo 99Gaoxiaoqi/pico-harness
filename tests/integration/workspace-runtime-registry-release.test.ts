@@ -60,13 +60,16 @@ test("get re-fetches a runtime released while its create was still pending", asy
   await mkdir(workspace, { recursive: true });
   const firstCreateReleased = deferred();
   let creates = 0;
-  const registry = new WorkspaceRuntimeRegistry<{ workspacePath: string; close(): Promise<void> }>({
-    create: async (workspacePath) => {
-      creates++;
-      if (creates === 1) await firstCreateReleased.promise;
-      return { workspacePath, close: async () => undefined };
+  const registry = new WorkspaceRuntimeRegistry<{ workspacePath: string; close(): Promise<void> }>(
+    {
+      create: async (workspacePath) => {
+        creates++;
+        if (creates === 1) await firstCreateReleased.promise;
+        return { workspacePath, close: async () => undefined };
+      },
     },
-  });
+    async (workspacePath) => workspacePath,
+  );
   context.after(async () => {
     firstCreateReleased.resolve();
     await registry.close().catch(() => undefined);
@@ -82,7 +85,7 @@ test("get re-fetches a runtime released while its create was still pending", asy
   // 与 runtimes.delete（之后卡在 closeRuntimes await pendingR1），再 resolve 让 get
   // 的 await 完成——此时 get 必须发现注册项已被删除并重新创建。
   const releasing = registry.release(workspace);
-  await new Promise((resolve) => setTimeout(resolve, 500));
+  await new Promise((resolve) => setImmediate(resolve));
   firstCreateReleased.resolve();
   await releasing;
 
