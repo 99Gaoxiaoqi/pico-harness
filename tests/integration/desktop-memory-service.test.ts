@@ -374,6 +374,17 @@ test("session deletion invalidates sources and tombstones proposal bodies but re
     sessionId: "session-delete",
     digest: "sha256:delete",
   });
+  const alreadyUnavailableSource = repository.createSource({
+    sourceId: "source-already-unavailable",
+    sessionId: "session-delete",
+    digest: "sha256:already-unavailable",
+  });
+  repository.updateSourceAvailability({
+    sourceId: alreadyUnavailableSource.sourceId,
+    expectedVersion: alreadyUnavailableSource.version,
+    availability: "unavailable",
+    invalidationCode: "evidence_missing",
+  });
   repository.createFact({
     factId: "approved-fact",
     kind: "project_fact",
@@ -416,6 +427,14 @@ test("session deletion invalidates sources and tombstones proposal bodies but re
     expectedVersion: rejectedProposal.version,
     resolution: "rejected",
   });
+  repository.createProposal({
+    proposalId: "unavailable-source-delete",
+    kind: "reference",
+    title: "Unavailable source",
+    content: "Unavailable source body",
+    reason: "Must still become a tombstone",
+    sourceId: alreadyUnavailableSource.sourceId,
+  });
   const deletedJob = repository.createJob({
     jobId: "pending-delete-job",
     type: MEMORY_PROPOSAL_JOB_TYPE,
@@ -457,12 +476,14 @@ test("session deletion invalidates sources and tombstones proposal bodies but re
   assert.equal(verify.getProposal("accepted-delete")?.content, null);
   assert.equal(verify.getProposal("rejected-delete")?.status, "deleted");
   assert.equal(verify.getProposal("rejected-delete")?.content, null);
+  assert.equal(verify.getProposal("unavailable-source-delete")?.status, "deleted");
+  assert.equal(verify.getProposal("unavailable-source-delete")?.content, null);
   assert.equal(verify.getFact("approved-fact")?.state, "active");
   assert.equal(verify.getFact("approved-fact")?.content, "Use npm run build");
   assert.equal(verify.getFact("accepted-fact")?.state, "active");
   assert.equal(verify.getFact("accepted-fact")?.content, "Accepted body");
   assert.equal(verify.getJob("pending-delete-job")?.status, "cancelled");
-  assert.equal(events.length, 1);
+  assert.equal(events.length, 2);
   assert.ok(events.every((event) => !("content" in event.payload) && !("reason" in event.payload)));
 });
 

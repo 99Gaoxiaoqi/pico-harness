@@ -681,7 +681,6 @@ export class DesktopMemoryService {
     let afterSourceId: string | undefined;
     while (true) {
       const sources = repository.listSessionSources(job.cursor.sessionId, {
-        availability: "available",
         ...(afterSourceId ? { afterSourceId } : {}),
         limit: MEMORY_LIFECYCLE_BATCH_SIZE,
       });
@@ -698,6 +697,7 @@ export class DesktopMemoryService {
           });
         }
         for (const source of sources) {
+          if (source.availability === "unavailable") continue;
           const updated = repository.updateSourceAvailability({
             sourceId: source.sourceId,
             expectedVersion: source.version,
