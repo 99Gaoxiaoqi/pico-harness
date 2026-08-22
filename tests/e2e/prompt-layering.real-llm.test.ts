@@ -83,7 +83,7 @@ test("real llm: PLAN_MODE_SPEC comes after AGENTS.md", async (context) => {
   const { systemPrompt } = await composer.buildLayers();
 
   const projectIndex = systemPrompt.indexOf("project-rule-marker");
-  const planModeIndex = systemPrompt.indexOf("长程任务与状态外部化强制规范");
+  const planModeIndex = systemPrompt.indexOf("规划协作模式 (Plan Mode: CRITICAL)");
 
   console.log(`[排序] AGENTS.md 位置: ${projectIndex}, PLAN_MODE_SPEC 位置: ${planModeIndex}`);
 
