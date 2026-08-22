@@ -26,7 +26,6 @@ import { isToolSupportedForHost, type ToolHostKind } from "../tools/tool-surface
 import { RUNTIME_EVENT_SCHEMA_VERSION } from "../engine/session-runtime-event.js";
 import { createRuntimeEventId } from "../storage/runtime-event-store-contracts.js";
 import {
-  createProvider,
   createRawProvider,
   type ProviderKind,
   type ProviderRuntimeDependencies,
@@ -34,7 +33,6 @@ import {
 import { PromptCachePrewarmCoordinator } from "../provider/prompt-cache-prewarm.js";
 import { ContextOverflowError, isAbortError } from "../provider/errors.js";
 import type { ProviderConfig } from "../provider/config.js";
-import { resolveAuxProviderConfig } from "../provider/aux-provider.js";
 import type { CredentialResolver } from "../provider/credential-vault.js";
 import type { LLMProvider } from "../provider/interface.js";
 import { CredentialPool } from "../provider/credential-pool.js";
@@ -1626,9 +1624,6 @@ export async function executeAgentRuntime(
         turnTail: turnTailParts.join("\n\n"),
       };
     };
-    // 辅助(廉价)模型:用于 FullCompactor 生成摘要,省主模型成本。
-    // 配齐 AUX_LLM_BASE_URL / AUX_LLM_API_KEY / AUX_LLM_MODEL 才启用;缺则用主 provider。
-    const auxProvider = loadAuxProvider(runtimeEnv, session, trackerOptions, providerDecorator);
     const reporter = dependencies.reporter ?? new TerminalReporter();
     const approvalNotifier =
       dependencies.approvalNotifier ?? buildFailClosedApprovalNotifier(approvalManager);
@@ -1664,11 +1659,10 @@ export async function executeAgentRuntime(
       compactor: contextRuntime.compactor,
       contextBudget: contextRuntime.budget,
       // 模型摘要压缩:85% 水位主动整理 + Provider overflow 紧急重试。
-      // 优先用辅助廉价模型(AUX_LLM_*)生成摘要省主模型成本;未配置则用主 provider。
+      // 始终复用已由宿主从用户模型路由解析并注入的主 Provider。
       fullCompactor: new FullCompactor({
         provider: trackedProvider,
         workDir,
-        ...(auxProvider ? { auxProvider } : {}),
         ...(activeHookService ? { hookService: activeHookService } : {}),
       }),
       reporter,
@@ -2631,27 +2625,6 @@ function activeRouteModelRouter(
     ],
     { [apiKeyEnv]: config.apiKey },
     routeId,
-  );
-}
-
-/**
- * 加载辅助(廉价)模型 provider,供 FullCompactor 生成摘要。
- * 配齐 AUX_LLM_BASE_URL / AUX_LLM_API_KEY / AUX_LLM_MODEL 三项才启用;
- * 缺任意一项则返回 undefined(FullCompactor 回退到主 provider)。
- */
-function loadAuxProvider(
-  env: RunAgentEnv,
-  session: Session,
-  trackerOptions: CostTrackerOptions,
-  decorateProvider: (provider: LLMProvider) => LLMProvider,
-): LLMProvider | undefined {
-  const resolved = resolveAuxProviderConfig(env);
-  if (!resolved) return undefined;
-  return new CostTracker(
-    decorateProvider(createProvider(resolved.kind, resolved.config)),
-    billingRouteForProvider(resolved.kind, resolved.config),
-    session,
-    trackerOptions,
   );
 }
 
