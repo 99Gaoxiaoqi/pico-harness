@@ -101,6 +101,11 @@ export class BrowserViewportGenerationAuthority {
 export interface BrowserGenerationFloorStore {
   getGenerationFloor(sessionId: string): number;
   setGenerationFloor(sessionId: string, generationFloor: number): number | undefined;
+  mutateSession(
+    sessionId: string,
+    mutation: { readonly generationFloor: number; readonly deleteUrl?: boolean },
+  ): number;
+  flush(): Promise<void>;
   flushThrough(revision: number): Promise<void>;
 }
 
@@ -127,12 +132,22 @@ export class PersistentBrowserViewportGenerationAuthority {
     return this.#authority.accept(sessionId, generation);
   }
 
-  revoke(sessionId: string): {
+  revoke(
+    sessionId: string,
+    options: { readonly deleteUrl?: boolean } = {},
+  ): {
     readonly generation: number;
     readonly persistence: Promise<void>;
   } {
     this.#seed(sessionId);
     const generation = this.#authority.revoke(sessionId);
+    if (options.deleteUrl) {
+      const revision = this.store.mutateSession(sessionId, {
+        generationFloor: generation,
+        deleteUrl: true,
+      });
+      return { generation, persistence: this.store.flushThrough(revision) };
+    }
     return { generation, persistence: this.#persist(sessionId, generation) };
   }
 
@@ -147,7 +162,7 @@ export class PersistentBrowserViewportGenerationAuthority {
     }
     return {
       revocations,
-      persistence: revision === undefined ? Promise.resolve() : this.store.flushThrough(revision),
+      persistence: revision === undefined ? this.store.flush() : this.store.flushThrough(revision),
     };
   }
 
@@ -164,7 +179,24 @@ export class PersistentBrowserViewportGenerationAuthority {
 
   async #persist(sessionId: string, generation: number): Promise<void> {
     const revision = this.store.setGenerationFloor(sessionId, generation);
-    if (revision !== undefined) await this.store.flushThrough(revision);
+    if (revision === undefined) {
+      await this.store.flush();
+      return;
+    }
+    await this.store.flushThrough(revision);
+  }
+}
+
+export async function commitBrowserRevocations(
+  persistence: Promise<void>,
+  revocations: readonly { readonly sessionId: string; readonly generation: number }[],
+  notify: ((sessionId: string, generation: number) => Promise<void>) | undefined,
+): Promise<void> {
+  await persistence;
+  if (notify) {
+    await Promise.all(
+      revocations.map(({ sessionId, generation }) => notify(sessionId, generation)),
+    );
   }
 }
 

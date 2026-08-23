@@ -5,6 +5,7 @@ import type {
   DesktopBrowserState,
 } from "../preload/contract.js";
 import {
+  commitBrowserRevocations,
   guardBrowserNavigation,
   normalizeActiveBrowserViewport,
   normalizeBrowserAddress,
@@ -193,18 +194,6 @@ export function createEmbeddedBrowserAuthority(options: {
     if (!entry.view.webContents.isDestroyed()) entry.view.webContents.setBackgroundThrottling(true);
     entry.view.setVisible(false);
     emit(sessionId, entry);
-  };
-
-  const revoke = (
-    sessionId: string,
-  ): { readonly generation: number; readonly completion: Promise<void> } => {
-    const { generation, persistence } = viewportGenerations.revoke(sessionId);
-    return {
-      generation,
-      completion: Promise.all([persistence, options.onRevoke?.(sessionId, generation)]).then(
-        () => undefined,
-      ),
-    };
   };
 
   const authority: EmbeddedBrowserAuthority = {
@@ -396,16 +385,15 @@ export function createEmbeddedBrowserAuthority(options: {
     },
 
     async close(sessionId) {
-      const revocation = revoke(sessionId);
+      const revocation = viewportGenerations.revoke(sessionId, { deleteUrl: true });
+      await commitBrowserRevocations(
+        revocation.persistence,
+        [{ sessionId, generation: revocation.generation }],
+        options.onRevoke,
+      );
       const entry = entries.get(sessionId);
-      const deletionRevision = urlStore.delete(sessionId);
       if (entry) destroyEntry(sessionId, entry);
       options.onState(emptyState(sessionId, revocation.generation));
-      const flushing =
-        deletionRevision === undefined
-          ? Promise.resolve()
-          : urlStore.flushThrough(deletionRevision);
-      await Promise.all([revocation.completion, flushing]);
     },
 
     async clearData() {
@@ -414,11 +402,8 @@ export function createEmbeddedBrowserAuthority(options: {
 
     async dispose() {
       const revoked = viewportGenerations.revokeAll();
-      const revocations = revoked.revocations.map(({ sessionId, generation }) =>
-        options.onRevoke?.(sessionId, generation),
-      );
+      await commitBrowserRevocations(revoked.persistence, revoked.revocations, options.onRevoke);
       for (const [sessionId, entry] of [...entries]) destroyEntry(sessionId, entry);
-      await Promise.all([...revocations, revoked.persistence, urlStore.flush()]);
       viewportGenerations.clear();
     },
   };
