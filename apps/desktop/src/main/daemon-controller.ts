@@ -34,7 +34,10 @@ export function isDesktopRuntimeInvocationAllowed(
 export class DesktopTerminalGenerationController {
   #sealed = true;
   #sealVersion = 0;
+  #activeCreates = 0;
+  readonly #createDrainWaiters = new Set<() => void>();
   #transitionTail: Promise<void> = Promise.resolve();
+  #cleanupRequired: (() => Promise<void>) | undefined;
 
   isCreateAllowed(): boolean {
     return !this.#sealed;
@@ -45,14 +48,32 @@ export class DesktopTerminalGenerationController {
     this.#sealVersion++;
   }
 
+  acquireCreate(): (() => void) | undefined {
+    if (this.#sealed) return undefined;
+    this.#activeCreates++;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.#activeCreates--;
+      if (this.#activeCreates !== 0) return;
+      for (const resolve of this.#createDrainWaiters) resolve();
+      this.#createDrainWaiters.clear();
+    };
+  }
+
   cleanup(stopAll: () => Promise<void>): Promise<void> {
     this.seal();
-    return this.#enqueue(stopAll);
+    this.#cleanupRequired = stopAll;
+    return this.#enqueue(async () => {
+      await this.#runRequiredCleanup();
+    });
   }
 
   open(resume: () => Promise<void>): Promise<void> {
     const expectedSealVersion = this.#sealVersion;
     return this.#enqueue(async () => {
+      await this.#runRequiredCleanup();
       await resume();
       if (this.#sealVersion === expectedSealVersion) this.#sealed = false;
     });
@@ -66,6 +87,38 @@ export class DesktopTerminalGenerationController {
     );
     return next;
   }
+
+  #drainCreates(): Promise<void> {
+    if (this.#activeCreates === 0) return Promise.resolve();
+    const deferred = Promise.withResolvers<void>();
+    this.#createDrainWaiters.add(deferred.resolve);
+    return deferred.promise;
+  }
+
+  async #runRequiredCleanup(): Promise<void> {
+    const cleanup = this.#cleanupRequired;
+    if (!cleanup) return;
+    await this.#drainCreates();
+    await cleanup();
+    if (this.#cleanupRequired === cleanup) this.#cleanupRequired = undefined;
+  }
+}
+
+export async function resumeDesktopTerminalGenerationWithUpgrade(options: {
+  readonly resume: () => Promise<void>;
+  readonly shutdownLegacyHost: () => Promise<void>;
+  readonly reconnect: () => Promise<void>;
+  readonly isMethodNotFound: (error: unknown) => boolean;
+}): Promise<void> {
+  try {
+    await options.resume();
+    return;
+  } catch (error) {
+    if (!options.isMethodNotFound(error)) throw error;
+  }
+  await options.shutdownLegacyHost();
+  await options.reconnect();
+  await options.resume();
 }
 
 /**
