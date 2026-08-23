@@ -13,7 +13,7 @@ import {
   type ClientPromptRequest,
   type DaemonSessionClient,
 } from "../../src/tui/client-session-runtime.js";
-import type { RuntimeNotification } from "@pico/protocol";
+import { LOCAL_RUNTIME_PROTOCOL_VERSION, type RuntimeNotification } from "@pico/protocol";
 
 /**
  * 3-D Phase 3 自由文本 ask_user 全链路（统一方案：options 可选 0-6 + freeText
@@ -172,7 +172,7 @@ test("TUI 客户端：prompt.requested 事件投影（freeText 透传）+ respon
 
   listener?.({
     eventId: "e1",
-    protocolVersion: 1,
+    protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
     topic: "prompt.requested",
     scope: { workspacePath: "C:\\ws", sessionId: "s1", runId: "run_1" },
     resourceVersion: 1,
@@ -204,7 +204,7 @@ test("TUI 客户端：prompt.requested 事件投影（freeText 透传）+ respon
   // 跨会话 prompt.resolved 前置清理（scope 过滤不影响收口）。
   listener?.({
     eventId: "e2",
-    protocolVersion: 1,
+    protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
     topic: "prompt.resolved",
     scope: { workspacePath: "C:\\ws", sessionId: "s-other" },
     resourceVersion: 2,
@@ -216,7 +216,7 @@ test("TUI 客户端：prompt.requested 事件投影（freeText 透传）+ respon
   // 其他会话的 prompt.requested 被 scope 过滤（不进对话框）。
   listener?.({
     eventId: "e3",
-    protocolVersion: 1,
+    protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
     topic: "prompt.requested",
     scope: { workspacePath: "C:\\ws", sessionId: "s-other" },
     resourceVersion: 3,
