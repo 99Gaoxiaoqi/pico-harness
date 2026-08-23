@@ -80,6 +80,17 @@ export function registerDesktopIpcHandlers(options: {
         const rawParams: unknown = params;
         const sessionId = isRecord(rawParams) ? rawParams["sessionId"] : undefined;
         if (isNonEmptyString(sessionId)) await browser.close(sessionId);
+        const rawResult: unknown = result;
+        if (envelope.method === "session.delete" && isRecord(rawResult)) {
+          const closedSessionIds = rawResult["closedSessionIds"];
+          if (Array.isArray(closedSessionIds)) {
+            for (const closedSessionId of closedSessionIds) {
+              if (isNonEmptyString(closedSessionId) && closedSessionId !== sessionId) {
+                await browser.close(closedSessionId);
+              }
+            }
+          }
+        }
       }
       return success(result);
     } catch (error) {
@@ -238,6 +249,41 @@ export function registerDesktopIpcHandlers(options: {
     }
   });
 
+  ipcMain.handle(
+    DESKTOP_IPC_CHANNELS.browserClick,
+    async (event, sessionId: unknown, selector: unknown) => {
+      if (!trusted(event)) return unauthorized();
+      if (!isNonEmptyString(sessionId) || !isBoundedString(selector, 2_048, false)) {
+        return invalidBrowserRequest();
+      }
+      try {
+        return success(await browser.click(sessionId, selector));
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  );
+
+  ipcMain.handle(
+    DESKTOP_IPC_CHANNELS.browserType,
+    async (event, sessionId: unknown, selector: unknown, text: unknown, clear: unknown) => {
+      if (!trusted(event)) return unauthorized();
+      if (
+        !isNonEmptyString(sessionId) ||
+        !isBoundedString(selector, 2_048, false) ||
+        !isBoundedString(text, 32_000, true) ||
+        typeof clear !== "boolean"
+      ) {
+        return invalidBrowserRequest();
+      }
+      try {
+        return success(await browser.type(sessionId, selector, text, clear));
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  );
+
   ipcMain.handle(DESKTOP_IPC_CHANNELS.chooseWorkspace, async (event) => {
     if (!trusted(event)) return unauthorized();
     const result = await dialog.showOpenDialog({
@@ -352,6 +398,14 @@ function readBrowserViewport(value: unknown):
 
 function invalidBrowserRequest(): DesktopResult<never> {
   return failure(invalidArgument("浏览器操作参数无效"));
+}
+
+function isBoundedString(value: unknown, maxLength: number, allowEmpty: boolean): value is string {
+  return (
+    typeof value === "string" &&
+    value.length <= maxLength &&
+    (allowEmpty || value.trim().length > 0)
+  );
 }
 
 function readInvocation(value: unknown): {

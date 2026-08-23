@@ -14,6 +14,7 @@ import {
   DESKTOP_RUNTIME_METHODS,
   type DesktopBridge,
   type DesktopBrowserRect,
+  type DesktopBrowserElementResult,
   type DesktopBrowserState,
   type DesktopResult,
   type DesktopRuntimeApi,
@@ -277,6 +278,33 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
       close: (sessionId: string) =>
         invokeBrowserSession<void>(ipcRenderer, DESKTOP_IPC_CHANNELS.browserClose, sessionId),
       clearData: () => ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.browserClearData),
+      click: (sessionId: string, selector: string) => {
+        if (!isNonEmptyString(sessionId) || !isBoundedString(selector, 2_048, false)) {
+          return Promise.resolve(validationFailure(invalidBridgeParams("浏览器点击参数无效")));
+        }
+        return ipcRenderer.invoke(
+          DESKTOP_IPC_CHANNELS.browserClick,
+          sessionId,
+          selector,
+        ) as Promise<DesktopResult<DesktopBrowserElementResult>>;
+      },
+      type: (sessionId: string, selector: string, value: string, clear = true) => {
+        if (
+          !isNonEmptyString(sessionId) ||
+          !isBoundedString(selector, 2_048, false) ||
+          !isBoundedString(value, 32_000, true) ||
+          typeof clear !== "boolean"
+        ) {
+          return Promise.resolve(validationFailure(invalidBridgeParams("浏览器输入参数无效")));
+        }
+        return ipcRenderer.invoke(
+          DESKTOP_IPC_CHANNELS.browserType,
+          sessionId,
+          selector,
+          value,
+          clear,
+        ) as Promise<DesktopResult<DesktopBrowserElementResult>>;
+      },
       onState(listener: (state: DesktopBrowserState) => void): () => void {
         if (typeof listener !== "function") return () => undefined;
         const handler = (_event: unknown, value: unknown): void => {
@@ -340,6 +368,14 @@ function isBrowserState(value: unknown): value is DesktopBrowserState {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function isBoundedString(value: unknown, maxLength: number, allowEmpty: boolean): value is string {
+  return (
+    typeof value === "string" &&
+    value.length <= maxLength &&
+    (allowEmpty || value.trim().length > 0)
+  );
 }
 
 function isSessionSubscriptionFrame(value: unknown): value is RuntimeSessionSubscriptionFrame {

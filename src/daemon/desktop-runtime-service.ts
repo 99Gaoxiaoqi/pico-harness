@@ -247,6 +247,10 @@ import type { ImagePart } from "../schema/message.js";
 import { createModelContextReport } from "../provider/model-runtime-report.js";
 import { createSessionHookRuntime } from "../hooks/runtime.js";
 import { PluginManagementService } from "../plugins/plugin-management-service.js";
+import {
+  BrowserAgentBrokerError,
+  BrowserAgentCommandBroker,
+} from "./browser-agent-command-broker.js";
 
 const UNSUPPORTED_DESKTOP_METHODS: ReadonlySet<string> = new Set([
   "approval.respond",
@@ -287,6 +291,7 @@ export interface DesktopRuntimeServiceOptions {
   readonly ownsMemoryService?: boolean;
   /** Commit 完成后通知 Dedicated Session Channel 读取已提交水位。 */
   readonly onTranscriptAdvanced?: (workspacePath: string, sessionId: string) => void;
+  readonly browserAgentBroker?: BrowserAgentCommandBroker;
 }
 
 export interface DesktopRuntimeInteractions {
@@ -367,6 +372,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private closePromise?: Promise<void>;
   private queuedInputDispatchTail: Promise<void> = Promise.resolve();
   private resourceVersion = 0;
+  private readonly browserAgentBroker: BrowserAgentCommandBroker;
 
   constructor(private readonly options: DesktopRuntimeServiceOptions) {
     this.env = options.env ?? process.env;
@@ -375,6 +381,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     this.picoHome = resolvePicoHome({ picoHome: this.env["PICO_HOME"] });
     this.gitReviewService = new DesktopWorkbarGitReviewService();
     this.terminalService = new DesktopWorkbarTerminalService({ picoHome: this.picoHome });
+    this.browserAgentBroker = options.browserAgentBroker ?? new BrowserAgentCommandBroker();
     this.registrationStore =
       options.registrationStore ??
       new WorkspaceRegistrationStore(join(this.picoHome, "daemon-workspaces.json"));
@@ -518,6 +525,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         this.withHostWorkbarErrors(() => this.gitReviewService.snapshot(request.params)),
       "git.review.diff": (request) =>
         this.withHostWorkbarErrors(() => this.gitReviewService.diff(request.params)),
+      "browser.agent.lease": (request) =>
+        this.withBrowserAgentErrors(() => this.browserAgentBroker.acquireLease(request.params)),
+      "browser.agent.next": (request) =>
+        this.withBrowserAgentErrors(() => this.browserAgentBroker.nextCommand(request.params)),
+      "browser.agent.resolve": (request) =>
+        this.withBrowserAgentErrors(() => this.browserAgentBroker.resolveCommand(request.params)),
       "terminal.create": (request) =>
         this.withHostWorkbarErrors(() => this.terminalService.create(request.params)),
       "terminal.list": (request) =>
@@ -815,6 +828,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       }
       if (this.ownsMemoryService) await attempt(() => this.memoryService.close());
       await attempt(() => this.terminalService.close());
+      this.browserAgentBroker.close();
     } finally {
       this.lifecycleState = "closed";
     }
@@ -1032,6 +1046,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     await this.withWorkspaceSessionStore(canonical, (store) =>
       store.setSessionArchived(sessionId, archived, this.now),
     );
+    if (archived) this.browserAgentBroker.invalidateSession(sessionId, "浏览器 Session 已归档");
     const session = await this.requireSession(canonical, sessionId);
     this.publishSession(session);
     return { session };
@@ -1058,12 +1073,16 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     await sideChats.recover();
     const leases = sideChats.list();
     if (leases.some((lease) => lease.targetSessionId === sessionId)) {
+      this.browserAgentBroker.invalidateSession(sessionId);
       await sideChats.cleanup(sessionId);
       return { sessionId, deleted: true };
     }
-    for (const lease of leases.filter((candidate) => candidate.sourceSessionId === sessionId)) {
+    const childLeases = leases.filter((candidate) => candidate.sourceSessionId === sessionId);
+    for (const lease of childLeases) {
+      this.browserAgentBroker.invalidateSession(lease.targetSessionId);
       await sideChats.cleanup(lease.targetSessionId);
     }
+    this.browserAgentBroker.invalidateSession(sessionId);
     await this.terminalService.stopSession({ workspacePath: canonical, sessionId });
     const preparedMemory = this.memoryService.prepareSessionSourceInvalidation(
       canonical,
@@ -1087,7 +1106,13 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       throw error;
     }
     this.memoryService.commitSessionSourceInvalidation(preparedMemory);
-    return { sessionId, deleted: true };
+    return {
+      sessionId,
+      deleted: true,
+      ...(childLeases.length > 0
+        ? { closedSessionIds: childLeases.map((lease) => lease.targetSessionId) }
+        : {}),
+    };
   }
 
   private async renameSession(
@@ -1198,6 +1223,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     params: RuntimeRequest<"sideChat.close">["params"],
   ): Promise<JsonValue> {
     const canonical = await canonicalizeWorkspacePath(params.workspacePath);
+    this.browserAgentBroker.invalidateSession(params.sessionId);
     await this.sideChatAuthority(canonical).cleanup(params.sessionId);
     return { cleanupScheduled: true };
   }
@@ -4547,6 +4573,24 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
             : error.code === "resource_epoch_mismatch" || error.code === "capacity_exceeded"
               ? RUNTIME_ERROR_CODES.CONFLICT
               : RUNTIME_ERROR_CODES.INVALID_PARAMS;
+        throw new RuntimeProtocolError(code, error.message);
+      }
+      throw error;
+    }
+  }
+
+  private async withBrowserAgentErrors<Result>(
+    operation: () => Result | Promise<Result>,
+  ): Promise<Result> {
+    try {
+      return await operation();
+    } catch (error) {
+      if (error instanceof RuntimeProtocolError) throw error;
+      if (error instanceof BrowserAgentBrokerError) {
+        const code =
+          error.code === "BROWSER_NOT_VISIBLE" || error.code === "BROWSER_LEASE_STALE"
+            ? RUNTIME_ERROR_CODES.FORBIDDEN
+            : RUNTIME_ERROR_CODES.CONFLICT;
         throw new RuntimeProtocolError(code, error.message);
       }
       throw error;

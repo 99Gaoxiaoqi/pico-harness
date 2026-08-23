@@ -67,6 +67,7 @@ import { LocalDaemonHost } from "./runtime-host.js";
 import { canonicalizeWorkspacePath } from "./workspace-registry.js";
 import { WorkspaceRegistrationStore } from "./workspace-registration.js";
 import { WorkspaceRuntimeService } from "./workspace-runtime-service.js";
+import { BrowserAgentCommandBroker } from "./browser-agent-command-broker.js";
 import { PluginRuntimeSnapshotRegistry } from "../plugins/plugin-runtime-snapshot-registry.js";
 import {
   createBuiltinPluginCapabilityRegistry,
@@ -150,6 +151,7 @@ export function createProductionRuntimeServices(
   const trustStore =
     options.trustStore ?? new WorkspaceTrustStore({ userStateDirectory: picoHome });
   const agentRuntime = options.agentRuntime ?? new AgentRuntime();
+  const browserAgentBroker = new BrowserAgentCommandBroker();
   if (
     options.pluginRuntimeSnapshotRegistry &&
     options.pluginCapabilityRegistry &&
@@ -433,6 +435,7 @@ export function createProductionRuntimeServices(
             mcpConfigSources: effectiveMcp.sources,
             picoHome,
             env,
+            browserAgent: browserAgentBroker.bind(targetSessionId),
             memoryProposalSink: (notice: MemoryProposalPublishedNotice) =>
               publishDesktopMemoryProposal(
                 service,
@@ -643,6 +646,7 @@ export function createProductionRuntimeServices(
     runtimeService: service,
     registrationStore,
     trustStore,
+    browserAgentBroker,
     env,
     automations,
     userConfigStore,

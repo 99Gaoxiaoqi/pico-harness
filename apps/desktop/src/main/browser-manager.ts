@@ -1,5 +1,6 @@
 import { session, type BrowserWindow, type Session, WebContentsView } from "electron";
 import type {
+  DesktopBrowserElementResult,
   DesktopBrowserRect,
   DesktopBrowserState,
 } from "../preload/contract.js";
@@ -22,6 +23,13 @@ export interface EmbeddedBrowserAuthority {
   reload(sessionId: string): DesktopBrowserState;
   stop(sessionId: string): DesktopBrowserState;
   getState(sessionId: string): DesktopBrowserState | null;
+  click(sessionId: string, selector: string): Promise<DesktopBrowserElementResult>;
+  type(
+    sessionId: string,
+    selector: string,
+    text: string,
+    clear: boolean,
+  ): Promise<DesktopBrowserElementResult>;
   close(sessionId: string): Promise<void>;
   clearData(): Promise<void>;
   dispose(): Promise<void>;
@@ -196,6 +204,83 @@ export function createEmbeddedBrowserAuthority(options: {
       return entry ? stateOf(sessionId, entry) : null;
     },
 
+    async click(sessionId, selector) {
+      const entry = requireVisible(sessionId);
+      const tagName = await withDocumentNode(entry, selector, async (nodeId) => {
+        await entry.view.webContents.debugger.sendCommand("DOM.scrollIntoViewIfNeeded", {
+          nodeId,
+        });
+        const result = await entry.view.webContents.debugger.sendCommand("DOM.getBoxModel", {
+          nodeId,
+        });
+        const quad = readQuad(result);
+        const x = (quad[0] + quad[2] + quad[4] + quad[6]) / 4;
+        const y = (quad[1] + quad[3] + quad[5] + quad[7]) / 4;
+        await entry.view.webContents.debugger.sendCommand("Input.dispatchMouseEvent", {
+          type: "mouseMoved",
+          x,
+          y,
+        });
+        await entry.view.webContents.debugger.sendCommand("Input.dispatchMouseEvent", {
+          type: "mousePressed",
+          x,
+          y,
+          button: "left",
+          clickCount: 1,
+        });
+        await entry.view.webContents.debugger.sendCommand("Input.dispatchMouseEvent", {
+          type: "mouseReleased",
+          x,
+          y,
+          button: "left",
+          clickCount: 1,
+        });
+        return readNodeName(
+          await entry.view.webContents.debugger.sendCommand("DOM.describeNode", { nodeId }),
+        );
+      });
+      return { state: emit(sessionId, entry), selector, tagName };
+    },
+
+    async type(sessionId, selector, text, clear) {
+      const entry = requireVisible(sessionId);
+      const tagName = await withDocumentNode(entry, selector, async (nodeId) => {
+        await entry.view.webContents.debugger.sendCommand("DOM.focus", { nodeId });
+        if (clear) {
+          const modifier = process.platform === "darwin" ? 4 : 2;
+          await entry.view.webContents.debugger.sendCommand("Input.dispatchKeyEvent", {
+            type: "keyDown",
+            key: "a",
+            code: "KeyA",
+            modifiers: modifier,
+          });
+          await entry.view.webContents.debugger.sendCommand("Input.dispatchKeyEvent", {
+            type: "keyUp",
+            key: "a",
+            code: "KeyA",
+            modifiers: modifier,
+          });
+          await entry.view.webContents.debugger.sendCommand("Input.dispatchKeyEvent", {
+            type: "keyDown",
+            key: "Backspace",
+            code: "Backspace",
+          });
+          await entry.view.webContents.debugger.sendCommand("Input.dispatchKeyEvent", {
+            type: "keyUp",
+            key: "Backspace",
+            code: "Backspace",
+          });
+        }
+        if (text.length > 0) {
+          await entry.view.webContents.debugger.sendCommand("Input.insertText", { text });
+        }
+        return readNodeName(
+          await entry.view.webContents.debugger.sendCommand("DOM.describeNode", { nodeId }),
+        );
+      });
+      return { state: emit(sessionId, entry), selector, tagName };
+    },
+
     async close(sessionId) {
       const entry = entries.get(sessionId);
       if (!entry) return;
@@ -214,4 +299,55 @@ export function createEmbeddedBrowserAuthority(options: {
     },
   };
   return authority;
+}
+
+async function withDocumentNode<T>(
+  entry: BrowserEntry,
+  selector: string,
+  operation: (nodeId: number) => Promise<T>,
+): Promise<T> {
+  const contents = entry.view.webContents;
+  if (contents.isDestroyed()) throw new Error("浏览器页面已经关闭");
+  const attachedHere = !contents.debugger.isAttached();
+  if (attachedHere) contents.debugger.attach("1.3");
+  try {
+    const document = await contents.debugger.sendCommand("DOM.getDocument", { depth: 0 });
+    const rootNodeId = readNodeId(document);
+    const match = await contents.debugger.sendCommand("DOM.querySelector", {
+      nodeId: rootNodeId,
+      selector,
+    });
+    const nodeId = readNodeId(match);
+    if (nodeId === 0) throw new Error(`网页中找不到元素: ${selector}`);
+    return await operation(nodeId);
+  } finally {
+    if (attachedHere && contents.debugger.isAttached()) contents.debugger.detach();
+  }
+}
+
+function readNodeId(value: unknown): number {
+  if (!value || typeof value !== "object") throw new Error("浏览器 DOM 响应无效");
+  const direct = (value as { nodeId?: unknown }).nodeId;
+  if (typeof direct === "number" && Number.isSafeInteger(direct)) return direct;
+  const root = (value as { root?: { nodeId?: unknown } }).root?.nodeId;
+  if (typeof root === "number" && Number.isSafeInteger(root)) return root;
+  throw new Error("浏览器 DOM 节点响应无效");
+}
+
+function readNodeName(value: unknown): string {
+  if (!value || typeof value !== "object") return "";
+  const nodeName = (value as { node?: { nodeName?: unknown } }).node?.nodeName;
+  return typeof nodeName === "string" ? nodeName.toLowerCase() : "";
+}
+
+function readQuad(
+  value: unknown,
+): readonly [number, number, number, number, number, number, number, number] {
+  if (!value || typeof value !== "object") throw new Error("网页元素当前不可见");
+  const model = (value as { model?: { border?: unknown } }).model;
+  const border = model?.border;
+  if (!Array.isArray(border) || border.length !== 8 || !border.every(Number.isFinite)) {
+    throw new Error("网页元素当前不可见或没有可点击区域");
+  }
+  return border as [number, number, number, number, number, number, number, number];
 }
