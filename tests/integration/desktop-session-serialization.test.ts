@@ -27,7 +27,6 @@ test(
       env,
       execute: async () => undefined,
     });
-    const desktop = new DesktopRuntimeService({ runtimeService: runtime, env });
     const sessionId = "desktop-serialized-session";
     const lease = await globalSessionManager.getOrCreatePinned(sessionId, canonicalWorkspace, {
       persistence: true,
@@ -39,17 +38,18 @@ test(
     const projectionSettled = new Promise<void>((resolve) => {
       resolveProjection = resolve;
     });
+    const desktop = new DesktopRuntimeService({
+      runtimeService: runtime,
+      env,
+      onTranscriptAdvanced: (_workspacePath, advancedSessionId) => {
+        if (advancedSessionId === sessionId) resolveProjection();
+      },
+    });
     const unsubscribe = desktop.subscribe((notification) => {
       if (notification.topic === "runtime.error") {
         runtimeErrors.push(notification.payload);
         resolveProjection();
         return;
-      }
-      if (
-        notification.topic === "session.transcriptUpdated" &&
-        notification.scope.sessionId === sessionId
-      ) {
-        resolveProjection();
       }
     });
     context.after(async () => {

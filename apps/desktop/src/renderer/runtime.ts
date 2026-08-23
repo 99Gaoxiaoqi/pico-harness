@@ -18,7 +18,6 @@ import {
   type RuntimeResult,
   type RuntimeScopedMcpServer,
   type RuntimeScopedSkill,
-  type RuntimeSessionSubscriptionFrame,
   type RuntimeToolResultEnvelope,
   type RuntimeUserDefaults,
 } from "@pico/protocol";
@@ -85,12 +84,7 @@ import type {
   ConversationItemView,
   ConversationProgressState,
 } from "./conversation/types.js";
-import {
-  applyLiveAssistantUpdate,
-  applyLiveReasoningUpdate,
-  conversationItemKey,
-  mergeHydratedConversationItems,
-} from "./conversation/items.js";
+import { conversationItemKey, mergeHydratedConversationItems } from "./conversation/items.js";
 import { applyTimelineNotification } from "./timeline.js";
 import { ConversationLoadTracker } from "./conversation-load-tracker.js";
 import {
@@ -112,16 +106,6 @@ export function isMemoryConflict(error: unknown): boolean {
 
 function getBridge(): DesktopBridge | undefined {
   return window.pico;
-}
-
-interface DesktopSessionFrameSource {
-  subscribe(listener: (frame: RuntimeSessionSubscriptionFrame) => void): { dispose(): void };
-}
-
-function sessionFrameSource(bridge: DesktopBridge): DesktopSessionFrameSource | undefined {
-  // preload/main 未升级时没有该字段，Renderer 继续使用 v1 降级路径。
-  return (bridge as DesktopBridge & { readonly sessionFrames?: DesktopSessionFrameSource })
-    .sessionFrames;
 }
 
 export function isPreviewMode(): boolean {
@@ -1618,9 +1602,7 @@ export function useRuntimeStore(): RuntimeStore {
   );
 
   const ensureDesktopContinuity = useCallback(
-    (bridge: DesktopBridge): DesktopSessionContinuity | undefined => {
-      const source = sessionFrameSource(bridge);
-      if (!source) return undefined;
+    (bridge: DesktopBridge): DesktopSessionContinuity => {
       if (desktopContinuityRef.current && desktopContinuityBridgeRef.current === bridge) {
         return desktopContinuityRef.current;
       }
@@ -1630,7 +1612,7 @@ export function useRuntimeStore(): RuntimeStore {
         close: (params) => invoke(bridge, "session.subscription.close", params),
         page: (params) => invoke(bridge, "session.transcript.page", params),
         advance: (params) => invoke(bridge, "session.transcript.advance", params),
-        subscribeFrames: (listener) => source.subscribe(listener),
+        subscribeFrames: (listener) => bridge.sessionFrames.subscribe(listener),
       };
       const continuity = new DesktopSessionContinuity({
         transport,
@@ -2038,24 +2020,19 @@ export function useRuntimeStore(): RuntimeStore {
       // daemon 服务层一处，本层仅丢弃迟到的旧加载）。
       const load = conversationLoadTracker.current.begin(conversationKey);
       const isCurrentLoad = () => conversationLoadTracker.current.isCurrent(load);
-      let continuity: DesktopSessionContinuity | undefined;
+      let continuity: DesktopSessionContinuity;
       let value: unknown;
       try {
         continuity = ensureDesktopContinuity(bridge);
-        if (continuity) {
-          const view = await continuity.open(workspacePath, sessionId);
-          value = {
-            items: view.records.map((record) => record.item),
-            queuedInputs: view.queuedInputs,
-            ...(view.activeRun ? { activeRun: view.activeRun } : {}),
-          };
-        } else {
-          value = await invoke(bridge, "session.transcript", {
-            workspacePath,
-            sessionId,
-            limit: 200,
-          });
-        }
+        const view = await continuity.open(workspacePath, sessionId);
+        value = {
+          items: [
+            ...view.records.map((record) => record.item),
+            ...view.activeOverlay.map(overlayRuntimeItem),
+          ],
+          queuedInputs: view.queuedInputs,
+          ...(view.activeRun ? { activeRun: view.activeRun } : {}),
+        };
       } catch (error) {
         if (!isCurrentLoad()) return;
         setData((current) => ({
@@ -2291,7 +2268,6 @@ export function useRuntimeStore(): RuntimeStore {
     if (preview || connection.kind !== "ready" || !data.workspacePath) return;
     const bridge = getBridge();
     if (!bridge) return;
-    const dedicatedSessionFrames = sessionFrameSource(bridge) !== undefined;
     seenEventIdsRef.current.clear();
     const workspacePath = data.workspacePath;
     let disposed = false;
@@ -2466,83 +2442,6 @@ export function useRuntimeStore(): RuntimeStore {
           ...current,
           timeline: applyTimelineNotification(current.timeline, event),
         }));
-      } else if (topic === "run.live" && !dedicatedSessionFrames) {
-        const sessionId = stringValue(scope.sessionId);
-        const runId = stringValue(scope.runId ?? payload.runId);
-        const conversationKey = sessionId
-          ? workspaceSessionKey({ workspacePath, sessionId })
-          : undefined;
-        const item = isRecord(payload.item) ? payload.item : {};
-        const operation = stringValue(item.operation);
-        const liveOperation =
-          operation === "append"
-            ? "append"
-            : operation === "complete"
-              ? "complete"
-              : operation === "clear"
-                ? "clear"
-                : undefined;
-        if (
-          sessionId &&
-          conversationKey &&
-          runId &&
-          (item.kind === "thinking" || item.kind === "assistantMessage") &&
-          liveOperation
-        ) {
-          setData((current) => {
-            const conversation = current.conversations[conversationKey] ?? {
-              workspacePath,
-              sessionId,
-              items: [],
-              queuedCount: 0,
-              runId,
-            };
-            const activeRun = current.runs.find(
-              (candidate) =>
-                candidate.workspacePath === workspacePath &&
-                candidate.sessionId === sessionId &&
-                !isTerminalRunStatus(candidate.status),
-            );
-            if (activeRun && activeRun.id !== runId) return current;
-            const runConversation =
-              conversation.runId === runId
-                ? conversation
-                : {
-                    ...conversation,
-                    runId,
-                    items: conversation.items.filter(
-                      (candidate) =>
-                        (candidate.kind !== "thinking" && candidate.kind !== "assistantMessage") ||
-                        candidate.streaming !== true,
-                    ),
-                  };
-            const update = {
-              runId,
-              operation: liveOperation,
-              ...(stringValue(item.streamId) ? { streamId: stringValue(item.streamId) } : {}),
-              ...(stringValue(item.turnId) ? { turnId: stringValue(item.turnId) } : {}),
-              ...(stringValue(item.delta) ? { delta: stringValue(item.delta) } : {}),
-              ...(item.truncated === true ? { truncated: true } : {}),
-              at: numberValue(event.at, Date.now()),
-            } as const;
-            return {
-              ...current,
-              conversations: {
-                ...current.conversations,
-                [conversationKey]: {
-                  ...runConversation,
-                  items:
-                    item.kind === "thinking"
-                      ? applyLiveReasoningUpdate(runConversation.items, update)
-                      : applyLiveAssistantUpdate(runConversation.items, update),
-                },
-              },
-            };
-          });
-          if (item.kind === "assistantMessage" && operation === "complete") {
-            scheduleHydration(sessionId);
-          }
-        }
       } else if (topic === "config.updated") {
         const changedCapabilities = Array.isArray(payload.capabilities)
           ? payload.capabilities.map((item) => stringValue(item))
@@ -2572,10 +2471,7 @@ export function useRuntimeStore(): RuntimeStore {
         topic.startsWith("run.") ||
         topic.startsWith("session.")
       ) {
-        if (
-          !dedicatedSessionFrames ||
-          (!topic.startsWith("run.") && topic !== "session.transcriptUpdated")
-        ) {
+        if (!topic.startsWith("run.")) {
           scheduleHydration(stringValue(scope.sessionId) || undefined);
         }
       }
@@ -2775,67 +2671,10 @@ export function useRuntimeStore(): RuntimeStore {
       },
       async loadEarlierSession(ref) {
         const { workspacePath, sessionId } = ref;
-        const conversationKey = workspaceSessionKey(ref);
-        const conversation = dataRef.current.conversations[conversationKey];
-        const cursor = transcriptCursorByConversation.current.get(conversationKey);
-        const before = conversation?.nextBefore;
-        const expectedRevision = conversation?.revision;
-        if (!workspacePath || (!cursor && !before) || !expectedRevision) return;
+        if (!workspacePath || !sessionId) return;
         await perform("load-earlier-session", async (bridge) => {
           if (preview) return;
-          let value: unknown;
-          try {
-            value = await invoke(bridge, "session.transcript", {
-              workspacePath,
-              sessionId,
-              ...(cursor ? { cursor } : { before }),
-              limit: 200,
-              ...(!cursor ? { expectedRevision } : {}),
-            });
-          } catch (error) {
-            if (error instanceof RuntimeInvocationError && error.code === "CONFLICT") {
-              await loadConversation(bridge, workspacePath, sessionId);
-              setMessage("会话历史已更新，已从最新版本重新加载。");
-              return;
-            }
-            throw error;
-          }
-          const fragments =
-            transcriptFragmentsByConversation.current.get(conversationKey) ??
-            new Map<string, RuntimeTranscriptFragment[]>();
-          transcriptFragmentsByConversation.current.set(conversationKey, fragments);
-          const page = parseConversation(value, workspacePath, sessionId, fragments);
-          if (
-            page.revision !== expectedRevision ||
-            dataRef.current.conversations[conversationKey]?.revision !== expectedRevision
-          ) {
-            await loadConversation(bridge, workspacePath, sessionId);
-            setMessage("会话历史已更新，已从最新版本重新加载。");
-            return;
-          }
-          if (page.nextCursor) {
-            transcriptCursorByConversation.current.set(conversationKey, page.nextCursor);
-          } else {
-            transcriptCursorByConversation.current.delete(conversationKey);
-          }
-          setData((current) => {
-            const latest = current.conversations[conversationKey];
-            if (!latest || latest.revision !== expectedRevision) return current;
-            const existingIds = new Set(latest.items.map((item) => item.id));
-            const olderItems = page.items.filter((item) => !existingIds.has(item.id));
-            return {
-              ...current,
-              conversations: {
-                ...current.conversations,
-                [conversationKey]: {
-                  ...latest,
-                  items: [...olderItems, ...latest.items],
-                  nextBefore: page.nextBefore,
-                  queuedCount: page.queuedCount,
-                },
-              },
-            };
-          });
+          await loadConversation(bridge, workspacePath, sessionId);
         });
       },
       async readToolEvidence(input) {
@@ -4030,6 +3869,9 @@ function createPreviewBridge(): DesktopBridge {
         ready: success({ subscribed: true, events: [], hasMore: false }),
         dispose: () => undefined,
       }),
+    },
+    sessionFrames: {
+      subscribe: () => ({ dispose: () => undefined }),
     },
     onUnavailable: () => () => undefined,
     onRecovered: () => () => undefined,

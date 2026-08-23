@@ -14,7 +14,6 @@ import {
   DESKTOP_RUNTIME_SCHEMA_CAPABILITY,
   DESKTOP_RUNTIME_SCHEMA_REVISION,
   isEphemeralRuntimeNotificationTopic,
-  isRunLiveRuntimeNotification,
   isJsonObject,
   encodeRuntimeFrame,
   LOCAL_RUNTIME_PROTOCOL_VERSION,
@@ -101,7 +100,6 @@ const MAX_REPLAY_EVENT_LIMIT = 9_999;
 const MAX_REPLAY_QUERY_LIMIT = 10_000;
 const REPLAY_RESPONSE_METADATA_RESERVE_BYTES = 64 * 1024;
 const MAX_REPLAY_EVENTS_BYTES = MAX_RUNTIME_FRAME_BYTES - REPLAY_RESPONSE_METADATA_RESERVE_BYTES;
-const MAX_LIVE_TERMINAL_STREAMS = 10_000;
 
 /**
  * Concrete daemon-facing owner for workspace Runs. It has no TUI dependency and is
@@ -111,7 +109,6 @@ const MAX_LIVE_TERMINAL_STREAMS = 10_000;
 export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
   private readonly registry: WorkspaceRuntimeRegistry<WorkspaceTaskRuntime>;
   private readonly listeners = new Set<(notification: RuntimeNotification) => void>();
-  private readonly terminalLiveStreams = new Set<string>();
   private readonly unsubscribers = new Map<string, () => void>();
   private readonly eventStores = new Map<string, SqliteRuntimeControlStore>();
   private readonly registrationStore: WorkspaceRegistrationStore;
@@ -519,38 +516,6 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
     this.publish(notification);
   }
 
-  /**
-   * Broadcast a bounded best-effort live update without adding it to RuntimeStore.
-   * Only protocol-declared ephemeral topics are accepted so callers cannot accidentally bypass
-   * durable delivery for ordinary lifecycle facts.
-   */
-  publishEphemeralNotification(notification: RuntimeNotification<"run.live">): void {
-    if (!isRunLiveRuntimeNotification(notification)) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.INVALID_PARAMS,
-        "Invalid run.live Runtime notification",
-      );
-    }
-    const item = notification.payload.item;
-    // 3-D Phase 1：subagent 快照无 streamId（无流语义），窄化访问。
-    const streamKey = liveStreamKey(notification, "streamId" in item ? item.streamId : undefined);
-    const runKey = liveStreamKey(notification);
-    if (
-      item.operation === "append" &&
-      (this.terminalLiveStreams.has(streamKey) || this.terminalLiveStreams.has(runKey))
-    ) {
-      return;
-    }
-    if (item.operation === "complete" || item.operation === "clear") {
-      this.terminalLiveStreams.add(streamKey);
-      if (this.terminalLiveStreams.size > MAX_LIVE_TERMINAL_STREAMS) {
-        const oldest = this.terminalLiveStreams.values().next().value;
-        if (oldest !== undefined) this.terminalLiveStreams.delete(oldest);
-      }
-    }
-    this.notifyListeners(notification, "ephemeral");
-  }
-
   closeRuntimes(): Promise<void> {
     if (this.runtimeClosePromise) return this.runtimeClosePromise;
     this.lifecycleState = "closing_runtimes";
@@ -604,7 +569,6 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
     for (const unsubscribe of this.unsubscribers.values()) unsubscribe();
     this.unsubscribers.clear();
     this.listeners.clear();
-    this.terminalLiveStreams.clear();
     for (const store of this.eventStores.values()) store.close();
     this.eventStores.clear();
   }
@@ -616,9 +580,6 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
     const store = this.eventStores.get(workspacePath);
     store?.close();
     this.eventStores.delete(workspacePath);
-    for (const key of [...this.terminalLiveStreams]) {
-      if (key.startsWith(`${workspacePath}\0`)) this.terminalLiveStreams.delete(key);
-    }
   }
 
   private publish(notification: RuntimeNotification, run?: DaemonRunRecord): void {
@@ -901,15 +862,6 @@ function eventPayload(
         }
       : {}),
   };
-}
-
-function liveStreamKey(notification: RuntimeNotification<"run.live">, streamId?: string): string {
-  return [
-    notification.scope.workspacePath,
-    notification.scope.sessionId ?? "",
-    notification.payload.runId,
-    streamId ?? "*",
-  ].join("\0");
 }
 
 function runPayload(run: {

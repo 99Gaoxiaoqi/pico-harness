@@ -7,7 +7,7 @@ export const CAPABILITY_SCOPE_RUNTIME_CAPABILITY = "capability-scopes-v1";
 export const MAX_RUNTIME_FRAME_BYTES = 1024 * 1024;
 /** Maximum UTF-8 payload exposed through a host-facing ToolResult projection. */
 export const MAX_TOOL_RESULT_ENVELOPE_TEXT_BYTES = 16 * 1024;
-export const EPHEMERAL_RUNTIME_NOTIFICATION_TOPICS = ["run.live"] as const;
+export const EPHEMERAL_RUNTIME_NOTIFICATION_TOPICS = [] as const;
 
 export type JsonScalar = boolean | null | number | string;
 export type JsonObject = { readonly [key: string]: JsonValue };
@@ -953,29 +953,6 @@ export type RuntimeMethodMap = {
       readonly nextCursor?: RuntimeTranscriptAdvanceCursor;
     };
   };
-  readonly "session.transcript": {
-    readonly params: WorkspaceParams & {
-      readonly sessionId: SessionId;
-      readonly cursor?: RuntimeTranscriptCursor;
-      /** @deprecated Use the structured fixed-watermark cursor. */
-      readonly before?: string;
-      readonly limit?: number;
-      readonly expectedRevision?: string;
-    };
-    readonly result: {
-      readonly session: RuntimeSession;
-      readonly items: readonly RuntimeConversationItem[];
-      readonly fragments?: readonly RuntimeTranscriptFragment[];
-      readonly activeRun?: RuntimeRun;
-      readonly queuedInputs: readonly RuntimeQueuedInput[];
-      readonly planProjection?: RuntimePlanProjection;
-      readonly discoveryProjection?: RuntimeDiscoveryProjection;
-      readonly nextCursor?: RuntimeTranscriptCursor;
-      /** @deprecated Compatibility alias while older clients migrate to nextCursor. */
-      readonly nextBefore?: string;
-      readonly revision: string;
-    };
-  };
   readonly "discovery.start": {
     readonly params: WorkspaceParams & {
       readonly sessionId: SessionId;
@@ -1681,7 +1658,6 @@ export const RUNTIME_METHODS = [
   "session.subscription.close",
   "session.transcript.page",
   "session.transcript.advance",
-  "session.transcript",
   "session.evidence.read",
   "discovery.start",
   "discovery.get",
@@ -1801,7 +1777,6 @@ export const DESKTOP_RUNTIME_METHODS = [
   "session.subscription.close",
   "session.transcript.page",
   "session.transcript.advance",
-  "session.transcript",
   "session.evidence.read",
   "discovery.start",
   "discovery.get",
@@ -1887,63 +1862,9 @@ export type RuntimeNotificationMap = {
     readonly sessionId: SessionId;
     readonly settings: RuntimeSessionSettings;
   };
-  readonly "session.transcriptUpdated": {
-    readonly sessionId: SessionId;
-    readonly operation: "reload" | "truncate";
-    readonly revision?: string;
-  };
   readonly "run.started": { readonly run: RuntimeRun };
   readonly "run.updated": { readonly run: RuntimeRun };
   readonly "run.finished": { readonly run: RuntimeRun };
-  /**
-   * Best-effort live projection. It is never stored or returned by events.replay.
-   * Item kinds: streaming text (thinking/assistantMessage), live tool cards (3-D
-   * Phase 1: started/output/completed snapshots keyed by toolCallId), and subagent
-   * activity snapshots (keyed by activityId). Clients must ignore unknown kinds —
-   * the union grows with new live surfaces.
-   */
-  readonly "run.live": {
-    readonly runId: RunId;
-    readonly item:
-      | {
-          readonly kind: "thinking" | "assistantMessage";
-          readonly operation: "append" | "complete" | "clear";
-          readonly streamId?: string;
-          readonly turnId?: string;
-          readonly delta?: string;
-          /** True when an intermediary retained only a bounded prefix of the live stream. */
-          readonly truncated?: boolean;
-        }
-      | {
-          readonly kind: "tool";
-          readonly toolCallId: string;
-          readonly toolName: string;
-          readonly operation: "started" | "append" | "completed" | "failed";
-          /** started 携带的有界调用参数（仅展示用途；canonical 真值在 transcript）。 */
-          readonly args?: string;
-          /** output 增量的流标识（append 专用）：`tool:live:{runId}:{toolCallId}:{stream}`。 */
-          readonly streamId?: string;
-          readonly turnId?: string;
-          readonly stream?: "stdout" | "stderr";
-          readonly delta?: string;
-          /** completed/failed 携带的有界结果投影文本（envelope projection）。 */
-          readonly summary?: string;
-          readonly truncated?: boolean;
-        }
-      | {
-          readonly kind: "subagent";
-          readonly operation: "update";
-          readonly activityId: string;
-          readonly status: string;
-          readonly turnId?: string;
-          readonly task?: string;
-          readonly agentName?: string;
-          readonly mode?: "explore" | "worker";
-          readonly currentAction?: string;
-          readonly summary?: string;
-          readonly truncated?: boolean;
-        };
-  };
   readonly "run.timeline": { readonly runId: RunId; readonly item: JsonObject };
   readonly "approval.requested": {
     readonly approvalId: ApprovalId;
@@ -2385,7 +2306,6 @@ function isRuntimeNotificationEnvelope(value: Record<string, unknown>): boolean 
 
 function isRuntimeNotification(value: Record<string, unknown>): boolean {
   if (!isRuntimeNotificationEnvelope(value)) return false;
-  if (value.topic === "run.live") return isRunLiveRuntimeNotification(value);
   if (value.topic === "discovery.updated") return isDiscoveryRuntimeNotification(value);
   if (typeof value.topic === "string" && value.topic.startsWith("memory.")) {
     return isMemoryRuntimeNotification(value);
@@ -2469,96 +2389,6 @@ function nonEmptyString(value: unknown): value is string {
 
 function nonNegativeSafeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-}
-
-/** Strict guard for the only ephemeral Runtime event accepted by buffering clients. */
-export function isRunLiveRuntimeNotification(
-  value: unknown,
-): value is RuntimeNotification<"run.live"> {
-  if (!isJsonObject(value) || !isRuntimeNotificationEnvelope(value) || value.topic !== "run.live") {
-    return false;
-  }
-  const payload = value.payload;
-  if (!isJsonObject(payload) || typeof payload.runId !== "string" || !payload.runId) return false;
-  const scope = value.scope;
-  if (!isJsonObject(scope) || scope.runId !== payload.runId) return false;
-  const item = payload.item;
-  if (!isJsonObject(item)) return false;
-  if (item.kind === "tool") {
-    return isRunLiveToolItem(item);
-  }
-  if (item.kind === "subagent") {
-    return isRunLiveSubagentItem(item);
-  }
-  if (item.kind !== "thinking" && item.kind !== "assistantMessage") {
-    return false;
-  }
-  if (item.operation !== "append" && item.operation !== "complete" && item.operation !== "clear") {
-    return false;
-  }
-  if (item.streamId !== undefined && typeof item.streamId !== "string") return false;
-  if (item.turnId !== undefined && (typeof item.turnId !== "string" || !item.turnId)) return false;
-  if (item.delta !== undefined && typeof item.delta !== "string") return false;
-  if (item.truncated !== undefined && typeof item.truncated !== "boolean") return false;
-  if (item.operation === "append") {
-    return (
-      typeof item.streamId === "string" &&
-      item.streamId.length > 0 &&
-      typeof item.delta === "string"
-    );
-  }
-  return item.delta === undefined && item.truncated === undefined;
-}
-
-/**
- * 3-D Phase 1 live tool item：append 需要 streamId+delta；started/completed/failed
- * 不带 delta（completed 的结果投影走 summary）。streamId 约定为
- * `tool:live:{runId}:{toolCallId}:{stream}`，与文本流同走 buffer 合流/截断机制。
- */
-function isRunLiveToolItem(item: Record<string, unknown>): boolean {
-  if (typeof item.toolCallId !== "string" || !item.toolCallId) return false;
-  if (typeof item.toolName !== "string" || !item.toolName) return false;
-  const operation = item.operation;
-  if (
-    operation !== "started" &&
-    operation !== "append" &&
-    operation !== "completed" &&
-    operation !== "failed"
-  ) {
-    return false;
-  }
-  if (item.stream !== undefined && item.stream !== "stdout" && item.stream !== "stderr") {
-    return false;
-  }
-  if (!optionalStringField(item, "args")) return false;
-  if (item.streamId !== undefined && typeof item.streamId !== "string") return false;
-  if (item.turnId !== undefined && (typeof item.turnId !== "string" || !item.turnId)) return false;
-  if (item.delta !== undefined && typeof item.delta !== "string") return false;
-  if (item.summary !== undefined && typeof item.summary !== "string") return false;
-  if (item.truncated !== undefined && typeof item.truncated !== "boolean") return false;
-  if (operation === "append") {
-    return (
-      typeof item.streamId === "string" &&
-      item.streamId.length > 0 &&
-      typeof item.delta === "string"
-    );
-  }
-  return item.delta === undefined;
-}
-
-/** 3-D Phase 1 live subagent item：活动卡片快照（activityId 幂等覆盖），无流语义。 */
-function isRunLiveSubagentItem(item: Record<string, unknown>): boolean {
-  if (item.operation !== "update") return false;
-  if (typeof item.activityId !== "string" || !item.activityId) return false;
-  if (typeof item.status !== "string" || !item.status) return false;
-  if (!optionalStringField(item, "task")) return false;
-  if (!optionalStringField(item, "agentName")) return false;
-  if (item.mode !== undefined && item.mode !== "explore" && item.mode !== "worker") return false;
-  if (!optionalStringField(item, "currentAction")) return false;
-  if (!optionalStringField(item, "summary")) return false;
-  if (item.turnId !== undefined && (typeof item.turnId !== "string" || !item.turnId)) return false;
-  if (item.truncated !== undefined && typeof item.truncated !== "boolean") return false;
-  return item.delta === undefined && item.streamId === undefined && item.stream === undefined;
 }
 
 function optionalStringField(value: Record<string, unknown>, key: string): boolean {
@@ -2712,34 +2542,6 @@ function assertNestedShape(
     if (Object.hasOwn(value, key)) rule(value[key], `${path}.${key}`);
   }
 }
-
-const runtimeTranscriptCursorParam: RuntimeParamRule = (value, path) => {
-  assertNestedShape(value, path, {
-    revision: boundedNonEmptyStringParam(512),
-    throughTranscriptSequence: positiveIntegerParam,
-    position: nonNegativeIntegerParam,
-    ordinal: nonNegativeIntegerParam,
-    byteOffset: nonNegativeIntegerParam,
-    direction: oneOfParam(["older", "newer"] as const),
-  });
-};
-
-const runtimeTranscriptParams = exactParamShape(
-  { workspacePath: stringParam, sessionId: stringParam },
-  {
-    cursor: runtimeTranscriptCursorParam,
-    before: stringParam,
-    limit: positiveIntegerParam,
-    expectedRevision: stringParam,
-  },
-);
-
-const runtimeTranscriptParamValidator: RuntimeParamValidator = (value) => {
-  runtimeTranscriptParams(value);
-  if (Object.hasOwn(value, "cursor") && Object.hasOwn(value, "before")) {
-    throw invalidParams("params.cursor 与 params.before 不能同时提供");
-  }
-};
 
 const transcriptProjectorVersionParam: RuntimeParamRule = (value, path) => {
   if (value !== TRANSCRIPT_PROJECTOR_VERSION) {
@@ -3108,7 +2910,11 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
   }),
   "session.transcript.page": exactParamShape(
     { workspacePath: stringParam, sessionId: stringParam, through: transcriptWatermarkParam },
-    { cursor: transcriptPageCursorParam, limit: positiveIntegerParam, maxBytes: positiveIntegerParam },
+    {
+      cursor: transcriptPageCursorParam,
+      limit: positiveIntegerParam,
+      maxBytes: positiveIntegerParam,
+    },
   ),
   "session.transcript.advance": exactParamShape(
     {
@@ -3123,7 +2929,6 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
       maxBytes: positiveIntegerParam,
     },
   ),
-  "session.transcript": runtimeTranscriptParamValidator,
   "session.evidence.read": exactParamShape(
     { workspacePath: stringParam, sessionId: stringParam, evidenceUri: stringParam },
     { offsetBytes: finiteNumberParam, limitBytes: finiteNumberParam },
@@ -3487,34 +3292,6 @@ const resultNonNegativeInteger: RuntimeResultRule = (value, path) => {
 const resultPositiveInteger: RuntimeResultRule = (value, path) => {
   resultNonNegativeInteger(value, path);
   if ((value as number) < 1) throw invalidResult(`${path} 必须是正整数`);
-};
-const runtimeTranscriptCursorResult: RuntimeResultRule = (value, path) => {
-  exactResultShape({
-    revision: resultNonEmptyString,
-    throughTranscriptSequence: resultPositiveInteger,
-    position: resultNonNegativeInteger,
-    ordinal: resultNonNegativeInteger,
-    byteOffset: resultNonNegativeInteger,
-    direction: resultOneOf(["older", "newer"]),
-  })(value, path);
-};
-const runtimeTranscriptFragmentResult: RuntimeResultRule = (value, path) => {
-  exactResultShape({
-    itemId: resultNonEmptyString,
-    position: resultNonNegativeInteger,
-    ordinal: resultNonNegativeInteger,
-    byteOffset: resultNonNegativeInteger,
-    byteLength: resultPositiveInteger,
-    totalBytes: resultPositiveInteger,
-    json: resultNonEmptyString,
-  })(value, path);
-  const fragment = value as RuntimeTranscriptFragment;
-  if (fragment.byteOffset + fragment.byteLength > fragment.totalBytes) {
-    throw invalidResult(`${path} 字节范围超过完整条目`);
-  }
-  if (new TextEncoder().encode(fragment.json).byteLength !== fragment.byteLength) {
-    throw invalidResult(`${path}.byteLength 与 UTF-8 正文不一致`);
-  }
 };
 const transcriptWatermarkResult: RuntimeResultRule = (value, path) => {
   exactResultShape({
@@ -4197,22 +3974,6 @@ const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
       changes: resultArray(transcriptChangeResult),
     },
     { nextCursor: transcriptAdvanceCursorResult },
-  ),
-  "session.transcript": resultShape(
-    {
-      session: runtimeSessionResult,
-      items: resultArray(runtimeConversationItemResult),
-      queuedInputs: resultArray(runtimeQueuedInputResult),
-      revision: resultString,
-    },
-    {
-      activeRun: runtimeRunResult,
-      fragments: resultArray(runtimeTranscriptFragmentResult),
-      nextCursor: runtimeTranscriptCursorResult,
-      nextBefore: resultString,
-      planProjection: resultJsonObject,
-      discoveryProjection: runtimeDiscoveryProjectionResult,
-    },
   ),
   "discovery.start": resultShape({ projection: runtimeDiscoveryProjectionResult }),
   "discovery.get": resultShape({ projection: runtimeDiscoveryProjectionResult }),

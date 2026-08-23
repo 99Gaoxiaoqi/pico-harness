@@ -41,6 +41,7 @@ function snapshot(): SessionSubscriptionSnapshot {
 class FakeSource implements SessionContinuityDataSource {
   readonly pageCalls: RuntimeParams<"session.transcript.page">[] = [];
   readonly advanceCalls: RuntimeParams<"session.transcript.advance">[] = [];
+  currentWatermark = watermark;
 
   async readOpenSnapshot(): Promise<SessionSubscriptionSnapshot> {
     return snapshot();
@@ -61,7 +62,7 @@ class FakeSource implements SessionContinuityDataSource {
   }
 
   async readTranscriptWatermark() {
-    return snapshot().watermark;
+    return this.currentWatermark;
   }
 }
 
@@ -315,6 +316,38 @@ test("page and advance operations preserve fixed watermark inputs", async () => 
   assert.equal(advance.through, through);
   assert.equal(source.pageCalls.length, 1);
   assert.equal(source.advanceCalls.length, 1);
+});
+
+test("committed transcript watermark is published once on the sequenced Session channel", async () => {
+  const source = new FakeSource();
+  const registry = new SessionSubscriptionRegistry("host-epoch-1", source);
+  const received: RuntimeSessionSubscriptionFrame[] = [];
+  const opened = await registry.open(
+    { workspacePath, sessionId },
+    {
+      connectionId: "connection-1",
+      push: async (frame) => {
+        received.push(frame);
+      },
+    },
+  );
+  registry.activate(workspacePath, sessionId, opened.subscriptionId, "connection-1");
+
+  source.currentWatermark = { ...watermark, throughSequence: 9 };
+  registry.publishTranscriptAdvanced(workspacePath, sessionId);
+  await waitFor(() => received.length === 1);
+  assert.deepEqual(received[0], {
+    hostEpoch: "host-epoch-1",
+    subscriptionId: opened.subscriptionId,
+    sequence: 1,
+    sessionId,
+    type: "subscription.transcript_advanced",
+    watermark: source.currentWatermark,
+  });
+
+  registry.publishTranscriptAdvanced(workspacePath, sessionId);
+  await tick();
+  assert.equal(received.length, 1, "同一 durable watermark 不得重复发布");
 });
 
 test("partial persistence failure is emitted once on the sequenced Session channel", async () => {

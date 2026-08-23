@@ -143,11 +143,30 @@ test("TUI 客户端：prompt.requested 事件投影（freeText 透传）+ respon
   let listener: ((notification: RuntimeNotification) => void) | undefined;
   const client = {
     connect: async () => undefined,
+    subscribeSessionFrames: () => ({ dispose: () => undefined }),
     request: async (method: string, params: Record<string, unknown>) => {
       requests.push({ method, params });
-      if (method === "session.transcript") {
-        return { items: [], queuedInputs: [], revision: "v1" };
+      if (method === "session.subscription.open") {
+        return {
+          session: {
+            sessionId: "s1",
+            workspacePath: "C:\\ws",
+            title: "Session",
+            status: "active",
+            pinned: false,
+            createdAt: 1,
+            updatedAt: 1,
+          },
+          hostEpoch: "host-test",
+          subscriptionId: "subscription-test",
+          nextSequence: 1,
+          watermark: { historyEpoch: "history-test", projectorVersion: 1, throughSequence: 0 },
+          durableTail: [],
+          activeOverlay: [],
+          queuedInputs: [],
+        };
       }
+      if (method === "session.subscription.close") return { closed: true };
       if (method === "prompt.respond") return { accepted: true, alreadyResolved: false };
       if (method === "prompt.cancel") return { cancelled: true };
       return {};
