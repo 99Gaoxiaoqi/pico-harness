@@ -66,6 +66,12 @@ export class BrowserViewportGenerationAuthority {
     return this.#generations.get(sessionId)?.generation ?? 0;
   }
 
+  seed(sessionId: string, generationFloor: number): void {
+    const current = this.#generations.get(sessionId);
+    if (current && current.generation >= generationFloor) return;
+    this.#generations.set(sessionId, { generation: generationFloor, issued: false });
+  }
+
   accept(sessionId: string, generation: number): boolean {
     const current = this.#generations.get(sessionId);
     return Boolean(current?.issued && current.generation === generation);
@@ -89,6 +95,76 @@ export class BrowserViewportGenerationAuthority {
 
   clear(): void {
     this.#generations.clear();
+  }
+}
+
+export interface BrowserGenerationFloorStore {
+  getGenerationFloor(sessionId: string): number;
+  setGenerationFloor(sessionId: string, generationFloor: number): number | undefined;
+  flushThrough(revision: number): Promise<void>;
+}
+
+export class PersistentBrowserViewportGenerationAuthority {
+  readonly #authority = new BrowserViewportGenerationAuthority();
+  readonly #seeded = new Set<string>();
+
+  constructor(private readonly store: BrowserGenerationFloorStore) {}
+
+  async acquire(sessionId: string): Promise<number> {
+    this.#seed(sessionId);
+    const generation = this.#authority.acquire(sessionId);
+    await this.#persist(sessionId, generation);
+    return generation;
+  }
+
+  current(sessionId: string): number {
+    this.#seed(sessionId);
+    return this.#authority.current(sessionId);
+  }
+
+  accept(sessionId: string, generation: number): boolean {
+    this.#seed(sessionId);
+    return this.#authority.accept(sessionId, generation);
+  }
+
+  revoke(sessionId: string): {
+    readonly generation: number;
+    readonly persistence: Promise<void>;
+  } {
+    this.#seed(sessionId);
+    const generation = this.#authority.revoke(sessionId);
+    return { generation, persistence: this.#persist(sessionId, generation) };
+  }
+
+  revokeAll(): {
+    readonly revocations: readonly { readonly sessionId: string; readonly generation: number }[];
+    readonly persistence: Promise<void>;
+  } {
+    const revocations = this.#authority.revokeAll();
+    let revision: number | undefined;
+    for (const { sessionId, generation } of revocations) {
+      revision = this.store.setGenerationFloor(sessionId, generation) ?? revision;
+    }
+    return {
+      revocations,
+      persistence: revision === undefined ? Promise.resolve() : this.store.flushThrough(revision),
+    };
+  }
+
+  clear(): void {
+    this.#authority.clear();
+    this.#seeded.clear();
+  }
+
+  #seed(sessionId: string): void {
+    if (this.#seeded.has(sessionId)) return;
+    this.#authority.seed(sessionId, this.store.getGenerationFloor(sessionId));
+    this.#seeded.add(sessionId);
+  }
+
+  async #persist(sessionId: string, generation: number): Promise<void> {
+    const revision = this.store.setGenerationFloor(sessionId, generation);
+    if (revision !== undefined) await this.store.flushThrough(revision);
   }
 }
 

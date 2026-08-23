@@ -3,7 +3,12 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { PersistentBrowserViewportGenerationAuthority } from "../../apps/desktop/src/main/browser-logic.js";
 import { BrowserUrlStore } from "../../apps/desktop/src/main/browser-url-store.js";
+import {
+  BrowserAgentBrokerError,
+  BrowserAgentCommandBroker,
+} from "../../src/daemon/browser-agent-command-broker.js";
 
 test("browser URL store atomically restores the last HTTP(S) URL per Session", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-browser-url-"));
@@ -20,10 +25,10 @@ test("browser URL store atomically restores the last HTTP(S) URL per Session", a
   assert.equal(restored.get("session-a"), "https://openai.com/");
   assert.equal(restored.get("session-b"), "http://example.com/path#two");
   assert.deepEqual(JSON.parse(await readFile(first.filePath, "utf8")), {
-    version: 1,
+    version: 2,
     sessions: [
-      { sessionId: "session-a", url: "https://openai.com/" },
-      { sessionId: "session-b", url: "http://example.com/path#two" },
+      { sessionId: "session-a", generationFloor: 0, url: "https://openai.com/" },
+      { sessionId: "session-b", generationFloor: 0, url: "http://example.com/path#two" },
     ],
   });
   assert.equal((await stat(first.filePath)).mode & 0o777, 0o600);
@@ -47,8 +52,78 @@ test("browser URL store deletes closed sessions and rejects unknown versions", a
   assert.equal(restored.get("session-a"), "https://example.com/keep");
   assert.equal(restored.get("session-b"), undefined);
 
-  await writeFile(store.filePath, JSON.stringify({ version: 2, sessions: [] }), "utf8");
+  await writeFile(store.filePath, JSON.stringify({ version: 3, sessions: [] }), "utf8");
   assert.equal(new BrowserUrlStore(root).get("session-a"), undefined);
+});
+
+test("browser generation floor survives Desktop restart against the same daemon", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-browser-generation-restart-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const broker = new BrowserAgentCommandBroker();
+
+  const firstStore = new BrowserUrlStore(root);
+  const firstMain = new PersistentBrowserViewportGenerationAuthority(firstStore);
+  const firstGeneration = await firstMain.acquire("session-a");
+  broker.acquireLease({ sessionId: "session-a", visible: true, generation: firstGeneration });
+  const disposed = firstMain.revokeAll();
+  for (const revocation of disposed.revocations) {
+    broker.acquireLease({
+      sessionId: revocation.sessionId,
+      visible: false,
+      generation: revocation.generation,
+    });
+  }
+  await disposed.persistence;
+
+  const restartedStore = new BrowserUrlStore(root);
+  const restartedMain = new PersistentBrowserViewportGenerationAuthority(restartedStore);
+  const restartedGeneration = await restartedMain.acquire("session-a");
+  assert.ok(restartedGeneration > disposed.revocations[0]!.generation);
+  assert.throws(
+    () =>
+      broker.acquireLease({
+        sessionId: "session-a",
+        visible: true,
+        generation: firstGeneration,
+      }),
+    (error: unknown) =>
+      error instanceof BrowserAgentBrokerError && error.code === "BROWSER_LEASE_STALE",
+  );
+  assert.equal(
+    broker.acquireLease({
+      sessionId: "session-a",
+      visible: true,
+      generation: restartedGeneration,
+    }).visible,
+    true,
+  );
+});
+
+test("browser URL store migrates v1 and fails safe on corrupt generation state", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-browser-generation-migration-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const filePath = join(root, "browser-urls.json");
+  await writeFile(
+    filePath,
+    JSON.stringify({
+      version: 1,
+      sessions: [{ sessionId: "session-a", url: "https://example.com/legacy" }],
+    }),
+    "utf8",
+  );
+  const migrated = new BrowserUrlStore(root);
+  assert.equal(migrated.get("session-a"), "https://example.com/legacy");
+  assert.equal(migrated.getGenerationFloor("session-a"), 0);
+  await migrated.flush();
+  assert.equal(JSON.parse(await readFile(filePath, "utf8")).version, 2);
+
+  await writeFile(filePath, "{corrupt", "utf8");
+  const errors: unknown[] = [];
+  const corrupt = new BrowserUrlStore(root, { onError: (error) => errors.push(error) });
+  assert.throws(() => corrupt.getGenerationFloor("session-a"), /拒绝当前操作/u);
+  assert.equal(errors.length, 1);
+  await corrupt.flush();
+  assert.equal(await readFile(filePath, "utf8"), "{corrupt");
 });
 
 test("browser URL store keeps memory retryable when an atomic publish fails", async (context) => {

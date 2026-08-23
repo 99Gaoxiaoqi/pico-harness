@@ -5,11 +5,11 @@ import type {
   DesktopBrowserState,
 } from "../preload/contract.js";
 import {
-  BrowserViewportGenerationAuthority,
   guardBrowserNavigation,
   normalizeActiveBrowserViewport,
   normalizeBrowserAddress,
   normalizePersistedBrowserNavigation,
+  PersistentBrowserViewportGenerationAuthority,
   replaceVisibleBrowserEntry,
 } from "./browser-logic.js";
 import { BrowserUrlStore } from "./browser-url-store.js";
@@ -19,7 +19,7 @@ export const PICO_BROWSER_PARTITION = "persist:pico-browser";
 const guardedSessions = new WeakSet<Session>();
 
 export interface EmbeddedBrowserAuthority {
-  acquireViewport(sessionId: string): number;
+  acquireViewport(sessionId: string): Promise<number>;
   isVisibleGeneration(sessionId: string, generation: number): boolean;
   setActiveSession(sessionId: string | null): void;
   setViewport(
@@ -59,10 +59,10 @@ export function createEmbeddedBrowserAuthority(options: {
   readonly userDataPath: string;
 }): EmbeddedBrowserAuthority {
   const entries = new Map<string, BrowserEntry>();
-  const viewportGenerations = new BrowserViewportGenerationAuthority();
   const urlStore = new BrowserUrlStore(options.userDataPath, {
     onError: (error) => console.error("Pico browser URL persistence failed", error),
   });
+  const viewportGenerations = new PersistentBrowserViewportGenerationAuthority(urlStore);
   let activeSessionId: string | null = null;
 
   const requireWindow = (): BrowserWindow => {
@@ -198,10 +198,12 @@ export function createEmbeddedBrowserAuthority(options: {
   const revoke = (
     sessionId: string,
   ): { readonly generation: number; readonly completion: Promise<void> } => {
-    const generation = viewportGenerations.revoke(sessionId);
+    const { generation, persistence } = viewportGenerations.revoke(sessionId);
     return {
       generation,
-      completion: options.onRevoke?.(sessionId, generation) ?? Promise.resolve(),
+      completion: Promise.all([persistence, options.onRevoke?.(sessionId, generation)]).then(
+        () => undefined,
+      ),
     };
   };
 
@@ -411,11 +413,12 @@ export function createEmbeddedBrowserAuthority(options: {
     },
 
     async dispose() {
-      const revocations = viewportGenerations
-        .revokeAll()
-        .map(({ sessionId, generation }) => options.onRevoke?.(sessionId, generation));
+      const revoked = viewportGenerations.revokeAll();
+      const revocations = revoked.revocations.map(({ sessionId, generation }) =>
+        options.onRevoke?.(sessionId, generation),
+      );
       for (const [sessionId, entry] of [...entries]) destroyEntry(sessionId, entry);
-      await Promise.all([...revocations, urlStore.flush()]);
+      await Promise.all([...revocations, revoked.persistence, urlStore.flush()]);
       viewportGenerations.clear();
     },
   };

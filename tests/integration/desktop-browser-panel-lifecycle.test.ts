@@ -1,6 +1,23 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { retainBrowserAgentLease } from "../../apps/desktop/src/renderer/workbar-panels/browser-agent-lease-controller.js";
+import {
+  acquireBrowserViewportIfActive,
+  isBrowserPanelActive,
+  retainBrowserAgentLease,
+} from "../../apps/desktop/src/renderer/workbar-panels/browser-agent-lease-controller.js";
+
+test("Archived Browser panel remount does not acquire a viewport until Session restore", async () => {
+  let acquisitions = 0;
+  const acquire = async () => ++acquisitions;
+  const archivedActive = isBrowserPanelActive(true, "archived");
+  assert.equal(archivedActive, false);
+  assert.equal(await acquireBrowserViewportIfActive(archivedActive, acquire), null);
+  assert.equal(acquisitions, 0);
+
+  const restoredActive = isBrowserPanelActive(true, "active");
+  assert.equal(restoredActive, true);
+  assert.equal(await acquireBrowserViewportIfActive(restoredActive, acquire), 1);
+});
 
 test("Browser panel immediately releases a lease acquired after effect disposal", async () => {
   const acquisition = Promise.withResolvers<{
