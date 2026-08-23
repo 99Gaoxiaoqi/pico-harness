@@ -5,3 +5,4 @@ export * from "./ReviewWorkbarPanel.js";
 export * from "./SideChatWorkbarPanel.js";
 export * from "./TasksWorkbarPanel.js";
 export * from "./TerminalWorkbarPanel.js";
+export * from "./WorkbarPanelHost.js";
