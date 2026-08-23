@@ -361,5 +361,57 @@ export const SESSIONS_SCOPE: SqliteSchemaScope = {
         ON runtime_transcript_records(session_id, source_sequence);
       `,
     ],
+    [
+      6,
+      `
+      CREATE TABLE runtime_transcript_projection_state (
+        session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+        history_epoch TEXT NOT NULL,
+        projector_version INTEGER NOT NULL CHECK (projector_version > 0),
+        through_sequence INTEGER NOT NULL DEFAULT 0 CHECK (through_sequence >= 0),
+        change_floor_sequence INTEGER NOT NULL DEFAULT 0 CHECK (change_floor_sequence >= 0)
+      );
+
+      CREATE TABLE runtime_transcript_item_versions (
+        session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+        item_id TEXT NOT NULL,
+        item_revision INTEGER NOT NULL CHECK (item_revision > 0),
+        valid_from_sequence INTEGER NOT NULL CHECK (valid_from_sequence >= 0),
+        valid_to_sequence INTEGER CHECK (
+          valid_to_sequence IS NULL OR valid_to_sequence > valid_from_sequence
+        ),
+        position_sequence INTEGER NOT NULL CHECK (position_sequence >= 0),
+        position_ordinal INTEGER NOT NULL CHECK (position_ordinal >= 0),
+        payload_json TEXT NOT NULL,
+        payload_digest TEXT NOT NULL CHECK (length(payload_digest) = 64),
+        PRIMARY KEY (session_id, item_id, item_revision)
+      );
+      CREATE UNIQUE INDEX runtime_transcript_item_versions_current
+        ON runtime_transcript_item_versions(session_id, item_id)
+        WHERE valid_to_sequence IS NULL;
+      CREATE INDEX runtime_transcript_item_versions_at_watermark
+        ON runtime_transcript_item_versions(
+          session_id, valid_from_sequence, valid_to_sequence,
+          position_sequence, position_ordinal, item_id
+        );
+
+      CREATE TABLE runtime_transcript_changes (
+        session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+        change_sequence INTEGER NOT NULL CHECK (change_sequence > 0),
+        change_ordinal INTEGER NOT NULL CHECK (change_ordinal >= 0),
+        op TEXT NOT NULL CHECK (op IN ('upsert','remove')),
+        item_id TEXT NOT NULL,
+        item_revision INTEGER NOT NULL CHECK (item_revision > 0),
+        payload_json TEXT,
+        PRIMARY KEY (session_id, change_sequence, change_ordinal),
+        CHECK (
+          (op = 'upsert' AND payload_json IS NOT NULL) OR
+          (op = 'remove' AND payload_json IS NULL)
+        )
+      );
+      CREATE INDEX runtime_transcript_changes_by_item
+        ON runtime_transcript_changes(session_id, item_id, change_sequence, change_ordinal);
+      `,
+    ],
   ]),
 };
