@@ -172,12 +172,10 @@ export class TranscriptReplica {
     if (token.generation !== this.#generation || this.#phase !== "opening") return false;
     try {
       assertOpenResult(this.#sessionId, result);
-      const sameHistory =
-        this.#watermark !== undefined && sameHistoryIdentity(this.#watermark, result.watermark);
-      const records = sameHistory
-        ? new Map(this.#records)
-        : new Map<string, RuntimeTranscriptItemRecord>();
-      const revisions = sameHistory ? new Map(this.#revisions) : new Map<string, number>();
+      // open 是权威快照边界。即使 history epoch 未变，断线期间也可能发生
+      // remove；保留旧 records 会让已删除条目永久复活。
+      const records = new Map<string, RuntimeTranscriptItemRecord>();
+      const revisions = new Map<string, number>();
       mergeRecords(records, revisions, result.durableTail);
       const overlays = new Map<string, RuntimeActiveOverlayEntry>();
       for (const overlay of result.activeOverlay) {
@@ -316,11 +314,13 @@ export class TranscriptReplica {
     this.#records = records;
     this.#revisions = revisions;
     this.#watermark = advance.through;
-    const upsertedIds = new Set(
-      advance.changes.flatMap((change) => (change.op === "upsert" ? [change.record.itemId] : [])),
+    const changedItemIds = new Set(
+      advance.changes.map((change) =>
+        change.op === "upsert" ? change.record.itemId : change.itemId,
+      ),
     );
     for (const [key, overlay] of this.#overlays) {
-      if (overlay.complete && upsertedIds.has(overlay.itemId)) this.#overlays.delete(key);
+      if (changedItemIds.has(overlay.itemId)) this.#overlays.delete(key);
     }
     if (
       this.#pendingWatermark &&
