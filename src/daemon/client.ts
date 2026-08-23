@@ -26,6 +26,7 @@ import {
 } from "./protocol.js";
 import { resolveCanonicalPicoHome, resolveLocalDaemonEndpoint } from "./endpoint.js";
 import { resolveLocalDaemonLockPath } from "./instance-lock.js";
+import { retireSessionOwnerLeasesForTerminatedProcess } from "../storage/session-owner-lease.js";
 import {
   ensurePicoRuntimeHostEventOperationsRegistered,
   ensurePicoRuntimeHostOperationsRegistered,
@@ -772,7 +773,22 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
       const processExited = !isProcessAlive(registration.pid);
       const registrationExited = currentRegistration?.hostEpoch !== registration.hostEpoch;
       const legacyLockExited = await legacyLockReleasedBy(legacyLockPath, registration.pid);
-      if (processExited && registrationExited && legacyLockExited) return;
+      if (processExited && registrationExited && legacyLockExited) {
+        try {
+          await retireSessionOwnerLeasesForTerminatedProcess({
+            picoHome: this.rootPath,
+            expectedPid: registration.pid,
+          });
+          return;
+        } catch (error) {
+          throw new RuntimeClientError(
+            "RUNTIME_SHUTDOWN_UNCONFIRMED",
+            `Runtime daemon 已退出，但 Session 所有权迁移失败（PID ${registration.pid}）`,
+            true,
+            { cause: error },
+          );
+        }
+      }
       lastState = `pidExited=${processExited}, registrationExited=${registrationExited}, legacyLockExited=${legacyLockExited}`;
       await sleep(
         Math.min(LEGACY_SHUTDOWN_CONFIRMATION_POLL_MS, Math.max(0, deadline - performance.now())),

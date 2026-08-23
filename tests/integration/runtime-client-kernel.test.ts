@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { setTimeout as delay } from "node:timers/promises";
@@ -19,6 +19,10 @@ import {
   RuntimeClientError,
   type RuntimeNotification,
 } from "../../src/daemon/index.js";
+import { Session } from "../../src/engine/session.js";
+import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
+import { resolveOwnerLeaseTombstonePath } from "../../src/storage/owner-lease.js";
+import { sessionOwnerLeaseDirectory } from "../../src/storage/session-owner-lease.js";
 import { resumeDesktopTerminalGenerationWithUpgrade } from "../../apps/desktop/src/main/daemon-controller.js";
 
 /**
@@ -295,6 +299,129 @@ test("kernel client: a shutdown response remains an error while the old host is 
   });
 });
 
+test("kernel client: confirmed legacy shutdown retires its fresh Session lease for immediate takeover", async (t) => {
+  const harness = await startKernelClientHarness(t);
+  const sessionId = "legacy-fresh-lease-takeover";
+  const initial = new Session(sessionId, harness.workspacePath, {
+    persistence: true,
+    picoHome: harness.picoHome,
+  });
+  await initial.recover();
+  await initial.close();
+
+  const leaseDirectory = sessionOwnerLeaseDirectory(
+    resolvePicoPaths(harness.workspacePath, { picoHome: harness.picoHome }).workspace,
+    sessionId,
+  );
+  const previousMode = process.env["PICO_TEST_LEGACY_SHUTDOWN_MODE"];
+  const previousLeaseDirectory = process.env["PICO_TEST_LEGACY_SESSION_LEASE_DIRECTORY"];
+  process.env["PICO_TEST_LEGACY_SHUTDOWN_MODE"] = "response-exit";
+  process.env["PICO_TEST_LEGACY_SESSION_LEASE_DIRECTORY"] = leaseDirectory;
+  t.after(() => restoreEnvironment("PICO_TEST_LEGACY_SHUTDOWN_MODE", previousMode));
+  t.after(() =>
+    restoreEnvironment("PICO_TEST_LEGACY_SESSION_LEASE_DIRECTORY", previousLeaseDirectory),
+  );
+  const fixture = fileURLToPath(
+    new URL("../fixtures/runtime-host-legacy-shutdown-candidate.ts", import.meta.url),
+  );
+  await startLegacyShutdownFixture(t, harness.picoHome, fixture);
+  const legacy = new LocalRuntimeClient(undefined, {
+    runtimeHostRootPath: harness.picoHome,
+    candidateEntrypoint: fixture,
+  });
+  t.after(() => legacy.close());
+  await legacy.connect();
+  const abandonedOwner = JSON.parse(await readFile(join(leaseDirectory, "owner.json"), "utf8")) as {
+    leaseId: string;
+  };
+
+  await legacy.shutdownDaemon();
+  await assert.doesNotReject(
+    access(resolveOwnerLeaseTombstonePath(leaseDirectory, abandonedOwner.leaseId)),
+    "旧 lease 必须通过 tombstone 迁移保留 ABA 栅栏",
+  );
+  await assert.rejects(access(leaseDirectory), { code: "ENOENT" });
+  const successor = new LocalRuntimeClient(undefined, { runtimeHostRootPath: harness.picoHome });
+  t.after(() => successor.close());
+  const takeoverStartedAt = performance.now();
+  await successor.request("workspace.trust", {
+    workspacePath: harness.workspacePath,
+    trusted: true,
+  });
+  await successor.request("goal.get", { workspacePath: harness.workspacePath, sessionId });
+  assert.ok(
+    performance.now() - takeoverStartedAt < 10_000,
+    "successor 应立即接管同一 Session，而不是等待 30s stale window",
+  );
+});
+
+test("kernel client: compatibility retirement preserves other PID, hostname, and malformed leases", async (t) => {
+  const harness = await startKernelClientHarness(t);
+  const previousMode = process.env["PICO_TEST_LEGACY_SHUTDOWN_MODE"];
+  process.env["PICO_TEST_LEGACY_SHUTDOWN_MODE"] = "response-exit";
+  t.after(() => restoreEnvironment("PICO_TEST_LEGACY_SHUTDOWN_MODE", previousMode));
+  const fixture = fileURLToPath(
+    new URL("../fixtures/runtime-host-legacy-shutdown-candidate.ts", import.meta.url),
+  );
+  const fixtureRegistration = await startLegacyShutdownFixture(t, harness.picoHome, fixture);
+  const ownerRoot = join(
+    resolvePicoPaths(harness.workspacePath, { picoHome: harness.picoHome }).workspace.root,
+    "session-owners",
+  );
+  const now = new Date().toISOString();
+  const records = [
+    {
+      directory: join(ownerRoot, "a".repeat(64)),
+      contents: `${JSON.stringify({
+        schemaVersion: 1,
+        leaseId: "other-pid",
+        ownerId: "negative-fixture",
+        pid: process.pid,
+        hostname: hostname(),
+        processStartedAt: now,
+        acquiredAt: now,
+        heartbeatAt: now,
+      })}\n`,
+    },
+    {
+      directory: join(ownerRoot, "b".repeat(64)),
+      contents: `${JSON.stringify({
+        schemaVersion: 1,
+        leaseId: "foreign-host",
+        ownerId: "negative-fixture",
+        pid: fixtureRegistration.pid,
+        hostname: "remote.invalid",
+        processStartedAt: now,
+        acquiredAt: now,
+        heartbeatAt: now,
+      })}\n`,
+    },
+    {
+      directory: join(ownerRoot, "c".repeat(64)),
+      contents: "{ malformed owner record\n",
+    },
+  ];
+  for (const record of records) {
+    await mkdir(record.directory, { recursive: true });
+    await writeFile(join(record.directory, "owner.json"), record.contents, "utf8");
+  }
+  const legacy = new LocalRuntimeClient(undefined, {
+    runtimeHostRootPath: harness.picoHome,
+    candidateEntrypoint: fixture,
+  });
+  t.after(() => legacy.close());
+  await legacy.connect();
+
+  await legacy.shutdownDaemon();
+  for (const record of records) {
+    assert.equal(
+      await readFile(join(record.directory, "owner.json"), "utf8"),
+      record.contents,
+      `兼容迁移不得改写 ${record.directory}`,
+    );
+  }
+});
+
 test("kernel client: non-idempotent write does not auto-retry after daemon death (P1-2)", async (t) => {
   const harness = await startKernelClientHarness(t);
   const client = new LocalRuntimeClient(undefined, {
@@ -370,7 +497,7 @@ async function startLegacyShutdownFixture(
   t: { after(hook: () => unknown): void },
   picoHome: string,
   fixture: string,
-): Promise<void> {
+): Promise<NonNullable<Awaited<ReturnType<typeof readHostRegistration>>>> {
   const capability = await resolveStorageRoot({ path: picoHome, kind: "interactive" });
   const tsxLoader = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
   const child = spawn(
@@ -393,4 +520,7 @@ async function startLegacyShutdownFixture(
     10_000,
   );
   assert.equal(registered, true, "旧行为 fixture 应发布 registration");
+  const registration = await readHostRegistration(controlDirectory);
+  assert.ok(registration);
+  return registration;
 }
