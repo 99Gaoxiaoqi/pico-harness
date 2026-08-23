@@ -455,6 +455,22 @@ export type RuntimeTranscriptItemRecord = JsonObject & {
   readonly item: RuntimeConversationItem;
 };
 
+/**
+ * One UTF-8-safe range of the canonical JSON encoding of `RuntimeTranscriptItemRecord.item`.
+ * Stable record metadata is repeated on every fragment so clients can validate and assemble
+ * without retaining Host-side state between fixed-watermark requests.
+ */
+export type RuntimeTranscriptItemFragment = JsonObject & {
+  readonly itemId: string;
+  readonly itemRevision: number;
+  readonly positionSequence: number;
+  readonly positionOrdinal: number;
+  readonly byteOffset: number;
+  readonly byteLength: number;
+  readonly totalBytes: number;
+  readonly json: string;
+};
+
 export type RuntimeTranscriptPageCursor = JsonObject & {
   readonly historyEpoch: string;
   readonly projectorVersion: typeof TRANSCRIPT_PROJECTOR_VERSION;
@@ -909,6 +925,7 @@ export type RuntimeMethodMap = {
       readonly nextSequence: number;
       readonly watermark: RuntimeTranscriptWatermark;
       readonly durableTail: readonly RuntimeTranscriptItemRecord[];
+      readonly durableTailFragments?: readonly RuntimeTranscriptItemFragment[];
       readonly activeOverlay: readonly RuntimeActiveOverlayEntry[];
       readonly queuedInputs: readonly RuntimeQueuedInput[];
       readonly activeRun?: RuntimeRun;
@@ -934,6 +951,7 @@ export type RuntimeMethodMap = {
     readonly result: {
       readonly watermark: RuntimeTranscriptWatermark;
       readonly items: readonly RuntimeTranscriptItemRecord[];
+      readonly fragments?: readonly RuntimeTranscriptItemFragment[];
       readonly nextCursor?: RuntimeTranscriptPageCursor;
     };
   };
@@ -950,6 +968,7 @@ export type RuntimeMethodMap = {
       readonly after: RuntimeTranscriptWatermark;
       readonly through: RuntimeTranscriptWatermark;
       readonly changes: readonly RuntimeTranscriptChange[];
+      readonly fragments?: readonly RuntimeTranscriptItemFragment[];
       readonly nextCursor?: RuntimeTranscriptAdvanceCursor;
     };
   };
@@ -3781,6 +3800,26 @@ const transcriptItemRecordResult: RuntimeResultRule = exactResultShape({
   item: runtimeConversationItemResult,
 });
 
+const transcriptItemFragmentResult: RuntimeResultRule = (value, path) => {
+  exactResultShape({
+    itemId: resultNonEmptyString,
+    itemRevision: resultPositiveInteger,
+    positionSequence: resultNonNegativeInteger,
+    positionOrdinal: resultNonNegativeInteger,
+    byteOffset: resultNonNegativeInteger,
+    byteLength: resultPositiveInteger,
+    totalBytes: resultPositiveInteger,
+    json: resultString,
+  })(value, path);
+  const fragment = value as RuntimeTranscriptItemFragment;
+  if (fragment.byteOffset + fragment.byteLength > fragment.totalBytes) {
+    throw invalidResult(`${path} 字节范围超过完整 item JSON`);
+  }
+  if (new TextEncoder().encode(fragment.json).byteLength !== fragment.byteLength) {
+    throw invalidResult(`${path}.byteLength 与 UTF-8 JSON 分片不一致`);
+  }
+};
+
 const transcriptChangeResult: RuntimeResultRule = (value, path) => {
   if (!isJsonObject(value)) throw invalidResult(`${path} 必须是 transcript change 对象`);
   if (value["op"] === "upsert") {
@@ -3955,6 +3994,7 @@ const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
     },
     {
       activeRun: runtimeRunResult,
+      durableTailFragments: resultArray(transcriptItemFragmentResult),
       olderCursor: transcriptPageCursorResult,
       continuityDegradedReason: resultOneOf(["partial_persistence_failed", "recovery_failed"]),
     },
@@ -3965,7 +4005,10 @@ const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
       watermark: transcriptWatermarkResult,
       items: resultArray(transcriptItemRecordResult),
     },
-    { nextCursor: transcriptPageCursorResult },
+    {
+      fragments: resultArray(transcriptItemFragmentResult),
+      nextCursor: transcriptPageCursorResult,
+    },
   ),
   "session.transcript.advance": exactResultShape(
     {
@@ -3973,7 +4016,10 @@ const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
       through: transcriptWatermarkResult,
       changes: resultArray(transcriptChangeResult),
     },
-    { nextCursor: transcriptAdvanceCursorResult },
+    {
+      fragments: resultArray(transcriptItemFragmentResult),
+      nextCursor: transcriptAdvanceCursorResult,
+    },
   ),
   "discovery.start": resultShape({ projection: runtimeDiscoveryProjectionResult }),
   "discovery.get": resultShape({ projection: runtimeDiscoveryProjectionResult }),

@@ -7,6 +7,7 @@ import {
   type RuntimeSessionSubscriptionFrame,
   type RuntimeTranscriptAdvanceCursor,
   type RuntimeTranscriptChange,
+  type RuntimeTranscriptItemFragment,
   type RuntimeTranscriptItemRecord,
   type RuntimeTranscriptPageCursor,
   type RuntimeTranscriptWatermark,
@@ -83,7 +84,18 @@ interface AdvanceState {
   readonly after: RuntimeTranscriptWatermark;
   readonly through: RuntimeTranscriptWatermark;
   readonly changes: RuntimeTranscriptChange[];
+  readonly fragments: Map<string, ItemFragmentAssembly>;
   cursor?: RuntimeTranscriptAdvanceCursor;
+}
+
+interface ItemFragmentAssembly {
+  readonly itemId: string;
+  readonly itemRevision: number;
+  readonly positionSequence: number;
+  readonly positionOrdinal: number;
+  readonly totalBytes: number;
+  json: string;
+  byteLength: number;
 }
 
 interface OpenDraft {
@@ -120,6 +132,7 @@ export class TranscriptReplica {
   #earlyFrames: RuntimeSessionSubscriptionFrame[] = [];
   #earlyFrameBytes = 0;
   #advance: AdvanceState | undefined;
+  #pageFragments = new Map<string, ItemFragmentAssembly>();
 
   constructor(sessionId: string, options: TranscriptReplicaOptions = {}) {
     if (!sessionId) throw new Error("TranscriptReplica requires a sessionId");
@@ -162,6 +175,7 @@ export class TranscriptReplica {
     this.#earlyFrames = [];
     this.#earlyFrameBytes = 0;
     this.#advance = undefined;
+    this.#pageFragments = new Map();
     return { generation: this.#generation };
   }
 
@@ -177,6 +191,15 @@ export class TranscriptReplica {
       const records = new Map<string, RuntimeTranscriptItemRecord>();
       const revisions = new Map<string, number>();
       mergeRecords(records, revisions, result.durableTail);
+      const pageFragments = new Map<string, ItemFragmentAssembly>();
+      mergeRecords(
+        records,
+        revisions,
+        consumeItemFragments(pageFragments, result.durableTailFragments ?? []),
+      );
+      if (pageFragments.size > 0 && !result.olderCursor) {
+        throw new Error("Open transcript fragment is incomplete without an older cursor");
+      }
       const overlays = new Map<string, RuntimeActiveOverlayEntry>();
       for (const overlay of result.activeOverlay) {
         assertOverlay(overlay);
@@ -210,6 +233,7 @@ export class TranscriptReplica {
       this.#queuedInputs = result.queuedInputs;
       this.#activeRun = draft.activeRun;
       this.#olderCursor = result.olderCursor;
+      this.#pageFragments = pageFragments;
       this.#earlyFrames = [];
       this.#earlyFrameBytes = 0;
       if (result.continuityDegradedReason) {
@@ -274,6 +298,7 @@ export class TranscriptReplica {
       after: this.#watermark,
       through,
       changes: [],
+      fragments: new Map(),
     };
     this.#advance = advance;
     return advanceRequest(advance);
@@ -300,7 +325,15 @@ export class TranscriptReplica {
     ) {
       return this.recover("advance_gap");
     }
-    advance.changes.push(...page.changes);
+    try {
+      const completed = consumeItemFragments(advance.fragments, page.fragments ?? []);
+      advance.changes.push(
+        ...completed.map((record): RuntimeTranscriptChange => ({ op: "upsert", record })),
+        ...page.changes,
+      );
+    } catch {
+      return this.recover("advance_gap");
+    }
     if (page.nextCursor) {
       if (!validNextAdvanceCursor(page.nextCursor, advance)) {
         return this.recover("advance_gap");
@@ -308,6 +341,7 @@ export class TranscriptReplica {
       advance.cursor = page.nextCursor;
       return { kind: "next", request: advanceRequest(advance) };
     }
+    if (advance.fragments.size > 0) return this.recover("advance_gap");
     const records = new Map(this.#records);
     const revisions = new Map(this.#revisions);
     applyChanges(records, revisions, advance.changes);
@@ -357,11 +391,29 @@ export class TranscriptReplica {
       this.enterRecovering("advance_gap");
       return "recovering";
     }
+    if (page.nextCursor && !validNextPageCursor(page.nextCursor, request.cursor)) {
+      this.enterRecovering("advance_gap");
+      return "recovering";
+    }
     const records = new Map(this.#records);
     const revisions = new Map(this.#revisions);
-    mergeRecords(records, revisions, page.items);
+    const fragments = cloneItemFragmentAssemblies(this.#pageFragments);
+    try {
+      mergeRecords(records, revisions, [
+        ...consumeItemFragments(fragments, page.fragments ?? []),
+        ...page.items,
+      ]);
+    } catch {
+      this.enterRecovering("advance_gap");
+      return "recovering";
+    }
+    if (fragments.size > 0 && !page.nextCursor) {
+      this.enterRecovering("advance_gap");
+      return "recovering";
+    }
     this.#records = records;
     this.#revisions = revisions;
+    this.#pageFragments = fragments;
     this.#olderCursor = page.nextCursor;
     return "applied";
   }
@@ -384,6 +436,7 @@ export class TranscriptReplica {
     this.#earlyFrames = [];
     this.#earlyFrameBytes = 0;
     this.#advance = undefined;
+    this.#pageFragments.clear();
   }
 
   private bufferEarlyFrame(frame: RuntimeSessionSubscriptionFrame): TranscriptReplicaFrameResult {
@@ -533,6 +586,7 @@ function assertOpenResult(
   }
   assertWatermark(result.watermark);
   for (const record of result.durableTail) assertRecord(record);
+  for (const fragment of result.durableTailFragments ?? []) assertItemFragment(fragment);
   if (result.olderCursor) {
     if (
       result.olderCursor.historyEpoch !== result.watermark.historyEpoch ||
@@ -568,6 +622,86 @@ function assertRecord(record: RuntimeTranscriptItemRecord): void {
   ) {
     throw new Error("Transcript item record is invalid");
   }
+}
+
+function assertItemFragment(fragment: RuntimeTranscriptItemFragment): void {
+  if (
+    !fragment.itemId ||
+    !Number.isSafeInteger(fragment.itemRevision) ||
+    fragment.itemRevision < 1 ||
+    !Number.isSafeInteger(fragment.positionSequence) ||
+    fragment.positionSequence < 0 ||
+    !Number.isSafeInteger(fragment.positionOrdinal) ||
+    fragment.positionOrdinal < 0 ||
+    !Number.isSafeInteger(fragment.byteOffset) ||
+    fragment.byteOffset < 0 ||
+    !Number.isSafeInteger(fragment.byteLength) ||
+    fragment.byteLength < 1 ||
+    !Number.isSafeInteger(fragment.totalBytes) ||
+    fragment.totalBytes < 1 ||
+    fragment.byteOffset + fragment.byteLength > fragment.totalBytes ||
+    utf8Bytes(fragment.json) !== fragment.byteLength
+  ) {
+    throw new Error("Transcript item fragment is invalid");
+  }
+}
+
+function consumeItemFragments(
+  assemblies: Map<string, ItemFragmentAssembly>,
+  fragments: readonly RuntimeTranscriptItemFragment[],
+): RuntimeTranscriptItemRecord[] {
+  const completed: RuntimeTranscriptItemRecord[] = [];
+  for (const fragment of fragments) {
+    assertItemFragment(fragment);
+    const current = assemblies.get(fragment.itemId);
+    if (!current) {
+      if (fragment.byteOffset !== 0) throw new Error("Transcript item fragment starts with a gap");
+      assemblies.set(fragment.itemId, {
+        itemId: fragment.itemId,
+        itemRevision: fragment.itemRevision,
+        positionSequence: fragment.positionSequence,
+        positionOrdinal: fragment.positionOrdinal,
+        totalBytes: fragment.totalBytes,
+        json: fragment.json,
+        byteLength: fragment.byteLength,
+      });
+    } else {
+      if (
+        current.itemRevision !== fragment.itemRevision ||
+        current.positionSequence !== fragment.positionSequence ||
+        current.positionOrdinal !== fragment.positionOrdinal ||
+        current.totalBytes !== fragment.totalBytes ||
+        current.byteLength !== fragment.byteOffset
+      ) {
+        throw new Error("Transcript item fragments overlap, gap, or change identity");
+      }
+      current.json += fragment.json;
+      current.byteLength += fragment.byteLength;
+    }
+    const assembled = assemblies.get(fragment.itemId)!;
+    if (assembled.byteLength !== utf8Bytes(assembled.json)) {
+      throw new Error("Transcript item fragment UTF-8 length drifted while assembling");
+    }
+    if (assembled.byteLength === assembled.totalBytes) {
+      const record: RuntimeTranscriptItemRecord = {
+        itemId: assembled.itemId,
+        itemRevision: assembled.itemRevision,
+        positionSequence: assembled.positionSequence,
+        positionOrdinal: assembled.positionOrdinal,
+        item: JSON.parse(assembled.json) as RuntimeTranscriptItemRecord["item"],
+      };
+      assertRecord(record);
+      assemblies.delete(fragment.itemId);
+      completed.push(record);
+    }
+  }
+  return completed;
+}
+
+function cloneItemFragmentAssemblies(
+  source: ReadonlyMap<string, ItemFragmentAssembly>,
+): Map<string, ItemFragmentAssembly> {
+  return new Map([...source].map(([key, value]) => [key, { ...value }]));
 }
 
 function assertOverlay(overlay: RuntimeActiveOverlayEntry): void {
@@ -659,6 +793,30 @@ function validNextAdvanceCursor(
   const previous = advance.cursor;
   if (!previous) return true;
   return compareAdvanceCursor(next, previous) > 0;
+}
+
+function validNextPageCursor(
+  next: RuntimeTranscriptPageCursor,
+  previous: RuntimeTranscriptPageCursor,
+): boolean {
+  if (
+    next.historyEpoch !== previous.historyEpoch ||
+    next.projectorVersion !== previous.projectorVersion ||
+    next.throughSequence !== previous.throughSequence
+  ) {
+    return false;
+  }
+  if (
+    next.positionSequence === previous.positionSequence &&
+    next.positionOrdinal === previous.positionOrdinal
+  ) {
+    return next.byteOffset > previous.byteOffset;
+  }
+  return (
+    next.positionSequence < previous.positionSequence ||
+    (next.positionSequence === previous.positionSequence &&
+      next.positionOrdinal < previous.positionOrdinal)
+  );
 }
 
 function compareAdvanceCursor(

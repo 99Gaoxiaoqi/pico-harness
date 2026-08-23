@@ -7,8 +7,9 @@ import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import type { RuntimeEvent } from "../../src/engine/session-runtime-event.js";
 import {
-  RuntimeEventStoreIntegrityError,
   RuntimeEventStoreRunSealedError,
+  type RuntimeTranscriptChangeCursor,
+  type RuntimeTranscriptProjectionCursor,
 } from "../../src/storage/runtime-event-store-contracts.js";
 import { operationalDatabasePath } from "../../src/storage/sqlite/sqlite-database.js";
 import {
@@ -136,14 +137,151 @@ test("transcript projection keeps fixed watermarks and advances from the change 
         }),
       RuntimeTranscriptResetRequiredError,
     );
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("projection page and advance resume one oversized item on UTF-8 boundaries", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pico-transcript-fragments-"));
+  const workspace = join(root, "workspace");
+  mkdirSync(workspace, { recursive: true });
+  const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "storage") });
+  try {
+    const sessionId = "fragment-session";
+    await store.initializeSession({ sessionId, workDir: workspace });
+    const before = await store.append(message("older-event", sessionId, "user", "older"));
+    const content = "你🙂好🌍".repeat(180);
+    const appended = await store.append(
+      message("large-event", sessionId, "assistant", content, "run-large", "turn-large"),
+    );
+
+    let pageCursor: RuntimeTranscriptProjectionCursor | undefined;
+    let pageJson = "";
+    let pageOffset = 0;
+    const ordinaryItemIds: string[] = [];
+    let pageCount = 0;
+    do {
+      const page = await store.readTranscriptProjectionPage({
+        sessionId,
+        through: appended.transcriptWatermark!,
+        ...(pageCursor ? { cursor: pageCursor } : {}),
+        maxBytes: 256,
+        limit: 2,
+      });
+      assert.deepEqual(page.watermark, appended.transcriptWatermark);
+      for (const fragment of page.fragments ?? []) {
+        assert.equal(fragment.itemId, "message:turn-large:assistant");
+        assert.equal(fragment.byteOffset, pageOffset);
+        assert.equal(Buffer.byteLength(fragment.json), fragment.byteLength);
+        pageOffset += fragment.byteLength;
+        pageJson += fragment.json;
+      }
+      ordinaryItemIds.push(...page.items.map(({ itemId }) => itemId));
+      pageCursor = page.nextCursor;
+      pageCount += 1;
+      assert.ok(pageCount < 200, "projection fragment cursor must make progress");
+    } while (pageCursor);
+    assert.ok(pageCount > 2);
+    assert.equal(pageOffset, Buffer.byteLength(pageJson));
+    assert.equal(
+      (JSON.parse(pageJson) as { content: string }).content,
+      content,
+      "projection fragments must have no overlap or gap",
+    );
+    assert.deepEqual(ordinaryItemIds, ["message:older-event:user"]);
+
+    let advanceCursor: RuntimeTranscriptChangeCursor | undefined;
+    let advanceJson = "";
+    let advanceOffset = 0;
+    let advanceCount = 0;
+    do {
+      const page = await store.readTranscriptAdvancePage({
+        sessionId,
+        after: before.transcriptWatermark!,
+        through: appended.transcriptWatermark!,
+        ...(advanceCursor ? { cursor: advanceCursor } : {}),
+        maxBytes: 257,
+        limit: 2,
+      });
+      assert.deepEqual(page.changes, []);
+      for (const fragment of page.fragments ?? []) {
+        assert.equal(fragment.byteOffset, advanceOffset);
+        assert.equal(Buffer.byteLength(fragment.json), fragment.byteLength);
+        advanceOffset += fragment.byteLength;
+        advanceJson += fragment.json;
+      }
+      advanceCursor = page.nextCursor;
+      advanceCount += 1;
+      assert.ok(advanceCount < 200, "advance fragment cursor must make progress");
+    } while (advanceCursor);
+    assert.ok(advanceCount > 2);
+    assert.equal(
+      (JSON.parse(advanceJson) as { content: string }).content,
+      content,
+      "advance fragments must have no overlap or gap",
+    );
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("transcript truncation rotates history and invalidates old fixed watermarks", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pico-transcript-truncate-"));
+  const workspace = join(root, "workspace");
+  mkdirSync(workspace, { recursive: true });
+  const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "storage") });
+  try {
+    const sessionId = "truncate-session";
+    await store.initializeSession({ sessionId, workDir: workspace });
+    await store.append(message("first", sessionId, "user", "first"));
+    await store.append(message("second", sessionId, "user", "second"));
+    const old = await store.append(message("third", sessionId, "user", "third"));
+    const truncated = await store.appendTranscriptEvent(
+      sessionId,
+      {
+        eventId: "truncate-event",
+        sequence: 1,
+        createdAt: Date.parse("2026-08-23T00:00:00.000Z"),
+        type: "transcript.truncated",
+        entryCount: 1,
+        operationId: "truncate-operation",
+      },
+      { eventId: "runtime-truncate" },
+    );
+    assert.notEqual(
+      truncated.transcriptWatermark?.historyEpoch,
+      old.transcriptWatermark?.historyEpoch,
+    );
     await assert.rejects(
       () =>
         store.readTranscriptProjectionPage({
           sessionId,
-          through: secondWatermark,
-          maxBytes: 1,
+          through: old.transcriptWatermark!,
+          maxBytes: 16_384,
         }),
-      RuntimeEventStoreIntegrityError,
+      RuntimeTranscriptResetRequiredError,
+    );
+    await assert.rejects(
+      () =>
+        store.readTranscriptAdvancePage({
+          sessionId,
+          after: old.transcriptWatermark!,
+          through: truncated.transcriptWatermark!,
+          maxBytes: 16_384,
+        }),
+      RuntimeTranscriptResetRequiredError,
+    );
+    const current = await store.readTranscriptProjectionPage({
+      sessionId,
+      through: truncated.transcriptWatermark!,
+      maxBytes: 16_384,
+    });
+    assert.deepEqual(
+      current.items.map(({ itemId }) => itemId),
+      ["message:first:user"],
     );
   } finally {
     store.close();
@@ -213,6 +351,103 @@ test("tool projection updates one source-stable item revision", async () => {
         status: "success",
       });
     }
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("structured interactions and goals update stable projection items in place", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pico-transcript-stable-items-"));
+  const workspace = join(root, "workspace");
+  mkdirSync(workspace, { recursive: true });
+  const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "storage") });
+  try {
+    const sessionId = "stable-item-session";
+    await store.initializeSession({ sessionId, workDir: workspace });
+    const interactions = [
+      { kind: "approval", stableKey: "approvalId", stableId: "approval-1", state: "waiting" },
+      { kind: "approval", stableKey: "approvalId", stableId: "approval-1", state: "allow" },
+      { kind: "prompt", stableKey: "promptId", stableId: "prompt-1", state: "waiting" },
+      { kind: "prompt", stableKey: "promptId", stableId: "prompt-1", state: "resolved" },
+      { kind: "changes", stableKey: "runId", stableId: "run-1", state: "ready" },
+      { kind: "changes", stableKey: "runId", stableId: "run-1", state: "applied" },
+    ] as const;
+    let transcriptSequence = 0;
+    for (const interaction of interactions) {
+      transcriptSequence += 1;
+      await store.appendTranscriptEvent(sessionId, {
+        eventId: `interaction-${transcriptSequence}`,
+        sequence: transcriptSequence,
+        createdAt: Date.parse("2026-08-23T00:00:00.000Z") + transcriptSequence,
+        type: "entry.appended",
+        entryId: `entry-${transcriptSequence}`,
+        entry: {
+          kind: interaction.kind,
+          title: `${interaction.kind} ${interaction.state}`,
+          state: interaction.state,
+          data: { [interaction.stableKey]: interaction.stableId },
+        },
+      });
+    }
+    const interactionPage = await store.readTranscriptProjectionPage({
+      sessionId,
+      maxBytes: 16_384,
+    });
+    assert.deepEqual(
+      interactionPage.items.map(({ itemId, itemRevision, payload }) => [
+        itemId,
+        itemRevision,
+        (payload as { state: string }).state,
+      ]),
+      [
+        ["approval:approval-1", 2, "allow"],
+        ["prompt:prompt-1", 2, "resolved"],
+        ["changes:run-1", 2, "applied"],
+      ],
+    );
+
+    const goal = {
+      id: "goal-1",
+      title: "Ship continuity",
+      description: "Finish the projection path",
+      status: "active" as const,
+      createdAt: 1,
+      budgetUsage: { turns: 0, tokens: 0, costCNY: 0, startedAt: 1 },
+    };
+    const active = await store.appendSessionState(sessionId, {
+      goal: { stateVersion: 1, sequence: 1, activeGoalId: goal.id, goals: [goal] },
+    });
+    const activePage = await store.readTranscriptProjectionPage({
+      sessionId,
+      through: active.transcriptWatermark!,
+      maxBytes: 16_384,
+    });
+    assert.equal(activePage.items.at(-1)?.itemId, "goal:goal-1");
+    assert.deepEqual(activePage.items.at(-1)?.payload, {
+      id: "goal:goal-1",
+      kind: "goal",
+      title: goal.title,
+      detail: goal.description,
+      state: "active",
+      data: { goalId: goal.id },
+    });
+
+    const completed = await store.appendSessionState(sessionId, {
+      goal: {
+        stateVersion: 1,
+        sequence: 2,
+        activeGoalId: null,
+        goals: [{ ...goal, status: "complete" }],
+      },
+    });
+    const advance = await store.readTranscriptAdvancePage({
+      sessionId,
+      after: active.transcriptWatermark!,
+      through: completed.transcriptWatermark!,
+      maxBytes: 16_384,
+    });
+    assert.deepEqual(advance.changes, [{ op: "remove", itemId: "goal:goal-1", itemRevision: 1 }]);
   } finally {
     store.close();
     rmSync(root, { recursive: true, force: true });

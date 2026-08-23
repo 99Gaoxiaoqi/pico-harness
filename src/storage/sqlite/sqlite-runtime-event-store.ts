@@ -79,6 +79,7 @@ import {
   type RuntimeTranscriptAdvancePage,
   type RuntimeTranscriptAdvancePageOptions,
   type RuntimeTranscriptProjectedItem,
+  type RuntimeTranscriptProjectedItemFragment,
   type RuntimeTranscriptProjectionChange,
   type RuntimeTranscriptProjectionPage,
   type RuntimeTranscriptProjectionPageOptions,
@@ -1876,13 +1877,15 @@ export class SqliteRuntimeEventStore {
       if (
         cursor.historyEpoch !== watermark.historyEpoch ||
         cursor.projectorVersion !== watermark.projectorVersion ||
-        cursor.throughSequence !== watermark.throughSequence ||
-        cursor.byteOffset !== 0
+        cursor.throughSequence !== watermark.throughSequence
       ) {
         throw new RuntimeTranscriptResetRequiredError(
           `Runtime session ${options.sessionId} transcript projection cursor is stale`,
         );
       }
+      assertNonNegativeInteger(cursor.positionSequence, "transcript projection positionSequence");
+      assertNonNegativeInteger(cursor.positionOrdinal, "transcript projection positionOrdinal");
+      assertNonNegativeInteger(cursor.byteOffset, "transcript projection byteOffset");
     }
     const params: SQLInputValue[] = [
       options.sessionId,
@@ -1891,11 +1894,11 @@ export class SqliteRuntimeEventStore {
     ];
     let cursorClause = "";
     if (cursor) {
-      cursorClause =
-        " AND (position_sequence < ? OR (position_sequence = ? AND position_ordinal < ?))";
+      const ordinalOperator = cursor.byteOffset > 0 ? "<=" : "<";
+      cursorClause = ` AND (position_sequence < ? OR (position_sequence = ? AND position_ordinal ${ordinalOperator} ?))`;
       params.push(cursor.positionSequence, cursor.positionSequence, cursor.positionOrdinal);
     }
-    params.push(limit + 1);
+    params.push(limit + 2);
     const rows = this.lease.database
       .prepare(
         `SELECT item_id, item_revision, position_sequence, position_ordinal, payload_json
@@ -1908,19 +1911,64 @@ export class SqliteRuntimeEventStore {
       .all(...params) as Array<Record<string, unknown>>;
     const selected: RuntimeTranscriptProjectedItem[] = [];
     let bytes = 0;
-    for (const row of rows.slice(0, limit)) {
+    let hasMore = false;
+    for (const [index, row] of rows.entries()) {
       const record = transcriptProjectedItemFromRow(row);
-      const recordBytes = Buffer.byteLength(canonicalJson(record), "utf8");
-      if (selected.length === 0 && recordBytes > maxBytes) {
-        throw new RuntimeEventStoreIntegrityError(
-          `Runtime transcript item ${record.itemId} exceeds the projection page byte budget`,
+      let fragmentOffset = 0;
+      if (cursor?.byteOffset && index === 0) {
+        if (
+          record.positionSequence !== cursor.positionSequence ||
+          record.positionOrdinal !== cursor.positionOrdinal
+        ) {
+          throw new RuntimeTranscriptResetRequiredError(
+            `Runtime session ${options.sessionId} transcript fragment cursor is unavailable`,
+          );
+        }
+        fragmentOffset = cursor.byteOffset;
+      }
+      const payloadJson = canonicalJson(record.payload);
+      const payloadBytes = Buffer.from(payloadJson, "utf8");
+      if (fragmentOffset > payloadBytes.length) {
+        throw new RuntimeTranscriptResetRequiredError(
+          `Runtime session ${options.sessionId} transcript fragment offset is unavailable`,
         );
       }
-      if (selected.length > 0 && bytes + recordBytes > maxBytes) break;
+      if (fragmentOffset === payloadBytes.length && fragmentOffset > 0) {
+        continue;
+      }
+      const recordBytes = Buffer.byteLength(canonicalJson(record), "utf8");
+      if (fragmentOffset > 0 || (selected.length === 0 && recordBytes > maxBytes)) {
+        const fragment = transcriptProjectedItemFragment(
+          record,
+          payloadBytes,
+          fragmentOffset,
+          maxBytes,
+        );
+        const fragmentComplete = fragment.byteOffset + fragment.byteLength === fragment.totalBytes;
+        return {
+          watermark,
+          items: [],
+          fragments: [fragment],
+          ...(!fragmentComplete || index + 1 < rows.length
+            ? {
+                nextCursor: {
+                  ...watermark,
+                  positionSequence: record.positionSequence,
+                  positionOrdinal: record.positionOrdinal,
+                  byteOffset: fragment.byteOffset + fragment.byteLength,
+                },
+              }
+            : {}),
+        };
+      }
+      if (selected.length >= limit || (selected.length > 0 && bytes + recordBytes > maxBytes)) {
+        hasMore = true;
+        break;
+      }
       selected.push(record);
       bytes += recordBytes;
     }
-    const hasMore = selected.length < rows.length;
+    if (!hasMore) hasMore = rows.length === limit + 2;
     const oldest = selected.at(-1);
     return {
       watermark,
@@ -1969,22 +2017,25 @@ export class SqliteRuntimeEventStore {
         cursor.historyEpoch !== options.after.historyEpoch ||
         cursor.projectorVersion !== options.after.projectorVersion ||
         cursor.fromSequence !== options.after.throughSequence ||
-        cursor.throughSequence !== options.through.throughSequence ||
-        cursor.byteOffset !== 0
+        cursor.throughSequence !== options.through.throughSequence
       ) {
         throw new RuntimeTranscriptResetRequiredError(
           `Runtime session ${options.sessionId} transcript change cursor is stale`,
         );
       }
+      assertNonNegativeInteger(cursor.changeSequence, "transcript changeSequence");
+      assertNonNegativeInteger(cursor.ordinal, "transcript change ordinal");
+      assertNonNegativeInteger(cursor.byteOffset, "transcript change byteOffset");
       changeSequence = cursor.changeSequence;
       ordinal = cursor.ordinal;
     }
+    const cursorOperator = cursor && cursor.byteOffset > 0 ? ">=" : ">";
     const rows = this.lease.database
       .prepare(
         `SELECT change_sequence, change_ordinal, op, item_id, item_revision, payload_json
          FROM runtime_transcript_changes
          WHERE session_id = ? AND change_sequence > ? AND change_sequence <= ?
-           AND (change_sequence > ? OR (change_sequence = ? AND change_ordinal > ?))
+           AND (change_sequence > ? OR (change_sequence = ? AND change_ordinal ${cursorOperator} ?))
          ORDER BY change_sequence ASC, change_ordinal ASC
          LIMIT ?`,
       )
@@ -1995,7 +2046,7 @@ export class SqliteRuntimeEventStore {
         changeSequence,
         changeSequence,
         ordinal,
-        limit + 1,
+        limit + 2,
       ) as Array<Record<string, unknown>>;
     const selected: Array<{
       readonly sequence: number;
@@ -2003,19 +2054,101 @@ export class SqliteRuntimeEventStore {
       readonly change: RuntimeTranscriptProjectionChange;
     }> = [];
     let bytes = 0;
-    for (const row of rows.slice(0, limit)) {
+    let hasMore = false;
+    for (const [index, row] of rows.entries()) {
       const decoded = transcriptChangeFromRow(row);
+      let fragmentOffset = 0;
+      if (cursor?.byteOffset && index === 0) {
+        if (decoded.sequence !== cursor.changeSequence || decoded.ordinal !== cursor.ordinal) {
+          throw new RuntimeTranscriptResetRequiredError(
+            `Runtime session ${options.sessionId} transcript change fragment cursor is unavailable`,
+          );
+        }
+        fragmentOffset = cursor.byteOffset;
+      }
+      if (fragmentOffset > 0) {
+        if (decoded.change.op !== "upsert") {
+          throw new RuntimeTranscriptResetRequiredError(
+            `Runtime session ${options.sessionId} transcript remove change cannot be fragmented`,
+          );
+        }
+        const payloadBytes = Buffer.from(canonicalJson(decoded.change.record.payload), "utf8");
+        if (fragmentOffset > payloadBytes.length) {
+          throw new RuntimeTranscriptResetRequiredError(
+            `Runtime session ${options.sessionId} transcript change fragment offset is unavailable`,
+          );
+        }
+        if (fragmentOffset === payloadBytes.length) continue;
+        const fragment = transcriptProjectedItemFragment(
+          decoded.change.record,
+          payloadBytes,
+          fragmentOffset,
+          maxBytes,
+        );
+        const fragmentComplete = fragment.byteOffset + fragment.byteLength === fragment.totalBytes;
+        return {
+          after: options.after,
+          through: options.through,
+          changes: [],
+          fragments: [fragment],
+          ...(!fragmentComplete || index + 1 < rows.length
+            ? {
+                nextCursor: {
+                  historyEpoch: options.after.historyEpoch,
+                  projectorVersion: options.after.projectorVersion,
+                  fromSequence: options.after.throughSequence,
+                  throughSequence: options.through.throughSequence,
+                  changeSequence: decoded.sequence,
+                  ordinal: decoded.ordinal,
+                  byteOffset: fragment.byteOffset + fragment.byteLength,
+                },
+              }
+            : {}),
+        };
+      }
       const recordBytes = Buffer.byteLength(canonicalJson(decoded.change), "utf8");
       if (selected.length === 0 && recordBytes > maxBytes) {
-        throw new RuntimeEventStoreIntegrityError(
-          `Runtime transcript change at ${decoded.sequence}:${decoded.ordinal} exceeds the page byte budget`,
+        if (decoded.change.op !== "upsert") {
+          throw new RuntimeEventStoreIntegrityError(
+            `Runtime transcript remove change at ${decoded.sequence}:${decoded.ordinal} exceeds the page byte budget`,
+          );
+        }
+        const payloadBytes = Buffer.from(canonicalJson(decoded.change.record.payload), "utf8");
+        const fragment = transcriptProjectedItemFragment(
+          decoded.change.record,
+          payloadBytes,
+          0,
+          maxBytes,
         );
+        const fragmentComplete = fragment.byteLength === fragment.totalBytes;
+        return {
+          after: options.after,
+          through: options.through,
+          changes: [],
+          fragments: [fragment],
+          ...(!fragmentComplete || index + 1 < rows.length
+            ? {
+                nextCursor: {
+                  historyEpoch: options.after.historyEpoch,
+                  projectorVersion: options.after.projectorVersion,
+                  fromSequence: options.after.throughSequence,
+                  throughSequence: options.through.throughSequence,
+                  changeSequence: decoded.sequence,
+                  ordinal: decoded.ordinal,
+                  byteOffset: fragment.byteLength,
+                },
+              }
+            : {}),
+        };
       }
-      if (selected.length > 0 && bytes + recordBytes > maxBytes) break;
+      if (selected.length >= limit || (selected.length > 0 && bytes + recordBytes > maxBytes)) {
+        hasMore = true;
+        break;
+      }
       selected.push(decoded);
       bytes += recordBytes;
     }
-    const hasMore = selected.length < rows.length;
+    if (!hasMore) hasMore = rows.length === limit + 2;
     const last = selected.at(-1);
     return {
       after: options.after,
@@ -2110,10 +2243,23 @@ export class SqliteRuntimeEventStore {
       rows.slice(event.data.event.entryCount).forEach((row, ordinal) => {
         this.removeTranscriptItemLocked(event.sessionId, sequence, ordinal, row.item_id);
       });
+      this.lease.database
+        .prepare("DELETE FROM runtime_transcript_changes WHERE session_id = ?")
+        .run(event.sessionId);
+      this.lease.database
+        .prepare(
+          `UPDATE runtime_transcript_projection_state
+           SET history_epoch = ?, through_sequence = ?, change_floor_sequence = ?
+           WHERE session_id = ?`,
+        )
+        .run(randomUUID(), sequence, sequence, event.sessionId);
       return;
     }
-    const mutations = transcriptMutationsForEvent(event, sequence, (itemId) =>
-      this.readCurrentTranscriptItemLocked(event.sessionId, itemId),
+    const mutations = transcriptMutationsForEvent(
+      event,
+      sequence,
+      (itemId) => this.readCurrentTranscriptItemLocked(event.sessionId, itemId),
+      (kind) => this.readCurrentTranscriptItemsByKindLocked(event.sessionId, kind),
     );
     mutations.forEach((mutation, ordinal) => {
       if (mutation.op === "remove") {
@@ -2166,6 +2312,22 @@ export class SqliteRuntimeEventStore {
       )
       .get(sessionId, itemId) as Record<string, unknown> | undefined;
     return row === undefined ? undefined : transcriptProjectedItemFromRow(row);
+  }
+
+  private readCurrentTranscriptItemsByKindLocked(
+    sessionId: string,
+    kind: string,
+  ): RuntimeTranscriptProjectedItem[] {
+    const rows = this.lease.database
+      .prepare(
+        `SELECT item_id, item_revision, position_sequence, position_ordinal, payload_json
+         FROM runtime_transcript_item_versions
+         WHERE session_id = ? AND valid_to_sequence IS NULL
+           AND json_extract(payload_json, '$.kind') = ?
+         ORDER BY position_sequence ASC, position_ordinal ASC, item_id ASC`,
+      )
+      .all(sessionId, kind) as Array<Record<string, unknown>>;
+    return rows.map(transcriptProjectedItemFromRow);
   }
 
   private upsertTranscriptItemLocked(
@@ -3613,6 +3775,7 @@ function transcriptMutationsForEvent(
   event: RuntimeEvent,
   sequence: number,
   current: (itemId: string) => RuntimeTranscriptProjectedItem | undefined,
+  currentByKind: (kind: string) => readonly RuntimeTranscriptProjectedItem[],
 ): readonly TranscriptItemMutation[] {
   if (event.kind === "message.committed") {
     const message = event.data.message;
@@ -3717,22 +3880,52 @@ function transcriptMutationsForEvent(
     ];
   }
 
+  if (event.kind === "session.state.committed") {
+    const goalSnapshot = event.data.patch.goal;
+    if (!goalSnapshot) return [];
+    const activeGoal = goalSnapshot.goals.find((goal) => goal.status === "active");
+    const itemId = activeGoal ? `goal:${activeGoal.id}` : undefined;
+    const mutations: TranscriptItemMutation[] = currentByKind("goal")
+      .filter((record) => record.itemId !== itemId)
+      .map((record) => ({ op: "remove", itemId: record.itemId }));
+    if (activeGoal && itemId) {
+      mutations.push({
+        op: "upsert",
+        itemId,
+        positionSequence: sequence,
+        positionOrdinal: 0,
+        payload: {
+          id: itemId,
+          kind: "goal",
+          title: activeGoal.title,
+          detail: activeGoal.progress ?? activeGoal.description,
+          state: activeGoal.status,
+          data: { goalId: activeGoal.id },
+        },
+      });
+    }
+    return mutations;
+  }
+
   if (event.kind !== "transcript.event.recorded") return [];
   const transcript = event.data.event;
   switch (transcript.type) {
     case "entry.appended": {
+      const itemId =
+        stableStructuredTranscriptItemId(transcript.entry) ?? `entry:${transcript.entryId}`;
       const payload = conversationPayloadForTranscriptEntry(
-        `entry:${transcript.entryId}`,
+        itemId,
         transcript.entry,
         transcript.createdAt,
       );
+      const prior = current(itemId);
       return payload
         ? [
             {
               op: "upsert",
-              itemId: `entry:${transcript.entryId}`,
-              positionSequence: sequence,
-              positionOrdinal: 0,
+              itemId,
+              positionSequence: prior?.positionSequence ?? sequence,
+              positionOrdinal: prior?.positionOrdinal ?? 0,
               payload,
             },
           ]
@@ -3841,6 +4034,20 @@ function transcriptMutationsForEvent(
     case "transcript.truncated":
       return [];
   }
+}
+
+function stableStructuredTranscriptItemId(entry: TranscriptEntryData): string | undefined {
+  if (entry.kind !== "approval" && entry.kind !== "prompt" && entry.kind !== "changes") {
+    return undefined;
+  }
+  const data = asJsonRecord(entry.data);
+  const stableId =
+    entry.kind === "approval"
+      ? data?.["approvalId"]
+      : entry.kind === "prompt"
+        ? data?.["promptId"]
+        : data?.["runId"];
+  return typeof stableId === "string" && stableId ? `${entry.kind}:${stableId}` : undefined;
 }
 
 function conversationPayloadForTranscriptEntry(
@@ -3987,6 +4194,40 @@ function transcriptProjectedItemFromRow(
       row["payload_json"],
       "runtime_transcript_item_versions.payload_json",
     ),
+  };
+}
+
+function transcriptProjectedItemFragment(
+  record: RuntimeTranscriptProjectedItem,
+  payloadBytes: Buffer,
+  byteOffset: number,
+  maxBytes: number,
+): RuntimeTranscriptProjectedItemFragment {
+  if (
+    byteOffset < 0 ||
+    byteOffset >= payloadBytes.length ||
+    (byteOffset > 0 && (payloadBytes[byteOffset]! & 0xc0) === 0x80)
+  ) {
+    throw new RuntimeEventStoreIntegrityError(
+      `Runtime transcript item ${record.itemId} fragment offset is not a UTF-8 boundary`,
+    );
+  }
+  const end = utf8ForwardEnd(payloadBytes, byteOffset, maxBytes);
+  if (end <= byteOffset || end - byteOffset > maxBytes) {
+    throw new RuntimeEventStoreIntegrityError(
+      `Runtime transcript item ${record.itemId} cannot fit one UTF-8 symbol in the page byte budget`,
+    );
+  }
+  const json = payloadBytes.subarray(byteOffset, end).toString("utf8");
+  return {
+    itemId: record.itemId,
+    itemRevision: record.itemRevision,
+    positionSequence: record.positionSequence,
+    positionOrdinal: record.positionOrdinal,
+    byteOffset,
+    byteLength: end - byteOffset,
+    totalBytes: payloadBytes.length,
+    json,
   };
 }
 
