@@ -36,6 +36,8 @@ export interface ConnectionContext {
    * "this connection is gone", not retry on it.
    */
   pushEvent?(event: Record<string, unknown>): Promise<void>;
+  /** Runs only after this request's successful response has flushed to the wire. */
+  afterResponseFlushed?(callback: () => void): void;
 }
 
 export interface OperationResidency {
