@@ -4,7 +4,12 @@ import type {
   DesktopBrowserRect,
   DesktopBrowserState,
 } from "../preload/contract.js";
-import { normalizeBrowserAddress, normalizeViewport } from "./browser-logic.js";
+import {
+  normalizeBrowserAddress,
+  normalizePersistedBrowserNavigation,
+  normalizeViewport,
+} from "./browser-logic.js";
+import { BrowserUrlStore } from "./browser-url-store.js";
 
 export const PICO_BROWSER_PARTITION = "persist:pico-browser";
 
@@ -44,8 +49,12 @@ interface BrowserEntry {
 export function createEmbeddedBrowserAuthority(options: {
   readonly getWindow: () => BrowserWindow | undefined;
   readonly onState: (state: DesktopBrowserState) => void;
+  readonly userDataPath: string;
 }): EmbeddedBrowserAuthority {
   const entries = new Map<string, BrowserEntry>();
+  const urlStore = new BrowserUrlStore(options.userDataPath, {
+    onError: (error) => console.error("Pico browser URL persistence failed", error),
+  });
   let activeSessionId: string | null = null;
 
   const requireWindow = (): BrowserWindow => {
@@ -87,7 +96,8 @@ export function createEmbeddedBrowserAuthority(options: {
 
   const getOrCreate = (sessionId: string): BrowserEntry => {
     const existing = entries.get(sessionId);
-    if (existing) return existing;
+    if (existing && !existing.view.webContents.isDestroyed()) return existing;
+    if (existing) entries.delete(sessionId);
     const window = requireWindow();
     const view = new WebContentsView({
       webPreferences: {
@@ -110,8 +120,16 @@ export function createEmbeddedBrowserAuthority(options: {
     };
     view.webContents.on("did-start-loading", refresh);
     view.webContents.on("did-stop-loading", refresh);
-    view.webContents.on("did-navigate", refresh);
-    view.webContents.on("did-navigate-in-page", refresh);
+    const persistNavigation = (url: string, isMainFrame: boolean): void => {
+      if (entries.get(sessionId) !== entry) return;
+      const normalized = normalizePersistedBrowserNavigation(url, isMainFrame);
+      if (normalized) urlStore.set(sessionId, normalized);
+      refresh();
+    };
+    view.webContents.on("did-navigate", (_event, url) => persistNavigation(url, true));
+    view.webContents.on("did-navigate-in-page", (_event, url, isMainFrame) => {
+      persistNavigation(url, isMainFrame);
+    });
     view.webContents.on("page-title-updated", refresh);
     view.webContents.on("did-fail-load", refresh);
     view.webContents.setWindowOpenHandler(({ url }) => {
@@ -122,7 +140,16 @@ export function createEmbeddedBrowserAuthority(options: {
     view.webContents.on("will-navigate", (event, url) => {
       if (!normalizeBrowserAddress(url)) event.preventDefault();
     });
+    const restoredUrl = urlStore.get(sessionId);
+    if (restoredUrl) void view.webContents.loadURL(restoredUrl).catch(() => undefined);
     return entry;
+  };
+
+  const destroyEntry = (sessionId: string, entry: BrowserEntry): void => {
+    entries.delete(sessionId);
+    const window = options.getWindow();
+    if (window && !window.isDestroyed()) window.contentView.removeChildView(entry.view);
+    if (!entry.view.webContents.isDestroyed()) entry.view.webContents.close();
   };
 
   const requireVisible = (sessionId: string): BrowserEntry => {
@@ -146,6 +173,7 @@ export function createEmbeddedBrowserAuthority(options: {
       for (const [id, entry] of entries) {
         if (id !== sessionId) hide(id, entry);
       }
+      if (sessionId) getOrCreate(sessionId);
     },
 
     setViewport(sessionId, rect, generation) {
@@ -285,11 +313,11 @@ export function createEmbeddedBrowserAuthority(options: {
 
     async close(sessionId) {
       const entry = entries.get(sessionId);
-      if (!entry) return;
-      entries.delete(sessionId);
-      const window = options.getWindow();
-      if (window && !window.isDestroyed()) window.contentView.removeChildView(entry.view);
-      if (!entry.view.webContents.isDestroyed()) entry.view.webContents.close();
+      const deletionRevision = urlStore.delete(sessionId);
+      if (entry) destroyEntry(sessionId, entry);
+      if (deletionRevision !== undefined) {
+        await urlStore.flushThrough(deletionRevision);
+      }
     },
 
     async clearData() {
@@ -297,7 +325,8 @@ export function createEmbeddedBrowserAuthority(options: {
     },
 
     async dispose() {
-      await Promise.all([...entries.keys()].map((sessionId) => authority.close(sessionId)));
+      for (const [sessionId, entry] of [...entries]) destroyEntry(sessionId, entry);
+      await urlStore.flush();
     },
   };
   return authority;

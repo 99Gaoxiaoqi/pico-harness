@@ -12,6 +12,13 @@ export function normalizeBrowserAddress(input: string): string | null {
   }
 }
 
+export function normalizePersistedBrowserNavigation(
+  input: string,
+  isMainFrame: boolean,
+): string | null {
+  return isMainFrame ? normalizeBrowserAddress(input) : null;
+}
+
 export function normalizeViewport(rect: DesktopBrowserRect | null): DesktopBrowserRect | null {
   if (!rect) return null;
   if (![rect.x, rect.y, rect.width, rect.height].every(Number.isFinite)) return null;
