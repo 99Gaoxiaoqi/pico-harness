@@ -19,6 +19,21 @@ export function normalizePersistedBrowserNavigation(
   return isMainFrame ? normalizeBrowserAddress(input) : null;
 }
 
+export function persistBrowserNavigationForCurrentEntry<Entry>(options: {
+  readonly entry: Entry;
+  readonly currentEntry: () => Entry | undefined;
+  readonly url: string;
+  readonly isMainFrame: boolean;
+  readonly persist: (url: string) => void;
+  readonly refresh: () => void;
+}): boolean {
+  if (options.currentEntry() !== options.entry) return false;
+  const normalized = normalizePersistedBrowserNavigation(options.url, options.isMainFrame);
+  if (normalized) options.persist(normalized);
+  options.refresh();
+  return true;
+}
+
 export function normalizeViewport(rect: DesktopBrowserRect | null): DesktopBrowserRect | null {
   if (!rect) return null;
   if (![rect.x, rect.y, rect.width, rect.height].every(Number.isFinite)) return null;
