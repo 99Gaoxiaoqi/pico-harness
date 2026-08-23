@@ -24,6 +24,7 @@ import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { resolveOwnerLeaseTombstonePath } from "../../src/storage/owner-lease.js";
 import { sessionOwnerLeaseDirectory } from "../../src/storage/session-owner-lease.js";
 import { resumeDesktopTerminalGenerationWithUpgrade } from "../../apps/desktop/src/main/daemon-controller.js";
+import { stopRegisteredTestDaemon } from "./helpers/test-runtime-daemon.js";
 
 /**
  * 3-B-3 kernel 承载客户端实盘验证：默认构造（不注入 endpoint）的 LocalRuntimeClient
@@ -60,15 +61,7 @@ async function startKernelClientHarness(t: {
 }
 
 async function killDaemonFor(picoHome: string): Promise<void> {
-  try {
-    const capability = await resolveStorageRoot({ path: picoHome, kind: "interactive" });
-    const registration = await readHostRegistration(
-      join(resolveRootControlNamespace(), capability.rootId),
-    );
-    if (registration) process.kill(registration.pid);
-  } catch {
-    // 无 daemon / 已退出：无需处理。
-  }
+  await stopRegisteredTestDaemon(picoHome);
 }
 
 test("kernel client: request + subscribe + live push over the spawned daemon", async (t) => {

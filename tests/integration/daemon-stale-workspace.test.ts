@@ -3,13 +3,9 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import {
-  readHostRegistration,
-  resolveRootControlNamespace,
-  resolveStorageRoot,
-} from "@pico/runtime-host";
 import { LocalRuntimeClient } from "../../src/daemon/index.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
+import { stopRegisteredTestDaemon } from "./helpers/test-runtime-daemon.js";
 
 /**
  * daemon 对"残留注册"的容忍（2026-08-16 真机事故回归）：
@@ -118,13 +114,5 @@ test("workspace.list isolates a registered workspace with legacy storage", async
 });
 
 async function killDaemonFor(picoHome: string): Promise<void> {
-  try {
-    const capability = await resolveStorageRoot({ path: picoHome, kind: "interactive" });
-    const registration = await readHostRegistration(
-      join(resolveRootControlNamespace(), capability.rootId),
-    );
-    if (registration) process.kill(registration.pid);
-  } catch {
-    // 无 daemon / 已退出。
-  }
+  await stopRegisteredTestDaemon(picoHome);
 }
