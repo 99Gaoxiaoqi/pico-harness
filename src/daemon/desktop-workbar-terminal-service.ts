@@ -202,9 +202,6 @@ function runtimeTerminal(record: WorkbarTerminalRecord) {
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
     ...(record.exitCode === undefined ? {} : { exitCode: record.exitCode }),
-    capability: record.capability,
-    resizeSupported: record.resizeSupported,
-    cwd: record.cwd,
   };
 }
 
