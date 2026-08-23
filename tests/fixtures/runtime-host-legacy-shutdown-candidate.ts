@@ -20,6 +20,7 @@ import {
   LocalDaemonInstanceLock,
   resolveLocalDaemonEndpoint,
 } from "../../src/daemon/index.js";
+import { OwnerLease } from "../../src/storage/owner-lease.js";
 
 ensurePicoRuntimeHostShutdownOperationRegistered();
 
@@ -61,6 +62,15 @@ try {
   if (!owner) {
     await legacyLock.release();
     process.exit(2);
+  }
+  const sessionLeaseDirectory = process.env["PICO_TEST_LEGACY_SESSION_LEASE_DIRECTORY"];
+  if (sessionLeaseDirectory) {
+    // Deliberately abandon this fresh lease on process exit to reproduce daemons
+    // that predate the SessionManager clearAndDrain shutdown fence.
+    await OwnerLease.acquire({
+      leaseDirectory: sessionLeaseDirectory,
+      ownerId: "legacy-shutdown-fixture",
+    });
   }
   hostEpoch = randomUUID();
   endpoint = await prepareRuntimeHostEndpoint({ rootId: capability.rootId, hostEpoch });
