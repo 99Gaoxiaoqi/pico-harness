@@ -5,9 +5,10 @@ import type {
   DesktopBrowserState,
 } from "../preload/contract.js";
 import {
+  guardBrowserNavigation,
+  normalizeActiveBrowserViewport,
   normalizeBrowserAddress,
   normalizePersistedBrowserNavigation,
-  normalizeViewport,
 } from "./browser-logic.js";
 import { BrowserUrlStore } from "./browser-url-store.js";
 
@@ -52,6 +53,7 @@ export function createEmbeddedBrowserAuthority(options: {
   readonly userDataPath: string;
 }): EmbeddedBrowserAuthority {
   const entries = new Map<string, BrowserEntry>();
+  const viewportGenerations = new Map<string, number>();
   const urlStore = new BrowserUrlStore(options.userDataPath, {
     onError: (error) => console.error("Pico browser URL persistence failed", error),
   });
@@ -79,6 +81,19 @@ export function createEmbeddedBrowserAuthority(options: {
       generation: entry.generation,
     };
   };
+
+  const emptyState = (sessionId: string, generation: number): DesktopBrowserState => ({
+    sessionId,
+    url: "",
+    title: "",
+    canGoBack: false,
+    canGoForward: false,
+    loading: false,
+    secure: false,
+    hasPage: false,
+    visible: false,
+    generation,
+  });
 
   const emit = (sessionId: string, entry: BrowserEntry): DesktopBrowserState => {
     const state = stateOf(sessionId, entry);
@@ -108,7 +123,11 @@ export function createEmbeddedBrowserAuthority(options: {
         webSecurity: true,
       },
     });
-    const entry: BrowserEntry = { view, generation: 0, visible: false };
+    const entry: BrowserEntry = {
+      view,
+      generation: viewportGenerations.get(sessionId) ?? 0,
+      visible: false,
+    };
     entries.set(sessionId, entry);
     window.contentView.addChildView(view);
     view.setVisible(false);
@@ -138,7 +157,10 @@ export function createEmbeddedBrowserAuthority(options: {
       return { action: "deny" };
     });
     view.webContents.on("will-navigate", (event, url) => {
-      if (!normalizeBrowserAddress(url)) event.preventDefault();
+      guardBrowserNavigation(event, url);
+    });
+    view.webContents.on("will-redirect", (event, url) => {
+      guardBrowserNavigation(event, url);
     });
     const restoredUrl = urlStore.get(sessionId);
     if (restoredUrl) void view.webContents.loadURL(restoredUrl).catch(() => undefined);
@@ -173,18 +195,24 @@ export function createEmbeddedBrowserAuthority(options: {
       for (const [id, entry] of entries) {
         if (id !== sessionId) hide(id, entry);
       }
-      if (sessionId) getOrCreate(sessionId);
     },
 
     setViewport(sessionId, rect, generation) {
-      const entry = getOrCreate(sessionId);
-      if (generation < entry.generation) return stateOf(sessionId, entry);
-      entry.generation = generation;
-      const bounds = normalizeViewport(rect);
-      if (!bounds || activeSessionId !== sessionId) {
-        hide(sessionId, entry);
-        return stateOf(sessionId, entry);
+      const existing = entries.get(sessionId);
+      const currentGeneration = existing?.generation ?? viewportGenerations.get(sessionId) ?? 0;
+      if (generation < currentGeneration) {
+        return existing ? stateOf(sessionId, existing) : emptyState(sessionId, currentGeneration);
       }
+      viewportGenerations.set(sessionId, generation);
+      const bounds = normalizeActiveBrowserViewport(rect, activeSessionId === sessionId);
+      if (!bounds) {
+        if (!existing) return emptyState(sessionId, generation);
+        existing.generation = generation;
+        hide(sessionId, existing);
+        return stateOf(sessionId, existing);
+      }
+      const entry = existing ?? getOrCreate(sessionId);
+      entry.generation = generation;
       entry.visible = true;
       entry.view.setBounds(bounds);
       entry.view.setVisible(true);
@@ -326,6 +354,7 @@ export function createEmbeddedBrowserAuthority(options: {
 
     async dispose() {
       for (const [sessionId, entry] of [...entries]) destroyEntry(sessionId, entry);
+      viewportGenerations.clear();
       await urlStore.flush();
     },
   };

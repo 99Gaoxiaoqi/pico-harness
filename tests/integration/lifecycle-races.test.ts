@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { setImmediate as waitForImmediate, setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import {
+  cleanupDesktopWorkbarResources,
   createDesktopDaemonShutdownFence,
   createDesktopTerminalCleanupFence,
   DesktopTerminalGenerationController,
@@ -725,6 +726,28 @@ test("Desktop terminal cleanup fence blocks repeated quit until terminal groups 
   assert.equal(timers.cleared, true);
   fence({ preventDefault: () => prevented++ });
   assert.equal(prevented, 2, "cleanup 完成后的第二次 app.quit 必须放行");
+});
+
+test("Desktop browser cleanup failure still waits for terminal groups", async () => {
+  const terminalCleanup = deferred();
+  const browserErrors: unknown[] = [];
+  let settled = false;
+  const cleanup = cleanupDesktopWorkbarResources({
+    cleanupTerminals: () => terminalCleanup.promise,
+    disposeBrowser: async () => {
+      throw new Error("browser persistence failed");
+    },
+    onBrowserError: (error) => browserErrors.push(error),
+  }).then(() => {
+    settled = true;
+  });
+
+  await waitForImmediate();
+  assert.equal(settled, false, "Browser 失败不得提前释放 Terminal 退出栅栏");
+  assert.match(String(browserErrors[0]), /browser persistence failed/u);
+  terminalCleanup.resolve();
+  await cleanup;
+  assert.equal(settled, true);
 });
 
 test("Desktop 退出代际拒绝新的 terminal.create 但允许终态操作", () => {

@@ -13,6 +13,7 @@ import { installApplicationMenu } from "./menu.js";
 import { sleepForRetry } from "../../../../src/provider/retry.js";
 import { createEmbeddedBrowserAuthority } from "./browser-manager.js";
 import {
+  cleanupDesktopWorkbarResources,
   createDesktopTerminalCleanupFence,
   DesktopTerminalGenerationController,
   resumeDesktopTerminalGenerationWithUpgrade,
@@ -50,7 +51,11 @@ const stopAllDesktopTerminals = async (): Promise<void> => {
   await runtime.request("terminal.stopAll", {});
 };
 const cleanupDesktopTerminalGeneration = async (): Promise<void> => {
-  await Promise.all([terminalGeneration.cleanup(stopAllDesktopTerminals), browser.dispose()]);
+  await cleanupDesktopWorkbarResources({
+    cleanupTerminals: () => terminalGeneration.cleanup(stopAllDesktopTerminals),
+    disposeBrowser: () => browser.dispose(),
+    onBrowserError: (error) => console.error("Pico desktop browser cleanup failed", error),
+  });
 };
 const openDesktopTerminalGeneration = (): Promise<void> =>
   terminalGeneration.open(async () => {
@@ -111,7 +116,9 @@ if (!app.requestSingleInstanceLock()) {
     disposeIpc?.();
     disposeUpdater?.();
     runtime.close();
-    void browser.dispose();
+    void browser
+      .dispose()
+      .catch((error: unknown) => console.error("Pico desktop browser cleanup failed", error));
   });
   app.on("window-all-closed", () => {
     if (process.platform !== "darwin" && !lifecycle.shouldKeepInBackground()) app.quit();

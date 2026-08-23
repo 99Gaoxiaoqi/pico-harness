@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  guardBrowserNavigation,
+  normalizeActiveBrowserViewport,
   normalizeBrowserAddress,
   normalizePersistedBrowserNavigation,
   normalizeViewport,
@@ -26,6 +28,13 @@ test("embedded browser rejects non-finite or empty viewports and clamps safe bou
   });
 });
 
+test("embedded browser creates a page only for an active non-empty viewport", () => {
+  const viewport = { x: 1, y: 2, width: 300, height: 200 };
+  assert.equal(normalizeActiveBrowserViewport(viewport, false), null);
+  assert.equal(normalizeActiveBrowserViewport(null, true), null);
+  assert.deepEqual(normalizeActiveBrowserViewport(viewport, true), viewport);
+});
+
 test("embedded browser persists only top-level HTTP(S) navigation", () => {
   assert.equal(
     normalizePersistedBrowserNavigation("https://example.com/main#next", true),
@@ -36,4 +45,13 @@ test("embedded browser persists only top-level HTTP(S) navigation", () => {
     null,
   );
   assert.equal(normalizePersistedBrowserNavigation("file:///tmp/secret", true), null);
+});
+
+test("embedded browser blocks invalid direct and redirected navigation protocols", () => {
+  let prevented = 0;
+  const event = { preventDefault: () => prevented++ };
+  assert.equal(guardBrowserNavigation(event, "https://example.com/next"), true);
+  assert.equal(guardBrowserNavigation(event, "file:///tmp/secret"), false);
+  assert.equal(guardBrowserNavigation(event, "javascript:alert(1)"), false);
+  assert.equal(prevented, 2);
 });
