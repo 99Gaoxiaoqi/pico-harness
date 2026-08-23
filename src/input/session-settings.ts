@@ -478,7 +478,10 @@ export function setSessionSideConversation(
   if (enabled) settings.sideConversation = true;
   else delete settings.sideConversation;
   persistSessionSettings(settings);
-  return { ok: true, message: enabled ? "Side conversation enabled" : "Side conversation disabled" };
+  return {
+    ok: true,
+    message: enabled ? "Side conversation enabled" : "Side conversation disabled",
+  };
 }
 
 export function setSessionPermissionMode(

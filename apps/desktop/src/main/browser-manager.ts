@@ -105,7 +105,8 @@ export function createEmbeddedBrowserAuthority(options: {
     view.webContents.setBackgroundThrottling(true);
     installPartitionGuards(view.webContents.session);
     const refresh = (): void => {
-      if (entries.get(sessionId) === entry && !view.webContents.isDestroyed()) emit(sessionId, entry);
+      if (entries.get(sessionId) === entry && !view.webContents.isDestroyed())
+        emit(sessionId, entry);
     };
     view.webContents.on("did-start-loading", refresh);
     view.webContents.on("did-stop-loading", refresh);
@@ -159,7 +160,8 @@ export function createEmbeddedBrowserAuthority(options: {
       entry.visible = true;
       entry.view.setBounds(bounds);
       entry.view.setVisible(true);
-      if (!entry.view.webContents.isDestroyed()) entry.view.webContents.setBackgroundThrottling(false);
+      if (!entry.view.webContents.isDestroyed())
+        entry.view.webContents.setBackgroundThrottling(false);
       return emit(sessionId, entry);
     },
 

@@ -1857,6 +1857,7 @@ function ConversationPage() {
       if (tab.kind === "side-chat") {
         return (
           <SideChatPanelController
+            key={JSON.stringify([workspacePath, sessionId, tab.id])}
             runtime={runtime}
             workspacePath={workspacePath}
             sourceSessionId={sessionId}

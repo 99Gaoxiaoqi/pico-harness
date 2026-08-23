@@ -1,6 +1,6 @@
 # EventLog Maka 语义对齐交付计划
 
-状态：Session Continuity 数据闭环已合并；Workbar v2 以 `d3e3b178` 为基线实施。EventLog 改造基线：`4b0813c3`；Session/Memory 语义修正基线：`fa362543`。授权终点：实现、验证并准备交付，不执行用户真实 workspace 迁移或发布。
+状态：Session Continuity 数据闭环已合并；Workbar v2 已在独立集成分支上完成七类真实 authority 和双 Dock 接线，以 `d3e3b178` 为基线。EventLog 改造基线：`4b0813c3`；Session/Memory 语义修正基线：`fa362543`。授权终点：实现、验证并准备交付，不执行用户真实 workspace 迁移或发布。
 
 ## Workbar v2 收敛基线（`d3e3b178`）
 
@@ -8,17 +8,19 @@ Session Continuity 已成为 Desktop 会话转录的唯一通用事件流：固�
 
 右侧/底部 Workbar 的产品边界固定为七类工具：侧边对话、变更、终端、浏览器、生成文件、待办和追踪。原“概览/上下文”合并为静态 Inspector，单次工具详情使用可替换 Preview。主会话的推理、工具执行、审批、Plan 和输入框不迁入 Workbar。
 
-| 工具      | authority 与生命周期要求                                       | `d3e3b178` 后差距                                           |
-| --------- | -------------------------------------------------------------- | ----------------------------------------------------------- |
-| Inspector | `session.trace.query` 水位 + 版本化 `session.context.get`      | 需增加独立查询、静态/动态 Preview 和隐藏停查                |
-| Review    | 实时 `git.review.snapshot/diff`，直读 branch/staged/unstaged   | 需脱离已完成 Run 的 `changes.*` 投影                        |
-| Tasks     | Session 任务账本、revision CAS、toolCallId 幂等                | 需持久化 authority、模型工具和有界摘要注入                  |
-| Files     | 仅当前 Session 生成产物、CAS Blob、分块读取                    | 需产物索引、ingest/commit 与统一 retention GC               |
-| Terminal  | Runtime Host 持有 PTY，独立序列流和有界缓冲                    | 需 create/list/attach/input/resize/stop/detach 及进程组清理 |
-| Browser   | Electron Main 持有 WebContentsView，全局持久登录分区，可见租约 | 需共享页面、危险协议/设备权限阻断与 Agent 操作边界          |
-| Side Chat | 仅从最近成功 Turn 分叉，隐藏于普通 Session，可恢复清理         | 需 Saga、权限继承、不回写父会话与禁止子代理                 |
+| 工具      | authority 与生命周期要求                                       | 集成分支实施结果                                                          |
+| --------- | -------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| Inspector | `session.trace.query` 水位 + 版本化 `session.context.get`      | 已完成固定水位、分页、静态 Inspector、动态 Preview 和隐藏停查             |
+| Review    | 实时 `git.review.snapshot/diff`，直读 branch/staged/unstaged   | 已脱离已完成 Run 投影；双快照版本不一致时重试并显式报冲突                 |
+| Tasks     | Session 任务账本、revision CAS、toolCallId 幂等                | 已完成 SQLite authority、模型工具、分页和 8 KiB 有界摘要注入              |
+| Files     | 仅当前 Session 生成产物、CAS Blob、分块读取                    | 已完成产物索引、32 KiB 分块、二进制安全重组与统一孤儿 Blob 清理           |
+| Terminal  | Runtime Host 持有 PTY，独立序列流和有界缓冲                    | 已完成真实 PTY、多实例、epoch 重附着、后台运行、resize 与进程组清理       |
+| Browser   | Electron Main 持有 WebContentsView，全局持久登录分区，可见租约 | 已完成共享页面、权限/协议阻断及 7 个固定 Agent 工具；不提供任意脚本入口   |
+| Side Chat | 仅从最近成功 Turn 分叉，隐藏于普通 Session，可恢复清理         | 已完成分叉 Saga、权限继承、审批 UI、父会话隔离、禁止子代理和心跳/崩溃清理 |
 
 开放闸门是真实 authority、明确错误态和删除/归档/断线生命周期同时通过；在此之前 Registry 可声明工具，但 Launcher 必须禁用并说明原因，不展示空面板。Session 删除会清理任务、产物引用、Trace 投影、终端、Browser 页面和侧聊；长期 Memory 只失效来源，已提交 Fact 保留。
+
+Browser screenshot 没有伪装成文本工具：当前 ToolResult 和 Session Continuity 不适合承载大块 base64，后续应将截图提交到 Artifacts CAS，再返回 artifact 引用。这是已知后续能力，不影响当前已开放 Browser 导航、状态、click 和 type 的真实 authority。
 
 ## 已决策边界
 
@@ -98,11 +100,16 @@ Continuation：冻结 source prefix digest + claim + target run.started（同事
 
 ## 实施结果与验收证据
 
+- Workbar v2 最终状态的全量集成测试：1141 通过、10 跳过、0 失败（共 1151 项）。Workbar/Side Chat、Host authority、Interaction recovery 和 Browser Agent 定向组合均通过。
+- 根与 Desktop typecheck、lint、架构边界检查、format 和 build 均通过。Electron 在隔离 `PICO_HOME` 下完成真实冷启动，Runtime 显示已连接；通过可访问性树和截图验证了七项 Launcher、右侧/底部双 Dock、变更与终端标签。
+- Desktop daemon 现以独立 Vite 目标产出，避免共享启动器的 `import.meta.url` 被打包重写后候选进程无法启动；打包产物同时携带 Runtime 所需的 native dependency closure。`node-pty` 是 Desktop 正式生产依赖，产物包含可执行 `spawn-helper` 与原生模块；已用打包后的 Electron Node 运行时实际创建、输入和关闭 PTY。极端环境若仍只能使用 pipe fallback，协议会返回 `capability=pipe` 与 `resizeSupported=false`，Renderer 停止 resize 并显示降级状态。Node 24.18 下 `desktop:package` 完整通过，生成 283 MiB macOS arm64 App，打包版再次以隔离 `PICO_HOME` 冷启动并验证 Runtime 连接与七项 Launcher。
+- 当前 Electron Packager 18.4.4 在 Node 26.7 下会在解包 Electron 模板后提前结束且不生成 `out` 产物；发布流程暂固定使用项目 engines 同样允许的 Node 24.x，升级 Forge/Packager 后再恢复 Node 26 打包闸门。
 - 原 EventLog 改造 HEAD 的 EventLog/continuation/transcript/fence/retention/memory/Plan/Desktop/TUI 定向组合测试：91/91 通过。Session/Memory 语义修正后的 retention、hard cut、Desktop lifecycle 与 Memory service 定向组合测试：28/28 通过，包含 1105 Sources 的 set-based invalidation、Memory 超配额不回收 Session，以及 hard-cut failpoint 全事务回滚。
 - Session/Memory 语义修正最终状态的全量集成测试：1039 通过、10 跳过、1 项既有基线失败；本次新增和受影响的 retention、hard cut、Desktop lifecycle、Memory repository 测试均通过。
 - 一项与本改造无差异的基线失败仍存在：`terminal-bench-bundle-lock.test.ts` 要求根依赖声明 `@pico/runtime-host: "*"`；基线到本分支的三个 package manifest/lockfile 均无改动。
 - `npm run build`、根 typecheck、Desktop typecheck、lint、format 与 `git diff --check` 均通过。
 - 后续对抗审查发现并修复一个 P0 语义问题：retention 与 hard cut 原先把 Source-linked Fact 当作 Session-owned 派生行删除。现在三条生命周期路径统一保留 committed Fact；Source 与 Proposal 使用 set-based lifecycle 更新，Memory 计费仍由 SQLite 按 owner 聚合并仅用于观测。最终独立审查又修正了两个 P1：不可回收控制账本导致的候选回收量高估，以及多实例恢复误取消仍被其他实例持有的 lifecycle prepare。
+- Workbar 最终对抗审查修复了两个发布阻断项：Side Chat 控制器现在按 workspace/source Session/panel 重新挂载并以同一 scope 延迟清理，父 Session 切换不会遗留隐藏分支；Terminal 从可选 pipe 路径升级为 Desktop 随包 PTY，并把 capability/resize 能力贯穿协议和 UI。对应真实 PTY 集成测试与打包产物 smoke 均通过。
 - 已知后续优化：daemon 为复用跨事实 projector，会在单次固定水位读取中累计分页结果；协议正确性和单帧预算已闭环，但极长 Session 的峰值内存可进一步改造成 checkpointed reducer。
 - 独立 Memory quota 尚未实现；当前先保证 Memory 不影响 EventLog quota。Memory 统计查询仍在读取存储状态时执行，后续可按独立 Memory 状态协议拆出。
 - `runtime_events` 的 append-only 由 typed store API 和事务边界保证，暂未增加阻止同库代码直接执行 `UPDATE` 的 SQLite trigger；新增直接 SQL 写路径仍需架构审查。

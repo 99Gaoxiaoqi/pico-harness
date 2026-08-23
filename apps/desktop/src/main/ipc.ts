@@ -220,9 +220,7 @@ export function registerDesktopIpcHandlers(options: {
   browserSessionHandler(DESKTOP_IPC_CHANNELS.browserGetState, (sessionId) =>
     browser.getState(sessionId),
   );
-  browserSessionHandler(DESKTOP_IPC_CHANNELS.browserClose, (sessionId) =>
-    browser.close(sessionId),
-  );
+  browserSessionHandler(DESKTOP_IPC_CHANNELS.browserClose, (sessionId) => browser.close(sessionId));
 
   ipcMain.handle(
     DESKTOP_IPC_CHANNELS.browserNavigate,
@@ -364,7 +362,12 @@ export function registerDesktopIpcHandlers(options: {
 function readBrowserViewport(value: unknown):
   | {
       readonly sessionId: string;
-      readonly rect: { readonly x: number; readonly y: number; readonly width: number; readonly height: number } | null;
+      readonly rect: {
+        readonly x: number;
+        readonly y: number;
+        readonly width: number;
+        readonly height: number;
+      } | null;
       readonly generation: number;
     }
   | undefined {

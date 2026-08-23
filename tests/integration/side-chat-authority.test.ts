@@ -9,7 +9,10 @@ import {
   latestCompletedTurnBoundary,
   readSideChatLeases,
 } from "../../src/daemon/side-chat-authority.js";
-import type { RuntimeEvent, RuntimeTerminalStatus } from "../../src/engine/session-runtime-event.js";
+import type {
+  RuntimeEvent,
+  RuntimeTerminalStatus,
+} from "../../src/engine/session-runtime-event.js";
 import { closeAllOperationalDatabasesForTest } from "../../src/storage/sqlite/sqlite-database.js";
 
 function terminal(eventId: string, status: RuntimeTerminalStatus): RuntimeEvent {

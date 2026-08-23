@@ -60,6 +60,11 @@ const config = {
           config: "vite.preload.config.ts",
           target: "preload",
         },
+        {
+          entry: "src/main/daemon-entry.ts",
+          config: "vite.daemon.config.ts",
+          target: "main",
+        },
       ],
       renderer: [
         {

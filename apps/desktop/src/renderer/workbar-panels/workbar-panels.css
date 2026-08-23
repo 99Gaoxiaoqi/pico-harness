@@ -112,9 +112,13 @@
 }
 
 @keyframes workbar-browser-spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .workbar-browser__spinner { animation: none; }
+  .workbar-browser__spinner {
+    animation: none;
+  }
 }

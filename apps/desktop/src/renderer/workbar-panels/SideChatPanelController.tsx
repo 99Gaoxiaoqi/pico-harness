@@ -40,6 +40,10 @@ export function SideChatPanelController({
   const [error, setError] = useState<SideChatPanelError | null>(null);
   const targetSessionIdRef = useRef<string | undefined>(undefined);
   const createGenerationRef = useRef(0);
+  const cleanupKey = useMemo(
+    () => JSON.stringify([workspacePath, sourceSessionId, panelId]),
+    [panelId, sourceSessionId, workspacePath],
+  );
 
   const create = useCallback(async () => {
     const generation = ++createGenerationRef.current;
@@ -80,13 +84,13 @@ export function SideChatPanelController({
   }, [actions, panelId, sourceSessionId, workspacePath]);
 
   useEffect(() => {
-    const pendingCleanup = deferredCleanup.get(panelId);
+    const pendingCleanup = deferredCleanup.get(cleanupKey);
     if (pendingCleanup !== undefined) {
       window.clearTimeout(pendingCleanup);
-      deferredCleanup.delete(panelId);
+      deferredCleanup.delete(cleanupKey);
     }
     void create();
-  }, [create, panelId]);
+  }, [cleanupKey, create]);
 
   useEffect(() => {
     const targetSessionId = child.targetSessionId;
@@ -113,12 +117,12 @@ export function SideChatPanelController({
       const targetSessionId = targetSessionIdRef.current;
       if (!targetSessionId) return;
       const timeout = window.setTimeout(() => {
-        deferredCleanup.delete(panelId);
+        deferredCleanup.delete(cleanupKey);
         void window.pico.runtime["sideChat.close"]({ workspacePath, sessionId: targetSessionId });
       }, 100);
-      deferredCleanup.set(panelId, timeout);
+      deferredCleanup.set(cleanupKey, timeout);
     },
-    [panelId, workspacePath],
+    [cleanupKey, workspacePath],
   );
 
   const targetSessionId = child.targetSessionId;
