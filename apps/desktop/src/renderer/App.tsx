@@ -132,6 +132,8 @@ import {
   type WorkbarToolKind,
 } from "./workbar/index.js";
 import "./workbar/SessionWorkbar.css";
+import { BrowserWorkbarPanel } from "./workbar-panels/BrowserWorkbarPanel.js";
+import "./workbar-panels/workbar-panels.css";
 
 const RuntimeContext = createContext<RuntimeStore | null>(null);
 
@@ -1842,6 +1844,15 @@ function ConversationPage() {
           </div>
         );
       }
+      if (tab.kind === "browser" && sessionId) {
+        return (
+          <BrowserWorkbarPanel
+            bridge={window.pico}
+            sessionId={sessionId}
+            active={active}
+          />
+        );
+      }
       if (tab.kind !== "review") {
         return null;
       }
@@ -1869,6 +1880,7 @@ function ConversationPage() {
       data.workspaceMode,
       inspector,
       openReview,
+      sessionId,
       sessionRef,
       workbar,
       workspacePath,
