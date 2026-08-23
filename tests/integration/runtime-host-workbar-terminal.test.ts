@@ -5,6 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  createDesktopTerminalCleanupFence,
+  DesktopTerminalGenerationController,
+} from "../../apps/desktop/src/main/daemon-controller.js";
+import {
   createChildProcessWorkbarTerminalFallback,
   createPreferredWorkbarTerminalProcessFactory,
   WorkbarTerminalAuthority,
@@ -331,6 +335,110 @@ test("Host terminal stopAll 等待已接纳但仍在 spawn 的 create 后再完�
   const persisted = store.records.find((record) => record.resourceId === created.resourceId);
   assert.equal(persisted?.status, "stopped");
   assert.equal(persisted?.pid, undefined);
+});
+
+test("Desktop 慢 spawn 超过退出 fence 时已向真实 Authority 提交 stopAll", async (context) => {
+  const workspacePath = await createWorkspace(context, "desktop-slow-create-fence");
+  const factory = new ControlledProcessFactory();
+  const authority = new WorkbarTerminalAuthority({
+    store: new MemoryStateStore(),
+    processFactory: factory,
+    stopGraceMs: 5,
+  });
+  context.after(() => authority.close());
+  const generation = new DesktopTerminalGenerationController();
+  await generation.open(async () => undefined);
+  const creating = generation.submitCreate(() =>
+    authority.create({ workspacePath, sessionId: "session-1" }),
+  );
+  assert.ok(creating);
+  await waitFor(async () => factory.spawnCount === 1);
+
+  let timeoutCallback: (() => void) | undefined;
+  let scheduledDelay: number | undefined;
+  let quitCount = 0;
+  let stopAllSubmitted = false;
+  const errors: unknown[] = [];
+  const fence = createDesktopTerminalCleanupFence(
+    {
+      stopAll: () =>
+        generation.cleanup(async () => {
+          const stopping = authority.stopAll();
+          stopAllSubmitted = true;
+          await stopping;
+        }),
+    },
+    () => quitCount++,
+    (error) => errors.push(error),
+    {
+      timeoutMs: 5_000,
+      setTimeout: (callback, delayMs) => {
+        timeoutCallback = callback;
+        scheduledDelay = delayMs;
+        return callback;
+      },
+      clearTimeout: () => undefined,
+    },
+  );
+  fence({ preventDefault: () => undefined });
+  await waitFor(async () => stopAllSubmitted);
+
+  await assert.rejects(
+    authority.create({ workspacePath, sessionId: "late-session" }),
+    (error: unknown) => error instanceof WorkbarTerminalError && error.code === "admission_closed",
+  );
+  assert.equal(scheduledDelay, 5_000);
+  timeoutCallback?.();
+  assert.equal(quitCount, 1);
+  assert.match(String(errors[0]), /cleanup exceeded/u);
+
+  const process = factory.resolveNext(true);
+  const created = await creating;
+  await waitFor(async () => {
+    const records = await authority.list({ workspacePath, sessionId: "session-1" });
+    return records[0]?.status === "stopped";
+  });
+  assert.deepEqual(process.signals, ["SIGTERM"]);
+  assert.equal(created.resourceId.length > 0, true);
+});
+
+test("Desktop 旧 create handler 未完成前 activate 不得 resume 真实 Authority", async (context) => {
+  const workspacePath = await createWorkspace(context, "desktop-delayed-handler-generation");
+  const authority = new WorkbarTerminalAuthority({
+    store: new MemoryStateStore(),
+    processFactory: new FakeProcessFactory(),
+  });
+  context.after(() => authority.close());
+  const generation = new DesktopTerminalGenerationController();
+  await generation.open(async () => undefined);
+  const handlerGate = Promise.withResolvers<void>();
+  const oldCreate = generation.submitCreate(async () => {
+    await handlerGate.promise;
+    return authority.create({ workspacePath, sessionId: "old-session" });
+  });
+  assert.ok(oldCreate);
+  let stopAllFinished = false;
+  const cleanup = generation.cleanup(async () => {
+    await authority.stopAll();
+    stopAllFinished = true;
+  });
+  let resumeCount = 0;
+  const opening = generation.open(async () => {
+    resumeCount++;
+    authority.resumeCreates();
+  });
+
+  await waitFor(async () => stopAllFinished);
+  assert.equal(resumeCount, 0, "stopAll 已完成但旧 handler 未响应时仍不得 resume");
+  handlerGate.resolve();
+  await assert.rejects(
+    oldCreate,
+    (error: unknown) => error instanceof WorkbarTerminalError && error.code === "admission_closed",
+  );
+  await cleanup;
+  await opening;
+  assert.equal(resumeCount, 1);
+  assert.deepEqual(await authority.list({ workspacePath, sessionId: "old-session" }), []);
 });
 
 test("Host terminal 退出清理锁住 admission，显式 resume 后才开启下一代", async (context) => {
