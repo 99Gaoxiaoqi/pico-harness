@@ -162,6 +162,23 @@ import { canonicalizeWorkspacePath, resolveGitBranch } from "./workspace-registr
 function manifestWorkspaceForm(registryCanonical: string): string {
   return canonicalizeManifestWorkspaceForm(registryCanonical);
 }
+
+function unavailableWorkspaceStatus(workspacePath: string): WorkspaceStatusResult {
+  return {
+    workspacePath,
+    registered: true,
+    schedulerStatus: "unknown",
+    mode: "folder",
+    branch: "",
+    capabilities: {
+      foregroundRuns: false,
+      fileHistory: false,
+      isolatedWorktrees: false,
+      branchMerge: false,
+    },
+    eventLog: null,
+  };
+}
 import { WorkspaceRegistrationStore } from "./workspace-registration.js";
 import { RUNTIME_REQUEST_RESULT_MAX_BYTES } from "./runtime-host-operations.js";
 import {
@@ -759,12 +776,20 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
             eventLog: null,
           } satisfies WorkspaceStatusResult;
         }
-        const runtime = await this.options.runtimeService.getWorkspaceRuntime(workspacePath);
-        return workspaceStatusResult(
-          runtime,
-          true,
-          runtime.mode === "git" ? await resolveGitBranch(runtime.workspace) : undefined,
-        );
+        try {
+          const runtime = await this.options.runtimeService.getWorkspaceRuntime(workspacePath);
+          return workspaceStatusResult(
+            runtime,
+            true,
+            runtime.mode === "git" ? await resolveGitBranch(runtime.workspace) : undefined,
+          );
+        } catch (error) {
+          // A registered workspace may still contain storage from an unsupported era.
+          // Listing is the Desktop bootstrap boundary: one unavailable workspace must
+          // remain discoverable without preventing every other workspace from opening.
+          logger.warn({ workspacePath, err: error }, "Workspace status materialization failed");
+          return unavailableWorkspaceStatus(workspacePath);
+        }
       }),
     );
     return { workspaces };
