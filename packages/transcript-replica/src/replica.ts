@@ -558,6 +558,7 @@ function applyFrameToDraft(
       return "gap";
     case "subscription.tool_event":
     case "subscription.subagent_update":
+    case "subscription.resource_changed":
       return "applied";
   }
 }

@@ -742,6 +742,7 @@ function isSessionSubscriptionFrame(
       "subscription.subagent_update",
       "subscription.run_state",
       "subscription.transcript_advanced",
+      "subscription.resource_changed",
       "subscription.continuity_degraded",
       "subscription.closed",
     ].includes(value["type"])

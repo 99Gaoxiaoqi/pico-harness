@@ -268,6 +268,27 @@ class SessionSubscriptionOwner {
   }
 
   acceptRuntimeNotification(notification: RuntimeNotification): void {
+    if (notification.topic === "session.resourceChanged") {
+      const payload = notification.payload as {
+        readonly resource?: unknown;
+        readonly revision?: unknown;
+        readonly watermark?: unknown;
+      };
+      if (
+        payload.resource === "tasks" ||
+        payload.resource === "artifacts" ||
+        payload.resource === "trace" ||
+        payload.resource === "context"
+      ) {
+        this.#publish({
+          type: "subscription.resource_changed",
+          resource: payload.resource,
+          ...(typeof payload.revision === "number" ? { revision: payload.revision } : {}),
+          ...(typeof payload.watermark === "number" ? { watermark: payload.watermark } : {}),
+        });
+      }
+      return;
+    }
     if (
       notification.topic !== "run.started" &&
       notification.topic !== "run.updated" &&
@@ -297,6 +318,16 @@ class SessionSubscriptionOwner {
     this.#publishedWatermark = watermark;
     this.#watermarkThroughSequence = watermark.throughSequence;
     this.#publish({ type: "subscription.transcript_advanced", watermark });
+    this.#publish({
+      type: "subscription.resource_changed",
+      resource: "trace",
+      watermark: watermark.throughSequence,
+    });
+    this.#publish({
+      type: "subscription.resource_changed",
+      resource: "context",
+      watermark: watermark.throughSequence,
+    });
   }
 
   acceptDelta(input: Omit<SessionLiveDeltaInput, "workspacePath" | "sessionId">): void {

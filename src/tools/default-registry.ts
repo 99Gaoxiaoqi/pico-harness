@@ -35,6 +35,7 @@ import type { CodeIntelligenceService } from "../code-intelligence/types.js";
 import { createCodeIntelligenceTools } from "./code-intelligence.js";
 import type { YoloSandboxConfig } from "../safety/yolo-sandbox.js";
 import { ExploreRepoTool } from "./explore-repo.js";
+import { createSessionTaskTools, type BoundSessionTaskAuthority } from "./session-tasks.js";
 
 export interface DefaultToolRegistryOptions {
   /** Read/Write/Edit/Glob/Grep 与请求边界共享的工作区根集合。 */
@@ -44,6 +45,8 @@ export interface DefaultToolRegistryOptions {
   /** 仅可信宿主在 YOLO 运行态显式注入；未传时保持旧 Bash 行为。 */
   yoloSandbox?: { config?: Partial<YoloSandboxConfig> };
   backgroundManager?: BackgroundManager;
+  /** Session-scoped durable task authority shared by model tools and prompt injection. */
+  sessionTasks?: BoundSessionTaskAuthority;
   /**
    * Goal Manager 单例(ROADMAP 3.5)。三个 Goal 工具共享此实例,
    * host 创建后同时传给 engine(经 AgentEngineOptions.goalManager),
@@ -108,6 +111,7 @@ export function buildDefaultToolRegistry(
 ): ToolRegistry {
   const {
     backgroundManager = new BackgroundManager(),
+    sessionTasks,
     goalManager,
     todoStore,
     toolDisclosure,
@@ -146,9 +150,22 @@ export function buildDefaultToolRegistry(
       ...(bashTimeoutMs !== undefined ? { timeoutMs: bashTimeoutMs } : {}),
     }),
   );
-  registry.register(new TaskListTool(backgroundManager));
+  registry.register(
+    new TaskListTool(
+      backgroundManager,
+      sessionTasks
+        ? {
+            list: () =>
+              sessionTasks.repository.queryTasks({ sessionId: sessionTasks.sessionId, limit: 200 }),
+          }
+        : undefined,
+    ),
+  );
   registry.register(new TaskOutputTool(backgroundManager));
   registry.register(new TaskStopTool(backgroundManager));
+  if (sessionTasks) {
+    for (const tool of createSessionTaskTools(sessionTasks)) registry.register(tool);
+  }
   registry.register(new SkillViewTool(skillLoader ?? new SkillLoader(workDir), activateSkillHooks));
   registry.register(new GlobTool(roots));
   registry.register(

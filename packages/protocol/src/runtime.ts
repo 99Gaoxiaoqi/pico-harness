@@ -1,8 +1,8 @@
 export const LOCAL_RUNTIME_PROTOCOL_VERSION = 2;
 export const LOCAL_RUNTIME_AUTH_VERSION = 1;
 /** Increment when the Desktop-required result schema changes incompatibly. */
-export const DESKTOP_RUNTIME_SCHEMA_REVISION = 13;
-export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v13";
+export const DESKTOP_RUNTIME_SCHEMA_REVISION = 14;
+export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v14";
 export const CAPABILITY_SCOPE_RUNTIME_CAPABILITY = "capability-scopes-v1";
 export const MAX_RUNTIME_FRAME_BYTES = 1024 * 1024;
 /** Maximum UTF-8 payload exposed through a host-facing ToolResult projection. */
@@ -548,6 +548,12 @@ export type RuntimeSessionSubscriptionFrame = RuntimeSessionSubscriptionEnvelope
         readonly watermark: RuntimeTranscriptWatermark;
       })
     | (JsonObject & {
+        readonly type: "subscription.resource_changed";
+        readonly resource: "tasks" | "artifacts" | "trace" | "context";
+        readonly revision?: number;
+        readonly watermark?: number;
+      })
+    | (JsonObject & {
         readonly type: "subscription.continuity_degraded";
         readonly reason: "partial_persistence_failed" | "recovery_failed";
       })
@@ -723,6 +729,64 @@ export type RuntimeSession = JsonObject & {
   readonly updatedAt: number;
 };
 
+export type RuntimeSessionTaskStatus =
+  | "pending"
+  | "in_progress"
+  | "blocked"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type RuntimeSessionTask = JsonObject & {
+  readonly taskId: string;
+  readonly title: string;
+  readonly detail?: string;
+  readonly status: RuntimeSessionTaskStatus;
+  readonly ordinal: number;
+  readonly version: number;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+};
+
+export type RuntimeSessionArtifact = JsonObject & {
+  readonly artifactId: string;
+  readonly title: string;
+  readonly mimeType: string;
+  readonly digest: string;
+  readonly sizeBytes: number;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+};
+
+/** Versioned extension of the legacy context JsonObject returned under `context`. */
+export type RuntimeSessionContextSnapshot = JsonObject & {
+  readonly version: 2;
+  readonly sessionId: SessionId;
+  readonly generatedAt: number;
+  readonly traceWatermark: number;
+};
+
+export type RuntimeGitReviewSource = "branch" | "staged" | "unstaged";
+export type RuntimeGitReviewFile = JsonObject & {
+  readonly path: string;
+  readonly status: "added" | "modified" | "deleted" | "renamed" | "untracked";
+  readonly additions: number;
+  readonly deletions: number;
+};
+
+export type RuntimeTerminalStatus = "starting" | "running" | "interrupted" | "exited";
+export type RuntimeTerminalSession = JsonObject & {
+  readonly terminalId: string;
+  readonly workspacePath: string;
+  readonly sessionId: SessionId;
+  readonly resourceEpoch: string;
+  readonly sequence: number;
+  readonly status: RuntimeTerminalStatus;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly exitCode?: number;
+};
+
 export type RuntimeJob = JsonObject & {
   readonly jobId: JobId;
   readonly workspacePath: string;
@@ -875,7 +939,185 @@ export type RuntimeMethodMap = {
   /** 活跃路由的上下文预算与能力报告（BLOCKED 收口：/context 镜像）。 */
   readonly "session.context.get": {
     readonly params: WorkspaceParams & { readonly sessionId: SessionId };
-    readonly result: { readonly context: JsonObject };
+    readonly result: { readonly context: RuntimeSessionContextSnapshot };
+  };
+  readonly "session.tasks.query": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly taskId?: string;
+      readonly cursor?: string;
+      readonly limit?: number;
+      readonly revision?: number;
+    };
+    readonly result: {
+      readonly revision: number;
+      readonly tasks: readonly RuntimeSessionTask[];
+      readonly nextCursor?: string;
+    };
+  };
+  readonly "session.tasks.command": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly action: "create" | "update";
+      readonly expectedRevision: number;
+      readonly idempotencyKey: string;
+      readonly taskId?: string;
+      readonly title?: string;
+      readonly detail?: string | null;
+      readonly status?: RuntimeSessionTaskStatus;
+    };
+    readonly result: { readonly revision: number; readonly task: RuntimeSessionTask };
+  };
+  readonly "session.artifacts.query": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly action: "list" | "get" | "read_chunk";
+      readonly artifactId?: string;
+      readonly cursor?: string;
+      readonly limit?: number;
+      readonly revision?: number;
+      readonly offsetBytes?: number;
+      readonly limitBytes?: number;
+    };
+    readonly result: JsonObject;
+  };
+  readonly "session.artifacts.command": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly action: "begin" | "append" | "commit" | "abort" | "delete";
+      readonly expectedRevision?: number;
+      readonly idempotencyKey?: string;
+      readonly artifactId?: string;
+      readonly ingestId?: string;
+      readonly title?: string;
+      readonly mimeType?: string;
+      readonly offsetBytes?: number;
+      readonly contentBase64?: string;
+      readonly expectedDigest?: string;
+      readonly expectedSizeBytes?: number;
+    };
+    readonly result: JsonObject;
+  };
+  readonly "session.trace.query": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly throughSequence?: number;
+      readonly afterSequence?: number;
+      readonly limit?: number;
+    };
+    readonly result: {
+      readonly throughSequence: number;
+      readonly events: readonly JsonObject[];
+      readonly nextAfterSequence?: number;
+    };
+  };
+  readonly "git.review.snapshot": {
+    readonly params: WorkspaceParams & { readonly source?: RuntimeGitReviewSource };
+    readonly result: {
+      readonly revision: string;
+      readonly branch: string;
+      readonly source: RuntimeGitReviewSource;
+      readonly files: readonly RuntimeGitReviewFile[];
+      readonly truncated: boolean;
+    };
+  };
+  readonly "git.review.diff": {
+    readonly params: WorkspaceParams & {
+      readonly path: string;
+      readonly source: RuntimeGitReviewSource;
+      readonly expectedRevision: string;
+    };
+    readonly result: {
+      readonly path: string;
+      readonly source: RuntimeGitReviewSource;
+      readonly revision: string;
+      readonly patch: string;
+      readonly truncated: boolean;
+    };
+  };
+  readonly "terminal.create": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly cols?: number;
+      readonly rows?: number;
+    };
+    readonly result: {
+      readonly terminal: RuntimeTerminalSession;
+      readonly resourceEpoch: string;
+      readonly sequence: number;
+      readonly snapshot: string;
+      readonly truncated: boolean;
+    };
+  };
+  readonly "terminal.list": {
+    readonly params: WorkspaceParams & { readonly sessionId: SessionId };
+    readonly result: { readonly terminals: readonly RuntimeTerminalSession[] };
+  };
+  readonly "terminal.attach": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly terminalId: string;
+      readonly afterSequence?: number;
+      readonly maxBytes?: number;
+    };
+    readonly result: {
+      readonly terminal: RuntimeTerminalSession;
+      readonly resourceEpoch: string;
+      readonly sequence: number;
+      readonly snapshot: string;
+      readonly truncated: boolean;
+    };
+  };
+  readonly "terminal.input": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly terminalId: string;
+      readonly resourceEpoch: string;
+      readonly data: string;
+    };
+    readonly result: { readonly accepted: true; readonly sequence: number };
+  };
+  readonly "terminal.resize": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly terminalId: string;
+      readonly resourceEpoch: string;
+      readonly cols: number;
+      readonly rows: number;
+    };
+    readonly result: { readonly resized: true; readonly sequence: number };
+  };
+  readonly "terminal.stop": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly terminalId: string;
+      readonly resourceEpoch: string;
+    };
+    readonly result: { readonly terminal: RuntimeTerminalSession };
+  };
+  readonly "terminal.detach": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly terminalId: string;
+      readonly resourceEpoch: string;
+    };
+    readonly result: { readonly detached: true };
+  };
+  readonly "sideChat.create": {
+    readonly params: WorkspaceParams & {
+      readonly sourceSessionId: SessionId;
+      readonly panelId: string;
+      readonly idempotencyKey: string;
+    };
+    readonly result: {
+      readonly session: RuntimeSession;
+      readonly sourceSessionId: SessionId;
+      readonly throughEventId: string;
+    };
+  };
+  readonly "sideChat.close": {
+    readonly params: WorkspaceParams & { readonly sessionId: SessionId };
+    readonly result: { readonly cleanupScheduled: true };
   };
   readonly "session.settings.update": {
     readonly params: WorkspaceParams & {
@@ -1666,6 +1908,22 @@ export const RUNTIME_METHODS = [
   "session.compact",
   "session.settings.get",
   "session.context.get",
+  "session.tasks.query",
+  "session.tasks.command",
+  "session.artifacts.query",
+  "session.artifacts.command",
+  "session.trace.query",
+  "git.review.snapshot",
+  "git.review.diff",
+  "terminal.create",
+  "terminal.list",
+  "terminal.attach",
+  "terminal.input",
+  "terminal.resize",
+  "terminal.stop",
+  "terminal.detach",
+  "sideChat.create",
+  "sideChat.close",
   "session.settings.update",
   "session.directories.add",
   "hooks.manage",
@@ -1785,6 +2043,22 @@ export const DESKTOP_RUNTIME_METHODS = [
   "session.compact",
   "session.settings.get",
   "session.context.get",
+  "session.tasks.query",
+  "session.tasks.command",
+  "session.artifacts.query",
+  "session.artifacts.command",
+  "session.trace.query",
+  "git.review.snapshot",
+  "git.review.diff",
+  "terminal.create",
+  "terminal.list",
+  "terminal.attach",
+  "terminal.input",
+  "terminal.resize",
+  "terminal.stop",
+  "terminal.detach",
+  "sideChat.create",
+  "sideChat.close",
   "session.settings.update",
   "session.directories.add",
   "hooks.manage",
@@ -1877,6 +2151,11 @@ export type RuntimeNotificationMap = {
   readonly "workspace.trustChanged": { readonly trusted: boolean };
   readonly "workspace.initialized": RuntimeWorkspaceInitResult;
   readonly "session.updated": { readonly session: RuntimeSession };
+  readonly "session.resourceChanged": {
+    readonly resource: "tasks" | "artifacts" | "trace" | "context";
+    readonly revision?: number;
+    readonly watermark?: number;
+  };
   readonly "session.settingsUpdated": {
     readonly sessionId: SessionId;
     readonly settings: RuntimeSessionSettings;
@@ -2852,6 +3131,136 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
   "session.compact": workspaceSessionParams,
   "session.settings.get": workspaceSessionParams,
   "session.context.get": workspaceSessionParams,
+  "session.tasks.query": exactParamShape(
+    { workspacePath: stringParam, sessionId: stringParam },
+    {
+      taskId: boundedNonEmptyStringParam(512),
+      cursor: boundedNonEmptyStringParam(2_048),
+      limit: positiveIntegerParam,
+      revision: nonNegativeIntegerParam,
+    },
+  ),
+  "session.tasks.command": exactParamShape(
+    {
+      workspacePath: stringParam,
+      sessionId: stringParam,
+      action: oneOfParam(["create", "update"] as const),
+      expectedRevision: nonNegativeIntegerParam,
+      idempotencyKey: boundedNonEmptyStringParam(512),
+    },
+    {
+      taskId: boundedNonEmptyStringParam(512),
+      title: boundedNonEmptyStringParam(2_048),
+      detail: nullableParam(boundedNonEmptyStringParam(16_000)),
+      status: oneOfParam([
+        "pending",
+        "in_progress",
+        "blocked",
+        "completed",
+        "failed",
+        "cancelled",
+      ] as const),
+    },
+  ),
+  "session.artifacts.query": exactParamShape(
+    {
+      workspacePath: stringParam,
+      sessionId: stringParam,
+      action: oneOfParam(["list", "get", "read_chunk"] as const),
+    },
+    {
+      artifactId: boundedNonEmptyStringParam(512),
+      cursor: boundedNonEmptyStringParam(2_048),
+      limit: positiveIntegerParam,
+      revision: nonNegativeIntegerParam,
+      offsetBytes: nonNegativeIntegerParam,
+      limitBytes: positiveIntegerParam,
+    },
+  ),
+  "session.artifacts.command": exactParamShape(
+    {
+      workspacePath: stringParam,
+      sessionId: stringParam,
+      action: oneOfParam(["begin", "append", "commit", "abort", "delete"] as const),
+    },
+    {
+      expectedRevision: nonNegativeIntegerParam,
+      idempotencyKey: boundedNonEmptyStringParam(512),
+      artifactId: boundedNonEmptyStringParam(512),
+      ingestId: boundedNonEmptyStringParam(512),
+      title: boundedNonEmptyStringParam(2_048),
+      mimeType: boundedNonEmptyStringParam(256),
+      offsetBytes: nonNegativeIntegerParam,
+      contentBase64: boundedNonEmptyStringParam(48_000),
+      expectedDigest: boundedNonEmptyStringParam(64),
+      expectedSizeBytes: nonNegativeIntegerParam,
+    },
+  ),
+  "session.trace.query": exactParamShape(
+    { workspacePath: stringParam, sessionId: stringParam },
+    {
+      throughSequence: nonNegativeIntegerParam,
+      afterSequence: nonNegativeIntegerParam,
+      limit: positiveIntegerParam,
+    },
+  ),
+  "git.review.snapshot": exactParamShape(
+    { workspacePath: stringParam },
+    { source: oneOfParam(["branch", "staged", "unstaged"] as const) },
+  ),
+  "git.review.diff": exactParamShape({
+    workspacePath: stringParam,
+    path: boundedNonEmptyStringParam(4_096),
+    source: oneOfParam(["branch", "staged", "unstaged"] as const),
+    expectedRevision: boundedNonEmptyStringParam(512),
+  }),
+  "terminal.create": exactParamShape(
+    { workspacePath: stringParam, sessionId: stringParam },
+    { cols: positiveIntegerParam, rows: positiveIntegerParam },
+  ),
+  "terminal.list": workspaceSessionParams,
+  "terminal.attach": exactParamShape(
+    {
+      workspacePath: stringParam,
+      sessionId: stringParam,
+      terminalId: boundedNonEmptyStringParam(512),
+    },
+    { afterSequence: nonNegativeIntegerParam, maxBytes: positiveIntegerParam },
+  ),
+  "terminal.input": exactParamShape({
+    workspacePath: stringParam,
+    sessionId: stringParam,
+    terminalId: boundedNonEmptyStringParam(512),
+    resourceEpoch: boundedNonEmptyStringParam(512),
+    data: boundedNonEmptyStringParam(64 * 1024),
+  }),
+  "terminal.resize": exactParamShape({
+    workspacePath: stringParam,
+    sessionId: stringParam,
+    terminalId: boundedNonEmptyStringParam(512),
+    resourceEpoch: boundedNonEmptyStringParam(512),
+    cols: positiveIntegerParam,
+    rows: positiveIntegerParam,
+  }),
+  "terminal.stop": exactParamShape({
+    workspacePath: stringParam,
+    sessionId: stringParam,
+    terminalId: boundedNonEmptyStringParam(512),
+    resourceEpoch: boundedNonEmptyStringParam(512),
+  }),
+  "terminal.detach": exactParamShape({
+    workspacePath: stringParam,
+    sessionId: stringParam,
+    terminalId: boundedNonEmptyStringParam(512),
+    resourceEpoch: boundedNonEmptyStringParam(512),
+  }),
+  "sideChat.create": exactParamShape({
+    workspacePath: stringParam,
+    sourceSessionId: stringParam,
+    panelId: boundedNonEmptyStringParam(512),
+    idempotencyKey: boundedNonEmptyStringParam(512),
+  }),
+  "sideChat.close": workspaceSessionParams,
   "session.directories.add": exactParamShape({
     workspacePath: stringParam,
     sessionId: stringParam,
@@ -3292,6 +3701,14 @@ const resultNonEmptyString: RuntimeResultRule = (value, path) => {
   resultString(value, path);
   if ((value as string).length === 0) throw invalidResult(`${path} 不能为空`);
 };
+const resultBoundedString =
+  (maxBytes: number): RuntimeResultRule =>
+  (value, path) => {
+    resultString(value, path);
+    if (new TextEncoder().encode(value as string).byteLength > maxBytes) {
+      throw invalidResult(`${path} 超过 ${maxBytes} UTF-8 字节上限`);
+    }
+  };
 const resultBoolean: RuntimeResultRule = (value, path) => {
   if (typeof value !== "boolean") throw invalidResult(`${path} 必须是布尔值`);
 };
@@ -3580,6 +3997,40 @@ const runtimeSessionResult = resultShape({
   createdAt: resultFiniteNumber,
   updatedAt: resultFiniteNumber,
 });
+
+const runtimeSessionTaskResult = exactResultShape(
+  {
+    taskId: resultNonEmptyString,
+    title: resultNonEmptyString,
+    status: resultOneOf(["pending", "in_progress", "blocked", "completed", "failed", "cancelled"]),
+    ordinal: resultNonNegativeInteger,
+    version: resultPositiveInteger,
+    createdAt: resultFiniteNumber,
+    updatedAt: resultFiniteNumber,
+  },
+  { detail: resultString },
+);
+
+const runtimeGitReviewFileResult = exactResultShape({
+  path: resultNonEmptyString,
+  status: resultOneOf(["added", "modified", "deleted", "renamed", "untracked"]),
+  additions: resultNonNegativeInteger,
+  deletions: resultNonNegativeInteger,
+});
+
+const runtimeTerminalSessionResult = exactResultShape(
+  {
+    terminalId: resultNonEmptyString,
+    workspacePath: resultNonEmptyString,
+    sessionId: resultNonEmptyString,
+    resourceEpoch: resultNonEmptyString,
+    sequence: resultNonNegativeInteger,
+    status: resultOneOf(["starting", "running", "interrupted", "exited"]),
+    createdAt: resultFiniteNumber,
+    updatedAt: resultFiniteNumber,
+  },
+  { exitCode: resultFiniteNumber },
+);
 
 const runtimeRunStatusResult = resultOneOf([
   "queued",
@@ -3973,6 +4424,66 @@ const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
   }),
   "workspace.trustStatus": resultShape({ workspacePath: resultString, trusted: resultBoolean }),
   "session.list": resultShape({ sessions: resultArray(runtimeSessionResult) }),
+  "session.context.get": exactResultShape({ context: resultJsonObject }),
+  "session.tasks.query": exactResultShape(
+    { revision: resultNonNegativeInteger, tasks: resultArray(runtimeSessionTaskResult) },
+    { nextCursor: resultNonEmptyString },
+  ),
+  "session.tasks.command": exactResultShape({
+    revision: resultNonNegativeInteger,
+    task: runtimeSessionTaskResult,
+  }),
+  "session.artifacts.query": resultJsonObject,
+  "session.artifacts.command": resultJsonObject,
+  "session.trace.query": exactResultShape(
+    { throughSequence: resultNonNegativeInteger, events: resultArray(resultJsonObject) },
+    { nextAfterSequence: resultNonNegativeInteger },
+  ),
+  "git.review.snapshot": exactResultShape({
+    revision: resultNonEmptyString,
+    branch: resultString,
+    source: resultOneOf(["branch", "staged", "unstaged"]),
+    files: resultArray(runtimeGitReviewFileResult),
+    truncated: resultBoolean,
+  }),
+  "git.review.diff": exactResultShape({
+    path: resultNonEmptyString,
+    source: resultOneOf(["branch", "staged", "unstaged"]),
+    revision: resultNonEmptyString,
+    patch: resultBoundedString(512 * 1024),
+    truncated: resultBoolean,
+  }),
+  "terminal.create": exactResultShape({
+    terminal: runtimeTerminalSessionResult,
+    resourceEpoch: resultNonEmptyString,
+    sequence: resultNonNegativeInteger,
+    snapshot: resultBoundedString(256 * 1024),
+    truncated: resultBoolean,
+  }),
+  "terminal.list": exactResultShape({ terminals: resultArray(runtimeTerminalSessionResult) }),
+  "terminal.attach": exactResultShape({
+    terminal: runtimeTerminalSessionResult,
+    resourceEpoch: resultNonEmptyString,
+    sequence: resultNonNegativeInteger,
+    snapshot: resultBoundedString(256 * 1024),
+    truncated: resultBoolean,
+  }),
+  "terminal.input": exactResultShape({
+    accepted: resultOneOf([true]),
+    sequence: resultNonNegativeInteger,
+  }),
+  "terminal.resize": exactResultShape({
+    resized: resultOneOf([true]),
+    sequence: resultNonNegativeInteger,
+  }),
+  "terminal.stop": exactResultShape({ terminal: runtimeTerminalSessionResult }),
+  "terminal.detach": exactResultShape({ detached: resultOneOf([true]) }),
+  "sideChat.create": exactResultShape({
+    session: runtimeSessionResult,
+    sourceSessionId: resultNonEmptyString,
+    throughEventId: resultNonEmptyString,
+  }),
+  "sideChat.close": exactResultShape({ cleanupScheduled: resultOneOf([true]) }),
   "session.fork": resultShape({ session: runtimeSessionResult, sourceSessionId: resultString }),
   "session.send": resultShape(
     {
