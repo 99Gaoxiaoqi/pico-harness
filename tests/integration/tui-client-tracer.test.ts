@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createRuntimeNotification, type RuntimeNotification } from "@pico/protocol";
+import {
+  createRuntimeNotification,
+  TRANSCRIPT_PROJECTOR_VERSION,
+  type RuntimeNotification,
+  type RuntimeSessionSubscriptionFrame,
+} from "@pico/protocol";
 import { TranscriptEventStore } from "../../src/presentation/transcript-event-store.js";
 import { DaemonEventReporter } from "../../src/tui/daemon-event-reporter.js";
 import { transcriptEventsFromRuntimeItems } from "../../src/tui/transcript-item-hydration.js";
@@ -607,6 +612,131 @@ test("client session runtime: hydrates every fixed-watermark transcript page", a
   assert.deepEqual(
     reporter.getProjection().entries.map(({ entry }) => entry.kind),
     ["user", "assistant"],
+  );
+  runtime.dispose();
+});
+
+test("client session runtime: dedicated session frames drive replica advance", async () => {
+  const requests: string[] = [];
+  let frameListener: ((frame: RuntimeSessionSubscriptionFrame) => void) | undefined;
+  const watermark = (throughSequence: number) => ({
+    historyEpoch: "history-1",
+    projectorVersion: TRANSCRIPT_PROJECTOR_VERSION,
+    throughSequence,
+  });
+  const session = {
+    sessionId: "s1",
+    workspacePath: "C:\\ws",
+    title: "t",
+    status: "active",
+    pinned: false,
+    createdAt: 1,
+    updatedAt: 1,
+  } as const;
+  const client = {
+    connect: async () => undefined,
+    subscribeSessionFrames(listener: (frame: RuntimeSessionSubscriptionFrame) => void) {
+      frameListener = listener;
+      return { dispose: () => (frameListener = undefined) };
+    },
+    request: async (method: string) => {
+      requests.push(method);
+      if (method === "session.subscription.open") {
+        frameListener?.({
+          hostEpoch: "host-1",
+          subscriptionId: "subscription-1",
+          sessionId: "s1",
+          sequence: 1,
+          type: "subscription.session_delta",
+          runId: "run-1",
+          turnId: "turn-1",
+          itemId: "live",
+          streamId: "stream-1",
+          kind: "text",
+          startOffsetBytes: 0,
+          text: "早到帧",
+        });
+        return {
+          session,
+          hostEpoch: "host-1",
+          subscriptionId: "subscription-1",
+          nextSequence: 1,
+          watermark: watermark(1),
+          durableTail: [
+            {
+              itemId: "history",
+              itemRevision: 1,
+              positionSequence: 1,
+              positionOrdinal: 0,
+              item: { id: "history", kind: "userMessage", content: "历史" },
+            },
+          ],
+          activeOverlay: [],
+          queuedInputs: [],
+        };
+      }
+      if (method === "session.transcript.advance") {
+        return {
+          after: watermark(1),
+          through: watermark(2),
+          changes: [
+            {
+              op: "upsert",
+              record: {
+                itemId: "live",
+                itemRevision: 1,
+                positionSequence: 2,
+                positionOrdinal: 0,
+                item: { id: "live", kind: "assistantMessage", content: "已持久化" },
+              },
+            },
+          ],
+        };
+      }
+      if (method === "session.subscription.close") return { closed: true };
+      return {};
+    },
+    subscribe: async () => ({
+      replay: { subscribed: true, events: [], hasMore: false },
+      dispose: () => undefined,
+    }),
+  } as unknown as DaemonSessionClient;
+  const reporter = new TuiReporter();
+  const runtime = new ClientSessionRuntime({
+    client,
+    workspacePath: "C:\\ws",
+    sessionId: "s1",
+    reporter,
+  });
+
+  await runtime.start();
+  assert.equal(requests.includes("session.transcript"), false, "v2 不应回退全量 RPC");
+  assert.deepEqual(
+    reporter
+      .getProjection()
+      .entries.map(({ entry }) =>
+        entry.kind === "user" || entry.kind === "assistant" ? entry.content : entry.kind,
+      ),
+    ["历史", "早到帧"],
+  );
+
+  frameListener?.({
+    hostEpoch: "host-1",
+    subscriptionId: "subscription-1",
+    sessionId: "s1",
+    sequence: 2,
+    type: "subscription.transcript_advanced",
+    watermark: watermark(2),
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.ok(requests.includes("session.transcript.advance"));
+  assert.deepEqual(
+    reporter
+      .getProjection()
+      .entries.map(({ entry }) =>
+        entry.kind === "user" || entry.kind === "assistant" ? entry.content : entry.kind,
+      ),
+    ["历史", "已持久化"],
   );
   runtime.dispose();
 });

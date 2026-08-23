@@ -170,6 +170,19 @@ test("transcript replica: advance stages every page then applies changes atomica
       token,
       openResult({
         durableTail: [record("answer", 1, 1, "old"), record("obsolete", 1, 2, "remove")],
+        activeOverlay: [
+          {
+            runId: "run-1",
+            turnId: "turn-1",
+            itemId: "answer",
+            streamId: "answer-stream",
+            kind: "text",
+            startOffsetBytes: 0,
+            endOffsetBytes: 4,
+            text: "live",
+            anchorSequence: 1,
+          },
+        ],
         olderCursor: {
           historyEpoch: "history-1",
           projectorVersion: TRANSCRIPT_PROJECTOR_VERSION,
@@ -230,6 +243,7 @@ test("transcript replica: advance stages every page then applies changes atomica
     replica.view.records.map((item) => item.itemId),
     ["answer"],
   );
+  assert.equal(replica.view.activeOverlay.length, 0, "durable change 应淘汰同 item overlay");
   assert.equal(
     replica.view.records[0]?.item.kind === "assistantMessage"
       ? replica.view.records[0].item.content
@@ -257,6 +271,35 @@ test("transcript replica: advance stages every page then applies changes atomica
       : undefined,
     "new",
     "older 记录不得覆盖更高 itemRevision",
+  );
+});
+
+test("transcript replica: reopen replaces the tail so disconnected removes stay removed", () => {
+  const replica = new TranscriptReplica(sessionId);
+  const first = replica.beginOpen();
+  assert.equal(
+    replica.installOpen(
+      first,
+      openResult({ durableTail: [record("kept", 1, 1, "kept"), record("removed", 1, 2, "old")] }),
+    ),
+    true,
+  );
+  const reopen = replica.beginOpen();
+  assert.equal(
+    replica.installOpen(
+      reopen,
+      openResult({
+        hostEpoch: "host-2",
+        subscriptionId: "subscription-2",
+        watermark: watermark(3),
+        durableTail: [record("kept", 2, 1, "current")],
+      }),
+    ),
+    true,
+  );
+  assert.deepEqual(
+    replica.view.records.map((item) => item.itemId),
+    ["kept"],
   );
 });
 

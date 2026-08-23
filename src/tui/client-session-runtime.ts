@@ -9,10 +9,13 @@ import {
   type RuntimeParams,
   type RuntimeResult,
   type RuntimeConversationItem,
+  type RuntimeActiveOverlayEntry,
+  type RuntimeSessionSubscriptionFrame,
   type RuntimeTranscriptCursor,
   type RuntimeTranscriptFragment,
   type RuntimeUserInput,
 } from "@pico/protocol";
+import { TranscriptReplica } from "@pico/transcript-replica";
 import type { ApprovalNotice } from "../approval/manager.js";
 import type { AskUserOption } from "../tools/ask-user.js";
 import type { PlanApprovalControl } from "./approval-dialogs.js";
@@ -58,6 +61,13 @@ export interface DaemonSessionClient {
     replay: RuntimeResult<"events.subscribe">;
     dispose(): void;
   }>;
+  /**
+   * Dedicated Session Channel 原始 Host event 适配面。它不属于
+   * RuntimeNotification/events.subscribe，传输层应在 open RPC 前安装监听。
+   */
+  subscribeSessionFrames?(listener: (frame: RuntimeSessionSubscriptionFrame) => void): {
+    dispose(): void;
+  };
 }
 
 export interface ClientSessionRuntimeOptions {
@@ -197,6 +207,32 @@ export function advanceRuntimeTranscriptPagingState(
   };
 }
 
+function overlayConversationItem(overlay: RuntimeActiveOverlayEntry): RuntimeConversationItem {
+  if (overlay.kind === "thinking") {
+    return {
+      id: overlay.itemId,
+      kind: "thinking",
+      content: overlay.text,
+      runId: overlay.runId,
+      turnId: overlay.turnId,
+    };
+  }
+  if (overlay.kind === "text") {
+    return {
+      id: overlay.itemId,
+      kind: "assistantMessage",
+      content: overlay.text,
+      runId: overlay.runId,
+      turnId: overlay.turnId,
+    };
+  }
+  return {
+    id: overlay.itemId,
+    kind: "systemNotice",
+    content: overlay.stream ? `[${overlay.stream}] ${overlay.text}` : overlay.text,
+  };
+}
+
 export class ClientSessionRuntime {
   private readonly client: DaemonSessionClient;
   private readonly workspacePath: string;
@@ -204,7 +240,11 @@ export class ClientSessionRuntime {
   private readonly onApproval: ClientSessionRuntimeOptions["onApproval"];
   private readonly eventReporter: DaemonEventReporter;
   private subscription: { dispose(): void } | undefined;
+  private sessionFrameSubscription: { dispose(): void } | undefined;
   private sessionId: string | undefined;
+  private replica: TranscriptReplica | undefined;
+  private advancingReplica = false;
+  private advanceReplicaAgain = false;
   private hydrating = false;
   private hydrateAgain = false;
   private hydrateChain: Promise<void> | undefined;
@@ -243,6 +283,9 @@ export class ClientSessionRuntime {
 
   async start(): Promise<void> {
     await this.client.connect?.();
+    this.sessionFrameSubscription = this.client.subscribeSessionFrames?.((frame) =>
+      this.acceptSessionFrame(frame),
+    );
     await this.resolveModelOverride();
     if (this.sessionId) {
       await this.hydrate();
@@ -293,6 +336,7 @@ export class ClientSessionRuntime {
       });
       if (this.sessionId === undefined) {
         this.sessionId = result.session.sessionId;
+        if (this.hasSessionChannel()) void this.hydrateSerial();
         await this.applyStartupOverrides();
       } else {
         // BYOK 覆盖若曾失败（applied 尚未置位），此后每次成功发送都是廉价重试
@@ -380,8 +424,23 @@ export class ClientSessionRuntime {
 
   dispose(): void {
     this.disposed = true;
+    this.closeReplicaSubscription();
+    this.sessionFrameSubscription?.dispose();
+    this.sessionFrameSubscription = undefined;
     this.subscription?.dispose();
     this.subscription = undefined;
+  }
+
+  /** Dedicated Session Channel 原始帧入口；不经 RuntimeNotification/topic 包装。 */
+  acceptSessionFrame(frame: RuntimeSessionSubscriptionFrame): void {
+    if (this.disposed || frame.sessionId !== this.sessionId || !this.replica) return;
+    const outcome = this.replica.receiveFrame(frame);
+    if (outcome.kind === "applied") {
+      this.renderReplica();
+      if (this.replica.view.pendingWatermark) void this.advanceReplicaSerial();
+      return;
+    }
+    if (outcome.kind === "recovering") void this.hydrateSerial();
   }
 
   private handleNotification(notification: RuntimeNotification): void {
@@ -420,12 +479,18 @@ export class ClientSessionRuntime {
         void this.refreshSettingsSnapshot();
       }
       const scoped = notification.scope.sessionId;
-      if (!this.sessionId || scoped === this.sessionId) void this.hydrateSerial();
+      // v2 Dedicated Session Channel 用 transcript_advanced + advance RPC 增量对账。
+      // 仅在传输层尚未提供原始帧适配时保留 v1 reload 降级路径。
+      if (!this.hasSessionChannel() && (!this.sessionId || scoped === this.sessionId)) {
+        void this.hydrateSerial();
+      }
     }
     if (notification.topic === "session.settingsUpdated") {
       void this.refreshSettingsSnapshot();
     }
-    this.eventReporter.handleNotification(notification);
+    if (!(this.hasSessionChannel() && notification.topic === "run.live")) {
+      this.eventReporter.handleNotification(notification);
+    }
   }
 
   /**
@@ -434,7 +499,9 @@ export class ClientSessionRuntime {
    * BYOK 启动覆盖不重放（startup-only 语义）。
    */
   async switchSession(sessionId: string | undefined): Promise<void> {
+    this.closeReplicaSubscription();
     this.sessionId = sessionId;
+    this.replica = undefined;
     this.eventReporter.clearTransientState();
     if (sessionId) {
       // 与 reload 对账共用串行化（对抗评审 P2：直连 hydrate 会与在途 reload
@@ -475,6 +542,10 @@ export class ClientSessionRuntime {
 
   private async hydrate(): Promise<void> {
     if (!this.sessionId) return;
+    if (this.hasSessionChannel()) {
+      await this.openReplica(this.sessionId);
+      return;
+    }
     // 跨切换竞态防护（对抗评审二轮 P1）：捕获发起时的 sessionId，响应落地时
     // 若已切换（/new 清空或 /resume 换目标）则丢弃——陈旧页不得复活旧 transcript
     // 或重亮已死的 run。
@@ -522,6 +593,129 @@ export class ClientSessionRuntime {
       this.eventReporter.clearTransientState();
       this.options.onRunStateChanged?.(false);
     }
+  }
+
+  private hasSessionChannel(): boolean {
+    return this.client.subscribeSessionFrames !== undefined;
+  }
+
+  private async openReplica(sessionId: string): Promise<void> {
+    const previous = this.replica;
+    if (previous && previous.view.sessionId !== sessionId) this.closeReplicaSubscription();
+    const replica =
+      previous?.view.sessionId === sessionId ? previous : new TranscriptReplica(sessionId);
+    this.replica = replica;
+    const token = replica.beginOpen();
+    const opened = await this.client.request("session.subscription.open", {
+      workspacePath: this.workspacePath,
+      sessionId,
+      tailLimit: 200,
+    });
+    if (this.disposed || this.sessionId !== sessionId || this.replica !== replica) return;
+    if (!replica.installOpen(token, opened)) {
+      throw new Error(
+        `Session continuity open failed (${replica.view.recoveryReason ?? "unknown"})`,
+      );
+    }
+    this.renderReplica();
+
+    // TUI 现有视图需要完整历史；旧页固定在 open 的 watermark，
+    // 与同时到达的新 revision 合并时不会覆盖新记录。
+    let older = replica.beginOlderPage();
+    while (older) {
+      const page = await this.client.request("session.transcript.page", {
+        workspacePath: this.workspacePath,
+        sessionId,
+        through: older.through,
+        cursor: older.cursor,
+        limit: 200,
+      });
+      if (this.disposed || this.sessionId !== sessionId || this.replica !== replica) return;
+      const outcome = replica.applyOlderPage(older, page);
+      if (outcome === "recovering") throw new Error("Session continuity older-page gap");
+      if (outcome === "ignored") return;
+      older = replica.beginOlderPage();
+    }
+    this.renderReplica();
+    if (replica.view.pendingWatermark) await this.advanceReplicaSerial();
+  }
+
+  private async advanceReplicaSerial(): Promise<void> {
+    if (this.advancingReplica) {
+      this.advanceReplicaAgain = true;
+      return;
+    }
+    this.advancingReplica = true;
+    try {
+      do {
+        this.advanceReplicaAgain = false;
+        const replica = this.replica;
+        const sessionId = this.sessionId;
+        if (!replica || !sessionId) return;
+        let request = replica.beginAdvance();
+        while (request) {
+          const page = await this.client.request("session.transcript.advance", {
+            workspacePath: this.workspacePath,
+            sessionId,
+            after: request.after,
+            through: request.through,
+            ...(request.cursor ? { cursor: request.cursor } : {}),
+            limit: 200,
+          });
+          if (this.disposed || this.replica !== replica || this.sessionId !== sessionId) return;
+          const outcome = replica.applyAdvancePage(request, page);
+          if (outcome.kind === "recovering") {
+            void this.hydrateSerial();
+            return;
+          }
+          if (outcome.kind === "next") {
+            request = outcome.request;
+          } else {
+            request = undefined;
+          }
+        }
+        this.renderReplica();
+        if (replica.view.pendingWatermark) this.advanceReplicaAgain = true;
+      } while (this.advanceReplicaAgain);
+    } catch (error) {
+      this.reporter.pushError(error instanceof Error ? error.message : String(error), {
+        retryable: true,
+        action: "session.transcript.advance",
+      });
+      void this.hydrateSerial();
+    } finally {
+      this.advancingReplica = false;
+    }
+  }
+
+  private renderReplica(): void {
+    const replica = this.replica;
+    const sessionId = this.sessionId;
+    if (!replica || !sessionId || replica.view.phase !== "ready") return;
+    const items = [
+      ...replica.view.records.map((record) => record.item),
+      ...replica.view.activeOverlay.map(overlayConversationItem),
+    ];
+    this.reporter.replaceTranscriptEvents(transcriptEventsFromRuntimeItems(items, sessionId));
+    const activeRun = replica.view.activeRun;
+    if (activeRun && isActiveRunStatus(activeRun.status)) {
+      this.eventReporter.seedActiveRun(activeRun.runId);
+    } else if (this.eventReporter.running) {
+      this.eventReporter.clearTransientState();
+      this.options.onRunStateChanged?.(false);
+    }
+  }
+
+  private closeReplicaSubscription(): void {
+    const view = this.replica?.view;
+    if (!view?.subscriptionId) return;
+    void this.client
+      .request("session.subscription.close", {
+        workspacePath: this.workspacePath,
+        sessionId: view.sessionId,
+        subscriptionId: view.subscriptionId,
+      })
+      .catch(() => undefined);
   }
 
   /** 拉取会话设置并推送快照（启动/切换/settingsUpdated 后调用）。 */
