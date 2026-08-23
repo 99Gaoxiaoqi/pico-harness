@@ -34,8 +34,8 @@ export function isDesktopRuntimeInvocationAllowed(
 export class DesktopTerminalGenerationController {
   #sealed = true;
   #sealVersion = 0;
-  #activeCreates = 0;
-  readonly #createDrainWaiters = new Set<() => void>();
+  #activeCreateSubmissions = 0;
+  readonly #createSubmissionDrainWaiters = new Set<() => void>();
   #transitionTail: Promise<void> = Promise.resolve();
   #cleanupRequired: (() => Promise<void>) | undefined;
 
@@ -48,18 +48,21 @@ export class DesktopTerminalGenerationController {
     this.#sealVersion++;
   }
 
-  acquireCreate(): (() => void) | undefined {
+  submitCreate<Result>(send: () => Promise<Result>): Promise<Result> | undefined {
     if (this.#sealed) return undefined;
-    this.#activeCreates++;
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      this.#activeCreates--;
-      if (this.#activeCreates !== 0) return;
-      for (const resolve of this.#createDrainWaiters) resolve();
-      this.#createDrainWaiters.clear();
-    };
+    this.#activeCreateSubmissions++;
+    try {
+      // The shared Runtime client preserves invocation order across its connection/open queue.
+      // Release the Main-side fence at that submission boundary: terminal.stopAll is invoked
+      // after every admitted create, while the Host Authority owns waiting for slow spawn results.
+      return send();
+    } finally {
+      this.#activeCreateSubmissions--;
+      if (this.#activeCreateSubmissions === 0) {
+        for (const resolve of this.#createSubmissionDrainWaiters) resolve();
+        this.#createSubmissionDrainWaiters.clear();
+      }
+    }
   }
 
   cleanup(stopAll: () => Promise<void>): Promise<void> {
@@ -88,17 +91,17 @@ export class DesktopTerminalGenerationController {
     return next;
   }
 
-  #drainCreates(): Promise<void> {
-    if (this.#activeCreates === 0) return Promise.resolve();
+  #drainCreateSubmissions(): Promise<void> {
+    if (this.#activeCreateSubmissions === 0) return Promise.resolve();
     const deferred = Promise.withResolvers<void>();
-    this.#createDrainWaiters.add(deferred.resolve);
+    this.#createSubmissionDrainWaiters.add(deferred.resolve);
     return deferred.promise;
   }
 
   async #runRequiredCleanup(): Promise<void> {
     const cleanup = this.#cleanupRequired;
     if (!cleanup) return;
-    await this.#drainCreates();
+    await this.#drainCreateSubmissions();
     await cleanup();
     if (this.#cleanupRequired === cleanup) this.#cleanupRequired = undefined;
   }

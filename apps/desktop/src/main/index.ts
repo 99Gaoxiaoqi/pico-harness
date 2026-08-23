@@ -138,8 +138,7 @@ if (!app.requestSingleInstanceLock()) {
         platform,
         lifecycle,
         browser,
-        isTerminalCreateAllowed: () => terminalGeneration.isCreateAllowed(),
-        acquireTerminalCreate: () => terminalGeneration.acquireCreate(),
+        submitTerminalCreate: (send) => terminalGeneration.submitCreate(send),
       });
       disposeUpdater = configureAutoUpdates(() => lifecycle.markQuitting());
       await openMainWindow();

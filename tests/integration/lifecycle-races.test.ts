@@ -753,23 +753,64 @@ test("Desktop 窗口关闭清理完成后才允许重开代际", async () => {
   assert.equal(controller.isCreateAllowed(), true);
 });
 
-test("Desktop cleanup 先 drain 已接纳 create，再 stopAll 且拒绝迟到 create", async () => {
+test("Desktop cleanup 只等待 create 提交，不等待完整响应后再 stopAll", async () => {
   const controller = new DesktopTerminalGenerationController();
   await controller.open(async () => undefined);
-  const releaseCreate = controller.acquireCreate();
-  assert.ok(releaseCreate);
+  const createResponse = deferred();
+  const createRequest = controller.submitCreate(() => createResponse.promise);
+  assert.ok(createRequest);
   let stopAllCount = 0;
   const cleanup = controller.cleanup(async () => {
     stopAllCount++;
   });
 
   await waitForImmediate();
-  assert.equal(controller.acquireCreate(), undefined);
-  assert.equal(stopAllCount, 0, "已接纳 create 完成前不得越过 stopAll fence");
-  releaseCreate();
+  assert.equal(
+    controller.submitCreate(async () => undefined),
+    undefined,
+  );
+  assert.equal(stopAllCount, 1, "create 请求已提交后必须立即把 stopAll 发给 Host");
   await cleanup;
-  assert.equal(stopAllCount, 1);
   assert.equal(controller.isCreateAllowed(), false);
+  createResponse.resolve();
+  await createRequest;
+});
+
+test("Desktop 慢 create 不会阻塞 5s fence 前向 Host 提交 stopAll", async () => {
+  const controller = new DesktopTerminalGenerationController();
+  await controller.open(async () => undefined);
+  const createResponse = deferred();
+  const createRequest = controller.submitCreate(() => createResponse.promise);
+  assert.ok(createRequest);
+  const hostCleanup = deferred();
+  const timers = manualTimers();
+  let stopAllCount = 0;
+  let quitCount = 0;
+  const errors: unknown[] = [];
+  const fence = createDesktopTerminalCleanupFence(
+    {
+      stopAll: () =>
+        controller.cleanup(async () => {
+          stopAllCount++;
+          await hostCleanup.promise;
+        }),
+    },
+    () => quitCount++,
+    (error) => errors.push(error),
+    { ...timers.options, timeoutMs: 5_000 },
+  );
+
+  fence({ preventDefault: () => undefined });
+  await waitForImmediate();
+  assert.equal(stopAllCount, 1, "即使 create 响应挂起，Host admission 也必须在超时前被关闭");
+  assert.equal(timers.delay, 5_000);
+  timers.fire();
+  assert.equal(quitCount, 1);
+  assert.match(String(errors[0]), /cleanup exceeded/u);
+
+  hostCleanup.resolve();
+  createResponse.resolve();
+  await createRequest;
 });
 
 test("Desktop 打开过程中再次退出不会被迟到 resume 解封", async () => {

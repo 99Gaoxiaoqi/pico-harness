@@ -46,8 +46,9 @@ export function registerDesktopIpcHandlers(options: {
   readonly platform: PlatformServices;
   readonly lifecycle: LifecycleControls;
   readonly browser: EmbeddedBrowserAuthority;
-  readonly isTerminalCreateAllowed: () => boolean;
-  readonly acquireTerminalCreate: () => (() => void) | undefined;
+  readonly submitTerminalCreate: <Result>(
+    send: () => Promise<Result>,
+  ) => Promise<Result> | undefined;
 }): () => void {
   const { ipcMain, runtime, platform, lifecycle, browser } = options;
   const subscriptions = new Map<string, RuntimeSubscription>();
@@ -69,20 +70,9 @@ export function registerDesktopIpcHandlers(options: {
 
   ipcMain.handle(DESKTOP_IPC_CHANNELS.runtimeInvoke, async (event, value: unknown) => {
     if (!trusted(event)) return unauthorized();
-    let releaseTerminalCreate: (() => void) | undefined;
     try {
       const envelope = readInvocation(value);
-      if (envelope.method === "terminal.create") {
-        releaseTerminalCreate = options.acquireTerminalCreate();
-      }
-      if (
-        !isDesktopRuntimeInvocationAllowed(
-          envelope.method,
-          lifecycle.isQuitting(),
-          options.isTerminalCreateAllowed() &&
-            (envelope.method !== "terminal.create" || releaseTerminalCreate !== undefined),
-        )
-      ) {
+      if (!isDesktopRuntimeInvocationAllowed(envelope.method, lifecycle.isQuitting())) {
         throw new RuntimeClientError(
           "RUNTIME_CLIENT_CLOSED",
           "Terminal 正在清理或 Desktop 正在退出，已拒绝创建新实例",
@@ -90,10 +80,18 @@ export function registerDesktopIpcHandlers(options: {
         );
       }
       const params = parseStrictRuntimeParams(envelope.method, envelope.params);
-      const result = parseDesktopRuntimeResult(
-        envelope.method,
-        await runtime.request(envelope.method, params),
-      );
+      const request =
+        envelope.method === "terminal.create"
+          ? options.submitTerminalCreate(() => runtime.request(envelope.method, params))
+          : runtime.request(envelope.method, params);
+      if (!request) {
+        throw new RuntimeClientError(
+          "RUNTIME_CLIENT_CLOSED",
+          "Terminal 正在清理或 Desktop 正在退出，已拒绝创建新实例",
+          false,
+        );
+      }
+      const result = parseDesktopRuntimeResult(envelope.method, await request);
       if (
         envelope.method === "session.delete" ||
         envelope.method === "session.archive" ||
@@ -117,8 +115,6 @@ export function registerDesktopIpcHandlers(options: {
       return success(result);
     } catch (error) {
       return failure(error);
-    } finally {
-      releaseTerminalCreate?.();
     }
   });
 
