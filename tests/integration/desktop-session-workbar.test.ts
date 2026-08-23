@@ -28,16 +28,13 @@ test("desktop Workbar renders accessible right and bottom Docks with persistent 
     },
   });
   const html = renderToStaticMarkup(
-    React.createElement(
-      SessionWorkbarLayout,
-      {
-        state,
-        presentTab: (tab) => ({ closable: true, ...(tab.kind === "review" ? { badge: 2 } : {}) }),
-        renderPanel: (tab) => React.createElement("p", null, `${tab.label}内容`),
-        onAction: () => undefined,
-      },
-      React.createElement("article", null, "主对话"),
-    ),
+    React.createElement(SessionWorkbarLayout, {
+      state,
+      presentTab: (tab) => ({ closable: true, ...(tab.kind === "review" ? { badge: 2 } : {}) }),
+      renderPanel: (tab) => React.createElement("p", null, `${tab.label}内容`),
+      onAction: () => undefined,
+      children: React.createElement("article", null, "主对话"),
+    }),
   );
 
   assert.match(html, /aria-label="右侧任务工作栏"/u);
