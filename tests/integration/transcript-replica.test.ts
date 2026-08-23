@@ -162,6 +162,81 @@ test("transcript replica: sequence and UTF-8 offset gaps fence into recovering",
   assert.equal(offsetReplica.view.activeOverlay[0]?.text, "你", "gap frame 不得部分落地");
 });
 
+test("transcript replica: reset-empty and terminal run state clear non-authoritative overlays", () => {
+  const replica = new TranscriptReplica(sessionId);
+  const token = replica.beginOpen();
+  assert.equal(
+    replica.installOpen(
+      token,
+      openResult({
+        activeOverlay: [
+          {
+            runId: "run-1",
+            turnId: "turn-1",
+            itemId: "answer-live",
+            streamId: "stream-1",
+            kind: "text",
+            startOffsetBytes: 0,
+            endOffsetBytes: 4,
+            text: "live",
+            anchorSequence: 1,
+          },
+        ],
+      }),
+    ),
+    true,
+  );
+  assert.equal(
+    replica.receiveFrame(
+      frame(1, {
+        type: "subscription.session_delta",
+        runId: "run-1",
+        turnId: "turn-1",
+        itemId: "answer-live",
+        streamId: "stream-1",
+        kind: "text",
+        startOffsetBytes: 4,
+        text: "",
+        reset: true,
+      }),
+    ).kind,
+    "applied",
+  );
+  assert.equal(replica.view.activeOverlay.length, 0);
+
+  replica.receiveFrame(
+    frame(2, {
+      type: "subscription.session_delta",
+      runId: "run-1",
+      turnId: "turn-1",
+      itemId: "answer-live",
+      streamId: "stream-1",
+      kind: "text",
+      startOffsetBytes: 0,
+      text: "again",
+    }),
+  );
+  replica.receiveFrame({
+    hostEpoch: "host-1",
+    subscriptionId: "subscription-1",
+    sessionId,
+    sequence: 3,
+    type: "subscription.run_state",
+    run: {
+      runId: "run-1",
+      sessionId,
+      workspacePath: "/workspace",
+      description: "test",
+      status: "failed",
+      startedAt: 1,
+      finishedAt: 2,
+      updatedAt: 2,
+      version: 2,
+    },
+  });
+  assert.equal(replica.view.activeOverlay.length, 0);
+});
+
 test("transcript replica: advance stages every page then applies changes atomically", () => {
   const replica = new TranscriptReplica(sessionId);
   const token = replica.beginOpen();

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -14,10 +14,12 @@ import {
   type RuntimeOwnerFence,
 } from "../../src/storage/runtime-event-store-contracts.js";
 import { operationalDatabasePath } from "../../src/storage/sqlite/sqlite-database.js";
+import { SESSIONS_SCOPE } from "../../src/storage/sqlite/sessions-scope.js";
 import {
   readExistingSqliteMaterializedTranscript,
   SqliteRuntimeEventStore,
 } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { prepareWorkspaceSqliteStorageSync } from "../../src/storage/sqlite/sqlite-workspace-storage.js";
 
 interface Fixture {
   readonly root: string;
@@ -164,6 +166,43 @@ test("EventLog migration installs every additive foundation table", () => {
     }
   } finally {
     cleanup(value);
+  }
+});
+
+test("sessions v5 to v6 migration creates a self-contained pre-upgrade backup", () => {
+  const root = mkdtempSync(join(tmpdir(), "pico-eventlog-v6-backup-"));
+  const storage = join(root, "storage");
+  const v5Scope = {
+    ...SESSIONS_SCOPE,
+    migrations: new Map([...SESSIONS_SCOPE.migrations].filter(([version]) => version <= 5)),
+  };
+  try {
+    prepareWorkspaceSqliteStorageSync(storage, [v5Scope]).lease.release();
+    prepareWorkspaceSqliteStorageSync(storage, [SESSIONS_SCOPE]).lease.release();
+
+    const backupPath = join(storage, "pico.sqlite.sessions-v5.bak");
+    assert.equal(existsSync(backupPath), true);
+    const backup = new DatabaseSync(backupPath, { readOnly: true });
+    try {
+      assert.equal(
+        backup
+          .prepare("SELECT version FROM operational_schema_migrations WHERE scope = 'sessions'")
+          .get()?.version,
+        5,
+      );
+      assert.equal(
+        backup
+          .prepare(
+            "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'runtime_transcript_projection_state'",
+          )
+          .get(),
+        undefined,
+      );
+    } finally {
+      backup.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

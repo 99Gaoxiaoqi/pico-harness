@@ -120,6 +120,8 @@ export interface ProductionRuntimeServices {
   attachHost(control: ProductionHostControl): void;
   /** Binds the Runtime Host-owned Session live channel after Host Epoch exists. */
   attachSessionSubscriptions(registry: SessionSubscriptionRegistry): void;
+  /** Flushes the in-memory Active Overlay before a subscription captures its bootstrap. */
+  flushSessionOverlay(workspacePath: string, sessionId: string): Promise<void>;
 }
 
 /**
@@ -200,6 +202,7 @@ export function createProductionRuntimeServices(
   let desktopResourceVersion = Date.now();
   const nextDesktopResourceVersion = () => ++desktopResourceVersion;
   let sessionSubscriptions: SessionSubscriptionRegistry | undefined;
+  const activeOverlays = new Map<string, PersistentActiveOverlay>();
   const service: WorkspaceRuntimeService = new WorkspaceRuntimeService({
     registrationStore,
     env,
@@ -285,6 +288,7 @@ export function createProductionRuntimeServices(
           );
         });
         const overlayToolCallIds = new Map<string, string>();
+        const overlayAnchorSequences = new Map<string, number>();
         const activeOverlay = new PersistentActiveOverlay(
           {
             async upsert(input) {
@@ -296,11 +300,17 @@ export function createProductionRuntimeServices(
               ) {
                 throw new Error("Active Overlay 已离开对应 Runtime Run 上下文");
               }
+              let anchorSequence = overlayAnchorSequences.get(input.partialId);
+              if (anchorSequence === undefined) {
+                anchorSequence = (await runtimeRun.store.readTranscriptWatermark(targetSessionId))
+                  .throughSequence;
+                overlayAnchorSequences.set(input.partialId, anchorSequence);
+              }
               const snapshot = await runtimeRun.upsertPartialSnapshot(
                 input.partialId,
                 input.kind,
                 input.expectedVersion,
-                input.payload,
+                { ...input.payload, anchorSequence },
               );
               return { version: snapshot.version };
             },
@@ -315,6 +325,7 @@ export function createProductionRuntimeServices(
                 itemId: delta.itemId,
                 streamId: delta.streamId,
                 kind: delta.kind,
+                startOffsetBytes: delta.startOffsetBytes,
                 text: delta.text,
                 ...(delta.stream ? { stream: delta.stream } : {}),
               });
@@ -328,6 +339,8 @@ export function createProductionRuntimeServices(
             },
           },
         );
+        const activeOverlayKey = sessionOverlayKey(workspacePath, targetSessionId);
+        activeOverlays.set(activeOverlayKey, activeOverlay);
         const reporter = new DesktopReporter({
           runId: context.run.runId,
           sessionId: targetSessionId,
@@ -479,6 +492,17 @@ export function createProductionRuntimeServices(
           removeBrokerInteractions(pendingApprovals, broker);
           removeBrokerInteractions(pendingPrompts, broker);
           await activeOverlay.flush();
+          try {
+            await currentRuntimeRun()?.clearPartials();
+          } catch (error) {
+            logger.warn(
+              { workspacePath, sessionId: targetSessionId, runId: context.run.runId, err: error },
+              "Run 已结束但 Active Overlay 残留清理失败",
+            );
+          }
+          if (activeOverlays.get(activeOverlayKey) === activeOverlay) {
+            activeOverlays.delete(activeOverlayKey);
+          }
           await runtimeState.dispose();
         }
       } finally {
@@ -893,7 +917,14 @@ export function createProductionRuntimeServices(
     attachSessionSubscriptions(registry) {
       sessionSubscriptions = registry;
     },
+    async flushSessionOverlay(workspacePath, sessionId) {
+      await activeOverlays.get(sessionOverlayKey(workspacePath, sessionId))?.flush();
+    },
   };
+}
+
+function sessionOverlayKey(workspacePath: string, sessionId: string): string {
+  return `${workspacePath}\u0000${sessionId}`;
 }
 
 /**

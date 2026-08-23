@@ -18,7 +18,10 @@ export interface DesktopSessionContinuityTransport {
   advance(
     params: RuntimeParams<"session.transcript.advance">,
   ): Promise<RuntimeResult<"session.transcript.advance">>;
-  subscribeFrames(listener: (frame: RuntimeSessionSubscriptionFrame) => void): { dispose(): void };
+  subscribeFrames(
+    listener: (frame: RuntimeSessionSubscriptionFrame) => void,
+    onDisconnect?: () => void,
+  ): { dispose(): void };
 }
 
 export interface DesktopSessionContinuityOptions {
@@ -34,6 +37,8 @@ interface Binding {
   advancing: boolean;
   advanceAgain: boolean;
   reopening: boolean;
+  retryAttempt: number;
+  retryTimer?: ReturnType<typeof setTimeout>;
   disposed: boolean;
 }
 
@@ -45,8 +50,9 @@ export class DesktopSessionContinuity {
 
   constructor(private readonly options: DesktopSessionContinuityOptions) {
     // Install the raw frame listener before any session.subscription.open request.
-    this.#frameSubscription = options.transport.subscribeFrames((frame) =>
-      this.acceptSessionFrame(frame),
+    this.#frameSubscription = options.transport.subscribeFrames(
+      (frame) => this.acceptSessionFrame(frame),
+      () => this.handleDisconnect(),
     );
   }
 
@@ -56,6 +62,7 @@ export class DesktopSessionContinuity {
     const previous = this.#bindings.get(key);
     if (previous) {
       previous.disposed = true;
+      this.clearRetry(previous);
       await this.closeBinding(previous);
     }
     const binding: Binding = {
@@ -65,10 +72,16 @@ export class DesktopSessionContinuity {
       advancing: false,
       advanceAgain: false,
       reopening: false,
+      retryAttempt: 0,
       disposed: false,
     };
     this.#bindings.set(key, binding);
-    await this.installOpen(binding);
+    try {
+      await this.installOpen(binding);
+    } catch (error) {
+      this.scheduleRetry(binding);
+      throw error;
+    }
     return binding.replica.view;
   }
 
@@ -87,6 +100,11 @@ export class DesktopSessionContinuity {
     }
   }
 
+  private handleDisconnect(): void {
+    if (this.#disposed) return;
+    for (const binding of this.#bindings.values()) void this.reopen(binding);
+  }
+
   view(workspacePath: string, sessionId: string): TranscriptReplicaView | undefined {
     return this.#bindings.get(bindingKey(workspacePath, sessionId))?.replica.view;
   }
@@ -96,6 +114,7 @@ export class DesktopSessionContinuity {
     const binding = this.#bindings.get(key);
     if (!binding) return;
     binding.disposed = true;
+    this.clearRetry(binding);
     this.#bindings.delete(key);
     await this.closeBinding(binding);
   }
@@ -106,6 +125,7 @@ export class DesktopSessionContinuity {
     this.#frameSubscription.dispose();
     for (const binding of this.#bindings.values()) {
       binding.disposed = true;
+      this.clearRetry(binding);
       void this.closeBinding(binding);
     }
     this.#bindings.clear();
@@ -118,8 +138,12 @@ export class DesktopSessionContinuity {
       sessionId: binding.sessionId,
       tailLimit: 200,
     });
-    if (!this.isCurrent(binding)) return;
+    if (!this.isCurrent(binding)) {
+      await this.closeOpened(binding, opened.subscriptionId);
+      return;
+    }
     if (!binding.replica.installOpen(token, opened)) {
+      await this.closeOpened(binding, opened.subscriptionId);
       throw new Error(
         `Session continuity open failed (${binding.replica.view.recoveryReason ?? "unknown"})`,
       );
@@ -187,15 +211,34 @@ export class DesktopSessionContinuity {
   private async reopen(binding: Binding): Promise<void> {
     if (!this.isCurrent(binding) || binding.reopening) return;
     binding.reopening = true;
+    this.clearRetry(binding);
     try {
       await this.closeBinding(binding);
       if (!this.isCurrent(binding)) return;
       await this.installOpen(binding);
+      binding.retryAttempt = 0;
     } catch (error) {
       this.options.onError?.(error);
+      this.scheduleRetry(binding);
     } finally {
       binding.reopening = false;
     }
+  }
+
+  private scheduleRetry(binding: Binding): void {
+    if (!this.isCurrent(binding) || binding.retryTimer) return;
+    const delay = Math.min(250 * 2 ** binding.retryAttempt, 5_000);
+    binding.retryAttempt += 1;
+    binding.retryTimer = setTimeout(() => {
+      binding.retryTimer = undefined;
+      void this.reopen(binding);
+    }, delay);
+  }
+
+  private clearRetry(binding: Binding): void {
+    if (!binding.retryTimer) return;
+    clearTimeout(binding.retryTimer);
+    binding.retryTimer = undefined;
   }
 
   private async closeBinding(binding: Binding): Promise<void> {
@@ -209,6 +252,18 @@ export class DesktopSessionContinuity {
       });
     } catch {
       // Close is idempotent best effort; the Host also drops it with the connection.
+    }
+  }
+
+  private async closeOpened(binding: Binding, subscriptionId: string): Promise<void> {
+    try {
+      await this.options.transport.close({
+        workspacePath: binding.workspacePath,
+        sessionId: binding.sessionId,
+        subscriptionId,
+      });
+    } catch {
+      // A stale open is connection-scoped and close is best effort.
     }
   }
 

@@ -55,10 +55,37 @@ test("active overlay persists the first delta before publishing and uses UTF-8 b
 
   await overlay.append({ ...base, text: "a" });
   assert.equal(deltas[1]?.startOffsetBytes, 7);
+  await overlay.complete(base.streamId);
+  assert.equal(writes.length, 1, "durable final 删除 partial 后 complete 不得再写回");
+  assert.deepEqual(parseActiveOverlayPayload(writes[0]?.payload), writes[0]?.payload);
+});
+
+test("active overlay completion does not misreport degradation after durable final cleanup", async () => {
+  let writes = 0;
+  const degraded: string[] = [];
+  const overlay = new PersistentActiveOverlay(
+    {
+      async upsert(input) {
+        writes += 1;
+        if (writes > 1) throw new Error("partial was atomically removed by durable final");
+        return { version: input.expectedVersion + 1 };
+      },
+    },
+    {
+      publishDelta() {},
+      publishContinuityDegraded(reason) {
+        degraded.push(reason);
+      },
+    },
+  );
+
+  await overlay.append({ ...base, text: "prefix" });
+  await overlay.append({ ...base, text: "final suffix" });
+  await overlay.complete(base.streamId);
   await overlay.flush();
-  assert.equal(writes[1]?.expectedVersion, 1);
-  assert.equal(writes[1]?.payload.endOffsetBytes, 8);
-  assert.deepEqual(parseActiveOverlayPayload(writes[1]?.payload), writes[1]?.payload);
+
+  assert.equal(writes, 1);
+  assert.deepEqual(degraded, []);
 });
 
 test("active overlay flushes at 8KiB and degrades once per Run without stopping live", async () => {
@@ -91,7 +118,12 @@ test("active overlay flushes at 8KiB and degrades once per Run without stopping 
   await overlay.append({ ...base, text: "still-live" });
   await overlay.flush();
 
-  await overlay.append({ ...base, streamId: "thinking:run-1:turn-1", kind: "thinking", text: "思考" });
+  await overlay.append({
+    ...base,
+    streamId: "thinking:run-1:turn-1",
+    kind: "thinking",
+    text: "思考",
+  });
   await overlay.flush();
 
   await overlay.append({

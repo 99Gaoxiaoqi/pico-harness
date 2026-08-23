@@ -23,10 +23,10 @@ type SubscriptionOpenResult = RuntimeResult<"session.subscription.open">;
 type TranscriptPageResult = RuntimeResult<"session.transcript.page">;
 type TranscriptAdvanceResult = RuntimeResult<"session.transcript.advance">;
 
-export interface SessionSubscriptionSnapshot extends Omit<
+export type SessionSubscriptionSnapshot = Omit<
   SubscriptionOpenResult,
   "hostEpoch" | "subscriptionId" | "nextSequence"
-> {}
+>;
 
 export interface SessionContinuityDataSource {
   readOpenSnapshot(
@@ -58,6 +58,7 @@ export interface SessionLiveDeltaInput {
   readonly itemId: string;
   readonly streamId: string;
   readonly kind: "text" | "thinking" | "toolOutput";
+  readonly startOffsetBytes: number;
   readonly text: string;
   readonly stream?: "stdout" | "stderr";
 }
@@ -115,6 +116,10 @@ class SessionSubscriptionOwner {
   }
 
   open(options: OpenSubscriptionOptions): SubscriptionOpenResult {
+    for (const [streamId, state] of this.#streams) {
+      if (state.complete) this.#streams.delete(streamId);
+    }
+    this.#installSnapshotOverlay(options.snapshot.activeOverlay);
     const subscriptionId = randomUUID();
     const subscription = new SessionWireSubscription({
       hostEpoch: this.hostEpoch,
@@ -180,12 +185,14 @@ class SessionSubscriptionOwner {
       if (!text) return;
       const turn = integerField(event.payload, "turn") ?? 0;
       const thinking = event.type === "assistant.reasoning.delta";
+      const streamId = `${thinking ? "thinking" : "assistant"}:live:${event.runId}:${turn}`;
       this.#appendDelta({
         runId: event.runId,
         turnId: turnId(event.runId, turn),
         itemId: messageItemId(turnId(event.runId, turn), thinking),
-        streamId: `${thinking ? "thinking" : "assistant"}:live:${event.runId}:${turn}`,
+        streamId,
         kind: thinking ? "thinking" : "text",
+        startOffsetBytes: this.#streams.get(streamId)?.endOffsetBytes ?? 0,
         text,
       });
       return;
@@ -197,13 +204,15 @@ class SessionSubscriptionOwner {
       if (!text || !providerCallId || !toolCallId) return;
       const stream = event.payload["stream"] === "stderr" ? "stderr" : "stdout";
       const turn = integerField(event.payload, "turn") ?? 0;
+      const streamId = `tool:live:${event.runId}:${toolCallId}:${stream}`;
       this.#appendDelta({
         runId: event.runId,
         turnId: turnId(event.runId, turn),
         itemId: `tool:${toolCallId}`,
-        streamId: `tool:live:${event.runId}:${toolCallId}:${stream}`,
+        streamId,
         kind: "toolOutput",
         stream,
+        startOffsetBytes: this.#streams.get(streamId)?.endOffsetBytes ?? 0,
         text,
       });
       return;
@@ -219,6 +228,7 @@ class SessionSubscriptionOwner {
           itemId: messageItemId(turnId(event.runId, turn), false),
           streamId,
           kind: "text",
+          startOffsetBytes: 0,
           text: content,
         });
       }
@@ -300,6 +310,7 @@ class SessionSubscriptionOwner {
     readonly streamId: string;
     readonly kind: "text" | "thinking" | "toolOutput";
     readonly stream?: "stdout" | "stderr";
+    readonly startOffsetBytes: number;
     readonly text: string;
   }): void {
     let state = this.#streams.get(input.streamId);
@@ -312,10 +323,10 @@ class SessionSubscriptionOwner {
         kind: input.kind,
         ...(input.stream ? { stream: input.stream } : {}),
         anchorSequence: this.#watermarkThroughSequence,
-        startOffsetBytes: 0,
-        endOffsetBytes: 0,
+        startOffsetBytes: input.startOffsetBytes,
+        endOffsetBytes: input.startOffsetBytes,
         text: "",
-        pendingStartOffsetBytes: 0,
+        pendingStartOffsetBytes: input.startOffsetBytes,
         pendingText: "",
         published: false,
         complete: false,
@@ -323,6 +334,23 @@ class SessionSubscriptionOwner {
       this.#streams.set(input.streamId, state);
     }
     if (state.complete) return;
+    const inputBytes = utf8Bytes(input.text);
+    const inputEndOffsetBytes = input.startOffsetBytes + inputBytes;
+    if (input.startOffsetBytes < state.endOffsetBytes) {
+      if (!overlayRangeMatches(state, input.startOffsetBytes, input.text)) {
+        this.#resetStreamFromDelta(state, input);
+        return;
+      }
+      if (inputEndOffsetBytes <= state.endOffsetBytes) return;
+      input = {
+        ...input,
+        text: utf8Suffix(input.text, state.endOffsetBytes - input.startOffsetBytes),
+        startOffsetBytes: state.endOffsetBytes,
+      };
+    } else if (input.startOffsetBytes > state.endOffsetBytes) {
+      this.#resetStreamFromDelta(state, input);
+      return;
+    }
     const chunks = splitUtf8(input.text, MAX_DELTA_BYTES);
     for (const chunk of chunks) {
       const startOffsetBytes = state.endOffsetBytes;
@@ -339,6 +367,44 @@ class SessionSubscriptionOwner {
       if (utf8Bytes(state.pendingText) >= MAX_DELTA_BYTES) this.#flushStream(state);
       else this.#scheduleFlush(state);
     }
+  }
+
+  #installSnapshotOverlay(entries: readonly RuntimeActiveOverlayEntry[]): void {
+    for (const entry of entries) {
+      const current = this.#streams.get(entry.streamId);
+      if (current && current.endOffsetBytes >= entry.endOffsetBytes) continue;
+      if (current?.timer) clearTimeout(current.timer);
+      this.#streams.set(entry.streamId, {
+        runId: entry.runId,
+        turnId: entry.turnId,
+        itemId: entry.itemId,
+        streamId: entry.streamId,
+        kind: entry.kind,
+        ...(entry.stream ? { stream: entry.stream } : {}),
+        anchorSequence: entry.anchorSequence,
+        startOffsetBytes: entry.startOffsetBytes,
+        endOffsetBytes: entry.endOffsetBytes,
+        text: entry.text,
+        pendingStartOffsetBytes: entry.endOffsetBytes,
+        pendingText: "",
+        published: true,
+        complete: entry.complete === true,
+      });
+    }
+  }
+
+  #resetStreamFromDelta(
+    state: LiveStreamState,
+    input: Omit<SessionLiveDeltaInput, "workspacePath" | "sessionId">,
+  ): void {
+    if (state.timer) clearTimeout(state.timer);
+    state.startOffsetBytes = input.startOffsetBytes;
+    state.endOffsetBytes = input.startOffsetBytes + utf8Bytes(input.text);
+    state.text = input.text;
+    state.pendingStartOffsetBytes = state.endOffsetBytes;
+    state.pendingText = "";
+    state.published = true;
+    this.#publishDelta(state, input.startOffsetBytes, input.text, { reset: true });
   }
 
   #scheduleFlush(state: LiveStreamState): void {
@@ -388,15 +454,17 @@ class SessionSubscriptionOwner {
     this.#flushStream(state);
     state.complete = true;
     this.#publishDelta(state, state.endOffsetBytes, "", { complete: true });
+    this.#streams.delete(streamId);
   }
 
   #flushRunStreams(runId: string, complete = false): void {
-    for (const state of this.#streams.values()) {
+    for (const [streamId, state] of [...this.#streams]) {
       if (state.runId !== runId) continue;
       this.#flushStream(state);
       if (complete && !state.complete) {
         state.complete = true;
         this.#publishDelta(state, state.endOffsetBytes, "", { complete: true });
+        this.#streams.delete(streamId);
       }
     }
   }
@@ -536,6 +604,7 @@ export class SessionSubscriptionRegistry {
   constructor(
     readonly hostEpoch: string,
     private readonly dataSource: SessionContinuityDataSource,
+    private readonly beforeOpen?: (workspacePath: string, sessionId: string) => Promise<void>,
   ) {}
 
   async open(
@@ -545,6 +614,7 @@ export class SessionSubscriptionRegistry {
     if (this.#closed) throw new Error("Session subscription registry is closed");
     const owner = this.#owner(params.workspacePath, params.sessionId);
     return owner.run(async () => {
+      await this.beforeOpen?.(params.workspacePath, params.sessionId);
       const snapshot = await this.dataSource.readOpenSnapshot(params);
       return owner.open({ connection, snapshot });
     });
@@ -603,6 +673,7 @@ export class SessionSubscriptionRegistry {
         itemId: input.itemId,
         streamId: input.streamId,
         kind: input.kind,
+        startOffsetBytes: input.startOffsetBytes,
         text: input.text,
         ...(input.stream ? { stream: input.stream } : {}),
       }),
@@ -697,6 +768,35 @@ function trimOverlayText(state: LiveStreamState): void {
   const suffixBytes = utf8Bytes(suffix);
   state.text = suffix;
   state.startOffsetBytes = state.endOffsetBytes - suffixBytes;
+}
+
+function overlayRangeMatches(
+  state: LiveStreamState,
+  startOffsetBytes: number,
+  text: string,
+): boolean {
+  const incoming = Buffer.from(text, "utf8");
+  const incomingEnd = startOffsetBytes + incoming.byteLength;
+  if (incomingEnd <= state.startOffsetBytes) return true;
+  const overlapStart = Math.max(startOffsetBytes, state.startOffsetBytes);
+  const overlapEnd = Math.min(incomingEnd, state.endOffsetBytes);
+  if (overlapStart >= overlapEnd) return true;
+  const retained = Buffer.from(state.text, "utf8");
+  return incoming
+    .subarray(overlapStart - startOffsetBytes, overlapEnd - startOffsetBytes)
+    .equals(
+      retained.subarray(overlapStart - state.startOffsetBytes, overlapEnd - state.startOffsetBytes),
+    );
+}
+
+function utf8Suffix(text: string, byteOffset: number): string {
+  const bytes = Buffer.from(text, "utf8");
+  if (byteOffset <= 0) return text;
+  if (byteOffset >= bytes.byteLength) return "";
+  if ((bytes[byteOffset]! & 0xc0) === 0x80) {
+    throw new Error("Session live delta overlap split a UTF-8 code point");
+  }
+  return bytes.subarray(byteOffset).toString("utf8");
 }
 
 function splitUtf8(text: string, maxBytes: number): string[] {

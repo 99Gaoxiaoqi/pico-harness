@@ -177,6 +177,7 @@ async function createPicoDaemonComposition(
       readMetadata: (workspacePath, sessionId) =>
         services.desktopService.readSessionContinuityMetadata(workspacePath, sessionId),
     }),
+    (workspacePath, sessionId) => services.flushSessionOverlay(workspacePath, sessionId),
   );
   services.attachSessionSubscriptions(sessionContinuity);
   const unsubscribeSessionNotifications = services.service.subscribe((notification) =>

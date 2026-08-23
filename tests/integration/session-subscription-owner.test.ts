@@ -42,9 +42,12 @@ class FakeSource implements SessionContinuityDataSource {
   readonly pageCalls: RuntimeParams<"session.transcript.page">[] = [];
   readonly advanceCalls: RuntimeParams<"session.transcript.advance">[] = [];
   currentWatermark = watermark;
+  openSnapshot = snapshot();
+  beforeOpenObserved?: () => void;
 
   async readOpenSnapshot(): Promise<SessionSubscriptionSnapshot> {
-    return snapshot();
+    this.beforeOpenObserved?.();
+    return this.openSnapshot;
   }
 
   async readTranscriptPage(
@@ -65,6 +68,21 @@ class FakeSource implements SessionContinuityDataSource {
     return this.currentWatermark;
   }
 }
+
+test("session subscription flushes Active Overlay before capturing the open snapshot", async () => {
+  const source = new FakeSource();
+  let flushed = false;
+  source.beforeOpenObserved = () => assert.equal(flushed, true);
+  const registry = new SessionSubscriptionRegistry("host-epoch-1", source, async () => {
+    flushed = true;
+  });
+
+  await registry.open(
+    { workspacePath, sessionId },
+    { connectionId: "connection-1", push: async () => undefined },
+  );
+  assert.equal(flushed, true);
+});
 
 test("session subscription stays paused until activation and begins at advertised sequence", async () => {
   const source = new FakeSource();
@@ -109,6 +127,64 @@ test("session subscription stays paused until activation and begins at advertise
     startOffsetBytes: 0,
     text: "hello",
   });
+});
+
+test("open bootstrap seeds absolute offsets and drops a concurrently queued duplicate delta", async () => {
+  const source = new FakeSource();
+  source.openSnapshot = {
+    ...snapshot(),
+    activeOverlay: [
+      {
+        runId: "run-1",
+        turnId: "turn-1",
+        itemId: "message:turn-1:assistant",
+        streamId: "assistant:run-1:turn-1",
+        kind: "text",
+        startOffsetBytes: 0,
+        endOffsetBytes: 5,
+        text: "hello",
+        anchorSequence: 7,
+      },
+    ],
+  };
+  const registry = new SessionSubscriptionRegistry("host-epoch-1", source, async () => {
+    registry.publishSessionDelta({
+      workspacePath,
+      sessionId,
+      runId: "run-1",
+      turnId: "turn-1",
+      itemId: "message:turn-1:assistant",
+      streamId: "assistant:run-1:turn-1",
+      kind: "text",
+      startOffsetBytes: 0,
+      text: "hello",
+    });
+  });
+  const received: RuntimeSessionSubscriptionFrame[] = [];
+  const opened = await registry.open(
+    { workspacePath, sessionId },
+    { connectionId: "connection-1", push: async (frame) => void received.push(frame) },
+  );
+  registry.activate(workspacePath, sessionId, opened.subscriptionId, "connection-1");
+  await tick();
+  assert.equal(received.length, 0, "bootstrap 已覆盖的绝对范围不得再次发送");
+
+  registry.publishSessionDelta({
+    workspacePath,
+    sessionId,
+    runId: "run-1",
+    turnId: "turn-1",
+    itemId: "message:turn-1:assistant",
+    streamId: "assistant:run-1:turn-1",
+    kind: "text",
+    startOffsetBytes: 5,
+    text: "!",
+  });
+  await waitFor(() => received.length === 1);
+  assert.equal(
+    received[0]?.type === "subscription.session_delta" ? received[0].startOffsetBytes : undefined,
+    5,
+  );
 });
 
 test("session subscription coalesces later deltas and preserves UTF-8 byte offsets", async () => {
@@ -290,6 +366,37 @@ test("tool output uses the canonical transcript toolCallId and run state is sequ
     [1, 2, 3],
   );
   assert.equal(received[2]?.type, "subscription.run_state");
+});
+
+test("completed streams are removed from owner memory and cannot revive after reopen", async () => {
+  const source = new FakeSource();
+  const registry = new SessionSubscriptionRegistry("host-epoch-1", source);
+  registry.publishSessionDelta({
+    workspacePath,
+    sessionId,
+    runId: "run-1",
+    turnId: "turn:run-1:1",
+    itemId: "message:turn:run-1:1:assistant",
+    streamId: "assistant:live:run-1:1",
+    kind: "text",
+    startOffsetBytes: 0,
+    text: "live",
+  });
+  registry.publishReporterEvent(workspacePath, {
+    runId: "run-1",
+    sessionId,
+    type: "assistant.message",
+    resourceVersion: 2,
+    at: 2,
+    payload: { turn: 1, content: "live" },
+  });
+  await tick();
+
+  const reopened = await registry.open(
+    { workspacePath, sessionId },
+    { connectionId: "connection-2", push: async () => undefined },
+  );
+  assert.deepEqual(reopened.activeOverlay, []);
 });
 
 test("page and advance operations preserve fixed watermark inputs", async () => {

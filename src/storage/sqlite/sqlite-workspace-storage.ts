@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { FileStorageIntegrityError, mkdirPrivateSync } from "../local-file-storage.js";
@@ -13,6 +13,8 @@ import {
   assertCurrentOperationalTargetSchemaSync,
   assertReadOnlySchemaIsCurrentSync,
   migrateOperationalDatabaseSync,
+  readOperationalSchemaVersionsSync,
+  scopeCurrentVersion,
   type SqliteSchemaScope,
 } from "./sqlite-schema.js";
 
@@ -32,6 +34,7 @@ const LEGACY_SESSION_CENTRIC_MARKERS = [".storage", "sessions", "task-runs", "co
 const LEGACY_PRE_V2_DIRECTORY = "runtime";
 
 const WORKSPACE_BINDING_SCOPE_NAME = "workspace";
+const SESSIONS_V5_BACKUP_FILENAME = "pico.sqlite.sessions-v5.bak";
 const WORKSPACE_BINDING_SCOPE: SqliteSchemaScope = {
   name: WORKSPACE_BINDING_SCOPE_NAME,
   migrations: new Map<number, string>([
@@ -108,6 +111,7 @@ export function prepareWorkspaceSqliteStorageSync(
   const allScopes = withWorkspaceBindingScope(scopes);
   const lease = acquireOperationalDatabase(root, {
     migrate: (database) => {
+      backupBeforeSessionContinuityMigration(database, root, allScopes);
       // 形状断言只在版本推进(建库/升级)时跑:每次连接重开都重放全套 DDL
       // 要 ~25ms,高频操作级 lease 不可承受;常规漂移检测由 doctor 承担。
       if (migrateOperationalDatabaseSync(database, allScopes)) {
@@ -122,6 +126,22 @@ export function prepareWorkspaceSqliteStorageSync(
     lease.release();
     throw error;
   }
+}
+
+/** Creates one self-contained pre-v6 snapshot before the Session continuity tables appear. */
+function backupBeforeSessionContinuityMigration(
+  database: DatabaseSync,
+  root: string,
+  scopes: readonly SqliteSchemaScope[],
+): void {
+  const sessionsScope = scopes.find((scope) => scope.name === "sessions");
+  if (!sessionsScope || scopeCurrentVersion(sessionsScope) < 6) return;
+  const applied = readOperationalSchemaVersionsSync(database).get("sessions");
+  if (applied !== 5) return;
+  const destination = join(root, SESSIONS_V5_BACKUP_FILENAME);
+  if (existsSync(destination)) return;
+  database.exec(`VACUUM INTO '${destination.replaceAll("'", "''")}'`);
+  chmodSync(destination, 0o600);
 }
 
 /** Verifies the bound identity of an already-initialized root without opening a write path. */

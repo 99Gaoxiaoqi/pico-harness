@@ -148,15 +148,21 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
       },
     }),
     sessionFrames: Object.freeze({
-      subscribe(listener: (frame: RuntimeSessionSubscriptionFrame) => void) {
+      subscribe(
+        listener: (frame: RuntimeSessionSubscriptionFrame) => void,
+        onDisconnect?: () => void,
+      ) {
         if (typeof listener !== "function") return Object.freeze({ dispose() {} });
         const onFrame = (_electronEvent: unknown, value: unknown) => {
           if (isSessionSubscriptionFrame(value)) listener(value);
         };
+        const onDisconnected = (): void => onDisconnect?.();
         ipcRenderer.on(DESKTOP_IPC_CHANNELS.sessionFrame, onFrame);
+        ipcRenderer.on(DESKTOP_IPC_CHANNELS.sessionDisconnected, onDisconnected);
         return Object.freeze({
           dispose() {
             ipcRenderer.removeListener(DESKTOP_IPC_CHANNELS.sessionFrame, onFrame);
+            ipcRenderer.removeListener(DESKTOP_IPC_CHANNELS.sessionDisconnected, onDisconnected);
           },
         });
       },

@@ -255,6 +255,8 @@ export class ClientSessionRuntime {
   private hydrating = false;
   private hydrateAgain = false;
   private hydrateChain: Promise<void> | undefined;
+  private hydrateRetryAttempt = 0;
+  private hydrateRetryTimer: NodeJS.Timeout | undefined;
   private disposed = false;
   private pendingModelRouteId: string | undefined;
   private settingsOverrideApplied = false;
@@ -434,6 +436,7 @@ export class ClientSessionRuntime {
 
   dispose(): void {
     this.disposed = true;
+    this.clearHydrateRetry();
     this.closeReplicaSubscription();
     this.sessionFrameSubscription?.dispose();
     this.sessionFrameSubscription = undefined;
@@ -488,7 +491,9 @@ export class ClientSessionRuntime {
    * BYOK 启动覆盖不重放（startup-only 语义）。
    */
   async switchSession(sessionId: string | undefined): Promise<void> {
-    this.closeReplicaSubscription();
+    this.clearHydrateRetry();
+    this.hydrateRetryAttempt = 0;
+    await this.closeReplicaSubscriptionAsync();
     this.sessionId = sessionId;
     this.replica = undefined;
     this.eventReporter.clearTransientState();
@@ -511,12 +516,15 @@ export class ClientSessionRuntime {
     const run = (async () => {
       try {
         await this.hydrate();
+        this.clearHydrateRetry();
+        this.hydrateRetryAttempt = 0;
       } catch (error) {
         // 对账失败保留最后一致画面，后续断线或新帧会再次触发 open。
         this.reporter.pushError(error instanceof Error ? error.message : String(error), {
           retryable: true,
           action: "session.subscription.open",
         });
+        this.scheduleHydrateRetry();
       } finally {
         this.hydrating = false;
         if (this.hydrateAgain) {
@@ -529,6 +537,23 @@ export class ClientSessionRuntime {
     return run;
   }
 
+  private scheduleHydrateRetry(): void {
+    if (this.disposed || !this.sessionId || this.hydrateRetryTimer) return;
+    const delay = Math.min(250 * 2 ** this.hydrateRetryAttempt, 5_000);
+    this.hydrateRetryAttempt += 1;
+    this.hydrateRetryTimer = setTimeout(() => {
+      this.hydrateRetryTimer = undefined;
+      void this.hydrateSerial();
+    }, delay);
+    this.hydrateRetryTimer.unref?.();
+  }
+
+  private clearHydrateRetry(): void {
+    if (!this.hydrateRetryTimer) return;
+    clearTimeout(this.hydrateRetryTimer);
+    this.hydrateRetryTimer = undefined;
+  }
+
   private async hydrate(): Promise<void> {
     if (!this.sessionId) return;
     await this.openReplica(this.sessionId);
@@ -536,7 +561,9 @@ export class ClientSessionRuntime {
 
   private async openReplica(sessionId: string): Promise<void> {
     const previous = this.replica;
-    if (previous && previous.view.sessionId !== sessionId) this.closeReplicaSubscription();
+    if (previous?.view.subscriptionId) {
+      await this.closeReplicaSubscriptionAsync(previous.view);
+    }
     const replica =
       previous?.view.sessionId === sessionId ? previous : new TranscriptReplica(sessionId);
     this.replica = replica;
@@ -546,8 +573,12 @@ export class ClientSessionRuntime {
       sessionId,
       tailLimit: 200,
     });
-    if (this.disposed || this.sessionId !== sessionId || this.replica !== replica) return;
+    if (this.disposed || this.sessionId !== sessionId || this.replica !== replica) {
+      await this.closeOpenedSubscription(sessionId, opened.subscriptionId);
+      return;
+    }
     if (!replica.installOpen(token, opened)) {
+      await this.closeOpenedSubscription(sessionId, opened.subscriptionId);
       throw new Error(
         `Session continuity open failed (${replica.view.recoveryReason ?? "unknown"})`,
       );
@@ -642,15 +673,34 @@ export class ClientSessionRuntime {
   }
 
   private closeReplicaSubscription(): void {
-    const view = this.replica?.view;
-    if (!view?.subscriptionId) return;
-    void this.client
+    void this.closeReplicaSubscriptionAsync();
+  }
+
+  private closeReplicaSubscriptionAsync(view = this.replica?.view): Promise<void> {
+    if (!view?.subscriptionId) return Promise.resolve();
+    return this.client
       .request("session.subscription.close", {
         workspacePath: this.workspacePath,
         sessionId: view.sessionId,
         subscriptionId: view.subscriptionId,
       })
-      .catch(() => undefined);
+      .then(
+        () => undefined,
+        () => undefined,
+      );
+  }
+
+  private closeOpenedSubscription(sessionId: string, subscriptionId: string): Promise<void> {
+    return this.client
+      .request("session.subscription.close", {
+        workspacePath: this.workspacePath,
+        sessionId,
+        subscriptionId,
+      })
+      .then(
+        () => undefined,
+        () => undefined,
+      );
   }
 
   /** 拉取会话设置并推送快照（启动/切换/settingsUpdated 后调用）。 */
