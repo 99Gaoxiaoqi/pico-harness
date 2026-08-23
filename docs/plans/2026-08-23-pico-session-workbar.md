@@ -1,6 +1,6 @@
 # Pico Desktop 右侧 Session Workbar 实施计划
 
-状态：P0 交互骨架实施中。本计划补充 [Pico Desktop UI 重写](./2026-08-23-maka-inspired-desktop-ui.md)，只替换其中“固定右侧工作台、Inspector 临时覆盖”的实现边界；EventLog、长期记忆和压缩语义继续以 [EventLog Maka 语义对齐计划](./2026-08-22-eventlog-maka-semantic-convergence.md) 为准。
+状态：P0 交互骨架已完成并通过真实 Electron 验收；步骤 5–9 尚未实施。本计划补充 [Pico Desktop UI 重写](./2026-08-23-maka-inspired-desktop-ui.md)，只替换其中“固定右侧工作台、Inspector 临时覆盖”的实现边界；EventLog、长期记忆和压缩语义继续以 [EventLog Maka 语义对齐计划](./2026-08-22-eventlog-maka-semantic-convergence.md) 为准。
 
 ## Approach
 
@@ -34,28 +34,28 @@
 
 ## Action Items
 
-[ ] 1. 冻结 Workbar 的 authority 与生命周期矩阵。
+[x] 1. 冻结 Workbar 的 authority 与生命周期矩阵。
 
 - 为 Review、Context、Inspector、Tasks、Interactions、Files 和 Terminal 分别指定唯一 authority、查询接口、通知来源和可操作命令。
 - 定义 archive、fork、delete、crash、daemon reconnect 和 workspace 切换时的资源行为。
 - 明确“历史事实”和“当前可操作状态”：Transcript 中的 waiting 记录不能直接恢复审批按钮，Context 压缩也不等于删除 Transcript。
 - 验收：每个计划展示的字段都能追溯到真实查询或持久投影；无 authority 的标签不进入 Launcher。
 
-[ ] 2. 建立统一的 Renderer Workbar 资源访问层。
+[x] 2. 建立统一的 Renderer Workbar 状态与资源访问边界。
 
-- 在 `apps/desktop/src/renderer/workbar/` 定义 `WorkbarTabKind`、`WorkbarTab`、`WorkbarResourceKey`、加载状态、revision/cursor 和错误模型。
-- 在现有严格 preload bridge 上封装 workspace/session/resource 组合身份、请求 generation、取消、迟到响应丢弃和 active-only subscription。
-- 复用现有事件订阅的 durable watermark/hydrate 模式；不得让各 Panel 自行发明刷新循环。
-- 验收：两个 workspace 使用同一 sessionId 时不串线；快速切换 Session 或 daemon 重连时无旧数据覆盖、缺事件或重复事件。
+- 在 `apps/desktop/src/renderer/workbar/` 定义标签、MRU、折叠、尺寸和版本化布局持久化；该目录不持有任何领域真相。
+- Review、Context、Inspector 复用现有 `RuntimeStore`、`ConversationLoadTracker` 和严格 preload bridge，以 `{workspacePath, sessionId}` 绑定当前会话并丢弃迟到响应。
+- `WorkbarResourceKey`、revision/cursor 和 active-only subscription 延后到步骤 5 第一个动态资源协议冻结时引入，避免 P0 产生没有调用方的抽象。
+- 验收：切换 Session 时动态 Inspector 自动关闭；Review 与 Context 始终从当前会话的 Runtime snapshot 读取，不由 Panel 自行刷新。
 
-[ ] 3. 实现右侧单 Dock 的 Workbar Shell。
+[x] 3. 实现右侧单 Dock 的 Workbar Shell。
 
 - 新增 `SessionWorkbar`、tab reducer、Launcher、tab strip、resizer 和版本化布局持久化；将当前 Environment Panel 与 Conversation Inspector 迁入同一容器。
 - 首版支持 320–600px 宽度、折叠/恢复、切换、关闭、MRU 回退、拖拽排序，以及 `ArrowLeft/ArrowRight/Home/End` 键盘导航。
 - 布局和静态标签拓扑可持久化；动态资源标签不跨重启盲目恢复。窄窗口沿用受控 overlay，不遮挡 composer 的主要操作。
 - 验收：Shell 不保存任何领域真相；折叠、切 Session 和关闭标签后焦点与订阅生命周期正确。
 
-[ ] 4. 接入现有 Review、Context 和 Inspector 数据。
+[x] 4. 接入现有 Review、Context 和 Inspector 数据。
 
 - Context 调用现有 `session.context.get`，展示模型窗口、已用、剩余、组成和 compaction 边界；Transcript 仍可完整分页读取。
 - Review 首版明确采用 completed-run checkpoint 语义；先加载文件摘要，展开单文件时才调用 `changes.diff`，移除当前 N+1 加载。
@@ -126,6 +126,14 @@
 - 核心数据闸门：步骤 5–8 覆盖同 sessionId 跨 workspace、并发 revision、强杀恢复、Session 删除、超大任务/Artifact/Trace 分页，并验证 committed Memory Fact 不变。
 - Terminal 闸门：步骤 9 覆盖 snapshot/delta 竞态、输入/resize/stop、孤儿清理和打包产物启动。
 - 性能闸门：打开 Workbar 不触发全量 Transcript 重放；Review、Tasks、Artifacts、Trace 的首屏请求、单帧大小和 Renderer 常驻数据均有显式上限。
+
+### P0 实施记录
+
+- 已完成右侧单 Dock、多标签、Launcher、320–600px 缩放、折叠、MRU、拖拽排序，以及方向键、Home/End 和键盘排序；折叠后只保留标题栏中的唯一恢复入口。
+- Launcher 只展示已有真实 authority 的概览、变更和上下文；Tool/Subagent Inspector 以当前 Session 的动态标签打开，并且不进入持久化布局。
+- Context 已接入 `session.context.get`；Review 首屏只读取 `changes.list`，选中单文件后才请求 `changes.diff`，移除了按文件预取 diff 的 N+1 请求。
+- 已增加 Workbar 状态、可访问性、真实面板边界、按需 diff 和 Context hydration 的 8 条定向集成测试，并完成 Desktop/root typecheck、lint、format 与真实 Electron 主路径验收。
+- 本阶段没有新增数据库 Schema、长期记忆生命周期或任何无 authority 的占位标签；Tasks、Interaction、Artifacts、Trace 与 Terminal 仍按步骤 5–9 推进。
 
 ## Open Questions
 

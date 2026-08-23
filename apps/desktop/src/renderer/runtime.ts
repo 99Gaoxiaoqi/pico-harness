@@ -62,6 +62,7 @@ import {
   type ProviderView,
   type RunView,
   type SessionView,
+  type SessionContextView,
   type SessionSettingsView,
   type UserDefaultsView,
   type UsageView,
@@ -1028,6 +1029,22 @@ export function parseUsage(value: unknown): UsageView {
   };
 }
 
+function parseSessionContext(value: unknown): SessionContextView {
+  const result = isRecord(value) ? value : {};
+  const context = isRecord(result.context) ? result.context : result;
+  return {
+    routeId: stringValue(context.routeId, "未知路由"),
+    estimatedInputTokens: numberValue(context.estimatedInputTokens),
+    contextWindowTokens: numberValue(context.contextWindowTokens),
+    reservedOutputTokens: numberValue(context.reservedOutputTokens),
+    safetyMarginTokens: numberValue(context.safetyMarginTokens),
+    inputBudgetTokens: numberValue(context.inputBudgetTokens),
+    remainingTokens: numberValue(context.remainingTokens),
+    usedPercent: numberValue(context.usedPercent),
+    estimation: stringValue(context.estimation, "estimated"),
+  };
+}
+
 function capability(item: JsonRecord, index: number): CapabilityView {
   const enabled = item.enabled;
   const configured = item.configured;
@@ -1394,6 +1411,12 @@ export interface RuntimeActions {
     readonly operationId?: string;
   }): Promise<void>;
   respondPrompt(id: string, answer: string): Promise<void>;
+  loadChangeDiff(input: {
+    readonly workspacePath: string;
+    readonly sessionId?: string;
+    readonly runId: string;
+    readonly path: string;
+  }): Promise<void>;
   reviewChanges(
     decision: "approve" | "request_changes",
     message?: string,
@@ -1947,8 +1970,9 @@ export function useRuntimeStore(): RuntimeStore {
             run.sessionId === sessionId &&
             isTerminalRunStatus(run.status),
         )?.id;
-      const [sessionUsage, settingsResult, goalResult] = await Promise.all([
+      const [sessionUsage, contextResult, settingsResult, goalResult] = await Promise.all([
         optionalInvoke(bridge, "usage.get", { workspacePath, sessionId }),
+        optionalInvoke(bridge, "session.context.get", { workspacePath, sessionId }),
         optionalInvoke(bridge, "session.settings.get", { workspacePath, sessionId }),
         optionalInvoke(bridge, "goal.get", { workspacePath, sessionId }),
       ]);
@@ -1965,6 +1989,7 @@ export function useRuntimeStore(): RuntimeStore {
         ...parsedConversation,
         ...(activeRunId ? { runId: activeRunId } : {}),
         ...(!sessionUsage.error ? { usage: parseUsage(sessionUsage.value) } : {}),
+        ...(!contextResult.error ? { context: parseSessionContext(contextResult.value) } : {}),
         ...(!settingsResult.error ? { settings: parseSessionSettings(settingsResult.value) } : {}),
         ...(!goalResult.error ? { goalItem: parseGoalItem(goalResult.value) } : {}),
       };
@@ -1975,21 +2000,7 @@ export function useRuntimeStore(): RuntimeStore {
         });
         if (!isCurrentLoad()) return;
         if (!changeList.error && changeList.value) {
-          const listValue = changeList.value;
-          const changes = await Promise.all(
-            recordArray(listValue.changes).map(async (change) => {
-              const path = stringValue(change.path);
-              if (!path) return change;
-              const diff = await optionalInvoke(bridge, "changes.diff", {
-                workspacePath,
-                runId: changeRunId,
-                path,
-              });
-              return { ...change, patch: stringValue(diff.value?.patch) || undefined };
-            }),
-          );
-          if (!isCurrentLoad()) return;
-          const parsed = parseChanges({ ...listValue, changes });
+          const parsed = parseChanges(changeList.value);
           conversation = {
             ...conversation,
             changes: parsed.changes,
@@ -3097,6 +3108,40 @@ export function useRuntimeStore(): RuntimeStore {
               runId: current.prompts.find((prompt) => prompt.id === id)?.runId ?? "",
             }),
           );
+        });
+      },
+      async loadChangeDiff(input) {
+        const { workspacePath, sessionId, runId, path } = input;
+        if (!workspacePath || !runId || !path) return;
+        await perform("change-diff", async (bridge) => {
+          if (preview) return;
+          const value = await invoke(bridge, "changes.diff", { workspacePath, runId, path });
+          const patch = stringValue(value.patch) || "Runtime 未返回此文件的 diff 内容。";
+          setData((current) => {
+            if (!sessionId) {
+              return {
+                ...current,
+                changes: current.changes.map((change) =>
+                  change.path === path ? { ...change, patch } : change,
+                ),
+              };
+            }
+            const key = workspaceSessionKey({ workspacePath, sessionId });
+            const conversation = current.conversations[key];
+            if (!conversation) return current;
+            return {
+              ...current,
+              conversations: {
+                ...current.conversations,
+                [key]: {
+                  ...conversation,
+                  changes: (conversation.changes ?? []).map((change) =>
+                    change.path === path ? { ...change, patch } : change,
+                  ),
+                },
+              },
+            };
+          });
         });
       },
       async reviewChanges(decision, reviewMessage, target) {

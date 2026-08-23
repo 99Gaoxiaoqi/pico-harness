@@ -12,7 +12,6 @@ import {
   type PointerEvent,
   type ReactNode,
 } from "react";
-import "./SessionWorkbar.css";
 
 const MIN_WORKBAR_WIDTH = 320;
 const MAX_WORKBAR_WIDTH = 600;
@@ -31,6 +30,8 @@ export interface SessionWorkbarProps {
   readonly activeTabId: string | undefined;
   readonly collapsed: boolean;
   readonly width: number;
+  readonly showRestoreButton?: boolean | undefined;
+  readonly launcher?: ReactNode | undefined;
   readonly renderPanel: (tab: SessionWorkbarTab) => ReactNode;
   readonly onSelect: (tabId: string) => void;
   readonly onClose: (tabId: string) => void;
@@ -57,6 +58,8 @@ export function SessionWorkbar({
   activeTabId,
   collapsed,
   width,
+  showRestoreButton = true,
+  launcher,
   renderPanel,
   onSelect,
   onClose,
@@ -93,13 +96,13 @@ export function SessionWorkbar({
     if (previousCollapsedRef.current === collapsed) return;
     previousCollapsedRef.current = collapsed;
     if (collapsed) {
-      restoreButtonRef.current?.focus();
+      if (showRestoreButton) restoreButtonRef.current?.focus();
       return;
     }
     const target = expandedFocusRef.current;
     if (target?.isConnected) target.focus();
     else if (selectedTabId) tabRefs.current.get(selectedTabId)?.focus();
-  }, [collapsed, selectedTabId]);
+  }, [collapsed, selectedTabId, showRestoreButton]);
 
   useEffect(() => {
     const handlePointerMove = (event: globalThis.PointerEvent) => {
@@ -130,7 +133,16 @@ export function SessionWorkbar({
   };
 
   const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
-    if (tabs.length === 0) return;
+    const currentTab = tabs[index];
+    if (!currentTab) return;
+    if (event.altKey && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+      event.preventDefault();
+      const targetIndex = event.key === "ArrowLeft" ? index - 1 : index + 1;
+      if (targetIndex >= 0 && targetIndex < tabs.length) {
+        onReorder(currentTab.id, targetIndex);
+      }
+      return;
+    }
     let nextIndex: number | undefined;
     switch (event.key) {
       case "ArrowLeft":
@@ -206,6 +218,7 @@ export function SessionWorkbar({
       className="session-workbar-shell"
       data-slot="session-workbar-shell"
       data-state={collapsed ? "collapsed" : "expanded"}
+      data-has-restore={showRestoreButton}
       style={rootStyle}
     >
       <button
@@ -215,7 +228,7 @@ export function SessionWorkbar({
         aria-label="展开任务工作栏"
         aria-controls={rootId}
         aria-expanded={!collapsed}
-        hidden={!collapsed}
+        hidden={!collapsed || !showRestoreButton}
         onClick={onToggleCollapsed}
       >
         <PanelRightOpen aria-hidden="true" size={18} />
@@ -271,6 +284,8 @@ export function SessionWorkbar({
           </div>
         </header>
 
+        {launcher}
+
         <div className="session-workbar__tab-strip" role="tablist" aria-label="已打开的任务面板">
           {tabs.map((tab, index) => {
             const selected = tab.id === selectedTabId;
@@ -306,6 +321,7 @@ export function SessionWorkbar({
                   role="tab"
                   aria-selected={selected}
                   aria-controls={panelDomId(rootId, tab.id)}
+                  aria-keyshortcuts="Alt+ArrowLeft Alt+ArrowRight"
                   tabIndex={selected ? 0 : -1}
                   data-kind={tab.kind}
                   onClick={() => onSelect(tab.id)}

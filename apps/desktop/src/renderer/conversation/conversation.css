@@ -34,6 +34,10 @@
   grid-template-columns: minmax(0, 1fr) minmax(286px, 330px);
 }
 
+.conversation-surface[data-inspector-mode="workbar"] {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
 .conversation-surface__main {
   display: grid;
   min-width: 0;
