@@ -45,8 +45,10 @@ import type { CronJobRecord, CronRunRecord } from "../tasks/runtime-types.js";
 import { createCronWorkspaceRuntimeFactory } from "./cron-workspace-runtime.js";
 import {
   DesktopInteractionBroker,
+  DesktopInteractionVersionConflictError,
   type DesktopInteractionEvent,
 } from "./desktop-interaction-broker.js";
+import { FileDesktopInteractionStore } from "./desktop-interaction-store.js";
 import { DesktopReporter, type DesktopReporterEvent } from "./desktop-reporter.js";
 import type { SessionSubscriptionRegistry } from "./session-subscription-owner.js";
 import { PersistentActiveOverlay } from "./session-active-overlay.js";
@@ -203,6 +205,7 @@ export function createProductionRuntimeServices(
   const pendingPrompts = new Map<string, PendingInteraction>();
   const resolvedApprovals = new Map<string, InteractionScope>();
   const resolvedPrompts = new Map<string, InteractionScope>();
+  const interactionStore = new FileDesktopInteractionStore({ picoHome });
   let desktopResourceVersion = Date.now();
   const nextDesktopResourceVersion = () => ++desktopResourceVersion;
   let sessionSubscriptions: SessionSubscriptionRegistry | undefined;
@@ -272,7 +275,21 @@ export function createProductionRuntimeServices(
             : {}),
         });
         sessionLeaseTransferred = true;
-        const broker = new DesktopInteractionBroker();
+        const broker = new DesktopInteractionBroker({
+          store: interactionStore,
+          ownerKey: `${workspacePath}\0${targetSessionId}\0${context.run.runId}`,
+          onPersistenceError: (error) =>
+            logger.error(
+              { workspacePath, sessionId: targetSessionId, runId: context.run.runId, error },
+              "桌面交互状态持久化失败",
+            ),
+          onListenerError: (error) =>
+            logger.warn(
+              { workspacePath, sessionId: targetSessionId, runId: context.run.runId, error },
+              "桌面交互状态订阅者失败",
+            ),
+        });
+        await broker.recover();
         const interaction: PendingInteraction = {
           broker,
           workspacePath,
@@ -505,7 +522,7 @@ export function createProductionRuntimeServices(
         } finally {
           unsubscribeSteer();
           unsubscribeInteractions();
-          broker.close();
+          await broker.closeAsync();
           removeBrokerInteractions(pendingApprovals, broker);
           removeBrokerInteractions(pendingPrompts, broker);
           await activeOverlay.flush();
@@ -810,7 +827,7 @@ export function createProductionRuntimeServices(
     interactions: {
       respondApproval: async (input) => {
         const workspacePath = await canonicalizeWorkspacePath(input.workspacePath);
-        const respond = () => {
+        const respond = async () => {
           const key = interactionKey(workspacePath, input.approvalId);
           const pending = pendingApprovals.get(key);
           if (!pending) {
@@ -820,25 +837,36 @@ export function createProductionRuntimeServices(
             return { accepted: true, alreadyResolved: true };
           }
           assertInteractionScope(pending, input, "Approval", input.approvalId, workspacePath);
-          const accepted = pending.broker.resolveApproval({
-            taskId: input.approvalId,
-            decision:
-              input.decision === "allow_session"
-                ? "approve-session"
-                : input.decision === "allow_once"
-                  ? "approve"
-                  : "reject",
-            ...(input.reason ? { reason: input.reason } : {}),
-          });
-          if (!accepted) {
-            throw new RuntimeProtocolError(
-              RUNTIME_ERROR_CODES.CONFLICT,
-              `Approval ${input.approvalId} 已在另一请求中处理`,
-            );
+          try {
+            const outcome = await pending.broker.resolveApprovalVersioned({
+              taskId: input.approvalId,
+              decision:
+                input.decision === "allow_session"
+                  ? "approve-session"
+                  : input.decision === "allow_once"
+                    ? "approve"
+                    : "reject",
+              ...(input.reason ? { reason: input.reason } : {}),
+            });
+            if (!outcome.accepted) {
+              throw new RuntimeProtocolError(
+                RUNTIME_ERROR_CODES.CONFLICT,
+                `Approval ${input.approvalId} 已在另一请求中处理`,
+              );
+            }
+            return {
+              accepted: outcome.accepted,
+              alreadyResolved: outcome.alreadyResolved,
+            };
+          } catch (error) {
+            if (error instanceof DesktopInteractionVersionConflictError) {
+              throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, error.message);
+            }
+            throw error;
           }
-          return { accepted, alreadyResolved: false };
         };
-        if (!input.idempotencyKey) return respond();
+        if (!input.idempotencyKey) return await respond();
+        const response = await respond();
         const outcome = await service.executeIdempotentDaemonCommand(
           workspacePath,
           {
@@ -853,13 +881,13 @@ export function createProductionRuntimeServices(
               ...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {}),
             },
           },
-          () => ({ result: respond() }),
+          () => ({ result: response }),
         );
         return outcome.result;
       },
       respondPrompt: async (input) => {
         const workspacePath = await canonicalizeWorkspacePath(input.workspacePath);
-        const respond = () => {
+        const respond = async () => {
           const key = interactionKey(workspacePath, input.promptId);
           const pending = pendingPrompts.get(key);
           if (!pending) {
@@ -875,16 +903,23 @@ export function createProductionRuntimeServices(
               "prompt.respond answer 必须是非空选项 ID、标签或自由文本",
             );
           }
-          const accepted = pending.broker.answerPrompt(input.promptId, input.answer.trim());
-          if (!accepted) {
+          const outcome = await pending.broker.answerPromptVersioned({
+            requestId: input.promptId,
+            answer: input.answer.trim(),
+          });
+          if (!outcome.accepted) {
             throw new RuntimeProtocolError(
               RUNTIME_ERROR_CODES.INVALID_PARAMS,
               `Prompt ${input.promptId} 的 answer 不是有效选项，且该问题未声明 freeText`,
             );
           }
-          return { accepted, alreadyResolved: false };
+          return {
+            accepted: outcome.accepted,
+            alreadyResolved: outcome.alreadyResolved,
+          };
         };
-        if (!input.idempotencyKey) return respond();
+        if (!input.idempotencyKey) return await respond();
+        const response = await respond();
         const outcome = await service.executeIdempotentDaemonCommand(
           workspacePath,
           {
@@ -898,7 +933,7 @@ export function createProductionRuntimeServices(
               ...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {}),
             },
           },
-          () => ({ result: respond() }),
+          () => ({ result: response }),
         );
         return outcome.result;
       },
@@ -911,11 +946,11 @@ export function createProductionRuntimeServices(
           return { cancelled: false };
         }
         assertInteractionScope(pending, input, "Prompt", input.promptId, workspacePath);
-        const cancelled = pending.broker.cancelPrompt(
-          input.promptId,
-          input.reason?.trim() || "用户在客户端取消了问题。",
-        );
-        return { cancelled };
+        const outcome = await pending.broker.cancelPromptVersioned({
+          requestId: input.promptId,
+          reason: input.reason?.trim() || "用户在客户端取消了问题。",
+        });
+        return { cancelled: outcome.accepted };
       },
     },
   });
