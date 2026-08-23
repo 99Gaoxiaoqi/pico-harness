@@ -5,6 +5,7 @@ import type {
   DesktopBrowserState,
 } from "../preload/contract.js";
 import {
+  BrowserSessionCloseFence,
   commitBrowserRevocations,
   guardBrowserNavigation,
   normalizeActiveBrowserViewport,
@@ -64,6 +65,7 @@ export function createEmbeddedBrowserAuthority(options: {
     onError: (error) => console.error("Pico browser URL persistence failed", error),
   });
   const viewportGenerations = new PersistentBrowserViewportGenerationAuthority(urlStore);
+  const closeFence = new BrowserSessionCloseFence();
   let activeSessionId: string | null = null;
 
   const requireWindow = (): BrowserWindow => {
@@ -202,6 +204,7 @@ export function createEmbeddedBrowserAuthority(options: {
 
   const authority: EmbeddedBrowserAuthority = {
     acquireViewport(sessionId) {
+      closeFence.assertAvailable(sessionId);
       return viewportGenerations.acquire(sessionId);
     },
 
@@ -224,6 +227,9 @@ export function createEmbeddedBrowserAuthority(options: {
     },
 
     setViewport(sessionId, rect, generation) {
+      if (closeFence.isClosing(sessionId)) {
+        return emptyState(sessionId, viewportGenerations.current(sessionId));
+      }
       const existing = entries.get(sessionId);
       const currentGeneration = viewportGenerations.current(sessionId);
       if (!viewportGenerations.accept(sessionId, generation)) {
@@ -389,15 +395,17 @@ export function createEmbeddedBrowserAuthority(options: {
     },
 
     async close(sessionId) {
-      const entry = entries.get(sessionId);
-      if (entry) destroyEntry(sessionId, entry);
-      const revocation = viewportGenerations.revoke(sessionId, { deleteUrl: true });
-      options.onState(emptyState(sessionId, revocation.generation));
-      await commitBrowserRevocations(
-        revocation.persistence,
-        [{ sessionId, generation: revocation.generation }],
-        options.onRevoke,
-      );
+      await closeFence.run(sessionId, async () => {
+        const entry = entries.get(sessionId);
+        if (entry) destroyEntry(sessionId, entry);
+        const revocation = viewportGenerations.revoke(sessionId, { deleteUrl: true });
+        options.onState(emptyState(sessionId, revocation.generation));
+        await commitBrowserRevocations(
+          revocation.persistence,
+          [{ sessionId, generation: revocation.generation }],
+          options.onRevoke,
+        );
+      });
     },
 
     async clearData() {
