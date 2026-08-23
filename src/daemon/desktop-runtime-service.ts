@@ -543,6 +543,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       "terminal.detach": (request) =>
         this.withHostWorkbarErrors(() => this.terminalService.detach(request.params)),
       "terminal.stopAll": () => this.withHostWorkbarErrors(() => this.terminalService.stopAll()),
+      "terminal.resume": () => this.withHostWorkbarErrors(() => this.terminalService.resume()),
       "sideChat.create": (request) => this.createSideChat(request.params),
       "sideChat.close": (request) => this.closeSideChat(request.params),
       "rewind.list": (request) =>
@@ -4568,7 +4569,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         const code =
           error.code === "not_found"
             ? RUNTIME_ERROR_CODES.NOT_FOUND
-            : error.code === "resource_epoch_mismatch" || error.code === "capacity_exceeded"
+            : error.code === "resource_epoch_mismatch" ||
+                error.code === "capacity_exceeded" ||
+                error.code === "admission_closed"
               ? RUNTIME_ERROR_CODES.CONFLICT
               : RUNTIME_ERROR_CODES.INVALID_PARAMS;
         throw new RuntimeProtocolError(code, error.message);

@@ -59,9 +59,19 @@ test("review, terminal and side chat contracts are renderer allowlisted and stri
     false,
     "全量释放仅允许 Electron 主进程调用",
   );
+  assert.equal(
+    (DESKTOP_RUNTIME_METHODS as readonly string[]).includes("terminal.resume"),
+    false,
+    "开启新代际仅允许 Electron 主进程调用",
+  );
   assert.deepEqual(parseStrictRuntimeParams("terminal.stopAll", {}), {});
+  assert.deepEqual(parseStrictRuntimeParams("terminal.resume", {}), {});
   assert.throws(
     () => parseStrictRuntimeParams("terminal.stopAll", { unexpected: true }),
+    RuntimeProtocolError,
+  );
+  assert.throws(
+    () => parseStrictRuntimeParams("terminal.resume", { unexpected: true }),
     RuntimeProtocolError,
   );
 

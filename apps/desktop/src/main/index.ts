@@ -12,11 +12,15 @@ import { configureAutoUpdates } from "./updater.js";
 import { installApplicationMenu } from "./menu.js";
 import { sleepForRetry } from "../../../../src/provider/retry.js";
 import { createEmbeddedBrowserAuthority } from "./browser-manager.js";
-import { createDesktopTerminalCleanupFence } from "./daemon-controller.js";
+import {
+  createDesktopTerminalCleanupFence,
+  DesktopTerminalGenerationController,
+} from "./daemon-controller.js";
 
 let mainWindow: BrowserWindow | undefined;
 let disposeIpc: (() => void) | undefined;
 let disposeUpdater: (() => void) | undefined;
+const terminalGeneration = new DesktopTerminalGenerationController();
 // 3-B-3 硬切后默认构造走 kernel 承载：首次请求（下方 runtime.ping）经
 // connectOrSpawn 自动拉起 detached 常驻 daemon candidate（自持 residency，
 // 不随本 app 退出；cron 调度依赖其常驻）。Electron 主进程只做瘦客户端。
@@ -43,8 +47,14 @@ const requestDesktopShutdown = (exitCode?: number): void => {
 const stopAllDesktopTerminals = async (): Promise<void> => {
   await runtime.request("terminal.stopAll", {});
 };
+const cleanupDesktopTerminalGeneration = (): Promise<void> =>
+  terminalGeneration.cleanup(stopAllDesktopTerminals);
+const openDesktopTerminalGeneration = (): Promise<void> =>
+  terminalGeneration.open(async () => {
+    await runtime.request("terminal.resume", {});
+  });
 const terminalCleanupFence = createDesktopTerminalCleanupFence(
-  { stopAll: stopAllDesktopTerminals },
+  { stopAll: cleanupDesktopTerminalGeneration },
   () => app.quit(),
   (error) => console.error("Pico desktop terminal cleanup failed", error),
 );
@@ -79,6 +89,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on("before-quit", (event) => {
     // daemon 由 kernel 承载独立常驻（cron 调度依赖），本 app 不拥有其生命周期，
     // 但 Workbar Terminal 不跨 Desktop 重启恢复，必须先释放其进程组。
+    terminalGeneration.seal();
     lifecycle.markQuitting();
     terminalCleanupFence(event);
   });
@@ -116,6 +127,7 @@ if (!app.requestSingleInstanceLock()) {
         platform,
         lifecycle,
         browser,
+        isTerminalCreateAllowed: () => terminalGeneration.isCreateAllowed(),
       });
       disposeUpdater = configureAutoUpdates(() => lifecycle.markQuitting());
       await openMainWindow();
@@ -147,11 +159,29 @@ async function openMainWindow(): Promise<void> {
     lifecycle.showWindow();
     return;
   }
+  await openDesktopTerminalGeneration();
+  if (lifecycle.isQuitting()) return;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    lifecycle.showWindow();
+    return;
+  }
   mainWindow = await createDesktopWindow({
     userDataPath: app.getPath("userData"),
     shouldKeepInBackground: () => lifecycle.shouldKeepInBackground(),
     onClosed: () => {
       mainWindow = undefined;
+      if (!lifecycle.isQuitting()) {
+        void cleanupDesktopTerminalGeneration().catch((error: unknown) => {
+          console.error("Pico desktop terminal release failed", error);
+        });
+      }
+    },
+    onRendererGone: () => {
+      if (!lifecycle.isQuitting()) {
+        void cleanupDesktopTerminalGeneration().catch((error: unknown) => {
+          console.error("Pico desktop terminal release failed", error);
+        });
+      }
     },
   });
 }
