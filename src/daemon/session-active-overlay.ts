@@ -1,4 +1,4 @@
-import type { RuntimeActiveOverlayEntry, RuntimeSessionSubscriptionFrame } from "./protocol.js";
+import type { RuntimeActiveOverlayEntry } from "./protocol.js";
 
 export const ACTIVE_OVERLAY_FLUSH_INTERVAL_MS = 80;
 export const ACTIVE_OVERLAY_FLUSH_BYTES = 8 * 1024;
@@ -45,13 +45,21 @@ export interface ActiveOverlayPersistence {
   upsert(input: ActiveOverlayPersistInput): Promise<{ readonly version: number }>;
 }
 
+export interface ActiveOverlayLiveDelta {
+  readonly type: "subscription.session_delta";
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly turnId: string;
+  readonly itemId: string;
+  readonly streamId: string;
+  readonly kind: ActiveOverlayKind;
+  readonly startOffsetBytes: number;
+  readonly text: string;
+  readonly stream?: "stdout" | "stderr";
+}
+
 export interface ActiveOverlayPublisher {
-  publishDelta(
-    delta: Omit<
-      Extract<RuntimeSessionSubscriptionFrame, { type: "subscription.session_delta" }>,
-      "hostEpoch" | "subscriptionId" | "sequence"
-    >,
-  ): void;
+  publishDelta(delta: ActiveOverlayLiveDelta): void;
   publishContinuityDegraded(reason: "partial_persistence_failed"): void;
 }
 
@@ -242,7 +250,11 @@ export function parseActiveOverlayPayload(value: unknown): ActiveOverlayPayload 
   ) {
     return undefined;
   }
-  if (value["stream"] !== undefined && value["stream"] !== "stdout" && value["stream"] !== "stderr") {
+  if (
+    value["stream"] !== undefined &&
+    value["stream"] !== "stdout" &&
+    value["stream"] !== "stderr"
+  ) {
     return undefined;
   }
   if (value["complete"] !== undefined && value["complete"] !== true) return undefined;
@@ -300,7 +312,10 @@ function persistentKind(kind: ActiveOverlayKind): ActiveOverlayPersistInput["kin
   return "tool_output";
 }
 
-function trimUtf8Prefix(text: string, minimumBytes: number): { text: string; removedBytes: number } {
+function trimUtf8Prefix(
+  text: string,
+  minimumBytes: number,
+): { text: string; removedBytes: number } {
   if (minimumBytes <= 0) return { text, removedBytes: 0 };
   const bytes = new TextEncoder().encode(text);
   if (minimumBytes >= bytes.byteLength) return { text: "", removedBytes: bytes.byteLength };

@@ -264,6 +264,10 @@ class SessionSubscriptionOwner {
     this.#publish({ type: "subscription.run_state", run });
   }
 
+  continuityDegraded(reason: "partial_persistence_failed" | "recovery_failed"): void {
+    this.#publish({ type: "subscription.continuity_degraded", reason });
+  }
+
   acceptDelta(input: Omit<SessionLiveDeltaInput, "workspacePath" | "sessionId">): void {
     this.#appendDelta(input);
   }
@@ -591,6 +595,15 @@ export class SessionSubscriptionRegistry {
     const owner = this.#owners.get(ownerKey(notification.scope.workspacePath, sessionId));
     if (!owner) return;
     void owner.run(() => owner.acceptRuntimeNotification(notification));
+  }
+
+  publishContinuityDegraded(
+    workspacePath: string,
+    sessionId: string,
+    reason: "partial_persistence_failed" | "recovery_failed",
+  ): void {
+    const owner = this.#owner(workspacePath, sessionId);
+    void owner.run(() => owner.continuityDegraded(reason));
   }
 
   releaseConnection(connectionId: string): void {

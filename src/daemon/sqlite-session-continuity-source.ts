@@ -27,6 +27,7 @@ import type {
   SessionContinuityDataSource,
   SessionSubscriptionSnapshot,
 } from "./session-subscription-owner.js";
+import { parseActiveOverlayPayload } from "./session-active-overlay.js";
 
 const DEFAULT_TAIL_LIMIT = 100;
 const DEFAULT_PAGE_LIMIT = 100;
@@ -235,59 +236,24 @@ function projectRunPartials(
 function activeOverlayEntry(
   value: unknown,
   runId: string,
-  anchorSequence: number,
+  _anchorSequence: number,
 ): RuntimeActiveOverlayEntry | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const record = value as Record<string, unknown>;
-  const candidate =
-    record["entry"] && typeof record["entry"] === "object" && !Array.isArray(record["entry"])
-      ? (record["entry"] as Record<string, unknown>)
-      : record;
-  const streamId = nonEmptyString(candidate["streamId"]);
-  const turnId = nonEmptyString(candidate["turnId"]);
-  const itemId = nonEmptyString(candidate["itemId"]);
-  const text = typeof candidate["text"] === "string" ? candidate["text"] : undefined;
-  const kind = candidate["kind"];
-  if (
-    !streamId ||
-    !turnId ||
-    !itemId ||
-    text === undefined ||
-    (kind !== "text" && kind !== "thinking" && kind !== "toolOutput")
-  ) {
-    return undefined;
-  }
-  const startOffsetBytes = nonNegativeInteger(candidate["startOffsetBytes"]) ?? 0;
-  const endOffsetBytes =
-    nonNegativeInteger(candidate["endOffsetBytes"]) ?? startOffsetBytes + Buffer.byteLength(text);
-  const persistedAnchorSequence = nonNegativeInteger(candidate["anchorSequence"]);
-  const truncatedBeforeBytes = nonNegativeInteger(candidate["truncatedBeforeBytes"]);
+  const candidate = parseActiveOverlayPayload(value);
+  if (!candidate || candidate.runId !== runId) return undefined;
   return {
     runId,
-    turnId,
-    itemId,
-    streamId,
-    kind,
-    startOffsetBytes,
-    endOffsetBytes,
-    text,
-    anchorSequence: persistedAnchorSequence ?? anchorSequence,
-    ...(candidate["stream"] === "stdout" || candidate["stream"] === "stderr"
-      ? { stream: candidate["stream"] }
+    turnId: candidate.turnId,
+    itemId: candidate.itemId,
+    streamId: candidate.streamId,
+    kind: candidate.kind,
+    startOffsetBytes: candidate.startOffsetBytes,
+    endOffsetBytes: candidate.endOffsetBytes,
+    text: candidate.text,
+    anchorSequence: candidate.anchorSequence,
+    ...(candidate.stream ? { stream: candidate.stream } : {}),
+    ...(candidate.truncatedBeforeBytes > 0
+      ? { truncatedBeforeBytes: candidate.truncatedBeforeBytes }
       : {}),
-    ...(truncatedBeforeBytes !== undefined
-      ? { truncatedBeforeBytes }
-      : startOffsetBytes > 0
-        ? { truncatedBeforeBytes: startOffsetBytes }
-        : {}),
-    ...(candidate["complete"] === true ? { complete: true } : {}),
+    ...(candidate.complete ? { complete: true } : {}),
   };
-}
-
-function nonEmptyString(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-function nonNegativeInteger(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
