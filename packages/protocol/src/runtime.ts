@@ -1,8 +1,8 @@
 export const LOCAL_RUNTIME_PROTOCOL_VERSION = 2;
 export const LOCAL_RUNTIME_AUTH_VERSION = 1;
 /** Increment when the Desktop-required result schema changes incompatibly. */
-export const DESKTOP_RUNTIME_SCHEMA_REVISION = 14;
-export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v14";
+export const DESKTOP_RUNTIME_SCHEMA_REVISION = 15;
+export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v15";
 export const CAPABILITY_SCOPE_RUNTIME_CAPABILITY = "capability-scopes-v1";
 export const MAX_RUNTIME_FRAME_BYTES = 1024 * 1024;
 /** Maximum UTF-8 payload exposed through a host-facing ToolResult projection. */
@@ -787,6 +787,19 @@ export type RuntimeTerminalSession = JsonObject & {
   readonly exitCode?: number;
 };
 
+export type RuntimeBrowserAgentAction =
+  "navigate" | "back" | "forward" | "reload" | "get_state" | "click" | "type";
+
+/** Fixed-operation command consumed only by the visible Electron browser panel. */
+export type RuntimeBrowserAgentCommand = JsonObject & {
+  readonly commandId: string;
+  readonly sessionId: SessionId;
+  readonly action: RuntimeBrowserAgentAction;
+  readonly input: JsonObject;
+  readonly createdAt: number;
+  readonly expiresAt: number;
+};
+
 export type RuntimeJob = JsonObject & {
   readonly jobId: JobId;
   readonly workspacePath: string;
@@ -913,7 +926,12 @@ export type RuntimeMethodMap = {
   };
   readonly "session.delete": {
     readonly params: WorkspaceParams & { readonly sessionId: SessionId };
-    readonly result: { readonly sessionId: SessionId; readonly deleted: true };
+    readonly result: {
+      readonly sessionId: SessionId;
+      readonly deleted: true;
+      /** Includes hidden Side Chat children whose host resources were removed in the same saga. */
+      readonly closedSessionIds?: readonly SessionId[];
+    };
   };
   readonly "session.rename": {
     readonly params: WorkspaceParams & { readonly sessionId: SessionId; readonly title: string };
@@ -1034,6 +1052,38 @@ export type RuntimeMethodMap = {
       readonly patch: string;
       readonly truncated: boolean;
     };
+  };
+  readonly "browser.agent.lease": {
+    readonly params: {
+      readonly sessionId: SessionId;
+      readonly visible: boolean;
+      readonly generation: number;
+      readonly leaseId?: string;
+    };
+    readonly result: {
+      readonly leaseId: string;
+      readonly expiresAt: number;
+      readonly visible: boolean;
+    };
+  };
+  readonly "browser.agent.next": {
+    readonly params: {
+      readonly sessionId: SessionId;
+      readonly leaseId: string;
+      readonly waitMs?: number;
+    };
+    readonly result: { readonly command: RuntimeBrowserAgentCommand | null };
+  };
+  readonly "browser.agent.resolve": {
+    readonly params: {
+      readonly sessionId: SessionId;
+      readonly leaseId: string;
+      readonly commandId: string;
+      readonly ok: boolean;
+      readonly result?: JsonObject;
+      readonly error?: string;
+    };
+    readonly result: { readonly accepted: true };
   };
   readonly "terminal.create": {
     readonly params: WorkspaceParams & {
@@ -1915,6 +1965,9 @@ export const RUNTIME_METHODS = [
   "session.trace.query",
   "git.review.snapshot",
   "git.review.diff",
+  "browser.agent.lease",
+  "browser.agent.next",
+  "browser.agent.resolve",
   "terminal.create",
   "terminal.list",
   "terminal.attach",
@@ -2050,6 +2103,9 @@ export const DESKTOP_RUNTIME_METHODS = [
   "session.trace.query",
   "git.review.snapshot",
   "git.review.diff",
+  "browser.agent.lease",
+  "browser.agent.next",
+  "browser.agent.resolve",
   "terminal.create",
   "terminal.list",
   "terminal.attach",
@@ -3214,6 +3270,33 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
     source: oneOfParam(["branch", "staged", "unstaged"] as const),
     expectedRevision: boundedNonEmptyStringParam(512),
   }),
+  "browser.agent.lease": exactParamShape(
+    {
+      sessionId: boundedNonEmptyStringParam(512),
+      visible: booleanParam,
+      generation: nonNegativeIntegerParam,
+    },
+    { leaseId: boundedNonEmptyStringParam(512) },
+  ),
+  "browser.agent.next": exactParamShape(
+    {
+      sessionId: boundedNonEmptyStringParam(512),
+      leaseId: boundedNonEmptyStringParam(512),
+    },
+    { waitMs: nonNegativeIntegerParam },
+  ),
+  "browser.agent.resolve": exactParamShape(
+    {
+      sessionId: boundedNonEmptyStringParam(512),
+      leaseId: boundedNonEmptyStringParam(512),
+      commandId: boundedNonEmptyStringParam(512),
+      ok: booleanParam,
+    },
+    {
+      result: jsonObjectParam,
+      error: boundedNonEmptyStringParam(4_000),
+    },
+  ),
   "terminal.create": exactParamShape(
     { workspacePath: stringParam, sessionId: stringParam },
     { cols: positiveIntegerParam, rows: positiveIntegerParam },
@@ -4032,6 +4115,15 @@ const runtimeTerminalSessionResult = exactResultShape(
   { exitCode: resultFiniteNumber },
 );
 
+const runtimeBrowserAgentCommandResult = exactResultShape({
+  commandId: resultNonEmptyString,
+  sessionId: resultNonEmptyString,
+  action: resultOneOf(["navigate", "back", "forward", "reload", "get_state", "click", "type"]),
+  input: resultJsonObject,
+  createdAt: resultFiniteNumber,
+  expiresAt: resultFiniteNumber,
+});
+
 const runtimeRunStatusResult = resultOneOf([
   "queued",
   "running",
@@ -4453,6 +4545,15 @@ const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
     patch: resultBoundedString(512 * 1024),
     truncated: resultBoolean,
   }),
+  "browser.agent.lease": exactResultShape({
+    leaseId: resultNonEmptyString,
+    expiresAt: resultFiniteNumber,
+    visible: resultBoolean,
+  }),
+  "browser.agent.next": exactResultShape({
+    command: resultNullable(runtimeBrowserAgentCommandResult),
+  }),
+  "browser.agent.resolve": exactResultShape({ accepted: resultOneOf([true]) }),
   "terminal.create": exactResultShape({
     terminal: runtimeTerminalSessionResult,
     resourceEpoch: resultNonEmptyString,

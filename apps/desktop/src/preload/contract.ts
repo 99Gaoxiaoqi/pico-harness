@@ -35,6 +35,8 @@ export const DESKTOP_IPC_CHANNELS = {
   browserGetState: "pico:browser:get-state",
   browserClose: "pico:browser:close",
   browserClearData: "pico:browser:clear-data",
+  browserClick: "pico:browser:click",
+  browserType: "pico:browser:type",
   browserState: "pico:browser:state",
 } as const;
 
@@ -56,6 +58,12 @@ export interface DesktopBrowserState {
   readonly hasPage: boolean;
   readonly visible: boolean;
   readonly generation: number;
+}
+
+export interface DesktopBrowserElementResult {
+  readonly state: DesktopBrowserState;
+  readonly selector: string;
+  readonly tagName: string;
 }
 
 export interface DesktopError {
@@ -129,6 +137,13 @@ export interface DesktopBridge {
     getState(sessionId: string): Promise<DesktopResult<DesktopBrowserState | null>>;
     close(sessionId: string): Promise<DesktopResult<void>>;
     clearData(): Promise<DesktopResult<void>>;
+    click(sessionId: string, selector: string): Promise<DesktopResult<DesktopBrowserElementResult>>;
+    type(
+      sessionId: string,
+      selector: string,
+      text: string,
+      clear?: boolean,
+    ): Promise<DesktopResult<DesktopBrowserElementResult>>;
     onState(listener: (state: DesktopBrowserState) => void): () => void;
   };
 }
