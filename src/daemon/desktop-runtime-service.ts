@@ -542,6 +542,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         this.withHostWorkbarErrors(() => this.terminalService.stop(request.params)),
       "terminal.detach": (request) =>
         this.withHostWorkbarErrors(() => this.terminalService.detach(request.params)),
+      "terminal.stopAll": () => this.withHostWorkbarErrors(() => this.terminalService.stopAll()),
       "sideChat.create": (request) => this.createSideChat(request.params),
       "sideChat.close": (request) => this.closeSideChat(request.params),
       "rewind.list": (request) =>
