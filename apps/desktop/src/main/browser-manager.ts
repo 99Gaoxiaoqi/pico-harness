@@ -20,6 +20,7 @@ const guardedSessions = new WeakSet<Session>();
 
 export interface EmbeddedBrowserAuthority {
   acquireViewport(sessionId: string): number;
+  isVisibleGeneration(sessionId: string, generation: number): boolean;
   setActiveSession(sessionId: string | null): void;
   setViewport(
     sessionId: string,
@@ -54,6 +55,7 @@ interface BrowserEntry {
 export function createEmbeddedBrowserAuthority(options: {
   readonly getWindow: () => BrowserWindow | undefined;
   readonly onState: (state: DesktopBrowserState) => void;
+  readonly onRevoke?: (sessionId: string, generation: number) => Promise<void>;
   readonly userDataPath: string;
 }): EmbeddedBrowserAuthority {
   const entries = new Map<string, BrowserEntry>();
@@ -193,9 +195,30 @@ export function createEmbeddedBrowserAuthority(options: {
     emit(sessionId, entry);
   };
 
+  const revoke = (
+    sessionId: string,
+  ): { readonly generation: number; readonly completion: Promise<void> } => {
+    const generation = viewportGenerations.revoke(sessionId);
+    return {
+      generation,
+      completion: options.onRevoke?.(sessionId, generation) ?? Promise.resolve(),
+    };
+  };
+
   const authority: EmbeddedBrowserAuthority = {
     acquireViewport(sessionId) {
       return viewportGenerations.acquire(sessionId);
+    },
+
+    isVisibleGeneration(sessionId, generation) {
+      const entry = entries.get(sessionId);
+      return Boolean(
+        viewportGenerations.accept(sessionId, generation) &&
+        activeSessionId === sessionId &&
+        entry?.visible &&
+        !entry.view.webContents.isDestroyed() &&
+        entry.generation === generation,
+      );
     },
 
     setActiveSession(sessionId) {
@@ -371,12 +394,16 @@ export function createEmbeddedBrowserAuthority(options: {
     },
 
     async close(sessionId) {
+      const revocation = revoke(sessionId);
       const entry = entries.get(sessionId);
       const deletionRevision = urlStore.delete(sessionId);
       if (entry) destroyEntry(sessionId, entry);
-      if (deletionRevision !== undefined) {
-        await urlStore.flushThrough(deletionRevision);
-      }
+      options.onState(emptyState(sessionId, revocation.generation));
+      const flushing =
+        deletionRevision === undefined
+          ? Promise.resolve()
+          : urlStore.flushThrough(deletionRevision);
+      await Promise.all([revocation.completion, flushing]);
     },
 
     async clearData() {
@@ -384,9 +411,12 @@ export function createEmbeddedBrowserAuthority(options: {
     },
 
     async dispose() {
+      const revocations = viewportGenerations
+        .revokeAll()
+        .map(({ sessionId, generation }) => options.onRevoke?.(sessionId, generation));
       for (const [sessionId, entry] of [...entries]) destroyEntry(sessionId, entry);
+      await Promise.all([...revocations, urlStore.flush()]);
       viewportGenerations.clear();
-      await urlStore.flush();
     },
   };
   return authority;

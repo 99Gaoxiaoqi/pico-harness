@@ -9,6 +9,7 @@ import {
 import {
   parseDesktopRuntimeResult,
   parseStrictRuntimeParams,
+  RUNTIME_ERROR_CODES,
   RuntimeNotificationBuffer,
   RuntimeProtocolError,
   type RuntimeMethod,
@@ -86,6 +87,19 @@ export function registerDesktopIpcHandlers(options: {
         );
       }
       const params = parseStrictRuntimeParams(envelope.method, envelope.params);
+      if (envelope.method === "browser.agent.lease") {
+        const lease = params as {
+          readonly sessionId: string;
+          readonly visible: boolean;
+          readonly generation: number;
+        };
+        if (lease.visible && !browser.isVisibleGeneration(lease.sessionId, lease.generation)) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.CONFLICT,
+            "浏览器面板代际已失效或当前不可见",
+          );
+        }
+      }
       const request =
         envelope.method === "terminal.create"
           ? options.submitTerminalCreate(() => runtime.request(envelope.method, params))

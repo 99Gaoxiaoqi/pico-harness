@@ -103,6 +103,28 @@ test("面板隐藏、租约过期和命令超时均 fail closed", async () => {
   );
 });
 
+test("Browser Agent generation floor prevents a closed viewport from reacquiring a lease", () => {
+  const broker = new BrowserAgentCommandBroker();
+  broker.acquireLease({ sessionId: "session-a", visible: true, generation: 5 });
+  broker.invalidateSession("session-a", "Session archived");
+  assert.throws(
+    () => broker.acquireLease({ sessionId: "session-a", visible: true, generation: 5 }),
+    (error: unknown) =>
+      error instanceof BrowserAgentBrokerError && error.code === "BROWSER_LEASE_STALE",
+  );
+  assert.equal(
+    broker.acquireLease({ sessionId: "session-a", visible: true, generation: 6 }).visible,
+    true,
+  );
+
+  broker.acquireLease({ sessionId: "session-b", visible: false, generation: 9 });
+  assert.throws(
+    () => broker.acquireLease({ sessionId: "session-b", visible: true, generation: 9 }),
+    (error: unknown) =>
+      error instanceof BrowserAgentBrokerError && error.code === "BROWSER_LEASE_STALE",
+  );
+});
+
 test("Browser Agent 工具只暴露固定操作且校验输入边界", async () => {
   const calls: Array<{ action: string; input: unknown }> = [];
   const tools = createBrowserAgentTools({
