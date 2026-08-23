@@ -48,11 +48,6 @@ const terminalCleanupFence = createDesktopTerminalCleanupFence(
   () => app.quit(),
   (error) => console.error("Pico desktop terminal cleanup failed", error),
 );
-const releaseDesktopTerminalsBestEffort = (): void => {
-  void stopAllDesktopTerminals().catch((error: unknown) => {
-    console.error("Pico desktop terminal release failed", error);
-  });
-};
 
 // Runtime 连接监督（3-C 自动恢复）：daemon 中途死亡时 subscription 重连只在
 // 主进程进行，渲染进程无感知，会停在"看似就绪但所有操作都失败"的界面。监督器
@@ -157,9 +152,7 @@ async function openMainWindow(): Promise<void> {
     shouldKeepInBackground: () => lifecycle.shouldKeepInBackground(),
     onClosed: () => {
       mainWindow = undefined;
-      if (!lifecycle.isQuitting()) releaseDesktopTerminalsBestEffort();
     },
-    onRendererGone: releaseDesktopTerminalsBestEffort,
   });
 }
 

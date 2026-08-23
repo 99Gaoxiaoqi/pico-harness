@@ -127,6 +127,42 @@ class FakeProcess implements WorkbarTerminalProcess {
   }
 }
 
+class ControlledProcessFactory implements WorkbarTerminalProcessFactory {
+  readonly capability = "pty" as const;
+  readonly processes: FakeProcess[] = [];
+  readonly #pending: Array<{
+    readonly handlers: Parameters<WorkbarTerminalProcessFactory["spawn"]>[1];
+    readonly resolve: (process: WorkbarTerminalProcess) => void;
+  }> = [];
+  spawnCount = 0;
+
+  spawn(
+    _input: Parameters<WorkbarTerminalProcessFactory["spawn"]>[0],
+    handlers: Parameters<WorkbarTerminalProcessFactory["spawn"]>[1],
+  ): Promise<WorkbarTerminalProcess> {
+    this.spawnCount++;
+    return new Promise((resolve) => this.#pending.push({ handlers, resolve }));
+  }
+
+  resolveNext(exitOnTerminate: boolean): FakeProcess {
+    const pending = this.#pending.shift();
+    assert.ok(pending, "expected a controlled terminal spawn");
+    const process = exitOnTerminate
+      ? new AutoExitFakeProcess(20_000 + this.processes.length, pending.handlers)
+      : new FakeProcess(20_000 + this.processes.length, pending.handlers);
+    this.processes.push(process);
+    pending.resolve(process);
+    return process;
+  }
+}
+
+class AutoExitFakeProcess extends FakeProcess {
+  override terminate(signal: "SIGTERM" | "SIGKILL"): void {
+    super.terminate(signal);
+    this.exit({ signal });
+  }
+}
+
 test("Host terminal 支持多实例、attach/detach、有界回放和单调 sequence", async (context) => {
   const workspacePath = await createWorkspace(context, "lifecycle");
   const store = new MemoryStateStore();
@@ -265,6 +301,67 @@ test("Host terminal stop 终止进程组，且重启把旧 running 记录标为 
   });
   assert.equal(replay.events[0]?.kind, "status");
   assert.equal(replay.events[0]?.sequence, 1);
+});
+
+test("Host terminal stopAll 等待已接纳但仍在 spawn 的 create 后再完成", async (context) => {
+  const workspacePath = await createWorkspace(context, "create-cleanup-fence");
+  const store = new MemoryStateStore();
+  const factory = new ControlledProcessFactory();
+  const authority = new WorkbarTerminalAuthority({
+    store,
+    processFactory: factory,
+    stopGraceMs: 5,
+  });
+  context.after(() => authority.close());
+
+  const creating = authority.create({ workspacePath, sessionId: "session-1" });
+  await waitFor(async () => factory.spawnCount === 1);
+  let cleanupFinished = false;
+  const cleanup = authority.stopAll().then((stopped) => {
+    cleanupFinished = true;
+    return stopped;
+  });
+  await Promise.resolve();
+  assert.equal(cleanupFinished, false);
+
+  const process = factory.resolveNext(true);
+  const created = await creating;
+  assert.equal(await cleanup, 1);
+  assert.deepEqual(process.signals, ["SIGTERM"]);
+  const persisted = store.records.find((record) => record.resourceId === created.resourceId);
+  assert.equal(persisted?.status, "stopped");
+  assert.equal(persisted?.pid, undefined);
+});
+
+test("Host terminal 清理期间的新 create 进入下一代且不被旧 stopAll 终止", async (context) => {
+  const workspacePath = await createWorkspace(context, "cleanup-reopen-generation");
+  const factory = new ControlledProcessFactory();
+  const authority = new WorkbarTerminalAuthority({
+    store: new MemoryStateStore(),
+    processFactory: factory,
+    stopGraceMs: 100,
+  });
+  context.after(() => authority.close());
+
+  const firstCreating = authority.create({ workspacePath, sessionId: "session-1" });
+  await waitFor(async () => factory.spawnCount === 1);
+  const firstProcess = factory.resolveNext(false);
+  const first = await firstCreating;
+
+  const cleanup = authority.stopAll();
+  await waitFor(async () => firstProcess.signals[0] === "SIGTERM");
+  const reopenedCreating = authority.create({ workspacePath, sessionId: "session-1" });
+  await Promise.resolve();
+  assert.equal(factory.spawnCount, 1, "cleanup 未完成前不得接纳下一代 spawn");
+
+  firstProcess.exit({ signal: "SIGTERM" });
+  assert.equal(await cleanup, 1);
+  await waitFor(async () => factory.spawnCount === 2);
+  const reopenedProcess = factory.resolveNext(false);
+  const reopened = await reopenedCreating;
+  assert.notEqual(reopened.resourceId, first.resourceId);
+  assert.equal(reopened.status, "running");
+  assert.deepEqual(reopenedProcess.signals, [], "旧代 stopAll 不得终止重开后的终端");
 });
 
 test("Host terminal stopAll 只终止 Authority 持有的进程组并持久化终态", async (context) => {
