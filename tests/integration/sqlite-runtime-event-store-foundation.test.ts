@@ -144,6 +144,9 @@ test("EventLog migration installs every additive foundation table", () => {
         "runtime_tool_journal",
         "runtime_transcript_records",
         "runtime_transcript_chunks",
+        "runtime_transcript_projection_state",
+        "runtime_transcript_item_versions",
+        "runtime_transcript_changes",
         "runtime_checkpoint_projection",
         "runtime_eventlog_metadata",
         "runtime_storage_assets",
@@ -154,7 +157,7 @@ test("EventLog migration installs every additive foundation table", () => {
         db
           .prepare("SELECT version FROM operational_schema_migrations WHERE scope = 'sessions'")
           .get()?.version,
-        5,
+        6,
       );
     } finally {
       db.close();

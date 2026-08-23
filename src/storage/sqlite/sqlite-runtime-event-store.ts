@@ -21,8 +21,13 @@ import {
   projectRuntimeModelMessage,
   runtimeEventHasModelHistoryEntry,
 } from "../../engine/runtime-model-message.js";
+import { createToolResultEnvelope } from "../../engine/tool-result-contract.js";
 import type { Message } from "../../schema/message.js";
-import type { DurableTranscriptEvent } from "../../presentation/transcript-event-store.js";
+import { isMessageHiddenFromTranscript } from "../../schema/message.js";
+import type {
+  DurableTranscriptEvent,
+  TranscriptEntryData,
+} from "../../presentation/transcript-event-store.js";
 import { canonicalizeWorkspacePath } from "../../paths/pico-paths.js";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION,
@@ -33,6 +38,7 @@ import {
 } from "../runtime-event.js";
 import {
   RUNTIME_EVENT_STORE_MAX_PAGE_SIZE,
+  RUNTIME_TRANSCRIPT_PROJECTOR_VERSION,
   RuntimeEventStoreHighWaterConflictError,
   RuntimeEventStoreIntegrityError,
   RuntimeEventStoreOwnerFenceError,
@@ -70,6 +76,13 @@ import {
   type RuntimeToolOperation,
   type RuntimeTranscriptPage,
   type RuntimeTranscriptPageOptions,
+  type RuntimeTranscriptAdvancePage,
+  type RuntimeTranscriptAdvancePageOptions,
+  type RuntimeTranscriptProjectedItem,
+  type RuntimeTranscriptProjectionChange,
+  type RuntimeTranscriptProjectionPage,
+  type RuntimeTranscriptProjectionPageOptions,
+  type RuntimeTranscriptProjectionWatermark,
   type RuntimeTranscriptRecordInput,
   type SettleRuntimeToolOperationInput,
   type SettleRuntimeToolOperationResult,
@@ -84,6 +97,16 @@ import { prepareCurrentWorkspaceSqliteStorageSync } from "./workspace-scopes.js"
 const MATERIALIZED_TRANSCRIPT_EVENT_KINDS = new Set<string>(
   RUNTIME_TRANSCRIPT_READ_MODEL_EVENT_KINDS,
 );
+
+/** Client must discard its cached transcript and request a fresh projection page. */
+export class RuntimeTranscriptResetRequiredError extends RuntimeEventStoreIntegrityError {
+  readonly code = "RESET_REQUIRED" as const;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "RuntimeTranscriptResetRequiredError";
+  }
+}
 
 /**
  * SQLite 纪元的会话账本(ADR 24 §4.1,票 02)。
@@ -151,6 +174,13 @@ export class SqliteRuntimeEventStore {
            VALUES (?, 0, ?)`,
         )
         .run(options.sessionId, createdAt);
+      this.lease.database
+        .prepare(
+          `INSERT INTO runtime_transcript_projection_state (
+             session_id, history_epoch, projector_version, through_sequence, change_floor_sequence
+           ) VALUES (?, ?, ?, 0, 0)`,
+        )
+        .run(options.sessionId, randomUUID(), RUNTIME_TRANSCRIPT_PROJECTOR_VERSION);
       const manifest: RuntimeSessionManifest = {
         schemaVersion: 2,
         sessionId: options.sessionId,
@@ -607,6 +637,31 @@ export class SqliteRuntimeEventStore {
 
   async readTranscriptPage(options: RuntimeTranscriptPageOptions): Promise<RuntimeTranscriptPage> {
     return this.read(() => this.readTranscriptPageLocked(options));
+  }
+
+  /** Reads a stable transcript item-version snapshot at one immutable watermark. */
+  async readTranscriptProjectionPage(
+    options: RuntimeTranscriptProjectionPageOptions,
+  ): Promise<RuntimeTranscriptProjectionPage> {
+    return this.write(() => this.readTranscriptProjectionPageLocked(options));
+  }
+
+  /** Reads only durable item changes in (after, through], never the canonical history. */
+  async readTranscriptAdvancePage(
+    options: RuntimeTranscriptAdvancePageOptions,
+  ): Promise<RuntimeTranscriptAdvancePage> {
+    return this.write(() => this.readTranscriptAdvancePageLocked(options));
+  }
+
+  async readTranscriptWatermark(sessionId: string): Promise<RuntimeTranscriptProjectionWatermark> {
+    return this.write(() => {
+      const row = this.readSessionRow(sessionId);
+      if (!row) {
+        throw new RuntimeEventStoreIntegrityError(`Runtime session ${sessionId} does not exist`);
+      }
+      this.ensureTranscriptProjectionCurrentLocked(sessionId, row.last_event_seq);
+      return this.readTranscriptWatermarkLocked(sessionId);
+    });
   }
 
   async appendPlanOperation(
@@ -1801,6 +1856,434 @@ export class SqliteRuntimeEventStore {
       .filter((entry): entry is SqliteSessionCatalogEntry => entry !== undefined);
   }
 
+  private readTranscriptProjectionPageLocked(
+    options: RuntimeTranscriptProjectionPageOptions,
+  ): RuntimeTranscriptProjectionPage {
+    const session = this.readSessionRow(options.sessionId);
+    if (!session) {
+      throw new RuntimeEventStoreIntegrityError(
+        `Runtime session ${options.sessionId} does not exist`,
+      );
+    }
+    this.ensureTranscriptProjectionCurrentLocked(options.sessionId, session.last_event_seq);
+    const current = this.readTranscriptProjectionStateLocked(options.sessionId);
+    const watermark = options.through ?? watermarkFromProjectionState(current);
+    this.assertTranscriptWatermarkReadable(current, watermark, "projection through");
+    const limit = normalizePageLimit(options.limit);
+    const maxBytes = normalizeTranscriptPageBytes(options.maxBytes);
+    const cursor = options.cursor;
+    if (cursor) {
+      if (
+        cursor.historyEpoch !== watermark.historyEpoch ||
+        cursor.projectorVersion !== watermark.projectorVersion ||
+        cursor.throughSequence !== watermark.throughSequence ||
+        cursor.byteOffset !== 0
+      ) {
+        throw new RuntimeTranscriptResetRequiredError(
+          `Runtime session ${options.sessionId} transcript projection cursor is stale`,
+        );
+      }
+    }
+    const params: SQLInputValue[] = [
+      options.sessionId,
+      watermark.throughSequence,
+      watermark.throughSequence,
+    ];
+    let cursorClause = "";
+    if (cursor) {
+      cursorClause =
+        " AND (position_sequence < ? OR (position_sequence = ? AND position_ordinal < ?))";
+      params.push(cursor.positionSequence, cursor.positionSequence, cursor.positionOrdinal);
+    }
+    params.push(limit + 1);
+    const rows = this.lease.database
+      .prepare(
+        `SELECT item_id, item_revision, position_sequence, position_ordinal, payload_json
+         FROM runtime_transcript_item_versions
+         WHERE session_id = ? AND valid_from_sequence <= ?
+           AND (valid_to_sequence IS NULL OR valid_to_sequence > ?)${cursorClause}
+         ORDER BY position_sequence DESC, position_ordinal DESC, item_id DESC
+         LIMIT ?`,
+      )
+      .all(...params) as Array<Record<string, unknown>>;
+    const selected: RuntimeTranscriptProjectedItem[] = [];
+    let bytes = 0;
+    for (const row of rows.slice(0, limit)) {
+      const record = transcriptProjectedItemFromRow(row);
+      const recordBytes = Buffer.byteLength(canonicalJson(record), "utf8");
+      if (selected.length === 0 && recordBytes > maxBytes) {
+        throw new RuntimeEventStoreIntegrityError(
+          `Runtime transcript item ${record.itemId} exceeds the projection page byte budget`,
+        );
+      }
+      if (selected.length > 0 && bytes + recordBytes > maxBytes) break;
+      selected.push(record);
+      bytes += recordBytes;
+    }
+    const hasMore = selected.length < rows.length;
+    const oldest = selected.at(-1);
+    return {
+      watermark,
+      items: selected.toReversed(),
+      ...(hasMore && oldest
+        ? {
+            nextCursor: {
+              ...watermark,
+              positionSequence: oldest.positionSequence,
+              positionOrdinal: oldest.positionOrdinal,
+              byteOffset: 0,
+            },
+          }
+        : {}),
+    };
+  }
+
+  private readTranscriptAdvancePageLocked(
+    options: RuntimeTranscriptAdvancePageOptions,
+  ): RuntimeTranscriptAdvancePage {
+    const session = this.readSessionRow(options.sessionId);
+    if (!session) {
+      throw new RuntimeEventStoreIntegrityError(
+        `Runtime session ${options.sessionId} does not exist`,
+      );
+    }
+    this.ensureTranscriptProjectionCurrentLocked(options.sessionId, session.last_event_seq);
+    const state = this.readTranscriptProjectionStateLocked(options.sessionId);
+    this.assertTranscriptWatermarkReadable(state, options.after, "advance after");
+    this.assertTranscriptWatermarkReadable(state, options.through, "advance through");
+    if (
+      options.after.throughSequence > options.through.throughSequence ||
+      options.after.throughSequence < state.change_floor_sequence
+    ) {
+      throw new RuntimeTranscriptResetRequiredError(
+        `Runtime session ${options.sessionId} transcript change range is unavailable`,
+      );
+    }
+    const limit = normalizePageLimit(options.limit);
+    const maxBytes = normalizeTranscriptPageBytes(options.maxBytes);
+    const cursor = options.cursor;
+    let changeSequence = options.after.throughSequence;
+    let ordinal = -1;
+    if (cursor) {
+      if (
+        cursor.historyEpoch !== options.after.historyEpoch ||
+        cursor.projectorVersion !== options.after.projectorVersion ||
+        cursor.fromSequence !== options.after.throughSequence ||
+        cursor.throughSequence !== options.through.throughSequence ||
+        cursor.byteOffset !== 0
+      ) {
+        throw new RuntimeTranscriptResetRequiredError(
+          `Runtime session ${options.sessionId} transcript change cursor is stale`,
+        );
+      }
+      changeSequence = cursor.changeSequence;
+      ordinal = cursor.ordinal;
+    }
+    const rows = this.lease.database
+      .prepare(
+        `SELECT change_sequence, change_ordinal, op, item_id, item_revision, payload_json
+         FROM runtime_transcript_changes
+         WHERE session_id = ? AND change_sequence > ? AND change_sequence <= ?
+           AND (change_sequence > ? OR (change_sequence = ? AND change_ordinal > ?))
+         ORDER BY change_sequence ASC, change_ordinal ASC
+         LIMIT ?`,
+      )
+      .all(
+        options.sessionId,
+        options.after.throughSequence,
+        options.through.throughSequence,
+        changeSequence,
+        changeSequence,
+        ordinal,
+        limit + 1,
+      ) as Array<Record<string, unknown>>;
+    const selected: Array<{
+      readonly sequence: number;
+      readonly ordinal: number;
+      readonly change: RuntimeTranscriptProjectionChange;
+    }> = [];
+    let bytes = 0;
+    for (const row of rows.slice(0, limit)) {
+      const decoded = transcriptChangeFromRow(row);
+      const recordBytes = Buffer.byteLength(canonicalJson(decoded.change), "utf8");
+      if (selected.length === 0 && recordBytes > maxBytes) {
+        throw new RuntimeEventStoreIntegrityError(
+          `Runtime transcript change at ${decoded.sequence}:${decoded.ordinal} exceeds the page byte budget`,
+        );
+      }
+      if (selected.length > 0 && bytes + recordBytes > maxBytes) break;
+      selected.push(decoded);
+      bytes += recordBytes;
+    }
+    const hasMore = selected.length < rows.length;
+    const last = selected.at(-1);
+    return {
+      after: options.after,
+      through: options.through,
+      changes: selected.map(({ change }) => change),
+      ...(hasMore && last
+        ? {
+            nextCursor: {
+              historyEpoch: options.after.historyEpoch,
+              projectorVersion: options.after.projectorVersion,
+              fromSequence: options.after.throughSequence,
+              throughSequence: options.through.throughSequence,
+              changeSequence: last.sequence,
+              ordinal: last.ordinal,
+              byteOffset: 0,
+            },
+          }
+        : {}),
+    };
+  }
+
+  private ensureTranscriptProjectionCurrentLocked(sessionId: string, ledgerHead: number): void {
+    const row = this.lease.database
+      .prepare(
+        `SELECT session_id, history_epoch, projector_version, through_sequence, change_floor_sequence
+         FROM runtime_transcript_projection_state WHERE session_id = ?`,
+      )
+      .get(sessionId) as Record<string, unknown> | undefined;
+    if (row !== undefined) {
+      if (
+        row["projector_version"] === RUNTIME_TRANSCRIPT_PROJECTOR_VERSION &&
+        row["through_sequence"] === ledgerHead
+      ) {
+        return;
+      }
+    }
+    this.rebuildTranscriptProjectionLocked(sessionId, ledgerHead);
+  }
+
+  private rebuildTranscriptProjectionLocked(sessionId: string, ledgerHead: number): void {
+    this.lease.database
+      .prepare("DELETE FROM runtime_transcript_changes WHERE session_id = ?")
+      .run(sessionId);
+    this.lease.database
+      .prepare("DELETE FROM runtime_transcript_item_versions WHERE session_id = ?")
+      .run(sessionId);
+    this.lease.database
+      .prepare("DELETE FROM runtime_transcript_projection_state WHERE session_id = ?")
+      .run(sessionId);
+    this.lease.database
+      .prepare(
+        `INSERT INTO runtime_transcript_projection_state (
+           session_id, history_epoch, projector_version, through_sequence, change_floor_sequence
+         ) VALUES (?, ?, ?, 0, 0)`,
+      )
+      .run(sessionId, randomUUID(), RUNTIME_TRANSCRIPT_PROJECTOR_VERSION);
+    const rows = this.lease.database
+      .prepare(
+        `SELECT event_id, session_id, event_seq, payload_json, at FROM runtime_events
+         WHERE session_id = ? AND event_seq <= ? ORDER BY event_seq ASC`,
+      )
+      .all(sessionId, ledgerHead) as Array<Record<string, unknown>>;
+    for (const raw of rows) {
+      const row = assertEventRow(raw);
+      this.projectTranscriptEventLocked(decodeStoredEvent(row.payload_json), row.event_seq);
+    }
+    // A rebuild establishes a new epoch. Its replay-generated changes are not a valid
+    // suffix for any former client watermark, so force a fresh bootstrap at this head.
+    this.lease.database
+      .prepare("DELETE FROM runtime_transcript_changes WHERE session_id = ?")
+      .run(sessionId);
+    this.lease.database
+      .prepare(
+        `UPDATE runtime_transcript_projection_state
+         SET through_sequence = ?, change_floor_sequence = ? WHERE session_id = ?`,
+      )
+      .run(ledgerHead, ledgerHead, sessionId);
+  }
+
+  private projectTranscriptEventLocked(event: RuntimeEvent, sequence: number): void {
+    if (
+      event.kind === "transcript.event.recorded" &&
+      event.data.event.type === "transcript.truncated"
+    ) {
+      const rows = this.lease.database
+        .prepare(
+          `SELECT item_id FROM runtime_transcript_item_versions
+           WHERE session_id = ? AND valid_to_sequence IS NULL
+           ORDER BY position_sequence ASC, position_ordinal ASC, item_id ASC`,
+        )
+        .all(event.sessionId) as Array<{ item_id: string }>;
+      rows.slice(event.data.event.entryCount).forEach((row, ordinal) => {
+        this.removeTranscriptItemLocked(event.sessionId, sequence, ordinal, row.item_id);
+      });
+      return;
+    }
+    const mutations = transcriptMutationsForEvent(event, sequence, (itemId) =>
+      this.readCurrentTranscriptItemLocked(event.sessionId, itemId),
+    );
+    mutations.forEach((mutation, ordinal) => {
+      if (mutation.op === "remove") {
+        this.removeTranscriptItemLocked(event.sessionId, sequence, ordinal, mutation.itemId);
+      } else {
+        this.upsertTranscriptItemLocked(
+          event.sessionId,
+          sequence,
+          ordinal,
+          mutation.itemId,
+          mutation.positionSequence,
+          mutation.positionOrdinal,
+          mutation.payload,
+        );
+      }
+    });
+  }
+
+  private readCurrentTranscriptItemLocked(
+    sessionId: string,
+    itemId: string,
+  ): RuntimeTranscriptProjectedItem | undefined {
+    const row = this.lease.database
+      .prepare(
+        `SELECT item_id, item_revision, position_sequence, position_ordinal, payload_json
+         FROM runtime_transcript_item_versions
+         WHERE session_id = ? AND item_id = ? AND valid_to_sequence IS NULL`,
+      )
+      .get(sessionId, itemId) as Record<string, unknown> | undefined;
+    return row === undefined ? undefined : transcriptProjectedItemFromRow(row);
+  }
+
+  private upsertTranscriptItemLocked(
+    sessionId: string,
+    sequence: number,
+    ordinal: number,
+    itemId: string,
+    positionSequence: number,
+    positionOrdinal: number,
+    payload: unknown,
+  ): void {
+    const payloadJson = canonicalJson(payload);
+    const digest = createHash("sha256").update(payloadJson).digest("hex");
+    const current = this.readCurrentTranscriptItemLocked(sessionId, itemId);
+    if (
+      current &&
+      current.positionSequence === positionSequence &&
+      current.positionOrdinal === positionOrdinal &&
+      canonicalJson(current.payload) === payloadJson
+    ) {
+      return;
+    }
+    if (current) {
+      this.lease.database
+        .prepare(
+          `UPDATE runtime_transcript_item_versions SET valid_to_sequence = ?
+           WHERE session_id = ? AND item_id = ? AND valid_to_sequence IS NULL`,
+        )
+        .run(sequence, sessionId, itemId);
+    }
+    const maxRevision = this.lease.database
+      .prepare(
+        `SELECT COALESCE(MAX(item_revision), 0) AS revision
+         FROM runtime_transcript_item_versions WHERE session_id = ? AND item_id = ?`,
+      )
+      .get(sessionId, itemId) as { revision: number };
+    const itemRevision = maxRevision.revision + 1;
+    this.lease.database
+      .prepare(
+        `INSERT INTO runtime_transcript_item_versions (
+           session_id, item_id, item_revision, valid_from_sequence, valid_to_sequence,
+           position_sequence, position_ordinal, payload_json, payload_digest
+         ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
+      )
+      .run(
+        sessionId,
+        itemId,
+        itemRevision,
+        sequence,
+        positionSequence,
+        positionOrdinal,
+        payloadJson,
+        digest,
+      );
+    const record: RuntimeTranscriptProjectedItem = {
+      itemId,
+      itemRevision,
+      positionSequence,
+      positionOrdinal,
+      payload,
+    };
+    this.lease.database
+      .prepare(
+        `INSERT INTO runtime_transcript_changes (
+           session_id, change_sequence, change_ordinal, op, item_id, item_revision, payload_json
+         ) VALUES (?, ?, ?, 'upsert', ?, ?, ?)`,
+      )
+      .run(sessionId, sequence, ordinal, itemId, itemRevision, canonicalJson(record));
+  }
+
+  private removeTranscriptItemLocked(
+    sessionId: string,
+    sequence: number,
+    ordinal: number,
+    itemId: string,
+  ): void {
+    const current = this.readCurrentTranscriptItemLocked(sessionId, itemId);
+    if (!current) return;
+    this.lease.database
+      .prepare(
+        `UPDATE runtime_transcript_item_versions SET valid_to_sequence = ?
+         WHERE session_id = ? AND item_id = ? AND valid_to_sequence IS NULL`,
+      )
+      .run(sequence, sessionId, itemId);
+    this.lease.database
+      .prepare(
+        `INSERT INTO runtime_transcript_changes (
+           session_id, change_sequence, change_ordinal, op, item_id, item_revision, payload_json
+         ) VALUES (?, ?, ?, 'remove', ?, ?, NULL)`,
+      )
+      .run(sessionId, sequence, ordinal, itemId, current.itemRevision);
+  }
+
+  private setTranscriptProjectionThroughLocked(sessionId: string, throughSequence: number): void {
+    this.lease.database
+      .prepare(
+        `UPDATE runtime_transcript_projection_state SET through_sequence = ?
+         WHERE session_id = ?`,
+      )
+      .run(throughSequence, sessionId);
+  }
+
+  private readTranscriptProjectionStateLocked(sessionId: string): TranscriptProjectionStateRow {
+    const row = this.lease.database
+      .prepare(
+        `SELECT session_id, history_epoch, projector_version, through_sequence, change_floor_sequence
+         FROM runtime_transcript_projection_state WHERE session_id = ?`,
+      )
+      .get(sessionId) as Record<string, unknown> | undefined;
+    if (!row) {
+      throw new RuntimeEventStoreIntegrityError(
+        `Runtime session ${sessionId} transcript projection state is missing`,
+      );
+    }
+    return transcriptProjectionStateFromRow(row);
+  }
+
+  private readTranscriptWatermarkLocked(sessionId: string): RuntimeTranscriptProjectionWatermark {
+    return watermarkFromProjectionState(this.readTranscriptProjectionStateLocked(sessionId));
+  }
+
+  private assertTranscriptWatermarkReadable(
+    state: TranscriptProjectionStateRow,
+    watermark: RuntimeTranscriptProjectionWatermark,
+    field: string,
+  ): void {
+    if (
+      watermark.historyEpoch !== state.history_epoch ||
+      watermark.projectorVersion !== RUNTIME_TRANSCRIPT_PROJECTOR_VERSION ||
+      !Number.isSafeInteger(watermark.throughSequence) ||
+      watermark.throughSequence < 0 ||
+      watermark.throughSequence < state.change_floor_sequence ||
+      watermark.throughSequence > state.through_sequence
+    ) {
+      throw new RuntimeTranscriptResetRequiredError(
+        `Runtime session ${state.session_id} ${field} watermark is unavailable`,
+      );
+    }
+  }
+
   private appendBatchLocked(
     canonicalEvents: readonly RuntimeEvent[],
     options: AppendRuntimeEventBatchOptions,
@@ -1842,6 +2325,9 @@ export class SqliteRuntimeEventStore {
       }
     }
     this.assertOwnerFenceLocked([...contexts.keys()], options.ownerFence);
+    for (const [sessionId, context] of contexts) {
+      this.ensureTranscriptProjectionCurrentLocked(sessionId, context.row.last_event_seq);
+    }
 
     if (options.planOperation) {
       const { operationId, fingerprint } = options.planOperation;
@@ -1870,13 +2356,16 @@ export class SqliteRuntimeEventStore {
               `Runtime event ID ${event.eventId} is already bound to another payload`,
             );
           }
-          return appendResultFor(
-            event.sessionId,
-            existing.event_seq,
-            existing.event_id,
-            existing.at,
-            false,
-          );
+          return {
+            ...appendResultFor(
+              event.sessionId,
+              existing.event_seq,
+              existing.event_id,
+              existing.at,
+              false,
+            ),
+            transcriptWatermark: this.readTranscriptWatermarkLocked(event.sessionId),
+          };
         });
       }
     }
@@ -1928,13 +2417,16 @@ export class SqliteRuntimeEventStore {
     if (!hasNewEvent) {
       return canonicalEvents.map((event) => {
         const existing = existingRows.get(event.eventId)!;
-        return appendResultFor(
-          event.sessionId,
-          existing.event_seq,
-          existing.event_id,
-          existing.at,
-          false,
-        );
+        return {
+          ...appendResultFor(
+            event.sessionId,
+            existing.event_seq,
+            existing.event_id,
+            existing.at,
+            false,
+          ),
+          transcriptWatermark: this.readTranscriptWatermarkLocked(event.sessionId),
+        };
       });
     }
 
@@ -2065,6 +2557,7 @@ export class SqliteRuntimeEventStore {
           message,
         );
       }
+      this.projectTranscriptEventLocked(event, sequence);
       // 与旧 store 的批内语义对齐:本批刚插入的事件立刻进入幂等视图,
       // 同批后续同 id 同载荷副本走重放分支(inserted:false,同 sequence),
       // 而不是撞 event_id 主键约束以原始 SqliteError 失败。
@@ -2106,13 +2599,17 @@ export class SqliteRuntimeEventStore {
         eventCount,
         storageBytes,
       });
+      this.setTranscriptProjectionThroughLocked(sessionId, lastEventSeq);
     }
     for (const [sessionId, parentSessionId] of batchForkParent) {
       if (contexts.get(sessionId)!.row.fork_parent_session_id === null) {
         setForkParent.run(parentSessionId, sessionId);
       }
     }
-    return results;
+    return results.map((result) => ({
+      ...result,
+      transcriptWatermark: this.readTranscriptWatermarkLocked(result.cursor.logId),
+    }));
   }
 
   private readOwnerFenceEpochLocked(sessionId: string): number {
@@ -2984,6 +3481,10 @@ async function arbitrateDurableAppendFailure(
   const rows = await store.readEventRowsByEventIds([
     ...new Set(events.map((event) => event.eventId)),
   ]);
+  const watermarks = new Map<string, RuntimeTranscriptProjectionWatermark>();
+  for (const sessionId of new Set(events.map((event) => event.sessionId))) {
+    watermarks.set(sessionId, await store.readTranscriptWatermark(sessionId));
+  }
   const results: RuntimeEventStoreAppendResult[] = [];
   for (const event of events) {
     const row = rows.get(event.eventId);
@@ -2992,7 +3493,10 @@ async function arbitrateDurableAppendFailure(
     if (row.payloadJson !== canonicalJson(canonicalizeRuntimeEvent(event))) {
       return undefined;
     }
-    results.push(appendResultFor(event.sessionId, row.eventSeq, row.eventId, row.at, false));
+    results.push({
+      ...appendResultFor(event.sessionId, row.eventSeq, row.eventId, row.at, false),
+      transcriptWatermark: watermarks.get(event.sessionId),
+    });
   }
   return results;
 }
@@ -3062,6 +3566,462 @@ interface RuntimeEventRow {
   readonly event_seq: number;
   readonly payload_json: string;
   readonly at: string;
+}
+
+interface TranscriptProjectionStateRow {
+  readonly session_id: string;
+  readonly history_epoch: string;
+  readonly projector_version: typeof RUNTIME_TRANSCRIPT_PROJECTOR_VERSION;
+  readonly through_sequence: number;
+  readonly change_floor_sequence: number;
+}
+
+type TranscriptItemMutation =
+  | {
+      readonly op: "upsert";
+      readonly itemId: string;
+      readonly positionSequence: number;
+      readonly positionOrdinal: number;
+      readonly payload: unknown;
+    }
+  | { readonly op: "remove"; readonly itemId: string };
+
+function transcriptMutationsForEvent(
+  event: RuntimeEvent,
+  sequence: number,
+  current: (itemId: string) => RuntimeTranscriptProjectedItem | undefined,
+): readonly TranscriptItemMutation[] {
+  if (event.kind === "message.committed") {
+    const message = event.data.message;
+    if (
+      message.role === "system" ||
+      message.toolCallId !== undefined ||
+      isMessageHiddenFromTranscript(message)
+    ) {
+      return [];
+    }
+    const displayText =
+      message.role === "user" && message.providerData?.["picoKind"] === "desktop_user_input"
+        ? message.providerData["displayText"]
+        : undefined;
+    const content =
+      typeof displayText === "string" && displayText.trim()
+        ? displayText.trim()
+        : message.content.trim();
+    const mutations: TranscriptItemMutation[] = [];
+    if (message.role === "user" && content) {
+      const itemId = `message:${event.eventId}:user`;
+      mutations.push({
+        op: "upsert",
+        itemId,
+        positionSequence: sequence,
+        positionOrdinal: 0,
+        payload: { id: itemId, kind: "userMessage", content },
+      });
+      return mutations;
+    }
+    const reasoning = message.role === "assistant" ? message.reasoning?.trim() : undefined;
+    if (reasoning) {
+      const itemId = `message:${event.turnId}:thinking`;
+      mutations.push({
+        op: "upsert",
+        itemId,
+        positionSequence: sequence,
+        positionOrdinal: 0,
+        payload: {
+          id: itemId,
+          kind: "thinking",
+          content: reasoning,
+          runId: event.runId,
+          turnId: event.turnId,
+        },
+      });
+    }
+    if (message.role === "assistant" && content) {
+      const itemId = `message:${event.turnId}:assistant`;
+      mutations.push({
+        op: "upsert",
+        itemId,
+        positionSequence: sequence,
+        positionOrdinal: 1,
+        payload: {
+          id: itemId,
+          kind: "assistantMessage",
+          content,
+          runId: event.runId,
+          turnId: event.turnId,
+        },
+      });
+    }
+    return mutations;
+  }
+
+  if (event.kind === "tool.result.recorded") {
+    const itemId = `tool:${event.refs.toolCallId}`;
+    const prior = current(itemId);
+    const priorPayload = asJsonRecord(prior?.payload);
+    return [
+      {
+        op: "upsert",
+        itemId,
+        positionSequence: prior?.positionSequence ?? sequence,
+        positionOrdinal: prior?.positionOrdinal ?? 0,
+        payload: {
+          ...(priorPayload ?? {}),
+          id: itemId,
+          kind: "tool",
+          name:
+            typeof priorPayload?.["name"] === "string" ? priorPayload["name"] : event.data.toolName,
+          args: typeof priorPayload?.["args"] === "string" ? priorPayload["args"] : "",
+          status: event.data.status === "succeeded" ? "success" : "error",
+          ...(typeof priorPayload?.["summary"] === "string"
+            ? { summary: priorPayload["summary"] }
+            : {}),
+          result: createToolResultEnvelope({
+            toolCallId: event.refs.toolCallId,
+            toolName: event.data.toolName,
+            status: event.data.status,
+            body: event.data.body,
+            projection: event.data.projection,
+            ...(event.refs.evidence ? { evidence: event.refs.evidence } : {}),
+          }),
+          data: {
+            ...(asJsonRecord(priorPayload?.["data"]) ?? {}),
+            toolCallId: event.refs.toolCallId,
+          },
+        },
+      },
+    ];
+  }
+
+  if (event.kind !== "transcript.event.recorded") return [];
+  const transcript = event.data.event;
+  switch (transcript.type) {
+    case "entry.appended": {
+      const payload = conversationPayloadForTranscriptEntry(
+        `entry:${transcript.entryId}`,
+        transcript.entry,
+        transcript.createdAt,
+      );
+      return payload
+        ? [
+            {
+              op: "upsert",
+              itemId: `entry:${transcript.entryId}`,
+              positionSequence: sequence,
+              positionOrdinal: 0,
+              payload,
+            },
+          ]
+        : [];
+    }
+    case "assistant.stream.started": {
+      if (transcript.entryKind !== "thinking" || !transcript.delta.trim()) return [];
+      const itemId = `entry:${transcript.entryId}`;
+      return [
+        {
+          op: "upsert",
+          itemId,
+          positionSequence: sequence,
+          positionOrdinal: 0,
+          payload: {
+            id: itemId,
+            kind: "thinking",
+            content: transcript.delta,
+            at: transcript.createdAt,
+          },
+        },
+      ];
+    }
+    case "assistant.stream.completed":
+    case "assistant.stream.interrupted": {
+      const itemId = `entry:${transcript.entryId}`;
+      const prior = current(itemId);
+      if (!prior || transcript.content === undefined || !transcript.content.trim()) return [];
+      const priorPayload = asJsonRecord(prior.payload);
+      if (priorPayload?.["kind"] !== "thinking") return [];
+      return [
+        {
+          op: "upsert",
+          itemId,
+          positionSequence: prior.positionSequence,
+          positionOrdinal: prior.positionOrdinal,
+          payload: { ...priorPayload, content: transcript.content },
+        },
+      ];
+    }
+    case "assistant.response.suppressed":
+      return [{ op: "remove", itemId: `entry:${transcript.entryId}` }];
+    case "tool.started": {
+      const itemId = `tool:${transcript.toolCallId}`;
+      return [
+        {
+          op: "upsert",
+          itemId,
+          positionSequence: sequence,
+          positionOrdinal: 0,
+          payload: {
+            id: itemId,
+            kind: "tool",
+            name: transcript.name,
+            args: transcript.args,
+            status: "running",
+            at: transcript.createdAt,
+            data: { toolCallId: transcript.toolCallId, entryId: transcript.entryId },
+          },
+        },
+      ];
+    }
+    case "tool.approval.requested": {
+      const itemId = `tool:${transcript.toolCallId}`;
+      const prior = current(itemId);
+      const priorPayload = asJsonRecord(prior?.payload);
+      if (!prior || !priorPayload) return [];
+      return [
+        {
+          op: "upsert",
+          itemId,
+          positionSequence: prior.positionSequence,
+          positionOrdinal: prior.positionOrdinal,
+          payload: { ...priorPayload, summary: transcript.summary },
+        },
+      ];
+    }
+    case "subagent.activity.updated": {
+      const itemId = `subagent:${transcript.activityId}`;
+      const prior = current(itemId);
+      return [
+        {
+          op: "upsert",
+          itemId,
+          positionSequence: prior?.positionSequence ?? sequence,
+          positionOrdinal: prior?.positionOrdinal ?? 0,
+          payload: {
+            id: itemId,
+            kind: "subagent",
+            ...(transcript.activity.agentName ? { name: transcript.activity.agentName } : {}),
+            title: transcript.activity.agentName
+              ? `${transcript.activity.agentName}: ${transcript.activity.task}`
+              : transcript.activity.task,
+            ...((transcript.activity.summary ?? transcript.activity.currentAction)
+              ? { detail: transcript.activity.summary ?? transcript.activity.currentAction }
+              : {}),
+            state: transcript.activity.status,
+            at: transcript.createdAt,
+            data: { activityId: transcript.activityId, mode: transcript.activity.mode },
+          },
+        },
+      ];
+    }
+    case "subagent.activity.archived":
+      return [{ op: "remove", itemId: `subagent:${transcript.activityId}` }];
+    case "transcript.truncated":
+      return [];
+  }
+}
+
+function conversationPayloadForTranscriptEntry(
+  itemId: string,
+  entry: TranscriptEntryData,
+  at: number,
+): unknown | undefined {
+  switch (entry.kind) {
+    case "logo":
+    case "user":
+    case "assistant":
+    case "tool":
+      return undefined;
+    case "system":
+      return entry.content.trim()
+        ? { id: itemId, kind: "systemNotice", content: entry.content, at }
+        : undefined;
+    case "error":
+      return { id: itemId, kind: "error", content: entry.message, at };
+    case "thinking":
+      return entry.content?.trim()
+        ? { id: itemId, kind: "thinking", content: entry.content, at }
+        : undefined;
+    case "skill":
+      return {
+        id: itemId,
+        kind: "skill",
+        name: entry.name,
+        args: entry.args,
+        trigger: entry.trigger,
+        at,
+      };
+    case "plan":
+      return {
+        id: itemId,
+        kind: "plan",
+        title: entry.title,
+        ...(entry.detail ? { detail: entry.detail } : {}),
+        ...(entry.state ? { state: entry.state } : {}),
+        at,
+      };
+    case "approval":
+    case "prompt":
+    case "changes":
+      return {
+        id: itemId,
+        kind: entry.kind,
+        title: entry.title,
+        ...(entry.detail ? { detail: entry.detail } : {}),
+        ...(entry.state ? { state: entry.state } : {}),
+        ...(entry.data ? { data: entry.data } : {}),
+        at,
+      };
+    case "run-boundary":
+      return {
+        id: itemId,
+        kind: "runBoundary",
+        runId: entry.runId,
+        status: entry.status,
+        startedAt: entry.startedAt,
+        ...(entry.finishedAt === undefined ? {} : { finishedAt: entry.finishedAt }),
+        ...(entry.error ? { error: entry.error } : {}),
+      };
+    case "subagent-activity":
+      return {
+        id: itemId,
+        kind: "subagent",
+        ...(entry.agentName ? { name: entry.agentName } : {}),
+        title: entry.agentName ? `${entry.agentName}: ${entry.task}` : entry.task,
+        ...((entry.summary ?? entry.currentAction)
+          ? { detail: entry.summary ?? entry.currentAction }
+          : {}),
+        state: entry.status,
+        at,
+        data: { mode: entry.mode },
+      };
+  }
+}
+
+function asJsonRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function transcriptProjectionStateFromRow(
+  row: Record<string, unknown>,
+): TranscriptProjectionStateRow {
+  const projectorVersion = requirePositiveInteger(
+    row["projector_version"],
+    "runtime_transcript_projection_state.projector_version",
+  );
+  if (projectorVersion !== RUNTIME_TRANSCRIPT_PROJECTOR_VERSION) {
+    throw new RuntimeEventStoreIntegrityError(
+      "SQLite transcript projection projector_version is unsupported",
+    );
+  }
+  return {
+    session_id: requireString(row["session_id"], "runtime_transcript_projection_state.session_id"),
+    history_epoch: requireString(
+      row["history_epoch"],
+      "runtime_transcript_projection_state.history_epoch",
+    ),
+    projector_version: projectorVersion,
+    through_sequence: requireSafeInteger(
+      row["through_sequence"],
+      "runtime_transcript_projection_state.through_sequence",
+    ),
+    change_floor_sequence: requireSafeInteger(
+      row["change_floor_sequence"],
+      "runtime_transcript_projection_state.change_floor_sequence",
+    ),
+  };
+}
+
+function watermarkFromProjectionState(
+  state: TranscriptProjectionStateRow,
+): RuntimeTranscriptProjectionWatermark {
+  return {
+    historyEpoch: state.history_epoch,
+    projectorVersion: state.projector_version,
+    throughSequence: state.through_sequence,
+  };
+}
+
+function transcriptProjectedItemFromRow(
+  row: Record<string, unknown>,
+): RuntimeTranscriptProjectedItem {
+  return {
+    itemId: requireString(row["item_id"], "runtime_transcript_item_versions.item_id"),
+    itemRevision: requirePositiveInteger(
+      row["item_revision"],
+      "runtime_transcript_item_versions.item_revision",
+    ),
+    positionSequence: requireSafeInteger(
+      row["position_sequence"],
+      "runtime_transcript_item_versions.position_sequence",
+    ),
+    positionOrdinal: requireSafeInteger(
+      row["position_ordinal"],
+      "runtime_transcript_item_versions.position_ordinal",
+    ),
+    payload: decodeProjectionJson(
+      row["payload_json"],
+      "runtime_transcript_item_versions.payload_json",
+    ),
+  };
+}
+
+function transcriptChangeFromRow(row: Record<string, unknown>): {
+  readonly sequence: number;
+  readonly ordinal: number;
+  readonly change: RuntimeTranscriptProjectionChange;
+} {
+  const sequence = requirePositiveInteger(
+    row["change_sequence"],
+    "runtime_transcript_changes.change_sequence",
+  );
+  const ordinal = requireSafeInteger(
+    row["change_ordinal"],
+    "runtime_transcript_changes.change_ordinal",
+  );
+  const itemId = requireString(row["item_id"], "runtime_transcript_changes.item_id");
+  const itemRevision = requirePositiveInteger(
+    row["item_revision"],
+    "runtime_transcript_changes.item_revision",
+  );
+  if (row["op"] === "remove") {
+    return { sequence, ordinal, change: { op: "remove", itemId, itemRevision } };
+  }
+  if (row["op"] !== "upsert") {
+    throw new RuntimeEventStoreIntegrityError("SQLite transcript change op is invalid");
+  }
+  const decoded = decodeProjectionJson(
+    row["payload_json"],
+    "runtime_transcript_changes.payload_json",
+  );
+  const record = asJsonRecord(decoded);
+  if (!record) {
+    throw new RuntimeEventStoreIntegrityError("SQLite transcript upsert record is invalid");
+  }
+  return {
+    sequence,
+    ordinal,
+    change: {
+      op: "upsert",
+      record: {
+        itemId: requireString(record["itemId"], "runtime_transcript_changes.record.itemId"),
+        itemRevision: requirePositiveInteger(
+          record["itemRevision"],
+          "runtime_transcript_changes.record.itemRevision",
+        ),
+        positionSequence: requireSafeInteger(
+          record["positionSequence"],
+          "runtime_transcript_changes.record.positionSequence",
+        ),
+        positionOrdinal: requireSafeInteger(
+          record["positionOrdinal"],
+          "runtime_transcript_changes.record.positionOrdinal",
+        ),
+        payload: record["payload"],
+      },
+    },
+  };
 }
 
 interface SessionAppendContext {
@@ -3403,6 +4363,13 @@ function normalizePageLimit(value = RUNTIME_EVENT_STORE_MAX_PAGE_SIZE): number {
     throw new Error(
       `Runtime event store page limit must be between 1 and ${RUNTIME_EVENT_STORE_MAX_PAGE_SIZE}`,
     );
+  }
+  return value;
+}
+
+function normalizeTranscriptPageBytes(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new Error("Runtime transcript page maxBytes must be a positive safe integer");
   }
   return value;
 }
