@@ -12,6 +12,7 @@ import { configureAutoUpdates } from "./updater.js";
 import { installApplicationMenu } from "./menu.js";
 import { sleepForRetry } from "../../../../src/provider/retry.js";
 import { createEmbeddedBrowserAuthority } from "./browser-manager.js";
+import { createDesktopTerminalCleanupFence } from "./daemon-controller.js";
 
 let mainWindow: BrowserWindow | undefined;
 let disposeIpc: (() => void) | undefined;
@@ -38,6 +39,19 @@ const requestDesktopShutdown = (exitCode?: number): void => {
   if (exitCode !== undefined) process.exitCode = exitCode;
   lifecycle.markQuitting();
   app.quit();
+};
+const stopAllDesktopTerminals = async (): Promise<void> => {
+  await runtime.request("terminal.stopAll", {});
+};
+const terminalCleanupFence = createDesktopTerminalCleanupFence(
+  { stopAll: stopAllDesktopTerminals },
+  () => app.quit(),
+  (error) => console.error("Pico desktop terminal cleanup failed", error),
+);
+const releaseDesktopTerminalsBestEffort = (): void => {
+  void stopAllDesktopTerminals().catch((error: unknown) => {
+    console.error("Pico desktop terminal release failed", error);
+  });
 };
 
 // Runtime 连接监督（3-C 自动恢复）：daemon 中途死亡时 subscription 重连只在
@@ -67,10 +81,11 @@ if (!app.requestSingleInstanceLock()) {
   requestDesktopShutdown();
 } else {
   app.on("second-instance", () => lifecycle.showWindow());
-  app.on("before-quit", () => {
+  app.on("before-quit", (event) => {
     // daemon 由 kernel 承载独立常驻（cron 调度依赖），本 app 不拥有其生命周期，
-    // quit 无需等待 daemon 关停——直接放行。
+    // 但 Workbar Terminal 不跨 Desktop 重启恢复，必须先释放其进程组。
     lifecycle.markQuitting();
+    terminalCleanupFence(event);
   });
   app.on("will-quit", () => {
     stopRuntimeProbe?.();
@@ -142,7 +157,9 @@ async function openMainWindow(): Promise<void> {
     shouldKeepInBackground: () => lifecycle.shouldKeepInBackground(),
     onClosed: () => {
       mainWindow = undefined;
+      if (!lifecycle.isQuitting()) releaseDesktopTerminalsBestEffort();
     },
+    onRendererGone: releaseDesktopTerminalsBestEffort,
   });
 }
 

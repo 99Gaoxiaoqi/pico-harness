@@ -1162,6 +1162,11 @@ export type RuntimeMethodMap = {
     };
     readonly result: { readonly detached: true };
   };
+  /** Host-only lifecycle fence; intentionally omitted from DESKTOP_RUNTIME_METHODS. */
+  readonly "terminal.stopAll": {
+    readonly params: EmptyParams;
+    readonly result: { readonly stopped: number };
+  };
   readonly "sideChat.create": {
     readonly params: WorkspaceParams & {
       readonly sourceSessionId: SessionId;
@@ -1984,6 +1989,7 @@ export const RUNTIME_METHODS = [
   "terminal.resize",
   "terminal.stop",
   "terminal.detach",
+  "terminal.stopAll",
   "sideChat.create",
   "sideChat.close",
   "session.settings.update",
@@ -3346,6 +3352,7 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
     terminalId: boundedNonEmptyStringParam(512),
     resourceEpoch: boundedNonEmptyStringParam(512),
   }),
+  "terminal.stopAll": noParams,
   "sideChat.create": exactParamShape({
     workspacePath: stringParam,
     sourceSessionId: stringParam,
