@@ -8,6 +8,8 @@ import { test } from "node:test";
 import {
   createDesktopDaemonShutdownFence,
   createDesktopTerminalCleanupFence,
+  DesktopTerminalGenerationController,
+  isDesktopRuntimeInvocationAllowed,
   type DesktopDaemonShutdownFenceOptions,
 } from "../../apps/desktop/src/main/daemon-controller.js";
 import {
@@ -722,6 +724,57 @@ test("Desktop terminal cleanup fence blocks repeated quit until terminal groups 
   assert.equal(timers.cleared, true);
   fence({ preventDefault: () => prevented++ });
   assert.equal(prevented, 2, "cleanup 完成后的第二次 app.quit 必须放行");
+});
+
+test("Desktop 退出代际拒绝新的 terminal.create 但允许终态操作", () => {
+  assert.equal(isDesktopRuntimeInvocationAllowed("terminal.create", false), true);
+  assert.equal(isDesktopRuntimeInvocationAllowed("terminal.create", true), false);
+  assert.equal(isDesktopRuntimeInvocationAllowed("terminal.create", false, false), false);
+  assert.equal(isDesktopRuntimeInvocationAllowed("terminal.stop", true), true);
+});
+
+test("Desktop 窗口关闭清理完成后才允许重开代际", async () => {
+  const controller = new DesktopTerminalGenerationController();
+  const cleanupRelease = deferred();
+  let resumeCount = 0;
+  const cleanup = controller.cleanup(() => cleanupRelease.promise);
+  const opening = controller.open(async () => {
+    resumeCount++;
+  });
+
+  await waitForImmediate();
+  assert.equal(controller.isCreateAllowed(), false);
+  assert.equal(resumeCount, 0, "旧窗口 cleanup 完成前不得 resume 新窗口");
+  cleanupRelease.resolve();
+  await cleanup;
+  await opening;
+  assert.equal(resumeCount, 1);
+  assert.equal(controller.isCreateAllowed(), true);
+});
+
+test("Desktop 打开过程中再次退出不会被迟到 resume 解封", async () => {
+  const controller = new DesktopTerminalGenerationController();
+  const resumeEntered = deferred();
+  const resumeRelease = deferred();
+  const cleanupEntered = deferred();
+  const cleanupRelease = deferred();
+  const opening = controller.open(async () => {
+    resumeEntered.resolve();
+    await resumeRelease.promise;
+  });
+  await resumeEntered.promise;
+  const cleanup = controller.cleanup(async () => {
+    cleanupEntered.resolve();
+    await cleanupRelease.promise;
+  });
+
+  resumeRelease.resolve();
+  await opening;
+  assert.equal(controller.isCreateAllowed(), false);
+  await cleanupEntered.promise;
+  cleanupRelease.resolve();
+  await cleanup;
+  assert.equal(controller.isCreateAllowed(), false);
 });
 
 test("Hook reloader stop fences an in-flight reload and supports a fresh generation", async (context) => {

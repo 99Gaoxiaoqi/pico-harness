@@ -22,6 +22,52 @@ export interface DesktopDaemonShutdownFenceOptions {
 
 export type DesktopTerminalCleanupFenceOptions = DesktopDaemonShutdownFenceOptions;
 
+export function isDesktopRuntimeInvocationAllowed(
+  method: string,
+  quitting: boolean,
+  terminalCreateAllowed = true,
+): boolean {
+  return method !== "terminal.create" || (!quitting && terminalCreateAllowed);
+}
+
+/** Serializes close/reopen transitions so cleanup from an old window cannot hit a new one. */
+export class DesktopTerminalGenerationController {
+  #sealed = true;
+  #sealVersion = 0;
+  #transitionTail: Promise<void> = Promise.resolve();
+
+  isCreateAllowed(): boolean {
+    return !this.#sealed;
+  }
+
+  seal(): void {
+    this.#sealed = true;
+    this.#sealVersion++;
+  }
+
+  cleanup(stopAll: () => Promise<void>): Promise<void> {
+    this.seal();
+    return this.#enqueue(stopAll);
+  }
+
+  open(resume: () => Promise<void>): Promise<void> {
+    const expectedSealVersion = this.#sealVersion;
+    return this.#enqueue(async () => {
+      await resume();
+      if (this.#sealVersion === expectedSealVersion) this.#sealed = false;
+    });
+  }
+
+  #enqueue(operation: () => Promise<void>): Promise<void> {
+    const next = this.#transitionTail.then(operation, operation);
+    this.#transitionTail = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }
+}
+
 /**
  * Workbar terminals are not restored across Desktop restarts, while the Runtime daemon is.
  * Fence Electron shutdown until the daemon has released every terminal it still owns.

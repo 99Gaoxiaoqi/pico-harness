@@ -122,6 +122,7 @@ export type WorkbarTerminalErrorCode =
   | "resource_epoch_mismatch"
   | "not_running"
   | "capacity_exceeded"
+  | "admission_closed"
   | "spawn_failed";
 
 export class WorkbarTerminalError extends Error {
@@ -179,6 +180,7 @@ export class WorkbarTerminalAuthority {
   readonly #pendingCreates = new Set<Promise<WorkbarTerminalAttachment>>();
   #persistQueue: Promise<void> = Promise.resolve();
   #stopAllPromise: Promise<number> | undefined;
+  #acceptingCreates = true;
 
   constructor(options: WorkbarTerminalAuthorityOptions) {
     this.processFactory = options.processFactory ?? createPreferredWorkbarTerminalProcessFactory();
@@ -266,8 +268,14 @@ export class WorkbarTerminalAuthority {
     readonly cols?: number | undefined;
     readonly rows?: number | undefined;
   }): Promise<WorkbarTerminalAttachment> {
-    const cleanup = this.#stopAllPromise;
-    if (cleanup) return cleanup.then(() => this.create(input));
+    if (!this.#acceptingCreates) {
+      return Promise.reject(
+        new WorkbarTerminalError(
+          "admission_closed",
+          "Terminal generation is closed; reconnect the Desktop before creating a terminal",
+        ),
+      );
+    }
     const creation = this.#create(input);
     this.#pendingCreates.add(creation);
     void creation.then(
@@ -461,6 +469,7 @@ export class WorkbarTerminalAuthority {
 
   /** Stops every live Workbar process owned by this authority before its UI owner disappears. */
   stopAll(): Promise<number> {
+    this.#acceptingCreates = false;
     if (this.#stopAllPromise) return this.#stopAllPromise;
     const operation = this.#stopAllOnce();
     const lifecycle = operation.finally(() => {
@@ -468,6 +477,13 @@ export class WorkbarTerminalAuthority {
     });
     this.#stopAllPromise = lifecycle;
     return lifecycle;
+  }
+
+  resumeCreates(): void {
+    if (this.#stopAllPromise) {
+      throw new WorkbarTerminalError("admission_closed", "Terminal cleanup is still in progress");
+    }
+    this.#acceptingCreates = true;
   }
 
   async #stopAllOnce(): Promise<number> {
