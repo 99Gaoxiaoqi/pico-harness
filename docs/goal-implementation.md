@@ -1,6 +1,8 @@
 # pico Goal 实现详解
 
-> 本文以 pico-harness 的实际代码为基础，完整梳理 Goal 功能从创建到完成的全链路实现，包括停滞检测、延续协调器、LLM 评估器和预算管理。
+> 文档状态：部分过期。Goal RuntimeEvent 状态机仍是实现主线；其中 `PLAN.md`、`todo.json`、
+> Session JSONL 路径和部分预算/停滞承诺不是当前事实。无预算 Goal 的 stall/startTurn 边界仍需
+> 以 `src/engine/goal-manager.ts` 和集成测试复核，本文不作为该行为的验收合同。
 
 ## 一、设计定位
 
@@ -8,7 +10,7 @@ Goal 是 pico 的**长程目标追踪 + 预算控制 + 完成判定**机制。�
 
 ```
 Goal   ← 宏观目标 + 预算锚点（如"重构认证模块，最多 20 轮"）
-Plan   ← 实现路径（PLAN.md）
+Plan   ← Session RuntimeEvent 中的结构化执行路径
 Todo   ← 原子任务清单
 ```
 

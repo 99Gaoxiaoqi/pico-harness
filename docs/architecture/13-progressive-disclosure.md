@@ -1,5 +1,9 @@
 # pico-harness 渐进式披露：让上下文窗口只装此刻需要的东西
 
+> 文档状态：部分过期。工具披露以[决策记录 23](./23-decision-tool-disclosure-surface.md)
+> 为准；ToolResult/Evidence 部分以[决策记录 26](./26-decision-tool-result-entry-shaping.md)
+> 为准。Skill 与 Repo Map 章节仍可作设计说明，但实现细节应回查当前代码。
+
 > **[历史文档]** 工具披露部分已于 2026-08-18 被重构取代（surface 组级激活 +
 > durable 重播 + TF-IDF），现状与动机见 `23-decision-tool-disclosure-surface.md`。
 > 本文其余披露机制（Skill 二段式 / ToolResult 预览与 Evidence 回取 / Repo Map

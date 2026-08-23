@@ -1,154 +1,106 @@
 # pico-harness 架构总览
 
-> 大模型是 CPU，上下文是内存，工具是外设，RuntimeEvent 是可恢复的运行事实。
+> 文档类型：当前架构导航。系统边界与状态真源以仓库根目录
+> [`ARCHITECTURE.md`](../../ARCHITECTURE.md) 和已跟踪代码为准；本页不重复保存易漂移的
+> 协议字段、表结构或验证数字。
 
-## 产品与 Runtime
+## 当前执行路径
 
-pico-harness 当前有 TUI 和 Desktop 两种产品外壳，两者共用 `AgentRuntime`、Provider、
-ToolRegistry、Session 和持久化语义。
+TUI 和 Desktop 是两个产品外壳，但不是两套 Runtime：
 
 ```text
-pico / npm run dev
-  └─ CLI + TUI ───────────────────────────────┐
+CLI / TUI ── LocalRuntimeClient ───────────────┐
                                                ▼
-                                        AgentRuntime
+Desktop Renderer ── Preload ── Electron Main ── current-user local daemon
                                                │
-Desktop Renderer                              ▼
-  └─ Preload ── Electron Main ── local daemon ─┘
-                       │
-                       └─ @pico/protocol 类型、校验与方法白名单
-
-AgentRuntime
-  └─ AgentEngine ── Provider / Tools / Context / Approval / Hooks / MCP
-          │
-          ├─ RuntimeEventStore：Session 与 Agent 事实
-          ├─ TaskRunStore：可恢复任务与 Attempt 事实
-          └─ RuntimeStore：Jobs、Runs、Usage 与租约控制面
+                                               ▼
+                                  WorkspaceRuntimeService
+                                               │
+                                               ▼
+                                  AgentRuntime / AgentEngine
+                                    ├─ Provider / ModelRouter
+                                    ├─ Context / Compaction
+                                    ├─ ToolRegistry / Safety
+                                    ├─ Hooks / MCP / Subagent
+                                    └─ workspace pico.sqlite
 ```
 
-Desktop Renderer 不直接加载 Runtime 代码。Electron Main 使用共享 `LocalRuntimeClient`
-连接当前 `PICO_HOME` 的认证本机 daemon；每个长连接订阅独占连接，普通请求复用请求连接。
+- `pico` 和 `npm run dev` 启动的是 daemon 瘦客户端；TUI 进程不装配执行内核。
+- Desktop Renderer 不访问 Node.js、Runtime registration 或本地文件，通过白名单 Preload API
+  与 Electron Main 通信。
+- `packages/protocol/` 定义本机 Runtime 方法、参数、结果、事件和 Desktop allowlist。
+- daemon 依靠私有 endpoint、当前用户权限、root authority 和协议白名单建立本机边界，
+  不是公开网络服务。
 
 ## 模块地图
 
-| 模块                          | 职责                                                                                 |
-| ----------------------------- | ------------------------------------------------------------------------------------ |
-| `src/runtime/`                | `AgentRuntime` composition root、RuntimeRun 及 Runtime adapters                      |
-| `src/storage/`                | RuntimeEventStore 等 durable storage 实现                                            |
-| `src/engine/`                 | ReAct 循环、Session、预算、Reporter、Goal 与 Steer                                   |
-| `src/provider/`               | Provider 协议、ModelRouter、凭证轮换、重试和计费能力                                 |
-| `src/tools/`                  | 工具 Registry、中间件、调度器、子代理与渐进披露                                      |
-| `src/context/`                | Prompt 组装、请求投影、模型摘要和 Evidence CAS                                       |
-| `src/tasks/`                  | RuntimeStore、TaskRun、后台 Job、Cron、租约、Usage 和完成通知                        |
-| `src/daemon/`                 | 本机 IPC、认证、Desktop/Workspace Runtime 服务；typed request router 与领域 handlers |
-| `src/plugins/`                | Plugin Manager、scope/winner、snapshot、Hook trust、受限 capability 与统一诊断       |
-| `packages/protocol/`          | daemon 协议契约、运行时校验和 Desktop 方法白名单                                     |
-| `apps/desktop/`               | Electron Main/Preload/Renderer 和平台集成                                            |
-| `src/safety/`、`src/storage/` | FileHistory、CAS、rewind/fork journal、lease 与原子写入                              |
+| 模块                                    | 当前职责                                                 |
+| --------------------------------------- | -------------------------------------------------------- |
+| `src/cli/`、`src/tui/`                  | CLI 参数、daemon 客户端、Ink UI 与本地交互适配           |
+| `apps/desktop/`                         | Electron Main/Preload/Renderer 与平台集成                |
+| `src/daemon/`、`packages/runtime-host/` | 本机 IPC、Runtime 宿主、Workspace 生命周期和协议 handler |
+| `src/runtime/`                          | `AgentRuntime` composition root、RuntimeRun 与恢复边界   |
+| `src/engine/`                           | ReAct 循环、Session、调度、预算和 Reporter               |
+| `src/provider/`                         | Provider 协议、模型路由、凭证解析、重试与计费            |
+| `src/tools/`                            | Tool Registry、安全中间件、资源调度、子代理和工具披露    |
+| `src/context/`                          | Prompt、请求投影、压缩、Skill 与恢复提示                 |
+| `src/storage/sqlite/`                   | workspace 单库 schema、typed store、投影与事务边界       |
+| `src/tasks/`、`src/memory/`             | Job/Cron/TaskRun 与长期记忆业务语义                      |
 
-## 状态边界
+## 状态真源
 
-- `RuntimeEventStore` 是 Session manifest、消息、工具、审批、压缩、rewind 和 run terminal
-  的唯一事实源，落在每个 Session 的 `session.jsonl`。它是整个系统的 canonical semantic log。
-- `RuntimeStore` 是 Jobs、daemon/cron runs、attempts、leases、usage 和 completion outbox
-  的控制面真源。
-- `TaskRunStore` 是显式 recoverable 任务跨 Attempt 的事实账本；它保存 adapter 身份、不可变输入、
-  checkpoint 引用、执行租约和启动凭据，但不复制 Session RuntimeEvent。
-- `MemoryRepository` 是 RuntimeEvent 派生投影 + 用户编辑 overlay 的复合 authority。派生层
-  （Source 的 eventIds/digest/evidenceRef）从 RuntimeEvent 提取，可重建；overlay 层
-  （Settings、manual-fact、Fact 状态变更、Proposal 裁决）是独立用户意图。使用独立的
-  `memory/` 目录和 lock，跨域操作采用两阶段提交模拟 + fail-closed 失效。
-- `daemon-events.jsonl` 是 daemon 通知的持久回放账本，不替代 Agent 事件或控制面状态。
-- 运行态三类 Store 共享 `$PICO_HOME/workspaces/<workspace-id>/.storage/` 下的事务协调，
-  但分别落在 `sessions/`、`task-runs/` 和 `control/`，使用不同账本和 API。
-- Session 内存、Transcript 和 Desktop ViewModel 都是可重建投影。
-- Session title 存在 RuntimeEvent；Desktop metadata 不保存第二份 title。
+每个 workspace 的持久事实集中在：
+
+```text
+$PICO_HOME/workspaces/<workspace-id>/
+├── pico.sqlite
+├── pico.sqlite-wal / pico.sqlite-shm  # 运行期
+├── traces/
+├── evidence/                           # 旧引用兼容或专用资产，不是新 ToolResult 主路径
+├── fork-staging/
+├── plugins.json
+└── hooks-state.json
+```
+
+`pico.sqlite` 是统一物理载体，不代表所有状态属于同一个业务对象：
+
+- sessions scope：RuntimeEvent、Session、Run、Transcript 与相关投影；
+- task-runs scope：显式 recoverable 任务、Attempt、checkpoint、租约和启动凭据；
+- control scope：Job、Cron、daemon run、usage、provider call 和生命周期控制状态；
+- memory scope：Source、Fact、Proposal、settings、审计与幂等记录；
+- operations、attachments、retention、kv 等 scope：跨域操作、文件历史 manifest、配额与辅助状态。
+
+这些 scope 通过 typed store API 和事务边界维持所有权。RuntimeEvent 是 Agent 运行事实，
+TaskRun 是恢复协议事实，Control 是调度事实，Memory Fact 是独立长期意图；它们不能互相冒充。
+
+## ToolResult 与上下文
+
+- ToolResult 在执行结果进入 Runtime 前受 1 MiB 上限约束。
+- 限内结果以 `storage: "inline"` 进入 canonical RuntimeEvent；超限结果改写为合成错误，原始
+  超限正文不会进入事实库。
+- Provider 请求在读取侧按预算生成有界投影；Compaction 只改变模型读取视图，不改写
+  canonical RuntimeEvent。
+- `read_evidence` 与新 ToolResult 的 Evidence CAS 回读协议已经退役；旧
+  `storage: "evidence"` 形态仅在兼容读取边界容忍。
 
 ## 路径边界
 
-- `$PICO_HOME`：用户和设备级状态根，默认 `~/.pico`。
-- `$PICO_HOME/workspaces/<workspace-id>/`：Runtime 文件账本、Evidence、
-  Trace、Task 和 storage operation。
-- `<workDir>/.pico/`：项目配置、commands、skills、agents、hooks、MCP 和 plugins。
-- 旧 `runtime.sqlite`、`memory.sqlite`、WAL/SHM 与 legacy task 文件保留原样，但当前版本不读取、迁移或自动删除。
-- 任意非空旧 `runtime/`（包括 `lock/`、tombstone、candidate、`control/` 和
-  `sessions/`）都会阻止 v2 初始化；程序不复制、不迁移，也不把旧锁当作兼容 fence。
-  开发期确认放弃旧会话后，应由使用者显式删除该目录；新旧版本不得并行运行。
+- `$PICO_HOME`：设备级配置、信任、daemon 注册、文件历史 blob 与 workspace 状态根。
+- `<workDir>/.pico/`：随项目保存的声明式 config、commands、skills、agents、hooks、MCP 和
+  plugins，不保存 Session 历史。
+- 旧 JSONL 纪元的 `.storage/`、`sessions/`、`task-runs/`、`control/` 与 `runtime/` 是不兼容
+  布局标记；产品路径不会猜测性迁移或自动删除。
 
-```text
-workspace/
-  sessions/<sha256(sessionId)>/{session.jsonl,manifest.json}
-  task-runs/<sha256(taskRunId)>/{task.jsonl,manifest.json}
-  control/{state.json,daemon-events.jsonl,usage-ledger.jsonl}
-  .storage/
-    layout.json # stable storageRootId + physical directory identity
-    commit.json
-    lock/
-  memory/
-    state.json
-    lock/
-```
+## 阅读顺序
 
-目录使用 `0700`，数据文件使用 `0600`。Session、TaskRun 与控制面读写先取得
-`.storage/lock/` 的 workspace owner lease，并恢复遗留 `.storage/commit.json`；JSON 替换通过
-临时文件、文件 `fsync`、原子 rename 和目录 `fsync` 发布。JSONL 只允许截断未完成的最后
-一行，完整但非法的中间记录会 fail closed。
-
-Runtime Host 必须显式传播 `picoHome` 和 `runtimeEnv`。同一进程中，不同
-`PICO_HOME` 的 Session 设置、授权、凭证、Evidence 与存储根不能共享状态。
-
-## 可恢复任务边界
-
-可恢复的是持久化工作流，不是旧 JavaScript 调用栈。恢复必须同时证明 adapter 版本与输入、
-workspace/root identity、RuntimeEvent 高水位、interrupted terminal、审批与工具副作用、
-后台操作、工具目录和 checkpoint 均一致；任一条件不确定就写入稳定 park reason。
-通过校验后，协调器先按 TaskRun 日志的提交时间取得或接管执行租约，再以 revision CAS 原子
-写入 `task.resume.claimed + attempt.started`。adapter 使用确定性的 `launchId`、Runtime Run ID
-和 `run.started` event ID，在来源高水位 `H+1` 以 CAS 原子发布 `run.started`；只有发布成功后
-才能安装或确认 durable execution intent/worker，再启动 provider、工具或其他外部副作用。
-`run.started` 只证明 admission，不单独证明 worker 已启动；若在 TaskRun 结算前崩溃，恢复器
-从 canonical `H+1` 事件重建 body-free 准入凭据，并以同一 `launchId` 重调幂等 adapter，
-直到 adapter 确认执行已安装。重复调用不得重复真实副作用。同一 Session 在 `H+2` 之后出现的
-其他合法 Run 不会推翻已经成立的准入凭据，但来源 Run 在终止序列后不得再追加事实。旧
-owner/lease epoch 的 checkpoint、launch 与完成写入会被拒绝。
-既有 Worktree runner、PTY、provider stream 和闭包没有该契约，继续标记为 `host_bound`，
-进程退出后只收敛为 `interrupted`。
-
-`sessions/`、`task-runs/`、Evidence 和 Trace 可进入只读导出计划；
-其中 Session/TaskRun 只接受完整 SHA-256 目录和固定 canonical 文件名，计划在共享事务锁内
-恢复 pending commit 后生成一致性哈希；
-`.storage/`、`control/`、Memory state、锁、凭据、临时文件和 legacy SQLite 属于 host-bound
-或 protected。Portable TaskRun 可用于检查和审计，但在新的 storage root 上不会自动接管执行。
-
-## 核心设计原则
-
-| 原则             | 说明                                                                        |
-| ---------------- | --------------------------------------------------------------------------- |
-| 单一执行内核     | TUI 和 Desktop 共享 AgentRuntime/AgentEngine，不维护两套业务实现            |
-| 事实与控制面分离 | RuntimeEvent 管 Agent 事实，TaskRun 管任务事实，RuntimeStore 管调度状态     |
-| 显式宿主边界     | Home、env、Provider config、Evidence root 由 composition root 固定并注入    |
-| 安全链前置       | Trust、Plan、Hardline、Approval、Hooks 和 workspace boundary 位于工具执行前 |
-| 投影可重建       | Session 内存、Transcript、UI state 不升级为第二事实源                       |
-| 状态所有权拆分   | 只有拥有独立状态或生命周期的模块才拆成服务，避免空转抽象                    |
-
-## 文档索引
-
-| 文档                                                                             | 内容                                                   |
-| -------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| [01-engine.md](./01-engine.md)                                                   | Engine、Session、RuntimeEvent 与 Reporter              |
-| [02-tools.md](./02-tools.md)                                                     | Registry、调度、子代理、渐进披露与 Hooks               |
-| [03-context.md](./03-context.md)                                                 | Prompt、投影、压缩、Evidence 与摘要 sidecar            |
-| [04-provider-entry.md](./04-provider-entry.md)                                   | Provider、AgentRuntime、TUI 与 Desktop 入口            |
-| [05-infra-safety.md](./05-infra-safety.md)                                       | FileHistory、审批、MCP、可观测性与部署边界             |
-| [06-data-flow.md](./06-data-flow.md)                                             | TUI/Desktop 到 Runtime 的关键数据流                    |
-| [07-hooks.md](./07-hooks.md)                                                     | Hook 来源、信任、热重载和前后台边界                    |
-| [09-architecture-debt-remediation.md](./09-architecture-debt-remediation.md)     | Durable transcript、Markdown 与 Runtime 窄拆债务修整   |
-| [10-architecture-quality-assessment.md](./10-architecture-quality-assessment.md) | 分层、模块化、可测试性与插件化质量评估及验收标准       |
-| [plugin-scope-contract.md](./plugin-scope-contract.md)                           | Plugin scope 物理根目录、优先级与 workspace-local 限制 |
-| [local-ipc-security.md](./local-ipc-security.md)                                 | Desktop 与 daemon 本机 IPC 安全                        |
+1. [`ARCHITECTURE.md`](../../ARCHITECTURE.md)：当前系统边界、状态所有权与安全边界。
+2. [`01-engine.md`](./01-engine.md) 至 [`07-hooks.md`](./07-hooks.md)：按模块理解实现；这些
+   深入文档可能包含被后续 ADR 取代的局部段落，先看 [`docs/README.md`](../README.md) 的状态索引。
+3. 决策记录 21—29：理解当前实现为何选择 PowerShell、SQLite、入口定形和恢复协议。
+4. `docs/plans/`：阶段性交付证据，只用于追溯，不定义当前事实。
 
 ## 技术栈
 
-- TypeScript ESM，Node.js 22.13+/24.3+/26，strict type checking
-- 本地 JSON/JSONL 文件存储、Ink/React、Electron、pino、gpt-tokenizer、js-yaml
+- TypeScript ESM，Node.js 22.19+/24.3+/26，内置 `node:sqlite`
+- Ink / React 19、Electron、pino、gpt-tokenizer、js-yaml
 - tsx、TypeScript、ESLint、Prettier

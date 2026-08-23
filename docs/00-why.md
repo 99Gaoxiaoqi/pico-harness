@@ -1,5 +1,9 @@
 # 第 0 章 · 为什么自己写？
 
+> 文档状态：历史课程快照。本章的四工具、文件式 Plan/Todo、JSONL 和 one-shot CLI
+> 描述保留早期推导，不代表当前实现；当前事实见[文档索引](README.md)与
+> [架构总览](../ARCHITECTURE.md)。
+
 2024 年，我在 GitHub 上搜索 "AI Agent"，看到了数以千计的项目：LangChain、AutoGPT、MetaGPT、CrewAI……它们都承诺用简洁的 API 帮你构建智能体。
 
 我也用过它们。但说实话，每次用到第三周左右，我都会遇到同一个问题：**我想改一个东西，但不知道从哪下手。**

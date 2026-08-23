@@ -1,5 +1,8 @@
 # Pico Harness 架构债务解释与修整方向
 
+> 文档状态：历史审计快照。本文用于追溯当时识别的债务，不是当前待办或现状清单；判断
+> 当前边界请从 [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md) 和后续 ADR 开始。
+
 > 状态：D1/D2 已实施；D3 窄拆、Session durable facts port、Engine/SessionFork RuntimePort、Desktop parity、workspace/session handler、Provider assembly、Plugin Hook trust、受限 Plugin Capability 激活、scope managed roots 和统一诊断已实施；公开 marketplace 与任意插件代码执行仍按安全边界不开放
 > 建立日期：2026-07-18
 > 基线：`main@81ff999`

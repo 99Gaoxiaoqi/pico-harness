@@ -1,5 +1,9 @@
 # 第 1 章 · 让它学会呼吸
 
+> 文档状态：历史课程快照。Two-Stage ReAct、位置参数 one-shot 启动和早期
+> `--thinking` 语义已经退役；当前 `--thinking <level>` 表示模型推理强度，公开入口是
+> daemon 支撑的交互式 TUI。当前事实见[文档索引](README.md)。
+
 一开始，我写了一个非常蠢的 Agent。大概 20 行代码。
 
 ```typescript

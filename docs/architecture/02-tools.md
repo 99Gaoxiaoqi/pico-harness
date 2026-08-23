@@ -1,5 +1,8 @@
 # 工具层 (`src/tools/`)
 
+> 文档状态：部分过期。Registry、资源调度和安全中间件主线仍可参考；ToolResult Evidence
+> 归档和 `read_evidence` 已被[决策记录 26](./26-decision-tool-result-entry-shaping.md)取代。
+
 > Main Loop 永远是"瞎子聋子"，只通过统一的 Registry 接口拿工具 schema、下发 ToolCall、接收 ToolResult。
 
 ## 架构分层

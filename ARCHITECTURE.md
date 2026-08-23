@@ -9,7 +9,7 @@
 TUI
   pico / npm run dev
     └─ src/cli + src/tui
-         └─ AgentRuntime
+         └─ LocalRuntimeClient
 
 Desktop
   Renderer
@@ -18,7 +18,7 @@ Desktop
               └─ LocalRuntimeClient
 
 LocalRuntimeClient
-  └─ authenticated local daemon
+  └─ current-user local daemon
        ├─ DesktopRuntimeService
        ├─ WorkspaceRuntimeService
        └─ AgentRuntime
@@ -31,9 +31,9 @@ AgentRuntime
   └─ RuntimeEventStore + TaskRunStore + RuntimeStore
 ```
 
-TUI 和 Desktop 是当前两种产品外壳。TUI 在当前进程装配 `AgentRuntime`；Desktop
-Renderer 不直接访问 Node.js 或 Runtime，而是经类型化 Preload、Electron Main 和本机
-daemon 调用同一个 Runtime。daemon 只提供当前用户本机 IPC，不开放网络传输。
+TUI 和 Desktop 是当前两种产品外壳。两者都通过 `LocalRuntimeClient` 调用本机 daemon；
+TUI 进程不再装配执行内核。Desktop Renderer 不直接访问 Node.js 或 Runtime，而是经类型化
+Preload 和 Electron Main 进入同一连接层。daemon 只提供当前用户本机 IPC，不开放网络传输。
 
 `packages/protocol` 定义 daemon 方法、参数、结果、事件和 Desktop 可访问方法白名单。
 Electron Main 只转发白名单内的方法，Renderer 只依赖 `DesktopBridge` 类型。
@@ -71,25 +71,27 @@ Electron Main 只转发白名单内的方法，Renderer 只依赖 `DesktopBridge
                  └─ Reporter 将生命周期投影给当前外壳
 ```
 
-`src/engine/loop.ts` 只负责执行循环，不拥有产品 UI 或持久化路径。TUI 使用
-`TuiReporter` 更新 Ink 界面；Desktop daemon 将同一类运行状态投影为协议事件，Renderer
-再构造 Transcript 和 Timeline。
+`src/engine/loop.ts` 只负责执行循环，不拥有产品 UI 或持久化路径。daemon 将运行状态投影为
+协议事件；TUI 的 `DaemonEventReporter` 再转给 `TuiReporter` 更新 Ink 界面，Desktop
+Renderer 则据此构造 Transcript 和 Timeline。
 
-上下文超水位时，旧 ToolResult 先做请求投影；仍超预算时，`FullCompactor` 在完整工具
-批次边界生成摘要。被移出模型历史的原始工具交换写入 evidence，RuntimeEvent 事实不因压缩
-而丢失。
+上下文超水位时，旧 ToolResult 先在读取侧生成有界请求投影；仍超预算时，`FullCompactor`
+在完整工具批次边界生成摘要。压缩只改变后续模型读取视图，不改写当前 EventLog 中的
+canonical RuntimeEvent。单次 ToolResult 在入口处受 1 MiB 上限约束，限内正文 inline 入库，
+超限则写入合成错误并要求模型通过更窄的命令重新获取。
 
 ## 状态真源
 
-`$PICO_HOME/workspaces/<workspace-id>/` 下的状态按事实所有权拆分。RuntimeEventStore
-是整个系统的 canonical semantic log；其他账本通过弱外键引用 RuntimeEvent，不复制会话历史。
+`$PICO_HOME/workspaces/<workspace-id>/` 下的状态按事实所有权拆分。RuntimeEventStore 是
+Session/Agent 叙事的 canonical semantic log；TaskRun、Control 与 Memory 各自拥有独立事实，
+只通过稳定标识或弱外键引用 RuntimeEvent，不复制会话历史。
 
-| 组件                | 位置         | 负责的数据                                                                                  | 不负责的数据                         |
-| ------------------- | ------------ | ------------------------------------------------------------------------------------------- | ------------------------------------ |
-| `RuntimeEventStore` | `sessions/`  | Session manifest、消息、工具、审批、压缩、rewind、run terminal 等 Agent 事实                | Job 调度、TaskRun 和长期记忆事实     |
-| `TaskRunStore`      | `task-runs/` | 显式可恢复任务跨 Attempt 的输入、checkpoint、租约、启动凭据与终态                           | Session Transcript 和 Cron 调度状态  |
-| `RuntimeStore`      | `control/`   | Jobs、daemon/cron runs、attempts、leases、usage、provider calls、completion outbox 等控制面 | Session Transcript 和 TaskRun 事实   |
-| `MemoryRepository`  | `memory/`    | 版本化的 settings、sources、facts、proposals、审计与幂等记录                                | 原始对话事实（属于 RuntimeEventStore） |
+| 组件                        | `pico.sqlite` 逻辑 scope | 负责的数据                                                                                  | 不负责的数据                           |
+| --------------------------- | ------------------------ | ------------------------------------------------------------------------------------------- | -------------------------------------- |
+| `SqliteRuntimeEventStore`   | sessions                 | Session、消息、工具、审批、压缩、rewind、run terminal 与 Transcript 投影                    | Job 调度、TaskRun 和长期记忆 Fact      |
+| `SqliteTaskRunStore`        | task-runs                | 显式可恢复任务跨 Attempt 的输入、checkpoint、租约、启动凭据与终态                           | Session Transcript 和 Cron 调度状态    |
+| `SqliteRuntimeControlStore` | control                  | Jobs、daemon/cron runs、attempts、leases、usage、provider calls、completion outbox 等控制面 | Session Transcript 和 TaskRun 事实     |
+| `SqliteMemoryRepository`    | memory                   | 版本化 settings、sources、facts、proposals、审计与幂等记录                                  | 原始对话事实（属于 RuntimeEventStore） |
 
 `RuntimeEventStore` 是会话和 Agent 运行事实的唯一真源。Session 内存、Transcript 和
 Desktop ViewModel 都是可重建投影；损坏后应从 RuntimeEvent 重建，不建立第二套会话历史。
@@ -97,19 +99,14 @@ Desktop ViewModel 都是可重建投影；损坏后应从 RuntimeEvent 重建，
 Session 标题也属于 RuntimeEvent。Desktop session metadata 只保存 archive 等 UI 元数据；
 旧 metadata 由一次性迁移转换，正常读写只使用当前 schema，不以 metadata title 作为回退。
 
-运行态三类 Store（RuntimeEventStore / TaskRunStore / RuntimeStore）共用 `.storage/` 下的
-workspace identity、文件事务锁和 commit 协调器，但通过不同 JSON/JSONL 文件和 API 维持
-边界，不能把 TaskRun 或 Job 状态当作 Session 历史。`MemoryRepository` 使用独立的 `memory/`
-目录和 lock；跨域操作（如 deleteSession）采用两阶段提交模拟（prepare lifecycle Job →
-执行操作 → commit lifecycle Job），中途崩溃时由 `reconcileLifecycleJobs` 的 fail-closed
-恢复保证隐私安全。
+所有 workspace Store 共用一个 `pico.sqlite`，但通过独立 schema scope、typed store API 和
+弱外键语义维持所有权边界。单库事务替代了旧 `.storage/` 目录锁、自研 commit journal 和
+跨 JSON/JSONL 文件协调；跨域生命周期操作仍先写 durable prepare，再执行或恢复收口。
 
-大体积 ToolResult 和子代理报告写入 `evidence/` 的不可变内容寻址存储，RuntimeEvent 保留
-���界投影、哈希与引用；`traces/` 保存可选的运行 Span，供观测和复盘，不替代任何事实账本。
-`memory/state.json` 是 RuntimeEvent 派生投影 + 用户编辑 overlay 的复合 authority：派生层
-（Source 的 eventIds/digest/evidenceRef）可从 RuntimeEvent 重建，overlay 层（Settings、
-manual-fact、Fact 状态变更、Proposal 裁决）是独立用户意图，需从备份恢复。原始用户证据
-始终来自 RuntimeEvent，不会复制出第二份 Transcript。
+`SqliteMemoryRepository` 是 RuntimeEvent 派生 provenance + 用户编辑意图的复合 authority：
+Source 可以由 RuntimeEvent 追溯，manual Fact、Fact 状态变更和 Proposal 裁决属于独立用户
+意图。Session 删除、自动 retention 或 EventLog hard cut 只让 Source unavailable，不删除
+已经提交的长期 Fact。`traces/` 保存可选运行 Span，不替代任何事实账本。
 
 ### Plan 执行与 DAG 调度
 
@@ -125,15 +122,14 @@ DAG 调度全部从 RuntimeEventStore 派生，不建立第二个 canonical stor
   启动的 step 仍未 settled 时，recover 将 step 回退为 pending（不自动重派）。
 - `delegate_task` 工具的 `plan_step_id` 参数让工具层自动管理 step 状态（dispatch →
   in_progress，完成 → completed），无需模型手动调 update_plan。
-- `src/graph/reconcile.ts` 的 `computeReadySteps` 是纯函数，从 PlanProjection 计算就绪步骤。
-- `src/graph/recover.ts` 的 `recoverOrphanSteps` 通过 `run.terminal` 跨参判定 orphan step，
+- `src/graph/graph-reconcile.ts` 的 `computeReadySteps` 是纯函数，从 PlanProjection 计算就绪步骤。
+- `src/graph/graph-recover.ts` 的 `recoverOrphanSteps` 通过 `run.terminal` 跨参判定 orphan step，
   零假阳性（vs lease 定时器的假阳性风险）。
 
 ## 路径模型
 
 `PICO_HOME` 是宿主拥有的用户状态根，默认值为 `~/.pico`。同一进程可以运行多个不同
-`PICO_HOME` 的 Runtime；Session scope、权限、凭证、Evidence、Trace 和存储根必须随宿主
-隔离。
+`PICO_HOME` 的 Runtime；Session scope、权限、凭证、Trace 和存储根必须随宿主隔离。
 
 ```text
 $PICO_HOME/
@@ -150,15 +146,10 @@ $PICO_HOME/
 ├── daemon-workspaces.json
 ├── file-history/
 └── workspaces/<workspace-id>/
-    ├── sessions/<sha256(sessionId)>/{session.jsonl,manifest.json}
-    ├── task-runs/<sha256(taskRunId)>/{task.jsonl,manifest.json}
-    ├── control/{state.json,daemon-events.jsonl,usage-ledger.jsonl}
-    ├── .storage/{layout.json,commit.json,lock/}
-    ├── memory/{state.json,lock/}
+    ├── pico.sqlite
+    ├── pico.sqlite-wal / pico.sqlite-shm  # SQLite 运行期文件
     ├── evidence/
     ├── traces/
-    ├── todo.json
-    ├── storage-operations/
     ├── fork-staging/
     ├── plugins.json
     └── hooks-state.json
@@ -176,24 +167,25 @@ $PICO_HOME/
 `<workDir>/.pico` 保存可跟随项目的声明式输入，不保存 Session 历史。旧 `.claw` 文件仅在
 明确标注的兼容读取边界中可能被识别，Pico 原生写入和事实源均不使用 `.claw`。
 
-旧 `runtime/`、`runtime.sqlite`、`memory.sqlite`、WAL/SHM 和 legacy `tasks/` 不属于当前
-布局。当前 Store 不读取、不迁移也不自动删除这些内容；SQLite 和 legacy task 文件只由诊断
-或导出边界识别，任意非空旧 `runtime/` 则会作为不兼容布局阻止 v2 初始化。
+旧 `.storage/`、`sessions/`、`task-runs/`、`control/`、`runtime/`、split-era
+`runtime.sqlite` / `memory.sqlite` 和 legacy task 文件都不属于当前布局。产品路径不会自动
+导入或删除这些内容；出现 JSONL 纪元目录标记时，SQLite 初始化会 fail-closed。需要保留数据
+时必须先走显式迁移或人工备份流程。
 
 ## 并发与安全边界
 
 - Session 以 `workspace root + sessionId` 隔离，并通过 owner lease 和 per-session drain
   串行化持久变更。
-- RuntimeEvent 追加在 workspace 文件事务中按 Session 分配连续 sequence，并以 `eventId`
-  保证重试幂等；跨 Session 批次由 durable `.storage/commit.json` 保证全有或全无。
+- RuntimeEvent 在 SQLite `BEGIN IMMEDIATE` 事务中按 Session 分配连续 sequence，并以
+  `eventId` 与 canonical payload 全等校验保证重试幂等；事实与相关投影同事务提交。
 - ToolScheduler 根据声明的文件读写资源构建冲突图；Bash 等动态能力使用保守资源边界。
-- 文件改动由 FileHistory、CAS blob 和 storage operation journal 支持 rewind/fork 恢复。
+- 文件改动由 FileHistory blob、SQLite manifest 和 operation journal 支持 rewind/fork 恢复。
 - Approval、Hardline、Plan、Workspace trust 和 Hook 位于工具执行前的安全链；Hook 改写后
   必须重新经过安全检查。
 - 子代理拥有独立上下文和工具集合。可写 Worker 的共享目录、OCC 和 worktree 升级规则见
   [多 Agent 共享工作区并发规范](./docs/architecture/08-multi-agent-concurrency.md)。
-- Desktop BrowserWindow 开启 context isolation、关闭 Node integration；daemon token、socket
-  权限和方法白名单共同构成本机信任边界。
+- Desktop BrowserWindow 开启 context isolation、关闭 Node integration；私有 endpoint、
+  当前用户文件/进程权限、typed root authority 和方法白名单共同构成本机信任边界。
 
 ## 关键模块索引
 

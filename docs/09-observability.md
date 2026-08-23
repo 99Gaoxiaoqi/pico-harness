@@ -1,5 +1,9 @@
 # 第 9 章 · 看清每一步在干什么
 
+> 文档状态：历史课程快照。价格表、Tracer/logger API 和 Evidence 归档示例是阶段性快照；
+> 当前价格以 `src/observability/pricing.ts` 为准，日志使用 pino，新 ToolResult 不再写
+> Evidence CAS。可观测性的设计动机仍可参考。
+
 Agent 能做事了。但我不知道它在做什么。
 
 它调了多少次 API？每次花了多少 Token？哪个步骤最耗时？为什么选了方案 A 而不是方案 B？月底老板拿着几千块的 API 账单问我"哪个任务消耗最多"，我哑口无言。

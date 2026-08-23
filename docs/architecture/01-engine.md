@@ -1,5 +1,9 @@
 # 核心引擎层 (`src/engine/`)
 
+> 文档状态：部分过期。Engine/ReAct 主线仍可参考；Session JSONL、manifest、commit marker 与
+> 文件事务描述已被 `SqliteRuntimeEventStore` 取代。当前状态真源见
+> [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md)。
+
 > 引擎是微型 OS 内核：Session 驱动的单阶段 ReAct 循环。Session 承载可恢复状态，引擎负责编排每轮模型调用、工具批次和安全边界。
 
 ## 文件总览

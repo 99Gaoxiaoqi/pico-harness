@@ -11,11 +11,18 @@
 - `PICO_UPDATE_BASE_URL`：Forge 生成更新 manifest 时使用的 HTTPS 静态发布根地址。
 - `PICO_UPDATE_FEED_URL`：构建时验证并写入应用的 Squirrel HTTPS 更新源，安装后不再依赖用户运行环境变量。
 
-缺少任一签名/公证变量时，只能生成本地无签名 smoke 包，不能标记为 Release。正式发布缺少任一更新地址、地址非 HTTPS，或 tag/手工输入版本与 `apps/desktop/package.json` 不一致时，工作流直接失败。本地未配置更新地址的 smoke 包保持禁用自动更新。
+本地 `desktop:package` / `desktop:make` 可以在没有签名或公证变量时生成 smoke 产物：签名只在
+`PICO_MAC_SIGN_IDENTITY` 存在时启用，公证只在三项 Apple 凭证同时存在时启用。正式 Release
+工作流随后强制执行签名、Gatekeeper 和 stapler 校验，因此缺少完整凭证的产物不能通过发布
+门禁。正式发布缺少任一更新地址、地址非 HTTPS，或 tag/手工输入版本与
+`apps/desktop/package.json` 不一致时，工作流直接失败；本地未配置更新地址的 smoke 包不写入
+更新源。
 
 ## 验证顺序
 
-1. `npm ci`，然后运行完整依赖审计、存储能力检查、Runtime/Desktop typecheck、全仓 lint/format 和 `test:integration`。这些确定性门禁全部在 `desktop:make` 之前运行，失败时不开始签名。
+1. `npm ci`，然后按当前工作流运行 `npm audit --audit-level=low`、Node/SQLite 能力检查、
+   Runtime/Desktop typecheck、全仓 lint/format 和 `test:integration`。这些确定性门禁全部在
+   `desktop:make` 之前运行，失败时不开始签名。
 2. 发布候选版在具有有效 Provider 配置、凭证和网络的受控环境运行 `npm run test:llm-e2e`。它覆盖真实模型调用与 Runtime 恢复，不在无凭证 GitHub Actions 中强制执行。
 3. 分别执行 `npm run desktop:make -- --arch=arm64` 与 `--arch=x64`。
 4. 用 `codesign --verify --deep --strict` 验证 `.app`，用 `spctl --assess --type execute` 验证 Gatekeeper。
@@ -25,4 +32,6 @@
 
 ## 依赖审计边界
 
-`npm audit --audit-level=high` 与 `npm audit --omit=dev --audit-level=high` 都必须为 0。根 `overrides` 将 Electron Forge 使用的 `@electron/rebuild` 和 `external-editor` 下的 `tmp` 锁定到已修复版本；更改或移除覆盖前，必须重跑完整审计、`npm ci`、Desktop typecheck 和未签名打包，确认构建链兼容。
+正式工作流以 `npm audit --audit-level=low` 为当前门禁。根 `overrides` 目前固定
+`external-editor.tmp` 与 `uuid`；更改或移除覆盖前，必须重跑审计、`npm ci`、Desktop
+typecheck 和未签名打包，确认构建链兼容。若工作流或 overrides 发生变化，本节也必须同步更新。

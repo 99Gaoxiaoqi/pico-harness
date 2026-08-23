@@ -1,5 +1,8 @@
 # pico-harness 架构审计与治理
 
+> 文档状态：阶段性审计与治理记录。本文的差距评分和路线是建立时快照，后续已经发生
+> runtime-host、SQLite 和 EventLog 收敛；不要把未勾选项直接当作当前待办。
+
 > 建立日期：2026-08-13
 > 标尺：[`19-concepts-map.md`](./19-concepts-map.md) 的 4 条设计原则
 > 配套：[`tests/integration/architecture-invariants.test.ts`](../../tests/integration/architecture-invariants.test.ts)（不变量）+ [`scripts/check-architecture-boundaries.mjs`](../../scripts/check-architecture-boundaries.mjs)（门禁）

@@ -1,7 +1,7 @@
 # pico-harness
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Node](https://img.shields.io/badge/node-22.13%2B%20%7C%2024.3%2B%20%7C%2026-339933.svg)
+![Node](https://img.shields.io/badge/node-22.19%2B%20%7C%2024.3%2B%20%7C%2026-339933.svg)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6.svg)
 
 ![pico-harness：面向本地工程的 Agent Runtime](./docs/readme-assets/pico-harness-cover.png)
@@ -18,26 +18,37 @@
 | ----------- | ----------------- | ------------------------------------------------------------------------------------ |
 | CLI / TUI   | 主要公开入口      | 源码运行使用 `npm run dev`；构建并 `npm link` 后使用 `pico`                          |
 | Desktop     | 仓库内开发入口    | macOS、Windows 持续做未签名 smoke 打包；签名、公证候选构建当前仅覆盖 macOS arm64/x64 |
-| 本机 daemon | 内部 Runtime 宿主 | 承载 Desktop 与持久 Cron；通过本机 IPC 通信，自身不监听网络端口                      |
+| 本机 daemon | 内部 Runtime 宿主 | 承载 TUI、Desktop 与持久 Cron；通过本机 IPC 通信，自身不监听网络端口                 |
 
 当前没有公开的 REST/WebSocket、ACP、one-shot/headless API、Docker 部署或 Linux Desktop 发布入口。根包为 `private: true`，当前安装方式是源码构建与本地链接，不是 npm 公共包。仓库内 benchmark 可使用[内部 Headless One-shot Runner](./docs/internal-headless-one-shot.md)；它同样不是产品入口。
 
 ## 架构概览
 
-![pico-harness 运行时架构：入口、宿主、执行内核、能力与状态](./docs/readme-assets/pico-harness-architecture.png)
+```mermaid
+flowchart LR
+  TUI["CLI / TUI"] --> CLIENT["LocalRuntimeClient"]
+  DESKTOP["Desktop Renderer"] --> BRIDGE["Preload / Electron Main"] --> CLIENT
+  CLIENT --> DAEMON["当前用户本机 daemon"]
+  DAEMON --> SERVICE["WorkspaceRuntimeService"] --> RUNTIME["AgentRuntime / AgentEngine"]
+  RUNTIME --> PROVIDER["Provider / Tools / Context"]
+  RUNTIME --> DB[("workspace/pico.sqlite")]
+```
 
 [查看 Mermaid 源图](./docs/readme-assets/pico-harness-architecture.mmd)
 
-两类正式前台入口最终复用同一个 [`executeAgentRuntime`](./src/runtime/agent-runtime.ts)：
+两类正式前台入口都通过 `LocalRuntimeClient` 进入本机 daemon，并最终复用同一个
+[`AgentRuntime`](./src/runtime/agent-runtime.ts)：
 
-- TUI：`CLI → TUI → 工作区信任/配置 → AgentRuntime`，前台执行不需要绕行 daemon。
-- Desktop：`Renderer → sandbox preload bridge → Electron IPC allowlist → LocalRuntimeClient → 本机 daemon → DesktopRuntimeService → WorkspaceRuntimeService → AgentRuntime`。
+- TUI：`CLI → client-repl → LocalRuntimeClient → daemon → WorkspaceRuntimeService → AgentRuntime`。
+- Desktop：`Renderer → sandbox preload bridge → Electron Main → LocalRuntimeClient → daemon → WorkspaceRuntimeService → AgentRuntime`。
 
-Desktop 进入 daemon 后使用版本化本机 IPC 协议、4 字节长度前缀 JSON 帧和 1 MiB 帧上限；端点是 POSIX socket 或 Windows named pipe，并带本机认证。它是同一用户边界内的内部协议，不是网络服务。
+本机协议使用版本化的 4 字节长度前缀 JSON 帧，单帧上限 1 MiB；端点是 POSIX socket 或
+Windows named pipe。当前承重边界是私有 endpoint、进程/文件权限、workspace root authority
+和协议方法白名单；它面向当前 OS 用户，不是网络 API。
 
 ### 一次运行如何闭环
 
-1. **解析入口与信任**：按工作区真实路径建立信任并读取设备级/项目级配置。模型路由按 Run 固定；TUI 在宿主启动时复用 Plugin 快照，Desktop 未由宿主注入时按 Run 加载和释放；Hook 可热重载但单次 dispatch 使用一致快照；后台 Job 不加载 Plugin，并使用创建时冻结的策略。
+1. **解析入口与信任**：daemon 按工作区真实路径建立信任并读取设备级/项目级配置。模型路由按 Run 固定；Hook 可热重载但单次 dispatch 使用一致快照；后台 Job 不加载 Plugin，并使用创建时冻结的策略。
 2. **组装上下文**：`PromptComposer` 汇总系统约束、`AGENTS.md`、Skills、会话历史与当前状态；接近预算时先缩短旧 ToolResult 请求投影，仍不足时在完整工具批次边界写 Runtime 摘要 checkpoint。
 3. **模型决策**：Engine 通过统一 Message Schema 调用选定模型；单阶段 ReAct 在一轮响应里返回文本和工具调用。
 4. **受控执行**：Engine 的 `ToolScheduler` 根据 Registry 提供的资源访问声明决定并发。每次执行先过 hardline/Plan 门禁，再运行 `PreToolUse`；Hook 改写输入后重跑前置门禁，最后进入模式对应的权限/审批并调用文件、Bash、MCP 或委派能力。
@@ -65,13 +76,14 @@ Desktop 进入 daemon 后使用版本化本机 IPC 协议、4 字节长度前缀
 
 状态不是写进一份“万能文件”。Agent 事实与任务控制面共享 workspace 状态根目录，但使用不同逻辑账本和所有者：
 
-- `RuntimeEventStore` 以 `sessions/<session-hash>/session.jsonl` 保存每个 Session 的 Agent 事实，并投影出 Run、消息、工具调用、usage 等查询视图。
-- `TaskRunStore` 以 `task-runs/<task-run-hash>/task.jsonl` 保存显式可恢复任务跨 Attempt 的事实、执行租约、安全边界和启动凭据；它只引用 RuntimeEvent 高水位，不复制 Agent 事件。
-- `RuntimeStore` 以 `control/state.json` 保存 Job、Cron 与调度状态；`control/daemon-events.jsonl` 是 daemon 通知账本，不是 Agent 事实日志。
-- `.storage/layout.json` 保存稳定 `storageRootId` 与物理目录身份；`.storage/commit.json` 与 `.storage/lock/` 为 Session、TaskRun 和控制面提供共享事务协调。
-- `MemoryRepository` 以 `memory/state.json` 保存版本化的 settings、sources、facts、proposals、审计和幂等记录；忘记操作会清除实时文件中的结构化明文。
-- 文件历史、计划/待办和 Skill 结果使用独立 sidecar；大体积工具输出进入 Evidence CAS，只把
-  canonical 有界投影和 `pico://evidence/...` 引用交给模型。
+- 每个 workspace 使用一个 `$PICO_HOME/workspaces/<workspace-id>/pico.sqlite`；`node:sqlite`
+  以 WAL 和 `synchronous=FULL` 承载事实、控制状态和事务边界。
+- `SqliteRuntimeEventStore` 拥有 Session、Run、消息、工具调用与 Transcript 事实及其投影。
+- `SqliteTaskRunStore` 保存显式可恢复任务跨 Attempt 的输入、checkpoint、租约与启动凭据；它只引用 RuntimeEvent 边界，不复制 Agent 事件。
+- `SqliteRuntimeControlStore` 保存 Job、Cron、daemon run、usage、provider call 与生命周期控制状态。
+- `SqliteMemoryRepository` 保存 settings、sources、facts、proposals、审计与幂等记录；长期 Fact 与 Session/EventLog 生命周期分离。
+- Plan、Todo、会话目录、文件历史 manifest 和跨存储 operation 等状态也进入同一数据库的独立 scope；Trace、文件内容 blob 和临时 staging 仍按各自生命周期保留为 sidecar。
+- ToolResult 在入口处限制为 1 MiB：限内正文以 `storage: "inline"` 写入事实，超限改写为合成错误并提示模型缩小命令输出；旧 Evidence 引用只读兼容，`read_evidence` 已退役。
 
 ## 核心能力
 
@@ -90,9 +102,10 @@ Desktop 进入 daemon 后使用版本化本机 IPC 协议、4 字节长度前缀
 
 ### 前置条件
 
-- Node.js `22.13+`、`24.3+` 或 `26.x`（只支持仍在维护的偶数主版本）
+- Node.js `22.19+`、`24.3+` 或 `26.x`（只支持仍在维护的偶数主版本）
 - npm
-- Windows 使用 Bash 工具时需要 Git for Windows，或让 `PICO_SHELL_PATH` 指向可信的 `bash.exe`
+- Windows 默认使用 PowerShell 7（`pwsh`），不可用时回退 Windows PowerShell 5.1；也可用
+  `PICO_SHELL_PATH` 显式指定受支持的 PowerShell 或 Bash
 
 仓库的 `.nvmrc` 和 `.node-version` 默认选择当前 LTS Node 24；Node 22 是最低兼容线，Node 26 作为新版兼容线由 CI 持续验证。
 
@@ -127,15 +140,16 @@ npm run dev
 }
 ```
 
-Runtime、Memory 和 usage 使用本地 JSON/JSONL，不依赖 Node/Electron 原生数据库模块。`PICO_HOME` 必须位于支持原子 `mkdir`、同目录 `rename` 与 `fsync` 的本地文件系统；`npm run check:storage` 会在启动和验证前探测这些能力。
+Runtime、Memory、TaskRun 和控制状态使用 Node 内置 `node:sqlite` 写入 workspace 的
+`pico.sqlite`，不依赖额外的原生数据库包。`npm run check:storage` 会在启动和验证前检查
+Node 版本是否满足 `node:sqlite` 能力要求。
 
-指定工作区、协议和模型：
+指定工作区和模型路由：
 
 ```bash
 npm run dev -- \
   --dir /path/to/project \
-  --provider openai \
-  --model your-model
+  --model my-provider/my-model
 ```
 
 构建并在其他项目目录使用 `pico`：
@@ -165,9 +179,10 @@ TUI 与 Desktop 共用 `$PICO_HOME`，默认是 `~/.pico`：
 | 路径/变量                            | 用途                                                           |
 | ------------------------------------ | -------------------------------------------------------------- |
 | `$PICO_HOME/config.json`             | 设备级 Provider、模型列表、默认路由及可选 API Key（权限 0600） |
+| `$PICO_HOME/mcp.json`                | 用户级 MCP 定义；与受信项目配置合并                            |
 | `$PICO_HOME/trusted-workspaces.json` | 按 `realpath` 记录的工作区信任                                 |
 | `.pico/config.json`                  | 受信项目的命令、兼容项、LSP 与沙箱配置                         |
-| `.pico/mcp.json`                     | 受信项目的 MCP 配置；`.claw/mcp.json` 仅作旧版只读回退         |
+| `.pico/mcp.json`                     | 受信项目的 MCP 配置；同名项覆盖用户级定义                      |
 | `PICO_HOME`                          | 切换整套配置、Session、daemon endpoint 与本地 Runtime 命名空间 |
 
 模型路由必须来自用户配置；当前 Session/CLI 只能在用户配置提供的路由中显式选择。裸环境变量和项目配置不再注入 Provider 或默认模型。
@@ -180,7 +195,7 @@ TUI 与 Desktop 共用 `$PICO_HOME`，默认是 `~/.pico`：
 | `LLM_API_KEY` / `LLM_API_KEYS`       | 迁移输入，或由用户 Provider 的 `apiKeyEnv` 显式引用 |
 | `SEARCH_API_BASE` / `SEARCH_API_KEY` | 可选的 `web_search` 服务                            |
 | `PICO_TRACE`                         | 开启运行追踪                                        |
-| `PICO_SHELL_PATH`                    | 覆盖 Bash 可执行文件；Windows 必须指向 Bash         |
+| `PICO_SHELL_PATH`                    | 覆盖宿主 Shell；可指向受支持的 Bash 或 PowerShell   |
 
 TUI 为避免 Pino 输出破坏 Ink 画面，会把进程日志级别固定为 `silent`；用户可见错误仍通过 UI Reporter 呈现。
 
@@ -211,11 +226,11 @@ TUI 为避免 Pino 输出破坏 Ink 画面，会把进程日志级别固定为 `
 
 ## 平台与发布边界
 
-| 平台    | TUI / Runtime                                           | Desktop                                             |
-| ------- | ------------------------------------------------------- | --------------------------------------------------- |
-| macOS   | 支持并运行完整确定性集成测试                            | CI 未签名打包；arm64/x64 有签名、公证发布工作流     |
-| Windows | 支持；Bash 依赖 Git for Windows，并运行独立安全集成测试 | CI 类型检查、安全集成与未签名打包；暂不公开签名发布 |
-| Linux   | 支持；主 CI、构建与包内容验证在 Ubuntu 执行             | 当前没有 Desktop CI 或发布入口                      |
+| 平台    | TUI / Runtime                                     | Desktop                                             |
+| ------- | ------------------------------------------------- | --------------------------------------------------- |
+| macOS   | 支持并运行完整确定性集成测试                      | CI 未签名打包；arm64/x64 有签名、公证发布工作流     |
+| Windows | 支持；默认使用 PowerShell，并运行独立安全集成测试 | CI 类型检查、安全集成与未签名打包；暂不公开签名发布 |
+| Linux   | 支持；主 CI、构建与包内容验证在 Ubuntu 执行       | 当前没有 Desktop CI 或发布入口                      |
 
 Linux 上完整验证 ACL/xattr/文件能力需要 `acl`、`attr`、`libcap2-bin` 等系统工具；CI 会显式安装它们。
 
@@ -223,7 +238,7 @@ Linux 上完整验证 ACL/xattr/文件能力需要 `acl`、`attr`、`libcap2-bin
 
 | 命令                               | 验证内容                                              |
 | ---------------------------------- | ----------------------------------------------------- |
-| `npm run check:storage`            | 本地文件锁、原子 rename、权限与 fsync 能力            |
+| `npm run check:storage`            | Node 版本与内置 `node:sqlite` 能力                    |
 | `npm run typecheck`                | Runtime、TUI 与共享 TypeScript 类型                   |
 | `npm run desktop:typecheck`        | Desktop main、preload、renderer 类型边界              |
 | `npm run lint`                     | 根项目、Desktop、测试与脚本的 ESLint 检查             |

@@ -1,30 +1,70 @@
 # 本机 Runtime IPC 安全边界
 
-## 平台边界
+> 文档类型：当前安全边界。这里描述 `packages/runtime-host` 承载的生产传输；
+> `src/daemon/ipc-auth.ts`、旧 socket server 和 instance-lock token 只服务退役传输的升级守卫，
+> 不是当前 TUI/Desktop 握手协议。
 
-- macOS/Linux 使用 Unix domain socket。父目录固定为 `0700`，socket 与认证文件固定为
-  `0600`，并在使用前验证不得有 group/world 权限。
-- Windows 使用 Named Pipe。Pipe 名中的用户哈希只用于名称隔离，**不是身份认证**。
-- Node.js `net.Server.listen()` 只提供 `readableAll` / `writableAll` 开关，默认均为
-  `false`，但不提供 Win32 `SECURITY_DESCRIPTOR` 或 logon SID DACL 接口。Pico 显式保持这两个
-  开关为 `false`，不能据此宣称 Pipe 已配置严格的每用户 ACL。
-- Microsoft 说明，`CreateNamedPipe` 的默认安全描述符可能给予 Everyone 和 anonymous
-  读取权限；若要隔离远程用户或不同登录会话，应在 DACL 中使用 logon SID。由于 Node API
-  无法直接表达该 DACL，Pico 额外实施版本化应用层认证。
+## 信任模型
 
-一手资料：
+Runtime Host 面向同一台机器、同一个 OS 用户下的 TUI 与 Desktop。它不是多租户服务，也不把
+本机 IPC 暴露为网络 API。当前连接主体统一建模为 `local_os_user`；安全边界由以下机制共同组成：
 
-- [Node.js `server.listen(options)`](https://nodejs.org/docs/latest-v22.x/api/net.html#serverlistenoptions-callback)
-- [Microsoft：Named Pipe Security and Access Rights](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights)
+1. 私有 endpoint 与当前用户的文件/进程权限；
+2. 持久 registration 中的 `rootId`、`hostEpoch` 和协议兼容范围；
+3. storage root capability、读写 lease 与物理目录身份绑定；
+4. 类型化 operation registry、参数校验与 Desktop Preload allowlist；
+5. workspace trust、Permission/Approval、Hardline 和 Hook 安全链。
 
-## 应用层认证
+这套边界不防御已经取得同一 OS 用户权限的恶意进程，也不等同于 OS sandbox。
 
-1. daemon 每次启动生成并轮换 256-bit 随机令牌。
-2. 首个 IPC 帧必须是 `authVersion: 1` 的认证帧；认证前不能调用 `runtime.ping`、订阅事件或
-   任何运行方法。
-3. 服务端使用常量时间比较；失败只返回通用认证错误并立即关闭连接，令牌不会写入日志。
-4. POSIX 令牌由文件权限保护。Windows 令牌存放于用户 LocalAppData，启动和连接时通过
-   `whoami.exe` 获取当前 SID，并用无 shell 的 `icacls.exe` 参数调用移除继承、仅授予该 SID
-   完全控制。SID 获取或 ACL 收紧失败时 fail-closed。
-5. 认证令牌不取代 OS ACL：管理员权限、同一用户进程和已被攻陷的用户会话仍在信任边界内。
-   如果未来引入能够传入 Win32 安全描述符的受审计原生传输，应继续保留握手作为纵深防御。
+## 平台 endpoint
+
+### macOS / Linux
+
+- 使用 Unix domain socket。
+- endpoint 位于 `mkdtemp` 创建的当前 UID 私有目录；目录强制为 `0700`。
+- listen 后 socket 强制为 `0600`，并复核它是 socket、owner UID 等于当前用户且没有
+  group/world 权限。
+- endpoint 名包含 storage root identity 和 owner pid；启动时只清理能够证明 owner 已死亡的
+  同 root 遗留目录，不猜测删除未知目录。
+
+### Windows
+
+- 使用 Named Pipe，名称包含 `rootId` 前缀与 `hostEpoch`，用于实例隔离而不是密码认证。
+- Node 的 `net` API 不能在这里表达完整的 logon-SID `SECURITY_DESCRIPTOR`；因此文档不能宣称
+  pipe 已配置显式的每用户 DACL。
+- 当前产品边界仍是同一 OS 用户的本机工作台。若未来需要抵抗其他登录会话或更强的本机对手，
+  应引入可审计的 Win32 peer/DACL 能力，而不是把名称随机性当作认证。
+
+## 握手与协议
+
+当前第一帧是 `ClientHello`，包含：
+
+- client instance ID 与 surface；
+- client 支持的 protocol min/max；
+- compatibility epoch。
+
+Host 返回 accepted、incompatible 或 draining。握手用于版本协商与生命周期收敛，**不携带
+bearer token**。后续帧使用 4 字节长度前缀 JSON，单帧上限 1 MiB；未知 operation、非法参数、
+不兼容版本和越界帧都会被拒绝。
+
+## Root authority
+
+Runtime Host 启动时取得绑定到 canonical path、`rootId` 和物理 dev/ino 的 capability，并通过
+OS handle/lease 维持读写所有权。业务 handler 只能拿到经过认证的 typed owner/reader，不能用
+任意字符串路径伪造另一个 storage root。根目录被替换、复制或移动后必须 fail-closed；显式
+adopt/repair 是独立流程。
+
+## Renderer 边界
+
+- Desktop Renderer 开启 context isolation、关闭 Node integration。
+- Preload 只暴露逐方法、可校验 API，不暴露通用 `send`、`invoke`、Shell 或任意 channel。
+- Renderer 不读取 host registration、Runtime 文件或已有 Provider secret。
+- write-only secret 只在明确的配置请求中短暂经过 Renderer，不进入响应、事件或 UI store。
+
+## 不承诺的能力
+
+- 不防御管理员/root、同一用户下的恶意进程或已被攻陷的用户会话。
+- 不把协议版本协商描述为身份认证。
+- 不把 Windows Named Pipe 名称或默认 ACL 描述为严格的每用户隔离。
+- 不用 IPC 边界替代 workspace trust、工具权限、Hardline、审批或 OS sandbox。

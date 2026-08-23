@@ -1,5 +1,9 @@
 # 第 2 章 · 接上不同的大脑
 
+> 文档状态：历史课程快照。文中的最小 Provider 接口、环境变量配置和自动 fallback 是早期
+> 方案；当前接口包含流式与能力元数据，模型必须通过用户 Provider 路由显式解析。当前事实见
+> [Provider 与产品入口](architecture/04-provider-entry.md)。
+
 第 1 章的 Agent 循环能跑了。但有一个硬伤：**它绑死了一种大模型。**
 
 代码里写了 `provider.generate(context, tools)`，但如果我想从 OpenAI 的 GPT-4 换成 Anthropic 的 Claude，会发生什么？请求格式完全不同——字段名不一样、嵌套结构不一样、连 HTTP Header 都不一样。

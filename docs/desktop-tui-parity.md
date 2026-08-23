@@ -1,11 +1,18 @@
 # Pico Desktop 与 TUI 入口一致性规范
 
+> 文档状态：目标/验收规格，不是已实现能力清单。表格中的“主路径”和“高级入口”表示目标
+> 等级；是否已经交付必须回查 `apps/desktop/`、`packages/protocol/` 与当前集成测试。特别是
+> MCP 活连接管理、Slash 补全和 additional-directory UI 仍可能只有部分协议或 TUI 能力。
+
 本文是 Pico Desktop 会话化改造的可验收入口映射。Desktop 是 TUI/Runtime 的图形宿主，不创建第二套任务、Session 或运行控制语义。
 
 ## 事实来源与术语
 
 - TUI 命令及其可用状态以 [`src/input/pico-command-registry.ts`](../src/input/pico-command-registry.ts) 和 [`src/input/command-availability.ts`](../src/input/command-availability.ts) 为准。
-- 运行中输入路由以 [`src/tui/repl.tsx`](../src/tui/repl.tsx) 为准：普通输入默认 Steer，`/queue` 排入下一轮，`/replace` 中断并替换，`/interrupt` 中断并清空队列。
+- 运行中输入路由以 [`src/tui/client-repl.tsx`](../src/tui/client-repl.tsx)、
+  [`src/tui/client-session-runtime.ts`](../src/tui/client-session-runtime.ts) 和
+  [`src/tui/client-commands.ts`](../src/tui/client-commands.ts) 为准：普通输入默认 Steer，
+  `/queue` 排入下一轮，`/replace` 中断并替换，`/interrupt` 中断并清空队列。
 - Session 持久化和恢复以 [`src/engine/session.ts`](../src/engine/session.ts)、[`src/tui/session-hydration.ts`](../src/tui/session-hydration.ts) 为准。
 - 当前 Desktop 路由与能力缺口以 [`apps/desktop/src/renderer/App.tsx`](../apps/desktop/src/renderer/App.tsx)、[`apps/desktop/src/renderer/runtime.ts`](../apps/desktop/src/renderer/runtime.ts) 和 [`packages/protocol/src/runtime.ts`](../packages/protocol/src/runtime.ts) 为准。
 

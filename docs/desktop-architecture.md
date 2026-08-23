@@ -17,21 +17,26 @@ Electron Main
 Pico daemon ── Agent Runtime / Session / Rewind / Automations
 ```
 
-- Renderer 不启用 Node.js，不读取文件、daemon token 或已有 Provider 密钥。用户新输入的密钥只在 write-only 提交流程中短暂经过 Renderer。
+- Renderer 不启用 Node.js，不读取文件、Runtime registration 或已有 Provider 密钥。用户新输入的密钥只在 write-only 提交流程中短暂经过 Renderer。
 - Preload 不暴露通用 `send`、`invoke`、Shell 或任意 channel。
 - Main 只负责窗口、系统集成、更新和本机 daemon 连接，不复制业务状态机。
-- daemon 保持当前用户本机 IPC；首次帧必须通过轮换 token 认证。
+- daemon 保持当前用户本机 IPC。POSIX endpoint 位于当前 UID 的 0700 私有目录且 socket 为
+  0600；协议把连接主体限定为 `local_os_user`，业务操作还必须通过 typed root authority 与
+  方法级校验。当前 runtime-host 握手不包含 bearer token。
 
 ## 数据所有权
 
 - `$PICO_HOME`：RuntimeEvent Session 账本、信任、daemon 注册等跨 CLI/App 的统一状态根。
 - 工作区 `.pico`：项目配置，受工作区信任边界约束；`.claw` 仅是只读 legacy 来源。Runtime 数据不写入项目目录。
-- Electron `userData`：窗口尺寸、主题、更新通道等纯界面状态。
+- Electron `userData`：当前只持久化窗口 bounds 与 maximized 状态；主题和更新通道不在该
+  store 的已实现范围内。
 - Provider 密钥：Runtime 只返回状态与 `credentialRef`；保存时原始值通过类型化 write-only 请求送到 daemon，不进入响应、事件、Renderer Store、持久配置或日志。发布构建默认禁用持久密钥；macOS `/usr/bin/security` 仅是显式开启的不安全本地开发兼容层，正式版本需由签名的 Pico Credential Broker/XPC 直接访问 Keychain。
 
 ## 平台边界
 
-共享代码负责 React、协议、Agent Runtime 和数据格式。`platform/darwin` 与 `platform/win32` 分别实现系统通知、目录定位、自启动、凭证、PTY 与后台服务。安装、签名和更新流水线按平台分开，Windows 安全能力未与 macOS 对齐前不公开发布。
+共享代码负责 React、协议、Agent Runtime 和数据格式。当前 `platform/darwin` 与
+`platform/win32` 适配系统通知、目录打开和 login item；凭证 broker、PTY 与独立后台服务不是
+这层现有接口。安装、签名和更新流水线按平台分开，Windows 安全能力未与 macOS 对齐前不公开发布。
 
 ## 兼容与失败语义
 
