@@ -118,6 +118,8 @@ export function TasksWorkbarPanel({
         <label>
           <span className="sr-only">新待办标题</span>
           <input
+            name="workbar-task-title"
+            autoComplete="off"
             value={title}
             placeholder="添加待办…"
             disabled={readOnly || creating || !ledger}
@@ -169,6 +171,7 @@ export function TasksWorkbarPanel({
                   <label className="tool-panel__task-status">
                     <span className="sr-only">更新“{task.title}”状态</span>
                     <select
+                      name={`workbar-task-status-${task.id}`}
                       value={task.status}
                       disabled={readOnly || updating}
                       onChange={(event) => {
