@@ -68,6 +68,12 @@ export function registerDesktopIpcHandlers(options: {
   const trusted = (event: IpcMainInvokeEvent | IpcMainEvent): boolean =>
     event.sender === options.getTrustedWebContents() && !event.sender.isDestroyed();
 
+  const closeCommittedBrowserSession = async (sessionId: string): Promise<void> => {
+    await browser.close(sessionId).catch((error: unknown) => {
+      console.error("Pico committed Session browser cleanup failed", error);
+    });
+  };
+
   ipcMain.handle(DESKTOP_IPC_CHANNELS.runtimeInvoke, async (event, value: unknown) => {
     if (!trusted(event)) return unauthorized();
     try {
@@ -99,14 +105,14 @@ export function registerDesktopIpcHandlers(options: {
       ) {
         const rawParams: unknown = params;
         const sessionId = isRecord(rawParams) ? rawParams["sessionId"] : undefined;
-        if (isNonEmptyString(sessionId)) await browser.close(sessionId);
+        if (isNonEmptyString(sessionId)) await closeCommittedBrowserSession(sessionId);
         const rawResult: unknown = result;
         if (envelope.method === "session.delete" && isRecord(rawResult)) {
           const closedSessionIds = rawResult["closedSessionIds"];
           if (Array.isArray(closedSessionIds)) {
             for (const closedSessionId of closedSessionIds) {
               if (isNonEmptyString(closedSessionId) && closedSessionId !== sessionId) {
-                await browser.close(closedSessionId);
+                await closeCommittedBrowserSession(closedSessionId);
               }
             }
           }
