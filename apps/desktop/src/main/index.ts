@@ -36,6 +36,9 @@ const lifecycle = new DesktopLifecycleController(() => mainWindow);
 const browser = createEmbeddedBrowserAuthority({
   getWindow: () => mainWindow,
   userDataPath: app.getPath("userData"),
+  onRevoke: async (sessionId, generation) => {
+    await runtime.request("browser.agent.lease", { sessionId, visible: false, generation });
+  },
   onState: (state) => {
     const contents = mainWindow?.webContents;
     if (!contents || contents.isDestroyed()) return;
