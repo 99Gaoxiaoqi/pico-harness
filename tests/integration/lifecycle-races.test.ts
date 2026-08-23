@@ -7,6 +7,7 @@ import { setImmediate as waitForImmediate, setTimeout as delay } from "node:time
 import { test } from "node:test";
 import {
   createDesktopDaemonShutdownFence,
+  createDesktopTerminalCleanupFence,
   type DesktopDaemonShutdownFenceOptions,
 } from "../../apps/desktop/src/main/daemon-controller.js";
 import {
@@ -686,6 +687,41 @@ test("Desktop daemon shutdown fence times out once and clears a completed timer"
   completedTimers.fire();
   assert.equal(completedQuitCount, 1);
   assert.deepEqual(completedErrors, []);
+});
+
+test("Desktop terminal cleanup fence blocks repeated quit until terminal groups are released", async () => {
+  const cleanup = deferred();
+  const timers = manualTimers();
+  let cleanupCount = 0;
+  let quitCount = 0;
+  let prevented = 0;
+  const errors: unknown[] = [];
+  const fence = createDesktopTerminalCleanupFence(
+    {
+      stopAll: async () => {
+        cleanupCount++;
+        await cleanup.promise;
+      },
+    },
+    () => quitCount++,
+    (error) => errors.push(error),
+    timers.options,
+  );
+
+  fence({ preventDefault: () => prevented++ });
+  fence({ preventDefault: () => prevented++ });
+  await waitForImmediate();
+  assert.equal(cleanupCount, 1);
+  assert.equal(prevented, 2);
+  assert.equal(quitCount, 0);
+
+  cleanup.resolve();
+  await waitForImmediate();
+  assert.equal(quitCount, 1);
+  assert.deepEqual(errors, []);
+  assert.equal(timers.cleared, true);
+  fence({ preventDefault: () => prevented++ });
+  assert.equal(prevented, 2, "cleanup 完成后的第二次 app.quit 必须放行");
 });
 
 test("Hook reloader stop fences an in-flight reload and supports a fresh generation", async (context) => {

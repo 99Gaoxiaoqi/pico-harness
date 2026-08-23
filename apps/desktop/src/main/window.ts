@@ -5,6 +5,7 @@ import { createWindowState, WindowStateStore } from "./window-state.js";
 export interface DesktopWindowOptions {
   readonly userDataPath: string;
   readonly onClosed: () => void;
+  readonly onRendererGone?: (() => void) | undefined;
   readonly shouldKeepInBackground: () => boolean;
 }
 
@@ -33,7 +34,7 @@ export async function createDesktopWindow(options: DesktopWindowOptions): Promis
   });
 
   if (state.maximized) window.maximize();
-  configureWebContentsSecurity(window);
+  configureWebContentsSecurity(window, options.onRendererGone);
 
   window.once("ready-to-show", () => window.show());
   window.on("close", (event) => {
@@ -68,13 +69,17 @@ export function isAllowedNavigation(target: string, current: string): boolean {
   }
 }
 
-function configureWebContentsSecurity(window: BrowserWindow): void {
+function configureWebContentsSecurity(
+  window: BrowserWindow,
+  onRendererGone: (() => void) | undefined,
+): void {
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.webContents.on("will-navigate", (event, target) => {
     if (!isAllowedNavigation(target, window.webContents.getURL())) event.preventDefault();
   });
   window.webContents.on("will-attach-webview", (event) => event.preventDefault());
   window.webContents.on("render-process-gone", () => {
+    onRendererGone?.();
     if (!window.isDestroyed()) window.hide();
   });
   session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => {

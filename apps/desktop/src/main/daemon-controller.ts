@@ -20,6 +20,65 @@ export interface DesktopDaemonShutdownFenceOptions {
   clearTimeout?: (handle: unknown) => void;
 }
 
+export type DesktopTerminalCleanupFenceOptions = DesktopDaemonShutdownFenceOptions;
+
+/**
+ * Workbar terminals are not restored across Desktop restarts, while the Runtime daemon is.
+ * Fence Electron shutdown until the daemon has released every terminal it still owns.
+ */
+export function createDesktopTerminalCleanupFence(
+  terminal: { stopAll(): Promise<void> },
+  quit: () => void,
+  onStopError: (error: unknown) => void,
+  options: DesktopTerminalCleanupFenceOptions = {},
+): (event: DesktopBeforeQuitEvent) => void {
+  let cleanupPromise: Promise<void> | undefined;
+  let timeoutHandle: unknown;
+  let timeoutPending = false;
+  let finished = false;
+  const timeoutMs = options.timeoutMs ?? 5_000;
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+    throw new RangeError("Desktop terminal cleanup timeoutMs 必须是非负有限数");
+  }
+  const scheduleTimeout =
+    options.setTimeout ??
+    ((callback: () => void, delayMs: number) => setTimeout(callback, delayMs));
+  const cancelTimeout =
+    options.clearTimeout ??
+    ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+
+  const finish = (error?: unknown): void => {
+    if (finished) return;
+    finished = true;
+    if (timeoutPending) {
+      cancelTimeout(timeoutHandle);
+      timeoutPending = false;
+      timeoutHandle = undefined;
+    }
+    try {
+      if (error !== undefined) onStopError(error);
+    } finally {
+      quit();
+    }
+  };
+
+  return (event) => {
+    if (finished) return;
+    event.preventDefault();
+    if (cleanupPromise) return;
+    cleanupPromise = Promise.resolve().then(() => terminal.stopAll());
+    timeoutHandle = scheduleTimeout(
+      () => finish(new Error(`Pico desktop terminal cleanup exceeded ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+    timeoutPending = true;
+    void cleanupPromise.then(
+      () => finish(),
+      (error) => finish(error),
+    );
+  };
+}
+
 /** Keeps every repeated before-quit event fenced until the owned daemon finishes draining. */
 export function createDesktopDaemonShutdownFence(
   daemon: { ownsProcess: boolean; stop(): Promise<void> },
