@@ -29,6 +29,7 @@ export interface SessionSettings {
   title?: string;
   sessionMode: SessionMode;
   forkFrom?: string;
+  sideConversation?: boolean;
   cwd: string;
   provider: ProviderKind;
   mode: InteractionMode;
@@ -470,6 +471,16 @@ export function setSessionOrchestrationMode(
   };
 }
 
+export function setSessionSideConversation(
+  settings: SessionSettings,
+  enabled: boolean,
+): SessionSettingResult {
+  if (enabled) settings.sideConversation = true;
+  else delete settings.sideConversation;
+  persistSessionSettings(settings);
+  return { ok: true, message: enabled ? "Side conversation enabled" : "Side conversation disabled" };
+}
+
 export function setSessionPermissionMode(
   settings: SessionSettings,
   mode: string,
@@ -747,6 +758,7 @@ export function snapshotSessionSettings(settings: SessionSettings): PersistedSes
   return {
     ...(settings.title !== undefined ? { title: settings.title } : {}),
     ...(settings.forkFrom !== undefined ? { forkFrom: settings.forkFrom } : {}),
+    ...(settings.sideConversation === true ? { sideConversation: true } : {}),
     provider: settings.provider,
     model: settings.model,
     modelRouteId,
@@ -773,6 +785,8 @@ function applyPersistedSessionSettings(
   } else {
     delete settings.forkFrom;
   }
+  if (persisted.sideConversation === true) settings.sideConversation = true;
+  else delete settings.sideConversation;
   settings.provider = persisted.provider;
   settings.model = persisted.model;
   settings.modelRouteId = persisted.modelRouteId;

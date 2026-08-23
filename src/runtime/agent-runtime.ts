@@ -921,6 +921,7 @@ export async function executeAgentRuntime(
       { persistence: session, ...(backgroundPolicy ? { restore: false } : {}) },
     );
     if (!settings.collaborationMode) throw new Error("Session collaborationMode is unavailable");
+    const sideConversation = settings.sideConversation === true;
     const collaborationMode = (): "agent" | "plan" => settings.collaborationMode!;
     planRun = collaborationMode() === "plan";
     const orchestrationMode = (): "default" | "graph" =>
@@ -1543,7 +1544,7 @@ export async function executeAgentRuntime(
     }
     // 记忆触发器工具只标记意图；executor 在 completed terminal 落盘后统一入队。
     const memoryTriggerSlot: MemoryTriggerSlot = { trigger: undefined };
-    if (memoryReviewScheduler && memoryReviewMode !== "eco") {
+    if (!sideConversation && memoryReviewScheduler && memoryReviewMode !== "eco") {
       for (const tool of buildMemoryTriggerTools(memoryTriggerSlot)) {
         registry.register(tool);
       }
@@ -1583,6 +1584,19 @@ export async function executeAgentRuntime(
           : {}),
       }).buildLayers();
       const turnTailParts = composed.turnTail ? [composed.turnTail] : [];
+      if (sideConversation) {
+        turnTailParts.push(
+          [
+            "<side-conversation-boundary>",
+            "This is a temporary side conversation. Inherited parent history is reference context only.",
+            "Only instructions explicitly submitted by the user in this side conversation are active.",
+            "Use tools or modify workspace state only when the current side-conversation request explicitly asks for it and the inherited permission profile allows it.",
+            "Do not spawn or coordinate sub-agents and do not change the parent conversation itself.",
+            "Messages and task state are not written back to the parent; workspace changes may be visible to both conversations.",
+            "</side-conversation-boundary>",
+          ].join("\n"),
+        );
+      }
       if (collaborationMode() === "plan" && session.runtimeEventStore) {
         const projection = await new PlanCoordinator(
           session.runtimeEventStore,
@@ -1591,7 +1605,7 @@ export async function executeAgentRuntime(
         const revisionTail = planRevisionRequestTurnTail(projection);
         if (revisionTail) turnTailParts.push(revisionTail);
       }
-      if (memoryContextBuilder) {
+      if (!sideConversation && memoryContextBuilder) {
         try {
           const canonical = await memoryTrustStore.canonicalize(workDir);
           if (await memoryTrustStore.isTrusted(canonical)) {
@@ -2044,8 +2058,8 @@ export async function executeAgentRuntime(
       ...(dependencies.signal ? { signal: dependencies.signal } : {}),
       ...(dependencies.onEvent ? { onEvent: dependencies.onEvent } : {}),
       ...(dependencies.rewindPointSink ? { rewindPointSink: dependencies.rewindPointSink } : {}),
-      ...(memoryReviewScheduler ? { memoryReviewScheduler } : {}),
-      ...(memoryReviewScheduler ? { memoryTriggerSlot } : {}),
+      ...(!sideConversation && memoryReviewScheduler ? { memoryReviewScheduler } : {}),
+      ...(!sideConversation && memoryReviewScheduler ? { memoryTriggerSlot } : {}),
       planHandoff,
       planCoordinator: () => {
         const submitted = planHandoff.result();

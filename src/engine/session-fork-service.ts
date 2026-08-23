@@ -801,6 +801,7 @@ function filterForkSettings(
   return {
     ...(sourceTitle ? { title: forkTitleFrom(sourceTitle) } : {}),
     forkFrom: sourceSessionId,
+    ...(settings.sideConversation === true ? { sideConversation: true } : {}),
     provider: settings.provider,
     model: settings.model,
     modelRouteId: settings.modelRouteId,

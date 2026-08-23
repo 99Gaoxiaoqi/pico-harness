@@ -11,6 +11,7 @@ import { createDesktopWindow } from "./window.js";
 import { configureAutoUpdates } from "./updater.js";
 import { installApplicationMenu } from "./menu.js";
 import { sleepForRetry } from "../../../../src/provider/retry.js";
+import { createEmbeddedBrowserAuthority } from "./browser-manager.js";
 
 let mainWindow: BrowserWindow | undefined;
 let disposeIpc: (() => void) | undefined;
@@ -26,6 +27,14 @@ const runtime = new LocalDaemonRuntimeClientAdapter(undefined, {
     : { candidateEntrypoint: resolve(app.getAppPath(), "../../src/daemon/main.ts") }),
 });
 const lifecycle = new DesktopLifecycleController(() => mainWindow);
+const browser = createEmbeddedBrowserAuthority({
+  getWindow: () => mainWindow,
+  onState: (state) => {
+    const contents = mainWindow?.webContents;
+    if (!contents || contents.isDestroyed()) return;
+    contents.send(DESKTOP_IPC_CHANNELS.browserState, state);
+  },
+});
 const requestDesktopShutdown = (exitCode?: number): void => {
   if (exitCode !== undefined) process.exitCode = exitCode;
   lifecycle.markQuitting();
@@ -69,6 +78,7 @@ if (!app.requestSingleInstanceLock()) {
     disposeIpc?.();
     disposeUpdater?.();
     runtime.close();
+    void browser.dispose();
   });
   app.on("window-all-closed", () => {
     if (process.platform !== "darwin" && !lifecycle.shouldKeepInBackground()) app.quit();
@@ -96,6 +106,7 @@ if (!app.requestSingleInstanceLock()) {
         runtime,
         platform,
         lifecycle,
+        browser,
       });
       disposeUpdater = configureAutoUpdates(() => lifecycle.markQuitting());
       await openMainWindow();
