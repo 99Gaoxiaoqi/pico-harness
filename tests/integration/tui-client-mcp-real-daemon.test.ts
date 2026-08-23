@@ -4,16 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { isTerminalRunStatus, parseStrictRuntimeParams } from "@pico/protocol";
-import {
-  readHostRegistration,
-  resolveRootControlNamespace,
-  resolveStorageRoot,
-} from "@pico/runtime-host";
 import { LocalRuntimeClient } from "../../src/daemon/index.js";
 import { UserConfigStore } from "../../src/input/user-config-store.js";
 import { ClientSessionRuntime } from "../../src/tui/client-session-runtime.js";
 import { createClientCommandRegistry, processClientInput } from "../../src/tui/client-commands.js";
 import { TuiReporter } from "../../src/tui/tui-reporter.js";
+import { stopRegisteredTestDaemon } from "./helpers/test-runtime-daemon.js";
 
 /**
  * 3-D BLOCKED 收口（/mcp 镜像）：真 daemon 上验证用户级 MCP 服务器配置面
@@ -79,8 +75,8 @@ test("real daemon: /mcp status + enable/disable round trip over user mcp.json", 
   const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome });
   t.after(() => client.close());
   t.after(async () => {
-    // 优雅关停失败时硬杀兜底（t.after LIFO：先关停再删 root）。
-    await stopScenarioDaemon(client, picoHome);
+    // t.after LIFO：精确 PID 退出后才删除 root，SIGTERM 超时仅兜底同一 PID。
+    await stopScenarioDaemon(picoHome);
     await rm(root, { recursive: true, force: true }).catch(() => undefined);
   });
 
@@ -237,27 +233,6 @@ async function waitForCondition(
 }
 
 /** 优雅关停场景专属 daemon；无注册时直接跳过，绝不反向拉起。 */
-async function stopScenarioDaemon(client: LocalRuntimeClient, picoHome: string): Promise<void> {
-  let pid: number | undefined;
-  try {
-    const capability = await resolveStorageRoot({ path: picoHome, kind: "interactive" });
-    const registration = await readHostRegistration(
-      join(resolveRootControlNamespace(), capability.rootId),
-    );
-    pid = registration?.pid;
-  } catch {
-    // 控制目录不可读 = daemon 未运行。
-  }
-  if (pid === undefined) return;
-  try {
-    await client.shutdownDaemon();
-    return;
-  } catch {
-    // 优雅路径失败（连接已死等）退回硬杀。
-  }
-  try {
-    process.kill(pid);
-  } catch {
-    // 已退出。
-  }
+async function stopScenarioDaemon(picoHome: string): Promise<void> {
+  await stopRegisteredTestDaemon(picoHome);
 }

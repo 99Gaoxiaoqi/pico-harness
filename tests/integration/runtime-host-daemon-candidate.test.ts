@@ -28,6 +28,7 @@ import {
 } from "../../src/daemon/index.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { sessionOwnerLeaseDirectory } from "../../src/storage/session-owner-lease.js";
+import { stopExactTestDaemon, stopRegisteredTestDaemon } from "./helpers/test-runtime-daemon.js";
 
 /**
  * 3-B-3 daemon candidate 实盘验证：
@@ -56,6 +57,7 @@ async function startCandidateHarness(t: {
   const env = { PICO_HOME: picoHome };
   const lockPath = resolveLocalDaemonLockPath(resolveLocalDaemonEndpoint({ env }));
   t.after(async () => {
+    await stopRegisteredTestDaemon(picoHome);
     await rm(root, { recursive: true, force: true }).catch(() => undefined);
   });
   return { picoHome, env, lockPath, cleanup: async () => undefined };
@@ -66,6 +68,9 @@ test("daemon candidate: in-process winner serves the full chain and releases the
   const result = await startPicoDaemonRuntimeHostCandidate({
     rootPath: harness.picoHome,
     env: harness.env,
+  });
+  t.after(async () => {
+    if (result.kind === "winner") await result.host.close().catch(() => undefined);
   });
   assert.equal(result.kind, "winner", `期望 winner，实际 ${JSON.stringify(result)}`);
   if (result.kind !== "winner") return;
@@ -162,16 +167,13 @@ test("daemon candidate: connectOrSpawn spawns the pico daemon entrypoint and rea
   );
   assert.ok(ping.result, "spawn 出的 daemon 应答 runtime.ping");
 
-  // 清理：daemon 是常驻进程（持有 residency），测试结束后硬杀（Windows 无跨进程
-  // 优雅信号）；registration/flock/守卫锁均有 pid-dead 恢复语义。
+  // 清理必须等待注册到该隔离 root 的精确 PID 退出，再允许 harness 删除 root。
+  const registration = await readHostRegistration(await findControlDirectory(harness.picoHome));
+  assert.ok(registration);
   await connection.close().catch(() => undefined);
-  try {
-    const controlDirectory = await findControlDirectory(harness.picoHome);
-    const registration = await readHostRegistration(controlDirectory);
-    if (registration) process.kill(registration.pid);
-  } catch {
-    // 已退出或注册不可读：测试通过即达意。
-  }
+  const stoppedPids = await stopRegisteredTestDaemon(harness.picoHome);
+  assert.ok(stoppedPids.includes(registration.pid));
+  assert.equal(await processAlive(registration.pid), false, "teardown 返回前 daemon 必须退出");
 });
 
 test("daemon candidate: runtime.shutdown gracefully stops the resident daemon", async (t) => {
@@ -195,11 +197,8 @@ test("daemon candidate: runtime.shutdown gracefully stops the resident daemon", 
   });
   child.unref();
   t.after(async () => {
-    // 若关停失败（断言已红），兜底硬杀避免残留 daemon。
-    const registration = await readHostRegistration(await findControlDirectory(harness.picoHome));
-    if (registration && (await processAlive(registration.pid))) {
-      process.kill(registration.pid);
-    }
+    // 若关停断言失败，仍按测试直接持有的精确 PID 收口并等待退出。
+    if (child.pid !== undefined) await stopExactTestDaemon(child.pid);
   });
 
   const capability = await resolveStorageRoot({ path: harness.picoHome, kind: "interactive" });
@@ -274,10 +273,7 @@ test("daemon candidate: rolling upgrade drains cached Session lease before succe
   const capability = await resolveStorageRoot({ path: harness.picoHome, kind: "interactive" });
   const controlDirectory = join(resolveRootControlNamespace(), capability.rootId);
   t.after(async () => {
-    const registration = await readHostRegistration(controlDirectory).catch(() => undefined);
-    if (registration && (await processAlive(registration.pid))) {
-      process.kill(registration.pid);
-    }
+    if (oldChild.pid !== undefined) await stopExactTestDaemon(oldChild.pid);
   });
 
   const oldRegistration = await waitForRegistration(controlDirectory, 30_000);

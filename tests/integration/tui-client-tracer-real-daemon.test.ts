@@ -4,16 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { test } from "node:test";
-import {
-  readHostRegistration,
-  resolveRootControlNamespace,
-  resolveStorageRoot,
-} from "@pico/runtime-host";
 import { LocalRuntimeClient } from "../../src/daemon/index.js";
 import { UserConfigStore } from "../../src/input/user-config-store.js";
 import { ClientSessionRuntime } from "../../src/tui/client-session-runtime.js";
 import { createClientCommandRegistry, processClientInput } from "../../src/tui/client-commands.js";
 import { TuiReporter } from "../../src/tui/tui-reporter.js";
+import { stopRegisteredTestDaemon } from "./helpers/test-runtime-daemon.js";
 
 /**
  * 3-D Phase 2 真机冒烟：ClientSessionRuntime 挂真实 LocalRuntimeClient（kernel
@@ -46,10 +42,9 @@ test("client session runtime over a real spawned daemon: send + lifecycle + reco
 
   const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome });
   t.after(() => client.close());
-  // 关停在 client.close 之前执行（t.after LIFO：后注册先跑）——优雅关停依赖
-  // 存活连接，先 close 会退化到注册表硬杀。
+  // t.after LIFO：先按隔离 root 的精确 PID 等待 daemon 退出，再关闭客户端和删 root。
   t.after(async () => {
-    await killDaemonFor(picoHome, client);
+    await killDaemonFor(picoHome);
     await rm(root, { recursive: true, force: true }).catch(() => undefined);
   });
 
@@ -114,10 +109,9 @@ test("client commands over a real spawned daemon: slash chains (dead-endpoint mo
 
   const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome });
   t.after(() => client.close());
-  // 关停在 client.close 之前执行（t.after LIFO：后注册先跑）——优雅关停依赖
-  // 存活连接，先 close 会退化到注册表硬杀。
+  // t.after LIFO：先按隔离 root 的精确 PID 等待 daemon 退出，再关闭客户端和删 root。
   t.after(async () => {
-    await killDaemonFor(picoHome, client);
+    await killDaemonFor(picoHome);
     await rm(root, { recursive: true, force: true }).catch(() => undefined);
   });
   await client.request("workspace.register", { workspacePath: workspaceDir });
@@ -226,23 +220,10 @@ async function configureDeadEndpointModel(picoHome: string): Promise<void> {
   );
 }
 
-async function killDaemonFor(picoHome: string, client: LocalRuntimeClient): Promise<void> {
-  // 优雅关停优先（runtime.shutdown 与 SIGTERM 同路径）；失败退回注册表 pid 硬杀。
-  try {
-    await client.shutdownDaemon();
-    return;
-  } catch {
-    // 优雅路径失败（连接已死等）。
-  }
-  try {
-    const capability = await resolveStorageRoot({ path: picoHome, kind: "interactive" });
-    const registration = await readHostRegistration(
-      join(resolveRootControlNamespace(), capability.rootId),
-    );
-    if (registration) process.kill(registration.pid);
-  } catch {
-    // 无 daemon / 已退出：无需处理。
-  }
+async function killDaemonFor(picoHome: string): Promise<void> {
+  // Teardown 直接按隔离 root 的 registration 收口，避免连接状态或 RPC 响应
+  // 时序让测试在 daemon 真正退出前删除临时目录。
+  await stopRegisteredTestDaemon(picoHome);
 }
 
 async function waitForCondition(condition: () => boolean, timeoutMs: number): Promise<boolean> {
