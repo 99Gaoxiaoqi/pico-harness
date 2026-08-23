@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { RUNTIME_ERROR_CODES } from "@pico/protocol";
 import {
@@ -194,6 +197,55 @@ test("kernel client: Desktop 检出旧方法后优雅关闭常驻 daemon 并接�
   assert.equal(resumeAttempts, 2);
 });
 
+test("kernel client: legacy shutdown EOF is accepted only after the old host fully exits", async (t) => {
+  const harness = await startKernelClientHarness(t);
+  const previousMode = process.env["PICO_TEST_LEGACY_SHUTDOWN_MODE"];
+  process.env["PICO_TEST_LEGACY_SHUTDOWN_MODE"] = "exit";
+  t.after(() => restoreEnvironment("PICO_TEST_LEGACY_SHUTDOWN_MODE", previousMode));
+  const fixture = fileURLToPath(
+    new URL("../fixtures/runtime-host-legacy-shutdown-candidate.ts", import.meta.url),
+  );
+  await startLegacyShutdownFixture(t, harness.picoHome, fixture);
+  const client = new LocalRuntimeClient(undefined, {
+    runtimeHostRootPath: harness.picoHome,
+    candidateEntrypoint: fixture,
+  });
+  t.after(() => client.close());
+
+  await client.connect();
+  const capability = await resolveStorageRoot({ path: harness.picoHome, kind: "interactive" });
+  const controlDirectory = join(resolveRootControlNamespace(), capability.rootId);
+  const before = await readHostRegistration(controlDirectory);
+  assert.ok(before);
+
+  await client.shutdownDaemon();
+  assert.equal(await processAlive(before.pid), false, "旧 daemon 必须真正退出后才能接受 EOF");
+  assert.equal(await readHostRegistration(controlDirectory), undefined);
+});
+
+test("kernel client: shutdown EOF remains an error while the old host is still alive", async (t) => {
+  const harness = await startKernelClientHarness(t);
+  const previousMode = process.env["PICO_TEST_LEGACY_SHUTDOWN_MODE"];
+  process.env["PICO_TEST_LEGACY_SHUTDOWN_MODE"] = "stay";
+  t.after(() => restoreEnvironment("PICO_TEST_LEGACY_SHUTDOWN_MODE", previousMode));
+  const fixture = fileURLToPath(
+    new URL("../fixtures/runtime-host-legacy-shutdown-candidate.ts", import.meta.url),
+  );
+  await startLegacyShutdownFixture(t, harness.picoHome, fixture);
+  const client = new LocalRuntimeClient(undefined, {
+    runtimeHostRootPath: harness.picoHome,
+    candidateEntrypoint: fixture,
+  });
+  t.after(() => client.close());
+
+  await client.connect();
+  await assert.rejects(client.shutdownDaemon(), (error: unknown) => {
+    assert.ok(error instanceof RuntimeClientError);
+    assert.equal(error.code, "RUNTIME_SHUTDOWN_UNCONFIRMED");
+    return true;
+  });
+});
+
 test("kernel client: non-idempotent write does not auto-retry after daemon death (P1-2)", async (t) => {
   const harness = await startKernelClientHarness(t);
   const client = new LocalRuntimeClient(undefined, {
@@ -239,11 +291,57 @@ test("kernel client: non-idempotent write does not auto-retry after daemon death
   assert.ok(pidDead, "被杀 daemon 应仍处于死亡状态（无重生实例顶替）");
 });
 
-async function waitForCondition(condition: () => boolean, timeoutMs: number): Promise<boolean> {
+async function waitForCondition(
+  condition: () => boolean | Promise<boolean>,
+  timeoutMs: number,
+): Promise<boolean> {
   const deadline = performance.now() + timeoutMs;
-  while (!condition()) {
+  while (!(await condition())) {
     if (performance.now() > deadline) return false;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   return true;
+}
+
+async function processAlive(pid: number): Promise<boolean> {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function restoreEnvironment(key: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[key];
+  else process.env[key] = value;
+}
+
+async function startLegacyShutdownFixture(
+  t: { after(hook: () => unknown): void },
+  picoHome: string,
+  fixture: string,
+): Promise<void> {
+  const capability = await resolveStorageRoot({ path: picoHome, kind: "interactive" });
+  const tsxLoader = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
+  const child = spawn(
+    process.execPath,
+    ["--import", tsxLoader, fixture, "--root", picoHome, "--expected-root-id", capability.rootId],
+    {
+      cwd: process.cwd(),
+      env: { ...process.env, PICO_HOME: picoHome },
+      stdio: "ignore",
+      windowsHide: true,
+    },
+  );
+  child.unref();
+  t.after(() => {
+    if (child.exitCode === null) child.kill();
+  });
+  const controlDirectory = join(resolveRootControlNamespace(), capability.rootId);
+  const registered = await waitForCondition(
+    () => readHostRegistration(controlDirectory).then((value) => value?.pid === child.pid),
+    10_000,
+  );
+  assert.equal(registered, true, "旧行为 fixture 应发布 registration");
 }

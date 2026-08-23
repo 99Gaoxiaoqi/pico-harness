@@ -27,6 +27,7 @@ import {
   ensurePicoRuntimeHostSessionContinuityOperationsRegistered,
   ensurePicoRuntimeHostShutdownOperationRegistered,
   RUNTIME_HOST_BRIDGE_RUNTIME_SHUTDOWN,
+  type BridgeOperationContext,
 } from "./runtime-host-operations.js";
 import { SessionSubscriptionRegistry } from "./session-subscription-owner.js";
 import { SqliteSessionContinuitySource } from "./sqlite-session-continuity-source.js";
@@ -195,12 +196,24 @@ async function createPicoDaemonComposition(
   return {
     // runtime.shutdown：常驻 daemon 的优雅关停入口（等效 SIGTERM 路径——
     // 触发 kernel requestDrain → 排空 → composition.close → 守卫锁释放 →
-    // residency 释放 → 进程退出）。handler 返回后 kernel 会等本操作排空并
-    // 把响应写出，再 destroy 连接，客户端无需额外确认握手。
+    // residency 释放 → 进程退出）。必须等成功响应刷入 transport 后再请求
+    // drain；否则 kernel 可能在客户端读到响应前销毁连接并暴露 read_eof。
     handlers: {
       ...bridge.handlers,
-      [RUNTIME_HOST_BRIDGE_RUNTIME_SHUTDOWN]: async () => {
-        context.requestDrain();
+      [RUNTIME_HOST_BRIDGE_RUNTIME_SHUTDOWN]: async (
+        _input: Record<string, never>,
+        operationContext?: BridgeOperationContext,
+      ) => {
+        if (!operationContext?.afterResponseFlushed) {
+          return {
+            ok: false,
+            error: {
+              code: "internal_failure" as const,
+              message: "runtime.shutdown requires a response-flushed barrier",
+            },
+          };
+        }
+        operationContext.afterResponseFlushed(() => context.requestDrain());
         return { ok: true, result: {} };
       },
     },

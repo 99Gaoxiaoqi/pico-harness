@@ -695,7 +695,10 @@ export class RuntimeHostKernel {
     this.#assertShutdownCanContinue();
     await this.#waitForResidencies();
     this.#assertShutdownCanContinue();
-    for (const transport of accepted) transport.destroy();
+    // Operations may have finished immediately after enqueueing their final
+    // response. Preserve those bytes while closing accepted connections; a
+    // hard destroy here can make the peer observe read_eof before the response.
+    for (const transport of accepted) transport.destroyAfterFlush();
     await serverClosed;
     this.#assertShutdownCanContinue();
     await this.#endpoint?.cleanup().catch((error: unknown) => errors.push(error));
