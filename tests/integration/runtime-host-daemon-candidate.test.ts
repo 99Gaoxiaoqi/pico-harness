@@ -20,11 +20,14 @@ import {
 } from "@pico/runtime-host";
 import {
   LocalDaemonInstanceLock,
+  ensurePicoRuntimeHostOperationsRegistered,
   ensurePicoRuntimeHostShutdownOperationRegistered,
   resolveLocalDaemonEndpoint,
   resolveLocalDaemonLockPath,
   startPicoDaemonRuntimeHostCandidate,
 } from "../../src/daemon/index.js";
+import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
+import { sessionOwnerLeaseDirectory } from "../../src/storage/session-owner-lease.js";
 
 /**
  * 3-B-3 daemon candidate 实盘验证：
@@ -250,12 +253,131 @@ test("daemon candidate: runtime.shutdown gracefully stops the resident daemon", 
   assert.equal(registrationGone, true, "优雅关停后 registration 应移除");
 });
 
+test("daemon candidate: rolling upgrade drains cached Session lease before successor takeover", async (t) => {
+  const harness = await startCandidateHarness(t);
+  const workspacePath = join(harness.picoHome, "rolling-upgrade-workspace");
+  await mkdir(workspacePath, { recursive: true });
+  const mainPath = fileURLToPath(new URL("../../src/daemon/main.ts", import.meta.url));
+  ensurePicoRuntimeHostOperationsRegistered();
+  ensurePicoRuntimeHostShutdownOperationRegistered();
+
+  const { spawn } = await import("node:child_process");
+  const { createRequire } = await import("node:module");
+  const tsxLoader = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
+  const oldChild = spawn(process.execPath, ["--import", tsxLoader, mainPath], {
+    cwd: process.cwd(),
+    env: { ...process.env, ...harness.env },
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  oldChild.unref();
+  const capability = await resolveStorageRoot({ path: harness.picoHome, kind: "interactive" });
+  const controlDirectory = join(resolveRootControlNamespace(), capability.rootId);
+  t.after(async () => {
+    const registration = await readHostRegistration(controlDirectory).catch(() => undefined);
+    if (registration && (await processAlive(registration.pid))) {
+      process.kill(registration.pid);
+    }
+  });
+
+  const oldRegistration = await waitForRegistration(controlDirectory, 30_000);
+  assert.ok(oldRegistration, "旧 daemon 应发布 registration");
+  const oldConnectionResult = await connectResolvedRuntimeHost({
+    capability,
+    controlDirectory,
+    surface: "tui",
+    protocol: { min: RUNTIME_HOST_PROTOCOL_VERSION, max: RUNTIME_HOST_PROTOCOL_VERSION },
+    clientInstanceId: "candidate-rolling-upgrade-old-client",
+    connectTimeoutMs: 5_000,
+    handshakeTimeoutMs: 5_000,
+  });
+  assert.equal(oldConnectionResult.kind, "connected");
+  if (oldConnectionResult.kind !== "connected") return;
+  const oldConnection = oldConnectionResult.connection;
+  await waitForReadyStatus(oldConnection, 15_000);
+
+  const created = await oldConnection.requestRegistered<{
+    result: { session: { sessionId: string } };
+  }>("runtime.request", { method: "session.create", params: { workspacePath } }, 10_000);
+  const sessionId = created.result.session.sessionId;
+  await oldConnection.requestRegistered(
+    "runtime.request",
+    { method: "workspace.trust", params: { workspacePath, trusted: true } },
+    10_000,
+  );
+  await oldConnection.requestRegistered(
+    "runtime.request",
+    { method: "goal.get", params: { workspacePath, sessionId } },
+    10_000,
+  );
+  const ownerPath = join(
+    sessionOwnerLeaseDirectory(
+      resolvePicoPaths(workspacePath, { picoHome: harness.picoHome }).workspace,
+      sessionId,
+    ),
+    "owner.json",
+  );
+  assert.equal(await pathExists(ownerPath), true, "历史 Session 应由旧 daemon 缓存并持 lease");
+
+  await oldConnection.requestRegistered("runtime.shutdown", {}, 10_000);
+  await waitForProcessExit(oldRegistration.pid, 15_000);
+  assert.equal(await processAlive(oldRegistration.pid), false, "rolling upgrade 必须终止旧 PID");
+  assert.equal(await pathExists(ownerPath), false, "旧 PID 退出前必须主动释放 Session lease");
+  await oldConnection.close().catch(() => undefined);
+
+  const successor = await connectOrSpawnRuntimeHost({
+    rootPath: harness.picoHome,
+    surface: "tui",
+    protocol: { min: RUNTIME_HOST_PROTOCOL_VERSION, max: RUNTIME_HOST_PROTOCOL_VERSION },
+    clientInstanceId: "candidate-rolling-upgrade-successor-client",
+    electionDeadlineMs: 45_000,
+    connectTimeoutMs: 5_000,
+    handshakeTimeoutMs: 5_000,
+    candidateEntrypoint: pathToFileURL(mainPath).href,
+    env: harness.env,
+  });
+  assert.equal(successor.kind, "connected", `新 daemon 接管失败：${JSON.stringify(successor)}`);
+  if (successor.kind !== "connected") return;
+  const successorRegistration = await readHostRegistration(controlDirectory);
+  assert.ok(successorRegistration);
+  assert.notEqual(successorRegistration.pid, oldRegistration.pid);
+  await successor.connection.requestRegistered(
+    "runtime.request",
+    { method: "goal.get", params: { workspacePath, sessionId } },
+    10_000,
+  );
+  assert.equal(await pathExists(ownerPath), true, "新 daemon 应无需等待 30s 即可接管 Session");
+  await successor.connection.requestRegistered("runtime.shutdown", {}, 10_000);
+  await waitForProcessExit(successorRegistration.pid, 15_000);
+});
+
 async function processAlive(pid: number): Promise<boolean> {
   try {
     process.kill(pid, 0);
     return true;
   } catch {
     return false;
+  }
+}
+
+async function waitForRegistration(
+  controlDirectory: string,
+  timeoutMs: number,
+): Promise<Awaited<ReturnType<typeof readHostRegistration>>> {
+  const deadline = performance.now() + timeoutMs;
+  while (performance.now() < deadline) {
+    const registration = await readHostRegistration(controlDirectory).catch(() => undefined);
+    if (registration) return registration;
+    await delay(100);
+  }
+  return undefined;
+}
+
+async function waitForProcessExit(pid: number, timeoutMs: number): Promise<void> {
+  const deadline = performance.now() + timeoutMs;
+  while (performance.now() < deadline) {
+    if (!(await processAlive(pid))) return;
+    await delay(100);
   }
 }
 

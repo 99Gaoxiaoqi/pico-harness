@@ -7,6 +7,7 @@ import {
   type RuntimeHostComposition,
   type RuntimeHostCompositionContext,
 } from "@pico/runtime-host";
+import { globalSessionManager } from "../engine/session.js";
 import { logger } from "../observability/logger.js";
 import { resolveCanonicalPicoHome, resolveLocalDaemonEndpoint } from "./endpoint.js";
 import {
@@ -218,6 +219,10 @@ async function createPicoDaemonComposition(
         await bridge.close();
         // 完整 shutdown fence 链（cron ownership + service.close + 锁保留语义）。
         await daemonHost.stop();
+        // SessionManager 的历史缓存可在请求结束后继续持有 durable OwnerLease。
+        // Runtime Host 已停止 admission，此处必须排空缓存后才能释放升级守卫锁，
+        // 否则旧进程会在 socket 消失后与新 daemon 并存，并阻塞同一 Session 接管。
+        await globalSessionManager.clearAndDrain();
         await legacyLock.release();
       } catch (error) {
         logger.error({ error }, "Pico daemon candidate 关停失败，保留升级守卫锁（fail-closed）");
