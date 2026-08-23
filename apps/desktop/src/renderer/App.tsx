@@ -117,24 +117,23 @@ import {
   type SidebarTaskGrouping,
 } from "./navigation.js";
 import {
-  SessionWorkbar,
+  SessionWorkbarLayout,
+  WorkbarLauncher,
+  createWorkbarToolTab,
   createWorkbarState,
+  getWorkbarTool,
+  isWorkbarPanelActive,
   loadWorkbarState,
   reduceWorkbarState,
+  resolveWorkbarShortcut,
   saveWorkbarState,
-  type SessionWorkbarTab,
+  type WorkbarDock,
   type WorkbarTab,
-  type WorkbarTabKind,
+  type WorkbarToolKind,
 } from "./workbar/index.js";
 import "./workbar/SessionWorkbar.css";
 
 const RuntimeContext = createContext<RuntimeStore | null>(null);
-
-const WORKBAR_LAUNCHER_TABS = [
-  { id: "overview", kind: "overview", label: "概览" },
-  { id: "review", kind: "review", label: "变更" },
-  { id: "context", kind: "context", label: "上下文" },
-] as const satisfies readonly WorkbarTab[];
 
 function useRuntime(): RuntimeStore {
   const value = useContext(RuntimeContext);
@@ -1453,7 +1452,6 @@ function ConversationPage() {
       ? fallback
       : loadWorkbarState(window.localStorage, fallback);
   });
-  const [workbarLauncherOpen, setWorkbarLauncherOpen] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [confirmCompact, setConfirmCompact] = useState(false);
@@ -1469,7 +1467,6 @@ function ConversationPage() {
 
   useEffect(() => {
     setInspector(undefined);
-    setWorkbarLauncherOpen(false);
     setCatalogOpen(false);
     setEditingTitle(false);
     setConfirmCompact(false);
@@ -1482,12 +1479,13 @@ function ConversationPage() {
 
   useEffect(() => {
     if (!inspector) {
-      dispatchWorkbar({ type: "close", tabId: "inspector" });
+      dispatchWorkbar({ type: "close", tabId: "inspector-preview" });
       return;
     }
     dispatchWorkbar({
-      type: "open",
-      tab: { id: "inspector", kind: "inspector", label: inspector.title },
+      type: "openPreview",
+      dock: "right",
+      tab: { id: "inspector-preview", kind: "inspector", label: inspector.title },
     });
   }, [inspector]);
 
@@ -1806,43 +1804,50 @@ function ConversationPage() {
   }, [navigate, sessionId, workspacePath]);
 
   const workbarChangeCount = conversation?.changes?.length ?? 0;
-  const workbarTabs = useMemo<readonly SessionWorkbarTab[]>(
-    () =>
-      workbar.tabs.map((tab) => ({
-        ...tab,
-        closable: true,
-        ...(tab.kind === "review" && workbarChangeCount > 0 ? { badge: workbarChangeCount } : {}),
-      })),
-    [workbar.tabs, workbarChangeCount],
-  );
-
   const renderWorkbarPanel = useCallback(
-    (tab: SessionWorkbarTab): ReactNode => {
+    (tab: WorkbarTab, dock: WorkbarDock): ReactNode => {
+      const active = isWorkbarPanelActive(workbar, dock, tab.id, {
+        sessionBound: Boolean(sessionRef),
+      });
       if (tab.kind === "inspector") {
-        return inspector ? (
-          <section className="conversation-inspector" aria-label={inspector.title}>
-            <header className="conversation-inspector__header">
-              <div>
-                <h2>{inspector.title}</h2>
-                {inspector.subtitle && <p>{inspector.subtitle}</p>}
-              </div>
-            </header>
-            <div className="conversation-inspector__body">{inspector.content}</div>
-          </section>
-        ) : (
-          <div className="conversation-workbench__empty">
-            <Code2 aria-hidden="true" />
-            <strong>没有选中的执行记录</strong>
-            <p>从主对话中打开工具调用或子代理记录后，这里会显示详情。</p>
+        const showPreview = tab.id === "inspector-preview" && inspector;
+        return (
+          <div data-panel-active={active || undefined}>
+            {showPreview ? (
+              <section className="conversation-inspector" aria-label={inspector.title}>
+                <header className="conversation-inspector__header">
+                  <div>
+                    <h2>{inspector.title}</h2>
+                    {inspector.subtitle && <p>{inspector.subtitle}</p>}
+                  </div>
+                </header>
+                <div className="conversation-inspector__body">{inspector.content}</div>
+              </section>
+            ) : (
+              <ConversationEnvironmentPanel
+                view="context"
+                workspacePath={workspacePath}
+                mode={data.workspaceMode ?? "folder"}
+                branch={data.workspaceBranch}
+                changes={conversation?.changes ?? []}
+                active={Boolean(activeRun)}
+                model={conversation?.settings?.model}
+                context={conversation?.context}
+                collaborationMode={conversation?.settings?.collaborationMode}
+                orchestrationMode={conversation?.settings?.orchestrationMode}
+                permissionMode={conversation?.settings?.permissionMode}
+                onReview={openReview}
+              />
+            )}
           </div>
         );
       }
-      if (tab.kind !== "overview" && tab.kind !== "review" && tab.kind !== "context") {
+      if (tab.kind !== "review") {
         return null;
       }
       return (
         <ConversationEnvironmentPanel
-          view={tab.kind}
+          view="review"
           workspacePath={workspacePath}
           mode={data.workspaceMode ?? "folder"}
           branch={data.workspaceBranch}
@@ -1864,41 +1869,76 @@ function ConversationPage() {
       data.workspaceMode,
       inspector,
       openReview,
+      sessionRef,
+      workbar,
       workspacePath,
     ],
   );
 
-  const openWorkbarTab = useCallback((kind: Exclude<WorkbarTabKind, "inspector">) => {
-    const tab = WORKBAR_LAUNCHER_TABS.find((candidate) => candidate.kind === kind);
-    if (!tab) return;
-    dispatchWorkbar({ type: "open", tab });
-    setWorkbarLauncherOpen(false);
+  const openWorkbarTab = useCallback((kind: WorkbarToolKind, dock?: WorkbarDock) => {
+    const tool = getWorkbarTool(kind);
+    const tab = tool.multiple
+      ? {
+          id: `${kind}:${globalThis.crypto.randomUUID()}`,
+          kind,
+          label: tool.label,
+        }
+      : createWorkbarToolTab(kind);
+    dispatchWorkbar({ type: "open", tab, dock: dock ?? tool.defaultDock });
   }, []);
 
-  const closeWorkbarTab = useCallback((tabId: string) => {
-    if (tabId === "inspector") setInspector(undefined);
-    dispatchWorkbar({ type: "close", tabId });
-  }, []);
+  useEffect(() => {
+    const handleShortcut = (event: globalThis.KeyboardEvent) => {
+      const kind = resolveWorkbarShortcut(event);
+      if (!kind || !sessionRef) return;
+      event.preventDefault();
+      openWorkbarTab(kind);
+    };
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  }, [openWorkbarTab, sessionRef]);
 
-  const workbarLauncher = workbarLauncherOpen ? (
-    <div className="session-workbar__launcher-menu" role="menu" aria-label="打开工作栏面板">
-      {WORKBAR_LAUNCHER_TABS.map((tab) => (
-        <button key={tab.id} type="button" role="menuitem" onClick={() => openWorkbarTab(tab.kind)}>
-          {tab.kind === "overview" ? (
-            <Gauge aria-hidden="true" size={15} />
-          ) : tab.kind === "review" ? (
-            <FileDiff aria-hidden="true" size={15} />
-          ) : (
-            <Code2 aria-hidden="true" size={15} />
-          )}
-          {tab.label}
-        </button>
-      ))}
-    </div>
-  ) : undefined;
+  const workbarLauncher = useCallback(
+    (dock: WorkbarDock): ReactNode =>
+      workbar.docks[dock].launcherOpen ? (
+        <WorkbarLauncher
+          dock={dock}
+          renderIcon={(kind) =>
+            kind === "review" ? (
+              <FileDiff size={15} />
+            ) : kind === "terminal" ? (
+              <TerminalSquare size={15} />
+            ) : kind === "side-chat" ? (
+              <Bot size={15} />
+            ) : kind === "files" ? (
+              <Folder size={15} />
+            ) : (
+              <Code2 size={15} />
+            )
+          }
+          onOpen={(kind, targetDock) => openWorkbarTab(kind, targetDock)}
+          onClose={() =>
+            dispatchWorkbar({ type: "setLauncherOpen", dock, open: false })
+          }
+        />
+      ) : undefined,
+    [openWorkbarTab, workbar.docks],
+  );
 
   return (
-    <ConversationSurface
+    <SessionWorkbarLayout
+      state={workbar}
+      launcher={workbarLauncher}
+      presentTab={(tab) => ({
+        closable: true,
+        ...(tab.kind === "review" && workbarChangeCount > 0
+          ? { badge: workbarChangeCount }
+          : {}),
+      })}
+      renderPanel={renderWorkbarPanel}
+      onAction={dispatchWorkbar}
+    >
+      <ConversationSurface
       className="session-conversation"
       header={
         <div className="conversation-session-header">
@@ -1994,13 +2034,19 @@ function ConversationPage() {
               <button
                 type="button"
                 className="conversation-panel-toggle"
-                aria-label={workbar.collapsed ? "打开任务工作栏" : "收起任务工作栏"}
-                aria-expanded={!workbar.collapsed}
+                aria-label={
+                  workbar.docks.right.collapsed ? "打开任务工作栏" : "收起任务工作栏"
+                }
+                aria-expanded={!workbar.docks.right.collapsed}
                 onClick={() =>
-                  dispatchWorkbar({ type: "setCollapsed", collapsed: !workbar.collapsed })
+                  dispatchWorkbar({
+                    type: "setCollapsed",
+                    dock: "right",
+                    collapsed: !workbar.docks.right.collapsed,
+                  })
                 }
               >
-                {workbar.collapsed ? (
+                {workbar.docks.right.collapsed ? (
                   <PanelRightOpen aria-hidden="true" />
                 ) : (
                   <PanelRightClose aria-hidden="true" />
@@ -2009,30 +2055,6 @@ function ConversationPage() {
             )}
           </div>
         </div>
-      }
-      inspectorMode="workbar"
-      inspector={
-        sessionRef && workspacePath ? (
-          <SessionWorkbar
-            tabs={workbarTabs}
-            activeTabId={workbar.activeTabId ?? undefined}
-            collapsed={workbar.collapsed}
-            width={workbar.width}
-            showRestoreButton={false}
-            launcher={workbarLauncher}
-            renderPanel={renderWorkbarPanel}
-            onSelect={(tabId) => dispatchWorkbar({ type: "select", tabId })}
-            onClose={closeWorkbarTab}
-            onReorder={(tabId, targetIndex) =>
-              dispatchWorkbar({ type: "reorder", tabId, toIndex: targetIndex })
-            }
-            onToggleCollapsed={() =>
-              dispatchWorkbar({ type: "setCollapsed", collapsed: !workbar.collapsed })
-            }
-            onResize={(width) => dispatchWorkbar({ type: "setWidth", width })}
-            onOpenLauncher={() => setWorkbarLauncherOpen((open) => !open)}
-          />
-        ) : undefined
       }
       composer={
         pendingPrompt || pendingApproval ? (
@@ -2476,7 +2498,8 @@ function ConversationPage() {
           />
         </>
       )}
-    </ConversationSurface>
+      </ConversationSurface>
+    </SessionWorkbarLayout>
   );
 }
 
