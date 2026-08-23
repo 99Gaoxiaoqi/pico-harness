@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { createCliSessionId } from "../cli/session-resolver.js";
 import { globalSessionManager } from "../engine/session.js";
@@ -279,7 +280,11 @@ export function createProductionRuntimeServices(
         sessionLeaseTransferred = true;
         const broker = new DesktopInteractionBroker({
           store: interactionStore,
-          ownerKey: `${workspacePath}\0${targetSessionId}\0${context.run.runId}`,
+          ownerKey: createDesktopInteractionOwnerKey(
+            workspacePath,
+            targetSessionId,
+            context.run.runId,
+          ),
           onPersistenceError: (error) =>
             logger.error(
               { workspacePath, sessionId: targetSessionId, runId: context.run.runId, error },
@@ -977,6 +982,18 @@ export function createProductionRuntimeServices(
       await activeOverlays.get(sessionOverlayKey(workspacePath, sessionId))?.flush();
     },
   };
+}
+
+/** Stable, bounded persistence identity for one Desktop run's interactions. */
+export function createDesktopInteractionOwnerKey(
+  workspacePath: string,
+  sessionId: string,
+  runId: string,
+): string {
+  const digest = createHash("sha256")
+    .update(JSON.stringify(["desktop-interaction-owner-v1", workspacePath, sessionId, runId]))
+    .digest("hex");
+  return `desktop-run:v1:${digest}`;
 }
 
 function sessionOverlayKey(workspacePath: string, sessionId: string): string {
