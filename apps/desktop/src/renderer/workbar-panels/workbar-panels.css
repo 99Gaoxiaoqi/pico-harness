@@ -1,0 +1,120 @@
+.workbar-browser {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+  background: var(--surface-primary, #fff);
+}
+
+.workbar-browser__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 8px;
+  border-bottom: 1px solid var(--border-subtle, #e5e7eb);
+}
+
+.workbar-browser__toolbar > button {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 6px;
+  color: var(--text-secondary, #6b7280);
+  background: transparent;
+}
+
+.workbar-browser__toolbar > button:hover:not(:disabled) {
+  color: var(--text-primary, #111827);
+  background: var(--surface-hover, #f3f4f6);
+}
+
+.workbar-browser__toolbar > button:focus-visible,
+.workbar-browser__address:focus-within {
+  outline: 2px solid var(--focus-ring, #2563eb);
+  outline-offset: 1px;
+}
+
+.workbar-browser__toolbar > button:disabled {
+  opacity: 0.36;
+}
+
+.workbar-browser__address {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--border-subtle, #e5e7eb);
+  border-radius: 7px;
+  color: var(--text-tertiary, #9ca3af);
+  background: var(--surface-secondary, #f8fafc);
+}
+
+.workbar-browser__address input {
+  min-width: 0;
+  width: 100%;
+  border: 0;
+  outline: 0;
+  color: var(--text-primary, #111827);
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+}
+
+.workbar-browser__viewport {
+  position: relative;
+  min-height: 160px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.workbar-browser__viewport[data-empty="true"] {
+  background: var(--surface-secondary, #f8fafc);
+}
+
+.workbar-browser__empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 7px;
+  padding: 24px;
+  text-align: center;
+  color: var(--text-tertiary, #9ca3af);
+}
+
+.workbar-browser__empty strong {
+  color: var(--text-primary, #111827);
+  font-size: 13px;
+}
+
+.workbar-browser__empty span,
+.workbar-browser__error {
+  font-size: 12px;
+}
+
+.workbar-browser__error {
+  margin: 0;
+  padding: 6px 10px;
+  color: var(--danger-foreground, #b91c1c);
+  background: var(--danger-subtle, #fef2f2);
+}
+
+.workbar-browser__spinner {
+  animation: workbar-browser-spin 0.8s linear infinite;
+}
+
+@keyframes workbar-browser-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workbar-browser__spinner { animation: none; }
+}
