@@ -2,6 +2,7 @@ import { ArrowLeft, ArrowRight, Globe2, LoaderCircle, RefreshCw, X } from "lucid
 import type { JsonObject, RuntimeBrowserAgentCommand } from "@pico/protocol";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import type { DesktopBridge, DesktopBrowserState } from "../../preload/contract.js";
+import { retainBrowserAgentLease } from "./browser-agent-lease-controller.js";
 
 export interface BrowserWorkbarPanelProps {
   readonly bridge: DesktopBridge;
@@ -11,9 +12,11 @@ export interface BrowserWorkbarPanelProps {
 
 export function BrowserWorkbarPanel({ bridge, sessionId, active }: BrowserWorkbarPanelProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
+  const visibleGenerationRef = useRef<number | null>(null);
   const [state, setState] = useState<DesktopBrowserState | null>(null);
   const [address, setAddress] = useState("");
   const [message, setMessage] = useState<string | null>(null);
+  visibleGenerationRef.current = active && state?.visible ? state.generation : null;
 
   const consume = useCallback((next: DesktopBrowserState | null): void => {
     setState(next);
@@ -93,6 +96,16 @@ export function BrowserWorkbarPanel({ bridge, sessionId, active }: BrowserWorkba
     let leaseId: string | undefined;
     const generation = state.generation;
 
+    const releaseLease = async (currentLeaseId: string): Promise<void> => {
+      const released = await bridge.runtime["browser.agent.lease"]({
+        sessionId,
+        visible: false,
+        generation,
+        leaseId: currentLeaseId,
+      });
+      if (!released.ok) throw new Error(released.error.message);
+    };
+
     const executeCommand = async (command: RuntimeBrowserAgentCommand): Promise<JsonObject> => {
       switch (command.action) {
         case "navigate": {
@@ -159,15 +172,33 @@ export function BrowserWorkbarPanel({ bridge, sessionId, active }: BrowserWorkba
       while (!disposed) {
         try {
           if (!leaseId || expiresAt - Date.now() < 3_000) {
-            const lease = await bridge.runtime["browser.agent.lease"]({
-              sessionId,
-              visible: true,
-              generation,
-              ...(leaseId ? { leaseId } : {}),
+            const lease = await retainBrowserAgentLease({
+              acquire: async () => {
+                const acquired = await bridge.runtime["browser.agent.lease"]({
+                  sessionId,
+                  visible: true,
+                  generation,
+                  ...(leaseId ? { leaseId } : {}),
+                });
+                if (!acquired.ok) throw new Error(acquired.error.message);
+                return acquired.value;
+              },
+              isCurrent: async () => {
+                if (disposed || visibleGenerationRef.current !== generation) return false;
+                const confirmed = await bridge.browser.getState(sessionId);
+                return Boolean(
+                  !disposed &&
+                  visibleGenerationRef.current === generation &&
+                  confirmed.ok &&
+                  confirmed.value?.visible &&
+                  confirmed.value.generation === generation,
+                );
+              },
+              release: releaseLease,
             });
-            if (!lease.ok) throw new Error(lease.error.message);
-            leaseId = lease.value.leaseId;
-            expiresAt = lease.value.expiresAt;
+            if (!lease) return;
+            leaseId = lease.leaseId;
+            expiresAt = lease.expiresAt;
           }
           const next = await bridge.runtime["browser.agent.next"]({
             sessionId,
@@ -214,15 +245,10 @@ export function BrowserWorkbarPanel({ bridge, sessionId, active }: BrowserWorkba
     return () => {
       disposed = true;
       if (leaseId) {
-        void bridge.runtime["browser.agent.lease"]({
-          sessionId,
-          visible: false,
-          generation,
-          leaseId,
-        });
+        void releaseLease(leaseId).catch(() => undefined);
       }
     };
-  }, [active, bridge, consume, sessionId, state?.visible]);
+  }, [active, bridge, consume, sessionId, state?.generation, state?.visible]);
 
   const perform = useCallback(
     async (

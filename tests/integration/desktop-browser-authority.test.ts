@@ -66,7 +66,22 @@ test("embedded browser viewport generations survive remounts and reject stale mo
   assert.ok(movedDockMount > firstMount);
   assert.equal(authority.accept("session-a", movedDockMount), true);
   assert.equal(authority.accept("session-a", firstMount), false);
+  assert.equal(
+    authority.accept("session-a", movedDockMount + 10),
+    false,
+    "Main 不得接受未签发的更高 generation",
+  );
   assert.equal(authority.current("session-a"), movedDockMount);
+  const archiveFloor = authority.revoke("session-a");
+  assert.ok(archiveFloor > movedDockMount);
+  assert.equal(
+    authority.accept("session-a", movedDockMount),
+    false,
+    "archive/delete 后旧 viewport 回调不得重新取得创建权限",
+  );
+  const restoredMount = authority.acquire("session-a");
+  assert.ok(restoredMount > archiveFloor);
+  assert.equal(authority.accept("session-a", restoredMount), true);
   assert.equal(authority.acquire("session-b"), 1);
 });
 
