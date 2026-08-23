@@ -25,7 +25,7 @@ export type { OperationSpec } from "./operation-spec.js";
 
 export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 1 as const;
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 3 as const;
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 2 as const;
 // 帧上限对齐 daemon IPC 的 1MiB（3-B-3 硬切后所有 daemon 方法结果都走本协议，
 // transcript/会话历史类大结果不能被控制面级小帧卡死）。队列字节上限随之放大
 // （writer/transport 各 8MB = 8 满帧余量）。

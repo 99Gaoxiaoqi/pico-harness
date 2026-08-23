@@ -3,7 +3,9 @@ import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
+import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
+import { RUNTIME_ERROR_CODES } from "@pico/protocol";
 import {
   readHostRegistration,
   resolveRootControlNamespace,
@@ -14,6 +16,7 @@ import {
   RuntimeClientError,
   type RuntimeNotification,
 } from "../../src/daemon/index.js";
+import { resumeDesktopTerminalGenerationWithUpgrade } from "../../apps/desktop/src/main/daemon-controller.js";
 
 /**
  * 3-B-3 kernel 承载客户端实盘验证：默认构造（不注入 endpoint）的 LocalRuntimeClient
@@ -137,6 +140,58 @@ test("kernel client: killing the daemon makes the next request respawn it", asyn
 
   // 清理重生的 daemon。
   await killDaemonFor(harness.picoHome);
+});
+
+test("kernel client: Desktop 检出旧方法后优雅关闭常驻 daemon 并接管新版本", async (t) => {
+  const harness = await startKernelClientHarness(t);
+  const client = new LocalRuntimeClient(undefined, {
+    runtimeHostRootPath: harness.picoHome,
+  });
+  t.after(() => client.close());
+  await client.connect();
+  await client.request("runtime.ping", {});
+
+  const capability = await resolveStorageRoot({ path: harness.picoHome, kind: "interactive" });
+  const controlDirectory = join(resolveRootControlNamespace(), capability.rootId);
+  const before = await readHostRegistration(controlDirectory);
+  assert.ok(before);
+  let resumeAttempts = 0;
+  await resumeDesktopTerminalGenerationWithUpgrade({
+    resume: async () => {
+      resumeAttempts++;
+      if (resumeAttempts === 1) {
+        throw new RuntimeClientError(
+          RUNTIME_ERROR_CODES.METHOD_NOT_FOUND,
+          "legacy daemon does not expose terminal.resume",
+          false,
+        );
+      }
+      await client.request("terminal.resume", {});
+    },
+    shutdownLegacyHost: () => client.shutdownDaemon(),
+    reconnect: async () => {
+      const deadline = performance.now() + 30_000;
+      for (;;) {
+        try {
+          await client.request("runtime.ping", {});
+          return;
+        } catch (error) {
+          if (!(error instanceof RuntimeClientError) || !error.retryable) throw error;
+          if (performance.now() >= deadline) {
+            throw new Error("new daemon did not become ready", { cause: error });
+          }
+          await delay(100);
+        }
+      }
+    },
+    isMethodNotFound: (error) =>
+      error instanceof RuntimeClientError && error.code === RUNTIME_ERROR_CODES.METHOD_NOT_FOUND,
+  });
+
+  const after = await readHostRegistration(controlDirectory);
+  assert.ok(after);
+  assert.notEqual(after.pid, before.pid, "旧 daemon 必须优雅退出并由新 candidate 接管");
+  assert.equal(resumeAttempts, 2);
 });
 
 test("kernel client: non-idempotent write does not auto-retry after daemon death (P1-2)", async (t) => {
