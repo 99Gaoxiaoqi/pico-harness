@@ -9,7 +9,7 @@ import { UserConfigStore } from "../../src/input/user-config-store.js";
 import { ClientSessionRuntime } from "../../src/tui/client-session-runtime.js";
 import { createClientCommandRegistry, processClientInput } from "../../src/tui/client-commands.js";
 import { TuiReporter } from "../../src/tui/tui-reporter.js";
-import { stopRegisteredTestDaemon } from "./helpers/test-runtime-daemon.js";
+import { TestRuntimeHostCandidateTracker } from "./helpers/test-runtime-daemon.js";
 
 /**
  * 3-D Phase 2 真机冒烟：ClientSessionRuntime 挂真实 LocalRuntimeClient（kernel
@@ -36,15 +36,19 @@ test("client session runtime over a real spawned daemon: send + lifecycle + reco
   const workspaceDir = await realpath(workspaceSeed);
   process.env.PICO_HOME = picoHome;
   await configureDeadEndpointModel(picoHome);
+  const candidates = new TestRuntimeHostCandidateTracker();
   t.after(() => {
     delete process.env.PICO_HOME;
   });
 
-  const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome });
+  const client = new LocalRuntimeClient(undefined, {
+    runtimeHostRootPath: picoHome,
+    candidateLauncher: candidates.launcher,
+  });
   t.after(() => client.close());
   // t.after LIFO：先按隔离 root 的精确 PID 等待 daemon 退出，再关闭客户端和删 root。
   t.after(async () => {
-    await killDaemonFor(picoHome);
+    await candidates.stopAll();
     await rm(root, { recursive: true, force: true }).catch(() => undefined);
   });
 
@@ -103,15 +107,19 @@ test("client commands over a real spawned daemon: slash chains (dead-endpoint mo
   const workspaceDir = await realpath(workspaceSeed);
   process.env.PICO_HOME = picoHome;
   await configureDeadEndpointModel(picoHome);
+  const candidates = new TestRuntimeHostCandidateTracker();
   t.after(() => {
     delete process.env.PICO_HOME;
   });
 
-  const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome });
+  const client = new LocalRuntimeClient(undefined, {
+    runtimeHostRootPath: picoHome,
+    candidateLauncher: candidates.launcher,
+  });
   t.after(() => client.close());
   // t.after LIFO：先按隔离 root 的精确 PID 等待 daemon 退出，再关闭客户端和删 root。
   t.after(async () => {
-    await killDaemonFor(picoHome);
+    await candidates.stopAll();
     await rm(root, { recursive: true, force: true }).catch(() => undefined);
   });
   await client.request("workspace.register", { workspacePath: workspaceDir });
@@ -218,12 +226,6 @@ async function configureDeadEndpointModel(picoHome: string): Promise<void> {
     },
     { expectedRevision: current.revision },
   );
-}
-
-async function killDaemonFor(picoHome: string): Promise<void> {
-  // Teardown 直接按隔离 root 的 registration 收口，避免连接状态或 RPC 响应
-  // 时序让测试在 daemon 真正退出前删除临时目录。
-  await stopRegisteredTestDaemon(picoHome);
 }
 
 async function waitForCondition(condition: () => boolean, timeoutMs: number): Promise<boolean> {

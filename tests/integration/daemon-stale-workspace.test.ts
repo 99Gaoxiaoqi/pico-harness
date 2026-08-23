@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { LocalRuntimeClient } from "../../src/daemon/index.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
-import { stopRegisteredTestDaemon } from "./helpers/test-runtime-daemon.js";
+import { TestRuntimeHostCandidateTracker } from "./helpers/test-runtime-daemon.js";
 
 /**
  * daemon 对"残留注册"的容忍（2026-08-16 真机事故回归）：
@@ -32,15 +32,19 @@ test("workspace.list tolerates registrations whose directory no longer exists", 
   const liveDir = await realpath(liveSeed);
   const ghostDir = await realpath(ghostSeed);
   process.env.PICO_HOME = picoHome;
+  const candidates = new TestRuntimeHostCandidateTracker();
   t.after(() => {
     delete process.env.PICO_HOME;
   });
   t.after(async () => {
-    await killDaemonFor(picoHome);
+    await candidates.stopAll();
     await rm(root, { recursive: true, force: true }).catch(() => undefined);
   });
 
-  const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome });
+  const client = new LocalRuntimeClient(undefined, {
+    runtimeHostRootPath: picoHome,
+    candidateLauncher: candidates.launcher,
+  });
   t.after(() => client.close());
   await client.request("runtime.ping", {});
   await client.request("workspace.register", { workspacePath: liveDir });
@@ -82,15 +86,19 @@ test("workspace.list isolates a registered workspace with legacy storage", async
     `${JSON.stringify({ version: 1, workspaces: [liveDir, legacyDir] }, null, 2)}\n`,
   );
   process.env.PICO_HOME = picoHome;
+  const candidates = new TestRuntimeHostCandidateTracker();
   t.after(() => {
     delete process.env.PICO_HOME;
   });
   t.after(async () => {
-    await killDaemonFor(picoHome);
+    await candidates.stopAll();
     await rm(root, { recursive: true, force: true }).catch(() => undefined);
   });
 
-  const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome });
+  const client = new LocalRuntimeClient(undefined, {
+    runtimeHostRootPath: picoHome,
+    candidateLauncher: candidates.launcher,
+  });
   t.after(() => client.close());
   await client.request("runtime.ping", {});
 
@@ -112,7 +120,3 @@ test("workspace.list isolates a registered workspace with legacy storage", async
   const again = await client.request("workspace.list", {});
   assert.equal((again.workspaces as unknown[]).length, 2);
 });
-
-async function killDaemonFor(picoHome: string): Promise<void> {
-  await stopRegisteredTestDaemon(picoHome);
-}

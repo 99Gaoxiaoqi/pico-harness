@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import {
   closeSync,
   existsSync,
@@ -40,6 +40,11 @@ export interface DetachedCandidateInput {
 
 export interface DetachedCandidateAttempt {
   pid: number;
+  /**
+   * Stable capability for this exact child. Tests use it to own teardown without
+   * turning the diagnostic PID into a long-lived signalling capability.
+   */
+  process?: DetachedCandidateProcess;
   /** Log file the candidate's output was redirected to, when logging was set up. */
   logFile?: string;
   /**
@@ -49,6 +54,19 @@ export interface DetachedCandidateAttempt {
    * 在本进程 event loop 存续期间仍能收到 exit 事件，unref 不影响。
    */
   startupFailure?: Promise<CandidateStartupFailure | undefined>;
+}
+
+export interface DetachedCandidateProcessExit {
+  readonly code: number | null;
+  readonly signal: NodeJS.Signals | null;
+}
+
+/** Exact spawned-child capability; unlike a raw PID it cannot be rebound after exit. */
+export interface DetachedCandidateProcess {
+  readonly pid: number;
+  readonly exited: boolean;
+  readonly closed: Promise<DetachedCandidateProcessExit>;
+  terminate(signal: "SIGTERM" | "SIGKILL"): boolean;
 }
 
 export interface DetachedCandidateLaunch {
@@ -177,8 +195,13 @@ export function launchDetachedRuntimeHostCandidate(
         reject(new Error("Runtime Host candidate did not receive a process id"));
         return;
       }
+      const candidateProcess = captureDetachedCandidateProcess(child, pid);
       child.unref();
-      resolve(logFile === undefined ? { pid, startupFailure } : { pid, logFile, startupFailure });
+      resolve(
+        logFile === undefined
+          ? { pid, process: candidateProcess, startupFailure }
+          : { pid, process: candidateProcess, logFile, startupFailure },
+      );
     };
     const onError = (error: Error) => {
       child.off("spawn", onSpawn);
@@ -189,6 +212,30 @@ export function launchDetachedRuntimeHostCandidate(
   });
   if (logSink) void pruneCandidateLogs(logSink.directory);
   return { spawned };
+}
+
+function captureDetachedCandidateProcess(
+  child: ChildProcess,
+  pid: number,
+): DetachedCandidateProcess {
+  let exited = child.exitCode !== null || child.signalCode !== null;
+  const closed = new Promise<DetachedCandidateProcessExit>((resolve) => {
+    child.once("exit", (code, signal) => {
+      exited = true;
+      resolve({ code, signal });
+    });
+  });
+  return {
+    pid,
+    get exited() {
+      return exited;
+    },
+    closed,
+    terminate(signal) {
+      if (exited) return false;
+      return child.kill(signal);
+    },
+  };
 }
 
 /**

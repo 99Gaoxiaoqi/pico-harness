@@ -9,11 +9,140 @@ import {
   resolveStorageRoot,
   RUNTIME_HOST_PROTOCOL_VERSION,
 } from "../../packages/runtime-host/src/index.js";
-import { launchDetachedRuntimeHostCandidate } from "../../packages/runtime-host/src/client/launcher.js";
+import {
+  launchDetachedRuntimeHostCandidate,
+  type CandidateLauncher,
+  type DetachedCandidateProcess,
+} from "../../packages/runtime-host/src/client/launcher.js";
+import { TestRuntimeHostCandidateTracker } from "./helpers/test-runtime-daemon.js";
+
+const TEST_CANDIDATE_INPUT = {
+  rootPath: tmpdir(),
+  expectedRootId: "0".repeat(64),
+};
+
+test("runtime-host spawn: teardown owns a late candidate before it ever registers", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "pico-runtime-host-late-candidate-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scriptPath = join(root, "never-registers.mjs");
+  writeFileSync(scriptPath, "setInterval(() => undefined, 1000);\n");
+  const tracker = new TestRuntimeHostCandidateTracker();
+  t.after(() => tracker.stopAll());
+
+  const attempt = await tracker.launcher({
+    rootPath: root,
+    expectedRootId: "0".repeat(64),
+    executable: process.execPath,
+    entrypoint: scriptPath,
+  }).spawned;
+  assert.ok(attempt.process && !attempt.process.exited, "未注册候选应已被启动句柄捕获");
+
+  await tracker.stopAll();
+  assert.equal(attempt.process.exited, true, "无需等待 registration quiet window 也应完成退出");
+});
+
+test("runtime-host spawn: teardown waits for a delayed spawn result before stopping it", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "pico-runtime-host-delayed-spawn-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scriptPath = join(root, "delayed-result.mjs");
+  writeFileSync(scriptPath, "setInterval(() => undefined, 1000);\n");
+  let ownedProcess: DetachedCandidateProcess | undefined;
+  const delayedLauncher: CandidateLauncher = (input) => {
+    const launch = launchDetachedRuntimeHostCandidate(input);
+    return {
+      spawned: launch.spawned.then(
+        (attempt) =>
+          new Promise((resolve) => {
+            ownedProcess = attempt.process;
+            setTimeout(() => resolve(attempt), 100);
+          }),
+      ),
+    };
+  };
+  const tracker = new TestRuntimeHostCandidateTracker({ launchCandidate: delayedLauncher });
+  t.after(() => tracker.stopAll());
+  const launch = tracker.launcher({
+    rootPath: root,
+    expectedRootId: "0".repeat(64),
+    executable: process.execPath,
+    entrypoint: scriptPath,
+  });
+
+  await tracker.stopAll();
+  const attempt = await launch.spawned;
+  assert.equal(attempt.process, ownedProcess);
+  assert.equal(ownedProcess?.exited, true, "晚到的 spawned 结果也必须等待到终态");
+});
+
+test("runtime-host spawn: teardown escalates only through the captured process capability", async () => {
+  const signals: string[] = [];
+  let exited = false;
+  let resolveClosed!: () => void;
+  const processCapability: DetachedCandidateProcess = {
+    pid: 73_001,
+    get exited() {
+      return exited;
+    },
+    closed: new Promise((resolve) => {
+      resolveClosed = () => resolve({ code: null, signal: "SIGKILL" });
+    }),
+    terminate(signal) {
+      signals.push(signal);
+      if (signal === "SIGKILL") {
+        exited = true;
+        resolveClosed();
+      }
+      return true;
+    },
+  };
+  const tracker = new TestRuntimeHostCandidateTracker({
+    launchCandidate: () => ({
+      spawned: Promise.resolve({ pid: processCapability.pid, process: processCapability }),
+    }),
+    gracefulExitTimeoutMs: 5,
+    forcedExitTimeoutMs: 50,
+  });
+  await tracker.launcher(TEST_CANDIDATE_INPUT).spawned;
+
+  await tracker.stopAll();
+  assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+});
+
+test("runtime-host spawn: a failed launch settles teardown without inventing PID ownership", async () => {
+  const tracker = new TestRuntimeHostCandidateTracker({
+    launchCandidate: () => ({ spawned: Promise.reject(new Error("expected spawn failure")) }),
+  });
+  await assert.rejects(tracker.launcher(TEST_CANDIDATE_INPUT).spawned, /expected spawn failure/);
+  await assert.doesNotReject(tracker.stopAll());
+});
+
+test("runtime-host spawn: an exited identity is never signalled even if its PID is stale", async () => {
+  let terminateCalls = 0;
+  const staleProcess: DetachedCandidateProcess = {
+    pid: 73_002,
+    exited: true,
+    closed: Promise.resolve({ code: 0, signal: null }),
+    terminate() {
+      terminateCalls += 1;
+      return true;
+    },
+  };
+  const tracker = new TestRuntimeHostCandidateTracker({
+    launchCandidate: () => ({
+      spawned: Promise.resolve({ pid: staleProcess.pid, process: staleProcess }),
+    }),
+  });
+  await tracker.launcher(TEST_CANDIDATE_INPUT).spawned;
+
+  await tracker.stopAll();
+  assert.equal(terminateCalls, 0, "已退出句柄不得因 PID 复用而再次发信号");
+});
 
 test("runtime-host spawn: connectOrSpawnRuntimeHost launches a detached candidate and connects", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "pico-runtime-host-spawn-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
+  const candidates = new TestRuntimeHostCandidateTracker();
+  t.after(() => candidates.stopAll());
 
   // 预创建 storage root marker，稳定 rootId。
   await resolveStorageRoot({ path: root, kind: "interactive" });
@@ -26,6 +155,7 @@ test("runtime-host spawn: connectOrSpawnRuntimeHost launches a detached candidat
     electionDeadlineMs: 30000,
     connectTimeoutMs: 5000,
     handshakeTimeoutMs: 5000,
+    candidateLauncher: candidates.launcher,
     // 短 idle grace：connection.close() 后 candidate 无连接，1s 内自动 idle 退出。
     idleGraceMs: 1000,
   });

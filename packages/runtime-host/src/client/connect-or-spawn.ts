@@ -59,6 +59,8 @@ export interface ConnectOrSpawnRuntimeHostInput {
    * anyone goes looking for it; override for tests or to concentrate diagnostics.
    */
   candidateLogDirectory?: string;
+  /** @internal Integration-test ownership seam; production callers must omit it. */
+  candidateLauncher?: CandidateLauncher;
 }
 
 interface ConnectOrSpawnRuntimeHostDependencies {
@@ -82,7 +84,12 @@ export type ConnectOrSpawnRuntimeHostResult =
 export async function connectOrSpawnRuntimeHost(
   input: ConnectOrSpawnRuntimeHostInput,
 ): Promise<ConnectOrSpawnRuntimeHostResult> {
-  return connectOrSpawnRuntimeHostWithDependencies(input, defaultDependencies);
+  return connectOrSpawnRuntimeHostWithDependencies(
+    input,
+    input.candidateLauncher
+      ? { ...defaultDependencies, launchCandidate: input.candidateLauncher }
+      : defaultDependencies,
+  );
 }
 
 export async function connectOrSpawnRuntimeHostWithDependencies(

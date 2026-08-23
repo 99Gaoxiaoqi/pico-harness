@@ -9,7 +9,7 @@ import { UserConfigStore } from "../../src/input/user-config-store.js";
 import { ClientSessionRuntime } from "../../src/tui/client-session-runtime.js";
 import { createClientCommandRegistry, processClientInput } from "../../src/tui/client-commands.js";
 import { TuiReporter } from "../../src/tui/tui-reporter.js";
-import { stopRegisteredTestDaemon } from "./helpers/test-runtime-daemon.js";
+import { TestRuntimeHostCandidateTracker } from "./helpers/test-runtime-daemon.js";
 
 /**
  * 3-D BLOCKED 收口（/mcp 镜像）：真 daemon 上验证用户级 MCP 服务器配置面
@@ -68,15 +68,19 @@ test("real daemon: /mcp status + enable/disable round trip over user mcp.json", 
   );
   process.env.PICO_HOME = picoHome;
   await configureDeadEndpointModel(picoHome);
+  const candidates = new TestRuntimeHostCandidateTracker();
   t.after(() => {
     delete process.env.PICO_HOME;
   });
 
-  const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome });
+  const client = new LocalRuntimeClient(undefined, {
+    runtimeHostRootPath: picoHome,
+    candidateLauncher: candidates.launcher,
+  });
   t.after(() => client.close());
   t.after(async () => {
     // t.after LIFO：精确 PID 退出后才删除 root，SIGTERM 超时仅兜底同一 PID。
-    await stopScenarioDaemon(picoHome);
+    await candidates.stopAll();
     await rm(root, { recursive: true, force: true }).catch(() => undefined);
   });
 
@@ -230,9 +234,4 @@ async function waitForCondition(
     if (Date.now() > deadline) return false;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-}
-
-/** 优雅关停场景专属 daemon；无注册时直接跳过，绝不反向拉起。 */
-async function stopScenarioDaemon(picoHome: string): Promise<void> {
-  await stopRegisteredTestDaemon(picoHome);
 }
