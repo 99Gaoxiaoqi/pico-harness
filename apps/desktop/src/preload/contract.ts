@@ -25,6 +25,7 @@ export const DESKTOP_IPC_CHANNELS = {
   setLaunchAtLogin: "pico:platform:set-launch-at-login",
   setBackgroundMode: "pico:lifecycle:set-background-mode",
   quit: "pico:lifecycle:quit",
+  browserAcquireViewport: "pico:browser:acquire-viewport",
   browserSetActiveSession: "pico:browser:set-active-session",
   browserSetViewport: "pico:browser:set-viewport",
   browserNavigate: "pico:browser:navigate",
@@ -33,6 +34,7 @@ export const DESKTOP_IPC_CHANNELS = {
   browserReload: "pico:browser:reload",
   browserStop: "pico:browser:stop",
   browserGetState: "pico:browser:get-state",
+  browserClearPage: "pico:browser:clear-page",
   browserClose: "pico:browser:close",
   browserClearData: "pico:browser:clear-data",
   browserClick: "pico:browser:click",
@@ -123,6 +125,7 @@ export interface DesktopBridge {
     quit(): Promise<DesktopResult<void>>;
   };
   readonly browser: {
+    acquireViewport(sessionId: string): Promise<DesktopResult<number>>;
     setActiveSession(sessionId: string | null): Promise<DesktopResult<void>>;
     setViewport(input: {
       readonly sessionId: string;
@@ -135,6 +138,7 @@ export interface DesktopBridge {
     reload(sessionId: string): Promise<DesktopResult<DesktopBrowserState>>;
     stop(sessionId: string): Promise<DesktopResult<DesktopBrowserState>>;
     getState(sessionId: string): Promise<DesktopResult<DesktopBrowserState | null>>;
+    clearPage(sessionId: string): Promise<DesktopResult<DesktopBrowserState>>;
     close(sessionId: string): Promise<DesktopResult<void>>;
     clearData(): Promise<DesktopResult<void>>;
     click(sessionId: string, selector: string): Promise<DesktopResult<DesktopBrowserElementResult>>;

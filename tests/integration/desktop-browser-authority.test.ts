@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  BrowserViewportGenerationAuthority,
   guardBrowserNavigation,
   normalizeActiveBrowserViewport,
   normalizeBrowserAddress,
   normalizePersistedBrowserNavigation,
   normalizeViewport,
+  replaceVisibleBrowserEntry,
 } from "../../apps/desktop/src/main/browser-logic.js";
 
 test("embedded browser accepts only HTTP(S) and defaults bare hosts to HTTPS", () => {
@@ -54,4 +56,47 @@ test("embedded browser blocks invalid direct and redirected navigation protocols
   assert.equal(guardBrowserNavigation(event, "file:///tmp/secret"), false);
   assert.equal(guardBrowserNavigation(event, "javascript:alert(1)"), false);
   assert.equal(prevented, 2);
+});
+
+test("embedded browser viewport generations survive remounts and reject stale mounts", () => {
+  const authority = new BrowserViewportGenerationAuthority();
+  const firstMount = authority.acquire("session-a");
+  assert.equal(authority.accept("session-a", firstMount), true);
+  const movedDockMount = authority.acquire("session-a");
+  assert.ok(movedDockMount > firstMount);
+  assert.equal(authority.accept("session-a", movedDockMount), true);
+  assert.equal(authority.accept("session-a", firstMount), false);
+  assert.equal(authority.current("session-a"), movedDockMount);
+  assert.equal(authority.acquire("session-b"), 1);
+});
+
+test("embedded browser clear replaces a visible entry without losing bounds or generation", () => {
+  type Entry = { readonly id: string; generation: number; visible: boolean };
+  const calls: string[] = [];
+  const current: Entry = { id: "old", generation: 7, visible: true };
+  const replacement = replaceVisibleBrowserEntry({
+    current,
+    generation: (entry) => entry.generation,
+    bounds: () => ({ x: 10, y: 20, width: 300, height: 200 }),
+    destroy: (entry) => calls.push(`destroy:${entry.id}`),
+    create: () => {
+      calls.push("create");
+      return { id: "new", generation: 0, visible: false };
+    },
+    show: (entry, bounds, generation) => {
+      calls.push(`show:${bounds.width}x${bounds.height}`);
+      entry.generation = generation;
+      entry.visible = true;
+    },
+  });
+  assert.deepEqual(calls, ["destroy:old", "create", "show:300x200"]);
+  assert.deepEqual(replacement, { id: "new", generation: 7, visible: true });
+  const navigate = (entry: Entry, url: string): string => {
+    if (!entry.visible) throw new Error("browser entry is not visible");
+    return url;
+  };
+  assert.equal(
+    navigate(replacement, "https://example.com/after-clear"),
+    "https://example.com/after-clear",
+  );
 });

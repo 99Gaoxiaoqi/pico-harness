@@ -222,6 +222,12 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
       quit: () => ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.quit),
     }),
     browser: Object.freeze({
+      acquireViewport: (sessionId: string) =>
+        invokeBrowserSession<number>(
+          ipcRenderer,
+          DESKTOP_IPC_CHANNELS.browserAcquireViewport,
+          sessionId,
+        ),
       setActiveSession: (sessionId: string | null) => {
         if (sessionId !== null && !isNonEmptyString(sessionId)) {
           return Promise.resolve(validationFailure(invalidBridgeParams("浏览器会话参数无效")));
@@ -273,6 +279,12 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
         invokeBrowserSession<DesktopBrowserState | null>(
           ipcRenderer,
           DESKTOP_IPC_CHANNELS.browserGetState,
+          sessionId,
+        ),
+      clearPage: (sessionId: string) =>
+        invokeBrowserSession<DesktopBrowserState>(
+          ipcRenderer,
+          DESKTOP_IPC_CHANNELS.browserClearPage,
           sessionId,
         ),
       close: (sessionId: string) =>
@@ -336,7 +348,11 @@ function isViewportInput(value: unknown): value is {
 } {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const input = value as Record<string, unknown>;
-  if (!isNonEmptyString(input["sessionId"]) || !Number.isSafeInteger(input["generation"])) {
+  if (
+    !isNonEmptyString(input["sessionId"]) ||
+    !Number.isSafeInteger(input["generation"]) ||
+    (input["generation"] as number) <= 0
+  ) {
     return false;
   }
   if (input["rect"] === null) return true;
