@@ -313,6 +313,31 @@ test("page and advance operations preserve fixed watermark inputs", async () => 
   assert.equal(source.advanceCalls.length, 1);
 });
 
+test("partial persistence failure is emitted once on the sequenced Session channel", async () => {
+  const registry = new SessionSubscriptionRegistry("host-epoch-1", new FakeSource());
+  const received: RuntimeSessionSubscriptionFrame[] = [];
+  const opened = await registry.open(
+    { workspacePath, sessionId },
+    {
+      connectionId: "connection-1",
+      push: async (frame) => {
+        received.push(frame);
+      },
+    },
+  );
+  registry.activate(workspacePath, sessionId, opened.subscriptionId, "connection-1");
+  registry.publishContinuityDegraded(workspacePath, sessionId, "partial_persistence_failed");
+  await waitFor(() => received.length === 1);
+  assert.deepEqual(received[0], {
+    hostEpoch: "host-epoch-1",
+    subscriptionId: opened.subscriptionId,
+    sequence: 1,
+    sessionId,
+    type: "subscription.continuity_degraded",
+    reason: "partial_persistence_failed",
+  });
+});
+
 function tick(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }

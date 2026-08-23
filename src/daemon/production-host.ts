@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { createCliSessionId } from "../cli/session-resolver.js";
 import { globalSessionManager } from "../engine/session.js";
 import { AgentRuntime, type RunAgentCliResult } from "../runtime/agent-runtime.js";
+import { currentRuntimeRun } from "../runtime/runtime-run.js";
 import type { PlanHandoff } from "../engine/plan-handoff.js";
 import { PlanCoordinator } from "../plan/coordinator.js";
 import type { PlanProjection } from "../plan/contract.js";
@@ -45,6 +46,7 @@ import {
 import { DesktopReporter, type DesktopReporterEvent } from "./desktop-reporter.js";
 import { ToolLiveCoalescer } from "./tool-live-coalescer.js";
 import type { SessionSubscriptionRegistry } from "./session-subscription-owner.js";
+import { PersistentActiveOverlay } from "./session-active-overlay.js";
 import { DesktopRuntimeService } from "./desktop-runtime-service.js";
 import { DesktopAutomationService } from "./desktop-automation-service.js";
 import { buildApprovalRequestedPayload } from "./approval-wire.js";
@@ -288,13 +290,62 @@ export function createProductionRuntimeServices(
         const toolLive = new ToolLiveCoalescer((event) =>
           publishDesktopReporterEvent(service, workspacePath, event, nextDesktopResourceVersion),
         );
+        const overlayToolCallIds = new Map<string, string>();
+        const activeOverlay = new PersistentActiveOverlay(
+          {
+            async upsert(input) {
+              const runtimeRun = currentRuntimeRun();
+              if (
+                !runtimeRun ||
+                runtimeRun.runId !== context.run.runId ||
+                runtimeRun.sessionId !== targetSessionId
+              ) {
+                throw new Error("Active Overlay 已离开对应 Runtime Run 上下文");
+              }
+              const snapshot = await runtimeRun.upsertPartialSnapshot(
+                input.partialId,
+                input.kind,
+                input.expectedVersion,
+                input.payload,
+              );
+              return { version: snapshot.version };
+            },
+          },
+          {
+            publishDelta(delta) {
+              sessionSubscriptions?.publishSessionDelta({
+                workspacePath,
+                sessionId: targetSessionId,
+                runId: delta.runId,
+                turnId: delta.turnId,
+                itemId: delta.itemId,
+                streamId: delta.streamId,
+                kind: delta.kind,
+                text: delta.text,
+                ...(delta.stream ? { stream: delta.stream } : {}),
+              });
+            },
+            publishContinuityDegraded(reason) {
+              sessionSubscriptions?.publishContinuityDegraded(
+                workspacePath,
+                targetSessionId,
+                reason,
+              );
+            },
+          },
+        );
         const reporter = new DesktopReporter({
           runId: context.run.runId,
           sessionId: targetSessionId,
           publish: (event) => {
-            // Session continuity receives raw Reporter events before the legacy
-            // tool-output coalescer / run.live notification path.
-            sessionSubscriptions?.publishReporterEvent(workspacePath, event);
+            const handledByOverlay = persistReporterOverlayDelta(
+              activeOverlay,
+              overlayToolCallIds,
+              event,
+            );
+            if (!handledByOverlay) {
+              sessionSubscriptions?.publishReporterEvent(workspacePath, event);
+            }
             toolLive.push(event);
           },
         });
@@ -433,6 +484,7 @@ export function createProductionRuntimeServices(
           broker.close();
           removeBrokerInteractions(pendingApprovals, broker);
           removeBrokerInteractions(pendingPrompts, broker);
+          await activeOverlay.flush();
           toolLive.dispose();
           await runtimeState.dispose();
         }
@@ -1258,6 +1310,84 @@ export function publishDesktopMemoryProposal(
       },
     }),
   );
+}
+
+function persistReporterOverlayDelta(
+  overlay: PersistentActiveOverlay,
+  toolCallIds: Map<string, string>,
+  event: DesktopReporterEvent,
+): boolean {
+  const turn =
+    typeof event.payload["turn"] === "number" && Number.isSafeInteger(event.payload["turn"])
+      ? event.payload["turn"]
+      : 0;
+  const stableTurnId = `turn:${event.runId}:${turn}`;
+  if (event.type === "assistant.delta" || event.type === "assistant.reasoning.delta") {
+    const text = firstString(event.payload["delta"]);
+    if (!text || !event.sessionId) return true;
+    const thinking = event.type === "assistant.reasoning.delta";
+    void overlay.append({
+      sessionId: event.sessionId,
+      runId: event.runId,
+      turnId: stableTurnId,
+      itemId: `message:${stableTurnId}:${thinking ? "thinking" : "assistant"}`,
+      streamId: `${thinking ? "thinking" : "assistant"}:live:${event.runId}:${turn}`,
+      kind: thinking ? "thinking" : "text",
+      text,
+      anchorSequence: 0,
+    });
+    return true;
+  }
+  if (event.type === "tool.started") {
+    const providerCallId = firstString(event.payload["providerCallId"]);
+    const canonicalStart = event.payload["canonicalTranscriptStart"];
+    const toolCallId =
+      isJsonObject(canonicalStart) && typeof canonicalStart["toolCallId"] === "string"
+        ? canonicalStart["toolCallId"]
+        : undefined;
+    if (providerCallId && toolCallId) toolCallIds.set(providerCallId, toolCallId);
+    void overlay.complete(`thinking:live:${event.runId}:${turn}`);
+    return false;
+  }
+  if (event.type === "tool.output") {
+    const text = firstString(event.payload["chunk"]);
+    const providerCallId = firstString(event.payload["providerCallId"]);
+    const toolCallId = providerCallId ? toolCallIds.get(providerCallId) : undefined;
+    if (!text || !event.sessionId || !toolCallId) return false;
+    const stream = event.payload["stream"] === "stderr" ? "stderr" : "stdout";
+    void overlay.append({
+      sessionId: event.sessionId,
+      runId: event.runId,
+      turnId: stableTurnId,
+      itemId: `tool:${toolCallId}`,
+      streamId: `tool:live:${event.runId}:${toolCallId}:${stream}`,
+      kind: "toolOutput",
+      stream,
+      text,
+      anchorSequence: 0,
+    });
+    return true;
+  }
+  if (event.type === "assistant.message") {
+    void overlay.complete(`assistant:live:${event.runId}:${turn}`);
+    void overlay.complete(`thinking:live:${event.runId}:${turn}`);
+  } else if (event.type === "tool.completed") {
+    const result = event.payload["result"];
+    const providerCallId =
+      isJsonObject(result) && typeof result["toolCallId"] === "string"
+        ? result["toolCallId"]
+        : undefined;
+    const toolCallId = providerCallId
+      ? (toolCallIds.get(providerCallId) ?? providerCallId)
+      : undefined;
+    if (toolCallId) {
+      void overlay.complete(`tool:live:${event.runId}:${toolCallId}:stdout`);
+      void overlay.complete(`tool:live:${event.runId}:${toolCallId}:stderr`);
+    }
+  } else if (event.type === "run.finished" || event.type === "run.interrupted") {
+    void overlay.flush();
+  }
+  return false;
 }
 
 export function publishDesktopReporterEvent(

@@ -20,10 +20,8 @@ const base = {
 
 test("active overlay persists the first delta before publishing and uses UTF-8 byte offsets", async () => {
   const writes: ActiveOverlayPersistInput[] = [];
-  const deltas: Extract<
-    RuntimeSessionSubscriptionFrame,
-    { type: "subscription.session_delta" }
-  >[] = [];
+  const deltas: Extract<RuntimeSessionSubscriptionFrame, { type: "subscription.session_delta" }>[] =
+    [];
   let release: (() => void) | undefined;
   const gate = new Promise<void>((resolve) => {
     release = resolve;
