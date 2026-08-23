@@ -21,5 +21,8 @@
   },
   "dependencies": {
     "fs-native-extensions": "^1.5.0"
+  },
+  "optionalDependencies": {
+    "node-pty": "^1.1.0"
   }
 }
