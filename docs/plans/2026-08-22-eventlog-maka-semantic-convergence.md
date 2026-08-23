@@ -1,6 +1,24 @@
 # EventLog Maka 语义对齐交付计划
 
-状态：实现与代码验收完成，待真实迁移/发布审批。EventLog 改造基线：`4b0813c3`；Session/Memory 语义修正基线：`fa362543`。授权终点：实现、验证并准备交付，不执行用户真实 workspace 迁移或发布。
+状态：Session Continuity 数据闭环已合并；Workbar v2 以 `d3e3b178` 为基线实施。EventLog 改造基线：`4b0813c3`；Session/Memory 语义修正基线：`fa362543`。授权终点：实现、验证并准备交付，不执行用户真实 workspace 迁移或发布。
+
+## Workbar v2 收敛基线（`d3e3b178`）
+
+Session Continuity 已成为 Desktop 会话转录的唯一通用事件流：固定水位分页、超大条目分片、host epoch 变更、断线重连、缺口补拉与迟到响应隔离都已落地。Workbar 不再使用或建设 `run.live` 类第二套通用事件通道；Tasks、Artifacts、Trace 和 Context 只通过轻量 `resource_changed` 获知变化，再按各自 revision/watermark 查询 authority。Terminal 高频输出和 Browser 页面状态保持专用通道，不写入 Session Continuity。
+
+右侧/底部 Workbar 的产品边界固定为七类工具：侧边对话、变更、终端、浏览器、生成文件、待办和追踪。原“概览/上下文”合并为静态 Inspector，单次工具详情使用可替换 Preview。主会话的推理、工具执行、审批、Plan 和输入框不迁入 Workbar。
+
+| 工具      | authority 与生命周期要求                                       | `d3e3b178` 后差距                                           |
+| --------- | -------------------------------------------------------------- | ----------------------------------------------------------- |
+| Inspector | `session.trace.query` 水位 + 版本化 `session.context.get`      | 需增加独立查询、静态/动态 Preview 和隐藏停查                |
+| Review    | 实时 `git.review.snapshot/diff`，直读 branch/staged/unstaged   | 需脱离已完成 Run 的 `changes.*` 投影                        |
+| Tasks     | Session 任务账本、revision CAS、toolCallId 幂等                | 需持久化 authority、模型工具和有界摘要注入                  |
+| Files     | 仅当前 Session 生成产物、CAS Blob、分块读取                    | 需产物索引、ingest/commit 与统一 retention GC               |
+| Terminal  | Runtime Host 持有 PTY，独立序列流和有界缓冲                    | 需 create/list/attach/input/resize/stop/detach 及进程组清理 |
+| Browser   | Electron Main 持有 WebContentsView，全局持久登录分区，可见租约 | 需共享页面、危险协议/设备权限阻断与 Agent 操作边界          |
+| Side Chat | 仅从最近成功 Turn 分叉，隐藏于普通 Session，可恢复清理         | 需 Saga、权限继承、不回写父会话与禁止子代理                 |
+
+开放闸门是真实 authority、明确错误态和删除/归档/断线生命周期同时通过；在此之前 Registry 可声明工具，但 Launcher 必须禁用并说明原因，不展示空面板。Session 删除会清理任务、产物引用、Trace 投影、终端、Browser 页面和侧聊；长期 Memory 只失效来源，已提交 Fact 保留。
 
 ## 已决策边界
 
