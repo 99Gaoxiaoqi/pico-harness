@@ -34,8 +34,8 @@ export function isDesktopRuntimeInvocationAllowed(
 export class DesktopTerminalGenerationController {
   #sealed = true;
   #sealVersion = 0;
-  #activeCreateSubmissions = 0;
-  readonly #createSubmissionDrainWaiters = new Set<() => void>();
+  #activeCreateResponses = 0;
+  readonly #createResponseDrainWaiters = new Set<() => void>();
   #transitionTail: Promise<void> = Promise.resolve();
   #cleanupRequired: (() => Promise<void>) | undefined;
 
@@ -50,19 +50,19 @@ export class DesktopTerminalGenerationController {
 
   submitCreate<Result>(send: () => Promise<Result>): Promise<Result> | undefined {
     if (this.#sealed) return undefined;
-    this.#activeCreateSubmissions++;
+    this.#activeCreateResponses++;
+    let request: Promise<Result>;
     try {
-      // The shared Runtime client preserves invocation order across its connection/open queue.
-      // Release the Main-side fence at that submission boundary: terminal.stopAll is invoked
-      // after every admitted create, while the Host Authority owns waiting for slow spawn results.
-      return send();
-    } finally {
-      this.#activeCreateSubmissions--;
-      if (this.#activeCreateSubmissions === 0) {
-        for (const resolve of this.#createSubmissionDrainWaiters) resolve();
-        this.#createSubmissionDrainWaiters.clear();
-      }
+      request = send();
+    } catch (error) {
+      this.#releaseCreateResponse();
+      throw error;
     }
+    void request.then(
+      () => this.#releaseCreateResponse(),
+      () => this.#releaseCreateResponse(),
+    );
+    return request;
   }
 
   cleanup(stopAll: () => Promise<void>): Promise<void> {
@@ -91,19 +91,41 @@ export class DesktopTerminalGenerationController {
     return next;
   }
 
-  #drainCreateSubmissions(): Promise<void> {
-    if (this.#activeCreateSubmissions === 0) return Promise.resolve();
+  #drainCreateResponses(): Promise<void> {
+    if (this.#activeCreateResponses === 0) return Promise.resolve();
     const deferred = Promise.withResolvers<void>();
-    this.#createSubmissionDrainWaiters.add(deferred.resolve);
+    this.#createResponseDrainWaiters.add(deferred.resolve);
     return deferred.promise;
   }
 
   async #runRequiredCleanup(): Promise<void> {
     const cleanup = this.#cleanupRequired;
     if (!cleanup) return;
-    await this.#drainCreateSubmissions();
-    await cleanup();
+    let stopping: Promise<void>;
+    try {
+      // Close Host admission first. Waiting for old create responses before this call lets the
+      // Desktop's 5s quit fence expire without ever submitting terminal.stopAll.
+      stopping = cleanup();
+    } catch (error) {
+      stopping = Promise.reject(error);
+    }
+    const stopped = stopping.then(
+      () => ({ ok: true as const }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+    // A create handler can still be between Runtime dispatch and Authority admission. Do not
+    // resume the next UI generation until those old responses settle as well as stopAll.
+    await this.#drainCreateResponses();
+    const outcome = await stopped;
+    if (!outcome.ok) throw outcome.error;
     if (this.#cleanupRequired === cleanup) this.#cleanupRequired = undefined;
+  }
+
+  #releaseCreateResponse(): void {
+    this.#activeCreateResponses--;
+    if (this.#activeCreateResponses !== 0) return;
+    for (const resolve of this.#createResponseDrainWaiters) resolve();
+    this.#createResponseDrainWaiters.clear();
   }
 }
 

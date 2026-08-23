@@ -753,7 +753,7 @@ test("Desktop 窗口关闭清理完成后才允许重开代际", async () => {
   assert.equal(controller.isCreateAllowed(), true);
 });
 
-test("Desktop cleanup 只等待 create 提交，不等待完整响应后再 stopAll", async () => {
+test("Desktop cleanup 先提交 stopAll，再等待旧 create 响应完成", async () => {
   const controller = new DesktopTerminalGenerationController();
   await controller.open(async () => undefined);
   const createResponse = deferred();
@@ -763,6 +763,10 @@ test("Desktop cleanup 只等待 create 提交，不等待完整响应后再 stop
   const cleanup = controller.cleanup(async () => {
     stopAllCount++;
   });
+  let cleanupFinished = false;
+  void cleanup.then(() => {
+    cleanupFinished = true;
+  });
 
   await waitForImmediate();
   assert.equal(
@@ -770,10 +774,12 @@ test("Desktop cleanup 只等待 create 提交，不等待完整响应后再 stop
     undefined,
   );
   assert.equal(stopAllCount, 1, "create 请求已提交后必须立即把 stopAll 发给 Host");
-  await cleanup;
+  assert.equal(cleanupFinished, false, "旧 create 响应未完成前 cleanup 不得开放下一代");
   assert.equal(controller.isCreateAllowed(), false);
   createResponse.resolve();
   await createRequest;
+  await cleanup;
+  assert.equal(cleanupFinished, true);
 });
 
 test("Desktop 慢 create 不会阻塞 5s fence 前向 Host 提交 stopAll", async () => {
