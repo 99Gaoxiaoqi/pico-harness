@@ -6,7 +6,10 @@ import { join } from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import type { RuntimeEvent } from "../../src/engine/session-runtime-event.js";
-import { RuntimeEventStoreIntegrityError } from "../../src/storage/runtime-event-store-contracts.js";
+import {
+  RuntimeEventStoreIntegrityError,
+  RuntimeEventStoreRunSealedError,
+} from "../../src/storage/runtime-event-store-contracts.js";
 import { operationalDatabasePath } from "../../src/storage/sqlite/sqlite-database.js";
 import {
   RuntimeTranscriptResetRequiredError,
@@ -39,6 +42,24 @@ function message(
     ...eventBase(eventId, sessionId, runId, turnId),
     kind: "message.committed",
     data: { message: { role, content } },
+  };
+}
+
+function started(eventId: string, sessionId: string, workDir: string): RuntimeEvent {
+  return {
+    ...eventBase(eventId, sessionId),
+    visibility: "internal",
+    kind: "run.started",
+    data: { workDir },
+  };
+}
+
+function terminal(eventId: string, sessionId: string): RuntimeEvent {
+  return {
+    ...eventBase(eventId, sessionId),
+    visibility: "internal",
+    kind: "run.terminal",
+    data: { status: "completed" },
   };
 }
 
@@ -276,6 +297,130 @@ test("normal append and advance do not decode canonical full history", async () 
         change.op === "upsert" ? change.record.itemId : change.itemId,
       ),
       ["message:turn-2:assistant"],
+    );
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("durable finals atomically replace matching assistant and tool partial overlays", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pico-transcript-final-overlay-"));
+  const workspace = join(root, "workspace");
+  mkdirSync(workspace, { recursive: true });
+  const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "storage") });
+  try {
+    const sessionId = "final-overlay-session";
+    await store.initializeSession({ sessionId, workDir: workspace });
+    const initial = await store.append(started("run-start", sessionId, workspace));
+    for (const [partialId, itemId] of [
+      ["assistant-partial", "message:turn:run-1:1:assistant"],
+      ["thinking-partial", "message:turn:run-1:1:thinking"],
+      ["unrelated-partial", "message:another-turn:assistant"],
+    ] as const) {
+      await store.upsertPartialSnapshot({
+        sessionId,
+        runId: "run-1",
+        partialId,
+        kind: "assistant",
+        expectedVersion: 0,
+        payload: { itemId, content: "streaming" },
+      });
+    }
+    await store.appendPartialSegment({
+      sessionId,
+      runId: "run-1",
+      partialId: "assistant-partial",
+      segmentIndex: 0,
+      payload: { delta: "streaming" },
+    });
+
+    const finalAssistant = message(
+      "assistant-final",
+      sessionId,
+      "assistant",
+      "done",
+      "run-1",
+      "turn:run-1:1",
+    );
+    await assert.rejects(
+      () =>
+        store.appendBatch([
+          finalAssistant,
+          terminal("terminal-in-rollback", sessionId),
+          message("sealed-tail", sessionId, "user", "must roll back"),
+        ]),
+      RuntimeEventStoreRunSealedError,
+    );
+    assert.equal(await store.readSessionEvent(sessionId, "assistant-final"), undefined);
+    assert.deepEqual(
+      (await store.readRunPartials(sessionId, "run-1")).snapshots.map(({ partialId }) => partialId),
+      ["assistant-partial", "thinking-partial", "unrelated-partial"],
+    );
+    assert.equal((await store.readRunPartials(sessionId, "run-1")).segments.length, 1);
+    assert.deepEqual(
+      (
+        await store.readTranscriptAdvancePage({
+          sessionId,
+          after: initial.transcriptWatermark!,
+          through: await store.readTranscriptWatermark(sessionId),
+          maxBytes: 16_384,
+        })
+      ).changes,
+      [],
+    );
+
+    const assistantResult = await store.append(finalAssistant);
+    const afterAssistantFinal = await store.readRunPartials(sessionId, "run-1");
+    assert.deepEqual(
+      afterAssistantFinal.snapshots.map(({ partialId }) => partialId),
+      ["unrelated-partial"],
+    );
+    assert.deepEqual(afterAssistantFinal.segments, []);
+    const assistantAdvance = await store.readTranscriptAdvancePage({
+      sessionId,
+      after: initial.transcriptWatermark!,
+      through: assistantResult.transcriptWatermark!,
+      maxBytes: 16_384,
+    });
+    assert.deepEqual(
+      assistantAdvance.changes.map((change) =>
+        change.op === "upsert" ? change.record.itemId : change.itemId,
+      ),
+      ["message:turn:run-1:1:assistant"],
+    );
+
+    await store.upsertPartialSnapshot({
+      sessionId,
+      runId: "run-1",
+      partialId: "tool-partial",
+      kind: "tool",
+      expectedVersion: 0,
+      payload: { itemId: "tool:call-final", status: "running" },
+    });
+    await store.appendPartialSegment({
+      sessionId,
+      runId: "run-1",
+      partialId: "tool-partial",
+      segmentIndex: 0,
+      payload: { delta: "output" },
+    });
+    const toolFinal = await store.append(toolResult("tool-final", sessionId, "call-final"));
+    assert.deepEqual(
+      (await store.readRunPartials(sessionId, "run-1")).snapshots.map(({ partialId }) => partialId),
+      ["unrelated-partial"],
+    );
+    const toolAdvance = await store.readTranscriptAdvancePage({
+      sessionId,
+      after: assistantResult.transcriptWatermark!,
+      through: toolFinal.transcriptWatermark!,
+      maxBytes: 16_384,
+    });
+    assert.deepEqual(
+      toolAdvance.changes.map((change) =>
+        change.op === "upsert" ? change.record.itemId : change.itemId,
+      ),
+      ["tool:call-final"],
     );
   } finally {
     store.close();

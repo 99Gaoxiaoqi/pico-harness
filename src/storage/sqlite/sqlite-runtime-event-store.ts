@@ -2132,6 +2132,28 @@ export class SqliteRuntimeEventStore {
     });
   }
 
+  /**
+   * A durable final item supersedes only its matching active overlay. This runs in
+   * appendBatch's transaction, after the canonical item/change projection exists;
+   * deleting the snapshot cascades all of its segments.
+   */
+  private clearFinalizedTranscriptPartialsLocked(event: RuntimeEvent): void {
+    let itemIds: readonly string[] = [];
+    if (event.kind === "message.committed" && event.data.message.role === "assistant") {
+      itemIds = [`message:${event.turnId}:assistant`, `message:${event.turnId}:thinking`];
+    } else if (event.kind === "tool.result.recorded") {
+      itemIds = [`tool:${event.refs.toolCallId}`];
+    }
+    if (itemIds.length === 0) return;
+    const placeholders = itemIds.map(() => "?").join(", ");
+    this.lease.database
+      .prepare(
+        `DELETE FROM runtime_partial_snapshots
+         WHERE session_id = ? AND json_extract(payload_json, '$.itemId') IN (${placeholders})`,
+      )
+      .run(event.sessionId, ...itemIds);
+  }
+
   private readCurrentTranscriptItemLocked(
     sessionId: string,
     itemId: string,
@@ -2558,6 +2580,7 @@ export class SqliteRuntimeEventStore {
         );
       }
       this.projectTranscriptEventLocked(event, sequence);
+      this.clearFinalizedTranscriptPartialsLocked(event);
       // 与旧 store 的批内语义对齐:本批刚插入的事件立刻进入幂等视图,
       // 同批后续同 id 同载荷副本走重放分支(inserted:false,同 sequence),
       // 而不是撞 event_id 主键约束以原始 SqliteError 失败。
