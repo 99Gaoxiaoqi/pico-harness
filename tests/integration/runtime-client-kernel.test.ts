@@ -200,7 +200,7 @@ test("kernel client: Desktop 检出旧方法后优雅关闭常驻 daemon 并接�
 test("kernel client: legacy shutdown EOF is accepted only after the old host fully exits", async (t) => {
   const harness = await startKernelClientHarness(t);
   const previousMode = process.env["PICO_TEST_LEGACY_SHUTDOWN_MODE"];
-  process.env["PICO_TEST_LEGACY_SHUTDOWN_MODE"] = "exit";
+  process.env["PICO_TEST_LEGACY_SHUTDOWN_MODE"] = "eof-exit";
   t.after(() => restoreEnvironment("PICO_TEST_LEGACY_SHUTDOWN_MODE", previousMode));
   const fixture = fileURLToPath(
     new URL("../fixtures/runtime-host-legacy-shutdown-candidate.ts", import.meta.url),
@@ -226,7 +226,56 @@ test("kernel client: legacy shutdown EOF is accepted only after the old host ful
 test("kernel client: shutdown EOF remains an error while the old host is still alive", async (t) => {
   const harness = await startKernelClientHarness(t);
   const previousMode = process.env["PICO_TEST_LEGACY_SHUTDOWN_MODE"];
-  process.env["PICO_TEST_LEGACY_SHUTDOWN_MODE"] = "stay";
+  process.env["PICO_TEST_LEGACY_SHUTDOWN_MODE"] = "eof-stay";
+  t.after(() => restoreEnvironment("PICO_TEST_LEGACY_SHUTDOWN_MODE", previousMode));
+  const fixture = fileURLToPath(
+    new URL("../fixtures/runtime-host-legacy-shutdown-candidate.ts", import.meta.url),
+  );
+  await startLegacyShutdownFixture(t, harness.picoHome, fixture);
+  const client = new LocalRuntimeClient(undefined, {
+    runtimeHostRootPath: harness.picoHome,
+    candidateEntrypoint: fixture,
+  });
+  t.after(() => client.close());
+
+  await client.connect();
+  await assert.rejects(client.shutdownDaemon(), (error: unknown) => {
+    assert.ok(error instanceof RuntimeClientError);
+    assert.equal(error.code, "RUNTIME_SHUTDOWN_UNCONFIRMED");
+    return true;
+  });
+});
+
+test("kernel client: a legacy shutdown response is accepted only after the old host fully exits", async (t) => {
+  const harness = await startKernelClientHarness(t);
+  const previousMode = process.env["PICO_TEST_LEGACY_SHUTDOWN_MODE"];
+  process.env["PICO_TEST_LEGACY_SHUTDOWN_MODE"] = "response-exit";
+  t.after(() => restoreEnvironment("PICO_TEST_LEGACY_SHUTDOWN_MODE", previousMode));
+  const fixture = fileURLToPath(
+    new URL("../fixtures/runtime-host-legacy-shutdown-candidate.ts", import.meta.url),
+  );
+  await startLegacyShutdownFixture(t, harness.picoHome, fixture);
+  const client = new LocalRuntimeClient(undefined, {
+    runtimeHostRootPath: harness.picoHome,
+    candidateEntrypoint: fixture,
+  });
+  t.after(() => client.close());
+
+  await client.connect();
+  const capability = await resolveStorageRoot({ path: harness.picoHome, kind: "interactive" });
+  const controlDirectory = join(resolveRootControlNamespace(), capability.rootId);
+  const before = await readHostRegistration(controlDirectory);
+  assert.ok(before);
+
+  await client.shutdownDaemon();
+  assert.equal(await processAlive(before.pid), false, "成功回包后仍必须等待旧 daemon 真正退出");
+  assert.equal(await readHostRegistration(controlDirectory), undefined);
+});
+
+test("kernel client: a shutdown response remains an error while the old host is still alive", async (t) => {
+  const harness = await startKernelClientHarness(t);
+  const previousMode = process.env["PICO_TEST_LEGACY_SHUTDOWN_MODE"];
+  process.env["PICO_TEST_LEGACY_SHUTDOWN_MODE"] = "response-stay";
   t.after(() => restoreEnvironment("PICO_TEST_LEGACY_SHUTDOWN_MODE", previousMode));
   const fixture = fileURLToPath(
     new URL("../fixtures/runtime-host-legacy-shutdown-candidate.ts", import.meta.url),
