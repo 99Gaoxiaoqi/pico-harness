@@ -47,7 +47,10 @@ export function guardBrowserNavigation(event: { preventDefault(): void }, url: s
 }
 
 export class BrowserViewportGenerationAuthority {
-  readonly #generations = new Map<string, number>();
+  readonly #generations = new Map<
+    string,
+    { readonly generation: number; readonly issued: boolean }
+  >();
 
   acquire(sessionId: string): number {
     const current = this.current(sessionId);
@@ -55,18 +58,33 @@ export class BrowserViewportGenerationAuthority {
       throw new Error(`浏览器会话 ${sessionId} 的视口代际已经耗尽`);
     }
     const generation = current + 1;
-    this.#generations.set(sessionId, generation);
+    this.#generations.set(sessionId, { generation, issued: true });
     return generation;
   }
 
   current(sessionId: string): number {
-    return this.#generations.get(sessionId) ?? 0;
+    return this.#generations.get(sessionId)?.generation ?? 0;
   }
 
   accept(sessionId: string, generation: number): boolean {
-    if (generation < this.current(sessionId)) return false;
-    this.#generations.set(sessionId, generation);
-    return true;
+    const current = this.#generations.get(sessionId);
+    return Boolean(current?.issued && current.generation === generation);
+  }
+
+  revoke(sessionId: string): number {
+    const current = this.#generations.get(sessionId);
+    if (current && !current.issued) return current.generation;
+    const generation = Math.min((current?.generation ?? 0) + 1, Number.MAX_SAFE_INTEGER);
+    this.#generations.set(sessionId, { generation, issued: false });
+    return generation;
+  }
+
+  revokeAll(): readonly { readonly sessionId: string; readonly generation: number }[] {
+    const revoked: { sessionId: string; generation: number }[] = [];
+    for (const sessionId of this.#generations.keys()) {
+      revoked.push({ sessionId, generation: this.revoke(sessionId) });
+    }
+    return revoked;
   }
 
   clear(): void {

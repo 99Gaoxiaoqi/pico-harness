@@ -52,6 +52,7 @@ type CommandOutcome =
  */
 export class BrowserAgentCommandBroker {
   private readonly leases = new Map<string, BrowserLease>();
+  private readonly revocationFloors = new Map<string, number>();
   private readonly pending = new Map<string, PendingCommand>();
   private readonly queues = new Map<string, string[]>();
   private readonly waiters = new Map<string, Set<() => void>>();
@@ -83,14 +84,19 @@ export class BrowserAgentCommandBroker {
     this.sweepExpired(input.sessionId);
     const current = this.leases.get(input.sessionId);
     if (!input.visible) {
+      this.recordRevocationFloor(input.sessionId, input.generation);
       if (!current || !input.leaseId || current.leaseId === input.leaseId) {
-        this.invalidateSession(input.sessionId, "浏览器面板已隐藏");
+        this.invalidateSession(input.sessionId, "浏览器面板已隐藏", false);
       }
       return {
         leaseId: input.leaseId ?? current?.leaseId ?? randomUUID(),
         expiresAt: this.now(),
         visible: false,
       };
+    }
+
+    if (input.generation <= (this.revocationFloors.get(input.sessionId) ?? 0)) {
+      throw new BrowserAgentBrokerError("BROWSER_LEASE_STALE", "浏览器面板代际已经被关闭或吊销");
     }
 
     if (current && current.leaseId !== input.leaseId && input.generation <= current.generation) {
@@ -158,7 +164,15 @@ export class BrowserAgentCommandBroker {
     return { accepted: true };
   }
 
-  invalidateSession(sessionId: string, reason = "浏览器 Session 已关闭"): void {
+  invalidateSession(
+    sessionId: string,
+    reason = "浏览器 Session 已关闭",
+    revokeCurrentGeneration = true,
+  ): void {
+    const current = this.leases.get(sessionId);
+    if (revokeCurrentGeneration && current) {
+      this.recordRevocationFloor(sessionId, current.generation);
+    }
     this.leases.delete(sessionId);
     this.rejectSessionCommands(sessionId, reason);
     this.wake(sessionId);
@@ -260,7 +274,14 @@ export class BrowserAgentCommandBroker {
   private sweepExpired(sessionId: string): void {
     const lease = this.leases.get(sessionId);
     if (!lease || lease.expiresAt > this.now()) return;
-    this.invalidateSession(sessionId, "浏览器面板可见租约已过期");
+    this.invalidateSession(sessionId, "浏览器面板可见租约已过期", false);
+  }
+
+  private recordRevocationFloor(sessionId: string, generation: number): void {
+    this.revocationFloors.set(
+      sessionId,
+      Math.max(generation, this.revocationFloors.get(sessionId) ?? 0),
+    );
   }
 
   private rejectSessionCommands(sessionId: string, reason: string): void {
