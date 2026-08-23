@@ -13,6 +13,8 @@ import {
   type RuntimeHostEventBridge,
   type RuntimeHostEventSource,
 } from "./runtime-host-events.js";
+import { createRuntimeHostSessionContinuityBridge } from "./runtime-host-session-continuity.js";
+import type { SessionSubscriptionRegistry } from "./session-subscription-owner.js";
 import {
   mapRuntimeErrorCode,
   RUNTIME_HOST_BRIDGE_RUNTIME_REQUEST,
@@ -61,6 +63,7 @@ export interface RuntimeHostCompositionOptions {
    * (ensurePicoRuntimeHostEventOperationsRegistered) before starting a kernel.
    */
   readonly eventSource?: RuntimeHostEventSource;
+  readonly sessionContinuity?: SessionSubscriptionRegistry;
 }
 
 function bridgeFailure(error: unknown): {
@@ -89,7 +92,7 @@ type BridgeHandlerOutcome<Output> =
 export function createRuntimeHostComposition(
   options: RuntimeHostCompositionOptions,
 ): RuntimeHostComposition {
-  const { service, eventSource } = options;
+  const { service, eventSource, sessionContinuity } = options;
 
   const workspaceStatusHandler = async (
     input: WorkspaceStatusBridgeInput,
@@ -148,26 +151,31 @@ export function createRuntimeHostComposition(
   const eventBridge: RuntimeHostEventBridge | undefined = eventSource
     ? createRuntimeHostEventBridge(eventSource)
     : undefined;
+  const sessionBridge = sessionContinuity
+    ? createRuntimeHostSessionContinuityBridge(sessionContinuity)
+    : undefined;
 
-  const mergedHandlers = eventBridge
-    ? {
-        ...handlers,
-        ...eventBridge.handlers,
-      }
-    : handlers;
+  const mergedHandlers = {
+    ...handlers,
+    ...(eventBridge?.handlers ?? {}),
+    ...(sessionBridge?.handlers ?? {}),
+  };
 
   return {
     handlers: mergedHandlers as unknown as RuntimeHostComposition["handlers"],
     releaseConnection(connectionId: string): void {
       eventBridge?.releaseConnection(connectionId);
+      sessionBridge?.releaseConnection(connectionId);
     },
     beginDrain() {
       // drain 期间不再推送事件：退订所有 live 监听（既有请求照常排空）。
       eventBridge?.unsubscribeAll();
+      sessionBridge?.beginDrain();
     },
     async recover() {},
     async close() {
       eventBridge?.unsubscribeAll();
+      sessionBridge?.beginDrain();
       await service.close?.();
     },
   };

@@ -23,9 +23,12 @@ import { createRuntimeHostComposition } from "./runtime-host-composition.js";
 import {
   ensurePicoRuntimeHostEventOperationsRegistered,
   ensurePicoRuntimeHostOperationsRegistered,
+  ensurePicoRuntimeHostSessionContinuityOperationsRegistered,
   ensurePicoRuntimeHostShutdownOperationRegistered,
   RUNTIME_HOST_BRIDGE_RUNTIME_SHUTDOWN,
 } from "./runtime-host-operations.js";
+import { SessionSubscriptionRegistry } from "./session-subscription-owner.js";
+import { SqliteSessionContinuitySource } from "./sqlite-session-continuity-source.js";
 
 /**
  * 3-B-3 daemon candidate：把 daemon main 从"旧传输单例宿主"迁移为 runtime-host
@@ -94,6 +97,7 @@ export async function startPicoDaemonRuntimeHostCandidate(
 ): Promise<PicoDaemonCandidateResult> {
   ensurePicoRuntimeHostOperationsRegistered();
   ensurePicoRuntimeHostEventOperationsRegistered();
+  ensurePicoRuntimeHostSessionContinuityOperationsRegistered();
   ensurePicoRuntimeHostShutdownOperationRegistered();
 
   // 1) 升级守卫：旧单例锁 + ping。
@@ -166,11 +170,24 @@ async function createPicoDaemonComposition(
 
   const services = createProductionRuntimeServices(options);
   const daemonHost = assembleProductionDaemonHost(services, options);
+  const sessionContinuity = new SessionSubscriptionRegistry(
+    context.hostEpoch,
+    new SqliteSessionContinuitySource({
+      picoHome: services.picoHome,
+      readMetadata: (workspacePath, sessionId) =>
+        services.desktopService.readSessionContinuityMetadata(workspacePath, sessionId),
+    }),
+  );
+  services.attachSessionSubscriptions(sessionContinuity);
+  const unsubscribeSessionNotifications = services.service.subscribe((notification) =>
+    sessionContinuity.publishRuntimeNotification(notification),
+  );
   const bridge = createRuntimeHostComposition({
     // service.close 由 daemonHost.stop() 的 closeService 单次性持有；桥接层拿
     // 不带 close 的视图，避免双重 close。
     service: { handle: (request) => services.desktopService.handle(request) },
     eventSource: services.desktopService,
+    sessionContinuity,
   });
 
   return {
@@ -196,6 +213,7 @@ async function createPicoDaemonComposition(
     },
     async close() {
       try {
+        unsubscribeSessionNotifications();
         await bridge.close();
         // 完整 shutdown fence 链（cron ownership + service.close + 锁保留语义）。
         await daemonHost.stop();

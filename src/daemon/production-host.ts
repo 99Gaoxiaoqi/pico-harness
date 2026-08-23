@@ -44,6 +44,7 @@ import {
 } from "./desktop-interaction-broker.js";
 import { DesktopReporter, type DesktopReporterEvent } from "./desktop-reporter.js";
 import { ToolLiveCoalescer } from "./tool-live-coalescer.js";
+import type { SessionSubscriptionRegistry } from "./session-subscription-owner.js";
 import { DesktopRuntimeService } from "./desktop-runtime-service.js";
 import { DesktopAutomationService } from "./desktop-automation-service.js";
 import { buildApprovalRequestedPayload } from "./approval-wire.js";
@@ -116,6 +117,8 @@ export interface ProductionRuntimeServices {
   readonly trustStore: WorkspaceTrustStore;
   /** Binds the host lifecycle once the LocalDaemonHost exists. */
   attachHost(control: ProductionHostControl): void;
+  /** Binds the Runtime Host-owned Session live channel after Host Epoch exists. */
+  attachSessionSubscriptions(registry: SessionSubscriptionRegistry): void;
 }
 
 /**
@@ -195,6 +198,7 @@ export function createProductionRuntimeServices(
   const resolvedPrompts = new Map<string, InteractionScope>();
   let desktopResourceVersion = Date.now();
   const nextDesktopResourceVersion = () => ++desktopResourceVersion;
+  let sessionSubscriptions: SessionSubscriptionRegistry | undefined;
   const service: WorkspaceRuntimeService = new WorkspaceRuntimeService({
     registrationStore,
     env,
@@ -287,7 +291,12 @@ export function createProductionRuntimeServices(
         const reporter = new DesktopReporter({
           runId: context.run.runId,
           sessionId: targetSessionId,
-          publish: (event) => toolLive.push(event),
+          publish: (event) => {
+            // Session continuity receives raw Reporter events before the legacy
+            // tool-output coalescer / run.live notification path.
+            sessionSubscriptions?.publishReporterEvent(workspacePath, event);
+            toolLive.push(event);
+          },
         });
         for (const steer of context.drainSteers()) runtimeState.steerQueue.push(steer);
         const unsubscribeSteer = context.onSteer((message) =>
@@ -834,6 +843,9 @@ export function createProductionRuntimeServices(
     credentialVault,
     trustStore,
     attachHost,
+    attachSessionSubscriptions(registry) {
+      sessionSubscriptions = registry;
+    },
   };
 }
 
