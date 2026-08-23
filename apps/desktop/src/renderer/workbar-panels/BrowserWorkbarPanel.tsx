@@ -11,14 +11,13 @@ export interface BrowserWorkbarPanelProps {
 
 export function BrowserWorkbarPanel({ bridge, sessionId, active }: BrowserWorkbarPanelProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
-  const generationRef = useRef(0);
   const [state, setState] = useState<DesktopBrowserState | null>(null);
   const [address, setAddress] = useState("");
   const [message, setMessage] = useState<string | null>(null);
 
   const consume = useCallback((next: DesktopBrowserState | null): void => {
     setState(next);
-    if (next?.url) setAddress(next.url);
+    if (next) setAddress(next.url);
   }, []);
 
   useEffect(
@@ -40,36 +39,51 @@ export function BrowserWorkbarPanel({ bridge, sessionId, active }: BrowserWorkba
   }, [bridge, consume, sessionId]);
 
   useEffect(() => {
-    const generation = ++generationRef.current;
-    if (!active) {
-      void bridge.browser.setViewport({ sessionId, rect: null, generation });
-      return;
-    }
-    void bridge.browser.setActiveSession(sessionId);
-    const viewport = viewportRef.current;
-    if (!viewport) return;
-    const sync = (): void => {
-      const rect = viewport.getBoundingClientRect();
-      void bridge.browser.setViewport({
-        sessionId,
-        generation,
-        rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
-      });
-    };
-    const observer = new ResizeObserver(sync);
-    observer.observe(viewport);
-    window.addEventListener("resize", sync);
-    window.addEventListener("scroll", sync, true);
-    sync();
+    let disposed = false;
+    let generation: number | undefined;
+    let observer: ResizeObserver | undefined;
+    let sync: (() => void) | undefined;
+    void bridge.browser.acquireViewport(sessionId).then((result) => {
+      if (!result.ok) {
+        if (!disposed) setMessage(result.error.message);
+        return;
+      }
+      generation = result.value;
+      if (disposed) {
+        void bridge.browser.setViewport({ sessionId, rect: null, generation });
+        return;
+      }
+      if (!active) {
+        void bridge.browser.setViewport({ sessionId, rect: null, generation });
+        return;
+      }
+      void bridge.browser.setActiveSession(sessionId);
+      const viewport = viewportRef.current;
+      if (!viewport) return;
+      sync = (): void => {
+        const rect = viewport.getBoundingClientRect();
+        void bridge.browser.setViewport({
+          sessionId,
+          generation: result.value,
+          rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+        });
+      };
+      observer = new ResizeObserver(sync);
+      observer.observe(viewport);
+      window.addEventListener("resize", sync);
+      window.addEventListener("scroll", sync, true);
+      sync();
+    });
     return () => {
-      observer.disconnect();
-      window.removeEventListener("resize", sync);
-      window.removeEventListener("scroll", sync, true);
-      void bridge.browser.setViewport({
-        sessionId,
-        rect: null,
-        generation: ++generationRef.current,
-      });
+      disposed = true;
+      observer?.disconnect();
+      if (sync) {
+        window.removeEventListener("resize", sync);
+        window.removeEventListener("scroll", sync, true);
+      }
+      if (generation !== undefined) {
+        void bridge.browser.setViewport({ sessionId, rect: null, generation });
+      }
     };
   }, [active, bridge, sessionId]);
 
@@ -77,7 +91,7 @@ export function BrowserWorkbarPanel({ bridge, sessionId, active }: BrowserWorkba
     if (!active || !state?.visible) return;
     let disposed = false;
     let leaseId: string | undefined;
-    const generation = generationRef.current;
+    const generation = state.generation;
 
     const executeCommand = async (command: RuntimeBrowserAgentCommand): Promise<JsonObject> => {
       switch (command.action) {
@@ -203,7 +217,7 @@ export function BrowserWorkbarPanel({ bridge, sessionId, active }: BrowserWorkba
         void bridge.runtime["browser.agent.lease"]({
           sessionId,
           visible: false,
-          generation: ++generationRef.current,
+          generation,
           leaseId,
         });
       }
@@ -286,12 +300,9 @@ export function BrowserWorkbarPanel({ bridge, sessionId, active }: BrowserWorkba
         <button
           type="button"
           aria-label="关闭当前页面"
-          disabled={!state}
+          disabled={!state?.hasPage}
           onClick={() => {
-            void bridge.browser.close(sessionId).then((result) => {
-              if (result.ok) consume(null);
-              else setMessage(result.error.message);
-            });
+            void perform(() => bridge.browser.clearPage(sessionId));
           }}
         >
           <X aria-hidden="true" size={15} />

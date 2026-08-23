@@ -55,3 +55,41 @@ test("Desktop preload releases a Runtime subscription that resolves with failure
   assert.ok(sent.length >= 1);
   assert.ok(sent.every((channel) => channel === DESKTOP_IPC_CHANNELS.runtimeUnsubscribe));
 });
+
+test("Desktop preload exposes Main-owned Browser viewport generations and page clear", async () => {
+  const ipc = new EventEmitter() as EventEmitter & {
+    invoke: (channel: string, ...args: unknown[]) => Promise<unknown>;
+    send: (channel: string, ...args: unknown[]) => void;
+  };
+  const calls: Array<{ readonly channel: string; readonly args: readonly unknown[] }> = [];
+  ipc.invoke = async (channel, ...args) => {
+    calls.push({ channel, args });
+    return channel === DESKTOP_IPC_CHANNELS.browserAcquireViewport
+      ? { ok: true, value: 9 }
+      : {
+          ok: true,
+          value: {
+            sessionId: "session-a",
+            url: "",
+            title: "",
+            canGoBack: false,
+            canGoForward: false,
+            loading: false,
+            secure: false,
+            hasPage: false,
+            visible: true,
+            generation: 9,
+          },
+        };
+  };
+  ipc.send = () => undefined;
+  const bridge = createDesktopBridge(ipc as unknown as IpcRenderer);
+
+  assert.deepEqual(await bridge.browser.acquireViewport("session-a"), { ok: true, value: 9 });
+  const cleared = await bridge.browser.clearPage("session-a");
+  assert.equal(cleared.ok && cleared.value.visible, true);
+  assert.deepEqual(calls, [
+    { channel: DESKTOP_IPC_CHANNELS.browserAcquireViewport, args: ["session-a", undefined] },
+    { channel: DESKTOP_IPC_CHANNELS.browserClearPage, args: ["session-a", undefined] },
+  ]);
+});
