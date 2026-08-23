@@ -176,7 +176,9 @@ export class WorkbarTerminalAuthority {
     >
   > &
     WorkbarTerminalAuthorityOptions;
+  readonly #pendingCreates = new Set<Promise<WorkbarTerminalAttachment>>();
   #persistQueue: Promise<void> = Promise.resolve();
+  #stopAllPromise: Promise<number> | undefined;
 
   constructor(options: WorkbarTerminalAuthorityOptions) {
     this.processFactory = options.processFactory ?? createPreferredWorkbarTerminalProcessFactory();
@@ -257,7 +259,25 @@ export class WorkbarTerminalAuthority {
     await this.#persist();
   }
 
-  async create(input: {
+  create(input: {
+    readonly workspacePath: string;
+    readonly sessionId: string;
+    readonly cwd?: string | undefined;
+    readonly cols?: number | undefined;
+    readonly rows?: number | undefined;
+  }): Promise<WorkbarTerminalAttachment> {
+    const cleanup = this.#stopAllPromise;
+    if (cleanup) return cleanup.then(() => this.create(input));
+    const creation = this.#create(input);
+    this.#pendingCreates.add(creation);
+    void creation.then(
+      () => this.#pendingCreates.delete(creation),
+      () => this.#pendingCreates.delete(creation),
+    );
+    return creation;
+  }
+
+  async #create(input: {
     readonly workspacePath: string;
     readonly sessionId: string;
     readonly cwd?: string | undefined;
@@ -440,7 +460,18 @@ export class WorkbarTerminalAuthority {
   }
 
   /** Stops every live Workbar process owned by this authority before its UI owner disappears. */
-  async stopAll(): Promise<number> {
+  stopAll(): Promise<number> {
+    if (this.#stopAllPromise) return this.#stopAllPromise;
+    const operation = this.#stopAllOnce();
+    const lifecycle = operation.finally(() => {
+      if (this.#stopAllPromise === lifecycle) this.#stopAllPromise = undefined;
+    });
+    this.#stopAllPromise = lifecycle;
+    return lifecycle;
+  }
+
+  async #stopAllOnce(): Promise<number> {
+    await Promise.allSettled([...this.#pendingCreates]);
     const running = [...this.#resources.values()].filter(
       (resource) => resource.record.status === "running",
     );
