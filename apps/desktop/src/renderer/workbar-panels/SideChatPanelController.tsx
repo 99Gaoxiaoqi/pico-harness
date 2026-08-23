@@ -11,6 +11,7 @@ import {
   type SideChatChildSession,
   type SideChatPanelError,
 } from "./SideChatWorkbarPanel.js";
+import { resolveSideChatCreationTarget } from "./side-chat-creation.js";
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const deferredCleanup = new Map<string, number>();
@@ -65,13 +66,13 @@ export function SideChatPanelController({
       });
       return;
     }
-    const targetSessionId = result.value.session.id;
-    const throughEventId = result.value.throughEventId;
-    if (typeof targetSessionId !== "string" || typeof throughEventId !== "string") {
+    const creation = resolveSideChatCreationTarget(result.value);
+    if (!creation) {
       setChild((current) => ({ ...current, state: "failed" }));
       setError({ code: "session_unavailable", message: "Runtime 未返回有效的临时会话" });
       return;
     }
+    const { targetSessionId, throughEventId } = creation;
     targetSessionIdRef.current = targetSessionId;
     setChild({
       panelId,
