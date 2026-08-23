@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   normalizeBrowserAddress,
+  normalizePersistedBrowserNavigation,
   normalizeViewport,
 } from "../../apps/desktop/src/main/browser-logic.js";
 
@@ -23,4 +24,16 @@ test("embedded browser rejects non-finite or empty viewports and clamps safe bou
     width: 301,
     height: 199,
   });
+});
+
+test("embedded browser persists only top-level HTTP(S) navigation", () => {
+  assert.equal(
+    normalizePersistedBrowserNavigation("https://example.com/main#next", true),
+    "https://example.com/main#next",
+  );
+  assert.equal(
+    normalizePersistedBrowserNavigation("https://third-party.example/frame#next", false),
+    null,
+  );
+  assert.equal(normalizePersistedBrowserNavigation("file:///tmp/secret", true), null);
 });
