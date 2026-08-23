@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { resolve } from "node:path";
 import { parseDesktopRuntimeResult } from "@pico/protocol";
 import { DESKTOP_IPC_CHANNELS } from "../preload/contract.js";
 import { createPlatformServices } from "../platform/index.js";
@@ -17,7 +18,13 @@ let disposeUpdater: (() => void) | undefined;
 // 3-B-3 硬切后默认构造走 kernel 承载：首次请求（下方 runtime.ping）经
 // connectOrSpawn 自动拉起 detached 常驻 daemon candidate（自持 residency，
 // 不随本 app 退出；cron 调度依赖其常驻）。Electron 主进程只做瘦客户端。
-const runtime = new LocalDaemonRuntimeClientAdapter();
+const runtime = new LocalDaemonRuntimeClientAdapter(undefined, {
+  // Vite rewrites import.meta.url inside the bundled shared client. In source
+  // development, anchor the detached daemon candidate to the repository tree.
+  ...(app.isPackaged
+    ? {}
+    : { candidateEntrypoint: resolve(app.getAppPath(), "../../src/daemon/main.ts") }),
+});
 const lifecycle = new DesktopLifecycleController(() => mainWindow);
 const requestDesktopShutdown = (exitCode?: number): void => {
   if (exitCode !== undefined) process.exitCode = exitCode;

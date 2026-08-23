@@ -108,6 +108,8 @@ export interface LocalRuntimeClientOptions {
   readonly replayBufferOptions?: RuntimeNotificationBufferOptions;
   /** runtime-host 交互根（默认 canonical PICO_HOME）。 */
   readonly runtimeHostRootPath?: string;
+  /** Host-owned daemon entrypoint for bundled callers whose import.meta.url is rewritten. */
+  readonly candidateEntrypoint?: string | URL;
 }
 
 export interface RuntimeClient {
@@ -166,6 +168,7 @@ export class LocalRuntimeClient implements RuntimeClient {
   private readonly maxReconnectDelayMs: number;
   private readonly replayBufferOptions?: RuntimeNotificationBufferOptions;
   private readonly runtimeHostRootPath?: string;
+  private readonly candidateEntrypoint?: string | URL;
   private closed = false;
 
   constructor(_endpoint?: unknown, options: LocalRuntimeClientOptions = {}) {
@@ -181,6 +184,7 @@ export class LocalRuntimeClient implements RuntimeClient {
     );
     this.replayBufferOptions = options.replayBufferOptions;
     this.runtimeHostRootPath = options.runtimeHostRootPath;
+    this.candidateEntrypoint = options.candidateEntrypoint;
     this.requestConnection = this.createConnection();
   }
 
@@ -253,7 +257,10 @@ export class LocalRuntimeClient implements RuntimeClient {
   }
 
   private createConnection(): RuntimeTransportConnection {
-    return new KernelRuntimeConnection(this.runtimeHostRootPath ?? resolveCanonicalPicoHome());
+    return new KernelRuntimeConnection(
+      this.runtimeHostRootPath ?? resolveCanonicalPicoHome(),
+      this.candidateEntrypoint,
+    );
   }
 
   private assertOpen(): void {
@@ -526,7 +533,10 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
   private disconnectListener?: () => void;
   private closed = false;
 
-  constructor(private readonly rootPath: string) {}
+  constructor(
+    private readonly rootPath: string,
+    private readonly candidateEntrypoint?: string | URL,
+  ) {}
 
   setEventListener(listener: (notification: RuntimeNotification) => void): void {
     this.eventListener = listener;
@@ -645,7 +655,7 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
       clientInstanceId: `pico-client-${randomUUID()}`,
       connectTimeoutMs: CONNECT_TIMEOUT_MS,
       handshakeTimeoutMs: HANDSHAKE_TIMEOUT_MS,
-      candidateEntrypoint: resolveDaemonCandidateEntrypoint(),
+      candidateEntrypoint: this.candidateEntrypoint ?? resolveDaemonCandidateEntrypoint(),
     });
     if (result.kind !== "connected") {
       throw new RuntimeClientError(

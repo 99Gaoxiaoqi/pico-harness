@@ -6,6 +6,12 @@ export default defineConfig({
   root: "src/renderer",
   base: "./",
   plugins: [react()],
+  resolve: {
+    // The desktop workspace and hoisted Radix dependencies must share the same
+    // React dispatcher. Rolldown otherwise optimizes nested peer paths as a
+    // second React instance and every hook call fails at runtime.
+    dedupe: ["react", "react-dom"],
+  },
   build: {
     outDir: resolve(import.meta.dirname, ".vite/renderer/main_window"),
     sourcemap: false,

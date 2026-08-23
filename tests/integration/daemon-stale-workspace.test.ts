@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -9,6 +9,7 @@ import {
   resolveStorageRoot,
 } from "@pico/runtime-host";
 import { LocalRuntimeClient } from "../../src/daemon/index.js";
+import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 
 /**
  * daemon 对"残留注册"的容忍（2026-08-16 真机事故回归）：
@@ -66,6 +67,54 @@ test("workspace.list tolerates registrations whose directory no longer exists", 
   // 连接未被拆断：同连接上再次请求仍成功（修复前 list 超 deadline 会整条拆连）。
   const again = await client.request("workspace.list", {});
   assert.equal((again.workspaces as unknown[]).length, entries.length);
+});
+
+test("workspace.list isolates a registered workspace with legacy storage", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-legacy-ws-"));
+  const picoHome = join(root, "pico-home");
+  const liveSeed = join(root, "live-workspace");
+  const legacySeed = join(root, "legacy-workspace");
+  await mkdir(liveSeed, { recursive: true });
+  await mkdir(legacySeed, { recursive: true });
+  const liveDir = await realpath(liveSeed);
+  const legacyDir = await realpath(legacySeed);
+  const legacyStorage = resolvePicoPaths(legacyDir, { picoHome }).workspace.root;
+  await mkdir(join(legacyStorage, ".storage"), { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  await writeFile(
+    join(picoHome, "daemon-workspaces.json"),
+    `${JSON.stringify({ version: 1, workspaces: [liveDir, legacyDir] }, null, 2)}\n`,
+  );
+  process.env.PICO_HOME = picoHome;
+  t.after(() => {
+    delete process.env.PICO_HOME;
+  });
+  t.after(async () => {
+    await killDaemonFor(picoHome);
+    await rm(root, { recursive: true, force: true }).catch(() => undefined);
+  });
+
+  const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome });
+  t.after(() => client.close());
+  await client.request("runtime.ping", {});
+
+  const { workspaces } = await client.request("workspace.list", {});
+  const entries = workspaces as unknown as {
+    workspacePath: string;
+    capabilities: { foregroundRuns: boolean };
+  }[];
+  assert.equal(entries.length, 2);
+  assert.equal(
+    entries.find((entry) => entry.workspacePath === liveDir)?.capabilities.foregroundRuns,
+    true,
+  );
+  assert.equal(
+    entries.find((entry) => entry.workspacePath === legacyDir)?.capabilities.foregroundRuns,
+    false,
+  );
+
+  const again = await client.request("workspace.list", {});
+  assert.equal((again.workspaces as unknown[]).length, 2);
 });
 
 async function killDaemonFor(picoHome: string): Promise<void> {

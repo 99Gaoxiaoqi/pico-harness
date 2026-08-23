@@ -9,7 +9,9 @@ export default defineConfig({
   build: {
     sourcemap: false,
     rollupOptions: {
-      external: ["electron"],
+      // Keep the native addon package boundary intact. Bundling it rewrites the
+      // package-relative `require.addon(".")` lookup to the Vite output folder.
+      external: ["electron", "fs-native-extensions"],
       output: {
         entryFileNames: "main.cjs",
         format: "cjs",
