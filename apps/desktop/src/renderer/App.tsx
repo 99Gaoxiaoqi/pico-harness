@@ -49,6 +49,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useReducer,
   useRef,
   useState,
   type FormEvent,
@@ -71,7 +72,6 @@ import { Button, CapabilityList, EmptyState, InlineNotice, StatusPill } from "./
 import {
   ConversationComposer,
   ConversationContextMenu,
-  ConversationInspector,
   ConversationInteractionSlot,
   ConversationSurface,
   ConversationTranscript,
@@ -86,6 +86,7 @@ import type {
   ApprovalView,
   CapabilityView,
   ChangeView,
+  ConversationView,
   McpServerDraft,
   PromptView,
   RunView,
@@ -115,8 +116,25 @@ import {
   sortSidebarTasks,
   type SidebarTaskGrouping,
 } from "./navigation.js";
+import {
+  SessionWorkbar,
+  createWorkbarState,
+  loadWorkbarState,
+  reduceWorkbarState,
+  saveWorkbarState,
+  type SessionWorkbarTab,
+  type WorkbarTab,
+  type WorkbarTabKind,
+} from "./workbar/index.js";
+import "./workbar/SessionWorkbar.css";
 
 const RuntimeContext = createContext<RuntimeStore | null>(null);
+
+const WORKBAR_LAUNCHER_TABS = [
+  { id: "overview", kind: "overview", label: "概览" },
+  { id: "review", kind: "review", label: "变更" },
+  { id: "context", kind: "context", label: "上下文" },
+] as const satisfies readonly WorkbarTab[];
 
 function useRuntime(): RuntimeStore {
   const value = useContext(RuntimeContext);
@@ -1178,12 +1196,14 @@ function NewTaskPage() {
 }
 
 interface ConversationEnvironmentPanelProps {
+  readonly view: "overview" | "review" | "context";
   readonly workspacePath: string;
   readonly mode: WorkspaceMode;
   readonly branch?: string | undefined;
   readonly changes: readonly ChangeView[];
   readonly active: boolean;
   readonly model?: string | undefined;
+  readonly context?: ConversationView["context"];
   readonly collaborationMode?: "agent" | "plan" | undefined;
   readonly orchestrationMode?: "default" | "graph" | undefined;
   readonly permissionMode?: "default" | "auto" | "yolo" | undefined;
@@ -1191,18 +1211,19 @@ interface ConversationEnvironmentPanelProps {
 }
 
 function ConversationEnvironmentPanel({
+  view,
   workspacePath,
   mode,
   branch,
   changes,
   active,
   model,
+  context,
   collaborationMode,
   orchestrationMode,
   permissionMode,
   onReview,
 }: ConversationEnvironmentPanelProps) {
-  const [activeTab, setActiveTab] = useState<"overview" | "changes" | "context">("overview");
   const [worktreeExpanded, setWorktreeExpanded] = useState(false);
   const [branchExpanded, setBranchExpanded] = useState(false);
   const additions = changes.reduce((total, change) => total + change.additions, 0);
@@ -1214,55 +1235,13 @@ function ConversationEnvironmentPanel({
   } as const;
 
   return (
-    <aside className="conversation-environment-shell" aria-label="任务工作台">
+    <section className="conversation-environment-shell" aria-label="任务工作台">
       <section className="conversation-environment-panel">
-        <header className="conversation-environment-panel__header">
-          <div>
-            <span className="conversation-workbench__eyebrow">Pico Workbench</span>
-            <h2>任务工作台</h2>
-          </div>
-          <span className={`conversation-workbench__status ${active ? "is-active" : ""}`}>
-            {active ? "执行中" : "已就绪"}
-          </span>
-        </header>
-        <div className="conversation-workbench__tabs" role="tablist" aria-label="工作台视图">
-          <button
-            type="button"
-            role="tab"
-            className={activeTab === "overview" ? "is-active" : undefined}
-            aria-selected={activeTab === "overview"}
-            onClick={() => setActiveTab("overview")}
-          >
-            <Gauge aria-hidden="true" /> 概览
-          </button>
-          <button
-            type="button"
-            role="tab"
-            className={activeTab === "changes" ? "is-active" : undefined}
-            aria-selected={activeTab === "changes"}
-            onClick={() => setActiveTab("changes")}
-          >
-            <FileDiff aria-hidden="true" /> 变更
-            {changes.length > 0 && <span>{changes.length}</span>}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            className={activeTab === "context" ? "is-active" : undefined}
-            aria-selected={activeTab === "context"}
-            onClick={() => setActiveTab("context")}
-          >
-            <Code2 aria-hidden="true" /> 上下文
-          </button>
-        </div>
         <div
           className="conversation-environment-panel__body"
-          role="tabpanel"
-          aria-label={
-            activeTab === "overview" ? "概览" : activeTab === "changes" ? "变更" : "上下文"
-          }
+          aria-label={view === "overview" ? "概览" : view === "review" ? "变更" : "上下文"}
         >
-          {activeTab === "overview" && (
+          {view === "overview" && (
             <div className="conversation-environment-panel__rows">
               <button
                 type="button"
@@ -1327,7 +1306,7 @@ function ConversationEnvironmentPanel({
               )}
             </div>
           )}
-          {activeTab === "changes" && (
+          {view === "review" && (
             <div className="conversation-workbench__changes">
               {changes.length === 0 ? (
                 <div className="conversation-workbench__empty">
@@ -1368,9 +1347,38 @@ function ConversationEnvironmentPanel({
               )}
             </div>
           )}
-          {activeTab === "context" && (
+          {view === "context" && (
             <div className="conversation-workbench__context">
               <dl>
+                {context && (
+                  <>
+                    <div>
+                      <dt>上下文</dt>
+                      <dd>
+                        {formatCompact(context.estimatedInputTokens)} /{" "}
+                        {formatCompact(context.inputBudgetTokens)}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>已用</dt>
+                      <dd>
+                        {context.usedPercent.toFixed(1)}%（
+                        {context.estimation === "estimated" ? "估算" : context.estimation}）
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>剩余</dt>
+                      <dd>约 {formatCompact(context.remainingTokens)} tokens</dd>
+                    </div>
+                    <div>
+                      <dt>窗口</dt>
+                      <dd>
+                        {formatCompact(context.contextWindowTokens)}，预留输出{" "}
+                        {formatCompact(context.reservedOutputTokens)}
+                      </dd>
+                    </div>
+                  </>
+                )}
                 <div>
                   <dt>Runtime</dt>
                   <dd>
@@ -1415,7 +1423,7 @@ function ConversationEnvironmentPanel({
           )}
         </div>
       </section>
-    </aside>
+    </section>
   );
 }
 
@@ -1439,8 +1447,13 @@ function ConversationPage() {
   const [behavior, setBehavior] = useState<ComposerBehavior>("steer");
   const [inspector, setInspector] = useState<ConversationInspectorView>();
   const [catalogOpen, setCatalogOpen] = useState(false);
-  const workbenchKey = `pico.workbench-open:${conversationKey ?? "new"}`;
-  const [environmentPanelOpen, setEnvironmentPanelOpen] = useState(false);
+  const [workbar, dispatchWorkbar] = useReducer(reduceWorkbarState, undefined, () => {
+    const fallback = createWorkbarState({ collapsed: true });
+    return typeof window === "undefined"
+      ? fallback
+      : loadWorkbarState(window.localStorage, fallback);
+  });
+  const [workbarLauncherOpen, setWorkbarLauncherOpen] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [confirmCompact, setConfirmCompact] = useState(false);
@@ -1456,6 +1469,7 @@ function ConversationPage() {
 
   useEffect(() => {
     setInspector(undefined);
+    setWorkbarLauncherOpen(false);
     setCatalogOpen(false);
     setEditingTitle(false);
     setConfirmCompact(false);
@@ -1463,8 +1477,19 @@ function ConversationPage() {
   }, [sessionId, workspacePath]);
 
   useEffect(() => {
-    setEnvironmentPanelOpen(window.localStorage.getItem(workbenchKey) === "true");
-  }, [workbenchKey]);
+    if (typeof window !== "undefined") saveWorkbarState(window.localStorage, workbar);
+  }, [workbar]);
+
+  useEffect(() => {
+    if (!inspector) {
+      dispatchWorkbar({ type: "close", tabId: "inspector" });
+      return;
+    }
+    dispatchWorkbar({
+      type: "open",
+      tab: { id: "inspector", kind: "inspector", label: inspector.title },
+    });
+  }, [inspector]);
 
   const session = data.sessions.find(
     (item) => item.workspacePath === workspacePath && item.id === sessionId,
@@ -1774,6 +1799,104 @@ function ConversationPage() {
     void operation;
   };
 
+  const openReview = useCallback(() => {
+    const params = new URLSearchParams({ workspace: workspacePath });
+    if (sessionId) params.set("sessionId", sessionId);
+    navigate(`/review?${params.toString()}`);
+  }, [navigate, sessionId, workspacePath]);
+
+  const workbarChangeCount = conversation?.changes?.length ?? 0;
+  const workbarTabs = useMemo<readonly SessionWorkbarTab[]>(
+    () =>
+      workbar.tabs.map((tab) => ({
+        ...tab,
+        closable: true,
+        ...(tab.kind === "review" && workbarChangeCount > 0 ? { badge: workbarChangeCount } : {}),
+      })),
+    [workbar.tabs, workbarChangeCount],
+  );
+
+  const renderWorkbarPanel = useCallback(
+    (tab: SessionWorkbarTab): ReactNode => {
+      if (tab.kind === "inspector") {
+        return inspector ? (
+          <section className="conversation-inspector" aria-label={inspector.title}>
+            <header className="conversation-inspector__header">
+              <div>
+                <h2>{inspector.title}</h2>
+                {inspector.subtitle && <p>{inspector.subtitle}</p>}
+              </div>
+            </header>
+            <div className="conversation-inspector__body">{inspector.content}</div>
+          </section>
+        ) : (
+          <div className="conversation-workbench__empty">
+            <Code2 aria-hidden="true" />
+            <strong>没有选中的执行记录</strong>
+            <p>从主对话中打开工具调用或子代理记录后，这里会显示详情。</p>
+          </div>
+        );
+      }
+      if (tab.kind !== "overview" && tab.kind !== "review" && tab.kind !== "context") {
+        return null;
+      }
+      return (
+        <ConversationEnvironmentPanel
+          view={tab.kind}
+          workspacePath={workspacePath}
+          mode={data.workspaceMode ?? "folder"}
+          branch={data.workspaceBranch}
+          changes={conversation?.changes ?? []}
+          active={Boolean(activeRun)}
+          model={conversation?.settings?.model}
+          context={conversation?.context}
+          collaborationMode={conversation?.settings?.collaborationMode}
+          orchestrationMode={conversation?.settings?.orchestrationMode}
+          permissionMode={conversation?.settings?.permissionMode}
+          onReview={openReview}
+        />
+      );
+    },
+    [
+      activeRun,
+      conversation,
+      data.workspaceBranch,
+      data.workspaceMode,
+      inspector,
+      openReview,
+      workspacePath,
+    ],
+  );
+
+  const openWorkbarTab = useCallback((kind: Exclude<WorkbarTabKind, "inspector">) => {
+    const tab = WORKBAR_LAUNCHER_TABS.find((candidate) => candidate.kind === kind);
+    if (!tab) return;
+    dispatchWorkbar({ type: "open", tab });
+    setWorkbarLauncherOpen(false);
+  }, []);
+
+  const closeWorkbarTab = useCallback((tabId: string) => {
+    if (tabId === "inspector") setInspector(undefined);
+    dispatchWorkbar({ type: "close", tabId });
+  }, []);
+
+  const workbarLauncher = workbarLauncherOpen ? (
+    <div className="session-workbar__launcher-menu" role="menu" aria-label="打开工作栏面板">
+      {WORKBAR_LAUNCHER_TABS.map((tab) => (
+        <button key={tab.id} type="button" role="menuitem" onClick={() => openWorkbarTab(tab.kind)}>
+          {tab.kind === "overview" ? (
+            <Gauge aria-hidden="true" size={15} />
+          ) : tab.kind === "review" ? (
+            <FileDiff aria-hidden="true" size={15} />
+          ) : (
+            <Code2 aria-hidden="true" size={15} />
+          )}
+          {tab.label}
+        </button>
+      ))}
+    </div>
+  ) : undefined;
+
   return (
     <ConversationSurface
       className="session-conversation"
@@ -1871,52 +1994,43 @@ function ConversationPage() {
               <button
                 type="button"
                 className="conversation-panel-toggle"
-                aria-label={environmentPanelOpen ? "收起任务工作台" : "打开任务工作台"}
-                aria-expanded={environmentPanelOpen}
+                aria-label={workbar.collapsed ? "打开任务工作栏" : "收起任务工作栏"}
+                aria-expanded={!workbar.collapsed}
                 onClick={() =>
-                  setEnvironmentPanelOpen((open) => {
-                    window.localStorage.setItem(workbenchKey, String(!open));
-                    return !open;
-                  })
+                  dispatchWorkbar({ type: "setCollapsed", collapsed: !workbar.collapsed })
                 }
               >
-                {environmentPanelOpen ? (
-                  <PanelRightClose aria-hidden="true" />
-                ) : (
+                {workbar.collapsed ? (
                   <PanelRightOpen aria-hidden="true" />
+                ) : (
+                  <PanelRightClose aria-hidden="true" />
                 )}
               </button>
             )}
           </div>
         </div>
       }
-      inspectorMode={inspector ? "rail" : "panel"}
+      inspectorMode="workbar"
       inspector={
-        inspector ? (
-          <ConversationInspector
-            open
-            title={inspector.title}
-            subtitle={inspector.subtitle}
-            onClose={() => setInspector(undefined)}
-          >
-            {inspector.content}
-          </ConversationInspector>
-        ) : environmentPanelOpen && workspacePath ? (
-          <ConversationEnvironmentPanel
-            workspacePath={workspacePath}
-            mode={data.workspaceMode ?? "folder"}
-            branch={data.workspaceBranch}
-            changes={conversation?.changes ?? []}
-            active={Boolean(activeRun)}
-            model={conversation?.settings?.model}
-            collaborationMode={conversation?.settings?.collaborationMode}
-            orchestrationMode={conversation?.settings?.orchestrationMode}
-            permissionMode={conversation?.settings?.permissionMode}
-            onReview={() => {
-              const params = new URLSearchParams({ workspace: workspacePath });
-              if (sessionId) params.set("sessionId", sessionId);
-              navigate(`/review?${params.toString()}`);
-            }}
+        sessionRef && workspacePath ? (
+          <SessionWorkbar
+            tabs={workbarTabs}
+            activeTabId={workbar.activeTabId ?? undefined}
+            collapsed={workbar.collapsed}
+            width={workbar.width}
+            showRestoreButton={false}
+            launcher={workbarLauncher}
+            renderPanel={renderWorkbarPanel}
+            onSelect={(tabId) => dispatchWorkbar({ type: "select", tabId })}
+            onClose={closeWorkbarTab}
+            onReorder={(tabId, targetIndex) =>
+              dispatchWorkbar({ type: "reorder", tabId, toIndex: targetIndex })
+            }
+            onToggleCollapsed={() =>
+              dispatchWorkbar({ type: "setCollapsed", collapsed: !workbar.collapsed })
+            }
+            onResize={(width) => dispatchWorkbar({ type: "setWidth", width })}
+            onOpenLauncher={() => setWorkbarLauncherOpen((open) => !open)}
           />
         ) : undefined
       }
@@ -2474,9 +2588,20 @@ function ReviewPage() {
     readonly changeCount: number;
   }>();
   useEffect(() => {
-    if (!selectedPath && changes[0]) setSelectedPath(changes[0].path);
+    if (!changes.some((change) => change.path === selectedPath)) {
+      setSelectedPath(changes[0]?.path);
+    }
   }, [changes, selectedPath]);
   const selected = changes.find((change) => change.path === selectedPath);
+  useEffect(() => {
+    if (!selected || selected.patch || !runId) return;
+    void actions.loadChangeDiff({
+      workspacePath,
+      ...(sessionId ? { sessionId } : {}),
+      runId,
+      path: selected.path,
+    });
+  }, [actions, runId, selected, sessionId, workspacePath]);
   if (data.notices.changes)
     return <CapabilityUnavailable title="无法读取更改" detail={data.notices.changes} />;
   if (!selected)

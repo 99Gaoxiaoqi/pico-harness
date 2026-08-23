@@ -15,6 +15,12 @@
     flex-basis: 44px;
   }
 
+  .session-workbar-shell[data-state="collapsed"][data-has-restore="false"] {
+    width: 0;
+    min-width: 0;
+    flex-basis: 0;
+  }
+
   .session-workbar {
     position: relative;
     display: grid;
@@ -151,6 +157,42 @@
     overflow-x: auto;
     border-bottom: 1px solid var(--line);
     scrollbar-width: thin;
+  }
+
+  .session-workbar__launcher-menu {
+    position: absolute;
+    z-index: 4;
+    top: 48px;
+    right: 10px;
+    display: grid;
+    width: min(220px, calc(100% - 20px));
+    gap: 3px;
+    padding: 7px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    background: var(--surface-raised);
+    box-shadow: var(--shadow-lg);
+  }
+
+  .session-workbar__launcher-menu button {
+    display: grid;
+    min-height: 34px;
+    grid-template-columns: 20px minmax(0, 1fr);
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--ink);
+    font: inherit;
+    font-size: 12px;
+    text-align: left;
+  }
+
+  .session-workbar__launcher-menu button:hover,
+  .session-workbar__launcher-menu button:focus-visible {
+    background: var(--surface-muted);
   }
 
   .session-workbar__tab-item {

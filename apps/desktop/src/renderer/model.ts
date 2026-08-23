@@ -68,10 +68,23 @@ export interface ConversationView {
   readonly changes?: readonly ChangeView[] | undefined;
   readonly changeFingerprint?: string | undefined;
   readonly usage?: UsageView | undefined;
+  readonly context?: SessionContextView | undefined;
   readonly settings?: SessionSettingsView | undefined;
   readonly goalItem?: ConversationItemView | undefined;
   readonly discoveryItem?: ConversationItemView | undefined;
   readonly loadError?: string | undefined;
+}
+
+export interface SessionContextView {
+  readonly routeId: string;
+  readonly estimatedInputTokens: number;
+  readonly contextWindowTokens: number;
+  readonly reservedOutputTokens: number;
+  readonly safetyMarginTokens: number;
+  readonly inputBudgetTokens: number;
+  readonly remainingTokens: number;
+  readonly usedPercent: number;
+  readonly estimation: string;
 }
 
 export interface SessionSettingsView {

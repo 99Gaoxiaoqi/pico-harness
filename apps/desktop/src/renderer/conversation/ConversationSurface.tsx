@@ -6,7 +6,7 @@ export interface ConversationSurfaceProps {
   readonly composer?: ReactNode | undefined;
   readonly header?: ReactNode | undefined;
   readonly className?: string | undefined;
-  readonly inspectorMode?: "rail" | "panel" | undefined;
+  readonly inspectorMode?: "rail" | "panel" | "workbar" | undefined;
 }
 
 export function ConversationSurface({
