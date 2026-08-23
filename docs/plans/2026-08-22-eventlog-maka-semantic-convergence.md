@@ -1,6 +1,6 @@
 # EventLog Maka 语义对齐交付计划
 
-状态：Session Continuity 数据闭环已合并；Workbar v2 已在独立集成分支上完成七类真实 authority 和双 Dock 接线，以 `d3e3b178` 为基线。EventLog 改造基线：`4b0813c3`；Session/Memory 语义修正基线：`fa362543`。授权终点：实现、验证并准备交付，不执行用户真实 workspace 迁移或发布。
+状态：Session Continuity 数据闭环与 Workbar v2 七类真实 authority、双 Dock 接线均已完成，以 `d3e3b178` 为 Workbar 基线；当前仓库对应的真实 workspace 已完成迁移，发布仍待审批。EventLog 改造基线：`4b0813c3`；Session/Memory 语义修正基线：`fa362543`。授权终点：实现、验证并迁移当前仓库 workspace，不执行发布或迁移其他 workspace。
 
 ## Workbar v2 收敛基线（`d3e3b178`）
 
@@ -25,7 +25,7 @@ Browser screenshot 没有伪装成文本工具：当前 ToolResult 和 Session C
 ## 已决策边界
 
 - 保留 RuntimeEvent v2 与当前 `runtime_events` canonical fact 表，不复制 Maka 的事件信封或 AgentRun 多账本。
-- 单版本硬切：在原 `pico.sqlite` 中清空旧 Session/eventLog，不保留备份；其他 scope 的弱引用清理或 park。长期 Memory Fact 不属于 EventLog，不随硬切删除。
+- 单版本硬切：已有统一 `pico.sqlite` 时在原库中清空旧 Session/EventLog，产品路径不自动生成备份；其他 scope 的弱引用清理或 park。长期 Memory Fact 不属于 EventLog，不随硬切删除。旧 split-era `runtime.sqlite`/`memory.sqlite` 不做行级导入，而是新建统一 `pico.sqlite` 开启当前纪元；真实迁移必须先核对长期 Fact 并保留人工回滚副本。
 - Desktop 与 TUI 同版本切换；不保留 legacy reader。
 - workspace EventLog 逻辑配额 2 GiB，触发后只删除 archived 且 unpinned Session，回收到 1.5 GiB；Memory 与独立控制账本只单独观测，不参与 EventLog admission 或候选回收量，因为 Session retention 不能可靠回收这些独立 authority。
 - 删除使用 SQLite `secure_delete`、WAL truncate 和有门槛的 vacuum，不承诺 SSD/备份层的法证擦除。
@@ -76,7 +76,8 @@ Continuation：冻结 source prefix digest + claim + target run.started（同事
 生命周期：eventlog epoch hard cut / archived retention
           -> Session/EventLog 删除 + Memory Source unavailable + Proposal 无正文墓碑
           -> committed Fact 保留
-          -> GC outbox -> secure_delete + WAL truncate + 门槛 vacuum
+          -> retention GC outbox -> 资产删除 + secure_delete + WAL truncate + 门槛 vacuum
+          -> hard-cut GC outbox（消费端尚未实现，物理资产清理不能宣称闭环）
 ```
 
 事实不变性边界：当前 epoch 内的 `runtime_events` 只追加且不可改写；同一 eventId 仅允许 canonical payload 完全相同的精确重放。projection、partial 和 transcript materialization 是可重建的派生状态。硬切与 retention 是显式、受约束的 EventLog 生命周期删除例外。Memory Source 是 provenance 而不是 Fact ownership；普通 Session 删除、自动 retention 和 EventLog hard cut 均不得删除或改写 committed Fact，只将 Source 标记为 `unavailable`、停止相关提取并把 Source-bound Proposal 转为无正文墓碑。真正忘记长期记忆必须走独立的 Memory forget 语义。
@@ -92,11 +93,11 @@ Continuation：冻结 source prefix digest + claim + target run.started（同事
 - 无可清理 Session 且超配额时，阻止新工作但允许 T2/recovery/terminal/delete 安全闭环。
 - Memory 与独立控制账本字节不进入 EventLog 配额；即使它们单独超过 2 GiB，也不得触发 Session 回收或阻止 EventLog 新工作。
 - 普通 Session 删除、自动 retention 和 EventLog hard cut 后，committed Fact 内容、状态、置顶及版本保持不变；Source `unavailable`，关联 Proposal 不保留正文。
-- prepared lifecycle job 只有在 Session 删除事实已提交后才能失效 Source；仍存在的 Session 必须取消该 intent。
+- lifecycle job 必须先以 `running` durable prepare 落盘，再删除 Session；`running + Session 存在` 可能仍由其他实例持有，必须 defer 而不能取消。`queued + Session 存在` 才表示“删除已提交”的声明与存储事实矛盾，必须 cancel；Session 不存在时，`queued`/遗留 `running` job 才能执行 Source 失效化并完成恢复。
 
 ## 证据口径
 
-每个切片记录实际执行的定向集成测试、typecheck/lint/format 和最终全量验证；未执行的检查不标记为通过。发布和真实数据迁移需另行人工批准。
+每个切片记录实际执行的定向集成测试、typecheck/lint/format 和最终全量验证；未执行的检查不标记为通过。发布和其他 workspace 的真实数据迁移仍需另行人工批准。
 
 ## 实施结果与验收证据
 
@@ -110,7 +111,9 @@ Continuation：冻结 source prefix digest + claim + target run.started（同事
 - `npm run build`、根 typecheck、Desktop typecheck、lint、format 与 `git diff --check` 均通过。
 - 后续对抗审查发现并修复一个 P0 语义问题：retention 与 hard cut 原先把 Source-linked Fact 当作 Session-owned 派生行删除。现在三条生命周期路径统一保留 committed Fact；Source 与 Proposal 使用 set-based lifecycle 更新，Memory 计费仍由 SQLite 按 owner 聚合并仅用于观测。最终独立审查又修正了两个 P1：不可回收控制账本导致的候选回收量高估，以及多实例恢复误取消仍被其他实例持有的 lifecycle prepare。
 - Workbar 最终对抗审查修复了两个发布阻断项：Side Chat 控制器现在按 workspace/source Session/panel 重新挂载并以同一 scope 延迟清理，父 Session 切换不会遗留隐藏分支；Terminal 从可选 pipe 路径升级为 Desktop 随包 PTY，并把 capability/resize 能力贯穿协议和 UI。对应真实 PTY 集成测试与打包产物 smoke 均通过。
+- 2026-08-23 已迁移当前仓库 workspace `pico-harness-42da8222f0ccd9303406`。迁移前旧 split-era 库为 9 个 Session、525 条 RuntimeEvent、0 条 Memory Fact；完整副本演练通过后，在原 workspace 新建统一 `pico.sqlite` 并提交 epoch 1（`runtime-event-v2-maka-v1`）。迁移后当前纪元 Session/RuntimeEvent/Memory Fact 均为 0，schema 形状、`integrity_check`、外键检查和重复打开幂等校验通过；旧库与 0700 回滚副本逐字节一致。其他 workspace 未迁移。
+- hard-cut `event_log_blob_gc_intents` 目前只有持久化和读取路径，没有消费/完成路径；有外部资产的硬切只能保证 GC intent 已提交，不能保证物理资产已经删除。本次真实迁移未导入旧 Session，因而没有生成 hard-cut GC intent；消费端仍是后续发布前需要决策的生命周期缺口。
 - 已知后续优化：daemon 为复用跨事实 projector，会在单次固定水位读取中累计分页结果；协议正确性和单帧预算已闭环，但极长 Session 的峰值内存可进一步改造成 checkpointed reducer。
 - 独立 Memory quota 尚未实现；当前先保证 Memory 不影响 EventLog quota。Memory 统计查询仍在读取存储状态时执行，后续可按独立 Memory 状态协议拆出。
 - `runtime_events` 的 append-only 由 typed store API 和事务边界保证，暂未增加阻止同库代码直接执行 `UPDATE` 的 SQLite trigger；新增直接 SQL 写路径仍需架构审查。
-- 未执行真实用户数据库硬切、发布或真实模型验收；这些动作仍需单独批准。
+- 未执行其他 workspace 迁移、发布或真实模型验收；这些动作仍需单独批准。
