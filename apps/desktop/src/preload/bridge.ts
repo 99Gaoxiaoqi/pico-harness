@@ -7,6 +7,7 @@ import {
   type RuntimeNotification,
   type RuntimeParams,
   type RuntimeResult,
+  type RuntimeSessionSubscriptionFrame,
 } from "@pico/protocol";
 import {
   DESKTOP_IPC_CHANNELS,
@@ -146,6 +147,20 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
         });
       },
     }),
+    sessionFrames: Object.freeze({
+      subscribe(listener: (frame: RuntimeSessionSubscriptionFrame) => void) {
+        if (typeof listener !== "function") return Object.freeze({ dispose() {} });
+        const onFrame = (_electronEvent: unknown, value: unknown) => {
+          if (isSessionSubscriptionFrame(value)) listener(value);
+        };
+        ipcRenderer.on(DESKTOP_IPC_CHANNELS.sessionFrame, onFrame);
+        return Object.freeze({
+          dispose() {
+            ipcRenderer.removeListener(DESKTOP_IPC_CHANNELS.sessionFrame, onFrame);
+          },
+        });
+      },
+    }),
     onUnavailable(listener: () => void): () => void {
       if (typeof listener !== "function") return () => undefined;
       const handler = (): void => listener();
@@ -198,6 +213,32 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
       quit: () => ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.quit),
     }),
   });
+}
+
+function isSessionSubscriptionFrame(value: unknown): value is RuntimeSessionSubscriptionFrame {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const frame = value as Record<string, unknown>;
+  return (
+    typeof frame["hostEpoch"] === "string" &&
+    frame["hostEpoch"].length > 0 &&
+    typeof frame["subscriptionId"] === "string" &&
+    frame["subscriptionId"].length > 0 &&
+    typeof frame["sessionId"] === "string" &&
+    frame["sessionId"].length > 0 &&
+    typeof frame["sequence"] === "number" &&
+    Number.isSafeInteger(frame["sequence"]) &&
+    frame["sequence"] > 0 &&
+    typeof frame["type"] === "string" &&
+    [
+      "subscription.session_delta",
+      "subscription.tool_event",
+      "subscription.subagent_update",
+      "subscription.run_state",
+      "subscription.transcript_advanced",
+      "subscription.continuity_degraded",
+      "subscription.closed",
+    ].includes(frame["type"])
+  );
 }
 
 interface RuntimeNotificationEnvelope {

@@ -50,6 +50,7 @@ function createHarness(options?: { readonly sessionId?: string }): Harness {
   };
   const client = {
     connect: async () => undefined,
+    subscribeSessionFrames: () => ({ dispose: () => undefined }),
     request: async (method: string, params: Record<string, unknown>) => {
       requests.push({ method, params });
       switch (method) {
@@ -59,13 +60,29 @@ function createHarness(options?: { readonly sessionId?: string }): Harness {
             run: { runId: "run_1", status: "running" },
             disposition: "started",
           };
-        case "session.transcript":
+        case "session.subscription.open":
           return {
             session: sessionRecord(String(params.sessionId ?? "s1")),
-            items: transcriptItems,
+            hostEpoch: "host-test",
+            subscriptionId: `subscription-${String(params.sessionId ?? "s1")}`,
+            nextSequence: 1,
+            watermark: {
+              historyEpoch: "history-test",
+              projectorVersion: 1,
+              throughSequence: transcriptItems.length,
+            },
+            durableTail: transcriptItems.map((item, index) => ({
+              itemId: (item as { id: string }).id,
+              itemRevision: 1,
+              positionSequence: index + 1,
+              positionOrdinal: 0,
+              item,
+            })),
+            activeOverlay: [],
             queuedInputs: [],
-            revision: "v1",
           };
+        case "session.subscription.close":
+          return { closed: true };
         case "session.get":
           if (params.sessionId === "missing") throw new Error("not found");
           return { session: sessionRecord(String(params.sessionId ?? "s1")) };
@@ -754,7 +771,7 @@ test("client commands: session-class commands switch/create/list", async () => {
   assert.equal(harness.runtime.activeSessionId, "s2");
   assert.ok(
     harness.requests.some(
-      (entry) => entry.method === "session.transcript" && entry.params.sessionId === "s2",
+      (entry) => entry.method === "session.subscription.open" && entry.params.sessionId === "s2",
     ),
     "切换应触发水化",
   );

@@ -95,14 +95,11 @@ import {
 } from "../paths/pico-paths.js";
 import {
   readExistingSqliteSessionEventSlice,
-  readExistingSqliteMaterializedTranscript,
   SqliteRuntimeEventStore,
   type SqliteSessionCatalogEntry,
 } from "../storage/sqlite/sqlite-runtime-event-store.js";
 import { SqliteRuntimeControlStore } from "../storage/sqlite/sqlite-runtime-control-store.js";
-import { RuntimeEventStoreIntegrityError } from "../storage/runtime-event-store-contracts.js";
 import { RuntimeRun } from "../runtime/runtime-run.js";
-import { AgentRuntime } from "../runtime/agent-runtime.js";
 import { createEngineRuntimePort } from "../runtime/engine-runtime-port-adapter.js";
 import { createSessionForkRuntimePort } from "../runtime/session-fork-runtime-port-adapter.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
@@ -150,10 +147,6 @@ import { SqliteDesktopConversationStateStore } from "../storage/sqlite/sqlite-de
 import type { PlanControlPort } from "./plan-control-port.js";
 import { PlanCoordinator } from "../plan/coordinator.js";
 import { createDesktopProviderRequestHandlers } from "./desktop-provider-request-handlers.js";
-import {
-  projectRuntimeTranscriptEntries,
-  TranscriptRevisionConflict,
-} from "./desktop-transcript.js";
 import { canonicalizeWorkspacePath, resolveGitBranch } from "./workspace-registry.js";
 
 /**
@@ -184,7 +177,6 @@ function unavailableWorkspaceStatus(workspacePath: string): WorkspaceStatusResul
   };
 }
 import { WorkspaceRegistrationStore } from "./workspace-registration.js";
-import { RUNTIME_REQUEST_RESULT_MAX_BYTES } from "./runtime-host-operations.js";
 import {
   WorkspaceRuntimeService,
   workspaceStatusResult,
@@ -647,7 +639,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         updateRuntimeSessionSettings: this.updateRuntimeSessionSettings.bind(this),
         getGoal: this.getGoal.bind(this),
         sendSession: this.sendSession.bind(this),
-        getSessionTranscript: this.getSessionTranscript.bind(this),
         readSessionEvidence: this.readSessionEvidence.bind(this),
         cancelRun: this.cancelRun.bind(this),
         withProviderDependencyLock: (operation) => this.withProviderDependencyLock(operation),
@@ -1676,99 +1667,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     if (sessionId) {
       const canonical = await canonicalizeWorkspacePath(workspacePath);
       await this.conversationStateStore.clearQueued(canonical, sessionId);
-    }
-    return result;
-  }
-
-  private async getSessionTranscript(
-    params: RuntimeRequest<"session.transcript">["params"],
-  ): Promise<JsonValue> {
-    const canonical = await canonicalizeWorkspacePath(params.workspacePath);
-    await this.transcriptPersistenceTail;
-    const session = await this.requireSession(canonical, params.sessionId);
-    const activeRun = await this.findActiveSessionRun(canonical, params.sessionId);
-    const queuedInputs = (
-      await this.conversationStateStore.listQueued(canonical, params.sessionId)
-    ).map((input) => ({
-      queueId: input.queueId,
-      sessionId: input.sessionId,
-      input: input.input,
-      createdAt: input.createdAt,
-    }));
-    const fixedBytes = Buffer.byteLength(
-      JSON.stringify({ session, ...(activeRun ? { activeRun } : {}), queuedInputs }),
-      "utf8",
-    );
-    // 预算对齐 kernel 桥的 runtime.request 结果闸门（P1-3）：transcript 结果必须
-    // 装入 RUNTIME_REQUEST_RESULT_MAX_BYTES（帧上限减 64KB 信封预留），否则
-    // 960KB–1MiB 区间的合法大页会在 kernel decodeOutput 硬失败（旧 socket 死区）。
-    const transcriptBudget = RUNTIME_REQUEST_RESULT_MAX_BYTES - fixedBytes - 1024;
-    if (transcriptBudget < 1024) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.FRAME_TOO_LARGE,
-        "会话队列元数据已超过单帧预算，请先处理排队输入",
-      );
-    }
-    // Canonical transcript facts are materialized in the source append transaction.
-    // Every request replays exactly one fixed ledger waterline; later appends cannot
-    // move an in-flight older traversal's source window.
-    const structuredCursor = (
-      params as { readonly cursor?: { readonly throughTranscriptSequence: number } }
-    ).cursor;
-    const transcriptSnapshot = await readExistingSqliteMaterializedTranscript({
-      storageRoot: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
-      sessionId: params.sessionId,
-      ...(structuredCursor ? { throughSequence: structuredCursor.throughTranscriptSequence } : {}),
-    });
-    if (!transcriptSnapshot) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.NOT_FOUND,
-        `Session ${params.sessionId} 不存在于工作区 ${canonical}`,
-      );
-    }
-    if (transcriptSnapshot.manifest.workDir !== manifestWorkspaceForm(canonical)) {
-      throw new RuntimeEventStoreIntegrityError(
-        `Runtime session ${params.sessionId} belongs to another workspace`,
-      );
-    }
-    let page;
-    try {
-      page = projectRuntimeTranscriptEntries(params.sessionId, transcriptSnapshot.entries, {
-        ...params,
-        maxBytes: transcriptBudget,
-        persistenceSequence: transcriptSnapshot.throughSequence,
-      });
-    } catch (error) {
-      if (error instanceof TranscriptRevisionConflict) {
-        throw new RuntimeProtocolError(
-          RUNTIME_ERROR_CODES.CONFLICT,
-          `会话历史已变化，请重新加载（current=${error.currentRevision}）`,
-        );
-      }
-      throw error;
-    }
-    const planProjection = await new AgentRuntime().readPlanProjection({
-      sessionId: params.sessionId,
-      dir: canonical,
-      picoHome: this.picoHome,
-      env: this.env,
-    });
-    const result = {
-      session,
-      items: page.items,
-      ...(page.fragments ? { fragments: page.fragments } : {}),
-      planProjection: toJsonValue(planProjection),
-      ...(activeRun ? { activeRun } : {}),
-      queuedInputs,
-      ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
-      ...(page.nextBefore ? { nextBefore: page.nextBefore } : {}),
-      revision: page.revision,
-    };
-    if (Buffer.byteLength(JSON.stringify(result), "utf8") > RUNTIME_REQUEST_RESULT_MAX_BYTES) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.FRAME_TOO_LARGE,
-        "会话 Transcript 无法安全装入单个 IPC 帧",
-      );
     }
     return result;
   }

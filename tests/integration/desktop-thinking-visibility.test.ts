@@ -85,7 +85,6 @@ test("Desktop host uses one stable timeline identity for the inference lifecycle
   const published: RuntimeNotification[] = [];
   const service = {
     publishDesktopNotification: (notification: RuntimeNotification) => published.push(notification),
-    publishEphemeralNotification: () => undefined,
   } as unknown as WorkspaceRuntimeService;
   let resourceVersion = 0;
   const reporter = new DesktopReporter({

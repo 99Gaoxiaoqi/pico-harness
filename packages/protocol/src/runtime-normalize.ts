@@ -37,7 +37,7 @@ export function isStreamingRunStatus(status: string): boolean {
   return STREAMING_RUN_STATUSES.includes(status);
 }
 
-/** run.live 的 onInterrupted 分支（cancelled/failed）；succeeded 走 onFinish。 */
+/** 运行态投影的中断分支（cancelled/failed）；succeeded 走正常完成。 */
 export function isInterruptedRunStatus(status: string): boolean {
   return status === "cancelled" || status === "failed";
 }

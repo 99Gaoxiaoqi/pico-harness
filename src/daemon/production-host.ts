@@ -44,7 +44,6 @@ import {
   type DesktopInteractionEvent,
 } from "./desktop-interaction-broker.js";
 import { DesktopReporter, type DesktopReporterEvent } from "./desktop-reporter.js";
-import { ToolLiveCoalescer } from "./tool-live-coalescer.js";
 import type { SessionSubscriptionRegistry } from "./session-subscription-owner.js";
 import { PersistentActiveOverlay } from "./session-active-overlay.js";
 import { DesktopRuntimeService } from "./desktop-runtime-service.js";
@@ -285,11 +284,6 @@ export function createProductionRuntimeServices(
             nextDesktopResourceVersion,
           );
         });
-        // 3-D Phase 1：tool.output 经 50ms 合流后进 run.live（防 per-chunk socket
-        // 洪泛）；完成/终态事件先冲刷对应缓冲再路由，输出增量永远先于完成标记。
-        const toolLive = new ToolLiveCoalescer((event) =>
-          publishDesktopReporterEvent(service, workspacePath, event, nextDesktopResourceVersion),
-        );
         const overlayToolCallIds = new Map<string, string>();
         const activeOverlay = new PersistentActiveOverlay(
           {
@@ -346,7 +340,7 @@ export function createProductionRuntimeServices(
             if (!handledByOverlay) {
               sessionSubscriptions?.publishReporterEvent(workspacePath, event);
             }
-            toolLive.push(event);
+            publishDesktopReporterEvent(service, workspacePath, event, nextDesktopResourceVersion);
           },
         });
         for (const steer of context.drainSteers()) runtimeState.steerQueue.push(steer);
@@ -485,7 +479,6 @@ export function createProductionRuntimeServices(
           removeBrokerInteractions(pendingApprovals, broker);
           removeBrokerInteractions(pendingPrompts, broker);
           await activeOverlay.flush();
-          toolLive.dispose();
           await runtimeState.dispose();
         }
       } finally {
@@ -1398,314 +1391,6 @@ export function publishDesktopReporterEvent(
   event: DesktopReporterEvent,
   nextResourceVersion: () => number,
 ): void {
-  if (event.type === "assistant.reasoning.delta") {
-    const delta = firstString(event.payload["delta"]);
-    if (!delta) return;
-    const turn =
-      typeof event.payload["turn"] === "number" && Number.isSafeInteger(event.payload["turn"])
-        ? event.payload["turn"]
-        : 0;
-    service.publishEphemeralNotification(
-      createRuntimeNotification({
-        topic: "run.live",
-        scope: {
-          workspacePath,
-          runId: event.runId,
-          ...(event.sessionId ? { sessionId: event.sessionId } : {}),
-        },
-        resourceVersion: nextResourceVersion(),
-        at: event.at,
-        payload: {
-          runId: event.runId,
-          item: {
-            kind: "thinking",
-            operation: "append",
-            streamId: liveReasoningStreamId(event.runId, turn),
-            turnId: runtimeTurnId(event.runId, turn),
-            delta,
-            ...(event.payload["truncated"] === true ? { truncated: true } : {}),
-          },
-        },
-      }),
-    );
-    return;
-  }
-  if (event.type === "assistant.delta") {
-    const delta = firstString(event.payload["delta"]);
-    if (!delta) return;
-    const turn =
-      typeof event.payload["turn"] === "number" && Number.isSafeInteger(event.payload["turn"])
-        ? event.payload["turn"]
-        : 0;
-    service.publishEphemeralNotification(
-      createRuntimeNotification({
-        topic: "run.live",
-        scope: {
-          workspacePath,
-          runId: event.runId,
-          ...(event.sessionId ? { sessionId: event.sessionId } : {}),
-        },
-        resourceVersion: nextResourceVersion(),
-        at: event.at,
-        payload: {
-          runId: event.runId,
-          item: {
-            kind: "assistantMessage",
-            operation: "append",
-            streamId: liveAssistantStreamId(event.runId, turn),
-            turnId: runtimeTurnId(event.runId, turn),
-            delta,
-            ...(event.payload["truncated"] === true ? { truncated: true } : {}),
-          },
-        },
-      }),
-    );
-    return;
-  }
-  if (
-    event.type === "assistant.suppressed" ||
-    event.type === "assistant.message" ||
-    event.type === "tool.started" ||
-    event.type === "run.interrupted" ||
-    event.type === "run.finished"
-  ) {
-    const turn =
-      typeof event.payload["turn"] === "number" && Number.isSafeInteger(event.payload["turn"])
-        ? event.payload["turn"]
-        : undefined;
-    service.publishEphemeralNotification(
-      createRuntimeNotification({
-        topic: "run.live",
-        scope: {
-          workspacePath,
-          runId: event.runId,
-          ...(event.sessionId ? { sessionId: event.sessionId } : {}),
-        },
-        resourceVersion: nextResourceVersion(),
-        at: event.at,
-        payload: {
-          runId: event.runId,
-          item: {
-            kind: "thinking",
-            operation:
-              event.type === "run.finished" ||
-              event.type === "assistant.message" ||
-              event.type === "tool.started"
-                ? "complete"
-                : "clear",
-            ...(turn === undefined ? {} : { streamId: liveReasoningStreamId(event.runId, turn) }),
-            ...(turn === undefined ? {} : { turnId: runtimeTurnId(event.runId, turn) }),
-          },
-        },
-      }),
-    );
-  }
-  if (event.type === "assistant.message") {
-    const turn =
-      typeof event.payload["turn"] === "number" && Number.isSafeInteger(event.payload["turn"])
-        ? event.payload["turn"]
-        : 0;
-    service.publishEphemeralNotification(
-      createRuntimeNotification({
-        topic: "run.live",
-        scope: {
-          workspacePath,
-          runId: event.runId,
-          ...(event.sessionId ? { sessionId: event.sessionId } : {}),
-        },
-        resourceVersion: nextResourceVersion(),
-        at: event.at,
-        payload: {
-          runId: event.runId,
-          item: {
-            kind: "assistantMessage",
-            operation: "complete",
-            streamId: liveAssistantStreamId(event.runId, turn),
-            turnId: runtimeTurnId(event.runId, turn),
-          },
-        },
-      }),
-    );
-  }
-  if (event.type === "assistant.suppressed" || event.type === "run.interrupted") {
-    const turn =
-      typeof event.payload["turn"] === "number" && Number.isSafeInteger(event.payload["turn"])
-        ? event.payload["turn"]
-        : undefined;
-    service.publishEphemeralNotification(
-      createRuntimeNotification({
-        topic: "run.live",
-        scope: {
-          workspacePath,
-          runId: event.runId,
-          ...(event.sessionId ? { sessionId: event.sessionId } : {}),
-        },
-        resourceVersion: nextResourceVersion(),
-        at: event.at,
-        payload: {
-          runId: event.runId,
-          item: {
-            kind: "assistantMessage",
-            operation: "clear",
-            ...(turn === undefined ? {} : { streamId: liveAssistantStreamId(event.runId, turn) }),
-            ...(turn === undefined ? {} : { turnId: runtimeTurnId(event.runId, turn) }),
-          },
-        },
-      }),
-    );
-  }
-  // --- 3-D Phase 1：工具卡片 / 子代理活动实时事件（run.live 扩展 kind）---
-  // live 是 overlay 不是第二事实源：durable timeline / canonical transcript 照旧
-  // （下方原路径不变），这里只补"实时看工具跑"的瞬时通道。
-  if (event.type === "tool.started") {
-    const providerCallId =
-      typeof event.payload["providerCallId"] === "string" ? event.payload["providerCallId"] : "";
-    const toolName = typeof event.payload["toolName"] === "string" ? event.payload["toolName"] : "";
-    if (providerCallId && toolName) {
-      const turn = numberOrUndefined(event.payload["turn"]);
-      // args 仅供 live 卡片展示（4KB 上限）；canonical 真值在 durable transcript。
-      const rawArgs = typeof event.payload["args"] === "string" ? event.payload["args"] : "";
-      const args = rawArgs.length > 4096 ? `${rawArgs.slice(0, 4096)}…` : rawArgs;
-      service.publishEphemeralNotification(
-        createRuntimeNotification({
-          topic: "run.live",
-          scope: {
-            workspacePath,
-            runId: event.runId,
-            ...(event.sessionId ? { sessionId: event.sessionId } : {}),
-          },
-          resourceVersion: nextResourceVersion(),
-          at: event.at,
-          payload: {
-            runId: event.runId,
-            item: {
-              kind: "tool",
-              toolCallId: providerCallId,
-              toolName,
-              operation: "started",
-              ...(args ? { args } : {}),
-              ...(turn === undefined ? {} : { turnId: runtimeTurnId(event.runId, turn) }),
-            },
-          },
-        }),
-      );
-    }
-  }
-  if (event.type === "tool.output") {
-    // 经 ToolLiveCoalescer 合流后到达；直接映射为 run.live append。
-    const providerCallId =
-      typeof event.payload["providerCallId"] === "string" ? event.payload["providerCallId"] : "";
-    const toolName = typeof event.payload["toolName"] === "string" ? event.payload["toolName"] : "";
-    const chunk = typeof event.payload["chunk"] === "string" ? event.payload["chunk"] : "";
-    const stream = event.payload["stream"] === "stderr" ? "stderr" : "stdout";
-    if (providerCallId && toolName && chunk) {
-      service.publishEphemeralNotification(
-        createRuntimeNotification({
-          topic: "run.live",
-          scope: {
-            workspacePath,
-            runId: event.runId,
-            ...(event.sessionId ? { sessionId: event.sessionId } : {}),
-          },
-          resourceVersion: nextResourceVersion(),
-          at: event.at,
-          payload: {
-            runId: event.runId,
-            item: {
-              kind: "tool",
-              toolCallId: providerCallId,
-              toolName,
-              operation: "append",
-              streamId: liveToolStreamId(event.runId, providerCallId, stream),
-              stream,
-              delta: chunk,
-              ...(event.payload["truncated"] === true ? { truncated: true } : {}),
-            },
-          },
-        }),
-      );
-    }
-    return;
-  }
-  if (event.type === "tool.completed") {
-    const envelope = event.payload["result"] as
-      | {
-          readonly toolCallId?: unknown;
-          readonly toolName?: unknown;
-          readonly status?: unknown;
-          readonly deliveryTruncated?: unknown;
-          readonly projection?: { readonly text?: unknown };
-        }
-      | undefined;
-    const toolCallId = typeof envelope?.toolCallId === "string" ? envelope.toolCallId : "";
-    const toolName = typeof envelope?.toolName === "string" ? envelope.toolName : "";
-    if (toolCallId && toolName) {
-      const status = typeof envelope?.status === "string" ? envelope.status : "";
-      const summary =
-        typeof envelope?.projection?.text === "string" ? envelope.projection.text : "";
-      service.publishEphemeralNotification(
-        createRuntimeNotification({
-          topic: "run.live",
-          scope: {
-            workspacePath,
-            runId: event.runId,
-            ...(event.sessionId ? { sessionId: event.sessionId } : {}),
-          },
-          resourceVersion: nextResourceVersion(),
-          at: event.at,
-          payload: {
-            runId: event.runId,
-            item: {
-              kind: "tool",
-              toolCallId,
-              toolName,
-              operation: status === "succeeded" ? "completed" : "failed",
-              ...(summary ? { summary } : {}),
-              ...(envelope?.deliveryTruncated === true ? { truncated: true } : {}),
-            },
-          },
-        }),
-      );
-    }
-  }
-  if (event.type === "subagent.activity") {
-    const activity = event.payload as Readonly<Record<string, unknown>>;
-    const activityId = typeof activity["activityId"] === "string" ? activity["activityId"] : "";
-    const status = typeof activity["status"] === "string" ? activity["status"] : "";
-    if (activityId && status) {
-      service.publishEphemeralNotification(
-        createRuntimeNotification({
-          topic: "run.live",
-          scope: {
-            workspacePath,
-            runId: event.runId,
-            ...(event.sessionId ? { sessionId: event.sessionId } : {}),
-          },
-          resourceVersion: nextResourceVersion(),
-          at: event.at,
-          payload: {
-            runId: event.runId,
-            item: {
-              kind: "subagent",
-              operation: "update",
-              activityId,
-              status,
-              ...optionalLiveString(activity["task"], "task"),
-              ...optionalLiveString(activity["agentName"], "agentName"),
-              ...(activity["mode"] === "explore" || activity["mode"] === "worker"
-                ? { mode: activity["mode"] }
-                : {}),
-              ...optionalLiveString(activity["currentAction"], "currentAction"),
-              ...optionalLiveString(activity["summary"], "summary"),
-            },
-          },
-        }),
-      );
-    }
-  }
-  // WorkspaceRuntime is the sole lifecycle authority. Stream chunks and final assistant/tool
-  // bodies already belong to the canonical transcript; without a separate bounded live channel,
-  // duplicating them into the durable timeline only creates an unbounded second event stream.
   if (
     [
       "run.started",
@@ -1716,8 +1401,9 @@ export function publishDesktopReporterEvent(
       "assistant.message",
       "tool.output",
     ].includes(event.type)
-  )
+  ) {
     return;
+  }
   service.publishDesktopNotification(
     createRuntimeNotification({
       topic: "run.timeline",
@@ -1728,41 +1414,9 @@ export function publishDesktopReporterEvent(
       },
       resourceVersion: nextResourceVersion(),
       at: event.at,
-      payload: {
-        runId: event.runId,
-        item: timelineItem(event),
-      },
+      payload: { runId: event.runId, item: timelineItem(event) },
     }),
   );
-}
-
-function liveReasoningStreamId(runId: string, turn: number): string {
-  return `thinking:live:${runId}:${turn}`;
-}
-
-function liveAssistantStreamId(runId: string, turn: number): string {
-  return `assistant:live:${runId}:${turn}`;
-}
-
-/** 3-D Phase 1：工具输出流的 live 标识（与文本流同走 buffer 合流/截断机制）。 */
-function liveToolStreamId(
-  runId: string,
-  providerCallId: string,
-  stream: "stdout" | "stderr",
-): string {
-  return `tool:live:${runId}:${providerCallId}:${stream}`;
-}
-
-function runtimeTurnId(runId: string, turn: number): string {
-  return `turn:${runId}:${turn}`;
-}
-
-function numberOrUndefined(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isSafeInteger(value) ? value : undefined;
-}
-
-function optionalLiveString(value: unknown, key: string): Readonly<Record<string, string>> {
-  return typeof value === "string" && value ? { [key]: value } : {};
 }
 
 function timelineItem(event: DesktopReporterEvent): JsonObject {

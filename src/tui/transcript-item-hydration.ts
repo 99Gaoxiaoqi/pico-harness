@@ -7,13 +7,11 @@ import type {
 import type { SubagentActivityEvent } from "../engine/reporter.js";
 
 /**
- * RPC transcript 页（session.transcript 的 RuntimeConversationItem[]）→
- * TranscriptEvent[] 转换器（3-D Phase 2）。
+ * Durable transcript 投影页的 RuntimeConversationItem[] → TranscriptEvent[] 转换器。
  *
  * RPC item 是 daemon 侧已投影的渲染视图（有损、无流语义），客户端水化走
- * `entry.appended` 全量重建（replaceTranscriptEvents），不做增量流回放——
- * 这与 Desktop 的"complete 后重水化"对账策略同构。未知 kind 静默跳过
- * （wire 前向兼容，与 run.live 未知 kind 容忍语义一致）。
+ * 共享 Replica 用稳定 Item ID 合并页面与增量；此处仅负责把渲染视图转换为
+ * TUI Reporter 事件。未知 kind 静默跳过以保持 wire 前向兼容。
  */
 
 export function transcriptEventsFromRuntimeItems(
