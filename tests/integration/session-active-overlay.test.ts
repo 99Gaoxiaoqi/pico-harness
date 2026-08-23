@@ -61,7 +61,7 @@ test("active overlay persists the first delta before publishing and uses UTF-8 b
   assert.deepEqual(parseActiveOverlayPayload(writes[1]?.payload), writes[1]?.payload);
 });
 
-test("active overlay flushes at 8KiB and degrades only once without stopping live", async () => {
+test("active overlay flushes at 8KiB and degrades once per Run without stopping live", async () => {
   let calls = 0;
   const deltas: string[] = [];
   const degraded: string[] = [];
@@ -91,9 +91,25 @@ test("active overlay flushes at 8KiB and degrades only once without stopping liv
   await overlay.append({ ...base, text: "still-live" });
   await overlay.flush();
 
-  assert.equal(calls, 2);
-  assert.deepEqual(degraded, ["partial_persistence_failed"]);
-  assert.deepEqual(deltas, ["first", "x".repeat(ACTIVE_OVERLAY_FLUSH_BYTES), "still-live"]);
+  await overlay.append({ ...base, streamId: "thinking:run-1:turn-1", kind: "thinking", text: "思考" });
+  await overlay.flush();
+
+  await overlay.append({
+    ...base,
+    runId: "run-2",
+    streamId: "assistant:run-2:turn-1",
+    text: "next-run",
+  });
+
+  assert.equal(calls, 3, "同一 Run 降级后不得继续持久化其他 stream；下一 Run 可重新尝试");
+  assert.deepEqual(degraded, ["partial_persistence_failed", "partial_persistence_failed"]);
+  assert.deepEqual(deltas, [
+    "first",
+    "x".repeat(ACTIVE_OVERLAY_FLUSH_BYTES),
+    "still-live",
+    "思考",
+    "next-run",
+  ]);
 });
 
 test("active overlay rolls old UTF-8 content and reports truncation honestly", async () => {
