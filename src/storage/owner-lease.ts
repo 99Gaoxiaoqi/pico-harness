@@ -29,6 +29,12 @@ export interface OwnerLeaseRecord {
   heartbeatAt: string;
 }
 
+export interface RetireTerminatedOwnerLeaseOptions {
+  leaseDirectory: string;
+  expectedPid: number;
+  expectedHostname?: string;
+}
+
 export class LeaseConflictError extends Error {
   constructor(
     message: string,
@@ -257,6 +263,45 @@ export class OwnerLease {
   }
 }
 
+/**
+ * Compatibility-only retirement for a process already proven terminated by
+ * its host lifecycle. Exact pid + hostname matching prevents this path from
+ * touching another machine/process; the leaseId recheck + retained tombstone
+ * preserves the normal acquisition protocol's ABA fence.
+ */
+export async function retireOwnerLeaseForTerminatedProcess(
+  options: RetireTerminatedOwnerLeaseOptions,
+): Promise<boolean> {
+  const ownerPath = join(options.leaseDirectory, "owner.json");
+  const expectedHostname = options.expectedHostname ?? hostname();
+  const existing = await readLeaseRecord(ownerPath);
+  if (!existing || existing.pid !== options.expectedPid || existing.hostname !== expectedHostname) {
+    return false;
+  }
+  if (isProcessAlive(options.expectedPid)) {
+    throw new LeaseConflictError(
+      "Refusing to retire a lease whose owner PID is still alive",
+      existing,
+    );
+  }
+  const retired = await moveLeaseToTombstoneIf({
+    leaseDirectory: options.leaseDirectory,
+    ownerPath,
+    expectedOwner: existing,
+    canRetire: (current) =>
+      current.pid === options.expectedPid &&
+      current.hostname === expectedHostname &&
+      !isProcessAlive(options.expectedPid),
+  });
+  if (retired) return true;
+
+  const current = await readLeaseRecord(ownerPath);
+  if (current?.leaseId === existing.leaseId) {
+    throw new LeaseConflictError("Terminated owner lease could not be retired safely", current);
+  }
+  return false;
+}
+
 function leaseLossReason(signal: AbortSignal): Error {
   return signal.reason instanceof Error
     ? signal.reason
@@ -300,13 +345,25 @@ interface MoveStaleLeaseOptions {
 }
 
 async function moveStaleLeaseToTombstone(options: MoveStaleLeaseOptions): Promise<boolean> {
+  return moveLeaseToTombstoneIf({
+    leaseDirectory: options.leaseDirectory,
+    ownerPath: options.ownerPath,
+    expectedOwner: options.expectedOwner,
+    canRetire: (current) => canProveOwnerIsDead(current, options.now, options.staleAfterMs),
+  });
+}
+
+interface MoveLeaseToTombstoneOptions {
+  leaseDirectory: string;
+  ownerPath: string;
+  expectedOwner: OwnerLeaseRecord;
+  canRetire(owner: OwnerLeaseRecord): boolean;
+}
+
+async function moveLeaseToTombstoneIf(options: MoveLeaseToTombstoneOptions): Promise<boolean> {
   const current = await readLeaseRecord(options.ownerPath);
-  if (
-    current?.leaseId !== options.expectedOwner.leaseId ||
-    !canProveOwnerIsDead(current, options.now, options.staleAfterMs)
-  ) {
+  if (current?.leaseId !== options.expectedOwner.leaseId || !options.canRetire(current))
     return false;
-  }
 
   const tombstonePath = resolveOwnerLeaseTombstonePath(
     options.leaseDirectory,
