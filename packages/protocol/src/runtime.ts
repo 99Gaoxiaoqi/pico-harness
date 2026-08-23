@@ -775,6 +775,7 @@ export type RuntimeGitReviewFile = JsonObject & {
 };
 
 export type RuntimeTerminalStatus = "starting" | "running" | "interrupted" | "exited";
+export type RuntimeTerminalCapability = "pty" | "pipe";
 export type RuntimeTerminalSession = JsonObject & {
   readonly terminalId: string;
   readonly workspacePath: string;
@@ -782,13 +783,21 @@ export type RuntimeTerminalSession = JsonObject & {
   readonly resourceEpoch: string;
   readonly sequence: number;
   readonly status: RuntimeTerminalStatus;
+  readonly capability: RuntimeTerminalCapability;
+  readonly resizeSupported: boolean;
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly exitCode?: number;
 };
 
 export type RuntimeBrowserAgentAction =
-  "navigate" | "back" | "forward" | "reload" | "get_state" | "click" | "type";
+  | "navigate"
+  | "back"
+  | "forward"
+  | "reload"
+  | "get_state"
+  | "click"
+  | "type";
 
 /** Fixed-operation command consumed only by the visible Electron browser panel. */
 export type RuntimeBrowserAgentCommand = JsonObject & {
@@ -4109,6 +4118,8 @@ const runtimeTerminalSessionResult = exactResultShape(
     resourceEpoch: resultNonEmptyString,
     sequence: resultNonNegativeInteger,
     status: resultOneOf(["starting", "running", "interrupted", "exited"]),
+    capability: resultOneOf(["pty", "pipe"]),
+    resizeSupported: resultBoolean,
     createdAt: resultFiniteNumber,
     updatedAt: resultFiniteNumber,
   },

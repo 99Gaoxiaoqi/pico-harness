@@ -1219,6 +1219,8 @@ function terminalView(
     status: terminal.status,
     attached,
     sequence: terminal.sequence,
+    capability: terminal.capability,
+    resizeSupported: terminal.resizeSupported,
     cwd: stringField(terminal, "cwd"),
     exitCode: terminal.exitCode,
   };

@@ -30,7 +30,9 @@ export class SideChatNoSettledTurnError extends Error {
   }
 }
 
-export function latestCompletedTurnBoundary(events: readonly RuntimeEvent[]): RuntimeEvent | undefined {
+export function latestCompletedTurnBoundary(
+  events: readonly RuntimeEvent[],
+): RuntimeEvent | undefined {
   return [...events]
     .reverse()
     .find((event) => event.kind === "run.terminal" && event.data.status === "completed");
@@ -59,8 +61,7 @@ export class SideChatAuthority {
     readonly sourceEvents: readonly RuntimeEvent[];
   }): Promise<SideChatLease> {
     const existing = this.list().find(
-      (lease) =>
-        lease.panelId === input.panelId && lease.sourceSessionId === input.sourceSessionId,
+      (lease) => lease.panelId === input.panelId && lease.sourceSessionId === input.sourceSessionId,
     );
     if (existing?.state === "live") {
       const refreshed = { ...existing, updatedAt: this.now() };
@@ -119,8 +120,7 @@ export class SideChatAuthority {
     for (const lease of this.list()) {
       if (
         lease.state === "live" &&
-        Date.parse(lease.updatedAt) +
-          (this.options.liveLeaseTtlMs ?? DEFAULT_LIVE_LEASE_TTL_MS) >
+        Date.parse(lease.updatedAt) + (this.options.liveLeaseTtlMs ?? DEFAULT_LIVE_LEASE_TTL_MS) >
           (this.options.now ?? (() => new Date()))().getTime()
       ) {
         continue;
@@ -145,8 +145,7 @@ function writeSideChatLease(storageRoot: string, lease: SideChatLease): void {
       (candidate) =>
         candidate.targetSessionId !== lease.targetSessionId &&
         !(
-          candidate.panelId === lease.panelId &&
-          candidate.sourceSessionId === lease.sourceSessionId
+          candidate.panelId === lease.panelId && candidate.sourceSessionId === lease.sourceSessionId
         ),
     );
     leases.push(lease);

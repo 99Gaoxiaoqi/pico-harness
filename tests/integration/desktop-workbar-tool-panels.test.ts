@@ -180,6 +180,8 @@ test("Workbar tool panels render real authority snapshots with accessible detail
           status: "running",
           attached: true,
           sequence: 18,
+          capability: "pty",
+          resizeSupported: true,
         },
       ],
       activeTerminalId: "terminal-1",
@@ -199,6 +201,34 @@ test("Workbar tool panels render real authority snapshots with accessible detail
   assert.match(terminal, /role="tabpanel"/u);
   assert.match(terminal, /role="log"/u);
   assert.match(terminal, /\$ npm test/u);
+
+  const fallbackTerminal = renderToStaticMarkup(
+    React.createElement(TerminalWorkbarPanel, {
+      terminals: [
+        {
+          id: "terminal-pipe",
+          title: "Shell fallback",
+          status: "running",
+          attached: true,
+          sequence: 1,
+          capability: "pipe",
+          resizeSupported: false,
+        },
+      ],
+      activeTerminalId: "terminal-pipe",
+      active: true,
+      loading: false,
+      onCreate: () => undefined,
+      onSelect: () => undefined,
+      onAttach: () => undefined,
+      onInput: () => undefined,
+      onResize: () => undefined,
+      onStop: () => undefined,
+      onSetPollingActive: () => undefined,
+    }),
+  );
+  assert.match(fallbackTerminal, /兼容管道/u);
+  assert.match(fallbackTerminal, /不支持随面板调整尺寸/u);
 });
 
 test("Workbar tool panels expose honest loading, error and empty states", () => {

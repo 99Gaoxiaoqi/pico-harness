@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   createChildProcessWorkbarTerminalFallback,
+  createPreferredWorkbarTerminalProcessFactory,
   WorkbarTerminalAuthority,
   WorkbarTerminalError,
   type WorkbarTerminalProcess,
@@ -13,6 +14,55 @@ import {
   type WorkbarTerminalRecord,
   type WorkbarTerminalStateStore,
 } from "../../packages/runtime-host/src/server/workbar-terminal-authority.js";
+
+test("Desktop 生产依赖提供可 resize 的真实 PTY", async (context) => {
+  if (process.platform === "win32") return;
+  const workspacePath = await createWorkspace(context, "real-pty");
+  const processFactory = createPreferredWorkbarTerminalProcessFactory();
+  assert.equal(processFactory.capability, "pty");
+  const authority = new WorkbarTerminalAuthority({
+    store: new MemoryStateStore(),
+    processFactory,
+    shell: "/bin/sh",
+    shellArgs: [],
+  });
+  context.after(() => authority.close());
+
+  const created = await authority.create({
+    workspacePath,
+    sessionId: "session-real-pty",
+    cols: 80,
+    rows: 24,
+  });
+  assert.equal(created.capability, "pty");
+  assert.equal(created.resizeSupported, true);
+  await authority.resize({
+    resourceId: created.resourceId,
+    resourceEpoch: created.resourceEpoch,
+    cols: 100,
+    rows: 30,
+  });
+  authority.input({
+    resourceId: created.resourceId,
+    resourceEpoch: created.resourceEpoch,
+    data: "printf 'real-pty-ready\\n'\n",
+  });
+  await waitFor(() =>
+    Promise.resolve(
+      authority
+        .attach({
+          resourceId: created.resourceId,
+          resourceEpoch: created.resourceEpoch,
+          attachmentId: "real-pty-view",
+        })
+        .events.some((event) => event.kind === "output" && event.data.includes("real-pty-ready")),
+    ),
+  );
+  await authority.stop({
+    resourceId: created.resourceId,
+    resourceEpoch: created.resourceEpoch,
+  });
+});
 
 class MemoryStateStore implements WorkbarTerminalStateStore {
   records: WorkbarTerminalRecord[] = [];

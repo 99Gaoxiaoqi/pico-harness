@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain } from "electron";
-import { resolve } from "node:path";
+import { join } from "node:path";
 import { parseDesktopRuntimeResult } from "@pico/protocol";
 import { DESKTOP_IPC_CHANNELS } from "../preload/contract.js";
 import { createPlatformServices } from "../platform/index.js";
@@ -20,11 +20,10 @@ let disposeUpdater: (() => void) | undefined;
 // connectOrSpawn 自动拉起 detached 常驻 daemon candidate（自持 residency，
 // 不随本 app 退出；cron 调度依赖其常驻）。Electron 主进程只做瘦客户端。
 const runtime = new LocalDaemonRuntimeClientAdapter(undefined, {
-  // Vite rewrites import.meta.url inside the bundled shared client. In source
-  // development, anchor the detached daemon candidate to the repository tree.
-  ...(app.isPackaged
-    ? {}
-    : { candidateEntrypoint: resolve(app.getAppPath(), "../../src/daemon/main.ts") }),
+  // The daemon is a separate Vite target beside main.cjs. Supplying its concrete
+  // artifact keeps both development and packaged startup independent from
+  // import.meta.url rewriting inside the shared client bundle.
+  candidateEntrypoint: join(__dirname, "daemon.cjs"),
 });
 const lifecycle = new DesktopLifecycleController(() => mainWindow);
 const browser = createEmbeddedBrowserAuthority({

@@ -9,6 +9,8 @@ export interface WorkbarTerminalInstance {
   readonly status: WorkbarTerminalStatus;
   readonly attached: boolean;
   readonly sequence: number;
+  readonly capability: "pty" | "pipe";
+  readonly resizeSupported: boolean;
   readonly cwd?: string;
   readonly exitCode?: number | null;
 }
@@ -82,7 +84,7 @@ export function TerminalWorkbarPanel({
 
   useEffect(() => {
     const viewport = viewportRef.current;
-    if (!active || !selected || !viewport) return;
+    if (!active || !selected?.resizeSupported || !viewport) return;
     const sync = () => {
       const bounds = viewport.getBoundingClientRect();
       const grid = terminalGridFromBounds(bounds.width, bounds.height);
@@ -178,10 +180,16 @@ export function TerminalWorkbarPanel({
             <span title={selected.cwd}>{selected.cwd ?? "工作区目录"}</span>
             <span>
               {terminalStatusLabel(selected.status)} · seq {selected.sequence}
+              {` · ${selected.capability === "pty" ? "PTY" : "兼容管道"}`}
               {selected.status === "exited" && selected.exitCode !== undefined
                 ? ` · exit ${selected.exitCode ?? "unknown"}`
                 : ""}
             </span>
+            {!selected.resizeSupported && (
+              <span className="tool-panel__terminal-capability" role="status">
+                当前环境未启用 PTY；终端仍可输入，但不支持随面板调整尺寸。
+              </span>
+            )}
             <div>
               {!selected.attached && selected.status !== "exited" && (
                 <button type="button" onClick={() => onAttach(selected.id)}>

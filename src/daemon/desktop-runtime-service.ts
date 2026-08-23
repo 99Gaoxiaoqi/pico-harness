@@ -238,10 +238,7 @@ import { createDesktopWorkbarRequestHandlers } from "./desktop-workbar-request-h
 import { DesktopWorkbarGitReviewService } from "./desktop-workbar-git-review-service.js";
 import { DesktopWorkbarTerminalService } from "./desktop-workbar-terminal-service.js";
 import { WorkbarGitReviewError } from "./workbar-git-review.js";
-import {
-  SideChatAuthority,
-  SideChatNoSettledTurnError,
-} from "./side-chat-authority.js";
+import { SideChatAuthority, SideChatNoSettledTurnError } from "./side-chat-authority.js";
 import { DesktopMemoryService } from "./desktop-memory-service.js";
 import type { ImagePart } from "../schema/message.js";
 import { createModelContextReport } from "../provider/model-runtime-report.js";

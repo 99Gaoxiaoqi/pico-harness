@@ -199,6 +199,8 @@ function runtimeTerminal(record: WorkbarTerminalRecord) {
         : record.status === "running"
           ? ("running" as const)
           : record.status,
+    capability: record.capability,
+    resizeSupported: record.resizeSupported,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
     ...(record.exitCode === undefined ? {} : { exitCode: record.exitCode }),

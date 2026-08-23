@@ -100,13 +100,16 @@ export function launchDetachedRuntimeHostCandidate(
   input: DetachedCandidateInput,
 ): DetachedCandidateLaunch {
   const executable = input.executable ?? process.execPath;
-  // Resolve the default entrypoint once; path and loader must come from the same
-  // resolution to avoid a TOCTOU between the two existsSync checks.
-  const resolvedDefault = resolveDefaultEntrypoint();
   const usesDefaultEntrypoint = input.entrypoint === undefined;
+  // Vite may rewrite import.meta.url in a bundled caller. Do not touch the
+  // default resolver when the host supplied an explicit candidate artifact;
+  // apart from avoiding unnecessary I/O, this keeps that bundled path viable.
+  // When the default is needed, resolve its path and loader together to avoid a
+  // TOCTOU between the two existsSync checks.
+  const resolvedDefault = usesDefaultEntrypoint ? resolveDefaultEntrypoint() : undefined;
   const entrypointPath =
     input.entrypoint === undefined
-      ? resolvedDefault.path
+      ? resolvedDefault!.path
       : typeof input.entrypoint === "string"
         ? // file:// href 字符串是常见的传参形态；转换为路径而非当作字面脚本路径。
           input.entrypoint.startsWith("file://")
@@ -116,7 +119,7 @@ export function launchDetachedRuntimeHostCandidate(
   // 自定义 entrypoint 若是 TypeScript 源文件（如 pico daemon main.ts），同样需要
   // tsx ESM loader——detached node 子进程没有别的 TS 装载途径。
   const tsxLoaderPath = usesDefaultEntrypoint
-    ? resolvedDefault.tsxLoaderPath
+    ? resolvedDefault!.tsxLoaderPath
     : entrypointPath.endsWith(".ts")
       ? resolveTsxLoaderPath()
       : undefined;

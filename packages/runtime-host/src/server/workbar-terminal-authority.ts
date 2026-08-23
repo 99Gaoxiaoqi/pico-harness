@@ -1,7 +1,8 @@
 import { spawn as spawnChild, execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { chmodSync } from "node:fs";
 import { createRequire } from "node:module";
-import { isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { realpath } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -609,6 +610,7 @@ export class WorkbarTerminalAuthority {
 export function createPreferredWorkbarTerminalProcessFactory(): WorkbarTerminalProcessFactory {
   try {
     const require = createRequire(import.meta.url);
+    ensureNodePtySpawnHelperExecutable(require);
     const nodePty = require("node-pty") as NodePtyModule;
     if (typeof nodePty.spawn !== "function")
       throw new Error("node-pty spawn export is unavailable");
@@ -617,6 +619,26 @@ export function createPreferredWorkbarTerminalProcessFactory(): WorkbarTerminalP
     return new ChildProcessFallbackFactory(
       error instanceof Error ? error.message : "node-pty could not be loaded",
     );
+  }
+}
+
+function ensureNodePtySpawnHelperExecutable(require: NodeJS.Require): void {
+  if (process.platform === "win32") return;
+  try {
+    const packageRoot = dirname(require.resolve("node-pty/package.json"));
+    for (const helper of [
+      join(packageRoot, "prebuilds", `${process.platform}-${process.arch}`, "spawn-helper"),
+      join(packageRoot, "build", "Release", "spawn-helper"),
+    ]) {
+      try {
+        chmodSync(helper, 0o755);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+  } catch {
+    // The packaged copy is prepared at build time. A read-only installation
+    // may reject chmod even though the helper already has the correct mode.
   }
 }
 
