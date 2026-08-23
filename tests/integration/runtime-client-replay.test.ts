@@ -13,7 +13,12 @@ import {
   createRuntimeHostComposition,
   ensurePicoRuntimeHostOperationsRegistered,
   ensurePicoRuntimeHostEventOperationsRegistered,
+  ensurePicoRuntimeHostSessionContinuityOperationsRegistered,
   ensurePicoRuntimeHostShutdownOperationRegistered,
+  RUNTIME_HOST_BRIDGE_SESSION_SUBSCRIPTION_CLOSE,
+  RUNTIME_HOST_BRIDGE_SESSION_SUBSCRIPTION_OPEN,
+  RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_ADVANCE,
+  RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_PAGE,
   RUNTIME_HOST_BRIDGE_RUNTIME_SHUTDOWN,
 } from "../../src/daemon/index.js";
 import type { LocalRuntimeService, RuntimeNotificationCursor } from "../../src/daemon/service.js";
@@ -29,6 +34,7 @@ import {
 // 进程级——客户端连接时也会注册；本测试的 composition 对齐 candidate 补 handler）。
 ensurePicoRuntimeHostOperationsRegistered();
 ensurePicoRuntimeHostEventOperationsRegistered();
+ensurePicoRuntimeHostSessionContinuityOperationsRegistered();
 ensurePicoRuntimeHostShutdownOperationRegistered();
 
 /**
@@ -113,10 +119,24 @@ test("Runtime client keeps a recovery fence after replay overflow", async (conte
   // 必须补对应 handler（对齐 candidate 的组装方式）。
   const compositionFactory = async () => {
     const bridge = createRuntimeHostComposition({ service, eventSource: service });
+    const unavailableSessionContinuity = async () => ({
+      ok: false as const,
+      error: {
+        code: "operation_unavailable" as const,
+        message: "Session continuity is not configured for this replay fixture",
+      },
+    });
     return {
       ...bridge,
       handlers: {
         ...bridge.handlers,
+        // LocalRuntimeClient 在进程级 registry 注册 Session 协议。Host 重启后
+        // fixture 必须显式声明这四个能力不可用，避免组装受客户端
+        // 注册副作用影响。本用例只验证 workspace event replay。
+        [RUNTIME_HOST_BRIDGE_SESSION_SUBSCRIPTION_OPEN]: unavailableSessionContinuity,
+        [RUNTIME_HOST_BRIDGE_SESSION_SUBSCRIPTION_CLOSE]: unavailableSessionContinuity,
+        [RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_PAGE]: unavailableSessionContinuity,
+        [RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_ADVANCE]: unavailableSessionContinuity,
         [RUNTIME_HOST_BRIDGE_RUNTIME_SHUTDOWN]: async () => ({ ok: true, result: {} }),
       },
     };

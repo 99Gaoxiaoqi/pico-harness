@@ -8,6 +8,7 @@ import {
 
 test("desktop session continuity: raw early frame and advance update one replica", async () => {
   let listener: ((frame: RuntimeSessionSubscriptionFrame) => void) | undefined;
+  let disconnect: (() => void) | undefined;
   const calls: string[] = [];
   const watermark = (throughSequence: number) => ({
     historyEpoch: "history-1",
@@ -15,9 +16,18 @@ test("desktop session continuity: raw early frame and advance update one replica
     throughSequence,
   });
   const transport = {
-    subscribeFrames(frameListener: (frame: RuntimeSessionSubscriptionFrame) => void) {
+    subscribeFrames(
+      frameListener: (frame: RuntimeSessionSubscriptionFrame) => void,
+      onDisconnect?: () => void,
+    ) {
       listener = frameListener;
-      return { dispose: () => (listener = undefined) };
+      disconnect = onDisconnect;
+      return {
+        dispose: () => {
+          listener = undefined;
+          disconnect = undefined;
+        },
+      };
     },
     async open() {
       calls.push("open");
@@ -131,5 +141,9 @@ test("desktop session continuity: raw early frame and advance update one replica
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.deepEqual(calls, ["open", "advance", "close", "open"]);
   assert.deepEqual(views.at(-1), ["question", "overlay:answer:live"]);
+
+  disconnect?.();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, ["open", "advance", "close", "open", "close", "open"]);
   continuity.dispose();
 });

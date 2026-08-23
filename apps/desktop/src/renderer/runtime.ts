@@ -1612,7 +1612,8 @@ export function useRuntimeStore(): RuntimeStore {
         close: (params) => invoke(bridge, "session.subscription.close", params),
         page: (params) => invoke(bridge, "session.transcript.page", params),
         advance: (params) => invoke(bridge, "session.transcript.advance", params),
-        subscribeFrames: (listener) => bridge.sessionFrames.subscribe(listener),
+        subscribeFrames: (listener, onDisconnect) =>
+          bridge.sessionFrames.subscribe(listener, onDisconnect),
       };
       const continuity = new DesktopSessionContinuity({
         transport,

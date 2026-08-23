@@ -15,6 +15,7 @@ export const DESKTOP_IPC_CHANNELS = {
   runtimeUnsubscribe: "pico:runtime:unsubscribe",
   runtimeEvent: "pico:runtime:event",
   sessionFrame: "pico:runtime:session-frame",
+  sessionDisconnected: "pico:runtime:session-disconnected",
   runtimeUnavailable: "pico:runtime:unavailable",
   runtimeRecovered: "pico:runtime:recovered",
   chooseWorkspace: "pico:platform:choose-workspace",
@@ -56,7 +57,10 @@ export interface DesktopBridge {
     ): RuntimeNotificationSubscription;
   };
   readonly sessionFrames: {
-    subscribe(listener: (frame: RuntimeSessionSubscriptionFrame) => void): { dispose(): void };
+    subscribe(
+      listener: (frame: RuntimeSessionSubscriptionFrame) => void,
+      onDisconnect?: () => void,
+    ): { dispose(): void };
   };
   /** 主进程探活判定 Runtime 永久不可达时通过此通道通知渲染进程。 */
   onUnavailable(listener: () => void): () => void;

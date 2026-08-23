@@ -129,7 +129,16 @@ export class PersistentActiveOverlay {
     const state = this.#streams.get(streamId);
     if (!state) return;
     state.complete = true;
-    await this.flushState(state);
+    state.recoverable = false;
+    state.pendingBytes = 0;
+    if (state.timer) {
+      clearTimeout(state.timer);
+      state.timer = undefined;
+    }
+    // Message/Tool final 已在 canonical append 的同一事务删除 partial。
+    // 此处只封流并等待先前在途的写，不用旧 version 把已删除
+    // 的 partial 再次 upsert 回去。Run finally 会在等待后再清理一次残留。
+    await state.flushChain;
   }
 
   async flush(streamId?: string): Promise<void> {

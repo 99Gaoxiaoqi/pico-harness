@@ -45,11 +45,18 @@ export function registerDesktopIpcHandlers(options: {
 }): () => void {
   const { ipcMain, runtime, platform, lifecycle } = options;
   const subscriptions = new Map<string, RuntimeSubscription>();
-  const sessionFrames = runtime.subscribeSessionFrames((frame) => {
-    const contents = options.getTrustedWebContents();
-    if (!contents || contents.isDestroyed()) return;
-    contents.send(DESKTOP_IPC_CHANNELS.sessionFrame, frame);
-  });
+  const sessionFrames = runtime.subscribeSessionFrames(
+    (frame) => {
+      const contents = options.getTrustedWebContents();
+      if (!contents || contents.isDestroyed()) return;
+      contents.send(DESKTOP_IPC_CHANNELS.sessionFrame, frame);
+    },
+    () => {
+      const contents = options.getTrustedWebContents();
+      if (!contents || contents.isDestroyed()) return;
+      contents.send(DESKTOP_IPC_CHANNELS.sessionDisconnected);
+    },
+  );
 
   const trusted = (event: IpcMainInvokeEvent | IpcMainEvent): boolean =>
     event.sender === options.getTrustedWebContents() && !event.sender.isDestroyed();

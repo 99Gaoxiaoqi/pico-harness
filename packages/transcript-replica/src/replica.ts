@@ -504,6 +504,10 @@ function applyFrameToDraft(
   switch (frame.type) {
     case "subscription.session_delta": {
       const key = overlayKey(frame.runId, frame.streamId);
+      if (frame.reset && frame.text === "") {
+        draft.overlays.delete(key);
+        return "applied";
+      }
       const current = draft.overlays.get(key);
       const bytes = utf8Bytes(frame.text);
       if (!frame.reset) {
@@ -532,6 +536,11 @@ function applyFrameToDraft(
     }
     case "subscription.run_state":
       draft.activeRun = frame.run;
+      if (["cancelled", "failed", "succeeded"].includes(frame.run.status)) {
+        for (const [key, overlay] of draft.overlays) {
+          if (overlay.runId === frame.run.runId) draft.overlays.delete(key);
+        }
+      }
       return "applied";
     case "subscription.transcript_advanced":
       if (!sameHistoryIdentity(draft.watermark, frame.watermark)) return "gap";
