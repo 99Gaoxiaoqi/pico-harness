@@ -13,6 +13,8 @@ import {
   DESKTOP_IPC_CHANNELS,
   DESKTOP_RUNTIME_METHODS,
   type DesktopBridge,
+  type DesktopBrowserRect,
+  type DesktopBrowserState,
   type DesktopResult,
   type DesktopRuntimeApi,
 } from "./contract.js";
@@ -218,7 +220,126 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
       },
       quit: () => ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.quit),
     }),
+    browser: Object.freeze({
+      setActiveSession: (sessionId: string | null) => {
+        if (sessionId !== null && !isNonEmptyString(sessionId)) {
+          return Promise.resolve(validationFailure(invalidBridgeParams("浏览器会话参数无效")));
+        }
+        return ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.browserSetActiveSession, sessionId);
+      },
+      setViewport: (input: {
+        readonly sessionId: string;
+        readonly rect: DesktopBrowserRect | null;
+        readonly generation: number;
+      }) => {
+        if (!isViewportInput(input)) {
+          return Promise.resolve(validationFailure(invalidBridgeParams("浏览器视口参数无效")));
+        }
+        return ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.browserSetViewport, input);
+      },
+      navigate: (sessionId: string, url: string) =>
+        invokeBrowserSession<DesktopBrowserState>(
+          ipcRenderer,
+          DESKTOP_IPC_CHANNELS.browserNavigate,
+          sessionId,
+          url,
+        ),
+      back: (sessionId: string) =>
+        invokeBrowserSession<DesktopBrowserState>(
+          ipcRenderer,
+          DESKTOP_IPC_CHANNELS.browserBack,
+          sessionId,
+        ),
+      forward: (sessionId: string) =>
+        invokeBrowserSession<DesktopBrowserState>(
+          ipcRenderer,
+          DESKTOP_IPC_CHANNELS.browserForward,
+          sessionId,
+        ),
+      reload: (sessionId: string) =>
+        invokeBrowserSession<DesktopBrowserState>(
+          ipcRenderer,
+          DESKTOP_IPC_CHANNELS.browserReload,
+          sessionId,
+        ),
+      stop: (sessionId: string) =>
+        invokeBrowserSession<DesktopBrowserState>(
+          ipcRenderer,
+          DESKTOP_IPC_CHANNELS.browserStop,
+          sessionId,
+        ),
+      getState: (sessionId: string) =>
+        invokeBrowserSession<DesktopBrowserState | null>(
+          ipcRenderer,
+          DESKTOP_IPC_CHANNELS.browserGetState,
+          sessionId,
+        ),
+      close: (sessionId: string) =>
+        invokeBrowserSession<void>(ipcRenderer, DESKTOP_IPC_CHANNELS.browserClose, sessionId),
+      clearData: () => ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.browserClearData),
+      onState(listener: (state: DesktopBrowserState) => void): () => void {
+        if (typeof listener !== "function") return () => undefined;
+        const handler = (_event: unknown, value: unknown): void => {
+          if (isBrowserState(value)) listener(value);
+        };
+        ipcRenderer.on(DESKTOP_IPC_CHANNELS.browserState, handler);
+        return () => ipcRenderer.removeListener(DESKTOP_IPC_CHANNELS.browserState, handler);
+      },
+    }),
   });
+}
+
+function invokeBrowserSession<T>(
+  ipcRenderer: IpcRenderer,
+  channel: string,
+  sessionId: string,
+  extra?: string,
+): Promise<DesktopResult<T>> {
+  if (!isNonEmptyString(sessionId) || (extra !== undefined && typeof extra !== "string")) {
+    return Promise.resolve(validationFailure(invalidBridgeParams("浏览器操作参数无效")));
+  }
+  return ipcRenderer.invoke(channel, sessionId, extra) as Promise<DesktopResult<T>>;
+}
+
+function isViewportInput(value: unknown): value is {
+  readonly sessionId: string;
+  readonly rect: DesktopBrowserRect | null;
+  readonly generation: number;
+} {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const input = value as Record<string, unknown>;
+  if (!isNonEmptyString(input["sessionId"]) || !Number.isSafeInteger(input["generation"])) {
+    return false;
+  }
+  if (input["rect"] === null) return true;
+  if (!input["rect"] || typeof input["rect"] !== "object" || Array.isArray(input["rect"])) {
+    return false;
+  }
+  const rect = input["rect"] as Record<string, unknown>;
+  return ["x", "y", "width", "height"].every(
+    (key) => typeof rect[key] === "number" && Number.isFinite(rect[key]),
+  );
+}
+
+function isBrowserState(value: unknown): value is DesktopBrowserState {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const state = value as Record<string, unknown>;
+  return (
+    isNonEmptyString(state["sessionId"]) &&
+    typeof state["url"] === "string" &&
+    typeof state["title"] === "string" &&
+    typeof state["canGoBack"] === "boolean" &&
+    typeof state["canGoForward"] === "boolean" &&
+    typeof state["loading"] === "boolean" &&
+    typeof state["secure"] === "boolean" &&
+    typeof state["hasPage"] === "boolean" &&
+    typeof state["visible"] === "boolean" &&
+    Number.isSafeInteger(state["generation"])
+  );
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 function isSessionSubscriptionFrame(value: unknown): value is RuntimeSessionSubscriptionFrame {

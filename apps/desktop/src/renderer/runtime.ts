@@ -3932,5 +3932,57 @@ function createPreviewBridge(): DesktopBridge {
       setBackgroundMode: () => success(undefined),
       quit: () => success(undefined),
     },
+    browser: {
+      setActiveSession: () => success(undefined),
+      setViewport: (input) =>
+        success({
+          sessionId: input.sessionId,
+          url: "",
+          title: "",
+          canGoBack: false,
+          canGoForward: false,
+          loading: false,
+          secure: false,
+          hasPage: false,
+          visible: input.rect !== null,
+          generation: input.generation,
+        }),
+      navigate: (sessionId, url) =>
+        success({
+          sessionId,
+          url,
+          title: url,
+          canGoBack: false,
+          canGoForward: false,
+          loading: false,
+          secure: url.startsWith("https://"),
+          hasPage: true,
+          visible: true,
+          generation: 0,
+        }),
+      back: (sessionId) => success(emptyPreviewBrowserState(sessionId)),
+      forward: (sessionId) => success(emptyPreviewBrowserState(sessionId)),
+      reload: (sessionId) => success(emptyPreviewBrowserState(sessionId)),
+      stop: (sessionId) => success(emptyPreviewBrowserState(sessionId)),
+      getState: () => success(null),
+      close: () => success(undefined),
+      clearData: () => success(undefined),
+      onState: () => () => undefined,
+    },
   };
+}
+
+function emptyPreviewBrowserState(sessionId: string) {
+  return {
+    sessionId,
+    url: "",
+    title: "",
+    canGoBack: false,
+    canGoForward: false,
+    loading: false,
+    secure: false,
+    hasPage: false,
+    visible: false,
+    generation: 0,
+  } as const;
 }

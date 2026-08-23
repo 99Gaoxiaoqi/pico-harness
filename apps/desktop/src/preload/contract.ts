@@ -25,7 +25,38 @@ export const DESKTOP_IPC_CHANNELS = {
   setLaunchAtLogin: "pico:platform:set-launch-at-login",
   setBackgroundMode: "pico:lifecycle:set-background-mode",
   quit: "pico:lifecycle:quit",
+  browserSetActiveSession: "pico:browser:set-active-session",
+  browserSetViewport: "pico:browser:set-viewport",
+  browserNavigate: "pico:browser:navigate",
+  browserBack: "pico:browser:back",
+  browserForward: "pico:browser:forward",
+  browserReload: "pico:browser:reload",
+  browserStop: "pico:browser:stop",
+  browserGetState: "pico:browser:get-state",
+  browserClose: "pico:browser:close",
+  browserClearData: "pico:browser:clear-data",
+  browserState: "pico:browser:state",
 } as const;
+
+export interface DesktopBrowserRect {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+export interface DesktopBrowserState {
+  readonly sessionId: string;
+  readonly url: string;
+  readonly title: string;
+  readonly canGoBack: boolean;
+  readonly canGoForward: boolean;
+  readonly loading: boolean;
+  readonly secure: boolean;
+  readonly hasPage: boolean;
+  readonly visible: boolean;
+  readonly generation: number;
+}
 
 export interface DesktopError {
   readonly code: string;
@@ -82,5 +113,22 @@ export interface DesktopBridge {
   readonly lifecycle: {
     setBackgroundMode(enabled: boolean): Promise<DesktopResult<void>>;
     quit(): Promise<DesktopResult<void>>;
+  };
+  readonly browser: {
+    setActiveSession(sessionId: string | null): Promise<DesktopResult<void>>;
+    setViewport(input: {
+      readonly sessionId: string;
+      readonly rect: DesktopBrowserRect | null;
+      readonly generation: number;
+    }): Promise<DesktopResult<DesktopBrowserState>>;
+    navigate(sessionId: string, url: string): Promise<DesktopResult<DesktopBrowserState>>;
+    back(sessionId: string): Promise<DesktopResult<DesktopBrowserState>>;
+    forward(sessionId: string): Promise<DesktopResult<DesktopBrowserState>>;
+    reload(sessionId: string): Promise<DesktopResult<DesktopBrowserState>>;
+    stop(sessionId: string): Promise<DesktopResult<DesktopBrowserState>>;
+    getState(sessionId: string): Promise<DesktopResult<DesktopBrowserState | null>>;
+    close(sessionId: string): Promise<DesktopResult<void>>;
+    clearData(): Promise<DesktopResult<void>>;
+    onState(listener: (state: DesktopBrowserState) => void): () => void;
   };
 }

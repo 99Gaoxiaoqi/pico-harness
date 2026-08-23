@@ -21,6 +21,8 @@ export interface PersistedSessionSettings {
   title?: string;
   /** Source session ID when this conversation was forked. */
   forkFrom?: string;
+  /** Ephemeral Workbar side conversation; hidden from the ordinary session catalog. */
+  sideConversation?: boolean;
   provider: ProviderKind;
   model: string;
   modelRouteId: string;
@@ -245,6 +247,7 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
     !hasOnlyKeys(value, [
       "title",
       "forkFrom",
+      "sideConversation",
       "provider",
       "model",
       "modelRouteId",
@@ -273,6 +276,7 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
   const modelRouteId = value["modelRouteId"];
   const title = value["title"];
   const forkFrom = value["forkFrom"];
+  const sideConversation = value["sideConversation"];
 
   if (!isProviderKind(provider) || typeof model !== "string" || model.trim().length === 0) {
     return undefined;
@@ -292,6 +296,7 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
   if (!isModelRouteId(modelRouteId)) return undefined;
   if (title !== undefined && !isSessionTitle(title)) return undefined;
   if (forkFrom !== undefined && !isNonBlankString(forkFrom)) return undefined;
+  if (sideConversation !== undefined && typeof sideConversation !== "boolean") return undefined;
   if (prePlanMode !== undefined && !isNonPlanMode(prePlanMode)) return undefined;
   if (hasLegacyMode && mode !== "plan" && prePlanMode !== undefined) return undefined;
   if (
@@ -314,6 +319,7 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
   return {
     ...(title !== undefined ? { title } : {}),
     ...(forkFrom !== undefined ? { forkFrom } : {}),
+    ...(sideConversation === true ? { sideConversation: true } : {}),
     provider,
     model,
     modelRouteId,

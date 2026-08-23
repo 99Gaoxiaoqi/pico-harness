@@ -23,6 +23,7 @@ import {
   type DesktopRuntimeMethod,
 } from "../preload/contract.js";
 import { RuntimeClientError, type RuntimeClientAdapter } from "./runtime-client-adapter.js";
+import type { EmbeddedBrowserAuthority } from "./browser-manager.js";
 
 interface LifecycleControls {
   setBackgroundMode(enabled: boolean): void;
@@ -42,8 +43,9 @@ export function registerDesktopIpcHandlers(options: {
   readonly runtime: RuntimeClientAdapter;
   readonly platform: PlatformServices;
   readonly lifecycle: LifecycleControls;
+  readonly browser: EmbeddedBrowserAuthority;
 }): () => void {
-  const { ipcMain, runtime, platform, lifecycle } = options;
+  const { ipcMain, runtime, platform, lifecycle, browser } = options;
   const subscriptions = new Map<string, RuntimeSubscription>();
   const sessionFrames = runtime.subscribeSessionFrames(
     (frame) => {
@@ -70,6 +72,11 @@ export function registerDesktopIpcHandlers(options: {
         envelope.method,
         await runtime.request(envelope.method, params),
       );
+      if (envelope.method === "session.delete" || envelope.method === "session.archive") {
+        const rawParams: unknown = params;
+        const sessionId = isRecord(rawParams) ? rawParams["sessionId"] : undefined;
+        if (isNonEmptyString(sessionId)) await browser.close(sessionId);
+      }
       return success(result);
     } catch (error) {
       return failure(error);
@@ -155,6 +162,78 @@ export function registerDesktopIpcHandlers(options: {
     subscriptions.delete(subscriptionId);
   });
 
+  ipcMain.handle(DESKTOP_IPC_CHANNELS.browserSetActiveSession, (event, value: unknown) => {
+    if (!trusted(event)) return unauthorized();
+    if (value !== null && !isNonEmptyString(value)) return invalidBrowserRequest();
+    browser.setActiveSession(value);
+    return success(undefined);
+  });
+
+  ipcMain.handle(DESKTOP_IPC_CHANNELS.browserSetViewport, (event, value: unknown) => {
+    if (!trusted(event)) return unauthorized();
+    const input = readBrowserViewport(value);
+    if (!input) return invalidBrowserRequest();
+    try {
+      return success(browser.setViewport(input.sessionId, input.rect, input.generation));
+    } catch (error) {
+      return failure(error);
+    }
+  });
+
+  const browserSessionHandler = <T>(
+    channel: string,
+    operation: (sessionId: string) => T | Promise<T>,
+  ): void => {
+    ipcMain.handle(channel, async (event, value: unknown) => {
+      if (!trusted(event)) return unauthorized();
+      if (!isNonEmptyString(value)) return invalidBrowserRequest();
+      try {
+        return success(await operation(value));
+      } catch (error) {
+        return failure(error);
+      }
+    });
+  };
+  browserSessionHandler(DESKTOP_IPC_CHANNELS.browserBack, (sessionId) => browser.back(sessionId));
+  browserSessionHandler(DESKTOP_IPC_CHANNELS.browserForward, (sessionId) =>
+    browser.forward(sessionId),
+  );
+  browserSessionHandler(DESKTOP_IPC_CHANNELS.browserReload, (sessionId) =>
+    browser.reload(sessionId),
+  );
+  browserSessionHandler(DESKTOP_IPC_CHANNELS.browserStop, (sessionId) => browser.stop(sessionId));
+  browserSessionHandler(DESKTOP_IPC_CHANNELS.browserGetState, (sessionId) =>
+    browser.getState(sessionId),
+  );
+  browserSessionHandler(DESKTOP_IPC_CHANNELS.browserClose, (sessionId) =>
+    browser.close(sessionId),
+  );
+
+  ipcMain.handle(
+    DESKTOP_IPC_CHANNELS.browserNavigate,
+    async (event, sessionId: unknown, address: unknown) => {
+      if (!trusted(event)) return unauthorized();
+      if (!isNonEmptyString(sessionId) || typeof address !== "string") {
+        return invalidBrowserRequest();
+      }
+      try {
+        return success(await browser.navigate(sessionId, address));
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  );
+
+  ipcMain.handle(DESKTOP_IPC_CHANNELS.browserClearData, async (event) => {
+    if (!trusted(event)) return unauthorized();
+    try {
+      await browser.clearData();
+      return success(undefined);
+    } catch (error) {
+      return failure(error);
+    }
+  });
+
   ipcMain.handle(DESKTOP_IPC_CHANNELS.chooseWorkspace, async (event) => {
     if (!trusted(event)) return unauthorized();
     const result = await dialog.showOpenDialog({
@@ -232,6 +311,45 @@ export function registerDesktopIpcHandlers(options: {
   };
 }
 
+function readBrowserViewport(value: unknown):
+  | {
+      readonly sessionId: string;
+      readonly rect: { readonly x: number; readonly y: number; readonly width: number; readonly height: number } | null;
+      readonly generation: number;
+    }
+  | undefined {
+  if (!isRecord(value) || !hasExactKeys(value, ["sessionId", "rect", "generation"])) {
+    return undefined;
+  }
+  if (!isNonEmptyString(value.sessionId) || !Number.isSafeInteger(value.generation)) {
+    return undefined;
+  }
+  if (value.rect === null) {
+    return { sessionId: value.sessionId, rect: null, generation: value.generation as number };
+  }
+  if (!isRecord(value.rect) || !hasExactKeys(value.rect, ["x", "y", "width", "height"])) {
+    return undefined;
+  }
+  const values = [value.rect.x, value.rect.y, value.rect.width, value.rect.height];
+  if (!values.every((candidate) => typeof candidate === "number" && Number.isFinite(candidate))) {
+    return undefined;
+  }
+  return {
+    sessionId: value.sessionId,
+    generation: value.generation as number,
+    rect: {
+      x: value.rect.x as number,
+      y: value.rect.y as number,
+      width: value.rect.width as number,
+      height: value.rect.height as number,
+    },
+  };
+}
+
+function invalidBrowserRequest(): DesktopResult<never> {
+  return failure(invalidArgument("浏览器操作参数无效"));
+}
+
 function readInvocation(value: unknown): {
   readonly method: DesktopRuntimeMethod;
   readonly params: unknown;
@@ -295,6 +413,10 @@ function isDesktopRuntimeMethod(value: unknown): value is DesktopRuntimeMethod {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
