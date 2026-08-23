@@ -15,11 +15,30 @@ import {
   type InteractiveRootOwner,
   type RuntimeHostEndpoint,
 } from "@pico/runtime-host";
-import { LocalDaemonInstanceLock, resolveLocalDaemonEndpoint } from "../../src/daemon/index.js";
+import {
+  ensurePicoRuntimeHostShutdownOperationRegistered,
+  LocalDaemonInstanceLock,
+  resolveLocalDaemonEndpoint,
+} from "../../src/daemon/index.js";
 
-const mode = process.env["PICO_TEST_LEGACY_SHUTDOWN_MODE"];
-if (mode !== "exit" && mode !== "stay") {
-  throw new Error("PICO_TEST_LEGACY_SHUTDOWN_MODE must be exit or stay");
+ensurePicoRuntimeHostShutdownOperationRegistered();
+
+type LegacyShutdownMode = "eof-exit" | "eof-stay" | "response-exit" | "response-stay";
+
+const mode = readMode(process.env["PICO_TEST_LEGACY_SHUTDOWN_MODE"]);
+
+function readMode(value: string | undefined): LegacyShutdownMode {
+  if (
+    value !== "eof-exit" &&
+    value !== "eof-stay" &&
+    value !== "response-exit" &&
+    value !== "response-stay"
+  ) {
+    throw new Error(
+      "PICO_TEST_LEGACY_SHUTDOWN_MODE must be eof-exit, eof-stay, response-exit, or response-stay",
+    );
+  }
+  return value;
 }
 
 const options = parseRuntimeHostCandidateArguments(process.argv.slice(2));
@@ -86,12 +105,22 @@ async function serveConnection(transport: FramedTransport): Promise<void> {
     compatibilityEpoch: RUNTIME_HOST_COMPATIBILITY_EPOCH,
     state: "ready",
   });
-  const request = (await transport.read(0)) as { operation?: unknown };
+  const request = (await transport.read(0)) as { requestId?: unknown; operation?: unknown };
   if (request.operation !== "runtime.shutdown") throw new Error("expected runtime.shutdown");
+  if (typeof request.requestId !== "string") throw new Error("expected requestId");
 
-  // 模拟升级前版本：接受关停后不发送 operation response，直接断开连接。
-  transport.destroy();
-  if (mode === "exit") {
+  // 模拟两类升级前版本：接受关停后不回包即断连，或成功回包但不一定真正退出。
+  if (mode.startsWith("response-")) {
+    await transport.write({
+      requestId: request.requestId,
+      operation: "runtime.shutdown",
+      ok: true,
+      result: {},
+    });
+  }
+  if (mode.startsWith("eof-")) transport.destroy();
+  if (mode.endsWith("-exit")) {
+    if (mode.startsWith("response-")) transport.destroyAfterFlush();
     await cleanup();
     process.exit(0);
   }
