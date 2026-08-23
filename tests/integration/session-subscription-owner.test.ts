@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type {
-  RuntimeParams,
-  RuntimeResult,
-  RuntimeSessionSubscriptionFrame,
+import {
+  createRuntimeNotification,
+  type RuntimeParams,
+  type RuntimeResult,
+  type RuntimeSessionSubscriptionFrame,
 } from "../../src/daemon/protocol.js";
 import {
   SessionSubscriptionRegistry,
@@ -29,7 +30,7 @@ function snapshot(): SessionSubscriptionSnapshot {
       pinned: false,
       createdAt: 1,
       updatedAt: 1,
-    } as SessionSubscriptionSnapshot["session"],
+    },
     watermark,
     durableTail: [],
     activeOverlay: [],
@@ -97,7 +98,7 @@ test("session subscription stays paused until activation and begins at advertise
     type: "subscription.session_delta",
     runId: "run-1",
     turnId: "turn:run-1:2",
-    itemId: "message:run-1:turn:run-1:2:assistant",
+    itemId: "message:turn:run-1:2:assistant",
     streamId: "assistant:live:run-1:2",
     kind: "text",
     startOffsetBytes: 0,
@@ -177,6 +178,113 @@ test("paused subscription over 512 frames terminates as slow_consumer with a vis
     received[0]?.type === "subscription.closed" ? received[0].reason : undefined,
     "slow_consumer",
   );
+});
+
+test("paused subscription over 2 MiB terminates as slow_consumer", async () => {
+  const registry = new SessionSubscriptionRegistry("host-epoch-1", new FakeSource());
+  const received: RuntimeSessionSubscriptionFrame[] = [];
+  const opened = await registry.open(
+    { workspacePath, sessionId },
+    {
+      connectionId: "connection-1",
+      push: async (frame) => {
+        received.push(frame);
+      },
+    },
+  );
+  for (let index = 0; index < 4; index += 1) {
+    registry.publishReporterEvent(workspacePath, {
+      runId: "run-1",
+      sessionId,
+      type: "subagent.activity",
+      resourceVersion: index + 1,
+      at: index + 1,
+      payload: { activityId: `activity-${index}`, status: "running", summary: "x".repeat(600_000) },
+    });
+  }
+  await tick();
+  registry.activate(workspacePath, sessionId, opened.subscriptionId, "connection-1");
+  await waitFor(() => received.length === 1);
+  assert.equal(received[0]?.type, "subscription.closed");
+  assert.equal(
+    received[0]?.type === "subscription.closed" ? received[0].reason : undefined,
+    "slow_consumer",
+  );
+});
+
+test("tool output uses the canonical transcript toolCallId and run state is sequenced", async () => {
+  const registry = new SessionSubscriptionRegistry("host-epoch-1", new FakeSource());
+  const received: RuntimeSessionSubscriptionFrame[] = [];
+  const opened = await registry.open(
+    { workspacePath, sessionId },
+    {
+      connectionId: "connection-1",
+      push: async (frame) => {
+        received.push(frame);
+      },
+    },
+  );
+  registry.activate(workspacePath, sessionId, opened.subscriptionId, "connection-1");
+  registry.publishReporterEvent(workspacePath, {
+    runId: "run-1",
+    sessionId,
+    type: "tool.started",
+    resourceVersion: 1,
+    at: 1,
+    payload: {
+      turn: 3,
+      providerCallId: "provider-call-1",
+      toolName: "bash",
+      canonicalTranscriptStart: { toolCallId: "canonical-tool-1" },
+    },
+  });
+  registry.publishReporterEvent(workspacePath, {
+    runId: "run-1",
+    sessionId,
+    type: "tool.output",
+    resourceVersion: 2,
+    at: 2,
+    payload: {
+      turn: 3,
+      providerCallId: "provider-call-1",
+      toolName: "bash",
+      stream: "stdout",
+      chunk: "done",
+    },
+  });
+  registry.publishRuntimeNotification(
+    createRuntimeNotification({
+      topic: "run.started",
+      scope: { workspacePath, sessionId, runId: "run-1" },
+      resourceVersion: 3,
+      at: 3,
+      payload: {
+        run: {
+          runId: "run-1",
+          workspacePath,
+          sessionId,
+          description: "test",
+          status: "running",
+          startedAt: 1,
+          updatedAt: 3,
+          version: 1,
+        },
+      },
+    }),
+  );
+  await waitFor(() => received.length === 3);
+  const toolDelta = received.find(
+    (frame) => frame.type === "subscription.session_delta" && frame.kind === "toolOutput",
+  );
+  assert.equal(
+    toolDelta?.type === "subscription.session_delta" ? toolDelta.itemId : undefined,
+    "tool:canonical-tool-1",
+  );
+  assert.deepEqual(
+    received.map((frame) => frame.sequence),
+    [1, 2, 3],
+  );
+  assert.equal(received[2]?.type, "subscription.run_state");
 });
 
 test("page and advance operations preserve fixed watermark inputs", async () => {

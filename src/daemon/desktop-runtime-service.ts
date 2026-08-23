@@ -132,6 +132,9 @@ import {
   type RuntimeInputAttachment,
   type RuntimeMcpServerInput,
   type RuntimeRequest,
+  type RuntimeQueuedInput,
+  type RuntimeRun as RuntimeRunRecord,
+  type RuntimeSession,
   type RuntimeProviderInput,
   type RuntimeScopedMcpServer,
   type RuntimeUserDefaults,
@@ -703,6 +706,32 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   subscribe(listener: (notification: RuntimeNotification) => void): () => void {
     return this.options.runtimeService.subscribe(listener);
+  }
+
+  /** Metadata half of the atomic Runtime Host session subscription snapshot. */
+  async readSessionContinuityMetadata(
+    workspacePath: string,
+    sessionId: string,
+  ): Promise<{
+    readonly session: RuntimeSession;
+    readonly queuedInputs: readonly RuntimeQueuedInput[];
+    readonly activeRun?: RuntimeRunRecord;
+  }> {
+    const canonical = await canonicalizeWorkspacePath(workspacePath);
+    await this.transcriptPersistenceTail;
+    const session = (await this.requireSession(canonical, sessionId)) as unknown as RuntimeSession;
+    const activeRun = (await this.findActiveSessionRun(canonical, sessionId)) as
+      | RuntimeRunRecord
+      | undefined;
+    const queuedInputs = (await this.conversationStateStore.listQueued(canonical, sessionId)).map(
+      (input) => ({
+        queueId: input.queueId,
+        sessionId: input.sessionId,
+        input: input.input,
+        createdAt: input.createdAt,
+      }),
+    );
+    return { session, queuedInputs, ...(activeRun ? { activeRun } : {}) };
   }
 
   close(): Promise<void> {

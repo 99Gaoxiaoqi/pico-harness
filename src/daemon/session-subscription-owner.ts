@@ -177,7 +177,7 @@ class SessionSubscriptionOwner {
       this.#appendDelta({
         runId: event.runId,
         turnId: turnId(event.runId, turn),
-        itemId: messageItemId(event.runId, turnId(event.runId, turn), thinking),
+        itemId: messageItemId(turnId(event.runId, turn), thinking),
         streamId: `${thinking ? "thinking" : "assistant"}:live:${event.runId}:${turn}`,
         kind: thinking ? "thinking" : "text",
         text,
@@ -210,7 +210,7 @@ class SessionSubscriptionOwner {
         this.#appendDelta({
           runId: event.runId,
           turnId: turnId(event.runId, turn),
-          itemId: messageItemId(event.runId, turnId(event.runId, turn), false),
+          itemId: messageItemId(turnId(event.runId, turn), false),
           streamId,
           kind: "text",
           text: content,
@@ -506,6 +506,7 @@ class SessionWireSubscription {
 
 export class SessionSubscriptionRegistry {
   readonly #owners = new Map<string, SessionSubscriptionOwner>();
+  #closed = false;
 
   constructor(
     readonly hostEpoch: string,
@@ -516,6 +517,7 @@ export class SessionSubscriptionRegistry {
     params: RuntimeParams<"session.subscription.open">,
     connection: SessionSubscriptionConnection,
   ): Promise<SubscriptionOpenResult> {
+    if (this.#closed) throw new Error("Session subscription registry is closed");
     const owner = this.#owner(params.workspacePath, params.sessionId);
     return owner.run(async () => {
       const snapshot = await this.dataSource.readOpenSnapshot(params);
@@ -560,12 +562,14 @@ export class SessionSubscriptionRegistry {
   }
 
   publishReporterEvent(workspacePath: string, event: DesktopReporterEvent): void {
+    if (this.#closed) return;
     if (!event.sessionId) return;
     const owner = this.#owner(workspacePath, event.sessionId);
     void owner.run(() => owner.acceptReporterEvent(event));
   }
 
   publishSessionDelta(input: SessionLiveDeltaInput): void {
+    if (this.#closed) return;
     const owner = this.#owner(input.workspacePath, input.sessionId);
     void owner.run(() =>
       owner.acceptDelta({
@@ -581,6 +585,7 @@ export class SessionSubscriptionRegistry {
   }
 
   publishRuntimeNotification(notification: RuntimeNotification): void {
+    if (this.#closed) return;
     const sessionId = notification.scope.sessionId;
     if (!sessionId) return;
     const owner = this.#owners.get(ownerKey(notification.scope.workspacePath, sessionId));
@@ -595,6 +600,8 @@ export class SessionSubscriptionRegistry {
   }
 
   shutdown(): void {
+    if (this.#closed) return;
+    this.#closed = true;
     for (const owner of this.#owners.values()) void owner.run(() => owner.shutdown());
     this.#owners.clear();
   }
@@ -686,8 +693,8 @@ function turnId(runId: string, turn: number): string {
   return `turn:${runId}:${turn}`;
 }
 
-function messageItemId(runId: string, stableTurnId: string, thinking: boolean): string {
-  return `message:${runId}:${stableTurnId}:${thinking ? "thinking" : "assistant"}`;
+function messageItemId(stableTurnId: string, thinking: boolean): string {
+  return `message:${stableTurnId}:${thinking ? "thinking" : "assistant"}`;
 }
 
 function reporterPayload(event: DesktopReporterEvent): JsonObject {
