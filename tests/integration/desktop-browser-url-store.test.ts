@@ -3,7 +3,10 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { PersistentBrowserViewportGenerationAuthority } from "../../apps/desktop/src/main/browser-logic.js";
+import {
+  commitBrowserRevocations,
+  PersistentBrowserViewportGenerationAuthority,
+} from "../../apps/desktop/src/main/browser-logic.js";
 import { BrowserUrlStore } from "../../apps/desktop/src/main/browser-url-store.js";
 import {
   BrowserAgentBrokerError,
@@ -66,14 +69,13 @@ test("browser generation floor survives Desktop restart against the same daemon"
   const firstGeneration = await firstMain.acquire("session-a");
   broker.acquireLease({ sessionId: "session-a", visible: true, generation: firstGeneration });
   const disposed = firstMain.revokeAll();
-  for (const revocation of disposed.revocations) {
-    broker.acquireLease({
-      sessionId: revocation.sessionId,
-      visible: false,
-      generation: revocation.generation,
-    });
-  }
-  await disposed.persistence;
+  await commitBrowserRevocations(
+    disposed.persistence,
+    disposed.revocations,
+    async (sessionId, generation) => {
+      broker.acquireLease({ sessionId, visible: false, generation });
+    },
+  );
 
   const restartedStore = new BrowserUrlStore(root);
   const restartedMain = new PersistentBrowserViewportGenerationAuthority(restartedStore);
@@ -97,6 +99,101 @@ test("browser generation floor survives Desktop restart against the same daemon"
     }).visible,
     true,
   );
+});
+
+test("browser close publishes one floor-and-URL snapshot before notifying daemon", async () => {
+  const published: unknown[] = [];
+  const releasePublish = Promise.withResolvers<void>();
+  let blockPublish = false;
+  const store = new BrowserUrlStore("/unused", {
+    writeDebounceMs: 60_000,
+    write: async (_path, state) => {
+      published.push(structuredClone(state));
+      if (blockPublish) await releasePublish.promise;
+    },
+  });
+  store.set("session-a", "https://example.com/active");
+  await store.flush();
+  const authority = new PersistentBrowserViewportGenerationAuthority(store);
+  await authority.acquire("session-a");
+  published.length = 0;
+  blockPublish = true;
+
+  const revocation = authority.revoke("session-a", { deleteUrl: true });
+  const notifications: number[] = [];
+  const completion = commitBrowserRevocations(
+    revocation.persistence,
+    [{ sessionId: "session-a", generation: revocation.generation }],
+    async (_sessionId, generation) => {
+      notifications.push(generation);
+    },
+  );
+  await Promise.resolve();
+
+  assert.deepEqual(published, [
+    {
+      version: 2,
+      sessions: [{ sessionId: "session-a", generationFloor: revocation.generation }],
+    },
+  ]);
+  assert.deepEqual(notifications, []);
+  releasePublish.resolve();
+  await completion;
+  assert.deepEqual(notifications, [revocation.generation]);
+});
+
+test("browser close does not notify daemon or succeed when atomic publication fails", async () => {
+  const published: unknown[] = [];
+  let rejectPublish = false;
+  const store = new BrowserUrlStore("/unused", {
+    writeDebounceMs: 60_000,
+    retryDelayMs: 60_000,
+    write: async (_path, state) => {
+      published.push(structuredClone(state));
+      if (rejectPublish) throw new Error("rename failed");
+    },
+  });
+  store.set("session-a", "https://example.com/active");
+  await store.flush();
+  const authority = new PersistentBrowserViewportGenerationAuthority(store);
+  await authority.acquire("session-a");
+  published.length = 0;
+  rejectPublish = true;
+
+  const revocation = authority.revoke("session-a", { deleteUrl: true });
+  const notifications: number[] = [];
+  await assert.rejects(
+    commitBrowserRevocations(
+      revocation.persistence,
+      [{ sessionId: "session-a", generation: revocation.generation }],
+      async (_sessionId, generation) => {
+        notifications.push(generation);
+      },
+    ),
+    /rename failed/u,
+  );
+
+  assert.deepEqual(published, [
+    {
+      version: 2,
+      sessions: [{ sessionId: "session-a", generationFloor: revocation.generation }],
+    },
+  ]);
+  assert.deepEqual(notifications, []);
+
+  published.length = 0;
+  rejectPublish = false;
+  const retry = authority.revoke("session-a", { deleteUrl: true });
+  assert.equal(retry.generation, revocation.generation);
+  await commitBrowserRevocations(
+    retry.persistence,
+    [{ sessionId: "session-a", generation: retry.generation }],
+    async (_sessionId, generation) => {
+      notifications.push(generation);
+    },
+  );
+  assert.equal(published.length, 1);
+  assert.deepEqual(notifications, [revocation.generation]);
 });
 
 test("browser URL store migrates v1 and fails safe on corrupt generation state", async (context) => {
