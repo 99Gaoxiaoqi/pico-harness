@@ -1,7 +1,11 @@
 import { join } from "node:path";
 import { createCliSessionId } from "../cli/session-resolver.js";
 import { globalSessionManager } from "../engine/session.js";
-import { AgentRuntime, type RunAgentCliResult } from "../runtime/agent-runtime.js";
+import {
+  AgentRuntime,
+  type RunAgentCliResult,
+  type RuntimeSessionResourceChangedNotice,
+} from "../runtime/agent-runtime.js";
 import { currentRuntimeRun } from "../runtime/runtime-run.js";
 import type { PlanHandoff } from "../engine/plan-handoff.js";
 import { PlanCoordinator } from "../plan/coordinator.js";
@@ -418,6 +422,19 @@ export function createProductionRuntimeServices(
                 workspacePath,
                 notice,
                 nextDesktopResourceVersion,
+              ),
+            sessionResourceChangedSink: (notice: RuntimeSessionResourceChangedNotice) =>
+              service.publishDesktopNotification(
+                createRuntimeNotification({
+                  topic: "session.resourceChanged",
+                  scope: {
+                    workspacePath: notice.workspacePath,
+                    sessionId: notice.sessionId,
+                  },
+                  resourceVersion: nextDesktopResourceVersion(),
+                  at: Date.now(),
+                  payload: { resource: notice.resource, revision: notice.revision },
+                }),
               ),
           };
           const planReview = execution?.planReview;

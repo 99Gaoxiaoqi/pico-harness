@@ -144,6 +144,8 @@ import {
 import { registerPluginCapabilityTools } from "../plugins/plugin-tool-activation.js";
 import { activatePluginProviderCapabilities } from "../plugins/plugin-provider-activation.js";
 import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
+import { SqliteSessionWorkbarRepository } from "../storage/sqlite/sqlite-session-workbar-repository.js";
+import { buildSessionTaskPromptBlock } from "../tools/session-tasks.js";
 import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 import { currentRuntimeRun, isRuntimeRunLive, RuntimeRun } from "./runtime-run.js";
 import { PlanCoordinator } from "../plan/coordinator.js";
@@ -222,6 +224,13 @@ export function resolveHostAgentMaxTurns(value?: unknown): number | undefined {
   return value;
 }
 
+export interface RuntimeSessionResourceChangedNotice {
+  readonly workspacePath: string;
+  readonly sessionId: string;
+  readonly resource: "tasks";
+  readonly revision: number;
+}
+
 /**
  * Host-provided effects. The runtime never renders an Ink component or assumes a terminal.
  * Missing approval delivery fails closed when a dangerous tool is requested.
@@ -232,6 +241,8 @@ export interface RuntimeHost {
   onEvent?: (event: RuntimeLifecycleEvent) => void;
   /** Metadata-only observer for newly committed pending memory proposals. */
   memoryProposalSink?: MemoryProposalPublishedSink;
+  /** Metadata-only signal emitted after a Session Workbar authority changes. */
+  sessionResourceChangedSink?: (notice: RuntimeSessionResourceChangedNotice) => void;
   /** Structured fail-closed safety/permission denial observer for non-interactive hosts. */
   onPolicyDenied?: (event: RuntimePolicyDenial) => void;
 }
@@ -1411,6 +1422,19 @@ export async function executeAgentRuntime(
     });
     const { goalManager, todoStore, toolDisclosure, backgroundManager, delegationManager } =
       runtimeState;
+    const sessionTaskAuthority = {
+      repository: new SqliteSessionWorkbarRepository({
+        storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
+      }),
+      sessionId: session.id,
+      onChanged: (revision: number) =>
+        dependencies.sessionResourceChangedSink?.({
+          workspacePath: workDir,
+          sessionId: session.id,
+          resource: "tasks",
+          revision,
+        }),
+    };
     if (options.approvedPlan) {
       toolDisclosure.discloseTools(["update_plan", "cancel_plan"]);
     }
@@ -1530,6 +1554,7 @@ export async function executeAgentRuntime(
       collaborationMode() === "plan" || options.approvedPlan ? planRegistryOptions : undefined,
       hostKind,
       onToolGroupLoaded,
+      sessionTaskAuthority,
     );
     registerPluginCapabilityTools(
       registry,
@@ -1583,6 +1608,18 @@ export async function executeAgentRuntime(
           : {}),
       }).buildLayers();
       const turnTailParts = composed.turnTail ? [composed.turnTail] : [];
+      try {
+        const taskBlock = buildSessionTaskPromptBlock(
+          sessionTaskAuthority.repository,
+          sessionTaskAuthority.sessionId,
+        );
+        if (taskBlock) turnTailParts.push(taskBlock);
+      } catch (error) {
+        logger.warn(
+          { workDir, error: error instanceof Error ? error.message : String(error) },
+          "[SessionTasks] prompt injection degraded",
+        );
+      }
       if (collaborationMode() === "plan" && session.runtimeEventStore) {
         const projection = await new PlanCoordinator(
           session.runtimeEventStore,
@@ -2282,6 +2319,7 @@ function buildRegistry(
   plan?: DefaultToolRegistryOptions["plan"],
   hostKind?: ToolHostKind,
   onToolGroupLoaded?: (groupId: string, toolNames: readonly string[]) => void,
+  sessionTasks?: DefaultToolRegistryOptions["sessionTasks"],
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
     deferWorkspaceBoundary: true,
@@ -2301,6 +2339,7 @@ function buildRegistry(
     ...(bashTimeoutMs !== undefined ? { bashTimeoutMs } : {}),
     ...(hostKind !== undefined ? { hostKind } : {}),
     ...(onToolGroupLoaded !== undefined ? { onToolGroupLoaded } : {}),
+    ...(sessionTasks !== undefined ? { sessionTasks } : {}),
   });
 }
 
