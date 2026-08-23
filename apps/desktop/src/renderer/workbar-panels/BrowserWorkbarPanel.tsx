@@ -2,7 +2,10 @@ import { ArrowLeft, ArrowRight, Globe2, LoaderCircle, RefreshCw, X } from "lucid
 import type { JsonObject, RuntimeBrowserAgentCommand } from "@pico/protocol";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import type { DesktopBridge, DesktopBrowserState } from "../../preload/contract.js";
-import { retainBrowserAgentLease } from "./browser-agent-lease-controller.js";
+import {
+  acquireBrowserViewportIfActive,
+  retainBrowserAgentLease,
+} from "./browser-agent-lease-controller.js";
 
 export interface BrowserWorkbarPanelProps {
   readonly bridge: DesktopBridge;
@@ -46,17 +49,16 @@ export function BrowserWorkbarPanel({ bridge, sessionId, active }: BrowserWorkba
     let generation: number | undefined;
     let observer: ResizeObserver | undefined;
     let sync: (() => void) | undefined;
-    void bridge.browser.acquireViewport(sessionId).then((result) => {
+    void acquireBrowserViewportIfActive(active, () =>
+      bridge.browser.acquireViewport(sessionId),
+    ).then((result) => {
+      if (!result) return;
       if (!result.ok) {
         if (!disposed) setMessage(result.error.message);
         return;
       }
       generation = result.value;
       if (disposed) {
-        void bridge.browser.setViewport({ sessionId, rect: null, generation });
-        return;
-      }
-      if (!active) {
         void bridge.browser.setViewport({ sessionId, rect: null, generation });
         return;
       }
