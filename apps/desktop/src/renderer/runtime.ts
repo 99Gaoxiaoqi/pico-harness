@@ -6,6 +6,8 @@ import {
   parseApprovalRequestedPayload,
   type DesktopRuntimeMethod,
   type RuntimeProviderInput,
+  type RuntimeActiveOverlayEntry,
+  type RuntimeConversationItem,
   type RuntimeParams,
   type RuntimeNotification,
   type RuntimeMemoryFact,
@@ -16,9 +18,11 @@ import {
   type RuntimeResult,
   type RuntimeScopedMcpServer,
   type RuntimeScopedSkill,
+  type RuntimeSessionSubscriptionFrame,
   type RuntimeToolResultEnvelope,
   type RuntimeUserDefaults,
 } from "@pico/protocol";
+import type { TranscriptReplicaView } from "@pico/transcript-replica";
 import type { DesktopBridge, DesktopResult } from "../preload/contract.js";
 
 type RuntimeTranscriptCursor = {
@@ -89,6 +93,10 @@ import {
 } from "./conversation/items.js";
 import { applyTimelineNotification } from "./timeline.js";
 import { ConversationLoadTracker } from "./conversation-load-tracker.js";
+import {
+  DesktopSessionContinuity,
+  type DesktopSessionContinuityTransport,
+} from "./session-continuity.js";
 
 const SHARED_CONFIG_CAPABILITY = "shared-config-v1";
 const WORKSPACE_MEMORY_CAPABILITY = "workspace-memory-v1";
@@ -104,6 +112,16 @@ export function isMemoryConflict(error: unknown): boolean {
 
 function getBridge(): DesktopBridge | undefined {
   return window.pico;
+}
+
+interface DesktopSessionFrameSource {
+  subscribe(listener: (frame: RuntimeSessionSubscriptionFrame) => void): { dispose(): void };
+}
+
+function sessionFrameSource(bridge: DesktopBridge): DesktopSessionFrameSource | undefined {
+  // preload/main 未升级时没有该字段，Renderer 继续使用 v1 降级路径。
+  return (bridge as DesktopBridge & { readonly sessionFrames?: DesktopSessionFrameSource })
+    .sessionFrames;
 }
 
 export function isPreviewMode(): boolean {
@@ -494,6 +512,41 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
     };
   }
   return undefined;
+}
+
+function overlayRuntimeItem(overlay: RuntimeActiveOverlayEntry): RuntimeConversationItem {
+  if (overlay.kind === "thinking") {
+    return {
+      id: overlay.itemId,
+      kind: "thinking",
+      content: overlay.text,
+      runId: overlay.runId,
+      turnId: overlay.turnId,
+    };
+  }
+  if (overlay.kind === "text") {
+    return {
+      id: overlay.itemId,
+      kind: "assistantMessage",
+      content: overlay.text,
+      runId: overlay.runId,
+      turnId: overlay.turnId,
+    };
+  }
+  return {
+    id: overlay.itemId,
+    kind: "systemNotice",
+    content: overlay.stream ? `[${overlay.stream}] ${overlay.text}` : overlay.text,
+  };
+}
+
+export function conversationItemsFromReplica(view: TranscriptReplicaView): ConversationItemView[] {
+  return [
+    ...view.records.map((record) => record.item),
+    ...view.activeOverlay.map(overlayRuntimeItem),
+  ]
+    .map(conversationItem)
+    .filter((item): item is ConversationItemView => item !== undefined);
 }
 
 interface ParsedConversation extends ConversationView {
@@ -1507,6 +1560,8 @@ export function useRuntimeStore(): RuntimeStore {
   const transcriptFragmentsByConversation = useRef(
     new Map<string, Map<string, RuntimeTranscriptFragment[]>>(),
   );
+  const desktopContinuityRef = useRef<DesktopSessionContinuity | undefined>(undefined);
+  const desktopContinuityBridgeRef = useRef<DesktopBridge | undefined>(undefined);
   const pendingSendRef = useRef<
     | {
         readonly identity: string;
@@ -1515,6 +1570,79 @@ export function useRuntimeStore(): RuntimeStore {
     | undefined
   >(undefined);
   dataRef.current = data;
+
+  const applyReplicaView = useCallback(
+    (workspacePath: string, sessionId: string, view: TranscriptReplicaView) => {
+      const conversationKey = workspaceSessionKey({ workspacePath, sessionId });
+      const activeRun =
+        view.activeRun && !isTerminalRunStatus(view.activeRun.status) ? view.activeRun : undefined;
+      setData((current) => {
+        const existing = current.conversations[conversationKey] ?? {
+          workspacePath,
+          sessionId,
+          items: [],
+          queuedCount: 0,
+        };
+        const { runId: _previousRunId, ...conversationWithoutRun } = existing;
+        return {
+          ...current,
+          conversations: {
+            ...current.conversations,
+            [conversationKey]: {
+              ...conversationWithoutRun,
+              items: conversationItemsFromReplica(view),
+              queuedCount: view.queuedInputs.length,
+              ...(activeRun ? { runId: activeRun.runId } : {}),
+            },
+          },
+          runs: view.activeRun
+            ? [
+                {
+                  id: view.activeRun.runId,
+                  workspacePath,
+                  sessionId,
+                  description: view.activeRun.description,
+                  status: view.activeRun.status,
+                  startedAt: view.activeRun.startedAt,
+                  updatedAt: view.activeRun.updatedAt,
+                },
+                ...current.runs.filter(
+                  (run) => run.workspacePath !== workspacePath || run.id !== view.activeRun?.runId,
+                ),
+              ]
+            : current.runs,
+        };
+      });
+    },
+    [],
+  );
+
+  const ensureDesktopContinuity = useCallback(
+    (bridge: DesktopBridge): DesktopSessionContinuity | undefined => {
+      const source = sessionFrameSource(bridge);
+      if (!source) return undefined;
+      if (desktopContinuityRef.current && desktopContinuityBridgeRef.current === bridge) {
+        return desktopContinuityRef.current;
+      }
+      desktopContinuityRef.current?.dispose();
+      const transport: DesktopSessionContinuityTransport = {
+        open: (params) => invoke(bridge, "session.subscription.open", params),
+        close: (params) => invoke(bridge, "session.subscription.close", params),
+        page: (params) => invoke(bridge, "session.transcript.page", params),
+        advance: (params) => invoke(bridge, "session.transcript.advance", params),
+        subscribeFrames: (listener) => source.subscribe(listener),
+      };
+      const continuity = new DesktopSessionContinuity({
+        transport,
+        onView: applyReplicaView,
+        onError: (error) => setMessage(errorMessage(error)),
+      });
+      desktopContinuityBridgeRef.current = bridge;
+      desktopContinuityRef.current = continuity;
+      return continuity;
+    },
+    [applyReplicaView],
+  );
 
   const reportFailure = useCallback((error: unknown) => {
     setMessage(errorMessage(error));
@@ -1910,13 +2038,24 @@ export function useRuntimeStore(): RuntimeStore {
       // daemon 服务层一处，本层仅丢弃迟到的旧加载）。
       const load = conversationLoadTracker.current.begin(conversationKey);
       const isCurrentLoad = () => conversationLoadTracker.current.isCurrent(load);
+      let continuity: DesktopSessionContinuity | undefined;
       let value: unknown;
       try {
-        value = await invoke(bridge, "session.transcript", {
-          workspacePath,
-          sessionId,
-          limit: 200,
-        });
+        continuity = ensureDesktopContinuity(bridge);
+        if (continuity) {
+          const view = await continuity.open(workspacePath, sessionId);
+          value = {
+            items: view.records.map((record) => record.item),
+            queuedInputs: view.queuedInputs,
+            ...(view.activeRun ? { activeRun: view.activeRun } : {}),
+          };
+        } else {
+          value = await invoke(bridge, "session.transcript", {
+            workspacePath,
+            sessionId,
+            limit: 200,
+          });
+        }
       } catch (error) {
         if (!isCurrentLoad()) return;
         setData((current) => ({
@@ -1998,6 +2137,7 @@ export function useRuntimeStore(): RuntimeStore {
         }
       }
       if (!isCurrentLoad()) return;
+      const latestReplicaView = continuity?.view(workspacePath, sessionId);
       setData((current) => ({
         ...current,
         approvals: [
@@ -2010,11 +2150,18 @@ export function useRuntimeStore(): RuntimeStore {
           ...current.conversations,
           [conversationKey]: {
             ...conversation,
-            items: mergeHydratedConversationItems(
-              conversation.items,
-              current.conversations[conversationKey]?.items ?? [],
-              activeRunId,
-            ),
+            ...(latestReplicaView
+              ? {
+                  items: conversationItemsFromReplica(latestReplicaView),
+                  queuedCount: latestReplicaView.queuedInputs.length,
+                }
+              : {
+                  items: mergeHydratedConversationItems(
+                    conversation.items,
+                    current.conversations[conversationKey]?.items ?? [],
+                    activeRunId,
+                  ),
+                }),
           },
         },
         runs: activeRun
@@ -2041,7 +2188,7 @@ export function useRuntimeStore(): RuntimeStore {
             ),
       }));
     },
-    [preview],
+    [ensureDesktopContinuity, preview],
   );
 
   const bootstrap = useCallback(async () => {
@@ -2144,6 +2291,7 @@ export function useRuntimeStore(): RuntimeStore {
     if (preview || connection.kind !== "ready" || !data.workspacePath) return;
     const bridge = getBridge();
     if (!bridge) return;
+    const dedicatedSessionFrames = sessionFrameSource(bridge) !== undefined;
     seenEventIdsRef.current.clear();
     const workspacePath = data.workspacePath;
     let disposed = false;
@@ -2318,7 +2466,7 @@ export function useRuntimeStore(): RuntimeStore {
           ...current,
           timeline: applyTimelineNotification(current.timeline, event),
         }));
-      } else if (topic === "run.live") {
+      } else if (topic === "run.live" && !dedicatedSessionFrames) {
         const sessionId = stringValue(scope.sessionId);
         const runId = stringValue(scope.runId ?? payload.runId);
         const conversationKey = sessionId
@@ -2424,7 +2572,12 @@ export function useRuntimeStore(): RuntimeStore {
         topic.startsWith("run.") ||
         topic.startsWith("session.")
       ) {
-        scheduleHydration(stringValue(scope.sessionId) || undefined);
+        if (
+          !dedicatedSessionFrames ||
+          (!topic.startsWith("run.") && topic !== "session.transcriptUpdated")
+        ) {
+          scheduleHydration(stringValue(scope.sessionId) || undefined);
+        }
       }
     };
     void (async () => {
@@ -2453,6 +2606,9 @@ export function useRuntimeStore(): RuntimeStore {
       if (refreshTimer) clearTimeout(refreshTimer);
       if (memoryRefreshTimer) clearTimeout(memoryRefreshTimer);
       subscription?.dispose();
+      desktopContinuityRef.current?.dispose();
+      desktopContinuityRef.current = undefined;
+      desktopContinuityBridgeRef.current = undefined;
     };
   }, [
     connection.kind,
