@@ -1,5 +1,8 @@
 # 决策记录 25：appendBatch 写路径瘦身——事件索引边车（2026-08-18）
 
+> 文档状态：历史过渡决策。这里的 JSONL 事件索引边车已经随决策记录 24 的 SQLite 硬切
+> 退役；当前 append、去重与投影均在 `pico.sqlite` 事务内完成。
+
 > 分支：`feat/session-catalog`（阶段 2）。实现见 `src/storage/session-event-index.ts`、
 > `runtime-event-store.ts` 的 `requireSessionAppendContext` 与 `tests/integration/session-event-index.test.ts`。
 

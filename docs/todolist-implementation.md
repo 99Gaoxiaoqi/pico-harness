@@ -1,6 +1,8 @@
 # pico TodoList 实现详解
 
-> 本文以 pico-harness 的实际代码为基础，完整梳理 TodoList 功能从存储到提示词注入的全链路实现。
+> 文档状态：部分过期。Todo 的增量工具与 Prompt 注入语义仍可参考；`todo.json`、内存缓存后
+> 异步写盘和文件路径说明已退役。当前 `TodoStore` 将状态写入 workspace `pico.sqlite` 的
+> `workspace_kv(key="todo")`。代码细节以 `src/context/todo-store.ts` 为准。
 
 ## 一、设计定位
 

@@ -1,5 +1,9 @@
 # 上下文管理层 (`src/context/`)
 
+> 文档状态：部分过期。Prompt、请求投影和压缩主线仍可参考；Evidence CAS、`read_evidence`、
+> Todo 文件路径和旧摘要段数已漂移。当前 ToolResult 见[决策记录 26](./26-decision-tool-result-entry-shaping.md)，
+> Todo 见 `src/context/todo-store.ts`。
+
 > 大模型是 CPU，Context Window 是受限 RAM。上下文管理层是"内存管理器"。
 
 ## 三条主线

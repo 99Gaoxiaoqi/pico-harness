@@ -1,65 +1,29 @@
 %%{init: {"theme":"base","themeVariables":{"background":"#F8F9FA","fontFamily":"Arial, PingFang SC, sans-serif","lineColor":"#64748B","primaryTextColor":"#2F2B42"},"flowchart":{"curve":"basis","nodeSpacing":38,"rankSpacing":52}}}%%
-flowchart TB
-  TUI["命令行 / TUI 终端"]
-  DESKTOP["Desktop Renderer 界面"]
-  MOBILE["Mobile / Expo 模拟器<br/>仓库内开发预览"]
+flowchart LR
+  TUI["CLI / TUI"] --> CLIENT["LocalRuntimeClient"]
+  DESKTOP["Desktop Renderer"] --> BRIDGE["Preload / Electron Main"] --> CLIENT
 
-  BRIDGE["Preload / Main IPC<br/>allowlist<br/>LocalRuntimeClient&nbsp;"]
-  GATEWAY["认证回环 Gateway<br/>HTTP Bearer<br/>Token<br/>WS 首帧 JSON<br/>同一 Token"]
-  MOBILE_CLIENT["LocalRuntimeClient&nbsp;<br/>认证本机 IPC"]
-  DAEMON["本机 daemon<br/>内部 Runtime 宿主"]
-  DRS["DesktopRuntime<br/>Service<br/>daemon 控制服务"]
-  TRUST["工作区信任 / 配置"]
-  WRS["WorkspaceRuntime<br/>Service<br/>工作区 Runtime 服务"]
+  CLIENT --> DAEMON["当前用户本机 daemon"]
+  DAEMON --> SERVICE["WorkspaceRuntimeService"]
+  SERVICE --> RUNTIME["AgentRuntime / AgentEngine"]
 
-  RUNTIME["Agent Runtime 核心"]
-  ENGINE["Agent Engine / 工具调度器"]
-  CONTEXT["上下文 / 会话"]
-  PROVIDER["模型路由 / Provider 适配器"]
-  REGISTRY["工具注册表"]
-  GATES{"模式化门禁<br/>YOLO / Default / Auto / Plan / 后台"}
+  RUNTIME --> PROVIDER["Provider / ModelRouter"]
+  RUNTIME --> CONTEXT["Context / Compaction"]
+  RUNTIME --> TOOLS["ToolRegistry / Safety / Hooks / MCP"]
+  TOOLS --> PROJECT["项目工作区"]
 
-  EXT["受信 Runtime 扩展快照<br/>Skill / Agent / Hook<br/>MCP / LSP"]
-  COMMANDS["TUI Markdown 命令"]
-  TASKS["任务控制<br/>TUI：TaskHost<br/>Daemon：周期任务"]
-  PROJECT["项目工作区"]
-  STATE[("&nbsp;Workspace 状态账本&nbsp;<br/>&nbsp;JSON / JSONL&nbsp;<br/>&nbsp;sessions/&nbsp;<br/>&nbsp;task-runs/&nbsp;<br/>&nbsp;control/&nbsp;")]
-  COORD[(".storage 共享事务协调<br/>layout.json · commit.json&nbsp;<br/>lock/")]
-  SIDECAR[("文件历史 / 产物<br/>Evidence CAS")]
-
-  TUI --> TRUST
-  DESKTOP --> BRIDGE --> DAEMON --> DRS --> TRUST
-  MOBILE --> GATEWAY --> MOBILE_CLIENT --> DAEMON
-  TRUST -->|TUI 进程内| RUNTIME
-  TRUST -->|daemon 入口| WRS --> RUNTIME
-
-  RUNTIME --> ENGINE
-  RUNTIME --> CONTEXT
-  RUNTIME --> PROVIDER
-  ENGINE <--> CONTEXT
-  ENGINE <--> PROVIDER
-  ENGINE --> REGISTRY --> GATES --> PROJECT
-
-  RUNTIME -.->|加载扩展| EXT
-  TUI -.->|加载命令| COMMANDS
-  RUNTIME -->|前台任务宿主| TASKS
-  DAEMON -->|周期任务生命周期| TASKS
-  RUNTIME --> STATE
-  TASKS --> STATE
-  STATE -.->|共享事务| COORD
-  REGISTRY --> SIDECAR
+  RUNTIME --> DB[("workspace/pico.sqlite\n事实 · 投影 · 控制状态")]
+  RUNTIME --> SIDECAR[("Trace · Blob · 临时 staging")]
 
   classDef input fill:#d3f9d8,stroke:#2f9e44,color:#1a1a1a
   classDef process fill:#e5dbff,stroke:#5f3dc4,color:#1a1a1a
-  classDef decision fill:#ffe3e3,stroke:#c92a2a,color:#1a1a1a
   classDef action fill:#ffe8cc,stroke:#d9480f,color:#1a1a1a
   classDef output fill:#c5f6fa,stroke:#0c8599,color:#1a1a1a
   classDef storage fill:#fff4e6,stroke:#e67700,color:#1a1a1a
   classDef meta fill:#e7f5ff,stroke:#1971c2,color:#1a1a1a
-  class TUI,DESKTOP,MOBILE input
-  class RUNTIME,ENGINE,CONTEXT,PROVIDER process
-  class GATES decision
-  class REGISTRY,EXT,COMMANDS action
+  class TUI,DESKTOP input
+  class RUNTIME,PROVIDER,CONTEXT process
+  class TOOLS action
   class PROJECT output
-  class STATE,COORD,TASKS,SIDECAR storage
-  class BRIDGE,GATEWAY,MOBILE_CLIENT,DAEMON,DRS,TRUST,WRS meta
+  class DB,SIDECAR storage
+  class CLIENT,BRIDGE,DAEMON,SERVICE meta

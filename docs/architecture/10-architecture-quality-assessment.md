@@ -1,5 +1,8 @@
 # Pico Harness 架构质量评估与修整路线
 
+> 文档状态：历史评估快照。评分、文件规模和修整路线只反映成文时状态，不作为当前质量
+> 结论或待办；当前边界见 [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md)。
+
 > 评估日期：2026-07-19
 > 评估范围：`src/`、`packages/protocol/`、`apps/desktop/` 及 `tests/integration/`
 > 评分口径：只把已经通过验证的实现计入当前分数；工作区中尚未完成验证的改动不提前加分。

@@ -1,5 +1,9 @@
 # 第 8 章 · 一个人不够，招几个帮手
 
+> 文档状态：历史课程快照。Shared Worker、`writeScopes` 与 OCC 是目标设计，当前可写 worker
+> 仍强制进入独立 Git worktree，隔离条件不足时 fail-closed。当前事实见
+> [多 Agent 并发说明](architecture/08-multi-agent-concurrency.md)。
+
 Agent 现在是一个能干的独行侠。但有些任务一个人做太慢了。
 
 比如"分析这个项目的架构"——需要读几十个文件，理解模块依赖，画出结构图。串行读取的话，每个文件需要 IO + 模型理解时间，50 个文件就是几十秒。

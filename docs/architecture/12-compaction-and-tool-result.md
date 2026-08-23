@@ -1,5 +1,9 @@
 # pico-harness 上下文管理：语义压缩与 Tool Result 归档
 
+> 文档状态：部分过期。Compaction 的动机与批次边界仍可参考；ToolResult 归档、Evidence CAS、
+> `read_evidence` 和相关阈值已经被[决策记录 26](./26-decision-tool-result-entry-shaping.md)
+> 取代。实现细节必须回查当前 `src/context/`、`src/engine/` 与 `src/tools/tool-result-observation.ts`。
+
 > 本文记录 pico-harness 如何管理 Agent 运行时的上下文窗口——当对话历史不断增长、工具返回结果越来越庞大时，系统如何在不丢失关键信息的前提下把上下文控制在 LLM 窗口内。涉及压缩的触发与策略、Tool Result 的归档与回读、以及失败场景下的降级兜底。
 
 ---

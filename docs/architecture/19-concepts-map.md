@@ -1,5 +1,8 @@
 # pico-harness 核心概念地图
 
+> 文档状态：部分过期。概念关系仍可参考；旧 JSONL 文件布局、Evidence 回读和部分源码行号已
+> 漂移。当前执行与存储边界见 [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md)。
+
 > 大模型是 CPU，上下文是内存，工具是外设，RuntimeEventStore 是可恢复的运行事实账本。
 > 整个项目的命脉可以用一句话概括：**一条 append-only 账本 + 一切皆投影 + 两层 CAS 互斥**。
 
@@ -203,7 +206,9 @@ Graph Mode **复用同一套 CAS**：`appendGraphOperation`（`runtime-event-sto
 ```
 
 - daemon：`LocalDaemonHost`（`src/daemon/runtime-host.ts:28`），文件头注释明确「永不 import 或静默回退到前台 AgentRuntime」。
-- IPC 认证：256-bit token，每次启动轮换，第一帧必须是 auth 帧（`src/daemon/ipc-auth.ts:8`、`src/daemon/server.ts:53`）。客户端请求复用一条认证长连接，每个订阅独占一条连接。
+- IPC 边界：当前 runtime-host 依赖私有 endpoint、当前用户权限、root authority 与协议方法
+  白名单；握手协商版本和 compatibility epoch，不携带 bearer token。`src/daemon/ipc-auth.ts`
+  只服务已退役传输的升级守卫，不是当前客户端协议。
 - Desktop：`apps/desktop/src/main/index.ts` 持有 `DesktopDaemonController` 托管 host。**Renderer 永不直接加载 Runtime**——经 `preload/bridge.ts` 走 IPC 到 Electron Main 再到 daemon。
 
 ### 4.2 Provider 集成

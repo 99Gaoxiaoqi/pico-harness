@@ -2,7 +2,11 @@
 
 pico-harness 的本地 Agent Runtime 同时支持 TUI 与 Desktop。`pico` → TUI 仍是已安装命令的公开启动方式；Desktop 当前从仓库开发脚本启动。
 
-REST/WebSocket、ACP、飞书和 one-shot CLI 外壳曾在历史阶段完成，后已退役。`executeAgentRuntime` 是 TUI 与 daemon 共用的内部 Runtime 入口，不构成公开 headless API。持久 Cron 通过 TUI 创建并由当前 OS 用户的本机 daemon 执行；daemon 是内部 Runtime 宿主，不是公开 headless CLI。Docker 部署、公开 Plugin 安装/市场 UI 和任意代码插件仍不在当前支持范围；已安装且明确受信的资源型 Plugin 会通过 host-private snapshot 供 TUI/daemon 内部运行时使用。
+REST/WebSocket、ACP、飞书和 one-shot CLI 外壳曾在历史阶段完成，后已退役。TUI 与 Desktop
+都通过 `LocalRuntimeClient` 使用本机 daemon；`executeAgentRuntime` 是 daemon 内部入口，不构成
+公开 headless API。持久 Cron 通过 TUI 创建并由当前 OS 用户的 daemon 执行。Docker 部署、
+公开 Plugin 安装/市场 UI 和任意代码插件仍不在当前支持范围；已安装且明确受信的资源型
+Plugin 会通过 host-private snapshot 供内部 Runtime 使用。
 
 ## 本地开发启动
 
@@ -37,37 +41,33 @@ pico
 
 TUI 和 Desktop 从同一个 `PICO_HOME`（默认 `~/.pico`）读取设备级配置。`config.json` 保存 Provider、默认路由，以及可选的明文 `apiKey`；目录和文件会分别收紧到 0700/0600。也可以让用户 Provider 通过 `apiKeyEnv` 或可用的系统凭证后端解析密钥。Desktop 的 Provider 页和 TUI `/provider` 命令修改的是同一份配置。
 
-`PICO_HOME` 也参与本地 daemon endpoint 命名；两个不同的 `PICO_HOME` 不会误连到对方的 Runtime。模型 Provider 与默认路由只来自用户级 `config.json`；工作区 `.pico/config.json` 不再覆盖它们。MCP 默认读取 `.pico/mcp.json`；旧 `.claw/mcp.json` 仅作兼容回退。
+`PICO_HOME` 也参与本地 daemon endpoint 命名；两个不同的 `PICO_HOME` 不会误连到对方的
+Runtime。模型 Provider 与默认路由只来自用户级 `config.json`；工作区 `.pico/config.json`
+不再覆盖它们。MCP 合并 `$PICO_HOME/mcp.json` 与受信工作区 `.pico/mcp.json`，项目同名定义
+优先；旧 `.claw/mcp.json` 仅作兼容回退。
 
-每个 workspace 的 Session、TaskRun 账本和控制面分别位于 `sessions/`、`task-runs/` 与 `control/`；同级
-`.storage/layout.json`、`.storage/commit.json` 和 `.storage/lock/` 负责布局标记与跨文件事务协调。
-这些目录必须位于同一个支持原子 rename、原子 `mkdir` 和文件/目录 `fsync` 的本地文件系统。
-`memory/`、`evidence/` 与 `traces/` 仍是独立的同级存储领域。
+每个 workspace 的 Session、TaskRun、控制面、Memory 和跨域 operation 都写入：
 
-`layout.json` 同时保存稳定 `storageRootId` 和当前物理目录身份。运行中的 Store 会在每次事务
-入口重新校验；目录被复制、替换或移动后会 fail closed。确认副本来源后只能通过显式 adopt API
-更新物理身份，不能由普通启动流程静默接管。可移植导出计划默认只包含 Session、TaskRun、
-Evidence 和 Trace；控制面、事务协调、Memory state、凭据、临时文件
-及 SQLite/WAL/SHM 不随包导出。
+```text
+$PICO_HOME/workspaces/<workspace-id>/pico.sqlite
+```
 
-显式 recoverable 任务的执行权由 `task.jsonl` 中的 TaskRun execution lease 决定；进程重启后
-只有租约到期且安全边界可证明时，新的 owner 才能创建 successor Attempt。adapter 必须先以
-Session 高水位 CAS 发布确定性的 `run.started`，再用同一 `launchId` 幂等安装或确认 durable
-worker，然后才启动 provider、工具或外部进程。`run.started` 只表示 admission；如果在
-TaskRun 结算前崩溃，下一次恢复会从该 canonical 事件重建准入凭据并再次调用 adapter，
-adapter 必须避免重复真实副作用，且只有确认执行已经安装后才能返回成功。未实现这套契约的
-现有生产 executor 均保持 `host_bound`，不会被自动接管。
+数据库使用 Node 内置 `node:sqlite`、WAL 和 `synchronous=FULL`；`workspace_storage_binding`
+保存稳定 `storageRootId` 与当前物理目录身份。存储根被复制、替换或移动后会 fail-closed，只有
+显式 adopt 流程可以更新绑定，普通启动不会静默接管。
 
-可移植计划会在 workspace 共享锁内先完成 pending transaction recovery，再对严格白名单文件
-计算哈希。Session/TaskRun 只接受 64 位十六进制摘要目录和固定账本/manifest 文件；未知文件、
-SQLite/WAL/SHM/rollback journal、锁与事务文件一律不进入计划。Portable TaskRun 的
-`storageRootId` 不匹配时只能只读审计，不能 repair、追加 park 或接管执行。
+显式 recoverable 任务的执行权由 SQLite task-runs scope 中的 execution lease 决定。恢复器
+必须重新证明 adapter 版本、不可变输入、workspace identity、RuntimeEvent 边界和副作用状态；
+不能证明时写入稳定 park reason，不自动重放不确定副作用。`run.started` 只表示准入，不单独
+证明 worker 已启动；既有闭包、provider stream、PTY 和普通子进程仍属于 `host_bound`。
 
-当前版本不会创建或保留旧 `runtime/lock/` 升级 fence。任意非空旧 `runtime/`，包括
-lock、tombstone、candidate、control 和 sessions，都会阻止 v2 初始化，且不会被自动删除、
-复制或迁移。开发期确认放弃旧会话后，应由使用者显式删除旧目录；不要让两个布局版本并行运行。
+旧 JSONL 纪元的 `.storage/`、`sessions/`、`task-runs/`、`control/` 与非空 `runtime/` 都是
+不兼容布局标记。产品路径不会自动导入、复制或删除它们；需要保留旧数据时应先执行明确的迁移
+或人工备份。旧 split-era `runtime.sqlite` / `memory.sqlite` 同样不是当前事实源。
 
-运行中的 Run 固定使用启动时的配置快照，不会中途热换模型或凭证。TUI 在下一轮发送前重新解析配置；Desktop 通过 Runtime 事件刷新，并在窗口重新聚焦时补一次读取。损坏配置、revision 冲突或 Provider authority 冲突都会 fail-closed。
+运行中的 Run 固定使用启动时的配置快照，不会中途热换模型或凭证。daemon 在后续 Run
+装配时读取新配置，并通过 Runtime 事件通知客户端刷新；Desktop 在窗口重新聚焦时还会补一次
+状态读取。损坏配置、revision 冲突或 Provider authority 冲突都会 fail-closed。
 
 ## 环境变量迁移
 
@@ -81,13 +81,13 @@ lock、tombstone、candidate、control 和 sessions，都会阻止 v2 初始化�
 
 可选：
 
-| 变量              | 说明                                |
-| ----------------- | ----------------------------------- |
-| `SEARCH_API_BASE` | 搜索服务端点                        |
-| `SEARCH_API_KEY`  | 搜索服务凭证                        |
-| `PICO_SHELL_PATH` | 覆盖 Bash 工具使用的 shell          |
-| `PICO_HOME`       | 覆盖共享配置与 Runtime 数据根目录   |
-| `LOG_LEVEL`       | `debug` / `info` / `warn` / `error` |
+| 变量              | 说明                                    |
+| ----------------- | --------------------------------------- |
+| `SEARCH_API_BASE` | 搜索服务端点                            |
+| `SEARCH_API_KEY`  | 搜索服务凭证                            |
+| `PICO_SHELL_PATH` | 覆盖宿主 Shell；支持 Bash 或 PowerShell |
+| `PICO_HOME`       | 覆盖共享配置与 Runtime 数据根目录       |
+| `LOG_LEVEL`       | `debug` / `info` / `warn` / `error`     |
 
 ## 验证
 
@@ -107,7 +107,10 @@ npm pack --dry-run
 npm run desktop:package
 ```
 
-`test:integration` 覆盖 Runtime、daemon、持久化和安全边界的本地集成路径；`check:storage` 单独验证受支持的 Node 22.13+/24.3+/26 运行时，以及当前 `PICO_HOME` 所需的原子 `mkdir`、同目录 `rename`、私有权限与文件/目录 `fsync` 能力。Runtime 与 Desktop 共用纯 TypeScript 文件存储，不需要按 ABI 重建原生数据库模块。`build` 和 `npm pack --dry-run` 检查 CLI 可发布产物，`desktop:package` 生成当前平台的未签名 Desktop smoke 包；它不替代安装、签名或公证验证。
+`test:integration` 覆盖 Runtime、daemon、持久化和安全边界的本地集成路径；`check:storage`
+验证 Node 22.19+/24.3+/26 的版本策略和内置 `node:sqlite` 可用性。项目不依赖需要单独按 ABI
+重建的第三方数据库模块。`build` 和 `npm pack --dry-run` 检查 CLI 产物，
+`desktop:package` 生成当前平台的未签名 Desktop smoke 包；它不替代安装、签名或公证验证。
 
 真实模型闭环需要可用的 Provider 配置、凭证与网络，只在受控环境执行，不在无凭证 CI 中强制运行：
 

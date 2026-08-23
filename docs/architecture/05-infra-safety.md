@@ -1,5 +1,9 @@
 # 基础设施与安全层
 
+> 文档状态：部分过期。安全分层仍可参考；JSON/JSONL、原子 rename 和目录 lease 的持久化
+> 描述已被 workspace `pico.sqlite` 取代。本机传输边界见
+> [`local-ipc-security.md`](./local-ipc-security.md)。
+
 > 安全底线、审批系统、可观测性、MCP 协议、核心数据结构。
 
 ---

@@ -1,5 +1,9 @@
 # ToolResult 事实、Evidence 与宿主投影
 
+> 文档状态：已被[决策记录 26](./26-decision-tool-result-entry-shaping.md)取代，仅保留设计
+> 演进背景。当前新写路径使用 inline ToolResult、1 MiB 入口门和读取侧投影；
+> `read_evidence` 已退役，旧 Evidence 形态只在兼容读取边界保留。
+
 ## 目标
 
 ToolResult 采用一条不可分叉的主链：

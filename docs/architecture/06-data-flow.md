@@ -1,5 +1,8 @@
 # 数据流：核心流程时序
 
+> 文档状态：部分过期。TUI/Desktop 到 daemon/Runtime 的主链仍可参考；ToolResult Evidence、
+> 部分 sidecar 和旧存储路径已被 SQLite 与入口定形方案取代。
+
 > 以具体场景串联整个架构，展示数据在各模块间的流转。
 
 ---
@@ -243,7 +246,7 @@ Renderer 用户操作
        └─ Preload DesktopBridge
             └─ Electron IPC（method allowlist + sender 校验）
                  └─ Electron Main LocalRuntimeClient
-                      └─ authenticated local daemon socket/pipe
+                      └─ current-user local daemon socket/pipe
                            └─ DesktopRuntimeService / WorkspaceRuntimeService
                                 ├─ RuntimeEventStore：Session / Agent ledger
                                 ├─ RuntimeStore：控制面与通知 replay ledger
@@ -256,7 +259,7 @@ daemon subscription
                  └─ Renderer 将通知投影为 Transcript / Timeline / status
 ```
 
-Renderer 不直接读取 Runtime 文件存储、daemon token 或已有 Provider secret。用户在
+Renderer 不直接读取 Runtime 存储、host registration 或已有 Provider secret。用户在
 Providers 页面输入的新 secret 会短暂经过 Renderer，并通过类型化 write-only 请求发送；
 它不会出现在响应、事件、Renderer Store、持久配置或日志中。Session 标题来自
 RuntimeEvent；Desktop metadata 只保留 archive 等 UI 状态。Jobs、Runs 和 Usage 来自

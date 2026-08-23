@@ -1,5 +1,9 @@
 # 第 4 章 · 记住上次聊到哪
 
+> 文档状态：历史课程快照。Session JSONL、`PLAN.md` / `TODO.md` 和文件事务描述已退役；
+> 当前 Session/Plan/Todo/Memory 使用 workspace `pico.sqlite` 中各自的逻辑 scope。当前事实见
+> [架构总览](architecture/00-overview.md)。
+
 Agent 现在能做事了。但它有一个致命问题：**每次启动都失忆。**
 
 上一轮它读了 `src/utils.ts`，分析了代码结构，想好了重构方案。下一轮启动时，这些全忘了。它又读了一遍 `src/utils.ts`，又分析了一遍代码结构——每次都在重复同样的工作。

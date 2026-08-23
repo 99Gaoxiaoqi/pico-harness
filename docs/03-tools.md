@@ -1,5 +1,9 @@
 # 第 3 章 · 教它用工具
 
+> 文档状态：历史课程快照。“四个工具”、旧 `read_file` 截断阈值和 Evidence 回读描述只代表
+> 课程起步阶段；当前工具面按 surface 渐进披露，ToolResult 使用 1 MiB 入口上限。当前事实见
+> [工具系统](architecture/02-tools.md)与[入口定形 ADR](architecture/26-decision-tool-result-entry-shaping.md)。
+
 Agent 有了大脑（Provider），有了心跳（Main Loop），但还没有手脚。
 
 Main Loop 里有一行 `registry.execute(tc.name, tc.arguments)`，但如果 registry 是空的，Agent 只能聊天，不能做事。现在我要给它装上真正的工具。

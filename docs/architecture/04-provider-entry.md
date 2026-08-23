@@ -114,27 +114,29 @@ new CostTracker(provider, modelRoute, session);
 
 ### 入口边界
 
-| 维度         | TUI                                | Desktop                                                    |
-| ------------ | ---------------------------------- | ---------------------------------------------------------- |
-| **启动**     | `pico` / `npm run dev`             | Electron Main 连接当前 `PICO_HOME` 的本地 daemon           |
-| **I/O**      | ink React TUI + `TuiReporter`      | React Renderer + 类型化 Preload/Runtime 事件               |
-| **Provider** | 共享路由实现；实例属于当前 Runtime | 同一实现位于 daemon；Renderer 只短暂提交 write-only secret |
-| **Session**  | 当前项目 TUI Session               | Workspace → Session → 多轮 Run 的连续 Transcript           |
-| **审批**     | 本地 TUI/终端审批                  | Transcript 内 Approval / Ask User                          |
-| **MCP**      | 工作区配置，可用高级命令管理       | 同一工作区配置，通过 daemon 类型化方法管理                 |
+| 维度         | TUI                                                          | Desktop                                                |
+| ------------ | ------------------------------------------------------------ | ------------------------------------------------------ |
+| **启动**     | `pico` / `npm run dev`，连接或拉起当前 `PICO_HOME` 的 daemon | Electron Main 连接或拉起同一个本机 daemon              |
+| **I/O**      | Ink React TUI + daemon 事件适配                              | React Renderer + 类型化 Preload/Runtime 事件           |
+| **Provider** | 实例位于 daemon，客户端只提交路由选择                        | 实例位于 daemon；Renderer 只短暂提交 write-only secret |
+| **Session**  | Workspace → Session → 多轮 Run                               | Workspace → Session → 多轮 Run 的连续 Transcript       |
+| **审批**     | daemon request → TUI Approval / Ask User                     | daemon request → Transcript 内 Approval / Ask User     |
+| **MCP**      | 工作区配置，经 daemon 命令/RPC 管理                          | 同一工作区配置，通过 daemon 类型化方法管理             |
 
-### TUI 启动装配 (`cli/main.ts` → `tui/repl.tsx` → `runtime/agent-runtime.ts`)
+### TUI 启动装配 (`cli/main.ts` → `tui/client-repl.tsx` → daemon)
 
 ```
 main.ts parseArgs
-  └─ startTuiRepl
-      └─ handleSubmit
-          └─ executeAgentRuntime
-              └─ AgentRuntime.execute
+  └─ startClientRepl
+      └─ LocalRuntimeClient.connectOrSpawn
+          └─ current-user local daemon
+              └─ WorkspaceRuntimeService
+                  └─ AgentRuntime.execute
 ```
 
-`executeAgentRuntime` 是 TUI 与 daemon 共用的内部 Runtime 入口，不是公开
-one-shot/headless API。共享装配链位于 `AgentRuntime`：
+`executeAgentRuntime` 只在 Runtime 宿主侧使用，不是公开 one-shot/headless API。TUI 进程
+不加载 Provider 或 Engine；它通过 `ClientSessionRuntime` 发送类型化请求、订阅事件并处理
+审批/Ask User。共享装配链位于 daemon 的 `AgentRuntime`：
 
 1. loadEffectiveModelRuntime（Session / CLI > 项目 > 用户 > 环境）
 2. globalSessionManager.getOrCreate（固定 ID 复用）
@@ -155,13 +157,12 @@ DesktopRuntimeService/WorkspaceRuntimeService → AgentRuntime`。协议参数�
 ink + React 19 全屏 REPL（对标 Claude Code）。
 
 ```
-InputBox ──▶ handleSubmit ──▶ executeAgentRuntime({reporter: TuiReporter})
-                                           │
-engine 事件流(onTextDelta/onToolCall/...)   │
-                                           ▼
-TuiReporter → TuiEntry[] → onUpdate → setEntries → ink 重渲染
-                                           │
-                            React 组件树(MessageRow memo)
+InputBox ──▶ ClientSessionRuntime ──▶ LocalRuntimeClient ──▶ daemon
+                                                            │
+daemon 协议事件 ◀───────────────────────────────────────────┘
+      │
+      ▼
+DaemonEventReporter → TuiReporter → TuiEntry[] → ink 重渲染
 ```
 
 **架构决策**：

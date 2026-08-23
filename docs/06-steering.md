@@ -1,5 +1,9 @@
 # 第 6 章 · 给它装上方向盘
 
+> 文档状态：历史课程快照。以 `PLAN.md` / `TODO.md` 外化状态的方案已经退役；当前 Plan 是
+> Session RuntimeEvent 状态机，通过 `submit_plan`、`update_plan` 等入口推进，普通 Todo 存在
+> workspace SQLite scope。恢复提示与重复失败控制的教学动机仍可参考。
+
 Agent 现在有了记忆、工具体系和上下文管理。但它还是会跑偏。
 
 我见过三种典型的跑偏模式：

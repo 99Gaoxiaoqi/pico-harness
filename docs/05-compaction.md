@@ -1,5 +1,9 @@
 # 第 5 章 · 别让它撑爆上下文
 
+> 文档状态：历史课程快照。Evidence CAS、`read_evidence`、精确 token 计数和旧阈值阶梯已被
+> 后续实现取代；当前 ToolResult inline 入库并受 1 MiB 入口门约束，压缩发生在读取侧。当前
+> 决策见[入口定形 ADR](architecture/26-decision-tool-result-entry-shaping.md)。
+
 完整 Model Context 保住了工作链，但也要求主动管理输入预算：**不能等 Provider 已经 overflow 才处理。**
 
 Agent 读了一个 1MB 的日志文件。单条 ToolResult 就可能把上下文撑爆，因此 Engine 在 durable

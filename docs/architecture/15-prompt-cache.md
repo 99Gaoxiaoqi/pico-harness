@@ -1,5 +1,8 @@
 # pico-harness 前缀缓存：断点注入、冻结策略与命中可观测性
 
+> 文档状态：待专项复核。缓存原理仍可参考，但 Provider 能力、阈值和代码行号可能已经漂移；
+> 实施或调参前必须回查 `src/provider/`、`src/context/` 与相关集成测试。
+
 > 本文梳理 pico-harness 如何利用大模型 Provider 的 Prompt Cache 能力降低延迟和成本。核心策略是**按稳定性分层**——把跨轮不变的内容放进缓存前缀，把每轮变化的内容隔离到断点之后。涉及内容分层、Claude 显式断点注入、OpenAI 隐式 cache key、Claude 预热、三层前缀稳定率诊断，以及压缩对缓存的影响。
 
 ---

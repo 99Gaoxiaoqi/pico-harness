@@ -1,5 +1,9 @@
 # 第 7 章 · 建一道安全防线
 
+> 文档状态：历史课程快照。飞书审批入口已经退役；当前审批由 TUI/Desktop 的 daemon broker
+> 承载。Hardline 拒绝不可经审批绕过，只有普通风险请求进入模式化 Permission/Approval 流程。
+> 当前事实见[基础设施与安全](architecture/05-infra-safety.md)。
+
 Agent 有 `bash` 工具。这意味着它可以执行任何 Shell 命令——包括 `rm -rf /`、`git push --force`、`curl ... | sh`。
 
 我不能依赖大模型的"理智"。System Prompt 里写"千万别删库"没用——模型不总是听话的。安全不能靠提示词，要靠机制。

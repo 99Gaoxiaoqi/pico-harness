@@ -1,6 +1,8 @@
 # 24. 架构决策:存储层全面迁移 SQLite
 
-状态:已批准(2026-08-18)。本文是迁移的总设计与实施计划,依据当日双代理写入面/读取面盘点与 maka-agent(`D:\work\maka-agent`)源码深潜。
+状态：已实施。本文是迁移的总设计与实施记录；当前生产路径已统一使用 workspace
+`pico.sqlite`，旧 JSONL 纪元不再提供产品读写路径。设计期个别实现选型后来发生调整：例如
+数据库副本当前使用 `VACUUM INTO`，不是下文最初设想的模块级 `backup()`；最终事实以代码为准。
 
 ## 1. 背景实证
 
@@ -47,7 +49,7 @@ maka 深潜关键结论(修正先前认知):maka 事实表 `runtime_events.paylo
 - 只读消费者开第二连接 `readOnly:true` + `query_only=ON`,不迁移、只校验版本,超前拒绝打开。
 - schema migration:每 scope 一个 `Map<version, SQL>`;打开时自动逐级、单事务(`BEGIN IMMEDIATE` 后重读版本防并发双跑);scope 版本注册于 `operational_schema_migrations(scope, version, applied_at)`。
 - 防漂移断言:`:memory:` 跑全套迁移得到目标 schema,`sqlite_schema` 逐对象规范化 diff(`normalizeSql`),不一致拒绝开库。
-- backup:`node:sqlite` 模块级 `backup()` → `journal_mode=DELETE` 固化自包含副本 → `integrity_check` + blob 对账。
+- backup：当前实现使用 `VACUUM INTO` 生成自包含副本，再执行完整性校验；本项与设计初稿不同。
 
 ## 4. Schema 设计
 
@@ -415,7 +417,7 @@ CREATE TABLE workspace_kv (key TEXT PRIMARY KEY, value_json TEXT NOT NULL);
 -- todo.json 迁入(顺带获得事务原子性);hooks-state/plugins workspace 态按需迁入
 ```
 
-## 5. 实施计划
+## 5. 实施记录（已完成）
 
 每阶段一条集成测试验收;涉及读路径的阶段追加真机 TUI 计时对比(基线:2026-08-18 A/B 后 ~0.85s)。
 

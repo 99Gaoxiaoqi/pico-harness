@@ -1,5 +1,9 @@
 # pico-harness 工作区记忆：提案式事实记忆系统
 
+> 文档状态：部分过期。Memory 的提案式语义仍可参考，但 `memory/state.json` 与独立 lock 已被
+> `SqliteMemoryRepository` 取代；Session 删除、retention 和 EventLog hard cut 只使 Source
+> unavailable，不删除已提交 Fact。当前状态真源见 [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md)。
+
 > 本文梳理 pico-harness 的工作区级事实记忆系统（`src/memory/`）。它和会话级记忆是两套不同的东西：会话记忆（第 4 章）管"对话历史不丢"，事实记忆管"跨会话记住用户偏好、项目约定和纠错"。本文重点不是"能记什么"，而是记忆如何经过触发、提取、安全清洗和预算控制才成为可信的事实。
 
 ---
