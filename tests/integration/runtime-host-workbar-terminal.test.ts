@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { spawn as spawnChild } from "node:child_process";
+import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -266,6 +267,57 @@ test("Host terminal stop 终止进程组，且重启把旧 running 记录标为 
   assert.equal(replay.events[0]?.sequence, 1);
 });
 
+test("Host terminal stopAll 只终止 Authority 持有的进程组并持久化终态", async (context) => {
+  if (process.platform === "win32") return;
+  const workspacePath = await createWorkspace(context, "stop-all-process-group");
+  const childPidFile = join(workspacePath, "terminal-child.pid");
+  const store = new MemoryStateStore();
+  const authority = new WorkbarTerminalAuthority({
+    store,
+    processFactory: createChildProcessWorkbarTerminalFallback("forced by test"),
+    shell: "/bin/sh",
+    shellArgs: ["-c", 'sleep 30 & echo "$!" > "$PICO_TERMINAL_CHILD_PID_FILE"; wait'],
+    env: { PICO_TERMINAL_CHILD_PID_FILE: childPidFile },
+    stopGraceMs: 100,
+  });
+  context.after(() => authority.close());
+
+  const sentinel = spawnChild("/bin/sh", ["-c", "sleep 30"], {
+    detached: true,
+    stdio: "ignore",
+  });
+  assert.ok(sentinel.pid);
+  context.after(() => terminateTestProcessGroup(sentinel.pid));
+
+  const created = await authority.create({ workspacePath, sessionId: "session-1" });
+  const running = store.records.find((record) => record.resourceId === created.resourceId);
+  assert.ok(running?.pid);
+  const terminalPid = running.pid;
+  context.after(() => terminateTestProcessGroup(terminalPid));
+  await waitFor(async () => {
+    try {
+      return Number.isSafeInteger(Number((await readFile(childPidFile, "utf8")).trim()));
+    } catch {
+      return false;
+    }
+  });
+  const childPid = Number((await readFile(childPidFile, "utf8")).trim());
+  assert.equal(isProcessPresent(terminalPid), true);
+  assert.equal(isProcessPresent(childPid), true);
+  assert.equal(isProcessPresent(sentinel.pid), true);
+
+  assert.equal(await authority.stopAll(), 1);
+  await waitFor(async () => !isProcessPresent(terminalPid) && !isProcessPresent(childPid), 5_000);
+  assert.equal(isProcessPresent(sentinel.pid), true, "不得误杀 Authority 外的进程组");
+  const persisted = store.records.find((record) => record.resourceId === created.resourceId);
+  assert.equal(persisted?.status, "stopped");
+  assert.equal(persisted?.pid, undefined);
+  assert.equal(
+    (await authority.list({ workspacePath, sessionId: "session-1" }))[0]?.status,
+    "stopped",
+  );
+});
+
 test("child process fallback 真实执行但明确声明 pipe，不伪称 PTY", async (context) => {
   if (process.platform === "win32") return;
   const workspacePath = await createWorkspace(context, "fallback");
@@ -311,5 +363,24 @@ async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 2_000): Pr
   while (!(await predicate())) {
     if (Date.now() >= deadline) throw new Error("timed out waiting for terminal state");
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+  }
+}
+
+function isProcessPresent(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+    throw error;
+  }
+}
+
+function terminateTestProcessGroup(pid: number | undefined): void {
+  if (!pid) return;
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
   }
 }

@@ -153,6 +153,11 @@ export class DesktopWorkbarTerminalService {
     );
   }
 
+  async stopAll() {
+    await this.ready;
+    return { stopped: await this.authority.stopAll() };
+  }
+
   async close(): Promise<void> {
     await this.ready.catch(() => undefined);
     await this.authority.close();

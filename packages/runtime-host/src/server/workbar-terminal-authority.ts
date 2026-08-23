@@ -439,11 +439,12 @@ export class WorkbarTerminalAuthority {
     return resource.record;
   }
 
-  async close(): Promise<void> {
+  /** Stops every live Workbar process owned by this authority before its UI owner disappears. */
+  async stopAll(): Promise<number> {
     const running = [...this.#resources.values()].filter(
       (resource) => resource.record.status === "running",
     );
-    await Promise.all(
+    const outcomes = await Promise.allSettled(
       running.map((resource) =>
         this.stop({
           resourceId: resource.record.resourceId,
@@ -451,6 +452,17 @@ export class WorkbarTerminalAuthority {
         }),
       ),
     );
+    const failures = outcomes.flatMap((outcome) =>
+      outcome.status === "rejected" ? [outcome.reason] : [],
+    );
+    if (failures.length > 0) {
+      throw new AggregateError(failures, "Workbar terminal cleanup failed");
+    }
+    return running.length;
+  }
+
+  async close(): Promise<void> {
+    await this.stopAll();
     await this.idle();
   }
 
