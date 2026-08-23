@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { RuntimeNotification } from "@pico/protocol";
+import { LOCAL_RUNTIME_PROTOCOL_VERSION, type RuntimeNotification } from "@pico/protocol";
 import { createPicoCommandRegistry } from "../../src/input/pico-command-registry.js";
 import { createClientCommandRegistry, processClientInput } from "../../src/tui/client-commands.js";
 import {
@@ -572,7 +572,7 @@ function runEvent(
 ): RuntimeNotification {
   return {
     eventId: `e-${Math.random()}`,
-    protocolVersion: 1,
+    protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
     topic,
     scope: { workspacePath: "C:\\ws", sessionId, runId },
     resourceVersion: 1,

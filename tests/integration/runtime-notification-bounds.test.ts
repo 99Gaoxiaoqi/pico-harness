@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { encodeRuntimeFrame } from "../../src/daemon/protocol.js";
+import { encodeRuntimeFrame, LOCAL_RUNTIME_PROTOCOL_VERSION } from "../../src/daemon/protocol.js";
 import { WorkspaceRuntimeService } from "../../src/daemon/workspace-runtime-service.js";
 import { createRuntimeNotification } from "../../src/daemon/protocol.js";
 
@@ -54,7 +54,11 @@ test("oversized durable notifications are bounded before entering replay", async
   );
   const first = replay.events[0]!;
   assert.doesNotThrow(() =>
-    encodeRuntimeFrame({ kind: "event", protocolVersion: 1, event: first }),
+    encodeRuntimeFrame({
+      kind: "event",
+      protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
+      event: first,
+    }),
   );
   assert.match(JSON.stringify(first.payload), /truncated/u);
 });
