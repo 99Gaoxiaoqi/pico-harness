@@ -1,4 +1,4 @@
-import { realpath } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -602,15 +602,18 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
     if (!connection || !registration) {
       throw new RuntimeClientError("RUNTIME_DISCONNECTED", "本机 Runtime daemon 连接已断开", true);
     }
+    let disconnectCause: unknown;
     try {
       // 新 daemon 在响应刷出后进入排空；旧 daemon 可能已经接受关停并退出，却在
-      // 客户端读到响应前断开。后者只在确认旧进程、registration 与升级锁均退出
-      // 后视为成功，避免把仍存活的旧 daemon 误判成可升级。
+      // 客户端读到响应前断开。无论收到成功响应还是兼容旧端断连，都必须确认旧
+      // 进程、registration 与升级锁均退出，避免把仍持有 Session lease 的旧端
+      // 误判成可升级。
       await connection.requestRegistered("runtime.shutdown", {});
     } catch (error) {
       if (!isShutdownDisconnect(error)) throw error;
-      await this.confirmDisconnectedShutdown(registration, error);
+      disconnectCause = error;
     }
+    await this.confirmShutdownCompletion(registration, disconnectCause);
   }
 
   async open(): Promise<void> {
@@ -753,9 +756,9 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
     this.disconnectListener?.();
   }
 
-  private async confirmDisconnectedShutdown(
+  private async confirmShutdownCompletion(
     registration: HostRegistration,
-    cause: unknown,
+    cause?: unknown,
   ): Promise<void> {
     const capability = await resolveStorageRoot({ path: this.rootPath, kind: "interactive" });
     const controlDirectory = join(resolveRootControlNamespace(), capability.rootId);
@@ -768,7 +771,7 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
       const currentRegistration = await readHostRegistration(controlDirectory);
       const processExited = !isProcessAlive(registration.pid);
       const registrationExited = currentRegistration?.hostEpoch !== registration.hostEpoch;
-      const legacyLockExited = !existsSync(legacyLockPath);
+      const legacyLockExited = await legacyLockReleasedBy(legacyLockPath, registration.pid);
       if (processExited && registrationExited && legacyLockExited) return;
       lastState = `pidExited=${processExited}, registrationExited=${registrationExited}, legacyLockExited=${legacyLockExited}`;
       await sleep(
@@ -777,7 +780,7 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
     } while (performance.now() < deadline);
     throw new RuntimeClientError(
       "RUNTIME_SHUTDOWN_UNCONFIRMED",
-      `Runtime daemon 断连后仍未完成关停确认（PID ${registration.pid}；${lastState}）`,
+      `Runtime daemon 响应关停后仍未完成退出确认（PID ${registration.pid}；${lastState}）`,
       true,
       { cause },
     );
@@ -805,6 +808,29 @@ function isProcessAlive(pid: number): boolean {
       error !== null &&
       "code" in error &&
       (error as { code?: unknown }).code === "EPERM"
+    );
+  }
+}
+
+async function legacyLockReleasedBy(lockPath: string, previousPid: number): Promise<boolean> {
+  if (!existsSync(lockPath)) return true;
+  try {
+    const owner: unknown = JSON.parse(await readFile(join(lockPath, "owner.json"), "utf8"));
+    return (
+      typeof owner === "object" &&
+      owner !== null &&
+      "pid" in owner &&
+      typeof (owner as { pid?: unknown }).pid === "number" &&
+      (owner as { pid: number }).pid !== previousPid
+    );
+  } catch (error) {
+    // 锁目录并发释放后的 ENOENT 等价于旧 owner 已退出；其他不可读状态保持
+    // fail-closed，由有界确认窗口继续重试而不是误判成功。
+    return (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      (error as { code?: unknown }).code === "ENOENT"
     );
   }
 }
