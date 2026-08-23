@@ -69,6 +69,18 @@ export interface RuntimeTranscriptProjectedItem {
   readonly payload: unknown;
 }
 
+/** UTF-8-safe range of the canonical JSON encoding of a projected item's payload. */
+export interface RuntimeTranscriptProjectedItemFragment {
+  readonly itemId: string;
+  readonly itemRevision: number;
+  readonly positionSequence: number;
+  readonly positionOrdinal: number;
+  readonly byteOffset: number;
+  readonly byteLength: number;
+  readonly totalBytes: number;
+  readonly json: string;
+}
+
 export interface RuntimeTranscriptProjectionCursor {
   readonly historyEpoch: string;
   readonly projectorVersion: typeof RUNTIME_TRANSCRIPT_PROJECTOR_VERSION;
@@ -89,6 +101,7 @@ export interface RuntimeTranscriptProjectionPageOptions {
 export interface RuntimeTranscriptProjectionPage {
   readonly watermark: RuntimeTranscriptProjectionWatermark;
   readonly items: readonly RuntimeTranscriptProjectedItem[];
+  readonly fragments?: readonly RuntimeTranscriptProjectedItemFragment[];
   readonly nextCursor?: RuntimeTranscriptProjectionCursor;
 }
 
@@ -119,6 +132,7 @@ export interface RuntimeTranscriptAdvancePage {
   readonly after: RuntimeTranscriptProjectionWatermark;
   readonly through: RuntimeTranscriptProjectionWatermark;
   readonly changes: readonly RuntimeTranscriptProjectionChange[];
+  readonly fragments?: readonly RuntimeTranscriptProjectedItemFragment[];
   readonly nextCursor?: RuntimeTranscriptChangeCursor;
 }
 

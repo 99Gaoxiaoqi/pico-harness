@@ -7,6 +7,7 @@ import type {
   RuntimeSession,
   RuntimeTranscriptAdvanceCursor,
   RuntimeTranscriptChange,
+  RuntimeTranscriptItemFragment,
   RuntimeTranscriptItemRecord,
   RuntimeTranscriptPageCursor,
   RuntimeTranscriptWatermark,
@@ -18,6 +19,7 @@ import type {
   RuntimeTranscriptAdvancePage,
   RuntimeTranscriptAdvancePageOptions,
   RuntimeTranscriptProjectionCursor,
+  RuntimeTranscriptProjectedItemFragment,
   RuntimeTranscriptProjectionPage,
   RuntimeTranscriptProjectionPageOptions,
   RuntimeTranscriptProjectionWatermark,
@@ -88,6 +90,9 @@ export class SqliteSessionContinuitySource implements SessionContinuityDataSourc
         session: metadata.session,
         watermark: watermark(page.watermark),
         durableTail: page.items.map(itemRecord),
+        ...(page.fragments?.length
+          ? { durableTailFragments: page.fragments.map(itemFragment) }
+          : {}),
         activeOverlay,
         queuedInputs: metadata.queuedInputs,
         ...(metadata.activeRun ? { activeRun: metadata.activeRun } : {}),
@@ -114,6 +119,7 @@ export class SqliteSessionContinuitySource implements SessionContinuityDataSourc
       return {
         watermark: watermark(page.watermark),
         items: page.items.map(itemRecord),
+        ...(page.fragments?.length ? { fragments: page.fragments.map(itemFragment) } : {}),
         ...(page.nextCursor ? { nextCursor: pageCursor(page.nextCursor) } : {}),
       };
     } finally {
@@ -148,6 +154,7 @@ export class SqliteSessionContinuitySource implements SessionContinuityDataSourc
                   itemRevision: change.itemRevision,
                 },
         ),
+        ...(page.fragments?.length ? { fragments: page.fragments.map(itemFragment) } : {}),
         ...(page.nextCursor ? { nextCursor: advanceCursor(page.nextCursor) } : {}),
       };
     } finally {
@@ -208,6 +215,21 @@ function itemRecord(value: {
     positionSequence: value.positionSequence,
     positionOrdinal: value.positionOrdinal,
     item: value.payload as RuntimeTranscriptItemRecord["item"],
+  };
+}
+
+function itemFragment(
+  value: RuntimeTranscriptProjectedItemFragment,
+): RuntimeTranscriptItemFragment {
+  return {
+    itemId: value.itemId,
+    itemRevision: value.itemRevision,
+    positionSequence: value.positionSequence,
+    positionOrdinal: value.positionOrdinal,
+    byteOffset: value.byteOffset,
+    byteLength: value.byteLength,
+    totalBytes: value.totalBytes,
+    json: value.json,
   };
 }
 
