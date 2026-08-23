@@ -27,6 +27,11 @@ interface StoredBrowserUrlState {
 
 type BrowserUrlWriter = (path: string, state: StoredBrowserUrlState) => Promise<void>;
 
+export interface BrowserSessionStateMutation {
+  readonly generationFloor: number;
+  readonly deleteUrl?: boolean;
+}
+
 export class BrowserUrlStore {
   readonly filePath: string;
   readonly #urls: Map<string, string>;
@@ -97,13 +102,26 @@ export class BrowserUrlStore {
 
   setGenerationFloor(sessionId: string, generationFloor: number): number | undefined {
     this.#requireSafeGenerationState();
-    if (!Number.isSafeInteger(generationFloor) || generationFloor < 0) {
-      throw new RangeError("浏览器视口代际必须是非负安全整数");
-    }
+    this.#validateGenerationFloor(generationFloor);
     if (generationFloor <= (this.#generationFloors.get(sessionId) ?? 0)) return undefined;
     this.#generationFloors.set(sessionId, generationFloor);
     this.#revision++;
     this.#schedule(this.#writeDebounceMs);
+    return this.#revision;
+  }
+
+  mutateSession(sessionId: string, mutation: BrowserSessionStateMutation): number {
+    this.#requireSafeGenerationState();
+    this.#validateGenerationFloor(mutation.generationFloor);
+    const currentFloor = this.#generationFloors.get(sessionId) ?? 0;
+    const advancesFloor = mutation.generationFloor > currentFloor;
+    const deletesUrl = Boolean(mutation.deleteUrl && this.#urls.has(sessionId));
+    if (advancesFloor) this.#generationFloors.set(sessionId, mutation.generationFloor);
+    if (mutation.deleteUrl) this.#urls.delete(sessionId);
+    if (advancesFloor || deletesUrl) {
+      this.#revision++;
+      this.#schedule(this.#writeDebounceMs);
+    }
     return this.#revision;
   }
 
@@ -172,6 +190,12 @@ export class BrowserUrlStore {
   #requireSafeGenerationState(): void {
     if (!this.#generationStateSafe) {
       throw new Error("浏览器持久状态损坏；为避免代际回退，已拒绝当前操作");
+    }
+  }
+
+  #validateGenerationFloor(generationFloor: number): void {
+    if (!Number.isSafeInteger(generationFloor) || generationFloor < 0) {
+      throw new RangeError("浏览器视口代际必须是非负安全整数");
     }
   }
 }
