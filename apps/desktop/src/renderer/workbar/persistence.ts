@@ -1,8 +1,15 @@
+import { createWorkbarToolTab, isStaticWorkbarToolTab } from "./registry.js";
 import { createWorkbarState } from "./state.js";
-import { isPersistedWorkbarTabKind } from "./types.js";
-import type { PersistedWorkbarTabKind, WorkbarState, WorkbarTab } from "./types.js";
+import {
+  isPersistedWorkbarTabKind,
+  isWorkbarDock,
+  type PersistedWorkbarTabKind,
+  type WorkbarDock,
+  type WorkbarState,
+  type WorkbarTab,
+} from "./types.js";
 
-export const WORKBAR_PERSISTENCE_VERSION = 1;
+export const WORKBAR_PERSISTENCE_VERSION = 2;
 export const WORKBAR_STORAGE_KEY = "pico.desktop.workbar";
 
 export interface WorkbarStorage {
@@ -16,33 +23,56 @@ interface PersistedWorkbarTab {
   readonly label: string;
 }
 
-interface PersistedWorkbarStateV1 {
-  readonly version: typeof WORKBAR_PERSISTENCE_VERSION;
-  readonly layout: {
-    readonly collapsed: boolean;
-    readonly width: number;
-  };
+interface PersistedDockState {
   readonly tabs: readonly PersistedWorkbarTab[];
   readonly activeTabId: string | null;
   readonly mruTabIds: readonly string[];
 }
 
+interface PersistedWorkbarStateV2 {
+  readonly version: 2;
+  readonly layout: {
+    readonly focusedDock: WorkbarDock;
+    readonly right: { readonly collapsed: boolean; readonly width: number };
+    readonly bottom: { readonly collapsed: boolean; readonly height: number };
+  };
+  readonly docks: Readonly<Record<WorkbarDock, PersistedDockState>>;
+}
+
+interface PersistedWorkbarStateV1 {
+  readonly version: 1;
+  readonly layout: { readonly collapsed: boolean; readonly width: number };
+  readonly tabs: readonly LegacyPersistedTab[];
+  readonly activeTabId: string | null;
+  readonly mruTabIds: readonly string[];
+}
+
+interface LegacyPersistedTab {
+  readonly id: string;
+  readonly kind: "overview" | "review" | "context";
+  readonly label: string;
+}
+
 export function serializeWorkbarState(state: WorkbarState): string {
-  const tabs = state.tabs.filter(isPersistableTab);
-  const persistedIds = new Set(tabs.map((tab) => tab.id));
-  const mruTabIds = state.mruTabIds.filter((tabId) => persistedIds.has(tabId));
-  const activeTabId = persistedIds.has(state.activeTabId ?? "")
-    ? state.activeTabId
-    : (mruTabIds[0] ?? tabs[0]?.id ?? null);
-  const payload: PersistedWorkbarStateV1 = {
+  const payload: PersistedWorkbarStateV2 = {
     version: WORKBAR_PERSISTENCE_VERSION,
     layout: {
-      collapsed: state.collapsed,
-      width: state.width,
+      focusedDock: state.focusedDock,
+      right: { collapsed: state.docks.right.collapsed, width: state.rightWidth },
+      bottom: { collapsed: state.docks.bottom.collapsed, height: state.bottomHeight },
     },
-    tabs,
-    activeTabId,
-    mruTabIds,
+    docks: {
+      right: serializeDock(
+        state.docks.right.tabs,
+        state.docks.right.activeTabId,
+        state.docks.right.mruTabIds,
+      ),
+      bottom: serializeDock(
+        state.docks.bottom.tabs,
+        state.docks.bottom.activeTabId,
+        state.docks.bottom.mruTabIds,
+      ),
+    },
   };
   return JSON.stringify(payload);
 }
@@ -53,16 +83,9 @@ export function parseWorkbarState(
 ): WorkbarState {
   try {
     const candidate: unknown = JSON.parse(serialized);
-    if (!isPersistedWorkbarState(candidate)) {
-      return fallback;
-    }
-    return createWorkbarState({
-      tabs: candidate.tabs,
-      activeTabId: candidate.activeTabId,
-      mruTabIds: candidate.mruTabIds,
-      collapsed: candidate.layout.collapsed,
-      width: candidate.layout.width,
-    });
+    if (isPersistedWorkbarStateV2(candidate)) return restoreV2(candidate);
+    if (isPersistedWorkbarStateV1(candidate)) return migrateV1(candidate);
+    return fallback;
   } catch {
     return fallback;
   }
@@ -94,43 +117,150 @@ export function saveWorkbarState(
   }
 }
 
-function isPersistableTab(tab: WorkbarTab): tab is PersistedWorkbarTab {
-  return isPersistedWorkbarTabKind(tab.kind);
+function serializeDock(
+  allTabs: readonly WorkbarTab[],
+  requestedActiveTabId: string | null,
+  requestedMru: readonly string[],
+): PersistedDockState {
+  const tabs = allTabs.filter(isPersistableTab);
+  const persistedIds = new Set(tabs.map((tab) => tab.id));
+  const mruTabIds = requestedMru.filter((tabId) => persistedIds.has(tabId));
+  const activeTabId = persistedIds.has(requestedActiveTabId ?? "")
+    ? requestedActiveTabId
+    : (mruTabIds[0] ?? tabs[0]?.id ?? null);
+  return { tabs, activeTabId, mruTabIds };
 }
 
-function isPersistedWorkbarState(value: unknown): value is PersistedWorkbarStateV1 {
-  if (!isRecord(value) || value.version !== WORKBAR_PERSISTENCE_VERSION) {
+function restoreV2(value: PersistedWorkbarStateV2): WorkbarState {
+  return createWorkbarState({
+    docks: {
+      right: {
+        ...value.docks.right,
+        collapsed: value.layout.right.collapsed,
+      },
+      bottom: {
+        ...value.docks.bottom,
+        collapsed: value.layout.bottom.collapsed,
+      },
+    },
+    focusedDock: value.layout.focusedDock,
+    rightWidth: value.layout.right.width,
+    bottomHeight: value.layout.bottom.height,
+  });
+}
+
+function migrateV1(value: PersistedWorkbarStateV1): WorkbarState {
+  const mappedTabs: WorkbarTab[] = [];
+  const mappedIds = new Set<string>();
+  for (const legacy of value.tabs) {
+    const tab =
+      legacy.kind === "review" ? createWorkbarToolTab("review") : createWorkbarToolTab("inspector");
+    if (!mappedIds.has(tab.id)) {
+      mappedIds.add(tab.id);
+      mappedTabs.push(tab);
+    }
+  }
+  const mapLegacyId = (id: string | null): string | null => {
+    if (id === null) return null;
+    const legacy = value.tabs.find((tab) => tab.id === id);
+    if (!legacy) return null;
+    return legacy.kind === "review" ? "review" : "inspector";
+  };
+  const mappedMru = uniqueStrings(
+    value.mruTabIds.map(mapLegacyId).filter((tabId): tabId is string => tabId !== null),
+  );
+  return createWorkbarState({
+    docks: {
+      right: {
+        tabs: mappedTabs,
+        activeTabId: mapLegacyId(value.activeTabId),
+        mruTabIds: mappedMru,
+        collapsed: value.layout.collapsed,
+      },
+      bottom: { collapsed: true },
+    },
+    focusedDock: "right",
+    rightWidth: value.layout.width,
+  });
+}
+
+function isPersistableTab(tab: WorkbarTab): tab is PersistedWorkbarTab {
+  return isStaticWorkbarToolTab(tab) && isPersistedWorkbarTabKind(tab.kind);
+}
+
+function isPersistedWorkbarStateV2(value: unknown): value is PersistedWorkbarStateV2 {
+  if (!isRecord(value) || value.version !== WORKBAR_PERSISTENCE_VERSION) return false;
+  if (
+    !isRecord(value.layout) ||
+    !isWorkbarDock(value.layout.focusedDock) ||
+    !isPersistedRightLayout(value.layout.right) ||
+    !isPersistedBottomLayout(value.layout.bottom) ||
+    !isRecord(value.docks)
+  ) {
     return false;
   }
+  if (!isPersistedDockState(value.docks.right) || !isPersistedDockState(value.docks.bottom)) {
+    return false;
+  }
+  const rightIds = new Set(value.docks.right.tabs.map((tab) => tab.id));
+  return !value.docks.bottom.tabs.some((tab) => rightIds.has(tab.id));
+}
+
+function isPersistedWorkbarStateV1(value: unknown): value is PersistedWorkbarStateV1 {
   if (
+    !isRecord(value) ||
+    value.version !== 1 ||
     !isRecord(value.layout) ||
     typeof value.layout.collapsed !== "boolean" ||
     typeof value.layout.width !== "number" ||
-    !Number.isFinite(value.layout.width)
+    !Number.isFinite(value.layout.width) ||
+    !Array.isArray(value.tabs) ||
+    !value.tabs.every(isLegacyPersistedTab)
   ) {
-    return false;
-  }
-  if (!Array.isArray(value.tabs) || !value.tabs.every(isPersistedWorkbarTab)) {
     return false;
   }
   const tabIds = new Set(value.tabs.map((tab) => tab.id));
-  if (tabIds.size !== value.tabs.length) {
+  return (
+    tabIds.size === value.tabs.length &&
+    (value.activeTabId === null ||
+      (typeof value.activeTabId === "string" && tabIds.has(value.activeTabId))) &&
+    Array.isArray(value.mruTabIds) &&
+    value.mruTabIds.every((tabId) => typeof tabId === "string" && tabIds.has(tabId)) &&
+    new Set(value.mruTabIds).size === value.mruTabIds.length
+  );
+}
+
+function isPersistedDockState(value: unknown): value is PersistedDockState {
+  if (!isRecord(value) || !Array.isArray(value.tabs) || !value.tabs.every(isPersistedWorkbarTab)) {
     return false;
   }
-  if (
-    value.activeTabId !== null &&
-    (typeof value.activeTabId !== "string" || !tabIds.has(value.activeTabId))
-  ) {
-    return false;
-  }
-  if (
-    !Array.isArray(value.mruTabIds) ||
-    !value.mruTabIds.every((tabId) => typeof tabId === "string" && tabIds.has(tabId)) ||
-    new Set(value.mruTabIds).size !== value.mruTabIds.length
-  ) {
-    return false;
-  }
-  return true;
+  const tabIds = new Set(value.tabs.map((tab) => tab.id));
+  return (
+    tabIds.size === value.tabs.length &&
+    (value.activeTabId === null ||
+      (typeof value.activeTabId === "string" && tabIds.has(value.activeTabId))) &&
+    Array.isArray(value.mruTabIds) &&
+    value.mruTabIds.every((tabId) => typeof tabId === "string" && tabIds.has(tabId)) &&
+    new Set(value.mruTabIds).size === value.mruTabIds.length
+  );
+}
+
+function isPersistedRightLayout(value: unknown): value is { collapsed: boolean; width: number } {
+  return (
+    isRecord(value) &&
+    typeof value.collapsed === "boolean" &&
+    typeof value.width === "number" &&
+    Number.isFinite(value.width)
+  );
+}
+
+function isPersistedBottomLayout(value: unknown): value is { collapsed: boolean; height: number } {
+  return (
+    isRecord(value) &&
+    typeof value.collapsed === "boolean" &&
+    typeof value.height === "number" &&
+    Number.isFinite(value.height)
+  );
 }
 
 function isPersistedWorkbarTab(value: unknown): value is PersistedWorkbarTab {
@@ -139,9 +269,25 @@ function isPersistedWorkbarTab(value: unknown): value is PersistedWorkbarTab {
     typeof value.id === "string" &&
     value.id.length > 0 &&
     isPersistedWorkbarTabKind(value.kind) &&
+    value.id === value.kind &&
     typeof value.label === "string" &&
     value.label.length > 0
   );
+}
+
+function isLegacyPersistedTab(value: unknown): value is LegacyPersistedTab {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    value.id.length > 0 &&
+    (value.kind === "overview" || value.kind === "review" || value.kind === "context") &&
+    typeof value.label === "string" &&
+    value.label.length > 0
+  );
+}
+
+function uniqueStrings(values: readonly string[]): readonly string[] {
+  return [...new Set(values)];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
