@@ -11,6 +11,7 @@ import type { RuntimeEvent } from "./runtime-event.js";
  */
 
 export const RUNTIME_EVENT_STORE_MAX_PAGE_SIZE = 250;
+export const RUNTIME_TRANSCRIPT_PROJECTOR_VERSION = 1 as const;
 
 export interface RuntimeSessionManifest {
   readonly schemaVersion: 2;
@@ -51,6 +52,74 @@ export interface RuntimeEventStoreAppendResult {
   readonly inserted: boolean;
   readonly cursor: SessionCursor;
   readonly committedAt: string;
+  readonly transcriptWatermark?: RuntimeTranscriptProjectionWatermark;
+}
+
+export interface RuntimeTranscriptProjectionWatermark {
+  readonly historyEpoch: string;
+  readonly projectorVersion: typeof RUNTIME_TRANSCRIPT_PROJECTOR_VERSION;
+  readonly throughSequence: number;
+}
+
+export interface RuntimeTranscriptProjectedItem {
+  readonly itemId: string;
+  readonly itemRevision: number;
+  readonly positionSequence: number;
+  readonly positionOrdinal: number;
+  readonly payload: unknown;
+}
+
+export interface RuntimeTranscriptProjectionCursor {
+  readonly historyEpoch: string;
+  readonly projectorVersion: typeof RUNTIME_TRANSCRIPT_PROJECTOR_VERSION;
+  readonly throughSequence: number;
+  readonly positionSequence: number;
+  readonly positionOrdinal: number;
+  readonly byteOffset: number;
+}
+
+export interface RuntimeTranscriptProjectionPageOptions {
+  readonly sessionId: string;
+  readonly through?: RuntimeTranscriptProjectionWatermark;
+  readonly cursor?: RuntimeTranscriptProjectionCursor;
+  readonly maxBytes: number;
+  readonly limit?: number;
+}
+
+export interface RuntimeTranscriptProjectionPage {
+  readonly watermark: RuntimeTranscriptProjectionWatermark;
+  readonly items: readonly RuntimeTranscriptProjectedItem[];
+  readonly nextCursor?: RuntimeTranscriptProjectionCursor;
+}
+
+export interface RuntimeTranscriptChangeCursor {
+  readonly historyEpoch: string;
+  readonly projectorVersion: typeof RUNTIME_TRANSCRIPT_PROJECTOR_VERSION;
+  readonly fromSequence: number;
+  readonly throughSequence: number;
+  readonly changeSequence: number;
+  readonly ordinal: number;
+  readonly byteOffset: number;
+}
+
+export type RuntimeTranscriptProjectionChange =
+  | { readonly op: "upsert"; readonly record: RuntimeTranscriptProjectedItem }
+  | { readonly op: "remove"; readonly itemId: string; readonly itemRevision: number };
+
+export interface RuntimeTranscriptAdvancePageOptions {
+  readonly sessionId: string;
+  readonly after: RuntimeTranscriptProjectionWatermark;
+  readonly through: RuntimeTranscriptProjectionWatermark;
+  readonly cursor?: RuntimeTranscriptChangeCursor;
+  readonly maxBytes: number;
+  readonly limit?: number;
+}
+
+export interface RuntimeTranscriptAdvancePage {
+  readonly after: RuntimeTranscriptProjectionWatermark;
+  readonly through: RuntimeTranscriptProjectionWatermark;
+  readonly changes: readonly RuntimeTranscriptProjectionChange[];
+  readonly nextCursor?: RuntimeTranscriptChangeCursor;
 }
 
 /**
