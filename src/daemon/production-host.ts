@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { createCliSessionId } from "../cli/session-resolver.js";
 import { globalSessionManager } from "../engine/session.js";
 import { AgentRuntime, type RunAgentCliResult } from "../runtime/agent-runtime.js";
+import { currentRuntimeRun } from "../runtime/runtime-run.js";
 import type { PlanHandoff } from "../engine/plan-handoff.js";
 import { PlanCoordinator } from "../plan/coordinator.js";
 import type { PlanProjection } from "../plan/contract.js";
@@ -43,7 +44,8 @@ import {
   type DesktopInteractionEvent,
 } from "./desktop-interaction-broker.js";
 import { DesktopReporter, type DesktopReporterEvent } from "./desktop-reporter.js";
-import { ToolLiveCoalescer } from "./tool-live-coalescer.js";
+import type { SessionSubscriptionRegistry } from "./session-subscription-owner.js";
+import { PersistentActiveOverlay } from "./session-active-overlay.js";
 import { DesktopRuntimeService } from "./desktop-runtime-service.js";
 import { DesktopAutomationService } from "./desktop-automation-service.js";
 import { buildApprovalRequestedPayload } from "./approval-wire.js";
@@ -116,6 +118,10 @@ export interface ProductionRuntimeServices {
   readonly trustStore: WorkspaceTrustStore;
   /** Binds the host lifecycle once the LocalDaemonHost exists. */
   attachHost(control: ProductionHostControl): void;
+  /** Binds the Runtime Host-owned Session live channel after Host Epoch exists. */
+  attachSessionSubscriptions(registry: SessionSubscriptionRegistry): void;
+  /** Flushes the in-memory Active Overlay before a subscription captures its bootstrap. */
+  flushSessionOverlay(workspacePath: string, sessionId: string): Promise<void>;
 }
 
 /**
@@ -195,6 +201,8 @@ export function createProductionRuntimeServices(
   const resolvedPrompts = new Map<string, InteractionScope>();
   let desktopResourceVersion = Date.now();
   const nextDesktopResourceVersion = () => ++desktopResourceVersion;
+  let sessionSubscriptions: SessionSubscriptionRegistry | undefined;
+  const activeOverlays = new Map<string, PersistentActiveOverlay>();
   const service: WorkspaceRuntimeService = new WorkspaceRuntimeService({
     registrationStore,
     env,
@@ -279,15 +287,74 @@ export function createProductionRuntimeServices(
             nextDesktopResourceVersion,
           );
         });
-        // 3-D Phase 1：tool.output 经 50ms 合流后进 run.live（防 per-chunk socket
-        // 洪泛）；完成/终态事件先冲刷对应缓冲再路由，输出增量永远先于完成标记。
-        const toolLive = new ToolLiveCoalescer((event) =>
-          publishDesktopReporterEvent(service, workspacePath, event, nextDesktopResourceVersion),
+        const overlayToolCallIds = new Map<string, string>();
+        const overlayAnchorSequences = new Map<string, number>();
+        const activeOverlay = new PersistentActiveOverlay(
+          {
+            async upsert(input) {
+              const runtimeRun = currentRuntimeRun();
+              if (
+                !runtimeRun ||
+                runtimeRun.runId !== context.run.runId ||
+                runtimeRun.sessionId !== targetSessionId
+              ) {
+                throw new Error("Active Overlay 已离开对应 Runtime Run 上下文");
+              }
+              let anchorSequence = overlayAnchorSequences.get(input.partialId);
+              if (anchorSequence === undefined) {
+                anchorSequence = (await runtimeRun.store.readTranscriptWatermark(targetSessionId))
+                  .throughSequence;
+                overlayAnchorSequences.set(input.partialId, anchorSequence);
+              }
+              const snapshot = await runtimeRun.upsertPartialSnapshot(
+                input.partialId,
+                input.kind,
+                input.expectedVersion,
+                { ...input.payload, anchorSequence },
+              );
+              return { version: snapshot.version };
+            },
+          },
+          {
+            publishDelta(delta) {
+              sessionSubscriptions?.publishSessionDelta({
+                workspacePath,
+                sessionId: targetSessionId,
+                runId: delta.runId,
+                turnId: delta.turnId,
+                itemId: delta.itemId,
+                streamId: delta.streamId,
+                kind: delta.kind,
+                startOffsetBytes: delta.startOffsetBytes,
+                text: delta.text,
+                ...(delta.stream ? { stream: delta.stream } : {}),
+              });
+            },
+            publishContinuityDegraded(reason) {
+              sessionSubscriptions?.publishContinuityDegraded(
+                workspacePath,
+                targetSessionId,
+                reason,
+              );
+            },
+          },
         );
+        const activeOverlayKey = sessionOverlayKey(workspacePath, targetSessionId);
+        activeOverlays.set(activeOverlayKey, activeOverlay);
         const reporter = new DesktopReporter({
           runId: context.run.runId,
           sessionId: targetSessionId,
-          publish: (event) => toolLive.push(event),
+          publish: (event) => {
+            const handledByOverlay = persistReporterOverlayDelta(
+              activeOverlay,
+              overlayToolCallIds,
+              event,
+            );
+            if (!handledByOverlay) {
+              sessionSubscriptions?.publishReporterEvent(workspacePath, event);
+            }
+            publishDesktopReporterEvent(service, workspacePath, event, nextDesktopResourceVersion);
+          },
         });
         for (const steer of context.drainSteers()) runtimeState.steerQueue.push(steer);
         const unsubscribeSteer = context.onSteer((message) =>
@@ -424,7 +491,18 @@ export function createProductionRuntimeServices(
           broker.close();
           removeBrokerInteractions(pendingApprovals, broker);
           removeBrokerInteractions(pendingPrompts, broker);
-          toolLive.dispose();
+          await activeOverlay.flush();
+          try {
+            await currentRuntimeRun()?.clearPartials();
+          } catch (error) {
+            logger.warn(
+              { workspacePath, sessionId: targetSessionId, runId: context.run.runId, err: error },
+              "Run 已结束但 Active Overlay 残留清理失败",
+            );
+          }
+          if (activeOverlays.get(activeOverlayKey) === activeOverlay) {
+            activeOverlays.delete(activeOverlayKey);
+          }
           await runtimeState.dispose();
         }
       } finally {
@@ -538,6 +616,8 @@ export function createProductionRuntimeServices(
     credentialVault,
     pluginRuntimeSnapshotRegistry,
     ownsPluginRuntimeSnapshotRegistry,
+    onTranscriptAdvanced: (workspacePath, sessionId) =>
+      sessionSubscriptions?.publishTranscriptAdvanced(workspacePath, sessionId),
     planControl: {
       respond: async (input) => {
         const workspacePath = await canonicalizeWorkspacePath(input.workspacePath);
@@ -834,7 +914,17 @@ export function createProductionRuntimeServices(
     credentialVault,
     trustStore,
     attachHost,
+    attachSessionSubscriptions(registry) {
+      sessionSubscriptions = registry;
+    },
+    async flushSessionOverlay(workspacePath, sessionId) {
+      await activeOverlays.get(sessionOverlayKey(workspacePath, sessionId))?.flush();
+    },
   };
+}
+
+function sessionOverlayKey(workspacePath: string, sessionId: string): string {
+  return `${workspacePath}\u0000${sessionId}`;
 }
 
 /**
@@ -1248,320 +1338,90 @@ export function publishDesktopMemoryProposal(
   );
 }
 
+function persistReporterOverlayDelta(
+  overlay: PersistentActiveOverlay,
+  toolCallIds: Map<string, string>,
+  event: DesktopReporterEvent,
+): boolean {
+  const turn =
+    typeof event.payload["turn"] === "number" && Number.isSafeInteger(event.payload["turn"])
+      ? event.payload["turn"]
+      : 0;
+  const stableTurnId = `turn:${event.runId}:${turn}`;
+  if (event.type === "assistant.delta" || event.type === "assistant.reasoning.delta") {
+    const text = firstString(event.payload["delta"]);
+    if (!text || !event.sessionId) return true;
+    const thinking = event.type === "assistant.reasoning.delta";
+    void overlay.append({
+      sessionId: event.sessionId,
+      runId: event.runId,
+      turnId: stableTurnId,
+      itemId: `message:${stableTurnId}:${thinking ? "thinking" : "assistant"}`,
+      streamId: `${thinking ? "thinking" : "assistant"}:live:${event.runId}:${turn}`,
+      kind: thinking ? "thinking" : "text",
+      text,
+      anchorSequence: 0,
+    });
+    return true;
+  }
+  if (event.type === "tool.started") {
+    const providerCallId = firstString(event.payload["providerCallId"]);
+    const canonicalStart = event.payload["canonicalTranscriptStart"];
+    const toolCallId =
+      isJsonObject(canonicalStart) && typeof canonicalStart["toolCallId"] === "string"
+        ? canonicalStart["toolCallId"]
+        : undefined;
+    if (providerCallId && toolCallId) toolCallIds.set(providerCallId, toolCallId);
+    void overlay.complete(`thinking:live:${event.runId}:${turn}`);
+    return false;
+  }
+  if (event.type === "tool.output") {
+    const text = firstString(event.payload["chunk"]);
+    const providerCallId = firstString(event.payload["providerCallId"]);
+    const toolCallId = providerCallId ? toolCallIds.get(providerCallId) : undefined;
+    if (!text || !event.sessionId || !toolCallId) return false;
+    const stream = event.payload["stream"] === "stderr" ? "stderr" : "stdout";
+    void overlay.append({
+      sessionId: event.sessionId,
+      runId: event.runId,
+      turnId: stableTurnId,
+      itemId: `tool:${toolCallId}`,
+      streamId: `tool:live:${event.runId}:${toolCallId}:${stream}`,
+      kind: "toolOutput",
+      stream,
+      text,
+      anchorSequence: 0,
+    });
+    return true;
+  }
+  if (event.type === "assistant.message") {
+    void overlay.complete(`assistant:live:${event.runId}:${turn}`);
+    void overlay.complete(`thinking:live:${event.runId}:${turn}`);
+  } else if (event.type === "tool.completed") {
+    const result = event.payload["result"];
+    const providerCallId =
+      isJsonObject(result) && typeof result["toolCallId"] === "string"
+        ? result["toolCallId"]
+        : undefined;
+    const toolCallId = providerCallId
+      ? (toolCallIds.get(providerCallId) ?? providerCallId)
+      : undefined;
+    if (toolCallId) {
+      void overlay.complete(`tool:live:${event.runId}:${toolCallId}:stdout`);
+      void overlay.complete(`tool:live:${event.runId}:${toolCallId}:stderr`);
+    }
+  } else if (event.type === "run.finished" || event.type === "run.interrupted") {
+    void overlay.flush();
+  }
+  return false;
+}
+
 export function publishDesktopReporterEvent(
   service: WorkspaceRuntimeService,
   workspacePath: string,
   event: DesktopReporterEvent,
   nextResourceVersion: () => number,
 ): void {
-  if (event.type === "assistant.reasoning.delta") {
-    const delta = firstString(event.payload["delta"]);
-    if (!delta) return;
-    const turn =
-      typeof event.payload["turn"] === "number" && Number.isSafeInteger(event.payload["turn"])
-        ? event.payload["turn"]
-        : 0;
-    service.publishEphemeralNotification(
-      createRuntimeNotification({
-        topic: "run.live",
-        scope: {
-          workspacePath,
-          runId: event.runId,
-          ...(event.sessionId ? { sessionId: event.sessionId } : {}),
-        },
-        resourceVersion: nextResourceVersion(),
-        at: event.at,
-        payload: {
-          runId: event.runId,
-          item: {
-            kind: "thinking",
-            operation: "append",
-            streamId: liveReasoningStreamId(event.runId, turn),
-            turnId: runtimeTurnId(event.runId, turn),
-            delta,
-            ...(event.payload["truncated"] === true ? { truncated: true } : {}),
-          },
-        },
-      }),
-    );
-    return;
-  }
-  if (event.type === "assistant.delta") {
-    const delta = firstString(event.payload["delta"]);
-    if (!delta) return;
-    const turn =
-      typeof event.payload["turn"] === "number" && Number.isSafeInteger(event.payload["turn"])
-        ? event.payload["turn"]
-        : 0;
-    service.publishEphemeralNotification(
-      createRuntimeNotification({
-        topic: "run.live",
-        scope: {
-          workspacePath,
-          runId: event.runId,
-          ...(event.sessionId ? { sessionId: event.sessionId } : {}),
-        },
-        resourceVersion: nextResourceVersion(),
-        at: event.at,
-        payload: {
-          runId: event.runId,
-          item: {
-            kind: "assistantMessage",
-            operation: "append",
-            streamId: liveAssistantStreamId(event.runId, turn),
-            turnId: runtimeTurnId(event.runId, turn),
-            delta,
-            ...(event.payload["truncated"] === true ? { truncated: true } : {}),
-          },
-        },
-      }),
-    );
-    return;
-  }
-  if (
-    event.type === "assistant.suppressed" ||
-    event.type === "assistant.message" ||
-    event.type === "tool.started" ||
-    event.type === "run.interrupted" ||
-    event.type === "run.finished"
-  ) {
-    const turn =
-      typeof event.payload["turn"] === "number" && Number.isSafeInteger(event.payload["turn"])
-        ? event.payload["turn"]
-        : undefined;
-    service.publishEphemeralNotification(
-      createRuntimeNotification({
-        topic: "run.live",
-        scope: {
-          workspacePath,
-          runId: event.runId,
-          ...(event.sessionId ? { sessionId: event.sessionId } : {}),
-        },
-        resourceVersion: nextResourceVersion(),
-        at: event.at,
-        payload: {
-          runId: event.runId,
-          item: {
-            kind: "thinking",
-            operation:
-              event.type === "run.finished" ||
-              event.type === "assistant.message" ||
-              event.type === "tool.started"
-                ? "complete"
-                : "clear",
-            ...(turn === undefined ? {} : { streamId: liveReasoningStreamId(event.runId, turn) }),
-            ...(turn === undefined ? {} : { turnId: runtimeTurnId(event.runId, turn) }),
-          },
-        },
-      }),
-    );
-  }
-  if (event.type === "assistant.message") {
-    const turn =
-      typeof event.payload["turn"] === "number" && Number.isSafeInteger(event.payload["turn"])
-        ? event.payload["turn"]
-        : 0;
-    service.publishEphemeralNotification(
-      createRuntimeNotification({
-        topic: "run.live",
-        scope: {
-          workspacePath,
-          runId: event.runId,
-          ...(event.sessionId ? { sessionId: event.sessionId } : {}),
-        },
-        resourceVersion: nextResourceVersion(),
-        at: event.at,
-        payload: {
-          runId: event.runId,
-          item: {
-            kind: "assistantMessage",
-            operation: "complete",
-            streamId: liveAssistantStreamId(event.runId, turn),
-            turnId: runtimeTurnId(event.runId, turn),
-          },
-        },
-      }),
-    );
-  }
-  if (event.type === "assistant.suppressed" || event.type === "run.interrupted") {
-    const turn =
-      typeof event.payload["turn"] === "number" && Number.isSafeInteger(event.payload["turn"])
-        ? event.payload["turn"]
-        : undefined;
-    service.publishEphemeralNotification(
-      createRuntimeNotification({
-        topic: "run.live",
-        scope: {
-          workspacePath,
-          runId: event.runId,
-          ...(event.sessionId ? { sessionId: event.sessionId } : {}),
-        },
-        resourceVersion: nextResourceVersion(),
-        at: event.at,
-        payload: {
-          runId: event.runId,
-          item: {
-            kind: "assistantMessage",
-            operation: "clear",
-            ...(turn === undefined ? {} : { streamId: liveAssistantStreamId(event.runId, turn) }),
-            ...(turn === undefined ? {} : { turnId: runtimeTurnId(event.runId, turn) }),
-          },
-        },
-      }),
-    );
-  }
-  // --- 3-D Phase 1：工具卡片 / 子代理活动实时事件（run.live 扩展 kind）---
-  // live 是 overlay 不是第二事实源：durable timeline / canonical transcript 照旧
-  // （下方原路径不变），这里只补"实时看工具跑"的瞬时通道。
-  if (event.type === "tool.started") {
-    const providerCallId =
-      typeof event.payload["providerCallId"] === "string" ? event.payload["providerCallId"] : "";
-    const toolName = typeof event.payload["toolName"] === "string" ? event.payload["toolName"] : "";
-    if (providerCallId && toolName) {
-      const turn = numberOrUndefined(event.payload["turn"]);
-      // args 仅供 live 卡片展示（4KB 上限）；canonical 真值在 durable transcript。
-      const rawArgs = typeof event.payload["args"] === "string" ? event.payload["args"] : "";
-      const args = rawArgs.length > 4096 ? `${rawArgs.slice(0, 4096)}…` : rawArgs;
-      service.publishEphemeralNotification(
-        createRuntimeNotification({
-          topic: "run.live",
-          scope: {
-            workspacePath,
-            runId: event.runId,
-            ...(event.sessionId ? { sessionId: event.sessionId } : {}),
-          },
-          resourceVersion: nextResourceVersion(),
-          at: event.at,
-          payload: {
-            runId: event.runId,
-            item: {
-              kind: "tool",
-              toolCallId: providerCallId,
-              toolName,
-              operation: "started",
-              ...(args ? { args } : {}),
-              ...(turn === undefined ? {} : { turnId: runtimeTurnId(event.runId, turn) }),
-            },
-          },
-        }),
-      );
-    }
-  }
-  if (event.type === "tool.output") {
-    // 经 ToolLiveCoalescer 合流后到达；直接映射为 run.live append。
-    const providerCallId =
-      typeof event.payload["providerCallId"] === "string" ? event.payload["providerCallId"] : "";
-    const toolName = typeof event.payload["toolName"] === "string" ? event.payload["toolName"] : "";
-    const chunk = typeof event.payload["chunk"] === "string" ? event.payload["chunk"] : "";
-    const stream = event.payload["stream"] === "stderr" ? "stderr" : "stdout";
-    if (providerCallId && toolName && chunk) {
-      service.publishEphemeralNotification(
-        createRuntimeNotification({
-          topic: "run.live",
-          scope: {
-            workspacePath,
-            runId: event.runId,
-            ...(event.sessionId ? { sessionId: event.sessionId } : {}),
-          },
-          resourceVersion: nextResourceVersion(),
-          at: event.at,
-          payload: {
-            runId: event.runId,
-            item: {
-              kind: "tool",
-              toolCallId: providerCallId,
-              toolName,
-              operation: "append",
-              streamId: liveToolStreamId(event.runId, providerCallId, stream),
-              stream,
-              delta: chunk,
-              ...(event.payload["truncated"] === true ? { truncated: true } : {}),
-            },
-          },
-        }),
-      );
-    }
-    return;
-  }
-  if (event.type === "tool.completed") {
-    const envelope = event.payload["result"] as
-      | {
-          readonly toolCallId?: unknown;
-          readonly toolName?: unknown;
-          readonly status?: unknown;
-          readonly deliveryTruncated?: unknown;
-          readonly projection?: { readonly text?: unknown };
-        }
-      | undefined;
-    const toolCallId = typeof envelope?.toolCallId === "string" ? envelope.toolCallId : "";
-    const toolName = typeof envelope?.toolName === "string" ? envelope.toolName : "";
-    if (toolCallId && toolName) {
-      const status = typeof envelope?.status === "string" ? envelope.status : "";
-      const summary =
-        typeof envelope?.projection?.text === "string" ? envelope.projection.text : "";
-      service.publishEphemeralNotification(
-        createRuntimeNotification({
-          topic: "run.live",
-          scope: {
-            workspacePath,
-            runId: event.runId,
-            ...(event.sessionId ? { sessionId: event.sessionId } : {}),
-          },
-          resourceVersion: nextResourceVersion(),
-          at: event.at,
-          payload: {
-            runId: event.runId,
-            item: {
-              kind: "tool",
-              toolCallId,
-              toolName,
-              operation: status === "succeeded" ? "completed" : "failed",
-              ...(summary ? { summary } : {}),
-              ...(envelope?.deliveryTruncated === true ? { truncated: true } : {}),
-            },
-          },
-        }),
-      );
-    }
-  }
-  if (event.type === "subagent.activity") {
-    const activity = event.payload as Readonly<Record<string, unknown>>;
-    const activityId = typeof activity["activityId"] === "string" ? activity["activityId"] : "";
-    const status = typeof activity["status"] === "string" ? activity["status"] : "";
-    if (activityId && status) {
-      service.publishEphemeralNotification(
-        createRuntimeNotification({
-          topic: "run.live",
-          scope: {
-            workspacePath,
-            runId: event.runId,
-            ...(event.sessionId ? { sessionId: event.sessionId } : {}),
-          },
-          resourceVersion: nextResourceVersion(),
-          at: event.at,
-          payload: {
-            runId: event.runId,
-            item: {
-              kind: "subagent",
-              operation: "update",
-              activityId,
-              status,
-              ...optionalLiveString(activity["task"], "task"),
-              ...optionalLiveString(activity["agentName"], "agentName"),
-              ...(activity["mode"] === "explore" || activity["mode"] === "worker"
-                ? { mode: activity["mode"] }
-                : {}),
-              ...optionalLiveString(activity["currentAction"], "currentAction"),
-              ...optionalLiveString(activity["summary"], "summary"),
-            },
-          },
-        }),
-      );
-    }
-  }
-  // WorkspaceRuntime is the sole lifecycle authority. Stream chunks and final assistant/tool
-  // bodies already belong to the canonical transcript; without a separate bounded live channel,
-  // duplicating them into the durable timeline only creates an unbounded second event stream.
   if (
     [
       "run.started",
@@ -1572,8 +1432,9 @@ export function publishDesktopReporterEvent(
       "assistant.message",
       "tool.output",
     ].includes(event.type)
-  )
+  ) {
     return;
+  }
   service.publishDesktopNotification(
     createRuntimeNotification({
       topic: "run.timeline",
@@ -1584,41 +1445,9 @@ export function publishDesktopReporterEvent(
       },
       resourceVersion: nextResourceVersion(),
       at: event.at,
-      payload: {
-        runId: event.runId,
-        item: timelineItem(event),
-      },
+      payload: { runId: event.runId, item: timelineItem(event) },
     }),
   );
-}
-
-function liveReasoningStreamId(runId: string, turn: number): string {
-  return `thinking:live:${runId}:${turn}`;
-}
-
-function liveAssistantStreamId(runId: string, turn: number): string {
-  return `assistant:live:${runId}:${turn}`;
-}
-
-/** 3-D Phase 1：工具输出流的 live 标识（与文本流同走 buffer 合流/截断机制）。 */
-function liveToolStreamId(
-  runId: string,
-  providerCallId: string,
-  stream: "stdout" | "stderr",
-): string {
-  return `tool:live:${runId}:${providerCallId}:${stream}`;
-}
-
-function runtimeTurnId(runId: string, turn: number): string {
-  return `turn:${runId}:${turn}`;
-}
-
-function numberOrUndefined(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isSafeInteger(value) ? value : undefined;
-}
-
-function optionalLiveString(value: unknown, key: string): Readonly<Record<string, string>> {
-  return typeof value === "string" && value ? { [key]: value } : {};
 }
 
 function timelineItem(event: DesktopReporterEvent): JsonObject {

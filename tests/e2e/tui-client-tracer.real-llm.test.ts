@@ -20,7 +20,7 @@ import { TuiReporter } from "../../src/tui/tui-reporter.js";
  * 3-D Phase 3 E2E：TUI 客户端 tracer 挂真实 daemon + 真实模型完整回合。
  *
  * 模型路由：把用户级 Provider 配置复制到专属临时 pico-home，确保隔离 daemon
- * 使用同一 defaults.modelRouteId，走一次真实的 session.send → run.live 流式 →
+ * 使用同一 defaults.modelRouteId，走一次真实的 session.send → Session 帧流式 →
  * run.finished → transcript 对账闭环，再验证 /rename /status 的 slash 真实
  * 链路与 interrupt。
  *

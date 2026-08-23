@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { parseStrictRuntimeParams } from "@pico/protocol";
+import { isTerminalRunStatus, parseStrictRuntimeParams } from "@pico/protocol";
 import {
   readHostRegistration,
   resolveRootControlNamespace,
@@ -93,6 +93,7 @@ test("real daemon: /mcp status + enable/disable round trip over user mcp.json", 
     workspacePath: workspaceDir,
     reporter: new TuiReporter(),
   });
+  await runtime.start();
   const registry = createClientCommandRegistry({ runtime, workspacePath: workspaceDir });
   const run = async (text: string) => {
     const outcome = await processClientInput(text, registry, runtime);
@@ -137,7 +138,12 @@ test("real daemon: /mcp status + enable/disable round trip over user mcp.json", 
   assert.ok(sessionId, "send 应带回 sessionId");
   // 死端点 run 快速失败——等终态再执行 idle 命令（/add-dir availability 门，
   // 竞态下会拒"仅 idle"命令，造成假阴性）。
-  const settled = await waitForCondition(() => !runtime.running, 60_000);
+  const settled = await waitForCondition(async () => {
+    const { runs } = await client.request("runs.list", { workspacePath: workspaceDir, sessionId });
+    return (
+      runs.length > 0 && runs.every((run) => isTerminalRunStatus(run.status)) && !runtime.running
+    );
+  }, 60_000);
   assert.ok(settled, "死端点 run 应快速终态");
 
   const context = await client.request("session.context.get", {

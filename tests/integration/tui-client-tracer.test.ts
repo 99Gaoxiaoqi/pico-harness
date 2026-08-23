@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createRuntimeNotification, type RuntimeNotification } from "@pico/protocol";
+import {
+  createRuntimeNotification,
+  TRANSCRIPT_PROJECTOR_VERSION,
+  type RuntimeNotification,
+  type RuntimeSessionSubscriptionFrame,
+} from "@pico/protocol";
 import { TranscriptEventStore } from "../../src/presentation/transcript-event-store.js";
 import { DaemonEventReporter } from "../../src/tui/daemon-event-reporter.js";
 import { transcriptEventsFromRuntimeItems } from "../../src/tui/transcript-item-hydration.js";
@@ -33,11 +38,7 @@ function notification(
   }) as RuntimeNotification;
 }
 
-function liveItem(item: Record<string, unknown>, runId = "run_1"): RuntimeNotification {
-  return notification("run.live", {}, { runId, item }, runId);
-}
-
-test("daemon event reporter: text stream + tool card + run lifecycle drive TuiReporter", () => {
+test("daemon event reporter: durable run lifecycle drives TuiReporter", () => {
   const reporter = new TuiReporter();
   let runningChanges = 0;
   const adapter = new DaemonEventReporter({
@@ -50,101 +51,6 @@ test("daemon event reporter: text stream + tool card + run lifecycle drive TuiRe
   adapter.handleNotification(
     notification("run.started", {}, { run: { runId: "run_1", status: "running" } }),
   );
-  adapter.handleNotification(
-    liveItem({
-      kind: "thinking",
-      operation: "append",
-      streamId: "t1",
-      turnId: "turn1",
-      delta: "推理中",
-    }),
-  );
-  adapter.handleNotification(
-    liveItem({
-      kind: "assistantMessage",
-      operation: "append",
-      streamId: "a1",
-      turnId: "turn1",
-      delta: "你好",
-    }),
-  );
-  adapter.handleNotification(
-    liveItem({
-      kind: "assistantMessage",
-      operation: "append",
-      streamId: "a1",
-      turnId: "turn1",
-      delta: "，世界",
-    }),
-  );
-  let projection = reporter.getProjection();
-  const contents = projection.entries
-    .map(({ entry }) => entry)
-    .filter((entry) => entry.kind === "assistant")
-    .map((entry) => (entry as { content?: string }).content ?? "");
-  assert.ok(contents.includes("你好，世界"), `流式文本应拼接，实际 ${JSON.stringify(contents)}`);
-  assert.ok(
-    projection.entries.some(({ entry }) => entry.kind === "thinking"),
-    "thinking 流应入投影",
-  );
-
-  // 工具卡：started(带 args) → output → completed。
-  adapter.handleNotification(
-    liveItem({
-      kind: "tool",
-      toolCallId: "call_1",
-      toolName: "bash",
-      operation: "started",
-      args: "npm test",
-    }),
-  );
-  adapter.handleNotification(
-    liveItem({
-      kind: "tool",
-      toolCallId: "call_1",
-      toolName: "bash",
-      operation: "append",
-      streamId: "tool:live:run_1:call_1:stdout",
-      stream: "stdout",
-      delta: "ok 1\n",
-    }),
-  );
-  adapter.handleNotification(
-    liveItem({
-      kind: "tool",
-      toolCallId: "call_1",
-      toolName: "bash",
-      operation: "completed",
-      summary: "exit 0",
-    }),
-  );
-  projection = reporter.getProjection();
-  const toolEntry = projection.entries
-    .map(({ entry }) => entry)
-    .find((entry) => entry.kind === "tool");
-  assert.ok(toolEntry, "工具卡应入投影");
-  if (toolEntry?.kind === "tool") {
-    assert.equal(toolEntry.name, "bash");
-    assert.equal(toolEntry.args, "npm test");
-    assert.equal(toolEntry.status, "success");
-  }
-
-  // 子代理活动卡。
-  adapter.handleNotification(
-    liveItem({
-      kind: "subagent",
-      operation: "update",
-      activityId: "act_1",
-      status: "running",
-      task: "扫描",
-    }),
-  );
-  assert.ok(
-    reporter.getProjection().entries.some(({ entry }) => entry.kind === "subagent-activity"),
-    "子代理卡应入投影",
-  );
-
-  // run 完成 → onFinish + running 回 false。
   assert.equal(adapter.running, true);
   adapter.handleNotification(
     notification("run.finished", {}, { run: { runId: "run_1", status: "succeeded" } }),
@@ -164,12 +70,6 @@ test("daemon event reporter: cancelled run drives onInterrupted; approval events
   });
   adapter.handleNotification(
     notification("run.started", {}, { run: { runId: "run_9", status: "running" } }, "run_9"),
-  );
-  adapter.handleNotification(
-    liveItem(
-      { kind: "tool", toolCallId: "c9", toolName: "write_file", operation: "started", args: "x" },
-      "run_9",
-    ),
   );
   adapter.handleNotification(
     notification("run.finished", {}, { run: { runId: "run_9", status: "cancelled" } }, "run_9"),
@@ -492,23 +392,58 @@ function createFakeClient(): FakeClientHarness {
     createdAt: 1,
     updatedAt: 1,
   };
+  const watermark = {
+    historyEpoch: "history-test",
+    projectorVersion: TRANSCRIPT_PROJECTOR_VERSION,
+    throughSequence: 2,
+  } as const;
+  const records = (items: unknown[], positionStart = 1) =>
+    items.map((item, index) => ({
+      itemId: (item as { id: string }).id,
+      itemRevision: 1,
+      positionSequence: positionStart + index,
+      positionOrdinal: 0,
+      item,
+    }));
   const client = {
     connect: async () => undefined,
+    subscribeSessionFrames: () => ({ dispose: () => undefined }),
     request: async (method: string, params: Record<string, unknown>) => {
       requests.push({ method, params });
       if (method === "session.send") {
         return { session, run: { runId: "run_1", status: "running" }, disposition: "started" };
       }
-      if (method === "session.transcript") {
+      if (method === "session.subscription.open") {
         const queuedPage = transcriptPages.shift();
-        if (queuedPage) return { session, queuedInputs: [], ...queuedPage };
+        const items =
+          queuedPage && Array.isArray(queuedPage.items) ? queuedPage.items : transcriptItems;
         return {
-          session,
-          items: transcriptItems,
+          session: { ...session, sessionId: String(params.sessionId) },
+          hostEpoch: "host-test",
+          subscriptionId: "subscription-test",
+          nextSequence: 1,
+          watermark,
+          durableTail: records(items, transcriptPages.length + 1),
+          activeOverlay: [],
           queuedInputs: [],
-          revision: "v1",
+          ...(transcriptPages.length > 0
+            ? {
+                olderCursor: {
+                  ...watermark,
+                  positionSequence: 1,
+                  positionOrdinal: 0,
+                  byteOffset: 0,
+                },
+              }
+            : {}),
         };
       }
+      if (method === "session.transcript.page") {
+        const queuedPage = transcriptPages.shift();
+        const items = queuedPage && Array.isArray(queuedPage.items) ? queuedPage.items : [];
+        return { watermark, items: records(items, transcriptPages.length + 1) };
+      }
+      if (method === "session.subscription.close") return { closed: true };
       if (method === "approval.respond") {
         return { accepted: true, alreadyResolved: false };
       }
@@ -572,23 +507,12 @@ function createFakeClient(): FakeClientHarness {
 test("client session runtime: hydrates every fixed-watermark transcript page", async () => {
   const harness = createFakeClient();
   const reporter = new TuiReporter();
-  const cursor = {
-    revision: "2",
-    throughTranscriptSequence: 2,
-    position: 2,
-    ordinal: 0,
-    byteOffset: 8192,
-    direction: "older",
-  } as const;
   harness.setTranscriptPages([
     {
       items: [{ id: "new", kind: "assistantMessage", content: "new" }],
-      revision: "2",
-      nextCursor: cursor,
     },
     {
       items: [{ id: "old", kind: "userMessage", content: "old" }],
-      revision: "2",
     },
   ]);
   const runtime = new ClientSessionRuntime({
@@ -600,10 +524,12 @@ test("client session runtime: hydrates every fixed-watermark transcript page", a
   await runtime.start();
 
   const transcriptRequests = harness.requests.filter(
-    (request) => request.method === "session.transcript",
+    (request) =>
+      request.method === "session.subscription.open" ||
+      request.method === "session.transcript.page",
   );
   assert.equal(transcriptRequests.length, 2, "TUI 不得在首页 200 items 处停止");
-  assert.deepEqual(transcriptRequests[1]?.params.cursor, cursor);
+  assert.equal(transcriptRequests[1]?.method, "session.transcript.page");
   assert.deepEqual(
     reporter.getProjection().entries.map(({ entry }) => entry.kind),
     ["user", "assistant"],
@@ -611,7 +537,132 @@ test("client session runtime: hydrates every fixed-watermark transcript page", a
   runtime.dispose();
 });
 
-test("client session runtime: start hydrates, send maps to session.send, live events project", async () => {
+test("client session runtime: dedicated session frames drive replica advance", async () => {
+  const requests: string[] = [];
+  let frameListener: ((frame: RuntimeSessionSubscriptionFrame) => void) | undefined;
+  const watermark = (throughSequence: number) => ({
+    historyEpoch: "history-1",
+    projectorVersion: TRANSCRIPT_PROJECTOR_VERSION,
+    throughSequence,
+  });
+  const session = {
+    sessionId: "s1",
+    workspacePath: "C:\\ws",
+    title: "t",
+    status: "active",
+    pinned: false,
+    createdAt: 1,
+    updatedAt: 1,
+  } as const;
+  const client = {
+    connect: async () => undefined,
+    subscribeSessionFrames(listener: (frame: RuntimeSessionSubscriptionFrame) => void) {
+      frameListener = listener;
+      return { dispose: () => (frameListener = undefined) };
+    },
+    request: async (method: string) => {
+      requests.push(method);
+      if (method === "session.subscription.open") {
+        frameListener?.({
+          hostEpoch: "host-1",
+          subscriptionId: "subscription-1",
+          sessionId: "s1",
+          sequence: 1,
+          type: "subscription.session_delta",
+          runId: "run-1",
+          turnId: "turn-1",
+          itemId: "live",
+          streamId: "stream-1",
+          kind: "text",
+          startOffsetBytes: 0,
+          text: "早到帧",
+        });
+        return {
+          session,
+          hostEpoch: "host-1",
+          subscriptionId: "subscription-1",
+          nextSequence: 1,
+          watermark: watermark(1),
+          durableTail: [
+            {
+              itemId: "history",
+              itemRevision: 1,
+              positionSequence: 1,
+              positionOrdinal: 0,
+              item: { id: "history", kind: "userMessage", content: "历史" },
+            },
+          ],
+          activeOverlay: [],
+          queuedInputs: [],
+        };
+      }
+      if (method === "session.transcript.advance") {
+        return {
+          after: watermark(1),
+          through: watermark(2),
+          changes: [
+            {
+              op: "upsert",
+              record: {
+                itemId: "live",
+                itemRevision: 1,
+                positionSequence: 2,
+                positionOrdinal: 0,
+                item: { id: "live", kind: "assistantMessage", content: "已持久化" },
+              },
+            },
+          ],
+        };
+      }
+      if (method === "session.subscription.close") return { closed: true };
+      return {};
+    },
+    subscribe: async () => ({
+      replay: { subscribed: true, events: [], hasMore: false },
+      dispose: () => undefined,
+    }),
+  } as unknown as DaemonSessionClient;
+  const reporter = new TuiReporter();
+  const runtime = new ClientSessionRuntime({
+    client,
+    workspacePath: "C:\\ws",
+    sessionId: "s1",
+    reporter,
+  });
+
+  await runtime.start();
+  assert.equal(requests.includes("session.transcript"), false, "v2 不应回退全量 RPC");
+  assert.deepEqual(
+    reporter
+      .getProjection()
+      .entries.map(({ entry }) =>
+        entry.kind === "user" || entry.kind === "assistant" ? entry.content : entry.kind,
+      ),
+    ["历史", "早到帧"],
+  );
+
+  frameListener?.({
+    hostEpoch: "host-1",
+    subscriptionId: "subscription-1",
+    sessionId: "s1",
+    sequence: 2,
+    type: "subscription.transcript_advanced",
+    watermark: watermark(2),
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.ok(requests.includes("session.transcript.advance"));
+  assert.deepEqual(
+    reporter
+      .getProjection()
+      .entries.map(({ entry }) =>
+        entry.kind === "user" || entry.kind === "assistant" ? entry.content : entry.kind,
+      ),
+    ["历史", "已持久化"],
+  );
+  runtime.dispose();
+});
+
+test("client session runtime: start opens replica and send maps to session.send", async () => {
   const harness = createFakeClient();
   const reporter = new TuiReporter();
   const runtime = new ClientSessionRuntime({
@@ -624,7 +675,7 @@ test("client session runtime: start hydrates, send maps to session.send, live ev
   await runtime.start();
   assert.ok(
     harness.requests.some(
-      (entry) => entry.method === "session.transcript" && entry.params.sessionId === "s1",
+      (entry) => entry.method === "session.subscription.open" && entry.params.sessionId === "s1",
     ),
     "显式 sessionId 启动应先水化 transcript",
   );
@@ -667,21 +718,6 @@ test("client session runtime: start hydrates, send maps to session.send, live ev
   assert.ok(
     !("attachments" in (sendPlain?.params.input as object)),
     "无附件时不应携带 attachments 字段",
-  );
-
-  // 事件流：run.live 文本增量直投投影。
-  harness.emit(
-    liveItem({
-      kind: "assistantMessage",
-      operation: "append",
-      streamId: "a1",
-      turnId: "turn1",
-      delta: "开始",
-    }),
-  );
-  assert.ok(
-    reporter.getProjection().entries.some(({ entry }) => entry.kind === "assistant"),
-    "live 文本应入投影",
   );
 
   // 中断：无 run 时静默；有 run 时 run.cancel。
@@ -829,27 +865,6 @@ test("client session runtime: approvals map to approval.respond and dialog callb
   assert.equal(planRespond?.params.action, "execute");
   assert.equal(planRespond?.params.expectedRevision, 3);
 
-  // transcriptUpdated reload 触发重取（对账）——本用例无初始 sessionId，
-  // 首次水化被跳过，reload 是唯一的 transcript 请求来源（顺带验证 scope 采纳）。
-  harness.setTranscriptItems([
-    { id: "i1", kind: "userMessage", content: "历史" },
-    { id: "i2", kind: "assistantMessage", content: "回答" },
-  ]);
-  harness.emit(
-    notification(
-      "session.transcriptUpdated",
-      { sessionId: "s1" },
-      { sessionId: "s1", operation: "reload" },
-    ),
-  );
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.ok(
-    harness.requests.some(
-      (entry) => entry.method === "session.transcript" && entry.params.sessionId === "s1",
-    ),
-    "reload 应采纳 scope sessionId 并触发 transcript 重取",
-  );
-
   runtime.dispose();
 });
 
@@ -875,28 +890,7 @@ test("client session runtime: session scope filtering isolates foreign-session e
       { run: { runId: "r_other", status: "running" } },
     ),
   );
-  harness.emit(
-    notification(
-      "run.live",
-      { sessionId: "s_other" },
-      {
-        runId: "r_other",
-        item: {
-          kind: "assistantMessage",
-          operation: "append",
-          streamId: "x",
-          turnId: "t",
-          delta: "他会的流",
-        },
-      },
-      "r_other",
-    ),
-  );
   assert.equal(runtime.running, false, "他会话 run.started 不得驱动 running");
-  assert.ok(
-    !reporter.getProjection().entries.some(({ entry }) => entry.kind === "assistant"),
-    "他会话 run.live 不得进投影",
-  );
 
   // 本会话事件照常。
   harness.emit(
@@ -937,16 +931,9 @@ test("client session runtime: session scope filtering isolates foreign-session e
   );
   assert.equal(runtime.running, true);
 
-  // /new（sessionId=undefined）：放行采纳新会话首事件。
+  // /new（sessionId=undefined）：由下一次 session.send 的原子响应确立会话。
   await runtime.switchSession(undefined);
-  harness.emit(
-    notification(
-      "session.transcriptUpdated",
-      { sessionId: "s_fresh" },
-      { sessionId: "s_fresh", operation: "reload" },
-    ),
-  );
-  assert.equal(runtime.activeSessionId, "s_fresh", "无会话态应重新采纳事件 scope");
+  assert.equal(runtime.activeSessionId, undefined);
 
   runtime.dispose();
 });

@@ -6,7 +6,7 @@ export default [
   {
     ignores: [
       "dist/**",
-      "packages/runtime-host/dist/**",
+      "packages/*/dist/**",
       "node_modules/**",
       ".worktrees/**",
       "**/.tsbuild/**",

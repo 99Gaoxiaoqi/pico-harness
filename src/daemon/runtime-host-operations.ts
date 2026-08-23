@@ -35,6 +35,10 @@ export const RUNTIME_HOST_BRIDGE_WORKSPACE_STATUS = "workspace.status";
 export const RUNTIME_HOST_BRIDGE_USAGE_GET = "usage.get";
 export const RUNTIME_HOST_BRIDGE_EVENTS_SUBSCRIBE = "events.subscribe";
 export const RUNTIME_HOST_BRIDGE_EVENTS_REPLAY = "events.replay";
+export const RUNTIME_HOST_BRIDGE_SESSION_SUBSCRIPTION_OPEN = "session.subscription.open";
+export const RUNTIME_HOST_BRIDGE_SESSION_SUBSCRIPTION_CLOSE = "session.subscription.close";
+export const RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_PAGE = "session.transcript.page";
+export const RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_ADVANCE = "session.transcript.advance";
 /**
  * Generic transition operation (3-B-3): carries any daemon RUNTIME_METHOD over
  * the Runtime Host wire so clients can migrate transport wholesale before each
@@ -61,6 +65,7 @@ const BRIDGE_ERRORS = [
   "not_found",
   "operation_conflict",
   "capability_unavailable",
+  "reset_required",
   "internal_failure",
 ] as const;
 
@@ -81,6 +86,7 @@ export type BridgeErrorCode =
   | "not_found"
   | "operation_conflict"
   | "capability_unavailable"
+  | "reset_required"
   | "internal_failure";
 
 /**
@@ -103,6 +109,8 @@ export function mapRuntimeErrorCode(code: RuntimeErrorCode): BridgeErrorCode {
       return "operation_conflict";
     case RUNTIME_ERROR_CODES.FORBIDDEN:
       return "capability_unavailable";
+    case RUNTIME_ERROR_CODES.RESET_REQUIRED:
+      return "reset_required";
     case RUNTIME_ERROR_CODES.METHOD_NOT_FOUND:
       return "operation_unavailable";
     default:
@@ -298,6 +306,37 @@ export const PICO_RUNTIME_HOST_EVENT_OPERATION_SPECS = {
   }),
 } satisfies Record<string, AnyOperationSpec>;
 
+export const PICO_RUNTIME_HOST_SESSION_CONTINUITY_OPERATION_SPECS = {
+  [RUNTIME_HOST_BRIDGE_SESSION_SUBSCRIPTION_OPEN]: defineOperation({
+    mode: "control",
+    availability: "ready",
+    errors: BRIDGE_ERRORS,
+    decodeInput: (value) => parseStrictRuntimeParams("session.subscription.open", value),
+    decodeOutput: (value) => parseDesktopRuntimeResult("session.subscription.open", value),
+  }),
+  [RUNTIME_HOST_BRIDGE_SESSION_SUBSCRIPTION_CLOSE]: defineOperation({
+    mode: "control",
+    availability: "ready",
+    errors: BRIDGE_ERRORS,
+    decodeInput: (value) => parseStrictRuntimeParams("session.subscription.close", value),
+    decodeOutput: (value) => parseDesktopRuntimeResult("session.subscription.close", value),
+  }),
+  [RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_PAGE]: defineOperation({
+    mode: "query",
+    availability: "ready",
+    errors: BRIDGE_ERRORS,
+    decodeInput: (value) => parseStrictRuntimeParams("session.transcript.page", value),
+    decodeOutput: (value) => parseDesktopRuntimeResult("session.transcript.page", value),
+  }),
+  [RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_ADVANCE]: defineOperation({
+    mode: "query",
+    availability: "ready",
+    errors: BRIDGE_ERRORS,
+    decodeInput: (value) => parseStrictRuntimeParams("session.transcript.advance", value),
+    decodeOutput: (value) => parseDesktopRuntimeResult("session.transcript.advance", value),
+  }),
+} satisfies Record<string, AnyOperationSpec>;
+
 export const PICO_RUNTIME_HOST_SHUTDOWN_OPERATION_SPEC = {
   [RUNTIME_HOST_BRIDGE_RUNTIME_SHUTDOWN]: defineOperation({
     mode: "query",
@@ -347,8 +386,10 @@ type InferBridgeError<S extends BridgeSpec> =
  * the connection's live push path.
  */
 export interface BridgeOperationContext {
+  hostEpoch: string;
   connectionId: string;
   pushEvent?(event: Record<string, unknown>): Promise<void>;
+  afterResponseFlushed?(callback: () => void): void;
 }
 
 /**
@@ -372,6 +413,9 @@ export type BridgeHandlerMap<Specs extends Record<string, BridgeSpec>> = {
 export type PicoBridgeHandlerMap = BridgeHandlerMap<typeof PICO_RUNTIME_HOST_OPERATION_SPECS>;
 export type PicoBridgeEventHandlerMap = BridgeHandlerMap<
   typeof PICO_RUNTIME_HOST_EVENT_OPERATION_SPECS
+>;
+export type PicoBridgeSessionContinuityHandlerMap = BridgeHandlerMap<
+  typeof PICO_RUNTIME_HOST_SESSION_CONTINUITY_OPERATION_SPECS
 >;
 
 let picoRuntimeHostOperationsRegistered = false;
@@ -398,6 +442,14 @@ export function ensurePicoRuntimeHostEventOperationsRegistered(): void {
   if (picoRuntimeHostEventOperationsRegistered) return;
   picoRuntimeHostEventOperationsRegistered = true;
   registerHostOperationSpecs(PICO_RUNTIME_HOST_EVENT_OPERATION_SPECS);
+}
+
+let picoRuntimeHostSessionContinuityOperationsRegistered = false;
+
+export function ensurePicoRuntimeHostSessionContinuityOperationsRegistered(): void {
+  if (picoRuntimeHostSessionContinuityOperationsRegistered) return;
+  picoRuntimeHostSessionContinuityOperationsRegistered = true;
+  registerHostOperationSpecs(PICO_RUNTIME_HOST_SESSION_CONTINUITY_OPERATION_SPECS);
 }
 
 let picoRuntimeHostShutdownOperationRegistered = false;

@@ -33,7 +33,6 @@ test("desktop session handlers keep protocol mapping separate from the service o
       calls.push(`send:${params.input.text}`);
       return { disposition: "started" };
     },
-    getSessionTranscript: async () => ({ items: [] }),
     readSessionEvidence: async (params) => ({
       evidenceUri: params.evidenceUri,
       content: "page",

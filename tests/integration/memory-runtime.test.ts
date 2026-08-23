@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { LOCAL_RUNTIME_PROTOCOL_VERSION } from "@pico/protocol";
 import { globalSessionManager } from "../../src/engine/session.js";
 import type { Message } from "../../src/schema/message.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
@@ -1167,7 +1168,7 @@ test("production adapter publishes a durable body-free memory.proposed notificat
   assert.equal(received.length, 1);
   assert.deepEqual(received[0], {
     eventId: (received[0] as { eventId: string }).eventId,
-    protocolVersion: 1,
+    protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
     topic: "memory.proposed",
     scope: { workspacePath: workspace },
     resourceVersion: 9,
