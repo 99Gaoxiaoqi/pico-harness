@@ -9,8 +9,8 @@ import {
   guardBrowserNavigation,
   normalizeActiveBrowserViewport,
   normalizeBrowserAddress,
-  normalizePersistedBrowserNavigation,
   PersistentBrowserViewportGenerationAuthority,
+  persistBrowserNavigationForCurrentEntry,
   replaceVisibleBrowserEntry,
 } from "./browser-logic.js";
 import { BrowserUrlStore } from "./browser-url-store.js";
@@ -147,10 +147,14 @@ export function createEmbeddedBrowserAuthority(options: {
     view.webContents.on("did-start-loading", refresh);
     view.webContents.on("did-stop-loading", refresh);
     const persistNavigation = (url: string, isMainFrame: boolean): void => {
-      if (entries.get(sessionId) !== entry) return;
-      const normalized = normalizePersistedBrowserNavigation(url, isMainFrame);
-      if (normalized) urlStore.set(sessionId, normalized);
-      refresh();
+      persistBrowserNavigationForCurrentEntry({
+        entry,
+        currentEntry: () => entries.get(sessionId),
+        url,
+        isMainFrame,
+        persist: (normalized) => urlStore.set(sessionId, normalized),
+        refresh,
+      });
     };
     view.webContents.on("did-navigate", (_event, url) => persistNavigation(url, true));
     view.webContents.on("did-navigate-in-page", (_event, url, isMainFrame) => {
@@ -385,15 +389,15 @@ export function createEmbeddedBrowserAuthority(options: {
     },
 
     async close(sessionId) {
+      const entry = entries.get(sessionId);
+      if (entry) destroyEntry(sessionId, entry);
       const revocation = viewportGenerations.revoke(sessionId, { deleteUrl: true });
+      options.onState(emptyState(sessionId, revocation.generation));
       await commitBrowserRevocations(
         revocation.persistence,
         [{ sessionId, generation: revocation.generation }],
         options.onRevoke,
       );
-      const entry = entries.get(sessionId);
-      if (entry) destroyEntry(sessionId, entry);
-      options.onState(emptyState(sessionId, revocation.generation));
     },
 
     async clearData() {

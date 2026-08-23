@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   commitBrowserRevocations,
+  persistBrowserNavigationForCurrentEntry,
   PersistentBrowserViewportGenerationAuthority,
 } from "../../apps/desktop/src/main/browser-logic.js";
 import { BrowserUrlStore } from "../../apps/desktop/src/main/browser-url-store.js";
@@ -118,7 +119,19 @@ test("browser close publishes one floor-and-URL snapshot before notifying daemon
   await authority.acquire("session-a");
   published.length = 0;
   blockPublish = true;
+  const entry = {};
+  let currentEntry: typeof entry | undefined = entry;
+  const lateNavigation = (): boolean =>
+    persistBrowserNavigationForCurrentEntry({
+      entry,
+      currentEntry: () => currentEntry,
+      url: "https://example.com/late",
+      isMainFrame: true,
+      persist: (url) => store.set("session-a", url),
+      refresh: () => undefined,
+    });
 
+  currentEntry = undefined;
   const revocation = authority.revoke("session-a", { deleteUrl: true });
   const notifications: number[] = [];
   const completion = commitBrowserRevocations(
@@ -129,6 +142,7 @@ test("browser close publishes one floor-and-URL snapshot before notifying daemon
     },
   );
   await Promise.resolve();
+  assert.equal(lateNavigation(), false);
 
   assert.deepEqual(published, [
     {
@@ -139,6 +153,20 @@ test("browser close publishes one floor-and-URL snapshot before notifying daemon
   assert.equal(notifications.length, 0);
   releasePublish.resolve();
   await completion;
+  currentEntry = {};
+  const restoredGeneration = await authority.acquire("session-a");
+  assert.equal(lateNavigation(), false);
+  assert.equal(store.get("session-a"), undefined);
+  assert.deepEqual(published, [
+    {
+      version: 2,
+      sessions: [{ sessionId: "session-a", generationFloor: revocation.generation }],
+    },
+    {
+      version: 2,
+      sessions: [{ sessionId: "session-a", generationFloor: restoredGeneration }],
+    },
+  ]);
   assert.deepEqual(notifications, [revocation.generation]);
 });
 
@@ -159,7 +187,19 @@ test("browser close does not notify daemon or succeed when atomic publication fa
   await authority.acquire("session-a");
   published.length = 0;
   rejectPublish = true;
+  const entry = {};
+  let currentEntry: typeof entry | undefined = entry;
+  const lateNavigation = (): boolean =>
+    persistBrowserNavigationForCurrentEntry({
+      entry,
+      currentEntry: () => currentEntry,
+      url: "https://example.com/late",
+      isMainFrame: true,
+      persist: (url) => store.set("session-a", url),
+      refresh: () => undefined,
+    });
 
+  currentEntry = undefined;
   const revocation = authority.revoke("session-a", { deleteUrl: true });
   const notifications: number[] = [];
   await assert.rejects(
@@ -173,6 +213,7 @@ test("browser close does not notify daemon or succeed when atomic publication fa
     /rename failed/u,
   );
 
+  assert.equal(lateNavigation(), false);
   assert.deepEqual(published, [
     {
       version: 2,
@@ -192,7 +233,15 @@ test("browser close does not notify daemon or succeed when atomic publication fa
       notifications.push(generation);
     },
   );
-  assert.equal(published.length, 1);
+  assert.equal(lateNavigation(), false);
+  assert.equal(currentEntry, undefined);
+  assert.equal(store.get("session-a"), undefined);
+  assert.deepEqual(published, [
+    {
+      version: 2,
+      sessions: [{ sessionId: "session-a", generationFloor: retry.generation }],
+    },
+  ]);
   assert.deepEqual(notifications, [revocation.generation]);
 });
 
