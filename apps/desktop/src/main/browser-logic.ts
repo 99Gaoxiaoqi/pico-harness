@@ -32,3 +32,16 @@ export function normalizeViewport(rect: DesktopBrowserRect | null): DesktopBrows
     height,
   };
 }
+
+export function normalizeActiveBrowserViewport(
+  rect: DesktopBrowserRect | null,
+  active: boolean,
+): DesktopBrowserRect | null {
+  return active ? normalizeViewport(rect) : null;
+}
+
+export function guardBrowserNavigation(event: { preventDefault(): void }, url: string): boolean {
+  if (normalizeBrowserAddress(url)) return true;
+  event.preventDefault();
+  return false;
+}

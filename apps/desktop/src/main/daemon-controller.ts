@@ -22,6 +22,20 @@ export interface DesktopDaemonShutdownFenceOptions {
 
 export type DesktopTerminalCleanupFenceOptions = DesktopDaemonShutdownFenceOptions;
 
+/** Browser persistence failures must not release the quit fence before terminals stop. */
+export async function cleanupDesktopWorkbarResources(options: {
+  readonly cleanupTerminals: () => Promise<void>;
+  readonly disposeBrowser: () => Promise<void>;
+  readonly onBrowserError: (error: unknown) => void;
+}): Promise<void> {
+  const terminalCleanup = Promise.resolve().then(options.cleanupTerminals);
+  const browserCleanup = Promise.resolve()
+    .then(options.disposeBrowser)
+    .catch((error: unknown) => options.onBrowserError(error));
+  const [terminalOutcome] = await Promise.allSettled([terminalCleanup, browserCleanup]);
+  if (terminalOutcome.status === "rejected") throw terminalOutcome.reason;
+}
+
 export function isDesktopRuntimeInvocationAllowed(
   method: string,
   quitting: boolean,
