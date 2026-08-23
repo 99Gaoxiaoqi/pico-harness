@@ -1,105 +1,157 @@
-import { realpath } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { isAbsolute, join, relative } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
+import type { ChildProcess } from "node:child_process";
 import {
-  readHostRegistration,
-  removeHostRegistration,
-  resolveRootControlNamespace,
-  resolveStorageRoot,
-} from "@pico/runtime-host";
+  launchDetachedRuntimeHostCandidate,
+  type CandidateLauncher,
+  type DetachedCandidateProcess,
+} from "../../../packages/runtime-host/src/client/launcher.js";
 
 const GRACEFUL_EXIT_TIMEOUT_MS = 12_000;
 const FORCED_EXIT_TIMEOUT_MS = 5_000;
-const SUCCESSOR_QUIET_WINDOW_MS = 2_000;
+
+export interface TestRuntimeHostCandidateTrackerOptions {
+  readonly launchCandidate?: CandidateLauncher;
+  readonly gracefulExitTimeoutMs?: number;
+  readonly forcedExitTimeoutMs?: number;
+}
 
 /**
- * Stops the daemon registered to an isolated test PICO_HOME and waits for the
- * exact PID to exit before the caller removes the temporary root.
+ * Owns every candidate launched by one integration test.
  *
- * This helper intentionally does not use process-name matching: production and
- * test daemons share the same entrypoint, so the isolated storage-root
- * registration is the authority for the only PID teardown may signal.
+ * Ownership is captured synchronously at launch and resolved to the exact
+ * ChildProcess-backed capability. Teardown never discovers a process through a
+ * registration file and never treats a reusable PID as signalling authority.
  */
-export async function stopRegisteredTestDaemon(picoHome: string): Promise<readonly number[]> {
-  await assertTemporaryTestRoot(picoHome);
-  const capability = await resolveStorageRoot({ path: picoHome, kind: "interactive" });
-  const controlDirectory = join(resolveRootControlNamespace(), capability.rootId);
-  const stoppedPids = new Set<number>();
-  let quietSince: number | undefined;
+export class TestRuntimeHostCandidateTracker {
+  private readonly baseLauncher: CandidateLauncher;
+  private readonly gracefulExitTimeoutMs: number;
+  private readonly forcedExitTimeoutMs: number;
+  private readonly pendingLaunches = new Set<Promise<void>>();
+  private readonly processes = new Map<number, DetachedCandidateProcess>();
+  private sealed = false;
 
-  for (;;) {
-    const registration = await readHostRegistration(controlDirectory).catch(() => undefined);
-    if (!registration) {
-      if (stoppedPids.size === 0) return [];
-      quietSince ??= Date.now();
-      if (Date.now() - quietSince >= SUCCESSOR_QUIET_WINDOW_MS) return [...stoppedPids];
-      await delay(50);
-      continue;
+  constructor(options: TestRuntimeHostCandidateTrackerOptions = {}) {
+    this.baseLauncher = options.launchCandidate ?? launchDetachedRuntimeHostCandidate;
+    this.gracefulExitTimeoutMs = options.gracefulExitTimeoutMs ?? GRACEFUL_EXIT_TIMEOUT_MS;
+    this.forcedExitTimeoutMs = options.forcedExitTimeoutMs ?? FORCED_EXIT_TIMEOUT_MS;
+  }
+
+  readonly launcher: CandidateLauncher = (input) => {
+    if (this.sealed) {
+      return { spawned: Promise.reject(new Error("Test candidate tracker is already stopping")) };
     }
-    // Some candidate tests host the kernel in the test process itself. Their
-    // test-local host handle owns cleanup; teardown must never signal itself.
-    if (registration.pid === process.pid) return [...stoppedPids];
+    const launch = this.baseLauncher(input);
+    const spawned = launch.spawned.then((attempt) => {
+      if (!attempt.process) {
+        throw new Error(`Candidate ${attempt.pid} did not expose a stable process capability`);
+      }
+      this.processes.set(attempt.process.pid, attempt.process);
+      return attempt;
+    });
+    const settlement = spawned.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.pendingLaunches.add(settlement);
+    void settlement.then(() => this.pendingLaunches.delete(settlement));
+    return { spawned };
+  };
 
-    quietSince = undefined;
-    await stopExactTestDaemon(registration.pid);
-    stoppedPids.add(registration.pid);
-    await removeHostRegistration(controlDirectory, registration.hostEpoch).catch(() => undefined);
+  /** Stops an exact, tracker-owned candidate selected only for test fault injection. */
+  async terminateOwned(pid: number, signal: "SIGTERM" | "SIGKILL" = "SIGKILL"): Promise<void> {
+    const processCapability = this.requireOwned(pid);
+    if (processCapability.exited) return;
+    processCapability.terminate(signal);
+    const exited = await waitForClosed(processCapability, this.forcedExitTimeoutMs);
+    if (!exited) throw new Error(`Owned candidate ${pid} did not exit after ${signal}`);
+  }
+
+  /** Synchronous crash injection for tests that intentionally exercise disconnect races. */
+  signalOwned(pid: number, signal: "SIGTERM" | "SIGKILL" = "SIGKILL"): void {
+    const processCapability = this.requireOwned(pid);
+    if (!processCapability.exited) processCapability.terminate(signal);
+  }
+
+  ownedExited(pid: number): boolean {
+    return this.requireOwned(pid).exited;
+  }
+
+  /** Seals future launches and waits until every launched candidate is terminal. */
+  async stopAll(): Promise<void> {
+    this.sealed = true;
+    while (this.pendingLaunches.size > 0) {
+      await Promise.all([...this.pendingLaunches]);
+    }
+    const failures: unknown[] = [];
+    for (const processCapability of this.processes.values()) {
+      try {
+        await stopCandidateProcess(
+          processCapability,
+          this.gracefulExitTimeoutMs,
+          this.forcedExitTimeoutMs,
+        );
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(failures, "One or more test-owned candidates did not exit");
+    }
+  }
+
+  private requireOwned(pid: number): DetachedCandidateProcess {
+    const processCapability = this.processes.get(pid);
+    if (!processCapability) {
+      throw new Error(`PID ${pid} is not owned by this test candidate tracker`);
+    }
+    return processCapability;
   }
 }
 
-/** Stops a PID captured directly from a test-owned child process. */
-export async function stopExactTestDaemon(pid: number): Promise<void> {
-  if (!Number.isSafeInteger(pid) || pid <= 1 || pid === process.pid) {
-    throw new Error(`Refusing to stop invalid test daemon PID ${String(pid)}`);
-  }
-  if (!isProcessAlive(pid)) return;
-
-  signalExactProcess(pid, "SIGTERM");
-  if (await waitForProcessExit(pid, GRACEFUL_EXIT_TIMEOUT_MS)) return;
-
-  signalExactProcess(pid, "SIGKILL");
-  if (await waitForProcessExit(pid, FORCED_EXIT_TIMEOUT_MS)) return;
-  throw new Error(`Test daemon PID ${pid} did not exit after SIGTERM and SIGKILL`);
+/** Stops a child created directly by a test through its stable ChildProcess handle. */
+export async function stopTestChildProcess(
+  child: ChildProcess,
+  gracefulExitTimeoutMs = GRACEFUL_EXIT_TIMEOUT_MS,
+  forcedExitTimeoutMs = FORCED_EXIT_TIMEOUT_MS,
+): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const closed = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  child.kill("SIGTERM");
+  if (await settleWithin(closed, gracefulExitTimeoutMs)) return;
+  child.kill("SIGKILL");
+  if (await settleWithin(closed, forcedExitTimeoutMs)) return;
+  throw new Error(`Test child ${String(child.pid)} did not exit after SIGTERM and SIGKILL`);
 }
 
-export function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return isNodeError(error, "EPERM");
-  }
+async function stopCandidateProcess(
+  processCapability: DetachedCandidateProcess,
+  gracefulExitTimeoutMs: number,
+  forcedExitTimeoutMs: number,
+): Promise<void> {
+  if (processCapability.exited) return;
+  processCapability.terminate("SIGTERM");
+  if (await waitForClosed(processCapability, gracefulExitTimeoutMs)) return;
+  processCapability.terminate("SIGKILL");
+  if (await waitForClosed(processCapability, forcedExitTimeoutMs)) return;
+  throw new Error(`Test candidate ${processCapability.pid} did not exit after SIGTERM and SIGKILL`);
 }
 
-async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (isProcessAlive(pid)) {
-    if (Date.now() >= deadline) return false;
-    await delay(50);
-  }
-  return true;
+function waitForClosed(processCapability: DetachedCandidateProcess, timeoutMs: number) {
+  if (processCapability.exited) return Promise.resolve(true);
+  return settleWithin(processCapability.closed, timeoutMs);
 }
 
-function signalExactProcess(pid: number, signal: NodeJS.Signals): void {
-  try {
-    process.kill(pid, signal);
-  } catch (error) {
-    if (!isNodeError(error, "ESRCH")) throw error;
-  }
-}
-
-async function assertTemporaryTestRoot(picoHome: string): Promise<void> {
-  const temporaryRoot = await realpath(tmpdir());
-  const candidate = await realpath(picoHome);
-  const childPath = relative(temporaryRoot, candidate);
-  if (childPath === "" || childPath.startsWith("..") || isAbsolute(childPath)) {
-    throw new Error(`Refusing to stop daemon outside the test temp root: ${picoHome}`);
-  }
-}
-
-function isNodeError(error: unknown, code: string): boolean {
-  return (
-    error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code
-  );
+async function settleWithin(operation: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => resolve(false), timeoutMs);
+    operation.then(
+      () => {
+        clearTimeout(timer);
+        resolve(true);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }

@@ -11,6 +11,7 @@ import {
   RUNTIME_HOST_PROTOCOL_VERSION,
   RuntimeHostTransportError,
   type HostRegistration,
+  type ConnectOrSpawnRuntimeHostInput,
   type RuntimeHostConnection,
   RuntimeHostOperationError,
 } from "@pico/runtime-host";
@@ -123,6 +124,8 @@ export interface LocalRuntimeClientOptions {
   readonly runtimeHostRootPath?: string;
   /** Host-owned daemon entrypoint for bundled callers whose import.meta.url is rewritten. */
   readonly candidateEntrypoint?: string | URL;
+  /** @internal Integration-test ownership seam; production callers must omit it. */
+  readonly candidateLauncher?: ConnectOrSpawnRuntimeHostInput["candidateLauncher"];
 }
 
 export interface RuntimeClient {
@@ -186,6 +189,7 @@ export class LocalRuntimeClient implements RuntimeClient {
   private readonly replayBufferOptions?: RuntimeNotificationBufferOptions;
   private readonly runtimeHostRootPath?: string;
   private readonly candidateEntrypoint?: string | URL;
+  private readonly candidateLauncher?: ConnectOrSpawnRuntimeHostInput["candidateLauncher"];
   private readonly sessionFrameListeners = new Set<
     (frame: RuntimeSessionSubscriptionFrame) => void
   >();
@@ -206,6 +210,7 @@ export class LocalRuntimeClient implements RuntimeClient {
     this.replayBufferOptions = options.replayBufferOptions;
     this.runtimeHostRootPath = options.runtimeHostRootPath;
     this.candidateEntrypoint = options.candidateEntrypoint;
+    this.candidateLauncher = options.candidateLauncher;
     this.requestConnection = this.createConnection();
     this.requestConnection.setEventListener((event) => this.deliverSessionFrame(event));
     this.requestConnection.setDisconnectListener(() => {
@@ -307,6 +312,7 @@ export class LocalRuntimeClient implements RuntimeClient {
     return new KernelRuntimeConnection(
       this.runtimeHostRootPath ?? resolveCanonicalPicoHome(),
       this.candidateEntrypoint,
+      this.candidateLauncher,
     );
   }
 
@@ -586,6 +592,7 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
   constructor(
     private readonly rootPath: string,
     private readonly candidateEntrypoint?: string | URL,
+    private readonly candidateLauncher?: ConnectOrSpawnRuntimeHostInput["candidateLauncher"],
   ) {}
 
   setEventListener(listener: (event: Record<string, unknown>) => void): void {
@@ -718,6 +725,7 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
       connectTimeoutMs: CONNECT_TIMEOUT_MS,
       handshakeTimeoutMs: HANDSHAKE_TIMEOUT_MS,
       candidateEntrypoint: this.candidateEntrypoint ?? resolveDaemonCandidateEntrypoint(),
+      ...(this.candidateLauncher ? { candidateLauncher: this.candidateLauncher } : {}),
     });
     if (result.kind !== "connected") {
       throw new RuntimeClientError(

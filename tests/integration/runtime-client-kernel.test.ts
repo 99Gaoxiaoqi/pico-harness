@@ -17,6 +17,7 @@ import {
 import {
   LocalRuntimeClient,
   RuntimeClientError,
+  type LocalRuntimeClientOptions,
   type RuntimeNotification,
 } from "../../src/daemon/index.js";
 import { Session } from "../../src/engine/session.js";
@@ -24,7 +25,10 @@ import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { resolveOwnerLeaseTombstonePath } from "../../src/storage/owner-lease.js";
 import { sessionOwnerLeaseDirectory } from "../../src/storage/session-owner-lease.js";
 import { resumeDesktopTerminalGenerationWithUpgrade } from "../../apps/desktop/src/main/daemon-controller.js";
-import { stopRegisteredTestDaemon } from "./helpers/test-runtime-daemon.js";
+import {
+  stopTestChildProcess,
+  TestRuntimeHostCandidateTracker,
+} from "./helpers/test-runtime-daemon.js";
 
 /**
  * 3-B-3 kernel 承载客户端实盘验证：默认构造（不注入 endpoint）的 LocalRuntimeClient
@@ -39,6 +43,10 @@ import { stopRegisteredTestDaemon } from "./helpers/test-runtime-daemon.js";
 interface KernelClientHarness {
   picoHome: string;
   workspacePath: string;
+  candidates: TestRuntimeHostCandidateTracker;
+  createClient(
+    options?: Omit<LocalRuntimeClientOptions, "runtimeHostRootPath" | "candidateLauncher">,
+  ): LocalRuntimeClient;
   cleanup: () => Promise<void>;
 }
 
@@ -51,24 +59,28 @@ async function startKernelClientHarness(t: {
   await mkdir(picoHome, { recursive: true });
   await mkdir(workspaceDir, { recursive: true });
   process.env.PICO_HOME = picoHome;
+  const candidates = new TestRuntimeHostCandidateTracker();
   t.after(async () => {
-    // 杀掉本测试拉起的常驻 daemon（按 registration pid），避免多 daemon 并存
-    // 触发子进程资源限制；root 目录最后清。
-    await killDaemonFor(picoHome);
+    await candidates.stopAll();
     await rm(root, { recursive: true, force: true }).catch(() => undefined);
   });
-  return { picoHome, workspacePath: await realpath(workspaceDir), cleanup: async () => undefined };
-}
-
-async function killDaemonFor(picoHome: string): Promise<void> {
-  await stopRegisteredTestDaemon(picoHome);
+  return {
+    picoHome,
+    workspacePath: await realpath(workspaceDir),
+    candidates,
+    createClient: (options = {}) =>
+      new LocalRuntimeClient(undefined, {
+        ...options,
+        runtimeHostRootPath: picoHome,
+        candidateLauncher: candidates.launcher,
+      }),
+    cleanup: async () => undefined,
+  };
 }
 
 test("kernel client: request + subscribe + live push over the spawned daemon", async (t) => {
   const harness = await startKernelClientHarness(t);
-  const client = new LocalRuntimeClient(undefined, {
-    runtimeHostRootPath: harness.picoHome,
-  });
+  const client = harness.createClient();
   t.after(() => client.close());
 
   // connect() 触发 connectOrSpawn：首次拉起 daemon candidate。
@@ -84,7 +96,7 @@ test("kernel client: request + subscribe + live push over the spawned daemon", a
   );
   assert.equal(replay.subscribed, true);
 
-  const trigger = new LocalRuntimeClient(undefined, { runtimeHostRootPath: harness.picoHome });
+  const trigger = harness.createClient();
   t.after(() => trigger.close());
   await trigger.request("workspace.register", { workspacePath: harness.workspacePath });
 
@@ -96,9 +108,7 @@ test("kernel client: request + subscribe + live push over the spawned daemon", a
 
 test("kernel client: expired cursor resets and resubscribes (INVALID_PARAMS reverse mapping)", async (t) => {
   const harness = await startKernelClientHarness(t);
-  const client = new LocalRuntimeClient(undefined, {
-    runtimeHostRootPath: harness.picoHome,
-  });
+  const client = harness.createClient();
   t.after(() => client.close());
   await client.connect();
   await client.request("workspace.register", { workspacePath: harness.workspacePath });
@@ -120,9 +130,7 @@ test("kernel client: expired cursor resets and resubscribes (INVALID_PARAMS reve
 
 test("kernel client: killing the daemon makes the next request respawn it", async (t) => {
   const harness = await startKernelClientHarness(t);
-  const client = new LocalRuntimeClient(undefined, {
-    runtimeHostRootPath: harness.picoHome,
-  });
+  const client = harness.createClient();
   t.after(() => client.close());
   await client.connect();
   await client.request("runtime.ping", {});
@@ -132,21 +140,18 @@ test("kernel client: killing the daemon makes the next request respawn it", asyn
   const controlDirectory = join(resolveRootControlNamespace(), capability.rootId);
   const registration = await readHostRegistration(controlDirectory);
   assert.ok(registration);
-  process.kill(registration.pid);
+  await harness.candidates.terminateOwned(registration.pid);
 
   // 下一次请求：断连检测 → openKernel → connectOrSpawn 发现 host 死亡 → 重生。
   const ping = await client.request("runtime.ping", {});
   assert.ok(ping, "daemon 被杀后下一次请求应触发重生并成功");
 
-  // 清理重生的 daemon。
-  await killDaemonFor(harness.picoHome);
+  // 重生实例由 harness 持有其稳定进程能力并统一清理。
 });
 
 test("kernel client: Desktop 检出旧方法后优雅关闭常驻 daemon 并接管新版本", async (t) => {
   const harness = await startKernelClientHarness(t);
-  const client = new LocalRuntimeClient(undefined, {
-    runtimeHostRootPath: harness.picoHome,
-  });
+  const client = harness.createClient();
   t.after(() => client.close());
   await client.connect();
   await client.request("runtime.ping", {});
@@ -203,10 +208,7 @@ test("kernel client: legacy shutdown EOF is accepted only after the old host ful
     new URL("../fixtures/runtime-host-legacy-shutdown-candidate.ts", import.meta.url),
   );
   await startLegacyShutdownFixture(t, harness.picoHome, fixture);
-  const client = new LocalRuntimeClient(undefined, {
-    runtimeHostRootPath: harness.picoHome,
-    candidateEntrypoint: fixture,
-  });
+  const client = harness.createClient({ candidateEntrypoint: fixture });
   t.after(() => client.close());
 
   await client.connect();
@@ -229,10 +231,7 @@ test("kernel client: shutdown EOF remains an error while the old host is still a
     new URL("../fixtures/runtime-host-legacy-shutdown-candidate.ts", import.meta.url),
   );
   await startLegacyShutdownFixture(t, harness.picoHome, fixture);
-  const client = new LocalRuntimeClient(undefined, {
-    runtimeHostRootPath: harness.picoHome,
-    candidateEntrypoint: fixture,
-  });
+  const client = harness.createClient({ candidateEntrypoint: fixture });
   t.after(() => client.close());
 
   await client.connect();
@@ -252,10 +251,7 @@ test("kernel client: a legacy shutdown response is accepted only after the old h
     new URL("../fixtures/runtime-host-legacy-shutdown-candidate.ts", import.meta.url),
   );
   await startLegacyShutdownFixture(t, harness.picoHome, fixture);
-  const client = new LocalRuntimeClient(undefined, {
-    runtimeHostRootPath: harness.picoHome,
-    candidateEntrypoint: fixture,
-  });
+  const client = harness.createClient({ candidateEntrypoint: fixture });
   t.after(() => client.close());
 
   await client.connect();
@@ -278,10 +274,7 @@ test("kernel client: a shutdown response remains an error while the old host is 
     new URL("../fixtures/runtime-host-legacy-shutdown-candidate.ts", import.meta.url),
   );
   await startLegacyShutdownFixture(t, harness.picoHome, fixture);
-  const client = new LocalRuntimeClient(undefined, {
-    runtimeHostRootPath: harness.picoHome,
-    candidateEntrypoint: fixture,
-  });
+  const client = harness.createClient({ candidateEntrypoint: fixture });
   t.after(() => client.close());
 
   await client.connect();
@@ -318,10 +311,7 @@ test("kernel client: confirmed legacy shutdown retires its fresh Session lease f
     new URL("../fixtures/runtime-host-legacy-shutdown-candidate.ts", import.meta.url),
   );
   await startLegacyShutdownFixture(t, harness.picoHome, fixture);
-  const legacy = new LocalRuntimeClient(undefined, {
-    runtimeHostRootPath: harness.picoHome,
-    candidateEntrypoint: fixture,
-  });
+  const legacy = harness.createClient({ candidateEntrypoint: fixture });
   t.after(() => legacy.close());
   await legacy.connect();
   const abandonedOwner = JSON.parse(await readFile(join(leaseDirectory, "owner.json"), "utf8")) as {
@@ -334,7 +324,7 @@ test("kernel client: confirmed legacy shutdown retires its fresh Session lease f
     "旧 lease 必须通过 tombstone 迁移保留 ABA 栅栏",
   );
   await assert.rejects(access(leaseDirectory), { code: "ENOENT" });
-  const successor = new LocalRuntimeClient(undefined, { runtimeHostRootPath: harness.picoHome });
+  const successor = harness.createClient();
   t.after(() => successor.close());
   const takeoverStartedAt = performance.now();
   await successor.request("workspace.trust", {
@@ -398,10 +388,7 @@ test("kernel client: compatibility retirement preserves other PID, hostname, and
     await mkdir(record.directory, { recursive: true });
     await writeFile(join(record.directory, "owner.json"), record.contents, "utf8");
   }
-  const legacy = new LocalRuntimeClient(undefined, {
-    runtimeHostRootPath: harness.picoHome,
-    candidateEntrypoint: fixture,
-  });
+  const legacy = harness.createClient({ candidateEntrypoint: fixture });
   t.after(() => legacy.close());
   await legacy.connect();
 
@@ -417,9 +404,7 @@ test("kernel client: compatibility retirement preserves other PID, hostname, and
 
 test("kernel client: non-idempotent write does not auto-retry after daemon death (P1-2)", async (t) => {
   const harness = await startKernelClientHarness(t);
-  const client = new LocalRuntimeClient(undefined, {
-    runtimeHostRootPath: harness.picoHome,
-  });
+  const client = harness.createClient();
   t.after(() => client.close());
   await client.connect();
   await client.request("workspace.register", { workspacePath: harness.workspacePath });
@@ -432,7 +417,7 @@ test("kernel client: non-idempotent write does not auto-retry after daemon death
   const registration = await readHostRegistration(controlDirectory);
   assert.ok(registration);
   const killedPid = registration.pid;
-  process.kill(killedPid);
+  harness.candidates.signalOwned(killedPid);
   // 非幂等写（workspace.unregister）：传输级失败 + 连接 terminal 后必须立即上抛，
   // 不得丢弃死连接重生重发（双执行风险）。
   const attempt = client.request("workspace.unregister", {
@@ -449,14 +434,7 @@ test("kernel client: non-idempotent write does not auto-retry after daemon death
   if (after) {
     assert.equal(after.pid, killedPid, "非幂等失败不应触发 daemon 重生");
   }
-  const pidDead = await waitForCondition(() => {
-    try {
-      process.kill(killedPid, 0);
-      return false;
-    } catch {
-      return true;
-    }
-  }, 2000);
+  const pidDead = await waitForCondition(() => harness.candidates.ownedExited(killedPid), 2000);
   assert.ok(pidDead, "被杀 daemon 应仍处于死亡状态（无重生实例顶替）");
 });
 
@@ -503,9 +481,8 @@ async function startLegacyShutdownFixture(
       windowsHide: true,
     },
   );
-  child.unref();
-  t.after(() => {
-    if (child.exitCode === null) child.kill();
+  t.after(async () => {
+    await stopTestChildProcess(child);
   });
   const controlDirectory = join(resolveRootControlNamespace(), capability.rootId);
   const registered = await waitForCondition(

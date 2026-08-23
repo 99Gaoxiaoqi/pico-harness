@@ -28,7 +28,10 @@ import {
 } from "../../src/daemon/index.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { sessionOwnerLeaseDirectory } from "../../src/storage/session-owner-lease.js";
-import { stopExactTestDaemon, stopRegisteredTestDaemon } from "./helpers/test-runtime-daemon.js";
+import {
+  stopTestChildProcess,
+  TestRuntimeHostCandidateTracker,
+} from "./helpers/test-runtime-daemon.js";
 
 /**
  * 3-B-3 daemon candidate 实盘验证：
@@ -45,6 +48,7 @@ interface CandidateHarness {
   picoHome: string;
   env: Record<string, string | undefined>;
   lockPath: string;
+  candidates: TestRuntimeHostCandidateTracker;
   cleanup: () => Promise<void>;
 }
 
@@ -56,11 +60,12 @@ async function startCandidateHarness(t: {
   await mkdir(picoHome, { recursive: true });
   const env = { PICO_HOME: picoHome };
   const lockPath = resolveLocalDaemonLockPath(resolveLocalDaemonEndpoint({ env }));
+  const candidates = new TestRuntimeHostCandidateTracker();
   t.after(async () => {
-    await stopRegisteredTestDaemon(picoHome);
+    await candidates.stopAll();
     await rm(root, { recursive: true, force: true }).catch(() => undefined);
   });
-  return { picoHome, env, lockPath, cleanup: async () => undefined };
+  return { picoHome, env, lockPath, candidates, cleanup: async () => undefined };
 }
 
 test("daemon candidate: in-process winner serves the full chain and releases the guard lock on close", async (t) => {
@@ -152,6 +157,7 @@ test("daemon candidate: connectOrSpawn spawns the pico daemon entrypoint and rea
     handshakeTimeoutMs: 5_000,
     candidateEntrypoint: pathToFileURL(mainPath).href,
     env: harness.env,
+    candidateLauncher: harness.candidates.launcher,
   });
   assert.equal(result.kind, "connected", `期望 connected，实际 ${JSON.stringify(result)}`);
   if (result.kind !== "connected") return;
@@ -171,8 +177,7 @@ test("daemon candidate: connectOrSpawn spawns the pico daemon entrypoint and rea
   const registration = await readHostRegistration(await findControlDirectory(harness.picoHome));
   assert.ok(registration);
   await connection.close().catch(() => undefined);
-  const stoppedPids = await stopRegisteredTestDaemon(harness.picoHome);
-  assert.ok(stoppedPids.includes(registration.pid));
+  await harness.candidates.stopAll();
   assert.equal(await processAlive(registration.pid), false, "teardown 返回前 daemon 必须退出");
 });
 
@@ -195,17 +200,15 @@ test("daemon candidate: runtime.shutdown gracefully stops the resident daemon", 
     stdio: "ignore",
     windowsHide: true,
   });
-  child.unref();
   t.after(async () => {
-    // 若关停断言失败，仍按测试直接持有的精确 PID 收口并等待退出。
-    if (child.pid !== undefined) await stopExactTestDaemon(child.pid);
+    await stopTestChildProcess(child);
   });
 
   const capability = await resolveStorageRoot({ path: harness.picoHome, kind: "interactive" });
   const controlDirectory = join(resolveRootControlNamespace(), capability.rootId);
   // 等 registration 发布（候选启动完成）。
   for (let i = 0; i < 60; i++) {
-    if (await readHostRegistration(controlDirectory).catch(() => undefined)) break;
+    if (await readHostRegistration(controlDirectory)) break;
     await delay(500);
   }
   const result = await connectResolvedRuntimeHost({
@@ -236,12 +239,8 @@ test("daemon candidate: runtime.shutdown gracefully stops the resident daemon", 
   const deadline = performance.now() + 15_000;
   let registrationGone = false;
   while (performance.now() < deadline) {
-    try {
-      registrationGone =
-        (await readHostRegistration(await findControlDirectory(harness.picoHome))) === undefined;
-    } catch {
-      registrationGone = true;
-    }
+    registrationGone =
+      (await readHostRegistration(await findControlDirectory(harness.picoHome))) === undefined;
     const lockReleased = !(await pathExists(harness.lockPath));
     const processExited = !(await processAlive(pid));
     if (registrationGone && lockReleased && processExited) break;
@@ -269,11 +268,10 @@ test("daemon candidate: rolling upgrade drains cached Session lease before succe
     stdio: "ignore",
     windowsHide: true,
   });
-  oldChild.unref();
   const capability = await resolveStorageRoot({ path: harness.picoHome, kind: "interactive" });
   const controlDirectory = join(resolveRootControlNamespace(), capability.rootId);
   t.after(async () => {
-    if (oldChild.pid !== undefined) await stopExactTestDaemon(oldChild.pid);
+    await stopTestChildProcess(oldChild);
   });
 
   const oldRegistration = await waitForRegistration(controlDirectory, 30_000);
@@ -331,6 +329,7 @@ test("daemon candidate: rolling upgrade drains cached Session lease before succe
     handshakeTimeoutMs: 5_000,
     candidateEntrypoint: pathToFileURL(mainPath).href,
     env: harness.env,
+    candidateLauncher: harness.candidates.launcher,
   });
   assert.equal(successor.kind, "connected", `新 daemon 接管失败：${JSON.stringify(successor)}`);
   if (successor.kind !== "connected") return;
@@ -364,7 +363,7 @@ async function waitForRegistration(
 ): Promise<Awaited<ReturnType<typeof readHostRegistration>>> {
   const deadline = performance.now() + timeoutMs;
   while (performance.now() < deadline) {
-    const registration = await readHostRegistration(controlDirectory).catch(() => undefined);
+    const registration = await readHostRegistration(controlDirectory);
     if (registration) return registration;
     await delay(100);
   }
