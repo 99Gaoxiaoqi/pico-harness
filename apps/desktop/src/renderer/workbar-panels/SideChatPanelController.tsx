@@ -140,9 +140,7 @@ export function SideChatPanelController({
   const pendingPrompt = data.prompts.filter((item) => runIds.has(item.runId)).at(-1);
   const items = useMemo(() => {
     const live = activeRun
-      ? data.timeline
-          .filter((item) => item.runId === activeRun.id)
-          .map(sideChatTimelineItem)
+      ? data.timeline.filter((item) => item.runId === activeRun.id).map(sideChatTimelineItem)
       : [];
     return mergeConversationItemGroups(conversation?.items ?? [], live);
   }, [activeRun, conversation?.items, data.timeline]);
