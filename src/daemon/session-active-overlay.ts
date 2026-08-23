@@ -84,7 +84,7 @@ interface ActiveStreamState {
  */
 export class PersistentActiveOverlay {
   readonly #streams = new Map<string, ActiveStreamState>();
-  #degradedPublished = false;
+  readonly #degradedRuns = new Set<string>();
 
   constructor(
     private readonly persistence: ActiveOverlayPersistence,
@@ -172,7 +172,7 @@ export class PersistentActiveOverlay {
       truncatedBeforeBytes: 0,
       complete: false,
       persistedOnce: false,
-      recoverable: true,
+      recoverable: !this.#degradedRuns.has(input.runId),
       flushChain: Promise.resolve(),
     };
     this.#streams.set(input.streamId, state);
@@ -207,14 +207,25 @@ export class PersistentActiveOverlay {
         state.persistedOnce = true;
         state.pendingBytes = state.endOffsetBytes - persistThroughOffset;
       } catch {
-        state.recoverable = false;
-        if (!this.#degradedPublished) {
-          this.#degradedPublished = true;
+        this.degradeRun(state.input.runId);
+        if (!this.#degradedRuns.has(state.input.runId)) {
+          this.#degradedRuns.add(state.input.runId);
           this.publisher.publishContinuityDegraded("partial_persistence_failed");
         }
       }
     });
     return state.flushChain;
+  }
+
+  private degradeRun(runId: string): void {
+    for (const state of this.#streams.values()) {
+      if (state.input.runId !== runId) continue;
+      state.recoverable = false;
+      if (state.timer) {
+        clearTimeout(state.timer);
+        state.timer = undefined;
+      }
+    }
   }
 
   private truncateRunIfNeeded(runId: string): void {
