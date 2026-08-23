@@ -1,10 +1,16 @@
 import { realpath } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import {
   connectOrSpawnRuntimeHost,
+  readHostRegistration,
+  resolveRootControlNamespace,
+  resolveStorageRoot,
   RUNTIME_HOST_PROTOCOL_VERSION,
+  RuntimeHostTransportError,
+  type HostRegistration,
   type RuntimeHostConnection,
   RuntimeHostOperationError,
 } from "@pico/runtime-host";
@@ -18,7 +24,8 @@ import {
   type RuntimeResult,
   type RuntimeSessionSubscriptionFrame,
 } from "./protocol.js";
-import { resolveCanonicalPicoHome } from "./endpoint.js";
+import { resolveCanonicalPicoHome, resolveLocalDaemonEndpoint } from "./endpoint.js";
+import { resolveLocalDaemonLockPath } from "./instance-lock.js";
 import {
   ensurePicoRuntimeHostEventOperationsRegistered,
   ensurePicoRuntimeHostOperationsRegistered,
@@ -92,6 +99,8 @@ const KERNEL_RETRY_SAFE_METHODS: ReadonlySet<RuntimeMethod> = new Set<RuntimeMet
   "events.replay",
 ]);
 const KERNEL_RETRY_BACKOFF_MS = 200;
+const LEGACY_SHUTDOWN_CONFIRMATION_TIMEOUT_MS = 12_000;
+const LEGACY_SHUTDOWN_CONFIRMATION_POLL_MS = 100;
 
 function sleep(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -567,6 +576,7 @@ class RuntimeSubscription {
 
 class KernelRuntimeConnection implements RuntimeTransportConnection {
   private hostConnection?: RuntimeHostConnection;
+  private hostRegistration?: HostRegistration;
   private connecting?: Promise<void>;
   private eventListener?: (event: Record<string, unknown>) => void;
   private disconnectListener?: () => void;
@@ -588,11 +598,19 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
   async shutdownHost(): Promise<void> {
     await this.open();
     const connection = this.hostConnection;
-    if (!connection) {
+    const registration = this.hostRegistration;
+    if (!connection || !registration) {
       throw new RuntimeClientError("RUNTIME_DISCONNECTED", "本机 Runtime daemon 连接已断开", true);
     }
-    // daemon 收到请求后进入排空：kernel 等本操作响应写出后 destroy 连接并退出。
-    await connection.requestRegistered("runtime.shutdown", {});
+    try {
+      // 新 daemon 在响应刷出后进入排空；旧 daemon 可能已经接受关停并退出，却在
+      // 客户端读到响应前断开。后者只在确认旧进程、registration 与升级锁均退出
+      // 后视为成功，避免把仍存活的旧 daemon 误判成可升级。
+      await connection.requestRegistered("runtime.shutdown", {});
+    } catch (error) {
+      if (!isShutdownDisconnect(error)) throw error;
+      await this.confirmDisconnectedShutdown(registration, error);
+    }
   }
 
   async open(): Promise<void> {
@@ -712,13 +730,82 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
       () => this.handleKernelDisconnect(connection),
       () => this.handleKernelDisconnect(connection),
     );
+    const capability = await resolveStorageRoot({ path: this.rootPath, kind: "interactive" });
+    const registration = await readHostRegistration(
+      join(resolveRootControlNamespace(), capability.rootId),
+    );
+    if (!registration || registration.hostEpoch !== connection.hostEpoch) {
+      await connection.close().catch(() => undefined);
+      throw new RuntimeClientError(
+        "RUNTIME_DISCONNECTED",
+        "本机 Runtime daemon registration 已在连接期间变更",
+        true,
+      );
+    }
+    this.hostRegistration = registration;
     this.hostConnection = connection;
   }
 
   private handleKernelDisconnect(connection: RuntimeHostConnection): void {
     if (this.hostConnection !== connection) return;
     this.hostConnection = undefined;
+    this.hostRegistration = undefined;
     this.disconnectListener?.();
+  }
+
+  private async confirmDisconnectedShutdown(
+    registration: HostRegistration,
+    cause: unknown,
+  ): Promise<void> {
+    const capability = await resolveStorageRoot({ path: this.rootPath, kind: "interactive" });
+    const controlDirectory = join(resolveRootControlNamespace(), capability.rootId);
+    const legacyLockPath = resolveLocalDaemonLockPath(
+      resolveLocalDaemonEndpoint({ picoHome: this.rootPath }),
+    );
+    const deadline = performance.now() + LEGACY_SHUTDOWN_CONFIRMATION_TIMEOUT_MS;
+    let lastState: string;
+    do {
+      const currentRegistration = await readHostRegistration(controlDirectory);
+      const processExited = !isProcessAlive(registration.pid);
+      const registrationExited = currentRegistration?.hostEpoch !== registration.hostEpoch;
+      const legacyLockExited = !existsSync(legacyLockPath);
+      if (processExited && registrationExited && legacyLockExited) return;
+      lastState = `pidExited=${processExited}, registrationExited=${registrationExited}, legacyLockExited=${legacyLockExited}`;
+      await sleep(
+        Math.min(LEGACY_SHUTDOWN_CONFIRMATION_POLL_MS, Math.max(0, deadline - performance.now())),
+      );
+    } while (performance.now() < deadline);
+    throw new RuntimeClientError(
+      "RUNTIME_SHUTDOWN_UNCONFIRMED",
+      `Runtime daemon 断连后仍未完成关停确认（PID ${registration.pid}；${lastState}）`,
+      true,
+      { cause },
+    );
+  }
+}
+
+function isShutdownDisconnect(error: unknown): boolean {
+  if (error instanceof RuntimeHostTransportError) {
+    return error.code === "read_eof" || error.code === "closed";
+  }
+  const code =
+    typeof error === "object" && error !== null && "code" in error
+      ? (error as { code?: unknown }).code
+      : undefined;
+  return code === "ECONNRESET" || code === "EPIPE";
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      (error as { code?: unknown }).code === "EPERM"
+    );
   }
 }
 

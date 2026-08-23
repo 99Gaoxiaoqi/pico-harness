@@ -338,6 +338,8 @@ test("daemon candidate: rolling upgrade drains cached Session lease before succe
   });
   assert.equal(successor.kind, "connected", `新 daemon 接管失败：${JSON.stringify(successor)}`);
   if (successor.kind !== "connected") return;
+  const successorStatus = await waitForReadyStatus(successor.connection, 15_000);
+  assert.equal(successorStatus.state, "ready", "successor daemon 必须 ready 后再接管 Session");
   const successorRegistration = await readHostRegistration(controlDirectory);
   assert.ok(successorRegistration);
   assert.notEqual(successorRegistration.pid, oldRegistration.pid);
