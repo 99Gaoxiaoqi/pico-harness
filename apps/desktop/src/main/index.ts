@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import { join } from "node:path";
-import { parseDesktopRuntimeResult } from "@pico/protocol";
+import { parseDesktopRuntimeResult, RUNTIME_ERROR_CODES } from "@pico/protocol";
 import { DESKTOP_IPC_CHANNELS } from "../preload/contract.js";
 import { createPlatformServices } from "../platform/index.js";
 import { registerDesktopIpcHandlers } from "./ipc.js";
@@ -15,6 +15,7 @@ import { createEmbeddedBrowserAuthority } from "./browser-manager.js";
 import {
   createDesktopTerminalCleanupFence,
   DesktopTerminalGenerationController,
+  resumeDesktopTerminalGenerationWithUpgrade,
 } from "./daemon-controller.js";
 
 let mainWindow: BrowserWindow | undefined;
@@ -51,7 +52,17 @@ const cleanupDesktopTerminalGeneration = (): Promise<void> =>
   terminalGeneration.cleanup(stopAllDesktopTerminals);
 const openDesktopTerminalGeneration = (): Promise<void> =>
   terminalGeneration.open(async () => {
-    await runtime.request("terminal.resume", {});
+    await resumeDesktopTerminalGenerationWithUpgrade({
+      resume: async () => {
+        await runtime.request("terminal.resume", {});
+      },
+      shutdownLegacyHost: () => runtime.shutdownDaemon(),
+      reconnect: async () => {
+        parseDesktopRuntimeResult("runtime.ping", await pingUntilReady());
+      },
+      isMethodNotFound: (error) =>
+        error instanceof RuntimeClientError && error.code === RUNTIME_ERROR_CODES.METHOD_NOT_FOUND,
+    });
   });
 const terminalCleanupFence = createDesktopTerminalCleanupFence(
   { stopAll: cleanupDesktopTerminalGeneration },
@@ -128,6 +139,7 @@ if (!app.requestSingleInstanceLock()) {
         lifecycle,
         browser,
         isTerminalCreateAllowed: () => terminalGeneration.isCreateAllowed(),
+        acquireTerminalCreate: () => terminalGeneration.acquireCreate(),
       });
       disposeUpdater = configureAutoUpdates(() => lifecycle.markQuitting());
       await openMainWindow();

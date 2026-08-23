@@ -10,6 +10,7 @@ import {
   createDesktopTerminalCleanupFence,
   DesktopTerminalGenerationController,
   isDesktopRuntimeInvocationAllowed,
+  resumeDesktopTerminalGenerationWithUpgrade,
   type DesktopDaemonShutdownFenceOptions,
 } from "../../apps/desktop/src/main/daemon-controller.js";
 import {
@@ -752,6 +753,25 @@ test("Desktop 窗口关闭清理完成后才允许重开代际", async () => {
   assert.equal(controller.isCreateAllowed(), true);
 });
 
+test("Desktop cleanup 先 drain 已接纳 create，再 stopAll 且拒绝迟到 create", async () => {
+  const controller = new DesktopTerminalGenerationController();
+  await controller.open(async () => undefined);
+  const releaseCreate = controller.acquireCreate();
+  assert.ok(releaseCreate);
+  let stopAllCount = 0;
+  const cleanup = controller.cleanup(async () => {
+    stopAllCount++;
+  });
+
+  await waitForImmediate();
+  assert.equal(controller.acquireCreate(), undefined);
+  assert.equal(stopAllCount, 0, "已接纳 create 完成前不得越过 stopAll fence");
+  releaseCreate();
+  await cleanup;
+  assert.equal(stopAllCount, 1);
+  assert.equal(controller.isCreateAllowed(), false);
+});
+
 test("Desktop 打开过程中再次退出不会被迟到 resume 解封", async () => {
   const controller = new DesktopTerminalGenerationController();
   const resumeEntered = deferred();
@@ -775,6 +795,65 @@ test("Desktop 打开过程中再次退出不会被迟到 resume 解封", async (
   cleanupRelease.resolve();
   await cleanup;
   assert.equal(controller.isCreateAllowed(), false);
+});
+
+test("Desktop cleanup 失败保持 sealed，open 重试成功后才 resume", async () => {
+  const controller = new DesktopTerminalGenerationController();
+  let cleanupAttempts = 0;
+  let resumeCount = 0;
+  const stopAll = async () => {
+    cleanupAttempts++;
+    if (cleanupAttempts < 3) throw new Error("cleanup unavailable");
+  };
+
+  await assert.rejects(controller.cleanup(stopAll), /cleanup unavailable/u);
+  assert.equal(controller.isCreateAllowed(), false);
+  await assert.rejects(
+    controller.open(async () => {
+      resumeCount++;
+    }),
+    /cleanup unavailable/u,
+  );
+  assert.equal(resumeCount, 0, "cleanup 重试失败时不得调用 resume");
+  assert.equal(controller.isCreateAllowed(), false);
+
+  await controller.open(async () => {
+    resumeCount++;
+  });
+  assert.equal(cleanupAttempts, 3);
+  assert.equal(resumeCount, 1);
+  assert.equal(controller.isCreateAllowed(), true);
+});
+
+test("Desktop 只在 resume 方法缺失时优雅接管旧 daemon", async () => {
+  const order: string[] = [];
+  let resumeAttempts = 0;
+  await resumeDesktopTerminalGenerationWithUpgrade({
+    resume: async () => {
+      order.push(`resume-${++resumeAttempts}`);
+      if (resumeAttempts === 1) throw new Error("method-not-found");
+    },
+    shutdownLegacyHost: async () => {
+      order.push("shutdown");
+    },
+    reconnect: async () => {
+      order.push("reconnect");
+    },
+    isMethodNotFound: (error) => String(error).includes("method-not-found"),
+  });
+  assert.deepEqual(order, ["resume-1", "shutdown", "reconnect", "resume-2"]);
+
+  await assert.rejects(
+    resumeDesktopTerminalGenerationWithUpgrade({
+      resume: async () => {
+        throw new Error("permission-denied");
+      },
+      shutdownLegacyHost: async () => assert.fail("非 method-not-found 不得关停 daemon"),
+      reconnect: async () => assert.fail("非 method-not-found 不得重连"),
+      isMethodNotFound: () => false,
+    }),
+    /permission-denied/u,
+  );
 });
 
 test("Hook reloader stop fences an in-flight reload and supports a fresh generation", async (context) => {
