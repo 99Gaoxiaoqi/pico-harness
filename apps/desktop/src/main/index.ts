@@ -34,6 +34,7 @@ const runtime = new LocalDaemonRuntimeClientAdapter(undefined, {
 const lifecycle = new DesktopLifecycleController(() => mainWindow);
 const browser = createEmbeddedBrowserAuthority({
   getWindow: () => mainWindow,
+  userDataPath: app.getPath("userData"),
   onState: (state) => {
     const contents = mainWindow?.webContents;
     if (!contents || contents.isDestroyed()) return;
@@ -48,8 +49,9 @@ const requestDesktopShutdown = (exitCode?: number): void => {
 const stopAllDesktopTerminals = async (): Promise<void> => {
   await runtime.request("terminal.stopAll", {});
 };
-const cleanupDesktopTerminalGeneration = (): Promise<void> =>
-  terminalGeneration.cleanup(stopAllDesktopTerminals);
+const cleanupDesktopTerminalGeneration = async (): Promise<void> => {
+  await Promise.all([terminalGeneration.cleanup(stopAllDesktopTerminals), browser.dispose()]);
+};
 const openDesktopTerminalGeneration = (): Promise<void> =>
   terminalGeneration.open(async () => {
     await resumeDesktopTerminalGenerationWithUpgrade({
