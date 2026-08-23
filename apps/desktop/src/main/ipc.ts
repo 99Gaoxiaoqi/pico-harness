@@ -210,6 +210,16 @@ export function registerDesktopIpcHandlers(options: {
     return success(undefined);
   });
 
+  ipcMain.handle(DESKTOP_IPC_CHANNELS.browserAcquireViewport, (event, value: unknown) => {
+    if (!trusted(event)) return unauthorized();
+    if (!isNonEmptyString(value)) return invalidBrowserRequest();
+    try {
+      return success(browser.acquireViewport(value));
+    } catch (error) {
+      return failure(error);
+    }
+  });
+
   ipcMain.handle(DESKTOP_IPC_CHANNELS.browserSetViewport, (event, value: unknown) => {
     if (!trusted(event)) return unauthorized();
     const input = readBrowserViewport(value);
@@ -245,6 +255,9 @@ export function registerDesktopIpcHandlers(options: {
   browserSessionHandler(DESKTOP_IPC_CHANNELS.browserStop, (sessionId) => browser.stop(sessionId));
   browserSessionHandler(DESKTOP_IPC_CHANNELS.browserGetState, (sessionId) =>
     browser.getState(sessionId),
+  );
+  browserSessionHandler(DESKTOP_IPC_CHANNELS.browserClearPage, (sessionId) =>
+    browser.clearPage(sessionId),
   );
   browserSessionHandler(DESKTOP_IPC_CHANNELS.browserClose, (sessionId) => browser.close(sessionId));
 
@@ -400,7 +413,11 @@ function readBrowserViewport(value: unknown):
   if (!isRecord(value) || !hasExactKeys(value, ["sessionId", "rect", "generation"])) {
     return undefined;
   }
-  if (!isNonEmptyString(value.sessionId) || !Number.isSafeInteger(value.generation)) {
+  if (
+    !isNonEmptyString(value.sessionId) ||
+    !Number.isSafeInteger(value.generation) ||
+    (value.generation as number) <= 0
+  ) {
     return undefined;
   }
   if (value.rect === null) {
