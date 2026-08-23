@@ -8,10 +8,33 @@ import {
   shouldActivateSideChatData,
   sideChatCanSend,
 } from "../../apps/desktop/src/renderer/workbar-panels/index.js";
+import { resolveSideChatCreationTarget } from "../../apps/desktop/src/renderer/workbar-panels/side-chat-creation.js";
 
 Object.assign(globalThis, { React });
 
 const noop = () => undefined;
+
+test("Side Chat resolves the decoded Runtime sessionId for its temporary branch", () => {
+  assert.deepEqual(
+    resolveSideChatCreationTarget({
+      session: {
+        sessionId: "child-session",
+        workspacePath: "/workspace",
+        title: "Temporary branch",
+        status: "active",
+        pinned: false,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+      sourceSessionId: "parent-session",
+      throughEventId: "event-12",
+    }),
+    {
+      targetSessionId: "child-session",
+      throughEventId: "event-12",
+    },
+  );
+});
 
 test("Side Chat helpers gate data activity without coupling it to rendered state", () => {
   assert.equal(shouldActivateSideChatData(true, "creating"), true);
