@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { isAbsolute, relative, resolve } from "node:path";
 import { realpath } from "node:fs/promises";
+import { setTimeout as delay } from "node:timers/promises";
 
 export type WorkbarTerminalCapability = "pty" | "pipe";
 export type WorkbarTerminalStatus = "running" | "exited" | "stopped" | "interrupted";
@@ -865,10 +866,6 @@ function splitUtf8(value: string, maximumBytes: number): string[] {
 
 function eventBytes(event: WorkbarTerminalEvent): number {
   return event.kind === "output" ? Buffer.byteLength(event.data) : 64;
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 }
 
 function isValidRecord(value: WorkbarTerminalRecord): boolean {
