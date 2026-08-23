@@ -3967,6 +3967,10 @@ function createPreviewBridge(): DesktopBridge {
       getState: () => success(null),
       close: () => success(undefined),
       clearData: () => success(undefined),
+      click: (sessionId, selector) =>
+        success({ state: emptyPreviewBrowserState(sessionId), selector, tagName: "button" }),
+      type: (sessionId, selector) =>
+        success({ state: emptyPreviewBrowserState(sessionId), selector, tagName: "input" }),
       onState: () => () => undefined,
     },
   };

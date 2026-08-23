@@ -1,4 +1,5 @@
 import { ArrowLeft, ArrowRight, Globe2, LoaderCircle, RefreshCw, X } from "lucide-react";
+import type { JsonObject, RuntimeBrowserAgentCommand } from "@pico/protocol";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import type { DesktopBridge, DesktopBrowserState } from "../../preload/contract.js";
 
@@ -71,6 +72,143 @@ export function BrowserWorkbarPanel({ bridge, sessionId, active }: BrowserWorkba
       });
     };
   }, [active, bridge, sessionId]);
+
+  useEffect(() => {
+    if (!active || !state?.visible) return;
+    let disposed = false;
+    let leaseId: string | undefined;
+    const generation = generationRef.current;
+
+    const executeCommand = async (command: RuntimeBrowserAgentCommand): Promise<JsonObject> => {
+      switch (command.action) {
+        case "navigate": {
+          const url = command.input["url"];
+          if (typeof url !== "string") throw new Error("browser_navigate 缺少 url");
+          const result = await bridge.browser.navigate(sessionId, url);
+          if (!result.ok) throw new Error(result.error.message);
+          consume(result.value);
+          return browserStateResult(result.value);
+        }
+        case "back":
+        case "forward":
+        case "reload": {
+          const result = await bridge.browser[command.action](sessionId);
+          if (!result.ok) throw new Error(result.error.message);
+          consume(result.value);
+          return browserStateResult(result.value);
+        }
+        case "get_state": {
+          const result = await bridge.browser.getState(sessionId);
+          if (!result.ok) throw new Error(result.error.message);
+          if (!result.value?.visible) throw new Error("浏览器面板当前不可见");
+          consume(result.value);
+          return browserStateResult(result.value);
+        }
+        case "click": {
+          const selector = command.input["selector"];
+          if (typeof selector !== "string") throw new Error("browser_click 缺少 selector");
+          const result = await bridge.browser.click(sessionId, selector);
+          if (!result.ok) throw new Error(result.error.message);
+          consume(result.value.state);
+          return {
+            selector: result.value.selector,
+            tagName: result.value.tagName,
+            state: browserStateResult(result.value.state),
+          };
+        }
+        case "type": {
+          const selector = command.input["selector"];
+          const text = command.input["text"];
+          const clear = command.input["clear"];
+          if (typeof selector !== "string" || typeof text !== "string") {
+            throw new Error("browser_type 缺少 selector 或 text");
+          }
+          const result = await bridge.browser.type(
+            sessionId,
+            selector,
+            text,
+            typeof clear === "boolean" ? clear : true,
+          );
+          if (!result.ok) throw new Error(result.error.message);
+          consume(result.value.state);
+          return {
+            selector: result.value.selector,
+            tagName: result.value.tagName,
+            state: browserStateResult(result.value.state),
+          };
+        }
+      }
+    };
+
+    const run = async (): Promise<void> => {
+      let expiresAt = 0;
+      while (!disposed) {
+        try {
+          if (!leaseId || expiresAt - Date.now() < 3_000) {
+            const lease = await bridge.runtime["browser.agent.lease"]({
+              sessionId,
+              visible: true,
+              generation,
+              ...(leaseId ? { leaseId } : {}),
+            });
+            if (!lease.ok) throw new Error(lease.error.message);
+            leaseId = lease.value.leaseId;
+            expiresAt = lease.value.expiresAt;
+          }
+          const next = await bridge.runtime["browser.agent.next"]({
+            sessionId,
+            leaseId,
+            waitMs: 1_000,
+          });
+          if (!next.ok) throw new Error(next.error.message);
+          const command = next.value.command;
+          if (!command || disposed) continue;
+          let resolution:
+            | { readonly ok: true; readonly result: JsonObject }
+            | { readonly ok: false; readonly error: string };
+          try {
+            const result = await executeCommand(command);
+            if (disposed) continue;
+            resolution = { ok: true, result };
+          } catch (error) {
+            if (disposed) continue;
+            resolution = {
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            };
+          }
+          const settled = await bridge.runtime["browser.agent.resolve"]({
+            sessionId,
+            leaseId,
+            commandId: command.commandId,
+            ...resolution,
+          });
+          if (!settled.ok) throw new Error(settled.error.message);
+        } catch (error) {
+          if (!disposed) {
+            setMessage(error instanceof Error ? error.message : String(error));
+            window.setTimeout(() => {
+              if (!disposed) void run();
+            }, 1_000);
+            return;
+          }
+        }
+      }
+    };
+
+    void run();
+    return () => {
+      disposed = true;
+      if (leaseId) {
+        void bridge.runtime["browser.agent.lease"]({
+          sessionId,
+          visible: false,
+          generation: ++generationRef.current,
+          leaseId,
+        });
+      }
+    };
+  }, [active, bridge, consume, sessionId, state?.visible]);
 
   const perform = useCallback(
     async (
@@ -180,4 +318,19 @@ export function BrowserWorkbarPanel({ bridge, sessionId, active }: BrowserWorkba
       </div>
     </section>
   );
+}
+
+function browserStateResult(state: DesktopBrowserState): JsonObject {
+  return {
+    sessionId: state.sessionId,
+    url: state.url,
+    title: state.title,
+    canGoBack: state.canGoBack,
+    canGoForward: state.canGoForward,
+    loading: state.loading,
+    secure: state.secure,
+    hasPage: state.hasPage,
+    visible: state.visible,
+    generation: state.generation,
+  };
 }
