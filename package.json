@@ -15,10 +15,11 @@
     "dist"
   ],
   "bundleDependencies": [
-    "@pico/protocol"
+    "@pico/protocol",
+    "@pico/transcript-replica"
   ],
   "scripts": {
-    "predev": "npm run check:storage && npm run build:protocol",
+    "predev": "npm run check:storage && npm run build:protocol && npm run build:transcript-replica",
     "dev": "tsx --import ./src/tui/preload-env.ts src/cli/main.ts",
     "internal:headless:dev": "tsx --import ./src/tui/preload-env.ts src/internal/headless-one-shot-main.ts",
     "internal:headless": "node dist/internal/headless-one-shot-main.js",
@@ -32,14 +33,15 @@
     "desktop:typecheck": "npm run typecheck --workspace @pico/desktop",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build:protocol": "npm run build --workspace @pico/protocol",
+    "build:transcript-replica": "npm run build --workspace @pico/transcript-replica",
     "build:runtime-host": "npm run build --workspace @pico/runtime-host",
-    "prebuild": "npm run clean && npm run check:storage && npm run build:protocol",
+    "prebuild": "npm run clean && npm run check:storage && npm run build:protocol && npm run build:transcript-replica",
     "build": "tsc -p tsconfig.build.json",
     "postbuild": "node -e \"require('node:fs').chmodSync('dist/cli/main.js',0o755)\"",
     "prepack": "npm run build",
-    "pretypecheck": "npm run build:protocol && npm run build:runtime-host",
+    "pretypecheck": "npm run build:protocol && npm run build:transcript-replica && npm run build:runtime-host",
     "typecheck": "tsc --noEmit",
-    "pretest:integration": "npm run check:storage && npm run build:protocol && npm run build:runtime-host",
+    "pretest:integration": "npm run check:storage && npm run build:protocol && npm run build:transcript-replica && npm run build:runtime-host",
     "test:integration": "node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/*.test.ts",
     "pretest:integration:windows": "npm run check:storage && npm run build:protocol",
     "test:integration:windows": "node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/windows/hook-security.test.ts tests/integration/windows/file-write-dacl.test.ts tests/integration/windows/yolo-shell-hardline.test.ts",
@@ -63,6 +65,7 @@
   "dependencies": {
     "@pico/protocol": "*",
     "@pico/runtime-host": "*",
+    "@pico/transcript-replica": "*",
     "gpt-tokenizer": "^3.4.0",
     "ink": "^7.1.0",
     "js-yaml": "^5.1.0",
