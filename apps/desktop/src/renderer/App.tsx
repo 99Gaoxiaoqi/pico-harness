@@ -134,6 +134,7 @@ import {
 } from "./workbar/index.js";
 import "./workbar/SessionWorkbar.css";
 import { BrowserWorkbarPanel } from "./workbar-panels/BrowserWorkbarPanel.js";
+import { isBrowserPanelActive } from "./workbar-panels/browser-agent-lease-controller.js";
 import { SideChatPanelController } from "./workbar-panels/SideChatPanelController.js";
 import {
   WorkbarPanelHost,
@@ -1852,7 +1853,13 @@ function ConversationPage() {
         );
       }
       if (tab.kind === "browser" && sessionId) {
-        return <BrowserWorkbarPanel bridge={window.pico} sessionId={sessionId} active={active} />;
+        return (
+          <BrowserWorkbarPanel
+            bridge={window.pico}
+            sessionId={sessionId}
+            active={isBrowserPanelActive(active, session?.status)}
+          />
+        );
       }
       if (tab.kind === "side-chat") {
         return (
