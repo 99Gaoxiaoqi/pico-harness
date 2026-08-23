@@ -69,9 +69,9 @@ export const PICO_TOOL_GROUPS: readonly ToolGroupDef[] = [
   },
   {
     id: "background-task",
-    label: "Background Tasks",
-    description: "管理后台任务：列出、查看输出、停止",
-    toolNames: ["task_list", "task_output", "task_stop"],
+    label: "Tasks",
+    description: "管理 Session 任务账本与后台进程",
+    toolNames: ["task_list", "task_create", "task_update", "task_get", "task_output", "task_stop"],
     economy: "deferred",
   },
   {

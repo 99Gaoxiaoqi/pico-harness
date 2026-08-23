@@ -10,10 +10,17 @@ import type { ToolDefinition } from "../schema/message.js";
 import { ToolAccesses } from "./tool-access.js";
 import { BackgroundManager } from "./background-manager.js";
 
+export interface SessionTaskListPort {
+  readonly list: () => unknown;
+}
+
 export class TaskListTool implements BaseTool {
   readonly readOnly = true;
 
-  constructor(private readonly backgroundManager: BackgroundManager) {}
+  constructor(
+    private readonly backgroundManager: BackgroundManager,
+    private readonly sessionTasks?: SessionTaskListPort,
+  ) {}
 
   name(): string {
     return "task_list";
@@ -26,15 +33,27 @@ export class TaskListTool implements BaseTool {
   definition(): ToolDefinition {
     return {
       name: "task_list",
-      description: "列出当前会话中由 bash background=true 启动的后台任务。",
+      description:
+        "列出任务。无参或 scope=background 保持旧语义：列出 bash background=true 后台进程；scope=session 读取当前 Session 的持久化任务账本。",
       inputSchema: {
         type: "object",
-        properties: {},
+        properties: {
+          scope: {
+            type: "string",
+            enum: ["background", "session"],
+            description: "任务域；缺省为 background，保持旧客户端兼容。",
+          },
+        },
       },
     };
   }
 
-  async execute(_args: string): Promise<string> {
+  async execute(args: string): Promise<string> {
+    const scope = parseTaskListScope(args);
+    if (scope === "session") {
+      if (!this.sessionTasks) throw new Error("当前 Runtime 未连接 Session 任务账本");
+      return JSON.stringify(this.sessionTasks.list());
+    }
     return JSON.stringify(
       this.backgroundManager.list().map((task) => ({
         ...task,
@@ -42,6 +61,19 @@ export class TaskListTool implements BaseTool {
         endedAt: task.endedAt?.toISOString() ?? null,
       })),
     );
+  }
+}
+
+function parseTaskListScope(args: string): "background" | "session" {
+  if (!args.trim()) return "background";
+  try {
+    const input = JSON.parse(args) as { scope?: unknown };
+    if (input.scope === undefined || input.scope === "background") return "background";
+    if (input.scope === "session") return "session";
+    throw new Error("scope 必须是 background 或 session");
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("scope ")) throw error;
+    throw new Error("参数解析失败: 期望 JSON 对象", { cause: error });
   }
 }
 

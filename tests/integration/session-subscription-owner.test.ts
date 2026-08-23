@@ -425,7 +425,7 @@ test("page and advance operations preserve fixed watermark inputs", async () => 
   assert.equal(source.advanceCalls.length, 1);
 });
 
-test("committed transcript watermark is published once on the sequenced Session channel", async () => {
+test("committed transcript watermark and workbar invalidations share the sequenced Session channel", async () => {
   const source = new FakeSource();
   const registry = new SessionSubscriptionRegistry("host-epoch-1", source);
   const received: RuntimeSessionSubscriptionFrame[] = [];
@@ -442,7 +442,7 @@ test("committed transcript watermark is published once on the sequenced Session 
 
   source.currentWatermark = { ...watermark, throughSequence: 9 };
   registry.publishTranscriptAdvanced(workspacePath, sessionId);
-  await waitFor(() => received.length === 1);
+  await waitFor(() => received.length === 3);
   assert.deepEqual(received[0], {
     hostEpoch: "host-epoch-1",
     subscriptionId: opened.subscriptionId,
@@ -451,10 +451,18 @@ test("committed transcript watermark is published once on the sequenced Session 
     type: "subscription.transcript_advanced",
     watermark: source.currentWatermark,
   });
+  assert.deepEqual(
+    received
+      .slice(1)
+      .map((frame) =>
+        frame.type === "subscription.resource_changed" ? frame.resource : frame.type,
+      ),
+    ["trace", "context"],
+  );
 
   registry.publishTranscriptAdvanced(workspacePath, sessionId);
   await tick();
-  assert.equal(received.length, 1, "同一 durable watermark 不得重复发布");
+  assert.equal(received.length, 3, "同一 durable watermark 不得重复发布");
 });
 
 test("partial persistence failure is emitted once on the sequenced Session channel", async () => {
