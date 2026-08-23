@@ -224,11 +224,11 @@ export function registerDesktopIpcHandlers(options: {
     return success(undefined);
   });
 
-  ipcMain.handle(DESKTOP_IPC_CHANNELS.browserAcquireViewport, (event, value: unknown) => {
+  ipcMain.handle(DESKTOP_IPC_CHANNELS.browserAcquireViewport, async (event, value: unknown) => {
     if (!trusted(event)) return unauthorized();
     if (!isNonEmptyString(value)) return invalidBrowserRequest();
     try {
-      return success(browser.acquireViewport(value));
+      return success(await browser.acquireViewport(value));
     } catch (error) {
       return failure(error);
     }
