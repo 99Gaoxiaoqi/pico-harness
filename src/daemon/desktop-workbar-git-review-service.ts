@@ -53,7 +53,6 @@ export class DesktopWorkbarGitReviewService {
       revision: diff.revision,
       patch: diff.patch,
       truncated: false,
-      binary: diff.binary,
     };
   }
 }

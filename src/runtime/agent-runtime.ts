@@ -1812,52 +1812,56 @@ export async function executeAgentRuntime(
         ),
       );
     }
-    registerDelegationTools(
-      registry,
-      engine,
-      workDir,
-      dependencies.isolatedHeadless
-        ? []
-        : await loadProfiles(workDir, {
-            externalSources: pluginSnapshot?.agentSources,
-            includeClaudeProjectResources:
-              claudeCompatibility.enabled && claudeCompatibility.projectResources,
-            includeClaudeUserResources:
-              claudeCompatibility.enabled && claudeCompatibility.userResources,
-            env: runtimeEnv,
-            picoHome,
-          }),
-      delegationManager,
-      workspaceRoots,
-      // 主会话的 mode 只控制主 Agent 权限。worker/explore 是独立的不可信执行边界，
-      // 必须始终使用 worktree + OS 沙箱，不得因 default/auto 模式退化为无沙箱 Bash。
-      { config: picoConfig.sandbox },
-      session.id,
-      !ownsRuntimeState,
-      runtimeState.taskHostRuntime?.supervisor,
-      reporter,
-      skillLoaderFactory,
-      activeHookService,
-      subagentModelCatalog,
-      runtimeEnv,
-      runtimeState.codeIntelligence,
-      activeHookService
-        ? async (profile) => {
-            if (!profile.sourcePath || profile.hooks === undefined) return async () => undefined;
-            return await runtimeState.activateComponentHookLease({
-              kind: "agent",
-              path: profile.sourcePath,
-              componentId: profile.name,
-              inlineHooks: profile.hooks,
-              ...(profile.hookTrustAuthority ? { trustAuthority: profile.hookTrustAuthority } : {}),
-            });
-          }
-        : undefined,
-      options.approvedPlan
-        ? createDelegatePlanStepCoordinator(() => planRegistryOptions!.coordinator())
-        : undefined,
-      hostKind,
-    );
+    if (!sideConversation) {
+      registerDelegationTools(
+        registry,
+        engine,
+        workDir,
+        dependencies.isolatedHeadless
+          ? []
+          : await loadProfiles(workDir, {
+              externalSources: pluginSnapshot?.agentSources,
+              includeClaudeProjectResources:
+                claudeCompatibility.enabled && claudeCompatibility.projectResources,
+              includeClaudeUserResources:
+                claudeCompatibility.enabled && claudeCompatibility.userResources,
+              env: runtimeEnv,
+              picoHome,
+            }),
+        delegationManager,
+        workspaceRoots,
+        // 主会话的 mode 只控制主 Agent 权限。worker/explore 是独立的不可信执行边界，
+        // 必须始终使用 worktree + OS 沙箱，不得因 default/auto 模式退化为无沙箱 Bash。
+        { config: picoConfig.sandbox },
+        session.id,
+        !ownsRuntimeState,
+        runtimeState.taskHostRuntime?.supervisor,
+        reporter,
+        skillLoaderFactory,
+        activeHookService,
+        subagentModelCatalog,
+        runtimeEnv,
+        runtimeState.codeIntelligence,
+        activeHookService
+          ? async (profile) => {
+              if (!profile.sourcePath || profile.hooks === undefined) return async () => undefined;
+              return await runtimeState.activateComponentHookLease({
+                kind: "agent",
+                path: profile.sourcePath,
+                componentId: profile.name,
+                inlineHooks: profile.hooks,
+                ...(profile.hookTrustAuthority
+                  ? { trustAuthority: profile.hookTrustAuthority }
+                  : {}),
+              });
+            }
+          : undefined,
+        options.approvedPlan
+          ? createDelegatePlanStepCoordinator(() => planRegistryOptions!.coordinator())
+          : undefined,
+        hostKind,
+      );
+    }
     if (backgroundPolicy) pruneRegistryToBackgroundAllowlist(registry, backgroundPolicy);
     dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
 

@@ -72,7 +72,11 @@ export function registerDesktopIpcHandlers(options: {
         envelope.method,
         await runtime.request(envelope.method, params),
       );
-      if (envelope.method === "session.delete" || envelope.method === "session.archive") {
+      if (
+        envelope.method === "session.delete" ||
+        envelope.method === "session.archive" ||
+        envelope.method === "sideChat.close"
+      ) {
         const rawParams: unknown = params;
         const sessionId = isRecord(rawParams) ? rawParams["sessionId"] : undefined;
         if (isNonEmptyString(sessionId)) await browser.close(sessionId);

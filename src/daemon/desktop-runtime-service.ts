@@ -2,6 +2,7 @@ import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from
 import { existsSync, unwatchFile, watchFile } from "node:fs";
 import { access, readFile, realpath, stat } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { WorkbarTerminalError } from "@pico/runtime-host";
 import { listRewindPointSummaries } from "../cli/file-history.js";
 import {
   createCliSessionId,
@@ -29,6 +30,7 @@ import {
   setSessionCollaborationMode,
   setSessionOrchestrationMode,
   setSessionPermissionMode,
+  setSessionSideConversation,
   setSessionThinkingEffort,
   setSessionTitle,
   addSessionAdditionalDirectory,
@@ -233,6 +235,13 @@ import { DesktopRequestRouter, type DesktopRequestHandlers } from "./desktop-req
 import { createDesktopSessionRequestHandlers } from "./desktop-session-request-handlers.js";
 import { createDesktopMemoryRequestHandlers } from "./desktop-memory-request-handlers.js";
 import { createDesktopWorkbarRequestHandlers } from "./desktop-workbar-request-handlers.js";
+import { DesktopWorkbarGitReviewService } from "./desktop-workbar-git-review-service.js";
+import { DesktopWorkbarTerminalService } from "./desktop-workbar-terminal-service.js";
+import { WorkbarGitReviewError } from "./workbar-git-review.js";
+import {
+  SideChatAuthority,
+  SideChatNoSettledTurnError,
+} from "./side-chat-authority.js";
 import { DesktopMemoryService } from "./desktop-memory-service.js";
 import type { ImagePart } from "../schema/message.js";
 import { createModelContextReport } from "../provider/model-runtime-report.js";
@@ -335,6 +344,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private readonly ownsPluginRuntimeSnapshotRegistry: boolean;
   private readonly memoryService: DesktopMemoryService;
   private readonly ownsMemoryService: boolean;
+  private readonly gitReviewService: DesktopWorkbarGitReviewService;
+  private readonly terminalService: DesktopWorkbarTerminalService;
   private readonly requestRouter: DesktopRequestRouter;
   private readonly unsubscribeRuntimeEvents: () => void;
   private readonly userConfigWatchListener = () => this.scheduleUserConfigRefresh();
@@ -362,6 +373,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     // Test embedders commonly inject only model credentials. Treat a missing PICO_HOME
     // as an overlay omission, while still freezing an explicitly supplied host state root.
     this.picoHome = resolvePicoHome({ picoHome: this.env["PICO_HOME"] });
+    this.gitReviewService = new DesktopWorkbarGitReviewService();
+    this.terminalService = new DesktopWorkbarTerminalService({ picoHome: this.picoHome });
     this.registrationStore =
       options.registrationStore ??
       new WorkspaceRegistrationStore(join(this.picoHome, "daemon-workspaces.json"));
@@ -501,6 +514,26 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           request.params.runId,
           request.params.expectedFingerprint,
         ),
+      "git.review.snapshot": (request) =>
+        this.withHostWorkbarErrors(() => this.gitReviewService.snapshot(request.params)),
+      "git.review.diff": (request) =>
+        this.withHostWorkbarErrors(() => this.gitReviewService.diff(request.params)),
+      "terminal.create": (request) =>
+        this.withHostWorkbarErrors(() => this.terminalService.create(request.params)),
+      "terminal.list": (request) =>
+        this.withHostWorkbarErrors(() => this.terminalService.list(request.params)),
+      "terminal.attach": (request) =>
+        this.withHostWorkbarErrors(() => this.terminalService.attach(request.params)),
+      "terminal.input": (request) =>
+        this.withHostWorkbarErrors(() => this.terminalService.input(request.params)),
+      "terminal.resize": (request) =>
+        this.withHostWorkbarErrors(() => this.terminalService.resize(request.params)),
+      "terminal.stop": (request) =>
+        this.withHostWorkbarErrors(() => this.terminalService.stop(request.params)),
+      "terminal.detach": (request) =>
+        this.withHostWorkbarErrors(() => this.terminalService.detach(request.params)),
+      "sideChat.create": (request) => this.createSideChat(request.params),
+      "sideChat.close": (request) => this.closeSideChat(request.params),
       "rewind.list": (request) =>
         this.listRewindPoints(request.params.workspacePath, request.params.sessionId),
       "rewind.preview": (request) =>
@@ -781,6 +814,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         await attempt(() => this.pluginRuntimeSnapshotRegistry.dispose());
       }
       if (this.ownsMemoryService) await attempt(() => this.memoryService.close());
+      await attempt(() => this.terminalService.close());
     } finally {
       this.lifecycleState = "closed";
     }
@@ -939,10 +973,16 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private async listSessions(workspacePath: string, includeArchived = false): Promise<JsonValue> {
     const canonical = await canonicalizeWorkspacePath(workspacePath);
+    const sideChats = this.sideChatAuthority(canonical);
+    await sideChats.recover();
+    const hiddenSessionIds = new Set(sideChats.list().map((lease) => lease.targetSessionId));
     // 归档/置顶已并入 sessions 表(catalog 投影行),desktop session-state.json 退役。
     const entries = await listCliSessionCatalogEntries(canonical, { picoHome: this.picoHome });
     const sessions = entries
-      .filter((entry) => includeArchived || !entry.isArchived)
+      .filter(
+        (entry) =>
+          !hiddenSessionIds.has(entry.summary.id) && (includeArchived || !entry.isArchived),
+      )
       .map((entry) => sessionPayload(entry));
     return { sessions };
   }
@@ -1014,6 +1054,17 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private async deleteSession(workspacePath: string, sessionId: string): Promise<JsonValue> {
     const canonical = await this.requireIdleTrustedSession(workspacePath, sessionId, "删除");
+    const sideChats = this.sideChatAuthority(canonical);
+    await sideChats.recover();
+    const leases = sideChats.list();
+    if (leases.some((lease) => lease.targetSessionId === sessionId)) {
+      await sideChats.cleanup(sessionId);
+      return { sessionId, deleted: true };
+    }
+    for (const lease of leases.filter((candidate) => candidate.sourceSessionId === sessionId)) {
+      await sideChats.cleanup(lease.targetSessionId);
+    }
+    await this.terminalService.stopSession({ workspacePath: canonical, sessionId });
     const preparedMemory = this.memoryService.prepareSessionSourceInvalidation(
       canonical,
       sessionId,
@@ -1097,6 +1148,58 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     this.publishSession(session);
     this.publishTranscriptUpdate(canonical, targetSessionId, "reload");
     return { session, sourceSessionId: sessionId };
+  }
+
+  private async createSideChat(
+    params: RuntimeRequest<"sideChat.create">["params"],
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(
+      params.workspacePath,
+      params.sourceSessionId,
+    );
+    const store = new SqliteRuntimeEventStore({
+      storageRoot: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
+    });
+    let sourceEvents;
+    try {
+      sourceEvents = await store.readSession(params.sourceSessionId);
+    } finally {
+      store.close();
+    }
+    const authority = this.sideChatAuthority(canonical);
+    await authority.recover();
+    let lease;
+    try {
+      lease = await authority.create({
+        panelId: params.panelId,
+        sourceSessionId: params.sourceSessionId,
+        targetSessionId: this.createSessionId(),
+        sourceEvents,
+      });
+    } catch (error) {
+      if (error instanceof SideChatNoSettledTurnError) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.INVALID_PARAMS,
+          "侧边对话只能从父会话最近一个成功完成的回合创建",
+        );
+      }
+      throw error;
+    }
+    const session = await this.requireSession(canonical, lease.targetSessionId);
+    this.publishTranscriptUpdate(canonical, lease.targetSessionId, "reload");
+    return {
+      session,
+      sourceSessionId: params.sourceSessionId,
+      throughEventId: lease.throughEventId,
+    };
+  }
+
+  private async closeSideChat(
+    params: RuntimeRequest<"sideChat.close">["params"],
+  ): Promise<JsonValue> {
+    const canonical = await canonicalizeWorkspacePath(params.workspacePath);
+    await this.sideChatAuthority(canonical).cleanup(params.sessionId);
+    return { cleanupScheduled: true };
   }
 
   private async getRuntimeSessionSettings(
@@ -4336,6 +4439,66 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return this.resourceVersion;
   }
 
+  private sideChatAuthority(workspacePath: string): SideChatAuthority {
+    const storageRoot = resolvePicoPaths(workspacePath, {
+      picoHome: this.picoHome,
+    }).workspace.root;
+    return new SideChatAuthority({
+      storageRoot,
+      now: () => new Date(this.now()),
+      fork: async ({ sourceSessionId, targetSessionId, throughEventId }) => {
+        const sourceLease = await globalSessionManager.getOrCreatePinned(
+          sourceSessionId,
+          workspacePath,
+          {
+            persistence: true,
+            picoHome: this.picoHome,
+            runtimePort: createEngineRuntimePort(),
+          },
+        );
+        try {
+          await new SessionForkService({
+            workDir: workspacePath,
+            picoHome: this.picoHome,
+            runtimePort: createSessionForkRuntimePort(),
+          }).fork({
+            sourceSessionId,
+            targetSessionId,
+            throughEventId,
+            targetMode:
+              sourceLease.session.getRuntimeStateSnapshot().settings?.mode ??
+              DEFAULT_INTERACTION_MODE,
+          });
+        } finally {
+          sourceLease.release();
+        }
+      },
+      markSideConversation: async (targetSessionId) => {
+        await this.withSession(workspacePath, targetSessionId, async (session) => {
+          const settings = await this.getSessionSettings(workspacePath, session);
+          setSessionSideConversation(settings, true);
+          await session.flushPersistence();
+        });
+      },
+      removeSession: async (targetSessionId) => {
+        await this.removeEphemeralSideChat(workspacePath, targetSessionId);
+      },
+    });
+  }
+
+  private async removeEphemeralSideChat(workspacePath: string, sessionId: string): Promise<void> {
+    await this.terminalService.stopSession({ workspacePath, sessionId });
+    const managed = globalSessionManager.delete(sessionId, workspacePath, {
+      picoHome: this.picoHome,
+    });
+    await managed?.close();
+    await Promise.all([
+      removeCliSessionFile(workspacePath, sessionId, { picoHome: this.picoHome }),
+      this.conversationStateStore.clearQueued(workspacePath, sessionId),
+    ]);
+    this.workbarRepository(workspacePath).purgeOrphanArtifactBlobs();
+  }
+
   private workbarRepository(workspacePath: string): SqliteSessionWorkbarRepository {
     return new SqliteSessionWorkbarRepository({
       storageRoot: resolvePicoPaths(workspacePath, { picoHome: this.picoHome }).workspace.root,
@@ -4356,6 +4519,35 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       }
       if (error instanceof WorkbarForbiddenError) {
         throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.FORBIDDEN, error.message);
+      }
+      throw error;
+    }
+  }
+
+  private async withHostWorkbarErrors<Result>(operation: () => Promise<Result>): Promise<Result> {
+    try {
+      return await operation();
+    } catch (error) {
+      if (error instanceof RuntimeProtocolError) throw error;
+      if (error instanceof WorkbarGitReviewError) {
+        const code =
+          error.code === "not_found"
+            ? RUNTIME_ERROR_CODES.NOT_FOUND
+            : error.code === "revision_conflict"
+              ? RUNTIME_ERROR_CODES.CONFLICT
+              : error.code === "outside_workspace"
+                ? RUNTIME_ERROR_CODES.FORBIDDEN
+                : RUNTIME_ERROR_CODES.INVALID_PARAMS;
+        throw new RuntimeProtocolError(code, error.message);
+      }
+      if (error instanceof WorkbarTerminalError) {
+        const code =
+          error.code === "not_found"
+            ? RUNTIME_ERROR_CODES.NOT_FOUND
+            : error.code === "resource_epoch_mismatch" || error.code === "capacity_exceeded"
+              ? RUNTIME_ERROR_CODES.CONFLICT
+              : RUNTIME_ERROR_CODES.INVALID_PARAMS;
+        throw new RuntimeProtocolError(code, error.message);
       }
       throw error;
     }

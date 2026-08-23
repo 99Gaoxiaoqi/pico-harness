@@ -86,3 +86,47 @@ test("side chat rejects creation when the parent has no completed turn", async (
     SideChatNoSettledTurnError,
   );
 });
+
+test("side chat live lease heartbeat postpones crash recovery cleanup", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-side-chat-heartbeat-"));
+  context.after(async () => {
+    closeAllOperationalDatabasesForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+  let now = new Date("2026-08-23T00:00:00.000Z");
+  const removed: string[] = [];
+  const authority = new SideChatAuthority({
+    storageRoot: join(root, "storage"),
+    now: () => now,
+    liveLeaseTtlMs: 60_000,
+    fork: async () => undefined,
+    markSideConversation: async () => undefined,
+    removeSession: async (sessionId) => void removed.push(sessionId),
+  });
+
+  await authority.create({
+    panelId: "panel-1",
+    sourceSessionId: "source",
+    targetSessionId: "side-1",
+    sourceEvents: [terminal("completed", "completed")],
+  });
+  now = new Date("2026-08-23T00:00:30.000Z");
+  const refreshed = await authority.create({
+    panelId: "panel-1",
+    sourceSessionId: "source",
+    targetSessionId: "unused-idempotent-target",
+    sourceEvents: [terminal("completed", "completed")],
+  });
+  assert.equal(refreshed.targetSessionId, "side-1");
+  assert.equal(refreshed.updatedAt, "2026-08-23T00:00:30.000Z");
+
+  now = new Date("2026-08-23T00:01:15.000Z");
+  await authority.recover();
+  assert.deepEqual(removed, []);
+  assert.equal(authority.list().length, 1);
+
+  now = new Date("2026-08-23T00:01:31.000Z");
+  await authority.recover();
+  assert.deepEqual(removed, ["side-1"]);
+  assert.deepEqual(authority.list(), []);
+});

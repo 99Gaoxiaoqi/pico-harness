@@ -3,6 +3,7 @@ import type { RuntimeEvent } from "../engine/session-runtime-event.js";
 import { withWorkspaceSqliteLease } from "../storage/sqlite/workspace-scopes.js";
 
 const SIDE_CHAT_LEASES_KEY = "desktop.side-chat.leases.v1";
+const DEFAULT_LIVE_LEASE_TTL_MS = 2 * 60 * 1000;
 
 export type SideChatLeaseState = "creating" | "live" | "cleanup";
 
@@ -40,6 +41,7 @@ export class SideChatAuthority {
     private readonly options: {
       readonly storageRoot: string;
       readonly now?: () => Date;
+      readonly liveLeaseTtlMs?: number;
       readonly fork: (input: SideChatForkInput) => Promise<void>;
       readonly markSideConversation: (targetSessionId: string) => Promise<void>;
       readonly removeSession: (targetSessionId: string) => Promise<void>;
@@ -60,7 +62,11 @@ export class SideChatAuthority {
       (lease) =>
         lease.panelId === input.panelId && lease.sourceSessionId === input.sourceSessionId,
     );
-    if (existing?.state === "live") return existing;
+    if (existing?.state === "live") {
+      const refreshed = { ...existing, updatedAt: this.now() };
+      writeSideChatLease(this.options.storageRoot, refreshed);
+      return refreshed;
+    }
     if (existing) await this.cleanup(existing.targetSessionId);
 
     const boundary = latestCompletedTurnBoundary(input.sourceEvents);
@@ -111,7 +117,14 @@ export class SideChatAuthority {
 
   async recover(): Promise<void> {
     for (const lease of this.list()) {
-      if (lease.state === "live") continue;
+      if (
+        lease.state === "live" &&
+        Date.parse(lease.updatedAt) +
+          (this.options.liveLeaseTtlMs ?? DEFAULT_LIVE_LEASE_TTL_MS) >
+          (this.options.now ?? (() => new Date()))().getTime()
+      ) {
+        continue;
+      }
       await this.options.removeSession(lease.targetSessionId).catch(() => undefined);
       deleteSideChatLease(this.options.storageRoot, lease.targetSessionId);
     }
