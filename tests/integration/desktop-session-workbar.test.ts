@@ -3,55 +3,80 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { SessionWorkbar } from "../../apps/desktop/src/renderer/workbar/SessionWorkbar.js";
 
-test("desktop Workbar renders one accessible right dock with persistent tab panels", () => {
+import {
+  SessionWorkbarLayout,
+  WORKBAR_TOOL_REGISTRY,
+  createWorkbarState,
+  createWorkbarToolTab,
+} from "../../apps/desktop/src/renderer/workbar/index.js";
+
+test("desktop Workbar renders accessible right and bottom Docks with persistent tab panels", () => {
   Object.assign(globalThis, { React });
+  const state = createWorkbarState({
+    rightWidth: 480,
+    bottomHeight: 360,
+    docks: {
+      right: {
+        collapsed: false,
+        tabs: [createWorkbarToolTab("review"), createWorkbarToolTab("tasks")],
+      },
+      bottom: {
+        collapsed: false,
+        tabs: [{ id: "terminal:1", kind: "terminal", label: "Terminal 1" }],
+      },
+    },
+  });
   const html = renderToStaticMarkup(
-    React.createElement(SessionWorkbar, {
-      tabs: [
-        { id: "overview", kind: "overview", label: "概览", closable: true },
-        { id: "review", kind: "review", label: "变更", closable: true, badge: 2 },
-      ],
-      activeTabId: "overview",
-      collapsed: false,
-      width: 480,
-      renderPanel: (tab) => React.createElement("p", null, `${tab.label}内容`),
-      onSelect: () => undefined,
-      onClose: () => undefined,
-      onReorder: () => undefined,
-      onToggleCollapsed: () => undefined,
-      onResize: () => undefined,
-      onOpenLauncher: () => undefined,
-    }),
+    React.createElement(
+      SessionWorkbarLayout,
+      {
+        state,
+        presentTab: (tab) => ({ closable: true, ...(tab.kind === "review" ? { badge: 2 } : {}) }),
+        renderPanel: (tab) => React.createElement("p", null, `${tab.label}内容`),
+        onAction: () => undefined,
+      },
+      React.createElement("article", null, "主对话"),
+    ),
   );
 
-  assert.match(html, /aria-label="任务工作栏"/u);
-  assert.match(html, /role="tablist"/u);
+  assert.match(html, /aria-label="右侧任务工作栏"/u);
+  assert.match(html, /aria-label="底部任务工作栏"/u);
+  assert.equal((html.match(/role="tablist"/gu) ?? []).length, 2);
   assert.match(html, /role="tab"[^>]+aria-selected="true"/u);
-  assert.match(html, /role="tabpanel"/u);
   assert.match(html, /hidden=""[^>]+tabindex="-1"/u);
   assert.match(html, /aria-valuemin="320"/u);
   assert.match(html, /aria-valuemax="600"/u);
+  assert.match(html, /aria-valuemin="180"/u);
+  assert.match(html, /aria-valuemax="520"/u);
   assert.match(html, /--session-workbar-width:480px/u);
+  assert.match(html, /--session-workbar-height:360px/u);
   assert.match(html, /aria-label="关闭“变更”"/u);
 });
 
-test("desktop Workbar exposes only panels backed by existing authorities", async () => {
-  const source = await rendererSource("App.tsx");
-  const launcher = source.slice(
-    source.indexOf("const WORKBAR_LAUNCHER_TABS"),
-    source.indexOf("function useRuntime"),
+test("desktop Workbar v2 source exposes full Registry, context menu and keyboard alternatives", async () => {
+  assert.deepEqual(
+    WORKBAR_TOOL_REGISTRY.map(({ kind, label }) => ({ kind, label })),
+    [
+      { kind: "side-chat", label: "侧边对话" },
+      { kind: "review", label: "变更" },
+      { kind: "terminal", label: "终端" },
+      { kind: "browser", label: "浏览器" },
+      { kind: "files", label: "生成文件" },
+      { kind: "tasks", label: "待办" },
+      { kind: "inspector", label: "追踪" },
+    ],
   );
 
-  assert.match(launcher, /kind: "overview"/u);
-  assert.match(launcher, /kind: "review"/u);
-  assert.match(launcher, /kind: "context"/u);
-  assert.doesNotMatch(launcher, /tasks|files|terminal|browser|side-chat/u);
-  assert.match(source, /<SessionWorkbar/u);
-  assert.match(source, /inspectorMode="workbar"/u);
-  assert.match(source, /tab: \{ id: "inspector", kind: "inspector", label: inspector\.title \}/u);
-  assert.doesNotMatch(source, /inspector \? \(\s*<ConversationInspector/u);
+  const source = await rendererSource("workbar/SessionWorkbar.tsx");
+  assert.match(source, /type: "moveDock"/u);
+  assert.match(source, /type: "pinPreview"/u);
+  assert.match(source, /type: "closeOthers"/u);
+  assert.match(source, /type: "closeRight"/u);
+  assert.match(source, /Shift\+F10/u);
+  assert.match(source, /Alt\+Shift\+ArrowUp/u);
+  assert.match(source, /onContextMenu/u);
+  assert.match(source, /onDoubleClick/u);
 });
 
 test("desktop loads change summaries first and fetches only the selected diff", async () => {
@@ -71,14 +96,11 @@ test("desktop loads change summaries first and fetches only the selected diff", 
   assert.match(selectedDiffLoad, /workspaceSessionKey\(\{ workspacePath, sessionId \}\)/u);
 });
 
-test("desktop hydrates the existing session context report into the Workbar", async () => {
+test("desktop hydrates the existing session context report for the Inspector authority", async () => {
   const runtimeSource = await rendererSource("runtime.ts");
-  const appSource = await rendererSource("App.tsx");
 
   assert.match(runtimeSource, /optionalInvoke\(bridge, "session\.context\.get"/u);
   assert.match(runtimeSource, /context: parseSessionContext\(contextResult\.value\)/u);
-  assert.match(appSource, /context\.remainingTokens/u);
-  assert.match(appSource, /context\.contextWindowTokens/u);
 });
 
 async function rendererSource(fileName: string): Promise<string> {
