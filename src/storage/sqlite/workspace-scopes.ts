@@ -12,6 +12,7 @@ import { OPERATIONS_SCOPE } from "./operations-scope.js";
 import { RETENTION_SCOPE } from "./retention-scope.js";
 import { SESSIONS_SCOPE } from "./sessions-scope.js";
 import { TASK_RUNS_SCOPE } from "./task-runs-scope.js";
+import { WORKBAR_SCOPE } from "./workbar-scope.js";
 import {
   prepareWorkspaceSqliteStorageSync,
   type WorkspaceSqliteStoragePreparation,
@@ -38,6 +39,7 @@ export const ALL_WORKSPACE_SQLITE_SCOPES: readonly SqliteSchemaScope[] = [
   RETENTION_SCOPE,
   KV_SCOPE,
   EVENT_LOG_HARD_CUT_SCOPE,
+  WORKBAR_SCOPE,
 ];
 
 export interface WorkspaceSqliteStorageRootOptions {

@@ -99,6 +99,12 @@ import {
   type SqliteSessionCatalogEntry,
 } from "../storage/sqlite/sqlite-runtime-event-store.js";
 import { SqliteRuntimeControlStore } from "../storage/sqlite/sqlite-runtime-control-store.js";
+import {
+  SqliteSessionWorkbarRepository,
+  WorkbarConflictError,
+  WorkbarForbiddenError,
+  WorkbarNotFoundError,
+} from "../storage/sqlite/sqlite-session-workbar-repository.js";
 import { RuntimeRun } from "../runtime/runtime-run.js";
 import { createEngineRuntimePort } from "../runtime/engine-runtime-port-adapter.js";
 import { createSessionForkRuntimePort } from "../runtime/session-fork-runtime-port-adapter.js";
@@ -226,6 +232,7 @@ import {
 import { DesktopRequestRouter, type DesktopRequestHandlers } from "./desktop-request-router.js";
 import { createDesktopSessionRequestHandlers } from "./desktop-session-request-handlers.js";
 import { createDesktopMemoryRequestHandlers } from "./desktop-memory-request-handlers.js";
+import { createDesktopWorkbarRequestHandlers } from "./desktop-workbar-request-handlers.js";
 import { DesktopMemoryService } from "./desktop-memory-service.js";
 import type { ImagePart } from "../schema/message.js";
 import { createModelContextReport } from "../provider/model-runtime-report.js";
@@ -644,6 +651,13 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         withProviderDependencyLock: (operation) => this.withProviderDependencyLock(operation),
         runStart: (request) => this.options.runtimeService.handle(request),
       }),
+      ...createDesktopWorkbarRequestHandlers({
+        "session.tasks.query": this.querySessionTasks.bind(this),
+        "session.tasks.command": this.commandSessionTasks.bind(this),
+        "session.artifacts.query": this.querySessionArtifacts.bind(this),
+        "session.artifacts.command": this.commandSessionArtifacts.bind(this),
+        "session.trace.query": this.querySessionTrace.bind(this),
+      }),
       ...createDesktopMemoryRequestHandlers({
         list: (params) =>
           this.withTrustedMemory(params.workspacePath, (canonical) =>
@@ -1014,6 +1028,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         removeCliSessionFile(canonical, sessionId, { picoHome: this.picoHome }),
         this.conversationStateStore.clearQueued(canonical, sessionId),
       ]);
+      this.workbarRepository(canonical).purgeOrphanArtifactBlobs();
     } catch (error) {
       // Once destructive work starts, a rejection may represent partial durable success.
       // Fail closed for privacy and converge source/proposal state through the prepared job.
@@ -1065,6 +1080,14 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       });
     } finally {
       sourceLease.release();
+    }
+    try {
+      this.workbarRepository(canonical).forkSessionData(sessionId, targetSessionId);
+    } catch (error) {
+      await removeCliSessionFile(canonical, targetSessionId, { picoHome: this.picoHome }).catch(
+        () => undefined,
+      );
+      throw error;
     }
     // Fork creates a new sessionId; the source session's Memory Sources and Facts
     // remain valid (source RuntimeEvents unchanged). The target session starts with
@@ -1281,10 +1304,246 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       const settings = await this.getSessionSettings(canonical, session);
       const runtime = await this.loadSessionModelRuntime(canonical, settings);
       const route = runtime.router.require(settings.modelRouteId);
+      const traceWatermark = this.workbarRepository(canonical).queryTrace({
+        sessionId,
+        limit: 1,
+      }).throughSequence;
       return toJsonValue({
-        context: createModelContextReport(route, session.getHistory()),
+        context: {
+          ...createModelContextReport(route, session.getHistory()),
+          version: 2,
+          sessionId,
+          generatedAt: this.now(),
+          traceWatermark,
+        },
       });
     });
+  }
+
+  private async querySessionTasks(
+    params: RuntimeRequest<"session.tasks.query">["params"],
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
+    return this.withWorkbarErrors(() =>
+      toJsonValue(
+        this.workbarRepository(canonical).queryTasks({
+          sessionId: params.sessionId,
+          ...(params.taskId ? { taskId: params.taskId } : {}),
+          ...(params.cursor ? { cursor: params.cursor } : {}),
+          ...(params.limit !== undefined ? { limit: params.limit } : {}),
+          ...(params.revision !== undefined ? { revision: params.revision } : {}),
+        }),
+      ),
+    );
+  }
+
+  private async commandSessionTasks(
+    params: RuntimeRequest<"session.tasks.command">["params"],
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
+    const result = this.withWorkbarErrors(() => {
+      const repository = this.workbarRepository(canonical);
+      if (params.action === "create") {
+        if (!params.title || params.detail === null) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.INVALID_PARAMS,
+            "task create 需要 title，detail 不能为 null",
+          );
+        }
+        return repository.createTask({
+          sessionId: params.sessionId,
+          title: params.title,
+          ...(params.detail ? { detail: params.detail } : {}),
+          expectedRevision: params.expectedRevision,
+          idempotencyKey: params.idempotencyKey,
+          ...(params.taskId ? { taskId: params.taskId } : {}),
+        });
+      }
+      if (
+        !params.taskId ||
+        (params.title === undefined && params.detail === undefined && params.status === undefined)
+      ) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.INVALID_PARAMS,
+          "task update 需要 taskId 和至少一个更新字段",
+        );
+      }
+      return repository.updateTask({
+        sessionId: params.sessionId,
+        taskId: params.taskId,
+        expectedRevision: params.expectedRevision,
+        idempotencyKey: params.idempotencyKey,
+        ...(params.title !== undefined ? { title: params.title } : {}),
+        ...(params.detail !== undefined ? { detail: params.detail } : {}),
+        ...(params.status !== undefined ? { status: params.status } : {}),
+      });
+    });
+    this.publishWorkbarResource(canonical, params.sessionId, "tasks", {
+      revision: result.revision,
+    });
+    return toJsonValue(result);
+  }
+
+  private async querySessionArtifacts(
+    params: RuntimeRequest<"session.artifacts.query">["params"],
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
+    return this.withWorkbarErrors(() => {
+      const repository = this.workbarRepository(canonical);
+      if (params.action === "read_chunk") {
+        if (!params.artifactId) {
+          throw new RuntimeProtocolError(
+            RUNTIME_ERROR_CODES.INVALID_PARAMS,
+            "read_chunk 需要 artifactId",
+          );
+        }
+        return toJsonValue(
+          repository.readArtifactChunk({
+            sessionId: params.sessionId,
+            artifactId: params.artifactId,
+            ...(params.offsetBytes !== undefined ? { offsetBytes: params.offsetBytes } : {}),
+            ...(params.limitBytes !== undefined ? { limitBytes: params.limitBytes } : {}),
+          }),
+        );
+      }
+      if (params.action === "get" && !params.artifactId) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.INVALID_PARAMS,
+          "artifact get 需要 artifactId",
+        );
+      }
+      return toJsonValue(
+        repository.queryArtifacts({
+          sessionId: params.sessionId,
+          ...(params.artifactId ? { artifactId: params.artifactId } : {}),
+          ...(params.cursor ? { cursor: params.cursor } : {}),
+          ...(params.limit !== undefined ? { limit: params.limit } : {}),
+          ...(params.revision !== undefined ? { revision: params.revision } : {}),
+        }),
+      );
+    });
+  }
+
+  private async commandSessionArtifacts(
+    params: RuntimeRequest<"session.artifacts.command">["params"],
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
+    const repository = this.workbarRepository(canonical);
+    const requiredRevision = (): number => {
+      if (params.expectedRevision === undefined) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.INVALID_PARAMS,
+          `${params.action} 需要 expectedRevision`,
+        );
+      }
+      return params.expectedRevision;
+    };
+    const requiredKey = (): string => {
+      if (!params.idempotencyKey) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.INVALID_PARAMS,
+          `${params.action} 需要 idempotencyKey`,
+        );
+      }
+      return params.idempotencyKey;
+    };
+    const result = this.withWorkbarErrors(() => {
+      switch (params.action) {
+        case "begin":
+          if (!params.title || !params.mimeType) {
+            throw new RuntimeProtocolError(
+              RUNTIME_ERROR_CODES.INVALID_PARAMS,
+              "begin 需要 title 和 mimeType",
+            );
+          }
+          return repository.beginArtifact({
+            sessionId: params.sessionId,
+            title: params.title,
+            mimeType: params.mimeType,
+            expectedRevision: requiredRevision(),
+            idempotencyKey: requiredKey(),
+            ...(params.artifactId ? { artifactId: params.artifactId } : {}),
+          });
+        case "append":
+          if (!params.ingestId || params.offsetBytes === undefined || !params.contentBase64) {
+            throw new RuntimeProtocolError(
+              RUNTIME_ERROR_CODES.INVALID_PARAMS,
+              "append 需要 ingestId、offsetBytes 和 contentBase64",
+            );
+          }
+          return repository.appendArtifactChunk({
+            sessionId: params.sessionId,
+            ingestId: params.ingestId,
+            offsetBytes: params.offsetBytes,
+            content: decodeCanonicalBase64(params.contentBase64),
+          });
+        case "commit":
+          if (!params.ingestId) {
+            throw new RuntimeProtocolError(
+              RUNTIME_ERROR_CODES.INVALID_PARAMS,
+              "commit 需要 ingestId",
+            );
+          }
+          return repository.commitArtifact({
+            sessionId: params.sessionId,
+            ingestId: params.ingestId,
+            expectedRevision: requiredRevision(),
+            idempotencyKey: requiredKey(),
+            ...(params.expectedDigest ? { expectedDigest: params.expectedDigest } : {}),
+            ...(params.expectedSizeBytes !== undefined
+              ? { expectedSizeBytes: params.expectedSizeBytes }
+              : {}),
+          });
+        case "abort":
+          if (!params.ingestId) {
+            throw new RuntimeProtocolError(
+              RUNTIME_ERROR_CODES.INVALID_PARAMS,
+              "abort 需要 ingestId",
+            );
+          }
+          return repository.abortArtifact({
+            sessionId: params.sessionId,
+            ingestId: params.ingestId,
+          });
+        case "delete":
+          if (!params.artifactId) {
+            throw new RuntimeProtocolError(
+              RUNTIME_ERROR_CODES.INVALID_PARAMS,
+              "delete 需要 artifactId",
+            );
+          }
+          return repository.deleteArtifact({
+            sessionId: params.sessionId,
+            artifactId: params.artifactId,
+            expectedRevision: requiredRevision(),
+            idempotencyKey: requiredKey(),
+          });
+      }
+    });
+    if ("revision" in result) {
+      this.publishWorkbarResource(canonical, params.sessionId, "artifacts", {
+        revision: typeof result.revision === "number" ? result.revision : undefined,
+      });
+    }
+    return toJsonValue(result);
+  }
+
+  private async querySessionTrace(
+    params: RuntimeRequest<"session.trace.query">["params"],
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
+    return this.withWorkbarErrors(() =>
+      toJsonValue(
+        this.workbarRepository(canonical).queryTrace({
+          sessionId: params.sessionId,
+          ...(params.throughSequence !== undefined
+            ? { throughSequence: params.throughSequence }
+            : {}),
+          ...(params.afterSequence !== undefined ? { afterSequence: params.afterSequence } : {}),
+          ...(params.limit !== undefined ? { limit: params.limit } : {}),
+        }),
+      ),
+    );
   }
 
   private async getGoal(workspacePath: string, sessionId: string): Promise<JsonValue> {
@@ -4076,6 +4335,63 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     this.resourceVersion = Math.max(this.resourceVersion + 1, this.now());
     return this.resourceVersion;
   }
+
+  private workbarRepository(workspacePath: string): SqliteSessionWorkbarRepository {
+    return new SqliteSessionWorkbarRepository({
+      storageRoot: resolvePicoPaths(workspacePath, { picoHome: this.picoHome }).workspace.root,
+      now: this.now,
+    });
+  }
+
+  private withWorkbarErrors<Result>(operation: () => Result): Result {
+    try {
+      return operation();
+    } catch (error) {
+      if (error instanceof RuntimeProtocolError) throw error;
+      if (error instanceof WorkbarConflictError) {
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, error.message);
+      }
+      if (error instanceof WorkbarNotFoundError) {
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.NOT_FOUND, error.message);
+      }
+      if (error instanceof WorkbarForbiddenError) {
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.FORBIDDEN, error.message);
+      }
+      throw error;
+    }
+  }
+
+  private publishWorkbarResource(
+    workspacePath: string,
+    sessionId: string,
+    resource: "tasks" | "artifacts" | "trace" | "context",
+    value: { readonly revision?: number; readonly watermark?: number },
+  ): void {
+    this.publish(
+      createRuntimeNotification({
+        topic: "session.resourceChanged",
+        scope: { workspacePath, sessionId },
+        resourceVersion: this.nextResourceVersion(),
+        at: this.now(),
+        payload: {
+          resource,
+          ...(value.revision !== undefined ? { revision: value.revision } : {}),
+          ...(value.watermark !== undefined ? { watermark: value.watermark } : {}),
+        },
+      }),
+    );
+  }
+}
+
+function decodeCanonicalBase64(value: string): Buffer {
+  const decoded = Buffer.from(value, "base64");
+  if (decoded.toString("base64") !== value) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      "contentBase64 不是规范 Base64",
+    );
+  }
+  return decoded;
 }
 
 function reconcileProviderOperationConfig(
