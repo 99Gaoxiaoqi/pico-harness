@@ -136,7 +136,7 @@ test("browser close publishes one floor-and-URL snapshot before notifying daemon
       sessions: [{ sessionId: "session-a", generationFloor: revocation.generation }],
     },
   ]);
-  assert.deepEqual(notifications, []);
+  assert.equal(notifications.length, 0);
   releasePublish.resolve();
   await completion;
   assert.deepEqual(notifications, [revocation.generation]);
@@ -179,7 +179,7 @@ test("browser close does not notify daemon or succeed when atomic publication fa
       sessions: [{ sessionId: "session-a", generationFloor: revocation.generation }],
     },
   ]);
-  assert.deepEqual(notifications, []);
+  assert.equal(notifications.length, 0);
 
   published.length = 0;
   rejectPublish = false;
