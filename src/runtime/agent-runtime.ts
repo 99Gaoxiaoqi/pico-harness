@@ -146,6 +146,10 @@ import { activatePluginProviderCapabilities } from "../plugins/plugin-provider-a
 import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
 import { SqliteSessionWorkbarRepository } from "../storage/sqlite/sqlite-session-workbar-repository.js";
 import { buildSessionTaskPromptBlock } from "../tools/session-tasks.js";
+import {
+  createBrowserAgentTools,
+  type BoundBrowserAgentAuthority,
+} from "../tools/browser-agent.js";
 import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 import { currentRuntimeRun, isRuntimeRunLive, RuntimeRun } from "./runtime-run.js";
 import { PlanCoordinator } from "../plan/coordinator.js";
@@ -329,6 +333,8 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   memoryReviewDebounceMs?: number;
   /** @internal Ignore project/user extension catalogs and host compatibility resources. */
   isolatedHeadless?: boolean;
+  /** Visible Electron browser authority. Omitted for CLI, background and headless hosts. */
+  browserAgent?: BoundBrowserAgentAuthority;
 }
 
 /** Runtime-first entry point. CLI/TUI compatibility wrappers call this method. */
@@ -1557,6 +1563,11 @@ export async function executeAgentRuntime(
       onToolGroupLoaded,
       sessionTaskAuthority,
     );
+    if (!backgroundPolicy && hostKind === "desktop" && dependencies.browserAgent) {
+      for (const tool of createBrowserAgentTools(dependencies.browserAgent)) {
+        registry.register(tool);
+      }
+    }
     registerPluginCapabilityTools(
       registry,
       pluginSnapshot,
