@@ -149,10 +149,18 @@ export class RuntimeHostConnectionSession {
       return;
     }
     const controller = new AbortController();
+    const afterResponseFlushedCallbacks: Array<() => void> = [];
+    let acceptsAfterResponseFlushedCallbacks = true;
     const dispatchTask = dispatchOperation(frame, this.#options.resolveHandlers(), {
       ...this.#options.connection,
       acquireResidency: () => admission.acquireResidency(),
       pushEvent: (event) => this.pushEvent(event),
+      afterResponseFlushed: (callback) => {
+        if (!acceptsAfterResponseFlushedCallbacks) {
+          throw new Error("Runtime Host response-flushed barrier is already sealed");
+        }
+        afterResponseFlushedCallbacks.push(callback);
+      },
       signal: controller.signal,
     });
     let deadlineExpired = false;
@@ -168,8 +176,12 @@ export class RuntimeHostConnectionSession {
           }, this.#options.operationDeadlineMs);
         }),
       ]);
+      acceptsAfterResponseFlushedCallbacks = false;
       admission.seal();
       await this.#writer.enqueue(response).flushed;
+      if (response.ok) {
+        for (const callback of afterResponseFlushedCallbacks) callback();
+      }
     } catch (error) {
       if (deadlineExpired) {
         // JS 无法真正取消一个挂死的 async handler（除非它响应上面的 AbortSignal）。
@@ -184,6 +196,7 @@ export class RuntimeHostConnectionSession {
       }
       throw error;
     } finally {
+      acceptsAfterResponseFlushedCallbacks = false;
       if (deadlineTimer) clearTimeout(deadlineTimer);
       // deadline 路径已在 catch 中 finish；这里只覆盖正常与 handler 抛错路径。
       if (!deadlineExpired) admission.finish();

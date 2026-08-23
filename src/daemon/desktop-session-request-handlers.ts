@@ -55,9 +55,6 @@ export interface DesktopSessionRequestContext {
   ) => Awaitable<JsonValue>;
   readonly getGoal: (workspacePath: string, sessionId: string) => Awaitable<JsonValue>;
   readonly sendSession: (params: RuntimeRequest<"session.send">["params"]) => Promise<JsonValue>;
-  readonly getSessionTranscript: (
-    params: RuntimeRequest<"session.transcript">["params"],
-  ) => Awaitable<JsonValue>;
   readonly readSessionEvidence: (
     params: RuntimeRequest<"session.evidence.read">["params"],
   ) => Awaitable<JsonValue>;
@@ -97,7 +94,6 @@ export function createDesktopSessionRequestHandlers(
   | "session.directories.add"
   | "goal.get"
   | "session.send"
-  | "session.transcript"
   | "session.evidence.read"
   | "run.cancel"
   | "run.start"
@@ -153,7 +149,6 @@ export function createDesktopSessionRequestHandlers(
       context.getGoal(request.params.workspacePath, request.params.sessionId),
     "session.send": (request) =>
       context.withProviderDependencyLock(() => context.sendSession(request.params)),
-    "session.transcript": (request) => context.getSessionTranscript(request.params),
     "session.evidence.read": (request) => context.readSessionEvidence(request.params),
     "run.cancel": (request) =>
       context.cancelRun(request.params.workspacePath, request.params.runId, request.params.reason),

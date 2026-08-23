@@ -19,13 +19,18 @@ export async function buildPicoBundle(outputPath) {
   const protocolPackage = JSON.parse(
     await readFile(join(projectRoot, "packages/protocol/package.json"), "utf8"),
   );
+  const deps = Object.fromEntries(
+    Object.entries(rootPackage.dependencies).filter(
+      ([name]) => name !== "@pico/runtime-host" && name !== "@pico/transcript-replica",
+    ),
+  );
   const packageJson = {
     name: "pico-headless-benchmark-bundle",
     version: rootPackage.version,
     private: true,
     type: "module",
     dependencies: {
-      ...rootPackage.dependencies,
+      ...deps,
       "@pico/protocol": "file:packages/protocol",
     },
   };

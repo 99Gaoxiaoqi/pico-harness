@@ -9,10 +9,13 @@ import {
   type RuntimeParams,
   type RuntimeResult,
   type RuntimeConversationItem,
+  type RuntimeActiveOverlayEntry,
+  type RuntimeSessionSubscriptionFrame,
   type RuntimeTranscriptCursor,
   type RuntimeTranscriptFragment,
   type RuntimeUserInput,
 } from "@pico/protocol";
+import { TranscriptReplica } from "@pico/transcript-replica";
 import type { ApprovalNotice } from "../approval/manager.js";
 import type { AskUserOption } from "../tools/ask-user.js";
 import type { PlanApprovalControl } from "./approval-dialogs.js";
@@ -36,9 +39,8 @@ export interface ClientPromptRequest {
  * TUI 客户端会话核心（3-D Phase 2，无 Ink——集成测试用 fake client 驱动）。
  *
  * 组合 LocalRuntimeClient（kernel 模式，connectOrSpawn 拉起/连上常驻 daemon）+
- * DaemonEventReporter（通知→TuiReporter）。发送走 session.send（daemon 侧决策
- * started/steered/queued）；run.live 增量经适配器直投 TuiReporter；终态由
- * session.transcriptUpdated{reload} 触发 transcript 重取对账。审批经
+ * DaemonEventReporter（工作区通知→TuiReporter）。发送走 session.send；Session
+ * transcript 与 live delta 统一由 Dedicated Session Channel 驱动共享 Replica。审批经
  * approval.requested 事件 + approval.respond / plan.respond RPC。
  *
  * v1 边界：斜杠命令本地拦截提示（Phase 3 RPC 化）；session.send 为非幂等
@@ -58,6 +60,16 @@ export interface DaemonSessionClient {
     replay: RuntimeResult<"events.subscribe">;
     dispose(): void;
   }>;
+  /**
+   * Dedicated Session Channel 原始 Host event 适配面。它不属于
+   * RuntimeNotification/events.subscribe，传输层应在 open RPC 前安装监听。
+   */
+  subscribeSessionFrames(
+    listener: (frame: RuntimeSessionSubscriptionFrame) => void,
+    onDisconnect?: () => void,
+  ): {
+    dispose(): void;
+  };
 }
 
 export interface ClientSessionRuntimeOptions {
@@ -98,6 +110,7 @@ export interface ClientSessionRuntimeOptions {
   readonly orchestrationModeOverride?: "graph";
 }
 
+/** 仅供旧投影 Oracle/迁移测试复用；不属于 v2 客户端读路径。 */
 export interface RuntimeTranscriptPagingState {
   readonly items: readonly RuntimeConversationItem[];
   readonly fragments?: Readonly<Record<string, readonly RuntimeTranscriptFragment[]>>;
@@ -106,15 +119,19 @@ export interface RuntimeTranscriptPagingState {
   readonly nextBefore?: string;
 }
 
-type RuntimeTranscriptPage = RuntimeResult<"session.transcript"> & {
-  readonly nextCursor?: RuntimeTranscriptCursor;
+interface LegacyTranscriptOraclePage {
+  readonly session?: unknown;
+  readonly queuedInputs?: readonly unknown[];
+  readonly items: readonly RuntimeConversationItem[];
   readonly fragments?: readonly RuntimeTranscriptFragment[];
-};
+  readonly revision: string;
+  readonly nextCursor?: RuntimeTranscriptCursor;
+  readonly nextBefore?: string;
+}
 
-/** Pure page reducer shared by TUI hydration tests and the request loop below. */
 export function advanceRuntimeTranscriptPagingState(
   state: RuntimeTranscriptPagingState,
-  page: RuntimeTranscriptPage,
+  page: LegacyTranscriptOraclePage,
 ): RuntimeTranscriptPagingState {
   if (state.revision !== undefined && page.revision !== state.revision) {
     throw new Error(
@@ -131,7 +148,6 @@ export function advanceRuntimeTranscriptPagingState(
   ) {
     throw new Error("Session transcript high-watermark changed during hydration");
   }
-
   const fragments: Record<string, readonly RuntimeTranscriptFragment[]> = {
     ...(state.fragments ?? {}),
   };
@@ -180,8 +196,9 @@ export function advanceRuntimeTranscriptPagingState(
       const parsed = JSON.parse(
         unique.map((part) => part.json).join(""),
       ) as RuntimeConversationItem;
-      if (parsed.id !== fragment.itemId)
+      if (parsed.id !== fragment.itemId) {
         throw new Error("Session transcript fragment item ID changed");
+      }
       completed.push(parsed);
       delete fragments[fragment.itemId];
     }
@@ -197,6 +214,32 @@ export function advanceRuntimeTranscriptPagingState(
   };
 }
 
+function overlayConversationItem(overlay: RuntimeActiveOverlayEntry): RuntimeConversationItem {
+  if (overlay.kind === "thinking") {
+    return {
+      id: overlay.itemId,
+      kind: "thinking",
+      content: overlay.text,
+      runId: overlay.runId,
+      turnId: overlay.turnId,
+    };
+  }
+  if (overlay.kind === "text") {
+    return {
+      id: overlay.itemId,
+      kind: "assistantMessage",
+      content: overlay.text,
+      runId: overlay.runId,
+      turnId: overlay.turnId,
+    };
+  }
+  return {
+    id: overlay.itemId,
+    kind: "systemNotice",
+    content: overlay.stream ? `[${overlay.stream}] ${overlay.text}` : overlay.text,
+  };
+}
+
 export class ClientSessionRuntime {
   private readonly client: DaemonSessionClient;
   private readonly workspacePath: string;
@@ -204,10 +247,16 @@ export class ClientSessionRuntime {
   private readonly onApproval: ClientSessionRuntimeOptions["onApproval"];
   private readonly eventReporter: DaemonEventReporter;
   private subscription: { dispose(): void } | undefined;
+  private sessionFrameSubscription: { dispose(): void } | undefined;
   private sessionId: string | undefined;
+  private replica: TranscriptReplica | undefined;
+  private advancingReplica = false;
+  private advanceReplicaAgain = false;
   private hydrating = false;
   private hydrateAgain = false;
   private hydrateChain: Promise<void> | undefined;
+  private hydrateRetryAttempt = 0;
+  private hydrateRetryTimer: NodeJS.Timeout | undefined;
   private disposed = false;
   private pendingModelRouteId: string | undefined;
   private settingsOverrideApplied = false;
@@ -243,6 +292,12 @@ export class ClientSessionRuntime {
 
   async start(): Promise<void> {
     await this.client.connect?.();
+    this.sessionFrameSubscription = this.client.subscribeSessionFrames(
+      (frame) => this.acceptSessionFrame(frame),
+      () => {
+        if (this.sessionId) void this.hydrateSerial();
+      },
+    );
     await this.resolveModelOverride();
     if (this.sessionId) {
       await this.hydrate();
@@ -293,6 +348,7 @@ export class ClientSessionRuntime {
       });
       if (this.sessionId === undefined) {
         this.sessionId = result.session.sessionId;
+        void this.hydrateSerial();
         await this.applyStartupOverrides();
       } else {
         // BYOK 覆盖若曾失败（applied 尚未置位），此后每次成功发送都是廉价重试
@@ -380,8 +436,24 @@ export class ClientSessionRuntime {
 
   dispose(): void {
     this.disposed = true;
+    this.clearHydrateRetry();
+    this.closeReplicaSubscription();
+    this.sessionFrameSubscription?.dispose();
+    this.sessionFrameSubscription = undefined;
     this.subscription?.dispose();
     this.subscription = undefined;
+  }
+
+  /** Dedicated Session Channel 原始帧入口；不经 RuntimeNotification/topic 包装。 */
+  acceptSessionFrame(frame: RuntimeSessionSubscriptionFrame): void {
+    if (this.disposed || frame.sessionId !== this.sessionId || !this.replica) return;
+    const outcome = this.replica.receiveFrame(frame);
+    if (outcome.kind === "applied") {
+      this.renderReplica();
+      if (this.replica.view.pendingWatermark) void this.advanceReplicaSerial();
+      return;
+    }
+    if (outcome.kind === "recovering") void this.hydrateSerial();
   }
 
   private handleNotification(notification: RuntimeNotification): void {
@@ -397,9 +469,8 @@ export class ClientSessionRuntime {
       const payload = notification.payload as RuntimeNotificationMap["prompt.resolved"];
       this.options.onPromptResolved?.(payload.promptId);
     }
-    // 会话 scope 过滤：订阅是工作区级的，同工作区其他会话（wake/cron/另一
-    // 客户端）的 run/live/审批事件不得流入本会话投影；sessionId 未知时（新会话
-    // 首事件先于 send 返回）仍放行，由下方 transcriptUpdated 采纳。
+    // 会话 scope 过滤：订阅是工作区级的，同工作区其他会话的
+    // 审批/设置等通知不得流入本会话。Transcript/live 已独立到 Session Channel。
     const scopedSessionId = notification.scope.sessionId;
     if (
       scopedSessionId !== undefined &&
@@ -407,20 +478,6 @@ export class ClientSessionRuntime {
       scopedSessionId !== this.sessionId
     ) {
       return;
-    }
-    if (
-      notification.topic === "session.transcriptUpdated" &&
-      (notification.payload as RuntimeNotificationMap["session.transcriptUpdated"]).operation ===
-        "reload"
-    ) {
-      // 新会话首条事件可能先于 session.send 返回到达：从事件 scope 采纳 sessionId。
-      if (this.sessionId === undefined && notification.scope.sessionId) {
-        this.sessionId = notification.scope.sessionId;
-        void this.applyStartupOverrides();
-        void this.refreshSettingsSnapshot();
-      }
-      const scoped = notification.scope.sessionId;
-      if (!this.sessionId || scoped === this.sessionId) void this.hydrateSerial();
     }
     if (notification.topic === "session.settingsUpdated") {
       void this.refreshSettingsSnapshot();
@@ -434,7 +491,11 @@ export class ClientSessionRuntime {
    * BYOK 启动覆盖不重放（startup-only 语义）。
    */
   async switchSession(sessionId: string | undefined): Promise<void> {
+    this.clearHydrateRetry();
+    this.hydrateRetryAttempt = 0;
+    await this.closeReplicaSubscriptionAsync();
     this.sessionId = sessionId;
+    this.replica = undefined;
     this.eventReporter.clearTransientState();
     if (sessionId) {
       // 与 reload 对账共用串行化（对抗评审 P2：直连 hydrate 会与在途 reload
@@ -455,12 +516,15 @@ export class ClientSessionRuntime {
     const run = (async () => {
       try {
         await this.hydrate();
+        this.clearHydrateRetry();
+        this.hydrateRetryAttempt = 0;
       } catch (error) {
-        // 对账是尽力而为：失败留给下一次 reload 重试，不得变成 unhandled rejection。
+        // 对账失败保留最后一致画面，后续断线或新帧会再次触发 open。
         this.reporter.pushError(error instanceof Error ? error.message : String(error), {
           retryable: true,
-          action: "session.transcript",
+          action: "session.subscription.open",
         });
+        this.scheduleHydrateRetry();
       } finally {
         this.hydrating = false;
         if (this.hydrateAgain) {
@@ -473,55 +537,170 @@ export class ClientSessionRuntime {
     return run;
   }
 
+  private scheduleHydrateRetry(): void {
+    if (this.disposed || !this.sessionId || this.hydrateRetryTimer) return;
+    const delay = Math.min(250 * 2 ** this.hydrateRetryAttempt, 5_000);
+    this.hydrateRetryAttempt += 1;
+    this.hydrateRetryTimer = setTimeout(() => {
+      this.hydrateRetryTimer = undefined;
+      void this.hydrateSerial();
+    }, delay);
+    this.hydrateRetryTimer.unref?.();
+  }
+
+  private clearHydrateRetry(): void {
+    if (!this.hydrateRetryTimer) return;
+    clearTimeout(this.hydrateRetryTimer);
+    this.hydrateRetryTimer = undefined;
+  }
+
   private async hydrate(): Promise<void> {
     if (!this.sessionId) return;
-    // 跨切换竞态防护（对抗评审二轮 P1）：捕获发起时的 sessionId，响应落地时
-    // 若已切换（/new 清空或 /resume 换目标）则丢弃——陈旧页不得复活旧 transcript
-    // 或重亮已死的 run。
-    const sessionId = this.sessionId;
-    let state: RuntimeTranscriptPagingState = { items: [] };
-    let page = await this.client.request("session.transcript", {
+    await this.openReplica(this.sessionId);
+  }
+
+  private async openReplica(sessionId: string): Promise<void> {
+    const previous = this.replica;
+    if (previous?.view.subscriptionId) {
+      await this.closeReplicaSubscriptionAsync(previous.view);
+    }
+    const replica =
+      previous?.view.sessionId === sessionId ? previous : new TranscriptReplica(sessionId);
+    this.replica = replica;
+    const token = replica.beginOpen();
+    const opened = await this.client.request("session.subscription.open", {
       workspacePath: this.workspacePath,
       sessionId,
-      limit: 200,
+      tailLimit: 200,
     });
-    const activeRun = page.activeRun as { runId?: unknown; status?: unknown } | undefined;
-    const seenBoundaries = new Set<string>();
-    while (true) {
-      state = advanceRuntimeTranscriptPagingState(state, page);
-      const boundary = state.nextCursor ?? state.nextBefore;
-      if (!boundary) break;
-      const boundaryKey =
-        typeof boundary === "string" ? `legacy:${boundary}` : `cursor:${JSON.stringify(boundary)}`;
-      if (seenBoundaries.has(boundaryKey)) {
-        throw new Error("Session transcript pagination cursor did not advance");
-      }
-      seenBoundaries.add(boundaryKey);
-      page = await this.client.request("session.transcript", {
+    if (this.disposed || this.sessionId !== sessionId || this.replica !== replica) {
+      await this.closeOpenedSubscription(sessionId, opened.subscriptionId);
+      return;
+    }
+    if (!replica.installOpen(token, opened)) {
+      await this.closeOpenedSubscription(sessionId, opened.subscriptionId);
+      throw new Error(
+        `Session continuity open failed (${replica.view.recoveryReason ?? "unknown"})`,
+      );
+    }
+    this.renderReplica();
+
+    // TUI 现有视图需要完整历史；旧页固定在 open 的 watermark，
+    // 与同时到达的新 revision 合并时不会覆盖新记录。
+    let older = replica.beginOlderPage();
+    while (older) {
+      const page = await this.client.request("session.transcript.page", {
         workspacePath: this.workspacePath,
         sessionId,
-        ...(state.nextCursor
-          ? { cursor: state.nextCursor }
-          : { before: state.nextBefore, expectedRevision: state.revision }),
+        through: older.through,
+        cursor: older.cursor,
         limit: 200,
       });
+      if (this.disposed || this.sessionId !== sessionId || this.replica !== replica) return;
+      const outcome = replica.applyOlderPage(older, page);
+      if (outcome === "recovering") throw new Error("Session continuity older-page gap");
+      if (outcome === "ignored") return;
+      older = replica.beginOlderPage();
     }
-    if (this.sessionId !== sessionId) return;
-    this.reporter.replaceTranscriptEvents(transcriptEventsFromRuntimeItems(state.items, sessionId));
-    // 恢复活跃 run 相位（对抗评审 P1：/resume 进运行中会话须点亮 running、
-    // /interrupt 才有目标）——双向对账：无活跃 run 时清掉误亮的相位。活跃口径
-    // 经 isActiveRunStatus（水化对账口径，含 paused/cancelling）。
-    const activeRunLive =
-      activeRun !== undefined &&
-      typeof activeRun.runId === "string" &&
-      isActiveRunStatus(typeof activeRun.status === "string" ? activeRun.status : "");
-    if (activeRunLive && typeof activeRun.runId === "string") {
+    this.renderReplica();
+    if (replica.view.pendingWatermark) await this.advanceReplicaSerial();
+  }
+
+  private async advanceReplicaSerial(): Promise<void> {
+    if (this.advancingReplica) {
+      this.advanceReplicaAgain = true;
+      return;
+    }
+    this.advancingReplica = true;
+    try {
+      do {
+        this.advanceReplicaAgain = false;
+        const replica = this.replica;
+        const sessionId = this.sessionId;
+        if (!replica || !sessionId) return;
+        let request = replica.beginAdvance();
+        while (request) {
+          const page = await this.client.request("session.transcript.advance", {
+            workspacePath: this.workspacePath,
+            sessionId,
+            after: request.after,
+            through: request.through,
+            ...(request.cursor ? { cursor: request.cursor } : {}),
+            limit: 200,
+          });
+          if (this.disposed || this.replica !== replica || this.sessionId !== sessionId) return;
+          const outcome = replica.applyAdvancePage(request, page);
+          if (outcome.kind === "recovering") {
+            void this.hydrateSerial();
+            return;
+          }
+          if (outcome.kind === "next") {
+            request = outcome.request;
+          } else {
+            request = undefined;
+          }
+        }
+        this.renderReplica();
+        if (replica.view.pendingWatermark) this.advanceReplicaAgain = true;
+      } while (this.advanceReplicaAgain);
+    } catch (error) {
+      this.reporter.pushError(error instanceof Error ? error.message : String(error), {
+        retryable: true,
+        action: "session.transcript.advance",
+      });
+      void this.hydrateSerial();
+    } finally {
+      this.advancingReplica = false;
+    }
+  }
+
+  private renderReplica(): void {
+    const replica = this.replica;
+    const sessionId = this.sessionId;
+    if (!replica || !sessionId || replica.view.phase !== "ready") return;
+    const items = [
+      ...replica.view.records.map((record) => record.item),
+      ...replica.view.activeOverlay.map(overlayConversationItem),
+    ];
+    this.reporter.replaceTranscriptEvents(transcriptEventsFromRuntimeItems(items, sessionId));
+    const activeRun = replica.view.activeRun;
+    if (activeRun && isActiveRunStatus(activeRun.status)) {
       this.eventReporter.seedActiveRun(activeRun.runId);
     } else if (this.eventReporter.running) {
-      // transcript 已无活跃 run：终态事件早于本次水化到达时按权威快照收口。
       this.eventReporter.clearTransientState();
       this.options.onRunStateChanged?.(false);
     }
+  }
+
+  private closeReplicaSubscription(): void {
+    void this.closeReplicaSubscriptionAsync();
+  }
+
+  private closeReplicaSubscriptionAsync(view = this.replica?.view): Promise<void> {
+    if (!view?.subscriptionId) return Promise.resolve();
+    return this.client
+      .request("session.subscription.close", {
+        workspacePath: this.workspacePath,
+        sessionId: view.sessionId,
+        subscriptionId: view.subscriptionId,
+      })
+      .then(
+        () => undefined,
+        () => undefined,
+      );
+  }
+
+  private closeOpenedSubscription(sessionId: string, subscriptionId: string): Promise<void> {
+    return this.client
+      .request("session.subscription.close", {
+        workspacePath: this.workspacePath,
+        sessionId,
+        subscriptionId,
+      })
+      .then(
+        () => undefined,
+        () => undefined,
+      );
   }
 
   /** 拉取会话设置并推送快照（启动/切换/settingsUpdated 后调用）。 */

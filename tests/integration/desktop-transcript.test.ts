@@ -14,10 +14,6 @@ import {
 } from "../../src/engine/tool-result-contract.js";
 import type { DurableTranscriptEvent } from "../../src/presentation/transcript-event-store.js";
 import type { Message } from "../../src/schema/message.js";
-import {
-  parseDesktopRuntimeResult,
-  parseStrictRuntimeParams,
-} from "../../packages/protocol/src/runtime.js";
 
 function snapshot(
   messages: readonly Message[],
@@ -650,95 +646,6 @@ test("newer cursor resumes an oversized item then advances to its following item
       .join(""),
   ) as { content?: unknown };
   assert.equal(reconstructed.content, huge);
-});
-
-test("session transcript cursor validators fail closed", () => {
-  const cursor = {
-    revision: "9",
-    throughTranscriptSequence: 9,
-    position: 4,
-    ordinal: 2,
-    byteOffset: 1024,
-    direction: "older" as const,
-  };
-  assert.deepEqual(
-    parseStrictRuntimeParams("session.transcript", {
-      workspacePath: "/workspace",
-      sessionId: "session-1",
-      cursor,
-    }).cursor,
-    cursor,
-  );
-  assert.throws(
-    () =>
-      parseStrictRuntimeParams("session.transcript", {
-        workspacePath: "/workspace",
-        sessionId: "session-1",
-        cursor: { ...cursor, throughTranscriptSequence: 0 },
-      }),
-    /正安全整数/u,
-  );
-  assert.throws(
-    () =>
-      parseStrictRuntimeParams("session.transcript", {
-        workspacePath: "/workspace",
-        sessionId: "session-1",
-        cursor,
-        before: "legacy",
-      }),
-    /不能同时提供/u,
-  );
-
-  const result = {
-    session: {
-      sessionId: "session-1",
-      workspacePath: "/workspace",
-      title: "Session",
-      status: "active",
-      createdAt: 1,
-      updatedAt: 1,
-    },
-    items: [],
-    queuedInputs: [],
-    revision: "9",
-    nextCursor: cursor,
-    fragments: [
-      {
-        itemId: "item-1",
-        position: 4,
-        ordinal: 2,
-        byteOffset: 0,
-        byteLength: 4,
-        totalBytes: 8,
-        json: "😀",
-      },
-    ],
-  };
-  assert.deepEqual(parseDesktopRuntimeResult("session.transcript", result), result);
-  assert.throws(
-    () =>
-      parseDesktopRuntimeResult("session.transcript", {
-        ...result,
-        nextCursor: { ...cursor, byteOffset: -1 },
-      }),
-    /不能为负数/u,
-  );
-  assert.throws(
-    () =>
-      parseDesktopRuntimeResult("session.transcript", {
-        ...result,
-        nextCursor: { ...cursor, direction: "sideways" },
-      }),
-    /older \| newer/u,
-  );
-  assert.throws(
-    () =>
-      parseDesktopRuntimeResult("session.transcript", {
-        ...result,
-        fragments: [{ ...result.fragments[0], byteLength: 5 }],
-      }),
-    /UTF-8/u,
-  );
 });
 
 test("Desktop fragment reducer rejects conflicting ranges and total byte counts", () => {

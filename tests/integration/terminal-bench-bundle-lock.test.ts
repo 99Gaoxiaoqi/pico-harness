@@ -13,8 +13,13 @@ test("Terminal-Bench approved bundle lock matches runtime dependencies", async (
   const rootPackage = JSON.parse(await readFile("package.json", "utf8"));
   const lock = JSON.parse(lockRaw);
   assert.equal(lock.lockfileVersion, 3);
+  const deps = Object.fromEntries(
+    Object.entries(rootPackage.dependencies).filter(
+      ([name]) => name !== "@pico/runtime-host" && name !== "@pico/transcript-replica",
+    ),
+  );
   assert.deepEqual(lock.packages[""].dependencies, {
-    ...rootPackage.dependencies,
+    ...deps,
     "@pico/protocol": "file:packages/protocol",
   });
   assert.equal(lock.packages["node_modules/@pico/protocol"].resolved, "packages/protocol");

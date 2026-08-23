@@ -6,6 +6,8 @@ import {
   parseApprovalRequestedPayload,
   type DesktopRuntimeMethod,
   type RuntimeProviderInput,
+  type RuntimeActiveOverlayEntry,
+  type RuntimeConversationItem,
   type RuntimeParams,
   type RuntimeNotification,
   type RuntimeMemoryFact,
@@ -19,6 +21,7 @@ import {
   type RuntimeToolResultEnvelope,
   type RuntimeUserDefaults,
 } from "@pico/protocol";
+import type { TranscriptReplicaView } from "@pico/transcript-replica";
 import type { DesktopBridge, DesktopResult } from "../preload/contract.js";
 
 type RuntimeTranscriptCursor = {
@@ -82,14 +85,13 @@ import type {
   ConversationItemView,
   ConversationProgressState,
 } from "./conversation/types.js";
-import {
-  applyLiveAssistantUpdate,
-  applyLiveReasoningUpdate,
-  conversationItemKey,
-  mergeHydratedConversationItems,
-} from "./conversation/items.js";
+import { conversationItemKey, mergeHydratedConversationItems } from "./conversation/items.js";
 import { applyTimelineNotification } from "./timeline.js";
 import { ConversationLoadTracker } from "./conversation-load-tracker.js";
+import {
+  DesktopSessionContinuity,
+  type DesktopSessionContinuityTransport,
+} from "./session-continuity.js";
 
 const SHARED_CONFIG_CAPABILITY = "shared-config-v1";
 const WORKSPACE_MEMORY_CAPABILITY = "workspace-memory-v1";
@@ -495,6 +497,41 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
     };
   }
   return undefined;
+}
+
+function overlayRuntimeItem(overlay: RuntimeActiveOverlayEntry): RuntimeConversationItem {
+  if (overlay.kind === "thinking") {
+    return {
+      id: overlay.itemId,
+      kind: "thinking",
+      content: overlay.text,
+      runId: overlay.runId,
+      turnId: overlay.turnId,
+    };
+  }
+  if (overlay.kind === "text") {
+    return {
+      id: overlay.itemId,
+      kind: "assistantMessage",
+      content: overlay.text,
+      runId: overlay.runId,
+      turnId: overlay.turnId,
+    };
+  }
+  return {
+    id: overlay.itemId,
+    kind: "systemNotice",
+    content: overlay.stream ? `[${overlay.stream}] ${overlay.text}` : overlay.text,
+  };
+}
+
+export function conversationItemsFromReplica(view: TranscriptReplicaView): ConversationItemView[] {
+  return [
+    ...view.records.map((record) => record.item),
+    ...view.activeOverlay.map(overlayRuntimeItem),
+  ]
+    .map(conversationItem)
+    .filter((item): item is ConversationItemView => item !== undefined);
 }
 
 interface ParsedConversation extends ConversationView {
@@ -1530,6 +1567,8 @@ export function useRuntimeStore(): RuntimeStore {
   const transcriptFragmentsByConversation = useRef(
     new Map<string, Map<string, RuntimeTranscriptFragment[]>>(),
   );
+  const desktopContinuityRef = useRef<DesktopSessionContinuity | undefined>(undefined);
+  const desktopContinuityBridgeRef = useRef<DesktopBridge | undefined>(undefined);
   const pendingSendRef = useRef<
     | {
         readonly identity: string;
@@ -1538,6 +1577,78 @@ export function useRuntimeStore(): RuntimeStore {
     | undefined
   >(undefined);
   dataRef.current = data;
+
+  const applyReplicaView = useCallback(
+    (workspacePath: string, sessionId: string, view: TranscriptReplicaView) => {
+      const conversationKey = workspaceSessionKey({ workspacePath, sessionId });
+      const activeRun =
+        view.activeRun && !isTerminalRunStatus(view.activeRun.status) ? view.activeRun : undefined;
+      setData((current) => {
+        const existing = current.conversations[conversationKey] ?? {
+          workspacePath,
+          sessionId,
+          items: [],
+          queuedCount: 0,
+        };
+        const { runId: _previousRunId, ...conversationWithoutRun } = existing;
+        return {
+          ...current,
+          conversations: {
+            ...current.conversations,
+            [conversationKey]: {
+              ...conversationWithoutRun,
+              items: conversationItemsFromReplica(view),
+              queuedCount: view.queuedInputs.length,
+              ...(activeRun ? { runId: activeRun.runId } : {}),
+            },
+          },
+          runs: view.activeRun
+            ? [
+                {
+                  id: view.activeRun.runId,
+                  workspacePath,
+                  sessionId,
+                  description: view.activeRun.description,
+                  status: view.activeRun.status,
+                  startedAt: view.activeRun.startedAt,
+                  updatedAt: view.activeRun.updatedAt,
+                },
+                ...current.runs.filter(
+                  (run) => run.workspacePath !== workspacePath || run.id !== view.activeRun?.runId,
+                ),
+              ]
+            : current.runs,
+        };
+      });
+    },
+    [],
+  );
+
+  const ensureDesktopContinuity = useCallback(
+    (bridge: DesktopBridge): DesktopSessionContinuity => {
+      if (desktopContinuityRef.current && desktopContinuityBridgeRef.current === bridge) {
+        return desktopContinuityRef.current;
+      }
+      desktopContinuityRef.current?.dispose();
+      const transport: DesktopSessionContinuityTransport = {
+        open: (params) => invoke(bridge, "session.subscription.open", params),
+        close: (params) => invoke(bridge, "session.subscription.close", params),
+        page: (params) => invoke(bridge, "session.transcript.page", params),
+        advance: (params) => invoke(bridge, "session.transcript.advance", params),
+        subscribeFrames: (listener, onDisconnect) =>
+          bridge.sessionFrames.subscribe(listener, onDisconnect),
+      };
+      const continuity = new DesktopSessionContinuity({
+        transport,
+        onView: applyReplicaView,
+        onError: (error) => setMessage(errorMessage(error)),
+      });
+      desktopContinuityBridgeRef.current = bridge;
+      desktopContinuityRef.current = continuity;
+      return continuity;
+    },
+    [applyReplicaView],
+  );
 
   const reportFailure = useCallback((error: unknown) => {
     setMessage(errorMessage(error));
@@ -1933,13 +2044,19 @@ export function useRuntimeStore(): RuntimeStore {
       // daemon 服务层一处，本层仅丢弃迟到的旧加载）。
       const load = conversationLoadTracker.current.begin(conversationKey);
       const isCurrentLoad = () => conversationLoadTracker.current.isCurrent(load);
+      let continuity: DesktopSessionContinuity;
       let value: unknown;
       try {
-        value = await invoke(bridge, "session.transcript", {
-          workspacePath,
-          sessionId,
-          limit: 200,
-        });
+        continuity = ensureDesktopContinuity(bridge);
+        const view = await continuity.open(workspacePath, sessionId);
+        value = {
+          items: [
+            ...view.records.map((record) => record.item),
+            ...view.activeOverlay.map(overlayRuntimeItem),
+          ],
+          queuedInputs: view.queuedInputs,
+          ...(view.activeRun ? { activeRun: view.activeRun } : {}),
+        };
       } catch (error) {
         if (!isCurrentLoad()) return;
         setData((current) => ({
@@ -2009,6 +2126,7 @@ export function useRuntimeStore(): RuntimeStore {
         }
       }
       if (!isCurrentLoad()) return;
+      const latestReplicaView = continuity?.view(workspacePath, sessionId);
       setData((current) => ({
         ...current,
         approvals: [
@@ -2021,11 +2139,18 @@ export function useRuntimeStore(): RuntimeStore {
           ...current.conversations,
           [conversationKey]: {
             ...conversation,
-            items: mergeHydratedConversationItems(
-              conversation.items,
-              current.conversations[conversationKey]?.items ?? [],
-              activeRunId,
-            ),
+            ...(latestReplicaView
+              ? {
+                  items: conversationItemsFromReplica(latestReplicaView),
+                  queuedCount: latestReplicaView.queuedInputs.length,
+                }
+              : {
+                  items: mergeHydratedConversationItems(
+                    conversation.items,
+                    current.conversations[conversationKey]?.items ?? [],
+                    activeRunId,
+                  ),
+                }),
           },
         },
         runs: activeRun
@@ -2052,7 +2177,7 @@ export function useRuntimeStore(): RuntimeStore {
             ),
       }));
     },
-    [preview],
+    [ensureDesktopContinuity, preview],
   );
 
   const bootstrap = useCallback(async () => {
@@ -2329,83 +2454,6 @@ export function useRuntimeStore(): RuntimeStore {
           ...current,
           timeline: applyTimelineNotification(current.timeline, event),
         }));
-      } else if (topic === "run.live") {
-        const sessionId = stringValue(scope.sessionId);
-        const runId = stringValue(scope.runId ?? payload.runId);
-        const conversationKey = sessionId
-          ? workspaceSessionKey({ workspacePath, sessionId })
-          : undefined;
-        const item = isRecord(payload.item) ? payload.item : {};
-        const operation = stringValue(item.operation);
-        const liveOperation =
-          operation === "append"
-            ? "append"
-            : operation === "complete"
-              ? "complete"
-              : operation === "clear"
-                ? "clear"
-                : undefined;
-        if (
-          sessionId &&
-          conversationKey &&
-          runId &&
-          (item.kind === "thinking" || item.kind === "assistantMessage") &&
-          liveOperation
-        ) {
-          setData((current) => {
-            const conversation = current.conversations[conversationKey] ?? {
-              workspacePath,
-              sessionId,
-              items: [],
-              queuedCount: 0,
-              runId,
-            };
-            const activeRun = current.runs.find(
-              (candidate) =>
-                candidate.workspacePath === workspacePath &&
-                candidate.sessionId === sessionId &&
-                !isTerminalRunStatus(candidate.status),
-            );
-            if (activeRun && activeRun.id !== runId) return current;
-            const runConversation =
-              conversation.runId === runId
-                ? conversation
-                : {
-                    ...conversation,
-                    runId,
-                    items: conversation.items.filter(
-                      (candidate) =>
-                        (candidate.kind !== "thinking" && candidate.kind !== "assistantMessage") ||
-                        candidate.streaming !== true,
-                    ),
-                  };
-            const update = {
-              runId,
-              operation: liveOperation,
-              ...(stringValue(item.streamId) ? { streamId: stringValue(item.streamId) } : {}),
-              ...(stringValue(item.turnId) ? { turnId: stringValue(item.turnId) } : {}),
-              ...(stringValue(item.delta) ? { delta: stringValue(item.delta) } : {}),
-              ...(item.truncated === true ? { truncated: true } : {}),
-              at: numberValue(event.at, Date.now()),
-            } as const;
-            return {
-              ...current,
-              conversations: {
-                ...current.conversations,
-                [conversationKey]: {
-                  ...runConversation,
-                  items:
-                    item.kind === "thinking"
-                      ? applyLiveReasoningUpdate(runConversation.items, update)
-                      : applyLiveAssistantUpdate(runConversation.items, update),
-                },
-              },
-            };
-          });
-          if (item.kind === "assistantMessage" && operation === "complete") {
-            scheduleHydration(sessionId);
-          }
-        }
       } else if (topic === "config.updated") {
         const changedCapabilities = Array.isArray(payload.capabilities)
           ? payload.capabilities.map((item) => stringValue(item))
@@ -2435,7 +2483,9 @@ export function useRuntimeStore(): RuntimeStore {
         topic.startsWith("run.") ||
         topic.startsWith("session.")
       ) {
-        scheduleHydration(stringValue(scope.sessionId) || undefined);
+        if (!topic.startsWith("run.")) {
+          scheduleHydration(stringValue(scope.sessionId) || undefined);
+        }
       }
     };
     void (async () => {
@@ -2464,6 +2514,9 @@ export function useRuntimeStore(): RuntimeStore {
       if (refreshTimer) clearTimeout(refreshTimer);
       if (memoryRefreshTimer) clearTimeout(memoryRefreshTimer);
       subscription?.dispose();
+      desktopContinuityRef.current?.dispose();
+      desktopContinuityRef.current = undefined;
+      desktopContinuityBridgeRef.current = undefined;
     };
   }, [
     connection.kind,
@@ -2630,67 +2683,10 @@ export function useRuntimeStore(): RuntimeStore {
       },
       async loadEarlierSession(ref) {
         const { workspacePath, sessionId } = ref;
-        const conversationKey = workspaceSessionKey(ref);
-        const conversation = dataRef.current.conversations[conversationKey];
-        const cursor = transcriptCursorByConversation.current.get(conversationKey);
-        const before = conversation?.nextBefore;
-        const expectedRevision = conversation?.revision;
-        if (!workspacePath || (!cursor && !before) || !expectedRevision) return;
+        if (!workspacePath || !sessionId) return;
         await perform("load-earlier-session", async (bridge) => {
           if (preview) return;
-          let value: unknown;
-          try {
-            value = await invoke(bridge, "session.transcript", {
-              workspacePath,
-              sessionId,
-              ...(cursor ? { cursor } : { before }),
-              limit: 200,
-              ...(!cursor ? { expectedRevision } : {}),
-            });
-          } catch (error) {
-            if (error instanceof RuntimeInvocationError && error.code === "CONFLICT") {
-              await loadConversation(bridge, workspacePath, sessionId);
-              setMessage("会话历史已更新，已从最新版本重新加载。");
-              return;
-            }
-            throw error;
-          }
-          const fragments =
-            transcriptFragmentsByConversation.current.get(conversationKey) ??
-            new Map<string, RuntimeTranscriptFragment[]>();
-          transcriptFragmentsByConversation.current.set(conversationKey, fragments);
-          const page = parseConversation(value, workspacePath, sessionId, fragments);
-          if (
-            page.revision !== expectedRevision ||
-            dataRef.current.conversations[conversationKey]?.revision !== expectedRevision
-          ) {
-            await loadConversation(bridge, workspacePath, sessionId);
-            setMessage("会话历史已更新，已从最新版本重新加载。");
-            return;
-          }
-          if (page.nextCursor) {
-            transcriptCursorByConversation.current.set(conversationKey, page.nextCursor);
-          } else {
-            transcriptCursorByConversation.current.delete(conversationKey);
-          }
-          setData((current) => {
-            const latest = current.conversations[conversationKey];
-            if (!latest || latest.revision !== expectedRevision) return current;
-            const existingIds = new Set(latest.items.map((item) => item.id));
-            const olderItems = page.items.filter((item) => !existingIds.has(item.id));
-            return {
-              ...current,
-              conversations: {
-                ...current.conversations,
-                [conversationKey]: {
-                  ...latest,
-                  items: [...olderItems, ...latest.items],
-                  nextBefore: page.nextBefore,
-                  queuedCount: page.queuedCount,
-                },
-              },
-            };
-          });
+          await loadConversation(bridge, workspacePath, sessionId);
         });
       },
       async readToolEvidence(input) {
@@ -3919,6 +3915,9 @@ function createPreviewBridge(): DesktopBridge {
         ready: success({ subscribed: true, events: [], hasMore: false }),
         dispose: () => undefined,
       }),
+    },
+    sessionFrames: {
+      subscribe: () => ({ dispose: () => undefined }),
     },
     onUnavailable: () => () => undefined,
     onRecovered: () => () => undefined,

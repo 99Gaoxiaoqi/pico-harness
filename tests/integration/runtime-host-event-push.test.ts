@@ -50,13 +50,25 @@ function pushCompositionFactory(hooks: PushCompositionHooks): RuntimeHostComposi
   return async (): Promise<RuntimeHostComposition> => ({
     handlers: {
       [PUSH_OPERATION]: async (
-        _input: unknown,
-        context: { pushEvent?: PushSink },
+        input: unknown,
+        context: {
+          pushEvent?: PushSink;
+          afterResponseFlushed?(callback: () => void): void;
+        },
       ): Promise<{ ok: true; result: { pushed: boolean } }> => {
         const pushEvent = context.pushEvent;
         if (!pushEvent) throw new Error("test handler expected a pushEvent capability");
         // 捕获闭包供测试在请求结束后继续推送（模拟桥接订阅的 live 推送）。
         hooks.capturedSinks.push(pushEvent);
+        if ((input as { afterResponse?: unknown }).afterResponse === true) {
+          if (!context.afterResponseFlushed) {
+            throw new Error("test handler expected an afterResponseFlushed capability");
+          }
+          context.afterResponseFlushed(() => {
+            void pushEvent({ seq: 1, activated: true });
+          });
+          return { ok: true, result: { pushed: true } };
+        }
         // handler 内同步推送：两帧事件先入 writer 队列，response 最后。
         await pushEvent({ seq: 1 });
         await pushEvent({ seq: 2 });
@@ -136,6 +148,39 @@ test("event push: handler-pushed events arrive in wire order before the response
   // 事件帧不占 operation 槽位：host.status 只计自身。
   const status = await connection.status(5000);
   assert.equal(status.activeOperations, 1);
+});
+
+test("event push: response-flushed barrier activates pushes after the response", async (t) => {
+  const hooks: PushCompositionHooks = { capturedSinks: [] };
+  const { capability, owner } = await startPushHarness(t);
+  const kernel = await RuntimeHostKernel.start({
+    owner,
+    compositionFactory: pushCompositionFactory(hooks),
+  });
+  t.after(async () => {
+    await kernel.close().catch(() => undefined);
+    await owner.close().catch(() => undefined);
+  });
+
+  const connection = await connectPushClient(capability, "event-push-barrier-client");
+  t.after(async () => {
+    await connection.close().catch(() => undefined);
+  });
+
+  const observed: string[] = [];
+  connection.setEventListener((event) => {
+    observed.push(`event:${(event as { seq: number }).seq}`);
+  });
+
+  const result = await connection.requestRegistered<{ pushed: boolean }>(
+    PUSH_OPERATION,
+    { afterResponse: true },
+    5000,
+  );
+  assert.equal(result.pushed, true);
+  observed.push("response");
+  assert.ok(await waitForCondition(() => observed.length === 2, 2000));
+  assert.deepEqual(observed, ["response", "event:1"]);
 });
 
 test("event push: a captured sink keeps pushing after the request completed", async (t) => {
