@@ -216,8 +216,10 @@ export function TerminalWorkbarPanel({
             <label>
               <span className="sr-only">终端输入</span>
               <input
+                name="workbar-terminal-command"
+                autoComplete="off"
                 value={input}
-                placeholder={selected.attached ? "输入命令并按 Enter" : "连接终端后输入"}
+                placeholder={selected.attached ? "输入命令并按 Enter…" : "连接终端后输入…"}
                 disabled={selected.status !== "running" || !selected.attached}
                 spellCheck={false}
                 onChange={(event) => setInput(event.target.value)}

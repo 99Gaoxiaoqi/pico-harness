@@ -235,6 +235,11 @@
   color: var(--text-tertiary, #9ca3af);
 }
 
+.tool-panel__timeline li {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 54px;
+}
+
 .tool-panel__compact-list li[data-state="omitted"],
 .tool-panel__compact-list li[data-state="unknown"] {
   opacity: 0.62;

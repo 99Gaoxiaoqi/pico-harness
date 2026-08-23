@@ -182,9 +182,11 @@ export function SideChatWorkbarPanel({
         <label>
           <span className="sr-only">发送给临时分支</span>
           <textarea
+            name="workbar-side-chat-message"
+            autoComplete="off"
             value={draft}
             rows={2}
-            placeholder={unavailable ? "临时分支就绪后可发送消息" : "在临时分支中继续…"}
+            placeholder={unavailable ? "临时分支就绪后可发送消息…" : "在临时分支中继续…"}
             disabled={unavailable}
             onChange={(event) => onDraftChange(event.target.value)}
             onKeyDown={handleDraftKeyDown}

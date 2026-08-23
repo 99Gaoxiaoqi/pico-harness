@@ -1,15 +1,6 @@
 import { ArrowLeft, ArrowRight, Globe2, LoaderCircle, RefreshCw, X } from "lucide-react";
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type FormEvent,
-} from "react";
-import type {
-  DesktopBridge,
-  DesktopBrowserState,
-} from "../../preload/contract.js";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import type { DesktopBridge, DesktopBrowserState } from "../../preload/contract.js";
 
 export interface BrowserWorkbarPanelProps {
   readonly bridge: DesktopBridge;
@@ -29,9 +20,13 @@ export function BrowserWorkbarPanel({ bridge, sessionId, active }: BrowserWorkba
     if (next?.url) setAddress(next.url);
   }, []);
 
-  useEffect(() => bridge.browser.onState((next) => {
-    if (next.sessionId === sessionId) consume(next);
-  }), [bridge, consume, sessionId]);
+  useEffect(
+    () =>
+      bridge.browser.onState((next) => {
+        if (next.sessionId === sessionId) consume(next);
+      }),
+    [bridge, consume, sessionId],
+  );
 
   useEffect(() => {
     let disposed = false;
@@ -78,7 +73,13 @@ export function BrowserWorkbarPanel({ bridge, sessionId, active }: BrowserWorkba
   }, [active, bridge, sessionId]);
 
   const perform = useCallback(
-    async (operation: () => Promise<{ readonly ok: boolean; readonly value?: DesktopBrowserState; readonly error?: { readonly message: string } }>) => {
+    async (
+      operation: () => Promise<{
+        readonly ok: boolean;
+        readonly value?: DesktopBrowserState;
+        readonly error?: { readonly message: string };
+      }>,
+    ) => {
       setMessage(null);
       const result = await operation();
       if (result.ok) consume(result.value ?? null);
@@ -135,8 +136,11 @@ export function BrowserWorkbarPanel({ bridge, sessionId, active }: BrowserWorkba
           <Globe2 aria-hidden="true" size={14} />
           <span className="sr-only">地址</span>
           <input
+            name="workbar-browser-address"
+            inputMode="url"
+            autoComplete="off"
             value={address}
-            placeholder="输入网址或域名"
+            placeholder="输入网址或域名…"
             spellCheck={false}
             onChange={(event) => setAddress(event.target.value)}
           />
@@ -155,7 +159,11 @@ export function BrowserWorkbarPanel({ bridge, sessionId, active }: BrowserWorkba
           <X aria-hidden="true" size={15} />
         </button>
       </form>
-      {message && <p className="workbar-browser__error" role="alert">{message}</p>}
+      {message && (
+        <p className="workbar-browser__error" role="alert">
+          {message}
+        </p>
+      )}
       <div
         ref={viewportRef}
         className="workbar-browser__viewport"
