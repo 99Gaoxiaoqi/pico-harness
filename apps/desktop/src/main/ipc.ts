@@ -24,10 +24,12 @@ import {
 } from "../preload/contract.js";
 import { RuntimeClientError, type RuntimeClientAdapter } from "./runtime-client-adapter.js";
 import type { EmbeddedBrowserAuthority } from "./browser-manager.js";
+import { isDesktopRuntimeInvocationAllowed } from "./daemon-controller.js";
 
 interface LifecycleControls {
   setBackgroundMode(enabled: boolean): void;
   requestQuit(): void;
+  isQuitting(): boolean;
 }
 
 interface RuntimeSubscription {
@@ -44,6 +46,7 @@ export function registerDesktopIpcHandlers(options: {
   readonly platform: PlatformServices;
   readonly lifecycle: LifecycleControls;
   readonly browser: EmbeddedBrowserAuthority;
+  readonly isTerminalCreateAllowed: () => boolean;
 }): () => void {
   const { ipcMain, runtime, platform, lifecycle, browser } = options;
   const subscriptions = new Map<string, RuntimeSubscription>();
@@ -67,6 +70,19 @@ export function registerDesktopIpcHandlers(options: {
     if (!trusted(event)) return unauthorized();
     try {
       const envelope = readInvocation(value);
+      if (
+        !isDesktopRuntimeInvocationAllowed(
+          envelope.method,
+          lifecycle.isQuitting(),
+          options.isTerminalCreateAllowed(),
+        )
+      ) {
+        throw new RuntimeClientError(
+          "RUNTIME_CLIENT_CLOSED",
+          "Terminal 正在清理或 Desktop 正在退出，已拒绝创建新实例",
+          false,
+        );
+      }
       const params = parseStrictRuntimeParams(envelope.method, envelope.params);
       const result = parseDesktopRuntimeResult(
         envelope.method,

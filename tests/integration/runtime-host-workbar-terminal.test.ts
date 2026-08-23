@@ -333,7 +333,7 @@ test("Host terminal stopAll 等待已接纳但仍在 spawn 的 create 后再完�
   assert.equal(persisted?.pid, undefined);
 });
 
-test("Host terminal 清理期间的新 create 进入下一代且不被旧 stopAll 终止", async (context) => {
+test("Host terminal 退出清理锁住 admission，显式 resume 后才开启下一代", async (context) => {
   const workspacePath = await createWorkspace(context, "cleanup-reopen-generation");
   const factory = new ControlledProcessFactory();
   const authority = new WorkbarTerminalAuthority({
@@ -350,18 +350,30 @@ test("Host terminal 清理期间的新 create 进入下一代且不被旧 stopAl
 
   const cleanup = authority.stopAll();
   await waitFor(async () => firstProcess.signals[0] === "SIGTERM");
-  const reopenedCreating = authority.create({ workspacePath, sessionId: "session-1" });
-  await Promise.resolve();
+  await assert.rejects(
+    authority.create({ workspacePath, sessionId: "session-1" }),
+    (error: unknown) => error instanceof WorkbarTerminalError && error.code === "admission_closed",
+  );
+  assert.throws(
+    () => authority.resumeCreates(),
+    (error: unknown) => error instanceof WorkbarTerminalError && error.code === "admission_closed",
+  );
   assert.equal(factory.spawnCount, 1, "cleanup 未完成前不得接纳下一代 spawn");
 
   firstProcess.exit({ signal: "SIGTERM" });
   assert.equal(await cleanup, 1);
+  await assert.rejects(
+    authority.create({ workspacePath, sessionId: "session-1" }),
+    (error: unknown) => error instanceof WorkbarTerminalError && error.code === "admission_closed",
+  );
+  authority.resumeCreates();
+  const reopenedCreating = authority.create({ workspacePath, sessionId: "session-1" });
   await waitFor(async () => factory.spawnCount === 2);
   const reopenedProcess = factory.resolveNext(false);
   const reopened = await reopenedCreating;
   assert.notEqual(reopened.resourceId, first.resourceId);
   assert.equal(reopened.status, "running");
-  assert.deepEqual(reopenedProcess.signals, [], "旧代 stopAll 不得终止重开后的终端");
+  assert.deepEqual(reopenedProcess.signals, [], "旧代 stopAll 不得终止新 App 代际的终端");
 });
 
 test("Host terminal stopAll 只终止 Authority 持有的进程组并持久化终态", async (context) => {
