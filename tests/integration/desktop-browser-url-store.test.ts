@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  BrowserSessionCloseFence,
   commitBrowserRevocations,
   persistBrowserNavigationForCurrentEntry,
   PersistentBrowserViewportGenerationAuthority,
@@ -102,7 +103,7 @@ test("browser generation floor survives Desktop restart against the same daemon"
   );
 });
 
-test("browser close publishes one floor-and-URL snapshot before notifying daemon", async () => {
+test("browser close fence blocks acquire through publication and daemon notification", async () => {
   const published: unknown[] = [];
   const releasePublish = Promise.withResolvers<void>();
   let blockPublish = false;
@@ -116,9 +117,16 @@ test("browser close publishes one floor-and-URL snapshot before notifying daemon
   store.set("session-a", "https://example.com/active");
   await store.flush();
   const authority = new PersistentBrowserViewportGenerationAuthority(store);
-  await authority.acquire("session-a");
+  const closeFence = new BrowserSessionCloseFence();
+  const acquireViewport = async (): Promise<number> => {
+    closeFence.assertAvailable("session-a");
+    return authority.acquire("session-a");
+  };
+  const firstGeneration = await acquireViewport();
   published.length = 0;
   blockPublish = true;
+  const notificationStarted = Promise.withResolvers<void>();
+  const releaseNotification = Promise.withResolvers<void>();
   const entry = {};
   let currentEntry: typeof entry | undefined = entry;
   const lateNavigation = (): boolean =>
@@ -131,46 +139,70 @@ test("browser close publishes one floor-and-URL snapshot before notifying daemon
       refresh: () => undefined,
     });
 
-  currentEntry = undefined;
-  const revocation = authority.revoke("session-a", { deleteUrl: true });
   const notifications: number[] = [];
-  const completion = commitBrowserRevocations(
-    revocation.persistence,
-    [{ sessionId: "session-a", generation: revocation.generation }],
-    async (_sessionId, generation) => {
-      notifications.push(generation);
-    },
-  );
+  let closeGeneration = 0;
+  const completion = closeFence.run("session-a", async () => {
+    currentEntry = undefined;
+    const revocation = authority.revoke("session-a", { deleteUrl: true });
+    closeGeneration = revocation.generation;
+    await commitBrowserRevocations(
+      revocation.persistence,
+      [{ sessionId: "session-a", generation: revocation.generation }],
+      async (_sessionId, generation) => {
+        notificationStarted.resolve();
+        await releaseNotification.promise;
+        notifications.push(generation);
+      },
+    );
+  });
+  let duplicateCloseRan = false;
+  const duplicateCompletion = closeFence.run("session-a", async () => {
+    duplicateCloseRan = true;
+  });
   await Promise.resolve();
+  assert.equal(closeFence.isClosing("session-a"), true);
+  await assert.rejects(acquireViewport(), /正在关闭/u);
+  assert.equal(authority.accept("session-a", firstGeneration), false);
+  assert.equal(
+    !closeFence.isClosing("session-a") && authority.accept("session-a", firstGeneration),
+    false,
+  );
   assert.equal(lateNavigation(), false);
 
   assert.deepEqual(published, [
     {
       version: 2,
-      sessions: [{ sessionId: "session-a", generationFloor: revocation.generation }],
+      sessions: [{ sessionId: "session-a", generationFloor: closeGeneration }],
     },
   ]);
   assert.equal(notifications.length, 0);
   releasePublish.resolve();
-  await completion;
+  await notificationStarted.promise;
+  assert.equal(closeFence.isClosing("session-a"), true);
+  await assert.rejects(acquireViewport(), /正在关闭/u);
+  assert.deepEqual(notifications, []);
+  releaseNotification.resolve();
+  await Promise.all([completion, duplicateCompletion]);
+  assert.equal(duplicateCloseRan, false);
+  assert.equal(closeFence.isClosing("session-a"), false);
   currentEntry = {};
-  const restoredGeneration = await authority.acquire("session-a");
+  const restoredGeneration = await acquireViewport();
   assert.equal(lateNavigation(), false);
   assert.equal(store.get("session-a"), undefined);
   assert.deepEqual(published, [
     {
       version: 2,
-      sessions: [{ sessionId: "session-a", generationFloor: revocation.generation }],
+      sessions: [{ sessionId: "session-a", generationFloor: closeGeneration }],
     },
     {
       version: 2,
       sessions: [{ sessionId: "session-a", generationFloor: restoredGeneration }],
     },
   ]);
-  assert.deepEqual(notifications, [revocation.generation]);
+  assert.deepEqual(notifications, [closeGeneration]);
 });
 
-test("browser close does not notify daemon or succeed when atomic publication fails", async () => {
+test("browser close fence releases after failure without reviving its entry or URL", async () => {
   const published: unknown[] = [];
   let rejectPublish = false;
   const store = new BrowserUrlStore("/unused", {
@@ -184,7 +216,12 @@ test("browser close does not notify daemon or succeed when atomic publication fa
   store.set("session-a", "https://example.com/active");
   await store.flush();
   const authority = new PersistentBrowserViewportGenerationAuthority(store);
-  await authority.acquire("session-a");
+  const closeFence = new BrowserSessionCloseFence();
+  const acquireViewport = async (): Promise<number> => {
+    closeFence.assertAvailable("session-a");
+    return authority.acquire("session-a");
+  };
+  const firstGeneration = await acquireViewport();
   published.length = 0;
   rejectPublish = true;
   const entry = {};
@@ -199,50 +236,63 @@ test("browser close does not notify daemon or succeed when atomic publication fa
       refresh: () => undefined,
     });
 
-  currentEntry = undefined;
-  const revocation = authority.revoke("session-a", { deleteUrl: true });
   const notifications: number[] = [];
+  let closeGeneration = 0;
   await assert.rejects(
-    commitBrowserRevocations(
-      revocation.persistence,
-      [{ sessionId: "session-a", generation: revocation.generation }],
-      async (_sessionId, generation) => {
-        notifications.push(generation);
-      },
-    ),
+    closeFence.run("session-a", async () => {
+      currentEntry = undefined;
+      const revocation = authority.revoke("session-a", { deleteUrl: true });
+      closeGeneration = revocation.generation;
+      await commitBrowserRevocations(
+        revocation.persistence,
+        [{ sessionId: "session-a", generation: revocation.generation }],
+        async (_sessionId, generation) => {
+          notifications.push(generation);
+        },
+      );
+    }),
     /rename failed/u,
   );
 
+  assert.equal(closeFence.isClosing("session-a"), false);
+  assert.equal(authority.accept("session-a", firstGeneration), false);
   assert.equal(lateNavigation(), false);
   assert.deepEqual(published, [
     {
       version: 2,
-      sessions: [{ sessionId: "session-a", generationFloor: revocation.generation }],
+      sessions: [{ sessionId: "session-a", generationFloor: closeGeneration }],
     },
   ]);
   assert.equal(notifications.length, 0);
 
   published.length = 0;
   rejectPublish = false;
-  const retry = authority.revoke("session-a", { deleteUrl: true });
-  assert.equal(retry.generation, revocation.generation);
-  await commitBrowserRevocations(
-    retry.persistence,
-    [{ sessionId: "session-a", generation: retry.generation }],
-    async (_sessionId, generation) => {
-      notifications.push(generation);
-    },
-  );
+  await closeFence.run("session-a", async () => {
+    const retry = authority.revoke("session-a", { deleteUrl: true });
+    assert.equal(retry.generation, closeGeneration);
+    await commitBrowserRevocations(
+      retry.persistence,
+      [{ sessionId: "session-a", generation: retry.generation }],
+      async (_sessionId, generation) => {
+        notifications.push(generation);
+      },
+    );
+  });
+  const restoredGeneration = await acquireViewport();
   assert.equal(lateNavigation(), false);
   assert.equal(currentEntry, undefined);
   assert.equal(store.get("session-a"), undefined);
   assert.deepEqual(published, [
     {
       version: 2,
-      sessions: [{ sessionId: "session-a", generationFloor: retry.generation }],
+      sessions: [{ sessionId: "session-a", generationFloor: closeGeneration }],
+    },
+    {
+      version: 2,
+      sessions: [{ sessionId: "session-a", generationFloor: restoredGeneration }],
     },
   ]);
-  assert.deepEqual(notifications, [revocation.generation]);
+  assert.deepEqual(notifications, [closeGeneration]);
 });
 
 test("browser URL store migrates v1 and fails safe on corrupt generation state", async (context) => {

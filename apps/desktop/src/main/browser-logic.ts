@@ -34,6 +34,41 @@ export function persistBrowserNavigationForCurrentEntry<Entry>(options: {
   return true;
 }
 
+export class BrowserSessionCloseFence {
+  readonly #closing = new Map<string, Promise<void>>();
+
+  isClosing(sessionId: string): boolean {
+    return this.#closing.has(sessionId);
+  }
+
+  assertAvailable(sessionId: string): void {
+    if (this.isClosing(sessionId)) throw new Error(`浏览器会话 ${sessionId} 正在关闭`);
+  }
+
+  run(sessionId: string, operation: () => Promise<void>): Promise<void> {
+    const existing = this.#closing.get(sessionId);
+    if (existing) return existing;
+    const completion = Promise.withResolvers<void>();
+    this.#closing.set(sessionId, completion.promise);
+    try {
+      void operation().then(
+        () => {
+          this.#closing.delete(sessionId);
+          completion.resolve();
+        },
+        (error: unknown) => {
+          this.#closing.delete(sessionId);
+          completion.reject(error);
+        },
+      );
+    } catch (error) {
+      this.#closing.delete(sessionId);
+      completion.reject(error);
+    }
+    return completion.promise;
+  }
+}
+
 export function normalizeViewport(rect: DesktopBrowserRect | null): DesktopBrowserRect | null {
   if (!rect) return null;
   if (![rect.x, rect.y, rect.width, rect.height].every(Number.isFinite)) return null;
