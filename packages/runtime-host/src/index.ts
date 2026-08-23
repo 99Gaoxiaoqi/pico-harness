@@ -50,6 +50,26 @@ export {
   type RuntimeHostCandidateResult,
 } from "./server/candidate.js";
 export { runRuntimeHostProcessLifecycle } from "./server/process-lifecycle.js";
+export {
+  createChildProcessWorkbarTerminalFallback,
+  createPreferredWorkbarTerminalProcessFactory,
+  WorkbarTerminalAuthority,
+  WorkbarTerminalError,
+} from "./server/workbar-terminal-authority.js";
+export type {
+  WorkbarTerminalAttachment,
+  WorkbarTerminalAuthorityOptions,
+  WorkbarTerminalCapability,
+  WorkbarTerminalErrorCode,
+  WorkbarTerminalEvent,
+  WorkbarTerminalOwner,
+  WorkbarTerminalProcess,
+  WorkbarTerminalProcessExit,
+  WorkbarTerminalProcessFactory,
+  WorkbarTerminalRecord,
+  WorkbarTerminalStateStore,
+  WorkbarTerminalStatus,
+} from "./server/workbar-terminal-authority.js";
 export { parseRuntimeHostCandidateArguments } from "./candidate-cli.js";
 
 // client
