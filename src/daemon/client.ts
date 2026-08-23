@@ -16,11 +16,13 @@ import {
   type RuntimeMethod,
   type RuntimeParams,
   type RuntimeResult,
+  type RuntimeSessionSubscriptionFrame,
 } from "./protocol.js";
 import { resolveCanonicalPicoHome } from "./endpoint.js";
 import {
   ensurePicoRuntimeHostEventOperationsRegistered,
   ensurePicoRuntimeHostOperationsRegistered,
+  ensurePicoRuntimeHostSessionContinuityOperationsRegistered,
   ensurePicoRuntimeHostShutdownOperationRegistered,
 } from "./runtime-host-operations.js";
 
@@ -44,7 +46,8 @@ const KERNEL_RETRY_SAFE_METHODS: ReadonlySet<RuntimeMethod> = new Set<RuntimeMet
   "session.list",
   "session.get",
   "session.settings.get",
-  "session.transcript",
+  "session.transcript.page",
+  "session.transcript.advance",
   "session.evidence.read",
   "goal.get",
   "discovery.get",
@@ -124,6 +127,10 @@ export interface RuntimeClient {
     readonly replay: RuntimeResult<"events.subscribe">;
     readonly dispose: () => void;
   }>;
+  subscribeSessionFrames(
+    listener: (frame: RuntimeSessionSubscriptionFrame) => void,
+    onDisconnect?: () => void,
+  ): { readonly dispose: () => void };
   close(): void;
 }
 
@@ -141,7 +148,7 @@ export class RuntimeClientError extends Error {
 
 /** 连接级能力面：订阅环与请求路径只依赖这四个成员，传输实现可替换。 */
 interface RuntimeTransportConnection {
-  setEventListener(listener: (notification: RuntimeNotification) => void): void;
+  setEventListener(listener: (event: Record<string, unknown>) => void): void;
   setDisconnectListener(listener: () => void): void;
   open(): Promise<void>;
   request<Method extends RuntimeMethod>(
@@ -169,6 +176,10 @@ export class LocalRuntimeClient implements RuntimeClient {
   private readonly replayBufferOptions?: RuntimeNotificationBufferOptions;
   private readonly runtimeHostRootPath?: string;
   private readonly candidateEntrypoint?: string | URL;
+  private readonly sessionFrameListeners = new Set<
+    (frame: RuntimeSessionSubscriptionFrame) => void
+  >();
+  private readonly sessionDisconnectListeners = new Set<() => void>();
   private closed = false;
 
   constructor(_endpoint?: unknown, options: LocalRuntimeClientOptions = {}) {
@@ -186,6 +197,10 @@ export class LocalRuntimeClient implements RuntimeClient {
     this.runtimeHostRootPath = options.runtimeHostRootPath;
     this.candidateEntrypoint = options.candidateEntrypoint;
     this.requestConnection = this.createConnection();
+    this.requestConnection.setEventListener((event) => this.deliverSessionFrame(event));
+    this.requestConnection.setDisconnectListener(() => {
+      for (const listener of this.sessionDisconnectListeners) listener();
+    });
   }
 
   async connect(): Promise<void> {
@@ -233,6 +248,21 @@ export class LocalRuntimeClient implements RuntimeClient {
     }
   }
 
+  subscribeSessionFrames(
+    listener: (frame: RuntimeSessionSubscriptionFrame) => void,
+    onDisconnect?: () => void,
+  ): { readonly dispose: () => void } {
+    this.assertOpen();
+    this.sessionFrameListeners.add(listener);
+    if (onDisconnect) this.sessionDisconnectListeners.add(onDisconnect);
+    return {
+      dispose: () => {
+        this.sessionFrameListeners.delete(listener);
+        if (onDisconnect) this.sessionDisconnectListeners.delete(onDisconnect);
+      },
+    };
+  }
+
   /** 请求常驻 daemon 优雅关停（3-B-4）。仅在 kernel 承载模式可用；旧 socket
    *  注入面不提供（对应 daemon 没有 kernel 生命周期可关）。 */
   async shutdownDaemon(): Promise<void> {
@@ -254,6 +284,13 @@ export class LocalRuntimeClient implements RuntimeClient {
     this.requestConnection.close();
     for (const subscription of [...this.subscriptions]) subscription.dispose();
     this.subscriptions.clear();
+    this.sessionFrameListeners.clear();
+    this.sessionDisconnectListeners.clear();
+  }
+
+  private deliverSessionFrame(event: Record<string, unknown>): void {
+    if (!isSessionSubscriptionFrame(event)) return;
+    for (const listener of this.sessionFrameListeners) listener(event);
   }
 
   private createConnection(): RuntimeTransportConnection {
@@ -300,7 +337,9 @@ class RuntimeSubscription {
   constructor(private readonly options: RuntimeSubscriptionOptions) {
     this.lastEventId = options.params.afterEventId;
     if (this.lastEventId) this.rememberEventId(this.lastEventId);
-    options.connection.setEventListener((event) => this.handleEvent(event));
+    options.connection.setEventListener((event) =>
+      this.handleEvent(event as unknown as RuntimeNotification),
+    );
     options.connection.setDisconnectListener(() => this.scheduleReconnect());
   }
 
@@ -529,7 +568,7 @@ class RuntimeSubscription {
 class KernelRuntimeConnection implements RuntimeTransportConnection {
   private hostConnection?: RuntimeHostConnection;
   private connecting?: Promise<void>;
-  private eventListener?: (notification: RuntimeNotification) => void;
+  private eventListener?: (event: Record<string, unknown>) => void;
   private disconnectListener?: () => void;
   private closed = false;
 
@@ -538,7 +577,7 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
     private readonly candidateEntrypoint?: string | URL,
   ) {}
 
-  setEventListener(listener: (notification: RuntimeNotification) => void): void {
+  setEventListener(listener: (event: Record<string, unknown>) => void): void {
     this.eventListener = listener;
   }
 
@@ -647,6 +686,7 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
     // 解析桥接操作（daemon 进程的注册不能代替本进程）。幂等。
     ensurePicoRuntimeHostOperationsRegistered();
     ensurePicoRuntimeHostEventOperationsRegistered();
+    ensurePicoRuntimeHostSessionContinuityOperationsRegistered();
     ensurePicoRuntimeHostShutdownOperationRegistered();
     const result = await connectOrSpawnRuntimeHost({
       rootPath: this.rootPath,
@@ -666,7 +706,7 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
     }
     const connection = result.connection;
     connection.setEventListener((event) => {
-      this.eventListener?.(event as unknown as RuntimeNotification);
+      this.eventListener?.(event);
     });
     void connection.closed.then(
       () => this.handleKernelDisconnect(connection),
@@ -680,6 +720,32 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
     this.hostConnection = undefined;
     this.disconnectListener?.();
   }
+}
+
+function isSessionSubscriptionFrame(
+  value: Record<string, unknown>,
+): value is RuntimeSessionSubscriptionFrame {
+  return (
+    typeof value["hostEpoch"] === "string" &&
+    value["hostEpoch"].length > 0 &&
+    typeof value["subscriptionId"] === "string" &&
+    value["subscriptionId"].length > 0 &&
+    typeof value["sessionId"] === "string" &&
+    value["sessionId"].length > 0 &&
+    typeof value["sequence"] === "number" &&
+    Number.isSafeInteger(value["sequence"]) &&
+    value["sequence"] > 0 &&
+    typeof value["type"] === "string" &&
+    [
+      "subscription.session_delta",
+      "subscription.tool_event",
+      "subscription.subagent_update",
+      "subscription.run_state",
+      "subscription.transcript_advanced",
+      "subscription.continuity_degraded",
+      "subscription.closed",
+    ].includes(value["type"])
+  );
 }
 
 function resolveDaemonCandidateEntrypoint(): string {
@@ -708,13 +774,20 @@ function describeElectionFailure(
   }
 }
 
-/** 单次桥接请求：events.* 走类型化桥接，其余方法走 runtime.request 通用桥接。 */
+/** Session continuity 需要连接亲和与 push context，与 events.* 一样直连注册操作。 */
 async function requestOverKernelConnection<Method extends RuntimeMethod>(
   connection: RuntimeHostConnection,
   method: Method,
   params: RuntimeParams<Method>,
 ): Promise<RuntimeResult<Method>> {
-  if (method === "events.subscribe" || method === "events.replay") {
+  if (
+    method === "events.subscribe" ||
+    method === "events.replay" ||
+    method === "session.subscription.open" ||
+    method === "session.subscription.close" ||
+    method === "session.transcript.page" ||
+    method === "session.transcript.advance"
+  ) {
     return await connection.requestRegistered<RuntimeResult<Method>>(method, params);
   }
   const response = await connection.requestRegistered<{ result: RuntimeResult<Method> }>(
@@ -751,6 +824,8 @@ function mapHostOperationErrorCode(code: string): string {
       return "FORBIDDEN";
     case "operation_unavailable":
       return "METHOD_NOT_FOUND";
+    case "reset_required":
+      return "RESET_REQUIRED";
     case "internal_failure":
       return "INTERNAL_ERROR";
     default:

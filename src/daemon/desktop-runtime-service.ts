@@ -277,6 +277,8 @@ export interface DesktopRuntimeServiceOptions {
   readonly ownsPluginRuntimeSnapshotRegistry?: boolean;
   readonly memoryService?: DesktopMemoryService;
   readonly ownsMemoryService?: boolean;
+  /** Commit 完成后通知 Dedicated Session Channel 读取已提交水位。 */
+  readonly onTranscriptAdvanced?: (workspacePath: string, sessionId: string) => void;
 }
 
 export interface DesktopRuntimeInteractions {
@@ -4147,17 +4149,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private publishTranscriptUpdate(
     workspacePath: string,
     sessionId: string,
-    operation: "reload" | "truncate",
+    _operation: "reload" | "truncate",
   ): void {
-    this.publish(
-      createRuntimeNotification({
-        topic: "session.transcriptUpdated",
-        scope: { workspacePath, sessionId },
-        resourceVersion: this.nextResourceVersion(),
-        at: this.now(),
-        payload: { sessionId, operation },
-      }),
-    );
+    this.options.onTranscriptAdvanced?.(workspacePath, sessionId);
   }
 
   private publishJob(job: JsonValue): void {
