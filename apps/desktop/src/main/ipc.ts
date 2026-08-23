@@ -47,6 +47,7 @@ export function registerDesktopIpcHandlers(options: {
   readonly lifecycle: LifecycleControls;
   readonly browser: EmbeddedBrowserAuthority;
   readonly isTerminalCreateAllowed: () => boolean;
+  readonly acquireTerminalCreate: () => (() => void) | undefined;
 }): () => void {
   const { ipcMain, runtime, platform, lifecycle, browser } = options;
   const subscriptions = new Map<string, RuntimeSubscription>();
@@ -68,13 +69,18 @@ export function registerDesktopIpcHandlers(options: {
 
   ipcMain.handle(DESKTOP_IPC_CHANNELS.runtimeInvoke, async (event, value: unknown) => {
     if (!trusted(event)) return unauthorized();
+    let releaseTerminalCreate: (() => void) | undefined;
     try {
       const envelope = readInvocation(value);
+      if (envelope.method === "terminal.create") {
+        releaseTerminalCreate = options.acquireTerminalCreate();
+      }
       if (
         !isDesktopRuntimeInvocationAllowed(
           envelope.method,
           lifecycle.isQuitting(),
-          options.isTerminalCreateAllowed(),
+          options.isTerminalCreateAllowed() &&
+            (envelope.method !== "terminal.create" || releaseTerminalCreate !== undefined),
         )
       ) {
         throw new RuntimeClientError(
@@ -111,6 +117,8 @@ export function registerDesktopIpcHandlers(options: {
       return success(result);
     } catch (error) {
       return failure(error);
+    } finally {
+      releaseTerminalCreate?.();
     }
   });
 
