@@ -45,3 +45,47 @@ export function guardBrowserNavigation(event: { preventDefault(): void }, url: s
   event.preventDefault();
   return false;
 }
+
+export class BrowserViewportGenerationAuthority {
+  readonly #generations = new Map<string, number>();
+
+  acquire(sessionId: string): number {
+    const current = this.current(sessionId);
+    if (current >= Number.MAX_SAFE_INTEGER) {
+      throw new Error(`浏览器会话 ${sessionId} 的视口代际已经耗尽`);
+    }
+    const generation = current + 1;
+    this.#generations.set(sessionId, generation);
+    return generation;
+  }
+
+  current(sessionId: string): number {
+    return this.#generations.get(sessionId) ?? 0;
+  }
+
+  accept(sessionId: string, generation: number): boolean {
+    if (generation < this.current(sessionId)) return false;
+    this.#generations.set(sessionId, generation);
+    return true;
+  }
+
+  clear(): void {
+    this.#generations.clear();
+  }
+}
+
+export function replaceVisibleBrowserEntry<Entry, Bounds>(options: {
+  readonly current: Entry;
+  readonly generation: (entry: Entry) => number;
+  readonly bounds: (entry: Entry) => Bounds;
+  readonly destroy: (entry: Entry) => void;
+  readonly create: () => Entry;
+  readonly show: (entry: Entry, bounds: Bounds, generation: number) => void;
+}): Entry {
+  const generation = options.generation(options.current);
+  const bounds = options.bounds(options.current);
+  options.destroy(options.current);
+  const replacement = options.create();
+  options.show(replacement, bounds, generation);
+  return replacement;
+}

@@ -3933,6 +3933,7 @@ function createPreviewBridge(): DesktopBridge {
       quit: () => success(undefined),
     },
     browser: {
+      acquireViewport: () => success(1),
       setActiveSession: () => success(undefined),
       setViewport: (input) =>
         success({
@@ -3965,6 +3966,7 @@ function createPreviewBridge(): DesktopBridge {
       reload: (sessionId) => success(emptyPreviewBrowserState(sessionId)),
       stop: (sessionId) => success(emptyPreviewBrowserState(sessionId)),
       getState: () => success(null),
+      clearPage: (sessionId) => success({ ...emptyPreviewBrowserState(sessionId), visible: true }),
       close: () => success(undefined),
       clearData: () => success(undefined),
       click: (sessionId, selector) =>

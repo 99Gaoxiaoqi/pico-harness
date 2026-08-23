@@ -5,10 +5,12 @@ import type {
   DesktopBrowserState,
 } from "../preload/contract.js";
 import {
+  BrowserViewportGenerationAuthority,
   guardBrowserNavigation,
   normalizeActiveBrowserViewport,
   normalizeBrowserAddress,
   normalizePersistedBrowserNavigation,
+  replaceVisibleBrowserEntry,
 } from "./browser-logic.js";
 import { BrowserUrlStore } from "./browser-url-store.js";
 
@@ -17,6 +19,7 @@ export const PICO_BROWSER_PARTITION = "persist:pico-browser";
 const guardedSessions = new WeakSet<Session>();
 
 export interface EmbeddedBrowserAuthority {
+  acquireViewport(sessionId: string): number;
   setActiveSession(sessionId: string | null): void;
   setViewport(
     sessionId: string,
@@ -29,6 +32,7 @@ export interface EmbeddedBrowserAuthority {
   reload(sessionId: string): DesktopBrowserState;
   stop(sessionId: string): DesktopBrowserState;
   getState(sessionId: string): DesktopBrowserState | null;
+  clearPage(sessionId: string): Promise<DesktopBrowserState>;
   click(sessionId: string, selector: string): Promise<DesktopBrowserElementResult>;
   type(
     sessionId: string,
@@ -53,7 +57,7 @@ export function createEmbeddedBrowserAuthority(options: {
   readonly userDataPath: string;
 }): EmbeddedBrowserAuthority {
   const entries = new Map<string, BrowserEntry>();
-  const viewportGenerations = new Map<string, number>();
+  const viewportGenerations = new BrowserViewportGenerationAuthority();
   const urlStore = new BrowserUrlStore(options.userDataPath, {
     onError: (error) => console.error("Pico browser URL persistence failed", error),
   });
@@ -125,7 +129,7 @@ export function createEmbeddedBrowserAuthority(options: {
     });
     const entry: BrowserEntry = {
       view,
-      generation: viewportGenerations.get(sessionId) ?? 0,
+      generation: viewportGenerations.current(sessionId),
       visible: false,
     };
     entries.set(sessionId, entry);
@@ -190,6 +194,10 @@ export function createEmbeddedBrowserAuthority(options: {
   };
 
   const authority: EmbeddedBrowserAuthority = {
+    acquireViewport(sessionId) {
+      return viewportGenerations.acquire(sessionId);
+    },
+
     setActiveSession(sessionId) {
       activeSessionId = sessionId;
       for (const [id, entry] of entries) {
@@ -199,11 +207,10 @@ export function createEmbeddedBrowserAuthority(options: {
 
     setViewport(sessionId, rect, generation) {
       const existing = entries.get(sessionId);
-      const currentGeneration = existing?.generation ?? viewportGenerations.get(sessionId) ?? 0;
-      if (generation < currentGeneration) {
+      const currentGeneration = viewportGenerations.current(sessionId);
+      if (!viewportGenerations.accept(sessionId, generation)) {
         return existing ? stateOf(sessionId, existing) : emptyState(sessionId, currentGeneration);
       }
-      viewportGenerations.set(sessionId, generation);
       const bounds = normalizeActiveBrowserViewport(rect, activeSessionId === sessionId);
       if (!bounds) {
         if (!existing) return emptyState(sessionId, generation);
@@ -260,6 +267,30 @@ export function createEmbeddedBrowserAuthority(options: {
     getState(sessionId) {
       const entry = entries.get(sessionId);
       return entry ? stateOf(sessionId, entry) : null;
+    },
+
+    async clearPage(sessionId) {
+      const entry = requireVisible(sessionId);
+      const deletionRevision = urlStore.delete(sessionId);
+      const replacement = replaceVisibleBrowserEntry({
+        current: entry,
+        generation: (current) => current.generation,
+        bounds: (current) => current.view.getBounds(),
+        destroy: (current) => destroyEntry(sessionId, current),
+        create: () => getOrCreate(sessionId),
+        show: (current, bounds, generation) => {
+          current.generation = generation;
+          current.visible = true;
+          current.view.setBounds(bounds);
+          current.view.setVisible(true);
+          if (!current.view.webContents.isDestroyed()) {
+            current.view.webContents.setBackgroundThrottling(false);
+          }
+        },
+      });
+      const state = emit(sessionId, replacement);
+      if (deletionRevision !== undefined) await urlStore.flushThrough(deletionRevision);
+      return state;
     },
 
     async click(sessionId, selector) {
