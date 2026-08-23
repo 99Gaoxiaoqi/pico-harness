@@ -116,6 +116,14 @@ export function createEmbeddedBrowserAuthority(options: {
     return entry;
   };
 
+  const requireVisible = (sessionId: string): BrowserEntry => {
+    const entry = entries.get(sessionId);
+    if (activeSessionId !== sessionId || !entry?.visible) {
+      throw new Error("浏览器会话当前不可见");
+    }
+    return entry;
+  };
+
   const hide = (sessionId: string, entry: BrowserEntry): void => {
     entry.visible = false;
     if (!entry.view.webContents.isDestroyed()) entry.view.webContents.setBackgroundThrottling(true);
@@ -148,16 +156,15 @@ export function createEmbeddedBrowserAuthority(options: {
     },
 
     async navigate(sessionId, address) {
-      if (activeSessionId !== sessionId) throw new Error("浏览器会话当前不可见");
       const url = normalizeBrowserAddress(address);
       if (!url) throw new Error("仅允许打开 HTTP 或 HTTPS 地址");
-      const entry = getOrCreate(sessionId);
+      const entry = requireVisible(sessionId);
       await entry.view.webContents.loadURL(url);
       return emit(sessionId, entry);
     },
 
     back(sessionId) {
-      const entry = getOrCreate(sessionId);
+      const entry = requireVisible(sessionId);
       if (entry.view.webContents.navigationHistory.canGoBack()) {
         entry.view.webContents.navigationHistory.goBack();
       }
@@ -165,7 +172,7 @@ export function createEmbeddedBrowserAuthority(options: {
     },
 
     forward(sessionId) {
-      const entry = getOrCreate(sessionId);
+      const entry = requireVisible(sessionId);
       if (entry.view.webContents.navigationHistory.canGoForward()) {
         entry.view.webContents.navigationHistory.goForward();
       }
@@ -173,13 +180,13 @@ export function createEmbeddedBrowserAuthority(options: {
     },
 
     reload(sessionId) {
-      const entry = getOrCreate(sessionId);
+      const entry = requireVisible(sessionId);
       entry.view.webContents.reload();
       return emit(sessionId, entry);
     },
 
     stop(sessionId) {
-      const entry = getOrCreate(sessionId);
+      const entry = requireVisible(sessionId);
       entry.view.webContents.stop();
       return emit(sessionId, entry);
     },
