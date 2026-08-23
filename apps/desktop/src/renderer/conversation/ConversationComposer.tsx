@@ -16,6 +16,7 @@ export interface ConversationComposerProps {
   readonly onBehaviorChange?: ((behavior: ComposerBehavior) => void) | undefined;
   readonly placeholder?: string | undefined;
   readonly disabled?: boolean | undefined;
+  readonly submitDisabled?: boolean | undefined;
   readonly busy?: boolean | undefined;
   readonly statusText?: string | undefined;
   readonly options?: readonly ComposerOptionView[] | undefined;
@@ -48,6 +49,7 @@ export function ConversationComposer({
   onBehaviorChange,
   placeholder = "给 Pico 发消息",
   disabled = false,
+  submitDisabled = false,
   busy = false,
   statusText,
   options = [],
@@ -62,7 +64,7 @@ export function ConversationComposer({
 }: ConversationComposerProps) {
   const textareaId = useId();
   const statusId = useId();
-  const canSubmit = value.trim().length > 0 && !disabled && !busy;
+  const canSubmit = value.trim().length > 0 && !disabled && !submitDisabled && !busy;
   const effectiveBehavior = status === "idle" ? "auto" : behavior === "auto" ? "steer" : behavior;
   const resolvedStatusText =
     statusText ??
@@ -98,7 +100,10 @@ export function ConversationComposer({
     <form
       className="conversation-composer"
       data-status={status}
+      data-behavior={effectiveBehavior}
+      data-has-value={value.trim().length > 0 || undefined}
       aria-label="消息输入"
+      aria-busy={busy}
       onSubmit={handleSubmit}
     >
       <label className="conversation-sr-only" htmlFor={textareaId}>

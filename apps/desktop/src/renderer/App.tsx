@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  ArrowLeft,
   Archive,
   Bot,
   Box,
@@ -40,6 +41,7 @@ import {
   WandSparkles,
   Workflow,
 } from "lucide-react";
+import type { RuntimeUserDefaults } from "@pico/protocol";
 import {
   Component,
   createContext,
@@ -65,30 +67,27 @@ import {
   useNavigate,
   useParams,
 } from "react-router-dom";
-import {
-  ApprovalDialog,
-  Button,
-  CapabilityList,
-  EmptyState,
-  InlineNotice,
-  PromptDialog,
-  StatusPill,
-} from "./components.js";
+import { Button, CapabilityList, EmptyState, InlineNotice, StatusPill } from "./components.js";
 import {
   ConversationComposer,
+  ConversationContextMenu,
   ConversationInspector,
+  ConversationInteractionSlot,
   ConversationSurface,
   ConversationTranscript,
   type ComposerBehavior,
   type ConversationInspectorView,
   type ConversationItemView,
   mergeConversationItemGroups,
+  removePersistentDraft,
+  usePersistentDraft,
 } from "./conversation/index.js";
 import type {
   ApprovalView,
   CapabilityView,
   ChangeView,
   McpServerDraft,
+  PromptView,
   RunView,
   SessionView,
   TimelineItem,
@@ -100,6 +99,7 @@ import { MemoryPage } from "./MemoryPage.js";
 import { useRuntimeStore, type RuntimeStore } from "./runtime.js";
 import {
   newSessionHref,
+  isActiveWorkspaceSession,
   sessionHref,
   workspaceHref,
   workspaceName,
@@ -108,6 +108,13 @@ import {
   workspaceSessionKey,
   type WorkspaceSessionRef,
 } from "./workspace-session.js";
+import {
+  appPrimaryNavigation,
+  legacySurfaceHref,
+  settingsNavigationGroups,
+  sortSidebarTasks,
+  type SidebarTaskGrouping,
+} from "./navigation.js";
 
 const RuntimeContext = createContext<RuntimeStore | null>(null);
 
@@ -165,16 +172,10 @@ function AppStateRouter() {
     <Routes>
       <Route path="/onboarding" element={<Onboarding />} />
       <Route element={<AppShell />}>
-        <Route index element={<HomePage />} />
+        <Route index element={<Navigate replace to="/task/new" />} />
+        <Route path="home" element={<HomePage />} />
         <Route path="sessions" element={<SessionsPage />} />
-        <Route
-          path="task/new"
-          element={
-            <WorkspaceRoute>
-              <NewTaskPage />
-            </WorkspaceRoute>
-          }
-        />
+        <Route path="task/new" element={<NewTaskPage />} />
         <Route
           path="task/:runId"
           element={
@@ -207,33 +208,40 @@ function AppStateRouter() {
             </WorkspaceRoute>
           }
         />
+        <Route path="extensions" element={<ExtensionsIndex />} />
+        <Route path="extensions/:kind" element={<ExtensionsPage />} />
+        <Route path="settings" element={<SettingsPage />} />
         <Route
-          path="memory"
+          path="settings/workspaces"
+          element={
+            <WorkspaceRoute>
+              <WorkspaceSettingsPage />
+            </WorkspaceRoute>
+          }
+        />
+        <Route path="settings/models" element={<ProviderPageRoute />} />
+        <Route
+          path="settings/memory"
           element={
             <WorkspaceRoute>
               <MemoryPageRoute />
             </WorkspaceRoute>
           }
         />
-        <Route path="skills" element={<CapabilityPage kind="skills" />} />
-        <Route path="mcp" element={<CapabilityPage kind="mcp" />} />
-        <Route path="providers" element={<ProviderPageRoute />} />
         <Route
-          path="usage"
+          path="settings/usage"
           element={
             <WorkspaceRoute>
               <UsagePage />
             </WorkspaceRoute>
           }
         />
-        <Route
-          path="settings"
-          element={
-            <WorkspaceRoute>
-              <SettingsPage />
-            </WorkspaceRoute>
-          }
-        />
+        <Route path="settings/system" element={<SystemSettingsPage />} />
+        <Route path="memory" element={<LegacySurfaceRedirect to="/settings/memory" />} />
+        <Route path="skills" element={<LegacySurfaceRedirect to="/extensions/skills" />} />
+        <Route path="mcp" element={<LegacySurfaceRedirect to="/extensions/mcp" />} />
+        <Route path="providers" element={<LegacySurfaceRedirect to="/settings/models" />} />
+        <Route path="usage" element={<LegacySurfaceRedirect to="/settings/usage" />} />
         <Route path="*" element={<NotFound />} />
       </Route>
     </Routes>
@@ -420,7 +428,10 @@ function Onboarding() {
               </Button>
             )}
             {selected && (
-              <Link style={{ display: "inline-block", fontSize: 13, marginTop: 8 }} to="/providers">
+              <Link
+                style={{ display: "inline-block", fontSize: 13, marginTop: 8 }}
+                to="/settings/models"
+              >
                 连接模型（配置 Provider 与 API Key）→
               </Link>
             )}
@@ -476,15 +487,7 @@ function TrustWorkspace({ workspacePath }: { readonly workspacePath: string }) {
   );
 }
 
-const primaryNav = [{ to: "/automations", label: "自动化", icon: Workflow, scoped: true }] as const;
-
-const resourceNav = [
-  { to: "/memory", label: "记忆", icon: BrainCircuit, scoped: true },
-  { to: "/skills", label: "Skills", icon: WandSparkles },
-  { to: "/mcp", label: "MCP", icon: Network },
-  { to: "/providers", label: "模型", icon: BrainCircuit },
-  { to: "/usage", label: "用量", icon: Gauge, scoped: true },
-] as const;
+const primaryNav = [{ ...appPrimaryNavigation[0], icon: Clock3 }] as const;
 
 function AppShell() {
   const { data, preview, message, actions, busy } = useRuntime();
@@ -494,9 +497,13 @@ function AppShell() {
     () => window.localStorage.getItem("pico.sidebar-collapsed") === "true",
   );
   const routeWorkspacePath = workspacePathFromSearch(location.search);
+  const navigationWorkspacePath = routeWorkspacePath ?? data.workspacePath;
   const pageTitle = routeTitle(location.pathname);
+  const settingsRoute =
+    location.pathname.startsWith("/settings") || location.pathname.startsWith("/extensions");
   const conversationRoute =
     location.pathname === "/task/new" || location.pathname.startsWith("/session/");
+  const immersiveRoute = conversationRoute || settingsRoute || location.pathname === "/";
   const handleNavKeys = (event: KeyboardEvent<HTMLElement>) => {
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
     const links = Array.from(
@@ -518,13 +525,13 @@ function AppShell() {
   useEffect(() => {
     window.localStorage.setItem("pico.sidebar-collapsed", String(sidebarCollapsed));
   }, [sidebarCollapsed]);
-  const handleAddWorkspace = useCallback(() => {
-    void actions.chooseWorkspace();
-  }, [actions]);
   const handleArchiveSession = useCallback(
     (session: SessionView) => {
       const isRunning = data.runs.some(
-        (run) => run.sessionId === session.id && !isTerminalRun(run.status),
+        (run) =>
+          run.workspacePath === session.workspacePath &&
+          run.sessionId === session.id &&
+          !isTerminalRun(run.status),
       );
       if (isRunning && !window.confirm("该会话正在运行，归档可能导致运行结果丢失。确认归档？")) {
         return;
@@ -555,107 +562,123 @@ function AppShell() {
         workspacePath: session.workspacePath,
         sessionId: session.id,
       });
-      if (deleted && location.pathname === `/session/${session.id}`) {
+      if (deleted) {
+        removePersistentDraft(
+          workspaceSessionKey({ workspacePath: session.workspacePath, sessionId: session.id }),
+        );
+      }
+      if (
+        deleted &&
+        isActiveWorkspaceSession(
+          { workspacePath: session.workspacePath, sessionId: session.id },
+          location.pathname,
+          location.search,
+        )
+      ) {
         navigate(newSessionHref(session.workspacePath));
       }
     },
-    [actions, location.pathname, navigate],
+    [actions, location.pathname, location.search, navigate],
   );
   return (
-    <div className={`app-shell ${sidebarCollapsed ? "is-sidebar-collapsed" : ""}`}>
+    <div
+      className={`app-shell ${!settingsRoute && sidebarCollapsed ? "is-sidebar-collapsed" : ""} ${settingsRoute ? "is-settings-route" : ""}`}
+    >
       <a className="skip-link" href="#main-content">
         跳到主要内容
       </a>
-      <aside
-        className={`sidebar ${sidebarCollapsed ? "sidebar--collapsed" : ""}`}
-        onKeyDown={handleNavKeys}
-      >
-        <div className="sidebar__header">
-          <Link className="sidebar__brand" to="/" aria-label="Pico 开始页">
-            <span className="brand-mark" aria-hidden="true">
-              P
-            </span>
-            <span className="sidebar__label">Pico</span>
-            {preview && <span className="preview-dot" title="视觉预览模式" />}
-          </Link>
-          {data.approvals.length + data.prompts.length > 0 ? (
-            <span
-              aria-label={`${data.approvals.length + data.prompts.length} 项待处理`}
-              title="有待处理的审批或提问，请到对应会话查看"
-              style={{
-                alignItems: "center",
-                background: "#d97706",
-                borderRadius: 999,
-                color: "#fff",
-                display: "inline-flex",
-                fontSize: 11,
-                fontWeight: 700,
-                height: 18,
-                justifyContent: "center",
-                minWidth: 18,
-                padding: "0 5px",
-              }}
+      {settingsRoute ? (
+        <SettingsSidebar workspacePath={navigationWorkspacePath} onKeyDown={handleNavKeys} />
+      ) : (
+        <aside
+          className={`sidebar ${sidebarCollapsed ? "sidebar--collapsed" : ""}`}
+          onKeyDown={handleNavKeys}
+        >
+          <div className="sidebar__header">
+            <Link className="sidebar__brand" to="/task/new" aria-label="Pico 新任务">
+              <span className="brand-mark" aria-hidden="true">
+                P
+              </span>
+              <span className="sidebar__label">Pico</span>
+              {preview && <span className="preview-dot" title="视觉预览模式" />}
+            </Link>
+            {data.approvals.length + data.prompts.length > 0 ? (
+              <span
+                className="sidebar-pending-count"
+                aria-label={`${data.approvals.length + data.prompts.length} 项待处理`}
+                title="有待处理的审批或提问，请到对应会话查看"
+              >
+                {data.approvals.length + data.prompts.length}
+              </span>
+            ) : null}
+            <button
+              type="button"
+              className="sidebar__collapse"
+              aria-label={sidebarCollapsed ? "展开侧栏" : "收起侧栏"}
+              title={sidebarCollapsed ? "展开侧栏" : "收起侧栏"}
+              onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}
             >
-              {data.approvals.length + data.prompts.length}
-            </span>
-          ) : null}
-          <button
-            type="button"
-            className="sidebar__collapse"
-            aria-label={sidebarCollapsed ? "展开侧栏" : "收起侧栏"}
-            title={sidebarCollapsed ? "展开侧栏" : "收起侧栏"}
-            onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}
-          >
-            {sidebarCollapsed ? (
-              <PanelLeftOpen aria-hidden="true" />
-            ) : (
-              <PanelLeftClose aria-hidden="true" />
-            )}
-          </button>
-        </div>
-        <Link className="sidebar-new-task" to={newSessionHref()} data-nav-link aria-label="新任务">
-          <Plus aria-hidden="true" />
-          <span>新任务</span>
-        </Link>
-        <div className="sidebar__body">
-          <SidebarNav items={primaryNav} label="主要导航" workspacePath={routeWorkspacePath} />
-          <SidebarTasks
-            sessions={data.sessions}
-            workspaces={data.workspaces}
-            runs={data.runs}
-            approvals={data.approvals}
-            busy={busy === "session-state" || busy === "choose-workspace"}
-            onAddWorkspace={handleAddWorkspace}
-            onArchiveSession={handleArchiveSession}
-            onDeleteSession={handleDeleteSession}
-            onPinSession={handlePinSession}
-          />
-          <SidebarNav
-            items={resourceNav}
-            label="能力与设置"
-            caption="工具"
-            workspacePath={routeWorkspacePath}
-          />
-        </div>
-        <div className="sidebar__footer">
-          <NavLink
-            to={routeWorkspacePath ? workspaceHref("/settings", routeWorkspacePath) : "/settings"}
-            data-nav-link
-            aria-label="设置"
-            className={({ isActive }) => `nav-link ${isActive ? "is-active" : ""}`}
-          >
-            <Settings aria-hidden="true" />
-            <span className="sidebar__label">设置</span>
-          </NavLink>
-          <div className="runtime-health">
-            <span /> Runtime 已连接
+              {sidebarCollapsed ? (
+                <PanelLeftOpen aria-hidden="true" />
+              ) : (
+                <PanelLeftClose aria-hidden="true" />
+              )}
+            </button>
           </div>
-        </div>
-      </aside>
+          <Link
+            className="sidebar-new-task"
+            to={newSessionHref()}
+            data-nav-link
+            aria-label="新任务"
+          >
+            <Plus aria-hidden="true" />
+            <span>新任务</span>
+          </Link>
+          <div className="sidebar__body">
+            <SidebarNav
+              items={primaryNav}
+              label="主要导航"
+              workspacePath={navigationWorkspacePath}
+            />
+            <SidebarTasks
+              sessions={data.sessions}
+              workspaces={data.workspaces}
+              runs={data.runs}
+              approvals={data.approvals}
+              prompts={data.prompts}
+              activeWorkspacePath={data.workspacePath}
+              busy={busy === "session-state" || busy === "choose-workspace"}
+              onArchiveSession={handleArchiveSession}
+              onDeleteSession={handleDeleteSession}
+              onPinSession={handlePinSession}
+            />
+          </div>
+          <div className="sidebar__footer">
+            <NavLink
+              to="/settings"
+              data-nav-link
+              aria-label="设置"
+              className={({ isActive }) => `nav-link ${isActive ? "is-active" : ""}`}
+              onClick={() =>
+                window.sessionStorage.setItem(
+                  "pico.settings-return-to",
+                  `${location.pathname}${location.search}`,
+                )
+              }
+            >
+              <Settings aria-hidden="true" />
+              <span className="sidebar__label">设置</span>
+            </NavLink>
+            <div className="runtime-health">
+              <span /> Runtime 已连接
+            </div>
+          </div>
+        </aside>
+      )}
       <div
-        className={`workspace-frame ${conversationRoute ? "workspace-frame--conversation" : ""}`}
+        className={`workspace-frame ${immersiveRoute ? "workspace-frame--immersive" : ""} ${conversationRoute ? "workspace-frame--conversation" : ""}`}
       >
-        {!conversationRoute && (
+        {!immersiveRoute && (
           <header className="titlebar">
             <div>
               <span className="titlebar__context">
@@ -671,11 +694,12 @@ function AppShell() {
             </div>
           </header>
         )}
-        {message && (
-          <div className="toast" role="status">
-            {message}
-          </div>
-        )}
+        {message &&
+          !message.startsWith("Legacy session-centric (JSONL) workspace storage exists:") && (
+            <div className="toast" role="status">
+              {message}
+            </div>
+          )}
         <main
           className={`page ${conversationRoute ? "page--conversation" : ""}`}
           id="main-content"
@@ -688,13 +712,86 @@ function AppShell() {
   );
 }
 
+function SettingsSidebar({
+  workspacePath,
+  onKeyDown,
+}: {
+  readonly workspacePath?: string;
+  readonly onKeyDown: (event: KeyboardEvent<HTMLElement>) => void;
+}) {
+  const returnTo = window.sessionStorage.getItem("pico.settings-return-to");
+  const returnHref =
+    returnTo?.startsWith("/") && !returnTo.startsWith("/settings")
+      ? returnTo
+      : newSessionHref(workspacePath);
+  const iconByKind = {
+    general: Settings,
+    workspaces: Folder,
+    models: BrainCircuit,
+    memory: BrainCircuit,
+    skills: WandSparkles,
+    mcp: Network,
+    usage: Gauge,
+    system: ShieldCheck,
+  } as const;
+  return (
+    <aside className="sidebar settings-sidebar" onKeyDown={onKeyDown}>
+      <Link
+        className="settings-sidebar__back"
+        to={returnHref}
+        data-nav-link
+        onClick={() => window.sessionStorage.removeItem("pico.settings-return-to")}
+      >
+        <ArrowLeft aria-hidden="true" />
+        <span>返回 Pico</span>
+      </Link>
+      <div className="settings-sidebar__title">
+        <span className="brand-mark" aria-hidden="true">
+          P
+        </span>
+        <strong>设置</strong>
+      </div>
+      <div className="settings-sidebar__body">
+        {settingsNavigationGroups.map((group) => (
+          <nav key={group.label} className="settings-nav-group" aria-label={group.label}>
+            <span>{group.label}</span>
+            {group.items.map((item) => {
+              const Icon = iconByKind[item.kind];
+              const href =
+                "scoped" in item && item.scoped && workspacePath
+                  ? workspaceHref(item.to, workspacePath)
+                  : item.to;
+              return (
+                <NavLink
+                  key={item.to}
+                  to={href}
+                  end={"end" in item && item.end}
+                  data-nav-link
+                  className={({ isActive }) => `nav-link ${isActive ? "is-active" : ""}`}
+                >
+                  <Icon aria-hidden="true" />
+                  <span>{item.label}</span>
+                </NavLink>
+              );
+            })}
+          </nav>
+        ))}
+      </div>
+      <div className="runtime-health">
+        <span /> Runtime 已连接
+      </div>
+    </aside>
+  );
+}
+
 function SidebarTasks({
   sessions,
   workspaces,
   runs,
   approvals,
+  prompts,
+  activeWorkspacePath,
   busy,
-  onAddWorkspace,
   onArchiveSession,
   onDeleteSession,
   onPinSession,
@@ -703,57 +800,102 @@ function SidebarTasks({
   readonly workspaces: readonly WorkspaceView[];
   readonly runs: readonly RunView[];
   readonly approvals: readonly ApprovalView[];
+  readonly prompts: readonly PromptView[];
+  readonly activeWorkspacePath?: string;
   readonly busy: boolean;
-  readonly onAddWorkspace: () => void;
   readonly onArchiveSession: (session: SessionView) => void;
   readonly onDeleteSession: (session: SessionView) => void;
   readonly onPinSession: (session: SessionView) => void;
 }) {
-  const visibleSessions = sessions.filter((session) => session.status !== "archived");
-  const workspacePaths = Array.from(
-    new Set([
-      ...workspaces.map((workspace) => workspace.path),
-      ...visibleSessions.map((session) => session.workspacePath),
-    ]),
+  const [grouping, setGrouping] = useState<SidebarTaskGrouping>(() =>
+    window.localStorage.getItem("pico.sidebar-task-grouping") === "project" ? "project" : "time",
   );
-  const groups = workspacePaths
+  const [collapsedProjects, setCollapsedProjects] = useState<ReadonlySet<string>>(new Set());
+  useEffect(() => {
+    window.localStorage.setItem("pico.sidebar-task-grouping", grouping);
+  }, [grouping]);
+  const visibleSessions = sortSidebarTasks(
+    sessions.filter((session) => session.status !== "archived"),
+  );
+  const groups = Array.from(new Set(visibleSessions.map((session) => session.workspacePath)))
     .map((workspacePath) => ({
       workspace: workspaces.find((candidate) => candidate.path === workspacePath),
       workspacePath,
-      sessions: visibleSessions
-        .filter((session) => session.workspacePath === workspacePath)
-        .sort(
-          (left, right) =>
-            Number(Boolean(right.pinned)) - Number(Boolean(left.pinned)) ||
-            right.updatedAt - left.updatedAt,
-        ),
+      sessions: visibleSessions.filter((session) => session.workspacePath === workspacePath),
     }))
-    .filter((group) => group.sessions.length > 0 || group.workspace);
+    .filter((group) => group.sessions.length > 0);
+  const renderSession = (session: SessionView, nested = false) => {
+    const sessionRuns = runs.filter(
+      (run) => run.workspacePath === session.workspacePath && run.sessionId === session.id,
+    );
+    const sessionRunIds = new Set(sessionRuns.map((run) => run.id));
+    const hasPendingInteraction =
+      activeWorkspacePath === session.workspacePath &&
+      (approvals.some(
+        (approval) =>
+          sessionRunIds.has(approval.runId) &&
+          (!approval.sessionId || approval.sessionId === session.id),
+      ) ||
+        prompts.some((prompt) => sessionRunIds.has(prompt.runId)));
+    return (
+      <SidebarSessionRow
+        key={workspaceSessionKey({ workspacePath: session.workspacePath, sessionId: session.id })}
+        session={session}
+        nested={nested}
+        running={sessionRuns.some((run) => !isTerminalRun(run.status))}
+        hasPendingInteraction={hasPendingInteraction}
+        busy={busy}
+        onArchive={onArchiveSession}
+        onDelete={onDeleteSession}
+        onPin={onPinSession}
+      />
+    );
+  };
 
   return (
     <section className="sidebar-tasks" aria-labelledby="sidebar-tasks-title">
       <div className="sidebar-section-heading">
-        <span id="sidebar-tasks-title">项目</span>
-        <button
-          type="button"
-          aria-label="添加工作区"
-          title="添加工作区"
-          disabled={busy}
-          onClick={onAddWorkspace}
-        >
-          <Plus aria-hidden="true" />
-        </button>
+        <span id="sidebar-tasks-title">任务</span>
+        <div className="sidebar-task-grouping" role="group" aria-label="任务分组方式">
+          <button
+            type="button"
+            className={grouping === "time" ? "is-active" : ""}
+            aria-pressed={grouping === "time"}
+            onClick={() => setGrouping("time")}
+          >
+            时间
+          </button>
+          <button
+            type="button"
+            className={grouping === "project" ? "is-active" : ""}
+            aria-pressed={grouping === "project"}
+            onClick={() => setGrouping("project")}
+          >
+            项目
+          </button>
+        </div>
       </div>
-      {groups.length === 0 ? (
-        <p className="sidebar-tasks__empty">新任务会按项目显示在这里。</p>
+      {visibleSessions.length === 0 ? (
+        <p className="sidebar-tasks__empty">发送第一条消息后，任务会出现在这里。</p>
+      ) : grouping === "time" ? (
+        <div className="sidebar-recent-sessions">
+          {visibleSessions.map((session) => renderSession(session))}
+        </div>
       ) : (
         groups.map(({ workspace, workspacePath, sessions: workspaceSessions }) => (
           <div className="sidebar-project" key={workspacePath}>
-            <Link
+            <button
+              type="button"
               className="sidebar-project__header"
-              to={newSessionHref(workspacePath)}
-              data-nav-link
-              title={`在 ${workspace?.name ?? workspaceName(workspacePath)} 中新建任务`}
+              aria-expanded={!collapsedProjects.has(workspacePath)}
+              onClick={() =>
+                setCollapsedProjects((current) => {
+                  const next = new Set(current);
+                  if (next.has(workspacePath)) next.delete(workspacePath);
+                  else next.add(workspacePath);
+                  return next;
+                })
+              }
             >
               {workspace?.mode === "git" ? (
                 <FolderGit2 aria-hidden="true" />
@@ -761,26 +903,14 @@ function SidebarTasks({
                 <Folder aria-hidden="true" />
               )}
               <span>{workspace?.name ?? workspaceName(workspacePath)}</span>
-              <Plus aria-hidden="true" />
-            </Link>
-            <div className="sidebar-project__sessions">
-              {workspaceSessions.map((session) => (
-                <SidebarSessionRow
-                  key={workspaceSessionKey({ workspacePath, sessionId: session.id })}
-                  session={session}
-                  running={runs.some(
-                    (run) => run.sessionId === session.id && !isTerminalRun(run.status),
-                  )}
-                  hasPendingApproval={approvals.some(
-                    (approval) => approval.sessionId === session.id,
-                  )}
-                  busy={busy}
-                  onArchive={onArchiveSession}
-                  onDelete={onDeleteSession}
-                  onPin={onPinSession}
-                />
-              ))}
-            </div>
+              <small>{workspaceSessions.length}</small>
+              <ChevronDown aria-hidden="true" />
+            </button>
+            {!collapsedProjects.has(workspacePath) && (
+              <div className="sidebar-project__sessions">
+                {workspaceSessions.map((session) => renderSession(session, true))}
+              </div>
+            )}
           </div>
         ))
       )}
@@ -790,39 +920,44 @@ function SidebarTasks({
 
 function SidebarSessionRow({
   session,
+  nested = false,
   running,
-  hasPendingApproval,
+  hasPendingInteraction,
   busy,
   onArchive,
   onDelete,
   onPin,
 }: {
   readonly session: SessionView;
+  readonly nested?: boolean;
   readonly running: boolean;
-  readonly hasPendingApproval: boolean;
+  readonly hasPendingInteraction: boolean;
   readonly busy: boolean;
   readonly onArchive: (session: SessionView) => void;
   readonly onDelete: (session: SessionView) => void;
   readonly onPin: (session: SessionView) => void;
 }) {
+  const location = useLocation();
+  const sessionRef = { workspacePath: session.workspacePath, sessionId: session.id };
+  const active = isActiveWorkspaceSession(sessionRef, location.pathname, location.search);
   const archiveSession = () => onArchive(session);
   const deleteSession = () => onDelete(session);
   const pinSession = () => onPin(session);
   return (
-    <div className="sidebar-session-row">
+    <div className={`sidebar-session-row ${nested ? "is-nested" : ""}`}>
       <NavLink
-        className={({ isActive }) =>
-          `sidebar-task-link ${isActive ? "is-active" : ""} ${session.pinned ? "is-pinned" : ""}`
+        className={() =>
+          `sidebar-task-link ${active ? "is-active" : ""} ${session.pinned ? "is-pinned" : ""}`
         }
-        to={sessionHref({ workspacePath: session.workspacePath, sessionId: session.id })}
+        to={sessionHref(sessionRef)}
         data-nav-link
       >
         <span
-          className={`sidebar-task-link__status ${running && !hasPendingApproval ? "is-running" : ""}`}
-          style={hasPendingApproval ? { background: "#d97706" } : undefined}
+          className={`sidebar-task-link__status ${running && !hasPendingInteraction ? "is-running" : ""}`}
+          style={hasPendingInteraction ? { background: "#d97706" } : undefined}
           aria-label={
-            hasPendingApproval
-              ? "等待审批"
+            hasPendingInteraction
+              ? "等待审批或回答"
               : running
                 ? "运行中"
                 : session.pinned
@@ -830,7 +965,7 @@ function SidebarSessionRow({
                   : "会话"
           }
         />
-        <span>{session.title}</span>
+        <span title={session.title}>{session.title}</span>
         <time dateTime={new Date(session.updatedAt).toISOString()}>
           {formatRelative(session.updatedAt)}
         </time>
@@ -946,85 +1081,99 @@ function WorkspaceModeCard({ mode }: { readonly mode: WorkspaceMode | undefined 
 function HomePage() {
   const { data } = useRuntime();
   const latestRun = data.runs.find((run) => !isTerminalRun(run.status));
+  const recentSessions = [...data.sessions]
+    .filter((session) => session.status !== "archived")
+    .sort((left, right) => right.updatedAt - left.updatedAt)
+    .slice(0, 6);
   return (
-    <div className="page-stack home-page">
-      <section className="welcome-block">
-        <span className="eyebrow">本地 Agent</span>
-        <h2>今天想推进什么？</h2>
-        <p>每个会话都会记住自己的项目边界。新建会话时选择工作区，已有会话会回到它原来的目录。</p>
-        <div className="button-row">
+    <div className="launch-page">
+      <section className="launch-hero">
+        <span className="brand-mark brand-mark--large" aria-hidden="true">
+          P
+        </span>
+        <span className="eyebrow">LOCAL AGENT WORKBENCH</span>
+        <h2>把下一件事交给 Pico</h2>
+        <p>选择一个项目，描述你想完成的结果。Pico 会把分析、执行和变更留在同一条任务记录里。</p>
+        <div className="launch-hero__actions">
           <Link className="button button--primary" to={newSessionHref()}>
-            <Plus aria-hidden="true" size={16} /> 新建会话
+            <Plus aria-hidden="true" size={16} /> 开始新任务
           </Link>
-          {data.workspaces.length === 0 && (
+          {data.workspaces.length === 0 ? (
             <Link className="button" to="/onboarding">
-              添加第一个项目
+              添加项目
             </Link>
+          ) : (
+            <span>{data.workspaces.length} 个本地项目已连接</span>
           )}
         </div>
       </section>
-      <div className="dashboard-grid">
-        <section className="panel panel--wide">
-          <PanelHeader
-            title="最近会话"
-            detail={`${data.sessions.length} 个本地会话`}
-            action={<Link to="/sessions">查看全部</Link>}
-          />
-          {data.sessions.length === 0 ? (
-            <EmptyState title="还没有会话" detail="创建第一项任务后，它会出现在这里。" />
-          ) : (
-            <div className="session-list session-list--compact">
-              {data.sessions.slice(0, 4).map((session) => (
-                <SessionRow
-                  key={workspaceSessionKey({
-                    workspacePath: session.workspacePath,
-                    sessionId: session.id,
-                  })}
-                  session={session}
-                />
-              ))}
-            </div>
-          )}
-        </section>
-        <section className="panel">
-          <PanelHeader title="当前运行" detail={latestRun ? "实时状态" : "没有运行中的任务"} />
-          {latestRun ? (
-            <Link
-              className="active-run-card"
-              to={
-                latestRun.sessionId
-                  ? sessionHref({
-                      workspacePath: latestRun.workspacePath,
-                      sessionId: latestRun.sessionId,
-                    })
-                  : workspaceHref(`/task/${latestRun.id}`, latestRun.workspacePath)
-              }
-            >
-              <span className="active-run-card__icon">
-                <Bot aria-hidden="true" />
-              </span>
-              <div>
-                <StatusPill status={latestRun.status} />
-                <h3>{latestRun.description}</h3>
-                <p>{formatElapsed(latestRun.startedAt)}</p>
-              </div>
-            </Link>
-          ) : (
-            <EmptyState icon={<Bot />} title="Pico 正在待命" detail="新任务会在这里显示进度。" />
-          )}
-        </section>
-        <section className="panel metric-panel">
-          <PanelHeader title="项目" detail="已注册的本地工作区" />
-          <strong>{data.workspaces.length}</strong>
-          <span>个可用项目</span>
-          <p>{data.workspaces.filter((workspace) => workspace.trusted).length} 个已信任</p>
-        </section>
-      </div>
+
+      <section className="launch-resume" aria-labelledby="launch-resume-title">
+        <header>
+          <div>
+            <span className="eyebrow">继续工作</span>
+            <h3 id="launch-resume-title">最近任务</h3>
+          </div>
+          <Link to="/sessions">查看全部</Link>
+        </header>
+        {latestRun && (
+          <Link
+            className="launch-active-run"
+            to={
+              latestRun.sessionId
+                ? sessionHref({
+                    workspacePath: latestRun.workspacePath,
+                    sessionId: latestRun.sessionId,
+                  })
+                : workspaceHref(`/task/${latestRun.id}`, latestRun.workspacePath)
+            }
+          >
+            <span className="launch-active-run__pulse" aria-hidden="true" />
+            <span>
+              <small>正在执行</small>
+              <strong>{latestRun.description}</strong>
+            </span>
+            <time>{formatElapsed(latestRun.startedAt)}</time>
+          </Link>
+        )}
+        {recentSessions.length === 0 ? (
+          <EmptyState title="还没有任务" detail="第一个任务会在发送消息后出现在这里。" />
+        ) : (
+          <div className="session-list session-list--compact launch-session-list">
+            {recentSessions.map((session) => (
+              <SessionRow
+                key={workspaceSessionKey({
+                  workspacePath: session.workspacePath,
+                  sessionId: session.id,
+                })}
+                session={session}
+              />
+            ))}
+          </div>
+        )}
+      </section>
     </div>
   );
 }
 
 function NewTaskPage() {
+  const { data, actions } = useRuntime();
+  const location = useLocation();
+  const workspacePath = workspacePathFromSearch(location.search);
+  const workspace = data.workspaces.find((candidate) => candidate.path === workspacePath);
+
+  useEffect(() => {
+    if (workspacePath && workspace && data.workspacePath !== workspacePath) {
+      void actions.selectWorkspace(workspacePath);
+    }
+  }, [actions, data.workspacePath, workspace, workspacePath]);
+
+  if (workspacePath && !workspace) {
+    return <Navigate replace to="/task/new" />;
+  }
+  if (workspacePath && workspace && data.workspacePath === workspacePath && !data.trusted) {
+    return <TrustWorkspace workspacePath={workspacePath} />;
+  }
   return <ConversationPage />;
 }
 
@@ -1053,6 +1202,7 @@ function ConversationEnvironmentPanel({
   permissionMode,
   onReview,
 }: ConversationEnvironmentPanelProps) {
+  const [activeTab, setActiveTab] = useState<"overview" | "changes" | "context">("overview");
   const [worktreeExpanded, setWorktreeExpanded] = useState(false);
   const [branchExpanded, setBranchExpanded] = useState(false);
   const additions = changes.reduce((total, change) => total + change.additions, 0);
@@ -1064,58 +1214,177 @@ function ConversationEnvironmentPanel({
   } as const;
 
   return (
-    <aside className="conversation-environment-shell" aria-label="当前会话环境">
+    <aside className="conversation-environment-shell" aria-label="任务工作台">
       <section className="conversation-environment-panel">
         <header className="conversation-environment-panel__header">
-          <h2>Environment</h2>
+          <div>
+            <span className="conversation-workbench__eyebrow">Pico Workbench</span>
+            <h2>任务工作台</h2>
+          </div>
+          <span className={`conversation-workbench__status ${active ? "is-active" : ""}`}>
+            {active ? "执行中" : "已就绪"}
+          </span>
         </header>
-        <div className="conversation-environment-panel__rows">
+        <div className="conversation-workbench__tabs" role="tablist" aria-label="工作台视图">
           <button
             type="button"
-            className="conversation-environment-row conversation-environment-row--changes"
-            disabled={changes.length === 0}
-            onClick={onReview}
+            role="tab"
+            className={activeTab === "overview" ? "is-active" : undefined}
+            aria-selected={activeTab === "overview"}
+            onClick={() => setActiveTab("overview")}
           >
-            <FileDiff aria-hidden="true" />
-            <span>Changes</span>
-            <span className="conversation-change-stats">
-              {active && changes.length === 0 ? (
-                <small>运行中</small>
-              ) : changes.length === 0 ? (
-                <small>0</small>
-              ) : (
+            <Gauge aria-hidden="true" /> 概览
+          </button>
+          <button
+            type="button"
+            role="tab"
+            className={activeTab === "changes" ? "is-active" : undefined}
+            aria-selected={activeTab === "changes"}
+            onClick={() => setActiveTab("changes")}
+          >
+            <FileDiff aria-hidden="true" /> 变更
+            {changes.length > 0 && <span>{changes.length}</span>}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            className={activeTab === "context" ? "is-active" : undefined}
+            aria-selected={activeTab === "context"}
+            onClick={() => setActiveTab("context")}
+          >
+            <Code2 aria-hidden="true" /> 上下文
+          </button>
+        </div>
+        <div
+          className="conversation-environment-panel__body"
+          role="tabpanel"
+          aria-label={
+            activeTab === "overview" ? "概览" : activeTab === "changes" ? "变更" : "上下文"
+          }
+        >
+          {activeTab === "overview" && (
+            <div className="conversation-environment-panel__rows">
+              <button
+                type="button"
+                className="conversation-environment-row conversation-environment-row--changes"
+                disabled={changes.length === 0}
+                onClick={onReview}
+              >
+                <FileDiff aria-hidden="true" />
+                <span>文件变更</span>
+                <span className="conversation-change-stats">
+                  {active && changes.length === 0 ? (
+                    <small>运行中</small>
+                  ) : changes.length === 0 ? (
+                    <small>暂无</small>
+                  ) : (
+                    <>
+                      <b>+{additions.toLocaleString()}</b>
+                      <em>-{deletions.toLocaleString()}</em>
+                    </>
+                  )}
+                </span>
+              </button>
+              <button
+                type="button"
+                className="conversation-environment-row"
+                aria-expanded={worktreeExpanded}
+                onClick={() => setWorktreeExpanded((expanded) => !expanded)}
+              >
+                <Laptop aria-hidden="true" />
+                <span>{mode === "git" ? "本地工作树" : "本地文件夹"}</span>
+                <ChevronDown
+                  className={worktreeExpanded ? "is-expanded" : undefined}
+                  aria-hidden="true"
+                />
+              </button>
+              {worktreeExpanded && (
+                <div className="conversation-environment-detail">
+                  <p title={workspacePath}>{workspacePath}</p>
+                </div>
+              )}
+              {mode === "git" && (
                 <>
-                  <b>+{additions.toLocaleString()}</b>
-                  <em>-{deletions.toLocaleString()}</em>
+                  <button
+                    type="button"
+                    className="conversation-environment-row"
+                    aria-expanded={branchExpanded}
+                    onClick={() => setBranchExpanded((expanded) => !expanded)}
+                  >
+                    <GitBranch aria-hidden="true" />
+                    <span>{branch ?? "Detached HEAD"}</span>
+                    <ChevronDown
+                      className={branchExpanded ? "is-expanded" : undefined}
+                      aria-hidden="true"
+                    />
+                  </button>
+                  {branchExpanded && (
+                    <div className="conversation-environment-detail conversation-environment-detail--branch">
+                      当前工作树分支；切换与合并仍由项目 Git 工具负责。
+                    </div>
+                  )}
                 </>
               )}
-            </span>
-          </button>
-          <button
-            type="button"
-            className="conversation-environment-row"
-            aria-expanded={worktreeExpanded}
-            onClick={() => setWorktreeExpanded((expanded) => !expanded)}
-          >
-            <Laptop aria-hidden="true" />
-            <span>{mode === "git" ? "Local worktree" : "Local folder"}</span>
-            <ChevronDown
-              className={worktreeExpanded ? "is-expanded" : undefined}
-              aria-hidden="true"
-            />
-          </button>
-          {worktreeExpanded && (
-            <div className="conversation-environment-detail">
-              <dl>
-                <div>
-                  <dt>路径</dt>
-                  <dd title={workspacePath}>{workspacePath}</dd>
+            </div>
+          )}
+          {activeTab === "changes" && (
+            <div className="conversation-workbench__changes">
+              {changes.length === 0 ? (
+                <div className="conversation-workbench__empty">
+                  <FileDiff aria-hidden="true" />
+                  <strong>{active ? "等待本次运行完成" : "没有可显示的变更检查点"}</strong>
+                  <p>
+                    {active
+                      ? "运行结束后，这里会显示固化的变更检查点。"
+                      : "这里仅展示已结束运行固化的变更，不代表当前工作区是干净的。"}
+                  </p>
                 </div>
+              ) : (
+                <>
+                  <div className="conversation-workbench__change-summary">
+                    <span>{changes.length} 个文件</span>
+                    <span className="conversation-change-stats">
+                      <b>+{additions.toLocaleString()}</b>
+                      <em>-{deletions.toLocaleString()}</em>
+                    </span>
+                  </div>
+                  <ol className="conversation-workbench__file-list">
+                    {changes.map((change) => (
+                      <li key={`${change.status}:${change.path}`}>
+                        <span data-status={change.status}>
+                          {change.status.slice(0, 1).toUpperCase()}
+                        </span>
+                        <code title={change.path}>{change.path}</code>
+                        <small>
+                          +{change.additions} −{change.deletions}
+                        </small>
+                      </li>
+                    ))}
+                  </ol>
+                  <Button variant="quiet" onClick={onReview}>
+                    打开完整审阅
+                  </Button>
+                </>
+              )}
+            </div>
+          )}
+          {activeTab === "context" && (
+            <div className="conversation-workbench__context">
+              <dl>
                 <div>
                   <dt>Runtime</dt>
                   <dd>
-                    <i aria-hidden="true" /> 已连接
+                    <i aria-hidden="true" />
+                    已连接
                   </dd>
+                </div>
+                <div>
+                  <dt>项目</dt>
+                  <dd title={workspacePath}>{workspaceName(workspacePath)}</dd>
+                </div>
+                <div>
+                  <dt>模式</dt>
+                  <dd>{mode === "git" ? "Git 工作树" : "本地文件夹"}</dd>
                 </div>
                 {model && (
                   <div>
@@ -1144,28 +1413,6 @@ function ConversationEnvironmentPanel({
               </dl>
             </div>
           )}
-          {mode === "git" && (
-            <>
-              <button
-                type="button"
-                className="conversation-environment-row"
-                aria-expanded={branchExpanded}
-                onClick={() => setBranchExpanded((expanded) => !expanded)}
-              >
-                <GitBranch aria-hidden="true" />
-                <span>{branch ?? "Detached HEAD"}</span>
-                <ChevronDown
-                  className={branchExpanded ? "is-expanded" : undefined}
-                  aria-hidden="true"
-                />
-              </button>
-              {branchExpanded && (
-                <div className="conversation-environment-detail conversation-environment-detail--branch">
-                  当前工作树分支；切换与合并操作仍由项目 Git 工具负责。
-                </div>
-              )}
-            </>
-          )}
         </div>
       </section>
     </aside>
@@ -1174,7 +1421,7 @@ function ConversationEnvironmentPanel({
 
 function ConversationPage() {
   const { sessionId } = useParams();
-  const { data, actions, busy, preview } = useRuntime();
+  const { data, actions, busy, preview, message } = useRuntime();
   const location = useLocation();
   const navigate = useNavigate();
   const workspacePath = workspacePathFromSearch(location.search) ?? "";
@@ -1183,25 +1430,17 @@ function ConversationPage() {
     [sessionId, workspacePath],
   );
   const conversationKey = sessionRef ? workspaceSessionKey(sessionRef) : undefined;
-  const [draft, setDraft] = useState("");
-  // 按会话缓存草稿：切会话保留半截输入，切回恢复，不再"切了就丢"。
-  const draftCache = useRef<Map<string, string>>(new Map());
-  const handleDraftChange = useCallback(
-    (value: string) => {
-      setDraft(value);
-      if (conversationKey) draftCache.current.set(conversationKey, value);
-    },
-    [conversationKey],
-  );
+  const draftKey = conversationKey ?? `new:${workspacePath || "unbound"}`;
+  const {
+    value: draft,
+    update: handleDraftChange,
+    clear: clearDraft,
+  } = usePersistentDraft(draftKey);
   const [behavior, setBehavior] = useState<ComposerBehavior>("steer");
-  const [approvalOpen, setApprovalOpen] = useState(false);
-  const [promptOpen, setPromptOpen] = useState(false);
-  const [selectedApprovalId, setSelectedApprovalId] = useState<string>();
-  const [selectedPromptId, setSelectedPromptId] = useState<string>();
   const [inspector, setInspector] = useState<ConversationInspectorView>();
-  const [environmentPanelOpen, setEnvironmentPanelOpen] = useState(
-    () => window.localStorage.getItem("pico.environment-panel-open") !== "false",
-  );
+  const [catalogOpen, setCatalogOpen] = useState(false);
+  const workbenchKey = `pico.workbench-open:${conversationKey ?? "new"}`;
+  const [environmentPanelOpen, setEnvironmentPanelOpen] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [confirmCompact, setConfirmCompact] = useState(false);
@@ -1216,16 +1455,16 @@ function ConversationPage() {
   }, [actions, sessionRef]);
 
   useEffect(() => {
-    setDraft(conversationKey ? (draftCache.current.get(conversationKey) ?? "") : "");
     setInspector(undefined);
-    setApprovalOpen(false);
-    setPromptOpen(false);
-    setSelectedApprovalId(undefined);
-    setSelectedPromptId(undefined);
+    setCatalogOpen(false);
     setEditingTitle(false);
     setConfirmCompact(false);
     setActivation(undefined);
   }, [sessionId, workspacePath]);
+
+  useEffect(() => {
+    setEnvironmentPanelOpen(window.localStorage.getItem(workbenchKey) === "true");
+  }, [workbenchKey]);
 
   const session = data.sessions.find(
     (item) => item.workspacePath === workspacePath && item.id === sessionId,
@@ -1235,21 +1474,62 @@ function ConversationPage() {
     (run) => run.workspacePath === workspacePath && run.sessionId === sessionId,
   );
   const activeRun = sessionRuns.find((run) => !isTerminalRun(run.status));
-  const selectedApproval = data.approvals.find((item) => item.id === selectedApprovalId);
-  const selectedPrompt = data.prompts.find((item) => item.id === selectedPromptId);
   const composerStatus = activeRun
     ? ["paused", "pause_requested"].includes(activeRun.status)
       ? "paused"
       : "running"
     : "idle";
+  const [newTaskSettingOverrides, setNewTaskSettingOverrides] = useState<
+    Readonly<Record<string, RuntimeUserDefaults>>
+  >({});
+  const newTaskSettings = useMemo<RuntimeUserDefaults>(() => {
+    const defaults = data.providerConfig.userDefaults;
+    const legacyMode = defaults.mode;
+    const modelRouteId =
+      defaults.modelRouteId ?? data.providerConfig.defaultModelRouteId ?? data.modelRoutes[0]?.id;
+    return {
+      ...(modelRouteId ? { modelRouteId } : {}),
+      collaborationMode: defaults.collaborationMode ?? (legacyMode === "plan" ? "plan" : "agent"),
+      orchestrationMode: defaults.orchestrationMode ?? "default",
+      permissionMode:
+        defaults.permissionMode ??
+        (legacyMode === "auto" || legacyMode === "yolo" ? legacyMode : "default"),
+      ...(defaults.thinkingEffort ? { thinkingEffort: defaults.thinkingEffort } : {}),
+      ...(workspacePath ? newTaskSettingOverrides[workspacePath] : {}),
+    };
+  }, [
+    data.modelRoutes,
+    data.providerConfig.defaultModelRouteId,
+    data.providerConfig.userDefaults,
+    newTaskSettingOverrides,
+    workspacePath,
+  ]);
+  const updateNewTaskSettings = useCallback(
+    (patch: RuntimeUserDefaults) => {
+      if (!workspacePath) return;
+      setNewTaskSettingOverrides((current) => ({
+        ...current,
+        [workspacePath]: { ...current[workspacePath], ...patch },
+      }));
+    },
+    [workspacePath],
+  );
+
+  const runIds = useMemo(() => new Set(sessionRuns.map((run) => run.id)), [sessionRuns]);
+  const pendingApproval = data.approvals.filter((item) => runIds.has(item.runId)).at(-1);
+  const pendingPrompt = data.prompts.filter((item) => runIds.has(item.runId)).at(-1);
+  const legacyStorageBlocked = Boolean(
+    workspacePath &&
+    message?.startsWith("Legacy session-centric (JSONL) workspace storage exists:") &&
+    message.includes(`/workspaces/${workspaceName(workspacePath)}-`),
+  );
+  const workspaceReady = Boolean(
+    workspacePath && data.workspacePath === workspacePath && data.trusted && !legacyStorageBlocked,
+  );
 
   useEffect(() => {
     if (!editingTitle) setTitleDraft(session?.title ?? "");
   }, [editingTitle, session?.title]);
-
-  useEffect(() => {
-    window.localStorage.setItem("pico.environment-panel-open", String(environmentPanelOpen));
-  }, [environmentPanelOpen]);
 
   const items = useMemo<readonly ConversationItemView[]>(() => {
     const persisted = conversation?.items ?? [];
@@ -1299,19 +1579,20 @@ function ConversationPage() {
   ]);
 
   const submit = async (text: string, nextBehavior: ComposerBehavior) => {
-    if (sendingRef.current) return;
+    if (sendingRef.current || !workspaceReady) return;
     sendingRef.current = true;
     try {
       const result = await actions.sendMessage({
         workspacePath,
         ...(sessionId ? { sessionId } : {}),
+        ...(!sessionId ? { initialSettings: newTaskSettings } : {}),
         text,
         behavior: nextBehavior,
         ...(activeRun ? { expectedRunId: activeRun.id } : {}),
         ...(activation ? { activation } : {}),
       });
       if (!result.succeeded) return;
-      handleDraftChange("");
+      clearDraft();
       setActivation(undefined);
       if (!sessionId && result.sessionId) {
         navigate(
@@ -1327,100 +1608,15 @@ function ConversationPage() {
     }
   };
 
-  const openCatalog = () => {
-    setInspector({
-      title: "添加到会话",
-      subtitle: "来自当前 Runtime 的真实目录",
-      content: (
-        <div className="conversation-catalog-list">
-          <section>
-            <h3>代码探索</h3>
-            <p>{draft.trim() ? "用当前输入作为探索目标。" : "请先在输入框填写探索目标。"}</p>
-            {(["quick", "balanced", "deep"] as const).map((depth) => (
-              <button
-                type="button"
-                key={`discovery:${depth}`}
-                disabled={!sessionId || !draft.trim()}
-                onClick={() => {
-                  if (!sessionId || !draft.trim()) return;
-                  void actions
-                    .startDiscovery({ workspacePath, sessionId, objective: draft, depth })
-                    .then(() => {
-                      handleDraftChange("");
-                      setInspector(undefined);
-                    });
-                }}
-              >
-                <WandSparkles aria-hidden="true" />
-                <span>
-                  <strong>{depth}</strong>
-                  <small>
-                    {depth === "quick" ? "快速定位" : depth === "deep" ? "深入验证" : "平衡探索"}
-                  </small>
-                </span>
-              </button>
-            ))}
-          </section>
-          <section>
-            <h3>Skills</h3>
-            {data.catalogSkills.length === 0 ? (
-              <p>当前工作区没有可用 Skill。</p>
-            ) : (
-              data.catalogSkills.map((skill) => (
-                <button
-                  type="button"
-                  key={`skill:${skill.name}`}
-                  onClick={() => {
-                    setActivation({ kind: "skill", name: skill.name });
-                    setInspector(undefined);
-                  }}
-                >
-                  <WandSparkles aria-hidden="true" />
-                  <span>
-                    <strong>{skill.name}</strong>
-                    <small>{skill.description}</small>
-                  </span>
-                </button>
-              ))
-            )}
-          </section>
-          <section>
-            <h3>子代理</h3>
-            {data.catalogAgents.length === 0 ? (
-              <p>当前 Runtime 没有发现可用 Agent。</p>
-            ) : (
-              data.catalogAgents.map((agent) => (
-                <button
-                  type="button"
-                  key={`agent:${agent.name}`}
-                  onClick={() => {
-                    setActivation({ kind: "agent", name: agent.name });
-                    setInspector(undefined);
-                  }}
-                >
-                  <Bot aria-hidden="true" />
-                  <span>
-                    <strong>{agent.name}</strong>
-                    <small>{agent.description}</small>
-                  </span>
-                </button>
-              ))
-            )}
-          </section>
-        </div>
-      ),
-    });
-  };
+  const openCatalog = () => setCatalogOpen((open) => !open);
 
   const openItem = (item: ConversationItemView) => {
     if (item.kind === "approval") {
-      setSelectedApprovalId(item.id.replace(/^approval:/, ""));
-      setApprovalOpen(true);
+      document.querySelector(".conversation-interaction-slot")?.scrollIntoView({ block: "end" });
       return;
     }
     if (item.kind === "prompt") {
-      setSelectedPromptId(item.id.replace(/^prompt:/, ""));
-      setPromptOpen(true);
+      document.querySelector(".conversation-interaction-slot")?.scrollIntoView({ block: "end" });
       return;
     }
     if (item.kind === "changes") {
@@ -1536,12 +1732,59 @@ function ConversationPage() {
     }
   };
 
+  const respondToApproval = (
+    decision:
+      | "allow_once"
+      | "allow_session"
+      | "deny"
+      | "execute"
+      | "continue_editing"
+      | "reject_exit"
+      | "resume_execution"
+      | "cancel_execution"
+      | "replan_execution",
+    feedback?: string,
+  ) => {
+    if (!pendingApproval) return;
+    const operation =
+      pendingApproval.kind === "plan" &&
+      (decision === "execute" ||
+        decision === "continue_editing" ||
+        decision === "reject_exit" ||
+        decision === "resume_execution" ||
+        decision === "cancel_execution" ||
+        decision === "replan_execution")
+        ? actions.respondPlan({
+            planId: pendingApproval.planId ?? "",
+            sessionId: sessionId ?? "",
+            action: decision,
+            expectedRevision: pendingApproval.expectedRevision ?? 0,
+            expectedSessionSequence: pendingApproval.expectedSessionSequence ?? 0,
+            ...(pendingApproval.planOperationId
+              ? { operationId: pendingApproval.planOperationId }
+              : {}),
+            ...(feedback || pendingApproval.planFeedback
+              ? { feedback: feedback ?? pendingApproval.planFeedback }
+              : {}),
+          })
+        : actions.respondApproval(
+            pendingApproval.id,
+            decision as "allow_once" | "allow_session" | "deny",
+          );
+    void operation;
+  };
+
   return (
     <ConversationSurface
       className="session-conversation"
       header={
         <div className="conversation-session-header">
-          <div>
+          <div className="conversation-session-header__identity">
+            {workspacePath && (
+              <span className="conversation-session-project" title={workspacePath}>
+                <Folder aria-hidden="true" /> {workspaceName(workspacePath)}
+              </span>
+            )}
             {editingTitle && sessionRef ? (
               <form
                 className="conversation-title-editor"
@@ -1575,7 +1818,7 @@ function ConversationPage() {
                 </Button>
               </form>
             ) : (
-              <h1>{session?.title ?? (sessionId ? "正在载入会话…" : "今天想一起做什么？")}</h1>
+              <h1>{session?.title ?? (sessionId ? "正在载入会话…" : "新任务")}</h1>
             )}
           </div>
           <div className="conversation-session-header__meta">
@@ -1624,13 +1867,18 @@ function ConversationPage() {
                 </button>
               </div>
             )}
-            {workspacePath && (
+            {sessionRef && (
               <button
                 type="button"
                 className="conversation-panel-toggle"
-                aria-label={environmentPanelOpen ? "收起环境面板" : "打开环境面板"}
+                aria-label={environmentPanelOpen ? "收起任务工作台" : "打开任务工作台"}
                 aria-expanded={environmentPanelOpen}
-                onClick={() => setEnvironmentPanelOpen((open) => !open)}
+                onClick={() =>
+                  setEnvironmentPanelOpen((open) => {
+                    window.localStorage.setItem(workbenchKey, String(!open));
+                    return !open;
+                  })
+                }
               >
                 {environmentPanelOpen ? (
                   <PanelRightClose aria-hidden="true" />
@@ -1673,186 +1921,360 @@ function ConversationPage() {
         ) : undefined
       }
       composer={
-        <ConversationComposer
-          value={draft}
-          onValueChange={handleDraftChange}
-          onSubmit={(value) => void submit(value.text, value.behavior)}
-          status={composerStatus}
-          behavior={behavior}
-          onBehaviorChange={setBehavior}
-          busy={busy === "send-message"}
-          disabled={Boolean(conversation?.loadError)}
-          placeholder={
-            activation?.kind === "skill"
-              ? `输入 ${activation.name} 的参数或补充要求…`
-              : activation?.kind === "agent"
-                ? `描述要委派给 ${activation.name} 的任务…`
-                : sessionId
-                  ? "继续对话，或在运行中调整方向…"
-                  : "向 Pico 发送消息…"
-          }
-          statusText={
-            conversation?.queuedCount ? `${conversation.queuedCount} 条消息正在排队` : undefined
-          }
-          onPause={activeRun ? () => void actions.pauseRun(activeRun.id) : undefined}
-          onResume={activeRun ? () => void actions.resumeRun(activeRun.id) : undefined}
-          onStop={activeRun ? () => void actions.stopRun(activeRun.id) : undefined}
-          onAttach={composerStatus === "idle" ? openCatalog : undefined}
-          trailingAccessory={
-            activation ? (
-              <button
-                type="button"
-                className="conversation-activation-chip"
-                onClick={() => setActivation(undefined)}
-                aria-label={`移除 ${activation.kind === "skill" ? "Skill" : "子代理"} ${activation.name}`}
-              >
-                {activation.kind === "skill" ? "Skill" : "Agent"}: {activation.name} ×
-              </button>
-            ) : undefined
-          }
-          leadingAccessory={
-            <>
-              <span className="conversation-context-label">
-                {data.workspaceMode === "git" ? (
-                  <FolderGit2 aria-hidden="true" />
-                ) : (
-                  <Folder aria-hidden="true" />
-                )}
-                {workspaceName(workspacePath)}
-              </span>
-              {sessionRef && conversation?.settings && (
+        pendingPrompt || pendingApproval ? (
+          <ConversationInteractionSlot
+            prompt={pendingPrompt}
+            approval={pendingPrompt ? undefined : pendingApproval}
+            busy={busy === "approval" || busy === "prompt"}
+            onApprovalDecision={respondToApproval}
+            onPromptAnswer={(answer) => {
+              if (pendingPrompt) void actions.respondPrompt(pendingPrompt.id, answer);
+            }}
+            onStop={activeRun ? () => void actions.stopRun(activeRun.id) : undefined}
+          />
+        ) : (
+          <div className="conversation-composer-region">
+            {catalogOpen && (
+              <ConversationContextMenu
+                skills={data.catalogSkills}
+                agents={data.catalogAgents}
+                onClose={() => setCatalogOpen(false)}
+                onSelect={(nextActivation) => {
+                  setActivation(nextActivation);
+                  setCatalogOpen(false);
+                  window.requestAnimationFrame(() =>
+                    document
+                      .querySelector<HTMLTextAreaElement>(".conversation-composer textarea")
+                      ?.focus(),
+                  );
+                }}
+              />
+            )}
+            <ConversationComposer
+              value={draft}
+              onValueChange={handleDraftChange}
+              onSubmit={(value) => void submit(value.text, value.behavior)}
+              status={composerStatus}
+              behavior={behavior}
+              onBehaviorChange={setBehavior}
+              busy={busy === "send-message"}
+              disabled={Boolean(conversation?.loadError)}
+              submitDisabled={!workspaceReady}
+              placeholder={
+                activation?.kind === "skill"
+                  ? `输入 ${activation.name} 的参数或补充要求…`
+                  : activation?.kind === "agent"
+                    ? `描述要委派给 ${activation.name} 的任务…`
+                    : sessionId
+                      ? "继续对话，或在运行中调整方向…"
+                      : !workspacePath
+                        ? "描述任务，并在下方选择项目…"
+                        : legacyStorageBlocked
+                          ? "这个项目需要先迁移旧版会话数据…"
+                          : !workspaceReady
+                            ? "正在准备项目…"
+                            : "向 Pico 发送消息…"
+              }
+              statusText={
+                conversation?.queuedCount ? `${conversation.queuedCount} 条消息正在排队` : undefined
+              }
+              onPause={activeRun ? () => void actions.pauseRun(activeRun.id) : undefined}
+              onResume={activeRun ? () => void actions.resumeRun(activeRun.id) : undefined}
+              onStop={activeRun ? () => void actions.stopRun(activeRun.id) : undefined}
+              onAttach={composerStatus === "idle" && workspaceReady ? openCatalog : undefined}
+              trailingAccessory={
+                activation ? (
+                  <button
+                    type="button"
+                    className="conversation-activation-chip"
+                    onClick={() => setActivation(undefined)}
+                    aria-label={`移除 ${activation.kind === "skill" ? "Skill" : "子代理"} ${activation.name}`}
+                  >
+                    {activation.kind === "skill" ? "Skill" : "Agent"}: {activation.name} ×
+                  </button>
+                ) : undefined
+              }
+              leadingAccessory={
                 <>
-                  <label className="conversation-context-option">
-                    <span className="conversation-sr-only">模型</span>
-                    <select
-                      name="model-route"
-                      aria-label="模型"
-                      value={conversation.settings.modelRouteId ?? ""}
-                      disabled={Boolean(activeRun) || Boolean(busy)}
-                      onChange={(event) =>
-                        void actions.updateSessionSettings(sessionRef, {
-                          modelRouteId: event.target.value,
-                        })
-                      }
-                    >
-                      {!data.modelRoutes.some(
-                        (route) => route.id === conversation.settings?.modelRouteId,
-                      ) && (
-                        <option value={conversation.settings.modelRouteId ?? ""}>
-                          {conversation.settings.model}
-                        </option>
+                  {!sessionRef ? (
+                    <>
+                      <label className="conversation-context-option conversation-project-option">
+                        <span className="conversation-sr-only">项目</span>
+                        <Folder aria-hidden="true" />
+                        <select
+                          name="workspace"
+                          aria-label="项目"
+                          value={workspacePath}
+                          onChange={(event) => {
+                            const nextWorkspacePath = event.target.value;
+                            if (nextWorkspacePath === "__add__") {
+                              void actions.chooseWorkspace().then((path) => {
+                                if (path) navigate(newSessionHref(path));
+                              });
+                              return;
+                            }
+                            navigate(newSessionHref(nextWorkspacePath));
+                          }}
+                        >
+                          <option value="">选择项目</option>
+                          {data.workspaces.map((workspace) => (
+                            <option key={workspace.path} value={workspace.path}>
+                              {workspace.name}
+                            </option>
+                          ))}
+                          <option value="__add__">添加项目文件夹…</option>
+                        </select>
+                      </label>
+                      {workspaceReady && (
+                        <>
+                          <label className="conversation-context-option">
+                            <span className="conversation-sr-only">模型</span>
+                            <select
+                              name="initial-model-route"
+                              aria-label="模型"
+                              value={newTaskSettings.modelRouteId ?? ""}
+                              onChange={(event) =>
+                                updateNewTaskSettings({ modelRouteId: event.target.value })
+                              }
+                            >
+                              {data.modelRoutes.length === 0 && <option value="">默认模型</option>}
+                              {data.modelRoutes.map((route) => (
+                                <option key={route.id} value={route.id}>
+                                  {route.label}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label className="conversation-context-option">
+                            <span className="conversation-sr-only">协作模式</span>
+                            <select
+                              name="initial-collaboration-mode"
+                              aria-label="协作模式"
+                              value={newTaskSettings.collaborationMode ?? "agent"}
+                              onChange={(event) =>
+                                updateNewTaskSettings({
+                                  collaborationMode: event.target.value as "agent" | "plan",
+                                })
+                              }
+                            >
+                              <option value="agent">Agent</option>
+                              <option value="plan">计划</option>
+                            </select>
+                          </label>
+                          <label className="conversation-context-option">
+                            <span className="conversation-sr-only">执行权限</span>
+                            <select
+                              name="initial-permission-mode"
+                              aria-label="执行权限"
+                              value={newTaskSettings.permissionMode ?? "default"}
+                              onChange={(event) =>
+                                updateNewTaskSettings({
+                                  permissionMode: event.target.value as "default" | "auto" | "yolo",
+                                })
+                              }
+                            >
+                              <option value="default">默认</option>
+                              <option value="auto">自动</option>
+                              <option value="yolo">完全访问</option>
+                            </select>
+                          </label>
+                          <label className="conversation-context-option">
+                            <span className="conversation-sr-only">编排模式</span>
+                            <select
+                              name="initial-orchestration-mode"
+                              aria-label="编排模式"
+                              value={newTaskSettings.orchestrationMode ?? "default"}
+                              onChange={(event) =>
+                                updateNewTaskSettings({
+                                  orchestrationMode: event.target.value as "default" | "graph",
+                                })
+                              }
+                            >
+                              <option value="default">线性</option>
+                              <option value="graph">Graph</option>
+                            </select>
+                          </label>
+                        </>
                       )}
-                      {data.modelRoutes.map((route) => (
-                        <option key={route.id} value={route.id}>
-                          {route.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="conversation-context-option">
-                    <span className="conversation-sr-only">协作模式</span>
-                    <select
-                      name="collaboration-mode"
-                      aria-label="协作模式"
-                      value={conversation.settings.collaborationMode}
-                      disabled={Boolean(activeRun) || Boolean(busy)}
-                      onChange={(event) => {
-                        const collaborationMode = event.target.value as "agent" | "plan";
-                        const pendingPlan = data.approvals.find(
-                          (approval) =>
-                            approval.kind === "plan" && approval.sessionId === sessionRef.sessionId,
-                        );
-                        if (
-                          collaborationMode === "agent" &&
-                          conversation.settings?.collaborationMode === "plan" &&
-                          pendingPlan
-                        ) {
-                          if (
-                            !window.confirm(
-                              "当前计划仍待审批。退出 Plan 将拒绝并放弃这份计划，是否继续？",
-                            )
-                          ) {
-                            return;
-                          }
-                          void actions.respondPlan({
-                            sessionId: sessionRef.sessionId,
-                            planId: pendingPlan.planId ?? pendingPlan.id,
-                            action: "reject_exit",
-                            expectedRevision: pendingPlan.expectedRevision ?? 0,
-                            expectedSessionSequence: pendingPlan.expectedSessionSequence ?? 0,
-                            feedback: "用户从协作模式开关退出 Plan。",
-                          });
-                          return;
-                        }
-                        void actions.updateSessionSettings(sessionRef, { collaborationMode });
-                      }}
-                    >
-                      <option value="agent">Agent</option>
-                      <option value="plan">计划</option>
-                    </select>
-                  </label>
-                  <label className="conversation-context-option">
-                    <span className="conversation-sr-only">执行权限</span>
-                    <select
-                      name="permission-mode"
-                      aria-label="执行权限"
-                      value={conversation.settings.permissionMode}
-                      disabled={Boolean(activeRun) || Boolean(busy)}
-                      onChange={(event) =>
-                        void actions.updateSessionSettings(sessionRef, {
-                          permissionMode: event.target.value as "default" | "auto" | "yolo",
-                        })
-                      }
-                    >
-                      <option value="default">默认</option>
-                      <option value="auto">自动</option>
-                      <option value="yolo">完全访问</option>
-                    </select>
-                  </label>
-                  <label className="conversation-context-option">
-                    <span className="conversation-sr-only">编排模式</span>
-                    <select
-                      name="orchestration-mode"
-                      aria-label="编排模式"
-                      value={conversation.settings.orchestrationMode}
-                      disabled={Boolean(activeRun) || Boolean(busy)}
-                      onChange={(event) =>
-                        void actions.updateSessionSettings(sessionRef, {
-                          orchestrationMode: event.target.value as "default" | "graph",
-                        })
-                      }
-                    >
-                      <option value="default">线性</option>
-                      <option value="graph">Graph</option>
-                    </select>
-                  </label>
-                  {conversation.settings.reasoningLevels.length > 0 && (
+                    </>
+                  ) : (
+                    <span className="conversation-context-label">
+                      {data.workspaceMode === "git" ? (
+                        <FolderGit2 aria-hidden="true" />
+                      ) : (
+                        <Folder aria-hidden="true" />
+                      )}
+                      {workspaceName(workspacePath)}
+                    </span>
+                  )}
+                  {sessionRef && composerStatus === "idle" && (
                     <label className="conversation-context-option">
-                      <span className="conversation-sr-only">Thinking</span>
+                      <span className="conversation-sr-only">代码探索深度</span>
+                      <WandSparkles aria-hidden="true" />
                       <select
-                        name="thinking-effort"
-                        aria-label="Thinking"
-                        value={conversation.settings.thinkingEffort}
-                        disabled={Boolean(activeRun) || Boolean(busy)}
-                        onChange={(event) =>
-                          void actions.updateSessionSettings(sessionRef, {
-                            thinkingEffort: event.target.value,
-                          })
-                        }
+                        name="discovery-depth"
+                        aria-label="启动代码探索"
+                        value=""
+                        disabled={!draft.trim() || Boolean(busy)}
+                        onChange={(event) => {
+                          const depth = event.target.value as "" | "quick" | "balanced" | "deep";
+                          if (!depth || !draft.trim()) return;
+                          void actions
+                            .startDiscovery({
+                              workspacePath,
+                              sessionId: sessionRef.sessionId,
+                              objective: draft,
+                              depth,
+                            })
+                            .then(() => {
+                              clearDraft();
+                              setCatalogOpen(false);
+                            });
+                        }}
                       >
-                        {conversation.settings.reasoningLevels.map((level) => (
-                          <option key={level} value={level}>
-                            {level}
-                          </option>
-                        ))}
+                        <option value="">代码探索…</option>
+                        <option value="quick">快速定位 (quick)</option>
+                        <option value="balanced">平衡探索 (balanced)</option>
+                        <option value="deep">深入验证 (deep)</option>
                       </select>
                     </label>
                   )}
+                  {sessionRef && conversation?.settings && (
+                    <>
+                      <label className="conversation-context-option">
+                        <span className="conversation-sr-only">模型</span>
+                        <select
+                          name="model-route"
+                          aria-label="模型"
+                          value={conversation.settings.modelRouteId ?? ""}
+                          disabled={Boolean(activeRun) || Boolean(busy)}
+                          onChange={(event) =>
+                            void actions.updateSessionSettings(sessionRef, {
+                              modelRouteId: event.target.value,
+                            })
+                          }
+                        >
+                          {!data.modelRoutes.some(
+                            (route) => route.id === conversation.settings?.modelRouteId,
+                          ) && (
+                            <option value={conversation.settings.modelRouteId ?? ""}>
+                              {conversation.settings.model}
+                            </option>
+                          )}
+                          {data.modelRoutes.map((route) => (
+                            <option key={route.id} value={route.id}>
+                              {route.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="conversation-context-option">
+                        <span className="conversation-sr-only">协作模式</span>
+                        <select
+                          name="collaboration-mode"
+                          aria-label="协作模式"
+                          value={conversation.settings.collaborationMode}
+                          disabled={Boolean(activeRun) || Boolean(busy)}
+                          onChange={(event) => {
+                            const collaborationMode = event.target.value as "agent" | "plan";
+                            const pendingPlan = data.approvals.find(
+                              (approval) =>
+                                approval.kind === "plan" &&
+                                approval.sessionId === sessionRef.sessionId,
+                            );
+                            if (
+                              collaborationMode === "agent" &&
+                              conversation.settings?.collaborationMode === "plan" &&
+                              pendingPlan
+                            ) {
+                              if (
+                                !window.confirm(
+                                  "当前计划仍待审批。退出 Plan 将拒绝并放弃这份计划，是否继续？",
+                                )
+                              ) {
+                                return;
+                              }
+                              void actions.respondPlan({
+                                sessionId: sessionRef.sessionId,
+                                planId: pendingPlan.planId ?? pendingPlan.id,
+                                action: "reject_exit",
+                                expectedRevision: pendingPlan.expectedRevision ?? 0,
+                                expectedSessionSequence: pendingPlan.expectedSessionSequence ?? 0,
+                                feedback: "用户从协作模式开关退出 Plan。",
+                              });
+                              return;
+                            }
+                            void actions.updateSessionSettings(sessionRef, { collaborationMode });
+                          }}
+                        >
+                          <option value="agent">Agent</option>
+                          <option value="plan">计划</option>
+                        </select>
+                      </label>
+                      <label className="conversation-context-option">
+                        <span className="conversation-sr-only">执行权限</span>
+                        <select
+                          name="permission-mode"
+                          aria-label="执行权限"
+                          value={conversation.settings.permissionMode}
+                          disabled={Boolean(activeRun) || Boolean(busy)}
+                          onChange={(event) =>
+                            void actions.updateSessionSettings(sessionRef, {
+                              permissionMode: event.target.value as "default" | "auto" | "yolo",
+                            })
+                          }
+                        >
+                          <option value="default">默认</option>
+                          <option value="auto">自动</option>
+                          <option value="yolo">完全访问</option>
+                        </select>
+                      </label>
+                      <label className="conversation-context-option">
+                        <span className="conversation-sr-only">编排模式</span>
+                        <select
+                          name="orchestration-mode"
+                          aria-label="编排模式"
+                          value={conversation.settings.orchestrationMode}
+                          disabled={Boolean(activeRun) || Boolean(busy)}
+                          onChange={(event) =>
+                            void actions.updateSessionSettings(sessionRef, {
+                              orchestrationMode: event.target.value as "default" | "graph",
+                            })
+                          }
+                        >
+                          <option value="default">线性</option>
+                          <option value="graph">Graph</option>
+                        </select>
+                      </label>
+                      {conversation.settings.reasoningLevels.length > 0 && (
+                        <label className="conversation-context-option">
+                          <span className="conversation-sr-only">Thinking</span>
+                          <select
+                            name="thinking-effort"
+                            aria-label="Thinking"
+                            value={conversation.settings.thinkingEffort}
+                            disabled={Boolean(activeRun) || Boolean(busy)}
+                            onChange={(event) =>
+                              void actions.updateSessionSettings(sessionRef, {
+                                thinkingEffort: event.target.value,
+                              })
+                            }
+                          >
+                            {conversation.settings.reasoningLevels.map((level) => (
+                              <option key={level} value={level}>
+                                {level}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      )}
+                    </>
+                  )}
                 </>
-              )}
-            </>
-          }
-        />
+              }
+            />
+          </div>
+        )
       }
     >
       {conversation?.loadError ? (
@@ -1888,62 +2310,58 @@ function ConversationPage() {
                 <div className="conversation-empty-state">
                   <h3>正在载入对话记录…</h3>
                 </div>
-              ) : (
+              ) : sessionId ? (
                 <div className="conversation-empty-state">
                   <Sparkles aria-hidden="true" />
-                  <h3>{sessionId ? "这个会话还没有可见消息" : "从一条消息开始"}</h3>
-                  <p>可以像在 TUI 里一样交代目标、追问方案，或先让 Pico 阅读项目。</p>
+                  <h3>这个会话还没有可见消息</h3>
+                  <p>继续输入后，消息和执行记录会显示在这里。</p>
+                </div>
+              ) : (
+                <div className="conversation-empty-state conversation-empty-state--new">
+                  <span className="brand-mark brand-mark--large" aria-hidden="true">
+                    P
+                  </span>
+                  <span className="eyebrow">{workspaceName(workspacePath)}</span>
+                  <h2>今天想推进什么？</h2>
+                  <p>描述目标和完成标准，Pico 会先理解项目，再把执行过程整理成一条可检查的记录。</p>
+                  {legacyStorageBlocked && (
+                    <InlineNotice tone="warning">
+                      这个项目仍包含旧版 JSONL 会话数据。Pico
+                      不会自动删除或混写这些历史；请先完成迁移，再开始新任务。
+                    </InlineNotice>
+                  )}
+                  <div className="conversation-starters" aria-label="任务示例">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleDraftChange("先阅读这个项目，告诉我它的结构和当前最重要的问题。")
+                      }
+                    >
+                      理解这个项目
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleDraftChange("定位当前最影响使用的问题，给出证据并修复它。")
+                      }
+                    >
+                      定位并修复问题
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleDraftChange("检查最近的改动，重点关注行为回归和数据安全。")
+                      }
+                    >
+                      审查最近改动
+                    </button>
+                  </div>
                 </div>
               )
             }
           />
         </>
       )}
-      <ApprovalDialog
-        approval={selectedApproval}
-        open={approvalOpen}
-        onOpenChange={setApprovalOpen}
-        busy={busy === "approval"}
-        onDecision={(decision, feedback) => {
-          const operation =
-            selectedApproval?.kind === "plan" &&
-            (decision === "execute" ||
-              decision === "continue_editing" ||
-              decision === "reject_exit" ||
-              decision === "resume_execution" ||
-              decision === "cancel_execution" ||
-              decision === "replan_execution")
-              ? actions.respondPlan({
-                  planId: selectedApproval.planId ?? "",
-                  sessionId: sessionId ?? "",
-                  action: decision,
-                  expectedRevision: selectedApproval.expectedRevision ?? 0,
-                  expectedSessionSequence: selectedApproval.expectedSessionSequence ?? 0,
-                  ...(selectedApproval.planOperationId
-                    ? { operationId: selectedApproval.planOperationId }
-                    : {}),
-                  ...(feedback || selectedApproval.planFeedback
-                    ? { feedback: feedback ?? selectedApproval.planFeedback }
-                    : {}),
-                })
-              : actions.respondApproval(
-                  selectedApproval?.id ?? "",
-                  decision as "allow_once" | "allow_session" | "deny",
-                );
-          void operation.then(() => setApprovalOpen(false));
-        }}
-      />
-      <PromptDialog
-        prompt={selectedPrompt}
-        open={promptOpen}
-        onOpenChange={setPromptOpen}
-        busy={busy === "prompt"}
-        onAnswer={(answer) =>
-          void actions
-            .respondPrompt(selectedPrompt?.id ?? "", answer)
-            .then(() => setPromptOpen(false))
-        }
-      />
     </ConversationSurface>
   );
 }
@@ -2459,7 +2877,55 @@ function MemoryPageRoute() {
   return <MemoryPage runtime={useRuntime()} />;
 }
 
-export function CapabilityPage({ kind }: { readonly kind: "skills" | "mcp" }) {
+function LegacySurfaceRedirect({ to }: { readonly to: string }) {
+  const location = useLocation();
+  return <Navigate replace to={legacySurfaceHref(to, location.search)} />;
+}
+
+function ExtensionsIndex() {
+  const lastKind = window.localStorage.getItem("pico.extensions-kind") === "mcp" ? "mcp" : "skills";
+  return <Navigate replace to={`/extensions/${lastKind}`} />;
+}
+
+function ExtensionsPage() {
+  const { kind } = useParams<{ kind: string }>();
+  const activeKind = kind === "mcp" ? "mcp" : kind === "skills" ? "skills" : undefined;
+  useEffect(() => {
+    if (activeKind) window.localStorage.setItem("pico.extensions-kind", activeKind);
+  }, [activeKind]);
+  if (!activeKind) return <Navigate replace to="/extensions/skills" />;
+  return (
+    <div className="extensions-page">
+      <header className="extensions-page__header">
+        <div>
+          <span className="eyebrow">可安装能力</span>
+          <h2>扩展</h2>
+          <p>Skills 定义工作方式，MCP 连接外部工具和数据源。</p>
+        </div>
+        <nav className="surface-tabs" aria-label="扩展类型">
+          <NavLink
+            to="/extensions/skills"
+            className={({ isActive }) => (isActive ? "is-active" : "")}
+          >
+            技能
+          </NavLink>
+          <NavLink to="/extensions/mcp" className={({ isActive }) => (isActive ? "is-active" : "")}>
+            MCP
+          </NavLink>
+        </nav>
+      </header>
+      <CapabilityPage kind={activeKind} embedded />
+    </div>
+  );
+}
+
+export function CapabilityPage({
+  kind,
+  embedded = false,
+}: {
+  readonly kind: "skills" | "mcp";
+  readonly embedded?: boolean;
+}) {
   const { data, actions, busy } = useRuntime();
   const [addingMcp, setAddingMcp] = useState(false);
   const scope = kind === "skills" ? data.skillScope : data.mcpScope;
@@ -2485,23 +2951,33 @@ export function CapabilityPage({ kind }: { readonly kind: "skills" | "mcp" }) {
   }[kind];
   return (
     <div className="page-stack">
-      <section className="page-intro">
-        <div>
-          <span className="eyebrow">{config.eyebrow}</span>
-          <h2>{config.title}</h2>
-          <p>{config.detail}</p>
-        </div>
-        {kind === "mcp" ? (
+      {!embedded && (
+        <section className="page-intro">
+          <div>
+            <span className="eyebrow">{config.eyebrow}</span>
+            <h2>{config.title}</h2>
+            <p>{config.detail}</p>
+          </div>
+          {kind === "mcp" ? (
+            <Button disabled={Boolean(busy)} onClick={() => setAddingMcp((visible) => !visible)}>
+              <Plus aria-hidden="true" size={16} />
+              添加用户级 MCP
+            </Button>
+          ) : (
+            <Button disabled title="Skills v1 仅支持查看">
+              Skills v1 只读
+            </Button>
+          )}
+        </section>
+      )}
+      {embedded && kind === "mcp" && (
+        <div className="button-row">
           <Button disabled={Boolean(busy)} onClick={() => setAddingMcp((visible) => !visible)}>
             <Plus aria-hidden="true" size={16} />
             添加用户级 MCP
           </Button>
-        ) : (
-          <Button disabled title="Skills v1 仅支持查看">
-            Skills v1 只读
-          </Button>
-        )}
-      </section>
+        </div>
+      )}
       <section className="panel capability-scope-picker" aria-label={`${config.title}作用域`}>
         <div>
           <strong>查看范围</strong>
@@ -2757,14 +3233,13 @@ function UsagePage() {
 function SettingsPage() {
   const { data, actions, busy } = useRuntime();
   const [background, setBackground] = useState<"" | "enabled" | "disabled">("");
-  const [diagnosticOutput, setDiagnosticOutput] = useState<string>();
   return (
     <div className="page-stack settings-page">
       <section className="page-intro">
         <div>
-          <span className="eyebrow">Pico Desktop</span>
-          <h2>设置</h2>
-          <p>桌面偏好与 Runtime 配置保持清晰分离。</p>
+          <span className="eyebrow">偏好</span>
+          <h2>通用</h2>
+          <p>设置 Pico Desktop 的启动和后台行为。</p>
         </div>
       </section>
       <section className="settings-section">
@@ -2812,19 +3287,157 @@ function SettingsPage() {
         </div>
       </section>
       <section className="settings-section">
-        <h3>项目与诊断</h3>
+        <h3>账户</h3>
         <div className="settings-list">
+          <SettingRow title="登录与同步" detail="尚未开放">
+            <StatusPill status="disabled" />
+          </SettingRow>
+          <SettingRow title="Plugin Runtime" detail="公开 Plugin Runtime 尚未开放">
+            <StatusPill status="disabled" />
+          </SettingRow>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function WorkspaceSettingsPage() {
+  const { data, actions, busy } = useRuntime();
+  const navigate = useNavigate();
+  const chooseWorkspace = async () => {
+    const workspacePath = await actions.chooseWorkspace();
+    if (workspacePath) navigate(workspaceHref("/settings/workspaces", workspacePath));
+  };
+  return (
+    <div className="page-stack settings-page">
+      <section className="page-intro">
+        <div>
+          <span className="eyebrow">偏好</span>
+          <h2>工作区</h2>
+          <p>项目在这里管理；新任务仍可以在 Composer 中临时切换项目。</p>
+        </div>
+        <Button disabled={Boolean(busy)} onClick={() => void chooseWorkspace()}>
+          <Plus aria-hidden="true" size={16} /> 添加工作区
+        </Button>
+      </section>
+      <section className="settings-section">
+        <h3>当前项目</h3>
+        <div className="settings-list">
+          <SettingRow title="管理项目" detail="切换只影响本设置页的操作对象">
+            <select
+              className="select-control"
+              value={data.workspacePath ?? ""}
+              aria-label="选择要管理的工作区"
+              onChange={(event) =>
+                navigate(workspaceHref("/settings/workspaces", event.target.value))
+              }
+            >
+              {data.workspaces.map((workspace) => (
+                <option key={workspace.path} value={workspace.path}>
+                  {workspace.name}
+                </option>
+              ))}
+            </select>
+          </SettingRow>
+          <SettingRow title="工作区路径" detail={data.workspacePath ?? "未选择"}>
+            <Button
+              variant="danger"
+              disabled={Boolean(busy)}
+              onClick={() =>
+                data.workspacePath && void actions.trustWorkspace(data.workspacePath, false)
+              }
+            >
+              撤销信任
+            </Button>
+          </SettingRow>
           <SettingRow title="初始化 Pico 项目" detail="仅创建缺失的 AGENTS.md 与 .pico/config.json">
             <Button
               disabled={Boolean(busy)}
               onClick={() => {
-                if (window.confirm(`在 ${data.workspacePath ?? "当前工作区"} 初始化 Pico 项目？`))
+                if (window.confirm(`在 ${data.workspacePath} 初始化 Pico 项目？`))
                   void actions.initializeWorkspace();
               }}
             >
               初始化
             </Button>
           </SettingRow>
+          <SettingRow
+            title="工作区模式"
+            detail={
+              data.workspaceMode === "git"
+                ? "已启用并行任务隔离与变更合并"
+                : "对话、工具和并行分析可用；可写子代理隔离、分支与独立合并不可用"
+            }
+          >
+            <WorkspaceModeBadge mode={data.workspaceMode} />
+          </SettingRow>
+        </div>
+        {data.workspaceMode === "folder" && (
+          <p className="settings-section__note">
+            版本保护是一项面向高级工作流的可选能力，由 Git 提供。Pico 不会自行修改你的文件夹设置。
+          </p>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function SystemSettingsPage() {
+  const { data, actions, busy, connection } = useRuntime();
+  const [diagnosticOutput, setDiagnosticOutput] = useState<string>();
+  const memoryHref = data.workspacePath
+    ? workspaceHref("/settings/memory", data.workspacePath)
+    : "/settings/memory";
+  return (
+    <div className="page-stack settings-page">
+      <section className="page-intro">
+        <div>
+          <span className="eyebrow">系统</span>
+          <h2>权限与能力</h2>
+          <p>系统内建工具在这里显示运行状态、权限边界和诊断入口。</p>
+        </div>
+      </section>
+      <section className="settings-section">
+        <h3>Runtime Host</h3>
+        <div className="settings-list">
+          <SettingRow
+            title="本地 Runtime"
+            detail="任务执行、工具调用和本地数据都由 Runtime Host 承载"
+          >
+            <StatusPill status={connection.kind === "ready" ? "ready" : "attention"} />
+          </SettingRow>
+          <SettingRow
+            title="文件与终端工具"
+            detail={
+              data.workspacePath
+                ? `当前运行上下文：${workspaceName(data.workspacePath)}`
+                : "选择项目并信任后，任务才能使用系统工具"
+            }
+          >
+            <StatusPill status={data.workspacePath && data.trusted ? "ready" : "attention"} />
+          </SettingRow>
+          <SettingRow
+            title="Computer Use"
+            detail="Desktop 尚未接入 macOS 辅助功能权限探测；实际调用仍会受系统与会话权限策略约束"
+          >
+            <StatusPill status="attention" />
+          </SettingRow>
+          <SettingRow
+            title="危险操作审批"
+            detail="越界写入、破坏性操作与外部访问由会话权限策略管理"
+          >
+            <StatusPill status="ready" />
+          </SettingRow>
+          <SettingRow title="记忆写入" detail="记忆生成、审核与长期保留策略在能力设置中管理">
+            <Link className="button" to={memoryHref}>
+              打开记忆设置
+            </Link>
+          </SettingRow>
+        </div>
+      </section>
+      <section className="settings-section">
+        <h3>诊断</h3>
+        <div className="settings-list">
           <SettingRow title="Runtime 诊断" detail="只读检查配置、存储和运行能力">
             <Button
               disabled={Boolean(busy)}
@@ -2847,51 +3460,6 @@ function SettingsPage() {
             {diagnosticOutput}
           </pre>
         )}
-      </section>
-      <section className="settings-section">
-        <h3>安全</h3>
-        <div className="settings-list">
-          <SettingRow title="当前工作区" detail={data.workspacePath ?? "未选择"}>
-            <Button
-              variant="danger"
-              disabled={Boolean(busy)}
-              onClick={() =>
-                data.workspacePath && void actions.trustWorkspace(data.workspacePath, false)
-              }
-            >
-              撤销信任
-            </Button>
-          </SettingRow>
-          <SettingRow
-            title="工作区模式"
-            detail={
-              data.workspaceMode === "git"
-                ? "已启用并行任务隔离与变更合并"
-                : "对话、工具和并行分析可用；可写子代理隔离、分支与独立合并不可用"
-            }
-          >
-            <WorkspaceModeBadge mode={data.workspaceMode} />
-          </SettingRow>
-          <SettingRow title="审批策略" detail="危险操作、越界写入与外部访问始终询问">
-            <StatusPill status="ready" />
-          </SettingRow>
-        </div>
-        {data.workspaceMode === "folder" && (
-          <p className="settings-section__note">
-            版本保护是一项面向高级工作流的可选能力，由 Git 提供。Pico 不会自行修改你的文件夹设置。
-          </p>
-        )}
-      </section>
-      <section className="settings-section">
-        <h3>账户与扩展</h3>
-        <div className="settings-list">
-          <SettingRow title="登录与同步" detail="尚未开放">
-            <StatusPill status="disabled" />
-          </SettingRow>
-          <SettingRow title="Plugins" detail="公开 Plugin Runtime 尚未开放">
-            <StatusPill status="disabled" />
-          </SettingRow>
-        </div>
       </section>
     </div>
   );
@@ -2987,8 +3555,8 @@ function NotFound() {
       title="找不到这个页面"
       detail="链接可能已失效。"
       action={
-        <Link className="button button--primary" to="/">
-          返回开始
+        <Link className="button button--primary" to="/task/new">
+          返回新任务
         </Link>
       }
     />
@@ -2998,19 +3566,15 @@ function NotFound() {
 function routeTitle(pathname: string): string {
   if (pathname.startsWith("/task/")) return pathname === "/task/new" ? "新任务" : "任务运行";
   if (pathname.startsWith("/session/")) return "会话";
+  if (pathname.startsWith("/extensions")) return "扩展";
+  if (pathname.startsWith("/settings")) return "设置";
   return (
     (
       {
         "/": "开始",
         "/sessions": "会话",
-        "/automations": "自动化",
+        "/automations": "定时任务",
         "/review": "更改审阅",
-        "/memory": "记忆",
-        "/skills": "Skills",
-        "/mcp": "MCP",
-        "/providers": "模型",
-        "/usage": "用量",
-        "/settings": "设置",
       } as Readonly<Record<string, string>>
     )[pathname] ?? "Pico"
   );

@@ -29,14 +29,14 @@ function previewRuntime(): RuntimeStore {
   };
 }
 
-test("desktop navigation exposes the workspace memory route", async () => {
+test("desktop settings exposes the workspace memory route", async () => {
   const source = await readFile(
     new URL("../../apps/desktop/src/renderer/App.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(source, /path="memory"/);
-  assert.match(source, /to: "\/memory", label: "记忆"/);
-  assert.match(source, /"\/memory": "记忆"/);
+  assert.match(source, /path="settings\/memory"/);
+  assert.match(source, /LegacySurfaceRedirect to="\/settings\/memory"/);
+  assert.doesNotMatch(source, /resourceNav/);
 });
 
 test("memory page renders three desktop columns and management actions", () => {

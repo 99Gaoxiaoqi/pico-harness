@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  isActiveWorkspaceSession,
   replaceWorkspaceItems,
   sessionHref,
   workspacePathFromSearch,
@@ -39,4 +40,14 @@ test("Desktop session links preserve the selected workspace", () => {
 
   assert.equal(pathname, "/session/session%2Fwith%20spaces");
   assert.equal(workspacePathFromSearch(`?${search}`), ref.workspacePath);
+});
+
+test("Desktop session active state includes workspace identity", () => {
+  const left = { workspacePath: "/projects/alpha", sessionId: "shared/session" };
+  const right = { workspacePath: "/projects/beta", sessionId: "shared/session" };
+  const href = sessionHref(left);
+  const [pathname, search = ""] = href.split("?");
+
+  assert.equal(isActiveWorkspaceSession(left, pathname!, `?${search}`), true);
+  assert.equal(isActiveWorkspaceSession(right, pathname!, `?${search}`), false);
 });

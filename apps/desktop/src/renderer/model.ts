@@ -1,11 +1,15 @@
 import type { ConversationItemView } from "./conversation/types.js";
 import type {
   RuntimeCapabilityScope,
+  RuntimeCollaborationMode,
+  RuntimeInteractionMode,
   RuntimeMcpServerInput,
   RuntimeMemoryFact,
   RuntimeMemoryProposal,
   RuntimeMemoryReviewBudget,
   RuntimeMemorySettings,
+  RuntimeOrchestrationMode,
+  RuntimePermissionMode,
 } from "@pico/protocol";
 
 export type JsonRecord = Readonly<Record<string, unknown>>;
@@ -112,7 +116,10 @@ export type ProviderDraft = Pick<
 
 export interface UserDefaultsView {
   readonly modelRouteId?: string | undefined;
-  readonly mode?: "default" | "plan" | "auto" | "yolo" | undefined;
+  readonly collaborationMode?: RuntimeCollaborationMode | undefined;
+  readonly orchestrationMode?: RuntimeOrchestrationMode | undefined;
+  readonly permissionMode?: RuntimePermissionMode | undefined;
+  readonly mode?: RuntimeInteractionMode | undefined;
   readonly thinkingEffort?: string | undefined;
 }
 

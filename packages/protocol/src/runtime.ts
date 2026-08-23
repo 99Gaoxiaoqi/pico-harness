@@ -782,6 +782,8 @@ export type RuntimeMethodMap = {
     readonly params: WorkspaceParams & {
       readonly sessionId?: SessionId;
       readonly input: RuntimeUserInput;
+      /** Settings applied before the first run starts. Valid only when creating a session. */
+      readonly initialSettings?: RuntimeUserDefaults;
       readonly behavior?: SessionSendBehavior;
       readonly expectedRunId?: RunId;
       readonly idempotencyKey: string;
@@ -2885,6 +2887,7 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
     { workspacePath: stringParam, input: runtimeUserInputParam, idempotencyKey: stringParam },
     {
       sessionId: stringParam,
+      initialSettings: runtimeUserDefaultsParam,
       behavior: sessionBehaviorParam,
       expectedRunId: stringParam,
     },

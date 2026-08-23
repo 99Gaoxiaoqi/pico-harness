@@ -40,6 +40,17 @@ export function sessionHref(ref: WorkspaceSessionRef): string {
   return workspaceHref(`/session/${encodeURIComponent(ref.sessionId)}`, ref.workspacePath);
 }
 
+export function isActiveWorkspaceSession(
+  ref: WorkspaceSessionRef,
+  pathname: string,
+  search: string,
+): boolean {
+  return (
+    pathname === `/session/${encodeURIComponent(ref.sessionId)}` &&
+    workspacePathFromSearch(search) === ref.workspacePath
+  );
+}
+
 export function newSessionHref(workspacePath?: string): string {
   return workspacePath ? workspaceHref("/task/new", workspacePath) : "/task/new";
 }

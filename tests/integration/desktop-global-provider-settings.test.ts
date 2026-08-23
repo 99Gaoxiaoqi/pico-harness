@@ -5,13 +5,16 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { parseStrictRuntimeParams } from "../../src/daemon/protocol.js";
 
-test("模型设置是全局路由且侧边栏不会附加工作区", async () => {
+test("模型设置收拢到全局设置且保留旧路由兼容", async () => {
   const source = await rendererSource("App.tsx");
-  assert.match(source, /<Route path="providers" element=\{<ProviderPageRoute \/>\} \/>/u);
-  assert.match(source, /\{ to: "\/providers", label: "模型", icon: BrainCircuit \}/u);
-  assert.doesNotMatch(source, /to: "\/providers"[^\n]+scoped: true/u);
+  assert.match(source, /path="settings\/models" element=\{<ProviderPageRoute \/>\}/u);
+  assert.match(
+    source,
+    /path="providers" element=\{<LegacySurfaceRedirect to="\/settings\/models" \/>\}/u,
+  );
+  assert.doesNotMatch(source, /resourceNav/u);
 
-  const providerRouteStart = source.indexOf('<Route path="providers"');
+  const providerRouteStart = source.indexOf('<Route path="settings/models"');
   const nextRouteStart = source.indexOf("<Route", providerRouteStart + 1);
   assert.ok(providerRouteStart >= 0 && nextRouteStart > providerRouteStart);
   assert.doesNotMatch(source.slice(providerRouteStart, nextRouteStart), /WorkspaceRoute/u);

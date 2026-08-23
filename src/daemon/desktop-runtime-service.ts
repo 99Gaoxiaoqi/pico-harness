@@ -134,6 +134,7 @@ import {
   type RuntimeRequest,
   type RuntimeProviderInput,
   type RuntimeScopedMcpServer,
+  type RuntimeUserDefaults,
   type RuntimeUserInput,
 } from "./protocol.js";
 import type {
@@ -1401,6 +1402,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     readonly workspacePath: string;
     readonly sessionId?: string;
     readonly input: RuntimeUserInput;
+    readonly initialSettings?: RuntimeUserDefaults;
     readonly behavior?: "auto" | "steer" | "queue" | "replace";
     readonly expectedRunId?: string;
     readonly idempotencyKey: string;
@@ -1450,11 +1452,18 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     readonly workspacePath: string;
     readonly sessionId?: string;
     readonly input: RuntimeUserInput;
+    readonly initialSettings?: RuntimeUserDefaults;
     readonly behavior?: "auto" | "steer" | "queue" | "replace";
     readonly expectedRunId?: string;
     readonly idempotencyKey: string;
   }): Promise<JsonObject> {
     const behavior = params.behavior ?? "auto";
+    if (params.sessionId && params.initialSettings) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        "initialSettings 只允许用于首次发送创建 Session",
+      );
+    }
     // Resolve a first-message activation before creating durable session metadata. Invalid
     // catalog selections must not leave behind an empty session.
     const initialResolution = params.sessionId
@@ -1537,6 +1546,14 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const sessionRecord = requireJsonRecord(session, "session");
     const sessionId = requireText(sessionRecord["sessionId"], "session.sessionId");
     const activeRun = await this.findActiveSessionRun(params.workspacePath, sessionId);
+
+    if (!params.sessionId && params.initialSettings && !activeRun) {
+      await this.updateRuntimeSessionSettings({
+        workspacePath: params.workspacePath,
+        sessionId,
+        ...params.initialSettings,
+      });
+    }
 
     if (params.expectedRunId !== undefined && activeRun?.["runId"] !== params.expectedRunId) {
       throw new RuntimeProtocolError(
@@ -4192,6 +4209,7 @@ function redactedErrorMessage(error: unknown, secret: string): string {
 function firstSendRequestFingerprint(params: {
   readonly sessionId?: string;
   readonly input: RuntimeUserInput;
+  readonly initialSettings?: RuntimeUserDefaults;
   readonly behavior?: "auto" | "steer" | "queue" | "replace";
   readonly expectedRunId?: string;
 }): string {
@@ -4200,6 +4218,7 @@ function firstSendRequestFingerprint(params: {
       JSON.stringify({
         sessionId: params.sessionId ?? null,
         input: params.input,
+        initialSettings: params.initialSettings ?? null,
         behavior: params.behavior ?? "auto",
         expectedRunId: params.expectedRunId ?? null,
       }),

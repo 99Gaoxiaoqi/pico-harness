@@ -10,13 +10,45 @@ import type { CapabilityView } from "../../apps/desktop/src/renderer/model.js";
 
 Object.assign(globalThis, { React });
 
-test("Skills 和 MCP 是全局路由，不会继承侧边栏工作区", async () => {
+test("Skills 和 MCP 收拢到设置侧边栏，不会继承项目作用域", async () => {
   const source = await rendererSource("App.tsx");
-  assert.match(source, /<Route path="skills" element=\{<CapabilityPage kind="skills" \/>\} \/>/u);
-  assert.match(source, /<Route path="mcp" element=\{<CapabilityPage kind="mcp" \/>\} \/>/u);
-  assert.match(source, /\{ to: "\/skills", label: "Skills", icon: WandSparkles \}/u);
-  assert.match(source, /\{ to: "\/mcp", label: "MCP", icon: Network \}/u);
-  assert.doesNotMatch(source, /to: "\/(?:skills|mcp)"[^\n]+scoped: true/u);
+  assert.match(source, /path="extensions\/:kind" element=\{<ExtensionsPage \/>\}/u);
+  assert.match(source, /LegacySurfaceRedirect to="\/extensions\/skills"/u);
+  assert.match(source, /LegacySurfaceRedirect to="\/extensions\/mcp"/u);
+  assert.match(source, /to="\/extensions\/skills"/u);
+  assert.match(source, /to="\/extensions\/mcp"/u);
+  assert.doesNotMatch(source, /resourceNav/u);
+});
+
+test("embedded MCP page keeps the user-level add action", async () => {
+  const source = await rendererSource("App.tsx");
+  const capabilityPage = source.slice(
+    source.indexOf("export function CapabilityPage"),
+    source.indexOf("function UsagePage"),
+  );
+  assert.match(capabilityPage, /embedded && kind === "mcp"/u);
+  assert.match(capabilityPage, /添加用户级 MCP/u);
+  assert.match(capabilityPage, /setAddingMcp\(\(visible\) => !visible\)/u);
+});
+
+test("composer exposes all discovery depths and uses the draft as its objective", async () => {
+  const source = await rendererSource("App.tsx");
+  assert.match(source, /name="discovery-depth"/u);
+  assert.match(source, /<option value="quick">快速定位 \(quick\)<\/option>/u);
+  assert.match(source, /<option value="balanced">平衡探索 \(balanced\)<\/option>/u);
+  assert.match(source, /<option value="deep">深入验证 \(deep\)<\/option>/u);
+  assert.match(
+    source,
+    /actions\s+\.startDiscovery\(\{[\s\S]{0,220}objective: draft,[\s\S]{0,80}depth,/u,
+  );
+});
+
+test("changes panel describes completed-run checkpoints instead of live workspace state", async () => {
+  const source = await rendererSource("App.tsx");
+  assert.match(source, /运行结束后，这里会显示固化的变更检查点/u);
+  assert.match(source, /仅展示已结束运行固化的变更/u);
+  assert.doesNotMatch(source, /<strong>\{active \? "等待文件变更" : "工作区是干净的"\}<\/strong>/u);
+  assert.doesNotMatch(source, /Pico 的写入会实时出现在这里/u);
 });
 
 test("启动只加载用户级能力，显式选择项目后才读取有效列表", async () => {
