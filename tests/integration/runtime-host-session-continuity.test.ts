@@ -97,6 +97,10 @@ class DeferredSource implements SessionContinuityDataSource {
     }
     return { after: params.after, through: params.through, changes: [] };
   }
+
+  async readTranscriptWatermark() {
+    return watermark;
+  }
 }
 
 test("session open flushes its snapshot response before activating queued live frames", async (t) => {

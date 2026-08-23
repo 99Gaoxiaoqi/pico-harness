@@ -36,6 +36,7 @@ const MAX_PAGE_LIMIT = 250;
 const MAX_PAGE_BYTES = 768 * 1024;
 
 interface ProjectionStore {
+  readTranscriptWatermark(sessionId: string): Promise<RuntimeTranscriptProjectionWatermark>;
   readTranscriptProjectionPage(
     options: RuntimeTranscriptProjectionPageOptions,
   ): Promise<RuntimeTranscriptProjectionPage>;
@@ -149,6 +150,19 @@ export class SqliteSessionContinuitySource implements SessionContinuityDataSourc
         ),
         ...(page.nextCursor ? { nextCursor: advanceCursor(page.nextCursor) } : {}),
       };
+    } finally {
+      store.close();
+    }
+  }
+
+  async readTranscriptWatermark(
+    workspacePath: string,
+    sessionId: string,
+  ): Promise<RuntimeTranscriptWatermark> {
+    const canonical = await canonicalizeWorkspacePath(workspacePath);
+    const store = this.openStore(canonical);
+    try {
+      return watermark(await store.readTranscriptWatermark(sessionId));
     } finally {
       store.close();
     }

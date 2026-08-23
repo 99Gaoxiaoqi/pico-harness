@@ -599,6 +599,8 @@ export function createProductionRuntimeServices(
     credentialVault,
     pluginRuntimeSnapshotRegistry,
     ownsPluginRuntimeSnapshotRegistry,
+    onTranscriptAdvanced: (workspacePath, sessionId) =>
+      sessionSubscriptions?.publishTranscriptAdvanced(workspacePath, sessionId),
     planControl: {
       respond: async (input) => {
         const workspacePath = await canonicalizeWorkspacePath(input.workspacePath);

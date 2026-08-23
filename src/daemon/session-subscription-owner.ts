@@ -38,6 +38,10 @@ export interface SessionContinuityDataSource {
   readTranscriptAdvance(
     params: RuntimeParams<"session.transcript.advance">,
   ): Promise<TranscriptAdvanceResult>;
+  readTranscriptWatermark(
+    workspacePath: string,
+    sessionId: string,
+  ): Promise<RuntimeTranscriptWatermark>;
 }
 
 export interface SessionSubscriptionConnection {
@@ -93,6 +97,7 @@ class SessionSubscriptionOwner {
   readonly #toolCallIds = new Map<string, string>();
   #lane: Promise<void> = Promise.resolve();
   #watermarkThroughSequence = 0;
+  #publishedWatermark: RuntimeTranscriptWatermark | undefined;
 
   constructor(
     readonly workspacePath: string,
@@ -124,6 +129,7 @@ class SessionSubscriptionOwner {
       this.#watermarkThroughSequence,
       options.snapshot.watermark.throughSequence,
     );
+    this.#publishedWatermark = options.snapshot.watermark;
     const activeOverlay = mergeOverlayEntries(
       options.snapshot.activeOverlay,
       [...this.#streams.values()].map(projectOverlayEntry),
@@ -266,6 +272,21 @@ class SessionSubscriptionOwner {
 
   continuityDegraded(reason: "partial_persistence_failed" | "recovery_failed"): void {
     this.#publish({ type: "subscription.continuity_degraded", reason });
+  }
+
+  transcriptAdvanced(watermark: RuntimeTranscriptWatermark): void {
+    const prior = this.#publishedWatermark;
+    if (
+      prior &&
+      prior.historyEpoch === watermark.historyEpoch &&
+      prior.projectorVersion === watermark.projectorVersion &&
+      watermark.throughSequence <= prior.throughSequence
+    ) {
+      return;
+    }
+    this.#publishedWatermark = watermark;
+    this.#watermarkThroughSequence = watermark.throughSequence;
+    this.#publish({ type: "subscription.transcript_advanced", watermark });
   }
 
   acceptDelta(input: Omit<SessionLiveDeltaInput, "workspacePath" | "sessionId">): void {
@@ -604,6 +625,15 @@ export class SessionSubscriptionRegistry {
   ): void {
     const owner = this.#owner(workspacePath, sessionId);
     void owner.run(() => owner.continuityDegraded(reason));
+  }
+
+  publishTranscriptAdvanced(workspacePath: string, sessionId: string): void {
+    if (this.#closed) return;
+    const owner = this.#owner(workspacePath, sessionId);
+    void owner.run(async () => {
+      const watermark = await this.dataSource.readTranscriptWatermark(workspacePath, sessionId);
+      owner.transcriptAdvanced(watermark);
+    });
   }
 
   releaseConnection(connectionId: string): void {

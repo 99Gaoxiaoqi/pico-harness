@@ -59,6 +59,10 @@ class FakeSource implements SessionContinuityDataSource {
     this.advanceCalls.push(params);
     return { after: params.after, through: params.through, changes: [] };
   }
+
+  async readTranscriptWatermark() {
+    return snapshot().watermark;
+  }
 }
 
 test("session subscription stays paused until activation and begins at advertised sequence", async () => {
