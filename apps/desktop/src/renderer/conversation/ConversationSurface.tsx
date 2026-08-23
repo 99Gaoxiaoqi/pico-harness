@@ -38,6 +38,8 @@ export function ConversationSurface({
       className={`conversation-surface ${className}`.trim()}
       data-inspector-open={Boolean(inspector) || undefined}
       data-inspector-mode={inspector ? inspectorMode : undefined}
+      data-has-composer={Boolean(composer) || undefined}
+      data-has-header={Boolean(header) || undefined}
       aria-label="Pico 会话"
     >
       <div className="conversation-surface__main">

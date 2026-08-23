@@ -35,6 +35,36 @@ export interface ConversationTranscriptProps {
     | undefined;
 }
 
+interface ConversationTurnView {
+  readonly key: string;
+  readonly items: readonly ConversationItemView[];
+}
+
+/**
+ * The transport still exposes a mixed transcript stream. A user message is the one stable
+ * boundary shared by persisted and live projections, so the renderer keeps everything until
+ * the next user message in the same visual turn without inventing event identities.
+ */
+export function groupConversationItemsIntoTurns(
+  items: readonly ConversationItemView[],
+): readonly ConversationTurnView[] {
+  const turns: { key: string; items: ConversationItemView[] }[] = [];
+  for (const item of items) {
+    if (item.kind === "userMessage" || turns.length === 0) {
+      turns.push({
+        key:
+          item.kind === "userMessage"
+            ? `turn:${conversationItemKey(item)}`
+            : `context:${conversationItemKey(item)}`,
+        items: [item],
+      });
+      continue;
+    }
+    turns.at(-1)?.items.push(item);
+  }
+  return turns;
+}
+
 const stateLabels: Readonly<Record<ConversationProgressState, string>> = {
   waiting: "等待中",
   active: "进行中",
@@ -126,7 +156,7 @@ function renderDefaultItem(
       );
     case "skill":
       return (
-        <section className="conversation-inline-card conversation-inline-card--skill">
+        <section className="conversation-inline-card conversation-inline-card--skill conversation-execution-record">
           <header className="conversation-inline-card__header">
             <WandSparkles aria-hidden="true" />
             <div>
@@ -144,10 +174,16 @@ function renderDefaultItem(
       return <RunBoundary item={item} />;
     case "plan":
       return (
-        <section className="conversation-inline-card" aria-label={item.title ?? "执行计划"}>
+        <section
+          className="conversation-inline-card conversation-execution-record"
+          aria-label={item.title ?? "执行计划"}
+        >
           <header className="conversation-inline-card__header">
             <ListChecks aria-hidden="true" />
-            <strong>{item.title ?? "执行计划"}</strong>
+            <div>
+              <span className="conversation-kicker">Plan</span>
+              <strong>{item.title ?? "执行计划"}</strong>
+            </div>
           </header>
           <ol className="conversation-plan">
             {item.steps.map((step) => (
@@ -162,7 +198,10 @@ function renderDefaultItem(
       );
     case "discovery":
       return (
-        <section className="conversation-inline-card" data-state={item.status}>
+        <section
+          className="conversation-inline-card conversation-execution-record"
+          data-state={item.status}
+        >
           <header className="conversation-inline-card__header">
             <SearchCode aria-hidden="true" />
             <div>
@@ -173,17 +212,20 @@ function renderDefaultItem(
             </div>
             <span className="conversation-item-state">{item.status}</span>
           </header>
-          <p>
+          <p className="conversation-execution-meta">
             {item.inspectedFiles} 个文件 · {item.evidenceCount} 条证据 · {item.openQuestions}{" "}
             个待确认问题
           </p>
-          {item.reason && <p>{item.reason}</p>}
+          {item.reason && <p className="conversation-execution-detail">{item.reason}</p>}
           {onOpenItem && <DetailButton label="探索控制" onClick={() => onOpenItem(item)} />}
         </section>
       );
     case "tool":
       return (
-        <section className="conversation-inline-card" data-state={item.state}>
+        <section
+          className="conversation-inline-card conversation-execution-record"
+          data-state={item.state}
+        >
           <header className="conversation-inline-card__header">
             <TerminalSquare aria-hidden="true" />
             <div>
@@ -195,20 +237,20 @@ function renderDefaultItem(
             </span>
           </header>
           {item.result && (
-            <p>
+            <p className="conversation-execution-meta">
               {item.result.rawSizeBytes} bytes · {item.result.status} ·
               <code>{item.result.sha256.slice(0, 12)}</code>
               {item.result.evidence ? " · Evidence" : ""}
             </p>
           )}
-          {item.detail && <p>{item.detail}</p>}
+          {item.detail && <p className="conversation-execution-detail">{item.detail}</p>}
           {item.output && <pre className="conversation-tool-output">{item.output}</pre>}
           {onOpenItem && <DetailButton label="查看工具详情" onClick={() => onOpenItem(item)} />}
         </section>
       );
     case "subagent":
       return (
-        <section className="conversation-inline-card conversation-inline-card--agent">
+        <section className="conversation-inline-card conversation-inline-card--agent conversation-execution-record">
           <header className="conversation-inline-card__header">
             <Bot aria-hidden="true" />
             <div>
@@ -219,7 +261,7 @@ function renderDefaultItem(
               <StateIcon state={item.state} /> {stateLabels[item.state]}
             </span>
           </header>
-          {item.detail && <p>{item.detail}</p>}
+          {item.detail && <p className="conversation-execution-detail">{item.detail}</p>}
           {onOpenItem && (
             <DetailButton label={`查看 ${item.name} 的会话`} onClick={() => onOpenItem(item)} />
           )}
@@ -239,7 +281,10 @@ function renderDefaultItem(
     }
     case "approval":
       return (
-        <section className="conversation-inline-card" data-state={item.state}>
+        <section
+          className="conversation-inline-card conversation-execution-record"
+          data-state={item.state}
+        >
           <header className="conversation-inline-card__header">
             <ShieldQuestion aria-hidden="true" />
             <strong>{item.title}</strong>
@@ -251,7 +296,7 @@ function renderDefaultItem(
                   : "已拒绝"}
             </span>
           </header>
-          <p>{item.detail}</p>
+          <p className="conversation-execution-detail">{item.detail}</p>
           {onOpenItem && item.state === "pending" && (
             <DetailButton label="处理审批" onClick={() => onOpenItem(item)} />
           )}
@@ -259,7 +304,10 @@ function renderDefaultItem(
       );
     case "prompt":
       return (
-        <section className="conversation-inline-card" data-state={item.state}>
+        <section
+          className="conversation-inline-card conversation-execution-record"
+          data-state={item.state}
+        >
           <header className="conversation-inline-card__header">
             <ShieldQuestion aria-hidden="true" />
             <strong>{item.question}</strong>
@@ -267,7 +315,7 @@ function renderDefaultItem(
               {item.state === "pending" ? "等待回答" : "已回答"}
             </span>
           </header>
-          {item.detail && <p>{item.detail}</p>}
+          {item.detail && <p className="conversation-execution-detail">{item.detail}</p>}
           {onOpenItem && item.state === "pending" && (
             <DetailButton label="回答问题" onClick={() => onOpenItem(item)} />
           )}
@@ -275,13 +323,16 @@ function renderDefaultItem(
       );
     case "changes":
       return (
-        <section className="conversation-inline-card" data-state={item.state}>
+        <section
+          className="conversation-inline-card conversation-execution-record"
+          data-state={item.state}
+        >
           <header className="conversation-inline-card__header">
             <FileDiff aria-hidden="true" />
             <strong>{item.title}</strong>
             <span className="conversation-item-state">{item.files.length} 个文件</span>
           </header>
-          {item.detail && <p>{item.detail}</p>}
+          {item.detail && <p className="conversation-execution-detail">{item.detail}</p>}
           <ul className="conversation-file-list" aria-label="更改的文件">
             {item.files.slice(0, 3).map((file) => (
               <li key={file}>{file}</li>
@@ -293,7 +344,7 @@ function renderDefaultItem(
     case "goal":
       return (
         <section
-          className="conversation-inline-card conversation-inline-card--goal"
+          className="conversation-inline-card conversation-inline-card--goal conversation-execution-record"
           data-state={item.state}
         >
           <header className="conversation-inline-card__header">
@@ -301,7 +352,7 @@ function renderDefaultItem(
             <strong>{item.title}</strong>
             <span className="conversation-item-state">{stateLabels[item.state]}</span>
           </header>
-          {item.detail && <p>{item.detail}</p>}
+          {item.detail && <p className="conversation-execution-detail">{item.detail}</p>}
           {onOpenItem && <DetailButton label="查看目标" onClick={() => onOpenItem(item)} />}
         </section>
       );
@@ -321,6 +372,7 @@ export function ConversationTranscript({
       (item.kind !== "runBoundary" || item.status !== "started") &&
       ((item.kind !== "thinking" && item.kind !== "assistantMessage") || item.cleared !== true),
   );
+  const turns = groupConversationItemsIntoTurns(visibleItems);
 
   if (visibleItems.length === 0) {
     return (
@@ -346,24 +398,33 @@ export function ConversationTranscript({
       aria-live="polite"
       aria-relevant="additions text"
     >
-      {visibleItems.map((item) => {
-        const fallback = renderDefaultItem(item, renderText, onOpenItem);
-        return (
-          <li
-            className="conversation-transcript__item"
-            data-kind={item.kind}
-            key={conversationItemKey(item)}
-          >
-            {renderItem ? renderItem(item, fallback) : fallback}
-            {item.truncated && (
-              <p className="conversation-truncated-notice" role="note">
-                这条记录超过桌面传输上限，已安全截断
-                {item.originalBytes ? `（原始 ${item.originalBytes.toLocaleString()} 字节）` : ""}。
-              </p>
-            )}
-          </li>
-        );
-      })}
+      {turns.map((turn) => (
+        <li className="conversation-turn" key={turn.key}>
+          <ol className="conversation-turn__items">
+            {turn.items.map((item) => {
+              const fallback = renderDefaultItem(item, renderText, onOpenItem);
+              return (
+                <li
+                  className="conversation-transcript__item"
+                  data-kind={item.kind}
+                  key={conversationItemKey(item)}
+                >
+                  {renderItem ? renderItem(item, fallback) : fallback}
+                  {item.truncated && (
+                    <p className="conversation-truncated-notice" role="note">
+                      这条记录超过桌面传输上限，已安全截断
+                      {item.originalBytes
+                        ? `（原始 ${item.originalBytes.toLocaleString()} 字节）`
+                        : ""}
+                      。
+                    </p>
+                  )}
+                </li>
+              );
+            })}
+          </ol>
+        </li>
+      ))}
     </ol>
   );
 }

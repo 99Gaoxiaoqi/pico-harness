@@ -895,12 +895,22 @@ function parseProviderProfile(value: JsonRecord, index: number): ProviderView {
   };
 }
 
-function parseUserDefaults(value: unknown): UserDefaultsView {
+export function parseUserDefaults(value: unknown): UserDefaultsView {
   const defaults = isRecord(value) ? value : {};
+  const collaborationMode = defaults.collaborationMode;
+  const orchestrationMode = defaults.orchestrationMode;
+  const permissionMode = defaults.permissionMode;
   const mode = defaults.mode;
   return {
     ...(stringValue(defaults.modelRouteId)
       ? { modelRouteId: stringValue(defaults.modelRouteId) }
+      : {}),
+    ...(collaborationMode === "agent" || collaborationMode === "plan" ? { collaborationMode } : {}),
+    ...(orchestrationMode === "default" || orchestrationMode === "graph"
+      ? { orchestrationMode }
+      : {}),
+    ...(permissionMode === "default" || permissionMode === "auto" || permissionMode === "yolo"
+      ? { permissionMode }
       : {}),
     ...(mode === "default" || mode === "plan" || mode === "auto" || mode === "yolo"
       ? { mode }
@@ -1336,6 +1346,7 @@ export interface RuntimeActions {
     readonly workspacePath: string;
     readonly sessionId?: string;
     readonly text: string;
+    readonly initialSettings?: RuntimeUserDefaults;
     readonly behavior?: ComposerBehavior;
     readonly expectedRunId?: string;
     readonly activation?:
@@ -2751,6 +2762,7 @@ export function useRuntimeStore(): RuntimeStore {
           workspacePath,
           sessionId: input.sessionId,
           text: input.text.trim(),
+          initialSettings: input.initialSettings,
           behavior: input.behavior ?? "auto",
           expectedRunId: input.expectedRunId,
           activation: input.activation,
@@ -2803,6 +2815,7 @@ export function useRuntimeStore(): RuntimeStore {
                 : input.activation?.kind === "agent"
                   ? { kind: "agent", name: input.activation.name, task: input.text.trim() }
                   : { kind: "text", text: input.text.trim() },
+            ...(input.initialSettings ? { initialSettings: input.initialSettings } : {}),
             behavior: input.behavior ?? "auto",
             ...(input.expectedRunId ? { expectedRunId: input.expectedRunId } : {}),
             idempotencyKey,
