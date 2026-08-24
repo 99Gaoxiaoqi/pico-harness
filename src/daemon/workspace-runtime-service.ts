@@ -44,6 +44,7 @@ import {
   WorkspaceRuntimeRegistry,
 } from "./workspace-registry.js";
 import { WorkspaceRegistrationStore } from "./workspace-registration.js";
+import { runWorkspaceBlobGcOnce } from "../storage/workspace-blob-gc.js";
 
 export interface DaemonRunExecutor {
   (input: {
@@ -92,6 +93,7 @@ export interface WorkspaceRuntimeServiceOptions {
   createWorkspaceRuntime?: (workspacePath: string) => Promise<WorkspaceTaskRuntime>;
   now?: () => number;
   registrationStore?: WorkspaceRegistrationStore;
+  runBlobGc?: (input: { readonly workDir: string; readonly picoHome: string }) => Promise<unknown>;
 }
 
 const DEFAULT_REPLAY_EVENT_LIMIT = 1_000;
@@ -120,6 +122,8 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
   private closePromise?: Promise<void>;
   private resourceClosePending = false;
   private resourceClosePromise: Promise<void> = Promise.resolve();
+  private readonly blobGcTails = new Map<string, Promise<void>>();
+  private readonly blobGcRerunRequested = new Set<string>();
 
   constructor(private readonly options: WorkspaceRuntimeServiceOptions) {
     this.picoHome = resolvePicoHome({ env: options.env });
@@ -151,6 +155,7 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
               }),
               event.run ? daemonRunRecord(event.run) : undefined,
             );
+            this.scheduleBlobGc(workspacePath);
           }),
         );
         return runtime;
@@ -544,6 +549,7 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
     // subscriptions and durable ledgers alive until those events have been recorded.
     try {
       await this.closeRuntimes();
+      await Promise.allSettled(this.blobGcTails.values());
     } finally {
       this.lifecycleState = "closed";
       const runtimeOwnershipPending = this.registry.hasPendingOwnership();
@@ -636,7 +642,9 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
       throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "Workspace Runtime 正在关闭");
     }
     try {
-      return await this.registry.get(workspacePath);
+      const runtime = await this.registry.get(workspacePath);
+      this.scheduleBlobGc(runtime.workspace);
+      return runtime;
     } catch (error) {
       if (this.lifecycleState !== "open") {
         throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "Workspace Runtime 正在关闭");
@@ -647,6 +655,29 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
       }
       throw error;
     }
+  }
+
+  private scheduleBlobGc(workspacePath: string): void {
+    if (this.lifecycleState !== "open") return;
+    if (this.blobGcTails.has(workspacePath)) {
+      this.blobGcRerunRequested.add(workspacePath);
+      return;
+    }
+    const runBlobGc = this.options.runBlobGc ?? runWorkspaceBlobGcOnce;
+    const tail = (async () => {
+      do {
+        this.blobGcRerunRequested.delete(workspacePath);
+        await runBlobGc({ workDir: workspacePath, picoHome: this.picoHome });
+      } while (this.lifecycleState === "open" && this.blobGcRerunRequested.has(workspacePath));
+    })()
+      .catch((error) => {
+        logger.warn({ error, workspacePath }, "Workspace Blob GC maintenance failed");
+      })
+      .finally(() => {
+        this.blobGcRerunRequested.delete(workspacePath);
+        if (this.blobGcTails.get(workspacePath) === tail) this.blobGcTails.delete(workspacePath);
+      });
+    this.blobGcTails.set(workspacePath, tail);
   }
 
   private eventStore(workspacePath: string): SqliteRuntimeControlStore {
