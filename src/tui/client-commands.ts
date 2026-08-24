@@ -18,9 +18,9 @@ import { snapshotSummariesFromRewindList } from "./rewind-client-bridge.js";
 import { formatRewindSelector } from "../input/rewind-presentation.js";
 import { resolveAutomationCredentialTarget } from "../provider/automation-credential.js";
 import { resolveModelRouteCapabilities } from "../provider/model-capabilities.js";
-import { filterBackgroundEligibleTools } from "../safety/background-yolo-policy.js";
+import { AUTOMATION_TOOL_ALLOWLIST } from "../safety/automation-tool-policy.js";
 import { normalizeExactHostname } from "../safety/background-yolo-policy-schema.js";
-import { getSupportedToolNames } from "../tools/tool-surface.js";
+import { AutomationCredentialImportProposalStore } from "./automation-credential-proposal.js";
 
 /**
  * TUI 客户端斜杠命令注册表（3-D Phase 3 tier1，31 命令）。
@@ -39,6 +39,9 @@ import { getSupportedToolNames } from "../tools/tool-surface.js";
 export interface ClientCommandRegistryDeps {
   readonly runtime: ClientSessionRuntime;
   readonly workspacePath: string;
+  /** One in-memory confirmation scope per command session; injectable for deterministic tests. */
+  readonly automationCredentialProposals?: AutomationCredentialImportProposalStore;
+  readonly credentialEnv?: Readonly<Record<string, string | undefined>>;
 }
 
 export interface ClientInputOutcome {
@@ -49,6 +52,9 @@ export interface ClientInputOutcome {
 
 export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): CommandRegistry {
   const { runtime, workspacePath } = deps;
+  const automationCredentialProposals =
+    deps.automationCredentialProposals ?? new AutomationCredentialImportProposalStore();
+  const credentialEnv = deps.credentialEnv ?? process.env;
   const session = (): string | undefined => runtime.activeSessionId;
   const needSession = (): string | LocalCommandResult => {
     const id = session();
@@ -1439,18 +1445,24 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
             );
           }
           if (operation === "credential") {
-            const [action = "status", routeOrConfirmation, trailingConfirmation, ...extra] = args;
-            const routeArgument =
-              routeOrConfirmation === "--confirm" ? undefined : routeOrConfirmation;
-            const confirmation =
-              routeOrConfirmation === "--confirm" ? routeOrConfirmation : trailingConfirmation;
+            const [action = "status", ...credentialArgs] = args;
+            if (action !== "status" && action !== "import") return msg(clientCronCredentialUsage());
             if (
-              extra.length > 0 ||
-              !["status", "import"].includes(action) ||
-              (confirmation !== undefined && confirmation !== "--confirm") ||
-              (action === "status" && confirmation !== undefined)
+              action === "status" &&
+              (credentialArgs.length > 1 || credentialArgs[0] === "--confirm")
             ) {
-              return msg("Usage: /cron credential <status|import> [provider/model] [--confirm]");
+              return msg(clientCronCredentialUsage());
+            }
+            const routeArgument = credentialArgs[0] === "--confirm" ? undefined : credentialArgs[0];
+            const confirmIndex = credentialArgs[0] === "--confirm" ? 0 : 1;
+            const hasConfirm = credentialArgs[confirmIndex] === "--confirm";
+            const proposalId = hasConfirm ? credentialArgs[confirmIndex + 1] : undefined;
+            const expectedLength = hasConfirm ? confirmIndex + 2 : routeArgument ? 1 : 0;
+            if (action === "import" && credentialArgs.length !== expectedLength) {
+              if (hasConfirm && !proposalId) {
+                return msg("禁止裸 --confirm；请先执行预览并携带返回的 proposalId。");
+              }
+              return msg(clientCronCredentialUsage());
             }
             const authority = await resolveClientAutomationAuthority({
               runtime,
@@ -1463,18 +1475,31 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
                 `${authority.route.id}: Provider 凭据状态 ${authority.provider.credentialStatus}（source=${authority.provider.credentialSource}）。Automation 创建时 daemon 会按精确 credentialRef 复核系统凭据库。`,
               );
             }
-            const secret = firstCredentialSecret(process.env[authority.route.apiKeyEnv]);
+            const secret = firstCredentialSecret(credentialEnv[authority.route.apiKeyEnv]);
             if (!secret) {
               return msg(`缺少凭据环境变量 ${authority.route.apiKeyEnv}，无法导入。`);
             }
-            if (confirmation !== "--confirm") {
+            const binding = clientAutomationCredentialProposalBinding(authority, secret);
+            if (!hasConfirm) {
+              const proposal = automationCredentialProposals.issue(binding);
               return msg(
                 [
                   `将为模型路由 ${authority.route.id} 导入当前进程的 ${authority.route.apiKeyEnv}。`,
                   "凭据将由 daemon 写入系统凭据库，值不会回显或进入命令参数。",
-                  `确认执行：/cron credential import ${authority.route.id} --confirm`,
+                  `proposalId: ${proposal.proposalId}（5 分钟内、仅可使用一次）`,
+                  `确认执行：/cron credential import ${authority.route.id} --confirm ${proposal.proposalId}`,
                 ].join("\n"),
               );
+            }
+            const confirmation = automationCredentialProposals.consume(proposalId!, binding);
+            if (confirmation.status === "missing") {
+              return msg("credential proposal 不存在、已使用或不属于当前命令会话；请重新预览。");
+            }
+            if (confirmation.status === "expired") {
+              return msg("credential proposal 已过期并作废；请重新预览。");
+            }
+            if (confirmation.status === "changed") {
+              return msg("预览后模型路由、Provider 配置或环境凭据已变化；proposal 已作废。");
             }
             secretToRedact = secret;
             await runtime.request("automation.credential.import", {
@@ -1522,7 +1547,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
               schedule: [minute, hour, day, month, weekday].join(" "),
               modelRouteId: authority.route.id,
               expectedCredentialRef: authority.target.ref,
-              allowedTools: filterBackgroundEligibleTools([...getSupportedToolNames("background")]),
+              allowedTools: [...AUTOMATION_TOOL_ALLOWLIST],
               toolNetworkPolicy: toolNetwork.policy,
               ...(toolNetwork.allowedHosts
                 ? { allowedToolNetworkHosts: toolNetwork.allowedHosts }
@@ -1834,6 +1859,27 @@ type ClientAutomationAuthority = {
   readonly provider: RuntimeEffectiveConfig["providers"][number];
   readonly target: ReturnType<typeof resolveAutomationCredentialTarget>;
 };
+
+function clientAutomationCredentialProposalBinding(
+  authority: ClientAutomationAuthority,
+  secret: string,
+) {
+  return {
+    routeId: authority.route.id,
+    providerId: authority.route.providerId,
+    credentialRef: authority.target.ref,
+    providerProtocol: authority.route.provider,
+    model: authority.route.model,
+    baseURL: authority.route.baseURL,
+    apiKeyEnv: authority.route.apiKeyEnv,
+    providerConfigFingerprint: authority.provider.fingerprint,
+    secret,
+  };
+}
+
+function clientCronCredentialUsage(): string {
+  return "Usage: /cron credential <status|import> [provider/model] [--confirm <proposalId>]";
+}
 
 async function resolveClientAutomationAuthority(input: {
   readonly runtime: ClientSessionRuntime;

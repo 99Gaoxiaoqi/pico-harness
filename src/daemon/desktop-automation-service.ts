@@ -9,10 +9,10 @@ import {
 import { resolveModelRouteCapabilities } from "../provider/model-capabilities.js";
 import type { ModelRoute } from "../provider/model-router.js";
 import { fingerprintBackgroundMcpConfig } from "../safety/background-mcp-policy.js";
+import { automationDeniedTools } from "../safety/automation-tool-policy.js";
 import {
   BACKGROUND_HARDLINE_VERSION,
   BACKGROUND_HOOK_VERSION,
-  filterBackgroundEligibleTools,
 } from "../safety/background-yolo-policy.js";
 import { CronService } from "../tasks/cron-service.js";
 import { RuntimeConflictError } from "../storage/sqlite/sqlite-runtime-control-store.js";
@@ -351,11 +351,11 @@ export async function createTrustedDesktopAutomation(
       `Automation 不支持前台 Plugin 工具: ${foregroundOnlyTools.join(", ")}`,
     );
   }
-  const eligibleTools = filterBackgroundEligibleTools(requestedTools);
-  if (!sameStringValues(requestedTools, eligibleTools)) {
+  const deniedTools = automationDeniedTools(requestedTools);
+  if (deniedTools.length > 0) {
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.FORBIDDEN,
-      "Automation 包含不允许在后台运行的交互式工具",
+      `Automation 包含未显式授权的工具: ${deniedTools.join(", ")}`,
     );
   }
   const target = await resolveDesktopAutomationTarget(
@@ -577,13 +577,6 @@ function requireSecret(value: string): string {
 
 function uniqueNonEmptyStrings(values: readonly string[], label: string): string[] {
   return [...new Set(values.map((value) => requiredText(value, label)))];
-}
-
-function sameStringValues(left: readonly string[], right: readonly string[]): boolean {
-  if (left.length !== right.length) return false;
-  const normalizedLeft = [...left].sort();
-  const normalizedRight = [...right].sort();
-  return normalizedLeft.every((value, index) => value === normalizedRight[index]);
 }
 
 function normalizeLimit(limit: number | undefined): number {

@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { LOCAL_RUNTIME_PROTOCOL_VERSION, type RuntimeNotification } from "@pico/protocol";
 import { createPicoCommandRegistry } from "../../src/input/pico-command-registry.js";
+import { AUTOMATION_TOOL_ALLOWLIST } from "../../src/safety/automation-tool-policy.js";
+import { AutomationCredentialImportProposalStore } from "../../src/tui/automation-credential-proposal.js";
 import { createClientCommandRegistry, processClientInput } from "../../src/tui/client-commands.js";
 import {
   ClientSessionRuntime,
@@ -24,17 +26,21 @@ interface Harness {
   emit(notification: RuntimeNotification): void;
   setSessions(sessions: unknown[]): void;
   setTranscriptItems(items: unknown[]): void;
+  setProviderApiKeyEnv(name: string): void;
 }
 
 function createHarness(options?: {
   readonly sessionId?: string;
   readonly permissionMode?: "default" | "auto" | "yolo";
   readonly echoAutomationCredentialError?: boolean;
+  readonly credentialEnv?: Readonly<Record<string, string | undefined>>;
+  readonly automationCredentialProposals?: AutomationCredentialImportProposalStore;
 }): Harness {
   const requests: { method: string; params: Record<string, unknown> }[] = [];
   let listener: ((notification: RuntimeNotification) => void) | undefined;
   let transcriptItems: unknown[] = [];
   let sessions: unknown[] = [];
+  let providerApiKeyEnv = "K";
   const sessionRecord = (sessionId: string) => ({
     sessionId,
     workspacePath: "C:\\ws",
@@ -301,7 +307,7 @@ function createHarness(options?: {
                   id: "p1",
                   protocol: "openai",
                   baseURL: "http://x",
-                  apiKeyEnv: "K",
+                  apiKeyEnv: providerApiKeyEnv,
                   models: ["m1", "m2"],
                   discoverModels: false,
                   origin: "user",
@@ -401,7 +407,7 @@ function createHarness(options?: {
                   id: "p1",
                   protocol: "openai",
                   baseURL: "http://x",
-                  apiKeyEnv: "K",
+                  apiKeyEnv: providerApiKeyEnv,
                   models: ["m1"],
                   discoverModels: false,
                 },
@@ -612,7 +618,14 @@ function createHarness(options?: {
   });
   return {
     runtime,
-    registry: createClientCommandRegistry({ runtime, workspacePath: "C:\\ws" }),
+    registry: createClientCommandRegistry({
+      runtime,
+      workspacePath: "C:\\ws",
+      ...(options?.credentialEnv ? { credentialEnv: options.credentialEnv } : {}),
+      ...(options?.automationCredentialProposals
+        ? { automationCredentialProposals: options.automationCredentialProposals }
+        : {}),
+    }),
     requests,
     emit: (event) => listener?.(event),
     setSessions: (value) => {
@@ -620,6 +633,9 @@ function createHarness(options?: {
     },
     setTranscriptItems: (items) => {
       transcriptItems = items;
+    },
+    setProviderApiKeyEnv: (name) => {
+      providerApiKeyEnv = name;
     },
   };
 }
@@ -655,6 +671,12 @@ async function run(
   message?: string;
 }> {
   return processClientInput(input, harness.registry, harness.runtime);
+}
+
+function credentialProposalId(message: unknown): string {
+  const proposalId = /proposalId: ([A-Za-z0-9_-]+)/u.exec(String(message))?.[1];
+  assert.ok(proposalId, "credential preview 必须返回 proposalId");
+  return proposalId;
 }
 
 test("client commands: settings-class commands map to session.settings.update", async () => {
@@ -1101,13 +1123,14 @@ test("client commands: tier2 mirrors map memory/provider/cron to RPCs", async (t
   const preview = await run("/cron credential import p1/m1");
   assert.match(String(preview.result?.message), /--confirm/);
   assert.equal(String(preview.result?.message).includes(secret), false, "预览不回显 secret");
+  const proposalId = credentialProposalId(preview.result?.message);
   assert.equal(
     harness.requests.some((entry) => entry.method === "automation.credential.import"),
     false,
     "未确认不写入凭据",
   );
   harness.requests.length = 0;
-  const imported = await run("/cron credential import p1/m1 --confirm");
+  const imported = await run(`/cron credential import p1/m1 --confirm ${proposalId}`);
   assert.match(String(imported.result?.message), /已导入/);
   assert.equal(String(imported.result?.message).includes(secret), false, "成功回执不回显 secret");
   const importRequest = harness.requests.at(-1);
@@ -1134,6 +1157,7 @@ test("client commands: tier2 mirrors map memory/provider/cron to RPCs", async (t
     "files.example.com",
   ]);
   assert.ok(Array.isArray(createRequest?.params.allowedTools));
+  assert.deepEqual(createRequest?.params.allowedTools, AUTOMATION_TOOL_ALLOWLIST);
   assert.equal(
     (createRequest?.params.allowedTools as string[]).includes("ask_user"),
     false,
@@ -1170,14 +1194,113 @@ test("client commands: tier2 mirrors map memory/provider/cron to RPCs", async (t
     permissionMode: "yolo",
     echoAutomationCredentialError: true,
   });
+  const failingPreview = await processClientInput(
+    "/cron credential import p1/m1",
+    failingHarness.registry,
+    failingHarness.runtime,
+  );
+  const failingProposalId = credentialProposalId(failingPreview.result?.message);
   const failed = await processClientInput(
-    "/cron credential import p1/m1 --confirm",
+    `/cron credential import p1/m1 --confirm ${failingProposalId}`,
     failingHarness.registry,
     failingHarness.runtime,
   );
   assert.equal(failed.kind, "local");
   assert.match(String(failed.result?.message), /<redacted>/);
   assert.equal(String(failed.result?.message).includes(secret), false, "错误回执不泄露 secret");
+  const failedReplay = await processClientInput(
+    `/cron credential import p1/m1 --confirm ${failingProposalId}`,
+    failingHarness.registry,
+    failingHarness.runtime,
+  );
+  assert.match(String(failedReplay.result?.message), /不存在、已使用/u);
+  assert.equal(
+    failingHarness.requests.filter((request) => request.method === "automation.credential.import")
+      .length,
+    1,
+    "已派发但失败的 proposal 也必须消费，避免不确定结果重放",
+  );
+});
+
+test("client cron credential proposals bind preview state, expire, and reject replay", async () => {
+  let now = 1_000;
+  let sequence = 0;
+  const credentialEnv: Record<string, string | undefined> = {
+    K: "credential-v1",
+    K2: "credential-v1",
+  };
+  const proposals = new AutomationCredentialImportProposalStore({
+    now: () => now,
+    createProposalId: () => `proposal_${String(++sequence).padStart(4, "0")}`,
+    ttlMs: 1_000,
+    fingerprintKey: Buffer.alloc(32, 7),
+  });
+  const harness = createHarness({
+    sessionId: "s1",
+    permissionMode: "yolo",
+    credentialEnv,
+    automationCredentialProposals: proposals,
+  });
+  const runCredential = (command: string) =>
+    processClientInput(command, harness.registry, harness.runtime);
+  const credentialWrites = () =>
+    harness.requests.filter((request) => request.method === "automation.credential.import");
+
+  const naked = await runCredential("/cron credential import p1/m1 --confirm");
+  assert.match(String(naked.result?.message), /禁止裸 --confirm/u);
+  assert.equal(credentialWrites().length, 0, "裸确认不得写入凭据");
+  const skippedPreview = await runCredential(
+    "/cron credential import p1/m1 --confirm proposal_unknown",
+  );
+  assert.match(String(skippedPreview.result?.message), /不存在、已使用/u);
+  assert.equal(credentialWrites().length, 0, "伪造 proposalId 不得跳过预览");
+
+  const expiringPreview = await runCredential("/cron credential import p1/m1");
+  const expiringId = credentialProposalId(expiringPreview.result?.message);
+  now += 1_001;
+  const expired = await runCredential(`/cron credential import p1/m1 --confirm ${expiringId}`);
+  assert.match(String(expired.result?.message), /已过期并作废/u);
+  assert.equal(credentialWrites().length, 0);
+
+  const envPreview = await runCredential("/cron credential import p1/m1");
+  const envProposalId = credentialProposalId(envPreview.result?.message);
+  harness.setProviderApiKeyEnv("K2");
+  const envChanged = await runCredential(
+    `/cron credential import p1/m1 --confirm ${envProposalId}`,
+  );
+  assert.match(String(envChanged.result?.message), /Provider 配置或环境凭据已变化/u);
+  assert.equal(credentialWrites().length, 0);
+
+  const routePreview = await runCredential("/cron credential import p1/m1");
+  const routeProposalId = credentialProposalId(routePreview.result?.message);
+  const routeChanged = await runCredential(
+    `/cron credential import p1/m2 --confirm ${routeProposalId}`,
+  );
+  assert.match(String(routeChanged.result?.message), /已变化/u);
+  assert.equal(credentialWrites().length, 0);
+
+  const secretPreview = await runCredential("/cron credential import p1/m1");
+  const secretProposalId = credentialProposalId(secretPreview.result?.message);
+  credentialEnv.K2 = "credential-v2";
+  const secretChanged = await runCredential(
+    `/cron credential import p1/m1 --confirm ${secretProposalId}`,
+  );
+  assert.match(String(secretChanged.result?.message), /已变化/u);
+  assert.equal(String(secretChanged.result?.message).includes("credential-v2"), false);
+  assert.equal(credentialWrites().length, 0);
+
+  const validPreview = await runCredential("/cron credential import p1/m1");
+  const validProposalId = credentialProposalId(validPreview.result?.message);
+  const imported = await runCredential(
+    `/cron credential import p1/m1 --confirm ${validProposalId}`,
+  );
+  assert.match(String(imported.result?.message), /已导入/u);
+  assert.equal(credentialWrites().length, 1);
+  const replayed = await runCredential(
+    `/cron credential import p1/m1 --confirm ${validProposalId}`,
+  );
+  assert.match(String(replayed.result?.message), /不存在、已使用/u);
+  assert.equal(credentialWrites().length, 1, "成功 proposal 不得重放");
 });
 
 test("client commands: /mcp only exposes status/enable/disable and accurate reload guidance", async () => {

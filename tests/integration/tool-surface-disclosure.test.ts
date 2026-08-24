@@ -10,6 +10,11 @@ import { LoadToolsTool, renderGroupCatalog } from "../../src/tools/load-tools.js
 import { SearchToolsTool } from "../../src/tools/search-tools.js";
 import { ToolDisclosure } from "../../src/tools/tool-disclosure.js";
 import {
+  AUTOMATION_TOOL_ALLOWLIST,
+  filterAutomationAllowedTools,
+  isAutomationToolAllowed,
+} from "../../src/safety/automation-tool-policy.js";
+import {
   getAvailableDeferredGroups,
   getSupportedToolNames,
   isPlanModeTool,
@@ -59,6 +64,19 @@ test("background 宿主亲和性收编原 UNSAFE_BACKGROUND_TOOLS 语义", () =>
   for (const name of ["read_file", "bash", "grep", "task_list"]) {
     assert.equal(isToolSupportedForHost(name, "background"), true, name);
   }
+});
+
+test("Automation 工具权限独立 fail-closed，新工具不会随 background surface 自动扩权", () => {
+  for (const name of AUTOMATION_TOOL_ALLOWLIST) {
+    assert.equal(isAutomationToolAllowed(name), true, name);
+    assert.equal(isToolSupportedForHost(name, "background"), true, `${name} 必须仍满足后台硬边界`);
+  }
+  assert.equal(isToolSupportedForHost("hypothetical_new_tool", "background"), true);
+  assert.equal(isAutomationToolAllowed("hypothetical_new_tool"), false);
+  assert.deepEqual(
+    filterAutomationAllowedTools(["hypothetical_new_tool", "read_file", "read_file"]),
+    ["read_file"],
+  );
 });
 
 test("组目录互斥：无工具重复声明", () => {
