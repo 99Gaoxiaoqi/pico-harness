@@ -130,6 +130,7 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
   private resourceClosePromise: Promise<void> = Promise.resolve();
   private readonly blobGcTails = new Map<string, Promise<void>>();
   private readonly blobGcRerunRequested = new Set<string>();
+  private readonly blobGcGenerations = new Map<string, number>();
   private readonly blobGcTimers = new Map<
     string,
     { readonly wakeAt: number; readonly timer: NodeJS.Timeout }
@@ -591,6 +592,7 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
   }
 
   private async releaseWorkspaceResources(workspacePath: string): Promise<void> {
+    this.blobGcGenerations.set(workspacePath, (this.blobGcGenerations.get(workspacePath) ?? 0) + 1);
     this.clearBlobGcTimer(workspacePath);
     this.blobGcRerunRequested.delete(workspacePath);
     this.unsubscribers.get(workspacePath)?.();
@@ -678,6 +680,7 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
       return;
     }
     const runBlobGc = this.options.runBlobGc ?? runWorkspaceBlobGcOnce;
+    const generation = this.blobGcGenerations.get(workspacePath) ?? 0;
     let nextWakeAt: number | undefined;
     const tail = (async () => {
       do {
@@ -685,7 +688,10 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
         const result = await runBlobGc({ workDir: workspacePath, picoHome: this.picoHome });
         nextWakeAt = result.nextWakeAt;
         if (!result.hasMore && !this.blobGcRerunRequested.has(workspacePath)) break;
-      } while (this.lifecycleState === "open");
+      } while (
+        this.lifecycleState === "open" &&
+        generation === (this.blobGcGenerations.get(workspacePath) ?? 0)
+      );
     })()
       .catch((error) => {
         logger.warn({ error, workspacePath }, "Workspace Blob GC maintenance failed");
@@ -696,7 +702,12 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
         const rerunRequested = this.blobGcRerunRequested.delete(workspacePath);
         if (this.lifecycleState !== "open") return;
         if (rerunRequested) this.scheduleBlobGc(workspacePath);
-        else if (nextWakeAt !== undefined) this.scheduleBlobGcWake(workspacePath, nextWakeAt);
+        else if (
+          generation === (this.blobGcGenerations.get(workspacePath) ?? 0) &&
+          nextWakeAt !== undefined
+        ) {
+          this.scheduleBlobGcWake(workspacePath, nextWakeAt);
+        }
       });
     this.blobGcTails.set(workspacePath, tail);
   }
