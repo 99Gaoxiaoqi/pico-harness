@@ -20,6 +20,7 @@ import {
 } from "../../src/context/evidence-blob-store.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { WorkspaceRuntimeService } from "../../src/daemon/workspace-runtime-service.js";
+import { createRuntimeRequest } from "../../src/daemon/protocol.js";
 import { FileHistoryBlobStore } from "../../src/storage/file-history-blob-store.js";
 import { closeAllOperationalDatabasesForTest } from "../../src/storage/sqlite/sqlite-database.js";
 import { withWorkspaceSqliteLease } from "../../src/storage/sqlite/workspace-scopes.js";
@@ -357,6 +358,50 @@ test("Workspace Runtime close clears a scheduled Blob GC wake timer", async () =
   }
 });
 
+test("workspace unregister prevents an active Blob GC tail from scheduling another wake", async () => {
+  const fixture = createFixture("runtime-unregister-tail");
+  initializeGitWorkspace(fixture.workDir);
+  let calls = 0;
+  let releaseGc: (() => void) | undefined;
+  const gcBlocked = new Promise<void>((resolve) => {
+    releaseGc = resolve;
+  });
+  const service = new WorkspaceRuntimeService({
+    env: { PICO_HOME: fixture.picoHome },
+    execute: async () => undefined,
+    runBlobGc: async () => {
+      calls += 1;
+      await gcBlocked;
+      return {
+        status: "completed",
+        processed: 0,
+        completed: 0,
+        retryable: 0,
+        hasMore: false,
+        nextWakeAt: Date.now() + 60_000,
+      };
+    },
+  });
+  try {
+    await service.handle(
+      createRuntimeRequest("workspace.register", { workspacePath: fixture.workDir }),
+    );
+    await waitFor(() => calls === 1, 2_000);
+    await service.handle(
+      createRuntimeRequest("workspace.unregister", { workspacePath: fixture.workDir }),
+    );
+    releaseGc?.();
+    await waitFor(() => activeBlobGcTailCount(service) === 0, 2_000);
+    assert.equal(scheduledBlobGcTimerCount(service), 0);
+    await delay(25);
+    assert.equal(calls, 1);
+  } finally {
+    releaseGc?.();
+    await service.close();
+    cleanupFixture(fixture.root);
+  }
+});
+
 function insertRetentionIntent(
   storageRoot: string,
   intentId: string,
@@ -439,6 +484,14 @@ function scheduledBlobGcTimerCount(service: WorkspaceRuntimeService): number {
       readonly blobGcTimers: ReadonlyMap<string, unknown>;
     }
   ).blobGcTimers.size;
+}
+
+function activeBlobGcTailCount(service: WorkspaceRuntimeService): number {
+  return (
+    service as unknown as {
+      readonly blobGcTails: ReadonlyMap<string, unknown>;
+    }
+  ).blobGcTails.size;
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<void> {
