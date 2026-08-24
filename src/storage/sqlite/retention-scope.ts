@@ -32,5 +32,18 @@ export const RETENTION_SCOPE: SqliteSchemaScope = {
         ON retention_gc_intents(status, updated_at) WHERE completed_at IS NULL;
       `,
     ],
+    [
+      2,
+      `
+      ALTER TABLE retention_gc_intents ADD COLUMN storage_uri TEXT;
+      DROP INDEX retention_gc_intents_open_blob;
+      CREATE UNIQUE INDEX retention_gc_intents_open_cas_blob
+        ON retention_gc_intents(blob_kind, digest)
+        WHERE completed_at IS NULL AND blob_kind != 'runtime_asset';
+      CREATE UNIQUE INDEX retention_gc_intents_open_runtime_asset
+        ON retention_gc_intents(blob_kind, digest, storage_uri)
+        WHERE completed_at IS NULL AND blob_kind = 'runtime_asset';
+      `,
+    ],
   ]),
 };
