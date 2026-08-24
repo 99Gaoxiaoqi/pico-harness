@@ -3,13 +3,14 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import { join, resolve } from "node:path";
 import {
   scanArchitectureBoundaries,
   scanCanonicalPrimitiveRedefinitions,
   scanCrossCuttingDefinitions,
   scanHandwrittenTimeoutPrimitives,
+  scanTypeScriptValueImportCycles,
 } from "../../scripts/check-architecture-boundaries.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -38,6 +39,44 @@ test("architecture boundary strict gate passes after legacy edges are migrated",
   });
   assert.match(result.stdout, /通过：没有新增逆依赖/);
   assert.match(result.stdout, /发现 0 条受控边界记录/);
+});
+
+test("architecture cycle gate rejects direct TypeScript value import cycles", async (context) => {
+  const fixtureRoot = await createArchitectureFixture(context, "pico-value-cycle-direct-", {
+    "src/engine/a.ts": 'import { b } from "./b.js"; export const a = b;\n',
+    "src/engine/b.ts": 'export { a } from "./a.js"; export const b = 1;\n',
+  });
+
+  assert.deepEqual(scanTypeScriptValueImportCycles({ repositoryRoot: fixtureRoot }), [
+    {
+      rule: "typescript-value-import-cycle",
+      source: "src/engine/a.ts",
+      target: "src/engine/a.ts -> src/engine/b.ts -> src/engine/a.ts",
+    },
+  ]);
+});
+
+test("architecture cycle gate treats literal dynamic import as a value edge", async (context) => {
+  const fixtureRoot = await createArchitectureFixture(context, "pico-value-cycle-dynamic-", {
+    "src/engine/a.ts": 'export async function load() { return import("./b.js"); }\n',
+    "src/engine/b.ts": 'import { load } from "./a.js"; export { load };\n',
+  });
+
+  assert.equal(scanTypeScriptValueImportCycles({ repositoryRoot: fixtureRoot }).length, 1);
+});
+
+test("architecture cycle gate ignores erased TypeScript type edges", async (context) => {
+  const fixtureRoot = await createArchitectureFixture(context, "pico-value-cycle-types-", {
+    "src/engine/a.ts": 'import type { B } from "./b.js"; export interface A { readonly b: B }\n',
+    "src/engine/b.ts":
+      'import { type A } from "./a.js"; export type { A as OtherA } from "./a.js"; export interface B { readonly a: A }\n',
+  });
+
+  assert.deepEqual(scanTypeScriptValueImportCycles({ repositoryRoot: fixtureRoot }), []);
+});
+
+test("architecture cycle gate finds no TypeScript value import cycle in this repository", () => {
+  assert.deepEqual(scanTypeScriptValueImportCycles({ repositoryRoot }), []);
 });
 
 test("architecture boundary gate rejects Engine type-only imports from Runtime", async (context) => {
@@ -303,3 +342,21 @@ test("architecture gate blocks delegation-manager from importing graph/runtime, 
     "work-lease.ts 是 D10 归位的唯一豁免——只有 contract.ts 应报违规",
   );
 });
+
+async function createArchitectureFixture(
+  context: TestContext,
+  prefix: string,
+  files: Readonly<Record<string, string>>,
+) {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), prefix));
+  context.after(() => rm(fixtureRoot, { recursive: true, force: true }));
+  await Promise.all(
+    ["src", "apps", "packages"].map((path) => mkdir(join(fixtureRoot, path), { recursive: true })),
+  );
+  for (const [path, source] of Object.entries(files)) {
+    const target = join(fixtureRoot, path);
+    await mkdir(resolve(target, ".."), { recursive: true });
+    await writeFile(target, source, "utf8");
+  }
+  return fixtureRoot;
+}

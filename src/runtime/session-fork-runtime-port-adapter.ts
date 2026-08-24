@@ -1,4 +1,5 @@
 import type { SessionForkRuntimePort } from "../engine/session-fork-runtime-port.js";
+import { SessionForkService } from "../engine/session-fork-service.js";
 import { materializeRuntimeHistory } from "../engine/session-runtime-read-model.js";
 import { deriveRuntimeForkBootstrapRunId, RuntimeRun } from "./runtime-run.js";
 import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
@@ -6,8 +7,26 @@ import { createEngineRuntimePort } from "./engine-runtime-port-adapter.js";
 
 /** Runtime-owned implementation of the narrow fork lifecycle contract. */
 export function createSessionForkRuntimePort(): SessionForkRuntimePort {
-  return {
+  const runtimePort: SessionForkRuntimePort = {
     engineRuntimePort: createEngineRuntimePort(),
+    forkSession: async (input) => {
+      const service = new SessionForkService({
+        workDir: input.workDir,
+        picoHome: input.picoHome,
+        fileHistoryBaseDir: input.fileHistoryBaseDir,
+        runtimePort,
+      });
+      try {
+        await service.fork({
+          sourceSessionId: input.sourceSessionId,
+          targetSessionId: input.targetSessionId,
+          targetMode: input.targetMode,
+          ...(input.throughEventId ? { throughEventId: input.throughEventId } : {}),
+        });
+      } finally {
+        service.close();
+      }
+    },
     validateModelHistory: (events) => {
       void materializeRuntimeHistory(events);
     },
@@ -58,6 +77,7 @@ export function createSessionForkRuntimePort(): SessionForkRuntimePort {
       });
     },
   };
+  return runtimePort;
 }
 
 function requireRuntimeEventStore(authority: object): SqliteRuntimeEventStore {

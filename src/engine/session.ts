@@ -58,13 +58,13 @@ import {
   type EngineRuntimePort,
   type EngineRuntimeWriteGuard,
 } from "./runtime-port.js";
+import { EngineRuntimeCapabilityOwner } from "./runtime-capability-owner.js";
 import {
   type RuntimeEventBase,
   type RuntimeEvent,
   type RuntimePlanEvent,
 } from "./session-runtime-event.js";
 import { projectActivePlanEntries } from "../plan/reducer.js";
-import { SessionForkService } from "./session-fork-service.js";
 import type { SessionForkRuntimePort } from "./session-fork-runtime-port.js";
 import {
   createCanonicalTranscriptToolStart,
@@ -180,13 +180,10 @@ function throwSerializedExecutionErrors(
  * Session:一次持续的人机交互过程。
  * 负责维护该会话的完整历史,并提供模型投影副本。
  */
-export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGuard {
-  #runtimeCapabilityOwnerBrand = true;
-
-  static isRuntimeCapabilityOwner(value: unknown): value is Session {
-    return typeof value === "object" && value !== null && #runtimeCapabilityOwnerBrand in value;
-  }
-
+export class Session
+  extends EngineRuntimeCapabilityOwner
+  implements SessionRuntimePersistence, EngineRuntimeWriteGuard
+{
   /** 会话标识(终端目录哈希 / 飞书 ChatID / 微信 OpenID) */
   readonly id: string;
   /** 该会话绑定的物理工作区 */
@@ -280,6 +277,7 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
   private runQueue: Promise<unknown> = Promise.resolve();
 
   constructor(id: string, workDir: string, options?: SessionOptions) {
+    super();
     this.id = id;
     this.workDir = workDir;
     this.picoHome = resolvePicoHome({ picoHome: options?.picoHome });
@@ -1278,13 +1276,10 @@ export class Session implements SessionRuntimePersistence, EngineRuntimeWriteGua
     const targetSessionId = createTargetSessionId();
     const throughEventId = await this.resolveForkBoundaryEventId(snapshot.beforeSessionSeq);
 
-    const forkService = new SessionForkService({
+    await runtimePort.forkSession({
       workDir: this.workDir,
       picoHome: this.picoHome,
-      runtimePort,
       fileHistoryBaseDir: this.fileHistoryBaseDir,
-    });
-    await forkService.fork({
       sourceSessionId: this.id,
       targetSessionId,
       targetMode: this.persistedSettings?.mode ?? "yolo",
