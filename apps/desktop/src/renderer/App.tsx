@@ -1671,42 +1671,7 @@ function ConversationPage() {
               {item.inspectedFiles} 个文件 · {item.evidenceCount} 条证据 · {item.openQuestions}{" "}
               个待确认问题
             </p>
-            {item.status === "active" && (
-              <Button
-                type="button"
-                variant="quiet"
-                onClick={() =>
-                  void actions
-                    .cancelDiscovery({
-                      workspacePath,
-                      sessionId,
-                      discoveryId: item.discoveryId,
-                      reason: "由 Desktop 用户取消",
-                    })
-                    .then(() => setInspector(undefined))
-                }
-              >
-                取消探索
-              </Button>
-            )}
-            {item.status === "interrupted" && (
-              <Button
-                type="button"
-                variant="quiet"
-                onClick={() =>
-                  void actions
-                    .resumeDiscovery({
-                      workspacePath,
-                      sessionId,
-                      discoveryId: item.discoveryId,
-                      depth: item.depth,
-                    })
-                    .then(() => setInspector(undefined))
-                }
-              >
-                恢复探索
-              </Button>
-            )}
+            {item.reason && <p>{item.reason}</p>}
           </div>
         ),
       });
@@ -2289,38 +2254,6 @@ function ConversationPage() {
                         )}
                         {workspaceName(workspacePath)}
                       </span>
-                    )}
-                    {sessionRef && composerStatus === "idle" && (
-                      <label className="conversation-context-option">
-                        <span className="conversation-sr-only">代码探索深度</span>
-                        <WandSparkles aria-hidden="true" />
-                        <select
-                          name="discovery-depth"
-                          aria-label="启动代码探索"
-                          value=""
-                          disabled={!draft.trim() || Boolean(busy)}
-                          onChange={(event) => {
-                            const depth = event.target.value as "" | "quick" | "balanced" | "deep";
-                            if (!depth || !draft.trim()) return;
-                            void actions
-                              .startDiscovery({
-                                workspacePath,
-                                sessionId: sessionRef.sessionId,
-                                objective: draft,
-                                depth,
-                              })
-                              .then(() => {
-                                clearDraft();
-                                setCatalogOpen(false);
-                              });
-                          }}
-                        >
-                          <option value="">代码探索…</option>
-                          <option value="quick">快速定位 (quick)</option>
-                          <option value="balanced">平衡探索 (balanced)</option>
-                          <option value="deep">深入验证 (deep)</option>
-                        </select>
-                      </label>
                     )}
                     {sessionRef && conversation?.settings && (
                       <>

@@ -1283,41 +1283,6 @@ export type RuntimeMethodMap = {
       readonly nextCursor?: RuntimeTranscriptAdvanceCursor;
     };
   };
-  readonly "discovery.start": {
-    readonly params: WorkspaceParams & {
-      readonly sessionId: SessionId;
-      readonly objective: string;
-      readonly depth: RuntimeDiscoveryDepth;
-      readonly roots?: readonly string[];
-      readonly operationId: string;
-      readonly expectedSessionSequence: number;
-    };
-    readonly result: { readonly projection: RuntimeDiscoveryProjection };
-  };
-  readonly "discovery.get": {
-    readonly params: WorkspaceParams & { readonly sessionId: SessionId };
-    readonly result: { readonly projection: RuntimeDiscoveryProjection };
-  };
-  readonly "discovery.resume": {
-    readonly params: WorkspaceParams & {
-      readonly sessionId: SessionId;
-      readonly discoveryId: string;
-      readonly depth?: RuntimeDiscoveryDepth;
-      readonly operationId: string;
-      readonly expectedSessionSequence: number;
-    };
-    readonly result: { readonly projection: RuntimeDiscoveryProjection };
-  };
-  readonly "discovery.cancel": {
-    readonly params: WorkspaceParams & {
-      readonly sessionId: SessionId;
-      readonly discoveryId: string;
-      readonly reason?: string;
-      readonly operationId: string;
-      readonly expectedSessionSequence: number;
-    };
-    readonly result: { readonly projection: RuntimeDiscoveryProjection };
-  };
   readonly "session.evidence.read": {
     readonly params: WorkspaceParams & {
       readonly sessionId: SessionId;
@@ -2010,10 +1975,6 @@ export const RUNTIME_METHODS = [
   "session.transcript.page",
   "session.transcript.advance",
   "session.evidence.read",
-  "discovery.start",
-  "discovery.get",
-  "discovery.resume",
-  "discovery.cancel",
   "run.start",
   "run.cancel",
   "run.pause",
@@ -2148,10 +2109,6 @@ export const DESKTOP_RUNTIME_METHODS = [
   "session.transcript.page",
   "session.transcript.advance",
   "session.evidence.read",
-  "discovery.start",
-  "discovery.get",
-  "discovery.resume",
-  "discovery.cancel",
   "run.start",
   "run.cancel",
   "run.pause",
@@ -3467,38 +3424,6 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
     { workspacePath: stringParam, sessionId: stringParam, evidenceUri: stringParam },
     { offsetBytes: finiteNumberParam, limitBytes: finiteNumberParam },
   ),
-  "discovery.start": exactParamShape(
-    {
-      workspacePath: stringParam,
-      sessionId: stringParam,
-      objective: boundedNonEmptyStringParam(8_000),
-      depth: oneOfParam(["quick", "balanced", "deep"]),
-      operationId: boundedNonEmptyStringParam(512),
-      expectedSessionSequence: finiteNumberParam,
-    },
-    { roots: stringArrayParam },
-  ),
-  "discovery.get": workspaceSessionParams,
-  "discovery.resume": exactParamShape(
-    {
-      workspacePath: stringParam,
-      sessionId: stringParam,
-      discoveryId: boundedNonEmptyStringParam(512),
-      operationId: boundedNonEmptyStringParam(512),
-      expectedSessionSequence: finiteNumberParam,
-    },
-    { depth: oneOfParam(["quick", "balanced", "deep"]) },
-  ),
-  "discovery.cancel": exactParamShape(
-    {
-      workspacePath: stringParam,
-      sessionId: stringParam,
-      discoveryId: boundedNonEmptyStringParam(512),
-      operationId: boundedNonEmptyStringParam(512),
-      expectedSessionSequence: finiteNumberParam,
-    },
-    { reason: boundedNonEmptyStringParam(4_000) },
-  ),
   "run.start": exactParamShape(
     { workspacePath: stringParam, prompt: stringParam },
     { sessionId: stringParam, idempotencyKey: stringParam },
@@ -4465,34 +4390,6 @@ const runtimeChangeResult = resultShape({
   deletions: resultFiniteNumber,
 });
 
-const runtimeDiscoveryRunResult = resultShape(
-  {
-    discoveryId: resultNonEmptyString,
-    objective: resultNonEmptyString,
-    depth: resultOneOf(["quick", "balanced", "deep"]),
-    phase: resultOneOf(["forage", "focus", "deepen", "verify"]),
-    status: resultOneOf(["active", "interrupted", "completed", "cancelled"]),
-    cycle: resultNonNegativeInteger,
-    inspectedFiles: resultStringArray,
-    evidenceRefs: resultStringArray,
-    openQuestions: resultStringArray,
-    candidates: resultArray(resultJsonObject),
-    branches: resultArray(resultJsonObject),
-    startedAt: resultNonEmptyString,
-    updatedAt: resultNonEmptyString,
-  },
-  { reason: resultString, report: resultJsonObject },
-);
-
-const runtimeDiscoveryProjectionResult = resultShape(
-  {
-    sessionId: resultString,
-    sessionSequence: resultNonNegativeInteger,
-    discoveries: resultArray(runtimeDiscoveryRunResult),
-  },
-  { latest: runtimeDiscoveryRunResult, active: runtimeDiscoveryRunResult },
-);
-
 const runtimeNotificationResult: RuntimeResultRule = (value, path) => {
   if (!isJsonObject(value) || !isRuntimeNotification(value)) {
     throw invalidResult(`${path} 不是有效的 Runtime event`);
@@ -4658,10 +4555,6 @@ const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
       nextCursor: transcriptAdvanceCursorResult,
     },
   ),
-  "discovery.start": resultShape({ projection: runtimeDiscoveryProjectionResult }),
-  "discovery.get": resultShape({ projection: runtimeDiscoveryProjectionResult }),
-  "discovery.resume": resultShape({ projection: runtimeDiscoveryProjectionResult }),
-  "discovery.cancel": resultShape({ projection: runtimeDiscoveryProjectionResult }),
   "session.evidence.read": resultShape(
     {
       evidenceUri: resultString,

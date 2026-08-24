@@ -31,16 +31,11 @@ test("embedded MCP page keeps the user-level add action", async () => {
   assert.match(capabilityPage, /setAddingMcp\(\(visible\) => !visible\)/u);
 });
 
-test("composer exposes all discovery depths and uses the draft as its objective", async () => {
+test("composer no longer exposes the retired Discovery entry", async () => {
   const source = await rendererSource("App.tsx");
-  assert.match(source, /name="discovery-depth"/u);
-  assert.match(source, /<option value="quick">快速定位 \(quick\)<\/option>/u);
-  assert.match(source, /<option value="balanced">平衡探索 \(balanced\)<\/option>/u);
-  assert.match(source, /<option value="deep">深入验证 \(deep\)<\/option>/u);
-  assert.match(
-    source,
-    /actions\s+\.startDiscovery\(\{[\s\S]{0,220}objective: draft,[\s\S]{0,80}depth,/u,
-  );
+  assert.doesNotMatch(source, /name="discovery-depth"/u);
+  assert.doesNotMatch(source, /startDiscovery|resumeDiscovery|cancelDiscovery/u);
+  assert.doesNotMatch(source, /启动代码探索|取消探索|恢复探索/u);
 });
 
 test("changes panel describes completed-run checkpoints instead of live workspace state", async () => {
