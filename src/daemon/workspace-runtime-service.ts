@@ -44,7 +44,10 @@ import {
   WorkspaceRuntimeRegistry,
 } from "./workspace-registry.js";
 import { WorkspaceRegistrationStore } from "./workspace-registration.js";
-import { runWorkspaceBlobGcOnce } from "../storage/workspace-blob-gc.js";
+import {
+  runWorkspaceBlobGcOnce,
+  type WorkspaceBlobGcResult,
+} from "../storage/workspace-blob-gc.js";
 
 export interface DaemonRunExecutor {
   (input: {
@@ -93,7 +96,10 @@ export interface WorkspaceRuntimeServiceOptions {
   createWorkspaceRuntime?: (workspacePath: string) => Promise<WorkspaceTaskRuntime>;
   now?: () => number;
   registrationStore?: WorkspaceRegistrationStore;
-  runBlobGc?: (input: { readonly workDir: string; readonly picoHome: string }) => Promise<unknown>;
+  runBlobGc?: (input: {
+    readonly workDir: string;
+    readonly picoHome: string;
+  }) => Promise<WorkspaceBlobGcResult>;
 }
 
 const DEFAULT_REPLAY_EVENT_LIMIT = 1_000;
@@ -124,6 +130,10 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
   private resourceClosePromise: Promise<void> = Promise.resolve();
   private readonly blobGcTails = new Map<string, Promise<void>>();
   private readonly blobGcRerunRequested = new Set<string>();
+  private readonly blobGcTimers = new Map<
+    string,
+    { readonly wakeAt: number; readonly timer: NodeJS.Timeout }
+  >();
 
   constructor(private readonly options: WorkspaceRuntimeServiceOptions) {
     this.picoHome = resolvePicoHome({ env: options.env });
@@ -524,6 +534,7 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
   closeRuntimes(): Promise<void> {
     if (this.runtimeClosePromise) return this.runtimeClosePromise;
     this.lifecycleState = "closing_runtimes";
+    this.clearAllBlobGcTimers();
     this.registrationChanged = undefined;
     this.runtimeClosePromise = this.registry.close().then(() => {
       this.lifecycleState = "runtimes_closed";
@@ -580,6 +591,8 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
   }
 
   private async releaseWorkspaceResources(workspacePath: string): Promise<void> {
+    this.clearBlobGcTimer(workspacePath);
+    this.blobGcRerunRequested.delete(workspacePath);
     this.unsubscribers.get(workspacePath)?.();
     this.unsubscribers.delete(workspacePath);
     await this.registry.release(workspacePath);
@@ -659,25 +672,61 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
 
   private scheduleBlobGc(workspacePath: string): void {
     if (this.lifecycleState !== "open") return;
+    this.clearBlobGcTimer(workspacePath);
     if (this.blobGcTails.has(workspacePath)) {
       this.blobGcRerunRequested.add(workspacePath);
       return;
     }
     const runBlobGc = this.options.runBlobGc ?? runWorkspaceBlobGcOnce;
+    let nextWakeAt: number | undefined;
     const tail = (async () => {
       do {
         this.blobGcRerunRequested.delete(workspacePath);
-        await runBlobGc({ workDir: workspacePath, picoHome: this.picoHome });
-      } while (this.lifecycleState === "open" && this.blobGcRerunRequested.has(workspacePath));
+        const result = await runBlobGc({ workDir: workspacePath, picoHome: this.picoHome });
+        nextWakeAt = result.nextWakeAt;
+        if (!result.hasMore && !this.blobGcRerunRequested.has(workspacePath)) break;
+      } while (this.lifecycleState === "open");
     })()
       .catch((error) => {
         logger.warn({ error, workspacePath }, "Workspace Blob GC maintenance failed");
+        nextWakeAt = Date.now() + 60_000;
       })
       .finally(() => {
-        this.blobGcRerunRequested.delete(workspacePath);
         if (this.blobGcTails.get(workspacePath) === tail) this.blobGcTails.delete(workspacePath);
+        const rerunRequested = this.blobGcRerunRequested.delete(workspacePath);
+        if (this.lifecycleState !== "open") return;
+        if (rerunRequested) this.scheduleBlobGc(workspacePath);
+        else if (nextWakeAt !== undefined) this.scheduleBlobGcWake(workspacePath, nextWakeAt);
       });
     this.blobGcTails.set(workspacePath, tail);
+  }
+
+  private scheduleBlobGcWake(workspacePath: string, wakeAt: number): void {
+    if (this.lifecycleState !== "open" || !Number.isFinite(wakeAt)) return;
+    const normalizedWakeAt = Math.max(Date.now(), wakeAt);
+    const existing = this.blobGcTimers.get(workspacePath);
+    if (existing && existing.wakeAt <= normalizedWakeAt) return;
+    if (existing) clearTimeout(existing.timer);
+    const timer = setTimeout(() => {
+      const current = this.blobGcTimers.get(workspacePath);
+      if (current?.timer !== timer) return;
+      this.blobGcTimers.delete(workspacePath);
+      this.scheduleBlobGc(workspacePath);
+    }, normalizedWakeAt - Date.now());
+    timer.unref();
+    this.blobGcTimers.set(workspacePath, { wakeAt: normalizedWakeAt, timer });
+  }
+
+  private clearBlobGcTimer(workspacePath: string): void {
+    const scheduled = this.blobGcTimers.get(workspacePath);
+    if (!scheduled) return;
+    clearTimeout(scheduled.timer);
+    this.blobGcTimers.delete(workspacePath);
+  }
+
+  private clearAllBlobGcTimers(): void {
+    for (const { timer } of this.blobGcTimers.values()) clearTimeout(timer);
+    this.blobGcTimers.clear();
   }
 
   private eventStore(workspacePath: string): SqliteRuntimeControlStore {
