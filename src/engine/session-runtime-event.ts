@@ -295,7 +295,7 @@ export type RuntimePlanEvent =
   | RuntimePlanExecutionCancelledEvent;
 
 /**
- * Graph Mode (Lesson 17). Graph events model an explicit DAG of works: each
+ * Graph Mode (Lesson 17). Graph events model incrementally submitted work dependencies: each
  * add_work declares an instruction plus optional upstream record ids; the
  * orchestrator dispatches each work once its inputs are ready and records the
  * output. Every graph event shares the same operationId + fingerprint CAS

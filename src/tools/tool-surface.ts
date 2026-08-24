@@ -127,7 +127,7 @@ export const PICO_TOOL_GROUPS: readonly ToolGroupDef[] = [
   {
     id: "graph",
     label: "Graph",
-    description: "Graph Mode 的 DAG 编排：添加工作、查看图、收口工作",
+    description: "Graph Mode 的增量依赖编排：添加工作、查看图、收口工作",
     toolNames: ["add_work", "view_graph", "close_graph"],
     economy: "deferred",
   },
