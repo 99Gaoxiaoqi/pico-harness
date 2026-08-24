@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { existsSync, unwatchFile, watchFile } from "node:fs";
 import { access, readFile, realpath, stat } from "node:fs/promises";
-import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { WorkbarTerminalError } from "@pico/runtime-host";
 import { listRewindPointSummaries } from "../cli/file-history.js";
 import {
@@ -135,13 +135,11 @@ import {
   type RuntimeNotificationPage,
   type RuntimeNotificationTopic,
   type RuntimeInputAttachment,
-  type RuntimeMcpServerInput,
   type RuntimeRequest,
   type RuntimeQueuedInput,
   type RuntimeRun as RuntimeRunRecord,
   type RuntimeSession,
   type RuntimeProviderInput,
-  type RuntimeScopedMcpServer,
   type RuntimeUserDefaults,
   type RuntimeUserInput,
 } from "./protocol.js";
@@ -155,6 +153,8 @@ import { SqliteDesktopConversationStateStore } from "../storage/sqlite/sqlite-de
 import type { PlanControlPort } from "./plan-control-port.js";
 import { PlanCoordinator } from "../plan/coordinator.js";
 import { createDesktopProviderRequestHandlers } from "./desktop-provider-request-handlers.js";
+import { createDesktopCatalogRequestHandlers } from "./desktop-catalog-request-handlers.js";
+import { createDesktopAutomationRequestHandlers } from "./desktop-automation-request-handlers.js";
 import { canonicalizeWorkspacePath, resolveGitBranch } from "./workspace-registry.js";
 
 /**
@@ -192,19 +192,10 @@ import {
 } from "./workspace-runtime-service.js";
 import type { WorkspaceStatusResult } from "./protocol.js";
 import {
-  createTrustedDesktopAutomation,
   DesktopAutomationService,
-  importDesktopAutomationCredential,
   type AutomationProviderReference,
   type ActiveAutomationReference,
 } from "./desktop-automation-service.js";
-import {
-  listDesktopAgents,
-  listDesktopEffectiveSkills,
-  listDesktopMcpServers,
-  listDesktopSkills,
-  listDesktopUserSkills,
-} from "./desktop-resource-catalog.js";
 import {
   assertDesktopChangesComplete,
   assertDesktopChangesFingerprint,
@@ -220,17 +211,7 @@ import type { TranscriptEvent } from "../presentation/transcript-event-store.js"
 import { PluginRuntimeSnapshotRegistry } from "../plugins/plugin-runtime-snapshot-registry.js";
 import { PluginCapabilityActivationScope } from "../plugins/plugin-capability.js";
 import { activatePluginProviderCapabilities } from "../plugins/plugin-provider-activation.js";
-import { mcpToolNameMayBelongToServer, type McpServerConfig } from "../mcp/types.js";
-import {
-  resolveTrustedEffectiveMcpSources,
-  userMcpDefinitions,
-  type EffectiveMcpServerDefinition,
-} from "../mcp/effective-config.js";
-import {
-  UserMcpConfigStore,
-  UserMcpIdempotencyConflictError,
-  UserMcpRevisionConflictError,
-} from "../mcp/user-config-store.js";
+import { UserMcpConfigStore } from "../mcp/user-config-store.js";
 import { DesktopRequestRouter, type DesktopRequestHandlers } from "./desktop-request-router.js";
 import { createDesktopSessionRequestHandlers } from "./desktop-session-request-handlers.js";
 import { createDesktopMemoryRequestHandlers } from "./desktop-memory-request-handlers.js";
@@ -495,17 +476,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       "config.get": (request) => this.getConfig(request.params.workspacePath),
       "config.providers": (request) => this.listProviders(request.params.workspacePath),
       "config.effective.get": (request) => this.getEffectiveConfig(request.params),
-      "catalog.agents": (request) => this.listAgents(request.params.workspacePath),
-      "catalog.skills": (request) => this.listSkills(request.params.workspacePath, true),
-      "config.skills": (request) => this.listSkills(request.params.workspacePath, false),
-      "skills.user.list": () => this.listUserSkills(),
-      "skills.effective.list": (request) => this.listEffectiveSkills(request.params.workspacePath),
-      "config.mcpServers": (request) => this.listMcpServers(request.params.workspacePath),
-      "mcp.user.list": () => this.listUserMcpServers(),
-      "mcp.user.upsert": (request) => this.upsertUserMcpServer(request.params),
-      "mcp.user.delete": (request) => this.deleteUserMcpServer(request.params),
-      "mcp.user.setEnabled": (request) => this.setUserMcpServerEnabled(request.params),
-      "mcp.effective.list": (request) => this.listEffectiveMcpServers(request.params.workspacePath),
       "usage.get": (request) => this.getUsage(request.params),
       "changes.list": (request) =>
         this.listChanges(request.params.workspacePath, request.params.runId),
@@ -565,30 +535,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       "hooks.manage": (request) => this.manageHooks(request.params),
       "operations.manage": (request) => this.manageOperations(request.params),
       "plugin.manage": (request) => this.managePlugins(request.params),
-      "jobs.list": (request) => this.listJobs(request.params.workspacePath),
-      "jobs.create": (request) =>
-        this.withProviderDependencyLock(() => this.createJob(request.params)),
-      "jobs.update": (request) => this.updateJob(request.params),
-      "jobs.delete": (request) =>
-        this.deleteJob(request.params.workspacePath, request.params.jobId),
-      "jobs.setEnabled": (request) =>
-        this.withProviderDependencyLock(() =>
-          this.setJobEnabled(
-            request.params.workspacePath,
-            request.params.jobId,
-            request.params.enabled,
-          ),
-        ),
-      "jobs.runNow": (request) =>
-        this.withProviderDependencyLock(() =>
-          this.runJobNow(request.params.workspacePath, request.params.jobId),
-        ),
-      "jobs.history": (request) =>
-        this.jobHistory(request.params.workspacePath, request.params.jobId, request.params.limit),
-      "automation.credential.import": (request) =>
-        this.withProviderDependencyLock(() => this.importAutomationCredential(request.params)),
-      "automation.create": (request) =>
-        this.withProviderDependencyLock(() => this.createTrustedAutomation(request.params)),
       "approval.respond": (request) => {
         if (!this.options.interactions) {
           throw new RuntimeProtocolError(
@@ -640,6 +586,28 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         getProviderCredentialStatus: this.getProviderCredentialStatus.bind(this),
         setProviderCredential: this.setProviderCredential.bind(this),
         deleteProviderCredential: this.deleteProviderCredential.bind(this),
+        withProviderDependencyLock: (operation) => this.withProviderDependencyLock(operation),
+      }),
+      ...createDesktopCatalogRequestHandlers({
+        env: this.env,
+        picoHome: this.picoHome,
+        pluginRuntimeSnapshotRegistry: this.pluginRuntimeSnapshotRegistry,
+        trustStore: this.trustStore,
+        userMcpConfigStore: this.userMcpConfigStore,
+        requireTrustedWorkspace: this.requireTrustedWorkspace.bind(this),
+        projectCapabilityRevision: this.projectCapabilityRevision.bind(this),
+        publishCapabilityConfigUpdated: this.publishCapabilityConfigUpdated.bind(this),
+      }),
+      ...createDesktopAutomationRequestHandlers({
+        automations: this.options.automations,
+        credentialVault: this.credentialVault,
+        effectiveConfigResolver: this.effectiveConfigResolver,
+        userConfigStore: this.userConfigStore,
+        pluginRuntimeSnapshotRegistry: this.pluginRuntimeSnapshotRegistry,
+        env: this.env,
+        now: this.now,
+        requireTrustedWorkspace: this.requireTrustedWorkspace.bind(this),
+        publishJob: this.publishJob.bind(this),
         withProviderDependencyLock: (operation) => this.withProviderDependencyLock(operation),
       }),
       ...createDesktopSessionRequestHandlers({
@@ -3343,228 +3311,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     }
   }
 
-  private async listAgents(workspacePath: string): Promise<JsonValue> {
-    const canonical = await this.requireTrustedWorkspace(workspacePath);
-    const pluginSnapshot = await this.pluginRuntimeSnapshotRegistry.get(canonical);
-    const agents = await listDesktopAgents(canonical, {
-      env: this.env,
-      picoHome: this.picoHome,
-      pluginSnapshot,
-    });
-    return { agents: toJsonValue(agents) };
-  }
-
-  private async listSkills(
-    workspacePath: string,
-    includeUserResources: boolean,
-  ): Promise<JsonValue> {
-    const canonical = await this.requireTrustedWorkspace(workspacePath);
-    const pluginSnapshot = await this.pluginRuntimeSnapshotRegistry.get(canonical);
-    const skills = await listDesktopSkills(canonical, includeUserResources, {
-      env: this.env,
-      picoHome: this.picoHome,
-      pluginSnapshot,
-    });
-    return { skills: toJsonValue(skills) };
-  }
-
-  private async listUserSkills(): Promise<JsonValue> {
-    const catalog = await listDesktopUserSkills({
-      env: this.env,
-      picoHome: this.picoHome,
-    });
-    return toJsonValue({
-      ...catalog,
-      revision: this.projectCapabilityRevision("skills", "user", catalog.revision),
-    });
-  }
-
-  private async listEffectiveSkills(workspacePath: string): Promise<JsonValue> {
-    const canonical = await this.requireTrustedWorkspace(workspacePath);
-    const pluginSnapshot = await this.pluginRuntimeSnapshotRegistry.get(canonical);
-    const catalog = await listDesktopEffectiveSkills(canonical, {
-      env: this.env,
-      picoHome: this.picoHome,
-      pluginSnapshot,
-    });
-    return toJsonValue({
-      ...catalog,
-      revisions: {
-        user: this.projectCapabilityRevision("skills", "user", catalog.revisions.user),
-        project: this.projectCapabilityRevision(
-          "skills",
-          "project",
-          catalog.revisions.project,
-          canonical,
-        ),
-      },
-    });
-  }
-
-  private async listUserMcpServers(): Promise<JsonValue> {
-    const snapshot = await this.userMcpConfigStore.read();
-    return toJsonValue({
-      servers: userMcpDefinitions(snapshot).map(projectPublicMcpServer),
-      revision: this.projectCapabilityRevision("mcp", "user", snapshot.revision),
-    });
-  }
-
-  private async upsertUserMcpServer(params: {
-    readonly server: RuntimeMcpServerInput;
-    readonly expectedRevision: string;
-    readonly idempotencyKey: string;
-  }): Promise<JsonValue> {
-    const current = await this.userMcpConfigStore.read();
-    const publicCurrent = this.projectCapabilityRevision("mcp", "user", current.revision);
-    const expectedRevision =
-      params.expectedRevision === publicCurrent ? current.revision : params.expectedRevision;
-    try {
-      const config = toCoreMcpServer(params.server);
-      const result = await this.userMcpConfigStore.upsert(config, {
-        expectedRevision,
-        idempotencyKey: params.idempotencyKey,
-      });
-      const definition: EffectiveMcpServerDefinition = {
-        name: config.name,
-        config,
-        scope: "user",
-        sourceId: "user",
-        sourceLabel: "用户级",
-        readOnly: false,
-        effective: true,
-      };
-      const revision = this.projectCapabilityRevision("mcp", "user", result.resultRevision);
-      if (!result.replayed) await this.publishCapabilityConfigUpdated("mcp", revision);
-      return toJsonValue({ server: projectPublicMcpServer(definition), revision });
-    } catch (error) {
-      throw publicMcpMutationError(error);
-    }
-  }
-
-  private async deleteUserMcpServer(params: {
-    readonly serverName: string;
-    readonly expectedRevision: string;
-    readonly idempotencyKey: string;
-  }): Promise<JsonValue> {
-    const current = await this.userMcpConfigStore.read();
-    const publicCurrent = this.projectCapabilityRevision("mcp", "user", current.revision);
-    const expectedRevision =
-      params.expectedRevision === publicCurrent ? current.revision : params.expectedRevision;
-    try {
-      const result = await this.userMcpConfigStore.delete(params.serverName, {
-        expectedRevision,
-        idempotencyKey: params.idempotencyKey,
-      });
-      const revision = this.projectCapabilityRevision("mcp", "user", result.resultRevision);
-      if (!result.replayed) await this.publishCapabilityConfigUpdated("mcp", revision);
-      return { serverName: params.serverName, deleted: true, revision };
-    } catch (error) {
-      throw publicMcpMutationError(error);
-    }
-  }
-
-  private async setUserMcpServerEnabled(params: {
-    readonly serverName: string;
-    readonly enabled: boolean;
-    readonly expectedRevision: string;
-    readonly idempotencyKey: string;
-  }): Promise<JsonValue> {
-    const current = await this.userMcpConfigStore.read();
-    const definition = userMcpDefinitions(current).find(
-      (entry) => entry.name === params.serverName,
-    );
-    if (!definition) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.NOT_FOUND,
-        `用户级 MCP 服务器不存在: ${params.serverName}`,
-      );
-    }
-    const publicCurrent = this.projectCapabilityRevision("mcp", "user", current.revision);
-    const expectedRevision =
-      params.expectedRevision === publicCurrent ? current.revision : params.expectedRevision;
-    try {
-      const result = await this.userMcpConfigStore.upsert(
-        { ...definition.config, enabled: params.enabled },
-        { expectedRevision, idempotencyKey: params.idempotencyKey },
-      );
-      const revision = this.projectCapabilityRevision("mcp", "user", result.resultRevision);
-      if (!result.replayed) await this.publishCapabilityConfigUpdated("mcp", revision);
-      return toJsonValue({
-        server: projectPublicMcpServer({
-          ...definition,
-          config: result.snapshot.config.mcpServers[params.serverName] ?? definition.config,
-        }),
-        revision,
-      });
-    } catch (error) {
-      throw publicMcpMutationError(error);
-    }
-  }
-
-  private async listEffectiveMcpServers(workspacePath: string): Promise<JsonValue> {
-    const canonical = await this.requireTrustedWorkspace(workspacePath);
-    const [resolution, pluginSnapshot] = await Promise.all([
-      resolveTrustedEffectiveMcpSources(canonical, {
-        picoHome: this.picoHome,
-        trustStore: this.trustStore,
-        userStore: this.userMcpConfigStore,
-      }),
-      this.pluginRuntimeSnapshotRegistry.get(canonical),
-    ]);
-    const occupied = new Map<string, "user" | "project" | "plugin">(
-      resolution.definitions
-        .filter((definition) => definition.effective)
-        .map((definition) => [definition.name, definition.scope] as const),
-    );
-    const pluginDefinitions = pluginSnapshot.mcpSources.flatMap((source) =>
-      Object.entries(source.config?.mcpServers ?? {}).map(([name, config]) => {
-        const shadowedBy = occupied.get(name);
-        if (!shadowedBy) occupied.set(name, "plugin");
-        return {
-          name,
-          config,
-          scope: "plugin" as const,
-          sourceId: source.id,
-          sourceLabel: pluginMcpSourceLabel(source.id),
-          readOnly: true,
-          effective: shadowedBy === undefined,
-          ...(shadowedBy ? { shadowedBy } : {}),
-        };
-      }),
-    );
-    const pluginRevision = createHash("sha256")
-      .update(JSON.stringify(pluginSnapshot.mcpSources), "utf8")
-      .digest("hex");
-    return toJsonValue({
-      servers: [...resolution.definitions, ...pluginDefinitions]
-        .map(projectPublicMcpServer)
-        .sort((left, right) => left.name.localeCompare(right.name)),
-      revisions: {
-        user: this.projectCapabilityRevision("mcp", "user", resolution.revisions.user),
-        project: this.projectCapabilityRevision(
-          "mcp",
-          "project",
-          `${resolution.revisions.project}:${pluginRevision}`,
-          canonical,
-        ),
-      },
-    });
-  }
-
-  private async listMcpServers(workspacePath: string): Promise<JsonValue> {
-    const canonical = await this.requireTrustedWorkspace(workspacePath);
-    const pluginSnapshot = await this.pluginRuntimeSnapshotRegistry.get(canonical);
-    return {
-      servers: toJsonValue(
-        await listDesktopMcpServers(canonical, {
-          env: this.env,
-          picoHome: this.picoHome,
-          pluginSnapshot,
-        }),
-      ),
-    };
-  }
-
   private async getUsage(params: {
     readonly workspacePath: string;
     readonly sessionId?: string;
@@ -4200,135 +3946,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         return toJsonValue({ result: { ok: true } });
       }
     }
-  }
-
-  private async listJobs(workspacePath: string): Promise<JsonValue> {
-    const [canonical, automations] = await Promise.all([
-      this.requireTrustedWorkspace(workspacePath),
-      Promise.resolve(this.requireAutomations()),
-    ]);
-    return { jobs: automations.list(canonical) };
-  }
-
-  private async importAutomationCredential(params: {
-    readonly workspacePath: string;
-    readonly modelRouteId: string;
-    readonly expectedCredentialRef: string;
-    readonly secret: string;
-  }): Promise<JsonValue> {
-    const canonical = await this.requireTrustedWorkspace(params.workspacePath);
-    return importDesktopAutomationCredential(canonical, params, {
-      credentialVault: this.credentialVault,
-      effectiveConfigResolver: this.effectiveConfigResolver,
-      userConfigStore: this.userConfigStore,
-      env: this.env,
-    });
-  }
-
-  private async createTrustedAutomation(params: {
-    readonly workspacePath: string;
-    readonly name?: string;
-    readonly prompt: string;
-    readonly schedule: string;
-    readonly timeZone?: string;
-    readonly modelRouteId: string;
-    readonly expectedCredentialRef: string;
-    readonly allowedTools: readonly string[];
-    readonly toolNetworkPolicy: "allow" | "disabled" | "allowlist";
-    readonly allowedToolNetworkHosts?: readonly string[];
-    readonly enabled?: boolean;
-  }): Promise<JsonValue> {
-    const canonical = await this.requireTrustedWorkspace(params.workspacePath);
-    const pluginSnapshot = await this.pluginRuntimeSnapshotRegistry.get(canonical);
-    const foregroundOnlyTools = new Set(
-      this.pluginRuntimeSnapshotRegistry.capabilityRegistry.toolNames(
-        pluginSnapshot.capabilities.filter((capability) => capability.kind === "tool"),
-      ),
-    );
-    const pluginMcpServers = pluginSnapshot.mcpSources.flatMap((source) =>
-      Object.keys(source.config?.mcpServers ?? {}),
-    );
-    for (const toolName of params.allowedTools) {
-      if (pluginMcpServers.some((server) => mcpToolNameMayBelongToServer(toolName, server))) {
-        foregroundOnlyTools.add(toolName);
-      }
-    }
-    const job = await createTrustedDesktopAutomation(this.requireAutomations(), canonical, params, {
-      credentialVault: this.credentialVault,
-      effectiveConfigResolver: this.effectiveConfigResolver,
-      userConfigStore: this.userConfigStore,
-      env: this.env,
-      foregroundOnlyTools,
-      now: this.now,
-    });
-    this.publishJob(job);
-    return { job };
-  }
-
-  private async createJob(params: {
-    readonly workspacePath: string;
-    readonly name: string;
-    readonly prompt: string;
-    readonly schedule: string;
-    readonly enabled?: boolean;
-  }): Promise<JsonValue> {
-    const canonical = await this.requireTrustedWorkspace(params.workspacePath);
-    const job = await this.requireAutomations().create(canonical, params);
-    this.publishJob(job);
-    return { job };
-  }
-
-  private async updateJob(params: {
-    readonly workspacePath: string;
-    readonly jobId: string;
-    readonly name?: string;
-    readonly prompt?: string;
-    readonly schedule?: string;
-  }): Promise<JsonValue> {
-    const canonical = await this.requireTrustedWorkspace(params.workspacePath);
-    const job = this.requireAutomations().update(canonical, params.jobId, params);
-    this.publishJob(job);
-    return { job };
-  }
-
-  private async deleteJob(workspacePath: string, jobId: string): Promise<JsonValue> {
-    const canonical = await this.requireTrustedWorkspace(workspacePath);
-    return { deleted: this.requireAutomations().delete(canonical, jobId) };
-  }
-
-  private async setJobEnabled(
-    workspacePath: string,
-    jobId: string,
-    enabled: boolean,
-  ): Promise<JsonValue> {
-    const canonical = await this.requireTrustedWorkspace(workspacePath);
-    const job = await this.requireAutomations().setEnabled(canonical, jobId, enabled);
-    this.publishJob(job);
-    return { job };
-  }
-
-  private async runJobNow(workspacePath: string, jobId: string): Promise<JsonValue> {
-    const canonical = await this.requireTrustedWorkspace(workspacePath);
-    const result = await this.requireAutomations().runNow(canonical, jobId);
-    this.publishJob(result.job);
-    return result;
-  }
-
-  private async jobHistory(
-    workspacePath: string,
-    jobId: string,
-    limit?: number,
-  ): Promise<JsonValue> {
-    const canonical = await this.requireTrustedWorkspace(workspacePath);
-    return { runs: this.requireAutomations().history(canonical, jobId, limit) };
-  }
-
-  private requireAutomations(): DesktopAutomationService {
-    if (this.options.automations) return this.options.automations;
-    throw new RuntimeProtocolError(
-      RUNTIME_ERROR_CODES.METHOD_NOT_FOUND,
-      "Automations 尚未连接到 daemon Cron runtime",
-    );
   }
 
   private async withTrustedMemory<Result extends JsonValue>(
@@ -5186,117 +4803,6 @@ function safeConfig(config: PicoProjectConfig): JsonValue {
     sandbox: config.sandbox,
     lspServers: config.lspServers,
   });
-}
-
-type PublicMcpDefinition = Omit<
-  EffectiveMcpServerDefinition,
-  "scope" | "sourceId" | "shadowedBy"
-> & {
-  readonly scope: "user" | "project" | "plugin";
-  readonly sourceId: string;
-  readonly shadowedBy?: string;
-};
-
-/** Project MCP metadata without exposing credentials, arguments, or full local paths. */
-function projectPublicMcpServer(definition: PublicMcpDefinition): RuntimeScopedMcpServer {
-  const common = {
-    name: definition.name,
-    ...(definition.config.startupTimeoutMs === undefined
-      ? {}
-      : { startupTimeoutMs: definition.config.startupTimeoutMs }),
-    ...(definition.config.toolTimeoutMs === undefined
-      ? {}
-      : { toolTimeoutMs: definition.config.toolTimeoutMs }),
-    ...(definition.config.enabled === undefined ? {} : { enabled: definition.config.enabled }),
-    source: {
-      scope: definition.scope,
-      sourceId: definition.sourceId,
-      sourceLabel: definition.sourceLabel,
-      readOnly: definition.readOnly,
-      effective: definition.effective,
-      ...(definition.shadowedBy ? { shadowedBy: definition.shadowedBy } : {}),
-    },
-  };
-  if (definition.config.transport === "stdio") {
-    return {
-      ...common,
-      transport: "stdio",
-      commandLabel: safeMcpCommandLabel(definition.config.command),
-      hasArguments: (definition.config.args?.length ?? 0) > 0,
-      ...(definition.config.env && Object.keys(definition.config.env).length > 0
-        ? { envKeys: Object.keys(definition.config.env).sort() }
-        : {}),
-    };
-  }
-  return {
-    ...common,
-    transport: definition.config.transport,
-    endpointLabel: safeMcpEndpointLabel(definition.config.url),
-    ...(definition.config.headers && Object.keys(definition.config.headers).length > 0
-      ? { headerKeys: Object.keys(definition.config.headers).sort() }
-      : {}),
-  };
-}
-
-function safeMcpCommandLabel(command: string | undefined): string {
-  const label = basename(command ?? "").trim();
-  return /^[a-z0-9._+-]+$/iu.test(label) ? label : "configured-command";
-}
-
-function safeMcpEndpointLabel(rawUrl: string | undefined): string {
-  if (!rawUrl) return "https://invalid.invalid";
-  try {
-    const parsed = new URL(rawUrl);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      return "https://invalid.invalid";
-    }
-    return parsed.origin;
-  } catch {
-    return "https://invalid.invalid";
-  }
-}
-
-function toCoreMcpServer(server: RuntimeMcpServerInput): McpServerConfig {
-  const common = {
-    name: server.name,
-    transport: server.transport,
-    ...(server.startupTimeoutMs === undefined ? {} : { startupTimeoutMs: server.startupTimeoutMs }),
-    ...(server.toolTimeoutMs === undefined ? {} : { toolTimeoutMs: server.toolTimeoutMs }),
-    ...(server.enabled === undefined ? {} : { enabled: server.enabled }),
-  };
-  if (server.transport === "stdio") {
-    return {
-      ...common,
-      command: server.command,
-      ...(server.args ? { args: [...server.args] } : {}),
-      ...(server.env ? { env: { ...server.env } } : {}),
-    };
-  }
-  return {
-    ...common,
-    url: server.url,
-    ...(server.headers ? { headers: { ...server.headers } } : {}),
-  };
-}
-
-function publicMcpMutationError(error: unknown): Error {
-  if (error instanceof UserMcpRevisionConflictError) {
-    return new RuntimeProtocolError(
-      RUNTIME_ERROR_CODES.CONFLICT,
-      "用户 MCP 配置已更改，请刷新后重试",
-    );
-  }
-  if (error instanceof UserMcpIdempotencyConflictError) {
-    return new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "MCP 幂等键已用于不同请求");
-  }
-  return error instanceof Error
-    ? error
-    : new RuntimeProtocolError(RUNTIME_ERROR_CODES.INTERNAL_ERROR, "用户 MCP 配置更新失败");
-}
-
-function pluginMcpSourceLabel(sourceId: string): string {
-  const pluginId = sourceId.match(/^plugin:([^:]+)/)?.[1] ?? sourceId;
-  return `Plugin · ${pluginId}`;
 }
 
 async function configContentVersion(workspacePath: string): Promise<number> {
