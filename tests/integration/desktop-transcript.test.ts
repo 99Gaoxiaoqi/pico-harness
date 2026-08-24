@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
+import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createElement } from "react";
 import { MarkdownText } from "../../apps/desktop/src/renderer/conversation/MarkdownText.js";
+import { ConversationTranscript } from "../../apps/desktop/src/renderer/conversation/ConversationTranscript.js";
 import { assembleConversationFragments } from "../../apps/desktop/src/renderer/runtime.js";
 import { projectRuntimeTranscript } from "../../src/daemon/desktop-transcript.js";
 import { createEmptyUsageSnapshot } from "../../src/engine/session-runtime.js";
@@ -14,6 +16,8 @@ import {
 } from "../../src/engine/tool-result-contract.js";
 import type { DurableTranscriptEvent } from "../../src/presentation/transcript-event-store.js";
 import type { Message } from "../../src/schema/message.js";
+
+Object.assign(globalThis, { React });
 
 function snapshot(
   messages: readonly Message[],
@@ -282,6 +286,33 @@ test("Desktop transcript preserves the subagent display name as structured data"
   assert.equal(item?.kind, "subagent");
   assert.equal(item?.kind === "subagent" ? item.name : undefined, "Explore");
   assert.equal(item?.kind === "subagent" ? item.title : undefined, "Explore: 检查架构边界");
+});
+
+test("Desktop keeps legacy Discovery cards readable without retired controls", () => {
+  const html = renderToStaticMarkup(
+    createElement(ConversationTranscript, {
+      items: [
+        {
+          id: "discovery:legacy-1",
+          kind: "discovery",
+          discoveryId: "legacy-1",
+          objective: "定位历史入口",
+          depth: "balanced",
+          phase: "verify",
+          status: "interrupted",
+          inspectedFiles: 4,
+          evidenceCount: 2,
+          openQuestions: 1,
+          reason: "daemon 重启",
+        },
+      ],
+      onOpenItem: () => undefined,
+    }),
+  );
+
+  assert.match(html, /定位历史入口/u);
+  assert.match(html, /查看探索详情/u);
+  assert.doesNotMatch(html, /取消探索|恢复探索|探索控制/u);
 });
 
 test("Desktop Markdown renders structure while blocking raw HTML and unsafe links", () => {
