@@ -17,7 +17,9 @@ import {
 } from "@pico/runtime-host";
 import {
   isEphemeralRuntimeNotificationTopic,
+  parseRuntimeResult,
   RuntimeNotificationBuffer,
+  RuntimeProtocolError,
   type RuntimeNotificationBufferOptions,
   type RuntimeNotification,
   type RuntimeMethod,
@@ -656,7 +658,11 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
     try {
       return await requestOverKernelConnection(connection, method, params);
     } catch (error) {
-      if (error instanceof RuntimeHostOperationError || this.closed) {
+      if (
+        error instanceof RuntimeHostOperationError ||
+        error instanceof RuntimeProtocolError ||
+        this.closed
+      ) {
         throw translateKernelRequestError(error);
       }
       // 传输级失败且连接已 terminal（如 daemon 被杀后断连传播慢于本次请求的
@@ -686,7 +692,11 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
         try {
           return await requestOverKernelConnection(revived, method, params);
         } catch (retryError) {
-          if (retryError instanceof RuntimeHostOperationError || this.closed) {
+          if (
+            retryError instanceof RuntimeHostOperationError ||
+            retryError instanceof RuntimeProtocolError ||
+            this.closed
+          ) {
             throw translateKernelRequestError(retryError);
           }
           lastError = retryError;
@@ -925,16 +935,22 @@ async function requestOverKernelConnection<Method extends RuntimeMethod>(
     method === "session.transcript.page" ||
     method === "session.transcript.advance"
   ) {
-    return await connection.requestRegistered<RuntimeResult<Method>>(method, params);
+    return parseRuntimeResult(
+      method,
+      await connection.requestRegistered<RuntimeResult<Method>>(method, params),
+    );
   }
   const response = await connection.requestRegistered<{ result: RuntimeResult<Method> }>(
     "runtime.request",
     { method, params: params as Record<string, unknown> },
   );
-  return response.result;
+  return parseRuntimeResult(method, response.result);
 }
 
 function translateKernelRequestError(error: unknown): RuntimeClientError {
+  if (error instanceof RuntimeProtocolError) {
+    return new RuntimeClientError(error.code, error.message, false, { cause: error });
+  }
   if (!(error instanceof RuntimeHostOperationError)) {
     // 传输/超时类失败按可重试断连处理：订阅环据此走重连退避。
     return new RuntimeClientError(

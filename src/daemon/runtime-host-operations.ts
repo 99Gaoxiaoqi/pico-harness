@@ -9,6 +9,8 @@ import {
   type OperationSpec,
 } from "@pico/runtime-host";
 import {
+  isJsonObject,
+  isJsonValue,
   parseDesktopRuntimeResult,
   parseStrictRuntimeParams,
   RUNTIME_ERROR_CODES,
@@ -225,18 +227,8 @@ export const PICO_RUNTIME_HOST_OPERATION_SPECS = {
     errors: BRIDGE_ERRORS,
     decodeInput: (value): UsageGetBridgeInput => parseStrictRuntimeParams("usage.get", value),
     decodeOutput: (value): UsageGetBridgeOutput => {
-      // The protocol layer has no result rule for usage.get; validate the shape here.
       requireEncodedByteLimit(value, "usage.get result", USAGE_RESULT_MAX_BYTES);
-      const result = parseDesktopRuntimeResult("usage.get", value) as { usage?: unknown };
-      if (
-        !result ||
-        typeof result.usage !== "object" ||
-        result.usage === null ||
-        Array.isArray(result.usage)
-      ) {
-        throw invalidProtocolFrame("Invalid usage.get result");
-      }
-      return { usage: result.usage as Record<string, unknown> };
+      return parseDesktopRuntimeResult("usage.get", value);
     },
   }),
   [RUNTIME_HOST_BRIDGE_RUNTIME_REQUEST]: defineOperation({
@@ -266,14 +258,22 @@ export const PICO_RUNTIME_HOST_OPERATION_SPECS = {
       };
     },
     decodeOutput: (value): RuntimeRequestBridgeOutput => {
+      if (
+        !isJsonObject(value) ||
+        !Object.hasOwn(value, "result") ||
+        Object.keys(value).length !== 1 ||
+        !isJsonValue(value["result"])
+      ) {
+        throw invalidProtocolFrame("runtime.request output must contain one JSON result");
+      }
       // Passthrough guard: the result must fit a response frame (envelope reserve
       // included) so framing cannot fail after the handler already committed.
       requireEncodedByteLimit(
-        (value as { result?: unknown })?.result,
+        value["result"],
         "runtime.request result",
         RUNTIME_REQUEST_RESULT_MAX_BYTES,
       );
-      return value as RuntimeRequestBridgeOutput;
+      return { result: value["result"] };
     },
   }),
 } satisfies Record<string, AnyOperationSpec>;

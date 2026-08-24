@@ -4025,6 +4025,7 @@ const runtimeSessionResult = resultShape({
   workspacePath: resultString,
   title: resultString,
   status: resultOneOf(["active", "archived"]),
+  pinned: resultBoolean,
   createdAt: resultFiniteNumber,
   updatedAt: resultFiniteNumber,
 });
@@ -4096,6 +4097,241 @@ const runtimeRunResult = resultShape(
     version: resultFiniteNumber,
   },
   { sessionId: resultString, finishedAt: resultFiniteNumber, error: resultString },
+);
+
+const runtimeWorkspaceInitResult = exactResultShape({
+  workspacePath: resultString,
+  files: resultArray(
+    exactResultShape({
+      path: resultOneOf(["AGENTS.md", ".pico/config.json"]),
+      status: resultOneOf(["created", "existing"]),
+    }),
+  ),
+  message: resultString,
+});
+
+const runtimeDiagnosticCheckResult = exactResultShape(
+  {
+    id: resultString,
+    label: resultString,
+    status: resultOneOf(["ok", "warning", "error", "unavailable"]),
+    summary: resultString,
+  },
+  { recommendation: resultString },
+);
+
+const runtimeDiagnosticsResult = exactResultShape({
+  workspacePath: resultString,
+  healthy: resultBoolean,
+  checks: resultArray(runtimeDiagnosticCheckResult),
+  output: resultString,
+});
+
+const runtimePluginDiagnosticResult = exactResultShape(
+  {
+    pluginId: resultString,
+    sourcePath: resultString,
+    message: resultString,
+  },
+  {
+    code: resultString,
+    scope: resultOneOf(["user", "project", "local"]),
+    severity: resultOneOf(["error", "warning", "info"]),
+    compatibility: resultOneOf(["compatible", "degraded", "blocked"]),
+  },
+);
+
+const runtimeResourceDiagnosticsResult = exactResultShape(
+  {
+    workDir: resultString,
+    picoHome: resultString,
+    workspaceStateRoot: resultString,
+    entries: resultArray(
+      exactResultShape(
+        {
+          kind: resultString,
+          origin: resultOneOf(["claude-compat", "legacy", "pico-native", "runtime-state"]),
+          path: resultString,
+          status: resultOneOf(["missing", "present", "unsafe"]),
+          authority: resultBoolean,
+        },
+        { reason: resultString },
+      ),
+    ),
+    findings: resultStringArray,
+    output: resultString,
+  },
+  { pluginDiagnostics: resultArray(runtimePluginDiagnosticResult) },
+);
+
+const runtimeSessionSettingsResult = exactResultShape(
+  {
+    sessionId: resultString,
+    provider: resultOneOf(["openai", "claude"]),
+    model: resultString,
+    collaborationMode: resultOneOf(["agent", "plan"]),
+    orchestrationMode: resultOneOf(["default", "graph"]),
+    permissionMode: resultOneOf(["default", "auto", "yolo"]),
+    thinkingEffort: resultString,
+    thinkingEffortExplicit: resultBoolean,
+    reasoningLevels: resultStringArray,
+  },
+  { modelRouteId: resultString, additionalDirectories: resultStringArray },
+);
+
+const runtimeGoalBudgetConfigResult = exactResultShape(
+  {},
+  {
+    maxTurns: resultFiniteNumber,
+    maxTokens: resultFiniteNumber,
+    maxCostCNY: resultFiniteNumber,
+    maxWallClockMs: resultFiniteNumber,
+  },
+);
+
+const runtimeGoalResult = exactResultShape(
+  {
+    id: resultString,
+    title: resultString,
+    description: resultString,
+    status: resultOneOf(["active", "paused", "blocked", "complete"]),
+    createdAt: resultFiniteNumber,
+    budgetUsage: exactResultShape({
+      turns: resultFiniteNumber,
+      tokens: resultFiniteNumber,
+      costCNY: resultFiniteNumber,
+      startedAt: resultFiniteNumber,
+    }),
+  },
+  {
+    budgetConfig: runtimeGoalBudgetConfigResult,
+    progress: resultString,
+    blockedReason: resultString,
+  },
+);
+
+const runtimeGoalSnapshotResult = exactResultShape({
+  stateVersion: resultOneOf([1]),
+  sequence: resultFiniteNumber,
+  activeGoalId: resultNullable(resultString),
+  goals: resultArray(runtimeGoalResult),
+});
+
+const runtimePlanStepResult = resultShape(
+  {
+    id: resultString,
+    title: resultString,
+    description: resultString,
+    status: resultOneOf(["pending", "in_progress", "completed", "skipped"]),
+  },
+  { note: resultString },
+);
+
+const runtimePlanProposalResult = resultShape(
+  {
+    planId: resultString,
+    revision: resultFiniteNumber,
+    title: resultString,
+    steps: resultArray(runtimePlanStepResult),
+    status: resultOneOf(["pending", "stale", "approved", "rejected"]),
+    proposedAt: resultString,
+  },
+  { overview: resultString, risks: resultStringArray },
+);
+
+const runtimePlanProjectionResult = resultShape(
+  {
+    sessionId: resultString,
+    sessionSequence: resultFiniteNumber,
+    proposals: resultArray(runtimePlanProposalResult),
+  },
+  {
+    latestProposal: runtimePlanProposalResult,
+    pendingProposal: runtimePlanProposalResult,
+  },
+);
+
+const runtimeJobResult = resultShape({
+  jobId: resultString,
+  workspacePath: resultString,
+  name: resultString,
+  prompt: resultString,
+  schedule: resultString,
+  enabled: resultBoolean,
+  status: resultOneOf(["idle", "running", "failed", "succeeded"]),
+  updatedAt: resultFiniteNumber,
+});
+
+const runtimeProviderInputResult = resultShape(
+  {
+    id: resultString,
+    protocol: resultOneOf(["openai", "claude"]),
+    baseURL: resultString,
+    apiKeyEnv: resultString,
+    models: resultStringArray,
+    discoverModels: resultBoolean,
+  },
+  { modelCapabilities: resultJsonObject },
+);
+
+const runtimeProviderProfileResult = resultShape(
+  {
+    id: resultString,
+    protocol: resultOneOf(["openai", "claude"]),
+    baseURL: resultString,
+    apiKeyEnv: resultString,
+    models: resultStringArray,
+    discoverModels: resultBoolean,
+    origin: resultOneOf(["user", "project-legacy", "environment"]),
+    fingerprint: resultString,
+    credentialStatus: resultOneOf(["ready", "missing", "environment", "unsupported"]),
+    credentialSource: resultOneOf(["config", "keychain", "environment", "none"]),
+    storedCredentialPresent: resultBoolean,
+  },
+  { modelCapabilities: resultJsonObject },
+);
+
+const runtimeUserDefaultsResult = exactResultShape(
+  {},
+  {
+    modelRouteId: resultString,
+    collaborationMode: resultOneOf(["agent", "plan"]),
+    orchestrationMode: resultOneOf(["default", "graph"]),
+    permissionMode: resultOneOf(["default", "auto", "yolo"]),
+    mode: resultOneOf(["default", "plan", "auto", "yolo"]),
+    thinkingEffort: resultString,
+  },
+);
+
+const runtimeUserConfigResult = resultShape({
+  version: resultOneOf([1]),
+  defaults: runtimeUserDefaultsResult,
+  providers: resultArray(runtimeProviderInputResult),
+});
+
+const runtimeEffectiveConfigResult = resultShape(
+  {
+    providers: resultArray(runtimeProviderProfileResult),
+    sources: resultJsonObject,
+    revisions: exactResultShape({ user: resultString, project: resultString }),
+  },
+  { defaultModelRouteId: resultString },
+);
+
+const runtimeCatalogAgentResult = resultShape(
+  {
+    name: resultString,
+    description: resultString,
+    source: resultString,
+    sourcePath: resultString,
+    tools: resultStringArray,
+  },
+  { modelRouteId: resultString },
+);
+
+const runtimeCatalogSkillResult = resultShape(
+  { name: resultString, description: resultString },
+  { sourcePath: resultString, allowedTools: resultStringArray, model: resultString },
 );
 
 const workspaceStatusResultRule = resultShape(
@@ -4426,10 +4662,11 @@ const runtimePingResult: RuntimeResultRule = (value, path) => {
   }
 };
 
-const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
-  Record<DesktopRuntimeBoundaryMethod, RuntimeResultRule>
-> = {
+const RUNTIME_RESULT_VALIDATORS = {
   "runtime.ping": runtimePingResult,
+  "workspace.init": runtimeWorkspaceInitResult,
+  "diagnostics.run": runtimeDiagnosticsResult,
+  "diagnostics.resources": runtimeResourceDiagnosticsResult,
   "workspace.list": resultShape({ workspaces: resultArray(workspaceStatusResultRule) }),
   "workspace.status": workspaceStatusResultRule,
   "workspace.register": resultShape({
@@ -4438,6 +4675,24 @@ const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
   }),
   "workspace.trustStatus": resultShape({ workspacePath: resultString, trusted: resultBoolean }),
   "session.list": resultShape({ sessions: resultArray(runtimeSessionResult) }),
+  "session.get": exactResultShape({ session: runtimeSessionResult }),
+  "session.create": exactResultShape({ session: runtimeSessionResult }),
+  "session.archive": exactResultShape({ session: runtimeSessionResult }),
+  "session.restore": exactResultShape({ session: runtimeSessionResult }),
+  "session.pin": exactResultShape({ session: runtimeSessionResult }),
+  "session.unpin": exactResultShape({ session: runtimeSessionResult }),
+  "session.delete": exactResultShape(
+    { sessionId: resultString, deleted: resultOneOf([true]) },
+    { closedSessionIds: resultStringArray },
+  ),
+  "session.rename": exactResultShape({ session: runtimeSessionResult }),
+  "session.compact": exactResultShape({
+    session: runtimeSessionResult,
+    compacted: resultOneOf([true]),
+    beforeMessageCount: resultFiniteNumber,
+    afterMessageCount: resultFiniteNumber,
+  }),
+  "session.settings.get": exactResultShape({ settings: runtimeSessionSettingsResult }),
   "session.context.get": exactResultShape({ context: resultJsonObject }),
   "session.tasks.query": exactResultShape(
     { revision: resultNonNegativeInteger, tasks: resultArray(runtimeSessionTaskResult) },
@@ -4501,12 +4756,23 @@ const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
   }),
   "terminal.stop": exactResultShape({ terminal: runtimeTerminalSessionResult }),
   "terminal.detach": exactResultShape({ detached: resultOneOf([true]) }),
+  "terminal.stopAll": exactResultShape({ stopped: resultNonNegativeInteger }),
+  "terminal.resume": exactResultShape({ accepting: resultOneOf([true]) }),
   "sideChat.create": exactResultShape({
     session: runtimeSessionResult,
     sourceSessionId: resultNonEmptyString,
     throughEventId: resultNonEmptyString,
   }),
   "sideChat.close": exactResultShape({ cleanupScheduled: resultOneOf([true]) }),
+  "session.settings.update": exactResultShape({ settings: runtimeSessionSettingsResult }),
+  "session.directories.add": exactResultShape({
+    directories: resultStringArray,
+    added: resultBoolean,
+  }),
+  "hooks.manage": exactResultShape({ result: resultJsonObject }),
+  "operations.manage": exactResultShape({ result: resultJsonObject }),
+  "plugin.manage": exactResultShape({ result: resultJsonObject }),
+  "goal.get": exactResultShape({ goal: resultNullable(runtimeGoalSnapshotResult) }),
   "session.fork": resultShape({ session: runtimeSessionResult, sourceSessionId: resultString }),
   "session.send": resultShape(
     {
@@ -4567,7 +4833,25 @@ const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
     },
     { nextOffsetBytes: resultNonNegativeInteger },
   ),
+  "run.start": runtimeRunResult,
+  "run.cancel": runtimeRunResult,
+  "run.pause": runtimeRunResult,
+  "run.resume": runtimeRunResult,
+  "run.steer": runtimeRunResult,
   "runs.list": resultShape({ runs: resultArray(runtimeRunResult) }),
+  "approval.respond": exactResultShape({
+    accepted: resultBoolean,
+    alreadyResolved: resultBoolean,
+  }),
+  "plan.respond": exactResultShape(
+    { accepted: resultBoolean, projection: runtimePlanProjectionResult },
+    { run: runtimeRunResult },
+  ),
+  "prompt.respond": exactResultShape({
+    accepted: resultBoolean,
+    alreadyResolved: resultBoolean,
+  }),
+  "prompt.cancel": exactResultShape({ cancelled: resultBoolean }),
   "changes.list": resultShape({
     changes: resultArray(runtimeChangeResult),
     fingerprint: resultString,
@@ -4577,6 +4861,47 @@ const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
     patch: resultString,
     truncated: resultBoolean,
     fingerprint: resultString,
+  }),
+  "changes.review": exactResultShape({ accepted: resultBoolean, fingerprint: resultString }),
+  "changes.apply": exactResultShape({ applied: resultBoolean, fingerprint: resultString }),
+  "rewind.list": exactResultShape({
+    checkpoints: resultArray(
+      resultShape({
+        checkpointId: resultString,
+        label: resultString,
+        createdAt: resultFiniteNumber,
+      }),
+    ),
+  }),
+  "rewind.preview": exactResultShape({
+    checkpointId: resultString,
+    changes: resultArray(runtimeChangeResult),
+    fingerprint: resultString,
+  }),
+  "rewind.apply": exactResultShape({ applied: resultBoolean, sessionId: resultString }),
+  "rewind.changes": exactResultShape(
+    {
+      checkpointId: resultString,
+      files: resultArray(
+        resultShape({
+          path: resultString,
+          status: resultOneOf(["created", "deleted", "modified"]),
+          additions: resultFiniteNumber,
+          deletions: resultFiniteNumber,
+          fingerprint: resultString,
+          patch: resultString,
+          truncated: resultBoolean,
+        }),
+      ),
+      addedLines: resultFiniteNumber,
+      removedLines: resultFiniteNumber,
+    },
+    { partial: resultBoolean, warnings: resultStringArray },
+  ),
+  "rewind.restoreFile": exactResultShape({
+    restored: resultBoolean,
+    path: resultString,
+    status: resultOneOf(["created", "deleted", "modified"]),
   }),
   "memory.list": exactResultShape({ facts: resultArray(memoryFactResult) }),
   "memory.get": exactResultShape({ fact: memoryFactResult }),
@@ -4606,6 +4931,73 @@ const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
       truncated: resultBoolean,
     }),
   }),
+  "jobs.list": exactResultShape({ jobs: resultArray(runtimeJobResult) }),
+  "jobs.create": exactResultShape({ job: runtimeJobResult }),
+  "jobs.update": exactResultShape({ job: runtimeJobResult }),
+  "jobs.delete": exactResultShape({ deleted: resultBoolean }),
+  "jobs.setEnabled": exactResultShape({ job: runtimeJobResult }),
+  "jobs.runNow": exactResultShape({ job: runtimeJobResult, runId: resultString }),
+  "jobs.history": exactResultShape({ runs: resultArray(runtimeRunResult) }),
+  "automation.credential.import": exactResultShape({
+    imported: resultOneOf([true]),
+    credentialRef: resultString,
+  }),
+  "automation.create": exactResultShape({ job: runtimeJobResult }),
+  "config.get": exactResultShape({ config: resultJsonObject, version: resultFiniteNumber }),
+  "config.update": exactResultShape({ config: resultJsonObject, version: resultFiniteNumber }),
+  "config.providers": exactResultShape({ providers: resultArray(resultJsonObject) }),
+  "config.user.get": exactResultShape({
+    config: runtimeUserConfigResult,
+    revision: resultString,
+  }),
+  "config.user.update": exactResultShape({
+    config: runtimeUserConfigResult,
+    revision: resultString,
+  }),
+  "config.effective.get": exactResultShape({ config: runtimeEffectiveConfigResult }),
+  "provider.list": exactResultShape({
+    providers: resultArray(runtimeProviderProfileResult),
+    revision: resultString,
+  }),
+  "provider.upsert": exactResultShape({
+    provider: runtimeProviderProfileResult,
+    revision: resultString,
+  }),
+  "provider.importEnvironment": exactResultShape({
+    provider: runtimeProviderProfileResult,
+    revision: resultString,
+  }),
+  "provider.delete": exactResultShape({
+    deleted: resultOneOf([true]),
+    revision: resultString,
+  }),
+  "provider.credential.status": exactResultShape({
+    providerId: resultString,
+    status: resultOneOf(["ready", "missing", "environment", "unsupported"]),
+    source: resultOneOf(["config", "keychain", "environment", "none"]),
+    storedCredentialPresent: resultBoolean,
+    providerFingerprint: resultString,
+  }),
+  "provider.credential.set": exactResultShape({
+    providerId: resultString,
+    status: resultOneOf(["ready"]),
+    source: resultOneOf(["config"]),
+    storedCredentialPresent: resultOneOf([true]),
+    providerFingerprint: resultString,
+    revision: resultString,
+  }),
+  "provider.credential.delete": exactResultShape({
+    providerId: resultString,
+    status: resultOneOf(["ready", "missing", "environment", "unsupported"]),
+    source: resultOneOf(["config", "keychain", "environment", "none"]),
+    storedCredentialPresent: resultBoolean,
+    providerFingerprint: resultString,
+    revision: resultString,
+  }),
+  "catalog.agents": exactResultShape({ agents: resultArray(runtimeCatalogAgentResult) }),
+  "catalog.skills": exactResultShape({ skills: resultArray(runtimeCatalogSkillResult) }),
+  "config.skills": exactResultShape({ skills: resultArray(resultJsonObject) }),
+  "config.mcpServers": exactResultShape({ servers: resultArray(resultJsonObject) }),
   "skills.user.list": exactResultShape({
     skills: resultArray(runtimeScopedSkillResult),
     revision: resultString,
@@ -4635,6 +5027,15 @@ const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
     servers: resultArray(runtimeScopedMcpServerResult),
     revisions: runtimeCapabilityRevisionsResult,
   }),
+  "usage.get": exactResultShape({ usage: resultJsonObject }),
+  "workspace.unregister": exactResultShape({
+    workspacePath: resultString,
+    registered: resultOneOf([false]),
+  }),
+  "workspace.trust": exactResultShape({
+    workspacePath: resultString,
+    trusted: resultBoolean,
+  }),
   "events.replay": resultShape(
     { events: resultArray(durableRuntimeNotificationResult), hasMore: resultBoolean },
     { nextAfterEventId: resultString, highWatermarkEventId: resultString },
@@ -4647,20 +5048,26 @@ const DESKTOP_CRITICAL_RESULT_VALIDATORS: Partial<
     },
     { nextAfterEventId: resultString, highWatermarkEventId: resultString },
   ),
-};
+} satisfies Readonly<Record<RuntimeMethod, RuntimeResultRule>>;
 
 /**
- * Validates the daemon results required for Desktop bootstrap and its conversation/run path.
- * Other allowlisted methods retain their existing feature-local parsing until they become a
- * startup or state-authority dependency; this intentionally is not a generated whole protocol.
+ * Applies the method-specific response contract at every Runtime client boundary.
  */
-export function parseDesktopRuntimeResult<Method extends DesktopRuntimeBoundaryMethod>(
+export function parseRuntimeResult<Method extends RuntimeMethod>(
   method: Method,
   value: unknown,
 ): RuntimeResult<Method> {
   if (!isJsonValue(value)) throw invalidResult(`${method} result 必须是 JSON 值`);
-  DESKTOP_CRITICAL_RESULT_VALIDATORS[method]?.(value, `${method} result`);
+  RUNTIME_RESULT_VALIDATORS[method](value, `${method} result`);
   return value as RuntimeResult<Method>;
+}
+
+/** Desktop-compatible alias retained for the preload/Main boundary. */
+export function parseDesktopRuntimeResult<Method extends DesktopRuntimeBoundaryMethod>(
+  method: Method,
+  value: unknown,
+): RuntimeResult<Method> {
+  return parseRuntimeResult(method, value);
 }
 
 export function isRuntimeErrorCode(value: unknown): value is RuntimeErrorCode {

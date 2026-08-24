@@ -52,6 +52,7 @@ test("continuity source and replica reassemble oversized UTF-8 open/page/advance
     workspacePath,
     title: "Large transcript",
     status: "active",
+    pinned: false,
     createdAt: 1,
     updatedAt: 1,
   } as RuntimeSession;
