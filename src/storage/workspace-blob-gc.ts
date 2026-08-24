@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, lstatSync, readdirSync, type Dirent } from "node:fs";
-import { lstat, open, unlink } from "node:fs/promises";
+import { lstat, open, realpath, unlink } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
+import { withVerifiedEvidenceDirectory } from "../context/evidence-blob-store.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { LeaseConflictError, OwnerLease } from "./owner-lease.js";
 import {
@@ -124,10 +125,7 @@ async function applyIntent(
         if (!isFileHistoryMutationLeaseHeld(paths.home.fileHistory)) {
           throw new Error("File History mutation lease was lost before unlink");
         }
-        await unlinkCasBlobIfPresent(
-          join(paths.home.fileHistory, "blobs", "sha256", intent.digest.slice(0, 2), intent.digest),
-          intent,
-        );
+        await unlinkVerifiedCasBlobIfPresent(paths.home.fileHistory, intent);
       },
       { waitForExternalLease: false },
     );
@@ -141,10 +139,36 @@ async function applyIntent(
     ) {
       throw new Error(`Evidence blob ${intent.digest} is still referenced`);
     }
-    await unlinkCasBlobIfPresent(
-      join(paths.workspace.evidence, "blobs", "sha256", intent.digest.slice(0, 2), intent.digest),
-      intent,
-    );
+    try {
+      await withVerifiedEvidenceDirectory(
+        paths.workspace.evidence,
+        ["blobs", "sha256", intent.digest.slice(0, 2)],
+        { create: false },
+        async (directory) => {
+          let handle;
+          try {
+            handle = await directory.openRegularFile(intent.digest, "Evidence blob GC target");
+          } catch (error) {
+            if (isMissing(error)) return;
+            throw error;
+          }
+          try {
+            const metadata = await handle.stat();
+            if (intent.byteLength !== undefined && metadata.size !== intent.byteLength) {
+              throw new Error(
+                `Blob GC target size mismatch for ${intent.digest}: expected ${intent.byteLength}, found ${metadata.size}`,
+              );
+            }
+            await directory.unlinkFile(intent.digest);
+            await directory.sync();
+          } finally {
+            await handle.close().catch(() => undefined);
+          }
+        },
+      );
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+    }
     return;
   }
 
@@ -153,6 +177,7 @@ async function applyIntent(
   }
   const assetPath = resolveRuntimeAssetPath(intent.storageUri);
   assertContainedPath(paths.workspace.root, assetPath);
+  if (!(await realPathIsContained(paths.workspace.root, assetPath))) return;
   await verifyAndUnlinkRuntimeAsset(assetPath, intent);
 }
 
@@ -318,24 +343,41 @@ function databaseJsonColumnContains(
   return row?.["present"] === 1;
 }
 
-async function unlinkCasBlobIfPresent(path: string, intent: BlobGcIntent): Promise<void> {
-  let metadata;
+async function unlinkVerifiedCasBlobIfPresent(
+  baseDirectory: string,
+  intent: BlobGcIntent,
+): Promise<void> {
   try {
-    metadata = await lstat(path);
+    await withVerifiedEvidenceDirectory(
+      baseDirectory,
+      ["blobs", "sha256", intent.digest.slice(0, 2)],
+      { create: false },
+      async (directory) => {
+        let handle;
+        try {
+          handle = await directory.openRegularFile(intent.digest, "CAS blob GC target");
+        } catch (error) {
+          if (isMissing(error)) return;
+          throw error;
+        }
+        try {
+          const metadata = await handle.stat();
+          if (intent.byteLength !== undefined && metadata.size !== intent.byteLength) {
+            throw new Error(
+              `Blob GC target size mismatch for ${intent.digest}: expected ${intent.byteLength}, found ${metadata.size}`,
+            );
+          }
+          await directory.unlinkFile(intent.digest);
+          await directory.sync();
+        } finally {
+          await handle.close().catch(() => undefined);
+        }
+      },
+    );
   } catch (error) {
     if (isMissing(error)) return;
     throw error;
   }
-  if (!metadata.isFile() || metadata.isSymbolicLink()) {
-    throw new Error(`Blob GC target is not a regular non-symlink file: ${path}`);
-  }
-  if (intent.byteLength !== undefined && metadata.size !== intent.byteLength) {
-    throw new Error(
-      `Blob GC target size mismatch for ${intent.digest}: expected ${intent.byteLength}, found ${metadata.size}`,
-    );
-  }
-  await unlink(path);
-  await syncDirectory(dirname(path));
 }
 
 async function verifyAndUnlinkRuntimeAsset(path: string, intent: BlobGcIntent): Promise<void> {
@@ -385,6 +427,19 @@ function assertContainedPath(root: string, candidate: string): void {
   if (!relativePath || relativePath.startsWith("..") || isAbsolute(relativePath)) {
     throw new Error(`Runtime asset path is outside the workspace storage root: ${candidate}`);
   }
+}
+
+async function realPathIsContained(root: string, candidate: string): Promise<boolean> {
+  let physicalCandidate: string;
+  try {
+    physicalCandidate = await realpath(candidate);
+  } catch (error) {
+    if (isMissing(error)) return false;
+    throw error;
+  }
+  const physicalRoot = await realpath(root);
+  assertContainedPath(physicalRoot, physicalCandidate);
+  return true;
 }
 
 async function syncDirectory(directory: string): Promise<void> {
