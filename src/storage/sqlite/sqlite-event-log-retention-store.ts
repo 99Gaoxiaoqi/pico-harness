@@ -98,6 +98,7 @@ export interface EventLogBlobGcIntent {
   readonly kind: EventLogBlobGcKind;
   readonly digest: string;
   readonly byteLength: number;
+  readonly storageUri?: string;
   readonly status: "pending" | "failed";
   readonly attemptCount: number;
   readonly lastError: string | null;
@@ -157,6 +158,7 @@ interface BlobReference {
   readonly sessionId: string;
   readonly digest: string;
   readonly byteLength: number;
+  readonly storageUri?: string;
 }
 
 interface BlobReferenceSnapshot {
@@ -175,6 +177,7 @@ interface NewBlobGcIntent {
   readonly kind: EventLogBlobGcKind;
   readonly digest: string;
   readonly byteLength: number;
+  readonly storageUri?: string;
 }
 
 const EMPTY_BREAKDOWN = Object.freeze({
@@ -249,7 +252,7 @@ export function readPendingEventLogBlobGcIntents(
       readBlobGcIntentRows(
         lease.database
           .prepare(
-            `SELECT intent_id, blob_kind, digest, byte_length, status,
+            `SELECT intent_id, blob_kind, digest, byte_length, storage_uri, status,
                     attempt_count, last_error, created_at, updated_at
              FROM retention_gc_intents
              WHERE completed_at IS NULL
@@ -885,18 +888,23 @@ function collectOrphanGcIntents(
 ): NewBlobGcIntent[] {
   const intents: NewBlobGcIntent[] = [];
   for (const kind of ["evidence", "fileHistory", "runtimeAsset"] as const) {
-    const survivors = new Set(after[kind].map(({ digest }) => digest));
-    const candidates = new Map<string, number>();
+    const survivors = new Set(
+      after[kind].map((reference) => blobReferenceIdentity(kind, reference)),
+    );
+    const candidates = new Map<string, BlobReference>();
     for (const reference of before[kind]) {
       if (deletedSessionIds.has(reference.sessionId)) {
-        candidates.set(
-          reference.digest,
-          Math.max(candidates.get(reference.digest) ?? 0, reference.byteLength),
-        );
+        const identity = blobReferenceIdentity(kind, reference);
+        const existing = candidates.get(identity);
+        candidates.set(identity, {
+          ...reference,
+          byteLength: Math.max(existing?.byteLength ?? 0, reference.byteLength),
+        });
       }
     }
-    for (const [digest, byteLength] of candidates) {
-      if (survivors.has(digest)) continue;
+    for (const [identity, reference] of candidates) {
+      if (survivors.has(identity)) continue;
+      const { digest, byteLength, storageUri } = reference;
       if (kind === "evidence") {
         const row = database
           .prepare("SELECT size_bytes FROM evidence_blobs WHERE digest = ?")
@@ -913,6 +921,7 @@ function collectOrphanGcIntents(
           kind: kind === "fileHistory" ? "file_history" : "runtime_asset",
           digest,
           byteLength,
+          ...(storageUri === undefined ? {} : { storageUri }),
         });
       }
     }
@@ -930,12 +939,15 @@ function persistBlobGcIntentsLocked(
   for (const intent of intents) {
     const existing = database
       .prepare(
-        `SELECT intent_id, blob_kind, digest, byte_length, status,
+        `SELECT intent_id, blob_kind, digest, byte_length, storage_uri, status,
                 attempt_count, last_error, created_at, updated_at
          FROM retention_gc_intents
-         WHERE blob_kind = ? AND digest = ? AND completed_at IS NULL`,
+         WHERE blob_kind = ? AND digest = ? AND completed_at IS NULL
+           AND (blob_kind != 'runtime_asset' OR storage_uri IS ?)`,
       )
-      .get(intent.kind, intent.digest) as Record<string, unknown> | undefined;
+      .get(intent.kind, intent.digest, intent.storageUri ?? null) as
+      | Record<string, unknown>
+      | undefined;
     if (existing) {
       const intentId = requireString(existing["intent_id"], "retention_gc_intents.intent_id");
       if (
@@ -944,12 +956,14 @@ function persistBlobGcIntentsLocked(
       ) {
         database
           .prepare(
-            "UPDATE retention_gc_intents SET byte_length = ?, updated_at = ? WHERE intent_id = ?",
+            `UPDATE retention_gc_intents
+             SET byte_length = ?, storage_uri = COALESCE(storage_uri, ?), updated_at = ?
+             WHERE intent_id = ?`,
           )
-          .run(intent.byteLength, Date.now(), intentId);
+          .run(intent.byteLength, intent.storageUri ?? null, Date.now(), intentId);
         const updated = database
           .prepare(
-            `SELECT intent_id, blob_kind, digest, byte_length, status,
+            `SELECT intent_id, blob_kind, digest, byte_length, storage_uri, status,
                     attempt_count, last_error, created_at, updated_at
              FROM retention_gc_intents WHERE intent_id = ?`,
           )
@@ -964,13 +978,20 @@ function persistBlobGcIntentsLocked(
     const inserted = database
       .prepare(
         `INSERT INTO retention_gc_intents (
-           intent_id, blob_kind, digest, byte_length, status,
+           intent_id, blob_kind, digest, byte_length, storage_uri, status,
            attempt_count, last_error, created_at, updated_at, completed_at
-         ) VALUES (lower(hex(randomblob(16))), ?, ?, ?, 'pending', 0, NULL, ?, ?, NULL)
-         RETURNING intent_id, blob_kind, digest, byte_length, status,
+         ) VALUES (lower(hex(randomblob(16))), ?, ?, ?, ?, 'pending', 0, NULL, ?, ?, NULL)
+         RETURNING intent_id, blob_kind, digest, byte_length, storage_uri, status,
                    attempt_count, last_error, created_at, updated_at`,
       )
-      .get(intent.kind, intent.digest, intent.byteLength, now, now) as Record<string, unknown>;
+      .get(
+        intent.kind,
+        intent.digest,
+        intent.byteLength,
+        intent.storageUri ?? null,
+        now,
+        now,
+      ) as Record<string, unknown>;
     persisted.push(...readBlobGcIntentRows([inserted]));
   }
   return persisted.toSorted(
@@ -988,11 +1009,13 @@ function readBlobGcIntentRows(rows: readonly Record<string, unknown>[]): EventLo
     if (lastError !== null && lastError !== undefined && typeof lastError !== "string") {
       throw new Error("retention_gc_intents.last_error is invalid");
     }
+    const storageUri = optionalStorageUri(row["storage_uri"]);
     return {
       intentId: requireString(row["intent_id"], "retention_gc_intents.intent_id"),
       kind: requireBlobGcKind(row["blob_kind"]),
       digest: requireDigest(row["digest"], "retention_gc_intents.digest"),
       byteLength: requireNonNegativeInteger(row["byte_length"], "retention_gc_intents.byte_length"),
+      ...(storageUri === undefined ? {} : { storageUri }),
       status,
       attemptCount: requireNonNegativeInteger(
         row["attempt_count"],
@@ -1093,6 +1116,7 @@ function readUnattributedControlBytes(database: DatabaseSync): number {
       "intent_id",
       "blob_kind",
       "digest",
+      "storage_uri",
       "status",
       "last_error",
     ]),
@@ -1462,13 +1486,30 @@ function readFileHistoryReferences(database: DatabaseSync): BlobReference[] {
 function readRuntimeAssetReferences(database: DatabaseSync): BlobReference[] {
   return (
     database
-      .prepare("SELECT session_id, content_digest, byte_length FROM runtime_storage_assets")
+      .prepare(
+        "SELECT session_id, content_digest, byte_length, storage_uri FROM runtime_storage_assets",
+      )
       .all() as Array<Record<string, unknown>>
   ).map((row) => ({
     sessionId: requireString(row["session_id"], "runtime_storage_assets.session_id"),
     digest: requireDigest(row["content_digest"], "runtime_storage_assets.content_digest"),
     byteLength: requireNonNegativeInteger(row["byte_length"], "runtime_storage_assets.byte_length"),
+    storageUri: requireString(row["storage_uri"], "runtime_storage_assets.storage_uri"),
   }));
+}
+
+function blobReferenceIdentity(
+  kind: keyof BlobReferenceSnapshot,
+  reference: BlobReference,
+): string {
+  return kind === "runtimeAsset"
+    ? `${reference.digest}\u0000${reference.storageUri ?? ""}`
+    : reference.digest;
+}
+
+function optionalStorageUri(value: unknown): string | undefined {
+  if (value === null || value === undefined) return undefined;
+  return requireString(value, "retention_gc_intents.storage_uri");
 }
 
 function extractBlobReferences(sessionId: string, value: unknown): BlobReference[] {

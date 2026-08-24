@@ -884,6 +884,10 @@ test("sqlite EventLog retention: cascades manifests and durably records only zer
         { kind: "runtime_asset", digest: ASSET_DIGEST, byteLength: 303 },
       ],
     );
+    assert.equal(
+      second.blobGcIntents.find(({ kind }) => kind === "runtime_asset")?.storageUri,
+      "cas://shared",
+    );
     closeAllOperationalDatabasesForTest();
     assert.equal(readPendingEventLogBlobGcIntents({ storageRoot }).length, 3);
     withWorkspaceSqliteLease(storageRoot, (lease) =>

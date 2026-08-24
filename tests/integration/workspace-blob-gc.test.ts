@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -150,22 +151,53 @@ test("Runtime asset GC fails closed for paths outside the workspace storage root
   }
 });
 
+test("Retention runtime asset intents retain their URI and delete only verified in-root files", async () => {
+  const fixture = createFixture("retention-runtime-asset");
+  try {
+    const paths = resolvePicoPaths(fixture.workDir, { picoHome: fixture.picoHome });
+    const assetDirectory = join(paths.workspace.root, "runtime-assets");
+    const assetPath = join(assetDirectory, "asset.bin");
+    const contents = Buffer.from("runtime asset", "utf8");
+    const digest = createHash("sha256").update(contents).digest("hex");
+    mkdirSync(assetDirectory, { recursive: true });
+    writeFileSync(assetPath, contents, { mode: 0o600 });
+    insertRetentionIntent(
+      paths.workspace.root,
+      "retention-runtime-asset",
+      "runtime_asset",
+      digest,
+      contents.byteLength,
+      assetPath,
+    );
+
+    const result = await runWorkspaceBlobGcOnce({
+      workDir: fixture.workDir,
+      picoHome: fixture.picoHome,
+    });
+    assert.equal(result.completed, 1);
+    assert.equal(existsSync(assetPath), false);
+  } finally {
+    cleanupFixture(fixture.root);
+  }
+});
+
 function insertRetentionIntent(
   storageRoot: string,
   intentId: string,
   kind: "evidence" | "file_history" | "runtime_asset",
   digest: string,
   byteLength: number,
+  storageUri?: string,
 ): void {
   withWorkspaceSqliteLease(storageRoot, (lease) => {
     lease.database
       .prepare(
         `INSERT INTO retention_gc_intents (
-           intent_id, blob_kind, digest, byte_length, status, attempt_count,
+           intent_id, blob_kind, digest, byte_length, storage_uri, status, attempt_count,
            last_error, created_at, updated_at, completed_at
-         ) VALUES (?, ?, ?, ?, 'pending', 0, NULL, 1, 1, NULL)`,
+         ) VALUES (?, ?, ?, ?, ?, 'pending', 0, NULL, 1, 1, NULL)`,
       )
-      .run(intentId, kind, digest, byteLength);
+      .run(intentId, kind, digest, byteLength, storageUri ?? null);
   });
 }
 

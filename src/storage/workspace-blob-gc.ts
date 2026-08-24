@@ -200,7 +200,7 @@ function readPendingIntents(storageRoot: string, limit: number, now: Date): Blob
           ? []
           : (lease.database
               .prepare(
-                `SELECT intent_id, blob_kind, digest, byte_length, attempt_count
+                `SELECT intent_id, blob_kind, digest, byte_length, storage_uri, attempt_count
                  FROM retention_gc_intents
                  WHERE completed_at IS NULL
                    AND (status = 'pending' OR updated_at <= ?)
@@ -484,12 +484,14 @@ function decodeRetentionIntent(row: Record<string, unknown>): BlobGcIntent {
   if (kind !== "evidence" && kind !== "file_history" && kind !== "runtime_asset") {
     throw new Error(`Unsupported retention GC blob kind: ${kind}`);
   }
+  const storageUri = optionalString(row["storage_uri"], "storage_uri");
   return {
     source: "retention",
     intentId: requiredString(row["intent_id"], "intent_id"),
     kind,
     digest: requiredString(row["digest"], "digest"),
     byteLength: requiredNonNegativeInteger(row["byte_length"], "byte_length"),
+    ...(storageUri === undefined ? {} : { storageUri }),
     requiresReferenceCheck: kind !== "runtime_asset",
     attemptCount: requiredNonNegativeInteger(row["attempt_count"], "attempt_count"),
   };
