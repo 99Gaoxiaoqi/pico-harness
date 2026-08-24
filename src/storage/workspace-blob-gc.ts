@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, lstatSync, readdirSync, type Dirent } from "node:fs";
-import { lstat, open, realpath, unlink } from "node:fs/promises";
+import { lstatSync, readdirSync, type BigIntStats, type Dirent } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import { withVerifiedEvidenceDirectory } from "../context/evidence-blob-store.js";
+import {
+  type VerifiedEvidenceDirectory,
+  withVerifiedEvidenceDirectory,
+} from "../context/evidence-blob-store.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { LeaseConflictError, OwnerLease } from "./owner-lease.js";
 import {
@@ -46,6 +48,10 @@ export interface WorkspaceBlobGcResult {
   readonly processed: number;
   readonly completed: number;
   readonly retryable: number;
+  /** More intents are already due and should be drained without waiting for another event. */
+  readonly hasMore: boolean;
+  /** Earliest epoch timestamp at which a retryable intent becomes due. */
+  readonly nextWakeAt?: number;
 }
 
 /**
@@ -62,6 +68,7 @@ export async function runWorkspaceBlobGcOnce(
   }
 
   const paths = resolvePicoPaths(options.workDir, { picoHome: options.picoHome });
+  const startedAt = options.now?.() ?? new Date();
   let lease: OwnerLease;
   try {
     lease = await OwnerLease.acquire({
@@ -71,7 +78,14 @@ export async function runWorkspaceBlobGcOnce(
     });
   } catch (error) {
     if (error instanceof LeaseConflictError) {
-      return { status: "lease_busy", processed: 0, completed: 0, retryable: 0 };
+      return {
+        status: "lease_busy",
+        processed: 0,
+        completed: 0,
+        retryable: 0,
+        hasMore: false,
+        nextWakeAt: startedAt.getTime() + 1_000,
+      };
     }
     throw error;
   }
@@ -80,7 +94,7 @@ export async function runWorkspaceBlobGcOnce(
   let completed = 0;
   let retryable = 0;
   try {
-    const intents = readPendingIntents(paths.workspace.root, limit, options.now?.() ?? new Date());
+    const intents = readPendingIntents(paths.workspace.root, limit, startedAt);
     for (const intent of intents) {
       await lease.assertOwnership();
       processed += 1;
@@ -100,7 +114,8 @@ export async function runWorkspaceBlobGcOnce(
   } finally {
     await lease.release();
   }
-  return { status: "completed", processed, completed, retryable };
+  const schedule = readPendingIntentSchedule(paths.workspace.root, options.now?.() ?? new Date());
+  return { status: "completed", processed, completed, retryable, ...schedule };
 }
 
 async function applyIntent(
@@ -176,9 +191,20 @@ async function applyIntent(
     throw new Error(`Runtime asset ${intent.digest} has no replayable storage URI`);
   }
   const assetPath = resolveRuntimeAssetPath(intent.storageUri);
-  assertContainedPath(paths.workspace.root, assetPath);
-  if (!(await realPathIsContained(paths.workspace.root, assetPath))) return;
-  await verifyAndUnlinkRuntimeAsset(assetPath, intent);
+  const relativeAssetPath = containedRelativePath(paths.workspace.root, assetPath);
+  const pathParts = relativeAssetPath.split(sep);
+  const fileName = pathParts.pop();
+  if (!fileName) throw new Error(`Runtime asset path has no file name: ${assetPath}`);
+  try {
+    await withVerifiedEvidenceDirectory(
+      paths.workspace.root,
+      pathParts,
+      { create: false },
+      async (directory) => verifyAndUnlinkRuntimeAsset(directory, fileName, intent),
+    );
+  } catch (error) {
+    if (!isMissing(error)) throw error;
+  }
 }
 
 function readPendingIntents(storageRoot: string, limit: number, now: Date): BlobGcIntent[] {
@@ -208,6 +234,68 @@ function readPendingIntents(storageRoot: string, limit: number, now: Date): Blob
               )
               .all(now.getTime() - 60_000, remaining) as Array<Record<string, unknown>>);
       return [...hardCut.map(decodeHardCutIntent), ...retention.map(decodeRetentionIntent)];
+    }),
+  );
+}
+
+function readPendingIntentSchedule(
+  storageRoot: string,
+  now: Date,
+): { readonly hasMore: boolean; readonly nextWakeAt?: number } {
+  return withWorkspaceSqliteLease(storageRoot, (lease) =>
+    lease.transaction("read", () => {
+      const hardCutDue = lease.database
+        .prepare(
+          `SELECT 1 AS due FROM event_log_blob_gc_intents
+           WHERE state = 'pending'
+              OR (state = 'retryable' AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
+           LIMIT 1`,
+        )
+        .get(now.toISOString()) as Record<string, unknown> | undefined;
+      const retentionCutoff = now.getTime() - 60_000;
+      const retentionDue = lease.database
+        .prepare(
+          `SELECT 1 AS due FROM retention_gc_intents
+           WHERE completed_at IS NULL
+             AND (status = 'pending' OR updated_at <= ?)
+           LIMIT 1`,
+        )
+        .get(retentionCutoff) as Record<string, unknown> | undefined;
+
+      const hardCutFuture = lease.database
+        .prepare(
+          `SELECT next_attempt_at FROM event_log_blob_gc_intents
+           WHERE state = 'retryable' AND next_attempt_at > ?
+           ORDER BY next_attempt_at LIMIT 1`,
+        )
+        .get(now.toISOString()) as Record<string, unknown> | undefined;
+      const retentionFuture = lease.database
+        .prepare(
+          `SELECT updated_at FROM retention_gc_intents
+           WHERE completed_at IS NULL AND status <> 'pending' AND updated_at > ?
+           ORDER BY updated_at LIMIT 1`,
+        )
+        .get(retentionCutoff) as Record<string, unknown> | undefined;
+
+      const wakeTimes: number[] = [];
+      if (hardCutFuture) {
+        const nextAttemptAt = Date.parse(
+          requiredString(hardCutFuture["next_attempt_at"], "next_attempt_at"),
+        );
+        if (!Number.isFinite(nextAttemptAt)) {
+          throw new Error("next_attempt_at must be a valid ISO timestamp");
+        }
+        wakeTimes.push(nextAttemptAt);
+      }
+      if (retentionFuture) {
+        wakeTimes.push(
+          requiredNonNegativeInteger(retentionFuture["updated_at"], "updated_at") + 60_000,
+        );
+      }
+      return {
+        hasMore: hardCutDue !== undefined || retentionDue !== undefined,
+        ...(wakeTimes.length === 0 ? {} : { nextWakeAt: Math.min(...wakeTimes) }),
+      };
     }),
   );
 }
@@ -380,38 +468,42 @@ async function unlinkVerifiedCasBlobIfPresent(
   }
 }
 
-async function verifyAndUnlinkRuntimeAsset(path: string, intent: BlobGcIntent): Promise<void> {
-  let before;
+async function verifyAndUnlinkRuntimeAsset(
+  directory: VerifiedEvidenceDirectory,
+  fileName: string,
+  intent: BlobGcIntent,
+): Promise<void> {
+  let handle;
   try {
-    before = await lstat(path, { bigint: true });
+    handle = await directory.openRegularFile(fileName, "Runtime asset GC target");
   } catch (error) {
     if (isMissing(error)) return;
     throw error;
   }
-  if (!before.isFile() || before.isSymbolicLink()) {
-    throw new Error(`Runtime asset is not a regular non-symlink file: ${path}`);
+  try {
+    const before = await handle.stat({ bigint: true });
+    if (intent.byteLength !== undefined && before.size !== BigInt(intent.byteLength)) {
+      throw new Error(`Runtime asset size does not match GC intent ${intent.intentId}`);
+    }
+    const digest = createHash("sha256");
+    for await (const chunk of handle.createReadStream({ autoClose: false })) {
+      digest.update(chunk as Buffer);
+    }
+    if (digest.digest("hex") !== intent.digest) {
+      throw new Error(`Runtime asset digest does not match GC intent ${intent.intentId}`);
+    }
+    const after = await handle.stat({ bigint: true });
+    if (!sameFileVersion(before, after)) {
+      throw new Error(
+        `Runtime asset changed during GC verification: ${directory.path}/${fileName}`,
+      );
+    }
+    await directory.assertStable();
+    await directory.unlinkFile(fileName, handle, "Runtime asset GC target");
+    await directory.sync();
+  } finally {
+    await handle.close().catch(() => undefined);
   }
-  if (intent.byteLength !== undefined && before.size !== BigInt(intent.byteLength)) {
-    throw new Error(`Runtime asset size does not match GC intent ${intent.intentId}`);
-  }
-  const digest = createHash("sha256");
-  for await (const chunk of createReadStream(path)) digest.update(chunk as Buffer);
-  if (digest.digest("hex") !== intent.digest) {
-    throw new Error(`Runtime asset digest does not match GC intent ${intent.intentId}`);
-  }
-  const after = await lstat(path, { bigint: true });
-  if (
-    after.isSymbolicLink() ||
-    !after.isFile() ||
-    after.dev !== before.dev ||
-    after.ino !== before.ino ||
-    after.size !== before.size ||
-    after.mtimeNs !== before.mtimeNs
-  ) {
-    throw new Error(`Runtime asset changed during GC verification: ${path}`);
-  }
-  await unlink(path);
-  await syncDirectory(dirname(path));
 }
 
 function resolveRuntimeAssetPath(storageUri: string): string {
@@ -422,36 +514,24 @@ function resolveRuntimeAssetPath(storageUri: string): string {
   return resolve(storageUri);
 }
 
-function assertContainedPath(root: string, candidate: string): void {
+function containedRelativePath(root: string, candidate: string): string {
   const relativePath = relative(resolve(root), resolve(candidate));
   if (!relativePath || relativePath.startsWith("..") || isAbsolute(relativePath)) {
     throw new Error(`Runtime asset path is outside the workspace storage root: ${candidate}`);
   }
+  return relativePath;
 }
 
-async function realPathIsContained(root: string, candidate: string): Promise<boolean> {
-  let physicalCandidate: string;
-  try {
-    physicalCandidate = await realpath(candidate);
-  } catch (error) {
-    if (isMissing(error)) return false;
-    throw error;
-  }
-  const physicalRoot = await realpath(root);
-  assertContainedPath(physicalRoot, physicalCandidate);
-  return true;
-}
-
-async function syncDirectory(directory: string): Promise<void> {
-  let handle;
-  try {
-    handle = await open(directory, "r");
-    await handle.sync();
-  } catch (error) {
-    if (!isUnsupportedDirectorySync(error)) throw error;
-  } finally {
-    await handle?.close().catch(() => undefined);
-  }
+function sameFileVersion(left: BigIntStats, right: BigIntStats): boolean {
+  return (
+    left.isFile() &&
+    right.isFile() &&
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  );
 }
 
 function decodeHardCutIntent(row: Record<string, unknown>): BlobGcIntent {
@@ -530,13 +610,6 @@ function optionalNonNegativeInteger(value: unknown, label: string): number | und
 
 function isMissing(error: unknown): boolean {
   return isNodeError(error) && error.code === "ENOENT";
-}
-
-function isUnsupportedDirectorySync(error: unknown): boolean {
-  return (
-    isNodeError(error) &&
-    new Set(["EACCES", "EINVAL", "EISDIR", "ENOTSUP", "EPERM"]).has(error.code ?? "")
-  );
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

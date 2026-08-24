@@ -1,11 +1,25 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
-import { EvidenceBlobStore } from "../../src/context/evidence-blob-store.js";
+import {
+  EvidenceBlobStore,
+  withVerifiedEvidenceDirectory,
+} from "../../src/context/evidence-blob-store.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
+import { WorkspaceRuntimeService } from "../../src/daemon/workspace-runtime-service.js";
 import { FileHistoryBlobStore } from "../../src/storage/file-history-blob-store.js";
 import { closeAllOperationalDatabasesForTest } from "../../src/storage/sqlite/sqlite-database.js";
 import { withWorkspaceSqliteLease } from "../../src/storage/sqlite/workspace-scopes.js";
@@ -42,6 +56,7 @@ test("Blob GC consumes retention evidence intents idempotently", async () => {
       processed: 1,
       completed: 1,
       retryable: 0,
+      hasMore: false,
     });
     assert.equal(existsSync(blobPath), false);
 
@@ -181,6 +196,167 @@ test("Retention runtime asset intents retain their URI and delete only verified 
   }
 });
 
+test("Runtime asset GC rejects a symlink directory ancestor even when its target stays in-root", async () => {
+  const fixture = createFixture("runtime-asset-symlink-parent");
+  try {
+    const paths = resolvePicoPaths(fixture.workDir, { picoHome: fixture.picoHome });
+    const realDirectory = join(paths.workspace.root, "real-runtime-assets");
+    const linkedDirectory = join(paths.workspace.root, "runtime-assets");
+    const contents = Buffer.from("runtime asset behind symlink", "utf8");
+    const digest = createHash("sha256").update(contents).digest("hex");
+    mkdirSync(realDirectory, { recursive: true });
+    writeFileSync(join(realDirectory, "asset.bin"), contents, { mode: 0o600 });
+    symlinkSync(realDirectory, linkedDirectory, process.platform === "win32" ? "junction" : "dir");
+    insertHardCutIntent(
+      paths.workspace.root,
+      "hard-cut-runtime-asset-symlink-parent",
+      "runtime_asset",
+      digest,
+      contents.byteLength,
+      join(linkedDirectory, "asset.bin"),
+    );
+
+    const result = await runWorkspaceBlobGcOnce({
+      workDir: fixture.workDir,
+      picoHome: fixture.picoHome,
+      now: () => new Date("2026-08-24T00:00:00.000Z"),
+    });
+    assert.equal(result.retryable, 1);
+    assert.equal(existsSync(join(realDirectory, "asset.bin")), true);
+  } finally {
+    cleanupFixture(fixture.root);
+  }
+});
+
+test("Runtime asset directory witness rejects a replaced parent before unlink", async () => {
+  const fixture = createFixture("runtime-asset-replaced-parent");
+  try {
+    const paths = resolvePicoPaths(fixture.workDir, { picoHome: fixture.picoHome });
+    const assetDirectory = join(paths.workspace.root, "runtime-assets");
+    const displacedDirectory = join(paths.workspace.root, "runtime-assets-displaced");
+    mkdirSync(assetDirectory, { recursive: true });
+    writeFileSync(join(assetDirectory, "asset.bin"), "original", { mode: 0o600 });
+
+    await assert.rejects(
+      withVerifiedEvidenceDirectory(
+        paths.workspace.root,
+        ["runtime-assets"],
+        { create: false },
+        async (directory) => {
+          const handle = await directory.openRegularFile("asset.bin", "Runtime asset GC target");
+          try {
+            renameSync(assetDirectory, displacedDirectory);
+            mkdirSync(assetDirectory);
+            writeFileSync(join(assetDirectory, "asset.bin"), "replacement", { mode: 0o600 });
+            await directory.unlinkFile("asset.bin", handle, "Runtime asset GC target");
+          } finally {
+            await handle.close();
+          }
+        },
+      ),
+      /changed/u,
+    );
+    assert.equal(existsSync(join(displacedDirectory, "asset.bin")), true);
+    assert.equal(existsSync(join(assetDirectory, "asset.bin")), true);
+  } finally {
+    cleanupFixture(fixture.root);
+  }
+});
+
+test("Workspace Runtime drains more than one Blob GC batch without another event", async () => {
+  const fixture = createFixture("runtime-drain");
+  initializeGitWorkspace(fixture.workDir);
+  const paths = resolvePicoPaths(fixture.workDir, { picoHome: fixture.picoHome });
+  for (let index = 0; index < 101; index++) {
+    const digest = createHash("sha256").update(`missing-${index}`).digest("hex");
+    insertRetentionIntent(
+      paths.workspace.root,
+      `retention-runtime-drain-${index}`,
+      "runtime_asset",
+      digest,
+      0,
+      join(paths.workspace.root, "runtime-assets", `missing-${index}`),
+    );
+  }
+  const service = new WorkspaceRuntimeService({
+    env: { PICO_HOME: fixture.picoHome },
+    execute: async () => undefined,
+  });
+  try {
+    await service.getWorkspaceRuntime(fixture.workDir);
+    await waitFor(() => countCompletedRetentionIntents(paths.workspace.root) === 101, 5_000);
+    assert.equal(countCompletedRetentionIntents(paths.workspace.root), 101);
+  } finally {
+    await service.close();
+    cleanupFixture(fixture.root);
+  }
+});
+
+test("Workspace Runtime wakes a retryable Blob GC intent when its backoff expires", async () => {
+  const fixture = createFixture("runtime-retry-wake");
+  initializeGitWorkspace(fixture.workDir);
+  const paths = resolvePicoPaths(fixture.workDir, { picoHome: fixture.picoHome });
+  const outsidePath = join(fixture.root, "outside.bin");
+  const contents = Buffer.from("outside retry canary", "utf8");
+  const digest = createHash("sha256").update(contents).digest("hex");
+  writeFileSync(outsidePath, contents, { mode: 0o600 });
+  insertHardCutIntent(
+    paths.workspace.root,
+    "hard-cut-runtime-retry-wake",
+    "runtime_asset",
+    digest,
+    contents.byteLength,
+    outsidePath,
+  );
+  const service = new WorkspaceRuntimeService({
+    env: { PICO_HOME: fixture.picoHome },
+    execute: async () => undefined,
+  });
+  try {
+    await service.getWorkspaceRuntime(fixture.workDir);
+    await waitFor(
+      () => hardCutAttemptCount(paths.workspace.root, "hard-cut-runtime-retry-wake") >= 2,
+      5_000,
+    );
+    assert.equal(existsSync(outsidePath), true);
+  } finally {
+    await service.close();
+    cleanupFixture(fixture.root);
+  }
+});
+
+test("Workspace Runtime close clears a scheduled Blob GC wake timer", async () => {
+  const fixture = createFixture("runtime-close-timer");
+  initializeGitWorkspace(fixture.workDir);
+  let calls = 0;
+  const service = new WorkspaceRuntimeService({
+    env: { PICO_HOME: fixture.picoHome },
+    execute: async () => undefined,
+    runBlobGc: async () => {
+      calls += 1;
+      return {
+        status: "completed",
+        processed: 0,
+        completed: 0,
+        retryable: 0,
+        hasMore: false,
+        nextWakeAt: Date.now() + 60_000,
+      };
+    },
+  });
+  try {
+    await service.getWorkspaceRuntime(fixture.workDir);
+    await waitFor(() => scheduledBlobGcTimerCount(service) === 1, 2_000);
+    await service.close();
+    assert.equal(scheduledBlobGcTimerCount(service), 0);
+    await delay(25);
+    assert.equal(calls, 1);
+  } finally {
+    await service.close();
+    cleanupFixture(fixture.root);
+  }
+});
+
 function insertRetentionIntent(
   storageRoot: string,
   intentId: string,
@@ -233,6 +409,44 @@ function insertHardCutIntent(
         "2026-08-24T00:00:00.000Z",
       );
   });
+}
+
+function initializeGitWorkspace(workDir: string): void {
+  execFileSync("git", ["init", "--quiet", workDir], { stdio: "ignore" });
+}
+
+function countCompletedRetentionIntents(storageRoot: string): number {
+  return withWorkspaceSqliteLease(storageRoot, (lease) => {
+    const row = lease.database
+      .prepare("SELECT COUNT(*) AS count FROM retention_gc_intents WHERE completed_at IS NOT NULL")
+      .get() as Record<string, unknown>;
+    return Number(row["count"]);
+  });
+}
+
+function hardCutAttemptCount(storageRoot: string, intentId: string): number {
+  return withWorkspaceSqliteLease(storageRoot, (lease) => {
+    const row = lease.database
+      .prepare("SELECT attempt_count FROM event_log_blob_gc_intents WHERE intent_id = ?")
+      .get(intentId) as Record<string, unknown>;
+    return Number(row["attempt_count"]);
+  });
+}
+
+function scheduledBlobGcTimerCount(service: WorkspaceRuntimeService): number {
+  return (
+    service as unknown as {
+      readonly blobGcTimers: ReadonlyMap<string, unknown>;
+    }
+  ).blobGcTimers.size;
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for Blob GC state");
+    await delay(20);
+  }
 }
 
 function createFixture(label: string): {
