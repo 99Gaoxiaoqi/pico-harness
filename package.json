@@ -94,6 +94,8 @@
     "typescript-eslint": "^8.61.1"
   },
   "overrides": {
+    "@electron/packager": "20.3.0",
+    "@electron/rebuild": "4.2.0",
     "external-editor": {
       "tmp": "0.2.7"
     },
