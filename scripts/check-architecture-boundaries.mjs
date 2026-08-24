@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, extname, relative, resolve, sep } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SOURCE_ROOTS = ["src", "apps", "packages"];
@@ -287,6 +288,169 @@ export function scanArchitectureBoundaries({ repositoryRoot = REPOSITORY_ROOT } 
 }
 
 /**
+ * Local TypeScript runtime dependency cycles.
+ *
+ * The TypeScript AST distinguishes erased type imports/exports from runtime
+ * edges and avoids treating strings or comments as dependencies. Literal
+ * dynamic import() remains a value edge because it loads the target module.
+ */
+export function scanTypeScriptValueImportCycles({ repositoryRoot = REPOSITORY_ROOT } = {}) {
+  const sourceFiles = SOURCE_ROOTS.flatMap((root) =>
+    listSourceFiles(resolve(repositoryRoot, root)),
+  );
+  const sourceFileSet = new Set(sourceFiles);
+  const adjacency = new Map(sourceFiles.map((file) => [file, new Set()]));
+
+  for (const importer of sourceFiles) {
+    const source = readFileSync(importer, "utf8");
+    for (const specifier of parseTypeScriptValueImports(source, importer)) {
+      const target = resolveImportPath(importer, specifier);
+      if (target && sourceFileSet.has(target)) adjacency.get(importer).add(target);
+    }
+  }
+
+  const violations = [];
+  for (const component of stronglyConnectedComponents(adjacency)) {
+    const hasSelfEdge = component.length === 1 && adjacency.get(component[0])?.has(component[0]);
+    if (component.length < 2 && !hasSelfEdge) continue;
+    const cycle = findCyclePath(component, adjacency);
+    const source = normalizeRelativePath(cycle[0], repositoryRoot);
+    violations.push({
+      rule: "typescript-value-import-cycle",
+      source,
+      target: cycle.map((file) => normalizeRelativePath(file, repositoryRoot)).join(" -> "),
+    });
+  }
+  return violations.sort((left, right) =>
+    `${left.rule}|${left.source}|${left.target}`.localeCompare(
+      `${right.rule}|${right.source}|${right.target}`,
+    ),
+  );
+}
+
+function parseTypeScriptValueImports(source, fileName) {
+  const sourceFile = ts.createSourceFile(
+    fileName,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+  );
+  if (sourceFile.isDeclarationFile) return [];
+  const specifiers = [];
+  const visit = (node) => {
+    if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+      if (importDeclarationHasRuntimeValue(node)) specifiers.push(node.moduleSpecifier.text);
+    } else if (
+      ts.isExportDeclaration(node) &&
+      node.moduleSpecifier &&
+      ts.isStringLiteral(node.moduleSpecifier)
+    ) {
+      if (exportDeclarationHasRuntimeValue(node)) specifiers.push(node.moduleSpecifier.text);
+    } else if (
+      ts.isImportEqualsDeclaration(node) &&
+      !node.isTypeOnly &&
+      ts.isExternalModuleReference(node.moduleReference) &&
+      node.moduleReference.expression &&
+      ts.isStringLiteral(node.moduleReference.expression)
+    ) {
+      specifiers.push(node.moduleReference.expression.text);
+    } else if (
+      ts.isCallExpression(node) &&
+      node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+      node.arguments.length === 1 &&
+      ts.isStringLiteral(node.arguments[0])
+    ) {
+      specifiers.push(node.arguments[0].text);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return specifiers;
+}
+
+function importDeclarationHasRuntimeValue(node) {
+  const clause = node.importClause;
+  if (!clause) return true;
+  if (clause.isTypeOnly) return false;
+  if (clause.name) return true;
+  if (!clause.namedBindings || ts.isNamespaceImport(clause.namedBindings)) return true;
+  return (
+    clause.namedBindings.elements.length === 0 ||
+    clause.namedBindings.elements.some((element) => !element.isTypeOnly)
+  );
+}
+
+function exportDeclarationHasRuntimeValue(node) {
+  if (node.isTypeOnly) return false;
+  if (!node.exportClause || ts.isNamespaceExport(node.exportClause)) return true;
+  return (
+    node.exportClause.elements.length === 0 ||
+    node.exportClause.elements.some((element) => !element.isTypeOnly)
+  );
+}
+
+function stronglyConnectedComponents(adjacency) {
+  let nextIndex = 0;
+  const indices = new Map();
+  const lowLinks = new Map();
+  const stack = [];
+  const onStack = new Set();
+  const components = [];
+
+  const connect = (node) => {
+    indices.set(node, nextIndex);
+    lowLinks.set(node, nextIndex);
+    nextIndex += 1;
+    stack.push(node);
+    onStack.add(node);
+
+    for (const target of adjacency.get(node) ?? []) {
+      if (!indices.has(target)) {
+        connect(target);
+        lowLinks.set(node, Math.min(lowLinks.get(node), lowLinks.get(target)));
+      } else if (onStack.has(target)) {
+        lowLinks.set(node, Math.min(lowLinks.get(node), indices.get(target)));
+      }
+    }
+
+    if (lowLinks.get(node) !== indices.get(node)) return;
+    const component = [];
+    while (stack.length > 0) {
+      const member = stack.pop();
+      onStack.delete(member);
+      component.push(member);
+      if (member === node) break;
+    }
+    components.push(component.sort());
+  };
+
+  for (const node of [...adjacency.keys()].sort()) {
+    if (!indices.has(node)) connect(node);
+  }
+  return components;
+}
+
+function findCyclePath(component, adjacency) {
+  const members = new Set(component);
+  const start = [...component].sort()[0];
+  const visit = (node, path, inPath) => {
+    for (const target of [...(adjacency.get(node) ?? [])]
+      .filter((item) => members.has(item))
+      .sort()) {
+      if (target === start) return [...path, start];
+      if (inPath.has(target)) continue;
+      inPath.add(target);
+      const found = visit(target, [...path, target], inPath);
+      if (found) return found;
+      inPath.delete(target);
+    }
+    return undefined;
+  };
+  return visit(start, [start], new Set([start])) ?? [...component.sort(), start];
+}
+
+/**
  * 横切原语唯一性：超时/排空原语应统一用 src/util/race-with-deadline.ts 的
  * raceWithDeadline / raceWithDeadlineReject，不得在别处重新定义本地副本。
  * 新增本地定义即违规（baseline 容纳过渡期存量，收敛后清空）。
@@ -439,6 +603,7 @@ function main() {
   }
   const violations = [
     ...scanArchitectureBoundaries(),
+    ...scanTypeScriptValueImportCycles(),
     ...scanCrossCuttingDefinitions(),
     ...scanHandwrittenTimeoutPrimitives(),
     ...scanCanonicalPrimitiveRedefinitions(),

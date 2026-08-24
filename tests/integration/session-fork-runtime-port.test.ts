@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import { Session } from "../../src/engine/session.js";
+import { globalSessionManager, Session } from "../../src/engine/session.js";
 import { SessionManager } from "../../src/engine/session.js";
 import { SessionForkService } from "../../src/engine/session-fork-service.js";
 import { SessionForkRuntimeConflictError } from "../../src/engine/session-fork-runtime-port.js";
@@ -195,6 +195,43 @@ test("session fork runtime port preserves the durable fork lifecycle", async () 
     );
   } finally {
     await source.close();
+    await rmRetry(root);
+  }
+});
+
+test("session fork runtime port composes the coordinator for Session callers", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-session-fork-port-compose-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const sourceSessionId = "fork-port-compose-source";
+  const targetSessionId = "fork-port-compose-target";
+  const source = await globalSessionManager.getOrCreate(sourceSessionId, workDir, {
+    persistence: true,
+    picoHome,
+    runtimePort: createEngineRuntimePort(),
+  });
+  try {
+    await source.commitMessages({ role: "user", content: "seed through composed port" });
+    await createSessionForkRuntimePort().forkSession({
+      workDir,
+      picoHome,
+      fileHistoryBaseDir: source.fileHistoryBaseDir,
+      sourceSessionId,
+      targetSessionId,
+      targetMode: "default",
+    });
+
+    const targetEvents = await source.runtimeEventStore!.readSession(targetSessionId);
+    assert.ok(
+      targetEvents.some(
+        (event) =>
+          event.kind === "message.committed" &&
+          event.data.message.content.includes("composed port"),
+      ),
+    );
+  } finally {
+    await globalSessionManager.delete(sourceSessionId, workDir, { picoHome })?.close();
+    await globalSessionManager.delete(targetSessionId, workDir, { picoHome })?.close();
     await rmRetry(root);
   }
 });
