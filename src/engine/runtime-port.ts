@@ -6,7 +6,8 @@ import type {
   RuntimePartialSnapshot,
   RuntimeRunPartials,
 } from "../storage/runtime-event-store-contracts.js";
-import { Session } from "./session.js";
+import { EngineRuntimeCapabilityOwner } from "./runtime-capability-owner.js";
+import type { Session } from "./session.js";
 import type { CanonicalTranscriptToolStart } from "./transcript-tool-start.js";
 import type {
   RuntimeEvidenceReference,
@@ -45,7 +46,7 @@ export interface EngineRuntimeCapability {
 }
 
 export interface EngineRuntimeCapabilityInput {
-  readonly owner: Session;
+  readonly owner: EngineRuntimeCapabilityOwner;
   readonly runtimeAuthority: EngineRuntimeAuthority;
 }
 
@@ -53,13 +54,13 @@ export interface EngineRuntimeCapabilityInput {
 export function createEngineRuntimeCapability(
   input: EngineRuntimeCapabilityInput,
 ): EngineRuntimeCapability {
-  if (!Session.isRuntimeCapabilityOwner(input.owner)) {
+  if (!EngineRuntimeCapabilityOwner.isOwner(input.owner)) {
     throw new Error("Runtime capability owner must be an actual Session");
   }
   const sessionId = input.owner.id;
   const workDir = input.owner.workDir;
   const assertAuthority = (): void => {
-    Session.prototype.assertRuntimeEventAuthority.call(input.owner, input.runtimeAuthority);
+    input.owner.assertRuntimeEventAuthority(input.runtimeAuthority);
   };
   assertAuthority();
   const capability: EngineRuntimeCapability = Object.freeze({
