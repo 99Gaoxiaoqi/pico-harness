@@ -251,6 +251,28 @@ test("runtime-host bridge: runtime.request carries an un-specced daemon method e
   assert.equal(connection.terminalError, undefined);
 });
 
+test("runtime-host bridge: runtime.request rejects a malformed method result", async (t) => {
+  const brokenService: RuntimeHostBridgeService = {
+    handle: async () => ({ config: [], version: "1" }) as unknown as JsonValue,
+  };
+  const { connection, workspacePath } = await startBridgeHarness(t, { service: brokenService });
+
+  await assert.rejects(
+    connection.requestRegistered(
+      "runtime.request",
+      { method: "config.get", params: { workspacePath } },
+      10_000,
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof RuntimeHostOperationError);
+      assert.equal(error.operation, "runtime.request");
+      assert.equal(error.code, "internal_failure");
+      return true;
+    },
+  );
+  assert.equal(connection.terminalError, undefined, "响应解码失败不应 fail 连接");
+});
+
 test("runtime-host bridge: a 950KB result rides the kernel wire — former dead zone is gone (P1-3)", async (t) => {
   // 旧 socket 1MiB 合法、kernel 闸门（帧上限-64KB 信封预留）以内的结果必须可
   // 传输：daemon 侧 transcript 分页预算已改为从 RUNTIME_REQUEST_RESULT_MAX_BYTES
@@ -265,7 +287,10 @@ test("runtime-host bridge: a 950KB result rides the kernel wire — former dead 
 
   const result = await connection.requestRegistered<{ result: { note: string } }>(
     "runtime.request",
-    { method: "workspace.status", params: { workspacePath } },
+    {
+      method: "session.artifacts.query",
+      params: { workspacePath, sessionId: "large-result", action: "list" },
+    },
     10_000,
   );
   assert.equal(result.result.note.length, bigPayload.length, "950KB 结果应完整过 kernel 线");
