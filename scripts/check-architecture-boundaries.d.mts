@@ -18,6 +18,10 @@ export function scanArchitectureBoundaries(
   options?: ArchitectureBoundaryScanOptions,
 ): ArchitectureBoundaryViolation[];
 
+export function scanTypeScriptValueImportCycles(
+  options?: ArchitectureBoundaryScanOptions,
+): ArchitectureBoundaryViolation[];
+
 export function scanCrossCuttingDefinitions(
   options?: ArchitectureBoundaryScanOptions,
 ): ArchitectureBoundaryViolation[];
