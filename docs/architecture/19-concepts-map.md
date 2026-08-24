@@ -28,14 +28,14 @@
         ┌──────────┬──────────┬───────────┼────────────┬──────────────┐
         ▼          ▼          ▼           ▼            ▼              ▼
     Messages    Transcript   Plan       Graph        Memory        Usage
-    (喂 LLM)    (UI 视图)   (状态机)   (DAG 投影)   (派生投影)     (计费统计)
+    (喂 LLM)    (UI 视图)   (状态机)   (依赖投影)  (派生投影)     (计费统计)
         │
    Messages / Transcript / UI / Usage 是 RuntimeProjectionService 重算的派生投影；
    Plan / Graph 各有独立 reducer，也从同一账本折叠；Memory 是派生 + overlay 复合体。
    没有任何一个投影升级为「第二事实源」。
 ```
 
-**一句话**：所有发生的事都先记进 `session.jsonl` 这个不可变账本；你看到的对话、界面、计划、DAG、记忆，都是从账本「投影」出来的派生视图，坏了随时能重算。
+**一句话**：所有发生的事都先记进 `session.jsonl` 这个不可变账本；你看到的对话、界面、计划、Graph 依赖、记忆，都是从账本「投影」出来的派生视图，坏了随时能重算。
 
 ---
 
@@ -126,7 +126,7 @@ Graph Mode **复用同一套 CAS**：`appendGraphOperation`（`runtime-event-sto
 
 ---
 
-## 二、辐射主线：Graph Mode（DAG 调度）
+## 二、辐射主线：Graph Mode（增量依赖调度）
 
 把「线性 `delegate_task`（串行阻塞 + 依赖靠主 Agent 手动转述）」升级为显式编排：多个无依赖工作并行派发，`input_ids` 显式声明依赖。默认关闭，由正交于 `collaborationMode` 的 `orchestrationMode`（`"default" | "graph"`）开启。
 
