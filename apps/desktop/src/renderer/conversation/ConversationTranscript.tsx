@@ -217,7 +217,7 @@ function renderDefaultItem(
             个待确认问题
           </p>
           {item.reason && <p className="conversation-execution-detail">{item.reason}</p>}
-          {onOpenItem && <DetailButton label="探索控制" onClick={() => onOpenItem(item)} />}
+          {onOpenItem && <DetailButton label="查看探索详情" onClick={() => onOpenItem(item)} />}
         </section>
       );
     case "tool":
