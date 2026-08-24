@@ -41,6 +41,7 @@ import {
   BACKGROUND_HOOK_VERSION,
   prepareBackgroundYoloPolicy,
 } from "../safety/background-yolo-policy.js";
+import { automationDeniedTools } from "../safety/automation-tool-policy.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import type { CronJobRecord, CronRunRecord } from "../tasks/runtime-types.js";
 import { createCronWorkspaceRuntimeFactory } from "./cron-workspace-runtime.js";
@@ -194,6 +195,10 @@ export function createProductionRuntimeServices(
         policy: job.policySnapshot,
         trustStore,
       });
+      const deniedTools = automationDeniedTools(job.policySnapshot.allowedTools);
+      if (deniedTools.length > 0) {
+        throw new Error(`Cron Job 包含未显式授权的工具: ${deniedTools.join(", ")}`);
+      }
       if (!job.credentialRef) throw new Error("Cron Job 缺少 credentialRef");
       await resolveCronModelRoute(job, effectiveConfigResolver, env);
       if (!(await credentialVault.has(job.credentialRef))) {

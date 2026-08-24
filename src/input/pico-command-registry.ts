@@ -83,7 +83,7 @@ import type { ModelRuntimeCommandService } from "../provider/model-runtime-repor
 import type { TaskHostRuntime } from "../tasks/task-runtime.js";
 import { CronService } from "../tasks/cron-service.js";
 import type { CronDaemonBridge } from "./cron-daemon-bridge.js";
-import { filterBackgroundEligibleTools } from "../safety/background-yolo-policy.js";
+import { filterAutomationAllowedTools } from "../safety/automation-tool-policy.js";
 import type { McpConnectionManager } from "../mcp/manager.js";
 import { CostTracker } from "../observability/tracker.js";
 import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
@@ -2255,7 +2255,7 @@ function createCronCommand(
             );
           const [minute, hour, day, month, weekday, ...promptParts] = toolNetwork.args;
           const credential = await requireCronCredential(options, settings);
-          const allowedTools = filterBackgroundEligibleTools(
+          const allowedTools = filterAutomationAllowedTools(
             (options.backgroundTools?.() ?? settings.tools).map((tool) => tool.name),
           );
           const daemon = options.cronDaemonBridge;
