@@ -4,7 +4,7 @@ import {
   resolveAutomationCredentialTarget,
   type AutomationCredentialTarget,
 } from "../provider/automation-credential.js";
-import { filterBackgroundEligibleTools } from "../safety/background-yolo-policy.js";
+import { filterAutomationAllowedTools } from "../safety/automation-tool-policy.js";
 import type { CronCreationReceipt, CronDraft } from "./cron-draft.js";
 import { nextCronRuns, type CronService } from "./cron-service.js";
 
@@ -71,7 +71,7 @@ export class CronDraftApplication {
     daemonStatus: string;
   }> {
     const route = this.requireConfiguredRoute();
-    const allowedTools = filterBackgroundEligibleTools(this.options.listAllowedTools());
+    const allowedTools = filterAutomationAllowedTools(this.options.listAllowedTools());
     const capability = this.options.credentialVault.capability();
     let credentialStatus: CronDraft["credentialStatus"] = "unavailable";
     if (capability.available) {
@@ -101,7 +101,7 @@ export class CronDraftApplication {
     if (route.id !== draft.modelRouteId) {
       throw new Error("草案创建后模型路由已变化，请重新提交定时任务");
     }
-    const currentTools = filterBackgroundEligibleTools(this.options.listAllowedTools());
+    const currentTools = filterAutomationAllowedTools(this.options.listAllowedTools());
     if (!sameStringSet(currentTools, draft.allowedTools)) {
       throw new Error("草案创建后可用工具已变化，请重新提交定时任务");
     }

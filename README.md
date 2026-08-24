@@ -92,7 +92,7 @@ Windows named pipe。当前承重边界是私有 endpoint、进程/文件权限�
 - **可恢复会话**：Session 隔离运行态；`/rewind` 可恢复代码、对话或两者，旧事件仍保留在追加式账本中。
 - **渐进式上下文**：Skills 只先披露元数据，按需加载正文；Compaction、ErrorRecovery 与 SystemReminders 控制预算和重复失败。
 - **多代理隔离**：Explore 保持只读；可写 Worker 只有在独立 Git worktree 和平台沙箱都可用时才启动，否则 fail-closed。
-- **后台任务**：自然语言或 `/cron add [--tool-network=...] <cron> <prompt>` 创建持久 Job，由当前 OS 用户的本机 daemon 执行；模型路由、凭证引用和网络策略在创建时冻结。首次使用前通过 `/cron credential import [provider/model] --confirm` 将环境凭证写入系统凭据库；凭证值不进入命令参数且不回显。
+- **后台任务**：自然语言或 `/cron add [--tool-network=...] <cron> <prompt>` 创建持久 Job，由当前 OS 用户的本机 daemon 执行；模型路由、凭证引用、Automation 显式工具白名单和网络策略在创建时冻结，新工具不会自动获得无人值守权限。首次使用先运行 `/cron credential import [provider/model]` 获取 5 分钟内有效的一次性 `proposalId`，再按提示执行 `--confirm <proposalId>`；提案绑定当前路由、Provider 配置、凭证引用和环境 secret 指纹，凭证值不落盘、不进入命令参数且不回显。
 - **安全恢复任务**：只有注册了稳定 adapter ID/version、不可变输入和 checkpoint 契约的任务才可进入 `recoverable`；重启后先取得 TaskRun 执行租约，再从已验证边界创建新 Attempt。adapter 必须以 RuntimeEvent 高水位 CAS 原子发布确定性的 `run.started`，再用同一 `launchId` 幂等安装或确认 durable worker；`run.started` 只证明准入，不单独证明执行已启动。既有闭包、进程和流仍为 `host_bound`。
 - **可扩展能力**：Hooks、MCP、LSP 与 Agent/Skill Catalog 由 Runtime 装配；Markdown Command 当前属于 TUI 输入层能力。
 - **受信 Plugin 快照**：Pico/Claude manifest 会先解析、校验并冻结为纯数据，可贡献 Skill、Command、Agent、Hook、MCP 与 LSP；TUI 在宿主生命周期复用快照，Desktop 默认按 Run 加载和释放，后台 Job 不加载。任意 Plugin 代码不会直接载入 Runtime 进程，但已授权 Hook、MCP 或 LSP 可以按各自边界启动子进程。
