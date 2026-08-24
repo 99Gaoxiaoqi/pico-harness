@@ -95,16 +95,15 @@ File History 只接受带 `sourceMessageEventId`、`beforeSessionSeq`、`message
 
 ## MCP、Skills、Subagents 与 Automations
 
-| TUI 入口                                                | TUI 行为与状态                                     | Desktop 等价入口                                     | 等级     | 验收标准                                                                                     |
-| ------------------------------------------------------- | -------------------------------------------------- | ---------------------------------------------------- | -------- | -------------------------------------------------------------------------------------------- |
-| `/mcp`                                                  | 查看 MCP 配置、连接状态和工具摘要；默认 `always`   | 侧栏 MCP 页面                                        | 主路径   | 显示 config path、连接/失败/禁用数量、各 Server transport、错误和工具数                      |
-| `/mcp reload`、`enable`、`disable`、`reconnect`、`auth` | 管理 Server 生命周期                               | MCP Server 行内菜单                                  | 主路径   | 每项操作展示进行中和真实失败；认证由 Main/daemon 安全流程完成，Renderer 不接触密钥           |
-| `/mcp resources`、`read`、`prompts`、`prompt`           | 浏览资源和 Prompt，并读取或实例化内容              | MCP Server 详情页的 Resources 与 Prompts 标签        | 高级入口 | JSON 参数在提交前校验；响应可插入 Composer，但不会自动发送                                   |
-| `/skills`                                               | 列出 Loader 发现的 Skills；`idle`                  | 侧栏 Skills 页面                                     | 主路径   | 与 TUI 使用相同来源和禁用原因；刷新后不展示演示数据                                          |
-| `/agents`                                               | 列出 Agent Catalog；`idle`                         | Composer 的 Subagent 选择器和右侧 Subagents 面板空态 | 主路径   | 展示名称、来源、说明、允许工具和模型路由；不能把“多 Agent”绑定为 Git 前置条件                |
-| `/cron status`、`list`、`runs`                          | 查看 Workspace 后台任务、daemon 和运行历史；`idle` | 侧栏 Automations 页面                                | 主路径   | 数据按 Workspace 隔离；后台 daemon 不可用时显示“已保存但不会运行”                            |
-| `/cron add`、`enable`、`disable`、`delete`              | 管理持久 YOLO Cron；`idle`                         | Automations 新建、编辑、启停和删除操作               | 主路径   | Job 固定创建时的模型路由和凭证引用；版本冲突不得覆盖更新；活动引用会阻止破坏性 Provider 变更 |
-| `/cron credential status`、`import`                     | 检查或导入后台 Provider 凭证                       | Automation Provider 设置                             | 高级入口 | Desktop 与 `/cron add` 要求凭证已存在；环境-only 路由不可持久化；Renderer 不读取 API Key     |
+| TUI 入口                                              | TUI 行为与状态                                       | Desktop 等价入口                                     | 等级     | 验收标准                                                                                             |
+| ----------------------------------------------------- | ---------------------------------------------------- | ---------------------------------------------------- | -------- | ---------------------------------------------------------------------------------------------------- |
+| `/mcp`                                                | 查看 MCP 配置、连接状态和工具摘要；默认 `always`     | 侧栏 MCP 页面                                        | 主路径   | 显示 config path、连接/失败/禁用数量、各 Server transport、错误和工具数                              |
+| `/mcp reload`、`enable`、`disable`                    | 启停用户级 Server；说明 daemon 按 run 重读配置的时机 | MCP Server 行内菜单                                  | 主路径   | `enable`/`disable` 携带 revision 并展示真实失败；TUI 不承诺活连接重连、认证或 Resources/Prompts 查询 |
+| `/skills`                                             | 列出 Loader 发现的 Skills；`idle`                    | 侧栏 Skills 页面                                     | 主路径   | 与 TUI 使用相同来源和禁用原因；刷新后不展示演示数据                                                  |
+| `/agents`                                             | 列出 Agent Catalog；`idle`                           | Composer 的 Subagent 选择器和右侧 Subagents 面板空态 | 主路径   | 展示名称、来源、说明、允许工具和模型路由；不能把“多 Agent”绑定为 Git 前置条件                        |
+| `/cron status`、`list`、`runs`                        | 查看 Workspace 后台任务、daemon 和运行历史；`idle`   | 侧栏 Automations 页面                                | 主路径   | 数据按 Workspace 隔离；后台 daemon 不可用时显示“已保存但不会运行”                                    |
+| `/cron add`、`enable`、`disable`、`delete`            | 管理持久 YOLO Cron；`idle`                           | Automations 新建、编辑、启停和删除操作               | 主路径   | Job 固定创建时的模型路由、凭据引用、后台工具和网络策略；交互式工具被拒绝                             |
+| `/cron credential status`、`import [route] --confirm` | 检查或导入后台 Provider 凭据                         | Automation Provider 设置                             | 高级入口 | 导入先预览再显式确认；secret 只进入 write-only RPC，不进入命令参数、回显或配置                       |
 
 ## 补充注册入口
 

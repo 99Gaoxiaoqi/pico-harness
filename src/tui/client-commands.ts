@@ -16,6 +16,11 @@ import type { ClientSessionRuntime } from "./client-session-runtime.js";
 import { decodeMemoryUndoToken, encodeMemoryUndoToken } from "../memory/memory-command.js";
 import { snapshotSummariesFromRewindList } from "./rewind-client-bridge.js";
 import { formatRewindSelector } from "../input/rewind-presentation.js";
+import { resolveAutomationCredentialTarget } from "../provider/automation-credential.js";
+import { resolveModelRouteCapabilities } from "../provider/model-capabilities.js";
+import { filterBackgroundEligibleTools } from "../safety/background-yolo-policy.js";
+import { normalizeExactHostname } from "../safety/background-yolo-policy-schema.js";
+import { getSupportedToolNames } from "../tools/tool-surface.js";
 
 /**
  * TUI 客户端斜杠命令注册表（3-D Phase 3 tier1，31 命令）。
@@ -1399,6 +1404,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
           message: text,
         });
         const [operation = "list", ...args] = input.argv;
+        let secretToRedact: string | undefined;
         try {
           if (operation === "status") {
             const { jobs } = await runtime.request("jobs.list", { workspacePath });
@@ -1432,9 +1438,99 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
                 .join("\n"),
             );
           }
-          if (operation === "add" || operation === "credential") {
+          if (operation === "credential") {
+            const [action = "status", routeOrConfirmation, trailingConfirmation, ...extra] = args;
+            const routeArgument =
+              routeOrConfirmation === "--confirm" ? undefined : routeOrConfirmation;
+            const confirmation =
+              routeOrConfirmation === "--confirm" ? routeOrConfirmation : trailingConfirmation;
+            if (
+              extra.length > 0 ||
+              !["status", "import"].includes(action) ||
+              (confirmation !== undefined && confirmation !== "--confirm") ||
+              (action === "status" && confirmation !== undefined)
+            ) {
+              return msg("Usage: /cron credential <status|import> [provider/model] [--confirm]");
+            }
+            const authority = await resolveClientAutomationAuthority({
+              runtime,
+              workspacePath,
+              requestedRouteId: routeArgument,
+              activeSessionId: session(),
+            });
+            if (action === "status") {
+              return msg(
+                `${authority.route.id}: Provider 凭据状态 ${authority.provider.credentialStatus}（source=${authority.provider.credentialSource}）。Automation 创建时 daemon 会按精确 credentialRef 复核系统凭据库。`,
+              );
+            }
+            const secret = firstCredentialSecret(process.env[authority.route.apiKeyEnv]);
+            if (!secret) {
+              return msg(`缺少凭据环境变量 ${authority.route.apiKeyEnv}，无法导入。`);
+            }
+            if (confirmation !== "--confirm") {
+              return msg(
+                [
+                  `将为模型路由 ${authority.route.id} 导入当前进程的 ${authority.route.apiKeyEnv}。`,
+                  "凭据将由 daemon 写入系统凭据库，值不会回显或进入命令参数。",
+                  `确认执行：/cron credential import ${authority.route.id} --confirm`,
+                ].join("\n"),
+              );
+            }
+            secretToRedact = secret;
+            await runtime.request("automation.credential.import", {
+              workspacePath,
+              modelRouteId: authority.route.id,
+              expectedCredentialRef: authority.target.ref,
+              secret,
+            });
+            return msg(`模型路由 ${authority.route.id} 的凭据已导入（值不回显）。`);
+          }
+          if (operation === "add") {
+            const sid = needSession();
+            if (typeof sid === "object") return sid;
+            const settings = await runtime.request("session.settings.get", {
+              workspacePath,
+              sessionId: sid,
+            });
+            if (settings.settings.permissionMode !== "yolo") {
+              return msg(
+                "Cron jobs require /mode yolo; interactive permission modes cannot run unattended.",
+              );
+            }
+            const toolNetwork = parseClientCronToolNetwork(args);
+            if (toolNetwork.args.length < 6) {
+              return msg(
+                "Usage: /cron add [--tool-network=allow|disabled|allowlist:host1,host2] <minute> <hour> <day> <month> <weekday> <prompt>",
+              );
+            }
+            const [minute, hour, day, month, weekday, ...promptParts] = toolNetwork.args;
+            const prompt = promptParts.join(" ").trim();
+            if (!prompt) {
+              return msg(
+                "Usage: /cron add [--tool-network=allow|disabled|allowlist:host1,host2] <minute> <hour> <day> <month> <weekday> <prompt>",
+              );
+            }
+            const authority = await resolveClientAutomationAuthority({
+              runtime,
+              workspacePath,
+              requestedRouteId: settings.settings.modelRouteId,
+              activeSessionId: sid,
+            });
+            const { job } = await runtime.request("automation.create", {
+              workspacePath,
+              prompt,
+              schedule: [minute, hour, day, month, weekday].join(" "),
+              modelRouteId: authority.route.id,
+              expectedCredentialRef: authority.target.ref,
+              allowedTools: filterBackgroundEligibleTools([...getSupportedToolNames("background")]),
+              toolNetworkPolicy: toolNetwork.policy,
+              ...(toolNetwork.allowedHosts
+                ? { allowedToolNetworkHosts: toolNetwork.allowedHosts }
+                : {}),
+              enabled: true,
+            });
             return msg(
-              `/${operation} 的自动化创建含凭据注入与工具网络策略门，暂未镜像到客户端（tier2 后续）；现有 Job 的管理（list/enable/disable/delete/runs）可用。`,
+              `Cron job created: ${job.jobId} (${job.enabled ? "enabled" : "disabled"})\n${job.schedule} · ${formatClientCronToolNetwork(toolNetwork.policy, toolNetwork.allowedHosts)}`,
             );
           }
           const jobId = args[0];
@@ -1455,14 +1551,14 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
             "Usage: /cron <status|list|credential|add|enable|disable|delete|runs> [arguments]",
           );
         } catch (error) {
-          return msg(`Cron failed: ${error instanceof Error ? error.message : String(error)}`);
+          return msg(`Cron failed: ${safeClientCommandError(error, secretToRedact)}`);
         }
       },
     }),
     rpcCommand({
       name: "mcp",
       description: "Inspect and control MCP server connections",
-      usage: "/mcp [reload|enable|disable|reconnect|resources|read|prompts|prompt|auth]",
+      usage: "/mcp [reload|enable <server>|disable <server>]",
       category: "mcp",
       availability: "always",
       execute: async (input) => {
@@ -1471,7 +1567,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
           action: "message" as const,
           message: text,
         });
-        const [action, server] = input.argv;
+        const [action, server, ...extra] = input.argv;
         try {
           // 无参 = 状态：effective 配置面 + config.mcpServers 瞬态探测面拼合。
           if (!action) {
@@ -1513,7 +1609,9 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
             return msg(lines.join("\n"));
           }
           if (action === "enable" || action === "disable") {
-            if (!server) return msg("Usage: /mcp enable <server> | disable <server>");
+            if (!server || extra.length > 0) {
+              return msg("Usage: /mcp enable <server> | disable <server>");
+            }
             const listed = await runtime.request("mcp.user.list", {});
             const target = listed.servers.find((entry) => entry.name === server);
             if (!target) {
@@ -1532,29 +1630,15 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
             );
           }
           if (action === "reload") {
+            if (server !== undefined || extra.length > 0) {
+              return msg("Usage: /mcp reload");
+            }
             // daemon 无跨 run 常驻连接管理面：reload = 配置快照刷新（下次 run 重读配置）。
             return msg(
               "MCP 配置由 daemon 在每次 run 时重读，无需 reload；重新拉取状态快照请直接运行 /mcp。",
             );
           }
-          if (action === "reconnect" || action === "auth") {
-            return msg(
-              `/mcp ${action} 需要 daemon 侧活连接管理面（暂未镜像）：请重启 run 使新配置生效。`,
-            );
-          }
-          if (
-            action === "resources" ||
-            action === "read" ||
-            action === "prompts" ||
-            action === "prompt"
-          ) {
-            return msg(
-              `/mcp ${action} 需要连接 MCP 服务器后查询（暂未镜像）：该能力属运行期工具面，客户端不做直连。`,
-            );
-          }
-          return msg(
-            "Usage: /mcp [reload|enable|disable|reconnect|resources|read|prompts|prompt|auth]",
-          );
+          return msg("Usage: /mcp [reload|enable <server>|disable <server>]");
         } catch (error) {
           return msg(
             `MCP command failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -1734,6 +1818,132 @@ function modelRoutesFromConfig(config: RuntimeEffectiveConfig): {
     }
   }
   return routes;
+}
+
+type ClientAutomationAuthority = {
+  readonly route: {
+    readonly id: string;
+    readonly providerId: string;
+    readonly provider: "openai" | "claude";
+    readonly model: string;
+    readonly baseURL: string;
+    readonly apiKeyEnv: string;
+    readonly source: "config";
+    readonly capabilities: ReturnType<typeof resolveModelRouteCapabilities>;
+  };
+  readonly provider: RuntimeEffectiveConfig["providers"][number];
+  readonly target: ReturnType<typeof resolveAutomationCredentialTarget>;
+};
+
+async function resolveClientAutomationAuthority(input: {
+  readonly runtime: ClientSessionRuntime;
+  readonly workspacePath: string;
+  readonly requestedRouteId?: string;
+  readonly activeSessionId?: string;
+}): Promise<ClientAutomationAuthority> {
+  const [effectiveResult, userResult, sessionResult] = await Promise.all([
+    input.runtime.request("config.effective.get", { workspacePath: input.workspacePath }),
+    input.runtime.request("config.user.get", {}),
+    input.requestedRouteId === undefined && input.activeSessionId
+      ? input.runtime.request("session.settings.get", {
+          workspacePath: input.workspacePath,
+          sessionId: input.activeSessionId,
+        })
+      : undefined,
+  ]);
+  const routeId =
+    input.requestedRouteId ??
+    sessionResult?.settings.modelRouteId ??
+    effectiveResult.config.defaultModelRouteId;
+  if (!routeId) throw new Error("当前没有可用模型路由。");
+  const separator = routeId.indexOf("/");
+  if (separator <= 0 || separator === routeId.length - 1) {
+    throw new Error("模型路由必须采用 providerID/modelID 格式。");
+  }
+  const providerId = routeId.slice(0, separator);
+  const model = routeId.slice(separator + 1);
+  const provider = effectiveResult.config.providers.find((entry) => entry.id === providerId);
+  if (!provider || !provider.models.includes(model)) {
+    throw new Error(`模型路由 ${routeId} 不存在，请刷新配置后重试。`);
+  }
+  const route = {
+    id: routeId,
+    providerId,
+    provider: provider.protocol,
+    model,
+    baseURL: provider.baseURL,
+    apiKeyEnv: provider.apiKeyEnv,
+    source: "config" as const,
+    capabilities: resolveModelRouteCapabilities(provider.protocol, model, undefined, {
+      baseURL: provider.baseURL,
+    }),
+  };
+  const userProviderRecord = userResult.config.providers.find((entry) => entry.id === providerId);
+  const userProvider = userProviderRecord
+    ? {
+        protocol: userProviderRecord.protocol,
+        baseURL: userProviderRecord.baseURL,
+        apiKeyEnv: userProviderRecord.apiKeyEnv,
+        models: userProviderRecord.models,
+        discoverModels: userProviderRecord.discoverModels,
+      }
+    : undefined;
+  const source = effectiveResult.config.sources[`providers.${providerId}`];
+  const target = resolveAutomationCredentialTarget({
+    route,
+    workspacePath: input.workspacePath,
+    ...(userProvider ? { userProvider } : {}),
+    ...(typeof source === "string"
+      ? { configSource: source as "user" | "project-legacy" | "environment" | "session" | "cli" }
+      : {}),
+  });
+  return { route, provider, target };
+}
+
+function firstCredentialSecret(value: string | undefined): string | undefined {
+  return value
+    ?.split(",")
+    .map((item) => item.trim())
+    .find(Boolean);
+}
+
+function parseClientCronToolNetwork(args: readonly string[]): {
+  readonly args: readonly string[];
+  readonly policy: "allow" | "disabled" | "allowlist";
+  readonly allowedHosts?: readonly string[];
+} {
+  const option = args[0];
+  if (!option?.startsWith("--tool-network=")) return { args, policy: "allow" };
+  const value = option.slice("--tool-network=".length);
+  if (value === "allow") return { args: args.slice(1), policy: "allow" };
+  if (value === "disabled") return { args: args.slice(1), policy: "disabled" };
+  if (value.startsWith("allowlist:")) {
+    const allowedHosts = [
+      ...new Set(value.slice("allowlist:".length).split(",").map(normalizeExactHostname)),
+    ];
+    if (allowedHosts.length === 0) throw new Error("工具网络 allowlist 不能为空。");
+    return { args: args.slice(1), policy: "allowlist", allowedHosts };
+  }
+  throw new Error(
+    "工具网络策略必须是 allow、disabled 或 allowlist:host1,host2；它不控制模型 Provider 网络。",
+  );
+}
+
+function formatClientCronToolNetwork(
+  policy: "allow" | "disabled" | "allowlist",
+  allowedHosts?: readonly string[],
+): string {
+  return policy === "disabled"
+    ? "工具网络：关闭（模型 Provider 网络不受此项控制）"
+    : policy === "allow"
+      ? "工具网络：允许所有符合后台资格的工具联网（模型 Provider 网络独立）"
+      : `工具网络：仅允许 ${allowedHosts?.join(", ") ?? "<invalid>"}（模型 Provider 网络不受此项控制）`;
+}
+
+function safeClientCommandError(error: unknown, secret?: string): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const withoutKnownSecret = secret ? message.replaceAll(secret, "<redacted>") : message;
+  return withoutKnownSecret.replace(/(api[_-]?key|token|secret)\s*[=:]\s*\S+/giu, "$1=<redacted>");
 }
 
 function renderReportOutput(output: unknown): string {

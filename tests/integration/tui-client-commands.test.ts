@@ -26,7 +26,11 @@ interface Harness {
   setTranscriptItems(items: unknown[]): void;
 }
 
-function createHarness(options?: { readonly sessionId?: string }): Harness {
+function createHarness(options?: {
+  readonly sessionId?: string;
+  readonly permissionMode?: "default" | "auto" | "yolo";
+  readonly echoAutomationCredentialError?: boolean;
+}): Harness {
   const requests: { method: string; params: Record<string, unknown> }[] = [];
   let listener: ((notification: RuntimeNotification) => void) | undefined;
   let transcriptItems: unknown[] = [];
@@ -45,7 +49,7 @@ function createHarness(options?: { readonly sessionId?: string }): Harness {
     thinkingEffort: "medium",
     reasoningLevels: ["low", "medium", "high"],
     collaborationMode: "agent",
-    permissionMode: "default",
+    permissionMode: options?.permissionMode ?? "default",
     orchestrationMode: "default",
   };
   const client = {
@@ -300,9 +304,14 @@ function createHarness(options?: { readonly sessionId?: string }): Harness {
                   apiKeyEnv: "K",
                   models: ["m1", "m2"],
                   discoverModels: false,
+                  origin: "user",
+                  fingerprint: "provider-fingerprint",
+                  credentialStatus: "ready",
+                  credentialSource: "keychain",
+                  storedCredentialPresent: true,
                 },
               ],
-              sources: {},
+              sources: { "providers.p1": "user" },
               revisions: { user: "1", project: "1" },
             },
           };
@@ -383,7 +392,23 @@ function createHarness(options?: { readonly sessionId?: string }): Harness {
             revision: "rev-3",
           };
         case "config.user.get":
-          return { config: { version: 1, defaults: {}, providers: [] }, revision: "cfg-1" };
+          return {
+            config: {
+              version: 1,
+              defaults: {},
+              providers: [
+                {
+                  id: "p1",
+                  protocol: "openai",
+                  baseURL: "http://x",
+                  apiKeyEnv: "K",
+                  models: ["m1"],
+                  discoverModels: false,
+                },
+              ],
+            },
+            revision: "cfg-1",
+          };
         case "config.user.update":
           return {
             config: {
@@ -439,6 +464,24 @@ function createHarness(options?: { readonly sessionId?: string }): Harness {
           return { deleted: true };
         case "jobs.history":
           return { runs: [{ runId: "run_9", status: "succeeded", startedAt: 1 } as never] };
+        case "automation.credential.import":
+          if (options?.echoAutomationCredentialError) {
+            throw new Error(`secret=${String(params.secret ?? "")}`);
+          }
+          return { imported: true, credentialRef: String(params.expectedCredentialRef ?? "") };
+        case "automation.create":
+          return {
+            job: {
+              jobId: "job_created",
+              workspacePath: "C:\\ws",
+              name: "Automation",
+              prompt: String(params.prompt ?? ""),
+              schedule: String(params.schedule ?? ""),
+              enabled: params.enabled === true,
+              status: "idle",
+              updatedAt: 4,
+            },
+          };
         case "memory.create":
           return {
             fact: {
@@ -988,8 +1031,8 @@ test("client commands: dynamic argument completers ride RPCs with TTL cache", as
   assert.equal(agent?.[0]?.value, "review");
 });
 
-test("client commands: tier2 mirrors map memory/provider/cron to RPCs", async () => {
-  const harness = createHarness({ sessionId: "s1" });
+test("client commands: tier2 mirrors map memory/provider/cron to RPCs", async (t) => {
+  const harness = createHarness({ sessionId: "s1", permissionMode: "yolo" });
   const run = async (text: string) => {
     const outcome = await processClientInput(text, harness.registry, harness.runtime);
     assert.equal(outcome.kind, "local", `${text} 应本地执行`);
@@ -1042,14 +1085,102 @@ test("client commands: tier2 mirrors map memory/provider/cron to RPCs", async ()
   assert.match(String(runs.result?.message), /run_9 · succeeded/);
   assert.equal(harness.requests.at(-1)?.method, "jobs.history");
 
-  // add/credential 明确降级提示（不发 automation RPC）。
+  const credentialStatus = await run("/cron credential status p1/m1");
+  assert.match(String(credentialStatus.result?.message), /Provider 凭据状态 ready/);
+  assert.match(String(credentialStatus.result?.message), /daemon .*credentialRef.*复核/);
+
+  // credential import 先预览后显式确认；secret 只进入 write-only RPC。
+  const previousCredential = process.env.K;
+  const secret = "pico-tui-credential-secret";
+  process.env.K = secret;
+  t.after(() => {
+    if (previousCredential === undefined) delete process.env.K;
+    else process.env.K = previousCredential;
+  });
   harness.requests.length = 0;
-  const add = await run("/cron add 0 9 * * * 提示词");
-  assert.match(String(add.result?.message), /暂未镜像/);
-  assert.equal(harness.requests.length, 0, "降级提示不发 RPC");
+  const preview = await run("/cron credential import p1/m1");
+  assert.match(String(preview.result?.message), /--confirm/);
+  assert.equal(String(preview.result?.message).includes(secret), false, "预览不回显 secret");
+  assert.equal(
+    harness.requests.some((entry) => entry.method === "automation.credential.import"),
+    false,
+    "未确认不写入凭据",
+  );
+  harness.requests.length = 0;
+  const imported = await run("/cron credential import p1/m1 --confirm");
+  assert.match(String(imported.result?.message), /已导入/);
+  assert.equal(String(imported.result?.message).includes(secret), false, "成功回执不回显 secret");
+  const importRequest = harness.requests.at(-1);
+  assert.equal(importRequest?.method, "automation.credential.import");
+  assert.equal(importRequest?.params.modelRouteId, "p1/m1");
+  assert.equal(importRequest?.params.secret, secret, "secret 仅送入 write-only RPC");
+  assert.equal(typeof importRequest?.params.expectedCredentialRef, "string");
+
+  // add 固化路由、后台工具与规范化网络 allowlist。
+  harness.requests.length = 0;
+  const add = await run(
+    "/cron add --tool-network=allowlist:API.EXAMPLE.COM.,files.example.com 0 9 * * * 提示词",
+  );
+  assert.match(String(add.result?.message), /job_created/);
+  assert.match(String(add.result?.message), /api\.example\.com, files\.example\.com/);
+  const createRequest = harness.requests.at(-1);
+  assert.equal(createRequest?.method, "automation.create");
+  assert.equal(createRequest?.params.schedule, "0 9 * * *");
+  assert.equal(createRequest?.params.prompt, "提示词");
+  assert.equal(createRequest?.params.modelRouteId, "p1/m1");
+  assert.equal(createRequest?.params.toolNetworkPolicy, "allowlist");
+  assert.deepEqual(createRequest?.params.allowedToolNetworkHosts, [
+    "api.example.com",
+    "files.example.com",
+  ]);
+  assert.ok(Array.isArray(createRequest?.params.allowedTools));
+  assert.equal(
+    (createRequest?.params.allowedTools as string[]).includes("ask_user"),
+    false,
+    "交互式工具不得进入后台快照",
+  );
+
+  harness.requests.length = 0;
+  const invalidNetwork = await run(
+    "/cron add --tool-network=allowlist:https://bad.example 0 9 * * * 提示词",
+  );
+  assert.match(String(invalidNetwork.result?.message), /非法 hostname/);
+  assert.equal(
+    harness.requests.some((entry) => entry.method === "automation.create"),
+    false,
+    "非法网络策略不得创建 Job",
+  );
+
+  const interactiveHarness = createHarness({ sessionId: "s1", permissionMode: "default" });
+  const interactive = await processClientInput(
+    "/cron add 0 9 * * * 提示词",
+    interactiveHarness.registry,
+    interactiveHarness.runtime,
+  );
+  assert.match(String(interactive.result?.message), /require \/mode yolo/);
+  assert.equal(
+    interactiveHarness.requests.some((entry) => entry.method === "automation.create"),
+    false,
+    "交互模式不得创建无人值守 Job",
+  );
+
+  // daemon 错误即使携带原凭据，TUI 也必须精确脱敏。
+  const failingHarness = createHarness({
+    sessionId: "s1",
+    permissionMode: "yolo",
+    echoAutomationCredentialError: true,
+  });
+  const failed = await processClientInput(
+    "/cron credential import p1/m1 --confirm",
+    failingHarness.registry,
+    failingHarness.runtime,
+  );
+  assert.equal(failed.kind, "local");
+  assert.match(String(failed.result?.message), /<redacted>/);
+  assert.equal(String(failed.result?.message).includes(secret), false, "错误回执不泄露 secret");
 });
 
-test("client commands: /mcp status/enable/disable map to mcp.* RPCs with explicit downgrades", async () => {
+test("client commands: /mcp only exposes status/enable/disable and accurate reload guidance", async () => {
   const harness = createHarness({ sessionId: "s1" });
   const run = async (text: string) => {
     const outcome = await processClientInput(text, harness.registry, harness.runtime);
@@ -1094,15 +1225,17 @@ test("client commands: /mcp status/enable/disable map to mcp.* RPCs with explici
     "非用户级 server 不发 setEnabled",
   );
 
-  // reload 与活连接类子命令：明确降级提示（不发 RPC）。
+  // reload 只准确说明配置重读时机；未实现能力不再对外承诺。
   harness.requests.length = 0;
   const reload = await run("/mcp reload");
   assert.match(String(reload.result?.message), /无需 reload/);
   const resources = await run("/mcp resources git-tools");
-  assert.match(String(resources.result?.message), /暂未镜像/);
-  const read = await run("/mcp read git-tools uri://x");
-  assert.match(String(read.result?.message), /暂未镜像/);
-  assert.equal(harness.requests.length, 0, "降级路径不发 RPC");
+  assert.equal(resources.result?.message, "Usage: /mcp [reload|enable <server>|disable <server>]");
+  const reconnect = await run("/mcp reconnect git-tools");
+  assert.equal(reconnect.result?.message, "Usage: /mcp [reload|enable <server>|disable <server>]");
+  const malformedReload = await run("/mcp reload git-tools");
+  assert.equal(malformedReload.result?.message, "Usage: /mcp reload");
+  assert.equal(harness.requests.length, 0, "非能力面子命令不发 RPC");
 
   // 未知子命令 → usage。
   const usage = await run("/mcp bogus");
@@ -1405,9 +1538,8 @@ test("client commands: registry metadata parity with in-process (drift gate)", a
   //（用户技能/插件注入的命令不在此列）。延后分两类（对抗评审二轮重划）：
   // BLOCKED=协议缺口（注释标缺失 RPC）；DEFERRED=优先级（RPC 已在，tier2 镜像）。
   const deferred = new Set<string>([]);
-  // 注：/mcp 已镜像（2026-08-16 BLOCKED 收口——状态=effective.list+config.mcpServers
-  // 拼合、enable/disable=mcp.user.setEnabled 新协议方法；reload/活连接类子命令
-  // 明确降级提示，执行体边界而非命令缺失）。
+  // 注：/mcp 已镜像状态、enable/disable 和 reload 说明；活连接、
+  // Resources/Prompts 不在 TUI 命令面暴露。
   // 注：/context 已镜像（session.context.get 新协议方法，daemon 复用
   // createModelContextReport）；/snapshots 已镜像（rewind.* 等价能力，纯客户端）；
   // /add-dir 已镜像（session.directories.add 新协议方法，daemon 校验+持久化）；
@@ -1417,10 +1549,9 @@ test("client commands: registry metadata parity with in-process (drift gate)", a
   // /plugin 已镜像（plugin.manage 单方法七动作，trust 两阶段无状态化——
   // confirm 以 fresh proposal 校验 confirmId+指纹，客户端不持有 pending）。
   // BLOCKED 豁免表已清空（2026-08-16 全部收口）。
-  // 注：/memory /provider /cron 已镜像（2026-08-16 tier2 收口——memory.create
-  // 新协议方法 + provider.*/config.user.* + jobs.*）。/cron 的 add/credential
-  // 子命令（automation.create 凭据注入门）与 /provider default clear 明确降级
-  // 为提示，属执行体边界而非命令缺失。model-usage/agents-usage 是过期豁免名
+  // 注：/memory /provider /cron 已镜像；/cron add/credential 通过
+  // automation.* 安全 RPC 创建并导入 write-only 凭据。/provider default clear 仍
+  // 明确降级为提示。model-usage/agents-usage 是过期豁免名
   // （in-process 从无此命令），已删除。
   // 注：/rewind /changes 已镜像（rewind.list/preview/apply + mode 参数）；
   // discovery 不在清单——协议方法已被 daemon 下线（METHOD_NOT_FOUND）且
