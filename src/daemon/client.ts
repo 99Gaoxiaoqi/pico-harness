@@ -59,7 +59,6 @@ const KERNEL_RETRY_SAFE_METHODS: ReadonlySet<RuntimeMethod> = new Set<RuntimeMet
   "session.transcript.advance",
   "session.evidence.read",
   "goal.get",
-  "discovery.get",
   "runs.list",
   "changes.list",
   "changes.diff",

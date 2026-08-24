@@ -678,16 +678,6 @@ function discoveryItemFromProjection(value: unknown): ConversationItemView | und
   };
 }
 
-function discoverySessionSequence(value: unknown): number {
-  const result = isRecord(value) ? value : undefined;
-  const projection = result && isRecord(result.projection) ? result.projection : undefined;
-  const sequence = projection?.sessionSequence;
-  if (typeof sequence !== "number" || !Number.isSafeInteger(sequence) || sequence < 0) {
-    throw new Error("Discovery projection is missing a valid session sequence");
-  }
-  return sequence;
-}
-
 // 终态判定经 @pico/protocol isTerminalRunStatus（wire 归一化唯一来源；本地
 // 版曾含非枚举值 "completed"——拷贝漂移）。
 
@@ -1378,24 +1368,6 @@ export interface RuntimeActions {
     readonly offsetBytes?: number;
     readonly limitBytes?: number;
   }): Promise<ToolEvidencePage | undefined>;
-  startDiscovery(input: {
-    readonly workspacePath: string;
-    readonly sessionId: string;
-    readonly objective: string;
-    readonly depth: "quick" | "balanced" | "deep";
-  }): Promise<void>;
-  resumeDiscovery(input: {
-    readonly workspacePath: string;
-    readonly sessionId: string;
-    readonly discoveryId: string;
-    readonly depth?: "quick" | "balanced" | "deep";
-  }): Promise<void>;
-  cancelDiscovery(input: {
-    readonly workspacePath: string;
-    readonly sessionId: string;
-    readonly discoveryId: string;
-    readonly reason?: string;
-  }): Promise<void>;
   sendMessage(input: {
     readonly workspacePath: string;
     readonly sessionId?: string;
@@ -2703,63 +2675,6 @@ export function useRuntimeStore(): RuntimeStore {
           page = toolEvidencePage(value, input.evidenceUri);
         });
         return page;
-      },
-      async startDiscovery(input) {
-        if (!input.workspacePath || !input.sessionId || !input.objective.trim()) return;
-        await perform("discovery-start", async (bridge) => {
-          if (preview) return;
-          const current = await invoke(bridge, "discovery.get", {
-            workspacePath: input.workspacePath,
-            sessionId: input.sessionId,
-          });
-          await invoke(bridge, "discovery.start", {
-            workspacePath: input.workspacePath,
-            sessionId: input.sessionId,
-            objective: input.objective.trim(),
-            depth: input.depth,
-            operationId: crypto.randomUUID(),
-            expectedSessionSequence: discoverySessionSequence(current),
-          });
-          await loadConversation(bridge, input.workspacePath, input.sessionId);
-        });
-      },
-      async resumeDiscovery(input) {
-        if (!input.workspacePath || !input.sessionId || !input.discoveryId) return;
-        await perform("discovery-resume", async (bridge) => {
-          if (preview) return;
-          const current = await invoke(bridge, "discovery.get", {
-            workspacePath: input.workspacePath,
-            sessionId: input.sessionId,
-          });
-          await invoke(bridge, "discovery.resume", {
-            workspacePath: input.workspacePath,
-            sessionId: input.sessionId,
-            discoveryId: input.discoveryId,
-            ...(input.depth ? { depth: input.depth } : {}),
-            operationId: crypto.randomUUID(),
-            expectedSessionSequence: discoverySessionSequence(current),
-          });
-          await loadConversation(bridge, input.workspacePath, input.sessionId);
-        });
-      },
-      async cancelDiscovery(input) {
-        if (!input.workspacePath || !input.sessionId || !input.discoveryId) return;
-        await perform("discovery-cancel", async (bridge) => {
-          if (preview) return;
-          const current = await invoke(bridge, "discovery.get", {
-            workspacePath: input.workspacePath,
-            sessionId: input.sessionId,
-          });
-          await invoke(bridge, "discovery.cancel", {
-            workspacePath: input.workspacePath,
-            sessionId: input.sessionId,
-            discoveryId: input.discoveryId,
-            ...(input.reason ? { reason: input.reason } : {}),
-            operationId: crypto.randomUUID(),
-            expectedSessionSequence: discoverySessionSequence(current),
-          });
-          await loadConversation(bridge, input.workspacePath, input.sessionId);
-        });
       },
       async sendMessage(input) {
         const workspacePath = input.workspacePath;

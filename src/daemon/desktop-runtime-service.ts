@@ -612,34 +612,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           ...(result.run ? { run: toJsonValue(result.run) } : {}),
         };
       },
-      "discovery.start": () =>
-        Promise.reject(
-          new RuntimeProtocolError(
-            RUNTIME_ERROR_CODES.METHOD_NOT_FOUND,
-            "discovery.start 已下线，Discovery 系统已移除",
-          ),
-        ),
-      "discovery.get": () =>
-        Promise.reject(
-          new RuntimeProtocolError(
-            RUNTIME_ERROR_CODES.METHOD_NOT_FOUND,
-            "discovery.get 已下线，Discovery 系统已移除",
-          ),
-        ),
-      "discovery.resume": () =>
-        Promise.reject(
-          new RuntimeProtocolError(
-            RUNTIME_ERROR_CODES.METHOD_NOT_FOUND,
-            "discovery.resume 已下线，Discovery 系统已移除",
-          ),
-        ),
-      "discovery.cancel": () =>
-        Promise.reject(
-          new RuntimeProtocolError(
-            RUNTIME_ERROR_CODES.METHOD_NOT_FOUND,
-            "discovery.cancel 已下线，Discovery 系统已移除",
-          ),
-        ),
       "prompt.respond": (request) => {
         if (!this.options.interactions) {
           throw new RuntimeProtocolError(
