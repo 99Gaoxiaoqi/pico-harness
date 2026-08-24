@@ -167,9 +167,21 @@ export class VerifiedEvidenceDirectory {
     await this.assertStable();
   }
 
-  async unlinkFile(fileName: string): Promise<void> {
+  async unlinkFile(
+    fileName: string,
+    expectedHandle?: FileHandle,
+    label = "Evidence file",
+  ): Promise<void> {
     const path = this.filePath(fileName);
     await this.assertStable();
+    if (expectedHandle) {
+      const opened = await expectedHandle.stat({ bigint: true });
+      const current = await lstat(path, { bigint: true });
+      if (current.isSymbolicLink() || !current.isFile() || !sameFileVersion(opened, current)) {
+        throw new Error(`${label} changed before unlink`);
+      }
+      await this.assertStable();
+    }
     await unlink(path);
     await this.assertStable();
   }
