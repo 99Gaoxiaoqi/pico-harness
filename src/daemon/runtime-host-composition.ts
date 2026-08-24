@@ -2,6 +2,7 @@ import type { RuntimeHostComposition, RuntimeHostCompositionFactory } from "@pic
 import {
   createRuntimeRequest,
   createTypedRuntimeRequest,
+  parseRuntimeResult,
   parseStrictRuntimeParams,
   RuntimeProtocolError,
   type JsonValue,
@@ -133,7 +134,15 @@ export function createRuntimeHostComposition(
       // 拒绝（invalid_request），与旧 daemon 传输层行为一致。
       const method = input.method as RuntimeMethod;
       const params = parseStrictRuntimeParams(method, input.params ?? {}) as JsonValue;
-      const result = await service.handle(createRuntimeRequest(method, params));
+      const rawResult = await service.handle(createRuntimeRequest(method, params));
+      let result: RuntimeRequestBridgeOutput["result"];
+      try {
+        result = parseRuntimeResult(method, rawResult);
+      } catch (error) {
+        // 请求已经通过校验；此处的协议错误来自 daemon handler 响应，
+        // 对 Host 属于 internal_failure，不能误报为客户端 invalid_request。
+        throw new Error(error instanceof Error ? error.message : String(error), { cause: error });
+      }
       return { ok: true, result: { result } };
     } catch (error) {
       return bridgeFailure(error);
