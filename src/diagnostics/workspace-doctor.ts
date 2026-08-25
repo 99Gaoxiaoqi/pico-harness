@@ -10,6 +10,7 @@ import {
   type StorageDoctorFinding,
   type StorageDoctorReport,
 } from "../storage/storage-doctor.js";
+import type { EffectiveModelRuntime } from "../provider/effective-model-runtime.js";
 
 export type WorkspaceDiagnosticStatus = "ok" | "warning" | "error" | "unavailable";
 
@@ -46,6 +47,28 @@ export interface WorkspaceConfigurationDiagnostic {
   readonly defaultSource?: string;
   readonly providerSources: Readonly<Record<string, string>>;
   readonly credentialStates: Readonly<Record<string, string>>;
+}
+
+/** Projects effective Runtime metadata without exposing the process-local ModelRouter secrets. */
+export function workspaceConfigurationDiagnosticFromRuntime(
+  runtime: Pick<EffectiveModelRuntime, "config" | "credentials">,
+): WorkspaceConfigurationDiagnostic {
+  const providerSources: Record<string, string> = {};
+  const credentialStates: Record<string, string> = {};
+  for (const providerId of Object.keys(runtime.config.providers)) {
+    providerSources[providerId] = runtime.config.sources[`providers.${providerId}`] ?? "unknown";
+    credentialStates[providerId] = runtime.credentials[providerId]?.state ?? "missing";
+  }
+  return Object.freeze({
+    ...(runtime.config.defaultModelRouteId
+      ? { defaultModelRouteId: runtime.config.defaultModelRouteId }
+      : {}),
+    ...(runtime.config.sources["defaults.modelRouteId"]
+      ? { defaultSource: runtime.config.sources["defaults.modelRouteId"] }
+      : {}),
+    providerSources: Object.freeze(providerSources),
+    credentialStates: Object.freeze(credentialStates),
+  });
 }
 
 /** Shared read-only `/doctor` domain operation. It never repairs, rebuilds, or runs GC. */
