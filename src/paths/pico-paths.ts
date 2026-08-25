@@ -67,6 +67,11 @@ export function resolvePicoHome(options: ResolvePicoPathsOptions = {}): string {
   return resolve(configured?.trim() || join(options.homeDir ?? homedir(), ".pico"));
 }
 
+/** Runtime-owned shared scratch directory used by Desktop sessions without a selected project. */
+export function resolvePicoTemporaryWorkspace(options: ResolvePicoPathsOptions = {}): string {
+  return join(resolvePicoHome(options), "temporary-workspace");
+}
+
 export function canonicalizeWorkspacePath(workDir: string): string {
   const absolute = resolve(workDir);
   let physical = absolute;

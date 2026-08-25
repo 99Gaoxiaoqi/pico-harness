@@ -18,6 +18,7 @@ import {
   encodeRuntimeFrame,
   LOCAL_RUNTIME_PROTOCOL_VERSION,
   MAX_RUNTIME_FRAME_BYTES,
+  TEMPORARY_WORKSPACE_RUNTIME_CAPABILITY,
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
   serializeRuntimeNotification,
@@ -184,6 +185,7 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
         capabilities: [
           DESKTOP_RUNTIME_SCHEMA_CAPABILITY,
           CAPABILITY_SCOPE_RUNTIME_CAPABILITY,
+          TEMPORARY_WORKSPACE_RUNTIME_CAPABILITY,
           "shared-config-v1",
           "session-conversation-v1",
           "session-management-v1",

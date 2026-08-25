@@ -92,6 +92,7 @@ const KERNEL_RETRY_SAFE_METHODS: ReadonlySet<RuntimeMethod> = new Set<RuntimeMet
   "usage.get",
   "workspace.status",
   "workspace.list",
+  "workspace.temporary.ensure",
   "workspace.trustStatus",
   // 幂等写（重复执行同态）：工作区注册/信任——重复 register/trust 返回同态
   // 结果，冷启动窗口（connectOrSpawn 拉起慢）内可安全自动重试。unregister
