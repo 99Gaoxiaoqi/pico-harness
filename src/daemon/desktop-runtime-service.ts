@@ -214,6 +214,7 @@ import { activatePluginProviderCapabilities } from "../plugins/plugin-provider-a
 import { UserMcpConfigStore } from "../mcp/user-config-store.js";
 import { DesktopRequestRouter, type DesktopRequestHandlers } from "./desktop-request-router.js";
 import { createDesktopSessionRequestHandlers } from "./desktop-session-request-handlers.js";
+import { TemporaryWorkspaceAuthority } from "./temporary-workspace-authority.js";
 import { createDesktopMemoryRequestHandlers } from "./desktop-memory-request-handlers.js";
 import { createDesktopWorkbarRequestHandlers } from "./desktop-workbar-request-handlers.js";
 import { DesktopWorkbarGitReviewService } from "./desktop-workbar-git-review-service.js";
@@ -311,6 +312,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private readonly userConfigRevisionTokenKey = randomBytes(32);
   private readonly registrationStore: WorkspaceRegistrationStore;
   private readonly trustStore: WorkspaceTrustStore;
+  private readonly temporaryWorkspace: TemporaryWorkspaceAuthority;
   private readonly conversationStateStore: DesktopConversationStateStoreLike;
   private readonly env: Readonly<Record<string, string | undefined>>;
   private readonly picoHome: string;
@@ -365,6 +367,23 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       new WorkspaceRegistrationStore(join(this.picoHome, "daemon-workspaces.json"));
     this.trustStore =
       options.trustStore ?? new WorkspaceTrustStore({ userStateDirectory: this.picoHome });
+    this.temporaryWorkspace = new TemporaryWorkspaceAuthority({
+      picoHome: this.picoHome,
+      register: async (workspacePath) => {
+        if ((await this.registrationStore.list()).includes(workspacePath)) return workspacePath;
+        const result = requireJsonRecord(
+          await this.options.runtimeService.handle(
+            createRuntimeRequest("workspace.register", { workspacePath }),
+          ),
+          "workspace.register result",
+        );
+        return String(result["workspacePath"]);
+      },
+      trust: async (workspacePath) => {
+        if (await this.trustStore.isTrusted(workspacePath)) return;
+        await this.setTrust(workspacePath, true);
+      },
+    });
     this.conversationStateStore =
       options.conversationStateStore ??
       new SqliteDesktopConversationStateStore({ picoHome: this.picoHome });
@@ -613,6 +632,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       ...createDesktopSessionRequestHandlers({
         initializeWorkspace: this.initializeWorkspace.bind(this),
         listWorkspaces: this.listWorkspaces.bind(this),
+        getWorkspaceStatus: this.getWorkspaceStatus.bind(this),
+        ensureTemporaryWorkspace: this.ensureTemporaryWorkspace.bind(this),
         trustStatus: this.trustStatus.bind(this),
         setTrust: this.setTrust.bind(this),
         unregisterWorkspace: this.unregisterWorkspace.bind(this),
@@ -785,7 +806,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         // workspace.list 物化全部 runtime 推过 kernel 操作 deadline，连接被
         // 整条拆断——根治在 e2e 隔离 daemon root，这里保证残留永不致命。
         if (!existsSync(workspacePath)) {
-          return {
+          return this.decorateWorkspaceStatus({
             workspacePath,
             registered: true,
             schedulerStatus: "unknown",
@@ -798,25 +819,47 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
               branchMerge: false,
             },
             eventLog: null,
-          } satisfies WorkspaceStatusResult;
+          } satisfies WorkspaceStatusResult);
         }
         try {
           const runtime = await this.options.runtimeService.getWorkspaceRuntime(workspacePath);
-          return workspaceStatusResult(
-            runtime,
-            true,
-            runtime.mode === "git" ? await resolveGitBranch(runtime.workspace) : undefined,
+          return this.decorateWorkspaceStatus(
+            workspaceStatusResult(
+              runtime,
+              true,
+              runtime.mode === "git" ? await resolveGitBranch(runtime.workspace) : undefined,
+            ),
           );
         } catch (error) {
           // A registered workspace may still contain storage from an unsupported era.
           // Listing is the Desktop bootstrap boundary: one unavailable workspace must
           // remain discoverable without preventing every other workspace from opening.
           logger.warn({ workspacePath, err: error }, "Workspace status materialization failed");
-          return unavailableWorkspaceStatus(workspacePath);
+          return this.decorateWorkspaceStatus(unavailableWorkspaceStatus(workspacePath));
         }
       }),
     );
     return { workspaces };
+  }
+
+  private async getWorkspaceStatus(workspacePath: string): Promise<JsonValue> {
+    const status = requireJsonRecord(
+      await this.options.runtimeService.handle(
+        createRuntimeRequest("workspace.status", { workspacePath }),
+      ),
+      "workspace.status result",
+    ) as WorkspaceStatusResult;
+    return this.decorateWorkspaceStatus(status);
+  }
+
+  private async ensureTemporaryWorkspace(): Promise<JsonValue> {
+    return this.getWorkspaceStatus(await this.temporaryWorkspace.ensure());
+  }
+
+  private decorateWorkspaceStatus(status: WorkspaceStatusResult): WorkspaceStatusResult {
+    return this.temporaryWorkspace.matches(status.workspacePath)
+      ? { ...status, temporary: true }
+      : status;
   }
 
   private async initializeWorkspace(workspacePath: string): Promise<JsonValue> {
@@ -910,6 +953,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private async setTrust(workspacePath: string, trusted: boolean): Promise<JsonValue> {
     const canonical = await this.trustStore.canonicalize(workspacePath);
+    if (!trusted && this.temporaryWorkspace.matches(canonical)) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.FORBIDDEN,
+        "Pico 临时工作区由 Runtime 管理，不能撤销信任",
+      );
+    }
     await this.trustStore.setTrusted(canonical, trusted);
     if (!trusted) this.pluginRuntimeSnapshotRegistry.invalidate(canonical);
     this.publish(
@@ -3075,6 +3124,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private async unregisterWorkspace(workspacePath: string): Promise<JsonValue> {
     const canonical = await this.registrationStore.resolveRegisteredPath(workspacePath);
+    if (this.temporaryWorkspace.matches(canonical)) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.FORBIDDEN,
+        "Pico 临时工作区由 Runtime 管理，不能注销",
+      );
+    }
     const workspaceExists = await access(canonical).then(
       () => true,
       (error: unknown) => {

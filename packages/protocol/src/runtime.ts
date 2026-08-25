@@ -1,9 +1,10 @@
 export const LOCAL_RUNTIME_PROTOCOL_VERSION = 2;
 export const LOCAL_RUNTIME_AUTH_VERSION = 1;
 /** Increment when the Desktop-required result schema changes incompatibly. */
-export const DESKTOP_RUNTIME_SCHEMA_REVISION = 15;
-export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v15";
+export const DESKTOP_RUNTIME_SCHEMA_REVISION = 16;
+export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v16";
 export const CAPABILITY_SCOPE_RUNTIME_CAPABILITY = "capability-scopes-v1";
+export const TEMPORARY_WORKSPACE_RUNTIME_CAPABILITY = "temporary-workspace-v1";
 export const MAX_RUNTIME_FRAME_BYTES = 1024 * 1024;
 /** Maximum UTF-8 payload exposed through a host-facing ToolResult projection. */
 export const MAX_TOOL_RESULT_ENVELOPE_TEXT_BYTES = 16 * 1024;
@@ -1900,6 +1901,10 @@ export type RuntimeMethodMap = {
     readonly params: EmptyParams;
     readonly result: { readonly workspaces: readonly WorkspaceStatusResult[] };
   };
+  readonly "workspace.temporary.ensure": {
+    readonly params: EmptyParams;
+    readonly result: WorkspaceStatusResult & { readonly temporary: true };
+  };
   readonly "workspace.trust": {
     readonly params: WorkspaceParams & { readonly trusted: boolean };
     readonly result: { readonly workspacePath: string; readonly trusted: boolean };
@@ -2042,6 +2047,7 @@ export const RUNTIME_METHODS = [
   "workspace.unregister",
   "workspace.status",
   "workspace.list",
+  "workspace.temporary.ensure",
   "workspace.trust",
   "workspace.trustStatus",
   "events.replay",
@@ -2172,6 +2178,7 @@ export const DESKTOP_RUNTIME_METHODS = [
   "workspace.unregister",
   "workspace.status",
   "workspace.list",
+  "workspace.temporary.ensure",
   "workspace.trust",
   "workspace.trustStatus",
   "events.replay",
@@ -2315,9 +2322,10 @@ export interface EventLogStorageStatusResult extends JsonObject {
   readonly estimatedLogicalBytesReclaimed: number;
 }
 
-export interface WorkspaceStatusResult extends JsonObject {
+export type WorkspaceStatusResult = JsonObject & {
   workspacePath: string;
   registered: boolean;
+  readonly temporary?: true;
   schedulerStatus: "unknown";
   mode: "folder" | "git";
   branch: string;
@@ -2328,7 +2336,7 @@ export interface WorkspaceStatusResult extends JsonObject {
     readonly branchMerge: boolean;
   };
   eventLog: EventLogStorageStatusResult | null;
-}
+};
 
 export type RuntimeRequest<Method extends RuntimeMethod = RuntimeMethod> =
   Method extends RuntimeMethod
@@ -3689,6 +3697,7 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
   "workspace.unregister": workspaceParams,
   "workspace.status": workspaceParams,
   "workspace.list": noParams,
+  "workspace.temporary.ensure": noParams,
   "workspace.trust": exactParamShape({
     workspacePath: stringParam,
     trusted: booleanParam,
@@ -4349,6 +4358,7 @@ const workspaceStatusResultRule = resultShape(
     }),
   },
   {
+    temporary: resultOneOf([true]),
     eventLog: resultNullable(
       resultShape({
         logicalBytes: resultNonNegativeInteger,
@@ -4363,6 +4373,11 @@ const workspaceStatusResultRule = resultShape(
     ),
   },
 );
+
+const temporaryWorkspaceStatusResultRule: RuntimeResultRule = (value, path) => {
+  workspaceStatusResultRule(value, path);
+  if (isJsonObject(value)) resultOneOf([true])(value["temporary"], `${path}.temporary`);
+};
 
 const runtimeToolResultEnvelopeResult: RuntimeResultRule = (value, path) => {
   exactResultShape(
@@ -4653,7 +4668,8 @@ const runtimePingResult: RuntimeResultRule = (value, path) => {
     value["desktopSchemaRevision"] !== DESKTOP_RUNTIME_SCHEMA_REVISION ||
     !Array.isArray(capabilities) ||
     !capabilities.includes(DESKTOP_RUNTIME_SCHEMA_CAPABILITY) ||
-    !capabilities.includes(CAPABILITY_SCOPE_RUNTIME_CAPABILITY)
+    !capabilities.includes(CAPABILITY_SCOPE_RUNTIME_CAPABILITY) ||
+    !capabilities.includes(TEMPORARY_WORKSPACE_RUNTIME_CAPABILITY)
   ) {
     throw protocolError(
       RUNTIME_ERROR_CODES.VERSION_MISMATCH,
@@ -4669,6 +4685,7 @@ const RUNTIME_RESULT_VALIDATORS = {
   "diagnostics.resources": runtimeResourceDiagnosticsResult,
   "workspace.list": resultShape({ workspaces: resultArray(workspaceStatusResultRule) }),
   "workspace.status": workspaceStatusResultRule,
+  "workspace.temporary.ensure": temporaryWorkspaceStatusResultRule,
   "workspace.register": resultShape({
     workspacePath: resultString,
     registered: resultOneOf([true]),

@@ -127,6 +127,7 @@ export interface WorkspaceStatusBridgeInput {
 export interface WorkspaceStatusBridgeOutput {
   workspacePath: string;
   registered: boolean;
+  temporary?: true;
   schedulerStatus: "unknown";
   mode: "folder" | "git";
   branch: string;

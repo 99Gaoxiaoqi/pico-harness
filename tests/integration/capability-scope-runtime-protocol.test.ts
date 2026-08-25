@@ -14,6 +14,7 @@ import {
   RUNTIME_METHODS,
   RuntimeProtocolError,
   serializeRuntimeNotification,
+  TEMPORARY_WORKSPACE_RUNTIME_CAPABILITY,
   type RuntimeCapabilitySourceMetadata,
   type RuntimeMcpServerInput,
   type RuntimeScopedMcpServer,
@@ -276,13 +277,17 @@ test("scoped capability results expose opaque provenance without source paths or
 });
 
 test("runtime schema and config notifications advertise scoped capabilities without secret data", () => {
-  assert.equal(DESKTOP_RUNTIME_SCHEMA_REVISION, 15);
-  assert.equal(DESKTOP_RUNTIME_SCHEMA_CAPABILITY, "desktop-runtime-schema-v15");
+  assert.equal(DESKTOP_RUNTIME_SCHEMA_REVISION, 16);
+  assert.equal(DESKTOP_RUNTIME_SCHEMA_CAPABILITY, "desktop-runtime-schema-v16");
   const ping = {
     pong: true,
     protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
     desktopSchemaRevision: DESKTOP_RUNTIME_SCHEMA_REVISION,
-    capabilities: [DESKTOP_RUNTIME_SCHEMA_CAPABILITY, CAPABILITY_SCOPE_RUNTIME_CAPABILITY],
+    capabilities: [
+      DESKTOP_RUNTIME_SCHEMA_CAPABILITY,
+      CAPABILITY_SCOPE_RUNTIME_CAPABILITY,
+      TEMPORARY_WORKSPACE_RUNTIME_CAPABILITY,
+    ],
     picoHome: "/state/pico",
   } as const;
   assert.deepEqual(parseDesktopRuntimeResult("runtime.ping", ping), ping);
@@ -295,6 +300,14 @@ test("runtime schema and config notifications advertise scoped capabilities with
       parseDesktopRuntimeResult("runtime.ping", {
         ...ping,
         capabilities: [DESKTOP_RUNTIME_SCHEMA_CAPABILITY],
+      }),
+    RUNTIME_ERROR_CODES.VERSION_MISMATCH,
+  );
+  assertProtocolError(
+    () =>
+      parseDesktopRuntimeResult("runtime.ping", {
+        ...ping,
+        capabilities: [DESKTOP_RUNTIME_SCHEMA_CAPABILITY, CAPABILITY_SCOPE_RUNTIME_CAPABILITY],
       }),
     RUNTIME_ERROR_CODES.VERSION_MISMATCH,
   );

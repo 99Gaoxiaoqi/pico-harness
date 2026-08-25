@@ -13,6 +13,8 @@ type Awaitable<T> = T | Promise<T>;
 export interface DesktopSessionRequestContext {
   readonly initializeWorkspace: (workspacePath: string) => Awaitable<JsonValue>;
   readonly listWorkspaces: () => Awaitable<JsonValue>;
+  readonly getWorkspaceStatus: (workspacePath: string) => Awaitable<JsonValue>;
+  readonly ensureTemporaryWorkspace: () => Awaitable<JsonValue>;
   readonly trustStatus: (workspacePath: string) => Awaitable<JsonValue>;
   readonly setTrust: (workspacePath: string, trusted: boolean) => Awaitable<JsonValue>;
   readonly unregisterWorkspace: (workspacePath: string) => Promise<JsonValue>;
@@ -74,6 +76,8 @@ export function createDesktopSessionRequestHandlers(
   DesktopRequestHandlers,
   | "workspace.init"
   | "workspace.list"
+  | "workspace.status"
+  | "workspace.temporary.ensure"
   | "workspace.trustStatus"
   | "workspace.trust"
   | "workspace.unregister"
@@ -101,6 +105,8 @@ export function createDesktopSessionRequestHandlers(
   return {
     "workspace.init": (request) => context.initializeWorkspace(request.params.workspacePath),
     "workspace.list": () => context.listWorkspaces(),
+    "workspace.status": (request) => context.getWorkspaceStatus(request.params.workspacePath),
+    "workspace.temporary.ensure": () => context.ensureTemporaryWorkspace(),
     "workspace.trustStatus": (request) => context.trustStatus(request.params.workspacePath),
     "workspace.trust": (request) =>
       context.setTrust(request.params.workspacePath, request.params.trusted),

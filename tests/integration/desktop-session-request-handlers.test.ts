@@ -12,6 +12,8 @@ test("desktop session handlers keep protocol mapping separate from the service o
   const context: DesktopSessionRequestContext = {
     initializeWorkspace: async (workspacePath) => ({ workspacePath }),
     listWorkspaces: async () => ({ workspaces: [] }),
+    getWorkspaceStatus: async (workspacePath) => ({ workspacePath }),
+    ensureTemporaryWorkspace: async () => ({ temporary: true }),
     trustStatus: async () => ({ trusted: true }),
     setTrust: async (_workspacePath, trusted) => ({ trusted }),
     unregisterWorkspace: async (workspacePath) => ({ workspacePath, unregistered: true }),
