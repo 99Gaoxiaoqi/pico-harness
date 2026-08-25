@@ -5,12 +5,9 @@
   "type": "module",
   "main": ".vite/build/main.cjs",
   "scripts": {
-    "prestart": "npm run build --workspace @pico/protocol && npm run build --workspace @pico/transcript-replica && npm run build --workspace @pico/runtime-host",
-    "start": "node --env-file-if-exists=../../.env ../../node_modules/@electron-forge/cli/dist/electron-forge.js start",
-    "prepackage": "npm run build --workspace @pico/protocol && npm run build --workspace @pico/transcript-replica && npm run build --workspace @pico/runtime-host",
-    "package": "electron-forge package",
-    "premake": "npm run build --workspace @pico/protocol && npm run build --workspace @pico/transcript-replica && npm run build --workspace @pico/runtime-host",
-    "make": "electron-forge make",
+    "start": "node --env-file-if-exists=../../.env ../../scripts/run-desktop-forge.mjs start",
+    "package": "node ../../scripts/run-desktop-forge.mjs package",
+    "make": "node ../../scripts/run-desktop-forge.mjs make",
     "pretypecheck": "npm run build --workspace @pico/protocol && npm run build --workspace @pico/transcript-replica && npm run build --workspace @pico/runtime-host",
     "typecheck": "tsc --noEmit -p tsconfig.main.json && tsc --noEmit -p tsconfig.preload.json && tsc --noEmit -p tsconfig.renderer.json"
   },
