@@ -326,8 +326,8 @@ export class MemoryRepositoryProposalStore implements MemoryProposalStorePort {
           ...(candidate.conflictFactId ? { conflictFactId: candidate.conflictFactId } : {}),
           idempotencyKey: `proposal-create:${identity}`,
         });
-        // autoCommit：默认生效，异常才审。
-        // 无冲突且非 quarantine（PII 脱敏）的干净提案直接 accept；
+        // autoCommit：仅兼容显式开启的内部场景，生产默认关闭。
+        // 显式开启时，无冲突且非 quarantine（PII 脱敏）的干净提案直接 accept；
         // conflict 或 [SAFETY_REVIEW_REQUIRED] 保持 pending 待人工裁决。
         const autoCommitEligible =
           settings.autoCommit &&
