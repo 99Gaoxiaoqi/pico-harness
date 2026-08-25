@@ -6,7 +6,6 @@ import {
   CircleOff,
   Pencil,
   RefreshCw,
-  ShieldAlert,
   Trash2,
   X,
 } from "lucide-react";
@@ -195,16 +194,11 @@ export function MemoryPage({
   };
 
   const updateSetting = async (
-    key: "enabled" | "autoPropose" | "autoCommit" | "injectionEnabled",
+    key: "enabled" | "autoPropose" | "injectionEnabled",
     value: boolean,
   ) => {
     const settings = memory.settings;
     if (!settings) return;
-    if (key === "autoCommit") {
-      const updated = await actions.updateMemorySettings(settings.version, { autoCommit: false });
-      if (updated) setAnnouncement("自动批准已关闭。此开关无法从 App 重新启用。");
-      return;
-    }
     const patch =
       key === "enabled"
         ? { enabled: value }
@@ -747,10 +741,7 @@ function MemorySettings({
   readonly settings: RuntimeStore["data"]["memory"]["settings"];
   readonly reviewBudget: RuntimeStore["data"]["memory"]["reviewBudget"];
   readonly busy: boolean;
-  readonly onChange: (
-    key: "enabled" | "autoPropose" | "autoCommit" | "injectionEnabled",
-    value: boolean,
-  ) => void;
+  readonly onChange: (key: "enabled" | "autoPropose" | "injectionEnabled", value: boolean) => void;
   readonly onReviewModeChange: (mode: RuntimeMemorySettings["reviewMode"]) => void;
 }) {
   if (!settings) return null;
@@ -844,23 +835,12 @@ function MemorySettings({
           </span>
         </label>
         <label className="is-locked">
-          <input type="checkbox" checked={settings.autoCommit} disabled />
+          <input type="checkbox" checked={false} disabled />
           <span>
-            <strong>自动批准</strong>
-            <small>
-              <ShieldAlert aria-hidden="true" size={14} />
-              固定关闭，普通用户无法启用。
-            </small>
+            <strong>自动批准已停用</strong>
+            <small>所有建议都会保留在待审核列表，由你手动批准。</small>
           </span>
         </label>
-        {settings.autoCommit && (
-          <div className="memory-settings__warning" role="alert">
-            <span>检测到旧配置仍开启自动批准，请立即关闭。</span>
-            <Button variant="danger" onClick={() => onChange("autoCommit", false)}>
-              立即关闭自动批准
-            </Button>
-          </div>
-        )}
       </fieldset>
     </section>
   );

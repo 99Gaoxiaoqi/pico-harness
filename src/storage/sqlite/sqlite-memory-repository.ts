@@ -87,6 +87,8 @@ const MAX_LIST_LIMIT = 500;
 const METADATA_WORKSPACE_KEY = "workspaceId";
 const METADATA_REVISION_KEY = "revision";
 const METADATA_SETTINGS_KEY = "settings";
+const METADATA_AUTO_COMMIT_DISABLED_MIGRATION_KEY = "migration:autoCommitDisabled:v1";
+const AUTO_COMMIT_DISABLED_MIGRATION_VERSION = 1;
 
 interface MemorySqliteWriteTx {
   dirty: boolean;
@@ -1249,6 +1251,10 @@ export class SqliteMemoryRepository implements MemoryRepositoryContract {
         METADATA_SETTINGS_KEY,
         defaultSettings(this.workspaceId, this.timestamp()),
       );
+      this.putMetadataRawLocked(
+        METADATA_AUTO_COMMIT_DISABLED_MIGRATION_KEY,
+        AUTO_COMMIT_DISABLED_MIGRATION_VERSION,
+      );
       return;
     }
     if (existing !== this.workspaceId) {
@@ -1261,6 +1267,46 @@ export class SqliteMemoryRepository implements MemoryRepositoryContract {
         throw new FileStorageIntegrityError(`Memory metadata row ${key} is missing`);
       }
     }
+    this.migrateAutoCommitDisabledLocked();
+  }
+
+  /**
+   * One-time data migration for repositories created while auto approval defaulted on.
+   * The settings write, audit mutation, and marker share the constructor's write transaction.
+   */
+  private migrateAutoCommitDisabledLocked(): void {
+    const applied = this.getMetadataValueLocked(METADATA_AUTO_COMMIT_DISABLED_MIGRATION_KEY);
+    if (applied === AUTO_COMMIT_DISABLED_MIGRATION_VERSION) return;
+    if (applied !== undefined) {
+      throw new FileStorageIntegrityError(
+        `Memory metadata row ${METADATA_AUTO_COMMIT_DISABLED_MIGRATION_KEY} is invalid`,
+      );
+    }
+
+    const current = this.readSettingsLocked();
+    if (current.autoCommit) {
+      const updatedAt = this.timestamp();
+      const migrated: Settings = {
+        ...current,
+        autoCommit: false,
+        version: current.version + 1,
+        updatedAt,
+      };
+      this.putMetadataLocked(METADATA_SETTINGS_KEY, migrated);
+      this.recordMutationLocked(
+        "settings",
+        this.workspaceId,
+        "settings.updated",
+        current.version,
+        migrated.version,
+        undefined,
+        updatedAt,
+      );
+    }
+    this.putMetadataRawLocked(
+      METADATA_AUTO_COMMIT_DISABLED_MIGRATION_KEY,
+      AUTO_COMMIT_DISABLED_MIGRATION_VERSION,
+    );
   }
 
   private readSettingsLocked(): Settings {
@@ -2158,7 +2204,7 @@ function defaultSettings(workspaceId: WorkspaceId, at: string): Settings {
     workspaceId,
     enabled: true,
     autoPropose: true,
-    autoCommit: true,
+    autoCommit: false,
     injectionEnabled: true,
     reviewMode: "balanced",
     version: 1,

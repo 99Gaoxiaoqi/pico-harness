@@ -61,6 +61,28 @@ test("proposal engine uses the model for explicit preferences and one-time reque
   );
 });
 
+test("default settings keep clean proposals pending instead of auto accepting", async (context) => {
+  const fixture = await createFixture("default-manual-approval");
+  context.after(fixture.close);
+  assert.equal(fixture.repository.getSettings().autoCommit, false);
+
+  const result = await fixture
+    .engine(
+      new QueueModel([
+        toolResponse([
+          candidate("project_fact", "Build command", "Use npm run build", "Stable build command"),
+        ]),
+      ]),
+      new ContentEvidenceReader(),
+    )
+    .process(runInput("default-manual-approval", "请记住：本项目使用 npm run build。"));
+
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.proposals[0]?.status, "pending");
+  assert.equal(fixture.repository.listFacts({ states: ["active"] }).length, 0);
+  assert.equal(fixture.repository.listProposals({ statuses: ["pending"] }).length, 1);
+});
+
 test("stable signal gate excludes questions, negation, discussion, and quoted examples", () => {
   for (const content of [
     "如何让 App 记住用户偏好？",
@@ -603,13 +625,6 @@ async function createFixture(label: string) {
   const repository = new SqliteMemoryRepository({
     storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
-  });
-  // 显式保留审批制语义：这些用例断言 pending 提案行为，
-  // autoCommit 的自动接受由生产默认值和专门用例覆盖。
-  repository.updateSettings({
-    expectedVersion: repository.getSettings().version,
-    autoCommit: false,
-    idempotencyKey: "fixture-autocommit-off",
   });
   const store = new MemoryRepositoryProposalStore(repository);
   return {

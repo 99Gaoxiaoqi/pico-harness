@@ -67,7 +67,7 @@ export function createMemoryFileState(workspaceId: WorkspaceId, at: string): Mem
       workspaceId,
       enabled: true,
       autoPropose: true,
-      autoCommit: true,
+      autoCommit: false,
       injectionEnabled: true,
       reviewMode: "balanced",
       version: 1,
