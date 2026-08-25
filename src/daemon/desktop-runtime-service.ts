@@ -17,7 +17,10 @@ import { recordRuntimeCompactionCheckpoint } from "../context/runtime-compaction
 import { SkillLoader } from "../context/skill.js";
 import { findAgentProfile, loadAgentCatalog } from "../agents/catalog.js";
 import { ResourceDoctor, renderResourceDoctorReport } from "../diagnostics/resource-doctor.js";
-import { runWorkspaceDoctor } from "../diagnostics/workspace-doctor.js";
+import {
+  runWorkspaceDoctor,
+  workspaceConfigurationDiagnosticFromRuntime,
+} from "../diagnostics/workspace-doctor.js";
 import { SessionForkService } from "../engine/session-fork-service.js";
 import { projectRuntimeSessionActiveToolResultEntries } from "../engine/session-runtime-projection.js";
 import { globalSessionManager, Session } from "../engine/session.js";
@@ -911,6 +914,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         model: defaults.model,
         env: this.env,
         taskRuntimeAvailable: true,
+        configuration: workspaceConfigurationDiagnosticFromRuntime(effective),
       }),
     );
   }
