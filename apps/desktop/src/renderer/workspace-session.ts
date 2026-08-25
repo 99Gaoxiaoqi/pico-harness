@@ -7,7 +7,9 @@ export interface WorkspaceScopedItem {
   readonly workspacePath: string;
 }
 
-export const TEMPORARY_WORKSPACE_LABEL = "临时工作区";
+/** User-facing label for Pico's durable scratch area. */
+export const TEMPORARY_WORKSPACE_LABEL = "无项目";
+export const TEMPORARY_WORKSPACE_GROUP_LABEL = "未归属项目";
 
 export interface WorkspaceLabelSource {
   readonly path: string;

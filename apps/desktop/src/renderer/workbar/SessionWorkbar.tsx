@@ -88,6 +88,8 @@ export interface SessionWorkbarProps {
 export interface SessionWorkbarLayoutProps {
   readonly state: WorkbarState;
   readonly children: ReactNode;
+  /** New tasks stay focused until a real session exists. */
+  readonly enabled?: boolean | undefined;
   readonly launcher?: ((dock: WorkbarDock) => ReactNode) | undefined;
   readonly presentTab?:
     | ((
@@ -654,11 +656,14 @@ export function SessionWorkbar({
 export function SessionWorkbarLayout({
   state,
   children,
+  enabled = true,
   launcher,
   presentTab,
   renderPanel,
   onAction,
 }: SessionWorkbarLayoutProps) {
+  if (!enabled) return children;
+
   const renderDock = (dock: WorkbarDock) => {
     const dockState = state.docks[dock];
     const tabs: readonly SessionWorkbarTab[] = dockState.tabs.map((tab) => {

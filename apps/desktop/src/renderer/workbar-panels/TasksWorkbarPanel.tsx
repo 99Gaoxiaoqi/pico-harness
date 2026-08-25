@@ -89,11 +89,11 @@ export function TasksWorkbarPanel({
     <section className="tool-panel tool-panel--tasks" aria-label="待办">
       <header className="tool-panel__header">
         <div>
-          <span className="tool-panel__eyebrow">Session Ledger</span>
+          <span className="tool-panel__eyebrow">任务清单</span>
           <strong>待办</strong>
         </div>
         <div className="tool-panel__header-meta">
-          <code>rev {ledger?.revision ?? "—"}</code>
+          <span>{ledger ? `已同步 ${ledger.tasks.length} 项` : "正在同步"}</span>
           <button
             type="button"
             className="tool-panel__icon-button"

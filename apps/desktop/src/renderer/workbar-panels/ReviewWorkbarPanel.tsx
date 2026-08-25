@@ -93,63 +93,65 @@ export function ReviewWorkbarPanel({
         </p>
       )}
 
-      <div className="tool-panel__split" aria-busy={loading}>
-        <div className="tool-panel__sidebar" aria-label="变更文件">
-          {loading && !snapshot ? (
-            <p className="tool-panel__state" role="status">
-              正在读取工作区变更…
-            </p>
-          ) : !snapshot || total === 0 ? (
-            <div className="tool-panel__state">
-              <FileDiff aria-hidden="true" size={20} />
-              <strong>没有本地变更</strong>
-              <span>工作区与当前 HEAD 一致。</span>
-            </div>
-          ) : (
-            <>
-              <ReviewFileGroup
-                heading="已暂存"
-                source="staged"
-                files={snapshot.staged}
-                selection={selection}
-                onSelectFile={onSelectFile}
-              />
-              <ReviewFileGroup
-                heading="未暂存"
-                source="unstaged"
-                files={snapshot.unstaged}
-                selection={selection}
-                onSelectFile={onSelectFile}
-              />
-            </>
-          )}
-        </div>
+      {!error && (
+        <div className="tool-panel__split" aria-busy={loading}>
+          <div className="tool-panel__sidebar" aria-label="变更文件">
+            {loading && !snapshot ? (
+              <p className="tool-panel__state" role="status">
+                正在读取工作区变更…
+              </p>
+            ) : !snapshot || total === 0 ? (
+              <div className="tool-panel__state">
+                <FileDiff aria-hidden="true" size={20} />
+                <strong>没有本地变更</strong>
+                <span>工作区与当前 HEAD 一致。</span>
+              </div>
+            ) : (
+              <>
+                <ReviewFileGroup
+                  heading="已暂存"
+                  source="staged"
+                  files={snapshot.staged}
+                  selection={selection}
+                  onSelectFile={onSelectFile}
+                />
+                <ReviewFileGroup
+                  heading="未暂存"
+                  source="unstaged"
+                  files={snapshot.unstaged}
+                  selection={selection}
+                  onSelectFile={onSelectFile}
+                />
+              </>
+            )}
+          </div>
 
-        <div className="tool-panel__detail" aria-live="polite">
-          {diffError ? (
-            <p className="tool-panel__error" role="alert">
-              {diffError}
-            </p>
-          ) : diffLoading ? (
-            <p className="tool-panel__state" role="status">
-              正在加载差异…
-            </p>
-          ) : !selection ? (
-            <p className="tool-panel__state">选择一个文件查看差异。</p>
-          ) : !diff ? (
-            <p className="tool-panel__state">当前文件没有可显示的文本差异。</p>
-          ) : (
-            <section className="tool-panel__diff" aria-label={`${diff.path} 差异`}>
-              <header>
-                <strong title={diff.path}>{diff.path}</strong>
-                <span>{diff.source === "staged" ? "已暂存" : "未暂存"}</span>
-              </header>
-              <pre tabIndex={0}>{diff.content}</pre>
-              {diff.truncated && <p className="tool-panel__notice">差异过大，当前内容已截断。</p>}
-            </section>
-          )}
+          <div className="tool-panel__detail" aria-live="polite">
+            {diffError ? (
+              <p className="tool-panel__error" role="alert">
+                {diffError}
+              </p>
+            ) : diffLoading ? (
+              <p className="tool-panel__state" role="status">
+                正在加载差异…
+              </p>
+            ) : !selection ? (
+              <p className="tool-panel__state">选择一个文件查看差异。</p>
+            ) : !diff ? (
+              <p className="tool-panel__state">当前文件没有可显示的文本差异。</p>
+            ) : (
+              <section className="tool-panel__diff" aria-label={`${diff.path} 差异`}>
+                <header>
+                  <strong title={diff.path}>{diff.path}</strong>
+                  <span>{diff.source === "staged" ? "已暂存" : "未暂存"}</span>
+                </header>
+                <pre tabIndex={0}>{diff.content}</pre>
+                {diff.truncated && <p className="tool-panel__notice">差异过大，当前内容已截断。</p>}
+              </section>
+            )}
+          </div>
         </div>
-      </div>
+      )}
     </section>
   );
 }

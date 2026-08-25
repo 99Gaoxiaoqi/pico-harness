@@ -51,6 +51,22 @@ test("desktop Workbar renders accessible right and bottom Docks with persistent 
   assert.match(html, /aria-label="关闭“变更”"/u);
 });
 
+test("new tasks render without Workbar chrome until a session exists", () => {
+  Object.assign(globalThis, { React });
+  const html = renderToStaticMarkup(
+    React.createElement(SessionWorkbarLayout, {
+      state: createWorkbarState(),
+      enabled: false,
+      renderPanel: () => React.createElement("p", null, "工作栏"),
+      onAction: () => undefined,
+      children: React.createElement("article", null, "专注的新任务"),
+    }),
+  );
+
+  assert.match(html, /专注的新任务/u);
+  assert.doesNotMatch(html, /任务工作栏|session-workbar/u);
+});
+
 test("desktop Workbar v2 source exposes full Registry, context menu and keyboard alternatives", async () => {
   assert.deepEqual(
     WORKBAR_TOOL_REGISTRY.map(({ kind, label }) => ({ kind, label })),

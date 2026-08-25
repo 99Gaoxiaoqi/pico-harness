@@ -54,6 +54,32 @@ export function mergeConversationItemGroups(
   return merged;
 }
 
+/**
+ * An approval-gated tool can leave a durable pre-approval "active" row next to
+ * the canonical completed row. Once the Run is terminal, keep the completed
+ * record and remove only that superseded duplicate.
+ */
+export function removeSupersededActiveTools(
+  items: readonly ConversationItemView[],
+  runActive: boolean,
+): readonly ConversationItemView[] {
+  if (runActive) return items;
+  return items.filter((item, index) => {
+    if (item.kind !== "tool" || item.state !== "active") return true;
+    const laterItems = items.slice(index + 1);
+    const terminalIndex = laterItems.findIndex(
+      (candidate) =>
+        candidate.kind === "tool" &&
+        candidate.state !== "active" &&
+        candidate.toolName === item.toolName,
+    );
+    if (terminalIndex < 0) return true;
+    return !laterItems
+      .slice(0, terminalIndex)
+      .some((candidate) => candidate.kind === "approval");
+  });
+}
+
 /** Preserve only the still-live item for the exact active Run across transcript hydration. */
 export function mergeHydratedConversationItems(
   hydrated: readonly ConversationItemView[],

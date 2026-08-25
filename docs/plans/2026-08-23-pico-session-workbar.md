@@ -1,6 +1,6 @@
 # Pico Desktop 右侧 Session Workbar 实施计划
 
-状态：P0 交互骨架已完成并通过真实 Electron 验收；步骤 5–9 尚未实施。本计划补充 [Pico Desktop UI 重写](./2026-08-23-maka-inspired-desktop-ui.md)，只替换其中“固定右侧工作台、Inspector 临时覆盖”的实现边界；EventLog、长期记忆和压缩语义继续以 [EventLog Maka 语义对齐计划](./2026-08-22-eventlog-maka-semantic-convergence.md) 为准。
+状态：历史实施快照。本文记录的 P0 步骤 1–4 已完成；原步骤 5–10 已在后续 Workbar v2 和 Session Continuity 集成中以调整后的边界交付。下方未勾选项仅保留当时的规划语境，不再代表当前待办；现状、验收证据和真实剩余项以 [EventLog Maka 语义对齐计划](./2026-08-22-eventlog-maka-semantic-convergence.md) 为准。本计划补充 [Pico Desktop UI 重写](./2026-08-23-maka-inspired-desktop-ui.md)。
 
 ## Approach
 

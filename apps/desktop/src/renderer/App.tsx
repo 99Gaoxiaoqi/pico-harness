@@ -79,6 +79,7 @@ import {
   type ConversationInspectorView,
   type ConversationItemView,
   mergeConversationItemGroups,
+  removeSupersededActiveTools,
   removePersistentDraft,
   usePersistentDraft,
 } from "./conversation/index.js";
@@ -97,9 +98,10 @@ import type {
 } from "./model.js";
 import { ProviderPage } from "./ProviderPage.js";
 import { MemoryPage } from "./MemoryPage.js";
-import { useRuntimeStore, type RuntimeStore } from "./runtime.js";
+import { useRuntimeStore, type DesktopDiagnosticReport, type RuntimeStore } from "./runtime.js";
 import {
   newSessionHref,
+  TEMPORARY_WORKSPACE_GROUP_LABEL,
   isActiveWorkspaceSession,
   sessionHref,
   workspaceDisplayName,
@@ -265,7 +267,14 @@ function AppStateRouter() {
             </WorkspaceRoute>
           }
         />
-        <Route path="settings/system" element={<SystemSettingsPage />} />
+        <Route
+          path="settings/system"
+          element={
+            <WorkspaceRoute>
+              <SystemSettingsPage />
+            </WorkspaceRoute>
+          }
+        />
         <Route path="memory" element={<LegacySurfaceRedirect to="/settings/memory" />} />
         <Route path="skills" element={<LegacySurfaceRedirect to="/extensions/skills" />} />
         <Route path="mcp" element={<LegacySurfaceRedirect to="/extensions/mcp" />} />
@@ -294,7 +303,7 @@ function WorkspaceRoute({ children }: { readonly children: ReactNode }) {
     return (
       <div className="workspace-route-loading" aria-busy="true">
         <RefreshCw aria-hidden="true" />
-        <p>正在载入 {workspace.name}…</p>
+        <p>正在载入 {workspaceDisplayName(workspace.path, workspace)}…</p>
       </div>
     );
   }
@@ -331,7 +340,7 @@ function WorkspacePicker() {
                 )}
               </span>
               <span>
-                <strong>{workspace.name}</strong>
+                <strong>{workspaceDisplayName(workspace.path, workspace)}</strong>
                 <small>{workspaceParent(workspace.path)}</small>
               </span>
               <span className="workspace-picker__state">
@@ -527,10 +536,17 @@ function AppShell() {
   );
   const routeWorkspacePath = workspacePathFromSearch(location.search);
   const routeWorkspace = data.workspaces.find((workspace) => workspace.path === routeWorkspacePath);
-  const navigationWorkspacePath = routeWorkspacePath ?? data.workspacePath;
   const pageTitle = routeTitle(location.pathname);
   const settingsRoute =
     location.pathname.startsWith("/settings") || location.pathname.startsWith("/extensions");
+  const settingsReturnTo = window.sessionStorage.getItem("pico.settings-return-to") ?? "";
+  const settingsReturnSearch = settingsReturnTo.includes("?")
+    ? settingsReturnTo.slice(settingsReturnTo.indexOf("?"))
+    : "";
+  const navigationWorkspacePath =
+    routeWorkspacePath ??
+    data.workspacePath ??
+    (settingsRoute ? workspacePathFromSearch(settingsReturnSearch) : undefined);
   const conversationRoute =
     location.pathname === "/task/new" || location.pathname.startsWith("/session/");
   const immersiveRoute = conversationRoute || settingsRoute || location.pathname === "/";
@@ -876,9 +892,7 @@ function SidebarTasks({
         session={session}
         nested={nested}
         workspaceLabel={
-          !nested && workspace?.temporary
-            ? workspaceDisplayName(session.workspacePath, workspace)
-            : undefined
+          !nested && workspace?.temporary ? TEMPORARY_WORKSPACE_GROUP_LABEL : undefined
         }
         running={sessionRuns.some((run) => !isTerminalRun(run.status))}
         hasPendingInteraction={hasPendingInteraction}
@@ -940,7 +954,11 @@ function SidebarTasks({
               ) : (
                 <Folder aria-hidden="true" />
               )}
-              <span>{workspace?.name ?? workspaceName(workspacePath)}</span>
+              <span>
+                {workspace?.temporary
+                  ? TEMPORARY_WORKSPACE_GROUP_LABEL
+                  : (workspace?.name ?? workspaceName(workspacePath))}
+              </span>
               <small>{workspaceSessions.length}</small>
               <ChevronDown aria-hidden="true" />
             </button>
@@ -1501,6 +1519,8 @@ function ConversationPage() {
     | { readonly kind: "agent"; readonly name: string }
   >();
   const sendingRef = useRef(false);
+  const firstSendBaselineRef = useRef<ReadonlySet<string>>(new Set());
+  const [awaitingFirstSession, setAwaitingFirstSession] = useState(false);
 
   useEffect(() => {
     if (sessionRef) void actions.loadSession(sessionRef);
@@ -1582,7 +1602,27 @@ function ConversationPage() {
   );
 
   const runIds = useMemo(() => new Set(sessionRuns.map((run) => run.id)), [sessionRuns]);
-  const pendingApproval = data.approvals.filter((item) => runIds.has(item.runId)).at(-1);
+  const persistedPendingApproval = activeRun
+    ? [...(conversation?.items ?? [])]
+        .reverse()
+        .find(
+          (item): item is Extract<ConversationItemView, { readonly kind: "approval" }> =>
+            item.kind === "approval" && item.state === "pending" && item.id.startsWith("approval:"),
+        )
+    : undefined;
+  const pendingApproval =
+    data.approvals.filter((item) => runIds.has(item.runId)).at(-1) ??
+    (persistedPendingApproval && activeRun
+      ? {
+          id: persistedPendingApproval.id.slice("approval:".length),
+          runId: activeRun.id,
+          sessionId,
+          title: persistedPendingApproval.title,
+          detail: persistedPendingApproval.detail,
+          risk: "medium" as const,
+          kind: "tool" as const,
+        }
+      : undefined);
   const pendingPrompt = data.prompts.filter((item) => runIds.has(item.runId)).at(-1);
   const legacyStorageBlocked = Boolean(
     workspacePath &&
@@ -1594,11 +1634,35 @@ function ConversationPage() {
   );
 
   useEffect(() => {
+    if (!awaitingFirstSession || sessionId || !workspacePath) return;
+    const createdSession = data.sessions
+      .filter(
+        (candidate) =>
+          candidate.workspacePath === workspacePath &&
+          !firstSendBaselineRef.current.has(candidate.id),
+      )
+      .sort((left, right) => right.updatedAt - left.updatedAt)[0];
+    if (!createdSession) return;
+    setAwaitingFirstSession(false);
+    navigate(
+      sessionHref({ workspacePath: createdSession.workspacePath, sessionId: createdSession.id }),
+      { replace: true },
+    );
+  }, [awaitingFirstSession, data.sessions, navigate, sessionId, workspacePath]);
+
+  useEffect(() => {
     if (!editingTitle) setTitleDraft(session?.title ?? "");
   }, [editingTitle, session?.title]);
 
   const items = useMemo<readonly ConversationItemView[]>(() => {
-    const persisted = conversation?.items ?? [];
+    const persisted = removeSupersededActiveTools(
+      conversation?.items ?? [],
+      Boolean(activeRun),
+    ).filter(
+      (item) =>
+        Boolean(activeRun) ||
+        !((item.kind === "approval" || item.kind === "prompt") && item.state === "pending"),
+    );
     const live = activeRun
       ? data.timeline
           .filter((item) => item.runId === activeRun.id)
@@ -1647,6 +1711,14 @@ function ConversationPage() {
   const submit = async (text: string, nextBehavior: ComposerBehavior) => {
     if (sendingRef.current || !workspaceReady) return;
     sendingRef.current = true;
+    if (!sessionId) {
+      firstSendBaselineRef.current = new Set(
+        data.sessions
+          .filter((candidate) => candidate.workspacePath === workspacePath)
+          .map((candidate) => candidate.id),
+      );
+      setAwaitingFirstSession(true);
+    }
     try {
       const result = await actions.sendMessage({
         workspacePath,
@@ -1657,10 +1729,14 @@ function ConversationPage() {
         ...(activeRun ? { expectedRunId: activeRun.id } : {}),
         ...(activation ? { activation } : {}),
       });
-      if (!result.succeeded) return;
+      if (!result.succeeded) {
+        setAwaitingFirstSession(false);
+        return;
+      }
       clearDraft();
       setActivation(undefined);
       if (!sessionId && result.sessionId) {
+        setAwaitingFirstSession(false);
         navigate(
           sessionHref({
             workspacePath: result.workspacePath ?? workspacePath,
@@ -1968,6 +2044,7 @@ function ConversationPage() {
   return (
     <SessionWorkbarLayout
       state={workbar}
+      enabled={Boolean(sessionRef)}
       launcher={workbarLauncher}
       presentTab={(tab) => ({
         closable: true,
@@ -1979,118 +2056,123 @@ function ConversationPage() {
       <ConversationSurface
         className="session-conversation"
         header={
-          <div className="conversation-session-header">
-            <div className="conversation-session-header__identity">
-              {workspacePath && (
-                <span className="conversation-session-project" title={workspacePath}>
-                  <Folder aria-hidden="true" /> {workspaceLabel}
-                </span>
-              )}
-              {editingTitle && sessionRef ? (
-                <form
-                  className="conversation-title-editor"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    void actions
-                      .renameSession(sessionRef, titleDraft)
-                      .then(() => setEditingTitle(false));
-                  }}
-                >
-                  <label className="conversation-sr-only" htmlFor="conversation-title">
-                    会话标题
-                  </label>
-                  <input
-                    id="conversation-title"
-                    name="conversation-title"
-                    autoComplete="off"
-                    value={titleDraft}
-                    autoFocus
-                    onChange={(event) => setTitleDraft(event.target.value)}
-                  />
-                  <Button
-                    type="submit"
-                    variant="quiet"
-                    disabled={!titleDraft.trim() || Boolean(busy)}
-                  >
-                    保存
-                  </Button>
-                  <Button type="button" variant="quiet" onClick={() => setEditingTitle(false)}>
-                    取消
-                  </Button>
-                </form>
-              ) : (
-                <h1>{session?.title ?? (sessionId ? "正在载入会话…" : "新任务")}</h1>
-              )}
-            </div>
-            <div className="conversation-session-header__meta">
-              {preview && <PreviewBadge />}
-              {conversation?.usage && (
-                <span>
-                  {formatCompact(
-                    (conversation.usage.inputTokens ?? 0) + (conversation.usage.outputTokens ?? 0),
-                  )}{" "}
-                  tokens
-                </span>
-              )}
-              {activeRun && <StatusPill status={activeRun.status} />}
-              {sessionRef && (
-                <div className="conversation-session-actions" aria-label="会话操作">
-                  <button
-                    type="button"
-                    disabled={Boolean(activeRun) || Boolean(busy)}
-                    onClick={() => setEditingTitle(true)}
-                  >
-                    <Pencil aria-hidden="true" /> 重命名
-                  </button>
-                  <button
-                    type="button"
-                    disabled={Boolean(activeRun) || Boolean(busy)}
-                    onClick={() =>
+          sessionRef ? (
+            <div className="conversation-session-header">
+              <div className="conversation-session-header__identity">
+                {workspacePath && (
+                  <span className="conversation-session-project" title={workspacePath}>
+                    <Folder aria-hidden="true" /> {workspaceLabel}
+                  </span>
+                )}
+                {editingTitle && sessionRef ? (
+                  <form
+                    className="conversation-title-editor"
+                    onSubmit={(event) => {
+                      event.preventDefault();
                       void actions
-                        .forkSession(sessionRef)
-                        .then((forked) => forked && navigate(sessionHref(forked)))
-                    }
-                  >
-                    <GitFork aria-hidden="true" /> 分叉
-                  </button>
-                  <button
-                    type="button"
-                    disabled={Boolean(activeRun) || Boolean(busy)}
-                    onClick={() => {
-                      if (!confirmCompact) {
-                        setConfirmCompact(true);
-                        return;
-                      }
-                      void actions.compactSession(sessionRef).then(() => setConfirmCompact(false));
+                        .renameSession(sessionRef, titleDraft)
+                        .then(() => setEditingTitle(false));
                     }}
                   >
-                    <Minimize2 aria-hidden="true" /> {confirmCompact ? "确认压缩" : "压缩"}
+                    <label className="conversation-sr-only" htmlFor="conversation-title">
+                      会话标题
+                    </label>
+                    <input
+                      id="conversation-title"
+                      name="conversation-title"
+                      autoComplete="off"
+                      value={titleDraft}
+                      autoFocus
+                      onChange={(event) => setTitleDraft(event.target.value)}
+                    />
+                    <Button
+                      type="submit"
+                      variant="quiet"
+                      disabled={!titleDraft.trim() || Boolean(busy)}
+                    >
+                      保存
+                    </Button>
+                    <Button type="button" variant="quiet" onClick={() => setEditingTitle(false)}>
+                      取消
+                    </Button>
+                  </form>
+                ) : (
+                  <h1>{session?.title ?? (sessionId ? "正在载入会话…" : "新任务")}</h1>
+                )}
+              </div>
+              <div className="conversation-session-header__meta">
+                {preview && <PreviewBadge />}
+                {conversation?.usage && (
+                  <span>
+                    {formatCompact(
+                      (conversation.usage.inputTokens ?? 0) +
+                        (conversation.usage.outputTokens ?? 0),
+                    )}{" "}
+                    tokens
+                  </span>
+                )}
+                {activeRun && <StatusPill status={activeRun.status} />}
+                {sessionRef && (
+                  <div className="conversation-session-actions" aria-label="会话操作">
+                    <button
+                      type="button"
+                      disabled={Boolean(activeRun) || Boolean(busy)}
+                      onClick={() => setEditingTitle(true)}
+                    >
+                      <Pencil aria-hidden="true" /> 重命名
+                    </button>
+                    <button
+                      type="button"
+                      disabled={Boolean(activeRun) || Boolean(busy)}
+                      onClick={() =>
+                        void actions
+                          .forkSession(sessionRef)
+                          .then((forked) => forked && navigate(sessionHref(forked)))
+                      }
+                    >
+                      <GitFork aria-hidden="true" /> 分叉
+                    </button>
+                    <button
+                      type="button"
+                      disabled={Boolean(activeRun) || Boolean(busy)}
+                      onClick={() => {
+                        if (!confirmCompact) {
+                          setConfirmCompact(true);
+                          return;
+                        }
+                        void actions
+                          .compactSession(sessionRef)
+                          .then(() => setConfirmCompact(false));
+                      }}
+                    >
+                      <Minimize2 aria-hidden="true" /> {confirmCompact ? "确认压缩" : "压缩"}
+                    </button>
+                  </div>
+                )}
+                {sessionRef && (
+                  <button
+                    type="button"
+                    className="conversation-panel-toggle"
+                    aria-label={workbar.docks.right.collapsed ? "打开任务工作栏" : "收起任务工作栏"}
+                    aria-expanded={!workbar.docks.right.collapsed}
+                    onClick={() =>
+                      dispatchWorkbar({
+                        type: "setCollapsed",
+                        dock: "right",
+                        collapsed: !workbar.docks.right.collapsed,
+                      })
+                    }
+                  >
+                    {workbar.docks.right.collapsed ? (
+                      <PanelRightOpen aria-hidden="true" />
+                    ) : (
+                      <PanelRightClose aria-hidden="true" />
+                    )}
                   </button>
-                </div>
-              )}
-              {sessionRef && (
-                <button
-                  type="button"
-                  className="conversation-panel-toggle"
-                  aria-label={workbar.docks.right.collapsed ? "打开任务工作栏" : "收起任务工作栏"}
-                  aria-expanded={!workbar.docks.right.collapsed}
-                  onClick={() =>
-                    dispatchWorkbar({
-                      type: "setCollapsed",
-                      dock: "right",
-                      collapsed: !workbar.docks.right.collapsed,
-                    })
-                  }
-                >
-                  {workbar.docks.right.collapsed ? (
-                    <PanelRightOpen aria-hidden="true" />
-                  ) : (
-                    <PanelRightClose aria-hidden="true" />
-                  )}
-                </button>
-              )}
+                )}
+              </div>
             </div>
-          </div>
+          ) : undefined
         }
         composer={
           pendingPrompt || pendingApproval ? (
@@ -2193,7 +2275,7 @@ function ConversationPage() {
                             <option value="">选择项目</option>
                             {data.workspaces.map((workspace) => (
                               <option key={workspace.path} value={workspace.path}>
-                                {workspace.name}
+                                {workspaceDisplayName(workspace.path, workspace)}
                               </option>
                             ))}
                             <option value="__add__">添加项目文件夹…</option>
@@ -2468,43 +2550,13 @@ function ConversationPage() {
                     <span className="brand-mark brand-mark--large" aria-hidden="true">
                       P
                     </span>
-                    <span className="eyebrow">{workspaceLabel}</span>
-                    <h2>今天想推进什么？</h2>
-                    <p>
-                      描述目标和完成标准，Pico 会先理解项目，再把执行过程整理成一条可检查的记录。
-                    </p>
+                    <h2>{newTaskGreeting()}</h2>
                     {legacyStorageBlocked && (
                       <InlineNotice tone="warning">
                         这个项目仍包含旧版 JSONL 会话数据。Pico
                         不会自动删除或混写这些历史；请先完成迁移，再开始新任务。
                       </InlineNotice>
                     )}
-                    <div className="conversation-starters" aria-label="任务示例">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          handleDraftChange("先阅读这个项目，告诉我它的结构和当前最重要的问题。")
-                        }
-                      >
-                        理解这个项目
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          handleDraftChange("定位当前最影响使用的问题，给出证据并修复它。")
-                        }
-                      >
-                        定位并修复问题
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          handleDraftChange("检查最近的改动，重点关注行为回归和数据安全。")
-                        }
-                      >
-                        审查最近改动
-                      </button>
-                    </div>
                   </div>
                 )
               }
@@ -2908,12 +2960,12 @@ function AutomationsPage() {
       <section className="page-intro">
         <div>
           <span className="eyebrow">后台任务</span>
-          <h2>Automations</h2>
-          <p>按计划启动真实任务；审批与信任规则不会被绕过。</p>
+          <h2>定时任务</h2>
+          <p>让 Pico 按计划重复执行任务；审批与信任规则始终有效。</p>
         </div>
         <Button variant="primary" onClick={() => setCreating((value) => !value)}>
           <Plus aria-hidden="true" size={16} />
-          新建自动化
+          新建定时任务
         </Button>
       </section>
       {creating && (
@@ -2976,8 +3028,8 @@ function AutomationsPage() {
       {data.jobs.length === 0 ? (
         <EmptyState
           icon={<Workflow />}
-          title="还没有自动化"
-          detail="Runtime 尚未返回已配置的后台任务。"
+          title="还没有定时任务"
+          detail="创建后，任务会在这里显示计划、开关和最近状态。"
         />
       ) : (
         <div className="automation-grid">
@@ -3160,7 +3212,7 @@ export function CapabilityPage({
             <option value="">仅用户级</option>
             {data.workspaces.map((workspace) => (
               <option key={workspace.path} value={workspace.path}>
-                {workspace.name}
+                {workspaceDisplayName(workspace.path, workspace)}
                 {workspace.trusted ? "" : "（未信任）"}
               </option>
             ))}
@@ -3346,7 +3398,7 @@ function UsagePage() {
     <div className="page-stack">
       <section className="page-intro">
         <div>
-          <span className="eyebrow">{data.usage.period || "Runtime 统计"}</span>
+          <span className="eyebrow">{formatUsagePeriod(data.usage.period)}</span>
           <h2>用量</h2>
           <p>总用量可含历史 baseline；缓存读写、命中与复用指标仅使用逐调用记录。</p>
         </div>
@@ -3396,7 +3448,9 @@ function UsagePage() {
 
 function SettingsPage() {
   const { data, actions, busy } = useRuntime();
-  const [background, setBackground] = useState<"" | "enabled" | "disabled">("");
+  const [background, setBackground] = useState<"enabled" | "disabled">(() =>
+    window.localStorage.getItem("pico.background-mode") === "enabled" ? "enabled" : "disabled",
+  );
   return (
     <div className="page-stack settings-page">
       <section className="page-intro">
@@ -3428,7 +3482,7 @@ function SettingsPage() {
               />
             )}
           </SettingRow>
-          <SettingRow title="关闭后行为" detail="主进程暂不提供状态读取；请选择要应用的行为">
+          <SettingRow title="关闭后行为" detail="关闭主窗口时，选择继续在后台运行或完全退出">
             <select
               name="background-mode"
               className="select-control"
@@ -3438,12 +3492,10 @@ function SettingsPage() {
               onChange={(event) => {
                 const value = event.target.value as "enabled" | "disabled";
                 setBackground(value);
+                window.localStorage.setItem("pico.background-mode", value);
                 void actions.setBackgroundMode(value === "enabled");
               }}
             >
-              <option value="" disabled>
-                选择…
-              </option>
               <option value="enabled">继续后台运行</option>
               <option value="disabled">退出 Pico</option>
             </select>
@@ -3482,16 +3534,16 @@ function WorkspaceSettingsPage() {
         <div>
           <span className="eyebrow">偏好</span>
           <h2>工作区</h2>
-          <p>项目在这里管理；新任务仍可以在 Composer 中临时切换项目。</p>
+          <p>管理真实项目。选择“无项目”时，任务会使用 Pico 的私有任务空间。</p>
         </div>
         <Button disabled={Boolean(busy)} onClick={() => void chooseWorkspace()}>
           <Plus aria-hidden="true" size={16} /> 添加工作区
         </Button>
       </section>
       <section className="settings-section">
-        <h3>当前项目</h3>
+        <h3>任务位置</h3>
         <div className="settings-list">
-          <SettingRow title="管理项目" detail="切换只影响本设置页的操作对象">
+          <SettingRow title="当前选择" detail="切换只影响本设置页的管理对象">
             <select
               className="select-control"
               value={data.workspacePath ?? ""}
@@ -3502,12 +3554,15 @@ function WorkspaceSettingsPage() {
             >
               {data.workspaces.map((workspace) => (
                 <option key={workspace.path} value={workspace.path}>
-                  {workspace.name}
+                  {workspaceDisplayName(workspace.path, workspace)}
                 </option>
               ))}
             </select>
           </SettingRow>
-          <SettingRow title="工作区路径" detail={data.workspacePath ?? "未选择"}>
+          <SettingRow
+            title={temporaryWorkspace ? "无项目" : "工作区路径"}
+            detail={temporaryWorkspace ? "Pico 私有任务空间" : (data.workspacePath ?? "未选择")}
+          >
             {temporaryWorkspace ? (
               <StatusPill status="ready" />
             ) : (
@@ -3542,7 +3597,7 @@ function WorkspaceSettingsPage() {
             title="工作区模式"
             detail={
               temporaryWorkspace
-                ? "不绑定真实项目；任务仍保存在这个私有工作区中"
+                ? "不关联真实项目；会话与文件仍会跨重启保留"
                 : data.workspaceMode === "git"
                   ? "已启用并行任务隔离与变更合并"
                   : "对话、工具和并行分析可用；可写子代理隔离、分支与独立合并不可用"
@@ -3563,7 +3618,7 @@ function WorkspaceSettingsPage() {
 
 function SystemSettingsPage() {
   const { data, actions, busy, connection } = useRuntime();
-  const [diagnosticOutput, setDiagnosticOutput] = useState<string>();
+  const [diagnosticReport, setDiagnosticReport] = useState<DesktopDiagnosticReport>();
   const memoryHref = data.workspacePath
     ? workspaceHref("/settings/memory", data.workspacePath)
     : "/settings/memory";
@@ -3572,12 +3627,20 @@ function SystemSettingsPage() {
       <section className="page-intro">
         <div>
           <span className="eyebrow">系统</span>
-          <h2>权限与能力</h2>
-          <p>系统内建工具在这里显示运行状态、权限边界和诊断入口。</p>
+          <h2>健康</h2>
+          <p>查看 Pico 的运行状态、模型连接、存储与系统能力。</p>
         </div>
+        <Button
+          variant="primary"
+          disabled={Boolean(busy) || !data.workspacePath}
+          onClick={() => void actions.runDiagnostics("runtime").then(setDiagnosticReport)}
+        >
+          <RefreshCw aria-hidden="true" size={16} />
+          重新检查
+        </Button>
       </section>
       <section className="settings-section">
-        <h3>Runtime Host</h3>
+        <h3>当前状态</h3>
         <div className="settings-list">
           <SettingRow
             title="本地 Runtime"
@@ -3589,22 +3652,19 @@ function SystemSettingsPage() {
             title="文件与终端工具"
             detail={
               data.workspacePath
-                ? `当前运行上下文：${workspaceName(data.workspacePath)}`
-                : "选择项目并信任后，任务才能使用系统工具"
+                ? `当前任务位置：${workspaceDisplayName(
+                    data.workspacePath,
+                    data.workspaces.find((workspace) => workspace.path === data.workspacePath),
+                  )}`
+                : "任务位置准备完成后，文件和终端工具会自动可用"
             }
           >
             <StatusPill status={data.workspacePath && data.trusted ? "ready" : "attention"} />
           </SettingRow>
-          <SettingRow
-            title="Computer Use"
-            detail="Desktop 尚未接入 macOS 辅助功能权限探测；实际调用仍会受系统与会话权限策略约束"
-          >
+          <SettingRow title="桌面控制" detail="受 macOS 辅助功能权限和当前会话权限共同保护">
             <StatusPill status="attention" />
           </SettingRow>
-          <SettingRow
-            title="危险操作审批"
-            detail="越界写入、破坏性操作与外部访问由会话权限策略管理"
-          >
+          <SettingRow title="操作审批" detail="越界写入、破坏性操作与外部访问由会话权限策略管理">
             <StatusPill status="ready" />
           </SettingRow>
           <SettingRow title="记忆写入" detail="记忆生成、审核与长期保留策略在能力设置中管理">
@@ -3617,31 +3677,124 @@ function SystemSettingsPage() {
       <section className="settings-section">
         <h3>诊断</h3>
         <div className="settings-list">
-          <SettingRow title="Runtime 诊断" detail="只读检查配置、存储和运行能力">
+          <SettingRow title="运行环境" detail="检查模型、凭证、Node、任务运行与本地存储">
             <Button
               disabled={Boolean(busy)}
-              onClick={() => void actions.runDiagnostics("runtime").then(setDiagnosticOutput)}
+              onClick={() => void actions.runDiagnostics("runtime").then(setDiagnosticReport)}
             >
-              运行诊断
+              开始检查
             </Button>
           </SettingRow>
-          <SettingRow title="资源扫描" detail="只读列出 Pico 与兼容资源，不执行修复或清理">
+          <SettingRow title="本地资源" detail="扫描 Pico 与兼容资源，不执行修复或清理">
             <Button
               disabled={Boolean(busy)}
-              onClick={() => void actions.runDiagnostics("resources").then(setDiagnosticOutput)}
+              onClick={() => void actions.runDiagnostics("resources").then(setDiagnosticReport)}
             >
-              扫描资源
+              扫描
             </Button>
           </SettingRow>
         </div>
-        {diagnosticOutput && (
-          <pre className="settings-diagnostic-output" aria-label="诊断结果">
-            {diagnosticOutput}
-          </pre>
-        )}
+        {diagnosticReport && <DiagnosticReport report={diagnosticReport} />}
       </section>
     </div>
   );
+}
+
+function DiagnosticReport({ report }: { readonly report: DesktopDiagnosticReport }) {
+  const visibleChecks = report.checks.filter((check) => check.id !== "provider");
+  return (
+    <section className="health-report" aria-label="诊断结果">
+      <header>
+        <div>
+          {report.healthy ? (
+            <CheckCircle2 aria-hidden="true" />
+          ) : (
+            <AlertTriangle aria-hidden="true" />
+          )}
+          <span>
+            <strong>{report.healthy ? "Pico 运行正常" : "发现需要处理的问题"}</strong>
+            <small>
+              {report.kind === "runtime" ? "运行环境检查" : "本地资源扫描"} · {visibleChecks.length}{" "}
+              项
+            </small>
+          </span>
+        </div>
+      </header>
+      <div className="health-check-list">
+        {visibleChecks.map((check) => (
+          <article key={check.id} data-status={check.status}>
+            {check.status === "ok" ? (
+              <CheckCircle2 aria-hidden="true" />
+            ) : (
+              <AlertTriangle aria-hidden="true" />
+            )}
+            <span>
+              <strong>{diagnosticLabel(check.id, check.label)}</strong>
+              <small>{diagnosticSummary(check.summary)}</small>
+              {check.recommendation && <p>{diagnosticSummary(check.recommendation)}</p>}
+            </span>
+            <em>{diagnosticStatusLabel(check.status)}</em>
+          </article>
+        ))}
+      </div>
+      <details className="health-report__raw">
+        <summary>查看原始报告</summary>
+        <pre>{report.output}</pre>
+      </details>
+    </section>
+  );
+}
+
+function diagnosticLabel(id: string, fallback: string): string {
+  return (
+    (
+      {
+        cwd: "任务位置",
+        "env-file": "环境文件",
+        model: "默认模型",
+        configuration: "模型配置",
+        "base-url": "模型路由",
+        "api-key": "模型凭证",
+        node: "Node.js",
+        "runtime-ledger": "运行记录",
+        "task-runtime": "任务 Runtime",
+        storage: "本地存储",
+        preview: "预览模式",
+      } as Readonly<Record<string, string>>
+    )[id] ?? fallback
+  );
+}
+
+function diagnosticSummary(value: string): string {
+  return value
+    .replace(/\s*\(ok\)/giu, "")
+    .replace(/\bfound\b/giu, "已找到")
+    .replace(/\bmissing for\b/giu, "未找到：")
+    .replace(/\bmissing\b/giu, "未找到")
+    .replace(/\bhealthy\b/giu, "正常")
+    .replace(/\bunavailable\b/giu, "不可用")
+    .replace(/\bprovided by user configuration\b/giu, "由用户配置提供")
+    .replace(/\bavailable from config\b/giu, "已由配置文件提供")
+    .replace(/\bavailable from environment\b/giu, "已由环境变量提供")
+    .replace(/\bavailable from keychain\b/giu, "已由系统凭证提供")
+    .replace(/provider\(s\)/giu, "个模型连接")
+    .replace(/session\(s\)/giu, "个会话")
+    .replace(/schema present/giu, "数据结构正常")
+    .replace(/default source=user/giu, "默认来源=用户配置")
+    .replace(/default source=built-in/giu, "默认来源=内建配置")
+    .replaceAll("; ", "；");
+}
+
+function diagnosticStatusLabel(
+  status: DesktopDiagnosticReport["checks"][number]["status"],
+): string {
+  return status === "ok"
+    ? "正常"
+    : status === "warning"
+      ? "注意"
+      : status === "error"
+        ? "错误"
+        : "不可用";
 }
 
 function Toggle({
@@ -3763,6 +3916,21 @@ function formatCompact(value: number): string {
   return new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(
     value,
   );
+}
+
+function formatUsagePeriod(period: string | undefined): string {
+  if (!period) return "全部时间";
+  if (period === "all_time_with_baselines") return "全部时间";
+  return period.replaceAll("_", " ");
+}
+
+function newTaskGreeting(now = new Date()): string {
+  const hour = now.getHours();
+  if (hour < 6) return "夜深了，先从一件小事开始。";
+  if (hour < 11) return "早上好，今天想推进什么？";
+  if (hour < 14) return "中午好，今天想推进什么？";
+  if (hour < 18) return "下午好，适合慢慢推进。";
+  return "晚上好，想先解决什么？";
 }
 
 function formatRelative(value: number): string {

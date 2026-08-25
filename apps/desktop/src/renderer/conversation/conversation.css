@@ -68,6 +68,10 @@
   min-height: 100%;
 }
 
+.session-conversation:not([data-has-header]) {
+  --conversation-content-width: 720px;
+}
+
 .conversation-session-header {
   display: flex;
   min-height: 52px;
@@ -736,16 +740,17 @@
 .conversation-empty-state--new {
   width: min(620px, 100%);
   max-width: none;
-  gap: 8px;
-  padding-bottom: 24px;
+  gap: 12px;
+  padding-bottom: 10vh;
 }
 
 .conversation-empty-state--new .brand-mark {
-  margin-bottom: 10px;
+  margin-bottom: 4px;
 }
 
 .conversation-empty-state--new h2 {
-  font-size: clamp(26px, 3vw, 34px);
+  font-size: clamp(22px, 2.5vw, 29px);
+  font-weight: 660;
   letter-spacing: -0.045em;
 }
 

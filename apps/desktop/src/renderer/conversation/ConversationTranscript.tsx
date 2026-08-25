@@ -292,7 +292,7 @@ function renderDefaultItem(
               {item.state === "pending"
                 ? "等待审批"
                 : item.state === "allowed"
-                  ? "已允许"
+                  ? "已批准"
                   : "已拒绝"}
             </span>
           </header>

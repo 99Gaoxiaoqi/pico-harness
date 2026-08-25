@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,6 +8,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { parseStrictRuntimeParams } from "../../packages/protocol/src/runtime.js";
 import { ConversationInteractionSlot } from "../../apps/desktop/src/renderer/conversation/ConversationInteractionSlot.js";
 import { groupConversationItemsIntoTurns } from "../../apps/desktop/src/renderer/conversation/ConversationTranscript.js";
+import { removeSupersededActiveTools } from "../../apps/desktop/src/renderer/conversation/items.js";
 import {
   createRuntimeRequest,
   DesktopRuntimeService,
@@ -103,6 +104,53 @@ test("desktop transcript groups execution records under the preceding user turn"
       ["user-1", "thinking-1", "tool-1", "assistant-1"],
       ["user-2", "assistant-2"],
     ],
+  );
+});
+
+test("terminal transcript removes only an approval-gated stale active tool duplicate", () => {
+  const items = [
+    {
+      id: "tool-before-approval",
+      kind: "tool" as const,
+      toolName: "write_file",
+      title: "write_file",
+      detail: '{"path":"result.txt"}',
+      state: "active" as const,
+    },
+    {
+      id: "approval",
+      kind: "approval" as const,
+      title: "写入文件",
+      detail: "等待确认",
+      state: "allowed" as const,
+    },
+    {
+      id: "tool-completed",
+      kind: "tool" as const,
+      toolName: "write_file",
+      title: "write_file",
+      detail: "Tool completed · 55 bytes",
+      state: "done" as const,
+    },
+  ];
+
+  assert.deepEqual(
+    removeSupersededActiveTools(items, false).map((item) => item.id),
+    ["approval", "tool-completed"],
+  );
+  assert.equal(removeSupersededActiveTools(items, true), items);
+});
+
+test("persisted approvals recover the interaction slot and disappear after terminal runs", async () => {
+  const appSource = await readFile(
+    new URL("../../apps/desktop/src/renderer/App.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(appSource, /persistedPendingApproval/u);
+  assert.match(appSource, /item\.id\.startsWith\("approval:"\)/u);
+  assert.match(
+    appSource,
+    /Boolean\(activeRun\)[\s\S]*?item\.kind === "approval" \|\| item\.kind === "prompt"[\s\S]*?item\.state === "pending"/u,
   );
 });
 
