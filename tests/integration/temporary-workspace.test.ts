@@ -34,6 +34,30 @@ test("temporary workspace protocol is strict and requires the temporary marker",
     () => parseDesktopRuntimeResult("workspace.temporary.ensure", ordinary),
     RuntimeProtocolError,
   );
+  assert.throws(
+    () =>
+      parseDesktopRuntimeResult("workspace.temporary.ensure", {
+        ...status,
+        temporary: false,
+      }),
+    RuntimeProtocolError,
+  );
+  assert.throws(
+    () =>
+      parseDesktopRuntimeResult("workspace.temporary.ensure", {
+        ...status,
+        registered: false,
+      }),
+    RuntimeProtocolError,
+  );
+  assert.throws(
+    () =>
+      parseDesktopRuntimeResult("workspace.temporary.ensure", {
+        ...status,
+        secret: "must-not-cross-ipc",
+      }),
+    RuntimeProtocolError,
+  );
 });
 
 test("temporary workspace authority creates a private persistent directory exactly once", async (t) => {

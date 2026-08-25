@@ -14,6 +14,7 @@ import {
   type CredentialVault,
 } from "../../src/provider/credential-vault.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
+import { runWorkspaceDoctor } from "../../src/diagnostics/workspace-doctor.js";
 
 const PROVIDER_ID = "doctor-fixture";
 const MODEL_ID = "doctor-model";
@@ -93,8 +94,11 @@ for (const source of ["config", "environment", "keychain"] as const) {
       output,
       new RegExp(`Configuration providers: ${PROVIDER_ID}=user/credential-${source}`, "u"),
     );
-    assert.match(output, /Provider routes: provided by user configuration/u);
-    assert.match(output, /Provider credentials: 1 available from user configuration/u);
+    assert.match(output, /Provider routes: doctor-fixture provided by user configuration/u);
+    assert.match(
+      output,
+      new RegExp(`Provider credentials: doctor-fixture available from ${source}`, "u"),
+    );
     assert.equal(JSON.stringify(report).includes(secret), false, "Doctor must not expose secrets");
 
     const credentialCheck = asArray(report["checks"])
@@ -103,6 +107,38 @@ for (const source of ["config", "environment", "keychain"] as const) {
     assert.equal(credentialCheck?.["status"], "ok");
   });
 }
+
+test("Workspace Doctor does not use another Provider credential to bless the default route", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-workspace-doctor-default-missing-"));
+  const workspace = join(root, "workspace");
+  await mkdir(workspace, { recursive: true });
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const report = await runWorkspaceDoctor({
+    workDir: workspace,
+    picoHome: join(root, "pico-home"),
+    provider: "default-provider",
+    model: "default-model",
+    taskRuntimeAvailable: true,
+    configuration: {
+      defaultModelRouteId: "default-provider/default-model",
+      defaultProviderId: "default-provider",
+      defaultSource: "user",
+      providerSources: {
+        "default-provider": "user",
+        "other-provider": "project",
+      },
+      credentialStates: {
+        "default-provider": "missing",
+        "other-provider": "environment",
+      },
+    },
+  });
+  const credentialCheck = report.checks.find((check) => check.id === "api-key");
+  assert.equal(credentialCheck?.status, "warning");
+  assert.equal(credentialCheck?.summary, "missing for default-provider");
+  assert.match(report.output, /Provider credentials: missing for default-provider/u);
+});
 
 function memoryVault(): CredentialVault {
   const secrets = new Map<CredentialRef, string>();
