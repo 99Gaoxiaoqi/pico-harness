@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { RuntimeEvent } from "../../src/engine/session-runtime-event.js";
+import { SESSION_RUNTIME_STATE_VERSION } from "../../src/engine/session-runtime.js";
 import {
   SqliteSessionWorkbarRepository,
   WorkbarConflictError,
@@ -108,12 +109,21 @@ test("session workbar authority enforces CAS/idempotency and projects trace", as
     assert.equal(sessionTaskList.revision, 3);
     assert.equal(sessionTaskList.tasks.length, 2);
 
+    await fixture.store.append(internalStateEvent("state-1", "source"));
+    await fixture.store.appendTranscriptEvent("source", {
+      eventId: "transcript-1",
+      sequence: 1,
+      createdAt: Date.parse("2026-08-23T00:00:00.000Z"),
+      type: "entry.appended",
+      entryId: "approval-entry",
+      entry: { kind: "approval", title: "Approved", state: "allow" },
+    });
     await fixture.store.append(messageEvent("event-1", "source", "hello"));
     await fixture.store.append(messageEvent("event-2", "source", "world"));
     const firstTracePage = fixture.repository.queryTrace({ sessionId: "source", limit: 1 });
-    assert.equal(firstTracePage.throughSequence, 2);
+    assert.equal(firstTracePage.throughSequence, 4);
     assert.equal(firstTracePage.events.length, 1);
-    assert.equal(firstTracePage.nextAfterSequence, 1);
+    assert.equal(firstTracePage.nextAfterSequence, 3);
     const fixedTracePage = fixture.repository.queryTrace({
       sessionId: "source",
       throughSequence: firstTracePage.throughSequence,
@@ -386,6 +396,25 @@ function messageEvent(eventId: string, sessionId: string, content: string): Runt
     visibility: "model",
     kind: "message.committed",
     data: { message: { role: "user", content } },
+  };
+}
+
+function internalStateEvent(eventId: string, sessionId: string): RuntimeEvent {
+  return {
+    schemaVersion: 2,
+    eventId,
+    sessionId,
+    invocationId: "invocation",
+    runId: "run",
+    turnId: "turn",
+    at: "2026-08-23T00:00:00.000Z",
+    partial: false,
+    visibility: "internal",
+    kind: "session.state.committed",
+    data: {
+      stateVersion: SESSION_RUNTIME_STATE_VERSION,
+      patch: { goal: { stateVersion: 1, sequence: 0, activeGoalId: null, goals: [] } },
+    },
   };
 }
 

@@ -61,6 +61,12 @@ test("temporary workspace keeps a stable UI label and can switch to a real proje
   assert.match(appSource, /TEMPORARY_WORKSPACE_GROUP_LABEL/u);
   assert.match(appSource, /navigate\(newSessionHref\(nextWorkspacePath\)\)/u);
   assert.match(appSource, /<option key=\{workspace\.path\} value=\{workspace\.path\}>/u);
+  assert.match(appSource, /const chooseProjectFolder = async \(\) =>/u);
+  assert.match(appSource, /title="打开项目文件夹"/u);
+  assert.match(
+    appSource,
+    /const chooseProjectFolder[\s\S]*?actions\.chooseWorkspace\(\)[\s\S]*?navigate\(newSessionHref\(path\)\)/u,
+  );
 
   const runtimeSource = await rendererSource("runtime.ts");
   assert.match(runtimeSource, /workspace\.temporary === true/u);

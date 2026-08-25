@@ -12,6 +12,12 @@ export default defineConfig({
     // second React instance and every hook call fails at runtime.
     dedupe: ["react", "react-dom"],
   },
+  // The renderer consumes locally built workspace packages. A previous dev run's
+  // optimized copy can otherwise survive a protocol/projector version bump and
+  // reject an otherwise valid Runtime Host snapshot.
+  optimizeDeps: {
+    force: true,
+  },
   build: {
     outDir: resolve(import.meta.dirname, ".vite/renderer/main_window"),
     sourcemap: false,

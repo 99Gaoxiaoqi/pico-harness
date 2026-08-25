@@ -312,7 +312,7 @@ test("tool projection updates one source-stable item revision", async () => {
       },
       { eventId: "runtime-tool-started" },
     );
-    const settled = await store.append(toolResult("runtime-tool-result", sessionId, "call-1"));
+    const settled = await store.append(toolResult("runtime-tool-result", sessionId, "provider-1"));
     const advance = await store.readTranscriptAdvancePage({
       sessionId,
       after: started.transcriptWatermark!,
@@ -328,7 +328,11 @@ test("tool projection updates one source-stable item revision", async () => {
       assert.deepEqual(change.record.payload, {
         args: '{"path":"README.md"}',
         at: Date.parse("2026-08-23T00:00:00.000Z"),
-        data: { toolCallId: "call-1", entryId: "entry-tool" },
+        data: {
+          toolCallId: "call-1",
+          providerCallId: "provider-1",
+          entryId: "entry-tool",
+        },
         id: "tool:call-1",
         kind: "tool",
         name: "read",
@@ -344,7 +348,7 @@ test("tool projection updates one source-stable item revision", async () => {
           rawSizeBytes: 11,
           sha256: createHash("sha256").update("tool result").digest("hex"),
           status: "succeeded",
-          toolCallId: "call-1",
+          toolCallId: "provider-1",
           toolName: "read",
           version: 1,
         },
@@ -625,13 +629,24 @@ test("durable finals atomically replace matching assistant and tool partial over
       ["message:turn:run-1:1:assistant"],
     );
 
+    const toolStart = await store.appendTranscriptEvent(sessionId, {
+      eventId: "tool-start",
+      sequence: 1,
+      createdAt: Date.parse("2026-08-23T00:00:00.000Z"),
+      type: "tool.started",
+      entryId: "tool-entry-final",
+      toolCallId: "canonical-final",
+      providerCallId: "provider-final",
+      name: "read",
+      args: "{}",
+    });
     await store.upsertPartialSnapshot({
       sessionId,
       runId: "run-1",
       partialId: "tool-partial",
       kind: "tool",
       expectedVersion: 0,
-      payload: { itemId: "tool:call-final", status: "running" },
+      payload: { itemId: "tool:canonical-final", status: "running" },
     });
     await store.appendPartialSegment({
       sessionId,
@@ -640,14 +655,14 @@ test("durable finals atomically replace matching assistant and tool partial over
       segmentIndex: 0,
       payload: { delta: "output" },
     });
-    const toolFinal = await store.append(toolResult("tool-final", sessionId, "call-final"));
+    const toolFinal = await store.append(toolResult("tool-final", sessionId, "provider-final"));
     assert.deepEqual(
       (await store.readRunPartials(sessionId, "run-1")).snapshots.map(({ partialId }) => partialId),
       ["unrelated-partial"],
     );
     const toolAdvance = await store.readTranscriptAdvancePage({
       sessionId,
-      after: assistantResult.transcriptWatermark!,
+      after: toolStart.transcriptWatermark!,
       through: toolFinal.transcriptWatermark!,
       maxBytes: 16_384,
     });
@@ -655,7 +670,7 @@ test("durable finals atomically replace matching assistant and tool partial over
       toolAdvance.changes.map((change) =>
         change.op === "upsert" ? change.record.itemId : change.itemId,
       ),
-      ["tool:call-final"],
+      ["tool:canonical-final"],
     );
   } finally {
     store.close();

@@ -78,7 +78,7 @@ function createHarness(options?: {
             nextSequence: 1,
             watermark: {
               historyEpoch: "history-test",
-              projectorVersion: 1,
+              projectorVersion: 2,
               throughSequence: transcriptItems.length,
             },
             durableTail: transcriptItems.map((item, index) => ({

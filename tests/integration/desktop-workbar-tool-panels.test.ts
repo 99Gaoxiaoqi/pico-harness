@@ -12,12 +12,125 @@ import {
   artifactChunkProgress,
   contextUsagePercent,
   createTaskUpdateRequest,
+  groupInspectorTraceItems,
   reviewSelectionKey,
   shouldPollTerminalPanel,
   terminalGridFromBounds,
+  tracePageView,
   type WorkbarArtifactContent,
   type WorkbarTaskItem,
 } from "../../apps/desktop/src/renderer/workbar-panels/index.js";
+
+test("Inspector trace hides internal state and transcript-only commits", () => {
+  const parsed = tracePageView([
+    {
+      sequence: 1,
+      eventId: "state-1",
+      kind: "session.state.committed",
+      at: "2026-08-23T10:00:00.000Z",
+      event: { kind: "session.state.committed", data: {} },
+    },
+    {
+      sequence: 2,
+      eventId: "message-1",
+      kind: "message.committed",
+      at: "2026-08-23T10:00:01.000Z",
+      event: { kind: "message.committed", data: {} },
+    },
+  ]);
+
+  assert.deepEqual(
+    parsed.items.map((item) => item.id),
+    [],
+  );
+});
+
+test("Inspector trace folds runtime lifecycle facts into user-facing run groups", () => {
+  const parsed = tracePageView([
+    traceRecord(1, "run-start", "run.started", "run-1", {
+      workDir: "/workspace",
+    }),
+    traceRecord(2, "message-1", "message.committed", "run-1", {
+      message: { role: "user", content: "检查项目" },
+    }),
+    traceRecord(3, "model-start", "model.call.started", "run-1", {
+      providerCallId: "provider-1",
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      purpose: "turn",
+    }),
+    traceRecord(4, "model-settled", "model.call.settled", "run-1", {
+      providerCallId: "provider-1",
+      status: "succeeded",
+      latencyMs: 1_250,
+    }),
+    traceRecord(
+      5,
+      "tool-start",
+      "tool.started",
+      "run-1",
+      { toolName: "bash", argumentsHash: "hash" },
+      { toolCallId: "tool-1" },
+    ),
+    traceRecord(
+      6,
+      "tool-result",
+      "tool.result.recorded",
+      "run-1",
+      {
+        toolName: "bash",
+        status: "succeeded",
+        projection: { text: "ok" },
+      },
+      { toolCallId: "tool-1" },
+    ),
+    traceRecord(7, "approval-requested", "approval.requested", "run-1", {
+      approvalId: "approval-1",
+      toolName: "bash",
+    }),
+    traceRecord(8, "approval-settled", "approval.settled", "run-1", {
+      approvalId: "approval-1",
+      decision: "approved",
+    }),
+    traceRecord(9, "run-terminal", "run.terminal", "run-1", {
+      status: "completed",
+    }),
+  ]);
+
+  assert.deepEqual(
+    parsed.items.map(({ category, title, status, durationMs }) => ({
+      category,
+      title,
+      status,
+      durationMs,
+    })),
+    [
+      { category: "run", title: "运行完成", status: "completed", durationMs: 8_000 },
+      {
+        category: "model",
+        title: "deepseek-v4-flash",
+        status: "completed",
+        durationMs: 1_250,
+      },
+      { category: "tool", title: "bash", status: "completed", durationMs: 1_000 },
+      {
+        category: "approval",
+        title: "批准 · bash",
+        status: "completed",
+        durationMs: 1_000,
+      },
+    ],
+  );
+  assert.equal(parsed.records.has("tool-start"), true);
+
+  const groups = groupInspectorTraceItems(parsed.items);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0]?.status, "completed");
+  assert.deepEqual(
+    groups[0]?.items.map((item) => item.category),
+    ["model", "tool", "approval"],
+  );
+});
 
 test("Workbar tool panel helpers preserve authority versions, chunks and active polling gates", () => {
   assert.equal(
@@ -65,6 +178,23 @@ test("Workbar tool panel helpers preserve authority versions, chunks and active 
   assert.equal(shouldPollTerminalPanel(false, "terminal-1"), false);
   assert.equal(shouldPollTerminalPanel(true), false);
 });
+
+function traceRecord(
+  sequence: number,
+  eventId: string,
+  kind: string,
+  runId: string,
+  data: Record<string, unknown>,
+  refs?: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    sequence,
+    eventId,
+    kind,
+    at: new Date(Date.UTC(2026, 7, 23, 10, 0, sequence - 1)).toISOString(),
+    event: { kind, runId, data, ...(refs ? { refs } : {}) },
+  };
+}
 
 test("Workbar tool panels render real authority snapshots with accessible detail regions", () => {
   Object.assign(globalThis, { React });

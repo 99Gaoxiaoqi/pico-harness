@@ -8,7 +8,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { parseStrictRuntimeParams } from "../../packages/protocol/src/runtime.js";
 import { ConversationInteractionSlot } from "../../apps/desktop/src/renderer/conversation/ConversationInteractionSlot.js";
 import { groupConversationItemsIntoTurns } from "../../apps/desktop/src/renderer/conversation/ConversationTranscript.js";
-import { removeSupersededActiveTools } from "../../apps/desktop/src/renderer/conversation/items.js";
+import {
+  omitApprovalAuditItems,
+  removeSupersededActiveTools,
+} from "../../apps/desktop/src/renderer/conversation/items.js";
 import {
   createRuntimeRequest,
   DesktopRuntimeService,
@@ -141,17 +144,88 @@ test("terminal transcript removes only an approval-gated stale active tool dupli
   assert.equal(removeSupersededActiveTools(items, true), items);
 });
 
+test("terminal run boundaries clear unresolved tool-start placeholders", () => {
+  const items = [
+    {
+      id: "stale-tool",
+      kind: "tool" as const,
+      toolName: "bash",
+      title: "bash",
+      state: "active" as const,
+    },
+    {
+      id: "run-completed",
+      kind: "runBoundary" as const,
+      status: "completed" as const,
+      label: "运行完成",
+    },
+    { id: "next-user", kind: "userMessage" as const, text: "下一轮" },
+    {
+      id: "current-tool",
+      kind: "tool" as const,
+      toolName: "read_file",
+      title: "read_file",
+      state: "active" as const,
+    },
+  ];
+
+  assert.deepEqual(
+    removeSupersededActiveTools(items, true).map((item) => item.id),
+    ["run-completed", "next-user", "current-tool"],
+  );
+});
+
+test("approval audit items stay out of the main transcript", () => {
+  const visible = omitApprovalAuditItems([
+    { id: "answer", kind: "assistantMessage" as const, text: "完成" },
+    {
+      id: "approval:1",
+      kind: "approval" as const,
+      title: "Approval granted",
+      detail: "Runtime 请求执行受保护操作。",
+      state: "allowed" as const,
+    },
+  ]);
+
+  assert.deepEqual(
+    visible.map((item) => item.id),
+    ["answer"],
+  );
+});
+
 test("persisted approvals recover the interaction slot and disappear after terminal runs", async () => {
   const appSource = await readFile(
     new URL("../../apps/desktop/src/renderer/App.tsx", import.meta.url),
     "utf8",
   );
   assert.match(appSource, /persistedPendingApproval/u);
+  assert.match(appSource, /omitApprovalAuditItems/u);
   assert.match(appSource, /item\.id\.startsWith\("approval:"\)/u);
   assert.match(
     appSource,
     /Boolean\(activeRun\)[\s\S]*?item\.kind === "approval" \|\| item\.kind === "prompt"[\s\S]*?item\.state === "pending"/u,
   );
+});
+
+test("a recovered continuity replica clears a transient conversation load error", async () => {
+  const runtimeSource = await readFile(
+    new URL("../../apps/desktop/src/renderer/runtime.ts", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(
+    runtimeSource,
+    /loadError:\s*_previousLoadError,[\s\S]*?\.\.\.conversationWithoutRun/u,
+  );
+});
+
+test("desktop dev refreshes optimized workspace dependencies before continuity opens", async () => {
+  const viteConfig = await readFile(
+    new URL("../../apps/desktop/vite.renderer.config.ts", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(viteConfig, /optimizeDeps:\s*\{[\s\S]*?force:\s*true/u);
 });
 
 test("pending question renders in the composer interaction slot instead of a modal", () => {

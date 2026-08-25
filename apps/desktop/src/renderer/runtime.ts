@@ -1581,7 +1581,13 @@ export function useRuntimeStore(): RuntimeStore {
           items: [],
           queuedCount: 0,
         };
-        const { runId: _previousRunId, ...conversationWithoutRun } = existing;
+        // A failed open may recover through the continuity controller's background retry.
+        // Once a ready replica arrives, the old load error is no longer authoritative.
+        const {
+          runId: _previousRunId,
+          loadError: _previousLoadError,
+          ...conversationWithoutRun
+        } = existing;
         return {
           ...current,
           conversations: {

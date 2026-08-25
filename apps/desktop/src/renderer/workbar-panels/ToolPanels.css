@@ -211,6 +211,7 @@
 
 .tool-panel__compact-list,
 .tool-panel__timeline,
+.tool-panel__trace-groups,
 .tool-panel__file-group ul,
 .tool-panel__artifact-list,
 .tool-panel__task-list {
@@ -219,6 +220,55 @@
   margin: 0;
   padding: 0;
   list-style: none;
+}
+
+.tool-panel__trace-groups {
+  gap: 8px;
+}
+
+.tool-panel__trace-group {
+  overflow: hidden;
+  border: 1px solid var(--border-subtle, #e5e7eb);
+  border-radius: 8px;
+  background: var(--surface-secondary, #f8fafc);
+}
+
+.tool-panel__trace-group > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--border-subtle, #e5e7eb);
+}
+
+.tool-panel__trace-group > header > span {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.tool-panel__trace-group > header small {
+  color: var(--text-secondary, #6b7280);
+  font-size: 10px;
+}
+
+.tool-panel__trace-group[data-status="running"] > header {
+  border-left: 2px solid var(--focus-ring, #2563eb);
+}
+
+.tool-panel__trace-group[data-status="failed"] > header {
+  border-left: 2px solid var(--danger-foreground, #b91c1c);
+}
+
+.tool-panel__trace-group > .tool-panel__timeline {
+  padding: 3px;
+}
+
+.tool-panel__trace-group > .tool-panel__muted {
+  margin: 0;
+  padding: 8px;
 }
 
 .tool-panel__compact-list li {
