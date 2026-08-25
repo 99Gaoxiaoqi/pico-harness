@@ -7,9 +7,25 @@ export interface WorkspaceScopedItem {
   readonly workspacePath: string;
 }
 
+export const TEMPORARY_WORKSPACE_LABEL = "临时工作区";
+
+export interface WorkspaceLabelSource {
+  readonly path: string;
+  readonly name: string;
+  readonly temporary?: true | undefined;
+}
+
 export function workspaceName(workspacePath: string): string {
   const normalized = workspacePath.replace(/[\\/]+$/u, "");
   return normalized.split(/[\\/]/u).at(-1) || workspacePath;
+}
+
+export function workspaceDisplayName(
+  workspacePath: string,
+  workspace?: WorkspaceLabelSource,
+): string {
+  if (workspace?.temporary) return TEMPORARY_WORKSPACE_LABEL;
+  return workspace?.name ?? workspaceName(workspacePath);
 }
 
 export function workspaceParent(workspacePath: string): string {

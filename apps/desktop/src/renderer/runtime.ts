@@ -75,6 +75,7 @@ import {
 } from "./model.js";
 import { previewData } from "./fixture.js";
 import {
+  TEMPORARY_WORKSPACE_LABEL,
   replaceWorkspaceItems,
   workspaceName,
   workspaceSessionKey,
@@ -99,6 +100,15 @@ const MAX_RENDERER_SEEN_EVENT_IDS = 10_000;
 
 export function isMemoryNotificationTopic(topic: string): boolean {
   return topic === "memory.proposed" || topic === "memory.changed" || topic === "memory.forgotten";
+}
+
+export function shouldBatchHydrateRuntimeNotification(topic: string): boolean {
+  return (
+    topic === "plan.updated" ||
+    topic === "discovery.updated" ||
+    topic.startsWith("session.") ||
+    (topic.startsWith("run.") && topic !== "run.started" && topic !== "run.timeline")
+  );
 }
 
 export function isMemoryConflict(error: unknown): boolean {
@@ -1356,6 +1366,7 @@ function mergeLoadedData(
 
 export interface RuntimeActions {
   chooseWorkspace(): Promise<string | undefined>;
+  ensureTemporaryWorkspace(): Promise<string | undefined>;
   selectWorkspace(workspacePath: string): Promise<void>;
   trustWorkspace(workspacePath: string, trusted: boolean): Promise<void>;
   reload(): Promise<void>;
@@ -1651,10 +1662,14 @@ export function useRuntimeStore(): RuntimeStore {
               return {
                 workspace: {
                   path: workspacePath,
-                  name: workspaceName(workspacePath),
+                  name:
+                    workspace.temporary === true
+                      ? TEMPORARY_WORKSPACE_LABEL
+                      : workspaceName(workspacePath),
                   mode: parseWorkspaceMode(workspace.mode, "folder") ?? "folder",
                   registered: true,
                   trusted,
+                  ...(workspace.temporary === true ? { temporary: true as const } : {}),
                 } satisfies WorkspaceView,
                 sessions: parseSessions(sessions.value, workspacePath),
                 runs: parseRuns(runs.value, workspacePath),
@@ -1968,12 +1983,14 @@ export function useRuntimeStore(): RuntimeStore {
         isRecord(values.workspace) ? values.workspace.mode : undefined,
         "folder",
       );
+      const temporary = isRecord(values.workspace) && values.workspace.temporary === true;
       const selectedWorkspace: WorkspaceView = {
         path: workspacePath,
-        name: workspaceName(workspacePath),
+        name: temporary ? TEMPORARY_WORKSPACE_LABEL : workspaceName(workspacePath),
         mode: workspaceMode ?? "folder",
         registered: true,
         trusted,
+        ...(temporary ? { temporary: true as const } : {}),
       };
       const workspaces = [
         selectedWorkspace,
@@ -2449,15 +2466,8 @@ export function useRuntimeStore(): RuntimeStore {
           void loadGlobalProviderConfig(bridge).catch(reportFailure);
         }
         scheduleHydration();
-      } else if (
-        topic === "plan.updated" ||
-        topic === "discovery.updated" ||
-        topic.startsWith("run.") ||
-        topic.startsWith("session.")
-      ) {
-        if (!topic.startsWith("run.")) {
-          scheduleHydration(stringValue(scope.sessionId) || undefined);
-        }
+      } else if (shouldBatchHydrateRuntimeNotification(topic)) {
+        scheduleHydration(stringValue(scope.sessionId) || undefined);
       }
     };
     void (async () => {
@@ -2613,6 +2623,21 @@ export function useRuntimeStore(): RuntimeStore {
           await loadWorkspace(bridge, workspacePath);
         });
         return selectedWorkspacePath;
+      },
+      async ensureTemporaryWorkspace() {
+        let temporaryWorkspacePath: string | undefined;
+        await perform("ensure-temporary-workspace", async (bridge) => {
+          if (preview) {
+            temporaryWorkspacePath = previewData.workspacePath;
+            setData(previewData);
+            return;
+          }
+          const status = await invoke(bridge, "workspace.temporary.ensure", {});
+          temporaryWorkspacePath = status.workspacePath;
+          await loadWorkspaceIndex(bridge);
+          await loadWorkspace(bridge, status.workspacePath);
+        });
+        return temporaryWorkspacePath;
       },
       async selectWorkspace(workspacePath) {
         if (!workspacePath) return;
