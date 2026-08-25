@@ -78,7 +78,8 @@ test("memory settings explain off behavior and keep auto approval locked", () =>
     React.createElement(MemoryPage, { runtime, forceNarrow: false }),
   );
   assert.match(html, /关闭后不会产生额外模型调用，也不会向会话注入记忆/);
-  assert.match(html, /固定关闭，普通用户无法启用/);
+  assert.match(html, /自动批准已停用/);
+  assert.match(html, /所有建议都会保留在待审核列表，由你手动批准/);
   assert.match(html, /节能/);
   assert.match(html, /仅生成规则提案，不调用模型审核模糊表达/);
   assert.match(html, /均衡（推荐）/);
@@ -118,21 +119,7 @@ test("memory settings explain off behavior and keep auto approval locked", () =>
     /节能模式保证后台模型审核调用为 0/,
   );
 
-  const unexpectedAutoCommit: RuntimeStore = {
-    ...runtime,
-    data: {
-      ...runtime.data,
-      memory: {
-        ...runtime.data.memory,
-        settings: { ...runtime.data.memory.settings!, autoCommit: true },
-      },
-    },
-  };
-  const warningHtml = renderToStaticMarkup(
-    React.createElement(MemoryPage, { runtime: unexpectedAutoCommit, forceNarrow: false }),
-  );
-  assert.match(warningHtml, /class="is-locked"><input type="checkbox" disabled="" checked=""/);
-  assert.match(warningHtml, /立即关闭自动批准/);
+  assert.doesNotMatch(html, /立即关闭自动批准/);
 
   const proposalsOff: RuntimeStore = {
     ...runtime,

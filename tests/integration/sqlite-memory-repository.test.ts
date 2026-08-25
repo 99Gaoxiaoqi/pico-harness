@@ -20,6 +20,8 @@ import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import type { WorkspaceId } from "../../src/paths/pico-paths.js";
 import type { TerminalMemoryEvidenceRef } from "../../src/memory/proposal-contracts.js";
 import type { Message } from "../../src/schema/message.js";
+import { createMemoryFileState } from "../../src/memory/memory-file-state.js";
+import { withWorkspaceSqliteLease } from "../../src/storage/sqlite/workspace-scopes.js";
 
 interface Fixture {
   readonly root: string;
@@ -58,6 +60,125 @@ async function createFixture(label: string): Promise<Fixture> {
     storageRoot: paths.workspace.root,
     workspaceId: paths.workspace.id,
   };
+}
+
+const AUTO_COMMIT_DISABLED_MIGRATION_KEY = "migration:autoCommitDisabled:v1";
+
+test("new memory repositories and file states default auto approval off", async (context) => {
+  const fixture = await createFixture("default-auto-commit-off");
+  context.after(() => rmRetry(fixture.root));
+
+  const repository = new SqliteMemoryRepository({
+    storageRoot: fixture.storageRoot,
+    workspaceId: fixture.workspaceId,
+  });
+  assert.equal(repository.getSettings().autoCommit, false);
+  assert.equal(repository.getSettings().version, 1);
+  repository.close();
+
+  assert.equal(
+    createMemoryFileState(fixture.workspaceId, "2026-08-25T00:00:00.000Z").settings.autoCommit,
+    false,
+  );
+  assert.equal(readAutoCommitMigrationMarker(fixture.storageRoot), 1);
+});
+
+test("legacy auto approval true migrates once with one settings audit mutation", async (context) => {
+  const fixture = await createFixture("legacy-auto-commit-true");
+  context.after(() => rmRetry(fixture.root));
+
+  seedLegacyAutoCommitSettings(fixture, true, 7);
+  const first = new SqliteMemoryRepository({
+    storageRoot: fixture.storageRoot,
+    workspaceId: fixture.workspaceId,
+    now: () => new Date("2026-08-25T01:00:00.000Z"),
+  });
+  assert.deepEqual(first.getSettings(), {
+    workspaceId: fixture.workspaceId,
+    enabled: true,
+    autoPropose: true,
+    autoCommit: false,
+    injectionEnabled: true,
+    reviewMode: "balanced",
+    version: 8,
+    updatedAt: "2026-08-25T01:00:00.000Z",
+  });
+  assert.deepEqual(
+    first.listMutations({ entityType: "settings" }).map((mutation) => ({
+      action: mutation.action,
+      fromVersion: mutation.fromVersion,
+      toVersion: mutation.toVersion,
+    })),
+    [{ action: "settings.updated", fromVersion: 7, toVersion: 8 }],
+  );
+  first.close();
+
+  const reopened = new SqliteMemoryRepository({
+    storageRoot: fixture.storageRoot,
+    workspaceId: fixture.workspaceId,
+    now: () => new Date("2026-08-25T02:00:00.000Z"),
+  });
+  assert.equal(reopened.getSettings().version, 8);
+  assert.equal(reopened.getSettings().updatedAt, "2026-08-25T01:00:00.000Z");
+  assert.equal(reopened.listMutations({ entityType: "settings" }).length, 1);
+  reopened.close();
+  assert.equal(readAutoCommitMigrationMarker(fixture.storageRoot), 1);
+});
+
+test("legacy auto approval false records migration without changing settings version", async (context) => {
+  const fixture = await createFixture("legacy-auto-commit-false");
+  context.after(() => rmRetry(fixture.root));
+
+  seedLegacyAutoCommitSettings(fixture, false, 11);
+  const repository = new SqliteMemoryRepository({
+    storageRoot: fixture.storageRoot,
+    workspaceId: fixture.workspaceId,
+    now: () => new Date("2026-08-25T03:00:00.000Z"),
+  });
+  assert.equal(repository.getSettings().autoCommit, false);
+  assert.equal(repository.getSettings().version, 11);
+  assert.equal(repository.getSettings().updatedAt, "2026-08-24T00:00:00.000Z");
+  assert.equal(repository.listMutations({ entityType: "settings" }).length, 0);
+  repository.close();
+  assert.equal(readAutoCommitMigrationMarker(fixture.storageRoot), 1);
+});
+
+function seedLegacyAutoCommitSettings(
+  fixture: Fixture,
+  autoCommit: boolean,
+  version: number,
+): void {
+  const repository = new SqliteMemoryRepository({
+    storageRoot: fixture.storageRoot,
+    workspaceId: fixture.workspaceId,
+  });
+  repository.close();
+  withWorkspaceSqliteLease(fixture.storageRoot, (lease) => {
+    lease.database.prepare("UPDATE memory_metadata SET value_json = ? WHERE key = 'settings'").run(
+      JSON.stringify({
+        workspaceId: fixture.workspaceId,
+        enabled: true,
+        autoPropose: true,
+        autoCommit,
+        injectionEnabled: true,
+        reviewMode: "balanced",
+        version,
+        updatedAt: "2026-08-24T00:00:00.000Z",
+      }),
+    );
+    lease.database
+      .prepare("DELETE FROM memory_metadata WHERE key = ?")
+      .run(AUTO_COMMIT_DISABLED_MIGRATION_KEY);
+  });
+}
+
+function readAutoCommitMigrationMarker(storageRoot: string): unknown {
+  return withWorkspaceSqliteLease(storageRoot, (lease) => {
+    const row = lease.database
+      .prepare("SELECT value_json FROM memory_metadata WHERE key = ?")
+      .get(AUTO_COMMIT_DISABLED_MIGRATION_KEY) as { value_json?: unknown } | undefined;
+    return typeof row?.value_json === "string" ? JSON.parse(row.value_json) : undefined;
+  });
 }
 
 test("提案→采纳→遗忘→重开:六表状态一致、mutations 连续、幂等键可重放", async (context) => {
