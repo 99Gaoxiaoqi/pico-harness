@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "linux": {
+    "bubblewrapVersion": "0.11.2",
+    "sourceUrl": "https://github.com/containers/bubblewrap/releases/download/v0.11.2/bubblewrap-0.11.2.tar.xz",
+    "sourceSha256": "69abc30005d2186baf7737feacd8da35633b93cf5af38838ecff17c5f8e924f6",
+    "architectures": ["x64", "arm64"]
+  },
+  "windows": {
+    "broker": "pico-appcontainer-broker.exe",
+    "architectures": ["x64"]
+  }
+}

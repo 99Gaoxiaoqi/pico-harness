@@ -20,6 +20,7 @@ const config = {
     appBundleId: "com.pico.harness",
     appCategoryType: "public.app-category.developer-tools",
     executableName: "Pico",
+    extraResource: ["../../resources/sandbox", "../../resources/licenses"],
     name: "Pico",
     osxSign: macSigningIdentity ? { identity: macSigningIdentity } : undefined,
     osxNotarize: macNotarization,

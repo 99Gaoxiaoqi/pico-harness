@@ -1,39 +1,29 @@
-import { existsSync } from "node:fs";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { createHash } from "node:crypto";
+import { isAbsolute, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { bashCommandFromArgs, extractBashWritePaths } from "../approval/bash-paths.js";
 import { isHardlineCommand } from "../approval/manager.js";
 import type { ToolCall } from "../schema/message.js";
 import type { WorkspaceRoots } from "../tools/workspace-roots.js";
+import {
+  DEFAULT_SANDBOX_CONFIG,
+  SandboxViolationError,
+  buildManagedSpawnPlan,
+  createSandboxPolicy,
+  detectSandboxBackend,
+  isWithinRoot,
+  type SandboxBackend,
+  type SandboxConfig,
+  type SandboxNetworkPolicy,
+  type SandboxSpawnPlan as ManagedSandboxSpawnPlan,
+  type SandboxViolationCode,
+} from "./process-sandbox/index.js";
 
-export type SandboxNetworkPolicy = "deny" | "allow";
-export type SandboxBackend = "macos-sandbox-exec" | "unavailable";
-
-export interface YoloSandboxConfig {
-  /** 子进程网络策略，默认拒绝。 */
-  network: SandboxNetworkPolicy;
-}
-
-export const DEFAULT_YOLO_SANDBOX_CONFIG: Readonly<YoloSandboxConfig> = Object.freeze({
-  network: "deny",
-});
-
-export type SandboxViolationCode =
-  | "sandbox_unavailable"
-  | "workspace_write_denied"
-  | "sensitive_path_denied"
-  | "network_denied"
-  | "sandbox_runtime_denied";
-
-export class SandboxViolationError extends Error {
-  override readonly name = "SandboxViolationError";
-
-  constructor(
-    readonly code: SandboxViolationCode,
-    message: string,
-  ) {
-    super(`[sandbox:${code}] ${message}`);
-  }
-}
+/** @deprecated 兼容旧调用方；配置现用于 workspace-write，而非 yolo。 */
+export type YoloSandboxConfig = SandboxConfig;
+export type { SandboxBackend, SandboxNetworkPolicy, SandboxViolationCode };
+export { SandboxViolationError, detectSandboxBackend };
+export const DEFAULT_YOLO_SANDBOX_CONFIG = DEFAULT_SANDBOX_CONFIG;
 
 export interface SandboxDecision {
   allowed: boolean;
@@ -41,12 +31,7 @@ export interface SandboxDecision {
   reason?: string;
 }
 
-export interface SandboxSpawnPlan {
-  backend: SandboxBackend;
-  command: string;
-  args: string[];
-  sandboxed: boolean;
-}
+export type SandboxSpawnPlan = Omit<ManagedSandboxSpawnPlan, "env" | "profile">;
 
 export interface SandboxRequest {
   command: string;
@@ -56,9 +41,10 @@ export interface SandboxRequest {
   writableRoots: readonly string[];
   config?: Partial<YoloSandboxConfig>;
   platform?: NodeJS.Platform;
+  backendExecutable?: string;
 }
 
-/** YOLO 请求边界：普通工作区操作放行，越界/敏感/网络与 hardline 确定性拒绝。 */
+/** 旧名称保留给后台策略；Hardline 与工作区边界仍是确定性预检。 */
 export function evaluateYoloToolCall(
   call: ToolCall,
   workDir: string,
@@ -68,23 +54,17 @@ export function evaluateYoloToolCall(
   if (isHardlineCommand(call.name, call.arguments, workDir)) {
     return denied("workspace_write_denied", "Hardline 高危命令不可通过 YOLO 绕过。");
   }
-
   if (call.name === "write_file" || call.name === "edit_file") {
     const path = jsonStringField(call.arguments, "path");
     if (!path) return { allowed: true };
-    const target = workspaceRoots.resolveUnchecked(path);
-    if (!workspaceRoots.isAllowedPath(target)) {
+    if (!workspaceRoots.isAllowedPath(workspaceRoots.resolveUnchecked(path))) {
       return denied(
         "workspace_write_denied",
         `写入目标不在授权工作区: ${path}。请先使用 /add-dir 显式授权。`,
       );
     }
-    if (isSensitiveWritePath(target, workspaceRoots.list())) {
-      return denied("sensitive_path_denied", `YOLO 不允许写入敏感路径: ${path}`);
-    }
     return { allowed: true };
   }
-
   if (call.name === "bash") {
     const command = bashCommandFromArgs(call.arguments);
     return command
@@ -94,123 +74,63 @@ export function evaluateYoloToolCall(
   return { allowed: true };
 }
 
-/**
- * 高置信的静态预检。它只用于提前返回清晰错误，不替代 OS 沙箱。
- * 未识别的 shell 语法仍会被 buildSandboxSpawnPlan 产生的宿主边界约束。
- */
 export function evaluateSandboxCommand(
   command: string,
   cwd: string,
   writableRoots: readonly string[],
   config: Partial<YoloSandboxConfig> = {},
 ): SandboxDecision {
-  const effective = normalizeSandboxConfig(config);
+  const effective = { ...DEFAULT_SANDBOX_CONFIG, ...config };
   for (const path of extractBashWritePaths(command)) {
+    if (isPseudoDevice(path)) continue;
     const target = isAbsolute(path) ? resolve(path) : resolve(cwd, path);
-    if (!writableRoots.some((root) => isWithin(resolve(root), target))) {
+    if (!writableRoots.some((root) => isWithinRoot(root, target))) {
       return denied("workspace_write_denied", `Bash 写入目标不在授权工作区: ${path}`);
     }
-    if (isSensitiveWritePath(target, writableRoots)) {
-      return denied("sensitive_path_denied", `Bash 写入敏感路径已拒绝: ${path}`);
-    }
   }
-
   if (effective.network === "deny" && hasExplicitNetworkIntent(command)) {
-    return denied("network_denied", "当前 YOLO 沙箱策略禁止子进程访问网络。");
+    return denied("network_denied", "当前沙箱策略禁止子进程访问网络。");
   }
   return { allowed: true };
 }
 
 export function buildSandboxSpawnPlan(request: SandboxRequest): SandboxSpawnPlan {
-  const config = normalizeSandboxConfig(request.config ?? {});
-  const backend = detectSandboxBackend(request.platform ?? process.platform);
-  if (backend === "unavailable") {
-    throw new SandboxViolationError(
-      "sandbox_unavailable",
-      "当前宿主没有可用的 OS 沙箱后端，已按 fail-closed 策略拒绝 Bash。",
-    );
-  }
-
-  const roots = normalizeWritableRoots(request.writableRoots);
-  if (backend === "macos-sandbox-exec") {
-    return {
-      backend,
-      command: "/usr/bin/sandbox-exec",
-      args: ["-p", buildMacosProfile(roots, config.network), request.shell, ...request.shellArgs],
-      sandboxed: true,
-    };
-  }
-
-  throw new SandboxViolationError("sandbox_unavailable", `未实现的沙箱后端: ${String(backend)}`);
-}
-
-export function detectSandboxBackend(platform: NodeJS.Platform = process.platform): SandboxBackend {
-  if (platform === "darwin" && existsSync("/usr/bin/sandbox-exec")) {
-    return "macos-sandbox-exec";
-  }
-  // bwrap 可以将整个 root 重新 bind 为可写，但无法按“未来文件名”禁止
-  // 嵌套 .git/.env/私钥。在完成 Landlock 等等价边界前，Linux 必须 fail-closed，
-  // 不得仅因 bwrap 存在就宣称已强制敏感路径策略。
-  return "unavailable";
-}
-
-export function isSensitiveWritePath(
-  targetPath: string,
-  writableRoots: readonly string[],
-): boolean {
-  const target = resolve(targetPath);
-  return writableRoots.some((root) => {
-    const rel = relative(resolve(root), target);
-    if (rel === "" || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return false;
-    const segments = rel.split(sep);
-    const basename = segments.at(-1)?.toLowerCase() ?? "";
-    const normalizedSegments = segments.map((segment) => segment.toLowerCase());
-    return (
-      normalizedSegments.some((segment) => SENSITIVE_DIRECTORY_NAMES.has(segment)) ||
-      basename === "agents.md" ||
-      SENSITIVE_FILE_NAMES.has(basename) ||
-      basename.startsWith(".env.") ||
-      PRIVATE_KEY_FILE_RE.test(basename)
-    );
+  const scratchId = createHash("sha256").update(resolve(request.cwd)).digest("hex").slice(0, 20);
+  const policy = createSandboxPolicy({
+    profile: "workspace-write",
+    workspaceRoots: request.writableRoots,
+    scratchRoot: resolve(tmpdir(), "pico-sandbox", scratchId),
+    config: request.config,
   });
+  const plan = buildManagedSpawnPlan({
+    command: request.shell,
+    args: request.shellArgs,
+    cwd: request.cwd,
+    origin: "bash",
+    policy,
+    ...(request.platform ? { platform: request.platform } : {}),
+    ...(request.backendExecutable ? { backendExecutable: request.backendExecutable } : {}),
+  });
+  return {
+    backend: plan.backend,
+    command: plan.command,
+    args: plan.args,
+    sandboxed: plan.sandboxed,
+  };
 }
 
-function normalizeSandboxConfig(config: Partial<YoloSandboxConfig>): YoloSandboxConfig {
-  return { ...DEFAULT_YOLO_SANDBOX_CONFIG, ...config };
-}
-
-function normalizeWritableRoots(roots: readonly string[]): string[] {
-  return [...new Set(roots.map((root) => resolve(root)))];
-}
-
-function buildMacosProfile(roots: readonly string[], network: SandboxNetworkPolicy): string {
-  const rules = [
-    "(version 1)",
-    "(deny default)",
-    "(allow process*)",
-    "(allow sysctl-read)",
-    "(allow file-read*)",
-    '(allow file-write-data (literal "/dev/null"))',
-    '(allow file-write-data (literal "/dev/tty"))',
-    ...roots.map((root) => `(allow file-write* (subpath ${sbplString(root)}))`),
-    `(deny file-read* (regex #"/(\\.ssh|\\.gnupg|\\.aws|\\.kube|\\.docker|\\.azure|gcloud)(/|$)" #"/(\\.env(\\.[^/]*)?|\\.npmrc|\\.pypirc|\\.netrc|\\.git-credentials|credentials|id_(rsa|ed25519|ecdsa)|[^/]*\\.(pem|key))$"))`,
-    `(deny file-write* (regex #"/(\\.git|\\.ssh|\\.gnupg|\\.aws|\\.kube|\\.docker|\\.azure|\\.pico|\\.claude|\\.vscode|\\.claw|gcloud)(/|$)" #"/(AGENTS\\.md|\\.env(\\.[^/]*)?|\\.npmrc|\\.pypirc|\\.netrc|\\.git-credentials|credentials|id_(rsa|ed25519|ecdsa)|[^/]*\\.(pem|key))$"))`,
-  ];
-  if (network === "allow") rules.push("(allow network*)");
-  return rules.join("\n");
+/** 工作区内部不再设置硬编码敏感写路径。 */
+export function isSensitiveWritePath(): boolean {
+  return false;
 }
 
 function denied(code: SandboxViolationCode, reason: string): SandboxDecision {
   return { allowed: false, code, reason: `[sandbox:${code}] ${reason}` };
 }
 
-function isWithin(root: string, target: string): boolean {
-  const rel = relative(root, target);
-  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
-}
-
-function sbplString(value: string): string {
-  return JSON.stringify(value);
+function isPseudoDevice(path: string): boolean {
+  const normalized = path.replaceAll("\\", "/").toLowerCase();
+  return normalized === "/dev/null" || normalized === "/dev/tty" || normalized === "nul";
 }
 
 function hasExplicitNetworkIntent(command: string): boolean {
@@ -226,29 +146,6 @@ function jsonStringField(args: string, field: string): string | undefined {
   }
 }
 
-const SENSITIVE_DIRECTORY_NAMES = new Set([
-  ".git",
-  ".pico",
-  ".claude",
-  ".vscode",
-  ".claw",
-  ".ssh",
-  ".gnupg",
-  ".aws",
-  ".docker",
-  ".kube",
-  ".azure",
-  "gcloud",
-]);
-const SENSITIVE_FILE_NAMES = new Set([
-  ".env",
-  ".npmrc",
-  ".pypirc",
-  ".netrc",
-  ".git-credentials",
-  "credentials",
-]);
-const PRIVATE_KEY_FILE_RE = /^(?:id_(?:rsa|ed25519|ecdsa)|.*\.(?:pem|key))$/iu;
 const EXPLICIT_NETWORK_COMMAND_RE =
   /(?:^|[;&|]\s*|\s)(?:curl|wget|nc|ncat|netcat|ssh|scp|sftp|ftp|telnet|ping)\b/iu;
 const NETWORK_URL_RE = /\b(?:https?|wss?|ftp):\/\//iu;
