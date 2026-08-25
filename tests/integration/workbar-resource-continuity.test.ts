@@ -15,7 +15,7 @@ import {
 
 const workspacePath = "/workspace";
 const sessionId = "session";
-const watermark = { historyEpoch: "history", projectorVersion: 1 as const, throughSequence: 2 };
+const watermark = { historyEpoch: "history", projectorVersion: 2 as const, throughSequence: 2 };
 
 class Source implements SessionContinuityDataSource {
   currentWatermark: RuntimeTranscriptWatermark = watermark;

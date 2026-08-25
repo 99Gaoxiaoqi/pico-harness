@@ -14,6 +14,7 @@ import {
   FileDiff,
   Folder,
   FolderGit2,
+  FolderPlus,
   Gauge,
   GitBranch,
   GitFork,
@@ -79,6 +80,7 @@ import {
   type ConversationInspectorView,
   type ConversationItemView,
   mergeConversationItemGroups,
+  omitApprovalAuditItems,
   removeSupersededActiveTools,
   removePersistentDraft,
   usePersistentDraft,
@@ -1697,7 +1699,9 @@ function ConversationPage() {
         ? [conversation.goalItem]
         : [];
     const discovery = conversation?.discoveryItem ? [conversation.discoveryItem] : [];
-    return mergeConversationItemGroups(persisted, goal, discovery, live, decisions);
+    return omitApprovalAuditItems(
+      mergeConversationItemGroups(persisted, goal, discovery, live, decisions),
+    );
   }, [
     activeRun,
     data.approvals,
@@ -1751,6 +1755,11 @@ function ConversationPage() {
   };
 
   const openCatalog = () => setCatalogOpen((open) => !open);
+
+  const chooseProjectFolder = async () => {
+    const path = await actions.chooseWorkspace();
+    if (path) navigate(newSessionHref(path));
+  };
 
   const openItem = (item: ConversationItemView) => {
     if (item.kind === "approval") {
@@ -2263,12 +2272,6 @@ function ConversationPage() {
                             value={workspacePath}
                             onChange={(event) => {
                               const nextWorkspacePath = event.target.value;
-                              if (nextWorkspacePath === "__add__") {
-                                void actions.chooseWorkspace().then((path) => {
-                                  if (path) navigate(newSessionHref(path));
-                                });
-                                return;
-                              }
                               navigate(newSessionHref(nextWorkspacePath));
                             }}
                           >
@@ -2278,9 +2281,18 @@ function ConversationPage() {
                                 {workspaceDisplayName(workspace.path, workspace)}
                               </option>
                             ))}
-                            <option value="__add__">添加项目文件夹…</option>
                           </select>
                         </label>
+                        <button
+                          type="button"
+                          className="conversation-icon-button"
+                          disabled={Boolean(busy)}
+                          title="打开项目文件夹"
+                          aria-label="打开项目文件夹"
+                          onClick={() => void chooseProjectFolder()}
+                        >
+                          <FolderPlus aria-hidden="true" />
+                        </button>
                         {workspaceReady && (
                           <>
                             <label className="conversation-context-option">
@@ -2320,10 +2332,11 @@ function ConversationPage() {
                               </select>
                             </label>
                             <label className="conversation-context-option">
-                              <span className="conversation-sr-only">执行权限</span>
+                              <span className="conversation-sr-only">权限模式</span>
                               <select
                                 name="initial-permission-mode"
-                                aria-label="执行权限"
+                                aria-label="权限模式"
+                                title="权限模式"
                                 value={newTaskSettings.permissionMode ?? "default"}
                                 onChange={(event) =>
                                   updateNewTaskSettings({
@@ -2334,9 +2347,9 @@ function ConversationPage() {
                                   })
                                 }
                               >
-                                <option value="default">默认</option>
-                                <option value="auto">自动</option>
-                                <option value="yolo">完全访问</option>
+                                <option value="default">权限：默认</option>
+                                <option value="auto">权限：自动</option>
+                                <option value="yolo">权限：YOLO（完全访问）</option>
                               </select>
                             </label>
                             <label className="conversation-context-option">
@@ -2441,10 +2454,11 @@ function ConversationPage() {
                           </select>
                         </label>
                         <label className="conversation-context-option">
-                          <span className="conversation-sr-only">执行权限</span>
+                          <span className="conversation-sr-only">权限模式</span>
                           <select
                             name="permission-mode"
-                            aria-label="执行权限"
+                            aria-label="权限模式"
+                            title="权限模式"
                             value={conversation.settings.permissionMode}
                             disabled={Boolean(activeRun) || Boolean(busy)}
                             onChange={(event) =>
@@ -2453,9 +2467,9 @@ function ConversationPage() {
                               })
                             }
                           >
-                            <option value="default">默认</option>
-                            <option value="auto">自动</option>
-                            <option value="yolo">完全访问</option>
+                            <option value="default">权限：默认</option>
+                            <option value="auto">权限：自动</option>
+                            <option value="yolo">权限：YOLO（完全访问）</option>
                           </select>
                         </label>
                         <label className="conversation-context-option">

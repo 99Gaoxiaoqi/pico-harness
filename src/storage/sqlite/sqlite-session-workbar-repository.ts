@@ -469,7 +469,9 @@ export class SqliteSessionWorkbarRepository {
       const rows = database
         .prepare(
           `SELECT event_seq, event_id, kind, visibility, partial, at, payload_json
-           FROM runtime_events WHERE session_id = ? AND event_seq > ? AND event_seq <= ?
+           FROM runtime_events
+           WHERE session_id = ? AND event_seq > ? AND event_seq <= ?
+             AND kind NOT IN ('session.state.committed', 'transcript.event.recorded')
            ORDER BY event_seq ASC LIMIT ?`,
         )
         .all(input.sessionId, afterSequence, throughSequence, limit + 1) as unknown as TraceRow[];

@@ -25,10 +25,22 @@ export interface InspectorTraceItem {
   readonly sequence: number;
   readonly createdAt: string;
   readonly kind: string;
+  readonly category?: "run" | "model" | "tool" | "approval" | "context" | "plan" | "graph" | "other";
+  readonly runId?: string;
   readonly title: string;
   readonly summary?: string;
   readonly status?: "pending" | "running" | "completed" | "failed" | "interrupted";
+  readonly durationMs?: number;
   readonly toolCallId?: string;
+}
+
+export interface InspectorTraceGroup {
+  readonly id: string;
+  readonly label: string;
+  readonly createdAt?: string;
+  readonly status?: InspectorTraceItem["status"];
+  readonly durationMs?: number;
+  readonly items: readonly InspectorTraceItem[];
 }
 
 export interface InspectorToolPreview {
@@ -72,6 +84,29 @@ export function contextUsagePercent(context?: InspectorContextSnapshot): number 
   );
 }
 
+export function groupInspectorTraceItems(
+  trace: readonly InspectorTraceItem[],
+): readonly InspectorTraceGroup[] {
+  const groups = new Map<string, { run?: InspectorTraceItem; items: InspectorTraceItem[] }>();
+  for (const item of trace) {
+    const id = item.runId ?? "session";
+    const group = groups.get(id) ?? { items: [] };
+    if (item.category === "run") group.run = item;
+    else group.items.push(item);
+    groups.set(id, group);
+  }
+  return [...groups.entries()]
+    .filter(([, group]) => group.items.length > 0 || group.run?.status !== "completed")
+    .map(([id, group], index) => ({
+      id,
+      label: id === "session" ? "会话事件" : `运行 ${index + 1}`,
+      createdAt: group.run?.createdAt ?? group.items[0]?.createdAt,
+      status: group.run?.status,
+      durationMs: group.run?.durationMs,
+      items: group.items,
+    }));
+}
+
 export function InspectorWorkbarPanel({
   context,
   trace,
@@ -86,6 +121,8 @@ export function InspectorWorkbarPanel({
   onOpenPreview,
 }: InspectorWorkbarPanelProps) {
   const usage = contextUsagePercent(context);
+  const traceGroups = groupInspectorTraceItems(trace);
+  const visibleTraceCount = traceGroups.reduce((count, group) => count + group.items.length, 0);
 
   return (
     <section className="tool-panel tool-panel--inspector" aria-label="追踪">
@@ -168,7 +205,7 @@ export function InspectorWorkbarPanel({
         <section className="tool-panel__section" aria-labelledby="inspector-trace-title">
           <div className="tool-panel__section-heading">
             <h3 id="inspector-trace-title">时间线</h3>
-            <span>{trace.length} 条</span>
+            <span>{traceGroups.length} 次运行 · {visibleTraceCount} 项</span>
           </div>
           {loading && trace.length === 0 ? (
             <p className="tool-panel__state" role="status">
@@ -177,33 +214,57 @@ export function InspectorWorkbarPanel({
           ) : trace.length === 0 ? (
             <p className="tool-panel__state">当前任务还没有追踪记录。</p>
           ) : (
-            <ol className="tool-panel__timeline">
-              {trace.map((item) => (
-                <li key={item.id} data-status={item.status ?? "completed"}>
-                  <button
-                    type="button"
-                    aria-pressed={selectedTraceId === item.id}
-                    onClick={() => onSelectTrace(item.id)}
-                    onDoubleClick={() => onOpenPreview?.(item.id)}
-                  >
-                    <span className="tool-panel__timeline-marker" aria-hidden="true" />
-                    <span className="tool-panel__timeline-copy">
-                      <strong>{item.title}</strong>
-                      {item.summary && <span>{item.summary}</span>}
-                      <small>
-                        #{item.sequence} · {item.kind} · {formatTimestamp(item.createdAt)}
-                      </small>
+            <div className="tool-panel__trace-groups">
+              {traceGroups.map((group) => (
+                <section className="tool-panel__trace-group" data-status={group.status} key={group.id}>
+                  <header>
+                    <span>
+                      <strong>{group.label}</strong>
+                      {group.status && <small>{statusLabel(group.status)}</small>}
                     </span>
-                    {item.toolCallId && <Wrench aria-label="工具调用" size={13} />}
-                  </button>
-                </li>
+                    <small>
+                      {group.durationMs === undefined
+                        ? formatTimestamp(group.createdAt ?? "")
+                        : formatDuration(group.durationMs)}
+                    </small>
+                  </header>
+                  {group.items.length === 0 ? (
+                    <p className="tool-panel__muted">没有可展示的执行步骤。</p>
+                  ) : (
+                    <ol className="tool-panel__timeline">
+                      {group.items.map((item) => (
+                        <li key={item.id} data-status={item.status ?? "completed"}>
+                          <button
+                            type="button"
+                            aria-pressed={selectedTraceId === item.id}
+                            onClick={() => onSelectTrace(item.id)}
+                            onDoubleClick={() => onOpenPreview?.(item.id)}
+                          >
+                            <span className="tool-panel__timeline-marker" aria-hidden="true" />
+                            <span className="tool-panel__timeline-copy">
+                              <strong>{item.title}</strong>
+                              {item.summary && <span>{item.summary}</span>}
+                              <small>
+                                {item.durationMs === undefined
+                                  ? formatTimestamp(item.createdAt)
+                                  : formatDuration(item.durationMs)}
+                                {` · ${item.kind}`}
+                              </small>
+                            </span>
+                            {item.toolCallId && <Wrench aria-label="工具调用" size={13} />}
+                          </button>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                </section>
               ))}
-            </ol>
+            </div>
           )}
           {hasMore && onLoadMore && (
             <button type="button" className="tool-panel__load-more" onClick={onLoadMore}>
               <ChevronDown aria-hidden="true" size={14} />
-              加载更早记录
+              加载更多记录
             </button>
           )}
         </section>
@@ -257,4 +318,20 @@ function formatTimestamp(value: string): string {
     minute: "2-digit",
     second: "2-digit",
   }).format(timestamp);
+}
+
+function formatDuration(durationMs: number): string {
+  if (durationMs < 1_000) return `${Math.max(0, Math.round(durationMs))} 毫秒`;
+  const totalSeconds = Math.round(durationMs / 1_000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes} 分 ${seconds} 秒` : `${seconds} 秒`;
+}
+
+function statusLabel(status: NonNullable<InspectorTraceItem["status"]>): string {
+  if (status === "pending") return "等待中";
+  if (status === "running") return "进行中";
+  if (status === "failed") return "失败";
+  if (status === "interrupted") return "已中断";
+  return "已完成";
 }

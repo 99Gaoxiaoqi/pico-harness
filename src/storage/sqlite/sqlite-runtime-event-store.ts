@@ -2288,7 +2288,17 @@ export class SqliteRuntimeEventStore {
     if (event.kind === "message.committed" && event.data.message.role === "assistant") {
       itemIds = [`message:${event.turnId}:assistant`, `message:${event.turnId}:thinking`];
     } else if (event.kind === "tool.result.recorded") {
-      itemIds = [`tool:${event.refs.toolCallId}`];
+      const finalized = this.readCurrentTranscriptItemsByKindLocked(
+        event.sessionId,
+        "tool",
+      ).findLast((record) => {
+        const payload = asJsonRecord(record.payload);
+        const data = asJsonRecord(payload?.["data"]);
+        return (
+          payload?.["status"] !== "running" && data?.["providerCallId"] === event.refs.toolCallId
+        );
+      });
+      itemIds = [finalized?.itemId ?? `tool:${event.refs.toolCallId}`];
     }
     if (itemIds.length === 0) return;
     const placeholders = itemIds.map(() => "?").join(", ");
@@ -3843,8 +3853,15 @@ function transcriptMutationsForEvent(
   }
 
   if (event.kind === "tool.result.recorded") {
-    const itemId = `tool:${event.refs.toolCallId}`;
-    const prior = current(itemId);
+    const prior =
+      currentByKind("tool").find((record) => {
+        const payload = asJsonRecord(record.payload);
+        const data = asJsonRecord(payload?.["data"]);
+        return (
+          payload?.["status"] === "running" && data?.["providerCallId"] === event.refs.toolCallId
+        );
+      }) ?? current(`tool:${event.refs.toolCallId}`);
+    const itemId = prior?.itemId ?? `tool:${event.refs.toolCallId}`;
     const priorPayload = asJsonRecord(prior?.payload);
     return [
       {
@@ -3873,7 +3890,7 @@ function transcriptMutationsForEvent(
           }),
           data: {
             ...(asJsonRecord(priorPayload?.["data"]) ?? {}),
-            toolCallId: event.refs.toolCallId,
+            providerCallId: event.refs.toolCallId,
           },
         },
       },
@@ -3983,7 +4000,11 @@ function transcriptMutationsForEvent(
             args: transcript.args,
             status: "running",
             at: transcript.createdAt,
-            data: { toolCallId: transcript.toolCallId, entryId: transcript.entryId },
+            data: {
+              toolCallId: transcript.toolCallId,
+              providerCallId: transcript.providerCallId,
+              entryId: transcript.entryId,
+            },
           },
         },
       ];

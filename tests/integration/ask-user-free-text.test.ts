@@ -160,7 +160,7 @@ test("TUI 客户端：prompt.requested 事件投影（freeText 透传）+ respon
           hostEpoch: "host-test",
           subscriptionId: "subscription-test",
           nextSequence: 1,
-          watermark: { historyEpoch: "history-test", projectorVersion: 1, throughSequence: 0 },
+          watermark: { historyEpoch: "history-test", projectorVersion: 2, throughSequence: 0 },
           durableTail: [],
           activeOverlay: [],
           queuedInputs: [],

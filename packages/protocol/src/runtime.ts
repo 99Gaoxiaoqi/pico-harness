@@ -440,7 +440,7 @@ export type RuntimeTranscriptFragment = JsonObject & {
   readonly json: string;
 };
 
-export const TRANSCRIPT_PROJECTOR_VERSION = 1 as const;
+export const TRANSCRIPT_PROJECTOR_VERSION = 2 as const;
 
 export type RuntimeTranscriptWatermark = JsonObject & {
   readonly historyEpoch: string;

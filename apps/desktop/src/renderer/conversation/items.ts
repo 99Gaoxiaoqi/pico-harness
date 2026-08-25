@@ -55,18 +55,31 @@ export function mergeConversationItemGroups(
 }
 
 /**
- * An approval-gated tool can leave a durable pre-approval "active" row next to
- * the canonical completed row. Once the Run is terminal, keep the completed
- * record and remove only that superseded duplicate.
+ * A terminal Run must not leave durable tool-start placeholders looking live.
+ * Prefer an explicit terminal boundary, then retain the legacy approval/result
+ * pairing fallback for transcripts written before Run boundaries were durable.
  */
 export function removeSupersededActiveTools(
   items: readonly ConversationItemView[],
   runActive: boolean,
 ): readonly ConversationItemView[] {
-  if (runActive) return items;
-  return items.filter((item, index) => {
+  const filtered = items.filter((item, index) => {
     if (item.kind !== "tool" || item.state !== "active") return true;
-    const laterItems = items.slice(index + 1);
+    const laterTurnBoundary = items.findIndex(
+      (candidate, candidateIndex) => candidateIndex > index && candidate.kind === "userMessage",
+    );
+    const laterItems = items.slice(
+      index + 1,
+      laterTurnBoundary < 0 ? undefined : laterTurnBoundary,
+    );
+    if (
+      laterItems.some(
+        (candidate) => candidate.kind === "runBoundary" && candidate.status !== "started",
+      )
+    ) {
+      return false;
+    }
+    if (runActive) return true;
     const terminalIndex = laterItems.findIndex(
       (candidate) =>
         candidate.kind === "tool" &&
@@ -74,10 +87,16 @@ export function removeSupersededActiveTools(
         candidate.toolName === item.toolName,
     );
     if (terminalIndex < 0) return true;
-    return !laterItems
-      .slice(0, terminalIndex)
-      .some((candidate) => candidate.kind === "approval");
+    return !laterItems.slice(0, terminalIndex).some((candidate) => candidate.kind === "approval");
   });
+  return filtered.length === items.length ? items : filtered;
+}
+
+/** Approval decisions remain recoverable/auditable but belong outside the main transcript. */
+export function omitApprovalAuditItems(
+  items: readonly ConversationItemView[],
+): readonly ConversationItemView[] {
+  return items.filter((item) => item.kind !== "approval");
 }
 
 /** Preserve only the still-live item for the exact active Run across transcript hydration. */
