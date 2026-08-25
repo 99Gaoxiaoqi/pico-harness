@@ -255,6 +255,7 @@ export interface WorkspaceView {
   readonly mode: WorkspaceMode;
   readonly registered: boolean;
   readonly trusted: boolean;
+  readonly temporary?: true | undefined;
 }
 
 export interface WorkspaceCapabilities {
