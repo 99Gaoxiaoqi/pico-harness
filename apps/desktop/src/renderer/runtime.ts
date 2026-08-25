@@ -15,6 +15,7 @@ import {
   type RuntimeMemoryReviewBudget,
   type RuntimeMemorySettings,
   type RuntimeMcpServerInput,
+  type RuntimeDiagnosticCheck,
   type RuntimeResult,
   type RuntimeScopedMcpServer,
   type RuntimeScopedSkill,
@@ -1499,7 +1500,14 @@ export interface RuntimeActions {
   setBackgroundMode(enabled: boolean): Promise<void>;
   openWorkspace(): Promise<void>;
   initializeWorkspace(): Promise<void>;
-  runDiagnostics(kind: "runtime" | "resources"): Promise<string | undefined>;
+  runDiagnostics(kind: "runtime" | "resources"): Promise<DesktopDiagnosticReport | undefined>;
+}
+
+export interface DesktopDiagnosticReport {
+  readonly kind: "runtime" | "resources";
+  readonly healthy: boolean;
+  readonly checks: readonly RuntimeDiagnosticCheck[];
+  readonly output: string;
 }
 
 export interface ToolEvidencePage {
@@ -3777,20 +3785,60 @@ export function useRuntimeStore(): RuntimeStore {
       async runDiagnostics(kind) {
         const workspacePath = dataRef.current.workspacePath;
         if (!workspacePath) return undefined;
-        let output: string | undefined;
+        let report: DesktopDiagnosticReport | undefined;
         await perform("diagnostics", async (bridge) => {
           if (preview) {
-            output = "Preview 模式不运行本机诊断。";
+            report = {
+              kind,
+              healthy: true,
+              checks: [
+                {
+                  id: "preview",
+                  label: "Preview",
+                  status: "unavailable",
+                  summary: "预览模式不会读取本机状态",
+                },
+              ],
+              output: "Preview 模式不运行本机诊断。",
+            };
             return;
           }
-          const value = await invoke(
-            bridge,
-            kind === "resources" ? "diagnostics.resources" : "diagnostics.run",
-            { workspacePath },
-          );
-          output = stringValue(value.output, "诊断完成，未返回文本报告。");
+          if (kind === "resources") {
+            const value = await invoke(bridge, "diagnostics.resources", { workspacePath });
+            const entryChecks: RuntimeDiagnosticCheck[] = value.entries.map((entry, index) => ({
+              id: `resource:${entry.kind}:${index}`,
+              label: entry.kind,
+              status:
+                entry.status === "unsafe" ? "error" : entry.status === "missing" ? "warning" : "ok",
+              summary: entry.path,
+              ...(entry.reason ? { recommendation: entry.reason } : {}),
+            }));
+            const findingChecks: RuntimeDiagnosticCheck[] = value.findings.map(
+              (finding, index) => ({
+                id: `finding:${index}`,
+                label: "扫描发现",
+                status: "warning",
+                summary: finding,
+              }),
+            );
+            const checks = [...entryChecks, ...findingChecks];
+            report = {
+              kind,
+              healthy: checks.every((check) => check.status !== "error"),
+              checks,
+              output: value.output,
+            };
+            return;
+          }
+          const value = await invoke(bridge, "diagnostics.run", { workspacePath });
+          report = {
+            kind,
+            healthy: value.healthy,
+            checks: value.checks,
+            output: value.output,
+          };
         });
-        return output;
+        return report;
       },
     }),
     [

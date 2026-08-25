@@ -1,5 +1,15 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { BrainCircuit, Check, KeyRound, Pencil, Plus, Server, Trash2, X } from "lucide-react";
+import {
+  BrainCircuit,
+  Check,
+  ChevronDown,
+  KeyRound,
+  Pencil,
+  Plus,
+  Server,
+  Trash2,
+  X,
+} from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Button, EmptyState, IconButton, InlineNotice } from "./components.js";
 import type {
@@ -71,8 +81,10 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
     readonly provider: ProviderView;
     readonly revision: string;
   }>();
+  const [expandedProviderIds, setExpandedProviderIds] = useState<ReadonlySet<string>>(new Set());
   const models = useMemo(() => routeOptions(config.providers), [config.providers]);
   const isBusy = Boolean(busy);
+  const defaultRouteId = config.userDefaults.modelRouteId ?? config.defaultModelRouteId;
 
   const handleDefaultChange = (modelRouteId: string) => {
     void actions.setDefaultModelRoute(modelRouteId || undefined);
@@ -92,12 +104,9 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
     <div className="page-stack provider-page">
       <section className="page-intro">
         <div>
-          <span className="eyebrow">推理能力</span>
-          <h2>模型服务商</h2>
-          <p>
-            Provider 代表服务商或网关渠道，API 协议决定实际请求格式；两者可以独立配置，并在 App 和
-            TUI 之间共用。
-          </p>
+          <span className="eyebrow">模型</span>
+          <h2>模型连接</h2>
+          <p>管理模型、API Key 与默认选择。配置只保存在当前设备，并与 Pico TUI 共用。</p>
         </div>
         <Button
           variant="primary"
@@ -105,7 +114,7 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
           onClick={() => setEditor(null)}
         >
           <Plus aria-hidden="true" size={16} />
-          添加服务商
+          添加连接
         </Button>
       </section>
 
@@ -153,12 +162,12 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
       )}
 
       {config.supported && (
-        <section className="panel provider-list-panel" aria-label="模型服务商列表">
+        <section className="panel provider-list-panel" aria-label="模型连接列表">
           {config.providers.length === 0 ? (
             <EmptyState
               icon={<Server aria-hidden="true" />}
-              title="还没有可用的模型服务商"
-              detail="添加一个模型服务后，App 与 TUI 会在这台设备上共用它。"
+              title="还没有模型连接"
+              detail="添加连接后，Pico 会在新任务和已有会话中提供这些模型。"
               action={
                 <Button
                   variant="primary"
@@ -166,94 +175,126 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
                   onClick={() => setEditor(null)}
                 >
                   <Plus aria-hidden="true" size={16} />
-                  配置第一个服务商
+                  添加第一个连接
                 </Button>
               }
             />
           ) : (
             <div className="provider-list">
-              {config.providers.map((provider) => (
-                <article className="provider-card" key={provider.id}>
-                  <header>
-                    <span className="provider-card__icon" aria-hidden="true">
-                      <Server size={17} />
-                    </span>
-                    <div>
-                      <div className="provider-card__title">
-                        <h3>{provider.id}</h3>
-                        <span className="provider-origin">{originLabels[provider.origin]}</span>
-                      </div>
-                      <p>{protocolLabels[provider.protocol]}</p>
-                    </div>
-                    <div className="provider-card__actions">
-                      {provider.origin === "user" ? (
-                        <>
-                          <Button
-                            variant="quiet"
-                            disabled={isBusy || !config.writable}
-                            onClick={() =>
-                              setCredentialEditor({ provider, revision: config.revision })
-                            }
-                          >
-                            <KeyRound aria-hidden="true" size={15} />
-                            API Key
-                          </Button>
-                          <Button
-                            variant="quiet"
-                            disabled={isBusy || !config.writable}
-                            onClick={() => setEditor(provider)}
-                          >
-                            <Pencil aria-hidden="true" size={15} />
-                            编辑
-                          </Button>
-                          <Button
-                            variant="quiet"
-                            disabled={isBusy || !config.writable}
-                            onClick={() => handleDeleteProvider(provider)}
-                          >
-                            <Trash2 aria-hidden="true" size={15} />
-                            删除
-                          </Button>
-                        </>
-                      ) : (
-                        <span className="provider-managed-hint">
-                          由{originLabels[provider.origin]}管理
-                        </span>
-                      )}
-                    </div>
-                  </header>
-                  <dl className="provider-facts">
-                    <div>
-                      <dt>{protocolLabels[provider.protocol]} Base URL</dt>
-                      <dd>
-                        <code title={provider.baseURL}>{provider.baseURL}</code>
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>凭证</dt>
-                      <dd>
-                        <span
-                          className={`status-pill status-pill--${credentialTone(provider.credentialStatus)}`}
-                        >
-                          {credentialLabels[provider.credentialStatus]}
-                        </span>
-                        {provider.credentialSource === "environment" && provider.apiKeyEnv && (
-                          <code>{provider.apiKeyEnv}</code>
-                        )}
-                      </dd>
-                    </div>
-                  </dl>
-                  <div className="provider-models" aria-label={`${provider.id} 模型`}>
-                    {provider.models.length > 0 ? (
-                      provider.models.map((model) => <code key={model}>{model}</code>)
-                    ) : (
-                      <span>
-                        {provider.discoverModels ? "由 Provider 动态发现模型" : "尚未配置模型"}
+              {config.providers.map((provider) => {
+                const expanded = expandedProviderIds.has(provider.id);
+                const defaultModel = defaultRouteId?.startsWith(`${provider.id}/`)
+                  ? defaultRouteId.slice(provider.id.length + 1)
+                  : undefined;
+                return (
+                  <article className="provider-card" key={provider.id} data-expanded={expanded}>
+                    <div className="provider-card__summary">
+                      <span className="provider-card__icon" aria-hidden="true">
+                        <Server size={17} />
                       </span>
+                      <div>
+                        <div className="provider-card__title">
+                          <h3>{provider.id}</h3>
+                          <span className="provider-origin">{originLabels[provider.origin]}</span>
+                          {defaultModel && <span className="provider-origin">默认</span>}
+                        </div>
+                        <p>
+                          {protocolLabels[provider.protocol]} · {provider.models.length} 个模型
+                          {defaultModel ? ` · ${defaultModel}` : ""}
+                        </p>
+                      </div>
+                      <span
+                        className={`status-pill status-pill--${credentialTone(provider.credentialStatus)}`}
+                      >
+                        {credentialLabels[provider.credentialStatus]}
+                      </span>
+                      <button
+                        type="button"
+                        className="provider-card__disclosure"
+                        aria-expanded={expanded}
+                        aria-label={`${expanded ? "收起" : "展开"}${provider.id}连接详情`}
+                        onClick={() =>
+                          setExpandedProviderIds((current) => {
+                            const next = new Set(current);
+                            if (next.has(provider.id)) next.delete(provider.id);
+                            else next.add(provider.id);
+                            return next;
+                          })
+                        }
+                      >
+                        <ChevronDown aria-hidden="true" size={17} />
+                      </button>
+                    </div>
+                    {expanded && (
+                      <div className="provider-card__details">
+                        <div className="provider-card__actions">
+                          {provider.origin === "user" ? (
+                            <>
+                              <Button
+                                variant="quiet"
+                                disabled={isBusy || !config.writable}
+                                onClick={() =>
+                                  setCredentialEditor({ provider, revision: config.revision })
+                                }
+                              >
+                                <KeyRound aria-hidden="true" size={15} />
+                                API Key
+                              </Button>
+                              <Button
+                                variant="quiet"
+                                disabled={isBusy || !config.writable}
+                                onClick={() => setEditor(provider)}
+                              >
+                                <Pencil aria-hidden="true" size={15} />
+                                编辑
+                              </Button>
+                              <Button
+                                variant="quiet"
+                                disabled={isBusy || !config.writable}
+                                onClick={() => handleDeleteProvider(provider)}
+                              >
+                                <Trash2 aria-hidden="true" size={15} />
+                                删除
+                              </Button>
+                            </>
+                          ) : (
+                            <span className="provider-managed-hint">
+                              由{originLabels[provider.origin]}管理
+                            </span>
+                          )}
+                        </div>
+                        <dl className="provider-facts">
+                          <div>
+                            <dt>{protocolLabels[provider.protocol]} Base URL</dt>
+                            <dd>
+                              <code title={provider.baseURL}>{provider.baseURL}</code>
+                            </dd>
+                          </div>
+                          <div>
+                            <dt>凭证</dt>
+                            <dd>
+                              <span>{credentialLabels[provider.credentialStatus]}</span>
+                              {provider.credentialSource === "environment" &&
+                                provider.apiKeyEnv && <code>{provider.apiKeyEnv}</code>}
+                            </dd>
+                          </div>
+                        </dl>
+                        <div className="provider-models" aria-label={`${provider.id} 模型`}>
+                          {provider.models.length > 0 ? (
+                            provider.models.map((model) => <code key={model}>{model}</code>)
+                          ) : (
+                            <span>
+                              {provider.discoverModels
+                                ? "由 Provider 动态发现模型"
+                                : "尚未配置模型"}
+                            </span>
+                          )}
+                        </div>
+                      </div>
                     )}
-                  </div>
-                </article>
-              ))}
+                  </article>
+                );
+              })}
             </div>
           )}
         </section>

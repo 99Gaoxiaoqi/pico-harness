@@ -1301,6 +1301,12 @@ function isEpochConflict(cause: unknown): boolean {
 }
 
 function workbarErrorMessage(cause: unknown): string {
+  if (
+    cause instanceof WorkbarPanelRuntimeError &&
+    (cause.code === "not_repository" || cause.message.includes("not a Git repository"))
+  ) {
+    return "当前任务没有关联 Git 项目，变更审阅仅在 Git 项目中可用。";
+  }
   if (cause instanceof Error && cause.message) return cause.message;
   return "工作栏 authority 请求失败。";
 }

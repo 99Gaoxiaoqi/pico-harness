@@ -6,6 +6,7 @@ import { folderWorkspaceCapabilities } from "../../apps/desktop/src/renderer/mod
 import { shouldBatchHydrateRuntimeNotification } from "../../apps/desktop/src/renderer/runtime.js";
 import {
   TEMPORARY_WORKSPACE_LABEL,
+  TEMPORARY_WORKSPACE_GROUP_LABEL,
   newSessionHref,
   workspaceDisplayName,
 } from "../../apps/desktop/src/renderer/workspace-session.js";
@@ -43,6 +44,8 @@ test("temporary workspace keeps a stable UI label and can switch to a real proje
     temporary: true as const,
   };
   assert.equal(workspaceDisplayName(temporary.path, temporary), TEMPORARY_WORKSPACE_LABEL);
+  assert.equal(TEMPORARY_WORKSPACE_LABEL, "无项目");
+  assert.equal(TEMPORARY_WORKSPACE_GROUP_LABEL, "未归属项目");
   assert.equal(
     workspaceDisplayName("/projects/pico", {
       path: "/projects/pico",
@@ -55,12 +58,23 @@ test("temporary workspace keeps a stable UI label and can switch to a real proje
   const appSource = await rendererSource("App.tsx");
   assert.match(appSource, /workspaceDisplayName\(workspacePath, workspace\)/u);
   assert.match(appSource, /!nested && workspace\?\.temporary/u);
+  assert.match(appSource, /TEMPORARY_WORKSPACE_GROUP_LABEL/u);
   assert.match(appSource, /navigate\(newSessionHref\(nextWorkspacePath\)\)/u);
   assert.match(appSource, /<option key=\{workspace\.path\} value=\{workspace\.path\}>/u);
 
   const runtimeSource = await rendererSource("runtime.ts");
   assert.match(runtimeSource, /workspace\.temporary === true/u);
   assert.match(runtimeSource, /temporary: true as const/u);
+});
+
+test("first send leaves the new-task shell as soon as its session appears", async () => {
+  const appSource = await rendererSource("App.tsx");
+  assert.match(appSource, /firstSendBaselineRef/u);
+  assert.match(appSource, /setAwaitingFirstSession\(true\)/u);
+  assert.match(
+    appSource,
+    /!firstSendBaselineRef\.current\.has\(candidate\.id\)[\s\S]*?sessionHref\(\{ workspacePath: createdSession\.workspacePath, sessionId: createdSession\.id \}\)/u,
+  );
 });
 
 test("temporary workspace omits trust revocation and Git worktree capabilities", async () => {

@@ -27,7 +27,7 @@ export const settingsNavigationGroups = [
   },
   {
     label: "系统",
-    items: [{ to: "/settings/system", label: "权限与能力", kind: "system" }],
+    items: [{ to: "/settings/system", label: "健康", kind: "system", scoped: true }],
   },
 ] as const;
 
