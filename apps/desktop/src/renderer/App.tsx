@@ -102,6 +102,7 @@ import {
   newSessionHref,
   isActiveWorkspaceSession,
   sessionHref,
+  workspaceDisplayName,
   workspaceHref,
   workspaceName,
   workspaceParent,
@@ -525,6 +526,7 @@ function AppShell() {
     () => window.localStorage.getItem("pico.sidebar-collapsed") === "true",
   );
   const routeWorkspacePath = workspacePathFromSearch(location.search);
+  const routeWorkspace = data.workspaces.find((workspace) => workspace.path === routeWorkspacePath);
   const navigationWorkspacePath = routeWorkspacePath ?? data.workspacePath;
   const pageTitle = routeTitle(location.pathname);
   const settingsRoute =
@@ -710,7 +712,9 @@ function AppShell() {
           <header className="titlebar">
             <div>
               <span className="titlebar__context">
-                {routeWorkspacePath ? workspaceName(routeWorkspacePath) : "全部项目"}
+                {routeWorkspacePath
+                  ? workspaceDisplayName(routeWorkspacePath, routeWorkspace)
+                  : "全部项目"}
               </span>
               <h1>{pageTitle}</h1>
             </div>
@@ -853,6 +857,7 @@ function SidebarTasks({
     }))
     .filter((group) => group.sessions.length > 0);
   const renderSession = (session: SessionView, nested = false) => {
+    const workspace = workspaces.find((candidate) => candidate.path === session.workspacePath);
     const sessionRuns = runs.filter(
       (run) => run.workspacePath === session.workspacePath && run.sessionId === session.id,
     );
@@ -870,6 +875,11 @@ function SidebarTasks({
         key={workspaceSessionKey({ workspacePath: session.workspacePath, sessionId: session.id })}
         session={session}
         nested={nested}
+        workspaceLabel={
+          !nested && workspace?.temporary
+            ? workspaceDisplayName(session.workspacePath, workspace)
+            : undefined
+        }
         running={sessionRuns.some((run) => !isTerminalRun(run.status))}
         hasPendingInteraction={hasPendingInteraction}
         busy={busy}
@@ -949,6 +959,7 @@ function SidebarTasks({
 function SidebarSessionRow({
   session,
   nested = false,
+  workspaceLabel,
   running,
   hasPendingInteraction,
   busy,
@@ -958,6 +969,7 @@ function SidebarSessionRow({
 }: {
   readonly session: SessionView;
   readonly nested?: boolean;
+  readonly workspaceLabel?: string | undefined;
   readonly running: boolean;
   readonly hasPendingInteraction: boolean;
   readonly busy: boolean;
@@ -993,7 +1005,9 @@ function SidebarSessionRow({
                   : "会话"
           }
         />
-        <span title={session.title}>{session.title}</span>
+        <span title={workspaceLabel ? `${workspaceLabel} · ${session.title}` : session.title}>
+          {workspaceLabel ? `${workspaceLabel} · ${session.title}` : session.title}
+        </span>
         <time dateTime={new Date(session.updatedAt).toISOString()}>
           {formatRelative(session.updatedAt)}
         </time>
@@ -1187,14 +1201,27 @@ function HomePage() {
 function NewTaskPage() {
   const { data, actions } = useRuntime();
   const location = useLocation();
+  const navigate = useNavigate();
   const workspacePath = workspacePathFromSearch(location.search);
   const workspace = data.workspaces.find((candidate) => candidate.path === workspacePath);
 
   useEffect(() => {
+    if (!workspacePath) {
+      let cancelled = false;
+      void actions.ensureTemporaryWorkspace().then((temporaryWorkspacePath) => {
+        if (!cancelled && temporaryWorkspacePath) {
+          navigate(newSessionHref(temporaryWorkspacePath), { replace: true });
+        }
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
     if (workspacePath && workspace && data.workspacePath !== workspacePath) {
       void actions.selectWorkspace(workspacePath);
     }
-  }, [actions, data.workspacePath, workspace, workspacePath]);
+    return undefined;
+  }, [actions, data.workspacePath, navigate, workspace, workspacePath]);
 
   if (workspacePath && !workspace) {
     return <Navigate replace to="/task/new" />;
@@ -1208,6 +1235,7 @@ function NewTaskPage() {
 interface ConversationEnvironmentPanelProps {
   readonly view: "overview" | "review" | "context";
   readonly workspacePath: string;
+  readonly workspaceLabel?: string | undefined;
   readonly mode: WorkspaceMode;
   readonly branch?: string | undefined;
   readonly changes: readonly ChangeView[];
@@ -1223,6 +1251,7 @@ interface ConversationEnvironmentPanelProps {
 export function ConversationEnvironmentPanel({
   view,
   workspacePath,
+  workspaceLabel,
   mode,
   branch,
   changes,
@@ -1398,7 +1427,7 @@ export function ConversationEnvironmentPanel({
                 </div>
                 <div>
                   <dt>项目</dt>
-                  <dd title={workspacePath}>{workspaceName(workspacePath)}</dd>
+                  <dd title={workspacePath}>{workspaceLabel ?? workspaceName(workspacePath)}</dd>
                 </div>
                 <div>
                   <dt>模式</dt>
@@ -1504,6 +1533,8 @@ function ConversationPage() {
   const session = data.sessions.find(
     (item) => item.workspacePath === workspacePath && item.id === sessionId,
   );
+  const workspace = data.workspaces.find((candidate) => candidate.path === workspacePath);
+  const workspaceLabel = workspaceDisplayName(workspacePath, workspace);
   const conversation = conversationKey ? data.conversations[conversationKey] : undefined;
   const sessionRuns = data.runs.filter(
     (run) => run.workspacePath === workspacePath && run.sessionId === sessionId,
@@ -1952,7 +1983,7 @@ function ConversationPage() {
             <div className="conversation-session-header__identity">
               {workspacePath && (
                 <span className="conversation-session-project" title={workspacePath}>
-                  <Folder aria-hidden="true" /> {workspaceName(workspacePath)}
+                  <Folder aria-hidden="true" /> {workspaceLabel}
                 </span>
               )}
               {editingTitle && sessionRef ? (
@@ -2252,7 +2283,7 @@ function ConversationPage() {
                         ) : (
                           <Folder aria-hidden="true" />
                         )}
-                        {workspaceName(workspacePath)}
+                        {workspaceLabel}
                       </span>
                     )}
                     {sessionRef && conversation?.settings && (
@@ -2437,7 +2468,7 @@ function ConversationPage() {
                     <span className="brand-mark brand-mark--large" aria-hidden="true">
                       P
                     </span>
-                    <span className="eyebrow">{workspaceName(workspacePath)}</span>
+                    <span className="eyebrow">{workspaceLabel}</span>
                     <h2>今天想推进什么？</h2>
                     <p>
                       描述目标和完成标准，Pico 会先理解项目，再把执行过程整理成一条可检查的记录。
@@ -2834,6 +2865,8 @@ function SessionRow({
   readonly session: SessionView;
   readonly action?: ReactNode;
 }) {
+  const { data } = useRuntime();
+  const workspace = data.workspaces.find((candidate) => candidate.path === session.workspacePath);
   return (
     <div className="session-row-wrap">
       <Link
@@ -2855,7 +2888,8 @@ function SessionRow({
           {session.summary && <p>{session.summary}</p>}
           <div className="session-row__meta">
             <span>
-              <Folder aria-hidden="true" /> {workspaceName(session.workspacePath)}
+              <Folder aria-hidden="true" />
+              {workspaceDisplayName(session.workspacePath, workspace)}
             </span>
             <time>{formatRelative(session.updatedAt)}</time>
           </div>
@@ -3434,6 +3468,10 @@ function SettingsPage() {
 function WorkspaceSettingsPage() {
   const { data, actions, busy } = useRuntime();
   const navigate = useNavigate();
+  const currentWorkspace = data.workspaces.find(
+    (workspace) => workspace.path === data.workspacePath,
+  );
+  const temporaryWorkspace = currentWorkspace?.temporary === true;
   const chooseWorkspace = async () => {
     const workspacePath = await actions.chooseWorkspace();
     if (workspacePath) navigate(workspaceHref("/settings/workspaces", workspacePath));
@@ -3470,15 +3508,19 @@ function WorkspaceSettingsPage() {
             </select>
           </SettingRow>
           <SettingRow title="工作区路径" detail={data.workspacePath ?? "未选择"}>
-            <Button
-              variant="danger"
-              disabled={Boolean(busy)}
-              onClick={() =>
-                data.workspacePath && void actions.trustWorkspace(data.workspacePath, false)
-              }
-            >
-              撤销信任
-            </Button>
+            {temporaryWorkspace ? (
+              <StatusPill status="ready" />
+            ) : (
+              <Button
+                variant="danger"
+                disabled={Boolean(busy)}
+                onClick={() =>
+                  data.workspacePath && void actions.trustWorkspace(data.workspacePath, false)
+                }
+              >
+                撤销信任
+              </Button>
+            )}
           </SettingRow>
           <SettingRow title="初始化 Pico 项目" detail="仅创建缺失的 AGENTS.md 与 .pico/config.json">
             <Button
@@ -3494,15 +3536,17 @@ function WorkspaceSettingsPage() {
           <SettingRow
             title="工作区模式"
             detail={
-              data.workspaceMode === "git"
-                ? "已启用并行任务隔离与变更合并"
-                : "对话、工具和并行分析可用；可写子代理隔离、分支与独立合并不可用"
+              temporaryWorkspace
+                ? "不绑定真实项目；任务仍保存在这个私有工作区中"
+                : data.workspaceMode === "git"
+                  ? "已启用并行任务隔离与变更合并"
+                  : "对话、工具和并行分析可用；可写子代理隔离、分支与独立合并不可用"
             }
           >
             <WorkspaceModeBadge mode={data.workspaceMode} />
           </SettingRow>
         </div>
-        {data.workspaceMode === "folder" && (
+        {data.workspaceMode === "folder" && !temporaryWorkspace && (
           <p className="settings-section__note">
             版本保护是一项面向高级工作流的可选能力，由 Git 提供。Pico 不会自行修改你的文件夹设置。
           </p>
