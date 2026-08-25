@@ -56,3 +56,45 @@ test("daemon-only Runtime methods use the same fail-closed result decoder", () =
     }),
   );
 });
+
+test("session continuity accepts projected tool identity metadata", () => {
+  const result = {
+    session: {
+      sessionId: "session-1",
+      workspacePath: "/workspace",
+      title: "Session",
+      status: "active",
+      pinned: false,
+      createdAt: 1,
+      updatedAt: 1,
+    },
+    hostEpoch: "host-1",
+    subscriptionId: "subscription-1",
+    nextSequence: 1,
+    watermark: {
+      historyEpoch: "history-1",
+      projectorVersion: 1,
+      throughSequence: 1,
+    },
+    durableTail: [
+      {
+        itemId: "tool:call-1",
+        itemRevision: 1,
+        positionSequence: 1,
+        positionOrdinal: 0,
+        item: {
+          id: "tool:call-1",
+          kind: "tool",
+          name: "write_file",
+          args: '{"path":"smoke.txt"}',
+          status: "running",
+          data: { toolCallId: "call-1", entryId: "entry-1" },
+        },
+      },
+    ],
+    activeOverlay: [],
+    queuedInputs: [],
+  } as const;
+
+  assert.deepEqual(parseDesktopRuntimeResult("session.subscription.open", result), result);
+});

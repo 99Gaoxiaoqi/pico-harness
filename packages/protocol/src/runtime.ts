@@ -668,6 +668,8 @@ export type RuntimeConversationItem = (
       readonly args: string;
       readonly status: "running" | "success" | "error";
       readonly summary?: string;
+      /** Stable projector metadata used to reconcile tool start/result records. */
+      readonly data?: JsonObject;
       /** Present only after a canonical tool.result.recorded fact exists. */
       readonly result?: RuntimeToolResultEnvelope;
       readonly at?: number;
@@ -4343,14 +4345,14 @@ const runtimeCatalogSkillResult = resultShape(
   { sourcePath: resultString, allowedTools: resultStringArray, model: resultString },
 );
 
-const workspaceStatusResultRule = resultShape(
+const workspaceStatusResultRule = exactResultShape(
   {
     workspacePath: resultString,
     registered: resultBoolean,
     schedulerStatus: resultOneOf(["unknown"]),
     mode: resultOneOf(["folder", "git"]),
     branch: resultString,
-    capabilities: resultShape({
+    capabilities: exactResultShape({
       foregroundRuns: resultBoolean,
       fileHistory: resultBoolean,
       isolatedWorktrees: resultBoolean,
@@ -4360,7 +4362,7 @@ const workspaceStatusResultRule = resultShape(
   {
     temporary: resultOneOf([true]),
     eventLog: resultNullable(
-      resultShape({
+      exactResultShape({
         logicalBytes: resultNonNegativeInteger,
         hardLimitBytes: resultNonNegativeInteger,
         lowWatermarkBytes: resultNonNegativeInteger,
@@ -4376,7 +4378,9 @@ const workspaceStatusResultRule = resultShape(
 
 const temporaryWorkspaceStatusResultRule: RuntimeResultRule = (value, path) => {
   workspaceStatusResultRule(value, path);
-  if (isJsonObject(value)) resultOneOf([true])(value["temporary"], `${path}.temporary`);
+  if (!isJsonObject(value)) return;
+  resultOneOf([true])(value["temporary"], `${path}.temporary`);
+  resultOneOf([true])(value["registered"], `${path}.registered`);
 };
 
 const runtimeToolResultEnvelopeResult: RuntimeResultRule = (value, path) => {
@@ -4519,6 +4523,7 @@ const runtimeConversationItemResult: RuntimeResultRule = (value, path) => {
       },
       {
         summary: resultString,
+        data: resultJsonObject,
         result: runtimeToolResultEnvelopeResult,
         at: resultFiniteNumber,
         truncated: resultOneOf([true]),
@@ -4683,7 +4688,7 @@ const RUNTIME_RESULT_VALIDATORS = {
   "workspace.init": runtimeWorkspaceInitResult,
   "diagnostics.run": runtimeDiagnosticsResult,
   "diagnostics.resources": runtimeResourceDiagnosticsResult,
-  "workspace.list": resultShape({ workspaces: resultArray(workspaceStatusResultRule) }),
+  "workspace.list": exactResultShape({ workspaces: resultArray(workspaceStatusResultRule) }),
   "workspace.status": workspaceStatusResultRule,
   "workspace.temporary.ensure": temporaryWorkspaceStatusResultRule,
   "workspace.register": resultShape({

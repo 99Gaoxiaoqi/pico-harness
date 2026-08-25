@@ -44,6 +44,7 @@ export interface WorkspaceDoctorOptions {
 
 export interface WorkspaceConfigurationDiagnostic {
   readonly defaultModelRouteId?: string;
+  readonly defaultProviderId?: string;
   readonly defaultSource?: string;
   readonly providerSources: Readonly<Record<string, string>>;
   readonly credentialStates: Readonly<Record<string, string>>;
@@ -51,7 +52,7 @@ export interface WorkspaceConfigurationDiagnostic {
 
 /** Projects effective Runtime metadata without exposing the process-local ModelRouter secrets. */
 export function workspaceConfigurationDiagnosticFromRuntime(
-  runtime: Pick<EffectiveModelRuntime, "config" | "credentials">,
+  runtime: Pick<EffectiveModelRuntime, "config" | "credentials" | "router">,
 ): WorkspaceConfigurationDiagnostic {
   const providerSources: Record<string, string> = {};
   const credentialStates: Record<string, string> = {};
@@ -59,10 +60,10 @@ export function workspaceConfigurationDiagnosticFromRuntime(
     providerSources[providerId] = runtime.config.sources[`providers.${providerId}`] ?? "unknown";
     credentialStates[providerId] = runtime.credentials[providerId]?.state ?? "missing";
   }
+  const resolvedDefaultRoute = runtime.router.resolve(runtime.config.defaultModelRouteId);
   return Object.freeze({
-    ...(runtime.config.defaultModelRouteId
-      ? { defaultModelRouteId: runtime.config.defaultModelRouteId }
-      : {}),
+    ...(resolvedDefaultRoute ? { defaultModelRouteId: resolvedDefaultRoute.id } : {}),
+    ...(resolvedDefaultRoute ? { defaultProviderId: resolvedDefaultRoute.providerId } : {}),
     ...(runtime.config.sources["defaults.modelRouteId"]
       ? { defaultSource: runtime.config.sources["defaults.modelRouteId"] }
       : {}),
@@ -79,10 +80,16 @@ export async function runWorkspaceDoctor(
   const nodeOk = isSupportedNodeVersion(process.versions.node);
   const nodeSummary = `${process.version} (${nodeOk ? "ok" : `requires ${NODE_RUNTIME_SUPPORT_LABEL}`})`;
   const cwdOk = existsSync(options.workDir);
-  const effectiveProviderCount = Object.keys(options.configuration?.providerSources ?? {}).length;
-  const effectiveCredentialCount = Object.values(
-    options.configuration?.credentialStates ?? {},
-  ).filter((state) => state === "config" || state === "environment" || state === "keychain").length;
+  const defaultProviderId = options.configuration?.defaultProviderId;
+  const defaultProviderSource = defaultProviderId
+    ? options.configuration?.providerSources[defaultProviderId]
+    : undefined;
+  const defaultCredentialState =
+    (defaultProviderId ? options.configuration?.credentialStates[defaultProviderId] : undefined) ??
+    "missing";
+  const defaultCredentialAvailable = ["config", "environment", "keychain"].includes(
+    defaultCredentialState,
+  );
   const storage = await scanStorage(options);
   const checks: WorkspaceDiagnosticCheck[] = [
     check("cwd", "CWD", cwdOk ? "ok" : "error", `${options.workDir} (${cwdOk ? "ok" : "missing"})`),
@@ -98,16 +105,18 @@ export async function runWorkspaceDoctor(
     check(
       "base-url",
       "Provider routes",
-      effectiveProviderCount > 0 ? "ok" : "warning",
-      effectiveProviderCount > 0 ? "provided by user configuration" : "missing",
+      defaultProviderSource ? "ok" : "warning",
+      defaultProviderSource
+        ? `${defaultProviderId} provided by ${defaultProviderSource} configuration`
+        : `missing for ${defaultProviderId ?? "default provider"}`,
     ),
     check(
       "api-key",
       "Provider credentials",
-      effectiveCredentialCount > 0 ? "ok" : "warning",
-      effectiveCredentialCount > 0
-        ? `${effectiveCredentialCount} available from user configuration`
-        : "missing",
+      defaultCredentialAvailable ? "ok" : "warning",
+      defaultCredentialAvailable
+        ? `${defaultProviderId} available from ${defaultCredentialState}`
+        : `missing for ${defaultProviderId ?? "default provider"}`,
     ),
     check("node", "Node", nodeOk ? "ok" : "error", nodeSummary),
     runtimeLedgerCheck(storage.report, storage.error),
@@ -126,11 +135,15 @@ export async function runWorkspaceDoctor(
     `Provider: ${options.provider}`,
     `Model: ${options.model}`,
     ...renderConfiguration(options.configuration),
-    `Provider routes: ${effectiveProviderCount > 0 ? "provided by user configuration" : "missing"}`,
+    `Provider routes: ${
+      defaultProviderSource
+        ? `${defaultProviderId} provided by ${defaultProviderSource} configuration`
+        : `missing for ${defaultProviderId ?? "default provider"}`
+    }`,
     `Provider credentials: ${
-      effectiveCredentialCount > 0
-        ? `${effectiveCredentialCount} available from user configuration`
-        : "missing"
+      defaultCredentialAvailable
+        ? `${defaultProviderId} available from ${defaultCredentialState}`
+        : `missing for ${defaultProviderId ?? "default provider"}`
     }`,
     `Node: ${nodeSummary}`,
     ...renderRuntimeLedger(storage.report, storage.error),

@@ -78,6 +78,7 @@ test("temporary workspace omits trust revocation and Git worktree capabilities",
     /temporaryWorkspace \? \([\s\S]+<StatusPill status="ready" \/>[\s\S]+撤销信任/u,
   );
   assert.match(settingsPage, /data\.workspaceMode === "folder" && !temporaryWorkspace/u);
+  assert.match(settingsPage, /!temporaryWorkspace && \([\s\S]+初始化 Pico 项目/u);
 });
 
 test("terminal run notifications batch hydrate so run.finished converges to idle", async () => {

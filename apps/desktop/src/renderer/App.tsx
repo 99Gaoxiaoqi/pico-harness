@@ -3522,17 +3522,22 @@ function WorkspaceSettingsPage() {
               </Button>
             )}
           </SettingRow>
-          <SettingRow title="初始化 Pico 项目" detail="仅创建缺失的 AGENTS.md 与 .pico/config.json">
-            <Button
-              disabled={Boolean(busy)}
-              onClick={() => {
-                if (window.confirm(`在 ${data.workspacePath} 初始化 Pico 项目？`))
-                  void actions.initializeWorkspace();
-              }}
+          {!temporaryWorkspace && (
+            <SettingRow
+              title="初始化 Pico 项目"
+              detail="仅创建缺失的 AGENTS.md 与 .pico/config.json"
             >
-              初始化
-            </Button>
-          </SettingRow>
+              <Button
+                disabled={Boolean(busy)}
+                onClick={() => {
+                  if (window.confirm(`在 ${data.workspacePath} 初始化 Pico 项目？`))
+                    void actions.initializeWorkspace();
+                }}
+              >
+                初始化
+              </Button>
+            </SettingRow>
+          )}
           <SettingRow
             title="工作区模式"
             detail={
