@@ -189,7 +189,10 @@ test("agent graph store persists exact identities, fences finish, and drives dur
     assert.equal(attempt1.replayed, false);
     assert.equal(attempt1.wake.status, "running");
     assert.equal(attempt1.wake.version, 2);
-    assert.equal(store.getRecoverableSupervisorWake("wake-1")?.attempt?.attemptId, "wake-attempt-1");
+    assert.equal(
+      store.getRecoverableSupervisorWake("wake-1")?.attempt?.attemptId,
+      "wake-attempt-1",
+    );
     assert.equal(
       store.claimSupervisorWake({
         wakeId: "wake-1",
@@ -394,7 +397,74 @@ test("agent graph store atomically consumes durable yield interest when admittin
   }
 });
 
-test("agent graph store serializes schedule and activation races across independent processes", async () => {
+test("finish atomically accepts only selected RecordRefs from the same Graph", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-agent-graph-finish-records-"));
+  const store = new SqliteAgentGraphControlStore({ storageRoot: root });
+  try {
+    const ownRecordId = seedGraphRecord(store, {
+      graphId: "finish-graph",
+      rootSessionId: "finish-root",
+      suffix: "own",
+    });
+    const foreignRecordId = seedGraphRecord(store, {
+      graphId: "foreign-graph",
+      rootSessionId: "foreign-root",
+      suffix: "foreign",
+    });
+
+    assert.throws(
+      () =>
+        store.commitScheduleRevision(
+          scheduleInput({
+            graphId: "finish-graph",
+            rootSessionId: "finish-root",
+            operationId: "finish-unknown",
+            expectedRevision: 1,
+            kind: "finish",
+            selectedRecordIds: ["missing-record"],
+          }),
+        ),
+      /Selected RecordRef missing-record does not exist/u,
+    );
+    assert.throws(
+      () =>
+        store.commitScheduleRevision(
+          scheduleInput({
+            graphId: "finish-graph",
+            rootSessionId: "finish-root",
+            operationId: "finish-foreign",
+            expectedRevision: 1,
+            kind: "finish",
+            selectedRecordIds: [foreignRecordId],
+          }),
+        ),
+      /belongs to Graph foreign-graph/u,
+    );
+    assert.equal(store.getGraph("finish-graph")?.headRevision, 1);
+    assert.equal(store.getGraph("finish-graph")?.phase, "open");
+    assert.equal(store.listScheduleRevisions("finish-graph").length, 1);
+
+    const finishInput = scheduleInput({
+      graphId: "finish-graph",
+      rootSessionId: "finish-root",
+      operationId: "finish-valid",
+      expectedRevision: 1,
+      kind: "finish",
+      selectedRecordIds: [ownRecordId],
+    });
+    const committed = store.commitScheduleRevision(finishInput);
+    assert.equal(committed.replayed, false);
+    assert.equal(committed.graph.phase, "finished");
+    assert.equal(committed.graph.headRevision, 2);
+    assert.equal(store.commitScheduleRevision(finishInput).replayed, true);
+    assert.equal(store.listScheduleRevisions("finish-graph").length, 2);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("agent graph store serializes schedule, activation, and finish races across processes", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-agent-graph-race-"));
   try {
     const seed = new SqliteAgentGraphControlStore({ storageRoot: root });
@@ -440,8 +510,56 @@ test("agent graph store serializes schedule and activation races across independ
       assert.equal(claims.length, 1);
       assert.equal(claims[0]?.targetSessionId, "race-child-session");
       assert.match(claims[0]?.targetRunId ?? "", /^race-child-run-[12]$/u);
+      const claim = claims[0];
+      assert.ok(claim);
+      inspect.putRecordRef({
+        recordId: "race-record",
+        graphId: claim.graphId,
+        claimId: claim.claimId,
+        operatorId: claim.operatorId,
+        operatorGeneration: claim.operatorGeneration,
+        recordFingerprint: "race-record-fingerprint",
+        sourceSessionId: claim.targetSessionId,
+        sourceTurnId: claim.targetTurnId,
+        sourceRunId: claim.targetRunId,
+        sourceEventId: "race-record-event",
+        kind: "agent_output",
+      });
     } finally {
       inspect.close();
+    }
+
+    const finishResults = await raceIndependentStores(root, "finish");
+    assert.deepEqual(finishResults.map(({ ok }) => ok).sort(), [false, true]);
+    assert.match(finishResults.find(({ ok }) => !ok)?.message ?? "", /finished|revision changed/u);
+    const finished = new SqliteAgentGraphControlStore({ storageRoot: root });
+    try {
+      const revisions = finished.listScheduleRevisions("race-graph");
+      assert.equal(revisions.length, 2);
+      assert.equal(revisions[1]?.kind, "finish");
+      assert.equal(finished.getGraph("race-graph")?.headRevision, 2);
+      assert.equal(finished.getGraph("race-graph")?.phase, "finished");
+      const winner = revisions[1];
+      assert.ok(winner);
+      const racer = winner.operationId.endsWith("-1") ? 1 : 2;
+      assert.equal(
+        finished.commitScheduleRevision({
+          graphId: "race-graph",
+          expectedRevision: 1,
+          operationId: `race-finish-${racer}`,
+          requestFingerprint: `race-finish-fingerprint-${racer}`,
+          kind: "finish",
+          command: { kind: "finish", selectedRecordIds: ["race-record"] },
+          sourceSessionId: "race-root",
+          sourceTurnId: `race-finish-turn-${racer}`,
+          sourceRunId: `race-finish-run-${racer}`,
+          sourceToolCallId: `race-finish-tool-${racer}`,
+        }).replayed,
+        true,
+      );
+      assert.equal(finished.listScheduleRevisions("race-graph").length, 2);
+    } finally {
+      finished.close();
     }
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -449,18 +567,22 @@ test("agent graph store serializes schedule and activation races across independ
 });
 
 function scheduleInput(options: {
+  graphId?: string;
+  rootSessionId?: string;
   operationId: string;
   expectedRevision: number;
   kind: CommitAgentGraphScheduleInput["kind"];
+  selectedRecordIds?: readonly string[];
 }): CommitAgentGraphScheduleInput {
+  const selectedRecordIds = options.selectedRecordIds ?? [];
   return {
-    graphId: "graph-1",
+    graphId: options.graphId ?? "graph-1",
     expectedRevision: options.expectedRevision,
     operationId: options.operationId,
     requestFingerprint: `fingerprint:${options.operationId}`,
     kind: options.kind,
-    command: { kind: options.kind, operatorId: "researcher" },
-    sourceSessionId: "root-session",
+    command: { kind: options.kind, operatorId: "researcher", selectedRecordIds },
+    sourceSessionId: options.rootSessionId ?? "root-session",
     sourceTurnId: "root-source-turn",
     sourceRunId: "root-source-run",
     sourceToolCallId: `tool:${options.operationId}`,
@@ -485,6 +607,78 @@ function activationClaimInput(): ClaimAgentGraphActivationInput {
   };
 }
 
+function seedGraphRecord(
+  store: SqliteAgentGraphControlStore,
+  options: {
+    readonly graphId: string;
+    readonly rootSessionId: string;
+    readonly suffix: string;
+  },
+): string {
+  const operatorId = `operator-${options.suffix}`;
+  const claimId = `claim-${options.suffix}`;
+  const childSessionId = `child-session-${options.suffix}`;
+  const childTurnId = `child-turn-${options.suffix}`;
+  const childRunId = `child-run-${options.suffix}`;
+  const recordId = `record-${options.suffix}`;
+  store.createGraph({ graphId: options.graphId, rootSessionId: options.rootSessionId, epoch: 1 });
+  store.commitScheduleRevision(
+    scheduleInput({
+      graphId: options.graphId,
+      rootSessionId: options.rootSessionId,
+      operationId: `add-${options.suffix}`,
+      expectedRevision: 0,
+      kind: "add",
+    }),
+  );
+  store.ensureOperatorProvision({
+    provisionId: `provision-${options.suffix}`,
+    graphId: options.graphId,
+    operatorId,
+    generation: 1,
+    scheduleRevision: 1,
+    provisionFingerprint: `provision-fingerprint-${options.suffix}`,
+    childSessionId,
+    profileSnapshot: { model: "test" },
+    workspaceBinding: { kind: "shared" },
+  });
+  store.transitionOperatorProvision({
+    provisionId: `provision-${options.suffix}`,
+    expectedVersion: 1,
+    from: "requested",
+    to: "provisioned",
+  });
+  store.claimActivation({
+    claimId,
+    graphId: options.graphId,
+    intentId: `intent-${options.suffix}`,
+    operatorId,
+    operatorGeneration: 1,
+    expectedGraphRevision: 1,
+    intentFingerprint: `intent-fingerprint-${options.suffix}`,
+    readinessFingerprint: `readiness-fingerprint-${options.suffix}`,
+    targetSessionId: childSessionId,
+    targetTurnId: childTurnId,
+    targetRunId: childRunId,
+    targetInvocationId: `invocation-${options.suffix}`,
+    runStartedEventId: `run-started-${options.suffix}`,
+  });
+  store.putRecordRef({
+    recordId,
+    graphId: options.graphId,
+    claimId,
+    operatorId,
+    operatorGeneration: 1,
+    recordFingerprint: `record-fingerprint-${options.suffix}`,
+    sourceSessionId: childSessionId,
+    sourceTurnId: childTurnId,
+    sourceRunId: childRunId,
+    sourceEventId: `record-event-${options.suffix}`,
+    kind: "agent_output",
+  });
+  return recordId;
+}
+
 interface RaceResult {
   readonly ok: boolean;
   readonly message?: string;
@@ -492,7 +686,7 @@ interface RaceResult {
 
 async function raceIndependentStores(
   storageRoot: string,
-  action: "schedule" | "claim",
+  action: "schedule" | "claim" | "finish",
 ): Promise<readonly RaceResult[]> {
   const syncRoot = await mkdtemp(join(tmpdir(), `pico-agent-graph-${action}-barrier-`));
   const startPath = join(syncRoot, "start");
@@ -517,7 +711,7 @@ async function raceIndependentStores(
 
 function spawnRaceProcess(options: {
   storageRoot: string;
-  action: "schedule" | "claim";
+  action: "schedule" | "claim" | "finish";
   racer: number;
   readyPath: string;
   startPath: string;
@@ -548,7 +742,7 @@ function spawnRaceProcess(options: {
           sourceRunId: "race-source-run-" + config.racer,
           sourceToolCallId: "race-tool-" + config.racer,
         });
-      } else {
+      } else if (config.action === "claim") {
         store.claimActivation({
           claimId: "race-claim-" + config.racer,
           graphId: "race-graph",
@@ -563,6 +757,19 @@ function spawnRaceProcess(options: {
           targetRunId: "race-child-run-" + config.racer,
           targetInvocationId: "race-child-invocation-" + config.racer,
           runStartedEventId: "race-run-started-" + config.racer,
+        });
+      } else {
+        store.commitScheduleRevision({
+          graphId: "race-graph",
+          expectedRevision: 1,
+          operationId: "race-finish-" + config.racer,
+          requestFingerprint: "race-finish-fingerprint-" + config.racer,
+          kind: "finish",
+          command: { kind: "finish", selectedRecordIds: ["race-record"] },
+          sourceSessionId: "race-root",
+          sourceTurnId: "race-finish-turn-" + config.racer,
+          sourceRunId: "race-finish-run-" + config.racer,
+          sourceToolCallId: "race-finish-tool-" + config.racer,
         });
       }
       result = { ok: true };
