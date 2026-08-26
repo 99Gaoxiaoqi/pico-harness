@@ -25,7 +25,15 @@ export interface InspectorTraceItem {
   readonly sequence: number;
   readonly createdAt: string;
   readonly kind: string;
-  readonly category?: "run" | "model" | "tool" | "approval" | "context" | "plan" | "graph" | "other";
+  readonly category?:
+    | "run"
+    | "model"
+    | "tool"
+    | "approval"
+    | "context"
+    | "plan"
+    | "graph"
+    | "other";
   readonly runId?: string;
   readonly title: string;
   readonly summary?: string;
@@ -205,7 +213,9 @@ export function InspectorWorkbarPanel({
         <section className="tool-panel__section" aria-labelledby="inspector-trace-title">
           <div className="tool-panel__section-heading">
             <h3 id="inspector-trace-title">时间线</h3>
-            <span>{traceGroups.length} 次运行 · {visibleTraceCount} 项</span>
+            <span>
+              {traceGroups.length} 次运行 · {visibleTraceCount} 项
+            </span>
           </div>
           {loading && trace.length === 0 ? (
             <p className="tool-panel__state" role="status">
@@ -216,7 +226,11 @@ export function InspectorWorkbarPanel({
           ) : (
             <div className="tool-panel__trace-groups">
               {traceGroups.map((group) => (
-                <section className="tool-panel__trace-group" data-status={group.status} key={group.id}>
+                <section
+                  className="tool-panel__trace-group"
+                  data-status={group.status}
+                  key={group.id}
+                >
                   <header>
                     <span>
                       <strong>{group.label}</strong>
