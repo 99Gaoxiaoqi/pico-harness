@@ -604,6 +604,42 @@ test("Supervisor tools reject forged host context and non-empty read/yield input
   assert.equal(port.updates.length + port.reads.length + port.yields.length, 0);
 });
 
+test("all Supervisor tools reject root identities with leading or trailing whitespace", async () => {
+  const contexts = [
+    { ...ROOT, graphId: ` ${ROOT.graphId}` },
+    { ...ROOT, graphId: `${ROOT.graphId} ` },
+    { ...ROOT, rootSessionId: ` ${ROOT.rootSessionId}` },
+    { ...ROOT, rootSessionId: `${ROOT.rootSessionId} ` },
+    { ...ROOT, rootTurnId: ` ${ROOT.rootTurnId}` },
+    { ...ROOT, rootTurnId: `${ROOT.rootTurnId} ` },
+    { ...ROOT, rootRunId: ` ${ROOT.rootRunId}` },
+    { ...ROOT, rootRunId: `${ROOT.rootRunId} ` },
+  ];
+
+  for (const [index, context] of contexts.entries()) {
+    const { port, byName } = fixture(context);
+    await assert.rejects(
+      byName.get("update_agent_graph")!.execute(
+        JSON.stringify({
+          expected_revision: 0,
+          operation_id: `operation-padded-root-${index}`,
+          commands: [addCommand()],
+        }),
+        { toolCallId: `provider-call-padded-root-${index}` },
+      ),
+      /调用上下文/u,
+    );
+    await assert.rejects(byName.get("view_agent_graph")!.execute("{}"), /调用上下文/u);
+    await assert.rejects(
+      byName.get("yield_agent_graph")!.execute("{}", {
+        toolCallId: `provider-call-padded-root-yield-${index}`,
+      }),
+      /调用上下文/u,
+    );
+    assert.equal(port.updates.length + port.reads.length + port.yields.length, 0);
+  }
+});
+
 test("view_agent_graph returns the application projection and yield_agent_graph forwards exact root/run/tool identity", async () => {
   const { port, byName } = fixture();
   const viewed = JSON.parse(await byName.get("view_agent_graph")!.execute("{}"));
