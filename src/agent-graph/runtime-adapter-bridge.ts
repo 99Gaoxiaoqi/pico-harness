@@ -294,7 +294,12 @@ function assertHeldLease(held: HeldOperatorLease, provision: AgentGraphOperatorP
 }
 
 function renderActivationPrompt(instruction: string, handoffPrompt: string): string {
-  return handoffPrompt ? `${instruction}\n\n${handoffPrompt}` : instruction;
+  const contract = [
+    "[Graph Operator activation]",
+    "完成该 activation 后必须调用 agent_output，显式提交 success 或 failure。",
+    "普通文字回复不是正式输出；agent_output 成功后不要继续执行工具。",
+  ].join("\n");
+  return [contract, instruction, handoffPrompt].filter((part) => part.length > 0).join("\n\n");
 }
 
 function requireWorkDir(workDir: string): void {
