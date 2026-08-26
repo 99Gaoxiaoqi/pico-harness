@@ -222,6 +222,7 @@ async function runProductionRootWakeScenario(scenario: "output" | "outputless"):
     const wake = host.store.getSupervisorWake(wakeId)!;
     await waitUntil(() => host?.store.listSupervisorWakeAttempts(wake.wakeId).length === 1);
     const attempts = host.store.listSupervisorWakeAttempts(wake.wakeId);
+    await waitUntil(() => workspaceRuntime.getRun(attempts[0]!.targetRunId) !== undefined);
     const run = await workspaceRuntime.waitForRun(attempts[0]!.targetRunId);
     const events = await rootLease.session.runtimeEventStore!.readRun(
       rootSessionId,

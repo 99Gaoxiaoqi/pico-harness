@@ -1360,12 +1360,25 @@ const MAX_GRAPH_EXECUTION_ERROR_CHARS = 1_000;
 
 function safeGraphExecutionError(error: unknown): Error {
   const raw = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-  const message = redactSensitiveText(raw)
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, " ")
-    .slice(0, MAX_GRAPH_EXECUTION_ERROR_CHARS);
+  const message = stripUnsafeControlCharacters(redactSensitiveText(raw)).slice(
+    0,
+    MAX_GRAPH_EXECUTION_ERROR_CHARS,
+  );
   const safe = new Error(message || "Graph host execution failed");
   safe.name = "GraphHostExecutionError";
   return safe;
+}
+
+function stripUnsafeControlCharacters(value: string): string {
+  return [...value]
+    .map((character) => {
+      const codePoint = character.codePointAt(0)!;
+      const isUnsafeControl =
+        (codePoint < 0x20 && codePoint !== 0x09 && codePoint !== 0x0a && codePoint !== 0x0d) ||
+        codePoint === 0x7f;
+      return isUnsafeControl ? " " : character;
+    })
+    .join("");
 }
 
 async function sealGraphPreDispatchFailure(

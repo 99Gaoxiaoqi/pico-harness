@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { graphIdFor } from "../../src/agent-graph/core/index.js";
+import { wakeIdFor } from "../../src/agent-graph/core/ids.js";
 import { Session } from "../../src/engine/session.js";
 import { SessionManager } from "../../src/engine/session-manager.js";
 import {
@@ -199,12 +200,21 @@ test("workspace Graph host executes one exact root wake and observes its termina
   }
 });
 
-test("workspace Graph host clears operator ownership after an exact execution error", async () => {
+test("workspace Graph host recovers a non-live indeterminate operator on startup without redispatch", async () => {
   const executions: Parameters<CreateAgentGraphWorkspaceHostOptions["execute"]>[0][] = [];
   let failedBinding: AgentGraphRunToolBinding | undefined;
-  const fixture = await createHostFixture(async (input) => {
+  let operatorExecutions = 0;
+  let rootExecutions = 0;
+  const execute: CreateAgentGraphWorkspaceHostOptions["execute"] = async (input) => {
     executions.push(input);
-    assert.equal(input.binding.kind, "operator");
+    if (input.binding.kind === "root") {
+      rootExecutions++;
+      const runtimeRun = await attachHostedRuntimeRun(input);
+      await runtimeRun.finish("completed");
+      input.onTerminal();
+      return;
+    }
+    operatorExecutions++;
     failedBinding = input.binding;
     const turnId = input.prestartedRun.turnId;
     assert.ok(turnId);
@@ -229,11 +239,26 @@ test("workspace Graph host clears operator ownership after an exact execution er
       { ownerFence },
     );
     throw new Error("simulated hosted execution crash");
-  });
+  };
+  const fixture = await createHostFixture(execute);
+  let recoveredHost: ReturnType<typeof createAgentGraphWorkspaceHost> | undefined;
   try {
     const graphId = graphIdFor(fixture.owner.session.id, 1);
+    fixture.host.store.createGraph({
+      graphId,
+      rootSessionId: fixture.owner.session.id,
+      epoch: 1,
+    });
+    fixture.host.store.registerYieldInterest({
+      permitId: "yield-before-indeterminate-crash",
+      graphId,
+      rootSessionId: fixture.owner.session.id,
+      rootTurnId: "root-turn-before-indeterminate-crash",
+      rootRunId: "root-run-before-indeterminate-crash",
+      toolCallId: "yield-tool-before-indeterminate-crash",
+    });
     await scheduleOperator(fixture, graphId, "intent-crash");
-    assert.equal(executions.length, 1);
+    assert.equal(operatorExecutions, 1);
     assert.ok(failedBinding?.kind === "operator");
     if (failedBinding?.kind === "operator") {
       const activation = failedBinding.getActivationContext();
@@ -244,12 +269,22 @@ test("workspace Graph host clears operator ownership after an exact execution er
       );
     }
 
-    await fixture.host.application.supervisor.notifyGraph(graphId);
-    assert.equal(
-      executions.length,
-      1,
-      "an indeterminate exact Run must be observed fail-closed without redispatch",
-    );
+    await fixture.host.close();
+    recoveredHost = createAgentGraphWorkspaceHost({
+      workDir: fixture.owner.session.workDir,
+      storageRoot: fixture.owner.session.runtimeEventStore!.storageRoot,
+      runtimeEventStore: fixture.owner.session.runtimeEventStore!,
+      sessionManager: fixture.manager,
+      sessionOptions: {
+        persistence: true,
+        picoHome: fixture.owner.session.picoHome,
+        runtimePort: createEngineRuntimePort(),
+      },
+      execute,
+    });
+    await recoveredHost.start();
+    assert.equal(operatorExecutions, 1, "startup recovery must not redispatch an unsafe Run");
+    assert.equal(rootExecutions, 1, "startup recovery must wake the registered root exactly once");
     const events = await fixture.owner.session.runtimeEventStore!.readRun(
       executions[0]!.session.id,
       executions[0]!.prestartedRun.runId,
@@ -260,7 +295,25 @@ test("workspace Graph host clears operator ownership after an exact execution er
       events.some((event) => event.kind === "run.terminal"),
       false,
     );
+    const view = await recoveredHost.application.toolPort.readProjection({
+      graphId,
+      rootSessionId: fixture.owner.session.id,
+    });
+    assert.equal(view.runtimeClaims[0]?.status, "interrupted");
+    const wakeId = wakeIdFor(
+      graphId,
+      `runtime-terminal:${executions[0]!.prestartedRun.runId}:interrupted`,
+    );
+    assert.equal(recoveredHost.store.getSupervisorWake(wakeId)?.status, "delivered");
+    assert.equal(
+      recoveredHost.store.getYieldInterest("yield-before-indeterminate-crash")?.state,
+      "consumed",
+    );
+    await recoveredHost.application.supervisor.notifyGraph(graphId);
+    assert.equal(operatorExecutions, 1);
+    assert.equal(rootExecutions, 1);
   } finally {
+    await recoveredHost?.close();
     await fixture.close();
   }
 });
@@ -519,6 +572,7 @@ async function createHostFixture(
 ): Promise<{
   readonly host: ReturnType<typeof createAgentGraphWorkspaceHost>;
   readonly owner: Awaited<ReturnType<SessionManager["getOrCreatePinned"]>>;
+  readonly manager: SessionManager;
   close(): Promise<void>;
 }> {
   const root = await mkdtemp(join(tmpdir(), "pico-agent-graph-host-execute-"));
@@ -552,6 +606,7 @@ async function createHostFixture(
   return {
     host,
     owner,
+    manager,
     close: async () => {
       await host.close();
       owner.release();
