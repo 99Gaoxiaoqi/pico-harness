@@ -328,7 +328,7 @@ export type RuntimePlanEvent =
 
 /**
  * Graph Mode (Lesson 17). Graph events model incrementally submitted work dependencies: each
- * add_work declares an instruction plus optional upstream record ids; the
+ * Legacy Graph v1 add_work declared an instruction plus optional upstream record ids; the
  * orchestrator dispatches each work once its inputs are ready and records the
  * output. Every graph event shares the same operationId + fingerprint CAS
  * envelope as Plan events, so the underlying store treats them identically.
