@@ -20,6 +20,7 @@ import type {
 
 export const AGENT_GRAPH_HANDOFF_MAX_RECORD_BYTES = 16 * 1024;
 export const AGENT_GRAPH_HANDOFF_MAX_TOTAL_BYTES = 48 * 1024;
+export const AGENT_GRAPH_HANDOFF_MAX_RECORDS = 64;
 
 export type AgentGraphActivationRuntimeStatus =
   | "not_started"
@@ -163,6 +164,7 @@ export interface StartOrObserveAgentGraphActivationResult {
 
 export interface ResolvedAgentGraphHandoffRecord {
   readonly recordId: string;
+  readonly status: AgentOutputEventPayload["status"];
   readonly provenance: {
     readonly graphId: string;
     readonly operatorId: string;
@@ -171,6 +173,7 @@ export interface ResolvedAgentGraphHandoffRecord {
     readonly sessionId: string;
     readonly turnId: string;
     readonly runId: string;
+    readonly invocationId: string;
     readonly eventId: string;
   };
   readonly content: string;
@@ -328,7 +331,7 @@ export class AgentGraphRuntimeAdapter implements AgentOutputCommitPort {
     const resolved: ResolvedAgentGraphHandoffRecord[] = [];
     let remaining = AGENT_GRAPH_HANDOFF_MAX_TOTAL_BYTES;
     let truncated = false;
-    for (const record of records) {
+    for (const record of records.slice(0, AGENT_GRAPH_HANDOFF_MAX_RECORDS)) {
       if (remaining <= 0) {
         truncated = true;
         break;
@@ -339,12 +342,14 @@ export class AgentGraphRuntimeAdapter implements AgentOutputCommitPort {
         );
       }
       const source = await this.options.outputLedger.readAgentOutputEvent(record.sourceEventId);
-      assertRecordSource(record, source);
+      const claim = this.options.recordStore.getActivationClaim(record.claimId);
+      assertRecordSource(record, source, claim);
       const limit = Math.min(AGENT_GRAPH_HANDOFF_MAX_RECORD_BYTES, remaining);
       const clipped = truncateUtf8(source.payload.output, limit);
       const itemTruncated = clipped.bytes < source.payload.outputBytes;
       resolved.push({
         recordId: record.recordId,
+        status: source.payload.status,
         provenance: {
           graphId: record.graphId,
           operatorId: record.operatorId,
@@ -353,6 +358,7 @@ export class AgentGraphRuntimeAdapter implements AgentOutputCommitPort {
           sessionId: record.sourceSessionId,
           turnId: record.sourceTurnId,
           runId: record.sourceRunId,
+          invocationId: source.invocationId,
           eventId: record.sourceEventId,
         },
         content: clipped.text,
@@ -630,8 +636,10 @@ function assertOutputSourceBelongsToClaim(
 function assertRecordSource(
   record: AgentGraphRecordRefRecord,
   source: CommittedAgentOutputSource | undefined,
+  claim: AgentGraphActivationClaimRecord | undefined,
 ): asserts source is CommittedAgentOutputSource {
   if (
+    !claim ||
     !source ||
     !source.committed ||
     source.partial ||
@@ -639,6 +647,14 @@ function assertRecordSource(
     source.sessionId !== record.sourceSessionId ||
     source.turnId !== record.sourceTurnId ||
     source.runId !== record.sourceRunId ||
+    claim.claimId !== record.claimId ||
+    claim.graphId !== record.graphId ||
+    claim.operatorId !== record.operatorId ||
+    claim.operatorGeneration !== record.operatorGeneration ||
+    claim.targetSessionId !== record.sourceSessionId ||
+    claim.targetTurnId !== record.sourceTurnId ||
+    claim.targetRunId !== record.sourceRunId ||
+    claim.targetInvocationId !== source.invocationId ||
     source.payload.graphId !== record.graphId ||
     source.payload.operatorId !== record.operatorId ||
     source.payload.operatorGeneration !== record.operatorGeneration ||
@@ -668,7 +684,7 @@ function renderHandoffPrompt(
   const body = records
     .map(
       (record) =>
-        `<graph-record record-id=${JSON.stringify(record.recordId)} source-run-id=${JSON.stringify(record.provenance.runId)} source-event-id=${JSON.stringify(record.provenance.eventId)} truncated=${JSON.stringify(record.truncated)}>\n${record.content}\n</graph-record>`,
+        `<graph-record record-id=${JSON.stringify(record.recordId)} status=${JSON.stringify(record.status)} source-run-id=${JSON.stringify(record.provenance.runId)} source-event-id=${JSON.stringify(record.provenance.eventId)} truncated=${JSON.stringify(record.truncated)}>\n${record.content}\n</graph-record>`,
     )
     .join("\n\n");
   return [
