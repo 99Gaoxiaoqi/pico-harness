@@ -63,11 +63,15 @@ export class SqliteAgentGraphExactRunPort implements AgentGraphExactRunPort {
     return this.options.runtimeEventStore.readRun(sessionId, runId);
   }
 
-  inspectLaunch(input: {
+  async inspectLaunch(input: {
     readonly sessionId: string;
     readonly runId: string;
-  }): Promise<AgentGraphRunLaunchState> | AgentGraphRunLaunchState {
-    return this.options.inspectLaunch?.(input) ?? { status: "unknown" };
+  }): Promise<AgentGraphRunLaunchState> {
+    const hostState = await this.options.inspectLaunch?.(input);
+    if (hostState && hostState.status !== "unknown") return hostState;
+    return isRuntimeRunLive(input.sessionId, input.runId)
+      ? { status: "running" }
+      : (hostState ?? { status: "unknown" });
   }
 
   startExactRun(input: StartExactAgentGraphRunInput): Promise<"started" | "observed"> {

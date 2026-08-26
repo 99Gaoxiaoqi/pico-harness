@@ -129,7 +129,7 @@ test("Graph runtime reattaches after the deterministic input was committed", asy
 
 test("Graph runtime only observes an exact Run that is live in this host", async () => {
   const fixture = createFixture();
-  fixture.runPort.events.push(runStartedEvent(CLAIM));
+  fixture.runPort.events.push(runStartedEvent(CLAIM), dispatchEvent(CLAIM, "provider"));
   fixture.runPort.live = true;
 
   const result = await fixture.adapter.startOrObserveActivation(activationInput());
@@ -157,15 +157,14 @@ test("Graph runtime lets terminal host state override nonterminal durable projec
   assert.equal((await missingTerminal.adapter.projectActivation(CLAIM)).status, "interrupted");
 });
 
-test("Graph runtime fails closed after a provider or tool dispatch", async () => {
+test("Graph runtime projects a non-live provider or tool dispatch as interrupted without replay", async () => {
   for (const dispatch of ["provider", "tool"] as const) {
     const fixture = createFixture();
     fixture.runPort.events.push(runStartedEvent(CLAIM), dispatchEvent(CLAIM, dispatch));
 
-    await assert.rejects(
-      fixture.adapter.startOrObserveActivation(activationInput()),
-      new RegExp(`${dispatch}_dispatch_recorded.*${dispatch}-dispatch-1`, "u"),
-    );
+    const result = await fixture.adapter.startOrObserveActivation(activationInput());
+    assert.equal(result.disposition, "observed");
+    assert.equal(result.projection.status, "interrupted");
     assert.equal(fixture.runPort.startCalls.length, 0);
     assert.equal(fixture.runPort.providerDispatches, 0);
   }
@@ -402,7 +401,9 @@ class FakeRunPort implements AgentGraphExactRunPort {
   }
 
   inspectLaunch() {
-    return this.launch;
+    return this.launch.status === "unknown" && this.live
+      ? { status: "running" as const }
+      : this.launch;
   }
 
   async startExactRun(input: StartExactAgentGraphRunInput) {
