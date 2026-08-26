@@ -473,7 +473,7 @@ export function createProductionRuntimeServices(
             runtimePort: createEngineRuntimePort(),
           },
           execute: async (input) => {
-            workspaceRuntime.startExactRun(
+            workspaceRuntime.reattachExactRun(
               input.prestartedRun.runId,
               {
                 description: `Graph ${input.binding.kind} activation ${input.claimId}`,
