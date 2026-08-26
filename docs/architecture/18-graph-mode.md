@@ -103,7 +103,7 @@ Graph = {
 - finish 后，已持久化的 Claim 和已经启动的 RuntimeRun 仍可被观察、停止和投影，不能被抹掉；
 - SQLite 约束同一 root Session 同时最多一个 open Graph；当前应用服务只创建 epoch 1。
 
-`selectedRecordIds` 是根 Supervisor 在 finish 时声明的最终结果集合。当前领域层保证非空字符串与去重，但尚未对“所选 ID 必须已经存在于 RecordRef 表”做强校验，调用方应从 `view_agent_graph` 返回值中精确选择。
+`selectedRecordIds` 是根 Supervisor 在 finish 时声明的最终结果集合。领域层在获得权威 RecordRef 集合时校验存在性与归属；SQLite store 则在提交 finish revision 的同一 `BEGIN IMMEDIATE` 事务内强制所有选中 ID 已存在且属于当前 Graph，未知或跨图引用不会推进 head revision。
 
 ### 4.2 ScheduleRevision：唯一可写的调度历史
 
@@ -151,7 +151,7 @@ Operator = {
 
 关键点：
 
-- profile 是声明时冻结并持久化的快照；当前 host 已消费 `model` 和 `tools`，但 `permissionPolicy` 与 `systemPromptVersion` 尚未完整接入生产 Runtime 的权限/提示恢复，不能把“已保存”理解为“已全部生效”；
+- profile 是声明时冻结并持久化的快照；production host 已消费 `model` 和 `tools`。`permissionPolicy` 目前由模型随 schedule 提交，不是可信授权源，因此 detached Operator 强制使用可交互、不提权的 `default` 边界；`systemPromptVersion` 尚未恢复自定义提示，不能把“已保存”理解为“已全部生效”；
 - `generation` 为替换同一逻辑角色保留代际边界，stop 可精确落到某一代；
 - workspace policy 也是不可变调度输入；默认 host 仅能解析 `shared`，`isolated-worktree` 必须由宿主提供 resolver；
 - 当前 `add` 要求 Operator ID 尚不存在，因此“向既有 Operator 追加 follow-up Intent”尚未开放。Reconciler 已按 Operator 分组并保留同 Operator 串行约束，为后续扩展留出边界。
@@ -297,6 +297,8 @@ finish fence 的精确定义是“禁止 fresh Claim”。已经存在的 Claim 
 
 `SqliteAgentGraphExactRunPort` 只做三件事：验证 Claim 身份、原子 admit/observe 一个 `run.started`、把已准入 Run 交给宿主组装真正的 AgentRuntime。它本身不创建 provider 或工具。
 
+production 将 exact RuntimeRun 安装为 `WorkspaceTaskRuntime` 中的 detached Run。如果宿主在 AgentRuntime attach 之前失败，canonical ledger 仍可能是 `attachable`；`reattachExactRun` 允许身份完全相同的 failed/cancelled workspace 记录以更高 version 重装一次 executor，而 active/succeeded 重放仍只观察。执行代际栅栏防止旧 executor 在重附着后回写新状态。
+
 对同一 Claim，恢复分类为：
 
 | Runtime ledger 事实                                        | 分类                              | 行为                                        |
@@ -322,7 +324,7 @@ finish fence 的精确定义是“禁止 fresh Claim”。已经存在的 Claim 
 - 创建中途失败会按相同边界清理，不留下半启动 application；
 - `close()` 不重写持久 Wake、Attempt、Claim 或 RuntimeEvent，下一进程仍能恢复。
 
-`createAgentGraphWorkspaceHost` 已提供 control store、exact run、output ledger、root wake 与工具 binding 的 production-neutral 组合。宿主的 execute callback 必须“安装 detached execution 后立即返回”，不能让 reconcile 工具栈等待整个模型 Run。
+`createAgentGraphWorkspaceHost` 提供 control store、exact run、output ledger、root wake 与工具 binding 的 production-neutral 组合。production daemon 通过 `WorkspaceRuntimeService.createAgentGraphApplicationService` 为每个 workspace 持有它：普通 Graph 根 Run 注入当前 Turn/Run 身份，Operator 与 root wake 使用 detached exact Run，模型路由、Plugin/MCP、Desktop 审批与 AskUser 都复用同一生产装配。execute callback “安装 detached execution 后立即返回”，不会让 reconcile 工具栈等待整个模型 Run。
 
 ## 9. 失败语义
 
@@ -354,13 +356,12 @@ finish fence 的精确定义是“禁止 fresh Claim”。已经存在的 Claim 
 
 ## 11. 当前实现限制与后续验证
 
-- Graph application 及 workspace 生命周期已可注入，但在本文对应基线中，production host 的完整 daemon 执行接线仍需最终集成验证；
+- Graph application 已接入 production daemon 的 workspace 生命周期；当前有确定性 production wiring 集成测试，真实模型闭环仍受 `RUN_LLM_E2E` 门控；
 - `isolated-worktree` 已进入领域和工具 schema，production 默认 workspace resolver 仅支持 `shared`；宿主没有显式提供 resolver 时会 fail closed，不能视为已交付；
-- `profileSnapshot.permissionPolicy` 与 `systemPromptVersion` 已持久化；workspace host 已映射 model/tools，但 production 最终接线以及完整权限与 system prompt 恢复仍是发布缺口；
+- `profileSnapshot.permissionPolicy` 与 `systemPromptVersion` 已持久化；production 已映射 model/tools，但在可信 profile catalog 出现前不使用模型提交的 policy 提权，system prompt 自定义恢复仍是发布缺口；
 - Runtime bridge 尚未提供完整 in-flight/failed readiness facts；
 - `artifact` / `evidence` RecordRef 是领域预留，当前 handoff 只接受 `agent-output`；
-- finish 的 `selectedRecordIds` 尚未做“必须已存在”的控制面 fence；
-- 已有确定性集成测试覆盖核心、store、跨进程 CAS、reconciler、exact Run、output、yield/wake 和 workspace 生命周期；尚无 Graph v2 真实模型 E2E，也没有用独立子进程逐一 kill/reopen 验证全部崩溃窗口。
+- 已有确定性集成测试覆盖核心、store、跨进程 CAS、reconciler、exact Run/reattach、production wiring、output、yield/wake 和 workspace 生命周期；Graph v2 真实模型 E2E 尚未在当前环境实际执行，也没有用独立子进程逐一 kill/reopen 验证全部崩溃窗口。
 
 ## 12. 代码索引
 
