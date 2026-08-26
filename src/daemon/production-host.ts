@@ -1549,8 +1549,13 @@ function timelineItem(event: DesktopReporterEvent): JsonObject {
     safePayload["currentAction"],
     safePayload["summary"],
   );
+  const explicitId = firstString(safePayload["timelineItemId"]);
   return jsonObject({
-    ...(thinkingStatus ? { id: thinkingStatusId(event.runId, safePayload["turn"]) } : {}),
+    ...(thinkingStatus
+      ? { id: thinkingStatusId(event.runId, safePayload["turn"]) }
+      : explicitId
+        ? { id: explicitId }
+        : {}),
     kind,
     title: timelineTitle(event.type, safePayload),
     ...(detail ? { detail } : {}),
@@ -1570,7 +1575,10 @@ function safeTimelinePayload(
   payload: Readonly<Record<string, unknown>>,
 ): Readonly<Record<string, unknown>> {
   if (type === "tool.completed") {
-    return isJsonObject(payload["result"]) ? { result: payload["result"] } : {};
+    const timelineItemId = firstString(payload["timelineItemId"]);
+    return isJsonObject(payload["result"])
+      ? { result: payload["result"], ...(timelineItemId ? { timelineItemId } : {}) }
+      : {};
   }
   if (type === "subagent.trace" && payload["type"] === "tool.completed") {
     return {

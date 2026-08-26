@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -10,6 +11,8 @@ import { publishDesktopReporterEvent } from "../../src/daemon/production-host.js
 import type { WorkspaceRuntimeService } from "../../src/daemon/workspace-runtime-service.js";
 import { AgentEngine } from "../../src/engine/loop.js";
 import { Session } from "../../src/engine/session.js";
+import { createCanonicalTranscriptToolStart } from "../../src/engine/transcript-tool-start.js";
+import { createToolResultEnvelope } from "../../src/engine/tool-result-contract.js";
 import { ToolRegistry } from "../../src/tools/registry-impl.js";
 
 test("Desktop run announces model inference before a provider without reasoning content", async (context) => {
@@ -125,6 +128,66 @@ test("Desktop host uses one stable timeline identity for the inference lifecycle
     [{ title: "Pico 正在推理", state: "active" }],
   );
   assert.deepEqual(applyTimelineNotification(activeTimeline, thinkingNotifications[1]!), []);
+});
+
+test("Desktop host replaces an active tool timeline item when the tool completes", () => {
+  const published: RuntimeNotification[] = [];
+  const service = {
+    publishDesktopNotification: (notification: RuntimeNotification) => published.push(notification),
+  } as unknown as WorkspaceRuntimeService;
+  let resourceVersion = 0;
+  const reporter = new DesktopReporter({
+    runId: "run-tool-host",
+    sessionId: "session-tool-host",
+    publish: (event) =>
+      publishDesktopReporterEvent(service, "/workspace", event, () => ++resourceVersion),
+  });
+  const start = createCanonicalTranscriptToolStart({
+    sessionId: "session-tool-host",
+    runId: "run-tool-host",
+    turnId: "turn-tool-host",
+    callIndex: 0,
+    sequence: 1,
+    createdAt: 1,
+    toolCall: { id: "provider-call-1", name: "read_file", arguments: "{}" },
+  });
+  const result = createToolResultEnvelope({
+    toolCallId: "provider-call-1",
+    toolName: "read_file",
+    status: "succeeded",
+    body: {
+      storage: "inline",
+      content: "ok",
+      sizeBytes: 2,
+      sha256: createHash("sha256").update("ok").digest("hex"),
+    },
+    projection: {
+      version: 1,
+      mode: "full",
+      text: "ok",
+      strategy: "test",
+      truncated: false,
+    },
+  });
+
+  reporter.onToolCall("read_file", "{}", "provider-call-1", start);
+  reporter.onToolResult(result);
+
+  const toolNotifications = published.filter(
+    (notification) =>
+      notification.topic === "run.timeline" &&
+      (notification.payload as { readonly item?: Readonly<Record<string, unknown>> }).item?.kind ===
+        "tool",
+  );
+  assert.equal(toolNotifications.length, 2);
+  const timeline = toolNotifications.reduce<ReturnType<typeof applyTimelineNotification>>(
+    (current, notification) => applyTimelineNotification(current, notification),
+    [],
+  );
+  assert.deepEqual(
+    timeline.map((item) => ({ id: item.id, title: item.title, state: item.state })),
+    [{ id: `tool:${start.toolCallId}`, title: "完成 read_file", state: "done" }],
+  );
 });
 
 test("Desktop labels provider-visible reasoning as a summary", () => {

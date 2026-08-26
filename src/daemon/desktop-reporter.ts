@@ -28,6 +28,7 @@ export interface DesktopReporterOptions {
 /** Projects existing Reporter callbacks into an auditable desktop timeline. */
 export class DesktopReporter implements Reporter {
   private readonly now: () => number;
+  private readonly toolTimelineItemIds = new Map<string, string>();
   private resourceVersion = 0;
   private turn = 0;
   private thinkingActive = false;
@@ -66,12 +67,17 @@ export class DesktopReporter implements Reporter {
   ): void {
     this.onThinkingEnd();
     const bounded = boundedText(args);
+    const timelineItemId = durableStart
+      ? `tool:${durableStart.toolCallId}`
+      : `tool:live:${this.options.runId}:${this.turn}:${providerCallId}`;
+    this.toolTimelineItemIds.set(providerCallId, timelineItemId);
     this.emit("tool.started", {
       toolName,
       args: bounded.value,
       truncated: bounded.truncated,
       turn: this.turn,
       providerCallId,
+      timelineItemId,
       ...(durableStart
         ? {
             canonicalTranscriptStart: {
@@ -86,7 +92,9 @@ export class DesktopReporter implements Reporter {
   }
 
   onToolResult(result: ToolResultEnvelope): void {
-    this.emit("tool.completed", { result });
+    const timelineItemId = this.toolTimelineItemIds.get(result.toolCallId);
+    this.toolTimelineItemIds.delete(result.toolCallId);
+    this.emit("tool.completed", { result, ...(timelineItemId ? { timelineItemId } : {}) });
   }
 
   onToolOutput(
@@ -162,11 +170,13 @@ export class DesktopReporter implements Reporter {
 
   onFinish(): void {
     this.onThinkingEnd();
+    this.toolTimelineItemIds.clear();
     this.emit("run.finished", {});
   }
 
   onInterrupted(): void {
     this.onThinkingEnd();
+    this.toolTimelineItemIds.clear();
     this.emit("run.interrupted", { turn: this.turn });
   }
 
