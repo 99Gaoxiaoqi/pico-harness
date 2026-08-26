@@ -13,11 +13,14 @@ import {
   AGENT_GRAPH_MAX_JSON_BYTES,
   AGENT_GRAPH_MAX_PROFILE_TOOLS,
   AGENT_GRAPH_MAX_SELECTED_RECORDS,
+  AGENT_GRAPH_MAX_VIEW_RECORDS,
   createAgentGraphSupervisorTools,
   type AgentGraphRootToolContext,
   type AgentGraphSupervisorProjection,
+  type AgentGraphSupervisorView,
   type AgentGraphSupervisorToolPort,
   type CommitAgentGraphUpdateInput,
+  type ReadAgentGraphProjectionInput,
   type RegisterAgentGraphYieldInput,
 } from "../../src/tools/agent-graph-tools.js";
 
@@ -49,9 +52,15 @@ const EMPTY_PROJECTION: AgentGraphSupervisorProjection = {
   records: [],
 };
 
+const EMPTY_VIEW: AgentGraphSupervisorView = {
+  ...EMPTY_PROJECTION,
+  runtimeClaims: [],
+  results: { records: [], totalBytes: 0, truncated: false },
+};
+
 class FakePort implements AgentGraphSupervisorToolPort {
   readonly updates: CommitAgentGraphUpdateInput[] = [];
-  readonly reads: { graphId: string; rootSessionId: string }[] = [];
+  readonly reads: ReadAgentGraphProjectionInput[] = [];
   readonly yields: RegisterAgentGraphYieldInput[] = [];
 
   async commitUpdate(input: CommitAgentGraphUpdateInput) {
@@ -83,9 +92,9 @@ class FakePort implements AgentGraphSupervisorToolPort {
     };
   }
 
-  async readProjection(input: { graphId: string; rootSessionId: string }) {
+  async readProjection(input: ReadAgentGraphProjectionInput) {
     this.reads.push(input);
-    return EMPTY_PROJECTION;
+    return EMPTY_VIEW;
   }
 
   async registerYield(input: RegisterAgentGraphYieldInput) {
@@ -678,8 +687,35 @@ test("all Supervisor tools reject root identities with leading or trailing white
 test("view_agent_graph returns the application projection and yield_agent_graph forwards exact root/run/tool identity", async () => {
   const { port, byName } = fixture();
   const viewed = JSON.parse(await byName.get("view_agent_graph")!.execute("{}"));
-  assert.deepEqual(viewed, EMPTY_PROJECTION);
+  assert.deepEqual(viewed, EMPTY_VIEW);
   assert.deepEqual(port.reads, [{ graphId: ROOT.graphId, rootSessionId: ROOT.rootSessionId }]);
+
+  await byName
+    .get("view_agent_graph")!
+    .execute(JSON.stringify({ record_ids: ["record-1", "record-2"] }));
+  assert.deepEqual(port.reads[1], {
+    graphId: ROOT.graphId,
+    rootSessionId: ROOT.rootSessionId,
+    recordIds: ["record-1", "record-2"],
+  });
+
+  await assert.rejects(
+    byName
+      .get("view_agent_graph")!
+      .execute(JSON.stringify({ record_ids: ["record-1", "record-1"] })),
+    /record_ids 不得包含重复项/u,
+  );
+  await assert.rejects(
+    byName.get("view_agent_graph")!.execute(
+      JSON.stringify({
+        record_ids: Array.from(
+          { length: AGENT_GRAPH_MAX_VIEW_RECORDS + 1 },
+          (_, index) => `record-${index}`,
+        ),
+      }),
+    ),
+    new RegExp(`record_ids 不得超过 ${AGENT_GRAPH_MAX_VIEW_RECORDS} 项`, "u"),
+  );
 
   const yielded = JSON.parse(
     await byName.get("yield_agent_graph")!.execute("{}", {
