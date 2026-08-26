@@ -15,10 +15,7 @@ import {
 } from "../../src/storage/runtime-event-store-contracts.js";
 import { operationalDatabasePath } from "../../src/storage/sqlite/sqlite-database.js";
 import { SESSIONS_SCOPE } from "../../src/storage/sqlite/sessions-scope.js";
-import {
-  readExistingSqliteMaterializedTranscript,
-  SqliteRuntimeEventStore,
-} from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import { prepareWorkspaceSqliteStorageSync } from "../../src/storage/sqlite/sqlite-workspace-storage.js";
 
 interface Fixture {
@@ -128,7 +125,7 @@ function toolResult(
   };
 }
 
-test("EventLog migration installs every additive foundation table", () => {
+test("EventLog migration installs current projection tables without the retired transcript copy", () => {
   const value = fixture("pico-eventlog-schema-");
   try {
     const db = new DatabaseSync(operationalDatabasePath(value.storage));
@@ -144,8 +141,6 @@ test("EventLog migration installs every additive foundation table", () => {
         "runtime_partial_segments",
         "runtime_tool_operations",
         "runtime_tool_journal",
-        "runtime_transcript_records",
-        "runtime_transcript_chunks",
         "runtime_transcript_projection_state",
         "runtime_transcript_item_versions",
         "runtime_transcript_changes",
@@ -155,11 +150,13 @@ test("EventLog migration installs every additive foundation table", () => {
       ]) {
         assert.ok(names.has(name), `${name} must exist`);
       }
+      assert.equal(names.has("runtime_transcript_records"), false);
+      assert.equal(names.has("runtime_transcript_chunks"), false);
       assert.equal(
         db
           .prepare("SELECT version FROM operational_schema_migrations WHERE scope = 'sessions'")
           .get()?.version,
-        6,
+        7,
       );
     } finally {
       db.close();
@@ -197,6 +194,80 @@ test("sessions v5 to v6 migration creates a self-contained pre-upgrade backup", 
           )
           .get(),
         undefined,
+      );
+    } finally {
+      backup.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("sessions v6 to v7 migration backs up then removes the retired transcript copy", () => {
+  const root = mkdtempSync(join(tmpdir(), "pico-eventlog-v7-backup-"));
+  const storage = join(root, "storage");
+  const v6Scope = {
+    ...SESSIONS_SCOPE,
+    migrations: new Map([...SESSIONS_SCOPE.migrations].filter(([version]) => version <= 6)),
+  };
+  try {
+    const preparation = prepareWorkspaceSqliteStorageSync(storage, [v6Scope]);
+    preparation.lease.database
+      .prepare(
+        `INSERT INTO sessions (session_id, work_dir, created_at, updated_at)
+         VALUES ('legacy-session', '/workspace', '2026', '2026')`,
+      )
+      .run();
+    preparation.lease.database
+      .prepare(
+        `INSERT INTO runtime_transcript_records
+         VALUES ('legacy-record', 'legacy-session', 'event-1', 1, 'message', '{}', '2026')`,
+      )
+      .run();
+    preparation.lease.database
+      .prepare(
+        `INSERT INTO runtime_transcript_chunks
+         VALUES ('legacy-record', 0, 'legacy', 6)`,
+      )
+      .run();
+    preparation.lease.release();
+
+    prepareWorkspaceSqliteStorageSync(storage, [SESSIONS_SCOPE]).lease.release();
+
+    const current = new DatabaseSync(operationalDatabasePath(storage), { readOnly: true });
+    try {
+      const names = new Set(
+        (
+          current.prepare("SELECT name FROM sqlite_schema WHERE type = 'table'").all() as Array<{
+            name: string;
+          }>
+        ).map(({ name }) => name),
+      );
+      assert.equal(names.has("runtime_transcript_records"), false);
+      assert.equal(names.has("runtime_transcript_chunks"), false);
+      assert.equal(
+        current
+          .prepare("SELECT version FROM operational_schema_migrations WHERE scope = 'sessions'")
+          .get()?.version,
+        7,
+      );
+    } finally {
+      current.close();
+    }
+
+    const backupPath = join(storage, "pico.sqlite.sessions-v6.bak");
+    assert.equal(existsSync(backupPath), true);
+    const backup = new DatabaseSync(backupPath, { readOnly: true });
+    try {
+      assert.equal(
+        backup.prepare("SELECT text_value FROM runtime_transcript_chunks").get()?.text_value,
+        "legacy",
+      );
+      assert.equal(
+        backup
+          .prepare("SELECT version FROM operational_schema_migrations WHERE scope = 'sessions'")
+          .get()?.version,
+        6,
       );
     } finally {
       backup.close();
@@ -456,178 +527,6 @@ test("tool T1/T2 atomically maintain canonical events, journal, and CAS projecti
     } finally {
       db.close();
     }
-  } finally {
-    cleanup(value);
-  }
-});
-
-test("transcript pages freeze throughSequence and resume by sequence/chunk/byte offset", async () => {
-  const value = fixture("pico-eventlog-transcript-");
-  try {
-    const sessionId = "transcript-session";
-    const ownerFence = await initializeAndFence(value, sessionId);
-    await value.store.appendBatch(
-      ["e01", "e02", "e03"].map((eventId, index) => ({
-        ...started(eventId, sessionId, value.workspace),
-        runId: `source-run-${index + 1}`,
-      })),
-      { ownerFence },
-    );
-    for (const [index, text] of ["abcdef", "gh", "ij"].entries()) {
-      await value.store.appendTranscriptRecord({
-        recordId: `record-${index + 1}`,
-        sessionId,
-        sourceEventId: `e0${index + 1}`,
-        sourceSequence: index + 1,
-        kind: "message",
-        payload: { index },
-        chunks: [text],
-        ownerFence,
-      });
-    }
-    const first = await value.store.readTranscriptPage({
-      sessionId,
-      direction: "forward",
-      maxBytes: 3,
-    });
-    assert.equal(first.throughSequence, 3);
-    assert.deepEqual(
-      first.items.map(({ text }) => text),
-      ["abc"],
-    );
-    assert.deepEqual(first.nextCursor, { sequence: 1, chunkIndex: 0, byteOffset: 3 });
-
-    await value.store.append(
-      { ...started("e04", sessionId, value.workspace), runId: "source-run-4" },
-      { ownerFence },
-    );
-    await value.store.appendTranscriptRecord({
-      recordId: "record-4",
-      sessionId,
-      sourceEventId: "e04",
-      sourceSequence: 4,
-      kind: "message",
-      payload: { index: 3 },
-      chunks: ["late"],
-      ownerFence,
-    });
-    const rest = await value.store.readTranscriptPage({
-      sessionId,
-      throughSequence: first.throughSequence,
-      direction: "forward",
-      cursor: first.nextCursor,
-      maxBytes: 32,
-    });
-    assert.deepEqual(
-      rest.items.map(({ text }) => text),
-      ["def", "gh", "ij"],
-    );
-    assert.equal(rest.nextCursor, undefined);
-
-    const backward = await value.store.readTranscriptPage({
-      sessionId,
-      throughSequence: 3,
-      direction: "backward",
-      maxBytes: 2,
-    });
-    assert.deepEqual(
-      backward.items.map(({ text }) => text),
-      ["ij"],
-    );
-    assert.deepEqual(backward.nextCursor, { sequence: 2, chunkIndex: 0, byteOffset: 2 });
-  } finally {
-    cleanup(value);
-  }
-});
-
-test("canonical append atomically materializes fixed-water transcript facts", async () => {
-  const value = fixture("pico-eventlog-transcript-materialized-");
-  try {
-    const sessionId = "materialized-session";
-    const ownerFence = await initializeAndFence(value, sessionId);
-    await value.store.appendBatch(
-      [
-        message("e01", sessionId, `one-${"😀".repeat(40)}`),
-        message("e02", sessionId, `two-${"😀".repeat(40)}`),
-        message("e03", sessionId, `three-${"😀".repeat(40)}`),
-      ],
-      { ownerFence },
-    );
-    const first = await value.store.readTranscriptPage({
-      sessionId,
-      direction: "backward",
-      maxBytes: 31,
-    });
-    assert.equal(first.revisionSequence, 3);
-    assert.equal(first.throughSequence, 3);
-
-    await value.store.append(message("e04", sessionId, "late"), { ownerFence });
-    const textByRecord = new Map<string, string>();
-    let page = first;
-    for (;;) {
-      for (const item of page.items) {
-        textByRecord.set(item.recordId, item.text + (textByRecord.get(item.recordId) ?? ""));
-      }
-      if (!page.nextCursor) break;
-      page = await value.store.readTranscriptPage({
-        sessionId,
-        throughSequence: first.throughSequence,
-        direction: "backward",
-        cursor: page.nextCursor,
-        maxBytes: 31,
-      });
-      assert.equal(page.throughSequence, 3);
-    }
-    assert.deepEqual(
-      [...textByRecord.values()]
-        .map((json) => JSON.parse(json) as RuntimeEvent)
-        .map((event) => event.eventId)
-        .sort(),
-      ["e01", "e02", "e03"],
-    );
-    const replay = await readExistingSqliteMaterializedTranscript({
-      storageRoot: value.storage,
-      sessionId,
-      throughSequence: 3,
-      pageBytes: 31,
-    });
-    assert.deepEqual(
-      replay?.entries.map(({ event }) => event.eventId),
-      ["e01", "e02", "e03"],
-    );
-    assert.equal(replay?.throughSequence, 3);
-    assert.equal(replay?.revisionSequence, 4);
-    const db = new DatabaseSync(operationalDatabasePath(value.storage));
-    try {
-      assert.equal(
-        db.prepare("SELECT COUNT(*) AS count FROM runtime_transcript_records").get()?.count,
-        4,
-      );
-      assert.deepEqual(
-        JSON.parse(
-          String(
-            db
-              .prepare(
-                "SELECT payload_json FROM runtime_transcript_records WHERE source_event_id = 'e01'",
-              )
-              .get()?.payload_json,
-          ),
-        ),
-        { codec: "runtime-event-json-v1" },
-      );
-    } finally {
-      db.close();
-    }
-    await assert.rejects(
-      value.store.readTranscriptPage({
-        sessionId,
-        throughSequence: 3,
-        direction: "backward",
-        cursor: { sequence: 2, chunkIndex: 99, byteOffset: 0 },
-        maxBytes: 31,
-      }),
-      RuntimeEventStoreIntegrityError,
-    );
   } finally {
     cleanup(value);
   }

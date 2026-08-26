@@ -476,20 +476,22 @@ function readStorageStatusLocked(
     ]),
   ]);
   addGroupedBytes(database, breakdowns, "transcriptBytes", [
-    groupedTextQuery("runtime_transcript_records", "session_id", [
-      "record_id",
+    groupedTextQuery("runtime_transcript_projection_state", "session_id", [
       "session_id",
-      "source_event_id",
-      "kind",
-      "payload_json",
-      "created_at",
+      "history_epoch",
     ]),
-    `SELECT records.session_id AS session_id,
-            COALESCE(SUM(${textBytes("chunks.record_id")} + ${textBytes("chunks.text_value")}), 0)
-              AS logical_bytes
-     FROM runtime_transcript_chunks AS chunks
-     JOIN runtime_transcript_records AS records ON records.record_id = chunks.record_id
-     GROUP BY records.session_id`,
+    groupedTextQuery("runtime_transcript_item_versions", "session_id", [
+      "session_id",
+      "item_id",
+      "payload_json",
+      "payload_digest",
+    ]),
+    groupedTextQuery("runtime_transcript_changes", "session_id", [
+      "session_id",
+      "op",
+      "item_id",
+      "payload_json",
+    ]),
   ]);
   addGroupedBytes(database, breakdowns, "checkpointAndMetadataBytes", [
     groupedTextQuery("runtime_checkpoint_projection", "session_id", [

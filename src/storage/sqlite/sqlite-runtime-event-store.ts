@@ -9,7 +9,6 @@ import {
   normalizeSessionRuntimeStateWritePatch,
   type SessionRuntimeStateWritePatch,
 } from "../../engine/session-runtime.js";
-import { RUNTIME_TRANSCRIPT_READ_MODEL_EVENT_KINDS } from "../../engine/session-runtime-projection.js";
 import {
   createInitialSessionSummaryFold,
   finalizeSessionSummary,
@@ -74,8 +73,6 @@ import {
   type RuntimeSessionProjectionDelta,
   type RuntimeSessionProjectionSnapshot,
   type RuntimeToolOperation,
-  type RuntimeTranscriptPage,
-  type RuntimeTranscriptPageOptions,
   type RuntimeTranscriptAdvancePage,
   type RuntimeTranscriptAdvancePageOptions,
   type RuntimeTranscriptProjectedItem,
@@ -84,7 +81,6 @@ import {
   type RuntimeTranscriptProjectionPage,
   type RuntimeTranscriptProjectionPageOptions,
   type RuntimeTranscriptProjectionWatermark,
-  type RuntimeTranscriptRecordInput,
   type SettleRuntimeToolOperationInput,
   type SettleRuntimeToolOperationResult,
   type StartRuntimeContinuationInput,
@@ -94,10 +90,6 @@ import {
 import { operationalDatabasePath, type OperationalDatabaseLease } from "./sqlite-database.js";
 import { logger } from "../../observability/logger.js";
 import { prepareCurrentWorkspaceSqliteStorageSync } from "./workspace-scopes.js";
-
-const MATERIALIZED_TRANSCRIPT_EVENT_KINDS = new Set<string>(
-  RUNTIME_TRANSCRIPT_READ_MODEL_EVENT_KINDS,
-);
 
 /** Client must discard its cached transcript and request a fresh projection page. */
 export class RuntimeTranscriptResetRequiredError extends RuntimeEventStoreIntegrityError {
@@ -571,73 +563,6 @@ export class SqliteRuntimeEventStore {
         operation: this.readToolOperationLocked(event.sessionId, event.runId, input.toolCallId)!,
       };
     });
-  }
-
-  async appendTranscriptRecord(input: RuntimeTranscriptRecordInput): Promise<boolean> {
-    return this.write(() => {
-      assertNonEmpty(input.recordId, "transcript recordId");
-      assertNonEmpty(input.sourceEventId, "transcript sourceEventId");
-      assertNonEmpty(input.kind, "transcript kind");
-      if (input.chunks.length === 0) throw new Error("Runtime transcript record requires chunks");
-      assertPositiveInteger(input.sourceSequence, "transcript sourceSequence");
-      this.requireSessionAppendContext(input.sessionId);
-      this.assertOwnerFenceLocked([input.sessionId], input.ownerFence);
-      const source = this.readEventRow(input.sourceEventId);
-      if (
-        !source ||
-        source.session_id !== input.sessionId ||
-        source.event_seq !== input.sourceSequence
-      ) {
-        throw new RuntimeEventStoreIntegrityError(
-          `Runtime transcript record ${input.recordId} source event is not at the declared sequence`,
-        );
-      }
-      const existing = this.readTranscriptRecordLocked(input.recordId);
-      const payloadJson = canonicalJson(input.payload);
-      if (existing) {
-        if (
-          existing.sessionId !== input.sessionId ||
-          existing.sourceEventId !== input.sourceEventId ||
-          existing.sequence !== input.sourceSequence ||
-          existing.kind !== input.kind ||
-          canonicalJson(existing.payload) !== payloadJson ||
-          !isDeepStrictEqual(existing.chunks, input.chunks)
-        ) {
-          throw new RuntimeEventStoreIntegrityError(
-            `Runtime transcript record ${input.recordId} has conflicting payload`,
-          );
-        }
-        return false;
-      }
-      const at = input.at ?? new Date().toISOString();
-      this.lease.database
-        .prepare(
-          `INSERT INTO runtime_transcript_records (
-             record_id, session_id, source_event_id, source_sequence, kind, payload_json, created_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          input.recordId,
-          input.sessionId,
-          input.sourceEventId,
-          input.sourceSequence,
-          input.kind,
-          payloadJson,
-          at,
-        );
-      const insertChunk = this.lease.database.prepare(
-        `INSERT INTO runtime_transcript_chunks (record_id, chunk_index, text_value, byte_length)
-         VALUES (?, ?, ?, ?)`,
-      );
-      input.chunks.forEach((chunk, chunkIndex) => {
-        insertChunk.run(input.recordId, chunkIndex, chunk, Buffer.byteLength(chunk));
-      });
-      return true;
-    });
-  }
-
-  async readTranscriptPage(options: RuntimeTranscriptPageOptions): Promise<RuntimeTranscriptPage> {
-    return this.read(() => this.readTranscriptPageLocked(options));
   }
 
   /** Reads a stable transcript item-version snapshot at one immutable watermark. */
@@ -2644,15 +2569,6 @@ export class SqliteRuntimeEventStore {
          partial, tx_id, tool_call_id, provider_call_id, operation_id, payload_json, at, committed_at
        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
-    const insertTranscriptRecord = this.lease.database.prepare(
-      `INSERT INTO runtime_transcript_records (
-         record_id, session_id, source_event_id, source_sequence, kind, payload_json, created_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    );
-    const insertTranscriptChunk = this.lease.database.prepare(
-      `INSERT INTO runtime_transcript_chunks (record_id, chunk_index, text_value, byte_length)
-       VALUES (?, 0, ?, ?)`,
-    );
     // run.terminal 是单 run 唯一 immutable tail；精确幂等重放已在上方 existing
     // 分支放行，任何新的 eventId 都必须在未封口状态写入。
     const runSealCache = new Map<string, boolean>();
@@ -2702,22 +2618,6 @@ export class SqliteRuntimeEventStore {
         event.at,
         event.at,
       );
-      // Transcript materialization is part of the canonical fact transaction.  The
-      // projection stores the canonical RuntimeEvent bytes (not a mutable UI card),
-      // so cross-fact folds such as tool start/result remain replayable and factual.
-      if (MATERIALIZED_TRANSCRIPT_EVENT_KINDS.has(event.kind)) {
-        const recordId = `runtime-event:${event.eventId}`;
-        insertTranscriptRecord.run(
-          recordId,
-          event.sessionId,
-          event.eventId,
-          sequence,
-          event.kind,
-          canonicalJson({ codec: "runtime-event-json-v1" }),
-          event.at,
-        );
-        insertTranscriptChunk.run(recordId, payloadJson, Buffer.byteLength(payloadJson, "utf8"));
-      }
       context.appendedCount += 1;
       context.appendedBytes += payloadJson.length;
       if (event.kind === "run.terminal") {
@@ -3050,206 +2950,6 @@ export class SqliteRuntimeEventStore {
     return row ? toolOperationFromRow(row as Record<string, unknown>) : undefined;
   }
 
-  private readTranscriptRecordLocked(recordId: string): TranscriptRecordWithChunks | undefined {
-    const row = this.lease.database
-      .prepare(
-        `SELECT record_id, session_id, source_event_id, source_sequence, kind, payload_json, created_at
-         FROM runtime_transcript_records WHERE record_id = ?`,
-      )
-      .get(recordId) as Record<string, unknown> | undefined;
-    if (!row) return undefined;
-    const chunks = this.lease.database
-      .prepare(
-        "SELECT text_value FROM runtime_transcript_chunks WHERE record_id = ? ORDER BY chunk_index ASC",
-      )
-      .all(recordId)
-      .map((chunk) => requireString(chunk["text_value"], "transcript_chunks.text_value"));
-    return {
-      recordId: requireString(row["record_id"], "transcript_records.record_id"),
-      sessionId: requireString(row["session_id"], "transcript_records.session_id"),
-      sourceEventId: requireString(row["source_event_id"], "transcript_records.source_event_id"),
-      sequence: requirePositiveInteger(
-        row["source_sequence"],
-        "transcript_records.source_sequence",
-      ),
-      kind: requireString(row["kind"], "transcript_records.kind"),
-      payload: decodeProjectionJson(row["payload_json"], "transcript_records.payload_json"),
-      chunks,
-      at: requireString(row["created_at"], "transcript_records.created_at"),
-    };
-  }
-
-  private readTranscriptPageLocked(options: RuntimeTranscriptPageOptions): RuntimeTranscriptPage {
-    assertNonEmpty(options.sessionId, "transcript sessionId");
-    assertPositiveInteger(options.maxBytes, "transcript maxBytes");
-    const limit = normalizePageLimit(options.limit);
-    const session = this.readSessionRow(options.sessionId);
-    if (!session) {
-      throw new RuntimeEventStoreIntegrityError(
-        `Runtime transcript session ${options.sessionId} does not exist`,
-      );
-    }
-    const revisionSequence = session.last_event_seq;
-    const throughSequence = options.throughSequence ?? revisionSequence;
-    assertNonNegativeInteger(throughSequence, "transcript throughSequence");
-    if (throughSequence > revisionSequence) {
-      throw new RuntimeEventStoreIntegrityError(
-        `Runtime transcript throughSequence ${throughSequence} is ahead of ledger head ${revisionSequence}`,
-      );
-    }
-    const cursor = options.cursor;
-    if (cursor) {
-      assertPositiveInteger(cursor.sequence, "transcript cursor sequence");
-      assertNonNegativeInteger(cursor.chunkIndex, "transcript cursor chunkIndex");
-      assertNonNegativeInteger(cursor.byteOffset, "transcript cursor byteOffset");
-      if (cursor.sequence > throughSequence) {
-        throw new RuntimeEventStoreIntegrityError(
-          "Runtime transcript cursor exceeds fixed waterline",
-        );
-      }
-      const boundary = this.lease.database
-        .prepare(
-          `SELECT chunks.byte_length
-           FROM runtime_transcript_records AS records
-           JOIN runtime_transcript_chunks AS chunks ON chunks.record_id = records.record_id
-           WHERE records.session_id = ? AND records.source_sequence = ?
-             AND chunks.chunk_index = ?`,
-        )
-        .get(options.sessionId, cursor.sequence, cursor.chunkIndex) as
-        | { byte_length?: unknown }
-        | undefined;
-      const boundaryBytes = boundary
-        ? requireSafeInteger(boundary.byte_length, "transcript cursor byteLength")
-        : undefined;
-      if (boundaryBytes === undefined || cursor.byteOffset > boundaryBytes) {
-        throw new RuntimeEventStoreIntegrityError("Runtime transcript cursor does not exist");
-      }
-    }
-    const selected = this.readTranscriptChunkWindowLocked({
-      ...options,
-      throughSequence,
-      limit,
-    });
-    return {
-      revisionSequence,
-      throughSequence,
-      items: selected.items,
-      ...(selected.nextCursor ? { nextCursor: selected.nextCursor } : {}),
-    };
-  }
-
-  private readTranscriptChunkWindowLocked(
-    options: RuntimeTranscriptPageOptions & {
-      readonly throughSequence: number;
-      readonly limit: number;
-    },
-  ): Pick<RuntimeTranscriptPage, "items" | "nextCursor"> {
-    const forward = options.direction === "forward";
-    const cursor = options.cursor;
-    const relation = forward ? ">" : "<";
-    const order = forward ? "ASC" : "DESC";
-    const cursorClause = cursor
-      ? `AND (records.source_sequence ${relation} ? OR
-             (records.source_sequence = ? AND chunks.chunk_index ${relation} ?))`
-      : "";
-    const params: SQLInputValue[] = [options.sessionId, options.throughSequence];
-    if (cursor) params.push(cursor.sequence, cursor.sequence, cursor.chunkIndex);
-    params.push(options.limit + 1);
-    const metadata = this.lease.database
-      .prepare(
-        `SELECT records.record_id, records.source_event_id, records.source_sequence,
-                records.kind, records.payload_json, records.created_at,
-                chunks.chunk_index, chunks.byte_length
-         FROM runtime_transcript_records AS records
-         JOIN runtime_transcript_chunks AS chunks ON chunks.record_id = records.record_id
-         WHERE records.session_id = ? AND records.source_sequence <= ? ${cursorClause}
-         ORDER BY records.source_sequence ${order}, chunks.chunk_index ${order}
-         LIMIT ?`,
-      )
-      .all(...params)
-      .map((row) => transcriptChunkMetadataFromRow(row));
-
-    // The cursor row is an inclusive byte boundary even though subsequent rows use
-    // keyset ordering. Fetch it explicitly so one oversized chunk resumes exactly.
-    if (cursor) {
-      const boundary = this.lease.database
-        .prepare(
-          `SELECT records.record_id, records.source_event_id, records.source_sequence,
-                  records.kind, records.payload_json, records.created_at,
-                  chunks.chunk_index, chunks.byte_length
-           FROM runtime_transcript_records AS records
-           JOIN runtime_transcript_chunks AS chunks ON chunks.record_id = records.record_id
-           WHERE records.session_id = ? AND records.source_sequence = ?
-             AND chunks.chunk_index = ?`,
-        )
-        .get(options.sessionId, cursor.sequence, cursor.chunkIndex);
-      const boundaryMetadata = transcriptChunkMetadataFromRow(boundary!);
-      const atTerminalEdge = forward
-        ? cursor.byteOffset === boundaryMetadata.byteLength
-        : cursor.byteOffset === 0;
-      if (!atTerminalEdge) metadata.unshift(boundaryMetadata);
-    }
-
-    const items: RuntimeTranscriptPage["items"][number][] = [];
-    let remaining = options.maxBytes;
-    let nextCursor: RuntimeTranscriptPage["nextCursor"];
-    for (const row of metadata.slice(0, options.limit)) {
-      if (remaining <= 0) break;
-      const boundaryOffset =
-        cursor && row.sequence === cursor.sequence && row.chunkIndex === cursor.chunkIndex
-          ? cursor.byteOffset
-          : undefined;
-      const end = forward ? row.byteLength : (boundaryOffset ?? row.byteLength);
-      const start = forward ? (boundaryOffset ?? 0) : Math.max(0, end - remaining - 4);
-      const blob = this.lease.database
-        .prepare(
-          `SELECT substr(CAST(text_value AS BLOB), ?, ?) AS value
-           FROM runtime_transcript_chunks WHERE record_id = ? AND chunk_index = ?`,
-        )
-        .get(
-          start + 1,
-          forward ? Math.min(end - start, remaining + 4) : end - start,
-          row.recordId,
-          row.chunkIndex,
-        ) as { value?: unknown } | undefined;
-      const bounded = Buffer.from(blob?.value as Uint8Array);
-      let sliceStart = 0;
-      let sliceEnd = bounded.length;
-      if (forward) sliceEnd = utf8ForwardEnd(bounded, 0, remaining);
-      else sliceStart = utf8BackwardStart(bounded, bounded.length, remaining);
-      const absoluteStart = start + sliceStart;
-      const bytes = bounded.subarray(sliceStart, sliceEnd);
-      items.push(transcriptPageItemFromMetadata(row, absoluteStart, bytes));
-      remaining -= bytes.length;
-      const absoluteEnd = absoluteStart + bytes.length;
-      if (forward && absoluteEnd < row.byteLength) {
-        nextCursor = {
-          sequence: row.sequence,
-          chunkIndex: row.chunkIndex,
-          byteOffset: absoluteEnd,
-        };
-        break;
-      }
-      if (!forward && absoluteStart > 0) {
-        nextCursor = {
-          sequence: row.sequence,
-          chunkIndex: row.chunkIndex,
-          byteOffset: absoluteStart,
-        };
-        break;
-      }
-    }
-    if (!nextCursor && metadata.length > items.length) {
-      const next = metadata[items.length]!;
-      nextCursor = {
-        sequence: next.sequence,
-        chunkIndex: next.chunkIndex,
-        byteOffset: forward ? 0 : next.byteLength,
-      };
-    }
-    return { items, ...(nextCursor ? { nextCursor } : {}) };
-  }
-
   /** appendBatch 专用:sessions 行 + MAX(event_seq) 水位一致性断言 + catalog fold 装载。 */
   private requireSessionAppendContext(sessionId: string): SessionAppendContext {
     const row = this.readSessionRow(sessionId);
@@ -3439,28 +3139,6 @@ export class SqliteRuntimeEventStore {
   }
 }
 
-interface TranscriptRecordWithChunks {
-  readonly recordId: string;
-  readonly sessionId: string;
-  readonly sourceEventId: string;
-  readonly sequence: number;
-  readonly kind: string;
-  readonly payload: unknown;
-  readonly chunks: readonly string[];
-  readonly at: string;
-}
-
-interface TranscriptChunkMetadataRow {
-  readonly recordId: string;
-  readonly sourceEventId: string;
-  readonly sequence: number;
-  readonly kind: string;
-  readonly payload: unknown;
-  readonly chunkIndex: number;
-  readonly byteLength: number;
-  readonly at: string;
-}
-
 function partialSnapshotFromRow(row: Record<string, unknown>): RuntimePartialSnapshot {
   return {
     sessionId: requireString(row["session_id"], "partial_snapshots.session_id"),
@@ -3514,38 +3192,6 @@ function toolOperationFromRow(row: Record<string, unknown>): RuntimeToolOperatio
   };
 }
 
-function transcriptChunkMetadataFromRow(row: Record<string, unknown>): TranscriptChunkMetadataRow {
-  return {
-    recordId: requireString(row["record_id"], "transcript_records.record_id"),
-    sourceEventId: requireString(row["source_event_id"], "transcript_records.source_event_id"),
-    sequence: requirePositiveInteger(row["source_sequence"], "transcript_records.source_sequence"),
-    kind: requireString(row["kind"], "transcript_records.kind"),
-    payload: decodeProjectionJson(row["payload_json"], "transcript_records.payload_json"),
-    chunkIndex: requireSafeInteger(row["chunk_index"], "transcript_chunks.chunk_index"),
-    byteLength: requireSafeInteger(row["byte_length"], "transcript_chunks.byte_length"),
-    at: requireString(row["created_at"], "transcript_records.created_at"),
-  };
-}
-
-function transcriptPageItemFromMetadata(
-  row: TranscriptChunkMetadataRow,
-  byteOffset: number,
-  bytes: Buffer,
-): RuntimeTranscriptPage["items"][number] {
-  return {
-    recordId: row.recordId,
-    sourceEventId: row.sourceEventId,
-    sequence: row.sequence,
-    kind: row.kind,
-    payload: row.payload,
-    chunkIndex: row.chunkIndex,
-    byteOffset,
-    text: bytes.toString("utf8"),
-    byteLength: bytes.length,
-    at: row.at,
-  };
-}
-
 function utf8ForwardEnd(bytes: Buffer, start: number, budget: number): number {
   if (start >= bytes.length) return start;
   let end = Math.min(bytes.length, start + budget);
@@ -3554,16 +3200,6 @@ function utf8ForwardEnd(bytes: Buffer, start: number, budget: number): number {
   end = start + 1;
   while (end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end += 1;
   return end;
-}
-
-function utf8BackwardStart(bytes: Buffer, end: number, budget: number): number {
-  if (end <= 0) return end;
-  let start = Math.max(0, end - budget);
-  while (start < end && (bytes[start]! & 0xc0) === 0x80) start += 1;
-  if (start < end) return start;
-  start = end - 1;
-  while (start > 0 && (bytes[start]! & 0xc0) === 0x80) start -= 1;
-  return start;
 }
 
 function decodeProjectionJson(value: unknown, field: string): unknown {
@@ -3585,10 +3221,6 @@ function assertNonEmpty(value: string, field: string): void {
 
 function assertNonNegativeInteger(value: number, field: string): void {
   if (!Number.isSafeInteger(value) || value < 0) throw new Error(`Runtime ${field} is invalid`);
-}
-
-function assertPositiveInteger(value: number, field: string): void {
-  if (!Number.isSafeInteger(value) || value < 1) throw new Error(`Runtime ${field} is invalid`);
 }
 
 function requirePositiveInteger(value: unknown, field: string): number {
@@ -5120,65 +4752,6 @@ export async function readExistingSqliteSessionEventSliceWithinBudget(options: {
       ...(options.alwaysIncludeKinds ? { alwaysIncludeKinds: options.alwaysIncludeKinds } : {}),
     });
     return { manifest, slice };
-  } finally {
-    store.close();
-  }
-}
-
-/**
- * Replays the transactionally materialized transcript fact stream at one immutable
- * ledger waterline. Each store page is SQL-keyset bounded; a large canonical event
- * may span pages and is reassembled before strict RuntimeEvent decoding.
- */
-export async function readExistingSqliteMaterializedTranscript(options: {
-  readonly storageRoot: string;
-  readonly sessionId: string;
-  readonly throughSequence?: number;
-  readonly pageBytes?: number;
-}): Promise<
-  | {
-      readonly manifest: RuntimeSessionManifest;
-      readonly entries: readonly RuntimeEventStoreEntry[];
-      readonly revisionSequence: number;
-      readonly throughSequence: number;
-    }
-  | undefined
-> {
-  const root = resolve(options.storageRoot);
-  if (!existsSync(operationalDatabasePath(root))) return undefined;
-  const store = new SqliteRuntimeEventStore({ storageRoot: root });
-  try {
-    const manifest = await store.readSessionManifest(options.sessionId);
-    if (!manifest) return undefined;
-    const textByRecord = new Map<string, { readonly sequence: number; readonly parts: string[] }>();
-    let cursor: RuntimeTranscriptPage["nextCursor"];
-    let throughSequence = options.throughSequence;
-    let revisionSequence = 0;
-    do {
-      const page = await store.readTranscriptPage({
-        sessionId: options.sessionId,
-        ...(throughSequence === undefined ? {} : { throughSequence }),
-        direction: "forward",
-        ...(cursor ? { cursor } : {}),
-        maxBytes: options.pageBytes ?? 256 * 1024,
-        limit: RUNTIME_EVENT_STORE_MAX_PAGE_SIZE,
-      });
-      throughSequence ??= page.throughSequence;
-      revisionSequence = page.revisionSequence;
-      for (const item of page.items) {
-        const record = textByRecord.get(item.recordId) ?? {
-          sequence: item.sequence,
-          parts: [],
-        };
-        record.parts.push(item.text);
-        textByRecord.set(item.recordId, record);
-      }
-      cursor = page.nextCursor;
-    } while (cursor);
-    const entries = [...textByRecord.values()]
-      .map(({ sequence, parts }) => ({ sequence, event: decodeRuntimeEventJson(parts.join("")) }))
-      .sort((left, right) => left.sequence - right.sequence);
-    return { manifest, entries, revisionSequence, throughSequence: throughSequence ?? 0 };
   } finally {
     store.close();
   }

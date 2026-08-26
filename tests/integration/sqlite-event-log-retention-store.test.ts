@@ -113,6 +113,63 @@ test("sqlite EventLog retention: measures UTF-8 payload bytes and shared blobs o
   }
 });
 
+test("sqlite EventLog retention: attributes current transcript projection bytes", async () => {
+  const { root, storageRoot } = await fixture("transcript-bytes");
+  try {
+    const sessionId = "session-transcript";
+    const historyEpoch = "epoch-1";
+    const itemId = "message:event-1";
+    const payload = JSON.stringify({ role: "assistant", text: "你好👋" });
+    const digest = "d".repeat(64);
+    seedSession(storageRoot, sessionId);
+    withWorkspaceSqliteLease(storageRoot, (lease) =>
+      lease.transaction("write", () => {
+        lease.database
+          .prepare(
+            `INSERT INTO runtime_transcript_projection_state
+             (session_id, history_epoch, projector_version, through_sequence, change_floor_sequence)
+             VALUES (?, ?, 2, 1, 0)`,
+          )
+          .run(sessionId, historyEpoch);
+        lease.database
+          .prepare(
+            `INSERT INTO runtime_transcript_item_versions
+             (session_id, item_id, item_revision, valid_from_sequence, valid_to_sequence,
+              position_sequence, position_ordinal, payload_json, payload_digest)
+             VALUES (?, ?, 1, 1, NULL, 1, 0, ?, ?)`,
+          )
+          .run(sessionId, itemId, payload, digest);
+        lease.database
+          .prepare(
+            `INSERT INTO runtime_transcript_changes
+             (session_id, change_sequence, change_ordinal, op, item_id, item_revision, payload_json)
+             VALUES (?, 1, 0, 'upsert', ?, 1, ?)`,
+          )
+          .run(sessionId, itemId, payload);
+      }),
+    );
+
+    const status = readEventLogStorageStatus({ storageRoot });
+    assert.equal(
+      status.sessions[0]!.breakdown.transcriptBytes,
+      byteLength(
+        sessionId,
+        historyEpoch,
+        sessionId,
+        itemId,
+        payload,
+        digest,
+        sessionId,
+        "upsert",
+        itemId,
+        payload,
+      ),
+    );
+  } finally {
+    await cleanup(root);
+  }
+});
+
 test("sqlite EventLog retention: observes Memory bytes without charging the EventLog quota", async () => {
   const { root, storageRoot } = await fixture("memory-bytes");
   try {
