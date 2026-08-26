@@ -231,6 +231,10 @@ function parseAgentOutputInput(args: string): NormalizedAgentOutputInput {
       `agent_output 参数无效：evidence_refs 与 artifact_refs 合计不得超过 ${AGENT_OUTPUT_MAX_REFS} 项。`,
     );
   }
+  const evidenceRefSet = new Set(evidenceRefs);
+  if (artifactRefs.some((ref) => evidenceRefSet.has(ref))) {
+    throw new Error("agent_output 参数无效：evidence_refs 与 artifact_refs 不得包含相同引用。");
+  }
   return { status, output, evidenceRefs, artifactRefs };
 }
 
@@ -259,6 +263,7 @@ function requiredBoundedText(value: unknown, field: string, maxBytes: number): s
   if (typeof value !== "string" || value.trim() === "") {
     throw new Error(`agent_output 参数无效：${field} 必须是非空字符串。`);
   }
+  assertWellFormedString(value, field);
   const normalized = value.trim();
   const bytes = Buffer.byteLength(normalized, "utf8");
   if (bytes > maxBytes) {
@@ -289,10 +294,17 @@ function requireNonEmptyIdentity(value: unknown, field: string): string {
   if (typeof value !== "string" || value.trim() === "" || value !== value.trim()) {
     throw new Error(`agent_output 调用上下文的 ${field} 无效。`);
   }
+  assertWellFormedString(value, field);
   if (Buffer.byteLength(value, "utf8") > AGENT_OUTPUT_MAX_REF_BYTES || /\p{Cc}|\s/u.test(value)) {
     throw new Error(`agent_output 调用上下文的 ${field} 无效。`);
   }
   return value;
+}
+
+function assertWellFormedString(value: string, field: string): void {
+  if (/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(value)) {
+    throw new Error(`agent_output 参数或调用上下文的 ${field} 包含非法 UTF-16/UTF-8 字符。`);
+  }
 }
 
 function requireCommitReceipt(receipt: CommitAgentOutputReceipt): CommitAgentOutputReceipt {
