@@ -1,5 +1,6 @@
 export type AgentGraphPhase = "open" | "finished";
-export type AgentGraphScheduleKind = "add" | "stop" | "finish";
+export type AgentGraphScheduleKind = "add" | "stop" | "finish" | "batch";
+export type AgentGraphProvisionState = "requested" | "provisioned" | "stopping" | "stopped";
 export type AgentGraphClaimState = "claimed" | "executing" | "cancelled";
 export type AgentGraphRecordKind = "agent_output" | "artifact" | "evidence";
 export type AgentGraphWakeCause =
@@ -39,6 +40,7 @@ export interface AgentGraphScheduleRevisionRecord {
   readonly kind: AgentGraphScheduleKind;
   readonly command: unknown;
   readonly sourceSessionId: string;
+  readonly sourceTurnId: string;
   readonly sourceRunId: string;
   readonly sourceToolCallId: string;
   readonly createdAt: number;
@@ -52,6 +54,7 @@ export interface CommitAgentGraphScheduleInput {
   readonly kind: AgentGraphScheduleKind;
   readonly command: unknown;
   readonly sourceSessionId: string;
+  readonly sourceTurnId: string;
   readonly sourceRunId: string;
   readonly sourceToolCallId: string;
 }
@@ -72,7 +75,11 @@ export interface AgentGraphOperatorProvisionRecord {
   readonly childSessionId: string;
   readonly profileSnapshot: unknown;
   readonly workspaceBinding: unknown;
+  readonly state: AgentGraphProvisionState;
+  readonly version: number;
   readonly createdAt: number;
+  readonly provisionedAt?: number;
+  readonly stoppedAt?: number;
 }
 
 export interface EnsureAgentGraphOperatorProvisionInput {
@@ -85,6 +92,13 @@ export interface EnsureAgentGraphOperatorProvisionInput {
   readonly childSessionId: string;
   readonly profileSnapshot: unknown;
   readonly workspaceBinding: unknown;
+}
+
+export interface TransitionAgentGraphProvisionInput {
+  readonly provisionId: string;
+  readonly expectedVersion: number;
+  readonly from: AgentGraphProvisionState;
+  readonly to: Extract<AgentGraphProvisionState, "provisioned" | "stopping" | "stopped">;
 }
 
 export interface AgentGraphActivationClaimRecord {

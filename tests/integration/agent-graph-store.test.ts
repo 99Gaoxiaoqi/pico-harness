@@ -34,6 +34,10 @@ test("agent graph store persists exact identities, fences finish, and drives dur
       () => store.createGraph({ graphId: "graph-1", rootSessionId: "other", epoch: 1 }),
       AgentGraphStoreConflictError,
     );
+    assert.throws(
+      () => store.createGraph({ graphId: "graph-2", rootSessionId: "root-session", epoch: 2 }),
+      /already has open graph/u,
+    );
 
     const add = scheduleInput({ operationId: "schedule-add", expectedRevision: 0, kind: "add" });
     const revision1 = store.commitScheduleRevision(add);
@@ -64,6 +68,7 @@ test("agent graph store persists exact identities, fences finish, and drives dur
       workspaceBinding: { kind: "isolated-worktree", path: "/tmp/worktree" },
     } as const;
     assert.equal(store.ensureOperatorProvision(provisionInput).replayed, false);
+    assert.equal(store.getOperatorProvision("graph-1", "researcher", 1)?.state, "requested");
     assert.equal(store.ensureOperatorProvision(provisionInput).replayed, true);
     assert.throws(
       () =>
@@ -72,6 +77,25 @@ test("agent graph store persists exact identities, fences finish, and drives dur
           childSessionId: "another-child-session",
         }),
       /different immutable metadata/u,
+    );
+
+    assert.throws(() => store.claimActivation(activationClaimInput()), /not provisioned/u);
+    const provisioned = store.transitionOperatorProvision({
+      provisionId: "provision-1",
+      expectedVersion: 1,
+      from: "requested",
+      to: "provisioned",
+    });
+    assert.equal(provisioned.record.state, "provisioned");
+    assert.equal(provisioned.record.version, 2);
+    assert.equal(
+      store.transitionOperatorProvision({
+        provisionId: "provision-1",
+        expectedVersion: 1,
+        from: "requested",
+        to: "provisioned",
+      }).replayed,
+      true,
     );
 
     const claimInput = activationClaimInput();
@@ -235,24 +259,33 @@ test("agent graph store persists exact identities, fences finish, and drives dur
       scheduleInput({ operationId: "schedule-stop", expectedRevision: 1, kind: "stop" }),
     );
     assert.equal(stop.revision.revision, 2);
+    const batch = store.commitScheduleRevision(
+      scheduleInput({ operationId: "schedule-batch", expectedRevision: 2, kind: "batch" }),
+    );
+    assert.equal(batch.revision.revision, 3);
     const finish = store.commitScheduleRevision(
-      scheduleInput({ operationId: "schedule-finish", expectedRevision: 2, kind: "finish" }),
+      scheduleInput({ operationId: "schedule-finish", expectedRevision: 3, kind: "finish" }),
     );
     assert.equal(finish.graph.phase, "finished");
-    assert.equal(finish.graph.headRevision, 3);
+    assert.equal(finish.graph.headRevision, 4);
     assert.throws(
       () =>
         store.commitScheduleRevision(
-          scheduleInput({ operationId: "after-finish", expectedRevision: 3, kind: "add" }),
+          scheduleInput({ operationId: "after-finish", expectedRevision: 4, kind: "add" }),
         ),
       /finished/u,
     );
+    const stopAfterFinish = store.commitScheduleRevision(
+      scheduleInput({ operationId: "stop-after-finish", expectedRevision: 4, kind: "stop" }),
+    );
+    assert.equal(stopAfterFinish.graph.phase, "finished");
+    assert.equal(stopAfterFinish.graph.headRevision, 5);
     assert.equal(store.ensureOperatorProvision(provisionInput).replayed, true);
     assert.equal(store.claimActivation(claimInput).replayed, true);
 
     assert.deepEqual(
       store.listScheduleRevisions("graph-1").map(({ kind }) => kind),
-      ["add", "stop", "finish"],
+      ["add", "stop", "batch", "finish", "stop"],
     );
     assert.equal(store.listOperatorProvisions("graph-1").length, 1);
     assert.equal(store.listActivationClaims("graph-1").length, 1);
@@ -323,6 +356,12 @@ test("agent graph store serializes schedule and activation races across independ
         profileSnapshot: { model: "test" },
         workspaceBinding: { kind: "shared" },
       });
+      provisioner.transitionOperatorProvision({
+        provisionId: "race-provision",
+        expectedVersion: 1,
+        from: "requested",
+        to: "provisioned",
+      });
     } finally {
       provisioner.close();
     }
@@ -359,6 +398,7 @@ function scheduleInput(options: {
     kind: options.kind,
     command: { kind: options.kind, operatorId: "researcher" },
     sourceSessionId: "root-session",
+    sourceTurnId: "root-source-turn",
     sourceRunId: "root-source-run",
     sourceToolCallId: `tool:${options.operationId}`,
   };
@@ -441,6 +481,7 @@ function spawnRaceProcess(options: {
           kind: "add",
           command: { operatorId: "race-operator" },
           sourceSessionId: "race-root",
+          sourceTurnId: "race-source-turn-" + config.racer,
           sourceRunId: "race-source-run-" + config.racer,
           sourceToolCallId: "race-tool-" + config.racer,
         });
