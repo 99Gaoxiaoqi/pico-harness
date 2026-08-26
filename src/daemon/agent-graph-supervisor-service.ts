@@ -9,6 +9,7 @@ import type {
   ClaimAgentGraphSupervisorWakeInput,
   ClaimAgentGraphSupervisorWakeResult,
   EnqueueAgentGraphSupervisorWakeInput,
+  EnqueueAgentGraphSupervisorWakeForYieldResult,
   IdempotentStoreResult,
   SettleAgentGraphSupervisorWakeInput,
 } from "../storage/sqlite/agent-graph-store-types.js";
@@ -86,6 +87,12 @@ export interface AgentGraphSupervisorStorePort {
   ):
     | Promise<IdempotentStoreResult<AgentGraphSupervisorWakeRecord>>
     | IdempotentStoreResult<AgentGraphSupervisorWakeRecord>;
+  /** Production SQLite path: atomically consumes a registered yield permit. */
+  enqueueSupervisorWakeForYield?(
+    input: EnqueueAgentGraphSupervisorWakeInput,
+  ):
+    | Promise<EnqueueAgentGraphSupervisorWakeForYieldResult>
+    | EnqueueAgentGraphSupervisorWakeForYieldResult;
   settleSupervisorWake(input: SettleAgentGraphSupervisorWakeInput): Promise<unknown> | unknown;
 }
 
@@ -269,14 +276,19 @@ export class AgentGraphSupervisorService {
           for (const candidate of result.wakeCandidates) {
             if (this.state !== "open") break;
             const wakeFingerprint = deterministicFingerprint({ graphId, ...candidate });
-            await this.options.store.enqueueSupervisorWake({
+            const input = {
               wakeId: wakeIdFor(graphId, candidate.dedupeKey),
               graphId,
               dedupeKey: candidate.dedupeKey,
               wakeFingerprint,
               cause: candidate.cause,
               payload: candidate.payload,
-            });
+            };
+            if (this.options.store.enqueueSupervisorWakeForYield) {
+              await this.options.store.enqueueSupervisorWakeForYield(input);
+            } else {
+              await this.options.store.enqueueSupervisorWake(input);
+            }
           }
         }
         if (result?.needsAnotherPass || result?.quiescent === false) flight.rerun = true;
