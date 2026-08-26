@@ -59,6 +59,23 @@ test("temporary workspace keeps a stable UI label and can switch to a real proje
   assert.match(appSource, /workspaceDisplayName\(workspacePath, workspace\)/u);
   assert.match(appSource, /!nested && workspace\?\.temporary/u);
   assert.match(appSource, /TEMPORARY_WORKSPACE_GROUP_LABEL/u);
+  assert.match(
+    appSource,
+    /const projectWorkspaceOptions = data\.workspaces\.filter\([\s\S]*?candidate\.temporary !== true/u,
+  );
+  assert.match(appSource, /projectWorkspaceOptions\.map\(\(workspace\) =>/u);
+  assert.match(
+    appSource,
+    /workspace\?\.temporary \? TEMPORARY_PROJECT_OPTION_VALUE : workspacePath/u,
+  );
+  assert.match(
+    appSource,
+    /nextWorkspacePath === CHOOSE_PROJECT_OPTION_VALUE[\s\S]*?void chooseProjectFolder\(\)/u,
+  );
+  assert.match(
+    appSource,
+    /<option value=\{TEMPORARY_PROJECT_OPTION_VALUE\}>\s*\{workspaceLabel\}\s*<\/option>/u,
+  );
   assert.match(appSource, /navigate\(newSessionHref\(nextWorkspacePath\)\)/u);
   assert.match(appSource, /<option key=\{workspace\.path\} value=\{workspace\.path\}>/u);
   assert.match(appSource, /const chooseProjectFolder = async \(\) =>/u);
