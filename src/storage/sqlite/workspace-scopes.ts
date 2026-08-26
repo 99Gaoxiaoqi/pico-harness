@@ -4,6 +4,7 @@ import {
   coordinateEventLogHardCut,
 } from "../event-log-hard-cut-coordinator.js";
 import { ATTACHMENTS_SCOPE } from "./attachments-scope.js";
+import { AGENT_GRAPH_SCOPE } from "./agent-graph-scope.js";
 import { CONTROL_SCOPE } from "./control-scope.js";
 import { EVENT_LOG_HARD_CUT_SCOPE } from "./event-log-hard-cut-scope.js";
 import { KV_SCOPE } from "./kv-scope.js";
@@ -40,6 +41,7 @@ export const ALL_WORKSPACE_SQLITE_SCOPES: readonly SqliteSchemaScope[] = [
   KV_SCOPE,
   EVENT_LOG_HARD_CUT_SCOPE,
   WORKBAR_SCOPE,
+  AGENT_GRAPH_SCOPE,
 ];
 
 export interface WorkspaceSqliteStorageRootOptions {
