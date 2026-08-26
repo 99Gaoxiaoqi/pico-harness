@@ -200,6 +200,38 @@ export class WorkspaceTaskRuntime {
   }
 
   startRun(request: WorkspaceRunRequest, executor: WorkspaceRunExecutor): WorkspaceRunSnapshot {
+    return this.startRunWithId(this.generateRunId(), request, executor);
+  }
+
+  /** Trusted scheduler entry: binds the workspace launch to a preallocated RuntimeRun id. */
+  startExactRun(
+    runId: string,
+    request: WorkspaceRunRequest,
+    executor: WorkspaceRunExecutor,
+  ): WorkspaceRunSnapshot {
+    const exactRunId = runId.trim();
+    if (!exactRunId || exactRunId !== runId || /\p{Cc}|\s/u.test(exactRunId)) {
+      throw new Error("Exact Run ID 无效");
+    }
+    const existing = this.runs.get(exactRunId);
+    if (existing) {
+      const description = request.description.trim();
+      if (
+        existing.snapshot.description !== description ||
+        existing.snapshot.sessionId !== request.sessionId
+      ) {
+        throw new Error(`Exact Run ID 已绑定到其他请求: ${exactRunId}`);
+      }
+      return cloneRun(existing.snapshot);
+    }
+    return this.startRunWithId(exactRunId, request, executor);
+  }
+
+  private startRunWithId(
+    runId: string,
+    request: WorkspaceRunRequest,
+    executor: WorkspaceRunExecutor,
+  ): WorkspaceRunSnapshot {
     this.assertOpen();
     const description = request.description.trim();
     if (!description) throw new Error("Run 描述不能为空");
@@ -207,7 +239,6 @@ export class WorkspaceTaskRuntime {
       throw new Error(`工作区 ${this.workspace} 已有活跃 Run，拒绝并发执行`);
     }
 
-    const runId = this.generateRunId();
     if (this.runs.has(runId)) throw new Error(`Run ID 已存在: ${runId}`);
     const startedAt = this.now();
     const record: WorkspaceRunRecord = {
