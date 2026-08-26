@@ -8,17 +8,29 @@ interface DesktopPackageManifest {
 }
 
 const RUNTIME_HOST_BUILD = "npm run build --workspace @pico/runtime-host";
+const DESKTOP_FORGE_RUNNER = "../../scripts/run-desktop-forge.mjs";
 
-test("Desktop cold workflows build their direct runtime-host authority dependency", async () => {
-  const manifest = JSON.parse(
-    await readFile(new URL("../../apps/desktop/package.json", import.meta.url), "utf8"),
-  ) as DesktopPackageManifest;
+test("Desktop cold workflows delegate runtime-host preparation to the Forge runner", async () => {
+  const [manifestSource, runnerSource] = await Promise.all([
+    readFile(new URL("../../apps/desktop/package.json", import.meta.url), "utf8"),
+    readFile(new URL("../../scripts/run-desktop-forge.mjs", import.meta.url), "utf8"),
+  ]);
+  const manifest = JSON.parse(manifestSource) as DesktopPackageManifest;
 
   assert.equal(manifest.dependencies?.["@pico/runtime-host"], "*");
-  for (const lifecycle of ["prestart", "prepackage", "premake", "pretypecheck"] as const) {
+  for (const lifecycle of ["start", "package", "make"] as const) {
     assert.ok(
-      manifest.scripts?.[lifecycle]?.includes(RUNTIME_HOST_BUILD),
-      `${lifecycle} must rebuild runtime-host before Desktop consumes its authority API`,
+      manifest.scripts?.[lifecycle]?.includes(DESKTOP_FORGE_RUNNER),
+      `${lifecycle} must delegate cold-start preparation to the Desktop Forge runner`,
     );
   }
+  assert.ok(
+    manifest.scripts?.["pretypecheck"]?.includes(RUNTIME_HOST_BUILD),
+    "pretypecheck must rebuild runtime-host before Desktop consumes its authority API",
+  );
+  assert.ok(
+    runnerSource.includes('"@pico/runtime-host"') &&
+      runnerSource.includes('["run", "build", "--workspace", workspace]'),
+    "the Desktop Forge runner must rebuild runtime-host before start/package/make",
+  );
 });
