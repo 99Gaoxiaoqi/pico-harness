@@ -3,12 +3,22 @@ import { MakerSquirrel } from "@electron-forge/maker-squirrel";
 import { MakerZIP } from "@electron-forge/maker-zip";
 import { VitePlugin } from "@electron-forge/plugin-vite";
 import type { ForgeConfig } from "@electron-forge/shared-types";
+import { join } from "node:path";
 
 const macSigningIdentity = process.env.PICO_MAC_SIGN_IDENTITY;
 const appleId = process.env.PICO_APPLE_ID;
 const appleIdPassword = process.env.PICO_APPLE_ID_PASSWORD;
 const appleTeamId = process.env.PICO_APPLE_TEAM_ID;
 const updateBaseUrl = readOptionalHttpsUrl("PICO_UPDATE_BASE_URL");
+const desktopAssetPath = (...segments: string[]): string =>
+  join(import.meta.dirname, "assets", ...segments);
+const desktopPackageIcon = desktopAssetPath(
+  process.platform === "darwin"
+    ? "icon.icns"
+    : process.platform === "win32"
+      ? "icon.ico"
+      : "icon.png",
+);
 
 const macNotarization =
   appleId && appleIdPassword && appleTeamId
@@ -20,6 +30,8 @@ const config = {
     appBundleId: "com.pico.harness",
     appCategoryType: "public.app-category.developer-tools",
     executableName: "Pico",
+    extraResource: [desktopAssetPath("icon.png")],
+    icon: desktopPackageIcon,
     name: "Pico",
     osxSign: macSigningIdentity ? { identity: macSigningIdentity } : undefined,
     osxNotarize: macNotarization,

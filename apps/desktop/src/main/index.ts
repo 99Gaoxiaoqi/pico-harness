@@ -135,6 +135,7 @@ if (!app.requestSingleInstanceLock()) {
     .whenReady()
     .then(async () => {
       if (process.platform === "win32") app.setAppUserModelId("com.squirrel.pico.Pico");
+      if (app.dock) app.dock.setIcon(resolveDesktopIconPath());
       installApplicationMenu(() => mainWindow);
       // 首次 ping 触发 connectOrSpawn：拉起或连上常驻 daemon 后返回。冷启动时
       // daemon 的 recover 窗口（reconcile 注册工作区 + 启动 cron，可达秒级）内
@@ -189,6 +190,7 @@ async function openMainWindow(): Promise<void> {
     return;
   }
   mainWindow = await createDesktopWindow({
+    iconPath: resolveDesktopIconPath(),
     userDataPath: app.getPath("userData"),
     shouldKeepInBackground: () => lifecycle.shouldKeepInBackground(),
     onClosed: () => {
@@ -207,6 +209,12 @@ async function openMainWindow(): Promise<void> {
       }
     },
   });
+}
+
+function resolveDesktopIconPath(): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, "icon.png")
+    : join(app.getAppPath(), "assets", "icon.png");
 }
 
 const FIRST_PING_DEADLINE_MS = 30_000;

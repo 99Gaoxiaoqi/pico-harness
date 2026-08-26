@@ -3,6 +3,7 @@ import { BrowserWindow, session } from "electron";
 import { createWindowState, WindowStateStore } from "./window-state.js";
 
 export interface DesktopWindowOptions {
+  readonly iconPath: string;
   readonly userDataPath: string;
   readonly onClosed: () => void;
   readonly onRendererGone?: (() => void) | undefined;
@@ -19,6 +20,7 @@ export async function createDesktopWindow(options: DesktopWindowOptions): Promis
     minHeight: 640,
     show: false,
     title: "Pico",
+    icon: options.iconPath,
     backgroundColor: "#141719",
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
     webPreferences: {
