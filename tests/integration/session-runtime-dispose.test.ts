@@ -1,11 +1,43 @@
 import assert from "node:assert/strict";
-import { access, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { CodeIntelligenceManager } from "../../src/code-intelligence/index.js";
 import { Session } from "../../src/engine/session.js";
 import { createSessionRuntime } from "../../src/runtime/session-runtime.js";
+
+test("SessionRuntime atomically detaches scratch before asynchronous cleanup", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-session-sandbox-cleanup-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const sessionId = "sandbox-cleanup";
+  const scratchRoot = join(picoHome, "sandboxes", sessionId);
+  await mkdir(workDir);
+  await mkdir(scratchRoot, { recursive: true });
+  await writeFile(join(scratchRoot, "old-cache"), "old");
+  const session = new Session(sessionId, workDir, { persistence: false, picoHome });
+  const runtime = await createSessionRuntime({
+    session,
+    sessionLease: { session, release: () => undefined },
+    hooks: false,
+    lspServers: [],
+    processSandbox: { scratchRoot, workspaceRoots: [workDir] },
+  });
+  context.after(async () => {
+    await runtime.dispose().catch(() => undefined);
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await runtime.dispose();
+  await assert.rejects(access(scratchRoot));
+  await mkdir(scratchRoot, { recursive: true });
+  const freshMarker = join(scratchRoot, "fresh-cache");
+  await writeFile(freshMarker, "fresh");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(await readFile(freshMarker, "utf8"), "fresh");
+});
 
 test("SessionRuntime reaches a terminal released state after owned cleanup fails", async (context) => {
   const workDir = await mkdtemp(join(tmpdir(), "pico-session-runtime-dispose-"));

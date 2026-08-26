@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { existsSync, renameSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { rm } from "node:fs/promises";
 import { PlanCoordinator } from "../plan/coordinator.js";
@@ -1240,7 +1242,7 @@ class DefaultSessionRuntime implements SessionRuntime {
     }
 
     await attempt(() => this.hookRuntime?.dispose());
-    await attempt(() => removeSessionSandboxRoot(this.picoHome, this.sessionId));
+    await attempt(() => detachSessionSandboxRoot(this.picoHome, this.sessionId));
     // Finalizers are terminal ownership transitions. They must all run even when
     // an earlier owned resource failed to close; callers generally discard this
     // runtime after dispose() settles and cannot safely retry a retained pin.
@@ -1338,14 +1340,23 @@ class DefaultSessionRuntime implements SessionRuntime {
   }
 }
 
-async function removeSessionSandboxRoot(picoHome: string, sessionId: string): Promise<void> {
+function detachSessionSandboxRoot(picoHome: string, sessionId: string): void {
   const parent = resolve(picoHome, "sandboxes");
   const target = resolve(parent, sessionId);
   const child = relative(parent, target);
   if (!child || child.startsWith("..") || isAbsolute(child)) {
     throw new Error(`拒绝清理非会话沙箱目录: ${target}`);
   }
-  await rm(target, { recursive: true, force: true });
+  if (!existsSync(target)) return;
+  const detached = resolve(parent, `.cleanup-${randomUUID()}`);
+  renameSync(target, detached);
+  // 原子移出活动会话路径后再后台删除：同 session 重建时不会复用
+  // 旧 HOME/cache，也不让递归 I/O 延迟已完成的前台 Run 返回。
+  setImmediate(() => {
+    void rm(detached, { recursive: true, force: true }).catch((error: unknown) =>
+      logger.warn({ detached, error: String(error) }, "[沙箱] 会话隔离目录后台清理失败"),
+    );
+  });
 }
 
 function positiveDuration(value: number, name: string): number {
