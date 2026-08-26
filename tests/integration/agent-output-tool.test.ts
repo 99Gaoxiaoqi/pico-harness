@@ -225,6 +225,23 @@ test("agent_output rejects exact-shape, status, and malformed ref extremes witho
       input: { status: "success", output: "done", artifact_refs: ["artifact://bad\nref"] },
       error: /artifact_refs\[0\] 不得包含控制字符/u,
     },
+    {
+      input: { status: "success", output: "\ud800" },
+      error: /output 包含非法 UTF-16\/UTF-8/u,
+    },
+    {
+      input: { status: "success", output: "done", evidence_refs: ["evidence://\udc00"] },
+      error: /evidence_refs\[0\] 包含非法 UTF-16\/UTF-8/u,
+    },
+    {
+      input: {
+        status: "success",
+        output: "done",
+        evidence_refs: [" provenance://same "],
+        artifact_refs: ["provenance://same"],
+      },
+      error: /evidence_refs 与 artifact_refs 不得包含相同引用/u,
+    },
   ];
 
   for (const [index, entry] of cases.entries()) {
@@ -247,6 +264,7 @@ test("agent_output rejects forged activation and tool-call identities before com
     { ...ACTIVATION, sessionId: " session" },
     { ...ACTIVATION, turnId: "turn " },
     { ...ACTIVATION, runId: "run\tid" },
+    { ...ACTIVATION, runId: "\ud800" },
   ];
 
   for (const [index, context] of contexts.entries()) {
@@ -260,14 +278,14 @@ test("agent_output rejects forged activation and tool-call identities before com
     assert.equal(commits.length, 0);
   }
 
-  for (const toolCallId of [undefined, "", " call", "call\nid"] as const) {
+  for (const toolCallId of [undefined, "", " call", "call\nid", "\udc00"] as const) {
     const { tool, commits } = fixture();
     await assert.rejects(
       tool.execute(
         JSON.stringify({ status: "success", output: "done" }),
         toolCallId === undefined ? undefined : { toolCallId },
       ),
-      /toolCallId 无效/u,
+      /toolCallId (?:无效|包含非法)/u,
     );
     assert.equal(commits.length, 0);
   }

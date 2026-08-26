@@ -626,11 +626,21 @@ function requireRootContext(
   if (!value || value.kind !== "graph_root_supervisor") {
     throw new Error("Agent Graph Supervisor 工具仅可由有效的 Graph root activation 调用。");
   }
-  requiredIdentity(value.graphId, "graphId");
-  requiredIdentity(value.rootSessionId, "rootSessionId");
-  requiredIdentity(value.rootTurnId, "rootTurnId");
-  requiredIdentity(value.rootRunId, "rootRunId");
-  return value;
+  return {
+    kind: value.kind,
+    graphId: requiredExactIdentity(value.graphId, "graphId"),
+    rootSessionId: requiredExactIdentity(value.rootSessionId, "rootSessionId"),
+    rootTurnId: requiredExactIdentity(value.rootTurnId, "rootTurnId"),
+    rootRunId: requiredExactIdentity(value.rootRunId, "rootRunId"),
+  };
+}
+
+function requiredExactIdentity(value: unknown, path: string): string {
+  const identity = requiredIdentity(value, path);
+  if (identity !== value) {
+    throw new Error(`Agent Graph 调用上下文的 ${path} 无效。`);
+  }
+  return identity;
 }
 
 function validateProjection(
