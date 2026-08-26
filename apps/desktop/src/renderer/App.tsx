@@ -1581,7 +1581,7 @@ function ConversationPage() {
       orchestrationMode: defaults.orchestrationMode ?? "default",
       permissionMode:
         defaults.permissionMode ??
-        (legacyMode === "auto" || legacyMode === "yolo" ? legacyMode : "default"),
+        (legacyMode === "auto" || legacyMode === "yolo" ? legacyMode : "yolo"),
       ...(defaults.thinkingEffort ? { thinkingEffort: defaults.thinkingEffort } : {}),
       ...(workspacePath ? newTaskSettingOverrides[workspacePath] : {}),
     };

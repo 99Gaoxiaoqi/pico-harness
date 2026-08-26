@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { lstat, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -60,7 +60,7 @@ test("temporary workspace protocol is strict and requires the temporary marker",
   );
 });
 
-test("temporary workspace authority creates a private persistent directory exactly once", async (t) => {
+test("temporary workspace authority allocates one private directory per new task", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-temporary-authority-"));
   const picoHome = join(root, "pico-home");
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -79,26 +79,35 @@ test("temporary workspace authority creates a private persistent directory exact
 
   const [first, concurrent] = await Promise.all([authority.ensure(), authority.ensure()]);
   assert.equal(first, concurrent);
-  assert.equal(first, await realpath(join(picoHome, "temporary-workspace")));
   assert.equal(registrations, 1);
   assert.equal(trusts, 1);
   assert.equal((await lstat(first)).mode & 0o777, 0o700);
 
-  await writeFile(join(first, "persistent.txt"), "kept across restarts\n", "utf8");
+  await writeFile(join(first, "private.txt"), "first task only\n", "utf8");
+  const second = await authority.ensure();
+  assert.notEqual(second, first);
+  assert.equal(registrations, 2);
+  assert.equal(trusts, 2);
+  await assert.rejects(lstat(join(second, "private.txt")), { code: "ENOENT" });
+
   const restarted = new TemporaryWorkspaceAuthority({
     picoHome,
     register: async (workspacePath) => workspacePath,
     trust: async () => undefined,
   });
-  assert.equal(await restarted.ensure(), first);
-  assert.equal((await lstat(join(first, "persistent.txt"))).isFile(), true);
+  assert.equal(restarted.matches(first), true);
+  assert.equal(restarted.matches(second), true);
+  assert.equal(restarted.matches(join(picoHome, "temporary-workspace")), true);
+  assert.equal(restarted.matches(join(picoHome, "temporary-workspace-not-a-uuid")), false);
+  assert.notEqual(await restarted.ensure(), first);
 });
 
 for (const placeholder of ["file", "symlink"] as const) {
   test(`temporary workspace authority rejects a ${placeholder} placeholder`, async (t) => {
     const root = await mkdtemp(join(tmpdir(), `pico-temporary-${placeholder}-`));
     const picoHome = join(root, "pico-home");
-    const workspacePath = join(picoHome, "temporary-workspace");
+    const instanceId = "11111111-1111-4111-8111-111111111111";
+    const workspacePath = join(picoHome, `temporary-workspace-${instanceId}`);
     await mkdir(picoHome, { recursive: true });
     if (placeholder === "file") await writeFile(workspacePath, "occupied", "utf8");
     else {
@@ -111,6 +120,7 @@ for (const placeholder of ["file", "symlink"] as const) {
       picoHome,
       register: async () => assert.fail("unsafe path must not be registered"),
       trust: async () => assert.fail("unsafe path must not be trusted"),
+      createId: () => instanceId,
     });
 
     await assert.rejects(authority.ensure(), TemporaryWorkspaceUnavailableError);
@@ -139,7 +149,7 @@ test("desktop temporary workspace is registered, trusted, listed and protected",
   assert.equal(ensured.temporary, true);
   assert.equal(ensured.registered, true);
   assert.equal(ensured.mode, "folder");
-  assert.equal(ensured.workspacePath, await realpath(join(picoHome, "temporary-workspace")));
+  assert.match(ensured.workspacePath, /temporary-workspace-[0-9a-f]{8}-[0-9a-f-]{27}$/iu);
   assert.deepEqual(
     await desktop.handle(
       createRuntimeRequest("workspace.trustStatus", { workspacePath: ensured.workspacePath }),
@@ -168,7 +178,7 @@ test("desktop temporary workspace is registered, trusted, listed and protected",
   }
 });
 
-test("temporary workspace sessions recover from the persisted workspace path", async (t) => {
+test("temporary workspace sessions recover without sharing new task directories", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-temporary-restart-"));
   const picoHome = join(root, "pico-home");
   const env = { PICO_HOME: picoHome };
@@ -212,9 +222,9 @@ test("temporary workspace sessions recover from the persisted workspace path", a
   const secondStatus = (await secondDesktop.handle(
     createRuntimeRequest("workspace.temporary.ensure", {}),
   )) as WorkspaceStatusResult & { readonly temporary: true };
-  assert.equal(secondStatus.workspacePath, firstStatus.workspacePath);
+  assert.notEqual(secondStatus.workspacePath, firstStatus.workspacePath);
   const sessions = (await secondDesktop.handle(
-    createRuntimeRequest("session.list", { workspacePath: secondStatus.workspacePath }),
+    createRuntimeRequest("session.list", { workspacePath: firstStatus.workspacePath }),
   )) as { readonly sessions: readonly { readonly sessionId: string }[] };
   assert.equal(
     sessions.sessions.some((item) => item.sessionId === sessionId),

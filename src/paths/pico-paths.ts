@@ -67,9 +67,17 @@ export function resolvePicoHome(options: ResolvePicoPathsOptions = {}): string {
   return resolve(configured?.trim() || join(options.homeDir ?? homedir(), ".pico"));
 }
 
-/** Runtime-owned shared scratch directory used by Desktop sessions without a selected project. */
+/** Legacy Runtime-owned scratch directory retained for existing Desktop sessions. */
 export function resolvePicoTemporaryWorkspace(options: ResolvePicoPathsOptions = {}): string {
   return join(resolvePicoHome(options), "temporary-workspace");
+}
+
+/** Runtime-owned isolated workspace allocated for one new Desktop task. */
+export function resolvePicoIsolatedTemporaryWorkspace(
+  instanceId: string,
+  options: ResolvePicoPathsOptions = {},
+): string {
+  return join(resolvePicoHome(options), `temporary-workspace-${instanceId}`);
 }
 
 export function canonicalizeWorkspacePath(workDir: string): string {
