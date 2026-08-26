@@ -455,6 +455,11 @@ function assertEventBelongsToClaim(
 function assertProvision(provision: AgentGraphOperatorProvisionRecord): void {
   requireNonEmpty(provision.provisionId, "provisionId");
   requireNonEmpty(provision.childSessionId, "childSessionId");
+  if (provision.state === "stopping" || provision.state === "stopped") {
+    throw new AgentGraphRuntimeIntegrityError(
+      `Provision ${provision.provisionId} is ${provision.state} and cannot be ensured`,
+    );
+  }
 }
 
 function assertLeaseMatchesProvision(
@@ -493,6 +498,11 @@ function assertActivationBinding(input: StartOrObserveAgentGraphActivationInput)
   ) {
     throw new AgentGraphRuntimeIntegrityError(
       `Claim ${claim.claimId} does not match provision ${provision.provisionId}`,
+    );
+  }
+  if (provision.state !== "provisioned") {
+    throw new AgentGraphRuntimeIntegrityError(
+      `Claim ${claim.claimId} cannot start while provision ${provision.provisionId} is ${provision.state}`,
     );
   }
   if (claim.state === "cancelled") {
