@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
+import { SqliteAgentGraphControlStoreAdapter } from "../../src/agent-graph/sqlite-control-store-adapter.js";
 import {
   AgentGraphStoreConflictError,
   SqliteAgentGraphControlStore,
@@ -464,6 +465,91 @@ test("finish atomically accepts only selected RecordRefs from the same Graph", a
   }
 });
 
+test("schedule add atomically accepts only committed input RecordRefs from the same Graph", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-agent-graph-input-records-"));
+  const store = new SqliteAgentGraphControlStore({ storageRoot: root });
+  const control = new SqliteAgentGraphControlStoreAdapter(store);
+  try {
+    const ownRecordId = seedGraphRecord(store, {
+      graphId: "input-graph",
+      rootSessionId: "input-root",
+      suffix: "input-own",
+    });
+    const foreignRecordId = seedGraphRecord(store, {
+      graphId: "input-foreign-graph",
+      rootSessionId: "input-foreign-root",
+      suffix: "input-foreign",
+    });
+    const before = graphMutationSnapshot(store, "input-graph");
+
+    assert.throws(
+      () =>
+        control.commitScheduleRevision({
+          graphId: "input-graph",
+          expectedPreviousRevision: 1,
+          operationId: "add-unknown-input",
+          source: operationSource("input-root", "add-unknown-input"),
+          commands: [
+            graphAddCommand({
+              graphId: "input-graph",
+              suffix: "unknown-input",
+              revision: 2,
+              inputRecordIds: ["missing-record"],
+            }),
+          ],
+        }),
+      /Input RecordRef missing-record does not exist/u,
+    );
+    assert.deepEqual(graphMutationSnapshot(store, "input-graph"), before);
+
+    assert.throws(
+      () =>
+        control.commitScheduleRevision({
+          graphId: "input-graph",
+          expectedPreviousRevision: 1,
+          operationId: "add-foreign-input",
+          source: operationSource("input-root", "add-foreign-input"),
+          commands: [
+            graphAddCommand({
+              graphId: "input-graph",
+              suffix: "foreign-input",
+              revision: 2,
+              inputRecordIds: [foreignRecordId],
+            }),
+          ],
+        }),
+      /belongs to Graph input-foreign-graph/u,
+    );
+    assert.deepEqual(graphMutationSnapshot(store, "input-graph"), before);
+
+    const committed = control.commitScheduleRevision({
+      graphId: "input-graph",
+      expectedPreviousRevision: 1,
+      operationId: "add-own-input",
+      source: operationSource("input-root", "add-own-input"),
+      commands: [
+        graphAddCommand({
+          graphId: "input-graph",
+          suffix: "own-input",
+          revision: 2,
+          inputRecordIds: [ownRecordId],
+        }),
+      ],
+    });
+    assert.equal(committed.record.revision, 2);
+    assert.equal(store.getGraph("input-graph")?.headRevision, 2);
+    assert.deepEqual(
+      store.listScheduleRevisions("input-graph").map((revision) => revision.operationId),
+      ["add-input-own", "add-own-input"],
+    );
+    assert.deepEqual(store.listOperatorProvisions("input-graph"), before.provisions);
+    assert.deepEqual(store.listActivationClaims("input-graph"), before.claims);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("agent graph store serializes schedule, activation, and finish races across processes", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-agent-graph-race-"));
   try {
@@ -607,6 +693,60 @@ function activationClaimInput(): ClaimAgentGraphActivationInput {
   };
 }
 
+function graphAddCommand(options: {
+  readonly graphId: string;
+  readonly suffix: string;
+  readonly revision: number;
+  readonly inputRecordIds: readonly string[];
+}) {
+  const source = operationSource(`root-${options.suffix}`, `add-${options.suffix}`);
+  return {
+    kind: "add" as const,
+    operator: {
+      graphId: options.graphId,
+      operatorId: `operator-${options.suffix}`,
+      generation: 1,
+      role: `role-${options.suffix}`,
+      profileSnapshot: {
+        profileId: "default",
+        tools: [],
+        permissionPolicy: null,
+        systemPromptVersion: "v1",
+      },
+      workspacePolicy: { kind: "shared" as const },
+    },
+    intent: {
+      graphId: options.graphId,
+      intentId: `intent-${options.suffix}`,
+      operatorId: `operator-${options.suffix}`,
+      operatorGeneration: 1,
+      instruction: `instruction-${options.suffix}`,
+      inputRefs: options.inputRecordIds.map((recordId) => ({ recordId })),
+      createdAtRevision: options.revision,
+      requestedBy: source,
+    },
+  };
+}
+
+function operationSource(rootSessionId: string, suffix: string) {
+  return {
+    sessionId: rootSessionId,
+    turnId: `turn-${suffix}`,
+    runId: `run-${suffix}`,
+    toolCallId: `tool-${suffix}`,
+  };
+}
+
+function graphMutationSnapshot(store: SqliteAgentGraphControlStore, graphId: string) {
+  return {
+    graph: store.getGraph(graphId),
+    revisions: store.listScheduleRevisions(graphId),
+    provisions: store.listOperatorProvisions(graphId),
+    claims: store.listActivationClaims(graphId),
+    records: store.listRecordRefs(graphId),
+  };
+}
+
 function seedGraphRecord(
   store: SqliteAgentGraphControlStore,
   options: {
@@ -622,15 +762,20 @@ function seedGraphRecord(
   const childRunId = `child-run-${options.suffix}`;
   const recordId = `record-${options.suffix}`;
   store.createGraph({ graphId: options.graphId, rootSessionId: options.rootSessionId, epoch: 1 });
-  store.commitScheduleRevision(
-    scheduleInput({
-      graphId: options.graphId,
-      rootSessionId: options.rootSessionId,
-      operationId: `add-${options.suffix}`,
-      expectedRevision: 0,
-      kind: "add",
-    }),
-  );
+  new SqliteAgentGraphControlStoreAdapter(store).commitScheduleRevision({
+    graphId: options.graphId,
+    expectedPreviousRevision: 0,
+    operationId: `add-${options.suffix}`,
+    source: operationSource(options.rootSessionId, `add-${options.suffix}`),
+    commands: [
+      graphAddCommand({
+        graphId: options.graphId,
+        suffix: options.suffix,
+        revision: 1,
+        inputRecordIds: [],
+      }),
+    ],
+  });
   store.ensureOperatorProvision({
     provisionId: `provision-${options.suffix}`,
     graphId: options.graphId,
