@@ -107,6 +107,7 @@ interface RuntimeRunBaseOptions {
   readonly sessionId: string;
   readonly workDir: string;
   readonly runId?: string;
+  readonly turnId?: string;
   readonly invocationId?: string;
   readonly runStartedEventId?: string;
   readonly terminalEventId?: string;
@@ -143,6 +144,20 @@ export interface RuntimeRunContinuationStartOptions {
   readonly startedAt?: string;
 }
 
+export interface RuntimeRunExactAdmissionOptions {
+  readonly capability: EngineRuntimeCapability;
+  readonly runId: string;
+  readonly turnId: string;
+  readonly invocationId: string;
+  readonly runStartedEventId: string;
+  readonly startedAt?: string;
+}
+
+export type RuntimeRunExactAdmissionOutcome = Readonly<{
+  status: "admitted" | "observed";
+  startEvent: RuntimeRunStartedEvent;
+}>;
+
 /** Narrow capability that proves a live Session may still append canonical RuntimeEvents. */
 export interface RuntimeEventWriteGuard {
   assertRuntimeEventWriteAllowed(): Promise<RuntimeOwnerFence | void>;
@@ -153,6 +168,8 @@ export interface ReconcileRuntimeRunsOptions {
   readonly capability: EngineRuntimeCapability;
   /** A durably pre-admitted run that a cold worker is about to attach and execute. */
   readonly prestartedRunId?: string;
+  /** Harmless deterministic facts that may already follow the admission on a crash retry. */
+  readonly prestartedAllowedEventIds?: readonly string[];
 }
 
 export interface RepairRuntimeSessionProjectionOptions {
@@ -348,7 +365,7 @@ export class RuntimeRun {
       ...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),
       ...(options.parentToolCallId ? { parentToolCallId: options.parentToolCallId } : {}),
     });
-    this.turnId = `turn:${this.runId}:input`;
+    this.turnId = options.turnId ?? `turn:${this.runId}:input`;
     this.stepId = `step:${this.runId}:input`;
   }
 
@@ -372,6 +389,75 @@ export class RuntimeRun {
       writeGuard: capability.writeGuard,
       runtimeCapability: capability,
     });
+  }
+
+  /**
+   * Publishes one caller-preallocated RuntimeRun admission without dispatching any work.
+   *
+   * The immutable start identity is observed on replay. A concurrent contender whose
+   * timestamp differs loses the event-id CAS, then reads and validates the winner instead
+   * of converting an already-admitted Run into a second execution.
+   */
+  static async admitExact(
+    options: RuntimeRunExactAdmissionOptions,
+  ): Promise<RuntimeRunExactAdmissionOutcome> {
+    const { capability } = options;
+    const store = runtimeEventStoreFromCapability(capability);
+    admitEventLogNewWork({
+      storageRoot: store.storageRoot,
+      currentSessionId: capability.sessionId,
+    });
+    const existing = await store.readRun(capability.sessionId, options.runId);
+    if (existing.length > 0) {
+      return {
+        status: "observed",
+        startEvent: requireExactRunStartedEvent(existing, capability, options),
+      };
+    }
+
+    const startedAt = options.startedAt ?? new Date().toISOString();
+    const run = new RuntimeRun(capability.sessionId, capability.workDir, {
+      sessionId: capability.sessionId,
+      workDir: capability.workDir,
+      store,
+      writeGuard: capability.writeGuard,
+      runtimeCapability: capability,
+      runId: options.runId,
+      turnId: options.turnId,
+      invocationId: options.invocationId,
+      runStartedEventId: options.runStartedEventId,
+      now: () => new Date(startedAt),
+    });
+    const guardedFence = await capability.writeGuard.assertRuntimeEventWriteAllowed();
+    await store.initializeSession({
+      sessionId: capability.sessionId,
+      workDir: capability.workDir,
+    });
+    await capability.writeGuard.assertRuntimeEventWriteAllowed();
+    if (guardedFence?.sessionId === capability.sessionId && guardedFence.epoch > 0) {
+      run.ownerFence = guardedFence;
+    } else {
+      const currentFence = await store.readOwnerFence(capability.sessionId);
+      run.ownerFence = await store.advanceOwnerFence(capability.sessionId, currentFence.epoch);
+    }
+    try {
+      const append = await run.recordRunStarted();
+      return {
+        status: append.inserted ? "admitted" : "observed",
+        startEvent: requireExactRunStartedEvent(
+          await store.readRun(capability.sessionId, options.runId),
+          capability,
+          options,
+        ),
+      };
+    } catch (error) {
+      const raced = await store.readRun(capability.sessionId, options.runId);
+      if (raced.length === 0) throw error;
+      return {
+        status: "observed",
+        startEvent: requireExactRunStartedEvent(raced, capability, options),
+      };
+    }
   }
 
   /** claim + canonical run.started 由 store 在同一事务完成；返回的 run 只 attach 已落库起点。 */
@@ -472,9 +558,20 @@ export class RuntimeRun {
     const reconciled: string[] = [];
     if (options.prestartedRunId) {
       const prestartedEvents = await store.readRun(sessionId, options.prestartedRunId);
-      if (prestartedEvents.length !== 1 || prestartedEvents[0]?.kind !== "run.started") {
+      const starts = prestartedEvents.filter((event) => event.kind === "run.started");
+      const unsafeDispatch = prestartedEvents.find(
+        (event) =>
+          event.kind === "model.call.started" ||
+          event.kind === "tool.started" ||
+          event.kind === "run.terminal",
+      );
+      const allowed = new Set(options.prestartedAllowedEventIds ?? []);
+      const unexpected = prestartedEvents.find(
+        (event) => event.kind !== "run.started" && !allowed.has(event.eventId),
+      );
+      if (starts.length !== 1 || unsafeDispatch || unexpected) {
         throw new Error(
-          `Prestarted Runtime run ${options.prestartedRunId} is not an unattached admission`,
+          `Prestarted Runtime run ${options.prestartedRunId} is not a safely attachable admission`,
         );
       }
     }
@@ -1547,7 +1644,7 @@ export class RuntimeRun {
     return this.finishPromise;
   }
 
-  private async recordRunStarted(): Promise<void> {
+  private async recordRunStarted(): Promise<RuntimeEventStoreAppendResult> {
     const event: RuntimeRunStartedEvent = {
       ...this.base(
         this.runStartedEventId ?? createRuntimeEventId("run-started"),
@@ -1559,7 +1656,7 @@ export class RuntimeRun {
         workDir: this.canonicalWorkDir,
       },
     };
-    await this.append(event);
+    return this.append(event);
   }
 
   private base(
@@ -2682,6 +2779,43 @@ function forkHistoryPayload(event: RuntimeModelHistoryEvent): unknown {
     },
     data: event.data,
   };
+}
+
+function requireExactRunStartedEvent(
+  events: readonly RuntimeEvent[],
+  capability: EngineRuntimeCapability,
+  identity: Omit<RuntimeRunExactAdmissionOptions, "capability" | "startedAt">,
+): RuntimeRunStartedEvent {
+  for (const event of events) {
+    if (
+      event.sessionId !== capability.sessionId ||
+      event.runId !== identity.runId ||
+      event.invocationId !== identity.invocationId
+    ) {
+      throw new RuntimeEventStoreIntegrityError(
+        `RuntimeRun ${identity.runId} contains an event outside its exact admission identity`,
+      );
+    }
+  }
+  const starts = events.filter(
+    (event): event is RuntimeRunStartedEvent => event.kind === "run.started",
+  );
+  if (starts.length !== 1) {
+    throw new RuntimeEventStoreIntegrityError(
+      `RuntimeRun ${identity.runId} must contain exactly one run.started event`,
+    );
+  }
+  const start = starts[0]!;
+  if (
+    start.eventId !== identity.runStartedEventId ||
+    start.turnId !== identity.turnId ||
+    canonicalizeWorkspacePath(start.data.workDir) !== canonicalizeWorkspacePath(capability.workDir)
+  ) {
+    throw new RuntimeEventStoreIntegrityError(
+      `RuntimeRun ${identity.runId} does not match its exact admission`,
+    );
+  }
+  return start;
 }
 
 function runtimeFailureReason(error: unknown): string {
