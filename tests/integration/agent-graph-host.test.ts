@@ -4,11 +4,24 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { graphIdFor } from "../../src/agent-graph/core/index.js";
 import { Session } from "../../src/engine/session.js";
 import { SessionManager } from "../../src/engine/session-manager.js";
-import { createAgentGraphWorkspaceHost } from "../../src/runtime/agent-graph-host.js";
+import {
+  createAgentGraphWorkspaceHost,
+  type AgentGraphRunToolBinding,
+  type CreateAgentGraphWorkspaceHostOptions,
+} from "../../src/runtime/agent-graph-host.js";
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
+import { RuntimeRun } from "../../src/runtime/runtime-run.js";
 import { WorkspaceTaskRuntime } from "../../src/runtime/workspace-runtime.js";
+import { RUNTIME_EVENT_SCHEMA_VERSION } from "../../src/storage/runtime-event.js";
+import {
+  agentOutputFingerprint,
+  agentOutputIdempotencyKey,
+  type CommitAgentOutputInput,
+  type GraphOperatorActivationContext,
+} from "../../src/tools/agent-output-tool.js";
 
 test("workspace Graph host exposes one root binding and owns application lifecycle", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-agent-graph-host-"));
@@ -65,6 +78,186 @@ test("workspace Graph host exposes one root binding and owns application lifecyc
     owner.release();
     await manager.clearAndDrain();
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("workspace Graph host executes an exact operator with owner-fenced output and observes terminal replay", async () => {
+  const executions: Parameters<CreateAgentGraphWorkspaceHostOptions["execute"]>[0][] = [];
+  let postTerminalBinding: AgentGraphRunToolBinding | undefined;
+  const fixture = await createHostFixture(async (input) => {
+    executions.push(input);
+    assert.equal(input.binding.kind, "operator");
+    if (input.binding.kind !== "operator") return;
+    postTerminalBinding = input.binding;
+    const activation = input.binding.getActivationContext();
+    assert.ok(activation);
+    assert.equal(input.orchestrationMode, "default");
+    assert.equal(input.requestedModel, "test/operator-model");
+    assert.deepEqual(input.allowedTools, ["read_file", "agent_output"]);
+
+    const runtimeRun = await attachHostedRuntimeRun(input);
+    const committed = await input.binding.outputPort.commitAgentOutput(
+      agentOutputInput(activation, "operator result"),
+    );
+    assert.equal(committed.replayed, false);
+    assert.ok(committed.recordId);
+    await runtimeRun.finish("completed");
+    input.onTerminal();
+    input.onTerminal();
+  });
+  try {
+    const graphId = graphIdFor(fixture.owner.session.id, 1);
+    await scheduleOperator(fixture, graphId, "intent-operator");
+
+    const projection = await fixture.host.application.toolPort.readProjection({
+      graphId,
+      rootSessionId: fixture.owner.session.id,
+    });
+    assert.equal(executions.length, 1);
+    assert.equal(projection.claims[0]?.state, "executing");
+    assert.equal(projection.records.length, 1);
+    assert.equal(projection.records[0]?.sourceRunId, executions[0]?.prestartedRun.runId);
+
+    assert.ok(postTerminalBinding?.kind === "operator");
+    if (postTerminalBinding?.kind === "operator") {
+      const activation = postTerminalBinding.getActivationContext();
+      assert.ok(activation);
+      await assert.rejects(
+        postTerminalBinding.outputPort.commitAgentOutput(
+          agentOutputInput(activation, "operator result"),
+        ),
+        /Session is not live/u,
+      );
+    }
+
+    await fixture.host.application.supervisor.notifyGraph(graphId);
+    assert.equal(executions.length, 1, "terminal exact Run must be observed without redispatch");
+    const events = await fixture.owner.session.runtimeEventStore!.readRun(
+      executions[0]!.session.id,
+      executions[0]!.prestartedRun.runId,
+    );
+    assert.equal(events.filter((event) => event.kind === "run.started").length, 1);
+    assert.equal(events.filter((event) => event.kind === "agent.output").length, 1);
+    assert.equal(events.filter((event) => event.kind === "run.terminal").length, 1);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("workspace Graph host executes one exact root wake and observes its terminal replay", async () => {
+  const executions: Parameters<CreateAgentGraphWorkspaceHostOptions["execute"]>[0][] = [];
+  const fixture = await createHostFixture(async (input) => {
+    executions.push(input);
+    assert.equal(input.binding.kind, "root");
+    if (input.binding.kind !== "root") return;
+    assert.equal(input.orchestrationMode, "graph");
+    assert.equal(input.requestedModel, undefined);
+    assert.equal(input.allowedTools, undefined);
+    const context = input.binding.getRootContext();
+    assert.ok(context);
+    assert.equal(context.graphId, "graph-root-wake");
+    assert.equal(context.rootSessionId, fixture.owner.session.id);
+    assert.equal(context.rootTurnId, input.prestartedRun.turnId);
+    assert.equal(context.rootRunId, input.prestartedRun.runId);
+
+    const runtimeRun = await attachHostedRuntimeRun(input);
+    await runtimeRun.finish("completed");
+    input.onTerminal();
+  });
+  try {
+    fixture.host.store.createGraph({
+      graphId: "graph-root-wake",
+      rootSessionId: fixture.owner.session.id,
+      epoch: 1,
+    });
+    fixture.host.store.enqueueSupervisorWake({
+      wakeId: "wake-root-execute",
+      graphId: "graph-root-wake",
+      dedupeKey: "record:operator-completed",
+      wakeFingerprint: "sha256:root-wake",
+      cause: "runtime_terminal",
+      payload: { recordId: "record-1" },
+    });
+
+    await fixture.host.application.supervisor.scanRecoverableWakes();
+    assert.equal(executions.length, 1);
+    assert.equal(fixture.host.store.getSupervisorWake("wake-root-execute")?.status, "delivered");
+    await fixture.host.application.supervisor.scanRecoverableWakes();
+    assert.equal(executions.length, 1, "delivered root wake must not redispatch");
+    const events = await fixture.owner.session.runtimeEventStore!.readRun(
+      fixture.owner.session.id,
+      executions[0]!.prestartedRun.runId,
+    );
+    assert.equal(events.filter((event) => event.kind === "run.started").length, 1);
+    assert.equal(events.filter((event) => event.kind === "run.terminal").length, 1);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("workspace Graph host clears operator ownership after an exact execution error", async () => {
+  const executions: Parameters<CreateAgentGraphWorkspaceHostOptions["execute"]>[0][] = [];
+  let failedBinding: AgentGraphRunToolBinding | undefined;
+  const fixture = await createHostFixture(async (input) => {
+    executions.push(input);
+    assert.equal(input.binding.kind, "operator");
+    failedBinding = input.binding;
+    const turnId = input.prestartedRun.turnId;
+    assert.ok(turnId);
+    const ownerFence = await input.session.assertRuntimeEventWriteAllowed();
+    await input.session.runtimeEventStore!.append(
+      {
+        schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
+        eventId: "provider-dispatch-before-crash",
+        sessionId: input.session.id,
+        invocationId: input.prestartedRun.invocationId,
+        runId: input.prestartedRun.runId,
+        turnId,
+        at: new Date().toISOString(),
+        partial: false,
+        visibility: "internal",
+        kind: "model.call.started",
+        data: {
+          providerCallId: "provider-dispatch-before-crash",
+          purpose: "main",
+        },
+      },
+      { ownerFence },
+    );
+    throw new Error("simulated hosted execution crash");
+  });
+  try {
+    const graphId = graphIdFor(fixture.owner.session.id, 1);
+    await scheduleOperator(fixture, graphId, "intent-crash");
+    assert.equal(executions.length, 1);
+    assert.ok(failedBinding?.kind === "operator");
+    if (failedBinding?.kind === "operator") {
+      const activation = failedBinding.getActivationContext();
+      assert.ok(activation);
+      await assert.rejects(
+        failedBinding.outputPort.commitAgentOutput(agentOutputInput(activation, "late output")),
+        /Session is not live/u,
+      );
+    }
+
+    await fixture.host.application.supervisor.notifyGraph(graphId);
+    assert.equal(
+      executions.length,
+      1,
+      "an indeterminate exact Run must be observed fail-closed without redispatch",
+    );
+    const events = await fixture.owner.session.runtimeEventStore!.readRun(
+      executions[0]!.session.id,
+      executions[0]!.prestartedRun.runId,
+    );
+    assert.equal(events.filter((event) => event.kind === "run.started").length, 1);
+    assert.equal(events.filter((event) => event.kind === "model.call.started").length, 1);
+    assert.equal(
+      events.some((event) => event.kind === "run.terminal"),
+      false,
+    );
+  } finally {
+    await fixture.close();
   }
 });
 
@@ -315,4 +508,152 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
     resolve = resolvePromise;
   });
   return { promise, resolve };
+}
+
+async function createHostFixture(
+  execute: CreateAgentGraphWorkspaceHostOptions["execute"],
+): Promise<{
+  readonly host: ReturnType<typeof createAgentGraphWorkspaceHost>;
+  readonly owner: Awaited<ReturnType<SessionManager["getOrCreatePinned"]>>;
+  close(): Promise<void>;
+}> {
+  const root = await mkdtemp(join(tmpdir(), "pico-agent-graph-host-execute-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  await mkdir(workDir, { recursive: true });
+  const runtimePort = createEngineRuntimePort();
+  const manager = new SessionManager({
+    createSession: (id, targetWorkDir, options) =>
+      new Session(id, targetWorkDir, {
+        ...options,
+        persistence: true,
+        picoHome,
+        runtimePort,
+      }),
+  });
+  const owner = await manager.getOrCreatePinned("root-session", workDir, {
+    persistence: true,
+    picoHome,
+    runtimePort,
+  });
+  const host = createAgentGraphWorkspaceHost({
+    workDir,
+    storageRoot: owner.session.runtimeEventStore!.storageRoot,
+    runtimeEventStore: owner.session.runtimeEventStore!,
+    sessionManager: manager,
+    sessionOptions: { persistence: true, picoHome, runtimePort },
+    execute,
+  });
+  await host.start();
+  return {
+    host,
+    owner,
+    close: async () => {
+      await host.close();
+      owner.release();
+      await manager.clearAndDrain();
+      await rm(root, { recursive: true, force: true });
+    },
+  };
+}
+
+async function scheduleOperator(
+  fixture: Awaited<ReturnType<typeof createHostFixture>>,
+  graphId: string,
+  intentId: string,
+): Promise<void> {
+  await fixture.host.application.toolPort.commitUpdate({
+    graphId,
+    expectedRevision: 0,
+    operationId: `add:${intentId}`,
+    source: {
+      sessionId: fixture.owner.session.id,
+      turnId: "root-turn-1",
+      runId: "root-run-1",
+      toolCallId: `tool:${intentId}`,
+    },
+    commands: [
+      {
+        kind: "add",
+        operator: {
+          graphId,
+          operatorId: "researcher",
+          generation: 1,
+          role: "researcher",
+          profileSnapshot: {
+            profileId: "test/operator",
+            model: "test/operator-model",
+            tools: ["read_file"],
+            permissionPolicy: null,
+            systemPromptVersion: "v1",
+          },
+          workspacePolicy: { kind: "shared" },
+        },
+        intent: {
+          graphId,
+          intentId,
+          operatorId: "researcher",
+          operatorGeneration: 1,
+          instruction: "research the requested topic",
+          inputRefs: [],
+          createdAtRevision: 1,
+          requestedBy: {
+            sessionId: fixture.owner.session.id,
+            turnId: "root-turn-1",
+            runId: "root-run-1",
+            toolCallId: `tool:${intentId}`,
+          },
+        },
+      },
+    ],
+  });
+  await fixture.host.application.supervisor.notifyGraph(graphId);
+}
+
+async function attachHostedRuntimeRun(
+  input: Parameters<CreateAgentGraphWorkspaceHostOptions["execute"]>[0],
+): Promise<RuntimeRun> {
+  return RuntimeRun.start({
+    capability: input.session.runtimeEventCapability!,
+    runId: input.prestartedRun.runId,
+    turnId: input.prestartedRun.turnId,
+    invocationId: input.prestartedRun.invocationId,
+    runStartedEventId: input.prestartedRun.runStartedEventId,
+    now: () => new Date(input.prestartedRun.runStartedAt),
+  });
+}
+
+function agentOutputInput(
+  activation: GraphOperatorActivationContext,
+  output: string,
+): CommitAgentOutputInput {
+  const evidenceRefs = ["pico://evidence/operator"];
+  const artifactRefs = ["artifact://operator-result"];
+  const idempotencyKey = agentOutputIdempotencyKey(activation);
+  const fingerprint = agentOutputFingerprint({
+    status: "success",
+    output,
+    evidenceRefs,
+    artifactRefs,
+  });
+  return {
+    activation,
+    toolCallId: "tool-call-agent-output",
+    idempotencyKey,
+    fingerprint,
+    eventPayload: {
+      schemaVersion: "pico.agent_output.v1",
+      graphId: activation.graphId,
+      operatorId: activation.operatorId,
+      operatorGeneration: activation.operatorGeneration,
+      activationId: activation.activationId,
+      status: "success",
+      output,
+      outputBytes: Buffer.byteLength(output, "utf8"),
+      evidenceRefs,
+      artifactRefs,
+      idempotencyKey,
+      fingerprint,
+    },
+  };
 }
