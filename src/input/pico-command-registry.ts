@@ -1453,11 +1453,11 @@ function createPlanCommand(settings: SessionSettings, session?: Session): SlashC
 function createGraphCommand(settings: SessionSettings): SlashCommand {
   return {
     name: "graph",
-    description: "Show or change Graph orchestration mode",
+    description: "Show or change persistent Agent Graph orchestration mode",
     usage: "/graph [on|off]",
     argumentHint: "[on|off]",
     argumentCompleter: completeFromCandidates([
-      { value: "on", description: "Enable Graph Mode (add_work scheduling)" },
+      { value: "on", description: "Enable persistent Agent Graph scheduling" },
       { value: "off", description: "Disable Graph Mode" },
     ]),
     category: "session",

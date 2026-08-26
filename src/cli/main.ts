@@ -63,7 +63,7 @@ Options:
   --add-dir <path>                   Add an authorized workspace directory (repeatable)
   -S, --session <id>                 Resume a session by id
   -c, --continue                     Continue the latest session in this project
-      --graph                        Start with Graph Mode enabled (add_work scheduling)
+      --graph                        Start with persistent Agent Graph scheduling enabled
   --resume <id>                      Resume a session by id
   --fork <id>                        Fork a saved session into a new session
   --fork-session <id>                Alias for --fork
