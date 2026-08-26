@@ -150,6 +150,8 @@ import "./workbar-panels/ToolPanels.css";
 import "./workbar-panels/workbar-panels.css";
 
 const RuntimeContext = createContext<RuntimeStore | null>(null);
+const CHOOSE_PROJECT_OPTION_VALUE = "__choose-project__";
+const TEMPORARY_PROJECT_OPTION_VALUE = "__temporary-project__";
 
 function useRuntime(): RuntimeStore {
   const value = useContext(RuntimeContext);
@@ -1556,6 +1558,9 @@ function ConversationPage() {
     (item) => item.workspacePath === workspacePath && item.id === sessionId,
   );
   const workspace = data.workspaces.find((candidate) => candidate.path === workspacePath);
+  const projectWorkspaceOptions = data.workspaces.filter(
+    (candidate) => candidate.temporary !== true,
+  );
   const workspaceLabel = workspaceDisplayName(workspacePath, workspace);
   const conversation = conversationKey ? data.conversations[conversationKey] : undefined;
   const sessionRuns = data.runs.filter(
@@ -2269,14 +2274,26 @@ function ConversationPage() {
                           <select
                             name="workspace"
                             aria-label="项目"
-                            value={workspacePath}
+                            value={
+                              workspace?.temporary ? TEMPORARY_PROJECT_OPTION_VALUE : workspacePath
+                            }
                             onChange={(event) => {
                               const nextWorkspacePath = event.target.value;
+                              if (nextWorkspacePath === CHOOSE_PROJECT_OPTION_VALUE) {
+                                void chooseProjectFolder();
+                                return;
+                              }
+                              if (nextWorkspacePath === TEMPORARY_PROJECT_OPTION_VALUE) return;
                               navigate(newSessionHref(nextWorkspacePath));
                             }}
                           >
-                            <option value="">选择项目</option>
-                            {data.workspaces.map((workspace) => (
+                            <option value={CHOOSE_PROJECT_OPTION_VALUE}>选择项目</option>
+                            {workspace?.temporary && (
+                              <option value={TEMPORARY_PROJECT_OPTION_VALUE}>
+                                {workspaceLabel}
+                              </option>
+                            )}
+                            {projectWorkspaceOptions.map((workspace) => (
                               <option key={workspace.path} value={workspace.path}>
                                 {workspaceDisplayName(workspace.path, workspace)}
                               </option>
