@@ -224,18 +224,22 @@ export class WorkspaceTaskRuntime {
       }
       return cloneRun(existing.snapshot);
     }
-    return this.startRunWithId(exactRunId, request, executor);
+    return this.startRunWithId(exactRunId, request, executor, { allowConcurrent: true });
   }
 
   private startRunWithId(
     runId: string,
     request: WorkspaceRunRequest,
     executor: WorkspaceRunExecutor,
+    options: { allowConcurrent?: boolean } = {},
   ): WorkspaceRunSnapshot {
     this.assertOpen();
     const description = request.description.trim();
     if (!description) throw new Error("Run 描述不能为空");
-    if (this.listRuns().some((run) => !isTerminalRunStatus(run.status))) {
+    if (
+      !options.allowConcurrent &&
+      this.listRuns().some((run) => !isTerminalRunStatus(run.status))
+    ) {
       throw new Error(`工作区 ${this.workspace} 已有活跃 Run，拒绝并发执行`);
     }
 

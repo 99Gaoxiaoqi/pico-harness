@@ -109,3 +109,103 @@ test("workspace runtime idempotently installs a trusted exact Run id", async () 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("workspace runtime admits a trusted exact operator beside the foreground root", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-agent-graph-foreground-operator-"));
+  const workDir = join(root, "workspace");
+  await mkdir(workDir);
+  const runtime = await WorkspaceTaskRuntime.create({ workDir });
+  const foreground = deferred();
+  const operator = deferred();
+  const foregroundStarted = deferred();
+  const operatorStarted = deferred();
+  try {
+    const rootRun = runtime.startRun({ description: "foreground root" }, async () => {
+      foregroundStarted.resolve();
+      await foreground.promise;
+    });
+    const operatorRun = runtime.startExactRun(
+      "operator-run-1",
+      { description: "Graph operator", sessionId: "operator-session" },
+      async () => {
+        operatorStarted.resolve();
+        await operator.promise;
+      },
+    );
+
+    await Promise.all([foregroundStarted.promise, operatorStarted.promise]);
+    assert.equal(rootRun.status, "running");
+    assert.equal(operatorRun.status, "running");
+    assert.throws(
+      () => runtime.startRun({ description: "another foreground" }, async () => undefined),
+      /已有活跃 Run/,
+    );
+
+    foreground.resolve();
+    operator.resolve();
+    assert.equal((await runtime.waitForRun(rootRun.runId)).status, "succeeded");
+    assert.equal((await runtime.waitForRun(operatorRun.runId)).status, "succeeded");
+  } finally {
+    foreground.resolve();
+    operator.resolve();
+    await runtime.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("workspace runtime admits concurrent trusted exact Graph Runs", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-agent-graph-concurrent-exact-"));
+  const workDir = join(root, "workspace");
+  await mkdir(workDir);
+  const runtime = await WorkspaceTaskRuntime.create({ workDir });
+  const firstGate = deferred();
+  const secondGate = deferred();
+  const firstStarted = deferred();
+  const secondStarted = deferred();
+  try {
+    const first = runtime.startExactRun(
+      "operator-run-1",
+      { description: "first operator", sessionId: "operator-session-1" },
+      async () => {
+        firstStarted.resolve();
+        await firstGate.promise;
+      },
+    );
+    const second = runtime.startExactRun(
+      "root-wake-run-1",
+      { description: "root wake", sessionId: "root-session" },
+      async () => {
+        secondStarted.resolve();
+        await secondGate.promise;
+      },
+    );
+
+    await Promise.all([firstStarted.promise, secondStarted.promise]);
+    assert.deepEqual(
+      runtime
+        .listRuns()
+        .filter((run) => run.status === "running")
+        .map((run) => run.runId)
+        .sort(),
+      [first.runId, second.runId].sort(),
+    );
+
+    firstGate.resolve();
+    secondGate.resolve();
+    assert.equal((await runtime.waitForRun(first.runId)).status, "succeeded");
+    assert.equal((await runtime.waitForRun(second.runId)).status, "succeeded");
+  } finally {
+    firstGate.resolve();
+    secondGate.resolve();
+    await runtime.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
