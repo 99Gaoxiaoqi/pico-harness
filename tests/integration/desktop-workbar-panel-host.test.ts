@@ -214,6 +214,7 @@ test("trace and terminal helpers project authority records without corrupting UT
     sequence: 9,
     createdAt: "2026-08-23T00:00:00.000Z",
     kind: "tool.completed",
+    category: "tool",
     title: "读取文件",
     summary: "完成",
     status: "completed",
