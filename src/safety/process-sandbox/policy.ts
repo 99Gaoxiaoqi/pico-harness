@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import { mkdirSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type {
   SandboxConfig,
@@ -26,7 +28,9 @@ export function createSandboxPolicy(options: CreateSandboxPolicyOptions): Sandbo
   const workspaceRoots = normalizeRoots(options.workspaceRoots);
   const explicitReadRoots = normalizeRoots(options.readRoots ?? []);
   const writeRoots =
-    profile === "workspace-write" ? normalizeRoots([...workspaceRoots, scratchRoot]) : [scratchRoot];
+    profile === "workspace-write"
+      ? normalizeRoots([...workspaceRoots, scratchRoot])
+      : [scratchRoot];
   const readRoots = normalizeRoots([...explicitReadRoots, ...workspaceRoots, ...writeRoots]);
   const network: SandboxNetworkPolicy =
     profile === "read-only" ? "deny" : profile === "danger-full-access" ? "allow" : config.network;
@@ -38,6 +42,11 @@ export function createSandboxPolicy(options: CreateSandboxPolicyOptions): Sandbo
     scratchRoot,
     generation: options.generation ?? 0,
   });
+}
+
+export function defaultSandboxScratchRoot(cwd: string): string {
+  const scope = createHash("sha256").update(resolve(cwd)).digest("hex").slice(0, 16);
+  return resolve(tmpdir(), "pico-process-sandbox", scope);
 }
 
 export function isWithinRoot(root: string, target: string): boolean {

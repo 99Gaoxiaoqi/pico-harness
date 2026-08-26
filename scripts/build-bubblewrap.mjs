@@ -53,15 +53,22 @@ await copyFile(join(buildRoot, "bwrap"), output);
 await chmod(output, 0o755);
 await copyFile(archive, join(licenseRoot, `bubblewrap-${linux.bubblewrapVersion}.tar.xz`));
 await copyFile(join(sourceRoot, "COPYING"), join(licenseRoot, "COPYING"));
-await writeFile(join(licenseRoot, "SOURCE.sha256"), `${linux.sourceSha256}  bubblewrap-${linux.bubblewrapVersion}.tar.xz\n`);
+await writeFile(
+  join(licenseRoot, "SOURCE.sha256"),
+  `${linux.sourceSha256}  bubblewrap-${linux.bubblewrapVersion}.tar.xz\n`,
+);
 
-const binaryDigest = createHash("sha256").update(await readFile(output)).digest("hex");
+const binaryDigest = createHash("sha256")
+  .update(await readFile(output))
+  .digest("hex");
 await writeFile(`${output}.sha256`, `${binaryDigest}  bwrap\n`);
 const linkage = run("ldd", [output], true);
 if (/libcap\.so/u.test(linkage)) {
   throw new Error("Bubblewrap 仍动态依赖 libcap，拒绝生成不可移植资源");
 }
-process.stdout.write(`Built verified Bubblewrap ${linux.bubblewrapVersion} for linux-${process.arch}\n`);
+process.stdout.write(
+  `Built verified Bubblewrap ${linux.bubblewrapVersion} for linux-${process.arch}\n`,
+);
 
 function run(command, args, capture = false) {
   const result = spawnSync(command, args, {

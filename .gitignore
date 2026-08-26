@@ -5,6 +5,7 @@ node_modules/
 dist/
 **/.tsbuild/
 **/.vite/
+**/target/
 apps/desktop/out/
 resources/sandbox/linux-*/bwrap
 resources/sandbox/linux-*/bwrap.sha256

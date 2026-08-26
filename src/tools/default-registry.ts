@@ -34,6 +34,7 @@ import { WorkspaceRoots, buildWorkspaceBoundaryMiddleware } from "./workspace-ro
 import type { CodeIntelligenceService } from "../code-intelligence/types.js";
 import { createCodeIntelligenceTools } from "./code-intelligence.js";
 import type { YoloSandboxConfig } from "../safety/yolo-sandbox.js";
+import type { SandboxProfile } from "../safety/process-sandbox/index.js";
 import { ExploreRepoTool } from "./explore-repo.js";
 import { createSessionTaskTools, type BoundSessionTaskAuthority } from "./session-tasks.js";
 
@@ -42,8 +43,13 @@ export interface DefaultToolRegistryOptions {
   workspaceRoots?: WorkspaceRoots;
   /** Host 将工作区 ask/yolo 与审批合并处理时，关闭这里的严格前置拒绝。 */
   deferWorkspaceBoundary?: boolean;
-  /** 仅可信宿主在 YOLO 运行态显式注入；未传时保持旧 Bash 行为。 */
-  yoloSandbox?: { config?: Partial<YoloSandboxConfig> };
+  /** 仅可信宿主注入的进程沙箱策略；未传表示 danger-full-access。 */
+  processSandbox?: {
+    profile: SandboxProfile;
+    config?: Partial<YoloSandboxConfig>;
+    scratchRoot?: string;
+    generation?: number;
+  };
   backgroundManager?: BackgroundManager;
   /** Session-scoped durable task authority shared by model tools and prompt injection. */
   sessionTasks?: BoundSessionTaskAuthority;
@@ -125,7 +131,7 @@ export function buildDefaultToolRegistry(
     bashTimeoutMs,
     workspaceRoots,
     deferWorkspaceBoundary = false,
-    yoloSandbox,
+    processSandbox,
     hostKind = "cli",
     onToolGroupLoaded,
   } = options;
@@ -138,11 +144,16 @@ export function buildDefaultToolRegistry(
   registry.register(new EditFileTool(roots));
   registry.register(
     new BashTool(workDir, backgroundManager, {
-      ...(yoloSandbox
+      ...(processSandbox
         ? {
             sandbox: {
               workspaceRoots: roots,
-              ...(yoloSandbox.config ? { config: yoloSandbox.config } : {}),
+              profile: processSandbox.profile,
+              ...(processSandbox.config ? { config: processSandbox.config } : {}),
+              ...(processSandbox.scratchRoot ? { scratchRoot: processSandbox.scratchRoot } : {}),
+              ...(processSandbox.generation !== undefined
+                ? { generation: processSandbox.generation }
+                : {}),
             },
           }
         : {}),
@@ -172,6 +183,19 @@ export function buildDefaultToolRegistry(
     new GrepTool(roots, {
       ...(excludeSensitiveGrepFiles !== undefined
         ? { excludeSensitiveFiles: excludeSensitiveGrepFiles }
+        : {}),
+      ...(processSandbox
+        ? {
+            processSandbox: {
+              profile: processSandbox.profile,
+              ...(processSandbox.config ? { config: processSandbox.config } : {}),
+              ...(processSandbox.scratchRoot ? { scratchRoot: processSandbox.scratchRoot } : {}),
+              ...(processSandbox.generation !== undefined
+                ? { generation: processSandbox.generation }
+                : {}),
+              ...(env ? { env } : {}),
+            },
+          }
         : {}),
     }),
   );

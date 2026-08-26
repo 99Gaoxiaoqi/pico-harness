@@ -45,6 +45,8 @@ export interface ManagedSpawnRequest {
   policy: SandboxPolicy;
   platform?: NodeJS.Platform;
   arch?: NodeJS.Architecture;
+  /** Windows Broker 的宿主控制/恢复目录；绝不能包含在目标进程读写根中。 */
+  controlRoot?: string;
   /** 仅测试与可信宿主可注入；项目配置和模型输入不得控制。 */
   backendExecutable?: string;
 }
@@ -67,6 +69,8 @@ export interface ManagedProcess {
 export interface SandboxLease {
   readonly policy: SandboxPolicy;
   readonly backend: SandboxBackend;
+  readonly released: boolean;
+  terminate(signal?: NodeJS.Signals | number): Promise<void>;
   release(): Promise<void>;
 }
 

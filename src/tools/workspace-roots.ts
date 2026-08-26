@@ -28,6 +28,7 @@ export interface AssertAllowedOptions {
 
 export class WorkspaceRoots {
   private readonly oneCallPaths = new Map<string, number>();
+  private policyGeneration = 0;
 
   private constructor(
     private readonly primaryRoot: string,
@@ -91,6 +92,14 @@ export class WorkspaceRoots {
     return Object.freeze([...this.roots]);
   }
 
+  processRoots(): readonly string[] {
+    return Object.freeze([...new Set([...this.roots, ...this.oneCallPaths.keys()])]);
+  }
+
+  generation(): number {
+    return this.policyGeneration;
+  }
+
   async addDirectory(path: string): Promise<AddDirectoryResult> {
     const canonicalPath = await normalizeDirectory(path, this.primaryRoot);
     if (this.roots.includes(canonicalPath)) {
@@ -104,6 +113,7 @@ export class WorkspaceRoots {
       };
     }
     this.roots.push(canonicalPath);
+    this.policyGeneration++;
     return { added: true, path: canonicalPath };
   }
 
@@ -143,12 +153,13 @@ export class WorkspaceRoots {
     const target = this.resolveUnchecked(path);
     let usedOneCallPermission = false;
     if (!this.isAllowed(target)) {
-      const remaining = this.oneCallPaths.get(target) ?? 0;
+      const authorization = [...this.oneCallPaths.keys()].find((root) => isWithin(root, target));
+      const remaining = authorization ? (this.oneCallPaths.get(authorization) ?? 0) : 0;
       if (remaining <= 0) throw outsideWorkspaceError(path);
       usedOneCallPermission = true;
       if (options.consumeAuthorization !== false) {
-        if (remaining === 1) this.oneCallPaths.delete(target);
-        else this.oneCallPaths.set(target, remaining - 1);
+        if (remaining === 1) this.oneCallPaths.delete(authorization!);
+        else this.oneCallPaths.set(authorization!, remaining - 1);
       }
     }
     const existingAncestor = await nearestExistingAncestor(target);
@@ -163,6 +174,13 @@ export class WorkspaceRoots {
     const target = this.resolveUnchecked(path);
     this.oneCallPaths.set(target, (this.oneCallPaths.get(target) ?? 0) + 1);
     return target;
+  }
+
+  consumeAllProcessAuthorizations(): void {
+    for (const [root, count] of [...this.oneCallPaths]) {
+      if (count <= 1) this.oneCallPaths.delete(root);
+      else this.oneCallPaths.set(root, count - 1);
+    }
   }
 
   private isAllowed(path: string): boolean {

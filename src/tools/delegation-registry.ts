@@ -33,7 +33,6 @@ import {
 } from "../approval/powershell-safety.js";
 import { hostShellDialect } from "../os/shell.js";
 import { bashCommandFromArgs } from "../approval/bash-paths.js";
-import { buildMinimalChildProcessEnv } from "../os/child-process-env.js";
 import { TodoTool } from "./todo.js";
 import type { HookService } from "../hooks/service.js";
 import type { SubagentModelCatalog } from "../runtime/subagent-model-catalog.js";
@@ -41,6 +40,7 @@ import type { CodeIntelligenceService } from "../code-intelligence/types.js";
 import { createCodeIntelligenceTools } from "./code-intelligence.js";
 import { ExploreRepoTool } from "./explore-repo.js";
 import { observeWorkspaceFileScans } from "./file-scan-observer.js";
+import type { SandboxProfile } from "../safety/process-sandbox/index.js";
 
 export interface SubagentRegistryFactoryConfig {
   workDir: string;
@@ -52,7 +52,11 @@ export interface SubagentRegistryFactoryConfig {
   /** 宿主统一 Agent 目录。显式 agent_name 未命中时 fail closed。 */
   profiles?: AgentProfile[];
   /** 可写 worker/explore 的独立宿主边界；TUI 无论主会话 mode 都应注入。 */
-  yoloSandbox?: { config?: Partial<YoloSandboxConfig> };
+  processSandbox?: {
+    config?: Partial<YoloSandboxConfig>;
+    scratchRoot?: string;
+    generation?: number;
+  };
   worktreeSupervisor?: WorktreeSupervisor;
   ownerSessionId?: string;
   /** 是否由长生命周期宿主持有 optional/detached 委派。 */
@@ -79,29 +83,47 @@ export interface SubagentRegistryFactoryConfig {
 type ToolCtor = (
   workDir: string,
   workspaceRoots?: WorkspaceRoots,
-  yoloSandbox?: { config?: Partial<YoloSandboxConfig> },
+  processSandbox?: SubagentRegistryFactoryConfig["processSandbox"],
+  profile?: SandboxProfile,
 ) => BaseTool;
 // exported 供测试按名字断言实例化结果;自定义角色按 profile.tools 实例化时查此 map。
 export const TOOL_CONSTRUCTORS: Record<string, ToolCtor> = {
   read_file: (wd, roots) => new ReadFileTool(roots ?? wd),
   write_file: (wd, roots) => new WriteFileTool(roots ?? wd),
   edit_file: (wd, roots) => new EditFileTool(roots ?? wd),
-  bash: (wd, roots, yoloSandbox) =>
+  bash: (wd, roots, processSandbox, profile = "workspace-write") =>
     new BashTool(wd, undefined, {
       allowBackground: false,
-      env: buildMinimalChildProcessEnv(),
-      ...(roots && yoloSandbox
+      origin: "subagent",
+      env: process.env,
+      ...(roots
         ? {
             sandbox: {
               workspaceRoots: roots,
-              ...(yoloSandbox.config ? { config: yoloSandbox.config } : {}),
+              profile,
+              ...(processSandbox?.config ? { config: processSandbox.config } : {}),
+              ...(processSandbox?.scratchRoot ? { scratchRoot: processSandbox.scratchRoot } : {}),
+              ...(processSandbox?.generation !== undefined
+                ? { generation: processSandbox.generation }
+                : {}),
             },
           }
         : {}),
     }),
   skill_view: (wd) => new SkillViewTool(new SkillLoader(wd)),
   glob: (wd, roots) => new GlobTool(roots ?? wd),
-  grep: (wd, roots) => new GrepTool(roots ?? wd, { excludeSensitiveFiles: true }),
+  grep: (wd, roots, processSandbox, profile = "read-only") =>
+    new GrepTool(roots ?? wd, {
+      excludeSensitiveFiles: true,
+      processSandbox: {
+        profile,
+        ...(processSandbox?.config ? { config: processSandbox.config } : {}),
+        ...(processSandbox?.scratchRoot ? { scratchRoot: processSandbox.scratchRoot } : {}),
+        ...(processSandbox?.generation !== undefined
+          ? { generation: processSandbox.generation }
+          : {}),
+      },
+    }),
   fetch_url: () => new FetchURLTool(),
   web_search: () => new WebSearchTool(),
   todo: (wd) => new TodoTool(new TodoStore(wd)),
@@ -195,7 +217,16 @@ function buildProfileRegistry(
       continue;
     }
     const ctor = TOOL_CONSTRUCTORS[toolName];
-    if (ctor) registry.register(ctor(config.workDir, config.workspaceRoots, config.yoloSandbox));
+    if (ctor) {
+      registry.register(
+        ctor(
+          config.workDir,
+          config.workspaceRoots,
+          config.processSandbox,
+          request.mode === "explore" ? "read-only" : "workspace-write",
+        ),
+      );
+    }
   }
   // 自定义角色不得扩大请求 mode：explore 过滤写工具并使用只读 Bash 守卫，
   // worker 才允许在独立 worktree 中普通写入。
@@ -224,15 +255,19 @@ function buildModeRegistry(
 
   const bash = new BashTool(config.workDir, undefined, {
     allowBackground: false,
-    env: buildMinimalChildProcessEnv(),
-    ...(config.yoloSandbox
-      ? {
-          sandbox: {
-            workspaceRoots: config.workspaceRoots,
-            ...(config.yoloSandbox.config ? { config: config.yoloSandbox.config } : {}),
-          },
-        }
-      : {}),
+    origin: "subagent",
+    env: config.env ? { ...config.env } : process.env,
+    sandbox: {
+      workspaceRoots: config.workspaceRoots,
+      profile: request.mode === "explore" ? "read-only" : "workspace-write",
+      ...(config.processSandbox?.config ? { config: config.processSandbox.config } : {}),
+      ...(config.processSandbox?.scratchRoot
+        ? { scratchRoot: config.processSandbox.scratchRoot }
+        : {}),
+      ...(config.processSandbox?.generation !== undefined
+        ? { generation: config.processSandbox.generation }
+        : {}),
+    },
   });
   if (request.mode === "explore") {
     (bash as BashTool & { readOnly?: boolean }).readOnly = true;
@@ -241,7 +276,22 @@ function buildModeRegistry(
 
   // 阶段 2 只读工具:explore/worker 都需要搜文件,worker 写代码也要先定位文件
   registry.register(new GlobTool(config.workspaceRoots));
-  registry.register(new GrepTool(config.workspaceRoots, { excludeSensitiveFiles: true }));
+  registry.register(
+    new GrepTool(config.workspaceRoots, {
+      excludeSensitiveFiles: true,
+      processSandbox: {
+        profile: request.mode === "explore" ? "read-only" : "workspace-write",
+        ...(config.processSandbox?.config ? { config: config.processSandbox.config } : {}),
+        ...(config.processSandbox?.scratchRoot
+          ? { scratchRoot: config.processSandbox.scratchRoot }
+          : {}),
+        ...(config.processSandbox?.generation !== undefined
+          ? { generation: config.processSandbox.generation }
+          : {}),
+        ...(config.env ? { env: { ...config.env } } : {}),
+      },
+    }),
+  );
 
   if (request.mode === "explore") {
     // 探索语义:联网搜索是 explore 的合理扩展(全只读,无副作用)
@@ -442,12 +492,12 @@ function buildSubagentSafetyMiddleware(
         return { allowed: false, reason: "子代理不允许读取密钥、.env 或凭据路径。" };
       }
     }
-    if (config.yoloSandbox) {
+    if (config.processSandbox) {
       const decision = evaluateYoloToolCall(
         call,
         config.workDir,
         config.workspaceRoots,
-        config.yoloSandbox.config,
+        config.processSandbox.config,
       );
       if (!decision.allowed) {
         return { allowed: false, reason: decision.reason ?? "子代理沙箱边界拒绝。" };

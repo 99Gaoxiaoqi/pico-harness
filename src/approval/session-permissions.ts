@@ -168,9 +168,13 @@ export function bypassImmuneSafetyPath(
         : [];
   return paths
     .map((path) => workspaceRoots?.resolveUnchecked(path) ?? resolve(workDir, path))
-    .find(
-      (path) => isSensitiveCredentialPath(path) || (!readAccess && isControlPlaneSafetyPath(path)),
-    );
+    .find((path) => {
+      const insideAuthorizedWorkspace = workspaceRoots
+        ? workspaceRoots.isAllowedPath(path)
+        : isWithinDirectory(resolve(workDir), path);
+      if (insideAuthorizedWorkspace) return false;
+      return isSensitiveCredentialPath(path) || (!readAccess && isControlPlaneSafetyPath(path));
+    });
 }
 
 /** 可能包含密钥的路径：读写都必须显式授权。 */

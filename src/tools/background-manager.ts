@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessByStdio } from "node:child_process";
+import type { ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 import {
   isWindows,
@@ -8,6 +8,12 @@ import {
 } from "../os/shell.js";
 import { signalProcessTree } from "../os/process-tree.js";
 import { TaskRegistry } from "../tasks/task-registry.js";
+import {
+  createSandboxPolicy,
+  defaultSandboxScratchRoot,
+  managedProcessLauncher,
+  type ManagedSpawnRequest,
+} from "../safety/process-sandbox/index.js";
 
 export type BackgroundTaskStatus = "running" | "exited" | "failed" | "stopped";
 
@@ -39,8 +45,7 @@ export interface BackgroundManagerOptions {
 
 export interface BackgroundTaskSpawnOptions {
   /** 可信宿主生成的实际执行文件与参数，任务记录仍保留原始 command。 */
-  executable?: string;
-  args?: readonly string[];
+  request?: ManagedSpawnRequest;
   /** 可信宿主为隔离子进程注入的最小环境。 */
   env?: NodeJS.ProcessEnv;
 }
@@ -95,17 +100,25 @@ export class BackgroundManager {
     const shell = resolveShell();
     let child: ChildProcessByStdio<null, Readable, Readable>;
     try {
-      child = spawn(
-        spawnOptions?.executable ?? shell,
-        spawnOptions?.args ? [...spawnOptions.args] : shellCommandArgs(shell, command),
-        {
+      child = managedProcessLauncher.launch(
+        spawnOptions?.request ?? {
+          command: shell,
+          args: shellCommandArgs(shell, command),
           cwd,
+          env: sanitizeShellProcessEnvironment(spawnOptions?.env ?? process.env),
+          origin: "background-bash",
+          policy: createSandboxPolicy({
+            profile: "danger-full-access",
+            workspaceRoots: [cwd],
+            scratchRoot: defaultSandboxScratchRoot(cwd),
+          }),
+        },
+        {
           detached: !isWindows,
           windowsHide: true,
           stdio: ["ignore", "pipe", "pipe"],
-          env: sanitizeShellProcessEnvironment(spawnOptions?.env ?? process.env),
         },
-      );
+      ).child as ChildProcessByStdio<null, Readable, Readable>;
     } catch (err) {
       this.taskRegistry.fail(taskId, err);
       throw err;

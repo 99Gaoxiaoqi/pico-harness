@@ -27,11 +27,26 @@ export function buildManagedSpawnPlan(request: ManagedSpawnRequest): SandboxSpaw
   }
 
   const policy = withRuntimeRoots(request.policy, request.command, env, platform);
-  const backend = detectSandboxBackend(platform, request.arch ?? process.arch, request.backendExecutable);
+  const backend = detectSandboxBackend(
+    platform,
+    request.arch ?? process.arch,
+    request.backendExecutable,
+  );
   if (backend === "unavailable") {
     throw new SandboxViolationError(
       "sandbox_unavailable",
       `当前 ${platform}/${request.arch ?? process.arch} 宿主没有可用的 OS 沙箱后端，已拒绝 ${request.origin}。`,
+    );
+  }
+  const backendPath =
+    request.backendExecutable ?? resolveBundledSandboxExecutable(platform, request.arch);
+  if (
+    request.backendExecutable === undefined &&
+    policy.writeRoots.some((root) => isWithinRoot(root, backendPath))
+  ) {
+    throw new SandboxViolationError(
+      "sandbox_unavailable",
+      "原生沙箱后端位于目标进程可写目录，拒绝把可替换资源作为信任边界。",
     );
   }
 
@@ -48,26 +63,64 @@ export function buildManagedSpawnPlan(request: ManagedSpawnRequest): SandboxSpaw
     case "linux-bubblewrap":
       return {
         backend,
-        command:
-          request.backendExecutable ?? resolveBundledSandboxExecutable(platform, request.arch),
+        command: backendPath,
         args: buildBubblewrapArgs(policy, request.command, request.args, request.cwd),
         env,
         sandboxed: true,
         profile: policy.profile,
       };
-    case "windows-appcontainer":
+    case "windows-appcontainer": {
+      const controlRoot =
+        request.controlRoot ?? resolve(dirname(policy.scratchRoot), ".windows-broker-control");
+      if (policy.readRoots.some((root) => isWithinRoot(root, controlRoot))) {
+        throw new SandboxViolationError(
+          "policy_compilation_failed",
+          "Windows Broker 控制目录不得对目标进程可见。",
+        );
+      }
       return {
         backend,
-        command:
-          request.backendExecutable ?? resolveBundledSandboxExecutable(platform, request.arch),
-        args: ["--profile", policy.profile, "--cwd", request.cwd, "--", request.command, ...request.args],
+        command: backendPath,
+        args: buildWindowsBrokerArgs(
+          policy,
+          request.command,
+          request.args,
+          request.cwd,
+          controlRoot,
+        ),
         env,
         sandboxed: true,
         profile: policy.profile,
       };
+    }
     default:
       throw new SandboxViolationError("policy_compilation_failed", `无法编译后端 ${backend}`);
   }
+}
+
+export function buildWindowsBrokerArgs(
+  policy: SandboxPolicy,
+  command: string,
+  args: readonly string[],
+  cwd: string,
+  controlRoot = resolve(dirname(policy.scratchRoot), ".windows-broker-control"),
+): string[] {
+  const result = [
+    "--profile",
+    policy.profile,
+    "--cwd",
+    cwd,
+    "--scratch",
+    policy.scratchRoot,
+    "--generation",
+    String(policy.generation),
+    "--control-root",
+    controlRoot,
+  ];
+  for (const root of policy.readRoots) result.push("--read-root", root);
+  for (const root of policy.writeRoots) result.push("--write-root", root);
+  result.push("--", command, ...args);
+  return result;
 }
 
 export function detectSandboxBackend(
@@ -108,6 +161,7 @@ export function isVerifiedBundledExecutable(executable: string): boolean {
 }
 
 export function buildMacosProfile(policy: SandboxPolicy): string {
+  const metadataRoots = macosMetadataAncestors([...policy.readRoots, ...policy.writeRoots]);
   const rules = [
     "(version 1)",
     "(deny default)",
@@ -123,7 +177,9 @@ export function buildMacosProfile(policy: SandboxPolicy): string {
     '(allow system-mac-syscall (require-all (mac-policy-name "Sandbox") (mac-syscall-number 67)))',
     '(allow file-read* file-test-existence (literal "/"))',
     '(allow file-read-metadata file-test-existence (literal "/etc") (literal "/tmp") (literal "/var") (literal "/System/Volumes") (literal "/System/Volumes/Data"))',
-    '(allow file-read-metadata (subpath "/var") (subpath "/private/var"))',
+    ...metadataRoots.map(
+      (root) => `(allow file-read-metadata file-test-existence (literal ${sbplString(root)}))`,
+    ),
     '(allow file-read* file-test-existence (literal "/dev/null") (literal "/dev/tty") (literal "/dev/random") (literal "/dev/urandom"))',
     '(allow file-read* file-write* (regex #"^/dev/fd/(0|1|2)$"))',
     '(allow file-read* file-write* (literal "/dev/null") (literal "/dev/tty"))',
@@ -131,13 +187,25 @@ export function buildMacosProfile(policy: SandboxPolicy): string {
     ...policy.readRoots.map(
       (root) => `(allow file-read* file-test-existence (subpath ${sbplString(root)}))`,
     ),
-    ...policy.readRoots.map(
-      (root) => `(allow file-map-executable (subpath ${sbplString(root)}))`,
-    ),
+    ...policy.readRoots.map((root) => `(allow file-map-executable (subpath ${sbplString(root)}))`),
     ...policy.writeRoots.map((root) => `(allow file-write* (subpath ${sbplString(root)}))`),
   ];
   if (policy.network === "allow") rules.push("(allow network*)");
   return rules.join("\n");
+}
+
+function macosMetadataAncestors(roots: readonly string[]): string[] {
+  const ancestors = new Set<string>();
+  for (const root of roots) {
+    let current = dirname(root);
+    while (current !== "/" && current !== ".") {
+      ancestors.add(current);
+      const parent = dirname(current);
+      if (parent === current) break;
+      current = parent;
+    }
+  }
+  return [...ancestors].sort((left, right) => left.length - right.length);
 }
 
 export function buildBubblewrapArgs(
@@ -189,9 +257,23 @@ function withRuntimeRoots(
   env: NodeJS.ProcessEnv,
   platform: NodeJS.Platform,
 ): SandboxPolicy {
+  const networkRoots =
+    platform === "linux" && policy.network === "allow"
+      ? [
+          "/etc/resolv.conf",
+          "/etc/hosts",
+          "/etc/nsswitch.conf",
+          "/etc/ssl/certs",
+          "/usr/share/ca-certificates",
+        ]
+      : [];
   return {
     ...policy,
-    readRoots: normalizeRoots([...policy.readRoots, ...runtimeReadRoots(command, env, platform)]),
+    readRoots: normalizeRoots([
+      ...policy.readRoots,
+      ...runtimeReadRoots(command, env, platform),
+      ...networkRoots,
+    ]),
   };
 }
 

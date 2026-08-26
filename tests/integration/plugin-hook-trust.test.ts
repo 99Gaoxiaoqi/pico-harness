@@ -13,7 +13,8 @@ test("materialized plugin Hook trust survives a new snapshot and is revoked on d
   const workspace = join(root, "workspace");
   const picoHome = join(root, "pico-home");
   const pluginRoot = join(workspace, "plugin-source");
-  const marker = join(root, "marker.txt");
+  // command Hook 运行在 workspace-write 进程沙箱中，只能写入已授权工作区。
+  const marker = join(workspace, "marker.txt");
   await mkdir(join(pluginRoot, ".pico"), { recursive: true });
   await mkdir(join(pluginRoot, "hooks"), { recursive: true });
   await mkdir(join(pluginRoot, "skills", "component"), { recursive: true });
@@ -77,7 +78,11 @@ test("materialized plugin Hook trust survives a new snapshot and is revoked on d
   });
   context.after(async () => await firstRuntime.dispose());
   assert.equal(firstRuntime.service.currentSnapshot().handlers.PreToolUse[0]?.trusted, true);
-  await firstRuntime.service.dispatch("PreToolUse", { tool_name: "read_file", tool_input: {} });
+  const firstDispatch = await firstRuntime.service.dispatch("PreToolUse", {
+    tool_name: "read_file",
+    tool_input: {},
+  });
+  assert.deepEqual(firstDispatch.diagnostics ?? [], []);
   assert.equal(await readFile(marker, "utf8"), "trusted");
   await rm(marker);
 
