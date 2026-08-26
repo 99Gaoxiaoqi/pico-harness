@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 import { recordIdFor } from "../agent-graph/core/ids.js";
 import type { SessionManager, SessionManagerLease } from "../engine/session-manager.js";
 import type { SessionOptions } from "../engine/session.js";
-import type { RuntimeEvent } from "../storage/runtime-event.js";
+import type { RuntimeEvent, RuntimeRunStartedEvent } from "../storage/runtime-event.js";
 import type {
   AgentGraphActivationClaimRecord,
   AgentGraphOperatorProvisionRecord,
@@ -53,15 +53,45 @@ export interface StartExactAgentGraphRunInput {
   readonly prompt: string;
 }
 
+export type AgentGraphExactRunIndeterminateReason =
+  | "provider_dispatch_recorded"
+  | "tool_dispatch_recorded"
+  | "unexpected_runtime_fact";
+
+/** Durable ledger classification used before deciding whether an exact Run may attach. */
+export type AgentGraphExactRunInspection =
+  | Readonly<{ status: "not_started" }>
+  | Readonly<{
+      status: "attachable";
+      startEvent: RuntimeRunStartedEvent;
+      input: "missing" | "committed";
+    }>
+  | Readonly<{
+      status: "live";
+      startEvent: RuntimeRunStartedEvent;
+    }>
+  | Readonly<{
+      status: "terminal";
+      startEvent: RuntimeRunStartedEvent;
+      terminalEvent: Extract<RuntimeEvent, { kind: "run.terminal" }>;
+    }>
+  | Readonly<{
+      status: "indeterminate";
+      reason: AgentGraphExactRunIndeterminateReason;
+      startEvent: RuntimeRunStartedEvent;
+      blockingEventIds: readonly string[];
+    }>;
+
 /**
  * The only boundary allowed to create a Graph activation Run.
  *
- * Implementations must atomically insert-or-observe run.started and may dispatch
- * the provider only when they inserted that exact event. `observed` therefore
- * means that another process already owns or completed this exact Run.
+ * Implementations atomically insert-or-observe run.started, classify the durable
+ * ledger, and may dispatch only for a fresh Run or a pre-dispatch attachable Run.
+ * A live, terminal, or indeterminate Run is observation-only.
  */
 export interface AgentGraphExactRunPort {
   readRunEvents(sessionId: string, runId: string): Promise<readonly RuntimeEvent[]>;
+  inspectExactRun(input: StartExactAgentGraphRunInput): Promise<AgentGraphExactRunInspection>;
   startExactRun(input: StartExactAgentGraphRunInput): Promise<"started" | "observed">;
   stopExactRun(input: {
     readonly sessionId: string;
@@ -344,11 +374,7 @@ export class AgentGraphRuntimeAdapter implements AgentOutputCommitPort {
   private async startOrObserveActivationOnce(
     input: StartOrObserveAgentGraphActivationInput,
   ): Promise<StartOrObserveAgentGraphActivationResult> {
-    const before = await this.projectActivation(input.claim);
-    if (before.status !== "not_started") {
-      return { disposition: "observed", projection: before };
-    }
-    const disposition = await this.options.runPort.startExactRun({
+    const exactRun = {
       claimId: input.claim.claimId,
       sessionId: input.claim.targetSessionId,
       turnId: input.claim.targetTurnId,
@@ -357,15 +383,39 @@ export class AgentGraphRuntimeAdapter implements AgentOutputCommitPort {
       runStartedEventId: input.claim.runStartedEventId,
       workDir: input.workDir,
       prompt: input.prompt,
-    });
+    } satisfies StartExactAgentGraphRunInput;
+    const before = await this.options.runPort.inspectExactRun(exactRun);
+    assertExactRunIsSafeToObserve(before, input.claim.targetRunId);
+    if (before.status === "live" || before.status === "terminal") {
+      return {
+        disposition: "observed",
+        projection: await this.projectActivation(input.claim),
+      };
+    }
+
+    // Both a fresh ledger and a pre-dispatch orphan are admitted through the same
+    // exact-ID boundary. The latter reattaches without creating another start/input.
+    const disposition = await this.options.runPort.startExactRun(exactRun);
+    const after = await this.options.runPort.inspectExactRun(exactRun);
+    assertExactRunIsSafeToObserve(after, input.claim.targetRunId);
     const projection = await this.projectActivation(input.claim);
-    if (projection.status === "not_started") {
+    if (after.status === "not_started" || projection.status === "not_started") {
       throw new AgentGraphRuntimeIntegrityError(
         `Exact RuntimeRun ${input.claim.targetRunId} has no committed run.started after ${disposition}`,
       );
     }
     return { disposition, projection };
   }
+}
+
+function assertExactRunIsSafeToObserve(
+  inspection: AgentGraphExactRunInspection,
+  runId: string,
+): void {
+  if (inspection.status !== "indeterminate") return;
+  throw new AgentGraphRuntimeIntegrityError(
+    `Exact RuntimeRun ${runId} requires operator review: ${inspection.reason}; blocking events: ${inspection.blockingEventIds.join(", ")}`,
+  );
 }
 
 export function projectAgentGraphActivation(
