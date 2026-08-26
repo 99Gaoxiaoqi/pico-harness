@@ -350,7 +350,11 @@ test("production host binds Graph root and installs detached exact execution", a
   await graphFactoryOptions.execute(brokerInput);
   await Promise.resolve();
   assert.equal(calls.length, callsBeforeBroker + 1, "successful exact replay must not redispatch");
-  assert.equal(brokerTerminalCount, 1);
+  assert.equal(
+    brokerTerminalCount,
+    2,
+    "a host-success replay without a canonical Runtime terminal must clear its launch",
+  );
 
   let modelFailureTerminalCount = 0;
   const modelFailureInput: ExecuteHostedAgentGraphRunInput = {

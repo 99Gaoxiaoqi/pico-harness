@@ -48,6 +48,13 @@ async function runProductionRootWakeScenario(scenario: "output" | "outputless"):
       assert.ok(binding);
       let turn = 0;
       const rootWake = options.prompt.startsWith("[Graph Supervisor wake]");
+      if (rootWake) {
+        assert.deepEqual(options.allowedTools, [
+          "view_agent_graph",
+          "update_agent_graph",
+          "yield_agent_graph",
+        ]);
+      }
       return super.execute(options, {
         ...dependencies,
         provider: {

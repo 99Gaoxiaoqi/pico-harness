@@ -19,6 +19,7 @@ import type {
   GraphOperatorActivationContext,
 } from "../tools/agent-output-tool.js";
 import { AgentGraphRuntimeAdapter } from "./agent-graph-runtime-adapter.js";
+import type { AgentGraphRunLaunchState } from "./agent-graph-runtime-adapter.js";
 import {
   SqliteAgentGraphExactRunPort,
   type ExecuteAgentGraphExactRunInput,
@@ -59,6 +60,10 @@ export interface CreateAgentGraphWorkspaceHostOptions {
   ) => Promise<ResolvedAgentGraphOperatorWorkspace> | ResolvedAgentGraphOperatorWorkspace;
   readonly isRootSourceActive?: (rootSessionId: string) => boolean;
   readonly isWorkspaceBusy?: () => boolean;
+  readonly inspectLaunch?: (input: {
+    readonly sessionId: string;
+    readonly runId: string;
+  }) => Promise<AgentGraphRunLaunchState> | AgentGraphRunLaunchState;
   readonly requestStop?: (input: {
     readonly sessionId: string;
     readonly runId: string;
@@ -110,6 +115,7 @@ export function createAgentGraphWorkspaceHost(
     sessionManager: options.sessionManager,
     ...(options.sessionOptions ? { sessionOptions: options.sessionOptions } : {}),
     ...(options.requestStop ? { requestStop: options.requestStop } : {}),
+    ...(options.inspectLaunch ? { inspectLaunch: options.inspectLaunch } : {}),
     execute: async (input) => {
       const app = requireApplication(application);
       const claim = store.getActivationClaim(input.claimId);
@@ -155,6 +161,7 @@ export function createAgentGraphWorkspaceHost(
         };
         binding = { kind: "root", getRootContext: () => root, toolPort: app.toolPort };
         orchestrationMode = "graph";
+        allowedTools = ["view_agent_graph", "update_agent_graph", "yield_agent_graph"];
       }
 
       liveLaunches.add(input.prestartedRun.runId);
