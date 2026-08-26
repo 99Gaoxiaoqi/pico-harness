@@ -156,8 +156,9 @@ export class AgentGraphReconciler {
       ]),
     );
 
-    await this.applyStops(state, claims, intentsById, pass);
+    await this.applyStops(state, claims, provisions, intentsById, pass);
     claims = [...this.store.listActivationClaims(graphId)];
+    provisions = [...this.store.listOperatorProvisions(graphId)];
 
     const ensuredOperators = await this.ensureOperators(
       state,
@@ -199,6 +200,7 @@ export class AgentGraphReconciler {
   private async applyStops(
     state: ReturnType<AgentGraphControlStore["getScheduleState"]>,
     claims: readonly AgentGraphActivationClaim[],
+    provisions: readonly AgentGraphOperatorProvision[],
     intentsById: ReadonlyMap<string, AgentGraphActivationIntent>,
     pass: MutablePassResult,
   ): Promise<void> {
@@ -232,6 +234,49 @@ export class AgentGraphReconciler {
         }
       }),
     );
+
+    const currentClaims = this.store.listActivationClaims(state.graph.graphId);
+    for (const provision of provisions) {
+      if (provision.state === "stopped") continue;
+      const stopped = state.intents.some(
+        (intent) =>
+          intent.operatorId === provision.operatorId &&
+          intent.operatorGeneration === provision.operatorGeneration &&
+          isIntentStopped(state, intent),
+      );
+      if (!stopped) continue;
+      const hasActiveClaim = currentClaims.some(
+        (claim) =>
+          claim.operatorId === provision.operatorId &&
+          claim.operatorGeneration === provision.operatorGeneration &&
+          claim.state !== "cancelled",
+      );
+      if (hasActiveClaim) continue;
+      try {
+        let current = provision;
+        if (current.state === "provisioned") {
+          const stopping = this.store.transitionOperatorProvision({
+            provisionId: current.provisionId,
+            expectedVersion: current.version,
+            from: "provisioned",
+            to: "stopping",
+          });
+          current = stopping.record;
+          if (!stopping.replayed) pass.progress += 1;
+        }
+        if (current.state === "requested" || current.state === "stopping") {
+          const stoppedResult = this.store.transitionOperatorProvision({
+            provisionId: current.provisionId,
+            expectedVersion: current.version,
+            from: current.state,
+            to: "stopped",
+          });
+          if (!stoppedResult.replayed) pass.progress += 1;
+        }
+      } catch (error) {
+        pass.errors.push(reconcileError("stop", provision.provisionId, error));
+      }
+    }
   }
 
   private async ensureOperators(
@@ -289,7 +334,18 @@ export class AgentGraphReconciler {
     await Promise.all(
       [...needed].map(async ([key, item]) => {
         try {
+          if (item.provision.state === "stopping" || item.provision.state === "stopped") return;
           await this.runtime.ensureOperator(item);
+          if (item.provision.state === "requested") {
+            const transitioned = this.store.transitionOperatorProvision({
+              provisionId: item.provision.provisionId,
+              expectedVersion: item.provision.version,
+              from: "requested",
+              to: "provisioned",
+            });
+            if (!transitioned.replayed) pass.progress += 1;
+            if (transitioned.record.state !== "provisioned") return;
+          }
           ensured.add(key);
         } catch (error) {
           pass.errors.push(reconcileError("provision", item.operator.operatorId, error));
@@ -321,7 +377,7 @@ export class AgentGraphReconciler {
         !claimedIntentIds.has(intent.intentId) &&
         canAdmitIntent(state, intent) &&
         ensuredOperators.has(key) &&
-        provisionsByKey.has(key)
+        provisionsByKey.get(key)?.state === "provisioned"
       );
     });
     const results = await Promise.all(
@@ -555,6 +611,7 @@ function createProvision(
     operatorGeneration: operator.generation,
     childSessionId: identity.childSessionId,
     state: "requested",
+    version: 1,
     profileSnapshot: operator.profileSnapshot,
     workspaceBinding:
       operator.workspacePolicy.kind === "shared"

@@ -22,6 +22,7 @@ import type {
   EnsureAgentGraphProvisionInput,
   PutAgentGraphRecordInput,
   TransitionAgentGraphClaimInput,
+  TransitionAgentGraphProvisionInput,
 } from "./control-store.js";
 import type {
   AgentGraphActivationClaimRecord,
@@ -34,7 +35,6 @@ import { SqliteAgentGraphControlStore } from "../storage/sqlite/sqlite-agent-gra
 
 interface StoredScheduleEnvelope {
   readonly schemaVersion: 1;
-  readonly sourceTurnId: string;
   readonly commands: readonly AgentGraphScheduleCommand[];
 }
 
@@ -114,10 +114,10 @@ export class SqliteAgentGraphControlStoreAdapter implements AgentGraphControlSto
       kind: aggregateScheduleKind(input.commands),
       command: {
         schemaVersion: 1,
-        sourceTurnId: input.source.turnId,
         commands: input.commands,
       } satisfies StoredScheduleEnvelope,
       sourceSessionId: input.source.sessionId,
+      sourceTurnId: input.source.turnId,
       sourceRunId: input.source.runId,
       sourceToolCallId: input.source.toolCallId,
     });
@@ -143,6 +143,13 @@ export class SqliteAgentGraphControlStoreAdapter implements AgentGraphControlSto
       profileSnapshot: provision.profileSnapshot,
       workspaceBinding: provision.workspaceBinding,
     });
+    return { record: provisionFromRecord(result.record), replayed: result.replayed };
+  }
+
+  transitionOperatorProvision(
+    input: TransitionAgentGraphProvisionInput,
+  ): AgentGraphStoreResult<AgentGraphOperatorProvision> {
+    const result = this.store.transitionOperatorProvision(input);
     return { record: provisionFromRecord(result.record), replayed: result.replayed };
   }
 
@@ -217,7 +224,7 @@ function revisionFromRecord(record: AgentGraphScheduleRevisionRecord): AgentGrap
     fingerprint: record.requestFingerprint,
     source: {
       sessionId: record.sourceSessionId,
-      turnId: envelope.sourceTurnId,
+      turnId: record.sourceTurnId,
       runId: record.sourceRunId,
       toolCallId: record.sourceToolCallId,
     },
@@ -231,17 +238,11 @@ function parseScheduleEnvelope(value: unknown): StoredScheduleEnvelope {
     throw new Error("Stored Graph schedule command must be an object envelope");
   }
   const candidate = value as Partial<StoredScheduleEnvelope>;
-  if (
-    candidate.schemaVersion !== 1 ||
-    typeof candidate.sourceTurnId !== "string" ||
-    !candidate.sourceTurnId.trim() ||
-    !Array.isArray(candidate.commands)
-  ) {
+  if (candidate.schemaVersion !== 1 || !Array.isArray(candidate.commands)) {
     throw new Error("Stored Graph schedule command envelope is invalid");
   }
   return {
     schemaVersion: 1,
-    sourceTurnId: candidate.sourceTurnId,
     commands: candidate.commands,
   };
 }
@@ -250,6 +251,8 @@ function aggregateScheduleKind(
   commands: readonly AgentGraphScheduleCommand[],
 ): AgentGraphScheduleKind {
   if (commands.some((command) => command.kind === "finish")) return "finish";
+  if (commands.every((command) => command.kind === "stop")) return "stop";
+  if (commands.length > 1) return "batch";
   if (commands.some((command) => command.kind === "add")) return "add";
   return "stop";
 }
@@ -263,10 +266,13 @@ function provisionFromRecord(
     operatorId: record.operatorId,
     operatorGeneration: record.generation,
     childSessionId: record.childSessionId,
-    state: "requested",
+    state: record.state,
+    version: record.version,
     profileSnapshot: record.profileSnapshot as AgentGraphOperatorProvision["profileSnapshot"],
     workspaceBinding: record.workspaceBinding as AgentGraphOperatorProvision["workspaceBinding"],
     createdAt: record.createdAt,
+    ...(record.provisionedAt === undefined ? {} : { provisionedAt: record.provisionedAt }),
+    ...(record.stoppedAt === undefined ? {} : { stoppedAt: record.stoppedAt }),
   };
 }
 
