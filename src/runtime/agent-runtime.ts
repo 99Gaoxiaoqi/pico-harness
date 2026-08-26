@@ -51,10 +51,7 @@ import {
   type AgentOutputCommitPort,
   type GraphOperatorActivationContext,
 } from "../tools/agent-output-tool.js";
-import {
-  DelegationManager,
-  DelegateStatusTool,
-} from "../tools/delegation-manager.js";
+import { DelegationManager, DelegateStatusTool } from "../tools/delegation-manager.js";
 import { createSubagentRegistryFactory } from "../tools/delegation-registry.js";
 import type { AgentProfile } from "../tools/agent-profile.js";
 import { loadAgentCatalog, type AgentExternalCatalogSource } from "../agents/catalog.js";
@@ -856,10 +853,7 @@ export async function executeAgentRuntime(
   if (dependencies.prestartedRun && !resumeExistingSession && !dependencies.prestartedUserInput) {
     throw new Error("new-turn prestartedRun requires prestartedUserInput");
   }
-  if (
-    dependencies.prestartedUserInput &&
-    (!dependencies.prestartedRun || resumeExistingSession)
-  ) {
+  if (dependencies.prestartedUserInput && (!dependencies.prestartedRun || resumeExistingSession)) {
     throw new Error("prestartedUserInput requires a non-resume prestartedRun");
   }
   const prompt = resumeExistingSession ? options.prompt : normalizePrompt(options.prompt);
@@ -1592,11 +1586,7 @@ export async function executeAgentRuntime(
       })) {
         registry.register(tool);
       }
-      toolDisclosure.discloseTools([
-        "update_agent_graph",
-        "view_agent_graph",
-        "yield_agent_graph",
-      ]);
+      toolDisclosure.discloseTools(["update_agent_graph", "view_agent_graph", "yield_agent_graph"]);
     } else if (dependencies.agentGraph?.kind === "operator") {
       registry.register(
         createAgentOutputTool({
