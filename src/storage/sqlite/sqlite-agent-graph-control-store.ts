@@ -10,6 +10,8 @@ import type {
   AgentGraphScheduleRevisionRecord,
   AgentGraphSupervisorWakeAttemptRecord,
   AgentGraphSupervisorWakeRecord,
+  AgentGraphYieldInterestRecord,
+  CancelAgentGraphYieldInterestInput,
   ClaimAgentGraphActivationInput,
   ClaimAgentGraphSupervisorWakeInput,
   ClaimAgentGraphSupervisorWakeResult,
@@ -17,9 +19,11 @@ import type {
   CommitAgentGraphScheduleResult,
   CreateAgentGraphInput,
   EnqueueAgentGraphSupervisorWakeInput,
+  EnqueueAgentGraphSupervisorWakeForYieldResult,
   EnsureAgentGraphOperatorProvisionInput,
   IdempotentStoreResult,
   PutAgentGraphRecordRefInput,
+  RegisterAgentGraphYieldInterestInput,
   RecoverableAgentGraphSupervisorWakeRecord,
   SettleAgentGraphSupervisorWakeInput,
   SettleAgentGraphSupervisorWakeResult,
@@ -555,6 +559,100 @@ export class SqliteAgentGraphControlStore {
     );
   }
 
+  registerYieldInterest(
+    input: RegisterAgentGraphYieldInterestInput,
+  ): IdempotentStoreResult<AgentGraphYieldInterestRecord> {
+    const normalized = normalizeYieldInterestInput(input);
+    return this.write(() => {
+      const byId = this.selectYieldInterest(normalized.permitId);
+      if (byId) return replayYieldInterest(byId, normalized);
+      const byRootRun = this.selectYieldInterestByRootRun(
+        normalized.graphId,
+        normalized.rootRunId,
+      );
+      if (byRootRun) return replayYieldInterest(byRootRun, normalized);
+      const graph = this.requireGraph(normalized.graphId);
+      if (graph.rootSessionId !== normalized.rootSessionId) {
+        throw new AgentGraphStoreConflictError(
+          `Yield interest ${normalized.permitId} root session does not match graph ${graph.graphId}`,
+        );
+      }
+      if (graph.phase !== "open") {
+        throw new AgentGraphStoreConflictError(
+          `Graph ${graph.graphId} is finished and rejects fresh yield interests`,
+        );
+      }
+      const createdAt = this.now();
+      this.lease.database
+        .prepare(
+          `INSERT INTO agent_graph_yield_interests
+           (permit_id, graph_id, root_session_id, root_turn_id, root_run_id,
+            tool_call_id, state, version, created_at, resolved_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'registered', 1, ?, NULL)`,
+        )
+        .run(
+          normalized.permitId,
+          normalized.graphId,
+          normalized.rootSessionId,
+          normalized.rootTurnId,
+          normalized.rootRunId,
+          normalized.toolCallId,
+          createdAt,
+        );
+      return { record: this.requireYieldInterest(normalized.permitId), replayed: false };
+    });
+  }
+
+  getYieldInterest(permitId: string): AgentGraphYieldInterestRecord | undefined {
+    return this.read(() => this.selectYieldInterest(requireNonEmpty(permitId, "permitId")));
+  }
+
+  listYieldInterests(
+    graphId: string,
+    state?: AgentGraphYieldInterestRecord["state"],
+  ): readonly AgentGraphYieldInterestRecord[] {
+    return this.read(() => {
+      const rows = state
+        ? this.lease.database
+            .prepare(
+              `SELECT * FROM agent_graph_yield_interests
+               WHERE graph_id = ? AND state = ? ORDER BY created_at ASC, permit_id ASC`,
+            )
+            .all(requireNonEmpty(graphId, "graphId"), state)
+        : this.lease.database
+            .prepare(
+              `SELECT * FROM agent_graph_yield_interests
+               WHERE graph_id = ? ORDER BY created_at ASC, permit_id ASC`,
+            )
+            .all(requireNonEmpty(graphId, "graphId"));
+      return rows.map((row) => yieldInterestFromRow(asRow(row)));
+    });
+  }
+
+  cancelYieldInterest(
+    input: CancelAgentGraphYieldInterestInput,
+  ): IdempotentStoreResult<AgentGraphYieldInterestRecord> {
+    const permitId = requireNonEmpty(input.permitId, "permitId");
+    requirePositiveInteger(input.expectedVersion, "expectedVersion");
+    return this.write(() => {
+      const current = this.requireYieldInterest(permitId);
+      if (current.state === "cancelled") return { record: current, replayed: true };
+      if (current.state !== "registered" || current.version !== input.expectedVersion) {
+        throw new AgentGraphStoreConflictError(
+          `Yield interest ${permitId} changed from registered@${input.expectedVersion} to ${current.state}@${current.version}`,
+        );
+      }
+      this.lease.database
+        .prepare(
+          `UPDATE agent_graph_yield_interests
+           SET state = 'cancelled', version = version + 1, resolved_at = ?
+           WHERE permit_id = ? AND state = 'registered' AND version = ?`,
+        )
+        .run(this.now(), permitId, input.expectedVersion);
+      return { record: this.requireYieldInterest(permitId), replayed: false };
+    });
+  }
+
   enqueueSupervisorWake(
     input: EnqueueAgentGraphSupervisorWakeInput,
   ): IdempotentStoreResult<AgentGraphSupervisorWakeRecord> {
@@ -597,6 +695,77 @@ export class SqliteAgentGraphControlStore {
           createdAt,
         );
       return { record: this.requireWake(normalized.wakeId), replayed: false };
+    });
+  }
+
+  enqueueSupervisorWakeForYield(
+    input: EnqueueAgentGraphSupervisorWakeInput,
+  ): EnqueueAgentGraphSupervisorWakeForYieldResult {
+    const normalized = normalizeWakeInput(input, this.now());
+    return this.write(() => {
+      const byDedupe = this.selectWakeByDedupe(normalized.graphId, normalized.dedupeKey);
+      if (byDedupe) {
+        if (byDedupe.wakeFingerprint !== normalized.wakeFingerprint) {
+          throw new AgentGraphStoreConflictError(
+            `Wake dedupe key ${normalized.dedupeKey} is already bound to another fingerprint`,
+          );
+        }
+        if (!byDedupe.yieldPermitId) {
+          throw new AgentGraphStoreConflictError(
+            `Wake ${byDedupe.wakeId} was not admitted by a yield interest`,
+          );
+        }
+        return {
+          status: "enqueued",
+          wake: byDedupe,
+          interest: this.requireYieldInterest(byDedupe.yieldPermitId),
+          replayed: true,
+        };
+      }
+      const byId = this.selectWake(normalized.wakeId);
+      if (byId) {
+        throw new AgentGraphStoreConflictError(
+          `Wake ${normalized.wakeId} is already bound to another dedupe key`,
+        );
+      }
+      const graph = this.requireGraph(normalized.graphId);
+      if (graph.phase !== "open") return { status: "not_waiting" };
+      const interest = this.selectRegisteredYieldInterest(normalized.graphId);
+      if (!interest) return { status: "not_waiting" };
+      const createdAt = this.now();
+      this.lease.database
+        .prepare(
+          `INSERT INTO agent_graph_supervisor_wakes
+           (wake_id, graph_id, dedupe_key, wake_fingerprint, cause, payload_json,
+            status, available_at, attempt_count, version, created_at, updated_at,
+            delivered_at, last_error, yield_permit_id)
+           VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, 0, 1, ?, ?, NULL, NULL, ?)`,
+        )
+        .run(
+          normalized.wakeId,
+          normalized.graphId,
+          normalized.dedupeKey,
+          normalized.wakeFingerprint,
+          normalized.cause,
+          normalized.payloadJson,
+          normalized.availableAt,
+          createdAt,
+          createdAt,
+          interest.permitId,
+        );
+      this.lease.database
+        .prepare(
+          `UPDATE agent_graph_yield_interests
+           SET state = 'consumed', version = version + 1, resolved_at = ?
+           WHERE permit_id = ? AND state = 'registered' AND version = ?`,
+        )
+        .run(createdAt, interest.permitId, interest.version);
+      return {
+        status: "enqueued",
+        wake: this.requireWake(normalized.wakeId),
+        interest: this.requireYieldInterest(interest.permitId),
+        replayed: false,
+      };
     });
   }
 
@@ -978,6 +1147,47 @@ export class SqliteAgentGraphControlStore {
     return row ? wakeFromRow(asRow(row)) : undefined;
   }
 
+  private selectYieldInterest(permitId: string): AgentGraphYieldInterestRecord | undefined {
+    const row = this.lease.database
+      .prepare("SELECT * FROM agent_graph_yield_interests WHERE permit_id = ?")
+      .get(permitId);
+    return row ? yieldInterestFromRow(asRow(row)) : undefined;
+  }
+
+  private selectYieldInterestByRootRun(
+    graphId: string,
+    rootRunId: string,
+  ): AgentGraphYieldInterestRecord | undefined {
+    const row = this.lease.database
+      .prepare(
+        `SELECT * FROM agent_graph_yield_interests
+         WHERE graph_id = ? AND root_run_id = ?`,
+      )
+      .get(graphId, rootRunId);
+    return row ? yieldInterestFromRow(asRow(row)) : undefined;
+  }
+
+  private selectRegisteredYieldInterest(
+    graphId: string,
+  ): AgentGraphYieldInterestRecord | undefined {
+    const row = this.lease.database
+      .prepare(
+        `SELECT * FROM agent_graph_yield_interests
+         WHERE graph_id = ? AND state = 'registered'
+         ORDER BY created_at ASC, permit_id ASC LIMIT 1`,
+      )
+      .get(graphId);
+    return row ? yieldInterestFromRow(asRow(row)) : undefined;
+  }
+
+  private requireYieldInterest(permitId: string): AgentGraphYieldInterestRecord {
+    const interest = this.selectYieldInterest(permitId);
+    if (!interest) {
+      throw new AgentGraphStoreConflictError(`Yield interest ${permitId} does not exist`);
+    }
+    return interest;
+  }
+
   private selectWakeByDedupe(
     graphId: string,
     dedupeKey: string,
@@ -1137,6 +1347,19 @@ function normalizeRecordRefInput(input: PutAgentGraphRecordRefInput): PutAgentGr
   };
 }
 
+function normalizeYieldInterestInput(
+  input: RegisterAgentGraphYieldInterestInput,
+): RegisterAgentGraphYieldInterestInput {
+  return {
+    permitId: requireNonEmpty(input.permitId, "permitId"),
+    graphId: requireNonEmpty(input.graphId, "graphId"),
+    rootSessionId: requireNonEmpty(input.rootSessionId, "rootSessionId"),
+    rootTurnId: requireNonEmpty(input.rootTurnId, "rootTurnId"),
+    rootRunId: requireNonEmpty(input.rootRunId, "rootRunId"),
+    toolCallId: requireNonEmpty(input.toolCallId, "toolCallId"),
+  };
+}
+
 interface NormalizedWakeInput extends Omit<EnqueueAgentGraphSupervisorWakeInput, "payload"> {
   readonly availableAt: number;
   readonly payloadJson: string;
@@ -1263,6 +1486,25 @@ function replayRecordRef(
   ) {
     throw new AgentGraphStoreConflictError(
       `Record ${input.recordId} is already bound to another runtime event`,
+    );
+  }
+  return { record: existing, replayed: true };
+}
+
+function replayYieldInterest(
+  existing: AgentGraphYieldInterestRecord,
+  input: RegisterAgentGraphYieldInterestInput,
+): IdempotentStoreResult<AgentGraphYieldInterestRecord> {
+  if (
+    existing.permitId !== input.permitId ||
+    existing.graphId !== input.graphId ||
+    existing.rootSessionId !== input.rootSessionId ||
+    existing.rootTurnId !== input.rootTurnId ||
+    existing.rootRunId !== input.rootRunId ||
+    existing.toolCallId !== input.toolCallId
+  ) {
+    throw new AgentGraphStoreConflictError(
+      `Yield interest ${input.permitId} is already bound to another root run`,
     );
   }
   return { record: existing, replayed: true };
@@ -1399,6 +1641,22 @@ function wakeFromRow(row: Record<string, unknown>): AgentGraphSupervisorWakeReco
     updatedAt: rowNumber(row, "updated_at"),
     deliveredAt: rowOptionalNumber(row, "delivered_at"),
     lastError: rowOptionalString(row, "last_error"),
+    yieldPermitId: rowOptionalString(row, "yield_permit_id"),
+  });
+}
+
+function yieldInterestFromRow(row: Record<string, unknown>): AgentGraphYieldInterestRecord {
+  return compact({
+    permitId: rowString(row, "permit_id"),
+    graphId: rowString(row, "graph_id"),
+    rootSessionId: rowString(row, "root_session_id"),
+    rootTurnId: rowString(row, "root_turn_id"),
+    rootRunId: rowString(row, "root_run_id"),
+    toolCallId: rowString(row, "tool_call_id"),
+    state: rowString(row, "state") as AgentGraphYieldInterestRecord["state"],
+    version: rowNumber(row, "version"),
+    createdAt: rowNumber(row, "created_at"),
+    resolvedAt: rowOptionalNumber(row, "resolved_at"),
   });
 }
 
