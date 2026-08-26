@@ -218,6 +218,12 @@ export interface AgentGraphSupervisorWakeAttemptRecord {
   readonly error?: string;
 }
 
+export interface RecoverableAgentGraphSupervisorWakeRecord {
+  readonly graph: AgentGraphRecord;
+  readonly wake: AgentGraphSupervisorWakeRecord;
+  readonly attempt?: AgentGraphSupervisorWakeAttemptRecord;
+}
+
 export interface ClaimAgentGraphSupervisorWakeInput {
   readonly wakeId: string;
   readonly expectedWakeVersion: number;

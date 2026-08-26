@@ -495,12 +495,11 @@ class SqliteSupervisorTestPort {
   constructor(private readonly store: SqliteAgentGraphControlStore) {}
 
   listRecoverableSupervisorWakes(at: number): readonly RecoverableAgentGraphSupervisorWake[] {
-    return this.store.listDueSupervisorWakes(at).map((wake) => this.recoverable(wake));
+    return this.store.listRecoverableSupervisorWakes(at);
   }
 
   getRecoverableSupervisorWake(wakeId: string): RecoverableAgentGraphSupervisorWake | undefined {
-    const wake = this.store.getSupervisorWake(wakeId);
-    return wake ? this.recoverable(wake) : undefined;
+    return this.store.getRecoverableSupervisorWake(wakeId);
   }
 
   claimSupervisorWake(input: ClaimAgentGraphSupervisorWakeInput) {
@@ -515,13 +514,6 @@ class SqliteSupervisorTestPort {
 
   settleSupervisorWake(input: SettleAgentGraphSupervisorWakeInput) {
     return this.store.settleSupervisorWake(input);
-  }
-
-  private recoverable(wake: AgentGraphSupervisorWakeRecord): RecoverableAgentGraphSupervisorWake {
-    const graph = this.store.getGraph(wake.graphId);
-    if (!graph) throw new Error("missing graph");
-    const attempt = this.store.listSupervisorWakeAttempts(wake.wakeId).at(-1);
-    return { graph, wake, ...(attempt ? { attempt } : {}) };
   }
 }
 
