@@ -70,20 +70,14 @@ test("压缩不改账本、只追加 checkpoint（读模型变化）", () => {
 // 提醒开发者删除/反转本测试。这是活体追踪——修复落地时由红测试强制显式处理，
 // 而不是靠人记。修复对应债务后：删除该测试，或按注释转为正向断言。
 
-test("D7 正向不变量：graph work 去重走 durable lease，records 已降为非权威活跃表", () => {
-  // 阶段 2 claim 推广已完成：dispatch 用 RuntimeStore.acquireLease 做执行主权去重
-  // （替代 records 扫描），settle 链 records.delete 使 records 降为非权威活跃表，
-  // orphan 恢复按 lease 活性（isWorkLeaseLive）判定。
+test("D7 正向不变量：DelegationManager 不再承担 graph 调度职责", () => {
+  // Graph v2 的去重、claim 与收口已归持久化调度器所有。DelegationManager
+  // 只管普通委派与 plan settle，不再接收 graph 身份、lease 或 settle 回调。
   const manager = readSource("src/tools/delegation-manager.ts");
-  // 正向：lease 回源路径与 orphan lease 判定已接入（协议实现点在 graph/work-lease）。
-  assert.match(manager, /acquireGraphWorkLease/, "DelegationManager 已接入 durable lease 去重");
-  assert.match(manager, /isWorkLeaseLive/, "orphan 恢复按 lease 活性判定");
-  // 负向：旧的内存负信号与 settleFinalized 标志已移除。
-  assert.doesNotMatch(
-    manager,
-    /\bliveDelegationIds\b/,
-    "liveDelegationIds 内存负信号已移除（orphan 改 lease 判定）",
-  );
+  assert.doesNotMatch(manager, /graphWorkId/, "DelegationManager 不得携带 graph work 身份");
+  assert.doesNotMatch(manager, /GraphWorkLease/, "DelegationManager 不得消费 graph lease");
+  assert.doesNotMatch(manager, /onGraphWorkSettled/, "DelegationManager 不得回调 graph settle 链");
+  assert.doesNotMatch(manager, /\bliveDelegationIds\b/, "liveDelegationIds 内存负信号已移除");
   assert.doesNotMatch(
     manager,
     /\bsettleFinalized\b/,
