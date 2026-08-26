@@ -145,6 +145,15 @@ export class AgentGraphRuntimePortBridge implements AgentGraphRuntimePort {
     );
   }
 
+  async resolveRecordHandoff(
+    records: readonly AgentGraphRecordRef[],
+  ): Promise<ResolvedAgentGraphHandoff> {
+    this.requireOpen();
+    return this.options.runtime.resolveInputHandoff(
+      records.map((record) => this.requireStoredRecord(record)),
+    );
+  }
+
   async stopActivation(input: StopAgentGraphActivationRequest): Promise<void> {
     this.requireOpen();
     await this.options.runtime.stopActivation(this.requireStoredClaim(input.claim), input.reason);

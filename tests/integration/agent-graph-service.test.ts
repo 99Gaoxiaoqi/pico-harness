@@ -82,9 +82,97 @@ test("workspace application drives add to records, durable yield wake, and finis
       reconciled.records.map((record) => record.recordId).sort(),
       [downstreamRecordId, upstreamRecordId].sort(),
     );
+    assert.deepEqual(
+      reconciled.runtimeClaims.map(({ claimId, status, terminalEventId }) => ({
+        claimId,
+        status,
+        terminalEventId,
+      })),
+      [
+        {
+          claimId: upstreamClaimId,
+          status: "completed",
+          terminalEventId: `terminal:${upstreamClaimId}`,
+        },
+        {
+          claimId: downstreamClaimId,
+          status: "completed",
+          terminalEventId: `terminal:${downstreamClaimId}`,
+        },
+      ],
+    );
+    assert.deepEqual(
+      reconciled.results.records.map(({ recordId, status, content }) => ({
+        recordId,
+        status,
+        content,
+      })),
+      [
+        {
+          recordId: upstreamRecordId,
+          status: "success",
+          content: `result:${upstreamRecordId}`,
+        },
+        {
+          recordId: downstreamRecordId,
+          status: "success",
+          content: `result:${downstreamRecordId}`,
+        },
+      ],
+    );
+    const exact = await service.toolPort.readProjection({
+      graphId,
+      rootSessionId,
+      recordIds: [downstreamRecordId],
+    });
+    assert.deepEqual(
+      exact.results.records.map((record) => record.recordId),
+      [downstreamRecordId],
+    );
+    await assert.rejects(
+      service.toolPort.readProjection({
+        graphId,
+        rootSessionId,
+        recordIds: ["record:unknown"],
+      }),
+      /RecordRef does not exist/u,
+    );
+    const otherRootSessionId = "other-root-session";
+    const otherGraphId = graphIdFor(otherRootSessionId, 1);
+    const otherSource = {
+      sessionId: otherRootSessionId,
+      turnId: "other-root-turn",
+      runId: "other-root-run",
+      toolCallId: "other-root-update",
+    };
+    await service.toolPort.commitUpdate({
+      graphId: otherGraphId,
+      expectedRevision: 0,
+      operationId: "add-other-graph-record",
+      source: otherSource,
+      commands: [
+        addCommand({
+          graphId: otherGraphId,
+          intentId: "other-intent",
+          operatorId: "other-worker",
+          source: otherSource,
+        }),
+      ],
+    });
+    await service.supervisor.notifyGraph(otherGraphId);
+    const otherRecordId = store.listRecordRefs(otherGraphId)[0]?.recordId;
+    assert.ok(otherRecordId);
+    await assert.rejects(
+      service.toolPort.readProjection({
+        graphId,
+        rootSessionId,
+        recordIds: [otherRecordId],
+      }),
+      /belongs to another Graph/u,
+    );
     assert.equal(store.listGraphs(rootSessionId).length, 1);
     assert.equal(store.listGraphs(rootSessionId)[0]?.epoch, 1);
-    assert.equal(runtime.starts.length, 2);
+    assert.equal(runtime.starts.length, 3);
     assert.match(runtime.starts[1]?.prompt ?? "", /review result/u);
     assert.match(runtime.starts[1]?.prompt ?? "", /handoff:1/u);
 
@@ -123,13 +211,66 @@ test("workspace application drives add to records, durable yield wake, and finis
     await rm(storageRoot, { recursive: true, force: true });
   }
 
-  assert.equal(runtime.releases, 2);
+  assert.equal(runtime.releases, 3);
+});
+
+test("view exposes a terminal Claim without agent_output so root does not wait for another wake", async () => {
+  const storageRoot = await mkdtemp(join(tmpdir(), "pico-agent-graph-outputless-view-"));
+  const store = new SqliteAgentGraphControlStore({ storageRoot, now: monotonicClock() });
+  const runtime = new CompletingRuntimeAdapter(false);
+  const rootSessionId = "outputless-root-session";
+  const graphId = graphIdFor(rootSessionId, 1);
+  const service = createAgentGraphApplicationService({
+    store,
+    runtime,
+    rootWakePort: new CompletingRootWakePort(),
+    resolveOperatorWorkspace: () => ({ workDir: storageRoot }),
+  });
+
+  try {
+    await service.start();
+    const source = {
+      sessionId: rootSessionId,
+      turnId: "root-turn",
+      runId: "root-run",
+      toolCallId: "root-update",
+    };
+    await service.toolPort.commitUpdate({
+      graphId,
+      expectedRevision: 0,
+      operationId: "add-outputless-operator",
+      source,
+      commands: [
+        addCommand({ graphId, intentId: "outputless-intent", operatorId: "worker", source }),
+      ],
+    });
+    await service.supervisor.notifyGraph(graphId);
+
+    const view = await service.toolPort.readProjection({ graphId, rootSessionId });
+    assert.equal(view.claims.length, 1);
+    assert.deepEqual(view.records, []);
+    assert.deepEqual(view.results, { records: [], totalBytes: 0, truncated: false });
+    assert.deepEqual(view.runtimeClaims, [
+      {
+        claimId: view.claims[0]!.claimId,
+        status: "completed",
+        terminalEventId: `terminal:${view.claims[0]!.claimId}`,
+        outputEventIds: [],
+      },
+    ]);
+  } finally {
+    await service.close();
+    store.close();
+    await rm(storageRoot, { recursive: true, force: true });
+  }
 });
 
 class CompletingRuntimeAdapter implements AgentGraphRuntimeApplicationPort {
   readonly starts: Array<{ claimId: string; prompt: string }> = [];
   readonly projections = new Map<string, ReturnType<typeof completedProjection>>();
   releases = 0;
+
+  constructor(private readonly emitOutput = true) {}
 
   async ensureOperatorProvision(input: {
     readonly provision: AgentGraphOperatorProvisionRecord;
@@ -155,7 +296,7 @@ class CompletingRuntimeAdapter implements AgentGraphRuntimeApplicationPort {
     const existing = this.projections.get(input.claim.claimId);
     if (existing) return { disposition: "observed" as const, projection: existing };
     this.starts.push({ claimId: input.claim.claimId, prompt: input.prompt });
-    const projection = completedProjection(input.claim);
+    const projection = completedProjection(input.claim, this.emitOutput);
     this.projections.set(input.claim.claimId, projection);
     return { disposition: "started" as const, projection };
   }
@@ -171,9 +312,27 @@ class CompletingRuntimeAdapter implements AgentGraphRuntimeApplicationPort {
   async resolveInputHandoff(
     records: readonly AgentGraphRecordRefRecord[],
   ): Promise<ResolvedAgentGraphHandoff> {
+    const resolved = records.map((record) => ({
+      recordId: record.recordId,
+      status: "success" as const,
+      provenance: {
+        graphId: record.graphId,
+        operatorId: record.operatorId,
+        operatorGeneration: record.operatorGeneration,
+        claimId: record.claimId,
+        sessionId: record.sourceSessionId,
+        turnId: record.sourceTurnId,
+        runId: record.sourceRunId,
+        invocationId: `invocation:${record.claimId}`,
+        eventId: record.sourceEventId,
+      },
+      content: `result:${record.recordId}`,
+      bytes: Buffer.byteLength(`result:${record.recordId}`, "utf8"),
+      truncated: false,
+    }));
     return {
-      records: [],
-      totalBytes: 0,
+      records: resolved,
+      totalBytes: resolved.reduce((total, record) => total + record.bytes, 0),
       truncated: false,
       prompt: records.length === 0 ? "" : `handoff:${records.length}`,
     };
@@ -240,7 +399,7 @@ function addCommand(input: {
   };
 }
 
-function completedProjection(claim: AgentGraphActivationClaimRecord) {
+function completedProjection(claim: AgentGraphActivationClaimRecord, emitOutput = true) {
   return {
     claimId: claim.claimId,
     sessionId: claim.targetSessionId,
@@ -250,7 +409,7 @@ function completedProjection(claim: AgentGraphActivationClaimRecord) {
     status: "completed" as const,
     startedEventId: claim.runStartedEventId,
     terminalEventId: `terminal:${claim.claimId}`,
-    outputEventIds: [`output:${claim.claimId}`],
+    outputEventIds: emitOutput ? [`output:${claim.claimId}`] : [],
   };
 }
 
