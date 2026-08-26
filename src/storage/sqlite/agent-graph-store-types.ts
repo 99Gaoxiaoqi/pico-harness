@@ -15,6 +15,7 @@ export type AgentGraphWakeStatus =
   | "waiting_permission"
   | "retryable_failed";
 export type AgentGraphWakeAttemptStatus = "running" | "completed" | "waiting_permission" | "failed";
+export type AgentGraphYieldInterestState = "registered" | "consumed" | "cancelled";
 
 export interface AgentGraphRecord {
   readonly graphId: string;
@@ -191,6 +192,34 @@ export interface AgentGraphSupervisorWakeRecord {
   readonly updatedAt: number;
   readonly deliveredAt?: number;
   readonly lastError?: string;
+  readonly yieldPermitId?: string;
+}
+
+export interface AgentGraphYieldInterestRecord {
+  readonly permitId: string;
+  readonly graphId: string;
+  readonly rootSessionId: string;
+  readonly rootTurnId: string;
+  readonly rootRunId: string;
+  readonly toolCallId: string;
+  readonly state: AgentGraphYieldInterestState;
+  readonly version: number;
+  readonly createdAt: number;
+  readonly resolvedAt?: number;
+}
+
+export interface RegisterAgentGraphYieldInterestInput {
+  readonly permitId: string;
+  readonly graphId: string;
+  readonly rootSessionId: string;
+  readonly rootTurnId: string;
+  readonly rootRunId: string;
+  readonly toolCallId: string;
+}
+
+export interface CancelAgentGraphYieldInterestInput {
+  readonly permitId: string;
+  readonly expectedVersion: number;
 }
 
 export interface EnqueueAgentGraphSupervisorWakeInput {
@@ -202,6 +231,15 @@ export interface EnqueueAgentGraphSupervisorWakeInput {
   readonly payload: unknown;
   readonly availableAt?: number;
 }
+
+export type EnqueueAgentGraphSupervisorWakeForYieldResult =
+  | { readonly status: "not_waiting" }
+  | {
+      readonly status: "enqueued";
+      readonly wake: AgentGraphSupervisorWakeRecord;
+      readonly interest: AgentGraphYieldInterestRecord;
+      readonly replayed: boolean;
+    };
 
 export interface AgentGraphSupervisorWakeAttemptRecord {
   readonly attemptId: string;

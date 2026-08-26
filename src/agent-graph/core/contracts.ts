@@ -212,3 +212,18 @@ export interface AgentGraphSupervisorWakeAttempt {
   readonly completedAt?: number;
   readonly error?: string;
 }
+
+export type AgentGraphYieldInterestState = "registered" | "consumed" | "cancelled";
+
+export interface AgentGraphYieldInterest {
+  readonly permitId: string;
+  readonly graphId: string;
+  readonly rootSessionId: string;
+  readonly rootTurnId: string;
+  readonly rootRunId: string;
+  readonly toolCallId: string;
+  readonly state: AgentGraphYieldInterestState;
+  readonly version: number;
+  readonly createdAt: number;
+  readonly resolvedAt?: number;
+}
