@@ -3,15 +3,6 @@ import type { ToolDefinition } from "../schema/message.js";
 import { TaskRegistry } from "../tasks/task-registry.js";
 import { SUBAGENT_OUTPUT_BUDGET } from "./subagent-budget.js";
 import { ChildRunLimiter, resolveChildRunCapacity } from "./child-run-limiter.js";
-import type { SqliteRuntimeControlStore } from "../storage/sqlite/sqlite-runtime-control-store.js";
-import {
-  acquireGraphWorkLease,
-  graphWorkLeaseKey,
-  GRAPH_WORK_HEARTBEAT_MS,
-  heartbeatGraphWorkLease,
-  isGraphWorkLeaseLive as isWorkLeaseLiveForGraph,
-  releaseGraphWorkLease,
-} from "../graph/work-lease.js";
 
 export type DelegationResultStatus = "completed" | "partial" | "error" | "timed_out" | "cancelled";
 
@@ -62,25 +53,9 @@ export interface DelegationManagerOptions {
   maxAsyncChildren?: number;
   maxOutputSummaryChars?: number;
   taskRegistry?: TaskRegistry;
-  /**
-   * Durable lease 源（RuntimeStore 控制面）。注入后 graph work dispatch 用
-   * `graph-work:${workId}` lease 做执行主权去重（替代内存 records 扫描），settle
-   * 链完成时释放；orphan 恢复按 lease 活性判定。未注入时去重降级为不拦截。
-   */
-  runtimeStore?: SqliteRuntimeControlStore;
   onCompletion?: (completion: DelegationCompletionEnvelope) => void;
   /** Called when a delegation carrying planStepId settles, regardless of completionPolicy. */
   onPlanStepSettled?: (planStepId: string, status: DelegationRecordStatus) => Promise<void> | void;
-  /**
-   * Called when a delegation carrying graphWorkId settles, regardless of
-   * completionPolicy. The outputSummary is the same bounded summary the
-   * completion envelope carries; the host uses it to mint graph.work.recorded.
-   */
-  onGraphWorkSettled?: (
-    workId: string,
-    status: DelegationRecordStatus,
-    outputSummary: string,
-  ) => Promise<void> | void;
 }
 
 export interface DelegationCompletionEnvelope {
@@ -96,8 +71,6 @@ export interface DelegationCompletionEnvelope {
   outputSummary: string;
   error?: string;
   planStepId?: string;
-  /** Graph Mode work handle this completion fulfills (if any). */
-  graphWorkId?: string;
 }
 
 export function formatDelegationCompletions(
@@ -133,8 +106,6 @@ export interface DelegationTaskRuntimeInput {
   ownerSessionId?: string;
   childSessionId?: string;
   planStepId?: string;
-  /** Graph Mode work handle this delegation is fulfilling. */
-  graphWorkId?: string;
 }
 
 export interface DelegationResumeInfo {
@@ -182,13 +153,6 @@ interface DelegationRecord {
   controller: AbortController;
   promise: Promise<void>;
   planStepId?: string;
-  graphWorkId?: string;
-  /** graph work 执行主权 lease 的 resourceKey（dispatch 时 acquire，settle 链完成时 release）。 */
-  leaseResourceKey?: string;
-  /** acquire 时拿到的 lease epoch，heartbeat/release 凭此校验所有权。 */
-  leaseEpoch?: number;
-  /** 运行期 lease 续租定时器；settle 链完成时清掉。 */
-  heartbeatTimer?: ReturnType<typeof setInterval>;
 }
 
 export class DelegationManager {
@@ -207,8 +171,6 @@ export class DelegationManager {
   private readonly maxOutputSummaryChars: number;
   private readonly onCompletion?: DelegationManagerOptions["onCompletion"];
   private readonly onPlanStepSettled?: DelegationManagerOptions["onPlanStepSettled"];
-  private readonly onGraphWorkSettled?: DelegationManagerOptions["onGraphWorkSettled"];
-  private readonly runtimeStore?: SqliteRuntimeControlStore;
   private nextCompletionSeq = 1;
   readonly taskRegistry?: TaskRegistry;
 
@@ -218,10 +180,8 @@ export class DelegationManager {
     this.maxOutputSummaryChars =
       options.maxOutputSummaryChars ?? SUBAGENT_OUTPUT_BUDGET.batch.hardMax;
     this.taskRegistry = options.taskRegistry;
-    this.runtimeStore = options.runtimeStore;
     this.onCompletion = options.onCompletion;
     this.onPlanStepSettled = options.onPlanStepSettled;
-    this.onGraphWorkSettled = options.onGraphWorkSettled;
   }
 
   dispatch(
@@ -249,31 +209,6 @@ export class DelegationManager {
     const completionPolicy = taskInput.completionPolicy ?? "required";
     const id = `delegation-${now}-${this.nextId}`;
     this.nextId++;
-
-    // 同一 graphWork 最多一个 in-flight 委派：用 durable lease 做执行主权去重（替代内存
-    // records 扫描）。lease 覆盖整个 dispatch → settle 链窗口（acquire 在此、release 在
-    // settle 链 .finally）。钻石/扇入图里并发 settleGraphWork 对仍 requested 的同一下游
-    // work 二次派发会被 lease 拦下——账本不坏因 CAS 幂等，但 worker 模式两子代理并发写同批
-    // 文件有冲突且浪费算力。安全性：图模型里一个 work 只声明/执行/settle 一次，不存在对已
-    // settle 的同一 work 的合法再派发——那种再派发本身就是要拦的双重执行 bug。未注入
-    // runtimeStore 时（如纯单测）降级为不拦截。
-    let leaseResourceKey: string | undefined;
-    let leaseEpoch: number | undefined;
-    if (taskInput.graphWorkId && this.runtimeStore) {
-      leaseResourceKey = graphWorkLeaseKey(taskInput.graphWorkId);
-      try {
-        const lease = acquireGraphWorkLease(this.runtimeStore, taskInput.graphWorkId, id);
-        leaseEpoch = lease.leaseEpoch;
-      } catch {
-        // lease 已被另一个 in-flight delegation 持有（TTL 未过）→ 幂等拒绝，返回持有者。
-        const holder = this.runtimeStore.getLease(leaseResourceKey);
-        return {
-          status: "rejected",
-          ...(holder?.ownerId ? { delegationId: holder.ownerId } : {}),
-          error: `graphWork ${taskInput.graphWorkId} 已有活跃委派 ${holder?.ownerId ?? "?"}`,
-        };
-      }
-    }
 
     const task = this.taskRegistry?.create("local_agent", {
       description: taskInput.description ?? "delegate_task",
@@ -304,9 +239,6 @@ export class DelegationManager {
       controller,
       promise: Promise.resolve(),
       ...(taskInput.planStepId ? { planStepId: taskInput.planStepId } : {}),
-      ...(taskInput.graphWorkId ? { graphWorkId: taskInput.graphWorkId } : {}),
-      ...(leaseResourceKey ? { leaseResourceKey } : {}),
-      ...(leaseEpoch !== undefined ? { leaseEpoch } : {}),
     };
 
     record.promise = Promise.resolve()
@@ -336,17 +268,6 @@ export class DelegationManager {
             /* best-effort */
           }
         }
-        if (record.graphWorkId) {
-          try {
-            await this.onGraphWorkSettled?.(
-              record.graphWorkId,
-              record.status,
-              this.outputSummary(record),
-            );
-          } catch {
-            /* best-effort */
-          }
-        }
         this.publishCompletion(record);
       })
       .catch(async (err: unknown) => {
@@ -363,28 +284,15 @@ export class DelegationManager {
             /* best-effort */
           }
         }
-        if (record.graphWorkId) {
-          try {
-            await this.onGraphWorkSettled?.(
-              record.graphWorkId,
-              record.status,
-              this.outputSummary(record),
-            );
-          } catch {
-            /* best-effort */
-          }
-        }
         this.publishCompletion(record);
       })
       .finally(() => {
-        this.releaseGraphWorkLease(record);
         // records 降为非权威活跃表：settle 链完成即移除（终态由 TaskRegistry 记录，
         // delegate_status 对已 settle 委派返回 not_found——该工具是 deprecated 兼容诊断）。
         this.records.delete(record.id);
       });
 
     this.records.set(id, record);
-    this.startGraphWorkHeartbeat(record);
     return {
       status: "dispatched",
       delegationId: id,
@@ -445,52 +353,6 @@ export class DelegationManager {
       }
     }
     return count;
-  }
-
-  /** 运行期周期续租 graph work lease，防长任务 delegation 让 TTL 过期被他人抢。 */
-  private startGraphWorkHeartbeat(record: DelegationRecord): void {
-    if (!record.leaseResourceKey || record.leaseEpoch === undefined || !this.runtimeStore) {
-      return;
-    }
-    const workId = record.graphWorkId;
-    const epoch = record.leaseEpoch;
-    if (!workId) return;
-    record.heartbeatTimer = setInterval(() => {
-      try {
-        heartbeatGraphWorkLease(this.runtimeStore!, workId, record.id, epoch);
-      } catch {
-        // 单进程下 lease 不会被他人抢，heartbeat 失败多为暂时 I/O；best-effort 不 abort，
-        // 避免误杀长任务。若 lease 真过期，settle 时 release 会失败（best-effort catch）。
-      }
-    }, GRAPH_WORK_HEARTBEAT_MS);
-    record.heartbeatTimer.unref?.();
-  }
-
-  /** settle 链完成时释放 graph work 执行主权 lease（best-effort）。 */
-  private releaseGraphWorkLease(record: DelegationRecord): void {
-    if (record.heartbeatTimer) clearInterval(record.heartbeatTimer);
-    if (
-      record.leaseResourceKey &&
-      record.leaseEpoch !== undefined &&
-      this.runtimeStore &&
-      record.graphWorkId
-    ) {
-      try {
-        releaseGraphWorkLease(this.runtimeStore, record.graphWorkId, record.id, record.leaseEpoch);
-      } catch {
-        // lease 可能已被 TTL 回收（崩溃后过期或被新派发接管），release 失败属正常，best-effort。
-      }
-    }
-  }
-
-  /**
-   * graph work 的执行主权 lease 是否仍活（TTL 未过期且有持有者）。orphan 恢复据此判定
-   * work 的 backing delegation 是否真在跑，取代"重启后 records 空集"的负信号。
-   * 未注入 runtimeStore 时保守返回 true（不标孤儿），保持降级路径不误杀。
-   */
-  isWorkLeaseLive(workId: string): boolean {
-    if (!this.runtimeStore) return true;
-    return isWorkLeaseLiveForGraph(this.runtimeStore, workId);
   }
 
   private toSnapshot(record: DelegationRecord): DelegationTaskSnapshot {
@@ -585,7 +447,6 @@ export class DelegationManager {
       outputSummary: this.outputSummary(record),
       ...(record.error !== undefined ? { error: record.error } : {}),
       ...(record.planStepId ? { planStepId: record.planStepId } : {}),
-      ...(record.graphWorkId ? { graphWorkId: record.graphWorkId } : {}),
     };
   }
 
