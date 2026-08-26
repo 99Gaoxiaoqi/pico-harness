@@ -23,6 +23,7 @@ import type {
   SettleAgentGraphSupervisorWakeInput,
   SettleAgentGraphSupervisorWakeResult,
   TransitionAgentGraphClaimInput,
+  TransitionAgentGraphProvisionInput,
 } from "./agent-graph-store-types.js";
 
 export * from "./agent-graph-store-types.js";
@@ -89,6 +90,12 @@ export class SqliteAgentGraphControlStore {
           `Root session ${rootSessionId} epoch ${input.epoch} is already bound to graph ${byEpoch.graphId}`,
         );
       }
+      const openGraph = this.selectOpenGraphByRoot(rootSessionId);
+      if (openGraph) {
+        throw new AgentGraphStoreConflictError(
+          `Root session ${rootSessionId} already has open graph ${openGraph.graphId}`,
+        );
+      }
       const createdAt = this.now();
       this.lease.database
         .prepare(
@@ -139,7 +146,7 @@ export class SqliteAgentGraphControlStore {
       }
 
       const graph = this.requireGraph(normalized.graphId);
-      if (graph.phase === "finished") {
+      if (graph.phase === "finished" && normalized.kind !== "stop") {
         throw new AgentGraphStoreConflictError(
           `Graph ${normalized.graphId} is finished and rejects schedule updates`,
         );
@@ -156,8 +163,8 @@ export class SqliteAgentGraphControlStore {
         .prepare(
           `INSERT INTO agent_graph_schedule_revisions
            (graph_id, revision, operation_id, request_fingerprint, kind, command_json,
-            source_session_id, source_run_id, source_tool_call_id, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            source_session_id, source_turn_id, source_run_id, source_tool_call_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           normalized.graphId,
@@ -167,11 +174,19 @@ export class SqliteAgentGraphControlStore {
           normalized.kind,
           normalized.commandJson,
           normalized.sourceSessionId,
+          normalized.sourceTurnId,
           normalized.sourceRunId,
           normalized.sourceToolCallId,
           createdAt,
         );
-      if (normalized.kind === "finish") {
+      if (graph.phase === "finished") {
+        this.lease.database
+          .prepare(
+            `UPDATE agent_graphs SET head_revision = ?
+             WHERE graph_id = ? AND head_revision = ? AND phase = 'finished'`,
+          )
+          .run(revision, normalized.graphId, normalized.expectedRevision);
+      } else if (normalized.kind === "finish") {
         this.lease.database
           .prepare(
             `UPDATE agent_graphs
@@ -237,8 +252,8 @@ export class SqliteAgentGraphControlStore {
           `INSERT INTO agent_graph_operator_provisions
            (provision_id, graph_id, operator_id, generation, schedule_revision,
             provision_fingerprint, child_session_id, profile_snapshot_json,
-            workspace_binding_json, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            workspace_binding_json, state, version, created_at, provisioned_at, stopped_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'requested', 1, ?, NULL, NULL)`,
         )
         .run(
           normalized.provisionId,
@@ -260,6 +275,55 @@ export class SqliteAgentGraphControlStore {
         ),
         replayed: false,
       };
+    });
+  }
+
+  transitionOperatorProvision(
+    input: TransitionAgentGraphProvisionInput,
+  ): IdempotentStoreResult<AgentGraphOperatorProvisionRecord> {
+    const provisionId = requireNonEmpty(input.provisionId, "provisionId");
+    requirePositiveInteger(input.expectedVersion, "expectedVersion");
+    assertProvisionTransition(input.from, input.to);
+    return this.write(() => {
+      const current = this.selectProvisionById(provisionId);
+      if (!current) {
+        throw new AgentGraphStoreConflictError(`Provision ${provisionId} does not exist`);
+      }
+      if (current.state === input.to) return { record: current, replayed: true };
+      if (current.state !== input.from || current.version !== input.expectedVersion) {
+        throw new AgentGraphStoreConflictError(
+          `Provision ${provisionId} state/version changed from ${input.from}@${input.expectedVersion} to ${current.state}@${current.version}`,
+        );
+      }
+      const now = this.now();
+      if (input.to === "provisioned") {
+        this.lease.database
+          .prepare(
+            `UPDATE agent_graph_operator_provisions
+             SET state = 'provisioned', version = version + 1, provisioned_at = ?
+             WHERE provision_id = ? AND state = ? AND version = ?`,
+          )
+          .run(now, provisionId, input.from, input.expectedVersion);
+      } else if (input.to === "stopping") {
+        this.lease.database
+          .prepare(
+            `UPDATE agent_graph_operator_provisions
+             SET state = 'stopping', version = version + 1
+             WHERE provision_id = ? AND state = ? AND version = ?`,
+          )
+          .run(provisionId, input.from, input.expectedVersion);
+      } else {
+        this.lease.database
+          .prepare(
+            `UPDATE agent_graph_operator_provisions
+             SET state = 'stopped', version = version + 1, stopped_at = ?
+             WHERE provision_id = ? AND state = ? AND version = ?`,
+          )
+          .run(now, provisionId, input.from, input.expectedVersion);
+      }
+      const updated = this.selectProvisionById(provisionId);
+      if (!updated) throw new AgentGraphStoreConflictError(`Provision ${provisionId} disappeared`);
+      return { record: updated, replayed: false };
     });
   }
 
@@ -322,6 +386,11 @@ export class SqliteAgentGraphControlStore {
       if (provision.childSessionId !== normalized.targetSessionId) {
         throw new AgentGraphStoreConflictError(
           `Activation ${normalized.intentId} target session does not match its operator provision`,
+        );
+      }
+      if (provision.state !== "provisioned") {
+        throw new AgentGraphStoreConflictError(
+          `Activation ${normalized.intentId} operator provision is ${provision.state}, not provisioned`,
         );
       }
       const claimedAt = this.now();
@@ -733,6 +802,13 @@ export class SqliteAgentGraphControlStore {
     return row ? graphFromRow(asRow(row)) : undefined;
   }
 
+  private selectOpenGraphByRoot(rootSessionId: string): AgentGraphRecord | undefined {
+    const row = this.lease.database
+      .prepare("SELECT * FROM agent_graphs WHERE root_session_id = ? AND phase = 'open'")
+      .get(rootSessionId);
+    return row ? graphFromRow(asRow(row)) : undefined;
+  }
+
   private requireGraph(graphId: string): AgentGraphRecord {
     const graph = this.selectGraph(graphId);
     if (!graph) throw new AgentGraphStoreConflictError(`Graph ${graphId} does not exist`);
@@ -927,6 +1003,7 @@ function normalizeScheduleInput(input: CommitAgentGraphScheduleInput): Normalize
     kind: input.kind,
     commandJson: canonicalJson(input.command),
     sourceSessionId: requireNonEmpty(input.sourceSessionId, "sourceSessionId"),
+    sourceTurnId: requireNonEmpty(input.sourceTurnId, "sourceTurnId"),
     sourceRunId: requireNonEmpty(input.sourceRunId, "sourceRunId"),
     sourceToolCallId: requireNonEmpty(input.sourceToolCallId, "sourceToolCallId"),
   };
@@ -1137,6 +1214,16 @@ function assertClaimTransition(
   throw new Error(`Unsupported activation claim transition ${from} -> ${to}`);
 }
 
+function assertProvisionTransition(
+  from: TransitionAgentGraphProvisionInput["from"],
+  to: TransitionAgentGraphProvisionInput["to"],
+): void {
+  if (from === "requested" && (to === "provisioned" || to === "stopped")) return;
+  if (from === "provisioned" && (to === "stopping" || to === "stopped")) return;
+  if (from === "stopping" && to === "stopped") return;
+  throw new Error(`Unsupported operator provision transition ${from} -> ${to}`);
+}
+
 function wakeAttemptStatusFor(
   outcome: SettleAgentGraphSupervisorWakeInput["outcome"],
 ): AgentGraphSupervisorWakeAttemptRecord["status"] {
@@ -1166,6 +1253,7 @@ function scheduleFromRow(row: Record<string, unknown>): AgentGraphScheduleRevisi
     kind: rowString(row, "kind") as AgentGraphScheduleRevisionRecord["kind"],
     command: rowJson(row, "command_json"),
     sourceSessionId: rowString(row, "source_session_id"),
+    sourceTurnId: rowString(row, "source_turn_id"),
     sourceRunId: rowString(row, "source_run_id"),
     sourceToolCallId: rowString(row, "source_tool_call_id"),
     createdAt: rowNumber(row, "created_at"),
@@ -1183,7 +1271,11 @@ function provisionFromRow(row: Record<string, unknown>): AgentGraphOperatorProvi
     childSessionId: rowString(row, "child_session_id"),
     profileSnapshot: rowJson(row, "profile_snapshot_json"),
     workspaceBinding: rowJson(row, "workspace_binding_json"),
+    state: rowString(row, "state") as AgentGraphOperatorProvisionRecord["state"],
+    version: rowNumber(row, "version"),
     createdAt: rowNumber(row, "created_at"),
+    provisionedAt: rowOptionalNumber(row, "provisioned_at"),
+    stoppedAt: rowOptionalNumber(row, "stopped_at"),
   };
 }
 
