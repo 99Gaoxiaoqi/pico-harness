@@ -49,6 +49,7 @@ import {
   runWorkspaceBlobGcOnce,
   type WorkspaceBlobGcResult,
 } from "../storage/workspace-blob-gc.js";
+import type { AgentGraphApplicationService } from "../agent-graph/service.js";
 
 export interface DaemonRunExecutor {
   (input: {
@@ -95,12 +96,22 @@ export interface WorkspaceRuntimeServiceOptions {
   execute: DaemonRunExecutor;
   env?: Readonly<Record<string, string | undefined>>;
   createWorkspaceRuntime?: (workspacePath: string) => Promise<WorkspaceTaskRuntime>;
+  createAgentGraphApplicationService?: (
+    input: WorkspaceAgentGraphApplicationServiceFactoryInput,
+  ) => Promise<AgentGraphApplicationService> | AgentGraphApplicationService;
   now?: () => number;
   registrationStore?: WorkspaceRegistrationStore;
   runBlobGc?: (input: {
     readonly workDir: string;
     readonly picoHome: string;
   }) => Promise<WorkspaceBlobGcResult>;
+}
+
+export interface WorkspaceAgentGraphApplicationServiceFactoryInput {
+  readonly workspacePath: string;
+  readonly workspaceRuntime: WorkspaceTaskRuntime;
+  readonly runtimeStore: SqliteRuntimeControlStore;
+  readonly picoHome: string;
 }
 
 const DEFAULT_REPLAY_EVENT_LIMIT = 1_000;
@@ -120,6 +131,7 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
   private readonly listeners = new Set<(notification: RuntimeNotification) => void>();
   private readonly unsubscribers = new Map<string, () => void>();
   private readonly eventStores = new Map<string, SqliteRuntimeControlStore>();
+  private readonly agentGraphApplications = new Map<string, AgentGraphApplicationService>();
   private readonly registrationStore: WorkspaceRegistrationStore;
   private readonly picoHome: string;
   private registrationChanged?: () => Promise<void>;
@@ -144,33 +156,53 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
       new WorkspaceRegistrationStore(join(this.picoHome, "daemon-workspaces.json"));
     this.registry = new WorkspaceRuntimeRegistry({
       create: async (workspacePath) => {
-        this.eventStore(workspacePath);
+        const runtimeStore = this.eventStore(workspacePath);
         const runtime = await (options.createWorkspaceRuntime?.(workspacePath) ??
           WorkspaceTaskRuntime.create({
             workDir: workspacePath,
             taskHostRuntimeOptions: { picoHome: this.picoHome },
           }));
-        this.unsubscribers.set(
-          workspacePath,
-          runtime.subscribe((event) => {
-            this.publish(
-              createRuntimeNotification({
-                topic: event.type,
-                scope: {
-                  workspacePath: event.workspace,
-                  ...(event.run?.sessionId ? { sessionId: event.run.sessionId } : {}),
-                  ...(event.run ? { runId: event.run.runId } : {}),
-                },
-                resourceVersion: event.resourceVersion,
-                at: event.at,
-                payload: eventPayload(event),
-              }),
-              event.run ? daemonRunRecord(event.run) : undefined,
-            );
-            this.scheduleBlobGc(workspacePath);
-          }),
-        );
-        return runtime;
+        const unsubscribe = runtime.subscribe((event) => {
+          this.publish(
+            createRuntimeNotification({
+              topic: event.type,
+              scope: {
+                workspacePath: event.workspace,
+                ...(event.run?.sessionId ? { sessionId: event.run.sessionId } : {}),
+                ...(event.run ? { runId: event.run.runId } : {}),
+              },
+              resourceVersion: event.resourceVersion,
+              at: event.at,
+              payload: eventPayload(event),
+            }),
+            event.run ? daemonRunRecord(event.run) : undefined,
+          );
+          this.scheduleBlobGc(workspacePath);
+        });
+        this.unsubscribers.set(workspacePath, unsubscribe);
+        let graphApplication: AgentGraphApplicationService | undefined;
+        try {
+          if (options.createAgentGraphApplicationService) {
+            graphApplication = await options.createAgentGraphApplicationService({
+              workspacePath,
+              workspaceRuntime: runtime,
+              runtimeStore,
+              picoHome: this.picoHome,
+            });
+            await graphApplication.start();
+            this.agentGraphApplications.set(workspacePath, graphApplication);
+          }
+          return runtime;
+        } catch (error) {
+          await this.cleanupFailedWorkspaceCreation({
+            workspacePath,
+            runtime,
+            runtimeStore,
+            unsubscribe,
+            graphApplication,
+          });
+          throw error;
+        }
       },
     });
   }
@@ -486,6 +518,14 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
     return this.getRuntime(workspacePath);
   }
 
+  /** Read-only lookup; unlike getWorkspaceRuntime this never constructs workspace resources. */
+  async getWorkspaceAgentGraphApplicationService(
+    workspacePath: string,
+  ): Promise<AgentGraphApplicationService | undefined> {
+    const canonical = await canonicalizeWorkspacePath(workspacePath);
+    return this.agentGraphApplications.get(canonical);
+  }
+
   /** Read-only lookup for adapters that project a Run's durable Session state. */
   async getWorkspaceRun(workspacePath: string, runId: string) {
     const runtime = await this.getRuntime(workspacePath);
@@ -568,7 +608,8 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
       this.lifecycleState = "closed";
       const runtimeOwnershipPending = this.registry.hasPendingOwnership();
       this.resourceClosePending = true;
-      const resourceClose = this.registry.waitForOwnershipRelease().then(() => {
+      const resourceClose = this.registry.waitForOwnershipRelease().then(async () => {
+        await this.closeAllAgentGraphApplications();
         this.releaseResources();
       });
       this.resourceClosePromise = resourceClose;
@@ -597,12 +638,72 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
     this.blobGcGenerations.set(workspacePath, (this.blobGcGenerations.get(workspacePath) ?? 0) + 1);
     this.clearBlobGcTimer(workspacePath);
     this.blobGcRerunRequested.delete(workspacePath);
+    await this.registry.release(workspacePath);
     this.unsubscribers.get(workspacePath)?.();
     this.unsubscribers.delete(workspacePath);
-    await this.registry.release(workspacePath);
+    await this.closeAgentGraphApplication(workspacePath);
     const store = this.eventStores.get(workspacePath);
     store?.close();
     this.eventStores.delete(workspacePath);
+  }
+
+  private async closeAgentGraphApplication(workspacePath: string): Promise<void> {
+    const application = this.agentGraphApplications.get(workspacePath);
+    if (!application) return;
+    await application.close();
+    if (this.agentGraphApplications.get(workspacePath) === application) {
+      this.agentGraphApplications.delete(workspacePath);
+    }
+  }
+
+  private async closeAllAgentGraphApplications(): Promise<void> {
+    const applications = [...this.agentGraphApplications.entries()];
+    await Promise.all(
+      applications.map(([workspacePath]) => this.closeAgentGraphApplication(workspacePath)),
+    );
+  }
+
+  private async cleanupFailedWorkspaceCreation(input: {
+    readonly workspacePath: string;
+    readonly runtime: WorkspaceTaskRuntime;
+    readonly runtimeStore: SqliteRuntimeControlStore;
+    readonly unsubscribe: () => void;
+    readonly graphApplication?: AgentGraphApplicationService;
+  }): Promise<void> {
+    const failures: unknown[] = [];
+    try {
+      await input.runtime.close();
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
+      await input.runtime.waitForOwnershipRelease();
+    } catch (error) {
+      failures.push(error);
+    }
+    if (input.graphApplication) {
+      try {
+        await input.graphApplication.close();
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    input.unsubscribe();
+    this.unsubscribers.delete(input.workspacePath);
+    try {
+      input.runtimeStore.close();
+    } catch (error) {
+      failures.push(error);
+    }
+    if (this.eventStores.get(input.workspacePath) === input.runtimeStore) {
+      this.eventStores.delete(input.workspacePath);
+    }
+    if (failures.length > 0) {
+      logger.warn(
+        { failures, workspacePath: input.workspacePath },
+        "Failed workspace Graph application startup cleanup was incomplete",
+      );
+    }
   }
 
   private publish(notification: RuntimeNotification, run?: DaemonRunRecord): void {
