@@ -51,7 +51,10 @@ const PROVISION: AgentGraphOperatorProvisionRecord = {
   childSessionId: "child-session-1",
   profileSnapshot: {},
   workspaceBinding: {},
+  state: "provisioned",
+  version: 2,
   createdAt: 1,
+  provisionedAt: 2,
 };
 
 test("Graph runtime starts one exact Run and only observes it on replay", async () => {
@@ -101,13 +104,27 @@ test("Graph runtime idempotently acquires and pins the provisioned child Session
     },
   } as unknown as SessionManager;
   const fixture = createFixture(sessionManager);
+  const requestedProvision: AgentGraphOperatorProvisionRecord = {
+    provisionId: PROVISION.provisionId,
+    graphId: PROVISION.graphId,
+    operatorId: PROVISION.operatorId,
+    generation: PROVISION.generation,
+    scheduleRevision: PROVISION.scheduleRevision,
+    provisionFingerprint: PROVISION.provisionFingerprint,
+    childSessionId: PROVISION.childSessionId,
+    profileSnapshot: PROVISION.profileSnapshot,
+    workspaceBinding: PROVISION.workspaceBinding,
+    state: "requested" as const,
+    version: 1,
+    createdAt: PROVISION.createdAt,
+  };
 
   const first = await fixture.adapter.ensureOperatorProvision({
-    provision: PROVISION,
+    provision: requestedProvision,
     workDir: "/workspace",
   });
   const replay = await fixture.adapter.ensureOperatorProvision({
-    provision: PROVISION,
+    provision: requestedProvision,
     workDir: "/workspace",
   });
 
