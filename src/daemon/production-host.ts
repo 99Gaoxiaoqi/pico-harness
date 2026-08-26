@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { createCliSessionId } from "../cli/session-resolver.js";
 import { globalSessionManager } from "../engine/session.js";
+import type { SessionManagerLease } from "../engine/session-manager.js";
 import {
   AgentRuntime,
   type RunAgentCliResult,
@@ -12,8 +13,20 @@ import type { PlanHandoff } from "../engine/plan-handoff.js";
 import { PlanCoordinator } from "../plan/coordinator.js";
 import type { PlanProjection } from "../plan/contract.js";
 import { createEngineRuntimePort } from "../runtime/engine-runtime-port-adapter.js";
+import {
+  createAgentGraphWorkspaceHost,
+  type AgentGraphRunToolBinding,
+  type AgentGraphWorkspaceHost,
+  type CreateAgentGraphWorkspaceHostOptions,
+  type ExecuteHostedAgentGraphRunInput,
+} from "../runtime/agent-graph-host.js";
 import type { MemoryProposalPublishedNotice } from "../memory/worker.js";
 import { createSessionRuntime } from "../runtime/session-runtime.js";
+import type {
+  WorkspaceRunContext,
+  WorkspaceRunStatus,
+  WorkspaceTaskRuntime,
+} from "../runtime/workspace-runtime.js";
 import { SilentReporter } from "../engine/reporter.js";
 import { loadPicoConfig } from "../input/pico-config.js";
 import { EffectiveConfigResolver } from "../input/effective-config.js";
@@ -70,6 +83,8 @@ import { canonicalizeWorkspacePath } from "./workspace-registry.js";
 import { WorkspaceRegistrationStore } from "./workspace-registration.js";
 import { WorkspaceRuntimeService } from "./workspace-runtime-service.js";
 import { BrowserAgentCommandBroker } from "./browser-agent-command-broker.js";
+import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
+import type { AgentGraphApplicationService } from "../agent-graph/service.js";
 import { PluginRuntimeSnapshotRegistry } from "../plugins/plugin-runtime-snapshot-registry.js";
 import {
   createBuiltinPluginCapabilityRegistry,
@@ -90,6 +105,10 @@ export interface ProductionLocalDaemonHostOptions {
   pluginCapabilityRegistry?: PluginCapabilityRegistry;
   /** Whether the production host releases an injected plugin registry on close. */
   ownsPluginRuntimeSnapshotRegistry?: boolean;
+  /** Test/embedding seam; production uses the canonical workspace Graph host factory. */
+  agentGraphWorkspaceHostFactory?: (
+    options: CreateAgentGraphWorkspaceHostOptions,
+  ) => AgentGraphWorkspaceHost;
   env?: Readonly<Record<string, string | undefined>>;
 }
 
@@ -218,9 +237,292 @@ export function createProductionRuntimeServices(
   const nextDesktopResourceVersion = () => ++desktopResourceVersion;
   let sessionSubscriptions: SessionSubscriptionRegistry | undefined;
   const activeOverlays = new Map<string, PersistentActiveOverlay>();
+  const agentGraphHosts = new Map<string, AgentGraphWorkspaceHost>();
+  const agentGraphWorkspaceHostFactory =
+    options.agentGraphWorkspaceHostFactory ?? createAgentGraphWorkspaceHost;
+  const executeDetachedGraphRun = async (detached: {
+    readonly input: ExecuteHostedAgentGraphRunInput;
+    readonly workspacePath: string;
+    readonly workspaceRuntime: WorkspaceTaskRuntime;
+    readonly context: WorkspaceRunContext;
+  }): Promise<void> => {
+    const { input, workspacePath, workspaceRuntime, context } = detached;
+    const runWorkDir = input.session.workDir;
+    const targetSessionId = input.session.id;
+    let sessionLeaseTransferred = false;
+    let sessionLease: SessionManagerLease | undefined;
+    let runtimeState: Awaited<ReturnType<typeof createSessionRuntime>> | undefined;
+    let broker: DesktopInteractionBroker | undefined;
+    let unsubscribeInteractions: (() => void) | undefined;
+    let executionFailed = false;
+    let executionFailure: unknown;
+    try {
+      sessionLease = await globalSessionManager.getOrCreatePinned(targetSessionId, runWorkDir, {
+        persistence: true,
+        picoHome,
+        runtimePort: createEngineRuntimePort(),
+      });
+      if (!(await trustStore.isTrusted(workspacePath))) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.FORBIDDEN,
+          `工作区尚未信任，拒绝启动 Graph Run: ${workspacePath}`,
+        );
+      }
+      if (sessionLease.session !== input.session) {
+        throw new Error(`Graph exact Session ownership changed: ${targetSessionId}`);
+      }
+      if (!input.session.runtimeEventStore) {
+        throw new Error(`Production Graph requires durable Session: ${targetSessionId}`);
+      }
+      const persistedSettings = (await input.session.readHydrationSnapshot()).runtime.settings;
+      const route = await resolveDesktopModelRoute(
+        runWorkDir,
+        credentialVault,
+        userConfigStore,
+        effectiveConfigResolver,
+        input.requestedModel ?? persistedSettings?.modelRouteId,
+        persistedSettings?.provider,
+        env,
+      );
+      const reasoningLevel = coordinateReasoningLevel(
+        route.capabilities.reasoningProfile,
+        persistedSettings?.thinkingEffortExplicit ? persistedSettings.thinkingEffort : undefined,
+      ).level;
+      const effectiveMcp = await resolveTrustedEffectiveMcpSources(runWorkDir, {
+        picoHome,
+        trustStore,
+        userStore: userMcpConfigStore,
+      });
+      const pluginSnapshot = await pluginRuntimeSnapshotRegistry.get(runWorkDir);
+      runtimeState = await createSessionRuntime({
+        session: input.session,
+        sessionLease,
+        env,
+        workspaceTrustStore: trustStore,
+        ...(workspaceRuntime.taskHostRuntime
+          ? { taskHostRuntime: workspaceRuntime.taskHostRuntime }
+          : {}),
+        ...(persistedSettings?.collaborationMode !== "plan" && pluginSnapshot.hookSources.length
+          ? { hookExtensionSources: pluginSnapshot.hookSources }
+          : {}),
+      });
+      sessionLeaseTransferred = true;
+      broker = new DesktopInteractionBroker({
+        store: interactionStore,
+        ownerKey: createDesktopInteractionOwnerKey(
+          workspacePath,
+          targetSessionId,
+          input.prestartedRun.runId,
+        ),
+        onPersistenceError: (error) =>
+          logger.error(
+            { workspacePath, sessionId: targetSessionId, runId: input.prestartedRun.runId, error },
+            "Graph desktop interaction persistence failed",
+          ),
+        onListenerError: (error) =>
+          logger.warn(
+            { workspacePath, sessionId: targetSessionId, runId: input.prestartedRun.runId, error },
+            "Graph desktop interaction listener failed",
+          ),
+      });
+      await broker.recover();
+      const interaction: PendingInteraction = {
+        broker,
+        workspacePath,
+        runId: input.prestartedRun.runId,
+        sessionId: targetSessionId,
+      };
+      unsubscribeInteractions = broker.subscribe((event) => {
+        publishInteractionEvent(
+          service,
+          interaction,
+          event,
+          pendingApprovals,
+          pendingPrompts,
+          resolvedApprovals,
+          resolvedPrompts,
+          nextDesktopResourceVersion,
+        );
+      });
+      await agentRuntime.execute(
+        {
+          prompt: input.prompt,
+          dir: runWorkDir,
+          session: targetSessionId,
+          provider: route.provider,
+          baseURL: route.baseURL,
+          apiKey: route.apiKey,
+          model: route.model,
+          modelRouteId: route.modelRouteId,
+          modelCapabilities: route.capabilities,
+          // Graph profile policy is model-authored until a trusted profile catalog exists.
+          // Keep every detached Run at the interactive, non-elevated default boundary.
+          interactionMode: "default",
+          orchestrationMode: input.orchestrationMode,
+          ...(reasoningLevel !== undefined ? { thinkingEffort: reasoningLevel } : {}),
+          ...(input.allowedTools ? { allowedTools: input.allowedTools } : {}),
+        },
+        {
+          signal: context.signal,
+          runtimeState,
+          reporter: new SilentReporter(),
+          modelRouter: route.modelRouter,
+          approvalNotifier: broker.notifyApproval,
+          approvalManager: broker.approvalManager,
+          askUserHandler: broker.askUserHandler,
+          waitAtSafeBoundary: context.waitAtSafeBoundary,
+          pluginSnapshot,
+          pluginCapabilityRegistry,
+          mcpConfigSources: effectiveMcp.sources,
+          picoHome,
+          env,
+          browserAgent: browserAgentBroker.bind(targetSessionId),
+          prestartedRun: input.prestartedRun,
+          prestartedUserInput: input.prestartedUserInput,
+          agentGraph: input.binding,
+          memoryProposalSink: (notice: MemoryProposalPublishedNotice) =>
+            publishDesktopMemoryProposal(
+              service,
+              workspacePath,
+              notice,
+              nextDesktopResourceVersion,
+            ),
+          sessionResourceChangedSink: (notice: RuntimeSessionResourceChangedNotice) =>
+            service.publishDesktopNotification(
+              createRuntimeNotification({
+                topic: "session.resourceChanged",
+                scope: {
+                  workspacePath: notice.workspacePath,
+                  sessionId: notice.sessionId,
+                },
+                resourceVersion: nextDesktopResourceVersion(),
+                at: Date.now(),
+                payload: { resource: notice.resource, revision: notice.revision },
+              }),
+            ),
+        },
+      );
+    } catch (error) {
+      executionFailed = true;
+      executionFailure = error;
+    }
+    const cleanupFailures: unknown[] = [];
+    try {
+      unsubscribeInteractions?.();
+    } catch (error) {
+      cleanupFailures.push(error);
+    }
+    if (broker) {
+      try {
+        await broker.closeAsync();
+      } catch (error) {
+        cleanupFailures.push(error);
+      }
+      removeBrokerInteractions(pendingApprovals, broker);
+      removeBrokerInteractions(pendingPrompts, broker);
+    }
+    try {
+      await runtimeState?.dispose();
+    } catch (error) {
+      cleanupFailures.push(error);
+    }
+    if (sessionLease && !sessionLeaseTransferred) {
+      try {
+        sessionLease.release();
+      } catch (error) {
+        cleanupFailures.push(error);
+      }
+    }
+    try {
+      input.onTerminal();
+    } catch (error) {
+      cleanupFailures.push(error);
+    }
+    if (executionFailed) {
+      if (cleanupFailures.length === 0) throw executionFailure;
+      throw new AggregateError(
+        [executionFailure, ...cleanupFailures],
+        `Graph detached Run execution and cleanup failed: ${input.prestartedRun.runId}`,
+      );
+    }
+    if (cleanupFailures.length === 1) throw cleanupFailures[0];
+    if (cleanupFailures.length > 1) {
+      throw new AggregateError(
+        cleanupFailures,
+        `Graph detached Run cleanup failed: ${input.prestartedRun.runId}`,
+      );
+    }
+  };
   const service: WorkspaceRuntimeService = new WorkspaceRuntimeService({
     registrationStore,
     env,
+    createAgentGraphApplicationService: ({ workspacePath, workspaceRuntime, runtimeStore }) => {
+      const runtimeEventStore = new SqliteRuntimeEventStore({
+        storageRoot: runtimeStore.storageRoot,
+      });
+      let host: AgentGraphWorkspaceHost;
+      try {
+        host = agentGraphWorkspaceHostFactory({
+          workDir: workspacePath,
+          storageRoot: runtimeStore.storageRoot,
+          runtimeEventStore,
+          sessionManager: globalSessionManager,
+          sessionOptions: {
+            persistence: true,
+            picoHome,
+            runtimePort: createEngineRuntimePort(),
+          },
+          execute: async (input) => {
+            workspaceRuntime.startExactRun(
+              input.prestartedRun.runId,
+              {
+                description: `Graph ${input.binding.kind} activation ${input.claimId}`,
+                sessionId: input.session.id,
+              },
+              async (context) => {
+                context.bindSession(input.session.id);
+                await executeDetachedGraphRun({
+                  input,
+                  workspacePath,
+                  workspaceRuntime,
+                  context,
+                });
+              },
+            );
+          },
+          isRootSourceActive: (rootSessionId) =>
+            workspaceRuntime
+              .listRuns()
+              .some(
+                (run) =>
+                  run.sessionId === rootSessionId && !isTerminalWorkspaceRunStatus(run.status),
+              ),
+          isWorkspaceBusy: () =>
+            workspaceRuntime.listRuns().some((run) => !isTerminalWorkspaceRunStatus(run.status)),
+          requestStop: ({ runId, reason }) => {
+            const run = workspaceRuntime.getRun(runId);
+            if (!run || isTerminalWorkspaceRunStatus(run.status)) return false;
+            workspaceRuntime.cancel(runId, reason);
+            return true;
+          },
+          onError: (error, context) =>
+            logger.error(
+              { workspacePath, ...context, error },
+              "Graph workspace supervisor execution failed",
+            ),
+        });
+      } catch (error) {
+        runtimeEventStore.close();
+        throw error;
+      }
+      agentGraphHosts.set(workspacePath, host);
+      return workspaceGraphApplicationLifecycle({
+        workspacePath,
+        host,
+        runtimeEventStore,
+        agentGraphHosts,
+      });
+    },
     execute: async ({ workspacePath, workspaceRuntime, prompt, sessionId, execution, context }) => {
       if (!(await trustStore.isTrusted(workspacePath))) {
         throw new RuntimeProtocolError(
@@ -418,6 +720,7 @@ export function createProductionRuntimeServices(
             model: route.model,
             modelRouteId: route.modelRouteId,
             modelCapabilities: route.capabilities,
+            orchestrationMode: persistedSettings?.orchestrationMode ?? "default",
             ...(reasoningLevel !== undefined ? { thinkingEffort: reasoningLevel } : {}),
             ...(persistedSettings?.collaborationMode === "plan" ||
             persistedSettings?.mode === "plan"
@@ -446,6 +749,14 @@ export function createProductionRuntimeServices(
             picoHome,
             env,
             browserAgent: browserAgentBroker.bind(targetSessionId),
+            ...(persistedSettings?.orchestrationMode === "graph"
+              ? {
+                  agentGraph: rootAgentGraphBinding(
+                    requireAgentGraphWorkspaceHost(agentGraphHosts, workspacePath),
+                    targetSessionId,
+                  ),
+                }
+              : {}),
             memoryProposalSink: (notice: MemoryProposalPublishedNotice) =>
               publishDesktopMemoryProposal(
                 service,
@@ -1003,6 +1314,80 @@ export function createDesktopInteractionOwnerKey(
 
 function sessionOverlayKey(workspacePath: string, sessionId: string): string {
   return `${workspacePath}\u0000${sessionId}`;
+}
+
+function workspaceGraphApplicationLifecycle(input: {
+  readonly workspacePath: string;
+  readonly host: AgentGraphWorkspaceHost;
+  readonly runtimeEventStore: SqliteRuntimeEventStore;
+  readonly agentGraphHosts: Map<string, AgentGraphWorkspaceHost>;
+}): AgentGraphApplicationService {
+  const { workspacePath, host, runtimeEventStore, agentGraphHosts } = input;
+  let closed = false;
+  return {
+    toolPort: host.application.toolPort,
+    drivePort: host.application.drivePort,
+    supervisor: host.application.supervisor,
+    start: () => host.start(),
+    close: async () => {
+      if (closed) return;
+      closed = true;
+      const failures: unknown[] = [];
+      try {
+        await host.close();
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
+        runtimeEventStore.close();
+      } catch (error) {
+        failures.push(error);
+      }
+      if (agentGraphHosts.get(workspacePath) === host) agentGraphHosts.delete(workspacePath);
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1) {
+        throw new AggregateError(failures, `Graph workspace close failed: ${workspacePath}`);
+      }
+    },
+  };
+}
+
+function requireAgentGraphWorkspaceHost(
+  hosts: ReadonlyMap<string, AgentGraphWorkspaceHost>,
+  workspacePath: string,
+): AgentGraphWorkspaceHost {
+  const host = hosts.get(workspacePath);
+  if (!host) throw new Error(`Graph workspace host is unavailable: ${workspacePath}`);
+  return host;
+}
+
+function rootAgentGraphBinding(
+  host: AgentGraphWorkspaceHost,
+  rootSessionId: string,
+): AgentGraphRunToolBinding {
+  return {
+    kind: "root",
+    getRootContext: () => {
+      const run = currentRuntimeRun();
+      if (!run || run.sessionId !== rootSessionId) return undefined;
+      // RuntimeRun.currentTurnId is the only safe source: engine turns advance after admission.
+      // The structural read keeps this integration commit cherry-pickable with the core getter.
+      const rootTurnId = (run as typeof run & { readonly currentTurnId?: unknown }).currentTurnId;
+      if (typeof rootTurnId !== "string" || !rootTurnId) return undefined;
+      return {
+        kind: "graph_root_supervisor",
+        graphId: `graph:${rootSessionId}`,
+        rootSessionId,
+        rootTurnId,
+        rootRunId: run.runId,
+      };
+    },
+    toolPort: host.application.toolPort,
+  };
+}
+
+function isTerminalWorkspaceRunStatus(status: WorkspaceRunStatus): boolean {
+  return status === "succeeded" || status === "failed" || status === "cancelled";
 }
 
 /**
