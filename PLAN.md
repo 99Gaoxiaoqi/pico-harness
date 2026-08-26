@@ -27,7 +27,8 @@
 - [x] 6. 已实现 workspace 级 `AgentGraphSupervisorService` 及 `WorkspaceRuntimeService` 生命周期接入，覆盖启动扫描、single-flight reconcile、持久 yield/Wake/Attempt、退避、权限等待、manual intervention 和精确根 RuntimeRun。
 - [x] 7. Graph 工具与 prompt 已硬切为 `view_agent_graph`、`update_agent_graph`、`yield_agent_graph` 和 operator-only `agent_output`；已删除 `DelegationManager` Graph 分支、Graph work lease、旧 settle/reconcile/recover 与 engine continuation 写路径。旧 `graph.*` 仅保留历史 codec/reducer，不迁移、不续跑。
 - [ ] 8. 确定性集成测试已覆盖 revision 幂等/冲突、readiness、stop/finish 与 Claim 竞争、两个 SQLite store/进程竞争、投影重建、exact Run attach/indeterminate、yield/wake 竞态和 workspace 生命周期；同 Operator 多 Intent 的公开协议尚未开放，独立 Operator 的真实并行执行仍需宿主级验证；也尚未用独立子进程逐一 kill/reopen 覆盖 claim 后 Run 前、provider 前后、terminal 后 wake 前的全部崩溃窗口。
-- [ ] 9. Graph v2 架构文档、旧数据硬切说明和 production daemon host 执行接线已完成；发布前仍需为 `isolated-worktree` 提供 resolver（当前默认仅支持 `shared`，否则 fail closed）、引入可信 profile catalog 后再消费 `permissionPolicy` / `systemPromptVersion`，并真实运行模型 E2E `add → yield → operator output → durable wake → finish`；最终代码还需重新运行 Graph 相关集成测试、`npm run typecheck`、`npm run check:architecture`、格式检查和差异审查。
+- [x] 9. 已完成 Graph v2 架构文档、旧数据硬切说明、production daemon host 执行接线和最终确定性验证：Graph 专项 83/83 通过，`npm run lint`、`npm run typecheck`、架构边界检查和差异检查通过。全量集成测试 1320 项通过；3 个 Desktop 断言已在相同 `main` 基线复现，另 1 个并发清理抖动已单独复跑通过。全量格式检查仅命中 `main` 已有且本分支未修改的 `InspectorWorkbarPanel.tsx`。
+- [ ] 10. 发布前仍需为 `isolated-worktree` 提供 resolver（当前默认仅支持 `shared`，否则 fail closed）、引入可信 profile catalog 后再消费 `permissionPolicy` / `systemPromptVersion`，并在具备凭证的环境真实运行模型 E2E `add → yield → operator output → durable wake → finish`。测试已落库且默认门禁验证为 1 项 skip，当前环境未执行真实模型调用。
 
 ## Validation
 
@@ -35,4 +36,4 @@
 - target Run 一旦存在，恢复只观察或恢复该 Run，provider 不会因 Graph reconcile 再调用一次。
 - 输入未提交、Graph 已 finish 或 revision 已变化时，不产生 provision 之外的 fresh execution side effect。
 - coordinator、UI callback 或进程崩溃不会改变 SQLite/Runtime ledger 中已经提交的事实，重启后能够从持久状态收敛到相同投影。
-- `npm run typecheck`、`npm run check:architecture`、Graph 相关集成测试和一条真实模型 Graph E2E 在最终代码状态上通过。
+- `npm run typecheck`、`npm run check:architecture` 和 Graph 相关集成测试在最终代码状态上通过；真实模型 Graph E2E 必须在发布环境显式启用并通过，不能把默认 skip 视为通过。
