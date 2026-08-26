@@ -26,9 +26,10 @@
 - [x] 5. 已实现 `src/agent-graph/reconciler.ts`，按 stop → provision → resolve inputs → revision-conditional claim → begin executing → project records 推进到 fixed point；finish 阻止 fresh Claim，但保留既有 Claim 与 Runtime 事实。
 - [x] 6. 已实现 workspace 级 `AgentGraphSupervisorService` 及 `WorkspaceRuntimeService` 生命周期接入，覆盖启动扫描、single-flight reconcile、持久 yield/Wake/Attempt、退避、权限等待、manual intervention 和精确根 RuntimeRun。
 - [x] 7. Graph 工具与 prompt 已硬切为 `view_agent_graph`、`update_agent_graph`、`yield_agent_graph` 和 operator-only `agent_output`；已删除 `DelegationManager` Graph 分支、Graph work lease、旧 settle/reconcile/recover 与 engine continuation 写路径。旧 `graph.*` 仅保留历史 codec/reducer，不迁移、不续跑。
-- [ ] 8. 确定性集成测试已覆盖 revision 幂等/冲突、readiness、stop/finish 与 Claim 竞争、两个 SQLite store/进程竞争、投影重建、exact Run attach/indeterminate、yield/wake 竞态和 workspace 生命周期；同 Operator 多 Intent 的公开协议尚未开放，独立 Operator 的真实并行执行仍需宿主级验证；也尚未用独立子进程逐一 kill/reopen 覆盖 claim 后 Run 前、provider 前后、terminal 后 wake 前的全部崩溃窗口。
-- [x] 9. 已完成 Graph v2 架构文档、旧数据硬切说明、production daemon host 执行接线和最终确定性验证：Graph 专项 83/83 通过，`npm run lint`、`npm run typecheck`、架构边界检查和差异检查通过。全量集成测试 1320 项通过；3 个 Desktop 断言已在相同 `main` 基线复现，另 1 个并发清理抖动已单独复跑通过。全量格式检查仅命中 `main` 已有且本分支未修改的 `InspectorWorkbarPanel.tsx`。
-- [ ] 10. 发布前仍需为 `isolated-worktree` 提供 resolver（当前默认仅支持 `shared`，否则 fail closed）、引入可信 profile catalog 后再消费 `permissionPolicy` / `systemPromptVersion`，并在具备凭证的环境真实运行模型 E2E `add → yield → operator output → durable wake → finish`。测试已落库且默认门禁验证为 1 项 skip，当前环境未执行真实模型调用。
+- [ ] 8. 确定性集成测试已覆盖 revision 幂等/冲突、readiness、stop/finish 与 Claim 竞争、两个 SQLite store/进程竞争、投影重建、exact Run attach/indeterminate/stop/authority/损坏账本、真实宿主 operator/root execute、owner fence、yield/wake 竞态、production 装配失败和 workspace 生命周期；关键并发组连续 10 轮共 300 项无失败。尚未用独立子进程逐一 kill/reopen 覆盖 claim 后 Run 前、provider 前后、terminal 后 wake 前的全部崩溃窗口。
+- [x] 9. 已完成 Graph v2 架构文档、旧数据硬切说明、production daemon host 执行接线和最终确定性验证：Graph/production 专项 100 项通过、真实模型门禁 1 项 skip，`npm run lint`、`npm run typecheck`、严格架构边界检查、build、Desktop typecheck/package/make 和差异检查通过。最终全量集成测试 1350 项中 1337 项通过、10 项平台跳过；3 个 Desktop 断言已在相同 `main` 基线复现。全量格式检查仅命中 `main` 已有且本分支未修改的 `InspectorWorkbarPanel.tsx`。
+- [ ] 10. 真实模型 E2E 已在用户默认路由 `deepseek/deepseek-v4-flash` 显式执行：初始 root 和 Operator 在约 5.5 秒内成功，Operator 产生唯一 output/Record；随后 7 次 exact root wake 均在 Provider/tool dispatch 前失败，最终 `retryable_failed`，未执行 view/finish。已加入分阶段、脱敏、持久状态诊断，但本次清理前未保留 terminal reason，具体装配错误仍需下一轮修复验证。
+- [ ] 11. 发布前还需修复三项 Graph 阻塞：exact root wake 的 Provider 前失败；`agent_output` 接受孤立 UTF-16 surrogate；Supervisor root context 接受并传递带首尾空白的身份字段。另需为 `isolated-worktree` 提供 resolver（当前默认仅支持 `shared`，否则 fail closed），并在引入可信 profile catalog 后再消费 `permissionPolicy` / `systemPromptVersion`。
 
 ## Validation
 
