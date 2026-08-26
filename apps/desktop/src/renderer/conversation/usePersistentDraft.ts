@@ -43,24 +43,25 @@ export function writePersistentDraft(key: string, value: string): void {
 }
 
 export function usePersistentDraft(key: string) {
-  const [value, setValue] = useState(() => readPersistentDraft(key));
+  const [draft, setDraft] = useState(() => ({ key, value: readPersistentDraft(key) }));
+  const current = draft.key === key ? draft : { key, value: readPersistentDraft(key) };
 
   useEffect(() => {
-    setValue(readPersistentDraft(key));
-  }, [key]);
+    if (draft.key !== key) setDraft(current);
+  }, [current, draft.key, key]);
 
   const update = useCallback(
     (next: string) => {
-      setValue(next);
+      setDraft({ key, value: next });
       writePersistentDraft(key, next);
     },
     [key],
   );
 
   const clear = useCallback(() => {
-    setValue("");
+    setDraft({ key, value: "" });
     removePersistentDraft(key);
   }, [key]);
 
-  return { value, update, clear } as const;
+  return { value: current.value, update, clear } as const;
 }

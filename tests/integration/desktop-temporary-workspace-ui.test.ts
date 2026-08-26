@@ -10,6 +10,7 @@ import {
   newSessionHref,
   workspaceDisplayName,
 } from "../../apps/desktop/src/renderer/workspace-session.js";
+import { TemporaryWorkspaceRequest } from "../../apps/desktop/src/renderer/temporary-workspace-request.js";
 
 test("global new task ensures the temporary workspace without inheriting a project", async () => {
   const appSource = await rendererSource("App.tsx");
@@ -19,6 +20,13 @@ test("global new task ensures the temporary workspace without inheriting a proje
   );
   assert.match(newTaskPage, /if \(!workspacePath\)/u);
   assert.match(newTaskPage, /actions\.ensureTemporaryWorkspace\(\)/u);
+  assert.match(newTaskPage, /aria-label="正在准备新任务"/u);
+  assert.match(newTaskPage, /<p>正在准备无项目任务…<\/p>/u);
+  assert.ok(
+    newTaskPage.indexOf('aria-label="正在准备新任务"') <
+      newTaskPage.lastIndexOf("return <ConversationPage />"),
+    "the unbound route must render a dedicated preparation state instead of a stale composer",
+  );
   assert.match(
     newTaskPage,
     /navigate\(newSessionHref\(temporaryWorkspacePath\), \{ replace: true \}\)/u,
@@ -34,7 +42,96 @@ test("global new task ensures the temporary workspace without inheriting a proje
     ),
   );
   assert.match(ensureAction, /invoke\(bridge, "workspace\.temporary\.ensure", \{\}\)/u);
-  assert.match(ensureAction, /loadWorkspace\(bridge, status\.workspacePath\)/u);
+  assert.match(ensureAction, /temporaryWorkspaceRequest\.current\.run/u);
+  assert.match(ensureAction, /await loadWorkspace\(bridge, status\.workspacePath\)/u);
+  assert.doesNotMatch(
+    ensureAction,
+    /loadWorkspaceIndex/u,
+    "new task must not wait for every registered workspace to refresh",
+  );
+});
+
+test("a stale workspace index cannot remove the newly activated workspace", async () => {
+  const runtimeSource = await rendererSource("runtime.ts");
+  const indexLoad = runtimeSource.slice(
+    runtimeSource.indexOf("const loadWorkspaceIndex"),
+    runtimeSource.indexOf("const loadUserCapabilities"),
+  );
+  assert.match(indexLoad, /workspaceIndexLoadGenerationRef\.current \+ 1/u);
+  assert.match(
+    indexLoad,
+    /workspaceIndexLoadGenerationRef\.current !== generation\) return workspaces/u,
+  );
+  assert.match(
+    indexLoad,
+    /workspaceIndexLoadGenerationRef\.current !== generation\) return current/u,
+  );
+
+  const workspaceLoad = runtimeSource.slice(
+    runtimeSource.indexOf("const loadWorkspace ="),
+    runtimeSource.indexOf("const loadConversation ="),
+  );
+  assert.match(workspaceLoad, /workspaceIndexLoadGenerationRef\.current \+= 1/u);
+  assert.match(workspaceLoad, /workspaceLoadIntentRef\.current = workspacePath/u);
+
+  const focusRefresh = runtimeSource.slice(
+    runtimeSource.indexOf("const refreshOnFocus"),
+    runtimeSource.indexOf("window.addEventListener", runtimeSource.indexOf("const refreshOnFocus")),
+  );
+  assert.match(
+    focusRefresh,
+    /dataRef\.current\.workspacePath === workspacePath[\s\S]*?workspaceLoadIntentRef\.current === workspacePath/u,
+  );
+
+  const subscriptionBootstrap = runtimeSource.slice(
+    runtimeSource.indexOf('const boundary = await bridge.runtime["events.replay"]'),
+    runtimeSource.indexOf("subscription = bridge.events.subscribe"),
+  );
+  const staleGuard = subscriptionBootstrap.indexOf(
+    "workspaceLoadIntentRef.current !== workspacePath",
+  );
+  const workspaceHydration = subscriptionBootstrap.indexOf(
+    "await loadWorkspace(bridge, workspacePath)",
+  );
+  assert.ok(staleGuard >= 0 && staleGuard < workspaceHydration);
+});
+
+test("concurrent new-task effects share one temporary workspace request", async () => {
+  const request = new TemporaryWorkspaceRequest();
+  let resolve!: (workspacePath: string) => void;
+  let calls = 0;
+  const operation = () => {
+    calls += 1;
+    return new Promise<string>((next) => {
+      resolve = next;
+    });
+  };
+
+  const first = request.run(operation);
+  const second = request.run(operation);
+  assert.strictEqual(second, first);
+  assert.equal(calls, 1);
+
+  resolve("/state/temporary-workspace");
+  assert.equal(await first, "/state/temporary-workspace");
+  await Promise.resolve();
+
+  const next = request.run(async () => {
+    calls += 1;
+    return "/state/another-temporary-workspace";
+  });
+  assert.equal(calls, 2, "a new request may start after the previous task is ready");
+  assert.equal(await next, "/state/another-temporary-workspace");
+});
+
+test("a failed temporary workspace request can be retried", async () => {
+  const request = new TemporaryWorkspaceRequest();
+  await assert.rejects(request.run(async () => Promise.reject(new Error("unavailable"))));
+  await Promise.resolve();
+  assert.equal(
+    await request.run(async () => "/state/recovered-workspace"),
+    "/state/recovered-workspace",
+  );
 });
 
 test("temporary workspace keeps a stable UI label and can switch to a real project", async () => {
