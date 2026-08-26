@@ -347,6 +347,11 @@ export class RuntimeRun {
   private finishPromise?: Promise<void>;
   private ownerFence?: RuntimeOwnerFence;
 
+  /** Current engine turn identity for host-injected, turn-scoped tool authority. */
+  get currentTurnId(): string {
+    return this.turnId;
+  }
+
   private constructor(
     readonly sessionId: string,
     readonly workDir: string,

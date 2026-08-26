@@ -201,7 +201,8 @@ const SUBAGENT_FAILURE_LEADS = [
 /**
  * D10④ 内容级熔断：子代理 loop 的"完成"是模型自报（不再调工具 + 总结可用），
  * 流程状态无法区分"真做完"与"做完样子但任务失败"。宿主若按 completed 记账
- * （graph.work.recorded / plan step completed），失败就被自报完成掩盖。
+ * （例如 plan step completed），失败就被自报完成掩盖。Graph v2 Operator
+ * 使用独立 RuntimeRun + agent_output 提交记录，不再经过本子代理结算路径。
  * 本函数只认总结开篇的明确失败宣言——保守换取零误伤：模糊表述交由宿主
  * 模型读 summary 自行判断，这里只兜底"模型亲口说失败"的下界。
  */
@@ -3613,7 +3614,7 @@ export class AgentEngine implements AgentRunner {
           taskPrompt,
         );
         // D10④ 内容级熔断：自报 completed 但总结开篇明确声明失败 → 降级 error，
-        // 宿主按失败结算（graph.work.failed / plan step 不落 completed）。
+        // 宿主按失败结算（plan step 不落 completed）。
         // 放在 finalize 之后：报告 inline 收口与上限门照常，只改终态。
         if (finalized.status === "completed" && subagentDeclaresFailure(finalized.summary)) {
           logger.warn(
@@ -3733,8 +3734,8 @@ export class AgentEngine implements AgentRunner {
    *
    * 第 1 轮审查问题 3 修复:报告被上限门拒绝时,原始报告已永久丢弃,交付物
    * 只剩合成错误文本——终态结算与工具结果入口门对齐(超限工具结果按
-   * isError/failed 结算),status 落 "error"(既有失败语义,宿主铸
-   * graph.work.failed / plan step 不落 completed),不再以 completed/partial
+   * isError/failed 结算),status 落 "error"(既有失败语义，plan step
+   * 不落 completed),不再以 completed/partial
    * 收场掩盖"报告不可用"的事实。拒绝文本保留在 summary 供主 Agent 重取。
    */
   private async finalizeSubagentResult(
