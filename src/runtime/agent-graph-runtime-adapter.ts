@@ -278,7 +278,7 @@ export class AgentGraphRuntimeAdapter implements AgentOutputCommitPort {
       ...projection,
       outputEventIds: outputSources.map((source) => source.eventId),
     };
-    return this.applyHostLaunchState(claim, durableProjection);
+    return this.applyHostLaunchState(claim, durableProjection, events);
   }
 
   async stopActivation(
@@ -404,8 +404,11 @@ export class AgentGraphRuntimeAdapter implements AgentOutputCommitPort {
       prompt: input.prompt,
     } satisfies StartExactAgentGraphRunInput;
     const before = await this.options.runPort.inspectExactRun(exactRun);
-    assertExactRunIsSafeToObserve(before, input.claim.targetRunId);
-    if (before.status === "live" || before.status === "terminal") {
+    if (
+      before.status === "live" ||
+      before.status === "terminal" ||
+      before.status === "indeterminate"
+    ) {
       return {
         disposition: "observed",
         projection: await this.projectActivation(input.claim),
@@ -416,7 +419,6 @@ export class AgentGraphRuntimeAdapter implements AgentOutputCommitPort {
     // exact-ID boundary. The latter reattaches without creating another start/input.
     const disposition = await this.options.runPort.startExactRun(exactRun);
     const after = await this.options.runPort.inspectExactRun(exactRun);
-    assertExactRunIsSafeToObserve(after, input.claim.targetRunId);
     const projection = await this.projectActivation(input.claim);
     if (after.status === "not_started" || projection.status === "not_started") {
       throw new AgentGraphRuntimeIntegrityError(
@@ -429,17 +431,16 @@ export class AgentGraphRuntimeAdapter implements AgentOutputCommitPort {
   private async applyHostLaunchState(
     claim: AgentGraphActivationClaimRecord,
     projection: AgentGraphActivationRuntimeProjection,
+    events: readonly RuntimeEvent[],
   ): Promise<AgentGraphActivationRuntimeProjection> {
-    if (
-      (projection.status !== "running" && projection.status !== "waiting_permission") ||
-      !this.options.runPort.inspectLaunch
-    ) {
+    if (isTerminalStatus(projection.status) || projection.status === "not_started")
       return projection;
-    }
-    const launch = await this.options.runPort.inspectLaunch({
-      sessionId: claim.targetSessionId,
-      runId: claim.targetRunId,
-    });
+    const launch = this.options.runPort.inspectLaunch
+      ? await this.options.runPort.inspectLaunch({
+          sessionId: claim.targetSessionId,
+          runId: claim.targetRunId,
+        })
+      : { status: "unknown" as const };
     if (launch.status === "failed" || launch.status === "cancelled") {
       return { ...projection, status: launch.status };
     }
@@ -448,18 +449,33 @@ export class AgentGraphRuntimeAdapter implements AgentOutputCommitPort {
       // replay-safe. Surface it as interrupted instead of treating it as live.
       return { ...projection, status: "interrupted" };
     }
+    if (launch.status === "unknown" && hasNonAttachableRuntimeFacts(claim, events)) {
+      // A non-live exact Run with a durable side-effect/approval fact is never
+      // replayed. Project one terminal recovery state so a registered yield can
+      // wake the root supervisor instead of remaining permanently executing.
+      return { ...projection, status: "interrupted" };
+    }
     return projection;
   }
 }
 
-function assertExactRunIsSafeToObserve(
-  inspection: AgentGraphExactRunInspection,
-  runId: string,
-): void {
-  if (inspection.status !== "indeterminate") return;
-  throw new AgentGraphRuntimeIntegrityError(
-    `Exact RuntimeRun ${runId} requires operator review: ${inspection.reason}; blocking events: ${inspection.blockingEventIds.join(", ")}`,
-  );
+function hasNonAttachableRuntimeFacts(
+  claim: AgentGraphActivationClaimRecord,
+  events: readonly RuntimeEvent[],
+): boolean {
+  const inputEventId = `user-message:agent-graph-input:${createHash("sha256")
+    .update(claim.claimId)
+    .digest("hex")}`;
+  return events.some((event) => {
+    if (event.kind === "run.started" || event.kind === "run.terminal") return false;
+    if (event.eventId !== inputEventId) return true;
+    if (event.kind !== "message.committed" || event.data.message.role !== "user") {
+      throw new AgentGraphRuntimeIntegrityError(
+        `Graph input event ${inputEventId} is bound to an incompatible Runtime fact`,
+      );
+    }
+    return false;
+  });
 }
 
 export function projectAgentGraphActivation(
