@@ -8,7 +8,9 @@ import {
   type RunAgentCliResult,
   type RuntimeSessionResourceChangedNotice,
 } from "../runtime/agent-runtime.js";
-import { currentRuntimeRun } from "../runtime/runtime-run.js";
+import { currentRuntimeRun, RuntimeRun } from "../runtime/runtime-run.js";
+import type { AgentGraphRunLaunchState } from "../runtime/agent-graph-runtime-adapter.js";
+import { inspectAgentGraphExactRun } from "../runtime/agent-graph-exact-run-port.js";
 import type { PlanHandoff } from "../engine/plan-handoff.js";
 import { PlanCoordinator } from "../plan/coordinator.js";
 import type { PlanProjection } from "../plan/contract.js";
@@ -32,6 +34,7 @@ import { loadPicoConfig } from "../input/pico-config.js";
 import { EffectiveConfigResolver } from "../input/effective-config.js";
 import { UserConfigStore } from "../input/user-config-store.js";
 import { resolveTrustedEffectiveMcpSources } from "../mcp/effective-config.js";
+import { redactSensitiveText } from "../mcp/redact.js";
 import { UserMcpConfigStore } from "../mcp/user-config-store.js";
 import {
   assertCredentialRefMatchesProvider,
@@ -256,6 +259,7 @@ export function createProductionRuntimeServices(
     let unsubscribeInteractions: (() => void) | undefined;
     let executionFailed = false;
     let executionFailure: unknown;
+    let failureSealError: unknown;
     try {
       sessionLease = await globalSessionManager.getOrCreatePinned(targetSessionId, runWorkDir, {
         persistence: true,
@@ -404,9 +408,18 @@ export function createProductionRuntimeServices(
       );
     } catch (error) {
       executionFailed = true;
-      executionFailure = error;
+      executionFailure = safeGraphExecutionError(error);
+      try {
+        await sealGraphPreDispatchFailure(
+          input,
+          context.signal.aborted ? "cancelled" : "failed",
+          error,
+        );
+      } catch (sealError) {
+        failureSealError = safeGraphExecutionError(sealError);
+      }
     }
-    const cleanupFailures: unknown[] = [];
+    const cleanupFailures: unknown[] = failureSealError ? [failureSealError] : [];
     try {
       unsubscribeInteractions?.();
     } catch (error) {
@@ -432,11 +445,6 @@ export function createProductionRuntimeServices(
       } catch (error) {
         cleanupFailures.push(error);
       }
-    }
-    try {
-      input.onTerminal();
-    } catch (error) {
-      cleanupFailures.push(error);
     }
     if (executionFailed) {
       if (cleanupFailures.length === 0) throw executionFailure;
@@ -473,23 +481,55 @@ export function createProductionRuntimeServices(
             runtimePort: createEngineRuntimePort(),
           },
           execute: async (input) => {
-            workspaceRuntime.reattachExactRun(
-              input.prestartedRun.runId,
-              {
-                description: `Graph ${input.binding.kind} activation ${input.claimId}`,
-                sessionId: input.session.id,
-              },
-              async (context) => {
-                context.bindSession(input.session.id);
-                await executeDetachedGraphRun({
-                  input,
-                  workspacePath,
-                  workspaceRuntime,
-                  context,
-                });
+            let launch;
+            try {
+              launch = workspaceRuntime.reattachExactRun(
+                input.prestartedRun.runId,
+                {
+                  description: `Graph ${input.binding.kind} activation ${input.claimId}`,
+                  sessionId: input.session.id,
+                },
+                async (context) => {
+                  context.bindSession(input.session.id);
+                  await executeDetachedGraphRun({
+                    input,
+                    workspacePath,
+                    workspaceRuntime,
+                    context,
+                  });
+                },
+              );
+            } catch (error) {
+              const safeError = safeGraphExecutionError(error);
+              try {
+                await sealGraphPreDispatchFailure(input, "failed", safeError);
+              } finally {
+                input.onTerminal();
+              }
+              throw safeError;
+            }
+            if (isTerminalWorkspaceRunStatus(launch.status)) {
+              input.onTerminal();
+              return;
+            }
+            void workspaceRuntime.waitForRun(input.prestartedRun.runId).then(
+              () => input.onTerminal(),
+              (error) => {
+                logger.error(
+                  {
+                    workspacePath,
+                    sessionId: input.session.id,
+                    runId: input.prestartedRun.runId,
+                    error: safeGraphExecutionError(error),
+                  },
+                  "Graph workspace terminal observation failed",
+                );
+                input.onTerminal();
               },
             );
           },
+          inspectLaunch: ({ sessionId, runId }) =>
+            graphLaunchState(workspaceRuntime, sessionId, runId),
           isRootSourceActive: (rootSessionId) =>
             workspaceRuntime
               .listRuns()
@@ -1314,6 +1354,73 @@ export function createDesktopInteractionOwnerKey(
 
 function sessionOverlayKey(workspacePath: string, sessionId: string): string {
   return `${workspacePath}\u0000${sessionId}`;
+}
+
+const MAX_GRAPH_EXECUTION_ERROR_CHARS = 1_000;
+
+function safeGraphExecutionError(error: unknown): Error {
+  const raw = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  const message = redactSensitiveText(raw)
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, " ")
+    .slice(0, MAX_GRAPH_EXECUTION_ERROR_CHARS);
+  const safe = new Error(message || "Graph host execution failed");
+  safe.name = "GraphHostExecutionError";
+  return safe;
+}
+
+async function sealGraphPreDispatchFailure(
+  input: ExecuteHostedAgentGraphRunInput,
+  status: "failed" | "cancelled",
+  error: unknown,
+): Promise<"sealed" | "already_terminal" | "unsafe_to_seal"> {
+  const store = input.session.runtimeEventStore;
+  const capability = input.session.runtimeEventCapability;
+  if (!store || !capability) return "unsafe_to_seal";
+  const turnId = input.prestartedRun.turnId;
+  if (!turnId) return "unsafe_to_seal";
+  const events = await store.readRun(input.session.id, input.prestartedRun.runId);
+  const inspection = inspectAgentGraphExactRun(
+    {
+      claimId: input.claimId,
+      sessionId: input.session.id,
+      turnId,
+      runId: input.prestartedRun.runId,
+      invocationId: input.prestartedRun.invocationId,
+      runStartedEventId: input.prestartedRun.runStartedEventId,
+      workDir: input.session.workDir,
+      prompt: input.prompt,
+    },
+    events,
+    false,
+  );
+  if (inspection.status === "terminal") return "already_terminal";
+  if (inspection.status !== "attachable") return "unsafe_to_seal";
+  const runtimeRun = await RuntimeRun.start({
+    capability,
+    runId: input.prestartedRun.runId,
+    ...(input.prestartedRun.turnId ? { turnId: input.prestartedRun.turnId } : {}),
+    invocationId: input.prestartedRun.invocationId,
+    runStartedEventId: input.prestartedRun.runStartedEventId,
+    now: () => new Date(input.prestartedRun.runStartedAt),
+  });
+  await runtimeRun.finish(status, safeGraphExecutionError(error).message);
+  return "sealed";
+}
+
+function graphLaunchState(
+  workspaceRuntime: WorkspaceTaskRuntime,
+  sessionId: string,
+  runId: string,
+): AgentGraphRunLaunchState {
+  const run = workspaceRuntime.getRun(runId);
+  if (!run || run.sessionId !== sessionId) return { status: "unknown" };
+  if (!isTerminalWorkspaceRunStatus(run.status)) return { status: "running" };
+  if (run.status === "succeeded") return { status: "succeeded" };
+  if (run.status !== "failed" && run.status !== "cancelled") return { status: "unknown" };
+  return {
+    status: run.status,
+    ...(run.error ? { error: safeGraphExecutionError(run.error).message } : {}),
+  };
 }
 
 function workspaceGraphApplicationLifecycle(input: {

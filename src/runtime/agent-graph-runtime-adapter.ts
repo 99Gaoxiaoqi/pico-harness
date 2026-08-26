@@ -53,6 +53,13 @@ export interface StartExactAgentGraphRunInput {
   readonly prompt: string;
 }
 
+/** Host-owned execution state for an admitted exact Run. */
+export type AgentGraphRunLaunchState =
+  | Readonly<{ status: "unknown" }>
+  | Readonly<{ status: "running" }>
+  | Readonly<{ status: "succeeded" }>
+  | Readonly<{ status: "failed" | "cancelled"; error?: string }>;
+
 export type AgentGraphExactRunIndeterminateReason =
   | "provider_dispatch_recorded"
   | "tool_dispatch_recorded"
@@ -98,6 +105,11 @@ export interface AgentGraphExactRunPort {
     readonly runId: string;
     readonly reason: string;
   }): Promise<"requested" | "already_terminal" | "not_started">;
+  /** Optional host projection used only when the durable Runtime ledger is not terminal yet. */
+  inspectLaunch?(input: {
+    readonly sessionId: string;
+    readonly runId: string;
+  }): Promise<AgentGraphRunLaunchState> | AgentGraphRunLaunchState;
 }
 
 export interface CommittedAgentOutputSource {
@@ -259,10 +271,11 @@ export class AgentGraphRuntimeAdapter implements AgentOutputCommitPort {
         `Exact RuntimeRun ${claim.targetRunId} has output without a committed run.started fact`,
       );
     }
-    return {
+    const durableProjection: AgentGraphActivationRuntimeProjection = {
       ...projection,
       outputEventIds: outputSources.map((source) => source.eventId),
     };
+    return this.applyHostLaunchState(claim, durableProjection);
   }
 
   async stopActivation(
@@ -405,6 +418,31 @@ export class AgentGraphRuntimeAdapter implements AgentOutputCommitPort {
       );
     }
     return { disposition, projection };
+  }
+
+  private async applyHostLaunchState(
+    claim: AgentGraphActivationClaimRecord,
+    projection: AgentGraphActivationRuntimeProjection,
+  ): Promise<AgentGraphActivationRuntimeProjection> {
+    if (
+      (projection.status !== "running" && projection.status !== "waiting_permission") ||
+      !this.options.runPort.inspectLaunch
+    ) {
+      return projection;
+    }
+    const launch = await this.options.runPort.inspectLaunch({
+      sessionId: claim.targetSessionId,
+      runId: claim.targetRunId,
+    });
+    if (launch.status === "failed" || launch.status === "cancelled") {
+      return { ...projection, status: launch.status };
+    }
+    if (launch.status === "succeeded") {
+      // A successful host executor without the canonical Runtime terminal is not
+      // replay-safe. Surface it as interrupted instead of treating it as live.
+      return { ...projection, status: "interrupted" };
+    }
+    return projection;
   }
 }
 
