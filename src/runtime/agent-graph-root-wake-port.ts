@@ -12,10 +12,8 @@ import type {
 import type { StartExactAgentGraphRunInput } from "./agent-graph-runtime-adapter.js";
 
 export interface AgentGraphRootWakeRuntimePortOptions {
-  readonly exactRuns: Pick<
-    SqliteAgentGraphExactRunPort,
-    "inspectExactRun" | "startExactRun"
-  >;
+  readonly exactRuns: Pick<SqliteAgentGraphExactRunPort, "inspectExactRun" | "startExactRun"> &
+    Partial<Pick<SqliteAgentGraphExactRunPort, "readRunEvents">>;
   readonly workDir: string;
   readonly preflight?: (
     input: RootSupervisorRunIdentity,
@@ -32,6 +30,27 @@ export class AgentGraphRootWakeRuntimePort implements AgentGraphRootWakePort {
 
   async inspect(input: RootSupervisorRunIdentity): Promise<RootSupervisorRunState> {
     const inspection = await this.options.exactRuns.inspectExactRun(this.exactInput(input));
+    if (
+      inspection.status === "terminal" &&
+      inspection.terminalEvent.data.status !== "completed" &&
+      this.options.exactRuns.readRunEvents
+    ) {
+      const events = await this.options.exactRuns.readRunEvents(
+        input.rootSessionId,
+        input.targetRunId,
+      );
+      const blockingEventIds = events
+        .filter((event) => event.kind === "model.call.started" || event.kind === "tool.started")
+        .map((event) => event.eventId);
+      if (blockingEventIds.length > 0) {
+        return {
+          status: "manual_intervention",
+          reason: "indeterminate",
+          error: `Root Supervisor Run ended after a durable dispatch as ${inspection.terminalEvent.data.status}`,
+          blockingEventIds,
+        };
+      }
+    }
     if (inspection.status === "attachable" && this.options.isLaunchLive?.(input)) {
       return { status: "running" };
     }
@@ -59,7 +78,9 @@ export class AgentGraphRootWakeRuntimePort implements AgentGraphRootWakePort {
 
   private preflight(input: RootSupervisorRunIdentity): RootSupervisorRunState {
     const decision = this.options.preflight?.(input) ?? "ready";
-    return decision === "ready" ? { status: "not_started" } : { status: "deferred", reason: decision };
+    return decision === "ready"
+      ? { status: "not_started" }
+      : { status: "deferred", reason: decision };
   }
 
   private exactInput(
@@ -80,9 +101,7 @@ export class AgentGraphRootWakeRuntimePort implements AgentGraphRootWakePort {
   }
 }
 
-export function rootWakeState(
-  inspection: AgentGraphExactRunInspection,
-): RootSupervisorRunState {
+export function rootWakeState(inspection: AgentGraphExactRunInspection): RootSupervisorRunState {
   switch (inspection.status) {
     case "not_started":
       return { status: "not_started" };
@@ -117,9 +136,7 @@ export function rootWakeState(
   }
 }
 
-export function renderRootWakePrompt(
-  input: RootSupervisorRunIdentity,
-): string {
+export function renderRootWakePrompt(input: RootSupervisorRunIdentity): string {
   return [
     "[Graph Supervisor wake]",
     `Graph ${input.graphId} has a new durable scheduling fact (wake ${input.wakeId}).`,
