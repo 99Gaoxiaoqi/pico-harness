@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, realpath } from "node:fs/promises";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { AgentEngine, isPlanProviderTool } from "../engine/loop.js";
 import { PlanHandoffController } from "../engine/plan-handoff.js";
 import type { GoalManager } from "../engine/goal-manager.js";
@@ -104,6 +104,7 @@ import {
   type McpStatusSnapshot,
 } from "../mcp/manager.js";
 import { isMcpToolName } from "../mcp/types.js";
+import type { ToolCall } from "../schema/message.js";
 import { createBackgroundMcpClient } from "../safety/background-mcp-client.js";
 import { configuredMcpServerNames, filterPluginMcpSources } from "../mcp/effective-config.js";
 import type { ScheduleDraftCoordinator } from "../tasks/cron-draft.js";
@@ -120,6 +121,7 @@ import {
 } from "../input/session-settings.js";
 import { createIsolatedPicoConfig, loadPicoConfig } from "../input/pico-config.js";
 import type { YoloSandboxConfig } from "../safety/yolo-sandbox.js";
+import { createSandboxPolicy, normalizeRoots } from "../safety/process-sandbox/index.js";
 import { resolveCliSession, type CliSessionSelection } from "../cli/session-resolver.js";
 import type { WorktreeSupervisor } from "../tasks/worktree-supervisor.js";
 import { SqliteRuntimeControlStore } from "../storage/sqlite/sqlite-runtime-control-store.js";
@@ -1146,6 +1148,13 @@ export async function executeAgentRuntime(
         // LSP 是项目配置启动的子进程；后台策略尚未为其提供网络/写入沙箱。
         lspEnabled: !backgroundPolicy && collaborationMode() !== "plan",
         lspServers: [...picoConfig.lspServers, ...(pluginSnapshot?.lspServers ?? [])],
+        processSandbox: {
+          profile: permissionMode() === "yolo" ? "danger-full-access" : "workspace-write",
+          config: picoConfig.sandbox,
+          scratchRoot: join(picoHome, "sandboxes", session.id),
+          workspaceRoots: workspaceRoots.list(),
+          generation: workspaceRoots.generation(),
+        },
         sessionStartSource:
           sessionSelection.mode === "resume" || sessionSelection.mode === "continue"
             ? "resume"
@@ -1367,6 +1376,7 @@ export async function executeAgentRuntime(
         .finally(kickMemoryWorker);
     }
     let activeMcpManager = collaborationMode() === "plan" ? undefined : dependencies.mcpManager;
+    const oneShotMcpCalls = new Set<string>();
     runtimeState.bindHookRuntime({
       provider: trackedProvider,
       modelRuntime: {
@@ -1398,7 +1408,10 @@ export async function executeAgentRuntime(
             runner: verifierEngine,
             manager: runtimeState.delegationManager,
             maxSpawnDepth: 0,
-            yoloSandbox: { config: picoConfig.sandbox },
+            processSandbox: {
+              config: picoConfig.sandbox,
+              scratchRoot: join(picoHome, "sandboxes", session.id, "subagents"),
+            },
             ownerSessionId: session.id,
             env: runtimeEnv,
             codeIntelligence: runtimeState.codeIntelligence,
@@ -1520,6 +1533,34 @@ export async function executeAgentRuntime(
       : dependencies.isolatedHeadless
         ? "headless"
         : (dependencies.hostKind ?? "desktop");
+    const processSandboxScratchRoot = join(picoHome, "sandboxes", session.id);
+    const mainProcessSandbox: DefaultToolRegistryOptions["processSandbox"] = backgroundPolicy
+      ? {
+          profile: "workspace-write",
+          config: {
+            network: backgroundPolicy.snapshot.toolNetworkPolicy === "allow" ? "allow" : "deny",
+          },
+          scratchRoot: processSandboxScratchRoot,
+        }
+      : permissionMode() === "yolo"
+        ? {
+            profile: "danger-full-access",
+            scratchRoot: processSandboxScratchRoot,
+          }
+        : {
+            profile: collaborationMode() === "plan" ? "read-only" : "workspace-write",
+            config: picoConfig.sandbox,
+            scratchRoot: processSandboxScratchRoot,
+          };
+    let mainProcessPolicy = createSandboxPolicy({
+      profile: mainProcessSandbox.profile,
+      workspaceRoots: workspaceRoots.list(),
+      scratchRoot: mainProcessSandbox.scratchRoot ?? processSandboxScratchRoot,
+      ...(mainProcessSandbox.config ? { config: mainProcessSandbox.config } : {}),
+      ...(mainProcessSandbox.generation !== undefined
+        ? { generation: mainProcessSandbox.generation }
+        : {}),
+    });
     const registry = buildRegistry(
       workDir,
       backgroundManager,
@@ -1534,13 +1575,7 @@ export async function executeAgentRuntime(
         if (settings.mode === "plan" || path === undefined) return true;
         return !isSensitiveCredentialPath(workspaceRoots.resolveUnchecked(path));
       },
-      backgroundPolicy
-        ? {
-            config: {
-              network: backgroundPolicy.snapshot.toolNetworkPolicy === "allow" ? "allow" : "deny",
-            },
-          }
-        : undefined,
+      mainProcessSandbox,
       activeHookService
         ? async (skill) => {
             if (!skill.sourcePath || skill.hooks === undefined) return;
@@ -1820,8 +1855,41 @@ export async function executeAgentRuntime(
           session.picoHome,
           dependencies.onPolicyDenied,
           permissionMode,
+          async () => {
+            const generation = workspaceRoots.generation();
+            const roots = workspaceRoots.list();
+            await runtimeState.refreshProcessSandbox(roots, generation);
+            if (activeMcpManager) {
+              mainProcessPolicy = createSandboxPolicy({
+                profile: mainProcessSandbox.profile,
+                workspaceRoots: roots,
+                scratchRoot: mainProcessSandbox.scratchRoot ?? processSandboxScratchRoot,
+                generation,
+                ...(mainProcessSandbox.config ? { config: mainProcessSandbox.config } : {}),
+              });
+              await activeMcpManager.updateProcessSandbox(mainProcessPolicy);
+            }
+          },
+          async (call, directories) => {
+            oneShotMcpCalls.add(call.id);
+            if (directories.length === 0) return;
+            await activeMcpManager?.restartStdioServerForTool(call.name, {
+              ...mainProcessPolicy,
+              readRoots: normalizeRoots([...mainProcessPolicy.readRoots, ...directories]),
+              writeRoots: normalizeRoots([...mainProcessPolicy.writeRoots, ...directories]),
+            });
+          },
         ),
       );
+      registry.useExecution?.(async (call, next) => {
+        try {
+          return await next(call);
+        } finally {
+          if (oneShotMcpCalls.delete(call.id)) {
+            await activeMcpManager?.restartStdioServerForTool(call.name);
+          }
+        }
+      });
     }
     if (!sideConversation) {
       registerDelegationTools(
@@ -1843,7 +1911,10 @@ export async function executeAgentRuntime(
         workspaceRoots,
         // 主会话的 mode 只控制主 Agent 权限。worker/explore 是独立的不可信执行边界，
         // 必须始终使用 worktree + OS 沙箱，不得因 default/auto 模式退化为无沙箱 Bash。
-        { config: picoConfig.sandbox },
+        {
+          config: picoConfig.sandbox,
+          scratchRoot: join(picoHome, "sandboxes", session.id, "subagents"),
+        },
         session.id,
         !ownsRuntimeState,
         runtimeState.taskHostRuntime?.supervisor,
@@ -1907,7 +1978,10 @@ export async function executeAgentRuntime(
           workDir,
           runner: engine,
           manager: delegationManager,
-          yoloSandbox: { config: picoConfig.sandbox },
+          processSandbox: {
+            config: picoConfig.sandbox,
+            scratchRoot: join(picoHome, "sandboxes", session.id, "subagents"),
+          },
           ownerSessionId: session.id,
           allowAsyncCompletion: !ownsRuntimeState,
           skillLoaderFactory,
@@ -1989,6 +2063,7 @@ export async function executeAgentRuntime(
         (mcpConfigPath || hostMcpSources.length > 0 || pluginMcpSources.length > 0
           ? new McpConnectionManager(registry, {
               stdioCwd: workDir,
+              ...(!backgroundPolicy ? { processSandbox: mainProcessPolicy } : {}),
               ...(backgroundPolicy?.snapshot.mcpConfigFingerprint
                 ? { expectedConfigFingerprint: backgroundPolicy.snapshot.mcpConfigFingerprint }
                 : {}),
@@ -2000,6 +2075,7 @@ export async function executeAgentRuntime(
                         workDir,
                         backgroundPolicy.snapshot.toolNetworkPolicy,
                         backgroundPolicy.allowedToolNetworkHosts,
+                        join(processSandboxScratchRoot, "background-mcp", config.name),
                       ),
                   }
                 : {}),
@@ -2011,6 +2087,9 @@ export async function executeAgentRuntime(
           : undefined));
     cleanupMcpManager = mcpManager;
     activeMcpManager = mcpManager;
+    if (mcpManager && !backgroundPolicy) {
+      await mcpManager.updateProcessSandbox(mainProcessPolicy);
+    }
     unsubscribeMcpStatus =
       mcpManager && dependencies.mcpStatusSink
         ? mcpManager.subscribe(dependencies.mcpStatusSink)
@@ -2340,7 +2419,7 @@ function buildRegistry(
   askUserHandler?: AskUserHandler,
   codeIntelligence?: SessionRuntime["codeIntelligence"],
   excludeSensitiveGrepFiles?: boolean | ((path: string | undefined) => boolean),
-  yoloSandbox?: { config?: Partial<YoloSandboxConfig> },
+  processSandbox?: DefaultToolRegistryOptions["processSandbox"],
   activateSkillHooks?: (skill: Skill) => void | Promise<void>,
   skillLoader?: SkillLoader,
   env?: NodeJS.ProcessEnv,
@@ -2360,7 +2439,7 @@ function buildRegistry(
     ...(askUserHandler !== undefined ? { askUserHandler } : {}),
     ...(codeIntelligence !== undefined ? { codeIntelligence } : {}),
     ...(excludeSensitiveGrepFiles !== undefined ? { excludeSensitiveGrepFiles } : {}),
-    ...(yoloSandbox !== undefined ? { yoloSandbox } : {}),
+    ...(processSandbox !== undefined ? { processSandbox } : {}),
     ...(activateSkillHooks !== undefined ? { activateSkillHooks } : {}),
     ...(skillLoader !== undefined ? { skillLoader } : {}),
     ...(plan !== undefined ? { plan } : {}),
@@ -2532,7 +2611,11 @@ function registerDelegationTools(
   profiles: AgentProfile[],
   manager: DelegationManager,
   workspaceRoots: WorkspaceRoots,
-  yoloSandbox: { config?: Partial<YoloSandboxConfig> },
+  processSandbox: {
+    config?: Partial<YoloSandboxConfig>;
+    scratchRoot?: string;
+    generation?: number;
+  },
   ownerSessionId: string,
   allowAsyncCompletion: boolean,
   worktreeSupervisor?: WorktreeSupervisor,
@@ -2551,7 +2634,7 @@ function registerDelegationTools(
     workspaceRoots,
     runner: engine,
     manager,
-    yoloSandbox,
+    processSandbox,
     ownerSessionId,
     allowAsyncCompletion,
     ...(skillLoaderFactory ? { skillLoaderFactory } : {}),
@@ -2787,6 +2870,11 @@ export function buildPermissionMiddleware(
   picoHome?: string,
   denialSink?: (event: RuntimePolicyDenial) => void,
   permissionMode?: () => "default" | "auto" | "yolo",
+  onSessionPolicyChanged?: () => Promise<void>,
+  onOneShotMcpAuthorization?: (
+    call: ToolCall,
+    externalDirectories: readonly string[],
+  ) => Promise<void>,
 ): MiddlewareFunc {
   return async (call, context) => {
     const mode =
@@ -2946,8 +3034,12 @@ export function buildPermissionMiddleware(
           },
         );
       }
+      await onSessionPolicyChanged?.();
     } else {
-      for (const access of externalAccesses) workspaceRoots.authorizeOnce(access.path);
+      for (const directory of externalDirectories) workspaceRoots.authorizeOnce(directory);
+      if (isMcpToolName(call.name)) {
+        await onOneShotMcpAuthorization?.(call, externalDirectories);
+      }
     }
     return result;
   };

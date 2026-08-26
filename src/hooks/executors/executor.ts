@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { signalProcessTree } from "../../os/process-tree.js";
 import { logger } from "../../observability/logger.js";
 import type { LLMProvider } from "../../provider/interface.js";
@@ -23,6 +23,13 @@ import {
   type HookShell,
   type ResolvedCommandHookInvocation,
 } from "../config/command-shell.js";
+import {
+  managedProcessLauncher,
+  normalizeRoots,
+  runtimeReadRoots,
+  SandboxViolationError,
+  type SandboxPolicy,
+} from "../../safety/process-sandbox/index.js";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -65,6 +72,7 @@ export interface HookHandlerExecutorOptions {
   modelRuntime?: HookModelRuntime;
   fetch?: typeof globalThis.fetch;
   env?: Readonly<NodeJS.ProcessEnv>;
+  processSandbox?: SandboxPolicy;
   /** Product runtime capability that returns one currently trusted, fully resolved invocation. */
   authorizeCommandExecution?: (
     handler: ResolvedHookHandler,
@@ -79,6 +87,10 @@ export class DefaultHookExecutor implements HookExecutor {
   private disposed = false;
 
   constructor(private readonly options: HookHandlerExecutorOptions) {}
+
+  updateProcessSandbox(policy: SandboxPolicy): void {
+    this.options.processSandbox = policy;
+  }
 
   /** SessionRuntime 每轮重建 Provider/MCP/Engine 时更新活态依赖，HookService 本身保持不变。 */
   bind(
@@ -155,7 +167,14 @@ export class DefaultHookExecutor implements HookExecutor {
           this.hookShell(),
         );
     if (!invocation) throw new Error("command Hook 执行前信任已失效");
-    const running = startCommand(resolved, invocation, input, this.options.workDir, signal);
+    const running = startCommand(
+      resolved,
+      invocation,
+      input,
+      this.options.workDir,
+      signal,
+      this.options.processSandbox,
+    );
     const runsInBackground = handler.async || handler.asyncRewake;
     if (runsInBackground) {
       const trackedCommand = running.completion
@@ -334,24 +353,34 @@ function startCommand(
   input: HookInput,
   cwd: string,
   signal: AbortSignal,
+  processSandbox?: SandboxPolicy,
 ): RunningCommand {
   let child: ChildProcess;
   try {
-    const spawnOptions: SpawnOptions = {
-      cwd,
-      env: invocation.env,
-      windowsHide: true,
-      detached: process.platform !== "win32",
-      stdio: ["pipe", "pipe", "pipe"],
-      shell: false,
-    };
+    if (!processSandbox) {
+      throw new SandboxViolationError(
+        "sandbox_unavailable",
+        "命令 Hook 缺少宿主进程沙箱策略，已拒绝启动。",
+      );
+    }
     // shell 化执行：显式 spawn 选定的 shell 二进制（不用 node shell:true 选项，
     // 避免 win32 默认 cmd.exe 的语义漂移），命令串整体作为 -c 参数交给 shell。
-    child = spawn(
-      invocation.shell.path,
-      [...invocation.shell.argsPrefix, invocation.commandString],
-      spawnOptions,
-    );
+    child = managedProcessLauncher.launch(
+      {
+        command: invocation.shell.path,
+        args: [...invocation.shell.argsPrefix, invocation.commandString],
+        cwd,
+        env: invocation.env,
+        origin: "command-hook",
+        policy: extendHookPolicy(processSandbox, resolved, invocation),
+      },
+      {
+        windowsHide: true,
+        detached: process.platform !== "win32",
+        stdio: ["pipe", "pipe", "pipe"],
+        shell: false,
+      },
+    ).child;
   } catch (err) {
     const rejected = Promise.reject(err);
     rejected.catch(() => undefined);
@@ -463,6 +492,24 @@ function startCommand(
   // async handler 的 completion 也必须有默认 rejection observer，避免后台 unhandled rejection。
   completion.catch(() => undefined);
   return { started, completion };
+}
+
+function extendHookPolicy(
+  policy: SandboxPolicy,
+  resolved: ResolvedHookHandler,
+  invocation: ResolvedCommandHookInvocation,
+): SandboxPolicy {
+  if (policy.profile === "danger-full-access") return policy;
+  const runtimeRoot = resolved.source.trustAuthority?.identity?.runtimeRoot;
+  const trustedReadRoots = [
+    resolved.source.path,
+    ...(typeof runtimeRoot === "string" ? [runtimeRoot] : []),
+    ...runtimeReadRoots(invocation.command, invocation.env),
+  ];
+  return {
+    ...policy,
+    readRoots: normalizeRoots([...policy.readRoots, ...trustedReadRoots]),
+  };
 }
 
 function isClosedStdinError(error: unknown): boolean {

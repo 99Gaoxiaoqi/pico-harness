@@ -157,6 +157,7 @@ test("persisted Plan collaboration disables LSP before SessionRuntime startup", 
   assert.match(runtime.codeIntelligenceManager.status().reason, /运行时策略禁用/u);
   await assert.rejects(access(spawnedMarker));
   await runtime.setCodeIntelligenceEnabled(true);
-  await access(spawnedMarker);
+  // LSP 始终使用 read-only profile：启动已尝试，但测试 server 不得写 marker。
+  await assert.rejects(access(spawnedMarker));
   assert.match(runtime.codeIntelligenceManager.status().reason, /启动失败/u);
 });

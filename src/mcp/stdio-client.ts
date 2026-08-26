@@ -13,9 +13,8 @@
 //   callTool()  → 发 tools/call → 收响应 → 解析 content 块
 //   close()     → kill 子进程 + 清理 pending
 
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { logger } from "../observability/logger.js";
-import { buildMinimalChildProcessEnv } from "../os/child-process-env.js";
 import { signalProcessTree } from "../os/process-tree.js";
 import { isWindows } from "../os/shell.js";
 import type { ToolExecutionContext } from "../tools/registry.js";
@@ -40,6 +39,7 @@ import {
   type McpToolResult,
 } from "./types.js";
 import { redactSensitiveArgs, redactSensitiveText, redactSensitiveValue } from "./redact.js";
+import { managedProcessLauncher } from "../safety/process-sandbox/index.js";
 
 /** 默认请求超时:30s。MCP server 可能启动慢(如 npx 首次下载) */
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
@@ -95,6 +95,9 @@ export class StdioMcpClient implements McpClient {
     if (!config.command) {
       throw new Error(`MCP server "${config.name}" 缺少 command 字段(stdio 模式必填)`);
     }
+    if (!options.processSandbox) {
+      throw new Error(`MCP server "${config.name}" 缺少宿主进程沙箱策略，已按 fail-closed 拒绝`);
+    }
   }
 
   async connect(): Promise<void> {
@@ -115,7 +118,8 @@ export class StdioMcpClient implements McpClient {
     if (!command) {
       throw new Error(`MCP server "${this.config.name}" 缺少 command(stdio 模式必填)`);
     }
-    const childEnv = buildMinimalChildProcessEnv(env);
+    const processCwd = cwd ?? process.cwd();
+    const childEnv = { ...process.env, ...env };
 
     const safeCommand = redactSensitiveText(command);
     const safeArgs = redactSensitiveArgs(args);
@@ -128,12 +132,20 @@ export class StdioMcpClient implements McpClient {
       },
       `[MCP] 启动 stdio server: ${safeCommand} ${safeArgs.join(" ")}`,
     );
-    this.child = spawn(command, args, {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: childEnv,
-      detached: !isWindows,
-      ...(cwd !== undefined ? { cwd } : {}),
-    });
+    this.child = managedProcessLauncher.launch(
+      {
+        command,
+        args,
+        cwd: processCwd,
+        env: childEnv,
+        origin: "stdio-mcp",
+        policy: this.options.processSandbox!,
+      },
+      {
+        stdio: ["pipe", "pipe", "pipe"],
+        detached: !isWindows,
+      },
+    ).child;
 
     this.wireStreams();
 

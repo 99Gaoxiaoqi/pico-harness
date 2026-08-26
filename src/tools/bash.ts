@@ -5,7 +5,7 @@
 // 独立文件实现,不进 registry-impl.ts,由 default-registry.ts 在合并阶段统一挂载。
 // timeout 常量与 resolveBashTimeoutMs 经 registry-impl 门面 re-export,供测试消费。
 
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import type { BaseTool, ToolExecutionContext } from "./registry.js";
 import { WORKSPACE_FILE_SIDE_EFFECTS } from "./registry.js";
 import type { ToolDefinition } from "../schema/message.js";
@@ -22,13 +22,21 @@ import { signalProcessTree } from "../os/process-tree.js";
 import { BackgroundManager } from "./background-manager.js";
 import type { WorkspaceRoots } from "./workspace-roots.js";
 import { isHardlineBashCommand } from "../approval/bash-hardline.js";
+import { classifyPowerShellHardlineCommand } from "../approval/powershell-safety.js";
 import {
-  buildSandboxSpawnPlan,
   evaluateSandboxCommand,
   SandboxViolationError,
-  type SandboxSpawnPlan,
   type YoloSandboxConfig,
 } from "../safety/yolo-sandbox.js";
+import {
+  createSandboxPolicy,
+  defaultSandboxScratchRoot,
+  managedProcessLauncher,
+  shellRuntimeReadRoots,
+  type ManagedProcessOrigin,
+  type ManagedSpawnRequest,
+  type SandboxProfile,
+} from "../safety/process-sandbox/index.js";
 
 /** bash 命令默认执行时间与可信宿主可配置边界。 */
 export const DEFAULT_BASH_TIMEOUT_MS = 30_000;
@@ -66,10 +74,15 @@ export class BashTool implements BaseTool {
       sandbox?: {
         workspaceRoots: WorkspaceRoots;
         config?: Partial<YoloSandboxConfig>;
+        profile?: SandboxProfile;
+        scratchRoot?: string;
+        generation?: number;
       };
+      /** 子代理 registry 用独立来源标记，便于审计模型进程平面。 */
+      origin?: ManagedProcessOrigin;
       /** 子代理 Bash 由宿主注入最小环境；主 Bash 未设置时仍继承当前用户环境。 */
       env?: NodeJS.ProcessEnv;
-      /** 仅��可信宿主注入；未设置时保持 30 秒默认值。 */
+      /** 仅由可信宿主注入；未设置时保持 30 秒默认值。 */
       timeoutMs?: number;
     } = {},
   ) {
@@ -128,7 +141,10 @@ export class BashTool implements BaseTool {
       throw new Error("参数解析失败: 期望 JSON 含 command 字段");
     }
 
-    const sandboxPlan = this.buildSandboxPlan(command);
+    const sandboxRequest = this.buildSandboxRequest(
+      command,
+      background ? "background-bash" : (this.options.origin ?? "bash"),
+    );
 
     if (background) {
       if (this.options.allowBackground === false) {
@@ -137,9 +153,9 @@ export class BashTool implements BaseTool {
       const task = this.backgroundManager.start(
         command,
         this.workDir,
-        sandboxPlan || this.options.env
+        sandboxRequest || this.options.env
           ? {
-              ...(sandboxPlan ? { executable: sandboxPlan.command, args: sandboxPlan.args } : {}),
+              ...(sandboxRequest ? { request: sandboxRequest } : {}),
               ...(this.options.env ? { env: this.options.env } : {}),
             }
           : undefined,
@@ -159,14 +175,14 @@ export class BashTool implements BaseTool {
       command,
       this.workDir,
       context,
-      sandboxPlan,
+      sandboxRequest,
       this.options.env,
       this.timeoutMs,
     );
     let stdout = execution.output;
 
     if (
-      sandboxPlan?.sandboxed === true &&
+      execution.sandboxed &&
       execution.exitCode !== 0 &&
       /(?:operation not permitted|permission denied|\bEPERM\b|\bEACCES\b)/iu.test(stdout)
     ) {
@@ -197,30 +213,45 @@ export class BashTool implements BaseTool {
     return stdout;
   }
 
-  private buildSandboxPlan(command: string): SandboxSpawnPlan | undefined {
-    // bash-hardline 只建模 bash 语法;PowerShell 宿主跳过(审批层把关,maka 对齐)。
-    if (hostShellDialect() === "bash" && isHardlineBashCommand(command, this.workDir)) {
+  private buildSandboxRequest(command: string, origin: ManagedProcessOrigin): ManagedSpawnRequest {
+    const hardline =
+      hostShellDialect() === "bash"
+        ? isHardlineBashCommand(command, this.workDir)
+        : classifyPowerShellHardlineCommand(command) !== undefined;
+    if (hardline) {
       throw new Error("Hardline 高危命令不可审批绕过，系统直接拒绝。");
     }
     const sandbox = this.options.sandbox;
-    if (!sandbox) return undefined;
-    const roots = sandbox.workspaceRoots.list();
-    const decision = evaluateSandboxCommand(command, this.workDir, roots, sandbox.config);
-    if (!decision.allowed) {
-      throw new SandboxViolationError(
-        decision.code ?? "workspace_write_denied",
-        decision.reason?.replace(/^\[sandbox:[^\]]+\]\s*/u, "") ?? "Bash 请求被沙箱策略拒绝。",
-      );
+    const roots = sandbox?.workspaceRoots.processRoots() ?? [this.workDir];
+    const profile = sandbox?.profile ?? "danger-full-access";
+    if (sandbox && profile !== "danger-full-access") {
+      const decision = evaluateSandboxCommand(command, this.workDir, roots, sandbox.config);
+      if (!decision.allowed) {
+        throw new SandboxViolationError(
+          decision.code ?? "workspace_write_denied",
+          decision.reason?.replace(/^\[sandbox:[^\]]+\]\s*/u, "") ?? "Bash 请求被沙箱策略拒绝。",
+        );
+      }
     }
     const shell = resolveShell();
-    return buildSandboxSpawnPlan({
-      command,
-      shell,
-      shellArgs: shellCommandArgs(shell, command),
+    const processEnvironment = sanitizeShellProcessEnvironment(this.options.env ?? process.env);
+    const request: ManagedSpawnRequest = {
+      command: shell,
+      args: shellCommandArgs(shell, command),
       cwd: this.workDir,
-      writableRoots: roots,
-      ...(sandbox.config ? { config: sandbox.config } : {}),
-    });
+      env: processEnvironment,
+      origin,
+      policy: createSandboxPolicy({
+        profile,
+        workspaceRoots: roots,
+        scratchRoot: sandbox?.scratchRoot ?? defaultSandboxScratchRoot(this.workDir),
+        readRoots: shellRuntimeReadRoots(command, processEnvironment),
+        ...(sandbox?.config ? { config: sandbox.config } : {}),
+        generation: sandbox?.generation ?? sandbox?.workspaceRoots.generation() ?? 0,
+      }),
+    };
+    sandbox?.workspaceRoots.consumeAllProcessAuthorizations();
+    return request;
   }
 }
 
@@ -229,6 +260,7 @@ interface ForegroundCommandResult {
   exitCode: number | null;
   timedOut: boolean;
   exceededExecutionBuffer: boolean;
+  sandboxed: boolean;
   error?: Error;
 }
 
@@ -236,7 +268,7 @@ function runForegroundCommand(
   command: string,
   cwd: string,
   context?: ToolExecutionContext,
-  sandboxPlan?: SandboxSpawnPlan,
+  sandboxRequest?: ManagedSpawnRequest,
   env?: NodeJS.ProcessEnv,
   timeoutMs = DEFAULT_BASH_TIMEOUT_MS,
 ): Promise<ForegroundCommandResult> {
@@ -244,24 +276,36 @@ function runForegroundCommand(
 
   return new Promise<ForegroundCommandResult>((resolvePromise, rejectPromise) => {
     let child: ChildProcess;
+    let sandboxed = false;
     try {
-      child = spawn(
-        sandboxPlan?.command ?? shell,
-        sandboxPlan?.args ?? shellCommandArgs(shell, command),
-        {
+      const managed = managedProcessLauncher.launch(
+        sandboxRequest ?? {
+          command: shell,
+          args: shellCommandArgs(shell, command),
           cwd,
+          env: sanitizeShellProcessEnvironment(env ?? process.env),
+          origin: "bash",
+          policy: createSandboxPolicy({
+            profile: "danger-full-access",
+            workspaceRoots: [cwd],
+            scratchRoot: defaultSandboxScratchRoot(cwd),
+          }),
+        },
+        {
           detached: !isWindows,
           windowsHide: true,
           stdio: ["ignore", "pipe", "pipe"],
-          env: sanitizeShellProcessEnvironment(env ?? process.env),
         },
       );
+      child = managed.child;
+      sandboxed = managed.plan.sandboxed;
     } catch (error) {
       resolvePromise({
         output: "",
         exitCode: null,
         timedOut: false,
         exceededExecutionBuffer: false,
+        sandboxed: false,
         error: asError(error),
       });
       return;
@@ -341,6 +385,7 @@ function runForegroundCommand(
           exitCode,
           timedOut,
           exceededExecutionBuffer,
+          sandboxed,
           ...(childError ? { error: childError } : {}),
         });
       });

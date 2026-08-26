@@ -31,6 +31,7 @@ import {
   type McpToolResult,
 } from "./types.js";
 import { parseMcpConfig } from "./config-parser.js";
+import type { SandboxPolicy } from "../safety/process-sandbox/index.js";
 
 const DEFAULT_CONFIG_RELATIVE = ".pico/mcp.json";
 const DEFAULT_STARTUP_TIMEOUT_MS = 30_000;
@@ -114,6 +115,8 @@ export interface McpConnectionManagerOptions {
   elicitationHandler?: McpElicitationHandler;
   /** Explicit host precedence for an ordered, already-authorized source assembly. */
   duplicateServerPolicy?: "reject" | "keep-first";
+  /** stdio MCP 共享的会话策略；策略代次变更后由宿主重建 manager。 */
+  processSandbox?: SandboxPolicy;
 }
 
 /**
@@ -121,6 +124,7 @@ export interface McpConnectionManagerOptions {
  * 所有修改生命周期的公开操作经同一队列串行，避免 reload/reconnect/close 交叉。
  */
 export class McpConnectionManager {
+  private readonly processSandboxOverrides = new Map<string, SandboxPolicy>();
   private readonly entries = new Map<string, ServerEntry>();
   private readonly listeners = new Set<McpStatusListener>();
   private registry: ToolRegistry | undefined;
@@ -294,6 +298,48 @@ export class McpConnectionManager {
       entry.error = undefined;
       this.emitSnapshot();
       await this.connectOne(entry);
+    });
+  }
+
+  /** 单次 MCP 授权结束后销毁原 stdio 进程，并按当前策略启动新的 server。 */
+  async restartStdioServerForTool(
+    qualifiedToolName: string,
+    oneShotPolicy?: SandboxPolicy,
+  ): Promise<void> {
+    await this.enqueueLifecycle(async () => {
+      const owners = [...this.entries.values()].filter((entry) =>
+        entry.toolNames.some(
+          (toolName) => qualifyMcpToolName(entry.name, toolName) === qualifiedToolName,
+        ),
+      );
+      if (owners.length !== 1) {
+        throw new Error(`无法唯一定位 MCP 工具 "${qualifiedToolName}" 的 server`);
+      }
+      const owner = owners[0]!;
+      if (owner.config.transport !== "stdio") return;
+      if (oneShotPolicy) this.processSandboxOverrides.set(owner.name, oneShotPolicy);
+      else this.processSandboxOverrides.delete(owner.name);
+      await this.closeEntryClient(owner);
+      this.clearEntryTools(owner);
+      owner.status = "pending";
+      owner.error = undefined;
+      this.emitSnapshot();
+      await this.connectOne(owner);
+    });
+  }
+
+  async updateProcessSandbox(policy: SandboxPolicy): Promise<void> {
+    await this.enqueueLifecycle(async () => {
+      if (this.options.processSandbox?.generation === policy.generation) return;
+      this.options.processSandbox = policy;
+      this.processSandboxOverrides.clear();
+      for (const entry of this.entries.values()) {
+        await this.closeEntryClient(entry);
+        this.clearEntryTools(entry);
+        entry.status = entry.config.enabled === false ? "disabled" : "pending";
+        entry.error = undefined;
+      }
+      await this.connectAllInternal();
     });
   }
 
@@ -772,10 +818,13 @@ export class McpConnectionManager {
 
     switch (resolvedConfig.transport) {
       case "stdio": {
+        const processSandbox =
+          this.processSandboxOverrides.get(resolvedConfig.name) ?? this.options.processSandbox;
         return new StdioMcpClient(resolvedConfig, {
           ...(this.options.elicitationHandler
             ? { elicitationHandler: this.options.elicitationHandler }
             : {}),
+          ...(processSandbox ? { processSandbox } : {}),
         });
       }
       case "http":

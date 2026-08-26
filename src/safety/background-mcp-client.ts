@@ -3,13 +3,14 @@ import { HttpMcpClient } from "../mcp/http-client.js";
 import { StdioMcpClient } from "../mcp/stdio-client.js";
 import type { McpClient, McpServerConfig } from "../mcp/types.js";
 import { normalizeExactHostname, type ToolNetworkPolicy } from "./background-yolo-policy-schema.js";
-import { buildSandboxSpawnPlan } from "./yolo-sandbox.js";
+import { createSandboxPolicy, defaultSandboxScratchRoot } from "./process-sandbox/index.js";
 
 export function createBackgroundMcpClient(
   config: McpServerConfig,
   workspacePath: string,
   networkPolicy: ToolNetworkPolicy,
   allowedHosts: ReadonlySet<string>,
+  scratchRoot?: string,
 ): McpClient {
   const secured = secureBackgroundMcpServerConfig(
     config,
@@ -18,7 +19,16 @@ export function createBackgroundMcpClient(
     networkPolicy,
     allowedHosts,
   );
-  return secured.transport === "stdio" ? new StdioMcpClient(secured) : new HttpMcpClient(secured);
+  return secured.transport === "stdio"
+    ? new StdioMcpClient(secured, {
+        processSandbox: createSandboxPolicy({
+          profile: "workspace-write",
+          workspaceRoots: [workspacePath],
+          scratchRoot: scratchRoot ?? defaultSandboxScratchRoot(workspacePath),
+          config: { network: networkPolicy === "allow" ? "allow" : "deny" },
+        }),
+      })
+    : new HttpMcpClient(secured);
 }
 
 /**
@@ -41,19 +51,9 @@ export function secureBackgroundMcpServerConfig(
     throw new Error(`后台 stdio MCP server "${config.name}" 不允许覆盖工作目录`);
   }
   const workspace = resolve(workspacePath);
-  const plan = buildSandboxSpawnPlan({
-    command: config.command,
-    shell: config.command,
-    shellArgs: config.args ?? [],
-    cwd: workspace,
-    writableRoots: [workspace],
-    config: { network: networkPolicy === "allow" ? "allow" : "deny" },
-    platform,
-  });
+  void platform;
   return {
     ...config,
-    command: plan.command,
-    args: plan.args,
     cwd: workspace,
   };
 }

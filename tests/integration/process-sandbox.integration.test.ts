@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,10 +10,18 @@ import {
   buildMacosProfile,
   buildManagedSpawnPlan,
   buildSandboxEnvironment,
+  buildWindowsBrokerArgs,
   createSandboxPolicy,
   isVerifiedBundledExecutable,
+  managedProcessLauncher,
+  shellRuntimeReadRoots,
 } from "../../src/safety/process-sandbox/index.js";
 import { evaluateSandboxCommand } from "../../src/safety/yolo-sandbox.js";
+import { createIsolatedPicoConfig } from "../../src/input/pico-config.js";
+import { McpConnectionManager } from "../../src/mcp/manager.js";
+import type { McpClient } from "../../src/mcp/types.js";
+import { BashTool } from "../../src/tools/bash.js";
+import { WorkspaceRoots } from "../../src/tools/workspace-roots.js";
 
 test("sandbox profile 固定模式与网络语义", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-policy-"));
@@ -46,6 +54,153 @@ test("sandbox profile 固定模式与网络语义", async (context) => {
     config: { network: "deny" },
   });
   assert.equal(unrestricted.network, "allow");
+  assert.equal(createIsolatedPicoConfig(workspace).sandbox.network, "allow");
+});
+
+test("Windows Broker 获取完整根目录与策略代次且不接受网络放行", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-winargs-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const policy = createSandboxPolicy({
+    profile: "workspace-write",
+    workspaceRoots: [root],
+    scratchRoot: join(root, "scratch"),
+    generation: 7,
+  });
+  const args = buildWindowsBrokerArgs(policy, "node.exe", ["-e", "0"], root);
+  assert.deepEqual(args.slice(-4), ["--", "node.exe", "-e", "0"]);
+  assert.ok(args.includes("--read-root"));
+  assert.ok(args.includes("--write-root"));
+  assert.equal(args[args.indexOf("--generation") + 1], "7");
+  assert.equal(args.includes("--network"), false);
+});
+
+test("受限模式在原生后端缺失时 fail-closed", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-missing-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const policy = createSandboxPolicy({
+    profile: "workspace-write",
+    workspaceRoots: [root],
+    scratchRoot: join(root, "scratch"),
+  });
+  assert.throws(
+    () =>
+      buildManagedSpawnPlan({
+        command: "node",
+        args: [],
+        cwd: root,
+        origin: "bash",
+        policy,
+        platform: "linux",
+        arch: "x64",
+        backendExecutable: join(root, "missing-bwrap"),
+      }),
+    /sandbox_unavailable/u,
+  );
+});
+
+test("SandboxLease 统一终止进程并在退出后幂等释放", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-lease-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const managed = managedProcessLauncher.launch(
+    {
+      command: process.execPath,
+      args: ["-e", "setInterval(()=>{},1000)"],
+      cwd: root,
+      origin: "bash",
+      policy: createSandboxPolicy({
+        profile: "danger-full-access",
+        workspaceRoots: [root],
+        scratchRoot: join(root, "scratch"),
+      }),
+    },
+    { stdio: "ignore" },
+  );
+  await new Promise<void>((resolve, reject) => {
+    managed.child.once("spawn", resolve);
+    managed.child.once("error", reject);
+  });
+  assert.equal(managed.lease.released, false);
+  await managed.lease.terminate("SIGKILL");
+  assert.equal(managed.lease.released, true);
+  await managed.lease.release();
+  assert.equal(managed.lease.released, true);
+});
+
+test("会话授权提升策略代次并重启 stdio MCP", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-mcp-generation-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const clients: Array<{ connects: number; closes: number }> = [];
+  const initial = createSandboxPolicy({
+    profile: "workspace-write",
+    workspaceRoots: [root],
+    scratchRoot: join(root, "scratch"),
+    generation: 0,
+  });
+  const manager = new McpConnectionManager(undefined, {
+    processSandbox: initial,
+    clientFactory: () => {
+      const state = { connects: 0, closes: 0 };
+      clients.push(state);
+      return {
+        toolCancellationScope: "process_tree",
+        async connect() {
+          state.connects++;
+        },
+        async listTools() {
+          return [{ name: "do", description: "fixture", inputSchema: { type: "object" } }];
+        },
+        async callTool() {
+          return { content: [], isError: false };
+        },
+        async listResources() {
+          return { resources: [] };
+        },
+        async readResource() {
+          return { contents: [] };
+        },
+        async listPrompts() {
+          return { prompts: [] };
+        },
+        async getPrompt() {
+          return { messages: [] };
+        },
+        async close() {
+          state.closes++;
+        },
+      } satisfies McpClient;
+    },
+  });
+  context.after(() => manager.closeAll());
+  await manager.replaceSources([
+    {
+      id: "test",
+      config: {
+        mcpServers: {
+          local: { name: "local", transport: "stdio", command: "fixture" },
+        },
+      },
+    },
+  ]);
+  await manager.connectAll();
+  await manager.updateProcessSandbox(
+    createSandboxPolicy({
+      profile: "workspace-write",
+      workspaceRoots: [root],
+      scratchRoot: join(root, "scratch"),
+      generation: 1,
+    }),
+  );
+  assert.equal(clients.length, 2);
+  assert.deepEqual(clients, [
+    { connects: 1, closes: 1 },
+    { connects: 1, closes: 0 },
+  ]);
+  await manager.restartStdioServerForTool("mcp__local__do");
+  assert.deepEqual(clients, [
+    { connects: 1, closes: 1 },
+    { connects: 1, closes: 1 },
+    { connects: 1, closes: 0 },
+  ]);
 });
 
 test("受限环境继承普通变量并隔离 HOME、临时目录与缓存", async (context) => {
@@ -77,7 +232,9 @@ test("macOS profile 不包含全局 file-read 且按根目录开放", async (con
   });
   const profile = buildMacosProfile(policy);
   assert.doesNotMatch(profile, /^\(allow file-read\*\)$/mu);
-  const canonicalRoot = policy.readRoots.find((candidate) => candidate.endsWith(root.split("/").at(-1)!));
+  const canonicalRoot = policy.readRoots.find((candidate) =>
+    candidate.endsWith(root.split("/").at(-1)!),
+  );
   assert.ok(canonicalRoot);
   assert.match(
     profile,
@@ -104,8 +261,7 @@ test("Bubblewrap profile 使用空命名空间、只读运行根和工作区写�
   assert.deepEqual(args.slice(-4), ["--", "/bin/sh", "-c", "true"]);
   assert.ok(
     args.some(
-      (value, index) =>
-        value === "--bind" && policy.writeRoots.includes(args[index + 1] ?? ""),
+      (value, index) => value === "--bind" && policy.writeRoots.includes(args[index + 1] ?? ""),
     ),
   );
 });
@@ -113,9 +269,61 @@ test("Bubblewrap profile 使用空命名空间、只读运行根和工作区写�
 test("静态写路径允许伪设备但仍拒绝普通工作区外路径", () => {
   const workspace = process.cwd();
   assert.equal(evaluateSandboxCommand("ls 2>/dev/null", workspace, [workspace]).allowed, true);
+  assert.equal(evaluateSandboxCommand("printf ok >/dev/tty", workspace, [workspace]).allowed, true);
   assert.equal(evaluateSandboxCommand("echo ok > NUL", workspace, [workspace]).allowed, true);
-  assert.equal(evaluateSandboxCommand("echo blocked > /etc/pico", workspace, [workspace]).allowed, false);
+  assert.equal(
+    evaluateSandboxCommand("echo blocked > /etc/pico", workspace, [workspace]).allowed,
+    false,
+  );
 });
+
+test("模型命令文本不能把任意绝对可执行路径提升为运行时读根", () => {
+  const outside = join(tmpdir(), "pico-sensitive", "not-a-command");
+  const roots = shellRuntimeReadRoots(
+    `${outside}; cat ${join(tmpdir(), "pico-sensitive/secret")}`,
+    {
+      PATH: process.env.PATH,
+    },
+  );
+  assert.equal(
+    roots.some((root) => root.includes("pico-sensitive")),
+    false,
+  );
+});
+
+test(
+  "BashTool 允许 /dev/null 重定向且不接受伪绝对命令的读根提升",
+  { skip: process.platform !== "darwin" },
+  async (context) => {
+    const root = await mkdtemp(join(tmpdir(), "pico-bash-sandbox-authority-"));
+    context.after(() => rm(root, { recursive: true, force: true }));
+    const workspace = join(root, "workspace");
+    const outside = join(root, "outside");
+    await mkdir(workspace);
+    await mkdir(outside);
+    await writeFile(join(outside, "secret"), "READ_ROOT_ESCAPE_CONFIRMED", "utf8");
+    const roots = await WorkspaceRoots.create(workspace);
+    const bash = new BashTool(workspace, undefined, {
+      sandbox: {
+        workspaceRoots: roots,
+        profile: "workspace-write",
+        scratchRoot: join(root, "scratch"),
+      },
+    });
+    assert.equal(
+      await bash.execute(JSON.stringify({ command: "ls 2>/dev/null" })),
+      "命令执行成功,无终端输出。",
+    );
+    await assert.rejects(
+      bash.execute(
+        JSON.stringify({
+          command: `${join(outside, "not-a-command")}; /bin/cat ${join(outside, "secret")}`,
+        }),
+      ),
+      /sandbox_runtime_denied/u,
+    );
+  },
+);
 
 test("打包原生后端必须通过同目录 SHA-256 校验", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-resource-"));
@@ -154,7 +362,11 @@ test(
       origin: "bash",
       policy,
     });
-    const result = spawnSync(plan.command, plan.args, { cwd: workspace, env: plan.env, encoding: "utf8" });
+    const result = spawnSync(plan.command, plan.args, {
+      cwd: workspace,
+      env: plan.env,
+      encoding: "utf8",
+    });
     assert.notEqual(result.status, 0);
     assert.equal(await readFile(join(workspace, "inside.txt"), "utf8"), "allowed");
     assert.doesNotMatch(result.stdout, /secret/u);

@@ -7,6 +7,11 @@ import {
 import { LspCodeIntelligenceService } from "./lsp-service.js";
 import { RepoMapService } from "./repo-map.js";
 import type { CodeIntelligenceService } from "./types.js";
+import {
+  createSandboxPolicy,
+  defaultSandboxScratchRoot,
+  type SandboxConfig,
+} from "../safety/process-sandbox/index.js";
 
 export type CodeIntelligenceBackend = "lsp" | "repo-map";
 
@@ -22,6 +27,12 @@ export interface CodeIntelligenceManagerOptions {
   readonly lspEnabled?: boolean;
   readonly lspServers?: readonly LspServerConfig[];
   readonly pathEnv?: string;
+  readonly processSandbox?: {
+    config?: Partial<SandboxConfig>;
+    scratchRoot?: string;
+    generation?: number;
+    workspaceRoots?: readonly string[];
+  };
 }
 
 /**
@@ -33,6 +44,8 @@ export class CodeIntelligenceManager {
   private currentService: CodeIntelligenceService | undefined;
   private startPromise: Promise<CodeIntelligenceStatus> | undefined;
   private lspEnabled: boolean;
+  private processSandbox: CodeIntelligenceManagerOptions["processSandbox"];
+  private readonly serviceProxy: CodeIntelligenceService;
   private currentStatus: CodeIntelligenceStatus = {
     backend: "repo-map",
     reason: "代码智能尚未启动，使用 Repo Map",
@@ -40,6 +53,25 @@ export class CodeIntelligenceManager {
 
   constructor(private readonly options: CodeIntelligenceManagerOptions) {
     this.lspEnabled = options.lspEnabled !== false;
+    this.processSandbox = options.processSandbox;
+    const serviceProxy: CodeIntelligenceService = {
+      backend: "repo-map",
+      definitions: (query, requestOptions) =>
+        this.requireService().definitions(query, requestOptions),
+      references: (query, requestOptions) =>
+        this.requireService().references(query, requestOptions),
+      symbols: (query, requestOptions) => this.requireService().symbols(query, requestOptions),
+      diagnostics: (filePath, requestOptions) =>
+        this.requireService().diagnostics(filePath, requestOptions),
+      callHierarchy: (query, direction, requestOptions) =>
+        this.requireService().callHierarchy(query, direction, requestOptions),
+      close: async () => undefined,
+    };
+    Object.defineProperty(serviceProxy, "backend", {
+      enumerable: true,
+      get: () => this.requireService().backend,
+    });
+    this.serviceProxy = serviceProxy;
   }
 
   start(): Promise<CodeIntelligenceStatus> {
@@ -58,7 +90,20 @@ export class CodeIntelligenceManager {
     });
     if (!discovery.config) return this.fallback(discovery);
 
-    const client = new StdioLspClient(this.options.rootDir, discovery.config);
+    const client = new StdioLspClient(
+      this.options.rootDir,
+      discovery.config,
+      createSandboxPolicy({
+        profile: "read-only",
+        workspaceRoots: this.processSandbox?.workspaceRoots ?? [this.options.rootDir],
+        scratchRoot:
+          this.processSandbox?.scratchRoot ?? defaultSandboxScratchRoot(this.options.rootDir),
+        ...(this.processSandbox?.config ? { config: this.processSandbox.config } : {}),
+        ...(this.processSandbox?.generation !== undefined
+          ? { generation: this.processSandbox.generation }
+          : {}),
+      }),
+    );
     try {
       await client.start();
       this.client = client;
@@ -88,7 +133,16 @@ export class CodeIntelligenceManager {
   }
 
   service(): CodeIntelligenceService | undefined {
-    return this.currentService;
+    return this.currentService ? this.serviceProxy : undefined;
+  }
+
+  async updateProcessSandbox(
+    processSandbox: NonNullable<CodeIntelligenceManagerOptions["processSandbox"]>,
+  ): Promise<CodeIntelligenceStatus> {
+    if (this.processSandbox?.generation === processSandbox.generation) return this.currentStatus;
+    this.processSandbox = processSandbox;
+    await this.close();
+    return await this.start();
   }
 
   /** Switch process policy while retaining a safe Repo Map service when LSP is disabled. */
@@ -111,6 +165,11 @@ export class CodeIntelligenceManager {
     this.currentService = new RepoMapService(this.options.rootDir);
     this.currentStatus = { backend: "repo-map", reason: discovery.reason };
     return this.currentStatus;
+  }
+
+  private requireService(): CodeIntelligenceService {
+    if (!this.currentService) throw new Error("代码智能服务当前不可用");
+    return this.currentService;
   }
 }
 

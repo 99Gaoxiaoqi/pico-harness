@@ -27,10 +27,15 @@ jobs:
       - name: Install filesystem metadata tools
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y acl attr libcap2-bin python3-venv
+          sudo apt-get install --no-install-recommends -y acl attr libcap2-bin libcap-dev meson ninja-build python3-venv xz-utils
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Build and verify bundled Linux sandbox
+        run: |
+          npm run build:sandbox:linux
+          npm run verify:sandbox:resources -- --require-current
 
       - name: Audit full dependency tree
         run: npm audit --audit-level=low
@@ -142,13 +147,31 @@ jobs:
           node-version: "22"
           cache: "npm"
 
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
       - name: Install dependencies
         run: npm ci
+
+      - name: Build and verify AppContainer Broker
+        run: |
+          npm run build:sandbox:windows
+          npm run verify:sandbox:resources -- --require-current
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-windows-x64
+          path: resources/sandbox/win32-x64
 
       - name: Run Windows security integration suite
         env:
           PICO_WINDOWS_LOW_PRIVILEGE_TEST: "1"
         run: npm run test:integration:windows
+
+      - name: Run Windows process sandbox integration
+        run: node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/process-sandbox.integration.test.ts tests/integration/process-sandbox-native.integration.test.ts
 
       - name: Cleanup temporary Windows ACL users
         if: always()
@@ -157,3 +180,95 @@ jobs:
           Get-LocalUser | Where-Object { $_.Name -like 'pico_acl_*' } | ForEach-Object {
             Remove-LocalUser -SID $_.SID -Confirm:$false
           }
+
+  macos-process-sandbox:
+    name: macOS process sandbox integration
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - run: npm ci
+      - run: npm run verify:sandbox:resources
+      - run: node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/process-sandbox.integration.test.ts tests/integration/process-sandbox-native.integration.test.ts
+
+  linux-process-sandbox:
+    name: Linux process sandbox (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libcap-dev meson ninja-build xz-utils
+      - run: npm ci
+      - run: npm run build:sandbox:linux
+      - run: npm run verify:sandbox:resources -- --require-current
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-linux-${{ matrix.arch }}
+          path: resources/sandbox/linux-${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        if: matrix.arch == 'x64'
+        with:
+          name: sandbox-bubblewrap-corresponding-source
+          path: resources/licenses/bubblewrap
+      - run: node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/process-sandbox.integration.test.ts tests/integration/process-sandbox-native.integration.test.ts
+
+  sandbox-publication:
+    name: Verify complete native sandbox publication
+    needs: [windows-security, linux-process-sandbox]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - run: npm ci
+      - uses: actions/download-artifact@v5
+        with:
+          name: sandbox-linux-x64
+          path: resources/sandbox/linux-x64
+      - uses: actions/download-artifact@v5
+        with:
+          name: sandbox-linux-arm64
+          path: resources/sandbox/linux-arm64
+      - uses: actions/download-artifact@v5
+        with:
+          name: sandbox-windows-x64
+          path: resources/sandbox/win32-x64
+      - uses: actions/download-artifact@v5
+        with:
+          name: sandbox-bubblewrap-corresponding-source
+          path: resources/licenses/bubblewrap
+      - run: npm run verify:sandbox:resources -- --require-all
+      - run: npm pack --dry-run

@@ -7,9 +7,9 @@
 // 安全语义:与 ReadFileTool 一致,搜索路径经 safeResolve 锚定到工作区根,
 // 不允许越界读取工作区之外的文件。
 
-import { execFile, execFileSync } from "node:child_process";
+import { accessSync, constants } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { delimiter, join, relative, resolve } from "node:path";
 import type { Dirent } from "node:fs";
 import type { BaseTool, ToolExecutionContext } from "./registry.js";
 import type { ToolDefinition } from "../schema/message.js";
@@ -17,6 +17,13 @@ import { ToolAccesses } from "./tool-access.js";
 import { WorkspaceRoots } from "./workspace-roots.js";
 import { logger } from "../observability/logger.js";
 import { reportWorkspaceFileScans } from "./file-scan-observer.js";
+import {
+  createSandboxPolicy,
+  defaultSandboxScratchRoot,
+  managedProcessLauncher,
+  type SandboxConfig,
+  type SandboxProfile,
+} from "../safety/process-sandbox/index.js";
 
 /** 搜索结果默认上限,避免海量匹配撑爆 Context。 */
 const DEFAULT_MAX_RESULTS = 50;
@@ -66,12 +73,19 @@ export function setRgAvailable(value: boolean): void {
  * 其他异常(权限/超时等)保守视为不可用,降级到 Node.js。
  */
 function detectRg(): boolean {
-  try {
-    execFileSync("rg", ["--version"], { stdio: "pipe", encoding: "utf8" });
-    return true;
-  } catch {
-    return false;
+  const extensions = process.platform === "win32" ? [".exe", ".cmd", ".bat", ""] : [""];
+  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+    if (!directory) continue;
+    for (const extension of extensions) {
+      try {
+        accessSync(resolve(directory, `rg${extension}`), constants.X_OK);
+        return true;
+      } catch {
+        // 继续检查下一个 PATH 目录。
+      }
+    }
   }
+  return false;
 }
 
 /** 解析 grep 工具入参,带类型校验。 */
@@ -249,6 +263,14 @@ function searchWithRg(opts: {
   maxResults: number;
   excludeSensitiveFiles?: boolean;
   signal?: AbortSignal;
+  sandbox?: {
+    profile: SandboxProfile;
+    workspaceRoots: readonly string[];
+    config?: Partial<SandboxConfig>;
+    scratchRoot?: string;
+    generation?: number;
+    env?: NodeJS.ProcessEnv;
+  };
 }): Promise<string> {
   return new Promise((resolvePromise, reject) => {
     const args: string[] = ["--color=never", "--no-heading"];
@@ -265,40 +287,65 @@ function searchWithRg(opts: {
     // 限制匹配文件数与每文件行数不是 rg 的强项,这里靠后续截断 maxResults 控制
     args.push(opts.searchRoot);
 
-    const child = execFile(
-      "rg",
-      args,
-      {
-        cwd: opts.searchRoot,
-        maxBuffer: 16 * 1024 * 1024,
-        encoding: "utf8",
-        windowsHide: true,
-        ...(opts.signal ? { signal: opts.signal } : {}),
-      },
-      (err, stdout, stderr) => {
-        // rg 退出码:0 有匹配,1 无匹配,>1 真实错误
-        if (err) {
-          // ENOENT:rg 不存在(理论上探测阶段已挡,这里是双保险)
-          if (err.code === "ENOENT") {
-            reject(new Error("rg 未安装"));
-            return;
-          }
-          // rg 的退出码体现在 err.code(数字)上。1 = 无匹配,返回空串而非报错
-          if (err.code === 1) {
-            resolvePromise("");
-            return;
-          }
-          // 其他错误:把 stderr 带回,交上层降级
-          const codeDesc =
-            err.code !== undefined && err.code !== null ? String(err.code) : "unknown";
-          reject(new Error(`rg 执行失败 (exit ${codeDesc}): ${stderr?.trim() ?? err.message}`));
-          return;
-        }
-        resolvePromise(stdout ?? "");
-      },
-    );
-    // 触发 unref,避免误判挂起(虽然 execFile 自带回调已足够)
-    void child;
+    const policy = createSandboxPolicy({
+      profile: opts.sandbox?.profile ?? "danger-full-access",
+      workspaceRoots: opts.sandbox?.workspaceRoots ?? [opts.searchRoot],
+      scratchRoot: opts.sandbox?.scratchRoot ?? defaultSandboxScratchRoot(opts.searchRoot),
+      ...(opts.sandbox?.config ? { config: opts.sandbox.config } : {}),
+      ...(opts.sandbox?.generation !== undefined ? { generation: opts.sandbox.generation } : {}),
+    });
+    let child;
+    try {
+      child = managedProcessLauncher.launch(
+        {
+          command: "rg",
+          args,
+          cwd: opts.searchRoot,
+          env: opts.sandbox?.env ?? process.env,
+          origin: "grep",
+          policy,
+        },
+        { stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
+      ).child;
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    let stdout = "";
+    let stderr = "";
+    let exceeded = false;
+    const maxBuffer = 16 * 1024 * 1024;
+    const append = (target: "stdout" | "stderr", chunk: Buffer): void => {
+      if (exceeded) return;
+      if (Buffer.byteLength(stdout) + Buffer.byteLength(stderr) + chunk.byteLength > maxBuffer) {
+        exceeded = true;
+        child.kill("SIGKILL");
+        return;
+      }
+      if (target === "stdout") stdout += chunk.toString("utf8");
+      else stderr += chunk.toString("utf8");
+    };
+    child.stdout?.on("data", (chunk: Buffer) => append("stdout", chunk));
+    child.stderr?.on("data", (chunk: Buffer) => append("stderr", chunk));
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (exceeded) {
+        reject(new Error(`rg 执行失败: 输出超过 ${maxBuffer} bytes`));
+      } else if (code === 0) {
+        resolvePromise(stdout);
+      } else if (code === 1) {
+        resolvePromise("");
+      } else {
+        reject(new Error(`rg 执行失败 (exit ${String(code)}): ${stderr.trim()}`));
+      }
+    });
+    if (opts.signal) {
+      const abort = (): void => {
+        child.kill("SIGKILL");
+      };
+      if (opts.signal.aborted) abort();
+      else opts.signal.addEventListener("abort", abort, { once: true });
+    }
   });
 }
 
@@ -422,6 +469,13 @@ export class GrepTool implements BaseTool {
     workDirOrRoots: string | WorkspaceRoots,
     private readonly options: {
       excludeSensitiveFiles?: boolean | ((path: string | undefined) => boolean);
+      processSandbox?: {
+        profile: SandboxProfile;
+        config?: Partial<SandboxConfig>;
+        scratchRoot?: string;
+        generation?: number;
+        env?: NodeJS.ProcessEnv;
+      };
     } = {},
   ) {
     this.roots =
@@ -503,12 +557,23 @@ export class GrepTool implements BaseTool {
           lineNumber,
           maxResults,
           excludeSensitiveFiles,
+          ...(this.options.processSandbox
+            ? {
+                sandbox: {
+                  ...this.options.processSandbox,
+                  workspaceRoots: this.roots.list(),
+                },
+              }
+            : {}),
           ...(context?.signal ? { signal: context.signal } : {}),
         });
         const matches = parseRgOutput(raw, lineNumber);
         return formatMatches(matches, maxResults, lineNumber);
       } catch (err) {
         if (context?.signal?.aborted) throw err;
+        // 一旦宿主要求受限进程，任何 launcher/backend/rg 失败都必须 fail closed；
+        // 不得改用宿主 Node.js 读取来绕过同一 OS 沙箱边界。
+        if (this.options.processSandbox) throw err;
         // rg 路径异常 → 标记不可用,降级到 Node.js
         rgAvailable = false;
         logger.warn({ err }, "grep 的 rg 路径失败,降级到 Node.js 实现");

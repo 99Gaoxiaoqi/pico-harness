@@ -1,4 +1,5 @@
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
+import { rm } from "node:fs/promises";
 import { PlanCoordinator } from "../plan/coordinator.js";
 import { TodoStore } from "../context/todo-store.js";
 import { GoalManager } from "../engine/goal-manager.js";
@@ -52,6 +53,11 @@ import type {
 import { isTerminalTaskStatus, type TaskSnapshot } from "../tasks/task-registry.js";
 import { resolvePicoHome } from "../paths/pico-paths.js";
 import { RuntimeEventStoreHighWaterConflictError } from "../storage/runtime-event-store-contracts.js";
+import {
+  createSandboxPolicy,
+  type SandboxConfig,
+  type SandboxProfile,
+} from "../safety/process-sandbox/index.js";
 
 /** UI-independent services scoped to one persisted session. */
 export interface SessionRuntimeOptions {
@@ -66,6 +72,13 @@ export interface SessionRuntimeOptions {
   toolDisclosure?: ToolDisclosure;
   lspEnabled?: boolean;
   lspServers?: readonly LspServerConfig[];
+  processSandbox?: {
+    profile?: SandboxProfile;
+    config?: Partial<SandboxConfig>;
+    scratchRoot?: string;
+    generation?: number;
+    workspaceRoots?: readonly string[];
+  };
   taskHostRuntime?: TaskHostRuntime;
   /**
    * Durable RuntimeStore（graph work lease 源）。taskHostRuntime 不可达时（headless/folder
@@ -130,6 +143,7 @@ export interface SessionRuntime {
   readonly codeIntelligenceManager: CodeIntelligenceManager;
   /** Keep code-intelligence processes aligned with persisted collaboration mode. */
   setCodeIntelligenceEnabled(enabled: boolean): Promise<void>;
+  refreshProcessSandbox(workspaceRoots: readonly string[], generation: number): Promise<void>;
   readonly hookService?: HookService;
   readonly hookCommands: readonly SlashCommand[];
   readonly hookManagement?: HookManagementService;
@@ -484,6 +498,7 @@ async function createPinnedSessionRuntime(
     rootDir: workDir,
     lspEnabled: codeIntelligenceEnabled,
     ...(options.lspServers ? { lspServers: options.lspServers } : {}),
+    ...(options.processSandbox ? { processSandbox: options.processSandbox } : {}),
   });
   await codeIntelligenceManager.start();
   const codeIntelligence = codeIntelligenceManager.service();
@@ -580,6 +595,7 @@ async function createPinnedSessionRuntime(
           sessionId,
           picoHome,
           ...(options.env ? { env: options.env } : {}),
+          ...(options.processSandbox ? { processSandbox: options.processSandbox } : {}),
           ...(options.hookUserHome ? { userHome: options.hookUserHome } : {}),
           ...(options.hookExtensionSources
             ? { extensionSources: options.hookExtensionSources }
@@ -638,6 +654,7 @@ async function createPinnedSessionRuntime(
     sessionStartSource: options.sessionStartSource ?? "startup",
     ...(hookRuntime ? { hookRuntime } : {}),
     ...(options.hookService ? { hookService: options.hookService } : {}),
+    ...(options.processSandbox ? { processSandbox: options.processSandbox } : {}),
   });
 }
 
@@ -957,6 +974,7 @@ interface DefaultSessionRuntimeOptions {
   sessionStartSource: "startup" | "resume";
   hookRuntime?: SessionHookRuntime;
   hookService?: HookService;
+  processSandbox?: SessionRuntimeOptions["processSandbox"];
 }
 
 class DefaultSessionRuntime implements SessionRuntime {
@@ -981,6 +999,7 @@ class DefaultSessionRuntime implements SessionRuntime {
   ) => void;
   private _hookService?: HookService;
   private readonly hookRuntime?: SessionHookRuntime;
+  private readonly processSandbox?: SessionRuntimeOptions["processSandbox"];
   private readonly pendingHookEvents = new Set<Promise<unknown>>();
   private readonly componentHookDisposers: Array<() => Promise<void>> = [];
   private readonly taskStatuses = new Map<string, TaskSnapshot["status"]>();
@@ -1023,6 +1042,7 @@ class DefaultSessionRuntime implements SessionRuntime {
     this.stopDelegationCompletionPolling = options.stopDelegationCompletionPolling;
     this.sessionStartSource = options.sessionStartSource;
     this.hookRuntime = options.hookRuntime;
+    this.processSandbox = options.processSandbox;
     this.unsubscribeTaskHooks = this.taskRegistry.subscribe((snapshot) =>
       this.onTaskTransition(snapshot),
     );
@@ -1062,6 +1082,32 @@ class DefaultSessionRuntime implements SessionRuntime {
       if (enabled === this.codeIntelligenceEnabled) return;
       await this.codeIntelligenceManager.setLspEnabled(enabled);
       this.codeIntelligenceEnabled = enabled;
+    });
+  }
+
+  async refreshProcessSandbox(
+    workspaceRoots: readonly string[],
+    generation: number,
+  ): Promise<void> {
+    await this.withCodeIntelligenceTransition(async () => {
+      if (this.codeIntelligenceDisposing) throw new Error("SessionRuntime is disposing");
+      const scratchRoot =
+        this.processSandbox?.scratchRoot ?? resolve(this.picoHome, "sandboxes", this.sessionId);
+      await this.codeIntelligenceManager.updateProcessSandbox({
+        workspaceRoots,
+        generation,
+        scratchRoot,
+        ...(this.processSandbox?.config ? { config: this.processSandbox.config } : {}),
+      });
+      this.hookRuntime?.updateProcessSandbox(
+        createSandboxPolicy({
+          profile: this.processSandbox?.profile ?? "workspace-write",
+          workspaceRoots,
+          scratchRoot,
+          generation,
+          ...(this.processSandbox?.config ? { config: this.processSandbox.config } : {}),
+        }),
+      );
     });
   }
 
@@ -1194,6 +1240,7 @@ class DefaultSessionRuntime implements SessionRuntime {
     }
 
     await attempt(() => this.hookRuntime?.dispose());
+    await attempt(() => removeSessionSandboxRoot(this.picoHome, this.sessionId));
     // Finalizers are terminal ownership transitions. They must all run even when
     // an earlier owned resource failed to close; callers generally discard this
     // runtime after dispose() settles and cannot safely retry a retained pin.
@@ -1289,6 +1336,16 @@ class DefaultSessionRuntime implements SessionRuntime {
       "SessionStart",
     );
   }
+}
+
+async function removeSessionSandboxRoot(picoHome: string, sessionId: string): Promise<void> {
+  const parent = resolve(picoHome, "sandboxes");
+  const target = resolve(parent, sessionId);
+  const child = relative(parent, target);
+  if (!child || child.startsWith("..") || isAbsolute(child)) {
+    throw new Error(`拒绝清理非会话沙箱目录: ${target}`);
+  }
+  await rm(target, { recursive: true, force: true });
 }
 
 function positiveDuration(value: number, name: string): number {
