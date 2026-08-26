@@ -8,6 +8,7 @@ import {
   type AgentGraphExactRunPort,
   type AgentGraphOutputLedgerPort,
   type AgentGraphRecordStorePort,
+  type AgentGraphRunLaunchState,
   type CommittedAgentOutputSource,
   type StartExactAgentGraphRunInput,
 } from "../../src/runtime/agent-graph-runtime-adapter.js";
@@ -136,6 +137,23 @@ test("Graph runtime only observes an exact Run that is live in this host", async
   assert.equal(result.projection.status, "running");
   assert.equal(fixture.runPort.startCalls.length, 0);
   assert.equal(fixture.runPort.providerDispatches, 0);
+});
+
+test("Graph runtime lets terminal host state override nonterminal durable projections", async () => {
+  const waiting = createFixture();
+  waiting.runPort.events.push(runStartedEvent(CLAIM), {
+    ...eventBase(CLAIM, "approval-requested-1"),
+    kind: "approval.requested",
+    refs: { toolCallId: "tool-call-approval-1" },
+    data: { approvalId: "approval-1", toolName: "bash" },
+  });
+  waiting.runPort.launch = { status: "failed", error: "host assembly failed" };
+  assert.equal((await waiting.adapter.projectActivation(CLAIM)).status, "failed");
+
+  const missingTerminal = createFixture();
+  missingTerminal.runPort.events.push(runStartedEvent(CLAIM));
+  missingTerminal.runPort.launch = { status: "succeeded" };
+  assert.equal((await missingTerminal.adapter.projectActivation(CLAIM)).status, "interrupted");
 });
 
 test("Graph runtime fails closed after a provider or tool dispatch", async () => {
@@ -330,6 +348,7 @@ class FakeRunPort implements AgentGraphExactRunPort {
   readonly startCalls: StartExactAgentGraphRunInput[] = [];
   providerDispatches = 0;
   live = false;
+  launch: AgentGraphRunLaunchState = { status: "unknown" };
 
   async readRunEvents(sessionId: string, runId: string) {
     return this.events.filter((event) => event.sessionId === sessionId && event.runId === runId);
@@ -341,6 +360,10 @@ class FakeRunPort implements AgentGraphExactRunPort {
       await this.readRunEvents(input.sessionId, input.runId),
       this.live,
     );
+  }
+
+  inspectLaunch() {
+    return this.launch;
   }
 
   async startExactRun(input: StartExactAgentGraphRunInput) {

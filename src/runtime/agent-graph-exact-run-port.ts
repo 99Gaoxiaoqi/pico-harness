@@ -9,6 +9,7 @@ import type { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-e
 import type {
   AgentGraphExactRunInspection,
   AgentGraphExactRunPort,
+  AgentGraphRunLaunchState,
   StartExactAgentGraphRunInput,
 } from "./agent-graph-runtime-adapter.js";
 import type { PrestartedRuntimeRun, PrestartedRuntimeUserInput } from "./runtime-run-executor.js";
@@ -40,6 +41,10 @@ export interface CreateAgentGraphExactRunPortOptions {
     readonly runId: string;
     readonly reason: string;
   }) => boolean | Promise<boolean>;
+  readonly inspectLaunch?: (input: {
+    readonly sessionId: string;
+    readonly runId: string;
+  }) => Promise<AgentGraphRunLaunchState> | AgentGraphRunLaunchState;
 }
 
 /**
@@ -56,6 +61,13 @@ export class SqliteAgentGraphExactRunPort implements AgentGraphExactRunPort {
 
   readRunEvents(sessionId: string, runId: string): Promise<readonly RuntimeEvent[]> {
     return this.options.runtimeEventStore.readRun(sessionId, runId);
+  }
+
+  inspectLaunch(input: {
+    readonly sessionId: string;
+    readonly runId: string;
+  }): Promise<AgentGraphRunLaunchState> | AgentGraphRunLaunchState {
+    return this.options.inspectLaunch?.(input) ?? { status: "unknown" };
   }
 
   startExactRun(input: StartExactAgentGraphRunInput): Promise<"started" | "observed"> {

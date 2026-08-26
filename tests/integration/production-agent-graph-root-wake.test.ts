@@ -40,6 +40,13 @@ test("production exact root wake escapes a completed ancestor AgentEngine contex
       assert.ok(binding);
       let turn = 0;
       const rootWake = options.prompt.startsWith("[Graph Supervisor wake]");
+      if (rootWake) {
+        assert.deepEqual(options.allowedTools, [
+          "view_agent_graph",
+          "update_agent_graph",
+          "yield_agent_graph",
+        ]);
+      }
       return super.execute(options, {
         ...dependencies,
         provider: {
