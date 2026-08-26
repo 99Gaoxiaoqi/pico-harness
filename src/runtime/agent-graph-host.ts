@@ -91,7 +91,6 @@ export function createAgentGraphWorkspaceHost(
   });
   const liveLaunches = new Set<string>();
   const activeSessions = new Map<string, Session>();
-  let application: AgentGraphApplicationService | undefined;
 
   const outputLedger = new SqliteAgentGraphOutputLedger({
     store: options.runtimeEventStore,
@@ -204,7 +203,7 @@ export function createAgentGraphWorkspaceHost(
           ? "workspace_busy"
           : "ready",
   });
-  application = createAgentGraphApplicationService({
+  const application = createAgentGraphApplicationService({
     store,
     runtime,
     rootWakePort,
