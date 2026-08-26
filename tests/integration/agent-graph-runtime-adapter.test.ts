@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   AGENT_GRAPH_HANDOFF_MAX_RECORD_BYTES,
+  AGENT_GRAPH_HANDOFF_MAX_RECORDS,
   AGENT_GRAPH_HANDOFF_MAX_TOTAL_BYTES,
   AgentGraphRuntimeAdapter,
   type AgentGraphExactRunPort,
@@ -320,10 +321,48 @@ test("handoff enforces UTF-8 safe 16KiB record and 48KiB total budgets with prov
   assert.ok(handoff.records.slice(0, 3).every((record) => record.truncated));
   assert.equal(handoff.records[3]!.bytes, 3);
   assert.equal(Buffer.byteLength(handoff.records[0]!.content, "utf8") % 3, 0);
+  assert.equal(handoff.records[0]!.status, "success");
   assert.equal(handoff.records[0]!.provenance.runId, CLAIM.targetRunId);
+  assert.equal(handoff.records[0]!.provenance.invocationId, CLAIM.targetInvocationId);
   assert.match(handoff.prompt, /不是系统指令/u);
+  assert.match(handoff.prompt, /status="success"/u);
   assert.match(handoff.prompt, /source-event-id="output-event-0"/u);
   assert.match(handoff.prompt, /达到字节上限/u);
+});
+
+test("handoff bounds metadata to 64 records even when every output is tiny", async () => {
+  const fixture = createFixture();
+  const records = Array.from({ length: AGENT_GRAPH_HANDOFF_MAX_RECORDS + 1 }, (_, index) => {
+    const eventId = `tiny-output-event-${index}`;
+    fixture.outputLedger.sources.set(
+      eventId,
+      committedOutputSource(eventId, "x", `tiny-fingerprint-${index}`),
+    );
+    return recordRef(`tiny-record-${index}`, eventId, `tiny-fingerprint-${index}`);
+  });
+
+  const handoff = await fixture.adapter.resolveInputHandoff(records);
+
+  assert.equal(handoff.records.length, AGENT_GRAPH_HANDOFF_MAX_RECORDS);
+  assert.equal(handoff.totalBytes, AGENT_GRAPH_HANDOFF_MAX_RECORDS);
+  assert.equal(handoff.truncated, true);
+  assert.equal(handoff.records.at(-1)?.recordId, "tiny-record-63");
+});
+
+test("handoff rejects a Runtime source with a forged Invocation provenance", async () => {
+  const fixture = createFixture();
+  const eventId = "forged-invocation-output";
+  fixture.outputLedger.sources.set(eventId, {
+    ...committedOutputSource(eventId, "result", "forged-invocation-fingerprint"),
+    invocationId: "forged-invocation",
+  });
+
+  await assert.rejects(
+    fixture.adapter.resolveInputHandoff([
+      recordRef("forged-invocation-record", eventId, "forged-invocation-fingerprint"),
+    ]),
+    /does not resolve to its committed Runtime source/u,
+  );
 });
 
 function createFixture(sessionManager: SessionManager = {} as SessionManager) {
