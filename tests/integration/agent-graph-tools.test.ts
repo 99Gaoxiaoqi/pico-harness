@@ -119,7 +119,7 @@ function addCommand(overrides: Record<string, unknown> = {}) {
         permission_policy: { filesystem: "read-only", network: false },
         system_prompt_version: "v1",
       },
-      workspace: { kind: "isolated-worktree", base_ref: "main" },
+      workspace: { kind: "shared" },
     },
     intent: {
       intent_id: "intent-research",
@@ -166,6 +166,9 @@ test("update_agent_graph normalizes one add command and forwards host-owned sour
   const command = port.updates[0]?.commands[0];
   assert.equal(command?.kind, "add");
   assert.equal((command as { operator: AgentGraphOperator }).operator.graphId, ROOT.graphId);
+  assert.deepEqual((command as { operator: AgentGraphOperator }).operator.workspacePolicy, {
+    kind: "shared",
+  });
   assert.equal(
     (command as { intent: AgentGraphActivationIntent }).intent.instruction,
     "调研 PostgreSQL 的事务隔离。",
@@ -255,6 +258,38 @@ test("update_agent_graph rejects malformed commands, forged root identity, and i
     /非法 UTF-16\/UTF-8/u,
   );
   assert.equal(port.updates.length, 0);
+});
+
+test("update_agent_graph exposes and accepts only the production-supported shared workspace", async () => {
+  const { port, byName } = fixture();
+  const update = byName.get("update_agent_graph")!;
+  const schema = JSON.stringify(update.definition().inputSchema);
+  assert.match(schema, /"enum":\["shared"\]/u);
+  assert.doesNotMatch(schema, /isolated-worktree|base_ref/u);
+
+  const command = addCommand() as ReturnType<typeof addCommand> & {
+    operator: Record<string, unknown>;
+  };
+  await assert.rejects(
+    update.execute(
+      JSON.stringify({
+        expected_revision: 0,
+        operation_id: "operation-isolated-worktree",
+        commands: [
+          {
+            ...command,
+            operator: {
+              ...command.operator,
+              workspace: { kind: "isolated-worktree", base_ref: "main" },
+            },
+          },
+        ],
+      }),
+      { toolCallId: "provider-call-isolated-worktree" },
+    ),
+    /workspace\.kind 当前仅支持 shared/u,
+  );
+  assert.equal(port.updates.length + port.reads.length + port.yields.length, 0);
 });
 
 test("update_agent_graph rejects unknown fields at every nested command boundary", async () => {

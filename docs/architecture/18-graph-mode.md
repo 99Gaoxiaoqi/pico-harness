@@ -145,7 +145,7 @@ Operator = {
     profileId, model?, tools,
     permissionPolicy, systemPromptVersion
   },
-  workspacePolicy: shared | isolated-worktree
+  workspacePolicy: shared | isolated-worktree (future)
 }
 ```
 
@@ -153,7 +153,7 @@ Operator = {
 
 - profile 是声明时冻结并持久化的快照；production host 已消费 `model` 和 `tools`。`permissionPolicy` 目前由模型随 schedule 提交，不是可信授权源，因此 detached Operator 强制使用可交互、不提权的 `default` 边界；`systemPromptVersion` 尚未恢复自定义提示，不能把“已保存”理解为“已全部生效”；
 - `generation` 为替换同一逻辑角色保留代际边界，stop 可精确落到某一代；
-- workspace policy 也是不可变调度输入；默认 host 仅能解析 `shared`，`isolated-worktree` 必须由宿主提供 resolver；
+- workspace policy 也是不可变调度输入；本次硬切的公共 `update_agent_graph` 入口仅接受 production 已可执行的 `shared`。`isolated-worktree` 只是领域内部的未来类型，在 resolver 与完整生命周期实现前不对外接受、不持久化调度意图；
 - 当前 `add` 要求 Operator ID 尚不存在，因此“向既有 Operator 追加 follow-up Intent”尚未开放。Reconciler 已按 Operator 分组并保留同 Operator 串行约束，为后续扩展留出边界。
 
 ### 4.4 ActivationIntent：想执行什么
@@ -357,7 +357,7 @@ production 将 exact RuntimeRun 安装为 `WorkspaceTaskRuntime` 中的 detached
 ## 11. 当前实现限制与后续验证
 
 - Graph application 已接入 production daemon 的 workspace 生命周期；当前有确定性 production wiring 集成测试，真实模型闭环仍受 `RUN_LLM_E2E` 门控；
-- `isolated-worktree` 已进入领域和工具 schema，production 默认 workspace resolver 仅支持 `shared`；宿主没有显式提供 resolver 时会 fail closed，不能视为已交付；
+- `isolated-worktree` 仅保留在领域契约中作为未来能力；公共工具 schema 和 submit 前解析均只接受 `shared`，避免持久化 production 无法执行的 Intent。未来必须先实现 resolver、清理/恢复语义及对应验证，再扩展公共入口；
 - `profileSnapshot.permissionPolicy` 与 `systemPromptVersion` 已持久化；production 已映射 model/tools，但在可信 profile catalog 出现前不使用模型提交的 policy 提权，system prompt 自定义恢复仍是发布缺口；
 - Runtime bridge 尚未提供完整 in-flight/failed readiness facts；
 - `artifact` / `evidence` RecordRef 是领域预留，当前 handoff 只接受 `agent-output`；
