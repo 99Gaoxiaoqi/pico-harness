@@ -10,12 +10,13 @@
   - 保留公开的 `orchestrationMode="graph"`、CLI/TUI/Desktop 模式入口和普通 Session/RuntimeEvent 执行语义。
   - 新增 schedule revision、operator provision、activation claim、record ref、supervisor wake/attempt 的 SQLite 控制面。
   - 新增 `view_agent_graph`、`update_agent_graph`、`yield_agent_graph` 和 operator-only `agent_output`。
-  - 支持首版主路径：add、stop、finish、已提交输入引用、有界 handoff、不同 Operator 并行、同一 Operator 串行、daemon 启动恢复。
+  - 支持首版主路径：add、stop、finish、`shared` workspace、已提交输入引用、有界 handoff、不同 Operator 并行、同一 Operator 串行、daemon 启动恢复。
   - 删除 v1 调度写链路；旧 `graph.*` RuntimeEvent 不迁移、不续跑，只作为不可变历史保留。
 - Out:
   - 不维护 v1/v2 双运行时或活动 Graph 原地迁移。
   - 不实现自动 `map` / `all_settled`、任意删边重连、可视化节点编辑器和全局公平调度。
   - 首版不实现跨 Graph epoch 历史结果输入、existing-operator follow-up 和丰富 replace 语义。
+  - `isolated-worktree` 仅作为领域内部未来类型保留；未实现 resolver 与生命周期前，公共 `update_agent_graph` 不接受该输入。
 
 ## Action Items
 
@@ -28,8 +29,9 @@
 - [x] 7. Graph 工具与 prompt 已硬切为 `view_agent_graph`、`update_agent_graph`、`yield_agent_graph` 和 operator-only `agent_output`；已删除 `DelegationManager` Graph 分支、Graph work lease、旧 settle/reconcile/recover 与 engine continuation 写路径。旧 `graph.*` 仅保留历史 codec/reducer，不迁移、不续跑。
 - [ ] 8. 确定性集成测试已覆盖 revision 幂等/冲突、readiness、stop/finish 与 Claim 竞争、两个 SQLite store/进程竞争、投影重建、exact Run attach/indeterminate/stop/authority/损坏账本、真实宿主 operator/root execute、owner fence、yield/wake 竞态、production 装配失败和 workspace 生命周期；关键并发组连续 10 轮共 300 项无失败。尚未用独立子进程逐一 kill/reopen 覆盖 claim 后 Run 前、provider 前后、terminal 后 wake 前的全部崩溃窗口。
 - [x] 9. 已完成 Graph v2 架构文档、旧数据硬切说明、production daemon host 执行接线和最终确定性验证：Graph/production 专项 100 项通过、真实模型门禁 1 项 skip，`npm run lint`、`npm run typecheck`、严格架构边界检查、build、Desktop typecheck/package/make 和差异检查通过。最终全量集成测试 1350 项中 1337 项通过、10 项平台跳过；3 个 Desktop 断言已在相同 `main` 基线复现。全量格式检查仅命中 `main` 已有且本分支未修改的 `InspectorWorkbarPanel.tsx`。
-- [ ] 10. 真实模型 E2E 已在用户默认路由 `deepseek/deepseek-v4-flash` 显式执行：初始 root 和 Operator 在约 5.5 秒内成功，Operator 产生唯一 output/Record；随后 7 次 exact root wake 均在 Provider/tool dispatch 前失败，最终 `retryable_failed`，未执行 view/finish。已加入分阶段、脱敏、持久状态诊断，但本次清理前未保留 terminal reason，具体装配错误仍需下一轮修复验证。
-- [ ] 11. 发布前还需修复三项 Graph 阻塞：exact root wake 的 Provider 前失败；`agent_output` 接受孤立 UTF-16 surrogate；Supervisor root context 接受并传递带首尾空白的身份字段。另需为 `isolated-worktree` 提供 resolver（当前默认仅支持 `shared`，否则 fail closed），并在引入可信 profile catalog 后再消费 `permissionPolicy` / `systemPromptVersion`。
+- [ ] 10. 真实模型 E2E 已在用户默认路由 `deepseek/deepseek-v4-flash` 显式执行：初始 root 和 Operator 在约 5.5 秒内成功，Operator 产生唯一 output/Record；随后 7 次 exact root wake 均在 Provider/tool dispatch 前失败，最终 `retryable_failed`，未执行 view/finish。后续已定位并修复 root wake 遗留执行上下文，确定性回归已通过；真实模型完整 view/finish 闭环仍需重跑。
+- [x] 11. 已修复 exact root wake 的 Provider 前失败、`agent_output` 非法 Unicode/重复 provenance 输入和 Supervisor root context 污染身份；公共 `update_agent_graph` 仅接受 `shared` workspace，`isolated-worktree` 在 submit/持久化前 fail closed。
+- [ ] 12. 未来对外支持 `isolated-worktree` 前，必须实现 resolver、清理/恢复生命周期与端到端验证；可信 profile catalog 引入后再消费 `permissionPolicy` / `systemPromptVersion`。
 
 ## Validation
 
