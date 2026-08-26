@@ -49,6 +49,12 @@ export interface RuntimeRunExecutorInput {
    */
   readonly prestartedRun?: PrestartedRuntimeRun;
   /**
+   * Deterministic input identity for a newly admitted Run. This is required when
+   * a prestarted Run is not resuming an existing user turn, so a crash after the
+   * input commit can attach without appending a duplicate prompt.
+   */
+  readonly prestartedUserInput?: PrestartedRuntimeUserInput;
+  /**
    * ADR 29 续跑声明(可选):声明本次 run 是某个 interrupted run 的续跑。
    * 调用方须先 store.claimContinuation 成功;三元组写入 run.started 的
    * data.continuationOf(与 prestartedRun 互斥:prestarted 事实已定形)。
@@ -76,10 +82,15 @@ export interface RuntimeRunExecutorInput {
 
 export interface PrestartedRuntimeRun {
   readonly runId: string;
+  readonly turnId?: string;
   readonly invocationId: string;
   readonly runStartedEventId: string;
   readonly runStartedAt: string;
-  readonly parentRunId: string;
+  readonly parentRunId?: string;
+}
+
+export interface PrestartedRuntimeUserInput {
+  readonly messageId: string;
 }
 
 /**
@@ -100,6 +111,7 @@ export class RuntimeRunExecutor {
       prompt: initialPrompt,
       resumeExistingSession,
       prestartedRun,
+      prestartedUserInput,
       options,
       signal,
       onEvent,
@@ -110,8 +122,17 @@ export class RuntimeRunExecutor {
     } = this.input;
     if (prestartedRun) {
       assertPrestartedRuntimeRun(prestartedRun);
-      if (!resumeExistingSession) {
-        throw new Error("A prestarted RuntimeRun requires resumeExistingSession");
+      if (!resumeExistingSession && !prestartedUserInput) {
+        throw new Error(
+          "A new-turn prestarted RuntimeRun requires a deterministic prestartedUserInput",
+        );
+      }
+    }
+    if (prestartedUserInput) {
+      if (!prestartedRun || resumeExistingSession || !prestartedUserInput.messageId.trim()) {
+        throw new Error(
+          "prestartedUserInput requires a non-resume prestarted RuntimeRun and non-empty messageId",
+        );
       }
     }
     if (this.input.continuationOf) {
@@ -129,6 +150,9 @@ export class RuntimeRunExecutor {
       await RuntimeRun.reconcileIncompleteRuns({
         capability: runtimeCapability,
         ...(prestartedRun ? { prestartedRunId: prestartedRun.runId } : {}),
+        ...(prestartedUserInput
+          ? { prestartedAllowedEventIds: [`user-message:${prestartedUserInput.messageId}`] }
+          : {}),
       });
       await RuntimeRun.repairSessionProjection(session, {
         capability: runtimeCapability,
@@ -144,9 +168,10 @@ export class RuntimeRunExecutor {
           ...(prestartedRun
             ? {
                 runId: prestartedRun.runId,
+                ...(prestartedRun.turnId ? { turnId: prestartedRun.turnId } : {}),
                 invocationId: prestartedRun.invocationId,
                 runStartedEventId: prestartedRun.runStartedEventId,
-                parentRunId: prestartedRun.parentRunId,
+                ...(prestartedRun.parentRunId ? { parentRunId: prestartedRun.parentRunId } : {}),
                 now: prestartedRunClock(prestartedRun.runStartedAt),
               }
             : {}),
@@ -197,18 +222,22 @@ export class RuntimeRunExecutor {
           const images: ImagePart[] | undefined =
             options.images ??
             (options.imagePath ? [loadImage(options.imagePath, workDir)] : undefined);
-          const rewindPointId = await session.beginRewindPoint({
-            userPrompt: options.rewindPrompt ?? prompt,
-            ...(options.rewindTranscriptIndex !== undefined
-              ? { transcriptIndex: options.rewindTranscriptIndex }
-              : {}),
-            ...(options.rewindInteractionMode !== undefined
-              ? { interactionMode: options.rewindInteractionMode }
-              : {}),
-            ...(options.rewindPrePlanMode !== undefined
-              ? { prePlanMode: options.rewindPrePlanMode }
-              : {}),
-          });
+          const rewindPointId = prestartedUserInput?.messageId ?? randomUUID();
+          if (!session.fileHistory.snapshots.some(({ messageId }) => messageId === rewindPointId)) {
+            await session.beginRewindPoint({
+              userPrompt: options.rewindPrompt ?? prompt,
+              messageId: rewindPointId,
+              ...(options.rewindTranscriptIndex !== undefined
+                ? { transcriptIndex: options.rewindTranscriptIndex }
+                : {}),
+              ...(options.rewindInteractionMode !== undefined
+                ? { interactionMode: options.rewindInteractionMode }
+                : {}),
+              ...(options.rewindPrePlanMode !== undefined
+                ? { prePlanMode: options.rewindPrePlanMode }
+                : {}),
+            });
+          }
           rewindPointSink?.(rewindPointId);
           const userReceipt = await session.commitMessageOnce(`user-message:${rewindPointId}`, {
             role: "user",
