@@ -272,8 +272,16 @@ realModelTest(
       );
       const allEvents = [...rootEvents, ...operatorEvents];
       const rootRuns = rootEvents.filter((event) => event.kind === "run.started");
+      const rootToolStarts = rootEvents.filter(
+        (event): event is Extract<RuntimeEvent, { kind: "tool.started" }> =>
+          event.kind === "tool.started",
+      );
+      const initialRootRuntimeRunId = rootToolStarts.find(
+        (event) => event.data.toolName === "yield_agent_graph",
+      )?.runId;
+      assert.ok(initialRootRuntimeRunId, "the initial root RuntimeRun must yield exactly once");
       assert.ok(rootRuns.length >= 2, "root Session must contain the initial and exact wake Runs");
-      assert.ok(rootRuns.some((event) => event.runId === initialRunId));
+      assert.ok(rootRuns.some((event) => event.runId === initialRootRuntimeRunId));
 
       const outputEvents = operatorEvents.filter((event) => event.kind === "agent.output");
       assert.equal(outputEvents.length, 1, "operator must commit exactly one agent.output fact");
@@ -287,23 +295,22 @@ realModelTest(
         "every RuntimeRun in the scenario must complete",
       );
 
-      const rootToolStarts = rootEvents.filter(
-        (event): event is Extract<RuntimeEvent, { kind: "tool.started" }> =>
-          event.kind === "tool.started",
-      );
       assert.ok(
         rootToolStarts.some(
-          (event) => event.runId === initialRunId && event.data.toolName === "update_agent_graph",
+          (event) =>
+            event.runId === initialRootRuntimeRunId && event.data.toolName === "update_agent_graph",
         ),
       );
       assert.ok(
         rootToolStarts.some(
-          (event) => event.runId === initialRunId && event.data.toolName === "yield_agent_graph",
+          (event) =>
+            event.runId === initialRootRuntimeRunId && event.data.toolName === "yield_agent_graph",
         ),
       );
       assert.ok(
         rootToolStarts.some(
-          (event) => event.runId !== initialRunId && event.data.toolName === "view_agent_graph",
+          (event) =>
+            event.runId !== initialRootRuntimeRunId && event.data.toolName === "view_agent_graph",
         ),
         "the exact root wake must inspect the durable projection before finishing",
       );
