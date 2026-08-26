@@ -9,7 +9,11 @@ import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-a
 import { SessionManager } from "../../src/engine/session-manager.js";
 import { Session } from "../../src/engine/session.js";
 import type { HookOutput } from "../../src/hooks/types.js";
-import { RUNTIME_EVENT_SCHEMA_VERSION } from "../../src/storage/runtime-event.js";
+import {
+  RUNTIME_EVENT_SCHEMA_VERSION,
+  type RuntimeEvent,
+} from "../../src/storage/runtime-event.js";
+import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import {
   agentGraphInputRuntimeEventId,
   inspectAgentGraphExactRun,
@@ -174,6 +178,7 @@ test("Graph exact Run is indeterminate and never redispatches after provider dis
     let redispatches = 0;
     const recovered = fixture.createPort(async () => void redispatches++);
     assert.equal(await recovered.startExactRun(run), "observed");
+    assert.equal(await recovered.startExactRun(run), "observed");
     assert.equal(redispatches, 0);
     const events = await recovered.readRunEvents(run.sessionId, run.runId);
     assert.equal(events.filter((event) => event.kind === "model.call.started").length, 1);
@@ -219,10 +224,248 @@ test("Graph exact inspection rejects a tool dispatch without pretending it is at
   }
 });
 
+test("Graph exact stop distinguishes absent, requested, and cancelled terminal runs", async () => {
+  const fixture = await createFixture();
+  let executeCalls = 0;
+  const stopRequests: Array<{ sessionId: string; runId: string; reason: string }> = [];
+  const port = fixture.createPort(
+    async () => void executeCalls++,
+    (input) => {
+      stopRequests.push(input);
+      return true;
+    },
+  );
+  let runtimeRun: RuntimeRun | undefined;
+  try {
+    const absent = exactRun(fixture, "absent");
+    assert.equal(
+      await port.stopExactRun({
+        sessionId: absent.sessionId,
+        runId: absent.runId,
+        reason: "cancel absent",
+      }),
+      "not_started",
+    );
+
+    const active = exactRun(fixture, "active");
+    runtimeRun = await startRuntimeRun(fixture, active);
+    assert.equal(
+      await port.stopExactRun({
+        sessionId: active.sessionId,
+        runId: active.runId,
+        reason: "cancel active",
+      }),
+      "requested",
+    );
+    assert.deepEqual(stopRequests, [
+      { sessionId: active.sessionId, runId: active.runId, reason: "cancel active" },
+    ]);
+
+    await runtimeRun.finish("cancelled", "cancelled by Graph stop");
+    assert.equal(
+      await port.stopExactRun({
+        sessionId: active.sessionId,
+        runId: active.runId,
+        reason: "replayed cancel",
+      }),
+      "already_terminal",
+    );
+    assert.equal(stopRequests.length, 1);
+    assert.equal(executeCalls, 0);
+  } finally {
+    await runtimeRun?.finish("cancelled", "test cleanup");
+    await fixture.close();
+  }
+});
+
+test("Graph exact stop fails closed when ownership is absent and closes a terminal race", async () => {
+  const fixture = await createFixture();
+  let executeCalls = 0;
+  const runtimeRuns: RuntimeRun[] = [];
+  try {
+    const noBoundaryRun = exactRun(fixture, "no-boundary");
+    const noBoundaryRuntime = await startRuntimeRun(fixture, noBoundaryRun);
+    runtimeRuns.push(noBoundaryRuntime);
+    const noBoundary = fixture.createPort(async () => void executeCalls++);
+    await assert.rejects(
+      noBoundary.stopExactRun({
+        sessionId: noBoundaryRun.sessionId,
+        runId: noBoundaryRun.runId,
+        reason: "must stop",
+      }),
+      /host has no stop boundary/u,
+    );
+    await noBoundaryRuntime.finish("cancelled", "test cleanup");
+
+    const unownedRun = exactRun(fixture, "unowned");
+    const unownedRuntime = await startRuntimeRun(fixture, unownedRun);
+    runtimeRuns.push(unownedRuntime);
+    const unowned = fixture.createPort(
+      async () => void executeCalls++,
+      () => false,
+    );
+    await assert.rejects(
+      unowned.stopExactRun({
+        sessionId: unownedRun.sessionId,
+        runId: unownedRun.runId,
+        reason: "must stop",
+      }),
+      /not owned by this host/u,
+    );
+    await unownedRuntime.finish("cancelled", "test cleanup");
+
+    const racingRun = exactRun(fixture, "terminal-race");
+    const racingRuntime = await startRuntimeRun(fixture, racingRun);
+    runtimeRuns.push(racingRuntime);
+    const racing = fixture.createPort(
+      async () => void executeCalls++,
+      async () => {
+        await racingRuntime.finish("cancelled", "terminal won the stop race");
+        return false;
+      },
+    );
+    assert.equal(
+      await racing.stopExactRun({
+        sessionId: racingRun.sessionId,
+        runId: racingRun.runId,
+        reason: "race with terminal",
+      }),
+      "already_terminal",
+    );
+    assert.equal(executeCalls, 0);
+  } finally {
+    await Promise.all(
+      runtimeRuns.map((runtimeRun) => runtimeRun.finish("cancelled", "test cleanup")),
+    );
+    await fixture.close();
+  }
+});
+
+test("Graph exact Run rejects mismatched Session and store authorities before dispatch", async () => {
+  const fixture = await createFixture();
+  const foreignRoot = await mkdtemp(join(tmpdir(), "pico-agent-graph-foreign-store-"));
+  const foreignStore = new SqliteRuntimeEventStore({ storageRoot: foreignRoot });
+  let executeCalls = 0;
+  let wrongSessionReleases = 0;
+  try {
+    const wrongSessionManager = {
+      async getOrCreatePinned() {
+        return {
+          session: fixture.session,
+          release: () => void wrongSessionReleases++,
+        };
+      },
+    } as unknown as SessionManager;
+    const wrongSessionPort = new SqliteAgentGraphExactRunPort({
+      runtimeEventStore: fixture.store,
+      sessionManager: wrongSessionManager,
+      execute: async () => void executeCalls++,
+    });
+    await assert.rejects(
+      wrongSessionPort.startExactRun({
+        ...exactRun(fixture, "wrong-session"),
+        sessionId: "another-session",
+      }),
+      /resolved to another Session authority/u,
+    );
+    assert.equal(wrongSessionReleases, 1);
+
+    const wrongStorePort = new SqliteAgentGraphExactRunPort({
+      runtimeEventStore: foreignStore,
+      sessionManager: managerReturning(fixture.session),
+      execute: async () => void executeCalls++,
+    });
+    await assert.rejects(
+      wrongStorePort.startExactRun(exactRun(fixture, "wrong-store")),
+      /resolved to another Session authority/u,
+    );
+    assert.equal(executeCalls, 0);
+  } finally {
+    foreignStore.close();
+    await rm(foreignRoot, { recursive: true, force: true });
+    await fixture.close();
+  }
+});
+
+test("Graph exact Run rejects corrupt ledgers repeatedly without dispatch", async () => {
+  const fixture = await createFixture();
+  const run = exactRun(fixture, "corrupt-ledger");
+  const start = exactStartEvent(run);
+  const scenarios: ReadonlyArray<{
+    readonly name: string;
+    readonly events: readonly RuntimeEvent[];
+    readonly error: RegExp;
+  }> = [
+    {
+      name: "missing start",
+      events: [inputEvent(run, "user")],
+      error: /exactly one run\.started fact/u,
+    },
+    {
+      name: "duplicate starts",
+      events: [start, { ...start, eventId: "duplicate-run-started" }],
+      error: /exactly one run\.started fact/u,
+    },
+    {
+      name: "mismatched exact start",
+      events: [{ ...start, turnId: "another-turn" }],
+      error: /does not match its preallocated Claim identity/u,
+    },
+    {
+      name: "conflicting event identity",
+      events: [start, { ...inputEvent(run, "user"), invocationId: "another-invocation" }],
+      error: /conflicting event identity/u,
+    },
+    {
+      name: "conflicting terminals",
+      events: [
+        start,
+        terminalEvent(run, "terminal-one", "failed"),
+        terminalEvent(run, "terminal-two", "cancelled"),
+      ],
+      error: /conflicting terminal facts/u,
+    },
+    {
+      name: "poisoned deterministic input",
+      events: [start, inputEvent(run, "assistant")],
+      error: /bound to an incompatible Runtime fact/u,
+    },
+  ];
+  try {
+    for (const scenario of scenarios) {
+      let executeCalls = 0;
+      const runtimeEventStore = {
+        storageRoot: fixture.store.storageRoot,
+        readRun: async () => scenario.events,
+      } as unknown as SqliteRuntimeEventStore;
+      const port = new SqliteAgentGraphExactRunPort({
+        runtimeEventStore,
+        sessionManager: managerReturning(fixture.session),
+        execute: async () => void executeCalls++,
+      });
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await assert.rejects(
+          port.startExactRun(run),
+          scenario.error,
+          `${scenario.name} must reject on attempt ${attempt + 1}`,
+        );
+      }
+      assert.equal(executeCalls, 0, `${scenario.name} must not dispatch`);
+    }
+  } finally {
+    await fixture.close();
+  }
+});
+
 interface Fixture {
   readonly workDir: string;
   readonly session: Session;
-  createPort(execute: CreateAgentGraphExactRunPortOptions["execute"]): SqliteAgentGraphExactRunPort;
+  readonly store: SqliteRuntimeEventStore;
+  createPort(
+    execute: CreateAgentGraphExactRunPortOptions["execute"],
+    requestStop?: CreateAgentGraphExactRunPortOptions["requestStop"],
+  ): SqliteAgentGraphExactRunPort;
   close(): Promise<void>;
 }
 
@@ -249,18 +492,104 @@ async function createFixture(): Promise<Fixture> {
   return {
     workDir,
     session: owner.session,
-    createPort: (execute) =>
+    store,
+    createPort: (execute, requestStop) =>
       new SqliteAgentGraphExactRunPort({
         runtimeEventStore: store,
         sessionManager: manager,
         sessionOptions: { persistence: true, picoHome, runtimePort },
         execute,
+        ...(requestStop ? { requestStop } : {}),
       }),
     async close() {
       owner.release();
       await manager.clearAndDrain();
       await rm(root, { recursive: true, force: true });
     },
+  };
+}
+
+function exactRun(fixture: Fixture, suffix: string): StartExactAgentGraphRunInput {
+  return {
+    claimId: `claim-${suffix}`,
+    sessionId: EXACT_RUN.sessionId,
+    turnId: `turn-${suffix}`,
+    runId: `run-${suffix}`,
+    invocationId: `invocation-${suffix}`,
+    runStartedEventId: `run-started-${suffix}`,
+    workDir: fixture.workDir,
+    prompt: `execute ${suffix}`,
+  };
+}
+
+function managerReturning(session: Session): SessionManager {
+  return {
+    async getOrCreatePinned() {
+      return { session, release() {} };
+    },
+  } as unknown as SessionManager;
+}
+
+function startRuntimeRun(
+  fixture: Fixture,
+  input: StartExactAgentGraphRunInput,
+): Promise<RuntimeRun> {
+  return RuntimeRun.start({
+    capability: fixture.session.runtimeEventCapability!,
+    runId: input.runId,
+    turnId: input.turnId,
+    invocationId: input.invocationId,
+    runStartedEventId: input.runStartedEventId,
+  });
+}
+
+function exactEventBase(input: StartExactAgentGraphRunInput) {
+  return {
+    schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
+    sessionId: input.sessionId,
+    invocationId: input.invocationId,
+    runId: input.runId,
+    turnId: input.turnId,
+    at: "2026-01-01T00:00:00.000Z",
+    partial: false as const,
+    visibility: "internal" as const,
+  };
+}
+
+function exactStartEvent(
+  input: StartExactAgentGraphRunInput,
+): Extract<RuntimeEvent, { kind: "run.started" }> {
+  return {
+    ...exactEventBase(input),
+    eventId: input.runStartedEventId,
+    kind: "run.started",
+    data: { workDir: input.workDir },
+  };
+}
+
+function inputEvent(
+  input: StartExactAgentGraphRunInput,
+  role: "assistant" | "user",
+): Extract<RuntimeEvent, { kind: "message.committed" }> {
+  return {
+    ...exactEventBase(input),
+    eventId: agentGraphInputRuntimeEventId(input.claimId),
+    visibility: "model",
+    kind: "message.committed",
+    data: { message: { role, content: input.prompt } },
+  };
+}
+
+function terminalEvent(
+  input: StartExactAgentGraphRunInput,
+  eventId: string,
+  status: Extract<RuntimeEvent, { kind: "run.terminal" }>["data"]["status"],
+): Extract<RuntimeEvent, { kind: "run.terminal" }> {
+  return {
+    ...exactEventBase(input),
+    eventId,
+    kind: "run.terminal",
+    data: { status },
   };
 }
 
