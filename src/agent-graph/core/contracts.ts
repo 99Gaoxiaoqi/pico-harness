@@ -126,10 +126,13 @@ export interface AgentGraphOperatorProvision {
   readonly operatorGeneration: number;
   readonly childSessionId: string;
   readonly state: AgentGraphProvisionState;
+  /** CAS version owned by the Graph control store. */
+  readonly version: number;
   readonly profileSnapshot: AgentGraphProfileSnapshot;
   readonly workspaceBinding: JsonValue;
   readonly createdAt: number;
   readonly provisionedAt?: number;
+  readonly stoppedAt?: number;
 }
 
 export type AgentGraphClaimState = "claimed" | "executing" | "cancelled";
