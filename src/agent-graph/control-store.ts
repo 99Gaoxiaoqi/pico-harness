@@ -28,6 +28,16 @@ export interface EnsureAgentGraphProvisionInput {
   readonly provisionFingerprint: string;
 }
 
+export interface TransitionAgentGraphProvisionInput {
+  readonly provisionId: string;
+  readonly expectedVersion: number;
+  readonly from: AgentGraphOperatorProvision["state"];
+  readonly to: Extract<
+    AgentGraphOperatorProvision["state"],
+    "provisioned" | "stopping" | "stopped"
+  >;
+}
+
 export interface ClaimAgentGraphIntentInput {
   readonly claim: AgentGraphActivationClaim;
   readonly expectedGraphRevision: number;
@@ -63,6 +73,9 @@ export interface AgentGraphControlStore {
   listOperatorProvisions(graphId: string): readonly AgentGraphOperatorProvision[];
   ensureOperatorProvision(
     input: EnsureAgentGraphProvisionInput,
+  ): AgentGraphStoreResult<AgentGraphOperatorProvision>;
+  transitionOperatorProvision(
+    input: TransitionAgentGraphProvisionInput,
   ): AgentGraphStoreResult<AgentGraphOperatorProvision>;
 
   listActivationClaims(graphId: string): readonly AgentGraphActivationClaim[];
