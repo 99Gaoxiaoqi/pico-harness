@@ -1577,7 +1577,7 @@ function isHomeExpression(target: string): boolean {
 function isWholeDirectoryContents(target: string, directory: string): boolean {
   if (directory === "/") return false;
   const suffix = target.slice(directory.length);
-  return target.startsWith(`${directory}/`) && /^\/(?:[*.?{[])/u.test(suffix);
+  return target.startsWith(`${directory}/`) && /^\/(?:[*?{[]|\.[*?{[])/u.test(suffix);
 }
 
 function isAbsoluteUserProfileTarget(target: string): boolean {

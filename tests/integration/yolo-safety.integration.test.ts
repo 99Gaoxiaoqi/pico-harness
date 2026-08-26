@@ -664,6 +664,33 @@ test(
 );
 
 test(
+  "YOLO hardline 不把隐藏工作区误判为整个用户目录通配目标",
+  { skip: process.platform === "win32" },
+  () => {
+    const hiddenWorkspace = "/Users/alice/.pico/temporary-workspace";
+    const ordinaryWorkspaceMutations = [
+      "rm pico-smoke.txt",
+      "rm ./.hidden-result",
+      "mv pico-smoke.txt ./.local/trash/",
+    ];
+    for (const command of ordinaryWorkspaceMutations) {
+      assert.equal(isHardlineBashCommand(command, hiddenWorkspace), false, command);
+    }
+
+    const wholeProfileGlobs = [
+      "rm -rf /Users/alice/*",
+      "rm -rf /Users/alice/.*",
+      "rm -rf /Users/alice/?*",
+      "rm -rf /Users/alice/[a-z]*",
+      "rm -rf /Users/alice/{*,.*}",
+    ];
+    for (const command of wholeProfileGlobs) {
+      assert.equal(isHardlineBashCommand(command, hiddenWorkspace), true, command);
+    }
+  },
+);
+
+test(
   "YOLO hardline 对真实 POSIX Shell stdin 执行入口 fail-closed",
   { skip: process.platform === "win32" },
   () => {
