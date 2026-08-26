@@ -66,6 +66,9 @@ test("reconciler drives dependent operators to a fixed point with exact durable 
     assert.equal(result.headRevision, 1);
     assert.ok(result.passes >= 3);
     assert.equal(raw.listOperatorProvisions(graphId).length, 3);
+    assert.ok(
+      raw.listOperatorProvisions(graphId).every((provision) => provision.state === "provisioned"),
+    );
     assert.equal(raw.listActivationClaims(graphId).length, 3);
     assert.equal(raw.listRecordRefs(graphId).length, 3);
     assert.ok(runtime.maxConcurrentStarts >= 2, "independent operators should start concurrently");
@@ -214,6 +217,7 @@ test("finish preserves exact claimed work and failed stop callbacks do not rewri
 
     await reconciler.reconcile(graphId);
     assert.equal(raw.listActivationClaims(graphId)[0]?.state, "cancelled");
+    assert.equal(raw.listOperatorProvisions(graphId)[0]?.state, "stopped");
   });
 });
 
