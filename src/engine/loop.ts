@@ -124,7 +124,12 @@ const TOOL_RESULT_REDACTION_MARKER = "[REDACTED]";
  * finally 块两处复用同一常量。
  */
 const TOOL_SETTLE_TIMEOUT_MS = 10_000;
-const engineSessionContext = new AsyncLocalStorage<string>();
+interface EngineSessionExecutionContext {
+  readonly capability: string;
+  active: boolean;
+}
+
+const engineSessionContext = new AsyncLocalStorage<EngineSessionExecutionContext>();
 // Plan 模式工具面单源迁移至 tool-surface.ts 的 PLAN_MODE_TOOL_NAMES
 // （只读侦察 + ask_user/submit_plan 协议闭环），此处仅保留消费接口。
 import { isPlanModeTool } from "../tools/tool-surface.js";
@@ -1475,13 +1480,27 @@ export class AgentEngine implements AgentRunner {
     signal?: AbortSignal,
   ): Promise<Message[]> {
     const capability = engineSessionCapability(session);
-    if (engineSessionContext.getStore() === capability) {
+    const ambientContext = engineSessionContext.getStore();
+    if (ambientContext?.active && ambientContext.capability === capability) {
       throw new Error(`AgentEngine does not support re-entrant runs for Session ${session.id}`);
     }
-    const run = () =>
-      engineSessionContext.run(capability, () =>
-        this.runInMainCompactorScope(session, runtimeReporter, runtimeTracer, signal),
-      );
+    const run = () => {
+      const context: EngineSessionExecutionContext = { capability, active: true };
+      return engineSessionContext.run(context, async () => {
+        try {
+          return await this.runInMainCompactorScope(
+            session,
+            runtimeReporter,
+            runtimeTracer,
+            signal,
+          );
+        } finally {
+          // Detached work inherits AsyncLocalStorage. Seal only this finished execution so a
+          // later exact Graph wake may reuse the same Session without weakening live re-entry.
+          context.active = false;
+        }
+      });
+    };
     const execute = () => (this.compactor ? this.compactor.runInMainScope(run) : run());
     const ambientRun = this.runtimePort?.currentRun();
     // Tests and explicit in-memory sessions intentionally skip durable runtime facts.
