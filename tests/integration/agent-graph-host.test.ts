@@ -152,7 +152,11 @@ test("workspace Graph host executes one exact root wake and observes its termina
     if (input.binding.kind !== "root") return;
     assert.equal(input.orchestrationMode, "graph");
     assert.equal(input.requestedModel, undefined);
-    assert.equal(input.allowedTools, undefined);
+    assert.deepEqual(input.allowedTools, [
+      "view_agent_graph",
+      "update_agent_graph",
+      "yield_agent_graph",
+    ]);
     const context = input.binding.getRootContext();
     assert.ok(context);
     assert.equal(context.graphId, "graph-root-wake");

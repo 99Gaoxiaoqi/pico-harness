@@ -13,7 +13,7 @@ import type { StartExactAgentGraphRunInput } from "./agent-graph-runtime-adapter
 
 export interface AgentGraphRootWakeRuntimePortOptions {
   readonly exactRuns: Pick<SqliteAgentGraphExactRunPort, "inspectExactRun" | "startExactRun"> &
-    Partial<Pick<SqliteAgentGraphExactRunPort, "readRunEvents">>;
+    Partial<Pick<SqliteAgentGraphExactRunPort, "readRunEvents" | "inspectLaunch">>;
   readonly workDir: string;
   readonly preflight?: (
     input: RootSupervisorRunIdentity,
@@ -48,6 +48,33 @@ export class AgentGraphRootWakeRuntimePort implements AgentGraphRootWakePort {
           reason: "indeterminate",
           error: `Root Supervisor Run ended after a durable dispatch as ${inspection.terminalEvent.data.status}`,
           blockingEventIds,
+        };
+      }
+    }
+    if (inspection.status === "attachable" && this.options.exactRuns.inspectLaunch) {
+      const launch = await this.options.exactRuns.inspectLaunch({
+        sessionId: input.rootSessionId,
+        runId: input.targetRunId,
+      });
+      if (launch.status === "running") return { status: "running" };
+      if (launch.status === "failed") {
+        return {
+          status: "failed",
+          error: launch.error ?? "Root Supervisor host execution failed before Runtime startup",
+        };
+      }
+      if (launch.status === "cancelled") {
+        return {
+          status: "manual_intervention",
+          reason: "cancelled",
+          error: launch.error ?? "Root Supervisor host execution was cancelled",
+        };
+      }
+      if (launch.status === "succeeded") {
+        return {
+          status: "manual_intervention",
+          reason: "indeterminate",
+          error: "Root Supervisor host execution succeeded without a Runtime terminal fact",
         };
       }
     }
