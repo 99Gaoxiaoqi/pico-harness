@@ -25,14 +25,18 @@ export const AGENT_GRAPH_SCOPE: SqliteSchemaScope = {
         CHECK ((phase = 'open' AND finished_at IS NULL) OR (phase = 'finished' AND finished_at IS NOT NULL))
       );
 
+      CREATE UNIQUE INDEX agent_graph_one_open_per_root
+        ON agent_graphs(root_session_id) WHERE phase = 'open';
+
       CREATE TABLE agent_graph_schedule_revisions (
         graph_id TEXT NOT NULL,
         revision INTEGER NOT NULL CHECK (revision >= 1),
         operation_id TEXT NOT NULL,
         request_fingerprint TEXT NOT NULL,
-        kind TEXT NOT NULL CHECK (kind IN ('add','stop','finish')),
+        kind TEXT NOT NULL CHECK (kind IN ('add','stop','finish','batch')),
         command_json TEXT NOT NULL CHECK (json_valid(command_json)),
         source_session_id TEXT NOT NULL,
+        source_turn_id TEXT NOT NULL,
         source_run_id TEXT NOT NULL,
         source_tool_call_id TEXT NOT NULL,
         created_at INTEGER NOT NULL,
@@ -54,11 +58,18 @@ export const AGENT_GRAPH_SCOPE: SqliteSchemaScope = {
         child_session_id TEXT NOT NULL UNIQUE,
         profile_snapshot_json TEXT NOT NULL CHECK (json_valid(profile_snapshot_json)),
         workspace_binding_json TEXT NOT NULL CHECK (json_valid(workspace_binding_json)),
+        state TEXT NOT NULL CHECK (state IN ('requested','provisioned','stopping','stopped')),
+        version INTEGER NOT NULL CHECK (version >= 1),
         created_at INTEGER NOT NULL,
+        provisioned_at INTEGER,
+        stopped_at INTEGER,
         UNIQUE (graph_id, operator_id, generation),
         FOREIGN KEY (graph_id, schedule_revision)
           REFERENCES agent_graph_schedule_revisions(graph_id, revision) ON DELETE RESTRICT,
-        FOREIGN KEY (graph_id) REFERENCES agent_graphs(graph_id) ON DELETE RESTRICT
+        FOREIGN KEY (graph_id) REFERENCES agent_graphs(graph_id) ON DELETE RESTRICT,
+        CHECK ((state = 'requested' AND provisioned_at IS NULL AND stopped_at IS NULL)
+          OR (state IN ('provisioned','stopping') AND provisioned_at IS NOT NULL AND stopped_at IS NULL)
+          OR (state = 'stopped' AND stopped_at IS NOT NULL))
       );
 
       CREATE INDEX agent_graph_provisions_by_graph
