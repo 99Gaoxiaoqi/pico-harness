@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { createRuntimeRequest } from "../../src/daemon/protocol.js";
 import { createProductionRuntimeServices } from "../../src/daemon/production-host.js";
 import { globalSessionManager } from "../../src/engine/session.js";
 import type { SessionManagerLease } from "../../src/engine/session-manager.js";
@@ -15,7 +16,9 @@ import type {
 } from "../../src/runtime/agent-graph-host.js";
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 import type { RunAgentCliDependencies } from "../../src/runtime/agent-runtime.js";
+import { PluginRuntimeSnapshotRegistry } from "../../src/plugins/plugin-runtime-snapshot-registry.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
+import { createAskUserRequestId } from "../../src/tools/ask-user.js";
 import { writeDesktopModelRouting } from "../fixtures/desktop-model-routing.js";
 
 test("production host binds Graph root and installs detached exact execution", async (context) => {
@@ -38,12 +41,51 @@ test("production host binds Graph root and installs detached exact execution", a
   const operatorGate = new Promise<void>((resolve) => {
     releaseOperator = resolve;
   });
+  const brokerPending = deferred<{
+    readonly approvalId: string;
+    readonly promptId: string;
+  }>();
+  let brokerApproval: { readonly allowed: boolean; readonly allowForSession?: boolean } | undefined;
+  let brokerAnswer: { readonly kind: string; readonly optionId?: string } | undefined;
   let reattachAttempts = 0;
   const fakeAgentRuntime = {
     execute: async (options: RunAgentCliOptions, host: RunAgentCliDependencies) => {
       calls.push({ options, host });
       if (options.prompt === "retry graph work" && ++reattachAttempts === 1) {
         throw new Error("attach failed before AgentRuntime completed");
+      }
+      if (options.prompt === "exercise broker boundaries") {
+        assert.equal(options.interactionMode, "default");
+        assert.ok(host.approvalManager);
+        assert.ok(host.approvalNotifier);
+        assert.ok(host.askUserHandler);
+        const approvalId = "graph-approval-1";
+        const promptId = createAskUserRequestId();
+        const approval = host.approvalManager.waitForApproval(
+          approvalId,
+          "bash",
+          '{"command":"sensitive"}',
+          host.approvalNotifier,
+          undefined,
+          host.signal,
+          {
+            providerCallId: "provider-call-approval-1",
+            sessionScope: { type: "tool", toolName: "bash" },
+          },
+        );
+        const answer = host.askUserHandler.waitForAnswer(
+          {
+            requestId: promptId,
+            question: "Choose a bounded action",
+            options: [
+              { optionId: "safe", label: "Safe" },
+              { optionId: "stop", label: "Stop" },
+            ],
+          },
+          host.signal,
+        );
+        brokerPending.resolve({ approvalId, promptId });
+        [brokerApproval, brokerAnswer] = await Promise.all([approval, answer]);
       }
       if (host.agentGraph?.kind === "operator") await operatorGate;
       return {
@@ -227,6 +269,133 @@ test("production host binds Graph root and installs detached exact execution", a
   assert.equal(reattachAttempts, 2);
   assert.equal(retryTerminalCount, 2);
 
+  let brokerTerminalCount = 0;
+  const brokerInput: ExecuteHostedAgentGraphRunInput = {
+    ...exactInput,
+    claimId: "claim-broker",
+    prompt: "exercise broker boundaries",
+    prestartedRun: {
+      runId: "graph-exact-run-broker",
+      turnId: "graph-exact-turn-broker",
+      invocationId: "graph-exact-invocation-broker",
+      runStartedEventId: "graph-exact-start-broker",
+      runStartedAt: new Date(2).toISOString(),
+    },
+    prestartedUserInput: { messageId: "graph-exact-input-broker" },
+    onTerminal: () => {
+      brokerTerminalCount++;
+    },
+  };
+  const callsBeforeBroker = calls.length;
+  await graphFactoryOptions.execute(brokerInput);
+  const pending = await brokerPending.promise;
+  await assert.rejects(
+    services.desktopService.handle(
+      createRuntimeRequest("approval.respond", {
+        workspacePath: canonicalWorkspace,
+        approvalId: pending.approvalId,
+        runId: brokerInput.prestartedRun.runId,
+        sessionId: "another-session",
+        decision: "allow_session",
+      }),
+    ),
+    /不存在或已过期/u,
+  );
+  await assert.rejects(
+    services.desktopService.handle(
+      createRuntimeRequest("prompt.respond", {
+        workspacePath: canonicalWorkspace,
+        promptId: pending.promptId,
+        runId: "another-run",
+        sessionId: operatorLease.session.id,
+        answer: "safe",
+      }),
+    ),
+    /不存在或已过期/u,
+  );
+  assert.deepEqual(
+    await services.desktopService.handle(
+      createRuntimeRequest("approval.respond", {
+        workspacePath: canonicalWorkspace,
+        approvalId: pending.approvalId,
+        runId: brokerInput.prestartedRun.runId,
+        sessionId: operatorLease.session.id,
+        decision: "allow_once",
+      }),
+    ),
+    { accepted: true, alreadyResolved: false },
+  );
+  assert.deepEqual(
+    await services.desktopService.handle(
+      createRuntimeRequest("prompt.respond", {
+        workspacePath: canonicalWorkspace,
+        promptId: pending.promptId,
+        runId: brokerInput.prestartedRun.runId,
+        sessionId: operatorLease.session.id,
+        answer: "safe",
+      }),
+    ),
+    { accepted: true, alreadyResolved: false },
+  );
+  assert.equal((await runtime.waitForRun(brokerInput.prestartedRun.runId)).status, "succeeded");
+  assert.deepEqual(brokerApproval, { allowed: true, reason: "用户在桌面端批准了本次操作。" });
+  assert.deepEqual(brokerAnswer, {
+    kind: "selected",
+    requestId: pending.promptId,
+    optionId: "safe",
+    label: "Safe",
+  });
+  assert.equal(brokerTerminalCount, 1);
+  assert.equal(calls.length, callsBeforeBroker + 1);
+  await graphFactoryOptions.execute(brokerInput);
+  await Promise.resolve();
+  assert.equal(calls.length, callsBeforeBroker + 1, "successful exact replay must not redispatch");
+  assert.equal(brokerTerminalCount, 1);
+
+  let modelFailureTerminalCount = 0;
+  const modelFailureInput: ExecuteHostedAgentGraphRunInput = {
+    ...exactInput,
+    claimId: "root-wake:model-failure",
+    session: rootLease.session,
+    prompt: "model assembly must fail closed",
+    prestartedRun: {
+      runId: "graph-exact-run-model-failure",
+      turnId: "graph-exact-turn-model-failure",
+      invocationId: "graph-exact-invocation-model-failure",
+      runStartedEventId: "graph-exact-start-model-failure",
+      runStartedAt: new Date(3).toISOString(),
+    },
+    prestartedUserInput: { messageId: "graph-exact-input-model-failure" },
+    binding: {
+      kind: "root",
+      getRootContext: () => undefined,
+      toolPort: {},
+    } as ExecuteHostedAgentGraphRunInput["binding"],
+    orchestrationMode: "graph",
+    requestedModel: "missing/model",
+    allowedTools: undefined,
+    onTerminal: () => {
+      modelFailureTerminalCount++;
+    },
+  };
+  const callsBeforeModelFailure = calls.length;
+  await graphFactoryOptions.execute(modelFailureInput);
+  const modelFailure = await runtime.waitForRun(modelFailureInput.prestartedRun.runId);
+  assert.equal(modelFailure.status, "failed");
+  assert.match(modelFailure.error ?? "", /missing\/model|model route|模型路由/u);
+  assert.equal(modelFailureTerminalCount, 1);
+  assert.equal(calls.length, callsBeforeModelFailure);
+  await graphFactoryOptions.execute(modelFailureInput);
+  const modelFailureReplay = await runtime.waitForRun(modelFailureInput.prestartedRun.runId);
+  assert.equal(modelFailureReplay.status, "failed");
+  assert.equal(modelFailureReplay.version, modelFailure.version + 2);
+  assert.equal(modelFailureTerminalCount, 2);
+  assert.equal(
+    calls.length,
+    callsBeforeModelFailure,
+    "assembly failure must not dispatch AgentRuntime",
+  );
+
   operatorLease.release();
   rootLease.release();
   await services.desktopService.close();
@@ -237,6 +406,134 @@ test("production host binds Graph root and installs detached exact execution", a
   }
   await rm(root, { recursive: true, force: true });
 });
+
+for (const scenario of [
+  { kind: "plugin", bindingKind: "operator", error: /plugin snapshot load failed/u },
+  { kind: "mcp", bindingKind: "root", error: /Unexpected token|JSON/u },
+] as const) {
+  test(`production Graph ${scenario.kind} assembly failure stays terminal and fail-closed`, async () => {
+    const root = await mkdtemp(join(tmpdir(), `pico-production-graph-${scenario.kind}-failure-`));
+    const workspace = join(root, "workspace");
+    const picoHome = join(root, "pico-home");
+    await mkdir(workspace, { recursive: true });
+    await mkdir(picoHome, { recursive: true });
+    await writeDesktopModelRouting(picoHome);
+    if (scenario.kind === "mcp") {
+      await mkdir(join(workspace, ".pico"), { recursive: true });
+      await writeFile(join(workspace, ".pico", "mcp.json"), "{ invalid-json", "utf8");
+    }
+    const canonicalWorkspace = await realpath(workspace);
+    const env = { PICO_HOME: picoHome, PICO_TEST_TOKEN: "test-token" };
+    const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
+    await trustStore.trust(canonicalWorkspace);
+    const pluginRuntimeSnapshotRegistry =
+      scenario.kind === "plugin"
+        ? new PluginRuntimeSnapshotRegistry({
+            loadSnapshot: async () => {
+              throw new Error("plugin snapshot load failed");
+            },
+          })
+        : undefined;
+    let dispatchCount = 0;
+    const fakeAgentRuntime = {
+      execute: async () => {
+        dispatchCount++;
+        throw new Error("AgentRuntime must not receive a failed assembly");
+      },
+    } as unknown as AgentRuntime;
+    let graphExecute: CreateAgentGraphWorkspaceHostOptions["execute"] | undefined;
+    const services = createProductionRuntimeServices({
+      env,
+      trustStore,
+      agentRuntime: fakeAgentRuntime,
+      ...(pluginRuntimeSnapshotRegistry
+        ? { pluginRuntimeSnapshotRegistry, ownsPluginRuntimeSnapshotRegistry: true }
+        : {}),
+      agentGraphWorkspaceHostFactory: (options) => {
+        graphExecute = options.execute;
+        const application = {
+          toolPort: {},
+          drivePort: {},
+          supervisor: {},
+          start: async () => undefined,
+          close: async () => undefined,
+        };
+        return {
+          application,
+          store: {},
+          rootBinding: () => ({ kind: "root", getRootContext: () => undefined, toolPort: {} }),
+          start: application.start,
+          close: application.close,
+        } as unknown as AgentGraphWorkspaceHost;
+      },
+    });
+    const sessionId = `graph-${scenario.kind}-failure-session`;
+    let lease: SessionManagerLease | undefined;
+    try {
+      const runtime = await services.service.getWorkspaceRuntime(canonicalWorkspace);
+      assert.ok(graphExecute);
+      lease = await globalSessionManager.getOrCreatePinned(sessionId, canonicalWorkspace, {
+        persistence: true,
+        picoHome,
+        runtimePort: createEngineRuntimePort(),
+      });
+      let terminalCount = 0;
+      const input: ExecuteHostedAgentGraphRunInput = {
+        claimId:
+          scenario.bindingKind === "root"
+            ? `root-wake:${scenario.kind}-failure`
+            : `${scenario.kind}-failure-claim`,
+        session: lease.session,
+        prompt: `${scenario.kind} assembly must fail closed`,
+        prestartedRun: {
+          runId: `graph-exact-${scenario.kind}-failure`,
+          turnId: `graph-exact-${scenario.kind}-failure-turn`,
+          invocationId: `graph-exact-${scenario.kind}-failure-invocation`,
+          runStartedEventId: `graph-exact-${scenario.kind}-failure-start`,
+          runStartedAt: new Date(0).toISOString(),
+        },
+        prestartedUserInput: { messageId: `graph-exact-${scenario.kind}-failure-input` },
+        binding:
+          scenario.bindingKind === "operator"
+            ? ({
+                kind: "operator",
+                getActivationContext: () => ({ privateIdentity: "must-not-be-dispatched" }),
+                outputPort: {},
+              } as unknown as ExecuteHostedAgentGraphRunInput["binding"])
+            : ({
+                kind: "root",
+                getRootContext: () => ({ privateIdentity: "must-not-be-dispatched" }),
+                toolPort: {},
+              } as unknown as ExecuteHostedAgentGraphRunInput["binding"]),
+        orchestrationMode: scenario.bindingKind === "root" ? "graph" : "default",
+        requestedModel: "test/coder",
+        onTerminal: () => {
+          terminalCount++;
+        },
+      };
+
+      await graphExecute(input);
+      const firstFailure = await runtime.waitForRun(input.prestartedRun.runId);
+      assert.equal(firstFailure.status, "failed");
+      assert.match(firstFailure.error ?? "", scenario.error);
+      assert.equal(terminalCount, 1);
+      assert.equal(dispatchCount, 0, "assembly failure must not expose the Graph binding");
+
+      await graphExecute(input);
+      const replayFailure = await runtime.waitForRun(input.prestartedRun.runId);
+      assert.equal(replayFailure.status, "failed");
+      assert.equal(replayFailure.version, firstFailure.version + 2);
+      assert.equal(terminalCount, 2);
+      assert.equal(dispatchCount, 0, "failed exact retry must not redispatch AgentRuntime");
+    } finally {
+      lease?.release();
+      await services.desktopService.close();
+      const session = globalSessionManager.delete(sessionId, canonicalWorkspace, { picoHome });
+      await session?.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
 
 async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -249,4 +546,12 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<v
 function asRecord(value: unknown): Record<string, unknown> {
   assert.ok(value && typeof value === "object" && !Array.isArray(value));
   return value as Record<string, unknown>;
+}
+
+function deferred<T>(): { readonly promise: Promise<T>; readonly resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((promiseResolve) => {
+    resolve = promiseResolve;
+  });
+  return { promise, resolve };
 }
