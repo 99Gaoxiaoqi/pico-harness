@@ -123,7 +123,11 @@ export function createAgentGraphWorkspaceHost(
       if (claim) {
         const provision = store
           .listOperatorProvisions(claim.graphId)
-          .find((candidate) => candidate.operatorId === claim.operatorId && candidate.generation === claim.operatorGeneration);
+          .find(
+            (candidate) =>
+              candidate.operatorId === claim.operatorId &&
+              candidate.generation === claim.operatorGeneration,
+          );
         if (!provision) throw new Error(`Graph activation ${claim.claimId} has no provision`);
         const activation: GraphOperatorActivationContext = {
           kind: "graph_operator_activation",
@@ -210,7 +214,10 @@ export function createAgentGraphWorkspaceHost(
         if (input.operator.workspacePolicy.kind !== "shared") {
           throw new Error("isolated-worktree Graph operators require a host workspace resolver");
         }
-        return { workDir: options.workDir, ...(options.sessionOptions ? { sessionOptions: options.sessionOptions } : {}) };
+        return {
+          workDir: options.workDir,
+          ...(options.sessionOptions ? { sessionOptions: options.sessionOptions } : {}),
+        };
       }),
     ...(options.now ? { now: options.now } : {}),
     ...(options.onError ? { onError: options.onError } : {}),
