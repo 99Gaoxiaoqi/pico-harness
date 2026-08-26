@@ -42,6 +42,16 @@ import { WorkspaceRoots, workspaceAccessesFromCall } from "../tools/workspace-ro
 import type { DefaultToolRegistryOptions } from "../tools/default-registry.js";
 import { FetchURLTool } from "../tools/web.js";
 import {
+  createAgentGraphSupervisorTools,
+  type AgentGraphRootToolContext,
+  type AgentGraphSupervisorToolPort,
+} from "../tools/agent-graph-tools.js";
+import {
+  createAgentOutputTool,
+  type AgentOutputCommitPort,
+  type GraphOperatorActivationContext,
+} from "../tools/agent-output-tool.js";
+import {
   DelegationManager,
   DelegateStatusTool,
 } from "../tools/delegation-manager.js";
@@ -151,6 +161,7 @@ import {
   emitRuntimeLifecycleEvent,
   RuntimeRunExecutor,
   type PrestartedRuntimeRun,
+  type PrestartedRuntimeUserInput,
 } from "./runtime-run-executor.js";
 import {
   invalidateMemoryReviewRecoverySuccess,
@@ -303,6 +314,20 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   resumeExistingSession?: boolean;
   /** @internal 恢复 adapter 已在 canonical ledger 发布的唯一 RuntimeRun admission。 */
   prestartedRun?: PrestartedRuntimeRun;
+  /** @internal Graph exact Run 首次输入的确定性消息身份。 */
+  prestartedUserInput?: PrestartedRuntimeUserInput;
+  /** 宿主持有的 Graph 身份与最小工具端口；模型参数不能创建或修改该绑定。 */
+  agentGraph?:
+    | {
+        readonly kind: "root";
+        readonly getRootContext: () => AgentGraphRootToolContext | undefined;
+        readonly toolPort: AgentGraphSupervisorToolPort;
+      }
+    | {
+        readonly kind: "operator";
+        readonly getActivationContext: () => GraphOperatorActivationContext | undefined;
+        readonly outputPort: AgentOutputCommitPort;
+      };
   /** 仅用于后台执行的实时信任校验；生产默认读取用户级 WorkspaceTrustStore。 */
   backgroundTrustStore?: BackgroundWorkspaceTrustVerifier;
   /** daemon/Cron 注入的系统凭证库读取边界；前台 BYOK 不需要。 */
@@ -828,8 +853,14 @@ export async function executeAgentRuntime(
     PICO_HOME: picoHome,
   });
   const resumeExistingSession = dependencies.resumeExistingSession === true;
-  if (dependencies.prestartedRun && !resumeExistingSession) {
-    throw new Error("prestartedRun requires resumeExistingSession");
+  if (dependencies.prestartedRun && !resumeExistingSession && !dependencies.prestartedUserInput) {
+    throw new Error("new-turn prestartedRun requires prestartedUserInput");
+  }
+  if (
+    dependencies.prestartedUserInput &&
+    (!dependencies.prestartedRun || resumeExistingSession)
+  ) {
+    throw new Error("prestartedUserInput requires a non-resume prestartedRun");
   }
   const prompt = resumeExistingSession ? options.prompt : normalizePrompt(options.prompt);
   const kind = options.provider ?? "openai";
@@ -1109,8 +1140,7 @@ export async function executeAgentRuntime(
       });
 
     // 阶段 3：装配 Provider、工具、Hook 与 AgentEngine 能力图。
-    // headless/folder 装配不注入 taskHostRuntime：提前建 RuntimeStore，同时作为
-    // graph work lease 源（注入 DelegationManager）与 usage ledger。
+    // headless/folder 装配不注入 taskHostRuntime：提前创建独立 usage ledger。
     if (dependencies.runtimeState === undefined && !ownedUsageStore) {
       try {
         ownedUsageStore = new SqliteRuntimeControlStore({
@@ -1149,7 +1179,6 @@ export async function executeAgentRuntime(
         ...(collaborationMode() !== "plan" && pluginSnapshot?.hookSources
           ? { hookExtensionSources: pluginSnapshot.hookSources }
           : {}),
-        ...(ownedUsageStore ? { runtimeStore: ownedUsageStore } : {}),
       }));
     if (ownsRuntimeState) sessionLeaseTransferred = true;
     cleanupRuntimeState = runtimeState;
@@ -1553,6 +1582,30 @@ export async function executeAgentRuntime(
       onToolGroupLoaded,
       sessionTaskAuthority,
     );
+    if (dependencies.agentGraph?.kind === "root") {
+      if (backgroundPolicy || orchestrationMode() !== "graph") {
+        throw new Error("Graph root tools require a foreground Graph Mode Runtime");
+      }
+      for (const tool of createAgentGraphSupervisorTools({
+        getRootContext: dependencies.agentGraph.getRootContext,
+        port: dependencies.agentGraph.toolPort,
+      })) {
+        registry.register(tool);
+      }
+      toolDisclosure.discloseTools([
+        "update_agent_graph",
+        "view_agent_graph",
+        "yield_agent_graph",
+      ]);
+    } else if (dependencies.agentGraph?.kind === "operator") {
+      registry.register(
+        createAgentOutputTool({
+          getActivationContext: dependencies.agentGraph.getActivationContext,
+          port: dependencies.agentGraph.outputPort,
+        }),
+      );
+      toolDisclosure.discloseTools(["agent_output"]);
+    }
     if (!backgroundPolicy && hostKind === "desktop" && dependencies.browserAgent) {
       for (const tool of createBrowserAgentTools(dependencies.browserAgent)) {
         registry.register(tool);
@@ -1594,7 +1647,10 @@ export async function executeAgentRuntime(
         todoStore,
         isolatedHeadless: dependencies.isolatedHeadless,
         graphToolsAvailable:
-          !!session.runtimeEventStore && !backgroundPolicy && orchestrationMode() === "graph",
+          !!session.runtimeEventStore &&
+          !backgroundPolicy &&
+          orchestrationMode() === "graph" &&
+          dependencies.agentGraph?.kind === "root",
         skillLoader: skillLoaderFactory(workDir),
         ...(dependencies.isolatedHeadless ? {} : { picoHome }),
         ...(activeHookService
@@ -1943,6 +1999,9 @@ export async function executeAgentRuntime(
       prompt,
       resumeExistingSession,
       ...(dependencies.prestartedRun ? { prestartedRun: dependencies.prestartedRun } : {}),
+      ...(dependencies.prestartedUserInput
+        ? { prestartedUserInput: dependencies.prestartedUserInput }
+        : {}),
       traceEnabled,
       options: {
         ...(effectiveOptions.rewindPrompt !== undefined
