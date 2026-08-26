@@ -19,13 +19,16 @@ const identity = {
 
 test("root wake starts one exact root RuntimeRun with deterministic identities", async () => {
   const starts: StartExactAgentGraphRunInput[] = [];
+  let launchLive = false;
   let inspection: AgentGraphExactRunInspection = { status: "not_started" };
   const port = new AgentGraphRootWakeRuntimePort({
     workDir: "/tmp/graph-root",
+    isLaunchLive: () => launchLive,
     exactRuns: {
       inspectExactRun: async () => inspection,
       startExactRun: async (input) => {
         starts.push(input);
+        launchLive = true;
         inspection = {
           status: "attachable",
           input: "committed",
@@ -57,23 +60,45 @@ test("root wake starts one exact root RuntimeRun with deterministic identities",
   assert.equal(starts[0]!.turnId, identity.targetTurnId);
   assert.equal(starts[0]!.runId, identity.targetRunId);
   assert.match(starts[0]!.prompt, /view_agent_graph/);
-  assert.match(starts[0]!.prompt, /claim-1/);
+  assert.doesNotMatch(starts[0]!.prompt, /claim-1/);
 });
 
-test("indeterminate exact root Run parks at manual permission boundary", () => {
+test("indeterminate exact root Run parks at manual intervention boundary", () => {
   const state = rootWakeState({
     status: "indeterminate",
     reason: "provider_dispatch_recorded",
     blockingEventIds: ["model-call-1"],
     startEvent: {} as never,
   });
-  assert.equal(state.status, "waiting_permission");
-  assert.match(state.status === "waiting_permission" ? (state.error ?? "") : "", /model-call-1/);
+  assert.equal(state.status, "manual_intervention");
+  assert.deepEqual(
+    state.status === "manual_intervention" ? state.blockingEventIds : undefined,
+    ["model-call-1"],
+  );
 });
 
-test("root wake prompt rejects an oversized durable payload", () => {
-  assert.throws(
-    () => renderRootWakePrompt({ ...identity, payload: "x".repeat(40 * 1024) }),
-    /exceeds/,
-  );
+test("root wake prompt never interprets durable payload as model instructions", () => {
+  const prompt = renderRootWakePrompt(identity);
+  assert.match(prompt, /view_agent_graph/);
+  assert.doesNotMatch(prompt, /payload/i);
+});
+
+test("root wake defers while the source root Session is still active", async () => {
+  let starts = 0;
+  const port = new AgentGraphRootWakeRuntimePort({
+    workDir: "/tmp/graph-root",
+    preflight: () => "source_root_active",
+    exactRuns: {
+      inspectExactRun: async () => ({ status: "not_started" }),
+      startExactRun: async () => {
+        starts += 1;
+        return "started";
+      },
+    },
+  });
+  assert.deepEqual(await port.startOrResume({ ...identity, payload: {} }), {
+    status: "deferred",
+    reason: "source_root_active",
+  });
+  assert.equal(starts, 0);
 });

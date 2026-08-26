@@ -11,14 +11,17 @@ import type {
 } from "./agent-graph-exact-run-port.js";
 import type { StartExactAgentGraphRunInput } from "./agent-graph-runtime-adapter.js";
 
-export const AGENT_GRAPH_ROOT_WAKE_PAYLOAD_MAX_BYTES = 32 * 1024;
-
 export interface AgentGraphRootWakeRuntimePortOptions {
   readonly exactRuns: Pick<
     SqliteAgentGraphExactRunPort,
     "inspectExactRun" | "startExactRun"
   >;
   readonly workDir: string;
+  readonly preflight?: (
+    input: RootSupervisorRunIdentity,
+  ) => "ready" | "source_root_active" | "workspace_busy";
+  /** True after the host installed a detached execution for this exact target Run. */
+  readonly isLaunchLive?: (input: RootSupervisorRunIdentity) => boolean;
 }
 
 /** Maps durable Supervisor wake attempts onto exact root-session RuntimeRuns. */
@@ -28,12 +31,20 @@ export class AgentGraphRootWakeRuntimePort implements AgentGraphRootWakePort {
   }
 
   async inspect(input: RootSupervisorRunIdentity): Promise<RootSupervisorRunState> {
-    return rootWakeState(await this.options.exactRuns.inspectExactRun(this.exactInput(input)));
+    const inspection = await this.options.exactRuns.inspectExactRun(this.exactInput(input));
+    if (inspection.status === "attachable" && this.options.isLaunchLive?.(input)) {
+      return { status: "running" };
+    }
+    const state = rootWakeState(inspection);
+    if (state.status !== "not_started") return state;
+    return this.preflight(input);
   }
 
   async startOrResume(
     input: RootSupervisorRunIdentity & { readonly payload: unknown },
   ): Promise<RootSupervisorRunState> {
+    const before = await this.inspect(input);
+    if (before.status !== "not_started") return before;
     const exact = this.exactInput(input, renderRootWakePrompt(input));
     try {
       await this.options.exactRuns.startExactRun(exact);
@@ -43,12 +54,17 @@ export class AgentGraphRootWakeRuntimePort implements AgentGraphRootWakePort {
       }
       return { status: "failed", error: errorMessage(error) };
     }
-    return rootWakeState(await this.options.exactRuns.inspectExactRun(exact));
+    return this.inspect(input);
+  }
+
+  private preflight(input: RootSupervisorRunIdentity): RootSupervisorRunState {
+    const decision = this.options.preflight?.(input) ?? "ready";
+    return decision === "ready" ? { status: "not_started" } : { status: "deferred", reason: decision };
   }
 
   private exactInput(
     input: RootSupervisorRunIdentity,
-    prompt = renderRootWakePrompt({ ...input, payload: undefined }),
+    prompt = renderRootWakePrompt(input),
   ): StartExactAgentGraphRunInput {
     const identity = stableRootWakeIdentity(input);
     return {
@@ -71,41 +87,43 @@ export function rootWakeState(
     case "not_started":
       return { status: "not_started" };
     case "attachable":
+      return { status: "not_started" };
     case "live":
       return { status: "running" };
     case "terminal":
-      return inspection.terminalEvent.data.status === "completed"
-        ? { status: "completed" }
-        : {
-            status: "failed",
-            error:
-              inspection.terminalEvent.data.reason ??
-              `Root Supervisor Run ended as ${inspection.terminalEvent.data.status}`,
-          };
+      if (inspection.terminalEvent.data.status === "completed") return { status: "completed" };
+      if (inspection.terminalEvent.data.status === "cancelled") {
+        return {
+          status: "manual_intervention",
+          reason: "cancelled",
+          error: inspection.terminalEvent.data.reason ?? "Root Supervisor Run was cancelled",
+        };
+      }
+      return {
+        status: "failed",
+        error:
+          inspection.terminalEvent.data.reason ??
+          `Root Supervisor Run ended as ${inspection.terminalEvent.data.status}`,
+      };
     case "indeterminate":
       // An exact Run with a durable provider/tool dispatch cannot be retried safely.
       // Park it behind the existing manual-resume boundary instead of creating a retry loop.
       return {
-        status: "waiting_permission",
-        error: `Root Supervisor Run requires operator review: ${inspection.reason} (${inspection.blockingEventIds.join(", ")})`,
+        status: "manual_intervention",
+        reason: "indeterminate",
+        error: `Root Supervisor Run requires operator review: ${inspection.reason}`,
+        blockingEventIds: inspection.blockingEventIds,
       };
   }
 }
 
 export function renderRootWakePrompt(
-  input: RootSupervisorRunIdentity & { readonly payload?: unknown },
+  input: RootSupervisorRunIdentity,
 ): string {
-  const payload = JSON.stringify(input.payload ?? null);
-  if (Buffer.byteLength(payload, "utf8") > AGENT_GRAPH_ROOT_WAKE_PAYLOAD_MAX_BYTES) {
-    throw new Error(
-      `Graph root wake payload exceeds ${AGENT_GRAPH_ROOT_WAKE_PAYLOAD_MAX_BYTES} bytes`,
-    );
-  }
   return [
     "[Graph Supervisor wake]",
     `Graph ${input.graphId} has a new durable scheduling fact (wake ${input.wakeId}).`,
     "Call view_agent_graph first. Then submit the next atomic update, or finish the Graph. If work remains, call yield_agent_graph again.",
-    `Wake payload: ${payload}`,
   ].join("\n");
 }
 
