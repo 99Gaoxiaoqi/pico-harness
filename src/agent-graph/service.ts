@@ -10,6 +10,7 @@ import {
 import type { SqliteAgentGraphControlStore } from "../storage/sqlite/sqlite-agent-graph-control-store.js";
 import type {
   AgentGraphSupervisorProjection,
+  AgentGraphSupervisorView,
   AgentGraphSupervisorToolPort,
   CommitAgentGraphUpdateInput,
   CommitAgentGraphUpdateResult,
@@ -143,6 +144,7 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
   constructor(
     private readonly store: SqliteAgentGraphControlStore,
     private readonly control: SqliteAgentGraphControlStoreAdapter,
+    private readonly runtime: AgentGraphRuntimePortBridge,
     private readonly drive: SqliteAgentGraphDriveBridge,
     private readonly supervisor: AgentGraphSupervisorService,
     private readonly onAsyncError?: AgentGraphSupervisorServiceOptions["onError"],
@@ -173,11 +175,39 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
     };
   }
 
-  async readProjection(
-    input: ReadAgentGraphProjectionInput,
-  ): Promise<AgentGraphSupervisorProjection> {
+  async readProjection(input: ReadAgentGraphProjectionInput): Promise<AgentGraphSupervisorView> {
     this.ensureEpochOneGraph(input.graphId, input.rootSessionId);
-    return this.readProjectionSync(input.graphId, input.rootSessionId);
+    const projection = this.readProjectionSync(input.graphId, input.rootSessionId);
+    const selectedRecords = this.selectViewRecords(
+      input.graphId,
+      projection.records,
+      input.recordIds,
+    );
+    const [handoff, runtimeClaims] = await Promise.all([
+      this.runtime.resolveRecordHandoff(selectedRecords),
+      Promise.all(
+        projection.claims.map(async (claim) => {
+          const runtime = await this.runtime.observeActivation(claim);
+          return {
+            claimId: claim.claimId,
+            status: runtime.status,
+            ...(runtime.terminalEventId === undefined
+              ? {}
+              : { terminalEventId: runtime.terminalEventId }),
+            outputEventIds: runtime.records.map((record) => record.sourceEventId),
+          };
+        }),
+      ),
+    ]);
+    return {
+      ...projection,
+      runtimeClaims,
+      results: {
+        records: handoff.records,
+        totalBytes: handoff.totalBytes,
+        truncated: handoff.truncated,
+      },
+    };
   }
 
   async registerYield(input: RegisterAgentGraphYieldInput): Promise<RegisterAgentGraphYieldResult> {
@@ -220,6 +250,27 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
       claims: this.control.listActivationClaims(graphId),
       records: this.control.listRecordRefs(graphId),
     };
+  }
+
+  private selectViewRecords(
+    graphId: string,
+    records: AgentGraphSupervisorProjection["records"],
+    requestedRecordIds: readonly string[] | undefined,
+  ): AgentGraphSupervisorProjection["records"] {
+    if (requestedRecordIds === undefined) return records;
+    const current = new Map(records.map((record) => [record.recordId, record]));
+    return requestedRecordIds.map((recordId) => {
+      const stored = this.store.getRecordRef(recordId);
+      if (!stored) throw new Error(`Graph RecordRef does not exist: ${recordId}`);
+      if (stored.graphId !== graphId) {
+        throw new Error(`Graph RecordRef ${recordId} belongs to another Graph`);
+      }
+      const record = current.get(recordId);
+      if (!record) {
+        throw new Error(`Graph RecordRef ${recordId} is missing from its control projection`);
+      }
+      return record;
+    });
   }
 
   private ensureEpochOneGraph(graphId: string, rootSessionId: string): void {
@@ -268,6 +319,7 @@ export function createAgentGraphApplicationService(
   const toolPort = new AgentGraphToolApplicationService(
     options.store,
     control,
+    runtime,
     drive,
     supervisor,
     options.onError,

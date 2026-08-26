@@ -81,7 +81,6 @@ realModelTest(
     const workspacePath = await realpath(workDir);
     const rootSessionId = `graph-v2-root-${randomUUID()}`;
     const graphId = `graph:${rootSessionId}`;
-    const canary = `GRAPH_V2_${randomUUID().replaceAll("-", "").toUpperCase()}`;
     const userConfigStore = new UserConfigStore({ picoHome });
     await userConfigStore.write(
       {
@@ -165,7 +164,7 @@ realModelTest(
         await services.service.startForegroundRun({
           workspacePath,
           sessionId: rootSessionId,
-          prompt: initialRootPrompt({ canary, modelRouteId: model.route.id }),
+          prompt: initialRootPrompt({ modelRouteId: model.route.id }),
           execution: {
             requestedModel: model.route.id,
             allowedTools: ["update_agent_graph", "yield_agent_graph"],
@@ -285,7 +284,9 @@ realModelTest(
 
       const outputEvents = operatorEvents.filter((event) => event.kind === "agent.output");
       assert.equal(outputEvents.length, 1, "operator must commit exactly one agent.output fact");
-      assert.equal(outputEvents[0]?.data.payload.output, canary);
+      const canary = outputEvents[0]?.data.payload.output;
+      assert.ok(canary, "operator output must contain a canary unknown to the initial root prompt");
+      assert.match(canary, /^GRAPH_V2_OPERATOR_CANARY_[A-F0-9]{32}$/u);
       assert.equal(outputEvents[0]?.data.payload.status, "success");
       assert.equal(outputEvents[0]?.runId, claim.targetRunId);
       assert.ok(
@@ -313,6 +314,26 @@ realModelTest(
             event.runId !== initialRootRuntimeRunId && event.data.toolName === "view_agent_graph",
         ),
         "the exact root wake must inspect the durable projection before finishing",
+      );
+      const durableWakeView = rootEvents.find(
+        (event): event is Extract<RuntimeEvent, { kind: "tool.result.recorded" }> =>
+          event.kind === "tool.result.recorded" &&
+          event.runId !== initialRootRuntimeRunId &&
+          event.data.toolName === "view_agent_graph",
+      );
+      assert.ok(
+        durableWakeView,
+        "the exact root wake must durably record the view_agent_graph tool result",
+      );
+      assert.match(
+        durableWakeView.data.projection.text,
+        new RegExp(canary, "u"),
+        "the durable view tool result must contain the operator output canary",
+      );
+      assert.match(
+        durableWakeView.data.projection.text,
+        /"status":"success"/u,
+        "the durable view tool result must expose the explicit agent_output status",
       );
 
       assert.equal(
@@ -362,10 +383,7 @@ realModelTest(
   },
 );
 
-function initialRootPrompt(input: {
-  readonly canary: string;
-  readonly modelRouteId: string;
-}): string {
+function initialRootPrompt(input: { readonly modelRouteId: string }): string {
   return [
     "This is a deterministic Graph v2 end-to-end check. Follow these steps exactly.",
     "First call update_agent_graph exactly once with expected_revision 0 and operation_id e2e-add-operator.",
@@ -388,7 +406,8 @@ function initialRootPrompt(input: {
       },
       intent: {
         intent_id: "emit-canary",
-        instruction: `Call agent_output exactly once with status success and output exactly ${input.canary}. Do not call any other tool and do not write files.`,
+        instruction:
+          "Invent 32 random uppercase hexadecimal characters that are not present in this instruction. Call agent_output exactly once with status success and output equal to GRAPH_V2_OPERATOR_CANARY_ followed immediately by those 32 characters. Do not call any other tool and do not write files.",
         input_record_ids: [],
       },
     }),

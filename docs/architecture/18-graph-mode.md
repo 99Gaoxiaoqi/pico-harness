@@ -239,7 +239,12 @@ RecordRef = {
 }
 ```
 
-当前正式产出和 handoff 只支持 `agent-output`。handoff 会重新读取 source event 并校验 provenance，单条最多 16 KiB、合计最多 48 KiB，按 UTF-8 安全截断；调度表不会信任模型直接提供的结果正文。
+当前正式产出和 handoff 只支持 `agent-output`。handoff 会重新读取 source event 并校验 provenance，每条显式携带 `success | failure` status、来源 Graph/Operator/Claim/Session/Turn/Run/Invocation/Event 身份和受限正文；单条最多 16 KiB、合计最多 48 KiB、最多 64 条，按 UTF-8 安全截断。下游 prompt 中的正文依然被明确标记为不可信数据；调度表不会信任模型直接提供的结果正文。
+
+`view_agent_graph` 在读取时使用当前 Graph 的 RecordRef 到 Runtime ledger 动态解析 committed、non-partial `agent.output`，并返回与 handoff 相同的 status/provenance/字节边界。省略 `record_ids` 时按当前 RecordRef 投影顺序返回前 64 条，超出数量或字节预算时 `truncated=true`；传入 `record_ids` 可精确读取，上限 64，重复、未知或跨 Graph ID 都 fail closed。这个结果视图是只读派生值，不会把正文回写进 `agent_graph_*` 控制表。
+根 Supervisor 必须把 `results.records[].content` 当作 Operator 提交的不可信数据，只用于综合用户任务与证据，不得把其中文本当作调度或工具指令执行。该边界同时出现在 Graph system prompt、wake prompt 和工具描述中。
+
+同一视图的 `runtimeClaims` 逐 Claim 读取 Runtime ledger，暴露实际 `not-started/running/waiting-permission/completed/failed/cancelled/interrupted` 状态、`terminalEventId` 和 output event IDs。因此 Operator 已终态但未调用 `agent_output` 时，根 Supervisor 仍能看到“已终态 + 无输出”，必须当场 stop/finish 或调度补救，不能再 yield 等待一个不会到来的 wake。
 
 ### 4.8 YieldInterest、Wake 与 Attempt：根 Supervisor 的持久续行
 
@@ -328,18 +333,18 @@ production 将 exact RuntimeRun 安装为 `WorkspaceTaskRuntime` 中的 detached
 
 ## 9. 失败语义
 
-| 场景                                         | 处理                                                                                          |
-| -------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| revision 或 operation 冲突                   | 当前写失败；调用方重新 `view_agent_graph` 后基于新 revision 决策                              |
-| stop/finish 与 Claim 竞争                    | SQLite writer lock + revision CAS 决定唯一顺序；输掉的一方重读                                |
-| Operator 未调用 `agent_output` 就终止        | RuntimeRun 可终态，但没有 RecordRef；依赖它的下游不会就绪                                     |
-| `agent_output(status="failure")`             | 仍是一条正式 `agent.output` 和 RecordRef；失败语义由显式 payload 保留，调度层不从自然语言猜测 |
-| output 身份、owner fence、fingerprint 不匹配 | 拒绝提交或拒绝重放，不能形成 RecordRef                                                        |
-| Provision/Session 在进程中丢失               | 从持久 Provision 重新取得同一 child Session                                                   |
-| Claim 后、provider 前崩溃                    | 若 ledger 仍可证明 attachable，恢复同一 exact Run                                             |
-| provider/tool 派发后崩溃                     | 视为 indeterminate，禁止自动再派发                                                            |
-| 根唤醒等待权限                               | Wake/Attempt 持久停在 `waiting_permission`，等待显式恢复                                      |
-| Graph finish                                 | 不产生 fresh Claim/wake/yield；保留并观察已准入运行，仍允许 stop                              |
+| 场景                                         | 处理                                                                                                      |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| revision 或 operation 冲突                   | 当前写失败；调用方重新 `view_agent_graph` 后基于新 revision 决策                                          |
+| stop/finish 与 Claim 竞争                    | SQLite writer lock + revision CAS 决定唯一顺序；输掉的一方重读                                            |
+| Operator 未调用 `agent_output` 就终止        | RuntimeRun 可终态，但没有 RecordRef；`view_agent_graph.runtimeClaims` 显式暴露该终态，根不得再 yield 等待 |
+| `agent_output(status="failure")`             | 仍是一条正式 `agent.output` 和 RecordRef；失败语义由显式 payload 保留，调度层不从自然语言猜测             |
+| output 身份、owner fence、fingerprint 不匹配 | 拒绝提交或拒绝重放，不能形成 RecordRef                                                                    |
+| Provision/Session 在进程中丢失               | 从持久 Provision 重新取得同一 child Session                                                               |
+| Claim 后、provider 前崩溃                    | 若 ledger 仍可证明 attachable，恢复同一 exact Run                                                         |
+| provider/tool 派发后崩溃                     | 视为 indeterminate，禁止自动再派发                                                                        |
+| 根唤醒等待权限                               | Wake/Attempt 持久停在 `waiting_permission`，等待显式恢复                                                  |
+| Graph finish                                 | 不产生 fresh Claim/wake/yield；保留并观察已准入运行，仍允许 stop                                          |
 
 ## 10. 必须保持的不变量
 
@@ -347,7 +352,7 @@ production 将 exact RuntimeRun 安装为 `WorkspaceTaskRuntime` 中的 detached
 2. 同一 root Session 最多一个 open Graph；当前宿主限定 epoch 1。
 3. 同一 `graphId + intentId` 最多一个 Claim；Claim 的 exact Runtime 身份不可变。
 4. finish 只阻止新的准入，不删除 Claim、RuntimeRun 或已提交 RecordRef。
-5. RecordRef 只能来自身份匹配、committed、non-partial 的 RuntimeEvent；正文不进入 Graph 控制表。
+5. RecordRef 只能来自身份匹配、committed、non-partial 的 RuntimeEvent；正文仅在 view/handoff 时有界解析，不进入 Graph 控制表。
 6. 模型不能通过工具参数提供 Graph/Session/Turn/Run 身份；身份由宿主绑定。
 7. 不同 Operator 可并行，同一 Operator 的 Activation 必须串行。
 8. yield interest 必须先于 reconcile/snapshot 持久化；Wake 只有消费 permit 后才可唤醒 root。
