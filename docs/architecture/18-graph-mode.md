@@ -361,12 +361,12 @@ production 将 exact RuntimeRun 安装为 `WorkspaceTaskRuntime` 中的 detached
 
 ## 11. 当前实现限制与后续验证
 
-- Graph application 已接入 production daemon 的 workspace 生命周期；当前有确定性 production wiring 集成测试，真实模型闭环仍受 `RUN_LLM_E2E` 门控；
+- Graph application 已接入 production daemon 的 workspace 生命周期；确定性 production wiring 集成测试与 `RUN_LLM_E2E=1` 真实模型闭环均已通过，真实模型门禁仍只在具备凭证的受控环境显式启用；
 - `isolated-worktree` 仅保留在领域契约中作为未来能力；公共工具 schema 和 submit 前解析均只接受 `shared`，避免持久化 production 无法执行的 Intent。未来必须先实现 resolver、清理/恢复语义及对应验证，再扩展公共入口；
 - `profileSnapshot.permissionPolicy` 与 `systemPromptVersion` 已持久化；production 已映射 model/tools，但在可信 profile catalog 出现前不使用模型提交的 policy 提权，system prompt 自定义恢复仍是发布缺口；
 - Runtime bridge 尚未提供完整 in-flight/failed readiness facts；
 - `artifact` / `evidence` RecordRef 是领域预留，当前 handoff 只接受 `agent-output`；
-- 已有确定性集成测试覆盖核心、store、跨进程 CAS、reconciler、exact Run/reattach、production wiring、output、yield/wake 和 workspace 生命周期；Graph v2 真实模型 E2E 尚未在当前环境实际执行，也没有用独立子进程逐一 kill/reopen 验证全部崩溃窗口。
+- 已有确定性集成测试覆盖核心、store、跨进程 CAS、reconciler、exact Run/reattach、production wiring、output、yield/wake 和 workspace 生命周期；真实模型 E2E 已验证 root、Operator、durable output、结果回读、exact wake 与 finish 闭环。尚未用独立子进程逐一 kill/reopen 验证全部崩溃窗口。
 
 ## 12. 代码索引
 
