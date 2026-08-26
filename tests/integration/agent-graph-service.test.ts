@@ -46,24 +46,35 @@ test("workspace application drives add to records, durable yield wake, and finis
       runId: "root-run-1",
       toolCallId: "update-call-1",
     };
-    const updated = await service.toolPort.commitUpdate({
+    const upstreamUpdated = await service.toolPort.commitUpdate({
       graphId,
       expectedRevision: 0,
-      operationId: "add-research-and-review",
+      operationId: "add-research",
       source,
       commands: [
         addCommand({ graphId, intentId: upstreamIntentId, operatorId: "researcher", source }),
+      ],
+    });
+
+    assert.equal(upstreamUpdated.revision, 1);
+    await service.supervisor.notifyGraph(graphId);
+    const downstreamUpdated = await service.toolPort.commitUpdate({
+      graphId,
+      expectedRevision: 1,
+      operationId: "add-review",
+      source,
+      commands: [
         addCommand({
           graphId,
           intentId: downstreamIntentId,
           operatorId: "reviewer",
           source,
           inputRecordIds: [upstreamRecordId],
+          createdAtRevision: 2,
         }),
       ],
     });
-
-    assert.equal(updated.revision, 1);
+    assert.equal(downstreamUpdated.revision, 2);
     await service.supervisor.notifyGraph(graphId);
     const reconciled = await service.toolPort.readProjection({ graphId, rootSessionId });
     assert.equal(reconciled.claims.length, 2);
@@ -85,14 +96,14 @@ test("workspace application drives add to records, durable yield wake, and finis
       toolCallId: "yield-call-1",
     });
 
-    assert.equal(yielded.snapshot.graph.headRevision, 1);
+    assert.equal(yielded.snapshot.graph.headRevision, 2);
     assert.equal(store.listYieldInterests(graphId)[0]?.state, "consumed");
     assert.equal(rootWake.starts.length, 1);
     assert.equal(store.listRecoverableSupervisorWakes(Number.MAX_SAFE_INTEGER).length, 0);
 
     const finished = await service.toolPort.commitUpdate({
       graphId,
-      expectedRevision: 1,
+      expectedRevision: 2,
       operationId: "finish-graph",
       source: {
         sessionId: rootSessionId,
@@ -103,7 +114,7 @@ test("workspace application drives add to records, durable yield wake, and finis
       commands: [{ kind: "finish", selectedRecordIds: [downstreamRecordId] }],
     });
 
-    assert.equal(finished.revision, 2);
+    assert.equal(finished.revision, 3);
     assert.equal(finished.projection.graph.admissionPhase, "sealed");
     assert.deepEqual(finished.projection.graph.selectedRecordIds, [downstreamRecordId]);
   } finally {
@@ -199,6 +210,7 @@ function addCommand(input: {
     readonly toolCallId: string;
   };
   readonly inputRecordIds?: readonly string[];
+  readonly createdAtRevision?: number;
 }) {
   return {
     kind: "add" as const,
@@ -222,7 +234,7 @@ function addCommand(input: {
       operatorGeneration: 1,
       instruction: input.operatorId === "reviewer" ? "review result" : "research topic",
       inputRefs: (input.inputRecordIds ?? []).map((recordId) => ({ recordId })),
-      createdAtRevision: 1,
+      createdAtRevision: input.createdAtRevision ?? 1,
       requestedBy: input.source,
     },
   };
