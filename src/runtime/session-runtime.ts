@@ -10,7 +10,6 @@ import { FileIndex } from "../input/file-index.js";
 import { logger } from "../observability/logger.js";
 import { TaskRegistry } from "../tasks/task-registry.js";
 import type { TaskHostRuntime } from "../tasks/task-runtime.js";
-import type { SqliteRuntimeControlStore } from "../storage/sqlite/sqlite-runtime-control-store.js";
 import type { CompletionOutboxRecord } from "../tasks/runtime-types.js";
 import { BackgroundManager } from "../tools/background-manager.js";
 import {
@@ -57,11 +56,6 @@ export interface SessionRuntimeOptions {
   lspEnabled?: boolean;
   lspServers?: readonly LspServerConfig[];
   taskHostRuntime?: TaskHostRuntime;
-  /**
-   * Durable RuntimeStore（graph work lease 源）。taskHostRuntime 不可达时（headless/folder
-   * 模式）由调用方注入；DelegationManager 用它做执行主权去重与 orphan 活性判定。
-   */
-  runtimeStore?: SqliteRuntimeControlStore;
   /** Durable completion outbox 的活态发现间隔。 */
   completionPollIntervalMs?: number;
   sessionStartSource?: "startup" | "resume";
@@ -561,7 +555,6 @@ async function createPinnedSessionRuntime(
     }),
     delegationManager: new DelegationManager({
       taskRegistry,
-      runtimeStore: jobService?.store ?? options.runtimeStore,
       onCompletion: (completion) => delegationCompletionQueue.enqueue(completion),
       onPlanStepSettled: (planStepId, status) =>
         settlePlanStepFromDelegation(session, planStepId, status),
