@@ -161,6 +161,9 @@ export class SqliteAgentGraphControlStore {
           `Graph ${normalized.graphId} revision changed from ${normalized.expectedRevision} to ${graph.headRevision}`,
         );
       }
+      if (normalized.kind === "finish") {
+        this.assertSelectedRecordRefs(normalized.graphId, normalized.selectedRecordIds);
+      }
 
       const revision = graph.headRevision + 1;
       const createdAt = this.now();
@@ -566,10 +569,7 @@ export class SqliteAgentGraphControlStore {
     return this.write(() => {
       const byId = this.selectYieldInterest(normalized.permitId);
       if (byId) return replayYieldInterest(byId, normalized);
-      const byRootRun = this.selectYieldInterestByRootRun(
-        normalized.graphId,
-        normalized.rootRunId,
-      );
+      const byRootRun = this.selectYieldInterestByRootRun(normalized.graphId, normalized.rootRunId);
       if (byRootRun) return replayYieldInterest(byRootRun, normalized);
       const graph = this.requireGraph(normalized.graphId);
       if (graph.rootSessionId !== normalized.rootSessionId) {
@@ -1140,6 +1140,22 @@ export class SqliteAgentGraphControlStore {
     return record;
   }
 
+  private assertSelectedRecordRefs(graphId: string, recordIds: readonly string[]): void {
+    for (const recordId of recordIds) {
+      const record = this.selectRecordRef(recordId);
+      if (!record) {
+        throw new AgentGraphStoreConflictError(
+          `Selected RecordRef ${recordId} does not exist for Graph ${graphId}`,
+        );
+      }
+      if (record.graphId !== graphId) {
+        throw new AgentGraphStoreConflictError(
+          `Selected RecordRef ${recordId} belongs to Graph ${record.graphId}, not ${graphId}`,
+        );
+      }
+    }
+  }
+
   private selectWake(wakeId: string): AgentGraphSupervisorWakeRecord | undefined {
     const row = this.lease.database
       .prepare("SELECT * FROM agent_graph_supervisor_wakes WHERE wake_id = ?")
@@ -1264,22 +1280,63 @@ export class SqliteAgentGraphControlStore {
 
 interface NormalizedScheduleInput extends Omit<CommitAgentGraphScheduleInput, "command"> {
   readonly commandJson: string;
+  readonly selectedRecordIds: readonly string[];
 }
 
 function normalizeScheduleInput(input: CommitAgentGraphScheduleInput): NormalizedScheduleInput {
   requireNonNegativeInteger(input.expectedRevision, "expectedRevision");
+  const selectedRecordIds = selectedRecordIdsFromCommand(input.kind, input.command).map(
+    (recordId) => requireNonEmpty(recordId, "selectedRecordId"),
+  );
+  if (new Set(selectedRecordIds).size !== selectedRecordIds.length) {
+    throw new Error("selectedRecordIds must be unique");
+  }
   return {
     graphId: requireNonEmpty(input.graphId, "graphId"),
     expectedRevision: input.expectedRevision,
     operationId: requireNonEmpty(input.operationId, "operationId"),
     requestFingerprint: requireNonEmpty(input.requestFingerprint, "requestFingerprint"),
     kind: input.kind,
+    selectedRecordIds,
     commandJson: canonicalJson(input.command),
     sourceSessionId: requireNonEmpty(input.sourceSessionId, "sourceSessionId"),
     sourceTurnId: requireNonEmpty(input.sourceTurnId, "sourceTurnId"),
     sourceRunId: requireNonEmpty(input.sourceRunId, "sourceRunId"),
     sourceToolCallId: requireNonEmpty(input.sourceToolCallId, "sourceToolCallId"),
   };
+}
+
+function selectedRecordIdsFromCommand(
+  kind: CommitAgentGraphScheduleInput["kind"],
+  command: unknown,
+): readonly string[] {
+  if (kind !== "finish") return [];
+  const envelope = asOptionalRecord(command);
+  const commands =
+    envelope?.["schemaVersion"] === 1 && Array.isArray(envelope["commands"])
+      ? envelope["commands"]
+      : [command];
+  const finishCommands = commands
+    .map(asOptionalRecord)
+    .filter((candidate) => candidate?.["kind"] === "finish");
+  if (finishCommands.length !== 1) {
+    throw new Error("A finish schedule revision must contain exactly one finish command");
+  }
+  const selectedRecordIds = finishCommands[0]?.["selectedRecordIds"];
+  if (selectedRecordIds === undefined) return [];
+  if (
+    !Array.isArray(selectedRecordIds) ||
+    !selectedRecordIds.every((value) => typeof value === "string")
+  ) {
+    throw new Error("finish selectedRecordIds must be a string array");
+  }
+  return selectedRecordIds;
+}
+
+function asOptionalRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
 interface NormalizedProvisionInput extends Omit<

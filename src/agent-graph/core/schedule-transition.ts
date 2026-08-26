@@ -1,6 +1,7 @@
 import type {
   AgentGraph,
   AgentGraphActivationIntent,
+  AgentGraphRecordRef,
   AgentGraphScheduleCommand,
   AgentGraphScheduleRevision,
   AgentGraphScheduleState,
@@ -19,6 +20,11 @@ export interface AgentGraphTransitionResult {
   readonly state: AgentGraphScheduleState;
   readonly applied: boolean;
   readonly revision: number;
+}
+
+export interface AgentGraphTransitionContext {
+  /** When present, this is the authoritative RecordRef set visible to the transition. */
+  readonly knownRecords?: readonly AgentGraphRecordRef[];
 }
 
 export function createAgentGraphScheduleState(graph: AgentGraph): AgentGraphScheduleState {
@@ -97,6 +103,7 @@ function applyCommand(
   state: AgentGraphScheduleState,
   revision: AgentGraphScheduleRevision,
   command: AgentGraphScheduleCommand,
+  context: AgentGraphTransitionContext,
 ): AgentGraphScheduleState {
   switch (command.kind) {
     case "add":
@@ -123,6 +130,22 @@ function applyCommand(
       ) {
         throw new AgentGraphConflictError("Selected record ids must be unique");
       }
+      if (context.knownRecords) {
+        const recordsById = new Map(
+          context.knownRecords.map((recordRef) => [recordRef.recordId, recordRef]),
+        );
+        for (const recordId of command.selectedRecordIds ?? []) {
+          const recordRef = recordsById.get(recordId);
+          if (!recordRef) {
+            throw new AgentGraphConflictError(`Selected RecordRef does not exist: ${recordId}`);
+          }
+          if (recordRef.graphId !== state.graph.graphId) {
+            throw new AgentGraphConflictError(
+              `Selected RecordRef ${recordId} belongs to another Graph`,
+            );
+          }
+        }
+      }
       return {
         ...state,
         graph: {
@@ -138,6 +161,7 @@ function applyCommand(
 export function applyScheduleRevision(
   state: AgentGraphScheduleState,
   revision: AgentGraphScheduleRevision,
+  context: AgentGraphTransitionContext = {},
 ): AgentGraphTransitionResult {
   if (revision.graphId !== state.graph.graphId) {
     throw new AgentGraphConflictError("Schedule revision belongs to another Graph");
@@ -174,7 +198,9 @@ export function applyScheduleRevision(
   }
 
   let next = state;
-  for (const command of revision.commands) next = applyCommand(next, revision, command);
+  for (const command of revision.commands) {
+    next = applyCommand(next, revision, command, context);
+  }
   next = {
     ...next,
     graph: { ...next.graph, headRevision: revision.revision },
