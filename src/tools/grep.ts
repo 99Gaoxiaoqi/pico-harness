@@ -538,6 +538,9 @@ export class GrepTool implements BaseTool {
         ? this.options.excludeSensitiveFiles(path)
         : this.options.excludeSensitiveFiles;
 
+    // 先快照进程可见根：assertAllowed 会消费一次性授权，但同一次
+    // rg 进程仍必须持有该根直到它退出。
+    const processRoots = this.roots.processRoots();
     // 路径防护:搜索根必须位于共享工作区根集合内
     const searchRoot = await this.roots.assertAllowed(path || ".");
 
@@ -561,7 +564,8 @@ export class GrepTool implements BaseTool {
             ? {
                 sandbox: {
                   ...this.options.processSandbox,
-                  workspaceRoots: this.roots.list(),
+                  workspaceRoots: processRoots,
+                  generation: this.options.processSandbox.generation ?? this.roots.generation(),
                 },
               }
             : {}),
