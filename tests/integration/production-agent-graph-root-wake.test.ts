@@ -18,10 +18,17 @@ import {
 } from "../../src/runtime/agent-graph-host.js";
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
+import type { RuntimeEvent } from "../../src/storage/runtime-event.js";
 import { writeDesktopModelRouting } from "../fixtures/desktop-model-routing.js";
 
-test("production exact root wake escapes a completed ancestor AgentEngine context", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pico-production-root-wake-"));
+test("production exact root wake reads durable output before finish", () =>
+  runProductionRootWakeScenario("output"));
+
+test("production exact root wake finishes a terminal Claim without output instead of yielding", () =>
+  runProductionRootWakeScenario("outputless"));
+
+async function runProductionRootWakeScenario(scenario: "output" | "outputless"): Promise<void> {
+  const root = await mkdtemp(join(tmpdir(), `pico-production-root-wake-${scenario}-`));
   const workspace = join(root, "workspace");
   const picoHome = join(root, "pico-home");
   await mkdir(workspace, { recursive: true });
@@ -34,6 +41,7 @@ test("production exact root wake escapes a completed ancestor AgentEngine contex
 
   let host: AgentGraphWorkspaceHost | undefined;
   let dispatchCount = 0;
+  const outputCanary = "DETERMINISTIC_GRAPH_OUTPUT_CANARY";
   const fakeAgentRuntime = new (class extends AgentRuntime {
     override async execute(options: RunAgentCliOptions, dependencies: RunAgentCliDependencies) {
       const binding = dependencies.agentGraph;
@@ -44,14 +52,17 @@ test("production exact root wake escapes a completed ancestor AgentEngine contex
         ...dependencies,
         provider: {
           modelName: "deterministic/root-wake",
-          generate: async () => {
+          generate: async (messages) => {
             dispatchCount++;
             turn++;
             if (binding.kind === "operator") {
+              if (scenario === "outputless") {
+                return assistant("operator completed without agent_output");
+              }
               return turn === 1
                 ? toolCall("operator-output", "agent_output", {
                     status: "success",
-                    output: "deterministic operator result",
+                    output: outputCanary,
                   })
                 : assistant("operator complete");
             }
@@ -92,12 +103,39 @@ test("production exact root wake escapes a completed ancestor AgentEngine contex
             }
             if (turn === 1) return toolCall("root-view", "view_agent_graph", {});
             if (turn === 2) {
-              const context = binding.getRootContext();
-              assert.ok(context);
-              const recordIds = host?.store
-                .listRecordRefs(context.graphId)
-                .map((record) => record.recordId);
-              assert.equal(recordIds?.length, 1);
+              const viewResult = messages.findLast(
+                (message) => message.role === "user" && message.toolCallId === "root-view",
+              );
+              assert.ok(viewResult, "root must receive the view tool result before finish");
+              const view = JSON.parse(viewResult.content) as {
+                readonly results: {
+                  readonly records: readonly {
+                    readonly recordId: string;
+                    readonly status: string;
+                    readonly content: string;
+                  }[];
+                };
+                readonly runtimeClaims: readonly {
+                  readonly status: string;
+                  readonly terminalEventId?: string;
+                  readonly outputEventIds: readonly string[];
+                }[];
+              };
+              if (scenario === "output") {
+                assert.deepEqual(
+                  view.results.records.map(({ status, content }) => ({ status, content })),
+                  [{ status: "success", content: outputCanary }],
+                );
+              } else {
+                assert.deepEqual(view.results.records, []);
+                assert.ok(view.runtimeClaims[0]?.terminalEventId);
+                assert.deepEqual(view.runtimeClaims[0]?.outputEventIds, []);
+              }
+              assert.deepEqual(
+                view.runtimeClaims.map(({ status }) => status),
+                ["completed"],
+              );
+              const recordIds = view.results.records.map((record) => record.recordId);
               return toolCall("root-finish", "update_agent_graph", {
                 expected_revision: 1,
                 operation_id: "deterministic-finish-graph",
@@ -120,7 +158,7 @@ test("production exact root wake escapes a completed ancestor AgentEngine contex
       return host;
     },
   });
-  const rootSessionId = "production-root-wake-session";
+  const rootSessionId = `production-root-wake-session-${scenario}`;
   const graphId = `graph:${rootSessionId}`;
   try {
     const workspaceRuntime = await services.service.getWorkspaceRuntime(canonicalWorkspace);
@@ -199,16 +237,35 @@ test("production exact root wake escapes a completed ancestor AgentEngine contex
     assert.equal(completedAttempts[0]?.rootSessionId, rootSessionId);
     assert.equal(completedAttempts[0]?.targetRunId, run.runId);
     assert.equal(run.sessionId, rootSessionId);
-    assert.equal(dispatchCount, 8);
+    assert.equal(dispatchCount, scenario === "output" ? 8 : 7);
     assert.equal(events.filter((event) => event.kind === "run.started").length, 1);
     assert.equal(events.filter((event) => event.kind === "run.terminal").length, 1);
+    const durableViewResult = events.find(
+      (event): event is Extract<RuntimeEvent, { kind: "tool.result.recorded" }> =>
+        event.kind === "tool.result.recorded" && event.data.toolName === "view_agent_graph",
+    );
+    assert.ok(durableViewResult, "view_agent_graph result must be durable on the exact root Run");
+    if (scenario === "output") {
+      assert.match(durableViewResult.data.projection.text, new RegExp(outputCanary, "u"));
+      assert.match(durableViewResult.data.projection.text, /"status":"success"/u);
+    } else {
+      assert.match(durableViewResult.data.projection.text, /"status":"completed"/u);
+      assert.match(durableViewResult.data.projection.text, /"outputEventIds":\[\]/u);
+      assert.equal(
+        events.some(
+          (event) => event.kind === "tool.started" && event.data.toolName === "yield_agent_graph",
+        ),
+        false,
+        "a root wake must not yield again for a terminal Claim without output",
+      );
+    }
   } finally {
     await services.desktopService.close();
     const session = globalSessionManager.delete(rootSessionId, canonicalWorkspace, { picoHome });
     await session?.close();
     await rm(root, { recursive: true, force: true });
   }
-});
+}
 
 async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
