@@ -145,10 +145,7 @@ function classifyViolation(importer, target, declaration, repositoryRoot, fromAr
   const importerRelative = normalizeRelativePath(importer, repositoryRoot);
   if (importerRelative === "src/tools/delegation-manager.ts") {
     const targetRelative = normalizeRelativePath(target, repositoryRoot);
-    if (
-      targetRelative.startsWith("src/graph/") ||
-      targetRelative.startsWith("src/runtime/")
-    ) {
+    if (targetRelative.startsWith("src/graph/") || targetRelative.startsWith("src/runtime/")) {
       return "delegation-manager-scheduling-leak";
     }
   }

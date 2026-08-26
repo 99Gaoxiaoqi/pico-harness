@@ -307,10 +307,7 @@ test("architecture gate blocks delegation-manager from importing graph/runtime, 
   );
   await writeFile(
     join(fixtureRoot, "src/tools/delegation-manager.ts"),
-    [
-      'import type { GraphWork } from "../graph/contract.js";',
-      "",
-    ].join("\n"),
+    ['import type { GraphWork } from "../graph/contract.js";', ""].join("\n"),
     "utf8",
   );
   await writeFile(
