@@ -71,10 +71,9 @@ test("indeterminate exact root Run parks at manual intervention boundary", () =>
     startEvent: {} as never,
   });
   assert.equal(state.status, "manual_intervention");
-  assert.deepEqual(
-    state.status === "manual_intervention" ? state.blockingEventIds : undefined,
-    ["model-call-1"],
-  );
+  assert.deepEqual(state.status === "manual_intervention" ? state.blockingEventIds : undefined, [
+    "model-call-1",
+  ]);
 });
 
 test("root wake prompt never interprets durable payload as model instructions", () => {
@@ -101,4 +100,30 @@ test("root wake defers while the source root Session is still active", async () 
     reason: "source_root_active",
   });
   assert.equal(starts, 0);
+});
+
+test("failed root wake after provider dispatch requires manual intervention", async () => {
+  const port = new AgentGraphRootWakeRuntimePort({
+    workDir: "/tmp/graph-root",
+    exactRuns: {
+      inspectExactRun: async () => ({
+        status: "terminal",
+        startEvent: {} as never,
+        terminalEvent: { data: { status: "failed", reason: "provider lost" } } as never,
+      }),
+      startExactRun: async () => "observed",
+      readRunEvents: async () =>
+        [
+          { kind: "run.started", eventId: "start-1" },
+          { kind: "model.call.started", eventId: "model-call-1" },
+          { kind: "run.terminal", eventId: "terminal-1" },
+        ] as never,
+    },
+  });
+  assert.deepEqual(await port.inspect(identity), {
+    status: "manual_intervention",
+    reason: "indeterminate",
+    error: "Root Supervisor Run ended after a durable dispatch as failed",
+    blockingEventIds: ["model-call-1"],
+  });
 });
