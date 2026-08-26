@@ -107,7 +107,14 @@ export interface RootSupervisorRunIdentity {
 export type RootSupervisorRunState =
   | { readonly status: "not_started" | "running" }
   | { readonly status: "completed" }
+  | { readonly status: "deferred"; readonly reason: "source_root_active" | "workspace_busy" }
   | { readonly status: "waiting_permission"; readonly error?: string }
+  | {
+      readonly status: "manual_intervention";
+      readonly reason: "indeterminate" | "cancelled";
+      readonly error: string;
+      readonly blockingEventIds?: readonly string[];
+    }
   | { readonly status: "failed"; readonly error: string };
 
 /** Root Runtime adapter. startOrResume must use the supplied exact Turn/Run identities. */
@@ -393,6 +400,21 @@ export class AgentGraphSupervisorService {
       // A runtime event may announce completion, but must not implicitly grant permission.
       return;
     }
+    if (observed.status === "deferred") {
+      this.scheduleWake(claimedWake.wakeId, this.now() + 100);
+      return;
+    }
+    if (observed.status === "manual_intervention") {
+      if (claimedWake.status !== "waiting_permission") {
+        await this.settle(
+          claimedWake,
+          attempt,
+          "waiting_permission",
+          `manual:${observed.reason}:${observed.error}`,
+        );
+      }
+      return;
+    }
     if (observed.status === "waiting_permission") {
       if (trigger !== "permission_changed") {
         await this.settle(claimedWake, attempt, "waiting_permission", observed.error);
@@ -407,6 +429,19 @@ export class AgentGraphSupervisorService {
         ...runIdentity,
         payload: claimedWake.payload,
       });
+    }
+    if (observed.status === "deferred") {
+      this.scheduleWake(claimedWake.wakeId, this.now() + 100);
+      return;
+    }
+    if (observed.status === "manual_intervention") {
+      await this.settle(
+        claimedWake,
+        attempt,
+        "waiting_permission",
+        `manual:${observed.reason}:${observed.error}`,
+      );
+      return;
     }
     if (observed.status === "completed") {
       await this.settle(claimedWake, attempt, "delivered");
