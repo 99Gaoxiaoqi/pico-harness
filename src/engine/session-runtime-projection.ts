@@ -44,13 +44,6 @@ export const RUNTIME_SESSION_USAGE_EVENT_KINDS = ["model.call.settled"] as const
 /** projectRuntimeSessionTranscriptEventEntries 消费的 kind 集。 */
 export const RUNTIME_SESSION_TRANSCRIPT_EVENT_KINDS = ["transcript.event.recorded"] as const;
 
-/** transcript 读模型(desktop-transcript)消费的完整 kind 集。 */
-export const RUNTIME_TRANSCRIPT_READ_MODEL_EVENT_KINDS = [
-  ...RUNTIME_MODEL_MESSAGE_EVENT_KINDS,
-  "transcript.event.recorded",
-  ...RUNTIME_SESSION_STATE_EVENT_KINDS,
-] as const;
-
 /** fork seed 投影(model + transcript 事实)消费的 kind 集。 */
 export const RUNTIME_SESSION_FORK_SEED_EVENT_KINDS = [
   ...RUNTIME_MODEL_MESSAGE_EVENT_KINDS,

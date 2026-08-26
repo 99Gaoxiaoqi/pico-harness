@@ -113,13 +113,6 @@ function insertSession(database: DatabaseSync, sessionId = "session-old"): void 
     .run(sessionId, AT);
   database
     .prepare(
-      `INSERT INTO runtime_transcript_records
-       VALUES ('record', ?, 'runtime-event', 1, 'text', '{}', ?)`,
-    )
-    .run(sessionId, AT);
-  database.prepare("INSERT INTO runtime_transcript_chunks VALUES ('record', 0, 'x', 1)").run();
-  database
-    .prepare(
       `INSERT INTO runtime_checkpoint_projection
        VALUES ('checkpoint', ?, 'run-old', 'checkpoint-event', 1,
                'runtime-event', 1, 'digest', NULL, ?)`,
@@ -431,8 +424,6 @@ test("event log hard cut: clears old sessions while preserving committed memory 
       "runtime_partial_segments",
       "runtime_tool_operations",
       "runtime_tool_journal",
-      "runtime_transcript_records",
-      "runtime_transcript_chunks",
       "runtime_checkpoint_projection",
       "runtime_eventlog_metadata",
       "runtime_storage_assets",

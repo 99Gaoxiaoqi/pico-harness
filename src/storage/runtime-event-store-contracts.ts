@@ -263,56 +263,6 @@ export interface SettleRuntimeToolOperationResult {
   readonly operation: RuntimeToolOperation;
 }
 
-export interface RuntimeTranscriptRecordInput extends RuntimeFencedWriteOptions {
-  readonly recordId: string;
-  readonly sessionId: string;
-  readonly sourceEventId: string;
-  readonly sourceSequence: number;
-  readonly kind: string;
-  readonly payload: unknown;
-  /** UTF-8 text chunks; a page may slice one chunk at a byte boundary. */
-  readonly chunks: readonly string[];
-  readonly at?: string;
-}
-
-export interface RuntimeTranscriptCursor {
-  readonly sequence: number;
-  readonly chunkIndex: number;
-  readonly byteOffset: number;
-}
-
-export interface RuntimeTranscriptPageOptions {
-  readonly sessionId: string;
-  /** Omit only on the first page; the returned value must be reused for the whole traversal. */
-  readonly throughSequence?: number;
-  readonly direction: "forward" | "backward";
-  readonly cursor?: RuntimeTranscriptCursor;
-  readonly maxBytes: number;
-  readonly limit?: number;
-}
-
-export interface RuntimeTranscriptPageItem {
-  readonly recordId: string;
-  readonly sourceEventId: string;
-  readonly sequence: number;
-  readonly kind: string;
-  readonly payload: unknown;
-  readonly chunkIndex: number;
-  readonly byteOffset: number;
-  readonly text: string;
-  readonly byteLength: number;
-  readonly at: string;
-}
-
-export interface RuntimeTranscriptPage {
-  /** Canonical ledger head captured in the same read transaction as this page. */
-  readonly revisionSequence: number;
-  /** Fixed read waterline; pass unchanged to every subsequent page request. */
-  readonly throughSequence: number;
-  readonly items: readonly RuntimeTranscriptPageItem[];
-  readonly nextCursor?: RuntimeTranscriptCursor;
-}
-
 export interface RuntimeEventStoreEntry {
   readonly sequence: number;
   readonly event: RuntimeEvent;

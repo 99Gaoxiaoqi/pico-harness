@@ -35,6 +35,7 @@ const LEGACY_PRE_V2_DIRECTORY = "runtime";
 
 const WORKSPACE_BINDING_SCOPE_NAME = "workspace";
 const SESSIONS_V5_BACKUP_FILENAME = "pico.sqlite.sessions-v5.bak";
+const SESSIONS_V6_BACKUP_FILENAME = "pico.sqlite.sessions-v6.bak";
 const WORKSPACE_BINDING_SCOPE: SqliteSchemaScope = {
   name: WORKSPACE_BINDING_SCOPE_NAME,
   migrations: new Map<number, string>([
@@ -111,7 +112,7 @@ export function prepareWorkspaceSqliteStorageSync(
   const allScopes = withWorkspaceBindingScope(scopes);
   const lease = acquireOperationalDatabase(root, {
     migrate: (database) => {
-      backupBeforeSessionContinuityMigration(database, root, allScopes);
+      backupBeforeSessionsMigration(database, root, allScopes);
       // 形状断言只在版本推进(建库/升级)时跑:每次连接重开都重放全套 DDL
       // 要 ~25ms,高频操作级 lease 不可承受;常规漂移检测由 doctor 承担。
       if (migrateOperationalDatabaseSync(database, allScopes)) {
@@ -128,17 +129,24 @@ export function prepareWorkspaceSqliteStorageSync(
   }
 }
 
-/** Creates one self-contained pre-v6 snapshot before the Session continuity tables appear. */
-function backupBeforeSessionContinuityMigration(
+/** Creates a self-contained snapshot before a Session migration adds or removes persisted data. */
+function backupBeforeSessionsMigration(
   database: DatabaseSync,
   root: string,
   scopes: readonly SqliteSchemaScope[],
 ): void {
   const sessionsScope = scopes.find((scope) => scope.name === "sessions");
-  if (!sessionsScope || scopeCurrentVersion(sessionsScope) < 6) return;
+  if (!sessionsScope) return;
+  const target = scopeCurrentVersion(sessionsScope);
   const applied = readOperationalSchemaVersionsSync(database).get("sessions");
-  if (applied !== 5) return;
-  const destination = join(root, SESSIONS_V5_BACKUP_FILENAME);
+  const filename =
+    applied === 5 && target >= 6
+      ? SESSIONS_V5_BACKUP_FILENAME
+      : applied === 6 && target >= 7
+        ? SESSIONS_V6_BACKUP_FILENAME
+        : undefined;
+  if (!filename) return;
+  const destination = join(root, filename);
   if (existsSync(destination)) return;
   database.exec(`VACUUM INTO '${destination.replaceAll("'", "''")}'`);
   chmodSync(destination, 0o600);
@@ -212,6 +220,7 @@ export function adoptWorkspaceSqliteStorageRootSync(
   const allScopes = withWorkspaceBindingScope(scopes);
   const lease = acquireOperationalDatabase(root, {
     migrate: (database) => {
+      backupBeforeSessionsMigration(database, root, allScopes);
       // 形状断言只在版本推进(建库/升级)时跑:每次连接重开都重放全套 DDL
       // 要 ~25ms,高频操作级 lease 不可承受;常规漂移检测由 doctor 承担。
       if (migrateOperationalDatabaseSync(database, allScopes)) {

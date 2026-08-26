@@ -33,9 +33,11 @@ import type { SqliteSchemaScope } from "./sqlite-schema.js";
  * claim 时刻的源前缀完整性;claim 由 store 单 BEGIN IMMEDIATE 事务写入
  * (claimContinuation),与源账本读取同事务快照。
  *
- * migration 4(EventLog foundation):全部表均为 additive expand migration。
+ * migration 4(EventLog foundation):初始 EventLog 存储面。
  * owner fence / run seal 是不可丢弃的协调投影；partial、tool journal、transcript、
  * checkpoint、metadata/assets 是独立于 immutable runtime_events 的存储面。
+ * migration 7:会话连续性已硬切 migration 6 的结构化 transcript 投影后，删除
+ * 仅用于旧固定水位 RuntimeEvent 分片分页的 records/chunks 重复物化。
  */
 
 export const SESSIONS_SCOPE_NAME = "sessions";
@@ -411,6 +413,13 @@ export const SESSIONS_SCOPE: SqliteSchemaScope = {
       );
       CREATE INDEX runtime_transcript_changes_by_item
         ON runtime_transcript_changes(session_id, item_id, change_sequence, change_ordinal);
+      `,
+    ],
+    [
+      7,
+      `
+      DROP TABLE runtime_transcript_chunks;
+      DROP TABLE runtime_transcript_records;
       `,
     ],
   ]),
