@@ -176,6 +176,7 @@ test("agent graph store persists exact identities, fences finish, and drives dur
       store.listDueSupervisorWakes().map((wake) => wake.wakeId),
       ["wake-1"],
     );
+    assert.equal(store.listRecoverableSupervisorWakes()[0]?.attempt, undefined);
 
     const attempt1 = store.claimSupervisorWake({
       wakeId: "wake-1",
@@ -188,6 +189,7 @@ test("agent graph store persists exact identities, fences finish, and drives dur
     assert.equal(attempt1.replayed, false);
     assert.equal(attempt1.wake.status, "running");
     assert.equal(attempt1.wake.version, 2);
+    assert.equal(store.getRecoverableSupervisorWake("wake-1")?.attempt?.attemptId, "wake-attempt-1");
     assert.equal(
       store.claimSupervisorWake({
         wakeId: "wake-1",
@@ -213,6 +215,7 @@ test("agent graph store persists exact identities, fences finish, and drives dur
     assert.equal(retryable.wake.status, "retryable_failed");
     assert.equal(retryable.attempt.status, "failed");
     assert.deepEqual(store.listDueSupervisorWakes(), []);
+    assert.equal(store.listRecoverableSupervisorWakes()[0]?.wake.status, "retryable_failed");
 
     now = retryAt;
     const attempt2 = store.claimSupervisorWake({
@@ -235,6 +238,10 @@ test("agent graph store persists exact identities, fences finish, and drives dur
     assert.equal(waitingPermission.wake.status, "waiting_permission");
     assert.equal(waitingPermission.attempt.status, "waiting_permission");
     assert.equal(waitingPermission.attempt.finishedAt, undefined);
+    assert.equal(
+      store.getRecoverableSupervisorWake("wake-1")?.attempt?.attemptId,
+      "wake-attempt-2",
+    );
     const delivered = store.settleSupervisorWake({
       wakeId: "wake-1",
       attemptId: "wake-attempt-2",
@@ -244,6 +251,7 @@ test("agent graph store persists exact identities, fences finish, and drives dur
     });
     assert.equal(delivered.wake.status, "delivered");
     assert.equal(delivered.attempt.status, "completed");
+    assert.equal(store.getRecoverableSupervisorWake("wake-1"), undefined);
     assert.equal(
       store.settleSupervisorWake({
         wakeId: "wake-1",

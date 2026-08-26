@@ -20,6 +20,7 @@ import type {
   EnsureAgentGraphOperatorProvisionInput,
   IdempotentStoreResult,
   PutAgentGraphRecordRefInput,
+  RecoverableAgentGraphSupervisorWakeRecord,
   SettleAgentGraphSupervisorWakeInput,
   SettleAgentGraphSupervisorWakeResult,
   TransitionAgentGraphClaimInput,
@@ -617,6 +618,43 @@ export class SqliteAgentGraphControlStore {
     );
   }
 
+  listRecoverableSupervisorWakes(
+    at = this.now(),
+  ): readonly RecoverableAgentGraphSupervisorWakeRecord[] {
+    requireFiniteNumber(at, "at");
+    return this.read(() =>
+      this.lease.database
+        .prepare(
+          `SELECT * FROM agent_graph_supervisor_wakes
+           WHERE status IN ('pending','retryable_failed','running','waiting_permission')
+           ORDER BY
+             CASE
+               WHEN status IN ('pending','retryable_failed') AND available_at <= ? THEN 0
+               WHEN status IN ('running','waiting_permission') THEN 1
+               ELSE 2
+             END,
+             available_at ASC, created_at ASC, wake_id ASC`,
+        )
+        .all(at)
+        .map((row) => this.recoverableWakeFromRecord(wakeFromRow(asRow(row)))),
+    );
+  }
+
+  getRecoverableSupervisorWake(
+    wakeId: string,
+  ): RecoverableAgentGraphSupervisorWakeRecord | undefined {
+    return this.read(() => {
+      const wake = this.selectWake(requireNonEmpty(wakeId, "wakeId"));
+      if (
+        !wake ||
+        !["pending", "retryable_failed", "running", "waiting_permission"].includes(wake.status)
+      ) {
+        return undefined;
+      }
+      return this.recoverableWakeFromRecord(wake);
+    });
+  }
+
   claimSupervisorWake(
     input: ClaimAgentGraphSupervisorWakeInput,
   ): ClaimAgentGraphSupervisorWakeResult {
@@ -972,6 +1010,31 @@ export class SqliteAgentGraphControlStore {
       throw new AgentGraphStoreConflictError(`Wake attempt ${attemptId} does not exist`);
     }
     return attempt;
+  }
+
+  private selectLatestWakeAttempt(
+    wakeId: string,
+  ): AgentGraphSupervisorWakeAttemptRecord | undefined {
+    const row = this.lease.database
+      .prepare(
+        `SELECT * FROM agent_graph_supervisor_wake_attempts
+         WHERE wake_id = ? ORDER BY attempt_number DESC LIMIT 1`,
+      )
+      .get(wakeId);
+    return row ? wakeAttemptFromRow(asRow(row)) : undefined;
+  }
+
+  private recoverableWakeFromRecord(
+    wake: AgentGraphSupervisorWakeRecord,
+  ): RecoverableAgentGraphSupervisorWakeRecord {
+    const graph = this.requireGraph(wake.graphId);
+    const attempt = this.selectLatestWakeAttempt(wake.wakeId);
+    if ((wake.status === "running" || wake.status === "waiting_permission") && !attempt) {
+      throw new AgentGraphStoreConflictError(
+        `Recoverable wake ${wake.wakeId} is ${wake.status} without an attempt`,
+      );
+    }
+    return { graph, wake, ...(attempt ? { attempt } : {}) };
   }
 
   private read<T>(operation: () => T): T {
