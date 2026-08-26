@@ -38,9 +38,13 @@ test("production host binds Graph root and installs detached exact execution", a
   const operatorGate = new Promise<void>((resolve) => {
     releaseOperator = resolve;
   });
+  let reattachAttempts = 0;
   const fakeAgentRuntime = {
     execute: async (options: RunAgentCliOptions, host: RunAgentCliDependencies) => {
       calls.push({ options, host });
+      if (options.prompt === "retry graph work" && ++reattachAttempts === 1) {
+        throw new Error("attach failed before AgentRuntime completed");
+      }
       if (host.agentGraph?.kind === "operator") await operatorGate;
       return {
         sessionId: options.session!,
@@ -192,6 +196,36 @@ test("production host binds Graph root and installs detached exact execution", a
   releaseOperator();
   assert.equal((await runtime.waitForRun(exactInput.prestartedRun.runId)).status, "succeeded");
   assert.equal(terminalCount, 1);
+
+  let retryTerminalCount = 0;
+  const retryInput: ExecuteHostedAgentGraphRunInput = {
+    ...exactInput,
+    claimId: "claim-retry",
+    prompt: "retry graph work",
+    prestartedRun: {
+      runId: "graph-exact-run-retry",
+      turnId: "graph-exact-turn-retry",
+      invocationId: "graph-exact-invocation-retry",
+      runStartedEventId: "graph-exact-start-retry",
+      runStartedAt: new Date(1).toISOString(),
+    },
+    prestartedUserInput: { messageId: "graph-exact-input-retry" },
+    onTerminal: () => {
+      retryTerminalCount++;
+    },
+  };
+  await graphFactoryOptions.execute(retryInput);
+  const failedRetry = await runtime.waitForRun(retryInput.prestartedRun.runId);
+  assert.equal(failedRetry.status, "failed");
+  assert.equal(reattachAttempts, 1);
+  assert.equal(retryTerminalCount, 1);
+
+  await graphFactoryOptions.execute(retryInput);
+  const succeededRetry = await runtime.waitForRun(retryInput.prestartedRun.runId);
+  assert.equal(succeededRetry.status, "succeeded");
+  assert.equal(succeededRetry.version, failedRetry.version + 2);
+  assert.equal(reattachAttempts, 2);
+  assert.equal(retryTerminalCount, 2);
 
   operatorLease.release();
   rootLease.release();
