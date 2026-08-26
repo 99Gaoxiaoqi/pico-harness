@@ -90,6 +90,7 @@ import type {
 import { conversationItemKey, mergeHydratedConversationItems } from "./conversation/items.js";
 import { applyTimelineNotification } from "./timeline.js";
 import { ConversationLoadTracker } from "./conversation-load-tracker.js";
+import { TemporaryWorkspaceRequest } from "./temporary-workspace-request.js";
 import {
   DesktopSessionContinuity,
   type DesktopSessionContinuityTransport,
@@ -1550,10 +1551,13 @@ export function useRuntimeStore(): RuntimeStore {
     ),
   );
   const seenEventIdsRef = useRef(new Set<string>());
+  const workspaceIndexLoadGenerationRef = useRef(0);
   const workspaceLoadGenerationRef = useRef(0);
+  const workspaceLoadIntentRef = useRef<string | undefined>(undefined);
   const providerConfigLoadGenerationRef = useRef(0);
   const memoryLoadGenerationRef = useRef(0);
   const conversationLoadTracker = useRef(new ConversationLoadTracker());
+  const temporaryWorkspaceRequest = useRef(new TemporaryWorkspaceRequest());
   const transcriptCursorByConversation = useRef(new Map<string, RuntimeTranscriptCursor>());
   const transcriptFragmentsByConversation = useRef(
     new Map<string, Map<string, RuntimeTranscriptFragment[]>>(),
@@ -1653,6 +1657,8 @@ export function useRuntimeStore(): RuntimeStore {
 
   const loadWorkspaceIndex = useCallback(
     async (bridge: DesktopBridge, reset = false): Promise<readonly WorkspaceView[]> => {
+      const generation = workspaceIndexLoadGenerationRef.current + 1;
+      workspaceIndexLoadGenerationRef.current = generation;
       const workspaceValue = await invoke(bridge, "workspace.list", {});
       const indexed = await Promise.all(
         parseWorkspaceList(workspaceValue).flatMap((workspace) => {
@@ -1697,7 +1703,9 @@ export function useRuntimeStore(): RuntimeStore {
       const runs = indexed
         .flatMap((item) => item.runs)
         .sort((left, right) => right.updatedAt - left.updatedAt);
+      if (workspaceIndexLoadGenerationRef.current !== generation) return workspaces;
       setData((current) => {
+        if (workspaceIndexLoadGenerationRef.current !== generation) return current;
         const base = reset ? emptyData : current;
         return {
           ...base,
@@ -1951,6 +1959,8 @@ export function useRuntimeStore(): RuntimeStore {
   );
 
   const loadWorkspace = useCallback(async (bridge: DesktopBridge, workspacePath: string) => {
+    workspaceLoadIntentRef.current = workspacePath;
+    workspaceIndexLoadGenerationRef.current += 1;
     const generation = workspaceLoadGenerationRef.current + 1;
     workspaceLoadGenerationRef.current = generation;
     const isCurrentLoad = () => workspaceLoadGenerationRef.current === generation;
@@ -2264,7 +2274,13 @@ export function useRuntimeStore(): RuntimeStore {
       const workspacePath = dataRef.current.workspacePath;
       void loadWorkspaceIndex(bridge)
         .then(() => Promise.all([loadUserCapabilities(bridge), loadGlobalProviderConfig(bridge)]))
-        .then(() => (workspacePath ? loadWorkspace(bridge, workspacePath) : undefined))
+        .then(() =>
+          workspacePath &&
+          dataRef.current.workspacePath === workspacePath &&
+          workspaceLoadIntentRef.current === workspacePath
+            ? loadWorkspace(bridge, workspacePath)
+            : undefined,
+        )
         .catch(reportFailure);
     };
     window.addEventListener("focus", refreshOnFocus);
@@ -2490,6 +2506,13 @@ export function useRuntimeStore(): RuntimeStore {
       // Main/preload pending buffers or trigger one refresh per old event.
       const boundary = await bridge.runtime["events.replay"]({ workspacePath, limit: 1 });
       if (!boundary.ok) throw new Error(boundary.error.message);
+      if (
+        disposed ||
+        dataRef.current.workspacePath !== workspacePath ||
+        workspaceLoadIntentRef.current !== workspacePath
+      ) {
+        return;
+      }
       await loadWorkspace(bridge, workspacePath);
       if (disposed) return;
       const highWatermarkEventId = boundary.value.highWatermarkEventId;
@@ -2639,19 +2662,20 @@ export function useRuntimeStore(): RuntimeStore {
         return selectedWorkspacePath;
       },
       async ensureTemporaryWorkspace() {
-        let temporaryWorkspacePath: string | undefined;
-        await perform("ensure-temporary-workspace", async (bridge) => {
-          if (preview) {
-            temporaryWorkspacePath = previewData.workspacePath;
-            setData(previewData);
-            return;
-          }
-          const status = await invoke(bridge, "workspace.temporary.ensure", {});
-          temporaryWorkspacePath = status.workspacePath;
-          await loadWorkspaceIndex(bridge);
-          await loadWorkspace(bridge, status.workspacePath);
+        return temporaryWorkspaceRequest.current.run(async () => {
+          let temporaryWorkspacePath: string | undefined;
+          await perform("ensure-temporary-workspace", async (bridge) => {
+            if (preview) {
+              temporaryWorkspacePath = previewData.workspacePath;
+              setData(previewData);
+              return;
+            }
+            const status = await invoke(bridge, "workspace.temporary.ensure", {});
+            temporaryWorkspacePath = status.workspacePath;
+            await loadWorkspace(bridge, status.workspacePath);
+          });
+          return temporaryWorkspacePath;
         });
-        return temporaryWorkspacePath;
       },
       async selectWorkspace(workspacePath) {
         if (!workspacePath) return;

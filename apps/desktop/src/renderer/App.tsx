@@ -1245,6 +1245,14 @@ function NewTaskPage() {
     return undefined;
   }, [actions, data.workspacePath, navigate, workspace, workspacePath]);
 
+  if (!workspacePath) {
+    return (
+      <div className="workspace-route-loading" aria-busy="true" aria-label="正在准备新任务">
+        <RefreshCw aria-hidden="true" />
+        <p>正在准备无项目任务…</p>
+      </div>
+    );
+  }
   if (workspacePath && !workspace) {
     return <Navigate replace to="/task/new" />;
   }

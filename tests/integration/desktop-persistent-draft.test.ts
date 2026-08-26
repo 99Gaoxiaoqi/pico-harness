@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   MAX_PERSISTED_DRAFT_CHARS,
@@ -75,4 +76,16 @@ test("persistent draft storage failures are fail-safe", () => {
     assert.doesNotThrow(() => removePersistentDraft("draft"));
     assert.equal(readPersistentDraft("draft"), "");
   });
+});
+
+test("the draft hook resolves a new key before the post-render effect", async () => {
+  const source = await readFile(
+    new URL("../../apps/desktop/src/renderer/conversation/usePersistentDraft.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /draft\.key === key \? draft : \{ key, value: readPersistentDraft\(key\) \}/u,
+  );
+  assert.match(source, /return \{ value: current\.value, update, clear \}/u);
 });
