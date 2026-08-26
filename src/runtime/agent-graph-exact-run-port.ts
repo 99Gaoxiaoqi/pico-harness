@@ -7,40 +7,17 @@ import type { RuntimeEvent, RuntimeRunStartedEvent } from "../storage/runtime-ev
 import { RuntimeEventStoreIntegrityError } from "../storage/runtime-event-store-contracts.js";
 import type { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 import type {
+  AgentGraphExactRunInspection,
   AgentGraphExactRunPort,
   StartExactAgentGraphRunInput,
 } from "./agent-graph-runtime-adapter.js";
 import type { PrestartedRuntimeRun, PrestartedRuntimeUserInput } from "./runtime-run-executor.js";
 import { isRuntimeRunLive, RuntimeRun } from "./runtime-run.js";
 
-export type AgentGraphExactRunIndeterminateReason =
-  | "provider_dispatch_recorded"
-  | "tool_dispatch_recorded"
-  | "unexpected_runtime_fact";
-
-/** Stable ledger classification used by the coordinator to surface uncertainty. */
-export type AgentGraphExactRunInspection =
-  | Readonly<{ status: "not_started" }>
-  | Readonly<{
-      status: "attachable";
-      startEvent: RuntimeRunStartedEvent;
-      input: "missing" | "committed";
-    }>
-  | Readonly<{
-      status: "live";
-      startEvent: RuntimeRunStartedEvent;
-    }>
-  | Readonly<{
-      status: "terminal";
-      startEvent: RuntimeRunStartedEvent;
-      terminalEvent: Extract<RuntimeEvent, { kind: "run.terminal" }>;
-    }>
-  | Readonly<{
-      status: "indeterminate";
-      reason: AgentGraphExactRunIndeterminateReason;
-      startEvent: RuntimeRunStartedEvent;
-      blockingEventIds: readonly string[];
-    }>;
+export type {
+  AgentGraphExactRunIndeterminateReason,
+  AgentGraphExactRunInspection,
+} from "./agent-graph-runtime-adapter.js";
 
 export interface ExecuteAgentGraphExactRunInput {
   readonly claimId: string;

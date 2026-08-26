@@ -11,6 +11,10 @@ import {
   type CommittedAgentOutputSource,
   type StartExactAgentGraphRunInput,
 } from "../../src/runtime/agent-graph-runtime-adapter.js";
+import {
+  agentGraphInputRuntimeEventId,
+  inspectAgentGraphExactRun,
+} from "../../src/runtime/agent-graph-exact-run-port.js";
 import type { RuntimeEvent } from "../../src/storage/runtime-event.js";
 import type {
   AgentGraphActivationClaimRecord,
@@ -89,6 +93,63 @@ test("Graph runtime starts one exact Run and only observes it on replay", async 
   assert.equal(replay.disposition, "observed");
   assert.equal(replay.projection.status, "running");
   assert.equal(replay.projection.startedEventId, CLAIM.runStartedEventId);
+});
+
+test("Graph runtime reattaches a started-only exact Run after process restart", async () => {
+  const fixture = createFixture();
+  fixture.runPort.events.push(runStartedEvent(CLAIM));
+
+  const result = await fixture.adapter.startOrObserveActivation(activationInput());
+
+  assert.equal(result.disposition, "started");
+  assert.equal(result.projection.status, "running");
+  assert.equal(fixture.runPort.startCalls.length, 1);
+  assert.equal(fixture.runPort.providerDispatches, 1);
+  assert.equal(fixture.runPort.events.filter((event) => event.kind === "run.started").length, 1);
+});
+
+test("Graph runtime reattaches after the deterministic input was committed", async () => {
+  const fixture = createFixture();
+  fixture.runPort.events.push(runStartedEvent(CLAIM), committedInputEvent(CLAIM, "research"));
+
+  const result = await fixture.adapter.startOrObserveActivation(activationInput());
+
+  assert.equal(result.disposition, "started");
+  assert.equal(fixture.runPort.startCalls.length, 1);
+  assert.equal(fixture.runPort.providerDispatches, 1);
+  assert.equal(
+    fixture.runPort.events.filter(
+      (event) => event.eventId === agentGraphInputRuntimeEventId(CLAIM.claimId),
+    ).length,
+    1,
+  );
+});
+
+test("Graph runtime only observes an exact Run that is live in this host", async () => {
+  const fixture = createFixture();
+  fixture.runPort.events.push(runStartedEvent(CLAIM));
+  fixture.runPort.live = true;
+
+  const result = await fixture.adapter.startOrObserveActivation(activationInput());
+
+  assert.equal(result.disposition, "observed");
+  assert.equal(result.projection.status, "running");
+  assert.equal(fixture.runPort.startCalls.length, 0);
+  assert.equal(fixture.runPort.providerDispatches, 0);
+});
+
+test("Graph runtime fails closed after a provider or tool dispatch", async () => {
+  for (const dispatch of ["provider", "tool"] as const) {
+    const fixture = createFixture();
+    fixture.runPort.events.push(runStartedEvent(CLAIM), dispatchEvent(CLAIM, dispatch));
+
+    await assert.rejects(
+      fixture.adapter.startOrObserveActivation(activationInput()),
+      new RegExp(`${dispatch}_dispatch_recorded.*${dispatch}-dispatch-1`, "u"),
+    );
+    assert.equal(fixture.runPort.startCalls.length, 0);
+    assert.equal(fixture.runPort.providerDispatches, 0);
+  }
 });
 
 test("Graph runtime idempotently acquires and pins the provisioned child Session", async () => {
@@ -185,7 +246,7 @@ test("Graph runtime fails closed when an existing Run does not match the Claim s
       workDir: "/workspace",
       prompt: "research",
     }),
-    /start identity does not match its Claim/u,
+    /does not match its preallocated Claim identity/u,
   );
   assert.equal(fixture.runPort.startCalls.length, 0);
   assert.equal(fixture.runPort.providerDispatches, 0);
@@ -268,15 +329,32 @@ class FakeRunPort implements AgentGraphExactRunPort {
   readonly events: RuntimeEvent[] = [];
   readonly startCalls: StartExactAgentGraphRunInput[] = [];
   providerDispatches = 0;
+  live = false;
 
   async readRunEvents(sessionId: string, runId: string) {
     return this.events.filter((event) => event.sessionId === sessionId && event.runId === runId);
   }
 
+  async inspectExactRun(input: StartExactAgentGraphRunInput) {
+    return inspectAgentGraphExactRun(
+      input,
+      await this.readRunEvents(input.sessionId, input.runId),
+      this.live,
+    );
+  }
+
   async startExactRun(input: StartExactAgentGraphRunInput) {
     this.startCalls.push(input);
-    if (this.events.some((event) => event.kind === "run.started")) return "observed" as const;
-    this.events.push(runStartedEvent(CLAIM));
+    const before = await this.inspectExactRun(input);
+    if (
+      before.status === "live" ||
+      before.status === "terminal" ||
+      before.status === "indeterminate"
+    ) {
+      return "observed" as const;
+    }
+    if (before.status === "not_started") this.events.push(runStartedEvent(CLAIM));
+    this.live = true;
     this.providerDispatches++;
     return "started" as const;
   }
@@ -359,6 +437,45 @@ function runStartedEvent(
     ...eventBase(claim, claim.runStartedEventId),
     kind: "run.started",
     data: { workDir: "/workspace" },
+  };
+}
+
+function committedInputEvent(
+  claim: AgentGraphActivationClaimRecord,
+  prompt: string,
+): Extract<RuntimeEvent, { kind: "message.committed" }> {
+  return {
+    ...eventBase(claim, agentGraphInputRuntimeEventId(claim.claimId)),
+    kind: "message.committed",
+    data: { message: { role: "user", content: prompt } },
+  };
+}
+
+function dispatchEvent(
+  claim: AgentGraphActivationClaimRecord,
+  dispatch: "provider" | "tool",
+): Extract<RuntimeEvent, { kind: "model.call.started" | "tool.started" }> {
+  if (dispatch === "provider") {
+    return {
+      ...eventBase(claim, "provider-dispatch-1"),
+      kind: "model.call.started",
+      data: { providerCallId: "provider-call-1", purpose: "main" },
+    };
+  }
+  return {
+    ...eventBase(claim, "tool-dispatch-1"),
+    kind: "tool.started",
+    refs: { stepId: "step-1", toolCallId: "tool-call-1" },
+    data: { toolName: "bash", argumentsHash: "sha256:arguments" },
+  };
+}
+
+function activationInput() {
+  return {
+    claim: CLAIM,
+    provision: PROVISION,
+    workDir: "/workspace",
+    prompt: "research",
   };
 }
 
