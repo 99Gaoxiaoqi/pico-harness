@@ -7,6 +7,12 @@ import type {
   AgentGraphOperator,
 } from "../../src/agent-graph/core/contracts.js";
 import {
+  AGENT_GRAPH_MAX_COMMANDS,
+  AGENT_GRAPH_MAX_INPUT_REFS,
+  AGENT_GRAPH_MAX_INSTRUCTION_BYTES,
+  AGENT_GRAPH_MAX_JSON_BYTES,
+  AGENT_GRAPH_MAX_PROFILE_TOOLS,
+  AGENT_GRAPH_MAX_SELECTED_RECORDS,
   createAgentGraphSupervisorTools,
   type AgentGraphRootToolContext,
   type AgentGraphSupervisorProjection,
@@ -124,6 +130,18 @@ function addCommand(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function nestedJson(depth: number): unknown {
+  let value: unknown = true;
+  for (let index = 0; index < depth; index += 1) value = { nested: value };
+  return value;
+}
+
+function padJsonToBytes(json: string, bytes: number): string {
+  const padding = bytes - Buffer.byteLength(json, "utf8");
+  assert.ok(padding >= 0, "JSON fixture must fit below its target boundary");
+  return `${json}${" ".repeat(padding)}`;
+}
+
 test("update_agent_graph normalizes one add command and forwards host-owned source identity", async () => {
   const { port, byName, tools } = fixture();
   const update = byName.get("update_agent_graph")!;
@@ -239,6 +257,288 @@ test("update_agent_graph rejects malformed commands, forged root identity, and i
   assert.equal(port.updates.length, 0);
 });
 
+test("update_agent_graph rejects unknown fields at every nested command boundary", async () => {
+  const { port, byName } = fixture();
+  const update = byName.get("update_agent_graph")!;
+  const base = addCommand() as ReturnType<typeof addCommand> & {
+    operator: Record<string, unknown> & {
+      profile: Record<string, unknown>;
+      workspace: Record<string, unknown>;
+    };
+    intent: Record<string, unknown>;
+  };
+  const cases = [
+    { ...base, operator: { ...base.operator, forged_session_id: "session-forged" } },
+    {
+      ...base,
+      operator: {
+        ...base.operator,
+        profile: { ...base.operator.profile, graph_id: "graph-forged" },
+      },
+    },
+    {
+      ...base,
+      operator: {
+        ...base.operator,
+        workspace: { ...base.operator.workspace, path: "/forged" },
+      },
+    },
+    { ...base, intent: { ...base.intent, requested_by: "forged-root" } },
+    {
+      kind: "stop",
+      target: { kind: "intent", intent_id: "intent-research", generation: 1 },
+    },
+    { kind: "finish", selected_record_ids: [], root_run_id: "forged-run" },
+  ];
+
+  for (const [index, command] of cases.entries()) {
+    await assert.rejects(
+      update.execute(
+        JSON.stringify({
+          expected_revision: 0,
+          operation_id: `operation-nested-extra-${index}`,
+          commands: [command],
+        }),
+        { toolCallId: `provider-call-nested-extra-${index}` },
+      ),
+      /不支持字段/u,
+    );
+  }
+  assert.equal(port.updates.length, 0);
+});
+
+test("update_agent_graph rejects deep policy JSON and duplicate command identities", async () => {
+  const { port, byName } = fixture();
+  const update = byName.get("update_agent_graph")!;
+  const invalidCommands = [
+    [
+      addCommand({
+        operator: {
+          ...(addCommand() as { operator: Record<string, unknown> }).operator,
+          profile: {
+            ...(addCommand() as { operator: { profile: Record<string, unknown> } }).operator
+              .profile,
+            permission_policy: nestedJson(32),
+          },
+        },
+      }),
+    ],
+    [
+      addCommand({
+        operator: {
+          ...(addCommand() as { operator: Record<string, unknown> }).operator,
+          profile: {
+            ...(addCommand() as { operator: { profile: Record<string, unknown> } }).operator
+              .profile,
+            permission_policy: Array.from({ length: 300 }, (_, index) => index),
+          },
+        },
+      }),
+    ],
+    [
+      { kind: "finish", selected_record_ids: ["record-1"] },
+      { kind: "stop", target: { kind: "intent", intent_id: "intent-1" } },
+    ],
+    [{ kind: "finish" }, { kind: "finish" }],
+    [
+      addCommand({
+        intent: {
+          intent_id: "intent-duplicate-input",
+          instruction: "duplicate input",
+          input_record_ids: ["record-1", "record-1"],
+        },
+      }),
+    ],
+    [
+      addCommand({
+        operator: {
+          ...(addCommand() as { operator: Record<string, unknown> }).operator,
+          profile: {
+            ...(addCommand() as { operator: { profile: Record<string, unknown> } }).operator
+              .profile,
+            tools: ["read_file", "read_file"],
+          },
+        },
+      }),
+    ],
+    [{ kind: "finish", selected_record_ids: ["record-1", "record-1"] }],
+  ];
+
+  for (const [index, commands] of invalidCommands.entries()) {
+    await assert.rejects(
+      update.execute(
+        JSON.stringify({
+          expected_revision: 0,
+          operation_id: `operation-conflict-${index}`,
+          commands,
+        }),
+        { toolCallId: `provider-call-conflict-${index}` },
+      ),
+      /嵌套过深|数组不得超过|finish 最多一条且必须是最后一条|不得包含重复项/u,
+    );
+  }
+  assert.equal(port.updates.length, 0);
+});
+
+test("update_agent_graph enforces UTF-8 and collection limits at exact boundaries", async () => {
+  const { port, byName } = fixture();
+  const update = byName.get("update_agent_graph")!;
+  const exactInstruction = "你".repeat(Math.floor(AGENT_GRAPH_MAX_INSTRUCTION_BYTES / 3)) + "ab";
+  assert.equal(Buffer.byteLength(exactInstruction, "utf8"), AGENT_GRAPH_MAX_INSTRUCTION_BYTES);
+
+  await update.execute(
+    JSON.stringify({
+      expected_revision: 0,
+      operation_id: "operation-exact-instruction",
+      commands: [
+        addCommand({
+          intent: {
+            intent_id: "intent-exact-instruction",
+            instruction: exactInstruction,
+            input_record_ids: Array.from(
+              { length: AGENT_GRAPH_MAX_INPUT_REFS },
+              (_, index) => `record-${index}`,
+            ),
+          },
+          operator: {
+            ...(addCommand() as { operator: Record<string, unknown> }).operator,
+            profile: {
+              ...(addCommand() as { operator: { profile: Record<string, unknown> } }).operator
+                .profile,
+              tools: Array.from(
+                { length: AGENT_GRAPH_MAX_PROFILE_TOOLS },
+                (_, index) => `tool-${index}`,
+              ),
+            },
+          },
+        }),
+      ],
+    }),
+    { toolCallId: "provider-call-exact-instruction" },
+  );
+
+  await assert.rejects(
+    update.execute(
+      JSON.stringify({
+        expected_revision: 1,
+        operation_id: "operation-over-instruction",
+        commands: [
+          addCommand({
+            intent: {
+              intent_id: "intent-over-instruction",
+              instruction: `${exactInstruction}a`,
+            },
+          }),
+        ],
+      }),
+      { toolCallId: "provider-call-over-instruction" },
+    ),
+    new RegExp(`不得超过 ${AGENT_GRAPH_MAX_INSTRUCTION_BYTES} 字节`, "u"),
+  );
+
+  await assert.rejects(
+    update.execute(
+      JSON.stringify({
+        expected_revision: 1,
+        operation_id: "operation-over-input-refs",
+        commands: [
+          addCommand({
+            intent: {
+              intent_id: "intent-over-input-refs",
+              instruction: "too many input refs",
+              input_record_ids: Array.from(
+                { length: AGENT_GRAPH_MAX_INPUT_REFS + 1 },
+                (_, index) => `record-over-${index}`,
+              ),
+            },
+          }),
+        ],
+      }),
+      { toolCallId: "provider-call-over-input-refs" },
+    ),
+    new RegExp(`input_record_ids 不得超过 ${AGENT_GRAPH_MAX_INPUT_REFS} 项`, "u"),
+  );
+  await assert.rejects(
+    update.execute(
+      JSON.stringify({
+        expected_revision: 1,
+        operation_id: "operation-over-profile-tools",
+        commands: [
+          addCommand({
+            operator: {
+              ...(addCommand() as { operator: Record<string, unknown> }).operator,
+              profile: {
+                ...(addCommand() as { operator: { profile: Record<string, unknown> } }).operator
+                  .profile,
+                tools: Array.from(
+                  { length: AGENT_GRAPH_MAX_PROFILE_TOOLS + 1 },
+                  (_, index) => `tool-over-${index}`,
+                ),
+              },
+            },
+          }),
+        ],
+      }),
+      { toolCallId: "provider-call-over-profile-tools" },
+    ),
+    /profile\.tools 不得超过/u,
+  );
+
+  const exactCommands = Array.from({ length: AGENT_GRAPH_MAX_COMMANDS }, (_, index) => ({
+    kind: "stop",
+    target: { kind: "intent", intent_id: `intent-${index}` },
+  }));
+  await update.execute(
+    JSON.stringify({
+      expected_revision: 1,
+      operation_id: "operation-exact-commands",
+      commands: exactCommands,
+    }),
+    { toolCallId: "provider-call-exact-commands" },
+  );
+  await assert.rejects(
+    update.execute(
+      JSON.stringify({
+        expected_revision: 2,
+        operation_id: "operation-over-commands",
+        commands: [...exactCommands, exactCommands[0]],
+      }),
+      { toolCallId: "provider-call-over-commands" },
+    ),
+    new RegExp(`commands 不得超过 ${AGENT_GRAPH_MAX_COMMANDS} 项`, "u"),
+  );
+
+  const finishIds = Array.from(
+    { length: AGENT_GRAPH_MAX_SELECTED_RECORDS + 1 },
+    (_, index) => `record-finish-${index}`,
+  );
+  await assert.rejects(
+    update.execute(
+      JSON.stringify({
+        expected_revision: 2,
+        operation_id: "operation-over-selected",
+        commands: [{ kind: "finish", selected_record_ids: finishIds }],
+      }),
+      { toolCallId: "provider-call-over-selected" },
+    ),
+    new RegExp(`selected_record_ids 不得超过 ${AGENT_GRAPH_MAX_SELECTED_RECORDS} 项`, "u"),
+  );
+
+  const minimal = JSON.stringify({
+    expected_revision: 2,
+    operation_id: "operation-json-boundary",
+    commands: [{ kind: "finish" }],
+  });
+  const exactJson = padJsonToBytes(minimal, AGENT_GRAPH_MAX_JSON_BYTES);
+  await update.execute(exactJson, { toolCallId: "provider-call-exact-json" });
+  await assert.rejects(
+    update.execute(`${exactJson} `, { toolCallId: "provider-call-over-json" }),
+    new RegExp(`JSON 不得超过 ${AGENT_GRAPH_MAX_JSON_BYTES} 字节`, "u"),
+  );
+
+  assert.equal(port.updates.length, 3);
+});
+
 test("all Supervisor tools reject calls without a host-injected root activation context", async () => {
   const { port, byName } = fixture(null);
   await assert.rejects(
@@ -256,6 +556,50 @@ test("all Supervisor tools reject calls without a host-injected root activation 
   await assert.rejects(
     byName.get("yield_agent_graph")!.execute("{}", { toolCallId: "provider-call-yield" }),
     /有效的 Graph root/u,
+  );
+  assert.equal(port.updates.length + port.reads.length + port.yields.length, 0);
+});
+
+test("Supervisor tools reject forged host context and non-empty read/yield input", async () => {
+  for (const context of [
+    { ...ROOT, graphId: "forged graph" },
+    { ...ROOT, rootSessionId: "root\nsession" },
+    { ...ROOT, rootTurnId: "" },
+    { ...ROOT, rootRunId: "\ud800" },
+  ]) {
+    const { port, byName } = fixture(context);
+    await assert.rejects(
+      byName.get("update_agent_graph")!.execute(
+        JSON.stringify({
+          expected_revision: 0,
+          operation_id: "operation-forged-context",
+          commands: [addCommand()],
+        }),
+        { toolCallId: "provider-call-forged-context" },
+      ),
+      /调用上下文或参数|必须是非空字符串|非法 UTF-16\/UTF-8/u,
+    );
+    assert.equal(port.updates.length, 0);
+  }
+
+  const { port, byName } = fixture();
+  await assert.rejects(
+    byName.get("update_agent_graph")!.execute(
+      JSON.stringify({
+        expected_revision: 0,
+        operation_id: "operation-missing-tool-call",
+        commands: [addCommand()],
+      }),
+    ),
+    /toolCallId/u,
+  );
+  await assert.rejects(
+    byName.get("view_agent_graph")!.execute(JSON.stringify({ graph_id: ROOT.graphId })),
+    /不支持字段 graph_id/u,
+  );
+  await assert.rejects(
+    byName.get("yield_agent_graph")!.execute("[]", { toolCallId: "provider-call-yield" }),
+    /期望 JSON 对象/u,
   );
   assert.equal(port.updates.length + port.reads.length + port.yields.length, 0);
 });

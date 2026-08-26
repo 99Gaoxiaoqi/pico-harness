@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   AGENT_OUTPUT_MAX_BYTES,
+  AGENT_OUTPUT_MAX_REFS,
+  AGENT_OUTPUT_MAX_REF_BYTES,
   createAgentOutputTool,
   type AgentOutputCommitPort,
   type CommitAgentOutputInput,
@@ -128,6 +130,147 @@ test("agent_output rejects empty and byte-bounded output plus invalid refs", asy
     /evidence_refs\[1\] 必须是非空字符串/u,
   );
   assert.equal(commits.length, 0);
+});
+
+test("agent_output enforces exact UTF-8 byte and reference-count boundaries", async () => {
+  const { tool, commits } = fixture();
+  const exactOutput = "🛠".repeat(AGENT_OUTPUT_MAX_BYTES / 4);
+  assert.equal(Buffer.byteLength(exactOutput, "utf8"), AGENT_OUTPUT_MAX_BYTES);
+  await tool.execute(JSON.stringify({ status: "success", output: exactOutput }), {
+    toolCallId: "call-exact-output",
+  });
+  assert.equal(commits[0]?.eventPayload.outputBytes, AGENT_OUTPUT_MAX_BYTES);
+
+  await assert.rejects(
+    tool.execute(JSON.stringify({ status: "success", output: `${exactOutput}a` }), {
+      toolCallId: "call-over-output",
+    }),
+    new RegExp(`output 不得超过 ${AGENT_OUTPUT_MAX_BYTES} 字节`, "u"),
+  );
+
+  const exactRef = "r".repeat(AGENT_OUTPUT_MAX_REF_BYTES);
+  const half = AGENT_OUTPUT_MAX_REFS / 2;
+  const evidenceRefs = Array.from({ length: half }, (_, index) => `evidence://${index}`);
+  const artifactRefs = Array.from({ length: half }, (_, index) => `artifact://${index}`);
+  evidenceRefs[0] = exactRef;
+  await tool.execute(
+    JSON.stringify({
+      status: "failure",
+      output: "bounded refs",
+      evidence_refs: evidenceRefs,
+      artifact_refs: artifactRefs,
+    }),
+    { toolCallId: "call-exact-refs" },
+  );
+  assert.equal(
+    commits[1]!.eventPayload.evidenceRefs.length + commits[1]!.eventPayload.artifactRefs.length,
+    AGENT_OUTPUT_MAX_REFS,
+  );
+  assert.equal(
+    Buffer.byteLength(commits[1]!.eventPayload.evidenceRefs[0]!, "utf8"),
+    exactRef.length,
+  );
+
+  await assert.rejects(
+    tool.execute(
+      JSON.stringify({
+        status: "success",
+        output: "over ref bytes",
+        evidence_refs: [`${exactRef}a`],
+      }),
+      { toolCallId: "call-over-ref-bytes" },
+    ),
+    /evidence_refs\[0\] 不得超过/u,
+  );
+  await assert.rejects(
+    tool.execute(
+      JSON.stringify({
+        status: "success",
+        output: "over total refs",
+        evidence_refs: [...evidenceRefs, "evidence://overflow"],
+        artifact_refs: artifactRefs,
+      }),
+      { toolCallId: "call-over-total-refs" },
+    ),
+    new RegExp(`合计不得超过 ${AGENT_OUTPUT_MAX_REFS} 项`, "u"),
+  );
+  assert.equal(commits.length, 2);
+});
+
+test("agent_output rejects exact-shape, status, and malformed ref extremes without commit", async () => {
+  const { tool, commits } = fixture();
+  const cases: ReadonlyArray<{ readonly input: unknown; readonly error: RegExp }> = [
+    { input: null, error: /期望 JSON 对象/u },
+    { input: [], error: /期望 JSON 对象/u },
+    {
+      input: { status: "success", output: "done", graph_id: "forged-graph" },
+      error: /不支持字段 graph_id/u,
+    },
+    { input: { status: "SUCCESS", output: "done" }, error: /status 必须是/u },
+    { input: { status: true, output: "done" }, error: /status 必须是/u },
+    { input: { status: null, output: "done" }, error: /status 必须是/u },
+    {
+      input: { status: "success", output: "done", evidence_refs: "evidence://not-array" },
+      error: /evidence_refs 必须是字符串数组/u,
+    },
+    {
+      input: {
+        status: "success",
+        output: "done",
+        evidence_refs: ["evidence://same", "evidence://same"],
+      },
+      error: /evidence_refs 不得包含重复引用/u,
+    },
+    {
+      input: { status: "success", output: "done", artifact_refs: ["artifact://bad\nref"] },
+      error: /artifact_refs\[0\] 不得包含控制字符/u,
+    },
+  ];
+
+  for (const [index, entry] of cases.entries()) {
+    await assert.rejects(
+      tool.execute(JSON.stringify(entry.input), { toolCallId: `call-invalid-${index}` }),
+      entry.error,
+    );
+  }
+  assert.equal(commits.length, 0);
+});
+
+test("agent_output rejects forged activation and tool-call identities before commit", async () => {
+  const contexts = [
+    { ...ACTIVATION, kind: "graph_root_supervisor" },
+    { ...ACTIVATION, graphId: "forged graph" },
+    { ...ACTIVATION, operatorId: "" },
+    { ...ACTIVATION, operatorGeneration: 0 },
+    { ...ACTIVATION, operatorGeneration: Number.MAX_SAFE_INTEGER + 1 },
+    { ...ACTIVATION, activationId: "activation\nid" },
+    { ...ACTIVATION, sessionId: " session" },
+    { ...ACTIVATION, turnId: "turn " },
+    { ...ACTIVATION, runId: "run\tid" },
+  ];
+
+  for (const [index, context] of contexts.entries()) {
+    const { tool, commits } = fixture(context as GraphOperatorActivationContext);
+    await assert.rejects(
+      tool.execute(JSON.stringify({ status: "success", output: "done" }), {
+        toolCallId: `call-forged-context-${index}`,
+      }),
+      /仅可由有效|调用上下文|operatorGeneration 无效/u,
+    );
+    assert.equal(commits.length, 0);
+  }
+
+  for (const toolCallId of [undefined, "", " call", "call\nid"] as const) {
+    const { tool, commits } = fixture();
+    await assert.rejects(
+      tool.execute(
+        JSON.stringify({ status: "success", output: "done" }),
+        toolCallId === undefined ? undefined : { toolCallId },
+      ),
+      /toolCallId 无效/u,
+    );
+    assert.equal(commits.length, 0);
+  }
 });
 
 test("agent_output passes the same activation idempotency key across replayed tool calls", async () => {
