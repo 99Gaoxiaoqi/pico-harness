@@ -13,6 +13,7 @@ import {
   type SandboxProfile,
 } from "../../src/safety/process-sandbox/index.js";
 import { BashTool } from "../../src/tools/bash.js";
+import { GrepTool, setRgAvailable } from "../../src/tools/grep.js";
 import { WorkspaceRoots } from "../../src/tools/workspace-roots.js";
 import { McpConnectionManager } from "../../src/mcp/manager.js";
 
@@ -244,6 +245,35 @@ test(
     await rm(target);
     await bash.execute(JSON.stringify({ command }));
     assert.equal(await readFile(target, "utf8"), "granted");
+  },
+);
+
+test(
+  "grep keeps an external one-shot root for exactly one sandboxed rg process",
+  { skip: !nativeAvailable },
+  async (context) => {
+    const fixture = await fixtureRoot(context, "pico-native-grep-grant-");
+    const external = join(fixture.root, "external");
+    await mkdir(external);
+    await writeFile(join(external, "needle.txt"), "one-shot-grep-secret\n");
+    const roots = await WorkspaceRoots.create(fixture.workspace);
+    roots.authorizeOnce(external);
+    setRgAvailable(true);
+    const grep = new GrepTool(roots, {
+      processSandbox: {
+        profile: "read-only",
+        scratchRoot: fixture.scratch,
+      },
+    });
+
+    const first = await grep.execute(
+      JSON.stringify({ pattern: "one-shot-grep-secret", path: external }),
+    );
+    assert.match(first, /needle\.txt:1:one-shot-grep-secret/u);
+    await assert.rejects(
+      grep.execute(JSON.stringify({ pattern: "one-shot-grep-secret", path: external })),
+      /路径不在当前工作区/u,
+    );
   },
 );
 
