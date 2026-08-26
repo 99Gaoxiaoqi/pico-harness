@@ -161,6 +161,7 @@ export class SqliteAgentGraphControlStore {
           `Graph ${normalized.graphId} revision changed from ${normalized.expectedRevision} to ${graph.headRevision}`,
         );
       }
+      this.assertInputRecordRefs(normalized.graphId, normalized.inputRecordIds);
       if (normalized.kind === "finish") {
         this.assertSelectedRecordRefs(normalized.graphId, normalized.selectedRecordIds);
       }
@@ -1156,6 +1157,22 @@ export class SqliteAgentGraphControlStore {
     }
   }
 
+  private assertInputRecordRefs(graphId: string, recordIds: readonly string[]): void {
+    for (const recordId of recordIds) {
+      const record = this.selectRecordRef(recordId);
+      if (!record) {
+        throw new AgentGraphStoreConflictError(
+          `Input RecordRef ${recordId} does not exist for Graph ${graphId}`,
+        );
+      }
+      if (record.graphId !== graphId) {
+        throw new AgentGraphStoreConflictError(
+          `Input RecordRef ${recordId} belongs to Graph ${record.graphId}, not ${graphId}`,
+        );
+      }
+    }
+  }
+
   private selectWake(wakeId: string): AgentGraphSupervisorWakeRecord | undefined {
     const row = this.lease.database
       .prepare("SELECT * FROM agent_graph_supervisor_wakes WHERE wake_id = ?")
@@ -1280,11 +1297,15 @@ export class SqliteAgentGraphControlStore {
 
 interface NormalizedScheduleInput extends Omit<CommitAgentGraphScheduleInput, "command"> {
   readonly commandJson: string;
+  readonly inputRecordIds: readonly string[];
   readonly selectedRecordIds: readonly string[];
 }
 
 function normalizeScheduleInput(input: CommitAgentGraphScheduleInput): NormalizedScheduleInput {
   requireNonNegativeInteger(input.expectedRevision, "expectedRevision");
+  const inputRecordIds = inputRecordIdsFromCommand(input.command).map((recordId) =>
+    requireNonEmpty(recordId, "inputRecordId"),
+  );
   const selectedRecordIds = selectedRecordIdsFromCommand(input.kind, input.command).map(
     (recordId) => requireNonEmpty(recordId, "selectedRecordId"),
   );
@@ -1297,6 +1318,7 @@ function normalizeScheduleInput(input: CommitAgentGraphScheduleInput): Normalize
     operationId: requireNonEmpty(input.operationId, "operationId"),
     requestFingerprint: requireNonEmpty(input.requestFingerprint, "requestFingerprint"),
     kind: input.kind,
+    inputRecordIds,
     selectedRecordIds,
     commandJson: canonicalJson(input.command),
     sourceSessionId: requireNonEmpty(input.sourceSessionId, "sourceSessionId"),
@@ -1304,6 +1326,32 @@ function normalizeScheduleInput(input: CommitAgentGraphScheduleInput): Normalize
     sourceRunId: requireNonEmpty(input.sourceRunId, "sourceRunId"),
     sourceToolCallId: requireNonEmpty(input.sourceToolCallId, "sourceToolCallId"),
   };
+}
+
+function inputRecordIdsFromCommand(command: unknown): readonly string[] {
+  const envelope = asOptionalRecord(command);
+  const commands =
+    envelope?.["schemaVersion"] === 1 && Array.isArray(envelope["commands"])
+      ? envelope["commands"]
+      : [command];
+  const inputRecordIds: string[] = [];
+  for (const candidate of commands.map(asOptionalRecord)) {
+    if (candidate?.["kind"] !== "add") continue;
+    const intent = asOptionalRecord(candidate["intent"]);
+    const inputRefs = intent?.["inputRefs"];
+    if (inputRefs === undefined) continue;
+    if (!Array.isArray(inputRefs)) {
+      throw new Error("add inputRefs must be an array");
+    }
+    for (const inputRef of inputRefs) {
+      const recordId = asOptionalRecord(inputRef)?.["recordId"];
+      if (typeof recordId !== "string") {
+        throw new Error("add inputRefs must contain string recordIds");
+      }
+      inputRecordIds.push(recordId);
+    }
+  }
+  return inputRecordIds;
 }
 
 function selectedRecordIdsFromCommand(

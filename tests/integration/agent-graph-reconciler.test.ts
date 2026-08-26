@@ -47,31 +47,46 @@ test("reconciler drives dependent operators to a fixed point with exact durable 
       claimIdFor(graphId, upstream.intent.intentId),
       upstreamEventId,
     );
-    const downstream = addCommand(graphId, "reviewer", 1, [expectedUpstreamRecordId]);
+    const downstream = addCommand(graphId, "reviewer", 2, [expectedUpstreamRecordId]);
     const independent = addCommand(graphId, "auditor", 1);
     store.commitScheduleRevision({
       graphId,
       expectedPreviousRevision: 0,
-      operationId: "add-workers",
+      operationId: "add-initial-workers",
       source: SOURCE,
-      commands: [upstream, downstream, independent],
+      commands: [upstream, independent],
     });
 
     const runtime = new CompletingRuntime();
     const reconciler = new AgentGraphReconciler({ store, runtime, now: () => 5_000 });
+    const initialResult = await reconciler.reconcile(graphId);
+
+    assert.equal(initialResult.quiescent, true);
+    assert.deepEqual(initialResult.errors, []);
+    assert.equal(initialResult.headRevision, 1);
+    assert.ok(initialResult.passes >= 2);
+    assert.equal(raw.listRecordRefs(graphId).length, 2);
+    assert.ok(runtime.maxConcurrentStarts >= 2, "independent operators should start concurrently");
+
+    store.commitScheduleRevision({
+      graphId,
+      expectedPreviousRevision: 1,
+      operationId: "add-dependent-worker",
+      source: { ...SOURCE, toolCallId: "add-dependent-worker-tool" },
+      commands: [downstream],
+    });
     const result = await reconciler.reconcile(graphId);
 
     assert.equal(result.quiescent, true);
     assert.deepEqual(result.errors, []);
-    assert.equal(result.headRevision, 1);
-    assert.ok(result.passes >= 3);
+    assert.equal(result.headRevision, 2);
+    assert.ok(result.passes >= 2);
     assert.equal(raw.listOperatorProvisions(graphId).length, 3);
     assert.ok(
       raw.listOperatorProvisions(graphId).every((provision) => provision.state === "provisioned"),
     );
     assert.equal(raw.listActivationClaims(graphId).length, 3);
     assert.equal(raw.listRecordRefs(graphId).length, 3);
-    assert.ok(runtime.maxConcurrentStarts >= 2, "independent operators should start concurrently");
 
     const upstreamClaim = raw
       .listActivationClaims(graphId)
@@ -110,7 +125,7 @@ test("reconciler drives dependent operators to a fixed point with exact durable 
     assert.ok(selectedRecordId);
     const finishInput = {
       graphId,
-      expectedPreviousRevision: 1,
+      expectedPreviousRevision: 2,
       operationId: "finish-with-record",
       source: { ...SOURCE, toolCallId: "finish-with-record-tool" },
       commands: [{ kind: "finish" as const, selectedRecordIds: [selectedRecordId] }],
