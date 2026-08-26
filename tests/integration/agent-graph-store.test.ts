@@ -332,11 +332,66 @@ test("agent graph store persists exact identities, fences finish, and drives dur
       "agent_graph_schedule_revisions",
       "agent_graph_supervisor_wake_attempts",
       "agent_graph_supervisor_wakes",
+      "agent_graph_yield_interests",
       "agent_graphs",
     ]);
   });
 
   await rm(root, { recursive: true, force: true });
+});
+
+test("agent graph store atomically consumes durable yield interest when admitting a wake", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-agent-graph-yield-"));
+  const store = new SqliteAgentGraphControlStore({ storageRoot: root, now: () => 50 });
+  try {
+    store.createGraph({ graphId: "yield-graph", rootSessionId: "yield-root", epoch: 1 });
+    const wake = {
+      wakeId: "yield-wake",
+      graphId: "yield-graph",
+      dedupeKey: "runtime-terminal:child-run",
+      wakeFingerprint: "yield-wake-fingerprint",
+      cause: "runtime_terminal",
+      payload: { runId: "child-run" },
+    } as const;
+    assert.deepEqual(store.enqueueSupervisorWakeForYield(wake), { status: "not_waiting" });
+
+    const interest = {
+      permitId: "yield-permit",
+      graphId: "yield-graph",
+      rootSessionId: "yield-root",
+      rootTurnId: "yield-root-turn",
+      rootRunId: "yield-root-run",
+      toolCallId: "yield-tool-call",
+    } as const;
+    assert.equal(store.registerYieldInterest(interest).replayed, false);
+    assert.equal(store.registerYieldInterest(interest).replayed, true);
+    const admitted = store.enqueueSupervisorWakeForYield(wake);
+    assert.equal(admitted.status, "enqueued");
+    if (admitted.status !== "enqueued") throw new Error("expected admitted yield wake");
+    assert.equal(admitted.replayed, false);
+    assert.equal(admitted.wake.yieldPermitId, "yield-permit");
+    assert.equal(admitted.interest.state, "consumed");
+    assert.equal(store.listYieldInterests("yield-graph", "registered").length, 0);
+    assert.equal(store.enqueueSupervisorWakeForYield(wake).status, "enqueued");
+
+    const cancel = store.registerYieldInterest({
+      ...interest,
+      permitId: "cancel-permit",
+      rootTurnId: "cancel-turn",
+      rootRunId: "cancel-run",
+      toolCallId: "cancel-tool",
+    });
+    assert.equal(
+      store.cancelYieldInterest({
+        permitId: cancel.record.permitId,
+        expectedVersion: cancel.record.version,
+      }).record.state,
+      "cancelled",
+    );
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("agent graph store serializes schedule and activation races across independent processes", async () => {

@@ -136,6 +136,27 @@ export const AGENT_GRAPH_SCOPE: SqliteSchemaScope = {
       CREATE INDEX agent_graph_record_refs_by_claim
         ON agent_graph_record_refs(claim_id, created_at, record_id);
 
+      CREATE TABLE agent_graph_yield_interests (
+        permit_id TEXT PRIMARY KEY,
+        graph_id TEXT NOT NULL,
+        root_session_id TEXT NOT NULL,
+        root_turn_id TEXT NOT NULL,
+        root_run_id TEXT NOT NULL,
+        tool_call_id TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('registered','consumed','cancelled')),
+        version INTEGER NOT NULL CHECK (version >= 1),
+        created_at INTEGER NOT NULL,
+        resolved_at INTEGER,
+        UNIQUE (graph_id, root_run_id),
+        FOREIGN KEY (graph_id) REFERENCES agent_graphs(graph_id) ON DELETE RESTRICT,
+        CHECK ((state = 'registered' AND resolved_at IS NULL)
+          OR (state IN ('consumed','cancelled') AND resolved_at IS NOT NULL))
+      );
+
+      CREATE INDEX agent_graph_yield_interests_registered
+        ON agent_graph_yield_interests(graph_id, created_at, permit_id)
+        WHERE state = 'registered';
+
       CREATE TABLE agent_graph_supervisor_wakes (
         wake_id TEXT PRIMARY KEY,
         graph_id TEXT NOT NULL,
@@ -151,9 +172,11 @@ export const AGENT_GRAPH_SCOPE: SqliteSchemaScope = {
         updated_at INTEGER NOT NULL,
         delivered_at INTEGER,
         last_error TEXT,
+        yield_permit_id TEXT UNIQUE,
         UNIQUE (graph_id, dedupe_key),
         UNIQUE (graph_id, wake_id),
         FOREIGN KEY (graph_id) REFERENCES agent_graphs(graph_id) ON DELETE RESTRICT,
+        FOREIGN KEY (yield_permit_id) REFERENCES agent_graph_yield_interests(permit_id) ON DELETE RESTRICT,
         CHECK ((status = 'delivered' AND delivered_at IS NOT NULL) OR (status <> 'delivered' AND delivered_at IS NULL))
       );
 
