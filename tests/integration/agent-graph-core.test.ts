@@ -107,10 +107,10 @@ function apply(
   return applyScheduleRevision(state, nextRevision).state;
 }
 
-function record(recordId: string): AgentGraphRecordRef {
+function record(recordId: string, graphId = "graph"): AgentGraphRecordRef {
   return {
     recordId,
-    graphId: "graph",
+    graphId,
     operatorId: "operator",
     operatorGeneration: 1,
     activationClaimId: "claim",
@@ -236,6 +236,30 @@ test("Stop fences admission by Intent or Operator while finish only fences fresh
         ]),
       ),
     /unknown Graph target/u,
+  );
+});
+
+test("finish validates selected RecordRefs when the transition receives authoritative records", () => {
+  const initial = createAgentGraphScheduleState(graph());
+  const selectedRecordId = "record-final";
+  const finish = revision(initial.graph.graphId, 1, "operation-finish", [
+    { kind: "finish", selectedRecordIds: [selectedRecordId] },
+  ]);
+
+  const applied = applyScheduleRevision(initial, finish, {
+    knownRecords: [record(selectedRecordId, initial.graph.graphId)],
+  });
+  assert.deepEqual(applied.state.graph.selectedRecordIds, [selectedRecordId]);
+  assert.throws(
+    () => applyScheduleRevision(initial, finish, { knownRecords: [] }),
+    /does not exist/u,
+  );
+  assert.throws(
+    () =>
+      applyScheduleRevision(initial, finish, {
+        knownRecords: [record(selectedRecordId, "another-graph")],
+      }),
+    /belongs to another Graph/u,
   );
 });
 

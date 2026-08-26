@@ -105,6 +105,19 @@ test("reconciler drives dependent operators to a fixed point with exact durable 
     assert.equal(raw.listRecordRefs(graphId).length, 3);
     assert.equal(runtime.startsByIntent.get(upstream.intent.intentId), 1);
     assert.ok(replay.wakeCandidates.every((wake) => wake.cause === "runtime_terminal"));
+
+    const selectedRecordId = raw.listRecordRefs(graphId)[0]?.recordId;
+    assert.ok(selectedRecordId);
+    const finishInput = {
+      graphId,
+      expectedPreviousRevision: 1,
+      operationId: "finish-with-record",
+      source: { ...SOURCE, toolCallId: "finish-with-record-tool" },
+      commands: [{ kind: "finish" as const, selectedRecordIds: [selectedRecordId] }],
+    };
+    assert.equal(store.commitScheduleRevision(finishInput).replayed, false);
+    assert.equal(store.commitScheduleRevision(finishInput).replayed, true);
+    assert.deepEqual(store.getScheduleState(graphId).graph.selectedRecordIds, [selectedRecordId]);
   });
 });
 
