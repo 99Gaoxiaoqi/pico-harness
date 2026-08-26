@@ -202,6 +202,113 @@ test("workspace runtime admits concurrent trusted exact Graph Runs", async () =>
   }
 });
 
+test("workspace runtime reattaches a failed exact Run with monotonic versions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-agent-graph-reattach-failed-"));
+  const workDir = join(root, "workspace");
+  await mkdir(workDir);
+  let now = 1_000;
+  const runtime = await WorkspaceTaskRuntime.create({ workDir, now: () => ++now });
+  const versions: number[] = [];
+  const unsubscribe = runtime.subscribe((event) => {
+    if (event.run?.runId === "reattach-run-1") versions.push(event.resourceVersion);
+  });
+  try {
+    runtime.startExactRun(
+      "reattach-run-1",
+      { description: "Graph operator", sessionId: "operator-session" },
+      async () => {
+        throw new Error("attach failed");
+      },
+    );
+    const failed = await runtime.waitForRun("reattach-run-1");
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.version, 2);
+
+    const reattached = runtime.reattachExactRun(
+      "reattach-run-1",
+      { description: "Graph operator", sessionId: "operator-session" },
+      async () => ({ recovered: true }),
+    );
+    assert.equal(reattached.status, "running");
+    assert.equal(reattached.version, 3);
+    assert.equal(reattached.startedAt, failed.startedAt);
+    assert.equal(reattached.finishedAt, undefined);
+    assert.equal(reattached.error, undefined);
+
+    const succeeded = await runtime.waitForRun("reattach-run-1");
+    assert.equal(succeeded.status, "succeeded");
+    assert.equal(succeeded.version, 4);
+    assert.deepEqual(succeeded.result, { recovered: true });
+    assert.deepEqual(versions, [1, 2, 3, 4]);
+  } finally {
+    unsubscribe();
+    await runtime.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("workspace runtime serializes concurrent exact reattach and rejects identity conflicts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-agent-graph-reattach-race-"));
+  const workDir = join(root, "workspace");
+  await mkdir(workDir);
+  const runtime = await WorkspaceTaskRuntime.create({ workDir });
+  const gate = deferred();
+  const started = deferred();
+  let installs = 0;
+  try {
+    runtime.startExactRun(
+      "reattach-run-1",
+      { description: "Graph operator", sessionId: "operator-session" },
+      async () => {
+        throw new Error("attach failed");
+      },
+    );
+    await runtime.waitForRun("reattach-run-1");
+
+    const reinstall = () =>
+      runtime.reattachExactRun(
+        "reattach-run-1",
+        { description: "Graph operator", sessionId: "operator-session" },
+        async () => {
+          installs++;
+          started.resolve();
+          await gate.promise;
+        },
+      );
+    const first = reinstall();
+    const replay = reinstall();
+    await started.promise;
+    assert.equal(installs, 1);
+    assert.equal(replay.version, first.version);
+    assert.throws(
+      () =>
+        runtime.reattachExactRun(
+          "reattach-run-1",
+          { description: "other request", sessionId: "operator-session" },
+          async () => undefined,
+        ),
+      /其他请求/,
+    );
+
+    gate.resolve();
+    assert.equal((await runtime.waitForRun("reattach-run-1")).status, "succeeded");
+    const succeededReplay = runtime.reattachExactRun(
+      "reattach-run-1",
+      { description: "Graph operator", sessionId: "operator-session" },
+      async () => {
+        installs++;
+      },
+    );
+    await Promise.resolve();
+    assert.equal(succeededReplay.status, "succeeded");
+    assert.equal(installs, 1);
+  } finally {
+    gate.resolve();
+    await runtime.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 function deferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void;
   const promise = new Promise<void>((resolvePromise) => {
