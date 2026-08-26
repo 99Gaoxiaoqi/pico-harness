@@ -16,8 +16,7 @@ import type { PlanHandoffController } from "../engine/plan-handoff.js";
 import type { PlanCoordinator } from "../plan/coordinator.js";
 import type { MemoryTriggerSlot } from "../memory/memory-trigger-tools.js";
 import { findPrecommittedDesktopMemoryEvidence } from "./memory-review-recovery.js";
-import { findOrphanGraphWorks } from "../graph/graph-recover.js";
-import { settleGraphWork, type SessionRuntime } from "./session-runtime.js";
+import type { SessionRuntime } from "./session-runtime.js";
 import type {
   RunAgentCliResult,
   RuntimeRunOptions,
@@ -133,7 +132,6 @@ export class RuntimeRunExecutor {
       await RuntimeRun.repairSessionProjection(session, {
         capability: runtimeCapability,
       });
-      await this.recoverOrphanGraphWorks(session, runtimeState);
       // reconcile 把崩溃 run 定形为 interrupted 后，store 原子落下 claim
       // 与 target run.started；prestartedRun 走已有的独立 admission 路径。
       const automaticContinuation = await this.startAutomaticContinuation(session);
@@ -341,33 +339,6 @@ export class RuntimeRunExecutor {
     return run;
   }
 
-  private async recoverOrphanGraphWorks(
-    session: Session,
-    runtimeState: SessionRuntime,
-  ): Promise<void> {
-    if (!session.runtimeEventStore || !runtimeState.graphContext) return;
-    const { orphanWorkIds } = await findOrphanGraphWorks({
-      runtimeStore: session.runtimeEventStore,
-      sessionId: session.id,
-      graphId: runtimeState.graphContext.graphId,
-      isWorkLeaseLive: (workId) => runtimeState.delegationManager.isWorkLeaseLive(workId),
-    });
-    for (const workId of orphanWorkIds) {
-      await settleGraphWork(
-        session,
-        runtimeState.graphContext,
-        workId,
-        "error",
-        "orphan: backing delegation lost on process restart (recovered)",
-        () => undefined,
-      ).catch((error) =>
-        logger.warn(
-          { sessionId: session.id, workId, error: String(error) },
-          "[graph] orphan recovery settle failed",
-        ),
-      );
-    }
-  }
 }
 
 function assertPrestartedRuntimeRun(value: PrestartedRuntimeRun): void {
