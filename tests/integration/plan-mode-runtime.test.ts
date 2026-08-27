@@ -23,7 +23,7 @@ import {
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 import { createSessionRuntime } from "../../src/runtime/session-runtime.js";
 import { RuntimeEventStorePlanOperationConflictError } from "../../src/storage/runtime-event-store-contracts.js";
-import { SubmitPlanTool } from "../../src/tools/plan-exit.js";
+import { SubmitPlanTool, UpdatePlanTool } from "../../src/tools/plan-exit.js";
 import { buildDefaultToolRegistry } from "../../src/tools/default-registry.js";
 import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
 
@@ -122,6 +122,181 @@ test("submit_plan persists a proposal and marks a machine-readable handoff", asy
   ) as { revision: number };
   assert.equal(revised.revision, 2);
   assert.equal((await coordinator.project()).revisionRequest, undefined);
+});
+
+test("update_plan reuses the caller operationId and commits one completion terminal", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-update-plan-retry-"));
+  const workDir = join(root, "work");
+  await mkdir(workDir);
+  const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "state") });
+  t.after(async () => {
+    store.close();
+    await rmRetry(root);
+  });
+  await store.initializeSession({ sessionId: "session-update-retry", workDir });
+  const coordinator = new PlanCoordinator(store, {
+    sessionId: "session-update-retry",
+    invocationId: "update-retry",
+    runId: "update-retry",
+    turnId: "update-retry",
+  });
+  const proposed = await coordinator.propose({
+    operationId: "update-retry-propose",
+    expectedSessionSequence: 0,
+    proposal: {
+      planId: "plan-update-retry",
+      title: "Retry completion",
+      steps: [{ id: "step-1", title: "Complete", description: "Complete once" }],
+    },
+  });
+  const approved = await coordinator.approve({
+    operationId: "update-retry-approve",
+    expectedSessionSequence: proposed.sessionSequence,
+    planId: "plan-update-retry",
+    expectedRevision: 1,
+    reviewedBy: "user",
+    settings: {
+      provider: "openai",
+      model: "test",
+      modelRouteId: "test/test",
+      collaborationMode: "plan",
+      permissionMode: "default",
+      orchestrationMode: "default",
+      thinkingEffort: "medium",
+      thinkingEffortExplicit: false,
+      additionalDirectories: [],
+    },
+  });
+  await coordinator.startExecution({
+    operationId: "update-retry-start",
+    expectedSessionSequence: approved.sessionSequence,
+    planId: "plan-update-retry",
+    revision: 1,
+  });
+  const tool = new UpdatePlanTool(() => coordinator, "plan-update-retry");
+  const args = JSON.stringify({
+    stepId: "step-1",
+    status: "completed",
+    operationId: "model-update-step-1",
+  });
+
+  await tool.execute(args);
+  await tool.execute(args);
+
+  const planEvents = (await store.readSession("session-update-retry")).filter(({ kind }) =>
+    kind.startsWith("plan."),
+  );
+  assert.equal(planEvents.filter(({ kind }) => kind === "plan.step.updated").length, 1);
+  assert.equal(planEvents.filter(({ kind }) => kind === "plan.execution.completed").length, 1);
+  assert.equal((await coordinator.project()).execution?.status, "completed");
+});
+
+test("a provider 400 after the final update_plan cannot replace completion with interrupted", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-plan-provider-after-complete-"));
+  const workDir = join(root, "work");
+  const picoHome = join(root, "home");
+  const sessionId = "plan-provider-after-complete";
+  await mkdir(workDir);
+  t.after(async () => {
+    const released = globalSessionManager.delete(sessionId, workDir, { picoHome });
+    await released?.close();
+    await rmRetry(root);
+  });
+  const runtime = new AgentRuntime();
+  const planned = await runtime.execute(
+    {
+      prompt: "提交一个一步计划",
+      dir: workDir,
+      sessionSelection: { mode: "new", sessionId },
+      provider: "openai",
+      modelRouteId: "test/test",
+      interactionMode: "plan",
+    },
+    {
+      picoHome,
+      reporter: new SilentReporter(),
+      provider: {
+        async generate() {
+          return {
+            role: "assistant",
+            content: "",
+            toolCalls: [
+              {
+                id: "submit-provider-after-complete",
+                name: "submit_plan",
+                arguments: JSON.stringify({
+                  title: "Provider failure after completion",
+                  steps: [{ id: "step-1", title: "Complete", description: "Complete once" }],
+                  operationId: "submit-provider-after-complete",
+                }),
+              },
+            ],
+          };
+        },
+      },
+    },
+  );
+  const handoff = planned.handoff;
+  assert.ok(handoff);
+  let executionCalls = 0;
+  const executionProvider: LLMProvider = {
+    async generate() {
+      executionCalls++;
+      if (executionCalls === 1) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "complete-before-provider-400",
+              name: "update_plan",
+              arguments: JSON.stringify({
+                stepId: "step-1",
+                status: "completed",
+                operationId: "complete-before-provider-400",
+              }),
+            },
+          ],
+        };
+      }
+      throw new Error("provider returned 400 during reconnect");
+    },
+  };
+
+  await assert.rejects(
+    runtime.approvePlanAndExecute(
+      {
+        approval: {
+          sessionId,
+          dir: workDir,
+          planId: handoff.planId,
+          expectedRevision: handoff.revision,
+          expectedSessionSequence: handoff.expectedSessionSequence,
+          operationId: "approve-provider-after-complete",
+        },
+        execution: {
+          provider: "openai",
+          modelRouteId: "test/test",
+          sessionSelection: { mode: "resume", sessionId },
+          interactionMode: "yolo",
+        },
+      },
+      { provider: executionProvider, picoHome, reporter: new SilentReporter() },
+    ),
+    /400/u,
+  );
+
+  const store = new SqliteRuntimeEventStore({
+    storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
+  });
+  const events = await store.readSession(sessionId);
+  store.close();
+  assert.equal(events.filter(({ kind }) => kind === "plan.execution.completed").length, 1);
+  assert.equal(events.filter(({ kind }) => kind === "plan.execution.interrupted").length, 0);
+  assert.equal(
+    (await runtime.readPlanProjection({ sessionId, dir: workDir, picoHome })).execution?.status,
+    "completed",
+  );
 });
 
 test("cancel and replan race commits exactly one interrupted Plan terminal", async (t) => {

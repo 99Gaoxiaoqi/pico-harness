@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { TRANSCRIPT_PROJECTOR_VERSION, type RuntimeSessionSubscriptionFrame } from "@pico/protocol";
+import {
+  TRANSCRIPT_PROJECTOR_VERSION,
+  type RuntimePlanControlSnapshot,
+  type RuntimeSessionSubscriptionFrame,
+} from "@pico/protocol";
 import {
   DesktopSessionContinuity,
   type DesktopSessionContinuityTransport,
@@ -180,5 +184,101 @@ test("desktop session continuity: raw early frame and advance update one replica
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.deepEqual(calls, ["open", "advance", "close", "open", "close", "open"]);
   assert.equal(planControls.at(-1), "pending_review");
+  continuity.dispose();
+});
+
+test("desktop session continuity: stale interrupted hydration cannot replace terminal", async () => {
+  const terminal: RuntimePlanControlSnapshot = {
+    version: 1,
+    availability: "ready",
+    state: "terminal",
+    projection: {
+      sessionId: "session-1",
+      sessionSequence: 12,
+      proposals: [],
+      execution: {
+        planId: "plan-1",
+        revision: 1,
+        status: "completed",
+        steps: [{ id: "step-1", title: "Done", description: "Done", status: "completed" }],
+        startedAt: "2026-08-27T00:00:00.000Z",
+        updatedAt: "2026-08-27T00:00:01.000Z",
+      },
+    },
+  };
+  const staleInterrupted: RuntimePlanControlSnapshot = {
+    version: 1,
+    availability: "ready",
+    state: "interrupted",
+    projection: {
+      sessionId: "session-1",
+      sessionSequence: 11,
+      proposals: [],
+      execution: {
+        planId: "plan-1",
+        revision: 1,
+        status: "interrupted",
+        steps: [{ id: "step-1", title: "Done", description: "Done", status: "completed" }],
+        startedAt: "2026-08-27T00:00:00.000Z",
+        updatedAt: "2026-08-27T00:00:00.500Z",
+      },
+    },
+  };
+  let opens = 0;
+  const controls: string[] = [];
+  const transport = {
+    subscribeFrames() {
+      return { dispose() {} };
+    },
+    async open() {
+      opens++;
+      return {
+        session: {
+          sessionId: "session-1",
+          workspacePath: "/workspace",
+          title: "test",
+          status: "active",
+          pinned: false,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+        hostEpoch: `host-${opens}`,
+        subscriptionId: `subscription-${opens}`,
+        nextSequence: 1,
+        watermark: {
+          historyEpoch: "history-1",
+          projectorVersion: TRANSCRIPT_PROJECTOR_VERSION,
+          throughSequence: 0,
+        },
+        durableTail: [],
+        activeOverlay: [],
+        queuedInputs: [],
+        planControl: opens === 1 ? terminal : staleInterrupted,
+      };
+    },
+    async close() {
+      return { closed: true as const };
+    },
+    async page() {
+      throw new Error("no older page expected");
+    },
+    async advance() {
+      throw new Error("no advance expected");
+    },
+  } as DesktopSessionContinuityTransport;
+  const continuity = new DesktopSessionContinuity({
+    transport,
+    onView() {},
+    onPlanControl: (_workspacePath, _sessionId, control) => {
+      controls.push(control?.state ?? "disconnected");
+    },
+  });
+
+  await continuity.open("/workspace", "session-1");
+  await continuity.open("/workspace", "session-1");
+
+  assert.equal(opens, 2);
+  assert.equal(continuity.planControl("/workspace", "session-1")?.state, "terminal");
+  assert.deepEqual(controls, ["terminal", "terminal"]);
   continuity.dispose();
 });

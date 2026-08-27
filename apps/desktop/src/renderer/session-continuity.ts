@@ -81,6 +81,7 @@ export class DesktopSessionContinuity {
       reopening: false,
       retryAttempt: 0,
       disposed: false,
+      ...(previous?.planControl ? { planControl: previous.planControl } : {}),
     };
     this.#bindings.set(key, binding);
     try {
@@ -110,7 +111,9 @@ export class DesktopSessionContinuity {
   private handleDisconnect(): void {
     if (this.#disposed) return;
     for (const binding of this.#bindings.values()) {
-      binding.planControl = undefined;
+      // Hide controls while disconnected, but retain the last durable projection as
+      // a monotonic fence for the reconnect snapshot. An older open response must
+      // never resurrect a control that a newer terminal projection already closed.
       this.options.onPlanControl?.(binding.workspacePath, binding.sessionId, undefined);
       void this.reopen(binding);
     }
@@ -165,8 +168,8 @@ export class DesktopSessionContinuity {
         `Session continuity open failed (${binding.replica.view.recoveryReason ?? "unknown"})`,
       );
     }
-    binding.planControl = opened.planControl;
-    this.options.onPlanControl?.(binding.workspacePath, binding.sessionId, opened.planControl);
+    binding.planControl = fresherPlanControl(binding.planControl, opened.planControl);
+    this.options.onPlanControl?.(binding.workspacePath, binding.sessionId, binding.planControl);
     this.emit(binding);
 
     let older = binding.replica.beginOlderPage();
@@ -306,4 +309,19 @@ export class DesktopSessionContinuity {
 
 function bindingKey(workspacePath: string, sessionId: string): string {
   return `${workspacePath}\u0000${sessionId}`;
+}
+
+function fresherPlanControl(
+  current: RuntimePlanControlSnapshot | undefined,
+  incoming: RuntimePlanControlSnapshot | undefined,
+): RuntimePlanControlSnapshot | undefined {
+  if (!incoming) return undefined;
+  if (!current) return incoming;
+  const currentSequence = current.projection.sessionSequence;
+  const incomingSequence = incoming.projection.sessionSequence;
+  if (incomingSequence !== currentSequence) {
+    return incomingSequence > currentSequence ? incoming : current;
+  }
+  if (current.state === "terminal" && incoming.state !== "terminal") return current;
+  return incoming;
 }
