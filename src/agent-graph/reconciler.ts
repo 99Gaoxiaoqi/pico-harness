@@ -7,6 +7,8 @@ import type {
   AgentGraphRecordRef,
 } from "./core/index.js";
 import {
+  agentOutputRecordIdFor,
+  agentGraphRecordRefFingerprint,
   canAdmitIntent,
   claimIdFor,
   deterministicFingerprint,
@@ -391,6 +393,10 @@ export class AgentGraphReconciler {
             intent,
             knownRecords: records,
             claims,
+            producerIntents: state.intents,
+            failedIntentIds: state.intents
+              .filter((candidate) => isIntentStopped(state, candidate))
+              .map((candidate) => candidate.intentId),
           });
           const facts = {
             ...observedFacts,
@@ -539,7 +545,10 @@ export class AgentGraphReconciler {
         try {
           assertCandidateMatchesClaim(candidate, claim);
           const record: AgentGraphRecordRef = {
-            recordId: recordIdFor(claim.claimId, candidate.sourceEventId),
+            recordId:
+              candidate.kind === "agent-output"
+                ? agentOutputRecordIdFor(graphId, claim.intentId)
+                : recordIdFor(claim.claimId, candidate.sourceEventId),
             graphId,
             operatorId: claim.operatorId,
             operatorGeneration: claim.operatorGeneration,
@@ -552,7 +561,7 @@ export class AgentGraphReconciler {
           };
           const result = this.store.putRecordRef({
             record,
-            recordFingerprint: deterministicFingerprint(record),
+            recordFingerprint: agentGraphRecordRefFingerprint(record),
           });
           if (!result.replayed) pass.progress += 1;
         } catch (error) {

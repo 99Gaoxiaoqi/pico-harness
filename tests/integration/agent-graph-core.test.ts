@@ -11,10 +11,12 @@ import type {
   AgentGraphScheduleRevision,
   AgentGraphScheduleState,
 } from "../../src/agent-graph/core/index.js";
+import { createBuiltinAgentGraphOperatorProfileCatalog } from "../../src/agent-graph/operator-profile-catalog.js";
 import {
   AgentGraphConflictError,
   AgentGraphReadinessError,
   applyScheduleRevision,
+  agentOutputRecordIdFor,
   canAdmitIntent,
   claimIdFor,
   createAgentGraphScheduleState,
@@ -61,13 +63,10 @@ function addCommand(
     operatorId,
     generation: 1,
     role: suffix,
-    profileSnapshot: {
-      profileId: `profile-${suffix}`,
-      model: "test-model",
-      tools: ["read_file"],
-      permissionPolicy: { mode: "read-only" },
-      systemPromptVersion: "1",
-    },
+    profileSnapshot: createBuiltinAgentGraphOperatorProfileCatalog().resolve({
+      profileId: "implement",
+      rootModelRouteId: "test-model",
+    }),
     workspacePolicy: { kind: "isolated-worktree", baseRef: "main" },
   };
   const intent: AgentGraphActivationIntent = {
@@ -76,6 +75,10 @@ function addCommand(
     operatorId,
     operatorGeneration: 1,
     instruction: `Complete ${suffix} work`,
+    expectedOutputRecordId: agentOutputRecordIdFor(
+      graphId,
+      intentIdFor(graphId, `operation-${revision}`, 0),
+    ),
     inputRefs: inputRecordIds.map((recordId) => ({ recordId })),
     createdAtRevision: revision,
     requestedBy: SOURCE,
@@ -97,6 +100,10 @@ function activateCommand(
       operatorId: operator.operatorId,
       operatorGeneration: operator.generation,
       instruction: `Complete ${suffix} work`,
+      expectedOutputRecordId: agentOutputRecordIdFor(
+        graphId,
+        intentIdFor(graphId, `operation-${revision}-${suffix}`, 0),
+      ),
       inputRefs: [],
       createdAtRevision: revision,
       requestedBy: SOURCE,
@@ -405,6 +412,38 @@ test("Readiness distinguishes resolved, in-flight, failed, and unknown inputs", 
       }),
     /belongs to another Graph/u,
   );
+});
+
+test("Graph schedule rejects cyclic future-output dependencies", () => {
+  const initial = createAgentGraphScheduleState(graph());
+  const left = addCommand(initial.graph.graphId, 1, "left");
+  const rawRight = addCommand(initial.graph.graphId, 1, "right");
+  const rightIntentId = intentIdFor(initial.graph.graphId, "cyclic-right", 0);
+  const right = {
+    ...rawRight,
+    intent: {
+      ...rawRight.intent,
+      intentId: rightIntentId,
+      expectedOutputRecordId: agentOutputRecordIdFor(initial.graph.graphId, rightIntentId),
+    },
+  };
+  const cyclic = revision(initial.graph.graphId, 1, "cyclic-dependencies", [
+    {
+      ...left,
+      intent: {
+        ...left.intent,
+        inputRefs: [{ recordId: right.intent.expectedOutputRecordId }],
+      },
+    },
+    {
+      ...right,
+      intent: {
+        ...right.intent,
+        inputRefs: [{ recordId: left.intent.expectedOutputRecordId }],
+      },
+    },
+  ]);
+  assert.throws(() => applyScheduleRevision(initial, cyclic), /dependencies must be acyclic/u);
 });
 
 test("Graph schedule rejects malformed add commands", () => {

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { graphIdFor } from "../../src/agent-graph/core/index.js";
+import { agentOutputRecordIdFor, graphIdFor } from "../../src/agent-graph/core/index.js";
 import { wakeIdFor } from "../../src/agent-graph/core/ids.js";
 import { Session } from "../../src/engine/session.js";
 import { SessionManager } from "../../src/engine/session-manager.js";
@@ -94,7 +94,7 @@ test("workspace Graph host executes an exact operator with owner-fenced output a
     assert.ok(activation);
     assert.equal(input.orchestrationMode, "default");
     assert.equal(input.requestedModel, "test/operator-model");
-    assert.deepEqual(input.allowedTools, ["read_file", "agent_output"]);
+    assert.deepEqual(input.allowedTools, ["read_file", "glob", "grep", "repo_map", "agent_output"]);
 
     const runtimeRun = await attachHostedRuntimeRun(input);
     const committed = await input.binding.outputPort.commitAgentOutput(
@@ -625,6 +625,7 @@ async function scheduleOperator(
     graphId,
     expectedRevision: 0,
     operationId: `add:${intentId}`,
+    rootModelRouteId: "test/operator-model",
     source: {
       sessionId: fixture.owner.session.id,
       turnId: "root-turn-1",
@@ -639,13 +640,7 @@ async function scheduleOperator(
           operatorId: "researcher",
           generation: 1,
           role: "researcher",
-          profileSnapshot: {
-            profileId: "test/operator",
-            model: "test/operator-model",
-            tools: ["read_file"],
-            permissionPolicy: null,
-            systemPromptVersion: "v1",
-          },
+          profileId: "explore",
           workspacePolicy: { kind: "shared" },
         },
         intent: {
@@ -654,6 +649,7 @@ async function scheduleOperator(
           operatorId: "researcher",
           operatorGeneration: 1,
           instruction: "research the requested topic",
+          expectedOutputRecordId: agentOutputRecordIdFor(graphId, intentId),
           inputRefs: [],
           createdAtRevision: 1,
           requestedBy: {

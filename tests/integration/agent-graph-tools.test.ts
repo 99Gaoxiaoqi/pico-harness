@@ -4,14 +4,13 @@ import test from "node:test";
 import type {
   AgentGraph,
   AgentGraphActivationIntent,
-  AgentGraphOperator,
 } from "../../src/agent-graph/core/contracts.js";
+import { createBuiltinAgentGraphOperatorProfileCatalog } from "../../src/agent-graph/operator-profile-catalog.js";
 import {
   AGENT_GRAPH_MAX_COMMANDS,
   AGENT_GRAPH_MAX_INPUT_REFS,
   AGENT_GRAPH_MAX_INSTRUCTION_BYTES,
   AGENT_GRAPH_MAX_JSON_BYTES,
-  AGENT_GRAPH_MAX_PROFILE_TOOLS,
   AGENT_GRAPH_MAX_SELECTED_RECORDS,
   AGENT_GRAPH_MAX_VIEW_RECORDS,
   createAgentGraphSupervisorTools,
@@ -30,6 +29,7 @@ const ROOT: AgentGraphRootToolContext = {
   rootSessionId: "root-session-1",
   rootTurnId: "root-turn-1",
   rootRunId: "root-run-1",
+  rootModelRouteId: "model-route-1",
 };
 
 const GRAPH: AgentGraph = {
@@ -54,6 +54,8 @@ const EMPTY_PROJECTION: AgentGraphSupervisorProjection = {
 
 const EMPTY_VIEW: AgentGraphSupervisorView = {
   ...EMPTY_PROJECTION,
+  availableOperatorProfiles: createBuiltinAgentGraphOperatorProfileCatalog().listPublicProfiles(),
+  intentReadiness: [],
   runtimeClaims: [],
   results: { records: [], totalBytes: 0, truncated: false },
 };
@@ -68,7 +70,20 @@ class FakePort implements AgentGraphSupervisorToolPort {
   async commitUpdate(input: CommitAgentGraphUpdateInput) {
     this.updates.push(input);
     const addCommands = input.commands.filter((command) => command.kind === "add");
-    const operators = addCommands.map((command) => command.operator);
+    const catalog = createBuiltinAgentGraphOperatorProfileCatalog();
+    const operators = addCommands.map((command) => {
+      const { profileId, ...operator } = command.operator;
+      return {
+        ...operator,
+        profile: (() => {
+          const snapshot = catalog.resolve({
+            profileId,
+            rootModelRouteId: input.rootModelRouteId,
+          });
+          return { profileId: snapshot.profileId, revision: snapshot.profileRevision };
+        })(),
+      };
+    });
     const intents = input.commands.flatMap((command) =>
       command.kind === "add" || command.kind === "activate" ? [command.intent] : [],
     );
@@ -132,10 +147,6 @@ function addCommand(overrides: Record<string, unknown> = {}) {
       description: "Research the requested topic.",
       profile: {
         profile_id: "explore",
-        model: "model-1",
-        tools: ["read_file", "web_search"],
-        permission_policy: { filesystem: "read-only", network: false },
-        system_prompt_version: "v1",
       },
       workspace: { kind: "shared" },
     },
@@ -159,12 +170,6 @@ function activateCommand(overrides: Record<string, unknown> = {}) {
     },
     ...overrides,
   };
-}
-
-function nestedJson(depth: number): unknown {
-  let value: unknown = true;
-  for (let index = 0; index < depth; index += 1) value = { nested: value };
-  return value;
 }
 
 function padJsonToBytes(json: string, bytes: number): string {
@@ -196,8 +201,10 @@ test("update_agent_graph normalizes one add command and forwards host-owned sour
   assert.equal(port.updates[0]?.operationId, "operation-1");
   const command = port.updates[0]?.commands[0];
   assert.equal(command?.kind, "add");
-  assert.equal((command as { operator: AgentGraphOperator }).operator.graphId, ROOT.graphId);
-  assert.deepEqual((command as { operator: AgentGraphOperator }).operator.workspacePolicy, {
+  if (command?.kind !== "add") assert.fail("expected add command");
+  assert.equal(command.operator.graphId, ROOT.graphId);
+  assert.equal(command.operator.profileId, "explore");
+  assert.deepEqual(command.operator.workspacePolicy, {
     kind: "shared",
   });
   assert.equal(
@@ -388,7 +395,7 @@ test("update_agent_graph rejects unknown fields at every nested command boundary
   assert.equal(port.updates.length, 0);
 });
 
-test("update_agent_graph rejects deep policy JSON and duplicate command identities", async () => {
+test("update_agent_graph rejects retired profile fields and duplicate command identities", async () => {
   const { port, byName } = fixture();
   const update = byName.get("update_agent_graph")!;
   const invalidCommands = [
@@ -399,7 +406,7 @@ test("update_agent_graph rejects deep policy JSON and duplicate command identiti
           profile: {
             ...(addCommand() as { operator: { profile: Record<string, unknown> } }).operator
               .profile,
-            permission_policy: nestedJson(32),
+            permission_policy: { mode: "default" },
           },
         },
       }),
@@ -411,7 +418,7 @@ test("update_agent_graph rejects deep policy JSON and duplicate command identiti
           profile: {
             ...(addCommand() as { operator: { profile: Record<string, unknown> } }).operator
               .profile,
-            permission_policy: Array.from({ length: 300 }, (_, index) => index),
+            tools: ["read_file"],
           },
         },
       }),
@@ -432,18 +439,6 @@ test("update_agent_graph rejects deep policy JSON and duplicate command identiti
         },
       }),
     ],
-    [
-      addCommand({
-        operator: {
-          ...(addCommand() as { operator: Record<string, unknown> }).operator,
-          profile: {
-            ...(addCommand() as { operator: { profile: Record<string, unknown> } }).operator
-              .profile,
-            tools: ["read_file", "read_file"],
-          },
-        },
-      }),
-    ],
     [{ kind: "finish", selected_record_ids: ["record-1", "record-1"] }],
   ];
 
@@ -457,7 +452,7 @@ test("update_agent_graph rejects deep policy JSON and duplicate command identiti
         }),
         { toolCallId: `provider-call-conflict-${index}` },
       ),
-      /嵌套过深|数组不得超过|finish 最多一条且必须是最后一条|finish 不能与 add 或 activate|不得包含重复项/u,
+      /不支持字段|finish 最多一条且必须是最后一条|finish 不能与 add 或 activate|不得包含重复项/u,
     );
   }
   assert.equal(port.updates.length, 0);
@@ -482,17 +477,6 @@ test("update_agent_graph enforces UTF-8 and collection limits at exact boundarie
               { length: AGENT_GRAPH_MAX_INPUT_REFS },
               (_, index) => `record-${index}`,
             ),
-          },
-          operator: {
-            ...(addCommand() as { operator: Record<string, unknown> }).operator,
-            profile: {
-              ...(addCommand() as { operator: { profile: Record<string, unknown> } }).operator
-                .profile,
-              tools: Array.from(
-                { length: AGENT_GRAPH_MAX_PROFILE_TOOLS },
-                (_, index) => `tool-${index}`,
-              ),
-            },
           },
         }),
       ],
@@ -541,32 +525,6 @@ test("update_agent_graph enforces UTF-8 and collection limits at exact boundarie
     ),
     new RegExp(`input_record_ids 不得超过 ${AGENT_GRAPH_MAX_INPUT_REFS} 项`, "u"),
   );
-  await assert.rejects(
-    update.execute(
-      JSON.stringify({
-        expected_revision: 1,
-        operation_id: "operation-over-profile-tools",
-        commands: [
-          addCommand({
-            operator: {
-              ...(addCommand() as { operator: Record<string, unknown> }).operator,
-              profile: {
-                ...(addCommand() as { operator: { profile: Record<string, unknown> } }).operator
-                  .profile,
-                tools: Array.from(
-                  { length: AGENT_GRAPH_MAX_PROFILE_TOOLS + 1 },
-                  (_, index) => `tool-over-${index}`,
-                ),
-              },
-            },
-          }),
-        ],
-      }),
-      { toolCallId: "provider-call-over-profile-tools" },
-    ),
-    /profile\.tools 不得超过/u,
-  );
-
   const exactCommands = Array.from({ length: AGENT_GRAPH_MAX_COMMANDS }, (_, index) => ({
     kind: "stop",
     target: { kind: "intent", intent_id: `intent-${index}` },

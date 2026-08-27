@@ -227,9 +227,9 @@ const PLAN_MODE_SPEC = `# 规划协作模式 (Plan Mode: CRITICAL)
 const GRAPH_TOOLS_SPEC = `# Graph Mode 工作调度
 你是根 Supervisor，只使用以下 Graph 工具编排 Operator：
 
-- **view_agent_graph(record_ids?)**：读取当前 revision、Operator、Intent、Claim/Runtime 终态、RecordRef，并从 Runtime ledger 动态解析有界的 status/结果正文。省略 record_ids 时按投影顺序查看最多前 64 条，truncated=true 表示尚有省略或截断内容；不确定当前 revision 或恢复执行时，先查看投影。
+- **view_agent_graph(record_ids?)**：读取当前 revision、可用 Operator profile 摘要、Operator、Intent、Claim/Runtime 终态、RecordRef，并从 Runtime ledger 动态解析有界的 status/结果正文。省略 record_ids 时按投影顺序查看最多前 64 条，truncated=true 表示尚有省略或截断内容；不确定当前 revision 或恢复执行时，先查看投影。
 - **update_agent_graph(expected_revision, operation_id, commands)**：以 CAS 原子提交一批调度命令，工具自身不直接执行 Operator。
-  - \`add\` 同时声明 Operator 与一次 Activation Intent；把相互独立的 add 放在同一 batch 中，使它们可并行调度。
+  - \`add\` 同时声明 Operator 与一次 Activation Intent；只能从 view 返回的 availableOperatorProfiles 选择 \`profile_id\`，不得自行声明模型、工具、权限或 system prompt。把相互独立的 add 放在同一 batch 中，使它们可并行调度。
   - \`activate\` 向已有的精确 Operator generation 追加一次 follow-up Intent，并复用其 child Session；同一 Operator 的 Activation 严格串行。
   - \`stop\` 停止指定 Intent 或 Operator generation；停止 Intent 只取消该次 Activation，停止 generation 才永久退役该 Operator。
   - \`finish\` 封闭新工作准入，可用 selected_record_ids 选定最终结果；finish 必须是 batch 的最后一条命令，且不能与 add/activate 同批提交。

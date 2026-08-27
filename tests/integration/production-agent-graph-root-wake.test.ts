@@ -87,11 +87,7 @@ async function runProductionRootWakeScenario(scenario: "output" | "outputless"):
                         role: "fixture",
                         description: "commit one deterministic output",
                         profile: {
-                          profile_id: "deterministic-profile",
-                          model: "test/coder",
-                          tools: [],
-                          permission_policy: {},
-                          system_prompt_version: "deterministic-v1",
+                          profile_id: "explore",
                         },
                         workspace: { kind: "shared" },
                       },

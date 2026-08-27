@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
-import { recordIdFor } from "../agent-graph/core/ids.js";
+import { agentGraphRecordRefFingerprint, agentOutputRecordIdFor } from "../agent-graph/core/ids.js";
 import type { SessionManager, SessionManagerLease } from "../engine/session-manager.js";
 import type { SessionOptions } from "../engine/session.js";
 import type { RuntimeEvent, RuntimeRunStartedEvent } from "../storage/runtime-event.js";
@@ -312,23 +312,31 @@ export class AgentGraphRuntimeAdapter implements AgentOutputCommitPort {
       payload: input.eventPayload,
     });
     assertCommittedAgentOutputSource(source, input, eventId, claim);
-    const recordId = recordIdFor(claim.claimId, source.eventId);
-    const recordFingerprint = fingerprint({
-      claimId: claim.claimId,
-      sourceEventId: source.eventId,
-      outputFingerprint: input.fingerprint,
-    });
-    const record = this.options.recordStore.putRecordRef({
+    const recordId = agentOutputRecordIdFor(claim.graphId, claim.intentId);
+    const canonicalRecord = {
       recordId,
       graphId: claim.graphId,
-      claimId: claim.claimId,
       operatorId: claim.operatorId,
       operatorGeneration: claim.operatorGeneration,
-      recordFingerprint,
+      activationClaimId: claim.claimId,
       sourceSessionId: source.sessionId,
       sourceTurnId: source.turnId,
       sourceRunId: source.runId,
       sourceEventId: source.eventId,
+      kind: "agent-output" as const,
+    };
+    const recordFingerprint = agentGraphRecordRefFingerprint(canonicalRecord);
+    const record = this.options.recordStore.putRecordRef({
+      recordId: canonicalRecord.recordId,
+      graphId: canonicalRecord.graphId,
+      claimId: canonicalRecord.activationClaimId,
+      operatorId: canonicalRecord.operatorId,
+      operatorGeneration: canonicalRecord.operatorGeneration,
+      recordFingerprint,
+      sourceSessionId: canonicalRecord.sourceSessionId,
+      sourceTurnId: canonicalRecord.sourceTurnId,
+      sourceRunId: canonicalRecord.sourceRunId,
+      sourceEventId: canonicalRecord.sourceEventId,
       kind: "agent_output",
     });
     return {
@@ -750,10 +758,6 @@ function renderHandoffPrompt(
 
 function deterministicRuntimeIdentity(prefix: string, value: string): string {
   return `${prefix}:${createHash("sha256").update(value).digest("hex")}`;
-}
-
-function fingerprint(value: unknown): string {
-  return `sha256:${createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
 }
 
 function requireNonEmpty(value: string, label: string): void {

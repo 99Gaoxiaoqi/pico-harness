@@ -99,6 +99,34 @@ test("Graph exact Run admits once under concurrency and replays the terminal led
   }
 });
 
+test("Graph exact Run validates host authority before Session pinning or run admission", async () => {
+  const fixture = await createFixture();
+  const run = exactRun(fixture, "preflight-rejected");
+  let pins = 0;
+  let executeCalls = 0;
+  const port = new SqliteAgentGraphExactRunPort({
+    runtimeEventStore: fixture.store,
+    sessionManager: {
+      async getOrCreatePinned() {
+        pins += 1;
+        throw new Error("Session must not be pinned");
+      },
+    } as unknown as SessionManager,
+    validateStart: () => {
+      throw new Error("invalid frozen authority");
+    },
+    execute: async () => void executeCalls++,
+  });
+  try {
+    await assert.rejects(port.startExactRun(run), /invalid frozen authority/u);
+    assert.equal(pins, 0);
+    assert.equal(executeCalls, 0);
+    assert.deepEqual(await fixture.store.readRun(run.sessionId, run.runId), []);
+  } finally {
+    await fixture.close();
+  }
+});
+
 test("Graph exact Run safely attaches after run.started and deterministic input commit", async () => {
   const fixture = await createFixture();
   const run = { ...EXACT_RUN, workDir: fixture.workDir };

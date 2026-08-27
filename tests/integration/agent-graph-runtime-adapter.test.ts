@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { agentGraphRecordRefFingerprint } from "../../src/agent-graph/core/ids.js";
 
 import {
   AGENT_GRAPH_HANDOFF_MAX_RECORD_BYTES,
@@ -293,6 +294,21 @@ test("agent_output commits one nonpartial Runtime source and creates one referen
   const record = fixture.recordStore.records.get(first.recordId!);
   assert.equal(record?.sourceEventId, first.eventId);
   assert.equal("output" in (record ?? {}), false);
+  assert.equal(
+    record?.recordFingerprint,
+    agentGraphRecordRefFingerprint({
+      recordId: record!.recordId,
+      graphId: record!.graphId,
+      operatorId: record!.operatorId,
+      operatorGeneration: record!.operatorGeneration,
+      activationClaimId: record!.claimId,
+      sourceSessionId: record!.sourceSessionId,
+      sourceTurnId: record!.sourceTurnId,
+      sourceRunId: record!.sourceRunId,
+      sourceEventId: record!.sourceEventId,
+      kind: "agent-output",
+    }),
+  );
 });
 
 test("handoff enforces UTF-8 safe 16KiB record and 48KiB total budgets with provenance", async () => {

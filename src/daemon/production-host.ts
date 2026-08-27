@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { assertValidAgentGraphOperatorProfileSnapshot } from "../agent-graph/operator-profile-catalog.js";
 import { createCliSessionId, listCliSessionCatalogEntries } from "../cli/session-resolver.js";
 import { globalSessionManager } from "../engine/session.js";
 import type { SessionManagerLease } from "../engine/session-manager.js";
@@ -283,35 +284,56 @@ export function createProductionRuntimeServices(
       if (!input.session.runtimeEventStore) {
         throw new Error(`Production Graph requires durable Session: ${targetSessionId}`);
       }
+      const operatorProfile =
+        input.binding.kind === "operator" ? input.binding.profileSnapshot : undefined;
+      if (operatorProfile) assertValidAgentGraphOperatorProfileSnapshot(operatorProfile);
       const persistedSettings = (await input.session.readHydrationSnapshot()).runtime.settings;
       const route = await resolveDesktopModelRoute(
         runWorkDir,
         credentialVault,
         userConfigStore,
         effectiveConfigResolver,
-        input.requestedModel ?? persistedSettings?.modelRouteId,
+        operatorProfile?.modelRouteId ?? input.requestedModel ?? persistedSettings?.modelRouteId,
         persistedSettings?.provider,
         env,
       );
+      if (operatorProfile && route.modelRouteId !== operatorProfile.modelRouteId) {
+        throw new Error("Graph Operator model route no longer resolves to its frozen identity");
+      }
+      const rootBinding = input.binding.kind === "root" ? input.binding : undefined;
+      const graphBinding: AgentGraphRunToolBinding = rootBinding
+        ? {
+            ...rootBinding,
+            getRootContext: () => {
+              const context = rootBinding.getRootContext();
+              return context ? { ...context, rootModelRouteId: route.modelRouteId } : undefined;
+            },
+          }
+        : input.binding;
       const reasoningLevel = coordinateReasoningLevel(
         route.capabilities.reasoningProfile,
         persistedSettings?.thinkingEffortExplicit ? persistedSettings.thinkingEffort : undefined,
       ).level;
-      const effectiveMcp = await resolveTrustedEffectiveMcpSources(runWorkDir, {
-        picoHome,
-        trustStore,
-        userStore: userMcpConfigStore,
-      });
-      const pluginSnapshot = await pluginRuntimeSnapshotRegistry.get(runWorkDir);
+      const effectiveMcp = operatorProfile
+        ? { sources: [] as const }
+        : await resolveTrustedEffectiveMcpSources(runWorkDir, {
+            picoHome,
+            trustStore,
+            userStore: userMcpConfigStore,
+          });
+      const pluginSnapshot = operatorProfile
+        ? undefined
+        : await pluginRuntimeSnapshotRegistry.get(runWorkDir);
       runtimeState = await createSessionRuntime({
         session: input.session,
         sessionLease,
         env,
         workspaceTrustStore: trustStore,
-        ...(workspaceRuntime.taskHostRuntime
+        ...(operatorProfile ? { lspEnabled: false as const, hooks: false as const } : {}),
+        ...(!operatorProfile && workspaceRuntime.taskHostRuntime
           ? { taskHostRuntime: workspaceRuntime.taskHostRuntime }
           : {}),
-        ...(persistedSettings?.collaborationMode !== "plan" && pluginSnapshot.hookSources.length
+        ...(persistedSettings?.collaborationMode !== "plan" && pluginSnapshot?.hookSources.length
           ? { hookExtensionSources: pluginSnapshot.hookSources }
           : {}),
       });
@@ -364,12 +386,14 @@ export function createProductionRuntimeServices(
           model: route.model,
           modelRouteId: route.modelRouteId,
           modelCapabilities: route.capabilities,
-          // Graph profile policy is model-authored until a trusted profile catalog exists.
-          // Keep every detached Run at the interactive, non-elevated default boundary.
           interactionMode: "default",
           orchestrationMode: input.orchestrationMode,
           ...(reasoningLevel !== undefined ? { thinkingEffort: reasoningLevel } : {}),
-          ...(input.allowedTools ? { allowedTools: input.allowedTools } : {}),
+          ...(operatorProfile
+            ? { allowedTools: [...operatorProfile.tools, "agent_output"] }
+            : input.allowedTools
+              ? { allowedTools: input.allowedTools }
+              : {}),
         },
         {
           signal: context.signal,
@@ -380,15 +404,17 @@ export function createProductionRuntimeServices(
           approvalManager: broker.approvalManager,
           askUserHandler: broker.askUserHandler,
           waitAtSafeBoundary: context.waitAtSafeBoundary,
-          pluginSnapshot,
-          pluginCapabilityRegistry,
-          mcpConfigSources: effectiveMcp.sources,
+          ...(pluginSnapshot ? { pluginSnapshot, pluginCapabilityRegistry } : {}),
+          ...(operatorProfile ? { isolatedHeadless: true as const } : {}),
+          ...(!operatorProfile && effectiveMcp.sources.length
+            ? { mcpConfigSources: effectiveMcp.sources }
+            : {}),
           picoHome,
           env,
-          browserAgent: browserAgentBroker.bind(targetSessionId),
+          ...(operatorProfile ? {} : { browserAgent: browserAgentBroker.bind(targetSessionId) }),
           prestartedRun: input.prestartedRun,
           prestartedUserInput: input.prestartedUserInput,
-          agentGraph: input.binding,
+          agentGraph: graphBinding,
           memoryProposalSink: (notice: MemoryProposalPublishedNotice) =>
             publishDesktopMemoryProposal(
               service,
@@ -799,6 +825,7 @@ export function createProductionRuntimeServices(
                   agentGraph: rootAgentGraphBinding(
                     requireAgentGraphWorkspaceHost(agentGraphHosts, workspacePath),
                     targetSessionId,
+                    route.modelRouteId,
                   ),
                 }
               : {}),
@@ -1630,6 +1657,7 @@ function requireAgentGraphWorkspaceHost(
 function rootAgentGraphBinding(
   host: AgentGraphWorkspaceHost,
   rootSessionId: string,
+  rootModelRouteId: string,
 ): AgentGraphRunToolBinding {
   return {
     kind: "root",
@@ -1646,6 +1674,7 @@ function rootAgentGraphBinding(
         rootSessionId,
         rootTurnId,
         rootRunId: run.runId,
+        rootModelRouteId,
       };
     },
     toolPort: host.application.toolPort,

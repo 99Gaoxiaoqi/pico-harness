@@ -37,6 +37,8 @@ export interface ResolveAgentGraphInputsRequest {
   readonly intent: AgentGraphActivationIntent;
   readonly knownRecords: readonly AgentGraphRecordRef[];
   readonly claims: readonly AgentGraphActivationClaim[];
+  readonly producerIntents: readonly AgentGraphActivationIntent[];
+  readonly failedIntentIds: readonly string[];
 }
 
 export interface EnsureAgentGraphOperatorRequest {

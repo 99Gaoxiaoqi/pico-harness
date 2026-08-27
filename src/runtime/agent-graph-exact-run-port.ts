@@ -34,6 +34,8 @@ export interface CreateAgentGraphExactRunPortOptions {
   readonly sessionOptions?:
     | SessionOptions
     | ((input: StartExactAgentGraphRunInput) => SessionOptions | undefined);
+  /** Fail-closed authority validation that runs before Session pinning or run.started admission. */
+  readonly validateStart?: (input: StartExactAgentGraphRunInput) => void | Promise<void>;
   /** Host-owned assembly of SessionRuntime, AgentEngine, providers, tools and observers. */
   execute(input: ExecuteAgentGraphExactRunInput): Promise<void>;
   readonly requestStop?: (input: {
@@ -118,6 +120,7 @@ export class SqliteAgentGraphExactRunPort implements AgentGraphExactRunPort {
     input: StartExactAgentGraphRunInput,
   ): Promise<"started" | "observed"> {
     assertStartInput(input);
+    await this.options.validateStart?.(input);
     const sessionOptions =
       typeof this.options.sessionOptions === "function"
         ? this.options.sessionOptions(input)

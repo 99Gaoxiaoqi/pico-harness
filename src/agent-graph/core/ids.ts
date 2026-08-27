@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import type {
   AgentGraphOperationSource,
+  AgentGraphRecordRef,
   AgentGraphScheduleCommand,
   AgentGraphScheduleRevision,
 } from "./contracts.js";
@@ -68,6 +69,14 @@ export function claimIdFor(graphId: string, intentId: string): string {
 
 export function recordIdFor(claimId: string, sourceEventId: string): string {
   return deterministicId("record", [claimId, sourceEventId]);
+}
+
+export function agentOutputRecordIdFor(graphId: string, intentId: string): string {
+  return deterministicId("agent-output-record", [graphId, intentId]);
+}
+
+export function agentGraphRecordRefFingerprint(record: AgentGraphRecordRef): string {
+  return deterministicFingerprint(record);
 }
 
 export function wakeIdFor(graphId: string, dedupeKey: string): string {

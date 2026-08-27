@@ -12,15 +12,15 @@ import type {
   AgentGraphScheduleCommand,
 } from "../../src/agent-graph/core/index.js";
 import {
-  claimIdFor,
+  agentOutputRecordIdFor,
   intentIdFor,
   operatorIdFor,
-  recordIdFor,
 } from "../../src/agent-graph/core/index.js";
 import {
   AgentGraphReconciler,
   deterministicAgentGraphIdentities,
 } from "../../src/agent-graph/reconciler.js";
+import { createBuiltinAgentGraphOperatorProfileCatalog } from "../../src/agent-graph/operator-profile-catalog.js";
 import type {
   AgentGraphRuntimePort,
   AgentGraphRuntimeProjection,
@@ -42,11 +42,7 @@ const SOURCE: AgentGraphOperationSource = {
 test("reconciler drives dependent operators to a fixed point with exact durable identities", async () => {
   await withGraph(async ({ raw, store, graphId }) => {
     const upstream = addCommand(graphId, "researcher", 1);
-    const upstreamEventId = `event:${upstream.intent.intentId}`;
-    const expectedUpstreamRecordId = recordIdFor(
-      claimIdFor(graphId, upstream.intent.intentId),
-      upstreamEventId,
-    );
+    const expectedUpstreamRecordId = upstream.intent.expectedOutputRecordId;
     const downstream = addCommand(graphId, "reviewer", 2, [expectedUpstreamRecordId]);
     const independent = addCommand(graphId, "auditor", 1);
     store.commitScheduleRevision({
@@ -397,13 +393,10 @@ function addCommand(
     operatorId,
     generation: 1,
     role,
-    profileSnapshot: {
-      profileId: `profile:${role}`,
-      model: "fake-model",
-      tools: ["read_file"],
-      permissionPolicy: { mode: "read-only" },
-      systemPromptVersion: "1",
-    },
+    profileSnapshot: createBuiltinAgentGraphOperatorProfileCatalog().resolve({
+      profileId: "implement",
+      rootModelRouteId: "fake-model",
+    }),
     workspacePolicy: { kind: "shared" },
   };
   const intent: AgentGraphActivationIntent = {
@@ -412,6 +405,7 @@ function addCommand(
     operatorId,
     operatorGeneration: 1,
     instruction: `Complete ${role} work`,
+    expectedOutputRecordId: agentOutputRecordIdFor(graphId, intentIdFor(graphId, `add-${role}`, 0)),
     inputRefs: inputRecordIds.map((recordId) => ({ recordId })),
     createdAtRevision: revision,
     requestedBy: SOURCE,

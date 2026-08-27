@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { wakeIdFor } from "../../src/agent-graph/core/ids.js";
+import { agentOutputRecordIdFor, wakeIdFor } from "../../src/agent-graph/core/ids.js";
 import { createProductionRuntimeServices } from "../../src/daemon/production-host.js";
 import { globalSessionManager } from "../../src/engine/session.js";
 import {
@@ -121,6 +121,7 @@ test("production operator assembly failure becomes terminal and wakes the root w
       graphId,
       expectedRevision: 0,
       operationId: "add-operator-with-missing-route",
+      rootModelRouteId: "missing/operator-assembly-model",
       source: {
         sessionId: fixture.rootSessionId,
         turnId: "root-turn-before-operator-failure",
@@ -135,13 +136,7 @@ test("production operator assembly failure becomes terminal and wakes the root w
             operatorId: "broken-operator",
             generation: 1,
             role: "fixture",
-            profileSnapshot: {
-              profileId: "fixture/broken-operator",
-              model: "missing/operator-assembly-model",
-              tools: [],
-              permissionPolicy: null,
-              systemPromptVersion: "v1",
-            },
+            profileId: "explore",
             workspacePolicy: { kind: "shared" },
           },
           intent: {
@@ -150,6 +145,7 @@ test("production operator assembly failure becomes terminal and wakes the root w
             operatorId: "broken-operator",
             operatorGeneration: 1,
             instruction: "This must fail during production route assembly.",
+            expectedOutputRecordId: agentOutputRecordIdFor(graphId, "intent-broken-operator"),
             inputRefs: [],
             createdAtRevision: 1,
             requestedBy: {

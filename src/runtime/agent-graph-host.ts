@@ -8,7 +8,16 @@ import type {
   ResolveAgentGraphOperatorWorkspaceInput,
   ResolvedAgentGraphOperatorWorkspace,
 } from "../agent-graph/runtime-adapter-bridge.js";
+import {
+  assertValidAgentGraphOperatorProfileSnapshot,
+  type AgentGraphOperatorProfileCatalog,
+} from "../agent-graph/operator-profile-catalog.js";
+import type { AgentGraphProfileSnapshot } from "../agent-graph/core/contracts.js";
 import { SqliteAgentGraphControlStore } from "../storage/sqlite/sqlite-agent-graph-control-store.js";
+import type {
+  AgentGraphActivationClaimRecord,
+  AgentGraphOperatorProvisionRecord,
+} from "../storage/sqlite/agent-graph-store-types.js";
 import type { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 import type {
   AgentGraphRootToolContext,
@@ -37,6 +46,7 @@ export type AgentGraphRunToolBinding =
       readonly kind: "operator";
       readonly getActivationContext: () => GraphOperatorActivationContext | undefined;
       readonly outputPort: AgentOutputCommitPort;
+      readonly profileSnapshot: AgentGraphProfileSnapshot;
     };
 
 export interface ExecuteHostedAgentGraphRunInput extends ExecuteAgentGraphExactRunInput {
@@ -54,6 +64,7 @@ export interface CreateAgentGraphWorkspaceHostOptions {
   readonly runtimeEventStore: SqliteRuntimeEventStore;
   readonly sessionManager: SessionManager;
   readonly sessionOptions?: SessionOptions;
+  readonly operatorProfileCatalog?: AgentGraphOperatorProfileCatalog;
   execute(input: ExecuteHostedAgentGraphRunInput): Promise<void>;
   readonly resolveOperatorWorkspace?: (
     input: ResolveAgentGraphOperatorWorkspaceInput,
@@ -81,6 +92,7 @@ export interface AgentGraphWorkspaceHost {
     readonly rootSessionId: string;
     readonly rootTurnId: string;
     readonly rootRunId: string;
+    readonly rootModelRouteId?: string;
   }): AgentGraphRunToolBinding;
   start(): Promise<void>;
   close(): Promise<void>;
@@ -116,6 +128,10 @@ export function createAgentGraphWorkspaceHost(
     ...(options.sessionOptions ? { sessionOptions: options.sessionOptions } : {}),
     ...(options.requestStop ? { requestStop: options.requestStop } : {}),
     ...(options.inspectLaunch ? { inspectLaunch: options.inspectLaunch } : {}),
+    validateStart: (input) => {
+      const claim = store.getActivationClaim(input.claimId);
+      if (claim) requireValidProvisionProfile(store, claim);
+    },
     execute: async (input) => {
       const app = requireApplication(application);
       const claim = store.getActivationClaim(input.claimId);
@@ -126,14 +142,7 @@ export function createAgentGraphWorkspaceHost(
       let wakeId: string | undefined;
 
       if (claim) {
-        const provision = store
-          .listOperatorProvisions(claim.graphId)
-          .find(
-            (candidate) =>
-              candidate.operatorId === claim.operatorId &&
-              candidate.generation === claim.operatorGeneration,
-          );
-        if (!provision) throw new Error(`Graph activation ${claim.claimId} has no provision`);
+        const provision = requireValidProvisionProfile(store, claim);
         const activation: GraphOperatorActivationContext = {
           kind: "graph_operator_activation",
           graphId: claim.graphId,
@@ -144,10 +153,16 @@ export function createAgentGraphWorkspaceHost(
           turnId: claim.targetTurnId,
           runId: claim.targetRunId,
         };
-        binding = { kind: "operator", getActivationContext: () => activation, outputPort: runtime };
+        const profileSnapshot = provision.profileSnapshot;
+        binding = {
+          kind: "operator",
+          getActivationContext: () => activation,
+          outputPort: runtime,
+          profileSnapshot,
+        };
         orchestrationMode = "default";
-        requestedModel = optionalString(provision.profileSnapshot, "model");
-        allowedTools = [...stringArray(provision.profileSnapshot, "tools"), "agent_output"];
+        requestedModel = profileSnapshot.modelRouteId;
+        allowedTools = [...profileSnapshot.tools, "agent_output"];
       } else {
         wakeId = rootWakeIdFromClaim(input.claimId);
         const recoverable = await store.getRecoverableSupervisorWake(wakeId);
@@ -214,6 +229,9 @@ export function createAgentGraphWorkspaceHost(
     store,
     runtime,
     rootWakePort,
+    ...(options.operatorProfileCatalog
+      ? { operatorProfileCatalog: options.operatorProfileCatalog }
+      : {}),
     resolveOperatorWorkspace:
       options.resolveOperatorWorkspace ??
       ((input) => {
@@ -262,16 +280,20 @@ function rootWakeIdFromClaim(claimId: string): string {
   return wakeId;
 }
 
-function optionalString(value: unknown, key: string): string | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const candidate = (value as Record<string, unknown>)[key];
-  return typeof candidate === "string" && candidate.trim() ? candidate : undefined;
-}
-
-function stringArray(value: unknown, key: string): readonly string[] {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
-  const candidate = (value as Record<string, unknown>)[key];
-  return Array.isArray(candidate) && candidate.every((item) => typeof item === "string")
-    ? candidate
-    : [];
+function requireValidProvisionProfile(
+  store: SqliteAgentGraphControlStore,
+  claim: AgentGraphActivationClaimRecord,
+): AgentGraphOperatorProvisionRecord & { readonly profileSnapshot: AgentGraphProfileSnapshot } {
+  const provision = store
+    .listOperatorProvisions(claim.graphId)
+    .find(
+      (candidate) =>
+        candidate.operatorId === claim.operatorId &&
+        candidate.generation === claim.operatorGeneration,
+    );
+  if (!provision) throw new Error(`Graph activation ${claim.claimId} has no provision`);
+  assertValidAgentGraphOperatorProfileSnapshot(provision.profileSnapshot);
+  return provision as AgentGraphOperatorProvisionRecord & {
+    readonly profileSnapshot: AgentGraphProfileSnapshot;
+  };
 }

@@ -6,7 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
+import { agentOutputRecordIdFor } from "../../src/agent-graph/core/ids.js";
 import { SqliteAgentGraphControlStoreAdapter } from "../../src/agent-graph/sqlite-control-store-adapter.js";
+import { createBuiltinAgentGraphOperatorProfileCatalog } from "../../src/agent-graph/operator-profile-catalog.js";
 import {
   AgentGraphStoreConflictError,
   SqliteAgentGraphControlStore,
@@ -558,6 +560,96 @@ test("schedule add atomically accepts only committed input RecordRefs from the s
   }
 });
 
+test("schedule accepts declared same-Graph future outputs and rejects foreign future outputs", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-agent-graph-future-inputs-"));
+  const store = new SqliteAgentGraphControlStore({ storageRoot: root });
+  const control = new SqliteAgentGraphControlStoreAdapter(store);
+  try {
+    store.createGraph({ graphId: "future-batch", rootSessionId: "future-batch-root", epoch: 1 });
+    const batchProducer = graphAddCommand({
+      graphId: "future-batch",
+      suffix: "batch-producer",
+      revision: 1,
+      inputRecordIds: [],
+    });
+    const batchConsumer = graphAddCommand({
+      graphId: "future-batch",
+      suffix: "batch-consumer",
+      revision: 1,
+      inputRecordIds: [batchProducer.intent.expectedOutputRecordId],
+    });
+    assert.equal(
+      control.commitScheduleRevision({
+        graphId: "future-batch",
+        expectedPreviousRevision: 0,
+        operationId: "future-batch",
+        source: operationSource("future-batch-root", "future-batch"),
+        commands: [batchProducer, batchConsumer],
+      }).record.revision,
+      1,
+    );
+
+    store.createGraph({
+      graphId: "future-persisted",
+      rootSessionId: "future-persisted-root",
+      epoch: 1,
+    });
+    const persistedProducer = graphAddCommand({
+      graphId: "future-persisted",
+      suffix: "persisted-producer",
+      revision: 1,
+      inputRecordIds: [],
+    });
+    control.commitScheduleRevision({
+      graphId: "future-persisted",
+      expectedPreviousRevision: 0,
+      operationId: "persist-producer",
+      source: operationSource("future-persisted-root", "persist-producer"),
+      commands: [persistedProducer],
+    });
+    const persistedConsumer = graphAddCommand({
+      graphId: "future-persisted",
+      suffix: "persisted-consumer",
+      revision: 2,
+      inputRecordIds: [persistedProducer.intent.expectedOutputRecordId],
+    });
+    assert.equal(
+      control.commitScheduleRevision({
+        graphId: "future-persisted",
+        expectedPreviousRevision: 1,
+        operationId: "persist-consumer",
+        source: operationSource("future-persisted-root", "persist-consumer"),
+        commands: [persistedConsumer],
+      }).record.revision,
+      2,
+    );
+
+    store.createGraph({ graphId: "future-target", rootSessionId: "future-target-root", epoch: 1 });
+    assert.throws(
+      () =>
+        control.commitScheduleRevision({
+          graphId: "future-target",
+          expectedPreviousRevision: 0,
+          operationId: "foreign-future",
+          source: operationSource("future-target-root", "foreign-future"),
+          commands: [
+            graphAddCommand({
+              graphId: "future-target",
+              suffix: "foreign-future-consumer",
+              revision: 1,
+              inputRecordIds: [persistedProducer.intent.expectedOutputRecordId],
+            }),
+          ],
+        }),
+      /belongs to Graph future-persisted/u,
+    );
+    assert.equal(store.getGraph("future-target")?.headRevision, 0);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("agent graph store serializes schedule, activation, and finish races across processes", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-agent-graph-race-"));
   try {
@@ -715,12 +807,10 @@ function graphAddCommand(options: {
       operatorId: `operator-${options.suffix}`,
       generation: 1,
       role: `role-${options.suffix}`,
-      profileSnapshot: {
-        profileId: "default",
-        tools: [],
-        permissionPolicy: null,
-        systemPromptVersion: "v1",
-      },
+      profileSnapshot: createBuiltinAgentGraphOperatorProfileCatalog().resolve({
+        profileId: "implement",
+        rootModelRouteId: "test-model",
+      }),
       workspacePolicy: { kind: "shared" as const },
     },
     intent: {
@@ -729,6 +819,7 @@ function graphAddCommand(options: {
       operatorId: `operator-${options.suffix}`,
       operatorGeneration: 1,
       instruction: `instruction-${options.suffix}`,
+      expectedOutputRecordId: agentOutputRecordIdFor(options.graphId, `intent-${options.suffix}`),
       inputRefs: options.inputRecordIds.map((recordId) => ({ recordId })),
       createdAtRevision: options.revision,
       requestedBy: source,

@@ -20,6 +20,7 @@ import {
 } from "../context/context-budget.js";
 import { PromptComposer } from "../context/composer.js";
 import type { TodoStore } from "../context/todo-store.js";
+import type { AgentGraphProfileSnapshot } from "../agent-graph/core/contracts.js";
 import { SkillLoader, type Skill } from "../context/skill.js";
 import { ToolDisclosure, type ToolGroupLoadedEventLike } from "../tools/tool-disclosure.js";
 import { isToolSupportedForHost, type ToolHostKind } from "../tools/tool-surface.js";
@@ -324,6 +325,7 @@ export interface RunAgentCliDependencies extends RuntimeHost {
         readonly kind: "operator";
         readonly getActivationContext: () => GraphOperatorActivationContext | undefined;
         readonly outputPort: AgentOutputCommitPort;
+        readonly profileSnapshot: AgentGraphProfileSnapshot;
       };
   /** 仅用于后台执行的实时信任校验；生产默认读取用户级 WorkspaceTrustStore。 */
   backgroundTrustStore?: BackgroundWorkspaceTrustVerifier;
@@ -975,11 +977,15 @@ export async function executeAgentRuntime(
     }
     if (!settings.collaborationMode) throw new Error("Session collaborationMode is unavailable");
     const sideConversation = settings.sideConversation === true;
-    const collaborationMode = (): "agent" | "plan" => settings.collaborationMode!;
+    const collaborationMode = (): "agent" | "plan" =>
+      dependencies.agentGraph?.kind === "operator" ? "agent" : settings.collaborationMode!;
     planRun = collaborationMode() === "plan";
     const orchestrationMode = (): "default" | "graph" =>
       options.orchestrationMode ?? settings.orchestrationMode ?? "default";
-    const permissionMode = (): "default" | "auto" | "yolo" => settings.permissionMode;
+    const permissionMode = (): "default" | "auto" | "yolo" =>
+      dependencies.agentGraph?.kind === "operator"
+        ? dependencies.agentGraph.profileSnapshot.permissionPolicy.mode
+        : settings.permissionMode;
     if (options.approvedPlan) {
       if (settings.collaborationMode !== "agent") {
         throw new Error("Approved plan execution requires collaborationMode=agent");
@@ -1075,7 +1081,9 @@ export async function executeAgentRuntime(
     }
     const workspaceRoots = await WorkspaceRoots.create(
       workDir,
-      backgroundPolicy || sessionSelection.mode === "fork"
+      backgroundPolicy ||
+        dependencies.agentGraph?.kind === "operator" ||
+        sessionSelection.mode === "fork"
         ? []
         : [
             ...configuredAdditionalDirectories,
@@ -1106,17 +1114,18 @@ export async function executeAgentRuntime(
       effectiveOptions,
       dependencies.provider !== undefined,
     );
-    const pluginSnapshot = backgroundPolicy
-      ? undefined
-      : (dependencies.pluginSnapshot ??
-        (await loadPluginRuntimeSnapshot({
-          workDir,
-          env: runtimeEnv,
-          picoHome,
-          ...(dependencies.pluginCapabilityRegistry
-            ? { capabilityRegistry: dependencies.pluginCapabilityRegistry }
-            : {}),
-        })));
+    const pluginSnapshot =
+      backgroundPolicy || dependencies.agentGraph?.kind === "operator"
+        ? undefined
+        : (dependencies.pluginSnapshot ??
+          (await loadPluginRuntimeSnapshot({
+            workDir,
+            env: runtimeEnv,
+            picoHome,
+            ...(dependencies.pluginCapabilityRegistry
+              ? { capabilityRegistry: dependencies.pluginCapabilityRegistry }
+              : {}),
+          })));
     const ownsPluginSnapshot =
       pluginSnapshot !== undefined && dependencies.pluginSnapshot === undefined;
     const pluginActivationScope = new PluginCapabilityActivationScope();
@@ -1182,7 +1191,10 @@ export async function executeAgentRuntime(
           ? { toolDisclosure: dependencies.toolDisclosure }
           : {}),
         // LSP 是项目配置启动的子进程；后台策略尚未为其提供网络/写入沙箱。
-        lspEnabled: !backgroundPolicy && collaborationMode() !== "plan",
+        lspEnabled:
+          !backgroundPolicy &&
+          dependencies.agentGraph?.kind !== "operator" &&
+          collaborationMode() !== "plan",
         lspServers: [...picoConfig.lspServers, ...(pluginSnapshot?.lspServers ?? [])],
         sessionStartSource:
           sessionSelection.mode === "resume" || sessionSelection.mode === "continue"
@@ -1201,7 +1213,9 @@ export async function executeAgentRuntime(
     if (ownsRuntimeState) sessionLeaseTransferred = true;
     cleanupRuntimeState = runtimeState;
     if (!ownsRuntimeState) {
-      await runtimeState.setCodeIntelligenceEnabled(collaborationMode() !== "plan");
+      await runtimeState.setCodeIntelligenceEnabled(
+        dependencies.agentGraph?.kind !== "operator" && collaborationMode() !== "plan",
+      );
     }
     if (collaborationMode() !== "plan" && dependencies.hookService) {
       runtimeState.attachHookService(dependencies.hookService);
@@ -1567,8 +1581,8 @@ export async function executeAgentRuntime(
       dependencies.askUserHandler,
       runtimeState.codeIntelligence,
       (path) => {
-        if (settings.mode === "yolo") return false;
-        if (settings.mode === "plan" || path === undefined) return true;
+        if (permissionMode() === "yolo") return false;
+        if (collaborationMode() === "plan" || path === undefined) return true;
         return !isSensitiveCredentialPath(workspaceRoots.resolveUnchecked(path));
       },
       backgroundPolicy
@@ -1737,7 +1751,15 @@ export async function executeAgentRuntime(
         );
       }
       return {
-        systemPrompt: composed.systemPrompt,
+        systemPrompt:
+          dependencies.agentGraph?.kind === "operator"
+            ? [
+                composed.systemPrompt,
+                "<graph-operator-profile>",
+                dependencies.agentGraph.profileSnapshot.systemPrompt.content,
+                "</graph-operator-profile>",
+              ].join("\n")
+            : composed.systemPrompt,
         turnTail: turnTailParts.join("\n\n"),
       };
     };
@@ -1839,6 +1861,8 @@ export async function executeAgentRuntime(
           session.picoHome,
           dependencies.onPolicyDenied,
           permissionMode,
+          dependencies.agentGraph?.kind !== "operator" ||
+            dependencies.agentGraph.profileSnapshot.permissionPolicy.allowSessionGrants,
         ),
       );
     }
@@ -2709,6 +2733,7 @@ export function buildPermissionMiddleware(
   picoHome?: string,
   denialSink?: (event: RuntimePolicyDenial) => void,
   permissionMode?: () => "default" | "auto" | "yolo",
+  allowSessionGrants = true,
 ): MiddlewareFunc {
   return async (call, context) => {
     const mode =
@@ -2733,20 +2758,18 @@ export function buildPermissionMiddleware(
       ? await externalAuthorizationDirectories(externalAccesses, workspaceRoots)
       : [];
     const safetyPath = bypassImmuneSafetyPath(call, workDir, workspaceRoots);
-    const hasSessionGrant = globalSessionPermissionGrants.allows(
-      sessionId,
-      call,
-      workDir,
-      workspaceRoots,
-      picoHome,
-    );
-    const hasExplicitSafetyGrant = globalSessionPermissionGrants.allowsSafetyOverride(
-      sessionId,
-      call,
-      workDir,
-      workspaceRoots,
-      picoHome,
-    );
+    const hasSessionGrant =
+      allowSessionGrants &&
+      globalSessionPermissionGrants.allows(sessionId, call, workDir, workspaceRoots, picoHome);
+    const hasExplicitSafetyGrant =
+      allowSessionGrants &&
+      globalSessionPermissionGrants.allowsSafetyOverride(
+        sessionId,
+        call,
+        workDir,
+        workspaceRoots,
+        picoHome,
+      );
 
     if (
       context?.forceApproval !== true &&
@@ -2848,7 +2871,7 @@ export function buildPermissionMiddleware(
       return result.allowed ? result : { ...result, denialSource: "human" };
     }
 
-    if (result.allowForSession) {
+    if (result.allowForSession && allowSessionGrants) {
       await applySessionPermissionScope(scope, {
         sessionId,
         workDir,
