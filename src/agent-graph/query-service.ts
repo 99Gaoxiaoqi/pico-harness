@@ -25,6 +25,10 @@ export interface AgentGraphTimelineItem {
     | "activation.cancelled"
     | "record.committed"
     | "resource.retained"
+    | "workspace.requested"
+    | "workspace.active"
+    | "workspace.retained"
+    | "workspace.cleaned"
     | "yield.registered"
     | "yield.resolved"
     | "wake.enqueued"
@@ -79,6 +83,7 @@ export class AgentGraphReadOnlyQueryService {
         claims: this.store.listActivationClaims(graph.graphId),
         records: this.store.listRecordRefs(graph.graphId),
         resources: this.store.listResourceRefs(graph.graphId),
+        workspaceResources: this.store.listWorkspaceResources(graph.graphId),
       };
     }
 
@@ -113,6 +118,7 @@ export class AgentGraphReadOnlyQueryService {
         claims: this.store.listActivationClaims(graphId).length,
         records: this.store.listRecordRefs(graphId).length,
         resources: this.store.listResourceRefs(graphId).length,
+        workspaceResources: this.store.listWorkspaceResources(graphId).length,
         wakes: this.store.listSupervisorWakes(graphId).length,
       },
     };
@@ -214,6 +220,16 @@ export class AgentGraphReadOnlyQueryService {
         subjectId: resource.resourceId,
         status: resource.kind,
         detail: resource.contentDigest,
+      });
+    }
+    for (const resource of this.store.listWorkspaceResources(graphId)) {
+      items.push({
+        id: `workspace:${resource.resourceId}:${resource.version}`,
+        at: resource.state === "requested" ? resource.createdAt : resource.updatedAt,
+        kind: `workspace.${resource.state}`,
+        subjectId: resource.provisionId,
+        status: resource.state,
+        detail: resource.retainReason ?? resource.branch,
       });
     }
     for (const interest of this.store.listYieldInterests(graphId)) {

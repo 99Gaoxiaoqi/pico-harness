@@ -30,6 +30,7 @@ import type {
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { AgentGraphRuntimeAdapter } from "./agent-graph-runtime-adapter.js";
 import { AgentGraphResourceAuthority } from "./agent-graph-resource-authority.js";
+import { AgentGraphWorkspaceResourceAuthority } from "./agent-graph-workspace-resource-authority.js";
 import type { AgentGraphRunLaunchState } from "./agent-graph-runtime-adapter.js";
 import {
   SqliteAgentGraphExactRunPort,
@@ -62,6 +63,7 @@ export interface ExecuteHostedAgentGraphRunInput extends ExecuteAgentGraphExactR
 
 export interface CreateAgentGraphWorkspaceHostOptions {
   readonly workDir: string;
+  readonly repoRoot?: string;
   readonly storageRoot: string;
   readonly runtimeEventStore: SqliteRuntimeEventStore;
   readonly sessionManager: SessionManager;
@@ -112,6 +114,13 @@ export function createAgentGraphWorkspaceHost(
   });
   const liveLaunches = new Set<string>();
   const activeSessions = new Map<string, Session>();
+  const workspaceAuthority = options.repoRoot
+    ? new AgentGraphWorkspaceResourceAuthority({
+        repoRoot: options.repoRoot,
+        storageRoot: options.storageRoot,
+        store,
+      })
+    : undefined;
 
   const outputLedger = new SqliteAgentGraphOutputLedger({
     store: options.runtimeEventStore,
@@ -129,7 +138,10 @@ export function createAgentGraphWorkspaceHost(
   const exactRuns = new SqliteAgentGraphExactRunPort({
     runtimeEventStore: options.runtimeEventStore,
     sessionManager: options.sessionManager,
-    ...(options.sessionOptions ? { sessionOptions: options.sessionOptions } : {}),
+    sessionOptions: {
+      ...options.sessionOptions,
+      runtimeStorageRoot: options.storageRoot,
+    },
     ...(options.requestStop ? { requestStop: options.requestStop } : {}),
     ...(options.inspectLaunch ? { inspectLaunch: options.inspectLaunch } : {}),
     validateStart: (input) => {
@@ -244,15 +256,34 @@ export function createAgentGraphWorkspaceHost(
     ...(options.operatorProfileCatalog
       ? { operatorProfileCatalog: options.operatorProfileCatalog }
       : {}),
+    validateWorkspacePolicy: (policy) => {
+      if (
+        policy.kind === "isolated-worktree" &&
+        !workspaceAuthority &&
+        !options.resolveOperatorWorkspace
+      ) {
+        throw new Error("isolated-worktree requires a Git workspace resource authority");
+      }
+    },
     resolveOperatorWorkspace:
       options.resolveOperatorWorkspace ??
-      ((input) => {
-        if (input.operator.workspacePolicy.kind !== "shared") {
-          throw new Error("isolated-worktree Graph operators require a host workspace resolver");
+      (async (input) => {
+        if (input.operator.workspacePolicy.kind === "shared") {
+          return {
+            workDir: options.workDir,
+            sessionOptions: {
+              ...options.sessionOptions,
+              runtimeStorageRoot: options.storageRoot,
+            },
+          };
         }
+        if (!workspaceAuthority) {
+          throw new Error("isolated-worktree requires a Git workspace resource authority");
+        }
+        const resolved = await workspaceAuthority.resolve(input.provision);
         return {
-          workDir: options.workDir,
-          ...(options.sessionOptions ? { sessionOptions: options.sessionOptions } : {}),
+          ...resolved,
+          sessionOptions: { ...options.sessionOptions, ...resolved.sessionOptions },
         };
       }),
     ...(options.now ? { now: options.now } : {}),
@@ -269,12 +300,18 @@ export function createAgentGraphWorkspaceHost(
       getRootContext: () => ({ kind: "graph_root_supervisor", ...input }),
       toolPort: requireApplication(application).toolPort,
     }),
-    start: () => requireApplication(application).start(),
+    start: async () => {
+      await workspaceAuthority?.recover();
+      await requireApplication(application).start();
+    },
     close: async () => {
       if (closed) return;
       closed = true;
-      await requireApplication(application).close();
-      store.close();
+      try {
+        await requireApplication(application).close();
+      } finally {
+        store.close();
+      }
     },
   };
 }

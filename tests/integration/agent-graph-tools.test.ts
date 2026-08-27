@@ -314,36 +314,42 @@ test("update_agent_graph rejects malformed commands, forged root identity, and i
   assert.equal(port.updates.length, 0);
 });
 
-test("update_agent_graph exposes and accepts only the production-supported shared workspace", async () => {
+test("update_agent_graph exposes shared and isolated workspace requests", async () => {
   const { port, byName } = fixture();
   const update = byName.get("update_agent_graph")!;
   const schema = JSON.stringify(update.definition().inputSchema);
   assert.match(schema, /"enum":\["shared"\]/u);
-  assert.doesNotMatch(schema, /isolated-worktree|base_ref/u);
+  assert.match(schema, /isolated-worktree/u);
+  assert.match(schema, /base_ref/u);
 
   const command = addCommand() as ReturnType<typeof addCommand> & {
     operator: Record<string, unknown>;
   };
-  await assert.rejects(
-    update.execute(
-      JSON.stringify({
-        expected_revision: 0,
-        operation_id: "operation-isolated-worktree",
-        commands: [
-          {
-            ...command,
-            operator: {
-              ...command.operator,
-              workspace: { kind: "isolated-worktree", base_ref: "main" },
-            },
+  await update.execute(
+    JSON.stringify({
+      expected_revision: 0,
+      operation_id: "operation-isolated-worktree",
+      commands: [
+        {
+          ...command,
+          operator: {
+            ...command.operator,
+            workspace: { kind: "isolated-worktree", base_ref: "main" },
           },
-        ],
-      }),
-      { toolCallId: "provider-call-isolated-worktree" },
-    ),
-    /workspace\.kind 当前仅支持 shared/u,
+        },
+      ],
+    }),
+    { toolCallId: "provider-call-isolated-worktree" },
   );
-  assert.equal(port.updates.length + port.reads.length + port.yields.length, 0);
+  assert.deepEqual(
+    port.updates[0]?.commands[0]?.kind === "add"
+      ? port.updates[0].commands[0].operator.workspacePolicy
+      : undefined,
+    {
+      kind: "isolated-worktree",
+      baseRef: "main",
+    },
+  );
 });
 
 test("update_agent_graph rejects unknown fields at every nested command boundary", async () => {

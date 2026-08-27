@@ -584,11 +584,20 @@ function parseWorkspace(
   path: string,
 ): AgentGraphOperator["workspacePolicy"] {
   const kind = value["kind"];
-  if (kind !== "shared") {
-    throw new Error(`update_agent_graph 参数无效：${path}.kind 当前仅支持 shared。`);
+  if (kind === "shared") {
+    assertKeys(value, ["kind"], ["kind"], path);
+    return { kind };
   }
-  assertKeys(value, ["kind"], ["kind"], path);
-  return { kind };
+  if (kind === "isolated-worktree") {
+    assertKeys(value, ["kind", "base_ref"], ["kind"], path);
+    return {
+      kind,
+      ...(value["base_ref"] === undefined
+        ? {}
+        : { baseRef: requiredIdentity(value["base_ref"], `${path}.base_ref`) }),
+    };
+  }
+  throw new Error(`update_agent_graph 参数无效：${path}.kind 必须是 shared 或 isolated-worktree。`);
 }
 
 function parseStopCommand(value: Record<string, unknown>, index: number): AgentGraphStopCommand {
@@ -949,10 +958,23 @@ function addCommandSchema(): Record<string, unknown> {
             additionalProperties: false,
           },
           workspace: {
-            type: "object",
-            properties: { kind: { type: "string", enum: ["shared"] } },
-            required: ["kind"],
-            additionalProperties: false,
+            oneOf: [
+              {
+                type: "object",
+                properties: { kind: { type: "string", enum: ["shared"] } },
+                required: ["kind"],
+                additionalProperties: false,
+              },
+              {
+                type: "object",
+                properties: {
+                  kind: { type: "string", enum: ["isolated-worktree"] },
+                  base_ref: { type: "string" },
+                },
+                required: ["kind"],
+                additionalProperties: false,
+              },
+            ],
           },
         },
         required: ["operator_id", "generation", "role", "profile", "workspace"],

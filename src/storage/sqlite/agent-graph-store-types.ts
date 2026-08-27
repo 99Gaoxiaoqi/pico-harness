@@ -210,6 +210,48 @@ export interface PutAgentGraphResourceRefInput {
   readonly metadata: unknown;
 }
 
+export type AgentGraphWorkspaceResourceState = "requested" | "active" | "retained" | "cleaned";
+
+export interface AgentGraphWorkspaceResourceRecord {
+  readonly resourceId: string;
+  readonly graphId: string;
+  readonly provisionId: string;
+  readonly childSessionId: string;
+  readonly repoRoot: string;
+  readonly worktreePath: string;
+  readonly branch: string;
+  readonly baseRef: string;
+  readonly baseCommit: string;
+  readonly state: AgentGraphWorkspaceResourceState;
+  readonly version: number;
+  readonly retainReason?: string;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly retainedAt?: number;
+  readonly cleanedAt?: number;
+}
+
+export interface EnsureAgentGraphWorkspaceResourceInput {
+  readonly resourceId: string;
+  readonly graphId: string;
+  readonly provisionId: string;
+  readonly childSessionId: string;
+  readonly repoRoot: string;
+  readonly worktreePath: string;
+  readonly branch: string;
+  readonly baseRef: string;
+  readonly baseCommit: string;
+}
+
+export interface TransitionAgentGraphWorkspaceResourceInput {
+  readonly resourceId: string;
+  readonly expectedVersion: number;
+  readonly from: AgentGraphWorkspaceResourceState;
+  readonly to: Extract<AgentGraphWorkspaceResourceState, "active" | "retained" | "cleaned">;
+  readonly baseCommit?: string;
+  readonly retainReason?: string;
+}
+
 export interface AgentGraphSupervisorWakeRecord {
   readonly wakeId: string;
   readonly graphId: string;

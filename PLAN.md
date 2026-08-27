@@ -26,16 +26,16 @@
 - [x] 5. 已实现 `src/agent-graph/reconciler.ts`，按 stop → provision → resolve inputs → revision-conditional claim → begin executing → project records 推进到 fixed point；finish 阻止 fresh Claim，但保留既有 Claim 与 Runtime 事实。
 - [x] 6. 已实现 workspace 级 `AgentGraphSupervisorService` 及 `WorkspaceRuntimeService` 生命周期接入，覆盖启动扫描、single-flight reconcile、持久 yield/Wake/Attempt、退避、权限等待、manual intervention 和精确根 RuntimeRun。
 - [x] 7. Graph 工具与 prompt 已硬切为 `view_agent_graph`、`update_agent_graph`、`yield_agent_graph` 和 operator-only `agent_output`；已删除 `DelegationManager` Graph 分支、Graph work lease、旧 settle/reconcile/recover 与 engine continuation 写路径；历史数据、codec、类型与 reducer 也已彻底退役。
-- [ ] 8. 确定性集成测试已覆盖 revision 幂等/冲突、readiness、stop/finish 与 Claim 竞争、两个 SQLite store/进程竞争、投影重建、exact Run attach/indeterminate/stop/authority/损坏账本、真实宿主 operator/root execute、owner fence、yield/wake 竞态、production 装配失败和 workspace 生命周期；关键并发组连续 10 轮共 400 项无失败。尚未用独立子进程逐一 kill/reopen 覆盖 claim 后 Run 前、provider 前后、terminal 后 wake 前的全部崩溃窗口。
+- [x] 8. 确定性集成测试已覆盖 revision 幂等/冲突、readiness、stop/finish 与 Claim 竞争、两个 SQLite store/进程竞争、投影重建、exact Run attach/indeterminate/stop/authority/损坏账本、真实宿主 operator/root execute、owner fence、yield/wake 竞态、production 装配失败和 workspace 生命周期；关键并发组连续 10 轮共 400 项无失败。独立子进程 SIGKILL/reopen 进一步验证 schedule、Provision、Claim、provider dispatch、output event、Wake Attempt 与 worktree 外部副作用窗口的事实持久性和二次恢复幂等。
 - [x] 9. 已完成 Graph v2 架构文档、旧数据硬切说明、production daemon host 执行接线和最终确定性验证：独立审查的 Graph/production 集成集 91/91 通过，`npm run lint`、`npm run typecheck`、严格架构边界检查、build、依赖审计（0 vulnerabilities）、Desktop typecheck/package/make、DMG 镜像校验、格式和差异检查通过。最终全量集成测试 1364 项中 1354 项通过、0 项失败、10 项仅因当前 macOS 平台跳过；Hook watcher 的丢通知、慢 guard 去重、guard 内二次写、startup gap、stop/restart 与旧异步回调撤租也已收口并通过 32 项生命周期回归。
 - [x] 10. 真实模型 E2E 已在用户默认路由 `deepseek/deepseek-v4-flash` 显式执行并 2/2 通过：完整走通 root → Operator → 唯一 durable output/Record → exact root wake → `view_agent_graph` 读取随机 canary/status → finish，约 44.9 秒完成；输出内容只经 Runtime RecordRef 返回，未复制到 Graph 控制库或 wake prompt。
-- [x] 11. 已修复 exact root wake 的 Provider 前失败、`agent_output` 非法 Unicode/重复 provenance 输入和 Supervisor root context 污染身份；公共 `update_agent_graph` 仅接受 `shared` workspace，`isolated-worktree` 在 submit/持久化前 fail closed。
+- [x] 11. 已修复 exact root wake 的 Provider 前失败、`agent_output` 非法 Unicode/重复 provenance 输入和 Supervisor root context 污染身份；workspace 策略由宿主在 schedule 持久化前校验，不具备 Git resource authority 的工作区对 `isolated-worktree` fail closed。
 - [x] 12. 已实现宿主内置 Operator 目录；公共 add 只接受 `profile_id`，应用服务冻结带指纹快照，production 在 Provider 前复验并强制默认权限、禁止 Session grant 累积与关闭扩展装配；Supervisor 投影不暴露内部快照。
 - [x] 13. 已实现完整 readiness facts：每个 Intent 由宿主派生单一正式输出 ID，允许同 Graph 未来输出作为依赖，拒绝任意/跨 Graph/循环引用，并在 view 中暴露 resolved/in_flight/failed/unknown 分类。
 - [x] 14. 已实现 artifact/evidence handoff：`agent_output` 在正式 Runtime 事实前校验规范 URI、Session 归属、资源存在性、SHA-256 摘要和字节数，Graph 持久保留不可变资源事实并纳入 artifact/evidence blob GC 存活集；handoff 按原输出顺序返回有界摘要与资源 provenance，重启后可从 SQLite 重建。
 - [x] 15. 已实现 root Run 绑定的多 epoch 分配：同一 root Session 复用当前 open Graph，finish 后下次 root Run 原子取得下一 epoch，工具读取不再隐式创建 Graph，且所有 root 工具请求校验精确 epoch。Desktop 通过只读 `session.graph.query` 按 Session 列出 epoch、读取调度摘要和稳定水位分页时间线；面板仅在激活时轮询，查询不会启动、恢复或修改 Graph。
-- [ ] 16. 实现 `isolated-worktree` 的持久 resource authority、adopt/release/retain/cleanup 生命周期和验收。
-- [ ] 17. 新增独立子进程真实 kill/reopen 测试，覆盖 schedule、provision、claim、provider、output、wake 和 workspace resource 窗口。
+- [x] 16. 已实现 `isolated-worktree` 持久 resource authority：确定性分支/路径和 immutable base commit 入库，启动可 adopt，宿主关闭只 release，dirty/未合并工作保留，安全状态才 cleanup；Operator cwd 与根 workspace 持久事实根解耦，避免产生第二套 Session/Runtime 权威。
+- [x] 17. 已新增独立子进程真实 SIGKILL/reopen 验收，覆盖 schedule、Provision、Claim、provider dispatch、output event、Wake Attempt 和 workspace resource 的 Git add/数据库提交间隙，并以第二次 reopen 锁定幂等与精确身份。
 
 ## Validation
 

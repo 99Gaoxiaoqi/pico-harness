@@ -291,6 +291,8 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   hostKind?: ToolHostKind;
   /** Session-scoped services owned by the caller and reused across prompts. */
   runtimeState?: SessionRuntime;
+  /** @internal Trusted host-selected Session; exact Graph runs must not resolve it from cwd again. */
+  runtimeSession?: Session;
   /** 仅由可展示结构化问题的 TUI bundle 提供。 */
   askUserHandler?: AskUserHandler;
   /** Host-owned approval state, required when decisions are settled outside the TUI process. */
@@ -899,13 +901,23 @@ export async function executeAgentRuntime(
   const defaultConfigModel = options.model ?? defaultModel(kind);
 
   // 阶段 2：获取持久化 Session，并推导会话级有效配置。
-  const sessionLease = await acquireRuntimeSession({
-    sessionSelection,
-    workDir,
-    picoHome,
-    resumeExistingSession,
-  });
+  const injectedSession = dependencies.runtimeSession;
+  if (
+    injectedSession &&
+    (injectedSession.id !== sessionSelection.sessionId || injectedSession.workDir !== workDir)
+  ) {
+    throw new Error(`Host-selected Session does not match the runtime request: ${sessionSelection.sessionId}`);
+  }
+  const sessionLease = injectedSession
+    ? { session: injectedSession, release: globalSessionManager.pin(injectedSession) }
+    : await acquireRuntimeSession({
+        sessionSelection,
+        workDir,
+        picoHome,
+        resumeExistingSession,
+      });
   const session = sessionLease.session;
+  const sessionStorageRoot = session.runtimeStorageRoot;
   let executionCoordinator: PlanCoordinator | undefined;
   let activeExecutionPlanId: string | undefined;
   let planRun = false;
@@ -1171,7 +1183,7 @@ export async function executeAgentRuntime(
     if (dependencies.runtimeState === undefined && !ownedUsageStore) {
       try {
         ownedUsageStore = new SqliteRuntimeControlStore({
-          storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
+          storageRoot: sessionStorageRoot,
         });
       } catch (error) {
         logger.error(
@@ -1230,7 +1242,7 @@ export async function executeAgentRuntime(
     if (!runtimeState.taskHostRuntime && !ownedUsageStore) {
       try {
         ownedUsageStore = new SqliteRuntimeControlStore({
-          storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
+          storageRoot: sessionStorageRoot,
         });
       } catch (error) {
         logger.error(
@@ -1262,9 +1274,6 @@ export async function executeAgentRuntime(
         };
       },
     };
-    const workspaceStatePaths = resolvePicoPaths(workDir, {
-      picoHome: session.picoHome,
-    }).workspace;
     const currentConfig: ProviderConfig = providerConfig;
     const routeCredentials =
       dependencies.provider === undefined && dependencies.modelRouter && currentConfig.routeId
@@ -1273,7 +1282,7 @@ export async function executeAgentRuntime(
     const credentialPool =
       routeCredentials.length > 1 ? new CredentialPool([...routeCredentials]) : undefined;
     const providerDependencies: ProviderRuntimeDependencies = {
-      promptCachePrewarm: PromptCachePrewarmCoordinator.shared(workspaceStatePaths.root),
+      promptCachePrewarm: PromptCachePrewarmCoordinator.shared(sessionStorageRoot),
     };
     const providerFactory = dependencies.providerFactory ?? createRawProvider;
     const providerDecorator = (provider: LLMProvider): LLMProvider => {
@@ -1368,7 +1377,7 @@ export async function executeAgentRuntime(
       (dependencies.provider === undefined
         ? async () => {
             const ledger = new SqliteRuntimeControlStore({
-              storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
+              storageRoot: sessionStorageRoot,
             });
             const billingRoute = billingRouteForProvider(kind, currentConfig);
             const provider = new CostTracker(
@@ -1482,7 +1491,7 @@ export async function executeAgentRuntime(
       runtimeState;
     const sessionTaskAuthority = {
       repository: new SqliteSessionWorkbarRepository({
-        storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
+        storageRoot: sessionStorageRoot,
       }),
       sessionId: session.id,
       onChanged: (revision: number) =>

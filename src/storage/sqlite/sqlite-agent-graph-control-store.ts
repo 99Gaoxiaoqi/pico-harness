@@ -23,6 +23,7 @@ import type {
   EnqueueAgentGraphSupervisorWakeInput,
   EnqueueAgentGraphSupervisorWakeForYieldResult,
   EnsureAgentGraphOperatorProvisionInput,
+  EnsureAgentGraphWorkspaceResourceInput,
   IdempotentStoreResult,
   PutAgentGraphRecordRefInput,
   PutAgentGraphResourceRefInput,
@@ -32,6 +33,8 @@ import type {
   SettleAgentGraphSupervisorWakeResult,
   TransitionAgentGraphClaimInput,
   TransitionAgentGraphProvisionInput,
+  TransitionAgentGraphWorkspaceResourceInput,
+  AgentGraphWorkspaceResourceRecord,
 } from "./agent-graph-store-types.js";
 
 export * from "./agent-graph-store-types.js";
@@ -672,6 +675,146 @@ export class SqliteAgentGraphControlStore {
     );
   }
 
+  ensureWorkspaceResource(
+    input: EnsureAgentGraphWorkspaceResourceInput,
+  ): IdempotentStoreResult<AgentGraphWorkspaceResourceRecord> {
+    const normalized = normalizeWorkspaceResourceInput(input);
+    return this.write(() => {
+      const existing = this.selectWorkspaceResource(normalized.resourceId);
+      if (existing) return replayWorkspaceResource(existing, normalized);
+      const byProvision = this.selectWorkspaceResourceByProvision(normalized.provisionId);
+      if (byProvision) return replayWorkspaceResource(byProvision, normalized);
+      const provision = this.selectProvisionById(normalized.provisionId);
+      if (
+        !provision ||
+        provision.graphId !== normalized.graphId ||
+        provision.childSessionId !== normalized.childSessionId
+      ) {
+        throw new AgentGraphStoreConflictError(
+          `Workspace resource ${normalized.resourceId} does not match provision ${normalized.provisionId}`,
+        );
+      }
+      const binding = asOptionalRecord(provision.workspaceBinding);
+      if (binding?.["kind"] !== "isolated-worktree") {
+        throw new AgentGraphStoreConflictError(
+          `Provision ${normalized.provisionId} is not bound to an isolated worktree`,
+        );
+      }
+      const now = this.now();
+      this.lease.database
+        .prepare(
+          `INSERT INTO agent_graph_workspace_resources
+           (resource_id, graph_id, provision_id, child_session_id, repo_root,
+            worktree_path, branch, base_ref, base_commit, state, version,
+            retain_reason, created_at, updated_at, retained_at, cleaned_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'requested', 1, NULL, ?, ?, NULL, NULL)`,
+        )
+        .run(
+          normalized.resourceId,
+          normalized.graphId,
+          normalized.provisionId,
+          normalized.childSessionId,
+          normalized.repoRoot,
+          normalized.worktreePath,
+          normalized.branch,
+          normalized.baseRef,
+          normalized.baseCommit,
+          now,
+          now,
+        );
+      return { record: this.requireWorkspaceResource(normalized.resourceId), replayed: false };
+    });
+  }
+
+  getWorkspaceResource(resourceId: string): AgentGraphWorkspaceResourceRecord | undefined {
+    return this.read(() => this.selectWorkspaceResource(requireNonEmpty(resourceId, "resourceId")));
+  }
+
+  getWorkspaceResourceByProvision(
+    provisionId: string,
+  ): AgentGraphWorkspaceResourceRecord | undefined {
+    return this.read(() =>
+      this.selectWorkspaceResourceByProvision(requireNonEmpty(provisionId, "provisionId")),
+    );
+  }
+
+  getWorkspaceResourceBySession(
+    childSessionId: string,
+  ): AgentGraphWorkspaceResourceRecord | undefined {
+    return this.read(() => {
+      const row = this.lease.database
+        .prepare("SELECT * FROM agent_graph_workspace_resources WHERE child_session_id = ?")
+        .get(requireNonEmpty(childSessionId, "childSessionId"));
+      return row ? workspaceResourceFromRow(asRow(row)) : undefined;
+    });
+  }
+
+  listWorkspaceResources(graphId?: string): readonly AgentGraphWorkspaceResourceRecord[] {
+    return this.read(() => {
+      const rows = graphId
+        ? this.lease.database
+            .prepare(
+              `SELECT * FROM agent_graph_workspace_resources
+               WHERE graph_id = ? ORDER BY created_at ASC, resource_id ASC`,
+            )
+            .all(requireNonEmpty(graphId, "graphId"))
+        : this.lease.database
+            .prepare(
+              `SELECT * FROM agent_graph_workspace_resources
+               ORDER BY created_at ASC, resource_id ASC`,
+            )
+            .all();
+      return rows.map((row) => workspaceResourceFromRow(asRow(row)));
+    });
+  }
+
+  transitionWorkspaceResource(
+    input: TransitionAgentGraphWorkspaceResourceInput,
+  ): AgentGraphWorkspaceResourceRecord {
+    requirePositiveInteger(input.expectedVersion, "expectedVersion");
+    const resourceId = requireNonEmpty(input.resourceId, "resourceId");
+    assertWorkspaceResourceTransition(input);
+    return this.write(() => {
+      const current = this.selectWorkspaceResource(resourceId);
+      if (!current)
+        throw new AgentGraphStoreConflictError(`Workspace resource ${resourceId} does not exist`);
+      if (current.version !== input.expectedVersion || current.state !== input.from) {
+        throw new AgentGraphStoreConflictError(
+          `Workspace resource ${resourceId} transition lost its CAS`,
+        );
+      }
+      const now = this.now();
+      const result = this.lease.database
+        .prepare(
+          `UPDATE agent_graph_workspace_resources
+           SET state = ?, version = version + 1, base_commit = COALESCE(?, base_commit),
+               retain_reason = ?, updated_at = ?,
+               retained_at = CASE WHEN ? = 'retained' THEN ? ELSE retained_at END,
+               cleaned_at = CASE WHEN ? = 'cleaned' THEN ? ELSE cleaned_at END
+           WHERE resource_id = ? AND version = ? AND state = ?`,
+        )
+        .run(
+          input.to,
+          input.baseCommit ?? null,
+          input.retainReason ?? null,
+          now,
+          input.to,
+          now,
+          input.to,
+          now,
+          resourceId,
+          input.expectedVersion,
+          input.from,
+        );
+      if (result.changes !== 1) {
+        throw new AgentGraphStoreConflictError(
+          `Workspace resource ${resourceId} transition lost its CAS`,
+        );
+      }
+      return this.requireWorkspaceResource(resourceId);
+    });
+  }
+
   registerYieldInterest(
     input: RegisterAgentGraphYieldInterestInput,
   ): IdempotentStoreResult<AgentGraphYieldInterestRecord> {
@@ -1196,6 +1339,32 @@ export class SqliteAgentGraphControlStore {
     return row ? provisionFromRow(asRow(row)) : undefined;
   }
 
+  private selectWorkspaceResource(
+    resourceId: string,
+  ): AgentGraphWorkspaceResourceRecord | undefined {
+    const row = this.lease.database
+      .prepare("SELECT * FROM agent_graph_workspace_resources WHERE resource_id = ?")
+      .get(resourceId);
+    return row ? workspaceResourceFromRow(asRow(row)) : undefined;
+  }
+
+  private selectWorkspaceResourceByProvision(
+    provisionId: string,
+  ): AgentGraphWorkspaceResourceRecord | undefined {
+    const row = this.lease.database
+      .prepare("SELECT * FROM agent_graph_workspace_resources WHERE provision_id = ?")
+      .get(provisionId);
+    return row ? workspaceResourceFromRow(asRow(row)) : undefined;
+  }
+
+  private requireWorkspaceResource(resourceId: string): AgentGraphWorkspaceResourceRecord {
+    const resource = this.selectWorkspaceResource(resourceId);
+    if (!resource) {
+      throw new AgentGraphStoreConflictError(`Workspace resource ${resourceId} does not exist`);
+    }
+    return resource;
+  }
+
   private requireProvision(
     graphId: string,
     operatorId: string,
@@ -1697,6 +1866,22 @@ function normalizeResourceRefInput(
   };
 }
 
+function normalizeWorkspaceResourceInput(
+  input: EnsureAgentGraphWorkspaceResourceInput,
+): EnsureAgentGraphWorkspaceResourceInput {
+  return {
+    resourceId: requireNonEmpty(input.resourceId, "resourceId"),
+    graphId: requireNonEmpty(input.graphId, "graphId"),
+    provisionId: requireNonEmpty(input.provisionId, "provisionId"),
+    childSessionId: requireNonEmpty(input.childSessionId, "childSessionId"),
+    repoRoot: requireNonEmpty(input.repoRoot, "repoRoot"),
+    worktreePath: requireNonEmpty(input.worktreePath, "worktreePath"),
+    branch: requireNonEmpty(input.branch, "branch"),
+    baseRef: requireNonEmpty(input.baseRef, "baseRef"),
+    baseCommit: requireNonEmpty(input.baseCommit, "baseCommit"),
+  };
+}
+
 function normalizeYieldInterestInput(
   input: RegisterAgentGraphYieldInterestInput,
 ): RegisterAgentGraphYieldInterestInput {
@@ -1866,6 +2051,39 @@ function replayResourceRef(
   return { record: existing, replayed: true };
 }
 
+function replayWorkspaceResource(
+  existing: AgentGraphWorkspaceResourceRecord,
+  input: EnsureAgentGraphWorkspaceResourceInput,
+): IdempotentStoreResult<AgentGraphWorkspaceResourceRecord> {
+  if (
+    existing.resourceId !== input.resourceId ||
+    existing.graphId !== input.graphId ||
+    existing.provisionId !== input.provisionId ||
+    existing.childSessionId !== input.childSessionId ||
+    existing.repoRoot !== input.repoRoot ||
+    existing.worktreePath !== input.worktreePath ||
+    existing.branch !== input.branch ||
+    existing.baseRef !== input.baseRef ||
+    existing.baseCommit !== input.baseCommit
+  ) {
+    throw new AgentGraphStoreConflictError(
+      `Workspace resource ${input.resourceId} is bound to different immutable metadata`,
+    );
+  }
+  return { record: existing, replayed: true };
+}
+
+function assertWorkspaceResourceTransition(
+  input: TransitionAgentGraphWorkspaceResourceInput,
+): void {
+  if (input.from === "requested" && input.to === "active") {
+    return;
+  }
+  if (input.from === "active" && (input.to === "retained" || input.to === "cleaned")) return;
+  if (input.from === "retained" && input.to === "cleaned") return;
+  throw new Error(`Unsupported workspace resource transition ${input.from} -> ${input.to}`);
+}
+
 function replayYieldInterest(
   existing: AgentGraphYieldInterestRecord,
   input: RegisterAgentGraphYieldInterestInput,
@@ -2015,6 +2233,27 @@ function resourceRefFromRow(row: Record<string, unknown>): AgentGraphResourceRef
     title: rowOptionalString(row, "title"),
     metadata: rowJson(row, "metadata_json"),
     createdAt: rowNumber(row, "created_at"),
+  });
+}
+
+function workspaceResourceFromRow(row: Record<string, unknown>): AgentGraphWorkspaceResourceRecord {
+  return compact({
+    resourceId: rowString(row, "resource_id"),
+    graphId: rowString(row, "graph_id"),
+    provisionId: rowString(row, "provision_id"),
+    childSessionId: rowString(row, "child_session_id"),
+    repoRoot: rowString(row, "repo_root"),
+    worktreePath: rowString(row, "worktree_path"),
+    branch: rowString(row, "branch"),
+    baseRef: rowString(row, "base_ref"),
+    baseCommit: rowString(row, "base_commit"),
+    state: rowString(row, "state") as AgentGraphWorkspaceResourceRecord["state"],
+    version: rowNumber(row, "version"),
+    retainReason: rowOptionalString(row, "retain_reason"),
+    createdAt: rowNumber(row, "created_at"),
+    updatedAt: rowNumber(row, "updated_at"),
+    retainedAt: rowOptionalNumber(row, "retained_at"),
+    cleanedAt: rowOptionalNumber(row, "cleaned_at"),
   });
 }
 

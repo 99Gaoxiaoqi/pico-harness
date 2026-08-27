@@ -72,7 +72,7 @@ export class SessionManager {
   async getOrCreate(id: string, workDir: string, options?: SessionOptions): Promise<Session> {
     this.evictExpired();
 
-    const key = this.entryKey(id, workDir, options?.picoHome);
+    const key = this.entryKey(id, workDir, options?.picoHome, options?.runtimeStorageRoot);
     const existing = this.entries.get(key);
     if (existing) {
       existing.lastAccessMs = Date.now();
@@ -99,7 +99,7 @@ export class SessionManager {
     options?: SessionOptions,
   ): Promise<SessionManagerLease> {
     this.evictExpired();
-    const key = this.entryKey(id, workDir, options?.picoHome);
+    const key = this.entryKey(id, workDir, options?.picoHome, options?.runtimeStorageRoot);
     const existing = this.entries.get(key);
     if (existing) return this.pinEntry(key, existing);
 
@@ -120,9 +120,9 @@ export class SessionManager {
   get(
     id: string,
     workDir?: string,
-    options: { readonly picoHome?: string } = {},
+    options: { readonly picoHome?: string; readonly runtimeStorageRoot?: string } = {},
   ): Session | undefined {
-    const key = this.findEntryKey(id, workDir, options.picoHome);
+    const key = this.findEntryKey(id, workDir, options.picoHome, options.runtimeStorageRoot);
     if (!key) return undefined;
     const entry = this.entries.get(key);
     if (!entry) return undefined;
@@ -132,7 +132,12 @@ export class SessionManager {
   }
 
   pin(session: Session): () => void {
-    const key = this.entryKey(session.id, session.workDir, session.picoHome);
+    const key = this.entryKey(
+      session.id,
+      session.workDir,
+      session.picoHome,
+      session.runtimeStorageRoot,
+    );
     const entry = this.entries.get(key);
     if (!entry) {
       throw new Error(`SessionManager cannot pin unmanaged Session: ${session.id}`);
@@ -320,13 +325,23 @@ export class SessionManager {
     });
   }
 
-  private entryKey(id: string, workDir: string, picoHome?: string): string {
-    return sessionEntryKey(id, workDir, picoHome);
+  private entryKey(
+    id: string,
+    workDir: string,
+    picoHome?: string,
+    runtimeStorageRoot?: string,
+  ): string {
+    return sessionEntryKey(id, workDir, picoHome, runtimeStorageRoot);
   }
 
-  private findEntryKey(id: string, workDir?: string, picoHome?: string): string | undefined {
+  private findEntryKey(
+    id: string,
+    workDir?: string,
+    picoHome?: string,
+    runtimeStorageRoot?: string,
+  ): string | undefined {
     if (workDir !== undefined) {
-      const key = this.entryKey(id, workDir, picoHome);
+      const key = this.entryKey(id, workDir, picoHome, runtimeStorageRoot);
       return this.entries.has(key) ? key : undefined;
     }
 

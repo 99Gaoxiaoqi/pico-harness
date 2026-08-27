@@ -153,7 +153,7 @@ Operator = {
     systemPrompt: { version, content },
     extensionPolicy: none
   },
-  workspacePolicy: shared | isolated-worktree (future)
+  workspacePolicy: shared | isolated-worktree
 }
 ```
 
@@ -163,7 +163,8 @@ Operator = {
 - production Operator 只消费持久快照中的精确模型路由、工具集、权限边界和 system prompt。运行时强制 `default` 权限，禁止 Session grant 累积，并在装配前关闭 MCP、Plugin、Hook、LSP、Browser 和 memory worker；
 - Supervisor 投影只暴露 profile ID/revision 及有界目录摘要，不返回 system prompt 正文、权限细节或模型路由；
 - `generation` 为替换同一逻辑角色保留代际边界，stop 可精确落到某一代；
-- workspace policy 也是不可变调度输入；本次硬切的公共 `update_agent_graph` 入口仅接受 production 已可执行的 `shared`。`isolated-worktree` 只是领域内部的未来类型，在 resolver 与完整生命周期实现前不对外接受、不持久化调度意图；
+- workspace policy 也是不可变调度输入。`shared` 复用根工作目录；`isolated-worktree` 由宿主持久资源权威解析为确定性 worktree 路径、分支与 immutable base commit。普通文件夹工作区会在 schedule 持久化前拒绝隔离策略；
+- 隔离 Operator 的工具 cwd 指向 worktree，但 Session/RuntimeEvent、owner fence、Workbar 资源和 File History manifest 仍绑定根 workspace storage root。这样 worktree 被安全清理后，Claim、output 和 handoff 仍可恢复，不会形成第二套事实账本；
 - `add` 要求 Operator ID 尚不存在；后续工作必须用 `activate` 指向精确 generation。同一 generation 的所有 Activation 复用一个持久 child Session，并由 Reconciler 串行执行。operator-level stop 是永久 fence，intent-level stop 不影响后续 follow-up。
 
 ### 4.4 ActivationIntent：想执行什么
@@ -353,6 +354,8 @@ production 将 exact RuntimeRun 安装为 `WorkspaceTaskRuntime` 中的 detached
 | `agent_output(status="failure")`             | 仍是一条正式 `agent.output` 和 RecordRef；失败语义由显式 payload 保留，调度层不从自然语言猜测             |
 | output 身份、owner fence、fingerprint 不匹配 | 拒绝提交或拒绝重放，不能形成 RecordRef                                                                    |
 | Provision/Session 在进程中丢失               | 从持久 Provision 重新取得同一 child Session                                                               |
+| worktree 创建后、active 提交前崩溃           | 按持久 resource 身份校验并 adopt 同一路径和分支，不重复分配                                               |
+| worktree 包含 dirty 或未合并提交             | 标记 retained 并保留；不会递归删除或强制删除分支                                                          |
 | Claim 后、provider 前崩溃                    | 若 ledger 仍可证明 attachable，恢复同一 exact Run                                                         |
 | provider/tool 派发后崩溃                     | 视为 indeterminate，禁止自动再派发                                                                        |
 | 根唤醒等待权限                               | Wake/Attempt 持久停在 `waiting_permission`，等待显式恢复                                                  |
@@ -371,17 +374,18 @@ production 将 exact RuntimeRun 安装为 `WorkspaceTaskRuntime` 中的 detached
 9. yield 只有在当前 permit 已 consumed 或仍有 executing 工作时才成功；无 future progress 的 registered permit 必须 cancelled。
 10. 进程内 map、lease 和 single-flight 都不是恢复权威；SQLite 与 Runtime ledger 才是。
 11. 已记录 provider/tool 派发且无 terminal 的 exact Run 不得自动重放。
+12. worktree 路径、分支、base commit 与 Provision 必须由持久 resource authority 唯一绑定；宿主关闭不能隐式清理。
 
 ## 11. 当前实现限制与后续验证
 
 - Graph application 已接入 production daemon 的 workspace 生命周期；确定性 production wiring 集成测试与 `RUN_LLM_E2E=1` 真实模型闭环均已通过，真实模型门禁仍只在具备凭证的受控环境显式启用；
-- `isolated-worktree` 仅保留在领域契约中作为未来能力；公共工具 schema 和 submit 前解析均只接受 `shared`，避免持久化 production 无法执行的 Intent。未来必须先实现 resolver、清理/恢复语义及对应验证，再扩展公共入口；
+- `isolated-worktree` 已接入 Git workspace：公共 schema 接受可选 `base_ref`，宿主在 schedule 提交前检查能力；持久 resource authority 负责 adopt/release/retain/cleanup，dirty 或未合并状态一律保留；
 - Operator profile 已由宿主内置目录解析为带指纹的不可变快照；公共工具不再接受模型、工具、权限或 system prompt 字段，生产运行时已消费并强制该快照；
 - schedule envelope 已硬切为 v2 以显式承载 `activate`；历史数据已清理，读取端拒绝 v1 envelope，不支持新旧进程混跑或直接降级；
 - Runtime bridge 已提供完整 readiness facts 和单一正式 `agent-output` RecordRef 身份；
 - root Graph 已支持多 epoch；root Run 固定精确 epoch，工具读写校验 `{graphId, rootSessionId, epoch}`，不存在的 Graph 读取不产生侧效应；
 - Artifact/Evidence 资源已经过宿主摘要校验和持久保留；调度依赖仍只引用每个 Intent 的单一 `agent-output` RecordRef，不将资源拆成额外产出身份；
-- 已有确定性集成测试覆盖核心、store、跨进程 CAS、reconciler、exact Run/reattach、production wiring、output、yield/wake 和 workspace 生命周期；真实模型 E2E 已验证 root、Operator、durable output、结果回读、exact wake 与 finish 闭环。尚未用独立子进程逐一 kill/reopen 验证全部崩溃窗口。
+- 已有确定性集成测试覆盖核心、store、跨进程 CAS、reconciler、exact Run/reattach、production wiring、output、yield/wake 和 workspace 生命周期；独立子进程 SIGKILL/reopen 覆盖 schedule、Provision、Claim、provider dispatch、output event、Wake Attempt 与 worktree Git 外部副作用窗口，并验证二次恢复不产生新身份；真实模型 E2E 已验证 root、Operator、durable output、结果回读、exact wake 与 finish 闭环。
 
 ## 12. 代码索引
 
@@ -397,5 +401,6 @@ production 将 exact RuntimeRun 安装为 `WorkspaceTaskRuntime` 中的 detached
 | `agent.output` ledger      | `src/runtime/agent-graph-output-ledger.ts`                                       |
 | 根唤醒                     | `src/runtime/agent-graph-root-wake-port.ts`                                      |
 | workspace host / lifecycle | `src/runtime/agent-graph-host.ts`、`src/daemon/workspace-runtime-service.ts`     |
+| 隔离 workspace authority   | `src/runtime/agent-graph-workspace-resource-authority.ts`                        |
 | Supervisor                 | `src/daemon/agent-graph-supervisor-service.ts`                                   |
 | 工具                       | `src/tools/agent-graph-tools.ts`、`src/tools/agent-output-tool.ts`               |
