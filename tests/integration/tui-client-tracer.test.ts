@@ -91,10 +91,10 @@ test("daemon event reporter: cancelled run drives onInterrupted; approval events
   assert.equal(approvals.length, 1);
 });
 
-test("daemon event reporter: wake-style back-to-back runs each drive onStart; mid-active repeats ignored", () => {
+test("daemon event reporter: an older terminal cannot clear a newer overlapping run", () => {
   // wake 触发的 run 经订阅以普通 run.started 到达（daemon 侧协调器已随会话宿主），
-  // 客户端只需按生命周期渲染——背靠背 run（finished 后紧跟新 started）必须各自
-  // 生效；active 期间的重复 started 是同会话串行的噪声，忽略（文档化语义）。
+  // 客户端只需按生命周期渲染——排队链可能先看到 B.started，
+  // 再看到 A.finished；此时 A 的旧终态不能收口 B。
   const reporter = new TuiReporter();
   const runningStates: boolean[] = [];
   const adapter = new DaemonEventReporter({
@@ -108,20 +108,24 @@ test("daemon event reporter: wake-style back-to-back runs each drive onStart; mi
     notification("run.finished", {}, { run: { runId, status: "succeeded" } }, runId);
 
   adapter.handleNotification(started("run_a"));
-  // 重叠 started（排队链 B 先于 A 终态启���）：跟踪最新 runId——/interrupt 打对
+  // 重叠 started（排队链 B 先于 A 终态启动）：跟踪最新 runId——/interrupt 打对
   // 目标（对抗评审 P2 修复后的新语义，此前忽略导致 B 全程失跟踪）。
-  adapter.handleNotification(started("run_a-repeat"));
+  adapter.handleNotification(started("run_b"));
   assert.equal(adapter.running, true);
-  assert.equal(adapter.activeRunId, "run_a-repeat", "重叠 started 应跟踪最新 run");
+  assert.equal(adapter.activeRunId, "run_b", "重叠 started 应跟踪最新 run");
 
   adapter.handleNotification(finished("run_a"));
+  assert.equal(adapter.running, true, "A 的旧终态不得清掉 B");
+  assert.equal(adapter.activeRunId, "run_b");
+
+  adapter.handleNotification(finished("run_b"));
   assert.equal(adapter.running, false);
 
   // wake 触发的新 run（无用户输入，daemon 侧发起）。
-  adapter.handleNotification(started("run_b"));
+  adapter.handleNotification(started("run_c"));
   assert.equal(adapter.running, true, "背靠背新 run 应重新进入活跃态");
-  assert.equal(adapter.activeRunId, "run_b");
-  adapter.handleNotification(finished("run_b"));
+  assert.equal(adapter.activeRunId, "run_c");
+  adapter.handleNotification(finished("run_c"));
 
   // true→false→true→false 两轮完整生命周期。
   assert.deepEqual(
@@ -378,6 +382,7 @@ interface FakeClientHarness {
   setTranscriptPages(pages: readonly Record<string, unknown>[]): void;
   failNextSubscription(message: string): void;
   setPlanControl(control: Record<string, unknown> | undefined): void;
+  setActiveRun(run: Record<string, unknown> | undefined): void;
   disconnect(): void;
 }
 
@@ -388,6 +393,7 @@ function createFakeClient(): FakeClientHarness {
   let transcriptPages: Record<string, unknown>[] = [];
   let nextSubscriptionError: Error | undefined;
   let planControl: Record<string, unknown> | undefined;
+  let activeRun: Record<string, unknown> | undefined;
   let disconnectListener: (() => void) | undefined;
   const session = {
     sessionId: "s1",
@@ -440,6 +446,7 @@ function createFakeClient(): FakeClientHarness {
           durableTail: records(items, transcriptPages.length + 1),
           activeOverlay: [],
           queuedInputs: [],
+          ...(activeRun ? { activeRun } : {}),
           ...(planControl ? { planControl } : {}),
           ...(transcriptPages.length > 0
             ? {
@@ -521,6 +528,9 @@ function createFakeClient(): FakeClientHarness {
     },
     setPlanControl: (control) => {
       planControl = control;
+    },
+    setActiveRun: (run) => {
+      activeRun = run;
     },
     disconnect: () => disconnectListener?.(),
   };
@@ -769,6 +779,68 @@ test("client session runtime: dedicated session frames drive replica advance", a
       ),
     ["历史", "已持久化"],
   );
+  runtime.dispose();
+});
+
+test("client session runtime: reconnect snapshots cannot erase the newest live cancel target", async () => {
+  const harness = createFakeClient();
+  const reporter = new TuiReporter();
+  const run = (runId: string) => ({
+    runId,
+    workspacePath: "C:\\ws",
+    sessionId: "s1",
+    description: runId,
+    status: "running",
+    startedAt: 1,
+    updatedAt: 1,
+    version: 1,
+  });
+  harness.setActiveRun(run("run_a"));
+  const runtime = new ClientSessionRuntime({
+    client: harness.client,
+    workspacePath: "C:\\ws",
+    sessionId: "s1",
+    reporter,
+  });
+  await runtime.start();
+  assert.equal(runtime.running, true);
+
+  // 通知流已经进入 B，重连 open 却仍返回落后的 A。
+  harness.emit(notification("run.started", {}, { run: run("run_b") }, "run_b"));
+  harness.disconnect();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await runtime.interrupt();
+  assert.equal(
+    harness.requests.filter((entry) => entry.method === "run.cancel").at(-1)?.params.runId,
+    "run_b",
+    "落后的 A 快照不得覆盖 live B",
+  );
+
+  // 下一次 open 的 activeRun 短暂缺失也不是 B 的终态事实。
+  harness.setActiveRun(undefined);
+  harness.disconnect();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await runtime.interrupt();
+  assert.equal(
+    harness.requests.filter((entry) => entry.method === "run.cancel").at(-1)?.params.runId,
+    "run_b",
+    "暂缺 activeRun 不得丢失 Ctrl+C 目标",
+  );
+
+  // 后到的 A 终态同样不得清掉 B；Ctrl+C 仍精确发往 run.cancel(B)。
+  harness.emit(
+    notification("run.finished", {}, { run: { ...run("run_a"), status: "succeeded" } }, "run_a"),
+  );
+  await runtime.interrupt();
+  assert.equal(
+    harness.requests.filter((entry) => entry.method === "run.cancel").at(-1)?.params.runId,
+    "run_b",
+  );
+
+  harness.emit(
+    notification("run.finished", {}, { run: { ...run("run_b"), status: "cancelled" } }, "run_b"),
+  );
+  assert.equal(runtime.running, false);
   runtime.dispose();
 });
 

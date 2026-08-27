@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import {
-  isActiveRunStatus,
   parseApprovalRequestedPayload,
   type RuntimeMethod,
   type RuntimeInputAttachment,
@@ -860,12 +859,9 @@ export class ClientSessionRuntime {
     ];
     this.reporter.replaceTranscriptEvents(transcriptEventsFromRuntimeItems(items, sessionId));
     const activeRun = replica.view.activeRun;
-    if (activeRun && isActiveRunStatus(activeRun.status)) {
-      this.eventReporter.seedActiveRun(activeRun.runId);
-    } else if (this.eventReporter.running) {
-      this.eventReporter.clearTransientState();
-      this.options.onRunStateChanged?.(false);
-    }
+    // open/advance 在重连窗口可能暂时不带 activeRun，缺失不是
+    // 终态事实；否则会清掉更新的 run.started，令 Ctrl+C 无目标。
+    if (activeRun) this.eventReporter.reconcileRunSnapshot(activeRun);
   }
 
   private closeReplicaSubscription(): void {
