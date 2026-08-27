@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { PlanHandoffController } from "../engine/plan-handoff.js";
 import type { PlanCoordinator } from "../plan/coordinator.js";
 import {
@@ -186,7 +186,7 @@ export class UpdatePlanTool implements BaseTool {
   accesses(): ToolAccesses {
     return ToolAccesses.all();
   }
-  async execute(args: string): Promise<string> {
+  async execute(args: string, context?: ToolExecutionContext): Promise<string> {
     const value = JSON.parse(args) as Record<string, unknown>;
     if (typeof value["stepId"] !== "string" || !isPlanStepStatus(value["status"])) {
       throw new Error("update_plan requires stepId and a valid status");
@@ -194,10 +194,7 @@ export class UpdatePlanTool implements BaseTool {
     const coordinator = this.coordinator();
     const before = await coordinator.project();
     const projection = await coordinator.updateStep({
-      operationId:
-        typeof value["operationId"] === "string"
-          ? value["operationId"]
-          : `update-plan:${randomUUID()}`,
+      operationId: updatePlanOperationId(value["operationId"], context?.toolCallId, this.planId),
       expectedSessionSequence: before.sessionSequence,
       planId: this.planId,
       stepId: value["stepId"],
@@ -206,6 +203,23 @@ export class UpdatePlanTool implements BaseTool {
     });
     return JSON.stringify({ kind: "plan_execution", projection });
   }
+}
+
+function updatePlanOperationId(
+  explicit: unknown,
+  toolCallId: string | undefined,
+  planId: string,
+): string {
+  if (typeof explicit === "string" && explicit.trim()) return explicit.trim();
+  if (toolCallId?.trim()) {
+    const digest = createHash("sha256")
+      .update(planId)
+      .update("\0")
+      .update(toolCallId.trim())
+      .digest("hex");
+    return `update-plan:tool-call:${digest}`;
+  }
+  return `update-plan:${randomUUID()}`;
 }
 
 export class CancelPlanTool implements BaseTool {
