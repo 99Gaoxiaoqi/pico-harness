@@ -176,6 +176,7 @@ async function createPicoDaemonComposition(
     context.hostEpoch,
     new SqliteSessionContinuitySource({
       picoHome: services.picoHome,
+      planControlAvailable: () => services.desktopService.planControlAvailable(),
       readMetadata: (workspacePath, sessionId) =>
         services.desktopService.readSessionContinuityMetadata(workspacePath, sessionId),
     }),

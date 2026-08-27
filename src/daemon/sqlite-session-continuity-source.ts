@@ -1,6 +1,8 @@
 import type {
   RuntimeActiveOverlayEntry,
   RuntimeParams,
+  RuntimePlanControlSnapshot,
+  RuntimePlanProjection,
   RuntimeQueuedInput,
   RuntimeResult,
   RuntimeRun,
@@ -14,6 +16,7 @@ import type {
 } from "./protocol.js";
 import { canonicalizeWorkspacePath, resolvePicoPaths } from "../paths/pico-paths.js";
 import type {
+  RuntimeEventStoreEntry,
   RuntimeRunPartials,
   RuntimeTranscriptChangeCursor,
   RuntimeTranscriptAdvancePage,
@@ -30,6 +33,8 @@ import type {
   SessionSubscriptionSnapshot,
 } from "./session-subscription-owner.js";
 import { parseActiveOverlayPayload } from "./session-active-overlay.js";
+import { PLAN_EVENT_KINDS } from "../plan/events.js";
+import { projectPlanEntries } from "../plan/reducer.js";
 
 const DEFAULT_TAIL_LIMIT = 100;
 const DEFAULT_PAGE_LIMIT = 100;
@@ -38,6 +43,13 @@ const MAX_PAGE_LIMIT = 250;
 const MAX_PAGE_BYTES = 768 * 1024;
 
 interface ProjectionStore {
+  readSessionEntriesOfKinds(
+    sessionId: string,
+    kinds: readonly string[],
+  ): Promise<{
+    readonly entries: readonly RuntimeEventStoreEntry[];
+    readonly headSequence: number;
+  }>;
   readTranscriptWatermark(sessionId: string): Promise<RuntimeTranscriptProjectionWatermark>;
   readTranscriptProjectionPage(
     options: RuntimeTranscriptProjectionPageOptions,
@@ -53,10 +65,19 @@ export interface SessionContinuityMetadata {
   readonly session: RuntimeSession;
   readonly queuedInputs: readonly RuntimeQueuedInput[];
   readonly activeRun?: RuntimeRun;
+  readonly planIntents?: readonly {
+    readonly runId: string;
+    readonly operationId: string;
+    readonly planId: string;
+    readonly revision: number;
+    readonly action: "execute" | "continue_editing" | "resume_execution" | "replan_execution";
+    readonly runStatus?: RuntimeRun["status"];
+  }[];
 }
 
 export interface SqliteSessionContinuitySourceOptions {
   readonly picoHome: string;
+  readonly planControlAvailable?: () => boolean;
   readonly readMetadata: (
     workspacePath: string,
     sessionId: string,
@@ -86,6 +107,18 @@ export class SqliteSessionContinuitySource implements SessionContinuityDataSourc
             page.watermark.throughSequence,
           )
         : [];
+      const planSlice = await store.readSessionEntriesOfKinds(params.sessionId, PLAN_EVENT_KINDS);
+      const planProjection = projectPlanEntries(
+        params.sessionId,
+        planSlice.entries,
+        planSlice.headSequence,
+      );
+      const planControl = planControlSnapshot(
+        planProjection as unknown as RuntimePlanProjection,
+        metadata.activeRun?.runId,
+        metadata.planIntents ?? [],
+        this.options.planControlAvailable?.() ?? false,
+      );
       return {
         session: metadata.session,
         watermark: watermark(page.watermark),
@@ -95,6 +128,7 @@ export class SqliteSessionContinuitySource implements SessionContinuityDataSourc
           : {}),
         activeOverlay,
         queuedInputs: metadata.queuedInputs,
+        planControl,
         ...(metadata.activeRun ? { activeRun: metadata.activeRun } : {}),
         ...(page.nextCursor ? { olderCursor: pageCursor(page.nextCursor) } : {}),
       };
@@ -184,6 +218,64 @@ export class SqliteSessionContinuitySource implements SessionContinuityDataSourc
     // shared Store contract from the Host-owned branch.
     return new SqliteRuntimeEventStore({ storageRoot }) as unknown as ProjectionStore;
   }
+}
+
+function planControlSnapshot(
+  projection: RuntimePlanProjection,
+  activeRunId: string | undefined,
+  intents: NonNullable<SessionContinuityMetadata["planIntents"]>,
+  available: boolean,
+): RuntimePlanControlSnapshot {
+  const execution = projection.execution;
+  const latest = projection.latestProposal;
+  const intent = [...intents]
+    .reverse()
+    .find(
+      (candidate) =>
+        candidate.planId ===
+          (projection.pendingProposal?.planId ??
+            projection.revisionRequest?.planId ??
+            projection.execution?.planId) &&
+        candidate.revision ===
+          (projection.pendingProposal?.revision ??
+            projection.revisionRequest?.expectedRevision ??
+            projection.execution?.revision),
+    );
+  const runActive = intent?.runStatus
+    ? !["succeeded", "failed", "cancelled"].includes(intent.runStatus)
+    : activeRunId === intent?.runId;
+  const state: RuntimePlanControlSnapshot["state"] = projection.pendingProposal
+    ? intent
+      ? intent.runStatus === undefined
+        ? "admitting"
+        : runActive
+          ? "admitted"
+          : "recovery_required"
+      : "pending_review"
+    : projection.revisionRequest
+      ? intent && runActive
+        ? "admitted"
+        : "revision"
+      : execution?.status === "interrupted"
+        ? "interrupted"
+        : execution?.status === "active"
+          ? runActive
+            ? "committed_executing"
+            : "recovery_required"
+          : execution?.status === "completed" ||
+              execution?.status === "cancelled" ||
+              latest?.status === "approved" ||
+              latest?.status === "rejected"
+            ? "terminal"
+            : "none";
+  return {
+    version: 1,
+    availability: available ? "ready" : "unavailable",
+    state,
+    projection,
+    ...(intent?.runId ? { activeRunId: intent.runId } : activeRunId ? { activeRunId } : {}),
+    ...(intent?.operationId ? { operationId: intent.operationId } : {}),
+  };
 }
 
 function boundedLimit(value: number | undefined, fallback: number): number {

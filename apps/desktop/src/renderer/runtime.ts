@@ -9,6 +9,7 @@ import {
   type RuntimeActiveOverlayEntry,
   type RuntimeConversationItem,
   type RuntimeParams,
+  type RuntimePlanControlSnapshot,
   type RuntimeNotification,
   type RuntimeMemoryFact,
   type RuntimeMemoryProposal,
@@ -221,6 +222,21 @@ export function approvalFromPlanProjection(
   };
 }
 
+export function approvalFromPlanControlSnapshot(
+  value: RuntimePlanControlSnapshot | undefined,
+  sessionId: string,
+): ApprovalView | undefined {
+  if (
+    !value ||
+    value.version !== 1 ||
+    value.availability !== "ready" ||
+    (value.state !== "pending_review" && value.state !== "interrupted")
+  ) {
+    return undefined;
+  }
+  return approvalFromPlanProjection(value.projection, sessionId);
+}
+
 function planResponseOperationId(input: {
   readonly sessionId: string;
   readonly planId: string;
@@ -229,7 +245,13 @@ function planResponseOperationId(input: {
   readonly expectedSessionSequence: number;
   readonly feedback?: string;
 }): string {
-  const canonical = JSON.stringify(input);
+  const canonical = JSON.stringify({
+    sessionId: input.sessionId,
+    planId: input.planId,
+    revision: input.expectedRevision,
+    action: input.action,
+    feedback: input.feedback?.trim() ?? "",
+  });
   let left = 0x811c9dc5;
   let right = 0x9e3779b9;
   for (let index = 0; index < canonical.length; index += 1) {
@@ -1673,6 +1695,18 @@ export function useRuntimeStore(): RuntimeStore {
       const continuity = new DesktopSessionContinuity({
         transport,
         onView: applyReplicaView,
+        onPlanControl: (_workspacePath, sessionId, control) => {
+          const approval = approvalFromPlanControlSnapshot(control, sessionId);
+          setData((current) => ({
+            ...current,
+            approvals: [
+              ...current.approvals.filter(
+                (candidate) => candidate.kind !== "plan" || candidate.sessionId !== sessionId,
+              ),
+              ...(approval ? [approval] : []),
+            ],
+          }));
+        },
         onError: (error) => setMessage(errorMessage(error)),
       });
       desktopContinuityBridgeRef.current = bridge;
@@ -2135,7 +2169,10 @@ export function useRuntimeStore(): RuntimeStore {
       }
       if (!isCurrentLoad()) return;
       const record = isRecord(value) ? value : {};
-      const hydratedPlanApproval = approvalFromPlanProjection(record.planProjection, sessionId);
+      const hydratedPlanApproval = approvalFromPlanControlSnapshot(
+        continuity.planControl(workspacePath, sessionId),
+        sessionId,
+      );
       const activeRun = isRecord(record.activeRun) ? record.activeRun : undefined;
       const activeRunId = stringValue(activeRun?.runId) || undefined;
       const changeRunId =
@@ -2416,7 +2453,10 @@ export function useRuntimeStore(): RuntimeStore {
         // wire 语义读取经 @pico/protocol parseApprovalRequestedPayload（与 TUI
         // 客户端同源；planId 不回退 approvalId 的兜底语义由此回流）。
         const approval = parseApprovalRequestedPayload(payload);
-        if (approval) {
+        // Plan cards are recovery-capable controls, so only the durable PlanControl
+        // snapshot/projection may create them. Generic approval replay remains display
+        // authority for non-Plan approvals only.
+        if (approval && approval.kind !== "plan") {
           setData((current) => ({
             ...current,
             approvals: [
@@ -2430,13 +2470,6 @@ export function useRuntimeStore(): RuntimeStore {
                 command: approval.command,
                 risk: approval.risk,
                 kind: approval.kind,
-                planControlMode: approval.kind === "plan" ? "review" : undefined,
-                planId: approval.planId,
-                expectedRevision: approval.expectedRevision,
-                expectedSessionSequence: approval.expectedSessionSequence,
-                planTitle: approval.planTitle,
-                planOverview: approval.planOverview,
-                planSteps: approval.planSteps,
               },
             ],
           }));

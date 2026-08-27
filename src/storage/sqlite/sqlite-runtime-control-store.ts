@@ -1382,6 +1382,17 @@ export class SqliteRuntimeControlStore {
     });
   }
 
+  listDaemonCommands(commandType: string): DaemonCommandState[] {
+    const normalized = commandType.trim();
+    if (!normalized) throw new Error("daemon commandType 必须是非空字符串");
+    return this.read(() =>
+      this.allRows(
+        `SELECT * FROM daemon_commands WHERE command_type = ? ORDER BY created_at, idempotency_key`,
+        normalized,
+      ).map(rowToDaemonCommand),
+    );
+  }
+
   upsertDaemonRun(input: DaemonRunRecord): DaemonRunRecord {
     return this.write(() => this.persistDaemonRun(input));
   }

@@ -275,6 +275,7 @@ export interface DesktopRuntimeServiceOptions {
   readonly ownsMemoryService?: boolean;
   /** Commit 完成后通知 Dedicated Session Channel 读取已提交水位。 */
   readonly onTranscriptAdvanced?: (workspacePath: string, sessionId: string) => void;
+  readonly reconcilePlanControl?: (workspacePath: string, sessionId: string) => Promise<void>;
   readonly browserAgentBroker?: BrowserAgentCommandBroker;
 }
 
@@ -737,6 +738,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return this.options.runtimeService.subscribe(listener);
   }
 
+  planControlAvailable(): boolean {
+    return this.options.planControl !== undefined;
+  }
+
   /** Metadata half of the atomic Runtime Host session subscription snapshot. */
   async readSessionContinuityMetadata(
     workspacePath: string,
@@ -745,8 +750,17 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     readonly session: RuntimeSession;
     readonly queuedInputs: readonly RuntimeQueuedInput[];
     readonly activeRun?: RuntimeRunRecord;
+    readonly planIntents?: readonly {
+      readonly runId: string;
+      readonly operationId: string;
+      readonly planId: string;
+      readonly revision: number;
+      readonly action: "execute" | "continue_editing" | "resume_execution" | "replan_execution";
+      readonly runStatus?: RuntimeRunRecord["status"];
+    }[];
   }> {
     const canonical = await canonicalizeWorkspacePath(workspacePath);
+    await this.options.reconcilePlanControl?.(canonical, sessionId);
     await this.transcriptPersistenceTail;
     const session = (await this.requireSession(canonical, sessionId)) as unknown as RuntimeSession;
     const activeRun = (await this.findActiveSessionRun(canonical, sessionId)) as
@@ -760,7 +774,27 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         createdAt: input.createdAt,
       }),
     );
-    return { session, queuedInputs, ...(activeRun ? { activeRun } : {}) };
+    const planIntents = await Promise.all(
+      (await this.options.runtimeService.listPlanReviewRunIntents(canonical, sessionId)).map(
+        async (intent) => {
+          const run = await this.options.runtimeService.getWorkspaceRun(canonical, intent.runId);
+          return {
+            runId: intent.runId,
+            operationId: intent.input.operationId,
+            planId: intent.input.planId,
+            revision: intent.input.revision,
+            action: intent.input.action,
+            ...(run ? { runStatus: run.status } : {}),
+          };
+        },
+      ),
+    );
+    return {
+      session,
+      queuedInputs,
+      ...(activeRun ? { activeRun } : {}),
+      ...(planIntents.length ? { planIntents } : {}),
+    };
   }
 
   close(): Promise<void> {

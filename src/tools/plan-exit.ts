@@ -1,7 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { PlanHandoffController } from "../engine/plan-handoff.js";
 import type { PlanCoordinator } from "../plan/coordinator.js";
-import { isPlanStepStatus, type PlanProposalInput } from "../plan/contract.js";
+import {
+  isPlanStepStatus,
+  normalizePlanProposalInput,
+  PlanConflictError,
+  type PlanProposalInput,
+} from "../plan/contract.js";
 import type { ToolDefinition } from "../schema/message.js";
 import { ToolAccesses } from "./tool-access.js";
 import type { BaseTool, ToolExecutionContext } from "./registry.js";
@@ -88,19 +93,30 @@ export class SubmitPlanTool implements BaseTool {
               candidate.revision === before.revisionRequest.expectedRevision,
           )
         : undefined);
-    const projection = revisionBase
-      ? await coordinator.revise({
-          operationId,
-          expectedSessionSequence: before.sessionSequence,
-          planId: revisionBase.planId,
-          expectedRevision: revisionBase.revision,
-          proposal,
-        })
-      : await coordinator.propose({
-          operationId,
-          expectedSessionSequence: before.sessionSequence,
-          proposal,
-        });
+    const normalizedProposal = normalizePlanProposalInput({
+      ...proposal,
+      ...(revisionBase ? { planId: revisionBase.planId } : {}),
+    });
+    const unchanged =
+      revisionBase !== undefined && sameProposalContent(revisionBase, normalizedProposal);
+    if (unchanged && before.revisionRequest) {
+      throw new PlanConflictError("Plan revision must change the normalized proposal content");
+    }
+    const projection = unchanged
+      ? before
+      : revisionBase
+        ? await coordinator.revise({
+            operationId,
+            expectedSessionSequence: before.sessionSequence,
+            planId: revisionBase.planId,
+            expectedRevision: revisionBase.revision,
+            proposal: normalizedProposal,
+          })
+        : await coordinator.propose({
+            operationId,
+            expectedSessionSequence: before.sessionSequence,
+            proposal: normalizedProposal,
+          });
     context?.signal?.throwIfAborted();
     const pending = projection.pendingProposal;
     if (!pending) throw new Error("Plan submission did not create a pending proposal");
@@ -116,6 +132,29 @@ export class SubmitPlanTool implements BaseTool {
     this.handoff.mark(handoff);
     return JSON.stringify(handoff);
   }
+}
+
+function sameProposalContent(
+  current: {
+    readonly title: string;
+    readonly overview?: string;
+    readonly steps: readonly {
+      readonly id: string;
+      readonly title: string;
+      readonly description: string;
+    }[];
+    readonly risks?: readonly string[];
+  },
+  next: PlanProposalInput,
+): boolean {
+  return (
+    current.title === next.title &&
+    current.overview === next.overview &&
+    JSON.stringify(
+      current.steps.map(({ id, title, description }) => ({ id, title, description })),
+    ) === JSON.stringify(next.steps) &&
+    JSON.stringify(current.risks ?? []) === JSON.stringify(next.risks ?? [])
+  );
 }
 
 export class UpdatePlanTool implements BaseTool {

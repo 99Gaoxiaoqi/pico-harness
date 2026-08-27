@@ -10,6 +10,7 @@ test("desktop session continuity: raw early frame and advance update one replica
   let listener: ((frame: RuntimeSessionSubscriptionFrame) => void) | undefined;
   let disconnect: (() => void) | undefined;
   const calls: string[] = [];
+  const planControls: string[] = [];
   const watermark = (throughSequence: number) => ({
     historyEpoch: "history-1",
     projectorVersion: TRANSCRIPT_PROJECTOR_VERSION,
@@ -70,6 +71,33 @@ test("desktop session continuity: raw early frame and advance update one replica
         ],
         activeOverlay: [],
         queuedInputs: [],
+        planControl: {
+          version: 1,
+          availability: "ready",
+          state: "pending_review",
+          projection: {
+            sessionId: "session-1",
+            sessionSequence: 1,
+            proposals: [
+              {
+                planId: "plan-1",
+                revision: 1,
+                title: "Review",
+                steps: [{ id: "step-1", title: "Ship", description: "Ship it", status: "pending" }],
+                status: "pending",
+                proposedAt: "2026-08-27T00:00:00.000Z",
+              },
+            ],
+            pendingProposal: {
+              planId: "plan-1",
+              revision: 1,
+              title: "Review",
+              steps: [{ id: "step-1", title: "Ship", description: "Ship it", status: "pending" }],
+              status: "pending",
+              proposedAt: "2026-08-27T00:00:00.000Z",
+            },
+          },
+        },
       };
     },
     async close() {
@@ -108,9 +136,14 @@ test("desktop session continuity: raw early frame and advance update one replica
         ...view.activeOverlay.map((overlay) => `overlay:${overlay.itemId}:${overlay.text}`),
       ]);
     },
+    onPlanControl: (_workspacePath, _sessionId, control) => {
+      planControls.push(control?.state ?? "disconnected");
+    },
   });
 
   await continuity.open("/workspace", "session-1");
+  assert.equal(continuity.planControl("/workspace", "session-1")?.state, "pending_review");
+  assert.equal(planControls.at(-1), "pending_review");
   assert.deepEqual(views.at(-1), ["question", "overlay:answer:live"]);
   listener?.({
     hostEpoch: "host-1",
@@ -143,7 +176,9 @@ test("desktop session continuity: raw early frame and advance update one replica
   assert.deepEqual(views.at(-1), ["question", "overlay:answer:live"]);
 
   disconnect?.();
+  assert.equal(planControls.at(-1), "disconnected");
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.deepEqual(calls, ["open", "advance", "close", "open", "close", "open"]);
+  assert.equal(planControls.at(-1), "pending_review");
   continuity.dispose();
 });

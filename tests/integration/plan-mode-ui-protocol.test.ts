@@ -4,7 +4,11 @@ import {
   DESKTOP_RUNTIME_METHODS,
   parseStrictRuntimeParams,
 } from "../../packages/protocol/src/runtime.js";
-import { approvalFromPlanProjection } from "../../apps/desktop/src/renderer/runtime.js";
+import {
+  approvalFromPlanControlSnapshot,
+  approvalFromPlanProjection,
+} from "../../apps/desktop/src/renderer/runtime.js";
+import { planReviewOperationId } from "../../src/tui/approval-dialogs.js";
 
 test("Plan review protocol exposes CAS-protected three-action requests", () => {
   assert.ok(DESKTOP_RUNTIME_METHODS.includes("plan.respond"));
@@ -101,6 +105,65 @@ test("Desktop hydration rebuilds pending, revision, and interrupted Plan control
   );
   assert.equal(interrupted?.planControlMode, "interrupted");
   assert.equal(interrupted?.planId, "plan-1");
+});
+
+test("Plan review identity is stable across ledger-only movement and isolated by Session/revision", () => {
+  const base = {
+    sessionId: "session-1",
+    planId: "plan-1",
+    expectedRevision: 2,
+    expectedSessionSequence: 9,
+    planControlMode: "review" as const,
+  };
+  const first = planReviewOperationId(base, "execute", undefined);
+  assert.equal(
+    planReviewOperationId({ ...base, expectedSessionSequence: 99 }, "execute", undefined),
+    first,
+  );
+  assert.notEqual(
+    planReviewOperationId({ ...base, sessionId: "session-2" }, "execute", undefined),
+    first,
+  );
+  assert.notEqual(
+    planReviewOperationId({ ...base, expectedRevision: 3 }, "execute", undefined),
+    first,
+  );
+});
+
+test("Desktop consumes the versioned PlanControl snapshot and hides unavailable/terminal controls", () => {
+  const projection = {
+    sessionId: "session-1",
+    sessionSequence: 7,
+    proposals: [],
+    pendingProposal: {
+      planId: "plan-1",
+      revision: 1,
+      title: "Ship it",
+      steps: [],
+      status: "pending" as const,
+      proposedAt: "2026-08-27T00:00:00.000Z",
+    },
+  };
+  assert.ok(
+    approvalFromPlanControlSnapshot(
+      { version: 1, availability: "ready", state: "pending_review", projection },
+      "session-1",
+    ),
+  );
+  assert.equal(
+    approvalFromPlanControlSnapshot(
+      { version: 1, availability: "unavailable", state: "pending_review", projection },
+      "session-1",
+    ),
+    undefined,
+  );
+  assert.equal(
+    approvalFromPlanControlSnapshot(
+      { version: 1, availability: "ready", state: "terminal", projection },
+      "session-1",
+    ),
+    undefined,
+  );
 });
 
 test("session settings protocol separates collaboration and permission axes", () => {
