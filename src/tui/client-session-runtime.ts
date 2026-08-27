@@ -566,6 +566,9 @@ export class ClientSessionRuntime {
     if (this.disposed || frame.sessionId !== this.sessionId || !this.replica) return;
     const outcome = this.replica.receiveFrame(frame);
     if (outcome.kind === "applied") {
+      if (frame.type === "subscription.run_state") {
+        this.eventReporter.reconcileRunSnapshot(frame.run);
+      }
       this.renderReplica();
       if (this.replica.view.pendingWatermark) void this.advanceReplicaSerial();
       return;
@@ -761,6 +764,7 @@ export class ClientSessionRuntime {
       previous?.view.sessionId === sessionId ? previous : new TranscriptReplica(sessionId);
     this.replica = replica;
     const token = replica.beginOpen();
+    const runReconciliation = this.eventReporter.beginRunSnapshotReconciliation();
     const opened = await this.client.request("session.subscription.open", {
       workspacePath: this.workspacePath,
       sessionId,
@@ -778,6 +782,8 @@ export class ClientSessionRuntime {
     }
     this.planControlConnected = true;
     this.reconcilePlanControl(opened.planControl);
+    const activeRun = replica.view.activeRun;
+    if (activeRun) this.eventReporter.reconcileRunSnapshot(activeRun, runReconciliation);
     this.renderReplica();
 
     // TUI 现有视图需要完整历史；旧页固定在 open 的 watermark，
@@ -858,10 +864,6 @@ export class ClientSessionRuntime {
       ...replica.view.activeOverlay.map(overlayConversationItem),
     ];
     this.reporter.replaceTranscriptEvents(transcriptEventsFromRuntimeItems(items, sessionId));
-    const activeRun = replica.view.activeRun;
-    // open/advance 在重连窗口可能暂时不带 activeRun，缺失不是
-    // 终态事实；否则会清掉更新的 run.started，令 Ctrl+C 无目标。
-    if (activeRun) this.eventReporter.reconcileRunSnapshot(activeRun);
   }
 
   private closeReplicaSubscription(): void {

@@ -383,6 +383,8 @@ interface FakeClientHarness {
   failNextSubscription(message: string): void;
   setPlanControl(control: Record<string, unknown> | undefined): void;
   setActiveRun(run: Record<string, unknown> | undefined): void;
+  deferNextSubscription(): void;
+  releaseNextSubscription(): void;
   disconnect(): void;
 }
 
@@ -394,6 +396,8 @@ function createFakeClient(): FakeClientHarness {
   let nextSubscriptionError: Error | undefined;
   let planControl: Record<string, unknown> | undefined;
   let activeRun: Record<string, unknown> | undefined;
+  let nextSubscriptionWait: Promise<void> | undefined;
+  let releaseNextSubscription: (() => void) | undefined;
   let disconnectListener: (() => void) | undefined;
   const session = {
     sessionId: "s1",
@@ -429,6 +433,11 @@ function createFakeClient(): FakeClientHarness {
         return { session, run: { runId: "run_1", status: "running" }, disposition: "started" };
       }
       if (method === "session.subscription.open") {
+        if (nextSubscriptionWait) {
+          const wait = nextSubscriptionWait;
+          nextSubscriptionWait = undefined;
+          await wait;
+        }
         if (nextSubscriptionError) {
           const error = nextSubscriptionError;
           nextSubscriptionError = undefined;
@@ -531,6 +540,15 @@ function createFakeClient(): FakeClientHarness {
     },
     setActiveRun: (run) => {
       activeRun = run;
+    },
+    deferNextSubscription: () => {
+      nextSubscriptionWait = new Promise<void>((resolve) => {
+        releaseNextSubscription = resolve;
+      });
+    },
+    releaseNextSubscription: () => {
+      releaseNextSubscription?.();
+      releaseNextSubscription = undefined;
     },
     disconnect: () => disconnectListener?.(),
   };
@@ -782,7 +800,7 @@ test("client session runtime: dedicated session frames drive replica advance", a
   runtime.dispose();
 });
 
-test("client session runtime: reconnect snapshots cannot erase the newest live cancel target", async () => {
+test("client session runtime: an in-flight stale open cannot erase a newer live cancel target", async () => {
   const harness = createFakeClient();
   const reporter = new TuiReporter();
   const run = (runId: string) => ({
@@ -805,9 +823,18 @@ test("client session runtime: reconnect snapshots cannot erase the newest live c
   await runtime.start();
   assert.equal(runtime.running, true);
 
-  // 通知流已经进入 B，重连 open 却仍返回落后的 A。
-  harness.emit(notification("run.started", {}, { run: run("run_b") }, "run_b"));
+  // open 发出时快照仍是 A；请求在途期间通知流已进入 B。
+  // 迟到的 A 快照必须被 open 起点后的 run observation 高水位压住。
+  harness.deferNextSubscription();
   harness.disconnect();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(
+    harness.requests.filter((entry) => entry.method === "session.subscription.open").length,
+    2,
+    "live B 必须在第二次 open 请求已发出后到达",
+  );
+  harness.emit(notification("run.started", {}, { run: run("run_b") }, "run_b"));
+  harness.releaseNextSubscription();
   await new Promise<void>((resolve) => setImmediate(resolve));
   await runtime.interrupt();
   assert.equal(
@@ -841,6 +868,42 @@ test("client session runtime: reconnect snapshots cannot erase the newest live c
     notification("run.finished", {}, { run: { ...run("run_b"), status: "cancelled" } }, "run_b"),
   );
   assert.equal(runtime.running, false);
+  runtime.dispose();
+});
+
+test("client session runtime: a new open generation advances a stale local cancel target", async () => {
+  const harness = createFakeClient();
+  const reporter = new TuiReporter();
+  const run = (runId: string) => ({
+    runId,
+    workspacePath: "C:\\ws",
+    sessionId: "s1",
+    description: runId,
+    status: "running",
+    startedAt: 1,
+    updatedAt: 1,
+    version: 1,
+  });
+  harness.setActiveRun(run("run_a"));
+  const runtime = new ClientSessionRuntime({
+    client: harness.client,
+    workspacePath: "C:\\ws",
+    sessionId: "s1",
+    reporter,
+  });
+  await runtime.start();
+
+  // 断线期间 daemon 已从 A 进入 B，且没有 live 通知越过本次
+  // open 起点；因此新 generation 的 B 是权威快照，必须推进旧本地 A。
+  harness.setActiveRun(run("run_b"));
+  harness.disconnect();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await runtime.interrupt();
+  assert.equal(
+    harness.requests.filter((entry) => entry.method === "run.cancel").at(-1)?.params.runId,
+    "run_b",
+    "新 open generation 应把 Ctrl+C target 从旧 A 推进到权威 B",
+  );
   runtime.dispose();
 });
 

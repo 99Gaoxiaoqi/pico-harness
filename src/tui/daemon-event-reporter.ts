@@ -32,6 +32,10 @@ export interface DaemonEventReporterOptions {
   readonly onRunStateChanged?: (running: boolean) => void;
 }
 
+export interface RunSnapshotReconciliation {
+  readonly observedThrough: number;
+}
+
 export class DaemonEventReporter {
   private readonly reporter: TuiReporter;
   private readonly onApprovalRequested: DaemonEventReporterOptions["onApprovalRequested"];
@@ -39,6 +43,9 @@ export class DaemonEventReporter {
   private readonly onRunStateChanged: DaemonEventReporterOptions["onRunStateChanged"];
   private active = false;
   private currentRunId: string | undefined;
+  private currentRunObservedAt = 0;
+  private runObservationEpoch = 0;
+  private readonly lastRunObservation = new Map<string, number>();
 
   constructor(options: DaemonEventReporterOptions) {
     this.reporter = options.reporter;
@@ -60,28 +67,44 @@ export class DaemonEventReporter {
   clearTransientState(): void {
     this.active = false;
     this.currentRunId = undefined;
+    this.currentRunObservedAt = 0;
+    this.lastRunObservation.clear();
+  }
+
+  /** 捕获 open 请求发出前已观测到的 run 事实高水位。 */
+  beginRunSnapshotReconciliation(): RunSnapshotReconciliation {
+    return { observedThrough: this.runObservationEpoch };
   }
 
   /**
-   * 从 transcript.activeRun 恢复运行相位（水化后调用——/resume 进运行中会话
-   * 时 run.started 已错过，事件流不会再补）。幂等：已活跃时不重复触发回调。
+   * 对账 Replica run 事实。open 快照携带请求起点高水位：若同 run
+   * 或当前 active target 在请求后已有新通知，迟到快照失效；否则新
+   * open generation 的快照可推进旧本地 target。Session run_state frame 已有
+   * 订阅顺序，不传 reconciliation 即直接作为新事实。
    */
-  seedActiveRun(runId: string): void {
-    // Hydration 只能补齐缺失的 live 事实，不能覆盖已经由
-    // run.started 观测到的更新 run。重连时 open 快照可能落后于通知流。
-    if (this.active) return;
-    this.active = true;
-    this.currentRunId = runId;
-    this.onRunStateChanged?.(true);
-  }
-
-  /** 对账一条带身份的 Replica run 快照；终态只能收口同一 run。 */
-  reconcileRunSnapshot(run: RuntimeRun): void {
+  reconcileRunSnapshot(run: RuntimeRun, reconciliation?: RunSnapshotReconciliation): boolean {
+    if (reconciliation) {
+      const observedThrough = reconciliation.observedThrough;
+      if ((this.lastRunObservation.get(run.runId) ?? 0) > observedThrough) return false;
+      if (
+        this.active &&
+        this.currentRunId !== run.runId &&
+        this.currentRunObservedAt > observedThrough
+      ) {
+        return false;
+      }
+    }
+    const observedAt = this.observeRun(run.runId);
     if (isActiveRunStatus(run.status)) {
-      this.seedActiveRun(run.runId);
-      return;
+      const wasActive = this.active;
+      this.active = true;
+      this.currentRunId = run.runId;
+      this.currentRunObservedAt = observedAt;
+      if (!wasActive) this.onRunStateChanged?.(true);
+      return true;
     }
     if (isTerminalRunStatus(run.status)) this.finishMatchingRun(run.runId, run.status);
+    return true;
   }
 
   handleNotification(event: RuntimeNotification): void {
@@ -93,6 +116,7 @@ export class DaemonEventReporter {
         const runId = typeof run?.runId === "string" ? run.runId : undefined;
         const status = typeof run?.status === "string" ? run.status : "";
         const running = isStreamingRunStatus(status);
+        const observedAt = runId ? this.observeRun(runId) : 0;
         if (event.topic === "run.started" && running) {
           // 重叠 run（排队链：A 活跃中 B 已 started）跟踪最新 runId——/interrupt
           // 才打对目标（对抗评审 P2：此前忽略导致 B 全程失跟踪）。
@@ -102,6 +126,7 @@ export class DaemonEventReporter {
             this.onRunStateChanged?.(true);
           }
           this.currentRunId = runId;
+          this.currentRunObservedAt = observedAt;
         } else if (!running && isTerminalRunStatus(status)) {
           if (this.finishMatchingRun(runId ?? event.scope.runId, status)) {
             this.surfaceRunFailure(run);
@@ -116,6 +141,7 @@ export class DaemonEventReporter {
           | { runId?: unknown; status?: unknown; error?: unknown }
           | undefined;
         const runId = typeof run?.runId === "string" ? run.runId : event.scope.runId;
+        if (runId) this.observeRun(runId);
         if (
           this.finishMatchingRun(runId, typeof run?.status === "string" ? run.status : "succeeded")
         ) {
@@ -150,6 +176,12 @@ export class DaemonEventReporter {
     }
   }
 
+  private observeRun(runId: string): number {
+    const observedAt = ++this.runObservationEpoch;
+    this.lastRunObservation.set(runId, observedAt);
+    return observedAt;
+  }
+
   private finishMatchingRun(runId: string | undefined, status: string): boolean {
     if (!this.active || !runId || runId !== this.currentRunId) return false;
     this.finishRun(status);
@@ -159,6 +191,7 @@ export class DaemonEventReporter {
   private finishRun(status: string): void {
     this.active = false;
     this.currentRunId = undefined;
+    this.currentRunObservedAt = 0;
     if (isInterruptedRunStatus(status)) {
       this.reporter.onInterrupted();
     } else {
