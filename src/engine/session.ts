@@ -48,8 +48,10 @@ import {
   fileHistoryDefaultBaseDir,
   fileHistoryLoadState,
   fileHistoryMessageDiffStat,
+  fileHistoryPrepareRewindTransaction,
   fileHistoryRegisterRoot,
   fileHistoryRewind,
+  type FileHistoryRewindTransactionHooks,
 } from "../safety/file-history.js";
 import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
 import {
@@ -1250,6 +1252,7 @@ export class Session
     runtimePort: SessionForkRuntimePort,
     createTargetSessionId: () => string,
     expectedFingerprints?: Record<string, string>,
+    options: { readonly fileTransactionHooks?: FileHistoryRewindTransactionHooks } = {},
   ): Promise<{ targetSessionId: string }> {
     this.assertWritable();
     const snapshot = this.requireRewindSnapshot(checkpointId);
@@ -1257,15 +1260,25 @@ export class Session
       ? new Map(Object.entries(expectedFingerprints))
       : undefined;
 
-    // code-only 模式没有破坏性副作用：旧 rewindCode 只应用工作区文件，
-    // 既不追加 history.rewound 也不丢弃后续 FileHistory 快照。
-    // 直接复用以保持与破坏性 code 模式一致的语义。
+    await this.flushPersistence();
+    const fileTransaction =
+      mode === "conversation"
+        ? undefined
+        : await fileHistoryPrepareRewindTransaction(
+            this.fileHistory,
+            checkpointId,
+            this.id,
+            this.fileHistoryBaseDir,
+            expectedCurrentFingerprints ? { expectedCurrentFingerprints } : {},
+          );
+
+    // code-only 不创建派生 Session；多文件恢复仍通过同一补偿事务避免部分应用。
     if (mode === "code") {
-      await this.rewindCode(checkpointId, expectedCurrentFingerprints);
+      await fileTransaction!.apply(options.fileTransactionHooks);
+      fileTransaction!.commit();
       return { targetSessionId: this.id };
     }
 
-    await this.flushPersistence();
     const store = this.store;
     if (!store) {
       throw new Error(`Session ${this.id} 需要 durable runtime 才能执行 fork rewind`);
@@ -1276,23 +1289,33 @@ export class Session
     const targetSessionId = createTargetSessionId();
     const throughEventId = await this.resolveForkBoundaryEventId(snapshot.beforeSessionSeq);
 
-    await runtimePort.forkSession({
-      workDir: this.workDir,
-      picoHome: this.picoHome,
-      fileHistoryBaseDir: this.fileHistoryBaseDir,
-      sourceSessionId: this.id,
-      targetSessionId,
-      ...(throughEventId ? { throughEventId } : {}),
-    });
-
-    // both 模式额外把工作区文件回滚到 checkpoint 状态。
-    // fork 只复制 RuntimeEvent 与 FileHistory sidecar，不动磁盘文件；
-    // 因此在共享工作区上显式应用 checkpoint 的文件状态。
-    // 复用 rewindCode：它的 saga 在 code 模式下只 applyWorkspace，
-    // 既不追加 history.rewound 也不丢弃后续 FileHistory 快照，本身即非破坏性。
-    if (mode === "both") {
-      await this.rewindCode(checkpointId, expectedCurrentFingerprints);
+    if (fileTransaction) await fileTransaction.apply(options.fileTransactionHooks);
+    try {
+      // Session 发布是 commit point：both 的文件已应用，但在 fork 持久化
+      // 失败时会立即补偿，因此失败响应不留下文件或当前 Session 副作用。
+      await runtimePort.forkSession({
+        workDir: this.workDir,
+        picoHome: this.picoHome,
+        fileHistoryBaseDir: this.fileHistoryBaseDir,
+        sourceSessionId: this.id,
+        targetSessionId,
+        ...(throughEventId ? { throughEventId } : {}),
+      });
+    } catch (error) {
+      if (fileTransaction) {
+        try {
+          await fileTransaction.rollback();
+        } catch (rollbackError) {
+          throw new AggregateError(
+            [error, rollbackError],
+            "Rewind Session 提交失败且工作区补偿未完成",
+            { cause: rollbackError },
+          );
+        }
+      }
+      throw error;
     }
+    fileTransaction?.commit();
 
     return { targetSessionId };
   }

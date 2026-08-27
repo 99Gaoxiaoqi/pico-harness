@@ -17,12 +17,20 @@ export function createSessionForkRuntimePort(): SessionForkRuntimePort {
         runtimePort,
       });
       try {
-        await service.fork({
-          sourceSessionId: input.sourceSessionId,
-          targetSessionId: input.targetSessionId,
-          ...(input.targetMode !== undefined ? { targetMode: input.targetMode } : {}),
-          ...(input.throughEventId ? { throughEventId: input.throughEventId } : {}),
-        });
+        try {
+          await service.fork({
+            sourceSessionId: input.sourceSessionId,
+            targetSessionId: input.targetSessionId,
+            ...(input.targetMode !== undefined ? { targetMode: input.targetMode } : {}),
+            ...(input.throughEventId ? { throughEventId: input.throughEventId } : {}),
+          });
+        } catch (error) {
+          const settlement = await service.settleFailedFork({
+            sourceSessionId: input.sourceSessionId,
+            targetSessionId: input.targetSessionId,
+          });
+          if (settlement !== "committed") throw error;
+        }
       } finally {
         service.close();
       }

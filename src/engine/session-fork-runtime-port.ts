@@ -41,6 +41,17 @@ export class SessionForkRuntimeConflictError extends Error {
   }
 }
 
+/** Fork publication 可能已发生，调用方不得猜测回滚工作区。 */
+export class SessionForkPublicationUncertainError extends Error {
+  constructor(
+    readonly targetSessionId: string,
+    options?: ErrorOptions,
+  ) {
+    super(`Fork ${targetSessionId} 的发布结果无法安全判定`, options);
+    this.name = "SessionForkPublicationUncertainError";
+  }
+}
+
 export interface SessionForkBootstrapSeed {
   readonly sourceSessionId: string;
   readonly targetSessionId: string;

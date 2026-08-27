@@ -11,6 +11,7 @@ import {
   rename,
   rm,
   open,
+  symlink,
 } from "node:fs/promises";
 import { join, dirname, isAbsolute, parse, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -20,6 +21,7 @@ import {
   type FileHistoryBlobRef,
 } from "../storage/file-history-blob-store.js";
 import {
+  deleteFileHistoryManifestRow,
   insertFileHistoryManifestRowIfAbsent,
   type FileHistoryManifestRow,
   readFileHistoryManifestRow,
@@ -802,17 +804,135 @@ export async function fileHistoryRewind(
   baseDir: string = fileHistoryDefaultBaseDir(),
   options: { expectedCurrentFingerprints?: ReadonlyMap<string, string> } = {},
 ): Promise<void> {
-  const prepared = await fileHistoryPrepareRewind(state, messageId, sessionId, baseDir, options);
+  const transaction = await fileHistoryPrepareRewindTransaction(
+    state,
+    messageId,
+    sessionId,
+    baseDir,
+    options,
+  );
+  await transaction.apply();
+  transaction.commit();
+}
 
-  // 在任何修改前再整体校验一次，避免预检后的外部写入造成部分恢复。
-  await assertPreparedRewindFingerprints(prepared);
-  for (const { filePath, backup } of prepared.files) {
-    if (backup.backupFileName === null) {
-      await removeCreatedFileForRewind(filePath);
-    } else {
-      await restoreFileHistoryBackup(filePath, backup, sessionId, baseDir);
+export interface FileHistoryRewindTransactionHooks {
+  /** 故障注入：单文件恢复前触发，用于验证多文件补偿。 */
+  readonly beforeApplyFile?: (
+    file: FileHistoryPreparedRewindFile,
+    index: number,
+  ) => void | Promise<void>;
+}
+
+export interface FileHistoryRewindTransaction {
+  readonly prepared: FileHistoryPreparedRewind;
+  apply(hooks?: FileHistoryRewindTransactionHooks): Promise<void>;
+  rollback(): Promise<void>;
+  commit(): void;
+}
+
+type FileHistoryRollbackState =
+  | { readonly kind: "missing"; readonly fingerprint: string }
+  | {
+      readonly kind: "file";
+      readonly bytes: Buffer;
+      readonly mode: number;
+      readonly fingerprint: string;
     }
+  | { readonly kind: "symlink"; readonly target: string; readonly fingerprint: string };
+
+/**
+ * 在工作区外部状态未变时冻结 rewind 输入与当前文件 preimage。
+ * apply 的任意失败会自动补偿；调用方可在后续 Session 持久化失败时
+ * 显式 rollback，只有全部持久化成功后才 commit。
+ */
+export async function fileHistoryPrepareRewindTransaction(
+  state: FileHistoryState,
+  messageId: string,
+  sessionId: string,
+  baseDir: string = fileHistoryDefaultBaseDir(),
+  options: { expectedCurrentFingerprints?: ReadonlyMap<string, string> } = {},
+): Promise<FileHistoryRewindTransaction> {
+  const prepared = await fileHistoryPrepareRewind(state, messageId, sessionId, baseDir, options);
+  const rollbackStates = new Map<string, FileHistoryRollbackState>();
+  for (const file of prepared.files) {
+    const current = await captureRewindRollbackState(file.filePath);
+    if (current.fingerprint !== file.currentFingerprint) {
+      throw new Error(`FileHistory: ${file.filePath} 在 rewind 预检后又发生变化`);
+    }
+    rollbackStates.set(file.filePath, current);
   }
+
+  const appliedFingerprints = new Map<string, string>();
+  let status: "prepared" | "applied" | "committed" | "rolled_back" = "prepared";
+
+  const rollback = async (): Promise<void> => {
+    if (status === "committed") throw new Error("FileHistory: 已提交的 rewind 不能回滚");
+    if (status === "rolled_back" || appliedFingerprints.size === 0) {
+      status = "rolled_back";
+      return;
+    }
+    const conflicts: string[] = [];
+    for (const [filePath, expectedFingerprint] of appliedFingerprints) {
+      if ((await readCurrentFileState(filePath)).fingerprint !== expectedFingerprint) {
+        conflicts.push(filePath);
+      }
+    }
+    if (conflicts.length > 0) {
+      throw new Error(`FileHistory: rewind 补偿前文件又发生变化: ${conflicts.join(", ")}`);
+    }
+    for (const file of [...prepared.files].reverse()) {
+      if (!appliedFingerprints.has(file.filePath)) continue;
+      await restoreRewindRollbackState(file.filePath, rollbackStates.get(file.filePath)!);
+    }
+    appliedFingerprints.clear();
+    status = "rolled_back";
+  };
+
+  return {
+    prepared,
+    async apply(hooks = {}) {
+      if (status === "applied") return;
+      if (status !== "prepared") {
+        throw new Error(`FileHistory: rewind 事务状态 ${status} 不能应用`);
+      }
+      await assertPreparedRewindFingerprints(prepared);
+      try {
+        for (const [index, file] of prepared.files.entries()) {
+          await hooks.beforeApplyFile?.(file, index);
+          if (file.backup.backupFileName === null) {
+            await removeCreatedFileForRewind(file.filePath);
+          } else {
+            await restoreFileHistoryBackup(file.filePath, file.backup, sessionId, baseDir);
+          }
+          appliedFingerprints.set(
+            file.filePath,
+            (await readCurrentFileState(file.filePath)).fingerprint,
+          );
+        }
+        status = "applied";
+      } catch (error) {
+        try {
+          await rollback();
+        } catch (rollbackError) {
+          throw new AggregateError(
+            [error, rollbackError],
+            "FileHistory: rewind 失败且工作区补偿未完成",
+            { cause: rollbackError },
+          );
+        }
+        throw error;
+      }
+    },
+    rollback,
+    commit() {
+      if (status !== "applied") {
+        throw new Error(`FileHistory: rewind 事务状态 ${status} 不能提交`);
+      }
+      status = "committed";
+      appliedFingerprints.clear();
+      rollbackStates.clear();
+    },
+  };
 }
 
 export interface FileHistoryPreparedRewindFile {
@@ -889,6 +1009,70 @@ async function removeCreatedFileForRewind(filePath: string): Promise<void> {
     await unlink(filePath);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+async function captureRewindRollbackState(filePath: string): Promise<FileHistoryRollbackState> {
+  try {
+    const info = await lstat(filePath);
+    if (info.isFile()) {
+      const bytes = await readFile(filePath);
+      const mode = info.mode & 0o777;
+      return {
+        kind: "file",
+        bytes,
+        mode,
+        fingerprint: fileStateFingerprint("file", mode, bytes),
+      };
+    }
+    if (info.isSymbolicLink()) {
+      const target = await readlink(filePath);
+      return {
+        kind: "symlink",
+        target,
+        fingerprint: fileStateFingerprint("symlink", info.mode & 0o777, target),
+      };
+    }
+    throw new Error(`FileHistory: ${filePath} 当前不是可补偿的普通文件或符号链接`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return {
+        kind: "missing",
+        fingerprint: fileStateFingerprint("missing", undefined, ""),
+      };
+    }
+    throw error;
+  }
+}
+
+async function restoreRewindRollbackState(
+  filePath: string,
+  state: FileHistoryRollbackState,
+): Promise<void> {
+  if (state.kind === "missing") {
+    await removeCreatedFileForRewind(filePath);
+    return;
+  }
+  await mkdir(dirname(filePath), { recursive: true });
+  const temporaryPath = join(dirname(filePath), `.pico-rewind-rollback-${randomUUID()}.tmp`);
+  let committed = false;
+  try {
+    if (state.kind === "symlink") {
+      await symlink(state.target, temporaryPath);
+    } else {
+      const handle = await open(temporaryPath, "wx", state.mode);
+      try {
+        await handle.writeFile(state.bytes);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await chmod(temporaryPath, state.mode);
+    }
+    await rename(temporaryPath, filePath);
+    committed = true;
+  } finally {
+    if (!committed) await rm(temporaryPath, { force: true }).catch(() => undefined);
   }
 }
 
@@ -1666,6 +1850,43 @@ export async function fileHistoryCloneSession(
     io.baseDir,
     `file-history-clone:${sourceSessionId}:${targetSessionId}:${process.pid}`,
     async () => fileHistoryCloneSessionUnlocked(sourceSessionId, targetSessionId, io),
+  );
+}
+
+/**
+ * 清理确定未发布 fork 的 FileHistory sidecar。只删除与当前 source
+ * manifest 精确相同的克隆；任何差异都视为可能已被使用，fail closed。
+ */
+export async function fileHistoryDeleteClonedSession(
+  sourceSessionId: string,
+  targetSessionId: string,
+  io: FileHistoryIo,
+): Promise<boolean> {
+  return withFileHistoryMutationLease(
+    io.baseDir,
+    `file-history-delete-clone:${sourceSessionId}:${targetSessionId}:${process.pid}`,
+    async () => {
+      const sourceRow = readFileHistoryManifestRow(io.storageRoot, sourceSessionId);
+      const targetRow = readFileHistoryManifestRow(io.storageRoot, targetSessionId);
+      if (!targetRow) return false;
+      if (!sourceRow) {
+        throw new FileHistoryCloneConflictError(
+          sourceSessionId,
+          targetSessionId,
+          `File History 源 manifest 在克隆清理期间消失: ${sourceSessionId}`,
+        );
+      }
+      const source = parseFileHistoryManifestV2(manifestFromRow(sourceRow), sourceSessionId);
+      const target = parseFileHistoryManifestV2(manifestFromRow(targetRow), targetSessionId);
+      if (!isDeepStrictEqual(target, { ...source, sessionId: targetSessionId })) {
+        throw new FileHistoryCloneConflictError(
+          sourceSessionId,
+          targetSessionId,
+          `File History 目标 manifest 已不是可清理的未发布克隆: ${targetSessionId}`,
+        );
+      }
+      return deleteFileHistoryManifestRow(io.storageRoot, targetSessionId);
+    },
   );
 }
 

@@ -376,6 +376,7 @@ interface FakeClientHarness {
   emit(notification: RuntimeNotification): void;
   setTranscriptItems(items: unknown[]): void;
   setTranscriptPages(pages: readonly Record<string, unknown>[]): void;
+  failNextSubscription(message: string): void;
 }
 
 function createFakeClient(): FakeClientHarness {
@@ -383,6 +384,7 @@ function createFakeClient(): FakeClientHarness {
   let listener: ((notification: RuntimeNotification) => void) | undefined;
   let transcriptItems: unknown[] = [];
   let transcriptPages: Record<string, unknown>[] = [];
+  let nextSubscriptionError: Error | undefined;
   const session = {
     sessionId: "s1",
     workspacePath: "C:\\ws",
@@ -414,6 +416,11 @@ function createFakeClient(): FakeClientHarness {
         return { session, run: { runId: "run_1", status: "running" }, disposition: "started" };
       }
       if (method === "session.subscription.open") {
+        if (nextSubscriptionError) {
+          const error = nextSubscriptionError;
+          nextSubscriptionError = undefined;
+          throw error;
+        }
         const queuedPage = transcriptPages.shift();
         const items =
           queuedPage && Array.isArray(queuedPage.items) ? queuedPage.items : transcriptItems;
@@ -500,6 +507,9 @@ function createFakeClient(): FakeClientHarness {
     },
     setTranscriptPages: (pages) => {
       transcriptPages = [...pages];
+    },
+    failNextSubscription: (message) => {
+      nextSubscriptionError = new Error(message);
     },
   };
 }
@@ -935,6 +945,29 @@ test("client session runtime: session scope filtering isolates foreign-session e
   await runtime.switchSession(undefined);
   assert.equal(runtime.activeSessionId, undefined);
 
+  runtime.dispose();
+});
+
+test("client session runtime: failed hydration rolls Session switching back atomically", async () => {
+  const harness = createFakeClient();
+  const reporter = new TuiReporter();
+  const runtime = new ClientSessionRuntime({
+    client: harness.client,
+    workspacePath: "C:\\ws",
+    sessionId: "s_source",
+    reporter,
+  });
+  harness.setTranscriptItems([{ id: "source", kind: "userMessage", content: "source history" }]);
+  await runtime.start();
+
+  harness.failNextSubscription("injected target hydration failure");
+  await assert.rejects(runtime.switchSession("s_target"), /injected target hydration failure/u);
+  assert.equal(runtime.activeSessionId, "s_source");
+  assert.ok(
+    reporter
+      .getProjection()
+      .entries.some(({ entry }) => entry.kind === "user" && entry.content === "source history"),
+  );
   runtime.dispose();
 });
 

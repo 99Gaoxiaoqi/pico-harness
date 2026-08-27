@@ -3,9 +3,39 @@ import test from "node:test";
 import {
   parseDesktopRuntimeResult,
   parseRuntimeResult,
+  parseStrictRuntimeParams,
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
 } from "../../packages/protocol/src/index.js";
+
+test("rewind.apply keeps one strict v2 request/result contract", () => {
+  const baseParams = {
+    workspacePath: "/workspace",
+    sessionId: "source",
+    checkpointId: "checkpoint",
+    expectedFingerprint: "fingerprint",
+  } as const;
+  assert.deepEqual(parseStrictRuntimeParams("rewind.apply", baseParams), baseParams);
+  for (const mode of ["code", "conversation", "both"] as const) {
+    const params = { ...baseParams, mode, idempotencyKey: `rewind-${mode}` };
+    assert.deepEqual(parseStrictRuntimeParams("rewind.apply", params), params);
+  }
+  assert.throws(() =>
+    parseStrictRuntimeParams("rewind.apply", { ...baseParams, sourceSessionId: "source" }),
+  );
+  assert.throws(() =>
+    parseStrictRuntimeParams("rewind.apply", { ...baseParams, idempotencyKey: "" }),
+  );
+
+  const legacy = { applied: true, sessionId: "target" } as const;
+  const current = { ...legacy, sourceSessionId: "source" } as const;
+  assert.deepEqual(parseRuntimeResult("rewind.apply", legacy), legacy);
+  assert.deepEqual(parseRuntimeResult("rewind.apply", current), current);
+  assert.throws(() =>
+    parseRuntimeResult("rewind.apply", { ...current, unexpected: "protocol-drift" }),
+  );
+  assert.throws(() => parseRuntimeResult("rewind.apply", { ...legacy, sourceSessionId: "" }));
+});
 
 test("Runtime result boundary rejects malformed responses for previously unchecked methods", () => {
   assert.throws(
