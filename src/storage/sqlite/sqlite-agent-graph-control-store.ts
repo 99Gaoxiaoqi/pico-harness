@@ -660,6 +660,18 @@ export class SqliteAgentGraphControlStore {
     );
   }
 
+  listResourceRefs(graphId: string): readonly AgentGraphResourceRefRecord[] {
+    return this.read(() =>
+      this.lease.database
+        .prepare(
+          `SELECT * FROM agent_graph_resource_refs
+           WHERE graph_id = ? ORDER BY created_at ASC, resource_id ASC`,
+        )
+        .all(requireNonEmpty(graphId, "graphId"))
+        .map((row) => resourceRefFromRow(asRow(row))),
+    );
+  }
+
   registerYieldInterest(
     input: RegisterAgentGraphYieldInterestInput,
   ): IdempotentStoreResult<AgentGraphYieldInterestRecord> {
@@ -869,6 +881,18 @@ export class SqliteAgentGraphControlStore {
 
   getSupervisorWake(wakeId: string): AgentGraphSupervisorWakeRecord | undefined {
     return this.read(() => this.selectWake(requireNonEmpty(wakeId, "wakeId")));
+  }
+
+  listSupervisorWakes(graphId: string): readonly AgentGraphSupervisorWakeRecord[] {
+    return this.read(() =>
+      this.lease.database
+        .prepare(
+          `SELECT * FROM agent_graph_supervisor_wakes
+           WHERE graph_id = ? ORDER BY created_at ASC, wake_id ASC`,
+        )
+        .all(requireNonEmpty(graphId, "graphId"))
+        .map((row) => wakeFromRow(asRow(row))),
+    );
   }
 
   listDueSupervisorWakes(at = this.now()): readonly AgentGraphSupervisorWakeRecord[] {

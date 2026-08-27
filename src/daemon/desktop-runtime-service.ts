@@ -15,6 +15,7 @@ import { EvidenceArchive, parseEvidenceUri } from "../context/evidence-archive.j
 import { FullCompactor } from "../context/full-compactor.js";
 import { recordRuntimeCompactionCheckpoint } from "../context/runtime-compaction-checkpoint.js";
 import { SkillLoader } from "../context/skill.js";
+import { AgentGraphReadOnlyQueryService } from "../agent-graph/query-service.js";
 import { findAgentProfile, loadAgentCatalog } from "../agents/catalog.js";
 import { ResourceDoctor, renderResourceDoctorReport } from "../diagnostics/resource-doctor.js";
 import {
@@ -106,6 +107,7 @@ import {
   type SqliteSessionCatalogEntry,
 } from "../storage/sqlite/sqlite-runtime-event-store.js";
 import { SqliteRuntimeControlStore } from "../storage/sqlite/sqlite-runtime-control-store.js";
+import { SqliteAgentGraphControlStore } from "../storage/sqlite/sqlite-agent-graph-control-store.js";
 import {
   SqliteSessionWorkbarRepository,
   WorkbarConflictError,
@@ -683,6 +685,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         "session.artifacts.query": this.querySessionArtifacts.bind(this),
         "session.artifacts.command": this.commandSessionArtifacts.bind(this),
         "session.trace.query": this.querySessionTrace.bind(this),
+        "session.graph.query": this.querySessionGraph.bind(this),
       }),
       ...createDesktopMemoryRequestHandlers({
         list: (params) =>
@@ -1717,6 +1720,36 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         }),
       ),
     );
+  }
+
+  private async querySessionGraph(
+    params: RuntimeRequest<"session.graph.query">["params"],
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
+    const store = new SqliteAgentGraphControlStore({
+      storageRoot: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
+      now: this.now,
+    });
+    try {
+      return toJsonValue(
+        new AgentGraphReadOnlyQueryService(store).query({
+          rootSessionId: params.sessionId,
+          action: params.action,
+          ...(params.graphId === undefined ? {} : { graphId: params.graphId }),
+          ...(params.cursor === undefined ? {} : { cursor: params.cursor }),
+          ...(params.limit === undefined ? {} : { limit: params.limit }),
+        }),
+      );
+    } catch (error) {
+      throw new RuntimeProtocolError(
+        error instanceof Error && /does not belong/u.test(error.message)
+          ? RUNTIME_ERROR_CODES.NOT_FOUND
+          : RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      store.close();
+    }
   }
 
   private async getGoal(workspacePath: string, sessionId: string): Promise<JsonValue> {

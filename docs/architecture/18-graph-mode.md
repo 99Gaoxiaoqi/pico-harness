@@ -81,6 +81,7 @@ flowchart TD
 | Runtime 适配 | `src/runtime/agent-graph-*`                                                    | child Session、exact Run、output ledger、handoff、根唤醒和 workspace host |
 | 生命周期     | `src/daemon/agent-graph-supervisor-service.ts`、`workspace-runtime-service.ts` | workspace 启停、扫描恢复、single-flight、wake/attempt                     |
 | 工具         | `src/tools/agent-graph-tools.ts`、`agent-output-tool.ts`                       | 解析模型命令；运行时身份由宿主注入                                        |
+| 只读观察     | `src/agent-graph/query-service.ts`、Desktop Graph Workbar                      | 按 Session/epoch 查询摘要和稳定水位时间线，不触发调度副作用               |
 
 ## 4. 领域模型
 
@@ -103,6 +104,8 @@ Graph = {
 - finish 后，已持久化的 Claim 和已经启动的 RuntimeRun 仍可被观察、停止和投影，不能被抹掉；
 - SQLite 约束同一 root Session 同时最多一个 open Graph；root Run 组装时在写事务中复用当前 open Graph，或以 `max(epoch) + 1` 创建新 Graph。
 - root Run 一旦组装就固定 `{graphId, epoch}`；同一 Run 内不会漂移到新 epoch。只读和工具路径必须匹配该绑定，不得为缺失 Graph 产生隐式写入。
+
+Desktop 的 Graph 面板通过 `session.graph.query` 读取这一边界。`list` 只列出当前 root Session 已存在的 epoch，`get` 返回经过裁剪的 Operator、Intent、Claim、RecordRef 与资源摘要，`timeline` 把持久 revision、Provision、Claim、RecordRef、resource、yield、Wake 和 Attempt 投影为按时间排序的只读事件。分页 cursor 绑定 `{graphId, watermark, offset}`；底层事实变化后旧 cursor 会明确失效，客户端重新读取，避免跨水位拼接。三种查询都不会创建 Graph、启动 RuntimeRun、触发 reconcile 或写入控制表。
 
 `selectedRecordIds` 是根 Supervisor 在 finish 时声明的最终结果集合。领域层在获得权威 RecordRef 集合时校验存在性与归属；SQLite store 则在提交 finish revision 的同一 `BEGIN IMMEDIATE` 事务内强制所有选中 ID 已存在且属于当前 Graph，未知或跨图引用不会推进 head revision。
 

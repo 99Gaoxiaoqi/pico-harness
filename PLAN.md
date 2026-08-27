@@ -33,7 +33,7 @@
 - [x] 12. 已实现宿主内置 Operator 目录；公共 add 只接受 `profile_id`，应用服务冻结带指纹快照，production 在 Provider 前复验并强制默认权限、禁止 Session grant 累积与关闭扩展装配；Supervisor 投影不暴露内部快照。
 - [x] 13. 已实现完整 readiness facts：每个 Intent 由宿主派生单一正式输出 ID，允许同 Graph 未来输出作为依赖，拒绝任意/跨 Graph/循环引用，并在 view 中暴露 resolved/in_flight/failed/unknown 分类。
 - [x] 14. 已实现 artifact/evidence handoff：`agent_output` 在正式 Runtime 事实前校验规范 URI、Session 归属、资源存在性、SHA-256 摘要和字节数，Graph 持久保留不可变资源事实并纳入 artifact/evidence blob GC 存活集；handoff 按原输出顺序返回有界摘要与资源 provenance，重启后可从 SQLite 重建。
-- [ ] 15. 已实现 root Run 绑定的多 epoch 分配：同一 root Session 复用当前 open Graph，finish 后下次 root Run 原子取得下一 epoch，工具读取不再隐式创建 Graph，且所有 root 工具请求校验精确 epoch。待完成只读 Graph query/timeline 协议与 Desktop 面板。
+- [x] 15. 已实现 root Run 绑定的多 epoch 分配：同一 root Session 复用当前 open Graph，finish 后下次 root Run 原子取得下一 epoch，工具读取不再隐式创建 Graph，且所有 root 工具请求校验精确 epoch。Desktop 通过只读 `session.graph.query` 按 Session 列出 epoch、读取调度摘要和稳定水位分页时间线；面板仅在激活时轮询，查询不会启动、恢复或修改 Graph。
 - [ ] 16. 实现 `isolated-worktree` 的持久 resource authority、adopt/release/retain/cleanup 生命周期和验收。
 - [ ] 17. 新增独立子进程真实 kill/reopen 测试，覆盖 schedule、provision、claim、provider、output、wake 和 workspace resource 窗口。
 

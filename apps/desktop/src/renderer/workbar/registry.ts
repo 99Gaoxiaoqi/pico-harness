@@ -80,6 +80,14 @@ export const WORKBAR_TOOL_REGISTRY = [
     multiple: false,
     persistsAcrossRestart: true,
   },
+  {
+    kind: "graph",
+    label: "Graph",
+    description: "查看调度周期、Operator、产出与唤醒时间线",
+    defaultDock: "right",
+    multiple: false,
+    persistsAcrossRestart: true,
+  },
 ] as const satisfies readonly WorkbarToolDefinition[];
 
 export function getWorkbarTool(kind: WorkbarToolKind): WorkbarToolDefinition {
