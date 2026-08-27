@@ -814,7 +814,13 @@ function writeCommand(
 function purgeOrphanArtifactBlobs(database: DatabaseSync): number {
   const result = database
     .prepare(
-      "DELETE FROM artifact_blobs WHERE NOT EXISTS (SELECT 1 FROM session_artifacts WHERE session_artifacts.digest = artifact_blobs.digest)",
+      `DELETE FROM artifact_blobs
+       WHERE NOT EXISTS (
+         SELECT 1 FROM session_artifacts WHERE session_artifacts.digest = artifact_blobs.digest
+       ) AND NOT EXISTS (
+         SELECT 1 FROM agent_graph_resource_refs
+         WHERE kind = 'artifact' AND content_digest = artifact_blobs.digest
+       )`,
     )
     .run();
   return Number(result.changes);

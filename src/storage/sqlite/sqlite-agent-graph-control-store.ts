@@ -8,6 +8,7 @@ import type {
   AgentGraphOperatorProvisionRecord,
   AgentGraphRecord,
   AgentGraphRecordRefRecord,
+  AgentGraphResourceRefRecord,
   AgentGraphScheduleRevisionRecord,
   AgentGraphSupervisorWakeAttemptRecord,
   AgentGraphSupervisorWakeRecord,
@@ -24,6 +25,7 @@ import type {
   EnsureAgentGraphOperatorProvisionInput,
   IdempotentStoreResult,
   PutAgentGraphRecordRefInput,
+  PutAgentGraphResourceRefInput,
   RegisterAgentGraphYieldInterestInput,
   RecoverableAgentGraphSupervisorWakeRecord,
   SettleAgentGraphSupervisorWakeInput,
@@ -593,6 +595,68 @@ export class SqliteAgentGraphControlStore {
         )
         .all(requireNonEmpty(graphId, "graphId"))
         .map((row) => recordRefFromRow(asRow(row))),
+    );
+  }
+
+  putResourceRef(
+    input: PutAgentGraphResourceRefInput,
+  ): IdempotentStoreResult<AgentGraphResourceRefRecord> {
+    const normalized = normalizeResourceRefInput(input);
+    return this.write(() => {
+      const byId = this.selectResourceRef(normalized.resourceId);
+      if (byId) return replayResourceRef(byId, normalized);
+      const bySource = this.selectResourceRefBySource(
+        normalized.claimId,
+        normalized.kind,
+        normalized.sourceRef,
+      );
+      if (bySource) return replayResourceRef(bySource, normalized);
+      const claim = this.requireClaim(normalized.claimId);
+      if (
+        claim.graphId !== normalized.graphId ||
+        claim.targetSessionId !== normalized.sourceSessionId
+      ) {
+        throw new AgentGraphStoreConflictError(
+          `Resource ${normalized.resourceId} source identity does not match claim ${normalized.claimId}`,
+        );
+      }
+      const createdAt = this.now();
+      this.lease.database
+        .prepare(
+          `INSERT INTO agent_graph_resource_refs
+           (resource_id, graph_id, claim_id, kind, source_ref, source_session_id,
+            source_resource_id, content_digest, content_bytes, media_type, title,
+            metadata_json, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          normalized.resourceId,
+          normalized.graphId,
+          normalized.claimId,
+          normalized.kind,
+          normalized.sourceRef,
+          normalized.sourceSessionId,
+          normalized.sourceResourceId,
+          normalized.contentDigest,
+          normalized.contentBytes,
+          normalized.mediaType ?? null,
+          normalized.title ?? null,
+          normalized.metadataJson,
+          createdAt,
+        );
+      return { record: this.requireResourceRef(normalized.resourceId), replayed: false };
+    });
+  }
+
+  listResourceRefsByClaim(claimId: string): readonly AgentGraphResourceRefRecord[] {
+    return this.read(() =>
+      this.lease.database
+        .prepare(
+          `SELECT * FROM agent_graph_resource_refs
+           WHERE claim_id = ? ORDER BY created_at ASC, resource_id ASC`,
+        )
+        .all(requireNonEmpty(claimId, "claimId"))
+        .map((row) => resourceRefFromRow(asRow(row))),
     );
   }
 
@@ -1174,6 +1238,35 @@ export class SqliteAgentGraphControlStore {
     return record;
   }
 
+  private selectResourceRef(resourceId: string): AgentGraphResourceRefRecord | undefined {
+    const row = this.lease.database
+      .prepare("SELECT * FROM agent_graph_resource_refs WHERE resource_id = ?")
+      .get(resourceId);
+    return row ? resourceRefFromRow(asRow(row)) : undefined;
+  }
+
+  private selectResourceRefBySource(
+    claimId: string,
+    kind: AgentGraphResourceRefRecord["kind"],
+    sourceRef: string,
+  ): AgentGraphResourceRefRecord | undefined {
+    const row = this.lease.database
+      .prepare(
+        `SELECT * FROM agent_graph_resource_refs
+         WHERE claim_id = ? AND kind = ? AND source_ref = ?`,
+      )
+      .get(claimId, kind, sourceRef);
+    return row ? resourceRefFromRow(asRow(row)) : undefined;
+  }
+
+  private requireResourceRef(resourceId: string): AgentGraphResourceRefRecord {
+    const resource = this.selectResourceRef(resourceId);
+    if (!resource) {
+      throw new AgentGraphStoreConflictError(`Resource ${resourceId} does not exist`);
+    }
+    return resource;
+  }
+
   private assertSelectedRecordRefs(graphId: string, recordIds: readonly string[]): void {
     for (const recordId of recordIds) {
       const record = this.selectRecordRef(recordId);
@@ -1553,6 +1646,33 @@ function normalizeRecordRefInput(input: PutAgentGraphRecordRefInput): PutAgentGr
   };
 }
 
+interface NormalizedResourceRefInput extends Omit<PutAgentGraphResourceRefInput, "metadata"> {
+  readonly metadataJson: string;
+}
+
+function normalizeResourceRefInput(
+  input: PutAgentGraphResourceRefInput,
+): NormalizedResourceRefInput {
+  requireNonNegativeInteger(input.contentBytes, "contentBytes");
+  if (!/^[a-f0-9]{64}$/u.test(input.contentDigest)) {
+    throw new Error("contentDigest must be a lowercase SHA-256 digest");
+  }
+  return {
+    resourceId: requireNonEmpty(input.resourceId, "resourceId"),
+    graphId: requireNonEmpty(input.graphId, "graphId"),
+    claimId: requireNonEmpty(input.claimId, "claimId"),
+    kind: input.kind,
+    sourceRef: requireNonEmpty(input.sourceRef, "sourceRef"),
+    sourceSessionId: requireNonEmpty(input.sourceSessionId, "sourceSessionId"),
+    sourceResourceId: requireNonEmpty(input.sourceResourceId, "sourceResourceId"),
+    contentDigest: input.contentDigest,
+    contentBytes: input.contentBytes,
+    mediaType: optionalNonEmpty(input.mediaType, "mediaType"),
+    title: optionalNonEmpty(input.title, "title"),
+    metadataJson: canonicalJson(input.metadata),
+  };
+}
+
 function normalizeYieldInterestInput(
   input: RegisterAgentGraphYieldInterestInput,
 ): RegisterAgentGraphYieldInterestInput {
@@ -1697,6 +1817,31 @@ function replayRecordRef(
   return { record: existing, replayed: true };
 }
 
+function replayResourceRef(
+  existing: AgentGraphResourceRefRecord,
+  input: NormalizedResourceRefInput,
+): IdempotentStoreResult<AgentGraphResourceRefRecord> {
+  if (
+    existing.resourceId !== input.resourceId ||
+    existing.graphId !== input.graphId ||
+    existing.claimId !== input.claimId ||
+    existing.kind !== input.kind ||
+    existing.sourceRef !== input.sourceRef ||
+    existing.sourceSessionId !== input.sourceSessionId ||
+    existing.sourceResourceId !== input.sourceResourceId ||
+    existing.contentDigest !== input.contentDigest ||
+    existing.contentBytes !== input.contentBytes ||
+    existing.mediaType !== input.mediaType ||
+    existing.title !== input.title ||
+    canonicalJson(existing.metadata) !== input.metadataJson
+  ) {
+    throw new AgentGraphStoreConflictError(
+      `Resource ${input.resourceId} is already bound to different immutable metadata`,
+    );
+  }
+  return { record: existing, replayed: true };
+}
+
 function replayYieldInterest(
   existing: AgentGraphYieldInterestRecord,
   input: RegisterAgentGraphYieldInterestInput,
@@ -1829,6 +1974,24 @@ function recordRefFromRow(row: Record<string, unknown>): AgentGraphRecordRefReco
     kind: rowString(row, "kind") as AgentGraphRecordRefRecord["kind"],
     createdAt: rowNumber(row, "created_at"),
   };
+}
+
+function resourceRefFromRow(row: Record<string, unknown>): AgentGraphResourceRefRecord {
+  return compact({
+    resourceId: rowString(row, "resource_id"),
+    graphId: rowString(row, "graph_id"),
+    claimId: rowString(row, "claim_id"),
+    kind: rowString(row, "kind") as AgentGraphResourceRefRecord["kind"],
+    sourceRef: rowString(row, "source_ref"),
+    sourceSessionId: rowString(row, "source_session_id"),
+    sourceResourceId: rowString(row, "source_resource_id"),
+    contentDigest: rowString(row, "content_digest"),
+    contentBytes: rowNumber(row, "content_bytes"),
+    mediaType: rowOptionalString(row, "media_type"),
+    title: rowOptionalString(row, "title"),
+    metadata: rowJson(row, "metadata_json"),
+    createdAt: rowNumber(row, "created_at"),
+  });
 }
 
 function wakeFromRow(row: Record<string, unknown>): AgentGraphSupervisorWakeRecord {

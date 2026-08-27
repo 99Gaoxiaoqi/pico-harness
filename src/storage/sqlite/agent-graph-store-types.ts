@@ -177,6 +177,39 @@ export interface PutAgentGraphRecordRefInput {
   readonly kind: AgentGraphRecordKind;
 }
 
+export type AgentGraphResourceKind = "artifact" | "evidence";
+
+export interface AgentGraphResourceRefRecord {
+  readonly resourceId: string;
+  readonly graphId: string;
+  readonly claimId: string;
+  readonly kind: AgentGraphResourceKind;
+  readonly sourceRef: string;
+  readonly sourceSessionId: string;
+  readonly sourceResourceId: string;
+  readonly contentDigest: string;
+  readonly contentBytes: number;
+  readonly mediaType?: string;
+  readonly title?: string;
+  readonly metadata: unknown;
+  readonly createdAt: number;
+}
+
+export interface PutAgentGraphResourceRefInput {
+  readonly resourceId: string;
+  readonly graphId: string;
+  readonly claimId: string;
+  readonly kind: AgentGraphResourceKind;
+  readonly sourceRef: string;
+  readonly sourceSessionId: string;
+  readonly sourceResourceId: string;
+  readonly contentDigest: string;
+  readonly contentBytes: number;
+  readonly mediaType?: string;
+  readonly title?: string;
+  readonly metadata: unknown;
+}
+
 export interface AgentGraphSupervisorWakeRecord {
   readonly wakeId: string;
   readonly graphId: string;

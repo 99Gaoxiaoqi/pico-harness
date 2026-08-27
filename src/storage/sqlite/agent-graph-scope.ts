@@ -209,5 +209,36 @@ export const AGENT_GRAPH_SCOPE: SqliteSchemaScope = {
         ON agent_graph_supervisor_wake_attempts(wake_id, attempt_number);
       `,
     ],
+    [
+      2,
+      `
+      CREATE TABLE agent_graph_resource_refs (
+        resource_id TEXT PRIMARY KEY,
+        graph_id TEXT NOT NULL,
+        claim_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('artifact','evidence')),
+        source_ref TEXT NOT NULL,
+        source_session_id TEXT NOT NULL,
+        source_resource_id TEXT NOT NULL,
+        content_digest TEXT NOT NULL CHECK (length(content_digest) = 64),
+        content_bytes INTEGER NOT NULL CHECK (content_bytes >= 0),
+        media_type TEXT,
+        title TEXT,
+        metadata_json TEXT NOT NULL CHECK (json_valid(metadata_json)),
+        created_at INTEGER NOT NULL,
+        UNIQUE (claim_id, kind, source_ref),
+        FOREIGN KEY (graph_id, claim_id)
+          REFERENCES agent_graph_activation_claims(graph_id, claim_id) ON DELETE RESTRICT,
+        FOREIGN KEY (graph_id) REFERENCES agent_graphs(graph_id) ON DELETE RESTRICT
+      );
+
+      CREATE INDEX agent_graph_resources_by_graph
+        ON agent_graph_resource_refs(graph_id, created_at, resource_id);
+      CREATE INDEX agent_graph_resources_by_claim
+        ON agent_graph_resource_refs(claim_id, kind, created_at, resource_id);
+      CREATE INDEX agent_graph_resources_by_digest
+        ON agent_graph_resource_refs(kind, content_digest);
+      `,
+    ],
   ]),
 };

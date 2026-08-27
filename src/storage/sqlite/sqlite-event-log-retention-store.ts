@@ -1453,7 +1453,7 @@ function readEvidenceReferences(database: DatabaseSync): BlobReference[] {
   const rows = database
     .prepare("SELECT session_id, content_json FROM evidence_records")
     .all() as Array<Record<string, unknown>>;
-  return rows.flatMap((row) =>
+  const manifestReferences = rows.flatMap((row) =>
     extractBlobReferences(
       requireString(row["session_id"], "evidence_records.session_id"),
       parseJson(row["content_json"], "evidence_records.content_json"),
@@ -1462,6 +1462,26 @@ function readEvidenceReferences(database: DatabaseSync): BlobReference[] {
       byteLength: blobSizes.get(reference.digest) ?? reference.byteLength,
     })),
   );
+  const graphReferences = database
+    .prepare(
+      `SELECT source_session_id, content_digest, content_bytes
+       FROM agent_graph_resource_refs WHERE kind = 'evidence'`,
+    )
+    .all() as Array<Record<string, unknown>>;
+  return [
+    ...manifestReferences,
+    ...graphReferences.map((row) => ({
+      sessionId: requireString(
+        row["source_session_id"],
+        "agent_graph_resource_refs.source_session_id",
+      ),
+      digest: requireDigest(row["content_digest"], "agent_graph_resource_refs.content_digest"),
+      byteLength: requireNonNegativeInteger(
+        row["content_bytes"],
+        "agent_graph_resource_refs.content_bytes",
+      ),
+    })),
+  ];
 }
 
 function readFileHistoryReferences(database: DatabaseSync): BlobReference[] {
