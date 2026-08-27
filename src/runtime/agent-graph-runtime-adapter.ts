@@ -249,7 +249,10 @@ export class AgentGraphRuntimeAdapter implements AgentOutputCommitPort {
     const existing = this.options.sessionManager.get(
       input.provision.childSessionId,
       input.workDir,
-      { picoHome: input.sessionOptions?.picoHome },
+      {
+        picoHome: input.sessionOptions?.picoHome,
+        runtimeStorageRoot: input.sessionOptions?.runtimeStorageRoot,
+      },
     );
     const lease = await this.options.sessionManager.getOrCreatePinned(
       input.provision.childSessionId,

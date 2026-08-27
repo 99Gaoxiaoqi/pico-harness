@@ -40,6 +40,9 @@ test("workspace application drives add and follow-up activate to records and fin
     resolveOperatorWorkspace: ({ operator }) => ({
       workDir: join(storageRoot, operator.operatorId),
     }),
+    validateWorkspacePolicy: (policy) => {
+      if (policy.kind !== "shared") throw new Error("isolated workspace unavailable");
+    },
   });
 
   try {
@@ -74,6 +77,33 @@ test("workspace application drives add and follow-up activate to records and fin
     const firstEpoch = service.openRootEpoch(rootSessionId);
     assert.equal(firstEpoch.graphId, graphId);
     assert.equal(firstEpoch.epoch, 1);
+    const isolated = addCommand({
+      graphId,
+      intentId: "intent-isolated",
+      operatorId: "isolated",
+      source,
+    });
+    await assert.rejects(
+      service.toolPort.commitUpdate({
+        graphId,
+        epoch: 1,
+        expectedRevision: 0,
+        operationId: "reject-unavailable-workspace",
+        rootModelRouteId: "test-root-model",
+        source,
+        commands: [
+          {
+            ...isolated,
+            operator: {
+              ...isolated.operator,
+              workspacePolicy: { kind: "isolated-worktree", baseRef: "HEAD" },
+            },
+          },
+        ],
+      }),
+      /isolated workspace unavailable/u,
+    );
+    assert.equal(store.getGraph(graphId)?.headRevision, 0);
     const upstreamUpdated = await service.toolPort.commitUpdate({
       graphId,
       epoch: 1,

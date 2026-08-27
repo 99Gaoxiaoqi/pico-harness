@@ -55,7 +55,7 @@ import {
   type FileHistoryRewindTransactionHooks,
   type FileHistoryDurableRewindPlan,
 } from "../safety/file-history.js";
-import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
+import { resolvePicoHome, resolvePicoPaths, workspaceIdForPath } from "../paths/pico-paths.js";
 import {
   createEngineRuntimeCapability,
   type EngineRuntimeCapability,
@@ -119,6 +119,8 @@ export interface SessionOptions {
   persistence?: boolean;
   /** Host-owned Pico state root. Omitted callers keep the process default. */
   picoHome?: string;
+  /** Host-owned durable authority; lets an isolated cwd keep facts in its root workspace ledger. */
+  runtimeStorageRoot?: string;
   identity?: SessionIdentity;
   /** Runtime adapter used for ambient/external durable commits. */
   runtimePort?: EngineRuntimePort;
@@ -196,6 +198,7 @@ export class Session
   readonly identity: SessionIdentity;
   /** Frozen state root so a live Session never follows later environment changes. */
   readonly picoHome: string;
+  readonly runtimeStorageRoot: string;
   /** Frozen File History root shared by the Session and AgentEngine journals. */
   readonly fileHistoryBaseDir: string;
   /** File History 持久化落点(blob CAS 根 + manifest 行所在的 workspace 库根)。 */
@@ -285,6 +288,10 @@ export class Session
     this.id = id;
     this.workDir = workDir;
     this.picoHome = resolvePicoHome({ picoHome: options?.picoHome });
+    this.runtimeStorageRoot = resolve(
+      options?.runtimeStorageRoot ??
+        resolvePicoPaths(workDir, { picoHome: this.picoHome }).workspace.root,
+    );
     this.fileHistoryBaseDir = options?.picoHome
       ? resolvePicoPaths(workDir, { picoHome: this.picoHome }).home.fileHistory
       : fileHistoryDefaultBaseDir();
@@ -292,7 +299,7 @@ export class Session
     // 的 RuntimeEventStore 解析口径一致。
     this.fileHistoryIo = {
       baseDir: this.fileHistoryBaseDir,
-      storageRoot: resolvePicoPaths(workDir, { picoHome: this.picoHome }).workspace.root,
+      storageRoot: this.runtimeStorageRoot,
     };
     this.identity =
       options?.identity ??
@@ -323,7 +330,7 @@ export class Session
     const enabled = explicit ?? process.env.PICO_PERSISTENCE !== "0";
     if (!enabled) return;
     this.store = new SqliteRuntimeEventStore({
-      storageRoot: resolvePicoPaths(this.workDir, { picoHome: this.picoHome }).workspace.root,
+      storageRoot: this.runtimeStorageRoot,
     });
   }
 
@@ -388,9 +395,11 @@ export class Session
     if (this.runtimeOwnership) return Promise.resolve(this.runtimeOwnership);
     if (this.runtimeOwnershipPromise) return this.runtimeOwnershipPromise;
 
-    const paths = resolvePicoPaths(this.workDir, { picoHome: this.picoHome }).workspace;
     const acquisition = OwnerLease.acquire({
-      leaseDirectory: sessionOwnerLeaseDirectory(paths, this.id),
+      leaseDirectory: sessionOwnerLeaseDirectory(
+        { id: workspaceIdForPath(this.runtimeStorageRoot), root: this.runtimeStorageRoot },
+        this.id,
+      ),
       ownerId: `runtime-session:${this.id}`,
     }).then((lease) => {
       this.runtimeOwnership = lease;
@@ -1714,7 +1723,7 @@ export class Session
         if (closeError) throw closeError;
       });
     this.closePromise = registerSessionDrain(
-      sessionEntryKey(this.id, this.workDir, this.picoHome),
+      sessionEntryKey(this.id, this.workDir, this.picoHome, this.runtimeStorageRoot),
       drain,
     );
     return this.closePromise;

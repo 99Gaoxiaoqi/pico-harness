@@ -8,7 +8,11 @@ import {
   type RegisterAgentGraphYieldInput as SupervisorRegisterYieldInput,
 } from "../daemon/agent-graph-supervisor-service.js";
 import type { SqliteAgentGraphControlStore } from "../storage/sqlite/sqlite-agent-graph-control-store.js";
-import type { AgentGraph, AgentGraphScheduleCommand } from "./core/contracts.js";
+import type {
+  AgentGraph,
+  AgentGraphScheduleCommand,
+  AgentGraphWorkspacePolicy,
+} from "./core/contracts.js";
 import { isIntentStopped, resolveIntentReadiness } from "./core/index.js";
 import type {
   AgentGraphSupervisorProjection,
@@ -41,6 +45,7 @@ export interface CreateAgentGraphApplicationServiceOptions {
   readonly resolveOperatorWorkspace: (
     input: ResolveAgentGraphOperatorWorkspaceInput,
   ) => Promise<ResolvedAgentGraphOperatorWorkspace> | ResolvedAgentGraphOperatorWorkspace;
+  readonly validateWorkspacePolicy?: (policy: AgentGraphWorkspacePolicy) => void;
   readonly operatorProfileCatalog?: AgentGraphOperatorProfileCatalog;
   readonly now?: () => number;
   readonly retryDelayMs?: AgentGraphSupervisorServiceOptions["retryDelayMs"];
@@ -76,7 +81,7 @@ class SqliteAgentGraphDriveBridge implements AgentGraphDrivePort {
 
   async driveGraph(graphId: string): Promise<AgentGraphDriveResult> {
     const result = await this.reconciler.reconcile(graphId);
-    this.runtime.releaseStoppedProvisions(graphId);
+    await this.runtime.releaseStoppedProvisions(graphId);
     return {
       quiescent: result.quiescent,
       wakeCandidates: result.wakeCandidates.map((candidate) => ({
@@ -172,6 +177,7 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
     private readonly drive: SqliteAgentGraphDriveBridge,
     private readonly supervisor: AgentGraphSupervisorService,
     private readonly operatorProfileCatalog: AgentGraphOperatorProfileCatalog,
+    private readonly validateWorkspacePolicy?: (policy: AgentGraphWorkspacePolicy) => void,
     private readonly onAsyncError?: AgentGraphSupervisorServiceOptions["onError"],
   ) {}
 
@@ -347,6 +353,7 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
   ): readonly AgentGraphScheduleCommand[] {
     return input.commands.map((command) => {
       if (command.kind !== "add") return command;
+      this.validateWorkspacePolicy?.(command.operator.workspacePolicy);
       const { profileId, ...operator } = command.operator;
       return {
         kind: "add" as const,
@@ -424,6 +431,7 @@ export function createAgentGraphApplicationService(
     drive,
     supervisor,
     options.operatorProfileCatalog ?? createBuiltinAgentGraphOperatorProfileCatalog(),
+    options.validateWorkspacePolicy,
     options.onError,
   );
   let closed = false;
@@ -440,7 +448,7 @@ export function createAgentGraphApplicationService(
       if (closed) return;
       closed = true;
       await supervisor.close();
-      runtime.close();
+      await runtime.close();
     },
   };
 }

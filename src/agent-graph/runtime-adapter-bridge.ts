@@ -55,6 +55,7 @@ export interface ResolveAgentGraphOperatorWorkspaceInput {
 export interface ResolvedAgentGraphOperatorWorkspace {
   readonly workDir: string;
   readonly sessionOptions?: SessionOptions;
+  release?(reason: "host-shutdown" | "provision-stopped"): Promise<void> | void;
 }
 
 export interface AgentGraphRuntimePortBridgeOptions {
@@ -136,13 +137,19 @@ export class AgentGraphRuntimePortBridge implements AgentGraphRuntimePort {
     }
     const workspace = await this.options.resolveOperatorWorkspace(input);
     requireWorkDir(workspace.workDir);
-    const lease = await this.options.runtime.ensureOperatorProvision({
-      provision: this.requireStoredProvision(input.provision),
-      workDir: workspace.workDir,
-      ...(workspace.sessionOptions === undefined
-        ? {}
-        : { sessionOptions: workspace.sessionOptions }),
-    });
+    let lease: EnsuredAgentGraphOperatorSession;
+    try {
+      lease = await this.options.runtime.ensureOperatorProvision({
+        provision: this.requireStoredProvision(input.provision),
+        workDir: workspace.workDir,
+        ...(workspace.sessionOptions === undefined
+          ? {}
+          : { sessionOptions: workspace.sessionOptions }),
+      });
+    } catch (error) {
+      await workspace.release?.("host-shutdown");
+      throw error;
+    }
     if (this.closed) {
       lease.release();
       throw new Error("Agent Graph runtime bridge is closed");
@@ -202,25 +209,39 @@ export class AgentGraphRuntimePortBridge implements AgentGraphRuntimePort {
     await this.options.runtime.stopActivation(this.requireStoredClaim(input.claim), input.reason);
   }
 
-  releaseStoppedProvisions(graphId: string): void {
+  async releaseStoppedProvisions(graphId: string): Promise<void> {
     for (const provision of this.options.store.listOperatorProvisions(graphId)) {
       if (provision.state !== "stopped") continue;
-      this.releaseProvision(provision.provisionId);
+      await this.releaseProvision(provision.provisionId, "provision-stopped");
     }
   }
 
-  releaseProvision(provisionId: string): void {
+  async releaseProvision(
+    provisionId: string,
+    reason: "host-shutdown" | "provision-stopped",
+  ): Promise<void> {
     const held = this.leases.get(provisionId);
     if (!held) return;
     this.leases.delete(provisionId);
     held.lease.release();
+    await held.workspace.release?.(reason);
   }
 
-  close(): void {
+  async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    for (const held of this.leases.values()) held.lease.release();
+    const held = [...this.leases.values()];
     this.leases.clear();
+    const failures: unknown[] = [];
+    for (const item of held) {
+      try {
+        item.lease.release();
+        await item.workspace.release?.("host-shutdown");
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length > 0) throw new AggregateError(failures, "Graph workspace release failed");
   }
 
   private requireStoredRecord(record: AgentGraphRecordRef): AgentGraphRecordRefRecord {

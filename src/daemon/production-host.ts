@@ -267,11 +267,10 @@ export function createProductionRuntimeServices(
     let executionFailure: unknown;
     let failureSealError: unknown;
     try {
-      sessionLease = await globalSessionManager.getOrCreatePinned(targetSessionId, runWorkDir, {
-        persistence: true,
-        picoHome,
-        runtimePort: createEngineRuntimePort(),
-      });
+      sessionLease = {
+        session: input.session,
+        release: globalSessionManager.pin(input.session),
+      };
       if (!(await trustStore.isTrusted(workspacePath))) {
         throw new RuntimeProtocolError(
           RUNTIME_ERROR_CODES.FORBIDDEN,
@@ -398,6 +397,7 @@ export function createProductionRuntimeServices(
         {
           signal: context.signal,
           runtimeState,
+          runtimeSession: input.session,
           reporter: new SilentReporter(),
           modelRouter: route.modelRouter,
           approvalNotifier: broker.notifyApproval,
@@ -503,6 +503,9 @@ export function createProductionRuntimeServices(
       try {
         host = agentGraphWorkspaceHostFactory({
           workDir: workspacePath,
+          ...(workspaceRuntime.taskHostRuntime
+            ? { repoRoot: workspaceRuntime.taskHostRuntime.repoRoot }
+            : {}),
           storageRoot: runtimeStore.storageRoot,
           runtimeEventStore,
           sessionManager: globalSessionManager,

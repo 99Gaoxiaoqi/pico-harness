@@ -240,5 +240,39 @@ export const AGENT_GRAPH_SCOPE: SqliteSchemaScope = {
         ON agent_graph_resource_refs(kind, content_digest);
       `,
     ],
+    [
+      3,
+      `
+      CREATE TABLE agent_graph_workspace_resources (
+        resource_id TEXT PRIMARY KEY,
+        graph_id TEXT NOT NULL,
+        provision_id TEXT NOT NULL UNIQUE,
+        child_session_id TEXT NOT NULL UNIQUE,
+        repo_root TEXT NOT NULL,
+        worktree_path TEXT NOT NULL UNIQUE,
+        branch TEXT NOT NULL UNIQUE,
+        base_ref TEXT NOT NULL,
+        base_commit TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('requested','active','retained','cleaned')),
+        version INTEGER NOT NULL CHECK (version >= 1),
+        retain_reason TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        retained_at INTEGER,
+        cleaned_at INTEGER,
+        FOREIGN KEY (graph_id) REFERENCES agent_graphs(graph_id) ON DELETE RESTRICT,
+        FOREIGN KEY (provision_id) REFERENCES agent_graph_operator_provisions(provision_id) ON DELETE RESTRICT,
+        CHECK ((state = 'requested' AND retained_at IS NULL AND cleaned_at IS NULL)
+          OR (state = 'active' AND retained_at IS NULL AND cleaned_at IS NULL)
+          OR (state = 'retained' AND retained_at IS NOT NULL AND cleaned_at IS NULL)
+          OR (state = 'cleaned' AND cleaned_at IS NOT NULL))
+      );
+
+      CREATE INDEX agent_graph_workspace_resources_by_graph
+        ON agent_graph_workspace_resources(graph_id, created_at, resource_id);
+      CREATE INDEX agent_graph_workspace_resources_by_state
+        ON agent_graph_workspace_resources(state, updated_at, resource_id);
+      `,
+    ],
   ]),
 };
