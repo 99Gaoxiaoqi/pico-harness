@@ -123,6 +123,21 @@ export function readFileHistoryManifestRow(
   );
 }
 
+/** 仅用于已验证未发布 fork target 的 sidecar 补偿清理。 */
+export function deleteFileHistoryManifestRow(storageRoot: string, sessionId: string): boolean {
+  return withWorkspaceSqliteLease(storageRoot, (lease) =>
+    lease.transaction("write", () => {
+      lease.database
+        .prepare("DELETE FROM file_history_snapshots WHERE session_id = ?")
+        .run(sessionId);
+      return (
+        lease.database.prepare("DELETE FROM file_history WHERE session_id = ?").run(sessionId)
+          .changes > 0
+      );
+    }),
+  );
+}
+
 /** Doctor 扫描用:本 workspace 库内存在 manifest 行的 sessionId 全集。 */
 export function listFileHistorySessionIds(storageRoot: string): string[] {
   return withWorkspaceSqliteLease(storageRoot, (lease) =>

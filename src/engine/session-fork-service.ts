@@ -5,6 +5,7 @@ import { resolvePicoHome, resolvePicoPaths, type PicoWorkspacePaths } from "../p
 import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 import { sessionOwnerLeaseDirectory } from "../storage/session-owner-lease.js";
 import {
+  fileHistoryDeleteClonedSession,
   fileHistoryCloneSession,
   fileHistoryDefaultBaseDir,
   type FileHistoryIo,
@@ -47,7 +48,10 @@ import type {
   SessionForkModelCheckpoint,
   SessionForkRuntimePort,
 } from "./session-fork-runtime-port.js";
-import { SessionForkRuntimeConflictError } from "./session-fork-runtime-port.js";
+import {
+  SessionForkPublicationUncertainError,
+  SessionForkRuntimeConflictError,
+} from "./session-fork-runtime-port.js";
 import {
   runtimeEventHasModelHistoryEntry,
   type RuntimeModelHistoryEvent,
@@ -117,6 +121,8 @@ export interface ForkOperationDispositionResult {
   readonly stagingCleanup?: ForkAbortResult["stagingCleanup"];
   readonly cleanupDiagnostic?: string;
 }
+
+export type ForkFailureSettlement = "committed" | "not_committed";
 
 export class SessionForkNeedsAttentionError extends Error {
   constructor(readonly operation: ForkStorageOperation) {
@@ -292,6 +298,114 @@ export class SessionForkService {
 
   async getOperation(operationId: string): Promise<StorageOperation | undefined> {
     return this.journal.get(operationId);
+  }
+
+  /**
+   * forkSession 抛错后的唯一安全收口：先向前重放一次；若 target
+   * 已有完整 publication marker 则视为提交成功，否则先固化为
+   * needs_attention 阻止自动恢复，再仅在验证 target 属于本 operation 后清理并 abort。
+   */
+  async settleFailedFork(input: {
+    readonly sourceSessionId: string;
+    readonly targetSessionId: string;
+  }): Promise<ForkFailureSettlement> {
+    const candidates = (await this.journal.list()).filter(
+      (operation): operation is ForkStorageOperation =>
+        operation.kind === "fork" &&
+        operation.sourceSessionId === input.sourceSessionId &&
+        operation.targetSessionId === input.targetSessionId,
+    );
+    let operation = candidates.at(-1);
+    if (!operation) return "not_committed";
+
+    if (
+      operation.state !== "completed" &&
+      operation.state !== "aborted" &&
+      operation.state !== "needs_attention"
+    ) {
+      try {
+        operation = await this.coordinator.reconcile(operation.operationId);
+      } catch {
+        operation = (await this.journal.get(operation.operationId)) as
+          | ForkStorageOperation
+          | undefined;
+      }
+    }
+    if (!operation) {
+      throw new SessionForkPublicationUncertainError(input.targetSessionId);
+    }
+    if (operation.state === "completed") return "committed";
+
+    const targetEvents = await this.runtimeStore.readSession(input.targetSessionId);
+    const publicationMarker = targetEvents.find(
+      (event) =>
+        event.kind === "session.forked" && event.data.parentSessionId === input.sourceSessionId,
+    );
+    const publicationTerminal =
+      publicationMarker === undefined
+        ? undefined
+        : targetEvents.find(
+            (event) =>
+              event.kind === "run.terminal" &&
+              event.runId === publicationMarker.runId &&
+              event.data.status === "completed",
+          );
+    if (publicationMarker && publicationTerminal) {
+      if (operation.state !== "sidecars_committed") {
+        throw new SessionForkPublicationUncertainError(input.targetSessionId);
+      }
+      try {
+        await this.journal.advance({
+          operationId: operation.operationId,
+          expectedVersion: operation.version,
+          nextState: "completed",
+        });
+      } catch (error) {
+        throw new SessionForkPublicationUncertainError(input.targetSessionId, { cause: error });
+      }
+      return "committed";
+    }
+    if (operation.state !== "aborted" && operation.state !== "needs_attention") {
+      try {
+        operation = (await this.journal.advance({
+          operationId: operation.operationId,
+          expectedVersion: operation.version,
+          nextState: "needs_attention",
+          error: {
+            phase: operation.state,
+            message:
+              targetEvents.length === 0
+                ? "fork publication failed before target Runtime was published"
+                : "fork publication is incomplete and has been sealed from automatic recovery",
+          },
+        })) as ForkStorageOperation;
+      } catch (error) {
+        throw new SessionForkPublicationUncertainError(input.targetSessionId, { cause: error });
+      }
+    }
+    if (operation.state === "needs_attention") {
+      try {
+        if (targetEvents.length > 0) {
+          await this.assertRuntimeTargetOwned(operation, {
+            stagedBundlePath: this.frozenBundlePath(operation.stagingDirectory),
+          });
+        }
+        await this.runtimeStore.deleteSession(input.targetSessionId);
+        await fileHistoryDeleteClonedSession(
+          input.sourceSessionId,
+          input.targetSessionId,
+          this.fileHistoryIo,
+        );
+        await this.coordinator.abortNeedsAttention({
+          operationId: operation.operationId,
+          expectedVersion: operation.version,
+          reason: "rewind fork did not complete publication; compensated owned target state",
+        });
+      } catch (error) {
+        throw new SessionForkPublicationUncertainError(input.targetSessionId, { cause: error });
+      }
+    }
+    return "not_committed";
   }
 
   async retryNeedsAttention(
@@ -555,7 +669,7 @@ export class SessionForkService {
 
   private async assertRuntimeTargetOwned(
     operation: ForkStorageOperation,
-    prepared: ForkPreparedBundle,
+    prepared: Pick<ForkPreparedBundle, "stagedBundlePath">,
   ): Promise<void> {
     if (!(await this.runtimeStore.readSessionManifest(operation.targetSessionId))) return;
     const events = await this.runtimeStore.readSession(operation.targetSessionId);
@@ -603,7 +717,7 @@ export class SessionForkService {
 
   private async readRuntimePublication(
     operation: ForkStorageOperation,
-    prepared: ForkPreparedBundle,
+    prepared: Pick<ForkPreparedBundle, "stagedBundlePath">,
   ): Promise<{
     readonly frozen: FrozenForkBundle;
     readonly seedEntries: readonly RuntimeSessionForkSeedEntry[];

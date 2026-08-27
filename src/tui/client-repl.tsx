@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { useCallback, useEffect, useState } from "react";
 import { render } from "ink";
 import { LocalRuntimeClient } from "../daemon/client.js";
@@ -198,17 +199,26 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
       checkpointId: snapshot.messageId,
       expectedFingerprint,
       mode,
+      idempotencyKey: createHash("sha256")
+        .update(`${sessionId}\0${snapshot.messageId}\0${mode}\0${expectedFingerprint}`)
+        .digest("hex"),
     });
+    if (result.sourceSessionId !== undefined && result.sourceSessionId !== sessionId) {
+      throw new Error(
+        `rewind.apply 源 Session 不一致: expected=${sessionId} actual=${result.sourceSessionId}`,
+      );
+    }
+    if (!result.applied) return;
     // fork 成功：回填原 prompt 并切换到 fork 会话（与 in-process applyTuiRewind
     // 同语义——inputReplacement 先行，switchSession 水化后即可编辑）。
-    if (result.applied && typeof snapshot.userPrompt === "string" && snapshot.userPrompt !== "") {
+    if (typeof snapshot.userPrompt === "string" && snapshot.userPrompt !== "") {
       inputReplacementSeq += 1;
       inputReplacementSink.current?.({ sequence: inputReplacementSeq, text: snapshot.userPrompt });
     }
     if (result.sessionId && result.sessionId !== sessionId) {
       await runtime.switchSession(result.sessionId);
     }
-    if (result.applied) fileIndex.markDirty();
+    fileIndex.markDirty();
   };
   const requestExit = (): void => {
     if (exitRequested) return;

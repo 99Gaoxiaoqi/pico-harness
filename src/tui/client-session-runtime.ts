@@ -524,6 +524,7 @@ export class ClientSessionRuntime {
    * BYOK 启动覆盖不重放（startup-only 语义）。
    */
   async switchSession(sessionId: string | undefined): Promise<void> {
+    const previousSessionId = this.sessionId;
     this.clearHydrateRetry();
     this.hydrateRetryAttempt = 0;
     await this.closeReplicaSubscriptionAsync();
@@ -533,8 +534,30 @@ export class ClientSessionRuntime {
     if (sessionId) {
       // 与 reload 对账共用串行化（对抗评审 P2：直连 hydrate 会与在途 reload
       // 竞态出乱序替换）。
-      await this.hydrateSerial();
-      await this.refreshSettingsSnapshot();
+      try {
+        await this.hydrateSerial({ propagateError: true });
+        await this.refreshSettingsSnapshot();
+      } catch (error) {
+        // 切换只有在新 Session 完成水化后才对用户生效。失败时恢复
+        // 原 Session 与投影，避免 rewind 成功但本地 activeSessionId 卡在半切换状态。
+        await this.closeReplicaSubscriptionAsync().catch(() => undefined);
+        this.sessionId = previousSessionId;
+        this.replica = undefined;
+        this.eventReporter.clearTransientState();
+        if (previousSessionId) {
+          try {
+            await this.hydrateSerial({ propagateError: true });
+            await this.refreshSettingsSnapshot();
+          } catch (rollbackError) {
+            throw new AggregateError(
+              [error, rollbackError],
+              `Session 切换到 ${sessionId} 失败，且原 Session ${previousSessionId} 恢复失败`,
+              { cause: rollbackError },
+            );
+          }
+        }
+        throw error;
+      }
     } else {
       this.pendingInitialSettingsTouched = false;
       this.pendingInitialSettings = this.configuredInitialSettings;
@@ -581,7 +604,7 @@ export class ClientSessionRuntime {
   }
 
   /** 串行水化：in-flight 防重入 + 尾随合并（reload 对账与切换共用），返回本次完成。 */
-  private hydrateSerial(): Promise<void> {
+  private hydrateSerial(options: { readonly propagateError?: boolean } = {}): Promise<void> {
     if (!this.sessionId) return Promise.resolve();
     if (this.hydrating) {
       this.hydrateAgain = true;
@@ -599,6 +622,7 @@ export class ClientSessionRuntime {
           retryable: true,
           action: "session.subscription.open",
         });
+        if (options.propagateError) throw error;
         this.scheduleHydrateRetry();
       } finally {
         this.hydrating = false;

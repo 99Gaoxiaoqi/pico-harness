@@ -128,6 +128,7 @@ import {
   createRuntimeNotification,
   createRuntimeRequest,
   isJsonValue,
+  parseRuntimeResult,
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
   type JsonValue,
@@ -138,6 +139,8 @@ import {
   type RuntimeNotificationTopic,
   type RuntimeInputAttachment,
   type RuntimeRequest,
+  type RuntimeParams,
+  type RuntimeResult,
   type RuntimeQueuedInput,
   type RuntimeRun as RuntimeRunRecord,
   type RuntimeSession,
@@ -340,6 +343,17 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private readonly pendingSends = new Map<
     string,
     { readonly requestFingerprint: string; readonly promise: Promise<JsonObject> }
+  >();
+  private readonly pendingRewinds = new Map<
+    string,
+    {
+      readonly requestFingerprint: string;
+      readonly promise: Promise<RuntimeResult<"rewind.apply">>;
+    }
+  >();
+  private readonly completedRewinds = new Map<
+    string,
+    { readonly requestFingerprint: string; readonly result: RuntimeResult<"rewind.apply"> }
   >();
   private readonly inFlightHandles = new Set<Promise<JsonValue>>();
   private transcriptPersistenceTail: Promise<void> = Promise.resolve();
@@ -3582,14 +3596,80 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     };
   }
 
-  private async applyRewind(params: {
-    readonly workspacePath: string;
-    readonly sessionId: string;
-    readonly checkpointId: string;
-    readonly expectedFingerprint: string;
-    /** 回滚范围（fork mode）；缺省 both（协议默认，向后兼容）。 */
-    readonly mode?: "code" | "conversation" | "both";
-  }): Promise<JsonValue> {
+  private async applyRewind(
+    params: RuntimeParams<"rewind.apply">,
+  ): Promise<RuntimeResult<"rewind.apply">> {
+    const canonical = await canonicalizeWorkspacePath(params.workspacePath);
+    const requestFingerprint = desktopRewindRequestFingerprint({
+      ...params,
+      workspacePath: canonical,
+    });
+    const idempotencyKey = `rewind.apply:${params.idempotencyKey ?? `auto:${requestFingerprint}`}`;
+    const pendingKey = `${canonical}\0${idempotencyKey}`;
+    const completed = this.completedRewinds.get(pendingKey);
+    if (completed) {
+      if (completed.requestFingerprint !== requestFingerprint) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          `idempotencyKey ${params.idempotencyKey ?? idempotencyKey} 已绑定不同的 rewind 请求`,
+        );
+      }
+      return completed.result;
+    }
+    const stored = await this.conversationStateStore.getIdempotent(canonical, idempotencyKey);
+    if (stored) {
+      if (stored.requestFingerprint !== requestFingerprint) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          `idempotencyKey ${params.idempotencyKey ?? idempotencyKey} 已绑定不同的 rewind 请求`,
+        );
+      }
+      return parseRuntimeResult("rewind.apply", stored.result);
+    }
+
+    const pending = this.pendingRewinds.get(pendingKey);
+    if (pending) {
+      if (pending.requestFingerprint !== requestFingerprint) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.CONFLICT,
+          `idempotencyKey ${params.idempotencyKey ?? idempotencyKey} 正在处理不同的 rewind 请求`,
+        );
+      }
+      return pending.promise;
+    }
+
+    const operation = this.applyRewindOnce({ ...params, workspacePath: canonical })
+      .then(async (result) => {
+        this.completedRewinds.set(pendingKey, { requestFingerprint, result });
+        if (this.completedRewinds.size > 500) {
+          const oldest = this.completedRewinds.keys().next().value;
+          if (oldest !== undefined) this.completedRewinds.delete(oldest);
+        }
+        try {
+          await this.conversationStateStore.rememberIdempotent(
+            canonical,
+            idempotencyKey,
+            requestFingerprint,
+            result,
+          );
+        } catch (error) {
+          // rewind 已跨过 commit point；保留进程内幂等记录并返回成功，
+          // 避免将已提交操作误报为失败后触发双执行。
+          logger.warn(
+            { error, sessionId: result.sessionId, sourceSessionId: params.sessionId },
+            "rewind committed but idempotency result persistence failed",
+          );
+        }
+        return result;
+      })
+      .finally(() => this.pendingRewinds.delete(pendingKey));
+    this.pendingRewinds.set(pendingKey, { requestFingerprint, promise: operation });
+    return operation;
+  }
+
+  private async applyRewindOnce(
+    params: RuntimeParams<"rewind.apply">,
+  ): Promise<RuntimeResult<"rewind.apply">> {
     const canonical = await this.requireIdleTrustedSession(
       params.workspacePath,
       params.sessionId,
@@ -3597,7 +3677,14 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     );
     // Non-destructive rewind: 从 checkpoint 创建新 Session（fork）。
     // 原 Session 完全不变，因此不再需要 Memory Source 失效——fork 不会破坏任何账本。
-    const targetSessionId = this.createSessionId();
+    const targetSessionId = params.mode === "code" ? params.sessionId : this.createSessionId();
+    const expectedTargetSessionId = targetSessionId;
+    // 在任何文件或 Session 副作用前先用协议单一事实源校验完整结果形状。
+    const result = parseRuntimeResult("rewind.apply", {
+      applied: true,
+      sessionId: expectedTargetSessionId,
+      sourceSessionId: params.sessionId,
+    });
     const forkedSessionId = await this.withSession(canonical, params.sessionId, async (session) => {
       const expectedFingerprints = await projectDesktopRewindFingerprints(
         session,
@@ -3613,23 +3700,37 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       );
       return fork.targetSessionId;
     });
-    const session = await this.requireSession(canonical, forkedSessionId);
-    this.publishSession(session);
-    this.publishTranscriptUpdate(canonical, forkedSessionId, "reload");
-    this.publish(
-      createRuntimeNotification({
-        topic: "rewind.completed",
-        scope: { workspacePath: canonical, sessionId: forkedSessionId },
-        resourceVersion: this.nextResourceVersion(),
-        at: this.now(),
-        payload: {
-          sessionId: forkedSessionId,
-          sourceSessionId: params.sessionId,
-          checkpointId: params.checkpointId,
-        },
-      }),
-    );
-    return { applied: true, sessionId: forkedSessionId, sourceSessionId: params.sessionId };
+    if (forkedSessionId !== expectedTargetSessionId) {
+      throw new Error(
+        `rewind.apply 目标 Session 不一致: expected=${expectedTargetSessionId} actual=${forkedSessionId}`,
+      );
+    }
+    // fork/file transaction 已跨过 commit point；此后的投影通知只能最大努力，
+    // 不能把已成功的耐久操作反报为失败，诱导客户端重复执行。
+    try {
+      const session = await this.requireSession(canonical, forkedSessionId);
+      this.publishSession(session);
+      this.publishTranscriptUpdate(canonical, forkedSessionId, "reload");
+      this.publish(
+        createRuntimeNotification({
+          topic: "rewind.completed",
+          scope: { workspacePath: canonical, sessionId: forkedSessionId },
+          resourceVersion: this.nextResourceVersion(),
+          at: this.now(),
+          payload: {
+            sessionId: forkedSessionId,
+            sourceSessionId: params.sessionId,
+            checkpointId: params.checkpointId,
+          },
+        }),
+      );
+    } catch (error) {
+      logger.warn(
+        { error, sessionId: forkedSessionId, sourceSessionId: params.sessionId },
+        "rewind committed but projection notification failed",
+      );
+    }
+    return result;
   }
 
   /** /changes 单文件恢复（3-D tier2 收口）：checkpoint 维度逐文件 diff + 当前指纹。 */
@@ -4380,6 +4481,20 @@ function firstSendRequestFingerprint(params: {
         initialSettings: params.initialSettings ?? null,
         behavior: params.behavior ?? "auto",
         expectedRunId: params.expectedRunId ?? null,
+      }),
+    )
+    .digest("hex");
+}
+
+function desktopRewindRequestFingerprint(params: RuntimeParams<"rewind.apply">): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        workspacePath: params.workspacePath,
+        sessionId: params.sessionId,
+        checkpointId: params.checkpointId,
+        expectedFingerprint: params.expectedFingerprint,
+        mode: params.mode ?? "both",
       }),
     )
     .digest("hex");
