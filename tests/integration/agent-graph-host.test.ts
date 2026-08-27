@@ -53,8 +53,10 @@ test("workspace Graph host exposes one root binding and owns application lifecyc
   });
   try {
     await host.start();
+    const graph = host.openRootEpoch("root-session");
     const binding = host.rootBinding({
-      graphId: "graph:root-session",
+      graphId: graph.graphId,
+      epoch: graph.epoch,
       rootSessionId: "root-session",
       rootTurnId: "root-turn",
       rootRunId: "root-run",
@@ -63,13 +65,15 @@ test("workspace Graph host exposes one root binding and owns application lifecyc
     if (binding.kind !== "root") return;
     assert.deepEqual(binding.getRootContext(), {
       kind: "graph_root_supervisor",
-      graphId: "graph:root-session",
+      graphId: graph.graphId,
+      epoch: 1,
       rootSessionId: "root-session",
       rootTurnId: "root-turn",
       rootRunId: "root-run",
     });
     const projection = await binding.toolPort.readProjection({
-      graphId: "graph:root-session",
+      graphId: graph.graphId,
+      epoch: 1,
       rootSessionId: "root-session",
     });
     assert.equal(projection.graph.headRevision, 0);
@@ -112,6 +116,7 @@ test("workspace Graph host executes an exact operator with owner-fenced output a
 
     const projection = await fixture.host.application.toolPort.readProjection({
       graphId,
+      epoch: 1,
       rootSessionId: fixture.owner.session.id,
     });
     assert.equal(executions.length, 1);
@@ -297,6 +302,7 @@ test("workspace Graph host recovers a non-live indeterminate operator on startup
     );
     const view = await recoveredHost.application.toolPort.readProjection({
       graphId,
+      epoch: 1,
       rootSessionId: fixture.owner.session.id,
     });
     assert.equal(view.runtimeClaims[0]?.status, "interrupted");
@@ -621,8 +627,12 @@ async function scheduleOperator(
   graphId: string,
   intentId: string,
 ): Promise<void> {
+  const graph = fixture.host.openRootEpoch(fixture.owner.session.id);
+  assert.equal(graph.graphId, graphId);
+  assert.equal(graph.epoch, 1);
   await fixture.host.application.toolPort.commitUpdate({
     graphId,
+    epoch: 1,
     expectedRevision: 0,
     operationId: `add:${intentId}`,
     rootModelRouteId: "test/operator-model",

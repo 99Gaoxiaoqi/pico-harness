@@ -33,7 +33,7 @@
 - [x] 12. 已实现宿主内置 Operator 目录；公共 add 只接受 `profile_id`，应用服务冻结带指纹快照，production 在 Provider 前复验并强制默认权限、禁止 Session grant 累积与关闭扩展装配；Supervisor 投影不暴露内部快照。
 - [x] 13. 已实现完整 readiness facts：每个 Intent 由宿主派生单一正式输出 ID，允许同 Graph 未来输出作为依赖，拒绝任意/跨 Graph/循环引用，并在 view 中暴露 resolved/in_flight/failed/unknown 分类。
 - [ ] 14. 实现 artifact/evidence handoff，包含持久资源保留、摘要验证与崩溃恢复。
-- [ ] 15. 实现多 epoch 分配、只读 Graph query/timeline 协议与 Desktop 面板。
+- [ ] 15. 已实现 root Run 绑定的多 epoch 分配：同一 root Session 复用当前 open Graph，finish 后下次 root Run 原子取得下一 epoch，工具读取不再隐式创建 Graph，且所有 root 工具请求校验精确 epoch。待完成只读 Graph query/timeline 协议与 Desktop 面板。
 - [ ] 16. 实现 `isolated-worktree` 的持久 resource authority、adopt/release/retain/cleanup 生命周期和验收。
 - [ ] 17. 新增独立子进程真实 kill/reopen 测试，覆盖 schedule、provision、claim、provider、output、wake 和 workspace resource 窗口。
 

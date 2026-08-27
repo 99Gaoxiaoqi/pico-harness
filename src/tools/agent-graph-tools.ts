@@ -35,6 +35,7 @@ const AGENT_GRAPH_VIEW_MAX_TOTAL_BYTES = 48 * 1024;
 export interface AgentGraphRootToolContext {
   readonly kind: "graph_root_supervisor";
   readonly graphId: string;
+  readonly epoch: number;
   readonly rootSessionId: string;
   readonly rootTurnId: string;
   readonly rootRunId: string;
@@ -131,6 +132,7 @@ export interface AgentGraphSupervisorIntentReadiness {
 
 export interface CommitAgentGraphUpdateInput {
   readonly graphId: string;
+  readonly epoch: number;
   readonly expectedRevision: number;
   readonly operationId: string;
   readonly source: AgentGraphOperationSource;
@@ -146,6 +148,7 @@ export interface CommitAgentGraphUpdateResult {
 
 export interface ReadAgentGraphProjectionInput {
   readonly graphId: string;
+  readonly epoch: number;
   readonly rootSessionId: string;
   /** Omitted means the first bounded page of current Graph RecordRefs. */
   readonly recordIds?: readonly string[];
@@ -153,6 +156,7 @@ export interface ReadAgentGraphProjectionInput {
 
 export interface RegisterAgentGraphYieldInput {
   readonly graphId: string;
+  readonly epoch: number;
   readonly rootSessionId: string;
   readonly rootTurnId: string;
   readonly rootRunId: string;
@@ -287,6 +291,7 @@ class ViewAgentGraphTool extends AgentGraphSupervisorTool {
     const root = this.rootContext();
     const projection = await this.options.port.readProjection({
       graphId: root.graphId,
+      epoch: root.epoch,
       rootSessionId: root.rootSessionId,
       ...(input.recordIds === undefined ? {} : { recordIds: input.recordIds }),
     });
@@ -325,6 +330,7 @@ class YieldAgentGraphTool extends AgentGraphSupervisorTool {
     try {
       receipt = await this.options.port.registerYield({
         graphId: root.graphId,
+        epoch: root.epoch,
         rootSessionId: root.rootSessionId,
         rootTurnId: root.rootTurnId,
         rootRunId: root.rootRunId,
@@ -409,6 +415,7 @@ function parseUpdateInput(
   }
   return {
     graphId: root.graphId,
+    epoch: root.epoch,
     expectedRevision,
     operationId,
     source,
@@ -748,6 +755,7 @@ function requireRootContext(
   return {
     kind: value.kind,
     graphId: requiredExactIdentity(value.graphId, "graphId"),
+    epoch: positiveInteger(value.epoch, "epoch"),
     rootSessionId: requiredExactIdentity(value.rootSessionId, "rootSessionId"),
     rootTurnId: requiredExactIdentity(value.rootTurnId, "rootTurnId"),
     rootRunId: requiredExactIdentity(value.rootRunId, "rootRunId"),
@@ -774,6 +782,9 @@ function validateProjection(
   }
   if (projection.graph.rootSessionId !== root.rootSessionId) {
     throw new Error("Agent Graph 应用服务返回了其他 root Session 的投影。");
+  }
+  if (projection.graph.epoch !== root.epoch) {
+    throw new Error("Agent Graph 应用服务返回了其他 epoch 的投影。");
   }
   for (const operator of projection.operators) {
     if (

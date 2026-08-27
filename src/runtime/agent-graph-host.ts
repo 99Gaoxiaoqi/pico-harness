@@ -87,8 +87,10 @@ export interface CreateAgentGraphWorkspaceHostOptions {
 export interface AgentGraphWorkspaceHost {
   readonly application: AgentGraphApplicationService;
   readonly store: SqliteAgentGraphControlStore;
+  openRootEpoch(rootSessionId: string): ReturnType<AgentGraphApplicationService["openRootEpoch"]>;
   rootBinding(input: {
     readonly graphId: string;
+    readonly epoch: number;
     readonly rootSessionId: string;
     readonly rootTurnId: string;
     readonly rootRunId: string;
@@ -170,6 +172,7 @@ export function createAgentGraphWorkspaceHost(
         const root: AgentGraphRootToolContext = {
           kind: "graph_root_supervisor",
           graphId: recoverable.graph.graphId,
+          epoch: recoverable.graph.epoch,
           rootSessionId: input.session.id,
           rootTurnId: input.prestartedRun.turnId ?? recoverable.attempt!.targetTurnId,
           rootRunId: input.prestartedRun.runId,
@@ -251,6 +254,7 @@ export function createAgentGraphWorkspaceHost(
   return {
     application,
     store,
+    openRootEpoch: (rootSessionId) => requireApplication(application).openRootEpoch(rootSessionId),
     rootBinding: (input) => ({
       kind: "root",
       getRootContext: () => ({ kind: "graph_root_supervisor", ...input }),

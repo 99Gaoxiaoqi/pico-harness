@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { graphIdFor } from "../../src/agent-graph/core/ids.js";
 import { createRuntimeRequest } from "../../src/daemon/protocol.js";
 import { createBuiltinAgentGraphOperatorProfileCatalog } from "../../src/agent-graph/operator-profile-catalog.js";
 import { createProductionRuntimeServices } from "../../src/daemon/production-host.js";
@@ -119,6 +120,15 @@ test("production host binds Graph root and installs detached exact execution", a
     return {
       application,
       store: {},
+      openRootEpoch: (rootSessionId: string) => ({
+        graphId: graphIdFor(rootSessionId, 1),
+        rootSessionId,
+        epoch: 1,
+        admissionPhase: "open",
+        headRevision: 0,
+        selectedRecordIds: [],
+        createdAt: 1,
+      }),
       rootBinding: () => ({ kind: "root", getRootContext: () => undefined, toolPort: {} }),
       start: application.start,
       close: async () => {
@@ -473,6 +483,15 @@ for (const scenario of [
         return {
           application,
           store: {},
+          openRootEpoch: (rootSessionId: string) => ({
+            graphId: graphIdFor(rootSessionId, 1),
+            rootSessionId,
+            epoch: 1,
+            admissionPhase: "open",
+            headRevision: 0,
+            selectedRecordIds: [],
+            createdAt: 1,
+          }),
           rootBinding: () => ({ kind: "root", getRootContext: () => undefined, toolPort: {} }),
           start: application.start,
           close: application.close,
