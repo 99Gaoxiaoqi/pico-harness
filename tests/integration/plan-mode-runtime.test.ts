@@ -124,7 +124,7 @@ test("submit_plan persists a proposal and marks a machine-readable handoff", asy
   assert.equal((await coordinator.project()).revisionRequest, undefined);
 });
 
-test("update_plan reuses the caller operationId and commits one completion terminal", async (t) => {
+test("update_plan derives stable scoped identities from toolCallId and commits completion once", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-update-plan-retry-"));
   const workDir = join(root, "work");
   await mkdir(workDir);
@@ -146,7 +146,12 @@ test("update_plan reuses the caller operationId and commits one completion termi
     proposal: {
       planId: "plan-update-retry",
       title: "Retry completion",
-      steps: [{ id: "step-1", title: "Complete", description: "Complete once" }],
+      steps: [
+        { id: "step-1", title: "Explicit", description: "Prefer an explicit operation id" },
+        { id: "step-2", title: "Blank A", description: "Fall back from a blank operation id" },
+        { id: "step-3", title: "Blank B", description: "Keep distinct tool calls isolated" },
+        { id: "step-4", title: "Complete", description: "Complete once on replay" },
+      ],
     },
   });
   const approved = await coordinator.approve({
@@ -174,19 +179,37 @@ test("update_plan reuses the caller operationId and commits one completion termi
     revision: 1,
   });
   const tool = new UpdatePlanTool(() => coordinator, "plan-update-retry");
-  const args = JSON.stringify({
+  const explicitArgs = JSON.stringify({
     stepId: "step-1",
     status: "completed",
     operationId: "model-update-step-1",
   });
+  const blankArgsA = JSON.stringify({ stepId: "step-2", status: "completed", operationId: " " });
+  const blankArgsB = JSON.stringify({ stepId: "step-3", status: "completed", operationId: "" });
+  const finalArgs = JSON.stringify({ stepId: "step-4", status: "completed" });
 
-  await tool.execute(args);
-  await tool.execute(args);
+  await tool.execute(explicitArgs);
+  await tool.execute(explicitArgs);
+  await tool.execute(blankArgsA, { toolCallId: "provider/call blank A" });
+  await tool.execute(blankArgsA, { toolCallId: "provider/call blank A" });
+  await tool.execute(blankArgsB, { toolCallId: "provider/call blank B" });
+  await tool.execute(finalArgs, { toolCallId: "provider/call final" });
+  await tool.execute(finalArgs, { toolCallId: "provider/call final" });
 
   const planEvents = (await store.readSession("session-update-retry")).filter(({ kind }) =>
     kind.startsWith("plan."),
   );
-  assert.equal(planEvents.filter(({ kind }) => kind === "plan.step.updated").length, 1);
+  const stepOperationIds = planEvents.flatMap((event) =>
+    event.kind === "plan.step.updated" ? [event.data.operationId] : [],
+  );
+  assert.equal(stepOperationIds.length, 4);
+  assert.equal(new Set(stepOperationIds).size, 4);
+  assert.equal(stepOperationIds[0], "model-update-step-1");
+  assert.ok(
+    stepOperationIds
+      .slice(1)
+      .every((operationId) => operationId.startsWith("update-plan:tool-call:")),
+  );
   assert.equal(planEvents.filter(({ kind }) => kind === "plan.execution.completed").length, 1);
   assert.equal((await coordinator.project()).execution?.status, "completed");
 });
