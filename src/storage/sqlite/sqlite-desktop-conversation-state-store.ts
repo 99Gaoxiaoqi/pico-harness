@@ -15,6 +15,7 @@ import {
   type DesktopConversationStateFile,
   type DesktopConversationStateStoreLike,
   type DesktopFirstSendClaim,
+  type DesktopRewindClaim,
   type DesktopIdempotencyRecord,
   type DesktopQueuedInput,
 } from "../../daemon/desktop-conversation-state.js";
@@ -216,6 +217,65 @@ export class SqliteDesktopConversationStateStore implements DesktopConversationS
     );
   }
 
+  async getRewindClaim(
+    workspacePath: string,
+    key: string,
+  ): Promise<DesktopRewindClaim | undefined> {
+    this.ensureLegacyMigration();
+    const canonical = normalizeWorkspacePath(workspacePath);
+    const normalizedKey = requireNonEmpty(key, "idempotencyKey");
+    return this.withWorkspace(canonical, (lease) =>
+      lease.transaction("read", () =>
+        selectRewindClaimRow(lease.database, canonical, normalizedKey),
+      ),
+    );
+  }
+
+  async claimRewind(
+    workspacePath: string,
+    key: string,
+    sourceSessionId: string,
+    targetSessionId: string,
+    operationId: string,
+    requestFingerprint: string,
+  ): Promise<DesktopRewindClaim> {
+    this.ensureLegacyMigration();
+    const canonical = normalizeWorkspacePath(workspacePath);
+    const normalizedKey = requireNonEmpty(key, "idempotencyKey");
+    const claim: DesktopRewindClaim = {
+      workspacePath: canonical,
+      key: normalizedKey,
+      sourceSessionId: requireNonEmpty(sourceSessionId, "sourceSessionId"),
+      targetSessionId: requireNonEmpty(targetSessionId, "targetSessionId"),
+      operationId: requireNonEmpty(operationId, "operationId"),
+      requestFingerprint: requireNonEmpty(requestFingerprint, "requestFingerprint"),
+      createdAt: this.now(),
+    };
+    return this.withWorkspace(canonical, (lease) =>
+      lease.transaction("write", () => {
+        const existing = selectRewindClaimRow(lease.database, canonical, normalizedKey);
+        if (existing) return existing;
+        lease.database
+          .prepare(
+            `INSERT INTO desktop_rewind_claims
+             (workspace_path, idempotency_key, source_session_id, target_session_id,
+              operation_id, request_fingerprint, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            claim.workspacePath,
+            claim.key,
+            claim.sourceSessionId,
+            claim.targetSessionId,
+            claim.operationId,
+            claim.requestFingerprint,
+            claim.createdAt,
+          );
+        return claim;
+      }),
+    );
+  }
+
   async rememberIdempotent(
     workspacePath: string,
     key: string,
@@ -230,6 +290,12 @@ export class SqliteDesktopConversationStateStore implements DesktopConversationS
         lease.database
           .prepare(
             `DELETE FROM desktop_first_send_claims
+             WHERE workspace_path = ? AND idempotency_key = ?`,
+          )
+          .run(canonical, normalized);
+        lease.database
+          .prepare(
+            `DELETE FROM desktop_rewind_claims
              WHERE workspace_path = ? AND idempotency_key = ?`,
           )
           .run(canonical, normalized);
@@ -467,6 +533,31 @@ function selectClaimRow(
     workspacePath: requireRowString(row, "workspace_path"),
     key: requireRowString(row, "idempotency_key"),
     sessionId: requireRowString(row, "session_id"),
+    requestFingerprint: requireRowString(row, "request_fingerprint"),
+    createdAt: requireRowNumber(row, "created_at"),
+  };
+}
+
+function selectRewindClaimRow(
+  database: DatabaseSync,
+  workspacePath: string,
+  key: string,
+): DesktopRewindClaim | undefined {
+  const row = database
+    .prepare(
+      `SELECT workspace_path, idempotency_key, source_session_id, target_session_id,
+              operation_id, request_fingerprint, created_at
+       FROM desktop_rewind_claims
+       WHERE workspace_path = ? AND idempotency_key = ?`,
+    )
+    .get(workspacePath, key) as Record<string, unknown> | undefined;
+  if (!row) return undefined;
+  return {
+    workspacePath: requireRowString(row, "workspace_path"),
+    key: requireRowString(row, "idempotency_key"),
+    sourceSessionId: requireRowString(row, "source_session_id"),
+    targetSessionId: requireRowString(row, "target_session_id"),
+    operationId: requireRowString(row, "operation_id"),
     requestFingerprint: requireRowString(row, "request_fingerprint"),
     createdAt: requireRowNumber(row, "created_at"),
   };

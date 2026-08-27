@@ -79,6 +79,7 @@ export interface RunAgentCliOptions extends RuntimeRunOptions {
     readonly revision: number;
     readonly expectedSessionSequence: number;
     readonly operationId?: string;
+    readonly claimOperationId?: string;
     readonly transition?: "start" | "resume";
   };
 }

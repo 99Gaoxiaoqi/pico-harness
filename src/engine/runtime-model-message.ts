@@ -52,6 +52,7 @@ const CLAIM_BY_KIND: Record<RuntimeEvent["kind"], RuntimeEventClaimKind> = {
   "plan.proposed": "control",
   "plan.revised": "control",
   "plan.revision.requested": "control",
+  "plan.review.claimed": "control",
   "plan.approved": "control",
   "plan.rejected": "control",
   "plan.execution.started": "control",

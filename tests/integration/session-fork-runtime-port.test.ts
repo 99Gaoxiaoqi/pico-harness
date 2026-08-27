@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -334,7 +335,7 @@ test("fork inherits both interaction axes and survives target Resume", async () 
   }
 });
 
-test("legacy fork journal recovery ignores historical yolo and uses frozen source permission", async () => {
+test("legacy settings-less fork journal recovery materializes agent/default before publication", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-session-fork-legacy-permission-"));
   const workDir = join(root, "workspace");
   const picoHome = join(root, "pico-home");
@@ -383,6 +384,37 @@ test("legacy fork journal recovery ignores historical yolo and uses frozen sourc
       /injected crash before publication/u,
     );
 
+    const failedBeforeRewrite = await journal.get(operationId);
+    assert.ok(failedBeforeRewrite?.kind === "fork");
+    const frozenPath = join(failedBeforeRewrite.stagingDirectory, "runtime-fork.json");
+    const frozen = JSON.parse(await readFile(frozenPath, "utf8")) as Record<string, unknown>;
+    delete frozen["settings"];
+    const frozenContents = `${JSON.stringify(frozen)}\n`;
+    await writeFile(frozenPath, frozenContents);
+    const manifestPath = join(failedBeforeRewrite.stagingDirectory, "fork-bundle.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
+    manifest["contentSha256"] = createHash("sha256").update(frozenContents).digest("hex");
+    manifest["sizeBytes"] = Buffer.byteLength(frozenContents);
+    await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`);
+
+    // Mutable source/user state may now be YOLO; the missing historical fact has
+    // no authority to inherit it.
+    const mutableSettings = getOrCreateSessionSettings(
+      {
+        sessionId: sourceSessionId,
+        cwd: workDir,
+        picoHome,
+        provider: "openai",
+        model: "test",
+        modelRouteId: "openai/test",
+        mode: "yolo",
+      },
+      { persistence: source, restore: false },
+    );
+    setSessionCollaborationMode(mutableSettings, "plan");
+    setSessionPermissionMode(mutableSettings, "yolo");
+    await source.flushPersistence();
+
     const database = new DatabaseSync(
       operationalDatabasePath(source.runtimeEventStore!.storageRoot),
     );
@@ -413,7 +445,9 @@ test("legacy fork journal recovery ignores historical yolo and uses frozen sourc
     });
     try {
       await resumed.recover();
+      assert.equal(resumed.getRuntimeStateSnapshot().settings?.collaborationMode, "agent");
       assert.equal(resumed.getRuntimeStateSnapshot().settings?.permissionMode, "default");
+      assert.deepEqual(resumed.getRuntimeStateSnapshot().settings?.additionalDirectories, []);
     } finally {
       await resumed.close();
     }

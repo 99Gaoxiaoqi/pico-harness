@@ -63,6 +63,8 @@ export interface ApprovalNotice {
   diff?: string;
   /** 当前审批可应用的结构化 session 权限更新。 */
   sessionScope?: PermissionSessionScope;
+  /** Plan-only: identity of the durable plan.* fact backing this control card. */
+  controlEpoch?: string;
 }
 
 /** 通知回调:由调用方注入(飞书发卡片 / 终端打印 / HTTP 推送) */

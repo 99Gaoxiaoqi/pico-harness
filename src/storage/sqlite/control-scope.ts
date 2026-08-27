@@ -167,5 +167,23 @@ export const CONTROL_SCOPE: SqliteSchemaScope = {
         ON desktop_first_send_claims(created_at DESC);
       `,
     ],
+    [
+      3,
+      `
+      CREATE TABLE desktop_rewind_claims (
+        workspace_path TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        source_session_id TEXT NOT NULL,
+        target_session_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        request_fingerprint TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (workspace_path, idempotency_key),
+        UNIQUE (workspace_path, operation_id)
+      );
+      CREATE INDEX desktop_rewind_claims_by_target
+        ON desktop_rewind_claims(target_session_id, created_at DESC);
+      `,
+    ],
   ]),
 };

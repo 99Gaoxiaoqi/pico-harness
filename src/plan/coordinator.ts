@@ -22,6 +22,7 @@ import {
   planOperationFingerprint,
   type PlanProjection,
   type PlanProposalInput,
+  type PlanReviewAction,
   type PlanReviewedBy,
   type PlanStepStatus,
 } from "./contract.js";
@@ -39,6 +40,7 @@ export interface PlanCoordinatorContext {
 interface OperationInput {
   readonly operationId: string;
   readonly expectedSessionSequence: number;
+  readonly claimOperationId?: string;
 }
 
 export type PlanOperationStatus = "missing" | "matching";
@@ -79,8 +81,12 @@ export class PlanCoordinator {
     operationId: string,
     kind: string,
     semantic: unknown,
+    claimOperationId?: string,
   ): Promise<PlanOperationStatus> {
-    const fingerprint = planOperationFingerprint(kind, semantic);
+    const fingerprint = planOperationFingerprint(
+      kind,
+      claimOperationId ? { semantic, claimOperationId } : semantic,
+    );
     const replay = projectActivePlanEntries((await this.readPlanEntries()).entries).find(
       ({ event }) =>
         event.kind.startsWith("plan.") &&
@@ -92,6 +98,118 @@ export class PlanCoordinator {
       throw new RuntimeEventStorePlanOperationConflictError(operationId);
     }
     return "matching";
+  }
+
+  async claimReview(
+    input: OperationInput & {
+      readonly planId: string;
+      readonly revision: number;
+      readonly controlEpoch: string;
+      readonly action: PlanReviewAction;
+      readonly feedback?: string;
+    },
+  ): Promise<PlanProjection> {
+    const semantic = {
+      planId: input.planId,
+      revision: input.revision,
+      controlEpoch: input.controlEpoch,
+      action: input.action,
+      ...(input.feedback?.trim() ? { feedback: input.feedback.trim() } : {}),
+    };
+    return this.simple(input, "plan.review.claimed", semantic);
+  }
+
+  async claimAndReject(
+    input: OperationInput & {
+      readonly planId: string;
+      readonly revision: number;
+      readonly controlEpoch: string;
+      readonly settings: PersistedSessionSettings;
+      readonly feedback?: string;
+    },
+  ): Promise<PlanProjection> {
+    const feedback = input.feedback?.trim();
+    const semantic = {
+      claim: {
+        planId: input.planId,
+        revision: input.revision,
+        controlEpoch: input.controlEpoch,
+        action: "reject_exit" as const,
+        ...(feedback ? { feedback } : {}),
+      },
+      transition: {
+        planId: input.planId,
+        expectedRevision: input.revision,
+        reviewedBy: "user" as const,
+        ...(feedback ? { reason: feedback } : {}),
+      },
+    };
+    return this.commit(input, "plan.review.reject", semantic, (fact, at) => {
+      const patch = normalizeSessionRuntimeStateWritePatch({
+        settings: {
+          ...input.settings,
+          collaborationMode: "agent",
+          permissionMode:
+            input.settings.permissionMode ??
+            input.settings.prePlanMode ??
+            (input.settings.mode === "plan" ? "yolo" : input.settings.mode),
+        },
+      });
+      if (!patch) throw new PlanConflictError("Session settings are invalid");
+      return [
+        {
+          ...this.baseEvent(input.operationId, "plan.review.claimed", at),
+          kind: "plan.review.claimed",
+          data: { ...fact, ...semantic.claim },
+        },
+        {
+          ...this.baseEvent(input.operationId, "plan.rejected", at),
+          kind: "plan.rejected",
+          data: { ...fact, claimOperationId: input.operationId, ...semantic.transition },
+        },
+        {
+          ...this.baseEvent(input.operationId, "session.state.committed", at),
+          kind: "session.state.committed",
+          data: { stateVersion: SESSION_RUNTIME_STATE_VERSION, patch },
+        },
+      ];
+    });
+  }
+
+  async claimAndCancel(
+    input: OperationInput & {
+      readonly planId: string;
+      readonly revision: number;
+      readonly controlEpoch: string;
+      readonly feedback?: string;
+    },
+  ): Promise<PlanProjection> {
+    const feedback = input.feedback?.trim();
+    const semantic = {
+      claim: {
+        planId: input.planId,
+        revision: input.revision,
+        controlEpoch: input.controlEpoch,
+        action: "cancel_execution" as const,
+        ...(feedback ? { feedback } : {}),
+      },
+      transition: {
+        planId: input.planId,
+        ...(feedback ? { reason: feedback } : {}),
+      },
+    };
+    return this.commit(input, "plan.review.cancel", semantic, (fact, at) => [
+      {
+        ...this.baseEvent(input.operationId, "plan.review.claimed", at),
+        kind: "plan.review.claimed",
+        data: { ...fact, ...semantic.claim },
+      },
+      {
+        ...this.baseEvent(input.operationId, "plan.execution.cancelled", at),
+        kind: "plan.execution.cancelled",
+        data: { ...fact, claimOperationId: input.operationId, ...semantic.transition },
+      },
+    ]);
   }
 
   async propose(
@@ -387,7 +505,7 @@ export class PlanCoordinator {
     kind: string,
     semantic: unknown,
     build: (
-      fact: { operationId: string; fingerprint: string },
+      fact: { operationId: string; fingerprint: string; claimOperationId?: string },
       at: string,
       projection: PlanProjection,
     ) => RuntimeEvent[],
@@ -396,6 +514,13 @@ export class PlanCoordinator {
     let slice = await this.readPlanEntries();
     const callerSequence = input.expectedSessionSequence;
     const assertNoConcurrentPlanMutation = (): void => {
+      if (input.claimOperationId) {
+        const claim = this.projectPlan(slice).reviewClaim;
+        if (claim?.operationId !== input.claimOperationId) {
+          throw new PlanConflictError("Plan review claim is no longer active");
+        }
+        return;
+      }
       if (
         callerSequence > slice.headSequence ||
         slice.entries.some(({ sequence }) => sequence > callerSequence)
@@ -413,7 +538,10 @@ export class PlanCoordinator {
         "operationId" in event.data &&
         event.data.operationId === input.operationId,
     );
-    const fingerprint = planOperationFingerprint(kind, semantic);
+    const fingerprint = planOperationFingerprint(
+      kind,
+      input.claimOperationId ? { semantic, claimOperationId: input.claimOperationId } : semantic,
+    );
     if (replay) {
       if (!("fingerprint" in replay.event.data) || replay.event.data.fingerprint !== fingerprint)
         throw new RuntimeEventStorePlanOperationConflictError(input.operationId);
@@ -423,7 +551,15 @@ export class PlanCoordinator {
     const at = this.now().toISOString();
     for (let attempt = 0; ; attempt++) {
       const projection = this.projectPlan(slice);
-      const events = build({ operationId: input.operationId, fingerprint }, at, projection);
+      const events = build(
+        {
+          operationId: input.operationId,
+          fingerprint,
+          ...(input.claimOperationId ? { claimOperationId: input.claimOperationId } : {}),
+        },
+        at,
+        projection,
+      );
       let candidate = projection;
       for (const event of events) {
         candidate = reducePlanEvent(candidate, event);

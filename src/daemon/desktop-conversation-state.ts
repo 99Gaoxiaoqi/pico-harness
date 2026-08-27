@@ -30,6 +30,17 @@ export interface DesktopFirstSendClaim {
   readonly createdAt: number;
 }
 
+/** Durable pre-side-effect ownership for rewind/fork idempotency. */
+export interface DesktopRewindClaim {
+  readonly workspacePath: string;
+  readonly key: string;
+  readonly sourceSessionId: string;
+  readonly targetSessionId: string;
+  readonly operationId: string;
+  readonly requestFingerprint: string;
+  readonly createdAt: number;
+}
+
 export interface DesktopConversationStateFile {
   readonly version: typeof DESKTOP_CONVERSATION_STATE_VERSION;
   readonly queuedInputs: readonly DesktopQueuedInput[];
@@ -62,6 +73,15 @@ export interface DesktopConversationStateStoreLike {
     sessionId: string,
     requestFingerprint: string,
   ): Promise<DesktopFirstSendClaim>;
+  getRewindClaim(workspacePath: string, key: string): Promise<DesktopRewindClaim | undefined>;
+  claimRewind(
+    workspacePath: string,
+    key: string,
+    sourceSessionId: string,
+    targetSessionId: string,
+    operationId: string,
+    requestFingerprint: string,
+  ): Promise<DesktopRewindClaim>;
   rememberIdempotent(
     workspacePath: string,
     key: string,

@@ -246,11 +246,27 @@ export type RuntimePlanRevisionRequest = JsonObject & {
 export type RuntimePlanProjection = JsonObject & {
   readonly sessionId: SessionId;
   readonly sessionSequence: number;
+  readonly controlEpoch?: string;
   readonly proposals: readonly RuntimePlanProposal[];
   readonly latestProposal?: RuntimePlanProposal;
   readonly pendingProposal?: RuntimePlanProposal;
   readonly execution?: RuntimePlanExecution;
   readonly revisionRequest?: RuntimePlanRevisionRequest;
+  readonly reviewClaim?: JsonObject & {
+    readonly operationId: string;
+    readonly planId: PlanId;
+    readonly revision: number;
+    readonly controlEpoch: string;
+    readonly action:
+      | "execute"
+      | "continue_editing"
+      | "reject_exit"
+      | "resume_execution"
+      | "cancel_execution"
+      | "replan_execution";
+    readonly feedback?: string;
+    readonly claimedAt: string;
+  };
 };
 
 export type RuntimePlanControlSnapshot = JsonObject & {
@@ -1396,7 +1412,7 @@ export type RuntimeMethodMap = {
         | "replan_execution";
       readonly expectedRevision: number;
       readonly expectedSessionSequence: number;
-      readonly operationId: string;
+      readonly controlEpoch: string;
       readonly feedback?: string;
     };
     readonly result: {
@@ -3530,7 +3546,7 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
         ]),
         expectedRevision: finiteNumberParam,
         expectedSessionSequence: finiteNumberParam,
-        operationId: stringParam,
+        controlEpoch: stringParam,
       },
       { feedback: stringParam },
     );
@@ -4327,6 +4343,7 @@ const runtimePlanProjectionResult = resultShape(
       },
       { reason: resultString },
     ),
+    controlEpoch: resultString,
     revisionRequest: resultShape({
       planId: resultString,
       expectedRevision: resultFiniteNumber,
@@ -4334,6 +4351,24 @@ const runtimePlanProjectionResult = resultShape(
       operationId: resultString,
       requestedAt: resultString,
     }),
+    reviewClaim: resultShape(
+      {
+        operationId: resultString,
+        planId: resultString,
+        revision: resultFiniteNumber,
+        controlEpoch: resultString,
+        action: resultOneOf([
+          "execute",
+          "continue_editing",
+          "reject_exit",
+          "resume_execution",
+          "cancel_execution",
+          "replan_execution",
+        ]),
+        claimedAt: resultString,
+      },
+      { feedback: resultString },
+    ),
   },
 );
 

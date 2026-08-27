@@ -4,6 +4,7 @@ import type { RuntimeEvent } from "./session-runtime-event.js";
 import type { EngineRuntimeCapability, EngineRuntimePort } from "./runtime-port.js";
 import type { RuntimeSessionForkSeedEntry } from "./session-runtime-projection.js";
 import type { PersistedInteractionMode, SessionRuntimeStateWritePatch } from "./session-runtime.js";
+import type { PersistedSessionSettings } from "./session-runtime.js";
 
 /**
  * Engine-side contract for the durable fork lifecycle.
@@ -86,9 +87,15 @@ export interface SessionForkRuntimePort {
     readonly fileHistoryBaseDir: string;
     readonly sourceSessionId: string;
     readonly targetSessionId: string;
+    /** Durable caller-owned identity used to resume the same fork after a crash. */
+    readonly operationId?: string;
     /** @deprecated Accepted for source compatibility but ignored by canonical forks. */
     readonly targetMode?: PersistedInteractionMode;
     readonly throughEventId?: string;
+    /** Safe settings frozen by the host when a historical boundary predates settings facts. */
+    readonly fallbackSettings?: PersistedSessionSettings;
+    /** If publication fails after an external file transaction, dispositions must only clean up. */
+    readonly cleanupOnlyOnFailure?: boolean;
   }): Promise<void>;
 
   /** Validate the current model history without exposing Runtime's read-model implementation. */

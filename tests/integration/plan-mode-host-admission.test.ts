@@ -10,6 +10,7 @@ import { RUNTIME_ERROR_CODES, RuntimeProtocolError } from "../../src/daemon/prot
 import { globalSessionManager } from "../../src/engine/session.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { PlanCoordinator } from "../../src/plan/coordinator.js";
+import { planReviewOperationId, planReviewRunId } from "../../src/plan/review-identity.js";
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 import { SqliteRuntimeControlStore } from "../../src/storage/sqlite/sqlite-runtime-control-store.js";
 
@@ -43,6 +44,7 @@ test("Plan review Run admission replays one durable run for the same operation",
         expectedRevision: 1,
         expectedSessionSequence: 4,
         operationId: "operation-1",
+        controlEpoch: "plan:operation-1",
       },
     },
     idempotencyKey: "plan-review-run:operation-1",
@@ -70,6 +72,7 @@ test("Plan review intent recovers Phase A without allocating a second Run", asyn
     sessionId: "session-saga",
     prompt: "execute approved plan",
     operationId: "operation-saga",
+    controlEpoch: "plan:operation-saga",
     planId: "plan-saga",
     revision: 2,
     action: "execute" as const,
@@ -81,6 +84,7 @@ test("Plan review intent recovers Phase A without allocating a second Run", asyn
         expectedRevision: 2,
         expectedSessionSequence: 9,
         operationId: "operation-saga",
+        controlEpoch: "plan:operation-saga",
       },
     },
     idempotencyKey: "plan-review-run:operation-saga",
@@ -129,6 +133,7 @@ test("Plan review intent recovers Phase B with the prebound Run identity", async
     sessionId: "session-phase-b",
     prompt: "execute approved plan",
     operationId: "operation-phase-b",
+    controlEpoch: "plan:operation-phase-b",
     planId: "plan-phase-b",
     revision: 3,
     action: "execute" as const,
@@ -140,6 +145,7 @@ test("Plan review intent recovers Phase B with the prebound Run identity", async
         expectedRevision: 3,
         expectedSessionSequence: 11,
         operationId: "operation-phase-b",
+        controlEpoch: "plan:operation-phase-b",
       },
     },
     idempotencyKey: "plan-review-run:operation-phase-b",
@@ -212,6 +218,7 @@ test("failed Plan review Run is recovery_required instead of being retried", asy
     sessionId: "session-failed",
     prompt: "execute approved plan",
     operationId: "operation-failed",
+    controlEpoch: "plan:operation-failed",
     planId: "plan-failed",
     revision: 1,
     action: "execute" as const,
@@ -223,6 +230,7 @@ test("failed Plan review Run is recovery_required instead of being retried", asy
         expectedRevision: 1,
         expectedSessionSequence: 3,
         operationId: "operation-failed",
+        controlEpoch: "plan:operation-failed",
       },
     },
     idempotencyKey: "plan-review-run:operation-failed",
@@ -287,6 +295,7 @@ test("production Plan review accepts the first click after non-Plan ledger drift
   const drifted = await coordinator.project();
   assert.ok(drifted.sessionSequence > proposed.sessionSequence);
   assert.equal(drifted.pendingProposal?.revision, proposed.pendingProposal?.revision);
+  assert.equal(drifted.controlEpoch, proposed.controlEpoch);
 
   const services = createProductionRuntimeServices({ env: { PICO_HOME: picoHome } });
   t.after(async () => {
@@ -304,7 +313,7 @@ test("production Plan review accepts the first click after non-Plan ledger drift
       action: "execute",
       expectedRevision: 1,
       expectedSessionSequence: proposed.sessionSequence,
-      operationId: "first-click-execute",
+      controlEpoch: proposed.controlEpoch!,
     }),
   )) as { accepted: boolean; run?: { runId?: string } };
   assert.equal(response.accepted, true);
@@ -389,13 +398,175 @@ test("production Plan review rejects an old card after a real revision", async (
         action: "execute",
         expectedRevision: 1,
         expectedSessionSequence: proposed.sessionSequence,
-        operationId: "old-card-execute",
+        controlEpoch: proposed.controlEpoch!,
       }),
     ),
     (error: unknown) =>
       error instanceof RuntimeProtocolError && error.code === RUNTIME_ERROR_CODES.CONFLICT,
   );
 });
+
+test("live Plan review claim recovers one deterministic intent after restart/open", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-plan-host-claim-recovery-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "state");
+  const sessionId = "session-claim-recovery";
+  await mkdir(workspace);
+  const lease = await globalSessionManager.getOrCreatePinned(sessionId, workspace, {
+    persistence: true,
+    picoHome,
+    runtimePort: createEngineRuntimePort(),
+  });
+  lease.session.updateRuntimeState({ settings: planSettings("plan") });
+  await lease.session.flushPersistence();
+  assert.ok(lease.session.runtimeEventStore);
+  const coordinator = new PlanCoordinator(lease.session.runtimeEventStore, {
+    sessionId,
+    invocationId: "claim-recovery",
+    runId: "claim-recovery",
+    turnId: "claim-recovery",
+    writeGuard: lease.session,
+  });
+  const proposed = await coordinator.propose({
+    operationId: "claim-recovery-proposal",
+    expectedSessionSequence: (await coordinator.project()).sessionSequence,
+    proposal: {
+      planId: "plan-claim-recovery",
+      title: "Recover claim",
+      steps: [{ id: "step-1", title: "Run", description: "Recover exact run" }],
+    },
+  });
+  const operationId = planReviewOperationId({
+    sessionId,
+    planId: "plan-claim-recovery",
+    revision: 1,
+    controlEpoch: proposed.controlEpoch!,
+    action: "execute",
+  });
+  await coordinator.claimReview({
+    operationId,
+    expectedSessionSequence: proposed.sessionSequence,
+    planId: "plan-claim-recovery",
+    revision: 1,
+    controlEpoch: proposed.controlEpoch!,
+    action: "execute",
+  });
+  lease.release();
+
+  const services = createProductionRuntimeServices({ env: { PICO_HOME: picoHome } });
+  t.after(async () => {
+    await services.desktopService.close();
+    const released = globalSessionManager.delete(sessionId, workspace, { picoHome });
+    await released?.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await services.desktopService.readSessionContinuityMetadata(workspace, sessionId);
+  const intents = await services.service.listPlanReviewRunIntents(workspace, sessionId);
+  assert.equal(intents.length, 1);
+  assert.equal(intents[0]?.input.operationId, operationId);
+  assert.equal(intents[0]?.runId, planReviewRunId(operationId));
+});
+
+test("cancel/replan competition admits only the Plan-ledger claim winner", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-plan-host-control-race-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "state");
+  const sessionId = "session-control-race";
+  await mkdir(workspace);
+  const lease = await globalSessionManager.getOrCreatePinned(sessionId, workspace, {
+    persistence: true,
+    picoHome,
+    runtimePort: createEngineRuntimePort(),
+  });
+  lease.session.updateRuntimeState({ settings: planSettings("plan") });
+  await lease.session.flushPersistence();
+  assert.ok(lease.session.runtimeEventStore);
+  const coordinator = new PlanCoordinator(lease.session.runtimeEventStore, {
+    sessionId,
+    invocationId: "control-race",
+    runId: "control-race",
+    turnId: "control-race",
+    writeGuard: lease.session,
+  });
+  const proposed = await coordinator.propose({
+    operationId: "control-race-proposal",
+    expectedSessionSequence: (await coordinator.project()).sessionSequence,
+    proposal: {
+      planId: "plan-control-race",
+      title: "Race controls",
+      steps: [{ id: "step-1", title: "Run", description: "Race cancel and replan" }],
+    },
+  });
+  const approved = await coordinator.approve({
+    operationId: "control-race-approve",
+    expectedSessionSequence: proposed.sessionSequence,
+    planId: "plan-control-race",
+    expectedRevision: 1,
+    reviewedBy: "user",
+    settings: planSettings("plan"),
+  });
+  const started = await coordinator.startExecution({
+    operationId: "control-race-start",
+    expectedSessionSequence: approved.sessionSequence,
+    planId: "plan-control-race",
+    revision: 1,
+  });
+  const interrupted = await coordinator.interrupt({
+    operationId: "control-race-interrupt",
+    expectedSessionSequence: started.sessionSequence,
+    planId: "plan-control-race",
+  });
+
+  const services = createProductionRuntimeServices({ env: { PICO_HOME: picoHome } });
+  t.after(async () => {
+    lease.release();
+    await services.desktopService.close();
+    const released = globalSessionManager.delete(sessionId, workspace, { picoHome });
+    await released?.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const base = {
+    workspacePath: workspace,
+    sessionId,
+    planId: "plan-control-race",
+    expectedRevision: 1,
+    expectedSessionSequence: interrupted.sessionSequence,
+    controlEpoch: interrupted.controlEpoch!,
+  };
+  const outcomes = await Promise.allSettled([
+    services.desktopService.handle(
+      createRuntimeRequest("plan.respond", { ...base, action: "cancel_execution" }),
+    ),
+    services.desktopService.handle(
+      createRuntimeRequest("plan.respond", { ...base, action: "replan_execution" }),
+    ),
+  ]);
+  assert.equal(outcomes.filter(({ status }) => status === "fulfilled").length, 1);
+  assert.equal(outcomes.filter(({ status }) => status === "rejected").length, 1);
+  const intents = await services.service.listPlanReviewRunIntents(workspace, sessionId);
+  assert.ok(intents.length <= 1, "the losing action must create no durable intent");
+  const runs = (await services.desktopService.handle(
+    createRuntimeRequest("runs.list", { workspacePath: workspace, sessionId }),
+  )) as { runs: readonly { runId: string }[] };
+  assert.ok(
+    runs.runs.filter(({ runId }) => runId.startsWith("run_plan_")).length <= 1,
+    "the losing action must create no RuntimeRun",
+  );
+});
+
+function planSettings(collaborationMode: "agent" | "plan") {
+  return {
+    provider: "openai" as const,
+    model: "test",
+    modelRouteId: "test/test",
+    collaborationMode,
+    permissionMode: "default" as const,
+    orchestrationMode: "default" as const,
+    thinkingEffort: "medium",
+    thinkingEffortExplicit: false,
+    additionalDirectories: [],
+  };
+}
 
 // 注：原"TUI Plan revision admission"用例随 in-process TUI 路径退役删除
 // （Phase 5，2026-08-16）：plan 审批 Run 的持久 admission 语义由上方

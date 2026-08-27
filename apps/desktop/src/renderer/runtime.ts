@@ -141,12 +141,18 @@ export function approvalFromPlanProjection(
   sessionId: string,
 ): ApprovalView | undefined {
   const projection = isRecord(value) ? value : undefined;
+  const controlEpoch = projection ? stringValue(projection.controlEpoch) : "";
   const pending =
     projection && isRecord(projection.pendingProposal) ? projection.pendingProposal : undefined;
   const execution = projection && isRecord(projection.execution) ? projection.execution : undefined;
   const revisionRequest =
     projection && isRecord(projection.revisionRequest) ? projection.revisionRequest : undefined;
-  if (!projection || (!pending && execution?.status !== "interrupted" && !revisionRequest)) {
+  if (
+    !projection ||
+    !controlEpoch ||
+    isRecord(projection.reviewClaim) ||
+    (!pending && execution?.status !== "interrupted" && !revisionRequest)
+  ) {
     return undefined;
   }
   if (!pending && revisionRequest) {
@@ -159,7 +165,7 @@ export function approvalFromPlanProjection(
       return undefined;
     }
     return {
-      id: `revision:${planId}`,
+      id: `revision:${planId}:${controlEpoch}`,
       runId: `plan-revision:${planId}`,
       sessionId,
       title: "计划修改等待恢复",
@@ -170,6 +176,7 @@ export function approvalFromPlanProjection(
       planId,
       expectedRevision: revision,
       expectedSessionSequence: sessionSequence,
+      controlEpoch,
       planOperationId: operationId,
       planFeedback: feedback,
     };
@@ -180,7 +187,7 @@ export function approvalFromPlanProjection(
     const sessionSequence = numberValue(projection.sessionSequence, -1);
     if (!planId || revision < 0 || sessionSequence < 0) return undefined;
     return {
-      id: `interrupted:${planId}`,
+      id: `interrupted:${planId}:${controlEpoch}`,
       runId: `plan-interrupted:${planId}`,
       sessionId,
       title: "计划执行已中断",
@@ -191,6 +198,7 @@ export function approvalFromPlanProjection(
       planId,
       expectedRevision: revision,
       expectedSessionSequence: sessionSequence,
+      controlEpoch,
       planSteps: recordArray(execution.steps)
         .map((step) => stringValue(step.title))
         .filter(Boolean),
@@ -205,7 +213,7 @@ export function approvalFromPlanProjection(
     .map((step) => stringValue(step.title ?? step.description))
     .filter(Boolean);
   return {
-    id: planId,
+    id: `${planId}:${controlEpoch}`,
     runId: `plan-hydrate:${planId}`,
     sessionId,
     title: stringValue(pending.title, "计划等待审批"),
@@ -216,6 +224,7 @@ export function approvalFromPlanProjection(
     planId,
     expectedRevision: revision,
     expectedSessionSequence: sessionSequence,
+    controlEpoch,
     planTitle: stringValue(pending.title) || undefined,
     planOverview: stringValue(pending.overview) || undefined,
     planSteps: steps.length ? steps : undefined,
@@ -235,33 +244,6 @@ export function approvalFromPlanControlSnapshot(
     return undefined;
   }
   return approvalFromPlanProjection(value.projection, sessionId);
-}
-
-function planResponseOperationId(input: {
-  readonly sessionId: string;
-  readonly planId: string;
-  readonly action: string;
-  readonly expectedRevision: number;
-  readonly expectedSessionSequence: number;
-  readonly feedback?: string;
-}): string {
-  const canonical = JSON.stringify({
-    sessionId: input.sessionId,
-    planId: input.planId,
-    revision: input.expectedRevision,
-    action: input.action,
-    feedback: input.feedback?.trim() ?? "",
-  });
-  let left = 0x811c9dc5;
-  let right = 0x9e3779b9;
-  for (let index = 0; index < canonical.length; index += 1) {
-    const code = canonical.charCodeAt(index);
-    left = Math.imul(left ^ code, 0x01000193);
-    right = Math.imul(right ^ code, 0x85ebca6b);
-  }
-  return `desktop-plan:${(left >>> 0).toString(16).padStart(8, "0")}${(right >>> 0)
-    .toString(16)
-    .padStart(8, "0")}`;
 }
 
 function numberValue(value: unknown, fallback = 0): number {
@@ -1474,8 +1456,8 @@ export interface RuntimeActions {
       | "replan_execution";
     readonly expectedRevision: number;
     readonly expectedSessionSequence: number;
+    readonly controlEpoch: string;
     readonly feedback?: string;
-    readonly operationId?: string;
   }): Promise<void>;
   respondPrompt(id: string, answer: string): Promise<void>;
   loadChangeDiff(input: {
@@ -3180,7 +3162,7 @@ export function useRuntimeStore(): RuntimeStore {
                 action: input.action,
                 expectedRevision: input.expectedRevision,
                 expectedSessionSequence: input.expectedSessionSequence,
-                operationId: input.operationId ?? planResponseOperationId(input),
+                controlEpoch: input.controlEpoch,
                 ...(input.feedback?.trim() ? { feedback: input.feedback.trim() } : {}),
               });
             } catch (error) {

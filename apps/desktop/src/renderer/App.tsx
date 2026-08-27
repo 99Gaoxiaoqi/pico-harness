@@ -1582,7 +1582,7 @@ function ConversationPage() {
       orchestrationMode: defaults.orchestrationMode ?? "default",
       permissionMode:
         defaults.permissionMode ??
-        (legacyMode === "auto" || legacyMode === "yolo" ? legacyMode : "yolo"),
+        (legacyMode === "auto" || legacyMode === "yolo" ? legacyMode : "default"),
       ...(defaults.thinkingEffort ? { thinkingEffort: defaults.thinkingEffort } : {}),
       ...(workspacePath ? newTaskSettingOverrides[workspacePath] : {}),
     };
@@ -1877,9 +1877,7 @@ function ConversationPage() {
             action: decision,
             expectedRevision: pendingApproval.expectedRevision ?? 0,
             expectedSessionSequence: pendingApproval.expectedSessionSequence ?? 0,
-            ...(pendingApproval.planOperationId
-              ? { operationId: pendingApproval.planOperationId }
-              : {}),
+            controlEpoch: pendingApproval.controlEpoch ?? "",
             ...(feedback || pendingApproval.planFeedback
               ? { feedback: feedback ?? pendingApproval.planFeedback }
               : {}),
@@ -2455,6 +2453,7 @@ function ConversationPage() {
                                   action: "reject_exit",
                                   expectedRevision: pendingPlan.expectedRevision ?? 0,
                                   expectedSessionSequence: pendingPlan.expectedSessionSequence ?? 0,
+                                  controlEpoch: pendingPlan.controlEpoch ?? "",
                                   feedback: "用户从协作模式开关退出 Plan。",
                                 });
                                 return;

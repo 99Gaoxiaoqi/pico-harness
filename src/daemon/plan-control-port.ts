@@ -26,7 +26,7 @@ export interface PlanControlPort {
     readonly action: PlanResponseAction;
     readonly expectedRevision: number;
     readonly expectedSessionSequence: number;
-    readonly operationId: string;
+    readonly controlEpoch: string;
     readonly feedback?: string;
   }): PlanControlResponse | Promise<PlanControlResponse>;
 }

@@ -44,6 +44,11 @@ export function reducePlanEvent(state: PlanProjection, event: RuntimeEvent): Pla
   let pendingProposal = state.pendingProposal;
   let execution = state.execution;
   let revisionRequest = state.revisionRequest;
+  let reviewClaim = state.reviewClaim;
+  if (event.kind !== "plan.review.claimed" && reviewClaim) {
+    assertReviewClaimTransition(reviewClaim, event, pendingProposal, execution);
+    reviewClaim = undefined;
+  }
   switch (event.kind) {
     case "plan.proposed": {
       if (pendingProposal) conflict("A pending plan proposal already exists");
@@ -75,6 +80,36 @@ export function reducePlanEvent(state: PlanProjection, event: RuntimeEvent): Pla
         feedback: event.data.feedback,
         operationId: event.data.operationId,
         requestedAt: event.at,
+      };
+      break;
+    }
+    case "plan.review.claimed": {
+      if (reviewClaim) conflict("A Plan review action already owns this control epoch");
+      if (state.controlEpoch !== event.data.controlEpoch) {
+        conflict("Plan control epoch is stale");
+      }
+      const pendingAction =
+        event.data.action === "execute" ||
+        event.data.action === "continue_editing" ||
+        event.data.action === "reject_exit";
+      if (pendingAction) {
+        requirePending(pendingProposal, event.data.planId, event.data.revision);
+      } else if (
+        !execution ||
+        execution.status !== "interrupted" ||
+        execution.planId !== event.data.planId ||
+        execution.revision !== event.data.revision
+      ) {
+        conflict("Plan execution is not interrupted");
+      }
+      reviewClaim = {
+        operationId: event.data.operationId,
+        planId: event.data.planId,
+        revision: event.data.revision,
+        controlEpoch: event.data.controlEpoch,
+        action: event.data.action,
+        ...(event.data.feedback ? { feedback: event.data.feedback } : {}),
+        claimedAt: event.at,
       };
       break;
     }
@@ -242,12 +277,69 @@ export function reducePlanEvent(state: PlanProjection, event: RuntimeEvent): Pla
   return {
     sessionId: state.sessionId,
     sessionSequence: state.sessionSequence,
+    controlEpoch: event.eventId,
     proposals,
     ...(proposals.at(-1) ? { latestProposal: proposals.at(-1) } : {}),
     ...(pendingProposal ? { pendingProposal } : {}),
     ...(execution ? { execution } : {}),
     ...(revisionRequest ? { revisionRequest } : {}),
+    ...(reviewClaim ? { reviewClaim } : {}),
   };
+}
+
+function assertReviewClaimTransition(
+  claim: NonNullable<PlanProjection["reviewClaim"]>,
+  event: RuntimeEvent,
+  pendingProposal: PlanProposal | undefined,
+  execution: PlanProjection["execution"],
+): void {
+  if (!("claimOperationId" in event.data) || event.data.claimOperationId !== claim.operationId) {
+    conflict("A Plan review action already owns this control epoch");
+  }
+  const expectedKind = {
+    execute: "plan.approved",
+    continue_editing: "plan.revision.requested",
+    reject_exit: "plan.rejected",
+    resume_execution: "plan.execution.resumed",
+    cancel_execution: "plan.execution.cancelled",
+    replan_execution: "plan.execution.replanned",
+  }[claim.action];
+  if (
+    event.kind !== expectedKind ||
+    !("planId" in event.data) ||
+    event.data.planId !== claim.planId
+  ) {
+    conflict("Plan review claim cannot be consumed by a different control action");
+  }
+  if (
+    (claim.action === "execute" ||
+      claim.action === "continue_editing" ||
+      claim.action === "reject_exit") &&
+    (!pendingProposal ||
+      pendingProposal.planId !== claim.planId ||
+      pendingProposal.revision !== claim.revision ||
+      !("expectedRevision" in event.data) ||
+      event.data.expectedRevision !== claim.revision)
+  ) {
+    conflict("Plan review claim revision is stale");
+  }
+  if (
+    (claim.action === "resume_execution" ||
+      claim.action === "cancel_execution" ||
+      claim.action === "replan_execution") &&
+    (!execution ||
+      execution.status !== "interrupted" ||
+      execution.planId !== claim.planId ||
+      execution.revision !== claim.revision)
+  ) {
+    conflict("Plan review claim execution is stale");
+  }
+  if (
+    claim.action === "continue_editing" &&
+    (!("feedback" in event.data) || event.data.feedback !== (claim.feedback ?? ""))
+  ) {
+    conflict("Plan review claim feedback differs");
+  }
 }
 
 function revisionRequestedProposal(

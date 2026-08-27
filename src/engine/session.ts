@@ -1252,7 +1252,11 @@ export class Session
     runtimePort: SessionForkRuntimePort,
     createTargetSessionId: () => string,
     expectedFingerprints?: Record<string, string>,
-    options: { readonly fileTransactionHooks?: FileHistoryRewindTransactionHooks } = {},
+    options: {
+      readonly fileTransactionHooks?: FileHistoryRewindTransactionHooks;
+      readonly fallbackSettings?: PersistedSessionSettings;
+      readonly operationId?: string;
+    } = {},
   ): Promise<{ targetSessionId: string }> {
     this.assertWritable();
     const snapshot = this.requireRewindSnapshot(checkpointId);
@@ -1299,7 +1303,10 @@ export class Session
         fileHistoryBaseDir: this.fileHistoryBaseDir,
         sourceSessionId: this.id,
         targetSessionId,
+        ...(options.operationId ? { operationId: options.operationId } : {}),
         ...(throughEventId ? { throughEventId } : {}),
+        ...(options.fallbackSettings ? { fallbackSettings: options.fallbackSettings } : {}),
+        ...(mode === "both" ? { cleanupOnlyOnFailure: true } : {}),
       });
     } catch (error) {
       if (fileTransaction) {

@@ -567,6 +567,7 @@ test("client session runtime: durable PlanControl snapshot owns restart and reco
   const projection = (revision: number, sessionSequence: number) => ({
     sessionId: "s1",
     sessionSequence,
+    controlEpoch: `plan:revision:${revision}`,
     proposals: [],
     pendingProposal: {
       planId: "plan-1",
@@ -592,7 +593,7 @@ test("client session runtime: durable PlanControl snapshot owns restart and reco
     onApprovalResolved: (id) => resolved.push(id),
   });
   await runtime.start();
-  assert.equal(approvals.at(-1)?.taskId, "plan-1");
+  assert.equal(approvals.at(-1)?.taskId, "plan-1:plan:revision:1");
 
   harness.setPlanControl({
     version: 1,
@@ -601,7 +602,11 @@ test("client session runtime: durable PlanControl snapshot owns restart and reco
     projection: { ...projection(1, 9), pendingProposal: undefined },
   });
   harness.disconnect();
-  assert.equal(resolved.at(-1), "plan-1", "disconnect immediately removes executable control");
+  assert.equal(
+    resolved.at(-1),
+    "plan-1:plan:revision:1",
+    "disconnect immediately removes executable control",
+  );
   const planRequestsBeforeDisconnectClick = harness.requests.filter(
     (request) => request.method === "plan.respond",
   ).length;
@@ -612,7 +617,7 @@ test("client session runtime: durable PlanControl snapshot owns restart and reco
       action: "execute",
       expectedRevision: 1,
       expectedSessionSequence: 7,
-      operationId: "disconnected-click",
+      controlEpoch: "plan:revision:1",
     }),
     /disconnected/u,
   );
@@ -937,6 +942,7 @@ test("client session runtime: approvals map to approval.respond and dialog callb
         projection: {
           sessionId: "s1",
           sessionSequence: 7,
+          controlEpoch: "plan:proposal:3",
           proposals: [],
           pendingProposal: {
             planId: "plan_42",
@@ -955,7 +961,7 @@ test("client session runtime: approvals map to approval.respond and dialog callb
     expectedRevision?: number;
     expectedSessionSequence?: number;
   };
-  assert.equal(planNotice.taskId, "plan_42");
+  assert.equal(planNotice.taskId, "plan_42:plan:proposal:3");
   assert.equal(planNotice.toolName, "submit_plan");
   assert.equal(planNotice.planId, "plan_42");
   assert.equal(planNotice.expectedRevision, 3);
@@ -968,7 +974,7 @@ test("client session runtime: approvals map to approval.respond and dialog callb
     action: "execute",
     expectedRevision: 3,
     expectedSessionSequence: 7,
-    operationId: "op-test",
+    controlEpoch: "plan:proposal:3",
   });
   const planRespond = harness.requests.find((entry) => entry.method === "plan.respond");
   assert.ok(planRespond, "应发出 plan.respond");

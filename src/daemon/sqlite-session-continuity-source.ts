@@ -68,6 +68,7 @@ export interface SessionContinuityMetadata {
   readonly planIntents?: readonly {
     readonly runId: string;
     readonly operationId: string;
+    readonly controlEpoch: string;
     readonly planId: string;
     readonly revision: number;
     readonly action: "execute" | "continue_editing" | "resume_execution" | "replan_execution";
@@ -228,46 +229,53 @@ function planControlSnapshot(
 ): RuntimePlanControlSnapshot {
   const execution = projection.execution;
   const latest = projection.latestProposal;
-  const intent = [...intents]
-    .reverse()
-    .find(
-      (candidate) =>
-        candidate.planId ===
-          (projection.pendingProposal?.planId ??
-            projection.revisionRequest?.planId ??
-            projection.execution?.planId) &&
-        candidate.revision ===
-          (projection.pendingProposal?.revision ??
-            projection.revisionRequest?.expectedRevision ??
-            projection.execution?.revision),
-    );
+  const intent = projection.reviewClaim
+    ? [...intents]
+        .reverse()
+        .find(
+          (candidate) =>
+            candidate.operationId === projection.reviewClaim?.operationId &&
+            candidate.controlEpoch === projection.reviewClaim.controlEpoch,
+        )
+    : projection.revisionRequest
+      ? [...intents]
+          .reverse()
+          .find(
+            (candidate) =>
+              `${candidate.operationId}:transition` === projection.revisionRequest?.operationId,
+          )
+      : activeRunId
+        ? [...intents].reverse().find((candidate) => candidate.runId === activeRunId)
+        : undefined;
   const runActive = intent?.runStatus
     ? !["succeeded", "failed", "cancelled"].includes(intent.runStatus)
     : activeRunId === intent?.runId;
-  const state: RuntimePlanControlSnapshot["state"] = projection.pendingProposal
+  const state: RuntimePlanControlSnapshot["state"] = projection.reviewClaim
     ? intent
       ? intent.runStatus === undefined
         ? "admitting"
         : runActive
           ? "admitted"
           : "recovery_required"
-      : "pending_review"
-    : projection.revisionRequest
-      ? intent && runActive
-        ? "admitted"
-        : "revision"
-      : execution?.status === "interrupted"
-        ? "interrupted"
-        : execution?.status === "active"
-          ? runActive
-            ? "committed_executing"
-            : "recovery_required"
-          : execution?.status === "completed" ||
-              execution?.status === "cancelled" ||
-              latest?.status === "approved" ||
-              latest?.status === "rejected"
-            ? "terminal"
-            : "none";
+      : "admitting"
+    : projection.pendingProposal
+      ? "pending_review"
+      : projection.revisionRequest
+        ? intent && runActive
+          ? "admitted"
+          : "revision"
+        : execution?.status === "interrupted"
+          ? "interrupted"
+          : execution?.status === "active"
+            ? runActive
+              ? "committed_executing"
+              : "recovery_required"
+            : execution?.status === "completed" ||
+                execution?.status === "cancelled" ||
+                latest?.status === "approved" ||
+                latest?.status === "rejected"
+              ? "terminal"
+              : "none";
   return {
     version: 1,
     availability: available ? "ready" : "unavailable",

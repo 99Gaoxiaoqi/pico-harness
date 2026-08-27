@@ -9,6 +9,7 @@ export const PLAN_EVENT_KINDS = [
   "plan.proposed",
   "plan.revised",
   "plan.revision.requested",
+  "plan.review.claimed",
   "plan.approved",
   "plan.rejected",
   "plan.execution.started",
@@ -30,6 +31,7 @@ export function isPlanEventKind(value: unknown): value is PlanEventKind {
 export function assertPlanEventData(kind: PlanEventKind, data: unknown): void {
   if (!isRecord(data)) throw new Error("Plan event data must be an object");
   assertId(data.operationId, "operationId");
+  if (data.claimOperationId !== undefined) assertId(data.claimOperationId, "claimOperationId");
   if (typeof data.fingerprint !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(data.fingerprint)) {
     throw new Error("Plan event fingerprint is invalid");
   }
@@ -50,6 +52,25 @@ export function assertPlanEventData(kind: PlanEventKind, data: unknown): void {
     assertPositiveInteger(data.expectedRevision, "expectedRevision");
     if (typeof data.feedback !== "string" || !data.feedback.trim()) {
       throw new Error("Plan revision feedback is invalid");
+    }
+    return;
+  }
+  if (kind === "plan.review.claimed") {
+    assertId(data.planId, "planId");
+    assertPositiveInteger(data.revision, "revision");
+    assertId(data.controlEpoch, "controlEpoch");
+    if (
+      data.action !== "execute" &&
+      data.action !== "continue_editing" &&
+      data.action !== "reject_exit" &&
+      data.action !== "resume_execution" &&
+      data.action !== "cancel_execution" &&
+      data.action !== "replan_execution"
+    ) {
+      throw new Error("Plan review action is invalid");
+    }
+    if (data.feedback !== undefined && typeof data.feedback !== "string") {
+      throw new Error("Plan review feedback is invalid");
     }
     return;
   }

@@ -8,7 +8,7 @@ import {
   approvalFromPlanControlSnapshot,
   approvalFromPlanProjection,
 } from "../../apps/desktop/src/renderer/runtime.js";
-import { planReviewOperationId } from "../../src/tui/approval-dialogs.js";
+import { planReviewOperationId } from "../../src/plan/review-identity.js";
 
 test("Plan review protocol exposes CAS-protected three-action requests", () => {
   assert.ok(DESKTOP_RUNTIME_METHODS.includes("plan.respond"));
@@ -19,7 +19,7 @@ test("Plan review protocol exposes CAS-protected three-action requests", () => {
     action: "continue_editing",
     expectedRevision: 2,
     expectedSessionSequence: 7,
-    operationId: "operation-1",
+    controlEpoch: "plan:proposal:2",
     feedback: "补充回滚验证",
   });
   assert.equal(parsed.action, "continue_editing");
@@ -32,7 +32,7 @@ test("Plan review protocol exposes CAS-protected three-action requests", () => {
         action: "continue_editing",
         expectedRevision: 2,
         expectedSessionSequence: 7,
-        operationId: "operation-2",
+        controlEpoch: "plan:proposal:2",
       }),
     /feedback/u,
   );
@@ -47,7 +47,7 @@ test("Plan protocol accepts interrupted execution controls", () => {
       action,
       expectedRevision: 2,
       expectedSessionSequence: 9,
-      operationId: `operation-${action}`,
+      controlEpoch: "plan:interrupted:2",
     });
     assert.equal(parsed.action, action);
   }
@@ -58,6 +58,7 @@ test("Desktop hydration rebuilds pending, revision, and interrupted Plan control
     {
       sessionId: "session-1",
       sessionSequence: 7,
+      controlEpoch: "plan:pending:2",
       pendingProposal: {
         planId: "plan-1",
         revision: 2,
@@ -74,6 +75,7 @@ test("Desktop hydration rebuilds pending, revision, and interrupted Plan control
     {
       sessionId: "session-1",
       sessionSequence: 9,
+      controlEpoch: "plan:revision:2",
       revisionRequest: {
         planId: "plan-1",
         expectedRevision: 2,
@@ -93,6 +95,7 @@ test("Desktop hydration rebuilds pending, revision, and interrupted Plan control
     {
       sessionId: "session-1",
       sessionSequence: 11,
+      controlEpoch: "plan:interrupted:2",
       execution: {
         planId: "plan-1",
         revision: 2,
@@ -111,29 +114,22 @@ test("Plan review identity is stable across ledger-only movement and isolated by
   const base = {
     sessionId: "session-1",
     planId: "plan-1",
-    expectedRevision: 2,
-    expectedSessionSequence: 9,
-    planControlMode: "review" as const,
+    revision: 2,
+    controlEpoch: "plan:proposal:2",
+    action: "execute" as const,
   };
-  const first = planReviewOperationId(base, "execute", undefined);
-  assert.equal(
-    planReviewOperationId({ ...base, expectedSessionSequence: 99 }, "execute", undefined),
-    first,
-  );
-  assert.notEqual(
-    planReviewOperationId({ ...base, sessionId: "session-2" }, "execute", undefined),
-    first,
-  );
-  assert.notEqual(
-    planReviewOperationId({ ...base, expectedRevision: 3 }, "execute", undefined),
-    first,
-  );
+  const first = planReviewOperationId(base);
+  assert.equal(planReviewOperationId(base), first);
+  assert.notEqual(planReviewOperationId({ ...base, sessionId: "session-2" }), first);
+  assert.notEqual(planReviewOperationId({ ...base, revision: 3 }), first);
+  assert.notEqual(planReviewOperationId({ ...base, controlEpoch: "plan:interrupted:2" }), first);
 });
 
 test("Desktop consumes the versioned PlanControl snapshot and hides unavailable/terminal controls", () => {
   const projection = {
     sessionId: "session-1",
     sessionSequence: 7,
+    controlEpoch: "plan:proposal:1",
     proposals: [],
     pendingProposal: {
       planId: "plan-1",

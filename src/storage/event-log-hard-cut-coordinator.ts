@@ -533,6 +533,7 @@ function clearControlWeakReferences(database: DatabaseSync): void {
   );
   changes += sqliteChanges(database.prepare("DELETE FROM desktop_input_queue").run());
   changes += sqliteChanges(database.prepare("DELETE FROM desktop_first_send_claims").run());
+  changes += sqliteChanges(database.prepare("DELETE FROM desktop_rewind_claims").run());
   changes += sqliteChanges(database.prepare("DELETE FROM desktop_idempotency").run());
   changes += sqliteChanges(database.prepare("DELETE FROM daemon_commands").run());
   if (changes > 0) bumpJsonRevision(database, "control_metadata");

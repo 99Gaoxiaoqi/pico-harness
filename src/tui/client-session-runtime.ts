@@ -127,10 +127,11 @@ export interface RuntimeTranscriptPagingState {
 export function planApprovalNoticeFromProjection(
   projection: RuntimePlanProjection,
 ): ApprovalNotice | undefined {
+  if (!projection.controlEpoch) return undefined;
   const pending = projection.pendingProposal;
   if (pending) {
     return {
-      taskId: pending.planId,
+      taskId: `${pending.planId}:${projection.controlEpoch}`,
       toolName: "submit_plan",
       args: JSON.stringify(pending),
       providerCallId: "",
@@ -139,12 +140,13 @@ export function planApprovalNoticeFromProjection(
       planControlMode: "review",
       expectedRevision: pending.revision,
       expectedSessionSequence: projection.sessionSequence,
+      controlEpoch: projection.controlEpoch,
     } as ApprovalNotice;
   }
   const execution = projection.execution;
   if (execution?.status === "interrupted") {
     return {
-      taskId: `interrupted:${execution.planId}`,
+      taskId: `interrupted:${execution.planId}:${projection.controlEpoch}`,
       toolName: "interrupted_plan_execution",
       args: JSON.stringify(execution),
       providerCallId: "",
@@ -153,6 +155,7 @@ export function planApprovalNoticeFromProjection(
       planControlMode: "interrupted",
       expectedRevision: execution.revision,
       expectedSessionSequence: projection.sessionSequence,
+      controlEpoch: projection.controlEpoch,
     } as ApprovalNotice;
   }
   return undefined;
@@ -163,8 +166,9 @@ function planControlSnapshotFromProjection(
   operation: RuntimeNotificationMap["plan.updated"]["operation"],
 ): RuntimePlanControlSnapshot {
   const execution = projection.execution;
-  const state: RuntimePlanControlSnapshot["state"] =
-    execution?.status === "interrupted"
+  const state: RuntimePlanControlSnapshot["state"] = projection.reviewClaim
+    ? "admitting"
+    : execution?.status === "interrupted"
       ? "interrupted"
       : execution?.status === "active"
         ? "committed_executing"
@@ -534,7 +538,7 @@ export class ClientSessionRuntime {
             action: input.action,
             expectedRevision: input.expectedRevision,
             expectedSessionSequence: input.expectedSessionSequence,
-            operationId: input.operationId,
+            controlEpoch: input.controlEpoch,
             ...(input.feedback !== undefined ? { feedback: input.feedback } : {}),
           });
           this.dismissPlanControl();

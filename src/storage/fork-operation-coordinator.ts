@@ -64,6 +64,8 @@ export interface ForkOperationCallbacks {
     bundle: ForkPreparedBundle,
     publication: ForkRuntimePublicationCapability,
   ): Promise<void>;
+  /** Remove only target facts proven to belong to this operation. */
+  cleanupUnpublishedTarget(operation: ForkStorageOperation): Promise<void>;
 }
 
 export interface ForkOperationCoordinatorOptions {
@@ -234,33 +236,61 @@ export class ForkOperationCoordinator {
     input: StorageOperationDispositionInput,
     options: ForkReconciliationOptions = {},
   ): Promise<ForkStorageOperation> {
-    const current = await this.journal.get(input.operationId);
-    if (!current) throw new Error(`Storage operation not found: ${input.operationId}`);
-    if (current.kind !== "fork") {
-      throw new Error(`Storage operation is not a fork: ${input.operationId}`);
-    }
-    const restored = await this.journal.retryNeedsAttention(input);
-    if (restored.kind !== "fork") throw new Error("Fork operation changed kind");
-    return this.forward(restored, options);
+    const result = await this.disposeNeedsAttention("retry", input, options);
+    return result.operation;
   }
 
   async abortNeedsAttention(input: StorageOperationDispositionInput): Promise<ForkAbortResult> {
+    return this.disposeNeedsAttention("abort", input, {});
+  }
+
+  private async disposeNeedsAttention(
+    action: "retry" | "abort",
+    input: StorageOperationDispositionInput,
+    options: ForkReconciliationOptions,
+  ): Promise<ForkAbortResult> {
     const current = await this.journal.get(input.operationId);
     if (!current) throw new Error(`Storage operation not found: ${input.operationId}`);
     if (current.kind !== "fork") {
       throw new Error(`Storage operation is not a fork: ${input.operationId}`);
     }
-    const aborted = await this.journal.abortNeedsAttention(input);
-    if (aborted.kind !== "fork") throw new Error("Fork operation changed kind");
+    const lease = await this.acquireTargetLease(current, options);
     try {
-      await this.cleanupStaging(aborted);
-      return { operation: aborted, stagingCleanup: "completed" };
-    } catch (error) {
-      return {
-        operation: aborted,
-        stagingCleanup: "failed",
-        cleanupDiagnostic: errorMessage(error),
-      };
+      const owned = await this.reloadOperation(current);
+      if (owned.state !== "needs_attention" || owned.version !== input.expectedVersion) {
+        throw new Error(
+          `Storage operation version/state conflict: expected needs_attention v${input.expectedVersion}, actual ${owned.state} v${owned.version}`,
+        );
+      }
+      await lease.assertOwnership();
+      const cleanupOnly =
+        action === "abort" ||
+        owned.recoveryPolicy === "cleanup_only" ||
+        // Missing policy is an old uncertain record; fail closed.
+        owned.recoveryPolicy === undefined;
+      if (!cleanupOnly) {
+        const restored = await this.journal.retryNeedsAttention(input);
+        if (restored.kind !== "fork") throw new Error("Fork operation changed kind");
+        const operation = await this.forwardOwned(restored, lease);
+        return { operation, stagingCleanup: "completed" };
+      }
+
+      await this.callbacks.cleanupUnpublishedTarget(owned);
+      await lease.assertOwnership();
+      const aborted = await this.journal.abortNeedsAttention(input);
+      if (aborted.kind !== "fork") throw new Error("Fork operation changed kind");
+      try {
+        await this.cleanupStaging(aborted);
+        return { operation: aborted, stagingCleanup: "completed" };
+      } catch (error) {
+        return {
+          operation: aborted,
+          stagingCleanup: "failed",
+          cleanupDiagnostic: errorMessage(error),
+        };
+      }
+    } finally {
+      await lease.release();
     }
   }
 

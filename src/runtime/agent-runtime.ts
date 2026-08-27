@@ -109,7 +109,9 @@ import { BackgroundManager } from "../tools/background-manager.js";
 import type { HookService } from "../hooks/service.js";
 import {
   getOrCreateSessionSettings,
+  setSessionCollaborationMode,
   setSessionAdditionalDirectories,
+  setSessionPermissionMode,
   toolStatusFromRegistry,
   type SessionToolStatus,
   type SessionSettings,
@@ -391,6 +393,7 @@ export class AgentRuntime {
         operationId,
         "plan.approved",
         approvalSemantic,
+        input.approval.claimOperationId,
       );
       const approved =
         approvalStatus === "matching"
@@ -399,6 +402,9 @@ export class AgentRuntime {
               operationId,
               expectedSessionSequence: input.approval.expectedSessionSequence,
               ...approvalSemantic,
+              ...(input.approval.claimOperationId
+                ? { claimOperationId: input.approval.claimOperationId }
+                : {}),
               settings,
             });
       await session.refreshRuntimeProjection();
@@ -489,6 +495,7 @@ export class AgentRuntime {
             operationId: input.operationId,
             expectedSessionSequence: input.expectedSessionSequence,
             ...semantic,
+            ...(input.claimOperationId ? { claimOperationId: input.claimOperationId } : {}),
           });
       return { projection, replayed };
     } finally {
@@ -513,6 +520,7 @@ export class AgentRuntime {
           input.operationId,
           "plan.execution.resumed",
           semantic,
+          input.claimOperationId,
         )) === "matching"
       ) {
         await reconcileOrphanedPlanExecution(session.runtimeEventStore, session.id, session);
@@ -539,6 +547,7 @@ export class AgentRuntime {
               revision: projection.execution.revision,
               expectedSessionSequence: input.expectedSessionSequence,
               operationId: input.operationId,
+              ...(input.claimOperationId ? { claimOperationId: input.claimOperationId } : {}),
               transition: "resume",
             },
           },
@@ -593,6 +602,7 @@ export class AgentRuntime {
           input.operationId,
           "plan.execution.replanned",
           semantic,
+          input.claimOperationId,
         )) === "matching"
       ) {
         return replayedPlanControlResult(session.id, workDir, input.operationId);
@@ -604,6 +614,7 @@ export class AgentRuntime {
         expectedSessionSequence: input.expectedSessionSequence,
         planId: input.planId,
         settings,
+        ...(input.claimOperationId ? { claimOperationId: input.claimOperationId } : {}),
         ...(input.reason ? { reason: input.reason } : {}),
       });
       return await this.execute(
@@ -630,6 +641,7 @@ export interface PlanApprovalExecutionRequest {
     readonly expectedRevision: number;
     readonly expectedSessionSequence: number;
     readonly operationId?: string;
+    readonly claimOperationId?: string;
   };
   readonly execution: Omit<RunAgentCliOptions, "prompt" | "session" | "dir" | "approvedPlan">;
 }
@@ -645,6 +657,7 @@ export interface PlanInterruptedControlRequest extends PlanSessionRequest {
   readonly planId: string;
   readonly expectedSessionSequence: number;
   readonly operationId: string;
+  readonly claimOperationId?: string;
   readonly reason?: string;
 }
 
@@ -653,6 +666,7 @@ export interface PlanRevisionRequest extends PlanSessionRequest {
   readonly expectedRevision: number;
   readonly expectedSessionSequence: number;
   readonly operationId: string;
+  readonly claimOperationId?: string;
   readonly feedback: string;
 }
 
@@ -927,6 +941,8 @@ export async function executeAgentRuntime(
       sessionLease.release();
       sessionLeaseTransferred = true;
     }
+    const legacyHistoryMissingSettings =
+      sessionSelection.mode !== "new" && session.getRuntimeStateSnapshot().settings === undefined;
     const settings = getOrCreateSessionSettings(
       {
         sessionId: sessionSelection.sessionId,
@@ -937,19 +953,26 @@ export async function executeAgentRuntime(
         cwd: workDir,
         picoHome: session.picoHome,
         provider: kind,
-        ...(sessionSelection.mode === "fork"
-          ? {}
-          : backgroundPolicy
-            ? { mode: "yolo" as const }
-            : options.interactionMode !== undefined
-              ? { mode: options.interactionMode }
-              : {}),
+        ...(legacyHistoryMissingSettings
+          ? { mode: "default" as const }
+          : sessionSelection.mode === "fork"
+            ? {}
+            : backgroundPolicy
+              ? { mode: "yolo" as const }
+              : options.interactionMode !== undefined
+                ? { mode: options.interactionMode }
+                : {}),
         model: defaultConfigModel,
         ...(options.modelRouteId !== undefined ? { modelRouteId: options.modelRouteId } : {}),
         ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
       },
       { persistence: session, ...(backgroundPolicy ? { restore: false } : {}) },
     );
+    if (legacyHistoryMissingSettings) {
+      setSessionCollaborationMode(settings, "agent");
+      setSessionPermissionMode(settings, "default");
+      await session.flushPersistence();
+    }
     if (!settings.collaborationMode) throw new Error("Session collaborationMode is unavailable");
     const sideConversation = settings.sideConversation === true;
     const collaborationMode = (): "agent" | "plan" => settings.collaborationMode!;
@@ -986,6 +1009,9 @@ export async function executeAgentRuntime(
           operationId,
           expectedSessionSequence: options.approvedPlan.expectedSessionSequence,
           planId: options.approvedPlan.planId,
+          ...(options.approvedPlan.claimOperationId
+            ? { claimOperationId: options.approvedPlan.claimOperationId }
+            : {}),
         });
       } else {
         await executionCoordinator.startExecution({
