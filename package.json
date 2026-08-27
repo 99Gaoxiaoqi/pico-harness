@@ -16,10 +16,11 @@
   ],
   "bundleDependencies": [
     "@pico/protocol",
+    "@pico/runtime-host",
     "@pico/transcript-replica"
   ],
   "scripts": {
-    "predev": "npm run check:storage && npm run build:protocol && npm run build:transcript-replica",
+    "predev": "npm run check:storage && npm run build:protocol && npm run build:transcript-replica && npm run build:runtime-host",
     "dev": "tsx --import ./src/tui/preload-env.ts src/cli/main.ts",
     "internal:headless:dev": "tsx --import ./src/tui/preload-env.ts src/internal/headless-one-shot-main.ts",
     "internal:headless": "node dist/internal/headless-one-shot-main.js",
@@ -35,7 +36,7 @@
     "build:protocol": "npm run build --workspace @pico/protocol",
     "build:transcript-replica": "npm run build --workspace @pico/transcript-replica",
     "build:runtime-host": "npm run build --workspace @pico/runtime-host",
-    "prebuild": "npm run clean && npm run check:storage && npm run build:protocol && npm run build:transcript-replica",
+    "prebuild": "npm run clean && npm run check:storage && npm run build:protocol && npm run build:transcript-replica && npm run build:runtime-host",
     "build": "tsc -p tsconfig.build.json",
     "postbuild": "node -e \"require('node:fs').chmodSync('dist/cli/main.js',0o755)\"",
     "prepack": "npm run build",
