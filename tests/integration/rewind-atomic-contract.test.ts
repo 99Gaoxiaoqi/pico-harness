@@ -115,6 +115,19 @@ async function sessionIds(fixture: RewindFixture): Promise<string[]> {
     .toSorted();
 }
 
+function rawRuntimeSessionCount(fixture: RewindFixture): number {
+  const database = new DatabaseSync(
+    operationalDatabasePath(fixture.session.fileHistoryIo.storageRoot),
+    { readOnly: true },
+  );
+  try {
+    return (database.prepare("SELECT count(*) AS count FROM sessions").get() as { count: number })
+      .count;
+  } finally {
+    database.close();
+  }
+}
+
 test("rewind file transaction compensates an injected second-file failure", async () => {
   const fixture = await createFixture("partial-file");
   try {
@@ -244,14 +257,7 @@ for (const failureKind of ["transient", "persistent"] as const) {
           [fixture.session.id, targetSessionId].toSorted(),
         );
       } else {
-        const beforeRuntimeSessionCount = new DatabaseSync(
-          operationalDatabasePath(fixture.session.fileHistoryIo.storageRoot),
-          { readOnly: true },
-        );
-        const beforeCount = beforeRuntimeSessionCount
-          .prepare("SELECT count(*) AS count FROM sessions")
-          .get() as { count: number };
-        beforeRuntimeSessionCount.close();
+        const beforeCount = rawRuntimeSessionCount(fixture);
         await assert.rejects(
           fixture.session.forkFromCheckpoint(
             fixture.checkpointId,
@@ -287,15 +293,7 @@ for (const failureKind of ["transient", "persistent"] as const) {
           (await service.getOperation("rewind-settle-persistent-operation"))?.state,
           "aborted",
         );
-        const afterRuntimeSessionCount = new DatabaseSync(
-          operationalDatabasePath(fixture.session.fileHistoryIo.storageRoot),
-          { readOnly: true },
-        );
-        const afterCount = afterRuntimeSessionCount
-          .prepare("SELECT count(*) AS count FROM sessions")
-          .get() as { count: number };
-        afterRuntimeSessionCount.close();
-        assert.equal(afterCount.count, beforeCount.count);
+        assert.equal(rawRuntimeSessionCount(fixture), beforeCount);
         await service.reconcileUnfinished();
         assert.deepEqual(await sessionIds(fixture), [fixture.session.id]);
       }
@@ -340,6 +338,16 @@ test("rewind both removes an owned partial Runtime publication before returning 
     runtimePort: faultingPort,
     createOperationId: () => "rewind-settle-partial-publication-operation",
   });
+  const runtimeStore = fixture.session.runtimeEventStore!;
+  const deleteSession = runtimeStore.deleteSession.bind(runtimeStore);
+  let cleanupFailuresRemaining = 1;
+  runtimeStore.deleteSession = async (sessionId) => {
+    if (sessionId === targetSessionId && cleanupFailuresRemaining > 0) {
+      cleanupFailuresRemaining -= 1;
+      throw new Error("injected target cleanup failure");
+    }
+    return deleteSession(sessionId);
+  };
   const settlingPort: SessionForkRuntimePort = {
     ...actualPort,
     forkSession: async (input) => {
@@ -361,6 +369,7 @@ test("rewind both removes an owned partial Runtime publication before returning 
   try {
     const checkpointRevision = fixture.session.fileHistory.revision;
     const beforeIds = await sessionIds(fixture);
+    const beforeCount = rawRuntimeSessionCount(fixture);
     await assert.rejects(
       fixture.session.forkFromCheckpoint(
         fixture.checkpointId,
@@ -369,23 +378,48 @@ test("rewind both removes an owned partial Runtime publication before returning 
         () => targetSessionId,
         fixture.expectedFingerprints,
       ),
-      /injected partial Runtime publication failure/u,
+      /\u53d1\u5e03\u7ed3\u679c\u65e0\u6cd5\u5b89\u5168\u5224\u5b9a/u,
     );
     assert.ok(writeFenceChecks >= 3);
     assert.equal(await readFile(fixture.firstFile, "utf8"), "a-after\n");
     assert.equal(await readFile(fixture.secondFile, "utf8"), "b-after\n");
     assert.deepEqual(await sessionIds(fixture), beforeIds);
+    assert.equal(rawRuntimeSessionCount(fixture), beforeCount + 1);
     assert.equal(
-      await fixture.session.runtimeEventStore!.readSessionManifest(targetSessionId),
+      (await service.getOperation("rewind-settle-partial-publication-operation"))?.state,
+      "needs_attention",
+    );
+    assert.equal(
+      await findCliSessionCatalogEntry(fixture.workDir, targetSessionId, {
+        picoHome: fixture.picoHome,
+      }),
       undefined,
     );
+    await assert.rejects(
+      resolveCliSession({
+        workDir: fixture.workDir,
+        picoHome: fixture.picoHome,
+        resumeSession: targetSessionId,
+      }),
+      /fork 尚未完成发布/u,
+    );
+
+    const needsAttention = await service.getOperation(
+      "rewind-settle-partial-publication-operation",
+    );
+    assert.ok(needsAttention?.kind === "fork" && needsAttention.state === "needs_attention");
+    const disposition = await service.abortNeedsAttention({
+      operationId: needsAttention.operationId,
+      expectedVersion: needsAttention.version,
+      reason: "test deterministic rewind cleanup",
+    });
+    assert.equal(disposition.operation.state, "aborted");
+    assert.equal(disposition.stagingCleanup, "completed");
+    assert.equal(rawRuntimeSessionCount(fixture), beforeCount);
+    assert.equal(await runtimeStore.readSessionManifest(targetSessionId), undefined);
     assert.equal(
       readFileHistoryManifestRow(fixture.session.fileHistoryIo.storageRoot, targetSessionId),
       undefined,
-    );
-    assert.equal(
-      (await service.getOperation("rewind-settle-partial-publication-operation"))?.state,
-      "aborted",
     );
     await assert.rejects(
       resolveCliSession({
@@ -399,6 +433,7 @@ test("rewind both removes an owned partial Runtime publication before returning 
     await service.reconcileUnfinished();
     assert.deepEqual(await sessionIds(fixture), beforeIds);
   } finally {
+    runtimeStore.deleteSession = deleteSession;
     service.close();
     await fixture.close();
   }
