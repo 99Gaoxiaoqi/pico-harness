@@ -109,7 +109,6 @@ import { BackgroundManager } from "../tools/background-manager.js";
 import type { HookService } from "../hooks/service.js";
 import {
   getOrCreateSessionSettings,
-  DEFAULT_INTERACTION_MODE,
   setSessionAdditionalDirectories,
   toolStatusFromRegistry,
   type SessionToolStatus,
@@ -369,7 +368,6 @@ export class AgentRuntime {
       workDir,
       picoHome,
       resumeExistingSession: false,
-      planMode: true,
     });
     try {
       const session = lease.session;
@@ -798,7 +796,6 @@ async function acquirePlanControlSession(
     workDir,
     picoHome,
     resumeExistingSession: false,
-    planMode: false,
   });
   return { session: lease.session, lease, workDir };
 }
@@ -892,7 +889,6 @@ export async function executeAgentRuntime(
     workDir,
     picoHome,
     resumeExistingSession,
-    planMode: options.planMode === true,
   });
   const session = sessionLease.session;
   let executionCoordinator: PlanCoordinator | undefined;
@@ -941,11 +937,13 @@ export async function executeAgentRuntime(
         cwd: workDir,
         picoHome: session.picoHome,
         provider: kind,
-        ...(backgroundPolicy
-          ? { mode: "yolo" as const }
-          : options.interactionMode !== undefined
-            ? { mode: options.interactionMode }
-            : {}),
+        ...(sessionSelection.mode === "fork"
+          ? {}
+          : backgroundPolicy
+            ? { mode: "yolo" as const }
+            : options.interactionMode !== undefined
+              ? { mode: options.interactionMode }
+              : {}),
         model: defaultConfigModel,
         ...(options.modelRouteId !== undefined ? { modelRouteId: options.modelRouteId } : {}),
         ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
@@ -2092,13 +2090,11 @@ async function acquireRuntimeSession({
   workDir,
   picoHome,
   resumeExistingSession,
-  planMode,
 }: {
   sessionSelection: CliSessionSelection;
   workDir: string;
   picoHome: string;
   resumeExistingSession: boolean;
-  planMode: boolean;
 }): Promise<SessionManagerLease> {
   const runtimeEventStore = new SqliteRuntimeEventStore({
     storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
@@ -2111,7 +2107,6 @@ async function acquireRuntimeSession({
       workDir,
       picoHome,
       resumeExistingSession,
-      planMode,
     });
   } finally {
     runtimeEventStore.close();
@@ -2125,13 +2120,11 @@ async function acquireRuntimeSessionWithStore(
     workDir,
     picoHome,
     resumeExistingSession,
-    planMode,
   }: {
     sessionSelection: CliSessionSelection;
     workDir: string;
     picoHome: string;
     resumeExistingSession: boolean;
-    planMode: boolean;
   },
 ): Promise<SessionManagerLease> {
   let targetManifest = await runtimeEventStore.readSessionManifest(sessionSelection.sessionId);
@@ -2171,7 +2164,6 @@ async function acquireRuntimeSessionWithStore(
           await forkService.fork({
             sourceSessionId: sessionSelection.sourceSessionId,
             targetSessionId: sessionSelection.sessionId,
-            targetMode: planMode ? "plan" : DEFAULT_INTERACTION_MODE,
           });
         } finally {
           forkService.close();

@@ -20,7 +20,7 @@ export interface SessionToolStatus {
 }
 
 export type InteractionMode = "default" | "plan" | "auto" | "yolo";
-export const DEFAULT_INTERACTION_MODE: InteractionMode = "yolo";
+export const DEFAULT_INTERACTION_MODE: InteractionMode = "default";
 export type SessionMode = "new" | "continue" | "resume" | "fork";
 
 export interface SessionSettings {
@@ -118,7 +118,7 @@ export function createDefaultSessionSettings(defaults: SessionSettingsDefaults):
     permissionMode:
       mode === "plan"
         ? compatibilityPreviousMode === "plan" || !compatibilityPreviousMode
-          ? "yolo"
+          ? "default"
           : compatibilityPreviousMode
         : mode,
     model: defaults.model,
@@ -798,7 +798,8 @@ function applyPersistedSessionSettings(
   settings.orchestrationMode = persisted.orchestrationMode ?? "default";
   settings.permissionMode =
     persisted.permissionMode ??
-    (persisted.mode === "plan" ? (persisted.prePlanMode ?? "yolo") : persisted.mode);
+    (persisted.mode === "plan" ? (persisted.prePlanMode ?? "default") : persisted.mode) ??
+    "default";
   settings.thinkingEffort = persisted.thinkingEffort;
   settings.thinkingEffortExplicit = persisted.thinkingEffortExplicit;
   settings.additionalDirectories = createAdditionalDirectorySnapshot(

@@ -196,10 +196,16 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       availability: "idle",
       argumentCompleter: staticCompleter(["default", "plan", "auto", "yolo"]),
       execute: async (input) => {
-        const sid = needSession();
-        if (typeof sid === "object") return sid;
         const target = input.argv[0];
+        const sid = session();
         if (target === undefined) {
+          if (sid === undefined) {
+            return {
+              type: "local",
+              action: "message",
+              message: `协作模式：${runtime.preSessionSettings.collaborationMode ?? "agent"} · 权限：${runtime.preSessionSettings.permissionMode ?? "default"}（新会话预设）`,
+            };
+          }
           const current = await runtime.request("session.settings.get", {
             workspacePath,
             sessionId: sid,
@@ -215,6 +221,21 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
             type: "local",
             action: "message",
             message: "Usage: /mode <default|plan|auto|yolo>",
+          };
+        }
+        if (sid === undefined) {
+          const updated =
+            target === "plan"
+              ? runtime.setPreSessionCollaborationMode("plan")
+              : runtime.setPreSessionPermissionMode(target as "default" | "auto" | "yolo");
+          return {
+            type: "local",
+            action: "message",
+            message: updated
+              ? target === "plan"
+                ? "新会话协作模式预设为 plan（首条消息创建时生效）。"
+                : `新会话权限预设为 ${target}（首条消息创建时生效）。`
+              : "当前无法修改新会话预设。",
           };
         }
         // 与 in-process 语义对齐（对抗评审 P1：此前 agent|plan 分叉）：SessionMode
@@ -237,11 +258,18 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       availability: "idle",
       argumentCompleter: staticCompleter(["on", "off"]),
       execute: async (input) => {
-        const sid = needSession();
-        if (typeof sid === "object") return sid;
         const target = input.argv[0] ?? "on";
         if (target !== "on" && target !== "off") {
           return { type: "local", action: "message", message: "Usage: /plan [on|off]" };
+        }
+        const sid = session();
+        if (sid === undefined) {
+          runtime.setPreSessionCollaborationMode(target === "on" ? "plan" : "agent");
+          return {
+            type: "local",
+            action: "message",
+            message: target === "on" ? "新会话将以计划模式开始。" : "新会话将以 Agent 模式开始。",
+          };
         }
         // in-process 版在 off 时校验 pending 提案（PlanCoordinator）；daemon 侧
         // 对计划状态一致性自保护，客户端 v1 直接切换。
@@ -267,10 +295,16 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       availability: "idle",
       argumentCompleter: staticCompleter(["default", "auto", "yolo", "plan"]),
       execute: async (input) => {
-        const sid = needSession();
-        if (typeof sid === "object") return sid;
         const target = input.argv[0];
+        const sid = session();
         if (target === undefined) {
+          if (sid === undefined) {
+            return {
+              type: "local",
+              action: "message",
+              message: `权限模式：${runtime.preSessionSettings.permissionMode ?? "default"}（新会话预设）`,
+            };
+          }
           const current = await runtime.request("session.settings.get", {
             workspacePath,
             sessionId: sid,
@@ -286,6 +320,18 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
             type: "local",
             action: "message",
             message: "Usage: /permissions [default|auto|yolo|plan]",
+          };
+        }
+        if (sid === undefined) {
+          if (target === "plan") runtime.setPreSessionCollaborationMode("plan");
+          else runtime.setPreSessionPermissionMode(target as "default" | "auto" | "yolo");
+          return {
+            type: "local",
+            action: "message",
+            message:
+              target === "plan"
+                ? "新会话将以计划模式开始，权限保持当前安全预设。"
+                : `新会话权限预设为 ${target}（首条消息创建时生效）。`,
           };
         }
         // permissionMode 枚举无 "plan"（协议 :695）；plan 走 deprecated permissions
@@ -1053,10 +1099,20 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
             sessionId: target,
           });
           await runtime.switchSession(result.session.sessionId);
+          let inheritedLabel = "继承设置已固化";
+          try {
+            const inherited = await runtime.request("session.settings.get", {
+              workspacePath,
+              sessionId: result.session.sessionId,
+            });
+            inheritedLabel = `继承协作 ${inherited.settings.collaborationMode} · 权限 ${inherited.settings.permissionMode}`;
+          } catch {
+            inheritedLabel = "已继承源会话设置（暂无法读取展示）";
+          }
           return {
             type: "local",
             action: "message",
-            message: `已分叉 ${target} → ${result.session.sessionId} 并切换。`,
+            message: `已分叉 ${target} → ${result.session.sessionId} 并切换；${inheritedLabel}。`,
           };
         } catch (error) {
           return {

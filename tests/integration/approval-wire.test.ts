@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { ApprovalNotice } from "../../src/approval/manager.js";
+import { ApprovalManager, type ApprovalNotice } from "../../src/approval/manager.js";
 import { buildApprovalRequestedPayload } from "../../src/daemon/approval-wire.js";
 import { parseApprovalRequestedPayload } from "@pico/protocol";
+import { DEFAULT_INTERACTION_MODE } from "../../src/input/session-settings.js";
+import { buildPermissionMiddleware } from "../../src/runtime/agent-runtime.js";
 
 /**
  * approval.requested wire 构造单一来源的形状测试（3-D 漏账补齐）。
@@ -88,4 +90,29 @@ test("buildApprovalRequestedPayload omits absent optionals and keeps plan shape"
   const view = parseApprovalRequestedPayload(planPayload);
   assert.equal(view?.kind, "plan");
   assert.deepEqual(view?.planSteps, ["步骤一"]);
+});
+
+test("fresh default mode asks before the first workspace write", async () => {
+  const manager = new ApprovalManager(60_000);
+  let requested: ApprovalNotice | undefined;
+  const middleware = buildPermissionMiddleware(
+    (notice) => {
+      requested = notice;
+      manager.resolveApproval(notice.taskId, false, "test rejection");
+    },
+    process.cwd(),
+    undefined,
+    manager,
+    { sessionId: "fresh-session", mode: DEFAULT_INTERACTION_MODE },
+  );
+
+  const decision = await middleware({
+    id: "write-call-1",
+    name: "write_file",
+    arguments: JSON.stringify({ path: "first-write.txt", content: "blocked" }),
+  });
+
+  assert.equal(DEFAULT_INTERACTION_MODE, "default");
+  assert.equal(requested?.toolName, "write_file");
+  assert.equal(decision.allowed, false);
 });

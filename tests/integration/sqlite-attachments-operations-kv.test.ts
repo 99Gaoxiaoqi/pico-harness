@@ -156,6 +156,48 @@ test("operation journal advances the saga state machine with CAS and recovers in
   );
 });
 
+test("fork journal accepts only an atomic canonical interaction pair", async (context) => {
+  const fixture = await workspaceFixture(context, "pico-ops-fork-permission-pair-");
+  const journal = new StorageOperationJournal({
+    workDir: fixture.workDir,
+    picoHome: fixture.picoHome,
+  });
+
+  await assert.rejects(
+    journal.create(
+      forkOperationInput({
+        operationId: "fork-partial-collaboration",
+        targetMode: undefined,
+        targetCollaborationMode: "plan",
+      }),
+    ),
+    /Invalid storage operation/u,
+  );
+  await assert.rejects(
+    journal.create(
+      forkOperationInput({
+        operationId: "fork-ambiguous-interaction",
+        targetCollaborationMode: "agent",
+        targetPermissionMode: "default",
+      }),
+    ),
+    /Invalid storage operation/u,
+  );
+  const canonical = await journal.create(
+    forkOperationInput({
+      operationId: "fork-canonical-interaction",
+      targetMode: undefined,
+      targetCollaborationMode: "plan",
+      targetPermissionMode: "auto",
+    }),
+  );
+  assert.equal(canonical.kind, "fork");
+  if (canonical.kind === "fork") {
+    assert.equal(canonical.targetCollaborationMode, "plan");
+    assert.equal(canonical.targetPermissionMode, "auto");
+  }
+});
+
 test("operation journal dispositions recover needs_attention with recorded phase", async (context) => {
   const fixture = await workspaceFixture(context, "pico-ops-disposition-");
   const journal = new StorageOperationJournal({

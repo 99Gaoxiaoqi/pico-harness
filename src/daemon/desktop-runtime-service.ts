@@ -25,7 +25,6 @@ import { SessionForkService } from "../engine/session-fork-service.js";
 import { projectRuntimeSessionActiveToolResultEntries } from "../engine/session-runtime-projection.js";
 import { globalSessionManager, Session } from "../engine/session.js";
 import {
-  DEFAULT_INTERACTION_MODE,
   getOrCreateSessionSettings,
   migrateSessionModelRoute,
   normalizeInteractionMode,
@@ -1136,6 +1135,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     });
     const targetSessionId = this.createSessionId();
     try {
+      await this.getForkSourceSettings(canonical, sourceLease.session);
+      await sourceLease.session.flushPersistence();
       await new SessionForkService({
         workDir: canonical,
         picoHome: this.picoHome,
@@ -1143,8 +1144,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       }).fork({
         sourceSessionId: sessionId,
         targetSessionId,
-        targetMode:
-          sourceLease.session.getRuntimeStateSnapshot().settings?.mode ?? DEFAULT_INTERACTION_MODE,
       });
     } finally {
       sourceLease.release();
@@ -3790,6 +3789,17 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     );
   }
 
+  /** Missing historical settings have no authorization to inherit; materialize safe axes. */
+  private async getForkSourceSettings(workspacePath: string, session: Session) {
+    const missingPersistedSettings = session.getRuntimeStateSnapshot().settings === undefined;
+    const settings = await this.getSessionSettings(workspacePath, session);
+    if (missingPersistedSettings) {
+      setSessionCollaborationMode(settings, "agent");
+      setSessionPermissionMode(settings, "default");
+    }
+    return settings;
+  }
+
   private async getSessionModelRouter(
     workspacePath: string,
     settings: SessionSettings,
@@ -4158,6 +4168,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           },
         );
         try {
+          await this.getForkSourceSettings(workspacePath, sourceLease.session);
+          await sourceLease.session.flushPersistence();
           await new SessionForkService({
             workDir: workspacePath,
             picoHome: this.picoHome,
@@ -4166,9 +4178,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
             sourceSessionId,
             targetSessionId,
             throughEventId,
-            targetMode:
-              sourceLease.session.getRuntimeStateSnapshot().settings?.mode ??
-              DEFAULT_INTERACTION_MODE,
           });
         } finally {
           sourceLease.release();

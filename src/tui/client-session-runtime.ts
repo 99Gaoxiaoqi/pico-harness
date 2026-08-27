@@ -9,11 +9,14 @@ import {
   type RuntimeParams,
   type RuntimeResult,
   type RuntimeConversationItem,
+  type RuntimeCollaborationMode,
+  type RuntimePermissionMode,
   type RuntimeActiveOverlayEntry,
   type RuntimeSessionSubscriptionFrame,
   type RuntimeTranscriptCursor,
   type RuntimeTranscriptFragment,
   type RuntimeUserInput,
+  type RuntimeUserDefaults,
 } from "@pico/protocol";
 import { TranscriptReplica } from "@pico/transcript-replica";
 import type { ApprovalNotice } from "../approval/manager.js";
@@ -261,6 +264,12 @@ export class ClientSessionRuntime {
   private pendingModelRouteId: string | undefined;
   private settingsOverrideApplied = false;
   private settingsOverrideInFlight = false;
+  private configuredInitialSettings: RuntimeUserDefaults = {
+    collaborationMode: "agent",
+    permissionMode: "default",
+  };
+  private pendingInitialSettings: RuntimeUserDefaults = this.configuredInitialSettings;
+  private pendingInitialSettingsTouched = false;
 
   constructor(private readonly options: ClientSessionRuntimeOptions) {
     this.client = options.client;
@@ -298,6 +307,7 @@ export class ClientSessionRuntime {
         if (this.sessionId) void this.hydrateSerial();
       },
     );
+    await this.resolvePreSessionDefaults();
     await this.resolveModelOverride();
     if (this.sessionId) {
       await this.hydrate();
@@ -311,6 +321,27 @@ export class ClientSessionRuntime {
     for (const event of subscription.replay.events) {
       this.handleNotification(event);
     }
+  }
+
+  /** No-session TUI settings are applied atomically by the first session.send. */
+  get preSessionSettings(): Readonly<RuntimeUserDefaults> {
+    return this.pendingInitialSettings;
+  }
+
+  setPreSessionPermissionMode(mode: RuntimePermissionMode): boolean {
+    if (this.sessionId !== undefined || this.running) return false;
+    this.pendingInitialSettingsTouched = true;
+    this.pendingInitialSettings = { ...this.pendingInitialSettings, permissionMode: mode };
+    this.publishPreSessionSettings();
+    return true;
+  }
+
+  setPreSessionCollaborationMode(mode: RuntimeCollaborationMode): boolean {
+    if (this.sessionId !== undefined || this.running) return false;
+    this.pendingInitialSettingsTouched = true;
+    this.pendingInitialSettings = { ...this.pendingInitialSettings, collaborationMode: mode };
+    this.publishPreSessionSettings();
+    return true;
   }
 
   /** 发送用户文本。behavior 供 /steer /queue /replace 映射；attachments 为
@@ -342,6 +373,7 @@ export class ClientSessionRuntime {
       const result = await this.client.request("session.send", {
         workspacePath: this.workspacePath,
         ...(this.sessionId ? { sessionId: this.sessionId } : {}),
+        ...(this.sessionId ? {} : { initialSettings: this.pendingInitialSettings }),
         input,
         behavior,
         idempotencyKey: randomUUID(),
@@ -349,6 +381,7 @@ export class ClientSessionRuntime {
       if (this.sessionId === undefined) {
         this.sessionId = result.session.sessionId;
         void this.hydrateSerial();
+        await this.refreshSettingsSnapshot();
         await this.applyStartupOverrides();
       } else {
         // BYOK 覆盖若曾失败（applied 尚未置位），此后每次成功发送都是廉价重试
@@ -502,7 +535,49 @@ export class ClientSessionRuntime {
       // 竞态出乱序替换）。
       await this.hydrateSerial();
       await this.refreshSettingsSnapshot();
+    } else {
+      this.pendingInitialSettingsTouched = false;
+      this.pendingInitialSettings = this.configuredInitialSettings;
+      this.publishPreSessionSettings();
     }
+  }
+
+  private async resolvePreSessionDefaults(): Promise<void> {
+    if (this.sessionId !== undefined) return;
+    try {
+      const { config } = await this.client.request("config.effective.get", {
+        workspacePath: this.workspacePath,
+      });
+      const defaults = resolvePreSessionDefaults(config.defaults);
+      this.configuredInitialSettings = defaults;
+      if (!this.pendingInitialSettingsTouched) this.pendingInitialSettings = defaults;
+    } catch {
+      this.configuredInitialSettings = {
+        collaborationMode: "agent",
+        permissionMode: "default",
+      };
+      if (!this.pendingInitialSettingsTouched) {
+        this.pendingInitialSettings = this.configuredInitialSettings;
+      }
+    }
+    this.publishPreSessionSettings();
+  }
+
+  private publishPreSessionSettings(): void {
+    if (this.sessionId !== undefined) return;
+    this.options.onSettingsSnapshot?.({
+      collaborationMode: this.pendingInitialSettings.collaborationMode ?? "agent",
+      permissionMode: this.pendingInitialSettings.permissionMode ?? "default",
+      ...(this.pendingInitialSettings.orchestrationMode
+        ? { orchestrationMode: this.pendingInitialSettings.orchestrationMode }
+        : {}),
+      ...(this.pendingInitialSettings.modelRouteId
+        ? { modelRouteId: this.pendingInitialSettings.modelRouteId }
+        : {}),
+      ...(this.pendingInitialSettings.thinkingEffort
+        ? { thinkingEffort: this.pendingInitialSettings.thinkingEffort }
+        : {}),
+    });
   }
 
   /** 串行水化：in-flight 防重入 + 尾随合并（reload 对账与切换共用），返回本次完成。 */
@@ -872,4 +947,22 @@ export class ClientSessionRuntime {
       ...(prompt["freeText"] === true ? { freeText: true } : {}),
     });
   }
+}
+
+function resolvePreSessionDefaults(defaults: RuntimeUserDefaults): RuntimeUserDefaults {
+  const legacyMode = defaults.mode;
+  const collaborationMode =
+    defaults.collaborationMode ?? (legacyMode === "plan" ? "plan" : "agent");
+  const permissionMode =
+    defaults.permissionMode ??
+    (legacyMode === "default" || legacyMode === "auto" || legacyMode === "yolo"
+      ? legacyMode
+      : "default");
+  return {
+    ...(defaults.modelRouteId ? { modelRouteId: defaults.modelRouteId } : {}),
+    collaborationMode,
+    permissionMode,
+    ...(defaults.orchestrationMode ? { orchestrationMode: defaults.orchestrationMode } : {}),
+    ...(defaults.thinkingEffort ? { thinkingEffort: defaults.thinkingEffort } : {}),
+  };
 }

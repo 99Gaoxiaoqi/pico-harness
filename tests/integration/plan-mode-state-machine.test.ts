@@ -504,10 +504,18 @@ test("v2 settings migrate to split axes and v3 snapshots omit legacy fields", as
   } as const;
   const legacyPlan = normalizeSessionRuntimeStatePatch({ settings: { ...base, mode: "plan" } })!;
   assert.equal(legacyPlan.settings?.collaborationMode, "plan");
-  assert.equal(legacyPlan.settings?.permissionMode, "yolo");
+  assert.equal(legacyPlan.settings?.permissionMode, "default");
   const legacyAuto = normalizeSessionRuntimeStatePatch({ settings: { ...base, mode: "auto" } })!;
   assert.equal(legacyAuto.settings?.collaborationMode, "agent");
   assert.equal(legacyAuto.settings?.permissionMode, "auto");
+  const missingAxes = normalizeSessionRuntimeStatePatch({ settings: base })!;
+  assert.equal(missingAxes.settings?.collaborationMode, "agent");
+  assert.equal(missingAxes.settings?.permissionMode, "default");
+  const missingPermission = normalizeSessionRuntimeStatePatch({
+    settings: { ...base, collaborationMode: "plan" },
+  })!;
+  assert.equal(missingPermission.settings?.collaborationMode, "plan");
+  assert.equal(missingPermission.settings?.permissionMode, "default");
   const settings = createDefaultSessionSettings({
     sessionId: "s",
     cwd: process.cwd(),

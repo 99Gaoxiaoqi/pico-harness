@@ -281,11 +281,16 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
   if (!isProviderKind(provider) || typeof model !== "string" || model.trim().length === 0) {
     return undefined;
   }
-  const hasLegacyMode = isInteractionMode(mode);
-  const hasSplitMode =
-    (collaborationMode === "agent" || collaborationMode === "plan") &&
-    isNonPlanMode(permissionMode);
-  if ((!hasLegacyMode && !hasSplitMode) || !isReasoningLevel(thinkingEffort)) return undefined;
+  if (mode !== undefined && !isInteractionMode(mode)) return undefined;
+  if (
+    collaborationMode !== undefined &&
+    collaborationMode !== "agent" &&
+    collaborationMode !== "plan"
+  ) {
+    return undefined;
+  }
+  if (permissionMode !== undefined && !isNonPlanMode(permissionMode)) return undefined;
+  if (!isReasoningLevel(thinkingEffort)) return undefined;
   if (typeof thinkingEffortExplicit !== "boolean") return undefined;
   if (
     !Array.isArray(additionalDirectories) ||
@@ -298,7 +303,7 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
   if (forkFrom !== undefined && !isNonBlankString(forkFrom)) return undefined;
   if (sideConversation !== undefined && typeof sideConversation !== "boolean") return undefined;
   if (prePlanMode !== undefined && !isNonPlanMode(prePlanMode)) return undefined;
-  if (hasLegacyMode && mode !== "plan" && prePlanMode !== undefined) return undefined;
+  if (mode !== "plan" && prePlanMode !== undefined) return undefined;
   if (
     orchestrationMode !== undefined &&
     orchestrationMode !== "default" &&
@@ -306,16 +311,15 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
   ) {
     return undefined;
   }
-  const canonicalCollaborationMode: "agent" | "plan" = hasSplitMode
-    ? (collaborationMode as "agent" | "plan")
-    : mode === "plan"
-      ? "plan"
-      : "agent";
-  const canonicalPermissionMode = hasSplitMode
-    ? (permissionMode as Exclude<PersistedInteractionMode, "plan">)
-    : mode === "plan"
-      ? (prePlanMode ?? "yolo")
-      : (mode as Exclude<PersistedInteractionMode, "plan">);
+  const canonicalCollaborationMode: "agent" | "plan" =
+    collaborationMode ?? (mode === "plan" ? "plan" : "agent");
+  const canonicalPermissionMode: Exclude<PersistedInteractionMode, "plan"> =
+    permissionMode ??
+    (mode === "plan"
+      ? (prePlanMode ?? "default")
+      : mode === "default" || mode === "auto" || mode === "yolo"
+        ? mode
+        : "default");
   return {
     ...(title !== undefined ? { title } : {}),
     ...(forkFrom !== undefined ? { forkFrom } : {}),

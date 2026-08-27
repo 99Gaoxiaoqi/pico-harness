@@ -88,8 +88,11 @@ export interface ForkStorageOperation extends StorageOperationBase {
     eventId: string;
   };
   targetSessionId: string;
-  /** 恢复 prepared 操作时不能猜测的目标会话交互模式。 */
+  /** @deprecated v1 journal compatibility; canonical writes use split axes below. */
   targetMode?: "default" | "plan" | "auto" | "yolo";
+  /** 恢复 prepared 操作时不能猜测的目标协作与权限轴。 */
+  targetCollaborationMode?: "agent" | "plan";
+  targetPermissionMode?: "default" | "auto" | "yolo";
   stagingDirectory: string;
 }
 
@@ -534,6 +537,16 @@ function parseForkOperation(value: Record<string, unknown>): ForkStorageOperatio
       value["targetMode"] !== "yolo" &&
       value["targetMode"] !== "auto" &&
       value["targetMode"] !== "plan") ||
+    (value["targetCollaborationMode"] !== undefined &&
+      value["targetCollaborationMode"] !== "agent" &&
+      value["targetCollaborationMode"] !== "plan") ||
+    (value["targetPermissionMode"] !== undefined &&
+      value["targetPermissionMode"] !== "default" &&
+      value["targetPermissionMode"] !== "auto" &&
+      value["targetPermissionMode"] !== "yolo") ||
+    (value["targetCollaborationMode"] === undefined) !==
+      (value["targetPermissionMode"] === undefined) ||
+    (value["targetMode"] !== undefined && value["targetCollaborationMode"] !== undefined) ||
     typeof value["stagingDirectory"] !== "string" ||
     !isRecord(cursor) ||
     typeof cursor["logId"] !== "string" ||

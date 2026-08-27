@@ -75,7 +75,8 @@ export interface SessionForkRuntimePort {
     readonly fileHistoryBaseDir: string;
     readonly sourceSessionId: string;
     readonly targetSessionId: string;
-    readonly targetMode: PersistedInteractionMode;
+    /** @deprecated Accepted for source compatibility but ignored by canonical forks. */
+    readonly targetMode?: PersistedInteractionMode;
     readonly throughEventId?: string;
   }): Promise<void>;
 
