@@ -1,6 +1,7 @@
 import type {
   AgentGraph,
   AgentGraphActivationIntent,
+  AgentGraphOperator,
   AgentGraphRecordRef,
   AgentGraphScheduleCommand,
   AgentGraphScheduleRevision,
@@ -59,26 +60,68 @@ function assertAddCommand(
   }
   assertNonEmpty(operator.operatorId, "Operator id");
   assertNonEmpty(operator.role, "Operator role");
-  assertNonEmpty(intent.intentId, "Activation Intent id");
-  assertNonEmpty(intent.instruction, "Activation Intent instruction");
   if (!Number.isSafeInteger(operator.generation) || operator.generation < 1) {
     throw new AgentGraphConflictError("Operator generation must be a positive safe integer");
   }
+  if (state.operators.some((item) => item.operatorId === operator.operatorId)) {
+    throw new AgentGraphConflictError(`Operator already exists: ${operator.operatorId}`);
+  }
+  assertActivationIntent(state, revision, intent, operator);
+}
+
+function assertActivateCommand(
+  state: AgentGraphScheduleState,
+  revision: AgentGraphScheduleRevision,
+  command: Extract<AgentGraphScheduleCommand, { kind: "activate" }>,
+): void {
+  if (state.graph.admissionPhase !== "open") {
+    throw new AgentGraphConflictError("Graph is sealed and cannot admit new work");
+  }
+  const operator = state.operators.find(
+    (item) =>
+      item.operatorId === command.intent.operatorId &&
+      item.generation === command.intent.operatorGeneration,
+  );
+  if (!operator) {
+    throw new AgentGraphConflictError(
+      `Cannot activate unknown Operator generation: ${command.intent.operatorId}@${command.intent.operatorGeneration}`,
+    );
+  }
+  const operatorStopped = state.stops.some(
+    (stop) =>
+      stop.target.kind === "operator" &&
+      stop.target.operatorId === operator.operatorId &&
+      stop.target.generation === operator.generation,
+  );
+  if (operatorStopped) {
+    throw new AgentGraphConflictError(
+      `Cannot activate stopped Operator generation: ${operator.operatorId}@${operator.generation}`,
+    );
+  }
+  assertActivationIntent(state, revision, command.intent, operator);
+}
+
+function assertActivationIntent(
+  state: AgentGraphScheduleState,
+  revision: AgentGraphScheduleRevision,
+  intent: AgentGraphActivationIntent,
+  operator: AgentGraphOperator,
+): void {
+  if (intent.graphId !== state.graph.graphId) {
+    throw new AgentGraphConflictError("Activation Intent must belong to the Graph");
+  }
+  assertNonEmpty(intent.intentId, "Activation Intent id");
+  assertNonEmpty(intent.instruction, "Activation Intent instruction");
   if (
     intent.operatorId !== operator.operatorId ||
     intent.operatorGeneration !== operator.generation
   ) {
-    throw new AgentGraphConflictError(
-      "Activation Intent must target its added Operator generation",
-    );
+    throw new AgentGraphConflictError("Activation Intent must target its Operator generation");
   }
   if (intent.createdAtRevision !== revision.revision) {
     throw new AgentGraphConflictError(
       "Activation Intent createdAtRevision must match its revision",
     );
-  }
-  if (state.operators.some((item) => item.operatorId === operator.operatorId)) {
-    throw new AgentGraphConflictError(`Operator already exists: ${operator.operatorId}`);
   }
   if (state.intents.some((item) => item.intentId === intent.intentId)) {
     throw new AgentGraphConflictError(`Activation Intent already exists: ${intent.intentId}`);
@@ -113,6 +156,9 @@ function applyCommand(
         operators: [...state.operators, command.operator],
         intents: [...state.intents, command.intent],
       };
+    case "activate":
+      assertActivateCommand(state, revision, command);
+      return { ...state, intents: [...state.intents, command.intent] };
     case "stop":
       if (!targetExists(state, command.target)) {
         throw new AgentGraphConflictError("Cannot stop an unknown Graph target");
@@ -195,6 +241,15 @@ export function applyScheduleRevision(
   }
   if (revision.commands.length === 0) {
     throw new AgentGraphConflictError("Schedule revision must contain at least one command");
+  }
+  const hasFinish = revision.commands.some((command) => command.kind === "finish");
+  const hasFreshWork = revision.commands.some(
+    (command) => command.kind === "add" || command.kind === "activate",
+  );
+  if (hasFinish && hasFreshWork) {
+    throw new AgentGraphConflictError(
+      "Schedule finish cannot be combined with add or activate commands",
+    );
   }
 
   let next = state;

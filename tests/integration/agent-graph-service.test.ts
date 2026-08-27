@@ -16,7 +16,7 @@ import type {
 } from "../../src/storage/sqlite/agent-graph-store-types.js";
 import { SqliteAgentGraphControlStore } from "../../src/storage/sqlite/sqlite-agent-graph-control-store.js";
 
-test("workspace application drives add to records, durable yield wake, and finish", async () => {
+test("workspace application drives add and follow-up activate to records and finish", async () => {
   const storageRoot = await mkdtemp(join(tmpdir(), "pico-agent-graph-service-"));
   const store = new SqliteAgentGraphControlStore({ storageRoot, now: monotonicClock() });
   const runtime = new CompletingRuntimeAdapter();
@@ -61,16 +61,17 @@ test("workspace application drives add to records, durable yield wake, and finis
     const downstreamUpdated = await service.toolPort.commitUpdate({
       graphId,
       expectedRevision: 1,
-      operationId: "add-review",
+      operationId: "activate-review",
       source,
       commands: [
-        addCommand({
+        activateCommand({
           graphId,
           intentId: downstreamIntentId,
-          operatorId: "reviewer",
+          operatorId: "researcher",
           source,
           inputRecordIds: [upstreamRecordId],
           createdAtRevision: 2,
+          instruction: "review result",
         }),
       ],
     });
@@ -78,6 +79,9 @@ test("workspace application drives add to records, durable yield wake, and finis
     await service.supervisor.notifyGraph(graphId);
     const reconciled = await service.toolPort.readProjection({ graphId, rootSessionId });
     assert.equal(reconciled.claims.length, 2);
+    assert.equal(reconciled.operators.length, 1);
+    assert.equal(reconciled.provisions.length, 1);
+    assert.equal(reconciled.claims[0]?.targetSessionId, reconciled.claims[1]?.targetSessionId);
     assert.deepEqual(
       reconciled.records.map((record) => record.recordId).sort(),
       [downstreamRecordId, upstreamRecordId].sort(),
@@ -176,19 +180,6 @@ test("workspace application drives add to records, durable yield wake, and finis
     assert.match(runtime.starts[1]?.prompt ?? "", /review result/u);
     assert.match(runtime.starts[1]?.prompt ?? "", /handoff:1/u);
 
-    const yielded = await service.toolPort.registerYield({
-      graphId,
-      rootSessionId,
-      rootTurnId: "root-turn-1",
-      rootRunId: "root-run-1",
-      toolCallId: "yield-call-1",
-    });
-
-    assert.equal(yielded.snapshot.graph.headRevision, 2);
-    assert.equal(store.listYieldInterests(graphId)[0]?.state, "consumed");
-    assert.equal(rootWake.starts.length, 1);
-    assert.equal(store.listRecoverableSupervisorWakes(Number.MAX_SAFE_INTEGER).length, 0);
-
     const finished = await service.toolPort.commitUpdate({
       graphId,
       expectedRevision: 2,
@@ -196,7 +187,7 @@ test("workspace application drives add to records, durable yield wake, and finis
       source: {
         sessionId: rootSessionId,
         turnId: "root-turn-2",
-        runId: rootWake.starts[0]!.targetRunId,
+        runId: "root-run-2",
         toolCallId: "finish-call-1",
       },
       commands: [{ kind: "finish", selectedRecordIds: [downstreamRecordId] }],
@@ -211,7 +202,7 @@ test("workspace application drives add to records, durable yield wake, and finis
     await rm(storageRoot, { recursive: true, force: true });
   }
 
-  assert.equal(runtime.releases, 3);
+  assert.equal(runtime.releases, 2);
 });
 
 test("view exposes a terminal Claim without agent_output so root does not wait for another wake", async () => {
@@ -258,6 +249,149 @@ test("view exposes a terminal Claim without agent_output so root does not wait f
         outputEventIds: [],
       },
     ]);
+
+    await service.toolPort.commitUpdate({
+      graphId,
+      expectedRevision: 1,
+      operationId: "stop-outputless-intent",
+      source,
+      commands: [
+        {
+          kind: "stop",
+          target: { kind: "intent", intentId: "outputless-intent" },
+          reason: "该次执行未提交正式输出",
+        },
+      ],
+    });
+    await service.supervisor.notifyGraph(graphId);
+    assert.equal(store.listActivationClaims(graphId)[0]?.state, "cancelled");
+    assert.equal(store.listOperatorProvisions(graphId)[0]?.state, "provisioned");
+
+    await service.toolPort.commitUpdate({
+      graphId,
+      expectedRevision: 2,
+      operationId: "follow-up-after-outputless",
+      source,
+      commands: [
+        activateCommand({
+          graphId,
+          intentId: "outputless-follow-up",
+          operatorId: "worker",
+          source,
+          createdAtRevision: 3,
+          instruction: "重新执行并明确提交结果",
+        }),
+      ],
+    });
+    await service.supervisor.notifyGraph(graphId);
+    const recovered = await service.toolPort.readProjection({ graphId, rootSessionId });
+    assert.equal(recovered.provisions.length, 1);
+    assert.equal(recovered.claims.length, 2);
+    assert.equal(recovered.claims[0]?.targetSessionId, recovered.claims[1]?.targetSessionId);
+    assert.equal(runtime.starts.length, 2);
+  } finally {
+    await service.close();
+    store.close();
+    await rm(storageRoot, { recursive: true, force: true });
+  }
+});
+
+test("a rejected no-progress yield leaves the same root Run free to schedule and yield again", async () => {
+  const storageRoot = await mkdtemp(join(tmpdir(), "pico-agent-graph-dead-yield-"));
+  const store = new SqliteAgentGraphControlStore({ storageRoot, now: monotonicClock() });
+  const rootSessionId = "dead-yield-root";
+  const graphId = graphIdFor(rootSessionId, 1);
+  const service = createAgentGraphApplicationService({
+    store,
+    runtime: new RunningRuntimeAdapter(),
+    rootWakePort: new CompletingRootWakePort(),
+    resolveOperatorWorkspace: () => ({ workDir: storageRoot }),
+  });
+
+  try {
+    await service.start();
+    await assert.rejects(
+      service.toolPort.registerYield({
+        graphId,
+        rootSessionId,
+        rootTurnId: "root-turn",
+        rootRunId: "root-run",
+        toolCallId: "yield-without-work",
+      }),
+      /没有可等待的未来进展/u,
+    );
+    assert.equal(store.listYieldInterests(graphId).length, 0);
+    assert.equal(store.listRecoverableSupervisorWakes(Number.MAX_SAFE_INTEGER).length, 0);
+
+    const source = {
+      sessionId: rootSessionId,
+      turnId: "root-turn",
+      runId: "root-run",
+      toolCallId: "update-after-rejected-yield",
+    };
+    await service.toolPort.commitUpdate({
+      graphId,
+      expectedRevision: 0,
+      operationId: "schedule-after-rejected-yield",
+      source,
+      commands: [addCommand({ graphId, intentId: "retry-intent", operatorId: "worker", source })],
+    });
+    const yielded = await service.toolPort.registerYield({
+      graphId,
+      rootSessionId,
+      rootTurnId: "root-turn",
+      rootRunId: "root-run",
+      toolCallId: "yield-after-scheduling",
+    });
+    assert.equal(store.getYieldInterest(yielded.permitId)?.state, "registered");
+    service.toolPort.cancelYield(yielded.permitId, rootSessionId);
+  } finally {
+    await service.close();
+    store.close();
+    await rm(storageRoot, { recursive: true, force: true });
+  }
+});
+
+test("yield remains registered while an Operator activation is still executing", async () => {
+  const storageRoot = await mkdtemp(join(tmpdir(), "pico-agent-graph-live-yield-"));
+  const store = new SqliteAgentGraphControlStore({ storageRoot, now: monotonicClock() });
+  const runtime = new RunningRuntimeAdapter();
+  const rootSessionId = "live-yield-root";
+  const graphId = graphIdFor(rootSessionId, 1);
+  const service = createAgentGraphApplicationService({
+    store,
+    runtime,
+    rootWakePort: new CompletingRootWakePort(),
+    resolveOperatorWorkspace: () => ({ workDir: storageRoot }),
+  });
+
+  try {
+    await service.start();
+    const source = {
+      sessionId: rootSessionId,
+      turnId: "root-turn",
+      runId: "root-run",
+      toolCallId: "root-update",
+    };
+    await service.toolPort.commitUpdate({
+      graphId,
+      expectedRevision: 0,
+      operationId: "add-running-work",
+      source,
+      commands: [addCommand({ graphId, intentId: "running-intent", operatorId: "worker", source })],
+    });
+    await service.supervisor.notifyGraph(graphId);
+
+    const yielded = await service.toolPort.registerYield({
+      graphId,
+      rootSessionId,
+      rootTurnId: "root-turn",
+      rootRunId: "root-run",
+      toolCallId: "yield-running-work",
+    });
+    assert.equal(store.getYieldInterest(yielded.permitId)?.state, "registered");
+    service.toolPort.cancelYield(yielded.permitId, rootSessionId);
+    assert.equal(store.getYieldInterest(yielded.permitId)?.state, "cancelled");
   } finally {
     await service.close();
     store.close();
@@ -339,6 +473,42 @@ class CompletingRuntimeAdapter implements AgentGraphRuntimeApplicationPort {
   }
 }
 
+class RunningRuntimeAdapter implements AgentGraphRuntimeApplicationPort {
+  private readonly delegate = new CompletingRuntimeAdapter();
+  private readonly running = new Map<string, ReturnType<typeof runningProjection>>();
+
+  ensureOperatorProvision(
+    input: Parameters<AgentGraphRuntimeApplicationPort["ensureOperatorProvision"]>[0],
+  ) {
+    return this.delegate.ensureOperatorProvision(input);
+  }
+
+  async startOrObserveActivation(input: {
+    readonly claim: AgentGraphActivationClaimRecord;
+    readonly provision: AgentGraphOperatorProvisionRecord;
+    readonly workDir: string;
+    readonly prompt: string;
+  }) {
+    const existing = this.running.get(input.claim.claimId);
+    if (existing) return { disposition: "observed" as const, projection: existing };
+    const projection = runningProjection(input.claim);
+    this.running.set(input.claim.claimId, projection);
+    return { disposition: "started" as const, projection };
+  }
+
+  async projectActivation(claim: AgentGraphActivationClaimRecord) {
+    return this.running.get(claim.claimId) ?? notStartedProjection(claim);
+  }
+
+  async stopActivation() {
+    return "already_terminal" as const;
+  }
+
+  resolveInputHandoff(records: readonly AgentGraphRecordRefRecord[]) {
+    return this.delegate.resolveInputHandoff(records);
+  }
+}
+
 class CompletingRootWakePort implements AgentGraphRootWakePort {
   readonly starts: Array<{
     readonly wakeId: string;
@@ -399,6 +569,35 @@ function addCommand(input: {
   };
 }
 
+function activateCommand(input: {
+  readonly graphId: string;
+  readonly intentId: string;
+  readonly operatorId: string;
+  readonly source: {
+    readonly sessionId: string;
+    readonly turnId: string;
+    readonly runId: string;
+    readonly toolCallId: string;
+  };
+  readonly inputRecordIds?: readonly string[];
+  readonly createdAtRevision: number;
+  readonly instruction: string;
+}) {
+  return {
+    kind: "activate" as const,
+    intent: {
+      graphId: input.graphId,
+      intentId: input.intentId,
+      operatorId: input.operatorId,
+      operatorGeneration: 1,
+      instruction: input.instruction,
+      inputRefs: (input.inputRecordIds ?? []).map((recordId) => ({ recordId })),
+      createdAtRevision: input.createdAtRevision,
+      requestedBy: input.source,
+    },
+  };
+}
+
 function completedProjection(claim: AgentGraphActivationClaimRecord, emitOutput = true) {
   return {
     claimId: claim.claimId,
@@ -421,6 +620,19 @@ function notStartedProjection(claim: AgentGraphActivationClaimRecord) {
     runId: claim.targetRunId,
     invocationId: claim.targetInvocationId,
     status: "not_started" as const,
+    outputEventIds: [],
+  };
+}
+
+function runningProjection(claim: AgentGraphActivationClaimRecord) {
+  return {
+    claimId: claim.claimId,
+    sessionId: claim.targetSessionId,
+    turnId: claim.targetTurnId,
+    runId: claim.targetRunId,
+    invocationId: claim.targetInvocationId,
+    status: "running" as const,
+    startedEventId: claim.runStartedEventId,
     outputEventIds: [],
   };
 }

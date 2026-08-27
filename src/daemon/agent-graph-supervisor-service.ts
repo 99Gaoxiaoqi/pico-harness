@@ -10,7 +10,6 @@ import type {
   ClaimAgentGraphSupervisorWakeResult,
   EnqueueAgentGraphSupervisorWakeInput,
   EnqueueAgentGraphSupervisorWakeForYieldResult,
-  IdempotentStoreResult,
   SettleAgentGraphSupervisorWakeInput,
 } from "../storage/sqlite/agent-graph-store-types.js";
 
@@ -52,6 +51,9 @@ export interface AgentGraphDrivePort {
   listOpenGraphIds(): Promise<readonly string[]> | readonly string[];
   driveGraph(graphId: string): Promise<AgentGraphDriveResult | void>;
   registerYieldInterest(input: RegisterAgentGraphYieldInput): Promise<void> | void;
+  cancelYieldInterestIfRegistered(
+    permitId: string,
+  ): Promise<"registered" | "consumed" | "cancelled"> | "registered" | "consumed" | "cancelled";
   readYieldSnapshot(graphId: string): Promise<AgentGraphYieldSnapshot> | AgentGraphYieldSnapshot;
 }
 
@@ -82,13 +84,8 @@ export interface AgentGraphSupervisorStorePort {
   claimSupervisorWake(
     input: ClaimAgentGraphSupervisorWakeInput,
   ): Promise<ClaimAgentGraphSupervisorWakeResult> | ClaimAgentGraphSupervisorWakeResult;
-  enqueueSupervisorWake(
-    input: EnqueueAgentGraphSupervisorWakeInput,
-  ):
-    | Promise<IdempotentStoreResult<AgentGraphSupervisorWakeRecord>>
-    | IdempotentStoreResult<AgentGraphSupervisorWakeRecord>;
   /** Production SQLite path: atomically consumes a registered yield permit. */
-  enqueueSupervisorWakeForYield?(
+  enqueueSupervisorWakeForYield(
     input: EnqueueAgentGraphSupervisorWakeInput,
   ):
     | Promise<EnqueueAgentGraphSupervisorWakeForYieldResult>
@@ -208,9 +205,18 @@ export class AgentGraphSupervisorService {
     requireId(input.rootRunId, "rootRunId");
     await this.options.drivePort.registerYieldInterest(input);
     await this.notifyGraph(input.graphId);
+    const snapshot = await this.options.drivePort.readYieldSnapshot(input.graphId);
+    if (snapshot.phase === "finished" || snapshot.executing === 0) {
+      const state = await this.options.drivePort.cancelYieldInterestIfRegistered(input.permitId);
+      if (state !== "consumed") {
+        throw new Error(
+          "Agent Graph 没有可等待的未来进展；请先更新/完成 Graph，不要无期限 yield。",
+        );
+      }
+    }
     return {
       permitId: input.permitId,
-      snapshot: await this.options.drivePort.readYieldSnapshot(input.graphId),
+      snapshot,
     };
   }
 
@@ -291,11 +297,7 @@ export class AgentGraphSupervisorService {
               cause: candidate.cause,
               payload: candidate.payload,
             };
-            if (this.options.store.enqueueSupervisorWakeForYield) {
-              await this.options.store.enqueueSupervisorWakeForYield(input);
-            } else {
-              await this.options.store.enqueueSupervisorWake(input);
-            }
+            await this.options.store.enqueueSupervisorWakeForYield(input);
           }
         }
         if (result?.needsAnotherPass || result?.quiescent === false) flight.rerun = true;

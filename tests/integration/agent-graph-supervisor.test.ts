@@ -42,7 +42,7 @@ test("startup recovers open graphs and due supervisor wakes", async () => {
   await service.close();
 });
 
-test("reconcile wake candidates become durable before root delivery", async () => {
+test("reconcile wake candidates do not bypass the durable yield permit gate", async () => {
   const store = new SharedWakeStore();
   store.addGraph(graphRecord());
   const drive = new FakeDrivePort(["graph-1"]);
@@ -61,9 +61,8 @@ test("reconcile wake candidates become durable before root delivery", async () =
 
   await service.start();
 
-  assert.equal(store.wakes.size, 1);
-  assert.equal([...store.wakes.values()][0]?.status, "delivered");
-  assert.equal(root.starts.length, 1);
+  assert.equal(store.wakes.size, 0);
+  assert.equal(root.starts.length, 0);
   await service.close();
 });
 
@@ -131,6 +130,57 @@ test("yield registers interest before snapshot and loses no completion around th
       await service.close();
     });
   }
+});
+
+test("yield rejects when quiescence has no executing work and cancellation wins", async () => {
+  const store = new SharedWakeStore();
+  store.addGraph(graphRecord());
+  const drive = new FakeDrivePort([]);
+  drive.cancelState = "cancelled";
+  const service = new AgentGraphSupervisorService({
+    store,
+    drivePort: drive,
+    rootWakePort: new FakeRootWakePort(),
+  });
+  await service.start();
+
+  await assert.rejects(
+    service.registerYield({
+      permitId: "permit-without-progress",
+      graphId: "graph-1",
+      rootSessionId: "root-1",
+      rootRunId: "yielding-run",
+    }),
+    /没有可等待的未来进展/u,
+  );
+  assert.deepEqual(drive.events, ["register:permit-without-progress", "snapshot:graph-1"]);
+  await service.close();
+});
+
+test("yield rejects a finished Graph even when an old Claim still appears executing", async () => {
+  const store = new SharedWakeStore();
+  store.addGraph(graphRecord());
+  const drive = new FakeDrivePort([]);
+  drive.snapshotPhase = "finished";
+  drive.snapshotExecuting = 1;
+  drive.cancelState = "cancelled";
+  const service = new AgentGraphSupervisorService({
+    store,
+    drivePort: drive,
+    rootWakePort: new FakeRootWakePort(),
+  });
+  await service.start();
+
+  await assert.rejects(
+    service.registerYield({
+      permitId: "permit-finished",
+      graphId: "graph-1",
+      rootSessionId: "root-1",
+      rootRunId: "yielding-run",
+    }),
+    /没有可等待的未来进展/u,
+  );
+  await service.close();
 });
 
 test("two services competing for one wake create and execute only one attempt", async () => {
@@ -293,6 +343,9 @@ class FakeDrivePort implements AgentGraphDrivePort {
   maxConcurrent = 0;
   readonly events: string[] = [];
   onDrive?: (call: number) => Promise<AgentGraphDriveResult | void> | AgentGraphDriveResult | void;
+  cancelState: "registered" | "consumed" | "cancelled" = "consumed";
+  snapshotPhase: AgentGraphYieldSnapshot["phase"] = "open";
+  snapshotExecuting = 0;
 
   constructor(private readonly openGraphIds: readonly string[]) {}
 
@@ -315,14 +368,18 @@ class FakeDrivePort implements AgentGraphDrivePort {
     this.events.push(`register:${input.permitId}`);
   }
 
+  cancelYieldInterestIfRegistered(): "registered" | "consumed" | "cancelled" {
+    return this.cancelState;
+  }
+
   readYieldSnapshot(graphId: string): AgentGraphYieldSnapshot {
     this.events.push(`snapshot:${graphId}`);
     return {
       graphId,
       headRevision: 1,
-      phase: "open",
+      phase: this.snapshotPhase,
       pending: 0,
-      executing: 0,
+      executing: this.snapshotExecuting,
       availableRecordIds: [],
     };
   }
@@ -380,6 +437,10 @@ class SharedWakeStore {
     });
     this.wakes.set(record.wakeId, record);
     return { record, replayed: false };
+  }
+
+  enqueueSupervisorWakeForYield(): { status: "not_waiting" } {
+    return { status: "not_waiting" };
   }
 
   listRecoverableSupervisorWakes(_at: number): readonly RecoverableAgentGraphSupervisorWake[] {
@@ -510,6 +571,12 @@ class SqliteSupervisorTestPort {
     input: Parameters<SqliteAgentGraphControlStore["enqueueSupervisorWake"]>[0],
   ) {
     return this.store.enqueueSupervisorWake(input);
+  }
+
+  enqueueSupervisorWakeForYield(
+    input: Parameters<SqliteAgentGraphControlStore["enqueueSupervisorWakeForYield"]>[0],
+  ) {
+    return this.store.enqueueSupervisorWakeForYield(input);
   }
 
   settleSupervisorWake(input: SettleAgentGraphSupervisorWakeInput) {

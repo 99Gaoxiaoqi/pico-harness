@@ -114,6 +114,22 @@ class SqliteAgentGraphDriveBridge implements AgentGraphDrivePort {
     prepared.replayed = result.replayed;
   }
 
+  cancelYieldInterestIfRegistered(permitId: string): "registered" | "consumed" | "cancelled" {
+    const current = this.store.getYieldInterest(permitId);
+    if (!current) throw new Error(`Yield permit ${permitId} was not persisted`);
+    if (current.state !== "registered") return current.state;
+    try {
+      return this.store.cancelYieldInterest({
+        permitId,
+        expectedVersion: current.version,
+      }).record.state;
+    } catch (error) {
+      const raced = this.store.getYieldInterest(permitId);
+      if (raced && raced.state !== "registered") return raced.state;
+      throw error;
+    }
+  }
+
   async readYieldSnapshot(graphId: string): Promise<AgentGraphYieldSnapshot> {
     const state = this.control.getScheduleState(graphId);
     const claims = this.control.listActivationClaims(graphId);
@@ -213,6 +229,14 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
   async registerYield(input: RegisterAgentGraphYieldInput): Promise<RegisterAgentGraphYieldResult> {
     this.ensureEpochOneGraph(input.graphId, input.rootSessionId);
     this.requireRootGraph(input.graphId, input.rootSessionId);
+    // Acquire future progress before allocating the root-Run-unique permit. A
+    // rejected preflight must leave the same root Run free to repair its
+    // schedule and yield again with a new tool call.
+    await this.supervisor.notifyGraph(input.graphId);
+    const preflight = await this.drive.readYieldSnapshot(input.graphId);
+    if (preflight.phase === "finished" || preflight.executing === 0) {
+      throw new Error("Agent Graph 没有可等待的未来进展；请先更新/完成 Graph，不要无期限 yield。");
+    }
     const permitId = yieldPermitId(input);
     this.drive.prepareYield(input, permitId);
     try {
@@ -230,9 +254,27 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
         snapshot: this.readProjectionSync(input.graphId, input.rootSessionId),
       };
     } catch (error) {
+      const interest = this.store.getYieldInterest(permitId);
+      if (interest?.state === "registered") {
+        try {
+          this.drive.cancelYieldInterestIfRegistered(permitId);
+        } catch {
+          // Preserve the original application error; a concurrent terminal may
+          // have consumed this permit and durably admitted its Wake.
+        }
+      }
       this.drive.consumeYieldReplayFlag(permitId);
       throw error;
     }
+  }
+
+  cancelYield(permitId: string, rootSessionId: string): void {
+    const interest = this.store.getYieldInterest(permitId);
+    if (!interest) return;
+    if (interest.rootSessionId !== rootSessionId) {
+      throw new Error(`Yield permit ${permitId} does not belong to root Session`);
+    }
+    this.drive.cancelYieldInterestIfRegistered(permitId);
   }
 
   private readProjectionSync(
