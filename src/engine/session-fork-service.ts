@@ -73,6 +73,8 @@ import { projectActivePlanEntries, projectPlanEntries, reducePlanEvent } from ".
 const SAFE_SESSION_ID = /^[A-Za-z0-9._-]+$/u;
 const FROZEN_FORK_BUNDLE_VERSION = 7 as const;
 const FROZEN_FORK_BUNDLE_NAME = "runtime-fork.json";
+const SAFE_FORK_SETTINGS_VERSION = 1 as const;
+const SAFE_FORK_SETTINGS_NAME = "safe-settings.json";
 const FORK_SIDECARS_VERSION = 2 as const;
 const FORK_SIDECARS_NAME = "fork-sidecars.json";
 
@@ -99,6 +101,7 @@ export interface SessionForkServiceOptions {
 export interface ForkSessionInput {
   readonly sourceSessionId: string;
   readonly targetSessionId: string;
+  readonly operationId?: string;
   /** @deprecated Accepted for source compatibility but ignored: forks always inherit source axes. */
   readonly targetMode?: PersistedInteractionMode;
   /**
@@ -107,6 +110,8 @@ export interface ForkSessionInput {
    * 用于把 rewind checkpoint 表达为对历史切片的 fork。
    */
   readonly throughEventId?: string;
+  /** Host-frozen safe settings used only when the selected historical slice has none. */
+  readonly fallbackSettings?: PersistedSessionSettings;
 }
 
 export interface ForkSessionResult {
@@ -147,6 +152,8 @@ interface FrozenForkBundle {
   readonly modelCheckpoint?: SessionForkModelCheckpoint;
   readonly sourceTitle?: string;
   readonly settings?: PersistedSessionSettings;
+  /** In-memory marker: historical bundle lacked authority and was repaired fail-closed. */
+  readonly settingsFallback?: true;
   readonly goal?: NonNullable<SessionRuntimeStatePatch["goal"]>;
 }
 
@@ -155,6 +162,14 @@ interface ForkSidecarsBundle {
   readonly operationId: string;
   readonly sourceSessionId: string;
   readonly targetSessionId: string;
+}
+
+interface SafeForkSettingsBundle {
+  readonly schemaVersion: typeof SAFE_FORK_SETTINGS_VERSION;
+  readonly operationId: string;
+  readonly sourceSessionId: string;
+  readonly targetSessionId: string;
+  readonly settings: PersistedSessionSettings;
 }
 
 /** Runtime facts 与 operation journal 共同构成发布边界；staging 只保存崩溃恢复输入。 */
@@ -218,6 +233,26 @@ export class SessionForkService {
     if (input.sourceSessionId === input.targetSessionId) {
       throw new Error("Fork source 与 target sessionId 不能相同");
     }
+    if (input.operationId) {
+      const existing = await this.journal.get(input.operationId);
+      if (existing) {
+        if (
+          existing.kind !== "fork" ||
+          existing.sourceSessionId !== input.sourceSessionId ||
+          existing.targetSessionId !== input.targetSessionId
+        ) {
+          throw new ForkOperationConflictError(
+            `Fork operation ${input.operationId} is bound to another request`,
+            "invalid_operation",
+          );
+        }
+        const operation = await this.coordinator.reconcile(existing.operationId);
+        if (operation.state === "needs_attention") {
+          throw new SessionForkNeedsAttentionError(operation);
+        }
+        return { operation };
+      }
+    }
     const source = await this.sessionManager.getOrCreate(input.sourceSessionId, this.workDir, {
       persistence: true,
       picoHome: this.picoHome,
@@ -252,7 +287,7 @@ export class SessionForkService {
       const snapshot = input.throughEventId
         ? await source.readDurableForkSnapshotAt(input.throughEventId)
         : await source.readDurableForkSnapshot();
-      const operationId = this.createOperationId();
+      const operationId = input.operationId ?? this.createOperationId();
       const stagingDirectory = join(this.workspacePaths.forkStaging, operationId);
       const frozen = createFrozenForkBundle(operationId, input, snapshot);
       const inheritedInteraction = resolveForkInteraction(frozen.settings);
@@ -269,6 +304,7 @@ export class SessionForkService {
         targetSessionId: input.targetSessionId,
         targetCollaborationMode: inheritedInteraction.collaborationMode,
         targetPermissionMode: inheritedInteraction.permissionMode,
+        recoveryPolicy: "forward",
         stagingDirectory,
       });
       if (operation.state === "needs_attention") {
@@ -308,6 +344,7 @@ export class SessionForkService {
   async settleFailedFork(input: {
     readonly sourceSessionId: string;
     readonly targetSessionId: string;
+    readonly cleanupOnly?: boolean;
   }): Promise<ForkFailureSettlement> {
     const candidates = (await this.journal.list()).filter(
       (operation): operation is ForkStorageOperation =>
@@ -371,6 +408,7 @@ export class SessionForkService {
           operationId: operation.operationId,
           expectedVersion: operation.version,
           nextState: "needs_attention",
+          ...(input.cleanupOnly ? { recoveryPolicy: "cleanup_only" as const } : {}),
           error: {
             phase: operation.state,
             message:
@@ -383,9 +421,22 @@ export class SessionForkService {
         throw new SessionForkPublicationUncertainError(input.targetSessionId, { cause: error });
       }
     }
+    if (
+      operation.state === "needs_attention" &&
+      input.cleanupOnly &&
+      operation.recoveryPolicy !== "cleanup_only"
+    ) {
+      try {
+        operation = await this.journal.sealForkCleanupOnly(
+          operation.operationId,
+          operation.version,
+        );
+      } catch (error) {
+        throw new SessionForkPublicationUncertainError(input.targetSessionId, { cause: error });
+      }
+    }
     if (operation.state === "needs_attention") {
       try {
-        await this.cleanupUnpublishedForkTarget(operation, targetEvents);
         await this.coordinator.abortNeedsAttention({
           operationId: operation.operationId,
           expectedVersion: operation.version,
@@ -430,7 +481,6 @@ export class SessionForkService {
     if (operation.state !== "needs_attention") {
       throw new Error(`Fork operation ${operation.operationId} is not awaiting disposition`);
     }
-    await this.cleanupUnpublishedForkTarget(operation);
     const result = await this.coordinator.abortNeedsAttention(input);
     return {
       operation: result.operation,
@@ -497,6 +547,7 @@ export class SessionForkService {
       },
       publishRuntime: async (operation, bundle, publication) =>
         this.publishRuntime(operation, bundle, publication),
+      cleanupUnpublishedTarget: async (operation) => this.cleanupUnpublishedForkTarget(operation),
     };
   }
 
@@ -542,7 +593,7 @@ export class SessionForkService {
     try {
       const runtimePatch = filteredRuntimePatch(
         frozen,
-        resolveForkOperationInteraction(operation, frozen.settings),
+        resolveForkOperationInteraction(operation, frozen.settings, frozen.settingsFallback),
         operation.createdAt,
       );
       const workflowEvents = this.buildForkWorkflowEntries(
@@ -613,11 +664,12 @@ export class SessionForkService {
       workDir: this.workDir,
       runtimeAuthority: this.runtimeStore,
     });
-    const workflowEntries = [...frozen.planEntries].sort(
-      (left, right) => left.sequence - right.sequence,
-    );
+    const workflowEntries = frozen.planEntries
+      .filter(({ event }) => event.kind !== "plan.review.claimed")
+      .sort((left, right) => left.sequence - right.sequence);
     const rewritten: RuntimePlanEvent[] = workflowEntries.map(({ event }, index) => {
       const operationId = `fork:${operation.operationId}:workflow:${index}`;
+      const { claimOperationId: _claimOperationId, ...sourceData } = event.data;
       return {
         ...structuredClone(event),
         eventId: operationId,
@@ -627,7 +679,7 @@ export class SessionForkService {
         turnId: `turn:${runId}:input`,
         at: operation.createdAt,
         data: {
-          ...structuredClone(event.data),
+          ...structuredClone(sourceData),
           operationId,
           fingerprint: planOperationFingerprint(`fork.${event.kind}`, event.data),
         },
@@ -709,7 +761,7 @@ export class SessionForkService {
     );
     const runtimePatch = filteredRuntimePatch(
       frozen,
-      resolveForkOperationInteraction(operation, frozen.settings),
+      resolveForkOperationInteraction(operation, frozen.settings, frozen.settingsFallback),
       operation.createdAt,
     );
     const expectedRunId = this.runtimePort.deriveBootstrapRunId({
@@ -779,7 +831,12 @@ export class SessionForkService {
     try {
       const frozen = await readVersionedJson(path, parseFrozenForkBundle);
       validateFrozenBundleForOperation(frozen, operation, path);
-      return frozen;
+      if (frozen.settings) return frozen;
+      return {
+        ...frozen,
+        settings: await this.readOrCreateSafeForkSettings(operation),
+        settingsFallback: true,
+      };
     } catch (error) {
       if (error instanceof ForkOperationConflictError) throw error;
       throw new ForkOperationConflictError(
@@ -788,6 +845,59 @@ export class SessionForkService {
         [path],
       );
     }
+  }
+
+  private async readOrCreateSafeForkSettings(
+    operation: ForkStorageOperation,
+  ): Promise<PersistedSessionSettings> {
+    const path = join(operation.stagingDirectory, SAFE_FORK_SETTINGS_NAME);
+    try {
+      const stored = await readVersionedJson(path, parseSafeForkSettings);
+      if (
+        stored.operationId !== operation.operationId ||
+        stored.sourceSessionId !== operation.sourceSessionId ||
+        stored.targetSessionId !== operation.targetSessionId
+      ) {
+        throw new Error("safe settings belong to another Fork operation");
+      }
+      return stored.settings;
+    } catch (error) {
+      if (!isNodeCode(error, "ENOENT")) {
+        throw new ForkOperationConflictError(
+          `Frozen safe settings cannot be decoded: ${errorMessage(error)}`,
+          "staging_corrupt",
+          [path],
+        );
+      }
+    }
+
+    const source = await this.sessionManager.getOrCreate(operation.sourceSessionId, this.workDir, {
+      persistence: true,
+      picoHome: this.picoHome,
+      runtimePort: this.runtimePort.engineRuntimePort,
+    });
+    const persisted = source.getRuntimeStateSnapshot().settings;
+    const candidate: PersistedSessionSettingsWrite = {
+      provider: persisted?.provider ?? "openai",
+      model: persisted?.model ?? "unconfigured",
+      modelRouteId: persisted?.modelRouteId ?? "openai/unconfigured",
+      collaborationMode: "agent",
+      permissionMode: "default",
+      orchestrationMode: persisted?.orchestrationMode ?? "default",
+      thinkingEffort: persisted?.thinkingEffort ?? "off",
+      thinkingEffortExplicit: persisted?.thinkingEffortExplicit ?? false,
+      additionalDirectories: [],
+    };
+    const settings = normalizeSessionRuntimeStatePatch({ settings: candidate })?.settings;
+    if (!settings) throw new Error("Failed to materialize safe Fork settings");
+    await writeJsonAtomic(path, {
+      schemaVersion: SAFE_FORK_SETTINGS_VERSION,
+      operationId: operation.operationId,
+      sourceSessionId: operation.sourceSessionId,
+      targetSessionId: operation.targetSessionId,
+      settings,
+    });
+    return settings;
   }
 
   private async tryReadSidecars(
@@ -897,8 +1007,10 @@ function createFrozenForkBundle(
         }
       : {}),
     ...(sourceTitle ? { sourceTitle } : {}),
-    ...(snapshot.hydration.runtime.settings
-      ? { settings: structuredClone(snapshot.hydration.runtime.settings) }
+    ...((snapshot.hydration.runtime.settings ?? input.fallbackSettings)
+      ? {
+          settings: structuredClone(snapshot.hydration.runtime.settings ?? input.fallbackSettings!),
+        }
       : {}),
     ...(snapshot.hydration.runtime.goal
       ? { goal: structuredClone(snapshot.hydration.runtime.goal) }
@@ -976,7 +1088,9 @@ function resolveForkInteraction(
 function resolveForkOperationInteraction(
   operation: ForkStorageOperation,
   source: PersistedSessionSettings | undefined,
+  settingsFallback?: true,
 ): ForkInteractionSettings {
+  if (settingsFallback) return { collaborationMode: "agent", permissionMode: "default" };
   if (
     operation.targetCollaborationMode !== undefined &&
     operation.targetPermissionMode !== undefined
@@ -1104,6 +1218,34 @@ function parseFrozenForkBundle(value: unknown): FrozenForkBundle {
     ...(value["sourceTitle"] !== undefined ? { sourceTitle: value["sourceTitle"] } : {}),
     ...(normalized?.settings ? { settings: normalized.settings } : {}),
     ...(normalized?.goal ? { goal: normalized.goal } : {}),
+  };
+}
+
+function parseSafeForkSettings(value: unknown): SafeForkSettingsBundle {
+  if (
+    !isRecord(value) ||
+    value["schemaVersion"] !== SAFE_FORK_SETTINGS_VERSION ||
+    typeof value["operationId"] !== "string" ||
+    typeof value["sourceSessionId"] !== "string" ||
+    typeof value["targetSessionId"] !== "string"
+  ) {
+    throw new Error("Invalid frozen safe Fork settings");
+  }
+  assertExactKeys(value, [
+    "schemaVersion",
+    "operationId",
+    "sourceSessionId",
+    "targetSessionId",
+    "settings",
+  ]);
+  const settings = normalizeSessionRuntimeStatePatch({ settings: value["settings"] })?.settings;
+  if (!settings) throw new Error("Invalid frozen safe Fork settings payload");
+  return {
+    schemaVersion: SAFE_FORK_SETTINGS_VERSION,
+    operationId: value["operationId"],
+    sourceSessionId: value["sourceSessionId"],
+    targetSessionId: value["targetSessionId"],
+    settings,
   };
 }
 

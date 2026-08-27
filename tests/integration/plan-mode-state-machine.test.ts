@@ -282,12 +282,13 @@ test("revision requests and interrupted controls are durable CAS operations", as
     planId: "plan-1",
     revision: 2,
   });
-  await reopened.interrupt({
+  const interruptedOnce = await reopened.interrupt({
     operationId: "interrupt-1",
     expectedSessionSequence: 6,
     planId: "plan-1",
     reason: "runtime stopped",
   });
+  const firstInterruptedEpoch = interruptedOnce.controlEpoch;
   const resumed = await reopened.resume({
     operationId: "resume",
     expectedSessionSequence: 7,
@@ -301,11 +302,14 @@ test("revision requests and interrupted controls are durable CAS operations", as
     planId: "plan-1",
   });
   assert.equal((await store.readSession("session-1")).length, 8);
-  await reopened.interrupt({
+  const interruptedTwice = await reopened.interrupt({
     operationId: "interrupt-2",
     expectedSessionSequence: 8,
     planId: "plan-1",
   });
+  assert.ok(firstInterruptedEpoch);
+  assert.ok(interruptedTwice.controlEpoch);
+  assert.notEqual(interruptedTwice.controlEpoch, firstInterruptedEpoch);
   const replanned = await reopened.replan({
     operationId: "replan",
     expectedSessionSequence: 9,

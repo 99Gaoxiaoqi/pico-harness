@@ -10,6 +10,7 @@ import { SilentReporter } from "../../src/engine/reporter.js";
 import { projectRuntimeSessionState } from "../../src/engine/session-runtime-projection.js";
 import { globalSessionManager } from "../../src/engine/session.js";
 import { HookService } from "../../src/hooks/service.js";
+import { getOrCreateSessionSettings } from "../../src/input/session-settings.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { PlanCoordinator } from "../../src/plan/coordinator.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
@@ -622,6 +623,20 @@ test("Plan Run isolates and restores code intelligence owned by an injected Sess
     hooks: false,
     lspServers: [],
   });
+  getOrCreateSessionSettings(
+    {
+      sessionId,
+      sessionMode: "resume",
+      cwd: workDir,
+      picoHome,
+      provider: "openai",
+      model: "glm-5.2",
+      modelRouteId: "test/test",
+      mode: "plan",
+    },
+    { persistence: sessionLease.session },
+  );
+  await sessionLease.session.flushPersistence();
   t.after(async () => {
     await runtimeState.dispose();
     const released = globalSessionManager.delete(sessionId, workDir, { picoHome });

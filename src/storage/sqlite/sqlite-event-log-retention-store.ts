@@ -699,6 +699,12 @@ function deleteSessionOwnedRowsLocked(database: DatabaseSync, sessionId: string)
     .run(sessionId);
   database.prepare("DELETE FROM desktop_input_queue WHERE session_id = ?").run(sessionId);
   database.prepare("DELETE FROM desktop_first_send_claims WHERE session_id = ?").run(sessionId);
+  database
+    .prepare(
+      `DELETE FROM desktop_rewind_claims
+       WHERE source_session_id = ? OR target_session_id = ?`,
+    )
+    .run(sessionId, sessionId);
 
   // Job/Attempt/command/outbox/merge rows belong to the independent control
   // ledger. Retention may detach their weak Session pointers after terminal,
@@ -1639,6 +1645,14 @@ function controlByteQueries(): readonly string[] {
       "workspace_path",
       "idempotency_key",
       "session_id",
+      "request_fingerprint",
+    ]),
+    groupedTextQuery("desktop_rewind_claims", "source_session_id", [
+      "workspace_path",
+      "idempotency_key",
+      "source_session_id",
+      "target_session_id",
+      "operation_id",
       "request_fingerprint",
     ]),
     `SELECT claims.session_id AS session_id,

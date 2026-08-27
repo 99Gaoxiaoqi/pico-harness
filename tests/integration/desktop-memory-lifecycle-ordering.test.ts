@@ -7,6 +7,7 @@ import {
   createRuntimeRequest,
   type DesktopConversationStateStoreLike,
   type DesktopFirstSendClaim,
+  type DesktopRewindClaim,
   DesktopMemoryService,
   DesktopRuntimeService,
   RUNTIME_ERROR_CODES,
@@ -381,6 +382,29 @@ class NoopConversationStateStore implements DesktopConversationStateStoreLike {
     requestFingerprint: string,
   ): Promise<DesktopFirstSendClaim> {
     return { workspacePath, key, sessionId, requestFingerprint, createdAt: 0 };
+  }
+
+  async getRewindClaim(): Promise<undefined> {
+    return undefined;
+  }
+
+  async claimRewind(
+    workspacePath: string,
+    key: string,
+    sourceSessionId: string,
+    targetSessionId: string,
+    operationId: string,
+    requestFingerprint: string,
+  ): Promise<DesktopRewindClaim> {
+    return {
+      workspacePath,
+      key,
+      sourceSessionId,
+      targetSessionId,
+      operationId,
+      requestFingerprint,
+      createdAt: 0,
+    };
   }
 
   async rememberIdempotent(

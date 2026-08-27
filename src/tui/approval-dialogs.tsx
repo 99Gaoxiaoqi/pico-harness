@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { globalApprovalManager, type ApprovalNotice } from "../approval/manager.js";
 import type { DialogRequest } from "./dialog-arbiter.js";
 import { approvalDialogId, InteractiveApprovalPanel } from "./approval-panel.js";
@@ -42,7 +41,7 @@ export interface PlanApprovalControl {
       | "replan_execution";
     readonly expectedRevision: number;
     readonly expectedSessionSequence: number;
-    readonly operationId: string;
+    readonly controlEpoch: string;
     readonly feedback?: string;
   }): Promise<unknown>;
 }
@@ -111,6 +110,7 @@ export async function resolvePlanApprovalAction(
     readonly planControlMode?: "review" | "interrupted";
     readonly expectedRevision?: number;
     readonly expectedSessionSequence?: number;
+    readonly controlEpoch?: string;
   };
   if (!deps.planControl || !deps.sessionId) {
     deps.reporter.pushSystemMessage(
@@ -125,11 +125,7 @@ export async function resolvePlanApprovalAction(
       action: mapPlanActionToProtocol(action),
       expectedRevision: metadata.expectedRevision ?? 0,
       expectedSessionSequence: metadata.expectedSessionSequence ?? 0,
-      operationId: planReviewOperationId(
-        { ...metadata, sessionId: deps.sessionId },
-        action,
-        feedback,
-      ),
+      controlEpoch: metadata.controlEpoch ?? "",
       ...(feedback ? { feedback } : {}),
     });
     deps.closeDialog?.(approvalDialogId(notice.taskId));
@@ -162,31 +158,6 @@ function mapPlanActionToProtocol(
           : action === "reject-exit"
             ? "reject_exit"
             : "execute";
-}
-
-export function planReviewOperationId(
-  metadata: {
-    readonly sessionId?: string;
-    readonly planId?: string;
-    readonly planControlMode?: "review" | "interrupted";
-    readonly expectedRevision?: number;
-    readonly expectedSessionSequence?: number;
-  },
-  action: PlanApprovalAction,
-  feedback: string | undefined,
-): string {
-  const digest = createHash("sha256")
-    .update(
-      JSON.stringify({
-        sessionId: metadata.sessionId ?? "unknown",
-        planId: metadata.planId ?? "unknown",
-        revision: metadata.expectedRevision ?? 0,
-        action,
-        feedback: feedback?.trim() ?? "",
-      }),
-    )
-    .digest("hex");
-  return `tui-plan:${digest}`;
 }
 
 /** 注入式普通审批解析（client 模式：approval.respond RPC 映射；允许异步）。 */

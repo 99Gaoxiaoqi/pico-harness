@@ -3,6 +3,7 @@ import type { Message, Usage } from "../schema/message.js";
 import type {
   PlanOperationFact,
   PlanProposal,
+  PlanReviewAction,
   PlanReviewedBy,
   PlanStepStatus,
 } from "../plan/contract.js";
@@ -256,6 +257,16 @@ export interface RuntimePlanRevisionRequestedEvent extends RuntimePlanEventBase 
     readonly feedback: string;
   };
 }
+export interface RuntimePlanReviewClaimedEvent extends RuntimePlanEventBase {
+  readonly kind: "plan.review.claimed";
+  readonly data: PlanOperationFact & {
+    readonly planId: string;
+    readonly revision: number;
+    readonly controlEpoch: string;
+    readonly action: PlanReviewAction;
+    readonly feedback?: string;
+  };
+}
 interface RuntimePlanReviewedEvent<
   K extends "plan.approved" | "plan.rejected",
 > extends RuntimePlanEventBase {
@@ -315,6 +326,7 @@ export type RuntimePlanEvent =
   | RuntimePlanProposedEvent
   | RuntimePlanRevisedEvent
   | RuntimePlanRevisionRequestedEvent
+  | RuntimePlanReviewClaimedEvent
   | RuntimePlanApprovedEvent
   | RuntimePlanRejectedEvent
   | RuntimePlanExecutionStartedEvent

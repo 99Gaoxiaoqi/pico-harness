@@ -189,9 +189,7 @@ export function SideChatPanelController({
             | "replan_execution",
           expectedRevision: pendingApproval.expectedRevision ?? 0,
           expectedSessionSequence: pendingApproval.expectedSessionSequence ?? 0,
-          ...(pendingApproval.planOperationId
-            ? { operationId: pendingApproval.planOperationId }
-            : {}),
+          controlEpoch: pendingApproval.controlEpoch ?? "",
           ...(feedback ? { feedback } : {}),
         });
         return;

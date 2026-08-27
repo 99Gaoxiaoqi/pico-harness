@@ -75,6 +75,7 @@ export interface DaemonRunExecution {
     readonly expectedRevision: number;
     readonly expectedSessionSequence: number;
     readonly operationId: string;
+    readonly controlEpoch: string;
     readonly feedback?: string;
   };
   readonly skillActivation?: {
@@ -97,6 +98,7 @@ export interface PlanReviewRunIntentInput extends StartDaemonRunInput {
   readonly sessionId: string;
   readonly idempotencyKey: string;
   readonly operationId: string;
+  readonly controlEpoch: string;
   readonly planId: string;
   readonly revision: number;
   readonly action: DaemonRunExecution["planReview"] extends infer Review
@@ -147,6 +149,7 @@ function planReviewIntentRequest(input: PlanReviewRunIntentInput): Record<string
     sessionId: input.sessionId,
     prompt: input.prompt,
     operationId: input.operationId,
+    controlEpoch: input.controlEpoch,
     planId: input.planId,
     revision: input.revision,
     action: input.action,
@@ -171,6 +174,7 @@ function parsePlanReviewIntent(value: string): PlanReviewRunIntentInput | undefi
     typeof parsed["sessionId"] !== "string" ||
     typeof parsed["prompt"] !== "string" ||
     typeof parsed["operationId"] !== "string" ||
+    typeof parsed["controlEpoch"] !== "string" ||
     typeof parsed["planId"] !== "string" ||
     typeof parsed["revision"] !== "number" ||
     typeof parsed["idempotencyKey"] !== "string" ||
@@ -186,6 +190,7 @@ function parsePlanReviewIntent(value: string): PlanReviewRunIntentInput | undefi
     review["planId"] !== parsed["planId"] ||
     review["expectedRevision"] !== parsed["revision"] ||
     review["operationId"] !== parsed["operationId"] ||
+    review["controlEpoch"] !== parsed["controlEpoch"] ||
     typeof review["expectedSessionSequence"] !== "number" ||
     !Number.isSafeInteger(review["expectedSessionSequence"]) ||
     (review["feedback"] !== undefined && typeof review["feedback"] !== "string")
@@ -197,6 +202,7 @@ function parsePlanReviewIntent(value: string): PlanReviewRunIntentInput | undefi
     sessionId: parsed["sessionId"],
     prompt: parsed["prompt"],
     operationId: parsed["operationId"],
+    controlEpoch: parsed["controlEpoch"],
     planId: parsed["planId"],
     revision: parsed["revision"],
     action,
@@ -209,6 +215,7 @@ function parsePlanReviewIntent(value: string): PlanReviewRunIntentInput | undefi
         expectedRevision: parsed["revision"],
         expectedSessionSequence: review["expectedSessionSequence"],
         operationId: parsed["operationId"],
+        controlEpoch: parsed["controlEpoch"],
         ...(typeof review["feedback"] === "string" ? { feedback: review["feedback"] } : {}),
       },
     },
@@ -520,6 +527,7 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
 
   async reservePlanReviewRun(
     input: PlanReviewRunIntentInput,
+    expectedRunId?: string,
   ): Promise<{ readonly runId: string; readonly replayed: boolean }> {
     const outcome = await this.executeIdempotentDaemonCommand(
       input.workspacePath,
@@ -529,12 +537,18 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
         request: planReviewIntentRequest(input),
       },
       () => {
-        const runId = `run_plan_${randomUUID()}`;
+        const runId = expectedRunId ?? `run_plan_${randomUUID()}`;
         return { result: { accepted: true, runId }, resourceId: runId };
       },
     );
     const runId = outcome.resourceId;
     if (!runId) throw new Error("Plan review intent did not reserve a RuntimeRun id");
+    if (expectedRunId && runId !== expectedRunId) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        "Plan review intent is bound to a different RuntimeRun id",
+      );
+    }
     return { runId, replayed: outcome.replayed };
   }
 

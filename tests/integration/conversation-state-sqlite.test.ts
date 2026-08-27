@@ -121,6 +121,49 @@ test("sqlite conversation state: idempotency write hits cached result and misses
   }
 });
 
+test("sqlite conversation state: rewind claim atomically fixes target and request identity", async () => {
+  const fixture = createFixture("pico-conversation-state-sqlite-rewind-claim-");
+  try {
+    const store = new SqliteDesktopConversationStateStore({ picoHome: fixture.picoHome });
+    const claims = await Promise.all([
+      store.claimRewind(
+        fixture.workspaceA,
+        "rewind-key",
+        "source",
+        "target-one",
+        "operation-one",
+        "fingerprint-one",
+      ),
+      store.claimRewind(
+        fixture.workspaceA,
+        "rewind-key",
+        "source",
+        "target-two",
+        "operation-two",
+        "fingerprint-two",
+      ),
+    ]);
+    assert.deepEqual(claims[1], claims[0]);
+    assert.equal(claims[0]?.targetSessionId, "target-one");
+    assert.equal(claims[0]?.operationId, "operation-one");
+    assert.equal(claims[0]?.requestFingerprint, "fingerprint-one");
+    assert.deepEqual(await store.getRewindClaim(fixture.workspaceA, "rewind-key"), claims[0]);
+
+    await store.rememberIdempotent(fixture.workspaceA, "rewind-key", "fingerprint-one", {
+      applied: true,
+      sessionId: "target-one",
+      sourceSessionId: "source",
+    });
+    assert.equal(await store.getRewindClaim(fixture.workspaceA, "rewind-key"), undefined);
+    assert.deepEqual(await store.getIdempotent(fixture.workspaceA, "rewind-key"), {
+      requestFingerprint: "fingerprint-one",
+      result: { applied: true, sessionId: "target-one", sourceSessionId: "source" },
+    });
+  } finally {
+    cleanupFixture(fixture.root);
+  }
+});
+
 test("sqlite conversation state: queue enqueue/list/remove/clear and first-send claim semantics (B3)", async () => {
   const fixture = createFixture("pico-conversation-state-sqlite-queue-");
   try {

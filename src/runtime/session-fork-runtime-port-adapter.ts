@@ -21,13 +21,16 @@ export function createSessionForkRuntimePort(): SessionForkRuntimePort {
           await service.fork({
             sourceSessionId: input.sourceSessionId,
             targetSessionId: input.targetSessionId,
+            ...(input.operationId ? { operationId: input.operationId } : {}),
             ...(input.targetMode !== undefined ? { targetMode: input.targetMode } : {}),
             ...(input.throughEventId ? { throughEventId: input.throughEventId } : {}),
+            ...(input.fallbackSettings ? { fallbackSettings: input.fallbackSettings } : {}),
           });
         } catch (error) {
           const settlement = await service.settleFailedFork({
             sourceSessionId: input.sourceSessionId,
             targetSessionId: input.targetSessionId,
+            ...(input.cleanupOnlyOnFailure ? { cleanupOnly: true } : {}),
           });
           if (settlement !== "committed") throw error;
         }

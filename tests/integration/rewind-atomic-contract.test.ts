@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import type { JsonObject } from "@pico/protocol";
 import {
   findCliSessionCatalogEntry,
   listCliSessionCatalogEntries,
@@ -26,6 +27,7 @@ import { fileHistoryChanges, fileHistoryTrackEdit } from "../../src/safety/file-
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 import { operationalDatabasePath } from "../../src/storage/sqlite/sqlite-database.js";
 import { readFileHistoryManifestRow } from "../../src/storage/sqlite/file-history-manifest-store.js";
+import { SqliteDesktopConversationStateStore } from "../../src/storage/sqlite/sqlite-desktop-conversation-state-store.js";
 
 interface RewindFixture {
   readonly root: string;
@@ -125,6 +127,23 @@ function rawRuntimeSessionCount(fixture: RewindFixture): number {
       .count;
   } finally {
     database.close();
+  }
+}
+
+class OneShotFailingRewindReceiptStore extends SqliteDesktopConversationStateStore {
+  private failed = false;
+
+  override async rememberIdempotent(
+    workspacePath: string,
+    key: string,
+    requestFingerprint: string,
+    result: JsonObject,
+  ): Promise<void> {
+    if (!this.failed && key.startsWith("rewind.apply:")) {
+      this.failed = true;
+      throw new Error("injected rewind receipt persistence crash");
+    }
+    return super.rememberIdempotent(workspacePath, key, requestFingerprint, result);
   }
 }
 
@@ -361,6 +380,7 @@ test("rewind both removes an owned partial Runtime publication before returning 
         const settlement = await service.settleFailedFork({
           sourceSessionId: input.sourceSessionId,
           targetSessionId: input.targetSessionId,
+          cleanupOnly: true,
         });
         if (settlement !== "committed") throw error;
       }
@@ -408,13 +428,13 @@ test("rewind both removes an owned partial Runtime publication before returning 
       "rewind-settle-partial-publication-operation",
     );
     assert.ok(needsAttention?.kind === "fork" && needsAttention.state === "needs_attention");
-    const disposition = await service.abortNeedsAttention({
+    assert.equal(needsAttention.recoveryPolicy, "cleanup_only");
+    const disposition = await service.retryNeedsAttention({
       operationId: needsAttention.operationId,
       expectedVersion: needsAttention.version,
-      reason: "test deterministic rewind cleanup",
+      reason: "retry must remain deterministic cleanup-only",
     });
     assert.equal(disposition.operation.state, "aborted");
-    assert.equal(disposition.stagingCleanup, "completed");
     assert.equal(rawRuntimeSessionCount(fixture), beforeCount);
     assert.equal(await runtimeStore.readSessionManifest(targetSessionId), undefined);
     assert.equal(
@@ -431,6 +451,8 @@ test("rewind both removes an owned partial Runtime publication before returning 
     );
     assert.equal(fixture.session.fileHistory.revision, checkpointRevision);
     await service.reconcileUnfinished();
+    const afterReconcile = await service.getOperation(needsAttention.operationId);
+    assert.equal(afterReconcile?.state, "aborted");
     assert.deepEqual(await sessionIds(fixture), beforeIds);
   } finally {
     runtimeStore.deleteSession = deleteSession;
@@ -592,3 +614,185 @@ for (const variant of ["conversation", "omitted-both"] as const) {
     }
   });
 }
+
+test("rewind receipt crash resumes the durable claim without allocating a second target", async () => {
+  const fixture = await createFixture("receipt-crash");
+  const env = { PICO_HOME: fixture.picoHome };
+  const trustStore = new WorkspaceTrustStore({ userStateDirectory: fixture.picoHome });
+  await trustStore.trust(fixture.workDir);
+  let runtimeService = new WorkspaceRuntimeService({ env, execute: async () => undefined });
+  let allocations = 0;
+  let desktop = new DesktopRuntimeService({
+    runtimeService,
+    trustStore,
+    env,
+    conversationStateStore: new OneShotFailingRewindReceiptStore({ picoHome: fixture.picoHome }),
+    createSessionId: () => `rewind-receipt-target-${++allocations}`,
+  });
+  try {
+    const preview = parseRuntimeResult(
+      "rewind.preview",
+      await desktop.handle(
+        createRuntimeRequest("rewind.preview", {
+          workspacePath: fixture.workDir,
+          sessionId: fixture.session.id,
+          checkpointId: fixture.checkpointId,
+        }),
+      ),
+    );
+    const params = {
+      workspacePath: fixture.workDir,
+      sessionId: fixture.session.id,
+      checkpointId: fixture.checkpointId,
+      expectedFingerprint: preview.fingerprint,
+      mode: "conversation" as const,
+      idempotencyKey: "receipt-crash-fixed",
+    };
+    const first = parseRuntimeResult(
+      "rewind.apply",
+      await desktop.handle(createRuntimeRequest("rewind.apply", params)),
+    );
+    assert.equal(allocations, 1);
+    await desktop.close();
+
+    runtimeService = new WorkspaceRuntimeService({ env, execute: async () => undefined });
+    desktop = new DesktopRuntimeService({
+      runtimeService,
+      trustStore,
+      env,
+      createSessionId: () => {
+        throw new Error("restart must reuse the durable rewind target claim");
+      },
+    });
+    const replay = parseRuntimeResult(
+      "rewind.apply",
+      await desktop.handle(createRuntimeRequest("rewind.apply", params)),
+    );
+    assert.deepEqual(replay, first);
+    assert.deepEqual(await sessionIds(fixture), [fixture.session.id, first.sessionId].toSorted());
+  } finally {
+    await desktop.close();
+    await fixture.close();
+  }
+});
+
+test("conversation rewind ignores incomplete FileHistory while code and both fail closed", async () => {
+  const fixture = await createFixture("conversation-incomplete");
+  const env = { PICO_HOME: fixture.picoHome };
+  const trustStore = new WorkspaceTrustStore({ userStateDirectory: fixture.picoHome });
+  await trustStore.trust(fixture.workDir);
+  const runtimeService = new WorkspaceRuntimeService({ env, execute: async () => undefined });
+  let targetSequence = 0;
+  const desktop = new DesktopRuntimeService({
+    runtimeService,
+    trustStore,
+    env,
+    createSessionId: () => `rewind-incomplete-target-${++targetSequence}`,
+  });
+  try {
+    fixture.session.fileHistory.snapshots[0]!.journalWarnings = ["injected incomplete history"];
+    const preview = parseRuntimeResult(
+      "rewind.preview",
+      await desktop.handle(
+        createRuntimeRequest("rewind.preview", {
+          workspacePath: fixture.workDir,
+          sessionId: fixture.session.id,
+          checkpointId: fixture.checkpointId,
+        }),
+      ),
+    );
+    const base = {
+      workspacePath: fixture.workDir,
+      sessionId: fixture.session.id,
+      checkpointId: fixture.checkpointId,
+      expectedFingerprint: preview.fingerprint,
+    };
+    const conversation = parseRuntimeResult(
+      "rewind.apply",
+      await desktop.handle(
+        createRuntimeRequest("rewind.apply", {
+          ...base,
+          mode: "conversation",
+          idempotencyKey: "incomplete-conversation",
+        }),
+      ),
+    );
+    assert.equal(conversation.applied, true);
+    assert.equal(await readFile(fixture.firstFile, "utf8"), "a-after\n");
+    assert.equal(await readFile(fixture.secondFile, "utf8"), "b-after\n");
+
+    for (const mode of ["code", "both"] as const) {
+      await assert.rejects(
+        desktop.handle(
+          createRuntimeRequest("rewind.apply", {
+            ...base,
+            mode,
+            idempotencyKey: `incomplete-${mode}`,
+          }),
+        ),
+        /Rewind 捕获不完整/u,
+      );
+    }
+  } finally {
+    await desktop.close();
+    await fixture.close();
+  }
+});
+
+test("legacy missing settings rewind freezes durable agent/default on the target", async () => {
+  const fixture = await createFixture("legacy-safe-settings");
+  const targetSessionId = "rewind-legacy-safe-settings-target";
+  const env = { PICO_HOME: fixture.picoHome };
+  const trustStore = new WorkspaceTrustStore({ userStateDirectory: fixture.picoHome });
+  await trustStore.trust(fixture.workDir);
+  const runtimeService = new WorkspaceRuntimeService({ env, execute: async () => undefined });
+  const desktop = new DesktopRuntimeService({
+    runtimeService,
+    trustStore,
+    env,
+    createSessionId: () => targetSessionId,
+  });
+  try {
+    assert.equal(fixture.session.getRuntimeStateSnapshot().settings, undefined);
+    const preview = parseRuntimeResult(
+      "rewind.preview",
+      await desktop.handle(
+        createRuntimeRequest("rewind.preview", {
+          workspacePath: fixture.workDir,
+          sessionId: fixture.session.id,
+          checkpointId: fixture.checkpointId,
+        }),
+      ),
+    );
+    await desktop.handle(
+      createRuntimeRequest("rewind.apply", {
+        workspacePath: fixture.workDir,
+        sessionId: fixture.session.id,
+        checkpointId: fixture.checkpointId,
+        expectedFingerprint: preview.fingerprint,
+        mode: "conversation",
+        idempotencyKey: "legacy-safe-settings",
+      }),
+    );
+    const targetLease = await globalSessionManager.getOrCreatePinned(
+      targetSessionId,
+      fixture.workDir,
+      {
+        persistence: true,
+        picoHome: fixture.picoHome,
+        runtimePort: createEngineRuntimePort(),
+      },
+    );
+    try {
+      const settings = targetLease.session.getRuntimeStateSnapshot().settings;
+      assert.equal(settings?.collaborationMode, "agent");
+      assert.equal(settings?.permissionMode, "default");
+      assert.deepEqual(settings?.additionalDirectories, []);
+    } finally {
+      targetLease.release();
+    }
+  } finally {
+    await desktop.close();
+    await fixture.close();
+  }
+});

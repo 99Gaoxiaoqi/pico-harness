@@ -6,6 +6,13 @@ export type PlanReviewedBy = "user" | "system";
 export type PlanProposalStatus = "pending" | "stale" | "approved" | "rejected";
 export type PlanStepStatus = "pending" | "in_progress" | "completed" | "skipped";
 export type PlanExecutionStatus = "active" | "interrupted" | "completed" | "cancelled";
+export type PlanReviewAction =
+  | "execute"
+  | "continue_editing"
+  | "reject_exit"
+  | "resume_execution"
+  | "cancel_execution"
+  | "replan_execution";
 
 export const PLAN_MAX_STEPS = 50;
 export const PLAN_EVENT_MAX_BYTES = 64 * 1024;
@@ -43,6 +50,8 @@ export interface PlanExecution {
 export interface PlanProjection {
   readonly sessionId: string;
   readonly sessionSequence: number;
+  /** Stable identity of the latest durable plan.* control fact. */
+  readonly controlEpoch?: string;
   readonly proposals: readonly PlanProposal[];
   readonly latestProposal?: PlanProposal;
   readonly pendingProposal?: PlanProposal;
@@ -54,11 +63,21 @@ export interface PlanProjection {
     readonly operationId: string;
     readonly requestedAt: string;
   };
+  readonly reviewClaim?: {
+    readonly operationId: string;
+    readonly planId: string;
+    readonly revision: number;
+    readonly controlEpoch: string;
+    readonly action: PlanReviewAction;
+    readonly feedback?: string;
+    readonly claimedAt: string;
+  };
 }
 
 export interface PlanOperationFact {
   readonly operationId: string;
   readonly fingerprint: string;
+  readonly claimOperationId?: string;
 }
 
 export interface PlanProposalInput {

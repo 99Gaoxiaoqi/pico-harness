@@ -10,12 +10,13 @@ import { TodoStore } from "../../src/context/todo-store.js";
 import { GoalManager } from "../../src/engine/goal-manager.js";
 import { AgentEngine } from "../../src/engine/loop.js";
 import { SilentReporter } from "../../src/engine/reporter.js";
-import { Session } from "../../src/engine/session.js";
+import { globalSessionManager, Session } from "../../src/engine/session.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { closeAllOperationalDatabasesForTest } from "../../src/storage/sqlite/sqlite-database.js";
 import { ContextOverflowError } from "../../src/provider/errors.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
 import { executeAgentRuntime } from "../../src/runtime/agent-runtime.js";
+import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 
 import type { Message } from "../../src/schema/message.js";
 import { ToolRegistry } from "../../src/tools/registry-impl.js";
@@ -311,6 +312,64 @@ test("AgentRuntime puts schedule intent in the current turn tail, not durable ev
     storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
   }).readSession(sessionId);
   assert.doesNotMatch(JSON.stringify(runtimeEvents), /schedule-task-intent|current-turn-context/u);
+});
+
+test("AgentRuntime resume durably fail-closes a legacy history without settings", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-legacy-resume-settings-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const sessionId = "legacy-resume-settings";
+  await mkdir(workDir, { recursive: true });
+  context.after(async () => {
+    const managed = globalSessionManager.delete(sessionId, workDir, { picoHome });
+    await managed?.close();
+    closeAllOperationalDatabasesForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const legacy = new Session(sessionId, workDir, {
+    picoHome,
+    runtimePort: createEngineRuntimePort(),
+  });
+  await legacy.recover();
+  await legacy.commitMessages({ role: "user", content: "legacy user" });
+  await legacy.commitMessages({ role: "assistant", content: "legacy assistant" });
+  assert.equal(legacy.getRuntimeStateSnapshot().settings, undefined);
+  await legacy.close();
+
+  await executeAgentRuntime(
+    {
+      prompt: "resume safely",
+      dir: workDir,
+      sessionSelection: { mode: "resume", sessionId },
+      provider: "openai",
+      modelRouteId: "test/test",
+      interactionMode: "yolo",
+    },
+    {
+      provider: {
+        async generate() {
+          return { role: "assistant", content: "done" };
+        },
+      },
+      picoHome,
+      reporter: new SilentReporter(),
+    },
+  );
+
+  const resumed = globalSessionManager.get(sessionId, workDir, { picoHome });
+  assert.ok(resumed);
+  assert.deepEqual(resumed.getRuntimeStateSnapshot().settings, {
+    provider: "openai",
+    model: "glm-5.2",
+    modelRouteId: "test/test",
+    collaborationMode: "agent",
+    orchestrationMode: "default",
+    thinkingEffort: "off",
+    thinkingEffortExplicit: false,
+    permissionMode: "default",
+    additionalDirectories: [],
+  });
 });
 
 test("isolated headless runtime adds the autonomous completion contract only to its system prompt", async (context) => {

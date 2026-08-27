@@ -93,6 +93,8 @@ export interface ForkStorageOperation extends StorageOperationBase {
   /** 恢复 prepared 操作时不能猜测的目标协作与权限轴。 */
   targetCollaborationMode?: "agent" | "plan";
   targetPermissionMode?: "default" | "auto" | "yolo";
+  /** Durable disposition: cleanup_only can never be retried forward. */
+  recoveryPolicy?: "forward" | "cleanup_only";
   stagingDirectory: string;
 }
 
@@ -167,6 +169,7 @@ export class StorageOperationJournal {
     expectedVersion: number;
     nextState: StorageOperationState;
     error?: StorageOperationError;
+    recoveryPolicy?: ForkStorageOperation["recoveryPolicy"];
   }): Promise<StorageOperation> {
     return withWorkspaceSqliteLease(this.storageRoot, (lease) =>
       lease.transaction("write", () => {
@@ -183,7 +186,37 @@ export class StorageOperationJournal {
           state: input.nextState,
           updatedAt: this.now().toISOString(),
           ...(input.error ? { error: input.error } : {}),
+          ...(current.kind === "fork" && input.recoveryPolicy
+            ? { recoveryPolicy: input.recoveryPolicy }
+            : {}),
         } satisfies StorageOperation;
+        updateOperationLocked(lease.database, next);
+        return next;
+      }),
+    );
+  }
+
+  /** Irreversibly seal an uncertain Fork so every disposition is cleanup-only. */
+  async sealForkCleanupOnly(
+    operationId: string,
+    expectedVersion: number,
+  ): Promise<ForkStorageOperation> {
+    return withWorkspaceSqliteLease(this.storageRoot, (lease) =>
+      lease.transaction("write", () => {
+        const current = requireOperationLocked(lease.database, operationId);
+        assertVersionMatch(current, expectedVersion);
+        if (current.kind !== "fork")
+          throw new Error(`Storage operation is not a fork: ${operationId}`);
+        if (current.state === "completed" || current.state === "aborted") {
+          throw new Error(`Fork operation ${operationId} is already ${current.state}`);
+        }
+        if (current.recoveryPolicy === "cleanup_only") return current;
+        const next: ForkStorageOperation = {
+          ...current,
+          recoveryPolicy: "cleanup_only",
+          version: current.version + 1,
+          updatedAt: this.now().toISOString(),
+        };
         updateOperationLocked(lease.database, next);
         return next;
       }),
@@ -547,6 +580,9 @@ function parseForkOperation(value: Record<string, unknown>): ForkStorageOperatio
     (value["targetCollaborationMode"] === undefined) !==
       (value["targetPermissionMode"] === undefined) ||
     (value["targetMode"] !== undefined && value["targetCollaborationMode"] !== undefined) ||
+    (value["recoveryPolicy"] !== undefined &&
+      value["recoveryPolicy"] !== "forward" &&
+      value["recoveryPolicy"] !== "cleanup_only") ||
     typeof value["stagingDirectory"] !== "string" ||
     !isRecord(cursor) ||
     typeof cursor["logId"] !== "string" ||

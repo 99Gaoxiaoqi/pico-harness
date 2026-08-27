@@ -33,6 +33,7 @@ test("fork coordinator scopes Runtime publication to the active target lease", a
         async assertTargetAvailable() {},
         async assertRuntimeTargetOwned() {},
         async cloneSidecars() {},
+        async cleanupUnpublishedTarget() {},
         async publishRuntime(_operation, _bundle, publication) {
           captured = publication;
           await publication.assertOwned();
@@ -87,6 +88,7 @@ test("fork target publication competes with the normal Session owner lease", asy
         async cloneSidecars() {
           sidecarWrites++;
         },
+        async cleanupUnpublishedTarget() {},
         async publishRuntime() {},
       },
     });
@@ -107,6 +109,71 @@ test("fork target publication competes with the normal Session owner lease", asy
     assert.equal(sidecarWrites, 0);
   } finally {
     await owner.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("cleanup-only retry and abort share one target lease and version CAS", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-fork-cleanup-disposition-race-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const workspace = resolvePicoPaths(workDir, { picoHome }).workspace;
+  const journal = new StorageOperationJournal({ workDir, picoHome });
+  let cleanupCalls = 0;
+  const coordinator = new ForkOperationCoordinator({
+    journal,
+    targetLeaseDirectory: (sessionId) => sessionOwnerLeaseDirectory(workspace, sessionId),
+    callbacks: {
+      async prepareTargetBundle(_operation, stagingDirectory) {
+        const stagedBundlePath = join(stagingDirectory, "payload.json");
+        await writeFile(stagedBundlePath, '{"ok":true}\n', { mode: 0o600 });
+        return { stagedBundlePath };
+      },
+      async assertTargetAvailable() {},
+      async assertRuntimeTargetOwned() {},
+      async cloneSidecars() {},
+      async publishRuntime() {},
+      async cleanupUnpublishedTarget() {
+        cleanupCalls++;
+      },
+    },
+  });
+  try {
+    const prepared = await journal.create({
+      kind: "fork",
+      operationId: "cleanup-disposition-race",
+      sessionId: "source",
+      sourceSessionId: "source",
+      sourceCursor: { logId: "log", seq: 1, epoch: 0, eventId: "source-event" },
+      targetSessionId: "target",
+      targetCollaborationMode: "agent",
+      targetPermissionMode: "default",
+      recoveryPolicy: "cleanup_only",
+      stagingDirectory: join(root, "staging", "cleanup-disposition-race"),
+    });
+    const blocked = await journal.advance({
+      operationId: prepared.operationId,
+      expectedVersion: prepared.version,
+      nextState: "needs_attention",
+      recoveryPolicy: "cleanup_only",
+      error: { phase: "sidecars_committed", message: "injected partial publication" },
+    });
+    const input = {
+      operationId: blocked.operationId,
+      expectedVersion: blocked.version,
+      reason: "concurrent disposition",
+    };
+    const settled = await Promise.allSettled([
+      coordinator.retryNeedsAttention(input),
+      coordinator.abortNeedsAttention(input),
+    ]);
+    assert.equal(settled.filter((result) => result.status === "fulfilled").length, 1);
+    assert.equal(settled.filter((result) => result.status === "rejected").length, 1);
+    assert.equal(cleanupCalls, 1);
+    assert.equal((await journal.get(blocked.operationId))?.state, "aborted");
+    assert.equal((await coordinator.reconcile(blocked.operationId)).state, "aborted");
+    assert.equal(cleanupCalls, 1);
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });

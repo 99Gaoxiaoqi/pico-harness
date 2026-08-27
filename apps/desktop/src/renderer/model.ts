@@ -173,6 +173,7 @@ export interface ApprovalView {
   readonly planId?: string | undefined;
   readonly expectedRevision?: number | undefined;
   readonly expectedSessionSequence?: number | undefined;
+  readonly controlEpoch?: string | undefined;
   readonly planTitle?: string | undefined;
   readonly planOverview?: string | undefined;
   readonly planSteps?: readonly string[] | undefined;

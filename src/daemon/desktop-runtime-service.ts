@@ -24,6 +24,7 @@ import {
 import { SessionForkService } from "../engine/session-fork-service.js";
 import { projectRuntimeSessionActiveToolResultEntries } from "../engine/session-runtime-projection.js";
 import { globalSessionManager, Session } from "../engine/session.js";
+import type { PersistedSessionSettings } from "../engine/session-runtime.js";
 import {
   getOrCreateSessionSettings,
   migrateSessionModelRoute,
@@ -753,6 +754,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     readonly planIntents?: readonly {
       readonly runId: string;
       readonly operationId: string;
+      readonly controlEpoch: string;
       readonly planId: string;
       readonly revision: number;
       readonly action: "execute" | "continue_editing" | "resume_execution" | "replan_execution";
@@ -781,6 +783,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           return {
             runId: intent.runId,
             operationId: intent.input.operationId,
+            controlEpoch: intent.input.controlEpoch,
             planId: intent.input.planId,
             revision: intent.input.revision,
             action: intent.input.action,
@@ -2439,6 +2442,14 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         `Session ${sessionId} 不存在于工作区 ${workspacePath}`,
       );
     }
+    // Opening/resuming a legacy Session is an authorization boundary.  A missing
+    // settings fact has no authority to inherit today's user/project YOLO default,
+    // so materialize the same durable agent/default snapshot used by Fork first.
+    await this.withSession(workspacePath, sessionId, async (session) => {
+      if (session.getRuntimeStateSnapshot().settings !== undefined) return;
+      await this.getForkSourceSettings(workspacePath, session);
+      await session.flushPersistence();
+    });
     return sessionPayload(entry);
   }
 
@@ -3672,7 +3683,39 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       return pending.promise;
     }
 
-    const operation = this.applyRewindOnce({ ...params, workspacePath: canonical })
+    // Persist the semantic request and all derived identities before any file/Fork
+    // side effect.  A receipt write may fail after commit; the next daemon then
+    // resumes this exact target/operation instead of allocating another Session.
+    const existingClaim = await this.conversationStateStore.getRewindClaim(
+      canonical,
+      idempotencyKey,
+    );
+    const claimed = await this.conversationStateStore.claimRewind(
+      canonical,
+      idempotencyKey,
+      params.sessionId,
+      existingClaim?.targetSessionId ??
+        (params.mode === "code" ? params.sessionId : this.createSessionId()),
+      desktopRewindOperationId(canonical, idempotencyKey),
+      requestFingerprint,
+    );
+    if (
+      claimed.requestFingerprint !== requestFingerprint ||
+      claimed.sourceSessionId !== params.sessionId ||
+      claimed.operationId !== desktopRewindOperationId(canonical, idempotencyKey) ||
+      (params.mode === "code" && claimed.targetSessionId !== params.sessionId)
+    ) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.CONFLICT,
+        `idempotencyKey ${params.idempotencyKey ?? idempotencyKey} 已绑定不同的 rewind 请求`,
+      );
+    }
+
+    const operation = this.applyRewindOnce(
+      { ...params, workspacePath: canonical },
+      claimed.targetSessionId,
+      claimed.operationId,
+    )
       .then(async (result) => {
         this.completedRewinds.set(pendingKey, { requestFingerprint, result });
         if (this.completedRewinds.size > 500) {
@@ -3703,6 +3746,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private async applyRewindOnce(
     params: RuntimeParams<"rewind.apply">,
+    targetSessionId: string,
+    operationId: string,
   ): Promise<RuntimeResult<"rewind.apply">> {
     const canonical = await this.requireIdleTrustedSession(
       params.workspacePath,
@@ -3711,7 +3756,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     );
     // Non-destructive rewind: 从 checkpoint 创建新 Session（fork）。
     // 原 Session 完全不变，因此不再需要 Memory Source 失效——fork 不会破坏任何账本。
-    const targetSessionId = params.mode === "code" ? params.sessionId : this.createSessionId();
     const expectedTargetSessionId = targetSessionId;
     // 在任何文件或 Session 副作用前先用协议单一事实源校验完整结果形状。
     const result = parseRuntimeResult("rewind.apply", {
@@ -3720,17 +3764,39 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       sourceSessionId: params.sessionId,
     });
     const forkedSessionId = await this.withSession(canonical, params.sessionId, async (session) => {
-      const expectedFingerprints = await projectDesktopRewindFingerprints(
-        session,
-        params.checkpointId,
-        params.expectedFingerprint,
-      );
+      const mode = params.mode ?? "both";
+      const fallbackSettings =
+        mode === "code"
+          ? undefined
+          : (await this.getForkSourceSettings(canonical, session),
+            session.getRuntimeStateSnapshot().settings);
+      if (mode !== "code" && !fallbackSettings) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.INTERNAL_ERROR,
+          "Rewind 未能冻结安全 Session settings",
+        );
+      }
+      // conversation-only never creates a FileHistory transaction.  File completeness
+      // and current-file fingerprints are therefore unrelated authority and must not
+      // block (or change the identity of) a conversation fork.
+      const expectedFingerprints =
+        mode === "conversation"
+          ? undefined
+          : await projectDesktopRewindFingerprints(
+              session,
+              params.checkpointId,
+              params.expectedFingerprint,
+            );
       const fork = await session.forkFromCheckpoint(
         params.checkpointId,
-        params.mode ?? "both",
+        mode,
         createSessionForkRuntimePort(),
         () => targetSessionId,
         expectedFingerprints,
+        {
+          ...(fallbackSettings ? { fallbackSettings } : {}),
+          ...(mode === "code" ? {} : { operationId }),
+        },
       );
       return fork.targetSessionId;
     });
@@ -3906,9 +3972,34 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private async getSessionSettings(workspacePath: string, session: Session) {
     const persisted = session.getRuntimeStateSnapshot().settings;
-    const defaults =
-      persisted ??
-      effectiveSessionSettingDefaults(await this.loadSessionModelRuntime(workspacePath));
+    let defaults = persisted;
+    if (!defaults) {
+      try {
+        defaults = effectiveSessionSettingDefaults(
+          await this.loadSessionModelRuntime(workspacePath),
+        ) as PersistedSessionSettings;
+      } catch (error) {
+        // Legacy state may predate model routing and tests/headless recovery can have
+        // no configured route. Persist a deliberately unavailable route rather than
+        // inheriting a later mutable route or permission mode; Resume then fails closed
+        // until the user explicitly selects a model.
+        logger.warn(
+          { error, sessionId: session.id },
+          "legacy Session has no durable model route; materializing fail-closed settings",
+        );
+        defaults = {
+          provider: "openai",
+          model: "unconfigured",
+          modelRouteId: "openai/unconfigured",
+          collaborationMode: "agent",
+          permissionMode: "default",
+          orchestrationMode: "default",
+          thinkingEffort: "off",
+          thinkingEffortExplicit: false,
+          additionalDirectories: [],
+        };
+      }
+    }
     return getOrCreateSessionSettings(
       {
         sessionId: session.id,
@@ -4521,17 +4612,24 @@ function firstSendRequestFingerprint(params: {
 }
 
 function desktopRewindRequestFingerprint(params: RuntimeParams<"rewind.apply">): string {
+  const mode = params.mode ?? "both";
   return createHash("sha256")
     .update(
       JSON.stringify({
         workspacePath: params.workspacePath,
         sessionId: params.sessionId,
         checkpointId: params.checkpointId,
-        expectedFingerprint: params.expectedFingerprint,
-        mode: params.mode ?? "both",
+        ...(mode === "conversation" ? {} : { expectedFingerprint: params.expectedFingerprint }),
+        mode,
       }),
     )
     .digest("hex");
+}
+
+function desktopRewindOperationId(workspacePath: string, idempotencyKey: string): string {
+  return `rewind-${createHash("sha256")
+    .update(`${workspacePath}\0${idempotencyKey}`)
+    .digest("hex")}`;
 }
 
 function desktopRunStartIdempotencyKey(source: "send" | "queue", key: string): string {

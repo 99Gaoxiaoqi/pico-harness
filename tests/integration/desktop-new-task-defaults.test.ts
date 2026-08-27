@@ -27,12 +27,15 @@ test("new task defaults retain only protocol-supported legacy mode values", () =
   assert.deepEqual(parseUserDefaults({ mode: "unsupported" }), {});
 });
 
-test("new task falls back to the Runtime YOLO default when user config is absent", async () => {
+test("new task falls back to the fail-closed Runtime default when user config is absent", async () => {
   const source = await readFile(
     new URL("../../apps/desktop/src/renderer/App.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(source, /legacyMode === "auto" \|\| legacyMode === "yolo" \? legacyMode : "yolo"/u);
+  assert.match(
+    source,
+    /legacyMode === "auto" \|\| legacyMode === "yolo" \? legacyMode : "default"/u,
+  );
 });
 
 test("desktop permission selectors expose all modes with explicit labels", async () => {
