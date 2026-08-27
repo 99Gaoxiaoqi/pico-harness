@@ -8,6 +8,8 @@ import {
   type RegisterAgentGraphYieldInput as SupervisorRegisterYieldInput,
 } from "../daemon/agent-graph-supervisor-service.js";
 import type { SqliteAgentGraphControlStore } from "../storage/sqlite/sqlite-agent-graph-control-store.js";
+import type { AgentGraphScheduleCommand } from "./core/contracts.js";
+import { isIntentStopped, resolveIntentReadiness } from "./core/index.js";
 import type {
   AgentGraphSupervisorProjection,
   AgentGraphSupervisorView,
@@ -19,6 +21,10 @@ import type {
   RegisterAgentGraphYieldResult,
 } from "../tools/agent-graph-tools.js";
 import { deterministicFingerprint } from "./core/ids.js";
+import {
+  createBuiltinAgentGraphOperatorProfileCatalog,
+  type AgentGraphOperatorProfileCatalog,
+} from "./operator-profile-catalog.js";
 import { AgentGraphReconciler } from "./reconciler.js";
 import {
   AgentGraphRuntimePortBridge,
@@ -35,6 +41,7 @@ export interface CreateAgentGraphApplicationServiceOptions {
   readonly resolveOperatorWorkspace: (
     input: ResolveAgentGraphOperatorWorkspaceInput,
   ) => Promise<ResolvedAgentGraphOperatorWorkspace> | ResolvedAgentGraphOperatorWorkspace;
+  readonly operatorProfileCatalog?: AgentGraphOperatorProfileCatalog;
   readonly now?: () => number;
   readonly retryDelayMs?: AgentGraphSupervisorServiceOptions["retryDelayMs"];
   readonly onError?: AgentGraphSupervisorServiceOptions["onError"];
@@ -163,10 +170,12 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
     private readonly runtime: AgentGraphRuntimePortBridge,
     private readonly drive: SqliteAgentGraphDriveBridge,
     private readonly supervisor: AgentGraphSupervisorService,
+    private readonly operatorProfileCatalog: AgentGraphOperatorProfileCatalog,
     private readonly onAsyncError?: AgentGraphSupervisorServiceOptions["onError"],
   ) {}
 
   async commitUpdate(input: CommitAgentGraphUpdateInput): Promise<CommitAgentGraphUpdateResult> {
+    const commands = this.materializeCommands(input);
     this.ensureEpochOneGraph(input.graphId, input.source.sessionId);
     const graph = this.requireRootGraph(input.graphId, input.source.sessionId);
     if (graph.rootSessionId !== input.source.sessionId) {
@@ -177,7 +186,7 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
       expectedPreviousRevision: input.expectedRevision,
       operationId: input.operationId,
       source: input.source,
-      commands: input.commands,
+      commands,
     });
     // Schedule delivery is asynchronous: update_agent_graph never waits in the
     // tool stack for an Operator/provider execution.
@@ -194,12 +203,13 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
   async readProjection(input: ReadAgentGraphProjectionInput): Promise<AgentGraphSupervisorView> {
     this.ensureEpochOneGraph(input.graphId, input.rootSessionId);
     const projection = this.readProjectionSync(input.graphId, input.rootSessionId);
+    const state = this.control.getScheduleState(input.graphId);
     const selectedRecords = this.selectViewRecords(
       input.graphId,
       projection.records,
       input.recordIds,
     );
-    const [handoff, runtimeClaims] = await Promise.all([
+    const [handoff, runtimeClaims, intentReadiness] = await Promise.all([
       this.runtime.resolveRecordHandoff(selectedRecords),
       Promise.all(
         projection.claims.map(async (claim) => {
@@ -214,9 +224,33 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
           };
         }),
       ),
+      Promise.all(
+        state.intents.map(async (intent) => {
+          const facts = await this.runtime.resolveInputFacts({
+            intent,
+            knownRecords: projection.records,
+            claims: projection.claims,
+            producerIntents: state.intents,
+            failedIntentIds: state.intents
+              .filter((candidate) => isIntentStopped(state, candidate))
+              .map((candidate) => candidate.intentId),
+          });
+          const readiness = resolveIntentReadiness(intent, facts);
+          return {
+            intentId: intent.intentId,
+            status: readiness.status,
+            resolvedRecordIds: readiness.resolvedRecords.map((record) => record.recordId),
+            inFlightRecordIds: readiness.inFlightRecordIds,
+            failedRecordIds: readiness.failedRecordIds,
+            unknownRecordIds: readiness.unknownRecordIds,
+          };
+        }),
+      ),
     ]);
     return {
       ...projection,
+      availableOperatorProfiles: this.operatorProfileCatalog.listPublicProfiles(),
+      intentReadiness,
       runtimeClaims,
       results: {
         records: handoff.records,
@@ -285,13 +319,47 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
     const state = this.control.getScheduleState(graphId);
     return {
       graph: state.graph,
-      operators: state.operators,
+      operators: state.operators.map(({ profileSnapshot, ...operator }) => ({
+        ...operator,
+        profile: {
+          profileId: profileSnapshot.profileId,
+          revision: profileSnapshot.profileRevision,
+        },
+      })),
       intents: state.intents,
       stops: state.stops,
-      provisions: this.control.listOperatorProvisions(graphId),
+      provisions: this.control
+        .listOperatorProvisions(graphId)
+        .map(({ profileSnapshot, ...provision }) => ({
+          ...provision,
+          profile: {
+            profileId: profileSnapshot.profileId,
+            revision: profileSnapshot.profileRevision,
+          },
+        })),
       claims: this.control.listActivationClaims(graphId),
       records: this.control.listRecordRefs(graphId),
     };
+  }
+
+  private materializeCommands(
+    input: CommitAgentGraphUpdateInput,
+  ): readonly AgentGraphScheduleCommand[] {
+    return input.commands.map((command) => {
+      if (command.kind !== "add") return command;
+      const { profileId, ...operator } = command.operator;
+      return {
+        kind: "add" as const,
+        operator: {
+          ...operator,
+          profileSnapshot: this.operatorProfileCatalog.resolve({
+            profileId,
+            rootModelRouteId: input.rootModelRouteId,
+          }),
+        },
+        intent: command.intent,
+      };
+    });
   }
 
   private selectViewRecords(
@@ -364,6 +432,7 @@ export function createAgentGraphApplicationService(
     runtime,
     drive,
     supervisor,
+    options.operatorProfileCatalog ?? createBuiltinAgentGraphOperatorProfileCatalog(),
     options.onError,
   );
   let closed = false;

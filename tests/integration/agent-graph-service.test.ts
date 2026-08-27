@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { claimIdFor, graphIdFor, recordIdFor } from "../../src/agent-graph/core/index.js";
+import {
+  agentOutputRecordIdFor,
+  claimIdFor,
+  graphIdFor,
+} from "../../src/agent-graph/core/index.js";
 import { createAgentGraphApplicationService } from "../../src/agent-graph/service.js";
 import type { AgentGraphRootWakePort } from "../../src/daemon/agent-graph-supervisor-service.js";
 import type { AgentGraphRuntimeApplicationPort } from "../../src/agent-graph/runtime-adapter-bridge.js";
@@ -25,10 +29,10 @@ test("workspace application drives add and follow-up activate to records and fin
   const graphId = graphIdFor(rootSessionId, 1);
   const upstreamIntentId = "intent-research";
   const upstreamClaimId = claimIdFor(graphId, upstreamIntentId);
-  const upstreamRecordId = recordIdFor(upstreamClaimId, `output:${upstreamClaimId}`);
+  const upstreamRecordId = agentOutputRecordIdFor(graphId, upstreamIntentId);
   const downstreamIntentId = "intent-review";
   const downstreamClaimId = claimIdFor(graphId, downstreamIntentId);
-  const downstreamRecordId = recordIdFor(downstreamClaimId, `output:${downstreamClaimId}`);
+  const downstreamRecordId = agentOutputRecordIdFor(graphId, downstreamIntentId);
   const service = createAgentGraphApplicationService({
     store,
     runtime,
@@ -46,10 +50,31 @@ test("workspace application drives add and follow-up activate to records and fin
       runId: "root-run-1",
       toolCallId: "update-call-1",
     };
+    await assert.rejects(
+      service.toolPort.commitUpdate({
+        graphId,
+        expectedRevision: 0,
+        operationId: "reject-unknown-profile",
+        rootModelRouteId: "test-root-model",
+        source,
+        commands: [
+          addCommand({
+            graphId,
+            intentId: "intent-unknown-profile",
+            operatorId: "unknown-profile",
+            profileId: "unknown",
+            source,
+          }),
+        ],
+      }),
+      /Unknown Agent Graph Operator profile/u,
+    );
+    assert.equal(store.getGraph(graphId), undefined);
     const upstreamUpdated = await service.toolPort.commitUpdate({
       graphId,
       expectedRevision: 0,
       operationId: "add-research",
+      rootModelRouteId: "test-root-model",
       source,
       commands: [
         addCommand({ graphId, intentId: upstreamIntentId, operatorId: "researcher", source }),
@@ -62,6 +87,7 @@ test("workspace application drives add and follow-up activate to records and fin
       graphId,
       expectedRevision: 1,
       operationId: "activate-review",
+      rootModelRouteId: "test-root-model",
       source,
       commands: [
         activateCommand({
@@ -85,6 +111,17 @@ test("workspace application drives add and follow-up activate to records and fin
     assert.deepEqual(
       reconciled.records.map((record) => record.recordId).sort(),
       [downstreamRecordId, upstreamRecordId].sort(),
+    );
+    assert.deepEqual(
+      reconciled.intentReadiness.map(({ intentId, status }) => ({ intentId, status })),
+      [
+        { intentId: upstreamIntentId, status: "resolved" },
+        { intentId: downstreamIntentId, status: "resolved" },
+      ],
+    );
+    assert.doesNotMatch(
+      JSON.stringify(reconciled),
+      /profileSnapshot|systemPrompt|modelRouteId|permissionPolicy|profileFingerprint/u,
     );
     assert.deepEqual(
       reconciled.runtimeClaims.map(({ claimId, status, terminalEventId }) => ({
@@ -153,6 +190,7 @@ test("workspace application drives add and follow-up activate to records and fin
       graphId: otherGraphId,
       expectedRevision: 0,
       operationId: "add-other-graph-record",
+      rootModelRouteId: "test-root-model",
       source: otherSource,
       commands: [
         addCommand({
@@ -184,6 +222,7 @@ test("workspace application drives add and follow-up activate to records and fin
       graphId,
       expectedRevision: 2,
       operationId: "finish-graph",
+      rootModelRouteId: "test-root-model",
       source: {
         sessionId: rootSessionId,
         turnId: "root-turn-2",
@@ -230,6 +269,7 @@ test("view exposes a terminal Claim without agent_output so root does not wait f
       graphId,
       expectedRevision: 0,
       operationId: "add-outputless-operator",
+      rootModelRouteId: "test-root-model",
       source,
       commands: [
         addCommand({ graphId, intentId: "outputless-intent", operatorId: "worker", source }),
@@ -254,6 +294,7 @@ test("view exposes a terminal Claim without agent_output so root does not wait f
       graphId,
       expectedRevision: 1,
       operationId: "stop-outputless-intent",
+      rootModelRouteId: "test-root-model",
       source,
       commands: [
         {
@@ -271,6 +312,7 @@ test("view exposes a terminal Claim without agent_output so root does not wait f
       graphId,
       expectedRevision: 2,
       operationId: "follow-up-after-outputless",
+      rootModelRouteId: "test-root-model",
       source,
       commands: [
         activateCommand({
@@ -333,6 +375,7 @@ test("a rejected no-progress yield leaves the same root Run free to schedule and
       graphId,
       expectedRevision: 0,
       operationId: "schedule-after-rejected-yield",
+      rootModelRouteId: "test-root-model",
       source,
       commands: [addCommand({ graphId, intentId: "retry-intent", operatorId: "worker", source })],
     });
@@ -377,6 +420,7 @@ test("yield remains registered while an Operator activation is still executing",
       graphId,
       expectedRevision: 0,
       operationId: "add-running-work",
+      rootModelRouteId: "test-root-model",
       source,
       commands: [addCommand({ graphId, intentId: "running-intent", operatorId: "worker", source })],
     });
@@ -540,6 +584,7 @@ function addCommand(input: {
   };
   readonly inputRecordIds?: readonly string[];
   readonly createdAtRevision?: number;
+  readonly profileId?: string;
 }) {
   return {
     kind: "add" as const,
@@ -548,12 +593,7 @@ function addCommand(input: {
       operatorId: input.operatorId,
       generation: 1,
       role: input.operatorId,
-      profileSnapshot: {
-        profileId: "default",
-        tools: [],
-        permissionPolicy: null,
-        systemPromptVersion: "v1",
-      },
+      profileId: input.profileId ?? "implement",
       workspacePolicy: { kind: "shared" as const },
     },
     intent: {
@@ -562,6 +602,7 @@ function addCommand(input: {
       operatorId: input.operatorId,
       operatorGeneration: 1,
       instruction: input.operatorId === "reviewer" ? "review result" : "research topic",
+      expectedOutputRecordId: agentOutputRecordIdFor(input.graphId, input.intentId),
       inputRefs: (input.inputRecordIds ?? []).map((recordId) => ({ recordId })),
       createdAtRevision: input.createdAtRevision ?? 1,
       requestedBy: input.source,
@@ -591,6 +632,7 @@ function activateCommand(input: {
       operatorId: input.operatorId,
       operatorGeneration: 1,
       instruction: input.instruction,
+      expectedOutputRecordId: agentOutputRecordIdFor(input.graphId, input.intentId),
       inputRefs: (input.inputRecordIds ?? []).map((recordId) => ({ recordId })),
       createdAtRevision: input.createdAtRevision,
       requestedBy: input.source,

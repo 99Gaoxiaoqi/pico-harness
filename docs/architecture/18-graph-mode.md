@@ -143,8 +143,11 @@ Operator = {
   graphId, operatorId, generation,
   role, description?,
   profileSnapshot: {
-    profileId, model?, tools,
-    permissionPolicy, systemPromptVersion
+    schemaVersion, profileId, profileRevision, profileFingerprint,
+    modelRouteId, tools,
+    permissionPolicy: { mode: default, allowSessionGrants: false },
+    systemPrompt: { version, content },
+    extensionPolicy: none
   },
   workspacePolicy: shared | isolated-worktree (future)
 }
@@ -152,7 +155,9 @@ Operator = {
 
 关键点：
 
-- profile 是声明时冻结并持久化的快照；production host 已消费 `model` 和 `tools`。`permissionPolicy` 目前由模型随 schedule 提交，不是可信授权源，因此 detached Operator 强制使用可交互、不提权的 `default` 边界；`systemPromptVersion` 尚未恢复自定义提示，不能把“已保存”理解为“已全部生效”；
+- 公共 `add` 只接受宿主目录中的 `profile_id`。应用服务在 schedule 提交前解析并冻结完整快照；未知 profile、损坏快照、指纹不匹配或模型路由失效均 fail closed，不做隐式回退；
+- production Operator 只消费持久快照中的精确模型路由、工具集、权限边界和 system prompt。运行时强制 `default` 权限，禁止 Session grant 累积，并在装配前关闭 MCP、Plugin、Hook、LSP、Browser 和 memory worker；
+- Supervisor 投影只暴露 profile ID/revision 及有界目录摘要，不返回 system prompt 正文、权限细节或模型路由；
 - `generation` 为替换同一逻辑角色保留代际边界，stop 可精确落到某一代；
 - workspace policy 也是不可变调度输入；本次硬切的公共 `update_agent_graph` 入口仅接受 production 已可执行的 `shared`。`isolated-worktree` 只是领域内部的未来类型，在 resolver 与完整生命周期实现前不对外接受、不持久化调度意图；
 - `add` 要求 Operator ID 尚不存在；后续工作必须用 `activate` 指向精确 generation。同一 generation 的所有 Activation 复用一个持久 child Session，并由 Reconciler 串行执行。operator-level stop 是永久 fence，intent-level stop 不影响后续 follow-up。
@@ -166,20 +171,21 @@ Intent = {
   graphId, intentId,
   operatorId, operatorGeneration,
   instruction,
+  expectedOutputRecordId,
   inputRefs: [{ recordId }],
   createdAtRevision,
   requestedBy
 }
 ```
 
-Intent 只表达期望，不代表已经取得执行权。`inputRefs` 必须来自同一 Graph 的已提交 RecordRef；readiness 每次由事实重新推导：
+Intent 只表达期望，不代表已经取得执行权。`expectedOutputRecordId` 由 `(graphId, intentId)` 确定性派生，模型不能指定。`inputRefs` 可引用同一 Graph 的已提交 RecordRef 或已声明的未来正式输出；任意 ID、跨 Graph 引用和循环依赖在 schedule 提交时拒绝。readiness 每次由事实重新推导：
 
 - `resolved`：所有引用都存在；
 - `in_flight`：引用已知会产生但尚未提交；
 - `failed`：引用已知失败；
 - `unknown`：系统没有对应事实。
 
-当前 production bridge 只返回已知 RecordRef，尚未提供完整的 in-flight/failed 输入分类，所以缺失输入通常表现为 `unknown`。只有 `resolved` Intent 才可能 Claim。
+Runtime bridge 会结合已知 RecordRef、生产者 Intent、Claim 和 exact Run 投影分类事实：计划中/执行中为 `in_flight`，终态且有正式输出事件但 RecordRef 尚未投影时仍为 `in_flight`，被停止或终态无输出为 `failed`，无生产者为 `unknown`。只有 `resolved` Intent 才可能 Claim；Supervisor view 按 Intent 返回同样的可观察分类。
 
 ### 4.5 Provision：Operator 的持久运行身份
 
@@ -365,9 +371,9 @@ production 将 exact RuntimeRun 安装为 `WorkspaceTaskRuntime` 中的 detached
 
 - Graph application 已接入 production daemon 的 workspace 生命周期；确定性 production wiring 集成测试与 `RUN_LLM_E2E=1` 真实模型闭环均已通过，真实模型门禁仍只在具备凭证的受控环境显式启用；
 - `isolated-worktree` 仅保留在领域契约中作为未来能力；公共工具 schema 和 submit 前解析均只接受 `shared`，避免持久化 production 无法执行的 Intent。未来必须先实现 resolver、清理/恢复语义及对应验证，再扩展公共入口；
-- `profileSnapshot.permissionPolicy` 与 `systemPromptVersion` 已持久化；production 已映射 model/tools，但在可信 profile catalog 出现前不使用模型提交的 policy 提权，system prompt 自定义恢复仍是发布缺口；
+- Operator profile 已由宿主内置目录解析为带指纹的不可变快照；公共工具不再接受模型、工具、权限或 system prompt 字段，生产运行时已消费并强制该快照；
 - schedule envelope 已硬切为 v2 以显式承载 `activate`；历史数据已清理，读取端拒绝 v1 envelope，不支持新旧进程混跑或直接降级；
-- Runtime bridge 尚未提供完整 in-flight/failed readiness facts；
+- Runtime bridge 已提供完整 readiness facts 和单一正式 `agent-output` RecordRef 身份；
 - `artifact` / `evidence` RecordRef 是领域预留，当前 handoff 只接受 `agent-output`；
 - 已有确定性集成测试覆盖核心、store、跨进程 CAS、reconciler、exact Run/reattach、production wiring、output、yield/wake 和 workspace 生命周期；真实模型 E2E 已验证 root、Operator、durable output、结果回读、exact wake 与 finish 闭环。尚未用独立子进程逐一 kill/reopen 验证全部崩溃窗口。
 

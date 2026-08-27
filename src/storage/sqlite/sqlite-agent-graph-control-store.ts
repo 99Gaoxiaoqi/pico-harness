@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { agentOutputRecordIdFor } from "../../agent-graph/core/ids.js";
 import type { OperationalDatabaseLease } from "./sqlite-database.js";
 import { prepareCurrentWorkspaceSqliteStorageSync } from "./workspace-scopes.js";
 import type {
@@ -161,7 +162,7 @@ export class SqliteAgentGraphControlStore {
           `Graph ${normalized.graphId} revision changed from ${normalized.expectedRevision} to ${graph.headRevision}`,
         );
       }
-      this.assertInputRecordRefs(normalized.graphId, normalized.inputRecordIds);
+      this.assertInputRecordRefs(normalized.graphId, normalized.inputRecordIds, normalized.command);
       if (normalized.kind === "finish") {
         this.assertSelectedRecordRefs(normalized.graphId, normalized.selectedRecordIds);
       }
@@ -1157,10 +1158,27 @@ export class SqliteAgentGraphControlStore {
     }
   }
 
-  private assertInputRecordRefs(graphId: string, recordIds: readonly string[]): void {
+  private assertInputRecordRefs(
+    graphId: string,
+    recordIds: readonly string[],
+    incomingCommand: unknown,
+  ): void {
+    const incomingExpected = new Set(expectedOutputRecordIdsFromCommand(incomingCommand));
     for (const recordId of recordIds) {
       const record = this.selectRecordRef(recordId);
       if (!record) {
+        if (
+          incomingExpected.has(recordId) ||
+          this.expectedOutputBelongsToGraph(graphId, recordId)
+        ) {
+          continue;
+        }
+        const foreignGraph = this.expectedOutputOwnerGraph(recordId);
+        if (foreignGraph) {
+          throw new AgentGraphStoreConflictError(
+            `Input RecordRef ${recordId} belongs to Graph ${foreignGraph}, not ${graphId}`,
+          );
+        }
         throw new AgentGraphStoreConflictError(
           `Input RecordRef ${recordId} does not exist for Graph ${graphId}`,
         );
@@ -1171,6 +1189,31 @@ export class SqliteAgentGraphControlStore {
         );
       }
     }
+  }
+
+  private expectedOutputBelongsToGraph(graphId: string, recordId: string): boolean {
+    return (
+      this.lease.database
+        .prepare(
+          `SELECT 1
+         FROM agent_graph_schedule_revisions, json_tree(command_json) AS entry
+         WHERE graph_id = ? AND entry.key = 'expectedOutputRecordId' AND entry.value = ?
+         LIMIT 1`,
+        )
+        .get(graphId, recordId) !== undefined
+    );
+  }
+
+  private expectedOutputOwnerGraph(recordId: string): string | undefined {
+    const row = this.lease.database
+      .prepare(
+        `SELECT graph_id
+         FROM agent_graph_schedule_revisions, json_tree(command_json) AS entry
+         WHERE entry.key = 'expectedOutputRecordId' AND entry.value = ?
+         LIMIT 1`,
+      )
+      .get(recordId);
+    return row ? rowString(asRow(row), "graph_id") : undefined;
   }
 
   private selectWake(wakeId: string): AgentGraphSupervisorWakeRecord | undefined {
@@ -1296,6 +1339,7 @@ export class SqliteAgentGraphControlStore {
 }
 
 interface NormalizedScheduleInput extends Omit<CommitAgentGraphScheduleInput, "command"> {
+  readonly command: unknown;
   readonly commandJson: string;
   readonly inputRecordIds: readonly string[];
   readonly selectedRecordIds: readonly string[];
@@ -1318,6 +1362,7 @@ function normalizeScheduleInput(input: CommitAgentGraphScheduleInput): Normalize
     operationId: requireNonEmpty(input.operationId, "operationId"),
     requestFingerprint: requireNonEmpty(input.requestFingerprint, "requestFingerprint"),
     kind: input.kind,
+    command: input.command,
     inputRecordIds,
     selectedRecordIds,
     commandJson: canonicalJson(input.command),
@@ -1352,6 +1397,30 @@ function inputRecordIdsFromCommand(command: unknown): readonly string[] {
     }
   }
   return inputRecordIds;
+}
+
+function expectedOutputRecordIdsFromCommand(command: unknown): readonly string[] {
+  const envelope = asOptionalRecord(command);
+  const commands =
+    envelope?.["schemaVersion"] === 2 && Array.isArray(envelope["commands"])
+      ? envelope["commands"]
+      : [command];
+  const recordIds: string[] = [];
+  for (const candidate of commands.map(asOptionalRecord)) {
+    if (candidate?.["kind"] !== "add" && candidate?.["kind"] !== "activate") continue;
+    const intent = asOptionalRecord(candidate["intent"]);
+    const graphId = intent?.["graphId"];
+    const intentId = intent?.["intentId"];
+    const value = intent?.["expectedOutputRecordId"];
+    if (typeof graphId !== "string" || typeof intentId !== "string" || typeof value !== "string") {
+      continue;
+    }
+    if (value !== agentOutputRecordIdFor(graphId, intentId)) {
+      throw new Error("Graph activation expected output RecordRef has an invalid identity");
+    }
+    recordIds.push(value);
+  }
+  return recordIds;
 }
 
 function selectedRecordIdsFromCommand(

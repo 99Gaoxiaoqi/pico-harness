@@ -26,6 +26,7 @@ import type {
   StartAgentGraphActivationRequest,
   StopAgentGraphActivationRequest,
 } from "./runtime-port.js";
+import { assertValidAgentGraphOperatorProfileSnapshot } from "./operator-profile-catalog.js";
 
 export interface AgentGraphRuntimeApplicationPort {
   ensureOperatorProvision(
@@ -82,11 +83,52 @@ export class AgentGraphRuntimePortBridge implements AgentGraphRuntimePort {
 
   async resolveInputFacts(input: ResolveAgentGraphInputsRequest) {
     this.requireOpen();
-    return { records: input.knownRecords };
+    const resolvedIds = new Set(input.knownRecords.map((record) => record.recordId));
+    const failedIntentIds = new Set(input.failedIntentIds);
+    const claimsByIntent = new Map(input.claims.map((claim) => [claim.intentId, claim]));
+    const producersByRecord = new Map(
+      input.producerIntents.map((intent) => [intent.expectedOutputRecordId, intent]),
+    );
+    const inFlightRecordIds: string[] = [];
+    const failedRecordIds: string[] = [];
+
+    for (const reference of input.intent.inputRefs) {
+      if (resolvedIds.has(reference.recordId)) continue;
+      const producer = producersByRecord.get(reference.recordId);
+      if (!producer) continue;
+      if (failedIntentIds.has(producer.intentId)) {
+        failedRecordIds.push(reference.recordId);
+        continue;
+      }
+      const claim = claimsByIntent.get(producer.intentId);
+      if (!claim) {
+        inFlightRecordIds.push(reference.recordId);
+        continue;
+      }
+      if (claim.state === "cancelled") {
+        failedRecordIds.push(reference.recordId);
+        continue;
+      }
+      const projection = await this.options.runtime.projectActivation(
+        this.requireStoredClaim(claim),
+      );
+      if (
+        isTerminalRuntimeProjection(projection.status) &&
+        projection.outputEventIds.length === 0
+      ) {
+        failedRecordIds.push(reference.recordId);
+      } else {
+        // A terminal output may be committed in the Runtime ledger one fixed-point
+        // pass before its formal RecordRef is projected into the control store.
+        inFlightRecordIds.push(reference.recordId);
+      }
+    }
+    return { records: input.knownRecords, inFlightRecordIds, failedRecordIds };
   }
 
   async ensureOperator(input: EnsureAgentGraphOperatorRequest): Promise<void> {
     this.requireOpen();
+    assertValidAgentGraphOperatorProfileSnapshot(input.provision.profileSnapshot);
     const existing = this.leases.get(input.provision.provisionId);
     if (existing) {
       assertHeldLease(existing, input.provision);
@@ -119,6 +161,7 @@ export class AgentGraphRuntimePortBridge implements AgentGraphRuntimePort {
   ): Promise<AgentGraphRuntimeProjection> {
     this.requireOpen();
     const provision = this.requireProvisionForOperator(input.operator);
+    assertValidAgentGraphOperatorProfileSnapshot(provision.profileSnapshot);
     const held = this.leases.get(provision.provisionId);
     if (!held) {
       throw new Error(`Graph operator provision ${provision.provisionId} is not pinned`);
@@ -313,4 +356,15 @@ function renderActivationPrompt(instruction: string, handoffPrompt: string): str
 
 function requireWorkDir(workDir: string): void {
   if (!workDir.trim()) throw new Error("Graph operator workDir must not be empty");
+}
+
+function isTerminalRuntimeProjection(
+  status: AgentGraphActivationRuntimeProjection["status"],
+): boolean {
+  return (
+    status === "completed" ||
+    status === "failed" ||
+    status === "cancelled" ||
+    status === "interrupted"
+  );
 }

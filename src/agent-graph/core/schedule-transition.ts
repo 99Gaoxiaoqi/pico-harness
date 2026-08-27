@@ -8,7 +8,7 @@ import type {
   AgentGraphScheduleState,
   AgentGraphStopTarget,
 } from "./contracts.js";
-import { scheduleOperationFingerprint } from "./ids.js";
+import { agentOutputRecordIdFor, scheduleOperationFingerprint } from "./ids.js";
 
 export class AgentGraphConflictError extends Error {
   constructor(message: string) {
@@ -112,6 +112,11 @@ function assertActivationIntent(
   }
   assertNonEmpty(intent.intentId, "Activation Intent id");
   assertNonEmpty(intent.instruction, "Activation Intent instruction");
+  if (intent.expectedOutputRecordId !== agentOutputRecordIdFor(intent.graphId, intent.intentId)) {
+    throw new AgentGraphConflictError(
+      "Activation Intent expected output RecordRef must match its host-derived identity",
+    );
+  }
   if (
     intent.operatorId !== operator.operatorId ||
     intent.operatorGeneration !== operator.generation
@@ -204,6 +209,35 @@ function applyCommand(
   }
 }
 
+function assertAcyclicIntentDependencies(intents: readonly AgentGraphActivationIntent[]): void {
+  const producerByRecordId = new Map(
+    intents.map((intent) => [intent.expectedOutputRecordId, intent.intentId]),
+  );
+  const dependencies = new Map(
+    intents.map((intent) => [
+      intent.intentId,
+      intent.inputRefs
+        .map((reference) => producerByRecordId.get(reference.recordId))
+        .filter((intentId): intentId is string => intentId !== undefined),
+    ]),
+  );
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
+
+  const visit = (intentId: string): void => {
+    if (visited.has(intentId)) return;
+    if (visiting.has(intentId)) {
+      throw new AgentGraphConflictError("Activation Intent dependencies must be acyclic");
+    }
+    visiting.add(intentId);
+    for (const dependency of dependencies.get(intentId) ?? []) visit(dependency);
+    visiting.delete(intentId);
+    visited.add(intentId);
+  };
+
+  for (const intent of intents) visit(intent.intentId);
+}
+
 export function applyScheduleRevision(
   state: AgentGraphScheduleState,
   revision: AgentGraphScheduleRevision,
@@ -256,6 +290,7 @@ export function applyScheduleRevision(
   for (const command of revision.commands) {
     next = applyCommand(next, revision, command, context);
   }
+  assertAcyclicIntentDependencies(next.intents);
   next = {
     ...next,
     graph: { ...next.graph, headRevision: revision.revision },

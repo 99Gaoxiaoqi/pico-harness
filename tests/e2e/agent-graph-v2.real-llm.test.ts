@@ -164,7 +164,7 @@ realModelTest(
         await services.service.startForegroundRun({
           workspacePath,
           sessionId: rootSessionId,
-          prompt: initialRootPrompt({ modelRouteId: model.route.id }),
+          prompt: initialRootPrompt(),
           execution: {
             requestedModel: model.route.id,
             allowedTools: ["update_agent_graph", "yield_agent_graph"],
@@ -383,7 +383,7 @@ realModelTest(
   },
 );
 
-function initialRootPrompt(input: { readonly modelRouteId: string }): string {
+function initialRootPrompt(): string {
   return [
     "This is a deterministic Graph v2 end-to-end check. Follow these steps exactly.",
     "First call update_agent_graph exactly once with expected_revision 0 and operation_id e2e-add-operator.",
@@ -396,11 +396,7 @@ function initialRootPrompt(input: { readonly modelRouteId: string }): string {
         role: "canary emitter",
         description: "emit the requested canary through agent_output",
         profile: {
-          profile_id: "graph-v2-real-e2e",
-          model: input.modelRouteId,
-          tools: [],
-          permission_policy: {},
-          system_prompt_version: "graph-v2-real-e2e-v1",
+          profile_id: "explore",
         },
         workspace: { kind: "shared" },
       },

@@ -25,11 +25,21 @@ export interface AgentGraphOperationSource {
 }
 
 export interface AgentGraphProfileSnapshot {
+  readonly schemaVersion: 1;
   readonly profileId: string;
-  readonly model?: string;
+  readonly profileRevision: string;
+  readonly profileFingerprint: string;
+  readonly modelRouteId: string;
   readonly tools: readonly string[];
-  readonly permissionPolicy: JsonValue;
-  readonly systemPromptVersion: string;
+  readonly permissionPolicy: {
+    readonly mode: "default";
+    readonly allowSessionGrants: false;
+  };
+  readonly systemPrompt: {
+    readonly version: string;
+    readonly content: string;
+  };
+  readonly extensionPolicy: "none";
 }
 
 export type AgentGraphWorkspacePolicy =
@@ -56,6 +66,8 @@ export interface AgentGraphActivationIntent {
   readonly operatorId: string;
   readonly operatorGeneration: number;
   readonly instruction: string;
+  /** Host-derived identity for this activation's single formal agent_output RecordRef. */
+  readonly expectedOutputRecordId: string;
   readonly inputRefs: readonly AgentGraphInputRef[];
   readonly createdAtRevision: number;
   readonly requestedBy: AgentGraphOperationSource;
