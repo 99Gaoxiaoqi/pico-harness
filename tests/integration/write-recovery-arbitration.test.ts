@@ -218,29 +218,25 @@ test("写失败读回仲裁：确定性契约拒绝（fingerprint CAS 冲突）�
   });
   context.after(scene.cleanup);
 
-  const graphEvent = {
+  const planEvent = {
     schemaVersion: 2,
-    eventId: `${scene.session.id}-graph-1`,
+    eventId: `${scene.session.id}-plan-1`,
     sessionId: scene.session.id,
     invocationId: "inv-1",
-    runId: "run-graph",
+    runId: "run-plan",
     turnId: "turn-1",
     at: "2026-08-19T00:00:00.000Z",
     partial: false,
     visibility: "internal",
-    kind: "graph.work.added",
+    kind: "plan.execution.completed",
     data: {
       operationId: "op-arbitration",
       fingerprint: "sha256:" + "a".repeat(64),
-      graphId: "graph-1",
-      workId: "work-1",
-      instruction: "do one thing",
-      inputIds: [],
-      mode: "worker",
+      planId: "plan-arbitration",
     },
   } as RuntimeEvent;
   // run.started 占 seq 1;首次 CAS 占 seq 2。
-  const first = await scene.realStore.appendGraphOperation([graphEvent], {
+  const first = await scene.realStore.appendPlanOperation([planEvent], {
     operationId: "op-arbitration",
     fingerprint: "sha256:" + "a".repeat(64),
     expectedSessionSequence: 1,
@@ -252,7 +248,7 @@ test("写失败读回仲裁：确定性契约拒绝（fingerprint CAS 冲突）�
   );
   // 同 eventId 同载荷但 fingerprint 不同:读回载荷相等也不得翻案,契约冲突原样抛出。
   await assert.rejects(
-    scene.realStore.appendGraphOperation([graphEvent], {
+    scene.realStore.appendPlanOperation([planEvent], {
       operationId: "op-arbitration",
       fingerprint: "sha256:" + "b".repeat(64),
       expectedSessionSequence: 2,

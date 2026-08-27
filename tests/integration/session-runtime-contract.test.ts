@@ -6,6 +6,7 @@ import {
 } from "../../src/engine/session-runtime-event.js";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION as runtimeSchemaVersion,
+  RuntimeEventDecodeError,
   decodeRuntimeEvent,
   runtimeEventHasModelMessage as runtimeModelMessageGuard,
 } from "../../src/storage/runtime-event.js";
@@ -21,6 +22,34 @@ test("Runtime adapters preserve the engine-owned durable Session contracts", () 
   assert.equal(runtimeSchemaVersion, RUNTIME_EVENT_SCHEMA_VERSION);
   assert.strictEqual(runtimeModelMessageGuard, runtimeEventHasModelMessage);
   assert.strictEqual(runtimeMaterializeHistoryEntries, materializeRuntimeHistoryEntries);
+});
+
+test("Graph v1 RuntimeEvent kinds are fully retired", () => {
+  for (const kind of [
+    "graph.work.added",
+    "graph.work.dispatched",
+    "graph.work.recorded",
+    "graph.work.failed",
+    "graph.closed",
+  ]) {
+    assert.throws(
+      () =>
+        decodeRuntimeEvent({
+          schemaVersion: runtimeSchemaVersion,
+          eventId: `retired-${kind}`,
+          sessionId: "retired-graph-v1",
+          invocationId: "retired-graph-v1",
+          runId: "retired-graph-v1",
+          turnId: "retired-graph-v1",
+          at: "2026-08-27T00:00:00.000Z",
+          partial: false,
+          visibility: "internal",
+          kind,
+          data: {},
+        }),
+      (error: unknown) => error instanceof RuntimeEventDecodeError && error.code === "unknown_kind",
+    );
+  }
 });
 
 test("Session runtime state rejects pre-route settings and unknown persisted fields", () => {

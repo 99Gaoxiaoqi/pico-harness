@@ -1,7 +1,8 @@
 # pico-harness 核心概念地图
 
-> 文档状态：部分过期。概念关系仍可参考；旧 JSONL 文件布局、Evidence 回读和部分源码行号已
-> 漂移。当前执行与存储边界见 [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md)。
+> 文档状态：历史架构快照。旧 JSONL 布局、Evidence 回读和 Graph v1 均已退役；
+> 当前执行与存储边界见 [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md)，Graph v2 见
+> [`18-graph-mode.md`](./18-graph-mode.md)。
 
 > 大模型是 CPU，上下文是内存，工具是外设，RuntimeEventStore 是可恢复的运行事实账本。
 > 整个项目的命脉可以用一句话概括：**一条 append-only 账本 + 一切皆投影 + 两层 CAS 互斥**。
@@ -23,7 +24,7 @@
             withLedgerStoreLock（文件锁 + 原子重命名 commit-marker + fsync）
                      │
                      ├── 高水位 CAS  → 串行追加，防并发写错位
-                     └── operationId + 指纹 CAS → plan/graph 状态机 exactly-once
+                     └── operationId + 指纹 CAS → plan 状态机 exactly-once
                                             │
         ┌──────────┬──────────┬───────────┼────────────┬──────────────┐
         ▼          ▼          ▼           ▼            ▼              ▼
@@ -45,7 +46,7 @@
 
 带信封的判别联合类型：`eventId / sessionId / invocationId / runId / turnId / at / kind / data / visibility / partial`（`src/engine/session-runtime-event.ts:36`）。
 
-`kind` 共 **32 种**，全部收录在 `RUNTIME_EVENT_KINDS`（`src/storage/runtime-event.ts:62`）内：13 个 plan 事件（来自 `PLAN_EVENT_KINDS`，`src/plan/events.ts:8`，spread 而入）+ 5 个 graph 事件（直接字面量）+ 14 个运行 / 消息 / 工具 / 审批 / 模型调用 / 检查点 / 会话类。整体分运行 / 消息 / 工具 / 审批 / 模型调用 / 检查点 / 会话 / 计划 / 图 **九类**。注意别遗漏 `approval.requested/settled` 与 `model.call.started/settled` 这两类。
+`kind` 全部收录在 `RUNTIME_EVENT_KINDS`（`src/storage/runtime-event.ts`）内，包括 plan 事件与运行 / 消息 / 工具 / 审批 / 模型调用 / 检查点 / 会话类。Graph v2 不再使用 `graph.*` RuntimeEvent，调度事实位于独立的 `agent_graph_*` SQLite 控制面。
 
 **持久化铁律**：
 
@@ -55,7 +56,7 @@
 
 ### 1.2 appendBatch：账本的唯一写入原语
 
-在 `RuntimeEventStore` 内，`appendBatch`（`src/storage/runtime-event-store.ts:362`）是 `session.jsonl` 的唯一写入原语；`append / appendSessionState / appendTranscriptEvent / appendPlanOperation / appendGraphOperation` 全是它的包装。它在 `withLedgerStoreLock`（`src/storage/ledger-store-lock.ts:59`）文件锁内，把一批事件封成一条 `event-batch` JSONL，用「临时文件 → fsync → 原子重命名」提交（底层原语 `commitFileTransactionSync`，`local-file-storage.ts:426`）。
+当前 SQLite `RuntimeEventStore` 内，`appendBatch` 是唯一批量写入原语；`appendSessionState / appendTranscriptEvent / appendPlanOperation` 是它的包装。
 
 > 注意：`TaskRunStore` 是另一套**独立账本**（`task-runs/`），有自己的 `appendBatch`（`task-run-store.ts:317`），与 RuntimeEventStore 平行，不互相委托。所以「唯一写原语」是限定在 RuntimeEventStore 内的。
 
@@ -63,10 +64,10 @@
 
 不用数据库，纯靠 CAS 在共享文件锁下保证并发安全：
 
-| CAS 层                     | 防什么                         | 机制                                                                                            |
-| -------------------------- | ------------------------------ | ----------------------------------------------------------------------------------------------- |
-| **高水位 CAS**             | 并发追加串行化                 | `expectedSessionHighWater`，条数不符抛 `HighWaterConflictError`（`runtime-event-store.ts:469`） |
-| **operationId + 指纹 CAS** | plan/graph 状态机 exactly-once | 同 operationId 不同指纹抛 `PlanOperationConflictError`（`runtime-event-store.ts:412`）          |
+| CAS 层                     | 防什么                   | 机制                                                                                            |
+| -------------------------- | ------------------------ | ----------------------------------------------------------------------------------------------- |
+| **高水位 CAS**             | 并发追加串行化           | `expectedSessionHighWater`，条数不符抛 `HighWaterConflictError`（`runtime-event-store.ts:469`） |
+| **operationId + 指纹 CAS** | plan 状态机 exactly-once | 同 operationId 不同指纹拒绝                                                                     |
 
 高水位 CAS 是**可选**入参（`:382`），且当整批全是重复事件（`!hasNewEvent`）时在 `:458` 提前返回、跳过校验。锁模板 `withLedgerStoreLock` 被 RuntimeEventStore 与 TaskRunStore 共用。
 
@@ -74,7 +75,7 @@
 
 `RuntimeProjectionService`（`src/engine/runtime-projection-service.ts:69`）是消息 / transcript / state / usage / fork-seed 的**统一投影入口**：`getSessionView / getMessages / getState / getUsage / getTranscriptEntries / getForkSeed` 全是「读账本 → 跑纯投影函数」。
 
-注意：**plan / graph 投影不在该 service 内**。plan 走 `PlanCoordinator.project()` → `projectPlanEntries`（`src/plan/reducer.ts:12`）；graph 走 `graph-reducer.ts`。但三者都从同一个 canonical 账本折叠，没有第二事实源。
+注意：plan 投影不在该 service 内，而是走 `PlanCoordinator.project()` → `projectPlanEntries`。Graph v2 使用独立的 workspace SQLite 控制面，RuntimeEvent ledger 只保存 Operator 的执行事实。
 
 ### 1.5 三态模型（log-first 对齐后）
 
@@ -114,7 +115,7 @@ Plan **不是**独立的 PLAN.md 文件，而是 13 种 `plan.*` 事件在账本
 
 > ⚠️ **PlanCoordinator 不是唯一写入者**。fork 重建路径（`src/engine/session-fork-service.ts:477`）在分叉时**直接 `appendBatch`** 写两类事件：`plan.step.recovered`（把继承的 in_progress 步骤重置为 pending）与 `plan.execution.interrupted`（标记继承的执行为中断）。这两类是 fork 语料、不属于用户意图转换，其中 `plan.step.recovered` 在 PlanCoordinator 根本没有对应公共方法。
 
-Graph Mode **复用同一套 CAS**：`appendGraphOperation`（`runtime-event-store.ts:584`）内部走 `planOperation` 信封，注释明说「CAS 契约相同」。
+Graph v2 的 revision CAS 由 `SqliteAgentGraphControlStore` 在 `agent_graph_schedule_revisions` 中独立仲裁，不再复用 RuntimeEvent 的 plan operation 信封。
 
 ### 1.8 持久化与删除边界
 
@@ -126,26 +127,9 @@ Graph Mode **复用同一套 CAS**：`appendGraphOperation`（`runtime-event-sto
 
 ---
 
-## 二、辐射主线：Graph Mode（增量依赖调度）
+## 二、辐射主线：Graph Mode v2
 
-把「线性 `delegate_task`（串行阻塞 + 依赖靠主 Agent 手动转述）」升级为显式编排：多个无依赖工作并行派发，`input_ids` 显式声明依赖。默认关闭，由正交于 `collaborationMode` 的 `orchestrationMode`（`"default" | "graph"`）开启。
-
-| 点                      | 说明                                                                                                                                                                                                                                                                                                                                                                                                                         | 锚点                                                                                          |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| **依赖建模**            | `GraphWork.inputIds`（字符串数组）引用上游 `recordId`。两个确定性哈希：`workIdFor(graphId, instruction, sorted(inputIds))` 与 `recordIdFor(graphId, workId)`，纯哈希、跨 run 稳定                                                                                                                                                                                                                                            | 定义 `src/graph/contract.ts:38,45`                                                            |
-| **无 `dependsOn` 字段** | 全仓 `git grep dependsOn` 在 src + tests 范围零命中（plan-mode 的 `PlanStep` 另有同名概念，仅出现在 `ARCHITECTURE.md` 文档层）                                                                                                                                                                                                                                                                                               | —                                                                                             |
-| **无显式拓扑排序**      | 依赖语义简化为「record 存在 = 就绪」：`computeReadyWorks` 过滤 `inputIds` 全到齐且状态 `requested` 的 work                                                                                                                                                                                                                                                                                                                   | `src/graph/graph-reconcile.ts:7`                                                              |
-| **增量调度**            | 三条触发：(a) `add_work` 即时就绪派发；(b) `settleGraphWork` 写终态后重读投影、对新就绪下游链式派发；(c) 主 Agent 准备停止时注入 `[Graph continuation]` 自救                                                                                                                                                                                                                                                                 | `src/tools/graph-tools.ts:201 · src/runtime/session-runtime.ts:866 · src/engine/loop.ts:2046` |
-| **Orphan 恢复**         | 进程崩在子代理执行期 → work 卡 `dispatched`。关键纠错：早期错误用 `delegationId === runId` 匹配（二者是独立 id 空间永不相等），正确判据是「dispatched 且 delegationId 不在 `liveDelegationIds` 里」。启动序列 `reconcileIncompleteRuns → repairSessionProjection → recoverOrphanGraphWorks → RuntimeRun.start` 跑一次恢复，对 orphan 标 failed + recovered。**不自动 reclaim**（无幂等 claim token，重派会重复 side effect） | `src/graph/graph-recover.ts:38`、`src/runtime/runtime-run-executor.ts:106`                    |
-| **零新存储**            | **项目中不存在 `GraphControlStore`**；全仓无该类型，仅 `src/runtime/agent-runtime.ts:1769` 有一个异名局部别名 `graphStore = session.runtimeEventStore`。5 种 `graph.*` 事件写同一 canonical 账本，`projectGraphEntries` 幂等折叠                                                                                                                                                                                             | `src/graph/graph-reducer.ts:195`                                                              |
-
-### Graph Mode 的三个已知边界
-
-多轮真实模型测试发现三个点，定性如下：
-
-1. **`close_graph` 不拒绝带 pending 的关闭**（设计性软报告，非 bug）：返回 `pendingWorks` 清单 + 分级 warning（requested 不会再调度；dispatched 仍会完成写 record 但不触发下游）。对标 maka `finish` 只断言 result_ids。`src/tools/graph-tools.ts:417`。
-2. **closed 后 `add_work` 被拒绝**（已修复并锁测试）：`AddWorkTool` 在 `status === "closed"` 时抛 `GraphConflictError`，reducer 额外防御性忽略 added 事件（双层守卫）。`src/tools/graph-tools.ts:160`、`src/graph/graph-reducer.ts:114`、`tests/e2e/graph-mode-multiround.real-llm.test.ts:447`（T6）。
-3. **子代理「自报完成」会掩盖失败，且无内容级熔断**（已知边界，风险较高）：子代理遇到不可完成任务时返回 `completed` + summary「无法完成」而非 `error`；`settleGraphWork` 把 `completed/partial` 一律写 `recorded`（`src/runtime/session-runtime.ts:803`）。**graph 调度层不做任何 outputSummary 内容校验**——`computeReadyWorks` 只看 record 是否存在不看内容，于是掩盖的失败 record 会让下游 work 立即 ready 并**自动链式派发**，烧下游预算产垃圾 record 再级联。续行仲裁器（只看 pending 数）和死锁检测器（看 `missingInputIds`）都不读 summary，无法自动熔断。**唯一缓解**是主 Agent 主动调 `view_graph` 人工识别失败文本。详见 `docs/architecture/18-graph-mode.md:222`。
+Graph v2 由 `orchestrationMode="graph"` 开启，根 Agent 使用 `view_agent_graph`、`update_agent_graph`和 `yield_agent_graph`；Operator 使用 `agent_output` 提交结果。调度权威是 workspace `pico.sqlite` 中的 `agent_graph_*` 表，执行权威仍是普通 RuntimeEvent ledger。具体领域契约、Claim、exact Run 和 yield/wake 恢复见 [`18-graph-mode.md`](./18-graph-mode.md)。
 
 ---
 
@@ -280,33 +264,32 @@ Graph Mode **复用同一套 CAS**：`appendGraphOperation`（`runtime-event-sto
 
 ## 七、概念速查表
 
-| 概念                           | 一句话                                                        | 锚点                                          |
-| ------------------------------ | ------------------------------------------------------------- | --------------------------------------------- |
-| **RuntimeEventStore**          | 唯一 canonical 账本，append-only JSONL                        | `src/storage/runtime-event-store.ts:362`      |
-| **appendBatch**                | RuntimeEventStore 内唯一写原语                                | 同上                                          |
-| **withLedgerStoreLock**        | 共享文件锁 + 原子重命名模板（两个 Store 共用）                | `src/storage/ledger-store-lock.ts:59`         |
-| **高水位 CAS**                 | 串行追加互斥（throw `:469`）                                  | `runtime-event-store.ts:469`                  |
-| **operationId + 指纹 CAS**     | plan/graph exactly-once（throw `:412`）                       | `runtime-event-store.ts:412`                  |
-| **RuntimeProjectionService**   | 消息/transcript/state/usage 统一投影入口（不含 plan/graph）   | `src/engine/runtime-projection-service.ts:69` |
-| **RuntimeEvidenceReference**   | 工具大块输出的内容寻址 CAS 引用                               | `src/engine/tool-result-contract.ts:8`        |
-| **EvidenceRef**                | Memory provenance 的事件区间游标（零持久化）                  | `src/engine/evidence-ref.ts:47`               |
-| **PlanCoordinator**            | plan 用户意图转换规范入口（非唯一写入者）                     | `src/plan/coordinator.ts:40`                  |
-| **reducePlanEvent**            | plan 纯函数 reducer（强制不变量）                             | `src/plan/reducer.ts:34`                      |
-| **GoalManager**                | 长程目标 + budget 状态机，每轮注入 turnTail                   | `src/engine/goal-manager.ts:113`              |
-| **TodoStore**                  | 原子任务清单，每轮注入 turnTail（独立 todo.json，非账本投影） | `src/context/todo-store.ts:53`                |
-| **session-fork-service**       | 非破坏性 fork + 写 recovered/interrupted 事件                 | `src/engine/session-fork-service.ts:477`      |
-| **GraphWork / inputIds**       | maka 式 record-id 依赖                                        | `src/graph/contract.ts:6`                     |
-| **workIdFor / recordIdFor**    | 纯哈希确定性 id（跨 run 稳定）                                | `src/graph/contract.ts:38,45`                 |
-| **computeReadyWorks**          | 「record 存在 = 就绪」调度                                    | `src/graph/graph-reconcile.ts:7`              |
-| **recoverOrphanGraphWorks**    | 崩溃孤儿恢复（标 failed + recovered）                         | `src/graph/graph-recover.ts:38`               |
-| **PromptComposer.buildLayers** | system(静态) / turnTail(动态) 分层                            | `src/context/composer.ts:94`                  |
-| **sanitizeToolPairs**          | 协议修复（孤儿/重复工具结果）                                 | `src/context/compactor.ts:526`                |
-| **explore_repo**               | 零-LLM 确定性 DFS 侦察                                        | `src/tools/explore-repo.ts`                   |
-| **MemoryContextBuilder**       | 被动 top-3 召回注入（需信任门控）                             | `src/memory/context-builder.ts:5`             |
-| **LocalDaemonHost**            | daemon 内部生命周期所有者                                     | `src/daemon/runtime-host.ts:28`               |
-| **ToolRegistry.execute**       | 中间件执行链（不截断结果）                                    | `src/tools/registry-impl.ts:208`              |
-| **DelegationManager**          | 子代理委派跟踪                                                | `src/tools/delegation-manager.ts:168`         |
-| **bash-hardline**              | 只兜受保护系统路径的破坏性命令                                | `src/approval/bash-hardline.ts:43`            |
+| 概念                             | 一句话                                                        | 锚点                                           |
+| -------------------------------- | ------------------------------------------------------------- | ---------------------------------------------- |
+| **RuntimeEventStore**            | 唯一 canonical 账本，append-only JSONL                        | `src/storage/runtime-event-store.ts:362`       |
+| **appendBatch**                  | RuntimeEventStore 内唯一写原语                                | 同上                                           |
+| **withLedgerStoreLock**          | 共享文件锁 + 原子重命名模板（两个 Store 共用）                | `src/storage/ledger-store-lock.ts:59`          |
+| **高水位 CAS**                   | 串行追加互斥（throw `:469`）                                  | `runtime-event-store.ts:469`                   |
+| **operationId + 指纹 CAS**       | plan exactly-once                                             | `sqlite-runtime-event-store.ts`                |
+| **RuntimeProjectionService**     | 消息/transcript/state/usage 统一投影入口（不含 plan）         | `src/engine/runtime-projection-service.ts`     |
+| **RuntimeEvidenceReference**     | 工具大块输出的内容寻址 CAS 引用                               | `src/engine/tool-result-contract.ts:8`         |
+| **EvidenceRef**                  | Memory provenance 的事件区间游标（零持久化）                  | `src/engine/evidence-ref.ts:47`                |
+| **PlanCoordinator**              | plan 用户意图转换规范入口（非唯一写入者）                     | `src/plan/coordinator.ts:40`                   |
+| **reducePlanEvent**              | plan 纯函数 reducer（强制不变量）                             | `src/plan/reducer.ts:34`                       |
+| **GoalManager**                  | 长程目标 + budget 状态机，每轮注入 turnTail                   | `src/engine/goal-manager.ts:113`               |
+| **TodoStore**                    | 原子任务清单，每轮注入 turnTail（独立 todo.json，非账本投影） | `src/context/todo-store.ts:53`                 |
+| **session-fork-service**         | 非破坏性 fork + 写 recovered/interrupted 事件                 | `src/engine/session-fork-service.ts:477`       |
+| **AgentGraphApplicationService** | Graph v2 调度应用边界                                         | `src/agent-graph/service.ts`                   |
+| **AgentGraphReconciler**         | revision / Claim / Runtime 事实的 fixed-point 调和            | `src/agent-graph/reconciler.ts`                |
+| **AgentGraphSupervisorService**  | workspace 级恢复、yield/wake 与 single-flight                 | `src/daemon/agent-graph-supervisor-service.ts` |
+| **PromptComposer.buildLayers**   | system(静态) / turnTail(动态) 分层                            | `src/context/composer.ts:94`                   |
+| **sanitizeToolPairs**            | 协议修复（孤儿/重复工具结果）                                 | `src/context/compactor.ts:526`                 |
+| **explore_repo**                 | 零-LLM 确定性 DFS 侦察                                        | `src/tools/explore-repo.ts`                    |
+| **MemoryContextBuilder**         | 被动 top-3 召回注入（需信任门控）                             | `src/memory/context-builder.ts:5`              |
+| **LocalDaemonHost**              | daemon 内部生命周期所有者                                     | `src/daemon/runtime-host.ts:28`                |
+| **ToolRegistry.execute**         | 中间件执行链（不截断结果）                                    | `src/tools/registry-impl.ts:208`               |
+| **DelegationManager**            | 子代理委派跟踪                                                | `src/tools/delegation-manager.ts:168`          |
+| **bash-hardline**                | 只兜受保护系统路径的破坏性命令                                | `src/approval/bash-hardline.ts:43`             |
 
 ---
 

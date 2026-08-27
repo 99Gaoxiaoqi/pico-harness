@@ -63,12 +63,6 @@ const CLAIM_BY_KIND: Record<RuntimeEvent["kind"], RuntimeEventClaimKind> = {
   "plan.execution.interrupted": "control",
   "plan.execution.resumed": "control",
   "plan.execution.replanned": "control",
-  // Graph Mode 事件（5 种全部覆盖）
-  "graph.work.added": "control",
-  "graph.work.dispatched": "control",
-  "graph.work.recorded": "control",
-  "graph.work.failed": "control",
-  "graph.closed": "control",
 };
 
 export function claimKindForEvent(event: RuntimeEvent): RuntimeEventClaimKind | undefined {

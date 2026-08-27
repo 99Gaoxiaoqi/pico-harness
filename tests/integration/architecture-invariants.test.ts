@@ -27,17 +27,12 @@ test("事件账本无事件级 GC（append-only 不变量）", () => {
 });
 
 test("appendBatch 是 RuntimeEventStore 内唯一写原语", () => {
-  // 19 文档 1.2：append/appendSessionState/appendTranscriptEvent/appendPlanOperation/
-  // appendGraphOperation 全是 appendBatch 的包装（SQLite 迁移后契约不变，ADR 24）。
+  // 19 文档 1.2：appendSessionState/appendTranscriptEvent/appendPlanOperation
+  // 全是 appendBatch 的包装（SQLite 迁移后契约不变，ADR 24）。
   const store = readSource("src/storage/sqlite/sqlite-runtime-event-store.ts");
   assert.match(store, /\bappendBatch\b/, "appendBatch 必须存在为唯一写原语");
   // 文档声称的写包装都应存在（委托 appendBatch）。
-  for (const wrapper of [
-    "appendSessionState",
-    "appendTranscriptEvent",
-    "appendPlanOperation",
-    "appendGraphOperation",
-  ]) {
+  for (const wrapper of ["appendSessionState", "appendTranscriptEvent", "appendPlanOperation"]) {
     assert.match(store, new RegExp(`\\b${wrapper}\\b`), `${wrapper} 应作为 appendBatch 的包装存在`);
   }
 });
@@ -48,7 +43,7 @@ test("投影入口 RuntimeProjectionService 不直接持久化（无第二事实
   // 投影服务不得直接调用账本的写原语（它是纯读侧）。
   assert.doesNotMatch(
     projection,
-    /\bappendBatch\b|\.append\(|appendPlanOperation|appendGraphOperation/,
+    /\bappendBatch\b|\.append\(|appendPlanOperation/,
     "RuntimeProjectionService 是读模型，不得调用账本写原语",
   );
 });
@@ -59,7 +54,7 @@ test("压缩不改账本、只追加 checkpoint（读模型变化）", () => {
   // 压缩器不得调用账本写/删原语（它只产出供投影使用的 summary，写入由 engine 负责）。
   assert.doesNotMatch(
     compactor,
-    /\bappendBatch\b|appendPlanOperation|appendGraphOperation|deleteSession\b/,
+    /\bappendBatch\b|appendPlanOperation|deleteSession\b/,
     "Compactor 不得直接写/删账本；压缩只产出 summary，checkpoint 追加由 engine 负责",
   );
 });

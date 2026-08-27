@@ -232,10 +232,6 @@ const EXPLORE_SYNTHESIS_FAILED_MESSAGE =
   "子代理已完成探索，但主模型连续违反纯文本总结协议，本次未能生成可靠的统一总结。";
 const MAX_REQUIRED_FIRST_DELEGATION_ATTEMPTS = 2;
 const MAX_PLAN_STOP_CONTINUATIONS = 2;
-/**
- * Graph Mode 续行上限：主 Agent 连续停止但 graph 仍有 pending 工作时，最多注入
- * 这么多次 [Graph continuation] 消息。超过即视为 graph 推进停滞，放行正常停止。
- */
 const REQUIRED_FIRST_DELEGATION_FAILED_MESSAGE =
   "模型未能按用户的明确要求启动 required 子代理，已停止主 Agent 自行探索。";
 const REQUIRED_DELEGATION_RECOVERY_PROMPT =

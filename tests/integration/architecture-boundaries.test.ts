@@ -296,23 +296,23 @@ test("architecture gate blocks delegation-manager from importing graph/runtime, 
   const fixtureRoot = await mkdtemp(join(tmpdir(), "pico-delegation-leak-"));
   context.after(() => rm(fixtureRoot, { recursive: true, force: true }));
   await Promise.all(
-    ["src/tools", "src/graph", "apps", "packages"].map((path) =>
+    ["src/tools", "src/agent-graph/core", "apps", "packages"].map((path) =>
       mkdir(join(fixtureRoot, path), { recursive: true }),
     ),
   );
   await writeFile(
-    join(fixtureRoot, "src/graph/contract.ts"),
-    "export interface GraphWork { readonly id: string }\n",
+    join(fixtureRoot, "src/agent-graph/core/contracts.ts"),
+    "export interface AgentGraph { readonly id: string }\n",
     "utf8",
   );
   await writeFile(
     join(fixtureRoot, "src/tools/delegation-manager.ts"),
-    ['import type { GraphWork } from "../graph/contract.js";', ""].join("\n"),
+    ['import type { AgentGraph } from "../agent-graph/core/contracts.js";', ""].join("\n"),
     "utf8",
   );
   await writeFile(
     join(fixtureRoot, "src/tools/other.ts"),
-    'import type { GraphWork } from "../graph/contract.js";\n',
+    'import type { AgentGraph } from "../agent-graph/core/contracts.js";\n',
     "utf8",
   );
 
@@ -323,7 +323,7 @@ test("architecture gate blocks delegation-manager from importing graph/runtime, 
       {
         rule: "delegation-manager-scheduling-leak",
         source: "src/tools/delegation-manager.ts",
-        target: "src/graph/contract.ts",
+        target: "src/agent-graph/core/contracts.ts",
       },
     ],
     "DelegationManager 的 Graph import 必须被拒绝",

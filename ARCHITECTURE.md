@@ -122,9 +122,6 @@ DAG 调度全部从 RuntimeEventStore 派生，不建立第二个 canonical stor
   启动的 step 仍未 settled 时，recover 将 step 回退为 pending（不自动重派）。
 - `delegate_task` 工具的 `plan_step_id` 参数让工具层自动管理 step 状态（dispatch →
   in_progress，完成 → completed），无需模型手动调 update_plan。
-- `src/graph/graph-reconcile.ts` 的 `computeReadySteps` 是纯函数，从 PlanProjection 计算就绪步骤。
-- `src/graph/graph-recover.ts` 的 `recoverOrphanSteps` 通过 `run.terminal` 跨参判定 orphan step，
-  零假阳性（vs lease 定时器的假阳性风险）。
 
 ## 路径模型
 

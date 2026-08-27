@@ -11,7 +11,7 @@
   - 新增 schedule revision、operator provision、activation claim、record ref、supervisor wake/attempt 的 SQLite 控制面。
   - 新增 `view_agent_graph`、`update_agent_graph`、`yield_agent_graph` 和 operator-only `agent_output`。
   - 支持首版主路径：add、stop、finish、`shared` workspace、已提交输入引用、有界 handoff、不同 Operator 并行、同一 Operator 串行、daemon 启动恢复。
-  - 删除 v1 调度写链路；旧 `graph.*` RuntimeEvent 不迁移、不续跑，只作为不可变历史保留。
+  - 删除 v1 调度写链路及历史兼容层；旧 `graph.*` RuntimeEvent 历史数据清理后不再解码。
 - Out:
   - 不维护 v1/v2 双运行时或活动 Graph 原地迁移。
   - 不实现自动 `map` / `all_settled`、任意删边重连、可视化节点编辑器和全局公平调度。
@@ -26,7 +26,7 @@
 - [x] 4. 已实现 operator-only `agent_output` 和 reference-only Record 投影，只接受 committed、non-partial、身份及 owner fence 匹配的 RuntimeEvent，并按单条 16 KiB、总计 48 KiB 生成带 provenance 的下游 handoff。
 - [x] 5. 已实现 `src/agent-graph/reconciler.ts`，按 stop → provision → resolve inputs → revision-conditional claim → begin executing → project records 推进到 fixed point；finish 阻止 fresh Claim，但保留既有 Claim 与 Runtime 事实。
 - [x] 6. 已实现 workspace 级 `AgentGraphSupervisorService` 及 `WorkspaceRuntimeService` 生命周期接入，覆盖启动扫描、single-flight reconcile、持久 yield/Wake/Attempt、退避、权限等待、manual intervention 和精确根 RuntimeRun。
-- [x] 7. Graph 工具与 prompt 已硬切为 `view_agent_graph`、`update_agent_graph`、`yield_agent_graph` 和 operator-only `agent_output`；已删除 `DelegationManager` Graph 分支、Graph work lease、旧 settle/reconcile/recover 与 engine continuation 写路径。旧 `graph.*` 仅保留历史 codec/reducer，不迁移、不续跑。
+- [x] 7. Graph 工具与 prompt 已硬切为 `view_agent_graph`、`update_agent_graph`、`yield_agent_graph` 和 operator-only `agent_output`；已删除 `DelegationManager` Graph 分支、Graph work lease、旧 settle/reconcile/recover 与 engine continuation 写路径；历史数据、codec、类型与 reducer 也已彻底退役。
 - [ ] 8. 确定性集成测试已覆盖 revision 幂等/冲突、readiness、stop/finish 与 Claim 竞争、两个 SQLite store/进程竞争、投影重建、exact Run attach/indeterminate/stop/authority/损坏账本、真实宿主 operator/root execute、owner fence、yield/wake 竞态、production 装配失败和 workspace 生命周期；关键并发组连续 10 轮共 400 项无失败。尚未用独立子进程逐一 kill/reopen 覆盖 claim 后 Run 前、provider 前后、terminal 后 wake 前的全部崩溃窗口。
 - [x] 9. 已完成 Graph v2 架构文档、旧数据硬切说明、production daemon host 执行接线和最终确定性验证：独立审查的 Graph/production 集成集 91/91 通过，`npm run lint`、`npm run typecheck`、严格架构边界检查、build、依赖审计（0 vulnerabilities）、Desktop typecheck/package/make、DMG 镜像校验、格式和差异检查通过。最终全量集成测试 1364 项中 1354 项通过、0 项失败、10 项仅因当前 macOS 平台跳过；Hook watcher 的丢通知、慢 guard 去重、guard 内二次写、startup gap、stop/restart 与旧异步回调撤租也已收口并通过 32 项生命周期回归。
 - [x] 10. 真实模型 E2E 已在用户默认路由 `deepseek/deepseek-v4-flash` 显式执行并 2/2 通过：完整走通 root → Operator → 唯一 durable output/Record → exact root wake → `view_agent_graph` 读取随机 canary/status → finish，约 44.9 秒完成；输出内容只经 Runtime RecordRef 返回，未复制到 Graph 控制库或 wake prompt。

@@ -54,8 +54,8 @@
 | [13 渐进披露](architecture/13-progressive-disclosure.md)                     | 部分过期   | 工具披露看 ADR 23；ToolResult 看 ADR 26                    |
 | [14 Workspace Memory](architecture/14-workspace-memory.md)                   | 部分过期   | 提案语义可参考；存储和生命周期已迁移                       |
 | [15 Prompt Cache](architecture/15-prompt-cache.md)                           | 待专项复核 | 原理可参考，阈值和 Provider 细节以代码为准                 |
-| [18 Graph Mode](architecture/18-graph-mode.md)                               | 当前主线   | 调度与恢复细节以 RuntimeEvent/SQLite 实现为准              |
-| [19 核心概念地图](architecture/19-concepts-map.md)                           | 部分过期   | 概念关系可参考；旧文件布局和部分行号已漂移                 |
+| [18 Graph Mode](architecture/18-graph-mode.md)                               | 当前主线   | Graph v2 控制面、exact Run 与 yield/wake 恢复              |
+| [19 核心概念地图](architecture/19-concepts-map.md)                           | 历史快照   | 旧 JSONL、Evidence 与 Graph v1 叙述不代表当前实现          |
 | [Plugin scope](architecture/plugin-scope-contract.md)                        | 当前约束   | Plugin 物理根与 scope 边界                                 |
 
 ## 架构决策与研究
