@@ -385,17 +385,7 @@ export class SessionForkService {
     }
     if (operation.state === "needs_attention") {
       try {
-        if (targetEvents.length > 0) {
-          await this.assertRuntimeTargetOwned(operation, {
-            stagedBundlePath: this.frozenBundlePath(operation.stagingDirectory),
-          });
-        }
-        await this.runtimeStore.deleteSession(input.targetSessionId);
-        await fileHistoryDeleteClonedSession(
-          input.sourceSessionId,
-          input.targetSessionId,
-          this.fileHistoryIo,
-        );
+        await this.cleanupUnpublishedForkTarget(operation, targetEvents);
         await this.coordinator.abortNeedsAttention({
           operationId: operation.operationId,
           expectedVersion: operation.version,
@@ -436,12 +426,51 @@ export class SessionForkService {
   async abortNeedsAttention(
     input: StorageOperationDispositionInput,
   ): Promise<ForkOperationDispositionResult> {
+    const operation = await this.requireForkOperation(input.operationId);
+    if (operation.state !== "needs_attention") {
+      throw new Error(`Fork operation ${operation.operationId} is not awaiting disposition`);
+    }
+    await this.cleanupUnpublishedForkTarget(operation);
     const result = await this.coordinator.abortNeedsAttention(input);
     return {
       operation: result.operation,
       stagingCleanup: result.stagingCleanup,
       ...(result.cleanupDiagnostic ? { cleanupDiagnostic: result.cleanupDiagnostic } : {}),
     };
+  }
+
+  private async cleanupUnpublishedForkTarget(
+    operation: ForkStorageOperation,
+    knownTargetEvents?: Awaited<ReturnType<SqliteRuntimeEventStore["readSession"]>>,
+  ): Promise<void> {
+    const targetEvents =
+      knownTargetEvents ?? (await this.runtimeStore.readSession(operation.targetSessionId));
+    const publicationMarker = targetEvents.find(
+      (event) =>
+        event.kind === "session.forked" && event.data.parentSessionId === operation.sourceSessionId,
+    );
+    const publicationTerminal = publicationMarker
+      ? targetEvents.find(
+          (event) =>
+            event.kind === "run.terminal" &&
+            event.runId === publicationMarker.runId &&
+            event.data.status === "completed",
+        )
+      : undefined;
+    if (publicationMarker && publicationTerminal) {
+      throw new SessionForkPublicationUncertainError(operation.targetSessionId);
+    }
+    if (targetEvents.length > 0) {
+      await this.assertRuntimeTargetOwned(operation, {
+        stagedBundlePath: this.frozenBundlePath(operation.stagingDirectory),
+      });
+    }
+    await this.runtimeStore.deleteSession(operation.targetSessionId);
+    await fileHistoryDeleteClonedSession(
+      operation.sourceSessionId,
+      operation.targetSessionId,
+      this.fileHistoryIo,
+    );
   }
 
   private createCallbacks(): ForkOperationCallbacks {
