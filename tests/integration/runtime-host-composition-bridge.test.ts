@@ -22,6 +22,7 @@ import {
   type JsonValue,
   type RuntimeHostBridgeService,
 } from "../../src/daemon/index.js";
+import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 
 ensurePicoRuntimeHostOperationsRegistered();
 
@@ -57,18 +58,20 @@ async function startBridgeHarness(
   await mkdir(picoHome, { recursive: true });
   await mkdir(workspaceDir, { recursive: true });
   const env = { PICO_HOME: picoHome };
+  const workspacePath = await realpath(workspaceDir);
 
   // Same assembly convention as the daemon / desktop integration tests: a query-only
   // workspace service needs no real executor. Tests may inject a fake service instead.
-  const service =
-    options.service ??
-    (() => {
-      const runtimeService = new WorkspaceRuntimeService({
-        env,
-        execute: async () => undefined,
-      });
-      return new DesktopRuntimeService({ runtimeService, env });
-    })();
+  let service = options.service;
+  if (!service) {
+    const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
+    await trustStore.trust(workspacePath);
+    const runtimeService = new WorkspaceRuntimeService({
+      env,
+      execute: async () => undefined,
+    });
+    service = new DesktopRuntimeService({ runtimeService, trustStore, env });
+  }
 
   const capability = await resolveStorageRoot({ path: root, kind: "interactive" });
   const owner = await tryAcquireInteractiveRootOwner(capability);
@@ -93,8 +96,6 @@ async function startBridgeHarness(
   assert.equal(connectResult.kind, "connected", `期望 connected，实际 ${connectResult.kind}`);
   if (connectResult.kind !== "connected") throw new Error("unreachable");
   const connection = connectResult.connection;
-
-  const workspacePath = await realpath(workspaceDir);
 
   const cleanup = async () => {
     await connection.close().catch(() => undefined);
@@ -160,6 +161,21 @@ test("runtime-host bridge: usage.get returns a decoded usage object", async (t) 
 
   assert.ok(result.usage && typeof result.usage === "object", "usage.get 应返回 usage 对象");
   assert.equal(result.usage["workspacePath"], workspacePath);
+  assert.equal(result.usage["currency"], "CNY");
+  assert.equal(result.usage["costStatus"], "none");
+  assert.deepEqual((result.usage["total"] as Record<string, unknown>)["totalTokens"], 0);
+});
+
+test("runtime-host bridge: usage.get supports one global query without a workspace", async (t) => {
+  const { connection } = await startBridgeHarness(t);
+  const result = await connection.requestRegistered<{ usage: Record<string, unknown> }>(
+    "usage.get",
+    {},
+    10000,
+  );
+  assert.equal(result.usage["scope"], "all");
+  assert.equal(result.usage["currency"], "CNY");
+  assert.ok(Array.isArray(result.usage["workspaces"]));
 });
 
 test("runtime-host bridge: daemon INVALID_PARAMS maps to invalid_request without dropping the connection", async (t) => {

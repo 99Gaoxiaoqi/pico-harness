@@ -1044,6 +1044,7 @@ export function parseUsage(value: unknown): UsageView {
   const usage = isRecord(result.usage) ? result.usage : result;
   const total = isRecord(usage.total) ? usage.total : usage;
   const cache = isRecord(usage.cache) ? usage.cache : {};
+  const unavailableWorkspaces = recordArray(usage.unavailableWorkspaces);
   // Cache metrics are provider_calls-only. Baselines lack per-call coverage and must not be mixed
   // into the cache token cards or ratios.
   const cacheReadTokens = optionalNumberValue(cache.cacheReadTokens ?? cache.cache_read_tokens);
@@ -1052,8 +1053,10 @@ export function parseUsage(value: unknown): UsageView {
     .map((alert) => stringValue(alert.message))
     .filter((message) => message.length > 0);
   return {
+    totalTokens: optionalNumberValue(total.totalTokens),
     inputTokens: optionalNumberValue(total.inputTokens ?? total.input_tokens),
     outputTokens: optionalNumberValue(total.outputTokens ?? total.output_tokens),
+    reasoningTokens: optionalNumberValue(total.reasoningTokens),
     cacheReadTokens,
     cacheWriteTokens,
     uncachedInputTokens: optionalNumberValue(cache.uncachedInputTokens),
@@ -1063,7 +1066,24 @@ export function parseUsage(value: unknown): UsageView {
     cachePromptTokenReuseRate: optionalNumberValue(cache.promptTokenReuseRate),
     cacheReadToWriteRatio: optionalNumberValue(cache.cacheReadToWriteRatio),
     ...(cacheAlerts.length > 0 ? { cacheAlerts } : {}),
-    cost: optionalNumberValue(total.cost),
+    costCNY: optionalNumberValue(total.costCNY ?? total.cost),
+    costStatus:
+      usage.costStatus === "none" ||
+      usage.costStatus === "estimated" ||
+      usage.costStatus === "included" ||
+      usage.costStatus === "unknown" ||
+      usage.costStatus === "partial"
+        ? usage.costStatus
+        : undefined,
+    providerCallCount: optionalNumberValue(usage.providerCallCount),
+    usageReportCount: optionalNumberValue(usage.usageReportCount),
+    baselineCount: optionalNumberValue(usage.baselineCount),
+    scope:
+      usage.scope === "all" || usage.scope === "workspace" || usage.scope === "session"
+        ? usage.scope
+        : undefined,
+    workspacePath: stringValue(usage.workspacePath) || undefined,
+    unavailableWorkspaceCount: unavailableWorkspaces.length || undefined,
     period: stringValue(usage.period || usage.rangeAccuracy),
   };
 }
@@ -1367,10 +1387,13 @@ function mergeLoadedData(
 }
 
 export interface RuntimeActions {
+  dismissMessage(): void;
   chooseWorkspace(): Promise<string | undefined>;
+  registerWorkspace(): Promise<string | undefined>;
   ensureTemporaryWorkspace(): Promise<string | undefined>;
   selectWorkspace(workspacePath: string): Promise<void>;
   trustWorkspace(workspacePath: string, trusted: boolean): Promise<void>;
+  unregisterWorkspace(workspacePath: string): Promise<void>;
   reload(): Promise<void>;
   loadSession(ref: WorkspaceSessionRef): Promise<void>;
   loadEarlierSession(ref: WorkspaceSessionRef): Promise<void>;
@@ -1468,6 +1491,11 @@ export interface RuntimeActions {
   upsertProvider(provider: ProviderDraft): Promise<boolean>;
   deleteProvider(providerId: string): Promise<boolean>;
   setDefaultModelRoute(modelRouteId?: string): Promise<boolean>;
+  queryUsage(input?: {
+    readonly workspacePath?: string;
+    readonly from?: number;
+    readonly to?: number;
+  }): Promise<UsageView | undefined>;
   setProviderCredential(
     providerId: string,
     secret: string,
@@ -1499,9 +1527,12 @@ export interface RuntimeActions {
   ): Promise<RuntimeMemorySettings | undefined>;
   setLaunchAtLogin(enabled: boolean): Promise<void>;
   setBackgroundMode(enabled: boolean): Promise<void>;
-  openWorkspace(): Promise<void>;
-  initializeWorkspace(): Promise<void>;
-  runDiagnostics(kind: "runtime" | "resources"): Promise<DesktopDiagnosticReport | undefined>;
+  openWorkspace(workspacePath?: string): Promise<void>;
+  initializeWorkspace(workspacePath?: string): Promise<void>;
+  runDiagnostics(
+    kind: "runtime" | "resources",
+    workspacePath?: string,
+  ): Promise<DesktopDiagnosticReport | undefined>;
 }
 
 export interface DesktopDiagnosticReport {
@@ -1815,6 +1846,28 @@ export function useRuntimeStore(): RuntimeStore {
     });
   }, []);
 
+  const loadDesktopPreferences = useCallback(async (bridge: DesktopBridge): Promise<void> => {
+    const [launchResult, backgroundResult] = await Promise.all([
+      bridge.platform.getLaunchAtLogin(),
+      bridge.lifecycle.getBackgroundMode(),
+    ]);
+    setData((current) => {
+      const notices = { ...current.notices };
+      const errors = [
+        !launchResult.ok ? launchResult.error.message : undefined,
+        !backgroundResult.ok ? backgroundResult.error.message : undefined,
+      ].filter((message): message is string => Boolean(message));
+      if (errors.length > 0) notices.desktopPreferences = errors.join("；");
+      else delete notices.desktopPreferences;
+      return {
+        ...current,
+        ...(launchResult.ok ? { launchAtLogin: launchResult.value } : {}),
+        ...(backgroundResult.ok ? { backgroundMode: backgroundResult.value } : {}),
+        notices,
+      };
+    });
+  }, []);
+
   const loadScopedCapabilities = useCallback(
     async (bridge: DesktopBridge, kind: "skills" | "mcp", workspacePath?: string) => {
       if (!workspacePath) {
@@ -1988,19 +2041,13 @@ export function useRuntimeStore(): RuntimeStore {
       else values[key] = result.value;
     }
     const trustResult = await optionalInvoke(bridge, "workspace.trustStatus", params);
-    let launchAtLogin: boolean | undefined;
-    try {
-      const launchResult = await bridge.platform.getLaunchAtLogin();
-      if (launchResult.ok) launchAtLogin = launchResult.value;
-      else notices.desktopPreferences = launchResult.error.message;
-    } catch (error) {
-      notices.desktopPreferences = errorMessage(error);
-    }
     if (!isCurrentLoad()) return;
     if (trustResult.error) notices.trust = trustResult.error;
     setData((current) => {
       if (current.notices.providers) notices.providers = current.notices.providers;
       else delete notices.providers;
+      if (current.notices.desktopPreferences)
+        notices.desktopPreferences = current.notices.desktopPreferences;
       const trusted = booleanValue(trustResult.value?.trusted);
       const switchingWorkspace = current.workspacePath !== workspacePath;
       const workspaceMode = parseWorkspaceMode(
@@ -2026,7 +2073,6 @@ export function useRuntimeStore(): RuntimeStore {
           workspaces,
           workspacePath,
           trusted,
-          launchAtLogin,
           notices,
           memory:
             trusted && !switchingWorkspace
@@ -2214,13 +2260,22 @@ export function useRuntimeStore(): RuntimeStore {
         throw new Error("当前 Runtime 缺少会话能力。请完全退出并重新启动 Pico。");
       }
       await loadWorkspaceIndex(bridge, true);
-      await loadUserCapabilities(bridge);
-      await loadGlobalProviderConfig(bridge);
+      await Promise.all([
+        loadUserCapabilities(bridge),
+        loadGlobalProviderConfig(bridge),
+        loadDesktopPreferences(bridge),
+      ]);
       setConnection({ kind: "ready" });
     } catch (error) {
       setConnection({ kind: "error", detail: errorMessage(error), retryable: true });
     }
-  }, [loadGlobalProviderConfig, loadUserCapabilities, loadWorkspaceIndex, preview]);
+  }, [
+    loadDesktopPreferences,
+    loadGlobalProviderConfig,
+    loadUserCapabilities,
+    loadWorkspaceIndex,
+    preview,
+  ]);
 
   useEffect(() => {
     void bootstrap();
@@ -2273,7 +2328,13 @@ export function useRuntimeStore(): RuntimeStore {
     const refreshOnFocus = () => {
       const workspacePath = dataRef.current.workspacePath;
       void loadWorkspaceIndex(bridge)
-        .then(() => Promise.all([loadUserCapabilities(bridge), loadGlobalProviderConfig(bridge)]))
+        .then(() =>
+          Promise.all([
+            loadUserCapabilities(bridge),
+            loadGlobalProviderConfig(bridge),
+            loadDesktopPreferences(bridge),
+          ]),
+        )
         .then(() =>
           workspacePath &&
           dataRef.current.workspacePath === workspacePath &&
@@ -2287,6 +2348,7 @@ export function useRuntimeStore(): RuntimeStore {
     return () => window.removeEventListener("focus", refreshOnFocus);
   }, [
     connection.kind,
+    loadDesktopPreferences,
     loadGlobalProviderConfig,
     loadUserCapabilities,
     loadWorkspace,
@@ -2640,6 +2702,9 @@ export function useRuntimeStore(): RuntimeStore {
 
   const actions = useMemo<RuntimeActions>(
     () => ({
+      dismissMessage() {
+        setMessage(undefined);
+      },
       async chooseWorkspace() {
         let selectedWorkspacePath: string | undefined;
         await perform("choose-workspace", async (bridge) => {
@@ -2660,6 +2725,25 @@ export function useRuntimeStore(): RuntimeStore {
           await loadWorkspace(bridge, workspacePath);
         });
         return selectedWorkspacePath;
+      },
+      async registerWorkspace() {
+        let registeredWorkspacePath: string | undefined;
+        await perform("register-workspace", async (bridge) => {
+          const result = await bridge.platform.chooseWorkspace();
+          if (!result.ok) throw new Error(result.error.message);
+          if (!result.value) return;
+          if (preview) {
+            registeredWorkspacePath = result.value;
+            return;
+          }
+          const registeredValue = await invoke(bridge, "workspace.register", {
+            workspacePath: result.value,
+          });
+          registeredWorkspacePath = stringValue(registeredValue.workspacePath, result.value);
+          await loadWorkspaceIndex(bridge);
+          setMessage("项目已添加；当前会话和新任务选择保持不变。");
+        });
+        return registeredWorkspacePath;
       },
       async ensureTemporaryWorkspace() {
         return temporaryWorkspaceRequest.current.run(async () => {
@@ -2693,7 +2777,9 @@ export function useRuntimeStore(): RuntimeStore {
           if (!preview) await invoke(bridge, "workspace.trust", { workspacePath, trusted });
           if (!preview) {
             await loadWorkspaceIndex(bridge);
-            await loadWorkspace(bridge, workspacePath);
+            if (dataRef.current.workspacePath === workspacePath) {
+              setData((current) => ({ ...current, trusted }));
+            }
             return;
           }
           setData((current) => ({
@@ -2703,6 +2789,23 @@ export function useRuntimeStore(): RuntimeStore {
               workspace.path === workspacePath ? { ...workspace, trusted } : workspace,
             ),
           }));
+        });
+      },
+      async unregisterWorkspace(workspacePath) {
+        if (!workspacePath) return;
+        await perform("unregister-workspace", async (bridge) => {
+          if (!preview) {
+            await invoke(bridge, "workspace.unregister", { workspacePath });
+            await loadWorkspaceIndex(bridge);
+          } else {
+            setData((current) => ({
+              ...current,
+              workspaces: current.workspaces.filter(
+                (workspace) => workspace.path !== workspacePath,
+              ),
+            }));
+          }
+          setMessage("项目已从 Pico 列表移除，磁盘文件未被删除。");
         });
       },
       reload: bootstrap,
@@ -3485,6 +3588,15 @@ export function useRuntimeStore(): RuntimeStore {
         if (!providerConfig.writable) return false;
         const defaults: RuntimeUserDefaults = {
           ...(modelRouteId ? { modelRouteId } : {}),
+          ...(providerConfig.userDefaults.collaborationMode
+            ? { collaborationMode: providerConfig.userDefaults.collaborationMode }
+            : {}),
+          ...(providerConfig.userDefaults.orchestrationMode
+            ? { orchestrationMode: providerConfig.userDefaults.orchestrationMode }
+            : {}),
+          ...(providerConfig.userDefaults.permissionMode
+            ? { permissionMode: providerConfig.userDefaults.permissionMode }
+            : {}),
           ...(providerConfig.userDefaults.mode ? { mode: providerConfig.userDefaults.mode } : {}),
           ...(providerConfig.userDefaults.thinkingEffort
             ? { thinkingEffort: providerConfig.userDefaults.thinkingEffort }
@@ -3514,6 +3626,25 @@ export function useRuntimeStore(): RuntimeStore {
           }
           setMessage(modelRouteId ? "默认模型已更新。" : "已清除用户默认模型。");
         });
+      },
+      async queryUsage(input = {}) {
+        let usage: UsageView | undefined;
+        await perform("usage-query", async (bridge) => {
+          if (preview) {
+            usage = { ...previewData.usage, refreshedAt: Date.now() };
+            return;
+          }
+          const params = {
+            ...(input.workspacePath ? { workspacePath: input.workspacePath } : {}),
+            ...(input.from !== undefined ? { from: input.from } : {}),
+            ...(input.to !== undefined ? { to: input.to } : {}),
+          };
+          usage = {
+            ...parseUsage(await invoke(bridge, "usage.get", params)),
+            refreshedAt: Date.now(),
+          };
+        });
+        return usage;
       },
       async setProviderCredential(providerId, secret, expectedRevision) {
         const providerConfig = dataRef.current.providerConfig;
@@ -3793,27 +3924,28 @@ export function useRuntimeStore(): RuntimeStore {
         await perform("background-mode", async (bridge) => {
           const result = await bridge.lifecycle.setBackgroundMode(enabled);
           if (!result.ok) throw new Error(result.error.message);
+          setData((current) => ({ ...current, backgroundMode: enabled }));
           setMessage(enabled ? "关闭窗口后 Pico 会继续运行。" : "关闭窗口时 Pico 将退出。");
         });
       },
-      async openWorkspace() {
-        const workspacePath = dataRef.current.workspacePath;
+      async openWorkspace(requestedWorkspacePath) {
+        const workspacePath = requestedWorkspacePath ?? dataRef.current.workspacePath;
         if (!workspacePath) return;
         await perform("open-workspace", async (bridge) => {
           const result = await bridge.platform.openDirectory(workspacePath);
           if (!result.ok) throw new Error(result.error.message);
         });
       },
-      async initializeWorkspace() {
-        const workspacePath = dataRef.current.workspacePath;
+      async initializeWorkspace(requestedWorkspacePath) {
+        const workspacePath = requestedWorkspacePath ?? dataRef.current.workspacePath;
         if (!workspacePath) return;
         await perform("workspace-init", async (bridge) => {
           if (!preview) await invoke(bridge, "workspace.init", { workspacePath });
           setMessage("Pico 项目入口已初始化；已存在的文件保持不变。");
         });
       },
-      async runDiagnostics(kind) {
-        const workspacePath = dataRef.current.workspacePath;
+      async runDiagnostics(kind, requestedWorkspacePath) {
+        const workspacePath = requestedWorkspacePath ?? dataRef.current.workspacePath;
         if (!workspacePath) return undefined;
         let report: DesktopDiagnosticReport | undefined;
         await perform("diagnostics", async (bridge) => {
@@ -3947,6 +4079,7 @@ function createPreviewBridge(): DesktopBridge {
       setLaunchAtLogin: () => success(undefined),
     },
     lifecycle: {
+      getBackgroundMode: () => success(false),
       setBackgroundMode: () => success(undefined),
       quit: () => success(undefined),
     },

@@ -114,7 +114,7 @@ export function createRuntimeHostComposition(
   ): Promise<BridgeHandlerOutcome<UsageGetBridgeOutput>> => {
     try {
       const request = createTypedRuntimeRequest("usage.get", {
-        workspacePath: input.workspacePath,
+        ...(input.workspacePath !== undefined ? { workspacePath: input.workspacePath } : {}),
         ...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {}),
         ...(input.from !== undefined ? { from: input.from } : {}),
         ...(input.to !== undefined ? { to: input.to } : {}),

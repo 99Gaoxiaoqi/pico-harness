@@ -58,7 +58,7 @@ test("启动只加载用户级能力，显式选择项目后才读取有效列�
   );
   assert.match(source, /optionalInvoke\(bridge, "skills\.user\.list", \{\}\)/u);
   assert.match(source, /optionalInvoke\(bridge, "mcp\.user\.list", \{\}\)/u);
-  assert.match(bootstrap, /await loadUserCapabilities\(bridge\)/u);
+  assert.match(bootstrap, /loadUserCapabilities\(bridge\)/u);
   assert.doesNotMatch(workspaceLoader, /config\.(?:skills|mcpServers)/u);
   assert.match(source, /invoke\(bridge, "skills\.effective\.list", \{ workspacePath \}\)/u);
   assert.match(source, /invoke\(bridge, "mcp\.effective\.list", \{ workspacePath \}\)/u);
