@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { agentOutputRecordIdFor } from "../../agent-graph/core/ids.js";
+import { agentOutputRecordIdFor, graphIdFor } from "../../agent-graph/core/ids.js";
 import type { OperationalDatabaseLease } from "./sqlite-database.js";
 import { prepareCurrentWorkspaceSqliteStorageSync } from "./workspace-scopes.js";
 import type {
@@ -116,6 +116,38 @@ export class SqliteAgentGraphControlStore {
 
   getGraph(graphId: string): AgentGraphRecord | undefined {
     return this.read(() => this.selectGraph(requireNonEmpty(graphId, "graphId")));
+  }
+
+  getOpenRootEpoch(rootSessionId: string): AgentGraphRecord | undefined {
+    return this.read(() =>
+      this.selectOpenGraphByRoot(requireNonEmpty(rootSessionId, "rootSessionId")),
+    );
+  }
+
+  openRootEpoch(rootSessionId: string): IdempotentStoreResult<AgentGraphRecord> {
+    const normalizedRootSessionId = requireNonEmpty(rootSessionId, "rootSessionId");
+    return this.write(() => {
+      const existing = this.selectOpenGraphByRoot(normalizedRootSessionId);
+      if (existing) return { record: existing, replayed: true };
+      const row = this.lease.database
+        .prepare(
+          `SELECT COALESCE(MAX(epoch), 0) AS max_epoch
+           FROM agent_graphs WHERE root_session_id = ?`,
+        )
+        .get(normalizedRootSessionId);
+      const epoch = rowNumber(asRow(row), "max_epoch") + 1;
+      requirePositiveInteger(epoch, "epoch");
+      const graphId = graphIdFor(normalizedRootSessionId, epoch);
+      const createdAt = this.now();
+      this.lease.database
+        .prepare(
+          `INSERT INTO agent_graphs
+           (graph_id, root_session_id, epoch, phase, head_revision, created_at, finished_at)
+           VALUES (?, ?, ?, 'open', 0, ?, NULL)`,
+        )
+        .run(graphId, normalizedRootSessionId, epoch, createdAt);
+      return { record: this.requireGraph(graphId), replayed: false };
+    });
   }
 
   listGraphs(rootSessionId?: string): readonly AgentGraphRecord[] {

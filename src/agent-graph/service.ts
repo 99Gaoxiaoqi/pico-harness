@@ -8,7 +8,7 @@ import {
   type RegisterAgentGraphYieldInput as SupervisorRegisterYieldInput,
 } from "../daemon/agent-graph-supervisor-service.js";
 import type { SqliteAgentGraphControlStore } from "../storage/sqlite/sqlite-agent-graph-control-store.js";
-import type { AgentGraphScheduleCommand } from "./core/contracts.js";
+import type { AgentGraph, AgentGraphScheduleCommand } from "./core/contracts.js";
 import { isIntentStopped, resolveIntentReadiness } from "./core/index.js";
 import type {
   AgentGraphSupervisorProjection,
@@ -51,6 +51,7 @@ export interface AgentGraphApplicationService {
   readonly toolPort: AgentGraphSupervisorToolPort;
   readonly drivePort: AgentGraphDrivePort;
   readonly supervisor: AgentGraphSupervisorService;
+  openRootEpoch(rootSessionId: string): AgentGraph;
   start(): Promise<void>;
   close(): Promise<void>;
 }
@@ -176,8 +177,7 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
 
   async commitUpdate(input: CommitAgentGraphUpdateInput): Promise<CommitAgentGraphUpdateResult> {
     const commands = this.materializeCommands(input);
-    this.ensureEpochOneGraph(input.graphId, input.source.sessionId);
-    const graph = this.requireRootGraph(input.graphId, input.source.sessionId);
+    const graph = this.requireBoundGraph(input.graphId, input.source.sessionId, input.epoch);
     if (graph.rootSessionId !== input.source.sessionId) {
       throw new Error(`Graph ${input.graphId} does not belong to update source Session`);
     }
@@ -196,13 +196,13 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
     return {
       revision: committed.record.revision,
       replayed: committed.replayed,
-      projection: this.readProjectionSync(input.graphId, input.source.sessionId),
+      projection: this.readProjectionSync(input.graphId, input.source.sessionId, input.epoch),
     };
   }
 
   async readProjection(input: ReadAgentGraphProjectionInput): Promise<AgentGraphSupervisorView> {
-    this.ensureEpochOneGraph(input.graphId, input.rootSessionId);
-    const projection = this.readProjectionSync(input.graphId, input.rootSessionId);
+    this.requireBoundGraph(input.graphId, input.rootSessionId, input.epoch);
+    const projection = this.readProjectionSync(input.graphId, input.rootSessionId, input.epoch);
     const state = this.control.getScheduleState(input.graphId);
     const selectedRecords = this.selectViewRecords(
       input.graphId,
@@ -261,8 +261,7 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
   }
 
   async registerYield(input: RegisterAgentGraphYieldInput): Promise<RegisterAgentGraphYieldResult> {
-    this.ensureEpochOneGraph(input.graphId, input.rootSessionId);
-    this.requireRootGraph(input.graphId, input.rootSessionId);
+    this.requireBoundGraph(input.graphId, input.rootSessionId, input.epoch);
     // Acquire future progress before allocating the root-Run-unique permit. A
     // rejected preflight must leave the same root Run free to repair its
     // schedule and yield again with a new tool call.
@@ -285,7 +284,7 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
       return {
         permitId,
         ...(replayed === undefined ? {} : { replayed }),
-        snapshot: this.readProjectionSync(input.graphId, input.rootSessionId),
+        snapshot: this.readProjectionSync(input.graphId, input.rootSessionId, input.epoch),
       };
     } catch (error) {
       const interest = this.store.getYieldInterest(permitId);
@@ -314,8 +313,9 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
   private readProjectionSync(
     graphId: string,
     rootSessionId: string,
+    epoch: number,
   ): AgentGraphSupervisorProjection {
-    this.requireRootGraph(graphId, rootSessionId);
+    this.requireBoundGraph(graphId, rootSessionId, epoch);
     const state = this.control.getScheduleState(graphId);
     return {
       graph: state.graph,
@@ -383,21 +383,12 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
     });
   }
 
-  private ensureEpochOneGraph(graphId: string, rootSessionId: string): void {
-    const existing = this.store.getGraph(graphId);
-    if (existing) {
-      if (existing.rootSessionId !== rootSessionId || existing.epoch !== 1) {
-        throw new Error(`Graph ${graphId} is not the epoch=1 Graph for root Session`);
-      }
-      return;
-    }
-    this.store.createGraph({ graphId, rootSessionId, epoch: 1 });
-  }
-
-  private requireRootGraph(graphId: string, rootSessionId: string) {
+  private requireBoundGraph(graphId: string, rootSessionId: string, epoch: number) {
     const graph = this.store.getGraph(graphId);
-    if (!graph || graph.rootSessionId !== rootSessionId || graph.epoch !== 1) {
-      throw new Error(`Graph ${graphId} does not belong to root Session ${rootSessionId}`);
+    if (!graph || graph.rootSessionId !== rootSessionId || graph.epoch !== epoch) {
+      throw new Error(
+        `Graph ${graphId} does not match root Session ${rootSessionId} epoch ${epoch}`,
+      );
     }
     return graph;
   }
@@ -440,6 +431,10 @@ export function createAgentGraphApplicationService(
     toolPort,
     drivePort: drive,
     supervisor,
+    openRootEpoch: (rootSessionId) => {
+      const opened = options.store.openRootEpoch(rootSessionId);
+      return control.getScheduleState(opened.record.graphId).graph;
+    },
     start: () => supervisor.start(),
     close: async () => {
       if (closed) return;

@@ -101,7 +101,8 @@ Graph = {
 - `headRevision` 是所有 schedule 更新的 CAS 版本；
 - `open` 可接纳新的 add/Claim/yield，`sealed`（存储层叫 `finished`）阻止新的工作准入；
 - finish 后，已持久化的 Claim 和已经启动的 RuntimeRun 仍可被观察、停止和投影，不能被抹掉；
-- SQLite 约束同一 root Session 同时最多一个 open Graph；当前应用服务只创建 epoch 1。
+- SQLite 约束同一 root Session 同时最多一个 open Graph；root Run 组装时在写事务中复用当前 open Graph，或以 `max(epoch) + 1` 创建新 Graph。
+- root Run 一旦组装就固定 `{graphId, epoch}`；同一 Run 内不会漂移到新 epoch。只读和工具路径必须匹配该绑定，不得为缺失 Graph 产生隐式写入。
 
 `selectedRecordIds` 是根 Supervisor 在 finish 时声明的最终结果集合。领域层在获得权威 RecordRef 集合时校验存在性与归属；SQLite store 则在提交 finish revision 的同一 `BEGIN IMMEDIATE` 事务内强制所有选中 ID 已存在且属于当前 Graph，未知或跨图引用不会推进 head revision。
 
@@ -356,7 +357,7 @@ production 将 exact RuntimeRun 安装为 `WorkspaceTaskRuntime` 中的 detached
 ## 10. 必须保持的不变量
 
 1. Schedule revision 是 Graph 调度历史的唯一写入口；`operationId + fingerprint` 决定幂等重放。
-2. 同一 root Session 最多一个 open Graph；当前宿主限定 epoch 1。
+2. 同一 root Session 最多一个 open Graph；新 root Run 复用当前 open epoch，只有在其 finish 后才原子分配下一 epoch。
 3. 同一 `graphId + intentId` 最多一个 Claim；Claim 的 exact Runtime 身份不可变。
 4. finish 只阻止新的准入，不删除 Claim、RuntimeRun 或已提交 RecordRef。
 5. RecordRef 只能来自身份匹配、committed、non-partial 的 RuntimeEvent；正文仅在 view/handoff 时有界解析，不进入 Graph 控制表。
@@ -374,6 +375,7 @@ production 将 exact RuntimeRun 安装为 `WorkspaceTaskRuntime` 中的 detached
 - Operator profile 已由宿主内置目录解析为带指纹的不可变快照；公共工具不再接受模型、工具、权限或 system prompt 字段，生产运行时已消费并强制该快照；
 - schedule envelope 已硬切为 v2 以显式承载 `activate`；历史数据已清理，读取端拒绝 v1 envelope，不支持新旧进程混跑或直接降级；
 - Runtime bridge 已提供完整 readiness facts 和单一正式 `agent-output` RecordRef 身份；
+- root Graph 已支持多 epoch；root Run 固定精确 epoch，工具读写校验 `{graphId, rootSessionId, epoch}`，不存在的 Graph 读取不产生侧效应；
 - `artifact` / `evidence` RecordRef 是领域预留，当前 handoff 只接受 `agent-output`；
 - 已有确定性集成测试覆盖核心、store、跨进程 CAS、reconciler、exact Run/reattach、production wiring、output、yield/wake 和 workspace 生命周期；真实模型 E2E 已验证 root、Operator、durable output、结果回读、exact wake 与 finish 闭环。尚未用独立子进程逐一 kill/reopen 验证全部崩溃窗口。
 

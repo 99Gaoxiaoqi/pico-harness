@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { wakeIdFor } from "../../src/agent-graph/core/ids.js";
+import { graphIdFor, wakeIdFor } from "../../src/agent-graph/core/ids.js";
 import { createProductionRuntimeServices } from "../../src/daemon/production-host.js";
 import { globalSessionManager } from "../../src/engine/session.js";
 import {
@@ -162,7 +162,7 @@ async function runProductionRootWakeScenario(scenario: "output" | "outputless"):
     },
   });
   const rootSessionId = `production-root-wake-session-${scenario}`;
-  const graphId = `graph:${rootSessionId}`;
+  const graphId = graphIdFor(rootSessionId, 1);
   try {
     const workspaceRuntime = await services.service.getWorkspaceRuntime(canonicalWorkspace);
     assert.ok(host);

@@ -26,6 +26,7 @@ import {
 const ROOT: AgentGraphRootToolContext = {
   kind: "graph_root_supervisor",
   graphId: "graph-1",
+  epoch: 1,
   rootSessionId: "root-session-1",
   rootTurnId: "root-turn-1",
   rootRunId: "root-run-1",
@@ -685,13 +686,16 @@ test("view_agent_graph returns the application projection and yield_agent_graph 
   const { port, byName } = fixture();
   const viewed = JSON.parse(await byName.get("view_agent_graph")!.execute("{}"));
   assert.deepEqual(viewed, EMPTY_VIEW);
-  assert.deepEqual(port.reads, [{ graphId: ROOT.graphId, rootSessionId: ROOT.rootSessionId }]);
+  assert.deepEqual(port.reads, [
+    { graphId: ROOT.graphId, epoch: ROOT.epoch, rootSessionId: ROOT.rootSessionId },
+  ]);
 
   await byName
     .get("view_agent_graph")!
     .execute(JSON.stringify({ record_ids: ["record-1", "record-2"] }));
   assert.deepEqual(port.reads[1], {
     graphId: ROOT.graphId,
+    epoch: ROOT.epoch,
     rootSessionId: ROOT.rootSessionId,
     recordIds: ["record-1", "record-2"],
   });
@@ -722,6 +726,7 @@ test("view_agent_graph returns the application projection and yield_agent_graph 
   assert.deepEqual(port.yields, [
     {
       graphId: ROOT.graphId,
+      epoch: ROOT.epoch,
       rootSessionId: ROOT.rootSessionId,
       rootTurnId: ROOT.rootTurnId,
       rootRunId: ROOT.rootRunId,

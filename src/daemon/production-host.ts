@@ -1621,6 +1621,7 @@ function workspaceGraphApplicationLifecycle(input: {
     toolPort: host.application.toolPort,
     drivePort: host.application.drivePort,
     supervisor: host.application.supervisor,
+    openRootEpoch: (rootSessionId) => host.application.openRootEpoch(rootSessionId),
     start: () => host.start(),
     close: async () => {
       if (closed) return;
@@ -1659,6 +1660,7 @@ function rootAgentGraphBinding(
   rootSessionId: string,
   rootModelRouteId: string,
 ): AgentGraphRunToolBinding {
+  const graph = host.openRootEpoch(rootSessionId);
   return {
     kind: "root",
     getRootContext: () => {
@@ -1670,7 +1672,8 @@ function rootAgentGraphBinding(
       if (typeof rootTurnId !== "string" || !rootTurnId) return undefined;
       return {
         kind: "graph_root_supervisor",
-        graphId: `graph:${rootSessionId}`,
+        graphId: graph.graphId,
+        epoch: graph.epoch,
         rootSessionId,
         rootTurnId,
         rootRunId: run.runId,

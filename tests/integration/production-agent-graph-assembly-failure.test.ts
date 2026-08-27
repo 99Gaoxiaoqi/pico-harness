@@ -119,6 +119,7 @@ test("production operator assembly failure becomes terminal and wakes the root w
     });
     await fixture.host.application.toolPort.commitUpdate({
       graphId,
+      epoch: 1,
       expectedRevision: 0,
       operationId: "add-operator-with-missing-route",
       rootModelRouteId: "missing/operator-assembly-model",

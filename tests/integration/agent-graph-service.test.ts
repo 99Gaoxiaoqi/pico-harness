@@ -53,6 +53,7 @@ test("workspace application drives add and follow-up activate to records and fin
     await assert.rejects(
       service.toolPort.commitUpdate({
         graphId,
+        epoch: 1,
         expectedRevision: 0,
         operationId: "reject-unknown-profile",
         rootModelRouteId: "test-root-model",
@@ -70,8 +71,12 @@ test("workspace application drives add and follow-up activate to records and fin
       /Unknown Agent Graph Operator profile/u,
     );
     assert.equal(store.getGraph(graphId), undefined);
+    const firstEpoch = service.openRootEpoch(rootSessionId);
+    assert.equal(firstEpoch.graphId, graphId);
+    assert.equal(firstEpoch.epoch, 1);
     const upstreamUpdated = await service.toolPort.commitUpdate({
       graphId,
+      epoch: 1,
       expectedRevision: 0,
       operationId: "add-research",
       rootModelRouteId: "test-root-model",
@@ -85,6 +90,7 @@ test("workspace application drives add and follow-up activate to records and fin
     await service.supervisor.notifyGraph(graphId);
     const downstreamUpdated = await service.toolPort.commitUpdate({
       graphId,
+      epoch: 1,
       expectedRevision: 1,
       operationId: "activate-review",
       rootModelRouteId: "test-root-model",
@@ -103,7 +109,7 @@ test("workspace application drives add and follow-up activate to records and fin
     });
     assert.equal(downstreamUpdated.revision, 2);
     await service.supervisor.notifyGraph(graphId);
-    const reconciled = await service.toolPort.readProjection({ graphId, rootSessionId });
+    const reconciled = await service.toolPort.readProjection({ graphId, epoch: 1, rootSessionId });
     assert.equal(reconciled.claims.length, 2);
     assert.equal(reconciled.operators.length, 1);
     assert.equal(reconciled.provisions.length, 1);
@@ -163,6 +169,7 @@ test("workspace application drives add and follow-up activate to records and fin
     );
     const exact = await service.toolPort.readProjection({
       graphId,
+      epoch: 1,
       rootSessionId,
       recordIds: [downstreamRecordId],
     });
@@ -173,6 +180,7 @@ test("workspace application drives add and follow-up activate to records and fin
     await assert.rejects(
       service.toolPort.readProjection({
         graphId,
+        epoch: 1,
         rootSessionId,
         recordIds: ["record:unknown"],
       }),
@@ -186,8 +194,11 @@ test("workspace application drives add and follow-up activate to records and fin
       runId: "other-root-run",
       toolCallId: "other-root-update",
     };
+    const otherEpoch = service.openRootEpoch(otherRootSessionId);
+    assert.equal(otherEpoch.graphId, otherGraphId);
     await service.toolPort.commitUpdate({
       graphId: otherGraphId,
+      epoch: 1,
       expectedRevision: 0,
       operationId: "add-other-graph-record",
       rootModelRouteId: "test-root-model",
@@ -207,6 +218,7 @@ test("workspace application drives add and follow-up activate to records and fin
     await assert.rejects(
       service.toolPort.readProjection({
         graphId,
+        epoch: 1,
         rootSessionId,
         recordIds: [otherRecordId],
       }),
@@ -220,6 +232,7 @@ test("workspace application drives add and follow-up activate to records and fin
 
     const finished = await service.toolPort.commitUpdate({
       graphId,
+      epoch: 1,
       expectedRevision: 2,
       operationId: "finish-graph",
       rootModelRouteId: "test-root-model",
@@ -244,6 +257,92 @@ test("workspace application drives add and follow-up activate to records and fin
   assert.equal(runtime.releases, 2);
 });
 
+test("root epochs advance only after finish and read paths never create Graphs", async () => {
+  const storageRoot = await mkdtemp(join(tmpdir(), "pico-agent-graph-epochs-"));
+  const store = new SqliteAgentGraphControlStore({ storageRoot, now: monotonicClock() });
+  const rootSessionId = "multi-epoch-root";
+  const epochOneGraphId = graphIdFor(rootSessionId, 1);
+  const epochTwoGraphId = graphIdFor(rootSessionId, 2);
+  const service = createAgentGraphApplicationService({
+    store,
+    runtime: new CompletingRuntimeAdapter(),
+    rootWakePort: new CompletingRootWakePort(),
+    resolveOperatorWorkspace: () => ({ workDir: storageRoot }),
+  });
+
+  try {
+    await service.start();
+    await assert.rejects(
+      service.toolPort.readProjection({
+        graphId: epochOneGraphId,
+        epoch: 1,
+        rootSessionId,
+      }),
+      /does not match root Session/u,
+    );
+    assert.deepEqual(store.listGraphs(rootSessionId), []);
+
+    const epochOne = service.openRootEpoch(rootSessionId);
+    assert.equal(epochOne.graphId, epochOneGraphId);
+    assert.equal(epochOne.epoch, 1);
+    assert.equal(service.openRootEpoch(rootSessionId).graphId, epochOneGraphId);
+
+    const source = {
+      sessionId: rootSessionId,
+      turnId: "epoch-one-turn",
+      runId: "epoch-one-run",
+      toolCallId: "epoch-one-finish",
+    };
+    await service.toolPort.commitUpdate({
+      graphId: epochOneGraphId,
+      epoch: 1,
+      expectedRevision: 0,
+      operationId: "finish-epoch-one",
+      rootModelRouteId: "test-root-model",
+      source,
+      commands: [{ kind: "finish" }],
+    });
+
+    const epochTwo = service.openRootEpoch(rootSessionId);
+    assert.equal(epochTwo.graphId, epochTwoGraphId);
+    assert.equal(epochTwo.epoch, 2);
+    assert.equal(service.openRootEpoch(rootSessionId).graphId, epochTwoGraphId);
+    assert.equal(
+      (
+        await service.toolPort.readProjection({
+          graphId: epochOneGraphId,
+          epoch: 1,
+          rootSessionId,
+        })
+      ).graph.admissionPhase,
+      "sealed",
+    );
+    await assert.rejects(
+      service.toolPort.readProjection({
+        graphId: epochTwoGraphId,
+        epoch: 1,
+        rootSessionId,
+      }),
+      /does not match root Session/u,
+    );
+    assert.deepEqual(
+      store.listGraphs(rootSessionId).map(({ graphId, epoch, phase }) => ({
+        graphId,
+        epoch,
+        phase,
+      })),
+      [
+        { graphId: epochOneGraphId, epoch: 1, phase: "finished" },
+        { graphId: epochTwoGraphId, epoch: 2, phase: "open" },
+      ],
+    );
+  } finally {
+    await service.close();
+    store.close();
+    await rm(storageRoot, { recursive: true, force: true });
+  }
+});
+
 test("view exposes a terminal Claim without agent_output so root does not wait for another wake", async () => {
   const storageRoot = await mkdtemp(join(tmpdir(), "pico-agent-graph-outputless-view-"));
   const store = new SqliteAgentGraphControlStore({ storageRoot, now: monotonicClock() });
@@ -259,6 +358,7 @@ test("view exposes a terminal Claim without agent_output so root does not wait f
 
   try {
     await service.start();
+    service.openRootEpoch(rootSessionId);
     const source = {
       sessionId: rootSessionId,
       turnId: "root-turn",
@@ -267,6 +367,7 @@ test("view exposes a terminal Claim without agent_output so root does not wait f
     };
     await service.toolPort.commitUpdate({
       graphId,
+      epoch: 1,
       expectedRevision: 0,
       operationId: "add-outputless-operator",
       rootModelRouteId: "test-root-model",
@@ -277,7 +378,7 @@ test("view exposes a terminal Claim without agent_output so root does not wait f
     });
     await service.supervisor.notifyGraph(graphId);
 
-    const view = await service.toolPort.readProjection({ graphId, rootSessionId });
+    const view = await service.toolPort.readProjection({ graphId, epoch: 1, rootSessionId });
     assert.equal(view.claims.length, 1);
     assert.deepEqual(view.records, []);
     assert.deepEqual(view.results, { records: [], totalBytes: 0, truncated: false });
@@ -292,6 +393,7 @@ test("view exposes a terminal Claim without agent_output so root does not wait f
 
     await service.toolPort.commitUpdate({
       graphId,
+      epoch: 1,
       expectedRevision: 1,
       operationId: "stop-outputless-intent",
       rootModelRouteId: "test-root-model",
@@ -310,6 +412,7 @@ test("view exposes a terminal Claim without agent_output so root does not wait f
 
     await service.toolPort.commitUpdate({
       graphId,
+      epoch: 1,
       expectedRevision: 2,
       operationId: "follow-up-after-outputless",
       rootModelRouteId: "test-root-model",
@@ -326,7 +429,7 @@ test("view exposes a terminal Claim without agent_output so root does not wait f
       ],
     });
     await service.supervisor.notifyGraph(graphId);
-    const recovered = await service.toolPort.readProjection({ graphId, rootSessionId });
+    const recovered = await service.toolPort.readProjection({ graphId, epoch: 1, rootSessionId });
     assert.equal(recovered.provisions.length, 1);
     assert.equal(recovered.claims.length, 2);
     assert.equal(recovered.claims[0]?.targetSessionId, recovered.claims[1]?.targetSessionId);
@@ -352,9 +455,11 @@ test("a rejected no-progress yield leaves the same root Run free to schedule and
 
   try {
     await service.start();
+    service.openRootEpoch(rootSessionId);
     await assert.rejects(
       service.toolPort.registerYield({
         graphId,
+        epoch: 1,
         rootSessionId,
         rootTurnId: "root-turn",
         rootRunId: "root-run",
@@ -373,6 +478,7 @@ test("a rejected no-progress yield leaves the same root Run free to schedule and
     };
     await service.toolPort.commitUpdate({
       graphId,
+      epoch: 1,
       expectedRevision: 0,
       operationId: "schedule-after-rejected-yield",
       rootModelRouteId: "test-root-model",
@@ -381,6 +487,7 @@ test("a rejected no-progress yield leaves the same root Run free to schedule and
     });
     const yielded = await service.toolPort.registerYield({
       graphId,
+      epoch: 1,
       rootSessionId,
       rootTurnId: "root-turn",
       rootRunId: "root-run",
@@ -410,6 +517,7 @@ test("yield remains registered while an Operator activation is still executing",
 
   try {
     await service.start();
+    service.openRootEpoch(rootSessionId);
     const source = {
       sessionId: rootSessionId,
       turnId: "root-turn",
@@ -418,6 +526,7 @@ test("yield remains registered while an Operator activation is still executing",
     };
     await service.toolPort.commitUpdate({
       graphId,
+      epoch: 1,
       expectedRevision: 0,
       operationId: "add-running-work",
       rootModelRouteId: "test-root-model",
@@ -428,6 +537,7 @@ test("yield remains registered while an Operator activation is still executing",
 
     const yielded = await service.toolPort.registerYield({
       graphId,
+      epoch: 1,
       rootSessionId,
       rootTurnId: "root-turn",
       rootRunId: "root-run",
