@@ -41,6 +41,7 @@ import {
   Trash2,
   WandSparkles,
   Workflow,
+  X,
 } from "lucide-react";
 import type { RuntimeUserDefaults } from "@pico/protocol";
 import {
@@ -246,14 +247,7 @@ function AppStateRouter() {
         <Route path="extensions" element={<ExtensionsIndex />} />
         <Route path="extensions/:kind" element={<ExtensionsPage />} />
         <Route path="settings" element={<SettingsPage />} />
-        <Route
-          path="settings/workspaces"
-          element={
-            <WorkspaceRoute>
-              <WorkspaceSettingsPage />
-            </WorkspaceRoute>
-          }
-        />
+        <Route path="settings/workspaces" element={<WorkspaceSettingsPage />} />
         <Route path="settings/models" element={<ProviderPageRoute />} />
         <Route
           path="settings/memory"
@@ -263,22 +257,8 @@ function AppStateRouter() {
             </WorkspaceRoute>
           }
         />
-        <Route
-          path="settings/usage"
-          element={
-            <WorkspaceRoute>
-              <UsagePage />
-            </WorkspaceRoute>
-          }
-        />
-        <Route
-          path="settings/system"
-          element={
-            <WorkspaceRoute>
-              <SystemSettingsPage />
-            </WorkspaceRoute>
-          }
-        />
+        <Route path="settings/usage" element={<UsagePage />} />
+        <Route path="settings/system" element={<SystemSettingsPage />} />
         <Route path="memory" element={<LegacySurfaceRedirect to="/settings/memory" />} />
         <Route path="skills" element={<LegacySurfaceRedirect to="/extensions/skills" />} />
         <Route path="mcp" element={<LegacySurfaceRedirect to="/extensions/mcp" />} />
@@ -726,7 +706,7 @@ function AppShell() {
         </aside>
       )}
       <div
-        className={`workspace-frame ${immersiveRoute ? "workspace-frame--immersive" : ""} ${conversationRoute ? "workspace-frame--conversation" : ""}`}
+        className={`workspace-frame ${immersiveRoute ? "workspace-frame--immersive" : ""} ${conversationRoute ? "workspace-frame--conversation" : ""} ${message ? "has-toast" : ""}`}
       >
         {!immersiveRoute && (
           <header className="titlebar">
@@ -749,7 +729,15 @@ function AppShell() {
         {message &&
           !message.startsWith("Legacy session-centric (JSONL) workspace storage exists:") && (
             <div className="toast" role="status">
-              {message}
+              <span>{message}</span>
+              <button
+                type="button"
+                className="toast__dismiss"
+                aria-label="关闭提示"
+                onClick={actions.dismissMessage}
+              >
+                <X aria-hidden="true" size={14} />
+              </button>
             </div>
           )}
         <main
@@ -3399,55 +3387,129 @@ function McpAddForm({
 }
 
 function UsagePage() {
-  const { data } = useRuntime();
-  const metrics = [
-    ["输入 tokens", data.usage.inputTokens, TerminalSquare],
-    ["输出 tokens", data.usage.outputTokens, Bot],
-    ["缓存读取 tokens", data.usage.cacheReadTokens ?? data.usage.cachedTokens, Layers3],
-    ["缓存写入 tokens", data.usage.cacheWriteTokens, Layers3],
-    ["未缓存输入 tokens", data.usage.uncachedInputTokens, TerminalSquare],
-    [
-      "缓存命中率",
-      data.usage.cacheRequestHitRate === undefined
-        ? undefined
-        : `${(data.usage.cacheRequestHitRate * 100).toFixed(1)}%`,
-      Layers3,
-    ],
-    [
-      "缓存复用率",
-      data.usage.cachePromptTokenReuseRate === undefined
-        ? undefined
-        : `${(data.usage.cachePromptTokenReuseRate * 100).toFixed(1)}%`,
-      Layers3,
-    ],
-    [
-      "缓存读写比",
-      data.usage.cacheReadToWriteRatio === undefined
-        ? undefined
-        : `${data.usage.cacheReadToWriteRatio.toFixed(2)}x`,
-      Layers3,
-    ],
-    [
-      "估算费用",
-      data.usage.cost === undefined ? undefined : `$${data.usage.cost.toFixed(2)}`,
-      CircleDollarSign,
-    ],
+  const { data, actions, busy } = useRuntime();
+  const [period, setPeriod] = useState<"24h" | "7d" | "30d" | "all">("30d");
+  const [workspacePath, setWorkspacePath] = useState("all");
+  const [usage, setUsage] = useState(data.usage);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const usageRequestSequence = useRef(0);
+  const refreshUsage = useCallback(async () => {
+    const requestSequence = ++usageRequestSequence.current;
+    setLoadFailed(false);
+    const duration = usagePeriodDuration(period);
+    const result = await actions.queryUsage({
+      ...(workspacePath !== "all" ? { workspacePath } : {}),
+      ...(duration ? { from: Date.now() - duration } : {}),
+    });
+    if (requestSequence !== usageRequestSequence.current) return;
+    if (result) setUsage(result);
+    else setLoadFailed(true);
+  }, [actions, period, workspacePath]);
+
+  useEffect(() => {
+    void refreshUsage();
+    return () => {
+      usageRequestSequence.current += 1;
+    };
+  }, [refreshUsage]);
+
+  const totalRecords = (usage.providerCallCount ?? 0) + (usage.baselineCount ?? 0);
+  const coverage =
+    usage.providerCallCount && usage.usageReportCount !== undefined
+      ? `${((usage.usageReportCount / usage.providerCallCount) * 100).toFixed(0)}%`
+      : "—";
+  const overview = [
+    ["总 Tokens", usage.totalTokens, Gauge],
+    ["模型请求", usage.providerCallCount, Bot],
+    ["Usage 上报覆盖", coverage, CheckCircle2],
+    ["估算费用", formatUsageCost(usage.costCNY, usage.costStatus), CircleDollarSign],
+  ] as const;
+  const details = [
+    ["输入 Tokens", usage.inputTokens, TerminalSquare],
+    ["输出 Tokens", usage.outputTokens, Bot],
+    ["推理 Tokens", usage.reasoningTokens, BrainCircuit],
+    ["缓存读取", usage.cacheReadTokens ?? usage.cachedTokens, Layers3],
+    ["缓存写入", usage.cacheWriteTokens, Layers3],
   ] as const;
   return (
-    <div className="page-stack">
+    <div className="page-stack settings-page usage-page">
       <section className="page-intro">
         <div>
-          <span className="eyebrow">{formatUsagePeriod(data.usage.period)}</span>
+          <span className="eyebrow">活动</span>
           <h2>用量</h2>
-          <p>总用量可含历史 baseline；缓存读写、命中与复用指标仅使用逐调用记录。</p>
+          <p>查看全部任务或单个项目的 Token、请求与人民币费用估算。</p>
         </div>
+        <Button disabled={busy === "usage-query"} onClick={() => void refreshUsage()}>
+          <RefreshCw aria-hidden="true" size={16} /> 刷新
+        </Button>
       </section>
-      {data.notices.usage ? (
-        <CapabilityUnavailable title="用量暂不可用" detail={data.notices.usage} />
+      <section className="usage-toolbar" aria-label="用量筛选">
+        <div className="usage-period-tabs" role="group" aria-label="统计时间范围">
+          {(
+            [
+              ["24h", "24 小时"],
+              ["7d", "7 天"],
+              ["30d", "30 天"],
+              ["all", "全部"],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              type="button"
+              aria-pressed={period === value}
+              className={period === value ? "is-active" : ""}
+              key={value}
+              onClick={() => setPeriod(value)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <label className="usage-workspace-filter">
+          <span>统计范围</span>
+          <select
+            className="select-control"
+            value={workspacePath}
+            onChange={(event) => setWorkspacePath(event.target.value)}
+          >
+            <option value="all">全部任务</option>
+            {data.workspaces.map((workspace) => (
+              <option key={workspace.path} value={workspace.path}>
+                {workspaceDisplayName(workspace.path, workspace)}
+              </option>
+            ))}
+          </select>
+        </label>
+      </section>
+      {loadFailed ? (
+        <CapabilityUnavailable title="用量暂不可用" detail="无法读取本地用量账本，请稍后重试。" />
+      ) : busy === "usage-query" && !usage.refreshedAt ? (
+        <div className="settings-loading" aria-live="polite">
+          <RefreshCw aria-hidden="true" /> 正在读取用量…
+        </div>
+      ) : totalRecords === 0 ? (
+        <div className="settings-empty settings-empty--wide">
+          {usage.unavailableWorkspaceCount ? (
+            <AlertTriangle aria-hidden="true" />
+          ) : (
+            <Gauge aria-hidden="true" />
+          )}
+          <div>
+            <strong>
+              {usage.unavailableWorkspaceCount
+                ? "无法确认这个范围是否为空"
+                : "这个范围内还没有模型调用"}
+            </strong>
+            <p>
+              {usage.unavailableWorkspaceCount
+                ? `有 ${usage.unavailableWorkspaceCount} 个项目的账本无法读取，请检查项目状态后刷新。`
+                : "完成一次使用模型的任务后，请求、Token 和费用估算会显示在这里。"}
+            </p>
+          </div>
+        </div>
       ) : (
         <>
-          <div className="usage-grid">
-            {metrics.map(([label, value, Icon]) => (
+          <div className="usage-grid usage-grid--overview">
+            {overview.map(([label, value, Icon]) => (
               <article className="usage-card" key={label}>
                 <Icon aria-hidden="true" />
                 <span>{label}</span>
@@ -3455,15 +3517,54 @@ function UsagePage() {
               </article>
             ))}
           </div>
-          {data.usage.cacheAlerts?.map((alert) => (
+          <section className="panel usage-details-panel">
+            <PanelHeader
+              title="Token 明细"
+              detail="输出 Tokens 包含 Provider 返回的推理部分；推理明细仅在 Provider 单独上报时显示"
+            />
+            <div className="usage-detail-grid">
+              {details.map(([label, value, Icon]) => (
+                <div key={label}>
+                  <Icon aria-hidden="true" />
+                  <span>{label}</span>
+                  <strong>{value === undefined ? "—" : formatCompact(value)}</strong>
+                </div>
+              ))}
+            </div>
+          </section>
+          {usage.costStatus === "unknown" || usage.costStatus === "partial" ? (
+            <InlineNotice tone="warning">
+              {usage.costStatus === "partial"
+                ? "部分调用缺少价格，费用只包含可估算部分。"
+                : "当前调用没有可用价格，未显示虚假的 ¥0.00。"}
+            </InlineNotice>
+          ) : null}
+          {usage.baselineCount ? (
+            <InlineNotice tone="warning">
+              历史基线只保留 Token 与费用总数，不包含逐次调用的推理明细和上报覆盖率。
+            </InlineNotice>
+          ) : null}
+          {usage.cacheAlerts?.map((alert) => (
             <InlineNotice key={alert} tone="warning">
               {alert}
             </InlineNotice>
           ))}
         </>
       )}
+      {!loadFailed && usage.unavailableWorkspaceCount ? (
+        <InlineNotice tone="warning">
+          有 {usage.unavailableWorkspaceCount} 个项目的账本暂时无法读取，当前总数为部分结果。
+        </InlineNotice>
+      ) : null}
       <section className="panel">
-        <PanelHeader title="数据边界" detail="费用仅为 Runtime 按 Provider 返回值计算的估算" />
+        <PanelHeader
+          title="数据边界"
+          detail={
+            usage.refreshedAt
+              ? `最近刷新：${new Date(usage.refreshedAt).toLocaleTimeString("zh-CN")}`
+              : "费用仅为 Runtime 根据 Provider 定价计算的人民币估算"
+          }
+        />
         <div className="usage-explainer">
           <div>
             <Box aria-hidden="true" />
@@ -3476,7 +3577,7 @@ function UsagePage() {
             <ShieldCheck aria-hidden="true" />
             <span>
               <strong>不显示猜测值</strong>
-              <p>Provider 未返回价格时，费用会明确显示为空。</p>
+              <p>价格未知时显示“无法估算”；套餐内调用明确标记为“套餐内”。</p>
             </span>
           </div>
         </div>
@@ -3487,9 +3588,6 @@ function UsagePage() {
 
 function SettingsPage() {
   const { data, actions, busy } = useRuntime();
-  const [background, setBackground] = useState<"enabled" | "disabled">(() =>
-    window.localStorage.getItem("pico.background-mode") === "enabled" ? "enabled" : "disabled",
-  );
   return (
     <div className="page-stack settings-page">
       <section className="page-intro">
@@ -3521,36 +3619,36 @@ function SettingsPage() {
               />
             )}
           </SettingRow>
-          <SettingRow title="关闭后行为" detail="关闭主窗口时，选择继续在后台运行或完全退出">
-            <select
-              name="background-mode"
-              className="select-control"
-              value={background}
-              disabled={Boolean(busy)}
-              aria-label="关闭后行为"
-              onChange={(event) => {
-                const value = event.target.value as "enabled" | "disabled";
-                setBackground(value);
-                window.localStorage.setItem("pico.background-mode", value);
-                void actions.setBackgroundMode(value === "enabled");
-              }}
-            >
-              <option value="enabled">继续后台运行</option>
-              <option value="disabled">退出 Pico</option>
-            </select>
+          <SettingRow
+            title="关闭后行为"
+            detail={
+              data.backgroundMode === undefined
+                ? "无法从系统读取当前状态"
+                : "关闭主窗口时，选择继续在后台运行或完全退出"
+            }
+          >
+            {data.backgroundMode === undefined ? (
+              <StatusPill status="attention" />
+            ) : (
+              <select
+                name="background-mode"
+                className="select-control"
+                value={data.backgroundMode ? "enabled" : "disabled"}
+                disabled={Boolean(busy)}
+                aria-label="关闭后行为"
+                onChange={(event) =>
+                  void actions.setBackgroundMode(event.target.value === "enabled")
+                }
+              >
+                <option value="enabled">继续后台运行</option>
+                <option value="disabled">退出 Pico</option>
+              </select>
+            )}
           </SettingRow>
         </div>
-      </section>
-      <section className="settings-section">
-        <h3>账户</h3>
-        <div className="settings-list">
-          <SettingRow title="登录与同步" detail="尚未开放">
-            <StatusPill status="disabled" />
-          </SettingRow>
-          <SettingRow title="Plugin Runtime" detail="公开 Plugin Runtime 尚未开放">
-            <StatusPill status="disabled" />
-          </SettingRow>
-        </div>
+        {data.notices.desktopPreferences && (
+          <InlineNotice tone="warning">{data.notices.desktopPreferences}</InlineNotice>
+        )}
       </section>
     </div>
   );
@@ -3558,97 +3656,112 @@ function SettingsPage() {
 
 function WorkspaceSettingsPage() {
   const { data, actions, busy } = useRuntime();
-  const navigate = useNavigate();
-  const currentWorkspace = data.workspaces.find(
-    (workspace) => workspace.path === data.workspacePath,
-  );
-  const temporaryWorkspace = currentWorkspace?.temporary === true;
-  const chooseWorkspace = async () => {
-    const workspacePath = await actions.chooseWorkspace();
-    if (workspacePath) navigate(workspaceHref("/settings/workspaces", workspacePath));
-  };
+  const temporaryWorkspace = data.workspaces.find((workspace) => workspace.temporary === true);
+  const projects = data.workspaces.filter((workspace) => workspace.temporary !== true);
   return (
     <div className="page-stack settings-page">
       <section className="page-intro">
         <div>
           <span className="eyebrow">偏好</span>
-          <h2>工作区</h2>
-          <p>管理真实项目。选择“无项目”时，任务会使用 Pico 的私有任务空间。</p>
+          <h2>项目</h2>
+          <p>管理 Pico 可以访问的项目。这里的操作不会切换当前会话或新任务项目。</p>
         </div>
-        <Button disabled={Boolean(busy)} onClick={() => void chooseWorkspace()}>
-          <Plus aria-hidden="true" size={16} /> 添加工作区
+        <Button disabled={Boolean(busy)} onClick={() => void actions.registerWorkspace()}>
+          <Plus aria-hidden="true" size={16} /> 添加项目
         </Button>
       </section>
       <section className="settings-section">
-        <h3>任务位置</h3>
+        <h3>无项目任务</h3>
         <div className="settings-list">
-          <SettingRow title="当前选择" detail="切换只影响本设置页的管理对象">
-            <select
-              className="select-control"
-              value={data.workspacePath ?? ""}
-              aria-label="选择要管理的工作区"
-              onChange={(event) =>
-                navigate(workspaceHref("/settings/workspaces", event.target.value))
-              }
-            >
-              {data.workspaces.map((workspace) => (
-                <option key={workspace.path} value={workspace.path}>
-                  {workspaceDisplayName(workspace.path, workspace)}
-                </option>
-              ))}
-            </select>
-          </SettingRow>
           <SettingRow
-            title={temporaryWorkspace ? "无项目" : "工作区路径"}
-            detail={temporaryWorkspace ? "Pico 私有任务空间" : (data.workspacePath ?? "未选择")}
-          >
-            {temporaryWorkspace ? (
-              <StatusPill status="ready" />
-            ) : (
-              <Button
-                variant="danger"
-                disabled={Boolean(busy)}
-                onClick={() =>
-                  data.workspacePath && void actions.trustWorkspace(data.workspacePath, false)
-                }
-              >
-                撤销信任
-              </Button>
-            )}
-          </SettingRow>
-          {!temporaryWorkspace && (
-            <SettingRow
-              title="初始化 Pico 项目"
-              detail="仅创建缺失的 AGENTS.md 与 .pico/config.json"
-            >
-              <Button
-                disabled={Boolean(busy)}
-                onClick={() => {
-                  if (window.confirm(`在 ${data.workspacePath} 初始化 Pico 项目？`))
-                    void actions.initializeWorkspace();
-                }}
-              >
-                初始化
-              </Button>
-            </SettingRow>
-          )}
-          <SettingRow
-            title="工作区模式"
+            title="Pico 私有任务空间"
             detail={
               temporaryWorkspace
-                ? "不关联真实项目；会话与文件仍会跨重启保留"
-                : data.workspaceMode === "git"
-                  ? "已启用并行任务隔离与变更合并"
-                  : "对话、工具和并行分析可用；可写子代理隔离、分支与独立合并不可用"
+                ? "会话和文件跨重启保留，由 Pico 自动维护"
+                : "第一次创建无项目任务时自动准备"
             }
           >
-            <WorkspaceModeBadge mode={data.workspaceMode} />
+            <StatusPill status={temporaryWorkspace ? "ready" : "disabled"} />
           </SettingRow>
         </div>
-        {data.workspaceMode === "folder" && !temporaryWorkspace && (
-          <p className="settings-section__note">
-            版本保护是一项面向高级工作流的可选能力，由 Git 提供。Pico 不会自行修改你的文件夹设置。
-          </p>
+      </section>
+      <section className="settings-section">
+        <h3>已添加项目</h3>
+        {projects.length === 0 ? (
+          <div className="settings-empty">
+            <Folder aria-hidden="true" />
+            <div>
+              <strong>还没有项目</strong>
+              <p>添加本地文件夹后，它会出现在新任务的项目选择中。</p>
+            </div>
+          </div>
+        ) : (
+          <div className="workspace-settings-list">
+            {projects.map((workspace) => (
+              <article className="workspace-setting-item" key={workspace.path}>
+                <span className="workspace-setting-item__icon">
+                  {workspace.mode === "git" ? (
+                    <FolderGit2 aria-hidden="true" />
+                  ) : (
+                    <Folder aria-hidden="true" />
+                  )}
+                </span>
+                <div className="workspace-setting-item__identity">
+                  <strong>{workspaceDisplayName(workspace.path, workspace)}</strong>
+                  <span title={workspace.path}>{workspace.path}</span>
+                </div>
+                <div className="workspace-setting-item__status">
+                  <WorkspaceModeBadge mode={workspace.mode} />
+                  <span>{workspace.trusted ? "已信任" : "待信任"}</span>
+                </div>
+                <div className="workspace-setting-item__actions">
+                  <Button
+                    disabled={Boolean(busy)}
+                    onClick={() => void actions.openWorkspace(workspace.path)}
+                  >
+                    打开文件夹
+                  </Button>
+                  <Button
+                    disabled={Boolean(busy)}
+                    onClick={() => {
+                      if (window.confirm(`在 ${workspace.path} 初始化 Pico 项目？`))
+                        void actions.initializeWorkspace(workspace.path);
+                    }}
+                  >
+                    初始化
+                  </Button>
+                  <Button
+                    disabled={Boolean(busy)}
+                    onClick={() => {
+                      const action = workspace.trusted ? "撤销信任" : "信任";
+                      if (
+                        window.confirm(
+                          `${action}项目 ${workspaceDisplayName(workspace.path, workspace)}？`,
+                        )
+                      )
+                        void actions.trustWorkspace(workspace.path, !workspace.trusted);
+                    }}
+                  >
+                    {workspace.trusted ? "撤销信任" : "信任"}
+                  </Button>
+                  <Button
+                    variant="danger"
+                    disabled={Boolean(busy)}
+                    onClick={() => {
+                      if (
+                        window.confirm(
+                          `从 Pico 项目列表移除 ${workspaceDisplayName(workspace.path, workspace)}？磁盘文件不会被删除。`,
+                        )
+                      )
+                        void actions.unregisterWorkspace(workspace.path);
+                    }}
+                  >
+                    移除
+                  </Button>
+                </div>
+              </article>
+            ))}
+          </div>
         )}
       </section>
     </div>
@@ -3658,6 +3771,9 @@ function WorkspaceSettingsPage() {
 function SystemSettingsPage() {
   const { data, actions, busy, connection } = useRuntime();
   const [diagnosticReport, setDiagnosticReport] = useState<DesktopDiagnosticReport>();
+  const [diagnosticWorkspacePath, setDiagnosticWorkspacePath] = useState(
+    () => data.workspacePath ?? data.workspaces[0]?.path ?? "",
+  );
   const memoryHref = data.workspacePath
     ? workspaceHref("/settings/memory", data.workspacePath)
     : "/settings/memory";
@@ -3667,16 +3783,8 @@ function SystemSettingsPage() {
         <div>
           <span className="eyebrow">系统</span>
           <h2>健康</h2>
-          <p>查看 Pico 的运行状态、模型连接、存储与系统能力。</p>
+          <p>查看真实连接状态，并按项目运行本地诊断。</p>
         </div>
-        <Button
-          variant="primary"
-          disabled={Boolean(busy) || !data.workspacePath}
-          onClick={() => void actions.runDiagnostics("runtime").then(setDiagnosticReport)}
-        >
-          <RefreshCw aria-hidden="true" size={16} />
-          重新检查
-        </Button>
       </section>
       <section className="settings-section">
         <h3>当前状态</h3>
@@ -3687,26 +3795,22 @@ function SystemSettingsPage() {
           >
             <StatusPill status={connection.kind === "ready" ? "ready" : "attention"} />
           </SettingRow>
+          <SettingRow title="模型连接" detail="只根据当前已加载的模型路由判断，不执行网络探测">
+            {data.modelRoutes.length > 0 ? (
+              <span className="health-status-text health-status-text--ready">已配置</span>
+            ) : (
+              <Link className="button" to="/settings/models">
+                配置模型
+              </Link>
+            )}
+          </SettingRow>
           <SettingRow
-            title="文件与终端工具"
-            detail={
-              data.workspacePath
-                ? `当前任务位置：${workspaceDisplayName(
-                    data.workspacePath,
-                    data.workspaces.find((workspace) => workspace.path === data.workspacePath),
-                  )}`
-                : "任务位置准备完成后，文件和终端工具会自动可用"
-            }
+            title="权限与审批"
+            detail="实际权限由每个会话的权限模式和 macOS 系统授权共同决定"
           >
-            <StatusPill status={data.workspacePath && data.trusted ? "ready" : "attention"} />
+            <span className="health-status-text">由会话控制</span>
           </SettingRow>
-          <SettingRow title="桌面控制" detail="受 macOS 辅助功能权限和当前会话权限共同保护">
-            <StatusPill status="attention" />
-          </SettingRow>
-          <SettingRow title="操作审批" detail="越界写入、破坏性操作与外部访问由会话权限策略管理">
-            <StatusPill status="ready" />
-          </SettingRow>
-          <SettingRow title="记忆写入" detail="记忆生成、审核与长期保留策略在能力设置中管理">
+          <SettingRow title="记忆" detail="记忆生成、审核与长期保留策略按项目管理">
             <Link className="button" to={memoryHref}>
               打开记忆设置
             </Link>
@@ -3714,25 +3818,54 @@ function SystemSettingsPage() {
         </div>
       </section>
       <section className="settings-section">
-        <h3>诊断</h3>
+        <h3>项目诊断</h3>
         <div className="settings-list">
-          <SettingRow title="运行环境" detail="检查模型、凭证、Node、任务运行与本地存储">
-            <Button
-              disabled={Boolean(busy)}
-              onClick={() => void actions.runDiagnostics("runtime").then(setDiagnosticReport)}
+          <SettingRow title="诊断项目" detail="只决定本次检查范围，不会切换当前会话">
+            <select
+              className="select-control"
+              value={diagnosticWorkspacePath}
+              aria-label="选择诊断项目"
+              onChange={(event) => {
+                setDiagnosticWorkspacePath(event.target.value);
+                setDiagnosticReport(undefined);
+              }}
             >
-              开始检查
-            </Button>
+              <option value="">选择项目</option>
+              {data.workspaces.map((workspace) => (
+                <option key={workspace.path} value={workspace.path}>
+                  {workspaceDisplayName(workspace.path, workspace)}
+                </option>
+              ))}
+            </select>
           </SettingRow>
-          <SettingRow title="本地资源" detail="扫描 Pico 与兼容资源，不执行修复或清理">
-            <Button
-              disabled={Boolean(busy)}
-              onClick={() => void actions.runDiagnostics("resources").then(setDiagnosticReport)}
-            >
-              扫描
-            </Button>
+          <SettingRow title="检查项目环境" detail="检查模型、凭证、Node、任务运行与本地存储">
+            <div className="button-row">
+              <Button
+                disabled={Boolean(busy) || !diagnosticWorkspacePath}
+                onClick={() =>
+                  void actions
+                    .runDiagnostics("runtime", diagnosticWorkspacePath)
+                    .then(setDiagnosticReport)
+                }
+              >
+                开始检查
+              </Button>
+              <Button
+                disabled={Boolean(busy) || !diagnosticWorkspacePath}
+                onClick={() =>
+                  void actions
+                    .runDiagnostics("resources", diagnosticWorkspacePath)
+                    .then(setDiagnosticReport)
+                }
+              >
+                扫描本地资源
+              </Button>
+            </div>
           </SettingRow>
         </div>
+        {!diagnosticWorkspacePath && (
+          <p className="settings-section__note">添加项目后可以检查目录、配置和本地资源。</p>
+        )}
         {diagnosticReport && <DiagnosticReport report={diagnosticReport} />}
       </section>
     </div>
@@ -3957,10 +4090,21 @@ function formatCompact(value: number): string {
   );
 }
 
-function formatUsagePeriod(period: string | undefined): string {
-  if (!period) return "全部时间";
-  if (period === "all_time_with_baselines") return "全部时间";
-  return period.replaceAll("_", " ");
+function usagePeriodDuration(period: "24h" | "7d" | "30d" | "all"): number | undefined {
+  if (period === "all") return undefined;
+  const days = period === "24h" ? 1 : period === "7d" ? 7 : 30;
+  return days * 24 * 60 * 60 * 1000;
+}
+
+function formatUsageCost(
+  costCNY: number | undefined,
+  status: "none" | "estimated" | "included" | "unknown" | "partial" | undefined,
+): string {
+  if (status === "included") return "套餐内";
+  if (status === "unknown") return "无法估算";
+  if (status === "none" || costCNY === undefined) return "—";
+  const formatted = `¥${costCNY.toFixed(2)}`;
+  return status === "partial" ? `${formatted}（部分）` : formatted;
 }
 
 function newTaskGreeting(now = new Date()): string {

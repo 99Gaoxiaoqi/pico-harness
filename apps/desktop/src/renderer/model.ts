@@ -232,8 +232,10 @@ export interface CapabilityScopeView {
 export type McpServerDraft = RuntimeMcpServerInput;
 
 export interface UsageView {
+  readonly totalTokens?: number | undefined;
   readonly inputTokens?: number | undefined;
   readonly outputTokens?: number | undefined;
+  readonly reasoningTokens?: number | undefined;
   /** 从 daemon 的 canonical cacheReadTokens 映射；兼容旧 cachedTokens。 */
   readonly cacheReadTokens?: number | undefined;
   readonly cacheWriteTokens?: number | undefined;
@@ -243,8 +245,16 @@ export interface UsageView {
   readonly cachePromptTokenReuseRate?: number | undefined;
   readonly cacheReadToWriteRatio?: number | undefined;
   readonly cacheAlerts?: readonly string[] | undefined;
-  readonly cost?: number | undefined;
+  readonly costCNY?: number | undefined;
+  readonly costStatus?: "none" | "estimated" | "included" | "unknown" | "partial" | undefined;
+  readonly providerCallCount?: number | undefined;
+  readonly usageReportCount?: number | undefined;
+  readonly baselineCount?: number | undefined;
+  readonly scope?: "all" | "workspace" | "session" | undefined;
+  readonly workspacePath?: string | undefined;
+  readonly unavailableWorkspaceCount?: number | undefined;
   readonly period?: string | undefined;
+  readonly refreshedAt?: number | undefined;
 }
 
 export type WorkspaceMode = "folder" | "git";
@@ -300,6 +310,7 @@ export interface AppData {
   readonly usage: UsageView;
   readonly configVersion: number;
   readonly launchAtLogin?: boolean | undefined;
+  readonly backgroundMode?: boolean | undefined;
   readonly memory: MemoryView;
   readonly notices: Readonly<Record<string, string>>;
 }

@@ -9,7 +9,7 @@ export const settingsNavigationGroups = [
     label: "偏好",
     items: [
       { to: "/settings", label: "通用", kind: "general", end: true },
-      { to: "/settings/workspaces", label: "工作区", kind: "workspaces", scoped: true },
+      { to: "/settings/workspaces", label: "项目", kind: "workspaces" },
     ],
   },
   {
@@ -23,11 +23,11 @@ export const settingsNavigationGroups = [
   },
   {
     label: "活动",
-    items: [{ to: "/settings/usage", label: "用量", kind: "usage", scoped: true }],
+    items: [{ to: "/settings/usage", label: "用量", kind: "usage" }],
   },
   {
     label: "系统",
-    items: [{ to: "/settings/system", label: "健康", kind: "system", scoped: true }],
+    items: [{ to: "/settings/system", label: "健康", kind: "system" }],
   },
 ] as const;
 

@@ -5,6 +5,7 @@ import { DESKTOP_IPC_CHANNELS } from "../preload/contract.js";
 import { createPlatformServices } from "../platform/index.js";
 import { registerDesktopIpcHandlers } from "./ipc.js";
 import { DesktopLifecycleController } from "./lifecycle.js";
+import { DesktopPreferencesStore } from "./preferences.js";
 import { LocalDaemonRuntimeClientAdapter, RuntimeClientError } from "./runtime-client-adapter.js";
 import { startRuntimeSupervisor, type RuntimeSupervisorEvent } from "./runtime-supervisor.js";
 import { createDesktopWindow } from "./window.js";
@@ -32,7 +33,10 @@ const runtime = new LocalDaemonRuntimeClientAdapter(undefined, {
   // import.meta.url rewriting inside the shared client bundle.
   candidateEntrypoint: join(__dirname, "daemon.cjs"),
 });
-const lifecycle = new DesktopLifecycleController(() => mainWindow);
+const lifecycle = new DesktopLifecycleController(
+  () => mainWindow,
+  new DesktopPreferencesStore(app.getPath("userData")),
+);
 const browser = createEmbeddedBrowserAuthority({
   getWindow: () => mainWindow,
   userDataPath: app.getPath("userData"),
@@ -124,7 +128,7 @@ if (!app.requestSingleInstanceLock()) {
       .catch((error: unknown) => console.error("Pico desktop browser cleanup failed", error));
   });
   app.on("window-all-closed", () => {
-    if (process.platform !== "darwin" && !lifecycle.shouldKeepInBackground()) app.quit();
+    if (!lifecycle.shouldKeepInBackground()) app.quit();
   });
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) void openMainWindow();
@@ -136,6 +140,7 @@ if (!app.requestSingleInstanceLock()) {
     .then(async () => {
       if (process.platform === "win32") app.setAppUserModelId("com.squirrel.pico.Pico");
       if (app.dock) app.dock.setIcon(resolveDesktopIconPath());
+      await lifecycle.initialize();
       installApplicationMenu(() => mainWindow);
       // 首次 ping 触发 connectOrSpawn：拉起或连上常驻 daemon 后返回。冷启动时
       // daemon 的 recover 窗口（reconcile 注册工作区 + 启动 cron，可达秒级）内

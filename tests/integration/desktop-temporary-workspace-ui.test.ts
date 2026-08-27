@@ -206,13 +206,13 @@ test("temporary workspace omits trust revocation and Git worktree capabilities",
     appSource.indexOf("function WorkspaceSettingsPage"),
     appSource.indexOf("function SystemSettingsPage"),
   );
-  assert.match(settingsPage, /currentWorkspace\?\.temporary === true/u);
-  assert.match(
-    settingsPage,
-    /temporaryWorkspace \? \([\s\S]+<StatusPill status="ready" \/>[\s\S]+撤销信任/u,
-  );
-  assert.match(settingsPage, /data\.workspaceMode === "folder" && !temporaryWorkspace/u);
-  assert.match(settingsPage, /!temporaryWorkspace && \([\s\S]+初始化 Pico 项目/u);
+  assert.match(settingsPage, /find\(\(workspace\) => workspace\.temporary === true\)/u);
+  assert.match(settingsPage, /filter\(\(workspace\) => workspace\.temporary !== true\)/u);
+  assert.match(settingsPage, /Pico 私有任务空间/u);
+  assert.match(settingsPage, /temporaryWorkspace \? "ready" : "disabled"/u);
+  const projectActions = settingsPage.slice(settingsPage.indexOf("projects.map"));
+  assert.match(projectActions, /撤销信任/u);
+  assert.match(projectActions, /unregisterWorkspace\(workspace\.path\)/u);
 });
 
 test("terminal run notifications batch hydrate so run.finished converges to idle", async () => {

@@ -23,6 +23,7 @@ export const DESKTOP_IPC_CHANNELS = {
   openDirectory: "pico:platform:open-directory",
   getLaunchAtLogin: "pico:platform:get-launch-at-login",
   setLaunchAtLogin: "pico:platform:set-launch-at-login",
+  getBackgroundMode: "pico:lifecycle:get-background-mode",
   setBackgroundMode: "pico:lifecycle:set-background-mode",
   quit: "pico:lifecycle:quit",
   browserAcquireViewport: "pico:browser:acquire-viewport",
@@ -121,6 +122,7 @@ export interface DesktopBridge {
     setLaunchAtLogin(enabled: boolean): Promise<DesktopResult<void>>;
   };
   readonly lifecycle: {
+    getBackgroundMode(): Promise<DesktopResult<boolean>>;
     setBackgroundMode(enabled: boolean): Promise<DesktopResult<void>>;
     quit(): Promise<DesktopResult<void>>;
   };

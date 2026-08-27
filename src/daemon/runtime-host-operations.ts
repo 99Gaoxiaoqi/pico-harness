@@ -150,7 +150,7 @@ export interface WorkspaceStatusBridgeOutput {
 }
 
 export interface UsageGetBridgeInput {
-  workspacePath: string;
+  workspacePath?: string;
   sessionId?: string;
   from?: number;
   to?: number;

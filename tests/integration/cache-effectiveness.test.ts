@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -24,6 +24,8 @@ import { SqliteRuntimeControlStore } from "../../src/storage/sqlite/sqlite-runti
 import { createEmptyUsageSnapshot } from "../../src/engine/session-runtime.js";
 import type { ProviderCallRecord } from "../../src/tasks/runtime-types.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
+import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
+import { WorkspaceRegistrationStore } from "../../src/daemon/workspace-registration.js";
 
 test("cache effectiveness only uses detailed calls for ratios and classifies cache misses", () => {
   const firstCapture = preparedCapture("first");
@@ -352,7 +354,9 @@ test("usage.get excludes baselines from cache ratios and honors the call time ra
   store.close();
 
   const runtime = new WorkspaceRuntimeService({ env, execute: async () => undefined });
-  const desktop = new DesktopRuntimeService({ runtimeService: runtime, env });
+  const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
+  await trustStore.trust(await trustStore.canonicalize(workspacePath));
+  const desktop = new DesktopRuntimeService({ runtimeService: runtime, trustStore, env });
   context.after(async () => {
     await desktop.close();
     await rm(workspacePath, { recursive: true, force: true });
@@ -362,6 +366,11 @@ test("usage.get excludes baselines from cache ratios and honors the call time ra
   const allUsage = asRecord(all["usage"]);
   const allCache = asRecord(allUsage["cache"]);
   assert.equal(asRecord(allUsage["total"])["inputTokens"], 103_071);
+  assert.equal(
+    asRecord(allUsage["total"])["totalTokens"],
+    203_674,
+    "总 Token 必须包含未缓存输入、缓存读写与输出，不重复计入 reasoning",
+  );
   assert.equal(allCache["cacheReadTokens"], 500);
   assert.equal(allCache["requestHitRate"], 0.5);
   assert.equal(allCache["source"], "provider_calls_only");
@@ -373,6 +382,74 @@ test("usage.get excludes baselines from cache ratios and honors the call time ra
   assert.equal(rangeUsage["baselineCount"], 0);
   assert.equal(rangeUsage["providerCallCount"], 1);
   assert.equal(asRecord(rangeUsage["cache"])["requestHitRate"], 0);
+});
+
+test("global usage.get returns trusted records plus explicit partial failures", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-global-usage-partial-"));
+  const picoHome = join(root, "pico-home");
+  const healthyWorkspace = join(root, "healthy");
+  const brokenWorkspace = join(root, "broken");
+  const untrustedWorkspace = join(root, "untrusted");
+  await Promise.all([
+    mkdir(healthyWorkspace, { recursive: true }),
+    mkdir(brokenWorkspace, { recursive: true }),
+    mkdir(untrustedWorkspace, { recursive: true }),
+  ]);
+
+  const env = { PICO_HOME: picoHome };
+  const registrationStore = new WorkspaceRegistrationStore(join(picoHome, "workspaces.json"));
+  const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
+  const registeredWorkspaces = await Promise.all(
+    [healthyWorkspace, brokenWorkspace, untrustedWorkspace].map((workspacePath) =>
+      registrationStore.register(workspacePath),
+    ),
+  );
+  await trustStore.trust(await trustStore.canonicalize(healthyWorkspace));
+  await trustStore.trust(await trustStore.canonicalize(brokenWorkspace));
+
+  const healthyStore = new SqliteRuntimeControlStore({
+    storageRoot: resolvePicoPaths(healthyWorkspace, { picoHome }).workspace.root,
+  });
+  healthyStore.recordProviderCall(
+    providerCall(
+      "healthy",
+      100,
+      900,
+      50,
+      diagnosePreparedProviderRequest(preparedCapture("stable")),
+    ),
+  );
+  healthyStore.close();
+
+  const brokenStorage = resolvePicoPaths(brokenWorkspace, { picoHome }).workspace.root;
+  await mkdir(resolvePicoPaths(brokenWorkspace, { picoHome }).home.workspaces, {
+    recursive: true,
+  });
+  await writeFile(brokenStorage, "not-a-directory", "utf8");
+
+  const runtime = new WorkspaceRuntimeService({ env, execute: async () => undefined });
+  const desktop = new DesktopRuntimeService({
+    runtimeService: runtime,
+    registrationStore,
+    trustStore,
+    env,
+  });
+  context.after(async () => {
+    await desktop.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const result = asRecord(await desktop.handle(createRuntimeRequest("usage.get", {})));
+  const usage = asRecord(result["usage"]);
+  assert.equal(usage["providerCallCount"], 1);
+  assert.equal(asRecord(usage["total"])["totalTokens"], 1_051);
+  const unavailable = usage["unavailableWorkspaces"];
+  assert.ok(Array.isArray(unavailable));
+  assert.equal(unavailable.length, 2);
+  assert.deepEqual(
+    new Set(unavailable.map((item) => asRecord(item)["workspacePath"])),
+    new Set([registeredWorkspaces[1], registeredWorkspaces[2]]),
+  );
 });
 
 test("Desktop usage parser reads canonical cache fields and preserves zero values", () => {
@@ -394,8 +471,10 @@ test("Desktop usage parser reads canonical cache fields and preserves zero value
       },
     }),
     {
+      totalTokens: undefined,
       inputTokens: 10,
       outputTokens: 2,
+      reasoningTokens: undefined,
       cacheReadTokens: 0,
       cacheWriteTokens: 5,
       uncachedInputTokens: 10,
@@ -404,7 +483,14 @@ test("Desktop usage parser reads canonical cache fields and preserves zero value
       cachePromptTokenReuseRate: 0,
       cacheReadToWriteRatio: 0,
       cacheAlerts: ["缓存路由连续零命中"],
-      cost: undefined,
+      costCNY: undefined,
+      costStatus: undefined,
+      providerCallCount: undefined,
+      usageReportCount: undefined,
+      baselineCount: undefined,
+      scope: undefined,
+      workspacePath: undefined,
+      unavailableWorkspaceCount: undefined,
       period: "",
     },
   );

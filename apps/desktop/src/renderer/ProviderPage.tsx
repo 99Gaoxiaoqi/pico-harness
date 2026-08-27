@@ -533,6 +533,13 @@ function CredentialDialog({
 
   const handleDelete = async () => {
     if (!provider || !expectedRevision) return;
+    if (
+      !window.confirm(
+        `删除 ${provider.id} 保存在当前设备上的 API Key？删除后，使用该服务商的新请求将无法发送，直到重新配置凭证。`,
+      )
+    ) {
+      return;
+    }
     try {
       const succeeded = await onDelete(provider.id, expectedRevision);
       if (succeeded) handleOpenChange(false);

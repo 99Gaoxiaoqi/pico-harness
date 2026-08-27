@@ -1880,7 +1880,8 @@ export type RuntimeMethodMap = {
     };
   };
   readonly "usage.get": {
-    readonly params: WorkspaceParams & {
+    readonly params: {
+      readonly workspacePath?: string;
       readonly sessionId?: SessionId;
       readonly from?: number;
       readonly to?: number;
@@ -3692,8 +3693,13 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
   }),
   "mcp.effective.list": workspaceParams,
   "usage.get": exactParamShape(
-    { workspacePath: stringParam },
-    { sessionId: stringParam, from: finiteNumberParam, to: finiteNumberParam },
+    {},
+    {
+      workspacePath: stringParam,
+      sessionId: stringParam,
+      from: finiteNumberParam,
+      to: finiteNumberParam,
+    },
   ),
   "workspace.register": workspaceParams,
   "workspace.unregister": workspaceParams,

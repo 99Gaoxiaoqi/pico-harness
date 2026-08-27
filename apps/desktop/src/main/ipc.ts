@@ -28,7 +28,8 @@ import type { EmbeddedBrowserAuthority } from "./browser-manager.js";
 import { isDesktopRuntimeInvocationAllowed } from "./daemon-controller.js";
 
 interface LifecycleControls {
-  setBackgroundMode(enabled: boolean): void;
+  getBackgroundMode(): boolean;
+  setBackgroundMode(enabled: boolean): Promise<void>;
   requestQuit(): void;
   isQuitting(): boolean;
 }
@@ -388,11 +389,20 @@ export function registerDesktopIpcHandlers(options: {
     }
   });
 
-  ipcMain.handle(DESKTOP_IPC_CHANNELS.setBackgroundMode, (event, value: unknown) => {
+  ipcMain.handle(DESKTOP_IPC_CHANNELS.getBackgroundMode, (event) => {
+    if (!trusted(event)) return unauthorized();
+    return success(lifecycle.getBackgroundMode());
+  });
+
+  ipcMain.handle(DESKTOP_IPC_CHANNELS.setBackgroundMode, async (event, value: unknown) => {
     if (!trusted(event)) return unauthorized();
     if (typeof value !== "boolean") return failure(invalidArgument("后台模式参数无效"));
-    lifecycle.setBackgroundMode(value);
-    return success(undefined);
+    try {
+      await lifecycle.setBackgroundMode(value);
+      return success(undefined);
+    } catch (error) {
+      return failure(error);
+    }
   });
 
   ipcMain.handle(DESKTOP_IPC_CHANNELS.quit, (event) => {

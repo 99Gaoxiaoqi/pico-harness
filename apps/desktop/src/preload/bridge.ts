@@ -211,6 +211,7 @@ export function createDesktopBridge(ipcRenderer: IpcRenderer): DesktopBridge {
       },
     }),
     lifecycle: Object.freeze({
+      getBackgroundMode: () => ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.getBackgroundMode),
       setBackgroundMode: (enabled: boolean) => {
         if (typeof enabled !== "boolean") {
           return Promise.resolve(

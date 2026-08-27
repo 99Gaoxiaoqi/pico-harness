@@ -1,12 +1,25 @@
 import { app, type BrowserWindow } from "electron";
+import { createDesktopPreferences, type DesktopPreferencesStore } from "./preferences.js";
 
 export class DesktopLifecycleController {
   private backgroundMode = false;
   private quitting = false;
 
-  constructor(private readonly getWindow: () => BrowserWindow | undefined) {}
+  constructor(
+    private readonly getWindow: () => BrowserWindow | undefined,
+    private readonly preferences?: DesktopPreferencesStore,
+  ) {}
 
-  setBackgroundMode(enabled: boolean): void {
+  async initialize(): Promise<void> {
+    if (this.preferences) this.backgroundMode = (await this.preferences.read()).backgroundMode;
+  }
+
+  getBackgroundMode(): boolean {
+    return this.backgroundMode;
+  }
+
+  async setBackgroundMode(enabled: boolean): Promise<void> {
+    if (this.preferences) await this.preferences.write(createDesktopPreferences(enabled));
     this.backgroundMode = enabled;
   }
 

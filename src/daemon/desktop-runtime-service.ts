@@ -3371,12 +3371,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   }
 
   private async getUsage(params: {
-    readonly workspacePath: string;
+    readonly workspacePath?: string;
     readonly sessionId?: string;
     readonly from?: number;
     readonly to?: number;
   }): Promise<JsonValue> {
-    const canonical = await canonicalizeWorkspacePath(params.workspacePath);
     const from = optionalTimestamp(params.from, "from");
     const to = optionalTimestamp(params.to, "to");
     if (from !== undefined && to !== undefined && from > to) {
@@ -3385,42 +3384,71 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         "usage.get 的 from 不能晚于 to",
       );
     }
-    const store = new SqliteRuntimeControlStore({
-      storageRoot: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
-    });
-    try {
-      const filter = params.sessionId ? { sessionId: params.sessionId } : {};
-      const calls = store
-        .listProviderCalls(filter)
-        .filter((record) => inTimeRange(record.createdAt, from, to));
-      const hasRange = from !== undefined || to !== undefined;
-      const baselines = hasRange
-        ? []
-        : store.listUsageBaselines(params.sessionId ? { sessionId: params.sessionId } : {});
-      const providerCalls = sumUsage(calls);
-      const baselineTotals = sumUsage(baselines);
-      const total = addUsage(providerCalls, baselineTotals);
-      // Baseline only contains cumulative buckets, not per-request report coverage or prompt
-      // fingerprints. Cache-effectiveness ratios intentionally stay provider_calls-only.
-      const cache = summarizeCacheEffectiveness(calls);
-      return toJsonValue({
-        usage: {
-          workspacePath: canonical,
-          ...(params.sessionId ? { sessionId: params.sessionId } : {}),
-          ...(from !== undefined ? { from } : {}),
-          ...(to !== undefined ? { to } : {}),
-          providerCallCount: calls.length,
-          baselineCount: baselines.length,
-          providerCalls,
-          baselines: baselineTotals,
-          total: { ...total, totalTokens: total.inputTokens + total.outputTokens },
-          cache,
-          rangeAccuracy: hasRange ? "provider_calls_only" : "all_time_with_baselines",
-        },
-      });
-    } finally {
-      store.close();
+    if (params.sessionId && !params.workspacePath) {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        "按会话查询用量时必须指定 workspacePath",
+      );
     }
+    const workspacePaths = params.workspacePath
+      ? [await this.requireTrustedWorkspace(params.workspacePath)]
+      : await this.registrationStore.list();
+    const allCalls: ProviderCallRecord[] = [];
+    const allBaselines: UsageBaselineRecord[] = [];
+    const workspaces: JsonValue[] = [];
+    const unavailableWorkspaces: JsonValue[] = [];
+    for (const workspacePath of workspacePaths) {
+      let store: SqliteRuntimeControlStore | undefined;
+      try {
+        if (!params.workspacePath && !(await this.trustStore.isTrusted(workspacePath))) {
+          unavailableWorkspaces.push({ workspacePath, error: "项目尚未信任" });
+          continue;
+        }
+        store = new SqliteRuntimeControlStore({
+          storageRoot: resolvePicoPaths(workspacePath, { picoHome: this.picoHome }).workspace.root,
+        });
+        const filter = params.sessionId ? { sessionId: params.sessionId } : {};
+        const calls = store
+          .listProviderCalls(filter)
+          .filter((record) => inTimeRange(record.createdAt, from, to));
+        const hasRange = from !== undefined || to !== undefined;
+        const baselines = hasRange
+          ? []
+          : store.listUsageBaselines(params.sessionId ? { sessionId: params.sessionId } : {});
+        allCalls.push(...calls);
+        allBaselines.push(...baselines);
+        workspaces.push(
+          toJsonValue({
+            workspacePath,
+            ...summarizeUsageRecords(calls, baselines),
+          }),
+        );
+      } catch (error) {
+        if (params.workspacePath) throw error;
+        unavailableWorkspaces.push({
+          workspacePath,
+          error: errorMessage(error),
+        });
+      } finally {
+        store?.close();
+      }
+    }
+    const hasRange = from !== undefined || to !== undefined;
+    const summary = summarizeUsageRecords(allCalls, allBaselines);
+    return toJsonValue({
+      usage: {
+        scope: params.workspacePath ? (params.sessionId ? "session" : "workspace") : "all",
+        ...(params.workspacePath ? { workspacePath: workspacePaths[0] } : {}),
+        ...(params.sessionId ? { sessionId: params.sessionId } : {}),
+        ...(from !== undefined ? { from } : {}),
+        ...(to !== undefined ? { to } : {}),
+        ...summary,
+        cache: summarizeCacheEffectiveness(allCalls),
+        workspaces,
+        ...(unavailableWorkspaces.length > 0 ? { unavailableWorkspaces } : {}),
+        rangeAccuracy: hasRange ? "provider_calls_only" : "all_time_with_baselines",
+      },
+    });
   }
 
   private async listChanges(workspacePath: string, runId: string): Promise<JsonValue> {
@@ -4887,6 +4915,62 @@ function optionalTimestamp(value: number | undefined, name: string): number | un
 
 function inTimeRange(at: number, from: number | undefined, to: number | undefined): boolean {
   return (from === undefined || at >= from) && (to === undefined || at <= to);
+}
+
+function summarizeUsageRecords(
+  calls: readonly ProviderCallRecord[],
+  baselines: readonly UsageBaselineRecord[],
+): JsonObject {
+  const providerCalls = sumUsage(calls);
+  const baselineTotals = sumUsage(baselines);
+  const total = addUsage(providerCalls, baselineTotals);
+  let usageReportCount = 0;
+  let reasoningTokens = 0;
+  let estimatedCostCallCount = 0;
+  let includedCostCallCount = 0;
+  let unknownCostCallCount = 0;
+  for (const call of calls) {
+    const reported = call.reported ?? {};
+    if (reported["usageMetadata"] === "reported") usageReportCount += 1;
+    const reasoning = reported["reasoningTokens"];
+    if (typeof reasoning === "number" && Number.isFinite(reasoning) && reasoning >= 0) {
+      reasoningTokens += reasoning;
+    }
+    if (reported["costStatus"] === "estimated") estimatedCostCallCount += 1;
+    else if (reported["costStatus"] === "included") includedCostCallCount += 1;
+    else unknownCostCallCount += 1;
+  }
+  const unknownCostRecordCount = unknownCostCallCount + baselines.length;
+  const pricedKinds = Number(estimatedCostCallCount > 0) + Number(includedCostCallCount > 0);
+  const costStatus =
+    calls.length === 0 && baselines.length === 0
+      ? "none"
+      : unknownCostRecordCount > 0 || pricedKinds > 1
+        ? estimatedCostCallCount > 0 || includedCostCallCount > 0
+          ? "partial"
+          : "unknown"
+        : estimatedCostCallCount > 0
+          ? "estimated"
+          : "included";
+  return {
+    providerCallCount: calls.length,
+    usageReportCount,
+    baselineCount: baselines.length,
+    providerCalls: { ...providerCalls },
+    baselines: { ...baselineTotals },
+    total: {
+      ...total,
+      costCNY: total.cost,
+      totalTokens:
+        total.inputTokens + total.cacheReadTokens + total.cacheWriteTokens + total.outputTokens,
+      reasoningTokens,
+    },
+    currency: "CNY",
+    costStatus,
+    estimatedCostCallCount,
+    includedCostCallCount,
+    unknownCostRecordCount,
+  };
 }
 
 function sumUsage(
