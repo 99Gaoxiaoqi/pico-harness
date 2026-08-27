@@ -148,7 +148,7 @@ export function App({
   sessionMode = "new",
   collaborationMode = "agent",
   graphMode = false,
-  permissionMode = "yolo",
+  permissionMode = "default",
   thinkingEffort,
   mcpSummary,
   taskSummary,

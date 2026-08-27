@@ -143,7 +143,7 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
 
   let exitRequested = false;
   const instanceRef: { current: ReturnType<typeof render> | undefined } = { current: undefined };
-  // 会话设置快照桥（对抗评审二轮 P1：App 的 permissionMode 默认 "yolo" 会误显；
+  // 会话设置快照桥：无会话时展示首条发送会原子应用的新会话预设；
   // runtime 推快照 → sink → 组件 state，与 projectionSink 同款桥接）。
   const currentSettings: {
     current:
@@ -393,8 +393,18 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
         sessionId: options.forkFrom,
       });
       await runtime.switchSession(forked.session.sessionId);
+      let inheritedLabel = "继承设置已固化";
+      try {
+        const inherited = await runtime.request("session.settings.get", {
+          workspacePath: options.workDir,
+          sessionId: forked.session.sessionId,
+        });
+        inheritedLabel = `继承协作 ${inherited.settings.collaborationMode} · 权限 ${inherited.settings.permissionMode}`;
+      } catch {
+        inheritedLabel = "已继承源会话设置（暂无法读取展示）";
+      }
       reporter.pushSystemMessage(
-        `已从 ${options.forkFrom} fork 到新会话 ${forked.session.sessionId}。`,
+        `已从 ${options.forkFrom} fork 到新会话 ${forked.session.sessionId}，${inheritedLabel}。`,
       );
     }
     await instance.waitUntilExit();

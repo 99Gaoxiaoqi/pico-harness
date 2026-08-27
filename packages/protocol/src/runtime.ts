@@ -182,6 +182,7 @@ export type RuntimeUserConfig = JsonObject & {
 
 export type RuntimeEffectiveConfig = JsonObject & {
   readonly defaultModelRouteId?: string;
+  readonly defaults: RuntimeUserDefaults;
   readonly providers: readonly RuntimeProviderProfile[];
   readonly sources: JsonObject;
   readonly revisions: {
@@ -4328,6 +4329,7 @@ const runtimeUserConfigResult = resultShape({
 
 const runtimeEffectiveConfigResult = resultShape(
   {
+    defaults: runtimeUserDefaultsResult,
     providers: resultArray(runtimeProviderProfileResult),
     sources: resultJsonObject,
     revisions: exactResultShape({ user: resultString, project: resultString }),

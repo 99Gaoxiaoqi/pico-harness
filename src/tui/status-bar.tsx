@@ -32,7 +32,7 @@ export function buildStatusItems({
   sessionMode = "new",
   forkFrom,
   collaborationMode = "agent",
-  permissionMode = "yolo",
+  permissionMode = "default",
   graphMode = false,
   mcpSummary,
   contextSummary,

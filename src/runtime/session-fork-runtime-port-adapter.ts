@@ -20,7 +20,7 @@ export function createSessionForkRuntimePort(): SessionForkRuntimePort {
         await service.fork({
           sourceSessionId: input.sourceSessionId,
           targetSessionId: input.targetSessionId,
-          targetMode: input.targetMode,
+          ...(input.targetMode !== undefined ? { targetMode: input.targetMode } : {}),
           ...(input.throughEventId ? { throughEventId: input.throughEventId } : {}),
         });
       } finally {

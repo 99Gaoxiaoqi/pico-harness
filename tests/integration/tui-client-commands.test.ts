@@ -32,6 +32,8 @@ interface Harness {
 function createHarness(options?: {
   readonly sessionId?: string;
   readonly permissionMode?: "default" | "auto" | "yolo";
+  readonly configuredPermissionMode?: "default" | "auto" | "yolo";
+  readonly configuredCollaborationMode?: "agent" | "plan";
   readonly echoAutomationCredentialError?: boolean;
   readonly credentialEnv?: Readonly<Record<string, string | undefined>>;
   readonly automationCredentialProposals?: AutomationCredentialImportProposalStore;
@@ -302,6 +304,10 @@ function createHarness(options?: {
           return {
             config: {
               defaultModelRouteId: "p1/m1",
+              defaults: {
+                collaborationMode: options?.configuredCollaborationMode ?? "agent",
+                permissionMode: options?.configuredPermissionMode ?? "default",
+              },
               providers: [
                 {
                   id: "p1",
@@ -1719,4 +1725,35 @@ test("client commands: local/unknown/prompt routing", async () => {
   const bare = createHarness();
   const needSession = await run(bare, "/status");
   assert.match(String(needSession.result?.message), /没有活跃会话/);
+});
+
+test("fresh TUI can choose safe settings before the first atomic session.send", async () => {
+  const harness = createHarness({
+    configuredPermissionMode: "auto",
+    configuredCollaborationMode: "agent",
+  });
+  await harness.runtime.start();
+
+  assert.equal(harness.runtime.preSessionSettings.permissionMode, "auto");
+  assert.equal(harness.runtime.preSessionSettings.collaborationMode, "agent");
+  assert.match(String((await run(harness, "/permissions")).result?.message), /auto/u);
+
+  assert.match(String((await run(harness, "/permissions yolo")).result?.message), /首条消息/u);
+  assert.match(String((await run(harness, "/plan on")).result?.message), /计划模式/u);
+  assert.equal(
+    harness.requests.some((entry) => entry.method === "session.settings.update"),
+    false,
+  );
+
+  await run(harness, "首条消息");
+  const firstSend = harness.requests.find((entry) => entry.method === "session.send");
+  assert.deepEqual(firstSend?.params.initialSettings, {
+    collaborationMode: "plan",
+    permissionMode: "yolo",
+  });
+
+  await harness.runtime.switchSession(undefined);
+  assert.equal(harness.runtime.preSessionSettings.permissionMode, "auto");
+  assert.equal(harness.runtime.preSessionSettings.collaborationMode, "agent");
+  harness.runtime.dispose();
 });

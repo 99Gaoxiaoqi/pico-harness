@@ -95,8 +95,8 @@ export interface SessionForkServiceOptions {
 export interface ForkSessionInput {
   readonly sourceSessionId: string;
   readonly targetSessionId: string;
-  /** fork 不继承 source 权限 mode，由当前产品启动默认值决定。 */
-  readonly targetMode: PersistedInteractionMode;
+  /** @deprecated Accepted for source compatibility but ignored: forks always inherit source axes. */
+  readonly targetMode?: PersistedInteractionMode;
   /**
    * Non-destructive rewind: 仅截取到 source 中该 RuntimeEvent 为止（含）
    * 的条目作为 fork 边界。省略时与原行为一致——从 source 当前 head fork。
@@ -249,6 +249,7 @@ export class SessionForkService {
       const operationId = this.createOperationId();
       const stagingDirectory = join(this.workspacePaths.forkStaging, operationId);
       const frozen = createFrozenForkBundle(operationId, input, snapshot);
+      const inheritedInteraction = resolveForkInteraction(frozen.settings);
 
       // 必须先冻结 payload 再创建 journal。这样 journal 一旦可见，reconcile
       // 就永远不需要从已经继续推进的 source 重建消息。
@@ -260,7 +261,8 @@ export class SessionForkService {
         sourceSessionId: input.sourceSessionId,
         sourceCursor: snapshot.cursor,
         targetSessionId: input.targetSessionId,
-        targetMode: input.targetMode,
+        targetCollaborationMode: inheritedInteraction.collaborationMode,
+        targetPermissionMode: inheritedInteraction.permissionMode,
         stagingDirectory,
       });
       if (operation.state === "needs_attention") {
@@ -397,7 +399,7 @@ export class SessionForkService {
     try {
       const runtimePatch = filteredRuntimePatch(
         frozen,
-        operation.targetMode ?? "yolo",
+        resolveForkOperationInteraction(operation, frozen.settings),
         operation.createdAt,
       );
       const workflowEvents = this.buildForkWorkflowEntries(
@@ -564,7 +566,7 @@ export class SessionForkService {
     );
     const runtimePatch = filteredRuntimePatch(
       frozen,
-      operation.targetMode ?? "yolo",
+      resolveForkOperationInteraction(operation, frozen.settings),
       operation.createdAt,
     );
     const expectedRunId = this.runtimePort.deriveBootstrapRunId({
@@ -763,11 +765,11 @@ function createFrozenForkBundle(
 
 function filteredRuntimePatch(
   frozen: FrozenForkBundle,
-  targetMode: PersistedInteractionMode,
+  interaction: ForkInteractionSettings,
   forkCreatedAt: string,
 ): SessionRuntimeStateWritePatch | undefined {
   const settings = frozen.settings
-    ? filterForkSettings(frozen.settings, frozen.sourceSessionId, targetMode, frozen.sourceTitle)
+    ? filterForkSettings(frozen.settings, frozen.sourceSessionId, interaction, frozen.sourceTitle)
     : undefined;
   return settings || frozen.goal
     ? {
@@ -795,7 +797,7 @@ function resetForkGoalUsage(
 function filterForkSettings(
   settings: PersistedSessionSettings,
   sourceSessionId: string,
-  targetMode: PersistedInteractionMode,
+  interaction: ForkInteractionSettings,
   sourceTitle: string | undefined,
 ): PersistedSessionSettingsWrite {
   return {
@@ -805,13 +807,45 @@ function filterForkSettings(
     provider: settings.provider,
     model: settings.model,
     modelRouteId: settings.modelRouteId,
-    collaborationMode: targetMode === "plan" ? "plan" : "agent",
+    collaborationMode: interaction.collaborationMode,
     orchestrationMode: settings.orchestrationMode ?? "default",
-    permissionMode: targetMode === "plan" ? "yolo" : targetMode,
+    permissionMode: interaction.permissionMode,
     thinkingEffort: settings.thinkingEffort,
     thinkingEffortExplicit: settings.thinkingEffortExplicit,
     additionalDirectories: [],
   };
+}
+
+interface ForkInteractionSettings {
+  readonly collaborationMode: "agent" | "plan";
+  readonly permissionMode: Exclude<PersistedInteractionMode, "plan">;
+}
+
+function resolveForkInteraction(
+  source: PersistedSessionSettings | undefined,
+): ForkInteractionSettings {
+  return {
+    collaborationMode: source?.collaborationMode ?? "agent",
+    permissionMode: source?.permissionMode ?? "default",
+  };
+}
+
+function resolveForkOperationInteraction(
+  operation: ForkStorageOperation,
+  source: PersistedSessionSettings | undefined,
+): ForkInteractionSettings {
+  if (
+    operation.targetCollaborationMode !== undefined &&
+    operation.targetPermissionMode !== undefined
+  ) {
+    return {
+      collaborationMode: operation.targetCollaborationMode,
+      permissionMode: operation.targetPermissionMode,
+    };
+  }
+  // Old journals only recorded a combined targetMode. Re-derive from the frozen
+  // source rather than treating a historical yolo default as authorization.
+  return resolveForkInteraction(source);
 }
 
 function stripMessageUsage(message: Message): Message {

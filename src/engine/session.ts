@@ -1282,7 +1282,6 @@ export class Session
       fileHistoryBaseDir: this.fileHistoryBaseDir,
       sourceSessionId: this.id,
       targetSessionId,
-      targetMode: this.persistedSettings?.mode ?? "yolo",
       ...(throughEventId ? { throughEventId } : {}),
     });
 

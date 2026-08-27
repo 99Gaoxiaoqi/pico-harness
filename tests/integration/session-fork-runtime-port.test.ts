@@ -14,6 +14,11 @@ import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime
 import { operationalDatabasePath } from "../../src/storage/sqlite/sqlite-database.js";
 import { RuntimeRun } from "../../src/runtime/runtime-run.js";
 import { StorageOperationJournal } from "../../src/storage/operation-journal.js";
+import {
+  getOrCreateSessionSettings,
+  setSessionCollaborationMode,
+  setSessionPermissionMode,
+} from "../../src/input/session-settings.js";
 
 /** Windows:分离的后台任务(memory recovery 等)可能短暂持有 pico.sqlite 句柄,
  * 删除临时目录按 EBUSY 有界重试,等待分离 drain 归还 lease。 */
@@ -232,6 +237,189 @@ test("session fork runtime port composes the coordinator for Session callers", a
   } finally {
     await globalSessionManager.delete(sourceSessionId, workDir, { picoHome })?.close();
     await globalSessionManager.delete(targetSessionId, workDir, { picoHome })?.close();
+    await rmRetry(root);
+  }
+});
+
+test("fork inherits both interaction axes and survives target Resume", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-session-fork-permissions-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const manager = new SessionManager();
+  const cases = [
+    ["agent", "default"],
+    ["agent", "auto"],
+    ["agent", "yolo"],
+    ["plan", "default"],
+    ["plan", "auto"],
+    ["plan", "yolo"],
+  ] as const;
+
+  try {
+    for (const [index, [collaborationMode, permissionMode]] of cases.entries()) {
+      const sourceSessionId = `fork-permission-source-${index}`;
+      const targetSessionId = `fork-permission-target-${index}`;
+      const source = await manager.getOrCreate(sourceSessionId, workDir, {
+        persistence: true,
+        picoHome,
+        runtimePort: createEngineRuntimePort(),
+      });
+      const settings = getOrCreateSessionSettings(
+        {
+          sessionId: sourceSessionId,
+          cwd: workDir,
+          picoHome,
+          provider: "openai",
+          model: "test",
+          modelRouteId: "openai/test",
+          mode: permissionMode,
+        },
+        { persistence: source },
+      );
+      assert.equal(setSessionCollaborationMode(settings, collaborationMode).ok, true);
+      assert.equal(setSessionPermissionMode(settings, permissionMode).ok, true);
+      await source.commitMessages({ role: "user", content: `seed ${index}` });
+      await source.flushPersistence();
+
+      const journal = new StorageOperationJournal({ workDir, picoHome });
+      const operationId = `fork-permission-op-${index}`;
+      const service = new SessionForkService({
+        workDir,
+        picoHome,
+        sessionManager: manager,
+        runtimeStore: source.runtimeEventStore!,
+        journal,
+        runtimePort: createSessionForkRuntimePort(),
+        createOperationId: () => operationId,
+      });
+      try {
+        await service.fork({
+          sourceSessionId,
+          targetSessionId,
+          // Compatibility input cannot override the source's canonical axes.
+          targetMode: permissionMode === "yolo" ? "default" : "yolo",
+        });
+      } finally {
+        service.close();
+      }
+
+      const operation = await journal.get(operationId);
+      assert.equal(operation?.kind, "fork");
+      if (operation?.kind === "fork") {
+        assert.equal(operation.targetCollaborationMode, collaborationMode);
+        assert.equal(operation.targetPermissionMode, permissionMode);
+        assert.equal(operation.targetMode, undefined);
+      }
+
+      const resumed = new Session(targetSessionId, workDir, {
+        persistence: true,
+        picoHome,
+        runtimePort: createEngineRuntimePort(),
+      });
+      try {
+        await resumed.recover();
+        const inherited = resumed.getRuntimeStateSnapshot().settings;
+        assert.equal(inherited?.collaborationMode, collaborationMode);
+        assert.equal(inherited?.permissionMode, permissionMode);
+        assert.deepEqual(inherited?.additionalDirectories, []);
+      } finally {
+        await resumed.close();
+      }
+    }
+  } finally {
+    for (const index of cases.keys()) {
+      await manager.delete(`fork-permission-source-${index}`, workDir, { picoHome })?.close();
+    }
+    await rmRetry(root);
+  }
+});
+
+test("legacy fork journal recovery ignores historical yolo and uses frozen source permission", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-session-fork-legacy-permission-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const sourceSessionId = "fork-legacy-permission-source";
+  const targetSessionId = "fork-legacy-permission-target";
+  const operationId = "fork-legacy-permission-op";
+  const manager = new SessionManager();
+  const source = await manager.getOrCreate(sourceSessionId, workDir, {
+    persistence: true,
+    picoHome,
+    runtimePort: createEngineRuntimePort(),
+  });
+  const journal = new StorageOperationJournal({ workDir, picoHome });
+  let injectFailure = true;
+  const service = new SessionForkService({
+    workDir,
+    picoHome,
+    sessionManager: manager,
+    runtimeStore: source.runtimeEventStore!,
+    journal,
+    runtimePort: createSessionForkRuntimePort(),
+    createOperationId: () => operationId,
+    hooks: {
+      beforeRuntimeBootstrap: () => {
+        if (injectFailure) throw new Error("injected crash before publication");
+      },
+    },
+  });
+  try {
+    getOrCreateSessionSettings(
+      {
+        sessionId: sourceSessionId,
+        cwd: workDir,
+        picoHome,
+        provider: "openai",
+        model: "test",
+        modelRouteId: "openai/test",
+        mode: "default",
+      },
+      { persistence: source },
+    );
+    await source.commitMessages({ role: "user", content: "legacy recovery seed" });
+    await source.flushPersistence();
+    await assert.rejects(
+      service.fork({ sourceSessionId, targetSessionId }),
+      /injected crash before publication/u,
+    );
+
+    const database = new DatabaseSync(
+      operationalDatabasePath(source.runtimeEventStore!.storageRoot),
+    );
+    try {
+      const row = database
+        .prepare("SELECT operation_json FROM storage_operations WHERE operation_id = ?")
+        .get(operationId) as { operation_json: string };
+      const legacy = JSON.parse(row.operation_json) as Record<string, unknown>;
+      delete legacy["targetCollaborationMode"];
+      delete legacy["targetPermissionMode"];
+      legacy["targetMode"] = "yolo";
+      database
+        .prepare("UPDATE storage_operations SET operation_json = ? WHERE operation_id = ?")
+        .run(JSON.stringify(legacy), operationId);
+    } finally {
+      database.close();
+    }
+
+    const failed = await journal.get(operationId);
+    assert.equal(failed?.state, "sidecars_committed");
+    injectFailure = false;
+    await service.reconcileUnfinished();
+
+    const resumed = new Session(targetSessionId, workDir, {
+      persistence: true,
+      picoHome,
+      runtimePort: createEngineRuntimePort(),
+    });
+    try {
+      await resumed.recover();
+      assert.equal(resumed.getRuntimeStateSnapshot().settings?.permissionMode, "default");
+    } finally {
+      await resumed.close();
+    }
+  } finally {
+    service.close();
+    await manager.delete(sourceSessionId, workDir, { picoHome })?.close();
     await rmRetry(root);
   }
 });

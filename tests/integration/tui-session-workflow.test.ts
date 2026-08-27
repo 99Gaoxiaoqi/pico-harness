@@ -119,7 +119,7 @@ test("/plan and legacy mode commands keep collaboration and permission independe
   assert.deepEqual(plan.result.data, {
     ok: true,
     collaborationMode: "plan",
-    permissionMode: "yolo",
+    permissionMode: "default",
   });
 
   const permission = await processUserInput("/mode auto", { registry });

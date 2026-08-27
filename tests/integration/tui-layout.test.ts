@@ -77,6 +77,10 @@ test("唯一状态栏同时呈现会话、权限和 MCP 状态", () => {
   );
 });
 
+test("全新 TUI 状态栏安全回退为 default 权限", () => {
+  assert.match(buildStatusBarText({ renderWidth: 120 }), /协作 agent · 权限 default/u);
+});
+
 test("Plan 审批卡片提供三个专用动作且继续修改要求反馈", () => {
   const notice = {
     taskId: "plan-1",
