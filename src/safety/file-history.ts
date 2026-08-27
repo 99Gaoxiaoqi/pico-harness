@@ -8,6 +8,7 @@ import {
   unlink,
   readFile,
   readlink,
+  realpath,
   rename,
   rm,
   open,
@@ -821,6 +822,11 @@ export interface FileHistoryRewindTransactionHooks {
     file: FileHistoryPreparedRewindFile,
     index: number,
   ) => void | Promise<void>;
+  /** 故障注入：单文件原子恢复后触发，用于验证崩溃重放。 */
+  readonly afterApplyFile?: (
+    file: FileHistoryPreparedRewindFile,
+    index: number,
+  ) => void | Promise<void>;
 }
 
 export interface FileHistoryRewindTransaction {
@@ -838,7 +844,63 @@ type FileHistoryRollbackState =
       readonly mode: number;
       readonly fingerprint: string;
     }
-  | { readonly kind: "symlink"; readonly target: string; readonly fingerprint: string };
+  | {
+      readonly kind: "symlink";
+      readonly target: string;
+      readonly mode: number;
+      readonly fingerprint: string;
+    };
+
+const DURABLE_REWIND_PLAN_VERSION = 2 as const;
+
+export type FileHistoryDurableFileState =
+  | { readonly kind: "missing"; readonly fingerprint: string }
+  | {
+      readonly kind: "file";
+      readonly contentsBase64: string;
+      readonly mode: number;
+      readonly fingerprint: string;
+    }
+  | {
+      readonly kind: "symlink";
+      readonly target: string;
+      readonly mode: number;
+      readonly fingerprint: string;
+    };
+
+export interface FileHistoryDurableRewindPlan {
+  readonly schemaVersion: typeof DURABLE_REWIND_PLAN_VERSION;
+  readonly messageId: string;
+  readonly revision: number;
+  /**
+   * Source FileHistory authority frozen before the first workspace mutation.
+   * `authoritySha256` binds the logical root identity to both its lexical and
+   * resolved locations; the operation bundle manifest binds this whole plan.
+   */
+  readonly roots: readonly {
+    readonly rootId: string;
+    readonly absolutePath: string;
+    readonly realPath: string;
+    readonly authoritySha256: string;
+  }[];
+  readonly files: readonly {
+    readonly location: PersistedFileLocationV2;
+    /** Workspace state captured before rewind; durable compensation authority. */
+    readonly original: FileHistoryDurableFileState;
+    /** Exact checkpoint state; durable forward-recovery authority. */
+    readonly rewound: FileHistoryDurableFileState;
+  }[];
+}
+
+export class FileHistoryDurableRewindConflictError extends Error {
+  constructor(
+    readonly conflictingPaths: readonly string[],
+    options?: ErrorOptions,
+  ) {
+    super(`FileHistory: durable rewind state conflicts: ${conflictingPaths.join(", ")}`, options);
+    this.name = "FileHistoryDurableRewindConflictError";
+  }
+}
 
 /**
  * 在工作区外部状态未变时冻结 rewind 输入与当前文件 preimage。
@@ -935,6 +997,286 @@ export async function fileHistoryPrepareRewindTransaction(
   };
 }
 
+/**
+ * Freeze both sides of a rewind before the first workspace mutation. The returned
+ * JSON-safe plan is self-contained so a fork journal can replay or compensate it
+ * after process death without re-reading the already changed workspace.
+ */
+export async function fileHistoryPrepareDurableRewindPlan(
+  state: FileHistoryState,
+  messageId: string,
+  sessionId: string,
+  baseDir: string = fileHistoryDefaultBaseDir(),
+  options: { expectedCurrentFingerprints?: ReadonlyMap<string, string> } = {},
+): Promise<FileHistoryDurableRewindPlan> {
+  const prepared = await fileHistoryPrepareRewind(state, messageId, sessionId, baseDir, options);
+  const roots = new Map<string, FileHistoryDurableRewindPlan["roots"][number]>();
+  const files = [] as Array<FileHistoryDurableRewindPlan["files"][number]>;
+  for (const file of prepared.files) {
+    const authority = await resolveDurableRewindRootAuthority(state, file.filePath);
+    roots.set(authority.root.rootId, authority.root);
+    const original = serializeDurableFileState(await captureRewindRollbackState(file.filePath));
+    if (original.fingerprint !== file.currentFingerprint) {
+      throw new Error(`FileHistory: ${file.filePath} 在 durable rewind 冻结前又发生变化`);
+    }
+    files.push({
+      location: authority.location,
+      original,
+      rewound: await materializeDurableRewoundState(file.backup, sessionId, baseDir),
+    });
+  }
+  return {
+    schemaVersion: DURABLE_REWIND_PLAN_VERSION,
+    messageId,
+    revision: prepared.revision,
+    roots: [...roots.values()].toSorted((left, right) => left.rootId.localeCompare(right.rootId)),
+    files,
+  };
+}
+
+async function resolveDurableRewindRootAuthority(
+  state: FileHistoryState,
+  filePath: string,
+): Promise<{
+  root: FileHistoryDurableRewindPlan["roots"][number];
+  location: PersistedFileLocationV2;
+}> {
+  const absoluteFilePath = resolve(filePath);
+  const sourceRoot = [...state.roots.entries()]
+    .map(([rootId, absolutePath]) => ({ rootId, absolutePath: resolve(absolutePath) }))
+    .filter((candidate) => isPathWithinRoot(candidate.absolutePath, absoluteFilePath))
+    .toSorted((left, right) => right.absolutePath.length - left.absolutePath.length)[0];
+  if (!sourceRoot) {
+    throw new Error(`FileHistory: durable rewind 路径未绑定已信任 root: ${filePath}`);
+  }
+  const root = {
+    ...sourceRoot,
+    realPath: resolve(await realpath(sourceRoot.absolutePath)),
+    authoritySha256: "",
+  } satisfies FileHistoryDurableRewindPlan["roots"][number];
+  const authority = {
+    ...root,
+    authoritySha256: durableRewindRootAuthoritySha256(root),
+  } satisfies FileHistoryDurableRewindPlan["roots"][number];
+  const location = encodeFileLocation(absoluteFilePath, new Map([[authority.rootId, authority]]));
+  await resolveDurableRewindFilePath(new Map([[authority.rootId, authority]]), location);
+  return { root: authority, location };
+}
+
+function durableRewindRootAuthoritySha256(
+  root: Pick<FileHistoryDurableRewindPlan["roots"][number], "rootId" | "absolutePath" | "realPath">,
+): string {
+  return createHash("sha256")
+    .update(
+      `pico-file-history-durable-rewind-root-v1\0${root.rootId}\0${resolve(root.absolutePath)}\0${resolve(root.realPath)}`,
+    )
+    .digest("hex");
+}
+
+async function resolveDurableRewindFilePath(
+  roots: ReadonlyMap<string, FileHistoryDurableRewindPlan["roots"][number]>,
+  location: PersistedFileLocationV2,
+): Promise<string> {
+  const root = roots.get(location.rootId);
+  const fallbackPath = root
+    ? resolve(root.absolutePath, ...location.relativePath.split("/"))
+    : location.relativePath;
+  if (!root || root.authoritySha256 !== durableRewindRootAuthoritySha256(root)) {
+    throw new FileHistoryDurableRewindConflictError([fallbackPath]);
+  }
+  let currentRootRealPath: string;
+  try {
+    currentRootRealPath = resolve(await realpath(root.absolutePath));
+  } catch (error) {
+    throw new FileHistoryDurableRewindConflictError([fallbackPath], { cause: error });
+  }
+  if (currentRootRealPath !== root.realPath) {
+    throw new FileHistoryDurableRewindConflictError([fallbackPath]);
+  }
+  const filePath = decodeFileLocation(location, new Map([[root.rootId, root.absolutePath]]));
+  let ancestor = dirname(filePath);
+  for (;;) {
+    if (!isPathWithinOrEqual(root.absolutePath, ancestor)) {
+      throw new FileHistoryDurableRewindConflictError([filePath]);
+    }
+    try {
+      const metadata = await lstat(ancestor);
+      if (!metadata.isDirectory() && !metadata.isSymbolicLink()) {
+        throw new FileHistoryDurableRewindConflictError([filePath]);
+      }
+      const ancestorRealPath = resolve(await realpath(ancestor));
+      if (!isPathWithinOrEqual(root.realPath, ancestorRealPath)) {
+        throw new FileHistoryDurableRewindConflictError([filePath]);
+      }
+      break;
+    } catch (error) {
+      if (error instanceof FileHistoryDurableRewindConflictError) throw error;
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw new FileHistoryDurableRewindConflictError([filePath], { cause: error });
+      }
+      if (ancestor === root.absolutePath) {
+        throw new FileHistoryDurableRewindConflictError([filePath]);
+      }
+      ancestor = dirname(ancestor);
+    }
+  }
+  return filePath;
+}
+
+export function parseFileHistoryDurableRewindPlan(value: unknown): FileHistoryDurableRewindPlan {
+  const record = requireRecord(value, "durable rewind plan");
+  assertOnlyKeys(
+    record,
+    ["schemaVersion", "messageId", "revision", "roots", "files"],
+    "durable rewind plan",
+  );
+  if (record["schemaVersion"] !== DURABLE_REWIND_PLAN_VERSION) {
+    throw new Error("Unsupported durable rewind plan schema");
+  }
+  const messageId = requireString(record["messageId"], "durable rewind plan.messageId");
+  const revision = requireNonNegativeInteger(record["revision"], "durable rewind plan.revision");
+  const roots = requireArray(record["roots"], "durable rewind plan.roots").map((item, index) => {
+    const root = requireRecord(item, `durable rewind plan.roots[${index}]`);
+    assertOnlyKeys(
+      root,
+      ["rootId", "absolutePath", "realPath", "authoritySha256"],
+      `durable rewind plan.roots[${index}]`,
+    );
+    const parsed = {
+      rootId: requireString(root["rootId"], `durable rewind plan.roots[${index}].rootId`),
+      absolutePath: requireAbsolutePath(
+        root["absolutePath"],
+        `durable rewind plan.roots[${index}].absolutePath`,
+      ),
+      realPath: requireAbsolutePath(
+        root["realPath"],
+        `durable rewind plan.roots[${index}].realPath`,
+      ),
+      authoritySha256: requireSha256(
+        root["authoritySha256"],
+        `durable rewind plan.roots[${index}].authoritySha256`,
+      ),
+    } satisfies FileHistoryDurableRewindPlan["roots"][number];
+    if (!/^[A-Za-z0-9._-]+$/u.test(parsed.rootId)) {
+      throw new Error(`durable rewind plan.roots[${index}].rootId is invalid`);
+    }
+    if (parsed.authoritySha256 !== durableRewindRootAuthoritySha256(parsed)) {
+      throw new Error(`durable rewind plan.roots[${index}] authority is invalid`);
+    }
+    return parsed;
+  });
+  if (new Set(roots.map((root) => root.rootId)).size !== roots.length) {
+    throw new Error("durable rewind plan repeats a rootId");
+  }
+  const rootsById = new Map(roots.map((root) => [root.rootId, root]));
+  const seen = new Set<string>();
+  const files = requireArray(record["files"], "durable rewind plan.files").map((item, index) => {
+    const file = requireRecord(item, `durable rewind plan.files[${index}]`);
+    assertOnlyKeys(
+      file,
+      ["location", "original", "rewound"],
+      `durable rewind plan.files[${index}]`,
+    );
+    const locationRecord = requireRecord(
+      file["location"],
+      `durable rewind plan.files[${index}].location`,
+    );
+    assertOnlyKeys(
+      locationRecord,
+      ["rootId", "relativePath"],
+      `durable rewind plan.files[${index}].location`,
+    );
+    const location = {
+      rootId: requireString(
+        locationRecord["rootId"],
+        `durable rewind plan.files[${index}].location.rootId`,
+      ),
+      relativePath: requireString(
+        locationRecord["relativePath"],
+        `durable rewind plan.files[${index}].location.relativePath`,
+      ),
+    } satisfies PersistedFileLocationV2;
+    const root = rootsById.get(location.rootId);
+    if (!root) throw new Error(`durable rewind plan references unknown root ${location.rootId}`);
+    assertSafeRelativePath(location.relativePath);
+    const filePath = decodeFileLocation(location, new Map([[root.rootId, root.absolutePath]]));
+    if (seen.has(filePath)) throw new Error(`durable rewind plan repeats ${filePath}`);
+    seen.add(filePath);
+    return {
+      location,
+      original: parseDurableFileState(
+        file["original"],
+        `durable rewind plan.files[${index}].original`,
+      ),
+      rewound: parseDurableFileState(
+        file["rewound"],
+        `durable rewind plan.files[${index}].rewound`,
+      ),
+    };
+  });
+  return { schemaVersion: DURABLE_REWIND_PLAN_VERSION, messageId, revision, roots, files };
+}
+
+/** Idempotently converge every file from original-or-rewound to rewound. */
+export async function fileHistoryApplyDurableRewindPlan(
+  plan: FileHistoryDurableRewindPlan,
+  hooks: FileHistoryRewindTransactionHooks = {},
+): Promise<void> {
+  const roots = new Map(plan.roots.map((root) => [root.rootId, root]));
+  for (const [index, file] of plan.files.entries()) {
+    const filePath = await resolveDurableRewindFilePath(roots, file.location);
+    const current = await readCurrentFileState(filePath);
+    if (current.fingerprint !== file.rewound.fingerprint) {
+      if (current.fingerprint !== file.original.fingerprint) {
+        throw new FileHistoryDurableRewindConflictError([filePath]);
+      }
+      await hooks.beforeApplyFile?.(
+        {
+          filePath,
+          backup: durableStateAsSyntheticBackup(file.rewound),
+          currentFingerprint: file.original.fingerprint,
+        },
+        index,
+      );
+      await resolveDurableRewindFilePath(roots, file.location);
+      await restoreDurableFileState(filePath, file.rewound);
+      await resolveDurableRewindFilePath(roots, file.location);
+      if ((await readCurrentFileState(filePath)).fingerprint !== file.rewound.fingerprint) {
+        throw new FileHistoryDurableRewindConflictError([filePath]);
+      }
+    }
+    await hooks.afterApplyFile?.(
+      {
+        filePath,
+        backup: durableStateAsSyntheticBackup(file.rewound),
+        currentFingerprint: file.original.fingerprint,
+      },
+      index,
+    );
+  }
+}
+
+/** Idempotently compensate every file from rewound-or-original to original. */
+export async function fileHistoryRollbackDurableRewindPlan(
+  plan: FileHistoryDurableRewindPlan,
+): Promise<void> {
+  const roots = new Map(plan.roots.map((root) => [root.rootId, root]));
+  for (const file of [...plan.files].reverse()) {
+    const filePath = await resolveDurableRewindFilePath(roots, file.location);
+    const current = await readCurrentFileState(filePath);
+    if (current.fingerprint === file.original.fingerprint) continue;
+    if (current.fingerprint !== file.rewound.fingerprint) {
+      throw new FileHistoryDurableRewindConflictError([filePath]);
+    }
+    await resolveDurableRewindFilePath(roots, file.location);
+    await restoreDurableFileState(filePath, file.original);
+    await resolveDurableRewindFilePath(roots, file.location);
+    if ((await readCurrentFileState(filePath)).fingerprint !== file.original.fingerprint) {
+      throw new FileHistoryDurableRewindConflictError([filePath]);
+    }
+  }
+}
+
 export interface FileHistoryPreparedRewindFile {
   filePath: string;
   backup: FileHistoryBackup;
@@ -1027,10 +1369,12 @@ async function captureRewindRollbackState(filePath: string): Promise<FileHistory
     }
     if (info.isSymbolicLink()) {
       const target = await readlink(filePath);
+      const mode = info.mode & 0o777;
       return {
         kind: "symlink",
         target,
-        fingerprint: fileStateFingerprint("symlink", info.mode & 0o777, target),
+        mode,
+        fingerprint: fileStateFingerprint("symlink", mode, target),
       };
     }
     throw new Error(`FileHistory: ${filePath} 当前不是可补偿的普通文件或符号链接`);
@@ -1043,6 +1387,108 @@ async function captureRewindRollbackState(filePath: string): Promise<FileHistory
     }
     throw error;
   }
+}
+
+async function materializeDurableRewoundState(
+  backup: FileHistoryBackup,
+  sessionId: string,
+  baseDir: string,
+): Promise<FileHistoryDurableFileState> {
+  if (backup.backupFileName === null) {
+    return {
+      kind: "missing",
+      fingerprint: fileStateFingerprint("missing", undefined, ""),
+    };
+  }
+  let bytes: Buffer;
+  let mode: number;
+  if (backup.blobRef) {
+    bytes = await new FileHistoryBlobStore({ baseDir }).read(backup.blobRef);
+    mode = backup.originMode ?? 0o600;
+  } else {
+    const backupPath = resolveBackupPath(sessionId, backup.backupFileName, baseDir);
+    const metadata = await stat(backupPath);
+    bytes = await readFile(backupPath);
+    mode = metadata.mode & 0o777;
+  }
+  return {
+    kind: "file",
+    contentsBase64: bytes.toString("base64"),
+    mode,
+    fingerprint: fileStateFingerprint("file", mode, bytes),
+  };
+}
+
+function serializeDurableFileState(state: FileHistoryRollbackState): FileHistoryDurableFileState {
+  return state.kind === "file"
+    ? {
+        kind: "file",
+        contentsBase64: state.bytes.toString("base64"),
+        mode: state.mode,
+        fingerprint: state.fingerprint,
+      }
+    : structuredClone(state);
+}
+
+async function restoreDurableFileState(
+  filePath: string,
+  state: FileHistoryDurableFileState,
+): Promise<void> {
+  await restoreRewindRollbackState(
+    filePath,
+    state.kind === "file"
+      ? {
+          kind: "file",
+          bytes: Buffer.from(state.contentsBase64, "base64"),
+          mode: state.mode,
+          fingerprint: state.fingerprint,
+        }
+      : state,
+  );
+}
+
+function durableStateAsSyntheticBackup(state: FileHistoryDurableFileState): FileHistoryBackup {
+  return {
+    backupFileName: state.kind === "missing" ? null : "durable-rewind-plan",
+    version: 1,
+    backupTime: new Date(0),
+    ...(state.kind === "file" ? { originMode: state.mode } : {}),
+  };
+}
+
+function parseDurableFileState(value: unknown, label: string): FileHistoryDurableFileState {
+  const state = requireRecord(value, label);
+  const kind = state["kind"];
+  const fingerprint = requireSha256(state["fingerprint"], `${label}.fingerprint`);
+  if (kind === "missing") {
+    assertOnlyKeys(state, ["kind", "fingerprint"], label);
+    if (fingerprint !== fileStateFingerprint("missing", undefined, "")) {
+      throw new Error(`${label} fingerprint is invalid`);
+    }
+    return { kind, fingerprint };
+  }
+  if (kind === "file") {
+    assertOnlyKeys(state, ["kind", "contentsBase64", "mode", "fingerprint"], label);
+    const contentsBase64 = state["contentsBase64"];
+    if (typeof contentsBase64 !== "string") throw new Error(`${label}.contentsBase64 is invalid`);
+    const bytes = Buffer.from(contentsBase64, "base64");
+    if (bytes.toString("base64") !== contentsBase64) throw new Error(`${label} base64 is invalid`);
+    const mode = requireFileMode(state["mode"], `${label}.mode`);
+    if (fingerprint !== fileStateFingerprint("file", mode, bytes)) {
+      throw new Error(`${label} fingerprint is invalid`);
+    }
+    return { kind, contentsBase64, mode, fingerprint };
+  }
+  if (kind === "symlink") {
+    assertOnlyKeys(state, ["kind", "target", "mode", "fingerprint"], label);
+    const target = requireString(state["target"], `${label}.target`);
+    const mode = requireFileMode(state["mode"], `${label}.mode`);
+    if (fingerprint !== fileStateFingerprint("symlink", mode, target)) {
+      throw new Error(`${label} fingerprint is invalid`);
+    }
+    return { kind, target, mode, fingerprint };
+  }
+  throw new Error(`${label}.kind is invalid`);
 }
 
 async function restoreRewindRollbackState(
@@ -2142,6 +2588,10 @@ function isPathWithinRoot(root: string, path: string): boolean {
   return relativePath !== "" && !relativePath.startsWith("..") && !isAbsolute(relativePath);
 }
 
+function isPathWithinOrEqual(root: string, path: string): boolean {
+  return resolve(root) === resolve(path) || isPathWithinRoot(root, path);
+}
+
 function parseFileHistoryManifestV2(
   value: unknown,
   expectedSessionId: string,
@@ -2376,6 +2826,28 @@ function requireArray(value: unknown, label: string): unknown[] {
 function requireString(value: unknown, label: string): string {
   if (typeof value !== "string" || value.length === 0) throw new Error(`${label} 必须是非空字符串`);
   return value;
+}
+
+function requireSha256(value: unknown, label: string): string {
+  const digest = requireString(value, label);
+  if (!/^[0-9a-f]{64}$/u.test(digest)) throw new Error(`${label} 必须是 SHA-256`);
+  return digest;
+}
+
+function requireFileMode(value: unknown, label: string): number {
+  const mode = requireNonNegativeInteger(value, label);
+  if (mode > 0o777) throw new Error(`${label} 超出文件权限范围`);
+  return mode;
+}
+
+function assertOnlyKeys(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+  label: string,
+): void {
+  const allowed = new Set(keys);
+  const extras = Object.keys(value).filter((key) => !allowed.has(key));
+  if (extras.length > 0) throw new Error(`${label} 包含未知字段: ${extras.join(", ")}`);
 }
 
 function requireAbsolutePath(value: unknown, label: string): string {

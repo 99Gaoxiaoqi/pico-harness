@@ -206,6 +206,60 @@ export function getOrCreateSessionSettings(
   return created;
 }
 
+/**
+ * Materialize a settings-less historical Session without ever publishing mutable
+ * process defaults as authorization. The first durable settings fact is the whole
+ * agent/default/empty-directories snapshot; there are no per-axis repair writes.
+ */
+export function getOrCreateFailClosedLegacySessionSettings(
+  defaults: SessionSettingsDefaults,
+  persistenceOptions: SessionSettingsPersistenceOptions,
+): SessionSettings {
+  if (persistenceOptions.persistence.getRuntimeStateSnapshot().settings !== undefined) {
+    return getOrCreateSessionSettings(defaults, persistenceOptions);
+  }
+
+  const key = sessionSettingsKey(defaults.sessionId, defaults.cwd, defaults.picoHome);
+  const resolvedSemantics = resolvedCliSessionSemantics.get(key);
+  const sessionMode = defaults.sessionMode ?? resolvedSemantics?.sessionMode;
+  const forkFrom = defaults.forkFrom ?? resolvedSemantics?.forkFrom;
+  let settings = settingsBySession.get(key);
+  if (!settings) {
+    settings = createDefaultSessionSettings({
+      ...defaults,
+      mode: "default",
+      orchestrationMode: "default",
+      additionalDirectories: [],
+    });
+    settingsBySession.set(key, settings);
+  } else {
+    if (sessionMode !== undefined) settings.sessionMode = sessionMode;
+    if (forkFrom !== undefined) {
+      settings.forkFrom = forkFrom;
+    } else if (sessionMode !== "fork" && defaults.sessionMode !== undefined) {
+      delete settings.forkFrom;
+    }
+    const title = normalizeSessionTitle(defaults.title);
+    if (title !== undefined) settings.title = title;
+    settings.provider = defaults.provider;
+    settings.model = defaults.model;
+    if (defaults.modelRouteId !== undefined) settings.modelRouteId = defaults.modelRouteId;
+    else delete settings.modelRouteId;
+    settings.collaborationMode = "agent";
+    settings.permissionMode = "default";
+    settings.orchestrationMode = "default";
+    settings.thinkingEffort = defaults.thinkingEffort ?? "off";
+    settings.thinkingEffortExplicit = defaults.thinkingEffort !== undefined;
+    settings.additionalDirectories = createAdditionalDirectorySnapshot([]);
+    settings.tools = defaults.tools ?? settings.tools;
+  }
+
+  // Bind only after the complete safe snapshot is assembled, then emit exactly one write.
+  bindSessionSettingsPersistence(settings, persistenceOptions.persistence);
+  persistSessionSettings(settings);
+  return settings;
+}
+
 export function rememberResolvedCliSession(
   selection: {
     sessionId: string;

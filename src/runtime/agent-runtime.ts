@@ -108,10 +108,9 @@ import { looksLikeScheduleCreationIntent, ScheduleTaskTool } from "../tools/sche
 import { BackgroundManager } from "../tools/background-manager.js";
 import type { HookService } from "../hooks/service.js";
 import {
+  getOrCreateFailClosedLegacySessionSettings,
   getOrCreateSessionSettings,
-  setSessionCollaborationMode,
   setSessionAdditionalDirectories,
-  setSessionPermissionMode,
   toolStatusFromRegistry,
   type SessionToolStatus,
   type SessionSettings,
@@ -943,34 +942,35 @@ export async function executeAgentRuntime(
     }
     const legacyHistoryMissingSettings =
       sessionSelection.mode !== "new" && session.getRuntimeStateSnapshot().settings === undefined;
-    const settings = getOrCreateSessionSettings(
-      {
-        sessionId: sessionSelection.sessionId,
-        sessionMode: sessionSelection.mode,
-        ...(sessionSelection.sourceSessionId !== undefined
-          ? { forkFrom: sessionSelection.sourceSessionId }
-          : {}),
-        cwd: workDir,
-        picoHome: session.picoHome,
-        provider: kind,
-        ...(legacyHistoryMissingSettings
-          ? { mode: "default" as const }
-          : sessionSelection.mode === "fork"
-            ? {}
-            : backgroundPolicy
-              ? { mode: "yolo" as const }
-              : options.interactionMode !== undefined
-                ? { mode: options.interactionMode }
-                : {}),
-        model: defaultConfigModel,
-        ...(options.modelRouteId !== undefined ? { modelRouteId: options.modelRouteId } : {}),
-        ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
-      },
-      { persistence: session, ...(backgroundPolicy ? { restore: false } : {}) },
-    );
+    const sessionSettingDefaults = {
+      sessionId: sessionSelection.sessionId,
+      sessionMode: sessionSelection.mode,
+      ...(sessionSelection.sourceSessionId !== undefined
+        ? { forkFrom: sessionSelection.sourceSessionId }
+        : {}),
+      cwd: workDir,
+      picoHome: session.picoHome,
+      provider: kind,
+      ...(sessionSelection.mode === "fork"
+        ? {}
+        : backgroundPolicy
+          ? { mode: "yolo" as const }
+          : options.interactionMode !== undefined
+            ? { mode: options.interactionMode }
+            : {}),
+      model: defaultConfigModel,
+      ...(options.modelRouteId !== undefined ? { modelRouteId: options.modelRouteId } : {}),
+      ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
+    };
+    const settings = legacyHistoryMissingSettings
+      ? getOrCreateFailClosedLegacySessionSettings(sessionSettingDefaults, {
+          persistence: session,
+        })
+      : getOrCreateSessionSettings(sessionSettingDefaults, {
+          persistence: session,
+          ...(backgroundPolicy ? { restore: false } : {}),
+        });
     if (legacyHistoryMissingSettings) {
-      setSessionCollaborationMode(settings, "agent");
-      setSessionPermissionMode(settings, "default");
       await session.flushPersistence();
     }
     if (!settings.collaborationMode) throw new Error("Session collaborationMode is unavailable");

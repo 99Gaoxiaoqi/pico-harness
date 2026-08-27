@@ -25,6 +25,7 @@ export function createSessionForkRuntimePort(): SessionForkRuntimePort {
             ...(input.targetMode !== undefined ? { targetMode: input.targetMode } : {}),
             ...(input.throughEventId ? { throughEventId: input.throughEventId } : {}),
             ...(input.fallbackSettings ? { fallbackSettings: input.fallbackSettings } : {}),
+            ...(input.rewind ? { rewind: input.rewind } : {}),
           });
         } catch (error) {
           const settlement = await service.settleFailedFork({

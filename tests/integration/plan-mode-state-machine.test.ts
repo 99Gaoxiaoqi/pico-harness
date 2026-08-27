@@ -172,6 +172,67 @@ test("Plan operation retries are idempotent and conflicting reuse is rejected", 
   );
 });
 
+test("concurrent identical Plan review claims converge despite different event timestamps", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-plan-review-claim-race-"));
+  const workDir = join(root, "work");
+  await mkdir(workDir);
+  t.after(() => {
+    store.close();
+    return rm(root, { recursive: true, force: true });
+  });
+  const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "state") });
+  await store.initializeSession({ sessionId: "session-review-race", workDir });
+  const proposalCoordinator = new PlanCoordinator(
+    store,
+    {
+      sessionId: "session-review-race",
+      invocationId: "proposal",
+      runId: "proposal",
+      turnId: "proposal",
+    },
+    () => AT,
+  );
+  const proposed = await proposalCoordinator.propose({
+    operationId: "review-race-proposal",
+    expectedSessionSequence: 0,
+    proposal: {
+      planId: "plan-review-race",
+      title: "Review once",
+      steps: [{ id: "step-1", title: "Run", description: "Run once" }],
+    },
+  });
+  const input = {
+    operationId: "review-race-claim",
+    expectedSessionSequence: proposed.sessionSequence,
+    planId: "plan-review-race",
+    revision: 1,
+    controlEpoch: proposed.controlEpoch!,
+    action: "execute" as const,
+  };
+  const first = new PlanCoordinator(
+    store,
+    { sessionId: "session-review-race", invocationId: "first", runId: "first", turnId: "first" },
+    () => AT,
+  );
+  const second = new PlanCoordinator(
+    store,
+    {
+      sessionId: "session-review-race",
+      invocationId: "second",
+      runId: "second",
+      turnId: "second",
+    },
+    () => new Date(AT.getTime() + 1_000),
+  );
+
+  const projections = await Promise.all([first.claimReview(input), second.claimReview(input)]);
+  assert.ok(projections.every(({ reviewClaim }) => reviewClaim?.operationId === input.operationId));
+  const claims = (await store.readSession("session-review-race")).filter(
+    ({ kind }) => kind === "plan.review.claimed",
+  );
+  assert.equal(claims.length, 1);
+});
+
 test("revision requests and interrupted controls are durable CAS operations", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-plan-recovery-"));
   const workDir = join(root, "work");

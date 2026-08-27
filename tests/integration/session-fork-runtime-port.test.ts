@@ -426,6 +426,12 @@ test("legacy settings-less fork journal recovery materializes agent/default befo
       delete legacy["targetCollaborationMode"];
       delete legacy["targetPermissionMode"];
       legacy["targetMode"] = "yolo";
+      legacy["bundleManifest"] = {
+        manifestPath,
+        stagedBundlePath: frozenPath,
+        contentSha256: manifest["contentSha256"],
+        sizeBytes: manifest["sizeBytes"],
+      };
       database
         .prepare("UPDATE storage_operations SET operation_json = ? WHERE operation_id = ?")
         .run(JSON.stringify(legacy), operationId);
@@ -647,15 +653,29 @@ test("SessionForkService explicitly rejects legacy v1/v2/v3/v4/v5 fork bundles",
         eventId: `source-event-v${version}`,
       };
       await mkdir(stagingDirectory, { recursive: true });
+      const stagedBundlePath = join(stagingDirectory, "runtime-fork.json");
+      const frozenContents = `${JSON.stringify({
+        schemaVersion: version,
+        operationId,
+        sourceSessionId: "legacy-source",
+        targetSessionId: `legacy-target-v${version}`,
+        sourceCursor,
+        ...(version <= 2 ? { messages: [] } : { historyEntries: [] }),
+      })}\n`;
+      const contentSha256 = createHash("sha256").update(frozenContents).digest("hex");
+      await writeFile(stagedBundlePath, frozenContents);
+      const manifestPath = join(stagingDirectory, "fork-bundle.json");
       await writeFile(
-        join(stagingDirectory, "runtime-fork.json"),
+        manifestPath,
         `${JSON.stringify({
-          schemaVersion: version,
+          schemaVersion: 2,
           operationId,
-          sourceSessionId: "legacy-source",
-          targetSessionId: `legacy-target-v${version}`,
           sourceCursor,
-          ...(version <= 2 ? { messages: [] } : { historyEntries: [] }),
+          targetSessionId: `legacy-target-v${version}`,
+          stagingDirectory,
+          stagedBundlePath,
+          contentSha256,
+          sizeBytes: Buffer.byteLength(frozenContents),
         })}\n`,
       );
       await journal.create({
@@ -667,6 +687,12 @@ test("SessionForkService explicitly rejects legacy v1/v2/v3/v4/v5 fork bundles",
         targetSessionId: `legacy-target-v${version}`,
         targetMode: "default",
         stagingDirectory,
+        bundleManifest: {
+          manifestPath,
+          stagedBundlePath,
+          contentSha256,
+          sizeBytes: Buffer.byteLength(frozenContents),
+        },
       });
     }
 
