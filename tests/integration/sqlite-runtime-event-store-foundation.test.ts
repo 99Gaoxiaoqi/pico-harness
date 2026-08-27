@@ -532,26 +532,26 @@ test("tool T1/T2 atomically maintain canonical events, journal, and CAS projecti
   }
 });
 
-test("Plan/Graph operation replay compares the full canonical payload", async () => {
+test("Plan operation replay compares the full canonical payload", async () => {
   const value = fixture("pico-eventlog-operation-replay-");
   try {
     const sessionId = "operation-session";
     const ownerFence = await initializeAndFence(value, sessionId);
-    const fingerprint = `sha256:${createHash("sha256").update("graph-op").digest("hex")}`;
-    const graphEvent = {
+    const fingerprint = `sha256:${createHash("sha256").update("plan-op").digest("hex")}`;
+    const planEvent = {
       ...eventBase("e01", sessionId),
-      kind: "graph.closed",
-      data: { operationId: "graph-op", fingerprint, graphId: "graph-1", resultRecordIds: ["a"] },
+      kind: "plan.execution.completed",
+      data: { operationId: "plan-op", fingerprint, planId: "plan-1", reason: "a" },
     } as RuntimeEvent;
-    await value.store.appendBatch([graphEvent], {
-      planOperation: { operationId: "graph-op", fingerprint },
+    await value.store.appendBatch([planEvent], {
+      planOperation: { operationId: "plan-op", fingerprint },
       ownerFence,
     });
     await assert.rejects(
       () =>
         value.store.appendBatch(
-          [{ ...graphEvent, data: { ...graphEvent.data, resultRecordIds: ["b"] } } as RuntimeEvent],
-          { planOperation: { operationId: "graph-op", fingerprint }, ownerFence },
+          [{ ...planEvent, data: { ...planEvent.data, reason: "b" } } as RuntimeEvent],
+          { planOperation: { operationId: "plan-op", fingerprint }, ownerFence },
         ),
       RuntimeEventStoreIntegrityError,
     );

@@ -14,7 +14,6 @@ import { operationalDatabasePath } from "../../src/storage/sqlite/sqlite-databas
 import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import { PLAN_EVENT_KINDS } from "../../src/plan/events.js";
 import { projectPlanEntries } from "../../src/plan/reducer.js";
-import { GRAPH_EVENT_KINDS, projectGraphEntries } from "../../src/graph/graph-reducer.js";
 
 /**
  * Ticket 02 acceptance: SQLite session ledger (store-layer slice).
@@ -384,27 +383,37 @@ test("sqlite sessions: same-tx replay does not double-write + conflicting eventI
         /conflicting payloads in one append batch/,
       );
 
-      // plan/graph CAS: exactly-once via the operation_id projection column.
+      // plan CAS: exactly-once via the operation_id projection column.
       const fingerprint = sha256Fingerprint("op");
       const opEvent = {
         schemaVersion: 2,
-        eventId: `${id}-graph-1`,
+        eventId: `${id}-plan-1`,
         sessionId: id,
         invocationId: "inv-1",
-        runId: "run-graph",
+        runId: "run-plan",
         turnId: "turn-1",
         at: "2026-08-18T00:00:10.000Z",
         partial: false,
         visibility: "internal",
-        kind: "graph.work.added",
+        kind: "plan.proposed",
         data: {
           operationId: "op-1",
           fingerprint,
-          graphId: "graph-1",
-          workId: "work-1",
-          instruction: "do one thing",
-          inputIds: [],
-          mode: "worker",
+          proposal: {
+            planId: "plan-op-1",
+            revision: 1,
+            title: "CAS verification",
+            status: "pending",
+            proposedAt: "2026-08-18T00:00:10.000Z",
+            steps: [
+              {
+                id: "plan-op-step-1",
+                title: "Verify CAS",
+                description: "Exercise plan operation replay",
+                status: "pending",
+              },
+            ],
+          },
         },
       } as RuntimeEvent;
       const opFirst = await fixture.store.appendPlanOperation([opEvent], {
@@ -460,7 +469,7 @@ test("sqlite sessions: same-tx replay does not double-write + conflicting eventI
             [
               {
                 ...opEvent,
-                eventId: `${id}-graph-2`,
+                eventId: `${id}-plan-2`,
                 data: { ...opEvent.data, operationId: "op-2" },
               } as RuntimeEvent,
             ],
@@ -766,10 +775,10 @@ test("sqlite sessions: projection delta 校验窄化——锚点/头部点查 + 
   }
 });
 
-test("sqlite sessions: plan/graph 投影 kind 切片 + 显式水位与全量读口径等价(票 04)", async () => {
-  const fixture = createFixture("pico-sqlite-plan-graph-slice-");
+test("sqlite sessions: plan 投影 kind 切片 + 显式水位与全量读口径等价(票 04)", async () => {
+  const fixture = createFixture("pico-sqlite-plan-slice-");
   try {
-    const id = "sqlite-plan-graph-slice";
+    const id = "sqlite-plan-slice";
     await fixture.store.initializeSession({ sessionId: id, workDir: fixture.workspace });
     const planEvent = {
       schemaVersion: 2,
@@ -795,39 +804,17 @@ test("sqlite sessions: plan/graph 投影 kind 切片 + 显式水位与全量读�
             {
               id: "step-1",
               title: "切片查询",
-              description: "plan/graph 投影等价验证",
+              description: "plan 投影等价验证",
               status: "pending",
             },
           ],
         },
       },
     } as RuntimeEvent;
-    const graphEvent = {
-      schemaVersion: 2,
-      eventId: `${id}-g1`,
-      sessionId: id,
-      invocationId: "inv-1",
-      runId: "run-1",
-      turnId: "turn-1",
-      at: "2026-08-19T00:00:02.000Z",
-      partial: false,
-      visibility: "internal",
-      kind: "graph.work.added",
-      data: {
-        operationId: "graph-op-1",
-        fingerprint: sha256Fingerprint("graph-op-1"),
-        graphId: "graph-1",
-        workId: "work-1",
-        instruction: "explore the ledger",
-        inputIds: [],
-        mode: "explore",
-      },
-    } as RuntimeEvent;
     const events = [
       runStarted(`${id}-e0`, id, "2026-08-19T00:00:00.000Z", fixture.workspace),
       planEvent,
       userMessage(`${id}-e1`, id, "2026-08-19T00:00:03.000Z", "message one"),
-      graphEvent,
       userMessage(`${id}-e2`, id, "2026-08-19T00:00:04.000Z", "message two"),
     ];
     await fixture.store.appendBatch(events);
@@ -845,14 +832,6 @@ test("sqlite sessions: plan/graph 投影 kind 切片 + 显式水位与全量读�
     assert.notEqual(
       projectPlanEntries(id, planSlice.entries).sessionSequence,
       projectPlanEntries(id, full).sessionSequence,
-    );
-
-    // graph 投影:同口径等价。
-    const graphSlice = await fixture.store.readSessionEntriesOfKinds(id, GRAPH_EVENT_KINDS);
-    assert.equal(graphSlice.entries.length, 1);
-    assert.deepEqual(
-      projectGraphEntries("graph-1", graphSlice.entries, graphSlice.headSequence),
-      projectGraphEntries("graph-1", full),
     );
   } finally {
     closeFixture(fixture);

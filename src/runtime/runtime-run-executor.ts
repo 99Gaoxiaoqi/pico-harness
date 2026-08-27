@@ -318,14 +318,6 @@ export class RuntimeRunExecutor {
   }
 
   /**
-   * Settles graph works left dispatched by a previous process: after a restart
-   * the prior delegations' heartbeats stop, so their `graph-work:${workId}`
-   * leases elapse (≤ TTL). Any still-dispatched work whose lease is now dead
-   * can never settle on its own. Each is marked failed (recovered); downstream
-   * works then surface as deadlocked via the existing missingInputIds
-   * continuation diagnostics.
-   */
-  /**
    * ADR 29 调度接入:最新 interrupted 终态且未被 claim 的 run → 为本次 run
    * 锚定续跑：store 在单事务内返回已起跑的 target RuntimeRun。
    * 无候选、候选状态变化或使用 prestartedRun 时返回 undefined，本次

@@ -38,7 +38,7 @@ v2 因此不是 v1 schema 的增量扩展，而是重新划分权威：SQLite Gr
 - Graph 模式只暴露 `view_agent_graph`、`update_agent_graph`、`yield_agent_graph`；
 - Operator 只通过 `agent_output` 提交正式结果；
 - 删除 v1 `graph-tools`、reconcile/recover/work-lease、DelegationManager Graph 分支和 engine Graph continuation 写路径；
-- 旧 `graph.*` RuntimeEvent 不迁移、不续跑，只保留 codec 与 `src/graph/graph-reducer.ts` 作为历史记录读取能力。
+- 旧 `graph.*` RuntimeEvent 历史数据已清理，codec、类型、reducer 与写入入口全部删除；这些 kind 现在按未知事件拒绝。
 
 公开的 `orchestrationMode="graph"` 以及 CLI/TUI/Desktop 开关名称保持不变；变化的是内部协议和工具面。
 
@@ -384,4 +384,3 @@ production 将 exact RuntimeRun 安装为 `WorkspaceTaskRuntime` 中的 detached
 | workspace host / lifecycle | `src/runtime/agent-graph-host.ts`、`src/daemon/workspace-runtime-service.ts`     |
 | Supervisor                 | `src/daemon/agent-graph-supervisor-service.ts`                                   |
 | 工具                       | `src/tools/agent-graph-tools.ts`、`src/tools/agent-output-tool.ts`               |
-| v1 历史读取                | `src/graph/graph-reducer.ts`                                                     |

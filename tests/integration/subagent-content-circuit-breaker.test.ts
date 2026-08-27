@@ -7,8 +7,8 @@ import type { LLMProvider } from "../../src/provider/interface.js";
 
 // D10④ 内容级熔断：子代理 loop 的"完成"是模型自报（不再调工具 + 可用总结），
 // 流程状态区分不了"真做完"与"做完样子但任务失败"。总结开篇的明确失败宣言
-// 必须把自报 completed 降级为 error——宿主按失败结算（graph.work.failed /
-// plan step 不落 completed），失败不再被自报完成掩盖。
+// 必须把自报 completed 降级为 error——宿主按失败结算，plan step 不落
+// completed，失败不再被自报完成掩盖。
 function fakeProvider(finalContent: string): LLMProvider {
   return {
     async generate() {

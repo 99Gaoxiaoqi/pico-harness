@@ -106,7 +106,7 @@ export class RuntimeTranscriptResetRequiredError extends RuntimeEventStoreIntegr
  *
  * 语义对齐旧 JSONL RuntimeEventStore:appendBatch 单 BEGIN IMMEDIATE 内完成
  * MAX(event_seq)+1 分配、event_id 点查幂等(canonical payload 深比较,冲突
- * 抛错)、plan/graph operationId 恰好一次 CAS(经 operation_id 投影列索引查询,
+ * 抛错)、plan operationId 恰好一次 CAS(经 operation_id 投影列索引查询,
  * 不全量扫);全部读方法 SQL 化,分页是真 keyset(event_seq > after LIMIT)。
  * 类型与错误类来自共享契约(runtime-event-store-contracts.ts,票 09 起),
  * 消费者签名零漂移(装配接线在票 03)。
@@ -602,30 +602,6 @@ export class SqliteRuntimeEventStore {
     const sessionId = events[0]?.sessionId;
     if (!sessionId || events.some((event) => event.sessionId !== sessionId)) {
       throw new Error("Plan operation events must belong to one session");
-    }
-    return appendRuntimeEventBatchWithArbitration(this, events, {
-      expectedSessionHighWater: { [sessionId]: operation.expectedSessionSequence },
-      planOperation: operation,
-      ownerFence: operation.ownerFence,
-    });
-  }
-
-  /**
-   * Graph Mode 操作与 {@link appendPlanOperation} 共用同一 operationId +
-   * fingerprint CAS 信封(恰好一次持久身份),机制完全一致。
-   */
-  async appendGraphOperation(
-    events: readonly RuntimeEvent[],
-    operation: {
-      readonly operationId: string;
-      readonly fingerprint: string;
-      readonly expectedSessionSequence: number;
-      readonly ownerFence?: RuntimeOwnerFence;
-    },
-  ): Promise<readonly RuntimeEventStoreAppendResult[]> {
-    const sessionId = events[0]?.sessionId;
-    if (!sessionId || events.some((event) => event.sessionId !== sessionId)) {
-      throw new Error("Graph operation events must belong to one session");
     }
     return appendRuntimeEventBatchWithArbitration(this, events, {
       expectedSessionHighWater: { [sessionId]: operation.expectedSessionSequence },
@@ -2979,7 +2955,7 @@ export class SqliteRuntimeEventStore {
     };
   }
 
-  /** plan/graph CAS:operation_id 投影列 + (session_id, operation_id) 部分索引点查。 */
+  /** plan CAS:operation_id 投影列 + (session_id, operation_id) 部分索引点查。 */
   private findOperationEvent(
     sessionIds: readonly string[],
     operationId: string,
@@ -4183,9 +4159,9 @@ function continuationPrefixDigest(rows: readonly Record<string, unknown>[]): str
   return hash.digest("hex");
 }
 
-/** plan/graph 操作身份投影(与旧事件索引的提取规则一致)。 */
+/** plan 操作身份投影。 */
 function operationIdProjection(event: RuntimeEvent): string | null {
-  if (!event.kind.startsWith("plan.") && !event.kind.startsWith("graph.")) return null;
+  if (!event.kind.startsWith("plan.")) return null;
   const data = event.data as Record<string, unknown>;
   return typeof data["operationId"] === "string" ? data["operationId"] : null;
 }
