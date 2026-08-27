@@ -124,7 +124,12 @@ const TOOL_RESULT_REDACTION_MARKER = "[REDACTED]";
  * finally 块两处复用同一常量。
  */
 const TOOL_SETTLE_TIMEOUT_MS = 10_000;
-const engineSessionContext = new AsyncLocalStorage<string>();
+interface EngineSessionExecutionContext {
+  readonly capability: string;
+  active: boolean;
+}
+
+const engineSessionContext = new AsyncLocalStorage<EngineSessionExecutionContext>();
 // Plan 模式工具面单源迁移至 tool-surface.ts 的 PLAN_MODE_TOOL_NAMES
 // （只读侦察 + ask_user/submit_plan 协议闭环），此处仅保留消费接口。
 import { isPlanModeTool } from "../tools/tool-surface.js";
@@ -201,7 +206,8 @@ const SUBAGENT_FAILURE_LEADS = [
 /**
  * D10④ 内容级熔断：子代理 loop 的"完成"是模型自报（不再调工具 + 总结可用），
  * 流程状态无法区分"真做完"与"做完样子但任务失败"。宿主若按 completed 记账
- * （graph.work.recorded / plan step completed），失败就被自报完成掩盖。
+ * （例如 plan step completed），失败就被自报完成掩盖。Graph v2 Operator
+ * 使用独立 RuntimeRun + agent_output 提交记录，不再经过本子代理结算路径。
  * 本函数只认总结开篇的明确失败宣言——保守换取零误伤：模糊表述交由宿主
  * 模型读 summary 自行判断，这里只兜底"模型亲口说失败"的下界。
  */
@@ -230,7 +236,6 @@ const MAX_PLAN_STOP_CONTINUATIONS = 2;
  * Graph Mode 续行上限：主 Agent 连续停止但 graph 仍有 pending 工作时，最多注入
  * 这么多次 [Graph continuation] 消息。超过即视为 graph 推进停滞，放行正常停止。
  */
-const MAX_GRAPH_STOP_CONTINUATIONS = 5;
 const REQUIRED_FIRST_DELEGATION_FAILED_MESSAGE =
   "模型未能按用户的明确要求启动 required 子代理，已停止主 Agent 自行探索。";
 const REQUIRED_DELEGATION_RECOVERY_PROMPT =
@@ -734,28 +739,6 @@ export interface AgentEngineOptions {
   skillLoaderFactory?: (workDir: string) => SkillLoader;
   /** Runtime-owned lifecycle port; the engine never imports the durable implementation. */
   runtimePort?: EngineRuntimePort;
-  /**
-   * Graph Mode continuation arbiter (Lesson 17). On a non-tool stop the engine
-   * calls this to check whether the active graph still has pending (requested
-   * or dispatched) works. When it does, the engine injects a continuation
-   * message and resumes, bounded by {@link MAX_GRAPH_STOP_CONTINUATIONS}.
-   *
-   * The callback is host-owned because the projection lives in the graph
-   * reducer; the engine never imports the durable graph store directly.
-   * Returning undefined or { pending: 0 } lets the engine proceed to its
-   * normal stop handling.
-   */
-  graphReconcile?: () => Promise<
-    | {
-        readonly pending: number;
-        readonly ready: number;
-        readonly stuck?: readonly {
-          readonly workId: string;
-          readonly missingInputIds: readonly string[];
-        }[];
-      }
-    | undefined
-  >;
 }
 
 export interface SubagentExecutionRuntime {
@@ -841,7 +824,6 @@ export class AgentEngine implements AgentRunner {
   private readonly runtimePort?: EngineRuntimePort;
   private readonly collaborationMode?: () => "agent" | "plan";
   private readonly planHandoff?: PlanHandoffController;
-  private readonly graphReconcile?: AgentEngineOptions["graphReconcile"];
   constructor(opts: AgentEngineOptions) {
     this.provider = opts.provider;
     this.registry = opts.registry;
@@ -894,7 +876,6 @@ export class AgentEngine implements AgentRunner {
     this.runtimePort = opts.runtimePort;
     this.collaborationMode = opts.collaborationMode;
     this.planHandoff = opts.planHandoff;
-    this.graphReconcile = opts.graphReconcile;
   }
 
   private isPlanning(): boolean {
@@ -1499,13 +1480,27 @@ export class AgentEngine implements AgentRunner {
     signal?: AbortSignal,
   ): Promise<Message[]> {
     const capability = engineSessionCapability(session);
-    if (engineSessionContext.getStore() === capability) {
+    const ambientContext = engineSessionContext.getStore();
+    if (ambientContext?.active && ambientContext.capability === capability) {
       throw new Error(`AgentEngine does not support re-entrant runs for Session ${session.id}`);
     }
-    const run = () =>
-      engineSessionContext.run(capability, () =>
-        this.runInMainCompactorScope(session, runtimeReporter, runtimeTracer, signal),
-      );
+    const run = () => {
+      const context: EngineSessionExecutionContext = { capability, active: true };
+      return engineSessionContext.run(context, async () => {
+        try {
+          return await this.runInMainCompactorScope(
+            session,
+            runtimeReporter,
+            runtimeTracer,
+            signal,
+          );
+        } finally {
+          // Detached work inherits AsyncLocalStorage. Seal only this finished execution so a
+          // later exact Graph wake may reuse the same Session without weakening live re-entry.
+          context.active = false;
+        }
+      });
+    };
     const execute = () => (this.compactor ? this.compactor.runInMainScope(run) : run());
     const ambientRun = this.runtimePort?.currentRun();
     // Tests and explicit in-memory sessions intentionally skip durable runtime facts.
@@ -1601,7 +1596,6 @@ export class AgentEngine implements AgentRunner {
     let requiredDelegationRecoveryExploreOnly = false;
     let consecutiveHookStopBlocks = 0;
     let planStopContinuations = 0;
-    let graphStopContinuations = 0;
     let graceCandidateTools: ToolDefinition[] = [];
     let runToolSnapshot: ToolDefinition[] | undefined;
     const userRewindPointId = session.fileHistory.snapshots.findLast(
@@ -2116,65 +2110,6 @@ export class AgentEngine implements AgentRunner {
                   },
                 });
                 continue;
-              }
-              // Graph Mode 续行仲裁：graph 仍有 pending（requested/dispatched）工作时，
-              // 注入 [Graph continuation] 让主 Agent 继续推进，最多 MAX_GRAPH_STOP_CONTINUATIONS 次。
-              // settleGraphWork 在上游完成时会尽力链式派发下游 ready 工作，但 ready→dispatched
-              // 之间的空隙、以及从未被 host 绑定 dispatcher 的后台运行时，都依赖这里兜底续行。
-              if (this.graphReconcile) {
-                let graphSnapshot: Awaited<
-                  ReturnType<NonNullable<AgentEngineOptions["graphReconcile"]>>
-                >;
-                try {
-                  graphSnapshot = await this.graphReconcile();
-                } catch (error) {
-                  logger.warn(
-                    { error: String(error) },
-                    "[Graph continuation] graphReconcile 检查失败，fail-open 放行正常停止",
-                  );
-                }
-                if (graphSnapshot && graphSnapshot.pending > 0) {
-                  if (graphStopContinuations >= MAX_GRAPH_STOP_CONTINUATIONS) {
-                    logger.warn(
-                      { pending: graphSnapshot.pending, continuations: graphStopContinuations },
-                      "[Graph continuation] 已达续行上限，放行停止；pending 工作将在下一次 run 续跑或由 recover 路径处理",
-                    );
-                  } else {
-                    graphStopContinuations++;
-                    const readyHint =
-                      graphSnapshot.ready > 0
-                        ? `其中 ${graphSnapshot.ready} 个已就绪可立即派发。`
-                        : "当前没有可立即派发的工作，等待上游产出记录。";
-                    // Deadlock diagnostic: requested works whose input_ids
-                    // reference records that will never be produced (wrong id
-                    // or a failed upstream). Surfacing this at stop-decision
-                    // time is the only reliable way for the model to learn
-                    // about an unresolvable dependency — the per-work hint
-                    // inside view_graph is easily missed (lesson from real-LLM
-                    // T5 regression).
-                    const stuck = graphSnapshot.stuck ?? [];
-                    const stuckHint =
-                      stuck.length > 0
-                        ? stuck
-                            .map(
-                              (entry) =>
-                                `工作 ${entry.workId} 的 input_ids 引用了永不产出的 record（${entry.missingInputIds.join(", ")}），将死锁；请用 view_graph 核对 recordId 后重新 add_work 修正，或显式放弃。`,
-                            )
-                            .join("")
-                        : "";
-                    await session.commitMessages({
-                      role: "user",
-                      content:
-                        `[Graph continuation] Graph Mode 仍有 ${graphSnapshot.pending} 个未完成的工作。` +
-                        `${readyHint}${stuckHint}请调用 view_graph 查看状态，或用 add_work 声明新工作；不要仅用文字结束。`,
-                      providerData: {
-                        picoKind: "graph_continuation",
-                        picoHiddenFromTranscript: true,
-                      },
-                    });
-                    continue;
-                  }
-                }
               }
               const stopHookDecision = await this.hookService?.dispatch(
                 "Stop",
@@ -3698,7 +3633,7 @@ export class AgentEngine implements AgentRunner {
           taskPrompt,
         );
         // D10④ 内容级熔断：自报 completed 但总结开篇明确声明失败 → 降级 error，
-        // 宿主按失败结算（graph.work.failed / plan step 不落 completed）。
+        // 宿主按失败结算（plan step 不落 completed）。
         // 放在 finalize 之后：报告 inline 收口与上限门照常，只改终态。
         if (finalized.status === "completed" && subagentDeclaresFailure(finalized.summary)) {
           logger.warn(
@@ -3818,8 +3753,8 @@ export class AgentEngine implements AgentRunner {
    *
    * 第 1 轮审查问题 3 修复:报告被上限门拒绝时,原始报告已永久丢弃,交付物
    * 只剩合成错误文本——终态结算与工具结果入口门对齐(超限工具结果按
-   * isError/failed 结算),status 落 "error"(既有失败语义,宿主铸
-   * graph.work.failed / plan step 不落 completed),不再以 completed/partial
+   * isError/failed 结算),status 落 "error"(既有失败语义，plan step
+   * 不落 completed),不再以 completed/partial
    * 收场掩盖"报告不可用"的事实。拒绝文本保留在 summary 供主 Agent 重取。
    */
   private async finalizeSubagentResult(

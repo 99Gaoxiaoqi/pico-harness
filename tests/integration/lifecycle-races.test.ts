@@ -1218,20 +1218,33 @@ test("Hook reloader swaps snapshot when the config file changes on disk", async 
 
   const initial = await loadHookSnapshot({ workDir: workspace, picoHome });
   let swaps = 0;
+  let guards = 0;
+  const rejects: string[] = [];
   const reloader = new HookConfigReloader({
     workDir: workspace,
     picoHome,
     initial,
     debounceMs: 5,
+    beforeSwap: async () => {
+      guards++;
+      await delay(600);
+      return true;
+    },
     onSwap: () => {
       swaps++;
     },
+    onReject: (message) => rejects.push(message),
   });
   context.after(async () => await reloader.stop());
   await reloader.start();
+  await delay(350);
+  assert.equal(guards, 0, "watcher 初始化不能制造伪配置变更");
 
   await writeCommandHook(configPath, "node changed.js");
-  await waitUntil(() => swaps >= 1);
+  await waitUntil(() => swaps >= 1 || rejects.length > 0, 3_000);
+  await delay(700);
+  assert.deepEqual(rejects, [], `watcher reload 被拒绝: ${rejects.join("; ")}`);
+  assert.equal(guards, 1, "快速通知与轮询兜底必须合并为一次配置变更");
   assert.equal(swaps, 1);
   const swapped = reloader.currentResult()?.snapshot.handlers.PreToolUse ?? [];
   assert.equal(
@@ -1241,6 +1254,93 @@ test("Hook reloader swaps snapshot when the config file changes on disk", async 
     true,
     "swap 后快照必须反映新配置",
   );
+});
+
+test("Hook reloader preserves a newer config written while the prior candidate is guarded", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-hook-reloader-guarded-write-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const configPath = join(workspace, ".pico", "hooks.json");
+  await mkdir(join(workspace, ".pico"), { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  await writeCommandHook(configPath, "node initial.js");
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const initial = await loadHookSnapshot({ workDir: workspace, picoHome });
+  const firstGuardEntered = deferred();
+  const releaseFirstGuard = deferred();
+  const swappedCommands: string[] = [];
+  let guards = 0;
+  const reloader = new HookConfigReloader({
+    workDir: workspace,
+    picoHome,
+    initial,
+    debounceMs: 5,
+    beforeSwap: async () => {
+      guards++;
+      if (guards === 1) {
+        firstGuardEntered.resolve();
+        await releaseFirstGuard.promise;
+      }
+      return true;
+    },
+    onSwap: (result) => {
+      const command = result.snapshot.handlers.PreToolUse?.find(
+        (entry) => entry.handler.type === "command",
+      )?.handler;
+      if (command?.type === "command") swappedCommands.push(command.command);
+    },
+  });
+  context.after(async () => {
+    releaseFirstGuard.resolve();
+    await reloader.stop();
+  });
+  await reloader.start();
+
+  await writeCommandHook(configPath, "node candidate-b.js");
+  await firstGuardEntered.promise;
+  await writeCommandHook(configPath, "node candidate-c.js");
+  releaseFirstGuard.resolve();
+
+  await waitUntil(() => swappedCommands.includes("node candidate-c.js"), 3_000);
+  await delay(350);
+  assert.deepEqual(swappedCommands, ["node candidate-c.js"]);
+  assert.equal(guards, 2);
+});
+
+test("Hook reloader reconciles a config changed before watcher startup", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-hook-reloader-startup-gap-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const configPath = join(workspace, ".pico", "hooks.json");
+  await mkdir(join(workspace, ".pico"), { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  await writeCommandHook(configPath, "node initial.js");
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const initial = await loadHookSnapshot({ workDir: workspace, picoHome });
+  let swaps = 0;
+  const reloader = new HookConfigReloader({
+    workDir: workspace,
+    picoHome,
+    initial,
+    onSwap: () => {
+      swaps++;
+    },
+  });
+  context.after(async () => await reloader.stop());
+  await writeCommandHook(configPath, "node changed-before-start.js");
+
+  const started = await reloader.start();
+  const command = started.snapshot.handlers.PreToolUse?.find(
+    (entry) => entry.handler.type === "command",
+  )?.handler;
+  assert.equal(
+    command?.type === "command" ? command.command : undefined,
+    "node changed-before-start.js",
+  );
+  assert.equal(swaps, 1);
+  assert.equal(started.snapshot.version, initial.snapshot.version + 1);
 });
 
 interface Deferred<T = void> {

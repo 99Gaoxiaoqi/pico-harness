@@ -1,302 +1,387 @@
-# Graph Mode：增量工作调度与显式编排入口
+# Graph Mode：持久调度领域模型与运行时
 
-> 本文梳理 pico-harness Graph Mode 的统一设计。核心不是"预声明一个 DAG 再执行",而是**模型用 `add_work` 逐个提交工作单元,系统从上游 record 的存在性自动解析依赖**。全部状态复用 RuntimeEventStore 事件流,零新 store;诊断与崩溃恢复内建在事件投影里,不依赖任何独立调度服务。
+> 本文描述当前 Graph v2。Graph 是 workspace 级持久调度控制面；`RuntimeRun` / `RuntimeEvent` 仍是执行事实权威。根 Supervisor 只提交调度意图，Operator 通过普通 Session 和精确身份的 RuntimeRun 执行，再用 `agent_output` 提交正式结果。
 
----
+## 1. 结论与边界
 
-## 一、为什么需要 Graph Mode
+Graph v2 解决的不是“如何把一张静态 DAG 跑完”，而是以下三个问题：
 
-`delegate_task` 是主 Agent 的一级编排入口,但它有两个局限:
+1. 根 Agent 如何以 revision CAS 原子声明一批可并行或有依赖的工作；
+2. 多进程竞争、进程重启和重复通知下，如何确保一次 Activation 只有一个 Claim 和一组精确 Runtime 身份；
+3. 根 Agent 主动让出当前 Run 后，如何在新结果出现时被持久、可恢复地唤醒。
 
-1. **串行阻塞**——主 Agent 派一个子代理、等它完成、读结果、再派下一个。N 个独立任务要排成 N 轮模型往返。
-2. **依赖隐式**——下游任务靠主 Agent 在 prompt 里手动转述上游产出,系统看不到"这个任务依赖那个结果"。
+它采用两本职责不同的账本：
 
-Graph Mode 把这两件事显式化:
+- workspace `pico.sqlite` 的 `agent_graph_*` 表是**调度权威**，保存 revision、Provision、Claim、RecordRef、yield、Wake 和 Attempt；
+- RuntimeEvent ledger 是**执行权威**，保存 `run.started`、模型/工具派发、`agent.output`、`run.terminal` 等事实。
 
-- **并行**——多个无依赖的 `add_work` 立即并行派发子代理,主 Agent 不必轮询等待。
-- **依赖**——`add_work` 的 `input_ids` 显式声明"等这些 record 产出后再派发我",系统自动调度。
+Graph 控制面不会把模型执行结果复制进调度表。`RecordRef` 只引用 Runtime ledger 中已提交的事件，并携带完整来源身份。
 
-**关键设计取舍**:模型不预先声明整个 DAG。原因很现实——下游的 `input_ids` 必须引用上游产出的 `recordId`,而 recordId 在上游完成前不可知(确定性哈希派生,但模型算不出)。所以 Graph Mode 的实际形态是**增量提交**:声明一个、等它产出 record、再声明依赖它的下一个。系统在这之上提供"声明后自动派发 + 上游 settle 后自动链式下游"的调度,让模型的增量提交尽量接近"声明即并行"的体验。
+当前明确不包含：活动 v1 Graph 迁移、v1/v2 双运行时、自动 `map` / `all_settled`、任意拓扑编辑、跨 epoch 结果输入、向既有 Operator 追加 follow-up Intent，以及全局公平调度。
 
----
+## 2. 为什么有 v1 和 v2
 
-## 二、全景:事件流 + 投影 + 工具 + 调度
+v1 使用 `graph.work.*` RuntimeEvent 投影工作状态，由 `DelegationManager` 启动子代理，并依靠 engine continuation 和 Graph work lease 补偿。它可以表达简单的 record 依赖，但调度和执行纠缠在同一条 Session 事件流与进程内委派生命周期中：
 
-Graph Mode 由四个角色协作,全部架在 RuntimeEventStore 之上:
+- 没有独立、原子的 schedule revision，根 Agent 更新与后台调度竞争时缺少明确 CAS 边界；
+- 没有持久 Provision 和唯一 Claim，无法先锁定 child Session、Turn、Run、Invocation、start event，再安全执行；
+- 子代理生命周期依赖 `DelegationManager`，进程崩溃后只能把 orphan 判失败，不能根据精确 RuntimeRun 事实安全 attach；
+- 根 Agent 的等待依赖 engine continuation，不是持久的 yield/wake 协议；
+- Graph settle、lease、continuation 分散在 tools、engine、SessionRuntime 和 DelegationManager，恢复权威不唯一。
 
-| 角色       | 位置                                      | 职责                                                                                            |
-| ---------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| **事件流** | RuntimeEventStore                         | 5 种 `graph.*` 事件,单 canonical,唯一真相                                                       |
-| **投影**   | `graph-reducer.ts`                        | 从事件流幂等折叠出 `GraphProjection`(works/records/status)                                      |
-| **工具层** | `graph-tools.ts`                          | `add_work` / `view_graph` / `close_graph`,经事件读写(view_graph 只读,add_work / close_graph 写) |
-| **调度**   | `agent-runtime.ts` + `session-runtime.ts` | `graphDispatcher` 派发子代理 + `settleGraphWork` 写终态 + `graphReconcile` 续行                 |
+v2 因此不是 v1 schema 的增量扩展，而是重新划分权威：SQLite Graph 控制面只决定“谁可以执行、用什么精确身份执行”，Runtime ledger 只证明“实际执行了什么”。
 
-```text
-┌─────────────────────────────────────────────────────────────┐
-│  RuntimeEventStore (单 canonical)                            │
-│  graph.work.added / dispatched / recorded / failed / closed  │
-└────────────────────────────┬────────────────────────────────┘
-                             │ readSessionEntries
-                             ▼
-┌─────────────────────────────────────────────────────────────┐
-│  graph-reducer (projectGraphEntries)  ← 幂等折叠投影          │
-│  GraphProjection { works, records, status, sessionSequence } │
-└────────────────────────────┬────────────────────────────────┘
-                             │ 读投影
-        ┌────────────────────┼────────────────────┐
-        ▼                    ▼                    ▼
-   AddWorkTool         ViewGraphTool        CloseGraphTool
-        │ (input 就绪时)
-        ▼
-   graphDispatcher → DelegationManager → engine.runSub(子代理)
-        │ 子代理完成
-        ▼
-   settleGraphWork (写 recorded/failed + 链式派发下游)
+### 为什么直接硬切
+
+如果 v1 和 v2 同时可写，会同时存在事件投影、DelegationManager、lease 和 SQLite Claim 多套调度权威。同一工作可能被两边各启动一次，finish/stop 也可能只约束其中一边。为避免双执行和不可解释的恢复，本次采用硬切：
+
+- Graph 模式只暴露 `view_agent_graph`、`update_agent_graph`、`yield_agent_graph`；
+- Operator 只通过 `agent_output` 提交正式结果；
+- 删除 v1 `graph-tools`、reconcile/recover/work-lease、DelegationManager Graph 分支和 engine Graph continuation 写路径；
+- 旧 `graph.*` RuntimeEvent 不迁移、不续跑，只保留 codec 与 `src/graph/graph-reducer.ts` 作为历史记录读取能力。
+
+公开的 `orchestrationMode="graph"` 以及 CLI/TUI/Desktop 开关名称保持不变；变化的是内部协议和工具面。
+
+## 3. 总体架构
+
+```mermaid
+flowchart TD
+  Root["根 Supervisor RuntimeRun"]
+  Tools["view / update / yield_agent_graph"]
+  App["AgentGraphApplicationService"]
+  Store[("SQLite Graph 控制面")]
+  Supervisor["Workspace Graph Supervisor"]
+  Reconciler["Reconciler fixed point"]
+  Adapter["Runtime adapter"]
+  Child["持久 child Session + exact RuntimeRun"]
+  Output["operator-only agent_output"]
+  Ledger[("RuntimeEvent ledger")]
+  Record["RecordRef"]
+  Wake["Yield interest → Wake → Attempt"]
+
+  Root --> Tools --> App
+  App --> Store
+  App --> Supervisor --> Reconciler
+  Reconciler <--> Store
+  Reconciler --> Adapter --> Child
+  Child --> Output --> Ledger
+  Ledger --> Adapter --> Record --> Store
+  Reconciler --> Wake --> Store
+  Wake --> Supervisor --> Root
 ```
 
-**核心不变量**:graph 层没有任何独立存储。`GraphProjection` 是从事件流现场折叠的派生视图,任何时候都可以从事件流重建。这意味着 rewind/fork/resume 天然一致——graph 状态就是事件历史。
+主要实现边界：
 
----
+| 层           | 位置                                                                           | 职责                                                                      |
+| ------------ | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------- |
+| 纯领域       | `src/agent-graph/core/`                                                        | 契约、确定性 ID、revision 状态转换、readiness                             |
+| 控制存储     | `src/storage/sqlite/agent-graph-*`                                             | `BEGIN IMMEDIATE` 下的持久 CAS、唯一约束和恢复记录                        |
+| 调和器       | `src/agent-graph/reconciler.ts`                                                | 把 schedule 和 Runtime 事实推进到 fixed point                             |
+| 应用服务     | `src/agent-graph/service.ts`                                                   | 组装 store adapter、runtime bridge、reconciler、supervisor 和工具端口     |
+| Runtime 适配 | `src/runtime/agent-graph-*`                                                    | child Session、exact Run、output ledger、handoff、根唤醒和 workspace host |
+| 生命周期     | `src/daemon/agent-graph-supervisor-service.ts`、`workspace-runtime-service.ts` | workspace 启停、扫描恢复、single-flight、wake/attempt                     |
+| 工具         | `src/tools/agent-graph-tools.ts`、`agent-output-tool.ts`                       | 解析模型命令；运行时身份由宿主注入                                        |
 
-## 三、核心抽象与确定性 ID（`src/graph/contract.ts`）
+## 4. 领域模型
 
-```text
-GraphWork      = { workId, instruction, inputIds, mode, status,
-                   delegationId?, recordId? }
-GraphRecord    = { recordId, workId, outputSummary, evidenceRefs? }
-GraphProjection = { graphId, works, records, status, sessionSequence }
-```
+### 4.1 Graph：调度聚合根
 
-两个确定性派生函数是一切幂等与依赖解析的基础:
-
-```text
-workIdFor(graphId, instruction, inputIds)
-  = "work_" + sha256(graphId : instruction : sorted(inputIds)).slice(0,32)
-
-recordIdFor(graphId, workId)
-  = "record_" + sha256(graphId : workId).slice(0,32)
-```
-
-**为什么这是基础**:
-
-- **幂等声明**——相同 (instruction, inputIds) 永远算出同一 workId。模型重复 `add_work` 同一任务,不会创建第二个 work,reducer 直接短路。
-- **依赖寻址**——下游 `input_ids` 引用的就是上游的 recordId。recordId 由 workId 派生,workId 由 instruction 派生,所以"声明依赖"等价于"我知道上游任务的语义指纹"。
-- **跨 run 稳定**——纯哈希,不依赖时间或随机数。resume 同一 session,graphId 从 sessionId 派生(`graph:${sessionId}`),同一图的 workId/recordId 不变。**graphId 与 sessionId 一对一绑定,每会话至多一个 active graph**;close 后该 session 不再可用 graph,需新会话或 fork。
-
-### work 状态机
+`AgentGraph` 表示某个 root Session 的一个调度 epoch：
 
 ```text
-                 graph.work.added            graph.work.dispatched
-   (不存在) ─────────────────────▶ requested ─────────────────────▶ dispatched
-                                        │                               │
-                                        │ set 跳过 dispatched 事件       │
-                                        │ (链式派发路径,实际罕见)         │
-                                        ▼                               ▼
-                                  ┌─────────────────────────────────────┘
-                                  │ graph.work.recorded / graph.work.failed
-                                  ▼
-                            recorded 或 failed (终态)
-```
-
-**非常规守卫**:reducer 对 `recorded`/`failed` **不校验前置状态**(`graph-reducer.ts`)——只要 work 存在即可覆盖。这意味着 `requested → recorded`(跳过 dispatched)在 reducer 层合法,支撑了"settle 在 dispatcher 未绑定时仍能 commit record"的设计。`dispatched` 则要求前置为 `requested` 或 `dispatched`(后者用于幂等 replay)。`added` 在 closed 投影上被防御性忽略(reducer 守卫,见第九章)。
-
----
-
-## 四、声明与派发:`add_work`
-
-`AddWorkTool.execute` 的流程,每一步都有明确的不变量守护:
-
-```text
-1. normalize(instruction, input_ids, mode)
-2. workId = workIdFor(graphId, instruction, inputIds)
-3. 读投影 before
-4. 守卫:before.status === "closed" → 抛 GraphConflictError
-   (关闭后不得声明新工作)
-5. work 不存在 → 写 graph.work.added (CAS: operationId+fingerprint+
-   expectedSessionSequence 三重绑定,一次性事务)
-6. 读投影 after → computeReadyWorks(after).find(workId)
-7. 分支:
-   ├─ work 已 dispatched/recorded/failed → 返回真实状态(防误导)
-   ├─ ready(input 全满足) → graphDispatcher 派发 → 写 dispatched
-   └─ 未就绪 → 返回 {status:"waiting", missingInputIds, hint}
-```
-
-**关键洞察 1:record 存在性 = 就绪**。`computeReadyWorks` 看 `inputIds` 是否都在已提交 records 里**且图处于 active 状态**(`graph-reconcile.ts`)。closed 图返回空就绪集——这是 settle 在 close 后只 record 不链式派发下游的底层原因。它不校验 record 内容——这是 graph 层的故意边界:record 的"真假"由 subagent 层保证,graph 层只负责调度。
-
-**关键洞察 2:`missingInputIds` 诊断**。waiting 分支不止返回 `status:"waiting"`,还带上 `missingInputIds`(未产出的 recordId 列表)+ hint 文本。这是死锁反馈的第一道闸门——如果模型引用了错误的 id(比如把 workId 当 recordId),它在声明那一刻就能看到"这些 input 永远不会产出",而不必等到困惑地反复 view_graph。
-
-**关键洞察 3:CAS 事务**。AddWorkTool 写 added 与写 dispatched 是**两次独立的 CAS**(`appendGraphOperation` 各自 `operationId+fingerprint+expectedSessionSequence`),分别实现声明与派发的幂等去重;dispatched 的 CAS 冲突被 best-effort 吞掉(delegation 已在跑)。`settleGraphWork` 则在 CAS 冲突时 retry 最多 3 次。reducer 幂等保证重复事件被短路。
-
-### view_graph:只读投影(模型调试主入口)
-
-view_graph 是模型排查 graph 状态的首选工具,返回当前投影的 JSON 快照:
-
-- **顶层聚合**:`hasPendingWorks`(故意独立于图状态,closed 图也如实反映)、`readyWorkCount`
-- **每个 work 渲染时也带 `missingInputIds` + hint**——这是 missingInputIds 的**常驻来源**(每次调用都重算),`add_work` 的 waiting 分支只是在声明那一刻额外提示一次
-- **`include_records=false`** 可省略 records 数组省 token(默认 true)
-
-这让第六章"工具返回值诊断易被忽略"成立——missingInputIds 确实每次 view_graph 都在,但模型在声明后往往不再主动查,所以需要续行消息在停止时再推一次。
-
----
-
-## 五、settle 与链式派发
-
-子代理(backing delegation)完成时,`DelegationManager` 在 delegation 终结路径里直接调用 `onGraphWorkSettled` 回调(`session-runtime.ts`)——**不经 delegationCompletionQueue**。这是有意的职责分离:`onCompletion`(经 queue)只用于 `delegate_task` 唤醒主 Agent;graph work 的完成走 `onGraphWorkSettled` 旁路,只写 graph 终态事件,不作为 completion 消息打断主 Agent(主 Agent 并未在等 graph work)。回调进入 `settleGraphWork`:
-
-```text
-settleGraphWork(session, graphContext, workId, status, outputSummary):
-  CAS retry 循环(最多 3 次):
-    1. 读投影 → 若 work 未 settle:
-       completed(partial) → 写 graph.work.recorded
-       其他(error/timed_out/cancelled) → 写 graph.work.failed
-    2. 链式:重读投影 → computeReadyWorks → 对每个新就绪下游调 dispatcher
-```
-
-**关键设计:settle 不检查 graph.status**。即使图已 closed,在跑的 delegation 完成仍会写 recorded。这是 `close_graph` 的 warning 必须**按 dispatched/requested 分级措辞**的原因:
-
-- `requested` 的 pending work——"不会再被调度、也不会产出记录"
-- `dispatched` 的 pending work——"子代理仍在执行,完成后仍会写入 record(但不再触发下游)"
-
-如果 warning 笼统说"不会再产出记录",对 dispatched work 就是虚假承诺,会被系统行为立刻打破。
-
-**链式派发的边界**:`settleGraphWork` 调 dispatcher 派发下游,但**不写 `graph.work.dispatched` 事件**(只有 AddWorkTool 写)。实际中这条路径几乎不可达——模型无法预知 recordId,只能等上游 recorded 后再 add_work(走 AddWorkTool 内派发,会写 dispatched)。settle 的链式派发是兜底,正常流程用不到。
-
----
-
-## 六、续行仲裁:决策时刻的诊断锚点（`src/engine/loop.ts`）
-
-主 Agent 产生**非工具停止**(准备结束回合)时,engine 检查 graph 是否还有 pending 工作:
-
-```text
-graphSnapshot = graphReconcile()  ← {pending, ready, stuck}
-if (pending > 0):
-   if (continuations >= MAX=5):
-      放行停止(pending 留待下次 run 或 orphan 恢复)
-   else:
-      注入 [Graph continuation] user 消息:
-        "Graph Mode 仍有 N 个未完成的工作。"
-        + readyHint(M 个已就绪 / 等待上游)
-        + stuckHint(死锁 work 的 missingInputIds)  ← 关键
-      continue(重新进入模型循环)
-```
-
-**为什么续行消息是诊断的核心**:工具返回值里的 `missingInputIds`(第四章)很容易被模型忽略——它在"声明那一刻"读到,但真正需要被提醒是在"准备停止/close"的决策时刻,那时诊断早已滚出注意力窗口。续行消息是模型在停止前的高注意力锚点,把死锁证据直接喂到这里,才能让模型自救(重新 `add_work` 修正 id,或显式 close 放弃)。
-
-`graphReconcile` 的 `stuck` 字段(`agent-runtime.ts`)就是为此设计:它列出"requested 且当前仍有未提交 input"的 work(含真正死锁——id 错或上游已 failed——与上游在途两类,模型需用 view_graph 区分),在续行消息里带 missingInputIds 逐个列出。真实模型测试证明这条闭环有效——模型收到 stuck 提示后会主动用正确 recordId 重新声明。
-
----
-
-## 七、显式入口:`orchestrationMode`
-
-Graph Mode **默认关闭**,需用户显式开启。这是通过一个正交于 `collaborationMode`(agent/plan)的新字段 `orchestrationMode`("default"|"graph")实现的。
-
-**三端入口**:
-
-| 端      | 入口                                  | 作用域         |
-| ------- | ------------------------------------- | -------------- |
-| TUI     | `/graph` · `/graph on` · `/graph off` | session 级持久 |
-| CLI     | `--graph` flag                        | 新会话初始模式 |
-| desktop | composer graph toggle + 环境面板显示  | session 级持久 |
-
-**门控三处**(`agent-runtime.ts`),确保 default 模式下模型完全看不到 graph:
-
-```text
-1. graph 工具注册(:1767)
-   if (runtimeEventStore && !backgroundPolicy && orchestrationMode()==="graph")
-2. GRAPH_TOOLS_SPEC prompt 注入(:1522)
-   graphToolsAvailable = ... && orchestrationMode()==="graph"
-3. graphReconcile 续行仲裁(:1644)
-   ... && orchestrationMode()==="graph"
-```
-
-这三处必须同改——只改工具注册不改 prompt,会出现"工具没注册但 system prompt 仍在教模型用它"的反向不一致。
-
-**门控的两个正交维度**:除 `orchestrationMode`(用户可见开关)外,`backgroundPolicy`(运行态派生条件)是隐式关闭维度。背景 runtime(如 detached delegation 内层)即使 `orchestrationMode==="graph"` 也无 graph 工具——graph 调度依赖 engine 续行仲裁,背景 runtime 不跑 engine loop。两维同时为真才注册工具。
-
-**完全对标 `collaborationMode` 基础设施**:`orchestrationMode` 复用了 plan mode 的整套链路——`PersistedSessionSettings` 字段 + `normalize` 校验 + `SessionSettings` + setter + snapshot/applyPersisted + fork 继承 + execute 闭包 + daemon wire 投影 + 协议层 RPC + JSON-schema 白名单。新增一个模式字段 = 在这条链路的每个对称点加一行。resume 时持久化的 orchestrationMode 自动恢复(零额外代码)。
-
----
-
-## 八、失败、死锁与恢复
-
-### 8.1 settle 语义的边界
-
-`recorded` 的含义是**子代理自报完成**,不是"任务目标达成"。子代理遇到不可完成任务时(如读取不存在的文件),会返回 `completed` + summary 里写"无法完成",而不是 `error`。于是 graph 层照常写 recorded,下游 input 满足后继续执行——错误被"自报完成"掩盖。
-
-这是 graph 层的故意边界:record 的内容真实性无法在调度层识破(需要 LLM-as-judge 或 evidence 校验,属 subagent 层职责)。graph 层能做的,是保证 record 的 `outputSummary` 在 view_graph 里可见,让主 Agent 有机会读到"任务无法完成"的说明并自行判断。
-
-### 8.2 close 边界
-
-`close_graph` 有两条平行语义边界:**硬校验**——`result_record_ids` 引用未知 recordId 时抛 `GraphConflictError`(对标 finish 断言 result_ids 已提交,保证声明的"最终交付"真实存在);**软报告**——图带 pending work 时不拒绝,但返回 pendingWorks 清单 + 分级 warning,如实反映未收敛状态:
-
-```text
-close_graph → {
-  status: "closed",
-  pendingWorks: [...],          ← requested + dispatched 的 work 清单
-  warning: "requested 不会再调度/产出;dispatched 仍会完成并写 record,但不再触发新的下游调度"
+Graph = {
+  graphId, rootSessionId, epoch,
+  admissionPhase: open | sealed,
+  headRevision,
+  selectedRecordIds,
+  createdAt, sealedAt?
 }
 ```
 
-配套的,`hasPendingWorks`(`graph-reconcile.ts`)**故意不看图状态**——closed 图若有 in-flight/never-started work,view_graph 的顶层标志必须说 true,而不是和 close 的 pendingWorks 报告矛盾。
+- `headRevision` 是所有 schedule 更新的 CAS 版本；
+- `open` 可接纳新的 add/Claim/yield，`sealed`（存储层叫 `finished`）阻止新的工作准入；
+- finish 后，已持久化的 Claim 和已经启动的 RuntimeRun 仍可被观察、停止和投影，不能被抹掉；
+- SQLite 约束同一 root Session 同时最多一个 open Graph；当前应用服务只创建 epoch 1。
 
-### 8.3 orphan 恢复:进程崩溃中断 delegation
+`selectedRecordIds` 是根 Supervisor 在 finish 时声明的最终结果集合。领域层在获得权威 RecordRef 集合时校验存在性与归属；SQLite store 则在提交 finish revision 的同一 `BEGIN IMMEDIATE` 事务内强制所有选中 ID 已存在且属于当前 Graph，未知或跨图引用不会推进 head revision。
 
-如果一个 graph work 已 dispatched,但进程在子代理执行期间崩溃,backing delegation 随进程丢失。重启后该 work 永远停在 `dispatched`,既不会 record 也不会 fail——它是 orphan。
+### 4.2 ScheduleRevision：唯一可写的调度历史
 
-**检测**(`graph-recover.ts`):不能用 `delegationId === runId` 匹配(两者是独立 id 空间,永不相等)。正确判据是**活跃 delegation 集合**——重启后 DelegationManager 是全新空实例,所以"dispatched 且 delegationId 不在活跃集合里"= orphan。
+一次 `update_agent_graph` 形成一个不可变 `AgentGraphScheduleRevision`：
 
-**接入**(`runtime-run-executor.ts`):在启动恢复序列里,`reconcileIncompleteRuns`(折回未终结 run)之后、`RuntimeRun.start` 之前,跑一次 `findOrphanGraphWorks`,对每个 orphan 调 `settleGraphWork(status:"error", "orphan: backing delegation lost on process restart (recovered)")`。
+```text
+ScheduleRevision = {
+  graphId, revision, expectedPreviousRevision,
+  operationId, fingerprint,
+  source: { sessionId, turnId, runId, toolCallId },
+  commands: [add | stop | finish],
+  createdAt
+}
+```
 
-**不自动 reclaim**:没有"claim 预分配 runId"的幂等机制,reclaim 会启动第二个子代理(双 activation,可能重复 side effect)。orphan 统一标 failed,让下游通过 missingInputIds 诊断自然卡住,由模型在续行消息里决定重新 add_work 或放弃。
+提交需同时满足：
 
----
+- `expectedPreviousRevision === headRevision`；
+- 新 revision 恰好为 `headRevision + 1`；
+- `operationId` 首次出现，或以完全相同 fingerprint 幂等重放；
+- fingerprint 覆盖 graph、operation、宿主注入的 source 和完整 commands；同一 operationId 换 payload 会冲突；
+- batch 非空，`finish` 最多一个且必须位于最后。
 
-## 九、关键不变量速查
+三种命令的语义：
 
-| 不变量                          | 守护位置                                             |
-| ------------------------------- | ---------------------------------------------------- |
-| 单 canonical(无跨 store 一致性) | 全部走 RuntimeEventStore                             |
-| work 声明幂等                   | workId 哈希 + reducer `findWork` 短路                |
-| added+dispatched 原子事务       | CAS operationId+fingerprint+expectedSessionSequence  |
-| closed 后不得新增 work          | AddWorkTool 检查 + reducer added 守卫(双重)          |
-| record 存在性 = 下游就绪        | computeReadyWorks(只看存在性,不校验内容)             |
-| settle 不依赖 graph.status      | settleGraphWork 不检查(closed 后仍写 recorded)       |
-| 诊断在决策时刻可见              | 续行消息注入 stuck missingInputIds                   |
-| closed 图的 pending 如实报告    | hasPendingWorks 不看图状态 + close 返回 pendingWorks |
+- `add`：当前公开协议一次同时声明一个新 Operator 和一个指向它的 ActivationIntent；
+- `stop`：以 Intent 或 `operatorId@generation` 为目标，阻止未 Claim 的工作，并请求停止已执行工作；
+- `finish`：封闭新的 add、Provision、Claim 和 yield；finish 后仍允许提交 stop。
 
----
+### 4.3 Operator：稳定执行者配置
 
-## 十、设计权衡
+`AgentGraphOperator` 是调度层的执行者身份，不是一次运行：
 
-- **record 驱动依赖**——不预声明 DAG 的代价:模型无法预知 recordId,只能"声明→等产出→再声明下游"的轮询式。链式自动派发是兜底,正常流程用不到。好处是依赖语义纯粹(存在性即就绪),无需 DAG 拓扑校验/环检测。
-- **显式入口**——默认关闭给用户控制权(避免模型在不合适场景误用 graph),代价是用户需知晓何时开。入口形式三端齐全,底层对标 plan mode 基础设施。
-- **不自动 reclaim orphan**——换来了简单性(无幂等 claim 机制),代价是崩溃中断的 work 要靠模型在续行消息里手动重新声明。
-- **graph 层不识破自报完成**——换来了层级清晰(调度层只管存在性),代价是错误可能链式传播为"成功",需 subagent 层补 status 语义。
+```text
+Operator = {
+  graphId, operatorId, generation,
+  role, description?,
+  profileSnapshot: {
+    profileId, model?, tools,
+    permissionPolicy, systemPromptVersion
+  },
+  workspacePolicy: shared | isolated-worktree (future)
+}
+```
 
----
+关键点：
 
-## 代码索引
+- profile 是声明时冻结并持久化的快照；production host 已消费 `model` 和 `tools`。`permissionPolicy` 目前由模型随 schedule 提交，不是可信授权源，因此 detached Operator 强制使用可交互、不提权的 `default` 边界；`systemPromptVersion` 尚未恢复自定义提示，不能把“已保存”理解为“已全部生效”；
+- `generation` 为替换同一逻辑角色保留代际边界，stop 可精确落到某一代；
+- workspace policy 也是不可变调度输入；本次硬切的公共 `update_agent_graph` 入口仅接受 production 已可执行的 `shared`。`isolated-worktree` 只是领域内部的未来类型，在 resolver 与完整生命周期实现前不对外接受、不持久化调度意图；
+- 当前 `add` 要求 Operator ID 尚不存在，因此“向既有 Operator 追加 follow-up Intent”尚未开放。Reconciler 已按 Operator 分组并保留同 Operator 串行约束，为后续扩展留出边界。
 
-| 模块            | 文件                                                     | 职责                                                          |
-| --------------- | -------------------------------------------------------- | ------------------------------------------------------------- |
-| 类型与 ID       | `src/graph/contract.ts`                                  | GraphWork/GraphRecord/GraphProjection + workIdFor/recordIdFor |
-| 投影            | `src/graph/graph-reducer.ts`                             | projectGraphEntries 幂等折叠                                  |
-| 依赖解析        | `src/graph/graph-reconcile.ts`                           | computeReadyWorks/hasPendingWorks/missingInputIdsFor          |
-| orphan 检测     | `src/graph/graph-recover.ts`                             | findOrphanGraphWorks(liveDelegationIds 判定)                  |
-| 工具            | `src/tools/graph-tools.ts`                               | AddWorkTool/ViewGraphTool/CloseGraphTool                      |
-| 派发器          | `src/runtime/agent-runtime.ts`                           | graphDispatcher + graphReconcile + 三处门控                   |
-| settle          | `src/runtime/session-runtime.ts`                         | settleGraphWork + onGraphWorkSettled 回调                     |
-| orphan 恢复接入 | `src/runtime/runtime-run-executor.ts`                    | recoverOrphanGraphWorks(启动恢复序列)                         |
-| 续行仲裁        | `src/engine/loop.ts`                                     | graphReconcile callback + [Graph continuation] 注入           |
-| 持久化字段      | `src/engine/session-runtime.ts`                          | PersistedSessionSettings.orchestrationMode                    |
-| 运行态字段      | `src/input/session-settings.ts`                          | SessionSettings + setSessionOrchestrationMode                 |
-| 入口            | `src/input/pico-command-registry.ts` / `src/cli/main.ts` | /graph 命令 + --graph flag                                    |
-| 协议层          | `packages/protocol/src/runtime.ts`                       | RuntimeOrchestrationMode + session.settings.update RPC        |
-| daemon          | `src/daemon/desktop-runtime-service.ts`                  | wire 投影 + updateRuntimeSessionSettings                      |
-| desktop UI      | `apps/desktop/src/renderer/App.tsx`                      | graph toggle + 环境面板显示                                   |
+### 4.4 ActivationIntent：想执行什么
 
----
+`AgentGraphActivationIntent` 是不可变请求：
 
-## 来源与范围
+```text
+Intent = {
+  graphId, intentId,
+  operatorId, operatorGeneration,
+  instruction,
+  inputRefs: [{ recordId }],
+  createdAtRevision,
+  requestedBy
+}
+```
 
-本文描述 Graph Mode 的当前实现状态(含多轮真实模型测试驱动的修复、对抗审查修正、orphan 恢复接入、显式入口与 desktop app 入口)。行为契约由 `tests/integration/graph-mode-test.ts`(31 条)与 `tests/e2e/graph-mode.real-llm.test.ts` + `graph-mode-multiround.real-llm.test.ts`(9 条真实模型场景)锚定。
+Intent 只表达期望，不代表已经取得执行权。`inputRefs` 必须来自同一 Graph 的已提交 RecordRef；readiness 每次由事实重新推导：
+
+- `resolved`：所有引用都存在；
+- `in_flight`：引用已知会产生但尚未提交；
+- `failed`：引用已知失败；
+- `unknown`：系统没有对应事实。
+
+当前 production bridge 只返回已知 RecordRef，尚未提供完整的 in-flight/failed 输入分类，所以缺失输入通常表现为 `unknown`。只有 `resolved` Intent 才可能 Claim。
+
+### 4.5 Provision：Operator 的持久运行身份
+
+`AgentGraphOperatorProvision` 将 `operatorId@generation` 绑定到一个确定性的 child Session：
+
+```text
+Provision = {
+  provisionId, graphId, operatorId, generation,
+  childSessionId,
+  state: requested | provisioned | stopping | stopped,
+  version,
+  profileSnapshot, workspaceBinding
+}
+```
+
+Provision 先写入 SQLite，再由 Runtime adapter 幂等地 `getOrCreatePinned` child Session，成功后才转为 `provisioned`。进程内 lease 只维持活性，不是权威；重启时可从 Provision 重新取得同一 Session。
+
+### 4.6 ActivationClaim：唯一执行准入凭证
+
+Claim 是 v2 最关键的边界。它在调用 provider 前一次性冻结所有执行身份：
+
+```text
+Claim = {
+  claimId, graphId, intentId, operatorId, generation,
+  scheduleRevision, intentFingerprint, readinessFingerprint,
+  state: claimed | executing | cancelled,
+  targetSessionId, targetTurnId, targetRunId,
+  targetInvocationId, runStartedEventId
+}
+```
+
+创建 Claim 的 SQLite 事务会重新检查：
+
+- Graph 仍 open；
+- `headRevision` 仍等于调和器观察到的 revision；
+- Provision 仍是 `provisioned` 且 child Session 匹配；
+- `(graphId, intentId)` 尚无 Claim；
+- Turn、Run、Invocation 和 run-start event ID 在全库保持唯一。
+
+因此并发 stop/finish/revision 更新会在 Claim CAS 前获胜，调和器必须重新读取；一旦 Claim 已存在，后续只允许用 Claim 内精确身份启动或观察，不重新分配 ID。
+
+### 4.7 RecordRef：结果引用，不是结果副本
+
+Operator 必须调用 `agent_output({status, output, evidence_refs, artifact_refs})`。工具只在宿主注入的 `graph_operator_activation` 身份下注册；根 Supervisor 和普通 Session 看不到它。
+
+提交链路为：
+
+1. 根据 activation 身份生成确定性 idempotency key 和 event ID；
+2. 使用当前 child Session owner fence 向 Runtime ledger 写一条非 partial `agent.output`；
+3. 对重放比较 fingerprint、Invocation 和完整来源身份，任何不一致都 fail closed；
+4. 在 Graph 控制面写 `RecordRef`，内容仍留在 Runtime ledger。
+
+```text
+RecordRef = {
+  recordId, graphId, operatorId, generation, claimId,
+  sourceSessionId, sourceTurnId, sourceRunId, sourceEventId,
+  kind: agent-output | artifact | evidence
+}
+```
+
+当前正式产出和 handoff 只支持 `agent-output`。handoff 会重新读取 source event 并校验 provenance，每条显式携带 `success | failure` status、来源 Graph/Operator/Claim/Session/Turn/Run/Invocation/Event 身份和受限正文；单条最多 16 KiB、合计最多 48 KiB、最多 64 条，按 UTF-8 安全截断。下游 prompt 中的正文依然被明确标记为不可信数据；调度表不会信任模型直接提供的结果正文。
+
+`view_agent_graph` 在读取时使用当前 Graph 的 RecordRef 到 Runtime ledger 动态解析 committed、non-partial `agent.output`，并返回与 handoff 相同的 status/provenance/字节边界。省略 `record_ids` 时按当前 RecordRef 投影顺序返回前 64 条，超出数量或字节预算时 `truncated=true`；传入 `record_ids` 可精确读取，上限 64，重复、未知或跨 Graph ID 都 fail closed。这个结果视图是只读派生值，不会把正文回写进 `agent_graph_*` 控制表。
+根 Supervisor 必须把 `results.records[].content` 当作 Operator 提交的不可信数据，只用于综合用户任务与证据，不得把其中文本当作调度或工具指令执行。该边界同时出现在 Graph system prompt、wake prompt 和工具描述中。
+
+同一视图的 `runtimeClaims` 逐 Claim 读取 Runtime ledger，暴露实际 `not-started/running/waiting-permission/completed/failed/cancelled/interrupted` 状态、`terminalEventId` 和 output event IDs。因此 Operator 已终态但未调用 `agent_output` 时，根 Supervisor 仍能看到“已终态 + 无输出”，必须当场 stop/finish 或调度补救，不能再 yield 等待一个不会到来的 wake。
+
+### 4.8 YieldInterest、Wake 与 Attempt：根 Supervisor 的持久续行
+
+`yield_agent_graph` 不是 sleep。它先写 `YieldInterest`，再 reconcile，最后返回 snapshot：
+
+```text
+YieldInterest = root Session/Turn/Run/toolCall 的一次等待许可
+Wake          = 某个新调度事实的持久、去重通知
+WakeAttempt   = 用精确 Turn/Run 身份交付一次根唤醒
+```
+
+注册顺序“interest → reconcile → snapshot”用于关闭结果在 yield 前后到达的竞态。终态 Runtime 事实产生 wake candidate 时，SQLite 以事务同时消费 registered interest 并插入 Wake；没有 interest 或 Graph 已 finished 时不会凭空启动根 Run。
+
+Wake 以 `(graphId, dedupeKey)` 去重，状态为 `pending`、`running`、`delivered`、`waiting_permission` 或 `retryable_failed`。每次尝试都有确定性的 attempt/Turn/Run ID，重启后继续观察同一个 exact RuntimeRun，而不是新建一次语义相同的运行。
+
+## 5. 工具身份与权限边界
+
+Graph 工具不接受 session/run/graph 身份参数；这些字段只能由运行时绑定注入：
+
+| Runtime 身份                     | 可见工具                                                      | 约束                                                                            |
+| -------------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| root + `orchestrationMode=graph` | `view_agent_graph`、`update_agent_graph`、`yield_agent_graph` | 必须是 foreground Graph Runtime；source 使用当前 root Session/Turn/Run/toolCall |
+| exact Operator activation        | `agent_output`                                                | activation 身份来自 Provision + Claim；只写一条正式终态输出                     |
+| 普通/default Runtime             | 无 Graph 工具                                                 | 不得伪造根或 Operator 身份                                                      |
+
+`update_agent_graph` 只提交 schedule，工具栈不会等待 Operator/provider 执行。提交后 Supervisor 异步收到通知。根 Agent 应将互不依赖的 add 放在同一 batch；引用下游结果时只能使用 `view_agent_graph` 已返回的 recordId。
+
+## 6. Reconciler：从意图推进到执行事实
+
+`AgentGraphReconciler` 对一个 Graph 运行有界 fixed-point 循环，单 pass 顺序固定：
+
+```mermaid
+flowchart LR
+  Load["读取 schedule / claim / provision / record"] --> Stop["1. 应用 stop"]
+  Stop --> Provision["2. 确保 Provision 与 child Session"]
+  Provision --> Inputs["3. 解析 RecordRef / handoff"]
+  Inputs --> Claim["4. revision-conditional Claim"]
+  Claim --> Begin["5. claimed → executing；启动或观察 exact Run"]
+  Begin --> Project["6. 投影 committed non-partial RecordRef"]
+  Project --> More{"有新持久事实？"}
+  More -- 是 --> Load
+  More -- 否 --> Quiet["quiescent"]
+```
+
+并发规则：
+
+- 不同 Operator group 用 `Promise.all` 推进，可并行；
+- 同一 Operator group 按 `claimedAt, claimId` 排序，一个未终态 Activation 会阻止该组后续 Activation；
+- `occupiedOperators` 防止同一 Operator 同时创建多个未完成 Claim；
+- 所有进程内 single-flight 仅用于合并重复工作，SQLite CAS/唯一约束才是跨进程权威。
+
+finish fence 的精确定义是“禁止 fresh Claim”。已经存在的 Claim 仍会从 `claimed` 转 `executing`、观察终态并投影 RecordRef；stop 可在 finish 后继续提交。
+
+## 7. Exact RuntimeRun 与崩溃恢复
+
+`SqliteAgentGraphExactRunPort` 只做三件事：验证 Claim 身份、原子 admit/observe 一个 `run.started`、把已准入 Run 交给宿主组装真正的 AgentRuntime。它本身不创建 provider 或工具。
+
+production 将 exact RuntimeRun 安装为 `WorkspaceTaskRuntime` 中的 detached Run。如果宿主在 AgentRuntime attach 之前失败，canonical ledger 仍可能是 `attachable`；`reattachExactRun` 允许身份完全相同的 failed/cancelled workspace 记录以更高 version 重装一次 executor，而 active/succeeded 重放仍只观察。执行代际栅栏防止旧 executor 在重附着后回写新状态。
+
+对同一 Claim，恢复分类为：
+
+| Runtime ledger 事实                                        | 分类                              | 行为                                        |
+| ---------------------------------------------------------- | --------------------------------- | ------------------------------------------- |
+| 无事件                                                     | `not_started`                     | 可用 Claim 的预分配 ID admit                |
+| 只有精确 `run.started`，以及可选的确定性 user input        | `attachable`                      | 可安全接管并继续                            |
+| 进程内仍有同一 Run                                         | `live`                            | 只观察，不重复派发                          |
+| 有唯一 `run.terminal`                                      | `terminal`                        | 只投影结果                                  |
+| 已写 `model.call.started` 或 `tool.started`，但无 terminal | `indeterminate`                   | fail closed，禁止自动再次调用 provider/tool |
+| 发现额外或身份不匹配的事件                                 | `indeterminate` / integrity error | 停止自动恢复，要求人工判断                  |
+
+“exact”指 Claim 中的 Session、Turn、Run、Invocation 和 run-start event ID 都必须原样使用。恢复不是根据 instruction 重新造一个 Run，也不是把 Claim ID 当 Run ID。
+
+根唤醒复用同一 exact Run 机制。若原始 root Session 仍活跃或 workspace 忙，Attempt 返回 `deferred` 并以同一 Attempt 稍后重试，不增加尝试号。权限等待进入 `waiting_permission`，只有显式权限变化才恢复。已经发生 provider/tool durable dispatch 的不确定失败，以及 cancelled 根唤醒，会停在 manual intervention 边界，不自动重派；只有能够证明未越过副作用边界的普通失败才进入有界退避重试。
+
+## 8. Workspace 生命周期
+
+每个 canonical workspace 最多拥有一个 Graph application：
+
+- workspace 首次创建 Runtime 时构造并 `start()` Graph application；启动会扫描 open Graph 和 recoverable Wake；
+- 同一 workspace 的重复 get 不重复构造；只读 getter 不会隐式启动服务；
+- unregister 或 daemon close 时，先 drain `WorkspaceTaskRuntime` 的执行所有权，再关闭 Graph supervisor/runtime bridge，最后关闭 SQLite store；
+- 创建中途失败会按相同边界清理，不留下半启动 application；
+- `close()` 不重写持久 Wake、Attempt、Claim 或 RuntimeEvent，下一进程仍能恢复。
+
+`createAgentGraphWorkspaceHost` 提供 control store、exact run、output ledger、root wake 与工具 binding 的 production-neutral 组合。production daemon 通过 `WorkspaceRuntimeService.createAgentGraphApplicationService` 为每个 workspace 持有它：普通 Graph 根 Run 注入当前 Turn/Run 身份，Operator 与 root wake 使用 detached exact Run，模型路由、Plugin/MCP、Desktop 审批与 AskUser 都复用同一生产装配。execute callback “安装 detached execution 后立即返回”，不会让 reconcile 工具栈等待整个模型 Run。
+
+## 9. 失败语义
+
+| 场景                                         | 处理                                                                                                      |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| revision 或 operation 冲突                   | 当前写失败；调用方重新 `view_agent_graph` 后基于新 revision 决策                                          |
+| stop/finish 与 Claim 竞争                    | SQLite writer lock + revision CAS 决定唯一顺序；输掉的一方重读                                            |
+| Operator 未调用 `agent_output` 就终止        | RuntimeRun 可终态，但没有 RecordRef；`view_agent_graph.runtimeClaims` 显式暴露该终态，根不得再 yield 等待 |
+| `agent_output(status="failure")`             | 仍是一条正式 `agent.output` 和 RecordRef；失败语义由显式 payload 保留，调度层不从自然语言猜测             |
+| output 身份、owner fence、fingerprint 不匹配 | 拒绝提交或拒绝重放，不能形成 RecordRef                                                                    |
+| Provision/Session 在进程中丢失               | 从持久 Provision 重新取得同一 child Session                                                               |
+| Claim 后、provider 前崩溃                    | 若 ledger 仍可证明 attachable，恢复同一 exact Run                                                         |
+| provider/tool 派发后崩溃                     | 视为 indeterminate，禁止自动再派发                                                                        |
+| 根唤醒等待权限                               | Wake/Attempt 持久停在 `waiting_permission`，等待显式恢复                                                  |
+| Graph finish                                 | 不产生 fresh Claim/wake/yield；保留并观察已准入运行，仍允许 stop                                          |
+
+## 10. 必须保持的不变量
+
+1. Schedule revision 是 Graph 调度历史的唯一写入口；`operationId + fingerprint` 决定幂等重放。
+2. 同一 root Session 最多一个 open Graph；当前宿主限定 epoch 1。
+3. 同一 `graphId + intentId` 最多一个 Claim；Claim 的 exact Runtime 身份不可变。
+4. finish 只阻止新的准入，不删除 Claim、RuntimeRun 或已提交 RecordRef。
+5. RecordRef 只能来自身份匹配、committed、non-partial 的 RuntimeEvent；正文仅在 view/handoff 时有界解析，不进入 Graph 控制表。
+6. 模型不能通过工具参数提供 Graph/Session/Turn/Run 身份；身份由宿主绑定。
+7. 不同 Operator 可并行，同一 Operator 的 Activation 必须串行。
+8. yield interest 必须先于 reconcile/snapshot 持久化；Wake 只有消费 permit 后才可唤醒 root。
+9. 进程内 map、lease 和 single-flight 都不是恢复权威；SQLite 与 Runtime ledger 才是。
+10. 已记录 provider/tool 派发且无 terminal 的 exact Run 不得自动重放。
+
+## 11. 当前实现限制与后续验证
+
+- Graph application 已接入 production daemon 的 workspace 生命周期；确定性 production wiring 集成测试与 `RUN_LLM_E2E=1` 真实模型闭环均已通过，真实模型门禁仍只在具备凭证的受控环境显式启用；
+- `isolated-worktree` 仅保留在领域契约中作为未来能力；公共工具 schema 和 submit 前解析均只接受 `shared`，避免持久化 production 无法执行的 Intent。未来必须先实现 resolver、清理/恢复语义及对应验证，再扩展公共入口；
+- `profileSnapshot.permissionPolicy` 与 `systemPromptVersion` 已持久化；production 已映射 model/tools，但在可信 profile catalog 出现前不使用模型提交的 policy 提权，system prompt 自定义恢复仍是发布缺口；
+- Runtime bridge 尚未提供完整 in-flight/failed readiness facts；
+- `artifact` / `evidence` RecordRef 是领域预留，当前 handoff 只接受 `agent-output`；
+- 已有确定性集成测试覆盖核心、store、跨进程 CAS、reconciler、exact Run/reattach、production wiring、output、yield/wake 和 workspace 生命周期；真实模型 E2E 已验证 root、Operator、durable output、结果回读、exact wake 与 finish 闭环。尚未用独立子进程逐一 kill/reopen 验证全部崩溃窗口。
+
+## 12. 代码索引
+
+| 主题                       | 文件                                                                             |
+| -------------------------- | -------------------------------------------------------------------------------- |
+| 领域契约与状态转换         | `src/agent-graph/core/contracts.ts`、`schedule-transition.ts`、`readiness.ts`    |
+| 确定性身份                 | `src/agent-graph/core/ids.ts`                                                    |
+| SQLite schema / store      | `src/storage/sqlite/agent-graph-scope.ts`、`sqlite-agent-graph-control-store.ts` |
+| 调和器                     | `src/agent-graph/reconciler.ts`                                                  |
+| 应用服务与 bridge          | `src/agent-graph/service.ts`、`runtime-adapter-bridge.ts`                        |
+| exact RuntimeRun           | `src/runtime/agent-graph-exact-run-port.ts`                                      |
+| Operator Runtime / handoff | `src/runtime/agent-graph-runtime-adapter.ts`                                     |
+| `agent.output` ledger      | `src/runtime/agent-graph-output-ledger.ts`                                       |
+| 根唤醒                     | `src/runtime/agent-graph-root-wake-port.ts`                                      |
+| workspace host / lifecycle | `src/runtime/agent-graph-host.ts`、`src/daemon/workspace-runtime-service.ts`     |
+| Supervisor                 | `src/daemon/agent-graph-supervisor-service.ts`                                   |
+| 工具                       | `src/tools/agent-graph-tools.ts`、`src/tools/agent-output-tool.ts`               |
+| v1 历史读取                | `src/graph/graph-reducer.ts`                                                     |

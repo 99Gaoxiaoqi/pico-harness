@@ -10,23 +10,13 @@ import { FileIndex } from "../input/file-index.js";
 import { logger } from "../observability/logger.js";
 import { TaskRegistry } from "../tasks/task-registry.js";
 import type { TaskHostRuntime } from "../tasks/task-runtime.js";
-import type { SqliteRuntimeControlStore } from "../storage/sqlite/sqlite-runtime-control-store.js";
 import type { CompletionOutboxRecord } from "../tasks/runtime-types.js";
 import { BackgroundManager } from "../tools/background-manager.js";
 import {
   DelegationManager,
   formatDelegationCompletions,
   type DelegationCompletionEnvelope,
-  type DelegationRecordStatus,
 } from "../tools/delegation-manager.js";
-import { recordIdFor } from "../graph/contract.js";
-import { computeReadyWorks } from "../graph/graph-reconcile.js";
-import { GRAPH_EVENT_KINDS, projectGraphEntries } from "../graph/graph-reducer.js";
-import { graphOperationFingerprint } from "../tools/graph-tools.js";
-import {
-  RUNTIME_EVENT_SCHEMA_VERSION,
-  type RuntimeEvent,
-} from "../engine/session-runtime-event.js";
 import { ToolDisclosure } from "../tools/tool-disclosure.js";
 import {
   CodeIntelligenceManager,
@@ -51,7 +41,6 @@ import type {
 } from "../hooks/types.js";
 import { isTerminalTaskStatus, type TaskSnapshot } from "../tasks/task-registry.js";
 import { resolvePicoHome } from "../paths/pico-paths.js";
-import { RuntimeEventStoreHighWaterConflictError } from "../storage/runtime-event-store-contracts.js";
 
 /** UI-independent services scoped to one persisted session. */
 export interface SessionRuntimeOptions {
@@ -67,11 +56,6 @@ export interface SessionRuntimeOptions {
   lspEnabled?: boolean;
   lspServers?: readonly LspServerConfig[];
   taskHostRuntime?: TaskHostRuntime;
-  /**
-   * Durable RuntimeStore（graph work lease 源）。taskHostRuntime 不可达时（headless/folder
-   * 模式）由调用方注入；DelegationManager 用它做执行主权去重与 orphan 活性判定。
-   */
-  runtimeStore?: SqliteRuntimeControlStore;
   /** Durable completion outbox 的活态发现间隔。 */
   completionPollIntervalMs?: number;
   sessionStartSource?: "startup" | "resume";
@@ -88,28 +72,6 @@ export interface SessionRuntimeOptions {
    */
   workspaceTrustStore?: WorkspaceTrustStore;
 }
-
-/**
- * Stable handle for the active Graph Mode instance on this session. The graphId
- * is derived from the sessionId so one session owns at most one active graph;
- * closing it finalizes the projection and rejects further add_work.
- */
-export interface SessionGraphContext {
-  readonly graphId: string;
-  readonly sessionId: string;
-}
-
-/**
- * Spawns the delegation backing a graph work. Host-implemented because the
- * engine + registry live in agent-runtime; session-runtime never imports the
- * engine to preserve the architectural boundary. Returns the delegationId on
- * dispatch, or undefined when the host declined (capacity exhausted, disposed).
- */
-export type GraphWorkDispatcher = (input: {
-  readonly workId: string;
-  readonly instruction: string;
-  readonly mode: "explore" | "worker";
-}) => Promise<string | undefined>;
 
 export interface SessionRuntime {
   readonly workDir: string;
@@ -148,13 +110,6 @@ export interface SessionRuntime {
   drainHookEvents(): Promise<void>;
   assertCompatible(session: Session): void;
   dispose(): Promise<void>;
-  /** Active Graph Mode handle (derived from sessionId); stable for the session lifetime. */
-  readonly graphContext: SessionGraphContext;
-  /**
-   * Lazily binds the host-owned graph dispatcher. Called by agent-runtime once
-   * the engine is constructed; settleGraphWork uses it to chain ready works.
-   */
-  setGraphWorkDispatcher(dispatcher: GraphWorkDispatcher | undefined): void;
 }
 
 export function createDelegationCompletionMessage(
@@ -495,13 +450,6 @@ async function createPinnedSessionRuntime(
 
   const steerQueue = new SteerQueue();
   const jobService = options.taskHostRuntime?.jobService;
-  const graphContext: SessionGraphContext = { graphId: `graph:${sessionId}`, sessionId };
-  // Late-bound by agent-runtime once the engine is constructed. settleGraphWork
-  // uses this to dispatch newly-ready works when an upstream work settles.
-  let graphWorkDispatcher: GraphWorkDispatcher | undefined;
-  const setGraphWorkDispatcher = (dispatcher: GraphWorkDispatcher | undefined): void => {
-    graphWorkDispatcher = dispatcher;
-  };
   const delegationCompletionQueue = new DelegationCompletionWakeQueue({
     deliver: async (completion) => {
       if (jobService) {
@@ -607,19 +555,9 @@ async function createPinnedSessionRuntime(
     }),
     delegationManager: new DelegationManager({
       taskRegistry,
-      runtimeStore: jobService?.store ?? options.runtimeStore,
       onCompletion: (completion) => delegationCompletionQueue.enqueue(completion),
       onPlanStepSettled: (planStepId, status) =>
         settlePlanStepFromDelegation(session, planStepId, status),
-      onGraphWorkSettled: (workId, status, outputSummary) =>
-        settleGraphWork(session, graphContext, workId, status, outputSummary, () =>
-          graphWorkDispatcher ? graphWorkDispatcher : undefined,
-        ).catch((error) => {
-          logger.warn(
-            { sessionId, workId, error: String(error) },
-            "[graph] settleGraphWork failed",
-          );
-        }),
     }),
     delegationCompletionQueue,
     hookRewakeQueue,
@@ -627,8 +565,6 @@ async function createPinnedSessionRuntime(
     steerQueue,
     codeIntelligenceManager,
     codeIntelligenceEnabled,
-    graphContext,
-    setGraphWorkDispatcher,
     unbindGoalManager,
     releaseSessionPin,
     stopDelegationCompletionPolling: () => {
@@ -797,139 +733,6 @@ async function settlePlanStepFromDelegation(
   }
 }
 
-/**
- * Settles a Graph Mode work when its backing delegation terminates. Writes
- * graph.work.recorded (on completed/partial) or graph.work.failed (otherwise),
- * then drains any works that became ready as a result and dispatches them via
- * the host-owned {@link GraphWorkDispatcher}.
- *
- * The dispatcher is resolved lazily because agent-runtime binds it after the
- * engine is constructed; if it is still missing (e.g. background runtime) the
- * recorded fact still commits and downstream works will be picked up by the
- * graph continuation arbiter on the next engine stop.
- */
-export async function settleGraphWork(
-  session: Session,
-  context: SessionGraphContext,
-  workId: string,
-  status: DelegationRecordStatus,
-  outputSummary: string,
-  resolveDispatcher: () => GraphWorkDispatcher | undefined,
-): Promise<void> {
-  const store = session.runtimeEventStore;
-  if (!store) return;
-  const completed = status === "completed" || status === "partial";
-  const recordId = recordIdFor(context.graphId, workId);
-  const at = new Date().toISOString();
-  const operationId = `settle-graph:${workId}:${Date.now()}`;
-  const semantic = completed
-    ? { kind: "graph.work.recorded", graphId: context.graphId, workId, recordId, outputSummary }
-    : {
-        kind: "graph.work.failed",
-        graphId: context.graphId,
-        workId,
-        error: outputSummary || status,
-      };
-  const kind = completed ? "graph.work.recorded" : "graph.work.failed";
-  const fingerprint = graphOperationFingerprint(kind, semantic);
-  for (let attempt = 0; attempt < 3; attempt++) {
-    // graph.* 事件切片 + 全会话水位(票 04):CAS 的 expectedSessionSequence
-    // 由水位显式传入,与全量读口径一致。
-    const slice = await store.readSessionEntriesOfKinds(context.sessionId, GRAPH_EVENT_KINDS);
-    const projection = projectGraphEntries(context.graphId, slice.entries, slice.headSequence);
-    // Idempotent: if the work is already recorded/failed for this delegation,
-    // the reducer treated the replay and we only need to chain downstream.
-    const work = projection.works.find((candidate) => candidate.workId === workId);
-    if (work && work.status !== "recorded" && work.status !== "failed") {
-      const baseEvent = {
-        schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
-        eventId: `graph:${operationId}:${kind.split(".").pop()}`,
-        sessionId: context.sessionId,
-        invocationId: `graph-settle:${workId}`,
-        runId: `graph-settle:${workId}`,
-        turnId: `graph-settle:${workId}`,
-        at,
-        partial: false as const,
-        visibility: "internal" as const,
-      };
-      const event: RuntimeEvent = completed
-        ? {
-            ...baseEvent,
-            kind: "graph.work.recorded",
-            data: {
-              operationId,
-              fingerprint,
-              graphId: context.graphId,
-              workId,
-              recordId,
-              outputSummary,
-            },
-          }
-        : {
-            ...baseEvent,
-            kind: "graph.work.failed",
-            data: {
-              operationId,
-              fingerprint,
-              graphId: context.graphId,
-              workId,
-              error: outputSummary || status,
-            },
-          };
-      // 直写 store（不经 session.serialize / enqueuePersistence / assertRuntimeEventWriteAllowed）：
-      // graph settle 依赖 CAS（expectedSessionSequence）+ 幂等短路 + 跨进程文件锁兜底并发与
-      // stale 进程。切勿改为包 session.serialize——会改变 CAS 重试的并发语义并引入死锁
-      //（参见 delegation graphWorkId 去重因扩大 settle 窗口而致 graph 死锁的教训）。
-      try {
-        const ownerFence = await session.assertRuntimeEventWriteAllowed();
-        await store.appendGraphOperation([event], {
-          operationId,
-          fingerprint,
-          expectedSessionSequence: projection.sessionSequence,
-          ownerFence,
-        });
-        const confirmedFence = await session.assertRuntimeEventWriteAllowed();
-        if (confirmedFence.epoch !== ownerFence.epoch) {
-          throw new Error(`Graph owner fence changed during Session ${session.id} settle`);
-        }
-      } catch (error) {
-        if (!(error instanceof RuntimeEventStoreHighWaterConflictError)) throw error;
-        // CAS conflict — re-read and retry. If the work is already settled by a
-        // concurrent settle, the next projection will short-circuit.
-        continue;
-      }
-    }
-    // Chain downstream ready works regardless of whether we wrote the fact.
-    const dispatcher = resolveDispatcher();
-    if (!dispatcher) return;
-    const refreshedSlice = await store.readSessionEntriesOfKinds(
-      context.sessionId,
-      GRAPH_EVENT_KINDS,
-    );
-    const refreshed = projectGraphEntries(
-      context.graphId,
-      refreshedSlice.entries,
-      refreshedSlice.headSequence,
-    );
-    const ready = computeReadyWorks(refreshed);
-    for (const candidate of ready) {
-      try {
-        await dispatcher({
-          workId: candidate.workId,
-          instruction: candidate.instruction,
-          mode: candidate.mode,
-        });
-      } catch (error) {
-        logger.warn(
-          { sessionId: context.sessionId, workId: candidate.workId, error: String(error) },
-          "[graph] downstream dispatch failed",
-        );
-      }
-    }
-    return;
-  }
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -949,8 +752,6 @@ interface DefaultSessionRuntimeOptions {
   steerQueue: SteerQueue;
   codeIntelligenceManager: CodeIntelligenceManager;
   codeIntelligenceEnabled: boolean;
-  graphContext: SessionGraphContext;
-  setGraphWorkDispatcher: (dispatcher: GraphWorkDispatcher | undefined) => void;
   unbindGoalManager: () => void;
   releaseSessionPin: () => void;
   stopDelegationCompletionPolling: () => void;
@@ -975,10 +776,6 @@ class DefaultSessionRuntime implements SessionRuntime {
   readonly fileIndex: FileIndex;
   readonly steerQueue: SteerQueue;
   readonly codeIntelligenceManager: CodeIntelligenceManager;
-  readonly graphContext: SessionGraphContext;
-  private readonly setGraphWorkDispatcherBound: (
-    dispatcher: GraphWorkDispatcher | undefined,
-  ) => void;
   private _hookService?: HookService;
   private readonly hookRuntime?: SessionHookRuntime;
   private readonly pendingHookEvents = new Set<Promise<unknown>>();
@@ -1016,8 +813,6 @@ class DefaultSessionRuntime implements SessionRuntime {
     this.steerQueue = options.steerQueue;
     this.codeIntelligenceManager = options.codeIntelligenceManager;
     this.codeIntelligenceEnabled = options.codeIntelligenceEnabled;
-    this.graphContext = options.graphContext;
-    this.setGraphWorkDispatcherBound = options.setGraphWorkDispatcher;
     this.unbindGoalManager = options.unbindGoalManager;
     this.releaseSessionPin = options.releaseSessionPin;
     this.stopDelegationCompletionPolling = options.stopDelegationCompletionPolling;
@@ -1146,10 +941,6 @@ class DefaultSessionRuntime implements SessionRuntime {
       );
     }
     throw new Error(`SessionRuntime is bound to a different Session instance: ${this.sessionId}`);
-  }
-
-  setGraphWorkDispatcher(dispatcher: GraphWorkDispatcher | undefined): void {
-    this.setGraphWorkDispatcherBound(dispatcher);
   }
 
   async dispose(): Promise<void> {

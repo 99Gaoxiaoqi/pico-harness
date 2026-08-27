@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { watch, type FSWatcher } from "node:fs";
-import { access } from "node:fs/promises";
+import { watch, type FSWatcher, type Stats } from "node:fs";
+import { access, readdir, stat } from "node:fs/promises";
 import { basename, dirname, resolve, sep } from "node:path";
 import {
   loadHookSnapshot,
@@ -13,6 +13,22 @@ import type { HookOutput, HookSnapshot, HookSource } from "../types.js";
 import { raceWithDeadline } from "../../util/race-with-deadline.js";
 
 const DEFAULT_STOP_DRAIN_TIMEOUT_MS = 1_000;
+const WATCH_FILE_FALLBACK_INTERVAL_MS = 250;
+
+interface PreparedHookWatchers {
+  readonly directories: Map<string, FSWatcher>;
+  readonly timers: Set<NodeJS.Timeout>;
+  readonly fingerprints: Map<string, string>;
+  readonly hookifyFingerprint: { value: string };
+  readonly lease: { active: boolean };
+}
+
+interface HookWatchBaseline {
+  readonly exactPaths: readonly string[];
+  readonly wantedDirectories: readonly string[];
+  readonly fingerprints: ReadonlyMap<string, string>;
+  readonly hookifyFingerprint: string;
+}
 
 export interface HookConfigChangeContext {
   oldSnapshot: HookSnapshot;
@@ -46,8 +62,12 @@ export interface HookConfigReloaderOptions extends LoadHookSnapshotOptions {
 export class HookConfigReloader {
   private current?: LoadHookSnapshotResult;
   private readonly watchers = new Map<string, FSWatcher>();
+  private readonly watchTimers = new Set<NodeJS.Timeout>();
+  private watchLease?: { active: boolean };
   private readonly changed = new Set<string>();
+  private readonly scheduledFingerprints = new Map<string, string>();
   private timer?: NodeJS.Timeout;
+  private scheduledDrain?: Promise<void>;
   private stopped = false;
   /** stop 使当前代立即失效；只有等待 stop 完成后的 start 才会开启新代。 */
   private generation = 0;
@@ -68,12 +88,27 @@ export class HookConfigReloader {
       this.generation++;
     }
     const generation = this.generation;
-    const current = this.current ?? (await loadHookSnapshot(this.loadOptions()));
+    let current = this.current ?? (await loadHookSnapshot(this.loadOptions()));
     if (!this.isActive(generation)) return current;
-    const preparedWatchers = await this.prepareWatchers(current, generation);
+    let watcherBaseline = await this.captureWatchBaseline(current, generation);
+    if (!watcherBaseline || !this.isActive(generation)) return current;
+    const confirmedCurrent = await loadHookSnapshot({
+      ...this.loadOptions(),
+      version: current.snapshot.version,
+    });
+    if (!this.isActive(generation)) return current;
+    if (confirmedCurrent.hasErrors || confirmedCurrent.snapshot.id !== current.snapshot.id) {
+      this.current = current;
+      await this.reload([...confirmedCurrent.watchedPaths]);
+      if (!this.isActive(generation)) return this.current ?? current;
+      current = this.current ?? current;
+      watcherBaseline = await this.captureWatchBaseline(current, generation);
+      if (!watcherBaseline || !this.isActive(generation)) return current;
+    }
+    const preparedWatchers = await this.prepareWatchers(current, generation, watcherBaseline);
     if (!preparedWatchers) return current;
     if (!this.isActive(generation)) {
-      closeWatcherMap(preparedWatchers);
+      closePreparedWatchers(preparedWatchers);
       return current;
     }
     this.current = current;
@@ -109,6 +144,23 @@ export class HookConfigReloader {
           this.options.onReject?.(formatInvalidSources(candidate), candidate);
           return;
         }
+        const watcherBaseline = await this.captureWatchBaseline(candidate, generation);
+        if (!watcherBaseline || !this.isActive(generation)) return;
+        const confirmedCandidate = await loadHookSnapshot({
+          ...this.loadOptions(),
+          version: candidate.snapshot.version,
+        });
+        if (!this.isActive(generation)) return;
+        if (
+          confirmedCandidate.hasErrors ||
+          confirmedCandidate.snapshot.id !== candidate.snapshot.id
+        ) {
+          // candidate 读取与 watcher 基线捕获之间发生了变化；交给串行尾重新加载，
+          // 不能把较新的磁盘状态误认成旧 candidate 的监视基线。
+          for (const path of watcherBaseline.exactPaths) this.schedule(path, generation);
+          this.schedule(resolve(this.options.workDir, ".claw"), generation);
+          return;
+        }
         const guard = await this.options.beforeSwap?.({
           oldSnapshot: previous.snapshot,
           candidate,
@@ -124,10 +176,10 @@ export class HookConfigReloader {
           );
           return;
         }
-        const preparedWatchers = await this.prepareWatchers(candidate, generation);
+        const preparedWatchers = await this.prepareWatchers(candidate, generation, watcherBaseline);
         if (!preparedWatchers) return;
         if (!this.isActive(generation)) {
-          closeWatcherMap(preparedWatchers);
+          closePreparedWatchers(preparedWatchers);
           return;
         }
         try {
@@ -139,7 +191,7 @@ export class HookConfigReloader {
           this.replaceWatchers(preparedWatchers);
           accepted = true;
         } catch (error) {
-          closeWatcherMap(preparedWatchers);
+          closePreparedWatchers(preparedWatchers);
           throw error;
         }
       }));
@@ -195,7 +247,7 @@ export class HookConfigReloader {
         const preparedWatchers = await this.prepareWatchers(next, generation);
         if (!preparedWatchers) return;
         if (!this.isActive(generation)) {
-          closeWatcherMap(preparedWatchers);
+          closePreparedWatchers(preparedWatchers);
           return;
         }
         try {
@@ -207,7 +259,7 @@ export class HookConfigReloader {
           this.replaceWatchers(preparedWatchers);
           retired = true;
         } catch (error) {
-          closeWatcherMap(preparedWatchers);
+          closePreparedWatchers(preparedWatchers);
           throw error;
         }
       }));
@@ -246,31 +298,189 @@ export class HookConfigReloader {
     return { ...this.options, ...(this.options.dynamicSources?.() ?? {}) };
   }
 
-  private schedule(path: string, generation: number): void {
+  private schedule(path: string, generation: number, fingerprint?: string): void {
     if (!this.isActive(generation)) return;
-    this.changed.add(resolve(path));
+    const canonicalPath = resolve(path);
+    if (fingerprint !== undefined) {
+      if (this.scheduledFingerprints.get(canonicalPath) === fingerprint) return;
+      this.scheduledFingerprints.set(canonicalPath, fingerprint);
+    }
+    this.changed.add(canonicalPath);
+    this.armScheduledReload(generation);
+  }
+
+  private armScheduledReload(generation: number): void {
     if (this.timer) clearTimeout(this.timer);
     const timer = setTimeout(() => {
       if (this.timer === timer) this.timer = undefined;
       if (!this.isActive(generation)) return;
-      const changed = [...this.changed];
-      this.changed.clear();
-      void this.reload(changed).catch((error: unknown) => {
+      this.flushScheduledReloads(generation);
+    }, this.options.debounceMs ?? 120);
+    this.timer = timer;
+  }
+
+  private flushScheduledReloads(generation: number): void {
+    if (this.scheduledDrain) return;
+    const draining = (async () => {
+      while (this.isActive(generation) && this.changed.size > 0) {
+        const changed = [...this.changed];
+        this.changed.clear();
+        await this.reload(changed);
+      }
+    })();
+    const tracked = draining
+      .catch((error: unknown) => {
         if (!this.isActive(generation)) return;
         try {
           this.options.onReject?.(`Hook 重载失败: ${String(error)}`);
         } catch {
           // Watcher 回调没有可传递的 caller，避免二次报错变成 unhandled rejection。
         }
+      })
+      .finally(() => {
+        if (this.scheduledDrain === tracked) this.scheduledDrain = undefined;
+        if (this.isActive(generation) && this.changed.size > 0) {
+          this.armScheduledReload(generation);
+        }
       });
-    }, this.options.debounceMs ?? 120);
-    this.timer = timer;
+    this.scheduledDrain = tracked;
   }
 
   private async prepareWatchers(
     result: LoadHookSnapshotResult,
     generation: number,
-  ): Promise<Map<string, FSWatcher> | undefined> {
+    capturedBaseline?: HookWatchBaseline,
+  ): Promise<PreparedHookWatchers | undefined> {
+    const baseline = capturedBaseline ?? (await this.captureWatchBaseline(result, generation));
+    if (!baseline || !this.isActive(generation)) return undefined;
+    const exactPaths = new Set(baseline.exactPaths);
+    const wantedDirectories = baseline.wantedDirectories;
+    const fingerprints = new Map(baseline.fingerprints);
+    const hookifyFingerprint = { value: baseline.hookifyFingerprint };
+    const lease = { active: true };
+    const isPreparedActive = (): boolean => lease.active && this.isActive(generation);
+    let dirtySinceBaseline = false;
+    const scheduleChangedPaths = async (paths: readonly string[]): Promise<boolean> => {
+      let detected = false;
+      for (const path of paths) {
+        const next = await fileFingerprint(path);
+        if (!isPreparedActive()) return detected;
+        if (next === fingerprints.get(path)) continue;
+        fingerprints.set(path, next);
+        dirtySinceBaseline = true;
+        detected = true;
+        this.schedule(path, generation, next);
+      }
+      return detected;
+    };
+    const scheduleHookifyIfChanged = async (): Promise<boolean> => {
+      const next = await hookifyFilesFingerprint(this.options.workDir);
+      if (!isPreparedActive() || next === hookifyFingerprint.value) return false;
+      hookifyFingerprint.value = next;
+      dirtySinceBaseline = true;
+      this.schedule(resolve(this.options.workDir, ".claw"), generation, next);
+      return true;
+    };
+    const prepared: PreparedHookWatchers = {
+      directories: new Map<string, FSWatcher>(),
+      timers: new Set<NodeJS.Timeout>(),
+      fingerprints,
+      hookifyFingerprint,
+      lease,
+    };
+    try {
+      for (const directory of wantedDirectories) {
+        if (!isPreparedActive()) {
+          closePreparedWatchers(prepared);
+          return undefined;
+        }
+        const exists = await access(directory).then(
+          () => true,
+          () => false,
+        );
+        if (!isPreparedActive()) {
+          closePreparedWatchers(prepared);
+          return undefined;
+        }
+        if (!exists) continue;
+        const watcher = watch(directory, { recursive: false }, (_event, filename) => {
+          // Node 不保证 fs.watch 始终提供 filename；所有通知先与共享指纹对账，
+          // 避免漏变更，也避免快速通知与轮询兜底重复执行 ConfigChange。
+          if (!filename) {
+            void Promise.all([
+              scheduleChangedPaths([...exactPaths]),
+              scheduleHookifyIfChanged(),
+            ]).catch((error: unknown) => {
+              if (isPreparedActive()) {
+                this.options.onReject?.(`Hook watcher 复核失败: ${String(error)}`);
+              }
+            });
+            return;
+          }
+          const path = resolve(directory, filename.toString());
+          const affectedPaths = [...exactPaths].filter(
+            (target) => target === path || target.startsWith(`${path}${sep}`),
+          );
+          if (affectedPaths.length > 0) {
+            void scheduleChangedPaths(affectedPaths).catch((error: unknown) => {
+              if (isPreparedActive()) {
+                this.options.onReject?.(`Hook watcher 复核失败: ${String(error)}`);
+              }
+            });
+          } else if (isHookifyFile(path, this.options.workDir)) {
+            void scheduleHookifyIfChanged().catch((error: unknown) => {
+              if (isPreparedActive()) {
+                this.options.onReject?.(`Hook watcher 复核失败: ${String(error)}`);
+              }
+            });
+          }
+        });
+        watcher.on("error", (error) => {
+          if (isPreparedActive()) {
+            this.options.onReject?.(`Hook watcher 失败: ${String(error)}`);
+          }
+        });
+        prepared.directories.set(directory, watcher);
+      }
+      const [exactChanged, hookifyChanged] = await Promise.all([
+        scheduleChangedPaths([...exactPaths]),
+        scheduleHookifyIfChanged(),
+      ]);
+      if (!isPreparedActive() || dirtySinceBaseline || exactChanged || hookifyChanged) {
+        // guard/安装期间出现的新磁盘状态时，不允许提交旧 candidate；已排入的
+        // 串行 reload 会重新加载最新内容。这样 onSwap 内 stop 也不会吞掉变化。
+        closePreparedWatchers(prepared);
+        return undefined;
+      }
+      // fs.watch 是有损通知；主动审计始终与代码捕获的 baseline 比较，既覆盖
+      // watcher 安装窗口，也不会依赖 watchFile 自身异步建立的内部 baseline。
+      let auditRunning = false;
+      const auditTimer = setInterval(() => {
+        if (!isPreparedActive() || auditRunning) return;
+        auditRunning = true;
+        void Promise.all([scheduleChangedPaths([...exactPaths]), scheduleHookifyIfChanged()])
+          .catch((error: unknown) => {
+            if (isPreparedActive()) {
+              this.options.onReject?.(`Hook watcher 复核失败: ${String(error)}`);
+            }
+          })
+          .finally(() => {
+            auditRunning = false;
+          });
+      }, WATCH_FILE_FALLBACK_INTERVAL_MS);
+      auditTimer.unref();
+      prepared.timers.add(auditTimer);
+      return prepared;
+    } catch (error) {
+      closePreparedWatchers(prepared);
+      throw error;
+    }
+  }
+
+  private async captureWatchBaseline(
+    result: LoadHookSnapshotResult,
+    generation: number,
+  ): Promise<HookWatchBaseline | undefined> {
     if (!this.isActive(generation)) return undefined;
     const exactPaths = new Set(result.watchedPaths.map((path) => resolve(path)));
     for (const eventHandlers of Object.values(result.snapshot.handlers)) {
@@ -290,51 +500,40 @@ export class HookConfigReloader {
     }
     const wantedDirectories = await existingWatchDirectories([...exactPaths]);
     if (!this.isActive(generation)) return undefined;
-    const prepared = new Map<string, FSWatcher>();
-    try {
-      for (const directory of wantedDirectories) {
-        if (!this.isActive(generation)) {
-          closeWatcherMap(prepared);
-          return undefined;
-        }
-        const exists = await access(directory).then(
-          () => true,
-          () => false,
-        );
-        if (!this.isActive(generation)) {
-          closeWatcherMap(prepared);
-          return undefined;
-        }
-        if (!exists) continue;
-        const watcher = watch(directory, { recursive: false }, (_event, filename) => {
-          if (!filename) return;
-          const path = resolve(directory, filename.toString());
-          if (
-            exactPaths.has(path) ||
-            [...exactPaths].some((target) => target.startsWith(`${path}${sep}`)) ||
-            isHookifyFile(path, this.options.workDir)
-          )
-            this.schedule(path, generation);
-        });
-        watcher.on("error", (error) => {
-          if (this.isActive(generation)) {
-            this.options.onReject?.(`Hook watcher 失败: ${String(error)}`);
-          }
-        });
-        prepared.set(directory, watcher);
-      }
-      return prepared;
-    } catch (error) {
-      closeWatcherMap(prepared);
-      throw error;
+    const fingerprints = new Map<string, string>();
+    for (const path of exactPaths) {
+      fingerprints.set(path, await fileFingerprint(path));
+      if (!this.isActive(generation)) return undefined;
     }
+    const hookifyFingerprint = await hookifyFilesFingerprint(this.options.workDir);
+    if (!this.isActive(generation)) return undefined;
+    return {
+      exactPaths: [...exactPaths],
+      wantedDirectories,
+      fingerprints,
+      hookifyFingerprint,
+    };
   }
 
-  private replaceWatchers(next: ReadonlyMap<string, FSWatcher>): void {
+  private replaceWatchers(next: PreparedHookWatchers): void {
     const previous = [...this.watchers.values()];
+    const previousTimers = [...this.watchTimers];
+    if (this.watchLease) this.watchLease.active = false;
+    this.watchLease = next.lease;
     this.watchers.clear();
-    for (const [directory, watcher] of next) this.watchers.set(directory, watcher);
+    this.watchTimers.clear();
+    for (const [directory, watcher] of next.directories) this.watchers.set(directory, watcher);
+    for (const timer of next.timers) this.watchTimers.add(timer);
+    this.scheduledFingerprints.clear();
+    for (const [path, fingerprint] of next.fingerprints) {
+      this.scheduledFingerprints.set(path, fingerprint);
+    }
+    this.scheduledFingerprints.set(
+      resolve(this.options.workDir, ".claw"),
+      next.hookifyFingerprint.value,
+    );
     for (const watcher of previous) safeCloseWatcher(watcher);
+    for (const timer of previousTimers) clearInterval(timer);
   }
 
   private isActive(generation: number): boolean {
@@ -348,8 +547,13 @@ export class HookConfigReloader {
   }
 
   private closeWatchers(): void {
+    if (this.watchLease) this.watchLease.active = false;
+    this.watchLease = undefined;
     for (const watcher of this.watchers.values()) safeCloseWatcher(watcher);
     this.watchers.clear();
+    for (const timer of this.watchTimers) clearInterval(timer);
+    this.watchTimers.clear();
+    this.scheduledFingerprints.clear();
   }
 
   private async finishStop(draining: Promise<void>): Promise<void> {
@@ -367,8 +571,10 @@ function boundedDrainTimeout(value: number | undefined): number {
   return timeoutMs;
 }
 
-function closeWatcherMap(watchers: ReadonlyMap<string, FSWatcher>): void {
-  for (const watcher of watchers.values()) safeCloseWatcher(watcher);
+function closePreparedWatchers(watchers: PreparedHookWatchers): void {
+  watchers.lease.active = false;
+  for (const watcher of watchers.directories.values()) safeCloseWatcher(watcher);
+  for (const timer of watchers.timers) clearInterval(timer);
 }
 
 function safeCloseWatcher(watcher: FSWatcher): void {
@@ -396,6 +602,27 @@ async function existingWatchDirectories(paths: readonly string[]): Promise<reado
     directories.add(candidate);
   }
   return [...directories];
+}
+
+async function fileFingerprint(path: string): Promise<string> {
+  return await stat(path).then(statsFingerprint, () => "missing");
+}
+
+function statsFingerprint(stats: Stats): string {
+  if (stats.nlink === 0) return "missing";
+  return [stats.dev, stats.ino, stats.size, stats.mtimeMs, stats.ctimeMs].join(":");
+}
+
+async function hookifyFilesFingerprint(workDir: string): Promise<string> {
+  const directory = resolve(workDir, ".claw");
+  const names = await readdir(directory).catch(() => [] as string[]);
+  const hookifyNames = names
+    .filter((name) => isHookifyFile(resolve(directory, name), workDir))
+    .sort();
+  const fingerprints = await Promise.all(
+    hookifyNames.map(async (name) => `${name}:${await fileFingerprint(resolve(directory, name))}`),
+  );
+  return fingerprints.join("|");
 }
 
 function isHookifyFile(path: string, workDir: string): boolean {

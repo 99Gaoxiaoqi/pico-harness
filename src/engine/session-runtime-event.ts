@@ -113,6 +113,38 @@ export interface RuntimeToolResultRecordedEvent extends RuntimeEventBase {
   };
 }
 
+export type RuntimeAgentOutputStatus = "success" | "failure";
+
+/** Stable semantic body committed by the operator-only agent_output tool. */
+export interface RuntimeAgentOutputPayload {
+  readonly schemaVersion: "pico.agent_output.v1";
+  readonly graphId: string;
+  readonly operatorId: string;
+  readonly operatorGeneration: number;
+  readonly activationId: string;
+  readonly status: RuntimeAgentOutputStatus;
+  readonly output: string;
+  readonly outputBytes: number;
+  readonly evidenceRefs: readonly string[];
+  readonly artifactRefs: readonly string[];
+  readonly idempotencyKey: string;
+  readonly fingerprint: string;
+}
+
+/** Canonical reference source for one Graph operator activation output. */
+export interface RuntimeAgentOutputEvent extends RuntimeEventBase {
+  readonly kind: "agent.output";
+  readonly partial: false;
+  readonly visibility: "internal";
+  readonly refs: RuntimeEventRefs & { readonly toolCallId: string };
+  readonly data: {
+    readonly toolCallId: string;
+    readonly idempotencyKey: string;
+    readonly fingerprint: string;
+    readonly payload: RuntimeAgentOutputPayload;
+  };
+}
+
 export interface RuntimeApprovalRequestedEvent extends RuntimeEventBase {
   readonly kind: "approval.requested";
   readonly data: { readonly approvalId: string; readonly toolName: string };
@@ -296,7 +328,7 @@ export type RuntimePlanEvent =
 
 /**
  * Graph Mode (Lesson 17). Graph events model incrementally submitted work dependencies: each
- * add_work declares an instruction plus optional upstream record ids; the
+ * Legacy Graph v1 add_work declared an instruction plus optional upstream record ids; the
  * orchestrator dispatches each work once its inputs are ready and records the
  * output. Every graph event shares the same operationId + fingerprint CAS
  * envelope as Plan events, so the underlying store treats them identically.
@@ -367,6 +399,7 @@ export type RuntimeEvent =
   | RuntimeToolStartedEvent
   | RuntimeToolGroupLoadedEvent
   | RuntimeToolResultRecordedEvent
+  | RuntimeAgentOutputEvent
   | RuntimeApprovalRequestedEvent
   | RuntimeApprovalSettledEvent
   | RuntimeModelCallStartedEvent
