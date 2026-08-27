@@ -59,6 +59,26 @@ test(
 );
 
 test(
+  "Bash abort immediately terminates a long-running foreground command",
+  { skip: process.platform === "win32" },
+  async (context) => {
+    const root = await mkdtemp(join(tmpdir(), "pico-bash-abort-"));
+    context.after(() => rm(root, { recursive: true, force: true }));
+    const tool = new BashTool(root, undefined, { timeoutMs: 30_000 });
+    const controller = new AbortController();
+    const startedAt = Date.now();
+    const execution = tool.execute(JSON.stringify({ command: "sleep 30" }), {
+      signal: controller.signal,
+    });
+
+    setTimeout(() => controller.abort(new DOMException("cancelled by Ctrl+C", "AbortError")), 100);
+
+    await assert.rejects(execution, /cancelled by Ctrl\+C/u);
+    assert.ok(Date.now() - startedAt < 3_000, "abort 应在 Bash 30s timeout 前快速收口");
+  },
+);
+
+test(
   "SessionRuntime disposal stops owned background Bash tasks",
   { skip: process.platform === "win32" },
   async (context) => {

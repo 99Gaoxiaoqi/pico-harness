@@ -1,9 +1,11 @@
 import {
+  isActiveRunStatus,
   isInterruptedRunStatus,
   isStreamingRunStatus,
   isTerminalRunStatus,
   type RuntimeNotification,
   type RuntimeNotificationMap,
+  type RuntimeRun,
 } from "@pico/protocol";
 import type { TuiReporter } from "./tui-reporter.js";
 
@@ -65,10 +67,21 @@ export class DaemonEventReporter {
    * 时 run.started 已错过，事件流不会再补）。幂等：已活跃时不重复触发回调。
    */
   seedActiveRun(runId: string): void {
-    const wasActive = this.active;
+    // Hydration 只能补齐缺失的 live 事实，不能覆盖已经由
+    // run.started 观测到的更新 run。重连时 open 快照可能落后于通知流。
+    if (this.active) return;
     this.active = true;
     this.currentRunId = runId;
-    if (!wasActive) this.onRunStateChanged?.(true);
+    this.onRunStateChanged?.(true);
+  }
+
+  /** 对账一条带身份的 Replica run 快照；终态只能收口同一 run。 */
+  reconcileRunSnapshot(run: RuntimeRun): void {
+    if (isActiveRunStatus(run.status)) {
+      this.seedActiveRun(run.runId);
+      return;
+    }
+    if (isTerminalRunStatus(run.status)) this.finishMatchingRun(run.runId, run.status);
   }
 
   handleNotification(event: RuntimeNotification): void {
@@ -89,18 +102,23 @@ export class DaemonEventReporter {
             this.onRunStateChanged?.(true);
           }
           this.currentRunId = runId;
-        } else if (this.active && !running && isTerminalRunStatus(status)) {
-          this.finishRun(status);
-          this.surfaceRunFailure(run);
+        } else if (!running && isTerminalRunStatus(status)) {
+          if (this.finishMatchingRun(runId ?? event.scope.runId, status)) {
+            this.surfaceRunFailure(run);
+          }
         }
         // paused/cancelling：非终态非运行——保持 active（run 仍占用，spinner 继续
         // 是可接受近似；终态由 run.finished 收口）。
         return;
       }
       case "run.finished": {
-        const run = payload["run"] as { status?: unknown; error?: unknown } | undefined;
-        if (this.active) {
-          this.finishRun(typeof run?.status === "string" ? run.status : "succeeded");
+        const run = payload["run"] as
+          | { runId?: unknown; status?: unknown; error?: unknown }
+          | undefined;
+        const runId = typeof run?.runId === "string" ? run.runId : event.scope.runId;
+        if (
+          this.finishMatchingRun(runId, typeof run?.status === "string" ? run.status : "succeeded")
+        ) {
           this.surfaceRunFailure(run);
         }
         return;
@@ -130,6 +148,12 @@ export class DaemonEventReporter {
       default:
         return;
     }
+  }
+
+  private finishMatchingRun(runId: string | undefined, status: string): boolean {
+    if (!this.active || !runId || runId !== this.currentRunId) return false;
+    this.finishRun(status);
+    return true;
   }
 
   private finishRun(status: string): void {
