@@ -1331,22 +1331,22 @@ function normalizeScheduleInput(input: CommitAgentGraphScheduleInput): Normalize
 function inputRecordIdsFromCommand(command: unknown): readonly string[] {
   const envelope = asOptionalRecord(command);
   const commands =
-    envelope?.["schemaVersion"] === 1 && Array.isArray(envelope["commands"])
+    envelope?.["schemaVersion"] === 2 && Array.isArray(envelope["commands"])
       ? envelope["commands"]
       : [command];
   const inputRecordIds: string[] = [];
   for (const candidate of commands.map(asOptionalRecord)) {
-    if (candidate?.["kind"] !== "add") continue;
+    if (candidate?.["kind"] !== "add" && candidate?.["kind"] !== "activate") continue;
     const intent = asOptionalRecord(candidate["intent"]);
     const inputRefs = intent?.["inputRefs"];
     if (inputRefs === undefined) continue;
     if (!Array.isArray(inputRefs)) {
-      throw new Error("add inputRefs must be an array");
+      throw new Error("Graph work inputRefs must be an array");
     }
     for (const inputRef of inputRefs) {
       const recordId = asOptionalRecord(inputRef)?.["recordId"];
       if (typeof recordId !== "string") {
-        throw new Error("add inputRefs must contain string recordIds");
+        throw new Error("Graph work inputRefs must contain string recordIds");
       }
       inputRecordIds.push(recordId);
     }
@@ -1361,7 +1361,7 @@ function selectedRecordIdsFromCommand(
   if (kind !== "finish") return [];
   const envelope = asOptionalRecord(command);
   const commands =
-    envelope?.["schemaVersion"] === 1 && Array.isArray(envelope["commands"])
+    envelope?.["schemaVersion"] === 2 && Array.isArray(envelope["commands"])
       ? envelope["commands"]
       : [command];
   const finishCommands = commands

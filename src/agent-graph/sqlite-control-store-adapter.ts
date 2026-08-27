@@ -34,7 +34,7 @@ import type {
 import { SqliteAgentGraphControlStore } from "../storage/sqlite/sqlite-agent-graph-control-store.js";
 
 interface StoredScheduleEnvelope {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly commands: readonly AgentGraphScheduleCommand[];
 }
 
@@ -113,7 +113,7 @@ export class SqliteAgentGraphControlStoreAdapter implements AgentGraphControlSto
       requestFingerprint,
       kind: aggregateScheduleKind(input.commands),
       command: {
-        schemaVersion: 1,
+        schemaVersion: 2,
         commands: input.commands,
       } satisfies StoredScheduleEnvelope,
       sourceSessionId: input.source.sessionId,
@@ -238,11 +238,11 @@ function parseScheduleEnvelope(value: unknown): StoredScheduleEnvelope {
     throw new Error("Stored Graph schedule command must be an object envelope");
   }
   const candidate = value as Partial<StoredScheduleEnvelope>;
-  if (candidate.schemaVersion !== 1 || !Array.isArray(candidate.commands)) {
+  if (candidate.schemaVersion !== 2 || !Array.isArray(candidate.commands)) {
     throw new Error("Stored Graph schedule command envelope is invalid");
   }
   return {
-    schemaVersion: 1,
+    schemaVersion: candidate.schemaVersion,
     commands: candidate.commands,
   };
 }
@@ -253,7 +253,9 @@ function aggregateScheduleKind(
   if (commands.some((command) => command.kind === "finish")) return "finish";
   if (commands.every((command) => command.kind === "stop")) return "stop";
   if (commands.length > 1) return "batch";
-  if (commands.some((command) => command.kind === "add")) return "add";
+  if (commands.some((command) => command.kind === "add" || command.kind === "activate")) {
+    return "add";
+  }
   return "stop";
 }
 

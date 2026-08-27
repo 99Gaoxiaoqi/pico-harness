@@ -238,11 +238,11 @@ export class AgentGraphReconciler {
     const currentClaims = this.store.listActivationClaims(state.graph.graphId);
     for (const provision of provisions) {
       if (provision.state === "stopped") continue;
-      const stopped = state.intents.some(
-        (intent) =>
-          intent.operatorId === provision.operatorId &&
-          intent.operatorGeneration === provision.operatorGeneration &&
-          isIntentStopped(state, intent),
+      const stopped = state.stops.some(
+        (stop) =>
+          stop.target.kind === "operator" &&
+          stop.target.operatorId === provision.operatorId &&
+          stop.target.generation === provision.operatorGeneration,
       );
       if (!stopped) continue;
       const hasActiveClaim = currentClaims.some(

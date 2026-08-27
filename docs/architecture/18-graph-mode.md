@@ -17,7 +17,7 @@ Graph v2 解决的不是“如何把一张静态 DAG 跑完”，而是以下三
 
 Graph 控制面不会把模型执行结果复制进调度表。`RecordRef` 只引用 Runtime ledger 中已提交的事件，并携带完整来源身份。
 
-当前明确不包含：活动 v1 Graph 迁移、v1/v2 双运行时、自动 `map` / `all_settled`、任意拓扑编辑、跨 epoch 结果输入、向既有 Operator 追加 follow-up Intent，以及全局公平调度。
+当前明确不包含：活动 v1 Graph 迁移、v1/v2 双运行时、自动 `map` / `all_settled`、任意拓扑编辑、跨 epoch 结果输入，以及全局公平调度。
 
 ## 2. 为什么有 v1 和 v2
 
@@ -114,7 +114,7 @@ ScheduleRevision = {
   graphId, revision, expectedPreviousRevision,
   operationId, fingerprint,
   source: { sessionId, turnId, runId, toolCallId },
-  commands: [add | stop | finish],
+  commands: [add | activate | stop | finish],
   createdAt
 }
 ```
@@ -125,13 +125,14 @@ ScheduleRevision = {
 - 新 revision 恰好为 `headRevision + 1`；
 - `operationId` 首次出现，或以完全相同 fingerprint 幂等重放；
 - fingerprint 覆盖 graph、operation、宿主注入的 source 和完整 commands；同一 operationId 换 payload 会冲突；
-- batch 非空，`finish` 最多一个且必须位于最后。
+- batch 非空，`finish` 最多一个且必须位于最后；`finish` 不能与 `add` 或 `activate` 同批提交，避免先创建永远不会准入的死工作。
 
-三种命令的语义：
+四种命令的语义：
 
-- `add`：当前公开协议一次同时声明一个新 Operator 和一个指向它的 ActivationIntent；
-- `stop`：以 Intent 或 `operatorId@generation` 为目标，阻止未 Claim 的工作，并请求停止已执行工作；
-- `finish`：封闭新的 add、Provision、Claim 和 yield；finish 后仍允许提交 stop。
+- `add`：一次同时声明一个新 Operator 和一个指向它的 ActivationIntent；
+- `activate`：向已存在且未被 operator-level stop 的 `operatorId@generation` 追加 follow-up Intent，复用原 Provision 与 child Session；
+- `stop`：以 Intent 为目标时只取消该次 Activation；以 `operatorId@generation` 为目标时取消该代全部 Activation 并永久停止 Provision；
+- `finish`：封闭新的 add/activate、Provision、Claim 和 yield；finish 后仍允许提交 stop。
 
 ### 4.3 Operator：稳定执行者配置
 
@@ -154,7 +155,7 @@ Operator = {
 - profile 是声明时冻结并持久化的快照；production host 已消费 `model` 和 `tools`。`permissionPolicy` 目前由模型随 schedule 提交，不是可信授权源，因此 detached Operator 强制使用可交互、不提权的 `default` 边界；`systemPromptVersion` 尚未恢复自定义提示，不能把“已保存”理解为“已全部生效”；
 - `generation` 为替换同一逻辑角色保留代际边界，stop 可精确落到某一代；
 - workspace policy 也是不可变调度输入；本次硬切的公共 `update_agent_graph` 入口仅接受 production 已可执行的 `shared`。`isolated-worktree` 只是领域内部的未来类型，在 resolver 与完整生命周期实现前不对外接受、不持久化调度意图；
-- 当前 `add` 要求 Operator ID 尚不存在，因此“向既有 Operator 追加 follow-up Intent”尚未开放。Reconciler 已按 Operator 分组并保留同 Operator 串行约束，为后续扩展留出边界。
+- `add` 要求 Operator ID 尚不存在；后续工作必须用 `activate` 指向精确 generation。同一 generation 的所有 Activation 复用一个持久 child Session，并由 Reconciler 串行执行。operator-level stop 是永久 fence，intent-level stop 不影响后续 follow-up。
 
 ### 4.4 ActivationIntent：想执行什么
 
@@ -248,7 +249,7 @@ RecordRef = {
 
 ### 4.8 YieldInterest、Wake 与 Attempt：根 Supervisor 的持久续行
 
-`yield_agent_graph` 不是 sleep。它先写 `YieldInterest`，再 reconcile，最后返回 snapshot：
+`yield_agent_graph` 不是 sleep。它通过 future-progress 预检后先写 `YieldInterest`，再 reconcile，最后返回 snapshot：
 
 ```text
 YieldInterest = root Session/Turn/Run/toolCall 的一次等待许可
@@ -256,7 +257,7 @@ Wake          = 某个新调度事实的持久、去重通知
 WakeAttempt   = 用精确 Turn/Run 身份交付一次根唤醒
 ```
 
-注册顺序“interest → reconcile → snapshot”用于关闭结果在 yield 前后到达的竞态。终态 Runtime 事实产生 wake candidate 时，SQLite 以事务同时消费 registered interest 并插入 Wake；没有 interest 或 Graph 已 finished 时不会凭空启动根 Run。
+系统先 reconcile 并做只读 future-progress 预检；确定 Graph 已 finished 或没有 executing 工作时直接拒绝，不占用 root-Run-unique permit，因此同一根 Run 修正 schedule 后可以再次 yield。通过预检后才执行“interest → reconcile → snapshot”，用于关闭结果在 permit 注册前后到达的竞态。终态 Runtime 事实产生 wake candidate 时，SQLite 以事务同时消费 registered interest 并插入 Wake；没有 interest 或 Graph 已 finished 时不会凭空启动根 Run。最终 snapshot 仍会复核：只有 Graph 仍 open 且 `executing > 0` 才证明未来仍可能推进；若当前 permit 未被 Wake 消费、没有 executing 工作或 Graph 已 finished，系统以 CAS 将其转为 `cancelled` 并拒绝 yield，避免永久 registered permit 之后错误唤醒旧 root Run。若 terminal 与取消竞争，`consumed` 与 `cancelled` 只有一方能获胜，二者都不可逆。
 
 Wake 以 `(graphId, dedupeKey)` 去重，状态为 `pending`、`running`、`delivered`、`waiting_permission` 或 `retryable_failed`。每次尝试都有确定性的 attempt/Turn/Run ID，重启后继续观察同一个 exact RuntimeRun，而不是新建一次语义相同的运行。
 
@@ -270,7 +271,7 @@ Graph 工具不接受 session/run/graph 身份参数；这些字段只能由运�
 | exact Operator activation        | `agent_output`                                                | activation 身份来自 Provision + Claim；只写一条正式终态输出                     |
 | 普通/default Runtime             | 无 Graph 工具                                                 | 不得伪造根或 Operator 身份                                                      |
 
-`update_agent_graph` 只提交 schedule，工具栈不会等待 Operator/provider 执行。提交后 Supervisor 异步收到通知。根 Agent 应将互不依赖的 add 放在同一 batch；引用下游结果时只能使用 `view_agent_graph` 已返回的 recordId。
+`update_agent_graph` 只提交 schedule，工具栈不会等待 Operator/provider 执行。提交后 Supervisor 异步收到通知。根 Agent 应将互不依赖的 add 放在同一 batch；已有 Operator 结合新证据继续工作时用 activate；引用下游结果时只能使用 `view_agent_graph` 已返回的 recordId。
 
 ## 6. Reconciler：从意图推进到执行事实
 
@@ -356,14 +357,16 @@ production 将 exact RuntimeRun 安装为 `WorkspaceTaskRuntime` 中的 detached
 6. 模型不能通过工具参数提供 Graph/Session/Turn/Run 身份；身份由宿主绑定。
 7. 不同 Operator 可并行，同一 Operator 的 Activation 必须串行。
 8. yield interest 必须先于 reconcile/snapshot 持久化；Wake 只有消费 permit 后才可唤醒 root。
-9. 进程内 map、lease 和 single-flight 都不是恢复权威；SQLite 与 Runtime ledger 才是。
-10. 已记录 provider/tool 派发且无 terminal 的 exact Run 不得自动重放。
+9. yield 只有在当前 permit 已 consumed 或仍有 executing 工作时才成功；无 future progress 的 registered permit 必须 cancelled。
+10. 进程内 map、lease 和 single-flight 都不是恢复权威；SQLite 与 Runtime ledger 才是。
+11. 已记录 provider/tool 派发且无 terminal 的 exact Run 不得自动重放。
 
 ## 11. 当前实现限制与后续验证
 
 - Graph application 已接入 production daemon 的 workspace 生命周期；确定性 production wiring 集成测试与 `RUN_LLM_E2E=1` 真实模型闭环均已通过，真实模型门禁仍只在具备凭证的受控环境显式启用；
 - `isolated-worktree` 仅保留在领域契约中作为未来能力；公共工具 schema 和 submit 前解析均只接受 `shared`，避免持久化 production 无法执行的 Intent。未来必须先实现 resolver、清理/恢复语义及对应验证，再扩展公共入口；
 - `profileSnapshot.permissionPolicy` 与 `systemPromptVersion` 已持久化；production 已映射 model/tools，但在可信 profile catalog 出现前不使用模型提交的 policy 提权，system prompt 自定义恢复仍是发布缺口；
+- schedule envelope 已硬切为 v2 以显式承载 `activate`；历史数据已清理，读取端拒绝 v1 envelope，不支持新旧进程混跑或直接降级；
 - Runtime bridge 尚未提供完整 in-flight/failed readiness facts；
 - `artifact` / `evidence` RecordRef 是领域预留，当前 handoff 只接受 `agent-output`；
 - 已有确定性集成测试覆盖核心、store、跨进程 CAS、reconciler、exact Run/reattach、production wiring、output、yield/wake 和 workspace 生命周期；真实模型 E2E 已验证 root、Operator、durable output、结果回读、exact wake 与 finish 闭环。尚未用独立子进程逐一 kill/reopen 验证全部崩溃窗口。

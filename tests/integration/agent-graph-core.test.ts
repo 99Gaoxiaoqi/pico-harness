@@ -83,6 +83,27 @@ function addCommand(
   return { kind: "add", operator, intent };
 }
 
+function activateCommand(
+  graphId: string,
+  revision: number,
+  operator: AgentGraphOperator,
+  suffix = "follow-up",
+): Extract<AgentGraphScheduleCommand, { kind: "activate" }> {
+  return {
+    kind: "activate",
+    intent: {
+      graphId,
+      intentId: intentIdFor(graphId, `operation-${revision}-${suffix}`, 0),
+      operatorId: operator.operatorId,
+      operatorGeneration: operator.generation,
+      instruction: `Complete ${suffix} work`,
+      inputRefs: [],
+      createdAtRevision: revision,
+      requestedBy: SOURCE,
+    },
+  };
+}
+
 function revision(
   graphId: string,
   number: number,
@@ -236,6 +257,82 @@ test("Stop fences admission by Intent or Operator while finish only fences fresh
         ]),
       ),
     /unknown Graph target/u,
+  );
+});
+
+test("activate reuses an existing Operator generation and respects permanent stop fences", () => {
+  let state = createAgentGraphScheduleState(graph());
+  const added = addCommand(state.graph.graphId, 1);
+  state = apply(state, revision(state.graph.graphId, 1, "operation-add", [added]));
+  const followUp = activateCommand(state.graph.graphId, 2, added.operator);
+  state = apply(state, revision(state.graph.graphId, 2, "operation-follow-up", [followUp]));
+
+  assert.equal(state.operators.length, 1);
+  assert.equal(state.intents.length, 2);
+  assert.equal(state.intents[1]?.operatorId, added.operator.operatorId);
+
+  const unknown = activateCommand(state.graph.graphId, 3, {
+    ...added.operator,
+    operatorId: "unknown-operator",
+  });
+  assert.throws(
+    () => apply(state, revision(state.graph.graphId, 3, "operation-unknown", [unknown])),
+    /unknown Operator generation/u,
+  );
+
+  state = apply(
+    state,
+    revision(state.graph.graphId, 3, "operation-stop-intent", [
+      { kind: "stop", target: { kind: "intent", intentId: followUp.intent.intentId } },
+    ]),
+  );
+  const afterIntentStop = activateCommand(
+    state.graph.graphId,
+    4,
+    added.operator,
+    "after-intent-stop",
+  );
+  state = apply(
+    state,
+    revision(state.graph.graphId, 4, "operation-after-intent-stop", [afterIntentStop]),
+  );
+  assert.equal(state.intents.length, 3);
+
+  state = apply(
+    state,
+    revision(state.graph.graphId, 5, "operation-stop-operator", [
+      {
+        kind: "stop",
+        target: {
+          kind: "operator",
+          operatorId: added.operator.operatorId,
+          generation: added.operator.generation,
+        },
+      },
+    ]),
+  );
+  assert.throws(
+    () =>
+      apply(
+        state,
+        revision(state.graph.graphId, 6, "operation-after-operator-stop", [
+          activateCommand(state.graph.graphId, 6, added.operator, "blocked"),
+        ]),
+      ),
+    /stopped Operator generation/u,
+  );
+});
+
+test("finish rejects dead work admitted in the same schedule revision", () => {
+  const initial = createAgentGraphScheduleState(graph());
+  const added = addCommand(initial.graph.graphId, 1);
+  assert.throws(
+    () =>
+      apply(
+        initial,
+        revision(initial.graph.graphId, 1, "operation-add-finish", [added, { kind: "finish" }]),
+      ),
+    /finish cannot be combined with add or activate/u,
   );
 });
 

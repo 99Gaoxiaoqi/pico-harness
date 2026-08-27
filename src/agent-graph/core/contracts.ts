@@ -67,6 +67,12 @@ export interface AgentGraphAddCommand {
   readonly intent: AgentGraphActivationIntent;
 }
 
+/** Adds a follow-up activation to an already provisioned Operator generation. */
+export interface AgentGraphActivateCommand {
+  readonly kind: "activate";
+  readonly intent: AgentGraphActivationIntent;
+}
+
 export type AgentGraphStopTarget =
   | { readonly kind: "intent"; readonly intentId: string }
   | {
@@ -88,6 +94,7 @@ export interface AgentGraphFinishCommand {
 
 export type AgentGraphScheduleCommand =
   | AgentGraphAddCommand
+  | AgentGraphActivateCommand
   | AgentGraphStopCommand
   | AgentGraphFinishCommand;
 

@@ -128,6 +128,7 @@ export interface AgentGraphSupervisorToolPort {
   commitUpdate(input: CommitAgentGraphUpdateInput): Promise<CommitAgentGraphUpdateResult>;
   readProjection(input: ReadAgentGraphProjectionInput): Promise<AgentGraphSupervisorView>;
   registerYield(input: RegisterAgentGraphYieldInput): Promise<RegisterAgentGraphYieldResult>;
+  cancelYield(permitId: string, rootSessionId: string): Promise<void> | void;
 }
 
 export interface CreateAgentGraphSupervisorToolsOptions {
@@ -177,7 +178,12 @@ class UpdateAgentGraphTool extends AgentGraphSupervisorTool {
             minItems: 1,
             maxItems: AGENT_GRAPH_MAX_COMMANDS,
             items: {
-              oneOf: [addCommandSchema(), stopCommandSchema(), finishCommandSchema()],
+              oneOf: [
+                addCommandSchema(),
+                activateCommandSchema(),
+                stopCommandSchema(),
+                finishCommandSchema(),
+              ],
             },
           },
         },
@@ -273,20 +279,33 @@ class YieldAgentGraphTool extends AgentGraphSupervisorTool {
     parseEmptyInput(args, this.name());
     const root = this.rootContext();
     const toolCallId = requiredIdentity(execution?.toolCallId, "toolCallId");
-    const receipt = await this.options.port.registerYield({
-      graphId: root.graphId,
-      rootSessionId: root.rootSessionId,
-      rootTurnId: root.rootTurnId,
-      rootRunId: root.rootRunId,
-      toolCallId,
-    });
-    execution?.signal?.throwIfAborted();
-    requiredIdentity(receipt.permitId, "permitId");
-    if (receipt.replayed !== undefined && typeof receipt.replayed !== "boolean") {
-      throw new Error("yield_agent_graph 应用服务返回了非法 replayed。");
+    let receipt: RegisterAgentGraphYieldResult | undefined;
+    try {
+      receipt = await this.options.port.registerYield({
+        graphId: root.graphId,
+        rootSessionId: root.rootSessionId,
+        rootTurnId: root.rootTurnId,
+        rootRunId: root.rootRunId,
+        toolCallId,
+      });
+      execution?.signal?.throwIfAborted();
+      requiredIdentity(receipt.permitId, "permitId");
+      if (receipt.replayed !== undefined && typeof receipt.replayed !== "boolean") {
+        throw new Error("yield_agent_graph 应用服务返回了非法 replayed。");
+      }
+      validateProjection(receipt.snapshot, root);
+      return JSON.stringify(receipt);
+    } catch (error) {
+      if (receipt?.permitId) {
+        try {
+          await this.options.port.cancelYield(receipt.permitId, root.rootSessionId);
+        } catch {
+          // Preserve the tool/application error; consumed permits and their Wake
+          // are terminal facts and must never be rolled back.
+        }
+      }
+      throw error;
     }
-    validateProjection(receipt.snapshot, root);
-    return JSON.stringify(receipt);
   }
 }
 
@@ -340,6 +359,12 @@ function parseUpdateInput(
   ) {
     throw new Error("update_agent_graph 参数无效：finish 最多一条且必须是最后一条命令。");
   }
+  if (
+    finishIndexes.length === 1 &&
+    commands.some((command) => command.kind === "add" || command.kind === "activate")
+  ) {
+    throw new Error("update_agent_graph 参数无效：finish 不能与 add 或 activate 同批提交。");
+  }
   return {
     graphId: root.graphId,
     expectedRevision,
@@ -361,10 +386,13 @@ function parseCommand(
   }
   const kind = value["kind"];
   if (kind === "add") return parseAddCommand(value, index, graphId, createdAtRevision, source);
+  if (kind === "activate") {
+    return parseActivateCommand(value, index, graphId, createdAtRevision, source);
+  }
   if (kind === "stop") return parseStopCommand(value, index);
   if (kind === "finish") return parseFinishCommand(value, index);
   throw new Error(
-    `update_agent_graph 参数无效：commands[${index}].kind 必须是 add、stop 或 finish。`,
+    `update_agent_graph 参数无效：commands[${index}].kind 必须是 add、activate、stop 或 finish。`,
   );
 }
 
@@ -432,33 +460,85 @@ function parseAddCommand(
     profileSnapshot: profile,
     workspacePolicy: workspace,
   };
-  const rawIntent = objectField(value["intent"], `${path}.intent`);
+  const intent = parseActivationIntent(
+    value["intent"],
+    `${path}.intent`,
+    graphId,
+    operatorId,
+    generation,
+    createdAtRevision,
+    source,
+  );
+  return { kind: "add", operator, intent };
+}
+
+function parseActivateCommand(
+  value: Record<string, unknown>,
+  index: number,
+  graphId: string,
+  createdAtRevision: number,
+  source: AgentGraphOperationSource,
+): AgentGraphScheduleCommand {
+  const path = `commands[${index}]`;
+  assertKeys(value, ["kind", "operator", "intent"], ["kind", "operator", "intent"], path);
+  const rawOperator = objectField(value["operator"], `${path}.operator`);
+  assertKeys(
+    rawOperator,
+    ["operator_id", "generation"],
+    ["operator_id", "generation"],
+    `${path}.operator`,
+  );
+  const operatorId = requiredIdentity(rawOperator["operator_id"], `${path}.operator.operator_id`);
+  const generation = positiveInteger(rawOperator["generation"], `${path}.operator.generation`);
+  return {
+    kind: "activate",
+    intent: parseActivationIntent(
+      value["intent"],
+      `${path}.intent`,
+      graphId,
+      operatorId,
+      generation,
+      createdAtRevision,
+      source,
+    ),
+  };
+}
+
+function parseActivationIntent(
+  value: unknown,
+  path: string,
+  graphId: string,
+  operatorId: string,
+  generation: number,
+  createdAtRevision: number,
+  source: AgentGraphOperationSource,
+): AgentGraphActivationIntent {
+  const rawIntent = objectField(value, path);
   assertKeys(
     rawIntent,
     ["intent_id", "instruction", "input_record_ids"],
     ["intent_id", "instruction"],
-    `${path}.intent`,
+    path,
   );
   const inputRecordIds = identityArray(
     rawIntent["input_record_ids"] ?? [],
-    `${path}.intent.input_record_ids`,
+    `${path}.input_record_ids`,
     AGENT_GRAPH_MAX_INPUT_REFS,
   );
-  const intent: AgentGraphActivationIntent = {
+  return {
     graphId,
-    intentId: requiredIdentity(rawIntent["intent_id"], `${path}.intent.intent_id`),
+    intentId: requiredIdentity(rawIntent["intent_id"], `${path}.intent_id`),
     operatorId,
     operatorGeneration: generation,
     instruction: requiredText(
       rawIntent["instruction"],
-      `${path}.intent.instruction`,
+      `${path}.instruction`,
       AGENT_GRAPH_MAX_INSTRUCTION_BYTES,
     ),
     inputRefs: inputRecordIds.map((recordId) => ({ recordId })),
     createdAtRevision,
     requestedBy: source,
   };
-  return { kind: "add", operator, intent };
 }
 
 function parseWorkspace(
@@ -845,6 +925,44 @@ function addCommandSchema(): Record<string, unknown> {
       },
     },
     required: ["kind", "operator", "intent"],
+    additionalProperties: false,
+  };
+}
+
+function activateCommandSchema(): Record<string, unknown> {
+  return {
+    type: "object",
+    properties: {
+      kind: { type: "string", enum: ["activate"] },
+      operator: {
+        type: "object",
+        properties: {
+          operator_id: { type: "string" },
+          generation: { type: "integer", minimum: 1 },
+        },
+        required: ["operator_id", "generation"],
+        additionalProperties: false,
+      },
+      intent: activationIntentSchema(),
+    },
+    required: ["kind", "operator", "intent"],
+    additionalProperties: false,
+  };
+}
+
+function activationIntentSchema(): Record<string, unknown> {
+  return {
+    type: "object",
+    properties: {
+      intent_id: { type: "string" },
+      instruction: { type: "string" },
+      input_record_ids: {
+        type: "array",
+        maxItems: AGENT_GRAPH_MAX_INPUT_REFS,
+        items: { type: "string" },
+      },
+    },
+    required: ["intent_id", "instruction"],
     additionalProperties: false,
   };
 }

@@ -376,8 +376,6 @@ test("agent graph store atomically consumes durable yield interest when admittin
     assert.equal(admitted.wake.yieldPermitId, "yield-permit");
     assert.equal(admitted.interest.state, "consumed");
     assert.equal(store.listYieldInterests("yield-graph", "registered").length, 0);
-    assert.equal(store.enqueueSupervisorWakeForYield(wake).status, "enqueued");
-
     const cancel = store.registerYieldInterest({
       ...interest,
       permitId: "cancel-permit",
@@ -385,6 +383,11 @@ test("agent graph store atomically consumes durable yield interest when admittin
       rootRunId: "cancel-run",
       toolCallId: "cancel-tool",
     });
+    const replayedWake = store.enqueueSupervisorWakeForYield(wake);
+    assert.equal(replayedWake.status, "enqueued");
+    if (replayedWake.status !== "enqueued") throw new Error("expected replayed yield wake");
+    assert.equal(replayedWake.interest.permitId, "yield-permit");
+    assert.equal(store.getYieldInterest("cancel-permit")?.state, "registered");
     assert.equal(
       store.cancelYieldInterest({
         permitId: cancel.record.permitId,
@@ -541,6 +544,11 @@ test("schedule add atomically accepts only committed input RecordRefs from the s
     assert.deepEqual(
       store.listScheduleRevisions("input-graph").map((revision) => revision.operationId),
       ["add-input-own", "add-own-input"],
+    );
+    assert.equal(
+      (store.listScheduleRevisions("input-graph")[1]?.command as { schemaVersion?: number })
+        .schemaVersion,
+      2,
     );
     assert.deepEqual(store.listOperatorProvisions("input-graph"), before.provisions);
     assert.deepEqual(store.listActivationClaims("input-graph"), before.claims);
