@@ -27,6 +27,7 @@ import type {
 } from "../../src/storage/sqlite/agent-graph-store-types.js";
 import type { CommitAgentOutputInput } from "../../src/tools/agent-output-tool.js";
 import type { SessionManager } from "../../src/engine/session-manager.js";
+import type { AgentGraphResourceAuthorityPort } from "../../src/runtime/agent-graph-resource-authority.js";
 
 const CLAIM: AgentGraphActivationClaimRecord = {
   claimId: "claim-1",
@@ -311,6 +312,28 @@ test("agent_output commits one nonpartial Runtime source and creates one referen
   );
 });
 
+test("agent_output validates and retains every resource before committing a Runtime fact", async () => {
+  let attempts = 0;
+  const resourceAuthority: AgentGraphResourceAuthorityPort = {
+    async retainOutputResources() {
+      attempts++;
+      throw new Error("artifact digest mismatch");
+    },
+    listClaimResources: () => [],
+  };
+  const fixture = createFixture({} as SessionManager, resourceAuthority);
+
+  await assert.rejects(
+    fixture.adapter.commitAgentOutput(
+      agentOutputInput("result", { artifactRefs: ["pico://artifact/invalid"] }),
+    ),
+    /artifact digest mismatch/u,
+  );
+  assert.equal(attempts, 1);
+  assert.equal(fixture.outputLedger.commits.length, 0);
+  assert.equal(fixture.recordStore.records.size, 0);
+});
+
 test("handoff enforces UTF-8 safe 16KiB record and 48KiB total budgets with provenance", async () => {
   const fixture = createFixture();
   const records: AgentGraphRecordRefRecord[] = [];
@@ -380,7 +403,10 @@ test("handoff rejects a Runtime source with a forged Invocation provenance", asy
   );
 });
 
-function createFixture(sessionManager: SessionManager = {} as SessionManager) {
+function createFixture(
+  sessionManager: SessionManager = {} as SessionManager,
+  resourceAuthority?: AgentGraphResourceAuthorityPort,
+) {
   const runPort = new FakeRunPort();
   const outputLedger = new FakeOutputLedger();
   const recordStore = new FakeRecordStore();
@@ -393,6 +419,7 @@ function createFixture(sessionManager: SessionManager = {} as SessionManager) {
       runPort,
       outputLedger,
       recordStore,
+      ...(resourceAuthority ? { resourceAuthority } : {}),
     }),
   };
 }
@@ -558,7 +585,13 @@ function activationInput() {
   };
 }
 
-function agentOutputInput(output: string): CommitAgentOutputInput {
+function agentOutputInput(
+  output: string,
+  resources: {
+    readonly evidenceRefs?: readonly string[];
+    readonly artifactRefs?: readonly string[];
+  } = {},
+): CommitAgentOutputInput {
   const fingerprint = "sha256:output";
   const idempotencyKey = "agent-output:key";
   return {
@@ -584,8 +617,8 @@ function agentOutputInput(output: string): CommitAgentOutputInput {
       status: "success",
       output,
       outputBytes: Buffer.byteLength(output),
-      evidenceRefs: [],
-      artifactRefs: [],
+      evidenceRefs: resources.evidenceRefs ?? [],
+      artifactRefs: resources.artifactRefs ?? [],
       idempotencyKey,
       fingerprint,
     },

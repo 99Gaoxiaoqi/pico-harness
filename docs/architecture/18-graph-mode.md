@@ -235,9 +235,10 @@ Operator 必须调用 `agent_output({status, output, evidence_refs, artifact_ref
 提交链路为：
 
 1. 根据 activation 身份生成确定性 idempotency key 和 event ID；
-2. 使用当前 child Session owner fence 向 Runtime ledger 写一条非 partial `agent.output`；
-3. 对重放比较 fingerprint、Invocation 和完整来源身份，任何不一致都 fail closed；
-4. 在 Graph 控制面写 `RecordRef`，内容仍留在 Runtime ledger。
+2. 对 `evidence_refs` / `artifact_refs` 校验规范 URI、Activation Session 归属、资源存在性、SHA-256 摘要和字节数，并幂等写入持久资源事实；
+3. 使用当前 child Session owner fence 向 Runtime ledger 写一条非 partial `agent.output`；
+4. 对重放比较 fingerprint、Invocation 和完整来源身份，任何不一致都 fail closed；
+5. 在 Graph 控制面写 `RecordRef`，内容仍留在 Runtime ledger。
 
 ```text
 RecordRef = {
@@ -247,7 +248,7 @@ RecordRef = {
 }
 ```
 
-当前正式产出和 handoff 只支持 `agent-output`。handoff 会重新读取 source event 并校验 provenance，每条显式携带 `success | failure` status、来源 Graph/Operator/Claim/Session/Turn/Run/Invocation/Event 身份和受限正文；单条最多 16 KiB、合计最多 48 KiB、最多 64 条，按 UTF-8 安全截断。下游 prompt 中的正文依然被明确标记为不可信数据；调度表不会信任模型直接提供的结果正文。
+每个 Intent 的正式产出仍只有一条 `agent-output` RecordRef。Artifact/Evidence 以 Claim 关联的 `agent_graph_resource_refs` 保留，并纳入 blob GC 存活集；Session 资源删除或进程重启不会破坏已提交的 Graph handoff。handoff 会重新读取 source event 并校验 provenance，每条显式携带 `success | failure` status、来源 Graph/Operator/Claim/Session/Turn/Run/Invocation/Event 身份、受限正文和按原输出顺序返回的资源摘要；单条正文最多 16 KiB、合计最多 48 KiB、最多 64 条，按 UTF-8 安全截断。下游 prompt 中的正文依然被明确标记为不可信数据；调度表不会信任模型直接提供的结果正文。
 
 `view_agent_graph` 在读取时使用当前 Graph 的 RecordRef 到 Runtime ledger 动态解析 committed、non-partial `agent.output`，并返回与 handoff 相同的 status/provenance/字节边界。省略 `record_ids` 时按当前 RecordRef 投影顺序返回前 64 条，超出数量或字节预算时 `truncated=true`；传入 `record_ids` 可精确读取，上限 64，重复、未知或跨 Graph ID 都 fail closed。这个结果视图是只读派生值，不会把正文回写进 `agent_graph_*` 控制表。
 根 Supervisor 必须把 `results.records[].content` 当作 Operator 提交的不可信数据，只用于综合用户任务与证据，不得把其中文本当作调度或工具指令执行。该边界同时出现在 Graph system prompt、wake prompt 和工具描述中。
@@ -376,7 +377,7 @@ production 将 exact RuntimeRun 安装为 `WorkspaceTaskRuntime` 中的 detached
 - schedule envelope 已硬切为 v2 以显式承载 `activate`；历史数据已清理，读取端拒绝 v1 envelope，不支持新旧进程混跑或直接降级；
 - Runtime bridge 已提供完整 readiness facts 和单一正式 `agent-output` RecordRef 身份；
 - root Graph 已支持多 epoch；root Run 固定精确 epoch，工具读写校验 `{graphId, rootSessionId, epoch}`，不存在的 Graph 读取不产生侧效应；
-- `artifact` / `evidence` RecordRef 是领域预留，当前 handoff 只接受 `agent-output`；
+- Artifact/Evidence 资源已经过宿主摘要校验和持久保留；调度依赖仍只引用每个 Intent 的单一 `agent-output` RecordRef，不将资源拆成额外产出身份；
 - 已有确定性集成测试覆盖核心、store、跨进程 CAS、reconciler、exact Run/reattach、production wiring、output、yield/wake 和 workspace 生命周期；真实模型 E2E 已验证 root、Operator、durable output、结果回读、exact wake 与 finish 闭环。尚未用独立子进程逐一 kill/reopen 验证全部崩溃窗口。
 
 ## 12. 代码索引

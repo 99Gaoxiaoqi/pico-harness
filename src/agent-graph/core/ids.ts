@@ -75,6 +75,15 @@ export function agentOutputRecordIdFor(graphId: string, intentId: string): strin
   return deterministicId("agent-output-record", [graphId, intentId]);
 }
 
+export function graphResourceIdFor(
+  graphId: string,
+  claimId: string,
+  kind: "artifact" | "evidence",
+  sourceRef: string,
+): string {
+  return deterministicId("graph-resource", [graphId, claimId, kind, sourceRef]);
+}
+
 export function agentGraphRecordRefFingerprint(record: AgentGraphRecordRef): string {
   return deterministicFingerprint(record);
 }

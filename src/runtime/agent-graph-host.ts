@@ -27,7 +27,9 @@ import type {
   AgentOutputCommitPort,
   GraphOperatorActivationContext,
 } from "../tools/agent-output-tool.js";
+import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { AgentGraphRuntimeAdapter } from "./agent-graph-runtime-adapter.js";
+import { AgentGraphResourceAuthority } from "./agent-graph-resource-authority.js";
 import type { AgentGraphRunLaunchState } from "./agent-graph-runtime-adapter.js";
 import {
   SqliteAgentGraphExactRunPort,
@@ -216,6 +218,13 @@ export function createAgentGraphWorkspaceHost(
     runPort: exactRuns,
     outputLedger,
     recordStore: store,
+    resourceAuthority: new AgentGraphResourceAuthority({
+      storageRoot: options.storageRoot,
+      evidenceBaseDir: resolvePicoPaths(options.workDir, {
+        picoHome: options.sessionOptions?.picoHome,
+      }).workspace.evidence,
+      store,
+    }),
   });
   const rootWakePort = new AgentGraphRootWakeRuntimePort({
     exactRuns,

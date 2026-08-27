@@ -108,6 +108,15 @@ export interface AgentGraphSupervisorResult {
   readonly content: string;
   readonly bytes: number;
   readonly truncated: boolean;
+  readonly resources: readonly {
+    readonly resourceId: string;
+    readonly kind: "artifact" | "evidence";
+    readonly ref: string;
+    readonly digest: string;
+    readonly bytes: number;
+    readonly mediaType?: string;
+    readonly title?: string;
+  }[];
 }
 
 export interface AgentGraphSupervisorView extends AgentGraphSupervisorProjection {

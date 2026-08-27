@@ -617,6 +617,7 @@ class CompletingRuntimeAdapter implements AgentGraphRuntimeApplicationPort {
       content: `result:${record.recordId}`,
       bytes: Buffer.byteLength(`result:${record.recordId}`, "utf8"),
       truncated: false,
+      resources: [],
     }));
     return {
       records: resolved,
