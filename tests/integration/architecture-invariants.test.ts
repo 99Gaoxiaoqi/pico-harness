@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -70,20 +70,14 @@ test("压缩不改账本、只追加 checkpoint（读模型变化）", () => {
 // 提醒开发者删除/反转本测试。这是活体追踪——修复落地时由红测试强制显式处理，
 // 而不是靠人记。修复对应债务后：删除该测试，或按注释转为正向断言。
 
-test("D7 正向不变量：graph work 去重走 durable lease，records 已降为非权威活跃表", () => {
-  // 阶段 2 claim 推广已完成：dispatch 用 RuntimeStore.acquireLease 做执行主权去重
-  // （替代 records 扫描），settle 链 records.delete 使 records 降为非权威活跃表，
-  // orphan 恢复按 lease 活性（isWorkLeaseLive）判定。
+test("D7 正向不变量：DelegationManager 不再承担 graph 调度职责", () => {
+  // Graph v2 的去重、claim 与收口已归持久化调度器所有。DelegationManager
+  // 只管普通委派与 plan settle，不再接收 graph 身份、lease 或 settle 回调。
   const manager = readSource("src/tools/delegation-manager.ts");
-  // 正向：lease 回源路径与 orphan lease 判定已接入（协议实现点在 graph/work-lease）。
-  assert.match(manager, /acquireGraphWorkLease/, "DelegationManager 已接入 durable lease 去重");
-  assert.match(manager, /isWorkLeaseLive/, "orphan 恢复按 lease 活性判定");
-  // 负向：旧的内存负信号与 settleFinalized 标志已移除。
-  assert.doesNotMatch(
-    manager,
-    /\bliveDelegationIds\b/,
-    "liveDelegationIds 内存负信号已移除（orphan 改 lease 判定）",
-  );
+  assert.doesNotMatch(manager, /graphWorkId/, "DelegationManager 不得携带 graph work 身份");
+  assert.doesNotMatch(manager, /GraphWorkLease/, "DelegationManager 不得消费 graph lease");
+  assert.doesNotMatch(manager, /onGraphWorkSettled/, "DelegationManager 不得回调 graph settle 链");
+  assert.doesNotMatch(manager, /\bliveDelegationIds\b/, "liveDelegationIds 内存负信号已移除");
   assert.doesNotMatch(
     manager,
     /\bsettleFinalized\b/,
@@ -91,29 +85,12 @@ test("D7 正向不变量：graph work 去重走 durable lease，records 已降�
   );
 });
 
-test("D10 正向不变量：graph work lease 协议单一实现于 src/graph/work-lease.ts", () => {
-  // D10 "DelegationManager 职责错位"收口（2026-08-16）：lease 协议（TTL 常量/
-  // 资源键/acquire/heartbeat/release/活性判定）从 tools 层提取到 graph 层唯一
-  // 实现点，DelegationManager 只消费不定义。20 文档 §3.2 判定 settle 回调扇出为
-  // 语义级耦合（import 门禁抓不到），按 ADR 维持宿主侧 settle 协调器不引入——
-  // 本断言锚定协议位置这一可门禁化维度。
-  const workLease = readSource("src/graph/work-lease.ts");
+test("D10 正向不变量：旧 graph work lease 协议已删除", () => {
+  // Graph v2 由 SQLite Provision/Claim CAS 与 exact RuntimeRun admission 持有执行主权，
+  // 不再保留 v1 DelegationManager graph work lease 协议。
   const manager = readSource("src/tools/delegation-manager.ts");
-  // 正向：协议实现点在 graph 层。
-  assert.match(workLease, /GRAPH_WORK_LEASE_TTL_MS/, "TTL 常量单一实现于 graph/work-lease");
-  assert.match(workLease, /heartbeatGraphWorkLease/, "续租协议在 graph 层实现");
-  assert.match(workLease, /isGraphWorkLeaseLive/, "活性判定在 graph 层实现");
-  // 负向：tools 层不再定义协议常量/资源键（纯消费）。
-  assert.doesNotMatch(
-    manager,
-    /const GRAPH_WORK_LEASE_TTL_MS/,
-    "DelegationManager 不得再定义 lease TTL（协议位置=graph/work-lease）",
-  );
-  assert.doesNotMatch(
-    manager,
-    /function graphWorkLeaseKey/,
-    "DelegationManager 不得再定义 lease 资源键（协议位置=graph/work-lease）",
-  );
+  assert.equal(existsSync(join(repositoryRoot, "src/graph/work-lease.ts")), false);
+  assert.doesNotMatch(manager, /GRAPH_WORK_LEASE_TTL_MS|graphWorkLeaseKey|heartbeatGraphWorkLease/);
 });
 
 test("D9 正向不变量：连接决策在监督器与共享 client，外壳只渲染推送相位", () => {

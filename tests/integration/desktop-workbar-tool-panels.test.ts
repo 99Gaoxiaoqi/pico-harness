@@ -266,7 +266,7 @@ test("Workbar tool panels render real authority snapshots with accessible detail
       onUpdate: () => undefined,
     }),
   );
-  assert.match(tasks, /rev 12/u);
+  assert.match(tasks, /已同步 1 项/u);
   assert.match(tasks, /task rev 7/u);
   assert.match(tasks, /更新“接通面板”状态/u);
 

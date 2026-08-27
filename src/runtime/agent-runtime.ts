@@ -42,10 +42,16 @@ import { WorkspaceRoots, workspaceAccessesFromCall } from "../tools/workspace-ro
 import type { DefaultToolRegistryOptions } from "../tools/default-registry.js";
 import { FetchURLTool } from "../tools/web.js";
 import {
-  DelegationManager,
-  DelegateStatusTool,
-  aggregateDelegationStatus,
-} from "../tools/delegation-manager.js";
+  createAgentGraphSupervisorTools,
+  type AgentGraphRootToolContext,
+  type AgentGraphSupervisorToolPort,
+} from "../tools/agent-graph-tools.js";
+import {
+  createAgentOutputTool,
+  type AgentOutputCommitPort,
+  type GraphOperatorActivationContext,
+} from "../tools/agent-output-tool.js";
+import { DelegationManager, DelegateStatusTool } from "../tools/delegation-manager.js";
 import { createSubagentRegistryFactory } from "../tools/delegation-registry.js";
 import type { AgentProfile } from "../tools/agent-profile.js";
 import { loadAgentCatalog, type AgentExternalCatalogSource } from "../agents/catalog.js";
@@ -55,15 +61,6 @@ import {
   SpawnSubagentTool,
   type SubagentModelSelectionRequest,
 } from "../tools/subagent.js";
-import {
-  AddWorkTool,
-  CloseGraphTool,
-  ViewGraphTool,
-  type GraphToolContext,
-} from "../tools/graph-tools.js";
-import { normalizeDelegateTasks } from "../tools/delegation-contract.js";
-import { GRAPH_EVENT_KINDS, projectGraphEntries } from "../graph/graph-reducer.js";
-import { computeReadyWorks, missingInputIdsFor } from "../graph/graph-reconcile.js";
 import { CostTracker, type CostTrackerOptions } from "../observability/tracker.js";
 import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
 import { resolveModelRouteCapabilities } from "../provider/model-capabilities.js";
@@ -161,6 +158,7 @@ import {
   emitRuntimeLifecycleEvent,
   RuntimeRunExecutor,
   type PrestartedRuntimeRun,
+  type PrestartedRuntimeUserInput,
 } from "./runtime-run-executor.js";
 import {
   invalidateMemoryReviewRecoverySuccess,
@@ -313,6 +311,20 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   resumeExistingSession?: boolean;
   /** @internal 恢复 adapter 已在 canonical ledger 发布的唯一 RuntimeRun admission。 */
   prestartedRun?: PrestartedRuntimeRun;
+  /** @internal Graph exact Run 首次输入的确定性消息身份。 */
+  prestartedUserInput?: PrestartedRuntimeUserInput;
+  /** 宿主持有的 Graph 身份与最小工具端口；模型参数不能创建或修改该绑定。 */
+  agentGraph?:
+    | {
+        readonly kind: "root";
+        readonly getRootContext: () => AgentGraphRootToolContext | undefined;
+        readonly toolPort: AgentGraphSupervisorToolPort;
+      }
+    | {
+        readonly kind: "operator";
+        readonly getActivationContext: () => GraphOperatorActivationContext | undefined;
+        readonly outputPort: AgentOutputCommitPort;
+      };
   /** 仅用于后台执行的实时信任校验；生产默认读取用户级 WorkspaceTrustStore。 */
   backgroundTrustStore?: BackgroundWorkspaceTrustVerifier;
   /** daemon/Cron 注入的系统凭证库读取边界；前台 BYOK 不需要。 */
@@ -838,8 +850,11 @@ export async function executeAgentRuntime(
     PICO_HOME: picoHome,
   });
   const resumeExistingSession = dependencies.resumeExistingSession === true;
-  if (dependencies.prestartedRun && !resumeExistingSession) {
-    throw new Error("prestartedRun requires resumeExistingSession");
+  if (dependencies.prestartedRun && !resumeExistingSession && !dependencies.prestartedUserInput) {
+    throw new Error("new-turn prestartedRun requires prestartedUserInput");
+  }
+  if (dependencies.prestartedUserInput && (!dependencies.prestartedRun || resumeExistingSession)) {
+    throw new Error("prestartedUserInput requires a non-resume prestartedRun");
   }
   const prompt = resumeExistingSession ? options.prompt : normalizePrompt(options.prompt);
   const kind = options.provider ?? "openai";
@@ -1119,8 +1134,7 @@ export async function executeAgentRuntime(
       });
 
     // 阶段 3：装配 Provider、工具、Hook 与 AgentEngine 能力图。
-    // headless/folder 装配不注入 taskHostRuntime：提前建 RuntimeStore，同时作为
-    // graph work lease 源（注入 DelegationManager）与 usage ledger。
+    // headless/folder 装配不注入 taskHostRuntime：提前创建独立 usage ledger。
     if (dependencies.runtimeState === undefined && !ownedUsageStore) {
       try {
         ownedUsageStore = new SqliteRuntimeControlStore({
@@ -1159,7 +1173,6 @@ export async function executeAgentRuntime(
         ...(collaborationMode() !== "plan" && pluginSnapshot?.hookSources
           ? { hookExtensionSources: pluginSnapshot.hookSources }
           : {}),
-        ...(ownedUsageStore ? { runtimeStore: ownedUsageStore } : {}),
       }));
     if (ownsRuntimeState) sessionLeaseTransferred = true;
     cleanupRuntimeState = runtimeState;
@@ -1563,6 +1576,26 @@ export async function executeAgentRuntime(
       onToolGroupLoaded,
       sessionTaskAuthority,
     );
+    if (dependencies.agentGraph?.kind === "root") {
+      if (backgroundPolicy || orchestrationMode() !== "graph") {
+        throw new Error("Graph root tools require a foreground Graph Mode Runtime");
+      }
+      for (const tool of createAgentGraphSupervisorTools({
+        getRootContext: dependencies.agentGraph.getRootContext,
+        port: dependencies.agentGraph.toolPort,
+      })) {
+        registry.register(tool);
+      }
+      toolDisclosure.discloseTools(["update_agent_graph", "view_agent_graph", "yield_agent_graph"]);
+    } else if (dependencies.agentGraph?.kind === "operator") {
+      registry.register(
+        createAgentOutputTool({
+          getActivationContext: dependencies.agentGraph.getActivationContext,
+          port: dependencies.agentGraph.outputPort,
+        }),
+      );
+      toolDisclosure.discloseTools(["agent_output"]);
+    }
     if (!backgroundPolicy && hostKind === "desktop" && dependencies.browserAgent) {
       for (const tool of createBrowserAgentTools(dependencies.browserAgent)) {
         registry.register(tool);
@@ -1604,7 +1637,10 @@ export async function executeAgentRuntime(
         todoStore,
         isolatedHeadless: dependencies.isolatedHeadless,
         graphToolsAvailable:
-          !!session.runtimeEventStore && !backgroundPolicy && orchestrationMode() === "graph",
+          !!session.runtimeEventStore &&
+          !backgroundPolicy &&
+          orchestrationMode() === "graph" &&
+          dependencies.agentGraph?.kind === "root",
         skillLoader: skillLoaderFactory(workDir),
         ...(dependencies.isolatedHeadless ? {} : { picoHome }),
         ...(activeHookService
@@ -1747,47 +1783,6 @@ export async function executeAgentRuntime(
         : {}),
       skillLoaderFactory,
       ...(rebuildProvider ? { rebuildProvider } : {}),
-      ...(session.runtimeEventStore && !backgroundPolicy && orchestrationMode() === "graph"
-        ? {
-            graphReconcile: async () => {
-              try {
-                // graph.* 事件切片 + 全会话水位(票 04):折叠输入只含 graph 事件。
-                const slice = await session.runtimeEventStore!.readSessionEntriesOfKinds(
-                  session.id,
-                  GRAPH_EVENT_KINDS,
-                );
-                const projection = projectGraphEntries(
-                  runtimeState.graphContext.graphId,
-                  slice.entries,
-                  slice.headSequence,
-                );
-                if (projection.status !== "active") return { pending: 0, ready: 0 };
-                const pendingWorks = projection.works.filter(
-                  (work) => work.status === "requested" || work.status === "dispatched",
-                );
-                const ready = computeReadyWorks(projection).length;
-                // Surface deadlocked requested works whose input_ids reference
-                // records that will never be produced (wrong id, or a failed
-                // upstream). The continuation arbiter injects this into the
-                // [Graph continuation] message so the model sees the deadlock
-                // at stop-decision time, not only inside a view_graph call.
-                const stuck = pendingWorks
-                  .filter(
-                    (work) =>
-                      work.status === "requested" &&
-                      missingInputIdsFor(projection, work).length > 0,
-                  )
-                  .map((work) => ({
-                    workId: work.workId,
-                    missingInputIds: [...missingInputIdsFor(projection, work)],
-                  }));
-                return { pending: pendingWorks.length, ready, stuck };
-              } catch {
-                return { pending: 0, ready: 0 };
-              }
-            },
-          }
-        : {}),
     });
 
     if (backgroundPolicy) {
@@ -1875,100 +1870,6 @@ export async function executeAgentRuntime(
     }
     if (backgroundPolicy) pruneRegistryToBackgroundAllowlist(registry, backgroundPolicy);
     dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
-
-    // Graph Mode 工具：每个会话最多持有一个活跃 graph，graphId 由 sessionId 派生。
-    // add_work 声明意图并尝试派发；view_graph 只读投影；close_graph 收尾。
-    // 派发回调封装 DelegationManager.dispatch + engine.runSub，复用与 delegate_task
-    // 相同的子代理执行边界（沙箱、worktree、profile 全部由 registryFactory 提供）。
-    if (session.runtimeEventStore && !backgroundPolicy && orchestrationMode() === "graph") {
-      const graphStore = session.runtimeEventStore;
-      const resolveGraphContext = (): GraphToolContext => ({
-        store: graphStore,
-        sessionId: session.id,
-        graphId: runtimeState.graphContext.graphId,
-        invocationId: currentRuntimeRun()?.invocationId ?? "graph-mode",
-        runId: currentRuntimeRun()?.runId ?? "graph-mode",
-        turnId: "graph-mode",
-        writeGuard: session,
-      });
-      const graphDispatcher = async (input: {
-        readonly workId: string;
-        readonly instruction: string;
-        readonly mode: "explore" | "worker";
-      }): Promise<string | undefined> => {
-        const normalized = normalizeDelegateTasks({
-          goal: input.instruction,
-          mode: input.mode,
-          role: "leaf",
-        });
-        if (normalized.length === 0) return undefined;
-        const task = normalized[0]!;
-        const childRegistry = createSubagentRegistryFactory({
-          workDir,
-          runner: engine,
-          manager: delegationManager,
-          yoloSandbox: { config: picoConfig.sandbox },
-          ownerSessionId: session.id,
-          allowAsyncCompletion: !ownsRuntimeState,
-          skillLoaderFactory,
-          ...(activeHookService ? { hookService: activeHookService } : {}),
-          ...(subagentModelCatalog ? { modelCatalog: subagentModelCatalog } : {}),
-          ...(runtimeEnv ? { env: runtimeEnv } : {}),
-          ...(runtimeState.codeIntelligence
-            ? { codeIntelligence: runtimeState.codeIntelligence }
-            : {}),
-        })({ mode: task.mode, role: task.role, depth: 0, maxSpawnDepth: 0 });
-        const dispatch = delegationManager.dispatch(
-          async (signal) => {
-            // graph work 的 child 同样过 turn 域容量闸：此处直接调 engine.runSub
-            // （不经 delegate_task 工具路径），需自挂闸，与工具路径共享同一执行预算。
-            const permit = await delegationManager.childRunLimiter.acquire(signal);
-            try {
-              const subResult = await engine.runSub(task.goal, childRegistry, undefined, {
-                depth: 0,
-                maxSpawnDepth: 0,
-                role: task.role,
-                ...(signal ? { signal } : {}),
-              });
-              const results = [
-                {
-                  taskIndex: 0,
-                  status: subResult.status,
-                  ...(subResult.summary ? { summary: subResult.summary } : {}),
-                  ...(subResult.error !== undefined ? { error: subResult.error } : {}),
-                  ...(subResult.evidenceRefs.length > 0
-                    ? { evidenceRefs: [...subResult.evidenceRefs] }
-                    : {}),
-                  durationMs: 0,
-                },
-              ];
-              return {
-                results,
-                status: aggregateDelegationStatus(results),
-                totalDurationMs: 0,
-              };
-            } finally {
-              permit.release();
-            }
-          },
-          {
-            completionPolicy: "optional",
-            description: task.goal.slice(0, 120),
-            ownerSessionId: session.id,
-            graphWorkId: input.workId,
-          },
-        );
-        if (dispatch.status !== "dispatched" || !dispatch.delegationId) return undefined;
-        return dispatch.delegationId;
-      };
-      runtimeState.setGraphWorkDispatcher(graphDispatcher);
-      registry.register(new AddWorkTool(resolveGraphContext(), graphDispatcher));
-      registry.register(new ViewGraphTool(resolveGraphContext()));
-      registry.register(new CloseGraphTool(resolveGraphContext()));
-      toolDisclosure.discloseTools(["add_work", "view_graph", "close_graph"]);
-    } else {
-      runtimeState.setGraphWorkDispatcher(undefined);
-    }
 
     // MCP 服务器:加载配置 → 并行连接 → 自动注册工具到 registry。
     // per-server 失败隔离,一个 server 挂了不影响其他。
@@ -2088,6 +1989,9 @@ export async function executeAgentRuntime(
       prompt,
       resumeExistingSession,
       ...(dependencies.prestartedRun ? { prestartedRun: dependencies.prestartedRun } : {}),
+      ...(dependencies.prestartedUserInput
+        ? { prestartedUserInput: dependencies.prestartedUserInput }
+        : {}),
       traceEnabled,
       options: {
         ...(effectiveOptions.rewindPrompt !== undefined

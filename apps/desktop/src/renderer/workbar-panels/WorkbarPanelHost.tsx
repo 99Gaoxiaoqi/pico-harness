@@ -992,6 +992,10 @@ function modelStatusSummary(status: string | undefined): string {
 }
 
 function traceCategory(kind: string): NonNullable<InspectorTraceItem["category"]> {
+  if (kind.startsWith("run.")) return "run";
+  if (kind.startsWith("model.")) return "model";
+  if (kind.startsWith("tool.")) return "tool";
+  if (kind.startsWith("approval.")) return "approval";
   if (kind.startsWith("plan.")) return "plan";
   if (kind.startsWith("graph.")) return "graph";
   if (kind.startsWith("context.")) return "context";

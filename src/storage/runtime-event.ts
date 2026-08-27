@@ -13,6 +13,9 @@ export {
   runtimeEventHasModelMessage,
 } from "../engine/session-runtime-event.js";
 export type {
+  RuntimeAgentOutputEvent,
+  RuntimeAgentOutputPayload,
+  RuntimeAgentOutputStatus,
   RuntimeApprovalRequestedEvent,
   RuntimeApprovalSettledEvent,
   RuntimeCheckpointRecordedEvent,
@@ -76,6 +79,7 @@ export const RUNTIME_EVENT_KINDS = [
   "tool.started",
   "tool.group.loaded",
   "tool.result.recorded",
+  "agent.output",
   "approval.requested",
   "approval.settled",
   "model.call.started",
@@ -232,6 +236,9 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
       return;
     case "tool.result.recorded":
       assertToolResultRecordedEvent(value);
+      return;
+    case "agent.output":
+      assertAgentOutputEvent(value);
       return;
     case "approval.requested":
       assertString(value["data"]["approvalId"], "approval.requested.approvalId");
@@ -619,6 +626,195 @@ function assertToolResultRecordedEvent(value: Record<string, unknown>): void {
       "Runtime tool result projection truncated must be boolean",
     );
   }
+}
+
+const AGENT_OUTPUT_MAX_BYTES = 16 * 1024;
+const AGENT_OUTPUT_MAX_REFS = 64;
+const AGENT_OUTPUT_MAX_REF_BYTES = 2 * 1024;
+
+function assertAgentOutputEvent(value: Record<string, unknown>): void {
+  assertOnlyKeys(
+    value,
+    [
+      "schemaVersion",
+      "eventId",
+      "sessionId",
+      "invocationId",
+      "runId",
+      "turnId",
+      "at",
+      "partial",
+      "visibility",
+      "refs",
+      "kind",
+      "data",
+    ],
+    "agent.output",
+  );
+  if (value["partial"] !== false || value["visibility"] !== "internal") {
+    throw new RuntimeEventIntegrityError("Runtime agent.output must be a complete internal fact");
+  }
+  const refs = value["refs"];
+  if (!isRecord(refs)) {
+    throw new RuntimeEventIntegrityError("Runtime agent.output refs must be an object");
+  }
+  assertOnlyKeys(
+    refs,
+    ["stepId", "toolCallId", "parentRunId", "parentToolCallId", "providerCallId"],
+    "agent.output.refs",
+  );
+  assertString(refs["toolCallId"], "agent.output.refs.toolCallId");
+  for (const field of ["stepId", "parentRunId", "parentToolCallId", "providerCallId"] as const) {
+    if (refs[field] !== undefined) assertString(refs[field], `agent.output.refs.${field}`);
+  }
+
+  const data = value["data"];
+  if (!isRecord(data)) {
+    throw new RuntimeEventIntegrityError("Runtime agent.output data must be an object");
+  }
+  assertOnlyKeys(
+    data,
+    ["toolCallId", "idempotencyKey", "fingerprint", "payload"],
+    "agent.output.data",
+  );
+  assertString(data["toolCallId"], "agent.output.data.toolCallId");
+  if (data["toolCallId"] !== refs["toolCallId"]) {
+    throw new RuntimeEventIntegrityError("Runtime agent.output toolCallId identities do not match");
+  }
+  assertAgentOutputIdempotencyKey(data["idempotencyKey"], "agent.output.data.idempotencyKey");
+  assertPrefixedSha256(data["fingerprint"], "agent.output.data.fingerprint");
+
+  const payload = data["payload"];
+  if (!isRecord(payload)) {
+    throw new RuntimeEventIntegrityError("Runtime agent.output payload must be an object");
+  }
+  assertOnlyKeys(
+    payload,
+    [
+      "schemaVersion",
+      "graphId",
+      "operatorId",
+      "operatorGeneration",
+      "activationId",
+      "status",
+      "output",
+      "outputBytes",
+      "evidenceRefs",
+      "artifactRefs",
+      "idempotencyKey",
+      "fingerprint",
+    ],
+    "agent.output.data.payload",
+  );
+  assertEqual(
+    payload["schemaVersion"],
+    "pico.agent_output.v1",
+    "agent.output.data.payload.schemaVersion",
+  );
+  for (const field of ["graphId", "operatorId", "activationId"] as const) {
+    assertId(payload[field], `agent.output.data.payload.${field}`);
+  }
+  if (
+    !Number.isSafeInteger(payload["operatorGeneration"]) ||
+    (payload["operatorGeneration"] as number) < 1
+  ) {
+    throw new RuntimeEventIntegrityError("Runtime agent.output operatorGeneration is invalid");
+  }
+  if (payload["status"] !== "success" && payload["status"] !== "failure") {
+    throw new RuntimeEventIntegrityError("Runtime agent.output status is invalid");
+  }
+  if (
+    typeof payload["output"] !== "string" ||
+    payload["output"].trim() === "" ||
+    payload["output"] !== payload["output"].trim()
+  ) {
+    throw new RuntimeEventIntegrityError("Runtime agent.output output is invalid");
+  }
+  const outputBytes = Buffer.byteLength(payload["output"], "utf8");
+  if (
+    !Number.isSafeInteger(payload["outputBytes"]) ||
+    payload["outputBytes"] !== outputBytes ||
+    outputBytes > AGENT_OUTPUT_MAX_BYTES
+  ) {
+    throw new RuntimeEventIntegrityError("Runtime agent.output outputBytes is invalid");
+  }
+  const evidenceRefs = assertAgentOutputRefs(payload["evidenceRefs"], "evidenceRefs");
+  const artifactRefs = assertAgentOutputRefs(payload["artifactRefs"], "artifactRefs");
+  if (evidenceRefs.length + artifactRefs.length > AGENT_OUTPUT_MAX_REFS) {
+    throw new RuntimeEventIntegrityError("Runtime agent.output has too many references");
+  }
+  assertAgentOutputIdempotencyKey(
+    payload["idempotencyKey"],
+    "agent.output.data.payload.idempotencyKey",
+  );
+  assertPrefixedSha256(payload["fingerprint"], "agent.output.data.payload.fingerprint");
+  if (
+    payload["idempotencyKey"] !== data["idempotencyKey"] ||
+    payload["fingerprint"] !== data["fingerprint"]
+  ) {
+    throw new RuntimeEventIntegrityError(
+      "Runtime agent.output envelope and payload identities do not match",
+    );
+  }
+  const expectedFingerprint = `sha256:${createHash("sha256")
+    .update(
+      stableJson({
+        status: payload["status"],
+        output: payload["output"],
+        evidenceRefs,
+        artifactRefs,
+      }),
+    )
+    .digest("hex")}`;
+  if (payload["fingerprint"] !== expectedFingerprint) {
+    throw new RuntimeEventIntegrityError(
+      "Runtime agent.output payload does not match its fingerprint",
+    );
+  }
+}
+
+function assertAgentOutputRefs(value: unknown, field: string): readonly string[] {
+  if (!Array.isArray(value) || value.length > AGENT_OUTPUT_MAX_REFS) {
+    throw new RuntimeEventIntegrityError(`Runtime agent.output ${field} is invalid`);
+  }
+  for (const ref of value) {
+    if (
+      typeof ref !== "string" ||
+      ref.trim() === "" ||
+      ref !== ref.trim() ||
+      Buffer.byteLength(ref, "utf8") > AGENT_OUTPUT_MAX_REF_BYTES ||
+      /\p{Cc}/u.test(ref)
+    ) {
+      throw new RuntimeEventIntegrityError(`Runtime agent.output ${field} is invalid`);
+    }
+  }
+  if (new Set(value).size !== value.length) {
+    throw new RuntimeEventIntegrityError(`Runtime agent.output ${field} contains duplicates`);
+  }
+  return value;
+}
+
+function assertAgentOutputIdempotencyKey(value: unknown, field: string): void {
+  if (typeof value !== "string" || !/^agent-output:[a-f0-9]{64}$/u.test(value)) {
+    throw new RuntimeEventIntegrityError(`Runtime event ${field} is invalid`);
+  }
+}
+
+function assertPrefixedSha256(value: unknown, field: string): void {
+  if (typeof value !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(value)) {
+    throw new RuntimeEventIntegrityError(`Runtime event ${field} is invalid`);
+  }
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value).sort(([left], [right]) => left.localeCompare(right));
+    return `{${entries
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 /**

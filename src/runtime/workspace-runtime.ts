@@ -108,6 +108,7 @@ export interface WorkspaceCapabilities {
 
 interface WorkspaceRunRecord {
   snapshot: WorkspaceRunSnapshot;
+  executionEpoch: number;
   controller: AbortController;
   steers: string[];
   steerSubscribers: Set<(message: string) => void>;
@@ -200,14 +201,119 @@ export class WorkspaceTaskRuntime {
   }
 
   startRun(request: WorkspaceRunRequest, executor: WorkspaceRunExecutor): WorkspaceRunSnapshot {
+    return this.startRunWithId(this.generateRunId(), request, executor);
+  }
+
+  /** Trusted scheduler entry: binds the workspace launch to a preallocated RuntimeRun id. */
+  startExactRun(
+    runId: string,
+    request: WorkspaceRunRequest,
+    executor: WorkspaceRunExecutor,
+  ): WorkspaceRunSnapshot {
+    return this.installExactRun(runId, request, executor, false);
+  }
+
+  /**
+   * Trusted scheduler entry that may reinstall one failed/cancelled exact Run.
+   * Active and successful replays remain observation-only, so concurrent callers
+   * cannot install more than one executor for the same exact identity.
+   */
+  reattachExactRun(
+    runId: string,
+    request: WorkspaceRunRequest,
+    executor: WorkspaceRunExecutor,
+  ): WorkspaceRunSnapshot {
+    return this.installExactRun(runId, request, executor, true);
+  }
+
+  private installExactRun(
+    runId: string,
+    request: WorkspaceRunRequest,
+    executor: WorkspaceRunExecutor,
+    reattachTerminalFailure: boolean,
+  ): WorkspaceRunSnapshot {
+    const exactRunId = runId.trim();
+    if (!exactRunId || exactRunId !== runId || /\p{Cc}|\s/u.test(exactRunId)) {
+      throw new Error("Exact Run ID 无效");
+    }
+    const existing = this.runs.get(exactRunId);
+    if (existing) {
+      const description = request.description.trim();
+      if (
+        existing.snapshot.description !== description ||
+        existing.snapshot.sessionId !== request.sessionId
+      ) {
+        throw new Error(`Exact Run ID 已绑定到其他请求: ${exactRunId}`);
+      }
+      if (
+        reattachTerminalFailure &&
+        (existing.snapshot.status === "failed" || existing.snapshot.status === "cancelled")
+      ) {
+        return this.reattachRun(existing, executor);
+      }
+      return cloneRun(existing.snapshot);
+    }
+    return this.startRunWithId(exactRunId, request, executor, { allowConcurrent: true });
+  }
+
+  private reattachRun(
+    record: WorkspaceRunRecord,
+    executor: WorkspaceRunExecutor,
+  ): WorkspaceRunSnapshot {
+    this.assertOpen();
+    const previous = record.snapshot;
+    const previousExecution = record.promise;
+    const executionEpoch = record.executionEpoch + 1;
+    const { finishedAt: _finishedAt, error: _error, result: _result, ...stable } = previous;
+    record.snapshot = {
+      ...stable,
+      status: "running",
+      updatedAt: this.now(),
+      version: previous.version + 1,
+    };
+    record.controller = new AbortController();
+    record.executionEpoch = executionEpoch;
+    record.steers = [];
+    record.steerSubscribers.clear();
+    record.pauseRequested = false;
+    record.resumePause?.();
+    record.resumePause = undefined;
+    let admitted = false;
+    record.promise = previousExecution.then(
+      () => {
+        if (!admitted || record.executionEpoch !== executionEpoch) return;
+        return this.executeRun(record, executor, executionEpoch);
+      },
+      () => {
+        if (!admitted || record.executionEpoch !== executionEpoch) return;
+        return this.executeRun(record, executor, executionEpoch);
+      },
+    );
+    this.publish({
+      type: "run.started",
+      resourceVersion: record.snapshot.version,
+      run: cloneRun(record.snapshot),
+    });
+    admitted = true;
+    return cloneRun(record.snapshot);
+  }
+
+  private startRunWithId(
+    runId: string,
+    request: WorkspaceRunRequest,
+    executor: WorkspaceRunExecutor,
+    options: { allowConcurrent?: boolean } = {},
+  ): WorkspaceRunSnapshot {
     this.assertOpen();
     const description = request.description.trim();
     if (!description) throw new Error("Run 描述不能为空");
-    if (this.listRuns().some((run) => !isTerminalRunStatus(run.status))) {
+    if (
+      !options.allowConcurrent &&
+      this.listRuns().some((run) => !isTerminalRunStatus(run.status))
+    ) {
       throw new Error(`工作区 ${this.workspace} 已有活跃 Run，拒绝并发执行`);
     }
 
-    const runId = this.generateRunId();
     if (this.runs.has(runId)) throw new Error(`Run ID 已存在: ${runId}`);
     const startedAt = this.now();
     const record: WorkspaceRunRecord = {
@@ -221,6 +327,7 @@ export class WorkspaceTaskRuntime {
         updatedAt: startedAt,
         version: 1,
       },
+      executionEpoch: 1,
       controller: new AbortController(),
       steers: [],
       steerSubscribers: new Set(),
@@ -229,9 +336,10 @@ export class WorkspaceTaskRuntime {
     };
     this.runs.set(runId, record);
     let admitted = false;
+    const executionEpoch = record.executionEpoch;
     record.promise = Promise.resolve().then(() => {
-      if (!admitted) return;
-      return this.executeRun(record, executor);
+      if (!admitted || record.executionEpoch !== executionEpoch) return;
+      return this.executeRun(record, executor, executionEpoch);
     });
     try {
       this.publish({
@@ -457,24 +565,46 @@ export class WorkspaceTaskRuntime {
   private async executeRun(
     record: WorkspaceRunRecord,
     executor: WorkspaceRunExecutor,
+    executionEpoch: number,
   ): Promise<void> {
     try {
-      if (isTerminalRunStatus(record.snapshot.status)) return;
+      if (record.executionEpoch !== executionEpoch || isTerminalRunStatus(record.snapshot.status)) {
+        return;
+      }
+      const assertCurrentExecution = (): void => {
+        if (record.executionEpoch !== executionEpoch) {
+          throw new Error(`Run ${record.snapshot.runId} 的 executor 所有权已失效`);
+        }
+      };
       const result = await executor({
         run: cloneRun(record.snapshot),
         signal: record.controller.signal,
-        drainSteers: () => record.steers.splice(0),
+        drainSteers: () => {
+          assertCurrentExecution();
+          return record.steers.splice(0);
+        },
         onSteer: (subscriber) => {
+          assertCurrentExecution();
           record.steerSubscribers.add(subscriber);
           return () => record.steerSubscribers.delete(subscriber);
         },
-        waitAtSafeBoundary: () => this.waitAtSafeBoundary(record),
-        bindSession: (sessionId) => this.bindRunIdentifier(record, "sessionId", sessionId),
-        bindCheckpoint: (checkpointId) =>
-          this.bindRunIdentifier(record, "checkpointId", checkpointId),
+        waitAtSafeBoundary: () => {
+          assertCurrentExecution();
+          return this.waitAtSafeBoundary(record);
+        },
+        bindSession: (sessionId) => {
+          assertCurrentExecution();
+          this.bindRunIdentifier(record, "sessionId", sessionId);
+        },
+        bindCheckpoint: (checkpointId) => {
+          assertCurrentExecution();
+          this.bindRunIdentifier(record, "checkpointId", checkpointId);
+        },
       });
+      if (record.executionEpoch !== executionEpoch) return;
       this.finishRun(record, record.controller.signal.aborted ? "cancelled" : "succeeded", result);
     } catch (error) {
+      if (record.executionEpoch !== executionEpoch) return;
       this.finishRun(
         record,
         record.controller.signal.aborted ? "cancelled" : "failed",
@@ -482,9 +612,11 @@ export class WorkspaceTaskRuntime {
         errorMessage(error),
       );
     } finally {
-      record.steerSubscribers.clear();
-      record.resumePause?.();
-      record.resumePause = undefined;
+      if (record.executionEpoch === executionEpoch) {
+        record.steerSubscribers.clear();
+        record.resumePause?.();
+        record.resumePause = undefined;
+      }
     }
   }
 

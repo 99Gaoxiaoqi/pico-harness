@@ -1,9 +1,10 @@
-import { MakerDMG } from "@electron-forge/maker-dmg";
 import { MakerSquirrel } from "@electron-forge/maker-squirrel";
 import { MakerZIP } from "@electron-forge/maker-zip";
 import { VitePlugin } from "@electron-forge/plugin-vite";
 import type { ForgeConfig } from "@electron-forge/shared-types";
 import { join } from "node:path";
+
+import { MakerHdiutilDmg } from "./makers/hdiutil-dmg.js";
 
 const macSigningIdentity = process.env.PICO_MAC_SIGN_IDENTITY;
 const appleId = process.env.PICO_APPLE_ID;
@@ -40,10 +41,9 @@ const config = {
     new MakerZIP(updateBaseUrl ? { macUpdateManifestBaseUrl: `${updateBaseUrl}/darwin` } : {}, [
       "darwin",
     ]),
-    new MakerDMG(
+    new MakerHdiutilDmg(
       {
         name: "Pico",
-        overwrite: true,
       },
       ["darwin"],
     ),
