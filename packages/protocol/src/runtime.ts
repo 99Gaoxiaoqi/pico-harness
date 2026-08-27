@@ -1096,6 +1096,16 @@ export type RuntimeMethodMap = {
       readonly nextAfterSequence?: number;
     };
   };
+  readonly "session.graph.query": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly action: "list" | "get" | "timeline";
+      readonly graphId?: string;
+      readonly cursor?: string;
+      readonly limit?: number;
+    };
+    readonly result: JsonObject;
+  };
   readonly "git.review.snapshot": {
     readonly params: WorkspaceParams & { readonly source?: RuntimeGitReviewSource };
     readonly result: {
@@ -2018,6 +2028,7 @@ export const RUNTIME_METHODS = [
   "session.artifacts.query",
   "session.artifacts.command",
   "session.trace.query",
+  "session.graph.query",
   "git.review.snapshot",
   "git.review.diff",
   "browser.agent.lease",
@@ -2155,6 +2166,7 @@ export const DESKTOP_RUNTIME_METHODS = [
   "session.artifacts.query",
   "session.artifacts.command",
   "session.trace.query",
+  "session.graph.query",
   "git.review.snapshot",
   "git.review.diff",
   "browser.agent.lease",
@@ -3310,6 +3322,18 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
     {
       throughSequence: nonNegativeIntegerParam,
       afterSequence: nonNegativeIntegerParam,
+      limit: positiveIntegerParam,
+    },
+  ),
+  "session.graph.query": exactParamShape(
+    {
+      workspacePath: stringParam,
+      sessionId: stringParam,
+      action: oneOfParam(["list", "get", "timeline"] as const),
+    },
+    {
+      graphId: boundedNonEmptyStringParam(512),
+      cursor: boundedNonEmptyStringParam(2_048),
       limit: positiveIntegerParam,
     },
   ),
@@ -4861,6 +4885,7 @@ const RUNTIME_RESULT_VALIDATORS = {
     { throughSequence: resultNonNegativeInteger, events: resultArray(resultJsonObject) },
     { nextAfterSequence: resultNonNegativeInteger },
   ),
+  "session.graph.query": resultJsonObject,
   "git.review.snapshot": exactResultShape({
     revision: resultNonEmptyString,
     branch: resultString,

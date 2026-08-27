@@ -36,6 +36,34 @@ test("workbar data methods reject unknown and oversized parameters", () => {
       }),
     RuntimeProtocolError,
   );
+  assert.deepEqual(
+    parseStrictRuntimeParams("session.graph.query", {
+      workspacePath: "/workspace",
+      sessionId: "session",
+      action: "timeline",
+      graphId: "graph-1",
+      limit: 100,
+    }),
+    {
+      workspacePath: "/workspace",
+      sessionId: "session",
+      action: "timeline",
+      graphId: "graph-1",
+      limit: 100,
+    },
+  );
+  assert.ok(DESKTOP_RUNTIME_METHODS.includes("session.graph.query"));
+  assert.throws(
+    () =>
+      parseStrictRuntimeParams("session.graph.query", {
+        workspacePath: "/workspace",
+        sessionId: "session",
+        action: "timeline",
+        graphId: "graph-1",
+        mutation: true,
+      }),
+    RuntimeProtocolError,
+  );
 });
 
 test("review, terminal and side chat contracts are renderer allowlisted and strictly decoded", () => {

@@ -37,7 +37,7 @@ const shortcut = (
     ...modifiers,
   });
 
-test("Workbar v2 starts collapsed and exposes the seven tools in the intended order", () => {
+test("Workbar v2 starts collapsed and exposes the eight tools in the intended order", () => {
   const state = createWorkbarState();
 
   assert.deepEqual(state.docks.right.tabs, []);
@@ -46,11 +46,11 @@ test("Workbar v2 starts collapsed and exposes the seven tools in the intended or
   assert.equal(state.docks.bottom.collapsed, true);
   assert.deepEqual(
     WORKBAR_TOOL_REGISTRY.map((tool) => tool.kind),
-    ["side-chat", "review", "terminal", "browser", "files", "tasks", "inspector"],
+    ["side-chat", "review", "terminal", "browser", "files", "tasks", "inspector", "graph"],
   );
 });
 
-test("Workbar Registry resolves the Maka-compatible global shortcuts", () => {
+test("Workbar Registry resolves the configured global shortcuts", () => {
   assert.equal(shortcut("g", { ctrlKey: true, shiftKey: true }), "review");
   assert.equal(shortcut("`", { ctrlKey: true }), "terminal");
   assert.equal(shortcut("t", { metaKey: true }), "browser");

@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   FilesWorkbarPanel,
+  GraphWorkbarPanel,
   InspectorWorkbarPanel,
   ReviewWorkbarPanel,
   TasksWorkbarPanel,
@@ -331,6 +332,48 @@ test("Workbar tool panels render real authority snapshots with accessible detail
   assert.match(terminal, /role="tabpanel"/u);
   assert.match(terminal, /role="log"/u);
   assert.match(terminal, /\$ npm test/u);
+
+  const graph = renderToStaticMarkup(
+    React.createElement(GraphWorkbarPanel, {
+      graphs: [
+        {
+          graphId: "graph-1",
+          epoch: 1,
+          phase: "open",
+          headRevision: 2,
+          createdAt: 1,
+          counts: { operators: 1, intents: 1, claims: 1, records: 1, resources: 2, wakes: 1 },
+        },
+      ],
+      selectedGraphId: "graph-1",
+      detail: {
+        summary: {
+          graphId: "graph-1",
+          epoch: 1,
+          phase: "open",
+          headRevision: 2,
+          createdAt: 1,
+          counts: { operators: 1, intents: 1, claims: 1, records: 1, resources: 2, wakes: 1 },
+        },
+        operators: [{ operatorId: "operator-1", role: "Researcher", profileId: "explore" }],
+        intents: [
+          {
+            intentId: "intent-1",
+            operatorId: "operator-1",
+            instruction: "核验实现",
+          },
+        ],
+        claims: [{ claimId: "claim-1", intentId: "intent-1", state: "executing" }],
+      },
+      timeline: [{ id: "event-1", at: 1, kind: "record.committed", status: "agent_output" }],
+      loading: false,
+      onRefresh: () => undefined,
+      onSelectGraph: () => undefined,
+    }),
+  );
+  assert.match(graph, /aria-label="Graph 周期"/u);
+  assert.match(graph, /Researcher/u);
+  assert.match(graph, /正式产出/u);
 
   const fallbackTerminal = renderToStaticMarkup(
     React.createElement(TerminalWorkbarPanel, {

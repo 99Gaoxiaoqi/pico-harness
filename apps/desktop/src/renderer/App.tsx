@@ -1919,7 +1919,8 @@ function ConversationPage() {
         tab.kind === "review" ||
         tab.kind === "tasks" ||
         tab.kind === "files" ||
-        tab.kind === "terminal"
+        tab.kind === "terminal" ||
+        tab.kind === "graph"
       ) {
         return (
           <WorkbarPanelHost
