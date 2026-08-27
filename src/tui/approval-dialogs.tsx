@@ -88,14 +88,12 @@ export function createApprovalDialogRequest(
         {...notice}
         onAction={(action, feedback) => {
           if (isPlanApprovalAction(action)) {
-            void resolvePlanApprovalAction(notice, action, feedback, deps);
-            return;
+            return resolvePlanApprovalAction(notice, action, feedback, deps);
           }
           if (deps.resolvePlain) {
-            resolveApprovalActionVia(deps.resolvePlain, action, notice.taskId, deps);
-            return;
+            return resolveApprovalActionVia(deps.resolvePlain, action, notice.taskId, deps);
           }
-          resolveApprovalAction({ action, taskId: notice.taskId }, deps);
+          return resolveApprovalAction({ action, taskId: notice.taskId }, deps);
         }}
       />
     ),
@@ -107,9 +105,10 @@ export async function resolvePlanApprovalAction(
   action: PlanApprovalAction,
   feedback: string | undefined,
   deps: ApprovalDialogDeps,
-): Promise<void> {
+): Promise<boolean> {
   const metadata = notice as ApprovalNotice & {
     readonly planId?: string;
+    readonly planControlMode?: "review" | "interrupted";
     readonly expectedRevision?: number;
     readonly expectedSessionSequence?: number;
   };
@@ -117,7 +116,7 @@ export async function resolvePlanApprovalAction(
     deps.reporter.pushSystemMessage(
       "Plan review is unavailable until the Runtime PlanControl port is connected.",
     );
-    return;
+    return false;
   }
   try {
     await deps.planControl.respond({
@@ -126,14 +125,20 @@ export async function resolvePlanApprovalAction(
       action: mapPlanActionToProtocol(action),
       expectedRevision: metadata.expectedRevision ?? 0,
       expectedSessionSequence: metadata.expectedSessionSequence ?? 0,
-      operationId: planReviewOperationId(metadata, action, feedback),
+      operationId: planReviewOperationId(
+        { ...metadata, sessionId: deps.sessionId },
+        action,
+        feedback,
+      ),
       ...(feedback ? { feedback } : {}),
     });
     deps.closeDialog?.(approvalDialogId(notice.taskId));
+    return true;
   } catch (error) {
     deps.reporter.pushSystemMessage(
       `Plan changed while reviewing; refresh the proposal and retry. ${error instanceof Error ? error.message : String(error)}`,
     );
+    return false;
   }
 }
 
@@ -161,7 +166,9 @@ function mapPlanActionToProtocol(
 
 export function planReviewOperationId(
   metadata: {
+    readonly sessionId?: string;
     readonly planId?: string;
+    readonly planControlMode?: "review" | "interrupted";
     readonly expectedRevision?: number;
     readonly expectedSessionSequence?: number;
   },
@@ -171,9 +178,9 @@ export function planReviewOperationId(
   const digest = createHash("sha256")
     .update(
       JSON.stringify({
+        sessionId: metadata.sessionId ?? "unknown",
         planId: metadata.planId ?? "unknown",
         revision: metadata.expectedRevision ?? 0,
-        sessionSequence: metadata.expectedSessionSequence ?? 0,
         action,
         feedback: feedback?.trim() ?? "",
       }),

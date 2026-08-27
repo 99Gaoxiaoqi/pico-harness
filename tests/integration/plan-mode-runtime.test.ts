@@ -78,6 +78,24 @@ test("submit_plan persists a proposal and marks a machine-readable handoff", asy
   assert.equal(output.revision, 1);
   assert.equal(handoff.hasPending(), true);
   assert.equal((await coordinator.project()).pendingProposal?.planId, output.planId);
+  const repeated = JSON.parse(
+    await new SubmitPlanTool(
+      () => coordinator,
+      new PlanHandoffController(),
+      "session-1",
+      () => "run-repeat",
+    ).execute(
+      JSON.stringify({
+        title: " Ship plan mode ",
+        overview: "Keep planning read-only",
+        steps: [{ id: "step-1", title: "Implement", description: "Implement the approved change" }],
+        risks: ["stale approval"],
+        operationId: "submit-same-content",
+      }),
+    ),
+  ) as { revision: number };
+  assert.equal(repeated.revision, 1, "same normalized proposal must keep the stable revision");
+  assert.equal((await coordinator.project()).proposals.length, 1);
   await coordinator.requestRevision({
     operationId: "request-revision",
     expectedSessionSequence: 1,
@@ -103,6 +121,85 @@ test("submit_plan persists a proposal and marks a machine-readable handoff", asy
   ) as { revision: number };
   assert.equal(revised.revision, 2);
   assert.equal((await coordinator.project()).revisionRequest, undefined);
+});
+
+test("cancel and replan race commits exactly one interrupted Plan terminal", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-plan-terminal-race-"));
+  const workDir = join(root, "work");
+  await mkdir(workDir);
+  const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "state") });
+  t.after(async () => {
+    store.close();
+    await rmRetry(root);
+  });
+  await store.initializeSession({ sessionId: "session-race", workDir });
+  const coordinator = new PlanCoordinator(store, {
+    sessionId: "session-race",
+    invocationId: "race",
+    runId: "race",
+    turnId: "race",
+  });
+  const proposed = await coordinator.propose({
+    operationId: "race-propose",
+    expectedSessionSequence: 0,
+    proposal: {
+      planId: "plan-race",
+      title: "Race",
+      steps: [{ id: "step-1", title: "Run", description: "Run once" }],
+    },
+  });
+  const settings = {
+    provider: "openai" as const,
+    model: "test",
+    modelRouteId: "test/test",
+    collaborationMode: "plan" as const,
+    permissionMode: "default" as const,
+    orchestrationMode: "default" as const,
+    thinkingEffort: "medium",
+    thinkingEffortExplicit: false,
+    additionalDirectories: [],
+  };
+  const approved = await coordinator.approve({
+    operationId: "race-approve",
+    expectedSessionSequence: proposed.sessionSequence,
+    planId: "plan-race",
+    expectedRevision: 1,
+    reviewedBy: "user",
+    settings,
+  });
+  const executing = await coordinator.startExecution({
+    operationId: "race-start",
+    expectedSessionSequence: approved.sessionSequence,
+    planId: "plan-race",
+    revision: 1,
+  });
+  const interrupted = await coordinator.interrupt({
+    operationId: "race-interrupt",
+    expectedSessionSequence: executing.sessionSequence,
+    planId: "plan-race",
+    reason: "pause",
+  });
+
+  const outcomes = await Promise.allSettled([
+    coordinator.cancel({
+      operationId: "race-cancel",
+      expectedSessionSequence: interrupted.sessionSequence,
+      planId: "plan-race",
+    }),
+    coordinator.replan({
+      operationId: "race-replan",
+      expectedSessionSequence: interrupted.sessionSequence,
+      planId: "plan-race",
+      settings,
+    }),
+  ]);
+  assert.equal(outcomes.filter(({ status }) => status === "fulfilled").length, 1);
+  assert.equal(outcomes.filter(({ status }) => status === "rejected").length, 1);
+  assert.equal((await coordinator.project()).execution?.status, "cancelled");
+  const terminalEvents = (await store.readSession("session-race")).filter(
+    ({ kind }) => kind === "plan.execution.cancelled" || kind === "plan.execution.replanned",
+  );
+  assert.equal(terminalEvents.length, 1);
 });
 
 test("plan tool projection and registry safety are the same deny-by-default boundary", async () => {

@@ -1003,6 +1003,81 @@ export function createProductionRuntimeServices(
       return host.runCronJobNow(workspacePath, jobId);
     },
   });
+  const reconcilePlanControl = async (workspacePath: string, sessionId: string): Promise<void> => {
+    for (const intent of await service.listPlanReviewRunIntents(workspacePath, sessionId)) {
+      const review = intent.input.execution?.planReview;
+      if (!review) continue;
+      let projection = await agentRuntime.readPlanProjection({
+        sessionId,
+        dir: workspacePath,
+        picoHome,
+        env,
+      });
+      if (review.action === "continue_editing") {
+        const matchingRevisionRequest =
+          projection.revisionRequest?.planId === review.planId &&
+          projection.revisionRequest.expectedRevision === review.expectedRevision &&
+          projection.revisionRequest.operationId === review.operationId;
+        if (!matchingRevisionRequest) {
+          if (
+            projection.pendingProposal?.planId !== review.planId ||
+            projection.pendingProposal.revision !== review.expectedRevision
+          ) {
+            continue;
+          }
+          projection = (
+            await agentRuntime.requestPlanRevision({
+              sessionId,
+              dir: workspacePath,
+              picoHome,
+              env,
+              planId: review.planId,
+              expectedRevision: review.expectedRevision,
+              expectedSessionSequence: projection.sessionSequence,
+              operationId: review.operationId,
+              feedback: review.feedback ?? "请继续修改计划。",
+            })
+          ).projection;
+        }
+      } else if (review.action === "execute") {
+        const pendingMatches =
+          projection.pendingProposal?.planId === review.planId &&
+          projection.pendingProposal.revision === review.expectedRevision;
+        const committedMatches =
+          projection.latestProposal?.planId === review.planId &&
+          projection.latestProposal.revision === review.expectedRevision &&
+          projection.latestProposal.status === "approved" &&
+          (!projection.execution || projection.execution.planId === review.planId);
+        if (!pendingMatches && !committedMatches) continue;
+      } else {
+        if (
+          projection.execution?.planId !== review.planId ||
+          projection.execution.revision !== review.expectedRevision ||
+          projection.execution.status !== "interrupted"
+        ) {
+          continue;
+        }
+      }
+      const reconciledIntent = {
+        ...intent,
+        input: {
+          ...intent.input,
+          execution: {
+            ...intent.input.execution,
+            planReview: { ...review, expectedSessionSequence: projection.sessionSequence },
+          },
+        },
+      };
+      await service.startReservedPlanReviewRun(reconciledIntent);
+      publishDesktopPlanProjection(
+        service,
+        workspacePath,
+        projection,
+        review.action === "continue_editing" ? "continue_editing" : "executing",
+        nextDesktopResourceVersion,
+      );
+    }
+  };
   const desktopService: DesktopRuntimeService = new DesktopRuntimeService({
     runtimeService: service,
     registrationStore,
@@ -1017,52 +1092,19 @@ export function createProductionRuntimeServices(
     ownsPluginRuntimeSnapshotRegistry,
     onTranscriptAdvanced: (workspacePath, sessionId) =>
       sessionSubscriptions?.publishTranscriptAdvanced(workspacePath, sessionId),
+    reconcilePlanControl,
     planControl: {
       respond: async (input) => {
         const workspacePath = await canonicalizeWorkspacePath(input.workspacePath);
         if (input.action === "execute" || input.action === "continue_editing") {
-          const projection =
-            input.action === "continue_editing"
-              ? (
-                  await agentRuntime.requestPlanRevision({
-                    sessionId: input.sessionId,
-                    dir: workspacePath,
-                    picoHome,
-                    env,
-                    planId: input.planId,
-                    expectedRevision: input.expectedRevision,
-                    expectedSessionSequence: input.expectedSessionSequence,
-                    operationId: input.operationId,
-                    feedback: input.feedback ?? "请继续修改计划。",
-                  })
-                ).projection
-              : await readDesktopPlanProjection(
-                  workspacePath,
-                  input.sessionId,
-                  picoHome,
-                  input.operationId,
-                );
-          if (input.action === "execute") {
-            await service.executeIdempotentDaemonCommand(
-              workspacePath,
-              {
-                commandType: "plan.review.claim",
-                idempotencyKey: input.operationId,
-                request: {
-                  planId: input.planId,
-                  expectedRevision: input.expectedRevision,
-                  expectedSessionSequence: input.expectedSessionSequence,
-                  operationId: input.operationId,
-                  action: input.action,
-                },
-              },
-              () => {
-                assertPendingPlanReview(projection, input);
-                return { result: { accepted: true, operationId: input.operationId } };
-              },
-            );
-          }
-          const run = await service.startForegroundRun({
+          const before = await readDesktopPlanProjection(
+            workspacePath,
+            input.sessionId,
+            picoHome,
+            input.operationId,
+          );
+          assertPendingPlanReview(before, input);
+          const runInput = {
             workspacePath,
             sessionId: input.sessionId,
             prompt:
@@ -1075,13 +1117,42 @@ export function createProductionRuntimeServices(
                 action: input.action,
                 planId: input.planId,
                 expectedRevision: input.expectedRevision,
-                expectedSessionSequence: input.expectedSessionSequence,
+                expectedSessionSequence: before.sessionSequence,
                 operationId: input.operationId,
                 ...(input.feedback ? { feedback: input.feedback } : {}),
               },
             },
-            idempotencyKey: `plan-review-run:${input.operationId}`,
-          });
+            idempotencyKey: input.operationId,
+            operationId: input.operationId,
+            planId: input.planId,
+            revision: input.expectedRevision,
+            action: input.action,
+          } as const;
+          const intent = await service.reservePlanReviewRun(runInput);
+          const projection =
+            input.action === "continue_editing"
+              ? (
+                  await agentRuntime.requestPlanRevision({
+                    sessionId: input.sessionId,
+                    dir: workspacePath,
+                    picoHome,
+                    env,
+                    planId: input.planId,
+                    expectedRevision: input.expectedRevision,
+                    expectedSessionSequence: before.sessionSequence,
+                    operationId: input.operationId,
+                    feedback: input.feedback ?? "请继续修改计划。",
+                  })
+                ).projection
+              : before;
+          const run = await service.startReservedPlanReviewRun({ input: runInput, ...intent });
+          publishDesktopPlanProjection(
+            service,
+            workspacePath,
+            projection,
+            input.action === "execute" ? "executing" : "continue_editing",
+            nextDesktopResourceVersion,
+          );
           return { accepted: true, projection, run: jsonObject(run) };
         }
         if (input.action === "resume_execution" || input.action === "replan_execution") {
@@ -1091,25 +1162,8 @@ export function createProductionRuntimeServices(
             picoHome,
             input.operationId,
           );
-          await service.executeIdempotentDaemonCommand(
-            workspacePath,
-            {
-              commandType: "plan.interrupted.claim",
-              idempotencyKey: input.operationId,
-              request: {
-                planId: input.planId,
-                expectedRevision: input.expectedRevision,
-                expectedSessionSequence: input.expectedSessionSequence,
-                action: input.action,
-                ...(input.feedback ? { feedback: input.feedback } : {}),
-              },
-            },
-            () => {
-              assertInterruptedPlanControl(projection, input);
-              return { result: { accepted: true, operationId: input.operationId } };
-            },
-          );
-          const run = await service.startForegroundRun({
+          assertInterruptedPlanControl(projection, input);
+          const runInput = {
             workspacePath,
             sessionId: input.sessionId,
             prompt:
@@ -1120,23 +1174,43 @@ export function createProductionRuntimeServices(
                 action: input.action,
                 planId: input.planId,
                 expectedRevision: input.expectedRevision,
-                expectedSessionSequence: input.expectedSessionSequence,
+                expectedSessionSequence: projection.sessionSequence,
                 operationId: input.operationId,
                 ...(input.feedback ? { feedback: input.feedback } : {}),
               },
             },
-            idempotencyKey: `plan-interrupted-run:${input.operationId}`,
-          });
+            idempotencyKey: input.operationId,
+            operationId: input.operationId,
+            planId: input.planId,
+            revision: input.expectedRevision,
+            action: input.action,
+          } as const;
+          const intent = await service.reservePlanReviewRun(runInput);
+          const run = await service.startReservedPlanReviewRun({ input: runInput, ...intent });
+          publishDesktopPlanProjection(
+            service,
+            workspacePath,
+            projection,
+            "executing",
+            nextDesktopResourceVersion,
+          );
           return { accepted: true, projection, run: jsonObject(run) };
         }
         if (input.action === "cancel_execution") {
+          const before = await readDesktopPlanProjection(
+            workspacePath,
+            input.sessionId,
+            picoHome,
+            input.operationId,
+          );
+          assertInterruptedPlanControl(before, input);
           const projection = await agentRuntime.cancelInterruptedPlan({
             sessionId: input.sessionId,
             dir: workspacePath,
             picoHome,
             env,
             planId: input.planId,
-            expectedSessionSequence: input.expectedSessionSequence,
+            expectedSessionSequence: before.sessionSequence,
             operationId: input.operationId,
             ...(input.feedback ? { reason: input.feedback } : {}),
           });
@@ -1160,15 +1234,18 @@ export function createProductionRuntimeServices(
           }
           const settings = (await lease.session.readHydrationSnapshot()).runtime.settings;
           if (!settings) throw new Error("Plan rejection requires persisted Session settings");
-          const projection = await new PlanCoordinator(lease.session.runtimeEventStore, {
+          const coordinator = new PlanCoordinator(lease.session.runtimeEventStore, {
             sessionId: input.sessionId,
             invocationId: `plan-review:${input.operationId}`,
             runId: `plan-review:${input.operationId}`,
             turnId: `plan-review:${input.operationId}`,
             writeGuard: lease.session,
-          }).rejectAndExit({
+          });
+          const before = await coordinator.project();
+          assertPendingPlanReview(before, input);
+          const projection = await coordinator.rejectAndExit({
             operationId: input.operationId,
-            expectedSessionSequence: input.expectedSessionSequence,
+            expectedSessionSequence: before.sessionSequence,
             planId: input.planId,
             expectedRevision: input.expectedRevision,
             reviewedBy: "user",
@@ -1319,6 +1396,19 @@ export function createProductionRuntimeServices(
       },
     },
   });
+  void registrationStore
+    .list()
+    .then(async (workspaces) => {
+      for (const workspacePath of workspaces) {
+        const sessionIds = new Set(
+          (await service.listPlanReviewRunIntents(workspacePath)).map(
+            (intent) => intent.input.sessionId,
+          ),
+        );
+        for (const sessionId of sessionIds) await reconcilePlanControl(workspacePath, sessionId);
+      }
+    })
+    .catch((error) => logger.warn({ error }, "PlanControl startup reconciliation failed"));
   return {
     service,
     desktopService,
@@ -1779,12 +1869,11 @@ function assertPendingPlanReview(
   },
 ): void {
   const pending = projection.pendingProposal;
-  if (
-    !pending ||
-    pending.planId !== input.planId ||
-    pending.revision !== input.expectedRevision ||
-    projection.sessionSequence !== input.expectedSessionSequence
-  ) {
+  // The proposal identity is planId + revision. The session sequence also advances
+  // for transcript/run events emitted after submit_plan, so equality here made the
+  // first review click stale even though no Plan fact changed. PlanCoordinator still
+  // applies the full watermark CAS and rejects any later plan.* mutation.
+  if (!pending || pending.planId !== input.planId || pending.revision !== input.expectedRevision) {
     throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "计划已更新，请刷新审批卡后重试");
   }
 }
@@ -1802,8 +1891,7 @@ function assertInterruptedPlanControl(
     !execution ||
     execution.status !== "interrupted" ||
     execution.planId !== input.planId ||
-    execution.revision !== input.expectedRevision ||
-    projection.sessionSequence !== input.expectedSessionSequence
+    execution.revision !== input.expectedRevision
   ) {
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.CONFLICT,

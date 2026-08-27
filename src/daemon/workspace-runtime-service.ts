@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { logger } from "../observability/logger.js";
 import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
@@ -92,6 +93,24 @@ export interface StartDaemonRunInput {
   readonly idempotencyKey?: string;
 }
 
+export interface PlanReviewRunIntentInput extends StartDaemonRunInput {
+  readonly sessionId: string;
+  readonly idempotencyKey: string;
+  readonly operationId: string;
+  readonly planId: string;
+  readonly revision: number;
+  readonly action: DaemonRunExecution["planReview"] extends infer Review
+    ? Review extends { readonly action: infer Action }
+      ? Action
+      : never
+    : never;
+}
+
+export interface DurablePlanReviewRunIntent {
+  readonly input: PlanReviewRunIntentInput;
+  readonly runId: string;
+}
+
 export interface WorkspaceRuntimeServiceOptions {
   execute: DaemonRunExecutor;
   env?: Readonly<Record<string, string | undefined>>;
@@ -120,6 +139,81 @@ const MAX_REPLAY_EVENT_LIMIT = 9_999;
 const MAX_REPLAY_QUERY_LIMIT = 10_000;
 const REPLAY_RESPONSE_METADATA_RESERVE_BYTES = 64 * 1024;
 const MAX_REPLAY_EVENTS_BYTES = MAX_RUNTIME_FRAME_BYTES - REPLAY_RESPONSE_METADATA_RESERVE_BYTES;
+const INTERRUPTED_DAEMON_RUN_ERROR = "daemon 重启前 Run 未进入终态，当前 executor 无法安全恢复";
+
+function planReviewIntentRequest(input: PlanReviewRunIntentInput): Record<string, unknown> {
+  return {
+    workspacePath: input.workspacePath,
+    sessionId: input.sessionId,
+    prompt: input.prompt,
+    operationId: input.operationId,
+    planId: input.planId,
+    revision: input.revision,
+    action: input.action,
+    idempotencyKey: input.idempotencyKey,
+    ...(input.execution ? { execution: input.execution } : {}),
+  };
+}
+
+function parsePlanReviewIntent(value: string): PlanReviewRunIntentInput | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+  if (!isJsonObject(parsed)) return undefined;
+  const action = parsed["action"];
+  const execution = parsed["execution"];
+  const review = isJsonObject(execution) ? execution["planReview"] : undefined;
+  if (
+    typeof parsed["workspacePath"] !== "string" ||
+    typeof parsed["sessionId"] !== "string" ||
+    typeof parsed["prompt"] !== "string" ||
+    typeof parsed["operationId"] !== "string" ||
+    typeof parsed["planId"] !== "string" ||
+    typeof parsed["revision"] !== "number" ||
+    typeof parsed["idempotencyKey"] !== "string" ||
+    (action !== "execute" &&
+      action !== "continue_editing" &&
+      action !== "resume_execution" &&
+      action !== "replan_execution") ||
+    !Number.isSafeInteger(parsed["revision"]) ||
+    parsed["revision"] <= 0 ||
+    !isJsonObject(execution) ||
+    !isJsonObject(review) ||
+    review["action"] !== action ||
+    review["planId"] !== parsed["planId"] ||
+    review["expectedRevision"] !== parsed["revision"] ||
+    review["operationId"] !== parsed["operationId"] ||
+    typeof review["expectedSessionSequence"] !== "number" ||
+    !Number.isSafeInteger(review["expectedSessionSequence"]) ||
+    (review["feedback"] !== undefined && typeof review["feedback"] !== "string")
+  ) {
+    return undefined;
+  }
+  return {
+    workspacePath: parsed["workspacePath"],
+    sessionId: parsed["sessionId"],
+    prompt: parsed["prompt"],
+    operationId: parsed["operationId"],
+    planId: parsed["planId"],
+    revision: parsed["revision"],
+    action,
+    idempotencyKey: parsed["idempotencyKey"],
+    execution: {
+      resumeExistingSession: execution["resumeExistingSession"] === true,
+      planReview: {
+        action,
+        planId: parsed["planId"],
+        expectedRevision: parsed["revision"],
+        expectedSessionSequence: review["expectedSessionSequence"],
+        operationId: parsed["operationId"],
+        ...(typeof review["feedback"] === "string" ? { feedback: review["feedback"] } : {}),
+      },
+    },
+  };
+}
 
 /**
  * Concrete daemon-facing owner for workspace Runs. It has no TUI dependency and is
@@ -422,6 +516,65 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
       if (durable) return runPayload(workspaceRunSnapshot(durable));
     }
     return outcome.result;
+  }
+
+  async reservePlanReviewRun(
+    input: PlanReviewRunIntentInput,
+  ): Promise<{ readonly runId: string; readonly replayed: boolean }> {
+    const outcome = await this.executeIdempotentDaemonCommand(
+      input.workspacePath,
+      {
+        commandType: "plan.review.start",
+        idempotencyKey: input.idempotencyKey,
+        request: planReviewIntentRequest(input),
+      },
+      () => {
+        const runId = `run_plan_${randomUUID()}`;
+        return { result: { accepted: true, runId }, resourceId: runId };
+      },
+    );
+    const runId = outcome.resourceId;
+    if (!runId) throw new Error("Plan review intent did not reserve a RuntimeRun id");
+    return { runId, replayed: outcome.replayed };
+  }
+
+  async startReservedPlanReviewRun(intent: DurablePlanReviewRunIntent): Promise<JsonValue> {
+    const runtime = await this.getRuntime(intent.input.workspacePath);
+    const request = {
+      description: intent.input.prompt,
+      sessionId: intent.input.sessionId,
+    };
+    const execute = (context: WorkspaceRunContext) =>
+      this.options.execute({
+        workspacePath: runtime.workspace,
+        workspaceRuntime: runtime,
+        prompt: intent.input.prompt,
+        sessionId: intent.input.sessionId,
+        ...(intent.input.execution ? { execution: intent.input.execution } : {}),
+        context,
+      });
+    const existing = runtime.getRun(intent.runId);
+    const run = existing
+      ? existing.status === "failed" && existing.error === INTERRUPTED_DAEMON_RUN_ERROR
+        ? runtime.reattachExactRun(intent.runId, request, execute)
+        : existing
+      : runtime.startExactRun(intent.runId, request, execute);
+    return runPayload(run);
+  }
+
+  async listPlanReviewRunIntents(
+    workspacePath: string,
+    sessionId?: string,
+  ): Promise<readonly DurablePlanReviewRunIntent[]> {
+    const canonical = await canonicalizeWorkspacePath(workspacePath);
+    return this.eventStore(canonical)
+      .listDaemonCommands("plan.review.start")
+      .flatMap((command) => {
+        if (command.status !== "completed" || !command.resourceId) return [];
+        const parsed = parsePlanReviewIntent(command.requestJson);
+        if (!parsed || (sessionId !== undefined && parsed.sessionId !== sessionId)) return [];
+        return [{ input: parsed, runId: command.resourceId }];
+      });
   }
 
   async replayEvents(cursor: RuntimeNotificationCursor): Promise<RuntimeNotificationPage> {
@@ -854,10 +1007,7 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
       ...(this.options.now ? { now: this.options.now } : {}),
     });
     try {
-      created.recoverInterruptedDaemonRuns(
-        workspacePath,
-        "daemon 重启前 Run 未进入终态，当前 executor 无法安全恢复",
-      );
+      created.recoverInterruptedDaemonRuns(workspacePath, INTERRUPTED_DAEMON_RUN_ERROR);
     } catch (error) {
       created.close();
       throw error;

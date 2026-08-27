@@ -122,6 +122,10 @@ test("中断计划卡片提供继续、取消与重新规划入口", () => {
     resolveApprovalPanelKey("", { return: true }, undefined, 2, false, true, true),
     "replan-execution",
   );
+  assert.equal(
+    resolveApprovalPanelKey("", { escape: true }, undefined, 0, false, true, true),
+    "cancel-execution",
+  );
 });
 
 test("运行中为紧随消息的 spinner 预留一行 transcript 空间", () => {

@@ -377,6 +377,8 @@ interface FakeClientHarness {
   setTranscriptItems(items: unknown[]): void;
   setTranscriptPages(pages: readonly Record<string, unknown>[]): void;
   failNextSubscription(message: string): void;
+  setPlanControl(control: Record<string, unknown> | undefined): void;
+  disconnect(): void;
 }
 
 function createFakeClient(): FakeClientHarness {
@@ -385,6 +387,8 @@ function createFakeClient(): FakeClientHarness {
   let transcriptItems: unknown[] = [];
   let transcriptPages: Record<string, unknown>[] = [];
   let nextSubscriptionError: Error | undefined;
+  let planControl: Record<string, unknown> | undefined;
+  let disconnectListener: (() => void) | undefined;
   const session = {
     sessionId: "s1",
     workspacePath: "C:\\ws",
@@ -409,7 +413,10 @@ function createFakeClient(): FakeClientHarness {
     }));
   const client = {
     connect: async () => undefined,
-    subscribeSessionFrames: () => ({ dispose: () => undefined }),
+    subscribeSessionFrames: (_listener: unknown, onDisconnect?: () => void) => {
+      disconnectListener = onDisconnect;
+      return { dispose: () => (disconnectListener = undefined) };
+    },
     request: async (method: string, params: Record<string, unknown>) => {
       requests.push({ method, params });
       if (method === "session.send") {
@@ -433,6 +440,7 @@ function createFakeClient(): FakeClientHarness {
           durableTail: records(items, transcriptPages.length + 1),
           activeOverlay: [],
           queuedInputs: [],
+          ...(planControl ? { planControl } : {}),
           ...(transcriptPages.length > 0
             ? {
                 olderCursor: {
@@ -511,6 +519,10 @@ function createFakeClient(): FakeClientHarness {
     failNextSubscription: (message) => {
       nextSubscriptionError = new Error(message);
     },
+    setPlanControl: (control) => {
+      planControl = control;
+    },
+    disconnect: () => disconnectListener?.(),
   };
 }
 
@@ -543,6 +555,89 @@ test("client session runtime: hydrates every fixed-watermark transcript page", a
   assert.deepEqual(
     reporter.getProjection().entries.map(({ entry }) => entry.kind),
     ["user", "assistant"],
+  );
+  runtime.dispose();
+});
+
+test("client session runtime: durable PlanControl snapshot owns restart and reconnect cards", async () => {
+  const harness = createFakeClient();
+  const reporter = new TuiReporter();
+  const approvals: ApprovalNotice[] = [];
+  const resolved: string[] = [];
+  const projection = (revision: number, sessionSequence: number) => ({
+    sessionId: "s1",
+    sessionSequence,
+    proposals: [],
+    pendingProposal: {
+      planId: "plan-1",
+      revision,
+      title: `Plan ${revision}`,
+      steps: [],
+      status: "pending",
+      proposedAt: "2026-08-27T00:00:00.000Z",
+    },
+  });
+  harness.setPlanControl({
+    version: 1,
+    availability: "ready",
+    state: "pending_review",
+    projection: projection(1, 7),
+  });
+  const runtime = new ClientSessionRuntime({
+    client: harness.client,
+    workspacePath: "C:\\ws",
+    sessionId: "s1",
+    reporter,
+    onApproval: (notice) => approvals.push(notice),
+    onApprovalResolved: (id) => resolved.push(id),
+  });
+  await runtime.start();
+  assert.equal(approvals.at(-1)?.taskId, "plan-1");
+
+  harness.setPlanControl({
+    version: 1,
+    availability: "ready",
+    state: "terminal",
+    projection: { ...projection(1, 9), pendingProposal: undefined },
+  });
+  harness.disconnect();
+  assert.equal(resolved.at(-1), "plan-1", "disconnect immediately removes executable control");
+  const planRequestsBeforeDisconnectClick = harness.requests.filter(
+    (request) => request.method === "plan.respond",
+  ).length;
+  await assert.rejects(
+    runtime.createPlanControl().respond({
+      sessionId: "s1",
+      planId: "plan-1",
+      action: "execute",
+      expectedRevision: 1,
+      expectedSessionSequence: 7,
+      operationId: "disconnected-click",
+    }),
+    /disconnected/u,
+  );
+  assert.equal(
+    harness.requests.filter((request) => request.method === "plan.respond").length,
+    planRequestsBeforeDisconnectClick,
+    "a disconnected card must emit zero Plan RPCs",
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  harness.emit(
+    notification(
+      "approval.requested",
+      { sessionId: "s1" },
+      {
+        approvalId: "plan-1",
+        runId: "old-run",
+        request: { kind: "plan", planId: "plan-1", expectedRevision: 1 },
+      },
+    ),
+  );
+  assert.equal(
+    approvals.length,
+    1,
+    "terminal snapshot must dominate replayed historical approval.requested",
   );
   runtime.dispose();
 });
@@ -749,6 +844,7 @@ test("client session runtime: approvals map to approval.respond and dialog callb
   const runtime = new ClientSessionRuntime({
     client: harness.client,
     workspacePath: "C:\\ws",
+    sessionId: "s1",
     reporter,
     onApproval: (notice) => {
       approvals.push(notice);
@@ -830,21 +926,26 @@ test("client session runtime: approvals map to approval.respond and dialog callb
   harness.emit(notification("approval.resolved", {}, { approvalId: "ap_1", decision: "deny" }));
   assert.deepEqual(resolved, ["ap_1"], "对端解析应回调清理对话框");
 
-  // plan 类审批：wire 元数据映射 + plan.respond 适配器参数形状（Phase 3 首批）。
+  // Plan 控制只从 durable projection 生成；历史 approval.requested 不再是恢复事实源。
   harness.emit(
     notification(
-      "approval.requested",
-      {},
+      "plan.updated",
+      { sessionId: "s1" },
       {
-        approvalId: "ap_plan",
-        runId: "run_1",
-        request: {
-          kind: "plan",
-          toolName: "exit_plan_mode",
-          title: "计划待审",
-          planId: "plan_42",
-          expectedRevision: 3,
-          expectedSessionSequence: 7,
+        sessionId: "s1",
+        operation: "proposed",
+        projection: {
+          sessionId: "s1",
+          sessionSequence: 7,
+          proposals: [],
+          pendingProposal: {
+            planId: "plan_42",
+            revision: 3,
+            title: "计划待审",
+            steps: [],
+            status: "pending",
+            proposedAt: "2026-08-27T00:00:00.000Z",
+          },
         },
       },
     ),
@@ -854,8 +955,8 @@ test("client session runtime: approvals map to approval.respond and dialog callb
     expectedRevision?: number;
     expectedSessionSequence?: number;
   };
-  assert.equal(planNotice.taskId, "ap_plan");
-  assert.equal(planNotice.toolName, "exit_plan_mode");
+  assert.equal(planNotice.taskId, "plan_42");
+  assert.equal(planNotice.toolName, "submit_plan");
   assert.equal(planNotice.planId, "plan_42");
   assert.equal(planNotice.expectedRevision, 3);
   assert.equal(planNotice.expectedSessionSequence, 7);

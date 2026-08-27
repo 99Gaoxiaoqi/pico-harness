@@ -11,6 +11,8 @@ import {
   type RuntimeConversationItem,
   type RuntimeCollaborationMode,
   type RuntimePermissionMode,
+  type RuntimePlanControlSnapshot,
+  type RuntimePlanProjection,
   type RuntimeActiveOverlayEntry,
   type RuntimeSessionSubscriptionFrame,
   type RuntimeTranscriptCursor,
@@ -43,8 +45,8 @@ export interface ClientPromptRequest {
  *
  * 组合 LocalRuntimeClient（kernel 模式，connectOrSpawn 拉起/连上常驻 daemon）+
  * DaemonEventReporter（工作区通知→TuiReporter）。发送走 session.send；Session
- * transcript 与 live delta 统一由 Dedicated Session Channel 驱动共享 Replica。审批经
- * approval.requested 事件 + approval.respond / plan.respond RPC。
+ * transcript 与 live delta 统一由 Dedicated Session Channel 驱动共享 Replica。普通审批经
+ * approval.requested + approval.respond；Plan 控制只经 durable projection + plan.respond。
  *
  * v1 边界：斜杠命令本地拦截提示（Phase 3 RPC 化）；session.send 为非幂等
  * P1-2 类写——传输级失败不自动重发（idempotencyKey 供手动重试）。
@@ -120,6 +122,67 @@ export interface RuntimeTranscriptPagingState {
   readonly revision?: string;
   readonly nextCursor?: RuntimeTranscriptCursor;
   readonly nextBefore?: string;
+}
+
+export function planApprovalNoticeFromProjection(
+  projection: RuntimePlanProjection,
+): ApprovalNotice | undefined {
+  const pending = projection.pendingProposal;
+  if (pending) {
+    return {
+      taskId: pending.planId,
+      toolName: "submit_plan",
+      args: JSON.stringify(pending),
+      providerCallId: "",
+      message: pending.title || "计划等待审批",
+      planId: pending.planId,
+      planControlMode: "review",
+      expectedRevision: pending.revision,
+      expectedSessionSequence: projection.sessionSequence,
+    } as ApprovalNotice;
+  }
+  const execution = projection.execution;
+  if (execution?.status === "interrupted") {
+    return {
+      taskId: `interrupted:${execution.planId}`,
+      toolName: "interrupted_plan_execution",
+      args: JSON.stringify(execution),
+      providerCallId: "",
+      message: execution.reason || "计划执行已中断，请选择下一步。",
+      planId: execution.planId,
+      planControlMode: "interrupted",
+      expectedRevision: execution.revision,
+      expectedSessionSequence: projection.sessionSequence,
+    } as ApprovalNotice;
+  }
+  return undefined;
+}
+
+function planControlSnapshotFromProjection(
+  projection: RuntimePlanProjection,
+  operation: RuntimeNotificationMap["plan.updated"]["operation"],
+): RuntimePlanControlSnapshot {
+  const execution = projection.execution;
+  const state: RuntimePlanControlSnapshot["state"] =
+    execution?.status === "interrupted"
+      ? "interrupted"
+      : execution?.status === "active"
+        ? "committed_executing"
+        : execution?.status === "completed" || execution?.status === "cancelled"
+          ? "terminal"
+          : projection.pendingProposal
+            ? operation === "executing" || operation === "continue_editing"
+              ? "admitted"
+              : "pending_review"
+            : projection.revisionRequest
+              ? operation === "continue_editing"
+                ? "admitted"
+                : "revision"
+              : projection.latestProposal?.status === "approved" ||
+                  projection.latestProposal?.status === "rejected"
+                ? "terminal"
+                : "none";
+  return { version: 1, availability: "ready", state, projection };
 }
 
 interface LegacyTranscriptOraclePage {
@@ -261,6 +324,10 @@ export class ClientSessionRuntime {
   private hydrateRetryAttempt = 0;
   private hydrateRetryTimer: NodeJS.Timeout | undefined;
   private disposed = false;
+  private planControlConnected = false;
+  private currentPlanControlId: string | undefined;
+  private planProjectionSequence = -1;
+  private surfacedRevisionRequestId: string | undefined;
   private pendingModelRouteId: string | undefined;
   private settingsOverrideApplied = false;
   private settingsOverrideInFlight = false;
@@ -304,9 +371,11 @@ export class ClientSessionRuntime {
     this.sessionFrameSubscription = this.client.subscribeSessionFrames(
       (frame) => this.acceptSessionFrame(frame),
       () => {
+        this.suspendPlanControl();
         if (this.sessionId) void this.hydrateSerial();
       },
     );
+    this.planControlConnected = true;
     await this.resolvePreSessionDefaults();
     await this.resolveModelOverride();
     if (this.sessionId) {
@@ -453,22 +522,34 @@ export class ClientSessionRuntime {
   /** plan 类审批控制（approval-dialogs 的 PlanApprovalControl → plan.respond RPC）。 */
   createPlanControl(): PlanApprovalControl {
     return {
-      respond: async (input) =>
-        this.client.request("plan.respond", {
-          workspacePath: this.workspacePath,
-          sessionId: input.sessionId,
-          planId: input.planId,
-          action: input.action,
-          expectedRevision: input.expectedRevision,
-          expectedSessionSequence: input.expectedSessionSequence,
-          operationId: input.operationId,
-          ...(input.feedback !== undefined ? { feedback: input.feedback } : {}),
-        }),
+      respond: async (input) => {
+        if (!this.planControlConnected) {
+          throw new Error("Runtime PlanControl port is disconnected");
+        }
+        try {
+          const result = await this.client.request("plan.respond", {
+            workspacePath: this.workspacePath,
+            sessionId: input.sessionId,
+            planId: input.planId,
+            action: input.action,
+            expectedRevision: input.expectedRevision,
+            expectedSessionSequence: input.expectedSessionSequence,
+            operationId: input.operationId,
+            ...(input.feedback !== undefined ? { feedback: input.feedback } : {}),
+          });
+          this.dismissPlanControl();
+          return result;
+        } catch (error) {
+          if (this.sessionId === input.sessionId) void this.hydrateSerial();
+          throw error;
+        }
+      },
     };
   }
 
   dispose(): void {
     this.disposed = true;
+    this.suspendPlanControl();
     this.clearHydrateRetry();
     this.closeReplicaSubscription();
     this.sessionFrameSubscription?.dispose();
@@ -515,6 +596,13 @@ export class ClientSessionRuntime {
     if (notification.topic === "session.settingsUpdated") {
       void this.refreshSettingsSnapshot();
     }
+    if (notification.topic === "plan.updated") {
+      const payload = notification.payload as RuntimeNotificationMap["plan.updated"];
+      this.reconcilePlanControl(
+        planControlSnapshotFromProjection(payload.projection, payload.operation),
+      );
+      return;
+    }
     this.eventReporter.handleNotification(notification);
   }
 
@@ -530,6 +618,9 @@ export class ClientSessionRuntime {
     await this.closeReplicaSubscriptionAsync();
     this.sessionId = sessionId;
     this.replica = undefined;
+    this.planProjectionSequence = -1;
+    this.surfacedRevisionRequestId = undefined;
+    this.dismissPlanControl();
     this.eventReporter.clearTransientState();
     if (sessionId) {
       // 与 reload 对账共用串行化（对抗评审 P2：直连 hydrate 会与在途 reload
@@ -682,6 +773,8 @@ export class ClientSessionRuntime {
         `Session continuity open failed (${replica.view.recoveryReason ?? "unknown"})`,
       );
     }
+    this.planControlConnected = true;
+    this.reconcilePlanControl(opened.planControl);
     this.renderReplica();
 
     // TUI 现有视图需要完整历史；旧页固定在 open 的 watermark，
@@ -909,6 +1002,9 @@ export class ClientSessionRuntime {
     // renderer 同源：planId 不回退 approvalId 的兜底语义一处收口）。
     const approval = parseApprovalRequestedPayload(payload);
     if (!approval) return;
+    // Plan controls are rebuilt only from the durable Plan projection. Replaying an
+    // old approval.requested event would otherwise resurrect a stale executable card.
+    if (approval.kind === "plan") return;
     const notice = {
       taskId: approval.approvalId,
       toolName: approval.toolName ?? "",
@@ -917,14 +1013,64 @@ export class ClientSessionRuntime {
       message: approval.title ?? approval.detail ?? "daemon 请求审批",
       ...(approval.diff ? { diff: approval.diff } : {}),
       ...(approval.sessionScope ? { sessionScope: approval.sessionScope } : {}),
-      ...(approval.kind === "plan"
-        ? {
-            planId: approval.planId,
-            expectedRevision: approval.expectedRevision ?? 0,
-            expectedSessionSequence: approval.expectedSessionSequence ?? 0,
-          }
-        : {}),
     };
+    this.onApproval?.(notice);
+  }
+
+  private suspendPlanControl(): void {
+    this.planControlConnected = false;
+    this.dismissPlanControl();
+  }
+
+  private dismissPlanControl(): void {
+    if (this.currentPlanControlId) {
+      this.options.onApprovalResolved?.(this.currentPlanControlId);
+      this.currentPlanControlId = undefined;
+    }
+  }
+
+  private reconcilePlanControl(control: RuntimePlanControlSnapshot | undefined): void {
+    const projection = control?.projection;
+    if (!control || !projection || projection.sessionId !== this.sessionId) return;
+    if (projection.sessionSequence < this.planProjectionSequence) return;
+    this.planProjectionSequence = projection.sessionSequence;
+    const actionable =
+      control.availability === "ready" &&
+      (control.state === "pending_review" || control.state === "interrupted");
+    const notice = actionable ? planApprovalNoticeFromProjection(projection) : undefined;
+    if (!this.planControlConnected || !notice) {
+      this.dismissPlanControl();
+      const revisionRequest = projection.revisionRequest;
+      if (
+        this.planControlConnected &&
+        revisionRequest &&
+        this.surfacedRevisionRequestId !== revisionRequest.operationId
+      ) {
+        this.surfacedRevisionRequestId = revisionRequest.operationId;
+        this.reporter.pushSystemMessage(
+          `计划 ${revisionRequest.planId}@${revisionRequest.expectedRevision} 的旧审批已失效；修改请求已持久化，等待 Runtime 继续完成。`,
+        );
+      } else if (
+        this.planControlConnected &&
+        (control.availability === "unavailable" ||
+          control.state === "admitting" ||
+          control.state === "recovery_required")
+      ) {
+        this.reporter.pushSystemMessage(
+          control.availability === "unavailable"
+            ? "Plan 控制面尚未连接；审批动作已隐藏，连接恢复后会自动重新绑定。"
+            : control.state === "admitting"
+              ? "Plan 执行请求已持久化，Runtime 正在恢复唯一执行；重复操作已禁用。"
+              : "Plan 控制状态需要 Runtime 恢复；旧审批已失效且不可执行。",
+        );
+      }
+      return;
+    }
+    this.surfacedRevisionRequestId = undefined;
+    if (this.currentPlanControlId && this.currentPlanControlId !== notice.taskId) {
+      this.options.onApprovalResolved?.(this.currentPlanControlId);
+    }
+    this.currentPlanControlId = notice.taskId;
     this.onApproval?.(notice);
   }
 

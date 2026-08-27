@@ -225,12 +225,50 @@ export type RuntimePlanProposal = JsonObject & {
   readonly proposedAt: string;
 };
 
+export type RuntimePlanExecution = JsonObject & {
+  readonly planId: PlanId;
+  readonly revision: number;
+  readonly status: "active" | "interrupted" | "completed" | "cancelled";
+  readonly steps: readonly RuntimePlanStep[];
+  readonly startedAt: string;
+  readonly updatedAt: string;
+  readonly reason?: string;
+};
+
+export type RuntimePlanRevisionRequest = JsonObject & {
+  readonly planId: PlanId;
+  readonly expectedRevision: number;
+  readonly feedback: string;
+  readonly operationId: string;
+  readonly requestedAt: string;
+};
+
 export type RuntimePlanProjection = JsonObject & {
   readonly sessionId: SessionId;
   readonly sessionSequence: number;
   readonly proposals: readonly RuntimePlanProposal[];
   readonly latestProposal?: RuntimePlanProposal;
   readonly pendingProposal?: RuntimePlanProposal;
+  readonly execution?: RuntimePlanExecution;
+  readonly revisionRequest?: RuntimePlanRevisionRequest;
+};
+
+export type RuntimePlanControlSnapshot = JsonObject & {
+  readonly version: 1;
+  readonly availability: "ready" | "unavailable";
+  readonly state:
+    | "none"
+    | "pending_review"
+    | "admitting"
+    | "admitted"
+    | "committed_executing"
+    | "revision"
+    | "interrupted"
+    | "recovery_required"
+    | "terminal";
+  readonly projection: RuntimePlanProjection;
+  readonly activeRunId?: RunId;
+  readonly operationId?: string;
 };
 
 export type RuntimeDiscoveryDepth = "quick" | "balanced" | "deep";
@@ -1243,6 +1281,7 @@ export type RuntimeMethodMap = {
       readonly durableTailFragments?: readonly RuntimeTranscriptItemFragment[];
       readonly activeOverlay: readonly RuntimeActiveOverlayEntry[];
       readonly queuedInputs: readonly RuntimeQueuedInput[];
+      readonly planControl?: RuntimePlanControlSnapshot;
       readonly activeRun?: RuntimeRun;
       readonly olderCursor?: RuntimeTranscriptPageCursor;
       readonly continuityDegradedReason?: "partial_persistence_failed" | "recovery_failed";
@@ -4277,7 +4316,45 @@ const runtimePlanProjectionResult = resultShape(
   {
     latestProposal: runtimePlanProposalResult,
     pendingProposal: runtimePlanProposalResult,
+    execution: resultShape(
+      {
+        planId: resultString,
+        revision: resultFiniteNumber,
+        status: resultOneOf(["active", "interrupted", "completed", "cancelled"]),
+        steps: resultArray(runtimePlanStepResult),
+        startedAt: resultString,
+        updatedAt: resultString,
+      },
+      { reason: resultString },
+    ),
+    revisionRequest: resultShape({
+      planId: resultString,
+      expectedRevision: resultFiniteNumber,
+      feedback: resultString,
+      operationId: resultString,
+      requestedAt: resultString,
+    }),
   },
+);
+
+const runtimePlanControlSnapshotResult = resultShape(
+  {
+    version: resultOneOf([1]),
+    availability: resultOneOf(["ready", "unavailable"]),
+    state: resultOneOf([
+      "none",
+      "pending_review",
+      "admitting",
+      "admitted",
+      "committed_executing",
+      "revision",
+      "interrupted",
+      "recovery_required",
+      "terminal",
+    ]),
+    projection: runtimePlanProjectionResult,
+  },
+  { activeRunId: resultString, operationId: resultString },
 );
 
 const runtimeJobResult = resultShape({
@@ -4835,6 +4912,7 @@ const RUNTIME_RESULT_VALIDATORS = {
     },
     {
       activeRun: runtimeRunResult,
+      planControl: runtimePlanControlSnapshotResult,
       durableTailFragments: resultArray(transcriptItemFragmentResult),
       olderCursor: transcriptPageCursorResult,
       continuityDegradedReason: resultOneOf(["partial_persistence_failed", "recovery_failed"]),

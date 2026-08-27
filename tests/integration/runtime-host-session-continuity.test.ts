@@ -80,6 +80,12 @@ class DeferredSource implements SessionContinuityDataSource {
       durableTail: [],
       activeOverlay: [],
       queuedInputs: [],
+      planControl: {
+        version: 1,
+        availability: "ready",
+        state: "none",
+        projection: { sessionId, sessionSequence: 4, proposals: [] },
+      },
     };
   }
 
@@ -151,6 +157,8 @@ test("session open flushes its snapshot response before activating queued live f
   });
   source.release();
   const opened = await openPending;
+  assert.equal(opened.planControl?.version, 1);
+  assert.equal(opened.planControl?.state, "none");
   observed.push("response");
   await waitFor(() => received.length === 1);
   assert.deepEqual(observed, ["response", "event"]);

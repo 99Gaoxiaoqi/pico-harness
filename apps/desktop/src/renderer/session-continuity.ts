@@ -1,5 +1,6 @@
 import {
   type RuntimeParams,
+  type RuntimePlanControlSnapshot,
   type RuntimeResult,
   type RuntimeSessionSubscriptionFrame,
 } from "@pico/protocol";
@@ -27,6 +28,11 @@ export interface DesktopSessionContinuityTransport {
 export interface DesktopSessionContinuityOptions {
   readonly transport: DesktopSessionContinuityTransport;
   readonly onView: (workspacePath: string, sessionId: string, view: TranscriptReplicaView) => void;
+  readonly onPlanControl?: (
+    workspacePath: string,
+    sessionId: string,
+    control: RuntimePlanControlSnapshot | undefined,
+  ) => void;
   readonly onError?: (error: unknown) => void;
 }
 
@@ -40,6 +46,7 @@ interface Binding {
   retryAttempt: number;
   retryTimer?: ReturnType<typeof setTimeout>;
   disposed: boolean;
+  planControl?: RuntimePlanControlSnapshot;
 }
 
 /** Renderer-owned v2 continuity controller. Host frames remain a distinct wire channel. */
@@ -102,11 +109,19 @@ export class DesktopSessionContinuity {
 
   private handleDisconnect(): void {
     if (this.#disposed) return;
-    for (const binding of this.#bindings.values()) void this.reopen(binding);
+    for (const binding of this.#bindings.values()) {
+      binding.planControl = undefined;
+      this.options.onPlanControl?.(binding.workspacePath, binding.sessionId, undefined);
+      void this.reopen(binding);
+    }
   }
 
   view(workspacePath: string, sessionId: string): TranscriptReplicaView | undefined {
     return this.#bindings.get(bindingKey(workspacePath, sessionId))?.replica.view;
+  }
+
+  planControl(workspacePath: string, sessionId: string): RuntimePlanControlSnapshot | undefined {
+    return this.#bindings.get(bindingKey(workspacePath, sessionId))?.planControl;
   }
 
   async close(workspacePath: string, sessionId: string): Promise<void> {
@@ -116,6 +131,8 @@ export class DesktopSessionContinuity {
     binding.disposed = true;
     this.clearRetry(binding);
     this.#bindings.delete(key);
+    binding.planControl = undefined;
+    this.options.onPlanControl?.(binding.workspacePath, binding.sessionId, undefined);
     await this.closeBinding(binding);
   }
 
@@ -148,6 +165,8 @@ export class DesktopSessionContinuity {
         `Session continuity open failed (${binding.replica.view.recoveryReason ?? "unknown"})`,
       );
     }
+    binding.planControl = opened.planControl;
+    this.options.onPlanControl?.(binding.workspacePath, binding.sessionId, opened.planControl);
     this.emit(binding);
 
     let older = binding.replica.beginOlderPage();

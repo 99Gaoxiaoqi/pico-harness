@@ -47,7 +47,10 @@ export interface ApprovalPanelState {
   selectedIndex: number;
 }
 export interface InteractiveApprovalPanelProps extends ApprovalPanelProps {
-  onAction: (action: ApprovalPanelAction, feedback?: string) => void;
+  onAction: (
+    action: ApprovalPanelAction,
+    feedback?: string,
+  ) => boolean | void | Promise<boolean | void>;
   onDiffExpandedChange?: (expanded: boolean) => void;
   keybindings?: UserKeybindingConfig;
 }
@@ -96,7 +99,19 @@ export function InteractiveApprovalPanel({
     if (action === "continue-editing" && feedback.trim().length === 0) return;
     if (submittedTaskId.current === notice.taskId) return;
     submittedTaskId.current = notice.taskId;
-    onAction(action, action === "continue-editing" ? feedback.trim() : undefined);
+    const outcome = onAction(action, action === "continue-editing" ? feedback.trim() : undefined);
+    if (outcome instanceof Promise) {
+      void outcome.then(
+        (accepted) => {
+          if (accepted === false) submittedTaskId.current = null;
+        },
+        () => {
+          submittedTaskId.current = null;
+        },
+      );
+    } else if (outcome === false) {
+      submittedTaskId.current = null;
+    }
   });
 
   useInput((input, key) => {
@@ -261,7 +276,7 @@ export function resolveApprovalPanelKey(
         : ((["execute", "continue-editing", "reject-exit"] as const)[selectedIndex] ?? "execute")
       : actionAtSelection(selectedIndex, hasSessionOption);
   }
-  if (key.escape) return planExit ? "reject-exit" : "reject";
+  if (key.escape) return interruptedPlan ? "cancel-execution" : planExit ? "reject-exit" : "reject";
   if (normalized === "y" && !key.ctrl && !key.meta) return "approve";
   if (normalized === "a" && !key.ctrl && !key.meta) {
     return hasSessionOption ? "approve-session" : null;
