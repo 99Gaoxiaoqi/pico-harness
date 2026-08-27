@@ -5,10 +5,16 @@ import { resolvePicoHome, resolvePicoPaths, type PicoWorkspacePaths } from "../p
 import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 import { sessionOwnerLeaseDirectory } from "../storage/session-owner-lease.js";
 import {
+  FileHistoryDurableRewindConflictError,
+  fileHistoryApplyDurableRewindPlan,
   fileHistoryDeleteClonedSession,
   fileHistoryCloneSession,
   fileHistoryDefaultBaseDir,
+  fileHistoryRollbackDurableRewindPlan,
+  parseFileHistoryDurableRewindPlan,
+  type FileHistoryDurableRewindPlan,
   type FileHistoryIo,
+  type FileHistoryRewindTransactionHooks,
 } from "../safety/file-history.js";
 import type { Message } from "../schema/message.js";
 import { readVersionedJson, writeJsonAtomic } from "../storage/atomic-json.js";
@@ -79,6 +85,10 @@ const FORK_SIDECARS_VERSION = 2 as const;
 const FORK_SIDECARS_NAME = "fork-sidecars.json";
 
 export interface SessionForkServiceHooks {
+  /** 故障注入：不可变 bundle 已落盘、journal 尚未创建。 */
+  readonly afterFrozenBundle?: () => void | Promise<void>;
+  /** 故障注入：journal + bundle manifest 已耐久、首个 workspace 写尚未发生。 */
+  readonly beforeWorkspaceApply?: (operation: ForkStorageOperation) => void | Promise<void>;
   /** 故障注入：sidecar 结果已可重放、Runtime 发布前。 */
   readonly afterSidecars?: (operation: ForkStorageOperation) => void | Promise<void>;
   /** 故障注入：Runtime fork bootstrap 写入前。 */
@@ -112,6 +122,12 @@ export interface ForkSessionInput {
   readonly throughEventId?: string;
   /** Host-frozen safe settings used only when the selected historical slice has none. */
   readonly fallbackSettings?: PersistedSessionSettings;
+  /** Combined rewind workspace authority, frozen before the journal's first mutation. */
+  readonly rewind?: {
+    readonly checkpointId: string;
+    readonly expectedFingerprints?: Readonly<Record<string, string>>;
+    readonly fileTransactionHooks?: FileHistoryRewindTransactionHooks;
+  };
 }
 
 export interface ForkSessionResult {
@@ -155,6 +171,7 @@ interface FrozenForkBundle {
   /** In-memory marker: historical bundle lacked authority and was repaired fail-closed. */
   readonly settingsFallback?: true;
   readonly goal?: NonNullable<SessionRuntimeStatePatch["goal"]>;
+  readonly rewind?: FileHistoryDurableRewindPlan;
 }
 
 interface ForkSidecarsBundle {
@@ -186,6 +203,8 @@ export class SessionForkService {
   private readonly createOperationId: () => string;
   private readonly runtimePort: SessionForkRuntimePort;
   private readonly coordinator: ForkOperationCoordinator;
+  private readonly pendingFrozenBundles = new Map<string, FrozenForkBundle>();
+  private readonly rewindHooks = new Map<string, FileHistoryRewindTransactionHooks>();
 
   constructor(options: SessionForkServiceOptions) {
     this.workDir = resolve(options.workDir);
@@ -250,6 +269,9 @@ export class SessionForkService {
         if (operation.state === "needs_attention") {
           throw new SessionForkNeedsAttentionError(operation);
         }
+        if (operation.state === "aborted") {
+          throw new Error(`Fork ${operation.operationId} was durably aborted`);
+        }
         return { operation };
       }
     }
@@ -289,24 +311,41 @@ export class SessionForkService {
         : await source.readDurableForkSnapshot();
       const operationId = input.operationId ?? this.createOperationId();
       const stagingDirectory = join(this.workspacePaths.forkStaging, operationId);
-      const frozen = createFrozenForkBundle(operationId, input, snapshot);
+      const rewind = input.rewind
+        ? await source.prepareDurableRewindPlan(
+            input.rewind.checkpointId,
+            input.rewind.expectedFingerprints
+              ? new Map(Object.entries(input.rewind.expectedFingerprints))
+              : undefined,
+          )
+        : undefined;
+      const frozen = createFrozenForkBundle(operationId, input, snapshot, rewind);
       const inheritedInteraction = resolveForkInteraction(frozen.settings);
 
-      // 必须先冻结 payload 再创建 journal。这样 journal 一旦可见，reconcile
-      // 就永远不需要从已经继续推进的 source 重建消息。
-      await writeJsonAtomic(this.frozenBundlePath(stagingDirectory), frozen);
-      const operation = await this.coordinator.execute({
-        kind: "fork",
-        operationId,
-        sessionId: input.sourceSessionId,
-        sourceSessionId: input.sourceSessionId,
-        sourceCursor: snapshot.cursor,
-        targetSessionId: input.targetSessionId,
-        targetCollaborationMode: inheritedInteraction.collaborationMode,
-        targetPermissionMode: inheritedInteraction.permissionMode,
-        recoveryPolicy: "forward",
-        stagingDirectory,
-      });
+      // Coordinator 会先将该 immutable payload 与 manifest 同时耐久化，再让
+      // prepared journal 可见。无 journal 的完整 orphan manifest 只能被同请求消费。
+      this.pendingFrozenBundles.set(operationId, frozen);
+      if (input.rewind?.fileTransactionHooks) {
+        this.rewindHooks.set(operationId, input.rewind.fileTransactionHooks);
+      }
+      let operation: ForkStorageOperation;
+      try {
+        operation = await this.coordinator.execute({
+          kind: "fork",
+          operationId,
+          sessionId: input.sourceSessionId,
+          sourceSessionId: input.sourceSessionId,
+          sourceCursor: snapshot.cursor,
+          targetSessionId: input.targetSessionId,
+          targetCollaborationMode: inheritedInteraction.collaborationMode,
+          targetPermissionMode: inheritedInteraction.permissionMode,
+          recoveryPolicy: "forward",
+          stagingDirectory,
+        });
+      } finally {
+        this.pendingFrozenBundles.delete(operationId);
+        this.rewindHooks.delete(operationId);
+      }
       if (operation.state === "needs_attention") {
         throw new SessionForkNeedsAttentionError(operation);
       }
@@ -491,6 +530,7 @@ export class SessionForkService {
 
   private async cleanupUnpublishedForkTarget(
     operation: ForkStorageOperation,
+    bundle: ForkPreparedBundle,
     knownTargetEvents?: Awaited<ReturnType<SqliteRuntimeEventStore["readSession"]>>,
   ): Promise<void> {
     const targetEvents =
@@ -510,6 +550,22 @@ export class SessionForkService {
     if (publicationMarker && publicationTerminal) {
       throw new SessionForkPublicationUncertainError(operation.targetSessionId);
     }
+    const frozen = await this.readFrozenBundle(operation, bundle.stagedBundlePath);
+    if (frozen.rewind) {
+      try {
+        await fileHistoryRollbackDurableRewindPlan(frozen.rewind);
+      } catch (error) {
+        if (error instanceof FileHistoryDurableRewindConflictError) {
+          throw new ForkOperationConflictError(
+            error.message,
+            "workspace_conflict",
+            error.conflictingPaths,
+            { cause: error },
+          );
+        }
+        throw error;
+      }
+    }
     if (targetEvents.length > 0) {
       await this.assertRuntimeTargetOwned(operation, {
         stagedBundlePath: this.frozenBundlePath(operation.stagingDirectory),
@@ -527,9 +583,19 @@ export class SessionForkService {
     return {
       prepareTargetBundle: async (operation, stagingDirectory) => {
         const stagedBundlePath = this.frozenBundlePath(stagingDirectory);
+        const pending = this.pendingFrozenBundles.get(operation.operationId);
+        if (!pending) {
+          throw new ForkOperationConflictError(
+            "Fork has no immutable payload for first admission",
+            "staging_corrupt",
+            [stagedBundlePath],
+          );
+        }
+        await writeJsonAtomic(stagedBundlePath, pending);
         await this.readFrozenBundle(operation, stagedBundlePath);
         return { stagedBundlePath };
       },
+      afterBundlePreparedBeforeJournal: async () => this.hooks?.afterFrozenBundle?.(),
       assertTargetAvailable: async (operation) => {
         if (await this.runtimeStore.readSessionManifest(operation.targetSessionId)) {
           throw new ForkOperationConflictError(
@@ -541,13 +607,35 @@ export class SessionForkService {
       assertRuntimeTargetOwned: async (operation, bundle) => {
         await this.assertRuntimeTargetOwned(operation, bundle);
       },
+      applyWorkspace: async (operation, bundle) => {
+        const frozen = await this.readFrozenBundle(operation, bundle.stagedBundlePath);
+        if (!frozen.rewind) return;
+        await this.hooks?.beforeWorkspaceApply?.(operation);
+        try {
+          await fileHistoryApplyDurableRewindPlan(
+            frozen.rewind,
+            this.rewindHooks.get(operation.operationId),
+          );
+        } catch (error) {
+          if (error instanceof FileHistoryDurableRewindConflictError) {
+            throw new ForkOperationConflictError(
+              error.message,
+              "workspace_conflict",
+              error.conflictingPaths,
+              { cause: error },
+            );
+          }
+          throw error;
+        }
+      },
       cloneSidecars: async (operation) => {
         await this.ensureSidecars(operation);
         await this.hooks?.afterSidecars?.(operation);
       },
       publishRuntime: async (operation, bundle, publication) =>
         this.publishRuntime(operation, bundle, publication),
-      cleanupUnpublishedTarget: async (operation) => this.cleanupUnpublishedForkTarget(operation),
+      cleanupUnpublishedTarget: async (operation, bundle) =>
+        this.cleanupUnpublishedForkTarget(operation, bundle),
     };
   }
 
@@ -988,6 +1076,7 @@ function createFrozenForkBundle(
   operationId: string,
   input: ForkSessionInput,
   snapshot: DurableSessionForkSnapshot,
+  rewind?: FileHistoryDurableRewindPlan,
 ): FrozenForkBundle {
   const sourceTitle = sourceDisplayTitle(snapshot);
   return {
@@ -1015,6 +1104,7 @@ function createFrozenForkBundle(
     ...(snapshot.hydration.runtime.goal
       ? { goal: structuredClone(snapshot.hydration.runtime.goal) }
       : {}),
+    ...(rewind ? { rewind: structuredClone(rewind) } : {}),
   };
 }
 
@@ -1172,6 +1262,7 @@ function parseFrozenForkBundle(value: unknown): FrozenForkBundle {
     "sourceTitle",
     "settings",
     "goal",
+    "rewind",
   ]);
   const seedEntries = parseFrozenRuntimeSeedEntries(value["seedEntries"]);
   const planEntries = parseFrozenPlanEntries(value["planEntries"], value["sourceSessionId"]);
@@ -1190,6 +1281,8 @@ function parseFrozenForkBundle(value: unknown): FrozenForkBundle {
 
   const hasSettings = value["settings"] !== undefined;
   const hasGoal = value["goal"] !== undefined;
+  const rewind =
+    value["rewind"] === undefined ? undefined : parseFileHistoryDurableRewindPlan(value["rewind"]);
   const normalized =
     hasSettings || hasGoal
       ? normalizeSessionRuntimeStatePatch({
@@ -1218,6 +1311,7 @@ function parseFrozenForkBundle(value: unknown): FrozenForkBundle {
     ...(value["sourceTitle"] !== undefined ? { sourceTitle: value["sourceTitle"] } : {}),
     ...(normalized?.settings ? { settings: normalized.settings } : {}),
     ...(normalized?.goal ? { goal: normalized.goal } : {}),
+    ...(rewind ? { rewind } : {}),
   };
 }
 

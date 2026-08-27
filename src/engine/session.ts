@@ -48,10 +48,12 @@ import {
   fileHistoryDefaultBaseDir,
   fileHistoryLoadState,
   fileHistoryMessageDiffStat,
+  fileHistoryPrepareDurableRewindPlan,
   fileHistoryPrepareRewindTransaction,
   fileHistoryRegisterRoot,
   fileHistoryRewind,
   type FileHistoryRewindTransactionHooks,
+  type FileHistoryDurableRewindPlan,
 } from "../safety/file-history.js";
 import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
 import {
@@ -1221,6 +1223,21 @@ export class Session
     );
   }
 
+  async prepareDurableRewindPlan(
+    messageId: string,
+    expectedCurrentFingerprints?: ReadonlyMap<string, string>,
+  ): Promise<FileHistoryDurableRewindPlan> {
+    this.assertWritable();
+    await this.flushPersistence();
+    return fileHistoryPrepareDurableRewindPlan(
+      this.fileHistory,
+      messageId,
+      this.id,
+      this.fileHistoryBaseDir,
+      expectedCurrentFingerprints ? { expectedCurrentFingerprints } : {},
+    );
+  }
+
   async getRewindDiffStat(messageId: string): Promise<FileHistoryDiffStat> {
     return fileHistoryDiffStat(this.fileHistory, messageId, this.id, this.fileHistoryBaseDir);
   }
@@ -1266,15 +1283,15 @@ export class Session
 
     await this.flushPersistence();
     const fileTransaction =
-      mode === "conversation"
-        ? undefined
-        : await fileHistoryPrepareRewindTransaction(
+      mode === "code"
+        ? await fileHistoryPrepareRewindTransaction(
             this.fileHistory,
             checkpointId,
             this.id,
             this.fileHistoryBaseDir,
             expectedCurrentFingerprints ? { expectedCurrentFingerprints } : {},
-          );
+          )
+        : undefined;
 
     // code-only 不创建派生 Session；多文件恢复仍通过同一补偿事务避免部分应用。
     if (mode === "code") {
@@ -1293,36 +1310,30 @@ export class Session
     const targetSessionId = createTargetSessionId();
     const throughEventId = await this.resolveForkBoundaryEventId(snapshot.beforeSessionSeq);
 
-    if (fileTransaction) await fileTransaction.apply(options.fileTransactionHooks);
-    try {
-      // Session 发布是 commit point：both 的文件已应用，但在 fork 持久化
-      // 失败时会立即补偿，因此失败响应不留下文件或当前 Session 副作用。
-      await runtimePort.forkSession({
-        workDir: this.workDir,
-        picoHome: this.picoHome,
-        fileHistoryBaseDir: this.fileHistoryBaseDir,
-        sourceSessionId: this.id,
-        targetSessionId,
-        ...(options.operationId ? { operationId: options.operationId } : {}),
-        ...(throughEventId ? { throughEventId } : {}),
-        ...(options.fallbackSettings ? { fallbackSettings: options.fallbackSettings } : {}),
-        ...(mode === "both" ? { cleanupOnlyOnFailure: true } : {}),
-      });
-    } catch (error) {
-      if (fileTransaction) {
-        try {
-          await fileTransaction.rollback();
-        } catch (rollbackError) {
-          throw new AggregateError(
-            [error, rollbackError],
-            "Rewind Session 提交失败且工作区补偿未完成",
-            { cause: rollbackError },
-          );
-        }
-      }
-      throw error;
-    }
-    fileTransaction?.commit();
+    // both 的文件阶段由 durable Fork coordinator 管理：它先冻结
+    // original/rewound 双向状态并创建 journal，再执行首个文件写入。
+    await runtimePort.forkSession({
+      workDir: this.workDir,
+      picoHome: this.picoHome,
+      fileHistoryBaseDir: this.fileHistoryBaseDir,
+      sourceSessionId: this.id,
+      targetSessionId,
+      ...(options.operationId ? { operationId: options.operationId } : {}),
+      ...(throughEventId ? { throughEventId } : {}),
+      ...(options.fallbackSettings ? { fallbackSettings: options.fallbackSettings } : {}),
+      ...(mode === "both"
+        ? {
+            cleanupOnlyOnFailure: true,
+            rewind: {
+              checkpointId,
+              ...(expectedFingerprints ? { expectedFingerprints } : {}),
+              ...(options.fileTransactionHooks
+                ? { fileTransactionHooks: options.fileTransactionHooks }
+                : {}),
+            },
+          }
+        : {}),
+    });
 
     return { targetSessionId };
   }

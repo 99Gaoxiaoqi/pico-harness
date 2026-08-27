@@ -11,6 +11,7 @@ import {
 } from "../engine/session-runtime-event.js";
 import {
   RuntimeEventStoreHighWaterConflictError,
+  RuntimeEventStoreIntegrityError,
   RuntimeEventStorePlanOperationConflictError,
   type RuntimeEventStoreEntry,
   type RuntimeOwnerFence,
@@ -532,21 +533,24 @@ export class PlanCoordinator {
         );
       }
     };
-    const replay = projectActivePlanEntries(slice.entries).find(
-      ({ event }) =>
-        event.kind.startsWith("plan.") &&
-        "operationId" in event.data &&
-        event.data.operationId === input.operationId,
-    );
     const fingerprint = planOperationFingerprint(
       kind,
       input.claimOperationId ? { semantic, claimOperationId: input.claimOperationId } : semantic,
     );
-    if (replay) {
+    const replayProjection = (): PlanProjection | undefined => {
+      const replay = projectActivePlanEntries(slice.entries).find(
+        ({ event }) =>
+          event.kind.startsWith("plan.") &&
+          "operationId" in event.data &&
+          event.data.operationId === input.operationId,
+      );
+      if (!replay) return undefined;
       if (!("fingerprint" in replay.event.data) || replay.event.data.fingerprint !== fingerprint)
         throw new RuntimeEventStorePlanOperationConflictError(input.operationId);
       return this.projectPlan(slice);
-    }
+    };
+    const replay = replayProjection();
+    if (replay) return replay;
     assertNoConcurrentPlanMutation();
     const at = this.now().toISOString();
     for (let attempt = 0; ; attempt++) {
@@ -573,9 +577,15 @@ export class PlanCoordinator {
         });
         break;
       } catch (error) {
+        if (!(error instanceof RuntimeEventStoreIntegrityError)) throw error;
+        slice = await this.readPlanEntries();
+        const concurrentReplay = replayProjection();
+        if (concurrentReplay) {
+          await this.confirmOwnerFence(ownerFence);
+          return concurrentReplay;
+        }
         if (!(error instanceof RuntimeEventStoreHighWaterConflictError) || attempt >= 7)
           throw error;
-        slice = await this.readPlanEntries();
         assertNoConcurrentPlanMutation();
       }
     }

@@ -22,10 +22,12 @@ import {
   workspaceConfigurationDiagnosticFromRuntime,
 } from "../diagnostics/workspace-doctor.js";
 import { SessionForkService } from "../engine/session-fork-service.js";
+import { StorageOperationJournal } from "../storage/operation-journal.js";
 import { projectRuntimeSessionActiveToolResultEntries } from "../engine/session-runtime-projection.js";
 import { globalSessionManager, Session } from "../engine/session.js";
 import type { PersistedSessionSettings } from "../engine/session-runtime.js";
 import {
+  getOrCreateFailClosedLegacySessionSettings,
   getOrCreateSessionSettings,
   migrateSessionModelRoute,
   normalizeInteractionMode,
@@ -3779,14 +3781,26 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       // conversation-only never creates a FileHistory transaction.  File completeness
       // and current-file fingerprints are therefore unrelated authority and must not
       // block (or change the identity of) a conversation fork.
-      const expectedFingerprints =
-        mode === "conversation"
-          ? undefined
-          : await projectDesktopRewindFingerprints(
-              session,
-              params.checkpointId,
-              params.expectedFingerprint,
-            );
+      const forkJournal =
+        mode === "both"
+          ? new StorageOperationJournal({ workDir: canonical, picoHome: this.picoHome })
+          : undefined;
+      const durableOperation = forkJournal ? await forkJournal.get(operationId) : undefined;
+      let expectedFingerprints: Record<string, string> | undefined;
+      if (mode !== "conversation" && !durableOperation) {
+        try {
+          expectedFingerprints = await projectDesktopRewindFingerprints(
+            session,
+            params.checkpointId,
+            params.expectedFingerprint,
+          );
+        } catch (error) {
+          // A peer may have crossed the durable operation boundary while this shell
+          // projected the preview. Once that fixed operation exists, its frozen bundle
+          // is authoritative and workspace changes may be its own partial progress.
+          if (!forkJournal || !(await forkJournal.get(operationId))) throw error;
+        }
+      }
       const fork = await session.forkFromCheckpoint(
         params.checkpointId,
         mode,
@@ -3972,12 +3986,14 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private async getSessionSettings(workspacePath: string, session: Session) {
     const persisted = session.getRuntimeStateSnapshot().settings;
-    let defaults = persisted;
-    if (!defaults) {
+    if (!persisted) {
+      let defaults: Pick<PersistedSessionSettings, "provider" | "model" | "modelRouteId"> & {
+        thinkingEffort?: string;
+      };
       try {
         defaults = effectiveSessionSettingDefaults(
           await this.loadSessionModelRuntime(workspacePath),
-        ) as PersistedSessionSettings;
+        );
       } catch (error) {
         // Legacy state may predate model routing and tests/headless recovery can have
         // no configured route. Persist a deliberately unavailable route rather than
@@ -3991,39 +4007,40 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           provider: "openai",
           model: "unconfigured",
           modelRouteId: "openai/unconfigured",
-          collaborationMode: "agent",
-          permissionMode: "default",
-          orchestrationMode: "default",
           thinkingEffort: "off",
-          thinkingEffortExplicit: false,
-          additionalDirectories: [],
         };
       }
+      return getOrCreateFailClosedLegacySessionSettings(
+        {
+          sessionId: session.id,
+          cwd: workspacePath,
+          picoHome: this.picoHome,
+          provider: defaults.provider,
+          model: defaults.model,
+          modelRouteId: defaults.modelRouteId,
+          ...(defaults.thinkingEffort ? { thinkingEffort: defaults.thinkingEffort } : {}),
+        },
+        { persistence: session },
+      );
     }
     return getOrCreateSessionSettings(
       {
         sessionId: session.id,
         cwd: workspacePath,
         picoHome: this.picoHome,
-        provider: defaults.provider,
-        model: defaults.model,
-        modelRouteId: defaults.modelRouteId,
-        ...(defaults.mode ? { mode: defaults.mode } : {}),
-        ...(defaults.thinkingEffort ? { thinkingEffort: defaults.thinkingEffort } : {}),
+        provider: persisted.provider,
+        model: persisted.model,
+        modelRouteId: persisted.modelRouteId,
+        ...(persisted.mode ? { mode: persisted.mode } : {}),
+        ...(persisted.thinkingEffort ? { thinkingEffort: persisted.thinkingEffort } : {}),
       },
       { persistence: session },
     );
   }
 
-  /** Missing historical settings have no authorization to inherit; materialize safe axes. */
+  /** Missing historical settings have no authorization to inherit mutable defaults. */
   private async getForkSourceSettings(workspacePath: string, session: Session) {
-    const missingPersistedSettings = session.getRuntimeStateSnapshot().settings === undefined;
-    const settings = await this.getSessionSettings(workspacePath, session);
-    if (missingPersistedSettings) {
-      setSessionCollaborationMode(settings, "agent");
-      setSessionPermissionMode(settings, "default");
-    }
-    return settings;
+    return this.getSessionSettings(workspacePath, session);
   }
 
   private async getSessionModelRouter(

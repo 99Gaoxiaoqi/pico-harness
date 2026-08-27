@@ -96,6 +96,13 @@ export interface ForkStorageOperation extends StorageOperationBase {
   /** Durable disposition: cleanup_only can never be retried forward. */
   recoveryPolicy?: "forward" | "cleanup_only";
   stagingDirectory: string;
+  /** Immutable staging authority bound in SQLite before the operation becomes visible. */
+  bundleManifest?: {
+    manifestPath: string;
+    stagedBundlePath: string;
+    contentSha256: string;
+    sizeBytes: number;
+  };
 }
 
 export type StorageOperation = RewindStorageOperation | ForkStorageOperation;
@@ -562,6 +569,7 @@ function parseRewindOperation(value: Record<string, unknown>): RewindStorageOper
 
 function parseForkOperation(value: Record<string, unknown>): ForkStorageOperation | undefined {
   const cursor = value["sourceCursor"];
+  const bundleManifest = value["bundleManifest"];
   if (
     typeof value["sourceSessionId"] !== "string" ||
     typeof value["targetSessionId"] !== "string" ||
@@ -584,6 +592,7 @@ function parseForkOperation(value: Record<string, unknown>): ForkStorageOperatio
       value["recoveryPolicy"] !== "forward" &&
       value["recoveryPolicy"] !== "cleanup_only") ||
     typeof value["stagingDirectory"] !== "string" ||
+    !isOptionalForkBundleManifest(bundleManifest) ||
     !isRecord(cursor) ||
     typeof cursor["logId"] !== "string" ||
     !isNonNegativeInteger(cursor["seq"]) ||
@@ -593,6 +602,18 @@ function parseForkOperation(value: Record<string, unknown>): ForkStorageOperatio
     return undefined;
   }
   return structuredClone(value) as unknown as ForkStorageOperation;
+}
+
+function isOptionalForkBundleManifest(value: unknown): boolean {
+  if (value === undefined) return true;
+  return (
+    isRecord(value) &&
+    typeof value["manifestPath"] === "string" &&
+    typeof value["stagedBundlePath"] === "string" &&
+    typeof value["contentSha256"] === "string" &&
+    /^[0-9a-f]{64}$/u.test(value["contentSha256"]) &&
+    isNonNegativeInteger(value["sizeBytes"])
+  );
 }
 
 function isStoredFileTransition(value: unknown): boolean {

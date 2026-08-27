@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -139,17 +140,45 @@ test("cleanup-only retry and abort share one target lease and version CAS", asyn
     },
   });
   try {
+    const operationId = "cleanup-disposition-race";
+    const sourceCursor = { logId: "log", seq: 1, epoch: 0, eventId: "source-event" };
+    const stagingDirectory = join(root, "staging", operationId);
+    const stagedBundlePath = join(stagingDirectory, "payload.json");
+    const manifestPath = join(stagingDirectory, "fork-bundle.json");
+    const payload = '{"ok":true}\n';
+    const contentSha256 = createHash("sha256").update(payload).digest("hex");
+    await mkdir(stagingDirectory, { recursive: true });
+    await writeFile(stagedBundlePath, payload, { mode: 0o600 });
+    await writeFile(
+      manifestPath,
+      `${JSON.stringify({
+        schemaVersion: 2,
+        operationId,
+        sourceCursor,
+        targetSessionId: "target",
+        stagingDirectory,
+        stagedBundlePath,
+        contentSha256,
+        sizeBytes: Buffer.byteLength(payload),
+      })}\n`,
+    );
     const prepared = await journal.create({
       kind: "fork",
-      operationId: "cleanup-disposition-race",
+      operationId,
       sessionId: "source",
       sourceSessionId: "source",
-      sourceCursor: { logId: "log", seq: 1, epoch: 0, eventId: "source-event" },
+      sourceCursor,
       targetSessionId: "target",
       targetCollaborationMode: "agent",
       targetPermissionMode: "default",
       recoveryPolicy: "cleanup_only",
-      stagingDirectory: join(root, "staging", "cleanup-disposition-race"),
+      stagingDirectory,
+      bundleManifest: {
+        manifestPath,
+        stagedBundlePath,
+        contentSha256,
+        sizeBytes: Buffer.byteLength(payload),
+      },
     });
     const blocked = await journal.advance({
       operationId: prepared.operationId,

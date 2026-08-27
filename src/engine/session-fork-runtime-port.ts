@@ -5,6 +5,7 @@ import type { EngineRuntimeCapability, EngineRuntimePort } from "./runtime-port.
 import type { RuntimeSessionForkSeedEntry } from "./session-runtime-projection.js";
 import type { PersistedInteractionMode, SessionRuntimeStateWritePatch } from "./session-runtime.js";
 import type { PersistedSessionSettings } from "./session-runtime.js";
+import type { FileHistoryRewindTransactionHooks } from "../safety/file-history.js";
 
 /**
  * Engine-side contract for the durable fork lifecycle.
@@ -96,6 +97,12 @@ export interface SessionForkRuntimePort {
     readonly fallbackSettings?: PersistedSessionSettings;
     /** If publication fails after an external file transaction, dispositions must only clean up. */
     readonly cleanupOnlyOnFailure?: boolean;
+    /** Durable workspace phase for a combined conversation + code rewind. */
+    readonly rewind?: {
+      readonly checkpointId: string;
+      readonly expectedFingerprints?: Readonly<Record<string, string>>;
+      readonly fileTransactionHooks?: FileHistoryRewindTransactionHooks;
+    };
   }): Promise<void>;
 
   /** Validate the current model history without exposing Runtime's read-model implementation. */

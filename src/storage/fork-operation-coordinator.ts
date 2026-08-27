@@ -49,6 +49,11 @@ export interface ForkOperationCallbacks {
     operation: ForkStorageOperation,
     stagingDirectory: string,
   ): Promise<ForkPreparedBundleFile>;
+  /** Failure injection/observability after bundle+manifest durability, before journal create. */
+  afterBundlePreparedBeforeJournal?(
+    operation: ForkStorageOperation,
+    bundle: ForkPreparedBundle,
+  ): Promise<void>;
   /** 持有 target lease 后重查 Runtime 归属；必须在任何 sidecar 写入前完成。 */
   assertTargetAvailable(operation: ForkStorageOperation): Promise<void>;
   /** Runtime 已初始化时，验证其事实属于当前 operation 的可重放 bootstrap。 */
@@ -56,6 +61,8 @@ export interface ForkOperationCallbacks {
     operation: ForkStorageOperation,
     bundle: ForkPreparedBundle,
   ): Promise<void>;
+  /** Apply an optional operation-scoped workspace plan before any target sidecar/publication. */
+  applyWorkspace?(operation: ForkStorageOperation, bundle: ForkPreparedBundle): Promise<void>;
   /** 克隆 File History 等必要 sidecar；必须以 operationId 幂等。 */
   cloneSidecars(operation: ForkStorageOperation, bundle: ForkPreparedBundle): Promise<void>;
   /** 向 RuntimeEventStore 发布消息、fork marker 与过滤后的 Session state。 */
@@ -65,7 +72,10 @@ export interface ForkOperationCallbacks {
     publication: ForkRuntimePublicationCapability,
   ): Promise<void>;
   /** Remove only target facts proven to belong to this operation. */
-  cleanupUnpublishedTarget(operation: ForkStorageOperation): Promise<void>;
+  cleanupUnpublishedTarget(
+    operation: ForkStorageOperation,
+    bundle: ForkPreparedBundle,
+  ): Promise<void>;
 }
 
 export interface ForkOperationCoordinatorOptions {
@@ -119,6 +129,7 @@ export type ForkOperationConflictReason =
   | "invalid_operation"
   | "source_cursor_changed"
   | "staging_corrupt"
+  | "workspace_conflict"
   | "target_conflict";
 
 export class ForkOperationConflictError extends Error {
@@ -186,7 +197,27 @@ export class ForkOperationCoordinator {
     input: NewForkStorageOperation,
     options: ForkReconciliationOptions = {},
   ): Promise<ForkStorageOperation> {
-    const operation = await this.journal.create(input);
+    if (!input.operationId) {
+      throw new Error("ForkOperationCoordinator requires an operationId before staging");
+    }
+    const provisional = provisionalForkOperation(input);
+    const bundle = await this.prepareBundleBeforeJournal(provisional);
+    await this.callbacks.afterBundlePreparedBeforeJournal?.(provisional, bundle);
+    const confirmed = await this.verifyStagedBundle(
+      provisional,
+      await this.loadBundleManifest(provisional),
+    );
+    if (!samePreparedBundle(bundle, confirmed)) {
+      throw new ForkOperationConflictError(
+        "Fork bundle changed before its journal binding",
+        "staging_corrupt",
+        [this.manifestPath(provisional)],
+      );
+    }
+    const operation = await this.journal.create({
+      ...input,
+      bundleManifest: bundleBinding(bundle, this.manifestPath(provisional)),
+    });
     if (operation.kind !== "fork") throw new Error("Expected fork operation");
     return this.forward(operation, options);
   }
@@ -275,7 +306,8 @@ export class ForkOperationCoordinator {
         return { operation, stagingCleanup: "completed" };
       }
 
-      await this.callbacks.cleanupUnpublishedTarget(owned);
+      const bundle = await this.loadAndVerifyStagedBundle(owned);
+      await this.callbacks.cleanupUnpublishedTarget(owned, bundle);
       await lease.assertOwnership();
       const aborted = await this.journal.abortNeedsAttention(input);
       if (aborted.kind !== "fork") throw new Error("Fork operation changed kind");
@@ -399,7 +431,9 @@ export class ForkOperationCoordinator {
         await this.assertTargetOwner(operation);
         await this.callbacks.assertTargetAvailable(operation);
         await lease.assertOwnership();
-        await this.prepareBundle(operation);
+        const bundle = await this.prepareBundle(operation);
+        await lease.assertOwnership();
+        await this.callbacks.applyWorkspace?.(operation, bundle);
         await lease.assertOwnership();
         operation = await this.advance(operation, "workspace_applied");
       }
@@ -497,9 +531,24 @@ export class ForkOperationCoordinator {
   }
 
   private async prepareBundle(operation: ForkStorageOperation): Promise<ForkPreparedBundle> {
+    const binding = operation.bundleManifest;
+    if (!binding) {
+      throw new ForkOperationConflictError(
+        "Fork journal does not bind an immutable bundle manifest",
+        "staging_corrupt",
+        [this.manifestPath(operation)],
+      );
+    }
+    const bundle = await this.loadAndVerifyStagedBundle(operation);
+    assertJournalBundleBinding(operation, bundle, this.manifestPath(operation));
+    return bundle;
+  }
+
+  private async prepareBundleBeforeJournal(
+    operation: ForkStorageOperation,
+  ): Promise<ForkPreparedBundle> {
     const stagingDirectory = assertSafeStagingDirectory(operation.stagingDirectory);
     await mkdir(stagingDirectory, { recursive: true, mode: 0o700 });
-
     const existingManifest = await this.tryLoadBundleManifest(operation);
     if (existingManifest) return this.verifyStagedBundle(operation, existingManifest);
 
@@ -519,13 +568,15 @@ export class ForkOperationCoordinator {
       schemaVersion: FORK_BUNDLE_MANIFEST_VERSION,
       ...bundle,
     });
-    return bundle;
+    return this.verifyStagedBundle(operation, bundle);
   }
 
   private async loadAndVerifyStagedBundle(
     operation: ForkStorageOperation,
   ): Promise<ForkPreparedBundle> {
-    return this.verifyStagedBundle(operation, await this.loadBundleManifest(operation));
+    const bundle = await this.loadBundleManifest(operation);
+    assertJournalBundleBinding(operation, bundle, this.manifestPath(operation));
+    return this.verifyStagedBundle(operation, bundle);
   }
 
   private async verifyStagedBundle(
@@ -611,6 +662,65 @@ function compareForkClaims(left: ForkStorageOperation, right: ForkStorageOperati
     left.createdAt.localeCompare(right.createdAt) ||
     left.operationId.localeCompare(right.operationId)
   );
+}
+
+function provisionalForkOperation(input: NewForkStorageOperation): ForkStorageOperation {
+  if (!input.operationId) throw new Error("Fork operationId is required before staging");
+  const at = new Date(0).toISOString();
+  return {
+    ...input,
+    schemaVersion: 1,
+    operationId: input.operationId,
+    version: 1,
+    state: "prepared",
+    createdAt: at,
+    updatedAt: at,
+  };
+}
+
+function bundleBinding(
+  bundle: ForkPreparedBundle,
+  manifestPath: string,
+): NonNullable<ForkStorageOperation["bundleManifest"]> {
+  return {
+    manifestPath: resolve(manifestPath),
+    stagedBundlePath: resolve(bundle.stagedBundlePath),
+    contentSha256: bundle.contentSha256,
+    sizeBytes: bundle.sizeBytes,
+  };
+}
+
+function samePreparedBundle(left: ForkPreparedBundle, right: ForkPreparedBundle): boolean {
+  return (
+    left.operationId === right.operationId &&
+    sameCursor(left.sourceCursor, right.sourceCursor) &&
+    left.targetSessionId === right.targetSessionId &&
+    resolve(left.stagingDirectory) === resolve(right.stagingDirectory) &&
+    resolve(left.stagedBundlePath) === resolve(right.stagedBundlePath) &&
+    left.contentSha256 === right.contentSha256 &&
+    left.sizeBytes === right.sizeBytes
+  );
+}
+
+function assertJournalBundleBinding(
+  operation: ForkStorageOperation,
+  bundle: ForkPreparedBundle,
+  expectedManifestPath: string,
+): void {
+  const binding = operation.bundleManifest;
+  if (
+    !binding ||
+    resolve(binding.manifestPath) !== resolve(expectedManifestPath) ||
+    resolve(binding.stagedBundlePath) !== resolve(bundle.stagedBundlePath) ||
+    binding.contentSha256 !== bundle.contentSha256 ||
+    binding.sizeBytes !== bundle.sizeBytes
+  ) {
+    throw new ForkOperationConflictError(
+      "Fork bundle manifest does not match its immutable journal binding",
+      "staging_corrupt",
+      [expectedManifestPath],
+    );
+  }
 }
 
 function parseBundleManifest(value: unknown): ForkPreparedBundle {

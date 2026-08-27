@@ -247,7 +247,7 @@ test("failed Plan review Run is recovery_required instead of being retried", asy
   assert.equal(executions, 1);
 });
 
-test("production Plan review accepts the first click after non-Plan ledger drift", async (t) => {
+test("production Plan review double-click converges on one Run after non-Plan ledger drift", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-plan-host-first-click-"));
   const workspace = join(root, "workspace");
   const picoHome = join(root, "state");
@@ -305,19 +305,26 @@ test("production Plan review accepts the first click after non-Plan ledger drift
     await released?.close();
     await rm(root, { recursive: true, force: true });
   });
-  const response = (await services.desktopService.handle(
-    createRuntimeRequest("plan.respond", {
-      workspacePath: workspace,
-      sessionId,
-      planId: "plan-first-click",
-      action: "execute",
-      expectedRevision: 1,
-      expectedSessionSequence: proposed.sessionSequence,
-      controlEpoch: proposed.controlEpoch!,
-    }),
-  )) as { accepted: boolean; run?: { runId?: string } };
-  assert.equal(response.accepted, true);
-  assert.match(response.run?.runId ?? "", /^run_plan_/u);
+  const request = createRuntimeRequest("plan.respond", {
+    workspacePath: workspace,
+    sessionId,
+    planId: "plan-first-click",
+    action: "execute",
+    expectedRevision: 1,
+    expectedSessionSequence: proposed.sessionSequence,
+    controlEpoch: proposed.controlEpoch!,
+  });
+  const responses = (await Promise.all([
+    services.desktopService.handle(request),
+    services.desktopService.handle(request),
+  ])) as unknown as readonly { accepted: boolean; run?: { runId?: string } }[];
+  assert.ok(responses.every(({ accepted }) => accepted));
+  assert.match(responses[0]?.run?.runId ?? "", /^run_plan_/u);
+  assert.equal(responses[0]?.run?.runId, responses[1]?.run?.runId);
+  const runs = (await services.desktopService.handle(
+    createRuntimeRequest("runs.list", { workspacePath: workspace, sessionId }),
+  )) as { runs: readonly { runId: string }[] };
+  assert.equal(runs.runs.filter(({ runId }) => runId.startsWith("run_plan_")).length, 1);
 });
 
 test("production Plan review rejects an old card after a real revision", async (t) => {
