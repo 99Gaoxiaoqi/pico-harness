@@ -25,6 +25,9 @@ export interface AgentGraphDriveResult {
   /** Reconciler-native equivalent; false requests another bounded pass. */
   readonly quiescent?: boolean;
   readonly wakeCandidates?: readonly AgentGraphWakeCandidate[];
+  /** Durable retry authority; the Supervisor must not drive this Graph before this instant. */
+  readonly retryAt?: number;
+  readonly needsAttention?: boolean;
 }
 
 export interface AgentGraphYieldSnapshot {
@@ -49,7 +52,10 @@ export interface RegisterAgentGraphYieldInput {
  */
 export interface AgentGraphDrivePort {
   listOpenGraphIds(): Promise<readonly string[]> | readonly string[];
-  driveGraph(graphId: string): Promise<AgentGraphDriveResult | void>;
+  driveGraph(
+    graphId: string,
+    options?: { readonly force?: boolean },
+  ): Promise<AgentGraphDriveResult | void>;
   registerYieldInterest(input: RegisterAgentGraphYieldInput): Promise<void> | void;
   cancelYieldInterestIfRegistered(
     permitId: string,
@@ -91,6 +97,14 @@ export interface AgentGraphSupervisorStorePort {
     | Promise<EnqueueAgentGraphSupervisorWakeForYieldResult>
     | EnqueueAgentGraphSupervisorWakeForYieldResult;
   settleSupervisorWake(input: SettleAgentGraphSupervisorWakeInput): Promise<unknown> | unknown;
+  retrySupervisorWake?(input: {
+    readonly wakeId: string;
+    readonly retryOperationId: string;
+    readonly expectedWakeVersion: number;
+    readonly expectedAttentionVersion: number;
+  }): Promise<{ readonly record: AgentGraphSupervisorWakeRecord }> | {
+    readonly record: AgentGraphSupervisorWakeRecord;
+  };
 }
 
 export interface RootSupervisorRunIdentity {
@@ -128,6 +142,7 @@ export interface AgentGraphSupervisorServiceOptions {
   readonly rootWakePort: AgentGraphRootWakePort;
   readonly now?: () => number;
   readonly retryDelayMs?: (attemptNumber: number) => number;
+  readonly maxWakeAttempts?: number;
   readonly onError?: (error: unknown, context: { graphId?: string; wakeId?: string }) => void;
 }
 
@@ -147,18 +162,24 @@ type LifecycleState = "idle" | "open" | "closing" | "closed";
 export class AgentGraphSupervisorService {
   private readonly now: () => number;
   private readonly retryDelayMs: (attemptNumber: number) => number;
+  private readonly maxWakeAttempts: number;
   private state: LifecycleState = "idle";
   private closePromise?: Promise<void>;
   private readonly graphFlights = new Map<
     string,
-    { rerun: boolean; readonly promise: Promise<void> }
+    { rerun: boolean; force: boolean; readonly promise: Promise<void> }
   >();
   private readonly wakeFlights = new Map<string, Promise<void>>();
   private readonly wakeTimers = new Map<string, NodeJS.Timeout>();
+  private readonly graphTimers = new Map<string, NodeJS.Timeout>();
 
   constructor(private readonly options: AgentGraphSupervisorServiceOptions) {
     this.now = options.now ?? Date.now;
     this.retryDelayMs = options.retryDelayMs ?? defaultRetryDelayMs;
+    this.maxWakeAttempts = options.maxWakeAttempts ?? 5;
+    if (!Number.isSafeInteger(this.maxWakeAttempts) || this.maxWakeAttempts < 1) {
+      throw new Error("Agent Graph root wake max attempts must be a positive safe integer");
+    }
   }
 
   async start(): Promise<void> {
@@ -166,21 +187,28 @@ export class AgentGraphSupervisorService {
     if (this.state !== "idle") throw new Error("Agent Graph Supervisor 已关闭");
     this.state = "open";
     const graphIds = await this.options.drivePort.listOpenGraphIds();
-    await Promise.allSettled(graphIds.map((graphId) => this.notifyGraph(graphId)));
+    await Promise.allSettled(graphIds.map((graphId) => this.notifyGraphInternal(graphId, false)));
     await this.scanRecoverableWakes();
   }
 
   /** Coalesces concurrent notifications while preserving one requested rerun. */
   notifyGraph(graphId: string): Promise<void> {
+    return this.notifyGraphInternal(graphId, true);
+  }
+
+  private notifyGraphInternal(graphId: string, force: boolean): Promise<void> {
     requireId(graphId, "graphId");
     if (this.state !== "open") return Promise.resolve();
+    if (force) this.clearGraphTimer(graphId);
     const current = this.graphFlights.get(graphId);
     if (current) {
       current.rerun = true;
+      current.force ||= force;
       return current.promise;
     }
     const flight = {
       rerun: false,
+      force,
       promise: Promise.resolve(),
     };
     flight.promise = this.driveUntilQuiescent(graphId, flight)
@@ -247,6 +275,29 @@ export class AgentGraphSupervisorService {
     await this.processWake(candidate, "permission_changed");
   }
 
+  /** Explicit CAS retry for a bounded root wake that requires user attention. */
+  async retryNeedsAttention(wakeId: string): Promise<boolean> {
+    this.requireOpen();
+    const candidate = await this.options.store.getRecoverableSupervisorWake(
+      requireId(wakeId, "wakeId"),
+    );
+    if (!candidate || candidate.wake.status !== "needs_attention") return false;
+    if (!this.options.store.retrySupervisorWake) {
+      throw new Error("Agent Graph wake store does not support explicit retry");
+    }
+    const retried = await this.options.store.retrySupervisorWake({
+      wakeId: candidate.wake.wakeId,
+      retryOperationId: `retry:${candidate.wake.wakeId}:${candidate.wake.attentionVersion ?? 0}`,
+      expectedWakeVersion: candidate.wake.version,
+      expectedAttentionVersion: candidate.wake.attentionVersion ?? 0,
+    });
+    const refreshed = await this.options.store.getRecoverableSupervisorWake(
+      retried.record.wakeId,
+    );
+    if (refreshed) await this.processWake(refreshed, "explicit_retry");
+    return true;
+  }
+
   /** Called when a root Runtime event for an in-flight wake is committed. */
   async notifyRootRunChanged(wakeId: string): Promise<void> {
     if (this.state !== "open") return;
@@ -267,6 +318,8 @@ export class AgentGraphSupervisorService {
     this.state = "closing";
     for (const timer of this.wakeTimers.values()) clearTimeout(timer);
     this.wakeTimers.clear();
+    for (const timer of this.graphTimers.values()) clearTimeout(timer);
+    this.graphTimers.clear();
     this.closePromise = Promise.allSettled([
       ...[...this.graphFlights.values()].map(({ promise }) => promise),
       ...this.wakeFlights.values(),
@@ -280,11 +333,16 @@ export class AgentGraphSupervisorService {
     return this.close();
   }
 
-  private async driveUntilQuiescent(graphId: string, flight: { rerun: boolean }): Promise<void> {
+  private async driveUntilQuiescent(
+    graphId: string,
+    flight: { rerun: boolean; force: boolean },
+  ): Promise<void> {
     do {
       flight.rerun = false;
       try {
-        const result = await this.options.drivePort.driveGraph(graphId);
+        const force = flight.force;
+        flight.force = false;
+        const result = await this.options.drivePort.driveGraph(graphId, { force });
         if (this.state === "open" && result?.wakeCandidates) {
           for (const candidate of result.wakeCandidates) {
             if (this.state !== "open") break;
@@ -301,6 +359,7 @@ export class AgentGraphSupervisorService {
           }
         }
         if (result?.needsAnotherPass || result?.quiescent === false) flight.rerun = true;
+        if (result?.retryAt !== undefined) this.scheduleGraph(graphId, result.retryAt);
       } catch (error) {
         this.report(error, { graphId });
       }
@@ -324,7 +383,7 @@ export class AgentGraphSupervisorService {
 
   private processWake(
     candidate: RecoverableAgentGraphSupervisorWake,
-    trigger: "startup" | "due" | "permission_changed" | "runtime_changed",
+    trigger: "startup" | "due" | "permission_changed" | "runtime_changed" | "explicit_retry",
   ): Promise<void> {
     if (this.state !== "open") return Promise.resolve();
     const current = this.wakeFlights.get(candidate.wake.wakeId);
@@ -344,11 +403,12 @@ export class AgentGraphSupervisorService {
 
   private async processWakeOnce(
     candidate: RecoverableAgentGraphSupervisorWake,
-    trigger: "startup" | "due" | "permission_changed" | "runtime_changed",
+    trigger: "startup" | "due" | "permission_changed" | "runtime_changed" | "explicit_retry",
   ): Promise<void> {
     if (this.state !== "open") return;
     const { graph, wake } = candidate;
     if (wake.status === "delivered") return;
+    if (wake.status === "needs_attention") return;
     // A sealed Graph is a durable retirement fence. In particular, never resume
     // an in-flight root wake after its root Session has been deleted.
     if (graph.phase !== "open") {
@@ -459,10 +519,34 @@ export class AgentGraphSupervisorService {
       return;
     }
     if (observed.status === "failed") {
-      const retryAt = this.now() + this.retryDelayMs(attempt.attemptNumber);
-      await this.settle(claimedWake, attempt, "retryable_failed", observed.error, retryAt);
-      this.scheduleWake(claimedWake.wakeId, retryAt);
+      if (attempt.attemptNumber >= this.maxWakeAttempts) {
+        await this.settle(claimedWake, attempt, "needs_attention", observed.error);
+      } else {
+        const retryAt = this.now() + this.retryDelayMs(attempt.attemptNumber);
+        await this.settle(claimedWake, attempt, "retryable_failed", observed.error, retryAt);
+        this.scheduleWake(claimedWake.wakeId, retryAt);
+      }
     }
+  }
+
+  private scheduleGraph(graphId: string, availableAt: number): void {
+    if (this.state !== "open") return;
+    this.clearGraphTimer(graphId);
+    const timer = setTimeout(
+      () => {
+        this.graphTimers.delete(graphId);
+        if (this.state === "open") void this.notifyGraphInternal(graphId, false);
+      },
+      Math.max(0, availableAt - this.now()),
+    );
+    timer.unref?.();
+    this.graphTimers.set(graphId, timer);
+  }
+
+  private clearGraphTimer(graphId: string): void {
+    const timer = this.graphTimers.get(graphId);
+    if (timer) clearTimeout(timer);
+    this.graphTimers.delete(graphId);
   }
 
   private scheduleWake(wakeId: string, availableAt: number): void {

@@ -1741,6 +1741,7 @@ function workspaceGraphApplicationLifecycle(input: {
     sealEmptyRootEpoch: (rootSessionId) => host.application.sealEmptyRootEpoch(rootSessionId),
     retireRootSession: (rootSessionId, reason) =>
       host.application.retireRootSession(rootSessionId, reason),
+    retryRootWake: (wakeId) => host.application.retryRootWake(wakeId),
     start: () => host.start(),
     close: async () => {
       if (closed) return;

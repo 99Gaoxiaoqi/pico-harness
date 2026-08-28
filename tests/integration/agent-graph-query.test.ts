@@ -108,6 +108,81 @@ test("read-only Graph query lists epochs and returns a stable paged timeline wit
   }
 });
 
+test("Graph query exposes durable diagnostics and wake needs-attention facts", async () => {
+  const storageRoot = await mkdtemp(join(tmpdir(), "pico-agent-graph-query-attention-"));
+  const store = new SqliteAgentGraphControlStore({ storageRoot, now: () => 100 });
+  const rootSessionId = "query-attention-root";
+  const graphId = graphIdFor(rootSessionId, 1);
+  try {
+    store.createGraph({ graphId, rootSessionId, epoch: 1 });
+    store.recordGraphDiagnostic({
+      diagnosticId: "diagnostic-1",
+      graphId,
+      phase: "provision",
+      subjectId: "operator-1",
+      classification: "configuration",
+      message: "operator route missing",
+      observationId: "observation-1",
+    });
+    store.enqueueSupervisorWake({
+      wakeId: "wake-1",
+      graphId,
+      dedupeKey: "runtime-terminal:run-1",
+      wakeFingerprint: "wake-fingerprint",
+      cause: "runtime_terminal",
+      payload: { claimId: "claim-1" },
+    });
+    const claimed = store.claimSupervisorWake({
+      wakeId: "wake-1",
+      expectedWakeVersion: 1,
+      attemptId: "attempt-1",
+      rootSessionId,
+      targetTurnId: "turn-1",
+      targetRunId: "run-1",
+    });
+    store.settleSupervisorWake({
+      wakeId: "wake-1",
+      attemptId: claimed.attempt.attemptId,
+      expectedWakeVersion: claimed.wake.version,
+      expectedAttemptVersion: claimed.attempt.version,
+      outcome: "needs_attention",
+      error: "root wake exhausted",
+    });
+
+    const query = new AgentGraphReadOnlyQueryService(store);
+    const detail = query.query({ rootSessionId, action: "get", graphId }) as {
+      readonly diagnostics: readonly { readonly state: string }[];
+      readonly wakes: readonly {
+        readonly status: string;
+        readonly attempts: readonly { readonly attemptNumber: number }[];
+      }[];
+    };
+    assert.equal(detail.diagnostics[0]?.state, "needs_attention");
+    assert.equal(detail.wakes[0]?.status, "needs_attention");
+    assert.equal(detail.wakes[0]?.attempts[0]?.attemptNumber, 1);
+
+    const timeline = query.query({
+      rootSessionId,
+      action: "timeline",
+      graphId,
+      limit: 100,
+    }) as { readonly items: readonly { readonly kind: string; readonly status?: string }[] };
+    assert.ok(
+      timeline.items.some(
+        (item) => item.kind === "diagnostic.recorded" && item.status === "needs_attention",
+      ),
+    );
+    assert.ok(
+      timeline.items.some(
+        (item) => item.kind === "wake.settled" && item.status === "needs_attention",
+      ),
+    );
+  } finally {
+    store.close();
+    await rm(storageRoot, { recursive: true, force: true });
+  }
+});
+
 function operationSource(rootSessionId: string, operationId: string) {
   return {
     sessionId: rootSessionId,
