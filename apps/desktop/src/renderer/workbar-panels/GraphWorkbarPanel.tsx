@@ -34,6 +34,21 @@ export interface WorkbarGraphDetail {
     readonly intentId: string;
     readonly state: string;
   }[];
+  readonly diagnostics: readonly {
+    readonly diagnosticId: string;
+    readonly phase: string;
+    readonly subjectId: string;
+    readonly classification: string;
+    readonly state: string;
+    readonly message: string;
+    readonly nextRetryAt?: number;
+  }[];
+  readonly wakes: readonly {
+    readonly wakeId: string;
+    readonly status: string;
+    readonly attemptCount: number;
+    readonly lastError?: string;
+  }[];
 }
 
 export interface WorkbarGraphTimelineItem {
@@ -54,6 +69,7 @@ export interface GraphWorkbarPanelProps {
   readonly error?: string;
   readonly onRefresh: () => void;
   readonly onSelectGraph: (graphId: string) => void;
+  readonly onRetryWake?: (wakeId: string) => void;
 }
 
 export function GraphWorkbarPanel({
@@ -65,6 +81,7 @@ export function GraphWorkbarPanel({
   error,
   onRefresh,
   onSelectGraph,
+  onRetryWake,
 }: GraphWorkbarPanelProps) {
   return (
     <section className="tool-panel tool-panel--graph" aria-label="Graph">
@@ -123,6 +140,47 @@ export function GraphWorkbarPanel({
         ) : (
           <>
             <GraphMetrics summary={detail.summary} />
+            {(detail.diagnostics.some(({ state }) => state !== "resolved") ||
+              detail.wakes.some(({ status }) => status === "needs_attention")) && (
+              <section className="graph-panel__section" aria-label="需要处理">
+                <div className="graph-panel__section-title">
+                  <strong>需要处理</strong>
+                  <span>
+                    {detail.diagnostics.filter(({ state }) => state !== "resolved").length +
+                      detail.wakes.filter(({ status }) => status === "needs_attention").length}
+                  </span>
+                </div>
+                <ul className="graph-panel__diagnostics">
+                  {detail.diagnostics
+                    .filter(({ state }) => state !== "resolved")
+                    .map((diagnostic) => (
+                      <li key={diagnostic.diagnosticId}>
+                        <div>
+                          <strong>{diagnostic.phase}</strong>
+                          <p>{diagnostic.message}</p>
+                          <small>
+                            {diagnostic.classification} · {diagnostic.subjectId}
+                          </small>
+                        </div>
+                      </li>
+                    ))}
+                  {detail.wakes
+                    .filter(({ status }) => status === "needs_attention")
+                    .map((wake) => (
+                      <li key={wake.wakeId}>
+                        <div>
+                          <strong>根唤醒已暂停</strong>
+                          <p>{wake.lastError ?? "连续失败达到自动重试上限。"}</p>
+                          <small>已尝试 {wake.attemptCount} 次</small>
+                        </div>
+                        <button type="button" onClick={() => onRetryWake?.(wake.wakeId)}>
+                          重试
+                        </button>
+                      </li>
+                    ))}
+                </ul>
+              </section>
+            )}
             {detail.summary.phase === "open" &&
               detail.operators.length === 0 &&
               detail.intents.length === 0 && (
@@ -243,6 +301,8 @@ function timelineLabel(kind: string): string {
     "wake.enqueued": "根唤醒入队",
     "wake.settled": "根唤醒完成",
     "wake.attempted": "根唤醒尝试",
+    "diagnostic.recorded": "调度诊断",
+    "diagnostic.resolved": "诊断恢复",
   };
   return labels[kind] ?? kind;
 }

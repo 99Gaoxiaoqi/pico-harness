@@ -4,7 +4,17 @@ import type { AgentGraphRecord } from "../storage/sqlite/agent-graph-store-types
 import { SqliteAgentGraphControlStore } from "../storage/sqlite/sqlite-agent-graph-control-store.js";
 import type { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 import { decodeRuntimeEventJson } from "../storage/runtime-event.js";
-import { projectAgentGraphActivation } from "../runtime/agent-graph-runtime-adapter.js";
+import {
+  projectAgentGraphRuntimeActivation,
+  type AgentGraphRunLaunchState,
+} from "./runtime-activation-projection.js";
+
+export interface AgentGraphLaunchStateQueryPort {
+  inspect(input: {
+    readonly sessionId: string;
+    readonly runId: string;
+  }): Promise<AgentGraphRunLaunchState> | AgentGraphRunLaunchState;
+}
 
 export interface AgentGraphQueryInput {
   readonly rootSessionId: string;
@@ -116,6 +126,7 @@ export class AgentGraphReadOnlyQueryService {
   async queryRuntimeFacts(
     graphId: string,
     runtimeStore: SqliteRuntimeEventStore,
+    launchStatePort?: AgentGraphLaunchStateQueryPort,
   ): Promise<{
     readonly runtimeClaims: readonly {
       readonly claimId: string;
@@ -133,16 +144,22 @@ export class AgentGraphReadOnlyQueryService {
     const claims = this.store.listActivationClaims(graphId);
     const runtimeClaims = await Promise.all(
       claims.map(async (claim) => {
-        const projection = projectAgentGraphActivation(
+        const [events, launchState] = await Promise.all([
+          runtimeStore.readRun(claim.targetSessionId, claim.targetRunId),
+          launchStatePort?.inspect({
+            sessionId: claim.targetSessionId,
+            runId: claim.targetRunId,
+          }),
+        ]);
+        const projection = projectAgentGraphRuntimeActivation({
           claim,
-          await runtimeStore.readRun(claim.targetSessionId, claim.targetRunId),
-        );
+          events,
+          ...(launchState ? { launchState } : {}),
+        });
         return {
           claimId: claim.claimId,
           status: projection.status,
-          ...(projection.terminalEventId
-            ? { terminalEventId: projection.terminalEventId }
-            : {}),
+          ...(projection.terminalEventId ? { terminalEventId: projection.terminalEventId } : {}),
         };
       }),
     );

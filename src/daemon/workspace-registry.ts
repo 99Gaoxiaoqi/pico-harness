@@ -59,6 +59,15 @@ export class WorkspaceRuntimeRegistry<T extends WorkspaceRuntime> {
     }
   }
 
+  /** Read-only lookup that never constructs or replaces a workspace runtime. */
+  async peek(workspacePath: string): Promise<T | undefined> {
+    const canonicalPath = await this.canonicalize(workspacePath);
+    const runtime = this.runtimes.get(canonicalPath);
+    if (!runtime) return undefined;
+    const resolved = await runtime;
+    return this.runtimes.get(canonicalPath) === runtime ? resolved : undefined;
+  }
+
   /** Release one workspace without closing the process-wide registry. */
   async release(workspacePath: string): Promise<void> {
     this.assertOpen();

@@ -2,6 +2,13 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
 import { agentGraphRecordRefFingerprint, agentOutputRecordIdFor } from "../agent-graph/core/ids.js";
+import {
+  AgentGraphRuntimeIntegrityError,
+  projectAgentGraphRuntimeActivation,
+  type AgentGraphActivationRuntimeProjection,
+  type AgentGraphActivationRuntimeStatus,
+  type AgentGraphRunLaunchState,
+} from "../agent-graph/runtime-activation-projection.js";
 import type { SessionManager, SessionManagerLease } from "../engine/session-manager.js";
 import type { SessionOptions } from "../engine/session.js";
 import type { RuntimeEvent, RuntimeRunStartedEvent } from "../storage/runtime-event.js";
@@ -24,27 +31,6 @@ export const AGENT_GRAPH_HANDOFF_MAX_RECORD_BYTES = 16 * 1024;
 export const AGENT_GRAPH_HANDOFF_MAX_TOTAL_BYTES = 48 * 1024;
 export const AGENT_GRAPH_HANDOFF_MAX_RECORDS = 64;
 
-export type AgentGraphActivationRuntimeStatus =
-  | "not_started"
-  | "running"
-  | "waiting_permission"
-  | "completed"
-  | "failed"
-  | "cancelled"
-  | "interrupted";
-
-export interface AgentGraphActivationRuntimeProjection {
-  readonly claimId: string;
-  readonly sessionId: string;
-  readonly turnId: string;
-  readonly runId: string;
-  readonly invocationId: string;
-  readonly status: AgentGraphActivationRuntimeStatus;
-  readonly startedEventId?: string;
-  readonly terminalEventId?: string;
-  readonly outputEventIds: readonly string[];
-}
-
 export interface StartExactAgentGraphRunInput {
   readonly claimId: string;
   readonly sessionId: string;
@@ -55,13 +41,6 @@ export interface StartExactAgentGraphRunInput {
   readonly workDir: string;
   readonly prompt: string;
 }
-
-/** Host-owned execution state for an admitted exact Run. */
-export type AgentGraphRunLaunchState =
-  | Readonly<{ status: "unknown" }>
-  | Readonly<{ status: "running" }>
-  | Readonly<{ status: "succeeded" }>
-  | Readonly<{ status: "failed" | "cancelled"; error?: string }>;
 
 export type AgentGraphExactRunIndeterminateReason =
   | "provider_dispatch_recorded"
@@ -213,13 +192,6 @@ export interface ResolvedAgentGraphHandoff {
   readonly prompt: string;
 }
 
-export class AgentGraphRuntimeIntegrityError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "AgentGraphRuntimeIntegrityError";
-  }
-}
-
 export interface AgentGraphRuntimeAdapterOptions {
   readonly sessionManager: SessionManager;
   readonly runPort: AgentGraphExactRunPort;
@@ -284,7 +256,13 @@ export class AgentGraphRuntimeAdapter implements AgentOutputCommitPort {
       this.options.runPort.readRunEvents(claim.targetSessionId, claim.targetRunId),
       this.options.outputLedger.listAgentOutputEvents(claim.targetSessionId, claim.targetRunId),
     ]);
-    const projection = projectAgentGraphActivation(claim, events);
+    const launchState = this.options.runPort.inspectLaunch
+      ? await this.options.runPort.inspectLaunch({
+          sessionId: claim.targetSessionId,
+          runId: claim.targetRunId,
+        })
+      : { status: "unknown" as const };
+    const projection = projectAgentGraphRuntimeActivation({ claim, events, launchState });
     for (const source of outputSources) assertOutputSourceBelongsToClaim(source, claim);
     if (projection.status === "not_started" && outputSources.length > 0) {
       throw new AgentGraphRuntimeIntegrityError(
@@ -295,7 +273,7 @@ export class AgentGraphRuntimeAdapter implements AgentOutputCommitPort {
       ...projection,
       outputEventIds: outputSources.map((source) => source.eventId),
     };
-    return this.applyHostLaunchState(claim, durableProjection, events);
+    return durableProjection;
   }
 
   async stopActivation(
@@ -470,139 +448,10 @@ export class AgentGraphRuntimeAdapter implements AgentOutputCommitPort {
     }
     return { disposition, projection };
   }
-
-  private async applyHostLaunchState(
-    claim: AgentGraphActivationClaimRecord,
-    projection: AgentGraphActivationRuntimeProjection,
-    events: readonly RuntimeEvent[],
-  ): Promise<AgentGraphActivationRuntimeProjection> {
-    if (isTerminalStatus(projection.status) || projection.status === "not_started")
-      return projection;
-    const launch = this.options.runPort.inspectLaunch
-      ? await this.options.runPort.inspectLaunch({
-          sessionId: claim.targetSessionId,
-          runId: claim.targetRunId,
-        })
-      : { status: "unknown" as const };
-    if (launch.status === "failed" || launch.status === "cancelled") {
-      return { ...projection, status: launch.status };
-    }
-    if (launch.status === "succeeded") {
-      // A successful host executor without the canonical Runtime terminal is not
-      // replay-safe. Surface it as interrupted instead of treating it as live.
-      return { ...projection, status: "interrupted" };
-    }
-    if (launch.status === "unknown" && hasNonAttachableRuntimeFacts(claim, events)) {
-      // A non-live exact Run with a durable side-effect/approval fact is never
-      // replayed. Project one terminal recovery state so a registered yield can
-      // wake the root supervisor instead of remaining permanently executing.
-      return { ...projection, status: "interrupted" };
-    }
-    return projection;
-  }
-}
-
-function hasNonAttachableRuntimeFacts(
-  claim: AgentGraphActivationClaimRecord,
-  events: readonly RuntimeEvent[],
-): boolean {
-  const inputEventId = `user-message:agent-graph-input:${createHash("sha256")
-    .update(claim.claimId)
-    .digest("hex")}`;
-  return events.some((event) => {
-    if (event.kind === "run.started" || event.kind === "run.terminal") return false;
-    if (event.eventId !== inputEventId) return true;
-    if (event.kind !== "message.committed" || event.data.message.role !== "user") {
-      throw new AgentGraphRuntimeIntegrityError(
-        `Graph input event ${inputEventId} is bound to an incompatible Runtime fact`,
-      );
-    }
-    return false;
-  });
-}
-
-export function projectAgentGraphActivation(
-  claim: AgentGraphActivationClaimRecord,
-  events: readonly RuntimeEvent[],
-): AgentGraphActivationRuntimeProjection {
-  if (events.length === 0) return emptyProjection(claim);
-  for (const event of events) assertEventBelongsToClaim(event, claim);
-  const starts = events.filter((event) => event.kind === "run.started");
-  if (starts.length !== 1) {
-    throw new AgentGraphRuntimeIntegrityError(
-      `Exact RuntimeRun ${claim.targetRunId} must contain exactly one run.started event`,
-    );
-  }
-  const started = starts[0]!;
-  if (started.eventId !== claim.runStartedEventId || started.turnId !== claim.targetTurnId) {
-    throw new AgentGraphRuntimeIntegrityError(
-      `Exact RuntimeRun ${claim.targetRunId} start identity does not match its Claim`,
-    );
-  }
-  const terminals = events.filter((event) => event.kind === "run.terminal");
-  if (terminals.length > 1) {
-    throw new AgentGraphRuntimeIntegrityError(
-      `Exact RuntimeRun ${claim.targetRunId} has conflicting terminal facts`,
-    );
-  }
-  const terminal = terminals[0];
-  const unsettledApprovals = new Set<string>();
-  for (const event of events) {
-    if (event.kind === "approval.requested") unsettledApprovals.add(event.data.approvalId);
-    if (event.kind === "approval.settled") unsettledApprovals.delete(event.data.approvalId);
-  }
-  return {
-    claimId: claim.claimId,
-    sessionId: claim.targetSessionId,
-    turnId: claim.targetTurnId,
-    runId: claim.targetRunId,
-    invocationId: claim.targetInvocationId,
-    status: terminal
-      ? terminalStatus(terminal.data.status)
-      : unsettledApprovals.size > 0
-        ? "waiting_permission"
-        : "running",
-    startedEventId: started.eventId,
-    ...(terminal ? { terminalEventId: terminal.eventId } : {}),
-    outputEventIds: [],
-  };
-}
-
-function emptyProjection(
-  claim: AgentGraphActivationClaimRecord,
-): AgentGraphActivationRuntimeProjection {
-  return {
-    claimId: claim.claimId,
-    sessionId: claim.targetSessionId,
-    turnId: claim.targetTurnId,
-    runId: claim.targetRunId,
-    invocationId: claim.targetInvocationId,
-    status: "not_started",
-    outputEventIds: [],
-  };
-}
-
-function terminalStatus(status: Extract<RuntimeEvent, { kind: "run.terminal" }>["data"]["status"]) {
-  return status === "completed" ? "completed" : status;
 }
 
 function isTerminalStatus(status: AgentGraphActivationRuntimeStatus): boolean {
   return ["completed", "failed", "cancelled", "interrupted"].includes(status);
-}
-
-function assertEventBelongsToClaim(
-  event: RuntimeEvent,
-  claim: AgentGraphActivationClaimRecord,
-): void {
-  if (
-    event.sessionId !== claim.targetSessionId ||
-    event.runId !== claim.targetRunId ||
-    event.invocationId !== claim.targetInvocationId
-  ) {
-    throw new AgentGraphRuntimeIntegrityError(
-      `Runtime event ${event.eventId} identity does not match Claim ${claim.claimId}`,
-    );
-  }
 }
 
 function assertProvision(provision: AgentGraphOperatorProvisionRecord): void {

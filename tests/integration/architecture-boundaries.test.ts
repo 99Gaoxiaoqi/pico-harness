@@ -110,6 +110,39 @@ test("architecture boundary gate rejects Engine type-only imports from Runtime",
   );
 });
 
+test("architecture boundary gate keeps Graph and Runtime independent from daemon composition", async (context) => {
+  const fixtureRoot = await createArchitectureFixture(context, "pico-graph-daemon-boundary-", {
+    "src/agent-graph/service.ts":
+      'import { host } from "../daemon/private.js"; export const graph = host;\n',
+    "src/runtime/consumer.ts":
+      'import type { HostContract } from "../daemon/contracts.js"; export type RuntimeHost = HostContract;\n',
+    "src/daemon/private.ts": "export const host = 1;\n",
+    "src/daemon/contracts.ts": "export interface HostContract { readonly id: string }\n",
+    "src/daemon/composition.ts":
+      'import { graph } from "../agent-graph/service.js"; import type { RuntimeHost } from "../runtime/consumer.js"; export { graph }; export type { RuntimeHost };\n',
+  });
+
+  assert.deepEqual(
+    scanArchitectureBoundaries({ repositoryRoot: fixtureRoot }).map(({ rule, source, target }) => ({
+      rule,
+      source,
+      target,
+    })),
+    [
+      {
+        rule: "agent-graph-to-daemon",
+        source: "src/agent-graph/service.ts",
+        target: "src/daemon/private.ts",
+      },
+      {
+        rule: "runtime-to-daemon",
+        source: "src/runtime/consumer.ts",
+        target: "src/daemon/contracts.ts",
+      },
+    ],
+  );
+});
+
 test("architecture gate flags locally-defined cross-cutting primitives", async (context) => {
   // 横切超时原语必须统一用 src/util/race-with-deadline.ts，不得本地重定义。
   const fixtureRoot = await mkdtemp(join(tmpdir(), "pico-cross-cutting-"));

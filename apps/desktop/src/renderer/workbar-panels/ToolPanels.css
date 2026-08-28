@@ -737,6 +737,7 @@
 
 .graph-panel__operators,
 .graph-panel__intents,
+.graph-panel__diagnostics,
 .graph-panel__timeline {
   display: grid;
   gap: 3px;
@@ -747,6 +748,7 @@
 
 .graph-panel__operators li,
 .graph-panel__intents li,
+.graph-panel__diagnostics li,
 .graph-panel__timeline li {
   display: flex;
   min-width: 0;
@@ -759,6 +761,7 @@
 
 .graph-panel__operators li > div,
 .graph-panel__intents li > div,
+.graph-panel__diagnostics li > div,
 .graph-panel__timeline li > div {
   display: grid;
   min-width: 0;
@@ -768,11 +771,24 @@
 
 .graph-panel__operators strong,
 .graph-panel__intents strong,
+.graph-panel__diagnostics strong,
 .graph-panel__timeline strong,
+.graph-panel__diagnostics p,
 .graph-panel__timeline p {
   overflow: hidden;
   margin: 0;
   text-overflow: ellipsis;
+}
+
+.graph-panel__diagnostics button {
+  align-self: center;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  padding: 4px 10px;
+  font: inherit;
+  cursor: pointer;
 }
 
 .graph-panel__node {

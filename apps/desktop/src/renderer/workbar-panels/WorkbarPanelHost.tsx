@@ -243,6 +243,16 @@ function GraphPanelController({ workspacePath, sessionId, active }: WorkbarPanel
       error={error}
       onRefresh={() => void refresh()}
       onSelectGraph={setSelectedGraphId}
+      onRetryWake={(wakeId) => {
+        if (!selectedGraphId) return;
+        void invokeWorkbarRuntime(runtime, "session.graph.retryWake", {
+          ...scope,
+          graphId: selectedGraphId,
+          wakeId,
+        })
+          .then(() => refresh())
+          .catch((cause) => setError(workbarErrorMessage(cause)));
+      }}
     />
   );
 }
@@ -262,7 +272,9 @@ export function parseGraphDetail(value: unknown): WorkbarGraphDetail {
     !Array.isArray(value["claims"]) ||
     !Array.isArray(value["records"]) ||
     !Array.isArray(value["runtimeClaims"]) ||
-    !Array.isArray(value["outputs"])
+    !Array.isArray(value["outputs"]) ||
+    !Array.isArray(value["diagnostics"]) ||
+    !Array.isArray(value["wakes"])
   ) {
     throw new Error("Graph authority 返回了无效详情。");
   }
@@ -321,6 +333,37 @@ export function parseGraphDetail(value: unknown): WorkbarGraphDetail {
         }),
       };
     }),
+    diagnostics: value["diagnostics"].map((candidate) => {
+      const diagnosticId = stringField(candidate, "diagnosticId");
+      const phase = stringField(candidate, "phase");
+      const subjectId = stringField(candidate, "subjectId");
+      const classification = stringField(candidate, "classification");
+      const state = stringField(candidate, "state");
+      const message = stringField(candidate, "message");
+      if (!diagnosticId || !phase || !subjectId || !classification || !state || !message) {
+        throw new Error("Graph 诊断条目无效。");
+      }
+      const nextRetryAt = numberField(candidate, "nextRetryAt");
+      return {
+        diagnosticId,
+        phase,
+        subjectId,
+        classification,
+        state,
+        message,
+        ...(nextRetryAt === undefined ? {} : { nextRetryAt }),
+      };
+    }),
+    wakes: value["wakes"].map((candidate) => {
+      const wakeId = stringField(candidate, "wakeId");
+      const status = stringField(candidate, "status");
+      const attemptCount = numberField(candidate, "attemptCount");
+      if (!wakeId || !status || attemptCount === undefined) {
+        throw new Error("Graph 根唤醒条目无效。");
+      }
+      const lastError = stringField(candidate, "lastError");
+      return { wakeId, status, attemptCount, ...(lastError ? { lastError } : {}) };
+    }),
   };
 }
 
@@ -333,7 +376,8 @@ export function graphClaimDisplayState(input: {
     return "cancelled";
   }
   if (input.outputStatus === "failure") return "failed";
-  if (input.runtimeStatus === "failed" || input.runtimeStatus === "interrupted") return "failed";
+  if (input.runtimeStatus === "interrupted") return "interrupted";
+  if (input.runtimeStatus === "failed") return "failed";
   if (input.runtimeStatus === "completed") {
     return input.outputStatus === "success" ? "completed" : "failed";
   }

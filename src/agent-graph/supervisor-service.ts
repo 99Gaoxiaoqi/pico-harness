@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { deterministicFingerprint, wakeIdFor } from "../agent-graph/core/ids.js";
+import { deterministicFingerprint, wakeIdFor } from "./core/ids.js";
 import type {
   AgentGraphRecord,
   AgentGraphSupervisorWakeAttemptRecord,
@@ -102,9 +102,11 @@ export interface AgentGraphSupervisorStorePort {
     readonly retryOperationId: string;
     readonly expectedWakeVersion: number;
     readonly expectedAttentionVersion: number;
-  }): Promise<{ readonly record: AgentGraphSupervisorWakeRecord }> | {
-    readonly record: AgentGraphSupervisorWakeRecord;
-  };
+  }):
+    | Promise<{ readonly record: AgentGraphSupervisorWakeRecord }>
+    | {
+        readonly record: AgentGraphSupervisorWakeRecord;
+      };
 }
 
 export interface RootSupervisorRunIdentity {
@@ -291,9 +293,7 @@ export class AgentGraphSupervisorService {
       expectedWakeVersion: candidate.wake.version,
       expectedAttentionVersion: candidate.wake.attentionVersion ?? 0,
     });
-    const refreshed = await this.options.store.getRecoverableSupervisorWake(
-      retried.record.wakeId,
-    );
+    const refreshed = await this.options.store.getRecoverableSupervisorWake(retried.record.wakeId);
     if (refreshed) await this.processWake(refreshed, "explicit_retry");
     return true;
   }
@@ -412,7 +412,10 @@ export class AgentGraphSupervisorService {
     // A sealed Graph is a durable retirement fence. In particular, never resume
     // an in-flight root wake after its root Session has been deleted.
     if (graph.phase !== "open") {
-      if (candidate.attempt && (wake.status === "running" || wake.status === "waiting_permission")) {
+      if (
+        candidate.attempt &&
+        (wake.status === "running" || wake.status === "waiting_permission")
+      ) {
         await this.settle(wake, candidate.attempt, "delivered");
       }
       return;

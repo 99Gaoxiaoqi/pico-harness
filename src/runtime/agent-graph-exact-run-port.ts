@@ -9,9 +9,9 @@ import type { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-e
 import type {
   AgentGraphExactRunInspection,
   AgentGraphExactRunPort,
-  AgentGraphRunLaunchState,
   StartExactAgentGraphRunInput,
 } from "./agent-graph-runtime-adapter.js";
+import type { AgentGraphRunLaunchState } from "../agent-graph/runtime-activation-projection.js";
 import type { PrestartedRuntimeRun, PrestartedRuntimeUserInput } from "./runtime-run-executor.js";
 import { isRuntimeRunLive, RuntimeRun } from "./runtime-run.js";
 

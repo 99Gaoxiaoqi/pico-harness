@@ -1,11 +1,11 @@
 import type { SessionOptions } from "../engine/session.js";
 import type {
-  AgentGraphActivationRuntimeProjection,
   AgentGraphRuntimeAdapter,
   EnsuredAgentGraphOperatorSession,
   ResolvedAgentGraphHandoff,
   StartOrObserveAgentGraphActivationResult,
 } from "../runtime/agent-graph-runtime-adapter.js";
+import type { AgentGraphActivationRuntimeProjection } from "./runtime-activation-projection.js";
 import type {
   AgentGraphActivationClaimRecord,
   AgentGraphOperatorProvisionRecord,

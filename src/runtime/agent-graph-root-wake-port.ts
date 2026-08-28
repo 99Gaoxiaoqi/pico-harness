@@ -4,7 +4,7 @@ import type {
   AgentGraphRootWakePort,
   RootSupervisorRunIdentity,
   RootSupervisorRunState,
-} from "../daemon/agent-graph-supervisor-service.js";
+} from "../agent-graph/supervisor-service.js";
 import type {
   AgentGraphExactRunInspection,
   SqliteAgentGraphExactRunPort,
@@ -68,6 +68,13 @@ export class AgentGraphRootWakeRuntimePort implements AgentGraphRootWakePort {
           status: "manual_intervention",
           reason: "cancelled",
           error: launch.error ?? "Root Supervisor host execution was cancelled",
+        };
+      }
+      if (launch.status === "interrupted") {
+        return {
+          status: "manual_intervention",
+          reason: "indeterminate",
+          error: launch.error ?? "Root Supervisor host execution was interrupted",
         };
       }
       if (launch.status === "succeeded") {
