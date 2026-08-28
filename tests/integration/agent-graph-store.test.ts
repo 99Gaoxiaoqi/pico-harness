@@ -16,6 +16,10 @@ import {
   type CommitAgentGraphScheduleInput,
 } from "../../src/storage/sqlite/sqlite-agent-graph-control-store.js";
 import { withWorkspaceSqliteLease } from "../../src/storage/sqlite/workspace-scopes.js";
+import { ALL_WORKSPACE_SQLITE_SCOPES } from "../../src/storage/sqlite/workspace-scopes.js";
+import { AGENT_GRAPH_SCOPE } from "../../src/storage/sqlite/agent-graph-scope.js";
+import { acquireOperationalDatabase } from "../../src/storage/sqlite/sqlite-database.js";
+import { migrateOperationalDatabaseSync } from "../../src/storage/sqlite/sqlite-schema.js";
 
 test("agent graph store persists exact identities, fences finish, and drives durable wakes", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-agent-graph-store-"));
@@ -323,7 +327,7 @@ test("agent graph store persists exact identities, fences finish, and drives dur
     const version = lease.database
       .prepare("SELECT version FROM operational_schema_migrations WHERE scope = 'agent_graph'")
       .get() as { version: number } | undefined;
-    assert.equal(version?.version, 3);
+    assert.equal(version?.version, 4);
     const names = lease.database
       .prepare(
         `SELECT name FROM sqlite_schema
@@ -333,6 +337,7 @@ test("agent graph store persists exact identities, fences finish, and drives dur
       .map((row) => (row as { name: string }).name);
     assert.deepEqual(names, [
       "agent_graph_activation_claims",
+      "agent_graph_diagnostics",
       "agent_graph_operator_provisions",
       "agent_graph_record_refs",
       "agent_graph_resource_refs",
@@ -346,6 +351,73 @@ test("agent graph store persists exact identities, fences finish, and drives dur
   });
 
   await rm(root, { recursive: true, force: true });
+});
+
+test("agent graph schema upgrades a v3 control ledger additively and reopens", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-agent-graph-v3-upgrade-"));
+  try {
+    const legacyAgentGraphScope = {
+      ...AGENT_GRAPH_SCOPE,
+      migrations: new Map(
+        [...AGENT_GRAPH_SCOPE.migrations].filter(([version]) => version <= 3),
+      ),
+    };
+    const legacyScopes = ALL_WORKSPACE_SQLITE_SCOPES.map((scope) =>
+      scope.name === AGENT_GRAPH_SCOPE.name ? legacyAgentGraphScope : scope,
+    );
+    const legacy = acquireOperationalDatabase(root, {
+      migrate: (database) => migrateOperationalDatabaseSync(database, legacyScopes),
+    });
+    legacy.release();
+
+    const upgraded = new SqliteAgentGraphControlStore({ storageRoot: root });
+    upgraded.createGraph({ graphId: "upgraded-graph", rootSessionId: "root", epoch: 1 });
+    const diagnostic = {
+      diagnosticId: "diagnostic-1",
+      graphId: "upgraded-graph",
+      phase: "provision",
+      subjectId: "operator-1",
+      classification: "transient",
+      message: "token=private-value temporarily unavailable",
+      observationId: "observation-1",
+      retryDelayMs: 100,
+    } as const;
+    assert.equal(upgraded.recordGraphDiagnostic(diagnostic).replayed, false);
+    assert.equal(upgraded.recordGraphDiagnostic(diagnostic).replayed, true);
+    assert.equal(upgraded.listGraphDiagnostics("upgraded-graph")[0]?.attemptCount, 1);
+    assert.doesNotMatch(
+      upgraded.listGraphDiagnostics("upgraded-graph")[0]?.message ?? "",
+      /private-value/u,
+    );
+    assert.equal(
+      upgraded.recordGraphDiagnostic({ ...diagnostic, observationId: "observation-2" }).record
+        .attemptCount,
+      2,
+    );
+    assert.equal(upgraded.resolveGraphDiagnostics("upgraded-graph"), 1);
+    upgraded.close();
+
+    const reopened = new SqliteAgentGraphControlStore({ storageRoot: root });
+    assert.equal(reopened.getGraph("upgraded-graph")?.rootSessionId, "root");
+    assert.equal(reopened.listGraphDiagnostics("upgraded-graph")[0]?.state, "resolved");
+    assert.equal(reopened.listGraphDiagnostics("upgraded-graph")[0]?.attemptCount, 2);
+    reopened.close();
+
+    withWorkspaceSqliteLease(root, (lease) => {
+      const version = lease.database
+        .prepare("SELECT version FROM operational_schema_migrations WHERE scope = 'agent_graph'")
+        .get() as { version: number } | undefined;
+      assert.equal(version?.version, 4);
+      const wakeColumns = lease.database
+        .prepare("PRAGMA table_info(agent_graph_supervisor_wakes)")
+        .all()
+        .map((row) => (row as { name: string }).name);
+      assert.ok(wakeColumns.includes("attention_state"));
+      assert.ok(wakeColumns.includes("attention_version"));
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("agent graph store atomically consumes durable yield interest when admitting a wake", async () => {

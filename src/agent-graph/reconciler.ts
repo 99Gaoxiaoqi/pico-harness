@@ -26,6 +26,11 @@ import type {
   AgentGraphRuntimeProjection,
   AgentGraphRuntimeRecordCandidate,
 } from "./runtime-port.js";
+import {
+  classifyAgentGraphError,
+  safeAgentGraphErrorMessage,
+  type AgentGraphDiagnosticClassification,
+} from "./diagnostics.js";
 
 export type AgentGraphReconcilePhase =
   | "load"
@@ -39,6 +44,7 @@ export type AgentGraphReconcilePhase =
 export interface AgentGraphReconcileError {
   readonly phase: AgentGraphReconcilePhase;
   readonly subjectId: string;
+  readonly classification: AgentGraphDiagnosticClassification;
   readonly message: string;
 }
 
@@ -110,20 +116,21 @@ export class AgentGraphReconciler {
 
   async reconcile(graphId: string): Promise<AgentGraphReconcileResult> {
     if (!graphId.trim()) throw new Error("Graph id must not be empty");
-    const errors: AgentGraphReconcileError[] = [];
+    let errors: AgentGraphReconcileError[] = [];
     const wakes = new Map<string, AgentGraphWakeCandidate>();
     let progressCount = 0;
     let passes = 0;
     let quiescent = false;
 
     for (; passes < this.maxPasses; passes += 1) {
-      const pass: MutablePassResult = { progress: 0, errors, wakes: [] };
+      const pass: MutablePassResult = { progress: 0, errors: [], wakes: [] };
       try {
         await this.drivePass(graphId, pass);
       } catch (error) {
-        errors.push(reconcileError("load", graphId, error));
+        errors = [reconcileError("load", graphId, error)];
         break;
       }
+      errors = pass.errors;
       progressCount += pass.progress;
       for (const wake of pass.wakes) wakes.set(wake.dedupeKey, wake);
       if (pass.progress === 0) {
@@ -709,6 +716,7 @@ function reconcileError(
   return {
     phase,
     subjectId,
-    message: error instanceof Error ? error.message : String(error),
+    classification: classifyAgentGraphError(error),
+    message: safeAgentGraphErrorMessage(error),
   };
 }
