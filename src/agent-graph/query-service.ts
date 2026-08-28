@@ -2,6 +2,9 @@ import { deterministicFingerprint } from "./core/ids.js";
 import { SqliteAgentGraphControlStoreAdapter } from "./sqlite-control-store-adapter.js";
 import type { AgentGraphRecord } from "../storage/sqlite/agent-graph-store-types.js";
 import { SqliteAgentGraphControlStore } from "../storage/sqlite/sqlite-agent-graph-control-store.js";
+import type { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
+import { decodeRuntimeEventJson } from "../storage/runtime-event.js";
+import { projectAgentGraphActivation } from "../runtime/agent-graph-runtime-adapter.js";
 
 export interface AgentGraphQueryInput {
   readonly rootSessionId: string;
@@ -100,6 +103,68 @@ export class AgentGraphReadOnlyQueryService {
         ? { nextCursor: encodeCursor(graph.graphId, watermark, nextOffset) }
         : {}),
     };
+  }
+
+  /** Joins control records with canonical Runtime/output facts for UI status projection. */
+  async queryRuntimeFacts(
+    graphId: string,
+    runtimeStore: SqliteRuntimeEventStore,
+  ): Promise<{
+    readonly runtimeClaims: readonly {
+      readonly claimId: string;
+      readonly status: string;
+      readonly terminalEventId?: string;
+    }[];
+    readonly outputs: readonly {
+      readonly recordId: string;
+      readonly claimId: string;
+      readonly status: "success" | "failure";
+    }[];
+  }> {
+    const graph = this.store.getGraph(graphId);
+    if (!graph) throw new Error(`Graph does not exist: ${graphId}`);
+    const claims = this.store.listActivationClaims(graphId);
+    const runtimeClaims = await Promise.all(
+      claims.map(async (claim) => {
+        const projection = projectAgentGraphActivation(
+          claim,
+          await runtimeStore.readRun(claim.targetSessionId, claim.targetRunId),
+        );
+        return {
+          claimId: claim.claimId,
+          status: projection.status,
+          ...(projection.terminalEventId
+            ? { terminalEventId: projection.terminalEventId }
+            : {}),
+        };
+      }),
+    );
+    const records = this.store.listRecordRefs(graphId);
+    const rows = await runtimeStore.readEventRowsByEventIds(
+      records.map((record) => record.sourceEventId),
+    );
+    const claimsById = new Map(claims.map((claim) => [claim.claimId, claim]));
+    const outputs = records.map((record) => {
+      const row = rows.get(record.sourceEventId);
+      const event = row ? decodeRuntimeEventJson(row.payloadJson) : undefined;
+      const claim = claimsById.get(record.claimId);
+      if (
+        !event ||
+        event.kind !== "agent.output" ||
+        !claim ||
+        event.sessionId !== record.sourceSessionId ||
+        event.runId !== record.sourceRunId ||
+        event.data.payload.activationId !== claim.claimId
+      ) {
+        throw new Error(`Graph record ${record.recordId} has no matching formal output`);
+      }
+      return {
+        recordId: record.recordId,
+        claimId: record.claimId,
+        status: event.data.payload.status,
+      };
+    });
+    return { runtimeClaims, outputs };
   }
 
   private summary(graph: AgentGraphRecord) {

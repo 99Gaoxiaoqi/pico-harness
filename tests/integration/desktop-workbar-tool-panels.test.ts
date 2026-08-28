@@ -14,6 +14,7 @@ import {
   contextUsagePercent,
   createTaskUpdateRequest,
   groupInspectorTraceItems,
+  parseGraphDetail,
   reviewSelectionKey,
   shouldPollTerminalPanel,
   terminalGridFromBounds,
@@ -21,6 +22,49 @@ import {
   type WorkbarArtifactContent,
   type WorkbarTaskItem,
 } from "../../apps/desktop/src/renderer/workbar-panels/index.js";
+
+test("Graph detail derives execution state from formal output and Runtime terminal facts", () => {
+  const detail = parseGraphDetail({
+    summary: {
+      graphId: "graph-1",
+      rootSessionId: "root-1",
+      epoch: 1,
+      phase: "finished",
+      headRevision: 2,
+      createdAt: 1,
+      finishedAt: 2,
+      counts: { operators: 1, intents: 3, claims: 3, records: 2, resources: 0, wakes: 1 },
+    },
+    operators: [{ operatorId: "operator-1", role: "explore", profile: {} }],
+    intents: [
+      { intentId: "intent-1", operatorId: "operator-1", instruction: "success" },
+      { intentId: "intent-2", operatorId: "operator-1", instruction: "failure" },
+      { intentId: "intent-3", operatorId: "operator-1", instruction: "running" },
+    ],
+    claims: [
+      { claimId: "claim-1", intentId: "intent-1", state: "executing" },
+      { claimId: "claim-2", intentId: "intent-2", state: "executing" },
+      { claimId: "claim-3", intentId: "intent-3", state: "executing" },
+    ],
+    records: [
+      { recordId: "record-1", claimId: "claim-1" },
+      { recordId: "record-2", claimId: "claim-2" },
+    ],
+    runtimeClaims: [
+      { claimId: "claim-1", status: "completed" },
+      { claimId: "claim-2", status: "completed" },
+      { claimId: "claim-3", status: "running" },
+    ],
+    outputs: [
+      { recordId: "record-1", claimId: "claim-1", status: "success" },
+      { recordId: "record-2", claimId: "claim-2", status: "failure" },
+    ],
+  });
+
+  assert.equal(detail.claims[0]?.state, "completed");
+  assert.equal(detail.claims[1]?.state, "failed");
+  assert.equal(detail.claims[2]?.state, "running");
+});
 
 test("Inspector trace hides internal state and transcript-only commits", () => {
   const parsed = tracePageView([
@@ -374,6 +418,41 @@ test("Workbar tool panels render real authority snapshots with accessible detail
   assert.match(graph, /aria-label="Graph 周期"/u);
   assert.match(graph, /Researcher/u);
   assert.match(graph, /正式产出/u);
+
+  const waitingGraph = renderToStaticMarkup(
+    React.createElement(GraphWorkbarPanel, {
+      graphs: [
+        {
+          graphId: "graph-waiting",
+          epoch: 1,
+          phase: "open",
+          headRevision: 0,
+          createdAt: 1,
+          counts: { operators: 0, intents: 0, claims: 0, records: 0, resources: 0, wakes: 0 },
+        },
+      ],
+      selectedGraphId: "graph-waiting",
+      detail: {
+        summary: {
+          graphId: "graph-waiting",
+          epoch: 1,
+          phase: "open",
+          headRevision: 0,
+          createdAt: 1,
+          counts: { operators: 0, intents: 0, claims: 0, records: 0, resources: 0, wakes: 0 },
+        },
+        operators: [],
+        intents: [],
+        claims: [],
+      },
+      timeline: [],
+      loading: false,
+      onRefresh: () => undefined,
+      onSelectGraph: () => undefined,
+    }),
+  );
+  assert.match(waitingGraph, /Graph 已启动/u);
+  assert.match(waitingGraph, /等待根 Agent 创建调度/u);
 
   const fallbackTerminal = renderToStaticMarkup(
     React.createElement(TerminalWorkbarPanel, {

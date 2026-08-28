@@ -25,6 +25,13 @@ export const AGENT_GRAPH_MAX_VIEW_RECORDS = 64;
 export const AGENT_GRAPH_MAX_INSTRUCTION_BYTES = 32 * 1024;
 export const AGENT_GRAPH_MAX_JSON_BYTES = 64 * 1024;
 
+/** The complete capability surface for a root Graph Supervisor run. */
+export const AGENT_GRAPH_SUPERVISOR_TOOL_NAMES = [
+  "view_agent_graph",
+  "update_agent_graph",
+  "yield_agent_graph",
+] as const;
+
 const MAX_IDENTITY_BYTES = 1024;
 const MAX_SHORT_TEXT_BYTES = 2 * 1024;
 const MAX_DESCRIPTION_BYTES = 8 * 1024;

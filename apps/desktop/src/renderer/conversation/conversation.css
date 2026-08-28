@@ -139,6 +139,30 @@
   font-size: 11px;
 }
 
+.conversation-graph-status {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border: 1px solid color-mix(in srgb, var(--conversation-accent) 30%, transparent);
+  border-radius: 999px;
+  background: var(--conversation-accent-soft);
+  color: var(--conversation-accent);
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.conversation-graph-status:hover {
+  border-color: color-mix(in srgb, var(--conversation-accent) 55%, transparent);
+}
+
+.conversation-graph-status svg {
+  width: 12px;
+  height: 12px;
+}
+
 .conversation-session-actions {
   display: inline-flex;
   gap: 2px;

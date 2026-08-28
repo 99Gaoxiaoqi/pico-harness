@@ -10,6 +10,7 @@ import {
 import type { SqliteAgentGraphControlStore } from "../storage/sqlite/sqlite-agent-graph-control-store.js";
 import type {
   AgentGraph,
+  AgentGraphOperationSource,
   AgentGraphScheduleCommand,
   AgentGraphWorkspacePolicy,
 } from "./core/contracts.js";
@@ -57,6 +58,12 @@ export interface AgentGraphApplicationService {
   readonly drivePort: AgentGraphDrivePort;
   readonly supervisor: AgentGraphSupervisorService;
   openRootEpoch(rootSessionId: string): AgentGraph;
+  /** Host-owned recovery permit used when a scheduled root Run fails before yielding. */
+  recoverFailedRootRun(input: RegisterAgentGraphYieldInput): Promise<boolean>;
+  /** Seals an admitted epoch only when no schedule revision was ever committed. */
+  sealEmptyRootEpoch(rootSessionId: string): boolean;
+  /** Stops all work admitted by the root Session and seals its open epoch. */
+  retireRootSession(rootSessionId: string, reason: string): Promise<boolean>;
   start(): Promise<void>;
   close(): Promise<void>;
 }
@@ -443,6 +450,80 @@ export function createAgentGraphApplicationService(
       const opened = options.store.openRootEpoch(rootSessionId);
       return control.getScheduleState(opened.record.graphId).graph;
     },
+    recoverFailedRootRun: async (input) => {
+      const graph = options.store.getGraph(input.graphId);
+      if (
+        !graph ||
+        graph.rootSessionId !== input.rootSessionId ||
+        graph.phase !== "open" ||
+        graph.headRevision === 0
+      ) {
+        return false;
+      }
+      const permitId = yieldPermitId(input);
+      drive.prepareYield(input, permitId);
+      try {
+        await supervisor.registerYield({
+          permitId,
+          graphId: input.graphId,
+          rootSessionId: input.rootSessionId,
+          rootRunId: input.rootRunId,
+        });
+        drive.consumeYieldReplayFlag(permitId);
+        return true;
+      } catch (error) {
+        drive.consumeYieldReplayFlag(permitId);
+        throw error;
+      }
+    },
+    sealEmptyRootEpoch: (rootSessionId) => {
+      const graph = options.store.getOpenRootEpoch(rootSessionId);
+      if (!graph || graph.headRevision !== 0) return false;
+      control.commitScheduleRevision({
+        graphId: graph.graphId,
+        expectedPreviousRevision: 0,
+        operationId: `host-empty-epoch:${graph.graphId}`,
+        source: hostLifecycleSource(rootSessionId, graph.graphId, "empty-epoch"),
+        commands: [{ kind: "finish", selectedRecordIds: [] }],
+      });
+      return true;
+    },
+    retireRootSession: async (rootSessionId, reason) => {
+      const graph = options.store.getOpenRootEpoch(rootSessionId);
+      if (!graph) return false;
+      const state = control.getScheduleState(graph.graphId);
+      const stoppedOperators = new Set(
+        state.stops.flatMap((stop) =>
+          stop.target.kind === "operator"
+            ? [`${stop.target.operatorId}\u0000${stop.target.generation}`]
+            : [],
+        ),
+      );
+      const commands: AgentGraphScheduleCommand[] = state.operators
+        .filter(
+          (operator) =>
+            !stoppedOperators.has(`${operator.operatorId}\u0000${operator.generation}`),
+        )
+        .map((operator) => ({
+          kind: "stop" as const,
+          target: {
+            kind: "operator" as const,
+            operatorId: operator.operatorId,
+            generation: operator.generation,
+          },
+          reason,
+        }));
+      commands.push({ kind: "finish", selectedRecordIds: [] });
+      control.commitScheduleRevision({
+        graphId: graph.graphId,
+        expectedPreviousRevision: state.graph.headRevision,
+        operationId: `host-retire-root:${graph.graphId}`,
+        source: hostLifecycleSource(rootSessionId, graph.graphId, "retire-root"),
+        commands,
+      });
+      await supervisor.notifyGraph(graph.graphId);
+      return true;
+    },
     start: () => supervisor.start(),
     close: async () => {
       if (closed) return;
@@ -450,6 +531,19 @@ export function createAgentGraphApplicationService(
       await supervisor.close();
       await runtime.close();
     },
+  };
+}
+
+function hostLifecycleSource(
+  rootSessionId: string,
+  graphId: string,
+  action: string,
+): AgentGraphOperationSource {
+  return {
+    sessionId: rootSessionId,
+    turnId: `host-turn:${graphId}`,
+    runId: `host-run:${graphId}`,
+    toolCallId: `host-${action}:${graphId}`,
   };
 }
 

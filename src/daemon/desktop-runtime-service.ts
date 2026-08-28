@@ -282,6 +282,12 @@ export interface DesktopRuntimeServiceOptions {
   readonly onTranscriptAdvanced?: (workspacePath: string, sessionId: string) => void;
   readonly reconcilePlanControl?: (workspacePath: string, sessionId: string) => Promise<void>;
   readonly browserAgentBroker?: BrowserAgentCommandBroker;
+  /** Production Graph lifecycle fence invoked before destructive root Session deletion. */
+  readonly retireAgentGraphRootSession?: (
+    workspacePath: string,
+    rootSessionId: string,
+    reason: string,
+  ) => Promise<boolean>;
 }
 
 export interface DesktopRuntimeInteractions {
@@ -1116,6 +1122,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private async deleteSession(workspacePath: string, sessionId: string): Promise<JsonValue> {
     const canonical = await this.requireIdleTrustedSession(workspacePath, sessionId, "删除");
+    await this.options.retireAgentGraphRootSession?.(
+      canonical,
+      sessionId,
+      "Root Session deleted",
+    );
     const sideChats = this.sideChatAuthority(canonical);
     await sideChats.recover();
     const leases = sideChats.list();
@@ -1373,6 +1384,25 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     );
     const settings = await this.withSession(canonical, params.sessionId, async (session) => {
       const current = await this.getSessionSettings(canonical, session);
+      if (
+        requestedOrchestrationMode === "default" &&
+        current.orchestrationMode === "graph"
+      ) {
+        const graphStore = new SqliteAgentGraphControlStore({
+          storageRoot: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
+          now: this.now,
+        });
+        try {
+          if (graphStore.getOpenRootEpoch(params.sessionId)) {
+            throw new RuntimeProtocolError(
+              RUNTIME_ERROR_CODES.CONFLICT,
+              "当前 Graph 周期仍未结束，请先让根 Agent 完成调度后再切换为线性模式",
+            );
+          }
+        } finally {
+          graphStore.close();
+        }
+      }
       if (
         requestedCollaborationMode === "agent" &&
         current.collaborationMode === "plan" &&
@@ -1726,20 +1756,26 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     params: RuntimeRequest<"session.graph.query">["params"],
   ): Promise<JsonValue> {
     const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
+    const storageRoot = resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root;
     const store = new SqliteAgentGraphControlStore({
-      storageRoot: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
+      storageRoot,
       now: this.now,
     });
+    const runtimeStore = new SqliteRuntimeEventStore({ storageRoot });
     try {
-      return toJsonValue(
-        new AgentGraphReadOnlyQueryService(store).query({
+      const query = new AgentGraphReadOnlyQueryService(store);
+      const result = query.query({
           rootSessionId: params.sessionId,
           action: params.action,
           ...(params.graphId === undefined ? {} : { graphId: params.graphId }),
           ...(params.cursor === undefined ? {} : { cursor: params.cursor }),
           ...(params.limit === undefined ? {} : { limit: params.limit }),
-        }),
-      );
+        });
+      if (params.action !== "get" || !params.graphId) return toJsonValue(result);
+      return toJsonValue({
+        ...requireJsonRecord(result, "Graph detail"),
+        ...(await query.queryRuntimeFacts(params.graphId, runtimeStore)),
+      });
     } catch (error) {
       throw new RuntimeProtocolError(
         error instanceof Error && /does not belong/u.test(error.message)
@@ -1748,6 +1784,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         error instanceof Error ? error.message : String(error),
       );
     } finally {
+      runtimeStore.close();
       store.close();
     }
   }

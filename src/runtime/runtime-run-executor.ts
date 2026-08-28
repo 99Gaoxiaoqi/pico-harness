@@ -71,6 +71,15 @@ export interface RuntimeRunExecutorInput {
   readonly signal?: AbortSignal;
   readonly onEvent?: (event: RuntimeLifecycleEvent) => void;
   readonly rewindPointSink?: (checkpointId: string) => void;
+  /** Trusted host-owned assertion that must pass before the Runtime Run can complete. */
+  readonly completionGuard?: () => Promise<void> | void;
+  /** Trusted host-owned recovery hook invoked while the failed Runtime Run identity is live. */
+  readonly failureGuard?: (input: {
+    readonly sessionId: string;
+    readonly turnId: string;
+    readonly runId: string;
+    readonly error: unknown;
+  }) => Promise<void> | void;
   /** Eligible foreground-only durable post-terminal memory scheduler. */
   readonly memoryReviewScheduler?: MemoryReviewSchedulerPort;
   /** Per-turn memory trigger slot: set by memory_remember/memory_extract tools. */
@@ -246,18 +255,29 @@ export class RuntimeRunExecutor {
           await session.bindRewindPointSource(rewindPointId, userReceipt);
         }
 
-        const messages = await engine.run(session, undefined, undefined, signal);
-        return {
-          sessionId: session.id,
-          sessionSelection,
-          workDir,
-          finalMessage: findFinalMessage(messages),
-          usage: snapshotUsage(session),
-          messages,
-          ...(this.input.traceEnabled
-            ? { tracePath: await findTracePath(workDir, session.id, this.input.picoHome) }
-            : {}),
-        } satisfies RunAgentCliResult;
+        try {
+          const messages = await engine.run(session, undefined, undefined, signal);
+          await this.input.completionGuard?.();
+          return {
+            sessionId: session.id,
+            sessionSelection,
+            workDir,
+            finalMessage: findFinalMessage(messages),
+            usage: snapshotUsage(session),
+            messages,
+            ...(this.input.traceEnabled
+              ? { tracePath: await findTracePath(workDir, session.id, this.input.picoHome) }
+              : {}),
+          } satisfies RunAgentCliResult;
+        } catch (error) {
+          await this.input.failureGuard?.({
+            sessionId: runtimeRun.sessionId,
+            turnId: runtimeRun.currentTurnId,
+            runId: runtimeRun.runId,
+            error,
+          });
+          throw error;
+        }
       }, signal);
       if (memoryReviewScheduler && submittedUserMessage && this.input.memoryTriggerSlot?.trigger) {
         try {

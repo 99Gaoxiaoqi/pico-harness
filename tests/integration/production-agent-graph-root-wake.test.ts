@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { graphIdFor, wakeIdFor } from "../../src/agent-graph/core/ids.js";
 import { createProductionRuntimeServices } from "../../src/daemon/production-host.js";
+import { createRuntimeRequest } from "../../src/daemon/protocol.js";
 import { globalSessionManager } from "../../src/engine/session.js";
 import {
   AgentRuntime,
@@ -27,7 +28,12 @@ test("production exact root wake reads durable output before finish", () =>
 test("production exact root wake finishes a terminal Claim without output instead of yielding", () =>
   runProductionRootWakeScenario("outputless"));
 
-async function runProductionRootWakeScenario(scenario: "output" | "outputless"): Promise<void> {
+test("production recovers a scheduled root after provider failure before yield", () =>
+  runProductionRootWakeScenario("root-failure"));
+
+async function runProductionRootWakeScenario(
+  scenario: "output" | "outputless" | "root-failure",
+): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), `pico-production-root-wake-${scenario}-`));
   const workspace = join(root, "workspace");
   const picoHome = join(root, "pico-home");
@@ -100,6 +106,9 @@ async function runProductionRootWakeScenario(scenario: "output" | "outputless"):
                   ],
                 });
               }
+              if (scenario === "root-failure" && turn === 2) {
+                throw new Error("provider failed after durable schedule commit");
+              }
               return turn === 2
                 ? toolCall("root-yield", "yield_agent_graph", {})
                 : assistant("initial root complete");
@@ -124,7 +133,7 @@ async function runProductionRootWakeScenario(scenario: "output" | "outputless"):
                   readonly outputEventIds: readonly string[];
                 }[];
               };
-              if (scenario === "output") {
+              if (scenario !== "outputless") {
                 assert.deepEqual(
                   view.results.records.map(({ status, content }) => ({ status, content })),
                   [{ status: "success", content: outputCanary }],
@@ -200,9 +209,13 @@ async function runProductionRootWakeScenario(scenario: "output" | "outputless"):
       },
     });
     const initialRunId = String((initial as Record<string, unknown>)["runId"]);
-    assert.equal((await workspaceRuntime.waitForRun(initialRunId)).status, "succeeded");
+    assert.equal(
+      (await workspaceRuntime.waitForRun(initialRunId)).status,
+      scenario === "root-failure" ? "failed" : "succeeded",
+    );
     await waitUntil(() => (host?.store.listActivationClaims(graphId).length ?? 0) === 1);
     const claim = host.store.listActivationClaims(graphId)[0]!;
+    await waitUntil(() => workspaceRuntime.getRun(claim.targetRunId) !== undefined);
     assert.equal((await workspaceRuntime.waitForRun(claim.targetRunId)).status, "succeeded");
     const operatorEvents = await rootLease.session.runtimeEventStore!.readRun(
       claim.targetSessionId,
@@ -241,7 +254,27 @@ async function runProductionRootWakeScenario(scenario: "output" | "outputless"):
     assert.equal(completedAttempts[0]?.rootSessionId, rootSessionId);
     assert.equal(completedAttempts[0]?.targetRunId, run.runId);
     assert.equal(run.sessionId, rootSessionId);
-    assert.equal(dispatchCount, scenario === "output" ? 8 : 7);
+    const desktopGraph = (await services.desktopService.handle(
+      createRuntimeRequest("session.graph.query", {
+        workspacePath: canonicalWorkspace,
+        sessionId: rootSessionId,
+        action: "get",
+        graphId,
+      }),
+    )) as {
+      readonly runtimeClaims: readonly { readonly status: string }[];
+      readonly outputs: readonly { readonly status: string }[];
+    };
+    assert.deepEqual(desktopGraph.runtimeClaims.map(({ status }) => status), ["completed"]);
+    assert.deepEqual(
+      desktopGraph.outputs.map(({ status }) => status),
+      scenario === "outputless" ? [] : ["success"],
+    );
+    assert.equal(
+      dispatchCount,
+      6,
+      "successful terminal Graph tools must not trigger an extra provider turn",
+    );
     assert.equal(events.filter((event) => event.kind === "run.started").length, 1);
     assert.equal(events.filter((event) => event.kind === "run.terminal").length, 1);
     const durableViewResult = events.find(
@@ -249,7 +282,7 @@ async function runProductionRootWakeScenario(scenario: "output" | "outputless"):
         event.kind === "tool.result.recorded" && event.data.toolName === "view_agent_graph",
     );
     assert.ok(durableViewResult, "view_agent_graph result must be durable on the exact root Run");
-    if (scenario === "output") {
+    if (scenario !== "outputless") {
       assert.match(durableViewResult.data.projection.text, new RegExp(outputCanary, "u"));
       assert.match(durableViewResult.data.projection.text, /"status":"success"/u);
     } else {
