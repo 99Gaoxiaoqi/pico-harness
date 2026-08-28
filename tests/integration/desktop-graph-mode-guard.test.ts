@@ -15,15 +15,13 @@ import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 import { SqliteAgentGraphControlStore } from "../../src/storage/sqlite/sqlite-agent-graph-control-store.js";
 import { createAgentGraphApplicationService } from "../../src/agent-graph/service.js";
+import type { AgentGraphApplicationService } from "../../src/agent-graph/service.js";
 
 test("desktop rejects Graph to linear mode switch while the root epoch is open", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-desktop-graph-mode-guard-"));
   const workspace = join(root, "workspace");
   const picoHome = join(root, "pico-home");
-  await Promise.all([
-    mkdir(workspace, { recursive: true }),
-    mkdir(picoHome, { recursive: true }),
-  ]);
+  await Promise.all([mkdir(workspace, { recursive: true }), mkdir(picoHome, { recursive: true })]);
   const canonical = await realpath(workspace);
   const env = { PICO_HOME: picoHome };
   const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
@@ -110,6 +108,110 @@ test("desktop deletion retires the root Graph before removing its Session", asyn
     assert.equal(graphStore.getGraph(epoch.graphId)?.phase, "finished");
   } finally {
     await graph.close();
+    graphStore.close();
+    await desktop.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("desktop Graph wake retry enforces Session and Graph ownership", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-desktop-graph-retry-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  await Promise.all([mkdir(workspace, { recursive: true }), mkdir(picoHome, { recursive: true })]);
+  const canonical = await realpath(workspace);
+  const env = { PICO_HOME: picoHome };
+  const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
+  await trustStore.trust(canonical);
+  const retriedWakeIds: string[] = [];
+  const graphApplication = {
+    retryRootWake: async (wakeId: string) => {
+      retriedWakeIds.push(wakeId);
+      return true;
+    },
+    start: async () => undefined,
+    close: async () => undefined,
+  } as unknown as AgentGraphApplicationService;
+  const runtime = new WorkspaceRuntimeService({
+    env,
+    execute: async () => ({ ok: true }),
+    createAgentGraphApplicationService: () => graphApplication,
+  });
+  const desktop = new DesktopRuntimeService({ runtimeService: runtime, trustStore, env });
+  const graphStore = new SqliteAgentGraphControlStore({
+    storageRoot: resolvePicoPaths(canonical, { picoHome }).workspace.root,
+  });
+  try {
+    const first = (await desktop.handle(
+      createRuntimeRequest("session.create", { workspacePath: canonical }),
+    )) as { session: { sessionId: string } };
+    const second = (await desktop.handle(
+      createRuntimeRequest("session.create", { workspacePath: canonical }),
+    )) as { session: { sessionId: string } };
+    graphStore.createGraph({
+      graphId: "graph-first",
+      rootSessionId: first.session.sessionId,
+      epoch: 1,
+    });
+    graphStore.createGraph({
+      graphId: "graph-second",
+      rootSessionId: second.session.sessionId,
+      epoch: 1,
+    });
+    graphStore.enqueueSupervisorWake({
+      wakeId: "wake-first",
+      graphId: "graph-first",
+      dedupeKey: "runtime-terminal:first",
+      wakeFingerprint: "wake-first-fingerprint",
+      cause: "runtime_terminal",
+      payload: { claimId: "claim-first" },
+    });
+    graphStore.enqueueSupervisorWake({
+      wakeId: "wake-second",
+      graphId: "graph-second",
+      dedupeKey: "runtime-terminal:second",
+      wakeFingerprint: "wake-second-fingerprint",
+      cause: "runtime_terminal",
+      payload: { claimId: "claim-second" },
+    });
+
+    await assert.rejects(
+      desktop.handle(
+        createRuntimeRequest("session.graph.retryWake", {
+          workspacePath: canonical,
+          sessionId: second.session.sessionId,
+          graphId: "graph-first",
+          wakeId: "wake-first",
+        }),
+      ),
+      (error: unknown) =>
+        error instanceof RuntimeProtocolError && error.code === RUNTIME_ERROR_CODES.NOT_FOUND,
+    );
+    await assert.rejects(
+      desktop.handle(
+        createRuntimeRequest("session.graph.retryWake", {
+          workspacePath: canonical,
+          sessionId: first.session.sessionId,
+          graphId: "graph-first",
+          wakeId: "wake-second",
+        }),
+      ),
+      (error: unknown) =>
+        error instanceof RuntimeProtocolError && error.code === RUNTIME_ERROR_CODES.NOT_FOUND,
+    );
+    assert.deepEqual(
+      await desktop.handle(
+        createRuntimeRequest("session.graph.retryWake", {
+          workspacePath: canonical,
+          sessionId: first.session.sessionId,
+          graphId: "graph-first",
+          wakeId: "wake-first",
+        }),
+      ),
+      { retried: true },
+    );
+    assert.deepEqual(retriedWakeIds, ["wake-first"]);
+  } finally {
     graphStore.close();
     await desktop.close();
     await rm(root, { recursive: true, force: true });

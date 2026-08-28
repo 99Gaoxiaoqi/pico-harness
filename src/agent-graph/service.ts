@@ -6,7 +6,7 @@ import {
   type AgentGraphSupervisorServiceOptions,
   type AgentGraphYieldSnapshot,
   type RegisterAgentGraphYieldInput as SupervisorRegisterYieldInput,
-} from "../daemon/agent-graph-supervisor-service.js";
+} from "./supervisor-service.js";
 import type { SqliteAgentGraphControlStore } from "../storage/sqlite/sqlite-agent-graph-control-store.js";
 import type {
   AgentGraph,
@@ -125,24 +125,26 @@ class SqliteAgentGraphDriveBridge implements AgentGraphDrivePort {
         const key = `${error.phase}\u0000${error.subjectId}`;
         const previous = current.get(key);
         const attemptNumber = (previous?.attemptCount ?? 0) + 1;
-        recorded.push(this.store.recordGraphDiagnostic({
-          diagnosticId: graphDiagnosticId(graphId, error.phase, error.subjectId),
-          graphId,
-          phase: error.phase,
-          subjectId: error.subjectId,
-          classification: error.classification,
-          message: error.message,
-          observationId: deterministicFingerprint({
+        recorded.push(
+          this.store.recordGraphDiagnostic({
+            diagnosticId: graphDiagnosticId(graphId, error.phase, error.subjectId),
             graphId,
             phase: error.phase,
             subjectId: error.subjectId,
+            classification: error.classification,
             message: error.message,
-            previousVersion: previous?.version ?? 0,
-          }),
-          ...(error.classification === "transient"
-            ? { retryDelayMs: graphRetryDelayMs(attemptNumber) }
-            : {}),
-        }).record);
+            observationId: deterministicFingerprint({
+              graphId,
+              phase: error.phase,
+              subjectId: error.subjectId,
+              message: error.message,
+              previousVersion: previous?.version ?? 0,
+            }),
+            ...(error.classification === "transient"
+              ? { retryDelayMs: graphRetryDelayMs(attemptNumber) }
+              : {}),
+          }).record,
+        );
       }
       const retryAt = recorded
         .flatMap((diagnostic) => diagnostic.nextRetryAt ?? [])
@@ -582,8 +584,7 @@ export function createAgentGraphApplicationService(
       );
       const commands: AgentGraphScheduleCommand[] = state.operators
         .filter(
-          (operator) =>
-            !stoppedOperators.has(`${operator.operatorId}\u0000${operator.generation}`),
+          (operator) => !stoppedOperators.has(`${operator.operatorId}\u0000${operator.generation}`),
         )
         .map((operator) => ({
           kind: "stop" as const,

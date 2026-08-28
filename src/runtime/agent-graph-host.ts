@@ -32,7 +32,7 @@ import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { AgentGraphRuntimeAdapter } from "./agent-graph-runtime-adapter.js";
 import { AgentGraphResourceAuthority } from "./agent-graph-resource-authority.js";
 import { AgentGraphWorkspaceResourceAuthority } from "./agent-graph-workspace-resource-authority.js";
-import type { AgentGraphRunLaunchState } from "./agent-graph-runtime-adapter.js";
+import type { AgentGraphRunLaunchState } from "../agent-graph/runtime-activation-projection.js";
 import {
   SqliteAgentGraphExactRunPort,
   type ExecuteAgentGraphExactRunInput,

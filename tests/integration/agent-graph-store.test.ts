@@ -358,9 +358,7 @@ test("agent graph schema upgrades a v3 control ledger additively and reopens", a
   try {
     const legacyAgentGraphScope = {
       ...AGENT_GRAPH_SCOPE,
-      migrations: new Map(
-        [...AGENT_GRAPH_SCOPE.migrations].filter(([version]) => version <= 3),
-      ),
+      migrations: new Map([...AGENT_GRAPH_SCOPE.migrations].filter(([version]) => version <= 3)),
     };
     const legacyScopes = ALL_WORKSPACE_SQLITE_SCOPES.map((scope) =>
       scope.name === AGENT_GRAPH_SCOPE.name ? legacyAgentGraphScope : scope,
@@ -416,6 +414,63 @@ test("agent graph schema upgrades a v3 control ledger additively and reopens", a
       assert.ok(wakeColumns.includes("attention_version"));
     });
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("explicit wake retry cannot cross a finished Graph fence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-agent-graph-finished-retry-"));
+  const store = new SqliteAgentGraphControlStore({ storageRoot: root, now: () => 100 });
+  try {
+    store.createGraph({ graphId: "retry-graph", rootSessionId: "retry-root", epoch: 1 });
+    store.enqueueSupervisorWake({
+      wakeId: "retry-wake",
+      graphId: "retry-graph",
+      dedupeKey: "runtime-terminal:retry-run",
+      wakeFingerprint: "retry-fingerprint",
+      cause: "runtime_terminal",
+      payload: { claimId: "retry-claim" },
+    });
+    const claimed = store.claimSupervisorWake({
+      wakeId: "retry-wake",
+      expectedWakeVersion: 1,
+      attemptId: "retry-attempt",
+      rootSessionId: "retry-root",
+      targetTurnId: "retry-turn",
+      targetRunId: "retry-run",
+    });
+    const parked = store.settleSupervisorWake({
+      wakeId: "retry-wake",
+      attemptId: claimed.attempt.attemptId,
+      expectedWakeVersion: claimed.wake.version,
+      expectedAttemptVersion: claimed.attempt.version,
+      outcome: "needs_attention",
+      error: "retry requires review",
+    });
+    store.commitScheduleRevision(
+      scheduleInput({
+        graphId: "retry-graph",
+        rootSessionId: "retry-root",
+        operationId: "finish-before-retry",
+        expectedRevision: 0,
+        kind: "finish",
+      }),
+    );
+
+    assert.throws(
+      () =>
+        store.retrySupervisorWake({
+          wakeId: "retry-wake",
+          retryOperationId: "retry-after-finish",
+          expectedWakeVersion: parked.wake.version,
+          expectedAttentionVersion: parked.wake.attentionVersion ?? 0,
+        }),
+      /cannot be retried after Graph .* is finished/u,
+    );
+    assert.equal(store.getSupervisorWake("retry-wake")?.status, "needs_attention");
+    assert.equal(store.listSupervisorWakeAttempts("retry-wake").length, 1);
+  } finally {
+    store.close();
     await rm(root, { recursive: true, force: true });
   }
 });

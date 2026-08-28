@@ -33,18 +33,20 @@ test("Graph detail derives execution state from formal output and Runtime termin
       headRevision: 2,
       createdAt: 1,
       finishedAt: 2,
-      counts: { operators: 1, intents: 3, claims: 3, records: 2, resources: 0, wakes: 1 },
+      counts: { operators: 1, intents: 4, claims: 4, records: 2, resources: 0, wakes: 1 },
     },
     operators: [{ operatorId: "operator-1", role: "explore", profile: {} }],
     intents: [
       { intentId: "intent-1", operatorId: "operator-1", instruction: "success" },
       { intentId: "intent-2", operatorId: "operator-1", instruction: "failure" },
       { intentId: "intent-3", operatorId: "operator-1", instruction: "running" },
+      { intentId: "intent-4", operatorId: "operator-1", instruction: "interrupted" },
     ],
     claims: [
       { claimId: "claim-1", intentId: "intent-1", state: "executing" },
       { claimId: "claim-2", intentId: "intent-2", state: "executing" },
       { claimId: "claim-3", intentId: "intent-3", state: "executing" },
+      { claimId: "claim-4", intentId: "intent-4", state: "executing" },
     ],
     records: [
       { recordId: "record-1", claimId: "claim-1" },
@@ -54,16 +56,20 @@ test("Graph detail derives execution state from formal output and Runtime termin
       { claimId: "claim-1", status: "completed" },
       { claimId: "claim-2", status: "completed" },
       { claimId: "claim-3", status: "running" },
+      { claimId: "claim-4", status: "interrupted" },
     ],
     outputs: [
       { recordId: "record-1", claimId: "claim-1", status: "success" },
       { recordId: "record-2", claimId: "claim-2", status: "failure" },
     ],
+    diagnostics: [],
+    wakes: [],
   });
 
   assert.equal(detail.claims[0]?.state, "completed");
   assert.equal(detail.claims[1]?.state, "failed");
   assert.equal(detail.claims[2]?.state, "running");
+  assert.equal(detail.claims[3]?.state, "interrupted");
 });
 
 test("Inspector trace hides internal state and transcript-only commits", () => {
@@ -408,6 +414,24 @@ test("Workbar tool panels render real authority snapshots with accessible detail
           },
         ],
         claims: [{ claimId: "claim-1", intentId: "intent-1", state: "executing" }],
+        diagnostics: [
+          {
+            diagnosticId: "diagnostic-1",
+            phase: "reconcile",
+            subjectId: "claim-1",
+            classification: "runtime",
+            state: "needs_attention",
+            message: "执行状态需要人工确认",
+          },
+        ],
+        wakes: [
+          {
+            wakeId: "wake-1",
+            status: "needs_attention",
+            attemptCount: 5,
+            lastError: "根唤醒连续失败",
+          },
+        ],
       },
       timeline: [{ id: "event-1", at: 1, kind: "record.committed", status: "agent_output" }],
       loading: false,
@@ -418,6 +442,9 @@ test("Workbar tool panels render real authority snapshots with accessible detail
   assert.match(graph, /aria-label="Graph 周期"/u);
   assert.match(graph, /Researcher/u);
   assert.match(graph, /正式产出/u);
+  assert.match(graph, /需要处理/u);
+  assert.match(graph, /执行状态需要人工确认/u);
+  assert.match(graph, />重试</u);
 
   const waitingGraph = renderToStaticMarkup(
     React.createElement(GraphWorkbarPanel, {
@@ -444,6 +471,8 @@ test("Workbar tool panels render real authority snapshots with accessible detail
         operators: [],
         intents: [],
         claims: [],
+        diagnostics: [],
+        wakes: [],
       },
       timeline: [],
       loading: false,

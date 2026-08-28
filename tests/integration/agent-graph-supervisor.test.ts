@@ -13,7 +13,7 @@ import {
   type RecoverableAgentGraphSupervisorWake,
   type RootSupervisorRunIdentity,
   type RootSupervisorRunState,
-} from "../../src/daemon/agent-graph-supervisor-service.js";
+} from "../../src/agent-graph/supervisor-service.js";
 import type {
   AgentGraphRecord,
   AgentGraphSupervisorWakeAttemptRecord,

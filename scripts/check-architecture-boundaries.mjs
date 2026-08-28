@@ -127,6 +127,7 @@ function sourceArea(path, repositoryRoot) {
   if (normalized.startsWith("src/input/")) return "input";
   if (normalized.startsWith("src/provider/")) return "provider";
   if (normalized.startsWith("src/engine/")) return "engine";
+  if (normalized.startsWith("src/agent-graph/")) return "agent-graph";
   if (normalized.startsWith("src/daemon/")) return "daemon";
   if (normalized.startsWith("src/runtime/")) return "runtime";
   return undefined;
@@ -164,6 +165,10 @@ function classifyViolation(importer, target, declaration, repositoryRoot, fromAr
   // Engine may not reach into Runtime even for types: contracts belong to Engine or neutral
   // storage. Type-only imports are exempt only after directional implementation rules run.
   if (from === "engine" && to === "runtime") return "engine-to-runtime-implementation";
+  // Graph application/runtime contracts must not depend on daemon composition details,
+  // including erased type-only edges. Daemon remains the outer composition root.
+  if (from === "agent-graph" && to === "daemon") return "agent-graph-to-daemon";
+  if (from === "runtime" && to === "daemon") return "runtime-to-daemon";
   // Other pure type imports express contract dependencies without loading implementations.
   if (isPureTypeImport(declaration)) return undefined;
   if (from === "provider" && to === "input") return "provider-to-input-concrete";

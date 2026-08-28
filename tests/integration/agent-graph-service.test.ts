@@ -11,7 +11,7 @@ import {
 } from "../../src/agent-graph/core/index.js";
 import { createAgentGraphApplicationService } from "../../src/agent-graph/service.js";
 import { AgentGraphNeedsAttentionError } from "../../src/agent-graph/diagnostics.js";
-import type { AgentGraphRootWakePort } from "../../src/daemon/agent-graph-supervisor-service.js";
+import type { AgentGraphRootWakePort } from "../../src/agent-graph/supervisor-service.js";
 import type { AgentGraphRuntimeApplicationPort } from "../../src/agent-graph/runtime-adapter-bridge.js";
 import type { ResolvedAgentGraphHandoff } from "../../src/runtime/agent-graph-runtime-adapter.js";
 import type {
@@ -755,7 +755,9 @@ test("host recovery yield wakes the root after a scheduled Run fails before yiel
       operationId: "schedule-before-provider-failure",
       rootModelRouteId: "test-root-model",
       source,
-      commands: [addCommand({ graphId, intentId: "completed-intent", operatorId: "worker", source })],
+      commands: [
+        addCommand({ graphId, intentId: "completed-intent", operatorId: "worker", source }),
+      ],
     });
     assert.equal(
       await service.recoverFailedRootRun({

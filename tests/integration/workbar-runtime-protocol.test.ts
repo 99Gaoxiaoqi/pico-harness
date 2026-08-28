@@ -53,6 +53,35 @@ test("workbar data methods reject unknown and oversized parameters", () => {
     },
   );
   assert.ok(DESKTOP_RUNTIME_METHODS.includes("session.graph.query"));
+  assert.deepEqual(
+    parseStrictRuntimeParams("session.graph.retryWake", {
+      workspacePath: "/workspace",
+      sessionId: "session",
+      graphId: "graph-1",
+      wakeId: "wake-1",
+    }),
+    {
+      workspacePath: "/workspace",
+      sessionId: "session",
+      graphId: "graph-1",
+      wakeId: "wake-1",
+    },
+  );
+  assert.deepEqual(parseDesktopRuntimeResult("session.graph.retryWake", { retried: true }), {
+    retried: true,
+  });
+  assert.ok(DESKTOP_RUNTIME_METHODS.includes("session.graph.retryWake"));
+  assert.throws(
+    () =>
+      parseStrictRuntimeParams("session.graph.retryWake", {
+        workspacePath: "/workspace",
+        sessionId: "session",
+        graphId: "graph-1",
+        wakeId: "wake-1",
+        mutation: true,
+      }),
+    RuntimeProtocolError,
+  );
   assert.throws(
     () =>
       parseStrictRuntimeParams("session.graph.query", {

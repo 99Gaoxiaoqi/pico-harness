@@ -10,7 +10,7 @@ import {
   type RuntimeSessionResourceChangedNotice,
 } from "../runtime/agent-runtime.js";
 import { currentRuntimeRun, RuntimeRun } from "../runtime/runtime-run.js";
-import type { AgentGraphRunLaunchState } from "../runtime/agent-graph-runtime-adapter.js";
+import type { AgentGraphRunLaunchState } from "../agent-graph/runtime-activation-projection.js";
 import { inspectAgentGraphExactRun } from "../runtime/agent-graph-exact-run-port.js";
 import type { PlanHandoff } from "../engine/plan-handoff.js";
 import { PlanCoordinator } from "../plan/coordinator.js";
@@ -92,6 +92,7 @@ import { LocalDaemonHost } from "./runtime-host.js";
 import { canonicalizeWorkspacePath } from "./workspace-registry.js";
 import { WorkspaceRegistrationStore } from "./workspace-registration.js";
 import { WorkspaceRuntimeService } from "./workspace-runtime-service.js";
+import { agentGraphLaunchStateFromWorkspaceRun } from "./agent-graph-launch-state.js";
 import { BrowserAgentCommandBroker } from "./browser-agent-command-broker.js";
 import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 import type { AgentGraphApplicationService } from "../agent-graph/service.js";
@@ -862,12 +863,7 @@ export function createProductionRuntimeServices(
           };
           foregroundGraphBinding =
             graphHost && admittedGraph
-              ? rootAgentGraphBinding(
-                  graphHost,
-                  admittedGraph,
-                  targetSessionId,
-                  route.modelRouteId,
-                )
+              ? rootAgentGraphBinding(graphHost, admittedGraph, targetSessionId, route.modelRouteId)
               : undefined;
           const foregroundGraphRuntime =
             graphHost && admittedGraph && foregroundGraphBinding
@@ -1714,14 +1710,10 @@ function graphLaunchState(
   runId: string,
 ): AgentGraphRunLaunchState {
   const run = workspaceRuntime.getRun(runId);
-  if (!run || run.sessionId !== sessionId) return { status: "unknown" };
-  if (!isTerminalWorkspaceRunStatus(run.status)) return { status: "running" };
-  if (run.status === "succeeded") return { status: "succeeded" };
-  if (run.status !== "failed" && run.status !== "cancelled") return { status: "unknown" };
-  return {
-    status: run.status,
-    ...(run.error ? { error: safeGraphExecutionError(run.error).message } : {}),
-  };
+  const projected = agentGraphLaunchStateFromWorkspaceRun(run, sessionId);
+  return "error" in projected && projected.error
+    ? { ...projected, error: safeGraphExecutionError(projected.error).message }
+    : projected;
 }
 
 function workspaceGraphApplicationLifecycle(input: {

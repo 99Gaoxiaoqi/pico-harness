@@ -10,10 +10,10 @@ import {
   type AgentGraphExactRunPort,
   type AgentGraphOutputLedgerPort,
   type AgentGraphRecordStorePort,
-  type AgentGraphRunLaunchState,
   type CommittedAgentOutputSource,
   type StartExactAgentGraphRunInput,
 } from "../../src/runtime/agent-graph-runtime-adapter.js";
+import type { AgentGraphRunLaunchState } from "../../src/agent-graph/runtime-activation-projection.js";
 import {
   agentGraphInputRuntimeEventId,
   inspectAgentGraphExactRun,

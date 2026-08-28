@@ -1191,9 +1191,13 @@ export class SqliteAgentGraphControlStore {
       const wake = this.selectWake(requireNonEmpty(wakeId, "wakeId"));
       if (
         !wake ||
-        !["pending", "retryable_failed", "running", "waiting_permission", "needs_attention"].includes(
-          wake.status,
-        )
+        ![
+          "pending",
+          "retryable_failed",
+          "running",
+          "waiting_permission",
+          "needs_attention",
+        ].includes(wake.status)
       ) {
         return undefined;
       }
@@ -1377,6 +1381,12 @@ export class SqliteAgentGraphControlStore {
       const wake = this.requireWake(wakeId);
       if (wake.lastRetryOperationId === retryOperationId) {
         return { record: wake, replayed: true };
+      }
+      const graph = this.requireGraph(wake.graphId);
+      if (graph.phase !== "open") {
+        throw new AgentGraphStoreConflictError(
+          `Wake ${wakeId} cannot be retried after Graph ${graph.graphId} is finished`,
+        );
       }
       if (
         wake.status !== "needs_attention" ||

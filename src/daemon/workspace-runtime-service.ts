@@ -141,7 +141,8 @@ const MAX_REPLAY_EVENT_LIMIT = 9_999;
 const MAX_REPLAY_QUERY_LIMIT = 10_000;
 const REPLAY_RESPONSE_METADATA_RESERVE_BYTES = 64 * 1024;
 const MAX_REPLAY_EVENTS_BYTES = MAX_RUNTIME_FRAME_BYTES - REPLAY_RESPONSE_METADATA_RESERVE_BYTES;
-const INTERRUPTED_DAEMON_RUN_ERROR = "daemon 重启前 Run 未进入终态，当前 executor 无法安全恢复";
+export const INTERRUPTED_DAEMON_RUN_ERROR =
+  "daemon 重启前 Run 未进入终态，当前 executor 无法安全恢复";
 
 function planReviewIntentRequest(input: PlanReviewRunIntentInput): Record<string, unknown> {
   return {
@@ -700,6 +701,12 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
     if (current) return current;
     const durable = this.eventStore(runtime.workspace).getDaemonRun(runtime.workspace, runId);
     return durable ? workspaceRunSnapshot(durable) : undefined;
+  }
+
+  /** Read-only live-host lookup; never constructs a workspace or starts Graph recovery. */
+  async peekWorkspaceRun(workspacePath: string, runId: string) {
+    const runtime = await this.registry.peek(workspacePath);
+    return runtime?.getRun(runId);
   }
 
   async executeIdempotentDaemonCommand<Result extends Record<string, unknown>>(

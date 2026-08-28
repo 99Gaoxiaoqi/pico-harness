@@ -5,6 +5,29 @@ import { join } from "node:path";
 import test from "node:test";
 import { WorkspaceRuntimeRegistry } from "../../src/daemon/workspace-registry.js";
 
+test("workspace registry peek never constructs a runtime", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-workspace-registry-peek-"));
+  const workspace = join(root, "workspace");
+  await mkdir(workspace, { recursive: true });
+  let creates = 0;
+  const registry = new WorkspaceRuntimeRegistry({
+    create: async (workspacePath) => {
+      creates++;
+      return { workspacePath, close: async () => undefined };
+    },
+  });
+  context.after(async () => {
+    await registry.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  assert.equal(await registry.peek(workspace), undefined);
+  assert.equal(creates, 0);
+  const runtime = await registry.get(workspace);
+  assert.strictEqual(await registry.peek(workspace), runtime);
+  assert.equal(creates, 1);
+});
+
 test("workspace replacement waits until the previous Runtime releases ownership", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-workspace-registry-release-"));
   const workspace = join(root, "workspace");
