@@ -27,6 +27,7 @@ import type {
   StopAgentGraphActivationRequest,
 } from "./runtime-port.js";
 import { assertValidAgentGraphOperatorProfileSnapshot } from "./operator-profile-catalog.js";
+import { AgentGraphNeedsAttentionError } from "./diagnostics.js";
 
 export interface AgentGraphRuntimeApplicationPort {
   ensureOperatorProvision(
@@ -129,7 +130,15 @@ export class AgentGraphRuntimePortBridge implements AgentGraphRuntimePort {
 
   async ensureOperator(input: EnsureAgentGraphOperatorRequest): Promise<void> {
     this.requireOpen();
-    assertValidAgentGraphOperatorProfileSnapshot(input.provision.profileSnapshot);
+    try {
+      assertValidAgentGraphOperatorProfileSnapshot(input.provision.profileSnapshot);
+    } catch (error) {
+      throw new AgentGraphNeedsAttentionError(
+        "configuration",
+        "Graph operator profile snapshot is invalid",
+        { cause: error },
+      );
+    }
     const existing = this.leases.get(input.provision.provisionId);
     if (existing) {
       assertHeldLease(existing, input.provision);

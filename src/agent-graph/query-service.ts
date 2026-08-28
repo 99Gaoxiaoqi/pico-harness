@@ -34,6 +34,8 @@ export interface AgentGraphTimelineItem {
     | "workspace.cleaned"
     | "yield.registered"
     | "yield.resolved"
+    | "diagnostic.recorded"
+    | "diagnostic.resolved"
     | "wake.enqueued"
     | "wake.settled"
     | "wake.attempted";
@@ -87,6 +89,11 @@ export class AgentGraphReadOnlyQueryService {
         records: this.store.listRecordRefs(graph.graphId),
         resources: this.store.listResourceRefs(graph.graphId),
         workspaceResources: this.store.listWorkspaceResources(graph.graphId),
+        diagnostics: this.store.listGraphDiagnostics(graph.graphId),
+        wakes: this.store.listSupervisorWakes(graph.graphId).map((wake) => ({
+          ...wake,
+          attempts: this.store.listSupervisorWakeAttempts(wake.wakeId),
+        })),
       };
     }
 
@@ -185,6 +192,7 @@ export class AgentGraphReadOnlyQueryService {
         resources: this.store.listResourceRefs(graphId).length,
         workspaceResources: this.store.listWorkspaceResources(graphId).length,
         wakes: this.store.listSupervisorWakes(graphId).length,
+        diagnostics: this.store.listGraphDiagnostics(graphId, { unresolvedOnly: true }).length,
       },
     };
   }
@@ -323,7 +331,11 @@ export class AgentGraphReadOnlyQueryService {
         subjectId: wake.wakeId,
         status: wake.cause,
       });
-      if (wake.deliveredAt !== undefined || wake.status === "retryable_failed") {
+      if (
+        wake.deliveredAt !== undefined ||
+        wake.status === "retryable_failed" ||
+        wake.status === "needs_attention"
+      ) {
         items.push({
           id: `wake-settled:${wake.wakeId}:${wake.version}`,
           at: wake.deliveredAt ?? wake.updatedAt,
@@ -341,6 +353,25 @@ export class AgentGraphReadOnlyQueryService {
           subjectId: attempt.attemptId,
           status: attempt.status,
           ...(attempt.error === undefined ? {} : { detail: attempt.error }),
+        });
+      }
+    }
+    for (const diagnostic of this.store.listGraphDiagnostics(graphId)) {
+      items.push({
+        id: `diagnostic:${diagnostic.diagnosticId}:${diagnostic.version}`,
+        at: diagnostic.createdAt,
+        kind: "diagnostic.recorded",
+        subjectId: diagnostic.subjectId,
+        status: diagnostic.state,
+        detail: `${diagnostic.phase}:${diagnostic.classification}:${diagnostic.message}`,
+      });
+      if (diagnostic.resolvedAt !== undefined) {
+        items.push({
+          id: `diagnostic-resolved:${diagnostic.diagnosticId}:${diagnostic.version}`,
+          at: diagnostic.resolvedAt,
+          kind: "diagnostic.resolved",
+          subjectId: diagnostic.subjectId,
+          status: "resolved",
         });
       }
     }

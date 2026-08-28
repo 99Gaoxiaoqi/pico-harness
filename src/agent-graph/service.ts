@@ -26,6 +26,7 @@ import type {
   RegisterAgentGraphYieldResult,
 } from "../tools/agent-graph-tools.js";
 import { deterministicFingerprint } from "./core/ids.js";
+import type { AgentGraphReconcileError } from "./reconciler.js";
 import {
   createBuiltinAgentGraphOperatorProfileCatalog,
   type AgentGraphOperatorProfileCatalog,
@@ -64,6 +65,7 @@ export interface AgentGraphApplicationService {
   sealEmptyRootEpoch(rootSessionId: string): boolean;
   /** Stops all work admitted by the root Session and seals its open epoch. */
   retireRootSession(rootSessionId: string, reason: string): Promise<boolean>;
+  retryRootWake(wakeId: string): Promise<boolean>;
   start(): Promise<void>;
   close(): Promise<void>;
 }
@@ -80,22 +82,100 @@ class SqliteAgentGraphDriveBridge implements AgentGraphDrivePort {
     private readonly control: SqliteAgentGraphControlStoreAdapter,
     private readonly reconciler: AgentGraphReconciler,
     private readonly runtime: AgentGraphRuntimePortBridge,
+    private readonly now: () => number,
   ) {}
 
   listOpenGraphIds(): readonly string[] {
     return this.control.listGraphIds({ openOnly: true });
   }
 
-  async driveGraph(graphId: string): Promise<AgentGraphDriveResult> {
+  async driveGraph(
+    graphId: string,
+    options: { readonly force?: boolean } = {},
+  ): Promise<AgentGraphDriveResult> {
+    const active = this.store.listGraphDiagnostics(graphId, { unresolvedOnly: true });
+    if (!options.force) {
+      if (active.some((diagnostic) => diagnostic.state === "needs_attention")) {
+        return { quiescent: true, needsAttention: true };
+      }
+      const retryAt = active
+        .flatMap((diagnostic) =>
+          diagnostic.state === "retry_scheduled" && diagnostic.nextRetryAt !== undefined
+            ? [diagnostic.nextRetryAt]
+            : [],
+        )
+        .sort((left, right) => left - right)[0];
+      if (retryAt !== undefined && retryAt > this.now()) {
+        return { quiescent: true, retryAt };
+      }
+    }
     const result = await this.reconciler.reconcile(graphId);
     await this.runtime.releaseStoppedProvisions(graphId);
+    if (result.errors.length === 0) {
+      this.store.resolveGraphDiagnostics(graphId);
+    } else {
+      const current = new Map(
+        this.store
+          .listGraphDiagnostics(graphId)
+          .map((diagnostic) => [`${diagnostic.phase}\u0000${diagnostic.subjectId}`, diagnostic]),
+      );
+      const errors = dedupeReconcileErrors(result.errors);
+      const recorded = [];
+      for (const error of errors) {
+        const key = `${error.phase}\u0000${error.subjectId}`;
+        const previous = current.get(key);
+        const attemptNumber = (previous?.attemptCount ?? 0) + 1;
+        recorded.push(this.store.recordGraphDiagnostic({
+          diagnosticId: graphDiagnosticId(graphId, error.phase, error.subjectId),
+          graphId,
+          phase: error.phase,
+          subjectId: error.subjectId,
+          classification: error.classification,
+          message: error.message,
+          observationId: deterministicFingerprint({
+            graphId,
+            phase: error.phase,
+            subjectId: error.subjectId,
+            message: error.message,
+            previousVersion: previous?.version ?? 0,
+          }),
+          ...(error.classification === "transient"
+            ? { retryDelayMs: graphRetryDelayMs(attemptNumber) }
+            : {}),
+        }).record);
+      }
+      const retryAt = recorded
+        .flatMap((diagnostic) => diagnostic.nextRetryAt ?? [])
+        .sort((left, right) => left - right)[0];
+      const unresolved = this.store.listGraphDiagnostics(graphId, { unresolvedOnly: true });
+      return {
+        quiescent: true,
+        wakeCandidates: result.wakeCandidates.map((candidate) => ({
+          dedupeKey: candidate.dedupeKey,
+          cause: "runtime_terminal" as const,
+          payload: candidate.payload,
+        })),
+        ...(retryAt === undefined ? {} : { retryAt }),
+        ...(unresolved.some((diagnostic) => diagnostic.state === "needs_attention")
+          ? { needsAttention: true }
+          : {}),
+      };
+    }
+    const unresolved = this.store.listGraphDiagnostics(graphId, { unresolvedOnly: true });
+    const retryAt = unresolved
+      .flatMap((diagnostic) => diagnostic.nextRetryAt ?? [])
+      .sort((left, right) => left - right)[0];
     return {
-      quiescent: result.quiescent,
+      quiescent: result.errors.length > 0 ? true : result.quiescent,
       wakeCandidates: result.wakeCandidates.map((candidate) => ({
         dedupeKey: candidate.dedupeKey,
         cause: "runtime_terminal" as const,
         payload: candidate.payload,
       })),
+      ...(retryAt === undefined ? {} : { retryAt }),
+      ...(unresolved.some((diagnostic) => diagnostic.state === "needs_attention")
+        ? { needsAttention: true }
+        : {}),
     };
   }
 
@@ -422,7 +502,8 @@ export function createAgentGraphApplicationService(
     runtime,
     ...(options.now === undefined ? {} : { now: options.now }),
   });
-  const drive = new SqliteAgentGraphDriveBridge(options.store, control, reconciler, runtime);
+  const now = options.now ?? Date.now;
+  const drive = new SqliteAgentGraphDriveBridge(options.store, control, reconciler, runtime, now);
   const supervisor = new AgentGraphSupervisorService({
     store: options.store,
     drivePort: drive,
@@ -524,6 +605,7 @@ export function createAgentGraphApplicationService(
       await supervisor.notifyGraph(graph.graphId);
       return true;
     },
+    retryRootWake: (wakeId) => supervisor.retryNeedsAttention(wakeId),
     start: () => supervisor.start(),
     close: async () => {
       if (closed) return;
@@ -532,6 +614,25 @@ export function createAgentGraphApplicationService(
       await runtime.close();
     },
   };
+}
+
+function graphDiagnosticId(graphId: string, phase: string, subjectId: string): string {
+  return `graph_diagnostic_${deterministicFingerprint({ graphId, phase, subjectId }).slice(
+    "sha256:".length,
+    39,
+  )}`;
+}
+
+function dedupeReconcileErrors(
+  errors: readonly AgentGraphReconcileError[],
+): readonly AgentGraphReconcileError[] {
+  const deduped = new Map<string, AgentGraphReconcileError>();
+  for (const error of errors) deduped.set(`${error.phase}\u0000${error.subjectId}`, error);
+  return [...deduped.values()];
+}
+
+function graphRetryDelayMs(attemptNumber: number): number {
+  return Math.min(60_000, 1_000 * 2 ** Math.min(Math.max(0, attemptNumber - 1), 6));
 }
 
 function hostLifecycleSource(

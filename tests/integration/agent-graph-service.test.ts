@@ -10,6 +10,7 @@ import {
   graphIdFor,
 } from "../../src/agent-graph/core/index.js";
 import { createAgentGraphApplicationService } from "../../src/agent-graph/service.js";
+import { AgentGraphNeedsAttentionError } from "../../src/agent-graph/diagnostics.js";
 import type { AgentGraphRootWakePort } from "../../src/daemon/agent-graph-supervisor-service.js";
 import type { AgentGraphRuntimeApplicationPort } from "../../src/agent-graph/runtime-adapter-bridge.js";
 import type { ResolvedAgentGraphHandoff } from "../../src/runtime/agent-graph-runtime-adapter.js";
@@ -285,6 +286,149 @@ test("workspace application drives add and follow-up activate to records and fin
   }
 
   assert.equal(runtime.releases, 2);
+});
+
+test("transient reconciler diagnostics survive restart, retry the same identity, and resolve", async () => {
+  const storageRoot = await mkdtemp(join(tmpdir(), "pico-agent-graph-diagnostic-retry-"));
+  let now = 100;
+  const rootSessionId = "diagnostic-retry-root";
+  const graphId = graphIdFor(rootSessionId, 1);
+  const source = {
+    sessionId: rootSessionId,
+    turnId: "root-turn",
+    runId: "root-run",
+    toolCallId: "root-update",
+  };
+  const firstStore = new SqliteAgentGraphControlStore({ storageRoot, now: () => now });
+  const failingRuntime = new ProvisionFailureRuntime(
+    new Error("Bearer private-token token=another-private-value temporarily unavailable"),
+  );
+  const first = createAgentGraphApplicationService({
+    store: firstStore,
+    runtime: failingRuntime,
+    rootWakePort: new CompletingRootWakePort(),
+    resolveOperatorWorkspace: () => ({ workDir: storageRoot }),
+    now: () => now,
+  });
+  try {
+    await first.start();
+    first.openRootEpoch(rootSessionId);
+    await first.toolPort.commitUpdate({
+      graphId,
+      epoch: 1,
+      expectedRevision: 0,
+      operationId: "schedule-transient-failure",
+      rootModelRouteId: "test-root-model",
+      source,
+      commands: [addCommand({ graphId, intentId: "intent-1", operatorId: "worker", source })],
+    });
+    await first.supervisor.notifyGraph(graphId);
+    const diagnostic = firstStore.listGraphDiagnostics(graphId, { unresolvedOnly: true })[0];
+    assert.equal(diagnostic?.classification, "transient");
+    assert.equal(diagnostic?.state, "retry_scheduled");
+    assert.ok((diagnostic?.attemptCount ?? 0) >= 1);
+    assert.doesNotMatch(diagnostic?.message ?? "", /private-token|another-private-value/u);
+    await first.close();
+    firstStore.close();
+
+    now = diagnostic!.nextRetryAt!;
+    const reopened = new SqliteAgentGraphControlStore({ storageRoot, now: () => now });
+    const completingRuntime = new CompletingRuntimeAdapter();
+    const recovered = createAgentGraphApplicationService({
+      store: reopened,
+      runtime: completingRuntime,
+      rootWakePort: new CompletingRootWakePort(),
+      resolveOperatorWorkspace: () => ({ workDir: storageRoot }),
+      now: () => now,
+    });
+    try {
+      await recovered.start();
+      assert.equal(reopened.listOperatorProvisions(graphId)[0]?.state, "provisioned");
+      assert.equal(reopened.listActivationClaims(graphId)[0]?.intentId, "intent-1");
+      assert.equal(reopened.listGraphDiagnostics(graphId)[0]?.state, "resolved");
+      assert.equal(
+        reopened.listGraphDiagnostics(graphId)[0]?.attemptCount,
+        diagnostic?.attemptCount,
+      );
+    } finally {
+      await recovered.close();
+      reopened.close();
+    }
+  } finally {
+    try {
+      await first.close();
+    } catch {
+      // The first service may already be closed by the restart boundary above.
+    }
+    firstStore.close();
+    await rm(storageRoot, { recursive: true, force: true });
+  }
+});
+
+test("configuration reconciler diagnostics remain needs-attention across restart", async () => {
+  const storageRoot = await mkdtemp(join(tmpdir(), "pico-agent-graph-diagnostic-attention-"));
+  const rootSessionId = "diagnostic-attention-root";
+  const graphId = graphIdFor(rootSessionId, 1);
+  const source = {
+    sessionId: rootSessionId,
+    turnId: "root-turn",
+    runId: "root-run",
+    toolCallId: "root-update",
+  };
+  const firstStore = new SqliteAgentGraphControlStore({ storageRoot });
+  const failure = new AgentGraphNeedsAttentionError(
+    "configuration",
+    "operator route is not configured",
+  );
+  const firstRuntime = new ProvisionFailureRuntime(failure);
+  const first = createAgentGraphApplicationService({
+    store: firstStore,
+    runtime: firstRuntime,
+    rootWakePort: new CompletingRootWakePort(),
+    resolveOperatorWorkspace: () => ({ workDir: storageRoot }),
+  });
+  try {
+    await first.start();
+    first.openRootEpoch(rootSessionId);
+    await first.toolPort.commitUpdate({
+      graphId,
+      epoch: 1,
+      expectedRevision: 0,
+      operationId: "schedule-configuration-failure",
+      rootModelRouteId: "test-root-model",
+      source,
+      commands: [addCommand({ graphId, intentId: "intent-1", operatorId: "worker", source })],
+    });
+    await first.supervisor.notifyGraph(graphId);
+    assert.equal(firstStore.listGraphDiagnostics(graphId)[0]?.state, "needs_attention");
+    await first.close();
+    firstStore.close();
+
+    const reopened = new SqliteAgentGraphControlStore({ storageRoot });
+    const recoveredRuntime = new ProvisionFailureRuntime(failure);
+    const recovered = createAgentGraphApplicationService({
+      store: reopened,
+      runtime: recoveredRuntime,
+      rootWakePort: new CompletingRootWakePort(),
+      resolveOperatorWorkspace: () => ({ workDir: storageRoot }),
+    });
+    try {
+      await recovered.start();
+      assert.equal(recoveredRuntime.ensureCalls, 0, "startup must not retry permanent failures");
+      assert.equal(reopened.listGraphDiagnostics(graphId)[0]?.state, "needs_attention");
+    } finally {
+      await recovered.close();
+      reopened.close();
+    }
+  } finally {
+    try {
+      await first.close();
+    } catch {
+      // The first service may already be closed by the restart boundary above.
+    }
+    firstStore.close();
+    await rm(storageRoot, { recursive: true, force: true });
+  }
 });
 
 test("root epochs advance only after finish and read paths never create Graphs", async () => {
@@ -751,6 +895,21 @@ class CompletingRuntimeAdapter implements AgentGraphRuntimeApplicationPort {
       truncated: false,
       prompt: records.length === 0 ? "" : `handoff:${records.length}`,
     };
+  }
+}
+
+class ProvisionFailureRuntime extends CompletingRuntimeAdapter {
+  ensureCalls = 0;
+
+  constructor(private readonly failure: Error) {
+    super();
+  }
+
+  override async ensureOperatorProvision(
+    _input: Parameters<AgentGraphRuntimeApplicationPort["ensureOperatorProvision"]>[0],
+  ): Promise<never> {
+    this.ensureCalls += 1;
+    throw this.failure;
   }
 }
 
