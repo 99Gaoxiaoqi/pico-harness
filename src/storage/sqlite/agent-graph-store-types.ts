@@ -13,7 +13,8 @@ export type AgentGraphWakeStatus =
   | "running"
   | "delivered"
   | "waiting_permission"
-  | "retryable_failed";
+  | "retryable_failed"
+  | "needs_attention";
 export type AgentGraphWakeAttemptStatus = "running" | "completed" | "waiting_permission" | "failed";
 export type AgentGraphYieldInterestState = "registered" | "consumed" | "cancelled";
 
@@ -268,6 +269,59 @@ export interface AgentGraphSupervisorWakeRecord {
   readonly deliveredAt?: number;
   readonly lastError?: string;
   readonly yieldPermitId?: string;
+  readonly attentionVersion?: number;
+  readonly needsAttentionAt?: number;
+  readonly attentionResolvedAt?: number;
+  readonly lastRetryOperationId?: string;
+}
+
+export type AgentGraphDiagnosticPhase =
+  | "load"
+  | "stop"
+  | "provision"
+  | "resolve-inputs"
+  | "claim"
+  | "begin-executing"
+  | "project-record";
+export type AgentGraphDiagnosticClassification =
+  | "transient"
+  | "configuration"
+  | "integrity";
+export type AgentGraphDiagnosticState = "retry_scheduled" | "needs_attention" | "resolved";
+
+export interface AgentGraphDiagnosticRecord {
+  readonly diagnosticId: string;
+  readonly graphId: string;
+  readonly phase: AgentGraphDiagnosticPhase;
+  readonly subjectId: string;
+  readonly classification: AgentGraphDiagnosticClassification;
+  readonly state: AgentGraphDiagnosticState;
+  readonly message: string;
+  readonly attemptCount: number;
+  readonly lastObservationId: string;
+  readonly nextRetryAt?: number;
+  readonly version: number;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly resolvedAt?: number;
+}
+
+export interface RecordAgentGraphDiagnosticInput {
+  readonly diagnosticId: string;
+  readonly graphId: string;
+  readonly phase: AgentGraphDiagnosticPhase;
+  readonly subjectId: string;
+  readonly classification: AgentGraphDiagnosticClassification;
+  readonly message: string;
+  readonly observationId: string;
+  readonly retryDelayMs?: number;
+}
+
+export interface RetryAgentGraphSupervisorWakeInput {
+  readonly wakeId: string;
+  readonly retryOperationId: string;
+  readonly expectedWakeVersion: number;
+  readonly expectedAttentionVersion: number;
 }
 
 export interface AgentGraphYieldInterestRecord {
@@ -353,7 +407,7 @@ export interface SettleAgentGraphSupervisorWakeInput {
   readonly expectedAttemptVersion: number;
   readonly outcome: Extract<
     AgentGraphWakeStatus,
-    "delivered" | "waiting_permission" | "retryable_failed"
+    "delivered" | "waiting_permission" | "retryable_failed" | "needs_attention"
   >;
   readonly error?: string;
   readonly retryAt?: number;

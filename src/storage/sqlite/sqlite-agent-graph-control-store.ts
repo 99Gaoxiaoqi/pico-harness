@@ -1,10 +1,12 @@
 import { resolve } from "node:path";
 import { agentOutputRecordIdFor, graphIdFor } from "../../agent-graph/core/ids.js";
+import { safeAgentGraphErrorMessage } from "../../agent-graph/diagnostics.js";
 import type { OperationalDatabaseLease } from "./sqlite-database.js";
 import { prepareCurrentWorkspaceSqliteStorageSync } from "./workspace-scopes.js";
 import type {
   AgentGraphActivationClaimRecord,
   AgentGraphClaimState,
+  AgentGraphDiagnosticRecord,
   AgentGraphOperatorProvisionRecord,
   AgentGraphRecord,
   AgentGraphRecordRefRecord,
@@ -29,6 +31,8 @@ import type {
   PutAgentGraphResourceRefInput,
   RegisterAgentGraphYieldInterestInput,
   RecoverableAgentGraphSupervisorWakeRecord,
+  RecordAgentGraphDiagnosticInput,
+  RetryAgentGraphSupervisorWakeInput,
   SettleAgentGraphSupervisorWakeInput,
   SettleAgentGraphSupervisorWakeResult,
   TransitionAgentGraphClaimInput,
@@ -1038,13 +1042,119 @@ export class SqliteAgentGraphControlStore {
     );
   }
 
+  listGraphDiagnostics(
+    graphId: string,
+    options: { readonly unresolvedOnly?: boolean } = {},
+  ): readonly AgentGraphDiagnosticRecord[] {
+    const normalizedGraphId = requireNonEmpty(graphId, "graphId");
+    return this.read(() =>
+      this.lease.database
+        .prepare(
+          `SELECT * FROM agent_graph_diagnostics
+           WHERE graph_id = ?${options.unresolvedOnly ? " AND state <> 'resolved'" : ""}
+           ORDER BY created_at ASC, diagnostic_id ASC`,
+        )
+        .all(normalizedGraphId)
+        .map((row) => diagnosticFromRow(asRow(row))),
+    );
+  }
+
+  recordGraphDiagnostic(
+    input: RecordAgentGraphDiagnosticInput,
+  ): IdempotentStoreResult<AgentGraphDiagnosticRecord> {
+    const normalized = normalizeDiagnosticInput(input);
+    return this.write(() => {
+      this.requireGraph(normalized.graphId);
+      const existing = this.selectDiagnosticBySubject(
+        normalized.graphId,
+        normalized.phase,
+        normalized.subjectId,
+      );
+      if (existing?.lastObservationId === normalized.observationId) {
+        return { record: existing, replayed: true };
+      }
+      if (existing && existing.diagnosticId !== normalized.diagnosticId) {
+        throw new AgentGraphStoreConflictError(
+          `Graph diagnostic ${normalized.phase}:${normalized.subjectId} has another identity`,
+        );
+      }
+      const now = this.now();
+      const state =
+        normalized.classification === "transient" ? "retry_scheduled" : "needs_attention";
+      const nextRetryAt =
+        normalized.classification === "transient" ? now + normalized.retryDelayMs! : null;
+      if (!existing) {
+        this.lease.database
+          .prepare(
+            `INSERT INTO agent_graph_diagnostics
+             (diagnostic_id, graph_id, phase, subject_id, classification, state, message,
+              attempt_count, last_observation_id, next_retry_at, version, created_at,
+              updated_at, resolved_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 1, ?, ?, NULL)`,
+          )
+          .run(
+            normalized.diagnosticId,
+            normalized.graphId,
+            normalized.phase,
+            normalized.subjectId,
+            normalized.classification,
+            state,
+            normalized.message,
+            normalized.observationId,
+            nextRetryAt,
+            now,
+            now,
+          );
+      } else {
+        this.lease.database
+          .prepare(
+            `UPDATE agent_graph_diagnostics
+             SET classification = ?, state = ?, message = ?, attempt_count = attempt_count + 1,
+                 last_observation_id = ?, next_retry_at = ?, version = version + 1,
+                 updated_at = ?, resolved_at = NULL
+             WHERE diagnostic_id = ? AND version = ?`,
+          )
+          .run(
+            normalized.classification,
+            state,
+            normalized.message,
+            normalized.observationId,
+            nextRetryAt,
+            now,
+            normalized.diagnosticId,
+            existing.version,
+          );
+      }
+      return { record: this.requireDiagnostic(normalized.diagnosticId), replayed: false };
+    });
+  }
+
+  resolveGraphDiagnostics(graphId: string): number {
+    const normalizedGraphId = requireNonEmpty(graphId, "graphId");
+    return this.write(() => {
+      this.requireGraph(normalizedGraphId);
+      const now = this.now();
+      return Number(
+        this.lease.database
+          .prepare(
+            `UPDATE agent_graph_diagnostics
+             SET state = 'resolved', next_retry_at = NULL, version = version + 1,
+                 updated_at = ?, resolved_at = ?
+             WHERE graph_id = ? AND state <> 'resolved'`,
+          )
+          .run(now, now, normalizedGraphId).changes,
+      );
+    });
+  }
+
   listDueSupervisorWakes(at = this.now()): readonly AgentGraphSupervisorWakeRecord[] {
     requireFiniteNumber(at, "at");
     return this.read(() =>
       this.lease.database
         .prepare(
           `SELECT * FROM agent_graph_supervisor_wakes
-           WHERE status IN ('pending','retryable_failed') AND available_at <= ?
+           WHERE status IN ('pending','retryable_failed') AND attention_state = 'none'
+             AND available_at <= ?
            ORDER BY available_at ASC, created_at ASC, wake_id ASC`,
         )
         .all(at)
@@ -1081,7 +1191,9 @@ export class SqliteAgentGraphControlStore {
       const wake = this.selectWake(requireNonEmpty(wakeId, "wakeId"));
       if (
         !wake ||
-        !["pending", "retryable_failed", "running", "waiting_permission"].includes(wake.status)
+        !["pending", "retryable_failed", "running", "waiting_permission", "needs_attention"].includes(
+          wake.status,
+        )
       ) {
         return undefined;
       }
@@ -1208,6 +1320,8 @@ export class SqliteAgentGraphControlStore {
         );
       }
       const now = this.now();
+      const storedOutcome =
+        normalized.outcome === "needs_attention" ? "retryable_failed" : normalized.outcome;
       this.lease.database
         .prepare(
           `UPDATE agent_graph_supervisor_wake_attempts
@@ -1227,15 +1341,19 @@ export class SqliteAgentGraphControlStore {
         .prepare(
           `UPDATE agent_graph_supervisor_wakes
            SET status = ?, available_at = ?, version = version + 1, updated_at = ?,
-               delivered_at = ?, last_error = ?
+               delivered_at = ?, last_error = ?, attention_state = ?,
+               attention_version = attention_version + ?, needs_attention_at = ?
            WHERE wake_id = ? AND status = ? AND version = ?`,
         )
         .run(
-          normalized.outcome,
+          storedOutcome,
           normalized.retryAt ?? wake.availableAt,
           now,
           normalized.outcome === "delivered" ? now : null,
           normalized.error ?? null,
+          normalized.outcome === "needs_attention" ? "needs_attention" : "none",
+          normalized.outcome === "needs_attention" ? 1 : 0,
+          normalized.outcome === "needs_attention" ? now : null,
           normalized.wakeId,
           wake.status,
           normalized.expectedWakeVersion,
@@ -1245,6 +1363,50 @@ export class SqliteAgentGraphControlStore {
         attempt: this.requireWakeAttempt(normalized.attemptId),
         replayed: false,
       };
+    });
+  }
+
+  retrySupervisorWake(
+    input: RetryAgentGraphSupervisorWakeInput,
+  ): IdempotentStoreResult<AgentGraphSupervisorWakeRecord> {
+    requirePositiveInteger(input.expectedWakeVersion, "expectedWakeVersion");
+    requireNonNegativeInteger(input.expectedAttentionVersion, "expectedAttentionVersion");
+    const wakeId = requireNonEmpty(input.wakeId, "wakeId");
+    const retryOperationId = requireNonEmpty(input.retryOperationId, "retryOperationId");
+    return this.write(() => {
+      const wake = this.requireWake(wakeId);
+      if (wake.lastRetryOperationId === retryOperationId) {
+        return { record: wake, replayed: true };
+      }
+      if (
+        wake.status !== "needs_attention" ||
+        wake.version !== input.expectedWakeVersion ||
+        (wake.attentionVersion ?? 0) !== input.expectedAttentionVersion
+      ) {
+        throw new AgentGraphStoreConflictError(
+          `Wake ${wakeId} attention state changed before explicit retry`,
+        );
+      }
+      const now = this.now();
+      this.lease.database
+        .prepare(
+          `UPDATE agent_graph_supervisor_wakes
+           SET status = 'pending', attention_state = 'none', available_at = ?,
+               version = version + 1, attention_version = attention_version + 1,
+               updated_at = ?, attention_resolved_at = ?, last_retry_operation_id = ?
+           WHERE wake_id = ? AND version = ? AND attention_version = ?
+             AND attention_state = 'needs_attention'`,
+        )
+        .run(
+          now,
+          now,
+          now,
+          retryOperationId,
+          wakeId,
+          input.expectedWakeVersion,
+          input.expectedAttentionVersion,
+        );
+      return { record: this.requireWake(wakeId), replayed: false };
     });
   }
 
@@ -1539,6 +1701,30 @@ export class SqliteAgentGraphControlStore {
       .prepare("SELECT * FROM agent_graph_supervisor_wakes WHERE wake_id = ?")
       .get(wakeId);
     return row ? wakeFromRow(asRow(row)) : undefined;
+  }
+
+  private selectDiagnosticBySubject(
+    graphId: string,
+    phase: AgentGraphDiagnosticRecord["phase"],
+    subjectId: string,
+  ): AgentGraphDiagnosticRecord | undefined {
+    const row = this.lease.database
+      .prepare(
+        `SELECT * FROM agent_graph_diagnostics
+         WHERE graph_id = ? AND phase = ? AND subject_id = ?`,
+      )
+      .get(graphId, phase, subjectId);
+    return row ? diagnosticFromRow(asRow(row)) : undefined;
+  }
+
+  private requireDiagnostic(diagnosticId: string): AgentGraphDiagnosticRecord {
+    const row = this.lease.database
+      .prepare("SELECT * FROM agent_graph_diagnostics WHERE diagnostic_id = ?")
+      .get(diagnosticId);
+    if (!row) {
+      throw new AgentGraphStoreConflictError(`Graph diagnostic ${diagnosticId} does not exist`);
+    }
+    return diagnosticFromRow(asRow(row));
   }
 
   private selectYieldInterest(permitId: string): AgentGraphYieldInterestRecord | undefined {
@@ -1936,7 +2122,8 @@ function normalizeWakeSettlementInput(
 ): SettleAgentGraphSupervisorWakeInput {
   requirePositiveInteger(input.expectedWakeVersion, "expectedWakeVersion");
   requirePositiveInteger(input.expectedAttemptVersion, "expectedAttemptVersion");
-  const error = optionalNonEmpty(input.error, "error");
+  const rawError = optionalNonEmpty(input.error, "error");
+  const error = rawError === undefined ? undefined : safeAgentGraphErrorMessage(rawError);
   if (input.outcome === "delivered" && error !== undefined) {
     throw new Error("delivered wake must not include an error");
   }
@@ -1948,6 +2135,9 @@ function normalizeWakeSettlementInput(
   } else if (input.retryAt !== undefined) {
     throw new Error(`${input.outcome} wake must not include retryAt`);
   }
+  if (input.outcome === "needs_attention" && error === undefined) {
+    throw new Error("needs_attention wake requires an error");
+  }
   return {
     wakeId: requireNonEmpty(input.wakeId, "wakeId"),
     attemptId: requireNonEmpty(input.attemptId, "attemptId"),
@@ -1956,6 +2146,35 @@ function normalizeWakeSettlementInput(
     outcome: input.outcome,
     ...(error === undefined ? {} : { error }),
     ...(input.retryAt === undefined ? {} : { retryAt: input.retryAt }),
+  };
+}
+
+interface NormalizedDiagnosticInput extends RecordAgentGraphDiagnosticInput {
+  readonly retryDelayMs?: number;
+}
+
+function normalizeDiagnosticInput(
+  input: RecordAgentGraphDiagnosticInput,
+): NormalizedDiagnosticInput {
+  const retryDelayMs = input.retryDelayMs;
+  if (input.classification === "transient") {
+    if (retryDelayMs === undefined) {
+      throw new Error("transient Graph diagnostic requires retryDelayMs");
+    }
+    requireFiniteNumber(retryDelayMs, "retryDelayMs");
+    if (retryDelayMs < 0) throw new Error("retryDelayMs must not be negative");
+  } else if (retryDelayMs !== undefined) {
+    throw new Error(`${input.classification} Graph diagnostic must not schedule a retry`);
+  }
+  return {
+    diagnosticId: requireNonEmpty(input.diagnosticId, "diagnosticId"),
+    graphId: requireNonEmpty(input.graphId, "graphId"),
+    phase: input.phase,
+    subjectId: requireNonEmpty(input.subjectId, "subjectId"),
+    classification: input.classification,
+    message: safeAgentGraphErrorMessage(input.message),
+    observationId: requireNonEmpty(input.observationId, "observationId"),
+    ...(retryDelayMs === undefined ? {} : { retryDelayMs }),
   };
 }
 
@@ -2258,6 +2477,8 @@ function workspaceResourceFromRow(row: Record<string, unknown>): AgentGraphWorks
 }
 
 function wakeFromRow(row: Record<string, unknown>): AgentGraphSupervisorWakeRecord {
+  const attentionState = rowString(row, "attention_state");
+  const storedStatus = rowString(row, "status") as AgentGraphSupervisorWakeRecord["status"];
   return compact({
     wakeId: rowString(row, "wake_id"),
     graphId: rowString(row, "graph_id"),
@@ -2265,7 +2486,7 @@ function wakeFromRow(row: Record<string, unknown>): AgentGraphSupervisorWakeReco
     wakeFingerprint: rowString(row, "wake_fingerprint"),
     cause: rowString(row, "cause") as AgentGraphSupervisorWakeRecord["cause"],
     payload: rowJson(row, "payload_json"),
-    status: rowString(row, "status") as AgentGraphSupervisorWakeRecord["status"],
+    status: attentionState === "needs_attention" ? "needs_attention" : storedStatus,
     availableAt: rowNumber(row, "available_at"),
     attemptCount: rowNumber(row, "attempt_count"),
     version: rowNumber(row, "version"),
@@ -2274,6 +2495,32 @@ function wakeFromRow(row: Record<string, unknown>): AgentGraphSupervisorWakeReco
     deliveredAt: rowOptionalNumber(row, "delivered_at"),
     lastError: rowOptionalString(row, "last_error"),
     yieldPermitId: rowOptionalString(row, "yield_permit_id"),
+    attentionVersion: rowNumber(row, "attention_version"),
+    needsAttentionAt: rowOptionalNumber(row, "needs_attention_at"),
+    attentionResolvedAt: rowOptionalNumber(row, "attention_resolved_at"),
+    lastRetryOperationId: rowOptionalString(row, "last_retry_operation_id"),
+  });
+}
+
+function diagnosticFromRow(row: Record<string, unknown>): AgentGraphDiagnosticRecord {
+  return compact({
+    diagnosticId: rowString(row, "diagnostic_id"),
+    graphId: rowString(row, "graph_id"),
+    phase: rowString(row, "phase") as AgentGraphDiagnosticRecord["phase"],
+    subjectId: rowString(row, "subject_id"),
+    classification: rowString(
+      row,
+      "classification",
+    ) as AgentGraphDiagnosticRecord["classification"],
+    state: rowString(row, "state") as AgentGraphDiagnosticRecord["state"],
+    message: rowString(row, "message"),
+    attemptCount: rowNumber(row, "attempt_count"),
+    lastObservationId: rowString(row, "last_observation_id"),
+    nextRetryAt: rowOptionalNumber(row, "next_retry_at"),
+    version: rowNumber(row, "version"),
+    createdAt: rowNumber(row, "created_at"),
+    updatedAt: rowNumber(row, "updated_at"),
+    resolvedAt: rowOptionalNumber(row, "resolved_at"),
   });
 }
 

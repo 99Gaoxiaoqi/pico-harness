@@ -317,6 +317,65 @@ test("retryable failures wait for their due time and allocate a new exact attemp
   await service.close();
 });
 
+test("ordinary root wake failures stop after five attempts and explicit retry preserves history", async () => {
+  const storageRoot = await mkdtemp(join(tmpdir(), "pico-graph-wake-attention-"));
+  let now = 10;
+  const store = new SqliteAgentGraphControlStore({ storageRoot, now: () => now });
+  store.createGraph({ graphId: "graph-1", rootSessionId: "root-1", epoch: 1 });
+  store.enqueueSupervisorWake({
+    wakeId: "wake-1",
+    graphId: "graph-1",
+    dedupeKey: "runtime-terminal:child-run-1",
+    wakeFingerprint: "fingerprint-1",
+    cause: "runtime_terminal",
+    payload: { claimId: "claim-1" },
+  });
+  const root = new FakeRootWakePort();
+  root.startState = { status: "failed", error: "token=private-value runtime unavailable" };
+  const first = new AgentGraphSupervisorService({
+    store: new SqliteSupervisorTestPort(store),
+    drivePort: new FakeDrivePort([]),
+    rootWakePort: root,
+    now: () => now,
+    retryDelayMs: () => 500,
+  });
+
+  try {
+    await first.start();
+    for (let attempt = 2; attempt <= 5; attempt += 1) {
+      now += 500;
+      await first.scanRecoverableWakes();
+    }
+    assert.equal(store.getSupervisorWake("wake-1")?.status, "needs_attention");
+    assert.equal(store.listSupervisorWakeAttempts("wake-1").length, 5);
+    assert.doesNotMatch(store.getSupervisorWake("wake-1")?.lastError ?? "", /private-value/u);
+    await first.scanRecoverableWakes();
+    assert.equal(root.starts.length, 5, "needs-attention wake must not busy-loop");
+    await first.close();
+
+    const recovered = new AgentGraphSupervisorService({
+      store: new SqliteSupervisorTestPort(store),
+      drivePort: new FakeDrivePort([]),
+      rootWakePort: root,
+      now: () => now,
+      retryDelayMs: () => 500,
+    });
+    await recovered.start();
+    assert.equal(root.starts.length, 5, "restart must preserve the attention fence");
+
+    root.startState = { status: "completed" };
+    assert.equal(await recovered.retryNeedsAttention("wake-1"), true);
+    assert.equal(store.getSupervisorWake("wake-1")?.status, "delivered");
+    const attempts = store.listSupervisorWakeAttempts("wake-1");
+    assert.equal(attempts.length, 6);
+    assert.equal(new Set(attempts.map((attempt) => attempt.targetRunId)).size, 6);
+    await recovered.close();
+  } finally {
+    store.close();
+    await rm(storageRoot, { recursive: true, force: true });
+  }
+});
+
 test("finished graphs do not admit a fresh root wake", async () => {
   const store = new SharedWakeStore();
   store.addGraph({ ...graphRecord(), phase: "finished", finishedAt: 2 });
@@ -609,6 +668,10 @@ class SqliteSupervisorTestPort {
 
   settleSupervisorWake(input: SettleAgentGraphSupervisorWakeInput) {
     return this.store.settleSupervisorWake(input);
+  }
+
+  retrySupervisorWake(input: Parameters<SqliteAgentGraphControlStore["retrySupervisorWake"]>[0]) {
+    return this.store.retrySupervisorWake(input);
   }
 }
 
