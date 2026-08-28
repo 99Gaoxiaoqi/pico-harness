@@ -1,4 +1,4 @@
-import type { WorkbarDock, WorkbarTab, WorkbarToolKind } from "./types.js";
+import type { WorkbarAction, WorkbarDock, WorkbarTab, WorkbarToolKind } from "./types.js";
 
 export interface WorkbarToolDefinition {
   readonly kind: WorkbarToolKind;
@@ -99,6 +99,14 @@ export function getWorkbarTool(kind: WorkbarToolKind): WorkbarToolDefinition {
 export function createWorkbarToolTab(kind: WorkbarToolKind): WorkbarTab {
   const tool = getWorkbarTool(kind);
   return { id: kind, kind, label: tool.label };
+}
+
+/** Makes the active Graph epoch visible when a session enters Graph mode. */
+export function graphModeWorkbarAction(
+  orchestrationMode: "default" | "graph" | undefined,
+): WorkbarAction | undefined {
+  if (orchestrationMode !== "graph") return undefined;
+  return { type: "open", tab: createWorkbarToolTab("graph"), dock: "right" };
 }
 
 export function isStaticWorkbarToolTab(tab: WorkbarTab): boolean {

@@ -10,6 +10,7 @@ import { wakeIdFor } from "../../src/agent-graph/core/ids.js";
 import { Session } from "../../src/engine/session.js";
 import { SessionManager } from "../../src/engine/session-manager.js";
 import {
+  assertAgentGraphRootRunSettled,
   createAgentGraphWorkspaceHost,
   type AgentGraphRunToolBinding,
   type CreateAgentGraphWorkspaceHostOptions,
@@ -88,6 +89,32 @@ test("workspace Graph host exposes one root binding and owns application lifecyc
     await host.close();
     owner.release();
     await manager.clearAndDrain();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Graph root Run can settle only after finish or a durable yield", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-agent-graph-settlement-"));
+  const store = new SqliteAgentGraphControlStore({ storageRoot: root });
+  try {
+    const graph = store.openRootEpoch("root-session").record;
+    const input = {
+      graphId: graph.graphId,
+      rootSessionId: "root-session",
+      rootRunId: "root-run",
+    };
+    assert.throws(() => assertAgentGraphRootRunSettled(store, input), /cannot complete/u);
+    store.registerYieldInterest({
+      permitId: "permit-1",
+      graphId: graph.graphId,
+      rootSessionId: "root-session",
+      rootTurnId: "root-turn",
+      rootRunId: "root-run",
+      toolCallId: "yield-call-1",
+    });
+    assert.doesNotThrow(() => assertAgentGraphRootRunSettled(store, input));
+  } finally {
+    store.close();
     await rm(root, { recursive: true, force: true });
   }
 });

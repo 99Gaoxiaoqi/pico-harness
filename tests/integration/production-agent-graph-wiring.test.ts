@@ -50,8 +50,16 @@ test("production host binds Graph root and installs detached exact execution", a
   let brokerApproval: { readonly allowed: boolean; readonly allowForSession?: boolean } | undefined;
   let brokerAnswer: { readonly kind: string; readonly optionId?: string } | undefined;
   let reattachAttempts = 0;
+  let rootEpochAdmitted = false;
   const fakeAgentRuntime = {
     execute: async (options: RunAgentCliOptions, host: RunAgentCliDependencies) => {
+      if (options.prompt === "supervise graph") {
+        assert.equal(
+          rootEpochAdmitted,
+          true,
+          "Graph epoch must exist before AgentRuntime dispatch",
+        );
+      }
       calls.push({ options, host });
       if (options.prompt === "retry graph work" && ++reattachAttempts === 1) {
         throw new Error("attach failed before AgentRuntime completed");
@@ -120,15 +128,18 @@ test("production host binds Graph root and installs detached exact execution", a
     return {
       application,
       store: {},
-      openRootEpoch: (rootSessionId: string) => ({
-        graphId: graphIdFor(rootSessionId, 1),
-        rootSessionId,
-        epoch: 1,
-        admissionPhase: "open",
-        headRevision: 0,
-        selectedRecordIds: [],
-        createdAt: 1,
-      }),
+      openRootEpoch: (rootSessionId: string) => {
+        rootEpochAdmitted = true;
+        return {
+          graphId: graphIdFor(rootSessionId, 1),
+          rootSessionId,
+          epoch: 1,
+          admissionPhase: "open",
+          headRevision: 0,
+          selectedRecordIds: [],
+          createdAt: 1,
+        };
+      },
       rootBinding: () => ({ kind: "root", getRootContext: () => undefined, toolPort: {} }),
       start: application.start,
       close: async () => {
@@ -195,6 +206,11 @@ test("production host binds Graph root and installs detached exact execution", a
   assert.equal((await runtime.waitForRun(foregroundRunId)).status, "succeeded");
   assert.equal(calls.length, 1);
   assert.equal(calls[0]?.options.orchestrationMode, "graph");
+  assert.deepEqual(calls[0]?.options.allowedTools, [
+    "view_agent_graph",
+    "update_agent_graph",
+    "yield_agent_graph",
+  ]);
   assert.equal(calls[0]?.host.agentGraph?.kind, "root");
 
   const operatorLease = await globalSessionManager.getOrCreatePinned(

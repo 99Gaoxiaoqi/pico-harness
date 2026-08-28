@@ -22,6 +22,7 @@ import {
 } from "../plan/review-identity.js";
 import { createEngineRuntimePort } from "../runtime/engine-runtime-port-adapter.js";
 import {
+  assertAgentGraphRootRunSettled,
   createAgentGraphWorkspaceHost,
   type AgentGraphRunToolBinding,
   type AgentGraphWorkspaceHost,
@@ -94,6 +95,8 @@ import { WorkspaceRuntimeService } from "./workspace-runtime-service.js";
 import { BrowserAgentCommandBroker } from "./browser-agent-command-broker.js";
 import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 import type { AgentGraphApplicationService } from "../agent-graph/service.js";
+import type { AgentGraph } from "../agent-graph/core/contracts.js";
+import { AGENT_GRAPH_SUPERVISOR_TOOL_NAMES } from "../tools/agent-graph-tools.js";
 import { PluginRuntimeSnapshotRegistry } from "../plugins/plugin-runtime-snapshot-registry.js";
 import {
   createBuiltinPluginCapabilityRegistry,
@@ -309,6 +312,10 @@ export function createProductionRuntimeServices(
             },
           }
         : input.binding;
+      const rootContext = graphBinding.kind === "root" ? graphBinding.getRootContext() : undefined;
+      if (graphBinding.kind === "root" && !rootContext) {
+        throw new Error("Graph root Run is missing its trusted supervisor context");
+      }
       const reasoningLevel = coordinateReasoningLevel(
         route.capabilities.reasoningProfile,
         persistedSettings?.thinkingEffortExplicit ? persistedSettings.thinkingEffort : undefined,
@@ -415,6 +422,36 @@ export function createProductionRuntimeServices(
           prestartedRun: input.prestartedRun,
           prestartedUserInput: input.prestartedUserInput,
           agentGraph: graphBinding,
+          ...(rootContext
+            ? {
+                runCompletionGuard: () =>
+                  assertAgentGraphRootRunSettled(
+                    requireAgentGraphWorkspaceHost(agentGraphHosts, workspacePath).store,
+                    rootContext,
+                  ),
+                runFailureGuard: async ({ turnId, runId }: { turnId: string; runId: string }) => {
+                  const application = requireAgentGraphWorkspaceHost(
+                    agentGraphHosts,
+                    workspacePath,
+                  ).application;
+                  try {
+                    await application.recoverFailedRootRun({
+                      graphId: rootContext.graphId,
+                      epoch: rootContext.epoch,
+                      rootSessionId: rootContext.rootSessionId,
+                      rootTurnId: turnId,
+                      rootRunId: runId,
+                      toolCallId: `host-failure-recovery:${runId}`,
+                    });
+                  } catch (error) {
+                    logger.error(
+                      { workspacePath, runId, error: safeGraphExecutionError(error) },
+                      "Graph root failure recovery permit could not be persisted",
+                    );
+                  }
+                },
+              }
+            : {}),
           memoryProposalSink: (notice: MemoryProposalPublishedNotice) =>
             publishDesktopMemoryProposal(
               service,
@@ -617,6 +654,8 @@ export function createProductionRuntimeServices(
       );
       const session = sessionLease.session;
       let sessionLeaseTransferred = false;
+      let graphHost: AgentGraphWorkspaceHost | undefined;
+      let admittedGraph: AgentGraph | undefined;
       try {
         if (!session.runtimeEventStore) {
           throw new Error(
@@ -624,6 +663,14 @@ export function createProductionRuntimeServices(
           );
         }
         const persistedSettings = (await session.readHydrationSnapshot()).runtime.settings;
+        const orchestrationMode = persistedSettings?.orchestrationMode ?? "default";
+        graphHost =
+          orchestrationMode === "graph"
+            ? requireAgentGraphWorkspaceHost(agentGraphHosts, workspacePath)
+            : undefined;
+        // Graph activation is a host admission decision. Persist the epoch before any model,
+        // plugin, or MCP assembly so observers can see the selected mode immediately.
+        admittedGraph = graphHost?.openRootEpoch(targetSessionId);
         const route = await resolveDesktopModelRoute(
           workspacePath,
           credentialVault,
@@ -769,6 +816,9 @@ export function createProductionRuntimeServices(
         const unsubscribeSteer = context.onSteer((message) =>
           runtimeState.steerQueue.push(message),
         );
+        let foregroundGraphBinding:
+          | Extract<AgentGraphRunToolBinding, { readonly kind: "root" }>
+          | undefined;
         try {
           const skillActivation = execution?.skillActivation;
           if (skillActivation?.sourcePath && skillActivation.hooks !== undefined) {
@@ -794,7 +844,7 @@ export function createProductionRuntimeServices(
             model: route.model,
             modelRouteId: route.modelRouteId,
             modelCapabilities: route.capabilities,
-            orchestrationMode: persistedSettings?.orchestrationMode ?? "default",
+            orchestrationMode,
             ...(reasoningLevel !== undefined ? { thinkingEffort: reasoningLevel } : {}),
             ...(persistedSettings?.collaborationMode === "plan" ||
             persistedSettings?.mode === "plan"
@@ -804,8 +854,29 @@ export function createProductionRuntimeServices(
             ...(persistedSettings?.mode === "plan" && persistedSettings.prePlanMode
               ? { rewindPrePlanMode: persistedSettings.prePlanMode }
               : {}),
-            ...(execution?.allowedTools ? { allowedTools: execution.allowedTools } : {}),
+            ...(orchestrationMode === "graph"
+              ? { allowedTools: AGENT_GRAPH_SUPERVISOR_TOOL_NAMES }
+              : execution?.allowedTools
+                ? { allowedTools: execution.allowedTools }
+                : {}),
           };
+          foregroundGraphBinding =
+            graphHost && admittedGraph
+              ? rootAgentGraphBinding(
+                  graphHost,
+                  admittedGraph,
+                  targetSessionId,
+                  route.modelRouteId,
+                )
+              : undefined;
+          const foregroundGraphRuntime =
+            graphHost && admittedGraph && foregroundGraphBinding
+              ? {
+                  host: graphHost,
+                  graph: admittedGraph,
+                  binding: foregroundGraphBinding,
+                }
+              : undefined;
           const runtimeHost = {
             signal: context.signal,
             runtimeState,
@@ -823,13 +894,37 @@ export function createProductionRuntimeServices(
             picoHome,
             env,
             browserAgent: browserAgentBroker.bind(targetSessionId),
-            ...(persistedSettings?.orchestrationMode === "graph"
+            ...(foregroundGraphRuntime
               ? {
-                  agentGraph: rootAgentGraphBinding(
-                    requireAgentGraphWorkspaceHost(agentGraphHosts, workspacePath),
-                    targetSessionId,
-                    route.modelRouteId,
-                  ),
+                  agentGraph: foregroundGraphRuntime.binding,
+                  runCompletionGuard: () => {
+                    const rootContext = foregroundGraphRuntime.binding.getRootContext();
+                    if (!rootContext) {
+                      throw new Error("Graph root Run is missing its trusted supervisor context");
+                    }
+                    assertAgentGraphRootRunSettled(foregroundGraphRuntime.host.store, {
+                      graphId: foregroundGraphRuntime.graph.graphId,
+                      rootSessionId: targetSessionId,
+                      rootRunId: rootContext.rootRunId,
+                    });
+                  },
+                  runFailureGuard: async ({ turnId, runId }: { turnId: string; runId: string }) => {
+                    try {
+                      await foregroundGraphRuntime.host.application.recoverFailedRootRun({
+                        graphId: foregroundGraphRuntime.graph.graphId,
+                        epoch: foregroundGraphRuntime.graph.epoch,
+                        rootSessionId: targetSessionId,
+                        rootTurnId: turnId,
+                        rootRunId: runId,
+                        toolCallId: `host-failure-recovery:${runId}`,
+                      });
+                    } catch (error) {
+                      logger.error(
+                        { workspacePath, runId, error: safeGraphExecutionError(error) },
+                        "Graph root failure recovery permit could not be persisted",
+                      );
+                    }
+                  },
                 }
               : {}),
             memoryProposalSink: (notice: MemoryProposalPublishedNotice) =>
@@ -944,6 +1039,19 @@ export function createProductionRuntimeServices(
           }
           await runtimeState.dispose();
         }
+      } catch (error) {
+        if (graphHost && admittedGraph) {
+          try {
+            graphHost.application.sealEmptyRootEpoch(targetSessionId);
+          } catch (sealError) {
+            throw new AggregateError(
+              [error, sealError],
+              `Graph foreground assembly failed and empty epoch could not be sealed: ${admittedGraph.graphId}`,
+              { cause: sealError },
+            );
+          }
+        }
+        throw error;
       } finally {
         if (!sessionLeaseTransferred) sessionLease.release();
       }
@@ -1178,6 +1286,10 @@ export function createProductionRuntimeServices(
     credentialVault,
     pluginRuntimeSnapshotRegistry,
     ownsPluginRuntimeSnapshotRegistry,
+    retireAgentGraphRootSession: async (workspacePath, rootSessionId, reason) => {
+      const host = agentGraphHosts.get(workspacePath);
+      return host ? host.retireRootSession(rootSessionId, reason) : false;
+    },
     onTranscriptAdvanced: (workspacePath, sessionId) =>
       sessionSubscriptions?.publishTranscriptAdvanced(workspacePath, sessionId),
     reconcilePlanControl,
@@ -1625,6 +1737,10 @@ function workspaceGraphApplicationLifecycle(input: {
     drivePort: host.application.drivePort,
     supervisor: host.application.supervisor,
     openRootEpoch: (rootSessionId) => host.application.openRootEpoch(rootSessionId),
+    recoverFailedRootRun: (run) => host.application.recoverFailedRootRun(run),
+    sealEmptyRootEpoch: (rootSessionId) => host.application.sealEmptyRootEpoch(rootSessionId),
+    retireRootSession: (rootSessionId, reason) =>
+      host.application.retireRootSession(rootSessionId, reason),
     start: () => host.start(),
     close: async () => {
       if (closed) return;
@@ -1660,10 +1776,10 @@ function requireAgentGraphWorkspaceHost(
 
 function rootAgentGraphBinding(
   host: AgentGraphWorkspaceHost,
+  graph: AgentGraph,
   rootSessionId: string,
   rootModelRouteId: string,
-): AgentGraphRunToolBinding {
-  const graph = host.openRootEpoch(rootSessionId);
+): Extract<AgentGraphRunToolBinding, { readonly kind: "root" }> {
   return {
     kind: "root",
     getRootContext: () => {

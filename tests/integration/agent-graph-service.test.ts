@@ -583,6 +583,102 @@ test("yield remains registered while an Operator activation is still executing",
   }
 });
 
+test("host recovery yield wakes the root after a scheduled Run fails before yielding", async () => {
+  const storageRoot = await mkdtemp(join(tmpdir(), "pico-agent-graph-host-recovery-"));
+  const store = new SqliteAgentGraphControlStore({ storageRoot, now: monotonicClock() });
+  const rootWake = new CompletingRootWakePort();
+  const rootSessionId = "failed-root";
+  const graphId = graphIdFor(rootSessionId, 1);
+  const service = createAgentGraphApplicationService({
+    store,
+    runtime: new CompletingRuntimeAdapter(),
+    rootWakePort: rootWake,
+    resolveOperatorWorkspace: () => ({ workDir: storageRoot }),
+  });
+  try {
+    await service.start();
+    service.openRootEpoch(rootSessionId);
+    const source = {
+      sessionId: rootSessionId,
+      turnId: "failed-root-turn",
+      runId: "failed-root-run",
+      toolCallId: "failed-root-update",
+    };
+    await service.toolPort.commitUpdate({
+      graphId,
+      epoch: 1,
+      expectedRevision: 0,
+      operationId: "schedule-before-provider-failure",
+      rootModelRouteId: "test-root-model",
+      source,
+      commands: [addCommand({ graphId, intentId: "completed-intent", operatorId: "worker", source })],
+    });
+    assert.equal(
+      await service.recoverFailedRootRun({
+        graphId,
+        epoch: 1,
+        rootSessionId,
+        rootTurnId: source.turnId,
+        rootRunId: source.runId,
+        toolCallId: "host-failure-recovery",
+      }),
+      true,
+    );
+    assert.equal(store.listYieldInterests(graphId)[0]?.state, "consumed");
+    assert.equal(rootWake.starts.length, 1);
+  } finally {
+    await service.close();
+    store.close();
+    await rm(storageRoot, { recursive: true, force: true });
+  }
+});
+
+test("host seals only empty assembly epochs and retires scheduled work", async () => {
+  const storageRoot = await mkdtemp(join(tmpdir(), "pico-agent-graph-host-retire-"));
+  const store = new SqliteAgentGraphControlStore({ storageRoot, now: monotonicClock() });
+  const rootSessionId = "retired-root";
+  const graphId = graphIdFor(rootSessionId, 1);
+  const runtime = new RunningRuntimeAdapter();
+  const service = createAgentGraphApplicationService({
+    store,
+    runtime,
+    rootWakePort: new CompletingRootWakePort(),
+    resolveOperatorWorkspace: () => ({ workDir: storageRoot }),
+  });
+  try {
+    await service.start();
+    service.openRootEpoch("empty-root");
+    assert.equal(service.sealEmptyRootEpoch("empty-root"), true);
+    assert.equal(store.getGraph(graphIdFor("empty-root", 1))?.phase, "finished");
+
+    service.openRootEpoch(rootSessionId);
+    const source = {
+      sessionId: rootSessionId,
+      turnId: "retire-turn",
+      runId: "retire-run",
+      toolCallId: "retire-update",
+    };
+    await service.toolPort.commitUpdate({
+      graphId,
+      epoch: 1,
+      expectedRevision: 0,
+      operationId: "schedule-before-retire",
+      rootModelRouteId: "test-root-model",
+      source,
+      commands: [addCommand({ graphId, intentId: "retire-intent", operatorId: "worker", source })],
+    });
+    assert.equal(service.sealEmptyRootEpoch(rootSessionId), false);
+    await service.supervisor.notifyGraph(graphId);
+    assert.equal(await service.retireRootSession(rootSessionId, "root deleted"), true);
+    assert.equal(store.getGraph(graphId)?.phase, "finished");
+    assert.equal(store.listActivationClaims(graphId)[0]?.state, "cancelled");
+  } finally {
+    await service.close();
+    store.close();
+    await rm(storageRoot, { recursive: true, force: true });
+  }
+});
+
 class CompletingRuntimeAdapter implements AgentGraphRuntimeApplicationPort {
   readonly starts: Array<{ claimId: string; prompt: string }> = [];
   readonly projections = new Map<string, ReturnType<typeof completedProjection>>();

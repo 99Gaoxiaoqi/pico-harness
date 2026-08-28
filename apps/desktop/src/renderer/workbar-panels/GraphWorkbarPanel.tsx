@@ -123,6 +123,17 @@ export function GraphWorkbarPanel({
         ) : (
           <>
             <GraphMetrics summary={detail.summary} />
+            {detail.summary.phase === "open" &&
+              detail.operators.length === 0 &&
+              detail.intents.length === 0 && (
+                <div className="graph-panel__waiting" role="status">
+                  <GitFork aria-hidden="true" size={18} />
+                  <div>
+                    <strong>Graph 已启动</strong>
+                    <span>等待根 Agent 创建调度；简单任务也可能直接结束当前周期。</span>
+                  </div>
+                </div>
+              )}
             <section className="graph-panel__section" aria-label="Operator">
               <div className="graph-panel__section-title">
                 <strong>Operator</strong>

@@ -692,6 +692,36 @@
   font-size: 9px;
 }
 
+.graph-panel__waiting {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 11px 12px;
+  border-bottom: 1px solid var(--border-subtle, #e5e7eb);
+  background: color-mix(in srgb, var(--focus-ring, #2563eb) 6%, transparent);
+  color: var(--text-secondary, #6b7280);
+}
+
+.graph-panel__waiting > svg {
+  flex: none;
+  color: var(--focus-ring, #2563eb);
+}
+
+.graph-panel__waiting > div {
+  display: grid;
+  gap: 2px;
+}
+
+.graph-panel__waiting strong {
+  color: var(--text-primary, #111827);
+  font-size: 11px;
+}
+
+.graph-panel__waiting span {
+  font-size: 10px;
+  line-height: 1.45;
+}
+
 .graph-panel__section {
   display: grid;
   gap: 7px;

@@ -612,6 +612,8 @@ export interface AgentEngineOptions {
   collaborationMode?: () => "agent" | "plan";
   /** Run-scoped latch marked by submit_plan after durable proposal creation. */
   planHandoff?: PlanHandoffController;
+  /** Host-owned tools whose successful durable result ends the current engine Run. */
+  stopAfterSuccessfulToolNames?: readonly string[];
   /** 当前 route 的统一上下文预算；未注入时仅保留旧 Compactor 兼容路径。 */
   contextBudget?: ContextBudget;
   /** 主动整理水位，默认为输入预算的 85%。 */
@@ -820,6 +822,7 @@ export class AgentEngine implements AgentRunner {
   private readonly runtimePort?: EngineRuntimePort;
   private readonly collaborationMode?: () => "agent" | "plan";
   private readonly planHandoff?: PlanHandoffController;
+  private readonly stopAfterSuccessfulToolNames: ReadonlySet<string>;
   constructor(opts: AgentEngineOptions) {
     this.provider = opts.provider;
     this.registry = opts.registry;
@@ -872,6 +875,7 @@ export class AgentEngine implements AgentRunner {
     this.runtimePort = opts.runtimePort;
     this.collaborationMode = opts.collaborationMode;
     this.planHandoff = opts.planHandoff;
+    this.stopAfterSuccessfulToolNames = new Set(opts.stopAfterSuccessfulToolNames ?? []);
   }
 
   private isPlanning(): boolean {
@@ -2350,6 +2354,15 @@ export class AgentEngine implements AgentRunner {
             results,
             completedToolReportIndexes,
           );
+          const successfulTerminalTool = toolCalls.some(
+            (call, index) =>
+              this.stopAfterSuccessfulToolNames.has(call.name) &&
+              results[index]?.report.status === "succeeded",
+          );
+          if (successfulTerminalTool) {
+            reporter.onFinish();
+            break;
+          }
           if (this.planHandoff?.hasPending()) {
             this.planHandoff.consume();
             reporter.onFinish();

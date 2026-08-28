@@ -23,6 +23,7 @@ import type {
   AgentGraphRootToolContext,
   AgentGraphSupervisorToolPort,
 } from "../tools/agent-graph-tools.js";
+import { AGENT_GRAPH_SUPERVISOR_TOOL_NAMES } from "../tools/agent-graph-tools.js";
 import type {
   AgentOutputCommitPort,
   GraphOperatorActivationContext,
@@ -100,8 +101,31 @@ export interface AgentGraphWorkspaceHost {
     readonly rootRunId: string;
     readonly rootModelRouteId?: string;
   }): AgentGraphRunToolBinding;
+  retireRootSession(rootSessionId: string, reason: string): Promise<boolean>;
   start(): Promise<void>;
   close(): Promise<void>;
+}
+
+export function assertAgentGraphRootRunSettled(
+  store: SqliteAgentGraphControlStore,
+  input: {
+    readonly graphId: string;
+    readonly rootSessionId: string;
+    readonly rootRunId: string;
+  },
+): void {
+  const graph = store.getGraph(input.graphId);
+  if (!graph || graph.rootSessionId !== input.rootSessionId) {
+    throw new Error(`Graph root Run is no longer bound to graph ${input.graphId}`);
+  }
+  if (graph.phase === "finished") return;
+  const yielded = store
+    .listYieldInterests(input.graphId)
+    .some((interest) => interest.rootRunId === input.rootRunId && interest.state !== "cancelled");
+  if (yielded) return;
+  throw new Error(
+    "Graph root Run cannot complete before it finishes the Graph or registers a durable yield",
+  );
 }
 
 /** Production-neutral composition of Graph control, exact Runs and tool identities. */
@@ -193,7 +217,7 @@ export function createAgentGraphWorkspaceHost(
         };
         binding = { kind: "root", getRootContext: () => root, toolPort: app.toolPort };
         orchestrationMode = "graph";
-        allowedTools = ["view_agent_graph", "update_agent_graph", "yield_agent_graph"];
+        allowedTools = AGENT_GRAPH_SUPERVISOR_TOOL_NAMES;
       }
 
       liveLaunches.add(input.prestartedRun.runId);
@@ -300,6 +324,27 @@ export function createAgentGraphWorkspaceHost(
       getRootContext: () => ({ kind: "graph_root_supervisor", ...input }),
       toolPort: requireApplication(application).toolPort,
     }),
+    retireRootSession: async (rootSessionId, reason) => {
+      const graph = store.getOpenRootEpoch(rootSessionId);
+      if (!graph) return false;
+      const retired = await requireApplication(application).retireRootSession(
+        rootSessionId,
+        reason,
+      );
+      if (retired && options.requestStop) {
+        for (const wake of store.listSupervisorWakes(graph.graphId)) {
+          for (const attempt of store.listSupervisorWakeAttempts(wake.wakeId)) {
+            if (attempt.status !== "running") continue;
+            await options.requestStop({
+              sessionId: attempt.rootSessionId,
+              runId: attempt.targetRunId,
+              reason,
+            });
+          }
+        }
+      }
+      return retired;
+    },
     start: async () => {
       await workspaceAuthority?.recover();
       await requireApplication(application).start();

@@ -349,13 +349,18 @@ export class AgentGraphSupervisorService {
     if (this.state !== "open") return;
     const { graph, wake } = candidate;
     if (wake.status === "delivered") return;
+    // A sealed Graph is a durable retirement fence. In particular, never resume
+    // an in-flight root wake after its root Session has been deleted.
+    if (graph.phase !== "open") {
+      if (candidate.attempt && (wake.status === "running" || wake.status === "waiting_permission")) {
+        await this.settle(wake, candidate.attempt, "delivered");
+      }
+      return;
+    }
 
     let claimedWake = wake;
     let attempt = candidate.attempt;
     if (wake.status === "pending" || wake.status === "retryable_failed") {
-      // A finished Graph never starts a fresh root wake. Existing running attempts
-      // remain recoverable below because their exact RuntimeRun is already admitted.
-      if (graph.phase !== "open") return;
       if (wake.availableAt > this.now()) {
         this.scheduleWake(wake.wakeId, wake.availableAt);
         return;

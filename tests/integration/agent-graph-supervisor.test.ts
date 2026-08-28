@@ -337,6 +337,34 @@ test("finished graphs do not admit a fresh root wake", async () => {
   await service.close();
 });
 
+test("startup does not resume a running wake after its Graph was retired", async () => {
+  const store = new SharedWakeStore();
+  store.addGraph(graphRecord());
+  store.addWake(wakeRecord());
+  const root = new FakeRootWakePort();
+  root.startState = { status: "running" };
+  const first = new AgentGraphSupervisorService({
+    store,
+    drivePort: new FakeDrivePort([]),
+    rootWakePort: root,
+  });
+  await first.start();
+  assert.equal(root.starts.length, 1);
+  await first.close();
+
+  store.addGraph({ ...graphRecord(), phase: "finished", finishedAt: 2 });
+  const recovered = new AgentGraphSupervisorService({
+    store,
+    drivePort: new FakeDrivePort([]),
+    rootWakePort: root,
+  });
+  await recovered.start();
+
+  assert.equal(root.starts.length, 1, "retired root wake must not recreate its Session");
+  assert.equal(store.wakes.get("wake-1")?.status, "delivered");
+  await recovered.close();
+});
+
 class FakeDrivePort implements AgentGraphDrivePort {
   calls = 0;
   active = 0;

@@ -259,10 +259,31 @@ export function parseGraphDetail(value: unknown): WorkbarGraphDetail {
     !isRecord(value) ||
     !Array.isArray(value["operators"]) ||
     !Array.isArray(value["intents"]) ||
-    !Array.isArray(value["claims"])
+    !Array.isArray(value["claims"]) ||
+    !Array.isArray(value["records"]) ||
+    !Array.isArray(value["runtimeClaims"]) ||
+    !Array.isArray(value["outputs"])
   ) {
     throw new Error("Graph authority 返回了无效详情。");
   }
+  const runtimeByClaim = new Map(
+    value["runtimeClaims"].map((candidate) => {
+      const claimId = stringField(candidate, "claimId");
+      const status = stringField(candidate, "status");
+      if (!claimId || !status) throw new Error("Graph Runtime Claim 条目无效。");
+      return [claimId, status] as const;
+    }),
+  );
+  const outputByClaim = new Map(
+    value["outputs"].map((candidate) => {
+      const claimId = stringField(candidate, "claimId");
+      const status = stringField(candidate, "status");
+      if (!claimId || (status !== "success" && status !== "failure")) {
+        throw new Error("Graph 正式产出条目无效。");
+      }
+      return [claimId, status] as const;
+    }),
+  );
   return {
     summary: parseGraphSummary(value["summary"]),
     operators: value["operators"].map((candidate) => {
@@ -290,9 +311,36 @@ export function parseGraphDetail(value: unknown): WorkbarGraphDetail {
       const intentId = stringField(candidate, "intentId");
       const state = stringField(candidate, "state");
       if (!claimId || !intentId || !state) throw new Error("Graph Claim 条目无效。");
-      return { claimId, intentId, state };
+      return {
+        claimId,
+        intentId,
+        state: graphClaimDisplayState({
+          controlState: state,
+          runtimeStatus: runtimeByClaim.get(claimId),
+          outputStatus: outputByClaim.get(claimId),
+        }),
+      };
     }),
   };
+}
+
+export function graphClaimDisplayState(input: {
+  readonly controlState: string;
+  readonly runtimeStatus?: string;
+  readonly outputStatus?: "success" | "failure";
+}): string {
+  if (input.controlState === "cancelled" || input.runtimeStatus === "cancelled") {
+    return "cancelled";
+  }
+  if (input.outputStatus === "failure") return "failed";
+  if (input.runtimeStatus === "failed" || input.runtimeStatus === "interrupted") return "failed";
+  if (input.runtimeStatus === "completed") {
+    return input.outputStatus === "success" ? "completed" : "failed";
+  }
+  if (input.runtimeStatus === "waiting_permission") return "waiting_permission";
+  if (input.runtimeStatus === "running") return "running";
+  if (input.runtimeStatus === "not_started") return "claimed";
+  return input.controlState;
 }
 
 export async function queryAllGraphTimeline(

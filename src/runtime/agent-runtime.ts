@@ -43,6 +43,7 @@ import { WorkspaceRoots, workspaceAccessesFromCall } from "../tools/workspace-ro
 import type { DefaultToolRegistryOptions } from "../tools/default-registry.js";
 import { FetchURLTool } from "../tools/web.js";
 import {
+  AGENT_GRAPH_SUPERVISOR_TOOL_NAMES,
   createAgentGraphSupervisorTools,
   type AgentGraphRootToolContext,
   type AgentGraphSupervisorToolPort,
@@ -160,6 +161,7 @@ import {
   RuntimeRunExecutor,
   type PrestartedRuntimeRun,
   type PrestartedRuntimeUserInput,
+  type RuntimeRunExecutorInput,
 } from "./runtime-run-executor.js";
 import {
   invalidateMemoryReviewRecoverySuccess,
@@ -310,6 +312,10 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   waitAtSafeBoundary?: () => Promise<void>;
   /** Receives the exact durable rewind point created for this top-level prompt. */
   rewindPointSink?: (checkpointId: string) => void;
+  /** @internal Trusted host assertion evaluated before a Runtime Run commits success. */
+  runCompletionGuard?: () => Promise<void> | void;
+  /** @internal Trusted host recovery hook evaluated before a failed Runtime Run is sealed. */
+  runFailureGuard?: NonNullable<RuntimeRunExecutorInput["failureGuard"]>;
   /** @internal 继续已存在的未完成轮次，不新增 user 消息或 rewind point。 */
   resumeExistingSession?: boolean;
   /** @internal 恢复 adapter 已在 canonical ledger 发布的唯一 RuntimeRun admission。 */
@@ -1633,7 +1639,7 @@ export async function executeAgentRuntime(
       })) {
         registry.register(tool);
       }
-      toolDisclosure.discloseTools(["update_agent_graph", "view_agent_graph", "yield_agent_graph"]);
+      toolDisclosure.discloseTools([...AGENT_GRAPH_SUPERVISOR_TOOL_NAMES]);
     } else if (dependencies.agentGraph?.kind === "operator") {
       registry.register(
         createAgentOutputTool({
@@ -1796,6 +1802,11 @@ export async function executeAgentRuntime(
       planMode: effectiveOptions.planMode ?? false,
       collaborationMode,
       planHandoff,
+      ...(dependencies.agentGraph?.kind === "root"
+        ? { stopAfterSuccessfulToolNames: ["yield_agent_graph"] }
+        : dependencies.agentGraph?.kind === "operator"
+          ? { stopAfterSuccessfulToolNames: ["agent_output"] }
+          : {}),
       ...(maxTurns !== undefined ? { maxTurns } : {}),
       promptLayersFactory,
       goalManager,
@@ -2071,6 +2082,10 @@ export async function executeAgentRuntime(
       ...(dependencies.signal ? { signal: dependencies.signal } : {}),
       ...(dependencies.onEvent ? { onEvent: dependencies.onEvent } : {}),
       ...(dependencies.rewindPointSink ? { rewindPointSink: dependencies.rewindPointSink } : {}),
+      ...(dependencies.runCompletionGuard
+        ? { completionGuard: dependencies.runCompletionGuard }
+        : {}),
+      ...(dependencies.runFailureGuard ? { failureGuard: dependencies.runFailureGuard } : {}),
       ...(!sideConversation && memoryReviewScheduler ? { memoryReviewScheduler } : {}),
       ...(!sideConversation && memoryReviewScheduler ? { memoryTriggerSlot } : {}),
       planHandoff,

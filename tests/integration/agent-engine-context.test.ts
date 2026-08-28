@@ -35,3 +35,47 @@ test("AgentEngine still rejects a live same-Session re-entrant run", async () =>
     await rm(workDir, { recursive: true, force: true });
   }
 });
+
+test("AgentEngine ends the Run after a host-declared terminal tool succeeds", async () => {
+  const workDir = await mkdtemp(join(tmpdir(), "pico-agent-engine-terminal-tool-"));
+  const session = new Session("agent-engine-terminal-tool", workDir, { persistence: false });
+  const registry = new ToolRegistry();
+  registry.register({
+    readOnly: false,
+    name: () => "yield_agent_graph",
+    definition: () => ({
+      name: "yield_agent_graph",
+      description: "fixture terminal tool",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    }),
+    execute: async () => JSON.stringify({ permitId: "permit-1" }),
+  });
+  let providerCalls = 0;
+  const engine = new AgentEngine({
+    provider: {
+      generate: async () => {
+        providerCalls++;
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "yield-1", name: "yield_agent_graph", arguments: "{}" }],
+        };
+      },
+    },
+    registry,
+    workDir,
+    stopAfterSuccessfulToolNames: ["yield_agent_graph"],
+  });
+  try {
+    await session.commitMessages({ role: "user", content: "yield once" });
+    const history = await engine.run(session);
+    assert.equal(providerCalls, 1);
+    assert.equal(
+      history.filter((message) => message.toolCallId === "yield-1").length,
+      1,
+    );
+  } finally {
+    await session.close();
+    await rm(workDir, { recursive: true, force: true });
+  }
+});
