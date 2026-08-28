@@ -20,6 +20,7 @@ import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-a
 import type { WorkspaceTaskRuntime } from "../../src/runtime/workspace-runtime.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 import type { RuntimeEvent } from "../../src/storage/runtime-event.js";
+import type { AgentGraphRecord } from "../../src/storage/sqlite/agent-graph-store-types.js";
 import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import { configuredUserDefaultRealModel } from "./real-llm-user-model.js";
 
@@ -68,6 +69,23 @@ test("Graph v2 E2E diagnostic stages expose bounded, sanitized failures", async 
   );
 });
 
+test("Graph v2 E2E binds to the epoch identity returned by Graph authority", () => {
+  const authorityGraph: AgentGraphRecord = {
+    graphId: "authority-issued-opaque-graph-id",
+    rootSessionId: "root-session",
+    epoch: 7,
+    phase: "open",
+    headRevision: 0,
+    createdAt: 1,
+  };
+  const authority = {
+    listGraphs: (rootSessionId?: string) =>
+      rootSessionId === authorityGraph.rootSessionId ? [authorityGraph] : [],
+  };
+
+  assert.equal(openRootEpochFromAuthority(authority, authorityGraph.rootSessionId), authorityGraph);
+});
+
 realModelTest(
   "Graph v2 persists one operator output and wakes the exact root Run to finish",
   { timeout: TEST_TIMEOUT_MS },
@@ -80,7 +98,7 @@ realModelTest(
     await mkdir(picoHome, { recursive: true });
     const workspacePath = await realpath(workDir);
     const rootSessionId = `graph-v2-root-${randomUUID()}`;
-    const graphId = `graph:${rootSessionId}`;
+    let graphId: string | undefined;
     const userConfigStore = new UserConfigStore({ picoHome });
     await userConfigStore.write(
       {
@@ -172,19 +190,27 @@ realModelTest(
         }),
       );
       initialRunId = requiredString(initial, "runId");
+      const openedGraph = await trace.waitForValue(
+        "graph.opened",
+        STAGE_TIMEOUT_MS.rootUpdate,
+        () => (graphHost ? openRootEpochFromAuthority(graphHost.store, rootSessionId) : undefined),
+      );
+      graphId = openedGraph.graphId;
       trace.mark("root.start", {
+        graphId,
+        epoch: openedGraph.epoch,
         workspaceRunStatus: workspaceRuntime.getRun(initialRunId)?.status,
       });
 
       await trace.waitFor(
         "root.update",
         STAGE_TIMEOUT_MS.rootUpdate,
-        () => (graphHost?.store.getGraph(graphId)?.headRevision ?? 0) >= 1,
+        () => (graphHost?.store.getGraph(graphId!)?.headRevision ?? 0) >= 1,
       );
       await trace.waitFor(
         "root.yield",
         STAGE_TIMEOUT_MS.rootYield,
-        () => (graphHost?.store.listYieldInterests(graphId).length ?? 0) >= 1,
+        () => (graphHost?.store.listYieldInterests(graphId!).length ?? 0) >= 1,
       );
       const initialTerminal = await trace.waitForValue(
         "root.initial-terminal",
@@ -199,7 +225,7 @@ realModelTest(
       const claim = await trace.waitForValue(
         "operator.claim",
         STAGE_TIMEOUT_MS.operatorClaim,
-        () => graphHost?.store.listActivationClaims(graphId)[0],
+        () => graphHost?.store.listActivationClaims(graphId!)[0],
       );
       sessionIds.add(claim.targetSessionId);
       await trace.waitFor(
@@ -223,7 +249,7 @@ realModelTest(
       await trace.waitFor(
         "root.finish",
         STAGE_TIMEOUT_MS.rootFinish,
-        () => graphHost?.store.getGraph(graphId)?.phase === "finished",
+        () => graphHost?.store.getGraph(graphId!)?.phase === "finished",
       );
       await trace.waitFor(
         "exact.terminal",
@@ -244,8 +270,12 @@ realModelTest(
 
       const host = graphHost;
       assert.ok(host, "production service must assemble the real Graph workspace host");
+      assert.ok(graphId, "production Graph authority must expose the admitted epoch identity");
       const persistedGraph = host.store.getGraph(graphId);
       assert.ok(persistedGraph);
+      assert.equal(persistedGraph.graphId, openedGraph.graphId);
+      assert.equal(persistedGraph.epoch, openedGraph.epoch);
+      assert.equal(persistedGraph.rootSessionId, rootSessionId);
       assert.equal(persistedGraph.phase, "finished");
       const graph = new SqliteAgentGraphControlStoreAdapter(host.store).getScheduleState(
         graphId,
@@ -281,14 +311,57 @@ realModelTest(
       assert.ok(initialRootRuntimeRunId, "the initial root RuntimeRun must yield exactly once");
       assert.ok(rootRuns.length >= 2, "root Session must contain the initial and exact wake Runs");
       assert.ok(rootRuns.some((event) => event.runId === initialRootRuntimeRunId));
+      assert.equal(
+        rootToolStarts.filter(
+          (event) =>
+            event.runId === initialRootRuntimeRunId &&
+            event.data.toolName === "update_agent_graph",
+        ).length,
+        1,
+        "the initial root RuntimeRun must update the admitted epoch exactly once",
+      );
+      assert.equal(
+        rootToolStarts.filter(
+          (event) =>
+            event.runId === initialRootRuntimeRunId &&
+            event.data.toolName === "yield_agent_graph",
+        ).length,
+        1,
+        "the initial root RuntimeRun must yield exactly once",
+      );
+      assert.deepEqual(
+        rootToolStarts
+          .filter((event) => event.runId === initialRootRuntimeRunId)
+          .map((event) => event.data.toolName),
+        ["update_agent_graph", "yield_agent_graph"],
+        "the initial root RuntimeRun must update before its single terminal yield",
+      );
 
       const outputEvents = operatorEvents.filter((event) => event.kind === "agent.output");
       assert.equal(outputEvents.length, 1, "operator must commit exactly one agent.output fact");
-      const canary = outputEvents[0]?.data.payload.output;
+      const outputEvent = outputEvents[0];
+      assert.ok(outputEvent);
+      const canary = outputEvent.data.payload.output;
       assert.ok(canary, "operator output must contain a canary unknown to the initial root prompt");
       assert.match(canary, /^GRAPH_V2_OPERATOR_CANARY_[A-F0-9]{32}$/u);
-      assert.equal(outputEvents[0]?.data.payload.status, "success");
-      assert.equal(outputEvents[0]?.runId, claim.targetRunId);
+      assert.equal(outputEvent.data.payload.status, "success");
+      assert.equal(outputEvent.data.payload.activationId, claim.claimId);
+      assert.equal(outputEvent.runId, claim.targetRunId);
+      assert.equal(
+        operatorEvents.filter(
+          (event) => event.kind === "tool.started" && event.data.toolName === "agent_output",
+        ).length,
+        1,
+        "operator must invoke its formal output tool exactly once",
+      );
+      assert.equal(record.graphId, openedGraph.graphId);
+      assert.equal(record.claimId, claim.claimId);
+      assert.equal(record.operatorId, claim.operatorId);
+      assert.equal(record.operatorGeneration, claim.operatorGeneration);
+      assert.equal(record.sourceSessionId, claim.targetSessionId);
+      assert.equal(record.sourceTurnId, outputEvent.turnId);
+      assert.equal(record.sourceRunId, outputEvent.runId);
+      assert.equal(record.sourceEventId, outputEvent.eventId);
       assert.ok(
         [...rootEvents, ...operatorEvents]
           .filter((event) => event.kind === "run.terminal")
@@ -296,29 +369,41 @@ realModelTest(
         "every RuntimeRun in the scenario must complete",
       );
 
-      assert.ok(
-        rootToolStarts.some(
-          (event) =>
-            event.runId === initialRootRuntimeRunId && event.data.toolName === "update_agent_graph",
-        ),
+      const wakes = host.store.listSupervisorWakes(graphId);
+      assert.equal(wakes.length, 1, "the operator terminal must enqueue one exact root wake");
+      const wake = wakes[0];
+      assert.ok(wake);
+      assert.equal(wake.graphId, openedGraph.graphId);
+      assert.equal(wake.cause, "runtime_terminal");
+      assert.equal(asRecord(wake.payload).claimId, claim.claimId);
+      const wakeAttempts = host.store.listSupervisorWakeAttempts(wake.wakeId);
+      assert.equal(wakeAttempts.length, 1, "the durable wake must have one exact attempt");
+      const wakeAttempt = wakeAttempts[0];
+      assert.ok(wakeAttempt);
+      assert.equal(wakeAttempt.rootSessionId, rootSessionId);
+      assert.equal(wakeAttempt.status, "completed");
+      const exactWakeToolStarts = rootToolStarts.filter(
+        (event) => event.runId === wakeAttempt.targetRunId,
       );
-      assert.ok(
-        rootToolStarts.some(
-          (event) =>
-            event.runId === initialRootRuntimeRunId && event.data.toolName === "yield_agent_graph",
-        ),
+      assert.deepEqual(
+        exactWakeToolStarts.map((event) => event.data.toolName),
+        ["view_agent_graph", "update_agent_graph"],
+        "the exact root wake must view the selected output before finishing",
       );
-      assert.ok(
-        rootToolStarts.some(
-          (event) =>
-            event.runId !== initialRootRuntimeRunId && event.data.toolName === "view_agent_graph",
-        ),
-        "the exact root wake must inspect the durable projection before finishing",
+      assert.equal(
+        exactWakeToolStarts.filter((event) => event.data.toolName === "view_agent_graph").length,
+        1,
+        "the exact root wake must inspect the durable projection exactly once",
+      );
+      assert.equal(
+        exactWakeToolStarts.filter((event) => event.data.toolName === "update_agent_graph").length,
+        1,
+        "the exact root wake must finish the Graph exactly once",
       );
       const durableWakeView = rootEvents.find(
         (event): event is Extract<RuntimeEvent, { kind: "tool.result.recorded" }> =>
           event.kind === "tool.result.recorded" &&
-          event.runId !== initialRootRuntimeRunId &&
+          event.runId === wakeAttempt.targetRunId &&
           event.data.toolName === "view_agent_graph",
       );
       assert.ok(
@@ -364,7 +449,9 @@ realModelTest(
       throw error;
     } finally {
       try {
-        for (const claim of graphHost?.store.listActivationClaims(graphId) ?? []) {
+        for (const claim of graphId
+          ? (graphHost?.store.listActivationClaims(graphId) ?? [])
+          : []) {
           sessionIds.add(claim.targetSessionId);
         }
       } catch {
@@ -554,21 +641,24 @@ async function collectGraphE2EDiagnosticSummary(input: {
   readonly workspaceRuntime: WorkspaceTaskRuntime | undefined;
   readonly workspacePath: string;
   readonly picoHome: string;
-  readonly graphId: string;
+  readonly graphId: string | undefined;
   readonly rootSessionId: string;
   readonly initialRunId: string | undefined;
 }): Promise<GraphE2EDiagnosticSummary> {
   const host = input.graphHost;
+  const graphId =
+    input.graphId ??
+    (host ? openRootEpochFromAuthority(host.store, input.rootSessionId)?.graphId : undefined);
   const workspaceRuns = input.workspaceRuntime?.listRuns() ?? [];
   const rootEvents = await readRuntimeEvents(
     input.workspacePath,
     input.picoHome,
     input.rootSessionId,
   );
-  const graph = host?.store.getGraph(input.graphId);
-  const claims = host?.store.listActivationClaims(input.graphId) ?? [];
-  const records = host?.store.listRecordRefs(input.graphId) ?? [];
-  const yields = host?.store.listYieldInterests(input.graphId) ?? [];
+  const graph = graphId ? host?.store.getGraph(graphId) : undefined;
+  const claims = graphId ? (host?.store.listActivationClaims(graphId) ?? []) : [];
+  const records = graphId ? (host?.store.listRecordRefs(graphId) ?? []) : [];
+  const yields = graphId ? (host?.store.listYieldInterests(graphId) ?? []) : [];
   const operatorEvents = (
     await Promise.all(
       [...new Set(claims.map((claim) => claim.targetSessionId))].map((sessionId) =>
@@ -584,10 +674,10 @@ async function collectGraphE2EDiagnosticSummary(input: {
     ? claims.find((claim) => claim.targetRunId === terminal.runId)
     : undefined;
   const wake =
-    host && terminal && terminalClaim
+    host && graphId && terminal && terminalClaim
       ? host.store.getSupervisorWake(
           wakeIdFor(
-            input.graphId,
+            graphId,
             `runtime-terminal:${terminalClaim.targetRunId}:${terminal.eventId}`,
           ),
         )
@@ -605,7 +695,7 @@ async function collectGraphE2EDiagnosticSummary(input: {
         ? {
             phase: graph.phase,
             headRevision: graph.headRevision,
-            scheduleRevisions: host?.store.listScheduleRevisions(input.graphId).length ?? 0,
+            scheduleRevisions: host?.store.listScheduleRevisions(graph.graphId).length ?? 0,
             yieldStates: countStrings(yields.map((interest) => interest.state)),
           }
         : {}),
@@ -705,4 +795,17 @@ function requiredString(value: Record<string, unknown>, key: string): string {
   const result = value[key];
   if (typeof result !== "string" || !result) assert.fail(`${key} must be a non-empty string`);
   return result;
+}
+
+function openRootEpochFromAuthority(
+  authority: {
+    listGraphs(rootSessionId?: string): readonly AgentGraphRecord[];
+  },
+  rootSessionId: string,
+): AgentGraphRecord | undefined {
+  const opened = authority
+    .listGraphs(rootSessionId)
+    .filter((graph) => graph.rootSessionId === rootSessionId && graph.phase === "open");
+  assert.ok(opened.length <= 1, `Graph authority returned multiple open epochs for ${rootSessionId}`);
+  return opened[0];
 }
