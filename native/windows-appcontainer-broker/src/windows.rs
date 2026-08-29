@@ -22,6 +22,10 @@ const ERROR_ACCESS_DENIED: u32 = 5;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 const INVALID_FILE_ATTRIBUTES: u32 = 0xffff_ffff;
 const WAIT_OBJECT_0: u32 = 0;
+const WAIT_ABANDONED: u32 = 0x0000_0080;
+const WAIT_TIMEOUT: u32 = 0x0000_0102;
+const WAIT_FAILED: u32 = 0xffff_ffff;
+const ACL_MUTATION_TIMEOUT_MS: u32 = 15_000;
 const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x0000_0002;
 const STARTF_USESTDHANDLES: u32 = 0x0000_0100;
 const STD_INPUT_HANDLE: u32 = (-10i32) as u32;
@@ -176,6 +180,8 @@ extern "system" {
     fn GetFileAttributesW(file_name: *const u16) -> u32;
     fn GetStdHandle(standard_handle: u32) -> Handle;
     fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
+    fn CreateMutexW(attributes: *const c_void, initial_owner: i32, name: *const u16) -> Handle;
+    fn ReleaseMutex(mutex: Handle) -> i32;
 }
 
 #[link(name = "bcrypt")]
@@ -213,6 +219,51 @@ struct Policy {
     write_roots: Vec<PathBuf>,
     command: String,
     args: Vec<String>,
+}
+
+struct AclMutationGuard {
+    mutex: Handle,
+}
+
+impl AclMutationGuard {
+    fn acquire() -> Result<Self, String> {
+        // icacls updates a DACL through a read-modify-write operation. Different broker
+        // processes can otherwise overwrite each other's capability ACE when they grant or
+        // remove access on the same workspace. A session-local kernel mutex serializes only
+        // those short mutations; sandboxed children still run concurrently.
+        let name = wide_null("Local\\PicoHarness.AppContainerAcl.v1");
+        let mutex = unsafe { CreateMutexW(null(), 0, name.as_ptr()) };
+        if mutex.is_null() {
+            return Err(last_error("CreateMutexW"));
+        }
+        match unsafe { WaitForSingleObject(mutex, ACL_MUTATION_TIMEOUT_MS) } {
+            WAIT_OBJECT_0 | WAIT_ABANDONED => Ok(Self { mutex }),
+            WAIT_TIMEOUT => {
+                unsafe { CloseHandle(mutex) };
+                Err(format!(
+                    "timed out after {ACL_MUTATION_TIMEOUT_MS}ms waiting for the ACL mutation mutex"
+                ))
+            }
+            WAIT_FAILED => {
+                let error = last_error("WaitForSingleObject(ACL mutex)");
+                unsafe { CloseHandle(mutex) };
+                Err(error)
+            }
+            status => {
+                unsafe { CloseHandle(mutex) };
+                Err(format!("unexpected ACL mutex wait status: 0x{status:08x}"))
+            }
+        }
+    }
+}
+
+impl Drop for AclMutationGuard {
+    fn drop(&mut self) {
+        unsafe {
+            ReleaseMutex(self.mutex);
+            CloseHandle(self.mutex);
+        }
+    }
 }
 
 pub fn run() -> Result<(), String> {
@@ -667,6 +718,7 @@ fn delete_appcontainer_profile(name: &str) -> Result<(), String> {
 }
 
 fn run_icacls<const N: usize>(operation: &str, args: [&str; N]) -> Result<(), String> {
+    let _mutation_guard = AclMutationGuard::acquire()?;
     // The broker starts in the target workspace and inherits its environment. Resolve both the
     // executable and cwd from Kernel32 so neither a workspace file nor PATH/SystemRoot can select
     // the ACL control binary.
