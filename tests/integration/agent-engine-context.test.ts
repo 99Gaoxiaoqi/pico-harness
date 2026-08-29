@@ -70,10 +70,7 @@ test("AgentEngine ends the Run after a host-declared terminal tool succeeds", as
     await session.commitMessages({ role: "user", content: "yield once" });
     const history = await engine.run(session);
     assert.equal(providerCalls, 1);
-    assert.equal(
-      history.filter((message) => message.toolCallId === "yield-1").length,
-      1,
-    );
+    assert.equal(history.filter((message) => message.toolCallId === "yield-1").length, 1);
   } finally {
     await session.close();
     await rm(workDir, { recursive: true, force: true });

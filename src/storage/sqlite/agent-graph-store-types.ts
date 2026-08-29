@@ -283,10 +283,7 @@ export type AgentGraphDiagnosticPhase =
   | "claim"
   | "begin-executing"
   | "project-record";
-export type AgentGraphDiagnosticClassification =
-  | "transient"
-  | "configuration"
-  | "integrity";
+export type AgentGraphDiagnosticClassification = "transient" | "configuration" | "integrity";
 export type AgentGraphDiagnosticState = "retry_scheduled" | "needs_attention" | "resolved";
 
 export interface AgentGraphDiagnosticRecord {

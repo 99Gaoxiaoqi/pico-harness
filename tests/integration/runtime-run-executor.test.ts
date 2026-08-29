@@ -117,9 +117,7 @@ test("RuntimeRunExecutor fails the canonical Run when its host completion guard 
     );
     const events = await session.runtimeEventStore!.readSession(session.id);
     assert.equal(
-      events.some(
-        (event) => event.kind === "run.terminal" && event.data.status === "failed",
-      ),
+      events.some((event) => event.kind === "run.terminal" && event.data.status === "failed"),
       true,
     );
   } finally {
