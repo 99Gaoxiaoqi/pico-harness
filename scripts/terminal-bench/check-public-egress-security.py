@@ -46,6 +46,15 @@ def functional_test_proxy(module: Any, token: str, *args: Any, **kwargs: Any) ->
     return module.PublicEgressProxy(token, module.MAX_TTL_SEC, *args, **kwargs)
 
 
+def run_check(name: str, check: Callable[[], None]) -> None:
+    """Leave a bounded progress trail when a hosted runner suspends local threads."""
+    started = time.monotonic()
+    print(f"[public-egress] start {name}", file=sys.stderr, flush=True)
+    check()
+    elapsed = time.monotonic() - started
+    print(f"[public-egress] pass {name} ({elapsed:.3f}s)", file=sys.stderr, flush=True)
+
+
 def port_is_bindable(module: Any, port: int) -> bool:
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -1139,25 +1148,29 @@ def assert_constructor_contract(module: Any) -> None:
 
 def main() -> None:
     module = load_public_egress()
-    assert_constructor_contract(module)
-    assert_http_and_audit(module)
-    assert_connect(module)
-    assert_policy_denials(module)
-    assert_authentication(module)
-    assert_header_smuggling_rejected(module)
-    assert_content_length_bound(module)
-    assert_doh_parser(module)
-    assert_doh_fallback_and_fail_closed(module)
-    assert_ttl(module)
-    assert_ttl_listener_lifecycle(module)
-    assert_revoke_lifecycle(module)
-    assert_request_limit(module)
-    assert_connection_limit(module)
-    assert_server_error_is_bounded(module)
-    assert_blocked_doh_cancellation(module)
-    assert_byte_limit(module)
-    assert_connection_timeout(module)
-    assert_bounded_audit(module)
+    checks = (
+        ("constructor", lambda: assert_constructor_contract(module)),
+        ("http-and-audit", lambda: assert_http_and_audit(module)),
+        ("connect", lambda: assert_connect(module)),
+        ("policy-denials", lambda: assert_policy_denials(module)),
+        ("authentication", lambda: assert_authentication(module)),
+        ("header-smuggling", lambda: assert_header_smuggling_rejected(module)),
+        ("content-length", lambda: assert_content_length_bound(module)),
+        ("doh-parser", lambda: assert_doh_parser(module)),
+        ("doh-fail-closed", lambda: assert_doh_fallback_and_fail_closed(module)),
+        ("ttl", lambda: assert_ttl(module)),
+        ("ttl-listener", lambda: assert_ttl_listener_lifecycle(module)),
+        ("revoke", lambda: assert_revoke_lifecycle(module)),
+        ("request-limit", lambda: assert_request_limit(module)),
+        ("connection-limit", lambda: assert_connection_limit(module)),
+        ("server-error", lambda: assert_server_error_is_bounded(module)),
+        ("blocked-doh", lambda: assert_blocked_doh_cancellation(module)),
+        ("byte-limit", lambda: assert_byte_limit(module)),
+        ("connection-timeout", lambda: assert_connection_timeout(module)),
+        ("bounded-audit", lambda: assert_bounded_audit(module)),
+    )
+    for name, check in checks:
+        run_check(name, check)
     print(
         json.dumps(
             {
