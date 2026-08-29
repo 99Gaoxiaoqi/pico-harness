@@ -26,7 +26,7 @@ import {
   resolveLocalDaemonLockPath,
   startPicoDaemonRuntimeHostCandidate,
 } from "../../src/daemon/index.js";
-import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
+import { resolvePicoPaths, workspaceIdForPath } from "../../src/paths/pico-paths.js";
 import { sessionOwnerLeaseDirectory } from "../../src/storage/session-owner-lease.js";
 import {
   stopTestChildProcess,
@@ -304,9 +304,12 @@ test("daemon candidate: rolling upgrade drains cached Session lease before succe
     { method: "goal.get", params: { workspacePath, sessionId } },
     10_000,
   );
+  const runtimeStorageRoot = resolvePicoPaths(workspacePath, {
+    picoHome: harness.picoHome,
+  }).workspace.root;
   const ownerPath = join(
     sessionOwnerLeaseDirectory(
-      resolvePicoPaths(workspacePath, { picoHome: harness.picoHome }).workspace,
+      { id: workspaceIdForPath(runtimeStorageRoot), root: runtimeStorageRoot },
       sessionId,
     ),
     "owner.json",
