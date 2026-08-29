@@ -41,6 +41,11 @@ def wait_until(predicate: Callable[[], bool], timeout_sec: float = 2.0) -> None:
         time.sleep(0.005)
 
 
+def functional_test_proxy(module: Any, token: str, *args: Any, **kwargs: Any) -> Any:
+    """Keep non-TTL checks independent from hosted-runner scheduling delays."""
+    return module.PublicEgressProxy(token, module.MAX_TTL_SEC, *args, **kwargs)
+
+
 def port_is_bindable(module: Any, port: int) -> bool:
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -296,7 +301,7 @@ def assert_http_and_audit(module: Any) -> None:
     capture: list[bytes] = []
     resolver = RebindingResolver()
     connector = SocketPairConnector(http_responder(capture))
-    proxy = module.PublicEgressProxy(token, 60)
+    proxy = functional_test_proxy(module, token)
     proxy._resolver = resolver
     proxy._connector = connector
     port = proxy.start()
@@ -312,12 +317,15 @@ def assert_http_and_audit(module: Any) -> None:
                 "Proxy-Connection": "keep-alive",
             },
         )
-        assert status == 200
-        assert body == b"ok"
     finally:
         receipt = proxy.stop()
         connector.join()
 
+    assert status == 200, (
+        f"expected HTTP forwarding status 200, got {status}; "
+        f"receipt={json.dumps(receipt, sort_keys=True)}"
+    )
+    assert body == b"ok"
     assert resolver.calls == 1
     assert len(connector.calls) == 1
     assert connector.calls[0][0] == "93.184.216.34"
@@ -357,7 +365,7 @@ def assert_connect(module: Any) -> None:
     token = "connect-token"
     resolver = MappingResolver({"tunnel.test": ["93.184.216.34"]})
     connector = SocketPairConnector(echo_responder)
-    proxy = module.PublicEgressProxy(token, 60)
+    proxy = functional_test_proxy(module, token)
     proxy._resolver = resolver
     proxy._connector = connector
     port = proxy.start()
@@ -399,7 +407,7 @@ def assert_policy_denials(module: Any) -> None:
     def unexpected_connector(_ip: str, _port: int, _timeout: float) -> socket.socket:
         raise AssertionError("a denied target reached the connector")
 
-    proxy = module.PublicEgressProxy(token, 60)
+    proxy = functional_test_proxy(module, token)
     proxy._resolver = resolver
     proxy._connector = unexpected_connector
     port = proxy.start()
@@ -469,7 +477,7 @@ def assert_authentication(module: Any) -> None:
     resolver = MappingResolver({"public.test": ["93.184.216.34"]})
     capture: list[bytes] = []
     connector = SocketPairConnector(http_responder(capture))
-    proxy = module.PublicEgressProxy(token, 60)
+    proxy = functional_test_proxy(module, token)
     proxy._resolver = resolver
     proxy._connector = connector
     port = proxy.start()
@@ -508,7 +516,7 @@ def assert_header_smuggling_rejected(module: Any) -> None:
     def unexpected_connector(_ip: str, _port: int, _timeout: float) -> socket.socket:
         raise AssertionError("an invalid header reached the connector")
 
-    proxy = module.PublicEgressProxy(token, 60)
+    proxy = functional_test_proxy(module, token)
     proxy._resolver = resolver
     proxy._connector = unexpected_connector
     port = proxy.start()
@@ -552,7 +560,7 @@ def assert_content_length_bound(module: Any) -> None:
     def unexpected_resolver(_host: str, _port: int) -> list[str]:
         raise AssertionError("an invalid Content-Length reached DNS")
 
-    proxy = module.PublicEgressProxy(token, 60)
+    proxy = functional_test_proxy(module, token)
     proxy._resolver = unexpected_resolver
     port = proxy.start()
     try:
@@ -694,7 +702,7 @@ def assert_doh_parser(module: Any) -> None:
 def assert_doh_fallback_and_fail_closed(module: Any) -> None:
     original_getaddrinfo = module.socket.getaddrinfo
     calls: list[tuple[str, str, str, float]] = []
-    proxy = module.PublicEgressProxy("doh-fail-closed-token", 60)
+    proxy = functional_test_proxy(module, "doh-fail-closed-token")
     proxy.start()
 
     def forbidden_system_dns(*_args: Any, **_kwargs: Any) -> Any:
@@ -834,7 +842,7 @@ def assert_ttl_listener_lifecycle(module: Any) -> None:
 
 
 def assert_revoke_lifecycle(module: Any) -> None:
-    proxy = module.PublicEgressProxy("revoke-token", 60)
+    proxy = functional_test_proxy(module, "revoke-token")
     port = proxy.start()
     try:
         proxy.revoke()
@@ -854,7 +862,7 @@ def assert_revoke_lifecycle(module: Any) -> None:
 
 
 def assert_request_limit(module: Any) -> None:
-    proxy = module.PublicEgressProxy("request-limit-token", 60, 32, 1_024, 2)
+    proxy = functional_test_proxy(module, "request-limit-token", 32, 1_024, 2)
     port = proxy.start()
     try:
         for _attempt in range(2):
@@ -882,7 +890,7 @@ def assert_request_limit(module: Any) -> None:
 
 
 def assert_connection_limit(module: Any) -> None:
-    proxy = module.PublicEgressProxy("connection-limit-token", 60, max_connections=1)
+    proxy = functional_test_proxy(module, "connection-limit-token", max_connections=1)
     port = proxy.start()
     holding_client = socket.create_connection(("127.0.0.1", port), timeout=2)
     try:
@@ -901,7 +909,7 @@ def assert_connection_limit(module: Any) -> None:
 
 
 def assert_server_error_is_bounded(module: Any) -> None:
-    proxy = module.PublicEgressProxy("server-error-token", 60)
+    proxy = functional_test_proxy(module, "server-error-token")
     proxy.start()
     client, peer = socket.socketpair()
     try:
@@ -927,7 +935,7 @@ def assert_server_error_is_bounded(module: Any) -> None:
 
 
 def assert_blocked_doh_action(module: Any, action: str) -> None:
-    ttl_sec = 0.5 if action == "ttl" else 60
+    ttl_sec = 0.5 if action == "ttl" else module.MAX_TTL_SEC
     proxy = module.PublicEgressProxy(f"blocked-doh-{action}-token", ttl_sec)
     entered = threading.Event()
     peers: list[socket.socket] = []
@@ -1022,7 +1030,7 @@ def assert_byte_limit(module: Any) -> None:
     resolver = MappingResolver({"public.test": ["93.184.216.34"]})
     capture: list[bytes] = []
     connector = SocketPairConnector(http_responder(capture, body=b"x" * 1_024))
-    proxy = module.PublicEgressProxy(token, 60, max_total_bytes=512)
+    proxy = functional_test_proxy(module, token, max_total_bytes=512)
     proxy._resolver = resolver
     proxy._connector = connector
     port = proxy.start()
@@ -1037,7 +1045,7 @@ def assert_byte_limit(module: Any) -> None:
     assert receipt["bytes"]["total"] <= 512
     assert receipt["decisions"][0]["reason"] == "byte_limit"
 
-    preflight_proxy = module.PublicEgressProxy(token, 60, max_total_bytes=512)
+    preflight_proxy = functional_test_proxy(module, token, max_total_bytes=512)
     preflight_proxy._resolver = resolver
     preflight_proxy._connector = connector
     preflight_port = preflight_proxy.start()
@@ -1081,7 +1089,7 @@ def assert_connection_timeout(module: Any) -> None:
 
 
 def assert_bounded_audit(module: Any) -> None:
-    proxy = module.PublicEgressProxy("bounded-audit-token", 60)
+    proxy = functional_test_proxy(module, "bounded-audit-token")
     proxy.start()
     server_thread = proxy._server_thread
     expiry_thread = proxy._expiry_thread
