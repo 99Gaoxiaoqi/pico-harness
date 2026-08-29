@@ -30,7 +30,9 @@ test("Desktop cold workflows delegate runtime-host preparation to the Forge runn
   );
   assert.ok(
     runnerSource.includes('"@pico/runtime-host"') &&
-      runnerSource.includes('["run", "build", "--workspace", workspace]'),
+      runnerSource.includes('"run", "build", "--workspace", workspace') &&
+      runnerSource.includes("process.env.npm_execpath") &&
+      runnerSource.includes("executable: process.execPath"),
     "the Desktop Forge runner must rebuild runtime-host before start/package/make",
   );
 });

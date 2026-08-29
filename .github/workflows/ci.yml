@@ -9,9 +9,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v7
@@ -103,6 +108,7 @@ jobs:
   node-compatibility:
     name: Node.js ${{ matrix.node }} compatibility
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -222,8 +228,13 @@ jobs:
           PICO_WINDOWS_LOW_PRIVILEGE_TEST: "1"
         run: npm run test:integration:windows
 
-      - name: Run Windows process sandbox integration
-        run: node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/process-sandbox.integration.test.ts tests/integration/process-sandbox-native.integration.test.ts
+      - name: Run Windows process sandbox contract integration
+        timeout-minutes: 5
+        run: node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/process-sandbox.integration.test.ts
+
+      - name: Run Windows native process sandbox integration
+        timeout-minutes: 5
+        run: node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/process-sandbox-native.integration.test.ts
 
       - name: Cleanup temporary Windows ACL users
         if: always()

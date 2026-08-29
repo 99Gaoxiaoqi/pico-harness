@@ -11,6 +11,8 @@ on:
       - "native/**"
       - "resources/**"
       - "scripts/build-windows-broker.mjs"
+      - "scripts/run-desktop-forge.mjs"
+      - "scripts/terminal-bench/**"
       - "scripts/verify-sandbox-resources.mjs"
       - "package.json"
       - "package-lock.json"
@@ -24,6 +26,8 @@ on:
       - "native/**"
       - "resources/**"
       - "scripts/build-windows-broker.mjs"
+      - "scripts/run-desktop-forge.mjs"
+      - "scripts/terminal-bench/**"
       - "scripts/verify-sandbox-resources.mjs"
       - "package.json"
       - "package-lock.json"
@@ -31,6 +35,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   desktop-check:
@@ -40,6 +48,7 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v7

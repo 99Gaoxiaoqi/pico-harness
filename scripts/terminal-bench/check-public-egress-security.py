@@ -1119,6 +1119,7 @@ def assert_bounded_audit(module: Any) -> None:
 
 def assert_constructor_contract(module: Any) -> None:
     assert module.PROXY_POLICY_VERSION == 1
+    assert module.PUBLIC_EGRESS_BIND_HOST == "0.0.0.0"
     assert module.DEFAULT_MAX_CONNECTIONS == 32
     assert module.DEFAULT_MAX_TOTAL_BYTES == 1_073_741_824
     assert module.DEFAULT_MAX_REQUESTS == 4_096
@@ -1148,8 +1149,12 @@ def assert_constructor_contract(module: Any) -> None:
 
 def main() -> None:
     module = load_public_egress()
+    run_check("constructor", lambda: assert_constructor_contract(module))
+    # These policy checks exercise only loopback clients. Binding their short-lived
+    # listeners to all interfaces repeatedly triggers macOS hosted-runner local-network
+    # privacy delays, while production keeps the wildcard bind asserted above.
+    module.PUBLIC_EGRESS_BIND_HOST = "127.0.0.1"
     checks = (
-        ("constructor", lambda: assert_constructor_contract(module)),
         ("http-and-audit", lambda: assert_http_and_audit(module)),
         ("connect", lambda: assert_connect(module)),
         ("policy-denials", lambda: assert_policy_denials(module)),
