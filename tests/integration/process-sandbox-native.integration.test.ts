@@ -74,14 +74,13 @@ test(
     const script =
       'setTimeout(()=>{process.stdout.write(require("node:fs").readFileSync("existing.txt","utf8"))},250)';
     await writeFile(join(fixture.workspace, "existing.txt"), "ok");
-    const [first, second] = await Promise.all([
-      runNode(fixture, "workspace-write", script),
-      runNode(fixture, "workspace-write", script),
-    ]);
-    assert.equal(first.code, 0, first.stderr);
-    assert.equal(second.code, 0, second.stderr);
-    assert.equal(first.stdout, "ok");
-    assert.equal(second.stdout, "ok");
+    const results = await Promise.all(
+      Array.from({ length: 4 }, () => runNode(fixture, "workspace-write", script)),
+    );
+    for (const result of results) {
+      assert.equal(result.code, 0, result.stderr);
+      assert.equal(result.stdout, "ok");
+    }
   },
 );
 
