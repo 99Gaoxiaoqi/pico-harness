@@ -112,10 +112,15 @@ jobs:
       - name: Install filesystem metadata tools
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y acl attr libcap2-bin python3-venv
+          sudo apt-get install --no-install-recommends -y acl attr libcap2-bin libcap-dev meson ninja-build python3-venv xz-utils
 
       - name: Install dependencies for this Node ABI
         run: npm ci
+
+      - name: Build and verify bundled Linux sandbox
+        run: |
+          npm run build:sandbox:linux
+          npm run verify:sandbox:resources -- --require-current
 
       - name: Verify local file storage capabilities
         run: npm run check:storage
@@ -227,10 +232,13 @@ jobs:
       - run: npm ci
       - run: npm run build:sandbox:linux
       - run: npm run verify:sandbox:resources -- --require-current
+      - name: Archive Linux sandbox with executable permissions
+        run: tar -C resources/sandbox -cf "${RUNNER_TEMP}/sandbox-linux-${{ matrix.arch }}.tar" "linux-${{ matrix.arch }}"
       - uses: actions/upload-artifact@v4
         with:
           name: sandbox-linux-${{ matrix.arch }}
-          path: resources/sandbox/linux-${{ matrix.arch }}
+          path: ${{ runner.temp }}/sandbox-linux-${{ matrix.arch }}.tar
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: matrix.arch == 'x64'
         with:
@@ -257,11 +265,11 @@ jobs:
       - uses: actions/download-artifact@v5
         with:
           name: sandbox-linux-x64
-          path: resources/sandbox/linux-x64
+          path: artifacts/linux-x64
       - uses: actions/download-artifact@v5
         with:
           name: sandbox-linux-arm64
-          path: resources/sandbox/linux-arm64
+          path: artifacts/linux-arm64
       - uses: actions/download-artifact@v5
         with:
           name: sandbox-windows-x64
@@ -270,5 +278,9 @@ jobs:
         with:
           name: sandbox-bubblewrap-corresponding-source
           path: resources/licenses/bubblewrap
+      - name: Restore Linux sandbox executable permissions
+        run: |
+          tar -xf artifacts/linux-x64/sandbox-linux-x64.tar -C resources/sandbox
+          tar -xf artifacts/linux-arm64/sandbox-linux-arm64.tar -C resources/sandbox
       - run: npm run verify:sandbox:resources -- --require-all
-      - run: npm pack --dry-run
+      - run: npm run verify:sandbox:package

@@ -256,7 +256,10 @@ test("Bubblewrap profile 使用空命名空间、只读运行根和工作区写�
   });
   const args = buildBubblewrapArgs(policy, "/bin/sh", ["-c", "true"], root);
   assert.ok(args.includes("--unshare-all"));
-  assert.ok(args.includes("--disable-userns"));
+  const unshareUser = args.indexOf("--unshare-user");
+  const disableUserns = args.indexOf("--disable-userns");
+  assert.ok(unshareUser >= 0, "--disable-userns requires an explicit --unshare-user");
+  assert.ok(disableUserns > unshareUser);
   assert.ok(args.includes("--share-net"));
   assert.deepEqual(args.slice(-4), ["--", "/bin/sh", "-c", "true"]);
   assert.ok(
@@ -334,6 +337,11 @@ test("打包原生后端必须通过同目录 SHA-256 校验", async (context) =
   const digest = createHash("sha256").update("trusted").digest("hex");
   await writeFile(`${executable}.sha256`, `${digest}  helper\n`, "utf8");
   assert.equal(isVerifiedBundledExecutable(executable), true);
+  if (process.platform !== "win32") {
+    await chmod(executable, 0o644);
+    assert.equal(isVerifiedBundledExecutable(executable, "linux"), false);
+    await chmod(executable, 0o755);
+  }
   await writeFile(executable, "tampered", "utf8");
   assert.equal(isVerifiedBundledExecutable(executable), false);
 });
