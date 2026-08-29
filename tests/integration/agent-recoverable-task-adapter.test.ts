@@ -140,6 +140,10 @@ test("an expired installing claim is taken over without duplicating the durable 
   const installed = new Map<string, string>();
   let installCalls = 0;
   let actualInstallations = 0;
+  let releaseFirstInstaller!: () => void;
+  const secondInstallerStarted = new Promise<void>((resolve) => {
+    releaseFirstInstaller = resolve;
+  });
   const installer: AgentRecoveryWorkerInstaller = {
     async installOrConfirmWorker(intent) {
       installCalls++;
@@ -150,7 +154,11 @@ test("an expired installing claim is taken over without duplicating the durable 
         actualInstallations++;
       }
       if (installCalls === 1) {
-        await new Promise((resolveDelay) => setTimeout(resolveDelay, 80));
+        await secondInstallerStarted;
+      } else {
+        releaseFirstInstaller();
+        // Keep the takeover claim live while the expired owner tries to settle.
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 40));
       }
       return workerReceipt(intent.launchId, workerId);
     },
@@ -161,14 +169,14 @@ test("an expired installing claim is taken over without duplicating the durable 
       storageRootId: fixture.storageRootId,
       installer,
       ownerId,
-      claimTtlMs: 25,
+      claimTtlMs: 100,
       contentionTimeoutMs: 500,
       contentionPollMs: 5,
     });
   const firstPort = createPort("host:expired:first");
   const secondPort = createPort("host:expired:second");
   const firstResume = fixture.createAdapter(firstPort).resume(fixture.input, fixture.resumeContext);
-  await new Promise((resolveDelay) => setTimeout(resolveDelay, 40));
+  await new Promise((resolveDelay) => setTimeout(resolveDelay, 120));
   const secondResume = fixture
     .createAdapter(secondPort)
     .resume(fixture.input, fixture.resumeContext);
