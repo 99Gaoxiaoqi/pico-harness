@@ -1,9 +1,15 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { logger } from "../observability/logger.js";
 import { buildMinimalChildProcessEnv } from "../os/child-process-env.js";
 import { redactSensitiveText } from "../mcp/redact.js";
 import type { LspServerConfig } from "./lsp-server-discovery.js";
+import {
+  createSandboxPolicy,
+  defaultSandboxScratchRoot,
+  managedProcessLauncher,
+  type SandboxPolicy,
+} from "../safety/process-sandbox/index.js";
 import {
   isJsonRpcNotification,
   isJsonRpcResponse,
@@ -55,18 +61,32 @@ export class StdioLspClient {
   constructor(
     private readonly rootDir: string,
     private readonly config: LspServerConfig,
+    private readonly processSandbox?: SandboxPolicy,
   ) {}
 
   async start(): Promise<void> {
     if (this.state === "ready") return;
     if (this.state !== "new") throw new Error(`LSP client 当前状态为 ${this.state}，无法启动`);
     this.state = "starting";
-    this.child = spawn(this.config.command, [...(this.config.args ?? [])], {
-      cwd: this.rootDir,
-      env: buildMinimalChildProcessEnv(this.config.env),
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
-    });
+    this.child = managedProcessLauncher.launch(
+      {
+        command: this.config.command,
+        args: [...(this.config.args ?? [])],
+        cwd: this.rootDir,
+        env: this.processSandbox
+          ? { ...process.env, ...this.config.env }
+          : buildMinimalChildProcessEnv(this.config.env),
+        origin: "lsp",
+        policy:
+          this.processSandbox ??
+          createSandboxPolicy({
+            profile: "read-only",
+            workspaceRoots: [this.rootDir],
+            scratchRoot: defaultSandboxScratchRoot(this.rootDir),
+          }),
+      },
+      { stdio: ["pipe", "pipe", "pipe"], windowsHide: true },
+    ).child as ChildProcessWithoutNullStreams;
     this.wireChild(this.child);
 
     try {

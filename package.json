@@ -12,7 +12,9 @@
     "pico": "./dist/cli/main.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "resources/sandbox",
+    "resources/licenses"
   ],
   "bundleDependencies": [
     "@pico/protocol",
@@ -36,6 +38,9 @@
     "build:protocol": "npm run build --workspace @pico/protocol",
     "build:transcript-replica": "npm run build --workspace @pico/transcript-replica",
     "build:runtime-host": "npm run build --workspace @pico/runtime-host",
+    "build:sandbox:linux": "node scripts/build-bubblewrap.mjs",
+    "build:sandbox:windows": "node scripts/build-windows-broker.mjs",
+    "verify:sandbox:resources": "node scripts/verify-sandbox-resources.mjs",
     "prebuild": "npm run clean && npm run check:storage && npm run build:protocol && npm run build:transcript-replica && npm run build:runtime-host",
     "build": "tsc -p tsconfig.build.json",
     "postbuild": "node -e \"require('node:fs').chmodSync('dist/cli/main.js',0o755)\"",

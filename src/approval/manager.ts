@@ -17,6 +17,7 @@
 import { logger } from "../observability/logger.js";
 import { hostShellDialect, type HostShellDialect } from "../os/shell.js";
 import { classifyHardlineBashCommand, type HardlineBashReasonKind } from "./bash-hardline.js";
+import { classifyPowerShellHardlineCommand } from "./powershell-safety.js";
 import type { PermissionSessionScope } from "./session-permissions.js";
 
 /** 审批结果包 */
@@ -379,12 +380,11 @@ export function classifyHardlineCommand(
   } catch {
     return "unknown_hardline";
   }
-  // PowerShell 宿主没有静态红线(对齐 maka:进程内命令文本分析不是安全边界,
-  // 承重边界是 OS 沙箱),由审批层把关;沙箱落地后重新评估。
-  if (dialect === "powershell") return undefined;
   const command = parseBashCommand(args);
-  // Bash 参数无法确定解析时不得继续到 shell。
-  return command === undefined ? "unknown_hardline" : classifyHardlineBashCommand(command, workDir);
+  if (command === undefined) return "unknown_hardline";
+  return dialect === "powershell"
+    ? classifyPowerShellHardlineCommand(command)
+    : classifyHardlineBashCommand(command, workDir);
 }
 
 export function isHardlineCommand(toolName: string, args: string, workDir?: string): boolean {

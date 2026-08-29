@@ -31,7 +31,11 @@ const config = {
     appBundleId: "com.pico.harness",
     appCategoryType: "public.app-category.developer-tools",
     executableName: "Pico",
-    extraResource: [desktopAssetPath("icon.png")],
+    extraResource: [
+      desktopAssetPath("icon.png"),
+      "../../resources/sandbox",
+      "../../resources/licenses",
+    ],
     icon: desktopPackageIcon,
     name: "Pico",
     osxSign: macSigningIdentity ? { identity: macSigningIdentity } : undefined,

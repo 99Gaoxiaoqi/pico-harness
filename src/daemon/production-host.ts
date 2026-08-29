@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createCliSessionId, listCliSessionCatalogEntries } from "../cli/session-resolver.js";
 import { globalSessionManager } from "../engine/session.js";
 import type { SessionManagerLease } from "../engine/session-manager.js";
@@ -617,11 +617,33 @@ export function createProductionRuntimeServices(
         // AgentRuntime.execute. When a runtimeState is injected, AgentRuntime deliberately reuses
         // it and cannot attach extension Hook sources retroactively.
         const pluginSnapshot = await pluginRuntimeSnapshotRegistry.get(workspacePath);
+        const projectConfig = await loadPicoConfig(workspacePath);
+        const persistedAdditionalDirectories = persistedSettings?.additionalDirectories ?? [];
+        const processWorkspaceRoots = [
+          workspacePath,
+          ...new Set(
+            [...projectConfig.additionalDirectories, ...persistedAdditionalDirectories].map(
+              (directory) => resolve(workspacePath, directory),
+            ),
+          ),
+        ];
         const runtimeState = await createSessionRuntime({
           session,
           sessionLease,
           env,
           workspaceTrustStore: trustStore,
+          processSandbox: {
+            profile:
+              persistedSettings?.collaborationMode === "plan" || persistedSettings?.mode === "plan"
+                ? "read-only"
+                : persistedSettings?.permissionMode === "yolo"
+                  ? "danger-full-access"
+                  : "workspace-write",
+            config: projectConfig.sandbox,
+            scratchRoot: join(picoHome, "sandboxes", targetSessionId),
+            workspaceRoots: processWorkspaceRoots,
+            generation: 0,
+          },
           ...(workspaceRuntime.taskHostRuntime
             ? { taskHostRuntime: workspaceRuntime.taskHostRuntime }
             : {}),

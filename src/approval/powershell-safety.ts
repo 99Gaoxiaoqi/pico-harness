@@ -9,6 +9,40 @@
  * 反引号转义、重定向、注释符一律 requires-approval——宁可多审批,不可错判。
  */
 import { classifyGitCommand } from "./bash-safety.js";
+import type { HardlineBashReasonKind } from "./bash-hardline.js";
+
+/** Windows YOLO 仍保留不可审批绕过的确定性红线；这里只拦截高置信破坏语义。 */
+export function classifyPowerShellHardlineCommand(
+  command: string,
+): HardlineBashReasonKind | undefined {
+  const normalized = command.trim();
+  if (!normalized) return "unknown_hardline";
+  if (/\bgit(?:\.exe)?\s+push\b[^\r\n;|]*(?:--force(?:-with-lease)?|-f)\b/iu.test(normalized)) {
+    return "destructive_git";
+  }
+  if (
+    /\b(?:format-volume|clear-disk|initialize-disk|remove-partition|stop-computer|restart-computer|remove-localuser|disable-localuser|bcdedit|diskpart)(?:\.exe)?\b/iu.test(
+      normalized,
+    ) ||
+    /\bstop-process\b[^\r\n;|]*(?:\bwininit\b|\bcsrss\b|\blsass\b|\bservices\b)/iu.test(normalized)
+  ) {
+    return "destructive_system";
+  }
+  if (
+    /\b(?:remove-item|del|erase|rd|rmdir|rm)\b[^\r\n;|]*(?:(?:[a-z]:)?\\(?:windows|program files|users)(?:\\|\b)|[a-z]:\\(?:\s|$)|\/(?:\s|$))/iu.test(
+      normalized,
+    )
+  ) {
+    return "protected_destination";
+  }
+  if (
+    /\b(?:invoke-expression|iex|add-type)\b/iu.test(normalized) ||
+    /\b(?:powershell|pwsh)(?:\.exe)?\b[^\r\n;|]*(?:-encodedcommand|-enc\b)/iu.test(normalized)
+  ) {
+    return "opaque_shell";
+  }
+  return undefined;
+}
 
 export type PowerShellSafetyClassification =
   | { readonly kind: "read-only" }

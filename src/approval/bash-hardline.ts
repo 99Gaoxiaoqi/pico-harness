@@ -1445,9 +1445,16 @@ function hasDestructiveOutputRedirection(words: readonly ShellWord[]): boolean {
       target = { ...redirection, value: attachedTarget, outputRedirection: false };
     }
 
+    if (target && isPseudoDeviceRedirectionTarget(target)) continue;
     if (target && isProtectedMutationTarget(target)) return true;
   }
   return false;
+}
+
+function isPseudoDeviceRedirectionTarget(target: ShellWord): boolean {
+  if (target.dynamic || target.unquotedExpansion) return false;
+  const normalized = target.value.replaceAll("\\", "/").toLowerCase();
+  return normalized === "/dev/null" || normalized === "/dev/tty" || normalized === "nul";
 }
 
 function isProtectedRmTarget(target: string): boolean {

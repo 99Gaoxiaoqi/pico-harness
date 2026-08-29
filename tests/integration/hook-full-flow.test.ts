@@ -15,7 +15,7 @@ import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 
 test("shell 化 hook 全链路：allow 场景——shell 组合命令执行且工具正常放行", async (context) => {
   const fixture = await createFixture(context, "flow-allow");
-  const marker = join(fixture.root, "marker.txt");
+  const marker = join(fixture.workspace, "marker.txt");
   const target = join(fixture.workspace, "target.txt");
   await writeFile(target, "TARGET_CONTENT_E2E\n");
   // shell 组合命令：第一支写 marker（副作用证据），第二支输出 allow 决策信封；
@@ -69,7 +69,7 @@ test("shell 化 hook 全链路：deny 场景——决策信封阻断工具并携
 
 test("shell 化 hook 全链路：未信任场景——hook 静默跳过且工具不受影响", async (context) => {
   const fixture = await createFixture(context, "flow-untrusted");
-  const marker = join(fixture.root, "marker.txt");
+  const marker = join(fixture.workspace, "marker.txt");
   const target = join(fixture.workspace, "target.txt");
   await writeFile(target, "UNTRUSTED_TARGET\n");
   const command = [

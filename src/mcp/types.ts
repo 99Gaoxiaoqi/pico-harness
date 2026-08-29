@@ -10,6 +10,7 @@
 // 具体工具桥接(BaseTool 适配)在 mcp-tool.ts,连接编排在 manager.ts。
 
 import type { ToolExecutionContext } from "../tools/registry.js";
+import type { SandboxPolicy } from "../safety/process-sandbox/index.js";
 
 /**
  * MCP 工具定义:由 server 的 tools/list 方法返回。
@@ -156,6 +157,8 @@ export type McpElicitationHandler = (
 export interface McpClientOptions {
   /** 只有宿主提供用户交互时才声明 elicitation capability。 */
   elicitationHandler?: McpElicitationHandler;
+  /** 可信宿主为 stdio transport 注入的进程沙箱策略。 */
+  processSandbox?: SandboxPolicy;
 }
 
 /**

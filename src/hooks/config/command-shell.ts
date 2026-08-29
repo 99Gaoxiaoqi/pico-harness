@@ -1,5 +1,4 @@
-import { existsSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { accessSync, constants, existsSync } from "node:fs";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
 import type { CommandHookHandler, HookHandler } from "../types.js";
 
@@ -184,13 +183,12 @@ export function resolveHookShell(
 
 /**
  * 探测 bash 真正可用。Git for Windows 的 `Git\bin\bash.exe` 是 47KB 转发
- * stub（转发到 usr/bin/bash.exe），残缺安装里目标缺失时 stub 会以
- * "Skipping command-line ... not found" 拒绝执行——existsSync 抓不出这种
- * 半死状态，必须实际跑一次。探测失败返回 false，调用方回落下一候选。
+ * stub（转发到 usr/bin/bash.exe）。模型可影响的 Hook 装配阶段不允许
+ * 旁路启动探测进程，因此只验证文件可执行；真实启动由沙箱 launcher fail-closed。
  */
 function isUsableBash(candidate: string): boolean {
   try {
-    execFileSync(candidate, ["-c", "exit 0"], { timeout: 3_000, stdio: "ignore" });
+    accessSync(candidate, constants.X_OK);
     return true;
   } catch {
     return false;

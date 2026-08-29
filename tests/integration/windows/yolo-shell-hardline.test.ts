@@ -12,8 +12,8 @@ import {
   shellCommandArgs,
 } from "../../../src/os/shell.js";
 
-// Windows 宿主方言为 PowerShell(对齐 maka):本文件锁定 PowerShell 宿主的
-// 解析、argv、无静态红线与只读分类契约。bash hardline 语义回归在 POSIX
+// Windows 宿主方言为 PowerShell:本文件锁定 PowerShell 宿主的
+// 解析、argv、确定性静态红线与只读分类契约。bash hardline 语义回归在 POSIX
 // 侧由 tests/integration/yolo-safety.integration.test.ts 覆盖。
 
 test(
@@ -44,7 +44,7 @@ test(
 );
 
 test(
-  "PowerShell 宿主无 bash 静态红线,危险命令交由审批层把关",
+  "PowerShell 宿主在 YOLO 下仍拒绝确定性系统破坏",
   { skip: process.platform !== "win32" },
   () => {
     resetShellCache();
@@ -57,7 +57,9 @@ test(
     for (const command of dangerous) {
       assert.equal(
         classifyHardlineCommand("bash", JSON.stringify({ command }), process.cwd()),
-        undefined,
+        command.startsWith("Remove-Item") || command === "rm -rf /"
+          ? "protected_destination"
+          : "destructive_system",
         command,
       );
     }
