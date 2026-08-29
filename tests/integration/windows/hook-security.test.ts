@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -10,6 +10,7 @@ import {
 } from "../../../src/hooks/config/command-shell.js";
 import { DefaultHookExecutor } from "../../../src/hooks/executors/executor.js";
 import type { CommandHookHandler, HookOutput } from "../../../src/hooks/types.js";
+import { createSandboxPolicy } from "../../../src/safety/process-sandbox/index.js";
 
 const WINDOWS_ONLY =
   process.platform === "win32" ? false : "requires Windows executable and process-tree semantics";
@@ -30,7 +31,7 @@ test(
       args: ["./entry.cjs"],
     } as const satisfies CommandHookHandler;
 
-    const executor = new DefaultHookExecutor({ workDir: fixture.workspace });
+    const executor = createHookExecutor(fixture);
     context.after(async () => await executor.dispose());
     const output = await executeStopHook(executor, fixture, handler, "windows-direct-exe");
     assert.equal(output.additionalContext, "windows-exe");
@@ -77,7 +78,7 @@ test(
     );
     assert.equal(overridden.PATH, "custom");
 
-    const executor = new DefaultHookExecutor({ workDir: fixture.workspace, env: environment });
+    const executor = createHookExecutor(fixture, environment);
     context.after(async () => await executor.dispose());
     const output = await executeStopHook(executor, fixture, handler, "windows-mixed-case-path");
     // 子进程看到的 PATH 就是受控环境的 pAtH 值（nodeDir 前缀 + 尾随分号）。
@@ -103,10 +104,36 @@ test(
       args: [entryPath],
     } as const satisfies CommandHookHandler;
 
-    const executor = new DefaultHookExecutor({ workDir: fixture.workspace });
+    const executor = createHookExecutor(fixture);
     context.after(async () => await executor.dispose());
     const output = await executeStopHook(executor, fixture, handler, "windows-absolute-tilde");
     assert.equal(output.additionalContext, "absolute-tilde", JSON.stringify(output));
+  },
+);
+
+test(
+  "Windows sandbox broker resolves ACL control tools from trusted System32",
+  { skip: WINDOWS_ONLY },
+  async (context) => {
+    const fixture = await createFixture(context, "trusted-icacls");
+    const entryPath = join(fixture.workspace, "entry.cjs");
+    await writeFile(
+      entryPath,
+      'process.stdout.write(JSON.stringify({ additionalContext: "trusted-icacls" }));\n',
+    );
+    // A bare Command::new("icacls.exe") can resolve from the broker cwd before System32.
+    // A renamed Node executable is enough to make that unsafe lookup fail deterministically.
+    await copyFile(process.execPath, join(fixture.workspace, "icacls.exe"));
+    const handler = {
+      type: "command",
+      command: process.execPath,
+      args: [entryPath],
+    } as const satisfies CommandHookHandler;
+    const executor = createHookExecutor(fixture);
+    context.after(async () => await executor.dispose());
+
+    const output = await executeStopHook(executor, fixture, handler, "windows-trusted-icacls");
+    assert.equal(output.additionalContext, "trusted-icacls", JSON.stringify(output));
   },
 );
 
@@ -161,7 +188,7 @@ test(
       command: process.execPath,
       args: ["./close-stdin.cjs"],
     } as const satisfies CommandHookHandler;
-    const executor = new DefaultHookExecutor({ workDir: fixture.workspace });
+    const executor = createHookExecutor(fixture);
     context.after(async () => await executor.dispose());
 
     const output = await executor.execute(
@@ -270,9 +297,9 @@ async function createProcessTreeFixture(
   const fixture = await createFixtureRoot(label);
   const parentPath = join(fixture.workspace, "parent.cjs");
   const descendantPath = join(fixture.workspace, "descendant.cjs");
-  const treePath = join(fixture.root, "tree.json");
-  const heartbeatPath = join(fixture.root, "descendant-heartbeat.txt");
-  const executor = new DefaultHookExecutor({ workDir: fixture.workspace });
+  const treePath = join(fixture.workspace, "tree.json");
+  const heartbeatPath = join(fixture.workspace, "descendant-heartbeat.txt");
+  const executor = createHookExecutor(fixture);
   context.after(async () => {
     try {
       const tree = await readProcessTree(treePath);
@@ -318,6 +345,21 @@ async function createProcessTreeFixture(
     timeoutMs,
   } as const satisfies CommandHookHandler;
   return { fixture, executor, handler, treePath, heartbeatPath };
+}
+
+function createHookExecutor(
+  fixture: Fixture,
+  env: Readonly<NodeJS.ProcessEnv> = process.env,
+): DefaultHookExecutor {
+  return new DefaultHookExecutor({
+    workDir: fixture.workspace,
+    env,
+    processSandbox: createSandboxPolicy({
+      profile: "workspace-write",
+      workspaceRoots: [fixture.workspace],
+      scratchRoot: join(fixture.root, "sandbox-scratch"),
+    }),
+  });
 }
 
 function withoutExecutionPath(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {

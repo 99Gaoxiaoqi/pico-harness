@@ -1,9 +1,9 @@
 use std::collections::HashSet;
-use std::ffi::{c_void, OsStr};
+use std::ffi::{c_void, OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::mem::{size_of, zeroed};
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::ptr::{null, null_mut};
@@ -175,6 +175,7 @@ extern "system" {
     ) -> i32;
     fn GetFileAttributesW(file_name: *const u16) -> u32;
     fn GetStdHandle(standard_handle: u32) -> Handle;
+    fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
 }
 
 #[link(name = "bcrypt")]
@@ -514,7 +515,7 @@ impl RecoveryJournal {
         let grant = format!("*{sid}:(OI)(CI){rights}");
         // Windows propagates inheritable ACEs to existing children. Avoid /T because a
         // string-based recursive traversal can cross a workspace junction into an external tree.
-        run_control("icacls.exe", [&path_text, "/grant", &grant, "/C", "/L"])
+        run_icacls("grant", [&path_text, "/grant", &grant, "/C", "/L"])
     }
 
     fn record(&mut self, kind: &str, target: &str, sid: &str) -> Result<(), String> {
@@ -637,8 +638,8 @@ fn recover(path: &Path) -> Result<(), String> {
 fn cleanup_entries(entries: &[(String, String, String)]) -> Result<(), String> {
     for (kind, target, sid) in entries.iter().rev() {
         match kind.as_str() {
-            "acl" => run_cleanup(
-                "icacls.exe",
+            "acl" => run_icacls(
+                "cleanup",
                 [target, "/remove", &format!("*{sid}"), "/C", "/L"],
             )?,
             "profile" => delete_appcontainer_profile(target)?,
@@ -661,27 +662,52 @@ fn delete_appcontainer_profile(name: &str) -> Result<(), String> {
     }
 }
 
-fn run_cleanup<const N: usize>(program: &str, args: [&str; N]) -> Result<(), String> {
-    let status = Command::new(program)
+fn run_icacls<const N: usize>(operation: &str, args: [&str; N]) -> Result<(), String> {
+    // The broker starts in the target workspace and inherits its environment. Resolve both the
+    // executable and cwd from Kernel32 so neither a workspace file nor PATH/SystemRoot can select
+    // the ACL control binary.
+    let system_directory = system_directory()?;
+    let program = system_directory.join("icacls.exe");
+    let status = Command::new(&program)
+        .current_dir(&system_directory)
         .args(args)
         .status()
         .map_err(error_text)?;
     if status.success() {
         Ok(())
     } else {
-        Err(format!("{program} cleanup failed with {status}"))
+        Err(format!(
+            "{} {operation} failed with {status}",
+            program.display()
+        ))
     }
 }
 
-fn run_control<const N: usize>(program: &str, args: [&str; N]) -> Result<(), String> {
-    let status = Command::new(program)
-        .args(args)
-        .status()
-        .map_err(error_text)?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("{program} failed with {status}"))
+fn system_directory() -> Result<PathBuf, String> {
+    let mut buffer = vec![0u16; 260];
+    loop {
+        let length = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+        if length == 0 {
+            return Err(last_error("GetSystemDirectoryW"));
+        }
+        let length = length as usize;
+        if length < buffer.len() {
+            buffer.truncate(length);
+            return Ok(PathBuf::from(OsString::from_wide(&buffer)));
+        }
+        buffer.resize(length + 1, 0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::system_directory;
+
+    #[test]
+    fn system_directory_is_absolute_and_contains_icacls() {
+        let system_directory = system_directory().expect("system directory should resolve");
+        assert!(system_directory.is_absolute());
+        assert!(system_directory.join("icacls.exe").is_file());
     }
 }
 
