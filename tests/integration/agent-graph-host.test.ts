@@ -803,6 +803,14 @@ async function attachHostedRuntimeRun(
 ): Promise<RuntimeRun> {
   return RuntimeRun.start({
     capability: input.session.runtimeEventCapability!,
+    ...(input.prestartedRun.presentation === "internal"
+      ? {
+          presentation: {
+            audience: "internal" as const,
+            source: "agent_graph_control" as const,
+          },
+        }
+      : {}),
     runId: input.prestartedRun.runId,
     turnId: input.prestartedRun.turnId,
     invocationId: input.prestartedRun.invocationId,
