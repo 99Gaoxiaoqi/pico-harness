@@ -33,6 +33,28 @@ for (const source of [
 ]) {
   await access(join(projectRoot, "native/windows-appcontainer-broker", source));
 }
+const windowsHostPrepRoot = join(projectRoot, "native/windows-appcontainer-broker");
+const windowsHostPrepManifest = await readFile(
+  join(windowsHostPrepRoot, "pico-appcontainer-host-prep.manifest"),
+  "utf8",
+);
+if (
+  windowsHostPrepManifest.includes("trustInfo") ||
+  windowsHostPrepManifest.includes("requestedExecutionLevel")
+) {
+  throw new Error("Windows host-prep compatibility manifest 不得重复定义 UAC trustInfo");
+}
+if (!windowsHostPrepManifest.includes("{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}")) {
+  throw new Error("Windows host-prep compatibility manifest 无效");
+}
+const windowsHostPrepBuildScript = await readFile(join(windowsHostPrepRoot, "build.rs"), "utf8");
+if (
+  !windowsHostPrepBuildScript.includes("MANIFESTUAC") ||
+  !windowsHostPrepBuildScript.includes("requireAdministrator") ||
+  !windowsHostPrepBuildScript.includes("uiAccess='false'")
+) {
+  throw new Error("Windows host-prep 缺少 requireAdministrator LINK 配置");
+}
 
 const requiredExecutables = process.argv.includes("--require-all")
   ? [
