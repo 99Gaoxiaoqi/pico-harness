@@ -3,6 +3,8 @@ import { accessSync, constants, mkdirSync, realpathSync } from "node:fs";
 import { delimiter, dirname, isAbsolute, resolve } from "node:path";
 import type { SandboxPolicy } from "./types.js";
 
+export const WINDOWS_RESTRICTED_NODE_OPTIONS = "--preserve-symlinks --preserve-symlinks-main";
+
 const CACHE_ENV_NAMES = [
   "XDG_CACHE_HOME",
   "npm_config_cache",

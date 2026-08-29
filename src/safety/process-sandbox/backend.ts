@@ -2,7 +2,12 @@ import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildSandboxEnvironment, runtimeReadAliases, runtimeReadRoots } from "./environment.js";
+import {
+  buildSandboxEnvironment,
+  runtimeReadAliases,
+  runtimeReadRoots,
+  WINDOWS_RESTRICTED_NODE_OPTIONS,
+} from "./environment.js";
 import { isWithinRoot, normalizeRoots } from "./policy.js";
 import {
   SandboxViolationError,
@@ -29,6 +34,11 @@ export function buildManagedSpawnPlan(request: ManagedSpawnRequest): SandboxSpaw
       sandboxed: false,
       profile: request.policy.profile,
     };
+  }
+  if (platform === "win32") {
+    // AppContainer 不获得盘符根 DACL；Node 默认 realpath 会逐级 lstat 到 C:\\。
+    // 这是宿主在清洗后固定的兼容参数，不恢复用户提供的 NODE_OPTIONS。
+    env.NODE_OPTIONS = WINDOWS_RESTRICTED_NODE_OPTIONS;
   }
 
   const policy = withRuntimeRoots(request.policy, request.command, env, platform);

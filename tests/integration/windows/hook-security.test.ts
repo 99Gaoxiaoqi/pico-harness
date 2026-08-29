@@ -14,7 +14,10 @@ import {
 } from "../../../src/hooks/executors/executor.js";
 import { HookTrustStore } from "../../../src/hooks/trust/store.js";
 import type { CommandHookHandler, HookOutput } from "../../../src/hooks/types.js";
-import { createSandboxPolicy } from "../../../src/safety/process-sandbox/index.js";
+import {
+  createSandboxPolicy,
+  WINDOWS_RESTRICTED_NODE_OPTIONS,
+} from "../../../src/safety/process-sandbox/index.js";
 
 const WINDOWS_ONLY =
   process.platform === "win32" ? false : "requires Windows executable and process-tree semantics";
@@ -25,9 +28,23 @@ test(
   async (context) => {
     const fixture = await createFixture(context, "direct-exe");
     const entryPath = join(fixture.workspace, "entry.cjs");
+    await writeFile(join(fixture.workspace, "dependency.cjs"), 'module.exports = "windows-exe";\n');
     await writeFile(
       entryPath,
-      'process.stdout.write(JSON.stringify({ additionalContext: "windows-exe" }));\n',
+      [
+        'const { readdirSync } = require("node:fs");',
+        'const { parse } = require("node:path");',
+        "const driveRoot = parse(process.execPath).root;",
+        "let rootListed = true;",
+        "try { readdirSync(driveRoot); } catch (error) {",
+        '  if (!error || !["EACCES", "EPERM"].includes(error.code)) throw error;',
+        "  rootListed = false;",
+        "}",
+        'if (rootListed) throw new Error("drive root unexpectedly listable");',
+        `if (process.env.NODE_OPTIONS !== ${JSON.stringify(WINDOWS_RESTRICTED_NODE_OPTIONS)}) throw new Error("unexpected NODE_OPTIONS");`,
+        'process.stdout.write(JSON.stringify({ additionalContext: require("./dependency.cjs") }));',
+        "",
+      ].join("\n"),
     );
     const handler = {
       type: "command",
