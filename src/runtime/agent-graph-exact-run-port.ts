@@ -167,7 +167,12 @@ export class SqliteAgentGraphExactRunPort implements AgentGraphExactRunPort {
         session,
         prompt: input.prompt,
         prestartedRun,
-        prestartedUserInput: { messageId: agentGraphInputMessageId(input.claimId) },
+        prestartedUserInput: {
+          messageId: agentGraphInputMessageId(input.claimId),
+          // A pre-existing input may come from a build before presentation provenance existed.
+          // Preserve that exact payload on attach; fresh Graph control input is internal.
+          ...(admitted.input === "missing" ? { presentation: "internal" as const } : {}),
+        },
       });
       return "started";
     } finally {

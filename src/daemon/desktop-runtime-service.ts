@@ -216,6 +216,7 @@ import {
 } from "./desktop-review.js";
 import {
   ingestDesktopRuntimeNotification,
+  isDesktopRunBoundaryNotification,
   isDesktopTranscriptNotification,
 } from "./desktop-transcript-persistence.js";
 import type { TranscriptEvent } from "../presentation/transcript-event-store.js";
@@ -1045,6 +1046,19 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const sideChats = this.sideChatAuthority(canonical);
     await sideChats.recover();
     const hiddenSessionIds = new Set(sideChats.list().map((lease) => lease.targetSessionId));
+    const graphStore = new SqliteAgentGraphControlStore({
+      storageRoot: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
+      now: this.now,
+    });
+    try {
+      for (const graph of graphStore.listGraphs()) {
+        for (const provision of graphStore.listOperatorProvisions(graph.graphId)) {
+          hiddenSessionIds.add(provision.childSessionId);
+        }
+      }
+    } finally {
+      graphStore.close();
+    }
     // 归档/置顶已并入 sessions 表(catalog 投影行),desktop session-state.json 退役。
     const entries = await listCliSessionCatalogEntries(canonical, { picoHome: this.picoHome });
     const sessions = entries
@@ -2445,10 +2459,51 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private async persistRuntimeNotification(event: RuntimeNotification): Promise<void> {
     const sessionId = event.scope.sessionId;
     if (!sessionId) return;
+    const runId = event.scope.runId;
+    if (
+      runId &&
+      isDesktopRunBoundaryNotification(event.topic) &&
+      (await this.isInternalAgentGraphRun(event.scope.workspacePath, sessionId, runId))
+    ) {
+      return;
+    }
     const persisted = await this.withSession(event.scope.workspacePath, sessionId, (session) =>
       ingestDesktopRuntimeNotification(session, event),
     );
     if (persisted) this.publishTranscriptUpdate(event.scope.workspacePath, sessionId, "reload");
+  }
+
+  private async isInternalAgentGraphRun(
+    workspacePath: string,
+    rootSessionId: string,
+    runId: string,
+  ): Promise<boolean> {
+    const canonical = await canonicalizeWorkspacePath(workspacePath);
+    const store = new SqliteAgentGraphControlStore({
+      storageRoot: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
+      now: this.now,
+    });
+    try {
+      for (const graph of store.listGraphs(rootSessionId)) {
+        if (
+          store.listYieldInterests(graph.graphId).some((interest) => interest.rootRunId === runId)
+        ) {
+          return true;
+        }
+        for (const wake of store.listSupervisorWakes(graph.graphId)) {
+          if (
+            store
+              .listSupervisorWakeAttempts(wake.wakeId)
+              .some((attempt) => attempt.targetRunId === runId)
+          ) {
+            return true;
+          }
+        }
+      }
+      return false;
+    } finally {
+      store.close();
+    }
   }
 
   private async resolveRuntimeUserInput(

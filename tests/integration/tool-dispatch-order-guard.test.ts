@@ -78,6 +78,14 @@ test("真实引擎账本序:message.committed(toolCall) < tool.started < tool.re
       declared < started && started < recorded,
       `ledger order violated: committed@${declared}, started@${started}, recorded@${recorded}`,
     );
+
+    const transcript = await session.runtimeEventStore!.readTranscriptProjectionPage({
+      sessionId: session.id,
+      maxBytes: 64 * 1024,
+    });
+    const projected = JSON.stringify(transcript.items.map((item) => item.payload));
+    assert.match(projected, /order_guard_fixture/u);
+    assert.match(projected, /deterministic output/u);
   } finally {
     await session.close();
     await rm(root, { recursive: true, force: true });

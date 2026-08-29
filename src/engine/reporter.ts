@@ -23,6 +23,7 @@ export type AssistantResponseSuppressionReason =
   | "required-delegation"
   | "delegation-first-retry"
   | "explore-synthesis-retry"
+  | "internal-control"
   | "network-retry";
 
 /** 宿主可见的子代理活动快照；activityId 只用于更新同一张卡片。 */

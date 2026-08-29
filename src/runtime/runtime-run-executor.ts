@@ -99,6 +99,8 @@ export interface PrestartedRuntimeRun {
 
 export interface PrestartedRuntimeUserInput {
   readonly messageId: string;
+  /** Host-owned control-plane input that remains in model history but not user transcript. */
+  readonly presentation?: "internal";
 }
 
 /**
@@ -249,6 +251,15 @@ export class RuntimeRunExecutor {
           const userReceipt = await session.commitMessageOnce(`user-message:${rewindPointId}`, {
             role: "user",
             content: prompt,
+            ...(prestartedUserInput?.presentation === "internal"
+              ? {
+                  providerData: {
+                    picoKind: "agent_graph_control_input",
+                    picoPresentationAudience: "internal",
+                    picoHiddenFromTranscript: true,
+                  },
+                }
+              : {}),
             ...(images ? { images } : {}),
           });
           submittedUserMessage = { eventId: userReceipt.eventId, content: prompt };

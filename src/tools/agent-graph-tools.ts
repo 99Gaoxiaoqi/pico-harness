@@ -11,6 +11,7 @@ import type {
   AgentGraphStopCommand,
   AgentGraphOperationSource,
 } from "../agent-graph/core/contracts.js";
+export { AGENT_GRAPH_SUPERVISOR_TOOL_NAMES } from "../agent-graph/core/tool-names.js";
 import type { AgentGraphOperatorProfileSummary } from "../agent-graph/operator-profile-catalog.js";
 import { agentOutputRecordIdFor } from "../agent-graph/core/ids.js";
 import type { AgentGraphRuntimeStatus } from "../agent-graph/runtime-port.js";
@@ -26,11 +27,6 @@ export const AGENT_GRAPH_MAX_INSTRUCTION_BYTES = 32 * 1024;
 export const AGENT_GRAPH_MAX_JSON_BYTES = 64 * 1024;
 
 /** The complete capability surface for a root Graph Supervisor run. */
-export const AGENT_GRAPH_SUPERVISOR_TOOL_NAMES = [
-  "view_agent_graph",
-  "update_agent_graph",
-  "yield_agent_graph",
-] as const;
 
 const MAX_IDENTITY_BYTES = 1024;
 const MAX_SHORT_TEXT_BYTES = 2 * 1024;

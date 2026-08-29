@@ -20,6 +20,7 @@ import {
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 import type { RuntimeEvent } from "../../src/storage/runtime-event.js";
+import { isMessageHiddenFromTranscript } from "../../src/schema/message.js";
 import { writeDesktopModelRouting } from "../fixtures/desktop-model-routing.js";
 
 test("production exact root wake reads durable output before finish", () =>
@@ -265,7 +266,10 @@ async function runProductionRootWakeScenario(
       readonly runtimeClaims: readonly { readonly status: string }[];
       readonly outputs: readonly { readonly status: string }[];
     };
-    assert.deepEqual(desktopGraph.runtimeClaims.map(({ status }) => status), ["completed"]);
+    assert.deepEqual(
+      desktopGraph.runtimeClaims.map(({ status }) => status),
+      ["completed"],
+    );
     assert.deepEqual(
       desktopGraph.outputs.map(({ status }) => status),
       scenario === "outputless" ? [] : ["success"],
@@ -277,6 +281,42 @@ async function runProductionRootWakeScenario(
     );
     assert.equal(events.filter((event) => event.kind === "run.started").length, 1);
     assert.equal(events.filter((event) => event.kind === "run.terminal").length, 1);
+    const wakeInput = events.find(
+      (event): event is Extract<RuntimeEvent, { kind: "message.committed" }> =>
+        event.kind === "message.committed" && event.data.message.role === "user",
+    );
+    assert.ok(wakeInput);
+    assert.equal(isMessageHiddenFromTranscript(wakeInput.data.message), true);
+    assert.equal(
+      events.some(
+        (event) =>
+          event.kind === "transcript.event.recorded" && event.data.event.type === "tool.started",
+      ),
+      false,
+      "Graph supervisor tools must stay in the Runtime ledger without entering transcript facts",
+    );
+    assert.ok(
+      events
+        .filter(
+          (event): event is Extract<RuntimeEvent, { kind: "message.committed" }> =>
+            event.kind === "message.committed" && event.data.message.role === "assistant",
+        )
+        .filter((event) => (event.data.message.toolCalls?.length ?? 0) > 0)
+        .every((event) => isMessageHiddenFromTranscript(event.data.message)),
+    );
+    const transcript = await rootLease.session.runtimeEventStore!.readTranscriptProjectionPage({
+      sessionId: rootSessionId,
+      maxBytes: 512 * 1024,
+      limit: 100,
+    });
+    const visibleTranscript = JSON.stringify(transcript.items.map((item) => item.payload));
+    assert.match(visibleTranscript, /Create one deterministic operator and yield\./u);
+    assert.match(visibleTranscript, /root wake complete/u);
+    assert.doesNotMatch(visibleTranscript, /Graph Supervisor wake/u);
+    assert.doesNotMatch(
+      visibleTranscript,
+      /view_agent_graph|update_agent_graph|yield_agent_graph/u,
+    );
     const durableViewResult = events.find(
       (event): event is Extract<RuntimeEvent, { kind: "tool.result.recorded" }> =>
         event.kind === "tool.result.recorded" && event.data.toolName === "view_agent_graph",
