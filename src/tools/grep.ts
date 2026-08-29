@@ -346,7 +346,7 @@ function searchWithRg(opts: {
         reject(new Error(`rg 执行失败: 输出超过 ${maxBuffer} bytes`));
       } else if (code === 0) {
         resolvePromise(stdout);
-      } else if (code === 1) {
+      } else if (code === 1 && stderr.trim().length === 0) {
         resolvePromise("");
       } else {
         reject(new Error(`rg 执行失败 (exit ${String(code)}): ${stderr.trim()}`));
