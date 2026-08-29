@@ -267,6 +267,17 @@ export class FileAgentRecoveryLaunchIntentPort implements AgentRecoveryLaunchInt
         continue;
       }
 
+      if (confirmedWorker) {
+        const settlement = await this.settleInstalled(intent, claim, confirmedWorker);
+        if (settlement.status === "settled") return settlement.worker;
+        if (this.now().getTime() >= deadline) {
+          throw new Error(
+            `Agent recovery launch ${intent.launchId} install claim was repeatedly superseded before settlement`,
+          );
+        }
+        continue;
+      }
+
       let worker: AgentRecoveryWorkerReceipt;
       try {
         worker = decodeAgentRecoveryWorkerReceipt(
@@ -289,6 +300,11 @@ export class FileAgentRecoveryLaunchIntentPort implements AgentRecoveryLaunchInt
       }
       const settlement = await this.settleInstalled(intent, claim, worker);
       if (settlement.status === "settled") return settlement.worker;
+      if (this.now().getTime() >= deadline) {
+        throw new Error(
+          `Agent recovery launch ${intent.launchId} install claim was repeatedly superseded before settlement`,
+        );
+      }
     }
   }
 
