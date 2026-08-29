@@ -157,8 +157,9 @@ test("an expired installing claim is taken over without duplicating the durable 
         await secondInstallerStarted;
       } else {
         releaseFirstInstaller();
-        // Keep the takeover claim live while the expired owner tries to settle.
-        await new Promise((resolveDelay) => setTimeout(resolveDelay, 40));
+        // Expire the takeover too: the first caller must reuse its durable receipt,
+        // not invoke the external installer for a third time.
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 140));
       }
       return workerReceipt(intent.launchId, workerId);
     },
@@ -187,7 +188,60 @@ test("an expired installing claim is taken over without duplicating the durable 
   assert.equal(actualInstallations, 1);
   const projection = await firstPort.inspect(first.launchId);
   assert.equal(projection?.state, "installed");
-  assert.equal(projection?.claimEpoch, 2);
+  assert.equal(projection?.claimEpoch, 3);
+});
+
+test("a superseded installer fails closed when the durable worker identity changes", async (context) => {
+  const fixture = await createFixture(context, "expired-claim-worker-conflict");
+  let installCalls = 0;
+  let releaseFirstInstaller!: () => void;
+  const secondInstallerStarted = new Promise<void>((resolve) => {
+    releaseFirstInstaller = resolve;
+  });
+  const installer: AgentRecoveryWorkerInstaller = {
+    async installOrConfirmWorker(intent) {
+      const call = ++installCalls;
+      if (call === 1) {
+        await secondInstallerStarted;
+        return workerReceipt(intent.launchId, `worker:first:${intent.launchId}`);
+      }
+      releaseFirstInstaller();
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 40));
+      return workerReceipt(intent.launchId, `worker:second:${intent.launchId}`);
+    },
+  };
+  const createPort = (ownerId: string) =>
+    new FileAgentRecoveryLaunchIntentPort({
+      storageRoot: fixture.store.storageRoot,
+      storageRootId: fixture.storageRootId,
+      installer,
+      ownerId,
+      claimTtlMs: 100,
+      contentionTimeoutMs: 500,
+      contentionPollMs: 5,
+    });
+  const firstPort = createPort("host:conflict:first");
+  const secondPort = createPort("host:conflict:second");
+  const firstResume = fixture.createAdapter(firstPort).resume(fixture.input, fixture.resumeContext);
+  await new Promise((resolveDelay) => setTimeout(resolveDelay, 120));
+  const secondResume = fixture
+    .createAdapter(secondPort)
+    .resume(fixture.input, fixture.resumeContext);
+  const [first, second] = await Promise.allSettled([firstResume, secondResume]);
+
+  assert.equal(first.status, "rejected");
+  assert.match(
+    first.status === "rejected" ? String(first.reason) : "",
+    /installed with another worker/u,
+  );
+  assert.equal(second.status, "fulfilled");
+  assert.equal(installCalls, 2);
+  const projection = await firstPort.inspect(fixture.resumeContext.launchId);
+  assert.equal(projection?.state, "installed");
+  assert.equal(
+    projection?.state === "installed" ? projection.worker.workerId : undefined,
+    `worker:second:${fixture.resumeContext.launchId}`,
+  );
 });
 
 test("immutable Agent input rejects extra prompt data and a launchId cannot be rebound", async (context) => {
