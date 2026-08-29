@@ -184,7 +184,9 @@ export class BashTool implements BaseTool {
     if (
       execution.sandboxed &&
       execution.exitCode !== 0 &&
-      /(?:operation not permitted|permission denied|\bEPERM\b|\bEACCES\b)/iu.test(stdout)
+      /(?:operation not permitted|permission denied|no such file or directory|\bEPERM\b|\bEACCES\b|\bENOENT\b)/iu.test(
+        stdout,
+      )
     ) {
       throw new SandboxViolationError(
         "sandbox_runtime_denied",

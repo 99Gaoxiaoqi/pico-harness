@@ -181,7 +181,13 @@ test(
       "read-only",
       'const s=require("node:net").createServer();s.on("error",()=>process.exit(24));s.listen(0,"127.0.0.1",()=>process.exit(0));',
     );
-    assert.notEqual(deniedListener.code, 0);
+    if (process.platform === "linux") {
+      // Bubblewrap denies host/external access with a fresh network namespace. Binding an
+      // otherwise unreachable socket inside that namespace remains safe and is expected.
+      assert.equal(deniedListener.code, 0, deniedListener.stderr);
+    } else {
+      assert.notEqual(deniedListener.code, 0);
+    }
   },
 );
 
