@@ -3365,6 +3365,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       createRuntimeRequest("workspace.unregister", { workspacePath: canonical }),
     );
     this.pluginRuntimeSnapshotRegistry.invalidate(canonical);
+    this.releaseAgentGraphStore(canonical);
     return result;
   }
 
@@ -4547,6 +4548,13 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     });
     this.agentGraphStores.set(workspacePath, store);
     return store;
+  }
+
+  private releaseAgentGraphStore(workspacePath: string): void {
+    const store = this.agentGraphStores.get(workspacePath);
+    if (!store) return;
+    this.agentGraphStores.delete(workspacePath);
+    store.close();
   }
 
   private sideChatAuthority(workspacePath: string): SideChatAuthority {

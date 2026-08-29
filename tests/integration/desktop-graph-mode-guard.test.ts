@@ -140,6 +140,53 @@ test("desktop session index excludes durable Graph operator Sessions", async () 
   }
 });
 
+test("desktop workspace unregister closes and evicts its cached Graph store", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-desktop-graph-store-unregister-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  await Promise.all([mkdir(workspace, { recursive: true }), mkdir(picoHome, { recursive: true })]);
+  const canonical = await realpath(workspace);
+  const env = { PICO_HOME: picoHome };
+  const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
+  await trustStore.trust(canonical);
+  const runtime = new WorkspaceRuntimeService({ env, execute: async () => ({ ok: true }) });
+  const desktop = new DesktopRuntimeService({ runtimeService: runtime, trustStore, env });
+  const graphStores = (
+    desktop as unknown as {
+      readonly agentGraphStores: Map<string, SqliteAgentGraphControlStore>;
+    }
+  ).agentGraphStores;
+  try {
+    await desktop.handle(createRuntimeRequest("workspace.register", { workspacePath: canonical }));
+    await desktop.handle(
+      createRuntimeRequest("session.list", { workspacePath: canonical, includeArchived: true }),
+    );
+    const cached = graphStores.get(canonical);
+    assert.ok(cached);
+    let closes = 0;
+    const close = cached.close.bind(cached);
+    cached.close = () => {
+      closes += 1;
+      close();
+    };
+
+    await desktop.handle(
+      createRuntimeRequest("workspace.unregister", { workspacePath: canonical }),
+    );
+    assert.equal(closes, 1);
+    assert.equal(graphStores.has(canonical), false);
+
+    await desktop.handle(createRuntimeRequest("workspace.register", { workspacePath: canonical }));
+    await desktop.handle(
+      createRuntimeRequest("session.list", { workspacePath: canonical, includeArchived: true }),
+    );
+    assert.notStrictEqual(graphStores.get(canonical), cached);
+  } finally {
+    await desktop.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("desktop persists linear run boundaries but never an orphan Graph root boundary", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-desktop-graph-run-boundary-"));
   const workspace = join(root, "workspace");
