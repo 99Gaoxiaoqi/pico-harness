@@ -152,12 +152,14 @@ export async function existingReferencedScripts(
 export interface ResolveHookShellOptions {
   /** 测试接缝：替换 bash 可用性探测（生产默认实跑 `bash -c "exit 0"`）。 */
   readonly isBashUsable?: (candidatePath: string) => boolean;
+  /** Windows AppContainer 无法初始化 MSYS 的 BaseNamedObjects；受限进程必须绕过 Git Bash。 */
+  readonly windowsAppContainerCompatible?: boolean;
 }
 
 /**
  * 选择 hook 命令的解释 shell。
- * - win32：Git Bash 优先（POSIX hook 语义的主体场景，对齐 Claude Code）；
- *   找不到 Git 时回落 PowerShell（pwsh 优先，否则 Windows PowerShell）。
+ * - win32 宿主直启：Git Bash 优先（POSIX hook 语义的主体场景，对齐 Claude Code）。
+ * - win32 AppContainer：跳过依赖 MSYS named objects 的 Git Bash，使用 PowerShell。
  * - POSIX：bash 优先，无 bash 退 /bin/sh。
  */
 export function resolveHookShell(
@@ -166,8 +168,10 @@ export function resolveHookShell(
 ): HookShell {
   const probe = options.isBashUsable ?? isUsableBash;
   if (process.platform === "win32") {
-    const bashPath = findGitBashPath(environment, probe);
-    if (bashPath) return { kind: "bash", path: bashPath, argsPrefix: ["-c"] };
+    if (!options.windowsAppContainerCompatible) {
+      const bashPath = findGitBashPath(environment, probe);
+      if (bashPath) return { kind: "bash", path: bashPath, argsPrefix: ["-c"] };
+    }
     const pwshPath = findExecutableInPath("pwsh.exe", environment) ?? findWindowsPowerShell();
     if (pwshPath)
       return {
