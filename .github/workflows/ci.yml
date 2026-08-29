@@ -247,6 +247,7 @@ jobs:
   macos-process-sandbox:
     name: macOS process sandbox integration
     runs-on: macos-latest
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v7
@@ -266,6 +267,7 @@ jobs:
 
   linux-process-sandbox:
     name: Linux process sandbox (${{ matrix.arch }})
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -320,6 +322,7 @@ jobs:
     name: Verify complete native sandbox publication
     needs: [windows-security, linux-process-sandbox]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v7
