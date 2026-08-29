@@ -13,7 +13,7 @@ import {
   type SandboxProfile,
 } from "../../src/safety/process-sandbox/index.js";
 import { BashTool } from "../../src/tools/bash.js";
-import { GrepTool, setRgAvailable } from "../../src/tools/grep.js";
+import { GrepTool, resetRgCache, setRgAvailable } from "../../src/tools/grep.js";
 import { WorkspaceRoots } from "../../src/tools/workspace-roots.js";
 import { McpConnectionManager } from "../../src/mcp/manager.js";
 
@@ -249,6 +249,29 @@ test(
 );
 
 test(
+  "macOS grep 使用已探测的 rg 绝对路径且不依赖目标 PATH",
+  {
+    skip: process.platform !== "darwin" || spawnSync("rg", ["--version"]).status !== 0,
+  },
+  async (context) => {
+    const fixture = await fixtureRoot(context, "pico-native-grep-path-");
+    await writeFile(join(fixture.workspace, "needle.txt"), "absolute-rg-path\n");
+    resetRgCache();
+    context.after(resetRgCache);
+    const grep = new GrepTool(fixture.workspace, {
+      processSandbox: {
+        profile: "read-only",
+        scratchRoot: fixture.scratch,
+        env: { LANG: "C" },
+      },
+    });
+
+    const result = await grep.execute(JSON.stringify({ pattern: "absolute-rg-path" }));
+    assert.match(result, /needle\.txt:1:absolute-rg-path/u);
+  },
+);
+
+test(
   "grep keeps an external one-shot root for exactly one sandboxed rg process",
   { skip: !nativeAvailable },
   async (context) => {
@@ -282,6 +305,13 @@ test(
   { skip: !nativeAvailable },
   async (context) => {
     const fixture = await fixtureRoot(context, "pico-native-mcp-grant-");
+    const ambientFixtureName = "PICO_MCP_AMBIENT_TOKEN_FIXTURE";
+    const previousAmbientFixture = process.env[ambientFixtureName];
+    process.env[ambientFixtureName] = "ambient-must-not-forward";
+    context.after(() => {
+      if (previousAmbientFixture === undefined) delete process.env[ambientFixtureName];
+      else process.env[ambientFixtureName] = previousAmbientFixture;
+    });
     const externalDirectory = join(fixture.root, "external");
     const external = join(externalDirectory, "secret.txt");
     const serverScript = join(fixture.workspace, "fixture-mcp.cjs");
@@ -296,7 +326,7 @@ test(
         'rl.on("line",line=>{const message=JSON.parse(line);if(message.id===undefined)return;',
         'if(message.method==="initialize")return send(message.id,{protocolVersion:"2024-11-05",capabilities:{},serverInfo:{name:"fixture",version:"1"}});',
         'if(message.method==="tools/list")return send(message.id,{tools:[{name:"read_external",description:"fixture",inputSchema:{type:"object"}}]});',
-        'if(message.method==="tools/call"){let text;try{text=fs.readFileSync(message.params.arguments.path,"utf8")}catch{text="denied"}return send(message.id,{content:[{type:"text",text}],isError:false})}',
+        'if(message.method==="tools/call"){let text;if(message.params.arguments.path==="__environment_fixture__"){text=(process.env.PICO_MCP_EXPLICIT_FIXTURE??"missing")+":"+(process.env.PICO_MCP_AMBIENT_TOKEN_FIXTURE===undefined?"ambient-absent":"ambient-present")}else{try{text=fs.readFileSync(message.params.arguments.path,"utf8")}catch{text="denied"}}return send(message.id,{content:[{type:"text",text}],isError:false})}',
         "send(message.id,{})});",
       ].join(""),
     );
@@ -320,12 +350,17 @@ test(
               transport: "stdio",
               command: process.execPath,
               args: [serverScript],
+              env: { PICO_MCP_EXPLICIT_FIXTURE: "explicit-forwarded" },
             },
           },
         },
       },
     ]);
     await manager.connectAll();
+    assert.equal(
+      await readExternalViaMcp(manager, "__environment_fixture__"),
+      "explicit-forwarded:ambient-absent",
+    );
     assert.equal(await readExternalViaMcp(manager, external), "denied");
 
     await manager.restartStdioServerForTool("mcp__local__read_external", {

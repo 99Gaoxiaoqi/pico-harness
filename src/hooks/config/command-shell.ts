@@ -17,7 +17,8 @@ import type { CommandHookHandler, HookHandler } from "../types.js";
  *    spawn 显式 shell 二进制 + `-c`，不用 node 的 shell:true 选项）。
  *    审计粒度从"文件字节钉死"降为"配置字节审批"——已确认的取舍。
  * 3. 环境消毒保留：剥离 base env 的 loader 注入变量（LD_PRELOAD 等）防第三
- *    方篡改被批准命令的行为；handler.env 覆盖（含 PATH）放行——配置即意图。
+ *    方篡改被批准命令的行为；handler.env 的变量名作为显式授权交给进程沙箱，
+ *    但全局禁止的动态加载/启动注入变量仍不会进入受限目标进程。
  */
 
 export interface ReferencedScriptResolution {
@@ -46,12 +47,14 @@ export interface ResolvedCommandHookInvocation extends CommandHookInvocation {
   /** command + args（按 shell 方言 quote 后）拼成的完整命令行。 */
   readonly commandString: string;
   readonly env: Readonly<NodeJS.ProcessEnv>;
+  /** handler.env 中由用户配置明确授权给命令进程的变量名。 */
+  readonly explicitEnvKeys: readonly string[];
 }
 
 /**
  * 剥离 base 环境里的 loader 注入变量，防止第三方通过 ambient 环境改变被批准
- * 命令的行为。handler.env 不再限制覆盖任何变量（含 PATH）——配置是用户意图，
- * 与 Claude Code 语义一致；消毒只针对继承环境。
+ * 命令的行为。handler.env 可覆盖普通变量（含 PATH）；最终受限进程环境仍由统一
+ * 沙箱层执行系统白名单和动态加载变量禁令。
  */
 export function sanitizeCommandHookEnvironment(
   handler: CommandHookHandler,
@@ -99,6 +102,7 @@ export async function resolveCommandHookExecution(
     shell: selectedShell,
     commandString,
     env: sanitizeCommandHookEnvironment(handler, environment),
+    explicitEnvKeys: Object.keys(handler.env ?? {}),
   };
 }
 

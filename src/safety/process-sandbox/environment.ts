@@ -9,10 +9,88 @@ const CACHE_ENV_NAMES = [
   "PIP_CACHE_DIR",
 ] as const;
 
+const PORTABLE_ENV_NAMES = new Set([
+  "HOME",
+  "LANG",
+  "PATH",
+  "SHELL",
+  "TEMP",
+  "TERM",
+  "TMP",
+  "TMPDIR",
+  "USER",
+]);
+
+const WINDOWS_ENV_NAMES = new Set([
+  "ALLUSERSPROFILE",
+  "APPDATA",
+  "COMSPEC",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "LOCALAPPDATA",
+  "NUMBER_OF_PROCESSORS",
+  "OS",
+  "PATHEXT",
+  "PROCESSOR_ARCHITECTURE",
+  "PROGRAMDATA",
+  "PROGRAMFILES",
+  "PROGRAMFILES(X86)",
+  "PROGRAMW6432",
+  "SYSTEMDRIVE",
+  "SYSTEMROOT",
+  "USERDOMAIN",
+  "USERNAME",
+  "USERPROFILE",
+  "WINDIR",
+]);
+
+const BLOCKED_RESTRICTED_ENV_NAMES = new Set([
+  "BASHOPTS",
+  "BASH_ENV",
+  "BASH_XTRACEFD",
+  "CDPATH",
+  "ENV",
+  "GLOBIGNORE",
+  "PROMPT_COMMAND",
+  "PS4",
+  "SHELLOPTS",
+  "ZDOTDIR",
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "NODE_REPL_EXTERNAL_MODULE",
+  "LD_PRELOAD",
+  "LD_AUDIT",
+  "LD_LIBRARY_PATH",
+  "LIBPATH",
+  "SHLIB_PATH",
+  "LDR_PRELOAD",
+  "LDR_PRELOAD64",
+  "OPENSSL_CONF",
+  "OPENSSL_CONF_INCLUDE",
+  "OPENSSL_MODULES",
+  "OPENSSL_ENGINES",
+  "PYTHONPATH",
+  "PYTHONHOME",
+  "PYTHONSTARTUP",
+  "PYTHONUSERBASE",
+  "RUBYOPT",
+  "RUBYLIB",
+  "RUBYGEMS_GEMDEPS",
+  "GEM_HOME",
+  "GEM_PATH",
+  "PERL5OPT",
+  "PERL5LIB",
+  "PERLLIB",
+  "JAVA_TOOL_OPTIONS",
+  "_JAVA_OPTIONS",
+  "JDK_JAVA_OPTIONS",
+]);
+
 export function buildSandboxEnvironment(
   base: NodeJS.ProcessEnv,
   policy: SandboxPolicy,
   platform: NodeJS.Platform = process.platform,
+  explicitEnvKeys: readonly string[] = [],
 ): NodeJS.ProcessEnv {
   if (policy.profile === "danger-full-access") return { ...base };
 
@@ -23,23 +101,82 @@ export function buildSandboxEnvironment(
     mkdirSync(path, { recursive: true, mode: 0o700 });
   }
 
-  const env: NodeJS.ProcessEnv = {
-    ...base,
-    HOME: home,
-    TMPDIR: temp,
-    TMP: temp,
-    TEMP: temp,
-  };
+  const env: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(base)) {
+    if (value !== undefined && shouldInheritRestrictedEnvironmentName(name, platform)) {
+      setEnvironmentVariable(env, name, value, platform);
+    }
+  }
+  for (const requestedName of explicitEnvKeys) {
+    if (isBlockedRestrictedEnvironmentName(requestedName)) continue;
+    const entry = findEnvironmentEntry(base, requestedName, platform);
+    if (entry?.[1] !== undefined) {
+      setEnvironmentVariable(env, requestedName, entry[1], platform);
+    }
+  }
+  setEnvironmentVariable(env, "HOME", home, platform);
+  setEnvironmentVariable(env, "TMPDIR", temp, platform);
+  setEnvironmentVariable(env, "TMP", temp, platform);
+  setEnvironmentVariable(env, "TEMP", temp, platform);
   if (platform !== "win32") env.OPENSSL_CONF = "/dev/null";
   if (platform === "win32") {
-    env.USERPROFILE = home;
-    env.LOCALAPPDATA = resolve(home, "AppData", "Local");
-    env.APPDATA = resolve(home, "AppData", "Roaming");
-    mkdirSync(env.LOCALAPPDATA, { recursive: true });
-    mkdirSync(env.APPDATA, { recursive: true });
+    const localAppData = resolve(home, "AppData", "Local");
+    const appData = resolve(home, "AppData", "Roaming");
+    setEnvironmentVariable(env, "USERPROFILE", home, platform);
+    setEnvironmentVariable(env, "LOCALAPPDATA", localAppData, platform);
+    setEnvironmentVariable(env, "APPDATA", appData, platform);
+    mkdirSync(localAppData, { recursive: true });
+    mkdirSync(appData, { recursive: true });
   }
-  for (const name of CACHE_ENV_NAMES) env[name] = cache;
+  for (const name of CACHE_ENV_NAMES) setEnvironmentVariable(env, name, cache, platform);
   return env;
+}
+
+function shouldInheritRestrictedEnvironmentName(name: string, platform: NodeJS.Platform): boolean {
+  const normalized = name.toUpperCase();
+  if (isBlockedRestrictedEnvironmentName(normalized)) return false;
+  return (
+    PORTABLE_ENV_NAMES.has(normalized) ||
+    normalized.startsWith("LC_") ||
+    (platform === "win32" && WINDOWS_ENV_NAMES.has(normalized))
+  );
+}
+
+function isBlockedRestrictedEnvironmentName(name: string): boolean {
+  const normalized = name.toUpperCase();
+  return (
+    BLOCKED_RESTRICTED_ENV_NAMES.has(normalized) ||
+    normalized.startsWith("DYLD_") ||
+    normalized.startsWith("LD_") ||
+    normalized.startsWith("LDR_") ||
+    normalized.startsWith("BASH_FUNC_")
+  );
+}
+
+function findEnvironmentEntry(
+  environment: NodeJS.ProcessEnv,
+  name: string,
+  platform: NodeJS.Platform,
+): [string, string | undefined] | undefined {
+  if (platform !== "win32") {
+    return Object.hasOwn(environment, name) ? [name, environment[name]] : undefined;
+  }
+  const normalized = name.toUpperCase();
+  return Object.entries(environment).find(([key]) => key.toUpperCase() === normalized);
+}
+
+function setEnvironmentVariable(
+  environment: NodeJS.ProcessEnv,
+  name: string,
+  value: string,
+  platform: NodeJS.Platform,
+): void {
+  if (platform === "win32") {
+    const normalized = name.toUpperCase();
+    const duplicate = Object.keys(environment).find((key) => key.toUpperCase() === normalized);
+    if (duplicate !== undefined && duplicate !== name) delete environment[duplicate];
+  }
+  environment[name] = value;
 }
 
 export function runtimeReadRoots(

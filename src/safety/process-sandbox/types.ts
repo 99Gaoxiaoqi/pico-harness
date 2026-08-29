@@ -41,6 +41,11 @@ export interface ManagedSpawnRequest {
   args: readonly string[];
   cwd: string;
   env?: NodeJS.ProcessEnv;
+  /**
+   * 宿主配置明确授权给目标进程的环境变量名。受限 profile 只继承安全系统变量，
+   * 再从 env 恢复这些显式值；动态加载/启动注入变量即使列出也不会放行。
+   */
+  explicitEnvKeys?: readonly string[];
   origin: ManagedProcessOrigin;
   policy: SandboxPolicy;
   platform?: NodeJS.Platform;

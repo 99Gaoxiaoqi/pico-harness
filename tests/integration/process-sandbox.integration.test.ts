@@ -203,7 +203,7 @@ test("会话授权提升策略代次并重启 stdio MCP", async (context) => {
   ]);
 });
 
-test("受限环境继承普通变量并隔离 HOME、临时目录与缓存", async (context) => {
+test("受限环境只继承系统白名单、恢复显式变量并拒绝加载器注入", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-env-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   const policy = createSandboxPolicy({
@@ -212,14 +212,49 @@ test("受限环境继承普通变量并隔离 HOME、临时目录与缓存", asy
     scratchRoot: join(root, "scratch"),
   });
   const env = buildSandboxEnvironment(
-    { PATH: process.env.PATH, PICO_FAKE_TOKEN: "visible", HOME: "/host/home" },
+    {
+      PATH: process.env.PATH,
+      LANG: "C",
+      PICO_AMBIENT_SECRET_FIXTURE: "not-forwarded",
+      PICO_EXPLICIT_FIXTURE: "forwarded",
+      NODE_OPTIONS: "--require=untrusted-loader.cjs",
+      DYLD_INSERT_LIBRARIES: "/tmp/untrusted-loader.dylib",
+      LD_PRELOAD: "/tmp/untrusted-loader.so",
+      PYTHONPATH: "/tmp/untrusted-python-modules",
+      HOME: "/host/home",
+    },
     policy,
+    process.platform,
+    ["PICO_EXPLICIT_FIXTURE", "NODE_OPTIONS", "DYLD_INSERT_LIBRARIES", "LD_PRELOAD", "PYTHONPATH"],
   );
-  assert.equal(env.PICO_FAKE_TOKEN, "visible");
+  assert.equal(env.LANG, "C");
+  assert.equal(env.PICO_EXPLICIT_FIXTURE, "forwarded");
+  assert.equal(env.PICO_AMBIENT_SECRET_FIXTURE, undefined);
+  assert.equal(env.NODE_OPTIONS, undefined);
+  assert.equal(env.DYLD_INSERT_LIBRARIES, undefined);
+  assert.equal(env.LD_PRELOAD, undefined);
+  assert.equal(env.PYTHONPATH, undefined);
   assert.notEqual(env.HOME, "/host/home");
   assert.match(env.HOME ?? "", /scratch[/\\]home$/u);
   assert.match(env.TMPDIR ?? "", /scratch[/\\]tmp$/u);
   assert.match(env.XDG_CACHE_HOME ?? "", /scratch[/\\]cache$/u);
+});
+
+test("danger-full-access 保留完整宿主环境且不应用受限显式键规则", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-env-yolo-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const policy = createSandboxPolicy({
+    profile: "danger-full-access",
+    workspaceRoots: [root],
+    scratchRoot: join(root, "scratch"),
+  });
+  const base = {
+    PATH: process.env.PATH,
+    PICO_AMBIENT_FIXTURE: "preserved",
+    NODE_OPTIONS: "--require=trusted-by-unrestricted-host.cjs",
+    HOME: "/host/home",
+  };
+  assert.deepEqual(buildSandboxEnvironment(base, policy, process.platform, []), base);
 });
 
 test("macOS profile 不包含全局 file-read 且按根目录开放", async (context) => {
