@@ -369,7 +369,8 @@ function resolveTrustedExecutable(
     }
   }
   const extensions = platform === "win32" ? [".exe", ".cmd", ".bat", ""] : [""];
-  for (const directory of (env.PATH ?? "").split(delimiter)) {
+  const pathValue = findEnvironmentEntry(env, "PATH", platform)?.[1] ?? "";
+  for (const directory of pathValue.split(delimiter)) {
     if (!directory) continue;
     for (const extension of extensions) {
       const candidate = resolve(directory, `${command}${extension}`);

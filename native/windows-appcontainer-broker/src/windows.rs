@@ -5,7 +5,7 @@ use std::io::{self, Write};
 use std::mem::{size_of, zeroed};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::ptr::{null, null_mut};
 
 type Handle = *mut c_void;
@@ -675,6 +675,10 @@ fn run_icacls<const N: usize>(operation: &str, args: [&str; N]) -> Result<(), St
     let status = Command::new(&program)
         .current_dir(&system_directory)
         .args(args)
+        // Broker 控制面不得污染目标 Hook 的 stdin/stdout JSON 协议。
+        // stderr 保留继承，便于 ACL 失败时诊断。
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
         .status()
         .map_err(error_text)?;
     if status.success() {
