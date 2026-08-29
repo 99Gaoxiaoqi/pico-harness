@@ -182,8 +182,13 @@ test(
     const executor = createHookExecutor(fixture, environment);
     context.after(async () => await executor.dispose());
     const output = await executeStopHook(executor, fixture, handler, "windows-mixed-case-path");
-    // 子进程看到的 PATH 就是受控环境的 pAtH 值（nodeDir + pwshDir + 尾随分号）。
-    assert.equal(output.additionalContext, restrictedPath, JSON.stringify(output));
+    // PowerShell 7 starts by prepending PSHOME; the remaining entries must be the
+    // deliberately controlled mixed-case PATH with no ambient host directories.
+    assert.equal(
+      output.additionalContext,
+      `${dirname(restrictedShell.path)};${restrictedPath}`,
+      JSON.stringify(output),
+    );
   },
 );
 
