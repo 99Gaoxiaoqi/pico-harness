@@ -309,6 +309,15 @@ test("Bubblewrap profile 使用空命名空间、只读运行根和工作区写�
   assert.ok(unshareUser >= 0, "--disable-userns requires an explicit --unshare-user");
   assert.ok(disableUserns > unshareUser);
   assert.ok(args.includes("--share-net"));
+  for (const root of ["/bin", "/sbin", "/lib", "/lib64"]) {
+    assert.ok(
+      args.some(
+        (value, index) =>
+          value === "--ro-bind-try" && args[index + 1] === root && args[index + 2] === root,
+      ),
+      `missing lexical runtime root ${root}`,
+    );
+  }
   assert.deepEqual(args.slice(-4), ["--", "/bin/sh", "-c", "true"]);
   assert.ok(
     args.some(

@@ -258,6 +258,13 @@ export function buildBubblewrapArgs(
     "--dev",
     "/dev",
   ];
+  // Keep the conventional loader and executable paths visible even on usr-merged hosts.
+  // Policy normalization resolves symlinks such as /bin -> /usr/bin and /lib64 ->
+  // /usr/lib64; binding the lexical aliases restores those ABI paths without granting
+  // anything beyond the already-authorized, read-only system runtime trees.
+  for (const root of ["/bin", "/sbin", "/lib", "/lib64"]) {
+    result.push("--ro-bind-try", root, root);
+  }
   for (const root of readRoots) result.push("--ro-bind-try", root, root);
   for (const root of writeRoots) result.push("--bind", root, root);
   result.push("--chdir", cwd, "--", command, ...args);
