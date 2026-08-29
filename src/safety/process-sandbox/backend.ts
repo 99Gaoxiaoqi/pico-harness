@@ -2,7 +2,7 @@ import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildSandboxEnvironment, runtimeReadRoots } from "./environment.js";
+import { buildSandboxEnvironment, runtimeReadAliases, runtimeReadRoots } from "./environment.js";
 import { isWithinRoot, normalizeRoots } from "./policy.js";
 import {
   SandboxViolationError,
@@ -60,7 +60,15 @@ export function buildManagedSpawnPlan(request: ManagedSpawnRequest): SandboxSpaw
       return {
         backend,
         command: request.backendExecutable ?? "/usr/bin/sandbox-exec",
-        args: ["-p", buildMacosProfile(policy), request.command, ...request.args],
+        args: [
+          "-p",
+          buildMacosProfile(
+            policy,
+            runtimeReadAliases(request.command, env, platform, policy.readRoots),
+          ),
+          request.command,
+          ...request.args,
+        ],
         env,
         sandboxed: true,
         profile: policy.profile,
@@ -169,8 +177,15 @@ export function isVerifiedBundledExecutable(
   }
 }
 
-export function buildMacosProfile(policy: SandboxPolicy): string {
-  const metadataRoots = macosMetadataAncestors([...policy.readRoots, ...policy.writeRoots]);
+export function buildMacosProfile(
+  policy: SandboxPolicy,
+  readAliases: readonly string[] = [],
+): string {
+  const metadataRoots = macosMetadataAncestors([
+    ...policy.readRoots,
+    ...policy.writeRoots,
+    ...readAliases,
+  ]);
   const rules = [
     "(version 1)",
     "(deny default)",
@@ -197,6 +212,10 @@ export function buildMacosProfile(policy: SandboxPolicy): string {
       (root) => `(allow file-read* file-test-existence (subpath ${sbplString(root)}))`,
     ),
     ...policy.readRoots.map((root) => `(allow file-map-executable (subpath ${sbplString(root)}))`),
+    ...readAliases.map(
+      (root) => `(allow file-read* file-test-existence (subpath ${sbplString(root)}))`,
+    ),
+    ...readAliases.map((root) => `(allow file-map-executable (subpath ${sbplString(root)}))`),
     ...policy.writeRoots.map((root) => `(allow file-write* (subpath ${sbplString(root)}))`),
   ];
   if (policy.network === "allow") rules.push("(allow network*)");

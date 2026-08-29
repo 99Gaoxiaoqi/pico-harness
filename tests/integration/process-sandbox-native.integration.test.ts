@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { realpathSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,9 +7,13 @@ import { createServer } from "node:net";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import {
+  buildManagedSpawnPlan,
   createSandboxPolicy,
   managedProcessLauncher,
   normalizeRoots,
+  runtimeReadAliases,
+  runtimeReadRoots,
+  shellRuntimeReadRoots,
   type ManagedSpawnRequest,
   type SandboxProfile,
 } from "../../src/safety/process-sandbox/index.js";
@@ -272,6 +277,80 @@ test(
 );
 
 test(
+  "macOS Homebrew 运行根只包含实际链接公式而不是整个 opt 仓库",
+  { skip: process.platform !== "darwin" || spawnSync("rg", ["--version"]).status !== 0 },
+  () => {
+    const lookup = spawnSync("/usr/bin/which", ["rg"], { encoding: "utf8" });
+    const executable = lookup.status === 0 ? lookup.stdout.trim() : "";
+    assert.ok(executable);
+    const canonical = realpathSync(executable).replaceAll("\\", "/");
+    if (!canonical.includes("/Cellar/")) return;
+
+    const roots = runtimeReadRoots(executable, { PATH: process.env.PATH }, "darwin");
+    const optRoot = realpathSync(`${canonical.slice(0, canonical.indexOf("/Cellar/"))}/opt`);
+    assert.equal(roots.includes(optRoot), false);
+    assert.ok(roots.length < 32, `unexpectedly broad Homebrew runtime roots: ${roots.length}`);
+  },
+);
+
+test(
+  "macOS shell 内层 Homebrew 进程只获得精确 formula alias",
+  {
+    skip:
+      process.platform !== "darwin" ||
+      !realpathSync(process.execPath).replaceAll("\\", "/").includes("/Cellar/"),
+  },
+  async (context) => {
+    const fixture = await fixtureRoot(context, "pico-native-shell-homebrew-");
+    const env = { PATH: process.env.PATH, LANG: "C" };
+    const readRoots = shellRuntimeReadRoots("node --version", env, "darwin");
+    const aliases = runtimeReadAliases("/bin/bash", env, "darwin", readRoots);
+    assert.ok(aliases.length > 0, "Homebrew node dependencies should expose exact opt aliases");
+
+    const canonicalNode = realpathSync(process.execPath).replaceAll("\\", "/");
+    const homebrewPrefix = canonicalNode.slice(0, canonicalNode.indexOf("/Cellar/"));
+    assert.equal(aliases.includes(`${homebrewPrefix}/opt`), false);
+    for (const alias of aliases) {
+      assert.match(alias, new RegExp(`^${escapeRegExp(homebrewPrefix)}/opt/[^/]+$`, "u"));
+    }
+
+    const policy = createSandboxPolicy({
+      profile: "workspace-write",
+      workspaceRoots: [fixture.workspace],
+      scratchRoot: fixture.scratch,
+      readRoots,
+    });
+    const plan = buildManagedSpawnPlan({
+      command: "/bin/bash",
+      args: ["-c", "node --version"],
+      cwd: fixture.workspace,
+      env,
+      origin: "command-hook",
+      policy,
+    });
+    const profile = plan.args[1] ?? "";
+    assert.doesNotMatch(
+      profile,
+      new RegExp(`\\(subpath ${escapeRegExp(JSON.stringify(`${homebrewPrefix}/opt`))}\\)`, "u"),
+    );
+    for (const alias of aliases) {
+      assert.match(
+        profile,
+        new RegExp(`\\(subpath ${escapeRegExp(JSON.stringify(alias))}\\)`, "u"),
+      );
+    }
+
+    const result = spawnSync(plan.command, plan.args, {
+      cwd: fixture.workspace,
+      env: plan.env,
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^v\d+/u);
+  },
+);
+
+test(
   "grep keeps an external one-shot root for exactly one sandboxed rg process",
   { skip: !nativeAvailable },
   async (context) => {
@@ -457,4 +536,8 @@ function posixQuote(value: string): string {
 
 function powerShellQuote(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
