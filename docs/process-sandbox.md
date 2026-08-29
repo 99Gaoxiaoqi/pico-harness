@@ -11,11 +11,18 @@ and subagent tools. Daemon installation, credential access, Git/worktree integra
 Desktop system actions remain host control-plane operations. The architecture check rejects a
 runtime `child_process` import in a model process entrypoint.
 
-Restricted processes inherit ordinary host variables, while Pico rewrites home, temporary, and
-cache locations into a session scratch directory. Workspace roots are readable; `workspace-write`
-also makes them writable. Files such as `.git`, `.env`, and `AGENTS.md` do not receive a special
-OS-level rule when they are inside an authorized workspace. `/dev/null`, `/dev/tty`, and Windows
-`NUL` are treated as devices rather than external write paths.
+Restricted processes inherit only a portable system environment allowlist (`PATH`, locale,
+terminal, user, and required Windows system variables). Host-approved MCP credentials/config,
+LSP configuration, and command Hook environment values are restored by explicit variable name.
+Dynamic loader and runtime-startup injection variables such as `LD_PRELOAD`, `DYLD_*`,
+`NODE_OPTIONS`, and `PYTHONPATH` are always removed from restricted processes, including explicit
+configuration. Pico rewrites home, temporary, and cache locations into a session scratch directory.
+`danger-full-access` keeps the complete caller environment unchanged.
+
+Workspace roots are readable; `workspace-write` also makes them writable. Files such as `.git`,
+`.env`, and `AGENTS.md` do not receive a special OS-level rule when they are inside an authorized
+workspace. `/dev/null`, `/dev/tty`, and Windows `NUL` are treated as devices rather than external
+write paths.
 
 ## Native backends
 

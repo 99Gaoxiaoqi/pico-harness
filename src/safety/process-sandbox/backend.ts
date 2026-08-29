@@ -14,7 +14,12 @@ import {
 
 export function buildManagedSpawnPlan(request: ManagedSpawnRequest): SandboxSpawnPlan {
   const platform = request.platform ?? process.platform;
-  const env = buildSandboxEnvironment(request.env ?? process.env, request.policy, platform);
+  const env = buildSandboxEnvironment(
+    request.env ?? process.env,
+    request.policy,
+    platform,
+    request.explicitEnvKeys,
+  );
   if (request.policy.profile === "danger-full-access") {
     return {
       backend: "none",

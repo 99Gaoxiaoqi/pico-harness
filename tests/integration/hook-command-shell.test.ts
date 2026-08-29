@@ -139,6 +139,10 @@ test("环境消毒：base 环境剥离 loader 注入变量；handler.env 覆盖 
   assert.equal(sanitized.PATH, "custom-path");
   assert.equal(sanitized.MY_VAR, "1");
   assert.equal(sanitized.PYTHONNOUSERSITE, "1");
+  const invocation = await resolveCommandHookExecution(handler, fixture.root, {
+    PATH: "inherited",
+  });
+  assert.deepEqual(invocation.explicitEnvKeys, ["PATH", "MY_VAR"]);
   void fixture;
 });
 

@@ -371,6 +371,7 @@ function startCommand(
         args: [...invocation.shell.argsPrefix, invocation.commandString],
         cwd,
         env: invocation.env,
+        explicitEnvKeys: invocation.explicitEnvKeys,
         origin: "command-hook",
         policy: extendHookPolicy(processSandbox, resolved, invocation),
       },
