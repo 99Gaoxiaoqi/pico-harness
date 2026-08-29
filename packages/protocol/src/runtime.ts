@@ -495,7 +495,7 @@ export type RuntimeTranscriptFragment = JsonObject & {
   readonly json: string;
 };
 
-export const TRANSCRIPT_PROJECTOR_VERSION = 2 as const;
+export const TRANSCRIPT_PROJECTOR_VERSION = 3 as const;
 
 export type RuntimeTranscriptWatermark = JsonObject & {
   readonly historyEpoch: string;

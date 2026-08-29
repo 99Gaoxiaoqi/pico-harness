@@ -2358,6 +2358,7 @@ export function publishDesktopReporterEvent(
       "assistant.delta",
       "assistant.reasoning.delta",
       "assistant.message",
+      "assistant.suppressed",
       "tool.output",
     ].includes(event.type)
   ) {

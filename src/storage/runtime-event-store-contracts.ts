@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { SessionCursor } from "../engine/session-persistence.js";
-import type { RuntimeEvent } from "./runtime-event.js";
+import type { RuntimeEvent, RuntimeRunStartedEvent } from "./runtime-event.js";
 
 /**
  * 会话账本的共享契约(票 09,JSONL 纪元退役)。
@@ -11,7 +11,7 @@ import type { RuntimeEvent } from "./runtime-event.js";
  */
 
 export const RUNTIME_EVENT_STORE_MAX_PAGE_SIZE = 250;
-export const RUNTIME_TRANSCRIPT_PROJECTOR_VERSION = 2 as const;
+export const RUNTIME_TRANSCRIPT_PROJECTOR_VERSION = 3 as const;
 
 export interface RuntimeSessionManifest {
   readonly schemaVersion: 2;
@@ -406,6 +406,7 @@ export interface StartRuntimeContinuationInput extends RuntimeFencedWriteOptions
   readonly workDir: string;
   /** 精确重放身份的一部分；重试必须传回同一时间。 */
   readonly startedAt: string;
+  readonly presentation?: RuntimeRunStartedEvent["data"]["presentation"];
   readonly now?: () => Date;
   /** 仅用于事务回滚测试；抛错时 claim 与 start 必须一起回滚。 */
   readonly afterClaimBeforeStart?: () => void;

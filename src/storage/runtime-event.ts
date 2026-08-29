@@ -195,6 +195,7 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
   switch (value["kind"]) {
     case "run.started":
       assertString(value["data"]["workDir"], "run.started.workDir");
+      assertRuntimePresentationProvenance(value["data"]["presentation"]);
       if (value["data"]["continuationOf"] !== undefined) {
         assertRunContinuationOf(value["data"]["continuationOf"]);
       }
@@ -743,6 +744,16 @@ function assertRunContinuationOf(value: unknown): void {
     throw new RuntimeEventIntegrityError("Runtime run.started continuationOf highWater is invalid");
   }
   assertSha256(value["prefixDigest"], "run.started.continuationOf.prefixDigest");
+}
+
+function assertRuntimePresentationProvenance(value: unknown): void {
+  if (value === undefined) return;
+  if (!isRecord(value)) {
+    throw new RuntimeEventIntegrityError("Runtime presentation provenance must be an object");
+  }
+  assertOnlyKeys(value, ["audience", "source"], "presentation");
+  assertEqual(value["audience"], "internal", "presentation.audience");
+  assertEqual(value["source"], "agent_graph_control", "presentation.source");
 }
 
 /** ADR 27 P0：恢复期合成结果可携带 recovery.classification；正常结果不得设置。 */

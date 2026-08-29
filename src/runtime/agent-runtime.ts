@@ -2061,6 +2061,7 @@ export async function executeAgentRuntime(
       picoHome,
       prompt,
       resumeExistingSession,
+      ...(dependencies.agentGraph ? { presentation: "internal" as const } : {}),
       ...(dependencies.prestartedRun ? { prestartedRun: dependencies.prestartedRun } : {}),
       ...(dependencies.prestartedUserInput
         ? { prestartedUserInput: dependencies.prestartedUserInput }

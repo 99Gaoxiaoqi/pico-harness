@@ -130,6 +130,22 @@ test("Desktop host uses one stable timeline identity for the inference lifecycle
   assert.deepEqual(applyTimelineNotification(activeTimeline, thinkingNotifications[1]!), []);
 });
 
+test("Desktop host keeps internal assistant suppression out of the user timeline", () => {
+  const published: RuntimeNotification[] = [];
+  const service = {
+    publishDesktopNotification: (notification: RuntimeNotification) => published.push(notification),
+  } as unknown as WorkspaceRuntimeService;
+  const reporter = new DesktopReporter({
+    runId: "run-internal-suppression",
+    sessionId: "session-internal-suppression",
+    publish: (event) => publishDesktopReporterEvent(service, "/workspace", event, () => 1),
+  });
+
+  reporter.onAssistantResponseSuppressed("internal-control");
+
+  assert.deepEqual(published, []);
+});
+
 test("Desktop host replaces an active tool timeline item when the tool completes", () => {
   const published: RuntimeNotification[] = [];
   const service = {

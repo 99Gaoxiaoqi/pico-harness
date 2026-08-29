@@ -24,6 +24,10 @@ export const RUNTIME_EVENT_SCHEMA_VERSION = 2 as const;
 
 export type RuntimeEventVisibility = "model" | "transcript" | "internal";
 export type RuntimeTerminalStatus = "completed" | "failed" | "cancelled" | "interrupted";
+export interface RuntimePresentationProvenance {
+  readonly audience: "internal";
+  readonly source: "agent_graph_control";
+}
 
 export interface RuntimeEventRefs {
   readonly stepId?: string;
@@ -63,6 +67,8 @@ export interface RuntimeRunStartedEvent extends RuntimeEventBase {
   readonly kind: "run.started";
   readonly data: {
     readonly workDir: string;
+    /** Host-owned presentation identity; model/runtime facts remain durable. */
+    readonly presentation?: RuntimePresentationProvenance;
     /** 仅续跑目标 run 携带;普通 run 不得设置。 */
     readonly continuationOf?: RuntimeRunContinuationOf;
   };

@@ -30,7 +30,7 @@ test("真实引擎账本序:message.committed(toolCall) < tool.started < tool.re
     await session.recover();
     await session.commitMessages({ role: "user", content: "Run the fixture." });
     const registry = new ToolRegistry();
-    registry.register(outputTool("order_guard_fixture", "deterministic output"));
+    registry.register(outputTool("view_agent_graph", "deterministic output"));
     let providerCalls = 0;
     const provider: LLMProvider = {
       async generate() {
@@ -39,7 +39,7 @@ test("真实引擎账本序:message.committed(toolCall) < tool.started < tool.re
         return {
           role: "assistant",
           content: "",
-          toolCalls: [{ id: "call:order-guard", name: "order_guard_fixture", arguments: "{}" }],
+          toolCalls: [{ id: "call:order-guard", name: "view_agent_graph", arguments: "{}" }],
         };
       },
     };
@@ -84,7 +84,7 @@ test("真实引擎账本序:message.committed(toolCall) < tool.started < tool.re
       maxBytes: 64 * 1024,
     });
     const projected = JSON.stringify(transcript.items.map((item) => item.payload));
-    assert.match(projected, /order_guard_fixture/u);
+    assert.match(projected, /view_agent_graph/u);
     assert.match(projected, /deterministic output/u);
   } finally {
     await session.close();

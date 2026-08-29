@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  createRuntimeNotification,
   createRuntimeRequest,
   DesktopRuntimeService,
   RuntimeProtocolError,
@@ -14,6 +15,7 @@ import {
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 import { SqliteAgentGraphControlStore } from "../../src/storage/sqlite/sqlite-agent-graph-control-store.js";
+import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import { createAgentGraphApplicationService } from "../../src/agent-graph/service.js";
 import type { AgentGraphApplicationService } from "../../src/agent-graph/service.js";
 
@@ -138,6 +140,100 @@ test("desktop session index excludes durable Graph operator Sessions", async () 
   }
 });
 
+test("desktop persists linear run boundaries but never an orphan Graph root boundary", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-desktop-graph-run-boundary-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  await Promise.all([mkdir(workspace, { recursive: true }), mkdir(picoHome, { recursive: true })]);
+  const canonical = await realpath(workspace);
+  const env = { PICO_HOME: picoHome };
+  const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
+  await trustStore.trust(canonical);
+  const runtime = new WorkspaceRuntimeService({ env, execute: async () => ({ ok: true }) });
+  let linearSessionId = "";
+  let linearAdvances = 0;
+  let resolvePersisted!: () => void;
+  const persisted = new Promise<void>((resolve) => {
+    resolvePersisted = resolve;
+  });
+  const desktop = new DesktopRuntimeService({
+    runtimeService: runtime,
+    trustStore,
+    env,
+    onTranscriptAdvanced: (_workspacePath, sessionId) => {
+      if (sessionId === linearSessionId && ++linearAdvances === 2) resolvePersisted();
+    },
+  });
+  let closed = false;
+  try {
+    const graphSession = (await desktop.handle(
+      createRuntimeRequest("session.create", { workspacePath: canonical }),
+    )) as { session: { sessionId: string } };
+    const linearSession = (await desktop.handle(
+      createRuntimeRequest("session.create", { workspacePath: canonical }),
+    )) as { session: { sessionId: string } };
+    linearSessionId = linearSession.session.sessionId;
+    await desktop.handle(
+      createRuntimeRequest("session.settings.update", {
+        workspacePath: canonical,
+        sessionId: graphSession.session.sessionId,
+        orchestrationMode: "graph",
+      }),
+    );
+
+    for (const [sessionId, runId] of [
+      [graphSession.session.sessionId, "graph-root-run"],
+      [linearSessionId, "linear-run"],
+    ] as const) {
+      runtime.publishDesktopNotification(
+        runBoundaryNotification(canonical, sessionId, runId, "run.started", "running", 1),
+      );
+      runtime.publishDesktopNotification(
+        runBoundaryNotification(canonical, sessionId, runId, "run.finished", "succeeded", 2),
+      );
+    }
+    await persisted;
+    await desktop.close();
+    closed = true;
+
+    const reloaded = new SqliteRuntimeEventStore({
+      storageRoot: resolvePicoPaths(canonical, { picoHome }).workspace.root,
+    });
+    try {
+      const graphPage = await reloaded.readTranscriptProjectionPage({
+        sessionId: graphSession.session.sessionId,
+        maxBytes: 64 * 1024,
+      });
+      assert.equal(JSON.stringify(graphPage.items).includes("graph-root-run"), false);
+
+      const linearPage = await reloaded.readTranscriptProjectionPage({
+        sessionId: linearSessionId,
+        maxBytes: 64 * 1024,
+      });
+      const linearBoundaries = linearPage.items.filter(
+        (item) =>
+          typeof item.payload === "object" &&
+          item.payload !== null &&
+          "kind" in item.payload &&
+          item.payload.kind === "runBoundary",
+      );
+      assert.deepEqual(
+        linearBoundaries.map((item) =>
+          typeof item.payload === "object" && item.payload !== null && "status" in item.payload
+            ? item.payload.status
+            : undefined,
+        ),
+        ["running", "succeeded"],
+      );
+    } finally {
+      reloaded.close();
+    }
+  } finally {
+    if (!closed) await desktop.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("desktop deletion retires the root Graph before removing its Session", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-desktop-graph-delete-"));
   const workspace = join(root, "workspace");
@@ -187,6 +283,36 @@ test("desktop deletion retires the root Graph before removing its Session", asyn
     await rm(root, { recursive: true, force: true });
   }
 });
+
+function runBoundaryNotification(
+  workspacePath: string,
+  sessionId: string,
+  runId: string,
+  topic: "run.started" | "run.finished",
+  status: "running" | "succeeded",
+  version: number,
+) {
+  return createRuntimeNotification({
+    eventId: `${runId}:${topic}`,
+    topic,
+    scope: { workspacePath, sessionId, runId },
+    resourceVersion: version,
+    at: version,
+    payload: {
+      run: {
+        runId,
+        sessionId,
+        workspacePath,
+        description: runId,
+        status,
+        startedAt: 1,
+        updatedAt: version,
+        ...(status === "succeeded" ? { finishedAt: version } : {}),
+        version,
+      },
+    },
+  });
+}
 
 test("desktop Graph wake retry enforces Session and Graph ownership", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-desktop-graph-retry-"));
