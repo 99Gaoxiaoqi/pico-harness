@@ -246,17 +246,9 @@ export class FileAgentRecoveryLaunchIntentPort implements AgentRecoveryLaunchInt
       throw new Error(`Agent recovery launch ${intent.launchId} belongs to another storage root`);
     }
     const deadline = this.now().getTime() + this.contentionTimeoutMs;
-    let confirmedWorker: AgentRecoveryWorkerReceipt | undefined;
     for (;;) {
       const claim = await this.claimInstall(intent);
-      if (claim.status === "settled") {
-        if (confirmedWorker && !isDeepStrictEqual(confirmedWorker, claim.worker)) {
-          throw new Error(
-            `Agent recovery launch ${intent.launchId} was installed with another worker`,
-          );
-        }
-        return claim.worker;
-      }
+      if (claim.status === "settled") return claim.worker;
       if (claim.status === "waiting") {
         if (this.now().getTime() >= deadline) {
           throw new Error(
@@ -264,17 +256,6 @@ export class FileAgentRecoveryLaunchIntentPort implements AgentRecoveryLaunchInt
           );
         }
         await delay(this.contentionPollMs);
-        continue;
-      }
-
-      if (confirmedWorker) {
-        const settlement = await this.settleInstalled(intent, claim, confirmedWorker);
-        if (settlement.status === "settled") return settlement.worker;
-        if (this.now().getTime() >= deadline) {
-          throw new Error(
-            `Agent recovery launch ${intent.launchId} install claim was repeatedly superseded before settlement`,
-          );
-        }
         continue;
       }
 
@@ -288,23 +269,11 @@ export class FileAgentRecoveryLaunchIntentPort implements AgentRecoveryLaunchInt
             `Agent recovery worker receipt belongs to ${worker.launchId}, expected ${intent.launchId}`,
           );
         }
-        if (confirmedWorker && !isDeepStrictEqual(confirmedWorker, worker)) {
-          throw new Error(
-            `Agent recovery launch ${intent.launchId} installer changed worker identity`,
-          );
-        }
-        confirmedWorker = worker;
       } catch (error) {
         await this.releaseFailedClaim(intent, claim);
         throw error;
       }
-      const settlement = await this.settleInstalled(intent, claim, worker);
-      if (settlement.status === "settled") return settlement.worker;
-      if (this.now().getTime() >= deadline) {
-        throw new Error(
-          `Agent recovery launch ${intent.launchId} install claim was repeatedly superseded before settlement`,
-        );
-      }
+      return this.settleInstalled(intent, claim, worker);
     }
   }
 
@@ -460,10 +429,7 @@ export class FileAgentRecoveryLaunchIntentPort implements AgentRecoveryLaunchInt
     intent: AgentRecoveryLaunchIntent,
     claim: { readonly claimId: string; readonly claimEpoch: number },
     worker: AgentRecoveryWorkerReceipt,
-  ): Promise<
-    | { readonly status: "settled"; readonly worker: AgentRecoveryWorkerReceipt }
-    | { readonly status: "superseded" }
-  > {
+  ): Promise<AgentRecoveryWorkerReceipt> {
     return this.withIntentLock(intent.launchId, async () => {
       const current = this.readProjection(intent.launchId);
       if (current?.state === "installed" || current?.state === "terminal") {
@@ -472,16 +438,20 @@ export class FileAgentRecoveryLaunchIntentPort implements AgentRecoveryLaunchInt
             `Agent recovery launch ${intent.launchId} was installed with another worker`,
           );
         }
-        return { status: "settled", worker: current.worker };
+        return current.worker;
       }
-      if (current && current.claimEpoch > claim.claimEpoch) {
-        return { status: "superseded" };
+      if (!current) {
+        throw new Error(
+          `Agent recovery launch ${intent.launchId} install claim was lost before settlement`,
+        );
       }
-      if (
-        current?.state !== "installing" ||
-        current.claimId !== claim.claimId ||
-        current.claimEpoch !== claim.claimEpoch
-      ) {
+      const ownsCurrentClaim =
+        current.state === "installing" &&
+        current.claimId === claim.claimId &&
+        current.claimEpoch === claim.claimEpoch;
+      // The claim fences admission to the external installer, not settlement of
+      // the durable receipt it returned. A newer epoch may adopt that proof.
+      if (!ownsCurrentClaim && current.claimEpoch <= claim.claimEpoch) {
         throw new Error(
           `Agent recovery launch ${intent.launchId} install claim was lost before settlement`,
         );
@@ -497,7 +467,7 @@ export class FileAgentRecoveryLaunchIntentPort implements AgentRecoveryLaunchInt
         installedAt: canonicalTimestamp(this.now(), "installedAt"),
       };
       this.writeProjection(installed);
-      return { status: "settled", worker: installed.worker };
+      return installed.worker;
     });
   }
 
