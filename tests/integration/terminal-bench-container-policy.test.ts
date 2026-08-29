@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,8 +8,14 @@ import { test } from "node:test";
 import * as containerPolicy from "../../scripts/terminal-bench/container-policy.mjs";
 
 const { assertTaskComposePolicy, prestartNetworkOverlay } = containerPolicy;
+const dockerComposeAvailable =
+  spawnSync("docker", ["compose", "version"], {
+    stdio: "ignore",
+    timeout: 5_000,
+  }).status === 0;
 
 test("Terminal-Bench accepts its exact single-main prestart overlay", async (context) => {
+  if (!dockerComposeAvailable) return context.skip("docker compose is unavailable");
   const root = await createTaskRoot(context, "trusted");
   await writeFile(
     join(root, "environment", "docker-compose.yaml"),
@@ -39,6 +46,7 @@ test("Terminal-Bench accepts its exact cached-image-only overlay", async (contex
 });
 
 test("Terminal-Bench rejects sidecars and externally connected proxies", async (context) => {
+  if (!dockerComposeAvailable) return context.skip("docker compose is unavailable");
   const root = await createTaskRoot(context, "sidecar");
   await writeFile(
     join(root, "environment", "compose.yaml"),
@@ -62,6 +70,7 @@ test("Terminal-Bench rejects sidecars and externally connected proxies", async (
 });
 
 test("Terminal-Bench rejects a dual-homed main service", async (context) => {
+  if (!dockerComposeAvailable) return context.skip("docker compose is unavailable");
   const root = await createTaskRoot(context, "dual-home");
   await writeFile(
     join(root, "environment", "compose.yaml"),
