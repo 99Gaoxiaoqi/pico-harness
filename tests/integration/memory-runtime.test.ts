@@ -1789,6 +1789,13 @@ test("/memory command uses trust, sanitizer, idempotency, CAS and executable und
   repository.close();
 });
 
+test.after(async () => {
+  // mode:new Sessions stay process-owned after each foreground Run. Drain the suite's
+  // shared manager so OwnerLease heartbeats and SQLite handles cannot survive this file.
+  await globalSessionManager.clearAndDrain();
+  closeAllOperationalDatabasesForTest();
+});
+
 async function createFixture(name: string) {
   const root = await mkdtemp(join(tmpdir(), `pico-memory-runtime-${name}-`));
   const workspace = join(root, "workspace");
