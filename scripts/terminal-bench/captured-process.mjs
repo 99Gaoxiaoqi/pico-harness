@@ -21,7 +21,6 @@ export function runCaptured(
       detached,
       stdio: ["ignore", "pipe", "pipe", "pipe", ...inheritedFileDescriptors],
     });
-    child.stdio[3].end(supervisorConfig);
     const stdout = [];
     const stderr = [];
     let bytes = 0;
@@ -62,8 +61,17 @@ export function runCaptured(
       }
       if (!outputLimitExceeded) target.push(Buffer.from(chunk));
     };
+    const handleCapturedStreamError = (error) => {
+      if (!outputLimitExceeded) settleReject(error);
+    };
     child.stdout.on("data", collect(stdout));
     child.stderr.on("data", collect(stderr));
+    child.stdout.once("error", handleCapturedStreamError);
+    child.stderr.once("error", handleCapturedStreamError);
+    child.stdio[3].once("error", (error) => {
+      if (!isReadReset(error)) settleReject(error);
+    });
+    child.stdio[3].end(supervisorConfig);
     child.once("error", (error) => {
       if (!outputLimitExceeded) settleReject(error);
     });
@@ -78,6 +86,10 @@ export function runCaptured(
       });
     });
   });
+}
+
+function isReadReset(error) {
+  return error?.code === "ECONNRESET" && error?.syscall === "read";
 }
 
 function killProcessGroup(child, detached) {
