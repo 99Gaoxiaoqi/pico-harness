@@ -327,7 +327,7 @@ test("agent graph store persists exact identities, fences finish, and drives dur
     const version = lease.database
       .prepare("SELECT version FROM operational_schema_migrations WHERE scope = 'agent_graph'")
       .get() as { version: number } | undefined;
-    assert.equal(version?.version, 4);
+    assert.equal(version?.version, 5);
     const names = lease.database
       .prepare(
         `SELECT name FROM sqlite_schema
@@ -348,6 +348,27 @@ test("agent graph store persists exact identities, fences finish, and drives dur
       "agent_graph_yield_interests",
       "agent_graphs",
     ]);
+    const identityPlan = lease.database
+      .prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT 1 AS matched FROM (
+           SELECT root_session_id AS session_id, root_run_id AS run_id
+           FROM agent_graph_yield_interests
+           UNION ALL
+           SELECT source_session_id AS session_id, source_run_id AS run_id
+           FROM agent_graph_schedule_revisions
+         ) WHERE session_id = ? AND run_id = ? LIMIT 1`,
+      )
+      .all("root-session", "root-run-1")
+      .map((row) => (row as { detail: string }).detail);
+    assert.ok(
+      identityPlan.some((detail) => detail.includes("agent_graph_yield_interests_by_root_run")),
+    );
+    assert.ok(
+      identityPlan.some((detail) =>
+        detail.includes("agent_graph_schedule_revisions_by_source_run"),
+      ),
+    );
   });
 
   await rm(root, { recursive: true, force: true });
@@ -405,13 +426,27 @@ test("agent graph schema upgrades a v3 control ledger additively and reopens", a
       const version = lease.database
         .prepare("SELECT version FROM operational_schema_migrations WHERE scope = 'agent_graph'")
         .get() as { version: number } | undefined;
-      assert.equal(version?.version, 4);
+      assert.equal(version?.version, 5);
       const wakeColumns = lease.database
         .prepare("PRAGMA table_info(agent_graph_supervisor_wakes)")
         .all()
         .map((row) => (row as { name: string }).name);
       assert.ok(wakeColumns.includes("attention_state"));
       assert.ok(wakeColumns.includes("attention_version"));
+      const identityIndexes = lease.database
+        .prepare(
+          `SELECT name FROM sqlite_schema
+           WHERE type = 'index' AND name IN (
+             'agent_graph_yield_interests_by_root_run',
+             'agent_graph_schedule_revisions_by_source_run'
+           ) ORDER BY name`,
+        )
+        .all()
+        .map((row) => (row as { name: string }).name);
+      assert.deepEqual(identityIndexes, [
+        "agent_graph_schedule_revisions_by_source_run",
+        "agent_graph_yield_interests_by_root_run",
+      ]);
     });
   } finally {
     await rm(root, { recursive: true, force: true });

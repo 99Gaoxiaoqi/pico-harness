@@ -317,5 +317,14 @@ export const AGENT_GRAPH_SCOPE: SqliteSchemaScope = {
         WHERE attention_state = 'needs_attention';
       `,
     ],
+    [
+      5,
+      `
+      CREATE INDEX agent_graph_yield_interests_by_root_run
+        ON agent_graph_yield_interests(root_session_id, root_run_id);
+      CREATE INDEX agent_graph_schedule_revisions_by_source_run
+        ON agent_graph_schedule_revisions(source_session_id, source_run_id);
+      `,
+    ],
   ]),
 };
