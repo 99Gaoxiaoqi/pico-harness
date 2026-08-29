@@ -314,8 +314,7 @@ realModelTest(
       assert.equal(
         rootToolStarts.filter(
           (event) =>
-            event.runId === initialRootRuntimeRunId &&
-            event.data.toolName === "update_agent_graph",
+            event.runId === initialRootRuntimeRunId && event.data.toolName === "update_agent_graph",
         ).length,
         1,
         "the initial root RuntimeRun must update the admitted epoch exactly once",
@@ -323,8 +322,7 @@ realModelTest(
       assert.equal(
         rootToolStarts.filter(
           (event) =>
-            event.runId === initialRootRuntimeRunId &&
-            event.data.toolName === "yield_agent_graph",
+            event.runId === initialRootRuntimeRunId && event.data.toolName === "yield_agent_graph",
         ).length,
         1,
         "the initial root RuntimeRun must yield exactly once",
@@ -449,9 +447,7 @@ realModelTest(
       throw error;
     } finally {
       try {
-        for (const claim of graphId
-          ? (graphHost?.store.listActivationClaims(graphId) ?? [])
-          : []) {
+        for (const claim of graphId ? (graphHost?.store.listActivationClaims(graphId) ?? []) : []) {
           sessionIds.add(claim.targetSessionId);
         }
       } catch {
@@ -676,10 +672,7 @@ async function collectGraphE2EDiagnosticSummary(input: {
   const wake =
     host && graphId && terminal && terminalClaim
       ? host.store.getSupervisorWake(
-          wakeIdFor(
-            graphId,
-            `runtime-terminal:${terminalClaim.targetRunId}:${terminal.eventId}`,
-          ),
+          wakeIdFor(graphId, `runtime-terminal:${terminalClaim.targetRunId}:${terminal.eventId}`),
         )
       : undefined;
   const attempts = wake ? (host?.store.listSupervisorWakeAttempts(wake.wakeId) ?? []) : [];
@@ -806,6 +799,9 @@ function openRootEpochFromAuthority(
   const opened = authority
     .listGraphs(rootSessionId)
     .filter((graph) => graph.rootSessionId === rootSessionId && graph.phase === "open");
-  assert.ok(opened.length <= 1, `Graph authority returned multiple open epochs for ${rootSessionId}`);
+  assert.ok(
+    opened.length <= 1,
+    `Graph authority returned multiple open epochs for ${rootSessionId}`,
+  );
   return opened[0];
 }

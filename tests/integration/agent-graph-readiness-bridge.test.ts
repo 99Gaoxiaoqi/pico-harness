@@ -133,9 +133,10 @@ test("runtime bridge derives planned, running, terminal and resolved readiness f
       producerIntents: state.intents,
       failedIntentIds: [],
     });
-    assert.deepEqual(facts.records.map((record) => record.recordId), [
-      producer.intent.expectedOutputRecordId,
-    ]);
+    assert.deepEqual(
+      facts.records.map((record) => record.recordId),
+      [producer.intent.expectedOutputRecordId],
+    );
     assert.deepEqual(facts.inFlightRecordIds, []);
     assert.deepEqual(facts.failedRecordIds, []);
 

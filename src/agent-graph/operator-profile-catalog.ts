@@ -56,7 +56,8 @@ const BUILTIN_PROFILES: readonly AgentGraphOperatorProfileDefinition[] = [
   {
     id: "implement",
     revision: "1",
-    description: "Scoped implementation and deterministic verification inside the assigned workspace.",
+    description:
+      "Scoped implementation and deterministic verification inside the assigned workspace.",
     tools: ["read_file", "write_file", "edit_file", "bash", "glob", "grep", "repo_map"],
     systemPrompt:
       "Implement only the assigned scope. Inspect before editing, preserve unrelated changes, run focused verification, and report the exact files and checks completed.",
@@ -233,7 +234,10 @@ function exactText(value: unknown, field: string): string {
 
 function assertExactKeys(value: Record<string, unknown>, keys: readonly string[]): void {
   const expected = new Set(keys);
-  if (Object.keys(value).some((key) => !expected.has(key)) || Object.keys(value).length !== keys.length) {
+  if (
+    Object.keys(value).some((key) => !expected.has(key)) ||
+    Object.keys(value).length !== keys.length
+  ) {
     throw new Error("Agent Graph Operator profile snapshot has unexpected fields");
   }
 }

@@ -1,7 +1,4 @@
-export type AgentGraphDiagnosticClassification =
-  | "transient"
-  | "configuration"
-  | "integrity";
+export type AgentGraphDiagnosticClassification = "transient" | "configuration" | "integrity";
 
 export type AgentGraphDiagnosticState = "retry_scheduled" | "needs_attention" | "resolved";
 
@@ -31,21 +28,21 @@ export function safeAgentGraphErrorMessage(error: unknown): string {
         : character;
     })
     .join("");
-  return withoutUnsafeControls
-    .replace(/\bBearer\s+[^\s,;]+/giu, "Bearer <redacted>")
-    .replace(/\b(sk|pk)-[A-Za-z0-9_-]{12,}\b/gu, "<redacted>")
-    .replace(/\b(https?:\/\/)[^/\s:@]+:[^/\s@]+@/giu, "$1<redacted>@")
-    .replace(
-      /\b[A-Za-z0-9_]*(api[_-]?key|authorization|password|secret|token)\b\s*[:=]\s*("[^"]*"|'[^']*'|[^\s,;]+)/giu,
-      "$1=<redacted>",
-    )
-    .slice(0, MAX_DIAGNOSTIC_MESSAGE_LENGTH)
-    .trim() || "Agent Graph operation failed";
+  return (
+    withoutUnsafeControls
+      .replace(/\bBearer\s+[^\s,;]+/giu, "Bearer <redacted>")
+      .replace(/\b(sk|pk)-[A-Za-z0-9_-]{12,}\b/gu, "<redacted>")
+      .replace(/\b(https?:\/\/)[^/\s:@]+:[^/\s@]+@/giu, "$1<redacted>@")
+      .replace(
+        /\b[A-Za-z0-9_]*(api[_-]?key|authorization|password|secret|token)\b\s*[:=]\s*("[^"]*"|'[^']*'|[^\s,;]+)/giu,
+        "$1=<redacted>",
+      )
+      .slice(0, MAX_DIAGNOSTIC_MESSAGE_LENGTH)
+      .trim() || "Agent Graph operation failed"
+  );
 }
 
-export function classifyAgentGraphError(
-  error: unknown,
-): AgentGraphDiagnosticClassification {
+export function classifyAgentGraphError(error: unknown): AgentGraphDiagnosticClassification {
   if (error instanceof AgentGraphNeedsAttentionError) return error.classification;
   if (error instanceof Error && error.name === "AgentGraphStoreConflictError") {
     return "integrity";
