@@ -175,7 +175,11 @@ test(
     context.after(async () => await executor.dispose());
     const output = await executeStopHook(executor, fixture, handler, "windows-mixed-case-path");
     // 子进程看到的 PATH 就是受控环境的 pAtH 值（nodeDir 前缀 + 尾随分号）。
-    assert.equal(output.additionalContext, `${join(process.execPath, "..")};`);
+    assert.equal(
+      output.additionalContext,
+      `${join(process.execPath, "..")};`,
+      JSON.stringify(output),
+    );
   },
 );
 
@@ -413,7 +417,9 @@ async function createProcessTreeFixture(
       'const { writeFileSync } = require("node:fs");',
       "const [descendantPath, treePath, heartbeatPath] = process.argv.slice(2);",
       "const descendant = spawn(process.execPath, [descendantPath, heartbeatPath], {",
-      '  stdio: "ignore",',
+      // This fixture validates Job Object tree termination. Inheriting the existing
+      // AppContainer handles avoids making that assertion depend on host NUL preparation.
+      '  stdio: "inherit",',
       "  windowsHide: true,",
       "});",
       'if (descendant.pid === undefined) throw new Error("descendant pid unavailable");',

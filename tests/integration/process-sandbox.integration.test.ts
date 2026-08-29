@@ -117,6 +117,27 @@ test("Windows 受限进程只获得宿主固定的 Node 路径兼容参数", asy
   assert.equal(unrestrictedPlan.env.NODE_OPTIONS, "--require=trusted-by-unrestricted-host.cjs");
 });
 
+test("Windows 受限环境规范化 PATH 系统键但保留自定义键大小写", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-win-env-case-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const policy = createSandboxPolicy({
+    profile: "workspace-write",
+    workspaceRoots: [root],
+    scratchRoot: join(root, "scratch"),
+  });
+  const env = buildSandboxEnvironment(
+    { pAtH: "C:\\runtime", pAtHeXt: ".EXE;.CMD", CustomCase: "kept" },
+    policy,
+    "win32",
+    ["CustomCase"],
+  );
+  assert.equal(env.PATH, "C:\\runtime");
+  assert.equal(env.PATHEXT, ".EXE;.CMD");
+  assert.equal(env.CustomCase, "kept");
+  assert.equal(Object.hasOwn(env, "pAtH"), false);
+  assert.equal(Object.hasOwn(env, "pAtHeXt"), false);
+});
+
 test("受限模式在原生后端缺失时 fail-closed", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-missing-"));
   context.after(() => rm(root, { recursive: true, force: true }));
