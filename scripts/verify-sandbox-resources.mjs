@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { constants } from "node:fs";
 import { access, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,6 +38,11 @@ const requiredExecutables = process.argv.includes("--require-all")
 for (const relativeExecutable of requiredExecutables) {
   const executable = join(projectRoot, relativeExecutable);
   await access(executable);
+  if (relativeExecutable.startsWith("resources/sandbox/linux-")) {
+    await access(executable, constants.X_OK).catch((error) => {
+      throw new Error(`Linux 沙箱原生资源不可执行: ${executable}`, { cause: error });
+    });
+  }
   const expected = (await readFile(`${executable}.sha256`, "utf8")).trim().split(/\s+/u)[0];
   const actual = createHash("sha256")
     .update(await readFile(executable))
