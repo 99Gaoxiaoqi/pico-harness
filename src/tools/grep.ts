@@ -52,11 +52,11 @@ const EXCLUDED_DIRS: ReadonlySet<string> = new Set([
  *
  * 模块级变量在进程内常驻;测试通过 resetRgCache 可重置以模拟两种路径。
  */
-let rgAvailable: boolean | null = null;
+let rgExecutable: string | false | null = null;
 
 /** 重置 rg 可用性缓存(仅测试用,允许强制走降级路径)。 */
 export function resetRgCache(): void {
-  rgAvailable = null;
+  rgExecutable = null;
 }
 
 /**
@@ -64,28 +64,29 @@ export function resetRgCache(): void {
  * 传 false 强制走 Node.js 降级路径;传 true 强制走 rg 路径(要求环境中真有 rg)。
  */
 export function setRgAvailable(value: boolean): void {
-  rgAvailable = value;
+  rgExecutable = value ? (detectRgExecutable() ?? "rg") : false;
 }
 
 /**
  * 探测当前环境中 ripgrep 是否可用且可执行。
- * 用 execFileSync("rg", ["--version"]) 探测:成功即可用,ENOENT 则不可用。
- * 其他异常(权限/超时等)保守视为不可用,降级到 Node.js。
+ * 返回宿主 PATH 中已验证可执行的绝对路径，避免进入受限环境后再次依赖 PATH 做
+ * execvp 解析。访问失败时保守视为不可用并降级到 Node.js。
  */
-function detectRg(): boolean {
+function detectRgExecutable(): string | undefined {
   const extensions = process.platform === "win32" ? [".exe", ".cmd", ".bat", ""] : [""];
   for (const directory of (process.env.PATH ?? "").split(delimiter)) {
     if (!directory) continue;
     for (const extension of extensions) {
       try {
-        accessSync(resolve(directory, `rg${extension}`), constants.X_OK);
-        return true;
+        const executable = resolve(directory, `rg${extension}`);
+        accessSync(executable, constants.X_OK);
+        return executable;
       } catch {
         // 继续检查下一个 PATH 目录。
       }
     }
   }
-  return false;
+  return undefined;
 }
 
 /** 解析 grep 工具入参,带类型校验。 */
@@ -255,6 +256,7 @@ function isErrnoCode(err: unknown, code: string): boolean {
  * rg 搜索无命中时退出码 1 且 stdout 为空,本函数捕获该情况返回空串。
  */
 function searchWithRg(opts: {
+  executable: string;
   pattern: string;
   searchRoot: string;
   glob: string | undefined;
@@ -273,7 +275,15 @@ function searchWithRg(opts: {
   };
 }): Promise<string> {
   return new Promise((resolvePromise, reject) => {
-    const args: string[] = ["--color=never", "--no-heading"];
+    // Match the Node fallback: authorized hidden/ignored files are searchable, while
+    // known high-cost implementation directories remain excluded explicitly.
+    const args: string[] = [
+      "--color=never",
+      "--no-heading",
+      "--with-filename",
+      "--hidden",
+      "--no-ignore",
+    ];
     if (opts.lineNumber) args.push("--line-number");
     else args.push("--no-line-number");
     if (!opts.caseSensitive) args.push("--ignore-case");
@@ -283,6 +293,9 @@ function searchWithRg(opts: {
     }
     if (opts.excludeSensitiveFiles) {
       for (const glob of SENSITIVE_GREP_GLOBS) args.push("-g", `!${glob}`);
+    }
+    for (const directory of EXCLUDED_DIRS) {
+      args.push("-g", `!${directory}/**`, "-g", `!**/${directory}/**`);
     }
     // 限制匹配文件数与每文件行数不是 rg 的强项,这里靠后续截断 maxResults 控制
     args.push(opts.searchRoot);
@@ -298,7 +311,7 @@ function searchWithRg(opts: {
     try {
       child = managedProcessLauncher.launch(
         {
-          command: "rg",
+          command: opts.executable,
           args,
           cwd: opts.searchRoot,
           env: opts.sandbox?.env ?? process.env,
@@ -333,7 +346,7 @@ function searchWithRg(opts: {
         reject(new Error(`rg 执行失败: 输出超过 ${maxBuffer} bytes`));
       } else if (code === 0) {
         resolvePromise(stdout);
-      } else if (code === 1) {
+      } else if (code === 1 && stderr.trim().length === 0) {
         resolvePromise("");
       } else {
         reject(new Error(`rg 执行失败 (exit ${String(code)}): ${stderr.trim()}`));
@@ -380,6 +393,9 @@ function parseRgOutput(raw: string, lineNumber: boolean): RawMatch[] {
         content: line.slice(idx + 1),
       });
     }
+  }
+  if (text.length > 0 && matches.length === 0) {
+    throw new Error("rg 返回了非空但无法解析的输出，已按 fail-closed 拒绝结果");
   }
   return matches;
 }
@@ -545,14 +561,15 @@ export class GrepTool implements BaseTool {
     const searchRoot = await this.roots.assertAllowed(path || ".");
 
     // 探测 rg(模块级缓存,只探测一次)
-    if (rgAvailable === null) {
-      rgAvailable = detectRg();
+    if (rgExecutable === null) {
+      rgExecutable = detectRgExecutable() ?? false;
     }
 
     // 优先 rg 路径
-    if (rgAvailable && maxFiles === undefined) {
+    if (rgExecutable !== false && maxFiles === undefined) {
       try {
         const raw = await searchWithRg({
+          executable: rgExecutable,
           pattern,
           searchRoot,
           glob,
@@ -579,7 +596,7 @@ export class GrepTool implements BaseTool {
         // 不得改用宿主 Node.js 读取来绕过同一 OS 沙箱边界。
         if (this.options.processSandbox) throw err;
         // rg 路径异常 → 标记不可用,降级到 Node.js
-        rgAvailable = false;
+        rgExecutable = false;
         logger.warn({ err }, "grep 的 rg 路径失败,降级到 Node.js 实现");
       }
     }

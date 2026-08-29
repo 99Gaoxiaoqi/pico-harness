@@ -78,6 +78,7 @@ test("desktop Workbar v2 source exposes full Registry, context menu and keyboard
       { kind: "files", label: "生成文件" },
       { kind: "tasks", label: "待办" },
       { kind: "inspector", label: "追踪" },
+      { kind: "graph", label: "Graph" },
     ],
   );
 

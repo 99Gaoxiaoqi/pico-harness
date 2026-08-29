@@ -76,6 +76,7 @@ export class StdioLspClient {
         env: this.processSandbox
           ? { ...process.env, ...this.config.env }
           : buildMinimalChildProcessEnv(this.config.env),
+        explicitEnvKeys: Object.keys(this.config.env ?? {}),
         origin: "lsp",
         policy:
           this.processSandbox ??

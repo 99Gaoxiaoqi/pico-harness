@@ -1,6 +1,9 @@
-import { accessSync, constants, mkdirSync, readdirSync, realpathSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { accessSync, constants, mkdirSync, realpathSync } from "node:fs";
 import { delimiter, dirname, isAbsolute, resolve } from "node:path";
 import type { SandboxPolicy } from "./types.js";
+
+export const WINDOWS_RESTRICTED_NODE_OPTIONS = "--preserve-symlinks --preserve-symlinks-main";
 
 const CACHE_ENV_NAMES = [
   "XDG_CACHE_HOME",
@@ -9,10 +12,91 @@ const CACHE_ENV_NAMES = [
   "PIP_CACHE_DIR",
 ] as const;
 
+const PORTABLE_ENV_NAMES = new Set([
+  "HOME",
+  "LANG",
+  "PATH",
+  "SHELL",
+  "TEMP",
+  "TERM",
+  "TMP",
+  "TMPDIR",
+  "USER",
+]);
+
+const WINDOWS_ENV_NAMES = new Set([
+  "ALLUSERSPROFILE",
+  "APPDATA",
+  "COMSPEC",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "LOCALAPPDATA",
+  "NUMBER_OF_PROCESSORS",
+  "OS",
+  "PATHEXT",
+  "PROCESSOR_ARCHITECTURE",
+  "PROGRAMDATA",
+  "PROGRAMFILES",
+  "PROGRAMFILES(X86)",
+  "PROGRAMW6432",
+  "SYSTEMDRIVE",
+  "SYSTEMROOT",
+  "USERDOMAIN",
+  "USERNAME",
+  "USERPROFILE",
+  "WINDIR",
+]);
+
+const BLOCKED_RESTRICTED_ENV_NAMES = new Set([
+  "BASHOPTS",
+  "BASH_ENV",
+  "BASH_XTRACEFD",
+  "CDPATH",
+  "ENV",
+  "GLOBIGNORE",
+  "PROMPT_COMMAND",
+  "PS4",
+  "SHELLOPTS",
+  "ZDOTDIR",
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "NODE_REPL_EXTERNAL_MODULE",
+  "LD_PRELOAD",
+  "LD_AUDIT",
+  "LD_LIBRARY_PATH",
+  "LIBPATH",
+  "SHLIB_PATH",
+  "LDR_PRELOAD",
+  "LDR_PRELOAD64",
+  "OPENSSL_CONF",
+  "OPENSSL_CONF_INCLUDE",
+  "OPENSSL_MODULES",
+  "OPENSSL_ENGINES",
+  "PYTHONPATH",
+  "PYTHONHOME",
+  "PYTHONSTARTUP",
+  "PYTHONUSERBASE",
+  "RUBYOPT",
+  "RUBYLIB",
+  "RUBYGEMS_GEMDEPS",
+  "GEM_HOME",
+  "GEM_PATH",
+  "GCONV_PATH",
+  "GLIBC_TUNABLES",
+  "LOCPATH",
+  "PERL5OPT",
+  "PERL5LIB",
+  "PERLLIB",
+  "JAVA_TOOL_OPTIONS",
+  "_JAVA_OPTIONS",
+  "JDK_JAVA_OPTIONS",
+]);
+
 export function buildSandboxEnvironment(
   base: NodeJS.ProcessEnv,
   policy: SandboxPolicy,
   platform: NodeJS.Platform = process.platform,
+  explicitEnvKeys: readonly string[] = [],
 ): NodeJS.ProcessEnv {
   if (policy.profile === "danger-full-access") return { ...base };
 
@@ -23,23 +107,86 @@ export function buildSandboxEnvironment(
     mkdirSync(path, { recursive: true, mode: 0o700 });
   }
 
-  const env: NodeJS.ProcessEnv = {
-    ...base,
-    HOME: home,
-    TMPDIR: temp,
-    TMP: temp,
-    TEMP: temp,
-  };
+  const env: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(base)) {
+    if (value !== undefined && shouldInheritRestrictedEnvironmentName(name, platform)) {
+      setEnvironmentVariable(env, name, value, platform);
+    }
+  }
+  for (const requestedName of explicitEnvKeys) {
+    if (isBlockedRestrictedEnvironmentName(requestedName)) continue;
+    const entry = findEnvironmentEntry(base, requestedName, platform);
+    if (entry?.[1] !== undefined) {
+      setEnvironmentVariable(env, requestedName, entry[1], platform);
+    }
+  }
+  setEnvironmentVariable(env, "HOME", home, platform);
+  setEnvironmentVariable(env, "TMPDIR", temp, platform);
+  setEnvironmentVariable(env, "TMP", temp, platform);
+  setEnvironmentVariable(env, "TEMP", temp, platform);
   if (platform !== "win32") env.OPENSSL_CONF = "/dev/null";
   if (platform === "win32") {
-    env.USERPROFILE = home;
-    env.LOCALAPPDATA = resolve(home, "AppData", "Local");
-    env.APPDATA = resolve(home, "AppData", "Roaming");
-    mkdirSync(env.LOCALAPPDATA, { recursive: true });
-    mkdirSync(env.APPDATA, { recursive: true });
+    const localAppData = resolve(home, "AppData", "Local");
+    const appData = resolve(home, "AppData", "Roaming");
+    setEnvironmentVariable(env, "USERPROFILE", home, platform);
+    setEnvironmentVariable(env, "LOCALAPPDATA", localAppData, platform);
+    setEnvironmentVariable(env, "APPDATA", appData, platform);
+    mkdirSync(localAppData, { recursive: true });
+    mkdirSync(appData, { recursive: true });
   }
-  for (const name of CACHE_ENV_NAMES) env[name] = cache;
+  for (const name of CACHE_ENV_NAMES) setEnvironmentVariable(env, name, cache, platform);
   return env;
+}
+
+function shouldInheritRestrictedEnvironmentName(name: string, platform: NodeJS.Platform): boolean {
+  const normalized = name.toUpperCase();
+  if (isBlockedRestrictedEnvironmentName(normalized)) return false;
+  return (
+    PORTABLE_ENV_NAMES.has(normalized) ||
+    normalized.startsWith("LC_") ||
+    (platform === "win32" && WINDOWS_ENV_NAMES.has(normalized))
+  );
+}
+
+function isBlockedRestrictedEnvironmentName(name: string): boolean {
+  const normalized = name.toUpperCase();
+  return (
+    BLOCKED_RESTRICTED_ENV_NAMES.has(normalized) ||
+    normalized.startsWith("DYLD_") ||
+    normalized.startsWith("LD_") ||
+    normalized.startsWith("LDR_") ||
+    normalized.startsWith("BASH_FUNC_")
+  );
+}
+
+function findEnvironmentEntry(
+  environment: NodeJS.ProcessEnv,
+  name: string,
+  platform: NodeJS.Platform,
+): [string, string | undefined] | undefined {
+  if (platform !== "win32") {
+    return Object.hasOwn(environment, name) ? [name, environment[name]] : undefined;
+  }
+  const normalized = name.toUpperCase();
+  return Object.entries(environment).find(([key]) => key.toUpperCase() === normalized);
+}
+
+function setEnvironmentVariable(
+  environment: NodeJS.ProcessEnv,
+  name: string,
+  value: string,
+  platform: NodeJS.Platform,
+): void {
+  const outputName =
+    platform === "win32" && ["PATH", "PATHEXT"].includes(name.toUpperCase())
+      ? name.toUpperCase()
+      : name;
+  if (platform === "win32") {
+    const normalized = outputName.toUpperCase();
+    const duplicate = Object.keys(environment).find((key) => key.toUpperCase() === normalized);
+    if (duplicate !== undefined && duplicate !== outputName) delete environment[duplicate];
+  }
+  environment[outputName] = value;
 }
 
 export function runtimeReadRoots(
@@ -109,21 +256,109 @@ export function shellRuntimeReadRoots(
 function toolchainRoots(executable: string): string[] {
   const canonical = canonicalize(executable);
   const normalized = canonical.replaceAll("\\", "/");
-  const cellarMatch = normalized.match(/^(.*)\/Cellar\/[^/]+\/[^/]+(?:\/|$)/u);
-  const cellar = normalized.match(/^(.*\/Cellar\/[^/]+\/[^/]+)(?:\/|$)/u)?.[1];
-  if (cellar && cellarMatch?.[1]) {
-    const opt = canonicalize(`${cellarMatch[1]}/opt`);
-    let linkedDependencies: string[] = [];
-    try {
-      linkedDependencies = readdirSync(opt).map((entry) => canonicalize(resolve(opt, entry)));
-    } catch {
-      // Homebrew opt 不存在时仅保留已解析的主工具链根。
-    }
-    return [canonicalize(cellar), opt, ...linkedDependencies];
+  const cellar = homebrewFormulaRoot(normalized);
+  if (cellar) {
+    return [canonicalize(cellar), ...macosLinkedLibraryAccess(canonical).roots];
   }
   const nix = normalized.match(/^(\/nix\/store\/[^/]+)(?:\/|$)/u)?.[1];
   if (nix) return [canonicalize(nix)];
   return [canonicalize(dirname(canonical))];
+}
+
+const MACOS_LINKED_LIBRARY_LIMIT = 128;
+interface MacosLinkedLibraryAccess {
+  readonly roots: readonly string[];
+  readonly aliases: readonly string[];
+}
+
+const macosLinkedLibraryAccessCache = new Map<string, MacosLinkedLibraryAccess>();
+
+function macosLinkedLibraryAccess(executable: string): MacosLinkedLibraryAccess {
+  if (process.platform !== "darwin" || !accessExecutable("/usr/bin/otool")) {
+    return { roots: [], aliases: [] };
+  }
+  const cached = macosLinkedLibraryAccessCache.get(executable);
+  if (cached) return cached;
+
+  const roots = new Set<string>();
+  const aliases = new Set<string>();
+  const inspected = new Set<string>();
+  const pending = [executable];
+  while (pending.length > 0 && inspected.size < MACOS_LINKED_LIBRARY_LIMIT) {
+    const candidate = pending.shift();
+    if (!candidate || inspected.has(candidate)) continue;
+    inspected.add(candidate);
+    const result = spawnSync("/usr/bin/otool", ["-L", candidate], {
+      encoding: "utf8",
+      timeout: 2_000,
+      maxBuffer: 1024 * 1024,
+      env: { PATH: "/usr/bin:/bin", LANG: "C", LC_ALL: "C" },
+    });
+    if (result.status !== 0 || typeof result.stdout !== "string") continue;
+    for (const line of result.stdout.split("\n").slice(1)) {
+      const normalizedLine = line.trim();
+      const metadataStart = normalizedLine.indexOf(" (");
+      const linkedPath = metadataStart > 0 ? normalizedLine.slice(0, metadataStart) : "";
+      if (!linkedPath.startsWith("/")) continue;
+      const linked = canonicalize(linkedPath);
+      const formula = homebrewFormulaRoot(linked.replaceAll("\\", "/"));
+      if (!formula) continue;
+      const canonicalFormula = canonicalize(formula);
+      roots.add(canonicalFormula);
+      const alias = homebrewOptFormulaRoot(linkedPath);
+      if (alias && canonicalize(alias) === canonicalFormula) aliases.add(alias);
+      if (!inspected.has(linked)) pending.push(linked);
+    }
+  }
+  const resolved = { roots: [...roots], aliases: [...aliases] };
+  macosLinkedLibraryAccessCache.set(executable, resolved);
+  return resolved;
+}
+
+function homebrewFormulaRoot(normalizedPath: string): string | undefined {
+  return normalizedPath.match(/^(.*\/Cellar\/[^/]+\/[^/]+)(?:\/|$)/u)?.[1];
+}
+
+function homebrewOptFormulaRoot(normalizedPath: string): string | undefined {
+  return normalizedPath.match(/^(.*\/opt\/[^/]+)(?:\/|$)/u)?.[1];
+}
+
+export function runtimeReadAliases(
+  command: string,
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+  readRoots: readonly string[] = [],
+): string[] {
+  if (platform !== "darwin") return [];
+  const aliases = new Set<string>();
+  const executable = resolveTrustedExecutable(command, env, platform);
+  if (executable) {
+    for (const alias of macosLinkedLibraryAccess(canonicalize(executable)).aliases) {
+      aliases.add(alias);
+    }
+  }
+  // Shell command 内的子进程依赖已被 shellRuntimeReadRoots 收录为真实
+  // Cellar 根；动态加载器仍会按 /opt/<formula> 词法路径访问。只为已授权
+  // 且实时指向同一 Cellar 根的单个 formula 补充 alias，不开放整个 opt。
+  for (const root of readRoots) {
+    const canonicalRoot = canonicalize(root);
+    const normalized = canonicalRoot.replaceAll("\\", "/");
+    const match = normalized.match(/^(.*)\/Cellar\/([^/]+)\/[^/]+(?:\/|$)/u);
+    const formulaRoot = homebrewFormulaRoot(normalized);
+    if (!match || !formulaRoot) continue;
+    const alias = resolve(match[1]!, "opt", match[2]!);
+    if (canonicalize(alias) === canonicalize(formulaRoot)) aliases.add(alias);
+  }
+  return [...aliases];
+}
+
+function accessExecutable(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function resolveTrustedExecutable(
@@ -140,7 +375,8 @@ function resolveTrustedExecutable(
     }
   }
   const extensions = platform === "win32" ? [".exe", ".cmd", ".bat", ""] : [""];
-  for (const directory of (env.PATH ?? "").split(delimiter)) {
+  const pathValue = findEnvironmentEntry(env, "PATH", platform)?.[1] ?? "";
+  for (const directory of pathValue.split(delimiter)) {
     if (!directory) continue;
     for (const extension of extensions) {
       const candidate = resolve(directory, `${command}${extension}`);

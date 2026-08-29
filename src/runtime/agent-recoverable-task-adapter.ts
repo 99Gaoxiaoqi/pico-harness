@@ -440,11 +440,18 @@ export class FileAgentRecoveryLaunchIntentPort implements AgentRecoveryLaunchInt
         }
         return current.worker;
       }
-      if (
-        current?.state !== "installing" ||
-        current.claimId !== claim.claimId ||
-        current.claimEpoch !== claim.claimEpoch
-      ) {
+      if (!current) {
+        throw new Error(
+          `Agent recovery launch ${intent.launchId} install claim was lost before settlement`,
+        );
+      }
+      const ownsCurrentClaim =
+        current.state === "installing" &&
+        current.claimId === claim.claimId &&
+        current.claimEpoch === claim.claimEpoch;
+      // The claim fences admission to the external installer, not settlement of
+      // the durable receipt it returned. A newer epoch may adopt that proof.
+      if (!ownsCurrentClaim && current.claimEpoch <= claim.claimEpoch) {
         throw new Error(
           `Agent recovery launch ${intent.launchId} install claim was lost before settlement`,
         );

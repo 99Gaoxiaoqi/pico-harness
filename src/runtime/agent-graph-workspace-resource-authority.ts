@@ -220,11 +220,7 @@ export class AgentGraphWorkspaceResourceAuthority {
 
   private async deleteBranchIfSafe(resource: AgentGraphWorkspaceResourceRecord): Promise<void> {
     const ref = `refs/heads/${resource.branch}`;
-    const exists = await this.gitRun(
-      ["show-ref", "--verify", ref],
-      this.repoRoot,
-      [0, 1],
-    );
+    const exists = await this.gitRun(["show-ref", "--verify", ref], this.repoRoot, [0, 1]);
     if (exists.exitCode === 1) return;
     const branchHead = await this.gitOutput(
       ["rev-parse", "--verify", `${ref}^{commit}`],
@@ -232,11 +228,13 @@ export class AgentGraphWorkspaceResourceAuthority {
     );
     const merged =
       branchHead === resource.baseCommit ||
-      (await this.gitRun(
-        ["merge-base", "--is-ancestor", branchHead, "HEAD"],
-        this.repoRoot,
-        [0, 1],
-      )).exitCode === 0;
+      (
+        await this.gitRun(
+          ["merge-base", "--is-ancestor", branchHead, "HEAD"],
+          this.repoRoot,
+          [0, 1],
+        )
+      ).exitCode === 0;
     if (!merged) throw new Error(`Graph worktree branch is not safe to delete: ${resource.branch}`);
     await this.gitRun(["update-ref", "-d", ref, branchHead], this.repoRoot);
   }

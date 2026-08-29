@@ -297,8 +297,27 @@ test("production Plan review double-click converges on one Run after non-Plan le
   assert.equal(drifted.pendingProposal?.revision, proposed.pendingProposal?.revision);
   assert.equal(drifted.controlEpoch, proposed.controlEpoch);
 
-  const services = createProductionRuntimeServices({ env: { PICO_HOME: picoHome } });
+  const reserveEntered = Promise.withResolvers<void>();
+  const releaseReserve = Promise.withResolvers<void>();
+  const duplicateJoined = Promise.withResolvers<void>();
+  const admissionPhases: string[] = [];
+  const services = createProductionRuntimeServices({
+    env: { PICO_HOME: picoHome },
+    planReviewAdmissionObserver: ({ phase }) => {
+      admissionPhases.push(phase);
+      if (phase === "joined") duplicateJoined.resolve();
+    },
+  });
+  const reservePlanReviewRun = services.service.reservePlanReviewRun.bind(services.service);
+  let reserveCalls = 0;
+  services.service.reservePlanReviewRun = async (...args) => {
+    reserveCalls += 1;
+    reserveEntered.resolve();
+    await releaseReserve.promise;
+    return reservePlanReviewRun(...args);
+  };
   t.after(async () => {
+    releaseReserve.resolve();
     lease.release();
     await services.desktopService.close();
     const released = globalSessionManager.delete(sessionId, workspace, { picoHome });
@@ -314,13 +333,26 @@ test("production Plan review double-click converges on one Run after non-Plan le
     expectedSessionSequence: proposed.sessionSequence,
     controlEpoch: proposed.controlEpoch!,
   });
-  const responses = (await Promise.all([
-    services.desktopService.handle(request),
-    services.desktopService.handle(request),
-  ])) as unknown as readonly { accepted: boolean; run?: { runId?: string } }[];
+  const firstResponse = services.desktopService.handle(request);
+  await reserveEntered.promise;
+  const secondResponse = services.desktopService.handle(request);
+  await duplicateJoined.promise;
+  assert.deepEqual(admissionPhases, ["started", "joined"]);
+  assert.equal(reserveCalls, 1, "the duplicate must join before durable intent reservation");
+  releaseReserve.resolve();
+  const responses = (await Promise.all([firstResponse, secondResponse])) as unknown as readonly {
+    accepted: boolean;
+    run?: { runId?: string };
+  }[];
   assert.ok(responses.every(({ accepted }) => accepted));
   assert.match(responses[0]?.run?.runId ?? "", /^run_plan_/u);
   assert.equal(responses[0]?.run?.runId, responses[1]?.run?.runId);
+  const replay = (await services.desktopService.handle(request)) as {
+    accepted: boolean;
+    run?: { runId?: string };
+  };
+  assert.equal(replay.accepted, true);
+  assert.equal(replay.run?.runId, responses[0]?.run?.runId);
   const runs = (await services.desktopService.handle(
     createRuntimeRequest("runs.list", { workspacePath: workspace, sessionId }),
   )) as { runs: readonly { runId: string }[] };

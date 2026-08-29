@@ -38,8 +38,13 @@ async function run(forgeCommand, forgeArgs) {
   process.on("SIGTERM", forwardTermination);
 
   try {
+    const npm = npmInvocation();
     for (const workspace of ["@pico/protocol", "@pico/transcript-replica", "@pico/runtime-host"]) {
-      await runChild(npmExecutable(), ["run", "build", "--workspace", workspace], repositoryRoot);
+      await runChild(
+        npm.executable,
+        [...npm.args, "run", "build", "--workspace", workspace],
+        repositoryRoot,
+      );
     }
 
     const forgeCli = join(
@@ -117,8 +122,18 @@ function processIsAlive(pid) {
   }
 }
 
-function npmExecutable() {
-  return process.platform === "win32" ? "npm.cmd" : "npm";
+function npmInvocation() {
+  const npmCli = process.env.npm_execpath?.trim();
+  if (npmCli) {
+    return { executable: process.execPath, args: [npmCli] };
+  }
+  if (process.platform === "win32") {
+    return {
+      executable: process.env.ComSpec?.trim() || "cmd.exe",
+      args: ["/d", "/s", "/c", "npm.cmd"],
+    };
+  }
+  return { executable: "npm", args: [] };
 }
 
 function runChild(executable, args, cwd, onSpawn) {

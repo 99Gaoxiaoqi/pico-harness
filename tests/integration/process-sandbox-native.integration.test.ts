@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { realpathSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,16 +7,21 @@ import { createServer } from "node:net";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import {
+  buildManagedSpawnPlan,
   createSandboxPolicy,
   managedProcessLauncher,
   normalizeRoots,
+  runtimeReadAliases,
+  runtimeReadRoots,
+  shellRuntimeReadRoots,
   type ManagedSpawnRequest,
   type SandboxProfile,
 } from "../../src/safety/process-sandbox/index.js";
 import { BashTool } from "../../src/tools/bash.js";
-import { GrepTool, setRgAvailable } from "../../src/tools/grep.js";
+import { GrepTool, resetRgCache, setRgAvailable } from "../../src/tools/grep.js";
 import { WorkspaceRoots } from "../../src/tools/workspace-roots.js";
 import { McpConnectionManager } from "../../src/mcp/manager.js";
+import { signalProcessTree } from "../../src/os/process-tree.js";
 
 const nativeAvailable =
   process.platform === "darwin" || process.platform === "linux" || process.platform === "win32";
@@ -68,14 +74,13 @@ test(
     const script =
       'setTimeout(()=>{process.stdout.write(require("node:fs").readFileSync("existing.txt","utf8"))},250)';
     await writeFile(join(fixture.workspace, "existing.txt"), "ok");
-    const [first, second] = await Promise.all([
-      runNode(fixture, "workspace-write", script),
-      runNode(fixture, "workspace-write", script),
-    ]);
-    assert.equal(first.code, 0, first.stderr);
-    assert.equal(second.code, 0, second.stderr);
-    assert.equal(first.stdout, "ok");
-    assert.equal(second.stdout, "ok");
+    const results = await Promise.all(
+      Array.from({ length: 4 }, () => runNode(fixture, "workspace-write", script)),
+    );
+    for (const result of results) {
+      assert.equal(result.code, 0, result.stderr);
+      assert.equal(result.stdout, "ok");
+    }
   },
 );
 
@@ -149,7 +154,7 @@ test(
     context.after(() => server.close());
     const address = server.address();
     assert.ok(address && typeof address !== "string");
-    const clientScript = `const n=require("node:net").connect(${address.port},"127.0.0.1");n.on("data",d=>process.stdout.write(d));n.on("end",()=>process.exit(0));n.on("error",()=>process.exit(23));`;
+    const clientScript = `const n=require("node:net").connect(${address.port},"127.0.0.1");n.setTimeout(2000,()=>{n.destroy();process.exit(23)});n.on("data",d=>process.stdout.write(d));n.on("end",()=>process.exit(0));n.on("error",()=>process.exit(23));`;
     const allowed = await runNode(fixture, "workspace-write", clientScript);
     if (process.platform === "win32") {
       assert.notEqual(allowed.code, 0, "Windows AppContainer must deny host loopback");
@@ -165,18 +170,23 @@ test(
       "workspace-write",
       'const s=require("node:net").createServer();s.listen(0,"127.0.0.1",()=>{process.stdout.write("listening");s.close()});',
     );
-    if (process.platform === "win32") {
-      assert.notEqual(listener.code, 0, "Windows AppContainer must deny listening sockets");
-    } else {
-      assert.equal(listener.code, 0, listener.stderr);
-      assert.equal(listener.stdout, "listening");
-    }
+    // AppContainer can bind a loopback socket without proving that any peer can reach it;
+    // the denied outbound connection above remains the enforced network boundary here.
+    assert.equal(listener.code, 0, listener.stderr);
+    assert.equal(listener.stdout, "listening");
     const deniedListener = await runNode(
       fixture,
       "read-only",
       'const s=require("node:net").createServer();s.on("error",()=>process.exit(24));s.listen(0,"127.0.0.1",()=>process.exit(0));',
     );
-    assert.notEqual(deniedListener.code, 0);
+    if (process.platform === "linux" || process.platform === "win32") {
+      // Bubblewrap denies host/external access with a fresh network namespace. Binding an
+      // otherwise unreachable socket inside that namespace remains safe and is expected.
+      // Windows AppContainer similarly isolates loopback without an explicit exemption.
+      assert.equal(deniedListener.code, 0, deniedListener.stderr);
+    } else {
+      assert.notEqual(deniedListener.code, 0);
+    }
   },
 );
 
@@ -202,7 +212,7 @@ test(
     await assert.rejects(readFile(journal));
     const acl = spawnSync("icacls.exe", [fixture.workspace], { encoding: "utf8" });
     assert.equal(acl.status, 0, acl.stderr);
-    assert.doesNotMatch(acl.stdout, new RegExp(capability.replaceAll("-", "\\-"), "u"));
+    assert.equal(acl.stdout.includes(capability), false);
   },
 );
 
@@ -249,13 +259,126 @@ test(
 );
 
 test(
+  "macOS grep 使用已探测的 rg 绝对路径且不依赖目标 PATH",
+  {
+    skip: process.platform !== "darwin" || spawnSync("rg", ["--version"]).status !== 0,
+  },
+  async (context) => {
+    const fixture = await fixtureRoot(context, "pico-native-grep-path-");
+    await writeFile(join(fixture.workspace, "needle.txt"), "absolute-rg-path\n");
+    resetRgCache();
+    context.after(resetRgCache);
+    const grep = new GrepTool(fixture.workspace, {
+      processSandbox: {
+        profile: "read-only",
+        scratchRoot: fixture.scratch,
+        env: { LANG: "C" },
+      },
+    });
+
+    const result = await grep.execute(JSON.stringify({ pattern: "absolute-rg-path" }));
+    assert.match(result, /needle\.txt:1:absolute-rg-path/u);
+  },
+);
+
+test(
+  "macOS Homebrew 运行根只包含实际链接公式而不是整个 opt 仓库",
+  { skip: process.platform !== "darwin" || spawnSync("rg", ["--version"]).status !== 0 },
+  () => {
+    const lookup = spawnSync("/usr/bin/which", ["rg"], { encoding: "utf8" });
+    const executable = lookup.status === 0 ? lookup.stdout.trim() : "";
+    assert.ok(executable);
+    const canonical = realpathSync(executable).replaceAll("\\", "/");
+    if (!canonical.includes("/Cellar/")) return;
+
+    const roots = runtimeReadRoots(executable, { PATH: process.env.PATH }, "darwin");
+    const optRoot = realpathSync(`${canonical.slice(0, canonical.indexOf("/Cellar/"))}/opt`);
+    assert.equal(roots.includes(optRoot), false);
+    assert.ok(roots.length < 32, `unexpectedly broad Homebrew runtime roots: ${roots.length}`);
+  },
+);
+
+test(
+  "macOS shell 内层 Homebrew 进程只获得精确 formula alias",
+  {
+    skip:
+      process.platform !== "darwin" ||
+      !realpathSync(process.execPath).replaceAll("\\", "/").includes("/Cellar/"),
+  },
+  async (context) => {
+    const fixture = await fixtureRoot(context, "pico-native-shell-homebrew-");
+    const env = { PATH: process.env.PATH, LANG: "C" };
+    const readRoots = shellRuntimeReadRoots("node --version", env, "darwin");
+    const aliases = runtimeReadAliases("/bin/bash", env, "darwin", readRoots);
+    assert.ok(aliases.length > 0, "Homebrew node dependencies should expose exact opt aliases");
+
+    const canonicalNode = realpathSync(process.execPath).replaceAll("\\", "/");
+    const homebrewPrefix = canonicalNode.slice(0, canonicalNode.indexOf("/Cellar/"));
+    assert.equal(aliases.includes(`${homebrewPrefix}/opt`), false);
+    for (const alias of aliases) {
+      assert.match(alias, new RegExp(`^${escapeRegExp(homebrewPrefix)}/opt/[^/]+$`, "u"));
+    }
+
+    const policy = createSandboxPolicy({
+      profile: "workspace-write",
+      workspaceRoots: [fixture.workspace],
+      scratchRoot: fixture.scratch,
+      readRoots,
+    });
+    const plan = buildManagedSpawnPlan({
+      command: "/bin/bash",
+      args: ["-c", "node --version"],
+      cwd: fixture.workspace,
+      env,
+      origin: "command-hook",
+      policy,
+    });
+    const profile = plan.args[1] ?? "";
+    assert.doesNotMatch(
+      profile,
+      new RegExp(`\\(subpath ${escapeRegExp(JSON.stringify(`${homebrewPrefix}/opt`))}\\)`, "u"),
+    );
+    for (const alias of aliases) {
+      assert.match(
+        profile,
+        new RegExp(`\\(subpath ${escapeRegExp(JSON.stringify(alias))}\\)`, "u"),
+      );
+    }
+
+    const result = spawnSync(plan.command, plan.args, {
+      cwd: fixture.workspace,
+      env: plan.env,
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^v\d+/u);
+  },
+);
+
+test(
   "grep keeps an external one-shot root for exactly one sandboxed rg process",
   { skip: !nativeAvailable },
   async (context) => {
     const fixture = await fixtureRoot(context, "pico-native-grep-grant-");
-    const external = join(fixture.root, "external");
+    const external = join(fixture.root, ".external");
     await mkdir(external);
     await writeFile(join(external, "needle.txt"), "one-shot-grep-secret\n");
+    await writeFile(join(external, ".gitignore"), "needle.txt\n");
+    await mkdir(join(external, "node_modules", "fixture"), { recursive: true });
+    await writeFile(
+      join(external, "node_modules", "fixture", "ignored.txt"),
+      "one-shot-grep-secret\n",
+    );
+    const directRead = await runNode(
+      fixture,
+      "read-only",
+      `process.stdout.write(require("node:fs").readFileSync(${JSON.stringify(join(external, "needle.txt"))},"utf8"))`,
+      fixture.workspace,
+      process.env,
+      [external],
+    );
+    assert.equal(directRead.code, 0, directRead.stderr);
+    assert.equal(directRead.stdout, "one-shot-grep-secret\n");
     const roots = await WorkspaceRoots.create(fixture.workspace);
     roots.authorizeOnce(external);
     setRgAvailable(true);
@@ -270,6 +393,7 @@ test(
       JSON.stringify({ pattern: "one-shot-grep-secret", path: external }),
     );
     assert.match(first, /needle\.txt:1:one-shot-grep-secret/u);
+    assert.doesNotMatch(first, /node_modules/u);
     await assert.rejects(
       grep.execute(JSON.stringify({ pattern: "one-shot-grep-secret", path: external })),
       /路径不在当前工作区/u,
@@ -281,7 +405,36 @@ test(
   "stdio MCP one-shot policy is active only for the approved call window",
   { skip: !nativeAvailable },
   async (context) => {
-    const fixture = await fixtureRoot(context, "pico-native-mcp-grant-");
+    const fixture = await fixtureRoot(context, "pico-native-mcp-grant-", false);
+    const ambientFixtureName = "PICO_MCP_AMBIENT_TOKEN_FIXTURE";
+    const previousAmbientFixture = process.env[ambientFixtureName];
+    process.env[ambientFixtureName] = "ambient-must-not-forward";
+    const teardown: { manager?: McpConnectionManager } = {};
+    context.after(async () => {
+      let closeFailed = false;
+      let closeError: unknown;
+      try {
+        await teardown.manager?.closeAll();
+      } catch (error) {
+        closeFailed = true;
+        closeError = error;
+      }
+      if (previousAmbientFixture === undefined) delete process.env[ambientFixtureName];
+      else process.env[ambientFixtureName] = previousAmbientFixture;
+      try {
+        await rm(fixture.root, { recursive: true, force: true });
+      } catch (removeError) {
+        if (closeFailed) {
+          throw new AggregateError(
+            [closeError, removeError],
+            "MCP sandbox teardown failed to close the process tree and remove its workspace",
+            { cause: removeError },
+          );
+        }
+        throw removeError;
+      }
+      if (closeFailed) throw closeError;
+    });
     const externalDirectory = join(fixture.root, "external");
     const external = join(externalDirectory, "secret.txt");
     const serverScript = join(fixture.workspace, "fixture-mcp.cjs");
@@ -296,7 +449,7 @@ test(
         'rl.on("line",line=>{const message=JSON.parse(line);if(message.id===undefined)return;',
         'if(message.method==="initialize")return send(message.id,{protocolVersion:"2024-11-05",capabilities:{},serverInfo:{name:"fixture",version:"1"}});',
         'if(message.method==="tools/list")return send(message.id,{tools:[{name:"read_external",description:"fixture",inputSchema:{type:"object"}}]});',
-        'if(message.method==="tools/call"){let text;try{text=fs.readFileSync(message.params.arguments.path,"utf8")}catch{text="denied"}return send(message.id,{content:[{type:"text",text}],isError:false})}',
+        'if(message.method==="tools/call"){let text;if(message.params.arguments.path==="__environment_fixture__"){text=(process.env.PICO_MCP_EXPLICIT_FIXTURE??"missing")+":"+(process.env.PICO_MCP_AMBIENT_TOKEN_FIXTURE===undefined?"ambient-absent":"ambient-present")}else{try{text=fs.readFileSync(message.params.arguments.path,"utf8")}catch{text="denied"}}return send(message.id,{content:[{type:"text",text}],isError:false})}',
         "send(message.id,{})});",
       ].join(""),
     );
@@ -309,7 +462,7 @@ test(
       stdioCwd: fixture.workspace,
       processSandbox: baseline,
     });
-    context.after(() => manager.closeAll());
+    teardown.manager = manager;
     await manager.replaceSources([
       {
         id: "test",
@@ -320,12 +473,17 @@ test(
               transport: "stdio",
               command: process.execPath,
               args: [serverScript],
+              env: { PICO_MCP_EXPLICIT_FIXTURE: "explicit-forwarded" },
             },
           },
         },
       },
     ]);
     await manager.connectAll();
+    assert.equal(
+      await readExternalViaMcp(manager, "__environment_fixture__"),
+      "explicit-forwarded:ambient-absent",
+    );
     assert.equal(await readExternalViaMcp(manager, external), "denied");
 
     await manager.restartStdioServerForTool("mcp__local__read_external", {
@@ -349,6 +507,7 @@ interface Fixture {
 async function fixtureRoot(
   context: { after(callback: () => unknown): void },
   prefix: string,
+  autoCleanup = true,
 ): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), prefix));
   const workspace = join(root, "workspace");
@@ -356,7 +515,7 @@ async function fixtureRoot(
   const control = join(root, "control");
   await mkdir(workspace);
   await mkdir(control);
-  context.after(() => rm(root, { recursive: true, force: true }));
+  if (autoCleanup) context.after(() => rm(root, { recursive: true, force: true }));
   return { root, workspace, scratch, control };
 }
 
@@ -366,11 +525,13 @@ async function runNode(
   script: string,
   cwd = fixture.workspace,
   env: NodeJS.ProcessEnv = process.env,
+  readRoots: readonly string[] = [],
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   const policy = createSandboxPolicy({
     profile,
     workspaceRoots: [fixture.workspace],
     scratchRoot: fixture.scratch,
+    readRoots,
     config: { network: "allow" },
   });
   const request: ManagedSpawnRequest = {
@@ -392,12 +553,67 @@ async function runNode(
   managed.child.stderr?.setEncoding("utf8");
   managed.child.stdout?.on("data", (chunk: string) => (stdout += chunk));
   managed.child.stderr?.on("data", (chunk: string) => (stderr += chunk));
-  const code = await new Promise<number | null>((resolve, reject) => {
-    managed.child.once("error", reject);
-    managed.child.once("close", resolve);
+  let childSettled = false;
+  const exited = new Promise<number | null>((resolve, reject) => {
+    managed.child.once("error", (error) => {
+      childSettled = true;
+      reject(error);
+    });
+    managed.child.once("close", (code) => {
+      childSettled = true;
+      resolve(code);
+    });
   });
-  await managed.lease.release();
-  return { code, stdout, stderr };
+  const timeoutError = new Error("native sandbox child timed out");
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    const code = await Promise.race([
+      exited,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => {
+          timeoutError.message =
+            `native sandbox child timed out after 15000ms ` +
+            `(profile=${profile}, backend=${managed.plan.backend}, ` +
+            `pid=${managed.child.pid ?? "unknown"}, stdout=${JSON.stringify(stdout)}, ` +
+            `stderr=${JSON.stringify(stderr)})`;
+          reject(timeoutError);
+        }, 15_000);
+      }),
+    ]);
+    return { code, stdout, stderr };
+  } catch (error) {
+    if (error === timeoutError) {
+      const signalled = await signalProcessTree(managed.child, "SIGKILL", {
+        requireWindowsTreeProof: process.platform === "win32",
+      }).catch(() => false);
+      if (!signalled) {
+        throw new Error(`${timeoutError.message}; failed to signal the sandbox process tree`, {
+          cause: error,
+        });
+      }
+      let closeTimeout: NodeJS.Timeout | undefined;
+      const closed = await Promise.race([
+        exited.then(
+          () => true,
+          () => true,
+        ),
+        new Promise<boolean>((resolve) => {
+          closeTimeout = setTimeout(() => resolve(false), 2_000);
+        }),
+      ]);
+      if (closeTimeout) clearTimeout(closeTimeout);
+      if (!closed) {
+        throw new Error(
+          `${timeoutError.message}; sandbox process tree did not exit after SIGKILL`,
+          { cause: error },
+        );
+      }
+    }
+    throw error;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    if (childSettled) await managed.lease.release();
+  }
 }
 
 function nodeWriteCommand(target: string): string {
@@ -422,4 +638,8 @@ function posixQuote(value: string): string {
 
 function powerShellQuote(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }

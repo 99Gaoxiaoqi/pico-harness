@@ -1,15 +1,23 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, extname, join } from "node:path";
+import { basename, dirname, extname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import {
   sanitizeCommandHookEnvironment,
   resolveHookShell,
 } from "../../../src/hooks/config/command-shell.js";
-import { DefaultHookExecutor } from "../../../src/hooks/executors/executor.js";
+import {
+  DefaultHookExecutor,
+  type HookHandlerExecutorOptions,
+} from "../../../src/hooks/executors/executor.js";
+import { HookTrustStore } from "../../../src/hooks/trust/store.js";
 import type { CommandHookHandler, HookOutput } from "../../../src/hooks/types.js";
+import {
+  createSandboxPolicy,
+  WINDOWS_RESTRICTED_NODE_OPTIONS,
+} from "../../../src/safety/process-sandbox/index.js";
 
 const WINDOWS_ONLY =
   process.platform === "win32" ? false : "requires Windows executable and process-tree semantics";
@@ -20,9 +28,23 @@ test(
   async (context) => {
     const fixture = await createFixture(context, "direct-exe");
     const entryPath = join(fixture.workspace, "entry.cjs");
+    await writeFile(join(fixture.workspace, "dependency.cjs"), 'module.exports = "windows-exe";\n');
     await writeFile(
       entryPath,
-      'process.stdout.write(JSON.stringify({ additionalContext: "windows-exe" }));\n',
+      [
+        'const { readdirSync } = require("node:fs");',
+        'const { parse } = require("node:path");',
+        "const driveRoot = parse(process.execPath).root;",
+        "let rootListed = true;",
+        "try { readdirSync(driveRoot); } catch (error) {",
+        '  if (!error || !["EACCES", "EPERM"].includes(error.code)) throw error;',
+        "  rootListed = false;",
+        "}",
+        'if (rootListed) throw new Error("drive root unexpectedly listable");',
+        `if (process.env.NODE_OPTIONS !== ${JSON.stringify(WINDOWS_RESTRICTED_NODE_OPTIONS)}) throw new Error("unexpected NODE_OPTIONS");`,
+        'process.stdout.write(JSON.stringify({ additionalContext: require("./dependency.cjs") }));',
+        "",
+      ].join("\n"),
     );
     const handler = {
       type: "command",
@@ -30,23 +52,95 @@ test(
       args: ["./entry.cjs"],
     } as const satisfies CommandHookHandler;
 
-    const executor = new DefaultHookExecutor({ workDir: fixture.workspace });
+    const executor = createHookExecutor(fixture);
     context.after(async () => await executor.dispose());
     const output = await executeStopHook(executor, fixture, handler, "windows-direct-exe");
-    assert.equal(output.additionalContext, "windows-exe");
+    assert.equal(output.additionalContext, "windows-exe", JSON.stringify(output));
 
-    // shell 化后 .cmd 不再被拒绝——命令交给 shell 解释。raw 命令按所选 shell
-    // 方言书写（本机无可用 Git Bash 时落 PowerShell，调用运算符为 &）。
+    // 受限 Windows Hook 固定由 PowerShell 解释，shell-owned .cmd 仍可显式调用。
     const cmdPath = join(fixture.workspace, "greet.cmd");
     await writeFile(cmdPath, '@echo {"additionalContext":"windows-cmd"}\r\n');
-    const shellKind = resolveHookShell().kind;
     const cmdHandler = {
       type: "command",
-      command:
-        shellKind === "pwsh" || shellKind === "powershell" ? `& "${cmdPath}"` : `"${cmdPath}"`,
+      command: `& "${cmdPath}"`,
     } as const satisfies CommandHookHandler;
     const cmdOutput = await executeStopHook(executor, fixture, cmdHandler, "windows-cmd");
     assert.equal(cmdOutput.additionalContext, "windows-cmd", JSON.stringify(cmdOutput));
+  },
+);
+
+test(
+  "Windows restricted command Hooks use AppContainer-compatible PowerShell",
+  { skip: WINDOWS_ONLY },
+  async (context) => {
+    const fixture = await createFixture(context, "restricted-powershell");
+    const handler = {
+      type: "command",
+      command: `Write-Output '{"additionalContext":"restricted-powershell"}'`,
+    } as const satisfies CommandHookHandler;
+    const trustStore = new HookTrustStore({
+      picoHome: join(fixture.root, "pico-home"),
+      env: process.env,
+    });
+    await trustStore.trust({ workspace: fixture.workspace, source: fixture.source, handler });
+    const executor = createHookExecutor(
+      fixture,
+      process.env,
+      "workspace-write",
+      async (entry, shell) =>
+        await trustStore.authorizeCommandExecution(
+          { workspace: fixture.workspace, source: entry.source, handler: entry.handler },
+          shell,
+        ),
+    );
+    context.after(async () => await executor.dispose());
+
+    const output = await executeStopHook(
+      executor,
+      fixture,
+      handler,
+      "windows-restricted-powershell",
+    );
+    assert.equal(output.additionalContext, "restricted-powershell", JSON.stringify(output));
+
+    const denyHandler = {
+      type: "command",
+      command: `Write-Output '{"decision":"deny","reason":"restricted-deny"}'`,
+    } as const satisfies CommandHookHandler;
+    await trustStore.trust({
+      workspace: fixture.workspace,
+      source: fixture.source,
+      handler: denyHandler,
+    });
+    const denied = await executeStopHook(
+      executor,
+      fixture,
+      denyHandler,
+      "windows-restricted-powershell-deny",
+    );
+    assert.deepEqual(denied, { decision: "deny", reason: "restricted-deny" });
+  },
+);
+
+test(
+  "Windows danger-full-access command Hooks retain Git Bash preference",
+  { skip: WINDOWS_ONLY },
+  async (context) => {
+    const fixture = await createFixture(context, "danger-git-bash");
+    assert.equal(resolveHookShell().kind, "bash", "Windows CI host must provide Git Bash");
+    const executor = createHookExecutor(fixture, process.env, "danger-full-access");
+    context.after(async () => await executor.dispose());
+
+    const output = await executeStopHook(
+      executor,
+      fixture,
+      {
+        type: "command",
+        command: `printf '%s' '{"additionalContext":"danger-git-bash"}'`,
+      },
+      "windows-danger-git-bash",
+    );
+    assert.equal(output.additionalContext, "danger-git-bash", JSON.stringify(output));
   },
 );
 
@@ -60,8 +154,16 @@ test(
       entryPath,
       "process.stdout.write(JSON.stringify({ additionalContext: `${process.env.pAtH ?? process.env.PATH}` }));\n",
     );
+    const restrictedShell = resolveHookShell(process.env, {
+      windowsAppContainerCompatible: true,
+    });
+    assert.equal(restrictedShell.kind, "pwsh", "Windows CI host must provide PowerShell 7");
+    const restrictedPath = `${join(process.execPath, "..")};${dirname(restrictedShell.path)};`;
     const environment = withoutExecutionPath(process.env);
-    environment.pAtH = `${join(process.execPath, "..")};${environment.pAtH ?? ""}`;
+    // Keep the AppContainer-compatible shell on the deliberately mixed-case PATH.
+    // Removing pwsh here would test the legacy Windows PowerShell fallback instead
+    // of case-insensitive bare-command lookup.
+    environment.pAtH = restrictedPath;
     // PowerShell 解析裸命令名依赖 PATHEXT（真实 Windows 恒有；测试受控环境需显式补回）。
     environment.pAtHeXt = ".CMD;.EXE";
     const handler = {
@@ -77,11 +179,16 @@ test(
     );
     assert.equal(overridden.PATH, "custom");
 
-    const executor = new DefaultHookExecutor({ workDir: fixture.workspace, env: environment });
+    const executor = createHookExecutor(fixture, environment);
     context.after(async () => await executor.dispose());
     const output = await executeStopHook(executor, fixture, handler, "windows-mixed-case-path");
-    // 子进程看到的 PATH 就是受控环境的 pAtH 值（nodeDir 前缀 + 尾随分号）。
-    assert.equal(output.additionalContext, `${join(process.execPath, "..")};`);
+    // PowerShell 7 starts by prepending PSHOME; the remaining entries must be the
+    // deliberately controlled mixed-case PATH with no ambient host directories.
+    assert.equal(
+      output.additionalContext,
+      `${dirname(restrictedShell.path)};${restrictedPath}`,
+      JSON.stringify(output),
+    );
   },
 );
 
@@ -103,10 +210,36 @@ test(
       args: [entryPath],
     } as const satisfies CommandHookHandler;
 
-    const executor = new DefaultHookExecutor({ workDir: fixture.workspace });
+    const executor = createHookExecutor(fixture);
     context.after(async () => await executor.dispose());
     const output = await executeStopHook(executor, fixture, handler, "windows-absolute-tilde");
     assert.equal(output.additionalContext, "absolute-tilde", JSON.stringify(output));
+  },
+);
+
+test(
+  "Windows sandbox broker resolves ACL control tools from trusted System32",
+  { skip: WINDOWS_ONLY },
+  async (context) => {
+    const fixture = await createFixture(context, "trusted-icacls");
+    const entryPath = join(fixture.workspace, "entry.cjs");
+    await writeFile(
+      entryPath,
+      'process.stdout.write(JSON.stringify({ additionalContext: "trusted-icacls" }));\n',
+    );
+    // A bare Command::new("icacls.exe") can resolve from the broker cwd before System32.
+    // A renamed Node executable is enough to make that unsafe lookup fail deterministically.
+    await copyFile(process.execPath, join(fixture.workspace, "icacls.exe"));
+    const handler = {
+      type: "command",
+      command: process.execPath,
+      args: [entryPath],
+    } as const satisfies CommandHookHandler;
+    const executor = createHookExecutor(fixture);
+    context.after(async () => await executor.dispose());
+
+    const output = await executeStopHook(executor, fixture, handler, "windows-trusted-icacls");
+    assert.equal(output.additionalContext, "trusted-icacls", JSON.stringify(output));
   },
 );
 
@@ -161,7 +294,7 @@ test(
       command: process.execPath,
       args: ["./close-stdin.cjs"],
     } as const satisfies CommandHookHandler;
-    const executor = new DefaultHookExecutor({ workDir: fixture.workspace });
+    const executor = createHookExecutor(fixture);
     context.after(async () => await executor.dispose());
 
     const output = await executor.execute(
@@ -250,13 +383,15 @@ async function createFixture(context: TestContext, label: string): Promise<Fixtu
 async function createFixtureRoot(label: string): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), `pico-windows-hook-${label}-`));
   const workspace = join(root, "workspace");
+  const sourcePath = join(workspace, ".pico", "hooks.json");
   await mkdir(join(workspace, ".pico"), { recursive: true });
+  await writeFile(sourcePath, "{}\n");
   return {
     root,
     workspace,
     source: {
       kind: "project",
-      path: join(workspace, ".pico", "hooks.json"),
+      path: sourcePath,
       version: 1,
     },
   };
@@ -270,9 +405,9 @@ async function createProcessTreeFixture(
   const fixture = await createFixtureRoot(label);
   const parentPath = join(fixture.workspace, "parent.cjs");
   const descendantPath = join(fixture.workspace, "descendant.cjs");
-  const treePath = join(fixture.root, "tree.json");
-  const heartbeatPath = join(fixture.root, "descendant-heartbeat.txt");
-  const executor = new DefaultHookExecutor({ workDir: fixture.workspace });
+  const treePath = join(fixture.workspace, "tree.json");
+  const heartbeatPath = join(fixture.workspace, "descendant-heartbeat.txt");
+  const executor = createHookExecutor(fixture);
   context.after(async () => {
     try {
       const tree = await readProcessTree(treePath);
@@ -291,6 +426,7 @@ async function createProcessTreeFixture(
       'const { writeFileSync } = require("node:fs");',
       "const [descendantPath, treePath, heartbeatPath] = process.argv.slice(2);",
       "const descendant = spawn(process.execPath, [descendantPath, heartbeatPath], {",
+      // Exercise the prepared \\Device\\Null boundary as well as Job Object tree termination.
       '  stdio: "ignore",',
       "  windowsHide: true,",
       "});",
@@ -318,6 +454,24 @@ async function createProcessTreeFixture(
     timeoutMs,
   } as const satisfies CommandHookHandler;
   return { fixture, executor, handler, treePath, heartbeatPath };
+}
+
+function createHookExecutor(
+  fixture: Fixture,
+  env: Readonly<NodeJS.ProcessEnv> = process.env,
+  profile: "workspace-write" | "danger-full-access" = "workspace-write",
+  authorizeCommandExecution?: HookHandlerExecutorOptions["authorizeCommandExecution"],
+): DefaultHookExecutor {
+  return new DefaultHookExecutor({
+    workDir: fixture.workspace,
+    env,
+    ...(authorizeCommandExecution ? { authorizeCommandExecution } : {}),
+    processSandbox: createSandboxPolicy({
+      profile,
+      workspaceRoots: [fixture.workspace],
+      scratchRoot: join(fixture.root, "sandbox-scratch"),
+    }),
+  });
 }
 
 function withoutExecutionPath(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
