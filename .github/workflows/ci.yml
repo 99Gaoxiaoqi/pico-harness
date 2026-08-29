@@ -234,6 +234,13 @@ jobs:
       - run: npm ci
       - run: npm run build:sandbox:linux
       - run: npm run verify:sandbox:resources -- --require-current
+      - name: Enable unprivileged user namespaces for Bubblewrap integration
+        shell: bash
+        run: |
+          if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+            echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          fi
+          unshare --user --map-root-user true
       - name: Archive Linux sandbox with executable permissions
         run: tar -C resources/sandbox -cf "${RUNNER_TEMP}/sandbox-linux-${{ matrix.arch }}.tar" "linux-${{ matrix.arch }}"
       - uses: actions/upload-artifact@v4

@@ -601,7 +601,11 @@ fn assert_not_reparse_point(path: &Path) -> Result<(), String> {
     let wide = wide_null(path.as_os_str());
     let attributes = unsafe { GetFileAttributesW(wide.as_ptr()) };
     if attributes == INVALID_FILE_ATTRIBUTES {
-        return Err(last_error("GetFileAttributesW(policy root)"));
+        return Err(format!(
+            "policy root {}: {}",
+            path.display(),
+            last_error("GetFileAttributesW")
+        ));
     }
     if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(format!(
