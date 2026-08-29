@@ -6,7 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
+import { agentOutputRecordIdFor } from "../../src/agent-graph/core/ids.js";
 import { SqliteAgentGraphControlStoreAdapter } from "../../src/agent-graph/sqlite-control-store-adapter.js";
+import { createBuiltinAgentGraphOperatorProfileCatalog } from "../../src/agent-graph/operator-profile-catalog.js";
 import {
   AgentGraphStoreConflictError,
   SqliteAgentGraphControlStore,
@@ -14,6 +16,10 @@ import {
   type CommitAgentGraphScheduleInput,
 } from "../../src/storage/sqlite/sqlite-agent-graph-control-store.js";
 import { withWorkspaceSqliteLease } from "../../src/storage/sqlite/workspace-scopes.js";
+import { ALL_WORKSPACE_SQLITE_SCOPES } from "../../src/storage/sqlite/workspace-scopes.js";
+import { AGENT_GRAPH_SCOPE } from "../../src/storage/sqlite/agent-graph-scope.js";
+import { acquireOperationalDatabase } from "../../src/storage/sqlite/sqlite-database.js";
+import { migrateOperationalDatabaseSync } from "../../src/storage/sqlite/sqlite-schema.js";
 
 test("agent graph store persists exact identities, fences finish, and drives durable wakes", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-agent-graph-store-"));
@@ -321,7 +327,7 @@ test("agent graph store persists exact identities, fences finish, and drives dur
     const version = lease.database
       .prepare("SELECT version FROM operational_schema_migrations WHERE scope = 'agent_graph'")
       .get() as { version: number } | undefined;
-    assert.equal(version?.version, 1);
+    assert.equal(version?.version, 5);
     const names = lease.database
       .prepare(
         `SELECT name FROM sqlite_schema
@@ -331,17 +337,177 @@ test("agent graph store persists exact identities, fences finish, and drives dur
       .map((row) => (row as { name: string }).name);
     assert.deepEqual(names, [
       "agent_graph_activation_claims",
+      "agent_graph_diagnostics",
       "agent_graph_operator_provisions",
       "agent_graph_record_refs",
+      "agent_graph_resource_refs",
       "agent_graph_schedule_revisions",
       "agent_graph_supervisor_wake_attempts",
       "agent_graph_supervisor_wakes",
+      "agent_graph_workspace_resources",
       "agent_graph_yield_interests",
       "agent_graphs",
     ]);
+    const identityPlan = lease.database
+      .prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT 1 AS matched FROM (
+           SELECT root_session_id AS session_id, root_run_id AS run_id
+           FROM agent_graph_yield_interests
+           UNION ALL
+           SELECT source_session_id AS session_id, source_run_id AS run_id
+           FROM agent_graph_schedule_revisions
+         ) WHERE session_id = ? AND run_id = ? LIMIT 1`,
+      )
+      .all("root-session", "root-run-1")
+      .map((row) => (row as { detail: string }).detail);
+    assert.ok(
+      identityPlan.some((detail) => detail.includes("agent_graph_yield_interests_by_root_run")),
+    );
+    assert.ok(
+      identityPlan.some((detail) =>
+        detail.includes("agent_graph_schedule_revisions_by_source_run"),
+      ),
+    );
   });
 
   await rm(root, { recursive: true, force: true });
+});
+
+test("agent graph schema upgrades a v3 control ledger additively and reopens", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-agent-graph-v3-upgrade-"));
+  try {
+    const legacyAgentGraphScope = {
+      ...AGENT_GRAPH_SCOPE,
+      migrations: new Map([...AGENT_GRAPH_SCOPE.migrations].filter(([version]) => version <= 3)),
+    };
+    const legacyScopes = ALL_WORKSPACE_SQLITE_SCOPES.map((scope) =>
+      scope.name === AGENT_GRAPH_SCOPE.name ? legacyAgentGraphScope : scope,
+    );
+    const legacy = acquireOperationalDatabase(root, {
+      migrate: (database) => migrateOperationalDatabaseSync(database, legacyScopes),
+    });
+    legacy.release();
+
+    const upgraded = new SqliteAgentGraphControlStore({ storageRoot: root });
+    upgraded.createGraph({ graphId: "upgraded-graph", rootSessionId: "root", epoch: 1 });
+    const diagnostic = {
+      diagnosticId: "diagnostic-1",
+      graphId: "upgraded-graph",
+      phase: "provision",
+      subjectId: "operator-1",
+      classification: "transient",
+      message: "token=private-value temporarily unavailable",
+      observationId: "observation-1",
+      retryDelayMs: 100,
+    } as const;
+    assert.equal(upgraded.recordGraphDiagnostic(diagnostic).replayed, false);
+    assert.equal(upgraded.recordGraphDiagnostic(diagnostic).replayed, true);
+    assert.equal(upgraded.listGraphDiagnostics("upgraded-graph")[0]?.attemptCount, 1);
+    assert.doesNotMatch(
+      upgraded.listGraphDiagnostics("upgraded-graph")[0]?.message ?? "",
+      /private-value/u,
+    );
+    assert.equal(
+      upgraded.recordGraphDiagnostic({ ...diagnostic, observationId: "observation-2" }).record
+        .attemptCount,
+      2,
+    );
+    assert.equal(upgraded.resolveGraphDiagnostics("upgraded-graph"), 1);
+    upgraded.close();
+
+    const reopened = new SqliteAgentGraphControlStore({ storageRoot: root });
+    assert.equal(reopened.getGraph("upgraded-graph")?.rootSessionId, "root");
+    assert.equal(reopened.listGraphDiagnostics("upgraded-graph")[0]?.state, "resolved");
+    assert.equal(reopened.listGraphDiagnostics("upgraded-graph")[0]?.attemptCount, 2);
+    reopened.close();
+
+    withWorkspaceSqliteLease(root, (lease) => {
+      const version = lease.database
+        .prepare("SELECT version FROM operational_schema_migrations WHERE scope = 'agent_graph'")
+        .get() as { version: number } | undefined;
+      assert.equal(version?.version, 5);
+      const wakeColumns = lease.database
+        .prepare("PRAGMA table_info(agent_graph_supervisor_wakes)")
+        .all()
+        .map((row) => (row as { name: string }).name);
+      assert.ok(wakeColumns.includes("attention_state"));
+      assert.ok(wakeColumns.includes("attention_version"));
+      const identityIndexes = lease.database
+        .prepare(
+          `SELECT name FROM sqlite_schema
+           WHERE type = 'index' AND name IN (
+             'agent_graph_yield_interests_by_root_run',
+             'agent_graph_schedule_revisions_by_source_run'
+           ) ORDER BY name`,
+        )
+        .all()
+        .map((row) => (row as { name: string }).name);
+      assert.deepEqual(identityIndexes, [
+        "agent_graph_schedule_revisions_by_source_run",
+        "agent_graph_yield_interests_by_root_run",
+      ]);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("explicit wake retry cannot cross a finished Graph fence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-agent-graph-finished-retry-"));
+  const store = new SqliteAgentGraphControlStore({ storageRoot: root, now: () => 100 });
+  try {
+    store.createGraph({ graphId: "retry-graph", rootSessionId: "retry-root", epoch: 1 });
+    store.enqueueSupervisorWake({
+      wakeId: "retry-wake",
+      graphId: "retry-graph",
+      dedupeKey: "runtime-terminal:retry-run",
+      wakeFingerprint: "retry-fingerprint",
+      cause: "runtime_terminal",
+      payload: { claimId: "retry-claim" },
+    });
+    const claimed = store.claimSupervisorWake({
+      wakeId: "retry-wake",
+      expectedWakeVersion: 1,
+      attemptId: "retry-attempt",
+      rootSessionId: "retry-root",
+      targetTurnId: "retry-turn",
+      targetRunId: "retry-run",
+    });
+    const parked = store.settleSupervisorWake({
+      wakeId: "retry-wake",
+      attemptId: claimed.attempt.attemptId,
+      expectedWakeVersion: claimed.wake.version,
+      expectedAttemptVersion: claimed.attempt.version,
+      outcome: "needs_attention",
+      error: "retry requires review",
+    });
+    store.commitScheduleRevision(
+      scheduleInput({
+        graphId: "retry-graph",
+        rootSessionId: "retry-root",
+        operationId: "finish-before-retry",
+        expectedRevision: 0,
+        kind: "finish",
+      }),
+    );
+
+    assert.throws(
+      () =>
+        store.retrySupervisorWake({
+          wakeId: "retry-wake",
+          retryOperationId: "retry-after-finish",
+          expectedWakeVersion: parked.wake.version,
+          expectedAttentionVersion: parked.wake.attentionVersion ?? 0,
+        }),
+      /cannot be retried after Graph .* is finished/u,
+    );
+    assert.equal(store.getSupervisorWake("retry-wake")?.status, "needs_attention");
+    assert.equal(store.listSupervisorWakeAttempts("retry-wake").length, 1);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("agent graph store atomically consumes durable yield interest when admitting a wake", async () => {
@@ -376,8 +542,6 @@ test("agent graph store atomically consumes durable yield interest when admittin
     assert.equal(admitted.wake.yieldPermitId, "yield-permit");
     assert.equal(admitted.interest.state, "consumed");
     assert.equal(store.listYieldInterests("yield-graph", "registered").length, 0);
-    assert.equal(store.enqueueSupervisorWakeForYield(wake).status, "enqueued");
-
     const cancel = store.registerYieldInterest({
       ...interest,
       permitId: "cancel-permit",
@@ -385,6 +549,11 @@ test("agent graph store atomically consumes durable yield interest when admittin
       rootRunId: "cancel-run",
       toolCallId: "cancel-tool",
     });
+    const replayedWake = store.enqueueSupervisorWakeForYield(wake);
+    assert.equal(replayedWake.status, "enqueued");
+    if (replayedWake.status !== "enqueued") throw new Error("expected replayed yield wake");
+    assert.equal(replayedWake.interest.permitId, "yield-permit");
+    assert.equal(store.getYieldInterest("cancel-permit")?.state, "registered");
     assert.equal(
       store.cancelYieldInterest({
         permitId: cancel.record.permitId,
@@ -542,8 +711,103 @@ test("schedule add atomically accepts only committed input RecordRefs from the s
       store.listScheduleRevisions("input-graph").map((revision) => revision.operationId),
       ["add-input-own", "add-own-input"],
     );
+    assert.equal(
+      (store.listScheduleRevisions("input-graph")[1]?.command as { schemaVersion?: number })
+        .schemaVersion,
+      2,
+    );
     assert.deepEqual(store.listOperatorProvisions("input-graph"), before.provisions);
     assert.deepEqual(store.listActivationClaims("input-graph"), before.claims);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("schedule accepts declared same-Graph future outputs and rejects foreign future outputs", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-agent-graph-future-inputs-"));
+  const store = new SqliteAgentGraphControlStore({ storageRoot: root });
+  const control = new SqliteAgentGraphControlStoreAdapter(store);
+  try {
+    store.createGraph({ graphId: "future-batch", rootSessionId: "future-batch-root", epoch: 1 });
+    const batchProducer = graphAddCommand({
+      graphId: "future-batch",
+      suffix: "batch-producer",
+      revision: 1,
+      inputRecordIds: [],
+    });
+    const batchConsumer = graphAddCommand({
+      graphId: "future-batch",
+      suffix: "batch-consumer",
+      revision: 1,
+      inputRecordIds: [batchProducer.intent.expectedOutputRecordId],
+    });
+    assert.equal(
+      control.commitScheduleRevision({
+        graphId: "future-batch",
+        expectedPreviousRevision: 0,
+        operationId: "future-batch",
+        source: operationSource("future-batch-root", "future-batch"),
+        commands: [batchProducer, batchConsumer],
+      }).record.revision,
+      1,
+    );
+
+    store.createGraph({
+      graphId: "future-persisted",
+      rootSessionId: "future-persisted-root",
+      epoch: 1,
+    });
+    const persistedProducer = graphAddCommand({
+      graphId: "future-persisted",
+      suffix: "persisted-producer",
+      revision: 1,
+      inputRecordIds: [],
+    });
+    control.commitScheduleRevision({
+      graphId: "future-persisted",
+      expectedPreviousRevision: 0,
+      operationId: "persist-producer",
+      source: operationSource("future-persisted-root", "persist-producer"),
+      commands: [persistedProducer],
+    });
+    const persistedConsumer = graphAddCommand({
+      graphId: "future-persisted",
+      suffix: "persisted-consumer",
+      revision: 2,
+      inputRecordIds: [persistedProducer.intent.expectedOutputRecordId],
+    });
+    assert.equal(
+      control.commitScheduleRevision({
+        graphId: "future-persisted",
+        expectedPreviousRevision: 1,
+        operationId: "persist-consumer",
+        source: operationSource("future-persisted-root", "persist-consumer"),
+        commands: [persistedConsumer],
+      }).record.revision,
+      2,
+    );
+
+    store.createGraph({ graphId: "future-target", rootSessionId: "future-target-root", epoch: 1 });
+    assert.throws(
+      () =>
+        control.commitScheduleRevision({
+          graphId: "future-target",
+          expectedPreviousRevision: 0,
+          operationId: "foreign-future",
+          source: operationSource("future-target-root", "foreign-future"),
+          commands: [
+            graphAddCommand({
+              graphId: "future-target",
+              suffix: "foreign-future-consumer",
+              revision: 1,
+              inputRecordIds: [persistedProducer.intent.expectedOutputRecordId],
+            }),
+          ],
+        }),
+      /belongs to Graph future-persisted/u,
+    );
+    assert.equal(store.getGraph("future-target")?.headRevision, 0);
   } finally {
     store.close();
     await rm(root, { recursive: true, force: true });
@@ -707,12 +971,10 @@ function graphAddCommand(options: {
       operatorId: `operator-${options.suffix}`,
       generation: 1,
       role: `role-${options.suffix}`,
-      profileSnapshot: {
-        profileId: "default",
-        tools: [],
-        permissionPolicy: null,
-        systemPromptVersion: "v1",
-      },
+      profileSnapshot: createBuiltinAgentGraphOperatorProfileCatalog().resolve({
+        profileId: "implement",
+        rootModelRouteId: "test-model",
+      }),
       workspacePolicy: { kind: "shared" as const },
     },
     intent: {
@@ -721,6 +983,7 @@ function graphAddCommand(options: {
       operatorId: `operator-${options.suffix}`,
       operatorGeneration: 1,
       instruction: `instruction-${options.suffix}`,
+      expectedOutputRecordId: agentOutputRecordIdFor(options.graphId, `intent-${options.suffix}`),
       inputRefs: options.inputRecordIds.map((recordId) => ({ recordId })),
       createdAtRevision: options.revision,
       requestedBy: source,

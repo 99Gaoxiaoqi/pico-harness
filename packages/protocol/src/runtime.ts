@@ -495,7 +495,7 @@ export type RuntimeTranscriptFragment = JsonObject & {
   readonly json: string;
 };
 
-export const TRANSCRIPT_PROJECTOR_VERSION = 2 as const;
+export const TRANSCRIPT_PROJECTOR_VERSION = 3 as const;
 
 export type RuntimeTranscriptWatermark = JsonObject & {
   readonly historyEpoch: string;
@@ -1095,6 +1095,24 @@ export type RuntimeMethodMap = {
       readonly events: readonly JsonObject[];
       readonly nextAfterSequence?: number;
     };
+  };
+  readonly "session.graph.query": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly action: "list" | "get" | "timeline";
+      readonly graphId?: string;
+      readonly cursor?: string;
+      readonly limit?: number;
+    };
+    readonly result: JsonObject;
+  };
+  readonly "session.graph.retryWake": {
+    readonly params: WorkspaceParams & {
+      readonly sessionId: SessionId;
+      readonly graphId: string;
+      readonly wakeId: string;
+    };
+    readonly result: { readonly retried: boolean };
   };
   readonly "git.review.snapshot": {
     readonly params: WorkspaceParams & { readonly source?: RuntimeGitReviewSource };
@@ -2018,6 +2036,8 @@ export const RUNTIME_METHODS = [
   "session.artifacts.query",
   "session.artifacts.command",
   "session.trace.query",
+  "session.graph.query",
+  "session.graph.retryWake",
   "git.review.snapshot",
   "git.review.diff",
   "browser.agent.lease",
@@ -2155,6 +2175,8 @@ export const DESKTOP_RUNTIME_METHODS = [
   "session.artifacts.query",
   "session.artifacts.command",
   "session.trace.query",
+  "session.graph.query",
+  "session.graph.retryWake",
   "git.review.snapshot",
   "git.review.diff",
   "browser.agent.lease",
@@ -3313,6 +3335,24 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
       limit: positiveIntegerParam,
     },
   ),
+  "session.graph.query": exactParamShape(
+    {
+      workspacePath: stringParam,
+      sessionId: stringParam,
+      action: oneOfParam(["list", "get", "timeline"] as const),
+    },
+    {
+      graphId: boundedNonEmptyStringParam(512),
+      cursor: boundedNonEmptyStringParam(2_048),
+      limit: positiveIntegerParam,
+    },
+  ),
+  "session.graph.retryWake": exactParamShape({
+    workspacePath: stringParam,
+    sessionId: stringParam,
+    graphId: boundedNonEmptyStringParam(512),
+    wakeId: boundedNonEmptyStringParam(512),
+  }),
   "git.review.snapshot": exactParamShape(
     { workspacePath: stringParam },
     { source: oneOfParam(["branch", "staged", "unstaged"] as const) },
@@ -4861,6 +4901,8 @@ const RUNTIME_RESULT_VALIDATORS = {
     { throughSequence: resultNonNegativeInteger, events: resultArray(resultJsonObject) },
     { nextAfterSequence: resultNonNegativeInteger },
   ),
+  "session.graph.query": resultJsonObject,
+  "session.graph.retryWake": exactResultShape({ retried: resultBoolean }),
   "git.review.snapshot": exactResultShape({
     revision: resultNonEmptyString,
     branch: resultString,

@@ -9,9 +9,9 @@ import type { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-e
 import type {
   AgentGraphExactRunInspection,
   AgentGraphExactRunPort,
-  AgentGraphRunLaunchState,
   StartExactAgentGraphRunInput,
 } from "./agent-graph-runtime-adapter.js";
+import type { AgentGraphRunLaunchState } from "../agent-graph/runtime-activation-projection.js";
 import type { PrestartedRuntimeRun, PrestartedRuntimeUserInput } from "./runtime-run-executor.js";
 import { isRuntimeRunLive, RuntimeRun } from "./runtime-run.js";
 
@@ -34,6 +34,8 @@ export interface CreateAgentGraphExactRunPortOptions {
   readonly sessionOptions?:
     | SessionOptions
     | ((input: StartExactAgentGraphRunInput) => SessionOptions | undefined);
+  /** Fail-closed authority validation that runs before Session pinning or run.started admission. */
+  readonly validateStart?: (input: StartExactAgentGraphRunInput) => void | Promise<void>;
   /** Host-owned assembly of SessionRuntime, AgentEngine, providers, tools and observers. */
   execute(input: ExecuteAgentGraphExactRunInput): Promise<void>;
   readonly requestStop?: (input: {
@@ -118,6 +120,7 @@ export class SqliteAgentGraphExactRunPort implements AgentGraphExactRunPort {
     input: StartExactAgentGraphRunInput,
   ): Promise<"started" | "observed"> {
     assertStartInput(input);
+    await this.options.validateStart?.(input);
     const sessionOptions =
       typeof this.options.sessionOptions === "function"
         ? this.options.sessionOptions(input)
@@ -147,6 +150,10 @@ export class SqliteAgentGraphExactRunPort implements AgentGraphExactRunPort {
           turnId: input.turnId,
           invocationId: input.invocationId,
           runStartedEventId: input.runStartedEventId,
+          presentation: {
+            audience: "internal",
+            source: "agent_graph_control",
+          },
         });
       }
 
@@ -158,13 +165,19 @@ export class SqliteAgentGraphExactRunPort implements AgentGraphExactRunPort {
         invocationId: input.invocationId,
         runStartedEventId: input.runStartedEventId,
         runStartedAt: admitted.startEvent.at,
+        ...(admitted.startEvent.data.presentation ? { presentation: "internal" as const } : {}),
       };
       await this.options.execute({
         claimId: input.claimId,
         session,
         prompt: input.prompt,
         prestartedRun,
-        prestartedUserInput: { messageId: agentGraphInputMessageId(input.claimId) },
+        prestartedUserInput: {
+          messageId: agentGraphInputMessageId(input.claimId),
+          // A pre-existing input may come from a build before presentation provenance existed.
+          // Preserve that exact payload on attach; fresh Graph control input is internal.
+          ...(admitted.input === "missing" ? { presentation: "internal" as const } : {}),
+        },
       });
       return "started";
     } finally {

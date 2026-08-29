@@ -20,6 +20,7 @@ import {
 } from "../context/context-budget.js";
 import { PromptComposer } from "../context/composer.js";
 import type { TodoStore } from "../context/todo-store.js";
+import type { AgentGraphProfileSnapshot } from "../agent-graph/core/contracts.js";
 import { SkillLoader, type Skill } from "../context/skill.js";
 import { ToolDisclosure, type ToolGroupLoadedEventLike } from "../tools/tool-disclosure.js";
 import { isToolSupportedForHost, type ToolHostKind } from "../tools/tool-surface.js";
@@ -42,6 +43,7 @@ import { WorkspaceRoots, workspaceAccessesFromCall } from "../tools/workspace-ro
 import type { DefaultToolRegistryOptions } from "../tools/default-registry.js";
 import { FetchURLTool } from "../tools/web.js";
 import {
+  AGENT_GRAPH_SUPERVISOR_TOOL_NAMES,
   createAgentGraphSupervisorTools,
   type AgentGraphRootToolContext,
   type AgentGraphSupervisorToolPort,
@@ -161,6 +163,7 @@ import {
   RuntimeRunExecutor,
   type PrestartedRuntimeRun,
   type PrestartedRuntimeUserInput,
+  type RuntimeRunExecutorInput,
 } from "./runtime-run-executor.js";
 import {
   invalidateMemoryReviewRecoverySuccess,
@@ -292,6 +295,8 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   hostKind?: ToolHostKind;
   /** Session-scoped services owned by the caller and reused across prompts. */
   runtimeState?: SessionRuntime;
+  /** @internal Trusted host-selected Session; exact Graph runs must not resolve it from cwd again. */
+  runtimeSession?: Session;
   /** 仅由可展示结构化问题的 TUI bundle 提供。 */
   askUserHandler?: AskUserHandler;
   /** Host-owned approval state, required when decisions are settled outside the TUI process. */
@@ -309,6 +314,10 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   waitAtSafeBoundary?: () => Promise<void>;
   /** Receives the exact durable rewind point created for this top-level prompt. */
   rewindPointSink?: (checkpointId: string) => void;
+  /** @internal Trusted host assertion evaluated before a Runtime Run commits success. */
+  runCompletionGuard?: () => Promise<void> | void;
+  /** @internal Trusted host recovery hook evaluated before a failed Runtime Run is sealed. */
+  runFailureGuard?: NonNullable<RuntimeRunExecutorInput["failureGuard"]>;
   /** @internal 继续已存在的未完成轮次，不新增 user 消息或 rewind point。 */
   resumeExistingSession?: boolean;
   /** @internal 恢复 adapter 已在 canonical ledger 发布的唯一 RuntimeRun admission。 */
@@ -326,6 +335,7 @@ export interface RunAgentCliDependencies extends RuntimeHost {
         readonly kind: "operator";
         readonly getActivationContext: () => GraphOperatorActivationContext | undefined;
         readonly outputPort: AgentOutputCommitPort;
+        readonly profileSnapshot: AgentGraphProfileSnapshot;
       };
   /** 仅用于后台执行的实时信任校验；生产默认读取用户级 WorkspaceTrustStore。 */
   backgroundTrustStore?: BackgroundWorkspaceTrustVerifier;
@@ -899,13 +909,25 @@ export async function executeAgentRuntime(
   const defaultConfigModel = options.model ?? defaultModel(kind);
 
   // 阶段 2：获取持久化 Session，并推导会话级有效配置。
-  const sessionLease = await acquireRuntimeSession({
-    sessionSelection,
-    workDir,
-    picoHome,
-    resumeExistingSession,
-  });
+  const injectedSession = dependencies.runtimeSession;
+  if (
+    injectedSession &&
+    (injectedSession.id !== sessionSelection.sessionId || injectedSession.workDir !== workDir)
+  ) {
+    throw new Error(
+      `Host-selected Session does not match the runtime request: ${sessionSelection.sessionId}`,
+    );
+  }
+  const sessionLease = injectedSession
+    ? { session: injectedSession, release: globalSessionManager.pin(injectedSession) }
+    : await acquireRuntimeSession({
+        sessionSelection,
+        workDir,
+        picoHome,
+        resumeExistingSession,
+      });
   const session = sessionLease.session;
+  const sessionStorageRoot = session.runtimeStorageRoot;
   let executionCoordinator: PlanCoordinator | undefined;
   let activeExecutionPlanId: string | undefined;
   let planRun = false;
@@ -977,11 +999,15 @@ export async function executeAgentRuntime(
     }
     if (!settings.collaborationMode) throw new Error("Session collaborationMode is unavailable");
     const sideConversation = settings.sideConversation === true;
-    const collaborationMode = (): "agent" | "plan" => settings.collaborationMode!;
+    const collaborationMode = (): "agent" | "plan" =>
+      dependencies.agentGraph?.kind === "operator" ? "agent" : settings.collaborationMode!;
     planRun = collaborationMode() === "plan";
     const orchestrationMode = (): "default" | "graph" =>
       options.orchestrationMode ?? settings.orchestrationMode ?? "default";
-    const permissionMode = (): "default" | "auto" | "yolo" => settings.permissionMode;
+    const permissionMode = (): "default" | "auto" | "yolo" =>
+      dependencies.agentGraph?.kind === "operator"
+        ? dependencies.agentGraph.profileSnapshot.permissionPolicy.mode
+        : settings.permissionMode;
     if (options.approvedPlan) {
       if (settings.collaborationMode !== "agent") {
         throw new Error("Approved plan execution requires collaborationMode=agent");
@@ -1077,7 +1103,9 @@ export async function executeAgentRuntime(
     }
     const workspaceRoots = await WorkspaceRoots.create(
       workDir,
-      backgroundPolicy || sessionSelection.mode === "fork"
+      backgroundPolicy ||
+        dependencies.agentGraph?.kind === "operator" ||
+        sessionSelection.mode === "fork"
         ? []
         : [
             ...configuredAdditionalDirectories,
@@ -1108,17 +1136,18 @@ export async function executeAgentRuntime(
       effectiveOptions,
       dependencies.provider !== undefined,
     );
-    const pluginSnapshot = backgroundPolicy
-      ? undefined
-      : (dependencies.pluginSnapshot ??
-        (await loadPluginRuntimeSnapshot({
-          workDir,
-          env: runtimeEnv,
-          picoHome,
-          ...(dependencies.pluginCapabilityRegistry
-            ? { capabilityRegistry: dependencies.pluginCapabilityRegistry }
-            : {}),
-        })));
+    const pluginSnapshot =
+      backgroundPolicy || dependencies.agentGraph?.kind === "operator"
+        ? undefined
+        : (dependencies.pluginSnapshot ??
+          (await loadPluginRuntimeSnapshot({
+            workDir,
+            env: runtimeEnv,
+            picoHome,
+            ...(dependencies.pluginCapabilityRegistry
+              ? { capabilityRegistry: dependencies.pluginCapabilityRegistry }
+              : {}),
+          })));
     const ownsPluginSnapshot =
       pluginSnapshot !== undefined && dependencies.pluginSnapshot === undefined;
     const pluginActivationScope = new PluginCapabilityActivationScope();
@@ -1164,7 +1193,7 @@ export async function executeAgentRuntime(
     if (dependencies.runtimeState === undefined && !ownedUsageStore) {
       try {
         ownedUsageStore = new SqliteRuntimeControlStore({
-          storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
+          storageRoot: sessionStorageRoot,
         });
       } catch (error) {
         logger.error(
@@ -1184,7 +1213,10 @@ export async function executeAgentRuntime(
           ? { toolDisclosure: dependencies.toolDisclosure }
           : {}),
         // LSP 是项目配置启动的子进程；后台策略尚未为其提供网络/写入沙箱。
-        lspEnabled: !backgroundPolicy && collaborationMode() !== "plan",
+        lspEnabled:
+          !backgroundPolicy &&
+          dependencies.agentGraph?.kind !== "operator" &&
+          collaborationMode() !== "plan",
         lspServers: [...picoConfig.lspServers, ...(pluginSnapshot?.lspServers ?? [])],
         processSandbox: {
           profile: permissionMode() === "yolo" ? "danger-full-access" : "workspace-write",
@@ -1210,7 +1242,9 @@ export async function executeAgentRuntime(
     if (ownsRuntimeState) sessionLeaseTransferred = true;
     cleanupRuntimeState = runtimeState;
     if (!ownsRuntimeState) {
-      await runtimeState.setCodeIntelligenceEnabled(collaborationMode() !== "plan");
+      await runtimeState.setCodeIntelligenceEnabled(
+        dependencies.agentGraph?.kind !== "operator" && collaborationMode() !== "plan",
+      );
     }
     if (collaborationMode() !== "plan" && dependencies.hookService) {
       runtimeState.attachHookService(dependencies.hookService);
@@ -1225,7 +1259,7 @@ export async function executeAgentRuntime(
     if (!runtimeState.taskHostRuntime && !ownedUsageStore) {
       try {
         ownedUsageStore = new SqliteRuntimeControlStore({
-          storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
+          storageRoot: sessionStorageRoot,
         });
       } catch (error) {
         logger.error(
@@ -1257,9 +1291,6 @@ export async function executeAgentRuntime(
         };
       },
     };
-    const workspaceStatePaths = resolvePicoPaths(workDir, {
-      picoHome: session.picoHome,
-    }).workspace;
     const currentConfig: ProviderConfig = providerConfig;
     const routeCredentials =
       dependencies.provider === undefined && dependencies.modelRouter && currentConfig.routeId
@@ -1268,7 +1299,7 @@ export async function executeAgentRuntime(
     const credentialPool =
       routeCredentials.length > 1 ? new CredentialPool([...routeCredentials]) : undefined;
     const providerDependencies: ProviderRuntimeDependencies = {
-      promptCachePrewarm: PromptCachePrewarmCoordinator.shared(workspaceStatePaths.root),
+      promptCachePrewarm: PromptCachePrewarmCoordinator.shared(sessionStorageRoot),
     };
     const providerFactory = dependencies.providerFactory ?? createRawProvider;
     const providerDecorator = (provider: LLMProvider): LLMProvider => {
@@ -1363,7 +1394,7 @@ export async function executeAgentRuntime(
       (dependencies.provider === undefined
         ? async () => {
             const ledger = new SqliteRuntimeControlStore({
-              storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
+              storageRoot: sessionStorageRoot,
             });
             const billingRoute = billingRouteForProvider(kind, currentConfig);
             const provider = new CostTracker(
@@ -1481,7 +1512,7 @@ export async function executeAgentRuntime(
       runtimeState;
     const sessionTaskAuthority = {
       repository: new SqliteSessionWorkbarRepository({
-        storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
+        storageRoot: sessionStorageRoot,
       }),
       sessionId: session.id,
       onChanged: (revision: number) =>
@@ -1608,8 +1639,8 @@ export async function executeAgentRuntime(
       dependencies.askUserHandler,
       runtimeState.codeIntelligence,
       (path) => {
-        if (settings.mode === "yolo") return false;
-        if (settings.mode === "plan" || path === undefined) return true;
+        if (permissionMode() === "yolo") return false;
+        if (collaborationMode() === "plan" || path === undefined) return true;
         return !isSensitiveCredentialPath(workspaceRoots.resolveUnchecked(path));
       },
       mainProcessSandbox,
@@ -1645,7 +1676,7 @@ export async function executeAgentRuntime(
       })) {
         registry.register(tool);
       }
-      toolDisclosure.discloseTools(["update_agent_graph", "view_agent_graph", "yield_agent_graph"]);
+      toolDisclosure.discloseTools([...AGENT_GRAPH_SUPERVISOR_TOOL_NAMES]);
     } else if (dependencies.agentGraph?.kind === "operator") {
       registry.register(
         createAgentOutputTool({
@@ -1772,7 +1803,15 @@ export async function executeAgentRuntime(
         );
       }
       return {
-        systemPrompt: composed.systemPrompt,
+        systemPrompt:
+          dependencies.agentGraph?.kind === "operator"
+            ? [
+                composed.systemPrompt,
+                "<graph-operator-profile>",
+                dependencies.agentGraph.profileSnapshot.systemPrompt.content,
+                "</graph-operator-profile>",
+              ].join("\n")
+            : composed.systemPrompt,
         turnTail: turnTailParts.join("\n\n"),
       };
     };
@@ -1800,6 +1839,14 @@ export async function executeAgentRuntime(
       planMode: effectiveOptions.planMode ?? false,
       collaborationMode,
       planHandoff,
+      ...(dependencies.agentGraph?.kind === "root"
+        ? {
+            stopAfterSuccessfulToolNames: ["yield_agent_graph"],
+            controlPlanePresentation: true,
+          }
+        : dependencies.agentGraph?.kind === "operator"
+          ? { stopAfterSuccessfulToolNames: ["agent_output"] }
+          : {}),
       ...(maxTurns !== undefined ? { maxTurns } : {}),
       promptLayersFactory,
       goalManager,
@@ -1874,29 +1921,34 @@ export async function executeAgentRuntime(
           session.picoHome,
           dependencies.onPolicyDenied,
           permissionMode,
-          async () => {
-            const generation = workspaceRoots.generation();
-            const roots = workspaceRoots.list();
-            await runtimeState.refreshProcessSandbox(roots, generation);
-            if (activeMcpManager) {
-              mainProcessPolicy = createSandboxPolicy({
-                profile: mainProcessSandbox.profile,
-                workspaceRoots: roots,
-                scratchRoot: mainProcessSandbox.scratchRoot ?? processSandboxScratchRoot,
-                generation,
-                ...(mainProcessSandbox.config ? { config: mainProcessSandbox.config } : {}),
+          {
+            onSessionPolicyChanged: async () => {
+              const generation = workspaceRoots.generation();
+              const roots = workspaceRoots.list();
+              await runtimeState.refreshProcessSandbox(roots, generation);
+              if (activeMcpManager) {
+                mainProcessPolicy = createSandboxPolicy({
+                  profile: mainProcessSandbox.profile,
+                  workspaceRoots: roots,
+                  scratchRoot: mainProcessSandbox.scratchRoot ?? processSandboxScratchRoot,
+                  generation,
+                  ...(mainProcessSandbox.config ? { config: mainProcessSandbox.config } : {}),
+                });
+                await activeMcpManager.updateProcessSandbox(mainProcessPolicy);
+              }
+            },
+            onOneShotMcpAuthorization: async (call, directories) => {
+              oneShotMcpCalls.add(call.id);
+              if (directories.length === 0) return;
+              await activeMcpManager?.restartStdioServerForTool(call.name, {
+                ...mainProcessPolicy,
+                readRoots: normalizeRoots([...mainProcessPolicy.readRoots, ...directories]),
+                writeRoots: normalizeRoots([...mainProcessPolicy.writeRoots, ...directories]),
               });
-              await activeMcpManager.updateProcessSandbox(mainProcessPolicy);
-            }
-          },
-          async (call, directories) => {
-            oneShotMcpCalls.add(call.id);
-            if (directories.length === 0) return;
-            await activeMcpManager?.restartStdioServerForTool(call.name, {
-              ...mainProcessPolicy,
-              readRoots: normalizeRoots([...mainProcessPolicy.readRoots, ...directories]),
-              writeRoots: normalizeRoots([...mainProcessPolicy.writeRoots, ...directories]),
-            });
+            },
+            allowSessionGrants:
+              dependencies.agentGraph?.kind !== "operator" ||
+              dependencies.agentGraph.profileSnapshot.permissionPolicy.allowSessionGrants,
           },
         ),
       );
@@ -2088,6 +2140,7 @@ export async function executeAgentRuntime(
       picoHome,
       prompt,
       resumeExistingSession,
+      ...(dependencies.agentGraph ? { presentation: "internal" as const } : {}),
       ...(dependencies.prestartedRun ? { prestartedRun: dependencies.prestartedRun } : {}),
       ...(dependencies.prestartedUserInput
         ? { prestartedUserInput: dependencies.prestartedUserInput }
@@ -2114,6 +2167,10 @@ export async function executeAgentRuntime(
       ...(dependencies.signal ? { signal: dependencies.signal } : {}),
       ...(dependencies.onEvent ? { onEvent: dependencies.onEvent } : {}),
       ...(dependencies.rewindPointSink ? { rewindPointSink: dependencies.rewindPointSink } : {}),
+      ...(dependencies.runCompletionGuard
+        ? { completionGuard: dependencies.runCompletionGuard }
+        : {}),
+      ...(dependencies.runFailureGuard ? { failureGuard: dependencies.runFailureGuard } : {}),
       ...(!sideConversation && memoryReviewScheduler ? { memoryReviewScheduler } : {}),
       ...(!sideConversation && memoryReviewScheduler ? { memoryTriggerSlot } : {}),
       planHandoff,
@@ -2789,11 +2846,14 @@ export function buildPermissionMiddleware(
   picoHome?: string,
   denialSink?: (event: RuntimePolicyDenial) => void,
   permissionMode?: () => "default" | "auto" | "yolo",
-  onSessionPolicyChanged?: () => Promise<void>,
-  onOneShotMcpAuthorization?: (
-    call: ToolCall,
-    externalDirectories: readonly string[],
-  ) => Promise<void>,
+  options: {
+    onSessionPolicyChanged?: () => Promise<void>;
+    onOneShotMcpAuthorization?: (
+      call: ToolCall,
+      externalDirectories: readonly string[],
+    ) => Promise<void>;
+    allowSessionGrants?: boolean;
+  } = {},
 ): MiddlewareFunc {
   return async (call, context) => {
     const mode =
@@ -2818,20 +2878,19 @@ export function buildPermissionMiddleware(
       ? await externalAuthorizationDirectories(externalAccesses, workspaceRoots)
       : [];
     const safetyPath = bypassImmuneSafetyPath(call, workDir, workspaceRoots);
-    const hasSessionGrant = globalSessionPermissionGrants.allows(
-      sessionId,
-      call,
-      workDir,
-      workspaceRoots,
-      picoHome,
-    );
-    const hasExplicitSafetyGrant = globalSessionPermissionGrants.allowsSafetyOverride(
-      sessionId,
-      call,
-      workDir,
-      workspaceRoots,
-      picoHome,
-    );
+    const allowSessionGrants = options.allowSessionGrants !== false;
+    const hasSessionGrant =
+      allowSessionGrants &&
+      globalSessionPermissionGrants.allows(sessionId, call, workDir, workspaceRoots, picoHome);
+    const hasExplicitSafetyGrant =
+      allowSessionGrants &&
+      globalSessionPermissionGrants.allowsSafetyOverride(
+        sessionId,
+        call,
+        workDir,
+        workspaceRoots,
+        picoHome,
+      );
 
     if (
       context?.forceApproval !== true &&
@@ -2933,7 +2992,7 @@ export function buildPermissionMiddleware(
       return result.allowed ? result : { ...result, denialSource: "human" };
     }
 
-    if (result.allowForSession) {
+    if (result.allowForSession && allowSessionGrants) {
       await applySessionPermissionScope(scope, {
         sessionId,
         workDir,
@@ -2953,11 +3012,11 @@ export function buildPermissionMiddleware(
           },
         );
       }
-      await onSessionPolicyChanged?.();
+      await options.onSessionPolicyChanged?.();
     } else {
       for (const directory of externalDirectories) workspaceRoots.authorizeOnce(directory);
       if (isMcpToolName(call.name)) {
-        await onOneShotMcpAuthorization?.(call, externalDirectories);
+        await options.onOneShotMcpAuthorization?.(call, externalDirectories);
       }
     }
     return result;

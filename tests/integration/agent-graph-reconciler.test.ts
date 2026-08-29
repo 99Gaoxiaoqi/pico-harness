@@ -12,15 +12,15 @@ import type {
   AgentGraphScheduleCommand,
 } from "../../src/agent-graph/core/index.js";
 import {
-  claimIdFor,
+  agentOutputRecordIdFor,
   intentIdFor,
   operatorIdFor,
-  recordIdFor,
 } from "../../src/agent-graph/core/index.js";
 import {
   AgentGraphReconciler,
   deterministicAgentGraphIdentities,
 } from "../../src/agent-graph/reconciler.js";
+import { createBuiltinAgentGraphOperatorProfileCatalog } from "../../src/agent-graph/operator-profile-catalog.js";
 import type {
   AgentGraphRuntimePort,
   AgentGraphRuntimeProjection,
@@ -42,11 +42,7 @@ const SOURCE: AgentGraphOperationSource = {
 test("reconciler drives dependent operators to a fixed point with exact durable identities", async () => {
   await withGraph(async ({ raw, store, graphId }) => {
     const upstream = addCommand(graphId, "researcher", 1);
-    const upstreamEventId = `event:${upstream.intent.intentId}`;
-    const expectedUpstreamRecordId = recordIdFor(
-      claimIdFor(graphId, upstream.intent.intentId),
-      upstreamEventId,
-    );
+    const expectedUpstreamRecordId = upstream.intent.expectedOutputRecordId;
     const downstream = addCommand(graphId, "reviewer", 2, [expectedUpstreamRecordId]);
     const independent = addCommand(graphId, "auditor", 1);
     store.commitScheduleRevision({
@@ -183,7 +179,7 @@ test("concurrent stop or finish wins revision CAS before a fresh claim", async (
   }
 });
 
-test("finish preserves exact claimed work and failed stop callbacks do not rewrite it", async () => {
+test("finish preserves exact claimed work and intent stop does not retire its Operator", async () => {
   await withGraph(async ({ raw, store, graphId }) => {
     const command = addCommand(graphId, "long-running", 1);
     store.commitScheduleRevision({
@@ -242,6 +238,40 @@ test("finish preserves exact claimed work and failed stop callbacks do not rewri
     const failedStop = await reconciler.reconcile(graphId);
     assert.equal(raw.listActivationClaims(graphId)[0]?.state, "executing");
     assert.ok(failedStop.errors.some((error) => error.phase === "stop"));
+
+    await reconciler.reconcile(graphId);
+    assert.equal(raw.listActivationClaims(graphId)[0]?.state, "cancelled");
+    assert.equal(raw.listOperatorProvisions(graphId)[0]?.state, "provisioned");
+  });
+
+  await withGraph(async ({ raw, store, graphId }) => {
+    const command = addCommand(graphId, "retired", 1);
+    store.commitScheduleRevision({
+      graphId,
+      expectedPreviousRevision: 0,
+      operationId: "add-retired",
+      source: SOURCE,
+      commands: [command],
+    });
+    const runtime = new RunningRuntime();
+    const reconciler = new AgentGraphReconciler({ store, runtime });
+    await reconciler.reconcile(graphId);
+    store.commitScheduleRevision({
+      graphId,
+      expectedPreviousRevision: 1,
+      operationId: "stop-operator",
+      source: { ...SOURCE, toolCallId: "stop-operator-tool" },
+      commands: [
+        {
+          kind: "stop",
+          target: {
+            kind: "operator",
+            operatorId: command.operator.operatorId,
+            generation: command.operator.generation,
+          },
+        },
+      ],
+    });
 
     await reconciler.reconcile(graphId);
     assert.equal(raw.listActivationClaims(graphId)[0]?.state, "cancelled");
@@ -363,13 +393,10 @@ function addCommand(
     operatorId,
     generation: 1,
     role,
-    profileSnapshot: {
-      profileId: `profile:${role}`,
-      model: "fake-model",
-      tools: ["read_file"],
-      permissionPolicy: { mode: "read-only" },
-      systemPromptVersion: "1",
-    },
+    profileSnapshot: createBuiltinAgentGraphOperatorProfileCatalog().resolve({
+      profileId: "implement",
+      rootModelRouteId: "fake-model",
+    }),
     workspacePolicy: { kind: "shared" },
   };
   const intent: AgentGraphActivationIntent = {
@@ -378,6 +405,7 @@ function addCommand(
     operatorId,
     operatorGeneration: 1,
     instruction: `Complete ${role} work`,
+    expectedOutputRecordId: agentOutputRecordIdFor(graphId, intentIdFor(graphId, `add-${role}`, 0)),
     inputRefs: inputRecordIds.map((recordId) => ({ recordId })),
     createdAtRevision: revision,
     requestedBy: SOURCE,

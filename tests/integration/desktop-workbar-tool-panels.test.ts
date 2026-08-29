@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   FilesWorkbarPanel,
+  GraphWorkbarPanel,
   InspectorWorkbarPanel,
   ReviewWorkbarPanel,
   TasksWorkbarPanel,
@@ -13,6 +14,7 @@ import {
   contextUsagePercent,
   createTaskUpdateRequest,
   groupInspectorTraceItems,
+  parseGraphDetail,
   reviewSelectionKey,
   shouldPollTerminalPanel,
   terminalGridFromBounds,
@@ -20,6 +22,55 @@ import {
   type WorkbarArtifactContent,
   type WorkbarTaskItem,
 } from "../../apps/desktop/src/renderer/workbar-panels/index.js";
+
+test("Graph detail derives execution state from formal output and Runtime terminal facts", () => {
+  const detail = parseGraphDetail({
+    summary: {
+      graphId: "graph-1",
+      rootSessionId: "root-1",
+      epoch: 1,
+      phase: "finished",
+      headRevision: 2,
+      createdAt: 1,
+      finishedAt: 2,
+      counts: { operators: 1, intents: 4, claims: 4, records: 2, resources: 0, wakes: 1 },
+    },
+    operators: [{ operatorId: "operator-1", role: "explore", profile: {} }],
+    intents: [
+      { intentId: "intent-1", operatorId: "operator-1", instruction: "success" },
+      { intentId: "intent-2", operatorId: "operator-1", instruction: "failure" },
+      { intentId: "intent-3", operatorId: "operator-1", instruction: "running" },
+      { intentId: "intent-4", operatorId: "operator-1", instruction: "interrupted" },
+    ],
+    claims: [
+      { claimId: "claim-1", intentId: "intent-1", state: "executing" },
+      { claimId: "claim-2", intentId: "intent-2", state: "executing" },
+      { claimId: "claim-3", intentId: "intent-3", state: "executing" },
+      { claimId: "claim-4", intentId: "intent-4", state: "executing" },
+    ],
+    records: [
+      { recordId: "record-1", claimId: "claim-1" },
+      { recordId: "record-2", claimId: "claim-2" },
+    ],
+    runtimeClaims: [
+      { claimId: "claim-1", status: "completed" },
+      { claimId: "claim-2", status: "completed" },
+      { claimId: "claim-3", status: "running" },
+      { claimId: "claim-4", status: "interrupted" },
+    ],
+    outputs: [
+      { recordId: "record-1", claimId: "claim-1", status: "success" },
+      { recordId: "record-2", claimId: "claim-2", status: "failure" },
+    ],
+    diagnostics: [],
+    wakes: [],
+  });
+
+  assert.equal(detail.claims[0]?.state, "completed");
+  assert.equal(detail.claims[1]?.state, "failed");
+  assert.equal(detail.claims[2]?.state, "running");
+  assert.equal(detail.claims[3]?.state, "interrupted");
+});
 
 test("Inspector trace hides internal state and transcript-only commits", () => {
   const parsed = tracePageView([
@@ -331,6 +382,106 @@ test("Workbar tool panels render real authority snapshots with accessible detail
   assert.match(terminal, /role="tabpanel"/u);
   assert.match(terminal, /role="log"/u);
   assert.match(terminal, /\$ npm test/u);
+
+  const graph = renderToStaticMarkup(
+    React.createElement(GraphWorkbarPanel, {
+      graphs: [
+        {
+          graphId: "graph-1",
+          epoch: 1,
+          phase: "open",
+          headRevision: 2,
+          createdAt: 1,
+          counts: { operators: 1, intents: 1, claims: 1, records: 1, resources: 2, wakes: 1 },
+        },
+      ],
+      selectedGraphId: "graph-1",
+      detail: {
+        summary: {
+          graphId: "graph-1",
+          epoch: 1,
+          phase: "open",
+          headRevision: 2,
+          createdAt: 1,
+          counts: { operators: 1, intents: 1, claims: 1, records: 1, resources: 2, wakes: 1 },
+        },
+        operators: [{ operatorId: "operator-1", role: "Researcher", profileId: "explore" }],
+        intents: [
+          {
+            intentId: "intent-1",
+            operatorId: "operator-1",
+            instruction: "核验实现",
+          },
+        ],
+        claims: [{ claimId: "claim-1", intentId: "intent-1", state: "executing" }],
+        diagnostics: [
+          {
+            diagnosticId: "diagnostic-1",
+            phase: "reconcile",
+            subjectId: "claim-1",
+            classification: "runtime",
+            state: "needs_attention",
+            message: "执行状态需要人工确认",
+          },
+        ],
+        wakes: [
+          {
+            wakeId: "wake-1",
+            status: "needs_attention",
+            attemptCount: 5,
+            lastError: "根唤醒连续失败",
+          },
+        ],
+      },
+      timeline: [{ id: "event-1", at: 1, kind: "record.committed", status: "agent_output" }],
+      loading: false,
+      onRefresh: () => undefined,
+      onSelectGraph: () => undefined,
+    }),
+  );
+  assert.match(graph, /aria-label="Graph 周期"/u);
+  assert.match(graph, /Researcher/u);
+  assert.match(graph, /正式产出/u);
+  assert.match(graph, /需要处理/u);
+  assert.match(graph, /执行状态需要人工确认/u);
+  assert.match(graph, />重试</u);
+
+  const waitingGraph = renderToStaticMarkup(
+    React.createElement(GraphWorkbarPanel, {
+      graphs: [
+        {
+          graphId: "graph-waiting",
+          epoch: 1,
+          phase: "open",
+          headRevision: 0,
+          createdAt: 1,
+          counts: { operators: 0, intents: 0, claims: 0, records: 0, resources: 0, wakes: 0 },
+        },
+      ],
+      selectedGraphId: "graph-waiting",
+      detail: {
+        summary: {
+          graphId: "graph-waiting",
+          epoch: 1,
+          phase: "open",
+          headRevision: 0,
+          createdAt: 1,
+          counts: { operators: 0, intents: 0, claims: 0, records: 0, resources: 0, wakes: 0 },
+        },
+        operators: [],
+        intents: [],
+        claims: [],
+        diagnostics: [],
+        wakes: [],
+      },
+      timeline: [],
+      loading: false,
+      onRefresh: () => undefined,
+      onSelectGraph: () => undefined,
+    }),
+  );
+  assert.match(waitingGraph, /Graph 已启动/u);
+  assert.match(waitingGraph, /等待根 Agent 创建调度/u);
 
   const fallbackTerminal = renderToStaticMarkup(
     React.createElement(TerminalWorkbarPanel, {

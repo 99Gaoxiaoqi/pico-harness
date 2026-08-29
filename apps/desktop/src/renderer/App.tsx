@@ -127,6 +127,7 @@ import {
   WorkbarLauncher,
   createWorkbarToolTab,
   createWorkbarState,
+  graphModeWorkbarAction,
   getWorkbarTool,
   isWorkbarPanelActive,
   loadWorkbarState,
@@ -1919,7 +1920,8 @@ function ConversationPage() {
         tab.kind === "review" ||
         tab.kind === "tasks" ||
         tab.kind === "files" ||
-        tab.kind === "terminal"
+        tab.kind === "terminal" ||
+        tab.kind === "graph"
       ) {
         return (
           <WorkbarPanelHost
@@ -2012,6 +2014,12 @@ function ConversationPage() {
       : createWorkbarToolTab(kind);
     dispatchWorkbar({ type: "open", tab, dock: dock ?? tool.defaultDock });
   }, []);
+
+  useEffect(() => {
+    if (!sessionId || !workspacePath) return;
+    const action = graphModeWorkbarAction(conversation?.settings?.orchestrationMode);
+    if (action) dispatchWorkbar(action);
+  }, [conversation?.settings?.orchestrationMode, sessionId, workspacePath]);
 
   useEffect(() => {
     const handleShortcut = (event: globalThis.KeyboardEvent) => {
@@ -2120,6 +2128,16 @@ function ConversationPage() {
                   </span>
                 )}
                 {activeRun && <StatusPill status={activeRun.status} />}
+                {conversation?.settings?.orchestrationMode === "graph" && (
+                  <button
+                    type="button"
+                    className="conversation-graph-status"
+                    aria-label="打开 Graph 面板"
+                    onClick={() => openWorkbarTab("graph", "right")}
+                  >
+                    <GitFork aria-hidden="true" /> Graph
+                  </button>
+                )}
                 {sessionRef && (
                   <div className="conversation-session-actions" aria-label="会话操作">
                     <button

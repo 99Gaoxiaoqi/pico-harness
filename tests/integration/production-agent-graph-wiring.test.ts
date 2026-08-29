@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { graphIdFor } from "../../src/agent-graph/core/ids.js";
 import { createRuntimeRequest } from "../../src/daemon/protocol.js";
+import { createBuiltinAgentGraphOperatorProfileCatalog } from "../../src/agent-graph/operator-profile-catalog.js";
 import { createProductionRuntimeServices } from "../../src/daemon/production-host.js";
 import { globalSessionManager } from "../../src/engine/session.js";
 import type { SessionManagerLease } from "../../src/engine/session-manager.js";
@@ -48,8 +50,16 @@ test("production host binds Graph root and installs detached exact execution", a
   let brokerApproval: { readonly allowed: boolean; readonly allowForSession?: boolean } | undefined;
   let brokerAnswer: { readonly kind: string; readonly optionId?: string } | undefined;
   let reattachAttempts = 0;
+  let rootEpochAdmitted = false;
   const fakeAgentRuntime = {
     execute: async (options: RunAgentCliOptions, host: RunAgentCliDependencies) => {
+      if (options.prompt === "supervise graph") {
+        assert.equal(
+          rootEpochAdmitted,
+          true,
+          "Graph epoch must exist before AgentRuntime dispatch",
+        );
+      }
       calls.push({ options, host });
       if (options.prompt === "retry graph work" && ++reattachAttempts === 1) {
         throw new Error("attach failed before AgentRuntime completed");
@@ -118,6 +128,18 @@ test("production host binds Graph root and installs detached exact execution", a
     return {
       application,
       store: {},
+      openRootEpoch: (rootSessionId: string) => {
+        rootEpochAdmitted = true;
+        return {
+          graphId: graphIdFor(rootSessionId, 1),
+          rootSessionId,
+          epoch: 1,
+          admissionPhase: "open",
+          headRevision: 0,
+          selectedRecordIds: [],
+          createdAt: 1,
+        };
+      },
       rootBinding: () => ({ kind: "root", getRootContext: () => undefined, toolPort: {} }),
       start: application.start,
       close: async () => {
@@ -184,6 +206,11 @@ test("production host binds Graph root and installs detached exact execution", a
   assert.equal((await runtime.waitForRun(foregroundRunId)).status, "succeeded");
   assert.equal(calls.length, 1);
   assert.equal(calls[0]?.options.orchestrationMode, "graph");
+  assert.deepEqual(calls[0]?.options.allowedTools, [
+    "view_agent_graph",
+    "update_agent_graph",
+    "yield_agent_graph",
+  ]);
   assert.equal(calls[0]?.host.agentGraph?.kind, "root");
 
   const operatorLease = await globalSessionManager.getOrCreatePinned(
@@ -196,6 +223,10 @@ test("production host binds Graph root and installs detached exact execution", a
     },
   );
   sessionLeases.push(operatorLease);
+  const operatorProfile = createBuiltinAgentGraphOperatorProfileCatalog().resolve({
+    profileId: "implement",
+    rootModelRouteId: "test/coder",
+  });
   let terminalCount = 0;
   const exactInput: ExecuteHostedAgentGraphRunInput = {
     claimId: "claim-1",
@@ -212,8 +243,9 @@ test("production host binds Graph root and installs detached exact execution", a
     binding: {
       kind: "operator",
       getActivationContext: () => undefined,
-      outputPort: {},
-    } as ExecuteHostedAgentGraphRunInput["binding"],
+      outputPort: {} as never,
+      profileSnapshot: operatorProfile,
+    },
     orchestrationMode: "default",
     requestedModel: "test/coder",
     allowedTools: ["read_file", "agent_output"],
@@ -227,13 +259,15 @@ test("production host binds Graph root and installs detached exact execution", a
   assert.equal(terminalCount, 0);
   assert.equal(calls[1]?.options.interactionMode, "default");
   assert.equal(calls[1]?.options.orchestrationMode, "default");
-  assert.deepEqual(calls[1]?.options.allowedTools, ["read_file", "agent_output"]);
+  assert.deepEqual(calls[1]?.options.allowedTools, [...operatorProfile.tools, "agent_output"]);
   assert.equal(calls[1]?.host.agentGraph?.kind, "operator");
   assert.equal(calls[1]?.host.prestartedRun, exactInput.prestartedRun);
   assert.equal(calls[1]?.host.prestartedUserInput, exactInput.prestartedUserInput);
   assert.ok(calls[1]?.host.runtimeState);
-  assert.ok(calls[1]?.host.pluginSnapshot);
-  assert.ok(calls[1]?.host.mcpConfigSources);
+  assert.equal(calls[1]?.host.isolatedHeadless, true);
+  assert.equal(calls[1]?.host.pluginSnapshot, undefined);
+  assert.equal(calls[1]?.host.mcpConfigSources, undefined);
+  assert.equal(calls[1]?.host.browserAgent, undefined);
 
   releaseOperator();
   assert.equal((await runtime.waitForRun(exactInput.prestartedRun.runId)).status, "succeeded");
@@ -412,8 +446,8 @@ test("production host binds Graph root and installs detached exact execution", a
 });
 
 for (const scenario of [
-  { kind: "plugin", bindingKind: "operator", error: /plugin snapshot load failed/u },
-  { kind: "mcp", bindingKind: "root", error: /Unexpected token|JSON/u },
+  { kind: "plugin", error: /plugin snapshot load failed/u },
+  { kind: "mcp", error: /Unexpected token|JSON/u },
 ] as const) {
   test(`production Graph ${scenario.kind} assembly failure stays terminal and fail-closed`, async () => {
     const root = await mkdtemp(join(tmpdir(), `pico-production-graph-${scenario.kind}-failure-`));
@@ -465,6 +499,15 @@ for (const scenario of [
         return {
           application,
           store: {},
+          openRootEpoch: (rootSessionId: string) => ({
+            graphId: graphIdFor(rootSessionId, 1),
+            rootSessionId,
+            epoch: 1,
+            admissionPhase: "open",
+            headRevision: 0,
+            selectedRecordIds: [],
+            createdAt: 1,
+          }),
           rootBinding: () => ({ kind: "root", getRootContext: () => undefined, toolPort: {} }),
           start: application.start,
           close: application.close,
@@ -483,10 +526,7 @@ for (const scenario of [
       });
       let terminalCount = 0;
       const input: ExecuteHostedAgentGraphRunInput = {
-        claimId:
-          scenario.bindingKind === "root"
-            ? `root-wake:${scenario.kind}-failure`
-            : `${scenario.kind}-failure-claim`,
+        claimId: `root-wake:${scenario.kind}-failure`,
         session: lease.session,
         prompt: `${scenario.kind} assembly must fail closed`,
         prestartedRun: {
@@ -497,19 +537,12 @@ for (const scenario of [
           runStartedAt: new Date(0).toISOString(),
         },
         prestartedUserInput: { messageId: `graph-exact-${scenario.kind}-failure-input` },
-        binding:
-          scenario.bindingKind === "operator"
-            ? ({
-                kind: "operator",
-                getActivationContext: () => ({ privateIdentity: "must-not-be-dispatched" }),
-                outputPort: {},
-              } as unknown as ExecuteHostedAgentGraphRunInput["binding"])
-            : ({
-                kind: "root",
-                getRootContext: () => ({ privateIdentity: "must-not-be-dispatched" }),
-                toolPort: {},
-              } as unknown as ExecuteHostedAgentGraphRunInput["binding"]),
-        orchestrationMode: scenario.bindingKind === "root" ? "graph" : "default",
+        binding: {
+          kind: "root",
+          getRootContext: () => ({ privateIdentity: "must-not-be-dispatched" }),
+          toolPort: {},
+        } as unknown as ExecuteHostedAgentGraphRunInput["binding"],
+        orchestrationMode: "graph",
         requestedModel: "test/coder",
         onTerminal: () => {
           terminalCount++;

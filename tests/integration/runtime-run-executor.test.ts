@@ -79,6 +79,55 @@ test("RuntimeRunExecutor executes one assembled turn without owning its resource
   }
 });
 
+test("RuntimeRunExecutor fails the canonical Run when its host completion guard rejects", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-runtime-run-completion-guard-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const session = new Session("runtime-run-completion-guard", workDir, {
+    persistence: true,
+    picoHome,
+    runtimePort: createEngineRuntimePort(),
+  });
+  try {
+    await session.recover();
+    await assert.rejects(
+      new RuntimeRunExecutor({
+        session,
+        runtimeState: {
+          dispatchHook: async (): Promise<HookOutput> => ({ decision: "allow" }),
+        } as unknown as SessionRuntime,
+        engine: {
+          run: async (target: Session) => {
+            await target.commitMessages({ role: "assistant", content: "premature" });
+            return target.getHistory();
+          },
+        } as unknown as AgentEngine,
+        sessionSelection: { mode: "new", sessionId: session.id },
+        workDir,
+        picoHome,
+        prompt: "start graph",
+        resumeExistingSession: false,
+        traceEnabled: false,
+        options: {},
+        completionGuard: () => {
+          throw new Error("graph remains open");
+        },
+      }).execute(),
+      /graph remains open/u,
+    );
+    const events = await session.runtimeEventStore!.readSession(session.id);
+    assert.equal(
+      events.some(
+        (event) => event.kind === "run.terminal" && event.data.status === "failed",
+      ),
+      true,
+    );
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("RuntimeRunExecutor isolates lifecycle observer failures from canonical run success", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-runtime-run-observer-"));
   const workDir = join(root, "workspace");

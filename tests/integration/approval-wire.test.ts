@@ -5,6 +5,8 @@ import { buildApprovalRequestedPayload } from "../../src/daemon/approval-wire.js
 import { parseApprovalRequestedPayload } from "@pico/protocol";
 import { DEFAULT_INTERACTION_MODE } from "../../src/input/session-settings.js";
 import { buildPermissionMiddleware } from "../../src/runtime/agent-runtime.js";
+import { globalSessionPermissionGrants } from "../../src/approval/session-permissions.js";
+import { WorkspaceRoots } from "../../src/tools/workspace-roots.js";
 
 /**
  * approval.requested wire 构造单一来源的形状测试（3-D 漏账补齐）。
@@ -115,4 +117,48 @@ test("fresh default mode asks before the first workspace write", async () => {
   assert.equal(DEFAULT_INTERACTION_MODE, "default");
   assert.equal(requested?.toolName, "write_file");
   assert.equal(decision.allowed, false);
+});
+
+test("disabled session grants neither inherit nor persist approval scope", async () => {
+  const manager = new ApprovalManager(60_000);
+  const sessionId = "isolated-graph-operator-session";
+  const workDir = process.cwd();
+  const workspaceRoots = WorkspaceRoots.createSync(workDir);
+  const settings = { sessionId, mode: DEFAULT_INTERACTION_MODE, additionalDirectories: [] };
+  let requested = 0;
+  globalSessionPermissionGrants.add(sessionId, workDir, {
+    type: "file",
+    path: `${workDir}/operator-write.txt`,
+    access: "edit",
+  });
+  const middleware = buildPermissionMiddleware(
+    (notice) => {
+      requested += 1;
+      manager.resolveApprovalForSession(notice.taskId, "test session approval");
+    },
+    workDir,
+    undefined,
+    manager,
+    settings,
+    workspaceRoots,
+    undefined,
+    undefined,
+    undefined,
+    () => "default",
+    { allowSessionGrants: false },
+  );
+  const call = {
+    id: "isolated-write",
+    name: "write_file",
+    arguments: JSON.stringify({ path: "operator-write.txt", content: "bounded" }),
+  };
+
+  try {
+    assert.equal((await middleware(call)).allowed, true);
+    assert.equal((await middleware({ ...call, id: "isolated-write-again" })).allowed, true);
+    assert.equal(requested, 2);
+    assert.equal(settings.mode, "default");
+  } finally {
+    globalSessionPermissionGrants.clear(sessionId, workDir);
+  }
 });

@@ -1,11 +1,11 @@
 import type { SessionOptions } from "../engine/session.js";
 import type {
-  AgentGraphActivationRuntimeProjection,
   AgentGraphRuntimeAdapter,
   EnsuredAgentGraphOperatorSession,
   ResolvedAgentGraphHandoff,
   StartOrObserveAgentGraphActivationResult,
 } from "../runtime/agent-graph-runtime-adapter.js";
+import type { AgentGraphActivationRuntimeProjection } from "./runtime-activation-projection.js";
 import type {
   AgentGraphActivationClaimRecord,
   AgentGraphOperatorProvisionRecord,
@@ -26,6 +26,8 @@ import type {
   StartAgentGraphActivationRequest,
   StopAgentGraphActivationRequest,
 } from "./runtime-port.js";
+import { assertValidAgentGraphOperatorProfileSnapshot } from "./operator-profile-catalog.js";
+import { AgentGraphNeedsAttentionError } from "./diagnostics.js";
 
 export interface AgentGraphRuntimeApplicationPort {
   ensureOperatorProvision(
@@ -54,6 +56,7 @@ export interface ResolveAgentGraphOperatorWorkspaceInput {
 export interface ResolvedAgentGraphOperatorWorkspace {
   readonly workDir: string;
   readonly sessionOptions?: SessionOptions;
+  release?(reason: "host-shutdown" | "provision-stopped"): Promise<void> | void;
 }
 
 export interface AgentGraphRuntimePortBridgeOptions {
@@ -82,11 +85,60 @@ export class AgentGraphRuntimePortBridge implements AgentGraphRuntimePort {
 
   async resolveInputFacts(input: ResolveAgentGraphInputsRequest) {
     this.requireOpen();
-    return { records: input.knownRecords };
+    const resolvedIds = new Set(input.knownRecords.map((record) => record.recordId));
+    const failedIntentIds = new Set(input.failedIntentIds);
+    const claimsByIntent = new Map(input.claims.map((claim) => [claim.intentId, claim]));
+    const producersByRecord = new Map(
+      input.producerIntents.map((intent) => [intent.expectedOutputRecordId, intent]),
+    );
+    const inFlightRecordIds: string[] = [];
+    const failedRecordIds: string[] = [];
+
+    for (const reference of input.intent.inputRefs) {
+      if (resolvedIds.has(reference.recordId)) continue;
+      const producer = producersByRecord.get(reference.recordId);
+      if (!producer) continue;
+      if (failedIntentIds.has(producer.intentId)) {
+        failedRecordIds.push(reference.recordId);
+        continue;
+      }
+      const claim = claimsByIntent.get(producer.intentId);
+      if (!claim) {
+        inFlightRecordIds.push(reference.recordId);
+        continue;
+      }
+      if (claim.state === "cancelled") {
+        failedRecordIds.push(reference.recordId);
+        continue;
+      }
+      const projection = await this.options.runtime.projectActivation(
+        this.requireStoredClaim(claim),
+      );
+      if (
+        isTerminalRuntimeProjection(projection.status) &&
+        projection.outputEventIds.length === 0
+      ) {
+        failedRecordIds.push(reference.recordId);
+      } else {
+        // A terminal output may be committed in the Runtime ledger one fixed-point
+        // pass before its formal RecordRef is projected into the control store.
+        inFlightRecordIds.push(reference.recordId);
+      }
+    }
+    return { records: input.knownRecords, inFlightRecordIds, failedRecordIds };
   }
 
   async ensureOperator(input: EnsureAgentGraphOperatorRequest): Promise<void> {
     this.requireOpen();
+    try {
+      assertValidAgentGraphOperatorProfileSnapshot(input.provision.profileSnapshot);
+    } catch (error) {
+      throw new AgentGraphNeedsAttentionError(
+        "configuration",
+        "Graph operator profile snapshot is invalid",
+        { cause: error },
+      );
+    }
     const existing = this.leases.get(input.provision.provisionId);
     if (existing) {
       assertHeldLease(existing, input.provision);
@@ -94,13 +146,19 @@ export class AgentGraphRuntimePortBridge implements AgentGraphRuntimePort {
     }
     const workspace = await this.options.resolveOperatorWorkspace(input);
     requireWorkDir(workspace.workDir);
-    const lease = await this.options.runtime.ensureOperatorProvision({
-      provision: this.requireStoredProvision(input.provision),
-      workDir: workspace.workDir,
-      ...(workspace.sessionOptions === undefined
-        ? {}
-        : { sessionOptions: workspace.sessionOptions }),
-    });
+    let lease: EnsuredAgentGraphOperatorSession;
+    try {
+      lease = await this.options.runtime.ensureOperatorProvision({
+        provision: this.requireStoredProvision(input.provision),
+        workDir: workspace.workDir,
+        ...(workspace.sessionOptions === undefined
+          ? {}
+          : { sessionOptions: workspace.sessionOptions }),
+      });
+    } catch (error) {
+      await workspace.release?.("host-shutdown");
+      throw error;
+    }
     if (this.closed) {
       lease.release();
       throw new Error("Agent Graph runtime bridge is closed");
@@ -119,6 +177,7 @@ export class AgentGraphRuntimePortBridge implements AgentGraphRuntimePort {
   ): Promise<AgentGraphRuntimeProjection> {
     this.requireOpen();
     const provision = this.requireProvisionForOperator(input.operator);
+    assertValidAgentGraphOperatorProfileSnapshot(provision.profileSnapshot);
     const held = this.leases.get(provision.provisionId);
     if (!held) {
       throw new Error(`Graph operator provision ${provision.provisionId} is not pinned`);
@@ -159,25 +218,39 @@ export class AgentGraphRuntimePortBridge implements AgentGraphRuntimePort {
     await this.options.runtime.stopActivation(this.requireStoredClaim(input.claim), input.reason);
   }
 
-  releaseStoppedProvisions(graphId: string): void {
+  async releaseStoppedProvisions(graphId: string): Promise<void> {
     for (const provision of this.options.store.listOperatorProvisions(graphId)) {
       if (provision.state !== "stopped") continue;
-      this.releaseProvision(provision.provisionId);
+      await this.releaseProvision(provision.provisionId, "provision-stopped");
     }
   }
 
-  releaseProvision(provisionId: string): void {
+  async releaseProvision(
+    provisionId: string,
+    reason: "host-shutdown" | "provision-stopped",
+  ): Promise<void> {
     const held = this.leases.get(provisionId);
     if (!held) return;
     this.leases.delete(provisionId);
     held.lease.release();
+    await held.workspace.release?.(reason);
   }
 
-  close(): void {
+  async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    for (const held of this.leases.values()) held.lease.release();
+    const held = [...this.leases.values()];
     this.leases.clear();
+    const failures: unknown[] = [];
+    for (const item of held) {
+      try {
+        item.lease.release();
+        await item.workspace.release?.("host-shutdown");
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length > 0) throw new AggregateError(failures, "Graph workspace release failed");
   }
 
   private requireStoredRecord(record: AgentGraphRecordRef): AgentGraphRecordRefRecord {
@@ -313,4 +386,15 @@ function renderActivationPrompt(instruction: string, handoffPrompt: string): str
 
 function requireWorkDir(workDir: string): void {
   if (!workDir.trim()) throw new Error("Graph operator workDir must not be empty");
+}
+
+function isTerminalRuntimeProjection(
+  status: AgentGraphActivationRuntimeProjection["status"],
+): boolean {
+  return (
+    status === "completed" ||
+    status === "failed" ||
+    status === "cancelled" ||
+    status === "interrupted"
+  );
 }

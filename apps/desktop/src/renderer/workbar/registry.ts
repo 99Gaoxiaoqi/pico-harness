@@ -1,4 +1,4 @@
-import type { WorkbarDock, WorkbarTab, WorkbarToolKind } from "./types.js";
+import type { WorkbarAction, WorkbarDock, WorkbarTab, WorkbarToolKind } from "./types.js";
 
 export interface WorkbarToolDefinition {
   readonly kind: WorkbarToolKind;
@@ -80,6 +80,14 @@ export const WORKBAR_TOOL_REGISTRY = [
     multiple: false,
     persistsAcrossRestart: true,
   },
+  {
+    kind: "graph",
+    label: "Graph",
+    description: "查看调度周期、Operator、产出与唤醒时间线",
+    defaultDock: "right",
+    multiple: false,
+    persistsAcrossRestart: true,
+  },
 ] as const satisfies readonly WorkbarToolDefinition[];
 
 export function getWorkbarTool(kind: WorkbarToolKind): WorkbarToolDefinition {
@@ -91,6 +99,14 @@ export function getWorkbarTool(kind: WorkbarToolKind): WorkbarToolDefinition {
 export function createWorkbarToolTab(kind: WorkbarToolKind): WorkbarTab {
   const tool = getWorkbarTool(kind);
   return { id: kind, kind, label: tool.label };
+}
+
+/** Makes the active Graph epoch visible when a session enters Graph mode. */
+export function graphModeWorkbarAction(
+  orchestrationMode: "default" | "graph" | undefined,
+): WorkbarAction | undefined {
+  if (orchestrationMode !== "graph") return undefined;
+  return { type: "open", tab: createWorkbarToolTab("graph"), dock: "right" };
 }
 
 export function isStaticWorkbarToolTab(tab: WorkbarTab): boolean {

@@ -612,6 +612,10 @@ export interface AgentEngineOptions {
   collaborationMode?: () => "agent" | "plan";
   /** Run-scoped latch marked by submit_plan after durable proposal creation. */
   planHandoff?: PlanHandoffController;
+  /** Host-owned tools whose successful durable result ends the current engine Run. */
+  stopAfterSuccessfulToolNames?: readonly string[];
+  /** Host-owned control plane: preserve model/runtime facts without projecting tool rounds to users. */
+  controlPlanePresentation?: boolean;
   /** 当前 route 的统一上下文预算；未注入时仅保留旧 Compactor 兼容路径。 */
   contextBudget?: ContextBudget;
   /** 主动整理水位，默认为输入预算的 85%。 */
@@ -820,6 +824,8 @@ export class AgentEngine implements AgentRunner {
   private readonly runtimePort?: EngineRuntimePort;
   private readonly collaborationMode?: () => "agent" | "plan";
   private readonly planHandoff?: PlanHandoffController;
+  private readonly stopAfterSuccessfulToolNames: ReadonlySet<string>;
+  private readonly controlPlanePresentation: boolean;
   constructor(opts: AgentEngineOptions) {
     this.provider = opts.provider;
     this.registry = opts.registry;
@@ -872,6 +878,8 @@ export class AgentEngine implements AgentRunner {
     this.runtimePort = opts.runtimePort;
     this.collaborationMode = opts.collaborationMode;
     this.planHandoff = opts.planHandoff;
+    this.stopAfterSuccessfulToolNames = new Set(opts.stopAfterSuccessfulToolNames ?? []);
+    this.controlPlanePresentation = opts.controlPlanePresentation === true;
   }
 
   private isPlanning(): boolean {
@@ -1864,6 +1872,18 @@ export class AgentEngine implements AgentRunner {
           }
 
           const toolCalls = responseMsg.toolCalls ?? [];
+          if (this.controlPlanePresentation && toolCalls.length > 0) {
+            reporter.onAssistantResponseSuppressed?.("internal-control");
+            responseMsg = {
+              ...responseMsg,
+              providerData: {
+                ...responseMsg.providerData,
+                picoKind: "control_plane_tool_round",
+                picoPresentationAudience: "internal",
+                picoHiddenFromTranscript: true,
+              },
+            };
+          }
           if (
             exploreSynthesisOnly &&
             toolCalls.some((toolCall) => !this.exploreSynthesisAllowedTools.has(toolCall.name))
@@ -2350,6 +2370,15 @@ export class AgentEngine implements AgentRunner {
             results,
             completedToolReportIndexes,
           );
+          const successfulTerminalTool = toolCalls.some(
+            (call, index) =>
+              this.stopAfterSuccessfulToolNames.has(call.name) &&
+              results[index]?.report.status === "succeeded",
+          );
+          if (successfulTerminalTool) {
+            reporter.onFinish();
+            break;
+          }
           if (this.planHandoff?.hasPending()) {
             this.planHandoff.consume();
             reporter.onFinish();
@@ -2562,6 +2591,7 @@ export class AgentEngine implements AgentRunner {
     runtimeRun: EngineRuntimeRun | undefined,
   ): Promise<readonly CanonicalTranscriptToolStart[] | undefined> {
     if (toolCalls.length === 0) return [];
+    if (this.controlPlanePresentation) return undefined;
     const durableStarts = runtimeRun
       ? await runtimeRun.recordTranscriptToolStarts(session, toolCalls)
       : undefined;
@@ -2579,6 +2609,7 @@ export class AgentEngine implements AgentRunner {
   ): void {
     let firstError: unknown;
     for (const [index, toolCall] of toolCalls.entries()) {
+      if (this.controlPlanePresentation) continue;
       const durableStart: CanonicalTranscriptToolStart | undefined = durableStarts?.[index];
       try {
         reporter.onToolCall(
@@ -2699,7 +2730,7 @@ export class AgentEngine implements AgentRunner {
     let firstError: unknown;
     for (const { call, envelope } of results) {
       try {
-        reporter.onToolResult(structuredClone(envelope));
+        if (!this.controlPlanePresentation) reporter.onToolResult(structuredClone(envelope));
       } catch (error) {
         firstError ??= error;
         logger.warn(

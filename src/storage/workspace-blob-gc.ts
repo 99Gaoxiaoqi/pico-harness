@@ -407,12 +407,40 @@ function workspaceDigestIsReferenced(
   const database = openOperationalDatabaseReadOnly(storageRoot);
   try {
     if (kind === "evidence") {
-      return databaseJsonColumnContains(database, "evidence_records", "content_json", digest);
+      return (
+        databaseJsonColumnContains(database, "evidence_records", "content_json", digest) ||
+        databaseColumnContains(
+          database,
+          "agent_graph_resource_refs",
+          "content_digest",
+          digest,
+          "kind = 'evidence'",
+        )
+      );
     }
     return false;
   } finally {
     database.close();
   }
+}
+
+function databaseColumnContains(
+  database: DatabaseSync,
+  table: string,
+  column: string,
+  value: string,
+  where?: string,
+): boolean {
+  const present = database
+    .prepare("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?")
+    .get(table) as Record<string, unknown> | undefined;
+  if (!present) return false;
+  const row = database
+    .prepare(
+      `SELECT 1 AS present FROM ${table} WHERE ${column} = ?${where ? ` AND ${where}` : ""} LIMIT 1`,
+    )
+    .get(value) as Record<string, unknown> | undefined;
+  return row !== undefined;
 }
 
 function databaseJsonColumnContains(
