@@ -1,4 +1,5 @@
-import { accessSync, constants, mkdirSync, readdirSync, realpathSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { accessSync, constants, mkdirSync, realpathSync } from "node:fs";
 import { delimiter, dirname, isAbsolute, resolve } from "node:path";
 import type { SandboxPolicy } from "./types.js";
 
@@ -78,6 +79,9 @@ const BLOCKED_RESTRICTED_ENV_NAMES = new Set([
   "RUBYGEMS_GEMDEPS",
   "GEM_HOME",
   "GEM_PATH",
+  "GCONV_PATH",
+  "GLIBC_TUNABLES",
+  "LOCPATH",
   "PERL5OPT",
   "PERL5LIB",
   "PERLLIB",
@@ -246,21 +250,109 @@ export function shellRuntimeReadRoots(
 function toolchainRoots(executable: string): string[] {
   const canonical = canonicalize(executable);
   const normalized = canonical.replaceAll("\\", "/");
-  const cellarMatch = normalized.match(/^(.*)\/Cellar\/[^/]+\/[^/]+(?:\/|$)/u);
-  const cellar = normalized.match(/^(.*\/Cellar\/[^/]+\/[^/]+)(?:\/|$)/u)?.[1];
-  if (cellar && cellarMatch?.[1]) {
-    const opt = canonicalize(`${cellarMatch[1]}/opt`);
-    let linkedDependencies: string[] = [];
-    try {
-      linkedDependencies = readdirSync(opt).map((entry) => canonicalize(resolve(opt, entry)));
-    } catch {
-      // Homebrew opt 不存在时仅保留已解析的主工具链根。
-    }
-    return [canonicalize(cellar), opt, ...linkedDependencies];
+  const cellar = homebrewFormulaRoot(normalized);
+  if (cellar) {
+    return [canonicalize(cellar), ...macosLinkedLibraryAccess(canonical).roots];
   }
   const nix = normalized.match(/^(\/nix\/store\/[^/]+)(?:\/|$)/u)?.[1];
   if (nix) return [canonicalize(nix)];
   return [canonicalize(dirname(canonical))];
+}
+
+const MACOS_LINKED_LIBRARY_LIMIT = 128;
+interface MacosLinkedLibraryAccess {
+  readonly roots: readonly string[];
+  readonly aliases: readonly string[];
+}
+
+const macosLinkedLibraryAccessCache = new Map<string, MacosLinkedLibraryAccess>();
+
+function macosLinkedLibraryAccess(executable: string): MacosLinkedLibraryAccess {
+  if (process.platform !== "darwin" || !accessExecutable("/usr/bin/otool")) {
+    return { roots: [], aliases: [] };
+  }
+  const cached = macosLinkedLibraryAccessCache.get(executable);
+  if (cached) return cached;
+
+  const roots = new Set<string>();
+  const aliases = new Set<string>();
+  const inspected = new Set<string>();
+  const pending = [executable];
+  while (pending.length > 0 && inspected.size < MACOS_LINKED_LIBRARY_LIMIT) {
+    const candidate = pending.shift();
+    if (!candidate || inspected.has(candidate)) continue;
+    inspected.add(candidate);
+    const result = spawnSync("/usr/bin/otool", ["-L", candidate], {
+      encoding: "utf8",
+      timeout: 2_000,
+      maxBuffer: 1024 * 1024,
+      env: { PATH: "/usr/bin:/bin", LANG: "C", LC_ALL: "C" },
+    });
+    if (result.status !== 0 || typeof result.stdout !== "string") continue;
+    for (const line of result.stdout.split("\n").slice(1)) {
+      const normalizedLine = line.trim();
+      const metadataStart = normalizedLine.indexOf(" (");
+      const linkedPath = metadataStart > 0 ? normalizedLine.slice(0, metadataStart) : "";
+      if (!linkedPath.startsWith("/")) continue;
+      const linked = canonicalize(linkedPath);
+      const formula = homebrewFormulaRoot(linked.replaceAll("\\", "/"));
+      if (!formula) continue;
+      const canonicalFormula = canonicalize(formula);
+      roots.add(canonicalFormula);
+      const alias = homebrewOptFormulaRoot(linkedPath);
+      if (alias && canonicalize(alias) === canonicalFormula) aliases.add(alias);
+      if (!inspected.has(linked)) pending.push(linked);
+    }
+  }
+  const resolved = { roots: [...roots], aliases: [...aliases] };
+  macosLinkedLibraryAccessCache.set(executable, resolved);
+  return resolved;
+}
+
+function homebrewFormulaRoot(normalizedPath: string): string | undefined {
+  return normalizedPath.match(/^(.*\/Cellar\/[^/]+\/[^/]+)(?:\/|$)/u)?.[1];
+}
+
+function homebrewOptFormulaRoot(normalizedPath: string): string | undefined {
+  return normalizedPath.match(/^(.*\/opt\/[^/]+)(?:\/|$)/u)?.[1];
+}
+
+export function runtimeReadAliases(
+  command: string,
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+  readRoots: readonly string[] = [],
+): string[] {
+  if (platform !== "darwin") return [];
+  const aliases = new Set<string>();
+  const executable = resolveTrustedExecutable(command, env, platform);
+  if (executable) {
+    for (const alias of macosLinkedLibraryAccess(canonicalize(executable)).aliases) {
+      aliases.add(alias);
+    }
+  }
+  // Shell command 内的子进程依赖已被 shellRuntimeReadRoots 收录为真实
+  // Cellar 根；动态加载器仍会按 /opt/<formula> 词法路径访问。只为已授权
+  // 且实时指向同一 Cellar 根的单个 formula 补充 alias，不开放整个 opt。
+  for (const root of readRoots) {
+    const canonicalRoot = canonicalize(root);
+    const normalized = canonicalRoot.replaceAll("\\", "/");
+    const match = normalized.match(/^(.*)\/Cellar\/([^/]+)\/[^/]+(?:\/|$)/u);
+    const formulaRoot = homebrewFormulaRoot(normalized);
+    if (!match || !formulaRoot) continue;
+    const alias = resolve(match[1]!, "opt", match[2]!);
+    if (canonicalize(alias) === canonicalize(formulaRoot)) aliases.add(alias);
+  }
+  return [...aliases];
+}
+
+function accessExecutable(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function resolveTrustedExecutable(

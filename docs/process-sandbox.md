@@ -15,8 +15,8 @@ Restricted processes inherit only a portable system environment allowlist (`PATH
 terminal, user, and required Windows system variables). Host-approved MCP credentials/config,
 LSP configuration, and command Hook environment values are restored by explicit variable name.
 Dynamic loader and runtime-startup injection variables such as `LD_PRELOAD`, `DYLD_*`,
-`NODE_OPTIONS`, and `PYTHONPATH` are always removed from restricted processes, including explicit
-configuration. Pico rewrites home, temporary, and cache locations into a session scratch directory.
+`GLIBC_TUNABLES`, `GCONV_PATH`, `NODE_OPTIONS`, and `PYTHONPATH` are always removed from restricted
+processes, including explicit configuration. Pico rewrites home, temporary, and cache locations into a session scratch directory.
 `danger-full-access` keeps the complete caller environment unchanged.
 
 Workspace roots are readable; `workspace-write` also makes them writable. Files such as `.git`,

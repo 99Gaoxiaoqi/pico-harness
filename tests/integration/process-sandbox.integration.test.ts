@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +14,7 @@ import {
   createSandboxPolicy,
   isVerifiedBundledExecutable,
   managedProcessLauncher,
+  runtimeReadAliases,
   shellRuntimeReadRoots,
 } from "../../src/safety/process-sandbox/index.js";
 import { evaluateSandboxCommand } from "../../src/safety/yolo-sandbox.js";
@@ -220,12 +221,22 @@ test("受限环境只继承系统白名单、恢复显式变量并拒绝加载�
       NODE_OPTIONS: "--require=untrusted-loader.cjs",
       DYLD_INSERT_LIBRARIES: "/tmp/untrusted-loader.dylib",
       LD_PRELOAD: "/tmp/untrusted-loader.so",
+      GLIBC_TUNABLES: "glibc.malloc.check=3",
+      GCONV_PATH: "/tmp/untrusted-gconv",
       PYTHONPATH: "/tmp/untrusted-python-modules",
       HOME: "/host/home",
     },
     policy,
     process.platform,
-    ["PICO_EXPLICIT_FIXTURE", "NODE_OPTIONS", "DYLD_INSERT_LIBRARIES", "LD_PRELOAD", "PYTHONPATH"],
+    [
+      "PICO_EXPLICIT_FIXTURE",
+      "NODE_OPTIONS",
+      "DYLD_INSERT_LIBRARIES",
+      "LD_PRELOAD",
+      "GLIBC_TUNABLES",
+      "GCONV_PATH",
+      "PYTHONPATH",
+    ],
   );
   assert.equal(env.LANG, "C");
   assert.equal(env.PICO_EXPLICIT_FIXTURE, "forwarded");
@@ -233,6 +244,8 @@ test("受限环境只继承系统白名单、恢复显式变量并拒绝加载�
   assert.equal(env.NODE_OPTIONS, undefined);
   assert.equal(env.DYLD_INSERT_LIBRARIES, undefined);
   assert.equal(env.LD_PRELOAD, undefined);
+  assert.equal(env.GLIBC_TUNABLES, undefined);
+  assert.equal(env.GCONV_PATH, undefined);
   assert.equal(env.PYTHONPATH, undefined);
   assert.notEqual(env.HOME, "/host/home");
   assert.match(env.HOME ?? "", /scratch[/\\]home$/u);
@@ -328,6 +341,27 @@ test("模型命令文本不能把任意绝对可执行路径提升为运行时�
     false,
   );
 });
+
+test(
+  "Homebrew formula alias 指向其他 Cellar 根时不授权",
+  { skip: process.platform === "win32" },
+  async (context) => {
+    const root = await mkdtemp(join(tmpdir(), "pico-homebrew-alias-mismatch-"));
+    context.after(() => rm(root, { recursive: true, force: true }));
+    const formulaRoot = join(root, "Cellar", "fixture", "1.0.0");
+    const otherFormulaRoot = join(root, "Cellar", "other", "1.0.0");
+    const alias = join(root, "opt", "fixture");
+    await mkdir(formulaRoot, { recursive: true });
+    await mkdir(otherFormulaRoot, { recursive: true });
+    await mkdir(join(root, "opt"), { recursive: true });
+    await symlink(otherFormulaRoot, alias);
+
+    const aliases = runtimeReadAliases("/bin/sh", { PATH: "/usr/bin:/bin" }, "darwin", [
+      formulaRoot,
+    ]);
+    assert.equal(aliases.includes(alias), false);
+  },
+);
 
 test(
   "BashTool 允许 /dev/null 重定向且不接受伪绝对命令的读根提升",
