@@ -78,6 +78,7 @@ import { DesktopReporter, type DesktopReporterEvent } from "./desktop-reporter.j
 import type { SessionSubscriptionRegistry } from "./session-subscription-owner.js";
 import { PersistentActiveOverlay } from "./session-active-overlay.js";
 import { DesktopRuntimeService } from "./desktop-runtime-service.js";
+import type { PlanControlResponse } from "./plan-control-port.js";
 import { DesktopAutomationService } from "./desktop-automation-service.js";
 import { buildApprovalRequestedPayload } from "./approval-wire.js";
 import {
@@ -122,6 +123,11 @@ export interface ProductionLocalDaemonHostOptions {
   agentGraphWorkspaceHostFactory?: (
     options: CreateAgentGraphWorkspaceHostOptions,
   ) => AgentGraphWorkspaceHost;
+  /** Test/embedding observer for exact Plan review admission singleflight. */
+  planReviewAdmissionObserver?: (event: {
+    readonly operationId: string;
+    readonly phase: "started" | "joined";
+  }) => void;
   env?: Readonly<Record<string, string | undefined>>;
 }
 
@@ -251,6 +257,30 @@ export function createProductionRuntimeServices(
   let sessionSubscriptions: SessionSubscriptionRegistry | undefined;
   const activeOverlays = new Map<string, PersistentActiveOverlay>();
   const agentGraphHosts = new Map<string, AgentGraphWorkspaceHost>();
+  const planReviewAdmissionFlights = new Map<string, Promise<PlanControlResponse>>();
+  const runPlanReviewAdmission = (
+    workspacePath: string,
+    sessionId: string,
+    operationId: string,
+    operation: () => Promise<PlanControlResponse>,
+  ): Promise<PlanControlResponse> => {
+    const key = JSON.stringify([workspacePath, sessionId, operationId]);
+    const existing = planReviewAdmissionFlights.get(key);
+    if (existing) {
+      options.planReviewAdmissionObserver?.({ operationId, phase: "joined" });
+      return existing;
+    }
+    options.planReviewAdmissionObserver?.({ operationId, phase: "started" });
+    const flight = Promise.resolve().then(operation);
+    planReviewAdmissionFlights.set(key, flight);
+    const clear = () => {
+      if (planReviewAdmissionFlights.get(key) === flight) {
+        planReviewAdmissionFlights.delete(key);
+      }
+    };
+    void flight.then(clear, clear);
+    return flight;
+  };
   const agentGraphWorkspaceHostFactory =
     options.agentGraphWorkspaceHostFactory ?? createAgentGraphWorkspaceHost;
   const executeDetachedGraphRun = async (detached: {
@@ -1329,93 +1359,110 @@ export function createProductionRuntimeServices(
           input.action === "resume_execution" ||
           input.action === "replan_execution"
         ) {
-          const before = await readDesktopPlanProjection(
-            workspacePath,
-            input.sessionId,
-            picoHome,
-            operationId,
-          );
-          if (input.action === "execute" || input.action === "continue_editing") {
-            assertPendingPlanReview(before, input);
-          } else {
-            assertInterruptedPlanControl(before, input);
-          }
-          const claimed = await claimDesktopPlanReview(workspacePath, input.sessionId, picoHome, {
-            operationId,
-            planId: input.planId,
-            revision: input.expectedRevision,
-            controlEpoch: input.controlEpoch,
-            action: input.action,
-            ...(input.feedback ? { feedback: input.feedback } : {}),
-          });
-          const runInput = {
-            workspacePath,
-            sessionId: input.sessionId,
-            prompt:
-              input.action === "execute"
-                ? "执行已批准计划"
-                : input.action === "continue_editing"
-                  ? `[PLAN REVISION FEEDBACK]\n${input.feedback ?? "请继续修改计划。"}`
-                  : input.action === "resume_execution"
-                    ? "继续执行已中断计划"
-                    : "重新规划已中断计划",
-            execution: {
-              resumeExistingSession: true,
-              planReview: {
-                action: input.action,
-                planId: input.planId,
-                expectedRevision: input.expectedRevision,
-                // Claimed transitions validate the durable claim instead of a volatile
-                // full-ledger watermark; keep the persisted intent canonical across reconnects.
-                expectedSessionSequence: 0,
-                operationId,
-                controlEpoch: input.controlEpoch,
-                ...(input.feedback ? { feedback: input.feedback } : {}),
+          const action = input.action;
+          return runPlanReviewAdmission(workspacePath, input.sessionId, operationId, async () => {
+            const findExistingIntent = async () =>
+              (await service.listPlanReviewRunIntents(workspacePath, input.sessionId)).find(
+                (candidate) => candidate.input.operationId === operationId,
+              );
+            let existingIntent = await findExistingIntent();
+            const before = await readDesktopPlanProjection(
+              workspacePath,
+              input.sessionId,
+              picoHome,
+              operationId,
+            );
+            if (!existingIntent) {
+              try {
+                if (action === "execute" || action === "continue_editing") {
+                  assertPendingPlanReview(before, input);
+                } else {
+                  assertInterruptedPlanControl(before, input);
+                }
+              } catch (error) {
+                // A prior process may reserve its exact Run before that Run moves the
+                // Plan ledger. Recheck durable intent before treating the card as stale.
+                existingIntent = await findExistingIntent();
+                if (!existingIntent) throw error;
+              }
+            }
+            const claimed = existingIntent
+              ? before
+              : await claimDesktopPlanReview(workspacePath, input.sessionId, picoHome, {
+                  operationId,
+                  planId: input.planId,
+                  revision: input.expectedRevision,
+                  controlEpoch: input.controlEpoch,
+                  action,
+                  ...(input.feedback ? { feedback: input.feedback } : {}),
+                });
+            const runInput = {
+              workspacePath,
+              sessionId: input.sessionId,
+              prompt:
+                action === "execute"
+                  ? "执行已批准计划"
+                  : action === "continue_editing"
+                    ? `[PLAN REVISION FEEDBACK]\n${input.feedback ?? "请继续修改计划。"}`
+                    : action === "resume_execution"
+                      ? "继续执行已中断计划"
+                      : "重新规划已中断计划",
+              execution: {
+                resumeExistingSession: true,
+                planReview: {
+                  action,
+                  planId: input.planId,
+                  expectedRevision: input.expectedRevision,
+                  // Claimed transitions validate the durable claim instead of a volatile
+                  // full-ledger watermark; keep the persisted intent canonical across reconnects.
+                  expectedSessionSequence: 0,
+                  operationId,
+                  controlEpoch: input.controlEpoch,
+                  ...(input.feedback ? { feedback: input.feedback } : {}),
+                },
               },
-            },
-            idempotencyKey: operationId,
-            operationId,
-            controlEpoch: input.controlEpoch,
-            planId: input.planId,
-            revision: input.expectedRevision,
-            action: input.action,
-          } as const;
-          const existingIntent = (
-            await service.listPlanReviewRunIntents(workspacePath, input.sessionId)
-          ).find((candidate) => candidate.input.operationId === operationId);
-          if (claimed.reviewClaim?.operationId !== operationId && !existingIntent) {
-            return { accepted: true, projection: claimed };
-          }
-          const intent = existingIntent ?? {
-            input: runInput,
-            ...(await service.reservePlanReviewRun(runInput, planReviewRunId(operationId))),
-          };
-          const projection =
-            input.action === "continue_editing" && claimed.reviewClaim?.operationId === operationId
-              ? (
-                  await agentRuntime.requestPlanRevision({
-                    sessionId: input.sessionId,
-                    dir: workspacePath,
-                    picoHome,
-                    env,
-                    planId: input.planId,
-                    expectedRevision: input.expectedRevision,
-                    expectedSessionSequence: 0,
-                    operationId: transitionOperationId,
-                    claimOperationId: operationId,
-                    feedback: input.feedback ?? "请继续修改计划。",
-                  })
-                ).projection
-              : claimed;
-          const run = await service.startReservedPlanReviewRun(intent);
-          publishDesktopPlanProjection(
-            service,
-            workspacePath,
-            projection,
-            input.action === "continue_editing" ? "continue_editing" : "executing",
-            nextDesktopResourceVersion,
-          );
-          return { accepted: true, projection, run: jsonObject(run) };
+              idempotencyKey: operationId,
+              operationId,
+              controlEpoch: input.controlEpoch,
+              planId: input.planId,
+              revision: input.expectedRevision,
+              action,
+            } as const;
+            existingIntent ??= await findExistingIntent();
+            if (claimed.reviewClaim?.operationId !== operationId && !existingIntent) {
+              return { accepted: true, projection: claimed };
+            }
+            const intent = existingIntent ?? {
+              input: runInput,
+              ...(await service.reservePlanReviewRun(runInput, planReviewRunId(operationId))),
+            };
+            const projection =
+              action === "continue_editing" && claimed.reviewClaim?.operationId === operationId
+                ? (
+                    await agentRuntime.requestPlanRevision({
+                      sessionId: input.sessionId,
+                      dir: workspacePath,
+                      picoHome,
+                      env,
+                      planId: input.planId,
+                      expectedRevision: input.expectedRevision,
+                      expectedSessionSequence: 0,
+                      operationId: transitionOperationId,
+                      claimOperationId: operationId,
+                      feedback: input.feedback ?? "请继续修改计划。",
+                    })
+                  ).projection
+                : claimed;
+            const run = await service.startReservedPlanReviewRun(intent);
+            publishDesktopPlanProjection(
+              service,
+              workspacePath,
+              projection,
+              action === "continue_editing" ? "continue_editing" : "executing",
+              nextDesktopResourceVersion,
+            );
+            return { accepted: true, projection, run: jsonObject(run) };
+          });
         }
         const lease = await globalSessionManager.getOrCreatePinned(input.sessionId, workspacePath, {
           persistence: true,

@@ -117,12 +117,15 @@ export async function createSessionHookRuntime(
         ? { generation: options.processSandbox.generation }
         : {}),
     }),
-    authorizeCommandExecution: async (entry) =>
-      await (entry.source.trustAuthority ?? trustStore).authorizeCommandExecution({
-        workspace: options.workDir,
-        source: entry.source,
-        handler: entry.handler,
-      }),
+    authorizeCommandExecution: async (entry, shell) =>
+      await (entry.source.trustAuthority ?? trustStore).authorizeCommandExecution(
+        {
+          workspace: options.workDir,
+          source: entry.source,
+          handler: entry.handler,
+        },
+        shell,
+      ),
   });
   const service = new HookService({
     workDir: options.workDir,

@@ -11,6 +11,8 @@ on:
       - "native/**"
       - "resources/**"
       - "scripts/build-windows-broker.mjs"
+      - "scripts/run-desktop-forge.mjs"
+      - "scripts/terminal-bench/**"
       - "scripts/verify-sandbox-resources.mjs"
       - "package.json"
       - "package-lock.json"
@@ -24,6 +26,8 @@ on:
       - "native/**"
       - "resources/**"
       - "scripts/build-windows-broker.mjs"
+      - "scripts/run-desktop-forge.mjs"
+      - "scripts/terminal-bench/**"
       - "scripts/verify-sandbox-resources.mjs"
       - "package.json"
       - "package-lock.json"
@@ -31,6 +35,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   desktop-check:
@@ -40,6 +48,7 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v7
@@ -59,12 +68,42 @@ jobs:
 
       - run: npm ci
 
-      - name: Build Windows AppContainer Broker
+      - name: Install ripgrep for the native Grep sandbox path
+        if: runner.os == 'macOS'
+        run: brew install ripgrep
+
+      - name: Build Windows AppContainer resources
         if: runner.os == 'Windows'
         run: npm run build:sandbox:windows
 
       - name: Verify sandbox resources
         run: npm run verify:sandbox:resources -- ${{ runner.os == 'Windows' && '--require-current' || '' }}
+
+      - name: Prepare and verify the Windows null device sandbox boundary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $hostPrep = Resolve-Path "resources/sandbox/win32-x64/pico-appcontainer-host-prep.exe"
+          $firstJson = & $hostPrep prepare-null-device --json
+          if ($LASTEXITCODE -ne 0) { throw "initial host preparation failed ($LASTEXITCODE)" }
+          $first = $firstJson | ConvertFrom-Json
+          if ($first.result -notin @("applied", "no-change")) {
+            throw "unexpected initial host preparation result: $($first.result)"
+          }
+
+          $secondJson = & $hostPrep prepare-null-device --json
+          if ($LASTEXITCODE -ne 0) { throw "idempotent host preparation failed ($LASTEXITCODE)" }
+          $second = $secondJson | ConvertFrom-Json
+          if ($second.result -ne "no-change") {
+            throw "second host preparation must be a no-op, got: $($second.result)"
+          }
+
+          $verifyJson = & $hostPrep verify-null-device --json
+          if ($LASTEXITCODE -ne 0) { throw "host preparation verification failed ($LASTEXITCODE)" }
+          $verify = $verifyJson | ConvertFrom-Json
+          if ($verify.result -ne "match") {
+            throw "prepared null device does not match the target SDDL"
+          }
 
       - name: Audit full dependency tree
         run: npm audit --audit-level=low

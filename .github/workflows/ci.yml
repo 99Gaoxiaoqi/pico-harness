@@ -9,9 +9,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v7
@@ -27,7 +32,7 @@ jobs:
       - name: Install filesystem metadata tools
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y acl attr libcap2-bin libcap-dev meson ninja-build python3-venv xz-utils
+          sudo apt-get install --no-install-recommends -y acl attr libcap2-bin libcap-dev meson ninja-build python3-venv ripgrep xz-utils
 
       - name: Install dependencies
         run: npm ci
@@ -36,6 +41,13 @@ jobs:
         run: |
           npm run build:sandbox:linux
           npm run verify:sandbox:resources -- --require-current
+
+      - name: Enable unprivileged user namespaces for Bubblewrap integration
+        run: |
+          if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+            echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          fi
+          unshare --user --map-root-user true
 
       - name: Audit full dependency tree
         run: npm audit --audit-level=low
@@ -56,7 +68,10 @@ jobs:
         run: npm run format
 
       - name: Run deterministic integration suite
-        run: npm run test:integration
+        run: |
+          node_executable="$(command -v node)"
+          npm_executable="$(command -v npm)"
+          PATH="/usr/bin:/bin:$PATH" "$node_executable" "$npm_executable" run test:integration
 
       - name: Verify root-only Linux publication ordering in container
         run: |
@@ -93,6 +108,7 @@ jobs:
   node-compatibility:
     name: Node.js ${{ matrix.node }} compatibility
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -112,10 +128,22 @@ jobs:
       - name: Install filesystem metadata tools
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y acl attr libcap2-bin python3-venv
+          sudo apt-get install --no-install-recommends -y acl attr libcap2-bin libcap-dev meson ninja-build python3-venv ripgrep xz-utils
 
       - name: Install dependencies for this Node ABI
         run: npm ci
+
+      - name: Build and verify bundled Linux sandbox
+        run: |
+          npm run build:sandbox:linux
+          npm run verify:sandbox:resources -- --require-current
+
+      - name: Enable unprivileged user namespaces for Bubblewrap integration
+        run: |
+          if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+            echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          fi
+          unshare --user --map-root-user true
 
       - name: Verify local file storage capabilities
         run: npm run check:storage
@@ -126,7 +154,10 @@ jobs:
           npm run desktop:typecheck
 
       - name: Run deterministic integration suite
-        run: npm run test:integration
+        run: |
+          node_executable="$(command -v node)"
+          npm_executable="$(command -v npm)"
+          PATH="/usr/bin:/bin:$PATH" "$node_executable" "$npm_executable" run test:integration
 
       - name: Build distributable
         run: npm run build
@@ -152,13 +183,61 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      - name: Install pinned ripgrep for the native Grep sandbox path
+        shell: pwsh
+        run: |
+          $version = "15.2.0"
+          $archive = Join-Path $env:RUNNER_TEMP "ripgrep-$version.zip"
+          $installRoot = Join-Path $env:RUNNER_TEMP "ripgrep-$version"
+          $url = "https://github.com/BurntSushi/ripgrep/releases/download/$version/ripgrep-$version-x86_64-pc-windows-msvc.zip"
+          $expectedSha256 = "71b2fef860abe467217a538ff31de02f5258807c0129f771846f87bd029aafc5"
+
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          $actualSha256 = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          if ($actualSha256 -ne $expectedSha256) {
+            throw "ripgrep archive checksum mismatch: $actualSha256"
+          }
+
+          Expand-Archive -Path $archive -DestinationPath $installRoot
+          $binary = Get-ChildItem -Path $installRoot -Filter rg.exe -Recurse | Select-Object -First 1
+          if (-not $binary) { throw "rg.exe was not present in the verified archive" }
+          $binary.Directory.FullName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & $binary.FullName --version
+
       - name: Install dependencies
         run: npm ci
 
-      - name: Build and verify AppContainer Broker
+      - name: Build and verify AppContainer resources
         run: |
+          cargo test --locked --manifest-path native/windows-appcontainer-broker/Cargo.toml --target x86_64-pc-windows-msvc
           npm run build:sandbox:windows
           npm run verify:sandbox:resources -- --require-current
+
+      - name: Prepare and verify the Windows null device sandbox boundary
+        shell: pwsh
+        run: |
+          $hostPrep = Resolve-Path "resources/sandbox/win32-x64/pico-appcontainer-host-prep.exe"
+
+          $firstJson = & $hostPrep prepare-null-device --json
+          if ($LASTEXITCODE -ne 0) { throw "initial host preparation failed ($LASTEXITCODE)" }
+          $first = $firstJson | ConvertFrom-Json
+          if ($first.result -notin @("applied", "no-change")) {
+            throw "unexpected initial host preparation result: $($first.result)"
+          }
+
+          $secondJson = & $hostPrep prepare-null-device --json
+          if ($LASTEXITCODE -ne 0) { throw "idempotent host preparation failed ($LASTEXITCODE)" }
+          $second = $secondJson | ConvertFrom-Json
+          if ($second.result -ne "no-change") {
+            throw "second host preparation must be a no-op, got: $($second.result)"
+          }
+
+          $verifyJson = & $hostPrep verify-null-device --json
+          if ($LASTEXITCODE -ne 0) { throw "host preparation verification failed ($LASTEXITCODE)" }
+          $verify = $verifyJson | ConvertFrom-Json
+          if ($verify.result -ne "match") {
+            throw "prepared null device does not match the target SDDL"
+          }
 
       - uses: actions/upload-artifact@v4
         with:
@@ -170,8 +249,13 @@ jobs:
           PICO_WINDOWS_LOW_PRIVILEGE_TEST: "1"
         run: npm run test:integration:windows
 
-      - name: Run Windows process sandbox integration
-        run: node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/process-sandbox.integration.test.ts tests/integration/process-sandbox-native.integration.test.ts
+      - name: Run Windows process sandbox contract integration
+        timeout-minutes: 5
+        run: node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/process-sandbox.integration.test.ts
+
+      - name: Run Windows native process sandbox integration
+        timeout-minutes: 5
+        run: node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/process-sandbox-native.integration.test.ts
 
       - name: Cleanup temporary Windows ACL users
         if: always()
@@ -184,6 +268,7 @@ jobs:
   macos-process-sandbox:
     name: macOS process sandbox integration
     runs-on: macos-latest
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v7
@@ -196,11 +281,14 @@ jobs:
           cache: "npm"
 
       - run: npm ci
+      - name: Install ripgrep for the native Grep sandbox path
+        run: brew install ripgrep
       - run: npm run verify:sandbox:resources
       - run: node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/process-sandbox.integration.test.ts tests/integration/process-sandbox-native.integration.test.ts
 
   linux-process-sandbox:
     name: Linux process sandbox (${{ matrix.arch }})
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -223,25 +311,39 @@ jobs:
 
       - run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y libcap-dev meson ninja-build xz-utils
+          sudo apt-get install --no-install-recommends -y libcap-dev meson ninja-build ripgrep xz-utils
       - run: npm ci
       - run: npm run build:sandbox:linux
       - run: npm run verify:sandbox:resources -- --require-current
+      - name: Enable unprivileged user namespaces for Bubblewrap integration
+        shell: bash
+        run: |
+          if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+            echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          fi
+          unshare --user --map-root-user true
+      - name: Archive Linux sandbox with executable permissions
+        run: tar -C resources/sandbox -cf "${RUNNER_TEMP}/sandbox-linux-${{ matrix.arch }}.tar" "linux-${{ matrix.arch }}"
       - uses: actions/upload-artifact@v4
         with:
           name: sandbox-linux-${{ matrix.arch }}
-          path: resources/sandbox/linux-${{ matrix.arch }}
+          path: ${{ runner.temp }}/sandbox-linux-${{ matrix.arch }}.tar
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: matrix.arch == 'x64'
         with:
           name: sandbox-bubblewrap-corresponding-source
           path: resources/licenses/bubblewrap
-      - run: node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/process-sandbox.integration.test.ts tests/integration/process-sandbox-native.integration.test.ts
+      - name: Run Linux process sandbox integration
+        run: |
+          node_executable="$(command -v node)"
+          PATH="/usr/bin:/bin:$PATH" "$node_executable" --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/process-sandbox.integration.test.ts tests/integration/process-sandbox-native.integration.test.ts
 
   sandbox-publication:
     name: Verify complete native sandbox publication
     needs: [windows-security, linux-process-sandbox]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v7
@@ -257,11 +359,11 @@ jobs:
       - uses: actions/download-artifact@v5
         with:
           name: sandbox-linux-x64
-          path: resources/sandbox/linux-x64
+          path: artifacts/linux-x64
       - uses: actions/download-artifact@v5
         with:
           name: sandbox-linux-arm64
-          path: resources/sandbox/linux-arm64
+          path: artifacts/linux-arm64
       - uses: actions/download-artifact@v5
         with:
           name: sandbox-windows-x64
@@ -270,5 +372,9 @@ jobs:
         with:
           name: sandbox-bubblewrap-corresponding-source
           path: resources/licenses/bubblewrap
+      - name: Restore Linux sandbox executable permissions
+        run: |
+          tar -xf artifacts/linux-x64/sandbox-linux-x64.tar -C resources/sandbox
+          tar -xf artifacts/linux-arm64/sandbox-linux-arm64.tar -C resources/sandbox
       - run: npm run verify:sandbox:resources -- --require-all
-      - run: npm pack --dry-run
+      - run: npm run verify:sandbox:package

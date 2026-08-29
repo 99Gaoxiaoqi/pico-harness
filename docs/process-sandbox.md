@@ -11,11 +11,18 @@ and subagent tools. Daemon installation, credential access, Git/worktree integra
 Desktop system actions remain host control-plane operations. The architecture check rejects a
 runtime `child_process` import in a model process entrypoint.
 
-Restricted processes inherit ordinary host variables, while Pico rewrites home, temporary, and
-cache locations into a session scratch directory. Workspace roots are readable; `workspace-write`
-also makes them writable. Files such as `.git`, `.env`, and `AGENTS.md` do not receive a special
-OS-level rule when they are inside an authorized workspace. `/dev/null`, `/dev/tty`, and Windows
-`NUL` are treated as devices rather than external write paths.
+Restricted processes inherit only a portable system environment allowlist (`PATH`, locale,
+terminal, user, and required Windows system variables). Host-approved MCP credentials/config,
+LSP configuration, and command Hook environment values are restored by explicit variable name.
+Dynamic loader and runtime-startup injection variables such as `LD_PRELOAD`, `DYLD_*`,
+`GLIBC_TUNABLES`, `GCONV_PATH`, `NODE_OPTIONS`, and `PYTHONPATH` are always removed from restricted
+processes, including explicit configuration. Pico rewrites home, temporary, and cache locations into a session scratch directory.
+`danger-full-access` keeps the complete caller environment unchanged.
+
+Workspace roots are readable; `workspace-write` also makes them writable. Files such as `.git`,
+`.env`, and `AGENTS.md` do not receive a special OS-level rule when they are inside an authorized
+workspace. `/dev/null`, `/dev/tty`, and Windows `NUL` are treated as devices rather than external
+write paths.
 
 ## Native backends
 
@@ -28,7 +35,36 @@ OS-level rule when they are inside an authorized workspace. `/dev/null`, `/dev/t
   ephemeral AppContainer, grants a process-specific capability SID to policy roots, supplies no
   network capability to restricted profiles, uses a kill-on-close Job Object, and journals
   temporary ACL changes for idempotent recovery. The Broker is launched per target process and is
-  not installed as a persistent Windows service.
+  not installed as a persistent Windows service. It never requests elevation.
+
+### Windows host preparation
+
+Classic AppContainer processes need `NUL` for standard-stream redirection, but Windows restores
+the `\Device\Null` security descriptor at every boot without the well-known AppContainer package
+SIDs. Pico therefore packages a separate, checksum-verified
+`resources/sandbox/win32-x64/pico-appcontainer-host-prep.exe`. Run this explicit command once per
+boot from an elevated administrator context (for example, an administrator startup task or an
+MDM-managed startup script), before starting Pico:
+
+```powershell
+& ".\resources\sandbox\win32-x64\pico-appcontainer-host-prep.exe" prepare-null-device --json
+& ".\resources\sandbox\win32-x64\pico-appcontainer-host-prep.exe" verify-null-device --json
+```
+
+Release builds embed `requireAdministrator`; a runtime token check fails with exit code `65` if
+that contract is bypassed. The helper enables `SeSecurityPrivilege`, compares owner, group, DACL,
+and SACL structurally, and writes the complete target descriptor with one
+`SetKernelObjectSecurity` call only when drift exists. A second preparation is a no-op. The managed
+target is:
+
+```text
+O:BAG:SYD:(A;;GRGWGX;;;WD)(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;RC)(A;;GRGWGX;;;AC)(A;;GRGWGX;;;S-1-15-2-2)S:(ML;;NW;;;LW)
+```
+
+This host-prep command does not grant access on the system-drive root and does not modify any
+system-drive DACL. The per-process Broker remains unprivileged and never invokes host-prep or UAC.
+The design and target descriptor follow Microsoft's published MXC host-preparation contract at
+[microsoft/mxc@066bab2](https://github.com/microsoft/mxc/blob/066bab24bb8c787f1a962271a6d9aa2a84d24f44/docs/host-prep.md#prepare-null-device).
 
 If a restricted backend or its verified sidecar checksum is missing, process startup fails closed.
 There is no fallback to an unsandboxed host process. Native binaries are produced on their target

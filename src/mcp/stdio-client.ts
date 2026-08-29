@@ -138,6 +138,7 @@ export class StdioMcpClient implements McpClient {
         args,
         cwd: processCwd,
         env: childEnv,
+        explicitEnvKeys: Object.keys(env ?? {}),
         origin: "stdio-mcp",
         policy: this.options.processSandbox!,
       },

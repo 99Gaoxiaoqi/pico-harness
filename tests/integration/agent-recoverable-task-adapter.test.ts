@@ -135,22 +135,73 @@ test("two file-backed ports atomically claim one launchId and install one worker
   );
 });
 
+test("contention deadline only bounds a caller without a durable worker receipt", async (context) => {
+  const fixture = await createFixture(context, "live-claim-timeout");
+  const installerStarted = deferred();
+  const releaseInstaller = deferred();
+  let installCalls = 0;
+  const installer: AgentRecoveryWorkerInstaller = {
+    async installOrConfirmWorker(intent) {
+      installCalls++;
+      installerStarted.resolve();
+      await releaseInstaller.promise;
+      return workerReceipt(intent.launchId, `worker:${intent.launchId}`);
+    },
+  };
+  const createPort = (ownerId: string, contentionTimeoutMs: number) =>
+    new FileAgentRecoveryLaunchIntentPort({
+      storageRoot: fixture.store.storageRoot,
+      storageRootId: fixture.storageRootId,
+      installer,
+      ownerId,
+      claimTtlMs: 1_000,
+      contentionTimeoutMs,
+      contentionPollMs: 5,
+    });
+  const firstResume = fixture
+    .createAdapter(createPort("host:timeout:first", 500))
+    .resume(fixture.input, fixture.resumeContext);
+  await installerStarted.promise;
+  try {
+    await assert.rejects(
+      async () =>
+        fixture
+          .createAdapter(createPort("host:timeout:second", 0))
+          .resume(fixture.input, fixture.resumeContext),
+      /still installing under another live claim/u,
+    );
+  } finally {
+    releaseInstaller.resolve();
+  }
+  await firstResume;
+  assert.equal(installCalls, 1);
+});
+
 test("an expired installing claim is taken over without duplicating the durable worker", async (context) => {
   const fixture = await createFixture(context, "expired-claim");
   const installed = new Map<string, string>();
   let installCalls = 0;
   let actualInstallations = 0;
+  let nowMs = Date.parse("2026-08-30T00:00:00.000Z");
+  const firstInstallerStarted = deferred();
+  const secondInstallerStarted = deferred();
+  const releaseFirstInstaller = deferred();
+  const releaseSecondInstaller = deferred();
   const installer: AgentRecoveryWorkerInstaller = {
     async installOrConfirmWorker(intent) {
-      installCalls++;
+      const call = ++installCalls;
       let workerId = installed.get(intent.launchId);
       if (!workerId) {
         workerId = `worker:${intent.launchId}`;
         installed.set(intent.launchId, workerId);
         actualInstallations++;
       }
-      if (installCalls === 1) {
-        await new Promise((resolveDelay) => setTimeout(resolveDelay, 80));
+      if (call === 1) {
+        firstInstallerStarted.resolve();
+        await releaseFirstInstaller.promise;
+      } else {
+        secondInstallerStarted.resolve();
+        await releaseSecondInstaller.promise;
       }
       return workerReceipt(intent.launchId, workerId);
     },
@@ -161,18 +212,29 @@ test("an expired installing claim is taken over without duplicating the durable 
       storageRootId: fixture.storageRootId,
       installer,
       ownerId,
-      claimTtlMs: 25,
+      claimTtlMs: 100,
       contentionTimeoutMs: 500,
       contentionPollMs: 5,
+      now: () => new Date(nowMs),
     });
   const firstPort = createPort("host:expired:first");
   const secondPort = createPort("host:expired:second");
   const firstResume = fixture.createAdapter(firstPort).resume(fixture.input, fixture.resumeContext);
-  await new Promise((resolveDelay) => setTimeout(resolveDelay, 40));
+  await firstInstallerStarted.promise;
+  nowMs += 101;
   const secondResume = fixture
     .createAdapter(secondPort)
     .resume(fixture.input, fixture.resumeContext);
-  const [first, second] = await Promise.all([firstResume, secondResume]);
+  await secondInstallerStarted.promise;
+  nowMs += 1_000;
+  releaseFirstInstaller.resolve();
+  let first: Awaited<typeof firstResume>;
+  try {
+    first = await firstResume;
+  } finally {
+    releaseSecondInstaller.resolve();
+  }
+  const second = await secondResume;
 
   assert.deepEqual(second, first);
   assert.equal(installCalls, 2);
@@ -180,6 +242,72 @@ test("an expired installing claim is taken over without duplicating the durable 
   const projection = await firstPort.inspect(first.launchId);
   assert.equal(projection?.state, "installed");
   assert.equal(projection?.claimEpoch, 2);
+});
+
+test("a superseded installer fails closed when the durable worker identity changes", async (context) => {
+  const fixture = await createFixture(context, "expired-claim-worker-conflict");
+  let installCalls = 0;
+  let nowMs = Date.parse("2026-08-30T00:00:00.000Z");
+  const firstInstallerStarted = deferred();
+  const secondInstallerStarted = deferred();
+  const releaseFirstInstaller = deferred();
+  const releaseSecondInstaller = deferred();
+  const installer: AgentRecoveryWorkerInstaller = {
+    async installOrConfirmWorker(intent) {
+      const call = ++installCalls;
+      if (call === 1) {
+        firstInstallerStarted.resolve();
+        await releaseFirstInstaller.promise;
+        return workerReceipt(intent.launchId, `worker:first:${intent.launchId}`);
+      }
+      secondInstallerStarted.resolve();
+      await releaseSecondInstaller.promise;
+      return workerReceipt(intent.launchId, `worker:second:${intent.launchId}`);
+    },
+  };
+  const createPort = (ownerId: string) =>
+    new FileAgentRecoveryLaunchIntentPort({
+      storageRoot: fixture.store.storageRoot,
+      storageRootId: fixture.storageRootId,
+      installer,
+      ownerId,
+      claimTtlMs: 100,
+      contentionTimeoutMs: 500,
+      contentionPollMs: 5,
+      now: () => new Date(nowMs),
+    });
+  const firstPort = createPort("host:conflict:first");
+  const secondPort = createPort("host:conflict:second");
+  const firstResume = fixture.createAdapter(firstPort).resume(fixture.input, fixture.resumeContext);
+  await firstInstallerStarted.promise;
+  nowMs += 101;
+  const secondResume = fixture
+    .createAdapter(secondPort)
+    .resume(fixture.input, fixture.resumeContext);
+  await secondInstallerStarted.promise;
+  nowMs += 1_000;
+  releaseFirstInstaller.resolve();
+  let first: Awaited<typeof firstResume>;
+  try {
+    first = await firstResume;
+  } finally {
+    releaseSecondInstaller.resolve();
+  }
+  const [second] = await Promise.allSettled([secondResume]);
+
+  assert.equal(second?.status, "rejected");
+  assert.match(
+    second?.status === "rejected" ? String(second.reason) : "",
+    /installed with another worker/u,
+  );
+  assert.equal(first.launchId, fixture.resumeContext.launchId);
+  assert.equal(installCalls, 2);
+  const projection = await firstPort.inspect(fixture.resumeContext.launchId);
+  assert.equal(projection?.state, "installed");
+  assert.equal(
+    projection?.state === "installed" ? projection.worker.workerId : undefined,
+    `worker:first:${fixture.resumeContext.launchId}`,
+  );
 });
 
 test("immutable Agent input rejects extra prompt data and a launchId cannot be rebound", async (context) => {
@@ -458,4 +586,12 @@ function workerReceipt(launchId: string, workerId: string): AgentRecoveryWorkerR
     launchId,
     workerId,
   };
+}
+
+function deferred(): { readonly promise: Promise<void>; resolve(): void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
 }

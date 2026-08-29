@@ -1,8 +1,13 @@
-import { existsSync, readFileSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildSandboxEnvironment, runtimeReadRoots } from "./environment.js";
+import {
+  buildSandboxEnvironment,
+  runtimeReadAliases,
+  runtimeReadRoots,
+  WINDOWS_RESTRICTED_NODE_OPTIONS,
+} from "./environment.js";
 import { isWithinRoot, normalizeRoots } from "./policy.js";
 import {
   SandboxViolationError,
@@ -14,7 +19,12 @@ import {
 
 export function buildManagedSpawnPlan(request: ManagedSpawnRequest): SandboxSpawnPlan {
   const platform = request.platform ?? process.platform;
-  const env = buildSandboxEnvironment(request.env ?? process.env, request.policy, platform);
+  const env = buildSandboxEnvironment(
+    request.env ?? process.env,
+    request.policy,
+    platform,
+    request.explicitEnvKeys,
+  );
   if (request.policy.profile === "danger-full-access") {
     return {
       backend: "none",
@@ -24,6 +34,11 @@ export function buildManagedSpawnPlan(request: ManagedSpawnRequest): SandboxSpaw
       sandboxed: false,
       profile: request.policy.profile,
     };
+  }
+  if (platform === "win32") {
+    // AppContainer 不获得盘符根 DACL；Node 默认 realpath 会逐级 lstat 到 C:\\。
+    // 这是宿主在清洗后固定的兼容参数，不恢复用户提供的 NODE_OPTIONS。
+    env.NODE_OPTIONS = WINDOWS_RESTRICTED_NODE_OPTIONS;
   }
 
   const policy = withRuntimeRoots(request.policy, request.command, env, platform);
@@ -55,7 +70,15 @@ export function buildManagedSpawnPlan(request: ManagedSpawnRequest): SandboxSpaw
       return {
         backend,
         command: request.backendExecutable ?? "/usr/bin/sandbox-exec",
-        args: ["-p", buildMacosProfile(policy), request.command, ...request.args],
+        args: [
+          "-p",
+          buildMacosProfile(
+            policy,
+            runtimeReadAliases(request.command, env, platform, policy.readRoots),
+          ),
+          request.command,
+          ...request.args,
+        ],
         env,
         sandboxed: true,
         profile: policy.profile,
@@ -141,16 +164,20 @@ export function detectSandboxBackend(
   if (platform === "darwin" && existsSync("/usr/bin/sandbox-exec")) return "macos-seatbelt";
   if (
     (platform === "linux" || platform === "win32") &&
-    isVerifiedBundledExecutable(resolveBundledSandboxExecutable(platform, arch))
+    isVerifiedBundledExecutable(resolveBundledSandboxExecutable(platform, arch), platform)
   ) {
     return platform === "linux" ? "linux-bubblewrap" : "windows-appcontainer";
   }
   return "unavailable";
 }
 
-export function isVerifiedBundledExecutable(executable: string): boolean {
+export function isVerifiedBundledExecutable(
+  executable: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
   if (!existsSync(executable) || !existsSync(`${executable}.sha256`)) return false;
   try {
+    if (platform !== "win32") accessSync(executable, constants.X_OK);
     const expected = readFileSync(`${executable}.sha256`, "utf8").trim().split(/\s+/u)[0];
     if (!expected || !/^[a-f0-9]{64}$/u.test(expected)) return false;
     const actual = createHash("sha256").update(readFileSync(executable)).digest("hex");
@@ -160,8 +187,15 @@ export function isVerifiedBundledExecutable(executable: string): boolean {
   }
 }
 
-export function buildMacosProfile(policy: SandboxPolicy): string {
-  const metadataRoots = macosMetadataAncestors([...policy.readRoots, ...policy.writeRoots]);
+export function buildMacosProfile(
+  policy: SandboxPolicy,
+  readAliases: readonly string[] = [],
+): string {
+  const metadataRoots = macosMetadataAncestors([
+    ...policy.readRoots,
+    ...policy.writeRoots,
+    ...readAliases,
+  ]);
   const rules = [
     "(version 1)",
     "(deny default)",
@@ -188,6 +222,10 @@ export function buildMacosProfile(policy: SandboxPolicy): string {
       (root) => `(allow file-read* file-test-existence (subpath ${sbplString(root)}))`,
     ),
     ...policy.readRoots.map((root) => `(allow file-map-executable (subpath ${sbplString(root)}))`),
+    ...readAliases.map(
+      (root) => `(allow file-read* file-test-existence (subpath ${sbplString(root)}))`,
+    ),
+    ...readAliases.map((root) => `(allow file-map-executable (subpath ${sbplString(root)}))`),
     ...policy.writeRoots.map((root) => `(allow file-write* (subpath ${sbplString(root)}))`),
   ];
   if (policy.network === "allow") rules.push("(allow network*)");
@@ -222,6 +260,7 @@ export function buildBubblewrapArgs(
     "--die-with-parent",
     "--new-session",
     "--unshare-all",
+    "--unshare-user",
     ...(policy.network === "allow" ? ["--share-net"] : []),
     "--disable-userns",
     "--proc",
@@ -229,6 +268,13 @@ export function buildBubblewrapArgs(
     "--dev",
     "/dev",
   ];
+  // Keep the conventional loader and executable paths visible even on usr-merged hosts.
+  // Policy normalization resolves symlinks such as /bin -> /usr/bin and /lib64 ->
+  // /usr/lib64; binding the lexical aliases restores those ABI paths without granting
+  // anything beyond the already-authorized, read-only system runtime trees.
+  for (const root of ["/bin", "/sbin", "/lib", "/lib64"]) {
+    result.push("--ro-bind-try", root, root);
+  }
   for (const root of readRoots) result.push("--ro-bind-try", root, root);
   for (const root of writeRoots) result.push("--bind", root, root);
   result.push("--chdir", cwd, "--", command, ...args);

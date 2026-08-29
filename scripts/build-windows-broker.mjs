@@ -10,21 +10,27 @@ if (process.platform !== "win32" || process.arch !== "x64") {
 }
 const crateRoot = join(projectRoot, "native/windows-appcontainer-broker");
 const target = "x86_64-pc-windows-msvc";
-const result = spawnSync("cargo", ["build", "--locked", "--release", "--target", target], {
-  cwd: crateRoot,
-  stdio: "inherit",
-  shell: false,
-});
+const result = spawnSync(
+  "cargo",
+  ["build", "--locked", "--release", "--bins", "--target", target],
+  {
+    cwd: crateRoot,
+    stdio: "inherit",
+    shell: false,
+  },
+);
 if (result.error) throw result.error;
 if (result.status !== 0) throw new Error(`Rust Broker 构建失败 (${String(result.status)})`);
 
 const outputRoot = join(projectRoot, "resources/sandbox/win32-x64");
 await mkdir(outputRoot, { recursive: true });
-const source = join(crateRoot, "target", target, "release", "pico-appcontainer-broker.exe");
-const output = join(outputRoot, "pico-appcontainer-broker.exe");
-await copyFile(source, output);
-const digest = createHash("sha256")
-  .update(await readFile(output))
-  .digest("hex");
-await writeFile(`${output}.sha256`, `${digest}  pico-appcontainer-broker.exe\n`);
-process.stdout.write("Built verified Pico AppContainer Broker for win32-x64\n");
+for (const executable of ["pico-appcontainer-broker.exe", "pico-appcontainer-host-prep.exe"]) {
+  const source = join(crateRoot, "target", target, "release", executable);
+  const output = join(outputRoot, executable);
+  await copyFile(source, output);
+  const digest = createHash("sha256")
+    .update(await readFile(output))
+    .digest("hex");
+  await writeFile(`${output}.sha256`, `${digest}  ${executable}\n`);
+}
+process.stdout.write("Built verified Pico Windows AppContainer resources for win32-x64\n");

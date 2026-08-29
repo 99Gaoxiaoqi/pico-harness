@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { test } from "node:test";
 import {
   buildBubblewrapArgs,
@@ -14,7 +14,9 @@ import {
   createSandboxPolicy,
   isVerifiedBundledExecutable,
   managedProcessLauncher,
+  runtimeReadAliases,
   shellRuntimeReadRoots,
+  WINDOWS_RESTRICTED_NODE_OPTIONS,
 } from "../../src/safety/process-sandbox/index.js";
 import { evaluateSandboxCommand } from "../../src/safety/yolo-sandbox.js";
 import { createIsolatedPicoConfig } from "../../src/input/pico-config.js";
@@ -72,6 +74,68 @@ test("Windows Broker 获取完整根目录与策略代次且不接受网络放�
   assert.ok(args.includes("--write-root"));
   assert.equal(args[args.indexOf("--generation") + 1], "7");
   assert.equal(args.includes("--network"), false);
+});
+
+test("Windows 受限进程只获得宿主固定的 Node 路径兼容参数", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-win-node-options-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const workspace = join(root, "workspace");
+  await mkdir(workspace);
+  const restricted = createSandboxPolicy({
+    profile: "workspace-write",
+    workspaceRoots: [workspace],
+    scratchRoot: join(root, "restricted-scratch"),
+  });
+  const restrictedPlan = buildManagedSpawnPlan({
+    command: "powershell.exe",
+    args: ["-Command", "node ./entry.cjs"],
+    cwd: workspace,
+    env: { ...process.env, NODE_OPTIONS: "--require=untrusted-loader.cjs" },
+    explicitEnvKeys: ["NODE_OPTIONS"],
+    origin: "command-hook",
+    policy: restricted,
+    platform: "win32",
+    controlRoot: join(root, "restricted-control"),
+    backendExecutable: process.execPath,
+  });
+  assert.equal(restrictedPlan.env.NODE_OPTIONS, WINDOWS_RESTRICTED_NODE_OPTIONS);
+
+  const unrestricted = createSandboxPolicy({
+    profile: "danger-full-access",
+    workspaceRoots: [workspace],
+    scratchRoot: join(root, "unrestricted-scratch"),
+  });
+  const unrestrictedPlan = buildManagedSpawnPlan({
+    command: "powershell.exe",
+    args: [],
+    cwd: workspace,
+    env: { NODE_OPTIONS: "--require=trusted-by-unrestricted-host.cjs" },
+    origin: "command-hook",
+    policy: unrestricted,
+    platform: "win32",
+  });
+  assert.equal(unrestrictedPlan.env.NODE_OPTIONS, "--require=trusted-by-unrestricted-host.cjs");
+});
+
+test("Windows 受限环境规范化 PATH 系统键但保留自定义键大小写", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-win-env-case-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const policy = createSandboxPolicy({
+    profile: "workspace-write",
+    workspaceRoots: [root],
+    scratchRoot: join(root, "scratch"),
+  });
+  const env = buildSandboxEnvironment(
+    { pAtH: "C:\\runtime", pAtHeXt: ".EXE;.CMD", CustomCase: "kept" },
+    policy,
+    "win32",
+    ["CustomCase"],
+  );
+  assert.equal(env.PATH, "C:\\runtime");
+  assert.equal(env.PATHEXT, ".EXE;.CMD");
+  assert.equal(env.CustomCase, "kept");
+  assert.equal(Object.hasOwn(env, "pAtH"), false);
+  assert.equal(Object.hasOwn(env, "pAtHeXt"), false);
 });
 
 test("受限模式在原生后端缺失时 fail-closed", async (context) => {
@@ -203,7 +267,7 @@ test("会话授权提升策略代次并重启 stdio MCP", async (context) => {
   ]);
 });
 
-test("受限环境继承普通变量并隔离 HOME、临时目录与缓存", async (context) => {
+test("受限环境只继承系统白名单、恢复显式变量并拒绝加载器注入", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-env-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   const policy = createSandboxPolicy({
@@ -212,14 +276,61 @@ test("受限环境继承普通变量并隔离 HOME、临时目录与缓存", asy
     scratchRoot: join(root, "scratch"),
   });
   const env = buildSandboxEnvironment(
-    { PATH: process.env.PATH, PICO_FAKE_TOKEN: "visible", HOME: "/host/home" },
+    {
+      PATH: process.env.PATH,
+      LANG: "C",
+      PICO_AMBIENT_SECRET_FIXTURE: "not-forwarded",
+      PICO_EXPLICIT_FIXTURE: "forwarded",
+      NODE_OPTIONS: "--require=untrusted-loader.cjs",
+      DYLD_INSERT_LIBRARIES: "/tmp/untrusted-loader.dylib",
+      LD_PRELOAD: "/tmp/untrusted-loader.so",
+      GLIBC_TUNABLES: "glibc.malloc.check=3",
+      GCONV_PATH: "/tmp/untrusted-gconv",
+      PYTHONPATH: "/tmp/untrusted-python-modules",
+      HOME: "/host/home",
+    },
     policy,
+    process.platform,
+    [
+      "PICO_EXPLICIT_FIXTURE",
+      "NODE_OPTIONS",
+      "DYLD_INSERT_LIBRARIES",
+      "LD_PRELOAD",
+      "GLIBC_TUNABLES",
+      "GCONV_PATH",
+      "PYTHONPATH",
+    ],
   );
-  assert.equal(env.PICO_FAKE_TOKEN, "visible");
+  assert.equal(env.LANG, "C");
+  assert.equal(env.PICO_EXPLICIT_FIXTURE, "forwarded");
+  assert.equal(env.PICO_AMBIENT_SECRET_FIXTURE, undefined);
+  assert.equal(env.NODE_OPTIONS, undefined);
+  assert.equal(env.DYLD_INSERT_LIBRARIES, undefined);
+  assert.equal(env.LD_PRELOAD, undefined);
+  assert.equal(env.GLIBC_TUNABLES, undefined);
+  assert.equal(env.GCONV_PATH, undefined);
+  assert.equal(env.PYTHONPATH, undefined);
   assert.notEqual(env.HOME, "/host/home");
   assert.match(env.HOME ?? "", /scratch[/\\]home$/u);
   assert.match(env.TMPDIR ?? "", /scratch[/\\]tmp$/u);
   assert.match(env.XDG_CACHE_HOME ?? "", /scratch[/\\]cache$/u);
+});
+
+test("danger-full-access 保留完整宿主环境且不应用受限显式键规则", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-env-yolo-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const policy = createSandboxPolicy({
+    profile: "danger-full-access",
+    workspaceRoots: [root],
+    scratchRoot: join(root, "scratch"),
+  });
+  const base = {
+    PATH: process.env.PATH,
+    PICO_AMBIENT_FIXTURE: "preserved",
+    NODE_OPTIONS: "--require=trusted-by-unrestricted-host.cjs",
+    HOME: "/host/home",
+  };
+  assert.deepEqual(buildSandboxEnvironment(base, policy, process.platform, []), base);
 });
 
 test("macOS profile 不包含全局 file-read 且按根目录开放", async (context) => {
@@ -232,9 +343,7 @@ test("macOS profile 不包含全局 file-read 且按根目录开放", async (con
   });
   const profile = buildMacosProfile(policy);
   assert.doesNotMatch(profile, /^\(allow file-read\*\)$/mu);
-  const canonicalRoot = policy.readRoots.find((candidate) =>
-    candidate.endsWith(root.split("/").at(-1)!),
-  );
+  const canonicalRoot = policy.readRoots.find((candidate) => candidate.endsWith(basename(root)));
   assert.ok(canonicalRoot);
   assert.match(
     profile,
@@ -256,8 +365,20 @@ test("Bubblewrap profile 使用空命名空间、只读运行根和工作区写�
   });
   const args = buildBubblewrapArgs(policy, "/bin/sh", ["-c", "true"], root);
   assert.ok(args.includes("--unshare-all"));
-  assert.ok(args.includes("--disable-userns"));
+  const unshareUser = args.indexOf("--unshare-user");
+  const disableUserns = args.indexOf("--disable-userns");
+  assert.ok(unshareUser >= 0, "--disable-userns requires an explicit --unshare-user");
+  assert.ok(disableUserns > unshareUser);
   assert.ok(args.includes("--share-net"));
+  for (const root of ["/bin", "/sbin", "/lib", "/lib64"]) {
+    assert.ok(
+      args.some(
+        (value, index) =>
+          value === "--ro-bind-try" && args[index + 1] === root && args[index + 2] === root,
+      ),
+      `missing lexical runtime root ${root}`,
+    );
+  }
   assert.deepEqual(args.slice(-4), ["--", "/bin/sh", "-c", "true"]);
   assert.ok(
     args.some(
@@ -290,6 +411,27 @@ test("模型命令文本不能把任意绝对可执行路径提升为运行时�
     false,
   );
 });
+
+test(
+  "Homebrew formula alias 指向其他 Cellar 根时不授权",
+  { skip: process.platform === "win32" },
+  async (context) => {
+    const root = await mkdtemp(join(tmpdir(), "pico-homebrew-alias-mismatch-"));
+    context.after(() => rm(root, { recursive: true, force: true }));
+    const formulaRoot = join(root, "Cellar", "fixture", "1.0.0");
+    const otherFormulaRoot = join(root, "Cellar", "other", "1.0.0");
+    const alias = join(root, "opt", "fixture");
+    await mkdir(formulaRoot, { recursive: true });
+    await mkdir(otherFormulaRoot, { recursive: true });
+    await mkdir(join(root, "opt"), { recursive: true });
+    await symlink(otherFormulaRoot, alias);
+
+    const aliases = runtimeReadAliases("/bin/sh", { PATH: "/usr/bin:/bin" }, "darwin", [
+      formulaRoot,
+    ]);
+    assert.equal(aliases.includes(alias), false);
+  },
+);
 
 test(
   "BashTool 允许 /dev/null 重定向且不接受伪绝对命令的读根提升",
@@ -334,6 +476,11 @@ test("打包原生后端必须通过同目录 SHA-256 校验", async (context) =
   const digest = createHash("sha256").update("trusted").digest("hex");
   await writeFile(`${executable}.sha256`, `${digest}  helper\n`, "utf8");
   assert.equal(isVerifiedBundledExecutable(executable), true);
+  if (process.platform !== "win32") {
+    await chmod(executable, 0o644);
+    assert.equal(isVerifiedBundledExecutable(executable, "linux"), false);
+    await chmod(executable, 0o755);
+  }
   await writeFile(executable, "tampered", "utf8");
   assert.equal(isVerifiedBundledExecutable(executable), false);
 });

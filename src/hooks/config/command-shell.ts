@@ -17,7 +17,8 @@ import type { CommandHookHandler, HookHandler } from "../types.js";
  *    spawn 显式 shell 二进制 + `-c`，不用 node 的 shell:true 选项）。
  *    审计粒度从"文件字节钉死"降为"配置字节审批"——已确认的取舍。
  * 3. 环境消毒保留：剥离 base env 的 loader 注入变量（LD_PRELOAD 等）防第三
- *    方篡改被批准命令的行为；handler.env 覆盖（含 PATH）放行——配置即意图。
+ *    方篡改被批准命令的行为；handler.env 的变量名作为显式授权交给进程沙箱，
+ *    但全局禁止的动态加载/启动注入变量仍不会进入受限目标进程。
  */
 
 export interface ReferencedScriptResolution {
@@ -46,12 +47,14 @@ export interface ResolvedCommandHookInvocation extends CommandHookInvocation {
   /** command + args（按 shell 方言 quote 后）拼成的完整命令行。 */
   readonly commandString: string;
   readonly env: Readonly<NodeJS.ProcessEnv>;
+  /** handler.env 中由用户配置明确授权给命令进程的变量名。 */
+  readonly explicitEnvKeys: readonly string[];
 }
 
 /**
  * 剥离 base 环境里的 loader 注入变量，防止第三方通过 ambient 环境改变被批准
- * 命令的行为。handler.env 不再限制覆盖任何变量（含 PATH）——配置是用户意图，
- * 与 Claude Code 语义一致；消毒只针对继承环境。
+ * 命令的行为。handler.env 可覆盖普通变量（含 PATH）；最终受限进程环境仍由统一
+ * 沙箱层执行系统白名单和动态加载变量禁令。
  */
 export function sanitizeCommandHookEnvironment(
   handler: CommandHookHandler,
@@ -99,6 +102,7 @@ export async function resolveCommandHookExecution(
     shell: selectedShell,
     commandString,
     env: sanitizeCommandHookEnvironment(handler, environment),
+    explicitEnvKeys: Object.keys(handler.env ?? {}),
   };
 }
 
@@ -148,12 +152,14 @@ export async function existingReferencedScripts(
 export interface ResolveHookShellOptions {
   /** 测试接缝：替换 bash 可用性探测（生产默认实跑 `bash -c "exit 0"`）。 */
   readonly isBashUsable?: (candidatePath: string) => boolean;
+  /** Windows AppContainer 无法初始化 MSYS 的 BaseNamedObjects；受限进程必须绕过 Git Bash。 */
+  readonly windowsAppContainerCompatible?: boolean;
 }
 
 /**
  * 选择 hook 命令的解释 shell。
- * - win32：Git Bash 优先（POSIX hook 语义的主体场景，对齐 Claude Code）；
- *   找不到 Git 时回落 PowerShell（pwsh 优先，否则 Windows PowerShell）。
+ * - win32 宿主直启：Git Bash 优先（POSIX hook 语义的主体场景，对齐 Claude Code）。
+ * - win32 AppContainer：跳过依赖 MSYS named objects 的 Git Bash，使用 PowerShell。
  * - POSIX：bash 优先，无 bash 退 /bin/sh。
  */
 export function resolveHookShell(
@@ -162,8 +168,10 @@ export function resolveHookShell(
 ): HookShell {
   const probe = options.isBashUsable ?? isUsableBash;
   if (process.platform === "win32") {
-    const bashPath = findGitBashPath(environment, probe);
-    if (bashPath) return { kind: "bash", path: bashPath, argsPrefix: ["-c"] };
+    if (!options.windowsAppContainerCompatible) {
+      const bashPath = findGitBashPath(environment, probe);
+      if (bashPath) return { kind: "bash", path: bashPath, argsPrefix: ["-c"] };
+    }
     const pwshPath = findExecutableInPath("pwsh.exe", environment) ?? findWindowsPowerShell();
     if (pwshPath)
       return {

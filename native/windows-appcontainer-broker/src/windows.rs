@@ -1,11 +1,11 @@
 use std::collections::HashSet;
-use std::ffi::{c_void, OsStr};
+use std::ffi::{c_void, OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::mem::{size_of, zeroed};
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::ptr::{null, null_mut};
 
 type Handle = *mut c_void;
@@ -22,6 +22,10 @@ const ERROR_ACCESS_DENIED: u32 = 5;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 const INVALID_FILE_ATTRIBUTES: u32 = 0xffff_ffff;
 const WAIT_OBJECT_0: u32 = 0;
+const WAIT_ABANDONED: u32 = 0x0000_0080;
+const WAIT_TIMEOUT: u32 = 0x0000_0102;
+const WAIT_FAILED: u32 = 0xffff_ffff;
+const ACL_MUTATION_TIMEOUT_MS: u32 = 15_000;
 const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x0000_0002;
 const STARTF_USESTDHANDLES: u32 = 0x0000_0100;
 const STD_INPUT_HANDLE: u32 = (-10i32) as u32;
@@ -175,6 +179,9 @@ extern "system" {
     ) -> i32;
     fn GetFileAttributesW(file_name: *const u16) -> u32;
     fn GetStdHandle(standard_handle: u32) -> Handle;
+    fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
+    fn CreateMutexW(attributes: *const c_void, initial_owner: i32, name: *const u16) -> Handle;
+    fn ReleaseMutex(mutex: Handle) -> i32;
 }
 
 #[link(name = "bcrypt")]
@@ -212,6 +219,51 @@ struct Policy {
     write_roots: Vec<PathBuf>,
     command: String,
     args: Vec<String>,
+}
+
+struct AclMutationGuard {
+    mutex: Handle,
+}
+
+impl AclMutationGuard {
+    fn acquire() -> Result<Self, String> {
+        // icacls updates a DACL through a read-modify-write operation. Different broker
+        // processes can otherwise overwrite each other's capability ACE when they grant or
+        // remove access on the same workspace. A session-local kernel mutex serializes only
+        // those short mutations; sandboxed children still run concurrently.
+        let name = wide_null("Local\\PicoHarness.AppContainerAcl.v1");
+        let mutex = unsafe { CreateMutexW(null(), 0, name.as_ptr()) };
+        if mutex.is_null() {
+            return Err(last_error("CreateMutexW"));
+        }
+        match unsafe { WaitForSingleObject(mutex, ACL_MUTATION_TIMEOUT_MS) } {
+            WAIT_OBJECT_0 | WAIT_ABANDONED => Ok(Self { mutex }),
+            WAIT_TIMEOUT => {
+                unsafe { CloseHandle(mutex) };
+                Err(format!(
+                    "timed out after {ACL_MUTATION_TIMEOUT_MS}ms waiting for the ACL mutation mutex"
+                ))
+            }
+            WAIT_FAILED => {
+                let error = last_error("WaitForSingleObject(ACL mutex)");
+                unsafe { CloseHandle(mutex) };
+                Err(error)
+            }
+            status => {
+                unsafe { CloseHandle(mutex) };
+                Err(format!("unexpected ACL mutex wait status: 0x{status:08x}"))
+            }
+        }
+    }
+}
+
+impl Drop for AclMutationGuard {
+    fn drop(&mut self) {
+        unsafe {
+            ReleaseMutex(self.mutex);
+            CloseHandle(self.mutex);
+        }
+    }
 }
 
 pub fn run() -> Result<(), String> {
@@ -514,7 +566,7 @@ impl RecoveryJournal {
         let grant = format!("*{sid}:(OI)(CI){rights}");
         // Windows propagates inheritable ACEs to existing children. Avoid /T because a
         // string-based recursive traversal can cross a workspace junction into an external tree.
-        run_control("icacls.exe", [&path_text, "/grant", &grant, "/C", "/L"])
+        run_icacls("grant", [&path_text, "/grant", &grant, "/C", "/L"])
     }
 
     fn record(&mut self, kind: &str, target: &str, sid: &str) -> Result<(), String> {
@@ -600,7 +652,11 @@ fn assert_not_reparse_point(path: &Path) -> Result<(), String> {
     let wide = wide_null(path.as_os_str());
     let attributes = unsafe { GetFileAttributesW(wide.as_ptr()) };
     if attributes == INVALID_FILE_ATTRIBUTES {
-        return Err(last_error("GetFileAttributesW(policy root)"));
+        return Err(format!(
+            "policy root {}: {}",
+            path.display(),
+            last_error("GetFileAttributesW")
+        ));
     }
     if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(format!(
@@ -637,8 +693,8 @@ fn recover(path: &Path) -> Result<(), String> {
 fn cleanup_entries(entries: &[(String, String, String)]) -> Result<(), String> {
     for (kind, target, sid) in entries.iter().rev() {
         match kind.as_str() {
-            "acl" => run_cleanup(
-                "icacls.exe",
+            "acl" => run_icacls(
+                "cleanup",
                 [target, "/remove", &format!("*{sid}"), "/C", "/L"],
             )?,
             "profile" => delete_appcontainer_profile(target)?,
@@ -661,27 +717,57 @@ fn delete_appcontainer_profile(name: &str) -> Result<(), String> {
     }
 }
 
-fn run_cleanup<const N: usize>(program: &str, args: [&str; N]) -> Result<(), String> {
-    let status = Command::new(program)
+fn run_icacls<const N: usize>(operation: &str, args: [&str; N]) -> Result<(), String> {
+    let _mutation_guard = AclMutationGuard::acquire()?;
+    // The broker starts in the target workspace and inherits its environment. Resolve both the
+    // executable and cwd from Kernel32 so neither a workspace file nor PATH/SystemRoot can select
+    // the ACL control binary.
+    let system_directory = system_directory()?;
+    let program = system_directory.join("icacls.exe");
+    let status = Command::new(&program)
+        .current_dir(&system_directory)
         .args(args)
+        // Broker 控制面不得污染目标 Hook 的 stdin/stdout JSON 协议。
+        // stderr 保留继承，便于 ACL 失败时诊断。
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
         .status()
         .map_err(error_text)?;
     if status.success() {
         Ok(())
     } else {
-        Err(format!("{program} cleanup failed with {status}"))
+        Err(format!(
+            "{} {operation} failed with {status}",
+            program.display()
+        ))
     }
 }
 
-fn run_control<const N: usize>(program: &str, args: [&str; N]) -> Result<(), String> {
-    let status = Command::new(program)
-        .args(args)
-        .status()
-        .map_err(error_text)?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("{program} failed with {status}"))
+fn system_directory() -> Result<PathBuf, String> {
+    let mut buffer = vec![0u16; 260];
+    loop {
+        let length = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+        if length == 0 {
+            return Err(last_error("GetSystemDirectoryW"));
+        }
+        let length = length as usize;
+        if length < buffer.len() {
+            buffer.truncate(length);
+            return Ok(PathBuf::from(OsString::from_wide(&buffer)));
+        }
+        buffer.resize(length + 1, 0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::system_directory;
+
+    #[test]
+    fn system_directory_is_absolute_and_contains_icacls() {
+        let system_directory = system_directory().expect("system directory should resolve");
+        assert!(system_directory.is_absolute());
+        assert!(system_directory.join("icacls.exe").is_file());
     }
 }
 
