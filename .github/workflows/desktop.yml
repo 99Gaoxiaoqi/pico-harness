@@ -59,6 +59,10 @@ jobs:
 
       - run: npm ci
 
+      - name: Install ripgrep for the native Grep sandbox path
+        if: runner.os == 'macOS'
+        run: brew install ripgrep
+
       - name: Build Windows AppContainer Broker
         if: runner.os == 'Windows'
         run: npm run build:sandbox:windows
