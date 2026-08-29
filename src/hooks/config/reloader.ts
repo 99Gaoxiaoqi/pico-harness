@@ -188,6 +188,7 @@ export class HookConfigReloader {
             throw new TypeError("Hook onSwap 必须同步完成且不返回值");
           }
           this.current = candidate;
+          this.discardChangesCoveredBy(watcherBaseline);
           this.replaceWatchers(preparedWatchers);
           accepted = true;
         } catch (error) {
@@ -534,6 +535,19 @@ export class HookConfigReloader {
     );
     for (const watcher of previous) safeCloseWatcher(watcher);
     for (const timer of previousTimers) clearInterval(timer);
+  }
+
+  private discardChangesCoveredBy(accepted: HookWatchBaseline): void {
+    // A slow write can enqueue an intermediate and the final fingerprint while one reload is
+    // guarded. Consume only notifications represented by the accepted disk baseline; a newer
+    // fingerprint stays queued for the serial tail.
+    for (const [path, fingerprint] of accepted.fingerprints) {
+      if (this.scheduledFingerprints.get(path) === fingerprint) this.changed.delete(path);
+    }
+    const hookifyPath = resolve(this.options.workDir, ".claw");
+    if (this.scheduledFingerprints.get(hookifyPath) === accepted.hookifyFingerprint) {
+      this.changed.delete(hookifyPath);
+    }
   }
 
   private isActive(generation: number): boolean {
