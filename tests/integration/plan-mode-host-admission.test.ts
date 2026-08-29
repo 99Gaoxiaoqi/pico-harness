@@ -321,6 +321,12 @@ test("production Plan review double-click converges on one Run after non-Plan le
   assert.ok(responses.every(({ accepted }) => accepted));
   assert.match(responses[0]?.run?.runId ?? "", /^run_plan_/u);
   assert.equal(responses[0]?.run?.runId, responses[1]?.run?.runId);
+  const replay = (await services.desktopService.handle(request)) as {
+    accepted: boolean;
+    run?: { runId?: string };
+  };
+  assert.equal(replay.accepted, true);
+  assert.equal(replay.run?.runId, responses[0]?.run?.runId);
   const runs = (await services.desktopService.handle(
     createRuntimeRequest("runs.list", { workspacePath: workspace, sessionId }),
   )) as { runs: readonly { runId: string }[] };
