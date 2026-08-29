@@ -277,13 +277,15 @@ async function createFixture(context: TestContext, label: string): Promise<Fixtu
 async function createFixtureRoot(label: string): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), `pico-windows-hook-${label}-`));
   const workspace = join(root, "workspace");
+  const sourcePath = join(workspace, ".pico", "hooks.json");
   await mkdir(join(workspace, ".pico"), { recursive: true });
+  await writeFile(sourcePath, "{}\n");
   return {
     root,
     workspace,
     source: {
       kind: "project",
-      path: join(workspace, ".pico", "hooks.json"),
+      path: sourcePath,
       version: 1,
     },
   };
