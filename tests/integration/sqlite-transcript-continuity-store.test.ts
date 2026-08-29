@@ -16,6 +16,7 @@ import {
   RuntimeTranscriptResetRequiredError,
   SqliteRuntimeEventStore,
 } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { SqliteAgentGraphControlStore } from "../../src/storage/sqlite/sqlite-agent-graph-control-store.js";
 
 function eventBase(eventId: string, sessionId: string, runId = "run-1", turnId = "turn-1") {
   return {
@@ -46,9 +47,14 @@ function message(
   };
 }
 
-function started(eventId: string, sessionId: string, workDir: string): RuntimeEvent {
+function started(
+  eventId: string,
+  sessionId: string,
+  workDir: string,
+  runId = "run-1",
+): RuntimeEvent {
   return {
-    ...eventBase(eventId, sessionId),
+    ...eventBase(eventId, sessionId, runId),
     visibility: "internal",
     kind: "run.started",
     data: { workDir },
@@ -64,15 +70,21 @@ function terminal(eventId: string, sessionId: string): RuntimeEvent {
   };
 }
 
-function toolResult(eventId: string, sessionId: string, toolCallId: string): RuntimeEvent {
+function toolResult(
+  eventId: string,
+  sessionId: string,
+  toolCallId: string,
+  toolName = "read",
+  runId = "run-1",
+): RuntimeEvent {
   const content = "tool result";
   const sha256 = createHash("sha256").update(content).digest("hex");
   return {
-    ...eventBase(eventId, sessionId),
+    ...eventBase(eventId, sessionId, runId),
     refs: { toolCallId },
     kind: "tool.result.recorded",
     data: {
-      toolName: "read",
+      toolName,
       status: "succeeded",
       body: { storage: "inline", content, sha256, sizeBytes: Buffer.byteLength(content) },
       projection: {
@@ -81,6 +93,36 @@ function toolResult(eventId: string, sessionId: string, toolCallId: string): Run
         text: content,
         strategy: "inline",
         truncated: false,
+      },
+    },
+  };
+}
+
+function transcriptToolStarted(
+  eventId: string,
+  sessionId: string,
+  runId: string,
+  turnId: string,
+  toolCallId: string,
+  providerCallId: string,
+  name: string,
+  sequence: number,
+): RuntimeEvent {
+  return {
+    ...eventBase(eventId, sessionId, runId, turnId),
+    visibility: "transcript",
+    kind: "transcript.event.recorded",
+    data: {
+      event: {
+        eventId: `${eventId}:transcript`,
+        sequence,
+        createdAt: sequence,
+        type: "tool.started",
+        entryId: `${toolCallId}:entry`,
+        toolCallId,
+        providerCallId,
+        name,
+        args: "{}",
       },
     },
   };
@@ -497,6 +539,299 @@ test("lazy rebuild rotates history and requires bootstrap from the rebuilt head"
     );
   } finally {
     store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("projector v3 rebuild removes durable Graph control history but keeps same-name linear tools", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pico-transcript-graph-upgrade-"));
+  const workspace = join(root, "workspace");
+  const storage = join(root, "storage");
+  mkdirSync(workspace, { recursive: true });
+  const sessionId = "graph-upgrade-session";
+  const graphRunId = "historical-graph-root-run";
+  const linearRunId = "ordinary-linear-run";
+  let store = new SqliteRuntimeEventStore({ storageRoot: storage });
+  const graphStore = new SqliteAgentGraphControlStore({ storageRoot: storage });
+  try {
+    await store.initializeSession({ sessionId, workDir: workspace });
+    graphStore.createGraph({ graphId: "graph-upgrade", rootSessionId: sessionId, epoch: 1 });
+    graphStore.commitScheduleRevision({
+      graphId: "graph-upgrade",
+      expectedRevision: 0,
+      operationId: "graph-upgrade-operation",
+      requestFingerprint: "graph-upgrade-fingerprint",
+      kind: "add",
+      command: { kind: "add" },
+      sourceSessionId: sessionId,
+      sourceTurnId: "graph-turn",
+      sourceRunId: "historical-initial-root-run",
+      sourceToolCallId: "graph-provider-call",
+    });
+    graphStore.enqueueSupervisorWake({
+      wakeId: "historical-wake",
+      graphId: "graph-upgrade",
+      dedupeKey: "runtime-terminal:historical-operator-run",
+      wakeFingerprint: "historical-wake-fingerprint",
+      cause: "runtime_terminal",
+      payload: { claimId: "historical-claim" },
+    });
+    graphStore.claimSupervisorWake({
+      wakeId: "historical-wake",
+      expectedWakeVersion: 1,
+      attemptId: "historical-wake-attempt",
+      rootSessionId: sessionId,
+      targetTurnId: "graph-turn",
+      targetRunId: graphRunId,
+    });
+
+    await store.append(started("graph-start", sessionId, workspace, graphRunId));
+    await store.append(
+      message(
+        "graph-user",
+        sessionId,
+        "user",
+        "[Graph Supervisor wake] historical internal input",
+        graphRunId,
+        "graph-turn",
+      ),
+    );
+    await store.append(
+      transcriptToolStarted(
+        "graph-tool-start",
+        sessionId,
+        graphRunId,
+        "graph-turn",
+        "graph-tool",
+        "graph-provider-call",
+        "view_agent_graph",
+        1,
+      ),
+    );
+    await store.append(
+      toolResult(
+        "graph-tool-result",
+        sessionId,
+        "graph-provider-call",
+        "view_agent_graph",
+        graphRunId,
+      ),
+    );
+    await store.appendTranscriptEvent(sessionId, {
+      eventId: "graph-boundary-transcript",
+      sequence: 2,
+      createdAt: 5,
+      type: "entry.appended",
+      entryId: "graph-boundary",
+      entry: {
+        kind: "run-boundary",
+        runId: graphRunId,
+        status: "running",
+        startedAt: 1,
+      },
+    });
+    await store.append(
+      message(
+        "graph-final",
+        sessionId,
+        "assistant",
+        "final Graph answer remains visible",
+        graphRunId,
+        "graph-final-turn",
+      ),
+    );
+
+    await store.append(started("linear-start", sessionId, workspace, linearRunId));
+    await store.append(
+      transcriptToolStarted(
+        "linear-tool-start",
+        sessionId,
+        linearRunId,
+        "linear-turn",
+        "linear-tool",
+        "linear-provider-call",
+        "view_agent_graph",
+        3,
+      ),
+    );
+    await store.append(
+      toolResult(
+        "linear-tool-result",
+        sessionId,
+        "linear-provider-call",
+        "view_agent_graph",
+        linearRunId,
+      ),
+    );
+    const before = await store.readTranscriptWatermark(sessionId);
+    store.close();
+    graphStore.close();
+
+    const database = new DatabaseSync(operationalDatabasePath(storage));
+    const leakedPayloads = [
+      {
+        itemId: "message:graph-user:user",
+        position: 2,
+        payload: {
+          id: "message:graph-user:user",
+          kind: "userMessage",
+          content: "[Graph Supervisor wake] historical internal input",
+        },
+      },
+      {
+        itemId: "tool:graph-tool",
+        position: 3,
+        payload: {
+          id: "tool:graph-tool",
+          kind: "tool",
+          name: "view_agent_graph",
+          args: "{}",
+          status: "success",
+        },
+      },
+      {
+        itemId: "entry:graph-boundary",
+        position: 4,
+        payload: {
+          id: "entry:graph-boundary",
+          kind: "runBoundary",
+          runId: graphRunId,
+          status: "running",
+          startedAt: 1,
+        },
+      },
+    ];
+    for (const leaked of leakedPayloads) {
+      const payloadJson = JSON.stringify(leaked.payload);
+      database
+        .prepare(
+          `INSERT INTO runtime_transcript_item_versions (
+             session_id, item_id, item_revision, valid_from_sequence, valid_to_sequence,
+             position_sequence, position_ordinal, payload_json, payload_digest
+           ) VALUES (?, ?, 1, ?, NULL, ?, 0, ?, ?)`,
+        )
+        .run(
+          sessionId,
+          leaked.itemId,
+          leaked.position,
+          leaked.position,
+          payloadJson,
+          createHash("sha256").update(payloadJson).digest("hex"),
+        );
+    }
+    database
+      .prepare(
+        "UPDATE runtime_transcript_projection_state SET projector_version = 2 WHERE session_id = ?",
+      )
+      .run(sessionId);
+    assert.equal(
+      (
+        database
+          .prepare(
+            "SELECT COUNT(*) AS count FROM runtime_transcript_item_versions WHERE session_id = ? AND valid_to_sequence IS NULL",
+          )
+          .get(sessionId) as { count: number }
+      ).count >= leakedPayloads.length,
+      true,
+    );
+    database.close();
+
+    store = new SqliteRuntimeEventStore({ storageRoot: storage });
+    const rebuilt = await store.readTranscriptProjectionPage({ sessionId, maxBytes: 64 * 1024 });
+    assert.equal(rebuilt.watermark.projectorVersion, 3);
+    assert.notEqual(rebuilt.watermark.historyEpoch, before.historyEpoch);
+    const visible = JSON.stringify(rebuilt.items.map((item) => item.payload));
+    assert.doesNotMatch(visible, /Graph Supervisor wake/u);
+    assert.equal(
+      rebuilt.items.some(
+        (item) =>
+          typeof item.payload === "object" &&
+          item.payload !== null &&
+          "kind" in item.payload &&
+          item.payload.kind === "runBoundary" &&
+          "runId" in item.payload &&
+          item.payload.runId === graphRunId,
+      ),
+      false,
+    );
+    assert.match(visible, /final Graph answer remains visible/u);
+    assert.equal(
+      rebuilt.items.filter(
+        (item) =>
+          typeof item.payload === "object" &&
+          item.payload !== null &&
+          "kind" in item.payload &&
+          item.payload.kind === "tool" &&
+          "name" in item.payload &&
+          item.payload.name === "view_agent_graph",
+      ).length,
+      1,
+    );
+  } finally {
+    store.close();
+    graphStore.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("projector rechecks a legacy run after its Graph identity becomes durable", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pico-transcript-graph-late-identity-"));
+  const workspace = join(root, "workspace");
+  const storage = join(root, "storage");
+  mkdirSync(workspace, { recursive: true });
+  const sessionId = "graph-late-identity-session";
+  const runId = "legacy-graph-run";
+  const store = new SqliteRuntimeEventStore({ storageRoot: storage });
+  const graphStore = new SqliteAgentGraphControlStore({ storageRoot: storage });
+  try {
+    await store.initializeSession({ sessionId, workDir: workspace });
+
+    // A legacy host can append the start before its durable Graph schedule fact.
+    // The initial negative lookup must not remain cached for later run events.
+    await store.append(started("legacy-start", sessionId, workspace, runId));
+    graphStore.createGraph({ graphId: "graph-late-identity", rootSessionId: sessionId, epoch: 1 });
+    graphStore.commitScheduleRevision({
+      graphId: "graph-late-identity",
+      expectedRevision: 0,
+      operationId: "late-identity-operation",
+      requestFingerprint: "late-identity-fingerprint",
+      kind: "add",
+      command: { kind: "add" },
+      sourceSessionId: sessionId,
+      sourceTurnId: "legacy-turn",
+      sourceRunId: runId,
+      sourceToolCallId: "legacy-provider-call",
+    });
+    await store.append(
+      transcriptToolStarted(
+        "legacy-tool-start",
+        sessionId,
+        runId,
+        "legacy-turn",
+        "legacy-tool",
+        "legacy-provider-call",
+        "view_agent_graph",
+        1,
+      ),
+    );
+
+    const projection = await store.readTranscriptProjectionPage({
+      sessionId,
+      maxBytes: 16_384,
+    });
+    assert.equal(
+      projection.items.some(
+        (item) =>
+          typeof item.payload === "object" &&
+          item.payload !== null &&
+          "kind" in item.payload &&
+          item.payload.kind === "tool",
+      ),
+      false,
+    );
+  } finally {
+    store.close();
+    graphStore.close();
     rmSync(root, { recursive: true, force: true });
   }
 });

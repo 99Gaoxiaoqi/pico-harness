@@ -114,6 +114,7 @@ interface RuntimeRunBaseOptions {
   readonly parentRunId?: string;
   readonly parentToolCallId?: string;
   readonly now?: () => Date;
+  readonly presentation?: RuntimeRunStartedEvent["data"]["presentation"];
 }
 
 export interface RuntimeRunStartOptions extends Omit<
@@ -142,6 +143,7 @@ export interface RuntimeRunContinuationStartOptions {
   readonly invocationId?: string;
   readonly runStartedEventId?: string;
   readonly startedAt?: string;
+  readonly presentation?: RuntimeRunStartedEvent["data"]["presentation"];
 }
 
 export interface RuntimeRunExactAdmissionOptions {
@@ -151,6 +153,7 @@ export interface RuntimeRunExactAdmissionOptions {
   readonly invocationId: string;
   readonly runStartedEventId: string;
   readonly startedAt?: string;
+  readonly presentation?: RuntimeRunStartedEvent["data"]["presentation"];
 }
 
 export type RuntimeRunExactAdmissionOutcome = Readonly<{
@@ -338,6 +341,7 @@ export class RuntimeRun {
   private readonly terminalEventId?: string;
   private readonly writeGuard: RuntimeEventWriteGuard;
   private readonly parentRefs?: Pick<RuntimeEventRefs, "parentRunId" | "parentToolCallId">;
+  private readonly presentation?: RuntimeRunStartedEvent["data"]["presentation"];
   private readonly pendingToolResults = new Map<string, PendingRegisteredToolResult[]>();
   private readonly toolOperations = new Map<string, RuntimeToolOperation>();
   private pendingMessageCommitBatch?: PendingMessageCommitBatch;
@@ -370,6 +374,7 @@ export class RuntimeRun {
       ...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),
       ...(options.parentToolCallId ? { parentToolCallId: options.parentToolCallId } : {}),
     });
+    this.presentation = options.presentation;
     this.turnId = options.turnId ?? `turn:${this.runId}:input`;
     this.stepId = `step:${this.runId}:input`;
   }
@@ -432,6 +437,7 @@ export class RuntimeRun {
       invocationId: options.invocationId,
       runStartedEventId: options.runStartedEventId,
       now: () => new Date(startedAt),
+      ...(options.presentation ? { presentation: options.presentation } : {}),
     });
     const guardedFence = await capability.writeGuard.assertRuntimeEventWriteAllowed();
     await store.initializeSession({
@@ -499,6 +505,7 @@ export class RuntimeRun {
           startEventId: runStartedEventId,
           workDir: options.capability.workDir,
           startedAt,
+          ...(options.presentation ? { presentation: options.presentation } : {}),
           ownerFence: guardedFence,
         }),
       `Runtime continuation ${options.sourceRunId} -> ${targetRunId}`,
@@ -1659,6 +1666,7 @@ export class RuntimeRun {
       kind: "run.started",
       data: {
         workDir: this.canonicalWorkDir,
+        ...(this.presentation ? { presentation: this.presentation } : {}),
       },
     };
     return this.append(event);

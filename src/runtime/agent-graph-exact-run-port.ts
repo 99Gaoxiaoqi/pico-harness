@@ -150,6 +150,10 @@ export class SqliteAgentGraphExactRunPort implements AgentGraphExactRunPort {
           turnId: input.turnId,
           invocationId: input.invocationId,
           runStartedEventId: input.runStartedEventId,
+          presentation: {
+            audience: "internal",
+            source: "agent_graph_control",
+          },
         });
       }
 
@@ -161,6 +165,7 @@ export class SqliteAgentGraphExactRunPort implements AgentGraphExactRunPort {
         invocationId: input.invocationId,
         runStartedEventId: input.runStartedEventId,
         runStartedAt: admitted.startEvent.at,
+        ...(admitted.startEvent.data.presentation ? { presentation: "internal" as const } : {}),
       };
       await this.options.execute({
         claimId: input.claimId,

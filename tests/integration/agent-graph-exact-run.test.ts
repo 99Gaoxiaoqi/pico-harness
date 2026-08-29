@@ -138,6 +138,14 @@ test("Graph exact Run safely attaches after run.started and deterministic input 
       invocationId: input.prestartedRun.invocationId,
       runStartedEventId: input.prestartedRun.runStartedEventId,
       now: () => new Date(input.prestartedRun.runStartedAt),
+      ...(input.prestartedRun.presentation === "internal"
+        ? {
+            presentation: {
+              audience: "internal" as const,
+              source: "agent_graph_control" as const,
+            },
+          }
+        : {}),
     });
     await input.session.beginRewindPoint({
       userPrompt: input.prompt,
@@ -186,6 +194,14 @@ test("Graph exact Run is indeterminate and never redispatches after provider dis
       invocationId: input.prestartedRun.invocationId,
       runStartedEventId: input.prestartedRun.runStartedEventId,
       now: () => new Date(input.prestartedRun.runStartedAt),
+      ...(input.prestartedRun.presentation === "internal"
+        ? {
+            presentation: {
+              audience: "internal" as const,
+              source: "agent_graph_control" as const,
+            },
+          }
+        : {}),
     });
     await runtimeRun.recordModelCallStarted({
       providerCallId: "provider-call-indeterminate",
@@ -651,6 +667,7 @@ async function executePrestarted(
     picoHome: input.session.picoHome,
     prompt: input.prompt,
     resumeExistingSession: false,
+    presentation: "internal",
     prestartedRun: input.prestartedRun,
     prestartedUserInput: input.prestartedUserInput,
     traceEnabled: false,

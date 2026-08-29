@@ -369,6 +369,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     string,
     { readonly requestFingerprint: string; readonly result: RuntimeResult<"rewind.apply"> }
   >();
+  private readonly agentGraphStores = new Map<string, SqliteAgentGraphControlStore>();
   private readonly inFlightHandles = new Set<Promise<JsonValue>>();
   private transcriptPersistenceTail: Promise<void> = Promise.resolve();
   private userConfigWatchTail: Promise<void> = Promise.resolve();
@@ -848,6 +849,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     try {
       await attempt(() => this.options.runtimeService.closeRuntimes());
       await attempt(() => this.transcriptPersistenceTail);
+      for (const store of this.agentGraphStores.values()) await attempt(() => store.close());
+      this.agentGraphStores.clear();
       this.unsubscribeRuntimeEvents();
       await attempt(() => this.options.runtimeService.close());
       if (this.ownsPluginRuntimeSnapshotRegistry) {
@@ -1046,18 +1049,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const sideChats = this.sideChatAuthority(canonical);
     await sideChats.recover();
     const hiddenSessionIds = new Set(sideChats.list().map((lease) => lease.targetSessionId));
-    const graphStore = new SqliteAgentGraphControlStore({
-      storageRoot: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
-      now: this.now,
-    });
-    try {
-      for (const graph of graphStore.listGraphs()) {
-        for (const provision of graphStore.listOperatorProvisions(graph.graphId)) {
-          hiddenSessionIds.add(provision.childSessionId);
-        }
-      }
-    } finally {
-      graphStore.close();
+    for (const childSessionId of this.agentGraphStore(canonical).listOperatorSessionIds()) {
+      hiddenSessionIds.add(childSessionId);
     }
     // 归档/置顶已并入 sessions 表(catalog 投影行),desktop session-state.json 退役。
     const entries = await listCliSessionCatalogEntries(canonical, { picoHome: this.picoHome });
@@ -2479,31 +2472,16 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     runId: string,
   ): Promise<boolean> {
     const canonical = await canonicalizeWorkspacePath(workspacePath);
-    const store = new SqliteAgentGraphControlStore({
-      storageRoot: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
-      now: this.now,
-    });
-    try {
-      for (const graph of store.listGraphs(rootSessionId)) {
-        if (
-          store.listYieldInterests(graph.graphId).some((interest) => interest.rootRunId === runId)
-        ) {
-          return true;
-        }
-        for (const wake of store.listSupervisorWakes(graph.graphId)) {
-          if (
-            store
-              .listSupervisorWakeAttempts(wake.wakeId)
-              .some((attempt) => attempt.targetRunId === runId)
-          ) {
-            return true;
-          }
-        }
-      }
-      return false;
-    } finally {
-      store.close();
-    }
+    const graphMode = await this.withSession(
+      canonical,
+      rootSessionId,
+      async (session) => session.getRuntimeStateSnapshot().settings?.orchestrationMode === "graph",
+    );
+    // Session orchestration mode is persisted before the host admits a foreground Run, so it is
+    // available for run.started as well as terminal notifications. Yield/wake facts are created
+    // later and remain only a recovery fallback for runs admitted by older hosts.
+    if (graphMode) return true;
+    return this.agentGraphStore(canonical).isInternalRun(rootSessionId, runId);
   }
 
   private async resolveRuntimeUserInput(
@@ -4558,6 +4536,17 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private nextResourceVersion(): number {
     this.resourceVersion = Math.max(this.resourceVersion + 1, this.now());
     return this.resourceVersion;
+  }
+
+  private agentGraphStore(workspacePath: string): SqliteAgentGraphControlStore {
+    const existing = this.agentGraphStores.get(workspacePath);
+    if (existing) return existing;
+    const store = new SqliteAgentGraphControlStore({
+      storageRoot: resolvePicoPaths(workspacePath, { picoHome: this.picoHome }).workspace.root,
+      now: this.now,
+    });
+    this.agentGraphStores.set(workspacePath, store);
+    return store;
   }
 
   private sideChatAuthority(workspacePath: string): SideChatAuthority {

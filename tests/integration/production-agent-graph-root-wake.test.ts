@@ -281,6 +281,10 @@ async function runProductionRootWakeScenario(
     );
     assert.equal(events.filter((event) => event.kind === "run.started").length, 1);
     assert.equal(events.filter((event) => event.kind === "run.terminal").length, 1);
+    assert.deepEqual(events.find((event) => event.kind === "run.started")?.data.presentation, {
+      audience: "internal",
+      source: "agent_graph_control",
+    });
     const wakeInput = events.find(
       (event): event is Extract<RuntimeEvent, { kind: "message.committed" }> =>
         event.kind === "message.committed" && event.data.message.role === "user",

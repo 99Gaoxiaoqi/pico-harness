@@ -405,6 +405,46 @@ export class SqliteAgentGraphControlStore {
     );
   }
 
+  /** Desktop index projection: one read, no graph-by-graph fan-out. */
+  listOperatorSessionIds(): readonly string[] {
+    return this.read(() =>
+      (
+        this.lease.database
+          .prepare(
+            `SELECT DISTINCT child_session_id FROM agent_graph_operator_provisions
+             ORDER BY child_session_id ASC`,
+          )
+          .all() as unknown as readonly { readonly child_session_id: string }[]
+      ).map((row) => row.child_session_id),
+    );
+  }
+
+  /** Historical control-run identity used only when Session mode provenance is unavailable. */
+  isInternalRun(sessionId: string, runId: string): boolean {
+    const normalizedSessionId = requireNonEmpty(sessionId, "sessionId");
+    const normalizedRunId = requireNonEmpty(runId, "runId");
+    return this.read(
+      () =>
+        this.lease.database
+          .prepare(
+            `SELECT 1 AS matched FROM (
+               SELECT root_session_id AS session_id, root_run_id AS run_id
+               FROM agent_graph_yield_interests
+               UNION ALL
+               SELECT root_session_id AS session_id, target_run_id AS run_id
+               FROM agent_graph_supervisor_wake_attempts
+               UNION ALL
+               SELECT target_session_id AS session_id, target_run_id AS run_id
+               FROM agent_graph_activation_claims
+               UNION ALL
+               SELECT source_session_id AS session_id, source_run_id AS run_id
+               FROM agent_graph_schedule_revisions
+             ) WHERE session_id = ? AND run_id = ? LIMIT 1`,
+          )
+          .get(normalizedSessionId, normalizedRunId) !== undefined,
+    );
+  }
+
   claimActivation(
     input: ClaimAgentGraphActivationInput,
   ): IdempotentStoreResult<AgentGraphActivationClaimRecord> {
