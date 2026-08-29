@@ -38,7 +38,7 @@ test(
     const executor = createHookExecutor(fixture);
     context.after(async () => await executor.dispose());
     const output = await executeStopHook(executor, fixture, handler, "windows-direct-exe");
-    assert.equal(output.additionalContext, "windows-exe");
+    assert.equal(output.additionalContext, "windows-exe", JSON.stringify(output));
 
     // 受限 Windows Hook 固定由 PowerShell 解释，shell-owned .cmd 仍可显式调用。
     const cmdPath = join(fixture.workspace, "greet.cmd");
@@ -85,6 +85,23 @@ test(
       "windows-restricted-powershell",
     );
     assert.equal(output.additionalContext, "restricted-powershell", JSON.stringify(output));
+
+    const denyHandler = {
+      type: "command",
+      command: `Write-Output '{"decision":"deny","reason":"restricted-deny"}'`,
+    } as const satisfies CommandHookHandler;
+    await trustStore.trust({
+      workspace: fixture.workspace,
+      source: fixture.source,
+      handler: denyHandler,
+    });
+    const denied = await executeStopHook(
+      executor,
+      fixture,
+      denyHandler,
+      "windows-restricted-powershell-deny",
+    );
+    assert.deepEqual(denied, { decision: "deny", reason: "restricted-deny" });
   },
 );
 
