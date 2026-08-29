@@ -49,9 +49,8 @@ if (!windowsHostPrepManifest.includes("{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"))
 }
 const windowsHostPrepBuildScript = await readFile(join(windowsHostPrepRoot, "build.rs"), "utf8");
 if (
-  !windowsHostPrepBuildScript.includes("MANIFESTUAC") ||
-  !windowsHostPrepBuildScript.includes("requireAdministrator") ||
-  !windowsHostPrepBuildScript.includes("uiAccess='false'")
+  !windowsHostPrepBuildScript.includes("MANIFESTUAC:level='requireAdministrator'") ||
+  windowsHostPrepBuildScript.includes("uiAccess")
 ) {
   throw new Error("Windows host-prep 缺少 requireAdministrator LINK 配置");
 }
