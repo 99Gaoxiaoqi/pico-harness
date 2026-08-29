@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { test } from "node:test";
 import {
   buildBubblewrapArgs,
@@ -343,9 +343,7 @@ test("macOS profile 不包含全局 file-read 且按根目录开放", async (con
   });
   const profile = buildMacosProfile(policy);
   assert.doesNotMatch(profile, /^\(allow file-read\*\)$/mu);
-  const canonicalRoot = policy.readRoots.find((candidate) =>
-    candidate.endsWith(root.split("/").at(-1)!),
-  );
+  const canonicalRoot = policy.readRoots.find((candidate) => candidate.endsWith(basename(root)));
   assert.ok(canonicalRoot);
   assert.match(
     profile,
