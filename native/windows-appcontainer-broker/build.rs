@@ -19,4 +19,7 @@ fn main() {
         manifest.display()
     );
     println!("cargo:rustc-link-arg-bin=pico-appcontainer-host-prep=/MANIFEST:EMBED");
+    println!(
+        "cargo:rustc-link-arg-bin=pico-appcontainer-host-prep=/MANIFESTUAC:\"level='requireAdministrator' uiAccess='false'\""
+    );
 }
