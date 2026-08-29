@@ -395,9 +395,12 @@ export class Session
     if (this.runtimeOwnership) return Promise.resolve(this.runtimeOwnership);
     if (this.runtimeOwnershipPromise) return this.runtimeOwnershipPromise;
 
+    const workspace = resolvePicoPaths(this.workDir, { picoHome: this.picoHome }).workspace;
     const acquisition = OwnerLease.acquire({
       leaseDirectory: sessionOwnerLeaseDirectory(
-        { id: workspaceIdForPath(this.runtimeStorageRoot), root: this.runtimeStorageRoot },
+        this.runtimeStorageRoot === workspace.root
+          ? workspace
+          : { id: workspaceIdForPath(this.runtimeStorageRoot), root: this.runtimeStorageRoot },
         this.id,
       ),
       ownerId: `runtime-session:${this.id}`,
