@@ -296,7 +296,7 @@ test(
         new WriteFileTool(fixture.workspace).execute(
           JSON.stringify({ path: "metadata.txt", content: "replacement\n" }),
         ),
-        /已校验的 bundled xattr helper 不可用|Linux.*扩展属性/u,
+        /已校验的 bundled xattr helper 不可用|Linux.*扩展属性|无法绑定 Linux 目标元数据/u,
       );
     } finally {
       await chmod(helperPath, 0o755);
