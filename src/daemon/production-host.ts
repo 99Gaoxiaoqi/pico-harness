@@ -2322,6 +2322,9 @@ function persistReporterOverlayDelta(
   if (event.type === "assistant.message") {
     void overlay.complete(`assistant:live:${event.runId}:${turn}`);
     void overlay.complete(`thinking:live:${event.runId}:${turn}`);
+  } else if (event.type === "assistant.suppressed") {
+    void overlay.complete(`assistant:live:${event.runId}:${turn}`);
+    void overlay.complete(`thinking:live:${event.runId}:${turn}`);
   } else if (event.type === "tool.completed") {
     const result = event.payload["result"];
     const providerCallId =

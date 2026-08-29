@@ -36,6 +36,10 @@ export function isDesktopTranscriptNotification(topic: string): boolean {
   );
 }
 
+export function isDesktopRunBoundaryNotification(topic: string): boolean {
+  return RUN_BOUNDARY_TOPICS.has(topic);
+}
+
 export async function ingestDesktopRuntimeNotification(
   session: Session,
   notification: RuntimeNotification,

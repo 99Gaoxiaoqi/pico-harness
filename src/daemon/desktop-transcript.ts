@@ -14,6 +14,7 @@ import {
   projectRuntimeSessionTranscriptEventEntries,
 } from "../engine/session-runtime-projection.js";
 import { isMessageHiddenFromTranscript } from "../schema/message.js";
+import { isAgentGraphSupervisorToolName } from "../agent-graph/core/tool-names.js";
 import {
   MAX_RUNTIME_FRAME_BYTES,
   type JsonObject,
@@ -485,6 +486,7 @@ function projectStructuredItems(
         );
         break;
       case "tool": {
+        if (isAgentGraphSupervisorToolName(entry.name)) break;
         const result =
           projected.toolCallId === undefined
             ? undefined

@@ -912,7 +912,9 @@ export async function executeAgentRuntime(
     injectedSession &&
     (injectedSession.id !== sessionSelection.sessionId || injectedSession.workDir !== workDir)
   ) {
-    throw new Error(`Host-selected Session does not match the runtime request: ${sessionSelection.sessionId}`);
+    throw new Error(
+      `Host-selected Session does not match the runtime request: ${sessionSelection.sessionId}`,
+    );
   }
   const sessionLease = injectedSession
     ? { session: injectedSession, release: globalSessionManager.pin(injectedSession) }
@@ -1803,7 +1805,10 @@ export async function executeAgentRuntime(
       collaborationMode,
       planHandoff,
       ...(dependencies.agentGraph?.kind === "root"
-        ? { stopAfterSuccessfulToolNames: ["yield_agent_graph"] }
+        ? {
+            stopAfterSuccessfulToolNames: ["yield_agent_graph"],
+            controlPlanePresentation: true,
+          }
         : dependencies.agentGraph?.kind === "operator"
           ? { stopAfterSuccessfulToolNames: ["agent_output"] }
           : {}),

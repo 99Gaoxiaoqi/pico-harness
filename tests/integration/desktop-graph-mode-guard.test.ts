@@ -64,6 +64,80 @@ test("desktop rejects Graph to linear mode switch while the root epoch is open",
   }
 });
 
+test("desktop session index excludes durable Graph operator Sessions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-desktop-graph-session-index-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  await Promise.all([mkdir(workspace, { recursive: true }), mkdir(picoHome, { recursive: true })]);
+  const canonical = await realpath(workspace);
+  const env = { PICO_HOME: picoHome };
+  const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
+  await trustStore.trust(canonical);
+  const runtime = new WorkspaceRuntimeService({ env, execute: async () => ({ ok: true }) });
+  const desktop = new DesktopRuntimeService({
+    runtimeService: runtime,
+    trustStore,
+    env,
+  });
+  const graphStore = new SqliteAgentGraphControlStore({
+    storageRoot: resolvePicoPaths(canonical, { picoHome }).workspace.root,
+  });
+  let reloadedDesktop: DesktopRuntimeService | undefined;
+  try {
+    const created = [] as string[];
+    for (let index = 0; index < 2; index++) {
+      const result = (await desktop.handle(
+        createRuntimeRequest("session.create", { workspacePath: canonical }),
+      )) as { session: { sessionId: string } };
+      created.push(result.session.sessionId);
+    }
+    const rootSessionId = created[0]!;
+    const childSessionId = created[1]!;
+    graphStore.createGraph({ graphId: "graph-session-index", rootSessionId, epoch: 1 });
+    graphStore.commitScheduleRevision({
+      graphId: "graph-session-index",
+      expectedRevision: 0,
+      operationId: "graph-session-index-add",
+      requestFingerprint: "graph-session-index-add-fingerprint",
+      kind: "add",
+      command: { kind: "add" },
+      sourceSessionId: rootSessionId,
+      sourceTurnId: "root-turn",
+      sourceRunId: "root-run",
+      sourceToolCallId: "root-tool",
+    });
+    graphStore.ensureOperatorProvision({
+      provisionId: "graph-session-index-provision",
+      graphId: "graph-session-index",
+      operatorId: "operator",
+      generation: 1,
+      scheduleRevision: 1,
+      provisionFingerprint: "graph-session-index-provision-fingerprint",
+      childSessionId,
+      profileSnapshot: { profileId: "explore" },
+      workspaceBinding: { kind: "shared" },
+    });
+
+    reloadedDesktop = new DesktopRuntimeService({
+      runtimeService: new WorkspaceRuntimeService({ env, execute: async () => ({ ok: true }) }),
+      trustStore,
+      env,
+    });
+    const listed = (await reloadedDesktop.handle(
+      createRuntimeRequest("session.list", { workspacePath: canonical, includeArchived: true }),
+    )) as { sessions: readonly { sessionId: string }[] };
+    assert.deepEqual(
+      listed.sessions.map((session) => session.sessionId),
+      [rootSessionId],
+    );
+  } finally {
+    graphStore.close();
+    await reloadedDesktop?.close();
+    await desktop.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("desktop deletion retires the root Graph before removing its Session", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-desktop-graph-delete-"));
   const workspace = join(root, "workspace");

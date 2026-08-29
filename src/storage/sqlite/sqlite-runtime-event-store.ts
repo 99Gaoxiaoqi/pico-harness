@@ -23,6 +23,7 @@ import {
 import { createToolResultEnvelope } from "../../engine/tool-result-contract.js";
 import type { Message } from "../../schema/message.js";
 import { isMessageHiddenFromTranscript } from "../../schema/message.js";
+import { isAgentGraphSupervisorToolName } from "../../agent-graph/core/tool-names.js";
 import type {
   DurableTranscriptEvent,
   TranscriptEntryData,
@@ -3461,6 +3462,7 @@ function transcriptMutationsForEvent(
   }
 
   if (event.kind === "tool.result.recorded") {
+    if (isAgentGraphSupervisorToolName(event.data.toolName)) return [];
     const prior =
       currentByKind("tool").find((record) => {
         const payload = asJsonRecord(record.payload);
@@ -3594,6 +3596,7 @@ function transcriptMutationsForEvent(
     case "assistant.response.suppressed":
       return [{ op: "remove", itemId: `entry:${transcript.entryId}` }];
     case "tool.started": {
+      if (isAgentGraphSupervisorToolName(transcript.name)) return [];
       const itemId = `tool:${transcript.toolCallId}`;
       return [
         {
