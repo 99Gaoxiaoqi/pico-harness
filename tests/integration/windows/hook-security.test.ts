@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { access, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, extname, join } from "node:path";
+import { basename, dirname, extname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import {
   sanitizeCommandHookEnvironment,
@@ -154,8 +154,16 @@ test(
       entryPath,
       "process.stdout.write(JSON.stringify({ additionalContext: `${process.env.pAtH ?? process.env.PATH}` }));\n",
     );
+    const restrictedShell = resolveHookShell(process.env, {
+      windowsAppContainerCompatible: true,
+    });
+    assert.equal(restrictedShell.kind, "pwsh", "Windows CI host must provide PowerShell 7");
+    const restrictedPath = `${join(process.execPath, "..")};${dirname(restrictedShell.path)};`;
     const environment = withoutExecutionPath(process.env);
-    environment.pAtH = `${join(process.execPath, "..")};${environment.pAtH ?? ""}`;
+    // Keep the AppContainer-compatible shell on the deliberately mixed-case PATH.
+    // Removing pwsh here would test the legacy Windows PowerShell fallback instead
+    // of case-insensitive bare-command lookup.
+    environment.pAtH = restrictedPath;
     // PowerShell 解析裸命令名依赖 PATHEXT（真实 Windows 恒有；测试受控环境需显式补回）。
     environment.pAtHeXt = ".CMD;.EXE";
     const handler = {
@@ -174,12 +182,8 @@ test(
     const executor = createHookExecutor(fixture, environment);
     context.after(async () => await executor.dispose());
     const output = await executeStopHook(executor, fixture, handler, "windows-mixed-case-path");
-    // 子进程看到的 PATH 就是受控环境的 pAtH 值（nodeDir 前缀 + 尾随分号）。
-    assert.equal(
-      output.additionalContext,
-      `${join(process.execPath, "..")};`,
-      JSON.stringify(output),
-    );
+    // 子进程看到的 PATH 就是受控环境的 pAtH 值（nodeDir + pwshDir + 尾随分号）。
+    assert.equal(output.additionalContext, restrictedPath, JSON.stringify(output));
   },
 );
 
