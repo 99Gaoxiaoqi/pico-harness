@@ -4,14 +4,13 @@ import test from "node:test";
 import type {
   AgentGraph,
   AgentGraphActivationIntent,
-  AgentGraphOperator,
 } from "../../src/agent-graph/core/contracts.js";
+import { createBuiltinAgentGraphOperatorProfileCatalog } from "../../src/agent-graph/operator-profile-catalog.js";
 import {
   AGENT_GRAPH_MAX_COMMANDS,
   AGENT_GRAPH_MAX_INPUT_REFS,
   AGENT_GRAPH_MAX_INSTRUCTION_BYTES,
   AGENT_GRAPH_MAX_JSON_BYTES,
-  AGENT_GRAPH_MAX_PROFILE_TOOLS,
   AGENT_GRAPH_MAX_SELECTED_RECORDS,
   AGENT_GRAPH_MAX_VIEW_RECORDS,
   createAgentGraphSupervisorTools,
@@ -27,9 +26,11 @@ import {
 const ROOT: AgentGraphRootToolContext = {
   kind: "graph_root_supervisor",
   graphId: "graph-1",
+  epoch: 1,
   rootSessionId: "root-session-1",
   rootTurnId: "root-turn-1",
   rootRunId: "root-run-1",
+  rootModelRouteId: "model-route-1",
 };
 
 const GRAPH: AgentGraph = {
@@ -54,6 +55,8 @@ const EMPTY_PROJECTION: AgentGraphSupervisorProjection = {
 
 const EMPTY_VIEW: AgentGraphSupervisorView = {
   ...EMPTY_PROJECTION,
+  availableOperatorProfiles: createBuiltinAgentGraphOperatorProfileCatalog().listPublicProfiles(),
+  intentReadiness: [],
   runtimeClaims: [],
   results: { records: [], totalBytes: 0, truncated: false },
 };
@@ -62,12 +65,29 @@ class FakePort implements AgentGraphSupervisorToolPort {
   readonly updates: CommitAgentGraphUpdateInput[] = [];
   readonly reads: ReadAgentGraphProjectionInput[] = [];
   readonly yields: RegisterAgentGraphYieldInput[] = [];
+  readonly cancelledYields: Array<{ permitId: string; rootSessionId: string }> = [];
+  onRegisterYield?: () => void;
 
   async commitUpdate(input: CommitAgentGraphUpdateInput) {
     this.updates.push(input);
     const addCommands = input.commands.filter((command) => command.kind === "add");
-    const operators = addCommands.map((command) => command.operator);
-    const intents = addCommands.map((command) => command.intent);
+    const catalog = createBuiltinAgentGraphOperatorProfileCatalog();
+    const operators = addCommands.map((command) => {
+      const { profileId, ...operator } = command.operator;
+      return {
+        ...operator,
+        profile: (() => {
+          const snapshot = catalog.resolve({
+            profileId,
+            rootModelRouteId: input.rootModelRouteId,
+          });
+          return { profileId: snapshot.profileId, revision: snapshot.profileRevision };
+        })(),
+      };
+    });
+    const intents = input.commands.flatMap((command) =>
+      command.kind === "add" || command.kind === "activate" ? [command.intent] : [],
+    );
     const stops = input.commands.filter((command) => command.kind === "stop");
     const finished = input.commands.find((command) => command.kind === "finish");
     return {
@@ -99,7 +119,12 @@ class FakePort implements AgentGraphSupervisorToolPort {
 
   async registerYield(input: RegisterAgentGraphYieldInput) {
     this.yields.push(input);
+    this.onRegisterYield?.();
     return { permitId: `permit:${input.toolCallId}`, replayed: false, snapshot: EMPTY_PROJECTION };
+  }
+
+  cancelYield(permitId: string, rootSessionId: string): void {
+    this.cancelledYields.push({ permitId, rootSessionId });
   }
 }
 
@@ -123,10 +148,6 @@ function addCommand(overrides: Record<string, unknown> = {}) {
       description: "Research the requested topic.",
       profile: {
         profile_id: "explore",
-        model: "model-1",
-        tools: ["read_file", "web_search"],
-        permission_policy: { filesystem: "read-only", network: false },
-        system_prompt_version: "v1",
       },
       workspace: { kind: "shared" },
     },
@@ -139,10 +160,17 @@ function addCommand(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function nestedJson(depth: number): unknown {
-  let value: unknown = true;
-  for (let index = 0; index < depth; index += 1) value = { nested: value };
-  return value;
+function activateCommand(overrides: Record<string, unknown> = {}) {
+  return {
+    kind: "activate",
+    operator: { operator_id: "researcher", generation: 1 },
+    intent: {
+      intent_id: "intent-follow-up",
+      instruction: "复核已有结论。",
+      input_record_ids: ["record-source-2"],
+    },
+    ...overrides,
+  };
 }
 
 function padJsonToBytes(json: string, bytes: number): string {
@@ -174,8 +202,10 @@ test("update_agent_graph normalizes one add command and forwards host-owned sour
   assert.equal(port.updates[0]?.operationId, "operation-1");
   const command = port.updates[0]?.commands[0];
   assert.equal(command?.kind, "add");
-  assert.equal((command as { operator: AgentGraphOperator }).operator.graphId, ROOT.graphId);
-  assert.deepEqual((command as { operator: AgentGraphOperator }).operator.workspacePolicy, {
+  if (command?.kind !== "add") assert.fail("expected add command");
+  assert.equal(command.operator.graphId, ROOT.graphId);
+  assert.equal(command.operator.profileId, "explore");
+  assert.deepEqual(command.operator.workspacePolicy, {
     kind: "shared",
   });
   assert.equal(
@@ -198,7 +228,7 @@ test("update_agent_graph normalizes one add command and forwards host-owned sour
   );
 });
 
-test("update_agent_graph submits add, stop, and finish as one ordered atomic batch", async () => {
+test("update_agent_graph submits add and stop as one ordered atomic batch", async () => {
   const { port, byName } = fixture();
   const raw = await byName.get("update_agent_graph")!.execute(
     JSON.stringify({
@@ -211,7 +241,6 @@ test("update_agent_graph submits add, stop, and finish as one ordered atomic bat
           target: { kind: "operator", operator_id: "researcher", generation: 1 },
           reason: "已获得足够证据",
         },
-        { kind: "finish", selected_record_ids: ["record-final"] },
       ],
     }),
     { toolCallId: "provider-call-batch" },
@@ -220,13 +249,29 @@ test("update_agent_graph submits add, stop, and finish as one ordered atomic bat
   assert.equal(port.updates.length, 1);
   assert.deepEqual(
     port.updates[0]?.commands.map((command) => command.kind),
-    ["add", "stop", "finish"],
+    ["add", "stop"],
   );
-  assert.deepEqual(port.updates[0]?.commands[2], {
-    kind: "finish",
-    selectedRecordIds: ["record-final"],
-  });
   assert.equal((JSON.parse(raw) as { revision: number }).revision, 9);
+});
+
+test("update_agent_graph parses a follow-up activation for an existing Operator generation", async () => {
+  const { port, byName } = fixture();
+  await byName.get("update_agent_graph")!.execute(
+    JSON.stringify({
+      expected_revision: 1,
+      operation_id: "operation-follow-up",
+      commands: [activateCommand()],
+    }),
+    { toolCallId: "provider-call-follow-up" },
+  );
+
+  const command = port.updates[0]?.commands[0];
+  assert.equal(command?.kind, "activate");
+  if (command?.kind !== "activate") throw new Error("expected activate command");
+  assert.equal(command.intent.operatorId, "researcher");
+  assert.equal(command.intent.operatorGeneration, 1);
+  assert.equal(command.intent.createdAtRevision, 2);
+  assert.equal(command.intent.requestedBy.toolCallId, "provider-call-follow-up");
 });
 
 test("update_agent_graph rejects malformed commands, forged root identity, and invalid Unicode", async () => {
@@ -241,7 +286,7 @@ test("update_agent_graph rejects malformed commands, forged root identity, and i
       }),
       { toolCallId: "provider-call-bad-kind" },
     ),
-    /kind 必须是 add、stop 或 finish/u,
+    /kind 必须是 add、activate、stop 或 finish/u,
   );
   await assert.rejects(
     update.execute(
@@ -269,36 +314,42 @@ test("update_agent_graph rejects malformed commands, forged root identity, and i
   assert.equal(port.updates.length, 0);
 });
 
-test("update_agent_graph exposes and accepts only the production-supported shared workspace", async () => {
+test("update_agent_graph exposes shared and isolated workspace requests", async () => {
   const { port, byName } = fixture();
   const update = byName.get("update_agent_graph")!;
   const schema = JSON.stringify(update.definition().inputSchema);
   assert.match(schema, /"enum":\["shared"\]/u);
-  assert.doesNotMatch(schema, /isolated-worktree|base_ref/u);
+  assert.match(schema, /isolated-worktree/u);
+  assert.match(schema, /base_ref/u);
 
   const command = addCommand() as ReturnType<typeof addCommand> & {
     operator: Record<string, unknown>;
   };
-  await assert.rejects(
-    update.execute(
-      JSON.stringify({
-        expected_revision: 0,
-        operation_id: "operation-isolated-worktree",
-        commands: [
-          {
-            ...command,
-            operator: {
-              ...command.operator,
-              workspace: { kind: "isolated-worktree", base_ref: "main" },
-            },
+  await update.execute(
+    JSON.stringify({
+      expected_revision: 0,
+      operation_id: "operation-isolated-worktree",
+      commands: [
+        {
+          ...command,
+          operator: {
+            ...command.operator,
+            workspace: { kind: "isolated-worktree", base_ref: "main" },
           },
-        ],
-      }),
-      { toolCallId: "provider-call-isolated-worktree" },
-    ),
-    /workspace\.kind 当前仅支持 shared/u,
+        },
+      ],
+    }),
+    { toolCallId: "provider-call-isolated-worktree" },
   );
-  assert.equal(port.updates.length + port.reads.length + port.yields.length, 0);
+  assert.deepEqual(
+    port.updates[0]?.commands[0]?.kind === "add"
+      ? port.updates[0].commands[0].operator.workspacePolicy
+      : undefined,
+    {
+      kind: "isolated-worktree",
+      baseRef: "main",
+    },
+  );
 });
 
 test("update_agent_graph rejects unknown fields at every nested command boundary", async () => {
@@ -351,7 +402,7 @@ test("update_agent_graph rejects unknown fields at every nested command boundary
   assert.equal(port.updates.length, 0);
 });
 
-test("update_agent_graph rejects deep policy JSON and duplicate command identities", async () => {
+test("update_agent_graph rejects retired profile fields and duplicate command identities", async () => {
   const { port, byName } = fixture();
   const update = byName.get("update_agent_graph")!;
   const invalidCommands = [
@@ -362,7 +413,7 @@ test("update_agent_graph rejects deep policy JSON and duplicate command identiti
           profile: {
             ...(addCommand() as { operator: { profile: Record<string, unknown> } }).operator
               .profile,
-            permission_policy: nestedJson(32),
+            permission_policy: { mode: "default" },
           },
         },
       }),
@@ -374,7 +425,7 @@ test("update_agent_graph rejects deep policy JSON and duplicate command identiti
           profile: {
             ...(addCommand() as { operator: { profile: Record<string, unknown> } }).operator
               .profile,
-            permission_policy: Array.from({ length: 300 }, (_, index) => index),
+            tools: ["read_file"],
           },
         },
       }),
@@ -384,24 +435,14 @@ test("update_agent_graph rejects deep policy JSON and duplicate command identiti
       { kind: "stop", target: { kind: "intent", intent_id: "intent-1" } },
     ],
     [{ kind: "finish" }, { kind: "finish" }],
+    [addCommand(), { kind: "finish" }],
+    [activateCommand(), { kind: "finish" }],
     [
       addCommand({
         intent: {
           intent_id: "intent-duplicate-input",
           instruction: "duplicate input",
           input_record_ids: ["record-1", "record-1"],
-        },
-      }),
-    ],
-    [
-      addCommand({
-        operator: {
-          ...(addCommand() as { operator: Record<string, unknown> }).operator,
-          profile: {
-            ...(addCommand() as { operator: { profile: Record<string, unknown> } }).operator
-              .profile,
-            tools: ["read_file", "read_file"],
-          },
         },
       }),
     ],
@@ -418,7 +459,7 @@ test("update_agent_graph rejects deep policy JSON and duplicate command identiti
         }),
         { toolCallId: `provider-call-conflict-${index}` },
       ),
-      /嵌套过深|数组不得超过|finish 最多一条且必须是最后一条|不得包含重复项/u,
+      /不支持字段|finish 最多一条且必须是最后一条|finish 不能与 add 或 activate|不得包含重复项/u,
     );
   }
   assert.equal(port.updates.length, 0);
@@ -443,17 +484,6 @@ test("update_agent_graph enforces UTF-8 and collection limits at exact boundarie
               { length: AGENT_GRAPH_MAX_INPUT_REFS },
               (_, index) => `record-${index}`,
             ),
-          },
-          operator: {
-            ...(addCommand() as { operator: Record<string, unknown> }).operator,
-            profile: {
-              ...(addCommand() as { operator: { profile: Record<string, unknown> } }).operator
-                .profile,
-              tools: Array.from(
-                { length: AGENT_GRAPH_MAX_PROFILE_TOOLS },
-                (_, index) => `tool-${index}`,
-              ),
-            },
           },
         }),
       ],
@@ -502,32 +532,6 @@ test("update_agent_graph enforces UTF-8 and collection limits at exact boundarie
     ),
     new RegExp(`input_record_ids 不得超过 ${AGENT_GRAPH_MAX_INPUT_REFS} 项`, "u"),
   );
-  await assert.rejects(
-    update.execute(
-      JSON.stringify({
-        expected_revision: 1,
-        operation_id: "operation-over-profile-tools",
-        commands: [
-          addCommand({
-            operator: {
-              ...(addCommand() as { operator: Record<string, unknown> }).operator,
-              profile: {
-                ...(addCommand() as { operator: { profile: Record<string, unknown> } }).operator
-                  .profile,
-                tools: Array.from(
-                  { length: AGENT_GRAPH_MAX_PROFILE_TOOLS + 1 },
-                  (_, index) => `tool-over-${index}`,
-                ),
-              },
-            },
-          }),
-        ],
-      }),
-      { toolCallId: "provider-call-over-profile-tools" },
-    ),
-    /profile\.tools 不得超过/u,
-  );
-
   const exactCommands = Array.from({ length: AGENT_GRAPH_MAX_COMMANDS }, (_, index) => ({
     kind: "stop",
     target: { kind: "intent", intent_id: `intent-${index}` },
@@ -688,13 +692,16 @@ test("view_agent_graph returns the application projection and yield_agent_graph 
   const { port, byName } = fixture();
   const viewed = JSON.parse(await byName.get("view_agent_graph")!.execute("{}"));
   assert.deepEqual(viewed, EMPTY_VIEW);
-  assert.deepEqual(port.reads, [{ graphId: ROOT.graphId, rootSessionId: ROOT.rootSessionId }]);
+  assert.deepEqual(port.reads, [
+    { graphId: ROOT.graphId, epoch: ROOT.epoch, rootSessionId: ROOT.rootSessionId },
+  ]);
 
   await byName
     .get("view_agent_graph")!
     .execute(JSON.stringify({ record_ids: ["record-1", "record-2"] }));
   assert.deepEqual(port.reads[1], {
     graphId: ROOT.graphId,
+    epoch: ROOT.epoch,
     rootSessionId: ROOT.rootSessionId,
     recordIds: ["record-1", "record-2"],
   });
@@ -725,6 +732,7 @@ test("view_agent_graph returns the application projection and yield_agent_graph 
   assert.deepEqual(port.yields, [
     {
       graphId: ROOT.graphId,
+      epoch: ROOT.epoch,
       rootSessionId: ROOT.rootSessionId,
       rootTurnId: ROOT.rootTurnId,
       rootRunId: ROOT.rootRunId,
@@ -733,4 +741,24 @@ test("view_agent_graph returns the application projection and yield_agent_graph 
   ]);
   assert.equal(yielded.permitId, "permit:provider-call-yield");
   assert.deepEqual(yielded.snapshot, EMPTY_PROJECTION);
+});
+
+test("yield_agent_graph cancels a registered permit when the tool call aborts after registration", async () => {
+  const { port, byName } = fixture();
+  const controller = new AbortController();
+  port.onRegisterYield = () => controller.abort();
+
+  await assert.rejects(
+    byName.get("yield_agent_graph")!.execute("{}", {
+      toolCallId: "provider-call-aborted-yield",
+      signal: controller.signal,
+    }),
+    /abort/u,
+  );
+  assert.deepEqual(port.cancelledYields, [
+    {
+      permitId: "permit:provider-call-aborted-yield",
+      rootSessionId: ROOT.rootSessionId,
+    },
+  ]);
 });

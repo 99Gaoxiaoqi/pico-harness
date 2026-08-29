@@ -30,7 +30,11 @@ test("Graph Mode prompt 只指导持久 Supervisor 工具与完整收口流程",
   for (const toolName of RETIRED_GRAPH_TOOLS) {
     assert.doesNotMatch(enabled.systemPrompt, new RegExp(`\\b${toolName}\\b`, "u"));
   }
-  assert.match(enabled.systemPrompt, /add\/stop/u);
+  assert.match(enabled.systemPrompt, /add\/activate\/stop/u);
+  assert.match(enabled.systemPrompt, /复用其 child Session/u);
+  assert.match(enabled.systemPrompt, /没有未来进展则拒绝/u);
+  assert.match(enabled.systemPrompt, /调用成功[\s\S]*立即结束本次响应/u);
+  assert.match(enabled.systemPrompt, /不再调用任何工具/u);
   assert.match(enabled.systemPrompt, /finish/u);
   assert.match(enabled.systemPrompt, /batch/u);
   assert.match(enabled.systemPrompt, /recordId/u);

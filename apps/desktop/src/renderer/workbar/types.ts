@@ -10,6 +10,7 @@ export const WORKBAR_TOOL_KINDS = [
   "files",
   "tasks",
   "inspector",
+  "graph",
 ] as const;
 
 export type WorkbarToolKind = (typeof WORKBAR_TOOL_KINDS)[number];
@@ -113,6 +114,7 @@ export function isPersistedWorkbarTabKind(value: unknown): value is PersistedWor
     value === "browser" ||
     value === "files" ||
     value === "tasks" ||
-    value === "inspector"
+    value === "inspector" ||
+    value === "graph"
   );
 }

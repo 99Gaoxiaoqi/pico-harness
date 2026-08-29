@@ -4,8 +4,13 @@ import { resolvePicoPaths } from "../paths/pico-paths.js";
 export const sessionDrains = new Map<string, Promise<void>>();
 const sessionManagerOwners = new Map<string, symbol>();
 
-export function sessionEntryKey(id: string, workDir: string, picoHome?: string): string {
-  return `${resolvePicoPaths(workDir, { picoHome }).workspace.root}\0${id}`;
+export function sessionEntryKey(
+  id: string,
+  workDir: string,
+  picoHome?: string,
+  runtimeStorageRoot?: string,
+): string {
+  return `${runtimeStorageRoot ?? resolvePicoPaths(workDir, { picoHome }).workspace.root}\0${id}`;
 }
 
 /** Prevent two manager instances from owning mutable Session objects for one durable key. */

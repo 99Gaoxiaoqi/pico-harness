@@ -209,5 +209,122 @@ export const AGENT_GRAPH_SCOPE: SqliteSchemaScope = {
         ON agent_graph_supervisor_wake_attempts(wake_id, attempt_number);
       `,
     ],
+    [
+      2,
+      `
+      CREATE TABLE agent_graph_resource_refs (
+        resource_id TEXT PRIMARY KEY,
+        graph_id TEXT NOT NULL,
+        claim_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('artifact','evidence')),
+        source_ref TEXT NOT NULL,
+        source_session_id TEXT NOT NULL,
+        source_resource_id TEXT NOT NULL,
+        content_digest TEXT NOT NULL CHECK (length(content_digest) = 64),
+        content_bytes INTEGER NOT NULL CHECK (content_bytes >= 0),
+        media_type TEXT,
+        title TEXT,
+        metadata_json TEXT NOT NULL CHECK (json_valid(metadata_json)),
+        created_at INTEGER NOT NULL,
+        UNIQUE (claim_id, kind, source_ref),
+        FOREIGN KEY (graph_id, claim_id)
+          REFERENCES agent_graph_activation_claims(graph_id, claim_id) ON DELETE RESTRICT,
+        FOREIGN KEY (graph_id) REFERENCES agent_graphs(graph_id) ON DELETE RESTRICT
+      );
+
+      CREATE INDEX agent_graph_resources_by_graph
+        ON agent_graph_resource_refs(graph_id, created_at, resource_id);
+      CREATE INDEX agent_graph_resources_by_claim
+        ON agent_graph_resource_refs(claim_id, kind, created_at, resource_id);
+      CREATE INDEX agent_graph_resources_by_digest
+        ON agent_graph_resource_refs(kind, content_digest);
+      `,
+    ],
+    [
+      3,
+      `
+      CREATE TABLE agent_graph_workspace_resources (
+        resource_id TEXT PRIMARY KEY,
+        graph_id TEXT NOT NULL,
+        provision_id TEXT NOT NULL UNIQUE,
+        child_session_id TEXT NOT NULL UNIQUE,
+        repo_root TEXT NOT NULL,
+        worktree_path TEXT NOT NULL UNIQUE,
+        branch TEXT NOT NULL UNIQUE,
+        base_ref TEXT NOT NULL,
+        base_commit TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('requested','active','retained','cleaned')),
+        version INTEGER NOT NULL CHECK (version >= 1),
+        retain_reason TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        retained_at INTEGER,
+        cleaned_at INTEGER,
+        FOREIGN KEY (graph_id) REFERENCES agent_graphs(graph_id) ON DELETE RESTRICT,
+        FOREIGN KEY (provision_id) REFERENCES agent_graph_operator_provisions(provision_id) ON DELETE RESTRICT,
+        CHECK ((state = 'requested' AND retained_at IS NULL AND cleaned_at IS NULL)
+          OR (state = 'active' AND retained_at IS NULL AND cleaned_at IS NULL)
+          OR (state = 'retained' AND retained_at IS NOT NULL AND cleaned_at IS NULL)
+          OR (state = 'cleaned' AND cleaned_at IS NOT NULL))
+      );
+
+      CREATE INDEX agent_graph_workspace_resources_by_graph
+        ON agent_graph_workspace_resources(graph_id, created_at, resource_id);
+      CREATE INDEX agent_graph_workspace_resources_by_state
+        ON agent_graph_workspace_resources(state, updated_at, resource_id);
+      `,
+    ],
+    [
+      4,
+      `
+      CREATE TABLE agent_graph_diagnostics (
+        diagnostic_id TEXT PRIMARY KEY,
+        graph_id TEXT NOT NULL,
+        phase TEXT NOT NULL CHECK (phase IN ('load','stop','provision','resolve-inputs','claim','begin-executing','project-record')),
+        subject_id TEXT NOT NULL,
+        classification TEXT NOT NULL CHECK (classification IN ('transient','configuration','integrity')),
+        state TEXT NOT NULL CHECK (state IN ('retry_scheduled','needs_attention','resolved')),
+        message TEXT NOT NULL CHECK (length(message) BETWEEN 1 AND 1024),
+        attempt_count INTEGER NOT NULL CHECK (attempt_count >= 1),
+        last_observation_id TEXT NOT NULL,
+        next_retry_at INTEGER,
+        version INTEGER NOT NULL CHECK (version >= 1),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        resolved_at INTEGER,
+        UNIQUE (graph_id, phase, subject_id),
+        FOREIGN KEY (graph_id) REFERENCES agent_graphs(graph_id) ON DELETE RESTRICT,
+        CHECK ((state = 'retry_scheduled' AND next_retry_at IS NOT NULL AND resolved_at IS NULL)
+          OR (state = 'needs_attention' AND next_retry_at IS NULL AND resolved_at IS NULL)
+          OR (state = 'resolved' AND next_retry_at IS NULL AND resolved_at IS NOT NULL))
+      );
+
+      CREATE INDEX agent_graph_diagnostics_active
+        ON agent_graph_diagnostics(graph_id, state, next_retry_at, updated_at)
+        WHERE state <> 'resolved';
+
+      ALTER TABLE agent_graph_supervisor_wakes
+        ADD COLUMN attention_state TEXT NOT NULL DEFAULT 'none'
+        CHECK (attention_state IN ('none','needs_attention'));
+      ALTER TABLE agent_graph_supervisor_wakes
+        ADD COLUMN attention_version INTEGER NOT NULL DEFAULT 0 CHECK (attention_version >= 0);
+      ALTER TABLE agent_graph_supervisor_wakes ADD COLUMN needs_attention_at INTEGER;
+      ALTER TABLE agent_graph_supervisor_wakes ADD COLUMN attention_resolved_at INTEGER;
+      ALTER TABLE agent_graph_supervisor_wakes ADD COLUMN last_retry_operation_id TEXT;
+
+      CREATE INDEX agent_graph_wakes_attention
+        ON agent_graph_supervisor_wakes(graph_id, attention_state, updated_at)
+        WHERE attention_state = 'needs_attention';
+      `,
+    ],
+    [
+      5,
+      `
+      CREATE INDEX agent_graph_yield_interests_by_root_run
+        ON agent_graph_yield_interests(root_session_id, root_run_id);
+      CREATE INDEX agent_graph_schedule_revisions_by_source_run
+        ON agent_graph_schedule_revisions(source_session_id, source_run_id);
+      `,
+    ],
   ]),
 };

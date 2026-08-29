@@ -4,17 +4,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { graphIdFor } from "../../src/agent-graph/core/index.js";
+import { agentOutputRecordIdFor, graphIdFor } from "../../src/agent-graph/core/index.js";
+import { formatEvidenceUri } from "../../src/context/evidence-archive.js";
 import { wakeIdFor } from "../../src/agent-graph/core/ids.js";
 import { Session } from "../../src/engine/session.js";
 import { SessionManager } from "../../src/engine/session-manager.js";
 import {
+  assertAgentGraphRootRunSettled,
   createAgentGraphWorkspaceHost,
   type AgentGraphRunToolBinding,
   type CreateAgentGraphWorkspaceHostOptions,
 } from "../../src/runtime/agent-graph-host.js";
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 import { RuntimeRun } from "../../src/runtime/runtime-run.js";
+import { formatAgentGraphArtifactRef } from "../../src/runtime/agent-graph-resource-authority.js";
 import { WorkspaceTaskRuntime } from "../../src/runtime/workspace-runtime.js";
 import { RUNTIME_EVENT_SCHEMA_VERSION } from "../../src/storage/runtime-event.js";
 import {
@@ -23,6 +26,10 @@ import {
   type CommitAgentOutputInput,
   type GraphOperatorActivationContext,
 } from "../../src/tools/agent-output-tool.js";
+import { SqliteSessionWorkbarRepository } from "../../src/storage/sqlite/sqlite-session-workbar-repository.js";
+import { SqliteAgentGraphControlStore } from "../../src/storage/sqlite/sqlite-agent-graph-control-store.js";
+import { withWorkspaceSqliteLease } from "../../src/storage/sqlite/workspace-scopes.js";
+import { seedRuntimeToolExchange } from "./helpers/legacy-evidence-fixture.js";
 
 test("workspace Graph host exposes one root binding and owns application lifecycle", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-agent-graph-host-"));
@@ -53,8 +60,10 @@ test("workspace Graph host exposes one root binding and owns application lifecyc
   });
   try {
     await host.start();
+    const graph = host.openRootEpoch("root-session");
     const binding = host.rootBinding({
-      graphId: "graph:root-session",
+      graphId: graph.graphId,
+      epoch: graph.epoch,
       rootSessionId: "root-session",
       rootTurnId: "root-turn",
       rootRunId: "root-run",
@@ -63,13 +72,15 @@ test("workspace Graph host exposes one root binding and owns application lifecyc
     if (binding.kind !== "root") return;
     assert.deepEqual(binding.getRootContext(), {
       kind: "graph_root_supervisor",
-      graphId: "graph:root-session",
+      graphId: graph.graphId,
+      epoch: 1,
       rootSessionId: "root-session",
       rootTurnId: "root-turn",
       rootRunId: "root-run",
     });
     const projection = await binding.toolPort.readProjection({
-      graphId: "graph:root-session",
+      graphId: graph.graphId,
+      epoch: 1,
       rootSessionId: "root-session",
     });
     assert.equal(projection.graph.headRevision, 0);
@@ -82,9 +93,38 @@ test("workspace Graph host exposes one root binding and owns application lifecyc
   }
 });
 
+test("Graph root Run can settle only after finish or a durable yield", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-agent-graph-settlement-"));
+  const store = new SqliteAgentGraphControlStore({ storageRoot: root });
+  try {
+    const graph = store.openRootEpoch("root-session").record;
+    const input = {
+      graphId: graph.graphId,
+      rootSessionId: "root-session",
+      rootRunId: "root-run",
+    };
+    assert.throws(() => assertAgentGraphRootRunSettled(store, input), /cannot complete/u);
+    store.registerYieldInterest({
+      permitId: "permit-1",
+      graphId: graph.graphId,
+      rootSessionId: "root-session",
+      rootTurnId: "root-turn",
+      rootRunId: "root-run",
+      toolCallId: "yield-call-1",
+    });
+    assert.doesNotThrow(() => assertAgentGraphRootRunSettled(store, input));
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("workspace Graph host executes an exact operator with owner-fenced output and observes terminal replay", async () => {
   const executions: Parameters<CreateAgentGraphWorkspaceHostOptions["execute"]>[0][] = [];
   let postTerminalBinding: AgentGraphRunToolBinding | undefined;
+  let retainedArtifact:
+    | { readonly storageRoot: string; readonly sessionId: string; readonly artifactId: string }
+    | undefined;
   const fixture = await createHostFixture(async (input) => {
     executions.push(input);
     assert.equal(input.binding.kind, "operator");
@@ -94,11 +134,55 @@ test("workspace Graph host executes an exact operator with owner-fenced output a
     assert.ok(activation);
     assert.equal(input.orchestrationMode, "default");
     assert.equal(input.requestedModel, "test/operator-model");
-    assert.deepEqual(input.allowedTools, ["read_file", "agent_output"]);
+    assert.deepEqual(input.allowedTools, ["read_file", "glob", "grep", "repo_map", "agent_output"]);
 
     const runtimeRun = await attachHostedRuntimeRun(input);
+    const storageRoot = input.session.runtimeEventStore!.storageRoot;
+    const artifacts = new SqliteSessionWorkbarRepository({ storageRoot });
+    const begun = artifacts.beginArtifact({
+      sessionId: input.session.id,
+      title: "operator report",
+      mimeType: "text/plain",
+      expectedRevision: 0,
+      idempotencyKey: "begin-operator-report",
+    });
+    artifacts.appendArtifactChunk({
+      sessionId: input.session.id,
+      ingestId: begun.ingestId,
+      offsetBytes: 0,
+      content: Buffer.from("durable artifact", "utf8"),
+    });
+    const committedArtifact = artifacts.commitArtifact({
+      sessionId: input.session.id,
+      ingestId: begun.ingestId,
+      expectedRevision: 0,
+      idempotencyKey: "commit-operator-report",
+    }).artifact;
+    retainedArtifact = {
+      storageRoot,
+      sessionId: input.session.id,
+      artifactId: committedArtifact.artifactId,
+    };
+    const artifactRef = formatAgentGraphArtifactRef({
+      sessionId: input.session.id,
+      artifactId: committedArtifact.artifactId,
+      digest: committedArtifact.digest,
+    });
+    const evidenceRef = await seedRuntimeToolExchange({
+      evidenceRoot: join(storageRoot, "evidence"),
+      storageRoot,
+      sessionId: input.session.id,
+      toolCallId: "operator-source-tool",
+      toolName: "read_file",
+      rawArguments: "{}",
+      rawOutput: "durable evidence",
+      isError: false,
+    });
     const committed = await input.binding.outputPort.commitAgentOutput(
-      agentOutputInput(activation, "operator result"),
+      agentOutputInput(activation, "operator result", {
+        evidenceRefs: [formatEvidenceUri(evidenceRef)],
+        artifactRefs: [artifactRef],
+      }),
     );
     assert.equal(committed.replayed, false);
     assert.ok(committed.recordId);
@@ -112,11 +196,30 @@ test("workspace Graph host executes an exact operator with owner-fenced output a
 
     const projection = await fixture.host.application.toolPort.readProjection({
       graphId,
+      epoch: 1,
       rootSessionId: fixture.owner.session.id,
     });
     assert.equal(executions.length, 1);
     assert.equal(projection.claims[0]?.state, "executing");
     assert.equal(projection.records.length, 1);
+    assert.deepEqual(
+      projection.results.records[0]?.resources.map(({ kind, bytes }) => ({ kind, bytes })),
+      [
+        { kind: "evidence", bytes: Buffer.byteLength("durable evidence", "utf8") },
+        { kind: "artifact", bytes: Buffer.byteLength("durable artifact", "utf8") },
+      ],
+    );
+    const reopened = new SqliteAgentGraphControlStore({
+      storageRoot: fixture.owner.session.runtimeEventStore!.storageRoot,
+    });
+    try {
+      assert.deepEqual(
+        reopened.listResourceRefsByClaim(projection.claims[0]!.claimId).map(({ kind }) => kind),
+        ["evidence", "artifact"],
+      );
+    } finally {
+      reopened.close();
+    }
     assert.equal(projection.records[0]?.sourceRunId, executions[0]?.prestartedRun.runId);
 
     assert.ok(postTerminalBinding?.kind === "operator");
@@ -140,6 +243,31 @@ test("workspace Graph host executes an exact operator with owner-fenced output a
     assert.equal(events.filter((event) => event.kind === "run.started").length, 1);
     assert.equal(events.filter((event) => event.kind === "agent.output").length, 1);
     assert.equal(events.filter((event) => event.kind === "run.terminal").length, 1);
+    assert.ok(retainedArtifact);
+    const artifacts = new SqliteSessionWorkbarRepository({
+      storageRoot: retainedArtifact.storageRoot,
+    });
+    artifacts.deleteArtifact({
+      sessionId: retainedArtifact.sessionId,
+      artifactId: retainedArtifact.artifactId,
+      expectedRevision: 1,
+      idempotencyKey: "delete-retained-operator-report",
+    });
+    withWorkspaceSqliteLease(retainedArtifact.storageRoot, ({ database }) => {
+      const resource = database
+        .prepare(
+          `SELECT content_digest FROM agent_graph_resource_refs
+           WHERE kind = 'artifact' AND source_resource_id = ?`,
+        )
+        .get(retainedArtifact!.artifactId) as { content_digest: string } | undefined;
+      assert.ok(resource);
+      assert.ok(
+        database
+          .prepare("SELECT 1 FROM artifact_blobs WHERE digest = ?")
+          .get(resource.content_digest),
+        "Graph-retained artifact blob must survive Session artifact deletion",
+      );
+    });
   } finally {
     await fixture.close();
   }
@@ -297,6 +425,7 @@ test("workspace Graph host recovers a non-live indeterminate operator on startup
     );
     const view = await recoveredHost.application.toolPort.readProjection({
       graphId,
+      epoch: 1,
       rootSessionId: fixture.owner.session.id,
     });
     assert.equal(view.runtimeClaims[0]?.status, "interrupted");
@@ -621,10 +750,15 @@ async function scheduleOperator(
   graphId: string,
   intentId: string,
 ): Promise<void> {
+  const graph = fixture.host.openRootEpoch(fixture.owner.session.id);
+  assert.equal(graph.graphId, graphId);
+  assert.equal(graph.epoch, 1);
   await fixture.host.application.toolPort.commitUpdate({
     graphId,
+    epoch: 1,
     expectedRevision: 0,
     operationId: `add:${intentId}`,
+    rootModelRouteId: "test/operator-model",
     source: {
       sessionId: fixture.owner.session.id,
       turnId: "root-turn-1",
@@ -639,13 +773,7 @@ async function scheduleOperator(
           operatorId: "researcher",
           generation: 1,
           role: "researcher",
-          profileSnapshot: {
-            profileId: "test/operator",
-            model: "test/operator-model",
-            tools: ["read_file"],
-            permissionPolicy: null,
-            systemPromptVersion: "v1",
-          },
+          profileId: "explore",
           workspacePolicy: { kind: "shared" },
         },
         intent: {
@@ -654,6 +782,7 @@ async function scheduleOperator(
           operatorId: "researcher",
           operatorGeneration: 1,
           instruction: "research the requested topic",
+          expectedOutputRecordId: agentOutputRecordIdFor(graphId, intentId),
           inputRefs: [],
           createdAtRevision: 1,
           requestedBy: {
@@ -685,9 +814,13 @@ async function attachHostedRuntimeRun(
 function agentOutputInput(
   activation: GraphOperatorActivationContext,
   output: string,
+  resources: {
+    readonly evidenceRefs?: readonly string[];
+    readonly artifactRefs?: readonly string[];
+  } = {},
 ): CommitAgentOutputInput {
-  const evidenceRefs = ["pico://evidence/operator"];
-  const artifactRefs = ["artifact://operator-result"];
+  const evidenceRefs = resources.evidenceRefs ?? [];
+  const artifactRefs = resources.artifactRefs ?? [];
   const idempotencyKey = agentOutputIdempotencyKey(activation);
   const fingerprint = agentOutputFingerprint({
     status: "success",

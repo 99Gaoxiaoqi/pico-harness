@@ -81,6 +81,108 @@ test("Blob GC consumes retention evidence intents idempotently", async () => {
   }
 });
 
+test("Blob GC preserves evidence retained by an Agent Graph resource fact", async () => {
+  const fixture = createFixture("graph-evidence");
+  try {
+    const paths = resolvePicoPaths(fixture.workDir, { picoHome: fixture.picoHome });
+    mkdirSync(paths.workspace.root, { recursive: true });
+    const created = await new EvidenceBlobStore(paths.workspace.evidence).putUtf8(
+      "graph retained evidence",
+    );
+    const blobPath = join(
+      paths.workspace.evidence,
+      "blobs",
+      "sha256",
+      created.ref.digest.slice(0, 2),
+      created.ref.digest,
+    );
+    withWorkspaceSqliteLease(paths.workspace.root, ({ database }) => {
+      database
+        .prepare(
+          `INSERT INTO agent_graphs
+           (graph_id, root_session_id, epoch, phase, head_revision, created_at, finished_at)
+           VALUES ('graph-retention', 'root-retention', 1, 'open', 1, 1, NULL)`,
+        )
+        .run();
+      database
+        .prepare(
+          `INSERT INTO agent_graph_schedule_revisions
+           (graph_id, revision, operation_id, request_fingerprint, kind, command_json,
+            source_session_id, source_turn_id, source_run_id, source_tool_call_id, created_at)
+           VALUES ('graph-retention', 1, 'add', 'fingerprint', 'add', '{}',
+                   'root-retention', 'root-turn', 'root-run', 'root-tool', 1)`,
+        )
+        .run();
+      database
+        .prepare(
+          `INSERT INTO agent_graph_operator_provisions
+           (provision_id, graph_id, operator_id, generation, schedule_revision,
+            provision_fingerprint, child_session_id, profile_snapshot_json,
+            workspace_binding_json, state, version, created_at, provisioned_at, stopped_at)
+           VALUES ('provision-retention', 'graph-retention', 'operator-retention', 1, 1,
+                   'provision-fingerprint', 'child-retention', '{}', '{}',
+                   'provisioned', 2, 1, 2, NULL)`,
+        )
+        .run();
+      database
+        .prepare(
+          `INSERT INTO agent_graph_activation_claims
+           (claim_id, graph_id, intent_id, operator_id, operator_generation,
+            schedule_revision, intent_fingerprint, readiness_fingerprint, state,
+            target_session_id, target_turn_id, target_run_id, target_invocation_id,
+            run_started_event_id, version, claimed_at, executing_at, cancelled_at,
+            cancellation_reason)
+           VALUES ('claim-retention', 'graph-retention', 'intent-retention',
+                   'operator-retention', 1, 1, 'intent-fingerprint', 'ready-fingerprint',
+                   'executing', 'child-retention', 'child-turn', 'child-run',
+                   'child-invocation', 'child-start', 2, 1, 2, NULL, NULL)`,
+        )
+        .run();
+      database
+        .prepare(
+          `INSERT INTO agent_graph_resource_refs
+           (resource_id, graph_id, claim_id, kind, source_ref, source_session_id,
+            source_resource_id, content_digest, content_bytes, media_type, title,
+            metadata_json, created_at)
+           VALUES ('resource-retention', 'graph-retention', 'claim-retention', 'evidence',
+                   'pico://evidence/child-retention/manifest', 'child-retention', 'manifest',
+                   ?, ?, 'text/plain', NULL, '{}', 1)`,
+        )
+        .run(created.ref.digest, created.ref.sizeBytes);
+    });
+    insertRetentionIntent(
+      paths.workspace.root,
+      "retention-graph-evidence",
+      "evidence",
+      created.ref.digest,
+      created.ref.sizeBytes,
+    );
+
+    const retained = await runWorkspaceBlobGcOnce({
+      workDir: fixture.workDir,
+      picoHome: fixture.picoHome,
+      now: () => new Date("2026-08-27T00:00:00.000Z"),
+    });
+    assert.equal(retained.retryable, 1);
+    assert.equal(existsSync(blobPath), true);
+
+    withWorkspaceSqliteLease(paths.workspace.root, ({ database }) => {
+      database
+        .prepare("DELETE FROM agent_graph_resource_refs WHERE resource_id = 'resource-retention'")
+        .run();
+    });
+    const released = await runWorkspaceBlobGcOnce({
+      workDir: fixture.workDir,
+      picoHome: fixture.picoHome,
+      now: () => new Date("2026-08-27T01:00:00.000Z"),
+    });
+    assert.equal(released.completed, 1);
+    assert.equal(existsSync(blobPath), false);
+  } finally {
+    cleanupFixture(fixture.root);
+  }
+});
+
 test("File History GC holds the global mutation lease and waits for all workspace references", async () => {
   const fixture = createFixture("file-history");
   const secondWorkDir = join(fixture.root, "workspace-b");

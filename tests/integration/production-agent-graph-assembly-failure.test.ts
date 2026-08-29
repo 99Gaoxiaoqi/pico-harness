@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { wakeIdFor } from "../../src/agent-graph/core/ids.js";
+import { agentOutputRecordIdFor, graphIdFor, wakeIdFor } from "../../src/agent-graph/core/ids.js";
 import { createProductionRuntimeServices } from "../../src/daemon/production-host.js";
+import { createRuntimeRequest } from "../../src/daemon/protocol.js";
 import { globalSessionManager } from "../../src/engine/session.js";
 import {
   AgentRuntime,
@@ -80,6 +81,39 @@ test("production root assembly failure settles one wake attempt into backoff wit
   }
 });
 
+test("foreground assembly failure seals only its empty epoch and allows linear mode", async () => {
+  const fixture = await createProductionFixture({
+    rootModel: "missing/foreground-assembly-model",
+    agentRuntime: new (class extends AgentRuntime {
+      override async execute(): Promise<never> {
+        throw new Error("AgentRuntime must not receive a foreground route assembly failure");
+      }
+    })(),
+  });
+  const graphId = graphIdFor(fixture.rootSessionId, 1);
+  try {
+    const started = (await fixture.services.service.startForegroundRun({
+      workspacePath: fixture.workspacePath,
+      sessionId: fixture.rootSessionId,
+      prompt: "fail during route assembly",
+    })) as Record<string, unknown>;
+    const failed = await fixture.workspaceRuntime.waitForRun(String(started["runId"]));
+    assert.equal(failed.status, "failed");
+    assert.equal(fixture.host.store.getGraph(graphId)?.phase, "finished");
+    assert.equal(fixture.host.store.getGraph(graphId)?.headRevision, 1);
+
+    await fixture.services.desktopService.handle(
+      createRuntimeRequest("session.settings.update", {
+        workspacePath: fixture.workspacePath,
+        sessionId: fixture.rootSessionId,
+        orchestrationMode: "default",
+      }),
+    );
+  } finally {
+    await fixture.close();
+  }
+});
+
 test("production operator assembly failure becomes terminal and wakes the root without a live ghost", async () => {
   let operatorDispatches = 0;
   let rootWakeDispatches = 0;
@@ -95,11 +129,31 @@ test("production operator assembly failure becomes terminal and wakes the root w
         }
         rootWakeDispatches++;
         assert.deepEqual(options.allowedTools, ROOT_WAKE_TOOLS);
+        let turn = 0;
         return super.execute(options, {
           ...dependencies,
           provider: {
             modelName: "deterministic/operator-failure-root-wake",
-            generate: async () => ({ role: "assistant", content: "failure observed" }),
+            generate: async () => {
+              turn++;
+              return turn === 1
+                ? {
+                    role: "assistant" as const,
+                    content: "",
+                    toolCalls: [
+                      {
+                        id: "finish-after-operator-failure",
+                        name: "update_agent_graph",
+                        arguments: JSON.stringify({
+                          expected_revision: 1,
+                          operation_id: "finish-after-operator-failure",
+                          commands: [{ kind: "finish", selected_record_ids: [] }],
+                        }),
+                      },
+                    ],
+                  }
+                : { role: "assistant" as const, content: "failure observed" };
+            },
           },
           isolatedHeadless: true,
         });
@@ -119,8 +173,10 @@ test("production operator assembly failure becomes terminal and wakes the root w
     });
     await fixture.host.application.toolPort.commitUpdate({
       graphId,
+      epoch: 1,
       expectedRevision: 0,
       operationId: "add-operator-with-missing-route",
+      rootModelRouteId: "missing/operator-assembly-model",
       source: {
         sessionId: fixture.rootSessionId,
         turnId: "root-turn-before-operator-failure",
@@ -135,13 +191,7 @@ test("production operator assembly failure becomes terminal and wakes the root w
             operatorId: "broken-operator",
             generation: 1,
             role: "fixture",
-            profileSnapshot: {
-              profileId: "fixture/broken-operator",
-              model: "missing/operator-assembly-model",
-              tools: [],
-              permissionPolicy: null,
-              systemPromptVersion: "v1",
-            },
+            profileId: "explore",
             workspacePolicy: { kind: "shared" },
           },
           intent: {
@@ -150,6 +200,7 @@ test("production operator assembly failure becomes terminal and wakes the root w
             operatorId: "broken-operator",
             operatorGeneration: 1,
             instruction: "This must fail during production route assembly.",
+            expectedOutputRecordId: agentOutputRecordIdFor(graphId, "intent-broken-operator"),
             inputRefs: [],
             createdAtRevision: 1,
             requestedBy: {
@@ -211,6 +262,8 @@ async function createProductionFixture(input: {
   readonly rootSession: Awaited<
     ReturnType<typeof globalSessionManager.getOrCreatePinned>
   >["session"];
+  readonly workspacePath: string;
+  readonly services: ReturnType<typeof createProductionRuntimeServices>;
   close(): Promise<void>;
 }> {
   const root = await mkdtemp(join(tmpdir(), "pico-production-graph-assembly-failure-"));
@@ -263,6 +316,8 @@ async function createProductionFixture(input: {
     workspaceRuntime,
     rootSessionId,
     rootSession: rootLease.session,
+    workspacePath: canonicalWorkspace,
+    services,
     close: async () => {
       const sessionIds = new Set([
         rootSessionId,

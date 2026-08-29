@@ -550,6 +550,9 @@ function clearAttachmentRows(database: DatabaseSync): void {
        WHERE NOT EXISTS (
          SELECT 1 FROM evidence_records AS records, json_tree(records.content_json) AS node
          WHERE node.key = 'digest' AND node.value = evidence_blobs.digest
+       ) AND NOT EXISTS (
+         SELECT 1 FROM agent_graph_resource_refs
+         WHERE kind = 'evidence' AND content_digest = evidence_blobs.digest
        )`,
     )
     .run();

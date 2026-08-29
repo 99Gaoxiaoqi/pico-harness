@@ -11,10 +11,12 @@ import type {
   AgentGraphScheduleRevision,
   AgentGraphScheduleState,
 } from "../../src/agent-graph/core/index.js";
+import { createBuiltinAgentGraphOperatorProfileCatalog } from "../../src/agent-graph/operator-profile-catalog.js";
 import {
   AgentGraphConflictError,
   AgentGraphReadinessError,
   applyScheduleRevision,
+  agentOutputRecordIdFor,
   canAdmitIntent,
   claimIdFor,
   createAgentGraphScheduleState,
@@ -61,13 +63,10 @@ function addCommand(
     operatorId,
     generation: 1,
     role: suffix,
-    profileSnapshot: {
-      profileId: `profile-${suffix}`,
-      model: "test-model",
-      tools: ["read_file"],
-      permissionPolicy: { mode: "read-only" },
-      systemPromptVersion: "1",
-    },
+    profileSnapshot: createBuiltinAgentGraphOperatorProfileCatalog().resolve({
+      profileId: "implement",
+      rootModelRouteId: "test-model",
+    }),
     workspacePolicy: { kind: "isolated-worktree", baseRef: "main" },
   };
   const intent: AgentGraphActivationIntent = {
@@ -76,11 +75,40 @@ function addCommand(
     operatorId,
     operatorGeneration: 1,
     instruction: `Complete ${suffix} work`,
+    expectedOutputRecordId: agentOutputRecordIdFor(
+      graphId,
+      intentIdFor(graphId, `operation-${revision}`, 0),
+    ),
     inputRefs: inputRecordIds.map((recordId) => ({ recordId })),
     createdAtRevision: revision,
     requestedBy: SOURCE,
   };
   return { kind: "add", operator, intent };
+}
+
+function activateCommand(
+  graphId: string,
+  revision: number,
+  operator: AgentGraphOperator,
+  suffix = "follow-up",
+): Extract<AgentGraphScheduleCommand, { kind: "activate" }> {
+  return {
+    kind: "activate",
+    intent: {
+      graphId,
+      intentId: intentIdFor(graphId, `operation-${revision}-${suffix}`, 0),
+      operatorId: operator.operatorId,
+      operatorGeneration: operator.generation,
+      instruction: `Complete ${suffix} work`,
+      expectedOutputRecordId: agentOutputRecordIdFor(
+        graphId,
+        intentIdFor(graphId, `operation-${revision}-${suffix}`, 0),
+      ),
+      inputRefs: [],
+      createdAtRevision: revision,
+      requestedBy: SOURCE,
+    },
+  };
 }
 
 function revision(
@@ -239,6 +267,82 @@ test("Stop fences admission by Intent or Operator while finish only fences fresh
   );
 });
 
+test("activate reuses an existing Operator generation and respects permanent stop fences", () => {
+  let state = createAgentGraphScheduleState(graph());
+  const added = addCommand(state.graph.graphId, 1);
+  state = apply(state, revision(state.graph.graphId, 1, "operation-add", [added]));
+  const followUp = activateCommand(state.graph.graphId, 2, added.operator);
+  state = apply(state, revision(state.graph.graphId, 2, "operation-follow-up", [followUp]));
+
+  assert.equal(state.operators.length, 1);
+  assert.equal(state.intents.length, 2);
+  assert.equal(state.intents[1]?.operatorId, added.operator.operatorId);
+
+  const unknown = activateCommand(state.graph.graphId, 3, {
+    ...added.operator,
+    operatorId: "unknown-operator",
+  });
+  assert.throws(
+    () => apply(state, revision(state.graph.graphId, 3, "operation-unknown", [unknown])),
+    /unknown Operator generation/u,
+  );
+
+  state = apply(
+    state,
+    revision(state.graph.graphId, 3, "operation-stop-intent", [
+      { kind: "stop", target: { kind: "intent", intentId: followUp.intent.intentId } },
+    ]),
+  );
+  const afterIntentStop = activateCommand(
+    state.graph.graphId,
+    4,
+    added.operator,
+    "after-intent-stop",
+  );
+  state = apply(
+    state,
+    revision(state.graph.graphId, 4, "operation-after-intent-stop", [afterIntentStop]),
+  );
+  assert.equal(state.intents.length, 3);
+
+  state = apply(
+    state,
+    revision(state.graph.graphId, 5, "operation-stop-operator", [
+      {
+        kind: "stop",
+        target: {
+          kind: "operator",
+          operatorId: added.operator.operatorId,
+          generation: added.operator.generation,
+        },
+      },
+    ]),
+  );
+  assert.throws(
+    () =>
+      apply(
+        state,
+        revision(state.graph.graphId, 6, "operation-after-operator-stop", [
+          activateCommand(state.graph.graphId, 6, added.operator, "blocked"),
+        ]),
+      ),
+    /stopped Operator generation/u,
+  );
+});
+
+test("finish rejects dead work admitted in the same schedule revision", () => {
+  const initial = createAgentGraphScheduleState(graph());
+  const added = addCommand(initial.graph.graphId, 1);
+  assert.throws(
+    () =>
+      apply(
+        initial,
+        revision(initial.graph.graphId, 1, "operation-add-finish", [added, { kind: "finish" }]),
+      ),
+    /finish cannot be combined with add or activate/u,
+  );
+});
+
 test("finish validates selected RecordRefs when the transition receives authoritative records", () => {
   const initial = createAgentGraphScheduleState(graph());
   const selectedRecordId = "record-final";
@@ -308,6 +412,38 @@ test("Readiness distinguishes resolved, in-flight, failed, and unknown inputs", 
       }),
     /belongs to another Graph/u,
   );
+});
+
+test("Graph schedule rejects cyclic future-output dependencies", () => {
+  const initial = createAgentGraphScheduleState(graph());
+  const left = addCommand(initial.graph.graphId, 1, "left");
+  const rawRight = addCommand(initial.graph.graphId, 1, "right");
+  const rightIntentId = intentIdFor(initial.graph.graphId, "cyclic-right", 0);
+  const right = {
+    ...rawRight,
+    intent: {
+      ...rawRight.intent,
+      intentId: rightIntentId,
+      expectedOutputRecordId: agentOutputRecordIdFor(initial.graph.graphId, rightIntentId),
+    },
+  };
+  const cyclic = revision(initial.graph.graphId, 1, "cyclic-dependencies", [
+    {
+      ...left,
+      intent: {
+        ...left.intent,
+        inputRefs: [{ recordId: right.intent.expectedOutputRecordId }],
+      },
+    },
+    {
+      ...right,
+      intent: {
+        ...right.intent,
+        inputRefs: [{ recordId: left.intent.expectedOutputRecordId }],
+      },
+    },
+  ]);
+  assert.throws(() => applyScheduleRevision(initial, cyclic), /dependencies must be acyclic/u);
 });
 
 test("Graph schedule rejects malformed add commands", () => {

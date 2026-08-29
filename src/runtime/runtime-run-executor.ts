@@ -42,6 +42,7 @@ export interface RuntimeRunExecutorInput {
   readonly picoHome: string;
   readonly prompt: string;
   readonly resumeExistingSession: boolean;
+  readonly presentation?: "internal";
   /**
    * Durable H+1 admission already published by a recoverable-task adapter.
    * RuntimeRun.start reuses this exact fact; it must not create another run.started.
@@ -71,6 +72,15 @@ export interface RuntimeRunExecutorInput {
   readonly signal?: AbortSignal;
   readonly onEvent?: (event: RuntimeLifecycleEvent) => void;
   readonly rewindPointSink?: (checkpointId: string) => void;
+  /** Trusted host-owned assertion that must pass before the Runtime Run can complete. */
+  readonly completionGuard?: () => Promise<void> | void;
+  /** Trusted host-owned recovery hook invoked while the failed Runtime Run identity is live. */
+  readonly failureGuard?: (input: {
+    readonly sessionId: string;
+    readonly turnId: string;
+    readonly runId: string;
+    readonly error: unknown;
+  }) => Promise<void> | void;
   /** Eligible foreground-only durable post-terminal memory scheduler. */
   readonly memoryReviewScheduler?: MemoryReviewSchedulerPort;
   /** Per-turn memory trigger slot: set by memory_remember/memory_extract tools. */
@@ -86,10 +96,13 @@ export interface PrestartedRuntimeRun {
   readonly runStartedEventId: string;
   readonly runStartedAt: string;
   readonly parentRunId?: string;
+  readonly presentation?: "internal";
 }
 
 export interface PrestartedRuntimeUserInput {
   readonly messageId: string;
+  /** Host-owned control-plane input that remains in model history but not user transcript. */
+  readonly presentation?: "internal";
 }
 
 /**
@@ -159,10 +172,21 @@ export class RuntimeRunExecutor {
       // reconcile 把崩溃 run 定形为 interrupted 后，store 原子落下 claim
       // 与 target run.started；prestartedRun 走已有的独立 admission 路径。
       const automaticContinuation = await this.startAutomaticContinuation(session);
+      // Exact legacy starts must be re-attached byte-for-byte; only inherit host provenance when
+      // this executor is admitting a fresh RuntimeRun.
+      const presentation = prestartedRun ? prestartedRun.presentation : this.input.presentation;
       const runtimeRun =
         automaticContinuation ??
         (await RuntimeRun.start({
           capability: runtimeCapability,
+          ...(presentation === "internal"
+            ? {
+                presentation: {
+                  audience: "internal" as const,
+                  source: "agent_graph_control" as const,
+                },
+              }
+            : {}),
           ...(prestartedRun
             ? {
                 runId: prestartedRun.runId,
@@ -240,24 +264,44 @@ export class RuntimeRunExecutor {
           const userReceipt = await session.commitMessageOnce(`user-message:${rewindPointId}`, {
             role: "user",
             content: prompt,
+            ...(prestartedUserInput?.presentation === "internal"
+              ? {
+                  providerData: {
+                    picoKind: "agent_graph_control_input",
+                    picoPresentationAudience: "internal",
+                    picoHiddenFromTranscript: true,
+                  },
+                }
+              : {}),
             ...(images ? { images } : {}),
           });
           submittedUserMessage = { eventId: userReceipt.eventId, content: prompt };
           await session.bindRewindPointSource(rewindPointId, userReceipt);
         }
 
-        const messages = await engine.run(session, undefined, undefined, signal);
-        return {
-          sessionId: session.id,
-          sessionSelection,
-          workDir,
-          finalMessage: findFinalMessage(messages),
-          usage: snapshotUsage(session),
-          messages,
-          ...(this.input.traceEnabled
-            ? { tracePath: await findTracePath(workDir, session.id, this.input.picoHome) }
-            : {}),
-        } satisfies RunAgentCliResult;
+        try {
+          const messages = await engine.run(session, undefined, undefined, signal);
+          await this.input.completionGuard?.();
+          return {
+            sessionId: session.id,
+            sessionSelection,
+            workDir,
+            finalMessage: findFinalMessage(messages),
+            usage: snapshotUsage(session),
+            messages,
+            ...(this.input.traceEnabled
+              ? { tracePath: await findTracePath(workDir, session.id, this.input.picoHome) }
+              : {}),
+          } satisfies RunAgentCliResult;
+        } catch (error) {
+          await this.input.failureGuard?.({
+            sessionId: runtimeRun.sessionId,
+            turnId: runtimeRun.currentTurnId,
+            runId: runtimeRun.runId,
+            error,
+          });
+          throw error;
+        }
       }, signal);
       if (memoryReviewScheduler && submittedUserMessage && this.input.memoryTriggerSlot?.trigger) {
         try {
@@ -349,6 +393,14 @@ export class RuntimeRunExecutor {
       capability: session.runtimeEventCapability!,
       sourceRunId: candidate.runId,
       targetRunId: randomUUID(),
+      ...(this.input.presentation === "internal"
+        ? {
+            presentation: {
+              audience: "internal" as const,
+              source: "agent_graph_control" as const,
+            },
+          }
+        : {}),
     });
     if (!run) {
       logger.info(

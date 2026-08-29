@@ -1,5 +1,6 @@
 export * from "./BrowserWorkbarPanel.js";
 export * from "./FilesWorkbarPanel.js";
+export * from "./GraphWorkbarPanel.js";
 export * from "./InspectorWorkbarPanel.js";
 export * from "./ReviewWorkbarPanel.js";
 export * from "./SideChatWorkbarPanel.js";

@@ -1,15 +1,19 @@
 import type {
   AgentGraph,
+  AgentGraphActivateCommand,
   AgentGraphActivationClaim,
   AgentGraphActivationIntent,
   AgentGraphOperator,
   AgentGraphOperatorProvision,
   AgentGraphRecordRef,
+  AgentGraphFinishCommand,
   AgentGraphScheduleCommand,
   AgentGraphStopCommand,
   AgentGraphOperationSource,
-  JsonValue,
 } from "../agent-graph/core/contracts.js";
+export { AGENT_GRAPH_SUPERVISOR_TOOL_NAMES } from "../agent-graph/core/tool-names.js";
+import type { AgentGraphOperatorProfileSummary } from "../agent-graph/operator-profile-catalog.js";
+import { agentOutputRecordIdFor } from "../agent-graph/core/ids.js";
 import type { AgentGraphRuntimeStatus } from "../agent-graph/runtime-port.js";
 import type { ToolDefinition } from "../schema/message.js";
 import { ToolAccesses } from "./tool-access.js";
@@ -19,16 +23,14 @@ export const AGENT_GRAPH_MAX_COMMANDS = 32;
 export const AGENT_GRAPH_MAX_INPUT_REFS = 64;
 export const AGENT_GRAPH_MAX_SELECTED_RECORDS = 64;
 export const AGENT_GRAPH_MAX_VIEW_RECORDS = 64;
-export const AGENT_GRAPH_MAX_PROFILE_TOOLS = 64;
 export const AGENT_GRAPH_MAX_INSTRUCTION_BYTES = 32 * 1024;
 export const AGENT_GRAPH_MAX_JSON_BYTES = 64 * 1024;
+
+/** The complete capability surface for a root Graph Supervisor run. */
 
 const MAX_IDENTITY_BYTES = 1024;
 const MAX_SHORT_TEXT_BYTES = 2 * 1024;
 const MAX_DESCRIPTION_BYTES = 8 * 1024;
-const MAX_POLICY_JSON_BYTES = 16 * 1024;
-const MAX_JSON_DEPTH = 16;
-const MAX_JSON_ARRAY_ITEMS = 256;
 const AGENT_GRAPH_VIEW_MAX_RECORD_BYTES = 16 * 1024;
 const AGENT_GRAPH_VIEW_MAX_TOTAL_BYTES = 48 * 1024;
 
@@ -36,18 +38,50 @@ const AGENT_GRAPH_VIEW_MAX_TOTAL_BYTES = 48 * 1024;
 export interface AgentGraphRootToolContext {
   readonly kind: "graph_root_supervisor";
   readonly graphId: string;
+  readonly epoch: number;
   readonly rootSessionId: string;
   readonly rootTurnId: string;
   readonly rootRunId: string;
+  /** Host-selected route for this exact root activation; model arguments cannot set it. */
+  readonly rootModelRouteId?: string;
+}
+
+export interface AgentGraphRequestedAddCommand {
+  readonly kind: "add";
+  readonly operator: Omit<AgentGraphOperator, "profileSnapshot"> & {
+    readonly profileId: string;
+  };
+  readonly intent: AgentGraphActivationIntent;
+}
+
+export type AgentGraphRequestedScheduleCommand =
+  | AgentGraphRequestedAddCommand
+  | Exclude<AgentGraphScheduleCommand, { readonly kind: "add" }>;
+
+export interface AgentGraphSupervisorOperator extends Omit<AgentGraphOperator, "profileSnapshot"> {
+  readonly profile: {
+    readonly profileId: string;
+    readonly revision: string;
+  };
+}
+
+export interface AgentGraphSupervisorProvision extends Omit<
+  AgentGraphOperatorProvision,
+  "profileSnapshot"
+> {
+  readonly profile: {
+    readonly profileId: string;
+    readonly revision: string;
+  };
 }
 
 /** Stable, authority-free view assembled by the Graph application service. */
 export interface AgentGraphSupervisorProjection {
   readonly graph: AgentGraph;
-  readonly operators: readonly AgentGraphOperator[];
+  readonly operators: readonly AgentGraphSupervisorOperator[];
   readonly intents: readonly AgentGraphActivationIntent[];
   readonly stops: readonly AgentGraphStopCommand[];
-  readonly provisions: readonly AgentGraphOperatorProvision[];
+  readonly provisions: readonly AgentGraphSupervisorProvision[];
   readonly claims: readonly AgentGraphActivationClaim[];
   readonly records: readonly AgentGraphRecordRef[];
 }
@@ -77,9 +111,20 @@ export interface AgentGraphSupervisorResult {
   readonly content: string;
   readonly bytes: number;
   readonly truncated: boolean;
+  readonly resources: readonly {
+    readonly resourceId: string;
+    readonly kind: "artifact" | "evidence";
+    readonly ref: string;
+    readonly digest: string;
+    readonly bytes: number;
+    readonly mediaType?: string;
+    readonly title?: string;
+  }[];
 }
 
 export interface AgentGraphSupervisorView extends AgentGraphSupervisorProjection {
+  readonly availableOperatorProfiles: readonly AgentGraphOperatorProfileSummary[];
+  readonly intentReadiness: readonly AgentGraphSupervisorIntentReadiness[];
   readonly runtimeClaims: readonly AgentGraphSupervisorClaimRuntime[];
   readonly results: {
     readonly records: readonly AgentGraphSupervisorResult[];
@@ -88,12 +133,23 @@ export interface AgentGraphSupervisorView extends AgentGraphSupervisorProjection
   };
 }
 
+export interface AgentGraphSupervisorIntentReadiness {
+  readonly intentId: string;
+  readonly status: "resolved" | "in_flight" | "failed" | "unknown";
+  readonly resolvedRecordIds: readonly string[];
+  readonly inFlightRecordIds: readonly string[];
+  readonly failedRecordIds: readonly string[];
+  readonly unknownRecordIds: readonly string[];
+}
+
 export interface CommitAgentGraphUpdateInput {
   readonly graphId: string;
+  readonly epoch: number;
   readonly expectedRevision: number;
   readonly operationId: string;
   readonly source: AgentGraphOperationSource;
-  readonly commands: readonly AgentGraphScheduleCommand[];
+  readonly rootModelRouteId: string;
+  readonly commands: readonly AgentGraphRequestedScheduleCommand[];
 }
 
 export interface CommitAgentGraphUpdateResult {
@@ -104,6 +160,7 @@ export interface CommitAgentGraphUpdateResult {
 
 export interface ReadAgentGraphProjectionInput {
   readonly graphId: string;
+  readonly epoch: number;
   readonly rootSessionId: string;
   /** Omitted means the first bounded page of current Graph RecordRefs. */
   readonly recordIds?: readonly string[];
@@ -111,6 +168,7 @@ export interface ReadAgentGraphProjectionInput {
 
 export interface RegisterAgentGraphYieldInput {
   readonly graphId: string;
+  readonly epoch: number;
   readonly rootSessionId: string;
   readonly rootTurnId: string;
   readonly rootRunId: string;
@@ -128,6 +186,7 @@ export interface AgentGraphSupervisorToolPort {
   commitUpdate(input: CommitAgentGraphUpdateInput): Promise<CommitAgentGraphUpdateResult>;
   readProjection(input: ReadAgentGraphProjectionInput): Promise<AgentGraphSupervisorView>;
   registerYield(input: RegisterAgentGraphYieldInput): Promise<RegisterAgentGraphYieldResult>;
+  cancelYield(permitId: string, rootSessionId: string): Promise<void> | void;
 }
 
 export interface CreateAgentGraphSupervisorToolsOptions {
@@ -177,7 +236,12 @@ class UpdateAgentGraphTool extends AgentGraphSupervisorTool {
             minItems: 1,
             maxItems: AGENT_GRAPH_MAX_COMMANDS,
             items: {
-              oneOf: [addCommandSchema(), stopCommandSchema(), finishCommandSchema()],
+              oneOf: [
+                addCommandSchema(),
+                activateCommandSchema(),
+                stopCommandSchema(),
+                finishCommandSchema(),
+              ],
             },
           },
         },
@@ -239,6 +303,7 @@ class ViewAgentGraphTool extends AgentGraphSupervisorTool {
     const root = this.rootContext();
     const projection = await this.options.port.readProjection({
       graphId: root.graphId,
+      epoch: root.epoch,
       rootSessionId: root.rootSessionId,
       ...(input.recordIds === undefined ? {} : { recordIds: input.recordIds }),
     });
@@ -273,20 +338,34 @@ class YieldAgentGraphTool extends AgentGraphSupervisorTool {
     parseEmptyInput(args, this.name());
     const root = this.rootContext();
     const toolCallId = requiredIdentity(execution?.toolCallId, "toolCallId");
-    const receipt = await this.options.port.registerYield({
-      graphId: root.graphId,
-      rootSessionId: root.rootSessionId,
-      rootTurnId: root.rootTurnId,
-      rootRunId: root.rootRunId,
-      toolCallId,
-    });
-    execution?.signal?.throwIfAborted();
-    requiredIdentity(receipt.permitId, "permitId");
-    if (receipt.replayed !== undefined && typeof receipt.replayed !== "boolean") {
-      throw new Error("yield_agent_graph 应用服务返回了非法 replayed。");
+    let receipt: RegisterAgentGraphYieldResult | undefined;
+    try {
+      receipt = await this.options.port.registerYield({
+        graphId: root.graphId,
+        epoch: root.epoch,
+        rootSessionId: root.rootSessionId,
+        rootTurnId: root.rootTurnId,
+        rootRunId: root.rootRunId,
+        toolCallId,
+      });
+      execution?.signal?.throwIfAborted();
+      requiredIdentity(receipt.permitId, "permitId");
+      if (receipt.replayed !== undefined && typeof receipt.replayed !== "boolean") {
+        throw new Error("yield_agent_graph 应用服务返回了非法 replayed。");
+      }
+      validateProjection(receipt.snapshot, root);
+      return JSON.stringify(receipt);
+    } catch (error) {
+      if (receipt?.permitId) {
+        try {
+          await this.options.port.cancelYield(receipt.permitId, root.rootSessionId);
+        } catch {
+          // Preserve the tool/application error; consumed permits and their Wake
+          // are terminal facts and must never be rolled back.
+        }
+      }
+      throw error;
     }
-    validateProjection(receipt.snapshot, root);
-    return JSON.stringify(receipt);
   }
 }
 
@@ -340,11 +419,19 @@ function parseUpdateInput(
   ) {
     throw new Error("update_agent_graph 参数无效：finish 最多一条且必须是最后一条命令。");
   }
+  if (
+    finishIndexes.length === 1 &&
+    commands.some((command) => command.kind === "add" || command.kind === "activate")
+  ) {
+    throw new Error("update_agent_graph 参数无效：finish 不能与 add 或 activate 同批提交。");
+  }
   return {
     graphId: root.graphId,
+    epoch: root.epoch,
     expectedRevision,
     operationId,
     source,
+    rootModelRouteId: requiredExactIdentity(root.rootModelRouteId, "rootModelRouteId"),
     commands,
   };
 }
@@ -355,16 +442,19 @@ function parseCommand(
   graphId: string,
   createdAtRevision: number,
   source: AgentGraphOperationSource,
-): AgentGraphScheduleCommand {
+): AgentGraphRequestedScheduleCommand {
   if (!isRecord(value)) {
     throw new Error(`update_agent_graph 参数无效：commands[${index}] 必须是对象。`);
   }
   const kind = value["kind"];
   if (kind === "add") return parseAddCommand(value, index, graphId, createdAtRevision, source);
+  if (kind === "activate") {
+    return parseActivateCommand(value, index, graphId, createdAtRevision, source);
+  }
   if (kind === "stop") return parseStopCommand(value, index);
   if (kind === "finish") return parseFinishCommand(value, index);
   throw new Error(
-    `update_agent_graph 参数无效：commands[${index}].kind 必须是 add、stop 或 finish。`,
+    `update_agent_graph 参数无效：commands[${index}].kind 必须是 add、activate、stop 或 finish。`,
   );
 }
 
@@ -374,7 +464,7 @@ function parseAddCommand(
   graphId: string,
   createdAtRevision: number,
   source: AgentGraphOperationSource,
-): AgentGraphScheduleCommand {
+): AgentGraphRequestedAddCommand {
   const path = `commands[${index}]`;
   assertKeys(value, ["kind", "operator", "intent"], ["kind", "operator", "intent"], path);
   const rawOperator = objectField(value["operator"], `${path}.operator`);
@@ -385,37 +475,12 @@ function parseAddCommand(
     `${path}.operator`,
   );
   const rawProfile = objectField(rawOperator["profile"], `${path}.operator.profile`);
-  assertKeys(
-    rawProfile,
-    ["profile_id", "model", "tools", "permission_policy", "system_prompt_version"],
-    ["profile_id", "tools", "permission_policy", "system_prompt_version"],
-    `${path}.operator.profile`,
-  );
-  const tools = identityArray(
-    rawProfile["tools"],
-    `${path}.operator.profile.tools`,
-    AGENT_GRAPH_MAX_PROFILE_TOOLS,
-  );
-  const profile = {
-    profileId: requiredIdentity(rawProfile["profile_id"], `${path}.operator.profile.profile_id`),
-    ...(rawProfile["model"] === undefined
-      ? {}
-      : { model: requiredIdentity(rawProfile["model"], `${path}.operator.profile.model`) }),
-    tools,
-    permissionPolicy: boundedJsonValue(
-      rawProfile["permission_policy"],
-      `${path}.operator.profile.permission_policy`,
-    ),
-    systemPromptVersion: requiredIdentity(
-      rawProfile["system_prompt_version"],
-      `${path}.operator.profile.system_prompt_version`,
-    ),
-  };
+  assertKeys(rawProfile, ["profile_id"], ["profile_id"], `${path}.operator.profile`);
   const rawWorkspace = objectField(rawOperator["workspace"], `${path}.operator.workspace`);
   const workspace = parseWorkspace(rawWorkspace, `${path}.operator.workspace`);
   const operatorId = requiredIdentity(rawOperator["operator_id"], `${path}.operator.operator_id`);
   const generation = positiveInteger(rawOperator["generation"], `${path}.operator.generation`);
-  const operator: AgentGraphOperator = {
+  const operator: AgentGraphRequestedAddCommand["operator"] = {
     graphId,
     operatorId,
     generation,
@@ -429,36 +494,92 @@ function parseAddCommand(
             MAX_DESCRIPTION_BYTES,
           ),
         }),
-    profileSnapshot: profile,
+    profileId: requiredIdentity(rawProfile["profile_id"], `${path}.operator.profile.profile_id`),
     workspacePolicy: workspace,
   };
-  const rawIntent = objectField(value["intent"], `${path}.intent`);
+  const intent = parseActivationIntent(
+    value["intent"],
+    `${path}.intent`,
+    graphId,
+    operatorId,
+    generation,
+    createdAtRevision,
+    source,
+  );
+  return { kind: "add", operator, intent };
+}
+
+function parseActivateCommand(
+  value: Record<string, unknown>,
+  index: number,
+  graphId: string,
+  createdAtRevision: number,
+  source: AgentGraphOperationSource,
+): AgentGraphActivateCommand {
+  const path = `commands[${index}]`;
+  assertKeys(value, ["kind", "operator", "intent"], ["kind", "operator", "intent"], path);
+  const rawOperator = objectField(value["operator"], `${path}.operator`);
+  assertKeys(
+    rawOperator,
+    ["operator_id", "generation"],
+    ["operator_id", "generation"],
+    `${path}.operator`,
+  );
+  const operatorId = requiredIdentity(rawOperator["operator_id"], `${path}.operator.operator_id`);
+  const generation = positiveInteger(rawOperator["generation"], `${path}.operator.generation`);
+  return {
+    kind: "activate",
+    intent: parseActivationIntent(
+      value["intent"],
+      `${path}.intent`,
+      graphId,
+      operatorId,
+      generation,
+      createdAtRevision,
+      source,
+    ),
+  };
+}
+
+function parseActivationIntent(
+  value: unknown,
+  path: string,
+  graphId: string,
+  operatorId: string,
+  generation: number,
+  createdAtRevision: number,
+  source: AgentGraphOperationSource,
+): AgentGraphActivationIntent {
+  const rawIntent = objectField(value, path);
   assertKeys(
     rawIntent,
     ["intent_id", "instruction", "input_record_ids"],
     ["intent_id", "instruction"],
-    `${path}.intent`,
+    path,
   );
   const inputRecordIds = identityArray(
     rawIntent["input_record_ids"] ?? [],
-    `${path}.intent.input_record_ids`,
+    `${path}.input_record_ids`,
     AGENT_GRAPH_MAX_INPUT_REFS,
   );
-  const intent: AgentGraphActivationIntent = {
+  return {
     graphId,
-    intentId: requiredIdentity(rawIntent["intent_id"], `${path}.intent.intent_id`),
+    intentId: requiredIdentity(rawIntent["intent_id"], `${path}.intent_id`),
     operatorId,
     operatorGeneration: generation,
     instruction: requiredText(
       rawIntent["instruction"],
-      `${path}.intent.instruction`,
+      `${path}.instruction`,
       AGENT_GRAPH_MAX_INSTRUCTION_BYTES,
+    ),
+    expectedOutputRecordId: agentOutputRecordIdFor(
+      graphId,
+      requiredIdentity(rawIntent["intent_id"], `${path}.intent_id`),
     ),
     inputRefs: inputRecordIds.map((recordId) => ({ recordId })),
     createdAtRevision,
     requestedBy: source,
   };
-  return { kind: "add", operator, intent };
 }
 
 function parseWorkspace(
@@ -466,11 +587,20 @@ function parseWorkspace(
   path: string,
 ): AgentGraphOperator["workspacePolicy"] {
   const kind = value["kind"];
-  if (kind !== "shared") {
-    throw new Error(`update_agent_graph 参数无效：${path}.kind 当前仅支持 shared。`);
+  if (kind === "shared") {
+    assertKeys(value, ["kind"], ["kind"], path);
+    return { kind };
   }
-  assertKeys(value, ["kind"], ["kind"], path);
-  return { kind };
+  if (kind === "isolated-worktree") {
+    assertKeys(value, ["kind", "base_ref"], ["kind"], path);
+    return {
+      kind,
+      ...(value["base_ref"] === undefined
+        ? {}
+        : { baseRef: requiredIdentity(value["base_ref"], `${path}.base_ref`) }),
+    };
+  }
+  throw new Error(`update_agent_graph 参数无效：${path}.kind 必须是 shared 或 isolated-worktree。`);
 }
 
 function parseStopCommand(value: Record<string, unknown>, index: number): AgentGraphStopCommand {
@@ -511,7 +641,7 @@ function parseStopCommand(value: Record<string, unknown>, index: number): AgentG
 function parseFinishCommand(
   value: Record<string, unknown>,
   index: number,
-): AgentGraphScheduleCommand {
+): AgentGraphFinishCommand {
   const path = `commands[${index}]`;
   assertKeys(value, ["kind", "selected_record_ids"], ["kind"], path);
   const selectedRecordIds = identityArray(
@@ -622,50 +752,6 @@ function assertWellFormedString(value: string, path: string): void {
   }
 }
 
-function boundedJsonValue(value: unknown, path: string): JsonValue {
-  validateJsonValue(value, path, 0);
-  const encoded = JSON.stringify(value);
-  if (Buffer.byteLength(encoded, "utf8") > MAX_POLICY_JSON_BYTES) {
-    throw new Error(
-      `update_agent_graph 参数无效：${path} 不得超过 ${MAX_POLICY_JSON_BYTES} 字节。`,
-    );
-  }
-  return value as JsonValue;
-}
-
-function validateJsonValue(value: unknown, path: string, depth: number): void {
-  if (depth > MAX_JSON_DEPTH) {
-    throw new Error(`update_agent_graph 参数无效：${path} JSON 嵌套过深。`);
-  }
-  if (value === null || typeof value === "boolean") return;
-  if (typeof value === "string") {
-    assertWellFormedString(value, path);
-    return;
-  }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value))
-      throw new Error(`update_agent_graph 参数无效：${path} 含非有限数字。`);
-    return;
-  }
-  if (Array.isArray(value)) {
-    if (value.length > MAX_JSON_ARRAY_ITEMS) {
-      throw new Error(
-        `update_agent_graph 参数无效：${path} 数组不得超过 ${MAX_JSON_ARRAY_ITEMS} 项。`,
-      );
-    }
-    value.forEach((item, index) => validateJsonValue(item, `${path}[${index}]`, depth + 1));
-    return;
-  }
-  if (isRecord(value)) {
-    for (const [key, item] of Object.entries(value)) {
-      assertWellFormedString(key, `${path} key`);
-      validateJsonValue(item, `${path}.${key}`, depth + 1);
-    }
-    return;
-  }
-  throw new Error(`update_agent_graph 参数无效：${path} 必须是严格 JSON 值。`);
-}
-
 function nonNegativeInteger(value: unknown, path: string): number {
   if (!Number.isSafeInteger(value) || (value as number) < 0) {
     throw new Error(`update_agent_graph 参数无效：${path} 必须是非负安全整数。`);
@@ -690,9 +776,13 @@ function requireRootContext(
   return {
     kind: value.kind,
     graphId: requiredExactIdentity(value.graphId, "graphId"),
+    epoch: positiveInteger(value.epoch, "epoch"),
     rootSessionId: requiredExactIdentity(value.rootSessionId, "rootSessionId"),
     rootTurnId: requiredExactIdentity(value.rootTurnId, "rootTurnId"),
     rootRunId: requiredExactIdentity(value.rootRunId, "rootRunId"),
+    ...(value.rootModelRouteId === undefined
+      ? {}
+      : { rootModelRouteId: requiredExactIdentity(value.rootModelRouteId, "rootModelRouteId") }),
   };
 }
 
@@ -714,6 +804,31 @@ function validateProjection(
   if (projection.graph.rootSessionId !== root.rootSessionId) {
     throw new Error("Agent Graph 应用服务返回了其他 root Session 的投影。");
   }
+  if (projection.graph.epoch !== root.epoch) {
+    throw new Error("Agent Graph 应用服务返回了其他 epoch 的投影。");
+  }
+  for (const operator of projection.operators) {
+    if (
+      "profileSnapshot" in operator ||
+      !operator.profile ||
+      typeof operator.profile !== "object"
+    ) {
+      throw new Error("Agent Graph 应用服务暴露了非公开 Operator profile 快照。");
+    }
+    requiredExactIdentity(operator.profile.profileId, "operator.profile.profileId");
+    requiredExactIdentity(operator.profile.revision, "operator.profile.revision");
+  }
+  for (const provision of projection.provisions) {
+    if (
+      "profileSnapshot" in provision ||
+      !provision.profile ||
+      typeof provision.profile !== "object"
+    ) {
+      throw new Error("Agent Graph 应用服务暴露了非公开 Provision profile 快照。");
+    }
+    requiredExactIdentity(provision.profile.profileId, "provision.profile.profileId");
+    requiredExactIdentity(provision.profile.revision, "provision.profile.revision");
+  }
 }
 
 function validateSupervisorView(
@@ -722,6 +837,42 @@ function validateSupervisorView(
   requestedRecordIds: readonly string[] | undefined,
 ): void {
   validateProjection(view, root);
+  const profileIds = new Set<string>();
+  for (const profile of view.availableOperatorProfiles) {
+    requiredExactIdentity(profile.profileId, "availableOperatorProfiles.profileId");
+    requiredExactIdentity(profile.revision, "availableOperatorProfiles.revision");
+    if (typeof profile.description !== "string" || profile.description.trim() === "") {
+      throw new Error("view_agent_graph 应用服务返回了非法 Operator profile 摘要。");
+    }
+    if (profileIds.has(profile.profileId)) {
+      throw new Error("view_agent_graph 应用服务返回了重复 Operator profile。");
+    }
+    profileIds.add(profile.profileId);
+  }
+  const intentIds = new Set(view.intents.map((intent) => intent.intentId));
+  const readinessIntentIds = new Set<string>();
+  for (const readiness of view.intentReadiness) {
+    if (
+      readinessIntentIds.has(readiness.intentId) ||
+      !intentIds.has(readiness.intentId) ||
+      !["resolved", "in_flight", "failed", "unknown"].includes(readiness.status)
+    ) {
+      throw new Error("view_agent_graph 应用服务返回了非法 Intent readiness。");
+    }
+    const classified = [
+      ...readiness.resolvedRecordIds,
+      ...readiness.inFlightRecordIds,
+      ...readiness.failedRecordIds,
+      ...readiness.unknownRecordIds,
+    ];
+    if (new Set(classified).size !== classified.length) {
+      throw new Error("view_agent_graph 应用服务返回了冲突的 Intent readiness facts。");
+    }
+    readinessIntentIds.add(readiness.intentId);
+  }
+  if (readinessIntentIds.size !== intentIds.size) {
+    throw new Error("view_agent_graph 应用服务缺少 Intent readiness。");
+  }
   const recordIds = new Set(view.records.map((record) => record.recordId));
   const recordsById = new Map(view.records.map((record) => [record.recordId, record]));
   const claimIds = new Set(view.claims.map((claim) => claim.claimId));
@@ -805,25 +956,28 @@ function addCommandSchema(): Record<string, unknown> {
             type: "object",
             properties: {
               profile_id: { type: "string" },
-              model: { type: "string" },
-              tools: {
-                type: "array",
-                maxItems: AGENT_GRAPH_MAX_PROFILE_TOOLS,
-                items: { type: "string" },
-              },
-              permission_policy: {
-                description: "冻结到 Operator provision 的 JSON 权限快照。",
-              },
-              system_prompt_version: { type: "string" },
             },
-            required: ["profile_id", "tools", "permission_policy", "system_prompt_version"],
+            required: ["profile_id"],
             additionalProperties: false,
           },
           workspace: {
-            type: "object",
-            properties: { kind: { type: "string", enum: ["shared"] } },
-            required: ["kind"],
-            additionalProperties: false,
+            oneOf: [
+              {
+                type: "object",
+                properties: { kind: { type: "string", enum: ["shared"] } },
+                required: ["kind"],
+                additionalProperties: false,
+              },
+              {
+                type: "object",
+                properties: {
+                  kind: { type: "string", enum: ["isolated-worktree"] },
+                  base_ref: { type: "string" },
+                },
+                required: ["kind"],
+                additionalProperties: false,
+              },
+            ],
           },
         },
         required: ["operator_id", "generation", "role", "profile", "workspace"],
@@ -845,6 +999,44 @@ function addCommandSchema(): Record<string, unknown> {
       },
     },
     required: ["kind", "operator", "intent"],
+    additionalProperties: false,
+  };
+}
+
+function activateCommandSchema(): Record<string, unknown> {
+  return {
+    type: "object",
+    properties: {
+      kind: { type: "string", enum: ["activate"] },
+      operator: {
+        type: "object",
+        properties: {
+          operator_id: { type: "string" },
+          generation: { type: "integer", minimum: 1 },
+        },
+        required: ["operator_id", "generation"],
+        additionalProperties: false,
+      },
+      intent: activationIntentSchema(),
+    },
+    required: ["kind", "operator", "intent"],
+    additionalProperties: false,
+  };
+}
+
+function activationIntentSchema(): Record<string, unknown> {
+  return {
+    type: "object",
+    properties: {
+      intent_id: { type: "string" },
+      instruction: { type: "string" },
+      input_record_ids: {
+        type: "array",
+        maxItems: AGENT_GRAPH_MAX_INPUT_REFS,
+        items: { type: "string" },
+      },
+    },
+    required: ["intent_id", "instruction"],
     additionalProperties: false,
   };
 }

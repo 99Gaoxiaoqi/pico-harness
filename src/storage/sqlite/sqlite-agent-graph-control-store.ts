@@ -1,12 +1,16 @@
 import { resolve } from "node:path";
+import { agentOutputRecordIdFor, graphIdFor } from "../../agent-graph/core/ids.js";
+import { safeAgentGraphErrorMessage } from "../../agent-graph/diagnostics.js";
 import type { OperationalDatabaseLease } from "./sqlite-database.js";
 import { prepareCurrentWorkspaceSqliteStorageSync } from "./workspace-scopes.js";
 import type {
   AgentGraphActivationClaimRecord,
   AgentGraphClaimState,
+  AgentGraphDiagnosticRecord,
   AgentGraphOperatorProvisionRecord,
   AgentGraphRecord,
   AgentGraphRecordRefRecord,
+  AgentGraphResourceRefRecord,
   AgentGraphScheduleRevisionRecord,
   AgentGraphSupervisorWakeAttemptRecord,
   AgentGraphSupervisorWakeRecord,
@@ -21,14 +25,20 @@ import type {
   EnqueueAgentGraphSupervisorWakeInput,
   EnqueueAgentGraphSupervisorWakeForYieldResult,
   EnsureAgentGraphOperatorProvisionInput,
+  EnsureAgentGraphWorkspaceResourceInput,
   IdempotentStoreResult,
   PutAgentGraphRecordRefInput,
+  PutAgentGraphResourceRefInput,
   RegisterAgentGraphYieldInterestInput,
   RecoverableAgentGraphSupervisorWakeRecord,
+  RecordAgentGraphDiagnosticInput,
+  RetryAgentGraphSupervisorWakeInput,
   SettleAgentGraphSupervisorWakeInput,
   SettleAgentGraphSupervisorWakeResult,
   TransitionAgentGraphClaimInput,
   TransitionAgentGraphProvisionInput,
+  TransitionAgentGraphWorkspaceResourceInput,
+  AgentGraphWorkspaceResourceRecord,
 } from "./agent-graph-store-types.js";
 
 export * from "./agent-graph-store-types.js";
@@ -117,6 +127,38 @@ export class SqliteAgentGraphControlStore {
     return this.read(() => this.selectGraph(requireNonEmpty(graphId, "graphId")));
   }
 
+  getOpenRootEpoch(rootSessionId: string): AgentGraphRecord | undefined {
+    return this.read(() =>
+      this.selectOpenGraphByRoot(requireNonEmpty(rootSessionId, "rootSessionId")),
+    );
+  }
+
+  openRootEpoch(rootSessionId: string): IdempotentStoreResult<AgentGraphRecord> {
+    const normalizedRootSessionId = requireNonEmpty(rootSessionId, "rootSessionId");
+    return this.write(() => {
+      const existing = this.selectOpenGraphByRoot(normalizedRootSessionId);
+      if (existing) return { record: existing, replayed: true };
+      const row = this.lease.database
+        .prepare(
+          `SELECT COALESCE(MAX(epoch), 0) AS max_epoch
+           FROM agent_graphs WHERE root_session_id = ?`,
+        )
+        .get(normalizedRootSessionId);
+      const epoch = rowNumber(asRow(row), "max_epoch") + 1;
+      requirePositiveInteger(epoch, "epoch");
+      const graphId = graphIdFor(normalizedRootSessionId, epoch);
+      const createdAt = this.now();
+      this.lease.database
+        .prepare(
+          `INSERT INTO agent_graphs
+           (graph_id, root_session_id, epoch, phase, head_revision, created_at, finished_at)
+           VALUES (?, ?, ?, 'open', 0, ?, NULL)`,
+        )
+        .run(graphId, normalizedRootSessionId, epoch, createdAt);
+      return { record: this.requireGraph(graphId), replayed: false };
+    });
+  }
+
   listGraphs(rootSessionId?: string): readonly AgentGraphRecord[] {
     return this.read(() => {
       const rows = rootSessionId
@@ -161,7 +203,7 @@ export class SqliteAgentGraphControlStore {
           `Graph ${normalized.graphId} revision changed from ${normalized.expectedRevision} to ${graph.headRevision}`,
         );
       }
-      this.assertInputRecordRefs(normalized.graphId, normalized.inputRecordIds);
+      this.assertInputRecordRefs(normalized.graphId, normalized.inputRecordIds, normalized.command);
       if (normalized.kind === "finish") {
         this.assertSelectedRecordRefs(normalized.graphId, normalized.selectedRecordIds);
       }
@@ -363,6 +405,46 @@ export class SqliteAgentGraphControlStore {
     );
   }
 
+  /** Desktop index projection: one read, no graph-by-graph fan-out. */
+  listOperatorSessionIds(): readonly string[] {
+    return this.read(() =>
+      (
+        this.lease.database
+          .prepare(
+            `SELECT DISTINCT child_session_id FROM agent_graph_operator_provisions
+             ORDER BY child_session_id ASC`,
+          )
+          .all() as unknown as readonly { readonly child_session_id: string }[]
+      ).map((row) => row.child_session_id),
+    );
+  }
+
+  /** Historical control-run identity used only when Session mode provenance is unavailable. */
+  isInternalRun(sessionId: string, runId: string): boolean {
+    const normalizedSessionId = requireNonEmpty(sessionId, "sessionId");
+    const normalizedRunId = requireNonEmpty(runId, "runId");
+    return this.read(
+      () =>
+        this.lease.database
+          .prepare(
+            `SELECT 1 AS matched FROM (
+               SELECT root_session_id AS session_id, root_run_id AS run_id
+               FROM agent_graph_yield_interests
+               UNION ALL
+               SELECT root_session_id AS session_id, target_run_id AS run_id
+               FROM agent_graph_supervisor_wake_attempts
+               UNION ALL
+               SELECT target_session_id AS session_id, target_run_id AS run_id
+               FROM agent_graph_activation_claims
+               UNION ALL
+               SELECT source_session_id AS session_id, source_run_id AS run_id
+               FROM agent_graph_schedule_revisions
+             ) WHERE session_id = ? AND run_id = ? LIMIT 1`,
+          )
+          .get(normalizedSessionId, normalizedRunId) !== undefined,
+    );
+  }
+
   claimActivation(
     input: ClaimAgentGraphActivationInput,
   ): IdempotentStoreResult<AgentGraphActivationClaimRecord> {
@@ -561,6 +643,220 @@ export class SqliteAgentGraphControlStore {
         .all(requireNonEmpty(graphId, "graphId"))
         .map((row) => recordRefFromRow(asRow(row))),
     );
+  }
+
+  putResourceRef(
+    input: PutAgentGraphResourceRefInput,
+  ): IdempotentStoreResult<AgentGraphResourceRefRecord> {
+    const normalized = normalizeResourceRefInput(input);
+    return this.write(() => {
+      const byId = this.selectResourceRef(normalized.resourceId);
+      if (byId) return replayResourceRef(byId, normalized);
+      const bySource = this.selectResourceRefBySource(
+        normalized.claimId,
+        normalized.kind,
+        normalized.sourceRef,
+      );
+      if (bySource) return replayResourceRef(bySource, normalized);
+      const claim = this.requireClaim(normalized.claimId);
+      if (
+        claim.graphId !== normalized.graphId ||
+        claim.targetSessionId !== normalized.sourceSessionId
+      ) {
+        throw new AgentGraphStoreConflictError(
+          `Resource ${normalized.resourceId} source identity does not match claim ${normalized.claimId}`,
+        );
+      }
+      const createdAt = this.now();
+      this.lease.database
+        .prepare(
+          `INSERT INTO agent_graph_resource_refs
+           (resource_id, graph_id, claim_id, kind, source_ref, source_session_id,
+            source_resource_id, content_digest, content_bytes, media_type, title,
+            metadata_json, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          normalized.resourceId,
+          normalized.graphId,
+          normalized.claimId,
+          normalized.kind,
+          normalized.sourceRef,
+          normalized.sourceSessionId,
+          normalized.sourceResourceId,
+          normalized.contentDigest,
+          normalized.contentBytes,
+          normalized.mediaType ?? null,
+          normalized.title ?? null,
+          normalized.metadataJson,
+          createdAt,
+        );
+      return { record: this.requireResourceRef(normalized.resourceId), replayed: false };
+    });
+  }
+
+  listResourceRefsByClaim(claimId: string): readonly AgentGraphResourceRefRecord[] {
+    return this.read(() =>
+      this.lease.database
+        .prepare(
+          `SELECT * FROM agent_graph_resource_refs
+           WHERE claim_id = ? ORDER BY created_at ASC, resource_id ASC`,
+        )
+        .all(requireNonEmpty(claimId, "claimId"))
+        .map((row) => resourceRefFromRow(asRow(row))),
+    );
+  }
+
+  listResourceRefs(graphId: string): readonly AgentGraphResourceRefRecord[] {
+    return this.read(() =>
+      this.lease.database
+        .prepare(
+          `SELECT * FROM agent_graph_resource_refs
+           WHERE graph_id = ? ORDER BY created_at ASC, resource_id ASC`,
+        )
+        .all(requireNonEmpty(graphId, "graphId"))
+        .map((row) => resourceRefFromRow(asRow(row))),
+    );
+  }
+
+  ensureWorkspaceResource(
+    input: EnsureAgentGraphWorkspaceResourceInput,
+  ): IdempotentStoreResult<AgentGraphWorkspaceResourceRecord> {
+    const normalized = normalizeWorkspaceResourceInput(input);
+    return this.write(() => {
+      const existing = this.selectWorkspaceResource(normalized.resourceId);
+      if (existing) return replayWorkspaceResource(existing, normalized);
+      const byProvision = this.selectWorkspaceResourceByProvision(normalized.provisionId);
+      if (byProvision) return replayWorkspaceResource(byProvision, normalized);
+      const provision = this.selectProvisionById(normalized.provisionId);
+      if (
+        !provision ||
+        provision.graphId !== normalized.graphId ||
+        provision.childSessionId !== normalized.childSessionId
+      ) {
+        throw new AgentGraphStoreConflictError(
+          `Workspace resource ${normalized.resourceId} does not match provision ${normalized.provisionId}`,
+        );
+      }
+      const binding = asOptionalRecord(provision.workspaceBinding);
+      if (binding?.["kind"] !== "isolated-worktree") {
+        throw new AgentGraphStoreConflictError(
+          `Provision ${normalized.provisionId} is not bound to an isolated worktree`,
+        );
+      }
+      const now = this.now();
+      this.lease.database
+        .prepare(
+          `INSERT INTO agent_graph_workspace_resources
+           (resource_id, graph_id, provision_id, child_session_id, repo_root,
+            worktree_path, branch, base_ref, base_commit, state, version,
+            retain_reason, created_at, updated_at, retained_at, cleaned_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'requested', 1, NULL, ?, ?, NULL, NULL)`,
+        )
+        .run(
+          normalized.resourceId,
+          normalized.graphId,
+          normalized.provisionId,
+          normalized.childSessionId,
+          normalized.repoRoot,
+          normalized.worktreePath,
+          normalized.branch,
+          normalized.baseRef,
+          normalized.baseCommit,
+          now,
+          now,
+        );
+      return { record: this.requireWorkspaceResource(normalized.resourceId), replayed: false };
+    });
+  }
+
+  getWorkspaceResource(resourceId: string): AgentGraphWorkspaceResourceRecord | undefined {
+    return this.read(() => this.selectWorkspaceResource(requireNonEmpty(resourceId, "resourceId")));
+  }
+
+  getWorkspaceResourceByProvision(
+    provisionId: string,
+  ): AgentGraphWorkspaceResourceRecord | undefined {
+    return this.read(() =>
+      this.selectWorkspaceResourceByProvision(requireNonEmpty(provisionId, "provisionId")),
+    );
+  }
+
+  getWorkspaceResourceBySession(
+    childSessionId: string,
+  ): AgentGraphWorkspaceResourceRecord | undefined {
+    return this.read(() => {
+      const row = this.lease.database
+        .prepare("SELECT * FROM agent_graph_workspace_resources WHERE child_session_id = ?")
+        .get(requireNonEmpty(childSessionId, "childSessionId"));
+      return row ? workspaceResourceFromRow(asRow(row)) : undefined;
+    });
+  }
+
+  listWorkspaceResources(graphId?: string): readonly AgentGraphWorkspaceResourceRecord[] {
+    return this.read(() => {
+      const rows = graphId
+        ? this.lease.database
+            .prepare(
+              `SELECT * FROM agent_graph_workspace_resources
+               WHERE graph_id = ? ORDER BY created_at ASC, resource_id ASC`,
+            )
+            .all(requireNonEmpty(graphId, "graphId"))
+        : this.lease.database
+            .prepare(
+              `SELECT * FROM agent_graph_workspace_resources
+               ORDER BY created_at ASC, resource_id ASC`,
+            )
+            .all();
+      return rows.map((row) => workspaceResourceFromRow(asRow(row)));
+    });
+  }
+
+  transitionWorkspaceResource(
+    input: TransitionAgentGraphWorkspaceResourceInput,
+  ): AgentGraphWorkspaceResourceRecord {
+    requirePositiveInteger(input.expectedVersion, "expectedVersion");
+    const resourceId = requireNonEmpty(input.resourceId, "resourceId");
+    assertWorkspaceResourceTransition(input);
+    return this.write(() => {
+      const current = this.selectWorkspaceResource(resourceId);
+      if (!current)
+        throw new AgentGraphStoreConflictError(`Workspace resource ${resourceId} does not exist`);
+      if (current.version !== input.expectedVersion || current.state !== input.from) {
+        throw new AgentGraphStoreConflictError(
+          `Workspace resource ${resourceId} transition lost its CAS`,
+        );
+      }
+      const now = this.now();
+      const result = this.lease.database
+        .prepare(
+          `UPDATE agent_graph_workspace_resources
+           SET state = ?, version = version + 1, base_commit = COALESCE(?, base_commit),
+               retain_reason = ?, updated_at = ?,
+               retained_at = CASE WHEN ? = 'retained' THEN ? ELSE retained_at END,
+               cleaned_at = CASE WHEN ? = 'cleaned' THEN ? ELSE cleaned_at END
+           WHERE resource_id = ? AND version = ? AND state = ?`,
+        )
+        .run(
+          input.to,
+          input.baseCommit ?? null,
+          input.retainReason ?? null,
+          now,
+          input.to,
+          now,
+          input.to,
+          now,
+          resourceId,
+          input.expectedVersion,
+          input.from,
+        );
+      if (result.changes !== 1) {
+        throw new AgentGraphStoreConflictError(
+          `Workspace resource ${resourceId} transition lost its CAS`,
+        );
+      }
+      return this.requireWorkspaceResource(resourceId);
+    });
   }
 
   registerYieldInterest(
@@ -774,13 +1070,131 @@ export class SqliteAgentGraphControlStore {
     return this.read(() => this.selectWake(requireNonEmpty(wakeId, "wakeId")));
   }
 
+  listSupervisorWakes(graphId: string): readonly AgentGraphSupervisorWakeRecord[] {
+    return this.read(() =>
+      this.lease.database
+        .prepare(
+          `SELECT * FROM agent_graph_supervisor_wakes
+           WHERE graph_id = ? ORDER BY created_at ASC, wake_id ASC`,
+        )
+        .all(requireNonEmpty(graphId, "graphId"))
+        .map((row) => wakeFromRow(asRow(row))),
+    );
+  }
+
+  listGraphDiagnostics(
+    graphId: string,
+    options: { readonly unresolvedOnly?: boolean } = {},
+  ): readonly AgentGraphDiagnosticRecord[] {
+    const normalizedGraphId = requireNonEmpty(graphId, "graphId");
+    return this.read(() =>
+      this.lease.database
+        .prepare(
+          `SELECT * FROM agent_graph_diagnostics
+           WHERE graph_id = ?${options.unresolvedOnly ? " AND state <> 'resolved'" : ""}
+           ORDER BY created_at ASC, diagnostic_id ASC`,
+        )
+        .all(normalizedGraphId)
+        .map((row) => diagnosticFromRow(asRow(row))),
+    );
+  }
+
+  recordGraphDiagnostic(
+    input: RecordAgentGraphDiagnosticInput,
+  ): IdempotentStoreResult<AgentGraphDiagnosticRecord> {
+    const normalized = normalizeDiagnosticInput(input);
+    return this.write(() => {
+      this.requireGraph(normalized.graphId);
+      const existing = this.selectDiagnosticBySubject(
+        normalized.graphId,
+        normalized.phase,
+        normalized.subjectId,
+      );
+      if (existing?.lastObservationId === normalized.observationId) {
+        return { record: existing, replayed: true };
+      }
+      if (existing && existing.diagnosticId !== normalized.diagnosticId) {
+        throw new AgentGraphStoreConflictError(
+          `Graph diagnostic ${normalized.phase}:${normalized.subjectId} has another identity`,
+        );
+      }
+      const now = this.now();
+      const state =
+        normalized.classification === "transient" ? "retry_scheduled" : "needs_attention";
+      const nextRetryAt =
+        normalized.classification === "transient" ? now + normalized.retryDelayMs! : null;
+      if (!existing) {
+        this.lease.database
+          .prepare(
+            `INSERT INTO agent_graph_diagnostics
+             (diagnostic_id, graph_id, phase, subject_id, classification, state, message,
+              attempt_count, last_observation_id, next_retry_at, version, created_at,
+              updated_at, resolved_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 1, ?, ?, NULL)`,
+          )
+          .run(
+            normalized.diagnosticId,
+            normalized.graphId,
+            normalized.phase,
+            normalized.subjectId,
+            normalized.classification,
+            state,
+            normalized.message,
+            normalized.observationId,
+            nextRetryAt,
+            now,
+            now,
+          );
+      } else {
+        this.lease.database
+          .prepare(
+            `UPDATE agent_graph_diagnostics
+             SET classification = ?, state = ?, message = ?, attempt_count = attempt_count + 1,
+                 last_observation_id = ?, next_retry_at = ?, version = version + 1,
+                 updated_at = ?, resolved_at = NULL
+             WHERE diagnostic_id = ? AND version = ?`,
+          )
+          .run(
+            normalized.classification,
+            state,
+            normalized.message,
+            normalized.observationId,
+            nextRetryAt,
+            now,
+            normalized.diagnosticId,
+            existing.version,
+          );
+      }
+      return { record: this.requireDiagnostic(normalized.diagnosticId), replayed: false };
+    });
+  }
+
+  resolveGraphDiagnostics(graphId: string): number {
+    const normalizedGraphId = requireNonEmpty(graphId, "graphId");
+    return this.write(() => {
+      this.requireGraph(normalizedGraphId);
+      const now = this.now();
+      return Number(
+        this.lease.database
+          .prepare(
+            `UPDATE agent_graph_diagnostics
+             SET state = 'resolved', next_retry_at = NULL, version = version + 1,
+                 updated_at = ?, resolved_at = ?
+             WHERE graph_id = ? AND state <> 'resolved'`,
+          )
+          .run(now, now, normalizedGraphId).changes,
+      );
+    });
+  }
+
   listDueSupervisorWakes(at = this.now()): readonly AgentGraphSupervisorWakeRecord[] {
     requireFiniteNumber(at, "at");
     return this.read(() =>
       this.lease.database
         .prepare(
           `SELECT * FROM agent_graph_supervisor_wakes
-           WHERE status IN ('pending','retryable_failed') AND available_at <= ?
+           WHERE status IN ('pending','retryable_failed') AND attention_state = 'none'
+             AND available_at <= ?
            ORDER BY available_at ASC, created_at ASC, wake_id ASC`,
         )
         .all(at)
@@ -817,7 +1231,13 @@ export class SqliteAgentGraphControlStore {
       const wake = this.selectWake(requireNonEmpty(wakeId, "wakeId"));
       if (
         !wake ||
-        !["pending", "retryable_failed", "running", "waiting_permission"].includes(wake.status)
+        ![
+          "pending",
+          "retryable_failed",
+          "running",
+          "waiting_permission",
+          "needs_attention",
+        ].includes(wake.status)
       ) {
         return undefined;
       }
@@ -944,6 +1364,8 @@ export class SqliteAgentGraphControlStore {
         );
       }
       const now = this.now();
+      const storedOutcome =
+        normalized.outcome === "needs_attention" ? "retryable_failed" : normalized.outcome;
       this.lease.database
         .prepare(
           `UPDATE agent_graph_supervisor_wake_attempts
@@ -963,15 +1385,19 @@ export class SqliteAgentGraphControlStore {
         .prepare(
           `UPDATE agent_graph_supervisor_wakes
            SET status = ?, available_at = ?, version = version + 1, updated_at = ?,
-               delivered_at = ?, last_error = ?
+               delivered_at = ?, last_error = ?, attention_state = ?,
+               attention_version = attention_version + ?, needs_attention_at = ?
            WHERE wake_id = ? AND status = ? AND version = ?`,
         )
         .run(
-          normalized.outcome,
+          storedOutcome,
           normalized.retryAt ?? wake.availableAt,
           now,
           normalized.outcome === "delivered" ? now : null,
           normalized.error ?? null,
+          normalized.outcome === "needs_attention" ? "needs_attention" : "none",
+          normalized.outcome === "needs_attention" ? 1 : 0,
+          normalized.outcome === "needs_attention" ? now : null,
           normalized.wakeId,
           wake.status,
           normalized.expectedWakeVersion,
@@ -981,6 +1407,56 @@ export class SqliteAgentGraphControlStore {
         attempt: this.requireWakeAttempt(normalized.attemptId),
         replayed: false,
       };
+    });
+  }
+
+  retrySupervisorWake(
+    input: RetryAgentGraphSupervisorWakeInput,
+  ): IdempotentStoreResult<AgentGraphSupervisorWakeRecord> {
+    requirePositiveInteger(input.expectedWakeVersion, "expectedWakeVersion");
+    requireNonNegativeInteger(input.expectedAttentionVersion, "expectedAttentionVersion");
+    const wakeId = requireNonEmpty(input.wakeId, "wakeId");
+    const retryOperationId = requireNonEmpty(input.retryOperationId, "retryOperationId");
+    return this.write(() => {
+      const wake = this.requireWake(wakeId);
+      if (wake.lastRetryOperationId === retryOperationId) {
+        return { record: wake, replayed: true };
+      }
+      const graph = this.requireGraph(wake.graphId);
+      if (graph.phase !== "open") {
+        throw new AgentGraphStoreConflictError(
+          `Wake ${wakeId} cannot be retried after Graph ${graph.graphId} is finished`,
+        );
+      }
+      if (
+        wake.status !== "needs_attention" ||
+        wake.version !== input.expectedWakeVersion ||
+        (wake.attentionVersion ?? 0) !== input.expectedAttentionVersion
+      ) {
+        throw new AgentGraphStoreConflictError(
+          `Wake ${wakeId} attention state changed before explicit retry`,
+        );
+      }
+      const now = this.now();
+      this.lease.database
+        .prepare(
+          `UPDATE agent_graph_supervisor_wakes
+           SET status = 'pending', attention_state = 'none', available_at = ?,
+               version = version + 1, attention_version = attention_version + 1,
+               updated_at = ?, attention_resolved_at = ?, last_retry_operation_id = ?
+           WHERE wake_id = ? AND version = ? AND attention_version = ?
+             AND attention_state = 'needs_attention'`,
+        )
+        .run(
+          now,
+          now,
+          now,
+          retryOperationId,
+          wakeId,
+          input.expectedWakeVersion,
+          input.expectedAttentionVersion,
+        );
+      return { record: this.requireWake(wakeId), replayed: false };
     });
   }
 
@@ -1075,6 +1551,32 @@ export class SqliteAgentGraphControlStore {
     return row ? provisionFromRow(asRow(row)) : undefined;
   }
 
+  private selectWorkspaceResource(
+    resourceId: string,
+  ): AgentGraphWorkspaceResourceRecord | undefined {
+    const row = this.lease.database
+      .prepare("SELECT * FROM agent_graph_workspace_resources WHERE resource_id = ?")
+      .get(resourceId);
+    return row ? workspaceResourceFromRow(asRow(row)) : undefined;
+  }
+
+  private selectWorkspaceResourceByProvision(
+    provisionId: string,
+  ): AgentGraphWorkspaceResourceRecord | undefined {
+    const row = this.lease.database
+      .prepare("SELECT * FROM agent_graph_workspace_resources WHERE provision_id = ?")
+      .get(provisionId);
+    return row ? workspaceResourceFromRow(asRow(row)) : undefined;
+  }
+
+  private requireWorkspaceResource(resourceId: string): AgentGraphWorkspaceResourceRecord {
+    const resource = this.selectWorkspaceResource(resourceId);
+    if (!resource) {
+      throw new AgentGraphStoreConflictError(`Workspace resource ${resourceId} does not exist`);
+    }
+    return resource;
+  }
+
   private requireProvision(
     graphId: string,
     operatorId: string,
@@ -1141,6 +1643,35 @@ export class SqliteAgentGraphControlStore {
     return record;
   }
 
+  private selectResourceRef(resourceId: string): AgentGraphResourceRefRecord | undefined {
+    const row = this.lease.database
+      .prepare("SELECT * FROM agent_graph_resource_refs WHERE resource_id = ?")
+      .get(resourceId);
+    return row ? resourceRefFromRow(asRow(row)) : undefined;
+  }
+
+  private selectResourceRefBySource(
+    claimId: string,
+    kind: AgentGraphResourceRefRecord["kind"],
+    sourceRef: string,
+  ): AgentGraphResourceRefRecord | undefined {
+    const row = this.lease.database
+      .prepare(
+        `SELECT * FROM agent_graph_resource_refs
+         WHERE claim_id = ? AND kind = ? AND source_ref = ?`,
+      )
+      .get(claimId, kind, sourceRef);
+    return row ? resourceRefFromRow(asRow(row)) : undefined;
+  }
+
+  private requireResourceRef(resourceId: string): AgentGraphResourceRefRecord {
+    const resource = this.selectResourceRef(resourceId);
+    if (!resource) {
+      throw new AgentGraphStoreConflictError(`Resource ${resourceId} does not exist`);
+    }
+    return resource;
+  }
+
   private assertSelectedRecordRefs(graphId: string, recordIds: readonly string[]): void {
     for (const recordId of recordIds) {
       const record = this.selectRecordRef(recordId);
@@ -1157,10 +1688,27 @@ export class SqliteAgentGraphControlStore {
     }
   }
 
-  private assertInputRecordRefs(graphId: string, recordIds: readonly string[]): void {
+  private assertInputRecordRefs(
+    graphId: string,
+    recordIds: readonly string[],
+    incomingCommand: unknown,
+  ): void {
+    const incomingExpected = new Set(expectedOutputRecordIdsFromCommand(incomingCommand));
     for (const recordId of recordIds) {
       const record = this.selectRecordRef(recordId);
       if (!record) {
+        if (
+          incomingExpected.has(recordId) ||
+          this.expectedOutputBelongsToGraph(graphId, recordId)
+        ) {
+          continue;
+        }
+        const foreignGraph = this.expectedOutputOwnerGraph(recordId);
+        if (foreignGraph) {
+          throw new AgentGraphStoreConflictError(
+            `Input RecordRef ${recordId} belongs to Graph ${foreignGraph}, not ${graphId}`,
+          );
+        }
         throw new AgentGraphStoreConflictError(
           `Input RecordRef ${recordId} does not exist for Graph ${graphId}`,
         );
@@ -1173,11 +1721,60 @@ export class SqliteAgentGraphControlStore {
     }
   }
 
+  private expectedOutputBelongsToGraph(graphId: string, recordId: string): boolean {
+    return (
+      this.lease.database
+        .prepare(
+          `SELECT 1
+         FROM agent_graph_schedule_revisions, json_tree(command_json) AS entry
+         WHERE graph_id = ? AND entry.key = 'expectedOutputRecordId' AND entry.value = ?
+         LIMIT 1`,
+        )
+        .get(graphId, recordId) !== undefined
+    );
+  }
+
+  private expectedOutputOwnerGraph(recordId: string): string | undefined {
+    const row = this.lease.database
+      .prepare(
+        `SELECT graph_id
+         FROM agent_graph_schedule_revisions, json_tree(command_json) AS entry
+         WHERE entry.key = 'expectedOutputRecordId' AND entry.value = ?
+         LIMIT 1`,
+      )
+      .get(recordId);
+    return row ? rowString(asRow(row), "graph_id") : undefined;
+  }
+
   private selectWake(wakeId: string): AgentGraphSupervisorWakeRecord | undefined {
     const row = this.lease.database
       .prepare("SELECT * FROM agent_graph_supervisor_wakes WHERE wake_id = ?")
       .get(wakeId);
     return row ? wakeFromRow(asRow(row)) : undefined;
+  }
+
+  private selectDiagnosticBySubject(
+    graphId: string,
+    phase: AgentGraphDiagnosticRecord["phase"],
+    subjectId: string,
+  ): AgentGraphDiagnosticRecord | undefined {
+    const row = this.lease.database
+      .prepare(
+        `SELECT * FROM agent_graph_diagnostics
+         WHERE graph_id = ? AND phase = ? AND subject_id = ?`,
+      )
+      .get(graphId, phase, subjectId);
+    return row ? diagnosticFromRow(asRow(row)) : undefined;
+  }
+
+  private requireDiagnostic(diagnosticId: string): AgentGraphDiagnosticRecord {
+    const row = this.lease.database
+      .prepare("SELECT * FROM agent_graph_diagnostics WHERE diagnostic_id = ?")
+      .get(diagnosticId);
+    if (!row) {
+      throw new AgentGraphStoreConflictError(`Graph diagnostic ${diagnosticId} does not exist`);
+    }
+    return diagnosticFromRow(asRow(row));
   }
 
   private selectYieldInterest(permitId: string): AgentGraphYieldInterestRecord | undefined {
@@ -1296,6 +1893,7 @@ export class SqliteAgentGraphControlStore {
 }
 
 interface NormalizedScheduleInput extends Omit<CommitAgentGraphScheduleInput, "command"> {
+  readonly command: unknown;
   readonly commandJson: string;
   readonly inputRecordIds: readonly string[];
   readonly selectedRecordIds: readonly string[];
@@ -1318,6 +1916,7 @@ function normalizeScheduleInput(input: CommitAgentGraphScheduleInput): Normalize
     operationId: requireNonEmpty(input.operationId, "operationId"),
     requestFingerprint: requireNonEmpty(input.requestFingerprint, "requestFingerprint"),
     kind: input.kind,
+    command: input.command,
     inputRecordIds,
     selectedRecordIds,
     commandJson: canonicalJson(input.command),
@@ -1331,27 +1930,51 @@ function normalizeScheduleInput(input: CommitAgentGraphScheduleInput): Normalize
 function inputRecordIdsFromCommand(command: unknown): readonly string[] {
   const envelope = asOptionalRecord(command);
   const commands =
-    envelope?.["schemaVersion"] === 1 && Array.isArray(envelope["commands"])
+    envelope?.["schemaVersion"] === 2 && Array.isArray(envelope["commands"])
       ? envelope["commands"]
       : [command];
   const inputRecordIds: string[] = [];
   for (const candidate of commands.map(asOptionalRecord)) {
-    if (candidate?.["kind"] !== "add") continue;
+    if (candidate?.["kind"] !== "add" && candidate?.["kind"] !== "activate") continue;
     const intent = asOptionalRecord(candidate["intent"]);
     const inputRefs = intent?.["inputRefs"];
     if (inputRefs === undefined) continue;
     if (!Array.isArray(inputRefs)) {
-      throw new Error("add inputRefs must be an array");
+      throw new Error("Graph work inputRefs must be an array");
     }
     for (const inputRef of inputRefs) {
       const recordId = asOptionalRecord(inputRef)?.["recordId"];
       if (typeof recordId !== "string") {
-        throw new Error("add inputRefs must contain string recordIds");
+        throw new Error("Graph work inputRefs must contain string recordIds");
       }
       inputRecordIds.push(recordId);
     }
   }
   return inputRecordIds;
+}
+
+function expectedOutputRecordIdsFromCommand(command: unknown): readonly string[] {
+  const envelope = asOptionalRecord(command);
+  const commands =
+    envelope?.["schemaVersion"] === 2 && Array.isArray(envelope["commands"])
+      ? envelope["commands"]
+      : [command];
+  const recordIds: string[] = [];
+  for (const candidate of commands.map(asOptionalRecord)) {
+    if (candidate?.["kind"] !== "add" && candidate?.["kind"] !== "activate") continue;
+    const intent = asOptionalRecord(candidate["intent"]);
+    const graphId = intent?.["graphId"];
+    const intentId = intent?.["intentId"];
+    const value = intent?.["expectedOutputRecordId"];
+    if (typeof graphId !== "string" || typeof intentId !== "string" || typeof value !== "string") {
+      continue;
+    }
+    if (value !== agentOutputRecordIdFor(graphId, intentId)) {
+      throw new Error("Graph activation expected output RecordRef has an invalid identity");
+    }
+    recordIds.push(value);
+  }
+  return recordIds;
 }
 
 function selectedRecordIdsFromCommand(
@@ -1361,7 +1984,7 @@ function selectedRecordIdsFromCommand(
   if (kind !== "finish") return [];
   const envelope = asOptionalRecord(command);
   const commands =
-    envelope?.["schemaVersion"] === 1 && Array.isArray(envelope["commands"])
+    envelope?.["schemaVersion"] === 2 && Array.isArray(envelope["commands"])
       ? envelope["commands"]
       : [command];
   const finishCommands = commands
@@ -1452,6 +2075,49 @@ function normalizeRecordRefInput(input: PutAgentGraphRecordRefInput): PutAgentGr
   };
 }
 
+interface NormalizedResourceRefInput extends Omit<PutAgentGraphResourceRefInput, "metadata"> {
+  readonly metadataJson: string;
+}
+
+function normalizeResourceRefInput(
+  input: PutAgentGraphResourceRefInput,
+): NormalizedResourceRefInput {
+  requireNonNegativeInteger(input.contentBytes, "contentBytes");
+  if (!/^[a-f0-9]{64}$/u.test(input.contentDigest)) {
+    throw new Error("contentDigest must be a lowercase SHA-256 digest");
+  }
+  return {
+    resourceId: requireNonEmpty(input.resourceId, "resourceId"),
+    graphId: requireNonEmpty(input.graphId, "graphId"),
+    claimId: requireNonEmpty(input.claimId, "claimId"),
+    kind: input.kind,
+    sourceRef: requireNonEmpty(input.sourceRef, "sourceRef"),
+    sourceSessionId: requireNonEmpty(input.sourceSessionId, "sourceSessionId"),
+    sourceResourceId: requireNonEmpty(input.sourceResourceId, "sourceResourceId"),
+    contentDigest: input.contentDigest,
+    contentBytes: input.contentBytes,
+    mediaType: optionalNonEmpty(input.mediaType, "mediaType"),
+    title: optionalNonEmpty(input.title, "title"),
+    metadataJson: canonicalJson(input.metadata),
+  };
+}
+
+function normalizeWorkspaceResourceInput(
+  input: EnsureAgentGraphWorkspaceResourceInput,
+): EnsureAgentGraphWorkspaceResourceInput {
+  return {
+    resourceId: requireNonEmpty(input.resourceId, "resourceId"),
+    graphId: requireNonEmpty(input.graphId, "graphId"),
+    provisionId: requireNonEmpty(input.provisionId, "provisionId"),
+    childSessionId: requireNonEmpty(input.childSessionId, "childSessionId"),
+    repoRoot: requireNonEmpty(input.repoRoot, "repoRoot"),
+    worktreePath: requireNonEmpty(input.worktreePath, "worktreePath"),
+    branch: requireNonEmpty(input.branch, "branch"),
+    baseRef: requireNonEmpty(input.baseRef, "baseRef"),
+    baseCommit: requireNonEmpty(input.baseCommit, "baseCommit"),
+  };
+}
+
 function normalizeYieldInterestInput(
   input: RegisterAgentGraphYieldInterestInput,
 ): RegisterAgentGraphYieldInterestInput {
@@ -1506,7 +2172,8 @@ function normalizeWakeSettlementInput(
 ): SettleAgentGraphSupervisorWakeInput {
   requirePositiveInteger(input.expectedWakeVersion, "expectedWakeVersion");
   requirePositiveInteger(input.expectedAttemptVersion, "expectedAttemptVersion");
-  const error = optionalNonEmpty(input.error, "error");
+  const rawError = optionalNonEmpty(input.error, "error");
+  const error = rawError === undefined ? undefined : safeAgentGraphErrorMessage(rawError);
   if (input.outcome === "delivered" && error !== undefined) {
     throw new Error("delivered wake must not include an error");
   }
@@ -1518,6 +2185,9 @@ function normalizeWakeSettlementInput(
   } else if (input.retryAt !== undefined) {
     throw new Error(`${input.outcome} wake must not include retryAt`);
   }
+  if (input.outcome === "needs_attention" && error === undefined) {
+    throw new Error("needs_attention wake requires an error");
+  }
   return {
     wakeId: requireNonEmpty(input.wakeId, "wakeId"),
     attemptId: requireNonEmpty(input.attemptId, "attemptId"),
@@ -1526,6 +2196,35 @@ function normalizeWakeSettlementInput(
     outcome: input.outcome,
     ...(error === undefined ? {} : { error }),
     ...(input.retryAt === undefined ? {} : { retryAt: input.retryAt }),
+  };
+}
+
+interface NormalizedDiagnosticInput extends RecordAgentGraphDiagnosticInput {
+  readonly retryDelayMs?: number;
+}
+
+function normalizeDiagnosticInput(
+  input: RecordAgentGraphDiagnosticInput,
+): NormalizedDiagnosticInput {
+  const retryDelayMs = input.retryDelayMs;
+  if (input.classification === "transient") {
+    if (retryDelayMs === undefined) {
+      throw new Error("transient Graph diagnostic requires retryDelayMs");
+    }
+    requireFiniteNumber(retryDelayMs, "retryDelayMs");
+    if (retryDelayMs < 0) throw new Error("retryDelayMs must not be negative");
+  } else if (retryDelayMs !== undefined) {
+    throw new Error(`${input.classification} Graph diagnostic must not schedule a retry`);
+  }
+  return {
+    diagnosticId: requireNonEmpty(input.diagnosticId, "diagnosticId"),
+    graphId: requireNonEmpty(input.graphId, "graphId"),
+    phase: input.phase,
+    subjectId: requireNonEmpty(input.subjectId, "subjectId"),
+    classification: input.classification,
+    message: safeAgentGraphErrorMessage(input.message),
+    observationId: requireNonEmpty(input.observationId, "observationId"),
+    ...(retryDelayMs === undefined ? {} : { retryDelayMs }),
   };
 }
 
@@ -1594,6 +2293,64 @@ function replayRecordRef(
     );
   }
   return { record: existing, replayed: true };
+}
+
+function replayResourceRef(
+  existing: AgentGraphResourceRefRecord,
+  input: NormalizedResourceRefInput,
+): IdempotentStoreResult<AgentGraphResourceRefRecord> {
+  if (
+    existing.resourceId !== input.resourceId ||
+    existing.graphId !== input.graphId ||
+    existing.claimId !== input.claimId ||
+    existing.kind !== input.kind ||
+    existing.sourceRef !== input.sourceRef ||
+    existing.sourceSessionId !== input.sourceSessionId ||
+    existing.sourceResourceId !== input.sourceResourceId ||
+    existing.contentDigest !== input.contentDigest ||
+    existing.contentBytes !== input.contentBytes ||
+    existing.mediaType !== input.mediaType ||
+    existing.title !== input.title ||
+    canonicalJson(existing.metadata) !== input.metadataJson
+  ) {
+    throw new AgentGraphStoreConflictError(
+      `Resource ${input.resourceId} is already bound to different immutable metadata`,
+    );
+  }
+  return { record: existing, replayed: true };
+}
+
+function replayWorkspaceResource(
+  existing: AgentGraphWorkspaceResourceRecord,
+  input: EnsureAgentGraphWorkspaceResourceInput,
+): IdempotentStoreResult<AgentGraphWorkspaceResourceRecord> {
+  if (
+    existing.resourceId !== input.resourceId ||
+    existing.graphId !== input.graphId ||
+    existing.provisionId !== input.provisionId ||
+    existing.childSessionId !== input.childSessionId ||
+    existing.repoRoot !== input.repoRoot ||
+    existing.worktreePath !== input.worktreePath ||
+    existing.branch !== input.branch ||
+    existing.baseRef !== input.baseRef ||
+    existing.baseCommit !== input.baseCommit
+  ) {
+    throw new AgentGraphStoreConflictError(
+      `Workspace resource ${input.resourceId} is bound to different immutable metadata`,
+    );
+  }
+  return { record: existing, replayed: true };
+}
+
+function assertWorkspaceResourceTransition(
+  input: TransitionAgentGraphWorkspaceResourceInput,
+): void {
+  if (input.from === "requested" && input.to === "active") {
+    return;
+  }
+  if (input.from === "active" && (input.to === "retained" || input.to === "cleaned")) return;
+  if (input.from === "retained" && input.to === "cleaned") return;
+  throw new Error(`Unsupported workspace resource transition ${input.from} -> ${input.to}`);
 }
 
 function replayYieldInterest(
@@ -1730,7 +2487,48 @@ function recordRefFromRow(row: Record<string, unknown>): AgentGraphRecordRefReco
   };
 }
 
+function resourceRefFromRow(row: Record<string, unknown>): AgentGraphResourceRefRecord {
+  return compact({
+    resourceId: rowString(row, "resource_id"),
+    graphId: rowString(row, "graph_id"),
+    claimId: rowString(row, "claim_id"),
+    kind: rowString(row, "kind") as AgentGraphResourceRefRecord["kind"],
+    sourceRef: rowString(row, "source_ref"),
+    sourceSessionId: rowString(row, "source_session_id"),
+    sourceResourceId: rowString(row, "source_resource_id"),
+    contentDigest: rowString(row, "content_digest"),
+    contentBytes: rowNumber(row, "content_bytes"),
+    mediaType: rowOptionalString(row, "media_type"),
+    title: rowOptionalString(row, "title"),
+    metadata: rowJson(row, "metadata_json"),
+    createdAt: rowNumber(row, "created_at"),
+  });
+}
+
+function workspaceResourceFromRow(row: Record<string, unknown>): AgentGraphWorkspaceResourceRecord {
+  return compact({
+    resourceId: rowString(row, "resource_id"),
+    graphId: rowString(row, "graph_id"),
+    provisionId: rowString(row, "provision_id"),
+    childSessionId: rowString(row, "child_session_id"),
+    repoRoot: rowString(row, "repo_root"),
+    worktreePath: rowString(row, "worktree_path"),
+    branch: rowString(row, "branch"),
+    baseRef: rowString(row, "base_ref"),
+    baseCommit: rowString(row, "base_commit"),
+    state: rowString(row, "state") as AgentGraphWorkspaceResourceRecord["state"],
+    version: rowNumber(row, "version"),
+    retainReason: rowOptionalString(row, "retain_reason"),
+    createdAt: rowNumber(row, "created_at"),
+    updatedAt: rowNumber(row, "updated_at"),
+    retainedAt: rowOptionalNumber(row, "retained_at"),
+    cleanedAt: rowOptionalNumber(row, "cleaned_at"),
+  });
+}
+
 function wakeFromRow(row: Record<string, unknown>): AgentGraphSupervisorWakeRecord {
+  const attentionState = rowString(row, "attention_state");
+  const storedStatus = rowString(row, "status") as AgentGraphSupervisorWakeRecord["status"];
   return compact({
     wakeId: rowString(row, "wake_id"),
     graphId: rowString(row, "graph_id"),
@@ -1738,7 +2536,7 @@ function wakeFromRow(row: Record<string, unknown>): AgentGraphSupervisorWakeReco
     wakeFingerprint: rowString(row, "wake_fingerprint"),
     cause: rowString(row, "cause") as AgentGraphSupervisorWakeRecord["cause"],
     payload: rowJson(row, "payload_json"),
-    status: rowString(row, "status") as AgentGraphSupervisorWakeRecord["status"],
+    status: attentionState === "needs_attention" ? "needs_attention" : storedStatus,
     availableAt: rowNumber(row, "available_at"),
     attemptCount: rowNumber(row, "attempt_count"),
     version: rowNumber(row, "version"),
@@ -1747,6 +2545,32 @@ function wakeFromRow(row: Record<string, unknown>): AgentGraphSupervisorWakeReco
     deliveredAt: rowOptionalNumber(row, "delivered_at"),
     lastError: rowOptionalString(row, "last_error"),
     yieldPermitId: rowOptionalString(row, "yield_permit_id"),
+    attentionVersion: rowNumber(row, "attention_version"),
+    needsAttentionAt: rowOptionalNumber(row, "needs_attention_at"),
+    attentionResolvedAt: rowOptionalNumber(row, "attention_resolved_at"),
+    lastRetryOperationId: rowOptionalString(row, "last_retry_operation_id"),
+  });
+}
+
+function diagnosticFromRow(row: Record<string, unknown>): AgentGraphDiagnosticRecord {
+  return compact({
+    diagnosticId: rowString(row, "diagnostic_id"),
+    graphId: rowString(row, "graph_id"),
+    phase: rowString(row, "phase") as AgentGraphDiagnosticRecord["phase"],
+    subjectId: rowString(row, "subject_id"),
+    classification: rowString(
+      row,
+      "classification",
+    ) as AgentGraphDiagnosticRecord["classification"],
+    state: rowString(row, "state") as AgentGraphDiagnosticRecord["state"],
+    message: rowString(row, "message"),
+    attemptCount: rowNumber(row, "attempt_count"),
+    lastObservationId: rowString(row, "last_observation_id"),
+    nextRetryAt: rowOptionalNumber(row, "next_retry_at"),
+    version: rowNumber(row, "version"),
+    createdAt: rowNumber(row, "created_at"),
+    updatedAt: rowNumber(row, "updated_at"),
+    resolvedAt: rowOptionalNumber(row, "resolved_at"),
   });
 }
 

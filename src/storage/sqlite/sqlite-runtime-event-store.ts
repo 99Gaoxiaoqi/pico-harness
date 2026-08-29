@@ -119,6 +119,7 @@ export class RuntimeTranscriptResetRequiredError extends RuntimeEventStoreIntegr
 export class SqliteRuntimeEventStore {
   readonly storageRoot: string;
   private readonly lease: OperationalDatabaseLease;
+  private readonly agentGraphPresentationByRun = new Map<string, AgentGraphRunPresentation>();
   private closed = false;
 
   constructor(options: RuntimeEventStoreOptions) {
@@ -1068,6 +1069,7 @@ export class SqliteRuntimeEventStore {
       kind: "run.started",
       data: {
         workDir: canonicalizeWorkspacePath(input.workDir),
+        ...(input.presentation ? { presentation: input.presentation } : {}),
         continuationOf: {
           runId: claim.sourceRunId,
           highWater: claim.sourceHighWater,
@@ -2090,6 +2092,9 @@ export class SqliteRuntimeEventStore {
   }
 
   private rebuildTranscriptProjectionLocked(sessionId: string, ledgerHead: number): void {
+    for (const key of this.agentGraphPresentationByRun.keys()) {
+      if (key.startsWith(`${sessionId}\0`)) this.agentGraphPresentationByRun.delete(key);
+    }
     this.lease.database
       .prepare("DELETE FROM runtime_transcript_changes WHERE session_id = ?")
       .run(sessionId);
@@ -2156,9 +2161,14 @@ export class SqliteRuntimeEventStore {
         .run(randomUUID(), sequence, sequence, event.sessionId);
       return;
     }
+    const presentationRunId = presentationRunIdForEvent(event);
+    const agentGraphPresentation = presentationRunId
+      ? this.isInternalAgentGraphRunLocked(event.sessionId, presentationRunId, event)
+      : { internal: false, hidesUserInput: false };
     const mutations = transcriptMutationsForEvent(
       event,
       sequence,
+      agentGraphPresentation,
       (itemId) => this.readCurrentTranscriptItemLocked(event.sessionId, itemId),
       (kind) => this.readCurrentTranscriptItemsByKindLocked(event.sessionId, kind),
     );
@@ -2177,6 +2187,71 @@ export class SqliteRuntimeEventStore {
         );
       }
     });
+    if (event.kind === "run.terminal") {
+      this.agentGraphPresentationByRun.delete(
+        agentGraphPresentationCacheKey(event.sessionId, event.runId),
+      );
+    }
+  }
+
+  private isInternalAgentGraphRunLocked(
+    sessionId: string,
+    runId: string,
+    currentEvent?: RuntimeEvent,
+  ): AgentGraphRunPresentation {
+    const cacheKey = agentGraphPresentationCacheKey(sessionId, runId);
+    const cached = this.agentGraphPresentationByRun.get(cacheKey);
+    if (cached) return cached;
+    const currentStart =
+      currentEvent?.kind === "run.started" && currentEvent.runId === runId
+        ? currentEvent
+        : undefined;
+    const storedStart = currentStart
+      ? undefined
+      : (this.lease.database
+          .prepare(
+            `SELECT payload_json FROM runtime_events
+             WHERE session_id = ? AND run_id = ? AND kind = 'run.started'
+             ORDER BY event_seq ASC LIMIT 1`,
+          )
+          .get(sessionId, runId) as { payload_json?: unknown } | undefined);
+    const start =
+      currentStart ??
+      (typeof storedStart?.payload_json === "string"
+        ? decodeStoredEvent(storedStart.payload_json)
+        : undefined);
+    const hasProvenance =
+      start?.kind === "run.started" &&
+      start.data.presentation?.audience === "internal" &&
+      start.data.presentation.source === "agent_graph_control";
+    const durable = this.lease.database
+      .prepare(
+        `SELECT MAX(hides_user_input) AS hides_user_input FROM (
+             SELECT root_session_id AS session_id, root_run_id AS run_id, 0 AS hides_user_input
+             FROM agent_graph_yield_interests
+             UNION ALL
+             SELECT root_session_id AS session_id, target_run_id AS run_id, 1 AS hides_user_input
+             FROM agent_graph_supervisor_wake_attempts
+             UNION ALL
+             SELECT target_session_id AS session_id, target_run_id AS run_id, 1 AS hides_user_input
+             FROM agent_graph_activation_claims
+             UNION ALL
+             SELECT source_session_id AS session_id, source_run_id AS run_id, 0 AS hides_user_input
+             FROM agent_graph_schedule_revisions
+           ) WHERE session_id = ? AND run_id = ?`,
+      )
+      .get(sessionId, runId) as { hides_user_input: number | null };
+    const presentation = {
+      internal: hasProvenance || durable.hides_user_input !== null,
+      hidesUserInput: durable.hides_user_input === 1,
+    };
+    // A missing durable Graph identity is not stable: older hosts may append the
+    // run start before persisting the schedule/wake fact. Cache only positive
+    // classifications so a later event can observe that newly durable identity.
+    if (presentation.internal) {
+      this.agentGraphPresentationByRun.set(cacheKey, presentation);
+    }
+    return presentation;
   }
 
   /**
@@ -3389,9 +3464,30 @@ type TranscriptItemMutation =
     }
   | { readonly op: "remove"; readonly itemId: string };
 
+interface AgentGraphRunPresentation {
+  readonly internal: boolean;
+  readonly hidesUserInput: boolean;
+}
+
+function agentGraphPresentationCacheKey(sessionId: string, runId: string): string {
+  return `${sessionId}\0${runId}`;
+}
+
+function presentationRunIdForEvent(event: RuntimeEvent): string | undefined {
+  if (
+    event.kind === "transcript.event.recorded" &&
+    event.data.event.type === "entry.appended" &&
+    event.data.event.entry.kind === "run-boundary"
+  ) {
+    return event.data.event.entry.runId;
+  }
+  return event.runId === "session-transcript" ? undefined : event.runId;
+}
+
 function transcriptMutationsForEvent(
   event: RuntimeEvent,
   sequence: number,
+  agentGraphPresentation: AgentGraphRunPresentation,
   current: (itemId: string) => RuntimeTranscriptProjectedItem | undefined,
   currentByKind: (kind: string) => readonly RuntimeTranscriptProjectedItem[],
 ): readonly TranscriptItemMutation[] {
@@ -3400,7 +3496,11 @@ function transcriptMutationsForEvent(
     if (
       message.role === "system" ||
       message.toolCallId !== undefined ||
-      isMessageHiddenFromTranscript(message)
+      isMessageHiddenFromTranscript(message) ||
+      (agentGraphPresentation.hidesUserInput && message.role === "user") ||
+      (agentGraphPresentation.internal &&
+        message.role === "assistant" &&
+        (message.toolCalls?.length ?? 0) > 0)
     ) {
       return [];
     }
@@ -3461,6 +3561,7 @@ function transcriptMutationsForEvent(
   }
 
   if (event.kind === "tool.result.recorded") {
+    if (agentGraphPresentation.internal) return [];
     const prior =
       currentByKind("tool").find((record) => {
         const payload = asJsonRecord(record.payload);
@@ -3536,6 +3637,7 @@ function transcriptMutationsForEvent(
   const transcript = event.data.event;
   switch (transcript.type) {
     case "entry.appended": {
+      if (agentGraphPresentation.internal && transcript.entry.kind === "run-boundary") return [];
       const itemId =
         stableStructuredTranscriptItemId(transcript.entry) ?? `entry:${transcript.entryId}`;
       const payload = conversationPayloadForTranscriptEntry(
@@ -3594,6 +3696,7 @@ function transcriptMutationsForEvent(
     case "assistant.response.suppressed":
       return [{ op: "remove", itemId: `entry:${transcript.entryId}` }];
     case "tool.started": {
+      if (agentGraphPresentation.internal) return [];
       const itemId = `tool:${transcript.toolCallId}`;
       return [
         {
