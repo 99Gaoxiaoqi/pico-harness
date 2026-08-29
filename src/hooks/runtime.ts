@@ -23,6 +23,12 @@ import { HookLocalStateStore } from "./management/state.js";
 import { HookService, type HookDecisionProvider } from "./service.js";
 import { HookTrustStore } from "./trust/store.js";
 import type { WorkspaceTrustStore } from "../security/workspace-trust.js";
+import {
+  createSandboxPolicy,
+  defaultSandboxScratchRoot,
+  type SandboxConfig,
+  type SandboxProfile,
+} from "../safety/process-sandbox/index.js";
 
 export interface SessionHookRuntimeOptions extends Pick<
   LoadHookSnapshotOptions,
@@ -39,6 +45,13 @@ export interface SessionHookRuntimeOptions extends Pick<
    * 现状（测试/headless 兼容）。
    */
   workspaceTrustStore?: WorkspaceTrustStore;
+  processSandbox?: {
+    profile?: SandboxProfile;
+    config?: Partial<SandboxConfig>;
+    scratchRoot?: string;
+    generation?: number;
+    workspaceRoots?: readonly string[];
+  };
 }
 
 export interface SessionHookRuntime {
@@ -47,6 +60,7 @@ export interface SessionHookRuntime {
   management: HookManagementService;
   commands: readonly SlashCommand[];
   bind(dependencies: Parameters<DefaultHookExecutor["bind"]>[0]): void;
+  updateProcessSandbox(policy: Parameters<DefaultHookExecutor["updateProcessSandbox"]>[0]): void;
   reload(changedPaths?: readonly string[]): Promise<boolean>;
   activateComponentSource(source: HookConfigSourceSpec): Promise<() => Promise<void>>;
   clearComponentSources(): Promise<void>;
@@ -93,6 +107,16 @@ export async function createSessionHookRuntime(
   const executor = new DefaultHookExecutor({
     workDir: options.workDir,
     ...(options.env ? { env: options.env } : {}),
+    processSandbox: createSandboxPolicy({
+      profile: options.processSandbox?.profile ?? "workspace-write",
+      workspaceRoots: options.processSandbox?.workspaceRoots ?? [options.workDir],
+      scratchRoot:
+        options.processSandbox?.scratchRoot ?? defaultSandboxScratchRoot(options.workDir),
+      ...(options.processSandbox?.config ? { config: options.processSandbox.config } : {}),
+      ...(options.processSandbox?.generation !== undefined
+        ? { generation: options.processSandbox.generation }
+        : {}),
+    }),
     authorizeCommandExecution: async (entry) =>
       await (entry.source.trustAuthority ?? trustStore).authorizeCommandExecution({
         workspace: options.workDir,
@@ -271,6 +295,7 @@ export async function createSessionHookRuntime(
     management,
     commands,
     bind: (dependencies) => executor.bind(dependencies),
+    updateProcessSandbox: (policy) => executor.updateProcessSandbox(policy),
     reload: async (changedPaths) => await reloader.reload(changedPaths),
     activateComponentSource,
     clearComponentSources,

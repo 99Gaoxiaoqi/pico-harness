@@ -563,6 +563,48 @@ export function scanCanonicalPrimitiveRedefinitions({ repositoryRoot = REPOSITOR
   );
 }
 
+const MODEL_PROCESS_ENTRYPOINTS = new Set([
+  "src/tools/bash.ts",
+  "src/tools/background-manager.ts",
+  "src/tools/grep.ts",
+  "src/mcp/stdio-client.ts",
+  "src/hooks/executors/executor.ts",
+  "src/hooks/config/command-shell.ts",
+  "src/safety/background-yolo-policy.ts",
+  "src/code-intelligence/lsp-client.ts",
+]);
+
+/** 模型可触发的进程入口只能消费 ChildProcess 类型，实际启动必须收口到 launcher。 */
+export function scanManagedProcessEntrypoints({ repositoryRoot = REPOSITORY_ROOT } = {}) {
+  const violations = [];
+  for (const relativePath of MODEL_PROCESS_ENTRYPOINTS) {
+    const file = resolve(repositoryRoot, relativePath);
+    if (!existsSync(file)) continue;
+    const source = stripComments(readFileSync(file, "utf8"));
+    for (const declaration of parseImportsFromSource(source)) {
+      if (
+        (declaration.specifier === "node:child_process" ||
+          declaration.specifier === "child_process") &&
+        !declaration.typeOnly
+      ) {
+        violations.push({
+          rule: "model-process-bypasses-launcher",
+          source: relativePath,
+          target: declaration.specifier,
+        });
+      }
+    }
+    if (/\brequire\s*\(\s*["'](?:node:)?child_process["']\s*\)/u.test(source)) {
+      violations.push({
+        rule: "model-process-bypasses-launcher",
+        source: relativePath,
+        target: "require(child_process)",
+      });
+    }
+  }
+  return violations;
+}
+
 export function evaluateArchitectureBoundaries(violations, baseline = loadBaseline()) {
   const known = [];
   const unexpected = [];
@@ -602,6 +644,7 @@ function main() {
     ...scanCrossCuttingDefinitions(),
     ...scanHandwrittenTimeoutPrimitives(),
     ...scanCanonicalPrimitiveRedefinitions(),
+    ...scanManagedProcessEntrypoints(),
   ];
   const { known, unexpected } = evaluateArchitectureBoundaries(violations);
   console.log(

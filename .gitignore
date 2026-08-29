@@ -5,7 +5,15 @@ node_modules/
 dist/
 **/.tsbuild/
 **/.vite/
+**/target/
 apps/desktop/out/
+resources/sandbox/linux-*/bwrap
+resources/sandbox/linux-*/bwrap.sha256
+resources/sandbox/win32-*/pico-appcontainer-broker.exe
+resources/sandbox/win32-*/pico-appcontainer-broker.exe.sha256
+resources/licenses/bubblewrap/COPYING
+resources/licenses/bubblewrap/SOURCE.sha256
+resources/licenses/bubblewrap/bubblewrap-*.tar.xz
 
 # Test and browser automation output
 coverage/

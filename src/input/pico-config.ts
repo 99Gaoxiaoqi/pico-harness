@@ -96,7 +96,7 @@ export function createIsolatedPicoConfig(workDir: string): PicoProjectConfig {
     additionalDirectories: [],
     keybindings: {},
     providers: {},
-    sandbox: { network: "deny" },
+    sandbox: { network: "allow" },
     lspServers: [],
     compatibility: {
       claude: {
@@ -195,9 +195,9 @@ function parseStringMap(value: unknown, configPath: string, field: string): Reco
 }
 
 function parseSandbox(value: unknown, configPath: string): YoloSandboxConfig {
-  if (value === undefined) return { network: "deny" };
+  if (value === undefined) return { network: "allow" };
   if (!isRecord(value)) throw configError(configPath, "sandbox", "must be an object");
-  const network = value["network"] ?? "deny";
+  const network = value["network"] ?? "allow";
   if (network !== "deny" && network !== "allow") {
     throw configError(configPath, "sandbox.network", "must be deny or allow");
   }

@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isHardlineCommand } from "../approval/manager.js";
@@ -19,12 +19,14 @@ import { WorkspaceRoots, workspaceAccessesFromCall } from "../tools/workspace-ro
 import { isToolSupportedForHost } from "../tools/tool-surface.js";
 import type { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import { verifyBackgroundMcpConfig } from "./background-mcp-policy.js";
+import { evaluateYoloToolCall, type SandboxNetworkPolicy } from "./yolo-sandbox.js";
 import {
-  buildSandboxSpawnPlan,
-  evaluateYoloToolCall,
-  type SandboxNetworkPolicy,
-  type SandboxSpawnPlan,
-} from "./yolo-sandbox.js";
+  createSandboxPolicy,
+  defaultSandboxScratchRoot,
+  managedProcessLauncher,
+  type ManagedSpawnRequest,
+} from "./process-sandbox/index.js";
+import { resolveShell, shellCommandArgs } from "../os/shell.js";
 import {
   BackgroundYoloPolicySnapshotError,
   normalizeExactHostname,
@@ -560,7 +562,7 @@ function matcherMatches(group: HookMatcherGroup, toolName: string): boolean {
 }
 
 export class StrictBackgroundHookRunner {
-  private readonly plans = new Map<HookHandler, SandboxSpawnPlan>();
+  private readonly plans = new Map<HookHandler, ManagedSpawnRequest>();
 
   constructor(
     private readonly workDir: string,
@@ -576,17 +578,20 @@ export class StrictBackgroundHookRunner {
               `后台模式仅支持 command hook，收到 ${handler.type}。`,
             );
           }
-          this.plans.set(
-            handler,
-            buildSandboxSpawnPlan({
-              command: handler.command,
-              shell: "/bin/sh",
-              shellArgs: ["-lc", handler.command],
-              cwd: workDir,
-              writableRoots: [workDir],
+          const shell = resolveShell();
+          this.plans.set(handler, {
+            command: shell,
+            args: shellCommandArgs(shell, handler.command),
+            cwd: workDir,
+            env: process.env,
+            origin: "command-hook",
+            policy: createSandboxPolicy({
+              profile: "workspace-write",
+              workspaceRoots: [workDir],
+              scratchRoot: defaultSandboxScratchRoot(workDir),
               config: { network },
             }),
-          );
+          });
         }
       }
     }
@@ -670,11 +675,10 @@ export class StrictBackgroundHookRunner {
     return new Promise((resolve) => {
       let child: ChildProcess;
       try {
-        child = spawn(plan.command, plan.args, {
-          cwd: this.workDir,
+        child = managedProcessLauncher.launch(plan, {
           windowsHide: true,
           stdio: ["pipe", "pipe", "pipe"],
-        });
+        }).child;
       } catch (error) {
         resolve({ decision: "deny", reason: `Hook 无法启动: ${errorMessage(error)}` });
         return;

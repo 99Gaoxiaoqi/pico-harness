@@ -8,6 +8,10 @@ on:
       - "packages/protocol/**"
       - "src/**"
       - "tests/**"
+      - "native/**"
+      - "resources/**"
+      - "scripts/build-windows-broker.mjs"
+      - "scripts/verify-sandbox-resources.mjs"
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/desktop.yml"
@@ -17,6 +21,10 @@ on:
       - "packages/protocol/**"
       - "src/**"
       - "tests/**"
+      - "native/**"
+      - "resources/**"
+      - "scripts/build-windows-broker.mjs"
+      - "scripts/verify-sandbox-resources.mjs"
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/desktop.yml"
@@ -43,7 +51,20 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Setup Rust stable
+        if: runner.os == 'Windows'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
       - run: npm ci
+
+      - name: Build Windows AppContainer Broker
+        if: runner.os == 'Windows'
+        run: npm run build:sandbox:windows
+
+      - name: Verify sandbox resources
+        run: npm run verify:sandbox:resources -- ${{ runner.os == 'Windows' && '--require-current' || '' }}
 
       - name: Audit full dependency tree
         run: npm audit --audit-level=low
