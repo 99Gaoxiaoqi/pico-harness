@@ -29,6 +29,7 @@ try {
   const requiredExecutables = [
     ...manifest.linux.architectures.map((arch) => `resources/sandbox/linux-${arch}/bwrap`),
     `resources/sandbox/win32-x64/${manifest.windows.broker}`,
+    `resources/sandbox/win32-x64/${manifest.windows.hostPrep}`,
   ];
   for (const relativeExecutable of requiredExecutables) {
     const executable = join(packageRoot, relativeExecutable);

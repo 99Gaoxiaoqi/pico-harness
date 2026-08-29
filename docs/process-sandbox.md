@@ -35,7 +35,36 @@ write paths.
   ephemeral AppContainer, grants a process-specific capability SID to policy roots, supplies no
   network capability to restricted profiles, uses a kill-on-close Job Object, and journals
   temporary ACL changes for idempotent recovery. The Broker is launched per target process and is
-  not installed as a persistent Windows service.
+  not installed as a persistent Windows service. It never requests elevation.
+
+### Windows host preparation
+
+Classic AppContainer processes need `NUL` for standard-stream redirection, but Windows restores
+the `\Device\Null` security descriptor at every boot without the well-known AppContainer package
+SIDs. Pico therefore packages a separate, checksum-verified
+`resources/sandbox/win32-x64/pico-appcontainer-host-prep.exe`. Run this explicit command once per
+boot from an elevated administrator context (for example, an administrator startup task or an
+MDM-managed startup script), before starting Pico:
+
+```powershell
+& ".\resources\sandbox\win32-x64\pico-appcontainer-host-prep.exe" prepare-null-device --json
+& ".\resources\sandbox\win32-x64\pico-appcontainer-host-prep.exe" verify-null-device --json
+```
+
+Release builds embed `requireAdministrator`; a runtime token check fails with exit code `65` if
+that contract is bypassed. The helper enables `SeSecurityPrivilege`, compares owner, group, DACL,
+and SACL structurally, and writes the complete target descriptor with one
+`SetKernelObjectSecurity` call only when drift exists. A second preparation is a no-op. The managed
+target is:
+
+```text
+O:BAG:SYD:(A;;GRGWGX;;;WD)(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;RC)(A;;GRGWGX;;;AC)(A;;GRGWGX;;;S-1-15-2-2)S:(ML;;NW;;;LW)
+```
+
+This host-prep command does not grant access on the system-drive root and does not modify any
+system-drive DACL. The per-process Broker remains unprivileged and never invokes host-prep or UAC.
+The design and target descriptor follow Microsoft's published MXC host-preparation contract at
+[microsoft/mxc@066bab2](https://github.com/microsoft/mxc/blob/066bab24bb8c787f1a962271a6d9aa2a84d24f44/docs/host-prep.md#prepare-null-device).
 
 If a restricted backend or its verified sidecar checksum is missing, process startup fails closed.
 There is no fallback to an unsandboxed host process. Native binaries are produced on their target
