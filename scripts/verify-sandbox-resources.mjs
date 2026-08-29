@@ -18,7 +18,19 @@ if (!/^[a-f0-9]{64}$/u.test(manifest.linux?.sourceSha256 ?? "")) {
 if (manifest.windows?.broker !== "pico-appcontainer-broker.exe") {
   throw new Error("Windows AppContainer Broker manifest 无效");
 }
-for (const source of ["Cargo.toml", "Cargo.lock", "src/main.rs", "src/windows.rs"]) {
+if (manifest.windows?.hostPrep !== "pico-appcontainer-host-prep.exe") {
+  throw new Error("Windows AppContainer host-prep manifest 无效");
+}
+for (const source of [
+  "Cargo.toml",
+  "Cargo.lock",
+  "build.rs",
+  "pico-appcontainer-host-prep.manifest",
+  "src/main.rs",
+  "src/windows.rs",
+  "src/windows_host_prep.rs",
+  "src/bin/pico-appcontainer-host-prep.rs",
+]) {
   await access(join(projectRoot, "native/windows-appcontainer-broker", source));
 }
 
@@ -27,12 +39,16 @@ const requiredExecutables = process.argv.includes("--require-all")
       "resources/sandbox/linux-x64/bwrap",
       "resources/sandbox/linux-arm64/bwrap",
       "resources/sandbox/win32-x64/pico-appcontainer-broker.exe",
+      "resources/sandbox/win32-x64/pico-appcontainer-host-prep.exe",
     ]
   : process.argv.includes("--require-current") && process.platform !== "darwin"
     ? [
-        process.platform === "win32"
-          ? `resources/sandbox/win32-${process.arch}/pico-appcontainer-broker.exe`
-          : `resources/sandbox/linux-${process.arch}/bwrap`,
+        ...(process.platform === "win32"
+          ? [
+              `resources/sandbox/win32-${process.arch}/${manifest.windows.broker}`,
+              `resources/sandbox/win32-${process.arch}/${manifest.windows.hostPrep}`,
+            ]
+          : [`resources/sandbox/linux-${process.arch}/bwrap`]),
       ]
     : [];
 for (const relativeExecutable of requiredExecutables) {

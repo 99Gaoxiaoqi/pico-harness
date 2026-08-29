@@ -4,6 +4,15 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 publish = false
+build = "build.rs"
+
+[[bin]]
+name = "pico-appcontainer-broker"
+path = "src/main.rs"
+
+[[bin]]
+name = "pico-appcontainer-host-prep"
+path = "src/bin/pico-appcontainer-host-prep.rs"
 
 [profile.release]
 codegen-units = 1

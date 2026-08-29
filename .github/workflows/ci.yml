@@ -180,10 +180,37 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build and verify AppContainer Broker
+      - name: Build and verify AppContainer resources
         run: |
+          cargo test --locked --manifest-path native/windows-appcontainer-broker/Cargo.toml --target x86_64-pc-windows-msvc
           npm run build:sandbox:windows
           npm run verify:sandbox:resources -- --require-current
+
+      - name: Prepare and verify the Windows null device sandbox boundary
+        shell: pwsh
+        run: |
+          $hostPrep = Resolve-Path "resources/sandbox/win32-x64/pico-appcontainer-host-prep.exe"
+
+          $firstJson = & $hostPrep prepare-null-device --json
+          if ($LASTEXITCODE -ne 0) { throw "initial host preparation failed ($LASTEXITCODE)" }
+          $first = $firstJson | ConvertFrom-Json
+          if ($first.result -notin @("applied", "no-change")) {
+            throw "unexpected initial host preparation result: $($first.result)"
+          }
+
+          $secondJson = & $hostPrep prepare-null-device --json
+          if ($LASTEXITCODE -ne 0) { throw "idempotent host preparation failed ($LASTEXITCODE)" }
+          $second = $secondJson | ConvertFrom-Json
+          if ($second.result -ne "no-change") {
+            throw "second host preparation must be a no-op, got: $($second.result)"
+          }
+
+          $verifyJson = & $hostPrep verify-null-device --json
+          if ($LASTEXITCODE -ne 0) { throw "host preparation verification failed ($LASTEXITCODE)" }
+          $verify = $verifyJson | ConvertFrom-Json
+          if ($verify.result -ne "match") {
+            throw "prepared null device does not match the target SDDL"
+          }
 
       - uses: actions/upload-artifact@v4
         with:
