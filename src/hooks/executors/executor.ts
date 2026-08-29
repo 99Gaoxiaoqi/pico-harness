@@ -76,6 +76,7 @@ export interface HookHandlerExecutorOptions {
   /** Product runtime capability that returns one currently trusted, fully resolved invocation. */
   authorizeCommandExecution?: (
     handler: ResolvedHookHandler,
+    shell: HookShell,
   ) => Promise<ResolvedCommandHookInvocation | undefined>;
   onAsyncRewake?: (handler: ResolvedHookHandler, output: HookOutput) => void | Promise<void>;
 }
@@ -90,6 +91,7 @@ export class DefaultHookExecutor implements HookExecutor {
 
   updateProcessSandbox(policy: SandboxPolicy): void {
     this.options.processSandbox = policy;
+    this.cachedShell = undefined;
   }
 
   /** SessionRuntime 每轮重建 Provider/MCP/Engine 时更新活态依赖，HookService 本身保持不变。 */
@@ -145,9 +147,13 @@ export class DefaultHookExecutor implements HookExecutor {
 
   private cachedShell: HookShell | undefined;
 
-  /** shell 选择一次解析，全 executor 复用（win32 Git Bash 优先，回落 PowerShell）。 */
+  /** shell 选择一次解析；Windows 受限 profile 必须避开 AppContainer 不兼容的 Git Bash。 */
   private hookShell(): HookShell {
-    this.cachedShell ??= resolveHookShell(this.options.env ?? process.env);
+    this.cachedShell ??= resolveHookShell(this.options.env ?? process.env, {
+      windowsAppContainerCompatible:
+        process.platform === "win32" &&
+        this.options.processSandbox?.profile !== "danger-full-access",
+    });
     return this.cachedShell;
   }
 
@@ -158,13 +164,14 @@ export class DefaultHookExecutor implements HookExecutor {
     parentSignal?: AbortSignal,
   ): Promise<HookOutput> {
     const signal = handlerSignal(parentSignal, timeoutMs(handler));
+    const shell = this.hookShell();
     const invocation = this.options.authorizeCommandExecution
-      ? await this.options.authorizeCommandExecution(resolved)
+      ? await this.options.authorizeCommandExecution(resolved, shell)
       : await resolveCommandHookExecution(
           handler,
           this.options.workDir,
           this.options.env ?? process.env,
-          this.hookShell(),
+          shell,
         );
     if (!invocation) throw new Error("command Hook 执行前信任已失效");
     const running = startCommand(

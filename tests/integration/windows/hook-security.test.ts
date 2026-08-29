@@ -8,7 +8,11 @@ import {
   sanitizeCommandHookEnvironment,
   resolveHookShell,
 } from "../../../src/hooks/config/command-shell.js";
-import { DefaultHookExecutor } from "../../../src/hooks/executors/executor.js";
+import {
+  DefaultHookExecutor,
+  type HookHandlerExecutorOptions,
+} from "../../../src/hooks/executors/executor.js";
+import { HookTrustStore } from "../../../src/hooks/trust/store.js";
 import type { CommandHookHandler, HookOutput } from "../../../src/hooks/types.js";
 import { createSandboxPolicy } from "../../../src/safety/process-sandbox/index.js";
 
@@ -36,18 +40,73 @@ test(
     const output = await executeStopHook(executor, fixture, handler, "windows-direct-exe");
     assert.equal(output.additionalContext, "windows-exe");
 
-    // shell 化后 .cmd 不再被拒绝——命令交给 shell 解释。raw 命令按所选 shell
-    // 方言书写（本机无可用 Git Bash 时落 PowerShell，调用运算符为 &）。
+    // 受限 Windows Hook 固定由 PowerShell 解释，shell-owned .cmd 仍可显式调用。
     const cmdPath = join(fixture.workspace, "greet.cmd");
     await writeFile(cmdPath, '@echo {"additionalContext":"windows-cmd"}\r\n');
-    const shellKind = resolveHookShell().kind;
     const cmdHandler = {
       type: "command",
-      command:
-        shellKind === "pwsh" || shellKind === "powershell" ? `& "${cmdPath}"` : `"${cmdPath}"`,
+      command: `& "${cmdPath}"`,
     } as const satisfies CommandHookHandler;
     const cmdOutput = await executeStopHook(executor, fixture, cmdHandler, "windows-cmd");
     assert.equal(cmdOutput.additionalContext, "windows-cmd", JSON.stringify(cmdOutput));
+  },
+);
+
+test(
+  "Windows restricted command Hooks use AppContainer-compatible PowerShell",
+  { skip: WINDOWS_ONLY },
+  async (context) => {
+    const fixture = await createFixture(context, "restricted-powershell");
+    const handler = {
+      type: "command",
+      command: `Write-Output '{"additionalContext":"restricted-powershell"}'`,
+    } as const satisfies CommandHookHandler;
+    const trustStore = new HookTrustStore({
+      picoHome: join(fixture.root, "pico-home"),
+      env: process.env,
+    });
+    await trustStore.trust({ workspace: fixture.workspace, source: fixture.source, handler });
+    const executor = createHookExecutor(
+      fixture,
+      process.env,
+      "workspace-write",
+      async (entry, shell) =>
+        await trustStore.authorizeCommandExecution(
+          { workspace: fixture.workspace, source: entry.source, handler: entry.handler },
+          shell,
+        ),
+    );
+    context.after(async () => await executor.dispose());
+
+    const output = await executeStopHook(
+      executor,
+      fixture,
+      handler,
+      "windows-restricted-powershell",
+    );
+    assert.equal(output.additionalContext, "restricted-powershell", JSON.stringify(output));
+  },
+);
+
+test(
+  "Windows danger-full-access command Hooks retain Git Bash preference",
+  { skip: WINDOWS_ONLY },
+  async (context) => {
+    const fixture = await createFixture(context, "danger-git-bash");
+    assert.equal(resolveHookShell().kind, "bash", "Windows CI host must provide Git Bash");
+    const executor = createHookExecutor(fixture, process.env, "danger-full-access");
+    context.after(async () => await executor.dispose());
+
+    const output = await executeStopHook(
+      executor,
+      fixture,
+      {
+        type: "command",
+        command: `printf '%s' '{"additionalContext":"danger-git-bash"}'`,
+      },
+      "windows-danger-git-bash",
+    );
+    assert.equal(output.additionalContext, "danger-git-bash", JSON.stringify(output));
   },
 );
 
@@ -352,12 +411,15 @@ async function createProcessTreeFixture(
 function createHookExecutor(
   fixture: Fixture,
   env: Readonly<NodeJS.ProcessEnv> = process.env,
+  profile: "workspace-write" | "danger-full-access" = "workspace-write",
+  authorizeCommandExecution?: HookHandlerExecutorOptions["authorizeCommandExecution"],
 ): DefaultHookExecutor {
   return new DefaultHookExecutor({
     workDir: fixture.workspace,
     env,
+    ...(authorizeCommandExecution ? { authorizeCommandExecution } : {}),
     processSandbox: createSandboxPolicy({
-      profile: "workspace-write",
+      profile,
       workspaceRoots: [fixture.workspace],
       scratchRoot: join(fixture.root, "sandbox-scratch"),
     }),

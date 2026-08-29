@@ -5,6 +5,7 @@ import { resolvePicoHome } from "../../paths/pico-paths.js";
 import {
   resolveCommandHookExecution,
   resolveReferencedScripts,
+  type HookShell,
   type ReferencedScriptResolution,
   type ResolvedCommandHookInvocation,
 } from "../config/command-shell.js";
@@ -30,7 +31,8 @@ export interface HookTrustSubject {
  *
  * 默认实现是 HookTrustStore；宿主可以为已经完成独立签名/指纹校验的资源快照提供
  * 更窄的 authority。实现必须在 status 与 authorizeCommandExecution 中保持同一绑定，
- * 并在快照失效后返回 pending/undefined。
+ * 并在快照失效后返回 pending/undefined。shell 由宿主按运行边界选择，不进入配置
+ * 指纹；authority 必须用 authorize 时收到的 shell 生成最终 invocation。
  */
 export interface HookTrustAuthority {
   readonly filePath?: string;
@@ -39,6 +41,7 @@ export interface HookTrustAuthority {
   status(subject: HookTrustSubject): Promise<HookTrustStatus>;
   authorizeCommandExecution(
     subject: HookTrustSubject,
+    shell?: HookShell,
   ): Promise<ResolvedCommandHookInvocation | undefined>;
 }
 
@@ -130,9 +133,10 @@ export class HookTrustStore {
    */
   async authorizeCommandExecution(
     subject: HookTrustSubject,
+    shell?: HookShell,
   ): Promise<ResolvedCommandHookInvocation | undefined> {
     if (subject.handler.type !== "command") return undefined;
-    const { fingerprint, commandExecution } = await this.resolveFingerprint(subject);
+    const { fingerprint, commandExecution } = await this.resolveFingerprint(subject, shell);
     const records = await this.readRecords();
     return records.some((record) => record.id === fingerprint.id) ? commandExecution : undefined;
   }
@@ -141,7 +145,10 @@ export class HookTrustStore {
     return await this.readRecords();
   }
 
-  private async resolveFingerprint(subject: HookTrustSubject): Promise<{
+  private async resolveFingerprint(
+    subject: HookTrustSubject,
+    shell?: HookShell,
+  ): Promise<{
     fingerprint: HookTrustFingerprint;
     commandExecution?: ResolvedCommandHookInvocation;
   }> {
@@ -150,7 +157,7 @@ export class HookTrustStore {
     const definitionHash = hash(stableStringify(trustedDefinition(subject.handler)));
     const commandExecution =
       subject.handler.type === "command"
-        ? await resolveCommandHookExecution(subject.handler, workspace, this.environment)
+        ? await resolveCommandHookExecution(subject.handler, workspace, this.environment, shell)
         : undefined;
     // shell 化后命令是配置字节（definitionHash 已覆盖），无文件可钉死——
     // scriptHashes 恒空。旧记录（含 scriptHashes）指纹失配回 pending，属一次性迁移。

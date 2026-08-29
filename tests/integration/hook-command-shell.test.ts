@@ -34,6 +34,24 @@ test("win32：PATH 里的 git 推导出 Git Bash 时选 bash -c", async (context
   assert.deepEqual(shell.argsPrefix, ["-c"]);
 });
 
+test("win32：AppContainer 兼容模式跳过 Git Bash 并选择 PowerShell", async (context) => {
+  if (process.platform !== "win32") return;
+  const fixture = await createFixture(context, "shell-appcontainer");
+  const cmdDir = join(fixture.root, "fake-git", "cmd");
+  const binDir = join(fixture.root, "fake-git", "bin");
+  await mkdir(cmdDir, { recursive: true });
+  await mkdir(binDir, { recursive: true });
+  await writeFile(join(cmdDir, "git.exe"), "");
+  await writeFile(join(binDir, "bash.exe"), "");
+
+  const shell = resolveHookShell(
+    { PATH: cmdDir },
+    { isBashUsable: () => true, windowsAppContainerCompatible: true },
+  );
+  assert.ok(shell.kind === "pwsh" || shell.kind === "powershell", `got ${shell.kind}`);
+  assert.deepEqual(shell.argsPrefix, ["-NoProfile", "-NonInteractive", "-Command"]);
+});
+
 test("win32：bash 候选探测失败时回落（stub 探测语义）", async (context) => {
   if (process.platform !== "win32") return;
   const fixture = await createFixture(context, "shell-git-bash-unusable");
@@ -167,6 +185,15 @@ test("指纹审批跟随配置字节：trust 后 active，命令文本变化回 
   const authorized = await store.authorizeCommandExecution(subject);
   assert.ok(authorized, "已信任定义的执行绑定可取回");
   assert.equal(authorized.commandString, "npm test");
+
+  const powershell = {
+    kind: "powershell",
+    path: "powershell.exe",
+    argsPrefix: ["-NoProfile", "-NonInteractive", "-Command"],
+  } as const;
+  const powershellAuthorized = await store.authorizeCommandExecution(subject, powershell);
+  assert.equal(powershellAuthorized?.shell, powershell);
+  assert.equal(await store.status(subject), "active", "宿主 shell 变化不得使既有信任失效");
 
   // 配置字节变化（命令文本改写）→ 指纹失配回 pending（防篡改的核心保证）。
   const tampered = {

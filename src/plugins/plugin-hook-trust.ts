@@ -2,6 +2,7 @@ import { realpath } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
 import {
   resolveCommandHookExecution,
+  type HookShell,
   type ResolvedCommandHookInvocation,
 } from "../hooks/config/command-shell.js";
 import type { HookTrustAuthority, HookTrustSubject } from "../hooks/trust/store.js";
@@ -57,6 +58,7 @@ export function createPluginHookTrustAuthority(
 
   const resolveInvocation = async (
     subject: HookTrustSubject,
+    shell?: HookShell,
   ): Promise<ResolvedCommandHookInvocation | undefined> => {
     if (subject.handler.type !== "command" || !(await matches(subject))) return undefined;
     try {
@@ -64,6 +66,7 @@ export function createPluginHookTrustAuthority(
         subject.handler,
         subject.workspace,
         options.env ?? process.env,
+        shell,
       );
     } catch {
       return undefined;
@@ -82,9 +85,9 @@ export function createPluginHookTrustAuthority(
       if (subject.handler.type !== "command") return "active";
       return (await resolveInvocation(subject)) ? "active" : "pending";
     },
-    async authorizeCommandExecution(subject) {
-      if ((await authority.status(subject)) !== "active") return undefined;
-      return await resolveInvocation(subject);
+    async authorizeCommandExecution(subject, shell) {
+      if (!(await matches(subject))) return undefined;
+      return await resolveInvocation(subject, shell);
     },
   };
 
