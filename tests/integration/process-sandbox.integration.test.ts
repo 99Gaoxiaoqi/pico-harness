@@ -16,6 +16,7 @@ import {
   managedProcessLauncher,
   runtimeReadAliases,
   shellRuntimeReadRoots,
+  WINDOWS_RESTRICTED_NODE_OPTIONS,
 } from "../../src/safety/process-sandbox/index.js";
 import { evaluateSandboxCommand } from "../../src/safety/yolo-sandbox.js";
 import { createIsolatedPicoConfig } from "../../src/input/pico-config.js";
@@ -73,6 +74,47 @@ test("Windows Broker 获取完整根目录与策略代次且不接受网络放�
   assert.ok(args.includes("--write-root"));
   assert.equal(args[args.indexOf("--generation") + 1], "7");
   assert.equal(args.includes("--network"), false);
+});
+
+test("Windows 受限进程只获得宿主固定的 Node 路径兼容参数", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-win-node-options-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const workspace = join(root, "workspace");
+  await mkdir(workspace);
+  const restricted = createSandboxPolicy({
+    profile: "workspace-write",
+    workspaceRoots: [workspace],
+    scratchRoot: join(root, "restricted-scratch"),
+  });
+  const restrictedPlan = buildManagedSpawnPlan({
+    command: "powershell.exe",
+    args: ["-Command", "node ./entry.cjs"],
+    cwd: workspace,
+    env: { ...process.env, NODE_OPTIONS: "--require=untrusted-loader.cjs" },
+    explicitEnvKeys: ["NODE_OPTIONS"],
+    origin: "command-hook",
+    policy: restricted,
+    platform: "win32",
+    controlRoot: join(root, "restricted-control"),
+    backendExecutable: process.execPath,
+  });
+  assert.equal(restrictedPlan.env.NODE_OPTIONS, WINDOWS_RESTRICTED_NODE_OPTIONS);
+
+  const unrestricted = createSandboxPolicy({
+    profile: "danger-full-access",
+    workspaceRoots: [workspace],
+    scratchRoot: join(root, "unrestricted-scratch"),
+  });
+  const unrestrictedPlan = buildManagedSpawnPlan({
+    command: "powershell.exe",
+    args: [],
+    cwd: workspace,
+    env: { NODE_OPTIONS: "--require=trusted-by-unrestricted-host.cjs" },
+    origin: "command-hook",
+    policy: unrestricted,
+    platform: "win32",
+  });
+  assert.equal(unrestrictedPlan.env.NODE_OPTIONS, "--require=trusted-by-unrestricted-host.cjs");
 });
 
 test("受限模式在原生后端缺失时 fail-closed", async (context) => {
