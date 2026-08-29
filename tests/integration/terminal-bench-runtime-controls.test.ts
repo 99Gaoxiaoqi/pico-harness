@@ -53,9 +53,9 @@ test("Terminal-Bench keeps its public egress manifest and runtime policy in sync
     ["scripts/terminal-bench/check-public-egress-security.py"],
     {
       cwd: process.cwd(),
-      // macOS hosted runners can spend close to one minute scheduling the 19 local
-      // proxy lifecycle checks under the full desktop suite; keep a bounded CI margin.
-      timeout: 120_000,
+      // Hosted macOS runners can suspend the Python worker threads while the full
+      // desktop suite is active. Keep a finite outer bound and emit per-check progress.
+      timeout: 300_000,
     },
   );
   const runtimePolicy = JSON.parse(stdout.trim()) as Record<string, unknown>;
