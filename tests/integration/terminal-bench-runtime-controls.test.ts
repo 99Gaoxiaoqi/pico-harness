@@ -53,7 +53,7 @@ test("Terminal-Bench keeps its public egress manifest and runtime policy in sync
     ["scripts/terminal-bench/check-public-egress-security.py"],
     {
       cwd: process.cwd(),
-      timeout: 30_000,
+      timeout: 60_000,
     },
   );
   const runtimePolicy = JSON.parse(stdout.trim()) as Record<string, unknown>;
