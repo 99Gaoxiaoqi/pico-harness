@@ -357,7 +357,17 @@ test("browser URL store throttles background writes but flush drains the latest 
   });
 
   store.set("session-a", "https://example.com/one");
-  await firstStarted.promise;
+  // Production debounce is intentionally unref'ed; the isolated test owns this ref'ed deadline.
+  const startDeadline = Promise.withResolvers<never>();
+  const startTimeout = setTimeout(
+    () => startDeadline.reject(new Error("background browser URL write did not start")),
+    1_000,
+  );
+  try {
+    await Promise.race([firstStarted.promise, startDeadline.promise]);
+  } finally {
+    clearTimeout(startTimeout);
+  }
   store.set("session-a", "https://example.com/two");
   store.set("session-a", "https://example.com/three");
   releaseFirst.resolve();
