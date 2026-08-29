@@ -1329,25 +1329,41 @@ export function createProductionRuntimeServices(
           input.action === "resume_execution" ||
           input.action === "replan_execution"
         ) {
+          const findExistingIntent = async () =>
+            (await service.listPlanReviewRunIntents(workspacePath, input.sessionId)).find(
+              (candidate) => candidate.input.operationId === operationId,
+            );
+          let existingIntent = await findExistingIntent();
           const before = await readDesktopPlanProjection(
             workspacePath,
             input.sessionId,
             picoHome,
             operationId,
           );
-          if (input.action === "execute" || input.action === "continue_editing") {
-            assertPendingPlanReview(before, input);
-          } else {
-            assertInterruptedPlanControl(before, input);
+          if (!existingIntent) {
+            try {
+              if (input.action === "execute" || input.action === "continue_editing") {
+                assertPendingPlanReview(before, input);
+              } else {
+                assertInterruptedPlanControl(before, input);
+              }
+            } catch (error) {
+              // A concurrent replay reserves its exact Run before that Run can move the
+              // Plan ledger. Recheck the durable intent before treating the old card as stale.
+              existingIntent = await findExistingIntent();
+              if (!existingIntent) throw error;
+            }
           }
-          const claimed = await claimDesktopPlanReview(workspacePath, input.sessionId, picoHome, {
-            operationId,
-            planId: input.planId,
-            revision: input.expectedRevision,
-            controlEpoch: input.controlEpoch,
-            action: input.action,
-            ...(input.feedback ? { feedback: input.feedback } : {}),
-          });
+          const claimed = existingIntent
+            ? before
+            : await claimDesktopPlanReview(workspacePath, input.sessionId, picoHome, {
+                operationId,
+                planId: input.planId,
+                revision: input.expectedRevision,
+                controlEpoch: input.controlEpoch,
+                action: input.action,
+                ...(input.feedback ? { feedback: input.feedback } : {}),
+              });
           const runInput = {
             workspacePath,
             sessionId: input.sessionId,
@@ -1380,9 +1396,7 @@ export function createProductionRuntimeServices(
             revision: input.expectedRevision,
             action: input.action,
           } as const;
-          const existingIntent = (
-            await service.listPlanReviewRunIntents(workspacePath, input.sessionId)
-          ).find((candidate) => candidate.input.operationId === operationId);
+          existingIntent ??= await findExistingIntent();
           if (claimed.reviewClaim?.operationId !== operationId && !existingIntent) {
             return { accepted: true, projection: claimed };
           }
