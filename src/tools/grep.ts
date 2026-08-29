@@ -277,7 +277,13 @@ function searchWithRg(opts: {
   return new Promise((resolvePromise, reject) => {
     // Match the Node fallback: authorized hidden/ignored files are searchable, while
     // known high-cost implementation directories remain excluded explicitly.
-    const args: string[] = ["--color=never", "--no-heading", "--hidden", "--no-ignore"];
+    const args: string[] = [
+      "--color=never",
+      "--no-heading",
+      "--with-filename",
+      "--hidden",
+      "--no-ignore",
+    ];
     if (opts.lineNumber) args.push("--line-number");
     else args.push("--no-line-number");
     if (!opts.caseSensitive) args.push("--ignore-case");
@@ -387,6 +393,9 @@ function parseRgOutput(raw: string, lineNumber: boolean): RawMatch[] {
         content: line.slice(idx + 1),
       });
     }
+  }
+  if (text.length > 0 && matches.length === 0) {
+    throw new Error("rg 返回了非空但无法解析的输出，已按 fail-closed 拒绝结果");
   }
   return matches;
 }
