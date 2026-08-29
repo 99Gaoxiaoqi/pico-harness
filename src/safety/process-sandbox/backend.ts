@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -141,16 +141,20 @@ export function detectSandboxBackend(
   if (platform === "darwin" && existsSync("/usr/bin/sandbox-exec")) return "macos-seatbelt";
   if (
     (platform === "linux" || platform === "win32") &&
-    isVerifiedBundledExecutable(resolveBundledSandboxExecutable(platform, arch))
+    isVerifiedBundledExecutable(resolveBundledSandboxExecutable(platform, arch), platform)
   ) {
     return platform === "linux" ? "linux-bubblewrap" : "windows-appcontainer";
   }
   return "unavailable";
 }
 
-export function isVerifiedBundledExecutable(executable: string): boolean {
+export function isVerifiedBundledExecutable(
+  executable: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
   if (!existsSync(executable) || !existsSync(`${executable}.sha256`)) return false;
   try {
+    if (platform !== "win32") accessSync(executable, constants.X_OK);
     const expected = readFileSync(`${executable}.sha256`, "utf8").trim().split(/\s+/u)[0];
     if (!expected || !/^[a-f0-9]{64}$/u.test(expected)) return false;
     const actual = createHash("sha256").update(readFileSync(executable)).digest("hex");
@@ -222,6 +226,7 @@ export function buildBubblewrapArgs(
     "--die-with-parent",
     "--new-session",
     "--unshare-all",
+    "--unshare-user",
     ...(policy.network === "allow" ? ["--share-net"] : []),
     "--disable-userns",
     "--proc",

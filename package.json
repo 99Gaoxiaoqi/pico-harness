@@ -41,6 +41,7 @@
     "build:sandbox:linux": "node scripts/build-bubblewrap.mjs",
     "build:sandbox:windows": "node scripts/build-windows-broker.mjs",
     "verify:sandbox:resources": "node scripts/verify-sandbox-resources.mjs",
+    "verify:sandbox:package": "node scripts/verify-sandbox-package.mjs",
     "prebuild": "npm run clean && npm run check:storage && npm run build:protocol && npm run build:transcript-replica && npm run build:runtime-host",
     "build": "tsc -p tsconfig.build.json",
     "postbuild": "node -e \"require('node:fs').chmodSync('dist/cli/main.js',0o755)\"",
