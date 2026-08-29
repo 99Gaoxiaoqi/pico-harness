@@ -417,9 +417,8 @@ async function createProcessTreeFixture(
       'const { writeFileSync } = require("node:fs");',
       "const [descendantPath, treePath, heartbeatPath] = process.argv.slice(2);",
       "const descendant = spawn(process.execPath, [descendantPath, heartbeatPath], {",
-      // This fixture validates Job Object tree termination. Inheriting the existing
-      // AppContainer handles avoids making that assertion depend on host NUL preparation.
-      '  stdio: "inherit",',
+      // Exercise the prepared \\Device\\Null boundary as well as Job Object tree termination.
+      '  stdio: "ignore",',
       "  windowsHide: true,",
       "});",
       'if (descendant.pid === undefined) throw new Error("descendant pid unavailable");',
