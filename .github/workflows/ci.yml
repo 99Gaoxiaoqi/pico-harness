@@ -201,6 +201,8 @@ jobs:
           cache: "npm"
 
       - run: npm ci
+      - name: Install ripgrep for the native Grep sandbox path
+        run: brew install ripgrep
       - run: npm run verify:sandbox:resources
       - run: node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/process-sandbox.integration.test.ts tests/integration/process-sandbox-native.integration.test.ts
 
