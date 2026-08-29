@@ -275,7 +275,9 @@ function searchWithRg(opts: {
   };
 }): Promise<string> {
   return new Promise((resolvePromise, reject) => {
-    const args: string[] = ["--color=never", "--no-heading"];
+    // Match the Node fallback: authorized hidden/ignored files are searchable, while
+    // known high-cost implementation directories remain excluded explicitly.
+    const args: string[] = ["--color=never", "--no-heading", "--hidden", "--no-ignore"];
     if (opts.lineNumber) args.push("--line-number");
     else args.push("--no-line-number");
     if (!opts.caseSensitive) args.push("--ignore-case");
@@ -285,6 +287,9 @@ function searchWithRg(opts: {
     }
     if (opts.excludeSensitiveFiles) {
       for (const glob of SENSITIVE_GREP_GLOBS) args.push("-g", `!${glob}`);
+    }
+    for (const directory of EXCLUDED_DIRS) {
+      args.push("-g", `!${directory}/**`, "-g", `!**/${directory}/**`);
     }
     // 限制匹配文件数与每文件行数不是 rg 的强项,这里靠后续截断 maxResults 控制
     args.push(opts.searchRoot);
