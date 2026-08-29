@@ -177,12 +177,16 @@ function setEnvironmentVariable(
   value: string,
   platform: NodeJS.Platform,
 ): void {
+  const outputName =
+    platform === "win32" && ["PATH", "PATHEXT"].includes(name.toUpperCase())
+      ? name.toUpperCase()
+      : name;
   if (platform === "win32") {
-    const normalized = name.toUpperCase();
+    const normalized = outputName.toUpperCase();
     const duplicate = Object.keys(environment).find((key) => key.toUpperCase() === normalized);
-    if (duplicate !== undefined && duplicate !== name) delete environment[duplicate];
+    if (duplicate !== undefined && duplicate !== outputName) delete environment[duplicate];
   }
-  environment[name] = value;
+  environment[outputName] = value;
 }
 
 export function runtimeReadRoots(
