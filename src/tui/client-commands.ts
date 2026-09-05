@@ -1526,6 +1526,8 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
               requestedRouteId: routeArgument,
               activeSessionId: session(),
             });
+            if (authority.route.auth === "none")
+              return msg(`${authority.route.id}: 免密钥，Automation 无需导入凭据。`);
             if (action === "status") {
               return msg(
                 `${authority.route.id}: Provider 凭据状态 ${authority.provider.credentialStatus}（source=${authority.provider.credentialSource}）。Automation 创建时 daemon 会按精确 credentialRef 复核系统凭据库。`,
@@ -1909,6 +1911,7 @@ type ClientAutomationAuthority = {
     readonly model: string;
     readonly baseURL: string;
     readonly apiKeyEnv: string;
+    readonly auth?: "api-key" | "none";
     readonly source: "config";
     readonly capabilities: ReturnType<typeof resolveModelRouteCapabilities>;
   };
@@ -1975,6 +1978,7 @@ async function resolveClientAutomationAuthority(input: {
     model,
     baseURL: provider.baseURL,
     apiKeyEnv: provider.apiKeyEnv,
+    ...(provider.auth ? { auth: provider.auth } : {}),
     source: "config" as const,
     capabilities: resolveModelRouteCapabilities(provider.protocol, model, undefined, {
       baseURL: provider.baseURL,
@@ -1986,6 +1990,7 @@ async function resolveClientAutomationAuthority(input: {
         protocol: userProviderRecord.protocol,
         baseURL: userProviderRecord.baseURL,
         apiKeyEnv: userProviderRecord.apiKeyEnv,
+        ...(userProviderRecord.auth ? { auth: userProviderRecord.auth } : {}),
         models: userProviderRecord.models,
         discoverModels: userProviderRecord.discoverModels,
       }

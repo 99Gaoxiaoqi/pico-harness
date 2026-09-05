@@ -2338,13 +2338,14 @@ async function manageCronCredential(
   settings: SessionSettings,
   args: readonly string[],
 ): Promise<string> {
+  const [action = "status", requestedRoute] = args;
+  const route = options.modelRouter?.require(requestedRoute ?? settings.modelRouteId);
+  if (!route) return "当前没有可导入的配置模型路由。";
+  if (route.auth === "none") return `${route.id}: 免密钥，Automation 无需导入凭据。`;
   const vault = options.credentialVault;
   if (!vault) return "系统凭证库未配置，后台 Provider 凭证已禁用。";
   const capability = vault.capability();
   if (!capability.available) return capability.diagnostic;
-  const [action = "status", requestedRoute] = args;
-  const route = options.modelRouter?.require(requestedRoute ?? settings.modelRouteId);
-  if (!route) return "当前没有可导入的配置模型路由。";
   if (route.source === "legacy") {
     return "持久 Cron 不支持 legacy 环境变量路由；请先在 .pico/config.json 配置 provider。";
   }
