@@ -151,6 +151,7 @@ export type RuntimeProviderInput = JsonObject & {
   readonly protocol: RuntimeProviderKind;
   readonly baseURL: string;
   readonly apiKeyEnv: string;
+  readonly auth?: "api-key" | "none";
   readonly models: readonly string[];
   readonly discoverModels: boolean;
   readonly modelCapabilities?: JsonObject;
@@ -3085,7 +3086,7 @@ const runtimeProviderParam: RuntimeParamRule = (value, path) => {
       models: stringArrayParam,
       discoverModels: booleanParam,
     },
-    { modelCapabilities: jsonObjectParam },
+    { modelCapabilities: jsonObjectParam, auth: oneOfParam(["api-key", "none"]) },
   );
 };
 
@@ -4452,7 +4453,7 @@ const runtimeProviderInputResult = resultShape(
     models: resultStringArray,
     discoverModels: resultBoolean,
   },
-  { modelCapabilities: resultJsonObject },
+  { modelCapabilities: resultJsonObject, auth: resultOneOf(["api-key", "none"]) },
 );
 
 const runtimeProviderProfileResult = resultShape(
@@ -4469,7 +4470,7 @@ const runtimeProviderProfileResult = resultShape(
     credentialSource: resultOneOf(["config", "keychain", "environment", "none"]),
     storedCredentialPresent: resultBoolean,
   },
-  { modelCapabilities: resultJsonObject },
+  { modelCapabilities: resultJsonObject, auth: resultOneOf(["api-key", "none"]) },
 );
 
 const runtimeUserDefaultsResult = exactResultShape(

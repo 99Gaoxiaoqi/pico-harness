@@ -309,6 +309,10 @@ export function parseModelProviderConfigs(
     if (!isProviderKind(protocol)) {
       throw configError(configPath, `${field}.protocol`, "must be openai or claude");
     }
+    const auth = rawProvider["auth"];
+    if (auth !== undefined && auth !== "none" && auth !== "api-key") {
+      throw configError(configPath, `${field}.auth`, "must be api-key or none");
+    }
     const baseURL = parseRequiredString(rawProvider["baseURL"], configPath, `${field}.baseURL`);
     const apiKeyEnv = parseRequiredString(
       rawProvider["apiKeyEnv"],
@@ -343,6 +347,7 @@ export function parseModelProviderConfigs(
       protocol,
       baseURL,
       apiKeyEnv,
+      ...(auth !== undefined ? { auth } : {}),
       models: parsedModels.models,
       discoverModels: discoverModels ?? protocol === "openai",
       ...(Object.keys(modelCapabilities).length > 0 ? { modelCapabilities } : {}),

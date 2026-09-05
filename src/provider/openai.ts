@@ -24,6 +24,7 @@ import {
   promptCacheRevisions,
   snapshotToolDefinitions,
 } from "./prompt-cache.js";
+import { openCodeClientHeaders } from "./opencode-headers.js";
 import { appendProviderEndpointPath } from "./provider-endpoint.js";
 
 interface OpenAIToolCall {
@@ -275,7 +276,8 @@ export class OpenAIProvider implements LLMProvider {
       return fetch(appendProviderEndpointPath(this.config.baseURL, "chat/completions"), {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${this.config.apiKey}`,
+          ...(this.config.auth === "none" ? {} : { Authorization: `Bearer ${this.config.apiKey}` }),
+          ...openCodeClientHeaders(this.config),
           "Content-Type": "application/json",
         },
         body: JSON.stringify(body),

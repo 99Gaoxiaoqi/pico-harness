@@ -420,6 +420,7 @@ export function createProductionRuntimeServices(
           provider: route.provider,
           baseURL: route.baseURL,
           apiKey: route.apiKey,
+          ...(route.auth ? { auth: route.auth } : {}),
           model: route.model,
           modelRouteId: route.modelRouteId,
           modelCapabilities: route.capabilities,
@@ -894,6 +895,7 @@ export function createProductionRuntimeServices(
             provider: route.provider,
             baseURL: route.baseURL,
             apiKey: route.apiKey,
+            ...(route.auth ? { auth: route.auth } : {}),
             model: route.model,
             modelRouteId: route.modelRouteId,
             modelCapabilities: route.capabilities,
@@ -1324,6 +1326,7 @@ export function createProductionRuntimeServices(
   };
   const desktopService: DesktopRuntimeService = new DesktopRuntimeService({
     runtimeService: service,
+    initializeDefaultProvider: true,
     registrationStore,
     trustStore,
     browserAgentBroker,
@@ -1994,6 +1997,7 @@ async function resolveDesktopAutomationRoute(
     baseURL: provider.baseURL,
     model,
     apiKeyEnv: provider.apiKeyEnv,
+    ...(provider.auth ? { auth: provider.auth } : {}),
     origin: config.sources[`providers.${providerId}`] ?? "user",
   };
 }
@@ -2029,6 +2033,7 @@ async function resolveCronModelRoute(
     baseURL: provider.baseURL,
     model,
     apiKeyEnv: provider.apiKeyEnv,
+    ...(provider.auth ? { auth: provider.auth } : {}),
     modelRouteId,
     capabilities: resolveModelRouteCapabilities(
       provider.protocol,
@@ -2096,6 +2101,7 @@ async function resolveDesktopModelRoute(
       provider: active.provider,
       baseURL: active.config.baseURL,
       apiKey: active.config.apiKey,
+      ...(active.config.auth ? { auth: active.config.auth } : {}),
       model: active.config.model,
       apiKeyEnv: active.route.apiKeyEnv,
       modelRouteId: active.route.id,

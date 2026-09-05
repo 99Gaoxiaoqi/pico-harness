@@ -266,6 +266,7 @@ export interface DesktopRuntimeServiceOptions {
   readonly planControl?: PlanControlPort;
   readonly automations?: DesktopAutomationService;
   readonly userConfigStore?: UserConfigStore;
+  readonly initializeDefaultProvider?: boolean;
   readonly userMcpConfigStore?: UserMcpConfigStore;
   readonly effectiveConfigResolver?: EffectiveConfigResolver;
   readonly credentialVault?: CredentialVault;
@@ -505,7 +506,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     } catch (error) {
       return Promise.reject(error);
     }
-    const operation = this.dispatchRequest(request);
+    const operation = this.userConfigWatchReady.then(() => this.dispatchRequest(request));
     this.inFlightHandles.add(operation);
     void operation.then(
       () => {
@@ -1852,6 +1853,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       const settings = await this.getSessionSettings(canonical, session);
       const effective = await this.loadSessionModelRuntime(canonical, settings);
       const active = effective.router.providerConfig(settings.modelRouteId);
+      active.config.sessionId = session.id;
       const pluginSnapshot = await this.pluginRuntimeSnapshotRegistry.get(canonical);
       const pluginActivationScope = new PluginCapabilityActivationScope();
       let ledger: SqliteRuntimeControlStore | undefined;
@@ -2786,6 +2788,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     );
     const expectedRevision = requireSha256(record["expectedRevision"], "expectedRevision");
     const { id, config } = normalizeRuntimeProvider(record["provider"]);
+    if (config.auth === "none") {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        "免密钥 Provider 不接受凭据导入",
+      );
+    }
     const defaultModel = requireText(record["defaultModel"], "defaultModel");
     if (!config.models.includes(defaultModel)) {
       throw new RuntimeProtocolError(
@@ -2975,6 +2983,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const current = await this.userConfigStore.read();
     this.assertUserConfigRevision(expectedRevision, current.revision);
     const provider = requireProviderFromUserConfig(current.config, providerId);
+    if (provider.auth === "none") {
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        "免密钥 Provider 不接受 API Key",
+      );
+    }
     const fingerprint = providerFingerprint(providerId, provider);
     const secret = requireSecret(record["secret"]);
     if (configuredCredential(provider) === secret) {
@@ -3073,6 +3087,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     providerId: string,
     provider: ModelProviderConfig,
   ): Promise<void> {
+    if (provider.auth === "none") return;
     if (configuredCredential(provider) !== undefined) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.CONFLICT,
@@ -3124,6 +3139,13 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     readonly credentialSource: "config" | "keychain" | "environment" | "none";
     readonly storedCredentialPresent: boolean;
   }> {
+    if (provider.auth === "none") {
+      return {
+        credentialStatus: "ready",
+        credentialSource: "none",
+        storedCredentialPresent: false,
+      };
+    }
     if (configuredCredential(provider) !== undefined) {
       return {
         credentialStatus: "ready",
@@ -3204,7 +3226,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private async startUserConfigWatch(): Promise<void> {
     try {
-      this.observedUserConfig = await this.userConfigStore.read();
+      this.observedUserConfig = this.options.initializeDefaultProvider
+        ? await this.userConfigStore.ensureDefaultProvider(this.env)
+        : await this.userConfigStore.read();
     } catch {
       // The typed config methods surface corrupt state. Keep watching so an external repair
       // is detected without requiring a daemon restart.
@@ -3299,6 +3323,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
               baseURL: provider.baseURL,
               model,
               apiKeyEnv: provider.apiKeyEnv,
+              ...(provider.auth ? { auth: provider.auth } : {}),
             },
             reference.workspacePath,
           );
@@ -4854,6 +4879,7 @@ function runtimeProviderInput(id: string, provider: ModelProviderConfig): JsonOb
     protocol: provider.protocol,
     baseURL: provider.baseURL,
     apiKeyEnv: provider.apiKeyEnv,
+    ...(provider.auth ? { auth: provider.auth } : {}),
     models: [...provider.models],
     discoverModels: provider.discoverModels,
     ...(modelCapabilities ? { modelCapabilities } : {}),
@@ -4884,6 +4910,7 @@ function retainConfiguredCredential(
   provider: ModelProviderConfig,
   previous: ModelProviderConfig | undefined,
 ): ModelProviderConfig {
+  if (provider.auth === "none") return provider;
   const apiKey = previous === undefined ? undefined : configuredCredential(previous);
   return apiKey === undefined ? provider : withConfiguredCredential(provider, apiKey);
 }
@@ -4945,7 +4972,16 @@ function normalizeRuntimeProvider(value: unknown): {
 } {
   const record = assertExactObjectKeys(
     value,
-    ["id", "protocol", "baseURL", "apiKeyEnv", "models", "discoverModels", "modelCapabilities"],
+    [
+      "id",
+      "protocol",
+      "baseURL",
+      "apiKeyEnv",
+      "auth",
+      "models",
+      "discoverModels",
+      "modelCapabilities",
+    ],
     "provider",
   );
   const id = requireProviderId(record["id"]);
@@ -4954,6 +4990,13 @@ function normalizeRuntimeProvider(value: unknown): {
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.INVALID_PARAMS,
       "provider.protocol 必须是 openai 或 claude",
+    );
+  }
+  const auth = record["auth"];
+  if (auth !== undefined && !isOneOf(auth, ["api-key", "none"] as const)) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      "provider.auth 必须是 api-key 或 none",
     );
   }
   const baseURL = requireText(record["baseURL"], "provider.baseURL");
@@ -5012,6 +5055,7 @@ function normalizeRuntimeProvider(value: unknown): {
     protocol,
     baseURL: normalizedEndpoint,
     apiKeyEnv,
+    ...(auth !== undefined ? { auth } : {}),
     discoverModels,
     models:
       modelCapabilities === undefined
@@ -5083,6 +5127,7 @@ function providerFingerprint(providerId: string, provider: ModelProviderConfig):
         protocol: provider.protocol,
         baseURL: provider.baseURL.trim().replace(/\/+$/u, ""),
         apiKeyEnv: provider.apiKeyEnv,
+        ...(provider.auth ? { auth: provider.auth } : {}),
         models: [...provider.models],
         discoverModels: provider.discoverModels,
         modelCapabilities: provider.modelCapabilities ?? {},
