@@ -548,6 +548,11 @@
       height: 44px;
     }
 
+    .session-workbar-layout
+      .session-workbar-shell[data-dock="right"][data-state="collapsed"][data-has-restore="false"] {
+      height: 0;
+    }
+
     .session-workbar-layout .session-workbar-shell[data-dock="bottom"][data-state="expanded"] {
       height: min(var(--session-workbar-height), 42vh);
     }

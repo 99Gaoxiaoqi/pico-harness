@@ -88,6 +88,8 @@ export interface SessionWorkbarProps {
 export interface SessionWorkbarLayoutProps {
   readonly state: WorkbarState;
   readonly children: ReactNode;
+  /** The conversation header can provide the dock restore controls. */
+  readonly showRestoreButton?: boolean | undefined;
   /** New tasks stay focused until a real session exists. */
   readonly enabled?: boolean | undefined;
   readonly launcher?: ((dock: WorkbarDock) => ReactNode) | undefined;
@@ -657,6 +659,7 @@ export function SessionWorkbarLayout({
   state,
   children,
   enabled = true,
+  showRestoreButton = true,
   launcher,
   presentTab,
   renderPanel,
@@ -680,6 +683,7 @@ export function SessionWorkbarLayout({
         tabs={tabs}
         activeTabId={dockState.activeTabId ?? undefined}
         collapsed={dockState.collapsed}
+        showRestoreButton={showRestoreButton}
         size={dock === "right" ? state.rightWidth : state.bottomHeight}
         launcher={launcher?.(dock)}
         renderPanel={(tab) => {

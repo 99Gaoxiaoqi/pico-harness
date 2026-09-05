@@ -160,16 +160,16 @@ export function ConversationComposer({
       />
       <div className="conversation-composer__footer">
         <div className="conversation-composer__controls">
-          {onAttach && (
-            <button
-              type="button"
-              className="conversation-icon-button"
-              onClick={onAttach}
-              aria-label="添加 Skill 或子代理"
-            >
-              <Plus aria-hidden="true" />
-            </button>
-          )}
+          <button
+            type="button"
+            className="conversation-icon-button"
+            onClick={onAttach}
+            disabled={!onAttach}
+            aria-label="添加 Skill 或子代理"
+            title={onAttach ? "添加 Skill 或子代理" : "选择项目后，可在空闲时添加 Skill 或子代理"}
+          >
+            <Plus aria-hidden="true" />
+          </button>
           {leadingAccessory}
           {status !== "idle" && (
             <label className="conversation-behavior">
