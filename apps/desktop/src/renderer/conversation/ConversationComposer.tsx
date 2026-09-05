@@ -1,5 +1,13 @@
 import { ArrowUp, Pause, Play, Plus, Square } from "lucide-react";
-import { useId, type ChangeEvent, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
+import {
+  useId,
+  useLayoutEffect,
+  useRef,
+  type ChangeEvent,
+  type FormEvent,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 import type {
   ComposerBehavior,
   ComposerOptionView,
@@ -62,7 +70,29 @@ export function ConversationComposer({
   leadingAccessory,
   trailingAccessory,
 }: ConversationComposerProps) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const textareaId = useId();
+
+  useLayoutEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    const resize = () => {
+      textarea.style.height = "auto";
+      const maxHeight = Number.parseFloat(getComputedStyle(textarea).maxHeight) || 200;
+      textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`;
+      textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
+    };
+    resize();
+    // A narrower window can wrap the same draft onto more lines.
+    let previousWidth = textarea.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (textarea.clientWidth === previousWidth) return;
+      previousWidth = textarea.clientWidth;
+      resize();
+    });
+    observer.observe(textarea);
+    return () => observer.disconnect();
+  }, [value]);
   const statusId = useId();
   const canSubmit = value.trim().length > 0 && !disabled && !submitDisabled && !busy;
   const effectiveBehavior = status === "idle" ? "auto" : behavior === "auto" ? "steer" : behavior;
@@ -87,7 +117,13 @@ export function ConversationComposer({
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+    if (
+      event.key !== "Enter" ||
+      event.shiftKey ||
+      event.nativeEvent.isComposing ||
+      event.nativeEvent.keyCode === 229
+    )
+      return;
     event.preventDefault();
     submit();
   };
@@ -110,6 +146,7 @@ export function ConversationComposer({
         消息
       </label>
       <textarea
+        ref={textareaRef}
         id={textareaId}
         name="message"
         autoComplete="off"

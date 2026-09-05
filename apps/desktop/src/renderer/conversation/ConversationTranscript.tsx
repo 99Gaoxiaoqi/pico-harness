@@ -222,11 +222,12 @@ function renderDefaultItem(
       );
     case "tool":
       return (
-        <section
-          className="conversation-inline-card conversation-execution-record"
+        <details
+          className="conversation-inline-card conversation-execution-record conversation-tool-record"
           data-state={item.state}
+          open={item.state === "failed"}
         >
-          <header className="conversation-inline-card__header">
+          <summary className="conversation-inline-card__header">
             <TerminalSquare aria-hidden="true" />
             <div>
               <span className="conversation-kicker">{item.toolName}</span>
@@ -235,18 +236,21 @@ function renderDefaultItem(
             <span className="conversation-item-state">
               <StateIcon state={item.state} /> {stateLabels[item.state]}
             </span>
-          </header>
-          {item.result && (
-            <p className="conversation-execution-meta">
-              {item.result.rawSizeBytes} bytes · {item.result.status} ·
-              <code>{item.result.sha256.slice(0, 12)}</code>
-              {item.result.evidence ? " · Evidence" : ""}
-            </p>
-          )}
-          {item.detail && <p className="conversation-execution-detail">{item.detail}</p>}
-          {item.output && <pre className="conversation-tool-output">{item.output}</pre>}
-          {onOpenItem && <DetailButton label="查看工具详情" onClick={() => onOpenItem(item)} />}
-        </section>
+            <ChevronRight className="conversation-tool-record__chevron" aria-hidden="true" />
+          </summary>
+          <div className="conversation-tool-record__body">
+            {item.result && (
+              <p className="conversation-execution-meta">
+                {item.result.rawSizeBytes} bytes · {item.result.status} ·
+                <code>{item.result.sha256.slice(0, 12)}</code>
+                {item.result.evidence ? " · Evidence" : ""}
+              </p>
+            )}
+            {item.detail && <p className="conversation-execution-detail">{item.detail}</p>}
+            {item.output && <pre className="conversation-tool-output">{item.output}</pre>}
+            {onOpenItem && <DetailButton label="查看工具详情" onClick={() => onOpenItem(item)} />}
+          </div>
+        </details>
       );
     case "subagent":
       return (
@@ -382,9 +386,10 @@ export function ConversationTranscript({
       >
         {emptyState ?? (
           <div className="conversation-empty-state">
-            <Sparkles aria-hidden="true" />
-            <h2>从一段对话开始</h2>
-            <p>描述你想推进的事情，Pico 会在这里展示思考、工具和结果。</p>
+            <span className="conversation-wordmark" aria-label="Pico">
+              pico
+            </span>
+            <h2>今天想做些什么？</h2>
           </div>
         )}
       </section>
