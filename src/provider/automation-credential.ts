@@ -63,6 +63,7 @@ export async function importAutomationCredential(input: {
   readonly vault: CredentialVault;
   readonly env?: Readonly<Record<string, string | undefined>>;
 }): Promise<void> {
+  if (input.route.auth === "none") throw new Error("免密钥 Provider 不接受 Automation 凭据导入");
   if (input.target.kind === "model-route") {
     await importModelRouteCredential({
       route: input.route,

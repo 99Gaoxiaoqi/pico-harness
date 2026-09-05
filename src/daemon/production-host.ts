@@ -238,8 +238,8 @@ export function createProductionRuntimeServices(
         throw new Error(`Cron Job 包含未显式授权的工具: ${deniedTools.join(", ")}`);
       }
       if (!job.credentialRef) throw new Error("Cron Job 缺少 credentialRef");
-      await resolveCronModelRoute(job, effectiveConfigResolver, env);
-      if (!(await credentialVault.has(job.credentialRef))) {
+      const route = await resolveCronModelRoute(job, effectiveConfigResolver, env);
+      if (route.auth !== "none" && !(await credentialVault.has(job.credentialRef))) {
         throw new Error(`系统凭证库中不存在 ${job.credentialRef}`);
       }
       return { allowed: true };
@@ -1145,7 +1145,7 @@ export function createProductionRuntimeServices(
             baseURL: route.baseURL,
           })
         : credentialRefForModelRoute(route, workspacePath);
-      if (!(await credentialVault.has(credentialRef))) {
+      if (route.auth !== "none" && !(await credentialVault.has(credentialRef))) {
         throw new RuntimeProtocolError(
           RUNTIME_ERROR_CODES.FORBIDDEN,
           `模型路由 ${route.id} 尚未导入系统凭证库，无法创建持久 Automation`,
@@ -1927,6 +1927,7 @@ export function assembleProductionDaemonHost(
           modelRouteId: route.modelRouteId,
           modelCapabilities: route.capabilities,
           credentialRef: job.credentialRef,
+          ...(route.auth ? { auth: route.auth } : {}),
           execution: { kind: "background", policy: job.policySnapshot },
         },
         {

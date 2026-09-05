@@ -3107,6 +3107,9 @@ async function resolveBackgroundCredential(
   dependencies: RunAgentCliDependencies,
 ): Promise<string | undefined> {
   if (execution.kind === "foreground" || dependencies.provider !== undefined) return undefined;
+  // Background auth is injected by the host after resolving the trusted Provider and
+  // checking its durable credentialRef identity, never from the Automation RPC input.
+  if (options.auth === "none") return undefined;
   if (options.apiKey !== undefined) {
     throw new Error("后台执行拒绝直接传入 apiKey；请使用 credentialRef 和系统凭证库。");
   }

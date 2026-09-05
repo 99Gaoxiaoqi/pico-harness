@@ -316,10 +316,6 @@ export async function importDesktopAutomationCredential(
   input: DesktopAutomationCredentialImport,
   dependencies: DesktopAutomationAuthorityDependencies,
 ): Promise<{ readonly imported: true; readonly credentialRef: CredentialRef }> {
-  const capability = dependencies.credentialVault.capability();
-  if (!capability.available) {
-    throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.FORBIDDEN, capability.diagnostic);
-  }
   const target = await resolveDesktopAutomationTarget(
     workspacePath,
     input.modelRouteId,
@@ -330,6 +326,16 @@ export async function importDesktopAutomationCredential(
       RUNTIME_ERROR_CODES.CONFLICT,
       "Automation Provider authority 已变化，请刷新配置后重试",
     );
+  }
+  if (target.auth === "none") {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      "免密钥 Provider 不接受 Automation 凭据导入",
+    );
+  }
+  const capability = dependencies.credentialVault.capability();
+  if (!capability.available) {
+    throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.FORBIDDEN, capability.diagnostic);
   }
   await dependencies.credentialVault.put(target.ref, requireSecret(input.secret));
   return { imported: true, credentialRef: target.ref };
@@ -369,7 +375,7 @@ export async function createTrustedDesktopAutomation(
       "Automation Provider authority 已变化，请刷新配置后重试",
     );
   }
-  if (!(await dependencies.credentialVault.has(target.ref))) {
+  if (target.auth !== "none" && !(await dependencies.credentialVault.has(target.ref))) {
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.CONFLICT,
       `模型路由 ${input.modelRouteId} 尚未导入系统凭证库`,
@@ -456,6 +462,7 @@ async function resolveDesktopAutomationTarget(
     model,
     baseURL: provider.baseURL,
     apiKeyEnv: provider.apiKeyEnv,
+    ...(provider.auth ? { auth: provider.auth } : {}),
     source: "config",
     capabilities: resolveModelRouteCapabilities(
       provider.protocol,
@@ -466,12 +473,15 @@ async function resolveDesktopAutomationTarget(
   };
   const userProvider = (await dependencies.userConfigStore.read()).config.providers[providerId];
   try {
-    return resolveAutomationCredentialTarget({
-      route,
-      workspacePath,
-      ...(userProvider ? { userProvider } : {}),
-      configSource: effective.sources[`providers.${providerId}`],
-    });
+    return {
+      ...resolveAutomationCredentialTarget({
+        route,
+        workspacePath,
+        ...(userProvider ? { userProvider } : {}),
+        configSource: effective.sources[`providers.${providerId}`],
+      }),
+      auth: provider.auth ?? "api-key",
+    };
   } catch (error) {
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.FORBIDDEN,
