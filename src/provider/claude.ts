@@ -32,6 +32,7 @@ import { applyAnthropicCacheControl } from "./anthropic-cache.js";
 import { parseRateLimitHeaders } from "./ratelimit.js";
 import { logger } from "../observability/logger.js";
 import { defaultToolChoiceNoneWithTools } from "./model-capabilities.js";
+import { openCodeClientHeaders } from "./opencode-headers.js";
 import { appendProviderEndpointPath } from "./provider-endpoint.js";
 import { snapshotToolDefinitions } from "./prompt-cache.js";
 
@@ -93,7 +94,8 @@ export class ClaudeProvider implements LLMProvider {
     const resp = await fetch(appendProviderEndpointPath(this.config.baseURL, "messages"), {
       method: "POST",
       headers: {
-        "x-api-key": this.config.apiKey,
+        ...(this.config.auth === "none" ? {} : { "x-api-key": this.config.apiKey }),
+        ...openCodeClientHeaders(this.config),
         "anthropic-version": "2023-06-01",
         "Content-Type": "application/json",
       },
@@ -160,7 +162,8 @@ export class ClaudeProvider implements LLMProvider {
     const resp = await fetch(appendProviderEndpointPath(this.config.baseURL, "messages"), {
       method: "POST",
       headers: {
-        "x-api-key": this.config.apiKey,
+        ...(this.config.auth === "none" ? {} : { "x-api-key": this.config.apiKey }),
+        ...openCodeClientHeaders(this.config),
         "anthropic-version": "2023-06-01",
         "Content-Type": "application/json",
       },

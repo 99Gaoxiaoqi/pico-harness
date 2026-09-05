@@ -1136,6 +1136,7 @@ export async function executeAgentRuntime(
       effectiveOptions,
       dependencies.provider !== undefined,
     );
+    providerConfig.sessionId = session.id;
     const pluginSnapshot =
       backgroundPolicy || dependencies.agentGraph?.kind === "operator"
         ? undefined
@@ -2739,6 +2740,7 @@ function activeRouteModelRouter(
         model: config.model,
         baseURL: config.baseURL,
         apiKeyEnv,
+        ...(config.auth ? { auth: config.auth } : {}),
         source: "config",
         capabilities:
           config.capabilities ??
@@ -3119,16 +3121,17 @@ function resolveProviderConfig(
   allowMissingNetworkConfig: boolean,
 ): ProviderConfig {
   const baseURL = options.baseURL;
-  const apiKey = options.apiKey;
+  const apiKey = options.auth === "none" ? "" : options.apiKey;
   const model = options.model ?? defaultModel(options.provider ?? "openai");
 
-  if (!allowMissingNetworkConfig && (!baseURL || !apiKey)) {
+  if (!allowMissingNetworkConfig && (!baseURL || (options.auth !== "none" && !apiKey))) {
     throw new Error("缺少 Provider 配置:宿主必须从用户模型路由注入 baseURL 和 apiKey");
   }
 
   return {
     baseURL: baseURL ?? "",
     apiKey: apiKey ?? "",
+    ...(options.auth ? { auth: options.auth } : {}),
     model,
     ...(options.modelRouteId ? { routeId: options.modelRouteId } : {}),
     ...(options.modelCapabilities ? { capabilities: options.modelCapabilities } : {}),

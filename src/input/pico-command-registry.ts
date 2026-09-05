@@ -613,7 +613,12 @@ function createCompactCommand(
       }
 
       let activeProvider: ProviderKind;
-      let activeConfig: { baseURL: string; apiKey: string; model: string };
+      let activeConfig: {
+        baseURL: string;
+        apiKey: string;
+        model: string;
+        auth?: "api-key" | "none";
+      };
       try {
         const resolved = modelRouter.providerConfig(
           settings.modelRouteId,
@@ -629,7 +634,7 @@ function createCompactCommand(
         };
       }
 
-      const { baseURL, apiKey, model } = activeConfig;
+      const { baseURL, apiKey, model, auth } = activeConfig;
 
       const pluginActivationScope = new PluginCapabilityActivationScope();
       try {
@@ -646,6 +651,8 @@ function createCompactCommand(
           createProvider(activeProvider, {
             baseURL,
             apiKey,
+            ...(auth ? { auth } : {}),
+            sessionId: session.id,
             model,
           }),
           pluginActivationScope,
@@ -1090,6 +1097,7 @@ async function providerCredentialState(
   options: PicoCommandRegistryOptions,
   env: Readonly<Record<string, string | undefined>>,
 ): Promise<string> {
+  if (provider.auth === "none") return "none";
   if (firstCredential(env[provider.apiKeyEnv])) return "environment";
   if (source === "user" && options.credentialVault) {
     if (!options.credentialVault.capability().available) return "unsupported";

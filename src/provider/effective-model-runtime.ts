@@ -21,6 +21,7 @@ import type {
 } from "./model-runtime-config-contract.js";
 
 export type EffectiveCredentialState =
+  | "none"
   | "config"
   | "environment"
   | "keychain"
@@ -136,6 +137,10 @@ async function resolveSecrets(
   await Promise.all(
     Object.entries(config.providers).map(async ([providerId, provider]) => {
       const configSource = config.sources[`providers.${providerId}`] ?? "user";
+      if (provider.auth === "none") {
+        statuses[providerId] = { providerId, configSource, state: "none" };
+        return;
+      }
       const userProvider = userProviders[providerId];
       const userProviderMatches =
         configSource === "user" ||

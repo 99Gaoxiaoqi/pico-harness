@@ -13,6 +13,7 @@ export interface ModelProviderConfig {
   protocol: ProviderKind;
   baseURL: string;
   apiKeyEnv: string;
+  auth?: "api-key" | "none";
   models: readonly string[];
   discoverModels: boolean;
   /** Per-model metadata; absent on legacy configs and discovery-only entries. */
@@ -33,6 +34,7 @@ export interface ModelRoute {
   baseURL: string;
   /** Environment variable name only. Secret values never enter session settings or UI data. */
   apiKeyEnv: string;
+  auth?: "api-key" | "none";
   source: "config" | "discovered" | "legacy";
   capabilities: ModelRouteCapabilities;
 }
@@ -143,7 +145,7 @@ export class ModelRouter {
         message: `模型路由 ${route.id} 缺少 baseURL。请检查用户级 $PICO_HOME/config.json。`,
       };
     }
-    if (!this.readCredential(route)) {
+    if (route.auth !== "none" && !this.readCredential(route)) {
       return {
         ok: false,
         message: `模型路由 ${route.id} 缺少凭证环境变量 ${route.apiKeyEnv}，且系统凭证库中无可用凭证。`,
@@ -161,7 +163,7 @@ export class ModelRouter {
       throw new Error(`模型路由 ${route.id} 缺少 baseURL。请检查用户级 $PICO_HOME/config.json。`);
     }
     const apiKey = this.readCredential(route);
-    if (!apiKey) {
+    if (route.auth !== "none" && !apiKey) {
       throw new Error(
         `模型路由 ${route.id} 缺少凭证环境变量 ${route.apiKeyEnv}，且系统凭证库中无可用凭证。`,
       );
@@ -170,7 +172,8 @@ export class ModelRouter {
       provider: route.provider,
       config: {
         baseURL: route.baseURL,
-        apiKey,
+        apiKey: apiKey ?? "",
+        ...(route.auth ? { auth: route.auth } : {}),
         model: route.model,
         capabilities: route.capabilities,
         routeId: route.id,
@@ -183,6 +186,7 @@ export class ModelRouter {
   /** Process-local credentials for the selected user route; never persist or log the result. */
   credentialCandidates(routeId: string | undefined): readonly string[] {
     const route = this.require(routeId);
+    if (route.auth === "none") return Object.freeze([]);
     const routeSecret = this.routeSecrets.get(route.id);
     if (routeSecret) return Object.freeze([routeSecret]);
 
@@ -223,6 +227,7 @@ export async function loadModelRouter(options: LoadModelRouterOptions): Promise<
       model,
       baseURL: provider.config.baseURL,
       apiKeyEnv: provider.config.apiKeyEnv,
+      ...(provider.config.auth ? { auth: provider.config.auth } : {}),
       capabilities: resolveModelRouteCapabilities(
         provider.config.protocol,
         model,
@@ -256,13 +261,15 @@ async function discoverProviderModels(
 ): Promise<{ provider: ProviderSource; models: string[]; discoveredModels: Set<string> }> {
   const configured = unique(provider.config.models);
   const apiKey =
-    normalizedSecret(options.resolvedSecrets?.providers?.[provider.id]) ??
-    readApiKey(env, provider.config.apiKeyEnv);
+    provider.config.auth === "none"
+      ? undefined
+      : (normalizedSecret(options.resolvedSecrets?.providers?.[provider.id]) ??
+        readApiKey(env, provider.config.apiKeyEnv));
   if (
     !provider.config.discoverModels ||
     provider.config.protocol !== "openai" ||
     !provider.config.baseURL ||
-    !apiKey
+    (provider.config.auth !== "none" && !apiKey)
   ) {
     return { provider, models: configured, discoveredModels: new Set() };
   }
@@ -286,13 +293,13 @@ async function discoverProviderModels(
 
 async function fetchModelIds(
   baseURL: string,
-  apiKey: string,
+  apiKey: string | undefined,
   fetchImpl: typeof fetch,
   timeoutMs: number,
 ): Promise<string[] | undefined> {
   try {
     const response = await fetchImpl(`${baseURL.replace(/\/+$/u, "")}/models`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
+      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!response.ok) return undefined;
