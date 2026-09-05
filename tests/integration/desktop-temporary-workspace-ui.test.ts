@@ -12,26 +12,30 @@ import {
 } from "../../apps/desktop/src/renderer/workspace-session.js";
 import { TemporaryWorkspaceRequest } from "../../apps/desktop/src/renderer/temporary-workspace-request.js";
 
-test("global new task ensures the temporary workspace without inheriting a project", async () => {
+test("global new task stays unbound until first send without inheriting a project", async () => {
   const appSource = await rendererSource("App.tsx");
   const newTaskPage = appSource.slice(
     appSource.indexOf("function NewTaskPage"),
     appSource.indexOf("interface ConversationEnvironmentPanelProps"),
   );
-  assert.match(newTaskPage, /if \(!workspacePath\)/u);
-  assert.match(newTaskPage, /actions\.ensureTemporaryWorkspace\(\)/u);
-  assert.match(newTaskPage, /aria-label="正在准备新任务"/u);
-  assert.match(newTaskPage, /<p>正在准备无项目任务…<\/p>/u);
-  assert.ok(
-    newTaskPage.indexOf('aria-label="正在准备新任务"') <
-      newTaskPage.lastIndexOf("return <ConversationPage />"),
-    "the unbound route must render a dedicated preparation state instead of a stale composer",
-  );
-  assert.match(
-    newTaskPage,
-    /navigate\(newSessionHref\(temporaryWorkspacePath\), \{ replace: true \}\)/u,
-  );
+  assert.doesNotMatch(newTaskPage, /ensureTemporaryWorkspace/u);
+  assert.match(newTaskPage, /return <ConversationPage \/>/u);
   assert.doesNotMatch(newTaskPage, /data\.workspacePath[^\n]+newSessionHref/u);
+  const submit = appSource.slice(
+    appSource.indexOf("  const submit = async (text:"),
+    appSource.indexOf("  const openCatalog"),
+  );
+  assert.ok(
+    submit.indexOf("actions.ensureTemporaryWorkspace()") < submit.indexOf("actions.sendMessage({"),
+  );
+  assert.match(submit, /workspacePath: targetWorkspacePath/u);
+  assert.match(submit, /temporaryPathRef\.current = targetWorkspacePath/u);
+  assert.match(submit, /sendRouteRef\.current !== sourceDraftKey/u);
+  assert.ok(submit.indexOf("if (!result.succeeded)") < submit.indexOf("clearDraft()"));
+  assert.match(
+    submit,
+    /finally \{[\s\S]*?firstSendSourceRef\.current = undefined;[\s\S]*?setAwaitingFirstSession\(false\)/u,
+  );
 
   const runtimeSource = await rendererSource("runtime.ts");
   const ensureAction = runtimeSource.slice(
@@ -163,7 +167,7 @@ test("temporary workspace keeps a stable UI label and can switch to a real proje
   assert.match(appSource, /projectWorkspaceOptions\.map\(\(workspace\) =>/u);
   assert.match(
     appSource,
-    /workspace\?\.temporary \? TEMPORARY_PROJECT_OPTION_VALUE : workspacePath/u,
+    /workspace\?\.temporary\s*\? TEMPORARY_PROJECT_OPTION_VALUE\s*: workspacePath/u,
   );
   assert.match(
     appSource,
@@ -176,7 +180,7 @@ test("temporary workspace keeps a stable UI label and can switch to a real proje
   assert.match(appSource, /navigate\(newSessionHref\(nextWorkspacePath\)\)/u);
   assert.match(appSource, /<option key=\{workspace\.path\} value=\{workspace\.path\}>/u);
   assert.match(appSource, /const chooseProjectFolder = async \(\) =>/u);
-  assert.match(appSource, /title="打开项目文件夹"/u);
+  assert.match(appSource, /打开项目文件夹…<\/option>/u);
   assert.match(
     appSource,
     /const chooseProjectFolder[\s\S]*?actions\.chooseWorkspace\(\)[\s\S]*?navigate\(newSessionHref\(path\)\)/u,
@@ -190,6 +194,7 @@ test("temporary workspace keeps a stable UI label and can switch to a real proje
 test("first send leaves the new-task shell as soon as its session appears", async () => {
   const appSource = await rendererSource("App.tsx");
   assert.match(appSource, /firstSendBaselineRef/u);
+  assert.match(appSource, /firstSendSourceRef\.current !== draftKey/u);
   assert.match(appSource, /setAwaitingFirstSession\(true\)/u);
   assert.match(
     appSource,

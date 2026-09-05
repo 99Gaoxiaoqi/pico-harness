@@ -14,7 +14,6 @@ import {
   FileDiff,
   Folder,
   FolderGit2,
-  FolderPlus,
   Gauge,
   GitBranch,
   GitFork,
@@ -23,7 +22,9 @@ import {
   Layers3,
   Laptop,
   Minimize2,
+  MoreHorizontal,
   Network,
+  PanelBottomOpen,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
@@ -84,6 +85,7 @@ import {
   omitApprovalAuditItems,
   removeSupersededActiveTools,
   removePersistentDraft,
+  writePersistentDraft,
   usePersistentDraft,
 } from "./conversation/index.js";
 import type {
@@ -99,6 +101,7 @@ import type {
   WorkspaceView,
   WorkspaceMode,
 } from "./model.js";
+import { TaskSearchDialog } from "./TaskSearchDialog.js";
 import { ProviderPage } from "./ProviderPage.js";
 import { MemoryPage } from "./MemoryPage.js";
 import { useRuntimeStore, type DesktopDiagnosticReport, type RuntimeStore } from "./runtime.js";
@@ -519,6 +522,29 @@ function AppShell() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
     () => window.localStorage.getItem("pico.sidebar-collapsed") === "true",
   );
+  const [searchOpen, setSearchOpen] = useState(false);
+  useEffect(() => {
+    const onShortcut = (event: globalThis.KeyboardEvent) => {
+      if (
+        event.defaultPrevented ||
+        event.isComposing ||
+        !(event.metaKey || event.ctrlKey) ||
+        event.altKey ||
+        event.shiftKey
+      )
+        return;
+      if (event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setSearchOpen((open) => !open);
+      } else if (event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        setSearchOpen(false);
+        navigate(newSessionHref());
+      }
+    };
+    window.addEventListener("keydown", onShortcut);
+    return () => window.removeEventListener("keydown", onShortcut);
+  }, [navigate]);
   const routeWorkspacePath = workspacePathFromSearch(location.search);
   const routeWorkspace = data.workspaces.find((workspace) => workspace.path === routeWorkspacePath);
   const pageTitle = routeTitle(location.pathname);
@@ -615,6 +641,16 @@ function AppShell() {
     <div
       className={`app-shell ${!settingsRoute && sidebarCollapsed ? "is-sidebar-collapsed" : ""} ${settingsRoute ? "is-settings-route" : ""}`}
     >
+      <TaskSearchDialog
+        open={searchOpen}
+        onOpenChange={setSearchOpen}
+        sessions={data.sessions}
+        workspaces={data.workspaces}
+        onSelect={(session) => {
+          setSearchOpen(false);
+          navigate(sessionHref({ workspacePath: session.workspacePath, sessionId: session.id }));
+        }}
+      />
       <a className="skip-link" href="#main-content">
         跳到主要内容
       </a>
@@ -626,13 +662,16 @@ function AppShell() {
           onKeyDown={handleNavKeys}
         >
           <div className="sidebar__header">
-            <Link className="sidebar__brand" to="/task/new" aria-label="Pico 新任务">
-              <span className="brand-mark" aria-hidden="true">
-                P
-              </span>
-              <span className="sidebar__label">Pico</span>
-              {preview && <span className="preview-dot" title="视觉预览模式" />}
-            </Link>
+            {preview && <span className="preview-dot" title="视觉预览模式" />}
+            <button
+              type="button"
+              className="sidebar__collapse sidebar__search"
+              aria-label="搜索任务"
+              title="搜索任务 · ⌘K / Ctrl+K"
+              onClick={() => setSearchOpen(true)}
+            >
+              <Search aria-hidden="true" />
+            </button>
             {data.approvals.length + data.prompts.length > 0 ? (
               <span
                 className="sidebar-pending-count"
@@ -664,8 +703,24 @@ function AppShell() {
           >
             <Plus aria-hidden="true" />
             <span>新任务</span>
+            <kbd className="sidebar-shortcut">⌘ N</kbd>
           </Link>
           <div className="sidebar__body">
+            <Link
+              className="nav-link"
+              to="/extensions/skills"
+              aria-label="扩展"
+              data-nav-link
+              onClick={() =>
+                window.sessionStorage.setItem(
+                  "pico.settings-return-to",
+                  `${location.pathname}${location.search}`,
+                )
+              }
+            >
+              <Box aria-hidden="true" />
+              <span className="sidebar__label">扩展</span>
+            </Link>
             <SidebarNav
               items={primaryNav}
               label="主要导航"
@@ -786,12 +841,7 @@ function SettingsSidebar({
         <ArrowLeft aria-hidden="true" />
         <span>返回 Pico</span>
       </Link>
-      <div className="settings-sidebar__title">
-        <span className="brand-mark" aria-hidden="true">
-          P
-        </span>
-        <strong>设置</strong>
-      </div>
+
       <div className="settings-sidebar__body">
         {settingsNavigationGroups.map((group) => (
           <nav key={group.label} className="settings-nav-group" aria-label={group.label}>
@@ -1023,36 +1073,62 @@ function SidebarSessionRow({
           {formatRelative(session.updatedAt)}
         </time>
       </NavLink>
-      <div className="sidebar-task-actions" aria-label="会话操作">
-        <button
-          type="button"
-          aria-label={`归档 ${session.title}`}
-          title="归档"
-          disabled={busy}
-          onClick={archiveSession}
+      <details
+        className="sidebar-task-menu"
+        onBlur={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false;
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.currentTarget.open = false;
+            event.currentTarget.querySelector("summary")?.focus();
+          }
+        }}
+      >
+        <summary aria-label={`更多操作 ${session.title}`} title="更多操作">
+          <MoreHorizontal aria-hidden="true" />
+        </summary>
+        <div
+          className="sidebar-task-actions"
+          aria-label="会话操作"
+          onClick={(event) => {
+            const details = event.currentTarget.closest("details");
+            if (details && (event.target as HTMLElement).closest("button")) {
+              details.open = false;
+              details.querySelector("summary")?.focus();
+            }
+          }}
         >
-          <Archive aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          aria-label={`删除 ${session.title}`}
-          title={running ? "运行中的会话不能删除" : "删除"}
-          disabled={busy || running}
-          onClick={deleteSession}
-        >
-          <Trash2 aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          className={session.pinned ? "is-active" : ""}
-          aria-label={`${session.pinned ? "取消置顶" : "置顶"} ${session.title}`}
-          title={session.pinned ? "取消置顶" : "置顶"}
-          disabled={busy}
-          onClick={pinSession}
-        >
-          <Pin aria-hidden="true" />
-        </button>
-      </div>
+          <button
+            type="button"
+            aria-label={`归档 ${session.title}`}
+            title="归档"
+            disabled={busy}
+            onClick={archiveSession}
+          >
+            <Archive aria-hidden="true" /> 归档
+          </button>
+          <button
+            type="button"
+            aria-label={`删除 ${session.title}`}
+            title={running ? "运行中的会话不能删除" : "删除"}
+            disabled={busy || running}
+            onClick={deleteSession}
+          >
+            <Trash2 aria-hidden="true" /> 删除
+          </button>
+          <button
+            type="button"
+            className={session.pinned ? "is-active" : ""}
+            aria-label={`${session.pinned ? "取消置顶" : "置顶"} ${session.title}`}
+            title={session.pinned ? "取消置顶" : "置顶"}
+            disabled={busy}
+            onClick={pinSession}
+          >
+            <Pin aria-hidden="true" /> {session.pinned ? "取消置顶" : "置顶"}
+          </button>
+        </div>
+      </details>
     </div>
   );
 }
@@ -1212,36 +1288,16 @@ function HomePage() {
 function NewTaskPage() {
   const { data, actions } = useRuntime();
   const location = useLocation();
-  const navigate = useNavigate();
   const workspacePath = workspacePathFromSearch(location.search);
   const workspace = data.workspaces.find((candidate) => candidate.path === workspacePath);
 
   useEffect(() => {
-    if (!workspacePath) {
-      let cancelled = false;
-      void actions.ensureTemporaryWorkspace().then((temporaryWorkspacePath) => {
-        if (!cancelled && temporaryWorkspacePath) {
-          navigate(newSessionHref(temporaryWorkspacePath), { replace: true });
-        }
-      });
-      return () => {
-        cancelled = true;
-      };
-    }
     if (workspacePath && workspace && data.workspacePath !== workspacePath) {
       void actions.selectWorkspace(workspacePath);
     }
     return undefined;
-  }, [actions, data.workspacePath, navigate, workspace, workspacePath]);
+  }, [actions, data.workspacePath, workspace, workspacePath]);
 
-  if (!workspacePath) {
-    return (
-      <div className="workspace-route-loading" aria-busy="true" aria-label="正在准备新任务">
-        <RefreshCw aria-hidden="true" />
-        <p>正在准备无项目任务…</p>
-      </div>
-    );
-  }
   if (workspacePath && !workspace) {
     return <Navigate replace to="/task/new" />;
   }
@@ -1520,6 +1576,20 @@ function ConversationPage() {
     | { readonly kind: "agent"; readonly name: string }
   >();
   const sendingRef = useRef(false);
+  const temporaryPathRef = useRef<string | undefined>(undefined);
+  const [preparingSend, setPreparingSend] = useState(false);
+  const sendRouteRef = useRef(draftKey);
+  sendRouteRef.current = draftKey;
+  useEffect(() => {
+    sendRouteRef.current = draftKey;
+    return () => {
+      sendRouteRef.current = "";
+    };
+  }, [draftKey]);
+  useEffect(() => {
+    temporaryPathRef.current = undefined;
+  }, [draftKey]);
+  const firstSendSourceRef = useRef<string | undefined>(undefined);
   const firstSendBaselineRef = useRef<ReadonlySet<string>>(new Set());
   const [awaitingFirstSession, setAwaitingFirstSession] = useState(false);
 
@@ -1585,7 +1655,7 @@ function ConversationPage() {
         defaults.permissionMode ??
         (legacyMode === "auto" || legacyMode === "yolo" ? legacyMode : "default"),
       ...(defaults.thinkingEffort ? { thinkingEffort: defaults.thinkingEffort } : {}),
-      ...(workspacePath ? newTaskSettingOverrides[workspacePath] : {}),
+      ...newTaskSettingOverrides[workspacePath || "unbound"],
     };
   }, [
     data.modelRoutes,
@@ -1596,10 +1666,9 @@ function ConversationPage() {
   ]);
   const updateNewTaskSettings = useCallback(
     (patch: RuntimeUserDefaults) => {
-      if (!workspacePath) return;
       setNewTaskSettingOverrides((current) => ({
         ...current,
-        [workspacePath]: { ...current[workspacePath], ...patch },
+        [workspacePath || "unbound"]: { ...current[workspacePath || "unbound"], ...patch },
       }));
     },
     [workspacePath],
@@ -1637,8 +1706,16 @@ function ConversationPage() {
     workspacePath && data.workspacePath === workspacePath && data.trusted && !legacyStorageBlocked,
   );
 
+  const composerReady = workspaceReady || (!sessionId && !workspacePath);
+
   useEffect(() => {
-    if (!awaitingFirstSession || sessionId || !workspacePath) return;
+    if (
+      !awaitingFirstSession ||
+      sessionId ||
+      !workspacePath ||
+      firstSendSourceRef.current !== draftKey
+    )
+      return;
     const createdSession = data.sessions
       .filter(
         (candidate) =>
@@ -1652,7 +1729,7 @@ function ConversationPage() {
       sessionHref({ workspacePath: createdSession.workspacePath, sessionId: createdSession.id }),
       { replace: true },
     );
-  }, [awaitingFirstSession, data.sessions, navigate, sessionId, workspacePath]);
+  }, [awaitingFirstSession, data.sessions, draftKey, navigate, sessionId, workspacePath]);
 
   useEffect(() => {
     if (!editingTitle) setTitleDraft(session?.title ?? "");
@@ -1715,9 +1792,12 @@ function ConversationPage() {
   ]);
 
   const submit = async (text: string, nextBehavior: ComposerBehavior) => {
-    if (sendingRef.current || !workspaceReady) return;
+    if (sendingRef.current || !composerReady) return;
     sendingRef.current = true;
-    if (!sessionId) {
+    setPreparingSend(true);
+    const sourceDraftKey = draftKey;
+    if (!sessionId && workspacePath) {
+      firstSendSourceRef.current = sourceDraftKey;
       firstSendBaselineRef.current = new Set(
         data.sessions
           .filter((candidate) => candidate.workspacePath === workspacePath)
@@ -1726,8 +1806,15 @@ function ConversationPage() {
       setAwaitingFirstSession(true);
     }
     try {
+      const targetWorkspacePath =
+        workspacePath || temporaryPathRef.current || (await actions.ensureTemporaryWorkspace());
+      if (!targetWorkspacePath || sendRouteRef.current !== sourceDraftKey) {
+        setAwaitingFirstSession(false);
+        return;
+      }
+      if (!workspacePath) temporaryPathRef.current = targetWorkspacePath;
       const result = await actions.sendMessage({
-        workspacePath,
+        workspacePath: targetWorkspacePath,
         ...(sessionId ? { sessionId } : {}),
         ...(!sessionId ? { initialSettings: newTaskSettings } : {}),
         text,
@@ -1739,13 +1826,17 @@ function ConversationPage() {
         setAwaitingFirstSession(false);
         return;
       }
+      if (sendRouteRef.current !== sourceDraftKey) {
+        removePersistentDraft(sourceDraftKey);
+        return;
+      }
       clearDraft();
       setActivation(undefined);
       if (!sessionId && result.sessionId) {
         setAwaitingFirstSession(false);
         navigate(
           sessionHref({
-            workspacePath: result.workspacePath ?? workspacePath,
+            workspacePath: result.workspacePath ?? targetWorkspacePath,
             sessionId: result.sessionId,
           }),
           { replace: true },
@@ -1753,14 +1844,22 @@ function ConversationPage() {
       }
     } finally {
       sendingRef.current = false;
+      firstSendSourceRef.current = undefined;
+      setAwaitingFirstSession(false);
+      setPreparingSend(false);
     }
   };
 
   const openCatalog = () => setCatalogOpen((open) => !open);
 
   const chooseProjectFolder = async () => {
+    const sourceDraftKey = draftKey;
     const path = await actions.chooseWorkspace();
-    if (path) navigate(newSessionHref(path));
+    if (path && sendRouteRef.current === sourceDraftKey) {
+      setNewTaskSettingOverrides((current) => ({ ...current, [path]: newTaskSettings }));
+      if (draft) writePersistentDraft(`new:${path}`, draft);
+      navigate(newSessionHref(path));
+    }
   };
 
   const openItem = (item: ConversationItemView) => {
@@ -2061,13 +2160,21 @@ function ConversationPage() {
     <SessionWorkbarLayout
       state={workbar}
       enabled={Boolean(sessionRef)}
+      showRestoreButton={false}
       launcher={workbarLauncher}
       presentTab={(tab) => ({
         closable: true,
         ...(tab.kind === "review" && workbarChangeCount > 0 ? { badge: workbarChangeCount } : {}),
       })}
       renderPanel={renderWorkbarPanel}
-      onAction={handleWorkbarAction}
+      onAction={(action) => {
+        handleWorkbarAction(action);
+        if (action.type === "setCollapsed" && action.collapsed) {
+          window.requestAnimationFrame(() =>
+            document.getElementById(`workbar-toggle-${action.dock}`)?.focus(),
+          );
+        }
+      }}
     >
       <ConversationSurface
         className="session-conversation"
@@ -2178,7 +2285,28 @@ function ConversationPage() {
                 {sessionRef && (
                   <button
                     type="button"
+                    id="workbar-toggle-bottom"
                     className="conversation-panel-toggle"
+                    aria-label={
+                      workbar.docks.bottom.collapsed ? "打开底部工作栏" : "收起底部工作栏"
+                    }
+                    aria-expanded={!workbar.docks.bottom.collapsed}
+                    onClick={() =>
+                      dispatchWorkbar({
+                        type: "setCollapsed",
+                        dock: "bottom",
+                        collapsed: !workbar.docks.bottom.collapsed,
+                      })
+                    }
+                  >
+                    <PanelBottomOpen aria-hidden="true" />
+                  </button>
+                )}
+                {sessionRef && (
+                  <button
+                    type="button"
+                    className="conversation-panel-toggle"
+                    id="workbar-toggle-right"
                     aria-label={workbar.docks.right.collapsed ? "打开任务工作栏" : "收起任务工作栏"}
                     aria-expanded={!workbar.docks.right.collapsed}
                     onClick={() =>
@@ -2237,9 +2365,9 @@ function ConversationPage() {
                 status={composerStatus}
                 behavior={behavior}
                 onBehaviorChange={setBehavior}
-                busy={busy === "send-message"}
+                busy={preparingSend || busy === "send-message"}
                 disabled={Boolean(conversation?.loadError)}
-                submitDisabled={!workspaceReady}
+                submitDisabled={!composerReady}
                 placeholder={
                   activation?.kind === "skill"
                     ? `输入 ${activation.name} 的参数或补充要求…`
@@ -2248,7 +2376,7 @@ function ConversationPage() {
                       : sessionId
                         ? "继续对话，或在运行中调整方向…"
                         : !workspacePath
-                          ? "描述任务，并在下方选择项目…"
+                          ? "向 Pico 发送消息…"
                           : legacyStorageBlocked
                             ? "这个项目需要先迁移旧版会话数据…"
                             : !workspaceReady
@@ -2287,7 +2415,9 @@ function ConversationPage() {
                             name="workspace"
                             aria-label="项目"
                             value={
-                              workspace?.temporary ? TEMPORARY_PROJECT_OPTION_VALUE : workspacePath
+                              workspace?.temporary
+                                ? TEMPORARY_PROJECT_OPTION_VALUE
+                                : workspacePath || ""
                             }
                             onChange={(event) => {
                               const nextWorkspacePath = event.target.value;
@@ -2296,10 +2426,20 @@ function ConversationPage() {
                                 return;
                               }
                               if (nextWorkspacePath === TEMPORARY_PROJECT_OPTION_VALUE) return;
+                              setNewTaskSettingOverrides((current) => ({
+                                ...current,
+                                [nextWorkspacePath || "unbound"]: newTaskSettings,
+                              }));
+                              if (draft)
+                                writePersistentDraft(
+                                  `new:${nextWorkspacePath || "unbound"}`,
+                                  draft,
+                                );
                               navigate(newSessionHref(nextWorkspacePath));
                             }}
                           >
-                            <option value={CHOOSE_PROJECT_OPTION_VALUE}>选择项目</option>
+                            <option value="">无项目</option>
+                            <option value={CHOOSE_PROJECT_OPTION_VALUE}>打开项目文件夹…</option>
                             {workspace?.temporary && (
                               <option value={TEMPORARY_PROJECT_OPTION_VALUE}>
                                 {workspaceLabel}
@@ -2312,17 +2452,7 @@ function ConversationPage() {
                             ))}
                           </select>
                         </label>
-                        <button
-                          type="button"
-                          className="conversation-icon-button"
-                          disabled={Boolean(busy)}
-                          title="打开项目文件夹"
-                          aria-label="打开项目文件夹"
-                          onClick={() => void chooseProjectFolder()}
-                        >
-                          <FolderPlus aria-hidden="true" />
-                        </button>
-                        {workspaceReady && (
+                        {composerReady && (
                           <>
                             <label className="conversation-context-option">
                               <span className="conversation-sr-only">模型</span>
@@ -2360,7 +2490,11 @@ function ConversationPage() {
                                 <option value="plan">计划</option>
                               </select>
                             </label>
-                            <label className="conversation-context-option">
+                            <label
+                              className={`conversation-context-option conversation-icon-select ${newTaskSettings.permissionMode === "yolo" ? "is-danger" : ""}`}
+                              title={`权限：${newTaskSettings.permissionMode === "yolo" ? "YOLO（完全访问）" : newTaskSettings.permissionMode === "auto" ? "自动" : "默认"}`}
+                            >
+                              <ShieldCheck aria-hidden="true" />
                               <span className="conversation-sr-only">权限模式</span>
                               <select
                                 name="initial-permission-mode"
@@ -2381,7 +2515,11 @@ function ConversationPage() {
                                 <option value="yolo">权限：YOLO（完全访问）</option>
                               </select>
                             </label>
-                            <label className="conversation-context-option">
+                            <label
+                              className="conversation-context-option conversation-icon-select"
+                              title={`编排：${newTaskSettings.orchestrationMode === "graph" ? "Graph" : "线性"}`}
+                            >
+                              <GitFork aria-hidden="true" />
                               <span className="conversation-sr-only">编排模式</span>
                               <select
                                 name="initial-orchestration-mode"
@@ -2591,8 +2729,8 @@ function ConversationPage() {
                   </div>
                 ) : (
                   <div className="conversation-empty-state conversation-empty-state--new">
-                    <span className="brand-mark brand-mark--large" aria-hidden="true">
-                      P
+                    <span className="conversation-wordmark" aria-label="Pico">
+                      pico
                     </span>
                     <h2>{newTaskGreeting()}</h2>
                     {legacyStorageBlocked && (
