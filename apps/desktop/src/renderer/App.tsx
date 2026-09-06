@@ -1695,7 +1695,8 @@ function ConversationPage() {
           risk: "medium" as const,
           kind: "tool" as const,
         }
-      : undefined);
+      : undefined) ??
+    data.approvals.findLast((item) => item.kind === "plan" && item.sessionId === sessionId);
   const pendingPrompt = data.prompts.filter((item) => runIds.has(item.runId)).at(-1);
   const legacyStorageBlocked = Boolean(
     workspacePath &&

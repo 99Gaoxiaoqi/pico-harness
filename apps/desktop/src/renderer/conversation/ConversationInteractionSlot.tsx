@@ -1,4 +1,4 @@
-import { ShieldAlert, Square } from "lucide-react";
+import { GitBranch, ShieldAlert, Square } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { ApprovalView, PromptView } from "../model.js";
 
@@ -67,11 +67,13 @@ export function ConversationInteractionSlot({
   const planApproval = approval.kind === "plan";
   const interruptedPlan = approval.planControlMode === "interrupted";
   const revisionPlan = approval.planControlMode === "revision";
+  const activeGraphPlan = approval.planControlMode === "graph_active";
   return (
     <section className="conversation-interaction-slot" aria-labelledby="pending-approval-title">
       <div className="conversation-interaction-slot__heading">
         <span>
-          <ShieldAlert aria-hidden="true" /> {planApproval ? "确认执行计划" : "等待操作授权"}
+          {activeGraphPlan ? <GitBranch aria-hidden="true" /> : <ShieldAlert aria-hidden="true" />}
+          {activeGraphPlan ? "计划执行进度" : planApproval ? "确认执行计划" : "等待操作授权"}
         </span>
         <h2 id="pending-approval-title">{approval.planTitle ?? approval.title}</h2>
         <p>{approval.planOverview ?? approval.detail}</p>
@@ -84,14 +86,23 @@ export function ConversationInteractionSlot({
           ))}
         </ol>
       )}
-      {planApproval && !revisionPlan && !interruptedPlan && (
+      {planApproval && !revisionPlan && !interruptedPlan && !activeGraphPlan && (
         <label className="conversation-interaction-slot__feedback">
           <span>需要调整时说明原因</span>
           <textarea value={feedback} onChange={(event) => setFeedback(event.target.value)} />
         </label>
       )}
       <div className="conversation-interaction-slot__actions">
-        {interruptedPlan ? (
+        {activeGraphPlan ? (
+          <button
+            type="button"
+            className="is-danger"
+            disabled={busy}
+            onClick={() => onApprovalDecision("cancel_execution")}
+          >
+            取消执行
+          </button>
+        ) : interruptedPlan ? (
           <>
             <button
               type="button"
