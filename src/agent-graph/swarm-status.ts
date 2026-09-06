@@ -87,26 +87,28 @@ export function projectAgentSwarmStatus(input: {
     let failureReason: string | undefined;
     if (replaced.has(intent.intentId)) {
       status = "superseded";
-    } else if (runtime?.status === "completed") {
-      status = runtime.outputStatus === "success" ? "completed" : "failed";
-      if (status === "failed")
-        failureReason =
-          runtime.failureReason ??
-          (runtime.outputStatus === "failure"
-            ? "agent_output reported failure"
-            : runtime.outputEventIds.length === 0
-              ? "Run completed without agent_output"
-              : "Committed agent_output status is unavailable");
-    } else if (runtime?.status === "failed") {
-      status = "failed";
-      failureReason = runtime.failureReason ?? "Runtime run failed";
     } else if (runtime?.status === "running") {
       status = "running";
     } else if (runtime?.status === "waiting-permission") {
       status = "blocked";
       failureReason = "Waiting for permission";
+    } else if (runtime?.status === "completed" && runtime.outputStatus === "success") {
+      status = "completed";
     } else if (stop) {
+      // An explicit stop settles failed work without hiding a still-live Runtime run.
       status = "stopped";
+    } else if (runtime?.status === "completed") {
+      status = "failed";
+      failureReason =
+        runtime.failureReason ??
+        (runtime.outputStatus === "failure"
+          ? "agent_output reported failure"
+          : runtime.outputEventIds.length === 0
+            ? "Run completed without agent_output"
+            : "Committed agent_output status is unavailable");
+    } else if (runtime?.status === "failed") {
+      status = "failed";
+      failureReason = runtime.failureReason ?? "Runtime run failed";
     } else if (runtime?.status === "cancelled" || claim?.state === "cancelled") {
       status = "cancelled";
       failureReason = runtime?.failureReason ?? claim?.cancellationReason ?? "Activation cancelled";
