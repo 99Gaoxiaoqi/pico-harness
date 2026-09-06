@@ -1270,6 +1270,8 @@ export class SqliteAgentGraphControlStore {
       }
       const wake = this.requireWake(normalized.wakeId);
       const graph = this.requireGraph(wake.graphId);
+      if (graph.phase !== "open")
+        throw new AgentGraphStoreConflictError(`Graph ${graph.graphId} is finished`);
       if (graph.rootSessionId !== normalized.rootSessionId) {
         throw new AgentGraphStoreConflictError(
           `Wake ${normalized.wakeId} root session does not match graph ${graph.graphId}`,

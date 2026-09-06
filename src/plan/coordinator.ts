@@ -22,6 +22,7 @@ import {
   normalizePlanProposalInput,
   planOperationFingerprint,
   type PlanProjection,
+  type PlanGraphBinding,
   type PlanProposalInput,
   type PlanReviewAction,
   type PlanReviewedBy,
@@ -30,6 +31,7 @@ import {
 import { projectActivePlanEntries, projectPlanEntries, reducePlanEvent } from "./reducer.js";
 import { PLAN_EVENT_KINDS } from "./events.js";
 import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
+import { SqliteAgentGraphControlStore } from "../storage/sqlite/sqlite-agent-graph-control-store.js";
 
 export interface PlanCoordinatorContext {
   readonly sessionId: string;
@@ -37,6 +39,7 @@ export interface PlanCoordinatorContext {
   readonly runId: string;
   readonly turnId: string;
   readonly writeGuard?: EngineRuntimeWriteGuard;
+  readonly retireGraph?: (graph: PlanGraphBinding, reason: string) => Promise<unknown>;
 }
 interface OperationInput {
   readonly operationId: string;
@@ -199,7 +202,7 @@ export class PlanCoordinator {
         ...(feedback ? { reason: feedback } : {}),
       },
     };
-    return this.commit(input, "plan.review.cancel", semantic, (fact, at) => [
+    const projection = await this.commit(input, "plan.review.cancel", semantic, (fact, at) => [
       {
         ...this.baseEvent(input.operationId, "plan.review.claimed", at),
         kind: "plan.review.claimed",
@@ -211,6 +214,8 @@ export class PlanCoordinator {
         data: { ...fact, claimOperationId: input.operationId, ...semantic.transition },
       },
     ]);
+    await this.retireCancelledGraph(projection);
+    return projection;
   }
 
   async propose(
@@ -389,11 +394,16 @@ export class PlanCoordinator {
     });
   }
   async startExecution(
-    input: OperationInput & { readonly planId: string; readonly revision: number },
+    input: OperationInput & {
+      readonly planId: string;
+      readonly revision: number;
+      readonly graph?: PlanGraphBinding;
+    },
   ): Promise<PlanProjection> {
     return this.simple(input, "plan.execution.started", {
       planId: input.planId,
       revision: input.revision,
+      ...(input.graph ? { graph: input.graph } : {}),
     });
   }
   async interrupt(
@@ -418,38 +428,74 @@ export class PlanCoordinator {
       planId: input.planId,
       ...(input.reason ? { reason: input.reason } : {}),
     };
-    return this.commit(input, "plan.execution.replanned", semantic, (fact, at) => {
-      const patch = normalizeSessionRuntimeStateWritePatch({
-        settings: {
-          ...input.settings,
-          collaborationMode: "plan",
-          permissionMode: input.settings.permissionMode,
-        },
-      });
-      if (!patch) throw new PlanConflictError("Session settings are invalid");
-      return [
-        {
-          ...this.baseEvent(input.operationId, "plan.execution.replanned", at),
-          kind: "plan.execution.replanned",
-          data: { ...fact, ...semantic },
-        },
-        {
-          ...this.baseEvent(input.operationId, "session.state.committed", at),
-          kind: "session.state.committed",
-          data: { stateVersion: SESSION_RUNTIME_STATE_VERSION, patch },
-        },
-      ];
-    });
+    const projection = await this.commit(
+      input,
+      "plan.execution.replanned",
+      semantic,
+      (fact, at) => {
+        const patch = normalizeSessionRuntimeStateWritePatch({
+          settings: {
+            ...input.settings,
+            collaborationMode: "plan",
+            permissionMode: input.settings.permissionMode,
+          },
+        });
+        if (!patch) throw new PlanConflictError("Session settings are invalid");
+        return [
+          {
+            ...this.baseEvent(input.operationId, "plan.execution.replanned", at),
+            kind: "plan.execution.replanned",
+            data: { ...fact, ...semantic },
+          },
+          {
+            ...this.baseEvent(input.operationId, "session.state.committed", at),
+            kind: "session.state.committed",
+            data: { stateVersion: SESSION_RUNTIME_STATE_VERSION, patch },
+          },
+        ];
+      },
+    );
+    await this.retireCancelledGraph(projection);
+    return projection;
   }
   async cancel(
     input: OperationInput & { readonly planId: string; readonly reason?: string },
   ): Promise<PlanProjection> {
-    return this.simple(input, "plan.execution.cancelled", {
+    const projection = await this.simple(input, "plan.execution.cancelled", {
       planId: input.planId,
       ...(input.reason ? { reason: input.reason } : {}),
     });
+    await this.retireCancelledGraph(projection);
+    return projection;
+  }
+  private async retireCancelledGraph(projection: PlanProjection): Promise<void> {
+    if (projection.execution?.status === "cancelled" && projection.execution.graph) {
+      await this.context.retireGraph?.(
+        projection.execution.graph,
+        projection.execution.reason ?? "Plan execution cancelled",
+      );
+    }
+  }
+  private assertGraphFinished(projection: PlanProjection): void {
+    const binding = projection.execution?.graph;
+    if (!binding) return;
+    const graphs = new SqliteAgentGraphControlStore({ storageRoot: this.store.storageRoot });
+    try {
+      const graph = graphs.getGraph(binding.graphId);
+      if (
+        !graph ||
+        graph.epoch !== binding.epoch ||
+        graph.rootSessionId !== this.context.sessionId ||
+        graph.phase !== "finished"
+      ) {
+        throw new PlanConflictError("Finish the bound Graph before completing the final plan step");
+      }
+    } finally {
+      graphs.close();
+    }
   }
   async complete(input: OperationInput & { readonly planId: string }): Promise<PlanProjection> {
+    this.assertGraphFinished(await this.project());
     return this.simple(input, "plan.execution.completed", { planId: input.planId });
   }
 
@@ -475,6 +521,7 @@ export class PlanCoordinator {
       };
       const afterStep = reducePlanEvent(projection, step);
       if (afterStep.execution?.status !== "completed") return [step];
+      this.assertGraphFinished(projection);
       return [
         step,
         {

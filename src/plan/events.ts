@@ -58,7 +58,9 @@ export function assertPlanEventData(kind: PlanEventKind, data: unknown): void {
   if (kind === "plan.review.claimed") {
     assertId(data.planId, "planId");
     assertPositiveInteger(data.revision, "revision");
-    assertId(data.controlEpoch, "controlEpoch");
+    // The epoch is an opaque eventId, which includes Session and operation identities.
+    if (typeof data.controlEpoch !== "string" || !data.controlEpoch.trim())
+      throw new Error("controlEpoch is invalid");
     if (
       data.action !== "execute" &&
       data.action !== "continue_editing" &&
@@ -81,6 +83,11 @@ export function assertPlanEventData(kind: PlanEventKind, data: unknown): void {
       throw new Error("reviewedBy is invalid");
   } else if (kind === "plan.execution.started") {
     assertPositiveInteger(data.revision, "revision");
+    if (data.graph !== undefined) {
+      if (!isRecord(data.graph)) throw new Error("Plan Graph binding is invalid");
+      assertId(data.graph.graphId, "graphId");
+      assertPositiveInteger(data.graph.epoch, "epoch");
+    }
   } else if (kind === "plan.step.updated") {
     assertId(data.stepId, "stepId");
     if (!isPlanStepStatus(data.status)) throw new Error("Plan step status is invalid");

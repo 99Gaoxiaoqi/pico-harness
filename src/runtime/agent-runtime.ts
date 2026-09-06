@@ -1,3 +1,4 @@
+import { isPlanGraphWaiting, reconcilePlanExecution } from "./plan-execution-recovery.js";
 import { randomUUID } from "node:crypto";
 import { mkdir, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -152,10 +153,8 @@ import {
   type BoundBrowserAgentAuthority,
 } from "../tools/browser-agent.js";
 import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
-import { currentRuntimeRun, isRuntimeRunLive, RuntimeRun } from "./runtime-run.js";
+import { currentRuntimeRun, RuntimeRun } from "./runtime-run.js";
 import { PlanCoordinator } from "../plan/coordinator.js";
-import { PLAN_EVENT_KINDS } from "../plan/events.js";
-import { projectActivePlanEntries } from "../plan/reducer.js";
 import { PlanConflictError, type PlanProjection, type PlanProposal } from "../plan/contract.js";
 import { RuntimeCleanupScope } from "./runtime-cleanup.js";
 import {
@@ -328,6 +327,11 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   agentGraph?:
     | {
         readonly kind: "root";
+        readonly graph?: { readonly graphId: string; readonly epoch: number };
+        readonly retireGraph?: (
+          graph: { readonly graphId: string; readonly epoch: number },
+          reason: string,
+        ) => Promise<unknown>;
         readonly getRootContext: () => AgentGraphRootToolContext | undefined;
         readonly toolPort: AgentGraphSupervisorToolPort;
       }
@@ -339,6 +343,10 @@ export interface RunAgentCliDependencies extends RuntimeHost {
       };
   /** 仅用于后台执行的实时信任校验；生产默认读取用户级 WorkspaceTrustStore。 */
   backgroundTrustStore?: BackgroundWorkspaceTrustVerifier;
+  retirePlanGraph?: (
+    graph: { readonly graphId: string; readonly epoch: number },
+    reason: string,
+  ) => Promise<unknown>;
   /** daemon/Cron 注入的系统凭证库读取边界；前台 BYOK 不需要。 */
   credentialResolver?: CredentialResolver;
   /** 宿主装配的会话级 HookService；TUI 后续消息必须复用同一实例。 */
@@ -431,6 +439,7 @@ export class AgentRuntime {
         (await coordinator.operationStatus(executionOperationId, "plan.execution.started", {
           planId: proposal.planId,
           revision: proposal.revision,
+          ...(approved.execution?.graph ? { graph: approved.execution.graph } : {}),
         })) === "matching"
       ) {
         await reconcileOrphanedPlanExecution(session.runtimeEventStore, session.id, session);
@@ -462,6 +471,16 @@ export class AgentRuntime {
     }
   }
 
+  async recoverPlanExecution(input: PlanSessionRequest): Promise<PlanProjection> {
+    const { session, lease } = await acquirePlanControlSession(input, {});
+    try {
+      if (!session.runtimeEventStore) throw new Error("Plan recovery requires durable storage");
+      return await reconcileOrphanedPlanExecution(session.runtimeEventStore, session.id, session);
+    } finally {
+      lease.release();
+    }
+  }
+
   async readPlanProjection(input: PlanSessionRequest): Promise<PlanProjection> {
     const picoHome = resolvePicoHome({ picoHome: input.picoHome, env: input.env ?? process.env });
     const workDir = await resolveWorkDir(input.dir);
@@ -485,10 +504,10 @@ export class AgentRuntime {
     const { session, lease } = await acquirePlanControlSession(input, host);
     try {
       if (!session.runtimeEventStore) throw new Error("Plan revision requires durable storage");
-      const coordinator = new PlanCoordinator(
-        session.runtimeEventStore,
-        planControlContext(session.id, input.operationId, session),
-      );
+      const coordinator = new PlanCoordinator(session.runtimeEventStore, {
+        ...planControlContext(session.id, input.operationId, session),
+        ...(host.retirePlanGraph ? { retireGraph: host.retirePlanGraph } : {}),
+      });
       const semantic = {
         planId: input.planId,
         expectedRevision: input.expectedRevision,
@@ -521,10 +540,10 @@ export class AgentRuntime {
     const { session, lease, workDir } = await acquirePlanControlSession(input, host);
     try {
       if (!session.runtimeEventStore) throw new Error("Plan resume requires durable storage");
-      const coordinator = new PlanCoordinator(
-        session.runtimeEventStore,
-        planControlContext(session.id, input.operationId, session),
-      );
+      const coordinator = new PlanCoordinator(session.runtimeEventStore, {
+        ...planControlContext(session.id, input.operationId, session),
+        ...(host.retirePlanGraph ? { retireGraph: host.retirePlanGraph } : {}),
+      });
       const semantic = { planId: input.planId };
       if (
         (await coordinator.operationStatus(
@@ -579,10 +598,10 @@ export class AgentRuntime {
     const { session, lease } = await acquirePlanControlSession(input, host);
     try {
       if (!session.runtimeEventStore) throw new Error("Plan cancel requires durable storage");
-      return await new PlanCoordinator(
-        session.runtimeEventStore,
-        planControlContext(session.id, input.operationId, session),
-      ).cancel({
+      return await new PlanCoordinator(session.runtimeEventStore, {
+        ...planControlContext(session.id, input.operationId, session),
+        ...(host.retirePlanGraph ? { retireGraph: host.retirePlanGraph } : {}),
+      }).cancel({
         operationId: input.operationId,
         expectedSessionSequence: input.expectedSessionSequence,
         planId: input.planId,
@@ -600,10 +619,10 @@ export class AgentRuntime {
     const { session, lease, workDir } = await acquirePlanControlSession(input, host);
     try {
       if (!session.runtimeEventStore) throw new Error("Plan replan requires durable storage");
-      const coordinator = new PlanCoordinator(
-        session.runtimeEventStore,
-        planControlContext(session.id, input.operationId, session),
-      );
+      const coordinator = new PlanCoordinator(session.runtimeEventStore, {
+        ...planControlContext(session.id, input.operationId, session),
+        ...(host.retirePlanGraph ? { retireGraph: host.retirePlanGraph } : {}),
+      });
       const semantic = {
         planId: input.planId,
         ...(input.reason ? { reason: input.reason } : {}),
@@ -701,7 +720,7 @@ function approvedPlanExecutionPrompt(proposal: PlanProposal): string {
       ? `Risks:\n${proposal.risks.map((risk) => `- ${risk}`).join("\n")}`
       : undefined,
     "开始执行某一步前，先调用 update_plan 将它标记为 in_progress；实施并验证成功后，再调用 update_plan 将它标记为 completed（不再需要的步骤标记为 skipped）。",
-    "只要 execution 仍为 active，就不得仅返回文字或结束本轮；必须继续处理未完成步骤，直到 update_plan 返回 execution 已 completed。确实无法继续时调用 cancel_plan。",
+    "Graph 模式允许通过 yield_agent_graph 持久化等待子任务，并在唤醒后继续。除此之外，只要 execution 仍为 active，就不得仅返回文字或结束本轮；必须继续处理未完成步骤，直到 update_plan 返回 execution 已 completed。确实无法继续时调用 cancel_plan。",
   ]
     .filter((part): part is string => part !== undefined)
     .join("\n\n");
@@ -717,7 +736,7 @@ function resumedPlanExecutionPrompt(projection: PlanProjection): string {
       (step) => `- [${step.status}] ${step.id}: ${step.title}\n  ${step.description}`,
     ),
     "恢复某一步前，先调用 update_plan 将它标记为 in_progress；实施并验证成功后，再调用 update_plan 将它标记为 completed（不再需要的步骤标记为 skipped）。",
-    "只要 execution 仍为 active，就不得仅返回文字或结束本轮；必须继续处理未完成步骤，直到 update_plan 返回 execution 已 completed。确实无法继续时调用 cancel_plan。",
+    "Graph 模式允许通过 yield_agent_graph 持久化等待子任务，并在唤醒后继续。除此之外，只要 execution 仍为 active，就不得仅返回文字或结束本轮；必须继续处理未完成步骤，直到 update_plan 返回 execution 已 completed。确实无法继续时调用 cancel_plan。",
   ].join("\n\n");
 }
 
@@ -729,54 +748,6 @@ function planControlContext(sessionId: string, operationId: string, writeGuard?:
     turnId: `turn:plan-control:${operationId}`,
     ...(writeGuard ? { writeGuard } : {}),
   };
-}
-
-async function reconcileOrphanedPlanExecution(
-  store: SqliteRuntimeEventStore,
-  sessionId: string,
-  writeGuard?: Session,
-): Promise<PlanProjection> {
-  // plan.* + run.started 事件切片(票 04):本函数只消费 plan 事件与
-  // transition 之后的 run.started 准入事实,不再全量读。
-  const { entries } = await store.readSessionEntriesOfKinds(sessionId, [
-    ...PLAN_EVENT_KINDS,
-    "run.started",
-  ]);
-  const coordinator = new PlanCoordinator(
-    store,
-    planControlContext(sessionId, "reconcile", writeGuard),
-  );
-  const projection = await coordinator.project();
-  if (projection.execution?.status !== "active") return projection;
-  const transition = projectActivePlanEntries(entries)
-    .filter(
-      ({ event }) =>
-        event.kind === "plan.execution.started" || event.kind === "plan.execution.resumed",
-    )
-    .at(-1);
-  if (!transition) return projection;
-  const transitionOperationId =
-    "operationId" in transition.event.data ? transition.event.data.operationId : undefined;
-  if (
-    typeof transitionOperationId === "string" &&
-    livePlanAdmissions.has(planAdmissionKey(sessionId, transitionOperationId))
-  ) {
-    return projection;
-  }
-  const admittedRun = entries.find(
-    ({ sequence, event }) => sequence > transition.sequence && event.kind === "run.started",
-  );
-  if (admittedRun && isRuntimeRunLive(sessionId, admittedRun.event.runId)) return projection;
-  const current = await coordinator.project();
-  if (current.execution?.status !== "active") return current;
-  return await coordinator.interrupt({
-    operationId: `reconcile-plan-execution:${transition.event.eventId}`,
-    expectedSessionSequence: current.sessionSequence,
-    planId: current.execution.planId,
-    reason: admittedRun
-      ? "RuntimeRun ended without closing the active plan execution"
-      : "Plan execution transition has no durable RuntimeRun admission",
-  });
 }
 
 function planAdmissionKey(sessionId: string, operationId: string): string {
@@ -932,6 +903,7 @@ export async function executeAgentRuntime(
   let activeExecutionPlanId: string | undefined;
   let planRun = false;
   let livePlanAdmission: string | undefined;
+  let planExecutionPromptId: string | undefined;
   const ownsRuntimeState = dependencies.runtimeState === undefined;
   let sessionLeaseTransferred = false;
   let cleanupRuntimeState: SessionRuntime | undefined;
@@ -1024,6 +996,7 @@ export async function executeAgentRuntime(
       const operationId =
         options.approvedPlan.operationId ??
         `${options.approvedPlan.transition === "resume" ? "resume" : "start"}-plan:${randomUUID()}`;
+      planExecutionPromptId = `plan-execution-input:${operationId}`;
       livePlanAdmission = planAdmissionKey(session.id, operationId);
       livePlanAdmissions.add(livePlanAdmission);
       if (options.approvedPlan.transition === "resume") {
@@ -1047,9 +1020,32 @@ export async function executeAgentRuntime(
           expectedSessionSequence: options.approvedPlan.expectedSessionSequence,
           planId: options.approvedPlan.planId,
           revision: options.approvedPlan.revision,
+          ...(dependencies.agentGraph?.kind === "root" && dependencies.agentGraph.graph
+            ? { graph: dependencies.agentGraph.graph }
+            : {}),
         });
       }
       activeExecutionPlanId = options.approvedPlan.planId;
+    } else if (
+      dependencies.agentGraph?.kind === "root" &&
+      dependencies.agentGraph.graph &&
+      session.runtimeEventStore
+    ) {
+      const coordinator = new PlanCoordinator(
+        session.runtimeEventStore,
+        planControlContext(session.id, "graph-attach", session),
+      );
+      const projection = await coordinator.project();
+      const execution = projection.execution;
+      if (
+        execution?.graph?.graphId === dependencies.agentGraph.graph.graphId &&
+        execution.graph.epoch === dependencies.agentGraph.graph.epoch
+      ) {
+        if (execution.status !== "active")
+          throw new PlanConflictError(`Bound plan execution is ${execution.status}`);
+        executionCoordinator = coordinator;
+        activeExecutionPlanId = execution.planId;
+      }
     }
     const memoryTrustStore =
       dependencies.memoryTrustStore ?? new WorkspaceTrustStore({ userStateDirectory: picoHome });
@@ -1524,7 +1520,7 @@ export async function executeAgentRuntime(
           revision,
         }),
     };
-    if (options.approvedPlan) {
+    if (activeExecutionPlanId) {
       toolDisclosure.discloseTools(["update_plan", "cancel_plan"]);
     }
     // durable 披露恢复：从本 session 的 ledger 重播 tool.group.loaded 事实，
@@ -1577,7 +1573,7 @@ export async function executeAgentRuntime(
       handoff: planHandoff,
       sessionId: session.id,
       mode: collaborationMode() === "plan" ? "planning" : "execution",
-      ...(options.approvedPlan ? { planId: options.approvedPlan.planId } : {}),
+      ...(activeExecutionPlanId ? { planId: activeExecutionPlanId } : {}),
       runId: () => currentRuntimeRun()?.runId ?? "unbound-plan-run",
       coordinator: () => {
         const run = currentRuntimeRun();
@@ -1590,6 +1586,9 @@ export async function executeAgentRuntime(
           runId: run.runId,
           turnId: `turn:${run.runId}:plan`,
           writeGuard: session,
+          ...(dependencies.agentGraph?.kind === "root" && dependencies.agentGraph.retireGraph
+            ? { retireGraph: dependencies.agentGraph.retireGraph }
+            : {}),
         });
       },
     };
@@ -1662,7 +1661,7 @@ export async function executeAgentRuntime(
       skillLoaderFactory(workDir),
       runtimeEnv,
       dependencies.bashTimeoutMs,
-      collaborationMode() === "plan" || options.approvedPlan ? planRegistryOptions : undefined,
+      collaborationMode() === "plan" || activeExecutionPlanId ? planRegistryOptions : undefined,
       hostKind,
       onToolGroupLoaded,
       sessionTaskAuthority,
@@ -1747,6 +1746,17 @@ export async function executeAgentRuntime(
           : {}),
       }).buildLayers();
       const turnTailParts = composed.turnTail ? [composed.turnTail] : [];
+      if (
+        activeExecutionPlanId &&
+        executionCoordinator &&
+        dependencies.agentGraph?.kind === "root"
+      ) {
+        const projection = await executionCoordinator.project();
+        turnTailParts.push(
+          "[GRAPH PLAN EXECUTION] 当前 Graph 绑定用户已批准的计划。只继续未完成步骤；用 update_plan 跟踪进度。需要等待子任务时调用 yield_agent_graph，计划会保持 active，唤醒后继续。先通过 update_agent_graph 的 finish 汇总 Graph，再完成最后一个计划步骤。无法继续时调用 cancel_plan。",
+          JSON.stringify(projection.execution),
+        );
+      }
       if (sideConversation) {
         turnTailParts.push(
           [
@@ -2010,7 +2020,7 @@ export async function executeAgentRuntime(
               });
             }
           : undefined,
-        options.approvedPlan
+        activeExecutionPlanId
           ? createDelegatePlanStepCoordinator(() => planRegistryOptions!.coordinator())
           : undefined,
         hostKind,
@@ -2119,7 +2129,7 @@ export async function executeAgentRuntime(
     if (effectiveOptions.allowedTools !== undefined) {
       const requiredControlTools = [
         ...(collaborationMode() === "plan" ? ["submit_plan"] : []),
-        ...(options.approvedPlan ? ["update_plan", "cancel_plan"] : []),
+        ...(activeExecutionPlanId ? ["update_plan", "cancel_plan"] : []),
       ];
       const commandAllowlist = [...effectiveOptions.allowedTools, ...requiredControlTools];
       pruneRegistryToCommandAllowlist(registry, commandAllowlist);
@@ -2141,6 +2151,9 @@ export async function executeAgentRuntime(
       picoHome,
       prompt,
       resumeExistingSession,
+      ...(resumeExistingSession && planExecutionPromptId
+        ? { planExecutionPrompt: { messageId: planExecutionPromptId, content: prompt } }
+        : {}),
       ...(dependencies.agentGraph ? { presentation: "internal" as const } : {}),
       ...(dependencies.prestartedRun ? { prestartedRun: dependencies.prestartedRun } : {}),
       ...(dependencies.prestartedUserInput
@@ -2189,11 +2202,22 @@ export async function executeAgentRuntime(
         });
       },
     }).execute();
-    await interruptOpenPlanExecution(
-      executionCoordinator,
-      activeExecutionPlanId,
-      "Execution Run ended before every plan step reached a terminal status.",
-    );
+    if (
+      !(
+        executionCoordinator &&
+        session.runtimeEventStore &&
+        (await isPlanGraphWaiting(
+          session.runtimeEventStore,
+          session.id,
+          await executionCoordinator.project(),
+        ))
+      )
+    )
+      await interruptOpenPlanExecution(
+        executionCoordinator,
+        activeExecutionPlanId,
+        "Execution Run ended before every plan step reached a terminal status.",
+      );
     return result;
   } catch (error) {
     await interruptOpenPlanExecution(
@@ -3182,4 +3206,14 @@ function defaultModel(kind: ProviderKind): string {
 
 function isTruthyEnv(value: string | undefined): boolean {
   return value === "1" || value?.toLowerCase() === "true" || value?.toLowerCase() === "on";
+}
+
+async function reconcileOrphanedPlanExecution(
+  store: SqliteRuntimeEventStore,
+  sessionId: string,
+  writeGuard?: Session,
+): Promise<PlanProjection> {
+  return reconcilePlanExecution(store, sessionId, writeGuard, (operationId) =>
+    livePlanAdmissions.has(planAdmissionKey(sessionId, operationId)),
+  );
 }

@@ -148,11 +148,12 @@ export function approvalFromPlanProjection(
   const execution = projection && isRecord(projection.execution) ? projection.execution : undefined;
   const revisionRequest =
     projection && isRecord(projection.revisionRequest) ? projection.revisionRequest : undefined;
+  const graphExecution = execution?.status === "active" && isRecord(execution.graph);
   if (
     !projection ||
     !controlEpoch ||
     isRecord(projection.reviewClaim) ||
-    (!pending && execution?.status !== "interrupted" && !revisionRequest)
+    (!pending && execution?.status !== "interrupted" && !graphExecution && !revisionRequest)
   ) {
     return undefined;
   }
@@ -188,14 +189,16 @@ export function approvalFromPlanProjection(
     const sessionSequence = numberValue(projection.sessionSequence, -1);
     if (!planId || revision < 0 || sessionSequence < 0) return undefined;
     return {
-      id: `interrupted:${planId}:${controlEpoch}`,
-      runId: `plan-interrupted:${planId}`,
+      id: `${graphExecution ? "graph-active" : "interrupted"}:${planId}:${controlEpoch}`,
+      runId: `plan-${graphExecution ? "graph-active" : "interrupted"}:${planId}`,
       sessionId,
-      title: "计划执行已中断",
-      detail: stringValue(execution.reason, "请选择继续执行、取消执行或重新规划。"),
-      risk: "medium",
+      title: graphExecution ? "计划执行中" : "计划执行已中断",
+      detail: graphExecution
+        ? "计划由 Graph 执行，等待或处理子任务结果。"
+        : stringValue(execution.reason, "请选择继续执行、取消执行或重新规划。"),
+      risk: graphExecution ? "low" : "medium",
       kind: "plan",
-      planControlMode: "interrupted",
+      planControlMode: graphExecution ? "graph_active" : "interrupted",
       planId,
       expectedRevision: revision,
       expectedSessionSequence: sessionSequence,
@@ -240,7 +243,9 @@ export function approvalFromPlanControlSnapshot(
     !value ||
     value.version !== 1 ||
     value.availability !== "ready" ||
-    (value.state !== "pending_review" && value.state !== "interrupted")
+    (value.state !== "pending_review" &&
+      value.state !== "interrupted" &&
+      value.state !== "committed_executing")
   ) {
     return undefined;
   }
@@ -467,6 +472,7 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
     return {
       id: structuredItemId("approval", data, id),
       kind: "approval",
+      approvalKind: data.kind === "plan" || data.planId || data.plan ? "plan" : "tool",
       title: stringValue(item.title, "需要你的批准"),
       detail: stringValue(item.detail, "Runtime 请求执行受保护操作。"),
       state:
@@ -549,6 +555,19 @@ export function conversationItemsFromReplica(view: TranscriptReplicaView): Conve
   ]
     .map(conversationItem)
     .filter((item): item is ConversationItemView => item !== undefined);
+}
+
+export function pendingToolApprovalFromTranscript(
+  items: readonly ConversationItemView[],
+): Extract<ConversationItemView, { readonly kind: "approval" }> | undefined {
+  // Plan controls come from the current projection, never from historical handoff cards.
+  return items.findLast(
+    (item): item is Extract<ConversationItemView, { readonly kind: "approval" }> =>
+      item.kind === "approval" &&
+      item.approvalKind !== "plan" &&
+      item.state === "pending" &&
+      item.id.startsWith("approval:"),
+  );
 }
 
 interface ParsedConversation extends ConversationView {

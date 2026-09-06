@@ -2,6 +2,7 @@ import type { DurableTranscriptEvent } from "../presentation/transcript-event-st
 import type { Message, Usage } from "../schema/message.js";
 import type {
   PlanOperationFact,
+  PlanGraphBinding,
   PlanProposal,
   PlanReviewAction,
   PlanReviewedBy,
@@ -288,7 +289,11 @@ export type RuntimePlanApprovedEvent = RuntimePlanReviewedEvent<"plan.approved">
 export type RuntimePlanRejectedEvent = RuntimePlanReviewedEvent<"plan.rejected">;
 export interface RuntimePlanExecutionStartedEvent extends RuntimePlanEventBase {
   readonly kind: "plan.execution.started";
-  readonly data: PlanOperationFact & { readonly planId: string; readonly revision: number };
+  readonly data: PlanOperationFact & {
+    readonly planId: string;
+    readonly revision: number;
+    readonly graph?: PlanGraphBinding;
+  };
 }
 export interface RuntimePlanStepUpdatedEvent extends RuntimePlanEventBase {
   readonly kind: "plan.step.updated";

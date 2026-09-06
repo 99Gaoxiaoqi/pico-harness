@@ -267,7 +267,7 @@ function planControlSnapshot(
         : execution?.status === "interrupted"
           ? "interrupted"
           : execution?.status === "active"
-            ? runActive
+            ? runActive || execution.graph !== undefined
               ? "committed_executing"
               : "recovery_required"
             : execution?.status === "completed" ||
