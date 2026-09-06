@@ -110,6 +110,14 @@ function assertActivationIntent(
   if (intent.graphId !== state.graph.graphId) {
     throw new AgentGraphConflictError("Activation Intent must belong to the Graph");
   }
+  if (intent.replacesIntentId) {
+    if (!state.intents.some((item) => item.intentId === intent.replacesIntentId)) {
+      throw new AgentGraphConflictError("Replacement must reference existing work in this Graph");
+    }
+    if (state.intents.some((item) => item.replacesIntentId === intent.replacesIntentId)) {
+      throw new AgentGraphConflictError("Graph work has already been replaced");
+    }
+  }
   assertNonEmpty(intent.intentId, "Activation Intent id");
   assertNonEmpty(intent.instruction, "Activation Intent instruction");
   if (intent.expectedOutputRecordId !== agentOutputRecordIdFor(intent.graphId, intent.intentId)) {

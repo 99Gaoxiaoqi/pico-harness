@@ -1,3 +1,4 @@
+import type { AgentSwarmStatusResult } from "../agent-graph/swarm-status.js";
 import type {
   AgentGraphWorkRequest,
   CommitAgentGraphWorkInput,
@@ -40,6 +41,7 @@ const AGENT_GRAPH_VIEW_MAX_TOTAL_BYTES = 48 * 1024;
 
 /** Runtime-owned identity for the exact root Supervisor activation. */
 export interface AgentGraphRootToolContext {
+  readonly supervision?: AgentGraphActivationIntent["supervision"];
   readonly kind: "graph_root_supervisor";
   readonly graphId: string;
   readonly epoch: number;
@@ -92,6 +94,8 @@ export interface AgentGraphSupervisorProjection {
 
 /** Runtime truth resolved on demand; never persisted in the Graph control tables. */
 export interface AgentGraphSupervisorClaimRuntime {
+  readonly outputStatus?: "success" | "failure";
+  readonly failureReason?: string;
   readonly claimId: string;
   readonly status: AgentGraphRuntimeStatus;
   readonly terminalEventId?: string;
@@ -147,6 +151,7 @@ export interface AgentGraphSupervisorIntentReadiness {
 }
 
 export interface CommitAgentGraphUpdateInput {
+  readonly supervision?: AgentGraphActivationIntent["supervision"];
   readonly graphId: string;
   readonly epoch: number;
   readonly expectedRevision: number;
@@ -187,6 +192,7 @@ export interface RegisterAgentGraphYieldResult {
 
 /** Thin application boundary: tools never own Graph storage, reconciliation, or Runtime execution. */
 export interface AgentGraphSupervisorToolPort {
+  readSwarmStatus?(input: ReadAgentGraphProjectionInput): Promise<AgentSwarmStatusResult>;
   commitWork?(input: CommitAgentGraphWorkInput): Promise<CommitAgentGraphUpdateResult>;
   commitUpdate(input: CommitAgentGraphUpdateInput): Promise<CommitAgentGraphUpdateResult>;
   readProjection(input: ReadAgentGraphProjectionInput): Promise<AgentGraphSupervisorView>;
@@ -195,6 +201,7 @@ export interface AgentGraphSupervisorToolPort {
 }
 
 export interface CreateAgentGraphSupervisorToolsOptions {
+  readonly swarm?: boolean;
   readonly getRootContext: () => AgentGraphRootToolContext | undefined;
   readonly port: AgentGraphSupervisorToolPort;
 }
@@ -259,6 +266,7 @@ class UpdateAgentGraphTool extends AgentGraphSupervisorTool {
           toolCallId,
         },
         request,
+        ...(root.supervision ? { supervision: root.supervision } : {}),
       });
     }
     execution?.signal?.throwIfAborted();
@@ -269,7 +277,69 @@ class UpdateAgentGraphTool extends AgentGraphSupervisorTool {
     if (typeof result.replayed !== "boolean") {
       throw new Error("update_agent_graph 应用服务返回了非法 replayed。");
     }
+    if (root.supervision?.mode === "swarm") {
+      return JSON.stringify({
+        revision: result.revision,
+        replayed: result.replayed,
+        swarmId: root.graphId,
+        phase: result.projection.graph.admissionPhase,
+        work: result.projection.intents
+          .filter(
+            (intent) =>
+              intent.requestedBy.toolCallId === toolCallId &&
+              intent.requestedBy.runId === root.rootRunId,
+          )
+          .map((intent) => ({ workId: intent.intentId, operatorId: intent.operatorId })),
+      });
+    }
     return JSON.stringify(result);
+  }
+}
+
+class ReadAgentGraphResultsTool extends AgentGraphSupervisorTool {
+  readonly readOnly = true;
+  name() {
+    return "agent_graph_results";
+  }
+  definition(): ToolDefinition {
+    return {
+      name: this.name(),
+      description:
+        "按 agent_swarm_status 返回的 workId 读取已提交的最终结果。只返回这些任务的正文与来源，不含日志或中间输出。使用返回的 recordId 选定 finish.result_ids。",
+      inputSchema: {
+        type: "object",
+        properties: {
+          work_ids: {
+            type: "array",
+            minItems: 1,
+            maxItems: AGENT_GRAPH_MAX_VIEW_RECORDS,
+            items: { type: "string" },
+          },
+        },
+        required: ["work_ids"],
+        additionalProperties: false,
+      },
+    };
+  }
+  async execute(args: string, execution?: ToolExecutionContext): Promise<string> {
+    execution?.signal?.throwIfAborted();
+    const root = this.rootContext();
+    const value = parseJsonObject(args, this.name());
+    assertKeys(value, ["work_ids"], ["work_ids"], this.name());
+    const workIds = identityArray(value["work_ids"], "work_ids", AGENT_GRAPH_MAX_VIEW_RECORDS);
+    if (!workIds.length) throw new Error("work_ids must not be empty");
+    const input = { graphId: root.graphId, epoch: root.epoch, rootSessionId: root.rootSessionId };
+    const view = await this.options.port.readProjection({ ...input, recordIds: [] });
+    validateProjection(view, root);
+    const recordIds = workIds.map((id) => {
+      const intent = view.intents.find((item) => item.intentId === id);
+      if (!intent) throw new Error(`Unknown workId: ${id}`);
+      return intent.expectedOutputRecordId;
+    });
+    const results = await this.options.port.readProjection({ ...input, recordIds });
+    validateProjection(results, root);
+    execution?.signal?.throwIfAborted();
+    return JSON.stringify(results.results);
   }
 }
 
@@ -358,7 +428,16 @@ class YieldAgentGraphTool extends AgentGraphSupervisorTool {
         throw new Error("yield_agent_graph 应用服务返回了非法 replayed。");
       }
       validateProjection(receipt.snapshot, root);
-      return JSON.stringify(receipt);
+      return JSON.stringify(
+        root.supervision?.mode === "swarm"
+          ? {
+              permitId: receipt.permitId,
+              replayed: receipt.replayed,
+              swarmId: root.graphId,
+              yielded: true,
+            }
+          : receipt,
+      );
     } catch (error) {
       if (receipt?.permitId) {
         try {
@@ -380,6 +459,7 @@ export function createAgentGraphSupervisorTools(
     new UpdateAgentGraphTool(options),
     new ViewAgentGraphTool(options),
     new YieldAgentGraphTool(options),
+    ...(options.swarm ? [new ReadAgentGraphResultsTool(options)] : []),
   ];
 }
 
@@ -779,6 +859,7 @@ function requireRootContext(
   }
   return {
     kind: value.kind,
+    ...(value.supervision ? { supervision: value.supervision } : {}),
     graphId: requiredExactIdentity(value.graphId, "graphId"),
     epoch: positiveInteger(value.epoch, "epoch"),
     rootSessionId: requiredExactIdentity(value.rootSessionId, "rootSessionId"),
@@ -969,6 +1050,11 @@ function workRequestSchema(): Record<string, unknown> {
                 "给已有子代理追加任务时，复制 view_agent_graph 返回的 operatorId；不要自行生成。",
             },
             instruction: { type: "string", minLength: 1 },
+            replaces: {
+              ...identity,
+              description:
+                "替换失败工作时填写其精确 workId/intentId；运行时原子停止旧任务并记录替代关系。",
+            },
             input_ids: { ...ids, description: "依赖的精确结果 recordId，省略表示无依赖。" },
             workspace: {
               type: "object",
@@ -1063,13 +1149,16 @@ function parseWorkRequest(value: Record<string, unknown>): AgentGraphWorkRequest
       const work = objectField(entry, path);
       assertKeys(
         work,
-        ["profile_id", "operator_id", "instruction", "input_ids", "workspace"],
+        ["profile_id", "operator_id", "instruction", "input_ids", "workspace", "replaces"],
         ["instruction"],
         path,
       );
       if ("profile_id" in work === "operator_id" in work)
         throw new Error(`${path}: profile_id 与 operator_id 必须二选一。`);
       const common = {
+        ...(work["replaces"] === undefined
+          ? {}
+          : { replacesIntentId: requiredIdentity(work["replaces"], `${path}.replaces`) }),
         instruction: requiredText(
           work["instruction"],
           `${path}.instruction`,

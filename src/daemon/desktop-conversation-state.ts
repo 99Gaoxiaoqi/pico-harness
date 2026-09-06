@@ -139,9 +139,13 @@ function parseStoredInput(value: Record<string, unknown>, filePath: string): Run
   const candidate = value["input"];
   const kind = candidate["kind"];
   if (kind === "text" && typeof candidate["text"] === "string") {
+    const mode = candidate["orchestrationMode"];
+    if (mode !== undefined && mode !== "graph" && mode !== "swarm")
+      throw new Error("Invalid queued orchestrationMode");
     return {
       kind,
       text: requireNonEmpty(candidate["text"], "input.text"),
+      ...(mode ? { orchestrationMode: mode } : {}),
     };
   }
   if (kind === "skill" && typeof candidate["name"] === "string") {

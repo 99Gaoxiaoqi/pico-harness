@@ -103,7 +103,7 @@ export function createWorkbarToolTab(kind: WorkbarToolKind): WorkbarTab {
 
 /** Makes the active Graph epoch visible when a session enters Graph mode. */
 export function graphModeWorkbarAction(
-  orchestrationMode: "default" | "graph" | undefined,
+  orchestrationMode: "default" | "graph" | "swarm" | undefined,
 ): WorkbarAction | undefined {
   if (orchestrationMode !== "graph") return undefined;
   return { type: "open", tab: createWorkbarToolTab("graph"), dock: "right" };

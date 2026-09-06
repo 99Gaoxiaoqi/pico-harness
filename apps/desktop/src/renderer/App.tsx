@@ -1324,7 +1324,7 @@ interface ConversationEnvironmentPanelProps {
   readonly model?: string | undefined;
   readonly context?: ConversationView["context"];
   readonly collaborationMode?: "agent" | "plan" | undefined;
-  readonly orchestrationMode?: "default" | "graph" | undefined;
+  readonly orchestrationMode?: "default" | "graph" | "swarm" | undefined;
   readonly permissionMode?: "default" | "auto" | "yolo" | undefined;
   readonly onReview: () => void;
 }
@@ -1535,7 +1535,13 @@ export function ConversationEnvironmentPanel({
                 {orchestrationMode && (
                   <div>
                     <dt>编排</dt>
-                    <dd>{orchestrationMode === "graph" ? "Graph 模式" : "线性"}</dd>
+                    <dd>
+                      {orchestrationMode === "swarm"
+                        ? "Swarm 模式"
+                        : orchestrationMode === "graph"
+                          ? "Graph 模式"
+                          : "线性"}
+                    </dd>
                   </div>
                 )}
               </dl>
@@ -1898,8 +1904,8 @@ function ConversationPage() {
     await actions.updateSessionSettings(sessionRef, { collaborationMode });
   };
 
-  const changeGraphMode = async (active: boolean) => {
-    const orchestrationMode = active ? "graph" : "default";
+  const changeGraphMode = async (active: boolean, mode: "graph" | "swarm" = "graph") => {
+    const orchestrationMode = active ? mode : "default";
     if (!sessionRef) {
       updateNewTaskSettings({ orchestrationMode });
       return;
@@ -2469,6 +2475,11 @@ function ConversationPage() {
                         disabled: Boolean(activeRun) || Boolean(busy),
                         onPlanChange: changePlanMode,
                         onGraphChange: changeGraphMode,
+                        swarmActive:
+                          (sessionRef
+                            ? conversation?.settings?.orchestrationMode
+                            : newTaskSettings.orchestrationMode) === "swarm",
+                        onSwarmChange: (active) => changeGraphMode(active, "swarm"),
                       }
                     : undefined
                 }

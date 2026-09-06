@@ -11,6 +11,7 @@ export type AgentGraphWorkRequest =
       readonly operation: "add_work";
       readonly work: readonly ({
         readonly instruction: string;
+        readonly replacesIntentId?: string;
         readonly inputIds: readonly string[];
       } & (
         | { readonly profileId: string; readonly workspace: AgentGraphWorkspacePolicy }
@@ -69,7 +70,7 @@ export function compileAgentGraphWork(
       ...(target.reason === undefined ? {} : { reason: target.reason }),
     }));
   }
-  return request.work.map((work, index) => {
+  return request.work.flatMap((work, index): readonly AgentGraphRequestedScheduleCommand[] => {
     const existing = "operatorId" in work ? operatorFor(work.operatorId) : undefined;
     const operatorId =
       existing?.operatorId ?? operatorIdFor(input.graphId, `${operationId}:${index}`);
@@ -85,19 +86,33 @@ export function compileAgentGraphWork(
       inputRefs: work.inputIds.map((recordId) => ({ recordId })),
       createdAtRevision: expectedRevision + 1,
       requestedBy: input.source,
+      ...(input.supervision ? { supervision: input.supervision } : {}),
+      ...(work.replacesIntentId ? { replacesIntentId: work.replacesIntentId } : {}),
     };
-    if ("operatorId" in work) return { kind: "activate", intent };
-    return {
-      kind: "add",
-      operator: {
-        graphId: input.graphId,
-        operatorId,
-        generation,
-        role: work.profileId,
-        profileId: work.profileId,
-        workspacePolicy: work.workspace,
+    const stop: AgentGraphRequestedScheduleCommand[] = work.replacesIntentId
+      ? [
+          {
+            kind: "stop",
+            target: { kind: "intent", intentId: work.replacesIntentId },
+            reason: "Replaced by follow-up work",
+          },
+        ]
+      : [];
+    if ("operatorId" in work) return [...stop, { kind: "activate", intent }];
+    return [
+      ...stop,
+      {
+        kind: "add",
+        operator: {
+          graphId: input.graphId,
+          operatorId,
+          generation,
+          role: work.profileId,
+          profileId: work.profileId,
+          workspacePolicy: work.workspace,
+        },
+        intent,
       },
-      intent,
-    };
+    ];
   });
 }

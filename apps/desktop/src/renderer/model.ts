@@ -91,7 +91,7 @@ export interface SessionSettingsView {
   readonly modelRouteId?: string | undefined;
   readonly model: string;
   readonly collaborationMode: "agent" | "plan";
-  readonly orchestrationMode: "default" | "graph";
+  readonly orchestrationMode: "default" | "graph" | "swarm";
   readonly permissionMode: "default" | "auto" | "yolo";
   readonly thinkingEffort: string;
   readonly reasoningLevels: readonly string[];

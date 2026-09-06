@@ -1,4 +1,4 @@
-import { Check, ListTodo, Plus, Sparkles, Workflow } from "lucide-react";
+import { Check, ListTodo, Plus, Sparkles, Workflow, Network } from "lucide-react";
 import {
   useEffect,
   useId,
@@ -12,6 +12,8 @@ import {
 export interface ConversationComposerModes {
   readonly planActive: boolean;
   readonly graphActive: boolean;
+  readonly swarmActive?: boolean;
+  readonly onSwarmChange?: (active: boolean) => void | Promise<void>;
   readonly disabled?: boolean | undefined;
   readonly onPlanChange: (active: boolean) => void | Promise<void>;
   readonly onGraphChange: (active: boolean) => void | Promise<void>;
@@ -43,6 +45,13 @@ export function ConversationComposerMenu({
       Icon: ListTodo,
       active: modes?.planActive,
       change: modes?.onPlanChange,
+    },
+    {
+      id: "swarm",
+      label: "Swarm",
+      Icon: Network,
+      active: modes?.swarmActive,
+      change: modes?.onSwarmChange,
     },
     {
       id: "graph",
@@ -181,7 +190,11 @@ export function ConversationComposerMenu({
                 disabled={locked}
                 tabIndex={-1}
                 title={
-                  option.id === "plan" ? "先规划，确认计划后执行" : "按任务依赖进行 Graph 编排"
+                  option.id === "plan"
+                    ? "先规划，确认计划后执行"
+                    : option.id === "swarm"
+                      ? "并行处理独立任务，完成或遇到问题后统一汇总"
+                      : "按任务依赖进行 Graph 编排"
                 }
                 onClick={() => void toggle(option)}
               >
