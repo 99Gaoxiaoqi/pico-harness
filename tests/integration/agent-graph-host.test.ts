@@ -178,6 +178,29 @@ test("workspace Graph host executes an exact operator with owner-fenced output a
       rawOutput: "durable evidence",
       isError: false,
     });
+    await assert.rejects(
+      input.binding.outputPort.commitAgentOutput(
+        agentOutputInput(activation, "operator result", {
+          evidenceRefs: ["branch-a.txt"],
+        }),
+      ),
+      /evidence_refs.*pico:\/\/evidence.*不能填文件路径.*省略/u,
+    );
+    await assert.rejects(
+      input.binding.outputPort.commitAgentOutput(
+        agentOutputInput(activation, "operator result", {
+          artifactRefs: ["report.md"],
+        }),
+      ),
+      /artifact_refs.*pico:\/\/artifact.*不能填文件路径/u,
+    );
+    assert.equal(
+      (
+        await input.session.runtimeEventStore!.readRun(activation.sessionId, activation.runId)
+      ).filter((event) => event.kind === "agent.output").length,
+      0,
+      "invalid references must not commit a terminal output or prevent a corrected retry",
+    );
     const committed = await input.binding.outputPort.commitAgentOutput(
       agentOutputInput(activation, "operator result", {
         evidenceRefs: [formatEvidenceUri(evidenceRef)],

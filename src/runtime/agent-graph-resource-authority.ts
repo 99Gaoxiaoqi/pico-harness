@@ -64,7 +64,14 @@ export class AgentGraphResourceAuthority implements AgentGraphResourceAuthorityP
     claim: AgentGraphActivationClaimRecord,
     sourceRef: string,
   ): Promise<AgentGraphResourceRefRecord> {
-    const reference = parseEvidenceUri(sourceRef);
+    let reference;
+    try {
+      reference = parseEvidenceUri(sourceRef);
+    } catch {
+      throw new Error(
+        "agent_output 的 evidence_refs 必须原样使用当前子任务工具返回的 pico://evidence/<sessionId>/<contentHash> URI，不能填文件路径。工具没有返回证据 URI 时，请省略 evidence_refs 或传 []，将文件路径与读取结果写入 output。",
+      );
+    }
     if (
       reference.sessionId !== claim.targetSessionId ||
       formatEvidenceUri(reference) !== sourceRef
@@ -108,7 +115,14 @@ export class AgentGraphResourceAuthority implements AgentGraphResourceAuthorityP
     claim: AgentGraphActivationClaimRecord,
     sourceRef: string,
   ): AgentGraphResourceRefRecord {
-    const reference = parseAgentGraphArtifactRef(sourceRef);
+    let reference;
+    try {
+      reference = parseAgentGraphArtifactRef(sourceRef);
+    } catch {
+      throw new Error(
+        "agent_output 的 artifact_refs 必须使用已提交制品返回的 pico://artifact/<sessionId>/<artifactId>/<digest> URI，不能填文件路径。没有制品 URI 时，请省略 artifact_refs 或传 []。",
+      );
+    }
     if (reference.sessionId !== claim.targetSessionId) {
       throw new Error(`Graph artifact ref must belong to activation Session: ${sourceRef}`);
     }

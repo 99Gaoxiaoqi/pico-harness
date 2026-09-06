@@ -98,7 +98,7 @@ class AgentOutputTool implements BaseTool {
     return {
       name: this.name(),
       description:
-        "提交当前 Graph Operator activation 的正式终态输出。只能由 Graph Operator 调用；success/failure 必须显式声明，系统不会从自然语言推断完成状态。",
+        "提交当前 Graph Operator activation 的正式终态输出。只能由 Graph Operator 调用；success/failure 必须显式声明，系统不会从自然语言推断完成状态。通常只需 status 和 output；文件路径、读取内容与来源说明写在 output 中，引用字段仅填写工具实际返回的 Pico URI，不得自行构造。",
       inputSchema: {
         type: "object",
         properties: {
@@ -115,13 +115,15 @@ class AgentOutputTool implements BaseTool {
             type: "array",
             maxItems: AGENT_OUTPUT_MAX_REFS,
             items: { type: "string" },
-            description: "支撑结论的稳定证据引用。",
+            description:
+              "可选。只接受当前子任务工具实际返回的 pico://evidence/<sessionId>/<contentHash> 证据 URI，必须原样复制。普通文件路径（如 branch-a.txt、./branch-a.txt）、绝对路径和 file:// URL 均无效。工具未返回证据 URI 时省略此字段或传 []，把文件路径与读取结果写在 output 中。",
           },
           artifact_refs: {
             type: "array",
             maxItems: AGENT_OUTPUT_MAX_REFS,
             items: { type: "string" },
-            description: "本次 activation 产出的稳定制品引用。",
+            description:
+              "可选。只接受已提交制品实际返回的 pico://artifact/<sessionId>/<artifactId>/<digest> URI，必须属于当前子任务。文件路径不能代替制品 URI；没有已提交的制品 URI 时省略此字段或传 []。",
           },
         },
         required: ["status", "output"],
