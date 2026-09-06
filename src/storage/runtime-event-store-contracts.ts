@@ -407,6 +407,7 @@ export interface StartRuntimeContinuationInput extends RuntimeFencedWriteOptions
   /** 精确重放身份的一部分；重试必须传回同一时间。 */
   readonly startedAt: string;
   readonly presentation?: RuntimeRunStartedEvent["data"]["presentation"];
+  readonly agentSwarmAuthorization?: RuntimeRunStartedEvent["data"]["agentSwarmAuthorization"];
   readonly now?: () => Date;
   /** 仅用于事务回滚测试；抛错时 claim 与 start 必须一起回滚。 */
   readonly afterClaimBeforeStart?: () => void;

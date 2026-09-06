@@ -741,6 +741,24 @@ async function admitSuccessorRuntimeRun(
     );
   }
 
+  const sourceStart = entries
+    .map(({ event }) => event)
+    .find(
+      (event): event is RuntimeRunStartedEvent =>
+        event.kind === "run.started" && event.runId === sourceRuntime.runId,
+    );
+  if (!sourceStart) {
+    throw new Error(`Agent recovery source run ${sourceRuntime.runId} has no admission`);
+  }
+  const existingStart = entries
+    .map(({ event }) => event)
+    .find(
+      (event): event is RuntimeRunStartedEvent =>
+        event.kind === "run.started" && event.eventId === context.expectedRunStartedEventId,
+    );
+  const agentSwarmAuthorization = existingStart
+    ? existingStart.data.agentSwarmAuthorization
+    : (sourceStart.data.agentSwarmAuthorization ?? "none");
   const invocationId = `invocation:${context.expectedRuntimeRunId}`;
   const started: RuntimeRunStartedEvent = {
     schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
@@ -754,7 +772,10 @@ async function admitSuccessorRuntimeRun(
     visibility: "internal",
     refs: { parentRunId: sourceRuntime.runId },
     kind: "run.started",
-    data: { workDir: input.workspacePath },
+    data: {
+      workDir: input.workspacePath,
+      ...(agentSwarmAuthorization !== undefined ? { agentSwarmAuthorization } : {}),
+    },
   };
   const ownerFence = await writeGuard.assertRuntimeEventWriteAllowed();
   const [result] = await store.appendBatch([started], {

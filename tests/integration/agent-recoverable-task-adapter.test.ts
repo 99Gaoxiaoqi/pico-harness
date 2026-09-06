@@ -27,7 +27,7 @@ import { readWorkspaceSqliteStorageRootIdentitySync } from "../../src/storage/sq
 import { ALL_WORKSPACE_SQLITE_SCOPES } from "../../src/storage/sqlite/workspace-scopes.js";
 
 test("core Agent adapter reuses one deterministic admission and never synthesizes a user prompt", async (context) => {
-  const fixture = await createFixture(context, "cold-continuation");
+  const fixture = await createFixture(context, "cold-continuation", "turn_override");
   const installed = new Map<string, string>();
   let installCalls = 0;
   let actualInstallations = 0;
@@ -54,6 +54,10 @@ test("core Agent adapter reuses one deterministic admission and never synthesize
     ["run.started", "message.committed", "run.terminal"],
   );
   assert.equal(successorEvents[0]?.eventId, first.runStartedEventId);
+  assert.equal(
+    successorEvents.find((event) => event.kind === "run.started")?.data.agentSwarmAuthorization,
+    "turn_override",
+  );
   assert.equal(first.runStartedSequence, fixture.sourceHighWater + 1);
   assert.equal(successorEvents.filter((event) => event.kind === "run.started").length, 1);
   const reconciliation = await new RuntimeEventBoundaryInspector({
@@ -441,7 +445,11 @@ interface Fixture {
   ): ReturnType<typeof createAgentRecoverableTaskAdapter>;
 }
 
-async function createFixture(context: test.TestContext, suffix: string): Promise<Fixture> {
+async function createFixture(
+  context: test.TestContext,
+  suffix: string,
+  agentSwarmAuthorization?: RuntimeRun["agentSwarmAuthorization"],
+): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), `pico-agent-recovery-${suffix}-`));
   const workDir = join(root, "workspace");
   const picoHome = join(root, "pico-home");
@@ -459,7 +467,7 @@ async function createFixture(context: test.TestContext, suffix: string): Promise
   const capability = session.runtimeEventCapability;
   assert.ok(store);
   assert.ok(capability);
-  const sourceRun = await RuntimeRun.start({ capability });
+  const sourceRun = await RuntimeRun.start({ capability, agentSwarmAuthorization });
   await sourceRun.commitMessages(session, [{ role: "user", content: "original durable prompt" }]);
   await sourceRun.finish("interrupted", "source process exited");
   const sourceEntries = await store.readSessionEntries(session.id);

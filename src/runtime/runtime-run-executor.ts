@@ -45,6 +45,7 @@ export interface RuntimeRunExecutorInput {
   /** Approval/resume is a new durable control instruction even when reusing the user turn. */
   readonly planExecutionPrompt?: { readonly messageId: string; readonly content: string };
   readonly presentation?: "internal";
+  readonly agentSwarmAuthorization?: RuntimeRun["agentSwarmAuthorization"];
   /**
    * Durable H+1 admission already published by a recoverable-task adapter.
    * RuntimeRun.start reuses this exact fact; it must not create another run.started.
@@ -99,6 +100,7 @@ export interface PrestartedRuntimeRun {
   readonly runStartedAt: string;
   readonly parentRunId?: string;
   readonly presentation?: "internal";
+  readonly agentSwarmAuthorization?: RuntimeRun["agentSwarmAuthorization"];
 }
 
 export interface PrestartedRuntimeUserInput {
@@ -181,6 +183,7 @@ export class RuntimeRunExecutor {
         automaticContinuation ??
         (await RuntimeRun.start({
           capability: runtimeCapability,
+          agentSwarmAuthorization: this.input.agentSwarmAuthorization ?? "none",
           ...(presentation === "internal"
             ? {
                 presentation: {
@@ -405,6 +408,10 @@ export class RuntimeRunExecutor {
     const run = await RuntimeRun.startContinuation({
       capability: session.runtimeEventCapability!,
       sourceRunId: candidate.runId,
+      // A resumed user turn inherits its original grant; a new input gets a new decision.
+      ...(!this.input.resumeExistingSession
+        ? { agentSwarmAuthorization: this.input.agentSwarmAuthorization ?? "none" }
+        : {}),
       targetRunId: randomUUID(),
       ...(this.input.presentation === "internal"
         ? {

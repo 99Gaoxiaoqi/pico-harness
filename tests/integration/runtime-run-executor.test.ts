@@ -79,6 +79,61 @@ test("RuntimeRunExecutor executes one assembled turn without owning its resource
   }
 });
 
+test("Run headers persist authorization for small turns without a graph across Session restart", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-run-authorization-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const openSession = () =>
+    new Session("run-authorization", workDir, {
+      persistence: true,
+      picoHome,
+      runtimePort: createEngineRuntimePort(),
+    });
+  let session = openSession();
+  try {
+    await session.recover();
+    for (const authorization of [undefined, "session_mode", "turn_override"] as const) {
+      await new RuntimeRunExecutor({
+        session,
+        runtimeState: {
+          dispatchHook: async () => ({ decision: "allow" }),
+        } as unknown as SessionRuntime,
+        engine: {
+          run: async (target: Session) => {
+            await target.commitMessages({ role: "assistant", content: "small answer" });
+            return target.getHistory();
+          },
+        } as unknown as AgentEngine,
+        sessionSelection: { mode: "resume", sessionId: session.id },
+        workDir,
+        picoHome,
+        prompt: "simple question",
+        resumeExistingSession: false,
+        traceEnabled: false,
+        options: {},
+        ...(authorization ? { agentSwarmAuthorization: authorization } : {}),
+      }).execute();
+    }
+    await session.close();
+    session = openSession();
+    await session.recover();
+    const events = await session.runtimeEventStore!.readSession(session.id);
+    const starts = events.filter((event) => event.kind === "run.started");
+    assert.deepEqual(
+      starts.map((event) => event.data.agentSwarmAuthorization),
+      ["none", "session_mode", "turn_override"],
+    );
+    assert.equal(events.filter((event) => event.kind === "run.terminal").length, 3);
+    assert.equal(
+      events.some((event) => event.kind.startsWith("agent.")),
+      false,
+    );
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("RuntimeRunExecutor fails the canonical Run when its host completion guard rejects", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-runtime-run-completion-guard-"));
   const workDir = join(root, "workspace");
