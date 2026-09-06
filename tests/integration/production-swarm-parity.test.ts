@@ -1,3 +1,5 @@
+import { SqliteSessionContinuitySource } from "../../src/daemon/sqlite-session-continuity-source.js";
+import type { SessionSubscriptionRegistry } from "../../src/daemon/session-subscription-owner.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
@@ -38,6 +40,10 @@ for (const planning of [false, true]) {
       const env = { PICO_HOME: picoHome, PICO_TEST_TOKEN: "test-token" };
       const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
       await trustStore.trust(workspacePath);
+      const firstDelta = Promise.withResolvers<void>();
+      const pendingDelta = Promise.withResolvers<void>();
+      const externalFlush = Promise.withResolvers<void>();
+      const degraded: unknown[] = [];
       let graphHost: AgentGraphWorkspaceHost | undefined;
       const runtimeAgent = new (class extends AgentRuntime {
         override execute(options: RunAgentCliOptions, dependencies: RunAgentCliDependencies) {
@@ -79,6 +85,16 @@ for (const planning of [false, true]) {
                   assert.equal(options.agentSwarmAuthorization, "turn_override");
                 }
                 step++;
+                if (
+                  !planning &&
+                  options.agentSwarmAuthorization === "turn_override" &&
+                  step === 1
+                ) {
+                  dependencies.reporter?.onTextDelta?.("prefix ");
+                  await firstDelta.promise;
+                  dependencies.reporter?.onTextDelta?.("suffix");
+                  await externalFlush.promise;
+                }
                 if (step === 1) return toolCall("read", "read_file", { path: "TASK.txt" });
                 assert.ok(
                   messages.some(
@@ -114,6 +130,18 @@ for (const planning of [false, true]) {
             (graphHost = createAgentGraphWorkspaceHost(options)),
         });
       let services = makeServices();
+      if (!planning)
+        services.attachSessionSubscriptions({
+          publishSessionDelta(delta: { text: string }) {
+            if (delta.text === "prefix ") firstDelta.resolve();
+            if (delta.text === "suffix") pendingDelta.resolve();
+          },
+          publishContinuityDegraded(...args: unknown[]) {
+            degraded.push(args);
+          },
+          publishReporterEvent() {},
+          publishTranscriptAdvanced() {},
+        } as unknown as SessionSubscriptionRegistry);
       try {
         let runtime = await services.service.getWorkspaceRuntime(workspacePath);
         const lease = await globalSessionManager.getOrCreatePinned(sessionId, workspacePath, {
@@ -143,6 +171,47 @@ for (const planning of [false, true]) {
           prompt: "Read TASK.txt directly; keep this small task on the main agent.",
           execution: { orchestrationMode: "swarm" },
         })) as { runId: string };
+        if (!planning) {
+          await pendingDelta.promise;
+          try {
+            // This call is outside the provider Run, exactly like subscription.open.
+            await services.flushSessionOverlay(workspacePath, sessionId);
+            assert.deepEqual(
+              degraded,
+              [],
+              "subscription flush must retain the original Run authority",
+            );
+            const continuity = new SqliteSessionContinuitySource({
+              picoHome,
+              readMetadata: async () => ({
+                session: {
+                  sessionId,
+                  workspacePath,
+                  title: "Swarm",
+                  status: "active",
+                  pinned: false,
+                  createdAt: 1,
+                  updatedAt: 1,
+                },
+                activeRun: {
+                  runId: request.runId,
+                  sessionId,
+                  workspacePath,
+                  description: "Swarm",
+                  status: "running",
+                  startedAt: 1,
+                  updatedAt: 1,
+                  version: 1,
+                },
+                queuedInputs: [],
+              }),
+            });
+            const snapshot = await continuity.readOpenSnapshot({ workspacePath, sessionId });
+            assert.ok(snapshot.activeOverlay.some(({ text }) => text === "prefix suffix"));
+          } finally {
+            externalFlush.resolve();
+          }
+        }
         const result = await runtime.waitForRun(request.runId);
         assert.equal(result.status, "succeeded", result.error);
         if (planning) {

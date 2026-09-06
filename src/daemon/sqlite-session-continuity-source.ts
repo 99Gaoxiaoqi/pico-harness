@@ -102,8 +102,9 @@ export class SqliteSessionContinuitySource implements SessionContinuityDataSourc
         limit: boundedLimit(params.tailLimit, DEFAULT_TAIL_LIMIT),
       });
       const activeOverlay = metadata.activeRun
-        ? projectRunPartials(
-            await store.readRunPartials(params.sessionId, metadata.activeRun.runId),
+        ? await readDisplayRunOverlays(
+            store,
+            params.sessionId,
             metadata.activeRun.runId,
             page.watermark.throughSequence,
           )
@@ -392,4 +393,38 @@ function activeOverlayEntry(
       : {}),
     ...(candidate.complete ? { complete: true } : {}),
   };
+}
+
+/** Workspace Run ids label live UI streams; snapshots remain owned by canonical RuntimeRuns. */
+async function readDisplayRunOverlays(
+  store: ProjectionStore,
+  sessionId: string,
+  displayRunId: string,
+  anchorSequence: number,
+): Promise<RuntimeActiveOverlayEntry[]> {
+  const exact = projectRunPartials(
+    await store.readRunPartials(sessionId, displayRunId),
+    displayRunId,
+    anchorSequence,
+  );
+  if (exact.length) return exact;
+  const { entries } = await store.readSessionEntriesOfKinds(sessionId, [
+    "run.started",
+    "run.terminal",
+  ]);
+  const terminal = new Set(
+    entries.filter(({ event }) => event.kind === "run.terminal").map(({ event }) => event.runId),
+  );
+  for (const { event } of [...entries].reverse()) {
+    if (event.kind !== "run.started" || event.runId === displayRunId || terminal.has(event.runId))
+      continue;
+    const overlays = projectRunPartials(
+      await store.readRunPartials(sessionId, event.runId),
+      displayRunId,
+      anchorSequence,
+    );
+    // Only the host-produced overlay payload may associate the two identities.
+    if (overlays.length) return overlays;
+  }
+  return [];
 }
