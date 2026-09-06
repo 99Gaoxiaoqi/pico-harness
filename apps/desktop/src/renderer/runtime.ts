@@ -147,11 +147,12 @@ export function approvalFromPlanProjection(
   const execution = projection && isRecord(projection.execution) ? projection.execution : undefined;
   const revisionRequest =
     projection && isRecord(projection.revisionRequest) ? projection.revisionRequest : undefined;
+  const graphExecution = execution?.status === "active" && isRecord(execution.graph);
   if (
     !projection ||
     !controlEpoch ||
     isRecord(projection.reviewClaim) ||
-    (!pending && execution?.status !== "interrupted" && !revisionRequest)
+    (!pending && execution?.status !== "interrupted" && !graphExecution && !revisionRequest)
   ) {
     return undefined;
   }
@@ -187,14 +188,16 @@ export function approvalFromPlanProjection(
     const sessionSequence = numberValue(projection.sessionSequence, -1);
     if (!planId || revision < 0 || sessionSequence < 0) return undefined;
     return {
-      id: `interrupted:${planId}:${controlEpoch}`,
-      runId: `plan-interrupted:${planId}`,
+      id: `${graphExecution ? "graph-active" : "interrupted"}:${planId}:${controlEpoch}`,
+      runId: `plan-${graphExecution ? "graph-active" : "interrupted"}:${planId}`,
       sessionId,
-      title: "计划执行已中断",
-      detail: stringValue(execution.reason, "请选择继续执行、取消执行或重新规划。"),
-      risk: "medium",
+      title: graphExecution ? "计划执行中" : "计划执行已中断",
+      detail: graphExecution
+        ? "计划由 Graph 执行，等待或处理子任务结果。"
+        : stringValue(execution.reason, "请选择继续执行、取消执行或重新规划。"),
+      risk: graphExecution ? "low" : "medium",
       kind: "plan",
-      planControlMode: "interrupted",
+      planControlMode: graphExecution ? "graph_active" : "interrupted",
       planId,
       expectedRevision: revision,
       expectedSessionSequence: sessionSequence,
@@ -239,7 +242,9 @@ export function approvalFromPlanControlSnapshot(
     !value ||
     value.version !== 1 ||
     value.availability !== "ready" ||
-    (value.state !== "pending_review" && value.state !== "interrupted")
+    (value.state !== "pending_review" &&
+      value.state !== "interrupted" &&
+      value.state !== "committed_executing")
   ) {
     return undefined;
   }
