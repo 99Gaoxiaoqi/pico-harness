@@ -55,7 +55,7 @@ const HELP_TEXT = `Usage: pico [options]
 Start the interactive Pico TUI in the current directory.
 
 Options:
-  --provider <openai|claude>         Provider protocol (default: openai)
+  --provider <openai|claude|responses> Provider protocol (default: openai)
   --thinking <off|low|medium|high>   Override the model's default reasoning level
   --dir <path>                       Workspace directory (default: current directory)
   --model <provider/model|name>      Model route or legacy model name
@@ -219,7 +219,9 @@ function parseCliOptions(args: readonly string[]): ParsedCliOptions {
 
   const provider = values.provider;
   if (!isProviderKind(provider)) {
-    throw new CliUsageError(`不支持的 provider: ${String(provider)}。可选值: openai / claude。`);
+    throw new CliUsageError(
+      `不支持的 provider: ${String(provider)}。可选值: openai / claude / responses。`,
+    );
   }
 
   const thinkingEffort =
@@ -271,7 +273,7 @@ function formatCliError(error: unknown): string {
 }
 
 function isProviderKind(value: unknown): value is ProviderKind {
-  return value === "openai" || value === "claude";
+  return value === "openai" || value === "claude" || value === "responses";
 }
 
 async function loadPackageVersion(): Promise<string> {

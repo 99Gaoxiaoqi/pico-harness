@@ -71,6 +71,7 @@ import {
   useNavigate,
   useParams,
 } from "react-router-dom";
+import { ComposerModelPicker } from "./ComposerModelPicker.js";
 import { Button, CapabilityList, EmptyState, InlineNotice, StatusPill } from "./components.js";
 import {
   ConversationComposer,
@@ -1642,11 +1643,23 @@ function ConversationPage() {
   const [newTaskSettingOverrides, setNewTaskSettingOverrides] = useState<
     Readonly<Record<string, RuntimeUserDefaults>>
   >({});
+  const newTaskModelRoutes = useMemo(() => {
+    if (workspacePath && data.modelRoutes.length) return data.modelRoutes;
+    const globalRoutes = data.providerConfig.providers
+      .filter((provider) => provider.origin === "user")
+      .flatMap((provider) =>
+        provider.models.map((model) => ({
+          id: `${provider.id}/${model}`,
+          label: `${model} · ${provider.id}`,
+        })),
+      );
+    return globalRoutes.length ? globalRoutes : data.modelRoutes;
+  }, [workspacePath, data.modelRoutes, data.providerConfig.providers]);
   const newTaskSettings = useMemo<RuntimeUserDefaults>(() => {
     const defaults = data.providerConfig.userDefaults;
     const legacyMode = defaults.mode;
     const modelRouteId =
-      defaults.modelRouteId ?? data.providerConfig.defaultModelRouteId ?? data.modelRoutes[0]?.id;
+      defaults.modelRouteId ?? data.providerConfig.defaultModelRouteId ?? newTaskModelRoutes[0]?.id;
     return {
       ...(modelRouteId ? { modelRouteId } : {}),
       collaborationMode: defaults.collaborationMode ?? (legacyMode === "plan" ? "plan" : "agent"),
@@ -1658,7 +1671,7 @@ function ConversationPage() {
       ...newTaskSettingOverrides[workspacePath || "unbound"],
     };
   }, [
-    data.modelRoutes,
+    newTaskModelRoutes,
     data.providerConfig.defaultModelRouteId,
     data.providerConfig.userDefaults,
     newTaskSettingOverrides,
@@ -1673,6 +1686,13 @@ function ConversationPage() {
     },
     [workspacePath],
   );
+  const composerModelRouteId = conversation?.settings?.modelRouteId ?? newTaskSettings.modelRouteId;
+  const composerProvider = data.providerConfig.providers.find((provider) =>
+    composerModelRouteId?.startsWith(`${provider.id}/`),
+  );
+  const usingOpenCodeFree =
+    composerProvider?.auth === "none" &&
+    composerProvider.baseURL.replace(/\/+$/u, "") === "https://opencode.ai/zen/v1";
 
   const runIds = useMemo(() => new Set(sessionRuns.map((run) => run.id)), [sessionRuns]);
   const persistedPendingApproval = activeRun
@@ -1851,6 +1871,40 @@ function ConversationPage() {
   };
 
   const openCatalog = () => setCatalogOpen((open) => !open);
+
+  const changePlanMode = async (active: boolean) => {
+    const collaborationMode = active ? "plan" : "agent";
+    if (!sessionRef) {
+      updateNewTaskSettings({ collaborationMode });
+      return;
+    }
+    const pendingPlan = data.approvals.find(
+      (approval) => approval.kind === "plan" && approval.sessionId === sessionRef.sessionId,
+    );
+    if (!active && conversation?.settings?.collaborationMode === "plan" && pendingPlan) {
+      if (!window.confirm("当前计划仍待审批。退出 Plan 将拒绝并放弃这份计划，是否继续？")) return;
+      await actions.respondPlan({
+        sessionId: sessionRef.sessionId,
+        planId: pendingPlan.planId ?? pendingPlan.id,
+        action: "reject_exit",
+        expectedRevision: pendingPlan.expectedRevision ?? 0,
+        expectedSessionSequence: pendingPlan.expectedSessionSequence ?? 0,
+        controlEpoch: pendingPlan.controlEpoch ?? "",
+        feedback: "用户从协作模式开关退出 Plan。",
+      });
+      return;
+    }
+    await actions.updateSessionSettings(sessionRef, { collaborationMode });
+  };
+
+  const changeGraphMode = async (active: boolean) => {
+    const orchestrationMode = active ? "graph" : "default";
+    if (!sessionRef) {
+      updateNewTaskSettings({ orchestrationMode });
+      return;
+    }
+    await actions.updateSessionSettings(sessionRef, { orchestrationMode });
+  };
 
   const chooseProjectFolder = async () => {
     const sourceDraftKey = draftKey;
@@ -2342,6 +2396,14 @@ function ConversationPage() {
             />
           ) : (
             <div className="conversation-composer-region">
+              {usingOpenCodeFree && (
+                <p className="conversation-free-notice">
+                  OpenCode Free 免费试用 · 按 IP 限流，请勿提交个人或机密信息。
+                  <a href="https://opencode.ai/docs/zen#privacy" target="_blank" rel="noreferrer">
+                    数据使用说明
+                  </a>
+                </p>
+              )}
               {catalogOpen && (
                 <ConversationContextMenu
                   skills={data.catalogSkills}
@@ -2392,6 +2454,23 @@ function ConversationPage() {
                 onResume={activeRun ? () => void actions.resumeRun(activeRun.id) : undefined}
                 onStop={activeRun ? () => void actions.stopRun(activeRun.id) : undefined}
                 onAttach={composerStatus === "idle" && workspaceReady ? openCatalog : undefined}
+                modes={
+                  composerReady && (!sessionRef || conversation?.settings)
+                    ? {
+                        planActive:
+                          (sessionRef
+                            ? conversation?.settings?.collaborationMode
+                            : newTaskSettings.collaborationMode) === "plan",
+                        graphActive:
+                          (sessionRef
+                            ? conversation?.settings?.orchestrationMode
+                            : newTaskSettings.orchestrationMode) === "graph",
+                        disabled: Boolean(activeRun) || Boolean(busy),
+                        onPlanChange: changePlanMode,
+                        onGraphChange: changeGraphMode,
+                      }
+                    : undefined
+                }
                 trailingAccessory={
                   activation ? (
                     <button
@@ -2454,42 +2533,14 @@ function ConversationPage() {
                         </label>
                         {composerReady && (
                           <>
-                            <label className="conversation-context-option">
-                              <span className="conversation-sr-only">模型</span>
-                              <select
-                                name="initial-model-route"
-                                aria-label="模型"
-                                value={newTaskSettings.modelRouteId ?? ""}
-                                onChange={(event) =>
-                                  updateNewTaskSettings({ modelRouteId: event.target.value })
-                                }
-                              >
-                                {data.modelRoutes.length === 0 && (
-                                  <option value="">默认模型</option>
-                                )}
-                                {data.modelRoutes.map((route) => (
-                                  <option key={route.id} value={route.id}>
-                                    {route.label}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                            <label className="conversation-context-option">
-                              <span className="conversation-sr-only">协作模式</span>
-                              <select
-                                name="initial-collaboration-mode"
-                                aria-label="协作模式"
-                                value={newTaskSettings.collaborationMode ?? "agent"}
-                                onChange={(event) =>
-                                  updateNewTaskSettings({
-                                    collaborationMode: event.target.value as "agent" | "plan",
-                                  })
-                                }
-                              >
-                                <option value="agent">Agent</option>
-                                <option value="plan">计划</option>
-                              </select>
-                            </label>
+                            <ComposerModelPicker
+                              routes={newTaskModelRoutes}
+                              providers={data.providerConfig.providers}
+                              value={newTaskSettings.modelRouteId}
+                              onChange={(modelRouteId) => updateNewTaskSettings({ modelRouteId })}
+                              onConfigure={() => navigate("/settings/models")}
+                            />
+
                             <label
                               className={`conversation-context-option conversation-icon-select ${newTaskSettings.permissionMode === "yolo" ? "is-danger" : ""}`}
                               title={`权限：${newTaskSettings.permissionMode === "yolo" ? "YOLO（完全访问）" : newTaskSettings.permissionMode === "auto" ? "自动" : "默认"}`}
@@ -2515,26 +2566,6 @@ function ConversationPage() {
                                 <option value="yolo">权限：YOLO（完全访问）</option>
                               </select>
                             </label>
-                            <label
-                              className="conversation-context-option conversation-icon-select"
-                              title={`编排：${newTaskSettings.orchestrationMode === "graph" ? "Graph" : "线性"}`}
-                            >
-                              <GitFork aria-hidden="true" />
-                              <span className="conversation-sr-only">编排模式</span>
-                              <select
-                                name="initial-orchestration-mode"
-                                aria-label="编排模式"
-                                value={newTaskSettings.orchestrationMode ?? "default"}
-                                onChange={(event) =>
-                                  updateNewTaskSettings({
-                                    orchestrationMode: event.target.value as "default" | "graph",
-                                  })
-                                }
-                              >
-                                <option value="default">线性</option>
-                                <option value="graph">Graph</option>
-                              </select>
-                            </label>
                           </>
                         )}
                       </>
@@ -2550,77 +2581,19 @@ function ConversationPage() {
                     )}
                     {sessionRef && conversation?.settings && (
                       <>
-                        <label className="conversation-context-option">
-                          <span className="conversation-sr-only">模型</span>
-                          <select
-                            name="model-route"
-                            aria-label="模型"
-                            value={conversation.settings.modelRouteId ?? ""}
-                            disabled={Boolean(activeRun) || Boolean(busy)}
-                            onChange={(event) =>
-                              void actions.updateSessionSettings(sessionRef, {
-                                modelRouteId: event.target.value,
-                              })
-                            }
-                          >
-                            {!data.modelRoutes.some(
-                              (route) => route.id === conversation.settings?.modelRouteId,
-                            ) && (
-                              <option value={conversation.settings.modelRouteId ?? ""}>
-                                {conversation.settings.model}
-                              </option>
-                            )}
-                            {data.modelRoutes.map((route) => (
-                              <option key={route.id} value={route.id}>
-                                {route.label}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                        <label className="conversation-context-option">
-                          <span className="conversation-sr-only">协作模式</span>
-                          <select
-                            name="collaboration-mode"
-                            aria-label="协作模式"
-                            value={conversation.settings.collaborationMode}
-                            disabled={Boolean(activeRun) || Boolean(busy)}
-                            onChange={(event) => {
-                              const collaborationMode = event.target.value as "agent" | "plan";
-                              const pendingPlan = data.approvals.find(
-                                (approval) =>
-                                  approval.kind === "plan" &&
-                                  approval.sessionId === sessionRef.sessionId,
-                              );
-                              if (
-                                collaborationMode === "agent" &&
-                                conversation.settings?.collaborationMode === "plan" &&
-                                pendingPlan
-                              ) {
-                                if (
-                                  !window.confirm(
-                                    "当前计划仍待审批。退出 Plan 将拒绝并放弃这份计划，是否继续？",
-                                  )
-                                ) {
-                                  return;
-                                }
-                                void actions.respondPlan({
-                                  sessionId: sessionRef.sessionId,
-                                  planId: pendingPlan.planId ?? pendingPlan.id,
-                                  action: "reject_exit",
-                                  expectedRevision: pendingPlan.expectedRevision ?? 0,
-                                  expectedSessionSequence: pendingPlan.expectedSessionSequence ?? 0,
-                                  controlEpoch: pendingPlan.controlEpoch ?? "",
-                                  feedback: "用户从协作模式开关退出 Plan。",
-                                });
-                                return;
-                              }
-                              void actions.updateSessionSettings(sessionRef, { collaborationMode });
-                            }}
-                          >
-                            <option value="agent">Agent</option>
-                            <option value="plan">计划</option>
-                          </select>
-                        </label>
+                        <ComposerModelPicker
+                          routes={data.modelRoutes}
+                          providers={data.providerConfig.providers}
+                          value={conversation.settings.modelRouteId}
+                          currentLabel={conversation.settings.model}
+                          disabled={Boolean(activeRun) || Boolean(busy)}
+                          hasHistory={conversation.items.length > 0}
+                          onChange={(modelRouteId) =>
+                            actions.updateSessionSettings(sessionRef, { modelRouteId })
+                          }
+                          onConfigure={() => navigate("/settings/models")}
+                        />
+
                         <label className="conversation-context-option">
                           <span className="conversation-sr-only">权限模式</span>
                           <select
@@ -2640,23 +2613,7 @@ function ConversationPage() {
                             <option value="yolo">权限：YOLO（完全访问）</option>
                           </select>
                         </label>
-                        <label className="conversation-context-option">
-                          <span className="conversation-sr-only">编排模式</span>
-                          <select
-                            name="orchestration-mode"
-                            aria-label="编排模式"
-                            value={conversation.settings.orchestrationMode}
-                            disabled={Boolean(activeRun) || Boolean(busy)}
-                            onChange={(event) =>
-                              void actions.updateSessionSettings(sessionRef, {
-                                orchestrationMode: event.target.value as "default" | "graph",
-                              })
-                            }
-                          >
-                            <option value="default">线性</option>
-                            <option value="graph">Graph</option>
-                          </select>
-                        </label>
+
                         {conversation.settings.reasoningLevels.length > 0 && (
                           <label className="conversation-context-option">
                             <span className="conversation-sr-only">Thinking</span>

@@ -70,9 +70,14 @@
     "node": ">=22.19 <23 || >=24.3 <25 || >=26 <27"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "4.0.39",
+    "@ai-sdk/open-responses": "2.0.28",
+    "@ai-sdk/openai": "4.0.42",
+    "@ai-sdk/openai-compatible": "3.0.30",
     "@pico/protocol": "*",
     "@pico/runtime-host": "*",
     "@pico/transcript-replica": "*",
+    "ai": "7.0.66",
     "gpt-tokenizer": "^3.4.0",
     "ink": "^7.1.0",
     "js-yaml": "^5.1.0",

@@ -1,6 +1,7 @@
 // Provider 工厂:按协议类型创建对应适配器。
 
 import type { ProviderConfig } from "./config.js";
+import { AiSdkProvider } from "./ai-sdk-provider.js";
 import { ClaudeProvider } from "./claude.js";
 import { OpenAIProvider } from "./openai.js";
 import type { LLMProvider } from "./interface.js";
@@ -10,7 +11,7 @@ import { providerProfileForRoute } from "./model-capabilities.js";
 import { withProviderErrorRedaction } from "./error-redaction.js";
 import type { PromptCachePrewarmCoordinator } from "./prompt-cache-prewarm.js";
 
-export type ProviderKind = "openai" | "claude";
+export type ProviderKind = "openai" | "claude" | "responses";
 
 /** Runtime-owned dependencies that are deliberately kept outside credential-bearing ProviderConfig. */
 export interface ProviderRuntimeDependencies {
@@ -56,6 +57,9 @@ export function createRawProvider(
   switch (kind) {
     case "openai":
       provider = new OpenAIProvider(cfg, profile);
+      break;
+    case "responses":
+      provider = new AiSdkProvider(kind, cfg, profile);
       break;
     case "claude":
       provider = new ClaudeProvider(cfg, profile);

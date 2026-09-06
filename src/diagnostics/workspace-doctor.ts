@@ -87,7 +87,7 @@ export async function runWorkspaceDoctor(
   const defaultCredentialState =
     (defaultProviderId ? options.configuration?.credentialStates[defaultProviderId] : undefined) ??
     "missing";
-  const defaultCredentialAvailable = ["config", "environment", "keychain"].includes(
+  const defaultCredentialAvailable = ["none", "config", "environment", "keychain"].includes(
     defaultCredentialState,
   );
   const storage = await scanStorage(options);

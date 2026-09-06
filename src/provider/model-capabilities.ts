@@ -158,6 +158,25 @@ function resolvePromptCachePolicy(
     throw new Error("promptCache.shardThresholdRpm requires keyShards greater than 1");
   }
   const prewarm = configured.prewarm ?? false;
+  if (provider === "responses") {
+    if (
+      configured.mode !== "implicit" ||
+      configured.ttl !== undefined ||
+      configured.explicitBreakpoints !== undefined ||
+      prewarm
+    ) {
+      throw new Error(
+        "Responses supports implicit prompt caching without TTL, breakpoints or prewarm",
+      );
+    }
+    return {
+      mode: "implicit",
+      keyShards,
+      ...(shardThresholdRpm !== undefined ? { shardThresholdRpm } : {}),
+      ...(configured.retention ? { retention: configured.retention } : {}),
+      prewarm: false,
+    };
+  }
   if (provider === "openai") {
     if (configured.ttl !== undefined && configured.ttl !== "30m") {
       throw new Error("OpenAI promptCache.ttl must be 30m");
@@ -227,7 +246,6 @@ export function defaultToolChoiceNoneWithTools(
   provider: ProviderKind,
   baseURL: string | undefined,
 ): CapabilitySupport {
-  if (provider !== "claude" && provider !== "openai") return false;
   if (!baseURL) return "unknown";
   try {
     const endpoint = new URL(baseURL);

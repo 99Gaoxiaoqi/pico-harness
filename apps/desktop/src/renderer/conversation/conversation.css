@@ -1467,6 +1467,93 @@
   height: 15px;
 }
 
+.conversation-plus-trigger[aria-expanded="true"] {
+  background: var(--conversation-bg-subtle);
+  color: var(--conversation-ink);
+}
+
+.conversation-plus-menu {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  padding: 5px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid color-mix(in srgb, var(--conversation-line) 65%, transparent);
+  border-radius: 9px;
+  background: var(--conversation-bg);
+  color: var(--conversation-ink);
+  box-shadow:
+    0 3px 8px rgb(0 0 0 / 0.08),
+    0 10px 28px rgb(0 0 0 / 0.06);
+  font-size: 12px;
+}
+
+.conversation-plus-menu > button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 34px;
+  padding: 7px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.conversation-plus-menu > button:hover:not(:disabled),
+.conversation-plus-menu > button:focus-visible {
+  background: var(--conversation-bg-subtle);
+  outline: none;
+}
+
+.conversation-plus-menu > button:disabled,
+.conversation-mode-mark:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.conversation-plus-menu svg,
+.conversation-mode-mark svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.conversation-plus-menu > button > span {
+  flex: 1;
+}
+
+.conversation-plus-divider {
+  height: 1px;
+  margin: 5px 2px;
+  background: var(--conversation-line);
+}
+
+.conversation-mode-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 4px 7px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--conversation-accent);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.conversation-mode-mark:hover:not(:disabled) {
+  background: var(--conversation-bg-subtle);
+}
+
 .conversation-send-button {
   border: 0;
   border-radius: 50%;
@@ -2113,5 +2200,157 @@
   [data-state="active"] > .conversation-inline-card__header .conversation-item-state svg,
   .conversation-plan li[data-state="active"] > svg {
     animation: none;
+  }
+}
+
+/* The composer uses a quiet, grouped model menu instead of a form select. */
+.composer-model-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 240px;
+  height: 28px;
+  padding: 4px 7px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--conversation-ink-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.composer-model-trigger > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-model-trigger:hover:not(:disabled),
+.composer-model-trigger[aria-expanded="true"] {
+  background: var(--conversation-bg-subtle);
+  color: var(--conversation-ink);
+}
+.composer-model-trigger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.composer-model-trigger svg,
+.composer-model-mark {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  object-fit: contain;
+}
+.composer-model-menu {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  padding: 5px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  border: 1px solid color-mix(in srgb, var(--conversation-line) 65%, transparent);
+  border-radius: 10px;
+  background: var(--conversation-bg);
+  color: var(--conversation-ink);
+  box-shadow:
+    0 3px 8px rgb(0 0 0 / 0.08),
+    0 10px 28px rgb(0 0 0 / 0.06);
+  font-size: 12px;
+}
+.composer-model-heading {
+  padding: 9px 7px 5px;
+  color: var(--conversation-ink-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.composer-model-menu [role="group"] + [role="group"] {
+  margin-top: 5px;
+  padding-top: 3px;
+  border-top: 1px solid var(--conversation-line);
+}
+.composer-model-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 34px;
+  padding: 7px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.composer-model-item > span {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 3px;
+}
+.composer-model-item strong,
+.composer-model-item small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 400;
+  line-height: 1.35;
+}
+.composer-model-item small {
+  color: var(--conversation-ink-faint);
+  font-size: 11px;
+}
+.composer-model-item:hover:not(:disabled),
+.composer-model-item:focus-visible {
+  background: var(--conversation-bg-subtle);
+  outline: none;
+}
+.composer-model-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.composer-model-check,
+.composer-model-item > svg:last-child {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+.composer-model-notice {
+  display: flex;
+  gap: 6px;
+  margin: 2px 2px 5px;
+  padding: 8px;
+  border: 1px solid color-mix(in srgb, var(--conversation-warning) 20%, transparent);
+  border-radius: 5px;
+  background: var(--conversation-warning-soft);
+  color: var(--conversation-warning);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.composer-model-notice svg {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  margin-top: 2px;
+}
+.composer-model-loading {
+  animation: composer-model-spin 1s linear infinite;
+}
+@keyframes composer-model-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .composer-model-loading {
+    animation: none;
+  }
+}
+@media (max-width: 640px) {
+  .composer-model-trigger {
+    max-width: 180px;
   }
 }

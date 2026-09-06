@@ -46,7 +46,7 @@ test("OpenAI explicit cache key is stable, private, and route-scoped", async (co
   globalThis.fetch = async (_input, init) => {
     bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
     return Response.json({
-      choices: [{ message: { role: "assistant", content: "ok" } }],
+      choices: [{ finish_reason: "stop", message: { role: "assistant", content: "ok" } }],
       usage: {
         prompt_tokens: 100,
         completion_tokens: 2,
@@ -124,7 +124,7 @@ test("OpenAI implicit cache sends a stable key and legacy retention", async (con
   globalThis.fetch = async (_input, init) => {
     bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
     return Response.json({
-      choices: [{ message: { role: "assistant", content: "ok" } }],
+      choices: [{ finish_reason: "stop", message: { role: "assistant", content: "ok" } }],
       usage: { prompt_tokens: 100, completion_tokens: 2 },
     });
   };
@@ -195,7 +195,7 @@ test("OpenAI appends the API path before preserving routing query parameters", a
   globalThis.fetch = async (input) => {
     requestUrl = String(input);
     return Response.json({
-      choices: [{ message: { role: "assistant", content: "ok" } }],
+      choices: [{ finish_reason: "stop", message: { role: "assistant", content: "ok" } }],
       usage: { prompt_tokens: 100, completion_tokens: 2 },
     });
   };
@@ -230,7 +230,7 @@ test("OpenAI compatible route rejects cache key without disabling breakpoints", 
       );
     }
     return Response.json({
-      choices: [{ message: { role: "assistant", content: "ok" } }],
+      choices: [{ finish_reason: "stop", message: { role: "assistant", content: "ok" } }],
       usage: { prompt_tokens: 100, completion_tokens: 2 },
     });
   };
@@ -280,7 +280,7 @@ test("OpenAI compatible implicit route remembers a rejected cache key", async (c
       );
     }
     return Response.json({
-      choices: [{ message: { role: "assistant", content: "ok" } }],
+      choices: [{ finish_reason: "stop", message: { role: "assistant", content: "ok" } }],
       usage: { prompt_tokens: 100, completion_tokens: 2 },
     });
   };
@@ -323,7 +323,7 @@ test("OpenAI compatible route rejects retention without disabling cache key", as
       );
     }
     return Response.json({
-      choices: [{ message: { role: "assistant", content: "ok" } }],
+      choices: [{ finish_reason: "stop", message: { role: "assistant", content: "ok" } }],
       usage: { prompt_tokens: 100, completion_tokens: 2 },
     });
   };
@@ -367,7 +367,7 @@ test("OpenAI compatible route rejects breakpoints without disabling cache key", 
       );
     }
     return Response.json({
-      choices: [{ message: { role: "assistant", content: "ok" } }],
+      choices: [{ finish_reason: "stop", message: { role: "assistant", content: "ok" } }],
       usage: { prompt_tokens: 100, completion_tokens: 2 },
     });
   };
@@ -425,7 +425,7 @@ test("OpenAI key shards use an opaque stable conversation seed", async (context)
   globalThis.fetch = async (_input, init) => {
     bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
     return Response.json({
-      choices: [{ message: { role: "assistant", content: "ok" } }],
+      choices: [{ finish_reason: "stop", message: { role: "assistant", content: "ok" } }],
       usage: { prompt_tokens: 100, completion_tokens: 2 },
     });
   };
@@ -531,7 +531,7 @@ test("OpenAI stream reports cache writes only when the provider sends the field"
   globalThis.fetch = async () =>
     new Response(
       [
-        'data: {"choices":[{"delta":{"content":"ok"}}]}',
+        'data: {"choices":[{"finish_reason":"stop","delta":{"content":"ok"}}]}',
         "",
         'data: {"choices":[],"usage":{"prompt_tokens":120,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":70,"cache_write_tokens":40}}}',
         "",
@@ -565,7 +565,12 @@ test("OpenAI stream preserves tools while sending tool_choice none on supported 
   globalThis.fetch = async (_input, init) => {
     body = JSON.parse(String(init?.body)) as Record<string, unknown>;
     return new Response(
-      ['data: {"choices":[{"delta":{"content":"ok"}}]}', "", "data: [DONE]", ""].join("\n"),
+      [
+        'data: {"choices":[{"finish_reason":"stop","delta":{"content":"ok"}}]}',
+        "",
+        "data: [DONE]",
+        "",
+      ].join("\n"),
       { status: 200, headers: { "content-type": "text/event-stream" } },
     );
   };
@@ -598,7 +603,16 @@ test("Claude applies 1h only to stable prefix and omits cache controls on unknow
   });
   globalThis.fetch = async (_input, init) => {
     bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
-    return Response.json({ content: [{ type: "text", text: "ok" }] });
+    return Response.json({
+      id: "msg_fixture",
+      type: "message",
+      role: "assistant",
+      model: "claude-fixture",
+      content: [{ type: "text", text: "ok" }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
   };
   const cached = new ClaudeProvider({
     baseURL: "https://compatible.invalid/v1",

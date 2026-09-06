@@ -1,4 +1,4 @@
-export type ProviderProtocol = "openai" | "claude";
+export type ProviderProtocol = "openai" | "claude" | "responses";
 export type AssistantContentMode = "empty_string" | "null_when_empty";
 
 export interface ProviderProfile {
@@ -18,6 +18,15 @@ export interface ProviderProfile {
 const DEFAULTS: Record<ProviderProtocol, Omit<ProviderProfile, "model">> = {
   openai: {
     protocol: "openai",
+    assistantContent: "empty_string",
+    contextWindowTokens: 128_000,
+    maxOutputTokens: 4096,
+    supportsReasoningContent: true,
+    supportsPromptCache: false,
+    supportsThinkingControl: false,
+  },
+  responses: {
+    protocol: "responses",
     assistantContent: "empty_string",
     contextWindowTokens: 128_000,
     maxOutputTokens: 4096,

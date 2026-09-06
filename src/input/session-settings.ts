@@ -714,7 +714,7 @@ export function toolStatusFromRegistry(registry: Registry): SessionToolStatus[] 
   }));
 }
 
-function toProfileProtocol(provider: ProviderKind): "openai" | "claude" {
+function toProfileProtocol(provider: ProviderKind): "openai" | "claude" | "responses" {
   return provider;
 }
 

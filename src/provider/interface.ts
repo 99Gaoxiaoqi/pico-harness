@@ -40,7 +40,7 @@ export interface LLMProviderRequestOptions {
 
 /** 已完成协议翻译、但尚未发送的无凭证 Provider 请求体。 */
 export interface PreparedProviderRequest {
-  provider: "claude" | "openai";
+  provider: "claude" | "openai" | "responses";
   model: string;
   body: Readonly<Record<string, unknown>>;
 }

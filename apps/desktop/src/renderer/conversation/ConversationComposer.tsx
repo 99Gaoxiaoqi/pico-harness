@@ -1,4 +1,4 @@
-import { ArrowUp, Pause, Play, Plus, Square } from "lucide-react";
+import { ArrowUp, Pause, Play, Square } from "lucide-react";
 import {
   useId,
   useLayoutEffect,
@@ -14,6 +14,10 @@ import type {
   ComposerStatus,
   ComposerSubmitValue,
 } from "./types.js";
+import {
+  ConversationComposerMenu,
+  type ConversationComposerModes,
+} from "./ConversationComposerMenu.js";
 
 export interface ConversationComposerProps {
   readonly value: string;
@@ -31,6 +35,7 @@ export interface ConversationComposerProps {
   readonly selectedOption?: string | undefined;
   readonly onOptionChange?: ((value: string) => void) | undefined;
   readonly onAttach?: (() => void) | undefined;
+  readonly modes?: ConversationComposerModes | undefined;
   readonly onPause?: (() => void) | undefined;
   readonly onResume?: (() => void) | undefined;
   readonly onStop?: (() => void) | undefined;
@@ -64,6 +69,7 @@ export function ConversationComposer({
   selectedOption,
   onOptionChange,
   onAttach,
+  modes,
   onPause,
   onResume,
   onStop,
@@ -160,17 +166,9 @@ export function ConversationComposer({
       />
       <div className="conversation-composer__footer">
         <div className="conversation-composer__controls">
-          <button
-            type="button"
-            className="conversation-icon-button"
-            onClick={onAttach}
-            disabled={!onAttach}
-            aria-label="添加 Skill 或子代理"
-            title={onAttach ? "添加 Skill 或子代理" : "选择项目后，可在空闲时添加 Skill 或子代理"}
-          >
-            <Plus aria-hidden="true" />
-          </button>
-          {leadingAccessory}
+          <ConversationComposerMenu onAttach={onAttach} modes={modes} disabled={disabled || busy}>
+            {leadingAccessory}
+          </ConversationComposerMenu>
           {status !== "idle" && (
             <label className="conversation-behavior">
               <span className="conversation-sr-only">运行中消息行为</span>

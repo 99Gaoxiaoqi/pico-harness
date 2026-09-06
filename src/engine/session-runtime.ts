@@ -531,7 +531,7 @@ function parseGeneratedGoalSequence(id: string): number | undefined {
 }
 
 function isProviderKind(value: unknown): value is ProviderKind {
-  return value === "openai" || value === "claude";
+  return value === "openai" || value === "claude" || value === "responses";
 }
 
 function isInteractionMode(value: unknown): value is PersistedInteractionMode {

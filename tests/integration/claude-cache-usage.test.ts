@@ -37,22 +37,31 @@ test("Claude keeps uncached input separate from prompt-cache usage", async (cont
     if (body["stream"] === true) {
       return new Response(
         [
-          'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":40,"cache_creation_input_tokens":10,"cache_read_input_tokens":50}}}',
+          'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_fixture","type":"message","role":"assistant","model":"claude-fixture","content":[],"usage":{"output_tokens":0,"input_tokens":40,"cache_creation_input_tokens":10,"cache_read_input_tokens":50}}}',
           "",
           'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
           "",
           'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"OK"}}',
           "",
-          'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":5}}',
+          'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}',
+          "",
+          'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}',
           "",
           'event: message_stop\ndata: {"type":"message_stop"}',
+          "",
           "",
         ].join("\n"),
         { status: 200, headers: { "content-type": "text/event-stream" } },
       );
     }
     return Response.json({
+      id: "msg_fixture",
+      type: "message",
+      role: "assistant",
+      model: "claude-fixture",
       content: [{ type: "text", text: "OK" }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
       usage: {
         input_tokens: 40,
         output_tokens: 5,
@@ -69,7 +78,10 @@ test("Claude keeps uncached input separate from prompt-cache usage", async (cont
   });
 
   const response = await provider.generate([{ role: "user", content: "test" }], []);
-  assert.deepEqual(response.usage, expectedUsage);
+  assert.deepEqual(
+    { ...response.usage, reportedFields: new Set(response.usage?.reportedFields) },
+    { ...expectedUsage, reportedFields: new Set(expectedUsage.reportedFields) },
+  );
   assert.deepEqual(toCanonicalUsage(response.usage!), expectedCanonicalUsage);
 
   const deltas: string[] = [];
@@ -79,6 +91,9 @@ test("Claude keeps uncached input separate from prompt-cache usage", async (cont
     (delta) => deltas.push(delta),
   );
   assert.deepEqual(deltas, ["OK"]);
-  assert.deepEqual(streamResponse.usage, expectedStreamUsage);
+  assert.deepEqual(
+    { ...streamResponse.usage, reportedFields: new Set(streamResponse.usage?.reportedFields) },
+    { ...expectedStreamUsage, reportedFields: new Set(expectedStreamUsage.reportedFields) },
+  );
   assert.deepEqual(toCanonicalUsage(streamResponse.usage!), expectedCanonicalUsage);
 });

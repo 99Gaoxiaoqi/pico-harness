@@ -307,7 +307,33 @@ export function parseModelProviderConfigs(
     }
     const protocol = rawProvider["protocol"] ?? "openai";
     if (!isProviderKind(protocol)) {
-      throw configError(configPath, `${field}.protocol`, "must be openai or claude");
+      throw configError(configPath, `${field}.protocol`, "must be openai, claude or responses");
+    }
+    const modelProtocols: Record<string, ProviderKind> = {};
+    const rawModelProtocols = rawProvider["modelProtocols"];
+    if (rawModelProtocols !== undefined) {
+      if (!isRecord(rawModelProtocols)) {
+        throw configError(configPath, `${field}.modelProtocols`, "must be an object");
+      }
+      for (const [model, wire] of Object.entries(rawModelProtocols)) {
+        if (
+          !model.trim() ||
+          model !== model.trim() ||
+          isUnsafeObjectKey(model) ||
+          !isProviderKind(wire)
+        ) {
+          throw configError(
+            configPath,
+            `${field}.modelProtocols.${model}`,
+            "must name a model and use openai, claude or responses",
+          );
+        }
+        modelProtocols[model] = wire;
+      }
+    }
+    const auth = rawProvider["auth"];
+    if (auth !== undefined && auth !== "none" && auth !== "api-key") {
+      throw configError(configPath, `${field}.auth`, "must be api-key or none");
     }
     const baseURL = parseRequiredString(rawProvider["baseURL"], configPath, `${field}.baseURL`);
     const apiKeyEnv = parseRequiredString(
@@ -323,13 +349,24 @@ export function parseModelProviderConfigs(
       protocol,
       configPath,
       `${field}.models`,
+      modelProtocols,
     );
+    for (const model of Object.keys(modelProtocols)) {
+      if (!parsedModels.models.includes(model)) {
+        throw configError(
+          configPath,
+          `${field}.modelProtocols.${model}`,
+          "must reference a model in providers.*.models",
+        );
+      }
+    }
     const normalizedCapabilities = parseNormalizedModelCapabilities(
       rawProvider["modelCapabilities"],
       parsedModels.models,
       protocol,
       configPath,
       `${field}.modelCapabilities`,
+      modelProtocols,
     );
     const modelCapabilities = {
       ...parsedModels.capabilities,
@@ -341,8 +378,10 @@ export function parseModelProviderConfigs(
     }
     providers[id] = {
       protocol,
+      ...(rawModelProtocols !== undefined ? { modelProtocols } : {}),
       baseURL,
       apiKeyEnv,
+      ...(auth !== undefined ? { auth } : {}),
       models: parsedModels.models,
       discoverModels: discoverModels ?? protocol === "openai",
       ...(Object.keys(modelCapabilities).length > 0 ? { modelCapabilities } : {}),
@@ -358,6 +397,7 @@ function parseNormalizedModelCapabilities(
   protocol: ProviderKind,
   configPath: string,
   field: string,
+  modelProtocols: Readonly<Record<string, ProviderKind>> = {},
 ): Record<string, ModelCapabilityConfig> {
   if (value === undefined) return {};
   if (!isRecord(value)) throw configError(configPath, field, "must be an object");
@@ -371,7 +411,12 @@ function parseNormalizedModelCapabilities(
     if (!isRecord(rawCapabilities)) {
       throw configError(configPath, modelField, "must be a capability object");
     }
-    capabilities[model] = parseModelCapabilities(rawCapabilities, protocol, configPath, modelField);
+    capabilities[model] = parseModelCapabilities(
+      rawCapabilities,
+      modelProtocols[model] ?? protocol,
+      configPath,
+      modelField,
+    );
   }
   return capabilities;
 }
@@ -381,6 +426,7 @@ function parseModels(
   protocol: ProviderKind,
   configPath: string,
   field: string,
+  modelProtocols: Readonly<Record<string, ProviderKind>> = {},
 ): { models: string[]; capabilities: Record<string, ModelCapabilityConfig> } {
   if (value === undefined) return { models: [], capabilities: {} };
   if (Array.isArray(value)) {
@@ -406,7 +452,12 @@ function parseModels(
       throw configError(configPath, modelField, "must be a capability object");
     }
     models.push(model);
-    capabilities[model] = parseModelCapabilities(rawCapabilities, protocol, configPath, modelField);
+    capabilities[model] = parseModelCapabilities(
+      rawCapabilities,
+      modelProtocols[model] ?? protocol,
+      configPath,
+      modelField,
+    );
   }
   return { models, capabilities };
 }
@@ -549,6 +600,31 @@ function parseModelCapabilities(
           "is not supported for claude",
         );
       }
+    } else if (protocol === "responses") {
+      if (mode !== "implicit") {
+        throw configError(
+          configPath,
+          `${field}.promptCache.mode`,
+          "must be implicit for responses",
+        );
+      }
+      if (ttl !== undefined) {
+        throw configError(configPath, `${field}.promptCache.ttl`, "is not supported for responses");
+      }
+      if (explicitBreakpoints !== undefined) {
+        throw configError(
+          configPath,
+          `${field}.promptCache.explicitBreakpoints`,
+          "is not supported for responses",
+        );
+      }
+      if (prewarm === true) {
+        throw configError(
+          configPath,
+          `${field}.promptCache.prewarm`,
+          "is not supported for responses",
+        );
+      }
     } else if (protocol === "openai") {
       if (ttl !== undefined && ttl !== "30m") {
         throw configError(configPath, `${field}.promptCache.ttl`, "must be 30m for openai");
@@ -673,7 +749,11 @@ function parseProviderOptionsByLevel(
     const protocols: Partial<Record<ProviderKind, ReasoningRequestPatch>> = {};
     for (const [protocol, rawPatch] of Object.entries(rawProtocols)) {
       if (!isProviderKind(protocol)) {
-        throw configError(configPath, `${field}.${level}.${protocol}`, "must be openai or claude");
+        throw configError(
+          configPath,
+          `${field}.${level}.${protocol}`,
+          "must be openai, claude or responses",
+        );
       }
       protocols[protocol] = parseReasoningRequestPatch(
         rawPatch,
@@ -797,7 +877,7 @@ function parseRequiredString(value: unknown, configPath: string, field: string):
 }
 
 function isProviderKind(value: unknown): value is ProviderKind {
-  return value === "openai" || value === "claude";
+  return value === "openai" || value === "claude" || value === "responses";
 }
 
 function parseVersion(value: unknown, configPath: string): typeof CONFIG_VERSION {

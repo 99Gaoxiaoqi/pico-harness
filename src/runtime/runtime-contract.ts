@@ -47,6 +47,7 @@ export interface RunAgentCliOptions extends RuntimeRunOptions {
   provider?: ProviderKind;
   baseURL?: string;
   apiKey?: string;
+  auth?: "api-key" | "none";
   /** 后台执行只持有非秘密引用；明文由 Runtime Host 在系统凭证库边界解析。 */
   credentialRef?: CredentialRef;
   model?: string;

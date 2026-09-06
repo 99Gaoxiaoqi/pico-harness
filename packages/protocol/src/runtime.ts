@@ -135,7 +135,7 @@ export type RuntimeOrchestrationMode = "default" | "graph";
 export type RuntimePermissionMode = "default" | "auto" | "yolo";
 /** @deprecated Compatibility input accepted by older clients. */
 export type RuntimeInteractionMode = RuntimePermissionMode | "plan";
-export type RuntimeProviderKind = "openai" | "claude";
+export type RuntimeProviderKind = "openai" | "claude" | "responses";
 export type RuntimeConfigSource =
   | "user"
   | "project"
@@ -149,8 +149,10 @@ export type RuntimeCredentialSource = "config" | "keychain" | "environment" | "n
 export type RuntimeProviderInput = JsonObject & {
   readonly id: string;
   readonly protocol: RuntimeProviderKind;
+  readonly modelProtocols?: Readonly<Record<string, RuntimeProviderKind>>;
   readonly baseURL: string;
   readonly apiKeyEnv: string;
+  readonly auth?: "api-key" | "none";
   readonly models: readonly string[];
   readonly discoverModels: boolean;
   readonly modelCapabilities?: JsonObject;
@@ -3013,7 +3015,7 @@ const interactionModeParam = oneOfParam(["default", "plan", "auto", "yolo"] as c
 const collaborationModeParam = oneOfParam(["agent", "plan"] as const);
 const orchestrationModeParam = oneOfParam(["default", "graph"] as const);
 const permissionModeParam = oneOfParam(["default", "auto", "yolo"] as const);
-const providerProtocolParam = oneOfParam(["openai", "claude"] as const);
+const providerProtocolParam = oneOfParam(["openai", "claude", "responses"] as const);
 const sessionBehaviorParam = oneOfParam(["auto", "steer", "queue", "replace"] as const);
 
 const runtimeUserInputParam: RuntimeParamRule = (value, path) => {
@@ -3073,6 +3075,20 @@ const runtimeInputAttachmentsParam: RuntimeParamRule = (value, path) => {
   }
 };
 
+const modelProtocolsParam: RuntimeParamRule = (value, path) => {
+  jsonObjectParam(value, path);
+  for (const [model, protocol] of Object.entries(value as JsonObject)) {
+    if (
+      !model.trim() ||
+      model !== model.trim() ||
+      ["__proto__", "constructor", "prototype"].includes(model)
+    ) {
+      throw invalidParams(`${path} contains an invalid model id`);
+    }
+    providerProtocolParam(protocol, `${path}.${model}`);
+  }
+};
+
 const runtimeProviderParam: RuntimeParamRule = (value, path) => {
   assertNestedShape(
     value,
@@ -3085,7 +3101,11 @@ const runtimeProviderParam: RuntimeParamRule = (value, path) => {
       models: stringArrayParam,
       discoverModels: booleanParam,
     },
-    { modelCapabilities: jsonObjectParam },
+    {
+      modelCapabilities: jsonObjectParam,
+      modelProtocols: modelProtocolsParam,
+      auth: oneOfParam(["api-key", "none"]),
+    },
   );
 };
 
@@ -4291,7 +4311,7 @@ const runtimeResourceDiagnosticsResult = exactResultShape(
 const runtimeSessionSettingsResult = exactResultShape(
   {
     sessionId: resultString,
-    provider: resultOneOf(["openai", "claude"]),
+    provider: resultOneOf(["openai", "claude", "responses"]),
     model: resultString,
     collaborationMode: resultOneOf(["agent", "plan"]),
     orchestrationMode: resultOneOf(["default", "graph"]),
@@ -4446,19 +4466,23 @@ const runtimeJobResult = resultShape({
 const runtimeProviderInputResult = resultShape(
   {
     id: resultString,
-    protocol: resultOneOf(["openai", "claude"]),
+    protocol: resultOneOf(["openai", "claude", "responses"]),
     baseURL: resultString,
     apiKeyEnv: resultString,
     models: resultStringArray,
     discoverModels: resultBoolean,
   },
-  { modelCapabilities: resultJsonObject },
+  {
+    modelCapabilities: resultJsonObject,
+    modelProtocols: resultJsonObject,
+    auth: resultOneOf(["api-key", "none"]),
+  },
 );
 
 const runtimeProviderProfileResult = resultShape(
   {
     id: resultString,
-    protocol: resultOneOf(["openai", "claude"]),
+    protocol: resultOneOf(["openai", "claude", "responses"]),
     baseURL: resultString,
     apiKeyEnv: resultString,
     models: resultStringArray,
@@ -4469,7 +4493,11 @@ const runtimeProviderProfileResult = resultShape(
     credentialSource: resultOneOf(["config", "keychain", "environment", "none"]),
     storedCredentialPresent: resultBoolean,
   },
-  { modelCapabilities: resultJsonObject },
+  {
+    modelCapabilities: resultJsonObject,
+    modelProtocols: resultJsonObject,
+    auth: resultOneOf(["api-key", "none"]),
+  },
 );
 
 const runtimeUserDefaultsResult = exactResultShape(

@@ -7,6 +7,9 @@ import type { ModelRouteCapabilities } from "./model-capabilities.js";
 export interface ProviderConfig {
   baseURL: string;
   apiKey: string;
+  auth?: "api-key" | "none";
+  /** Opaque host session identity for endpoints that require client attribution. */
+  sessionId?: string;
   model: string;
   /** Route-owned capability metadata. Explicit test/host callers may omit it. */
   capabilities?: ModelRouteCapabilities;
