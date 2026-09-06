@@ -61,6 +61,22 @@ interface OperationalDatabaseOwner {
 
 const owners = new Map<string, OperationalDatabaseOwnerState>();
 
+export function hasOperationalDatabaseOwner(storageRoot: string): boolean {
+  return owners.has(resolve(storageRoot));
+}
+
+/** A fresh connection for confirmed binding repair; never migrates or changes journal mode. */
+export function openOperationalDatabaseForBindingRepairSync(storageRoot: string): DatabaseSync {
+  const databasePath = operationalDatabasePath(storageRoot);
+  if (!existsSync(databasePath)) {
+    throw new FileStorageIntegrityError(`Operational database is missing: ${databasePath}`);
+  }
+  const { DatabaseSync } = loadNodeSqlite();
+  const database = new DatabaseSync(databasePath);
+  database.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+  return database;
+}
+
 interface OperationalDatabaseOwnerState {
   readonly owner: OperationalDatabaseOwner;
   refCount: number;

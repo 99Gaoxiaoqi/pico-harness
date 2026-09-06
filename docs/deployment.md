@@ -56,6 +56,9 @@ $PICO_HOME/workspaces/<workspace-id>/pico.sqlite
 保存稳定 `storageRootId` 与当前物理目录身份。存储根被复制、替换或移动后会 fail-closed，只有
 显式 adopt 流程可以更新绑定，普通启动不会静默接管。
 
+Desktop 打开或添加项目时会先只读检查存储绑定；发生身份变化时，提供“修复工作区 / 暂不修复”的原生确认。
+修复由 daemon 执行，仅更新物理绑定与修复时间，保留 `storageRootId` 和业务数据；确认期间目录、数据库、绑定或 Schema 变化，以及后台仍持有该库连接时均拒绝修复。此入口不迁移旧布局或 Schema，也不处理用户级 Runtime Host marker。
+
 显式 recoverable 任务的执行权由 SQLite task-runs scope 中的 execution lease 决定。恢复器
 必须重新证明 adapter 版本、不可变输入、workspace identity、RuntimeEvent 边界和副作用状态；
 不能证明时写入稳定 park reason，不自动重放不确定副作用。`run.started` 只表示准入，不单独

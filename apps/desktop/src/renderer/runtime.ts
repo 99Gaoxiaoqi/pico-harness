@@ -2070,8 +2070,12 @@ export function useRuntimeStore(): RuntimeStore {
     const isCurrentLoad = () => workspaceLoadGenerationRef.current === generation;
     const params = { workspacePath };
     const sharedConfigSupported = runtimeCapabilitiesRef.current.has(SHARED_CONFIG_CAPABILITY);
+    // Main may be awaiting native storage-repair confirmation. Do not open dependent stores yet.
+    const workspaceEntry = await optionalEntry("workspace", bridge, "workspace.status", params);
+    if (!isCurrentLoad()) return;
+    if (workspaceEntry[1].error) throw new Error(workspaceEntry[1].error);
     const requests = [
-      optionalEntry("workspace", bridge, "workspace.status", params),
+      Promise.resolve(workspaceEntry),
       optionalEntry("sessions", bridge, "session.list", { ...params, includeArchived: true }),
       optionalEntry("runs", bridge, "runs.list", params),
       optionalEntry("jobs", bridge, "jobs.list", params),

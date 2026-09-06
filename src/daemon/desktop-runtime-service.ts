@@ -166,6 +166,7 @@ import { createDesktopProviderRequestHandlers } from "./desktop-provider-request
 import { createDesktopCatalogRequestHandlers } from "./desktop-catalog-request-handlers.js";
 import { createDesktopAutomationRequestHandlers } from "./desktop-automation-request-handlers.js";
 import { canonicalizeWorkspacePath, resolveGitBranch } from "./workspace-registry.js";
+import { WorkspaceStorageRepairService } from "./workspace-storage-repair.js";
 
 /**
  * manifest.workDir 的写入侧（engine 经 pico-paths 的 canonicalizeWorkspacePath）
@@ -385,12 +386,14 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private queuedInputDispatchTail: Promise<void> = Promise.resolve();
   private resourceVersion = 0;
   private readonly browserAgentBroker: BrowserAgentCommandBroker;
+  private readonly storageRepair: WorkspaceStorageRepairService;
 
   constructor(private readonly options: DesktopRuntimeServiceOptions) {
     this.env = options.env ?? process.env;
     // Test embedders commonly inject only model credentials. Treat a missing PICO_HOME
     // as an overlay omission, while still freezing an explicitly supplied host state root.
     this.picoHome = resolvePicoHome({ picoHome: this.env["PICO_HOME"] });
+    this.storageRepair = new WorkspaceStorageRepairService(this.picoHome);
     this.gitReviewService = new DesktopWorkbarGitReviewService();
     this.terminalService = new DesktopWorkbarTerminalService({ picoHome: this.picoHome });
     this.browserAgentBroker = options.browserAgentBroker ?? new BrowserAgentCommandBroker();
@@ -521,6 +524,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private createRequestHandlers(): DesktopRequestHandlers {
     return {
+      "workspace.storageRepair.prepare": (request) =>
+        this.storageRepair.prepare(request.params.workspacePath),
+      "workspace.storageRepair.respond": (request) => this.storageRepair.respond(request.params),
       "diagnostics.run": (request) => this.runDiagnostics(request.params.workspacePath),
       "diagnostics.resources": (request) =>
         this.runResourceDiagnostics(request.params.workspacePath),
