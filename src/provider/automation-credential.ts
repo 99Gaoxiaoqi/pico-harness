@@ -32,7 +32,7 @@ export function resolveAutomationCredentialTarget(input: {
   if (userProvider && sameProviderAuthority(userProvider, route)) {
     const provider = {
       providerId: route.providerId,
-      protocol: route.provider,
+      protocol: userProvider.protocol,
       baseURL: route.baseURL,
     } satisfies ProviderCredentialIdentity;
     return {
@@ -63,6 +63,7 @@ export async function importAutomationCredential(input: {
   readonly vault: CredentialVault;
   readonly env?: Readonly<Record<string, string | undefined>>;
 }): Promise<void> {
+  if (input.route.auth === "none") throw new Error("免密钥 Provider 不接受 Automation 凭据导入");
   if (input.target.kind === "model-route") {
     await importModelRouteCredential({
       route: input.route,
@@ -85,7 +86,7 @@ export async function importAutomationCredential(input: {
 
 function sameProviderAuthority(provider: ModelProviderConfig, route: ModelRoute): boolean {
   return (
-    provider.protocol === route.provider &&
+    (provider.modelProtocols?.[route.model] ?? provider.protocol) === route.provider &&
     normalizeProviderEndpoint(provider.baseURL) === normalizeProviderEndpoint(route.baseURL)
   );
 }

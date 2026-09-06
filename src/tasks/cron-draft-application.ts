@@ -72,9 +72,9 @@ export class CronDraftApplication {
   }> {
     const route = this.requireConfiguredRoute();
     const allowedTools = filterAutomationAllowedTools(this.options.listAllowedTools());
-    const capability = this.options.credentialVault.capability();
-    let credentialStatus: CronDraft["credentialStatus"] = "unavailable";
-    if (capability.available) {
+    let credentialStatus: CronDraft["credentialStatus"] =
+      route.auth === "none" ? "available" : "unavailable";
+    if (route.auth !== "none" && this.options.credentialVault.capability().available) {
       const target = await this.resolveCredentialTarget(route);
       credentialStatus = (await this.options.credentialVault.has(target.ref))
         ? "available"
@@ -107,9 +107,10 @@ export class CronDraftApplication {
     }
 
     const vault = this.options.credentialVault;
-    if (!vault.capability().available) throw new Error(vault.capability().diagnostic);
+    if (route.auth !== "none" && !vault.capability().available)
+      throw new Error(vault.capability().diagnostic);
     const credential = await this.resolveCredentialTarget(route);
-    if (!(await vault.has(credential.ref))) {
+    if (route.auth !== "none" && !(await vault.has(credential.ref))) {
       const importer = this.options.workspaceRegistrar.importAutomationCredential;
       if (!importer) {
         throw new Error("本机 Runtime daemon 不支持安全的 Automation 凭证导入");

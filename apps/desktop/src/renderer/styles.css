@@ -3892,3 +3892,315 @@
 .conversation-empty-state--new {
   padding-bottom: 3vh;
 }
+
+/* Provider onboarding follows the compact, inline settings navigation. */
+.provider-onboarding {
+  gap: 20px;
+}
+.provider-onboarding .page-intro {
+  min-height: 74px;
+}
+.provider-onboarding .page-intro h2 {
+  font-size: 18px;
+}
+.provider-onboarding .page-intro p {
+  margin-top: 8px;
+  font-size: 12px;
+}
+.provider-flow-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.provider-flow-heading > .icon-button {
+  flex: 0 0 28px;
+  margin-left: -10px;
+}
+.provider-flow-heading h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+.provider-flow-heading p {
+  margin: 4px 0 0;
+  color: var(--ink-tertiary);
+  font-size: 11px;
+}
+.provider-catalog-filters {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+.provider-catalog-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 210px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink-tertiary);
+}
+.provider-catalog-search:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.provider-catalog-search input {
+  min-width: 0;
+  width: 100%;
+  min-height: 30px;
+  padding: 0;
+  border: 0;
+  box-shadow: none;
+  background: transparent;
+  outline: none;
+  font-size: 12px;
+}
+.provider-catalog-filters select {
+  width: auto;
+  min-height: 30px;
+  padding-block: 4px;
+  font-size: 12px;
+}
+.provider-catalog-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 50px;
+  padding: 8px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+.provider-catalog-row:hover {
+  background: var(--surface-muted);
+  border-radius: 7px;
+}
+.provider-catalog-row > span:nth-child(2) {
+  flex: 1;
+  min-width: 0;
+}
+.provider-catalog-row strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 18px;
+}
+.provider-catalog-row small {
+  display: block;
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--ink-tertiary);
+  line-height: 16px;
+}
+.provider-catalog-row > svg {
+  flex-shrink: 0;
+  color: var(--ink-secondary);
+}
+.provider-catalog-mark {
+  display: grid;
+  place-items: center;
+  width: 29px;
+  height: 29px;
+  flex-shrink: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--ink-secondary);
+  background: var(--surface-muted);
+}
+.provider-catalog-empty {
+  padding: 36px 0;
+  text-align: center;
+  color: var(--ink-secondary);
+}
+.provider-catalog-mark img {
+  width: 21px;
+  height: 21px;
+  object-fit: contain;
+}
+.provider-catalog-filters select {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  padding-inline: 10px;
+}
+.provider-setup-form fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.provider-setup-form [hidden] {
+  display: none;
+}
+.provider-setup-form label {
+  display: grid;
+  gap: 7px;
+  font-size: 12px;
+}
+.provider-setup-form > .inline-notice {
+  margin-bottom: 16px;
+}
+.provider-required {
+  color: var(--ink-tertiary);
+}
+.provider-setup-form label[for="provider-setup-key"] {
+  display: block;
+  margin-bottom: 7px;
+}
+.provider-key-input {
+  display: flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  overflow: hidden;
+}
+.provider-key-input:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.provider-key-input input {
+  flex: 1;
+  min-width: 0;
+  min-height: 28px;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  outline: none;
+  background: transparent;
+}
+.provider-key-input .icon-button {
+  margin-inline: 3px;
+  height: 28px;
+  width: 28px;
+}
+.provider-advanced-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 12px 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.provider-advanced-toggle[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+.provider-advanced-fields {
+  display: grid;
+  gap: 14px;
+  padding-block: 8px 14px;
+}
+.provider-advanced-fields p,
+.provider-model-hint {
+  color: var(--ink-tertiary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.provider-setup-form h4 {
+  margin: 0;
+  font-size: 14px;
+}
+.provider-model-hint {
+  margin: 8px 0 16px;
+}
+.provider-model-choices {
+  margin-bottom: 16px;
+}
+.provider-model-choices label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+.provider-model-choices input {
+  width: 15px;
+  height: 15px;
+  min-height: 0;
+  accent-color: var(--accent);
+}
+.provider-setup-form .provider-discovery-toggle {
+  margin-top: 10px;
+}
+.provider-doc-link {
+  display: inline-block;
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--accent);
+}
+.provider-setup-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+.provider-setup-actions .button {
+  min-height: 32px;
+  padding: 6px 12px;
+  font-size: 12px;
+}
+.provider-free-notice {
+  margin-bottom: 18px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-muted);
+  font-size: 12px;
+}
+.provider-free-notice p {
+  margin: 6px 0;
+  color: var(--ink-secondary);
+  line-height: 1.7;
+}
+.provider-free-notice a,
+.conversation-free-notice a {
+  color: var(--accent);
+}
+.provider-unavailable {
+  margin-top: 24px;
+  color: var(--ink-tertiary);
+  font-size: 12px;
+}
+.provider-unavailable summary {
+  cursor: pointer;
+}
+.provider-unavailable > div {
+  padding: 12px 8px;
+  border-bottom: 1px solid var(--line);
+}
+.provider-unavailable strong {
+  font-weight: 500;
+}
+.provider-unavailable p {
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.6;
+}
+.conversation-free-notice {
+  margin: 0 10px 8px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--ink-tertiary);
+}
+@media (max-width: 620px) {
+  .provider-catalog-search {
+    width: min(210px, 65%);
+  }
+  .provider-flow-heading p {
+    line-height: 1.5;
+  }
+}

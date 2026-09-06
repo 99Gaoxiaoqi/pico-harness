@@ -1537,6 +1537,8 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
               requestedRouteId: routeArgument,
               activeSessionId: session(),
             });
+            if (authority.route.auth === "none")
+              return msg(`${authority.route.id}: 免密钥，Automation 无需导入凭据。`);
             if (action === "status") {
               return msg(
                 `${authority.route.id}: Provider 凭据状态 ${authority.provider.credentialStatus}（source=${authority.provider.credentialSource}）。Automation 创建时 daemon 会按精确 credentialRef 复核系统凭据库。`,
@@ -1916,10 +1918,11 @@ type ClientAutomationAuthority = {
   readonly route: {
     readonly id: string;
     readonly providerId: string;
-    readonly provider: "openai" | "claude";
+    readonly provider: "openai" | "claude" | "responses";
     readonly model: string;
     readonly baseURL: string;
     readonly apiKeyEnv: string;
+    readonly auth?: "api-key" | "none";
     readonly source: "config";
     readonly capabilities: ReturnType<typeof resolveModelRouteCapabilities>;
   };
@@ -1982,21 +1985,31 @@ async function resolveClientAutomationAuthority(input: {
   const route = {
     id: routeId,
     providerId,
-    provider: provider.protocol,
+    provider: provider.modelProtocols?.[model] ?? provider.protocol,
     model,
     baseURL: provider.baseURL,
     apiKeyEnv: provider.apiKeyEnv,
+    ...(provider.auth ? { auth: provider.auth } : {}),
     source: "config" as const,
-    capabilities: resolveModelRouteCapabilities(provider.protocol, model, undefined, {
-      baseURL: provider.baseURL,
-    }),
+    capabilities: resolveModelRouteCapabilities(
+      provider.modelProtocols?.[model] ?? provider.protocol,
+      model,
+      undefined,
+      {
+        baseURL: provider.baseURL,
+      },
+    ),
   };
   const userProviderRecord = userResult.config.providers.find((entry) => entry.id === providerId);
   const userProvider = userProviderRecord
     ? {
         protocol: userProviderRecord.protocol,
+        ...(userProviderRecord.modelProtocols
+          ? { modelProtocols: userProviderRecord.modelProtocols }
+          : {}),
         baseURL: userProviderRecord.baseURL,
         apiKeyEnv: userProviderRecord.apiKeyEnv,
+        ...(userProviderRecord.auth ? { auth: userProviderRecord.auth } : {}),
         models: userProviderRecord.models,
         discoverModels: userProviderRecord.discoverModels,
       }

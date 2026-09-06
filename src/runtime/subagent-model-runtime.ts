@@ -58,6 +58,7 @@ export function createSubagentModelRuntime(
     config,
     route,
   } = options.router.providerConfig(options.selection.route.id, options.selection.thinking.level);
+  if (options.session) config.sessionId = options.session.id;
   const providerFactory = options.providerFactory ?? createRawProvider;
   const rawProvider = providerFactory(kind, config, undefined, options.providerDependencies);
   const provider = withPromptCachePrewarm(

@@ -479,6 +479,7 @@ async function runValidatedRequest(
       );
     }
 
+    selected.config.sessionId = request.sessionId;
     effective = {
       modelRouteId: selected.route.id,
       thinkingEffort: effectiveThinking ?? null,
@@ -558,6 +559,7 @@ async function runValidatedRequest(
         provider: selected.provider,
         baseURL: selected.config.baseURL,
         apiKey: selected.config.apiKey,
+        ...(selected.config.auth ? { auth: selected.config.auth } : {}),
         model: selected.config.model,
         modelRouteId: selected.route.id,
         modelCapabilities: selected.route.capabilities,
@@ -786,7 +788,7 @@ async function loadTrustedModelRuntime(
   });
   const modelEnv: Record<string, string | undefined> = { PICO_HOME: picoHome };
   const credentialName = selectedProvider.apiKeyEnv;
-  if (credentialName) {
+  if (selectedProvider.auth !== "none" && credentialName) {
     modelEnv[credentialName] = (dependencies.env ?? process.env)[credentialName];
   }
   return await racePreflight(

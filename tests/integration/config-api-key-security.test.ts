@@ -27,12 +27,14 @@ import {
 } from "../../src/provider/credential-vault.js";
 import { loadEffectiveModelRuntime } from "../../src/provider/effective-model-runtime.js";
 import { assertPrivatePermissions } from "./helpers/private-file-mode.js";
+import type { RuntimeResult } from "@pico/protocol";
+import { saveProviderConnection } from "../../apps/desktop/src/renderer/provider-connection.js";
 
 const PROVIDER_ID = "config-key-fixture";
 const MODEL_ID = "fixture-model";
 const API_KEY_ENV = "PICO_CONFIG_KEY_FIXTURE_ENV";
 
-test("Desktop credential API persists a user-config API key without projecting plaintext", async (context) => {
+test("Desktop connection onboarding persists an API key without projecting plaintext", async (context) => {
   const fixture = await createDesktopFixture("desktop-write");
   context.after(fixture.dispose);
   const secret = syntheticSecret("desktop-write");
@@ -41,21 +43,16 @@ test("Desktop credential API persists a user-config API key without projecting p
   context.after(unsubscribe);
   const initialRevision = await readPublicUserRevision(fixture.desktop);
 
-  const upserted = asRecord(
-    await fixture.desktop.handle(
-      createRuntimeRequest("provider.upsert", {
-        provider: providerInput(),
-        expectedRevision: initialRevision,
-      }),
-    ),
-  );
-  const providerRevision = requiredString(upserted["revision"], "provider revision");
-  const setResult = await fixture.desktop.handle(
-    createRuntimeRequest("provider.credential.set", {
-      providerId: PROVIDER_ID,
-      secret,
-      expectedRevision: providerRevision,
-    }),
+  const results: unknown[] = [];
+  await saveProviderConnection(
+    async (method, params) => {
+      if (method === "provider.upsert") assertSecretAbsent("provider draft", params, secret);
+      const result = await fixture.desktop.handle(createRuntimeRequest(method, params));
+      results.push(result);
+      return result as RuntimeResult<typeof method>;
+    },
+    { provider: providerInput(), expectedRevision: initialRevision },
+    secret,
   );
 
   const raw = await readFile(fixture.userConfig.filePath, "utf8");
@@ -71,12 +68,44 @@ test("Desktop credential API persists a user-config API key without projecting p
   const userConfigProjection = await fixture.desktop.handle(
     createRuntimeRequest("config.user.get", {}),
   );
-  assertSecretAbsent("credential set result", setResult, secret);
+  assertSecretAbsent("connection save results", results, secret);
   assertSecretAbsent("provider list", listed, secret);
   assertSecretAbsent("credential status", status, secret);
   assertSecretAbsent("user config protocol projection", userConfigProjection, secret);
   assertSecretAbsent("config.updated notifications", notifications, secret);
   assert.equal(fixture.vaultCalls(), 0, "ordinary config-key writes must not require Keychain");
+});
+
+test("Desktop connection onboarding preserves concurrent changes when credential saving conflicts", async (context) => {
+  const fixture = await createDesktopFixture("onboarding-conflict");
+  context.after(fixture.dispose);
+  const initialRevision = await readPublicUserRevision(fixture.desktop);
+  const secret = syntheticSecret("onboarding-conflict");
+  await assert.rejects(
+    saveProviderConnection(
+      async (method, params) => {
+        const result = await fixture.desktop.handle(createRuntimeRequest(method, params));
+        if (method === "provider.upsert") {
+          const revision = requiredString(asRecord(result)["revision"], "provider revision");
+          await fixture.desktop.handle(
+            createRuntimeRequest("config.user.update", {
+              defaults: { modelRouteId: `${PROVIDER_ID}/${MODEL_ID}` },
+              expectedRevision: revision,
+            }),
+          );
+        }
+        return result as RuntimeResult<typeof method>;
+      },
+      { provider: providerInput(), expectedRevision: initialRevision },
+      secret,
+    ),
+    (error: unknown) =>
+      error instanceof RuntimeProtocolError && error.code === RUNTIME_ERROR_CODES.CONFLICT,
+  );
+  const saved = await fixture.userConfig.read();
+  assert.equal(saved.config.defaults?.modelRouteId, `${PROVIDER_ID}/${MODEL_ID}`);
+  assert.ok(saved.config.providers[PROVIDER_ID]);
+  assert.equal(saved.config.providers[PROVIDER_ID]?.apiKey, undefined);
 });
 
 test("credential delete is CAS protected and removes only the persisted API key", async (context) => {

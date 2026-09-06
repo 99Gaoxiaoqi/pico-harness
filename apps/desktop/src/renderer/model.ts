@@ -103,13 +103,15 @@ export interface ModelRouteView {
 }
 
 export type ProviderOrigin = "user" | "project-legacy" | "environment";
-export type ProviderProtocol = "openai" | "claude";
+export type ProviderProtocol = "openai" | "claude" | "responses";
 export type ProviderCredentialStatus = "ready" | "missing" | "environment" | "unsupported";
 export type ProviderCredentialSource = "config" | "keychain" | "environment" | "none";
 
 export interface ProviderView {
   readonly id: string;
   readonly protocol: ProviderProtocol;
+  readonly modelProtocols?: Readonly<Record<string, ProviderProtocol>>;
+  readonly auth?: "api-key" | "none";
   readonly baseURL: string;
   readonly apiKeyEnv: string;
   readonly models: readonly string[];
@@ -124,7 +126,15 @@ export interface ProviderView {
 
 export type ProviderDraft = Pick<
   ProviderView,
-  "id" | "protocol" | "baseURL" | "apiKeyEnv" | "models" | "discoverModels" | "modelCapabilities"
+  | "id"
+  | "protocol"
+  | "modelProtocols"
+  | "auth"
+  | "baseURL"
+  | "apiKeyEnv"
+  | "models"
+  | "discoverModels"
+  | "modelCapabilities"
 >;
 
 export interface UserDefaultsView {

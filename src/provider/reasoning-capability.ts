@@ -106,14 +106,17 @@ const GLM_5_2_REASONING = modelRule(["nothink", "high", "max"], "max", {
 
 const DEEPSEEK_V4_REASONING = modelRule(["off", "high", "max"], "max", {
   off: {
+    responses: patch([["reasoning", "effort"], "none"]),
     openai: patch([["thinking", "type"], "disabled"], [["reasoning_effort"]]),
     claude: patch([["thinking", "type"], "disabled"]),
   },
   high: {
+    responses: patch([["reasoning", "effort"], "high"]),
     openai: patch([["thinking", "type"], "enabled"], [["reasoning_effort"], "high"]),
     claude: patch([["thinking", "type"], "enabled"], [["thinking", "budget_tokens"], 16_000]),
   },
   max: {
+    responses: patch([["reasoning", "effort"], "max"]),
     openai: patch([["thinking", "type"], "enabled"], [["reasoning_effort"], "max"]),
     claude: patch([["thinking", "type"], "enabled"], [["thinking", "budget_tokens"], 32_000]),
   },

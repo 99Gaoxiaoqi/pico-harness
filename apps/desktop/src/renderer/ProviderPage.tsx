@@ -20,15 +20,19 @@ import type {
   ProviderView,
 } from "./model.js";
 import type { RuntimeStore } from "./runtime.js";
+import { ProviderOnboarding } from "./ProviderOnboarding.js";
+import { selectedModelProtocols } from "./provider-presets.js";
 
 const protocolLabels: Readonly<Record<ProviderProtocol, string>> = {
   openai: "OpenAI-compatible",
   claude: "Anthropic-compatible",
+  responses: "OpenAI Responses",
 };
 
 const protocolBaseURLPlaceholders: Readonly<Record<ProviderProtocol, string>> = {
   openai: "https://api.example.com/v1",
   claude: "https://api.example.com",
+  responses: "https://api.example.com/v1",
 };
 
 const originLabels: Readonly<Record<ProviderOrigin, string>> = {
@@ -47,6 +51,7 @@ const credentialLabels: Readonly<Record<ProviderCredentialStatus, string>> = {
 const defaultApiKeyEnvs: Readonly<Record<ProviderProtocol, string>> = {
   openai: "OPENAI_API_KEY",
   claude: "ANTHROPIC_API_KEY",
+  responses: "OPENAI_API_KEY",
 };
 
 function credentialTone(status: ProviderCredentialStatus): string {
@@ -76,6 +81,7 @@ function providerApiKeyEnv(provider: ProviderView | undefined, protocol: Provide
 export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
   const { data, actions, busy } = runtime;
   const config = data.providerConfig;
+  const [adding, setAdding] = useState(false);
   const [editor, setEditor] = useState<ProviderView | null>();
   const [credentialEditor, setCredentialEditor] = useState<{
     readonly provider: ProviderView;
@@ -100,6 +106,8 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
     }
   };
 
+  if (adding) return <ProviderOnboarding runtime={runtime} onClose={() => setAdding(false)} />;
+
   return (
     <div className="page-stack provider-page">
       <section className="page-intro">
@@ -111,7 +119,7 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
         <Button
           variant="primary"
           disabled={isBusy || !config.writable}
-          onClick={() => setEditor(null)}
+          onClick={() => setAdding(true)}
         >
           <Plus aria-hidden="true" size={16} />
           添加连接
@@ -130,6 +138,20 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
         <InlineNotice tone="warning">
           模型服务商配置没有完整加载，已暂停编辑以避免覆盖更新的配置。请重新加载后再试。
         </InlineNotice>
+      )}
+
+      {config.providers.some(
+        (provider) =>
+          provider.auth === "none" &&
+          provider.baseURL.replace(/\/+$/u, "") === "https://opencode.ai/zen/v1",
+      ) && (
+        <div className="provider-free-notice">
+          <strong>OpenCode Free · 免费试用</strong>
+          <p>无需 API Key，按 IP 限流。免费模型与额度可能变化，请勿提交个人或机密信息。</p>
+          <a href="https://opencode.ai/docs/zen#privacy" target="_blank" rel="noreferrer">
+            查看数据使用说明
+          </a>
+        </div>
       )}
 
       {config.supported && (
@@ -172,7 +194,7 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
                 <Button
                   variant="primary"
                   disabled={!config.writable}
-                  onClick={() => setEditor(null)}
+                  onClick={() => setAdding(true)}
                 >
                   <Plus aria-hidden="true" size={16} />
                   添加第一个连接
@@ -199,14 +221,19 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
                           {defaultModel && <span className="provider-origin">默认</span>}
                         </div>
                         <p>
-                          {protocolLabels[provider.protocol]} · {provider.models.length} 个模型
+                          {provider.modelProtocols
+                            ? "自动适配模型"
+                            : protocolLabels[provider.protocol]}{" "}
+                          · {provider.models.length} 个模型
                           {defaultModel ? ` · ${defaultModel}` : ""}
                         </p>
                       </div>
                       <span
                         className={`status-pill status-pill--${credentialTone(provider.credentialStatus)}`}
                       >
-                        {credentialLabels[provider.credentialStatus]}
+                        {provider.auth === "none"
+                          ? "无需 API Key"
+                          : credentialLabels[provider.credentialStatus]}
                       </span>
                       <button
                         type="button"
@@ -230,16 +257,18 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
                         <div className="provider-card__actions">
                           {provider.origin === "user" ? (
                             <>
-                              <Button
-                                variant="quiet"
-                                disabled={isBusy || !config.writable}
-                                onClick={() =>
-                                  setCredentialEditor({ provider, revision: config.revision })
-                                }
-                              >
-                                <KeyRound aria-hidden="true" size={15} />
-                                API Key
-                              </Button>
+                              {provider.auth !== "none" && (
+                                <Button
+                                  variant="quiet"
+                                  disabled={isBusy || !config.writable}
+                                  onClick={() =>
+                                    setCredentialEditor({ provider, revision: config.revision })
+                                  }
+                                >
+                                  <KeyRound aria-hidden="true" size={15} />
+                                  API Key
+                                </Button>
+                              )}
                               <Button
                                 variant="quiet"
                                 disabled={isBusy || !config.writable}
@@ -265,7 +294,7 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
                         </div>
                         <dl className="provider-facts">
                           <div>
-                            <dt>{protocolLabels[provider.protocol]} Base URL</dt>
+                            <dt>Base URL</dt>
                             <dd>
                               <code title={provider.baseURL}>{provider.baseURL}</code>
                             </dd>
@@ -273,7 +302,11 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
                           <div>
                             <dt>凭证</dt>
                             <dd>
-                              <span>{credentialLabels[provider.credentialStatus]}</span>
+                              <span>
+                                {provider.auth === "none"
+                                  ? "匿名连接 · 无需 API Key"
+                                  : credentialLabels[provider.credentialStatus]}
+                              </span>
                               {provider.credentialSource === "environment" &&
                                 provider.apiKeyEnv && <code>{provider.apiKeyEnv}</code>}
                             </dd>
@@ -382,9 +415,18 @@ function ProviderEditorDialog({
     const succeeded = await onSave({
       id: id.trim(),
       protocol,
+      ...(provider?.auth ? { auth: provider.auth } : {}),
       baseURL: baseURL.trim(),
       apiKeyEnv: providerApiKeyEnv(provider, protocol),
       models: normalizedModels,
+      ...(provider?.modelProtocols
+        ? {
+            modelProtocols: selectedModelProtocols(
+              { baseURL, modelProtocols: provider.modelProtocols },
+              normalizedModels,
+            ),
+          }
+        : {}),
       discoverModels: protocol === "openai" && discoverModels,
       ...(retainedModelCapabilities && Object.keys(retainedModelCapabilities).length > 0
         ? { modelCapabilities: retainedModelCapabilities }
@@ -403,7 +445,9 @@ function ProviderEditorDialog({
         >
           <Dialog.Title>{provider ? `编辑 ${provider.id}` : "添加模型服务商"}</Dialog.Title>
           <Dialog.Description id="provider-editor-detail">
-            配置服务商或网关渠道。保存后，在服务商卡片中点击“API Key”添加凭证。
+            {provider?.auth === "none"
+              ? "此连接无需 API Key。修改模型或地址后，将继续使用匿名请求。"
+              : "配置服务商或网关渠道。保存后，在服务商卡片中点击“API Key”添加凭证。"}
           </Dialog.Description>
           <Dialog.Close asChild>
             <IconButton className="dialog__close" label="关闭 Provider 编辑器">
@@ -423,7 +467,7 @@ function ProviderEditorDialog({
               {provider && <small>ID 创建后不可修改。</small>}
             </label>
             <label>
-              <span>API 协议</span>
+              <span>{provider?.modelProtocols ? "默认 API 协议" : "API 协议"}</span>
               <select
                 value={protocol}
                 onChange={(event) =>
@@ -432,8 +476,13 @@ function ProviderEditorDialog({
               >
                 <option value="openai">OpenAI-compatible</option>
                 <option value="claude">Anthropic-compatible</option>
+                <option value="responses">OpenAI Responses</option>
               </select>
-              <small>协议只决定请求格式，不限制模型厂商。</small>
+              <small>
+                {provider?.modelProtocols
+                  ? "已配置的模型会自动使用各自的协议；此项仅用于其他模型。"
+                  : "协议只决定请求格式，不限制模型厂商。"}
+              </small>
             </label>
             <label className="provider-form__wide">
               <span>{protocolLabels[protocol]} Base URL</span>

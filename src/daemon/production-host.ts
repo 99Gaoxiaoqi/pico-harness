@@ -238,8 +238,8 @@ export function createProductionRuntimeServices(
         throw new Error(`Cron Job 包含未显式授权的工具: ${deniedTools.join(", ")}`);
       }
       if (!job.credentialRef) throw new Error("Cron Job 缺少 credentialRef");
-      await resolveCronModelRoute(job, effectiveConfigResolver, env);
-      if (!(await credentialVault.has(job.credentialRef))) {
+      const route = await resolveCronModelRoute(job, effectiveConfigResolver, env);
+      if (route.auth !== "none" && !(await credentialVault.has(job.credentialRef))) {
         throw new Error(`系统凭证库中不存在 ${job.credentialRef}`);
       }
       return { allowed: true };
@@ -420,6 +420,7 @@ export function createProductionRuntimeServices(
           provider: route.provider,
           baseURL: route.baseURL,
           apiKey: route.apiKey,
+          ...(route.auth ? { auth: route.auth } : {}),
           model: route.model,
           modelRouteId: route.modelRouteId,
           modelCapabilities: route.capabilities,
@@ -894,6 +895,7 @@ export function createProductionRuntimeServices(
             provider: route.provider,
             baseURL: route.baseURL,
             apiKey: route.apiKey,
+            ...(route.auth ? { auth: route.auth } : {}),
             model: route.model,
             modelRouteId: route.modelRouteId,
             modelCapabilities: route.capabilities,
@@ -1128,7 +1130,7 @@ export function createProductionRuntimeServices(
       const userProvider = (await userConfigStore.read()).config.providers[route.providerId];
       const useSharedProviderCredential =
         userProvider !== undefined &&
-        userProvider.protocol === route.provider &&
+        (userProvider.modelProtocols?.[route.model] ?? userProvider.protocol) === route.provider &&
         sameEndpoint(userProvider.baseURL, route.baseURL);
       if (route.origin === "environment" && !useSharedProviderCredential) {
         throw new RuntimeProtocolError(
@@ -1139,11 +1141,11 @@ export function createProductionRuntimeServices(
       const credentialRef = useSharedProviderCredential
         ? credentialRefForProvider({
             providerId: route.providerId,
-            protocol: route.provider,
+            protocol: userProvider.protocol,
             baseURL: route.baseURL,
           })
         : credentialRefForModelRoute(route, workspacePath);
-      if (!(await credentialVault.has(credentialRef))) {
+      if (route.auth !== "none" && !(await credentialVault.has(credentialRef))) {
         throw new RuntimeProtocolError(
           RUNTIME_ERROR_CODES.FORBIDDEN,
           `模型路由 ${route.id} 尚未导入系统凭证库，无法创建持久 Automation`,
@@ -1324,6 +1326,7 @@ export function createProductionRuntimeServices(
   };
   const desktopService: DesktopRuntimeService = new DesktopRuntimeService({
     runtimeService: service,
+    initializeDefaultProvider: true,
     registrationStore,
     trustStore,
     browserAgentBroker,
@@ -1924,6 +1927,7 @@ export function assembleProductionDaemonHost(
           modelRouteId: route.modelRouteId,
           modelCapabilities: route.capabilities,
           credentialRef: job.credentialRef,
+          ...(route.auth ? { auth: route.auth } : {}),
           execution: { kind: "background", policy: job.policySnapshot },
         },
         {
@@ -1990,10 +1994,11 @@ async function resolveDesktopAutomationRoute(
   return {
     id: modelRouteId,
     providerId,
-    provider: provider.protocol,
+    provider: provider.modelProtocols?.[model] ?? provider.protocol,
     baseURL: provider.baseURL,
     model,
     apiKeyEnv: provider.apiKeyEnv,
+    ...(provider.auth ? { auth: provider.auth } : {}),
     origin: config.sources[`providers.${providerId}`] ?? "user",
   };
 }
@@ -2025,13 +2030,14 @@ async function resolveCronModelRoute(
   const resolved = {
     id: modelRouteId,
     providerId,
-    provider: provider.protocol,
+    provider: provider.modelProtocols?.[model] ?? provider.protocol,
     baseURL: provider.baseURL,
     model,
     apiKeyEnv: provider.apiKeyEnv,
+    ...(provider.auth ? { auth: provider.auth } : {}),
     modelRouteId,
     capabilities: resolveModelRouteCapabilities(
-      provider.protocol,
+      provider.modelProtocols?.[model] ?? provider.protocol,
       model,
       provider.modelCapabilities?.[model],
       { baseURL: provider.baseURL },
@@ -2096,6 +2102,7 @@ async function resolveDesktopModelRoute(
       provider: active.provider,
       baseURL: active.config.baseURL,
       apiKey: active.config.apiKey,
+      ...(active.config.auth ? { auth: active.config.auth } : {}),
       model: active.config.model,
       apiKeyEnv: active.route.apiKeyEnv,
       modelRouteId: active.route.id,

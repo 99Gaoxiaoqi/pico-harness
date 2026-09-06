@@ -32,11 +32,15 @@ test("OpenAI requests enforce the configured output-token limit", async (context
     requestBodies.push(body);
     if (body["stream"] === true) {
       return streamResponse([
-        new TextEncoder().encode('data: {"choices":[{"delta":{"content":"OK"}}]}\n\n'),
+        new TextEncoder().encode(
+          'data: {"choices":[{"finish_reason":"stop","delta":{"content":"OK"}}]}\n\n',
+        ),
         new TextEncoder().encode("data: [DONE]\n\n"),
       ]);
     }
-    return Response.json({ choices: [{ message: { role: "assistant", content: "OK" } }] });
+    return Response.json({
+      choices: [{ finish_reason: "stop", message: { role: "assistant", content: "OK" } }],
+    });
   };
 
   const capabilities = resolveModelRouteCapabilities("openai", "capped-model", {
@@ -69,7 +73,9 @@ test("OpenAI routes can select max_completion_tokens explicitly", async (context
   });
   globalThis.fetch = async (_input, init) => {
     requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
-    return Response.json({ choices: [{ message: { role: "assistant", content: "OK" } }] });
+    return Response.json({
+      choices: [{ finish_reason: "stop", message: { role: "assistant", content: "OK" } }],
+    });
   };
 
   const provider = createProvider("openai", {
@@ -163,11 +169,15 @@ test("legacy OpenAI-compatible calls do not guess an output-token field", async 
     requestBodies.push(body);
     if (body["stream"] === true) {
       return streamResponse([
-        new TextEncoder().encode('data: {"choices":[{"delta":{"content":"OK"}}]}\n\n'),
+        new TextEncoder().encode(
+          'data: {"choices":[{"finish_reason":"stop","delta":{"content":"OK"}}]}\n\n',
+        ),
         new TextEncoder().encode("data: [DONE]\n\n"),
       ]);
     }
-    return Response.json({ choices: [{ message: { role: "assistant", content: "OK" } }] });
+    return Response.json({
+      choices: [{ finish_reason: "stop", message: { role: "assistant", content: "OK" } }],
+    });
   };
 
   const provider = new OpenAIProvider({
@@ -193,7 +203,9 @@ test("OpenAI reasoning patches cannot unset the configured output-token limit", 
   });
   globalThis.fetch = async (_input, init) => {
     requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
-    return Response.json({ choices: [{ message: { role: "assistant", content: "OK" } }] });
+    return Response.json({
+      choices: [{ finish_reason: "stop", message: { role: "assistant", content: "OK" } }],
+    });
   };
 
   const provider = createProvider(
@@ -238,7 +250,9 @@ test("OpenAI reasoning patches cannot raise or double-write the output-token lim
   globalThis.fetch = async (_input, init) => {
     requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
     return streamResponse([
-      new TextEncoder().encode('data: {"choices":[{"delta":{"content":"OK"}}]}\n\n'),
+      new TextEncoder().encode(
+        'data: {"choices":[{"finish_reason":"stop","delta":{"content":"OK"}}]}\n\n',
+      ),
       new TextEncoder().encode("data: [DONE]\n\n"),
     ]);
   };
@@ -290,7 +304,7 @@ test("OpenAI stream requests and consumes the terminal Usage-only chunk", async 
     requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
     return new Response(
       [
-        'data: {"choices":[{"delta":{"content":"OK"}}]}',
+        'data: {"choices":[{"finish_reason":"stop","delta":{"content":"OK"}}]}',
         "",
         'data: {"choices":[],"usage":{"prompt_tokens":13,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":5},"completion_tokens_details":{"reasoning_tokens":1}}}',
         "",
@@ -331,11 +345,11 @@ test("OpenAI stream keeps reasoning separate from the final answer", async (cont
   globalThis.fetch = async () =>
     new Response(
       [
-        'data: {"choices":[{"delta":{"reasoning_content":"先检查"}}]}',
+        'data: {"choices":[{"finish_reason":null,"delta":{"reasoning_content":"先检查"}}]}',
         "",
-        'data: {"choices":[{"delta":{"reasoning_content":"配置。"}}]}',
+        'data: {"choices":[{"finish_reason":null,"delta":{"reasoning_content":"配置。"}}]}',
         "",
-        'data: {"choices":[{"delta":{"content":"已完成"}}]}',
+        'data: {"choices":[{"finish_reason":"stop","delta":{"content":"已完成"}}]}',
         "",
         "data: [DONE]",
         "",
@@ -369,7 +383,7 @@ test("OpenAI-compatible routes omit stream_options unless explicitly enabled", a
     requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
     return new Response(
       [
-        'data: {"choices":[{"delta":{"content":"OK"}}]}',
+        'data: {"choices":[{"finish_reason":"stop","delta":{"content":"OK"}}]}',
         "",
         'data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1}}',
         "",
@@ -405,14 +419,14 @@ test("OpenAI stream accepts CRLF, bare CR, and SSE fields across chunk boundarie
     streamResponse([
       encoder.encode(": heartbeat\r"),
       encoder.encode("\nevent: message\r"),
-      encoder.encode('\ndata:{"choices":[{"delta":\r'),
+      encoder.encode('\ndata:{"choices":[{"finish_reason":"stop","delta":\r'),
       encoder.encode('\ndata:{"content":"'),
       splitCharacter.slice(0, 1),
       splitCharacter.slice(1),
       encoder.encode('"}}]}\r'),
       encoder.encode("\n\r"),
       encoder.encode("\n"),
-      encoder.encode('data: {"choices":[{"delta":{"content":"好"}}]}\r'),
+      encoder.encode('data: {"choices":[{"finish_reason":"stop","delta":{"content":"好"}}]}\r'),
       encoder.encode("\rdata: [DONE]\r"),
       encoder.encode("\n\r"),
       encoder.encode("\n"),
@@ -436,6 +450,7 @@ test("OpenAI stream consumes the final event at EOF without a trailing blank lin
   const firstChunk = {
     choices: [
       {
+        finish_reason: null,
         delta: {
           tool_calls: [
             {
@@ -451,6 +466,7 @@ test("OpenAI stream consumes the final event at EOF without a trailing blank lin
   const finalChunk = {
     choices: [
       {
+        finish_reason: "tool_calls",
         delta: {
           content: "🙂",
           tool_calls: [{ index: 0, function: { arguments: '"x"}' } }],

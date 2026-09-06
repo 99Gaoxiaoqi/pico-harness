@@ -25,6 +25,7 @@ import {
 } from "@pico/protocol";
 import type { TranscriptReplicaView } from "@pico/transcript-replica";
 import type { DesktopBridge, DesktopResult } from "../preload/contract.js";
+import { saveProviderConnection } from "./provider-connection.js";
 
 type RuntimeTranscriptCursor = {
   readonly revision: string;
@@ -903,7 +904,7 @@ function parseModelRoutes(value: unknown): readonly ModelRouteView[] {
 }
 
 function providerProtocol(value: unknown): ProviderProtocol {
-  return value === "claude" ? value : "openai";
+  return value === "claude" || value === "responses" ? value : "openai";
 }
 
 function providerOrigin(value: unknown): ProviderOrigin {
@@ -924,6 +925,17 @@ function parseProviderProfile(value: JsonRecord, index: number): ProviderView {
   return {
     id: stringValue(value.id, `provider-${index}`),
     protocol: providerProtocol(value.protocol),
+    ...(isRecord(value.modelProtocols)
+      ? {
+          modelProtocols: Object.fromEntries(
+            Object.entries(value.modelProtocols).map(([model, protocol]) => [
+              model,
+              providerProtocol(protocol),
+            ]),
+          ),
+        }
+      : {}),
+    ...(value.auth === "none" || value.auth === "api-key" ? { auth: value.auth } : {}),
     baseURL: stringValue(value.baseURL),
     apiKeyEnv: stringValue(value.apiKeyEnv),
     models: Array.isArray(value.models)
@@ -1492,7 +1504,11 @@ export interface RuntimeActions {
   loadCapabilityScope(kind: "skills" | "mcp", workspacePath?: string): Promise<void>;
   addUserMcp(server: RuntimeMcpServerInput): Promise<boolean>;
   deleteUserMcp(serverName: string): Promise<boolean>;
-  upsertProvider(provider: ProviderDraft): Promise<boolean>;
+  upsertProvider(
+    provider: ProviderDraft,
+    newConnectionSecret?: string,
+    createOnly?: boolean,
+  ): Promise<boolean>;
   deleteProvider(providerId: string): Promise<boolean>;
   setDefaultModelRoute(modelRouteId?: string): Promise<boolean>;
   queryUsage(input?: {
@@ -3510,8 +3526,16 @@ export function useRuntimeStore(): RuntimeStore {
           setMessage(`MCP 服务 ${serverName} 已删除。`);
         });
       },
-      async upsertProvider(provider) {
+      async upsertProvider(provider, newConnectionSecret, createOnly = false) {
         const providerConfig = dataRef.current.providerConfig;
+        if (
+          (createOnly || newConnectionSecret !== undefined) &&
+          ((provider.auth !== "none" && !newConnectionSecret?.trim()) ||
+            providerConfig.providers.some((item) => item.id === provider.id))
+        ) {
+          setMessage("API Key 不能为空，且新连接 ID 不能与已有连接重复。");
+          return false;
+        }
         if (!providerConfig.writable) {
           setMessage(
             providerConfig.supported
@@ -3529,9 +3553,15 @@ export function useRuntimeStore(): RuntimeStore {
               ...provider,
               origin: "user",
               fingerprint: previous?.fingerprint ?? `preview-${provider.id}-fingerprint`,
-              credentialStatus: previous?.credentialStatus ?? "missing",
-              credentialSource: previous?.credentialSource ?? "none",
-              storedCredentialPresent: previous?.storedCredentialPresent ?? false,
+              credentialStatus:
+                newConnectionSecret || provider.auth === "none"
+                  ? "ready"
+                  : (previous?.credentialStatus ?? "missing"),
+              credentialSource: newConnectionSecret
+                ? "config"
+                : (previous?.credentialSource ?? "none"),
+              storedCredentialPresent:
+                Boolean(newConnectionSecret) || (previous?.storedCredentialPresent ?? false),
             };
             setData((current) => ({
               ...current,
@@ -3553,6 +3583,8 @@ export function useRuntimeStore(): RuntimeStore {
           const runtimeProvider: RuntimeProviderInput = {
             id: provider.id,
             protocol: provider.protocol,
+            ...(provider.modelProtocols ? { modelProtocols: provider.modelProtocols } : {}),
+            ...(provider.auth ? { auth: provider.auth } : {}),
             baseURL: provider.baseURL,
             apiKeyEnv: provider.apiKeyEnv,
             models: provider.models,
@@ -3561,13 +3593,23 @@ export function useRuntimeStore(): RuntimeStore {
               ? { modelCapabilities: provider.modelCapabilities }
               : {}),
           };
-          await invoke(bridge, "provider.upsert", {
-            provider: runtimeProvider,
-            expectedRevision: providerConfig.revision,
-          });
-          await loadGlobalProviderConfig(bridge);
-          const workspacePath = dataRef.current.workspacePath;
-          if (workspacePath) await loadWorkspace(bridge, workspacePath);
+          try {
+            const params = { provider: runtimeProvider, expectedRevision: providerConfig.revision };
+            if (createOnly || newConnectionSecret !== undefined) {
+              await saveProviderConnection(
+                (method, input) => invoke(bridge, method, input),
+                params,
+                newConnectionSecret,
+              );
+            } else {
+              await invoke(bridge, "provider.upsert", params);
+            }
+          } finally {
+            // Reconcile partial writes and unknown transport outcomes before allowing a retry.
+            await loadGlobalProviderConfig(bridge);
+            const workspacePath = dataRef.current.workspacePath;
+            if (workspacePath) await loadWorkspace(bridge, workspacePath);
+          }
           setMessage(`Provider ${provider.id} 已保存。`);
         });
       },
