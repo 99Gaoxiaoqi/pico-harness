@@ -1,3 +1,4 @@
+import { parseSwarmCommand } from "./swarm-command.js";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -1820,6 +1821,29 @@ function ConversationPage() {
 
   const submit = async (text: string, nextBehavior: ComposerBehavior) => {
     if (sendingRef.current || !composerReady) return;
+    const swarmCommand = !activation ? parseSwarmCommand(text) : undefined;
+    if (swarmCommand) {
+      if (swarmCommand.kind !== "status" && activeRun) {
+        actions.showMessage?.("任务运行中不能切换或启动 Swarm；可以使用 /swarm status 查看状态。");
+        return;
+      }
+      const currentMode = sessionRef
+        ? conversation?.settings?.orchestrationMode
+        : newTaskSettings.orchestrationMode;
+      if (swarmCommand.kind === "status") {
+        actions.showMessage?.(
+          `Swarm：${currentMode === "swarm" ? "开启" : "关闭"}；当前编排：${currentMode ?? "default"}`,
+        );
+        clearDraft();
+        return;
+      }
+      if (swarmCommand.kind === "set_mode") {
+        if (swarmCommand.mode === "swarm" || currentMode === "swarm")
+          await changeGraphMode(swarmCommand.mode === "swarm", "swarm");
+        clearDraft();
+        return;
+      }
+    }
     sendingRef.current = true;
     setPreparingSend(true);
     const sourceDraftKey = draftKey;

@@ -1,4 +1,3 @@
-import { AGENT_SWARM_SUPERVISOR_TOOL_NAMES } from "../agent-graph/core/tool-names.js";
 import { reconcilePlanExecution } from "./plan-execution-recovery.js";
 import { PlanCoordinator } from "../plan/coordinator.js";
 import type { Session, SessionOptions } from "../engine/session.js";
@@ -228,11 +227,16 @@ export function createAgentGraphWorkspaceHost(
         if (!recoverable) throw new Error(`Graph root wake does not exist: ${wakeId}`);
         if (recoverable.graph.phase !== "open")
           throw new Error("Cannot execute a wake for a finished Graph");
+        const authorization = input.prestartedRun.agentSwarmAuthorization;
+        const supervision =
+          authorization === undefined
+            ? app.graphSupervision(recoverable.graph.graphId)
+            : authorization === "none"
+              ? undefined
+              : { mode: "swarm" as const, authorization };
         const root: AgentGraphRootToolContext = {
           kind: "graph_root_supervisor",
-          ...(app.graphSupervision(recoverable.graph.graphId)
-            ? { supervision: app.graphSupervision(recoverable.graph.graphId) }
-            : {}),
+          ...(supervision ? { supervision } : {}),
           graphId: recoverable.graph.graphId,
           epoch: recoverable.graph.epoch,
           rootSessionId: input.session.id,
@@ -247,9 +251,7 @@ export function createAgentGraphWorkspaceHost(
           toolPort: app.toolPort,
         };
         orchestrationMode = root.supervision ? "swarm" : "graph";
-        allowedTools = root.supervision
-          ? AGENT_SWARM_SUPERVISOR_TOOL_NAMES
-          : AGENT_GRAPH_SUPERVISOR_TOOL_NAMES;
+        allowedTools = root.supervision ? undefined : AGENT_GRAPH_SUPERVISOR_TOOL_NAMES;
       }
 
       liveLaunches.add(input.prestartedRun.runId);
@@ -302,6 +304,30 @@ export function createAgentGraphWorkspaceHost(
     exactRuns,
     workDir: options.workDir,
     isLaunchLive: ({ targetRunId }) => liveLaunches.has(targetRunId),
+    resolveAgentSwarmAuthorization: async (identity) => {
+      const wake = store.getSupervisorWake(identity.wakeId);
+      const interest = wake?.yieldPermitId ? store.getYieldInterest(wake.yieldPermitId) : undefined;
+      if (
+        !wake ||
+        wake.graphId !== identity.graphId ||
+        !interest ||
+        interest.graphId !== identity.graphId ||
+        interest.rootSessionId !== identity.rootSessionId
+      )
+        return "none";
+      const events = await options.runtimeEventStore.readRun(
+        identity.rootSessionId,
+        interest.rootRunId,
+      );
+      const start = events.find((event) => event.kind === "run.started");
+      if (!start) return "none";
+      if (start.data.agentSwarmAuthorization !== undefined)
+        return start.data.agentSwarmAuthorization;
+      // Legacy Runs had no authorization header. Only their durable Graph intent is proof.
+      return (
+        requireApplication(application).graphSupervision(identity.graphId)?.authorization ?? "none"
+      );
+    },
     preflight: ({ rootSessionId }) =>
       options.isRootSourceActive?.(rootSessionId)
         ? "source_root_active"

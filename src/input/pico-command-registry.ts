@@ -1528,7 +1528,7 @@ function createSwarmCommand(settings: SessionSettings): SlashCommand {
     availability: "idle",
     execute: async (input): Promise<LocalCommandResult | PromptCommandResult> => {
       const task = input.args.trim();
-      const target = task.toLowerCase();
+      const target = task;
       if (target && !["on", "off", "status"].includes(target)) {
         return { type: "prompt", prompt: task, execution: { orchestrationMode: "swarm" } };
       }

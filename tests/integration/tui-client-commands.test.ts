@@ -988,6 +988,21 @@ test("client commands: running-class behaviors gate on availability and map sess
   // 进入 running 态（事件流）。
   harness.emit(runEvent("run.started", "s1", "run_1", "running"));
   assert.equal(harness.runtime.running, true);
+  const beforeSwarm = harness.requests.length;
+  const swarmStatus = await processClientInput("/swarm status", harness.registry, harness.runtime);
+  assert.equal(swarmStatus.kind, "local");
+  if (swarmStatus.kind === "local") assert.match(String(swarmStatus.result?.message), /Swarm Mode/u);
+  for (const command of ["/swarm on", "/swarm off", "/swarm Do work"]) {
+    const blocked = await processClientInput(command, harness.registry, harness.runtime);
+    assert.equal(blocked.kind, "local");
+    if (blocked.kind === "local")
+      assert.match(String(blocked.result?.message), /only available while idle/u);
+  }
+  assert.ok(
+    harness.requests
+      .slice(beforeSwarm)
+      .every(({ method }) => method !== "session.send" && method !== "session.settings.update"),
+  );
 
   // idle-only 命令被拦（/model /new）。
   const modelBlocked = await run(harness, "/model p1/m2");

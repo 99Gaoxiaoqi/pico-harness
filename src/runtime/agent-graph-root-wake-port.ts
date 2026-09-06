@@ -185,8 +185,9 @@ export function renderRootWakePrompt(input: RootSupervisorRunIdentity, payload?:
     return [
       "[Graph Supervisor wake]",
       `Swarm ${input.graphId} reached a supervisor checkpoint.`,
-      "Call agent_swarm_status first. Read only committed results with agent_graph_results(work_ids), not logs or partial output.",
-      "Replace failed work with update_agent_graph add_work.replaces using the exact workId. Do not repeat successful work.",
+      'Call agent_swarm_status first. Read only committed results with agent_output({view:"result", work_ids:[...]}), not logs or partial output.',
+
+      "Replace failed work with update_agent_graph add_work with replacement_mode=replace and replaces using the exact workId. Do not repeat successful work.",
       "When useful work is settled, select committed recordIds with finish and synthesize the result. Otherwise yield immediately; never poll.",
     ].join("\n");
   }

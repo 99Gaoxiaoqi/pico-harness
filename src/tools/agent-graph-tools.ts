@@ -680,7 +680,7 @@ export function createAgentGraphSupervisorTools(
 ): readonly BaseTool[] {
   return [
     new UpdateAgentGraphTool(options),
-    new ViewAgentGraphTool(options),
+    ...(options.swarm ? [] : [new ViewAgentGraphTool(options)]),
     new YieldAgentGraphTool(options),
     ...(options.swarm ? [new AgentListTool(options), new ReadAgentOutputTool(options)] : []),
   ];

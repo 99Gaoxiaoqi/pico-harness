@@ -25,7 +25,7 @@ import type {
 } from "./runtime-contract.js";
 
 /** 自动锚定的终态新鲜度窗口缺省(审查 F2):跨进程存活保护的等待期。 */
-const DEFAULT_CONTINUATION_TERMINAL_MIN_AGE_MS = 10 * 60_000;
+export const DEFAULT_CONTINUATION_TERMINAL_MIN_AGE_MS = 10 * 60_000;
 
 /**
  * The narrow, already-assembled boundary for one foreground/background Agent turn.
@@ -70,6 +70,8 @@ export interface RuntimeRunExecutorInput {
    * 测试可传 0 关闭窗口。
    */
   readonly continuationTerminalMinAgeMs?: number;
+  /** Assembly must match the committed grant, including a raced continuation admission. */
+  readonly expectedAgentSwarmAuthorization?: RuntimeRunOptions["agentSwarmAuthorization"];
   readonly traceEnabled: boolean;
   readonly options: RuntimeRunOptions;
   readonly signal?: AbortSignal;
@@ -219,6 +221,15 @@ export class RuntimeRunExecutor {
       });
       const runResult = await runtimeRun.run(async () => {
         signal?.throwIfAborted();
+        if (
+          this.input.expectedAgentSwarmAuthorization !== undefined &&
+          runtimeRun.agentSwarmAuthorization !== undefined &&
+          runtimeRun.agentSwarmAuthorization !== this.input.expectedAgentSwarmAuthorization
+        ) {
+          throw new Error(
+            "Run authorization changed during assembly; resume with the committed Run identity",
+          );
+        }
         if (!resumeExistingSession) {
           const submittedPrompt = prompt;
           const submitDecision = await runtimeState.dispatchHook(
