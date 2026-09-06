@@ -97,6 +97,7 @@ export interface AppProps {
   collaborationMode?: string;
   /** Graph Mode 启用状态(状态区展示) */
   graphMode?: boolean;
+  orchestrationMode?: string;
   /** Permission 模式(状态区展示) */
   permissionMode?: string;
   /** 思考强度(状态区展示) */
@@ -148,6 +149,7 @@ export function App({
   sessionMode = "new",
   collaborationMode = "agent",
   graphMode = false,
+  orchestrationMode,
   permissionMode = "default",
   thinkingEffort,
   mcpSummary,
@@ -491,6 +493,7 @@ export function App({
       sessionMode={sessionMode}
       collaborationMode={collaborationMode}
       graphMode={graphMode}
+      orchestrationMode={orchestrationMode}
       permissionMode={permissionMode}
       mcpSummary={mcpSummary}
       contextSummary={undefined}

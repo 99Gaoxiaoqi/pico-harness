@@ -10,6 +10,7 @@ export interface StatusBarProps {
   collaborationMode?: string;
   permissionMode?: string;
   graphMode?: boolean;
+  orchestrationMode?: string;
   mcpSummary?: string;
   contextSummary?: string;
   taskSummary?: string;
@@ -34,6 +35,7 @@ export function buildStatusItems({
   collaborationMode = "agent",
   permissionMode = "default",
   graphMode = false,
+  orchestrationMode,
   mcpSummary,
   contextSummary,
   taskSummary,
@@ -48,6 +50,7 @@ export function buildStatusItems({
   }
   items.push(["collab", collaborationMode], ["perm", permissionMode]);
   if (graphMode) items.push(["graph", "on"]);
+  items.push(["orchestration", orchestrationMode ?? (graphMode ? "graph" : "default")]);
   if (mcpSummary) items.push(["mcp", mcpSummary]);
   if (contextSummary) {
     items.push(["context", truncateLogoCwd(contextSummary, summaryMaxLength)]);
@@ -83,6 +86,7 @@ export function buildStatusBarText(props: StatusBarProps): string {
     `模式 ${modeText}`,
     ...(collaborationMode ? [`协作 ${collaborationMode}`] : []),
     ...(permissionMode ? [`权限 ${permissionMode}`] : []),
+    `编排 ${itemByLabel.get("orchestration")}`,
     ...(mcpSummary ? [mcpSummary] : []),
     ...(itemByLabel.has("context") ? [`上下文 ${itemByLabel.get("context")}`] : []),
     ...(itemByLabel.has("task") ? [`任务 ${itemByLabel.get("task")}`] : []),
