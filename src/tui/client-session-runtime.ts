@@ -10,6 +10,7 @@ import {
   type RuntimeConversationItem,
   type RuntimeCollaborationMode,
   type RuntimePermissionMode,
+  type RuntimeOrchestrationMode,
   type RuntimePlanControlSnapshot,
   type RuntimePlanProjection,
   type RuntimeActiveOverlayEntry,
@@ -110,8 +111,8 @@ export interface ClientSessionRuntimeOptions {
    */
   readonly modelOverride?: string;
   readonly thinkingOverride?: string;
-  /** --graph 启动覆盖（Phase 4）：sessionId 确立后 orchestrationMode=graph 一次。 */
-  readonly orchestrationModeOverride?: "graph";
+  /** --graph / --swarm 启动覆盖，在首次发送或恢复会话时生效。 */
+  readonly orchestrationModeOverride?: "graph" | "swarm";
 }
 
 /** 仅供旧投影 Oracle/迁移测试复用；不属于 v2 客户端读路径。 */
@@ -332,6 +333,7 @@ export class ClientSessionRuntime {
   private planProjectionSequence = -1;
   private surfacedRevisionRequestId: string | undefined;
   private pendingModelRouteId: string | undefined;
+  private startupOrchestrationMode: "graph" | "swarm" | undefined;
   private settingsOverrideApplied = false;
   private settingsOverrideInFlight = false;
   private configuredInitialSettings: RuntimeUserDefaults = {
@@ -342,6 +344,13 @@ export class ClientSessionRuntime {
   private pendingInitialSettingsTouched = false;
 
   constructor(private readonly options: ClientSessionRuntimeOptions) {
+    this.startupOrchestrationMode = options.orchestrationModeOverride;
+    if (this.startupOrchestrationMode) {
+      this.pendingInitialSettings = {
+        ...this.pendingInitialSettings,
+        orchestrationMode: this.startupOrchestrationMode,
+      };
+    }
     this.client = options.client;
     this.workspacePath = options.workspacePath;
     this.reporter = options.reporter;
@@ -416,12 +425,22 @@ export class ClientSessionRuntime {
     return true;
   }
 
+  setPreSessionOrchestrationMode(mode: RuntimeOrchestrationMode): boolean {
+    if (this.sessionId !== undefined || this.running) return false;
+    this.pendingInitialSettingsTouched = true;
+    this.startupOrchestrationMode = undefined;
+    this.pendingInitialSettings = { ...this.pendingInitialSettings, orchestrationMode: mode };
+    this.publishPreSessionSettings();
+    return true;
+  }
+
   /** 发送用户文本。behavior 供 /steer /queue /replace 映射；attachments 为
    * 图片附件（3-D 漏账补齐：仅 idle 发送，running 态由宿主本地拒绝）。 */
   async sendText(
     text: string,
     behavior: "auto" | "steer" | "queue" | "replace" = "auto",
     attachments?: readonly RuntimeInputAttachment[],
+    execution?: { orchestrationMode?: "graph" | "swarm" },
   ): Promise<boolean> {
     // 斜杠分派归 processClientInput（对抗评审 P2：核心层不再自带命令语法知识，
     // 且 process-user-input 保证 prompt 永不以 "/" 开头，此守卫本就不可达）。
@@ -432,6 +451,7 @@ export class ClientSessionRuntime {
         ...(attachments && attachments.length > 0 ? { attachments } : {}),
       },
       behavior,
+      execution,
     );
   }
 
@@ -439,6 +459,7 @@ export class ClientSessionRuntime {
   async sendInput(
     input: RuntimeUserInput,
     behavior: "auto" | "steer" | "queue" | "replace" = "auto",
+    execution?: { orchestrationMode?: "graph" | "swarm" },
   ): Promise<boolean> {
     if (input.kind === "text") this.reporter.pushUserMessage(input.text);
     try {
@@ -446,11 +467,15 @@ export class ClientSessionRuntime {
         workspacePath: this.workspacePath,
         ...(this.sessionId ? { sessionId: this.sessionId } : {}),
         ...(this.sessionId ? {} : { initialSettings: this.pendingInitialSettings }),
-        input,
+        input:
+          input.kind === "text" && execution?.orchestrationMode
+            ? { ...input, orchestrationMode: execution.orchestrationMode }
+            : input,
         behavior,
         idempotencyKey: randomUUID(),
       });
       if (this.sessionId === undefined) {
+        this.startupOrchestrationMode = undefined;
         this.sessionId = result.session.sessionId;
         void this.hydrateSerial();
         await this.refreshSettingsSnapshot();
@@ -679,6 +704,12 @@ export class ClientSessionRuntime {
       if (!this.pendingInitialSettingsTouched) {
         this.pendingInitialSettings = this.configuredInitialSettings;
       }
+    }
+    if (!this.pendingInitialSettingsTouched && this.startupOrchestrationMode) {
+      this.pendingInitialSettings = {
+        ...this.pendingInitialSettings,
+        orchestrationMode: this.startupOrchestrationMode,
+      };
     }
     this.publishPreSessionSettings();
   }
@@ -971,8 +1002,8 @@ export class ClientSessionRuntime {
     if (this.settingsOverrideApplied || this.settingsOverrideInFlight || this.disposed) return;
     const routeId = this.pendingModelRouteId;
     const thinking = this.options.thinkingOverride;
-    const graph = this.options.orchestrationModeOverride;
-    if (!routeId && !thinking && !graph) return;
+    const orchestration = this.startupOrchestrationMode;
+    if (!routeId && !thinking && !orchestration) return;
     if (!this.sessionId) return;
     // in-flight 同步置位防并发双发；applied 只在成功后置（对抗评审 P2：失败
     // 前置会让一次瞬时错误永久吞掉 --model），失败留给下一入口自然重试。
@@ -983,11 +1014,11 @@ export class ClientSessionRuntime {
         sessionId: this.sessionId,
         ...(routeId ? { modelRouteId: routeId } : {}),
         ...(thinking ? { thinkingEffort: thinking } : {}),
-        ...(graph ? { orchestrationMode: graph } : {}),
+        ...(orchestration ? { orchestrationMode: orchestration } : {}),
       });
       this.settingsOverrideApplied = true;
       this.reporter.pushSystemMessage(
-        `客户端覆盖已应用：${[routeId ? `模型路由 ${routeId}` : undefined, thinking ? `思考强度 ${thinking}` : undefined, graph ? "Graph Mode" : undefined].filter(Boolean).join("，")}。`,
+        `客户端覆盖已应用：${[routeId ? `模型路由 ${routeId}` : undefined, thinking ? `思考强度 ${thinking}` : undefined, orchestration ? `编排 ${orchestration}` : undefined].filter(Boolean).join("，")}。`,
       );
     } catch (error) {
       this.reporter.pushError(

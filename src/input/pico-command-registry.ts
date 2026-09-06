@@ -265,6 +265,7 @@ export async function createPicoCommandRegistry(
     createModeCommand(settings),
     createPlanCommand(settings, options.session),
     createGraphCommand(settings),
+    createSwarmCommand(settings),
     createExploreCommand(),
     createPermissionsCommand(settings),
     createCompactCommand(options, settings),
@@ -1495,13 +1496,51 @@ function createGraphCommand(settings: SessionSettings): SlashCommand {
       }
       const result = setSessionOrchestrationMode(
         settings,
-        requested === "off" ? "default" : "graph",
+        requested === "off"
+          ? settings.orchestrationMode === "graph"
+            ? "default"
+            : (settings.orchestrationMode ?? "default")
+          : "graph",
       );
       return {
         type: "local",
         action: "message",
         message: result.message,
         data: { ok: result.ok, orchestrationMode: settings.orchestrationMode },
+      };
+    },
+  };
+}
+
+function createSwarmCommand(settings: SessionSettings): SlashCommand {
+  return {
+    name: "swarm",
+    description: "查看或切换 Swarm 编排，或用 Swarm 执行一次任务",
+    usage: "/swarm [on|off|status|task]",
+    argumentHint: "[on|off|status|task]",
+    argumentCompleter: completeFromCandidates([
+      { value: "on", description: "启用 Swarm 编排" },
+      { value: "off", description: "关闭 Swarm 编排" },
+      { value: "status", description: "查看当前编排" },
+    ]),
+    category: "session",
+    kind: "local",
+    availability: "idle",
+    execute: async (input): Promise<LocalCommandResult | PromptCommandResult> => {
+      const task = input.args.trim();
+      const target = task.toLowerCase();
+      if (target && !["on", "off", "status"].includes(target)) {
+        return { type: "prompt", prompt: task, execution: { orchestrationMode: "swarm" } };
+      }
+      if (target === "on" || (target === "off" && settings.orchestrationMode === "swarm")) {
+        setSessionOrchestrationMode(settings, target === "on" ? "swarm" : "default");
+      }
+      const current = settings.orchestrationMode ?? "default";
+      return {
+        type: "local",
+        action: "message",
+        message: `Swarm Mode：${current === "swarm" ? "开启" : "关闭"}；当前编排：${current}`,
+        data: { ok: true, orchestrationMode: current },
       };
     },
   };

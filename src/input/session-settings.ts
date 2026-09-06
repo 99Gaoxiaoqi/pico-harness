@@ -34,8 +34,8 @@ export interface SessionSettings {
   provider: ProviderKind;
   mode: InteractionMode;
   collaborationMode?: "agent" | "plan";
-  /** Orchestration axis: "default" = no graph scheduling, "graph" = Graph Mode active. */
-  orchestrationMode?: "default" | "graph";
+  /** Orchestration axis: "default" = direct execution, "graph" / "swarm" = coordinated execution. */
+  orchestrationMode?: "default" | "graph" | "swarm";
   /** @deprecated Legacy v2 read compatibility only; new SessionSettings never sets it. */
   prePlanMode?: Exclude<InteractionMode, "plan">;
   model: string;
@@ -66,8 +66,8 @@ export interface SessionSettingsDefaults {
   permissionMode?: string;
   tools?: readonly SessionToolStatus[];
   additionalDirectories?: readonly string[];
-  /** Initial orchestration mode for new sessions (CLI --graph / programmatic). Defaults to "default". */
-  orchestrationMode?: "default" | "graph";
+  /** Initial orchestration mode for new sessions (CLI --graph / --swarm / programmatic). Defaults to "default". */
+  orchestrationMode?: "default" | "graph" | "swarm";
 }
 
 export interface SessionSettingResult {
@@ -515,13 +515,13 @@ export function setSessionCollaborationMode(
 
 export function setSessionOrchestrationMode(
   settings: SessionSettings,
-  mode: "default" | "graph",
+  mode: "default" | "graph" | "swarm",
 ): SessionSettingResult {
   settings.orchestrationMode = mode;
   persistSessionSettings(settings);
   return {
     ok: true,
-    message: mode === "graph" ? "Graph Mode 已启用" : "Graph Mode 已关闭",
+    message: `编排模式已设置：${mode}`,
   };
 }
 
@@ -679,6 +679,7 @@ export function parseThinkingEffortArg(raw: string): ThinkingEffort | undefined 
 export function formatSessionStatus(settings: SessionSettings): string {
   return [
     `Mode: ${settings.mode}`,
+    `Orchestration: ${settings.orchestrationMode ?? "default"}`,
     `Model: ${settings.model}`,
     `Model route: ${settings.modelRouteId ?? "unconfigured"}`,
     `Thinking effort: ${settings.thinkingEffort}`,

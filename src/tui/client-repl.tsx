@@ -48,6 +48,7 @@ export interface ClientReplOptions {
   readonly forkFrom?: string;
   /** Graph Mode 启动覆盖（--graph，经 session.settings.update 应用）。 */
   readonly graphMode?: boolean;
+  readonly swarmMode?: boolean;
 }
 
 export async function startClientRepl(options: ClientReplOptions): Promise<void> {
@@ -78,6 +79,7 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
     ...(options.model ? { modelOverride: options.model } : {}),
     ...(options.thinkingEffort ? { thinkingOverride: options.thinkingEffort } : {}),
     ...(options.graphMode ? { orchestrationModeOverride: "graph" } : {}),
+    ...(options.swarmMode ? { orchestrationModeOverride: "swarm" } : {}),
     onRunStateChanged: (running) => {
       runningSink.current?.(running);
       if (!running) fileIndex.markDirty();
@@ -372,7 +374,7 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
         inputReplacement={inputReplacement}
         collaborationMode={settings.collaborationMode}
         permissionMode={settings.permissionMode}
-        graphMode={settings.orchestrationMode === "graph"}
+        orchestrationMode={settings.orchestrationMode ?? "default"}
         thinkingEffort={settings.thinkingEffort}
         slashCommandSuggestions={(query: string) =>
           clientSlashSuggestions(commandRegistry, query, running ? "running" : "idle")
