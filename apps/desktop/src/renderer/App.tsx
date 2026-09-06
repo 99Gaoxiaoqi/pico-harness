@@ -1,3 +1,5 @@
+import { UsageSettingsPage } from "./usage/UsageSettingsPage.js";
+import "./usage/usage.css";
 import { parseSwarmCommand } from "./swarm-command.js";
 import {
   AlertTriangle,
@@ -8,7 +10,6 @@ import {
   BrainCircuit,
   CheckCircle2,
   ChevronDown,
-  CircleDollarSign,
   Clock3,
   Code2,
   FileCode2,
@@ -3535,202 +3536,45 @@ function McpAddForm({
 }
 
 function UsagePage() {
-  const { data, actions, busy } = useRuntime();
-  const [period, setPeriod] = useState<"24h" | "7d" | "30d" | "all">("30d");
-  const [workspacePath, setWorkspacePath] = useState("all");
+  const { data, actions } = useRuntime();
+  const navigate = useNavigate();
   const [usage, setUsage] = useState(data.usage);
-  const [loadFailed, setLoadFailed] = useState(false);
-  const usageRequestSequence = useRef(0);
-  const refreshUsage = useCallback(async () => {
-    const requestSequence = ++usageRequestSequence.current;
-    setLoadFailed(false);
-    const duration = usagePeriodDuration(period);
-    const result = await actions.queryUsage({
-      ...(workspacePath !== "all" ? { workspacePath } : {}),
-      ...(duration ? { from: Date.now() - duration } : {}),
-    });
-    if (requestSequence !== usageRequestSequence.current) return;
-    if (result) setUsage(result);
-    else setLoadFailed(true);
-  }, [actions, period, workspacePath]);
-
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string>();
+  const sequence = useRef(0);
+  const query = useCallback(
+    async (input: { workspacePath?: string; from?: number; to?: number }) => {
+      const request = ++sequence.current;
+      setLoading(true);
+      setError(undefined);
+      try {
+        const result = await actions.queryUsage(input);
+        if (request !== sequence.current) return;
+        if (result) setUsage(result);
+        else setError("无法读取本地用量账本，请重试。");
+      } finally {
+        if (request === sequence.current) setLoading(false);
+      }
+    },
+    [actions],
+  );
   useEffect(() => {
-    void refreshUsage();
+    void query({});
     return () => {
-      usageRequestSequence.current += 1;
+      sequence.current += 1;
     };
-  }, [refreshUsage]);
-
-  const totalRecords = (usage.providerCallCount ?? 0) + (usage.baselineCount ?? 0);
-  const coverage =
-    usage.providerCallCount && usage.usageReportCount !== undefined
-      ? `${((usage.usageReportCount / usage.providerCallCount) * 100).toFixed(0)}%`
-      : "—";
-  const overview = [
-    ["总 Tokens", usage.totalTokens, Gauge],
-    ["模型请求", usage.providerCallCount, Bot],
-    ["Usage 上报覆盖", coverage, CheckCircle2],
-    ["估算费用", formatUsageCost(usage.costCNY, usage.costStatus), CircleDollarSign],
-  ] as const;
-  const details = [
-    ["输入 Tokens", usage.inputTokens, TerminalSquare],
-    ["输出 Tokens", usage.outputTokens, Bot],
-    ["推理 Tokens", usage.reasoningTokens, BrainCircuit],
-    ["缓存读取", usage.cacheReadTokens ?? usage.cachedTokens, Layers3],
-    ["缓存写入", usage.cacheWriteTokens, Layers3],
-  ] as const;
+  }, [query]);
   return (
-    <div className="page-stack settings-page usage-page">
-      <section className="page-intro">
-        <div>
-          <span className="eyebrow">活动</span>
-          <h2>用量</h2>
-          <p>查看全部任务或单个项目的 Token、请求与人民币费用估算。</p>
-        </div>
-        <Button disabled={busy === "usage-query"} onClick={() => void refreshUsage()}>
-          <RefreshCw aria-hidden="true" size={16} /> 刷新
-        </Button>
-      </section>
-      <section className="usage-toolbar" aria-label="用量筛选">
-        <div className="usage-period-tabs" role="group" aria-label="统计时间范围">
-          {(
-            [
-              ["24h", "24 小时"],
-              ["7d", "7 天"],
-              ["30d", "30 天"],
-              ["all", "全部"],
-            ] as const
-          ).map(([value, label]) => (
-            <button
-              type="button"
-              aria-pressed={period === value}
-              className={period === value ? "is-active" : ""}
-              key={value}
-              onClick={() => setPeriod(value)}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-        <label className="usage-workspace-filter">
-          <span>统计范围</span>
-          <select
-            className="select-control"
-            value={workspacePath}
-            onChange={(event) => setWorkspacePath(event.target.value)}
-          >
-            <option value="all">全部任务</option>
-            {data.workspaces.map((workspace) => (
-              <option key={workspace.path} value={workspace.path}>
-                {workspaceDisplayName(workspace.path, workspace)}
-              </option>
-            ))}
-          </select>
-        </label>
-      </section>
-      {loadFailed ? (
-        <CapabilityUnavailable title="用量暂不可用" detail="无法读取本地用量账本，请稍后重试。" />
-      ) : busy === "usage-query" && !usage.refreshedAt ? (
-        <div className="settings-loading" aria-live="polite">
-          <RefreshCw aria-hidden="true" /> 正在读取用量…
-        </div>
-      ) : totalRecords === 0 ? (
-        <div className="settings-empty settings-empty--wide">
-          {usage.unavailableWorkspaceCount ? (
-            <AlertTriangle aria-hidden="true" />
-          ) : (
-            <Gauge aria-hidden="true" />
-          )}
-          <div>
-            <strong>
-              {usage.unavailableWorkspaceCount
-                ? "无法确认这个范围是否为空"
-                : "这个范围内还没有模型调用"}
-            </strong>
-            <p>
-              {usage.unavailableWorkspaceCount
-                ? `有 ${usage.unavailableWorkspaceCount} 个项目的账本无法读取，请检查项目状态后刷新。`
-                : "完成一次使用模型的任务后，请求、Token 和费用估算会显示在这里。"}
-            </p>
-          </div>
-        </div>
-      ) : (
-        <>
-          <div className="usage-grid usage-grid--overview">
-            {overview.map(([label, value, Icon]) => (
-              <article className="usage-card" key={label}>
-                <Icon aria-hidden="true" />
-                <span>{label}</span>
-                <strong>{typeof value === "number" ? formatCompact(value) : (value ?? "—")}</strong>
-              </article>
-            ))}
-          </div>
-          <section className="panel usage-details-panel">
-            <PanelHeader
-              title="Token 明细"
-              detail="输出 Tokens 包含 Provider 返回的推理部分；推理明细仅在 Provider 单独上报时显示"
-            />
-            <div className="usage-detail-grid">
-              {details.map(([label, value, Icon]) => (
-                <div key={label}>
-                  <Icon aria-hidden="true" />
-                  <span>{label}</span>
-                  <strong>{value === undefined ? "—" : formatCompact(value)}</strong>
-                </div>
-              ))}
-            </div>
-          </section>
-          {usage.costStatus === "unknown" || usage.costStatus === "partial" ? (
-            <InlineNotice tone="warning">
-              {usage.costStatus === "partial"
-                ? "部分调用缺少价格，费用只包含可估算部分。"
-                : "当前调用没有可用价格，未显示虚假的 ¥0.00。"}
-            </InlineNotice>
-          ) : null}
-          {usage.baselineCount ? (
-            <InlineNotice tone="warning">
-              历史基线只保留 Token 与费用总数，不包含逐次调用的推理明细和上报覆盖率。
-            </InlineNotice>
-          ) : null}
-          {usage.cacheAlerts?.map((alert) => (
-            <InlineNotice key={alert} tone="warning">
-              {alert}
-            </InlineNotice>
-          ))}
-        </>
-      )}
-      {!loadFailed && usage.unavailableWorkspaceCount ? (
-        <InlineNotice tone="warning">
-          有 {usage.unavailableWorkspaceCount} 个项目的账本暂时无法读取，当前总数为部分结果。
-        </InlineNotice>
-      ) : null}
-      <section className="panel">
-        <PanelHeader
-          title="数据边界"
-          detail={
-            usage.refreshedAt
-              ? `最近刷新：${new Date(usage.refreshedAt).toLocaleTimeString("zh-CN")}`
-              : "费用仅为 Runtime 根据 Provider 定价计算的人民币估算"
-          }
-        />
-        <div className="usage-explainer">
-          <div>
-            <Box aria-hidden="true" />
-            <span>
-              <strong>本地汇总</strong>
-              <p>会话用量保存在 ~/.pico，不依赖登录同步。</p>
-            </span>
-          </div>
-          <div>
-            <ShieldCheck aria-hidden="true" />
-            <span>
-              <strong>不显示猜测值</strong>
-              <p>价格未知时显示“无法估算”；套餐内调用明确标记为“套餐内”。</p>
-            </span>
-          </div>
-        </div>
-      </section>
-    </div>
+    <UsageSettingsPage
+      usage={usage}
+      workspaces={data.workspaces}
+      loading={loading}
+      {...(error ? { error } : {})}
+      onQuery={query}
+      onOpenSession={(workspacePath, sessionId) =>
+        navigate(sessionHref({ sessionId, workspacePath }))
+      }
+    />
   );
 }
 
@@ -4181,26 +4025,6 @@ function CapabilityUnavailable({
   );
 }
 
-function PanelHeader({
-  title,
-  detail,
-  action,
-}: {
-  readonly title: string;
-  readonly detail?: string;
-  readonly action?: ReactNode;
-}) {
-  return (
-    <header className="panel-header">
-      <div>
-        <h3>{title}</h3>
-        {detail && <p>{detail}</p>}
-      </div>
-      {action}
-    </header>
-  );
-}
-
 function NotFound() {
   return (
     <EmptyState
@@ -4236,23 +4060,6 @@ function formatCompact(value: number): string {
   return new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(
     value,
   );
-}
-
-function usagePeriodDuration(period: "24h" | "7d" | "30d" | "all"): number | undefined {
-  if (period === "all") return undefined;
-  const days = period === "24h" ? 1 : period === "7d" ? 7 : 30;
-  return days * 24 * 60 * 60 * 1000;
-}
-
-function formatUsageCost(
-  costCNY: number | undefined,
-  status: "none" | "estimated" | "included" | "unknown" | "partial" | undefined,
-): string {
-  if (status === "included") return "套餐内";
-  if (status === "unknown") return "无法估算";
-  if (status === "none" || costCNY === undefined) return "—";
-  const formatted = `¥${costCNY.toFixed(2)}`;
-  return status === "partial" ? `${formatted}（部分）` : formatted;
 }
 
 function newTaskGreeting(now = new Date()): string {
