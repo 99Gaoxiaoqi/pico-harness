@@ -122,7 +122,18 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
             message: `当前默认路由：${configured.defaultModelRouteId ?? "(未设置)"}`,
           };
         }
-        const matched = routes.find((route) => route.id === target || route.name === target);
+        const exact = routes.find((route) => route.id === target);
+        const candidates = routes.filter((route) => route.name === target);
+        if (!exact && candidates.length > 1) {
+          return {
+            type: "local",
+            action: "model",
+            ui: { kind: "open-selector", selector: "model" },
+            data: { modelRoutes: candidates },
+            message: `多个厂商提供 ${target}，请选择厂商，或使用完整路由：${candidates.map((route) => `/model ${route.id}`).join("、")}。`,
+          };
+        }
+        const matched = exact ?? candidates[0];
         if (!matched) {
           return {
             type: "local",

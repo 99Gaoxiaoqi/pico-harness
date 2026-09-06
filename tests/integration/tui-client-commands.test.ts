@@ -3,6 +3,9 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { PassThrough } from "node:stream";
+import { setTimeout as delay } from "node:timers/promises";
+import { render } from "ink";
 import { LOCAL_RUNTIME_PROTOCOL_VERSION, type RuntimeNotification } from "@pico/protocol";
 import { createPicoCommandRegistry } from "../../src/input/pico-command-registry.js";
 import { AUTOMATION_TOOL_ALLOWLIST } from "../../src/safety/automation-tool-policy.js";
@@ -13,6 +16,7 @@ import {
   type DaemonSessionClient,
 } from "../../src/tui/client-session-runtime.js";
 import { TuiReporter } from "../../src/tui/tui-reporter.js";
+import { handleClientLocalCommand } from "../../src/tui/client-command-host.js";
 
 /**
  * 3-D Phase 3 tier1：客户端命令注册表全命令矩阵。fake client 记录全部 RPC，
@@ -30,6 +34,7 @@ interface Harness {
 }
 
 function createHarness(options?: {
+  readonly duplicateModelProvider?: boolean;
   readonly sessionId?: string;
   readonly permissionMode?: "default" | "auto" | "yolo";
   readonly configuredPermissionMode?: "default" | "auto" | "yolo";
@@ -322,6 +327,16 @@ function createHarness(options?: {
                   credentialSource: "keychain",
                   storedCredentialPresent: true,
                 },
+                ...(options?.duplicateModelProvider
+                  ? [
+                      {
+                        id: "p2",
+                        protocol: "openai",
+                        baseURL: "http://y",
+                        models: ["m1", "org/nested"],
+                      },
+                    ]
+                  : []),
               ],
               sources: { "providers.p1": "user" },
               revisions: { user: "1", project: "1" },
@@ -684,6 +699,97 @@ function credentialProposalId(message: unknown): string {
   assert.ok(proposalId, "credential preview 必须返回 proposalId");
   return proposalId;
 }
+
+test("TUI 模型选择：厂商分组、筛选后确认保留完整路由，同名命令不静默切换", async () => {
+  const harness = createHarness({ sessionId: "s1", duplicateModelProvider: true });
+  const ambiguous = await run(harness, "/model m1");
+  assert.equal(ambiguous.result?.ui?.selector, "model");
+  assert.match(ambiguous.result?.message ?? "", /多个厂商/);
+  assert.ok(!harness.requests.some((request) => request.method === "session.settings.update"));
+
+  const result = await processClientInput("/model", harness.registry, harness.runtime);
+  assert.ok(result.result);
+  const dispatched: Promise<unknown>[] = [];
+  const closed: string[] = [];
+  const effect = handleClientLocalCommand(result.result, {
+    reporter: new TuiReporter(),
+    registry: harness.registry,
+    currentModelId: () => "p1/m1",
+    closeDialog: (id) => {
+      closed.push(id);
+    },
+    switchSession: () => undefined,
+    dispatchInput: (input) => {
+      dispatched.push(run(harness, input));
+    },
+  });
+  assert.ok(effect.dialog);
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  Object.defineProperty(stdin, "isTTY", { value: true });
+  Object.assign(stdin, {
+    setRawMode: () => undefined,
+    ref: () => undefined,
+    unref: () => undefined,
+  });
+  Object.defineProperty(stdout, "columns", { value: 100 });
+  let output = "";
+  stdout.on("data", (chunk) => {
+    output += String(chunk);
+  });
+  const instance = render(effect.dialog.content, {
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    debug: true,
+    patchConsole: false,
+    exitOnCtrlC: false,
+  });
+  async function press(input: string): Promise<void> {
+    output = "";
+    stdin.write(input);
+    await delay(30);
+    await instance.waitUntilRenderFlush();
+  }
+  try {
+    await delay(30);
+    await instance.waitUntilRenderFlush();
+    assert.match(output, /当前：p1\/m1/);
+    assert.match(output, /m1 ✓ 当前/);
+    assert.match(output, /p1[\s\S]*p2/);
+    await press("no-match");
+    assert.match(output, /没有匹配的模型/);
+    await press("\r");
+    assert.equal(dispatched.length, 0);
+    assert.equal(closed.length, 0);
+    await press("\u0015"); // Ctrl+U
+    await press("P2");
+    assert.match(output, /筛选：P2/);
+    assert.match(output, /已选：p2\/m1/);
+    await press("\u001b[B");
+    assert.match(output, /已选：p2\/org\/nested/);
+    await press("\r");
+    await Promise.all(dispatched);
+    assert.deepEqual(closed, ["local-ui:model-selector"]);
+    const updates = harness.requests.filter(
+      (request) => request.method === "session.settings.update",
+    );
+    assert.equal(updates.length, 1);
+    assert.equal(updates[0]?.params.modelRouteId, "p2/org/nested");
+  } finally {
+    instance.unmount();
+    await instance.waitUntilExit();
+    stdin.destroy();
+    stdout.destroy();
+  }
+
+  harness.requests.length = 0;
+  await run(harness, "/model p2/m1");
+  assert.equal(
+    harness.requests.find((request) => request.method === "session.settings.update")?.params
+      .modelRouteId,
+    "p2/m1",
+  );
+});
 
 test("client commands: settings-class commands map to session.settings.update", async () => {
   const harness = createHarness({ sessionId: "s1" });
