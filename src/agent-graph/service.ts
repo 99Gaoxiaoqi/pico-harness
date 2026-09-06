@@ -1,7 +1,8 @@
 import {
   projectAgentSwarmStatus,
-  swarmCheckpointKey,
+  swarmAttentionKey,
   type AgentSwarmStatusResult,
+  type AgentSwarmDiagnostic,
 } from "./swarm-status.js";
 import {
   AgentGraphSupervisorService,
@@ -98,13 +99,18 @@ class SqliteAgentGraphDriveBridge implements AgentGraphDrivePort {
     const state = this.control.getScheduleState(graphId);
     if (!state.intents.some((intent) => intent.supervision?.mode === "swarm")) return [];
     const status = await readCompactSwarmStatus(this.store, this.control, this.runtime, graphId);
-    const key = swarmCheckpointKey(status);
-    return key
+    const checkpoint = this.store.observeSwarmCheckpoint({
+      graphId,
+      status: status.status,
+      attentionKey: swarmAttentionKey(status),
+      emptyAttentionKey: swarmAttentionKey({ items: [] }),
+    });
+    return checkpoint
       ? [
           {
-            dedupeKey: `swarm:${key}`,
+            dedupeKey: checkpoint.dedupeKey,
             cause: "runtime_terminal",
-            payload: { mode: "swarm", status: status.status },
+            payload: checkpoint.payload,
           },
         ]
       : [];
@@ -118,6 +124,9 @@ class SqliteAgentGraphDriveBridge implements AgentGraphDrivePort {
     graphId: string,
     options: { readonly force?: boolean } = {},
   ): Promise<AgentGraphDriveResult> {
+    // Observe admitted queued work before reconciliation can complete it in the
+    // same pass; otherwise a fresh batch can appear as settled -> settled.
+    await this.swarmWakeCandidates(graphId);
     const active = activeSwarmDiagnostics(this.store, this.control, graphId);
     if (!options.force) {
       if (active.some((diagnostic) => diagnostic.state === "needs_attention")) {
@@ -795,7 +804,7 @@ async function readCompactSwarmStatus(
 ): Promise<AgentSwarmStatusResult> {
   const state = control.getScheduleState(graphId);
   const claims = control.listActivationClaims(graphId);
-  const readFailures: { subjectId: string; message: string }[] = [];
+  const readFailures: AgentSwarmDiagnostic[] = [];
   const observations = await Promise.all(
     claims.map(async (claim) => {
       try {
@@ -839,7 +848,11 @@ async function readCompactSwarmStatus(
       })),
   };
   const diagnostics = activeSwarmDiagnostics(store, control, graphId).map(
-    ({ subjectId, message }) => ({ subjectId, message }),
+    ({ subjectId, message, phase }) => ({
+      subjectId,
+      message,
+      failurePhase: swarmFailurePhase(phase),
+    }),
   );
   return projectAgentSwarmStatus({
     projection,
@@ -878,4 +891,23 @@ function activeSwarmDiagnostics(
   return store
     .listGraphDiagnostics(graphId, { unresolvedOnly: true })
     .filter((item) => !ignored.has(item.subjectId));
+}
+
+function swarmFailurePhase(
+  phase: AgentGraphReconcileError["phase"],
+): NonNullable<AgentSwarmDiagnostic["failurePhase"]> {
+  switch (phase) {
+    case "load":
+    case "claim":
+      return "schedule";
+    case "provision":
+      return "topology";
+    case "stop":
+      return "stop";
+    case "resolve-inputs":
+      return "render";
+    case "begin-executing":
+    case "project-record":
+      return "dispatch";
+  }
 }

@@ -1141,15 +1141,14 @@ test("Swarm waits for the batch, wakes on failure, replaces work and survives re
     assert.equal(repairing.counts.superseded, 1);
     assert.equal(repairing.counts.completed, 1);
     await call("yield_agent_graph", {}, "replacement-yield");
+    assert.equal(rootWake.starts.length, 2, "clearing the attention set wakes once");
+    runId = "swarm-root-run-3";
+    await call("yield_agent_graph", {}, "recovery-yield");
     await service.close();
     service = makeService();
     await service.start();
     assert.equal(service.graphSupervision(graph.graphId)?.authorization, "turn_override");
-    assert.equal(
-      rootWake.starts.length,
-      1,
-      "restart does not replay an obsolete failure checkpoint",
-    );
+    assert.equal(rootWake.starts.length, 2, "restart does not replay the recovery checkpoint");
     const replacement = store
       .listActivationClaims(graph.graphId)
       .find((claim) => claim.intentId === replaced.work[0].workId)!;
@@ -1160,7 +1159,7 @@ test("Swarm waits for the batch, wakes on failure, replaces work and survives re
     await service.supervisor.notifyGraph(graph.graphId);
     const settled = await status();
     assert.equal(settled.status, "settled");
-    assert.equal(rootWake.starts.length, 2);
+    assert.equal(rootWake.starts.length, 3);
     const results = await call(
       "agent_graph_results",
       { work_ids: [added.work[0].workId, replaced.work[0].workId] },
@@ -1178,6 +1177,101 @@ test("Swarm waits for the batch, wakes on failure, replaces work and survives re
       "swarm-finish",
     );
     assert.equal(store.getGraph(graph.graphId)?.phase, "finished");
+  } finally {
+    await service.close();
+    store.close();
+    await rm(storageRoot, { recursive: true, force: true });
+  }
+});
+
+test("Swarm replacement retires failed provisioning diagnostics and starts fresh work", async () => {
+  const storageRoot = await mkdtemp(join(tmpdir(), "pico-swarm-replace-diagnostic-"));
+  const store = new SqliteAgentGraphControlStore({ storageRoot });
+  const delegate = new CompletingRuntimeAdapter();
+  let failedOperator: string | undefined;
+  const service = createAgentGraphApplicationService({
+    store,
+    runtime: {
+      ensureOperatorProvision: async (input) => {
+        failedOperator ??= input.provision.operatorId;
+        if (input.provision.operatorId === failedOperator)
+          throw new AgentGraphNeedsAttentionError("configuration", "operator unavailable");
+        return delegate.ensureOperatorProvision(input);
+      },
+      startOrObserveActivation: async (input) => {
+        const result = await delegate.startOrObserveActivation(input);
+        return { ...result, projection: { ...result.projection, outputStatus: "success" } };
+      },
+      projectActivation: async (claim) => ({
+        ...(await delegate.projectActivation(claim)),
+        outputStatus: "success",
+      }),
+      stopActivation: () => delegate.stopActivation(),
+      resolveInputHandoff: (records) => delegate.resolveInputHandoff(records),
+    },
+    rootWakePort: new CompletingRootWakePort(),
+    resolveOperatorWorkspace: () => ({ workDir: storageRoot }),
+  });
+  try {
+    await service.start();
+    const graph = service.openRootEpoch("root-replacement");
+    const add = (toolCallId: string, replacesIntentId?: string) =>
+      service.toolPort.commitWork!({
+        graphId: graph.graphId,
+        epoch: 1,
+        rootModelRouteId: "test-route",
+        source: {
+          sessionId: "root-replacement",
+          turnId: toolCallId,
+          runId: toolCallId,
+          toolCallId,
+        },
+        supervision: { mode: "swarm", authorization: "turn_override" },
+        request: {
+          operation: "add_work",
+          work: [
+            {
+              profileId: "explore",
+              instruction: "Perform work",
+              inputIds: [],
+              workspace: { kind: "shared" },
+              ...(replacesIntentId ? { replacesIntentId } : {}),
+            },
+          ],
+        },
+      });
+    const first = await add("first");
+    await service.supervisor.notifyGraph(graph.graphId);
+    const read = () =>
+      service.toolPort.readSwarmStatus!({
+        graphId: graph.graphId,
+        epoch: 1,
+        rootSessionId: "root-replacement",
+      });
+    const failed = await read();
+    assert.equal(failed.items[0]!.status, "failed");
+    assert.equal(failed.items[0]!.failurePhase, "topology");
+    await add("replacement", first.projection.intents[0]!.intentId);
+    await service.supervisor.notifyGraph(graph.graphId);
+    const repaired = await read();
+    assert.equal(repaired.counts.superseded, 1);
+    assert.equal(repaired.counts.completed, 1);
+    assert.equal(
+      repaired.status,
+      "settled",
+      "obsolete operator diagnostics cannot block replacement",
+    );
+    assert.equal(delegate.starts.length, 1);
+    const firstSettled = await service.drivePort.driveGraph(graph.graphId);
+    await add("next-batch");
+    await service.supervisor.notifyGraph(graph.graphId);
+    const nextSettled = await service.drivePort.driveGraph(graph.graphId);
+    assert.equal((await read()).status, "settled");
+    assert.notEqual(
+      nextSettled?.wakeCandidates?.[0]?.dedupeKey,
+      firstSettled?.wakeCandidates?.[0]?.dedupeKey,
+      "an immediately completed new batch must still cross a fresh settled boundary",
+    );
   } finally {
     await service.close();
     store.close();
