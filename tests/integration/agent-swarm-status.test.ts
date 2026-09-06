@@ -280,3 +280,32 @@ test("Stopping failed work allows the remaining branch to reach a fresh settled 
     }
   }
 });
+
+test("Swarm status exposes reconciliation failure phases without content and keeps unknown terminal outputs failed", async () => {
+  const projection = fixture(["a", "b"]);
+  for (const failurePhase of ["schedule", "topology", "stop", "render", "dispatch"] as const) {
+    const status = projectAgentSwarmStatus({
+      projection,
+      runtimeClaims: [runtime("b", "running")],
+      diagnostics: [{ subjectId: "a", failurePhase, message: "Cannot schedule work" }],
+    });
+    assert.equal(status.items[0]!.status, "failed");
+    const tool = createAgentSwarmStatusTool({
+      getRootContext: () => root,
+      port: {
+        async readSwarmStatus() {
+          return status;
+        },
+      },
+    });
+    const result = JSON.parse(await tool.execute("{}"));
+    assert.equal(result.items[0].failurePhase, failurePhase);
+    assert.equal(result.items[0].failureReason, "Cannot schedule work");
+  }
+  const unknown = projectAgentSwarmStatus({
+    projection,
+    runtimeClaims: [{ ...runtime("a", "completed"), outputEventIds: ["unreadable-output"] }],
+  });
+  assert.equal(unknown.items[0]!.status, "failed");
+  assert.match(unknown.items[0]!.failureReason!, /status is unavailable/);
+});

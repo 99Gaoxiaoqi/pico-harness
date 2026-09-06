@@ -326,5 +326,18 @@ export const AGENT_GRAPH_SCOPE: SqliteSchemaScope = {
         ON agent_graph_schedule_revisions(source_session_id, source_run_id);
       `,
     ],
+    [
+      6,
+      `
+      CREATE TABLE agent_graph_swarm_checkpoints (
+        graph_id TEXT PRIMARY KEY,
+        status TEXT NOT NULL CHECK (status IN ('running','needs_attention','settled')),
+        attention_key TEXT NOT NULL,
+        sequence INTEGER NOT NULL CHECK (sequence >= 0),
+        pending_status TEXT CHECK (pending_status IN ('running','needs_attention','settled')),
+        FOREIGN KEY (graph_id) REFERENCES agent_graphs(graph_id) ON DELETE RESTRICT
+      ) WITHOUT ROWID;
+      `,
+    ],
   ]),
 };

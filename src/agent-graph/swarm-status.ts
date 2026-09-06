@@ -22,7 +22,14 @@ export interface AgentSwarmStatusItem {
   readonly childSessionId?: string;
   readonly runId?: string;
   readonly status: AgentSwarmItemStatus;
+  readonly failurePhase?: "schedule" | "topology" | "stop" | "render" | "dispatch";
   readonly failureReason?: string;
+}
+
+export interface AgentSwarmDiagnostic {
+  readonly subjectId: string;
+  readonly message?: string;
+  readonly failurePhase?: AgentSwarmStatusItem["failurePhase"];
 }
 
 export interface AgentSwarmStatusResult {
@@ -31,7 +38,7 @@ export interface AgentSwarmStatusResult {
   readonly status: "running" | "needs_attention" | "settled";
   readonly counts: Readonly<Record<AgentSwarmItemStatus, number>> & { readonly total: number };
   readonly items: readonly AgentSwarmStatusItem[];
-  readonly diagnostics?: readonly { readonly subjectId: string; readonly message?: string }[];
+  readonly diagnostics?: readonly AgentSwarmDiagnostic[];
   readonly availableOperatorProfiles?: readonly AgentGraphOperatorProfileSummary[];
 }
 
@@ -46,7 +53,7 @@ const attentionStatuses = new Set<AgentSwarmItemStatus>([
 export function projectAgentSwarmStatus(input: {
   readonly projection: AgentGraphSupervisorProjection;
   readonly runtimeClaims: readonly AgentGraphSupervisorClaimRuntime[];
-  readonly diagnostics?: readonly { readonly subjectId: string; readonly message?: string }[];
+  readonly diagnostics?: readonly AgentSwarmDiagnostic[];
 }): AgentSwarmStatusResult {
   const { projection } = input;
   const runtimeByClaim = new Map(input.runtimeClaims.map((runtime) => [runtime.claimId, runtime]));
@@ -79,14 +86,23 @@ export function projectAgentSwarmStatus(input: {
           target.generation === intent.operatorGeneration,
     );
     const diagnostic = input.diagnostics?.find(({ subjectId }) =>
-      [intent.intentId, intent.operatorId, claim?.claimId, provision?.provisionId].includes(
-        subjectId,
-      ),
+      [
+        projection.graph.graphId,
+        intent.intentId,
+        intent.operatorId,
+        claim?.claimId,
+        provision?.provisionId,
+      ].includes(subjectId),
     );
     let status: AgentSwarmItemStatus = "queued";
     let failureReason: string | undefined;
+    let failurePhase: AgentSwarmStatusItem["failurePhase"];
     if (replaced.has(intent.intentId)) {
       status = "superseded";
+    } else if (diagnostic?.failurePhase && (!stop || diagnostic.failurePhase === "stop")) {
+      status = "failed";
+      failurePhase = diagnostic.failurePhase;
+      failureReason = diagnostic.message ?? "Scheduling requires attention";
     } else if (runtime?.status === "running") {
       status = "running";
     } else if (runtime?.status === "waiting-permission") {
@@ -128,6 +144,7 @@ export function projectAgentSwarmStatus(input: {
           ? { childSessionId: provision.childSessionId }
           : {}),
       status,
+      ...(failurePhase === undefined ? {} : { failurePhase }),
       ...(failureReason === undefined ? {} : { failureReason }),
     };
   });
@@ -188,26 +205,22 @@ export function projectAgentSwarmStatus(input: {
   };
 }
 
-/** Success on one branch does not wake the root while other work remains active. */
+/** Only item identities and statuses form the attention set, never diagnostic text. */
+export function swarmAttentionKey(status: Pick<AgentSwarmStatusResult, "items">): string {
+  return deterministicFingerprint(
+    status.items
+      .filter((item) => attentionStatuses.has(item.status))
+      .map(({ workId, status }) => ({ workId, status }))
+      .sort((left, right) => left.workId.localeCompare(right.workId)),
+  );
+}
+
+/** Snapshot identity only; durable transition sequence owns wake deduplication. */
 export function swarmCheckpointKey(status: AgentSwarmStatusResult): string | undefined {
   if (status.status === "running") return undefined;
-  const items = status.items.filter(
-    (item) => status.status === "settled" || attentionStatuses.has(item.status),
-  );
   return deterministicFingerprint({
     swarmId: status.swarmId,
     status: status.status,
-    items: items
-      .map(({ workId, status: itemStatus, failureReason }) => ({
-        workId,
-        status: itemStatus,
-        failureReason,
-      }))
-      .sort((left, right) => left.workId.localeCompare(right.workId)),
-    diagnostics: [...(status.diagnostics ?? [])].sort(
-      (left, right) =>
-        left.subjectId.localeCompare(right.subjectId) ||
-        (left.message ?? "").localeCompare(right.message ?? ""),
-    ),
+    attention: swarmAttentionKey(status),
   });
 }
