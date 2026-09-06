@@ -957,7 +957,13 @@ export class SqliteRuntimeEventStore {
             `Runtime continuation source ${sourceRunId} is already bound to target ${existingBySource.targetRunId}`,
           );
         }
-        const replayEvent = this.createContinuationStartEvent(input, existingBySource);
+        const admitted = this.readRunEntriesLocked(sourceSessionId, targetRunId)
+          .map(({ event }) => event)
+          .find(
+            (event): event is Extract<RuntimeEvent, { kind: "run.started" }> =>
+              event.kind === "run.started" && event.eventId === input.startEventId,
+          );
+        const replayEvent = this.createContinuationStartEvent(input, existingBySource, admitted);
         const [append] = this.appendBatchLocked(
           [replayEvent],
           { ownerFence: input.ownerFence },
@@ -1055,7 +1061,17 @@ export class SqliteRuntimeEventStore {
   private createContinuationStartEvent(
     input: StartRuntimeContinuationInput,
     claim: RuntimeContinuationClaim,
+    admitted?: Extract<RuntimeEvent, { kind: "run.started" }>,
   ): Extract<RuntimeEvent, { kind: "run.started" }> {
+    const sourceStart = this.readRunEntriesLocked(input.sessionId, input.sourceRunId)
+      .map(({ event }) => event)
+      .find(
+        (event): event is Extract<RuntimeEvent, { kind: "run.started" }> =>
+          event.kind === "run.started",
+      );
+    const agentSwarmAuthorization = admitted
+      ? admitted.data.agentSwarmAuthorization
+      : (input.agentSwarmAuthorization ?? sourceStart?.data.agentSwarmAuthorization ?? "none");
     return canonicalizeRuntimeEvent({
       schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
       eventId: input.startEventId,
@@ -1069,6 +1085,7 @@ export class SqliteRuntimeEventStore {
       kind: "run.started",
       data: {
         workDir: canonicalizeWorkspacePath(input.workDir),
+        ...(agentSwarmAuthorization !== undefined ? { agentSwarmAuthorization } : {}),
         ...(input.presentation ? { presentation: input.presentation } : {}),
         continuationOf: {
           runId: claim.sourceRunId,

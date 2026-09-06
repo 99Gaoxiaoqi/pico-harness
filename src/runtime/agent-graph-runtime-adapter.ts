@@ -40,6 +40,7 @@ export interface StartExactAgentGraphRunInput {
   readonly runStartedEventId: string;
   readonly workDir: string;
   readonly prompt: string;
+  readonly agentSwarmAuthorization?: RuntimeRunStartedEvent["data"]["agentSwarmAuthorization"];
 }
 
 export type AgentGraphExactRunIndeterminateReason =

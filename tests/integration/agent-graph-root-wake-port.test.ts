@@ -23,6 +23,7 @@ test("root wake starts one exact root RuntimeRun with deterministic identities",
   let inspection: AgentGraphExactRunInspection = { status: "not_started" };
   const port = new AgentGraphRootWakeRuntimePort({
     workDir: "/tmp/graph-root",
+    resolveAgentSwarmAuthorization: async () => "turn_override" as const,
     isLaunchLive: () => launchLive,
     exactRuns: {
       inspectExactRun: async () => inspection,
@@ -56,6 +57,7 @@ test("root wake starts one exact root RuntimeRun with deterministic identities",
     status: "running",
   });
   assert.equal(starts.length, 1);
+  assert.equal(starts[0]!.agentSwarmAuthorization, "turn_override");
   assert.equal(starts[0]!.claimId, "root-wake:wake-1");
   assert.equal(starts[0]!.turnId, identity.targetTurnId);
   assert.equal(starts[0]!.runId, identity.targetRunId);
