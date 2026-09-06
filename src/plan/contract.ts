@@ -37,7 +37,13 @@ export interface PlanProposal {
   readonly reviewedBy?: PlanReviewedBy;
 }
 
+export interface PlanGraphBinding {
+  readonly graphId: string;
+  readonly epoch: number;
+}
+
 export interface PlanExecution {
+  readonly graph?: PlanGraphBinding;
   readonly planId: string;
   readonly revision: number;
   readonly status: PlanExecutionStatus;

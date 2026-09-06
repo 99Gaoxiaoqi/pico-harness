@@ -95,6 +95,7 @@ export interface SubagentItemView extends ConversationItemBase {
 
 export interface ApprovalItemView extends ConversationItemBase {
   readonly kind: "approval";
+  readonly approvalKind?: "tool" | "plan" | undefined;
   readonly title: string;
   readonly detail: string;
   readonly state: "pending" | "allowed" | "denied";

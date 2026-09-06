@@ -1,3 +1,4 @@
+import { SqliteAgentGraphControlStoreAdapter } from "../agent-graph/sqlite-control-store-adapter.js";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { assertValidAgentGraphOperatorProfileSnapshot } from "../agent-graph/operator-profile-catalog.js";
@@ -640,8 +641,22 @@ export function createProductionRuntimeServices(
                 (run) =>
                   run.sessionId === rootSessionId && !isTerminalWorkspaceRunStatus(run.status),
               ),
-          isWorkspaceBusy: () =>
-            workspaceRuntime.listRuns().some((run) => !isTerminalWorkspaceRunStatus(run.status)),
+          isWorkspaceBusy: () => {
+            // Operator Runs are the work the root is supervising; one unfinished branch must
+            // not prevent it from consuming another branch's result and yielding again.
+            const operatorRuns = new Set(
+              host.store
+                .listGraphs()
+                .flatMap((graph) =>
+                  host.store.listActivationClaims(graph.graphId).map((claim) => claim.targetRunId),
+                ),
+            );
+            return workspaceRuntime
+              .listRuns()
+              .some(
+                (run) => !isTerminalWorkspaceRunStatus(run.status) && !operatorRuns.has(run.runId),
+              );
+          },
           requestStop: ({ runId, reason }) => {
             const run = workspaceRuntime.getRun(runId);
             if (!run || isTerminalWorkspaceRunStatus(run.status)) return false;
@@ -695,14 +710,45 @@ export function createProductionRuntimeServices(
           );
         }
         const persistedSettings = (await session.readHydrationSnapshot()).runtime.settings;
-        const orchestrationMode = persistedSettings?.orchestrationMode ?? "default";
+        const priorPlan = await new PlanCoordinator(session.runtimeEventStore, {
+          sessionId: targetSessionId,
+          invocationId: "graph-admission",
+          runId: "graph-admission",
+          turnId: "graph-admission",
+          writeGuard: session,
+        }).project();
+        const resumeGraph =
+          execution?.planReview?.action === "resume_execution" && priorPlan.execution?.graph;
+        const planning =
+          execution?.planReview?.action === "replan_execution" ||
+          (persistedSettings?.collaborationMode === "plan" &&
+            execution?.planReview?.action !== "execute" &&
+            execution?.planReview?.action !== "resume_execution");
+        const orchestrationMode = planning
+          ? "default"
+          : resumeGraph
+            ? "graph"
+            : (persistedSettings?.orchestrationMode ?? "default");
         graphHost =
           orchestrationMode === "graph"
             ? requireAgentGraphWorkspaceHost(agentGraphHosts, workspacePath)
             : undefined;
         // Graph activation is a host admission decision. Persist the epoch before any model,
         // plugin, or MCP assembly so observers can see the selected mode immediately.
-        admittedGraph = graphHost?.openRootEpoch(targetSessionId);
+        const binding = priorPlan?.execution?.graph;
+        if (graphHost && execution?.planReview?.action === "resume_execution" && binding) {
+          admittedGraph = new SqliteAgentGraphControlStoreAdapter(graphHost.store).getGraph(
+            binding.graphId,
+          );
+          if (
+            !admittedGraph ||
+            admittedGraph.epoch !== binding.epoch ||
+            admittedGraph.rootSessionId !== targetSessionId
+          )
+            throw new Error("Plan Graph binding is no longer available");
+        } else {
+          admittedGraph = graphHost?.openRootEpoch(targetSessionId);
+        }
         const route = await resolveDesktopModelRoute(
           workspacePath,
           credentialVault,
@@ -901,10 +947,7 @@ export function createProductionRuntimeServices(
             modelCapabilities: route.capabilities,
             orchestrationMode,
             ...(reasoningLevel !== undefined ? { thinkingEffort: reasoningLevel } : {}),
-            ...(persistedSettings?.collaborationMode === "plan" ||
-            persistedSettings?.mode === "plan"
-              ? { planMode: true }
-              : {}),
+            ...(planning ? { planMode: true } : {}),
             ...(persistedSettings?.mode ? { rewindInteractionMode: persistedSettings.mode } : {}),
             ...(persistedSettings?.mode === "plan" && persistedSettings.prePlanMode
               ? { rewindPrePlanMode: persistedSettings.prePlanMode }
@@ -928,6 +971,15 @@ export function createProductionRuntimeServices(
                 }
               : undefined;
           const runtimeHost = {
+            retirePlanGraph: (
+              graph: { readonly graphId: string; readonly epoch: number },
+              reason: string,
+            ) =>
+              requireAgentGraphWorkspaceHost(agentGraphHosts, workspacePath).retireRootSession(
+                targetSessionId,
+                reason,
+                graph,
+              ),
             signal: context.signal,
             runtimeState,
             reporter,
@@ -1489,11 +1541,17 @@ export function createProductionRuntimeServices(
             runId: `plan-review:${operationId}`,
             turnId: `plan-review:${operationId}`,
             writeGuard: lease.session,
+            retireGraph: (graph, reason) =>
+              requireAgentGraphWorkspaceHost(agentGraphHosts, workspacePath).retireRootSession(
+                input.sessionId,
+                reason,
+                graph,
+              ),
           });
           const before = await coordinator.project();
           const projection =
             input.action === "cancel_execution"
-              ? (assertInterruptedPlanControl(before, input),
+              ? (assertInterruptedPlanControl(before, input, true),
                 await coordinator.claimAndCancel({
                   operationId,
                   expectedSessionSequence: before.sessionSequence,
@@ -1855,6 +1913,8 @@ function rootAgentGraphBinding(
 ): Extract<AgentGraphRunToolBinding, { readonly kind: "root" }> {
   return {
     kind: "root",
+    graph: { graphId: graph.graphId, epoch: graph.epoch },
+    retireGraph: (binding, reason) => host.retireRootSession(rootSessionId, reason, binding),
     getRootContext: () => {
       const run = currentRuntimeRun();
       if (!run || run.sessionId !== rootSessionId) return undefined;
@@ -2222,11 +2282,13 @@ function assertInterruptedPlanControl(
     readonly expectedSessionSequence: number;
     readonly controlEpoch: string;
   },
+  allowActiveGraph = false,
 ): void {
   const execution = projection.execution;
   if (
     !execution ||
-    execution.status !== "interrupted" ||
+    (execution.status !== "interrupted" &&
+      !(allowActiveGraph && execution.status === "active" && execution.graph)) ||
     execution.planId !== input.planId ||
     execution.revision !== input.expectedRevision ||
     projection.controlEpoch !== input.controlEpoch

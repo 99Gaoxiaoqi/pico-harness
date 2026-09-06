@@ -1,3 +1,5 @@
+import { reconcilePlanExecution } from "./plan-execution-recovery.js";
+import { PlanCoordinator } from "../plan/coordinator.js";
 import type { Session, SessionOptions } from "../engine/session.js";
 import type { SessionManager } from "../engine/session-manager.js";
 import {
@@ -43,6 +45,11 @@ import { AgentGraphRootWakeRuntimePort } from "./agent-graph-root-wake-port.js";
 export type AgentGraphRunToolBinding =
   | {
       readonly kind: "root";
+      readonly graph?: { readonly graphId: string; readonly epoch: number };
+      readonly retireGraph?: (
+        graph: { readonly graphId: string; readonly epoch: number },
+        reason: string,
+      ) => Promise<unknown>;
       readonly getRootContext: () => AgentGraphRootToolContext | undefined;
       readonly toolPort: AgentGraphSupervisorToolPort;
     }
@@ -101,7 +108,11 @@ export interface AgentGraphWorkspaceHost {
     readonly rootRunId: string;
     readonly rootModelRouteId?: string;
   }): AgentGraphRunToolBinding;
-  retireRootSession(rootSessionId: string, reason: string): Promise<boolean>;
+  retireRootSession(
+    rootSessionId: string,
+    reason: string,
+    expectedGraph?: { readonly graphId: string; readonly epoch: number },
+  ): Promise<boolean>;
   start(): Promise<void>;
   close(): Promise<void>;
 }
@@ -171,6 +182,10 @@ export function createAgentGraphWorkspaceHost(
     validateStart: (input) => {
       const claim = store.getActivationClaim(input.claimId);
       if (claim) requireValidProvisionProfile(store, claim);
+      const graphId =
+        claim?.graphId ?? store.getSupervisorWake(rootWakeIdFromClaim(input.claimId))?.graphId;
+      if (!graphId || store.getGraph(graphId)?.phase !== "open")
+        throw new Error("Cannot start a Run for a finished Graph");
     },
     execute: async (input) => {
       const app = requireApplication(application);
@@ -182,6 +197,8 @@ export function createAgentGraphWorkspaceHost(
       let wakeId: string | undefined;
 
       if (claim) {
+        if (store.getGraph(claim.graphId)?.phase !== "open")
+          throw new Error("Cannot execute an Operator for a finished Graph");
         const provision = requireValidProvisionProfile(store, claim);
         const activation: GraphOperatorActivationContext = {
           kind: "graph_operator_activation",
@@ -207,6 +224,8 @@ export function createAgentGraphWorkspaceHost(
         wakeId = rootWakeIdFromClaim(input.claimId);
         const recoverable = await store.getRecoverableSupervisorWake(wakeId);
         if (!recoverable) throw new Error(`Graph root wake does not exist: ${wakeId}`);
+        if (recoverable.graph.phase !== "open")
+          throw new Error("Cannot execute a wake for a finished Graph");
         const root: AgentGraphRootToolContext = {
           kind: "graph_root_supervisor",
           graphId: recoverable.graph.graphId,
@@ -215,7 +234,13 @@ export function createAgentGraphWorkspaceHost(
           rootTurnId: input.prestartedRun.turnId ?? recoverable.attempt!.targetTurnId,
           rootRunId: input.prestartedRun.runId,
         };
-        binding = { kind: "root", getRootContext: () => root, toolPort: app.toolPort };
+        binding = {
+          kind: "root",
+          retireGraph: (graph, reason) => host.retireRootSession(root.rootSessionId, reason, graph),
+          graph: { graphId: root.graphId, epoch: root.epoch },
+          getRootContext: () => root,
+          toolPort: app.toolPort,
+        };
         orchestrationMode = "graph";
         allowedTools = AGENT_GRAPH_SUPERVISOR_TOOL_NAMES;
       }
@@ -315,23 +340,58 @@ export function createAgentGraphWorkspaceHost(
   });
 
   let closed = false;
-  return {
+  const host: AgentGraphWorkspaceHost = {
     application,
     store,
     openRootEpoch: (rootSessionId) => requireApplication(application).openRootEpoch(rootSessionId),
     rootBinding: (input) => ({
       kind: "root",
+      graph: { graphId: input.graphId, epoch: input.epoch },
+      retireGraph: (graph, reason) => host.retireRootSession(input.rootSessionId, reason, graph),
       getRootContext: () => ({ kind: "graph_root_supervisor", ...input }),
       toolPort: requireApplication(application).toolPort,
     }),
-    retireRootSession: async (rootSessionId, reason) => {
-      const graph = store.getOpenRootEpoch(rootSessionId);
-      if (!graph) return false;
-      const retired = await requireApplication(application).retireRootSession(
-        rootSessionId,
-        reason,
-      );
-      if (retired && options.requestStop) {
+    retireRootSession: async (rootSessionId, reason, expectedGraph) => {
+      const graph = expectedGraph
+        ? store.getGraph(expectedGraph.graphId)
+        : store.getOpenRootEpoch(rootSessionId);
+      if (
+        !graph ||
+        graph.rootSessionId !== rootSessionId ||
+        (expectedGraph &&
+          (graph.graphId !== expectedGraph.graphId || graph.epoch !== expectedGraph.epoch))
+      )
+        return false;
+      const retired =
+        graph.phase === "open"
+          ? await requireApplication(application).retireRootSession(rootSessionId, reason)
+          : false;
+      // Finish is durable; replay delivery even when a previous process stopped after sealing.
+      await requireApplication(application).supervisor.notifyGraph(graph.graphId);
+      if (options.requestStop) {
+        // The initial foreground root may not have yielded or created a wake yet.
+        if (store.listGraphs(rootSessionId).at(-1)?.graphId === graph.graphId) {
+          const { entries } = await options.runtimeEventStore.readSessionEntriesOfKinds(
+            rootSessionId,
+            ["run.started", "run.terminal"],
+          );
+          const terminalRuns = new Set(
+            entries
+              .filter((entry) => entry.event.kind === "run.terminal")
+              .map((entry) => entry.event.runId),
+          );
+          const liveRoot = entries
+            .filter(
+              (entry) => entry.event.kind === "run.started" && !terminalRuns.has(entry.event.runId),
+            )
+            .at(-1);
+          if (liveRoot)
+            await options.requestStop({
+              sessionId: rootSessionId,
+              runId: liveRoot.event.runId,
+              reason,
+            });
+        }
         for (const wake of store.listSupervisorWakes(graph.graphId)) {
           for (const attempt of store.listSupervisorWakeAttempts(wake.wakeId)) {
             if (attempt.status !== "running") continue;
@@ -346,8 +406,50 @@ export function createAgentGraphWorkspaceHost(
       return retired;
     },
     start: async () => {
+      const cancelled: { rootSessionId: string; graphId: string; epoch: number; reason: string }[] =
+        [];
+      for (const graph of store.listGraphs()) {
+        const projection = await new PlanCoordinator(options.runtimeEventStore, {
+          sessionId: graph.rootSessionId,
+          invocationId: "graph-recovery",
+          runId: "graph-recovery",
+          turnId: "graph-recovery",
+        }).project();
+        const execution = projection.execution;
+        if (
+          execution?.status === "active" &&
+          execution.graph?.graphId === graph.graphId &&
+          execution.graph.epoch === graph.epoch
+        ) {
+          const lease = await options.sessionManager.getOrCreatePinned(
+            graph.rootSessionId,
+            options.workDir,
+            options.sessionOptions,
+          );
+          try {
+            await reconcilePlanExecution(
+              options.runtimeEventStore,
+              graph.rootSessionId,
+              lease.session,
+            );
+          } finally {
+            lease.release();
+          }
+        }
+        if (
+          execution?.status === "cancelled" &&
+          execution.graph?.graphId === graph.graphId &&
+          execution.graph.epoch === graph.epoch
+        ) {
+          const reason = execution.reason ?? "Recover cancelled plan";
+          cancelled.push({ rootSessionId: graph.rootSessionId, ...execution.graph, reason });
+          await host.retireRootSession(graph.rootSessionId, reason, execution.graph);
+        }
+      }
       await workspaceAuthority?.recover();
       await requireApplication(application).start();
+      for (const graph of cancelled)
+        await host.retireRootSession(graph.rootSessionId, graph.reason, graph);
     },
     close: async () => {
       if (closed) return;
@@ -359,6 +461,7 @@ export function createAgentGraphWorkspaceHost(
       }
     },
   };
+  return host;
 }
 
 function requireApplication(

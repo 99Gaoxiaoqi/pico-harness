@@ -206,6 +206,7 @@ export function ApprovalDialog({
   const planApproval = approval.kind === "plan";
   const interruptedPlan = approval.planControlMode === "interrupted";
   const revisionPlan = approval.planControlMode === "revision";
+  const activeGraphPlan = approval.planControlMode === "graph_active";
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
@@ -230,7 +231,7 @@ export function ApprovalDialog({
               )}
               {revisionPlan ? (
                 <p>原修改反馈：{approval.planFeedback}</p>
-              ) : (
+              ) : !activeGraphPlan && !interruptedPlan ? (
                 <label>
                   继续修改反馈
                   <textarea
@@ -239,7 +240,7 @@ export function ApprovalDialog({
                     placeholder="说明需要修改的内容"
                   />
                 </label>
-              )}
+              ) : null}
             </div>
           )}
           <div className="risk-row">
@@ -247,7 +248,15 @@ export function ApprovalDialog({
             <StatusPill status={approval.risk === "low" ? "ready" : "attention"} />
           </div>
           <div className="dialog__actions">
-            {interruptedPlan ? (
+            {activeGraphPlan ? (
+              <Button
+                variant="danger"
+                disabled={busy}
+                onClick={() => onDecision("cancel_execution")}
+              >
+                取消执行
+              </Button>
+            ) : interruptedPlan ? (
               <>
                 <Button
                   variant="danger"

@@ -179,7 +179,7 @@ export interface ApprovalView {
   readonly command?: string | undefined;
   readonly risk: "low" | "medium" | "high";
   readonly kind?: "tool" | "plan" | undefined;
-  readonly planControlMode?: "review" | "revision" | "interrupted" | undefined;
+  readonly planControlMode?: "review" | "revision" | "interrupted" | "graph_active" | undefined;
   readonly planId?: string | undefined;
   readonly expectedRevision?: number | undefined;
   readonly expectedSessionSequence?: number | undefined;

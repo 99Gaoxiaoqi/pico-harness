@@ -228,6 +228,7 @@ export type RuntimePlanProposal = JsonObject & {
 };
 
 export type RuntimePlanExecution = JsonObject & {
+  readonly graph?: JsonObject & { readonly graphId: string; readonly epoch: number };
   readonly planId: PlanId;
   readonly revision: number;
   readonly status: "active" | "interrupted" | "completed" | "cancelled";

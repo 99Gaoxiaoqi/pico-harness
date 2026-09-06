@@ -96,7 +96,12 @@ export function reducePlanEvent(state: PlanProjection, event: RuntimeEvent): Pla
         requirePending(pendingProposal, event.data.planId, event.data.revision);
       } else if (
         !execution ||
-        execution.status !== "interrupted" ||
+        (execution.status !== "interrupted" &&
+          !(
+            event.data.action === "cancel_execution" &&
+            execution.status === "active" &&
+            execution.graph
+          )) ||
         execution.planId !== event.data.planId ||
         execution.revision !== event.data.revision
       ) {
@@ -147,6 +152,7 @@ export function reducePlanEvent(state: PlanProjection, event: RuntimeEvent): Pla
         revision: approved.revision,
         status: "active",
         steps: clone(approved.steps),
+        ...(event.data.graph ? { graph: clone(event.data.graph) } : {}),
         startedAt: event.at,
         updatedAt: event.at,
       };
@@ -328,7 +334,12 @@ function assertReviewClaimTransition(
       claim.action === "cancel_execution" ||
       claim.action === "replan_execution") &&
     (!execution ||
-      execution.status !== "interrupted" ||
+      (execution.status !== "interrupted" &&
+        !(
+          claim.action === "cancel_execution" &&
+          execution.status === "active" &&
+          execution.graph
+        )) ||
       execution.planId !== claim.planId ||
       execution.revision !== claim.revision)
   ) {

@@ -42,6 +42,8 @@ export interface RuntimeRunExecutorInput {
   readonly picoHome: string;
   readonly prompt: string;
   readonly resumeExistingSession: boolean;
+  /** Approval/resume is a new durable control instruction even when reusing the user turn. */
+  readonly planExecutionPrompt?: { readonly messageId: string; readonly content: string };
   readonly presentation?: "internal";
   /**
    * Durable H+1 admission already published by a recoverable-task adapter.
@@ -279,6 +281,17 @@ export class RuntimeRunExecutor {
           await session.bindRewindPointSource(rewindPointId, userReceipt);
         }
 
+        if (this.input.planExecutionPrompt) {
+          await session.commitMessageOnce(this.input.planExecutionPrompt.messageId, {
+            role: "user",
+            content: this.input.planExecutionPrompt.content,
+            providerData: {
+              picoKind: "plan_execution_control_input",
+              picoPresentationAudience: "internal",
+              picoHiddenFromTranscript: true,
+            },
+          });
+        }
         try {
           const messages = await engine.run(session, undefined, undefined, signal);
           await this.input.completionGuard?.();

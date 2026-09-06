@@ -105,7 +105,12 @@ import type {
 import { TaskSearchDialog } from "./TaskSearchDialog.js";
 import { ProviderPage } from "./ProviderPage.js";
 import { MemoryPage } from "./MemoryPage.js";
-import { useRuntimeStore, type DesktopDiagnosticReport, type RuntimeStore } from "./runtime.js";
+import {
+  pendingToolApprovalFromTranscript,
+  useRuntimeStore,
+  type DesktopDiagnosticReport,
+  type RuntimeStore,
+} from "./runtime.js";
 import {
   newSessionHref,
   TEMPORARY_WORKSPACE_GROUP_LABEL,
@@ -1696,12 +1701,7 @@ function ConversationPage() {
 
   const runIds = useMemo(() => new Set(sessionRuns.map((run) => run.id)), [sessionRuns]);
   const persistedPendingApproval = activeRun
-    ? [...(conversation?.items ?? [])]
-        .reverse()
-        .find(
-          (item): item is Extract<ConversationItemView, { readonly kind: "approval" }> =>
-            item.kind === "approval" && item.state === "pending" && item.id.startsWith("approval:"),
-        )
+    ? pendingToolApprovalFromTranscript(conversation?.items ?? [])
     : undefined;
   const pendingApproval =
     data.approvals.filter((item) => runIds.has(item.runId)).at(-1) ??
@@ -1715,7 +1715,8 @@ function ConversationPage() {
           risk: "medium" as const,
           kind: "tool" as const,
         }
-      : undefined);
+      : undefined) ??
+    data.approvals.findLast((item) => item.kind === "plan" && item.sessionId === sessionId);
   const pendingPrompt = data.prompts.filter((item) => runIds.has(item.runId)).at(-1);
   const legacyStorageBlocked = Boolean(
     workspacePath &&
