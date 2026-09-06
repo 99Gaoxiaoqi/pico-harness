@@ -6,7 +6,8 @@ export const AGENT_GRAPH_SUPERVISOR_TOOL_NAMES = [
 
 export const AGENT_SWARM_SUPERVISOR_TOOL_NAMES = [
   "agent_swarm_status",
-  "agent_graph_results",
+  "agent_list",
+  "agent_output",
   "update_agent_graph",
   "yield_agent_graph",
 ] as const;

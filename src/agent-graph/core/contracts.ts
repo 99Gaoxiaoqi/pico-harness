@@ -30,6 +30,8 @@ export interface AgentGraphProfileSnapshot {
   readonly profileRevision: string;
   readonly profileFingerprint: string;
   readonly modelRouteId: string;
+  readonly thinkingEffort?: string;
+  readonly maxTurns?: number;
   readonly tools: readonly string[];
   readonly permissionPolicy: {
     readonly mode: "default";
