@@ -13,6 +13,7 @@ export {
   runtimeEventHasModelMessage,
 } from "../engine/session-runtime-event.js";
 export type {
+  AgentSwarmAuthorizationSource,
   RuntimeAgentOutputEvent,
   RuntimeAgentOutputPayload,
   RuntimeAgentOutputStatus,
@@ -196,6 +197,16 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
     case "run.started":
       assertString(value["data"]["workDir"], "run.started.workDir");
       assertRuntimePresentationProvenance(value["data"]["presentation"]);
+      if (
+        value["data"]["agentSwarmAuthorization"] !== undefined &&
+        !["none", "session_mode", "turn_override"].includes(
+          value["data"]["agentSwarmAuthorization"] as string,
+        )
+      ) {
+        throw new RuntimeEventIntegrityError(
+          "Runtime run.started agentSwarmAuthorization is invalid",
+        );
+      }
       if (value["data"]["continuationOf"] !== undefined) {
         assertRunContinuationOf(value["data"]["continuationOf"]);
       }

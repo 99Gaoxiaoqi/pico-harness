@@ -64,10 +64,14 @@ export interface RuntimeRunContinuationOf {
   readonly prefixDigest: string;
 }
 
+/** Trusted host decision frozen when a Run is admitted; absence means legacy/unauthorized. */
+export type AgentSwarmAuthorizationSource = "none" | "session_mode" | "turn_override";
+
 export interface RuntimeRunStartedEvent extends RuntimeEventBase {
   readonly kind: "run.started";
   readonly data: {
     readonly workDir: string;
+    readonly agentSwarmAuthorization?: AgentSwarmAuthorizationSource;
     /** Host-owned presentation identity; model/runtime facts remain durable. */
     readonly presentation?: RuntimePresentationProvenance;
     /** 仅续跑目标 run 携带;普通 run 不得设置。 */
