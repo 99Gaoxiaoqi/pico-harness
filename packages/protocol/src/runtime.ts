@@ -1984,6 +1984,19 @@ export type RuntimeMethodMap = {
     readonly params: WorkspaceParams;
     readonly result: WorkspaceStatusResult;
   };
+  readonly "workspace.storageRepair.prepare": {
+    readonly params: WorkspaceParams;
+    readonly result: {
+      readonly candidate: { readonly token: string; readonly storagePath: string } | null;
+    };
+  };
+  readonly "workspace.storageRepair.respond": {
+    readonly params: WorkspaceParams & {
+      readonly token: string;
+      readonly action: "repair" | "cancel";
+    };
+    readonly result: { readonly repaired: boolean };
+  };
   readonly "workspace.list": {
     readonly params: EmptyParams;
     readonly result: { readonly workspaces: readonly WorkspaceStatusResult[] };
@@ -2135,6 +2148,8 @@ export const RUNTIME_METHODS = [
   "workspace.register",
   "workspace.unregister",
   "workspace.status",
+  "workspace.storageRepair.prepare",
+  "workspace.storageRepair.respond",
   "workspace.list",
   "workspace.temporary.ensure",
   "workspace.trust",
@@ -3832,6 +3847,12 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
   "workspace.register": workspaceParams,
   "workspace.unregister": workspaceParams,
   "workspace.status": workspaceParams,
+  "workspace.storageRepair.prepare": workspaceParams,
+  "workspace.storageRepair.respond": exactParamShape({
+    workspacePath: stringParam,
+    token: boundedNonEmptyStringParam(128),
+    action: oneOfParam(["repair", "cancel"]),
+  }),
   "workspace.list": noParams,
   "workspace.temporary.ensure": noParams,
   "workspace.trust": exactParamShape({
@@ -4890,6 +4911,10 @@ const RUNTIME_RESULT_VALIDATORS = {
   "diagnostics.resources": runtimeResourceDiagnosticsResult,
   "workspace.list": exactResultShape({ workspaces: resultArray(workspaceStatusResultRule) }),
   "workspace.status": workspaceStatusResultRule,
+  "workspace.storageRepair.prepare": exactResultShape({
+    candidate: resultNullable(exactResultShape({ token: resultString, storagePath: resultString })),
+  }),
+  "workspace.storageRepair.respond": exactResultShape({ repaired: resultBoolean }),
   "workspace.temporary.ensure": temporaryWorkspaceStatusResultRule,
   "workspace.register": resultShape({
     workspacePath: resultString,

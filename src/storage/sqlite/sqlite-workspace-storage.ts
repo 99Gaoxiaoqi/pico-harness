@@ -7,6 +7,8 @@ import {
   acquireOperationalDatabase,
   operationalDatabasePath,
   openOperationalDatabaseReadOnly,
+  openOperationalDatabaseForBindingRepairSync,
+  hasOperationalDatabaseOwner,
   type OperationalDatabaseLease,
 } from "./sqlite-database.js";
 import {
@@ -303,6 +305,156 @@ function ensureBindingSync(database: DatabaseSync, root: string): WorkspaceStora
     throw error;
   }
   return { storageRootId, ...physical };
+}
+
+export interface WorkspaceStorageRepairCandidate {
+  readonly storagePath: string;
+}
+
+interface WorkspaceStorageRepairSnapshot {
+  readonly root: WorkspacePhysicalIdentity;
+  readonly database: WorkspacePhysicalIdentity;
+  readonly binding: WorkspaceStorageBindingRow;
+  readonly scopes: readonly SqliteSchemaScope[];
+}
+
+const storageRepairs = new WeakMap<
+  WorkspaceStorageRepairCandidate,
+  WorkspaceStorageRepairSnapshot
+>();
+
+/** Reads a repair snapshot without adopting, migrating, or creating storage. */
+export function prepareWorkspaceStorageRepairSync(
+  workspaceRoot: string,
+  scopes: readonly SqliteSchemaScope[],
+): WorkspaceStorageRepairCandidate | undefined {
+  const root = resolve(workspaceRoot);
+  if (!existsSync(operationalDatabasePath(root))) return undefined;
+  assertNoLegacyStorageSync(root);
+  const rootIdentity = currentPhysicalIdentity(root);
+  const databaseIdentity = repairDatabaseIdentity(root);
+  const database = openOperationalDatabaseReadOnly(root);
+  try {
+    const allScopes = withWorkspaceBindingScope(scopes);
+    assertReadOnlySchemaIsCurrentSync(database, [WORKSPACE_BINDING_SCOPE]);
+    const binding = requireBindingSync(database, root);
+    if (samePhysicalIdentity(identityFromBinding(binding), rootIdentity)) return undefined;
+    assertRepairIdle(root);
+    assertReadOnlySchemaIsCurrentSync(database, allScopes);
+    assertCurrentOperationalTargetSchemaSync(database, allScopes);
+    const candidate = Object.freeze({ storagePath: root });
+    const snapshot = { root: rootIdentity, database: databaseIdentity, binding, scopes: allScopes };
+    assertRepairSnapshot(database, candidate, snapshot);
+    storageRepairs.set(candidate, snapshot);
+    return candidate;
+  } finally {
+    database.close();
+  }
+}
+
+export function discardWorkspaceStorageRepair(candidate: WorkspaceStorageRepairCandidate): void {
+  storageRepairs.delete(candidate);
+}
+
+/** Consumes the confirmed snapshot once, retaining storageRootId and every business record. */
+export function repairWorkspaceStorageSync(
+  candidate: WorkspaceStorageRepairCandidate,
+): WorkspaceStorageRootIdentity {
+  const snapshot = storageRepairs.get(candidate);
+  storageRepairs.delete(candidate);
+  if (!snapshot) throw new FileStorageIntegrityError("修复请求已失效，请重新打开工作区。");
+  const root = candidate.storagePath;
+  assertRepairIdle(root);
+  // Reject directory/database replacements before opening any writable connection.
+  assertRepairPhysicalSnapshot(candidate, snapshot);
+  const database = openOperationalDatabaseForBindingRepairSync(root);
+  try {
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      assertRepairSnapshot(database, candidate, snapshot);
+      assertReadOnlySchemaIsCurrentSync(database, snapshot.scopes);
+      assertCurrentOperationalTargetSchemaSync(database, snapshot.scopes);
+      database
+        .prepare(
+          `UPDATE workspace_storage_binding
+         SET canonical_path = ?, device = ?, inode = ?, adopted_at = ? WHERE singleton = 1`,
+        )
+        .run(
+          snapshot.root.canonicalPath,
+          snapshot.root.device,
+          snapshot.root.inode,
+          new Date().toISOString(),
+        );
+      assertRepairPhysicalSnapshot(candidate, snapshot);
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+    return { storageRootId: snapshot.binding.storage_root_id, ...snapshot.root };
+  } finally {
+    database.close();
+  }
+}
+
+function repairDatabaseIdentity(root: string): WorkspacePhysicalIdentity {
+  const path = operationalDatabasePath(root);
+  const metadata = lstatSync(path);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1) {
+    throw new FileStorageIntegrityError("工作区数据库必须是独立的普通文件，不能修复链接文件。");
+  }
+  return {
+    canonicalPath: realpathSync.native(path),
+    device: String(metadata.dev),
+    inode: String(metadata.ino),
+  };
+}
+
+function samePhysicalIdentity(
+  left: WorkspacePhysicalIdentity,
+  right: WorkspacePhysicalIdentity,
+): boolean {
+  return (
+    left.canonicalPath === right.canonicalPath &&
+    left.device === right.device &&
+    left.inode === right.inode
+  );
+}
+
+function assertRepairIdle(root: string): void {
+  if (hasOperationalDatabaseOwner(root)) {
+    throw new FileStorageIntegrityError("工作区仍被后台使用，请结束任务并重启 Pico 后再修复。");
+  }
+}
+
+function assertRepairPhysicalSnapshot(
+  candidate: WorkspaceStorageRepairCandidate,
+  snapshot: WorkspaceStorageRepairSnapshot,
+): void {
+  if (
+    !samePhysicalIdentity(currentPhysicalIdentity(candidate.storagePath), snapshot.root) ||
+    !samePhysicalIdentity(repairDatabaseIdentity(candidate.storagePath), snapshot.database)
+  ) {
+    throw new FileStorageIntegrityError(
+      "确认期间工作区目录或数据库发生变化，已取消修复，请重新打开工作区。",
+    );
+  }
+}
+
+function assertRepairSnapshot(
+  database: DatabaseSync,
+  candidate: WorkspaceStorageRepairCandidate,
+  snapshot: WorkspaceStorageRepairSnapshot,
+): void {
+  assertRepairPhysicalSnapshot(candidate, snapshot);
+  if (
+    JSON.stringify(requireBindingSync(database, candidate.storagePath)) !==
+    JSON.stringify(snapshot.binding)
+  ) {
+    throw new FileStorageIntegrityError(
+      "确认期间存储身份记录发生变化，已取消修复，请重新打开工作区。",
+    );
+  }
 }
 
 function verifyBindingIdentity(

@@ -26,6 +26,7 @@ import {
 import { RuntimeClientError, type RuntimeClientAdapter } from "./runtime-client-adapter.js";
 import type { EmbeddedBrowserAuthority } from "./browser-manager.js";
 import { isDesktopRuntimeInvocationAllowed } from "./daemon-controller.js";
+import { createDesktopWorkspaceStorageRecovery } from "./workspace-storage-recovery.js";
 
 interface LifecycleControls {
   getBackgroundMode(): boolean;
@@ -70,6 +71,30 @@ export function registerDesktopIpcHandlers(options: {
   const trusted = (event: IpcMainInvokeEvent | IpcMainEvent): boolean =>
     event.sender === options.getTrustedWebContents() && !event.sender.isDestroyed();
 
+  const ensureWorkspaceStorage = createDesktopWorkspaceStorageRecovery({
+    runtime,
+    confirmRepair: async (workspacePath, storagePath) => {
+      const contents = options.getTrustedWebContents();
+      if (!contents || contents.isDestroyed() || lifecycle.isQuitting()) return false;
+      const { response } = await dialog.showMessageBox({
+        type: "warning",
+        title: "Pico 工作区需要修复",
+        message: "这个工作区的存储位置需要重新确认",
+        detail: `系统中的磁盘标识可能发生了变化。仅当这是本机原来的 Pico 工作区，而不是复制出的工作区时，才选择修复。\n\n修复会更新存储绑定，保留原有会话和数据。\n\n项目：${workspacePath}\n存储：${storagePath}`,
+        buttons: ["修复工作区", "暂不修复"],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true,
+      });
+      return (
+        response === 0 &&
+        !contents.isDestroyed() &&
+        contents === options.getTrustedWebContents() &&
+        !lifecycle.isQuitting()
+      );
+    },
+  });
+
   const closeCommittedBrowserSession = async (sessionId: string): Promise<void> => {
     await browser.close(sessionId).catch((error: unknown) => {
       console.error("Pico committed Session browser cleanup failed", error);
@@ -88,6 +113,12 @@ export function registerDesktopIpcHandlers(options: {
         );
       }
       const params = parseStrictRuntimeParams(envelope.method, envelope.params);
+      const repairSupported =
+        envelope.method === "workspace.status" || envelope.method === "workspace.register"
+          ? await ensureWorkspaceStorage(
+              (params as { readonly workspacePath: string }).workspacePath,
+            )
+          : true;
       if (envelope.method === "browser.agent.lease") {
         const lease = params as {
           readonly sessionId: string;
@@ -112,7 +143,19 @@ export function registerDesktopIpcHandlers(options: {
           false,
         );
       }
-      const result = parseDesktopRuntimeResult(envelope.method, await request);
+      const response = await request.catch((error: unknown) => {
+        if (
+          !repairSupported &&
+          error instanceof Error &&
+          error.message.includes("requires explicit adoption")
+        ) {
+          throw new Error(
+            "工作区需要修复，但当前常驻后台版本尚不支持。请结束任务并重启 Pico 后台后重试。",
+          );
+        }
+        throw error;
+      });
+      const result = parseDesktopRuntimeResult(envelope.method, response);
       if (
         envelope.method === "session.delete" ||
         envelope.method === "session.archive" ||
