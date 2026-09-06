@@ -1,3 +1,4 @@
+import { parseUsageDashboard } from "@pico/protocol";
 import { parseSwarmCommand } from "./swarm-command.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -1096,6 +1097,7 @@ export function parseUsage(value: unknown): UsageView {
     .map((alert) => stringValue(alert.message))
     .filter((message) => message.length > 0);
   return {
+    ...(usage.details === undefined ? {} : { details: parseUsageDashboard(usage.details) }),
     totalTokens: optionalNumberValue(total.totalTokens),
     inputTokens: optionalNumberValue(total.inputTokens ?? total.input_tokens),
     outputTokens: optionalNumberValue(total.outputTokens ?? total.output_tokens),

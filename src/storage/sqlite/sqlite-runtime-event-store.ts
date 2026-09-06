@@ -719,6 +719,37 @@ export class SqliteRuntimeEventStore {
     }));
   }
 
+  /** Usage needs metadata only: never materialize tool bodies or message history. */
+  readUsageToolMetadata(sessionId?: string): readonly RuntimeUsageToolMetadata[] {
+    return this.read(() => {
+      const rows = this.lease.database
+        .prepare(
+          `
+        SELECT event_id, session_id, kind, at,
+          json_extract(payload_json, '$.runId') AS run_id,
+          json_extract(payload_json, '$.refs.toolCallId') AS tool_call_id,
+          json_extract(payload_json, '$.data.toolName') AS tool_name,
+          json_extract(payload_json, '$.data.status') AS status
+        FROM runtime_events
+        WHERE kind IN ('tool.started', 'tool.result.recorded', 'run.terminal')
+          ${sessionId ? "AND session_id = ?" : ""}
+        ORDER BY session_id, event_seq
+      `,
+        )
+        .all(...(sessionId ? [sessionId] : []));
+      return rows.map((row) => ({
+        eventId: requireString(row["event_id"], "usage.eventId"),
+        sessionId: requireString(row["session_id"], "usage.sessionId"),
+        kind: requireString(row["kind"], "usage.kind"),
+        at: requireString(row["at"], "usage.at"),
+        runId: requireString(row["run_id"], "usage.runId"),
+        ...(typeof row["tool_call_id"] === "string" ? { toolCallId: row["tool_call_id"] } : {}),
+        ...(typeof row["tool_name"] === "string" ? { toolName: row["tool_name"] } : {}),
+        ...(typeof row["status"] === "string" ? { status: row["status"] } : {}),
+      }));
+    });
+  }
+
   /** 按 kind 取首条(经 kind 索引;fork 父链等正向点查消费方)。 */
   async readFirstSessionEntryOfKind(
     sessionId: string,
@@ -4445,6 +4476,17 @@ export interface SqliteSessionCatalogCursor {
 }
 
 /** catalog 行的读取形态:结构列重组的 summary + 行内折叠态 + 归档/置顶。 */
+export interface RuntimeUsageToolMetadata {
+  readonly eventId: string;
+  readonly sessionId: string;
+  readonly kind: string;
+  readonly at: string;
+  readonly runId: string;
+  readonly toolCallId?: string;
+  readonly toolName?: string;
+  readonly status?: string;
+}
+
 export interface SqliteSessionCatalogEntry {
   readonly summary: CliSessionSummary;
   readonly fold: SessionSummaryFold;

@@ -202,7 +202,15 @@ export function UsageSettingsPage({
   const input =
     usage.inputTokens === undefined ? undefined : usage.inputTokens + (read ?? 0) + (write ?? 0);
   const cacheTotal = read === undefined || write === undefined ? undefined : read + write;
-  const warnings = [...(details?.warnings ?? []), ...(usage.cacheAlerts ?? [])];
+  const warnings = [
+    ...(details?.warnings ?? []),
+    ...(usage.cacheAlerts ?? []),
+    ...((usage.baselineCount ?? 0) > 0
+      ? [
+          `总量包含 ${usage.baselineCount} 条历史汇总；这些记录没有逐次调用明细，因此分类明细与总量可能不同。`,
+        ]
+      : []),
+  ];
   const unavailable = details?.unavailableWorkspaces ?? [];
   const hasDiagnostics =
     warnings.length > 0 ||

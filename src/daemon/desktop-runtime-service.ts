@@ -1,3 +1,5 @@
+import type { UsagePrice } from "@pico/protocol";
+import { buildUsageDashboard, type UsageDashboardInput } from "./usage-dashboard.js";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { existsSync, unwatchFile, watchFile } from "node:fs";
 import { access, readFile, realpath, stat } from "node:fs/promises";
@@ -3644,7 +3646,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const allCalls: ProviderCallRecord[] = [];
     const allBaselines: UsageBaselineRecord[] = [];
     const workspaces: JsonValue[] = [];
-    const unavailableWorkspaces: JsonValue[] = [];
+    const unavailableWorkspaces: { workspacePath: string; error: string }[] = [];
+    const sources: Array<UsageDashboardInput["sources"][number]> = [];
     for (const workspacePath of workspacePaths) {
       let store: SqliteRuntimeControlStore | undefined;
       try {
@@ -3663,6 +3666,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         const baselines = hasRange
           ? []
           : store.listUsageBaselines(params.sessionId ? { sessionId: params.sessionId } : {});
+        sources.push({ workspacePath, storageRoot: store.storageRoot, calls });
         allCalls.push(...calls);
         allBaselines.push(...baselines);
         workspaces.push(
@@ -3683,6 +3687,23 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     }
     const hasRange = from !== undefined || to !== undefined;
     const summary = summarizeUsageRecords(allCalls, allBaselines);
+    const pricing: UsagePrice[] = [];
+    const userConfig = await this.userConfigStore.read();
+    for (const [provider, config] of Object.entries(userConfig.config.providers)) {
+      for (const [model, capabilities] of Object.entries(config.modelCapabilities ?? {})) {
+        if (capabilities.price)
+          pricing.push({ provider, model, source: "configured", ...capabilities.price });
+      }
+    }
+    const dashboard = await buildUsageDashboard({
+      sources,
+      pricing,
+      unavailableWorkspaces,
+      ...(from !== undefined ? { from } : {}),
+      ...(to !== undefined ? { to } : {}),
+      ...(params.sessionId ? { sessionId: params.sessionId } : {}),
+    });
+    const baselineTotals = sumUsage(allBaselines);
     return toJsonValue({
       usage: {
         scope: params.workspacePath ? (params.sessionId ? "session" : "workspace") : "all",
@@ -3692,6 +3713,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         ...(to !== undefined ? { to } : {}),
         ...summary,
         cache: summarizeCacheEffectiveness(allCalls),
+        details: {
+          ...dashboard,
+          knownCacheReadTokens: dashboard.knownCacheReadTokens + baselineTotals.cacheReadTokens,
+          knownCacheWriteTokens: dashboard.knownCacheWriteTokens + baselineTotals.cacheWriteTokens,
+        },
         workspaces,
         ...(unavailableWorkspaces.length > 0 ? { unavailableWorkspaces } : {}),
         rangeAccuracy: hasRange ? "provider_calls_only" : "all_time_with_baselines",
