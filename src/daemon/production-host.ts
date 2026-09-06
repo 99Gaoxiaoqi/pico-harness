@@ -906,17 +906,20 @@ export function createProductionRuntimeServices(
         });
         const overlayToolCallIds = new Map<string, string>();
         const overlayAnchorSequences = new Map<string, number>();
+        let overlayRuntimeRun: RuntimeRun | undefined;
         const activeOverlay = new PersistentActiveOverlay(
           {
             async upsert(input) {
-              const runtimeRun = currentRuntimeRun();
+              // Resubscription may flush outside AsyncLocalStorage; retain the first legal Run.
+              const runtimeRun = overlayRuntimeRun ?? currentRuntimeRun();
               if (
                 !runtimeRun ||
-                runtimeRun.runId !== context.run.runId ||
-                runtimeRun.sessionId !== targetSessionId
+                !runtimeRun.claimsSession(session) ||
+                input.payload.runId !== context.run.runId
               ) {
                 throw new Error("Active Overlay 已离开对应 Runtime Run 上下文");
               }
+              overlayRuntimeRun = runtimeRun;
               let anchorSequence = overlayAnchorSequences.get(input.partialId);
               if (anchorSequence === undefined) {
                 anchorSequence = (await runtimeRun.store.readTranscriptWatermark(targetSessionId))
