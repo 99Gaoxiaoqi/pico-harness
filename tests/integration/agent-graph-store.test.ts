@@ -327,7 +327,7 @@ test("agent graph store persists exact identities, fences finish, and drives dur
     const version = lease.database
       .prepare("SELECT version FROM operational_schema_migrations WHERE scope = 'agent_graph'")
       .get() as { version: number } | undefined;
-    assert.equal(version?.version, 5);
+    assert.equal(version?.version, 6);
     const names = lease.database
       .prepare(
         `SELECT name FROM sqlite_schema
@@ -344,6 +344,7 @@ test("agent graph store persists exact identities, fences finish, and drives dur
       "agent_graph_schedule_revisions",
       "agent_graph_supervisor_wake_attempts",
       "agent_graph_supervisor_wakes",
+      "agent_graph_swarm_checkpoints",
       "agent_graph_workspace_resources",
       "agent_graph_yield_interests",
       "agent_graphs",
@@ -426,7 +427,7 @@ test("agent graph schema upgrades a v3 control ledger additively and reopens", a
       const version = lease.database
         .prepare("SELECT version FROM operational_schema_migrations WHERE scope = 'agent_graph'")
         .get() as { version: number } | undefined;
-      assert.equal(version?.version, 5);
+      assert.equal(version?.version, 6);
       const wakeColumns = lease.database
         .prepare("PRAGMA table_info(agent_graph_supervisor_wakes)")
         .all()

@@ -1066,6 +1066,66 @@ export class SqliteAgentGraphControlStore {
     });
   }
 
+  /**
+   * Persist the observation and its pending candidate together. The Supervisor
+   * may crash before enqueue; replay returns the same sequence and the existing
+   * wake queue remains the authority for delivery and yield consumption.
+   */
+  observeSwarmCheckpoint(input: {
+    readonly graphId: string;
+    readonly status: "running" | "needs_attention" | "settled";
+    readonly attentionKey: string;
+    readonly emptyAttentionKey: string;
+  }):
+    | {
+        readonly dedupeKey: string;
+        readonly payload: {
+          readonly mode: "swarm";
+          readonly status: "running" | "needs_attention" | "settled";
+        };
+      }
+    | undefined {
+    return this.write(() => {
+      this.requireGraph(input.graphId);
+      const previous = this.lease.database
+        .prepare("SELECT * FROM agent_graph_swarm_checkpoints WHERE graph_id = ?")
+        .get(input.graphId) as
+        | {
+            status: string;
+            attention_key: string;
+            sequence: number;
+            pending_status: "running" | "needs_attention" | "settled" | null;
+          }
+        | undefined;
+      const transition =
+        (input.status === "settled" && previous?.status !== "settled") ||
+        input.attentionKey !== (previous?.attention_key ?? input.emptyAttentionKey);
+      const sequence = (previous?.sequence ?? 0) + (transition ? 1 : 0);
+      // A new active batch supersedes an unconsumed settled notification.
+      const pendingStatus = transition
+        ? input.status
+        : previous?.status === "settled" && input.status === "running"
+          ? null
+          : (previous?.pending_status ?? null);
+      this.lease.database
+        .prepare(
+          `INSERT INTO agent_graph_swarm_checkpoints
+         (graph_id, status, attention_key, sequence, pending_status)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(graph_id) DO UPDATE SET status = excluded.status,
+           attention_key = excluded.attention_key, sequence = excluded.sequence,
+           pending_status = excluded.pending_status`,
+        )
+        .run(input.graphId, input.status, input.attentionKey, sequence, pendingStatus);
+      return pendingStatus === null
+        ? undefined
+        : {
+            dedupeKey: `swarm:checkpoint:${sequence}`,
+            payload: { mode: "swarm", status: pendingStatus },
+          };
+    });
+  }
+
   getSupervisorWake(wakeId: string): AgentGraphSupervisorWakeRecord | undefined {
     return this.read(() => this.selectWake(requireNonEmpty(wakeId, "wakeId")));
   }
