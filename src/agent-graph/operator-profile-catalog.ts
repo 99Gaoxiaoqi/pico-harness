@@ -1,3 +1,5 @@
+import type { CatalogAgentProfile } from "../agents/catalog.js";
+import { KNOWN_TOOL_NAMES } from "../tools/agent-profile.js";
 import type { AgentGraphProfileSnapshot } from "./core/contracts.js";
 import { deterministicFingerprint } from "./core/ids.js";
 
@@ -23,22 +25,20 @@ interface AgentGraphOperatorProfileDefinition {
   readonly description: string;
   readonly tools: readonly string[];
   readonly systemPrompt: string;
+  readonly modelRouteId?: string;
+  readonly thinkingEffort?: string;
+  readonly maxTurns?: number;
 }
 
 type UnsignedProfileSnapshot = Omit<AgentGraphProfileSnapshot, "profileFingerprint">;
 
-const SAFE_BUILTIN_TOOLS = new Set([
-  "bash",
-  "edit_file",
-  "glob",
-  "grep",
-  "read_file",
-  "repo_map",
-  "write_file",
-]);
+const SAFE_BUILTIN_TOOLS = new Set([...KNOWN_TOOL_NAMES, "explore_repo"]);
 
 const RESERVED_GRAPH_TOOLS = new Set([
   "agent_output",
+  "agent_list",
+  "agent_swarm_status",
+  "agent_graph_results",
   "update_agent_graph",
   "view_agent_graph",
   "yield_agent_graph",
@@ -104,7 +104,14 @@ class BuiltinAgentGraphOperatorProfileCatalog implements AgentGraphOperatorProfi
       schemaVersion: 1,
       profileId: definition.id,
       profileRevision: definition.revision,
-      modelRouteId: rootModelRouteId,
+      modelRouteId:
+        definition.modelRouteId && definition.modelRouteId !== "inherit"
+          ? definition.modelRouteId
+          : rootModelRouteId,
+      ...(definition.thinkingEffort === undefined
+        ? {}
+        : { thinkingEffort: definition.thinkingEffort }),
+      ...(definition.maxTurns === undefined ? {} : { maxTurns: definition.maxTurns }),
       tools: [...definition.tools],
       permissionPolicy: { mode: "default", allowSessionGrants: false },
       systemPrompt: { version: definition.revision, content: definition.systemPrompt },
@@ -121,6 +128,78 @@ export function createBuiltinAgentGraphOperatorProfileCatalog(): AgentGraphOpera
   return new BuiltinAgentGraphOperatorProfileCatalog(BUILTIN_PROFILES);
 }
 
+export interface MutableAgentGraphOperatorProfileCatalog extends AgentGraphOperatorProfileCatalog {
+  /** Replace only future choices; persisted activation snapshots remain immutable. */
+  replaceProfiles(profiles: readonly CatalogAgentProfile[]): void;
+}
+
+export function createCatalogAgentGraphOperatorProfileCatalog(
+  profiles: readonly CatalogAgentProfile[],
+): MutableAgentGraphOperatorProfileCatalog {
+  const legacy = createBuiltinAgentGraphOperatorProfileCatalog();
+  let current: AgentGraphOperatorProfileCatalog;
+  let unavailable = new Map<string, string>();
+  const replaceProfiles = (next: readonly CatalogAgentProfile[]) => {
+    const rejected = new Map<string, string>();
+    const definitions = next.flatMap((profile): AgentGraphOperatorProfileDefinition[] => {
+      const unsupportedTool = profile.tools.find(
+        (tool) => !SAFE_BUILTIN_TOOLS.has(tool) || RESERVED_GRAPH_TOOLS.has(tool),
+      );
+      const reason =
+        profile.hooks !== undefined
+          ? "Agent hooks are not supported by persistent Graph execution"
+          : unsupportedTool
+            ? `Unsupported Graph Operator tool: ${unsupportedTool}`
+            : undefined;
+      if (reason) {
+        rejected.set(profile.name, reason);
+        return [];
+      }
+      const definition = {
+        id: profile.name,
+        description: profile.description,
+        tools: [...profile.tools],
+        systemPrompt: profile.systemPrompt,
+        ...(profile.modelRouteId === undefined ? {} : { modelRouteId: profile.modelRouteId }),
+        ...(profile.thinkingEffort === undefined ? {} : { thinkingEffort: profile.thinkingEffort }),
+        ...(profile.maxTurns === undefined ? {} : { maxTurns: profile.maxTurns }),
+      };
+      return [{ ...definition, revision: deterministicFingerprint(definition) }];
+    });
+    const catalog = new BuiltinAgentGraphOperatorProfileCatalog(definitions);
+    current = catalog;
+    unavailable = rejected;
+  };
+  replaceProfiles(profiles);
+  return {
+    listPublicProfiles: () => current.listPublicProfiles(),
+    resolve: (input) => {
+      const reason = unavailable.get(input.profileId);
+      if (reason) throw new Error(`Subagent ${input.profileId} is unavailable: ${reason}`);
+      const catalog = current
+        .listPublicProfiles()
+        .some((profile) => profile.profileId === input.profileId)
+        ? current
+        : legacy;
+      return catalog.resolve(input);
+    },
+    replaceProfiles,
+  };
+}
+
+function validateExecutionOptions(value: Record<string, unknown>): void {
+  if (value["thinkingEffort"] !== undefined)
+    exactIdentity(value["thinkingEffort"], "thinkingEffort");
+  if (
+    value["maxTurns"] !== undefined &&
+    (!Number.isSafeInteger(value["maxTurns"]) ||
+      (value["maxTurns"] as number) < 1 ||
+      (value["maxTurns"] as number) > 50)
+  ) {
+    throw new Error("Agent Graph Operator maxTurns must be an integer between 1 and 50");
+  }
+}
+
 export function operatorProfileFingerprint(snapshot: UnsignedProfileSnapshot): string {
   return deterministicFingerprint(snapshot);
 }
@@ -130,6 +209,8 @@ export function assertValidAgentGraphOperatorProfileSnapshot(
 ): asserts value is AgentGraphProfileSnapshot {
   if (!isRecord(value)) throw new Error("Agent Graph Operator profile snapshot must be an object");
   assertExactKeys(value, [
+    ...(value["thinkingEffort"] === undefined ? [] : ["thinkingEffort"]),
+    ...(value["maxTurns"] === undefined ? [] : ["maxTurns"]),
     "schemaVersion",
     "profileId",
     "profileRevision",
@@ -147,6 +228,7 @@ export function assertValidAgentGraphOperatorProfileSnapshot(
   exactIdentity(value["profileRevision"], "profileRevision");
   exactIdentity(value["modelRouteId"], "modelRouteId");
   const fingerprint = exactIdentity(value["profileFingerprint"], "profileFingerprint");
+  validateExecutionOptions(value);
   if (!Array.isArray(value["tools"]) || value["tools"].length === 0) {
     throw new Error("Agent Graph Operator profile tools must be a non-empty array");
   }
@@ -185,6 +267,10 @@ export function assertValidAgentGraphOperatorProfileSnapshot(
     profileId: value["profileId"] as string,
     profileRevision: value["profileRevision"] as string,
     modelRouteId: value["modelRouteId"] as string,
+    ...(value["thinkingEffort"] === undefined
+      ? {}
+      : { thinkingEffort: value["thinkingEffort"] as string }),
+    ...(value["maxTurns"] === undefined ? {} : { maxTurns: value["maxTurns"] as number }),
     tools,
     permissionPolicy: { mode: "default", allowSessionGrants: false },
     systemPrompt: {
@@ -202,10 +288,12 @@ function validateDefinition(
   definition: AgentGraphOperatorProfileDefinition,
 ): AgentGraphOperatorProfileDefinition {
   const id = exactIdentity(definition.id, "definition.id");
-  if (id !== id.toLowerCase()) throw new Error(`Operator profile ID must be lowercase: ${id}`);
+
   exactIdentity(definition.revision, "definition.revision");
   exactText(definition.description, "definition.description");
   exactText(definition.systemPrompt, "definition.systemPrompt");
+  validateExecutionOptions({ ...definition });
+  if (definition.modelRouteId !== undefined) exactIdentity(definition.modelRouteId, "modelRouteId");
   if (definition.tools.length === 0 || new Set(definition.tools).size !== definition.tools.length) {
     throw new Error(`Operator profile ${id} must contain unique tools`);
   }
