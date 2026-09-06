@@ -26,6 +26,7 @@ import type {
   RegisterAgentGraphYieldResult,
 } from "../tools/agent-graph-tools.js";
 import { deterministicFingerprint } from "./core/ids.js";
+import { compileAgentGraphWork, type CommitAgentGraphWorkInput } from "./work-request.js";
 import type { AgentGraphReconcileError } from "./reconciler.js";
 import {
   createBuiltinAgentGraphOperatorProfileCatalog,
@@ -270,8 +271,41 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
     private readonly onAsyncError?: AgentGraphSupervisorServiceOptions["onError"],
   ) {}
 
+  async commitWork(input: CommitAgentGraphWorkInput): Promise<CommitAgentGraphUpdateResult> {
+    this.requireBoundGraph(input.graphId, input.source.sessionId, input.epoch);
+    const state = this.control.getScheduleState(input.graphId);
+    // Derive identity from the invocation, never from model content: altered replay must conflict.
+    const operationId = `graph-work-update_${deterministicFingerprint({ graphId: input.graphId, source: input.source }).slice(7, 39)}`;
+    const previous = state.revisions.find((revision) => revision.operationId === operationId);
+    const expectedRevision = previous?.expectedPreviousRevision ?? state.graph.headRevision;
+    const commands = compileAgentGraphWork(input, operationId, expectedRevision, state.operators);
+    const update = { ...input, operationId, expectedRevision, commands };
+    if (previous) {
+      const original = previous.commands.map((command) => {
+        if (command.kind !== "add") return command;
+        const { profileSnapshot, ...operator } = command.operator;
+        if (profileSnapshot.modelRouteId !== input.rootModelRouteId) {
+          throw new Error("Graph work replay model route conflicts with the original request");
+        }
+        return { ...command, operator: { ...operator, profileId: profileSnapshot.profileId } };
+      });
+      if (deterministicFingerprint(commands) !== deterministicFingerprint(original)) {
+        throw new Error("Graph work replay conflicts with the original request");
+      }
+      // The original profile is durable authority, even after catalog changes or a restart.
+      return this.commitPreparedUpdate(update, previous.commands);
+    }
+    return this.commitUpdate(update);
+  }
+
   async commitUpdate(input: CommitAgentGraphUpdateInput): Promise<CommitAgentGraphUpdateResult> {
-    const commands = this.materializeCommands(input);
+    return this.commitPreparedUpdate(input, this.materializeCommands(input));
+  }
+
+  private commitPreparedUpdate(
+    input: CommitAgentGraphUpdateInput,
+    commands: readonly AgentGraphScheduleCommand[],
+  ): CommitAgentGraphUpdateResult {
     const graph = this.requireBoundGraph(input.graphId, input.source.sessionId, input.epoch);
     if (graph.rootSessionId !== input.source.sessionId) {
       throw new Error(`Graph ${input.graphId} does not belong to update source Session`);

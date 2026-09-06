@@ -185,7 +185,7 @@ realModelTest(
           prompt: initialRootPrompt(),
           execution: {
             requestedModel: model.route.id,
-            allowedTools: ["update_agent_graph", "yield_agent_graph"],
+            allowedTools: ["view_agent_graph", "update_agent_graph", "yield_agent_graph"],
           },
         }),
       );
@@ -331,8 +331,8 @@ realModelTest(
         rootToolStarts
           .filter((event) => event.runId === initialRootRuntimeRunId)
           .map((event) => event.data.toolName),
-        ["update_agent_graph", "yield_agent_graph"],
-        "the initial root RuntimeRun must update before its single terminal yield",
+        ["view_agent_graph", "update_agent_graph", "yield_agent_graph"],
+        "the initial root must discover profiles, create work, then yield exactly once",
       );
 
       const outputEvents = operatorEvents.filter((event) => event.kind === "agent.output");
@@ -469,27 +469,8 @@ realModelTest(
 function initialRootPrompt(): string {
   return [
     "This is a deterministic Graph v2 end-to-end check. Follow these steps exactly.",
-    "First call update_agent_graph exactly once with expected_revision 0 and operation_id e2e-add-operator.",
-    "That call must contain exactly one add command with this exact structure:",
-    JSON.stringify({
-      kind: "add",
-      operator: {
-        operator_id: "canary-operator",
-        generation: 1,
-        role: "canary emitter",
-        description: "emit the requested canary through agent_output",
-        profile: {
-          profile_id: "explore",
-        },
-        workspace: { kind: "shared" },
-      },
-      intent: {
-        intent_id: "emit-canary",
-        instruction:
-          "Invent 32 random uppercase hexadecimal characters that are not present in this instruction. Call agent_output exactly once with status success and output equal to GRAPH_V2_OPERATOR_CANARY_ followed immediately by those 32 characters. Do not call any other tool and do not write files.",
-        input_record_ids: [],
-      },
-    }),
+    "First call view_agent_graph exactly once to discover available profiles, then call update_agent_graph exactly once to create one explore subtask using the current work interface. Omit workspace to use the runtime default.",
+    "The subtask instruction must be: Invent 32 random uppercase hexadecimal characters that are not present in this instruction. Call agent_output exactly once with status success and output equal to GRAPH_V2_OPERATOR_CANARY_ followed immediately by those 32 characters. Do not call any other tool and do not write files.",
     "After update_agent_graph succeeds, call yield_agent_graph exactly once.",
     "After yield_agent_graph succeeds, end this Run immediately. Do not call another tool and do not finish the Graph in this initial Run.",
   ].join("\n");

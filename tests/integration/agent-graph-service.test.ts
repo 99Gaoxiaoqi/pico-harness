@@ -9,6 +9,8 @@ import {
   claimIdFor,
   graphIdFor,
 } from "../../src/agent-graph/core/index.js";
+import { createAgentGraphSupervisorTools } from "../../src/tools/agent-graph-tools.js";
+import { createBuiltinAgentGraphOperatorProfileCatalog } from "../../src/agent-graph/operator-profile-catalog.js";
 import { createAgentGraphApplicationService } from "../../src/agent-graph/service.js";
 import { AgentGraphNeedsAttentionError } from "../../src/agent-graph/diagnostics.js";
 import type { AgentGraphRootWakePort } from "../../src/agent-graph/supervisor-service.js";
@@ -818,6 +820,178 @@ test("host seals only empty assembly epochs and retires scheduled work", async (
     assert.equal(await service.retireRootSession(rootSessionId, "root deleted"), true);
     assert.equal(store.getGraph(graphId)?.phase, "finished");
     assert.equal(store.listActivationClaims(graphId)[0]?.state, "cancelled");
+  } finally {
+    await service.close();
+    store.close();
+    await rm(storageRoot, { recursive: true, force: true });
+  }
+});
+
+test("model work requests own durable identities, follow-ups, stop fences and restart replay", async () => {
+  const storageRoot = await mkdtemp(join(tmpdir(), "pico-graph-work-interface-"));
+  const store = new SqliteAgentGraphControlStore({ storageRoot, now: monotonicClock() });
+  const runtime = new CompletingRuntimeAdapter();
+  const rootWake = new CompletingRootWakePort();
+  const catalog = createBuiltinAgentGraphOperatorProfileCatalog();
+  let catalogAvailable = true;
+  const makeService = () =>
+    createAgentGraphApplicationService({
+      store,
+      runtime,
+      rootWakePort: rootWake,
+      resolveOperatorWorkspace: () => ({ workDir: storageRoot }),
+      validateWorkspacePolicy: (policy) => {
+        if (policy.kind !== "shared") throw new Error("isolated workspace unavailable");
+      },
+      operatorProfileCatalog: {
+        listPublicProfiles: () => catalog.listPublicProfiles(),
+        resolve: (input) => {
+          assert.ok(catalogAvailable, "replay must use the persisted profile, not today's catalog");
+          return catalog.resolve(input);
+        },
+      },
+    });
+  let service = makeService();
+  const graph = service.openRootEpoch("work-root");
+  const root = {
+    kind: "graph_root_supervisor" as const,
+    graphId: graph.graphId,
+    epoch: graph.epoch,
+    rootSessionId: "work-root",
+    rootTurnId: "work-turn",
+    rootRunId: "work-run",
+    rootModelRouteId: "test-route",
+  };
+  const updateTool = () =>
+    createAgentGraphSupervisorTools({
+      getRootContext: () => root,
+      port: service.toolPort,
+    }).find((tool) => tool.name() === "update_agent_graph")!;
+  const execute = async (value: unknown, toolCallId: string) =>
+    JSON.parse(await updateTool().execute(JSON.stringify(value), { toolCallId }));
+  const add = {
+    operation: "add_work",
+    add_work: [
+      { profile_id: "explore", instruction: "Read branch A" },
+      { profile_id: "review", instruction: "Read branch B" },
+    ],
+  };
+  try {
+    await service.start();
+    const schema = JSON.stringify(updateTool().definition().inputSchema);
+    assert.doesNotMatch(
+      schema,
+      /expected_revision|operation_id|generation|intent_id.*instruction/u,
+    );
+    for (const value of [
+      {
+        operation: "add_work",
+        add_work: [{ profile_id: "explore", operator_id: "invented", instruction: "bad" }],
+      },
+      {
+        operation: "add_work",
+        add_work: [{ profile_id: "explore", instruction: "bad", generation: 2 }],
+      },
+      { ...add, finish: { result_ids: [] } },
+    ])
+      await assert.rejects(execute(value, "invalid-shape"));
+    await assert.rejects(
+      execute(
+        { operation: "add_work", add_work: [{ profile_id: "unknown", instruction: "bad" }] },
+        "invalid-profile",
+      ),
+      /Unknown.*profile/u,
+    );
+    await assert.rejects(
+      execute(
+        {
+          operation: "add_work",
+          add_work: [
+            { profile_id: "explore", instruction: "bad", workspace: { kind: "isolated-worktree" } },
+          ],
+        },
+        "invalid-workspace",
+      ),
+      /isolated workspace unavailable/u,
+    );
+    assert.equal(store.getGraph(graph.graphId)?.headRevision, 0);
+    const added = await execute(add, "call-add");
+    assert.equal(added.revision, 1);
+    assert.equal(added.projection.operators.length, 2);
+    assert.notEqual(
+      added.projection.operators[0].operatorId,
+      added.projection.operators[1].operatorId,
+    );
+    const operatorId = added.projection.operators[0].operatorId as string;
+    assert.equal(added.projection.operators[0].generation, 1);
+    assert.deepEqual(added.projection.operators[0].workspacePolicy, { kind: "shared" });
+    await service.supervisor.notifyGraph(graph.graphId);
+    const first = await service.toolPort.readProjection({
+      graphId: graph.graphId,
+      epoch: 1,
+      rootSessionId: root.rootSessionId,
+    });
+    const resultId = first.records.find((record) => record.operatorId === operatorId)!.recordId;
+    const follow = {
+      operation: "add_work",
+      add_work: [
+        { operator_id: operatorId, instruction: "Review earlier result", input_ids: [resultId] },
+      ],
+    };
+    const followed = await execute(follow, "call-follow");
+    assert.equal(followed.revision, 2);
+    await service.supervisor.notifyGraph(graph.graphId);
+    const next = await service.toolPort.readProjection({
+      graphId: graph.graphId,
+      epoch: 1,
+      rootSessionId: root.rootSessionId,
+    });
+    assert.equal(next.operators.length, 2);
+    assert.equal(next.intents.length, 3);
+    const claims = next.claims.filter((claim) => claim.operatorId === operatorId);
+    assert.equal(claims.length, 2);
+    assert.equal(claims[0]!.targetSessionId, claims[1]!.targetSessionId);
+    assert.equal(claims[0]!.operatorGeneration, claims[1]!.operatorGeneration);
+    assert.deepEqual(next.intents.at(-1)!.inputRefs, [{ recordId: resultId }]);
+    const stopped = { operation: "stop", stop: [{ operator_id: operatorId, reason: "Done" }] };
+    await execute(stopped, "call-stop");
+    await assert.rejects(execute(follow, "new-follow-after-stop"), /stopped Operator/u);
+    const finish = {
+      operation: "finish",
+      finish: { result_ids: next.records.map((record) => record.recordId) },
+    };
+    await execute(finish, "call-finish");
+    const head = store.getGraph(graph.graphId)!.headRevision;
+    await service.close();
+    service = makeService();
+    catalogAvailable = false;
+    await service.start();
+    for (const [request, call, revision] of [
+      [add, "call-add", 1],
+      [follow, "call-follow", 2],
+      [stopped, "call-stop", 3],
+      [finish, "call-finish", 4],
+    ] as const) {
+      const replay = await execute(request, call);
+      assert.equal(replay.replayed, true);
+      assert.equal(replay.revision, revision);
+    }
+    for (const changed of [
+      { ...add, add_work: [{ ...add.add_work[0], instruction: "Changed" }, add.add_work[1]] },
+      { ...add, add_work: [{ ...add.add_work[0], profile_id: "review" }, add.add_work[1]] },
+      { ...follow, add_work: [{ ...follow.add_work[0], input_ids: [] }] },
+    ])
+      await assert.rejects(
+        execute(
+          changed,
+          changed.operation === "add_work" && changed.add_work.length === 1
+            ? "call-follow"
+            : "call-add",
+        ),
+        /replay conflicts/u,
+      );
+    assert.equal(store.getGraph(graph.graphId)!.headRevision, head);
+    assert.equal(store.listActivationClaims(graph.graphId).length, 3);
   } finally {
     await service.close();
     store.close();

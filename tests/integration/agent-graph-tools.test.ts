@@ -318,7 +318,7 @@ test("update_agent_graph exposes shared and isolated workspace requests", async 
   const { port, byName } = fixture();
   const update = byName.get("update_agent_graph")!;
   const schema = JSON.stringify(update.definition().inputSchema);
-  assert.match(schema, /"enum":\["shared"\]/u);
+  assert.match(schema, /"enum":\["shared","isolated-worktree"\]/u);
   assert.match(schema, /isolated-worktree/u);
   assert.match(schema, /base_ref/u);
 
