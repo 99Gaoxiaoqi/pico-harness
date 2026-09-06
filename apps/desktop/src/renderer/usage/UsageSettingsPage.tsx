@@ -232,7 +232,9 @@ export function UsageSettingsPage({
         : [
             <span>
               {row.name}
-              {row.provider && <small className="usage-cell-secondary">{row.provider}</small>}
+              {row.provider && row.provider !== row.name && (
+                <small className="usage-cell-secondary">{row.provider}</small>
+              )}
             </span>,
             number(row.count),
             number(row.totalTokens),
@@ -283,8 +285,8 @@ export function UsageSettingsPage({
           >
             <option value="">全部项目</option>
             {workspaces.map((workspace) => (
-              <option key={workspace.path} value={workspace.path}>
-                {workspace.name}
+              <option key={workspace.path} value={workspace.path} title={workspace.path}>
+                {workspace.name && workspace.name !== "无项目" ? workspace.name : workspace.path}
               </option>
             ))}
           </select>
