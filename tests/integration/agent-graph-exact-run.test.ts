@@ -75,7 +75,11 @@ test("Graph exact Run admits once under concurrency and replays the terminal led
     await executePrestarted(input, () => providerDispatches++);
   });
   try {
-    const run = { ...EXACT_RUN, workDir: fixture.workDir };
+    const run = {
+      ...EXACT_RUN,
+      workDir: fixture.workDir,
+      agentSwarmAuthorization: "session_mode" as const,
+    };
     const [first, concurrent] = await Promise.all([
       port.startExactRun(run),
       port.startExactRun(run),
@@ -91,9 +95,52 @@ test("Graph exact Run admits once under concurrency and replays the terminal led
     assert.equal(events.filter((event) => event.kind === "model.call.started").length, 1);
     assert.equal(events.find((event) => event.kind === "run.started")?.turnId, run.turnId);
     assert.equal(
+      events.find((event) => event.kind === "run.started")?.data.agentSwarmAuthorization,
+      "session_mode",
+    );
+    assert.equal(
       events.filter((event) => event.eventId === agentGraphInputRuntimeEventId(run.claimId)).length,
       1,
     );
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("exact Run attachment preserves committed authorization and legacy absence despite later overrides", async () => {
+  const fixture = await createFixture();
+  try {
+    for (const authorization of [undefined, "none", "session_mode", "turn_override"] as const) {
+      const run = exactRun(fixture, `authorization-${authorization ?? "legacy"}`);
+      const start = exactStartEvent(run);
+      const admitted = {
+        ...start,
+        data: {
+          ...start.data,
+          ...(authorization !== undefined ? { agentSwarmAuthorization: authorization } : {}),
+        },
+      };
+      await fixture.store.append(admitted, {
+        ownerFence: await fixture.session.assertRuntimeEventWriteAllowed(),
+      });
+      let dispatches = 0;
+      const port = fixture.createPort(async (input) => {
+        assert.equal(input.prestartedRun.agentSwarmAuthorization, authorization);
+        await executePrestarted(input, () => {
+          dispatches += 1;
+          assert.equal(currentRuntimeRun()!.agentSwarmAuthorization, authorization);
+        });
+      });
+      assert.equal(
+        await port.startExactRun({ ...run, agentSwarmAuthorization: "turn_override" }),
+        "started",
+      );
+      assert.equal(dispatches, 1);
+      const after = (await fixture.store.readRun(run.sessionId, run.runId)).filter(
+        (event) => event.kind === "run.started",
+      );
+      assert.deepEqual(after, [admitted]);
+    }
   } finally {
     await fixture.close();
   }
@@ -668,6 +715,7 @@ async function executePrestarted(
     prompt: input.prompt,
     resumeExistingSession: false,
     presentation: "internal",
+    agentSwarmAuthorization: "turn_override",
     prestartedRun: input.prestartedRun,
     prestartedUserInput: input.prestartedUserInput,
     traceEnabled: false,

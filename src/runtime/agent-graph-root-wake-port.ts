@@ -15,6 +15,12 @@ export interface AgentGraphRootWakeRuntimePortOptions {
   readonly exactRuns: Pick<SqliteAgentGraphExactRunPort, "inspectExactRun" | "startExactRun"> &
     Partial<Pick<SqliteAgentGraphExactRunPort, "readRunEvents" | "inspectLaunch">>;
   readonly workDir: string;
+  /** Resolve from the original root Run header, never from mutable Session settings. */
+  readonly resolveAgentSwarmAuthorization?: (
+    input: RootSupervisorRunIdentity,
+  ) =>
+    | NonNullable<StartExactAgentGraphRunInput["agentSwarmAuthorization"]>
+    | Promise<NonNullable<StartExactAgentGraphRunInput["agentSwarmAuthorization"]>>;
   readonly preflight?: (
     input: RootSupervisorRunIdentity,
   ) => "ready" | "source_root_active" | "workspace_busy";
@@ -98,8 +104,12 @@ export class AgentGraphRootWakeRuntimePort implements AgentGraphRootWakePort {
   ): Promise<RootSupervisorRunState> {
     const before = await this.inspect(input);
     if (before.status !== "not_started") return before;
-    const exact = this.exactInput(input, renderRootWakePrompt(input, input.payload));
     try {
+      const exact = {
+        ...this.exactInput(input, renderRootWakePrompt(input, input.payload)),
+        agentSwarmAuthorization:
+          (await this.options.resolveAgentSwarmAuthorization?.(input)) ?? "none",
+      };
       await this.options.exactRuns.startExactRun(exact);
     } catch (error) {
       if (isPermissionBoundaryError(error)) {

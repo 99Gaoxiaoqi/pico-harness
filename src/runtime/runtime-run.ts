@@ -115,6 +115,7 @@ interface RuntimeRunBaseOptions {
   readonly parentToolCallId?: string;
   readonly now?: () => Date;
   readonly presentation?: RuntimeRunStartedEvent["data"]["presentation"];
+  readonly agentSwarmAuthorization?: RuntimeRunStartedEvent["data"]["agentSwarmAuthorization"];
 }
 
 export interface RuntimeRunStartOptions extends Omit<
@@ -144,6 +145,7 @@ export interface RuntimeRunContinuationStartOptions {
   readonly runStartedEventId?: string;
   readonly startedAt?: string;
   readonly presentation?: RuntimeRunStartedEvent["data"]["presentation"];
+  readonly agentSwarmAuthorization?: RuntimeRunStartedEvent["data"]["agentSwarmAuthorization"];
 }
 
 export interface RuntimeRunExactAdmissionOptions {
@@ -154,6 +156,7 @@ export interface RuntimeRunExactAdmissionOptions {
   readonly runStartedEventId: string;
   readonly startedAt?: string;
   readonly presentation?: RuntimeRunStartedEvent["data"]["presentation"];
+  readonly agentSwarmAuthorization?: RuntimeRunStartedEvent["data"]["agentSwarmAuthorization"];
 }
 
 export type RuntimeRunExactAdmissionOutcome = Readonly<{
@@ -335,6 +338,7 @@ export class RuntimeRun {
   readonly invocationId: string;
   readonly store: SqliteRuntimeEventStore;
   readonly runtimeCapability?: EngineRuntimeCapability;
+  readonly agentSwarmAuthorization?: RuntimeRunStartedEvent["data"]["agentSwarmAuthorization"];
   private readonly canonicalWorkDir: string;
   private readonly now: () => Date;
   private readonly runStartedEventId?: string;
@@ -375,6 +379,7 @@ export class RuntimeRun {
       ...(options.parentToolCallId ? { parentToolCallId: options.parentToolCallId } : {}),
     });
     this.presentation = options.presentation;
+    this.agentSwarmAuthorization = options.agentSwarmAuthorization;
     this.turnId = options.turnId ?? `turn:${this.runId}:input`;
     this.stepId = `step:${this.runId}:input`;
   }
@@ -437,6 +442,7 @@ export class RuntimeRun {
       invocationId: options.invocationId,
       runStartedEventId: options.runStartedEventId,
       now: () => new Date(startedAt),
+      agentSwarmAuthorization: options.agentSwarmAuthorization ?? "none",
       ...(options.presentation ? { presentation: options.presentation } : {}),
     });
     const guardedFence = await capability.writeGuard.assertRuntimeEventWriteAllowed();
@@ -505,6 +511,9 @@ export class RuntimeRun {
           startEventId: runStartedEventId,
           workDir: options.capability.workDir,
           startedAt,
+          ...(options.agentSwarmAuthorization !== undefined
+            ? { agentSwarmAuthorization: options.agentSwarmAuthorization }
+            : {}),
           ...(options.presentation ? { presentation: options.presentation } : {}),
           ownerFence: guardedFence,
         }),
@@ -522,6 +531,7 @@ export class RuntimeRun {
       runId: event.runId,
       invocationId: event.invocationId,
       runStartedEventId: event.eventId,
+      agentSwarmAuthorization: event.data.agentSwarmAuthorization,
     });
     run.ownerFence = ownerFence;
     return run;
@@ -534,7 +544,22 @@ export class RuntimeRun {
 
   private static async startInternal(options: RuntimeRunConstructionOptions): Promise<RuntimeRun> {
     const store = options.store;
-    const run = new RuntimeRun(options.sessionId, options.workDir, { ...options, store });
+    // An already-admitted Run owns its authorization forever, including a legacy
+    // header with no authorization. A later Session mode or host override cannot amend it.
+    const existingStart =
+      options.runId && options.runStartedEventId
+        ? (await store.readRun(options.sessionId, options.runId)).find(
+            (event): event is RuntimeRunStartedEvent =>
+              event.kind === "run.started" && event.eventId === options.runStartedEventId,
+          )
+        : undefined;
+    const run = new RuntimeRun(options.sessionId, options.workDir, {
+      ...options,
+      store,
+      agentSwarmAuthorization: existingStart
+        ? existingStart.data.agentSwarmAuthorization
+        : (options.agentSwarmAuthorization ?? "none"),
+    });
     const guardedFence = await options.writeGuard.assertRuntimeEventWriteAllowed();
     await store.initializeSession({
       sessionId: options.sessionId,
@@ -1666,6 +1691,9 @@ export class RuntimeRun {
       kind: "run.started",
       data: {
         workDir: this.canonicalWorkDir,
+        ...(this.agentSwarmAuthorization !== undefined
+          ? { agentSwarmAuthorization: this.agentSwarmAuthorization }
+          : {}),
         ...(this.presentation ? { presentation: this.presentation } : {}),
       },
     };

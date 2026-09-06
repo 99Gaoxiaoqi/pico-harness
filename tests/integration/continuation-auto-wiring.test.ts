@@ -39,6 +39,7 @@ test("executor 自动锚定 interrupted 续跑：claim→targetRunId 起跑→�
 
     const result = await newExecutor(session, workDir, picoHome, {
       continuationTerminalMinAgeMs: 0,
+      agentSwarmAuthorization: "turn_override",
     }).execute();
     assert.equal(result.finalMessage, "answer");
 
@@ -56,6 +57,7 @@ test("executor 自动锚定 interrupted 续跑：claim→targetRunId 起跑→�
     if (targetStart?.kind !== "run.started") {
       assert.fail("target run.started missing");
     }
+    assert.equal(targetStart.data.agentSwarmAuthorization, "turn_override");
     assert.deepEqual(targetStart.data.continuationOf, {
       runId: crashed.runId,
       highWater: claim.sourceHighWater,
@@ -97,6 +99,7 @@ test("executor 自动锚定 interrupted 续跑：claim→targetRunId 起跑→�
     const lastStart = starts.at(-1);
     assert.ok(lastStart, "second run must have started");
     assert.equal(lastStart.data.continuationOf, undefined);
+    assert.equal(lastStart.data.agentSwarmAuthorization, "none");
     assert.notEqual(lastStart.runId, claim.targetRunId);
     // claim 不因二次起跑变化。
     const reread = await store.findContinuationClaimBySourceRun(session.id, crashed.runId);
@@ -142,11 +145,55 @@ test("executor 自动锚定 interrupted 续跑：claim→targetRunId 起跑→�
   }
 });
 
+test("resuming an interrupted user turn inherits its authorization rather than current host mode", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-continuation-authorization-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const session = new Session("continuation-authorization", workDir, {
+    persistence: true,
+    picoHome,
+    runtimePort: createEngineRuntimePort(),
+  });
+  try {
+    await session.recover();
+    const source = await RuntimeRun.start({
+      capability: session.runtimeEventCapability!,
+      agentSwarmAuthorization: "turn_override",
+    });
+    await source.commitMessages(session, [
+      { role: "user", content: "continue the authorized task" },
+    ]);
+    await source.finish("interrupted", "process exited");
+    await newExecutor(session, workDir, picoHome, {
+      continuationTerminalMinAgeMs: 0,
+      resumeExistingSession: true,
+      agentSwarmAuthorization: "none",
+    }).execute();
+    const claim = await session.runtimeEventStore!.findContinuationClaimBySourceRun(
+      session.id,
+      source.runId,
+    );
+    assert.ok(claim);
+    const target = await session.runtimeEventStore!.readRun(session.id, claim.targetRunId);
+    assert.equal(
+      target.find((event) => event.kind === "run.started")?.data.agentSwarmAuthorization,
+      "turn_override",
+    );
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 function newExecutor(
   session: Session,
   workDir: string,
   picoHome: string,
-  extra?: { continuationTerminalMinAgeMs?: number },
+  extra?: {
+    continuationTerminalMinAgeMs?: number;
+    resumeExistingSession?: boolean;
+    agentSwarmAuthorization?: RuntimeRun["agentSwarmAuthorization"];
+  },
 ): RuntimeRunExecutor {
   const runtimeState = {
     dispatchHook: async (): Promise<HookOutput> => ({ decision: "allow" }),
