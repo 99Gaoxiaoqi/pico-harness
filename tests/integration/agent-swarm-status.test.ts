@@ -241,3 +241,42 @@ test("Swarm failures, replacement and blocked dependencies produce stable attent
   });
   await assert.rejects(wrong.execute("{}"), /不属于/);
 });
+
+test("Stopping failed work allows the remaining branch to reach a fresh settled checkpoint", () => {
+  const projection = fixture(["a", "b"]);
+  for (const failed of [runtime("a", "failed"), runtime("a", "completed", "failure")]) {
+    const initial = projectAgentSwarmStatus({
+      projection,
+      runtimeClaims: [failed, runtime("b", "running")],
+    });
+    const stoppedProjection = {
+      ...projection,
+      stops: [{ kind: "stop" as const, target: { kind: "intent" as const, intentId: "a" } }],
+    };
+    const stopped = projectAgentSwarmStatus({
+      projection: stoppedProjection,
+      runtimeClaims: [failed, runtime("b", "running")],
+    });
+    assert.equal(stopped.items[0]!.status, "stopped");
+    assert.equal(stopped.status, "running");
+    assert.equal(swarmCheckpointKey(stopped), undefined);
+    const completed = projectAgentSwarmStatus({
+      projection: stoppedProjection,
+      runtimeClaims: [failed, runtime("b", "completed", "success")],
+    });
+    assert.equal(completed.status, "settled");
+    assert.notEqual(swarmCheckpointKey(completed), swarmCheckpointKey(initial));
+
+    for (const [observed, expected] of [
+      [runtime("a", "running"), "running"],
+      [runtime("a", "waiting-permission"), "blocked"],
+      [runtime("a", "completed", "success"), "completed"],
+    ] as const) {
+      assert.equal(
+        projectAgentSwarmStatus({ projection: stoppedProjection, runtimeClaims: [observed] })
+          .items[0]!.status,
+        expected,
+      );
+    }
+  }
+});
