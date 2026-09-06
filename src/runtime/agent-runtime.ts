@@ -162,6 +162,7 @@ import { RuntimeCleanupScope } from "./runtime-cleanup.js";
 import {
   emitRuntimeLifecycleEvent,
   RuntimeRunExecutor,
+  DEFAULT_CONTINUATION_TERMINAL_MIN_AGE_MS,
   type PrestartedRuntimeRun,
   type PrestartedRuntimeUserInput,
   type RuntimeRunExecutorInput,
@@ -976,8 +977,30 @@ export async function executeAgentRuntime(
     const collaborationMode = (): "agent" | "plan" =>
       dependencies.agentGraph?.kind === "operator" ? "agent" : settings.collaborationMode!;
     planRun = collaborationMode() === "plan";
+    const inheritedAuthorization = await readInheritedRunSwarmAuthorization(
+      session,
+      dependencies.prestartedRun,
+      resumeExistingSession,
+    );
+    const requestedMode = options.orchestrationMode ?? settings.orchestrationMode ?? "default";
+    const agentSwarmAuthorization =
+      inheritedAuthorization ??
+      options.agentSwarmAuthorization ??
+      (requestedMode === "swarm"
+        ? options.orchestrationMode === "swarm"
+          ? "turn_override"
+          : "session_mode"
+        : "none");
     const orchestrationMode = (): "default" | "graph" | "swarm" =>
-      options.orchestrationMode ?? settings.orchestrationMode ?? "default";
+      collaborationMode() === "plan"
+        ? "default"
+        : inheritedAuthorization !== undefined
+          ? inheritedAuthorization !== "none"
+            ? "swarm"
+            : requestedMode === "swarm"
+              ? "default"
+              : requestedMode
+          : requestedMode;
     const permissionMode = (): "default" | "auto" | "yolo" =>
       dependencies.agentGraph?.kind === "operator"
         ? dependencies.agentGraph.profileSnapshot.permissionPolicy.mode
@@ -2169,6 +2192,8 @@ export async function executeAgentRuntime(
       workDir,
       picoHome,
       prompt,
+      agentSwarmAuthorization,
+      expectedAgentSwarmAuthorization: agentSwarmAuthorization,
       resumeExistingSession,
       ...(resumeExistingSession && planExecutionPromptId
         ? { planExecutionPrompt: { messageId: planExecutionPromptId, content: prompt } }
@@ -3235,4 +3260,27 @@ async function reconcileOrphanedPlanExecution(
   return reconcilePlanExecution(store, sessionId, writeGuard, (operationId) =>
     livePlanAdmissions.has(planAdmissionKey(sessionId, operationId)),
   );
+}
+
+/** Resolve immutable provenance before assembling any model-visible tools. */
+async function readInheritedRunSwarmAuthorization(
+  session: Session,
+  prestarted: PrestartedRuntimeRun | undefined,
+  resume: boolean,
+): Promise<RunAgentCliOptions["agentSwarmAuthorization"]> {
+  const store = session.runtimeEventStore;
+  if (!store) return undefined;
+  let sourceRunId = prestarted?.runId;
+  if (!sourceRunId && resume) {
+    const candidate = await store.findLatestInterruptedUnclaimedRun(session.id);
+    if (
+      candidate &&
+      Date.now() - Date.parse(candidate.terminalAt) >= DEFAULT_CONTINUATION_TERMINAL_MIN_AGE_MS
+    )
+      sourceRunId = candidate.runId;
+  }
+  if (!sourceRunId) return undefined;
+  const events = await store.readRun(session.id, sourceRunId);
+  const start = events.find((event) => event.kind === "run.started");
+  return start?.data.agentSwarmAuthorization;
 }

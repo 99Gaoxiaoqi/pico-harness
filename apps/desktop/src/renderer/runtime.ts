@@ -1,3 +1,4 @@
+import { parseSwarmCommand } from "./swarm-command.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CAPABILITY_SCOPE_RUNTIME_CAPABILITY,
@@ -1430,6 +1431,7 @@ function mergeLoadedData(
 
 export interface RuntimeActions {
   dismissMessage(): void;
+  showMessage?(message: string): void;
   chooseWorkspace(): Promise<string | undefined>;
   registerWorkspace(): Promise<string | undefined>;
   ensureTemporaryWorkspace(): Promise<string | undefined>;
@@ -2766,6 +2768,9 @@ export function useRuntimeStore(): RuntimeStore {
       dismissMessage() {
         setMessage(undefined);
       },
+      showMessage(text) {
+        setMessage(text);
+      },
       async chooseWorkspace() {
         let selectedWorkspacePath: string | undefined;
         await perform("choose-workspace", async (bridge) => {
@@ -2906,6 +2911,7 @@ export function useRuntimeStore(): RuntimeStore {
       async sendMessage(input) {
         const workspacePath = input.workspacePath;
         if (!workspacePath || !input.text.trim()) return { succeeded: false };
+        const swarmCommand = !input.activation ? parseSwarmCommand(input.text) : undefined;
         let resolvedSessionId = input.sessionId;
         const sendIdentity = JSON.stringify({
           workspacePath,
@@ -2963,10 +2969,10 @@ export function useRuntimeStore(): RuntimeStore {
                 ? { kind: "skill", name: input.activation.name, args: input.text.trim() }
                 : input.activation?.kind === "agent"
                   ? { kind: "agent", name: input.activation.name, task: input.text.trim() }
-                  : /^\/swarm\s+(?!on$|off$|status$)(.+)/s.test(input.text.trim())
+                  : swarmCommand?.kind === "run_once"
                     ? {
                         kind: "text",
-                        text: input.text.trim().replace(/^\/swarm\s+/, ""),
+                        text: swarmCommand.task,
                         orchestrationMode: "swarm",
                       }
                     : { kind: "text", text: input.text.trim() },

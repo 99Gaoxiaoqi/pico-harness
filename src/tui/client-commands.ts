@@ -417,7 +417,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
       argumentCompleter: staticCompleter(["on", "off", "status"]),
       execute: async (input) => {
         const task = input.args.trim();
-        const target = task.toLowerCase();
+        const target = task;
         if (target && !["on", "off", "status"].includes(target)) {
           const sent = await runtime.sendInput({ kind: "text", text: task }, "auto", {
             orchestrationMode: "swarm",
@@ -1850,7 +1850,12 @@ export async function processClientInput(
     const command = registry.resolve(parsed.name);
     if (command) {
       const state: "idle" | "running" = runtime.running ? "running" : "idle";
-      const availability = getCommandAvailability(command, state);
+      const swarmStatus =
+        command.name === "swarm" && (!parsed.args.trim() || parsed.args.trim() === "status");
+      const availability = getCommandAvailability(
+        swarmStatus ? { ...command, availability: "always" } : command,
+        state,
+      );
       if (!availability.available) {
         return {
           kind: "local",

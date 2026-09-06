@@ -1,4 +1,10 @@
-import { AGENT_SWARM_SUPERVISOR_TOOL_NAMES } from "../agent-graph/core/tool-names.js";
+import type { Session } from "../engine/session.js";
+import { loadAgentCatalog } from "../agents/catalog.js";
+import {
+  createCatalogAgentGraphOperatorProfileCatalog,
+  type MutableAgentGraphOperatorProfileCatalog,
+} from "../agent-graph/operator-profile-catalog.js";
+import type { AgentSwarmAuthorizationSource } from "../engine/session-runtime-event.js";
 import { SqliteAgentGraphControlStoreAdapter } from "../agent-graph/sqlite-control-store-adapter.js";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
@@ -285,6 +291,31 @@ export function createProductionRuntimeServices(
   };
   const agentGraphWorkspaceHostFactory =
     options.agentGraphWorkspaceHostFactory ?? createAgentGraphWorkspaceHost;
+  const graphOperatorCatalogs = new WeakMap<
+    AgentGraphWorkspaceHost,
+    MutableAgentGraphOperatorProfileCatalog
+  >();
+  const refreshGraphOperatorCatalog = async (workspacePath: string) => {
+    const host = agentGraphHosts.get(workspacePath);
+    const catalog = host && graphOperatorCatalogs.get(host);
+    if (!catalog) return;
+    const [config, snapshot] = await Promise.all([
+      loadPicoConfig(workspacePath),
+      pluginRuntimeSnapshotRegistry.get(workspacePath),
+    ]);
+    catalog.replaceProfiles(
+      await loadAgentCatalog({
+        workDir: workspacePath,
+        picoHome,
+        env,
+        externalSources: snapshot.agentSources,
+        includeClaudeProjectResources:
+          config.compatibility.claude.enabled && config.compatibility.claude.projectResources,
+        includeClaudeUserResources:
+          config.compatibility.claude.enabled && config.compatibility.claude.userResources,
+      }),
+    );
+  };
   const executeDetachedGraphRun = async (detached: {
     readonly input: ExecuteHostedAgentGraphRunInput;
     readonly workspacePath: string;
@@ -345,13 +376,17 @@ export function createProductionRuntimeServices(
             },
           }
         : input.binding;
+      if (graphBinding.kind === "root") await refreshGraphOperatorCatalog(workspacePath);
       const rootContext = graphBinding.kind === "root" ? graphBinding.getRootContext() : undefined;
       if (graphBinding.kind === "root" && !rootContext) {
         throw new Error("Graph root Run is missing its trusted supervisor context");
       }
       const reasoningLevel = coordinateReasoningLevel(
         route.capabilities.reasoningProfile,
-        persistedSettings?.thinkingEffortExplicit ? persistedSettings.thinkingEffort : undefined,
+        operatorProfile?.thinkingEffort ??
+          (persistedSettings?.thinkingEffortExplicit
+            ? persistedSettings.thinkingEffort
+            : undefined),
       ).level;
       const effectiveMcp = operatorProfile
         ? { sources: [] as const }
@@ -429,6 +464,7 @@ export function createProductionRuntimeServices(
           modelCapabilities: route.capabilities,
           interactionMode: "default",
           orchestrationMode: input.orchestrationMode,
+          agentSwarmAuthorization: input.prestartedRun.agentSwarmAuthorization ?? "none",
           ...(reasoningLevel !== undefined ? { thinkingEffort: reasoningLevel } : {}),
           ...(operatorProfile
             ? { allowedTools: [...operatorProfile.tools, "agent_output"] }
@@ -447,7 +483,14 @@ export function createProductionRuntimeServices(
           askUserHandler: broker.askUserHandler,
           waitAtSafeBoundary: context.waitAtSafeBoundary,
           ...(pluginSnapshot ? { pluginSnapshot, pluginCapabilityRegistry } : {}),
-          ...(operatorProfile ? { isolatedHeadless: true as const } : {}),
+          ...(operatorProfile
+            ? {
+                isolatedHeadless: true as const,
+                ...(operatorProfile.maxTurns === undefined
+                  ? {}
+                  : { maxTurns: operatorProfile.maxTurns }),
+              }
+            : {}),
           ...(!operatorProfile && effectiveMcp.sources.length
             ? { mcpConfigSources: effectiveMcp.sources }
             : {}),
@@ -572,6 +615,7 @@ export function createProductionRuntimeServices(
         storageRoot: runtimeStore.storageRoot,
       });
       let host: AgentGraphWorkspaceHost;
+      const operatorProfileCatalog = createCatalogAgentGraphOperatorProfileCatalog([]);
       try {
         host = agentGraphWorkspaceHostFactory({
           workDir: workspacePath,
@@ -580,6 +624,7 @@ export function createProductionRuntimeServices(
             : {}),
           storageRoot: runtimeStore.storageRoot,
           runtimeEventStore,
+          operatorProfileCatalog,
           sessionManager: globalSessionManager,
           sessionOptions: {
             persistence: true,
@@ -675,6 +720,7 @@ export function createProductionRuntimeServices(
         runtimeEventStore.close();
         throw error;
       }
+      graphOperatorCatalogs.set(host, operatorProfileCatalog);
       agentGraphHosts.set(workspacePath, host);
       return workspaceGraphApplicationLifecycle({
         workspacePath,
@@ -726,16 +772,23 @@ export function createProductionRuntimeServices(
           (persistedSettings?.collaborationMode === "plan" &&
             execution?.planReview?.action !== "execute" &&
             execution?.planReview?.action !== "resume_execution");
-        if (planning && execution?.orchestrationMode) {
-          throw new Error(
-            "单次编排覆盖只能用于执行；规划时请先通过会话模式开启 Swarm，再提交计划。",
-          );
-        }
+        const proposalAuthorization = execution?.planReview
+          ? await readPlanSwarmAuthorization(session, execution.planReview.planId)
+          : undefined;
+        let agentSwarmAuthorization: AgentSwarmAuthorizationSource = execution?.orchestrationMode
+          ? execution.orchestrationMode === "swarm"
+            ? "turn_override"
+            : "none"
+          : (proposalAuthorization ??
+            (persistedSettings?.orchestrationMode === "swarm" ? "session_mode" : "none"));
         let orchestrationMode = planning
           ? "default"
-          : resumeGraph
-            ? "graph"
-            : (execution?.orchestrationMode ?? persistedSettings?.orchestrationMode ?? "default");
+          : (execution?.orchestrationMode ??
+            (agentSwarmAuthorization !== "none"
+              ? "swarm"
+              : resumeGraph
+                ? "graph"
+                : (persistedSettings?.orchestrationMode ?? "default")));
         graphHost =
           orchestrationMode === "graph" || orchestrationMode === "swarm"
             ? requireAgentGraphWorkspaceHost(agentGraphHosts, workspacePath)
@@ -778,6 +831,7 @@ export function createProductionRuntimeServices(
         // AgentRuntime.execute. When a runtimeState is injected, AgentRuntime deliberately reuses
         // it and cannot attach extension Hook sources retroactively.
         const pluginSnapshot = await pluginRuntimeSnapshotRegistry.get(workspacePath);
+        if (graphHost) await refreshGraphOperatorCatalog(workspacePath);
         const projectConfig = await loadPicoConfig(workspacePath);
         const persistedAdditionalDirectories = persistedSettings?.additionalDirectories ?? [];
         const processWorkspaceRoots = [
@@ -945,8 +999,12 @@ export function createProductionRuntimeServices(
             graphHost &&
             admittedGraph &&
             graphHost.application.graphSupervision(admittedGraph.graphId)?.mode === "swarm"
-          )
+          ) {
             orchestrationMode = "swarm";
+            agentSwarmAuthorization = graphHost.application.graphSupervision(
+              admittedGraph.graphId,
+            )!.authorization;
+          }
           const runtimeOptions = {
             prompt,
             dir: workspacePath,
@@ -959,19 +1017,15 @@ export function createProductionRuntimeServices(
             modelRouteId: route.modelRouteId,
             modelCapabilities: route.capabilities,
             orchestrationMode,
+            agentSwarmAuthorization,
             ...(reasoningLevel !== undefined ? { thinkingEffort: reasoningLevel } : {}),
             ...(planning ? { planMode: true } : {}),
             ...(persistedSettings?.mode ? { rewindInteractionMode: persistedSettings.mode } : {}),
             ...(persistedSettings?.mode === "plan" && persistedSettings.prePlanMode
               ? { rewindPrePlanMode: persistedSettings.prePlanMode }
               : {}),
-            ...(orchestrationMode !== "default"
-              ? {
-                  allowedTools:
-                    orchestrationMode === "swarm"
-                      ? AGENT_SWARM_SUPERVISOR_TOOL_NAMES
-                      : AGENT_GRAPH_SUPERVISOR_TOOL_NAMES,
-                }
+            ...(orchestrationMode === "graph"
+              ? { allowedTools: AGENT_GRAPH_SUPERVISOR_TOOL_NAMES }
               : execution?.allowedTools
                 ? { allowedTools: execution.allowedTools }
                 : {}),
@@ -988,7 +1042,7 @@ export function createProductionRuntimeServices(
                       ? {
                           mode: "swarm",
                           authorization:
-                            execution?.orchestrationMode === "swarm"
+                            agentSwarmAuthorization === "turn_override"
                               ? "turn_override"
                               : "session_mode",
                         }
@@ -1037,6 +1091,8 @@ export function createProductionRuntimeServices(
                     if (!rootContext) {
                       throw new Error("Graph root Run is missing its trusted supervisor context");
                     }
+                    if (orchestrationMode === "swarm")
+                      foregroundGraphRuntime.host.application.sealEmptyRootEpoch(targetSessionId);
                     assertAgentGraphRootRunSettled(foregroundGraphRuntime.host.store, {
                       graphId: foregroundGraphRuntime.graph.graphId,
                       rootSessionId: targetSessionId,
@@ -1965,7 +2021,15 @@ function rootAgentGraphBinding(
         rootTurnId,
         rootRunId: run.runId,
         rootModelRouteId,
-        ...(supervision ? { supervision } : {}),
+        ...(run.agentSwarmAuthorization === undefined
+          ? supervision
+            ? { supervision }
+            : {}
+          : run.agentSwarmAuthorization === "none"
+            ? {}
+            : {
+                supervision: { mode: "swarm" as const, authorization: run.agentSwarmAuthorization },
+              }),
       };
     },
     toolPort: host.application.toolPort,
@@ -2809,4 +2873,28 @@ function jsonObject(value: unknown): JsonObject {
 
 function firstString(...values: readonly unknown[]): string | undefined {
   return values.find((value): value is string => typeof value === "string" && value.length > 0);
+}
+
+/** A pending plan inherits the authorization of its actual proposing Run, never the model text. */
+async function readPlanSwarmAuthorization(
+  session: Session,
+  planId: string,
+): Promise<AgentSwarmAuthorizationSource | undefined> {
+  const store = session.runtimeEventStore;
+  if (!store) return undefined;
+  const { entries } = await store.readSessionEntriesOfKinds(session.id, [
+    "plan.proposed",
+    "plan.revised",
+  ]);
+  const proposal = entries
+    .map(({ event }) => event)
+    .findLast(
+      (event) =>
+        (event.kind === "plan.proposed" || event.kind === "plan.revised") &&
+        event.data.proposal.planId === planId,
+    );
+  if (!proposal) return undefined;
+  const events = await store.readRun(session.id, proposal.runId);
+  const started = events.find((event) => event.kind === "run.started");
+  return started?.data.agentSwarmAuthorization;
 }

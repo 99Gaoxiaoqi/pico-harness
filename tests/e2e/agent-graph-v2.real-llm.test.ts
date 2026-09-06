@@ -1,3 +1,8 @@
+import {
+  AgentRuntime,
+  type RunAgentCliOptions,
+  type RunAgentCliDependencies,
+} from "../../src/runtime/agent-runtime.js";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
@@ -132,6 +137,17 @@ realModelTest(
       trustStore,
       userConfigStore,
       credentialVault: memoryCredentialVault(model.config.apiKey),
+      agentRuntime: new (class extends AgentRuntime {
+        override execute(options: RunAgentCliOptions, dependencies: RunAgentCliDependencies) {
+          // A wake must honor the admitted Run even if a later host mode is stale.
+          return super.execute(
+            SWARM_E2E && dependencies.prestartedRun && dependencies.agentGraph?.kind === "root"
+              ? { ...options, orchestrationMode: "default", agentSwarmAuthorization: "none" }
+              : options,
+            dependencies,
+          );
+        }
+      })(),
       agentGraphWorkspaceHostFactory: (options) => {
         graphHost = createAgentGraphWorkspaceHost(options);
         return graphHost;
@@ -187,14 +203,9 @@ realModelTest(
           execution: {
             requestedModel: model.route.id,
             ...(SWARM_E2E ? { orchestrationMode: "swarm" as const } : {}),
-            allowedTools: SWARM_E2E
-              ? [
-                  "agent_swarm_status",
-                  "update_agent_graph",
-                  "yield_agent_graph",
-                  "agent_graph_results",
-                ]
-              : ["view_agent_graph", "update_agent_graph", "yield_agent_graph"],
+            ...(!SWARM_E2E
+              ? { allowedTools: ["view_agent_graph", "update_agent_graph", "yield_agent_graph"] }
+              : {}),
           },
         }),
       );
@@ -319,6 +330,9 @@ realModelTest(
       )?.runId;
       assert.ok(initialRootRuntimeRunId, "the initial root RuntimeRun must yield exactly once");
       assert.ok(rootRuns.length >= 2, "root Session must contain the initial and exact wake Runs");
+      for (const run of rootRuns) {
+        assert.equal(run.data.agentSwarmAuthorization, SWARM_E2E ? "turn_override" : "none");
+      }
       assert.ok(rootRuns.some((event) => event.runId === initialRootRuntimeRunId));
       assert.equal(
         rootToolStarts.filter(
@@ -340,11 +354,7 @@ realModelTest(
         rootToolStarts
           .filter((event) => event.runId === initialRootRuntimeRunId)
           .map((event) => event.data.toolName),
-        [
-          SWARM_E2E ? "agent_swarm_status" : "view_agent_graph",
-          "update_agent_graph",
-          "yield_agent_graph",
-        ],
+        [SWARM_E2E ? "agent_list" : "view_agent_graph", "update_agent_graph", "yield_agent_graph"],
         "the initial root must discover profiles, create work, then yield exactly once",
       );
 
@@ -407,7 +417,7 @@ realModelTest(
       assert.deepEqual(
         exactWakeToolStarts.map((event) => event.data.toolName),
         SWARM_E2E
-          ? ["agent_swarm_status", "agent_graph_results", "update_agent_graph"]
+          ? ["agent_swarm_status", "agent_output", "update_agent_graph"]
           : ["view_agent_graph", "update_agent_graph"],
         "the exact root wake must view the selected output before finishing",
       );
@@ -428,7 +438,7 @@ realModelTest(
         (event): event is Extract<RuntimeEvent, { kind: "tool.result.recorded" }> =>
           event.kind === "tool.result.recorded" &&
           event.runId === wakeAttempt.targetRunId &&
-          event.data.toolName === (SWARM_E2E ? "agent_graph_results" : "view_agent_graph"),
+          event.data.toolName === (SWARM_E2E ? "agent_output" : "view_agent_graph"),
       );
       assert.ok(
         durableWakeView,
@@ -495,7 +505,7 @@ realModelTest(
 function initialRootPrompt(): string {
   return [
     "This is a deterministic Graph v2 end-to-end check. Follow these steps exactly.",
-    `First call ${SWARM_E2E ? "agent_swarm_status" : "view_agent_graph"} exactly once to discover available profiles, then call update_agent_graph exactly once to create one explore subtask using the current work interface. This test explicitly needs exactly one child, even in swarm mode. Omit workspace to use the runtime default.`,
+    `First call ${SWARM_E2E ? "agent_list" : "view_agent_graph"} exactly once to discover available profiles, then call update_agent_graph exactly once to create one explore subtask using the current work interface. This test explicitly needs exactly one child, even in swarm mode. Omit workspace to use the runtime default.`,
     "The subtask instruction must be: Invent 32 random uppercase hexadecimal characters that are not present in this instruction. Call agent_output exactly once with status success and output equal to GRAPH_V2_OPERATOR_CANARY_ followed immediately by those 32 characters. Do not call any other tool and do not write files.",
     "After update_agent_graph succeeds, call yield_agent_graph exactly once.",
     "After yield_agent_graph succeeds, end this Run immediately. Do not call another tool and do not finish the Graph in this initial Run.",

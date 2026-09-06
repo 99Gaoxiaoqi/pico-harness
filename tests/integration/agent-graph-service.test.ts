@@ -1161,8 +1161,8 @@ test("Swarm waits for the batch, wakes on failure, replaces work and survives re
     assert.equal(settled.status, "settled");
     assert.equal(rootWake.starts.length, 3);
     const results = await call(
-      "agent_graph_results",
-      { work_ids: [added.work[0].workId, replaced.work[0].workId] },
+      "agent_output",
+      { view: "result", work_ids: [added.work[0].workId, replaced.work[0].workId] },
       "read-final",
     );
     assert.equal(results.records.length, 2);

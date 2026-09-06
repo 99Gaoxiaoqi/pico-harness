@@ -14,6 +14,9 @@ export type RuntimeExecution =
 
 /** Options consumed by the already-assembled RuntimeRun executor. */
 export interface RuntimeRunOptions {
+  /** Host-resolved, durable source of Swarm authorization for this Run. */
+  agentSwarmAuthorization?: import("../engine/session-runtime-event.js").AgentSwarmAuthorizationSource;
+
   /** TUI 中用户实际发送的文本，用作 /rewind 的可见名称。 */
   rewindPrompt?: string;
   /** 用户消息写入可见 transcript 前的条目下标。 */
