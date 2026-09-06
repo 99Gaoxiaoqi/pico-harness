@@ -61,6 +61,11 @@ export interface AgentGraphInputRef {
 }
 
 export interface AgentGraphActivationIntent {
+  readonly supervision?: {
+    readonly mode: "swarm";
+    readonly authorization: "session_mode" | "turn_override";
+  };
+  readonly replacesIntentId?: string;
   readonly graphId: string;
   readonly intentId: string;
   readonly operatorId: string;

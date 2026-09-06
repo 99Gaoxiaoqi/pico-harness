@@ -867,7 +867,12 @@ function parseSessionSettings(value: unknown): SessionSettingsView | undefined {
       : legacyMode === "default" || legacyMode === "auto" || legacyMode === "yolo"
         ? legacyMode
         : "default";
-  const orchestrationMode = settings.orchestrationMode === "graph" ? "graph" : "default";
+  const orchestrationMode =
+    settings.orchestrationMode === "swarm"
+      ? "swarm"
+      : settings.orchestrationMode === "graph"
+        ? "graph"
+        : "default";
   if (!model) {
     return undefined;
   }
@@ -981,7 +986,9 @@ export function parseUserDefaults(value: unknown): UserDefaultsView {
       ? { modelRouteId: stringValue(defaults.modelRouteId) }
       : {}),
     ...(collaborationMode === "agent" || collaborationMode === "plan" ? { collaborationMode } : {}),
-    ...(orchestrationMode === "default" || orchestrationMode === "graph"
+    ...(orchestrationMode === "default" ||
+    orchestrationMode === "graph" ||
+    orchestrationMode === "swarm"
       ? { orchestrationMode }
       : {}),
     ...(permissionMode === "default" || permissionMode === "auto" || permissionMode === "yolo"
@@ -1462,7 +1469,7 @@ export interface RuntimeActions {
     patch: Readonly<{
       modelRouteId?: string;
       collaborationMode?: "agent" | "plan";
-      orchestrationMode?: "default" | "graph";
+      orchestrationMode?: "default" | "graph" | "swarm";
       permissionMode?: "default" | "auto" | "yolo";
       thinkingEffort?: string;
     }>,
@@ -2956,7 +2963,13 @@ export function useRuntimeStore(): RuntimeStore {
                 ? { kind: "skill", name: input.activation.name, args: input.text.trim() }
                 : input.activation?.kind === "agent"
                   ? { kind: "agent", name: input.activation.name, task: input.text.trim() }
-                  : { kind: "text", text: input.text.trim() },
+                  : /^\/swarm\s+(?!on$|off$|status$)(.+)/s.test(input.text.trim())
+                    ? {
+                        kind: "text",
+                        text: input.text.trim().replace(/^\/swarm\s+/, ""),
+                        orchestrationMode: "swarm",
+                      }
+                    : { kind: "text", text: input.text.trim() },
             ...(input.initialSettings ? { initialSettings: input.initialSettings } : {}),
             behavior: input.behavior ?? "auto",
             ...(input.expectedRunId ? { expectedRunId: input.expectedRunId } : {}),

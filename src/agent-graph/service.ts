@@ -1,7 +1,13 @@
 import {
+  projectAgentSwarmStatus,
+  swarmCheckpointKey,
+  type AgentSwarmStatusResult,
+} from "./swarm-status.js";
+import {
   AgentGraphSupervisorService,
   type AgentGraphDrivePort,
   type AgentGraphDriveResult,
+  type AgentGraphWakeCandidate,
   type AgentGraphRootWakePort,
   type AgentGraphSupervisorServiceOptions,
   type AgentGraphYieldSnapshot,
@@ -10,6 +16,7 @@ import {
 import type { SqliteAgentGraphControlStore } from "../storage/sqlite/sqlite-agent-graph-control-store.js";
 import type {
   AgentGraph,
+  AgentGraphActivationIntent,
   AgentGraphOperationSource,
   AgentGraphScheduleCommand,
   AgentGraphWorkspacePolicy,
@@ -60,6 +67,7 @@ export interface AgentGraphApplicationService {
   readonly drivePort: AgentGraphDrivePort;
   readonly supervisor: AgentGraphSupervisorService;
   openRootEpoch(rootSessionId: string): AgentGraph;
+  graphSupervision(graphId: string): AgentGraphActivationIntent["supervision"];
   /** Host-owned recovery permit used when a scheduled root Run fails before yielding. */
   recoverFailedRootRun(input: RegisterAgentGraphYieldInput): Promise<boolean>;
   /** Seals an admitted epoch only when no schedule revision was ever committed. */
@@ -86,6 +94,22 @@ class SqliteAgentGraphDriveBridge implements AgentGraphDrivePort {
     private readonly now: () => number,
   ) {}
 
+  async swarmWakeCandidates(graphId: string): Promise<readonly AgentGraphWakeCandidate[]> {
+    const state = this.control.getScheduleState(graphId);
+    if (!state.intents.some((intent) => intent.supervision?.mode === "swarm")) return [];
+    const status = await readCompactSwarmStatus(this.store, this.control, this.runtime, graphId);
+    const key = swarmCheckpointKey(status);
+    return key
+      ? [
+          {
+            dedupeKey: `swarm:${key}`,
+            cause: "runtime_terminal",
+            payload: { mode: "swarm", status: status.status },
+          },
+        ]
+      : [];
+  }
+
   listOpenGraphIds(): readonly string[] {
     return this.control.listGraphIds({ openOnly: true });
   }
@@ -94,10 +118,14 @@ class SqliteAgentGraphDriveBridge implements AgentGraphDrivePort {
     graphId: string,
     options: { readonly force?: boolean } = {},
   ): Promise<AgentGraphDriveResult> {
-    const active = this.store.listGraphDiagnostics(graphId, { unresolvedOnly: true });
+    const active = activeSwarmDiagnostics(this.store, this.control, graphId);
     if (!options.force) {
       if (active.some((diagnostic) => diagnostic.state === "needs_attention")) {
-        return { quiescent: true, needsAttention: true };
+        return {
+          quiescent: true,
+          needsAttention: true,
+          wakeCandidates: await this.swarmWakeCandidates(graphId),
+        };
       }
       const retryAt = active
         .flatMap((diagnostic) =>
@@ -150,31 +178,39 @@ class SqliteAgentGraphDriveBridge implements AgentGraphDrivePort {
       const retryAt = recorded
         .flatMap((diagnostic) => diagnostic.nextRetryAt ?? [])
         .sort((left, right) => left - right)[0];
-      const unresolved = this.store.listGraphDiagnostics(graphId, { unresolvedOnly: true });
+      const unresolved = activeSwarmDiagnostics(this.store, this.control, graphId);
       return {
         quiescent: true,
-        wakeCandidates: result.wakeCandidates.map((candidate) => ({
-          dedupeKey: candidate.dedupeKey,
-          cause: "runtime_terminal" as const,
-          payload: candidate.payload,
-        })),
+        wakeCandidates: this.control
+          .getScheduleState(graphId)
+          .intents.some((intent) => intent.supervision?.mode === "swarm")
+          ? await this.swarmWakeCandidates(graphId)
+          : result.wakeCandidates.map((candidate) => ({
+              dedupeKey: candidate.dedupeKey,
+              cause: "runtime_terminal" as const,
+              payload: candidate.payload,
+            })),
         ...(retryAt === undefined ? {} : { retryAt }),
         ...(unresolved.some((diagnostic) => diagnostic.state === "needs_attention")
           ? { needsAttention: true }
           : {}),
       };
     }
-    const unresolved = this.store.listGraphDiagnostics(graphId, { unresolvedOnly: true });
+    const unresolved = activeSwarmDiagnostics(this.store, this.control, graphId);
     const retryAt = unresolved
       .flatMap((diagnostic) => diagnostic.nextRetryAt ?? [])
       .sort((left, right) => left - right)[0];
     return {
       quiescent: result.errors.length > 0 ? true : result.quiescent,
-      wakeCandidates: result.wakeCandidates.map((candidate) => ({
-        dedupeKey: candidate.dedupeKey,
-        cause: "runtime_terminal" as const,
-        payload: candidate.payload,
-      })),
+      wakeCandidates: this.control
+        .getScheduleState(graphId)
+        .intents.some((intent) => intent.supervision?.mode === "swarm")
+        ? await this.swarmWakeCandidates(graphId)
+        : result.wakeCandidates.map((candidate) => ({
+            dedupeKey: candidate.dedupeKey,
+            cause: "runtime_terminal" as const,
+            payload: candidate.payload,
+          })),
       ...(retryAt === undefined ? {} : { retryAt }),
       ...(unresolved.some((diagnostic) => diagnostic.state === "needs_attention")
         ? { needsAttention: true }
@@ -278,7 +314,47 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
     const operationId = `graph-work-update_${deterministicFingerprint({ graphId: input.graphId, source: input.source }).slice(7, 39)}`;
     const previous = state.revisions.find((revision) => revision.operationId === operationId);
     const expectedRevision = previous?.expectedPreviousRevision ?? state.graph.headRevision;
-    const commands = compileAgentGraphWork(input, operationId, expectedRevision, state.operators);
+    if (!previous && input.request.operation === "add_work") {
+      for (const work of input.request.work) {
+        if (!work.replacesIntentId) continue;
+        const prior = state.intents.find((intent) => intent.intentId === work.replacesIntentId);
+        if (!prior) throw new Error("Replacement must reference existing work in this Graph");
+        const claim = this.control
+          .listActivationClaims(input.graphId)
+          .find((claim) => claim.intentId === prior.intentId);
+        const runtime = claim ? await this.runtime.observeActivation(claim) : undefined;
+        const diagnostics = this.store.listGraphDiagnostics(input.graphId, {
+          unresolvedOnly: true,
+        });
+        const related = new Set([
+          prior.intentId,
+          prior.operatorId,
+          ...(claim ? [claim.claimId] : []),
+          ...this.control
+            .listOperatorProvisions(input.graphId)
+            .filter((item) => item.operatorId === prior.operatorId)
+            .map((item) => item.provisionId),
+        ]);
+        const failed =
+          (runtime &&
+            (["failed", "cancelled", "interrupted"].includes(runtime.status) ||
+              (runtime.status === "completed" && runtime.outputStatus !== "success"))) ||
+          ((!runtime || runtime.status === "not-started") &&
+            diagnostics.some((item) => related.has(item.subjectId)));
+        if (!failed)
+          throw new Error(
+            "Only failed or cancelled work can be replaced; stop active work explicitly first",
+          );
+      }
+    }
+    const supervision =
+      state.intents.find((intent) => intent.supervision)?.supervision ?? input.supervision;
+    const commands = compileAgentGraphWork(
+      { ...input, ...(supervision ? { supervision } : {}) },
+      operationId,
+      expectedRevision,
+      state.operators,
+    );
     const update = { ...input, operationId, expectedRevision, commands };
     if (previous) {
       const original = previous.commands.map((command) => {
@@ -329,6 +405,14 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
     };
   }
 
+  async readSwarmStatus(input: ReadAgentGraphProjectionInput): Promise<AgentSwarmStatusResult> {
+    this.requireBoundGraph(input.graphId, input.rootSessionId, input.epoch);
+    return {
+      ...(await readCompactSwarmStatus(this.store, this.control, this.runtime, input.graphId)),
+      availableOperatorProfiles: this.operatorProfileCatalog.listPublicProfiles(),
+    };
+  }
+
   async readProjection(input: ReadAgentGraphProjectionInput): Promise<AgentGraphSupervisorView> {
     this.requireBoundGraph(input.graphId, input.rootSessionId, input.epoch);
     const projection = this.readProjectionSync(input.graphId, input.rootSessionId, input.epoch);
@@ -350,6 +434,7 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
               ? {}
               : { terminalEventId: runtime.terminalEventId }),
             outputEventIds: runtime.records.map((record) => record.sourceEventId),
+            ...(runtime.outputStatus ? { outputStatus: runtime.outputStatus } : {}),
           };
         }),
       ),
@@ -561,6 +646,8 @@ export function createAgentGraphApplicationService(
   let closed = false;
   return {
     toolPort,
+    graphSupervision: (graphId) =>
+      control.getScheduleState(graphId).intents.find((intent) => intent.supervision)?.supervision,
     drivePort: drive,
     supervisor,
     openRootEpoch: (rootSessionId) => {
@@ -698,4 +785,97 @@ function sameYieldRegistration(
     left.rootRunId === right.rootRunId &&
     left.toolCallId === right.toolCallId
   );
+}
+
+async function readCompactSwarmStatus(
+  store: SqliteAgentGraphControlStore,
+  control: SqliteAgentGraphControlStoreAdapter,
+  runtime: AgentGraphRuntimePortBridge,
+  graphId: string,
+): Promise<AgentSwarmStatusResult> {
+  const state = control.getScheduleState(graphId);
+  const claims = control.listActivationClaims(graphId);
+  const readFailures: { subjectId: string; message: string }[] = [];
+  const observations = await Promise.all(
+    claims.map(async (claim) => {
+      try {
+        const observed = await runtime.observeActivation(claim);
+        return {
+          claimId: claim.claimId,
+          status: observed.status,
+          outputEventIds: observed.records.map((record) => record.sourceEventId),
+          ...(observed.outputStatus ? { outputStatus: observed.outputStatus } : {}),
+        };
+      } catch {
+        readFailures.push({
+          subjectId: claim.claimId,
+          message: "Runtime 状态读取失败，需要检查该任务",
+        });
+        return undefined;
+      }
+    }),
+  );
+  const runtimeClaims = observations.filter(
+    (value): value is NonNullable<typeof value> => value !== undefined,
+  );
+  const projection = {
+    graph: state.graph,
+    operators: state.operators.map(({ profileSnapshot, ...operator }) => ({
+      ...operator,
+      profile: { profileId: profileSnapshot.profileId, revision: profileSnapshot.profileRevision },
+    })),
+    intents: state.intents,
+    stops: state.stops,
+    claims,
+    records: control.listRecordRefs(graphId),
+    provisions: control
+      .listOperatorProvisions(graphId)
+      .map(({ profileSnapshot, ...provision }) => ({
+        ...provision,
+        profile: {
+          profileId: profileSnapshot.profileId,
+          revision: profileSnapshot.profileRevision,
+        },
+      })),
+  };
+  const diagnostics = activeSwarmDiagnostics(store, control, graphId).map(
+    ({ subjectId, message }) => ({ subjectId, message }),
+  );
+  return projectAgentSwarmStatus({
+    projection,
+    runtimeClaims,
+    diagnostics: [...diagnostics, ...readFailures],
+  });
+}
+
+function activeSwarmDiagnostics(
+  store: SqliteAgentGraphControlStore,
+  control: SqliteAgentGraphControlStoreAdapter,
+  graphId: string,
+) {
+  const state = control.getScheduleState(graphId);
+  const replaced = new Set(
+    state.intents.flatMap((intent) => (intent.replacesIntentId ? [intent.replacesIntentId] : [])),
+  );
+  const ignored = new Set(replaced);
+  for (const intent of state.intents.filter((intent) => replaced.has(intent.intentId))) {
+    for (const claim of control
+      .listActivationClaims(graphId)
+      .filter((claim) => claim.intentId === intent.intentId))
+      ignored.add(claim.claimId);
+    if (
+      !state.intents.some(
+        (item) => item.operatorId === intent.operatorId && !replaced.has(item.intentId),
+      )
+    ) {
+      ignored.add(intent.operatorId);
+      for (const provision of control
+        .listOperatorProvisions(graphId)
+        .filter((item) => item.operatorId === intent.operatorId))
+        ignored.add(provision.provisionId);
+    }
+  }
+  return store
+    .listGraphDiagnostics(graphId, { unresolvedOnly: true })
+    .filter((item) => !ignored.has(item.subjectId));
 }

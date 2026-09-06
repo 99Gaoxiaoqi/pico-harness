@@ -1,3 +1,5 @@
+import { createAgentSwarmStatusTool } from "../tools/agent-swarm-status-tool.js";
+import { AGENT_SWARM_SUPERVISOR_TOOL_NAMES } from "../agent-graph/core/tool-names.js";
 import { isPlanGraphWaiting, reconcilePlanExecution } from "./plan-execution-recovery.js";
 import { randomUUID } from "node:crypto";
 import { mkdir, realpath } from "node:fs/promises";
@@ -974,7 +976,7 @@ export async function executeAgentRuntime(
     const collaborationMode = (): "agent" | "plan" =>
       dependencies.agentGraph?.kind === "operator" ? "agent" : settings.collaborationMode!;
     planRun = collaborationMode() === "plan";
-    const orchestrationMode = (): "default" | "graph" =>
+    const orchestrationMode = (): "default" | "graph" | "swarm" =>
       options.orchestrationMode ?? settings.orchestrationMode ?? "default";
     const permissionMode = (): "default" | "auto" | "yolo" =>
       dependencies.agentGraph?.kind === "operator"
@@ -1667,16 +1669,32 @@ export async function executeAgentRuntime(
       sessionTaskAuthority,
     );
     if (dependencies.agentGraph?.kind === "root") {
-      if (backgroundPolicy || orchestrationMode() !== "graph") {
+      if (backgroundPolicy || orchestrationMode() === "default") {
         throw new Error("Graph root tools require a foreground Graph Mode Runtime");
       }
       for (const tool of createAgentGraphSupervisorTools({
         getRootContext: dependencies.agentGraph.getRootContext,
         port: dependencies.agentGraph.toolPort,
+        swarm: orchestrationMode() === "swarm",
       })) {
         registry.register(tool);
       }
-      toolDisclosure.discloseTools([...AGENT_GRAPH_SUPERVISOR_TOOL_NAMES]);
+      if (orchestrationMode() === "swarm") {
+        const binding = dependencies.agentGraph;
+        const readSwarmStatus = binding.toolPort.readSwarmStatus;
+        if (!readSwarmStatus) throw new Error("Swarm status application is unavailable");
+        registry.register(
+          createAgentSwarmStatusTool({
+            getRootContext: binding.getRootContext,
+            port: { readSwarmStatus: (input) => readSwarmStatus.call(binding.toolPort, input) },
+          }),
+        );
+      }
+      toolDisclosure.discloseTools([
+        ...(orchestrationMode() === "swarm"
+          ? AGENT_SWARM_SUPERVISOR_TOOL_NAMES
+          : AGENT_GRAPH_SUPERVISOR_TOOL_NAMES),
+      ]);
     } else if (dependencies.agentGraph?.kind === "operator") {
       registry.register(
         createAgentOutputTool({
@@ -1729,8 +1747,9 @@ export async function executeAgentRuntime(
         graphToolsAvailable:
           !!session.runtimeEventStore &&
           !backgroundPolicy &&
-          orchestrationMode() === "graph" &&
+          orchestrationMode() !== "default" &&
           dependencies.agentGraph?.kind === "root",
+        swarmMode: orchestrationMode() === "swarm",
         skillLoader: skillLoaderFactory(workDir),
         ...(dependencies.isolatedHeadless ? {} : { picoHome }),
         ...(activeHookService

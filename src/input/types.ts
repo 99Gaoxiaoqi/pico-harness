@@ -56,6 +56,7 @@ export interface PromptCommandResult {
   metadata?: Record<string, unknown>;
   /** Per-run restrictions from command frontmatter. They never mutate session settings. */
   execution?: {
+    orchestrationMode?: "graph" | "swarm";
     model?: string;
     allowedTools?: readonly string[];
     discoveryRun?: boolean;

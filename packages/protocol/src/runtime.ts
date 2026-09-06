@@ -131,7 +131,7 @@ export type RuntimeJobStatus = "idle" | "running" | "failed" | "succeeded";
 export type SessionSendBehavior = "auto" | "steer" | "queue" | "replace";
 export type SessionSendDisposition = "started" | "steered" | "queued" | "replaced";
 export type RuntimeCollaborationMode = "agent" | "plan";
-export type RuntimeOrchestrationMode = "default" | "graph";
+export type RuntimeOrchestrationMode = "default" | "graph" | "swarm";
 export type RuntimePermissionMode = "default" | "auto" | "yolo";
 /** @deprecated Compatibility input accepted by older clients. */
 export type RuntimeInteractionMode = RuntimePermissionMode | "plan";
@@ -358,6 +358,8 @@ export type RuntimeInputAttachment = JsonObject & {
 };
 
 export type RuntimeTextUserInput = JsonObject & {
+  /** Explicit per-turn override; retained with queued input without changing Session defaults. */
+  readonly orchestrationMode?: "graph" | "swarm";
   readonly kind: "text";
   readonly text: string;
   /** 图片附件（3-D 漏账补齐；无附件时省略字段，空数组非法）。 */
@@ -3029,7 +3031,7 @@ const transcriptAdvanceCursorParam: RuntimeParamRule = (value, path) => {
 
 const interactionModeParam = oneOfParam(["default", "plan", "auto", "yolo"] as const);
 const collaborationModeParam = oneOfParam(["agent", "plan"] as const);
-const orchestrationModeParam = oneOfParam(["default", "graph"] as const);
+const orchestrationModeParam = oneOfParam(["default", "graph", "swarm"] as const);
 const permissionModeParam = oneOfParam(["default", "auto", "yolo"] as const);
 const providerProtocolParam = oneOfParam(["openai", "claude", "responses"] as const);
 const sessionBehaviorParam = oneOfParam(["auto", "steer", "queue", "replace"] as const);
@@ -3062,7 +3064,10 @@ const runtimeUserInputParam: RuntimeParamRule = (value, path) => {
       kind: oneOfParam(["text"]),
       text: stringParam,
     },
-    { attachments: runtimeInputAttachmentsParam },
+    {
+      attachments: runtimeInputAttachmentsParam,
+      orchestrationMode: oneOfParam(["graph", "swarm"]),
+    },
   );
 };
 
@@ -4336,7 +4341,7 @@ const runtimeSessionSettingsResult = exactResultShape(
     provider: resultOneOf(["openai", "claude", "responses"]),
     model: resultString,
     collaborationMode: resultOneOf(["agent", "plan"]),
-    orchestrationMode: resultOneOf(["default", "graph"]),
+    orchestrationMode: resultOneOf(["default", "graph", "swarm"]),
     permissionMode: resultOneOf(["default", "auto", "yolo"]),
     thinkingEffort: resultString,
     thinkingEffortExplicit: resultBoolean,
@@ -4527,7 +4532,7 @@ const runtimeUserDefaultsResult = exactResultShape(
   {
     modelRouteId: resultString,
     collaborationMode: resultOneOf(["agent", "plan"]),
-    orchestrationMode: resultOneOf(["default", "graph"]),
+    orchestrationMode: resultOneOf(["default", "graph", "swarm"]),
     permissionMode: resultOneOf(["default", "auto", "yolo"]),
     mode: resultOneOf(["default", "plan", "auto", "yolo"]),
     thinkingEffort: resultString,

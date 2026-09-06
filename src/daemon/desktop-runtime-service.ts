@@ -1370,11 +1370,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     if (
       requestedOrchestrationMode !== undefined &&
       requestedOrchestrationMode !== "default" &&
-      requestedOrchestrationMode !== "graph"
+      requestedOrchestrationMode !== "graph" &&
+      requestedOrchestrationMode !== "swarm"
     ) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.INVALID_PARAMS,
-        "orchestrationMode 必须是 default 或 graph",
+        "orchestrationMode 必须是 default、graph 或 swarm",
       );
     }
     if (
@@ -1396,7 +1397,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     );
     const settings = await this.withSession(canonical, params.sessionId, async (session) => {
       const current = await this.getSessionSettings(canonical, session);
-      if (requestedOrchestrationMode === "default" && current.orchestrationMode === "graph") {
+      if (
+        requestedOrchestrationMode !== undefined &&
+        requestedOrchestrationMode !== current.orchestrationMode &&
+        current.orchestrationMode !== "default"
+      ) {
         const graphStore = new SqliteAgentGraphControlStore({
           storageRoot: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
           now: this.now,
@@ -1447,7 +1452,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       if (requestedOrchestrationMode) {
         const result = setSessionOrchestrationMode(
           current,
-          requestedOrchestrationMode as "default" | "graph",
+          requestedOrchestrationMode as "default" | "graph" | "swarm",
         );
         if (!result.ok) throw invalidSessionSetting(result.message);
       }
@@ -2480,10 +2485,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     runId: string,
   ): Promise<boolean> {
     const canonical = await canonicalizeWorkspacePath(workspacePath);
-    const graphMode = await this.withSession(
-      canonical,
-      rootSessionId,
-      async (session) => session.getRuntimeStateSnapshot().settings?.orchestrationMode === "graph",
+    const graphMode = await this.withSession(canonical, rootSessionId, async (session) =>
+      ["graph", "swarm"].includes(
+        session.getRuntimeStateSnapshot().settings?.orchestrationMode ?? "default",
+      ),
     );
     // Session orchestration mode is persisted before the host admits a foreground Run, so it is
     // available for run.started as well as terminal notifications. Yield/wake facts are created
@@ -2498,7 +2503,13 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   ): Promise<ResolvedRuntimeUserInput> {
     if (input.kind === "text") {
       const images = inputAttachmentsToImages(input.attachments);
-      return { prompt: input.text, ...(images ? { images } : {}) };
+      return {
+        prompt: input.text,
+        ...(images ? { images } : {}),
+        ...(input.orchestrationMode
+          ? { execution: { orchestrationMode: input.orchestrationMode } }
+          : {}),
+      };
     }
     const canonical = await this.requireTrustedWorkspace(workspacePath);
     const pluginSnapshot = await this.pluginRuntimeSnapshotRegistry.get(canonical);
@@ -5598,10 +5609,17 @@ function normalizeRuntimeUserInput(value: RuntimeUserInput): RuntimeUserInput {
   const kind = value["kind"];
   if (kind === "text") {
     const attachments = normalizeInputAttachments(value["attachments"]);
+    const mode = value["orchestrationMode"];
+    if (mode !== undefined && mode !== "graph" && mode !== "swarm")
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.INVALID_PARAMS,
+        "input.orchestrationMode 必须是 graph 或 swarm",
+      );
     return {
       kind,
       text: requireText(value["text"], "input.text"),
       ...(attachments ? { attachments } : {}),
+      ...(mode ? { orchestrationMode: mode } : {}),
     };
   }
   if (kind === "skill") {

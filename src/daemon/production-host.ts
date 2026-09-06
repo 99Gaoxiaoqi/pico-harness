@@ -1,3 +1,4 @@
+import { AGENT_SWARM_SUPERVISOR_TOOL_NAMES } from "../agent-graph/core/tool-names.js";
 import { SqliteAgentGraphControlStoreAdapter } from "../agent-graph/sqlite-control-store-adapter.js";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
@@ -402,6 +403,7 @@ export function createProductionRuntimeServices(
         sessionId: targetSessionId,
       };
       unsubscribeInteractions = broker.subscribe((event) => {
+        input.onCheckpoint?.();
         publishInteractionEvent(
           service,
           interaction,
@@ -724,13 +726,18 @@ export function createProductionRuntimeServices(
           (persistedSettings?.collaborationMode === "plan" &&
             execution?.planReview?.action !== "execute" &&
             execution?.planReview?.action !== "resume_execution");
-        const orchestrationMode = planning
+        if (planning && execution?.orchestrationMode) {
+          throw new Error(
+            "单次编排覆盖只能用于执行；规划时请先通过会话模式开启 Swarm，再提交计划。",
+          );
+        }
+        let orchestrationMode = planning
           ? "default"
           : resumeGraph
             ? "graph"
-            : (persistedSettings?.orchestrationMode ?? "default");
+            : (execution?.orchestrationMode ?? persistedSettings?.orchestrationMode ?? "default");
         graphHost =
-          orchestrationMode === "graph"
+          orchestrationMode === "graph" || orchestrationMode === "swarm"
             ? requireAgentGraphWorkspaceHost(agentGraphHosts, workspacePath)
             : undefined;
         // Graph activation is a host admission decision. Persist the epoch before any model,
@@ -934,6 +941,12 @@ export function createProductionRuntimeServices(
               ...(trustAuthority ? { trustAuthority } : {}),
             });
           }
+          if (
+            graphHost &&
+            admittedGraph &&
+            graphHost.application.graphSupervision(admittedGraph.graphId)?.mode === "swarm"
+          )
+            orchestrationMode = "swarm";
           const runtimeOptions = {
             prompt,
             dir: workspacePath,
@@ -952,15 +965,35 @@ export function createProductionRuntimeServices(
             ...(persistedSettings?.mode === "plan" && persistedSettings.prePlanMode
               ? { rewindPrePlanMode: persistedSettings.prePlanMode }
               : {}),
-            ...(orchestrationMode === "graph"
-              ? { allowedTools: AGENT_GRAPH_SUPERVISOR_TOOL_NAMES }
+            ...(orchestrationMode !== "default"
+              ? {
+                  allowedTools:
+                    orchestrationMode === "swarm"
+                      ? AGENT_SWARM_SUPERVISOR_TOOL_NAMES
+                      : AGENT_GRAPH_SUPERVISOR_TOOL_NAMES,
+                }
               : execution?.allowedTools
                 ? { allowedTools: execution.allowedTools }
                 : {}),
           };
           foregroundGraphBinding =
             graphHost && admittedGraph
-              ? rootAgentGraphBinding(graphHost, admittedGraph, targetSessionId, route.modelRouteId)
+              ? rootAgentGraphBinding(
+                  graphHost,
+                  admittedGraph,
+                  targetSessionId,
+                  route.modelRouteId,
+                  graphHost.application.graphSupervision(admittedGraph.graphId) ??
+                    (orchestrationMode === "swarm"
+                      ? {
+                          mode: "swarm",
+                          authorization:
+                            execution?.orchestrationMode === "swarm"
+                              ? "turn_override"
+                              : "session_mode",
+                        }
+                      : undefined),
+                )
               : undefined;
           const foregroundGraphRuntime =
             graphHost && admittedGraph && foregroundGraphBinding
@@ -1867,6 +1900,7 @@ function workspaceGraphApplicationLifecycle(input: {
     drivePort: host.application.drivePort,
     supervisor: host.application.supervisor,
     openRootEpoch: (rootSessionId) => host.application.openRootEpoch(rootSessionId),
+    graphSupervision: (graphId) => host.application.graphSupervision(graphId),
     recoverFailedRootRun: (run) => host.application.recoverFailedRootRun(run),
     sealEmptyRootEpoch: (rootSessionId) => host.application.sealEmptyRootEpoch(rootSessionId),
     retireRootSession: (rootSessionId, reason) =>
@@ -1910,6 +1944,7 @@ function rootAgentGraphBinding(
   graph: AgentGraph,
   rootSessionId: string,
   rootModelRouteId: string,
+  supervision?: import("../agent-graph/core/contracts.js").AgentGraphActivationIntent["supervision"],
 ): Extract<AgentGraphRunToolBinding, { readonly kind: "root" }> {
   return {
     kind: "root",
@@ -1930,6 +1965,7 @@ function rootAgentGraphBinding(
         rootTurnId,
         rootRunId: run.runId,
         rootModelRouteId,
+        ...(supervision ? { supervision } : {}),
       };
     },
     toolPort: host.application.toolPort,

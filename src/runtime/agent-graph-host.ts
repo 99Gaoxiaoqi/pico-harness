@@ -1,3 +1,4 @@
+import { AGENT_SWARM_SUPERVISOR_TOOL_NAMES } from "../agent-graph/core/tool-names.js";
 import { reconcilePlanExecution } from "./plan-execution-recovery.js";
 import { PlanCoordinator } from "../plan/coordinator.js";
 import type { Session, SessionOptions } from "../engine/session.js";
@@ -62,11 +63,12 @@ export type AgentGraphRunToolBinding =
 
 export interface ExecuteHostedAgentGraphRunInput extends ExecuteAgentGraphExactRunInput {
   readonly binding: AgentGraphRunToolBinding;
-  readonly orchestrationMode: "default" | "graph";
+  readonly orchestrationMode: "default" | "graph" | "swarm";
   readonly requestedModel?: string;
   readonly allowedTools?: readonly string[];
   /** Installs detached execution and returns; it must not wait for the whole model Run. */
   readonly onTerminal: () => void;
+  readonly onCheckpoint?: () => void;
 }
 
 export interface CreateAgentGraphWorkspaceHostOptions {
@@ -191,7 +193,7 @@ export function createAgentGraphWorkspaceHost(
       const app = requireApplication(application);
       const claim = store.getActivationClaim(input.claimId);
       let binding: AgentGraphRunToolBinding;
-      let orchestrationMode: "default" | "graph";
+      let orchestrationMode: "default" | "graph" | "swarm";
       let requestedModel: string | undefined;
       let allowedTools: readonly string[] | undefined;
       let wakeId: string | undefined;
@@ -228,6 +230,9 @@ export function createAgentGraphWorkspaceHost(
           throw new Error("Cannot execute a wake for a finished Graph");
         const root: AgentGraphRootToolContext = {
           kind: "graph_root_supervisor",
+          ...(app.graphSupervision(recoverable.graph.graphId)
+            ? { supervision: app.graphSupervision(recoverable.graph.graphId) }
+            : {}),
           graphId: recoverable.graph.graphId,
           epoch: recoverable.graph.epoch,
           rootSessionId: input.session.id,
@@ -241,8 +246,10 @@ export function createAgentGraphWorkspaceHost(
           getRootContext: () => root,
           toolPort: app.toolPort,
         };
-        orchestrationMode = "graph";
-        allowedTools = AGENT_GRAPH_SUPERVISOR_TOOL_NAMES;
+        orchestrationMode = root.supervision ? "swarm" : "graph";
+        allowedTools = root.supervision
+          ? AGENT_SWARM_SUPERVISOR_TOOL_NAMES
+          : AGENT_GRAPH_SUPERVISOR_TOOL_NAMES;
       }
 
       liveLaunches.add(input.prestartedRun.runId);
@@ -264,6 +271,10 @@ export function createAgentGraphWorkspaceHost(
           ...(requestedModel ? { requestedModel } : {}),
           ...(allowedTools ? { allowedTools } : {}),
           onTerminal,
+          onCheckpoint: () => {
+            if (claim && app.graphSupervision(claim.graphId)?.mode === "swarm")
+              void app.supervisor.notifyGraph(claim.graphId);
+          },
         });
       } catch (error) {
         if (!terminalNotified) {

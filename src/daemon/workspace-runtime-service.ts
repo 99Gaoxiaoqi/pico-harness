@@ -64,6 +64,7 @@ export interface DaemonRunExecutor {
 }
 
 export interface DaemonRunExecution {
+  readonly orchestrationMode?: "graph" | "swarm";
   readonly requestedModel?: string;
   readonly allowedTools?: readonly string[];
   /** Desktop has already committed the visible user input to the canonical RuntimeEvent ledger. */

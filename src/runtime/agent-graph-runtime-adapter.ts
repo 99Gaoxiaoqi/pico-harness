@@ -272,6 +272,7 @@ export class AgentGraphRuntimeAdapter implements AgentOutputCommitPort {
     const durableProjection: AgentGraphActivationRuntimeProjection = {
       ...projection,
       outputEventIds: outputSources.map((source) => source.eventId),
+      ...(outputSources[0] ? { outputStatus: outputSources[0].payload.status } : {}),
     };
     return durableProjection;
   }

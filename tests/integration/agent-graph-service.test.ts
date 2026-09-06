@@ -999,6 +999,192 @@ test("model work requests own durable identities, follow-ups, stop fences and re
   }
 });
 
+test("Swarm waits for the batch, wakes on failure, replaces work and survives restart", async () => {
+  const storageRoot = await mkdtemp(join(tmpdir(), "pico-swarm-lifecycle-"));
+  const store = new SqliteAgentGraphControlStore({ storageRoot, now: monotonicClock() });
+  const delegate = new CompletingRuntimeAdapter();
+  const projections = new Map<
+    string,
+    Awaited<ReturnType<AgentGraphRuntimeApplicationPort["projectActivation"]>>
+  >();
+  const rootWake = new CompletingRootWakePort();
+  const unreadable = new Set<string>();
+  const runtime: AgentGraphRuntimeApplicationPort = {
+    ensureOperatorProvision: (input) => delegate.ensureOperatorProvision(input),
+    startOrObserveActivation: async ({ claim }) => {
+      const current = projections.get(claim.claimId);
+      const projection = current ?? runningProjection(claim);
+      projections.set(claim.claimId, projection);
+      return { disposition: current ? "observed" : "started", projection };
+    },
+    projectActivation: async (claim) => {
+      if (unreadable.has(claim.claimId)) throw new Error("private runtime read failure");
+      return projections.get(claim.claimId) ?? notStartedProjection(claim);
+    },
+    stopActivation: async (claim) => {
+      const current = projections.get(claim.claimId);
+      if (current?.status === "running")
+        projections.set(claim.claimId, {
+          ...current,
+          status: "cancelled",
+          terminalEventId: `cancel:${claim.claimId}`,
+        });
+      return "already_terminal";
+    },
+    resolveInputHandoff: (records) => delegate.resolveInputHandoff(records),
+  };
+  const makeService = () =>
+    createAgentGraphApplicationService({
+      store,
+      runtime,
+      rootWakePort: rootWake,
+      resolveOperatorWorkspace: () => ({ workDir: storageRoot }),
+    });
+  let service = makeService();
+  const graph = service.openRootEpoch("swarm-root");
+  let runId = "swarm-root-run-1";
+  const tools = () =>
+    createAgentGraphSupervisorTools({
+      swarm: true,
+      port: service.toolPort,
+      getRootContext: () => ({
+        kind: "graph_root_supervisor",
+        graphId: graph.graphId,
+        epoch: 1,
+        rootSessionId: "swarm-root",
+        rootTurnId: runId,
+        rootRunId: runId,
+        rootModelRouteId: "test-route",
+        supervision: { mode: "swarm", authorization: "turn_override" },
+      }),
+    });
+  const call = async (name: string, input: unknown, toolCallId: string) =>
+    JSON.parse(
+      await tools()
+        .find((tool) => tool.name() === name)!
+        .execute(JSON.stringify(input), { toolCallId }),
+    );
+  const status = () =>
+    service.toolPort.readSwarmStatus!({
+      graphId: graph.graphId,
+      epoch: 1,
+      rootSessionId: "swarm-root",
+    });
+  try {
+    await service.start();
+    const added = await call(
+      "update_agent_graph",
+      {
+        operation: "add_work",
+        add_work: [
+          { profile_id: "explore", instruction: "Branch A" },
+          { profile_id: "review", instruction: "Branch B" },
+        ],
+      },
+      "swarm-add",
+    );
+    assert.equal(added.projection, undefined, "Swarm update receipts omit the full graph");
+    assert.equal(added.work.length, 2);
+    await service.supervisor.notifyGraph(graph.graphId);
+    const [a, b] = store.listActivationClaims(graph.graphId);
+    assert.ok(a && b);
+    unreadable.add(b.claimId);
+    const unreadableStatus = await status();
+    assert.equal(unreadableStatus.status, "needs_attention");
+    assert.equal(unreadableStatus.counts.running, 1);
+    assert.equal(unreadableStatus.counts.blocked, 1);
+    assert.doesNotMatch(JSON.stringify(unreadableStatus), /private runtime read failure/u);
+    unreadable.clear();
+    await call("yield_agent_graph", {}, "swarm-yield");
+    assert.equal(rootWake.starts.length, 0);
+    projections.set(a.claimId, { ...completedProjection(a), outputStatus: "success" });
+    await service.supervisor.notifyGraph(graph.graphId);
+    assert.equal((await status()).status, "running");
+    assert.equal(rootWake.starts.length, 0, "one successful branch must not wake the supervisor");
+    await assert.rejects(
+      call(
+        "update_agent_graph",
+        {
+          operation: "add_work",
+          add_work: [
+            {
+              profile_id: "explore",
+              instruction: "Duplicate success",
+              replaces: added.work[0].workId,
+            },
+          ],
+        },
+        "reject-success",
+      ),
+      /Only failed/u,
+    );
+    projections.set(b.claimId, { ...completedProjection(b), outputStatus: "failure" });
+    await service.supervisor.notifyGraph(graph.graphId);
+    assert.equal((await status()).status, "needs_attention");
+    assert.equal(rootWake.starts.length, 1);
+    await service.supervisor.notifyGraph(graph.graphId);
+    assert.equal(rootWake.starts.length, 1, "unchanged failure must not repeatedly wake");
+    runId = "swarm-root-run-2";
+    const replaced = await call(
+      "update_agent_graph",
+      {
+        operation: "add_work",
+        add_work: [
+          { profile_id: "explore", instruction: "Retry Branch B", replaces: added.work[1].workId },
+        ],
+      },
+      "replace-failed",
+    );
+    await service.supervisor.notifyGraph(graph.graphId);
+    const repairing = await status();
+    assert.equal(repairing.status, "running");
+    assert.equal(repairing.counts.superseded, 1);
+    assert.equal(repairing.counts.completed, 1);
+    await call("yield_agent_graph", {}, "replacement-yield");
+    await service.close();
+    service = makeService();
+    await service.start();
+    assert.equal(service.graphSupervision(graph.graphId)?.authorization, "turn_override");
+    assert.equal(
+      rootWake.starts.length,
+      1,
+      "restart does not replay an obsolete failure checkpoint",
+    );
+    const replacement = store
+      .listActivationClaims(graph.graphId)
+      .find((claim) => claim.intentId === replaced.work[0].workId)!;
+    projections.set(replacement.claimId, {
+      ...completedProjection(replacement),
+      outputStatus: "success",
+    });
+    await service.supervisor.notifyGraph(graph.graphId);
+    const settled = await status();
+    assert.equal(settled.status, "settled");
+    assert.equal(rootWake.starts.length, 2);
+    const results = await call(
+      "agent_graph_results",
+      { work_ids: [added.work[0].workId, replaced.work[0].workId] },
+      "read-final",
+    );
+    assert.equal(results.records.length, 2);
+    await call(
+      "update_agent_graph",
+      {
+        operation: "finish",
+        finish: {
+          result_ids: results.records.map((record: { recordId: string }) => record.recordId),
+        },
+      },
+      "swarm-finish",
+    );
+    assert.equal(store.getGraph(graph.graphId)?.phase, "finished");
+  } finally {
+    await service.close();
+    store.close();
+    await rm(storageRoot, { recursive: true, force: true });
+  }
+});
+
 class CompletingRuntimeAdapter implements AgentGraphRuntimeApplicationPort {
   readonly starts: Array<{ claimId: string; prompt: string }> = [];
   readonly projections = new Map<string, ReturnType<typeof completedProjection>>();

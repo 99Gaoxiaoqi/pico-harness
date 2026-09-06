@@ -333,6 +333,7 @@ function projectionFromRuntime(
 ): AgentGraphRuntimeProjection {
   assertProjectionIdentity(projection, claim);
   return {
+    ...(projection.outputStatus ? { outputStatus: projection.outputStatus } : {}),
     status:
       projection.status === "not_started"
         ? "not-started"

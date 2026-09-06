@@ -98,7 +98,7 @@ export class AgentGraphRootWakeRuntimePort implements AgentGraphRootWakePort {
   ): Promise<RootSupervisorRunState> {
     const before = await this.inspect(input);
     if (before.status !== "not_started") return before;
-    const exact = this.exactInput(input, renderRootWakePrompt(input));
+    const exact = this.exactInput(input, renderRootWakePrompt(input, input.payload));
     try {
       await this.options.exactRuns.startExactRun(exact);
     } catch (error) {
@@ -170,7 +170,16 @@ export function rootWakeState(inspection: AgentGraphExactRunInspection): RootSup
   }
 }
 
-export function renderRootWakePrompt(input: RootSupervisorRunIdentity): string {
+export function renderRootWakePrompt(input: RootSupervisorRunIdentity, payload?: unknown): string {
+  if (payload && typeof payload === "object" && "mode" in payload && payload.mode === "swarm") {
+    return [
+      "[Graph Supervisor wake]",
+      `Swarm ${input.graphId} reached a supervisor checkpoint.`,
+      "Call agent_swarm_status first. Read only committed results with agent_graph_results(work_ids), not logs or partial output.",
+      "Replace failed work with update_agent_graph add_work.replaces using the exact workId. Do not repeat successful work.",
+      "When useful work is settled, select committed recordIds with finish and synthesize the result. Otherwise yield immediately; never poll.",
+    ].join("\n");
+  }
   return [
     "[Graph Supervisor wake]",
     `Graph ${input.graphId} has a new durable scheduling fact (wake ${input.wakeId}).`,

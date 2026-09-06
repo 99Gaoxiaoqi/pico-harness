@@ -28,6 +28,7 @@ export interface AgentGraphRuntimeRecordCandidate {
 }
 
 export interface AgentGraphRuntimeProjection {
+  readonly outputStatus?: "success" | "failure";
   readonly status: AgentGraphRuntimeStatus;
   readonly terminalEventId?: string;
   readonly records: readonly AgentGraphRuntimeRecordCandidate[];

@@ -36,6 +36,7 @@ const STAGE_TIMEOUT_MS = {
   rootFinish: 90_000,
   exactTerminal: 30_000,
 } as const;
+const SWARM_E2E = process.env.GRAPH_E2E_MODE === "swarm";
 const RUN_REAL_MODEL = process.env.RUN_LLM_E2E === "1";
 const realModelTest = RUN_REAL_MODEL ? test : test.skip;
 const LEGACY_GRAPH_TOOLS = new Set(["add_work", "view_graph", "close_graph"]);
@@ -87,7 +88,7 @@ test("Graph v2 E2E binds to the epoch identity returned by Graph authority", () 
 });
 
 realModelTest(
-  "Graph v2 persists one operator output and wakes the exact root Run to finish",
+  `${SWARM_E2E ? "Swarm" : "Graph v2"} persists one operator output and wakes the exact root Run to finish`,
   { timeout: TEST_TIMEOUT_MS },
   async () => {
     const model = await configuredUserDefaultRealModel();
@@ -166,7 +167,7 @@ realModelTest(
             modelRouteId: model.route.id,
             collaborationMode: "agent",
             permissionMode: "yolo",
-            orchestrationMode: "graph",
+            orchestrationMode: SWARM_E2E ? "default" : "graph",
             thinkingEffort: "off",
             thinkingEffortExplicit: false,
             additionalDirectories: [],
@@ -185,7 +186,15 @@ realModelTest(
           prompt: initialRootPrompt(),
           execution: {
             requestedModel: model.route.id,
-            allowedTools: ["view_agent_graph", "update_agent_graph", "yield_agent_graph"],
+            ...(SWARM_E2E ? { orchestrationMode: "swarm" as const } : {}),
+            allowedTools: SWARM_E2E
+              ? [
+                  "agent_swarm_status",
+                  "update_agent_graph",
+                  "yield_agent_graph",
+                  "agent_graph_results",
+                ]
+              : ["view_agent_graph", "update_agent_graph", "yield_agent_graph"],
           },
         }),
       );
@@ -331,7 +340,11 @@ realModelTest(
         rootToolStarts
           .filter((event) => event.runId === initialRootRuntimeRunId)
           .map((event) => event.data.toolName),
-        ["view_agent_graph", "update_agent_graph", "yield_agent_graph"],
+        [
+          SWARM_E2E ? "agent_swarm_status" : "view_agent_graph",
+          "update_agent_graph",
+          "yield_agent_graph",
+        ],
         "the initial root must discover profiles, create work, then yield exactly once",
       );
 
@@ -372,8 +385,16 @@ realModelTest(
       const wake = wakes[0];
       assert.ok(wake);
       assert.equal(wake.graphId, openedGraph.graphId);
+      if (SWARM_E2E) {
+        assert.equal(host.application.graphSupervision(openedGraph.graphId)?.mode, "swarm");
+        assert.equal(
+          host.application.graphSupervision(openedGraph.graphId)?.authorization,
+          "turn_override",
+        );
+        assert.equal(asRecord(wake.payload).mode, "swarm");
+      }
       assert.equal(wake.cause, "runtime_terminal");
-      assert.equal(asRecord(wake.payload).claimId, claim.claimId);
+      if (!SWARM_E2E) assert.equal(asRecord(wake.payload).claimId, claim.claimId);
       const wakeAttempts = host.store.listSupervisorWakeAttempts(wake.wakeId);
       assert.equal(wakeAttempts.length, 1, "the durable wake must have one exact attempt");
       const wakeAttempt = wakeAttempts[0];
@@ -385,11 +406,16 @@ realModelTest(
       );
       assert.deepEqual(
         exactWakeToolStarts.map((event) => event.data.toolName),
-        ["view_agent_graph", "update_agent_graph"],
+        SWARM_E2E
+          ? ["agent_swarm_status", "agent_graph_results", "update_agent_graph"]
+          : ["view_agent_graph", "update_agent_graph"],
         "the exact root wake must view the selected output before finishing",
       );
       assert.equal(
-        exactWakeToolStarts.filter((event) => event.data.toolName === "view_agent_graph").length,
+        exactWakeToolStarts.filter(
+          (event) =>
+            event.data.toolName === (SWARM_E2E ? "agent_swarm_status" : "view_agent_graph"),
+        ).length,
         1,
         "the exact root wake must inspect the durable projection exactly once",
       );
@@ -402,7 +428,7 @@ realModelTest(
         (event): event is Extract<RuntimeEvent, { kind: "tool.result.recorded" }> =>
           event.kind === "tool.result.recorded" &&
           event.runId === wakeAttempt.targetRunId &&
-          event.data.toolName === "view_agent_graph",
+          event.data.toolName === (SWARM_E2E ? "agent_graph_results" : "view_agent_graph"),
       );
       assert.ok(
         durableWakeView,
@@ -469,7 +495,7 @@ realModelTest(
 function initialRootPrompt(): string {
   return [
     "This is a deterministic Graph v2 end-to-end check. Follow these steps exactly.",
-    "First call view_agent_graph exactly once to discover available profiles, then call update_agent_graph exactly once to create one explore subtask using the current work interface. Omit workspace to use the runtime default.",
+    `First call ${SWARM_E2E ? "agent_swarm_status" : "view_agent_graph"} exactly once to discover available profiles, then call update_agent_graph exactly once to create one explore subtask using the current work interface. This test explicitly needs exactly one child, even in swarm mode. Omit workspace to use the runtime default.`,
     "The subtask instruction must be: Invent 32 random uppercase hexadecimal characters that are not present in this instruction. Call agent_output exactly once with status success and output equal to GRAPH_V2_OPERATOR_CANARY_ followed immediately by those 32 characters. Do not call any other tool and do not write files.",
     "After update_agent_graph succeeds, call yield_agent_graph exactly once.",
     "After yield_agent_graph succeeds, end this Run immediately. Do not call another tool and do not finish the Graph in this initial Run.",

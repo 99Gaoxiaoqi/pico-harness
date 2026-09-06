@@ -13,6 +13,7 @@ export type AgentGraphActivationRuntimeStatus =
   | "interrupted";
 
 export interface AgentGraphActivationRuntimeProjection {
+  readonly outputStatus?: "success" | "failure";
   readonly claimId: string;
   readonly sessionId: string;
   readonly turnId: string;
