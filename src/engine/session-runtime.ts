@@ -33,8 +33,8 @@ export interface PersistedSessionSettings {
   collaborationMode: "agent" | "plan";
   /** Canonical v3 permission axis. */
   permissionMode: Exclude<PersistedInteractionMode, "plan">;
-  /** Canonical orchestration axis: "default" = no graph scheduling, "graph" = Graph Mode active. */
-  orchestrationMode?: "default" | "graph";
+  /** Canonical orchestration axis: "default" = direct execution, "graph" / "swarm" = coordinated execution. */
+  orchestrationMode?: "default" | "graph" | "swarm";
   /** Current model reasoning level. */
   thinkingEffort: string;
   thinkingEffortExplicit: boolean;
@@ -307,7 +307,8 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
   if (
     orchestrationMode !== undefined &&
     orchestrationMode !== "default" &&
-    orchestrationMode !== "graph"
+    orchestrationMode !== "graph" &&
+    orchestrationMode !== "swarm"
   ) {
     return undefined;
   }
@@ -329,7 +330,7 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
     modelRouteId,
     collaborationMode: canonicalCollaborationMode,
     permissionMode: canonicalPermissionMode,
-    orchestrationMode: orchestrationMode === "graph" ? "graph" : "default",
+    orchestrationMode: orchestrationMode ?? "default",
     thinkingEffort,
     thinkingEffortExplicit,
     additionalDirectories: [...new Set(additionalDirectories)],
