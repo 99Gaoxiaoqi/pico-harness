@@ -64,6 +64,7 @@ Options:
   -S, --session <id>                 Resume a session by id
   -c, --continue                     Continue the latest session in this project
       --graph                        Start with persistent Agent Graph scheduling enabled
+      --swarm                        Start with autonomous Swarm orchestration (exclusive with --graph)
   --resume <id>                      Resume a session by id
   --fork <id>                        Fork a saved session into a new session
   --fork-session <id>                Alias for --fork
@@ -96,6 +97,7 @@ interface ParsedCliOptions {
   mcpConfigPath?: string;
   addDirs?: string[];
   graph: boolean;
+  swarm: boolean;
   help: boolean;
   version: boolean;
   daemonStop: boolean;
@@ -112,6 +114,7 @@ interface ParsedCliValues {
   session?: string;
   continue?: boolean;
   graph?: boolean;
+  swarm?: boolean;
   resume?: string;
   fork?: string;
   "fork-session"?: string;
@@ -173,6 +176,7 @@ export async function runCli(args: readonly string[], runtime: CliRuntime): Prom
       ...(options.model !== undefined ? { model: options.model } : {}),
       ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
       ...(options.graph ? { graphMode: true } : {}),
+      ...(options.swarm ? { swarmMode: true } : {}),
     });
     return 0;
   } catch (error) {
@@ -203,6 +207,7 @@ function parseCliOptions(args: readonly string[]): ParsedCliOptions {
         session: { type: "string", short: "S" },
         continue: { type: "boolean", short: "c" },
         graph: { type: "boolean" },
+        swarm: { type: "boolean" },
         resume: { type: "string" },
         fork: { type: "string" },
         "fork-session": { type: "string" },
@@ -215,6 +220,10 @@ function parseCliOptions(args: readonly string[]): ParsedCliOptions {
     values = parsed.values as ParsedCliValues;
   } catch (error) {
     throw normalizeParseArgsError(error);
+  }
+
+  if (values.graph && values.swarm) {
+    throw new CliUsageError("--graph 与 --swarm 不能同时使用，请选择一种编排模式。");
   }
 
   const provider = values.provider;
@@ -235,6 +244,7 @@ function parseCliOptions(args: readonly string[]): ParsedCliOptions {
     ...(typeof values["mcp-config"] === "string" ? { mcpConfigPath: values["mcp-config"] } : {}),
     ...(Array.isArray(values["add-dir"]) ? { addDirs: values["add-dir"] } : {}),
     graph: values.graph === true,
+    swarm: values.swarm === true,
     help: values.help === true,
     version: values.version === true,
     daemonStop: values["daemon-stop"] === true,

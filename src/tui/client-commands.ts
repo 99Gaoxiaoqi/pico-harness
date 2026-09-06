@@ -389,15 +389,66 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
         if (target !== "on" && target !== "off") {
           return { type: "local", action: "message", message: "Usage: /graph [on|off]" };
         }
-        await runtime.request("session.settings.update", {
+        const current = await runtime.request("session.settings.get", {
           workspacePath,
           sessionId: sid,
-          orchestrationMode: target === "on" ? "graph" : "default",
         });
+        if (target === "on" || current.settings.orchestrationMode === "graph") {
+          await runtime.request("session.settings.update", {
+            workspacePath,
+            sessionId: sid,
+            orchestrationMode: target === "on" ? "graph" : "default",
+          });
+        }
         return {
           type: "local",
           action: "message",
           message: target === "on" ? "Graph Mode 已开启。" : "Graph Mode 已关闭。",
+        };
+      },
+    }),
+    rpcCommand({
+      name: "swarm",
+      description: "查看或切换 Swarm 编排，或用 Swarm 执行一次任务",
+      usage: "/swarm [on|off|status|task]",
+      argumentHint: "[on|off|status|task]",
+      category: "session",
+      availability: "idle",
+      argumentCompleter: staticCompleter(["on", "off", "status"]),
+      execute: async (input) => {
+        const task = input.args.trim();
+        const target = task.toLowerCase();
+        if (target && !["on", "off", "status"].includes(target)) {
+          const sent = await runtime.sendInput({ kind: "text", text: task }, "auto", {
+            orchestrationMode: "swarm",
+          });
+          return {
+            type: "local",
+            action: "message",
+            ...(sent ? {} : { message: "Swarm 任务发送失败。" }),
+          };
+        }
+        const sid = session();
+        let mode = sid
+          ? ((await runtime.request("session.settings.get", { workspacePath, sessionId: sid }))
+              .settings.orchestrationMode ?? "default")
+          : (runtime.preSessionSettings.orchestrationMode ?? "default");
+        if (target === "on" || (target === "off" && mode === "swarm")) {
+          mode = target === "on" ? "swarm" : "default";
+          if (sid) {
+            await runtime.request("session.settings.update", {
+              workspacePath,
+              sessionId: sid,
+              orchestrationMode: mode,
+            });
+          } else {
+            runtime.setPreSessionOrchestrationMode(mode);
+          }
+        }
+        return {
+          type: "local",
+          action: "message",
+          message: `Swarm Mode：${mode === "swarm" ? "开启" : "关闭"}；当前编排：${mode}`,
         };
       },
     }),
@@ -424,7 +475,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
             `思考强度：${settings.settings.thinkingEffort ?? "(默认)"}`,
             `协作模式：${settings.settings.collaborationMode ?? "agent"}`,
             `权限模式：${settings.settings.permissionMode ?? "default"}`,
-            `Graph：${settings.settings.orchestrationMode === "graph" ? "开" : "关"}`,
+            `编排模式：${settings.settings.orchestrationMode ?? "default"}`,
           ].join(" · "),
         };
       },
