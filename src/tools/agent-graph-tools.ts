@@ -1,4 +1,8 @@
 import type {
+  AgentGraphWorkRequest,
+  CommitAgentGraphWorkInput,
+} from "../agent-graph/work-request.js";
+import type {
   AgentGraph,
   AgentGraphActivateCommand,
   AgentGraphActivationClaim,
@@ -183,6 +187,7 @@ export interface RegisterAgentGraphYieldResult {
 
 /** Thin application boundary: tools never own Graph storage, reconciliation, or Runtime execution. */
 export interface AgentGraphSupervisorToolPort {
+  commitWork?(input: CommitAgentGraphWorkInput): Promise<CommitAgentGraphUpdateResult>;
   commitUpdate(input: CommitAgentGraphUpdateInput): Promise<CommitAgentGraphUpdateResult>;
   readProjection(input: ReadAgentGraphProjectionInput): Promise<AgentGraphSupervisorView>;
   registerYield(input: RegisterAgentGraphYieldInput): Promise<RegisterAgentGraphYieldResult>;
@@ -225,29 +230,8 @@ class UpdateAgentGraphTool extends AgentGraphSupervisorTool {
     return {
       name: this.name(),
       description:
-        "以 expected_revision CAS 原子提交一批 Graph schedule 命令。只写持久调度意图，不会在工具调用中直接执行 Operator。",
-      inputSchema: {
-        type: "object",
-        properties: {
-          expected_revision: { type: "integer", minimum: 0 },
-          operation_id: { type: "string" },
-          commands: {
-            type: "array",
-            minItems: 1,
-            maxItems: AGENT_GRAPH_MAX_COMMANDS,
-            items: {
-              oneOf: [
-                addCommandSchema(),
-                activateCommandSchema(),
-                stopCommandSchema(),
-                finishCommandSchema(),
-              ],
-            },
-          },
-        },
-        required: ["expected_revision", "operation_id", "commands"],
-        additionalProperties: false,
-      },
+        "安排 Graph 子任务。operation=add_work 时提供 add_work 数组：新任务选择 view_agent_graph 返回的 profile_id，追加任务引用已有 operator_id，填写 instruction 和可选 input_ids；运行时自动生成编号、代次与调度版本。新任务 workspace 默认 shared，需隔离时显式指定 isolated-worktree。operation=stop 时提供 stop 数组；operation=finish 时提供 finish.result_ids 选定最终结果。每次只提交一种 operation；成功后仍有执行中的任务则 yield_agent_graph，让出当前响应。",
+      inputSchema: workRequestSchema(),
     };
   }
 
@@ -255,8 +239,28 @@ class UpdateAgentGraphTool extends AgentGraphSupervisorTool {
     execution?.signal?.throwIfAborted();
     const root = this.rootContext();
     const toolCallId = requiredIdentity(execution?.toolCallId, "toolCallId");
-    const input = parseUpdateInput(args, root, toolCallId);
-    const result = await this.options.port.commitUpdate(input);
+    const value = parseJsonObject(args, "update_agent_graph");
+    // Decode old persisted invocations, but advertise only the model-facing work interface.
+    let result: CommitAgentGraphUpdateResult;
+    if ("commands" in value && !("operation" in value)) {
+      result = await this.options.port.commitUpdate(parseUpdateInput(args, root, toolCallId));
+    } else {
+      const request = parseWorkRequest(value);
+      if (!this.options.port.commitWork)
+        throw new Error("Graph application does not support work requests");
+      result = await this.options.port.commitWork({
+        graphId: root.graphId,
+        epoch: root.epoch,
+        rootModelRouteId: requiredExactIdentity(root.rootModelRouteId, "rootModelRouteId"),
+        source: {
+          sessionId: root.rootSessionId,
+          turnId: root.rootTurnId,
+          runId: root.rootRunId,
+          toolCallId,
+        },
+        request,
+      });
+    }
     execution?.signal?.throwIfAborted();
     validateProjection(result.projection, root);
     if (!Number.isSafeInteger(result.revision) || result.revision < 0) {
@@ -940,154 +944,159 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function addCommandSchema(): Record<string, unknown> {
+function workRequestSchema(): Record<string, unknown> {
+  const identity = { type: "string", minLength: 1 };
+  const ids = { type: "array", maxItems: AGENT_GRAPH_MAX_INPUT_REFS, items: identity };
   return {
     type: "object",
     properties: {
-      kind: { type: "string", enum: ["add"] },
-      operator: {
-        type: "object",
-        properties: {
-          operator_id: { type: "string" },
-          generation: { type: "integer", minimum: 1 },
-          role: { type: "string" },
-          description: { type: "string" },
-          profile: {
-            type: "object",
-            properties: {
-              profile_id: { type: "string" },
-            },
-            required: ["profile_id"],
-            additionalProperties: false,
-          },
-          workspace: {
-            oneOf: [
-              {
-                type: "object",
-                properties: { kind: { type: "string", enum: ["shared"] } },
-                required: ["kind"],
-                additionalProperties: false,
-              },
-              {
-                type: "object",
-                properties: {
-                  kind: { type: "string", enum: ["isolated-worktree"] },
-                  base_ref: { type: "string" },
-                },
-                required: ["kind"],
-                additionalProperties: false,
-              },
-            ],
-          },
-        },
-        required: ["operator_id", "generation", "role", "profile", "workspace"],
-        additionalProperties: false,
-      },
-      intent: {
-        type: "object",
-        properties: {
-          intent_id: { type: "string" },
-          instruction: { type: "string" },
-          input_record_ids: {
-            type: "array",
-            maxItems: AGENT_GRAPH_MAX_INPUT_REFS,
-            items: { type: "string" },
-          },
-        },
-        required: ["intent_id", "instruction"],
-        additionalProperties: false,
-      },
-    },
-    required: ["kind", "operator", "intent"],
-    additionalProperties: false,
-  };
-}
-
-function activateCommandSchema(): Record<string, unknown> {
-  return {
-    type: "object",
-    properties: {
-      kind: { type: "string", enum: ["activate"] },
-      operator: {
-        type: "object",
-        properties: {
-          operator_id: { type: "string" },
-          generation: { type: "integer", minimum: 1 },
-        },
-        required: ["operator_id", "generation"],
-        additionalProperties: false,
-      },
-      intent: activationIntentSchema(),
-    },
-    required: ["kind", "operator", "intent"],
-    additionalProperties: false,
-  };
-}
-
-function activationIntentSchema(): Record<string, unknown> {
-  return {
-    type: "object",
-    properties: {
-      intent_id: { type: "string" },
-      instruction: { type: "string" },
-      input_record_ids: {
+      operation: { type: "string", enum: ["add_work", "stop", "finish"] },
+      add_work: {
         type: "array",
-        maxItems: AGENT_GRAPH_MAX_INPUT_REFS,
-        items: { type: "string" },
-      },
-    },
-    required: ["intent_id", "instruction"],
-    additionalProperties: false,
-  };
-}
-
-function stopCommandSchema(): Record<string, unknown> {
-  return {
-    type: "object",
-    properties: {
-      kind: { type: "string", enum: ["stop"] },
-      target: {
-        oneOf: [
-          {
-            type: "object",
-            properties: {
-              kind: { type: "string", enum: ["intent"] },
-              intent_id: { type: "string" },
+        minItems: 1,
+        maxItems: AGENT_GRAPH_MAX_COMMANDS,
+        items: {
+          type: "object",
+          properties: {
+            profile_id: {
+              ...identity,
+              description:
+                "新任务选择 view_agent_graph.availableOperatorProfiles 的 profileId；与 operator_id 二选一。",
             },
-            required: ["kind", "intent_id"],
-            additionalProperties: false,
-          },
-          {
-            type: "object",
-            properties: {
-              kind: { type: "string", enum: ["operator"] },
-              operator_id: { type: "string" },
-              generation: { type: "integer", minimum: 1 },
+            operator_id: {
+              ...identity,
+              description:
+                "给已有子代理追加任务时，复制 view_agent_graph 返回的 operatorId；不要自行生成。",
             },
-            required: ["kind", "operator_id", "generation"],
-            additionalProperties: false,
+            instruction: { type: "string", minLength: 1 },
+            input_ids: { ...ids, description: "依赖的精确结果 recordId，省略表示无依赖。" },
+            workspace: {
+              type: "object",
+              properties: {
+                kind: { type: "string", enum: ["shared", "isolated-worktree"] },
+                base_ref: identity,
+              },
+              required: ["kind"],
+              additionalProperties: false,
+              description:
+                "只用于新任务；默认 shared。隔离任务可选 isolated-worktree，base_ref 默认 HEAD。",
+            },
           },
-        ],
+          required: ["instruction"],
+          additionalProperties: false,
+        },
       },
-      reason: { type: "string" },
-    },
-    required: ["kind", "target"],
-    additionalProperties: false,
-  };
-}
-
-function finishCommandSchema(): Record<string, unknown> {
-  return {
-    type: "object",
-    properties: {
-      kind: { type: "string", enum: ["finish"] },
-      selected_record_ids: {
+      stop: {
         type: "array",
-        maxItems: AGENT_GRAPH_MAX_SELECTED_RECORDS,
-        items: { type: "string" },
+        minItems: 1,
+        maxItems: AGENT_GRAPH_MAX_COMMANDS,
+        items: {
+          type: "object",
+          properties: {
+            operator_id: { ...identity, description: "停止整个子代理，与 intent_id 二选一。" },
+            intent_id: { ...identity, description: "只停止该次任务，子代理仍可接受后续工作。" },
+            reason: { type: "string", minLength: 1 },
+          },
+          additionalProperties: false,
+        },
+      },
+      finish: {
+        type: "object",
+        properties: { result_ids: { ...ids, maxItems: AGENT_GRAPH_MAX_SELECTED_RECORDS } },
+        required: ["result_ids"],
+        additionalProperties: false,
       },
     },
-    required: ["kind"],
+    required: ["operation"],
     additionalProperties: false,
+  };
+}
+
+function parseWorkRequest(value: Record<string, unknown>): AgentGraphWorkRequest {
+  const operation = value["operation"];
+  if (operation !== "add_work" && operation !== "stop" && operation !== "finish") {
+    throw new Error("update_agent_graph: operation 必须是 add_work、stop 或 finish。");
+  }
+  assertKeys(value, ["operation", operation], ["operation", operation]);
+  if (operation === "finish") {
+    const finish = objectField(value["finish"], "finish");
+    assertKeys(finish, ["result_ids"], ["result_ids"], "finish");
+    return {
+      operation,
+      resultIds: identityArray(
+        finish["result_ids"],
+        "finish.result_ids",
+        AGENT_GRAPH_MAX_SELECTED_RECORDS,
+      ),
+    };
+  }
+  const entries = value[operation];
+  if (!Array.isArray(entries) || entries.length < 1 || entries.length > AGENT_GRAPH_MAX_COMMANDS) {
+    throw new Error(
+      `update_agent_graph: ${operation} 必须包含 1 至 ${AGENT_GRAPH_MAX_COMMANDS} 项。`,
+    );
+  }
+  if (operation === "stop") {
+    return {
+      operation,
+      targets: entries.map((entry, index) => {
+        const path = `stop[${index}]`;
+        const target = objectField(entry, path);
+        assertKeys(target, ["operator_id", "intent_id", "reason"], [], path);
+        if ("operator_id" in target === "intent_id" in target)
+          throw new Error(`${path}: operator_id 与 intent_id 必须二选一。`);
+        return {
+          ...("operator_id" in target
+            ? { operatorId: requiredIdentity(target["operator_id"], `${path}.operator_id`) }
+            : { intentId: requiredIdentity(target["intent_id"], `${path}.intent_id`) }),
+          ...(target["reason"] === undefined
+            ? {}
+            : { reason: requiredText(target["reason"], `${path}.reason`, MAX_SHORT_TEXT_BYTES) }),
+        };
+      }),
+    };
+  }
+  return {
+    operation,
+    work: entries.map((entry, index) => {
+      const path = `add_work[${index}]`;
+      const work = objectField(entry, path);
+      assertKeys(
+        work,
+        ["profile_id", "operator_id", "instruction", "input_ids", "workspace"],
+        ["instruction"],
+        path,
+      );
+      if ("profile_id" in work === "operator_id" in work)
+        throw new Error(`${path}: profile_id 与 operator_id 必须二选一。`);
+      const common = {
+        instruction: requiredText(
+          work["instruction"],
+          `${path}.instruction`,
+          AGENT_GRAPH_MAX_INSTRUCTION_BYTES,
+        ),
+        inputIds: identityArray(
+          work["input_ids"] ?? [],
+          `${path}.input_ids`,
+          AGENT_GRAPH_MAX_INPUT_REFS,
+        ),
+      };
+      if ("operator_id" in work) {
+        if ("workspace" in work)
+          throw new Error(`${path}: 已有子代理复用原工作区，不允许改写 workspace。`);
+        return {
+          ...common,
+          operatorId: requiredIdentity(work["operator_id"], `${path}.operator_id`),
+        };
+      }
+      return {
+        ...common,
+        profileId: requiredIdentity(work["profile_id"], `${path}.profile_id`),
+        workspace: parseWorkspace(
+          objectField(work["workspace"] ?? { kind: "shared" }, `${path}.workspace`),
+          `${path}.workspace`,
+        ),
+      };
+    }),
   };
 }
