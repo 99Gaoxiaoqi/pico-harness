@@ -869,9 +869,14 @@ function unavailable(reason: string): AtomicMemoryResult {
   return { status: "unavailable", reason, requestedItems: [] };
 }
 function temporaryDenial(reason: string): boolean {
-  return ["unavailable", "draining", "provider_unsupported", "configuration", "aborted"].includes(
-    reason,
-  );
+  return [
+    "unavailable",
+    "session_unavailable",
+    "draining",
+    "provider_unsupported",
+    "configuration",
+    "aborted",
+  ].includes(reason);
 }
 function blockedModelError(error: unknown): boolean {
   if (typeof error !== "object" || error === null) return false;
