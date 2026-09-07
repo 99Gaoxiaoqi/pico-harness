@@ -114,7 +114,8 @@ receipt。修改用 expected version，提取覆盖推进用 cursor CAS；operat
 
 每轮组装动态 turn tail 时，用当前用户问题生成路径、词项和 CJK 双字查询。SQLite 对 keys
 进行 exact/prefix 匹配，只查询 global 和当前 workspace 的 active Item；不使用 embedding、
-向量库或模型检索。
+向量库或模型检索。中文复合关键词另在最近 500 条候选内补充匹配：至少命中两个不同的非停用
+双字词，例如“验收报告”可以命中“项目验收报告”；仍按工作区和归档状态过滤。
 
 路径匹配权重高于普通词项，CJK 双字得分封顶，同分时优先最近更新的条目。还有一个有限补位
 规则：从最近的候选窗口中补充最多一条未匹配的通用 `preference`。不会把所有未匹配知识都
