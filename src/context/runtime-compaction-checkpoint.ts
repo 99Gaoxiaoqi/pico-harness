@@ -41,6 +41,7 @@ export function computeCheckpointSourceDigest(entries: readonly CheckpointDigest
 }
 
 export interface RuntimeCompactionCheckpointResult {
+  readonly checkpointId: string;
   readonly preview: FullCompactionPreview;
   readonly beforeMessageCount: number;
   readonly afterMessageCount: number;
@@ -125,6 +126,7 @@ export async function recordRuntimeCompactionCheckpoint(
   }
 
   return {
+    checkpointId,
     preview,
     beforeMessageCount: entries.length,
     afterMessageCount,

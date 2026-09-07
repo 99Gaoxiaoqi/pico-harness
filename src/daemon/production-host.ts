@@ -530,12 +530,20 @@ export function createProductionRuntimeServices(
                 },
               }
             : {}),
-          memoryProposalSink: (notice: MemoryProposalPublishedNotice) =>
-            publishDesktopMemoryProposal(
-              service,
-              workspacePath,
-              notice,
-              nextDesktopResourceVersion,
+          memoryChangedSink: () =>
+            service.publishDesktopNotification(
+              createRuntimeNotification({
+                topic: "memory.changed",
+                scope: { workspacePath },
+                resourceVersion: nextDesktopResourceVersion(),
+                at: Date.now(),
+                payload: {
+                  entityType: "source",
+                  entityId: "atomic-extraction",
+                  version: Date.now(),
+                  change: "updated",
+                },
+              }),
             ),
           sessionResourceChangedSink: (notice: RuntimeSessionResourceChangedNotice) =>
             service.publishDesktopNotification(
@@ -1121,12 +1129,20 @@ export function createProductionRuntimeServices(
                   },
                 }
               : {}),
-            memoryProposalSink: (notice: MemoryProposalPublishedNotice) =>
-              publishDesktopMemoryProposal(
-                service,
-                workspacePath,
-                notice,
-                nextDesktopResourceVersion,
+            memoryChangedSink: () =>
+              service.publishDesktopNotification(
+                createRuntimeNotification({
+                  topic: "memory.changed",
+                  scope: { workspacePath },
+                  resourceVersion: nextDesktopResourceVersion(),
+                  at: Date.now(),
+                  payload: {
+                    entityType: "source",
+                    entityId: "atomic-extraction",
+                    version: Date.now(),
+                    change: "updated",
+                  },
+                }),
               ),
             sessionResourceChangedSink: (notice: RuntimeSessionResourceChangedNotice) =>
               service.publishDesktopNotification(
