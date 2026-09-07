@@ -4,9 +4,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { executeAgentRuntime } from "../../src/runtime/agent-runtime.js";
-import { AtomicMemoryRuntime } from "../../src/runtime/atomic-memory-runtime.js";
+import {
+  AtomicMemoryRuntime,
+  ProviderAtomicMemoryModel,
+} from "../../src/runtime/atomic-memory-runtime.js";
+import { CostTracker } from "../../src/observability/tracker.js";
+import { SqliteRuntimeControlStore } from "../../src/storage/sqlite/sqlite-runtime-control-store.js";
 import { SilentReporter } from "../../src/engine/reporter.js";
-import { globalSessionManager } from "../../src/engine/session.js";
+import { globalSessionManager, Session } from "../../src/engine/session.js";
+import { RuntimeRun } from "../../src/runtime/runtime-run.js";
+import { FullCompactor } from "../../src/context/full-compactor.js";
+import { recordRuntimeCompactionCheckpoint } from "../../src/context/runtime-compaction-checkpoint.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { SqliteMemoryItemStore } from "../../src/storage/sqlite/sqlite-memory-item-store.js";
@@ -214,4 +222,121 @@ test("atomic memory extraction waits for a successful durable terminal and stops
   await runtime.completed(terminal.event.runId);
   await runtime.drain();
   assert.equal(modelCalls, 1);
+});
+
+test("atomic compaction persists its covered boundary and records disabled-policy barriers without waiting for terminal", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-atomic-compaction-"));
+  const workDir = join(root, "workspace"),
+    picoHome = join(root, "home"),
+    sessionId = "atomic-compaction";
+  await mkdir(workDir);
+  const session = new Session(sessionId, workDir, { persistence: true, picoHome });
+  t.after(async () => {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await session.recover();
+  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  await run.run(async () => {
+    await run.commitMessages(session, [
+      { role: "user", content: "My old project uses Rust. " + "old context ".repeat(80) },
+      { role: "assistant", content: "Understood. " + "old context ".repeat(80) },
+      { role: "user", content: "Continue." },
+      { role: "assistant", content: "Continuing." },
+    ]);
+    const checkpoint = await recordRuntimeCompactionCheckpoint({
+      session,
+      runtimeRun: run,
+      compactor: new FullCompactor({
+        provider: {
+          async generate() {
+            return { role: "assistant", content: "Summary of old project." };
+          },
+        },
+        maxAttempts: 1,
+      }),
+      request: { inputBudgetTokens: 4000, targetRetainedTokens: 1, trigger: "manual" },
+    });
+    assert.ok(checkpoint);
+    let calls = 0;
+    const runtime = new AtomicMemoryRuntime({
+      workDir,
+      picoHome,
+      sessionId,
+      supported: true,
+      gate: async () => ({ allowed: false, reason: "memory_disabled" }),
+      modelFactory: async () => {
+        calls++;
+        throw new Error("disabled model factory must not run");
+      },
+    });
+    await runtime.checkpoint(checkpoint.checkpointId);
+    await runtime.drain();
+    assert.equal(calls, 0);
+    const paths = resolvePicoPaths(workDir, { picoHome });
+    const store = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"));
+    try {
+      const denials = await store.readCompactionPolicyDenials(
+        memorySessionKey(paths.workspace.id, sessionId),
+      );
+      assert.equal(denials.length, 1);
+      assert.equal(denials[0]!.compactionCheckpointId, checkpoint.checkpointId);
+    } finally {
+      store.close();
+    }
+    const entries = await session.runtimeEventStore!.readSessionEntries(sessionId);
+    assert.equal(
+      entries.some((entry) => entry.event.kind === "run.terminal"),
+      false,
+    );
+  });
+});
+
+test("background memory billing can settle after the parent run terminal without appending to that run", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-atomic-billing-"));
+  const workDir = join(root, "workspace"),
+    picoHome = join(root, "home");
+  await mkdir(workDir);
+  const session = new Session("atomic-billing", workDir, { persistence: true, picoHome });
+  await session.recover();
+  const paths = resolvePicoPaths(workDir, { picoHome });
+  const ledger = new SqliteRuntimeControlStore({ storageRoot: paths.workspace.root });
+  t.after(async () => {
+    ledger.close();
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  let release!: () => void;
+  const barrier = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const model = new ProviderAtomicMemoryModel(
+    new CostTracker(
+      {
+        async generate() {
+          await barrier;
+          return {
+            role: "assistant",
+            content: "finished",
+            usage: { promptTokens: 10, completionTokens: 2 },
+          };
+        },
+      },
+      "test-model",
+      undefined,
+      { ledger, recordRuntimeEvents: false, context: { purpose: "main", sessionId: session.id } },
+    ),
+  );
+  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  let pending!: Promise<string>;
+  await run.run(async () => {
+    pending = model.call({ stage: "canonicalize", prompt: "test" });
+  });
+  release();
+  assert.equal(await pending, "finished");
+  const entries = await session.runtimeEventStore!.readSessionEntries(session.id);
+  assert.equal(entries.filter((entry) => entry.event.kind === "model.call.started").length, 0);
+  const records = ledger.listProviderCalls({ sessionId: session.id });
+  assert.equal(records.length, 1);
+  assert.equal(records[0]!.purpose, "memory_review");
 });

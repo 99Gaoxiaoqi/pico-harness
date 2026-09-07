@@ -1403,7 +1403,11 @@ export async function executeAgentRuntime(
                   providerFactory(kind, currentConfig, undefined, providerDependencies),
                 billingRouteForProvider(kind, currentConfig),
                 undefined,
-                { ledger, context: { purpose: "memory_review" } },
+                {
+                  ledger,
+                  recordRuntimeEvents: false,
+                  context: { purpose: "memory_review", sessionId: session.id },
+                },
               );
               return {
                 model: new ProviderAtomicMemoryModel(provider),
