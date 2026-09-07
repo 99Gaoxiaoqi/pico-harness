@@ -16,6 +16,8 @@ export interface MemoryEvidenceEvent {
   readonly eventId: string;
   readonly runId: string;
   readonly turnId: string;
+  /** Timestamp from the committed RuntimeEvent, in epoch milliseconds. */
+  readonly observedAt: number;
   readonly role: "user" | "assistant" | "other";
   readonly text: string;
 }
