@@ -71,8 +71,6 @@ const BRIDGE_ERRORS = [
   "internal_failure",
 ] as const;
 
-const USAGE_RESULT_MAX_BYTES = 64 * 1024;
-
 /**
  * runtime.request 结果预算：帧上限减响应信封预留（对齐 daemon replay 的 64KB 预留惯例）。
  * 导出供 daemon 侧大结果生产者（如 session.transcript 分页）对齐同一预算——
@@ -228,7 +226,7 @@ export const PICO_RUNTIME_HOST_OPERATION_SPECS = {
     errors: BRIDGE_ERRORS,
     decodeInput: (value): UsageGetBridgeInput => parseStrictRuntimeParams("usage.get", value),
     decodeOutput: (value): UsageGetBridgeOutput => {
-      requireEncodedByteLimit(value, "usage.get result", USAGE_RESULT_MAX_BYTES);
+      requireEncodedByteLimit(value, "usage.get result", RUNTIME_REQUEST_RESULT_MAX_BYTES);
       return parseDesktopRuntimeResult("usage.get", value);
     },
   }),
