@@ -148,3 +148,38 @@ test("atomic recall enforces complete XML/token/count budgets and both policy sw
     store.close();
   }
 });
+
+test("Chinese recall matches informative words inside persisted compound keys", async () => {
+  const store = new SqliteMemoryItemStore(":memory:");
+  try {
+    await store.applyMutations({
+      operationId: "compound-keys",
+      mutations: [
+        memory("项目验收报告的标题前缀是青柠月舟907。", [
+          "项目验收报告",
+          "项目验收报告标题前缀",
+          "青柠月舟907",
+        ]),
+        memory("另一个项目的验收报告是私有信息。", ["项目验收报告"], { scopeKey: "/other" }),
+        memory("项目部署流程需要检查。", ["项目部署流程"]),
+      ].map((item) => ({ type: "create" as const, item })),
+    });
+    const builder = new AtomicMemoryContextBuilder(store, workspaceKey);
+    const result = await builder.build("当前测试项目的验收报告，之前约定的固定标题前缀是什么？");
+    assert.deepEqual(
+      result.items.map(({ item }) => item.content),
+      ["项目验收报告的标题前缀是青柠月舟907。"],
+    );
+    assert.equal((await builder.build("项目怎么样？")).items.length, 0);
+    const record = result.items[0]!;
+    await store.applyMutations({
+      operationId: "archive-compound",
+      mutations: [
+        { type: "archive", itemId: record.item.itemId, expectedVersion: record.item.version },
+      ],
+    });
+    assert.equal((await builder.build("验收报告标题前缀是什么？")).items.length, 0);
+  } finally {
+    store.close();
+  }
+});
