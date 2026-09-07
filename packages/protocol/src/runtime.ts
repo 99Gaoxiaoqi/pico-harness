@@ -32,6 +32,8 @@ export type RuntimeMemoryProposalStatus = "pending" | "accepted" | "rejected" | 
 export type RuntimeMemoryProposalConflictStatus = "none" | "potential" | "confirmed" | "resolved";
 
 export type RuntimeMemoryFact = JsonObject & {
+  /** Atomic Item metadata; legacy envelope names remain wire-compatible during cutover. */
+  readonly atomic?: RuntimeAtomicMemoryDetails;
   readonly factId: string;
   readonly kind: RuntimeMemoryKind;
   readonly title: string | null;
@@ -47,6 +49,19 @@ export type RuntimeMemoryFact = JsonObject & {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly forgottenAt?: string;
+};
+
+export type RuntimeAtomicMemoryDetails = JsonObject & {
+  readonly itemId: string;
+  readonly kind: "preference" | "identity" | "context" | "knowledge" | "failure" | "note";
+  readonly scopeType: "global" | "workspace";
+  readonly scopeKey: string | null;
+  readonly statementType: "fact" | "plan" | "prediction";
+  readonly temporalType: "undated" | "point" | "interval" | "open_ended";
+  readonly observedAt: number;
+  readonly eventStartedAt: number | null;
+  readonly eventEndedAt: number | null;
+  readonly origin: "agent_extracted" | "user_requested";
 };
 
 export type RuntimeMemorySourceMetadata = JsonObject & {
@@ -4120,6 +4135,18 @@ const memoryFactResult = exactResultShape(
     updatedAt: resultString,
   },
   {
+    atomic: exactResultShape({
+      itemId: resultString,
+      kind: resultOneOf(["preference", "identity", "context", "knowledge", "failure", "note"]),
+      scopeType: resultOneOf(["global", "workspace"]),
+      scopeKey: resultNullable(resultString),
+      statementType: resultOneOf(["fact", "plan", "prediction"]),
+      temporalType: resultOneOf(["undated", "point", "interval", "open_ended"]),
+      observedAt: resultFiniteNumber,
+      eventStartedAt: resultNullable(resultFiniteNumber),
+      eventEndedAt: resultNullable(resultFiniteNumber),
+      origin: resultOneOf(["agent_extracted", "user_requested"]),
+    }),
     sourceId: resultString,
     source: exactResultShape(
       {
