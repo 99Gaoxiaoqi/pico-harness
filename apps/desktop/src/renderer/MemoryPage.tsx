@@ -1,38 +1,26 @@
-import {
-  Archive,
-  ArchiveRestore,
-  BrainCircuit,
-  Check,
-  CircleOff,
-  Pencil,
-  RefreshCw,
-  Trash2,
-  X,
-} from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import type {
-  RuntimeMemoryFact,
-  RuntimeMemoryProposal,
-  RuntimeMemoryReviewBudget,
-  RuntimeMemorySettings,
-} from "@pico/protocol";
+import { Archive, ArchiveRestore, BrainCircuit, Pencil, RefreshCw, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import type { RuntimeAtomicMemoryDetails, RuntimeMemoryFact } from "@pico/protocol";
 import { Button, EmptyState, IconButton, InlineNotice } from "./components.js";
 import type { RuntimeStore } from "./runtime.js";
 
-const panels = ["pending", "enabled", "archived"] as const;
+const panels = ["saved", "archived"] as const;
 type PanelId = (typeof panels)[number];
-
-const panelLabels: Readonly<Record<PanelId, string>> = {
-  pending: "待审核",
-  enabled: "已启用",
-  archived: "未启用与归档",
-};
-
-const kindLabels: Readonly<Record<RuntimeMemoryFact["kind"], string>> = {
+const panelLabels = { saved: "已保存", archived: "已归档" };
+const kindLabels: Record<RuntimeAtomicMemoryDetails["kind"], string> = {
   preference: "偏好",
-  correction: "纠正",
-  project_fact: "项目事实",
-  reference: "参考",
+  identity: "身份",
+  context: "背景",
+  knowledge: "知识",
+  failure: "失败经验",
+  note: "笔记",
+};
+const statementLabels = { fact: "事实", plan: "计划", prediction: "预测" };
+const temporalLabels = {
+  undated: "未注明时间",
+  point: "时间点",
+  interval: "时间区间",
+  open_ended: "持续有效",
 };
 
 export function nextMemoryTabIndex(current: number, key: string, count = panels.length): number {
@@ -60,14 +48,6 @@ function useNarrowLayout(forceNarrow?: boolean): boolean {
   return forceNarrow ?? narrow;
 }
 
-type UndoAction = Readonly<{ label: string; run: () => Promise<void> }>;
-type EditorState = Readonly<{
-  type: "fact" | "proposal";
-  id: string;
-  title: string;
-  content: string;
-}>;
-
 export function MemoryPage({
   runtime,
   forceNarrow,
@@ -78,41 +58,22 @@ export function MemoryPage({
   const { data, actions, busy } = runtime;
   const memory = data.memory;
   const narrow = useNarrowLayout(forceNarrow);
-  const [activePanel, setActivePanel] = useState<PanelId>("pending");
-  const [editor, setEditor] = useState<EditorState>();
-  const [undo, setUndo] = useState<UndoAction>();
+  const [activePanel, setActivePanel] = useState<PanelId>("saved");
+  const [editor, setEditor] = useState<{ id: string; content: string }>();
   const [announcement, setAnnouncement] = useState("");
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const pending = memory.proposals.filter((proposal) => proposal.status === "pending");
-  const enabled = memory.facts.filter((fact) => fact.state === "active");
-  const archived = memory.facts.filter(
-    (fact) => fact.state === "disabled" || fact.state === "archived",
-  );
-  const counts = useMemo(
-    () => ({ pending: pending.length, enabled: enabled.length, archived: archived.length }),
-    [archived.length, enabled.length, pending.length],
-  );
-
+  const groups = {
+    saved: memory.facts.filter((fact) => fact.state === "active"),
+    archived: memory.facts.filter((fact) => fact.state === "archived" || fact.state === "disabled"),
+  };
   useEffect(() => {
     if (
       data.trusted &&
       data.workspacePath &&
       (memory.workspacePath !== data.workspacePath || memory.status === "idle")
-    ) {
+    )
       void actions.refreshMemory();
-    }
   }, [actions, data.trusted, data.workspacePath, memory.status, memory.workspacePath]);
-
-  useEffect(() => {
-    if (!undo) return;
-    const timer = window.setTimeout(() => setUndo(undefined), 8_000);
-    return () => window.clearTimeout(timer);
-  }, [undo]);
-
-  const announceUndo = (next: UndoAction, message: string) => {
-    setUndo(next);
-    setAnnouncement(message);
-  };
 
   const handleTabKey = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
@@ -121,268 +82,164 @@ export function MemoryPage({
     setActivePanel(panels[next]!);
     tabRefs.current[next]?.focus();
   };
-
-  const updateFactState = async (
-    fact: RuntimeMemoryFact,
-    state: "active" | "disabled" | "archived",
-  ) => {
-    const updated = await actions.updateMemoryFact(fact.factId, fact.version, { state });
-    if (!updated) return;
-    const previousState = fact.state === "forgotten" ? "disabled" : fact.state;
-    announceUndo(
-      {
-        label: "撤销状态更改",
-        run: async () => {
-          await actions.updateMemoryFact(updated.factId, updated.version, { state: previousState });
-        },
-      },
-      "记忆状态已更新，可在 8 秒内撤销。",
-    );
+  const changeState = async (fact: RuntimeMemoryFact) => {
+    const state = fact.state === "active" ? "archived" : "active";
+    if (await actions.updateMemoryFact(fact.factId, fact.version, { state }))
+      setAnnouncement(state === "active" ? "记忆已恢复。" : "记忆已归档，不再参与召回。");
   };
-
-  const saveFact = async (fact: RuntimeMemoryFact) => {
-    if (!editor || editor.type !== "fact" || editor.id !== fact.factId) return;
-    const updated = await actions.updateMemoryFact(fact.factId, fact.version, {
-      title: editor.title.trim(),
-      content: editor.content.trim(),
-    });
-    if (!updated) return;
-    setEditor(undefined);
-    announceUndo(
-      {
-        label: "撤销编辑",
-        run: async () => {
-          await actions.updateMemoryFact(updated.factId, updated.version, {
-            title: fact.title ?? "",
-            content: fact.content ?? "",
-          });
-        },
-      },
-      "记忆已编辑，可在 8 秒内撤销。",
-    );
-  };
-
-  const resolveProposal = async (proposal: RuntimeMemoryProposal, edited = false) => {
-    const resolution = "accepted" as const;
-    const patch =
-      edited && editor?.type === "proposal" && editor.id === proposal.proposalId
-        ? { title: editor.title.trim(), content: editor.content.trim() }
-        : undefined;
-    const result = await actions.resolveMemoryProposal(
-      proposal.proposalId,
-      proposal.version,
-      resolution,
-      patch,
-    );
-    if (!result) return;
-    const fact = result.fact;
-    setEditor(undefined);
-    if (fact) {
-      const acceptedFact = fact;
-      announceUndo(
-        {
-          label: "撤销启用",
-          run: async () => {
-            await actions.updateMemoryFact(acceptedFact.factId, acceptedFact.version, {
-              state: "disabled",
-            });
-          },
-        },
-        "建议已批准。可以撤销启用；审核记录仍会保留。",
-      );
+  const save = async (fact: RuntimeMemoryFact) => {
+    if (!editor || editor.id !== fact.factId || !editor.content.trim()) return;
+    if (
+      await actions.updateMemoryFact(fact.factId, fact.version, { content: editor.content.trim() })
+    ) {
+      setEditor(undefined);
+      setAnnouncement("记忆已保存。");
     }
   };
-
-  const updateSetting = async (
+  const forget = async (fact: RuntimeMemoryFact) => {
+    if (
+      typeof window === "undefined" ||
+      !window.confirm("永久遗忘这条记忆？内容将被删除，无法恢复。")
+    )
+      return;
+    if (await actions.forgetMemoryFact(fact.factId, fact.version)) {
+      setEditor(undefined);
+      setAnnouncement("记忆已遗忘。");
+    }
+  };
+  const changeSetting = async (
     key: "enabled" | "autoPropose" | "injectionEnabled",
     value: boolean,
   ) => {
-    const settings = memory.settings;
-    if (!settings) return;
-    const patch =
-      key === "enabled"
-        ? { enabled: value }
-        : key === "autoPropose"
-          ? { autoPropose: value }
-          : { injectionEnabled: value };
-    const updated = await actions.updateMemorySettings(settings.version, patch);
-    if (!updated) return;
-    announceUndo(
-      {
-        label: "撤销设置更改",
-        run: async () => {
-          await actions.updateMemorySettings(
-            updated.version,
-            key === "enabled"
-              ? { enabled: settings.enabled }
-              : key === "autoPropose"
-                ? { autoPropose: settings.autoPropose }
-                : { injectionEnabled: settings.injectionEnabled },
-          );
-        },
-      },
-      "记忆设置已更新，可在 8 秒内撤销。",
+    if (!memory.settings) return;
+    if (await actions.updateMemorySettings(memory.settings.version, { [key]: value }))
+      setAnnouncement("记忆设置已更新。");
+  };
+  const renderList = (panel: PanelId) =>
+    groups[panel].length ? (
+      <div className="memory-list" role="list">
+        {groups[panel].map((fact) => (
+          <article className="memory-card" role="listitem" key={fact.factId}>
+            <header className="memory-card__meta">
+              <span>{fact.atomic ? kindLabels[fact.atomic.kind] : "记忆"}</span>
+              <span>{fact.atomic?.scopeType === "global" ? "全局 · 跨工作区" : "当前工作区"}</span>
+              {fact.atomic && <span>{statementLabels[fact.atomic.statementType]}</span>}
+            </header>
+            {editor?.id === fact.factId ? (
+              <div className="memory-editor">
+                <label>
+                  记忆内容
+                  <textarea
+                    rows={5}
+                    maxLength={2000}
+                    value={editor.content}
+                    onChange={(event) =>
+                      setEditor({ id: fact.factId, content: event.target.value })
+                    }
+                  />
+                </label>
+              </div>
+            ) : (
+              <p>{fact.content || "没有可显示的内容。"}</p>
+            )}
+            <SourceDetails fact={fact} />
+            <div className="memory-card__actions">
+              {editor?.id === fact.factId ? (
+                <>
+                  <Button
+                    variant="primary"
+                    disabled={Boolean(busy) || !editor.content.trim()}
+                    onClick={() => void save(fact)}
+                  >
+                    保存
+                  </Button>
+                  <Button
+                    variant="quiet"
+                    disabled={Boolean(busy)}
+                    onClick={() => setEditor(undefined)}
+                  >
+                    取消
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <IconButton
+                    label={`编辑 ${fact.title || "记忆"}`}
+                    disabled={Boolean(busy)}
+                    onClick={() => setEditor({ id: fact.factId, content: fact.content ?? "" })}
+                  >
+                    <Pencil aria-hidden="true" />
+                  </IconButton>
+                  <IconButton
+                    label={`${fact.state === "active" ? "归档" : "恢复"} ${fact.title || "记忆"}`}
+                    disabled={Boolean(busy)}
+                    onClick={() => void changeState(fact)}
+                  >
+                    {fact.state === "active" ? (
+                      <Archive aria-hidden="true" />
+                    ) : (
+                      <ArchiveRestore aria-hidden="true" />
+                    )}
+                  </IconButton>
+                  <IconButton
+                    label={`永久遗忘 ${fact.title || "记忆"}`}
+                    disabled={Boolean(busy)}
+                    onClick={() => void forget(fact)}
+                  >
+                    <Trash2 aria-hidden="true" />
+                  </IconButton>
+                </>
+              )}
+            </div>
+          </article>
+        ))}
+      </div>
+    ) : (
+      <EmptyState
+        icon={<BrainCircuit aria-hidden="true" />}
+        title={panel === "saved" ? "还没有已保存的记忆" : "没有已归档的记忆"}
+        detail={
+          panel === "saved"
+            ? "对话中的长期信息会在提取后保存；你也可以请 Pico 记住一条信息。"
+            : "归档条目不会参与会话召回，可以随时恢复。"
+        }
+      />
     );
-  };
-
-  const updateReviewMode = async (reviewMode: RuntimeMemorySettings["reviewMode"]) => {
-    const settings = memory.settings;
-    if (!settings || settings.reviewMode === reviewMode) return;
-    const updated = await actions.updateMemorySettings(settings.version, { reviewMode });
-    if (!updated) return;
-    announceUndo(
-      {
-        label: "撤销审核模式更改",
-        run: async () => {
-          await actions.updateMemorySettings(updated.version, { reviewMode: settings.reviewMode });
-        },
-      },
-      "自动审核模式已更新，可在 8 秒内撤销。",
-    );
-  };
-
-  const permanentlyForget = async (fact: RuntimeMemoryFact) => {
-    if (
-      typeof window === "undefined" ||
-      !window.confirm(`永久删除“${fact.title || "未命名记忆"}”？此操作会安全删除数据且无法撤销。`)
-    ) {
-      return;
-    }
-    setUndo(undefined);
-    const forgotten = await actions.forgetMemoryFact(fact.factId, fact.version);
-    if (forgotten) setAnnouncement("记忆已永久删除，无法撤销。");
-  };
-
-  const panelContent: Readonly<Record<PanelId, ReactNode>> = {
-    pending: (
-      <MemoryListEmpty
-        items={pending}
-        title="没有待审核建议"
-        detail="自动建议会先留在这里，只有你批准后才会启用。"
-        render={(proposal) => (
-          <ProposalCard
-            key={proposal.proposalId}
-            proposal={proposal}
-            editor={editor}
-            busy={Boolean(busy)}
-            onEdit={(next) => setEditor(next)}
-            onCancel={() => setEditor(undefined)}
-            onApprove={() => void resolveProposal(proposal, false)}
-            onEditApprove={() => void resolveProposal(proposal, true)}
-            onReject={() =>
-              void actions
-                .resolveMemoryProposal(proposal.proposalId, proposal.version, "rejected")
-                .then((result) => {
-                  if (result) setAnnouncement("建议已拒绝。审核结果不可撤销。");
-                })
-            }
-          />
-        )}
-      />
-    ),
-    enabled: (
-      <MemoryListEmpty
-        items={enabled}
-        title="还没有已启用记忆"
-        detail="批准建议后，工作区记忆会显示在这里。"
-        render={(fact) => (
-          <FactCard
-            key={fact.factId}
-            fact={fact}
-            editor={editor}
-            busy={Boolean(busy)}
-            onEdit={(next) => setEditor(next)}
-            onCancel={() => setEditor(undefined)}
-            onSave={() => void saveFact(fact)}
-            onDisable={() => void updateFactState(fact, "disabled")}
-            onArchive={() => void updateFactState(fact, "archived")}
-            onRestore={() => void updateFactState(fact, "active")}
-            onForget={() => void permanentlyForget(fact)}
-          />
-        )}
-      />
-    ),
-    archived: (
-      <MemoryListEmpty
-        items={archived}
-        title="没有停用或归档的记忆"
-        detail="停用和归档的内容不会注入会话，但仍可恢复。"
-        render={(fact) => (
-          <FactCard
-            key={fact.factId}
-            fact={fact}
-            editor={editor}
-            busy={Boolean(busy)}
-            onEdit={(next) => setEditor(next)}
-            onCancel={() => setEditor(undefined)}
-            onSave={() => void saveFact(fact)}
-            onDisable={() => void updateFactState(fact, "disabled")}
-            onArchive={() => void updateFactState(fact, "archived")}
-            onRestore={() => void updateFactState(fact, "active")}
-            onForget={() => void permanentlyForget(fact)}
-          />
-        )}
-      />
-    ),
-  };
 
   return (
     <section className="memory-page" aria-labelledby="memory-page-title">
       <header className="memory-page__intro">
         <div>
-          <span className="eyebrow">Workspace memory</span>
+          <span className="eyebrow">Memory</span>
           <h2 id="memory-page-title">工作区记忆</h2>
-          <p>审核 Pico 建议保留的信息，并决定哪些内容可以在后续会话中使用。</p>
+          <p>管理已保存的信息。全局记忆可跨工作区使用，归档后不再参与召回。</p>
         </div>
         <Button
           variant="quiet"
-          disabled={Boolean(busy)}
+          disabled={Boolean(busy) || !data.trusted}
           onClick={() => void actions.refreshMemory()}
         >
-          <RefreshCw aria-hidden="true" size={15} /> 刷新
+          <RefreshCw aria-hidden="true" size={14} />
+          刷新
         </Button>
       </header>
-
-      <div className="sr-only" aria-live="polite" aria-atomic="true">
+      <p className="sr-only" role="status" aria-live="polite">
         {announcement}
-      </div>
-      {undo && (
-        <div className="memory-undo" role="status">
-          <span>{announcement}</span>
-          <Button
-            variant="quiet"
-            onClick={() => {
-              const current = undo;
-              setUndo(undefined);
-              void current.run();
-            }}
-          >
-            {undo.label}
-          </Button>
-        </div>
-      )}
-
-      {memory.status === "degraded" && <InlineNotice tone="warning">{memory.error}</InlineNotice>}
-      {memory.status === "error" && <InlineNotice tone="error">{memory.error}</InlineNotice>}
-      {runtime.message?.includes("记忆已在另一处更新") && (
-        <div className="inline-notice inline-notice--error" role="alert">
-          {runtime.message}
-        </div>
-      )}
-      {memory.status === "loading" && memory.facts.length === 0 && pending.length === 0 ? (
-        <div className="memory-loading" role="status">
-          正在读取工作区记忆…
-        </div>
+      </p>
+      {runtime.message && <InlineNotice tone="error">{runtime.message}</InlineNotice>}
+      {memory.error && <InlineNotice tone="error">{memory.error}</InlineNotice>}
+      {!data.trusted ? (
+        <InlineNotice tone="warning">信任当前工作区后可管理记忆。</InlineNotice>
       ) : (
         <>
           {narrow ? (
             <div className="memory-tabs">
-              <div role="tablist" aria-label="记忆状态" className="memory-tablist">
+              <div className="memory-tablist" role="tablist" aria-label="记忆状态">
                 {panels.map((panel, index) => (
                   <button
                     key={panel}
-                    ref={(node) => {
-                      tabRefs.current[index] = node;
+                    ref={(element) => {
+                      tabRefs.current[index] = element;
                     }}
                     type="button"
                     role="tab"
@@ -393,7 +250,7 @@ export function MemoryPage({
                     onClick={() => setActivePanel(panel)}
                     onKeyDown={(event) => handleTabKey(event, index)}
                   >
-                    {panelLabels[panel]} <span>{counts[panel]}</span>
+                    {panelLabels[panel]} <span>{groups[panel].length}</span>
                   </button>
                 ))}
               </div>
@@ -403,11 +260,15 @@ export function MemoryPage({
                 aria-labelledby={`memory-tab-${activePanel}`}
                 className="memory-panel"
               >
-                {panelContent[activePanel]}
+                {renderList(activePanel)}
               </section>
             </div>
           ) : (
-            <div className="memory-board" aria-label="工作区记忆状态">
+            <div
+              className="memory-board"
+              style={{ gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}
+              aria-label="记忆状态"
+            >
               {panels.map((panel) => (
                 <section
                   className="memory-column"
@@ -416,465 +277,118 @@ export function MemoryPage({
                 >
                   <header>
                     <h3 id={`memory-column-${panel}`}>{panelLabels[panel]}</h3>
-                    <span aria-label={`${counts[panel]} 项`}>{counts[panel]}</span>
+                    <span aria-label={`${groups[panel].length} 项`}>{groups[panel].length}</span>
                   </header>
-                  {panelContent[panel]}
+                  {renderList(panel)}
                 </section>
               ))}
             </div>
           )}
         </>
       )}
-
-      <MemorySettings
-        settings={memory.settings}
-        reviewBudget={memory.reviewBudget}
-        busy={Boolean(busy)}
-        onChange={(key, value) => void updateSetting(key, value)}
-        onReviewModeChange={(mode) => void updateReviewMode(mode)}
-      />
+      {memory.settings && (
+        <section className="memory-settings" aria-labelledby="memory-settings-title">
+          <div>
+            <h3 id="memory-settings-title">记忆设置</h3>
+            <p>开关只影响当前工作区，已保存的内容仍可管理。</p>
+          </div>
+          <fieldset disabled={Boolean(busy) || !data.trusted}>
+            <legend className="sr-only">工作区记忆开关</legend>
+            {(
+              [
+                ["enabled", "启用记忆", "关闭后停止记忆提取和会话召回。"],
+                ["autoPropose", "自动提取长期信息", "对话中的长期信息经过验证后直接保存。"],
+                ["injectionEnabled", "会话召回", "按当前问题选取相关记忆；归档条目不会注入。"],
+              ] as const
+            ).map(([key, label, detail]) => (
+              <label key={key}>
+                <input
+                  type="checkbox"
+                  checked={memory.settings![key]}
+                  onChange={(event) => void changeSetting(key, event.target.checked)}
+                />
+                <span>
+                  <strong>{label}</strong>
+                  <small>{detail}</small>
+                </span>
+              </label>
+            ))}
+          </fieldset>
+        </section>
+      )}
     </section>
   );
 }
 
-function MemoryListEmpty<T>({
-  items,
-  title,
-  detail,
-  render,
-}: {
-  readonly items: readonly T[];
-  readonly title: string;
-  readonly detail: string;
-  readonly render: (item: T) => ReactNode;
-}) {
-  if (items.length === 0) {
-    return <EmptyState icon={<BrainCircuit aria-hidden="true" />} title={title} detail={detail} />;
-  }
-  return (
-    <div className="memory-list" role="list">
-      {items.map(render)}
-    </div>
-  );
-}
-
-function ProposalCard({
-  proposal,
-  editor,
-  busy,
-  onEdit,
-  onCancel,
-  onApprove,
-  onEditApprove,
-  onReject,
-}: {
-  readonly proposal: RuntimeMemoryProposal;
-  readonly editor?: EditorState | undefined;
-  readonly busy: boolean;
-  readonly onEdit: (editor: EditorState) => void;
-  readonly onCancel: () => void;
-  readonly onApprove: () => void;
-  readonly onEditApprove: () => void;
-  readonly onReject: () => void;
-}) {
-  const editing = editor?.type === "proposal" && editor.id === proposal.proposalId;
-  return (
-    <article className="memory-card" role="listitem">
-      <MemoryCardHeader kind={proposal.kind} confidence={proposal.confidence} />
-      {editing ? (
-        <MemoryEditor editor={editor} onChange={onEdit} />
-      ) : (
-        <>
-          <h4>{proposal.title || "未命名建议"}</h4>
-          <p>{proposal.content || "没有可显示的内容。"}</p>
-        </>
-      )}
-      {proposal.reason && <p className="memory-card__reason">建议原因：{proposal.reason}</p>}
-      <SourceDetails sourceId={proposal.sourceId} />
-      <div className="memory-card__actions">
-        {editing ? (
-          <>
-            <Button variant="primary" disabled={busy} onClick={onEditApprove}>
-              保存并批准
-            </Button>
-            <Button variant="quiet" disabled={busy} onClick={onCancel}>
-              取消
-            </Button>
-          </>
-        ) : (
-          <>
-            <Button variant="primary" disabled={busy} onClick={onApprove}>
-              <Check aria-hidden="true" size={14} />
-              批准
-            </Button>
-            <Button
-              variant="quiet"
-              disabled={busy}
-              onClick={() =>
-                onEdit({
-                  type: "proposal",
-                  id: proposal.proposalId,
-                  title: proposal.title ?? "",
-                  content: proposal.content ?? "",
-                })
-              }
-            >
-              <Pencil aria-hidden="true" size={14} />
-              编辑后批准
-            </Button>
-            <Button variant="quiet" disabled={busy} onClick={onReject}>
-              <X aria-hidden="true" size={14} />
-              拒绝
-            </Button>
-          </>
-        )}
-      </div>
-    </article>
-  );
-}
-
-function FactCard({
-  fact,
-  editor,
-  busy,
-  onEdit,
-  onCancel,
-  onSave,
-  onDisable,
-  onArchive,
-  onRestore,
-  onForget,
-}: {
-  readonly fact: RuntimeMemoryFact;
-  readonly editor?: EditorState | undefined;
-  readonly busy: boolean;
-  readonly onEdit: (editor: EditorState) => void;
-  readonly onCancel: () => void;
-  readonly onSave: () => void;
-  readonly onDisable: () => void;
-  readonly onArchive: () => void;
-  readonly onRestore: () => void;
-  readonly onForget: () => void;
-}) {
-  const editing = editor?.type === "fact" && editor.id === fact.factId;
-  const expired = Boolean(fact.expiresAt && Date.parse(fact.expiresAt) <= Date.now());
-  return (
-    <article className="memory-card" role="listitem">
-      <MemoryCardHeader kind={fact.kind} confidence={fact.confidence} />
-      <div className="memory-card__flags" aria-label="记忆状态">
-        <span>
-          {fact.state === "active" ? "已启用" : fact.state === "disabled" ? "已停用" : "已归档"}
-        </span>
-        {fact.pinned && <span>已置顶</span>}
-        {expired && <span>已过期</span>}
-      </div>
-      {editing ? (
-        <MemoryEditor editor={editor} onChange={onEdit} />
-      ) : (
-        <>
-          <h4>{fact.title || "未命名记忆"}</h4>
-          <p>{fact.content || "没有可显示的内容。"}</p>
-        </>
-      )}
-      <SourceDetails sourceId={fact.sourceId} source={fact.source} />
-      <div className="memory-card__actions">
-        {editing ? (
-          <>
-            <Button variant="primary" disabled={busy} onClick={onSave}>
-              保存
-            </Button>
-            <Button variant="quiet" disabled={busy} onClick={onCancel}>
-              取消
-            </Button>
-          </>
-        ) : (
-          <>
-            <IconButton
-              label={`编辑 ${fact.title || "记忆"}`}
-              disabled={busy}
-              onClick={() =>
-                onEdit({
-                  type: "fact",
-                  id: fact.factId,
-                  title: fact.title ?? "",
-                  content: fact.content ?? "",
-                })
-              }
-            >
-              <Pencil aria-hidden="true" />
-            </IconButton>
-            {fact.state === "active" ? (
-              <IconButton
-                label={`停用 ${fact.title || "记忆"}`}
-                disabled={busy}
-                onClick={onDisable}
-              >
-                <CircleOff aria-hidden="true" />
-              </IconButton>
-            ) : (
-              <IconButton
-                label={`恢复 ${fact.title || "记忆"}`}
-                disabled={busy}
-                onClick={onRestore}
-              >
-                <ArchiveRestore aria-hidden="true" />
-              </IconButton>
-            )}
-            {fact.state !== "archived" && (
-              <IconButton
-                label={`归档 ${fact.title || "记忆"}`}
-                disabled={busy}
-                onClick={onArchive}
-              >
-                <Archive aria-hidden="true" />
-              </IconButton>
-            )}
-            <IconButton
-              label={`永久删除 ${fact.title || "记忆"}`}
-              disabled={busy}
-              onClick={onForget}
-            >
-              <Trash2 aria-hidden="true" />
-            </IconButton>
-          </>
-        )}
-      </div>
-    </article>
-  );
-}
-
-function MemoryEditor({
-  editor,
-  onChange,
-}: {
-  readonly editor: EditorState;
-  readonly onChange: (editor: EditorState) => void;
-}) {
-  return (
-    <div className="memory-editor">
-      <label>
-        标题
-        <input
-          value={editor.title}
-          onChange={(event) => onChange({ ...editor, title: event.target.value })}
-        />
-      </label>
-      <label>
-        内容
-        <textarea
-          rows={4}
-          value={editor.content}
-          onChange={(event) => onChange({ ...editor, content: event.target.value })}
-        />
-      </label>
-    </div>
-  );
-}
-
-function MemoryCardHeader({
-  kind,
-  confidence,
-}: {
-  readonly kind: RuntimeMemoryFact["kind"];
-  readonly confidence: number;
-}) {
-  return (
-    <header className="memory-card__meta">
-      <span>{kindLabels[kind]}</span>
-      <span>置信度 {Math.round(confidence * 100)}%</span>
-    </header>
-  );
-}
-
-function SourceDetails({
-  sourceId,
-  source,
-}: {
-  readonly sourceId?: string | undefined;
-  readonly source?: RuntimeMemoryFact["source"] | undefined;
-}) {
-  if (!sourceId && !source)
-    return <p className="memory-source memory-source--unavailable">来源不可用</p>;
-  if (!source) {
-    return <p className="memory-source">来源 ID：{sourceId}（详情未提供）</p>;
-  }
-  const availability = source?.availability;
-  const label = availability === "available" ? "来源可用" : "来源不可用";
+function SourceDetails({ fact }: { readonly fact: RuntimeMemoryFact }) {
+  const atomic = fact.atomic;
   return (
     <details className="memory-source">
-      <summary>{label}</summary>
+      <summary>
+        {atomic?.origin === "user_requested"
+          ? "用户保存"
+          : atomic?.origin === "agent_extracted"
+            ? "对话提取"
+            : "来源信息"}
+      </summary>
       <dl>
-        <div>
-          <dt>来源 ID</dt>
-          <dd>{source?.sourceId ?? sourceId}</dd>
-        </div>
-        {source?.sessionId && (
+        {fact.source ? (
+          <>
+            <div>
+              <dt>来源会话</dt>
+              <dd>{fact.source.sessionId}</dd>
+            </div>
+            <div>
+              <dt>来源引用</dt>
+              <dd>{fact.source.sourceId}</dd>
+            </div>
+          </>
+        ) : (
           <div>
-            <dt>会话</dt>
-            <dd>{source.sessionId}</dd>
+            <dt>来源</dt>
+            <dd>
+              {atomic?.origin === "user_requested" ? "手动内容，无会话引用" : "来源详情未提供"}
+            </dd>
           </div>
         )}
-        {source?.branchId && (
+        {fact.source?.availability === "unavailable" && (
           <div>
-            <dt>分支</dt>
-            <dd>{source.branchId}</dd>
+            <dt>会话状态</dt>
+            <dd>来源不可用，已保存内容仍保留</dd>
           </div>
         )}
-        {source?.invalidationCode && (
-          <div>
-            <dt>失效原因</dt>
-            <dd>{source.invalidationCode}</dd>
-          </div>
+        {atomic && (
+          <>
+            <div>
+              <dt>作用域</dt>
+              <dd>{atomic.scopeType === "global" ? "全局" : "当前工作区"}</dd>
+            </div>
+            <div>
+              <dt>时间类型</dt>
+              <dd>{temporalLabels[atomic.temporalType]}</dd>
+            </div>
+            <div>
+              <dt>记录时间</dt>
+              <dd>{formatTime(atomic.observedAt)}</dd>
+            </div>
+            {atomic.eventStartedAt !== null && (
+              <div>
+                <dt>开始</dt>
+                <dd>{formatTime(atomic.eventStartedAt)}</dd>
+              </div>
+            )}
+            {atomic.eventEndedAt !== null && (
+              <div>
+                <dt>结束</dt>
+                <dd>{formatTime(atomic.eventEndedAt)}</dd>
+              </div>
+            )}
+          </>
         )}
       </dl>
     </details>
   );
 }
-
-function MemorySettings({
-  settings,
-  reviewBudget,
-  busy,
-  onChange,
-  onReviewModeChange,
-}: {
-  readonly settings: RuntimeStore["data"]["memory"]["settings"];
-  readonly reviewBudget: RuntimeStore["data"]["memory"]["reviewBudget"];
-  readonly busy: boolean;
-  readonly onChange: (key: "enabled" | "autoPropose" | "injectionEnabled", value: boolean) => void;
-  readonly onReviewModeChange: (mode: RuntimeMemorySettings["reviewMode"]) => void;
-}) {
-  if (!settings) return null;
-  return (
-    <section className="memory-settings" aria-labelledby="memory-settings-title">
-      <div>
-        <h3 id="memory-settings-title">记忆设置</h3>
-        <p>所有设置只作用于当前工作区。</p>
-      </div>
-      <fieldset disabled={busy}>
-        <legend className="sr-only">工作区记忆开关</legend>
-        <label>
-          <input
-            type="checkbox"
-            checked={settings.enabled}
-            onChange={(event) => onChange("enabled", event.target.checked)}
-          />
-          <span>
-            <strong>启用记忆</strong>
-            <small>关闭后不会产生额外模型调用，也不会向会话注入记忆。</small>
-          </span>
-        </label>
-        <div className="memory-settings__review-mode">
-          <strong>自动审核模式</strong>
-          <p>
-            {settings.autoPropose
-              ? "只控制自动建议的模型预算，不影响记忆总开关或会话注入。"
-              : "自动提出建议已关闭；当前模式暂不生效。"}
-          </p>
-        </div>
-        {reviewBudget && <MemoryReviewBudgetSummary budget={reviewBudget} />}
-        <label>
-          <input
-            type="radio"
-            name="memory-review-mode"
-            value="eco"
-            checked={settings.reviewMode === "eco"}
-            onChange={() => onReviewModeChange("eco")}
-          />
-          <span>
-            <strong>节能</strong>
-            <small>仅生成规则提案，不调用模型审核模糊表达。</small>
-          </span>
-        </label>
-        <label>
-          <input
-            type="radio"
-            name="memory-review-mode"
-            value="balanced"
-            checked={settings.reviewMode === "balanced"}
-            onChange={() => onReviewModeChange("balanced")}
-          />
-          <span>
-            <strong>均衡（推荐）</strong>
-            <small>滚动 24 小时内最多 8 次模型审核，兼顾成本与召回。</small>
-          </span>
-        </label>
-        <label>
-          <input
-            type="radio"
-            name="memory-review-mode"
-            value="quality"
-            checked={settings.reviewMode === "quality"}
-            onChange={() => onReviewModeChange("quality")}
-          />
-          <span>
-            <strong>质量优先</strong>
-            <small>提高模糊表达的召回，滚动 24 小时内最多 16 次模型审核。</small>
-          </span>
-        </label>
-        <label>
-          <input
-            type="checkbox"
-            checked={settings.autoPropose}
-            onChange={(event) => onChange("autoPropose", event.target.checked)}
-          />
-          <span>
-            <strong>自动提出建议</strong>
-            <small>候选内容仍须在待审核列中由你批准。</small>
-          </span>
-        </label>
-        <label>
-          <input
-            type="checkbox"
-            checked={settings.injectionEnabled}
-            onChange={(event) => onChange("injectionEnabled", event.target.checked)}
-          />
-          <span>
-            <strong>向会话注入已启用记忆</strong>
-            <small>停用或归档的内容不会注入。</small>
-          </span>
-        </label>
-        <label className="is-locked">
-          <input type="checkbox" checked={false} disabled />
-          <span>
-            <strong>自动批准已停用</strong>
-            <small>所有建议都会保留在待审核列表，由你手动批准。</small>
-          </span>
-        </label>
-      </fieldset>
-    </section>
-  );
-}
-
-function MemoryReviewBudgetSummary({ budget }: { readonly budget: RuntimeMemoryReviewBudget }) {
-  const status =
-    budget.reason === "eco-mode"
-      ? "节能模式保证后台模型审核调用为 0。"
-      : budget.reason === "budget-exhausted"
-        ? `本工作区的滚动 24 小时模型审核预算已耗尽。${budget.nextRecoveryAt ? `预计 ${formatRecoveryTime(budget.nextRecoveryAt)} 恢复。` : ""}`
-        : "滚动 24 小时模型审核预算可用。";
-  return (
-    <div className={`memory-settings__budget${budget.allowed ? "" : " is-paused"}`} role="status">
-      <strong>当前用量</strong>
-      <p>{status}</p>
-      <small>
-        调用 {budget.calls}/{budget.maxCalls} · 输入 {budget.inputTokens.toLocaleString()}/
-        {budget.maxInputTokens.toLocaleString()} tokens · 输出{" "}
-        {budget.outputTokens.toLocaleString()}/{budget.maxOutputTokens.toLocaleString()} tokens · $
-        {budget.costUsd.toFixed(4)}/${budget.maxCostUsd.toFixed(4)}
-      </small>
-    </div>
-  );
-}
-
-function formatRecoveryTime(value: string): string {
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) return value;
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "numeric",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(timestamp);
+function formatTime(value: number): string {
+  return new Date(value).toLocaleString("zh-CN");
 }
