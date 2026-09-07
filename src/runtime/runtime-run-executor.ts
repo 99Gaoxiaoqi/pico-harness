@@ -34,6 +34,7 @@ export const DEFAULT_CONTINUATION_TERMINAL_MIN_AGE_MS = 10 * 60_000;
  * creates or closes SessionRuntime, MCP, plugin snapshots, stores, or providers.
  */
 export interface RuntimeRunExecutorInput {
+  readonly atomicMemoryCompleted?: (runId: string) => Promise<void>;
   readonly session: Session;
   readonly runtimeState: SessionRuntime;
   readonly engine: AgentEngine;
@@ -330,6 +331,7 @@ export class RuntimeRunExecutor {
           throw error;
         }
       }, signal);
+      await this.input.atomicMemoryCompleted?.(runtimeRun.runId);
       if (memoryReviewScheduler && submittedUserMessage && this.input.memoryTriggerSlot?.trigger) {
         try {
           const terminalEntry = (await runtimeRun.store.readSessionEntries(session.id)).find(

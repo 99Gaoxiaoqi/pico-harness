@@ -620,6 +620,11 @@ export interface AgentEngineOptions {
   contextBudget?: ContextBudget;
   /** 主动整理水位，默认为输入预算的 85%。 */
   autoCompactTriggerRatio?: number;
+  /** Host-owned memory hooks; snapshots are frozen before each actual provider attempt. */
+  memoryHooks?: {
+    capture(messages: readonly Message[], tools: readonly ToolDefinition[]): Promise<void>;
+    checkpoint(checkpointId: string): Promise<void>;
+  };
   /** 主循环最大轮次兜底(默认 50,防止失控烧穿 Token) */
   maxTurns?: number;
   /**
@@ -774,6 +779,10 @@ export class AgentEngine implements AgentRunner {
   private planMode: boolean;
   private readonly contextBudget?: ContextBudget;
   private readonly autoCompactTriggerRatio: number;
+  private readonly memoryHooks?: {
+    capture(messages: readonly Message[], tools: readonly ToolDefinition[]): Promise<void>;
+    checkpoint(checkpointId: string): Promise<void>;
+  };
   private readonly maxTurns: number;
   private readonly compactor?: Compactor;
   private readonly fullCompactor?: FullCompactor;
@@ -842,6 +851,7 @@ export class AgentEngine implements AgentRunner {
     this.resolveSubagentModelRuntime = opts.resolveSubagentModelRuntime;
     this.planMode = opts.planMode ?? false;
     this.contextBudget = opts.contextBudget;
+    this.memoryHooks = opts.memoryHooks;
     this.autoCompactTriggerRatio =
       opts.autoCompactTriggerRatio ?? DEFAULT_AUTO_COMPACT_TRIGGER_RATIO;
     this.maxTurns = opts.maxTurns ?? 50;
@@ -1101,6 +1111,7 @@ export class AgentEngine implements AgentRunner {
       ...(this.hookService ? { hookService: this.hookService } : {}),
       ...(signal ? { signal } : {}),
     });
+    if (result) await this.memoryHooks?.checkpoint(result.checkpointId);
     return result?.preview;
   }
 
@@ -1387,19 +1398,26 @@ export class AgentEngine implements AgentRunner {
             shardSeed: promptCacheConversationShardSeed(baseContext),
             active: routeThresholdActive,
           };
-    const generate = (context: Message[]) =>
-      generateWithRetry(this.providerForReporter(this.provider, reporter, signal), context, tools, {
-        signal,
-        onRetry: this.makeRetryReporter(span, reporter),
-        onRateLimited: () => this.rotateProvider(reporter, signal),
-        ...(promptCacheRequest.shardSeed
-          ? { promptCacheShardSeed: promptCacheRequest.shardSeed }
-          : {}),
-        ...(promptCacheRequest.active !== undefined
-          ? { promptCacheShardActive: promptCacheRequest.active }
-          : {}),
-        ...requestOptions,
-      });
+    const generate = async (context: Message[]) => {
+      await this.memoryHooks?.capture(context, tools);
+      return generateWithRetry(
+        this.providerForReporter(this.provider, reporter, signal),
+        context,
+        tools,
+        {
+          signal,
+          onRetry: this.makeRetryReporter(span, reporter),
+          onRateLimited: () => this.rotateProvider(reporter, signal),
+          ...(promptCacheRequest.shardSeed
+            ? { promptCacheShardSeed: promptCacheRequest.shardSeed }
+            : {}),
+          ...(promptCacheRequest.active !== undefined
+            ? { promptCacheShardActive: promptCacheRequest.active }
+            : {}),
+          ...requestOptions,
+        },
+      );
+    };
     try {
       return await generate(baseContext);
     } catch (err) {
@@ -2292,40 +2310,49 @@ export class AgentEngine implements AgentRunner {
               });
               for (const [index, tc] of toolCalls.entries()) {
                 const execution: Promise<ToolExecutionOutcome> =
-                  submitPlanCall && index !== submitPlanIndex
+                  memoryStepRejects(toolCalls, index) && !submitPlanCall && !requiredDelegation
                     ? Promise.resolve(
-                        buildPlanSubmitSiblingRejection(
+                        buildRejectedToolResult(
                           tc,
-                          submitPlanCall,
+                          "memory_remember 必须独占模型工具步骤；请在下一步单独调用。",
+                          "exclusive-memory-rejection",
                           this.runtimePort?.currentRun(),
                         ),
                       )
-                    : requiredDelegation && index !== requiredDelegationIndex
+                    : submitPlanCall && index !== submitPlanIndex
                       ? Promise.resolve(
-                          buildRejectedToolObservation(
+                          buildPlanSubmitSiblingRejection(
                             tc,
-                            requiredDelegation,
+                            submitPlanCall,
                             this.runtimePort?.currentRun(),
                           ),
                         )
-                      : scheduler.add({
-                          accesses: getAccesses
-                            ? getAccesses.call(this.registry, tc)
-                            : ToolAccesses.all(),
-                          // 文件事务只能在活跃写任务的 start Promise 真实收口后提交，
-                          // 故所有文件类工具在 abort 时一律等待 settle。文件写很快完成、
-                          // 不会无限挂起；即便工具不协作 signal，failToolProtocol / finally
-                          // 的 10s 超时兜底也会强制收口，防止主循环卡死（loop-1）。
-                          settleOnAbort: fileSideEffectKinds[index] !== "none",
-                          start: async () => {
-                            signal?.throwIfAborted();
-                            return this.runtimePort
-                              ? this.runtimePort.runWithToolCall(tc.id, () =>
-                                  this.runOneTool(tc, reporter, turnSpan, signal),
-                                )
-                              : this.runOneTool(tc, reporter, turnSpan, signal);
-                          },
-                        });
+                      : requiredDelegation && index !== requiredDelegationIndex
+                        ? Promise.resolve(
+                            buildRejectedToolObservation(
+                              tc,
+                              requiredDelegation,
+                              this.runtimePort?.currentRun(),
+                            ),
+                          )
+                        : scheduler.add({
+                            accesses: getAccesses
+                              ? getAccesses.call(this.registry, tc)
+                              : ToolAccesses.all(),
+                            // 文件事务只能在活跃写任务的 start Promise 真实收口后提交，
+                            // 故所有文件类工具在 abort 时一律等待 settle。文件写很快完成、
+                            // 不会无限挂起；即便工具不协作 signal，failToolProtocol / finally
+                            // 的 10s 超时兜底也会强制收口，防止主循环卡死（loop-1）。
+                            settleOnAbort: fileSideEffectKinds[index] !== "none",
+                            start: async () => {
+                              signal?.throwIfAborted();
+                              return this.runtimePort
+                                ? this.runtimePort.runWithToolCall(tc.id, () =>
+                                    this.runOneTool(tc, reporter, turnSpan, signal),
+                                  )
+                                : this.runOneTool(tc, reporter, turnSpan, signal);
+                            },
+                          });
                 scheduled.push(
                   execution.then((result) => {
                     settledResults[index] = result;
@@ -3990,4 +4017,9 @@ function assertRunProducedModelOutput(messages: readonly Message[]): void {
       "模型本轮零输出（无回复内容、无工具调用）：疑似 provider 端点返回空流（HTTP 200 + 0 字节）。请检查模型路由或端点状态后重试。",
     );
   }
+}
+
+function memoryStepRejects(calls: readonly ToolCall[], index: number): boolean {
+  const first = calls.findIndex((call) => call.name === "memory_remember");
+  return first === 0 ? index !== 0 : first > 0 && calls[index]?.name === "memory_remember";
 }
