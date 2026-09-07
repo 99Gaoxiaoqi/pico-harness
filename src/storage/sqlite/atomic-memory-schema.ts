@@ -19,7 +19,7 @@
 
 import type { DatabaseSync } from "node:sqlite";
 
-export const SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION = 6;
+export const SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION = 7;
 
 const SQLITE_INITIALIZATION_BUSY_TIMEOUT_MS = 5_000;
 const SQLITE_INITIALIZATION_RETRY_DELAY_MS = 10;
@@ -250,6 +250,23 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
 `,
 );
 
+(MIGRATIONS as Map<number, string>).set(
+  7,
+  `
+  CREATE TABLE memory_suppressed_events (evidence_hash TEXT PRIMARY KEY CHECK(length(evidence_hash) = 64)) WITHOUT ROWID;
+  CREATE TABLE memory_workspace_migrations (workspace_key TEXT PRIMARY KEY, report_json TEXT NOT NULL) WITHOUT ROWID;
+  CREATE TABLE memory_migration_source_events (
+    item_id TEXT NOT NULL REFERENCES memory_items(item_id) ON DELETE CASCADE,
+    evidence_hash TEXT NOT NULL CHECK(length(evidence_hash) = 64),
+    PRIMARY KEY(item_id, evidence_hash)
+  ) WITHOUT ROWID;
+  CREATE TABLE memory_migration_origins (
+    item_id TEXT PRIMARY KEY REFERENCES memory_items(item_id) ON DELETE CASCADE,
+    origin_json TEXT NOT NULL
+  ) WITHOUT ROWID;
+`,
+);
+
 interface MinimumTableShape {
   readonly name: string;
   readonly requiredColumns: readonly string[];
@@ -444,6 +461,17 @@ MINIMUM_SCHEMA_SHAPES.set(6, {
       requiredColumns: ["item_id", "session_id", "run_id", "turn_id", "event_id"],
     },
     { name: "memory_forget_operations", requiredColumns: ["operation_id", "request_hash"] },
+  ],
+  indexes: version4MinimumShape.indexes,
+});
+
+MINIMUM_SCHEMA_SHAPES.set(7, {
+  tables: [
+    ...MINIMUM_SCHEMA_SHAPES.get(6)!.tables,
+    { name: "memory_suppressed_events", requiredColumns: ["evidence_hash"] },
+    { name: "memory_workspace_migrations", requiredColumns: ["workspace_key", "report_json"] },
+    { name: "memory_migration_source_events", requiredColumns: ["item_id", "evidence_hash"] },
+    { name: "memory_migration_origins", requiredColumns: ["item_id", "origin_json"] },
   ],
   indexes: version4MinimumShape.indexes,
 });
