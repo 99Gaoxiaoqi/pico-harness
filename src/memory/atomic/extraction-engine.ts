@@ -99,6 +99,8 @@ export class AtomicMemoryExtractionEngine {
     }
     const existing = await store.readExtractionReceipt(operationId);
     if (existing) return this.visibleReceipt(existing);
+    if (snapshot.deletionRevision !== (await store.readDeletionRevision()))
+      return unavailable("memory_deleted");
     let cursor = await store.readExtractionCursor(snapshot.sessionId);
     const pending = await store.readPendingExtractionFailure(snapshot.sessionId);
     const denied = new Set(
@@ -163,8 +165,12 @@ export class AtomicMemoryExtractionEngine {
       );
       if (range.coverageHash !== pending.coverageHash)
         return unavailable("pending_coverage_changed");
-      const result = await this.processRange(range);
-      const settled = await this.settle(result);
+      // A retry belongs to the generation that originally admitted it. Never replay
+      // a pre-deletion explicit request as part of a later automatic task.
+      const settled =
+        pending.deletionRevision !== snapshot.deletionRevision
+          ? await this.commit(range, [], [], undefined, "memory_deleted")
+          : await this.settle(await this.processRange(range));
       if (settled.kind !== "committed")
         return unavailable(settled.kind === "blocked" ? settled.reason : "retry_later");
       after = settled.through;
@@ -194,7 +200,7 @@ export class AtomicMemoryExtractionEngine {
         historyAfter(checkpoint.throughOrdinal),
       );
       const result = denied.has(checkpoint.checkpointId)
-        ? await this.commit(range, [], [], undefined, true)
+        ? await this.commit(range, [], [], undefined, "policy_denied")
         : await this.settle(await this.processRange(range));
       if (result.kind !== "committed")
         return unavailable(result.kind === "blocked" ? result.reason : "retry_later");
@@ -218,7 +224,7 @@ export class AtomicMemoryExtractionEngine {
     );
     const outcome =
       snapshot.compactionCheckpointId && denied.has(snapshot.compactionCheckpointId)
-        ? await this.commit(range, [], [], undefined, true)
+        ? await this.commit(range, [], [], undefined, "policy_denied")
         : await this.settle(await this.processRange(range));
     return outcome.kind === "committed"
       ? outcome.receipt
@@ -258,10 +264,7 @@ export class AtomicMemoryExtractionEngine {
       (event) => event.ordinal > range.after && event.ordinal <= range.through,
     );
     if (entries.length === 0) return { kind: "blocked", reason: "coverage_missing" };
-    const evidence = await this.unsuppressed(
-      snapshot,
-      projectAtomicMemoryEvidence(entries, snapshot.sourceMessages),
-    );
+    const evidence = projectAtomicMemoryEvidence(entries, snapshot.sourceMessages);
     const fitted = fitAtomicMemoryEvidence(evidence);
     if (!fitted) {
       // A split is still bounded: two independent segments, never recursive slicing.
@@ -347,19 +350,14 @@ export class AtomicMemoryExtractionEngine {
         return { kind: "failed", failureClass: "localization", range };
       budget.localized = true;
       if (!(await this.allowed(snapshot))) return { kind: "blocked", reason: "policy_changed" };
-      const history = await this.unsuppressedHistory(
-        snapshot,
-        snapshot.events.filter(
-          (event) => event.ordinal > range.historyAfter && event.ordinal <= range.through,
-        ),
+      const history = snapshot.events.filter(
+        (event) => event.ordinal > range.historyAfter && event.ordinal <= range.through,
       );
       const found = localizeAtomicMemoryHistory(history, proposal.search);
       if (!found.length) return { kind: "failed", failureClass: "localization", range };
       // Localized evidence is explicitly included in the auxiliary prompt, so older
       // user text need not be part of the original provider prefix to become visible.
-      const localized = fitAtomicMemoryEvidence(
-        await this.unsuppressed(snapshot, projectAtomicMemoryEvidence(found)),
-      );
+      const localized = fitAtomicMemoryEvidence(projectAtomicMemoryEvidence(found));
       if (!localized) return { kind: "failed", failureClass: "localization", range };
       if (
         snapshot.trigger === "remember" &&
@@ -529,71 +527,30 @@ export class AtomicMemoryExtractionEngine {
     }
   }
 
-  private async unsuppressed(
-    snapshot: MemoryExtractionSnapshot,
-    evidence: readonly AtomicMemoryEvidence[],
-  ): Promise<AtomicMemoryEvidence[]> {
-    const result: AtomicMemoryEvidence[] = [];
-    for (const entry of evidence)
-      if (
-        !(await this.options.store.isEvidenceSuppressed(
-          evidenceSource(snapshot.sessionId, entry.event),
-        ))
-      )
-        result.push(entry);
-    return result;
-  }
-
-  private async unsuppressedHistory(
-    snapshot: MemoryExtractionSnapshot,
-    events: readonly MemoryEvidenceEvent[],
-  ): Promise<MemoryEvidenceEvent[]> {
-    const suppressedTurns = new Set<string>();
-    for (const event of events)
-      if (await this.options.store.isEvidenceSuppressed(evidenceSource(snapshot.sessionId, event)))
-        suppressedTurns.add(JSON.stringify([event.runId, event.turnId]));
-    // A forgotten user assertion must not return through an assistant paraphrase
-    // in the same turn during reference localization.
-    return events.filter(
-      (event) => !suppressedTurns.has(JSON.stringify([event.runId, event.turnId])),
-    );
-  }
-
   private async commit(
     range: Range,
     writes: readonly MemoryItemWrite[],
     requestedIndexes: readonly number[],
     noOpReason?: "sensitive_information",
-    policyDenied = false,
+    skipReason?: MemoryExtractionReceipt["skipReason"],
   ): Promise<Outcome> {
-    if (!policyDenied && !(await this.allowed(range.snapshot)))
-      return { kind: "blocked", reason: "policy_changed" };
-    const items: MemoryItemWrite[] = [];
-    const requestedItemIndexes: number[] = [];
-    for (const [index, write] of writes.entries()) {
-      let suppressed = false;
-      for (const source of write.sources)
-        if (await this.options.store.isEvidenceSuppressed(source)) suppressed = true;
-      if (suppressed) continue;
-      if (requestedIndexes.includes(index)) requestedItemIndexes.push(items.length);
-      items.push(write);
-    }
-    if (!policyDenied && !(await this.allowed(range.snapshot)))
+    if (skipReason !== "policy_denied" && !(await this.allowed(range.snapshot)))
       return { kind: "blocked", reason: "policy_changed" };
     const { receipt } = await this.options.store.commitExtraction({
       operationId: range.operationId,
       sessionId: range.snapshot.sessionId,
       expectedCursorOrdinal: range.after,
+      expectedDeletionRevision: range.snapshot.deletionRevision,
       nextCursorOrdinal: range.through,
       coverageHash: range.coverageHash,
-      items,
-      requestedItemIndexes,
+      items: writes,
+      requestedItemIndexes: requestedIndexes,
       trigger: range.snapshot.trigger,
       ...(range.snapshot.compactionCheckpointId
         ? { compactionCheckpointId: range.snapshot.compactionCheckpointId }
         : {}),
       ...(noOpReason ? { noOpReason } : {}),
-      ...(policyDenied ? { skipReason: "policy_denied" as const } : {}),
+      ...(skipReason ? { skipReason } : {}),
     });
     return { kind: "committed", receipt, through: range.through };
   }
@@ -606,6 +563,7 @@ export class AtomicMemoryExtractionEngine {
       operationId: range.operationId,
       sessionId: range.snapshot.sessionId,
       expectedCursorOrdinal: range.after,
+      expectedDeletionRevision: range.snapshot.deletionRevision,
       failedThroughOrdinal: range.through,
       coverageHash: range.coverageHash,
       failureClass: outcome.failureClass,
@@ -620,7 +578,11 @@ export class AtomicMemoryExtractionEngine {
   }
 
   private async allowed(snapshot: MemoryExtractionSnapshot): Promise<boolean> {
-    if (snapshot.signal?.aborted) return false;
+    if (
+      snapshot.signal?.aborted ||
+      snapshot.deletionRevision !== (await this.options.store.readDeletionRevision())
+    )
+      return false;
     const gate = await this.options.gate();
     if (!gate.allowed && !temporaryDenial(gate.reason)) await this.recordDenial(snapshot);
     return gate.allowed;
@@ -643,7 +605,7 @@ export class AtomicMemoryExtractionEngine {
         [],
         [],
         undefined,
-        true,
+        "policy_denied",
       );
   }
 
@@ -653,10 +615,7 @@ export class AtomicMemoryExtractionEngine {
     for (const requested of receipt.requestedItems) {
       const record = await this.options.store.readItem(requested.itemId);
       if (!record || record.item.lifecycleState !== "active") continue;
-      let suppressed = false;
-      for (const source of record.sources)
-        if (await this.options.store.isEvidenceSuppressed(source)) suppressed = true;
-      if (!suppressed) requestedItems.push(requested);
+      requestedItems.push(requested);
     }
     return requestedItems.length === receipt.requestedItems.length
       ? receipt
@@ -760,6 +719,8 @@ function historicalSnapshot(
 
 function freezeSnapshot(input: MemoryExtractionSnapshot): MemoryExtractionSnapshot | undefined {
   if (
+    !Number.isSafeInteger(input.deletionRevision) ||
+    input.deletionRevision < 0 ||
     !input.sessionId ||
     !input.workspaceKey ||
     !input.runId ||

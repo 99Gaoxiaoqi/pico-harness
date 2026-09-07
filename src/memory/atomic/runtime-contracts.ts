@@ -1,10 +1,5 @@
 import type { Message, ToolDefinition } from "../../schema/message.js";
-import type {
-  MemoryItemRecord,
-  MemoryItemSource,
-  MemoryItemStore,
-  MemoryExtractionReceipt,
-} from "./contracts.js";
+import type { MemoryItemRecord, MemoryItemStore, MemoryExtractionReceipt } from "./contracts.js";
 
 /** Host identity, never an LLM-selected session identifier. */
 export function memorySessionKey(workspaceKey: string, sessionId: string): string {
@@ -32,6 +27,8 @@ export interface MemoryCheckpointBoundary {
 }
 
 export interface MemoryExtractionSnapshot {
+  /** Captured before queuing, never refreshed for an existing task. */
+  readonly deletionRevision: number;
   readonly trigger: "remember" | "extract" | "compaction";
   /** Composite workspace/session identity used by cursors and provenance. */
   readonly sessionId: string;
@@ -72,7 +69,7 @@ export interface AtomicMemorySettings {
   readonly version: number;
 }
 
-/** Pico management extensions are separate from Maka's extraction/store contract. */
+/** Workspace management and extraction invalidation. */
 export interface AtomicMemoryStore extends MemoryItemStore {
   close(): void;
   listItems(input: {
@@ -88,12 +85,12 @@ export interface AtomicMemoryStore extends MemoryItemStore {
     readonly autoExtract?: boolean;
     readonly recallEnabled?: boolean;
   }): Promise<AtomicMemorySettings>;
-  forgetItem(input: {
+  deleteItem(input: {
     readonly itemId: string;
     readonly expectedVersion: number;
     readonly operationId: string;
   }): Promise<void>;
-  isEvidenceSuppressed(source: MemoryItemSource): Promise<boolean>;
+  readDeletionRevision(): Promise<number>;
 }
 
 export interface AtomicMemoryEngineOptions {

@@ -58,7 +58,7 @@ export type MemoryKeyOrigin = (typeof MEMORY_KEY_ORIGINS)[number];
 
 export const MEMORY_MUTATION_TYPES = ["create", "update", "archive", "restore"] as const;
 export type MemoryMutationType = (typeof MEMORY_MUTATION_TYPES)[number];
-export type MemoryWriteOperationType = MemoryMutationType | "batch";
+export type MemoryWriteOperationType = MemoryMutationType | "batch" | "delete";
 
 export const LONG_TERM_MEMORY_CONTENT_MAX_CODE_POINTS = 2_000;
 
@@ -196,9 +196,12 @@ export interface PendingMemoryExtractionFailure {
   readonly compactionCheckpointId?: string;
   readonly firstFailureClass: MemoryExtractionFailureClass;
   readonly failedAt: number;
+  readonly deletionRevision: number;
 }
 
 export interface SettleMemoryExtractionFailureRequest {
+  /** Deletion generation captured before the extraction was queued. */
+  readonly expectedDeletionRevision: number;
   readonly operationId: string;
   readonly sessionId: string;
   readonly expectedCursorOrdinal: number;
@@ -236,8 +239,8 @@ export interface MemoryExtractionReceipt {
   readonly status: "remembered" | "not_applicable" | "extracted" | "discarded" | "skipped";
   readonly requestedItems: readonly MemoryExtractionRequestedItemResult[];
   readonly noOpReason?: "sensitive_information";
-  /** Automatic Compaction coverage intentionally settled without model access. */
-  readonly skipReason?: "policy_denied";
+  /** Coverage settled without model access due to policy or an intervening deletion. */
+  readonly skipReason?: "policy_denied" | "memory_deleted";
   readonly discardedRange?: MemoryExtractionDiscardedRange;
   readonly committedAt: number;
 }
@@ -252,6 +255,8 @@ export interface MemoryExtractionRequestedItemResult {
  * the Store; SQLite atomically creates admitted Items and advances the Session watermark.
  */
 export interface CommitMemoryExtractionRequest {
+  /** Deletion generation captured before the extraction was queued. */
+  readonly expectedDeletionRevision: number;
   readonly operationId: string;
   readonly sessionId: string;
   readonly expectedCursorOrdinal: number;
@@ -262,8 +267,8 @@ export interface CommitMemoryExtractionRequest {
   readonly requestedItemIndexes: readonly number[];
   /** Explicit deterministic no-op for a user-requested batch rejected by policy. */
   readonly noOpReason?: "sensitive_information";
-  /** Set only when policy denies an automatic Compaction task after its durable checkpoint. */
-  readonly skipReason?: "policy_denied";
+  /** Policy-denied Compaction or a pending range invalidated by deletion. */
+  readonly skipReason?: "policy_denied" | "memory_deleted";
   readonly trigger: "remember" | "extract" | "compaction";
   readonly compactionCheckpointId?: string;
 }
@@ -337,6 +342,7 @@ export type MemoryItemStoreConflictReason =
   | "version_conflict"
   | "item_not_found"
   | "cursor_conflict"
+  | "deletion_conflict"
   | "invalid_lifecycle_transition";
 
 export class MemoryItemStoreConflictError extends Error {

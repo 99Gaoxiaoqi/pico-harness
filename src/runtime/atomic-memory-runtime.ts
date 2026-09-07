@@ -19,7 +19,6 @@ import {
   type MemoryGateResult,
 } from "../memory/atomic/runtime-contracts.js";
 import { logger } from "../observability/logger.js";
-import { ensureAtomicMemoryWorkspace } from "../memory/atomic/migration.js";
 
 export function atomicMemoryDatabasePath(picoHome: string): string {
   return join(picoHome, "memory.sqlite");
@@ -67,7 +66,7 @@ export interface AtomicMemoryRuntimeOptions {
 /** One foreground run owns snapshots; background tasks own their own connections/model leases. */
 export class AtomicMemoryRuntime {
   private source?: MemoryExtractionSnapshot;
-  private extractRequested = false;
+  private extractRequestedRevision?: number;
   private readonly background = new Set<Promise<unknown>>();
   private readonly workspaceKey: string;
   private readonly laneKey: string;
@@ -84,7 +83,7 @@ export class AtomicMemoryRuntime {
   async capture(messages: readonly Message[], tools: readonly ToolDefinition[]): Promise<void> {
     if (!this.options.supported) return;
     try {
-      this.source = await this.snapshot("remember", undefined, {
+      this.source = await this.snapshot("remember", await this.readDeletionRevision(), undefined, {
         messages: structuredClone(messages),
         tools: structuredClone(tools),
       });
@@ -95,8 +94,8 @@ export class AtomicMemoryRuntime {
   }
 
   async remember(signal?: AbortSignal): Promise<AtomicMemoryResult> {
-    if (!this.options.supported || !this.source)
-      return unavailable("provider_or_source_unavailable");
+    if (!this.options.supported) return unavailable("provider_unsupported");
+    if (!this.source) return unavailable("source_unavailable");
     const snapshot = { ...this.source, ...(signal ? { signal } : {}) };
     return this.lifecycle.run(
       "remember",
@@ -105,20 +104,19 @@ export class AtomicMemoryRuntime {
     );
   }
 
-  async requestExtract(): Promise<{ status: "accepted" | "unavailable" }> {
-    if (
-      !this.options.supported ||
-      !(await this.options.gate()).allowed ||
-      this.lifecycle.isDraining
-    )
+  async requestExtract(): Promise<{ status: "accepted" | "unavailable"; reason?: string }> {
+    if (!this.options.supported) return { status: "unavailable", reason: "provider_unsupported" };
+    const deletionRevision = await this.readDeletionRevision();
+    if (!(await this.options.gate()).allowed || this.lifecycle.isDraining)
       return { status: "unavailable" };
-    this.extractRequested = true;
+    this.extractRequestedRevision = deletionRevision;
     return { status: "accepted" };
   }
 
   async completed(runId: string): Promise<void> {
-    if (!this.extractRequested) return;
-    this.extractRequested = false;
+    const deletionRevision = this.extractRequestedRevision;
+    if (deletionRevision === undefined) return;
+    this.extractRequestedRevision = undefined;
     this.enqueue("extract", async () => {
       const entries = await this.readEntries();
       const terminal = entries.find(
@@ -129,12 +127,13 @@ export class AtomicMemoryRuntime {
           !event.data.recovered,
       );
       if (!terminal) return;
-      return this.snapshot("extract", terminal.sequence);
+      return this.snapshot("extract", deletionRevision, terminal.sequence);
     });
   }
 
   async checkpoint(checkpointId: string): Promise<void> {
     if (!this.options.supported) return;
+    const deletionRevision = await this.readDeletionRevision();
     this.enqueue("compaction", async () => {
       const entries = await this.readEntries();
       const checkpoint = entries.find(
@@ -142,7 +141,7 @@ export class AtomicMemoryRuntime {
           event.kind === "context.checkpoint.recorded" && event.data.checkpointId === checkpointId,
       );
       if (!checkpoint) return;
-      const snapshot = await this.snapshot("compaction", checkpoint.sequence);
+      const snapshot = await this.snapshot("compaction", deletionRevision, checkpoint.sequence);
       const checkpointEvent = checkpoint.event;
       const through =
         checkpointEvent.kind === "context.checkpoint.recorded"
@@ -185,7 +184,6 @@ export class AtomicMemoryRuntime {
   }
 
   private async execute(snapshot: MemoryExtractionSnapshot): Promise<AtomicMemoryResult> {
-    await ensureAtomicMemoryWorkspace(this.options.workDir, this.options.picoHome);
     const store = new SqliteMemoryItemStore(atomicMemoryDatabasePath(this.options.picoHome));
     let lease: AtomicMemoryModelLease | undefined;
     try {
@@ -243,8 +241,18 @@ export class AtomicMemoryRuntime {
     }
   }
 
+  private async readDeletionRevision(): Promise<number> {
+    const store = new SqliteMemoryItemStore(atomicMemoryDatabasePath(this.options.picoHome));
+    try {
+      return await store.readDeletionRevision();
+    } finally {
+      store.close();
+    }
+  }
+
   private async snapshot(
     trigger: MemoryExtractionSnapshot["trigger"],
+    deletionRevision: number,
     maxSequence?: number,
     source?: {
       messages: readonly Message[];
@@ -310,6 +318,7 @@ export class AtomicMemoryRuntime {
             .map((e) => ({ role: e.role as "user" | "assistant", content: e.text })));
     return {
       trigger,
+      deletionRevision,
       sessionId: memorySessionKey(this.workspaceKey, this.options.sessionId),
       workspaceKey: this.workspaceKey,
       runId: last.event.runId,

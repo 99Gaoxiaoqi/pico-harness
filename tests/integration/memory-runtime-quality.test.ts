@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { SilentReporter } from "../../src/engine/reporter.js";
+import { getOrCreateSessionSettings } from "../../src/input/session-settings.js";
+import { AtomicMemoryLifecycle } from "../../src/runtime/atomic-memory-lifecycle.js";
+import { isAutomationToolAllowed } from "../../src/safety/automation-tool-policy.js";
 import { globalSessionManager } from "../../src/engine/session.js";
-import { ensureAtomicMemoryWorkspace } from "../../src/memory/atomic/migration.js";
 import { sessionMemoryLane } from "../../src/memory/atomic/session-lane.js";
 import { memorySessionKey } from "../../src/memory/atomic/runtime-contracts.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
@@ -23,6 +25,185 @@ import { SqliteRuntimeControlStore } from "../../src/storage/sqlite/sqlite-runti
 import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
 
 const MEMORY_CANARY = "npm run reviewed-memory-canary";
+
+test("Maka memory admission separates recall from extraction across runtime profiles", async (t) => {
+  const profiles = [
+    "plan",
+    "side",
+    "background",
+    "background-restricted",
+    "responses",
+    "headless",
+    "untrusted",
+  ] as const;
+  for (const profile of profiles) {
+    await t.test(profile, async () => {
+      const fixture = await createFixture(`profile-${profile}`);
+      const sessionId = `memory-profile-${profile}`;
+      const trust =
+        profile === "untrusted"
+          ? new WorkspaceTrustStore({ userStateDirectory: fixture.picoHome })
+          : await trustWorkspaces(fixture.picoHome, fixture.workspace);
+      const lifecycle = new AtomicMemoryLifecycle();
+      const triggers = ["memory_remember", "memory_extract"];
+      const background = profile.startsWith("background");
+      const toolsAllowed = profile !== "background-restricted";
+      const canRecall = profile !== "headless" && profile !== "untrusted";
+      const canExtract = profile === "side" || profile === "background";
+      const hasTriggers = canExtract || profile === "responses";
+      let calls = 0;
+      let extractionCalls = 0;
+      const store = openStore(fixture);
+      try {
+        await store.applyMutations({
+          operationId: "seed-profile-memory",
+          mutations: [
+            {
+              type: "create",
+              item: {
+                content: MEMORY_CANARY,
+                kind: "knowledge",
+                statementType: "fact",
+                temporalType: "undated",
+                scopeType: "workspace",
+                scopeKey: workspaceKey(fixture),
+                observedAt: 1,
+                origin: "user_requested",
+                keys: [{ key: "build", keyType: "concept", keyOrigin: "user" }],
+                sources: [],
+              },
+            },
+          ],
+        });
+        if (profile === "side") {
+          const settings = getOrCreateSessionSettings({
+            sessionId,
+            cwd: fixture.workspace,
+            picoHome: fixture.picoHome,
+            provider: "openai",
+            model: "test",
+            modelRouteId: "test/test",
+          });
+          settings.sideConversation = true;
+        }
+        if (background) triggers.forEach((name) => assert.ok(isAutomationToolAllowed(name)));
+        await executeAgentRuntime(
+          {
+            ...runtimeRequest(fixture.workspace, sessionId, "What is the build command?"),
+            provider: profile === "responses" ? "responses" : "openai",
+            allowedTools: hasTriggers ? triggers : [],
+            ...(profile === "plan" ? { interactionMode: "plan" as const } : {}),
+            ...(background
+              ? {
+                  execution: {
+                    kind: "background" as const,
+                    policy: {
+                      mode: "yolo" as const,
+                      backgroundEnabled: true,
+                      trustedWorkspace: true,
+                      toolNetworkPolicy: "disabled" as const,
+                      allowedTools: toolsAllowed ? triggers : [],
+                      hardlineVersion: "builtin-v1",
+                      hookVersion: "workspace-v1",
+                      createdAt: Date.now(),
+                    },
+                  },
+                }
+              : {}),
+          },
+          {
+            picoHome: fixture.picoHome,
+            memoryTrustStore: trust,
+            backgroundTrustStore: trust,
+            isolatedHeadless: profile === "headless",
+            atomicMemoryLifecycle: lifecycle,
+            reporter: new SilentReporter(),
+            atomicMemoryModelFactory: async () => ({
+              model: {
+                async call() {
+                  extractionCalls++;
+                  return JSON.stringify({
+                    status: "complete",
+                    coverageStatus: "processed",
+                    requestedStatus: "not_applicable",
+                    requestedItems: [],
+                    incidentalItems: [],
+                  });
+                },
+              },
+            }),
+            provider: {
+              async generate(messages, tools) {
+                calls++;
+                assert.equal(
+                  currentVisibleUserContent(messages).includes(MEMORY_CANARY),
+                  canRecall,
+                );
+                for (const name of triggers)
+                  assert.equal(
+                    tools.some((tool) => tool.name === name),
+                    hasTriggers,
+                    name,
+                  );
+                if (profile === "plan") {
+                  return {
+                    role: "assistant" as const,
+                    content: "",
+                    toolCalls: [
+                      {
+                        id: "submit-memory-plan",
+                        name: "submit_plan",
+                        arguments: JSON.stringify({
+                          title: "Use remembered build command",
+                          steps: [{ title: "Verify", description: MEMORY_CANARY }],
+                        }),
+                      },
+                    ],
+                  };
+                }
+                if (profile === "responses") {
+                  if (calls > 1)
+                    assert.ok(
+                      messages.some(
+                        (message) =>
+                          message.toolCallId === `unsupported-${calls - 1}` &&
+                          message.content.includes("provider_unsupported"),
+                      ),
+                    );
+                  if (calls <= 2)
+                    return {
+                      role: "assistant" as const,
+                      content: "",
+                      toolCalls: [
+                        { id: `unsupported-${calls}`, name: triggers[calls - 1]!, arguments: "{}" },
+                      ],
+                    };
+                } else if (canExtract && calls === 1) {
+                  return {
+                    role: "assistant" as const,
+                    content: "",
+                    toolCalls: [{ id: "extract-profile", name: "memory_extract", arguments: "{}" }],
+                  };
+                }
+                return { role: "assistant" as const, content: "profile complete" };
+              },
+            },
+          },
+        );
+        // Let terminal-triggered work settle before the host enters drain mode.
+        await drainExtraction(fixture, sessionId);
+        await lifecycle.close();
+        assert.equal(extractionCalls, canExtract ? 1 : 0);
+        assert.equal((await store.listItems({ workspaceKey: workspaceKey(fixture) })).length, 1);
+      } finally {
+        await lifecycle.close();
+        store.close();
+        await closeSessions([sessionId], [fixture.workspace], fixture.picoHome);
+        await rm(fixture.root, { recursive: true, force: true });
+      }
+    });
+  }
+});
 
 test("committed Session A atomic memory reaches Session B AgentRuntime prompt but not another workspace", async () => {
   const fixture = await createFixture("cross-session");
@@ -648,7 +829,6 @@ async function createFixture(name: string): Promise<RuntimeFixture> {
   const workspace = join(root, "workspace");
   const picoHome = join(root, "pico-home");
   await Promise.all([mkdir(workspace, { recursive: true }), mkdir(picoHome, { recursive: true })]);
-  await ensureAtomicMemoryWorkspace(workspace, picoHome);
   return { root, workspace, picoHome };
 }
 

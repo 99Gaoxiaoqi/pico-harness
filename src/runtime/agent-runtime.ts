@@ -186,7 +186,6 @@ import type {
   RuntimeLifecycleEvent,
 } from "./runtime-contract.js";
 import { AtomicMemoryContextBuilder } from "../memory/atomic/context-builder.js";
-import { ensureAtomicMemoryWorkspace } from "../memory/atomic/migration.js";
 import { buildMemoryTriggerTools } from "../memory/memory-trigger-tools.js";
 import { SqliteMemoryItemStore } from "../storage/sqlite/sqlite-memory-item-store.js";
 import {
@@ -1069,23 +1068,22 @@ export async function executeAgentRuntime(
     }
     const memoryTrustStore =
       dependencies.memoryTrustStore ?? new WorkspaceTrustStore({ userStateDirectory: picoHome });
-    const memoryAllowed = async () => {
-      if (
-        backgroundPolicy ||
-        dependencies.isolatedHeadless ||
-        sideConversation ||
-        dependencies.agentGraph?.kind === "operator" ||
-        collaborationMode() === "plan"
-      )
+    // Maka separates prompt reads from extraction admission. Plan can read;
+    // side conversations and scheduled runs use the ordinary memory policy.
+    const memoryRecallAllowed = async () => {
+      if (dependencies.isolatedHeadless || dependencies.agentGraph?.kind === "operator")
         return { allowed: false as const, reason: "runtime_profile_disabled" };
       const canonical = await memoryTrustStore.canonicalize(workDir);
       return (await memoryTrustStore.isTrusted(canonical))
         ? { allowed: true as const }
         : { allowed: false as const, reason: "workspace_untrusted" };
     };
+    const memoryExtractionAllowed = async () =>
+      collaborationMode() === "plan"
+        ? { allowed: false as const, reason: "runtime_profile_disabled" }
+        : memoryRecallAllowed();
     try {
-      if ((await memoryAllowed()).allowed) {
-        await ensureAtomicMemoryWorkspace(workDir, picoHome);
+      if ((await memoryRecallAllowed()).allowed) {
         const memoryPaths = resolvePicoPaths(workDir, { picoHome });
         memoryRepository = new SqliteMemoryItemStore(atomicMemoryDatabasePath(picoHome));
         memoryContextBuilder = new AtomicMemoryContextBuilder(
@@ -1387,16 +1385,16 @@ export async function executeAgentRuntime(
     });
     const trackedProvider = providerAssembly.provider;
     const rebuildProvider = providerAssembly.rebuildProvider;
-    if (memoryRepository && kind !== "responses") {
+    if (memoryRepository && (await memoryExtractionAllowed()).allowed) {
       atomicMemoryRuntime = new AtomicMemoryRuntime({
         workDir,
         picoHome,
         sessionId: session.id,
-        gate: memoryAllowed,
+        gate: memoryExtractionAllowed,
         ...(dependencies.atomicMemoryLifecycle
           ? { lifecycle: dependencies.atomicMemoryLifecycle }
           : {}),
-        supported: true,
+        supported: kind !== "responses",
         ...(dependencies.memoryChangedSink ? { onChanged: dependencies.memoryChangedSink } : {}),
         modelFactory:
           dependencies.atomicMemoryModelFactory ??
@@ -1702,7 +1700,8 @@ export async function executeAgentRuntime(
     if (!backgroundPolicy && dependencies.scheduleDraftCoordinator) {
       registry.register(new ScheduleTaskTool(dependencies.scheduleDraftCoordinator));
     }
-    // 记忆触发器工具只标记意图；executor 在 completed terminal 落盘后统一入队。
+    // remember 同步提交；extract 在 completed terminal 落盘后入队。
+    // Responses 保留工具入口，但明确返回 provider_unsupported，不执行提取。
     if (atomicMemoryRuntime) {
       for (const tool of buildMemoryTriggerTools(atomicMemoryRuntime)) {
         registry.register(tool);
@@ -1791,10 +1790,9 @@ export async function executeAgentRuntime(
         const revisionTail = planRevisionRequestTurnTail(projection);
         if (revisionTail) turnTailParts.push(revisionTail);
       }
-      if (!sideConversation && memoryContextBuilder) {
+      if (memoryContextBuilder) {
         try {
-          const canonical = await memoryTrustStore.canonicalize(workDir);
-          if (await memoryTrustStore.isTrusted(canonical)) {
+          if ((await memoryRecallAllowed()).allowed) {
             const memory = await memoryContextBuilder.build(currentUserPrompt);
             if (memory.block) turnTailParts.push(memory.block);
           }

@@ -2,7 +2,6 @@
 
 > 文档状态：当前事实。依据 2026-09-07 的当前实现核对。生产链路已从
 > Fact/Proposal/Worker 切换到原子 Item；本文替代旧“提案式事实记忆”说明。
-> Maka 核验范围和实现历程见[任务记录](../plans/2026-09-07-maka-atomic-memory-redesign.md)。
 
 ## 1. 记忆分成什么
 
@@ -13,7 +12,7 @@
 | 原子长期记忆 | 跨会话保存稳定偏好、背景、知识等                 | 用户级 `$PICO_HOME/memory.sqlite`；按当前问题召回少量 Item              |
 
 长期记忆不等于聊天全文或压缩摘要。自动提取的内容来自受约束的用户证据；手动保存、编辑、
-归档和遗忘属于独立用户意图，不能靠重跑模型可靠恢复整个记忆库。
+归档和删除属于独立用户意图，不能靠重跑模型可靠恢复整个记忆库。
 
 同一 `PICO_HOME` 共用一个原子记忆库。`global` 条目可以在该用户的受信工作区中使用；
 `workspace` 条目只对匹配的工作区 key 可见。开关按工作区保存，不同 `PICO_HOME` 相互隔离。
@@ -50,10 +49,12 @@ flowchart TD
 不会触发 `memory_extract`；但此前同步 remember 或 checkpoint 提取已提交的内容不会随 Run
 后来失败而回滚。
 
-Runtime 只在受信工作区且运行配置允许时装配记忆，提取时还检查 Session 存在且未归档。
-Plan、Graph operator、side conversation、
-后台 Automation 和隔离 headless 路径不启用这套记忆。Responses Provider 不装配提取 runtime
-和两个触发工具；符合条件时仍可以召回已有记忆。
+Runtime 分别控制召回和提取，均要求受信工作区；提取还检查
+Session 存在且未归档。Plan 可以召回，不装配提取工具；旁路对话和后台 Automation
+不因会话类型单独关闭记忆。后台记忆工具进入可授权列表，仍须满足各 Job 的 `allowedTools`，
+不会自动扩大既有任务权限。Graph operator、普通子代理及隔离 headless 不注入或提取记忆。
+Responses Provider 保留两个触发工具，但调用返回 `provider_unsupported`，不发起提取模型调用，
+也不执行压缩提取；符合条件时仍可以召回已有记忆。召回读取原子记忆库，三个记忆开关按工作区生效。
 
 ### 提取与证据
 
@@ -127,9 +128,12 @@ receipt。修改用 expected version，提取覆盖推进用 cursor CAS；operat
 
 召回开关关闭、不受信或查询失败时不注入；失败会降级记录，不阻断普通对话。
 
-## 5. 用户控制与遗忘
+## 5. 用户控制与删除
 
-桌面记忆页提供已保存/已归档列表、正文编辑、范围和来源展示、归档/恢复、遗忘，以及三个
+“添加记忆”表单直接调用 `memory.create` 保存当前工作区笔记，不调用模型。保存失败时保留输入；
+相同正文复用已有条目，已归档的相同正文会恢复。保存后仍按相关性和召回开关选取，不保证每轮注入。
+
+桌面记忆页提供手动添加、已保存/已归档列表、正文编辑、范围和来源展示、归档/恢复、删除，以及三个
 按工作区生效的开关：
 
 | 存储字段        | 含义                                                     | 兼容协议字段       |
@@ -148,10 +152,16 @@ receipt。修改用 expected version，提取覆盖推进用 cursor CAS；operat
 /memory undo <token>      版本仍匹配时归档刚保存的条目
 ```
 
-归档停止召回但保留正文，可恢复；undo 也是归档。遗忘则删除新库当前 Item、keys、sources 及
-有关回执中的正文，保留不含正文的来源抑制和必要操作记录，阻止旧证据重试或重建把它恢复出来。
-这不删除原始会话、旧数据库或外部备份，也不是磁盘介质擦除。用户在新消息中重新提供信息不
-等于旧证据重放，不能承诺该内容永远不会再次被记住。
+归档停止召回但保留正文，可恢复；undo 也是归档。删除记忆会清除当前 Item、keys、sources
+及有关回执中的正文，删除操作统一记录到 `memory_write_operations`，不保存旧来源黑名单。
+原始聊天仍会保留；用户之后重新提供信息或明确要求记住旧聊天中的信息，可以重新保存。
+这不删除原始会话、旧数据库或外部备份，也不是磁盘介质擦除。
+
+为防止删除前已在途的提取把内容写回来，Snapshot 在捕获/请求入队前保存删除代次，
+提交及失败结算在 SQLite 事务中复核该代次。代次来自操作表中已提交的 `delete` 记录数，
+重复删除请求不会增加代次，不依赖时间戳。当前采用整个记忆库的代次：一次删除会使该库
+所有旧代次任务失效，新任务正常运行。待重试失败范围也记录代次；旧代次范围以
+`skipped / memory_deleted` 空结算并推进游标，不重新执行删除前的显式保存请求。
 
 Session 删除不删除已提交 Item；删除后不再为该 Session 新提取。当前管理协议只投影第一条
 来源，未实时验证原事件是否仍可打开，不能把显示的来源等同于永久可用的证据链接。
@@ -164,27 +174,19 @@ global 条目在同一用户的受信工作区可管理，其他 workspace 的�
 的 `/memory status` 仍显示旧 Review/Pending 字段，undo 提示仍写 disabled；实际后端已经是
 直接保存/归档语义。这是尚待对齐的界面措辞，不是旧审核机制仍在运行。
 
-## 6. 旧数据迁移和备份
+## 6. 数据库结构与备份
 
-受信工作区首次访问原子记忆时，`ensureAtomicMemoryWorkspace` 只读检查该工作区 `pico.sqlite`
-中的旧 memory 表，并把迁移结果与 marker 事务写入用户级新库：
+原子记忆库 Schema 为 v9，共 9 张业务表。工作区开关继续保存在 `memory_settings`。
+其余八张表保存条目、关键词、当前来源、写入操作、提取游标、回执、失败范围和压缩策略拒绝记录。
+运行时不再检查或导入旧 Fact/Proposal 数据，也不从旧库读取记忆设置或回退召回。
 
-| 旧数据                        | 处理                                                         |
-| ----------------------------- | ------------------------------------------------------------ |
-| active Fact                   | 导入 active workspace Item                                   |
-| disabled / archived Fact      | 导入 archived Item                                           |
-| pending Proposal              | 统计并保全在旧库，不自动生效                                 |
-| forgotten / suppressed Source | 不导入正文，迁移已有来源事件的抑制信息                       |
-| 长正文                        | 标题和正文合并后按 2000 code point 分块，保存迁移 provenance |
-| 旧 settings                   | 映射三个开关；旧 eco 使 autoExtract 关闭                     |
+新库直接在一个事务中创建当前 9 张表和索引，不执行历史版本升级脚本。
+已有当前版本库只校验结构并打开；其他版本或非空且未标记版本的库明确拒绝打开，
+不自动升级或清空。版本号仅用于识别结构是否兼容。
 
-迁移会验证旧工作区身份和必要表/设置，缺失或损坏时拒绝迁移；旧库不被重写、删除或当作召回
-fallback。marker 使重复访问和并发迁移幂等。手动 Fact 没有 RuntimeEvent 时使用明确的迁移
-记录，不伪造会话来源。旧 JSONL 或 workspace split-era 文件不属于这次自动迁移范围。
-
-备份需同时考虑 `$PICO_HOME/memory.sqlite` 和各 workspace `pico.sqlite`；前者是跨工作区
-长期记忆，后者保留会话证据与旧记忆保全副本。运行中的库须用一致的 SQLite 备份方式，不能
-只复制主文件而遗漏 WAL。新库已有写入后，不能通过直接恢复旧库回退而丢失新增记忆或遗忘抑制。
+备份需同时考虑 `$PICO_HOME/memory.sqlite` 和各 workspace `pico.sqlite`；前者保存
+长期记忆，后者保存会话证据。运行中的库须用一致的 SQLite 备份方式，不能只复制主文件而
+遗漏 WAL。旧备份可能包含后来已删除的记忆，恢复时需留意备份的时间范围。
 
 ## 7. 代码与验证入口
 
@@ -195,7 +197,7 @@ fallback。marker 使重复访问和并发迁移幂等。手动 Fact 没有 Runt
 | 提取、引文校验、规范化与恢复             | [extraction-engine.ts](../../src/memory/atomic/extraction-engine.ts)、[extraction-evidence.ts](../../src/memory/atomic/extraction-evidence.ts)、[extraction-proposal.ts](../../src/memory/atomic/extraction-proposal.ts) |
 | Item 契约与 SQLite 存储                  | [contracts.ts](../../src/memory/atomic/contracts.ts)、[sqlite-memory-item-store.ts](../../src/storage/sqlite/sqlite-memory-item-store.ts)                                                                                |
 | 关键词召回与预算                         | [context-builder.ts](../../src/memory/atomic/context-builder.ts)                                                                                                                                                         |
-| 管理、开关与迁移                         | [desktop-atomic-memory-service.ts](../../src/daemon/desktop-atomic-memory-service.ts)、[migration.ts](../../src/memory/atomic/migration.ts)                                                                              |
+| 管理与开关                               | [desktop-atomic-memory-service.ts](../../src/daemon/desktop-atomic-memory-service.ts)                                                                                                                                    |
 | 命令入口                                 | [client-commands.ts](../../src/tui/client-commands.ts)、[memory-command.ts](../../src/memory/memory-command.ts)                                                                                                          |
 
 确定性覆盖见 `tests/integration/atomic-memory-*.test.ts`、

@@ -1,4 +1,12 @@
-import { Archive, ArchiveRestore, BrainCircuit, Pencil, RefreshCw, Trash2 } from "lucide-react";
+import {
+  Archive,
+  ArchiveRestore,
+  BrainCircuit,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Trash2,
+} from "lucide-react";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import type { RuntimeAtomicMemoryDetails, RuntimeMemoryFact } from "@pico/protocol";
 import { Button, EmptyState, IconButton, InlineNotice } from "./components.js";
@@ -61,6 +69,53 @@ export function MemoryPage({
   const [activePanel, setActivePanel] = useState<PanelId>("saved");
   const [editor, setEditor] = useState<{ id: string; content: string }>();
   const [announcement, setAnnouncement] = useState("");
+  const [draft, setDraft] = useState<{ workspacePath: string; content: string }>();
+  const [creationNotice, setCreationNotice] = useState("");
+  const addButtonRef = useRef<HTMLButtonElement>(null);
+  const contentRef = useRef<HTMLTextAreaElement>(null);
+  const returnFocusRef = useRef(false);
+  const creatingRef = useRef(false);
+  const workspaceRef = useRef(data.workspacePath);
+  workspaceRef.current = data.workspacePath;
+  const adding = Boolean(draft && draft.workspacePath === data.workspacePath);
+  useEffect(() => {
+    returnFocusRef.current = false;
+    setDraft(undefined);
+    setCreationNotice("");
+  }, [data.workspacePath]);
+  useEffect(() => {
+    if (adding) {
+      returnFocusRef.current = true;
+      contentRef.current?.focus();
+    } else if (returnFocusRef.current && !busy) {
+      returnFocusRef.current = false;
+      addButtonRef.current?.focus();
+    }
+  }, [adding, busy]);
+  const openAdd = () => {
+    if (!data.workspacePath || !data.trusted || busy) return;
+    setCreationNotice("");
+    setDraft({ workspacePath: data.workspacePath, content: "" });
+  };
+  const cancelAdd = () => {
+    if (creatingRef.current) return;
+    setDraft(undefined);
+  };
+  const create = async () => {
+    if (!draft || !adding || !draft.content.trim() || busy || creatingRef.current) return;
+    const submitted = draft;
+    creatingRef.current = true;
+    try {
+      const fact = await actions.createMemoryFact(submitted.content.trim());
+      if (!fact || workspaceRef.current !== submitted.workspacePath) return;
+      setDraft((current) => (current === submitted ? undefined : current));
+      setActivePanel("saved");
+      setCreationNotice("记忆已保存到当前工作区。");
+      setAnnouncement("记忆已保存到当前工作区。");
+    } finally {
+      creatingRef.current = false;
+    }
+  };
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const groups = {
     saved: memory.facts.filter((fact) => fact.state === "active"),
@@ -99,12 +154,14 @@ export function MemoryPage({
   const forget = async (fact: RuntimeMemoryFact) => {
     if (
       typeof window === "undefined" ||
-      !window.confirm("永久遗忘这条记忆？内容将被删除，无法恢复。")
+      !window.confirm(
+        "删除这条记忆？将从长期记忆中删除，无法恢复。原聊天记录仍会保留；之后重新提供或要求记住的信息仍可保存。",
+      )
     )
       return;
     if (await actions.forgetMemoryFact(fact.factId, fact.version)) {
       setEditor(undefined);
-      setAnnouncement("记忆已遗忘。");
+      setAnnouncement("记忆已删除。");
     }
   };
   const changeSetting = async (
@@ -182,7 +239,7 @@ export function MemoryPage({
                     )}
                   </IconButton>
                   <IconButton
-                    label={`永久遗忘 ${fact.title || "记忆"}`}
+                    label={`删除记忆 ${fact.title || "记忆"}`}
                     disabled={Boolean(busy)}
                     onClick={() => void forget(fact)}
                   >
@@ -200,7 +257,7 @@ export function MemoryPage({
         title={panel === "saved" ? "还没有已保存的记忆" : "没有已归档的记忆"}
         detail={
           panel === "saved"
-            ? "对话中的长期信息会在提取后保存；你也可以请 Pico 记住一条信息。"
+            ? "可以手动添加项目约定或偏好，也可以在对话中请 Pico 记住一条信息。"
             : "归档条目不会参与会话召回，可以随时恢复。"
         }
       />
@@ -214,24 +271,110 @@ export function MemoryPage({
           <h2 id="memory-page-title">工作区记忆</h2>
           <p>管理已保存的信息。全局记忆可跨工作区使用，归档后不再参与召回。</p>
         </div>
-        <Button
-          variant="quiet"
-          disabled={Boolean(busy) || !data.trusted}
-          onClick={() => void actions.refreshMemory()}
-        >
-          <RefreshCw aria-hidden="true" size={14} />
-          刷新
-        </Button>
+        <div className="memory-page__actions">
+          <Button
+            ref={addButtonRef}
+            variant="primary"
+            disabled={Boolean(busy) || !data.trusted || !data.workspacePath || adding}
+            aria-expanded={adding}
+            aria-controls="memory-add-form"
+            onClick={openAdd}
+          >
+            <Plus aria-hidden="true" size={14} />
+            添加记忆
+          </Button>
+          <Button
+            variant="quiet"
+            disabled={Boolean(busy) || !data.trusted}
+            onClick={() => void actions.refreshMemory()}
+          >
+            <RefreshCw aria-hidden="true" size={14} />
+            刷新
+          </Button>
+        </div>
       </header>
       <p className="sr-only" role="status" aria-live="polite">
         {announcement}
       </p>
-      {runtime.message && <InlineNotice tone="error">{runtime.message}</InlineNotice>}
+      {runtime.message && (
+        <InlineNotice
+          tone={
+            ["记忆已更新。", "记忆设置已更新。", "记忆已删除，无法撤销。"].includes(runtime.message)
+              ? "success"
+              : "error"
+          }
+        >
+          {runtime.message}
+        </InlineNotice>
+      )}
       {memory.error && <InlineNotice tone="error">{memory.error}</InlineNotice>}
       {!data.trusted ? (
         <InlineNotice tone="warning">信任当前工作区后可管理记忆。</InlineNotice>
       ) : (
         <>
+          {creationNotice && <InlineNotice tone="success">{creationNotice}</InlineNotice>}
+          {adding && draft && (
+            <form
+              id="memory-add-form"
+              className="memory-add-form"
+              aria-labelledby="memory-add-title"
+              aria-busy={busy === "memory-create"}
+              onSubmit={(event) => {
+                event.preventDefault();
+                void create();
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  cancelAdd();
+                }
+                if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                  event.preventDefault();
+                  void create();
+                }
+              }}
+            >
+              <h3 id="memory-add-title">添加记忆</h3>
+              <p id="memory-add-help">
+                保存到当前工作区：{data.workspacePath}
+                。内容直接保存，不调用模型；在相关对话中按需召回。相同内容会复用已有记忆，归档内容会恢复。
+              </p>
+              <div className="memory-editor">
+                <label htmlFor="memory-add-content">记忆内容</label>
+                <textarea
+                  id="memory-add-content"
+                  ref={contentRef}
+                  rows={4}
+                  maxLength={2000}
+                  required
+                  disabled={Boolean(busy)}
+                  aria-describedby="memory-add-help memory-add-length"
+                  placeholder="例如：项目发布前必须运行 npm run verify。"
+                  value={draft.content}
+                  onChange={(event) => setDraft({ ...draft, content: event.target.value })}
+                />
+                <small id="memory-add-length">{draft.content.length} / 2000</small>
+              </div>
+              {(!memory.settings?.enabled || !memory.settings?.injectionEnabled) &&
+                memory.settings && (
+                  <InlineNotice>
+                    当前记忆或会话召回已关闭，仍可保存；开启后才会参与召回。
+                  </InlineNotice>
+                )}
+              <div className="memory-page__actions">
+                <Button
+                  type="submit"
+                  variant="primary"
+                  disabled={Boolean(busy) || !draft.content.trim()}
+                >
+                  {busy === "memory-create" ? "保存中…" : "保存记忆"}
+                </Button>
+                <Button variant="quiet" disabled={Boolean(busy)} onClick={cancelAdd}>
+                  取消
+                </Button>
+              </div>
+            </form>
+          )}
           {narrow ? (
             <div className="memory-tabs">
               <div className="memory-tablist" role="tablist" aria-label="记忆状态">
@@ -326,7 +469,9 @@ function SourceDetails({ fact }: { readonly fact: RuntimeMemoryFact }) {
     <details className="memory-source">
       <summary>
         {atomic?.origin === "user_requested"
-          ? "用户保存"
+          ? fact.source
+            ? "用户保存"
+            : "手动保存"
           : atomic?.origin === "agent_extracted"
             ? "对话提取"
             : "来源信息"}

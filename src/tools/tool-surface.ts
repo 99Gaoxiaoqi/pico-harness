@@ -149,8 +149,6 @@ const TOOL_HOST_AFFINITY: Readonly<Record<string, Partial<Record<ToolHostKind, T
     delegate_task: { background: "unsupported" },
     delegate_status: { background: "unsupported" },
     spawn_subagent: { background: "unsupported" },
-    memory_remember: { background: "unsupported" },
-    memory_extract: { background: "unsupported" },
     // headless 显式白名单（fail-closed）。read_evidence 已随 Evidence 回读协议
     // 退役（ADR 26，票 E3）；code_*/goal/skill/graph 等未列工具默认 unsupported。
     read_file: { headless: "supported" },

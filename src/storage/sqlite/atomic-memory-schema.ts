@@ -19,23 +19,82 @@
 
 import type { DatabaseSync } from "node:sqlite";
 
-export const SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION = 7;
+export const SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION = 9;
 
 const SQLITE_INITIALIZATION_BUSY_TIMEOUT_MS = 5_000;
 const SQLITE_INITIALIZATION_RETRY_DELAY_MS = 10;
 const initializationRetryGate = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
 
-export type SqliteLongTermMemoryMigrationFailpoint = "after_schema_sql";
+// A fresh database is created directly in the current shape. No historical upgrades.
+const CURRENT_SCHEMA_SQL = `
+CREATE TABLE memory_compaction_policy_denials (
+      session_id TEXT NOT NULL CHECK (length(session_id) > 0),
+      compaction_checkpoint_id TEXT NOT NULL CHECK (length(compaction_checkpoint_id) > 0),
+      denied_at INTEGER NOT NULL CHECK (denied_at >= 0),
+      PRIMARY KEY(session_id, compaction_checkpoint_id)
+    ) WITHOUT ROWID;
 
-export interface SqliteLongTermMemoryMigrationOptions {
-  readonly failpoint?: (point: SqliteLongTermMemoryMigrationFailpoint) => void;
-}
+CREATE TABLE memory_extraction_cursors (
+      session_id TEXT PRIMARY KEY CHECK (length(session_id) > 0),
+      processed_ordinal INTEGER NOT NULL CHECK (processed_ordinal > 0),
+      updated_at INTEGER NOT NULL CHECK (updated_at >= 0)
+    );
 
-const MIGRATIONS: ReadonlyMap<number, string> = new Map([
-  [
-    1,
-    `
-    CREATE TABLE memory_items (
+CREATE TABLE memory_extraction_failures (
+      session_id TEXT PRIMARY KEY CHECK (length(session_id) > 0),
+      from_ordinal INTEGER NOT NULL CHECK (from_ordinal > 0),
+      through_ordinal INTEGER NOT NULL CHECK (through_ordinal >= from_ordinal),
+      coverage_hash TEXT NOT NULL CHECK (length(coverage_hash) = 64),
+      first_operation_id TEXT NOT NULL UNIQUE CHECK (length(first_operation_id) > 0),
+      first_trigger TEXT NOT NULL CHECK (
+        first_trigger IN ('remember', 'extract', 'compaction')
+      ),
+      compaction_checkpoint_id TEXT CHECK (
+        compaction_checkpoint_id IS NULL OR length(compaction_checkpoint_id) > 0
+      ),
+      first_failure_class TEXT NOT NULL CHECK (
+        first_failure_class IN (
+          'provider', 'schema', 'evidence', 'localization', 'requested_admission'
+        )
+      ),
+      failed_at INTEGER NOT NULL CHECK (failed_at >= 0),
+      deletion_revision INTEGER NOT NULL CHECK (deletion_revision >= 0),
+      CHECK (
+        (first_trigger = 'compaction' AND compaction_checkpoint_id IS NOT NULL)
+        OR (first_trigger != 'compaction' AND compaction_checkpoint_id IS NULL)
+      )
+    );
+
+CREATE TABLE memory_extraction_receipts (
+      operation_id TEXT PRIMARY KEY CHECK (length(operation_id) > 0),
+      session_id TEXT NOT NULL CHECK (length(session_id) > 0),
+      request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+      result_json TEXT NOT NULL,
+      committed_at INTEGER NOT NULL CHECK (committed_at >= 0),
+      FOREIGN KEY (operation_id) REFERENCES memory_write_operations(operation_id) ON DELETE CASCADE
+    );
+
+CREATE TABLE memory_item_keys (
+      item_id TEXT NOT NULL,
+      key_text TEXT NOT NULL CHECK (length(key_text) > 0),
+      normalized_key TEXT NOT NULL CHECK (length(normalized_key) > 0),
+      key_type TEXT NOT NULL CHECK (key_type IN ('exact', 'entity', 'concept', 'alias', 'code')),
+      key_origin TEXT NOT NULL CHECK (key_origin IN ('deterministic', 'llm', 'user')),
+      PRIMARY KEY(item_id, normalized_key),
+      FOREIGN KEY(item_id) REFERENCES memory_items(item_id) ON DELETE CASCADE
+    ) WITHOUT ROWID;
+
+CREATE TABLE memory_item_sources (
+      item_id TEXT NOT NULL,
+      session_id TEXT NOT NULL CHECK (length(session_id) > 0),
+      run_id TEXT NOT NULL CHECK (length(run_id) > 0),
+      turn_id TEXT NOT NULL CHECK (length(turn_id) > 0),
+      event_id TEXT NOT NULL CHECK (length(event_id) > 0),
+      PRIMARY KEY(item_id, event_id),
+      FOREIGN KEY(item_id) REFERENCES memory_items(item_id) ON DELETE CASCADE
+    ) WITHOUT ROWID;
+
+CREATE TABLE memory_items (
       item_id TEXT PRIMARY KEY,
       version INTEGER NOT NULL CHECK (version >= 1),
       content TEXT NOT NULL CHECK (length(content) > 0),
@@ -86,207 +145,82 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
       CHECK (observed_at <= updated_at)
     );
 
-    CREATE INDEX memory_items_by_scope_and_lifecycle
-      ON memory_items(scope_type, scope_key, lifecycle_state, updated_at DESC, item_id);
-
-    CREATE TABLE memory_item_keys (
-      item_id TEXT NOT NULL,
-      key_text TEXT NOT NULL CHECK (length(key_text) > 0),
-      normalized_key TEXT NOT NULL CHECK (length(normalized_key) > 0),
-      key_type TEXT NOT NULL CHECK (key_type IN ('exact', 'entity', 'concept', 'alias', 'code')),
-      key_origin TEXT NOT NULL CHECK (key_origin IN ('deterministic', 'llm', 'user')),
-      PRIMARY KEY(item_id, normalized_key),
-      FOREIGN KEY(item_id) REFERENCES memory_items(item_id) ON DELETE CASCADE
-    ) WITHOUT ROWID;
-
-    CREATE INDEX memory_item_keys_by_normalized_key
-      ON memory_item_keys(normalized_key, item_id);
-
-    CREATE TABLE memory_item_sources (
-      item_id TEXT NOT NULL,
-      session_id TEXT NOT NULL CHECK (length(session_id) > 0),
-      run_id TEXT NOT NULL CHECK (length(run_id) > 0),
-      turn_id TEXT NOT NULL CHECK (length(turn_id) > 0),
-      event_id TEXT NOT NULL CHECK (length(event_id) > 0),
-      PRIMARY KEY(item_id, event_id),
-      FOREIGN KEY(item_id) REFERENCES memory_items(item_id) ON DELETE CASCADE
-    ) WITHOUT ROWID;
-
-    CREATE INDEX memory_item_sources_by_event
-      ON memory_item_sources(event_id, item_id);
-
-    CREATE INDEX memory_item_sources_by_turn
-      ON memory_item_sources(session_id, turn_id, item_id);
-
-    CREATE TABLE memory_write_operations (
-      operation_id TEXT PRIMARY KEY,
-      operation_type TEXT NOT NULL CHECK (
-        operation_type IN ('create', 'update', 'archive', 'restore', 'batch')
-      ),
-      request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
-      result_json TEXT NOT NULL,
-      committed_at INTEGER NOT NULL CHECK (committed_at >= 0)
-    );
-  `,
-  ],
-  [
-    2,
-    `
-    CREATE TABLE memory_extraction_cursors (
-      session_id TEXT PRIMARY KEY CHECK (length(session_id) > 0),
-      processed_ordinal INTEGER NOT NULL CHECK (processed_ordinal > 0),
-      updated_at INTEGER NOT NULL CHECK (updated_at >= 0)
-    );
-
-    CREATE TABLE memory_extraction_receipts (
-      operation_id TEXT PRIMARY KEY CHECK (length(operation_id) > 0),
-      session_id TEXT NOT NULL CHECK (length(session_id) > 0),
-      request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
-      result_json TEXT NOT NULL,
-      committed_at INTEGER NOT NULL CHECK (committed_at >= 0),
-      FOREIGN KEY (operation_id) REFERENCES memory_write_operations(operation_id) ON DELETE CASCADE
-    );
-  `,
-  ],
-  [
-    3,
-    `
-    CREATE TABLE memory_extraction_failures (
-      session_id TEXT PRIMARY KEY CHECK (length(session_id) > 0),
-      from_ordinal INTEGER NOT NULL CHECK (from_ordinal > 0),
-      through_ordinal INTEGER NOT NULL CHECK (through_ordinal >= from_ordinal),
-      coverage_hash TEXT NOT NULL CHECK (length(coverage_hash) = 64),
-      first_operation_id TEXT NOT NULL UNIQUE CHECK (length(first_operation_id) > 0),
-      first_trigger TEXT NOT NULL CHECK (first_trigger IN ('remember', 'extract')),
-      first_failure_class TEXT NOT NULL CHECK (
-        first_failure_class IN (
-          'provider', 'schema', 'evidence', 'localization', 'requested_admission'
-        )
-      ),
-      failed_at INTEGER NOT NULL CHECK (failed_at >= 0)
-    );
-  `,
-  ],
-  [
-    4,
-    `
-    ALTER TABLE memory_extraction_failures RENAME TO memory_extraction_failures_v3;
-
-    CREATE TABLE memory_extraction_failures (
-      session_id TEXT PRIMARY KEY CHECK (length(session_id) > 0),
-      from_ordinal INTEGER NOT NULL CHECK (from_ordinal > 0),
-      through_ordinal INTEGER NOT NULL CHECK (through_ordinal >= from_ordinal),
-      coverage_hash TEXT NOT NULL CHECK (length(coverage_hash) = 64),
-      first_operation_id TEXT NOT NULL UNIQUE CHECK (length(first_operation_id) > 0),
-      first_trigger TEXT NOT NULL CHECK (
-        first_trigger IN ('remember', 'extract', 'compaction')
-      ),
-      compaction_checkpoint_id TEXT CHECK (
-        compaction_checkpoint_id IS NULL OR length(compaction_checkpoint_id) > 0
-      ),
-      first_failure_class TEXT NOT NULL CHECK (
-        first_failure_class IN (
-          'provider', 'schema', 'evidence', 'localization', 'requested_admission'
-        )
-      ),
-      failed_at INTEGER NOT NULL CHECK (failed_at >= 0),
-      CHECK (
-        (first_trigger = 'compaction' AND compaction_checkpoint_id IS NOT NULL)
-        OR (first_trigger != 'compaction' AND compaction_checkpoint_id IS NULL)
-      )
-    );
-
-    INSERT INTO memory_extraction_failures(
-      session_id, from_ordinal, through_ordinal, coverage_hash,
-      first_operation_id, first_trigger, compaction_checkpoint_id,
-      first_failure_class, failed_at
-    )
-    SELECT
-      session_id, from_ordinal, through_ordinal, coverage_hash,
-      first_operation_id, first_trigger, NULL,
-      first_failure_class, failed_at
-    FROM memory_extraction_failures_v3;
-
-    DROP TABLE memory_extraction_failures_v3;
-  `,
-  ],
-  [
-    5,
-    `
-    CREATE TABLE memory_compaction_policy_denials (
-      session_id TEXT NOT NULL CHECK (length(session_id) > 0),
-      compaction_checkpoint_id TEXT NOT NULL CHECK (length(compaction_checkpoint_id) > 0),
-      denied_at INTEGER NOT NULL CHECK (denied_at >= 0),
-      PRIMARY KEY(session_id, compaction_checkpoint_id)
-    ) WITHOUT ROWID;
-  `,
-  ],
-]);
-
-// Pico management extensions; the Maka v1-v5 migrations remain unchanged.
-(MIGRATIONS as Map<number, string>).set(
-  6,
-  `
-  CREATE TABLE memory_settings (
+CREATE TABLE memory_settings (
     workspace_key TEXT PRIMARY KEY,
     version INTEGER NOT NULL CHECK(version >= 1),
     enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
     auto_extract INTEGER NOT NULL CHECK(auto_extract IN (0, 1)),
     recall_enabled INTEGER NOT NULL CHECK(recall_enabled IN (0, 1))
   );
-  CREATE TABLE memory_forgotten_sources (
-    source_hash TEXT PRIMARY KEY CHECK(length(source_hash) = 64)
-  ) WITHOUT ROWID;
-  CREATE TABLE memory_item_source_history (
-    item_id TEXT NOT NULL REFERENCES memory_items(item_id) ON DELETE CASCADE,
-    session_id TEXT NOT NULL, run_id TEXT NOT NULL, turn_id TEXT NOT NULL, event_id TEXT NOT NULL,
-    PRIMARY KEY(item_id, session_id, run_id, turn_id, event_id)
-  ) WITHOUT ROWID;
-  INSERT INTO memory_item_source_history SELECT item_id, session_id, run_id, turn_id, event_id FROM memory_item_sources;
-  CREATE TABLE memory_forget_operations (
-    operation_id TEXT PRIMARY KEY,
-    request_hash TEXT NOT NULL CHECK(length(request_hash) = 64)
-  ) WITHOUT ROWID;
-`,
-);
 
-(MIGRATIONS as Map<number, string>).set(
-  7,
-  `
-  CREATE TABLE memory_suppressed_events (evidence_hash TEXT PRIMARY KEY CHECK(length(evidence_hash) = 64)) WITHOUT ROWID;
-  CREATE TABLE memory_workspace_migrations (workspace_key TEXT PRIMARY KEY, report_json TEXT NOT NULL) WITHOUT ROWID;
-  CREATE TABLE memory_migration_source_events (
-    item_id TEXT NOT NULL REFERENCES memory_items(item_id) ON DELETE CASCADE,
-    evidence_hash TEXT NOT NULL CHECK(length(evidence_hash) = 64),
-    PRIMARY KEY(item_id, evidence_hash)
-  ) WITHOUT ROWID;
-  CREATE TABLE memory_migration_origins (
-    item_id TEXT PRIMARY KEY REFERENCES memory_items(item_id) ON DELETE CASCADE,
-    origin_json TEXT NOT NULL
-  ) WITHOUT ROWID;
-`,
-);
+CREATE TABLE memory_write_operations (
+      operation_id TEXT PRIMARY KEY,
+      operation_type TEXT NOT NULL CHECK (
+        operation_type IN ('create', 'update', 'archive', 'restore', 'batch', 'delete')
+      ),
+      request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+      result_json TEXT NOT NULL,
+      committed_at INTEGER NOT NULL CHECK (committed_at >= 0)
+    );
 
-interface MinimumTableShape {
-  readonly name: string;
-  readonly requiredColumns: readonly string[];
-}
+CREATE INDEX memory_write_operations_by_type ON memory_write_operations(operation_type);
 
-interface MinimumIndexShape {
-  readonly name: string;
-  readonly tableName: string;
-  readonly requiredColumnPrefix: readonly string[];
-}
+CREATE INDEX memory_item_keys_by_normalized_key
+      ON memory_item_keys(normalized_key, item_id);
 
-interface MinimumSchemaShape {
-  readonly tables: readonly MinimumTableShape[];
-  readonly indexes: readonly MinimumIndexShape[];
-}
+CREATE INDEX memory_item_sources_by_event
+      ON memory_item_sources(event_id, item_id);
 
-// Each entry describes the complete minimum shape required by that schema version. Extra
-// columns and indexes are allowed so additive migrations do not fail exact-DDL validation.
-const VERSION_1_MINIMUM_SCHEMA_SHAPE: MinimumSchemaShape = {
+CREATE INDEX memory_item_sources_by_turn
+      ON memory_item_sources(session_id, turn_id, item_id);
+
+CREATE INDEX memory_items_by_scope_and_lifecycle
+      ON memory_items(scope_type, scope_key, lifecycle_state, updated_at DESC, item_id);
+`;
+
+const CURRENT_SCHEMA_SHAPE = {
   tables: [
+    {
+      name: "memory_compaction_policy_denials",
+      requiredColumns: ["session_id", "compaction_checkpoint_id", "denied_at"],
+    },
+    {
+      name: "memory_extraction_cursors",
+      requiredColumns: ["session_id", "processed_ordinal", "updated_at"],
+    },
+    {
+      name: "memory_extraction_failures",
+      requiredColumns: [
+        "session_id",
+        "from_ordinal",
+        "through_ordinal",
+        "coverage_hash",
+        "first_operation_id",
+        "first_trigger",
+        "compaction_checkpoint_id",
+        "first_failure_class",
+        "failed_at",
+        "deletion_revision",
+      ],
+    },
+    {
+      name: "memory_extraction_receipts",
+      requiredColumns: [
+        "operation_id",
+        "session_id",
+        "request_hash",
+        "result_json",
+        "committed_at",
+      ],
+    },
+    {
+      name: "memory_item_keys",
+      requiredColumns: ["item_id", "key_text", "normalized_key", "key_type", "key_origin"],
+    },
+    {
+      name: "memory_item_sources",
+      requiredColumns: ["item_id", "session_id", "run_id", "turn_id", "event_id"],
+    },
     {
       name: "memory_items",
       requiredColumns: [
@@ -309,12 +243,8 @@ const VERSION_1_MINIMUM_SCHEMA_SHAPE: MinimumSchemaShape = {
       ],
     },
     {
-      name: "memory_item_keys",
-      requiredColumns: ["item_id", "key_text", "normalized_key", "key_type", "key_origin"],
-    },
-    {
-      name: "memory_item_sources",
-      requiredColumns: ["item_id", "session_id", "run_id", "turn_id", "event_id"],
+      name: "memory_settings",
+      requiredColumns: ["workspace_key", "version", "enabled", "auto_extract", "recall_enabled"],
     },
     {
       name: "memory_write_operations",
@@ -336,155 +266,6 @@ const VERSION_1_MINIMUM_SCHEMA_SHAPE: MinimumSchemaShape = {
   ],
 };
 
-const MINIMUM_SCHEMA_SHAPES = new Map<number, MinimumSchemaShape>([
-  [1, VERSION_1_MINIMUM_SCHEMA_SHAPE],
-  [
-    2,
-    {
-      tables: [
-        ...VERSION_1_MINIMUM_SCHEMA_SHAPE.tables,
-        {
-          name: "memory_extraction_cursors",
-          requiredColumns: ["session_id", "processed_ordinal", "updated_at"],
-        },
-        {
-          name: "memory_extraction_receipts",
-          requiredColumns: [
-            "operation_id",
-            "session_id",
-            "request_hash",
-            "result_json",
-            "committed_at",
-          ],
-        },
-      ],
-      indexes: VERSION_1_MINIMUM_SCHEMA_SHAPE.indexes,
-    },
-  ],
-  [
-    3,
-    {
-      tables: [
-        ...VERSION_1_MINIMUM_SCHEMA_SHAPE.tables,
-        {
-          name: "memory_extraction_cursors",
-          requiredColumns: ["session_id", "processed_ordinal", "updated_at"],
-        },
-        {
-          name: "memory_extraction_receipts",
-          requiredColumns: [
-            "operation_id",
-            "session_id",
-            "request_hash",
-            "result_json",
-            "committed_at",
-          ],
-        },
-        {
-          name: "memory_extraction_failures",
-          requiredColumns: [
-            "session_id",
-            "from_ordinal",
-            "through_ordinal",
-            "coverage_hash",
-            "first_operation_id",
-            "first_trigger",
-            "first_failure_class",
-            "failed_at",
-          ],
-        },
-      ],
-      indexes: VERSION_1_MINIMUM_SCHEMA_SHAPE.indexes,
-    },
-  ],
-  [
-    4,
-    {
-      tables: [
-        ...VERSION_1_MINIMUM_SCHEMA_SHAPE.tables,
-        {
-          name: "memory_extraction_cursors",
-          requiredColumns: ["session_id", "processed_ordinal", "updated_at"],
-        },
-        {
-          name: "memory_extraction_receipts",
-          requiredColumns: [
-            "operation_id",
-            "session_id",
-            "request_hash",
-            "result_json",
-            "committed_at",
-          ],
-        },
-        {
-          name: "memory_extraction_failures",
-          requiredColumns: [
-            "session_id",
-            "from_ordinal",
-            "through_ordinal",
-            "coverage_hash",
-            "first_operation_id",
-            "first_trigger",
-            "compaction_checkpoint_id",
-            "first_failure_class",
-            "failed_at",
-          ],
-        },
-      ],
-      indexes: VERSION_1_MINIMUM_SCHEMA_SHAPE.indexes,
-    },
-  ],
-]);
-
-const version4MinimumShape = MINIMUM_SCHEMA_SHAPES.get(4)!;
-MINIMUM_SCHEMA_SHAPES.set(5, {
-  tables: [
-    ...version4MinimumShape.tables,
-    {
-      name: "memory_compaction_policy_denials",
-      requiredColumns: ["session_id", "compaction_checkpoint_id", "denied_at"],
-    },
-  ],
-  indexes: version4MinimumShape.indexes,
-});
-
-MINIMUM_SCHEMA_SHAPES.set(6, {
-  tables: [
-    ...MINIMUM_SCHEMA_SHAPES.get(5)!.tables,
-    {
-      name: "memory_settings",
-      requiredColumns: ["workspace_key", "version", "enabled", "auto_extract", "recall_enabled"],
-    },
-    { name: "memory_forgotten_sources", requiredColumns: ["source_hash"] },
-    {
-      name: "memory_item_source_history",
-      requiredColumns: ["item_id", "session_id", "run_id", "turn_id", "event_id"],
-    },
-    { name: "memory_forget_operations", requiredColumns: ["operation_id", "request_hash"] },
-  ],
-  indexes: version4MinimumShape.indexes,
-});
-
-MINIMUM_SCHEMA_SHAPES.set(7, {
-  tables: [
-    ...MINIMUM_SCHEMA_SHAPES.get(6)!.tables,
-    { name: "memory_suppressed_events", requiredColumns: ["evidence_hash"] },
-    { name: "memory_workspace_migrations", requiredColumns: ["workspace_key", "report_json"] },
-    { name: "memory_migration_source_events", requiredColumns: ["item_id", "evidence_hash"] },
-    { name: "memory_migration_origins", requiredColumns: ["item_id", "origin_json"] },
-  ],
-  indexes: version4MinimumShape.indexes,
-});
-
-for (let version = 1; version <= SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION; version += 1) {
-  if (!MIGRATIONS.has(version)) {
-    throw new Error(`Missing long-term memory SQLite migration ${version}`);
-  }
-  if (!MINIMUM_SCHEMA_SHAPES.has(version)) {
-    throw new Error(`Missing long-term memory SQLite minimum schema shape ${version}`);
-  }
-}
-
 export function configureSqliteLongTermMemoryDatabase(db: DatabaseSync): void {
   db.exec(`PRAGMA busy_timeout = ${SQLITE_INITIALIZATION_BUSY_TIMEOUT_MS}`);
   ensureWalJournalMode(db);
@@ -493,35 +274,21 @@ export function configureSqliteLongTermMemoryDatabase(db: DatabaseSync): void {
   db.exec("PRAGMA secure_delete = ON");
 }
 
-export function migrateSqliteLongTermMemoryDatabase(
-  db: DatabaseSync,
-  options: SqliteLongTermMemoryMigrationOptions = {},
-): void {
-  const observedVersion = readSqliteLongTermMemorySchemaVersion(db);
-  if (observedVersion > SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION) {
-    throw newerSchemaError(observedVersion);
-  }
-  if (observedVersion === SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION) {
-    validateMinimumSchemaShape(db, observedVersion);
+export function initializeSqliteLongTermMemoryDatabase(db: DatabaseSync): void {
+  assertSupportedSqliteLongTermMemorySchemaVersion(db);
+  if (readSqliteLongTermMemorySchemaVersion(db) === SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION) {
+    validateMinimumSchemaShape(db);
     return;
   }
-
   db.exec("BEGIN IMMEDIATE");
   try {
-    const current = readSqliteLongTermMemorySchemaVersion(db);
-    if (current > SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION) throw newerSchemaError(current);
-    for (
-      let version = current + 1;
-      version <= SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION;
-      version += 1
-    ) {
-      const sql = MIGRATIONS.get(version);
-      if (!sql) throw new Error(`Missing long-term memory SQLite migration ${version}`);
-      db.exec(sql);
-      options.failpoint?.("after_schema_sql");
-      db.exec(`PRAGMA user_version = ${version}`);
+    // Another connection may have initialized the database before we acquired the lock.
+    assertSupportedSqliteLongTermMemorySchemaVersion(db);
+    if (readSqliteLongTermMemorySchemaVersion(db) === 0) {
+      db.exec(CURRENT_SCHEMA_SQL);
+      db.exec(`PRAGMA user_version = ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}`);
     }
-    validateMinimumSchemaShape(db, SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION);
+    validateMinimumSchemaShape(db);
     db.exec("COMMIT");
   } catch (error) {
     rollback(db);
@@ -530,9 +297,19 @@ export function migrateSqliteLongTermMemoryDatabase(
 }
 
 export function assertSupportedSqliteLongTermMemorySchemaVersion(db: DatabaseSync): void {
-  const observedVersion = readSqliteLongTermMemorySchemaVersion(db);
-  if (observedVersion > SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION) {
-    throw newerSchemaError(observedVersion);
+  const version = readSqliteLongTermMemorySchemaVersion(db);
+  if (version !== 0 && version !== SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION) {
+    throw new Error(
+      `Long-term memory SQLite schema ${version} is unsupported; expected ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}. Automatic upgrades are not supported.`,
+    );
+  }
+  if (
+    version === 0 &&
+    db.prepare("SELECT 1 FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' LIMIT 1").get() &&
+    // A concurrent initializer may have committed since the first version read.
+    readSqliteLongTermMemorySchemaVersion(db) === 0
+  ) {
+    throw new Error("Cannot initialize a non-empty unversioned memory database");
   }
 }
 
@@ -606,18 +383,8 @@ function retryWhileSqliteBusy<T>(operation: () => T): T {
   }
 }
 
-function newerSchemaError(version: number): Error {
-  return new Error(
-    `Long-term memory SQLite schema ${version} is newer than supported version ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}`,
-  );
-}
-
-function validateMinimumSchemaShape(db: DatabaseSync, version: number): void {
-  const shape = MINIMUM_SCHEMA_SHAPES.get(version);
-  if (!shape) {
-    throw new Error(`Missing long-term memory SQLite minimum schema shape ${version}`);
-  }
-
+function validateMinimumSchemaShape(db: DatabaseSync): void {
+  const shape = CURRENT_SCHEMA_SHAPE;
   const readSchemaObject = db.prepare("SELECT type, tbl_name FROM sqlite_schema WHERE name = ?");
   for (const table of shape.tables) {
     const object = readSchemaObject.get(table.name) as
@@ -681,6 +448,6 @@ function rollback(db: DatabaseSync): void {
   try {
     db.exec("ROLLBACK");
   } catch {
-    // Preserve the migration failure that triggered rollback.
+    // Preserve the initialization failure that triggered rollback.
   }
 }

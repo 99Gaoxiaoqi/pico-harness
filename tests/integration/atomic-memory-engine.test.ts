@@ -72,7 +72,7 @@ test("atomic engine commits canonical user evidence synchronously, honors provid
   assert.equal((await engine.execute(snapshot)).status, "remembered");
   assert.equal(model.calls.length, 2, "receipt replay never calls the model");
 
-  await fixture.store.forgetItem({ itemId: "item-1", expectedVersion: 1, operationId: "forget-1" });
+  await fixture.store.deleteItem({ itemId: "item-1", expectedVersion: 1, operationId: "forget-1" });
   assert.equal(
     (await engine.execute(snapshot)).status,
     "not_applicable",
@@ -80,7 +80,8 @@ test("atomic engine commits canonical user evidence synchronously, honors provid
   );
   const later = event(4, "other", "", "2");
   assert.equal(
-    (await engine.execute(source([user, assistant, boundary, later]))).status,
+    (await engine.execute(source([user, assistant, boundary, later], { deletionRevision: 1 })))
+      .status,
     "not_applicable",
   );
   assert.equal(model.calls.length, 2);
@@ -349,6 +350,133 @@ test("atomic engine rejects hidden or fabricated requested citations and sensiti
   assert.equal(secretModel.calls.length, 0);
 });
 
+test("deletion invalidates queued snapshots and model results without retaining failed retries", async (t) => {
+  const fixture = memoryFixture(t);
+  const historical = event(1, "user", "I prefer functional TypeScript.");
+  const initialEvents = [historical, event(2, "other", "")];
+  const candidate = item("The user prefers functional TypeScript.", historical, historical.text);
+  const initial = new AtomicMemoryExtractionEngine({
+    store: fixture.store,
+    gate: async () => ({ allowed: true }),
+    model: scriptedModel([proposal([candidate]), canonicalization(candidate)]),
+  });
+  await initial.execute(source(initialEvents));
+  const current = event(3, "user", "Remember that preference.", "2");
+  const snapshot = source([...initialEvents, current, event(4, "other", "", "2")]);
+  let signalStarted!: () => void;
+  let finishModel!: (output: string) => void;
+  const started = new Promise<void>((resolve) => {
+    signalStarted = resolve;
+  });
+  const modelResult = new Promise<string>((resolve) => {
+    finishModel = resolve;
+  });
+  let calls = 0;
+  const engine = new AtomicMemoryExtractionEngine({
+    store: fixture.store,
+    gate: async () => ({ allowed: true }),
+    model: {
+      async call() {
+        calls++;
+        signalStarted();
+        return modelResult;
+      },
+    },
+  });
+  const inFlight = engine.execute(snapshot);
+  await started;
+  await fixture.store.deleteItem({
+    itemId: "item-1",
+    expectedVersion: 1,
+    operationId: "delete-in-flight",
+  });
+  finishModel("{}");
+  assert.equal((await inFlight).status, "unavailable");
+  assert.equal(await fixture.pending(), undefined);
+  assert.equal((await fixture.cursor())?.processedOrdinal, 2);
+  assert.equal(
+    (await engine.execute(snapshot)).status,
+    "unavailable",
+    "queued snapshots keep their old generation",
+  );
+  assert.equal(calls, 1);
+  assert.deepEqual(await fixture.store.listItems({ workspaceKey: "/workspace" }), []);
+});
+
+test("deletion skips an old pending remember but a new request may remember the original evidence", async (t) => {
+  const fixture = memoryFixture(t);
+  const historical = event(1, "user", "I prefer functional TypeScript.");
+  const initialEvents = [historical, event(2, "other", "")];
+  const candidate = item("The user prefers functional TypeScript.", historical, historical.text);
+  const model = scriptedModel([
+    proposal([candidate]),
+    canonicalization(candidate),
+    "{}",
+    "{}",
+    "{}",
+    JSON.stringify({
+      status: "search_required",
+      coverageStatus: "processed",
+      requestedStatus: "unresolved",
+      requestedItems: [],
+      incidentalItems: [],
+      search: { terms: ["functional"], roles: ["user"] },
+    }),
+    proposal([candidate]),
+    canonicalization(candidate),
+  ]);
+  const engine = new AtomicMemoryExtractionEngine({
+    store: fixture.store,
+    model,
+    gate: async () => ({ allowed: true }),
+  });
+  await engine.execute(source(initialEvents));
+  const failedEvents = [
+    ...initialEvents,
+    event(3, "user", "Remember that preference.", "2"),
+    event(4, "other", "", "2"),
+  ];
+  assert.equal((await engine.execute(source(failedEvents))).status, "unavailable");
+  assert.equal((await fixture.pending())?.deletionRevision, 0);
+  await fixture.store.deleteItem({
+    itemId: "item-1",
+    expectedVersion: 1,
+    operationId: "delete-pending",
+  });
+  const deletionRevision = await fixture.store.readDeletionRevision();
+  const automaticEvents = [...failedEvents, event(5, "other", "", "3")];
+  await engine.execute(source(automaticEvents, { trigger: "extract", deletionRevision }));
+  assert.equal(model.calls.length, 5, "old explicit request is skipped without calling the model");
+  assert.equal(await fixture.pending(), undefined);
+  assert.equal((await fixture.cursor())?.processedOrdinal, 5);
+  assert.ok(
+    fixture.commits.some(
+      (commit) => commit.skipReason === "memory_deleted" && commit.items.length === 0,
+    ),
+  );
+  assert.deepEqual(await fixture.store.listItems({ workspaceKey: "/workspace" }), []);
+  const current = event(
+    6,
+    "user",
+    "Please remember my earlier functional TypeScript preference again.",
+    "4",
+  );
+  const result = await engine.execute(
+    source([...automaticEvents, current, event(7, "other", "", "4")], {
+      deletionRevision,
+      sourceMessages: [{ role: "user", content: current.text }],
+    }),
+  );
+  assert.equal(result.status, "remembered");
+  assert.equal(model.calls.length, 8);
+  assert.deepEqual(
+    (await fixture.store.readItem(result.requestedItems[0]!.itemId))?.sources.map(
+      (source) => source.eventId,
+    ),
+    [historical.eventId],
+  );
+});
+
 function event(
   ordinal: number,
   role: MemoryEvidenceEvent["role"],
@@ -371,6 +499,7 @@ function source(
 ): MemoryExtractionSnapshot {
   const boundary = events.at(-1)!;
   return {
+    deletionRevision: 0,
     trigger: "remember",
     sessionId: SESSION,
     workspaceKey: "/workspace",

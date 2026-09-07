@@ -53,6 +53,8 @@ test("atomic memory page renders saved and archived items, scope, provenance and
     React.createElement(MemoryPage, { runtime: previewRuntime(), forceNarrow: false }),
   );
   assert.match(html, /工作区记忆/);
+  assert.match(html, /添加记忆/);
+  assert.match(html, /aria-controls="memory-add-form"/);
   assert.match(html, /已保存/);
   assert.match(html, /已归档/);
   assert.match(html, /全局 · 跨工作区/);
@@ -63,10 +65,10 @@ test("atomic memory page renders saved and archived items, scope, provenance and
   assert.match(html, /aria-label="编辑/);
   assert.match(html, /aria-label="归档/);
   assert.match(html, /aria-label="恢复/);
-  assert.match(html, /aria-label="永久遗忘/);
+  assert.match(html, /aria-label="删除记忆/);
   assert.match(html, /自动提取长期信息/);
   assert.match(html, /会话召回/);
-  assert.doesNotMatch(html, /待审核|批准|拒绝|自动审核|当前用量|质量优先|滚动 24 小时/);
+  assert.doesNotMatch(html, /永久遗忘|待审核|批准|拒绝|自动审核|当前用量|质量优先|滚动 24 小时/);
   assert.equal((html.match(/type="checkbox"/g) ?? []).length, 3);
 });
 
