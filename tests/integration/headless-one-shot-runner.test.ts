@@ -697,6 +697,12 @@ test("OpenAI and Claude transports forward the trusted provider timeout", async 
     }
     if (url.endsWith("/messages")) {
       return Response.json({
+        id: "msg_headless_fixture",
+        type: "message",
+        role: "assistant",
+        model: "fixture-model",
+        stop_reason: "end_turn",
+        stop_sequence: null,
         content: [{ type: "text", text: "claude ok" }],
         usage: { input_tokens: 1, output_tokens: 1 },
       });
@@ -734,6 +740,12 @@ test("OpenAI and Claude transports preserve bounded multi-image order and MIME",
         });
       }
       return Response.json({
+        id: "msg_headless_fixture",
+        type: "message",
+        role: "assistant",
+        model: "fixture-model",
+        stop_reason: "end_turn",
+        stop_sequence: null,
         content: [{ type: "text", text: "claude images ok" }],
         usage: { input_tokens: 1, output_tokens: 1 },
       });
@@ -767,7 +779,9 @@ test("OpenAI and Claude transports preserve bounded multi-image order and MIME",
     content: Array<{ type: string; image_url?: { url: string } }>;
   }>;
   assert.deepEqual(
-    openAiMessages[0]?.content.slice(1).map((part) => part.image_url?.url.split(";", 1)[0]),
+    openAiMessages[0]?.content
+      .filter((part) => part.type === "image_url")
+      .map((part) => part.image_url?.url.split(";", 1)[0]),
     mimeTypes.map((mimeType) => `data:${mimeType}`),
   );
   const claudeMessages = requestBodies[1]?.body["messages"] as Array<{

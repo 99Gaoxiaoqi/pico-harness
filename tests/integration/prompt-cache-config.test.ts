@@ -199,5 +199,8 @@ test("project config validates prompt-cache policy against its provider protocol
     }),
     "utf8",
   );
-  await assert.rejects(loadPicoProjectConfig(root), /protocol.*must be openai or claude/u);
+  await assert.rejects(
+    loadPicoProjectConfig(root),
+    /protocol.*must be openai, claude or responses/u,
+  );
 });

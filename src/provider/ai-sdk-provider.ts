@@ -40,19 +40,15 @@ export class AiSdkProvider implements LLMProvider {
       this.profile,
       wire === "responses" ? "responses" : "openai",
     );
-    this.requestCapabilities =
-      wire !== "claude"
-        ? {
-            ...this.chatPolicy.requestCapabilities,
-            toolChoiceNoneWithTools:
-              config.capabilities?.toolChoiceNoneWithTools === true ||
-              defaultToolChoiceNoneWithTools(wire, config.baseURL) === true,
-          }
-        : {
-            toolChoiceNoneWithTools:
-              config.capabilities?.toolChoiceNoneWithTools === true ||
-              defaultToolChoiceNoneWithTools(wire, config.baseURL) === true,
-          };
+    const configuredToolChoiceNone = config.capabilities?.toolChoiceNoneWithTools;
+    const toolChoiceNoneWithTools =
+      typeof configuredToolChoiceNone === "boolean"
+        ? configuredToolChoiceNone
+        : defaultToolChoiceNoneWithTools(wire, config.baseURL) === true;
+    this.requestCapabilities = {
+      ...(wire !== "claude" ? this.chatPolicy.requestCapabilities : {}),
+      toolChoiceNoneWithTools,
+    };
   }
   get modelName(): string {
     return this.config.model;
@@ -183,7 +179,9 @@ export class AiSdkProvider implements LLMProvider {
       ...(this.wire === "claude" ? { maxOutputTokens: this.profile.maxOutputTokens } : {}),
       maxRetries: 0,
       abortSignal: signal,
-      ...(options?.toolChoice === "none" && definitions.length
+      ...(options?.toolChoice === "none" &&
+      definitions.length &&
+      (this.wire !== "claude" || !this.requestCapabilities.toolChoiceNoneWithTools)
         ? { toolChoice: "none" as const }
         : {}),
       ...(this.wire === "responses" && !deepseek
@@ -280,6 +278,13 @@ export class AiSdkProvider implements LLMProvider {
       // Full-history requests also replay reasoning; no server-side conversation dependency.
       return body;
     }
+    // The SDK removes Anthropic tools for "none". Opted-in routes preserve their cache prefix.
+    if (
+      options?.toolChoice === "none" &&
+      tools.length &&
+      this.requestCapabilities.toolChoiceNoneWithTools
+    )
+      body.tool_choice = { type: "none" };
     body.max_tokens = this.profile.maxOutputTokens;
     if (!capability && isLegacyThinkingEffort(effort)) {
       const thinking = toAnthropicThinkingConfig(effort);
