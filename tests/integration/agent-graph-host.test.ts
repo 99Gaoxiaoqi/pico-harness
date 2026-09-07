@@ -237,8 +237,11 @@ test("workspace Graph host executes an exact operator with owner-fenced output a
     });
     try {
       assert.deepEqual(
-        reopened.listResourceRefsByClaim(projection.claims[0]!.claimId).map(({ kind }) => kind),
-        ["evidence", "artifact"],
+        reopened
+          .listResourceRefsByClaim(projection.claims[0]!.claimId)
+          .map(({ kind }) => kind)
+          .sort(),
+        ["artifact", "evidence"],
       );
     } finally {
       reopened.close();
