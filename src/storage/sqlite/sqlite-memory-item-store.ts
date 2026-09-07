@@ -70,9 +70,8 @@ import {
 import {
   assertSupportedSqliteLongTermMemorySchemaVersion,
   configureSqliteLongTermMemoryDatabase,
-  migrateSqliteLongTermMemoryDatabase,
+  initializeSqliteLongTermMemoryDatabase,
   readSqliteLongTermMemorySchemaVersion,
-  type SqliteLongTermMemoryMigrationFailpoint,
 } from "./atomic-memory-schema.js";
 
 const MAX_MUTATIONS_PER_OPERATION = 32;
@@ -98,21 +97,6 @@ export interface SqliteMemoryItemStoreOptions {
   readonly now?: () => number;
   readonly idFactory?: () => string;
   readonly failpoint?: (point: SqliteMemoryItemStoreFailpoint) => void;
-  readonly migrationFailpoint?: (point: SqliteLongTermMemoryMigrationFailpoint) => void;
-}
-
-export interface LegacyMemoryMigrationInput {
-  readonly workspaceKey: string;
-  readonly reportJson: string;
-  readonly settings: Pick<AtomicMemorySettings, "enabled" | "autoExtract" | "recallEnabled">;
-  readonly items: readonly {
-    readonly operationId: string;
-    readonly item: MemoryItemWrite;
-    readonly archived: boolean;
-    readonly originJson: string;
-    readonly sourceEvents?: readonly { readonly sessionId: string; readonly eventId: string }[];
-  }[];
-  readonly suppressedEvents: readonly { readonly sessionId: string; readonly eventId: string }[];
 }
 
 interface NormalizedMemoryWrite {
@@ -199,6 +183,7 @@ interface MemoryExtractionFailureRow {
   compaction_checkpoint_id: unknown;
   first_failure_class: unknown;
   failed_at: unknown;
+  deletion_revision: unknown;
 }
 
 interface MemoryExtractionReceiptRow {
@@ -229,9 +214,7 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
     try {
       assertSupportedSqliteLongTermMemorySchemaVersion(this.#database);
       configureSqliteLongTermMemoryDatabase(this.#database);
-      migrateSqliteLongTermMemoryDatabase(this.#database, {
-        failpoint: options.migrationFailpoint,
-      });
+      initializeSqliteLongTermMemoryDatabase(this.#database);
       if (path !== ":memory:") secureExistingDatabaseFiles(path);
     } catch (error) {
       this.#database.close();
@@ -271,7 +254,7 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
 
     this.#database.exec("BEGIN IMMEDIATE");
     try {
-      this.#assertNotForgetOperation(operationId);
+      this.#assertNotDeleteOperation(operationId);
       const existing = this.#readOperationRow(operationId);
       if (existing) {
         if (requiredHash(existing.request_hash, "request_hash") !== requestHash) {
@@ -353,7 +336,9 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
     }
     if (
       skipReason &&
-      (trigger !== "compaction" || items.length > 0 || requestedItemIndexes.length > 0)
+      ((skipReason === "policy_denied" && trigger !== "compaction") ||
+        items.length > 0 ||
+        requestedItemIndexes.length > 0)
     ) {
       throw new Error("A policy-skipped Memory extraction must be an empty Compaction commit");
     }
@@ -374,7 +359,7 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
 
     this.#database.exec("BEGIN IMMEDIATE");
     try {
-      this.#assertNotForgetOperation(operationId);
+      this.#assertNotDeleteOperation(operationId);
       const existingReceipt = this.#readExtractionReceiptRow(operationId);
       if (existingReceipt) {
         if (requiredHash(existingReceipt.request_hash, "request_hash") !== requestHash) {
@@ -400,6 +385,7 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
         };
       }
 
+      this.#assertDeletionRevision(request.expectedDeletionRevision);
       const currentCursor = this.#readExtractionCursorRow(sessionId);
       const currentOrdinal = currentCursor
         ? requiredPositiveInteger(currentCursor.processed_ordinal, "processed_ordinal")
@@ -415,7 +401,7 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
       if (pendingFailure) {
         const pending = decodePendingExtractionFailure(pendingFailure);
         const pendingMatchesCommit = skipReason
-          ? pending.firstTrigger === "compaction" &&
+          ? (skipReason === "memory_deleted" || pending.firstTrigger === "compaction") &&
             pending.fromOrdinal === expectedCursorOrdinal + 1 &&
             pending.throughOrdinal <= nextCursorOrdinal
           : pending.firstOperationId !== operationId &&
@@ -654,7 +640,7 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
 
     this.#database.exec("BEGIN IMMEDIATE");
     try {
-      this.#assertNotForgetOperation(operationId);
+      this.#assertNotDeleteOperation(operationId);
       const existingReceipt = this.#readExtractionReceiptRow(operationId);
       if (existingReceipt) {
         const receipt = decodeExtractionReceipt(existingReceipt);
@@ -696,6 +682,7 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
         };
       }
 
+      this.#assertDeletionRevision(request.expectedDeletionRevision);
       const cursorRow = this.#readExtractionCursorRow(sessionId);
       const currentOrdinal = cursorRow
         ? requiredPositiveInteger(cursorRow.processed_ordinal, "processed_ordinal")
@@ -719,14 +706,15 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
           ...(compactionCheckpointId ? { compactionCheckpointId } : {}),
           firstFailureClass: failureClass,
           failedAt: recordedAt,
+          deletionRevision: request.expectedDeletionRevision,
         };
         this.#database
           .prepare(
             `INSERT INTO memory_extraction_failures(
                session_id, from_ordinal, through_ordinal, coverage_hash,
                first_operation_id, first_trigger, compaction_checkpoint_id,
-               first_failure_class, failed_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               first_failure_class, failed_at, deletion_revision
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             sessionId,
@@ -738,6 +726,7 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
             pending.compactionCheckpointId ?? null,
             pending.firstFailureClass,
             pending.failedAt,
+            pending.deletionRevision,
           );
         this.#database.exec("COMMIT");
         return { status: "retry_later", replayed: false, pending };
@@ -911,139 +900,6 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
     });
   }
 
-  async readLegacyMigration(workspaceKey: string): Promise<string | undefined> {
-    this.#assertOpen();
-    const row = this.#database
-      .prepare("SELECT report_json FROM memory_workspace_migrations WHERE workspace_key = ?")
-      .get(normalizeIdentifier(workspaceKey, "workspaceKey")) as
-      | { report_json: string }
-      | undefined;
-    return row?.report_json;
-  }
-
-  async readMigrationOrigin(itemId: string): Promise<string | undefined> {
-    this.#assertOpen();
-    const row = this.#database
-      .prepare("SELECT origin_json FROM memory_migration_origins WHERE item_id = ?")
-      .get(normalizeIdentifier(itemId, "itemId")) as { origin_json: string } | undefined;
-    return row?.origin_json;
-  }
-
-  /** One new-database transaction owns the entire migration and its completion marker. */
-  async commitLegacyMigration(input: LegacyMemoryMigrationInput): Promise<string> {
-    this.#assertOpen();
-    const workspaceKey = normalizeIdentifier(input.workspaceKey, "workspaceKey");
-    const now = normalizeTimestamp((this.#options.now ?? Date.now)(), "current time");
-    const items = input.items.map((entry) => ({
-      ...entry,
-      operationId: normalizeIdentifier(entry.operationId, "operationId"),
-      item: normalizeWrite(entry.item),
-    }));
-    const suppressed = input.suppressedEvents.map((entry) => ({
-      sessionId: normalizeIdentifier(entry.sessionId, "sessionId"),
-      eventId: normalizeIdentifier(entry.eventId, "eventId"),
-    }));
-    JSON.parse(input.reportJson);
-    for (const value of Object.values(input.settings))
-      if (typeof value !== "boolean") throw new Error("Migration settings must be boolean");
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
-      const prior = this.#database
-        .prepare("SELECT report_json FROM memory_workspace_migrations WHERE workspace_key = ?")
-        .get(workspaceKey) as { report_json: string } | undefined;
-      if (prior) {
-        this.#database.exec("COMMIT");
-        return prior.report_json;
-      }
-      for (const entry of items) {
-        if (
-          entry.item.origin !== "user_requested" ||
-          entry.item.sources.length !== 0 ||
-          entry.item.scopeType !== "workspace" ||
-          entry.item.scopeKey !== workspaceKey
-        )
-          throw new Error("Legacy migration must use a workspace manual overlay");
-        JSON.parse(entry.originJson);
-        const requestHash = hashCanonical({
-          item: entry.item,
-          archived: entry.archived,
-          originJson: entry.originJson,
-          sourceEvents: entry.sourceEvents ?? [],
-        });
-        this.#assertNotForgetOperation(entry.operationId);
-        const existing = this.#readOperationRow(entry.operationId);
-        if (existing) {
-          if (existing.request_hash !== requestHash)
-            throw new MemoryItemStoreConflictError(
-              "operation_reused",
-              "Legacy migration operation was reused",
-            );
-          continue;
-        }
-        const created = this.#createItem(entry.item, 0, now);
-        const results: MemoryMutationResult[] = [created];
-        if (entry.archived)
-          results.push(
-            this.#changeLifecycle(
-              { type: "archive", itemId: created.itemId, expectedVersion: 1 },
-              1,
-              now,
-              "archived",
-            ),
-          );
-        this.#database
-          .prepare("INSERT INTO memory_migration_origins(item_id, origin_json) VALUES (?, ?)")
-          .run(created.itemId, entry.originJson);
-        for (const event of entry.sourceEvents ?? []) {
-          const identity = {
-            sessionId: normalizeIdentifier(event.sessionId, "sessionId"),
-            eventId: normalizeIdentifier(event.eventId, "eventId"),
-          };
-          this.#database
-            .prepare(
-              "INSERT OR IGNORE INTO memory_migration_source_events(item_id, evidence_hash) VALUES (?, ?)",
-            )
-            .run(created.itemId, hashCanonical(identity));
-        }
-        this.#options.failpoint?.("before_operation_write");
-        this.#database
-          .prepare(
-            `INSERT INTO memory_write_operations(operation_id, operation_type, request_hash, result_json, committed_at) VALUES (?, 'batch', ?, ?, ?)`,
-          )
-          .run(entry.operationId, requestHash, JSON.stringify(results), now);
-      }
-      for (const entry of suppressed)
-        this.#database
-          .prepare("INSERT OR IGNORE INTO memory_suppressed_events(evidence_hash) VALUES (?)")
-          .run(hashCanonical(entry));
-      // All users must migrate before opening the new store. Do not silently replace
-      // an already edited atomic setting if a caller violated that ordering.
-      const settings = input.settings;
-      this.#database
-        .prepare(
-          `INSERT INTO memory_settings(workspace_key, version, enabled, auto_extract, recall_enabled) VALUES (?, 1, ?, ?, ?)
-        ON CONFLICT(workspace_key) DO NOTHING`,
-        )
-        .run(
-          workspaceKey,
-          Number(settings.enabled),
-          Number(settings.autoExtract),
-          Number(settings.recallEnabled),
-        );
-      this.#database
-        .prepare(
-          "INSERT INTO memory_workspace_migrations(workspace_key, report_json) VALUES (?, ?)",
-        )
-        .run(workspaceKey, input.reportJson);
-      this.#database.exec("COMMIT");
-      this.#options.failpoint?.("after_commit");
-      return input.reportJson;
-    } catch (error) {
-      rollback(this.#database);
-      throw error;
-    }
-  }
-
   async listItems(input: {
     workspaceKey: string;
     includeArchived?: boolean;
@@ -1142,44 +998,41 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
     }
   }
 
-  async isEvidenceSuppressed(source: MemoryItemSource): Promise<boolean> {
+  async readDeletionRevision(): Promise<number> {
     this.#assertOpen();
-    return this.#sourceSuppressed(normalizeSources([source])[0]!);
+    return this.#deletionRevision();
   }
 
-  #sourceSuppressed(source: MemoryItemSource): boolean {
-    if (
-      this.#database
-        .prepare("SELECT 1 FROM memory_suppressed_events WHERE evidence_hash = ?")
-        .get(hashCanonical({ sessionId: source.sessionId, eventId: source.eventId }))
-    )
-      return true;
-    return (
-      this.#database
-        .prepare("SELECT 1 FROM memory_forgotten_sources WHERE source_hash = ?")
-        .get(hashCanonical(source)) !== undefined
-    );
+  #deletionRevision(): number {
+    // Delete receipts are append-only; retries do not increment this generation.
+    const row = this.#database
+      .prepare(
+        "SELECT count(*) AS revision FROM memory_write_operations WHERE operation_type = 'delete'",
+      )
+      .get()!;
+    return requiredNonNegativeInteger(row.revision, "deletion revision");
   }
 
-  #assertSourcesNotSuppressed(sources: readonly MemoryItemSource[]): void {
-    if (sources.some((source) => this.#sourceSuppressed(source)))
-      throw new Error("Memory evidence was forgotten");
-  }
-
-  #assertNotForgetOperation(operationId: string): void {
-    if (
-      this.#database
-        .prepare("SELECT 1 FROM memory_forget_operations WHERE operation_id = ?")
-        .get(operationId)
-    ) {
+  #assertDeletionRevision(expected: number): void {
+    const revision = requiredNonNegativeInteger(expected, "expectedDeletionRevision");
+    if (revision !== this.#deletionRevision()) {
       throw new MemoryItemStoreConflictError(
-        "operation_reused",
-        "Operation was already used to forget a Memory Item",
+        "deletion_conflict",
+        "Memory was deleted after this extraction was captured",
       );
     }
   }
 
-  async forgetItem(input: {
+  #assertNotDeleteOperation(operationId: string): void {
+    if (this.#readOperationRow(operationId)?.operation_type === "delete") {
+      throw new MemoryItemStoreConflictError(
+        "operation_reused",
+        "Operation already deleted a Memory Item",
+      );
+    }
+  }
+
+  async deleteItem(input: {
     itemId: string;
     expectedVersion: number;
     operationId: string;
@@ -1192,14 +1045,12 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
     const requestHash = hashCanonical({ itemId, expectedVersion: input.expectedVersion });
     this.#database.exec("BEGIN IMMEDIATE");
     try {
-      const previous = this.#database
-        .prepare("SELECT request_hash FROM memory_forget_operations WHERE operation_id = ?")
-        .get(operationId) as { request_hash: string } | undefined;
+      const previous = this.#readOperationRow(operationId);
       if (previous) {
-        if (previous.request_hash !== requestHash)
-          throw new MemoryItemStoreConflictError("operation_reused", "Forget operation was reused");
+        if (previous.operation_type !== "delete" || previous.request_hash !== requestHash)
+          throw new MemoryItemStoreConflictError("operation_reused", "Delete operation was reused");
         this.#database.exec("COMMIT");
-        this.#checkpointAfterForget();
+        this.#checkpointAfterDelete();
         return;
       }
       if (
@@ -1214,19 +1065,6 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
         );
       }
       this.#requireVersion(itemId, input.expectedVersion);
-      const history = this.#database
-        .prepare(
-          "SELECT session_id, run_id, turn_id, event_id FROM memory_item_source_history WHERE item_id = ?",
-        )
-        .all(itemId) as unknown as MemorySourceRow[];
-      for (const source of history) {
-        this.#database
-          .prepare("INSERT OR IGNORE INTO memory_suppressed_events(evidence_hash) VALUES (?)")
-          .run(hashCanonical({ sessionId: source.session_id, eventId: source.event_id }));
-        this.#database
-          .prepare("INSERT OR IGNORE INTO memory_forgotten_sources(source_hash) VALUES (?)")
-          .run(hashCanonical(decodeSource(source)));
-      }
       // Operation results contain only IDs, versions and lifecycle metadata. Extraction
       // receipts also contain requested prose: redact every historical copy atomically.
       const receipts = this.#database
@@ -1248,20 +1086,22 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
           .prepare("UPDATE memory_extraction_receipts SET result_json = ? WHERE operation_id = ?")
           .run(JSON.stringify(redacted), receipt.operationId);
       }
-      this.#database
-        .prepare(
-          `INSERT OR IGNORE INTO memory_suppressed_events(evidence_hash)
-        SELECT evidence_hash FROM memory_migration_source_events WHERE item_id = ?`,
-        )
-        .run(itemId);
       this.#database.prepare("DELETE FROM memory_items WHERE item_id = ?").run(itemId);
       this.#options.failpoint?.("after_item_write");
       this.#options.failpoint?.("before_operation_write");
       this.#database
-        .prepare("INSERT INTO memory_forget_operations(operation_id, request_hash) VALUES (?, ?)")
-        .run(operationId, requestHash);
+        .prepare(
+          `INSERT INTO memory_write_operations
+          (operation_id, operation_type, request_hash, result_json, committed_at)
+          VALUES (?, 'delete', ?, '[]', ?)`,
+        )
+        .run(
+          operationId,
+          requestHash,
+          normalizeTimestamp((this.#options.now ?? Date.now)(), "current time"),
+        );
       this.#database.exec("COMMIT");
-      this.#checkpointAfterForget();
+      this.#checkpointAfterDelete();
       this.#options.failpoint?.("after_commit");
     } catch (error) {
       rollback(this.#database);
@@ -1269,14 +1109,14 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
     }
   }
 
-  #checkpointAfterForget(): void {
+  #checkpointAfterDelete(): void {
     // secure_delete clears database pages; checkpoint also retires old WAL prose.
-    // Another connection may hold a reader. The committed logical forget remains
-    // authoritative, and repeating the same forget operation retries checkpoint.
+    // Another connection may hold a reader. The committed logical delete remains
+    // authoritative, and repeating the same delete operation retries checkpoint.
     try {
       this.#database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
     } catch {
-      // Do not report a committed forget as rolled back because a reader is busy.
+      // Do not report a committed delete as rolled back because a reader is busy.
     }
   }
 
@@ -1314,7 +1154,6 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
     mutationIndex: number,
     committedAt: number,
   ): MemoryMutationResult {
-    this.#assertSourcesNotSuppressed(write.sources);
     const itemId = normalizeIdentifier(
       (this.#options.idFactory ?? randomUUID)(),
       "generated itemId",
@@ -1356,7 +1195,6 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
     mutationIndex: number,
     committedAt: number,
   ): MemoryMutationResult {
-    this.#assertSourcesNotSuppressed(mutation.item.sources);
     const current = this.#requireVersion(mutation.itemId, mutation.expectedVersion);
     const currentRecord = this.#requireItemRecord(mutation.itemId);
     if (recordMatchesWrite(currentRecord, mutation.item)) {
@@ -1473,12 +1311,6 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
     );
     for (const source of sources) {
       insert.run(itemId, source.sessionId, source.runId, source.turnId, source.eventId);
-      this.#database
-        .prepare(
-          `INSERT OR IGNORE INTO memory_item_source_history
-        (item_id, session_id, run_id, turn_id, event_id) VALUES (?, ?, ?, ?, ?)`,
-        )
-        .run(itemId, source.sessionId, source.runId, source.turnId, source.eventId);
     }
   }
 
@@ -1541,7 +1373,7 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
       .prepare(
         `SELECT session_id, from_ordinal, through_ordinal, coverage_hash,
                 first_operation_id, first_trigger, compaction_checkpoint_id,
-                first_failure_class, failed_at
+                first_failure_class, failed_at, deletion_revision
          FROM memory_extraction_failures WHERE session_id = ?`,
       )
       .get(sessionId) as MemoryExtractionFailureRow | undefined;
@@ -1913,9 +1745,9 @@ function normalizeExtractionNoOpReason(value: unknown): "sensitive_information" 
   return value;
 }
 
-function normalizeExtractionSkipReason(value: unknown): "policy_denied" | undefined {
+function normalizeExtractionSkipReason(value: unknown): MemoryExtractionReceipt["skipReason"] {
   if (value === undefined) return undefined;
-  if (value !== "policy_denied") {
+  if (value !== "policy_denied" && value !== "memory_deleted") {
     throw new Error("Invalid Memory extraction skip reason");
   }
   return value;
@@ -2110,6 +1942,7 @@ function decodePendingExtractionFailure(
         }),
     firstFailureClass: normalizeExtractionFailureClass(row.first_failure_class),
     failedAt: requiredNonNegativeInteger(row.failed_at, "failed_at"),
+    deletionRevision: requiredNonNegativeInteger(row.deletion_revision, "deletion_revision"),
   };
 }
 
@@ -2205,7 +2038,7 @@ function decodeExtractionReceipt(row: MemoryExtractionReceiptRow): MemoryExtract
 function decodeOperation(row: MemoryOperationRow): MemoryWriteOperationResult {
   const operationId = requiredIdentifierString(row.operation_id, "operation_id");
   const operationType = requiredString(row.operation_type, "operation_type");
-  if (!["create", "update", "archive", "restore", "batch"].includes(operationType)) {
+  if (!["create", "update", "archive", "restore", "batch", "delete"].includes(operationType)) {
     throw invalidColumn("operation_type");
   }
   requiredHash(row.request_hash, "request_hash");
@@ -2228,8 +2061,10 @@ function decodeOperation(row: MemoryOperationRow): MemoryWriteOperationResult {
   }
   const decodedResults = results.map((result, index) => decodeMutationResult(result, index));
   if (
-    operationType !== "batch" &&
-    (decodedResults.length !== 1 || decodedResults[0]?.mutationType !== operationType)
+    operationType === "delete"
+      ? decodedResults.length !== 0
+      : operationType !== "batch" &&
+        (decodedResults.length !== 1 || decodedResults[0]?.mutationType !== operationType)
   ) {
     throw new Error(`Invalid results for Memory operation ${operationId}`);
   }

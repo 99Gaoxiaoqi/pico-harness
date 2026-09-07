@@ -1,4 +1,5 @@
 import { AtomicMemoryLifecycle } from "../../src/runtime/atomic-memory-lifecycle.js";
+import { DesktopAtomicMemoryService } from "../../src/daemon/desktop-atomic-memory-service.js";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -212,6 +213,29 @@ test("atomic memory extraction waits for a successful durable terminal and stops
   const events = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
   const entries = await events.readSessionEntries(sessionId);
   const terminal = entries.find((e) => e.event.kind === "run.terminal")!;
+  const management = new DesktopAtomicMemoryService({ picoHome, publish: () => {} });
+  const saved = (await management.create(workDir, "A note to delete during the pending run.")).fact;
+  await runtime.capture([{ role: "user", content: "你好" }], []);
+  await runtime.requestExtract();
+  await management.forget(workDir, {
+    workspacePath: workDir,
+    factId: saved.factId,
+    expectedVersion: saved.version,
+    idempotencyKey: "delete-before-terminal",
+  });
+  management.close();
+  assert.equal(
+    (await runtime.remember()).status,
+    "unavailable",
+    "captured foreground work is invalidated",
+  );
+  await runtime.completed(terminal.event.runId);
+  await runtime.drain();
+  assert.equal(
+    modelCalls,
+    0,
+    "pre-deletion requests keep their generation through delayed preparation",
+  );
   await runtime.requestExtract();
   await runtime.completed(terminal.event.runId);
   await runtime.drain();

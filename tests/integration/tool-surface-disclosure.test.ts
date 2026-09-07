@@ -184,11 +184,15 @@ test("LoadToolsTool description 渲染组目录", () => {
   );
 });
 
-test("background 宿主的 deferred 组列表不含 memory", () => {
+test("background 允许 memory 组，隔离 headless 仍不暴露", () => {
   const desktop = getAvailableDeferredGroups("desktop").map((g) => g.id);
   const background = getAvailableDeferredGroups("background").map((g) => g.id);
   assert.ok(desktop.includes("memory"));
-  assert.equal(background.includes("memory"), false);
+  assert.ok(background.includes("memory"));
+  assert.equal(
+    getAvailableDeferredGroups("headless").some((group) => group.id === "memory"),
+    false,
+  );
   assert.ok(background.includes("web"));
 });
 

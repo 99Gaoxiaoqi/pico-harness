@@ -1,3 +1,4 @@
+import { AtomicMemoryContextBuilder } from "../../src/memory/atomic/context-builder.js";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -34,6 +35,14 @@ test("desktop atomic memory persists manual edits, archive/restore and settings 
     );
     const store = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"));
     assert.deepEqual((await store.readItem(created.fact.factId))?.sources, []);
+    const manualContext = await new AtomicMemoryContextBuilder(
+      store,
+      resolvePicoPaths(workspacePath, { picoHome }).workspace.id,
+    ).build("What answers should I provide?");
+    assert.ok(
+      manualContext.block.includes("Prefer short answers."),
+      "manual notes must be recallable without a source session",
+    );
     store.close();
     const updated = parseRuntimeResult(
       "memory.update",

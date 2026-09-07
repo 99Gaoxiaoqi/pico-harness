@@ -16,7 +16,6 @@ import {
 } from "../memory/atomic/contracts.js";
 import type { MemoryItemRecord, MemoryItemWrite } from "../memory/atomic/contracts.js";
 import type { AtomicMemorySettings } from "../memory/atomic/runtime-contracts.js";
-import { ensureAtomicMemoryWorkspace } from "../memory/atomic/migration.js";
 import { sanitizeMemoryProposalCandidate } from "../memory/proposal-sanitizer.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { SqliteMemoryItemStore } from "../storage/sqlite/sqlite-memory-item-store.js";
@@ -172,7 +171,7 @@ export class DesktopAtomicMemoryService {
   ): Promise<RuntimeResult<"memory.forget">> {
     return this.withStore(workspacePath, async (store, key) => {
       const record = await authorizedItem(store, key, params.factId);
-      await store.forgetItem({
+      await store.deleteItem({
         itemId: params.factId,
         expectedVersion: params.expectedVersion,
         operationId: operationKey(key, params.idempotencyKey),
@@ -282,7 +281,6 @@ export class DesktopAtomicMemoryService {
   ): Promise<T> {
     try {
       if (this.closed) throw new Error("Memory service is closed");
-      await ensureAtomicMemoryWorkspace(workspacePath, this.options.picoHome);
       const key = resolvePicoPaths(workspacePath, { picoHome: this.options.picoHome }).workspace.id;
       const store = new SqliteMemoryItemStore(join(this.options.picoHome, "memory.sqlite"), {
         now: () => this.now(),

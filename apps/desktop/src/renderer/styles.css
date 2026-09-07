@@ -3239,6 +3239,26 @@
     justify-content: space-between;
     gap: 20px;
   }
+  .memory-page__actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+  .memory-add-form {
+    display: grid;
+    gap: 12px;
+    padding: 20px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-md);
+    background: var(--surface-raised);
+  }
+  .memory-add-form p,
+  .memory-add-form small {
+    color: var(--ink-secondary);
+    font-size: 12px;
+    overflow-wrap: anywhere;
+  }
   .memory-page__intro h2 {
     margin-top: 4px;
     font-size: 22px;

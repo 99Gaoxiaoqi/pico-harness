@@ -220,18 +220,17 @@ realModelTest(
         "the fresh session receives the committed atomic memory in the real provider request",
       );
 
-      // Forget through the same atomic store contract used by the management surfaces.
-      await store.forgetItem({
+      // Delete through the same atomic store contract used by the management surfaces.
+      await store.deleteItem({
         itemId: saved.item.itemId,
         expectedVersion: saved.item.version,
         operationId: "real-runtime-forget",
       });
-      for (const source of saved.sources)
-        assert.equal(await store.isEvidenceSuppressed(source), true);
+      assert.equal(await store.readDeletionRevision(), 1);
       assert.equal((await store.listItems({ workspaceKey: paths.workspace.id })).length, 0);
 
       // Re-dispatch the original durable session's terminal through the production
-      // adapter. Forgotten provenance must not become a new memory during replay.
+      // adapter. The persisted cursor must prevent processing the same range again.
       const events = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
       let completedRunId: string | undefined;
       try {

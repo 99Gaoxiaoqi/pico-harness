@@ -1553,6 +1553,7 @@ export interface RuntimeActions {
   ): Promise<boolean>;
   deleteProviderCredential(providerId: string, expectedRevision: string): Promise<boolean>;
   refreshMemory(): Promise<void>;
+  createMemoryFact(text: string): Promise<RuntimeMemoryFact | undefined>;
   updateMemoryFact(
     factId: string,
     expectedVersion: number,
@@ -3823,6 +3824,89 @@ export function useRuntimeStore(): RuntimeStore {
           await loadMemory(bridge, workspacePath);
         });
       },
+      async createMemoryFact(text) {
+        const workspacePath = dataRef.current.workspacePath;
+        const content = text.trim();
+        if (!workspacePath || !dataRef.current.trusted || !content) return undefined;
+        let created: RuntimeMemoryFact | undefined;
+        setMessage(undefined);
+        await perform("memory-create", async (bridge) => {
+          if (preview) {
+            const now = Date.now();
+            const factId = crypto.randomUUID();
+            created = {
+              factId,
+              kind: "reference",
+              title: null,
+              content,
+              confidence: 1,
+              state: "active",
+              pinned: false,
+              version: 1,
+              createdAt: new Date(now).toISOString(),
+              updatedAt: new Date(now).toISOString(),
+              atomic: {
+                itemId: factId,
+                kind: "note",
+                scopeType: "workspace",
+                scopeKey: workspacePath,
+                statementType: "fact",
+                temporalType: "undated",
+                observedAt: now,
+                eventStartedAt: null,
+                eventEndedAt: null,
+                origin: "user_requested",
+              },
+            };
+          } else {
+            try {
+              created = (await invoke(bridge, "memory.create", { workspacePath, text: content }))
+                .fact;
+            } catch (error) {
+              if (
+                error instanceof RuntimeInvocationError &&
+                error.code === "INVALID_PARAMS" &&
+                error.message.includes("安全扫描")
+              )
+                throw new Error(
+                  "内容未通过记忆安全检查，尚未保存。请移除疑似密钥等敏感信息后重试。",
+                  { cause: error },
+                );
+              throw error;
+            }
+          }
+          if (dataRef.current.workspacePath !== workspacePath) return;
+          const fact = created;
+          // The write is already durable. Show its result even if the follow-up read fails.
+          setData((current) =>
+            current.workspacePath !== workspacePath
+              ? current
+              : {
+                  ...current,
+                  memory: {
+                    ...current.memory,
+                    workspacePath,
+                    facts: [
+                      fact,
+                      ...(current.memory.workspacePath === workspacePath
+                        ? current.memory.facts
+                        : []
+                      ).filter((item) => item.factId !== fact.factId),
+                    ],
+                  },
+                },
+          );
+          if (!preview) {
+            try {
+              await loadMemory(bridge, workspacePath);
+            } catch {
+              if (dataRef.current.workspacePath === workspacePath)
+                setMessage("记忆已保存，但列表刷新失败。请点击刷新重试。");
+            }
+          }
+        });
+        return created;
+      },
       async updateMemoryFact(factId, expectedVersion, patch) {
         const workspacePath = dataRef.current.workspacePath;
         if (!workspacePath || !dataRef.current.trusted) return undefined;
@@ -3901,7 +3985,7 @@ export function useRuntimeStore(): RuntimeStore {
             });
             await loadMemory(bridge, workspacePath);
           }
-          setMessage("记忆已永久删除，无法撤销。");
+          setMessage("记忆已删除，无法撤销。");
         });
       },
       async resolveMemoryProposal(proposalId, expectedVersion, resolution, patch) {

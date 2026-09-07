@@ -39,6 +39,7 @@ const extraction = (
   operationId: "extract-1",
   sessionId: source().sessionId,
   expectedCursorOrdinal: 0,
+  expectedDeletionRevision: 0,
   nextCursorOrdinal: 2,
   coverageHash: "a".repeat(64),
   items: [write()],
@@ -81,7 +82,7 @@ async function fixture(
 
 test("atomic memory persists scoped assertions with transaction replay, rollback, CAS and private files", async () => {
   await fixture(async ({ store, path, setFailpoint }) => {
-    assert.equal(store.schemaVersion(), 7);
+    assert.equal(store.schemaVersion(), 9);
     assert.equal(store.journalMode(), "wal");
     assert.equal(store.foreignKeysEnabled(), true);
     if (process.platform !== "win32") {
@@ -215,6 +216,7 @@ test("atomic memory retries a pending range once, discards atomically and never 
       operationId: "failure-1",
       sessionId: source().sessionId,
       expectedCursorOrdinal: 0,
+      expectedDeletionRevision: 0,
       failedThroughOrdinal: 2,
       coverageHash: "a".repeat(64),
       failureClass: "provider" as const,
@@ -246,7 +248,7 @@ test("atomic memory retries a pending range once, discards atomically and never 
   });
 });
 
-test("forget atomically erases prose, retains safe replay and suppresses all historical sources after reopen", async () => {
+test("deletion atomically erases prose, survives retries and allows saving the same source again", async () => {
   await fixture(async ({ store, path, setFailpoint }) => {
     const request = extraction();
     const initial = await store.commitExtraction(request);
@@ -264,35 +266,28 @@ test("forget atomically erases prose, retains safe replay and suppresses all his
     });
     const forget = { itemId, expectedVersion: 2, operationId: "forget-1" };
     setFailpoint("before_operation_write");
-    await assert.rejects(store.forgetItem(forget), /injected/);
+    await assert.rejects(store.deleteItem(forget), /injected/);
     assert.equal((await store.readItem(itemId))?.item.content, "New private assertion");
-    assert.equal(await store.isEvidenceSuppressed(source()), false);
+    assert.equal(await store.readDeletionRevision(), 0);
     assert.equal(
       (await store.readExtractionReceipt(request.operationId))?.requestedItems[0]?.content,
       request.items[0]?.content,
     );
     setFailpoint();
-    await store.forgetItem(forget);
-    await store.forgetItem(forget);
+    await store.deleteItem(forget);
+    await store.deleteItem(forget);
     assert.equal(await store.readItem(itemId), undefined);
-    assert.equal(await store.isEvidenceSuppressed(source()), true);
-    assert.equal(await store.isEvidenceSuppressed(source("event-2")), true);
     assert.equal(
-      await store.isEvidenceSuppressed({ ...source(), sessionId: "another-session" }),
-      false,
+      await store.readDeletionRevision(),
+      1,
+      "a replay does not increment the deletion generation",
     );
+    assert.equal((await store.readOperation(forget.operationId))?.operationType, "delete");
     assert.deepEqual((await store.readExtractionReceipt(request.operationId))?.requestedItems, []);
     assert.deepEqual((await store.commitExtraction(request)).receipt.requestedItems, []);
     assert.equal(await store.readItem(itemId), undefined);
     await assert.rejects(
-      store.applyMutations({
-        operationId: "resurrect",
-        mutations: [{ type: "create", item: write() }],
-      }),
-      /forgotten/,
-    );
-    await assert.rejects(
-      store.forgetItem({ ...forget, expectedVersion: 3 }),
+      store.deleteItem({ ...forget, expectedVersion: 3 }),
       conflict("operation_reused"),
     );
     await assert.rejects(
@@ -320,11 +315,72 @@ test("forget atomically erases prose, retains safe replay and suppresses all his
     store.close();
     const reopened = new SqliteMemoryItemStore(path);
     try {
-      assert.equal(await reopened.isEvidenceSuppressed(source()), true);
+      assert.equal(await reopened.readDeletionRevision(), 1);
       assert.equal((await reopened.commitExtraction(request)).replayed, true);
       assert.deepEqual(await reopened.listItems({ workspaceKey: "/workspace/a" }), []);
+      const resaved = await reopened.commitExtraction(
+        extraction({
+          operationId: "remember-again",
+          expectedCursorOrdinal: 2,
+          nextCursorOrdinal: 3,
+          expectedDeletionRevision: await reopened.readDeletionRevision(),
+        }),
+      );
+      assert.equal(resaved.receipt.status, "remembered");
+      assert.deepEqual((await reopened.readItem(resaved.results[0]!.itemId))?.sources, [source()]);
     } finally {
       reopened.close();
+    }
+  });
+});
+
+test("deletion from another connection rejects stale extraction commits and failure settlement", async () => {
+  await fixture(async ({ store, path }) => {
+    const initial = await store.commitExtraction(extraction());
+    const revision = await store.readDeletionRevision();
+    const management = new SqliteMemoryItemStore(path, { now: () => 1000 });
+    try {
+      await management.deleteItem({
+        itemId: initial.results[0]!.itemId,
+        expectedVersion: 1,
+        operationId: "delete-concurrently",
+      });
+      const stale = extraction({
+        operationId: "in-flight",
+        expectedCursorOrdinal: 2,
+        nextCursorOrdinal: 4,
+        expectedDeletionRevision: revision,
+      });
+      await assert.rejects(store.commitExtraction(stale), conflict("deletion_conflict"));
+      await assert.rejects(
+        store.settleExtractionFailure({
+          operationId: "in-flight-failure",
+          sessionId: stale.sessionId,
+          expectedCursorOrdinal: 2,
+          failedThroughOrdinal: 4,
+          expectedDeletionRevision: revision,
+          coverageHash: stale.coverageHash,
+          failureClass: "provider",
+          trigger: "remember",
+        }),
+        conflict("deletion_conflict"),
+      );
+      assert.equal((await store.readExtractionCursor(stale.sessionId))?.processedOrdinal, 2);
+      assert.equal(await store.readPendingExtractionFailure(stale.sessionId), undefined);
+      assert.equal(await store.readOperation(stale.operationId), undefined);
+      assert.deepEqual(await store.listItems({ workspaceKey: "/workspace/a" }), []);
+      assert.equal(
+        (
+          await store.commitExtraction({
+            ...stale,
+            operationId: "new-request",
+            expectedDeletionRevision: await store.readDeletionRevision(),
+          })
+        ).receipt.status,
+        "remembered",
+      );
+    } finally {
+      management.close();
     }
   });
 });
