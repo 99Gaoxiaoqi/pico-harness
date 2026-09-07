@@ -64,6 +64,13 @@ test("Claude grace keeps action tools/system cache prefix and disables tool choi
     response.writeHead(200, { "content-type": "application/json" });
     response.end(
       JSON.stringify({
+        id: "msg_grace_fixture",
+        type: "message",
+        role: "assistant",
+        model: "claude-test",
+        stop_reason: "tool_use",
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 1 },
         content:
           requestBodies.length === 1
             ? [{ type: "tool_use", id: "action-call", name: "read_marker", input: {} }]
@@ -139,7 +146,7 @@ test("Claude grace keeps action tools/system cache prefix and disables tool choi
   assert.equal(requestBodies.length, 2);
   const action = requestBodies[0]!;
   const grace = requestBodies[1]!;
-  assert.equal(action.tool_choice, undefined);
+  assert.deepEqual(action.tool_choice, { type: "auto" });
   assert.deepEqual(grace.tool_choice, { type: "none" });
   assert.deepEqual(grace.tools, action.tools);
   assert.deepEqual(grace.system, action.system);
@@ -166,8 +173,8 @@ test("Claude-compatible routes require an explicit tool_choice:none capability o
       apiKey: "test-key",
       model: "claude-test",
       capabilities: unknownCapabilities,
-    }).requestCapabilities,
-    undefined,
+    }).requestCapabilities?.toolChoiceNoneWithTools,
+    false,
   );
 
   const enabledCapabilities = resolveModelRouteCapabilities(
@@ -205,8 +212,8 @@ test("Claude-compatible routes require an explicit tool_choice:none capability o
       apiKey: "test-key",
       model: "claude-test",
       capabilities: disabledOfficialCapabilities,
-    }).requestCapabilities,
-    undefined,
+    }).requestCapabilities?.toolChoiceNoneWithTools,
+    false,
   );
 
   const root = await mkdtemp(join(tmpdir(), "pico-claude-tool-choice-config-"));
@@ -253,6 +260,25 @@ test("official OpenAI supports tool_choice none with tools while compatible rout
     }).requestCapabilities?.toolChoiceNoneWithTools,
     true,
   );
+
+  for (const protocol of ["openai", "responses"] as const) {
+    const disabled = resolveModelRouteCapabilities(
+      protocol,
+      "gpt-test",
+      { toolChoiceNoneWithTools: false },
+      { baseURL: "https://api.openai.com/v1" },
+    );
+    assert.equal(
+      createRawProvider(protocol, {
+        baseURL: "https://api.openai.com/v1",
+        apiKey: "test-key",
+        model: "gpt-test",
+        capabilities: disabled,
+      }).requestCapabilities?.toolChoiceNoneWithTools,
+      false,
+      `${protocol} must honor an explicit opt-out on official endpoints`,
+    );
+  }
 
   const compatible = resolveModelRouteCapabilities("openai", "gpt-test", undefined, {
     baseURL: "https://openai-compatible.invalid/v1",
