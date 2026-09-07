@@ -22,7 +22,10 @@ import {
   MEMORY_PROPOSAL_JOB_TYPE,
   type MemoryProposalModelPort,
 } from "../../src/memory/proposal-contracts.js";
-import { MEMORY_REVIEW_LEASE_TTL_MS } from "../../src/memory/runtime-scheduler.js";
+import {
+  MemoryReviewScheduler,
+  MEMORY_REVIEW_LEASE_TTL_MS,
+} from "../../src/memory/runtime-scheduler.js";
 import {
   MemoryReviewWorker,
   ProviderMemoryProposalModel,
@@ -32,6 +35,12 @@ import { createPicoCommandRegistry } from "../../src/input/pico-command-registry
 import { CostTracker } from "../../src/observability/tracker.js";
 import { estimateCost, type BillingRoute } from "../../src/observability/pricing.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
+import { SqliteMemoryItemStore } from "../../src/storage/sqlite/sqlite-memory-item-store.js";
+import { DesktopAtomicMemoryService } from "../../src/daemon/desktop-atomic-memory-service.js";
+import {
+  memorySessionKey,
+  type MemoryExtractionModel,
+} from "../../src/memory/atomic/runtime-contracts.js";
 import { executeAgentRuntime } from "../../src/runtime/agent-runtime.js";
 import { createEngineRuntimePort } from "../../src/runtime/engine-runtime-port-adapter.js";
 import {
@@ -227,26 +236,20 @@ test("memory recall keeps one stable preference without displacing every query-a
   );
 });
 
-test("foreground Runtime injects trusted recall ephemerally and schedules only completed enabled runs", async (context) => {
+test("foreground Runtime injects atomic recall ephemerally and respects disabled and untrusted gates", async (context) => {
   const fixture = await createFixture("runtime");
   context.after(() => rmRetry(fixture.root));
   const trustStore = await trustFixture(fixture);
-  const repository = openRepository(fixture);
-  createFact(repository, "runtime-fact", "project_fact", {
-    content: "Use npm run verify-memory with hidden-recall-policy",
-  });
-  createFact(repository, "runtime-unrelated", "reference", { content: "Deploy with kubectl" });
-  repository.close();
-
+  const service = new DesktopAtomicMemoryService({ picoHome: fixture.picoHome, publish: () => {} });
+  await service.create(fixture.workspace, "Use npm run verify-memory with hidden-recall-policy");
+  await service.create(fixture.workspace, "Deploy with kubectl");
   const captured: Message[][] = [];
+  let extractionCalls = 0;
   const provider: LLMProvider = {
     modelName: "memory-fixture",
     async generate(messages, tools) {
       captured.push(structuredClone(messages));
-      if (
-        tools?.some((tool) => tool.name === "memory_extract") === true &&
-        messages.at(-1)?.toolCallId === undefined
-      ) {
+      if (tools?.some((tool) => tool.name === "memory_extract") && !messages.at(-1)?.toolCallId) {
         return {
           role: "assistant",
           content: "",
@@ -256,146 +259,108 @@ test("foreground Runtime injects trusted recall ephemerally and schedules only c
       return { role: "assistant", content: "done" };
     },
   };
+  const sessionId = "memory-runtime-session";
   const result = await executeAgentRuntime(
     {
       prompt:
         "Please use npm run verify-memory. Please remember that this is a durable project convention.",
       dir: fixture.workspace,
-      sessionSelection: { mode: "new", sessionId: "memory-runtime-session" },
+      sessionSelection: { mode: "new", sessionId },
       provider: "openai",
       modelRouteId: "test/test",
       allowedTools: ["memory_extract"],
     },
-    { provider, picoHome: fixture.picoHome, memoryTrustStore: trustStore },
+    {
+      provider,
+      picoHome: fixture.picoHome,
+      memoryTrustStore: trustStore,
+      atomicMemoryModelFactory: async () => ({
+        model: createAtomicModel(fixture, sessionId, false, () => {
+          extractionCalls++;
+        }),
+      }),
+    },
   );
   assert.equal(result.finalMessage, "done");
-  const beforeDetachedEnqueue = openRepository(fixture);
-  assert.equal(
-    beforeDetachedEnqueue.listJobs().length,
-    0,
-    "foreground result must resolve before the detached durable enqueue runs",
-  );
-  beforeDetachedEnqueue.close();
-  await waitForImmediate();
+  await waitForAtomicCursor(fixture, sessionId);
+  assert.equal(extractionCalls, 1);
   const firstRequest = captured[0] ?? [];
-  const currentUserRequest = firstRequest.findLast(
+  const currentUser = firstRequest.findLast(
     (message) =>
       message.role === "user" &&
-      message.toolCallId === undefined &&
+      !message.toolCallId &&
       message.providerData?.["picoHiddenFromTranscript"] !== true,
   );
   assert.doesNotMatch(firstRequest[0]?.content ?? "", /hidden-recall-policy/u);
-  assert.match(currentUserRequest?.content ?? "", /hidden-recall-policy/u);
-  assert.doesNotMatch(currentUserRequest?.content ?? "", /Deploy with kubectl/u);
+  assert.match(currentUser?.content ?? "", /hidden-recall-policy/u);
+  assert.doesNotMatch(currentUser?.content ?? "", /Deploy with kubectl/u);
+  assert.equal(JSON.stringify(result.messages).includes("hidden-recall-policy"), false);
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const events = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
+  const transcript = await events.readSession(sessionId);
+  events.close();
   assert.equal(
-    result.messages.some((message) => message.content.includes("hidden-recall-policy")),
+    JSON.stringify(transcript).includes("hidden-recall-policy"),
     false,
+    "recall must never become transcript or checkpoint evidence",
   );
-  const runtimePaths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const runtimeEventStore = new SqliteRuntimeEventStore({
-    storageRoot: runtimePaths.workspace.root,
-  });
-  const runtimeEvents = await runtimeEventStore.readSession("memory-runtime-session");
-  runtimeEventStore.close();
-  assert.equal(
-    JSON.stringify(runtimeEvents).includes("hidden-recall-policy"),
-    false,
-    "ephemeral recall must not enter transcript, checkpoints, compaction or rewind facts",
-  );
-  const transcriptMessages = runtimeEvents
-    .filter((event) => event.kind === "message.committed")
-    .map((event) => (event.kind === "message.committed" ? event.data.message : undefined));
-  assert.deepEqual(
-    transcriptMessages.map((message) => message?.role),
-    ["user", "assistant", "assistant"],
-  );
-  assert.equal(
-    transcriptMessages.some((message) => message?.content.includes("hidden-recall-policy")),
-    false,
-  );
-
-  const after = openRepository(fixture);
-  const jobs = after.listJobs();
-  assert.equal(jobs.length, 1);
-  assert.equal(jobs[0]?.cursor.sessionId, "memory-runtime-session");
-  assert.match(jobs[0]?.cursor.eventId ?? "", /^user-message:/u);
-  const settings = after.getSettings();
-  after.updateSettings({
-    expectedVersion: settings.version,
+  const legacy = openRepository(fixture);
+  assert.equal(legacy.listJobs().length, 0, "atomic extraction must not write legacy review jobs");
+  legacy.close();
+  const initial = (await service.getSettings(fixture.workspace)).settings;
+  await service.updateSettings(fixture.workspace, {
+    workspacePath: fixture.workspace,
+    expectedVersion: initial.version,
+    idempotencyKey: "off",
     enabled: false,
-    injectionEnabled: false,
-    idempotencyKey: "test-memory-off",
   });
-  after.close();
-
-  captured.length = 0;
-  await executeAgentRuntime(
-    {
-      prompt: "Another foreground turn.",
-      dir: fixture.workspace,
-      sessionSelection: { mode: "new", sessionId: "memory-runtime-disabled" },
-      provider: "openai",
-      modelRouteId: "test/test",
-    },
-    { provider, picoHome: fixture.picoHome, memoryTrustStore: trustStore },
-  );
-  assert.equal(captured[0]?.[0]?.content.includes("verify-memory"), false);
-  const disabled = openRepository(fixture);
-  assert.equal(disabled.listJobs().length, 1, "disabled run must not enqueue extraction");
-  const disabledSettings = disabled.getSettings();
-  disabled.updateSettings({
-    expectedVersion: disabledSettings.version,
-    enabled: true,
-    injectionEnabled: true,
-    idempotencyKey: "test-memory-reenable-before-untrust",
-  });
-  disabled.close();
-
-  await trustStore.setTrusted(await trustStore.canonicalize(fixture.workspace), false);
-  captured.length = 0;
-  await executeAgentRuntime(
-    {
-      prompt: "Untrusted workspace turn.",
-      dir: fixture.workspace,
-      sessionSelection: { mode: "new", sessionId: "memory-runtime-untrusted" },
-      provider: "openai",
-      modelRouteId: "test/test",
-    },
-    { provider, picoHome: fixture.picoHome, memoryTrustStore: trustStore },
-  );
-  assert.equal(captured[0]?.[0]?.content.includes("verify-memory"), false);
-  const untrusted = openRepository(fixture);
-  assert.equal(untrusted.listJobs().length, 1, "untrusted run must not enqueue extraction");
-  untrusted.close();
+  let disabledFactoryCalls = 0;
+  const disabledModel = async () => {
+    disabledFactoryCalls++;
+    throw new Error("disabled/untrusted runs must not acquire a memory model");
+  };
+  for (const scenario of ["disabled", "untrusted"]) {
+    if (scenario === "untrusted") {
+      const settings = (await service.getSettings(fixture.workspace)).settings;
+      await service.updateSettings(fixture.workspace, {
+        workspacePath: fixture.workspace,
+        expectedVersion: settings.version,
+        idempotencyKey: "on",
+        enabled: true,
+      });
+      await trustStore.setTrusted(await trustStore.canonicalize(fixture.workspace), false);
+    }
+    captured.length = 0;
+    await executeAgentRuntime(
+      {
+        prompt: "verify-memory",
+        dir: fixture.workspace,
+        sessionSelection: { mode: "new", sessionId: `memory-runtime-${scenario}` },
+        provider: "openai",
+        modelRouteId: "test/test",
+      },
+      {
+        provider,
+        picoHome: fixture.picoHome,
+        memoryTrustStore: trustStore,
+        atomicMemoryModelFactory: disabledModel,
+      },
+    );
+    await waitForImmediate();
+    assert.equal(JSON.stringify(captured).includes("hidden-recall-policy"), false);
+    assert.equal(extractionCalls, 1);
+    assert.equal(disabledFactoryCalls, 0);
+  }
+  service.close();
 });
 
-test("memory_remember schedules extraction only after the completed terminal is durable", async (context) => {
-  const fixture = await createFixture("remember-post-terminal");
-  const sessionId = "memory-remember-post-terminal";
-  context.after(async () => {
-    const leftover = globalSessionManager.delete(sessionId, fixture.workspace, {
-      picoHome: fixture.picoHome,
-    });
-    await leftover?.close();
-    await rmRetry(fixture.root);
-  });
+test("memory_remember persists requested memory before the next model step and before terminal", async (context) => {
+  const fixture = await createFixture("remember-synchronous");
+  context.after(() => rmRetry(fixture.root));
+  const sessionId = "memory-remember-synchronous";
   const trustStore = await trustFixture(fixture);
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
   let calls = 0;
-  const provider: LLMProvider = {
-    async generate(_messages, tools) {
-      if (calls++ === 0 && tools?.some((tool) => tool.name === "memory_remember")) {
-        return {
-          role: "assistant",
-          content: "",
-          toolCalls: [
-            { id: "memory-remember-post-terminal-call", name: "memory_remember", arguments: "{}" },
-          ],
-        };
-      }
-      return { role: "assistant", content: "done" };
-    },
-  };
-
   const result = await executeAgentRuntime(
     {
       prompt: "请记住：本项目固定运行 npm run post-terminal-memory。",
@@ -406,33 +371,46 @@ test("memory_remember schedules extraction only after the completed terminal is 
       allowedTools: ["memory_remember"],
     },
     {
-      provider,
       picoHome: fixture.picoHome,
       memoryTrustStore: trustStore,
-      memoryReviewDebounceMs: 0,
+      atomicMemoryModelFactory: async () => ({
+        model: createAtomicModel(fixture, sessionId, true),
+      }),
+      provider: {
+        async generate(messages) {
+          if (calls++ === 0)
+            return {
+              role: "assistant",
+              content: "",
+              toolCalls: [{ id: "remember-call", name: "memory_remember", arguments: "{}" }],
+            };
+          const store = new SqliteMemoryItemStore(join(fixture.picoHome, "memory.sqlite"));
+          const items = await store.listItems({ workspaceKey: paths.workspace.id });
+          store.close();
+          assert.equal(items.length, 1);
+          assert.match(
+            messages.find((message) => message.toolCallId === "remember-call")?.content ?? "",
+            /remembered/,
+          );
+          const events = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
+          const entries = await events.readSession(sessionId);
+          events.close();
+          assert.equal(
+            entries.some((event) => event.kind === "run.terminal"),
+            false,
+          );
+          return { role: "assistant", content: "done" };
+        },
+      },
     },
   );
   assert.equal(result.finalMessage, "done");
-  await waitForImmediate();
-
-  const repository = openRepository(fixture);
-  const jobs = repository.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE });
-  repository.close();
-  assert.equal(jobs.length, 1);
-  const job = jobs[0]!;
-  assert.notEqual(job.terminalEventId, job.cursor.eventId);
-
-  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
-  const eventStore = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
-  const terminal = await eventStore.readSessionEvent(sessionId, job.terminalEventId);
-  eventStore.close();
-  assert.equal(terminal?.event.kind, "run.terminal");
-  if (terminal?.event.kind === "run.terminal") {
-    assert.equal(terminal.event.data.status, "completed");
-  }
+  const legacy = openRepository(fixture);
+  assert.equal(legacy.listJobs().length, 0);
+  legacy.close();
 });
 
-test("the second turn in one Session schedules Memory only when it carries a stable signal", async (context) => {
+test("the second turn in one Session extracts atomic memory only when its model requests the trigger", async (context) => {
   const fixture = await createFixture("multi-turn-signal-gate");
   const workspace = await realpath(fixture.workspace);
   const trustStore = await trustFixture(fixture);
@@ -495,7 +473,9 @@ test("the second turn in one Session schedules Memory only when it carries a sta
         provider,
         picoHome: fixture.picoHome,
         memoryTrustStore: trustStore,
-        memoryReviewDebounceMs: 0,
+        atomicMemoryModelFactory: async () => ({
+          model: createAtomicModel(fixture, sessionId, false),
+        }),
         runtimeState,
         resumeExistingSession: true,
       },
@@ -504,23 +484,36 @@ test("the second turn in one Session schedules Memory only when it carries a sta
 
   await executeDesktopTurn("What is 2 + 2?", "desktop-user-ordinary");
   await waitForImmediate();
-  let repository = openRepository(fixture);
-  assert.equal(repository.listJobs().length, 0);
-  repository.close();
+  let atomic = new SqliteMemoryItemStore(join(fixture.picoHome, "memory.sqlite"));
+  assert.equal(
+    await atomic.readExtractionCursor(
+      memorySessionKey(
+        resolvePicoPaths(workspace, { picoHome: fixture.picoHome }).workspace.id,
+        sessionId,
+      ),
+    ),
+    undefined,
+  );
+  atomic.close();
 
   await executeDesktopTurn(
     "请记住：这个项目固定使用 npm run multi-turn-memory 。",
     "desktop-user-stable",
   );
   await waitForImmediate();
-  repository = openRepository(fixture);
-  const jobs = repository.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE });
-  assert.equal(jobs.length, 1);
-  assert.equal(jobs[0]?.cursor.sessionId, sessionId);
-  repository.close();
+  await waitForAtomicCursor(fixture, sessionId);
+  atomic = new SqliteMemoryItemStore(join(fixture.picoHome, "memory.sqlite"));
+  const items = await atomic.listItems({
+    workspaceKey: resolvePicoPaths(workspace, { picoHome: fixture.picoHome }).workspace.id,
+  });
+  assert.equal(items.length, 1);
+  assert.match(items[0]?.item.content ?? "", /multi-turn-memory/);
+  assert.ok(items[0]?.sources.some((source) => source.sessionId.includes(sessionId)));
+  atomic.close();
 });
 
-test("startup rebuilds a Memory job lost after a durable completed terminal", async (context) => {
+test("startup does not reconstruct obsolete review jobs from durable completed terminals", async (context) => {
+  let startupModelCalls = 0;
   const fixture = await createFixture("terminal-job-gap-recovery");
   context.after(async () => {
     // executeAgentRuntime(mode:new) 会把会话留在 globalSessionManager;其
@@ -619,91 +612,93 @@ test("startup rebuilds a Memory job lost after a durable completed terminal", as
       picoHome: fixture.picoHome,
       memoryTrustStore: trustStore,
       memoryReviewDebounceMs: 0,
-      memoryProposalModelFactory: () => ({ model: createSuccessfulModel(() => undefined) }),
+      atomicMemoryModelFactory: async () => {
+        startupModelCalls++;
+        assert.fail("ordinary startup must not acquire a memory model");
+      },
     },
   );
   assert.equal(result.finalMessage, "4");
 
-  for (let attempt = 0; attempt < 100; attempt++) {
-    await waitForImmediate();
-    const repository = openRepository(fixture);
-    const recovered = repository
-      .listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE })
-      .find((job) => job.terminalEventId === "terminal-before-crash");
-    repository.close();
-    if (recovered?.status === "succeeded") return;
-  }
-  assert.fail("startup did not rebuild and process the review lost after terminal commit");
-});
-
-test("a direct enqueue failure invalidates a successful scan so the next Run rebuilds it", async (context) => {
-  const fixture = await createFixture("terminal-job-gap-cache-invalidation");
-  context.after(() => rmRetry(fixture.root));
-  const trustStore = await trustFixture(fixture);
-  const provider: LLMProvider = {
-    async generate(messages, tools) {
-      if (
-        tools?.some((tool) => tool.name === "memory_extract") === true &&
-        messages.at(-1)?.toolCallId === undefined
-      ) {
-        return {
-          role: "assistant",
-          content: "",
-          toolCalls: [{ id: "memory-cache-trigger", name: "memory_extract", arguments: "{}" }],
-        };
-      }
-      return { role: "assistant", content: "foreground complete" };
-    },
-  };
-  const execute = (sessionId: string, prompt: string, debounceMs: number) =>
-    executeAgentRuntime(
-      {
-        prompt,
-        dir: fixture.workspace,
-        sessionSelection: { mode: "new", sessionId },
-        provider: "openai",
-        modelRouteId: "test/test",
-        allowedTools: prompt.includes("请记住") ? ["memory_extract"] : [],
-      },
-      {
-        provider,
-        picoHome: fixture.picoHome,
-        memoryTrustStore: trustStore,
-        memoryReviewDebounceMs: debounceMs,
-        memoryProposalModelFactory: () => ({ model: createSuccessfulModel(() => undefined) }),
-      },
-    );
-
-  await execute("memory-cache-prime", "What is 2 + 2?", -1);
-  for (let attempt = 0; attempt < 20; attempt++) await waitForImmediate();
-
-  const failedSessionId = "memory-cache-direct-enqueue-failure";
-  await execute(failedSessionId, "请记住：这个项目固定使用 npm run cache-recovery 。", -1);
-  for (let attempt = 0; attempt < 20; attempt++) await waitForImmediate();
-  let repository = openRepository(fixture);
+  for (let attempt = 0; attempt < 5; attempt++) await waitForImmediate();
+  const repository = openRepository(fixture);
   assert.equal(repository.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE }).length, 0);
   repository.close();
+  const atomic = new SqliteMemoryItemStore(join(fixture.picoHome, "memory.sqlite"));
+  assert.equal((await atomic.listItems({ workspaceKey: paths.workspace.id })).length, 0);
+  atomic.close();
+  assert.equal(startupModelCalls, 0);
+});
 
-  const runtimeStore = new SqliteRuntimeEventStore({
-    storageRoot: resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome }).workspace.root,
-  });
-  const failedTerminal = (await runtimeStore.readSession(failedSessionId)).find(
-    (event) => event.kind === "run.terminal" && event.data.status === "completed",
+test("atomic extraction is independent of obsolete debounce settings and is not repeated on ordinary startup", async (context) => {
+  let startupModelCalls = 0;
+  const fixture = await createFixture("obsolete-debounce");
+  context.after(() => rmRetry(fixture.root));
+  const trustStore = await trustFixture(fixture);
+  const sessionId = "memory-obsolete-debounce";
+  let foregroundCalls = 0,
+    extractionCalls = 0;
+  await executeAgentRuntime(
+    {
+      prompt: "请记住：本项目使用 npm run cache-recovery。",
+      dir: fixture.workspace,
+      sessionSelection: { mode: "new", sessionId },
+      provider: "openai",
+      modelRouteId: "test/test",
+      allowedTools: ["memory_extract"],
+    },
+    {
+      picoHome: fixture.picoHome,
+      memoryTrustStore: trustStore,
+      memoryReviewDebounceMs: -1,
+      atomicMemoryModelFactory: async () => ({
+        model: createAtomicModel(fixture, sessionId, false, () => {
+          extractionCalls++;
+        }),
+      }),
+      provider: {
+        async generate() {
+          if (foregroundCalls++ === 0)
+            return {
+              role: "assistant",
+              content: "",
+              toolCalls: [{ id: "extract", name: "memory_extract", arguments: "{}" }],
+            };
+          return { role: "assistant", content: "done" };
+        },
+      },
+    },
   );
-  runtimeStore.close();
-  assert.ok(failedTerminal);
-
-  await execute("memory-cache-recovery-trigger", "What is 3 + 3?", 0);
-  for (let attempt = 0; attempt < 100; attempt++) {
-    await waitForImmediate();
-    repository = openRepository(fixture);
-    const rebuilt = repository
-      .listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE })
-      .find((job) => job.terminalEventId === failedTerminal.eventId);
-    repository.close();
-    if (rebuilt?.status === "succeeded") return;
-  }
-  assert.fail("the Run after a direct enqueue failure did not rebuild the missing review");
+  await waitForAtomicCursor(fixture, sessionId);
+  assert.equal(extractionCalls, 1);
+  await executeAgentRuntime(
+    {
+      prompt: "What is 3 + 3?",
+      dir: fixture.workspace,
+      sessionSelection: { mode: "new", sessionId: "ordinary-after-extract" },
+      provider: "openai",
+      modelRouteId: "test/test",
+    },
+    {
+      picoHome: fixture.picoHome,
+      memoryTrustStore: trustStore,
+      provider: {
+        async generate() {
+          return { role: "assistant", content: "6" };
+        },
+      },
+      atomicMemoryModelFactory: async () => {
+        startupModelCalls++;
+        assert.fail("startup must not replay extraction");
+      },
+    },
+  );
+  await waitForImmediate();
+  const repository = openRepository(fixture);
+  assert.equal(repository.listJobs().length, 0);
+  repository.close();
+  assert.equal(extractionCalls, 1);
+  assert.equal(startupModelCalls, 0);
 });
 
 test("an invalidated in-flight recovery continues with the current generation", async (context) => {
@@ -923,7 +918,8 @@ test("recovery yields to the host after each fixed enqueue batch", async (contex
  * loadSession 的 repairManifests 在下次读取时自动修复。
  */
 
-test("an ordinary question wakes an existing durable review without enqueueing another", async (context) => {
+test("an ordinary foreground question leaves existing legacy review jobs untouched", async (context) => {
+  let startupModelCalls = 0;
   const fixture = await createFixture("ordinary-recovery-kick");
   context.after(() => rmRetry(fixture.root));
   const trustStore = await trustFixture(fixture);
@@ -952,19 +948,21 @@ test("an ordinary question wakes an existing durable review without enqueueing a
       picoHome: fixture.picoHome,
       memoryTrustStore: trustStore,
       memoryReviewDebounceMs: 0,
-      memoryProposalModelFactory: () => ({ model: createSuccessfulModel(() => undefined) }),
+      atomicMemoryModelFactory: async () => {
+        startupModelCalls++;
+        assert.fail("legacy queued reviews must not acquire an atomic model");
+      },
     },
   );
 
-  for (let attempt = 0; attempt < 100; attempt++) {
-    await waitForImmediate();
-    repository = openRepository(fixture);
-    const jobs = repository.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE });
-    const recovered = jobs.length === 1 && jobs[0]?.status === "succeeded";
-    repository.close();
-    if (recovered) return;
-  }
-  assert.fail("ordinary foreground startup did not recover the existing durable review");
+  for (let attempt = 0; attempt < 5; attempt++) await waitForImmediate();
+  repository = openRepository(fixture);
+  const jobs = repository.listJobs({ type: MEMORY_PROPOSAL_JOB_TYPE });
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0]?.status, "queued");
+  assert.equal(jobs[0]?.attemptCount, 0);
+  repository.close();
+  assert.equal(startupModelCalls, 0);
 });
 
 test("proposal notification outbox retries across workers without repeating extraction", async (context) => {
@@ -979,39 +977,12 @@ test("proposal notification outbox retries across workers without repeating extr
     idempotencyKey: "memory-worker-manual-review",
   });
   settingsRepository.close();
-  let foregroundCalls = 0;
-  const foregroundProvider: LLMProvider = {
-    async generate(_messages, tools) {
-      if (
-        foregroundCalls++ === 0 &&
-        tools?.some((tool) => tool.name === "memory_extract") === true
-      ) {
-        return {
-          role: "assistant",
-          content: "",
-          toolCalls: [{ id: "memory-worker-trigger", name: "memory_extract", arguments: "{}" }],
-        };
-      }
-      return { role: "assistant", content: "foreground complete" };
-    },
-  };
-  const foreground = await executeAgentRuntime(
-    {
-      prompt: "请记住：这个项目固定使用 npm run build-memory 进行构建，并且延续现有发布约定。",
-      dir: fixture.workspace,
-      sessionSelection: { mode: "new", sessionId: "memory-worker-session" },
-      provider: "openai",
-      modelRouteId: "test/test",
-      allowedTools: ["memory_extract"],
-    },
-    {
-      provider: foregroundProvider,
-      picoHome: fixture.picoHome,
-      memoryTrustStore: trustStore,
-      memoryReviewDebounceMs: 0,
-    },
+  await enqueueCompletedReview(
+    fixture,
+    trustStore,
+    "memory-worker-session",
+    "请记住：这个项目固定使用 npm run build-memory 进行构建，并且延续现有发布约定。",
   );
-  await waitForImmediate();
 
   let modelCalls = 0;
   let disposals = 0;
@@ -1091,7 +1062,6 @@ test("proposal notification outbox retries across workers without repeating extr
   assert.equal(results[0]?.status, "succeeded");
   assert.equal(modelCalls, 1);
   assert.equal(disposals, 1);
-  assert.equal(foreground.usage.costCNY, 0, "memory review must not enter main Session usage");
   assert.deepEqual(Object.keys(notices[0] ?? {}).sort(), ["kind", "proposalId", "version"]);
 
   const repository = openRepository(fixture);
@@ -1110,6 +1080,11 @@ test("proposal notification outbox retries across workers without repeating extr
   const usageLedger = new SqliteRuntimeControlStore({
     storageRoot: resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome }).workspace.root,
   });
+  assert.equal(
+    usageLedger.listProviderCalls().some((call) => call.purpose !== "memory_review"),
+    false,
+    "isolated review billing must not enter foreground usage",
+  );
   const memoryCall = usageLedger
     .listProviderCalls()
     .find((call) => call.purpose === "memory_review");
@@ -1690,7 +1665,7 @@ test("exhausted workspace review budget defers fuzzy jobs without consuming an a
   inspection.close();
 });
 
-test("/memory command uses trust, sanitizer, idempotency, CAS and executable undo", async (context) => {
+test("/memory registry command uses atomic storage, sanitizer, idempotency, settings and executable undo", async (context) => {
   const fixture = await createFixture("command");
   context.after(() => rmRetry(fixture.root));
   const trustStore = await trustFixture(fixture);
@@ -1703,90 +1678,34 @@ test("/memory command uses trust, sanitizer, idempotency, CAS and executable und
   });
   const command = registry.resolve("memory");
   assert.ok(command);
-  const execute = async (args: string[]) =>
-    command.execute(
-      {
-        raw: `/memory ${args.join(" ")}`,
-        name: "memory",
-        args: args.join(" "),
-        argv: args,
-      },
+  const execute = async (argv: string[]) => {
+    const result = await command.execute(
+      { raw: `/memory ${argv.join(" ")}`, name: "memory", args: argv.join(" "), argv },
       {},
     );
-
-  const remembered = await execute(["remember", "Use", "npm", "run", "test:memory"]);
-  assert.equal(remembered.type, "local");
-  const undoCommand =
-    remembered.type === "local"
-      ? remembered.message?.match(/\/memory undo (\S+)/u)?.[1]
-      : undefined;
-  assert.ok(undoCommand);
-  await execute(["remember", "Use", "npm", "run", "test:memory"]);
-  let repository = openRepository(fixture);
-  assert.equal(repository.listFacts({ states: ["active"] }).length, 1, "remember is idempotent");
-  repository.close();
-
-  const rejected = await execute(["remember", "sk-abcdefghijklmnopqrstuvwxyz123456"]);
+    assert.equal(result.type, "local");
+    return result.type === "local" ? (result.message ?? "") : "";
+  };
+  const remembered = await execute(["remember", "Use npm run test:memory"]);
+  const undo = remembered.match(/\/memory undo (\S+)/u)?.[1];
+  assert.ok(undo);
+  await execute(["remember", "Use npm run test:memory"]);
+  assert.match(await execute(["status"]), /Active facts: 1/);
   assert.match(
-    rejected.type === "local" ? (rejected.message ?? "") : "",
-    /rejected by the safety scan/u,
+    await execute(["remember", "sk-abcdefghijklmnopqrstuvwxyz123456"]),
+    /安全扫描未通过/,
   );
-  repository = openRepository(fixture);
-  const reviewJob = repository.createJob({
-    type: "terminal-extraction",
-    terminalEventId: "memory-command-review",
-    extractorVersion: "memory-command-v1",
-    cursor: { sessionId: "memory-command-session" },
-  });
-  repository.updateJob({
-    jobId: reviewJob.jobId,
-    expectedVersion: reviewJob.version,
-    status: "succeeded",
-    modelCalls: 1,
-    inputTokens: 120,
-    outputTokens: 30,
-    costUsd: 0.0125,
-    idempotencyKey: "memory-command-review-complete",
-  });
-  const settings = repository.getSettings();
-  repository.updateSettings({
-    expectedVersion: settings.version,
-    autoPropose: false,
-    idempotencyKey: "test-disable-auto-propose",
-  });
-  repository.close();
-  const balancedStatus = await execute(["status"]);
-  assert.match(
-    balancedStatus.type === "local" ? (balancedStatus.message ?? "") : "",
-    /Review mode: balanced[\s\S]*Review budget \(rolling 24h\): available[\s\S]*Review usage: 1\/8 calls, 120\/16000 input tokens, 30\/2000 output tokens, \$0\.0125\/\$0\.1000/u,
-  );
-  repository = openRepository(fixture);
-  const balancedSettings = repository.getSettings();
-  repository.updateSettings({
-    expectedVersion: balancedSettings.version,
-    reviewMode: "eco",
-    idempotencyKey: "memory-command-review-eco",
-  });
-  repository.close();
-  const ecoStatus = await execute(["status"]);
-  assert.match(
-    ecoStatus.type === "local" ? (ecoStatus.message ?? "") : "",
-    /Review mode: eco[\s\S]*Eco mode guarantees zero model review calls/u,
-  );
+  assert.doesNotMatch(await execute(["status"]), /Review budget|Pending proposals/);
   await execute(["off"]);
-  repository = openRepository(fixture);
-  assert.equal(repository.getSettings().enabled, false);
-  assert.equal(repository.getSettings().injectionEnabled, false);
-  repository.close();
-  const enabled = await execute(["on"]);
-  assert.match(enabled.type === "local" ? (enabled.message ?? "") : "", /review remains off/u);
-  await execute(["undo", undoCommand]);
-  repository = openRepository(fixture);
-  assert.equal(repository.listFacts({ states: ["active"] }).length, 0);
-  assert.equal(repository.listFacts({ states: ["disabled"] }).length, 1);
-  assert.equal(repository.getSettings().enabled, true);
-  assert.equal(repository.getSettings().autoPropose, false);
-  repository.close();
+  assert.match(await execute(["status"]), /Memory: off[\s\S]*Injection: off/);
+  await execute(["on"]);
+  assert.match(await execute(["status"]), /Memory: on[\s\S]*Injection: on/);
+  await execute(["undo", undo]);
+  assert.match(await execute(["status"]), /Active facts: 0[\s\S]*Archived facts: 1/);
+  assert.match(await execute(["undo", undo]), /fact changed/);
+  const legacy = openRepository(fixture);
+  assert.equal(legacy.listFacts().length, 0);
+  legacy.close();
 });
 
 test.after(async () => {
@@ -1812,73 +1731,142 @@ async function trustFixture(fixture: { workspace: string; picoHome: string }) {
 
 async function enqueueCompletedReview(
   fixture: { workspace: string; picoHome: string },
-  trustStore: WorkspaceTrustStore,
+  _trustStore: WorkspaceTrustStore,
   sessionId: string,
   prompt = "请记住：这个项目固定使用 npm run memory-recovery 进行构建，并且延续现有发布约定。",
 ): Promise<void> {
-  let triggerCalls = 0;
-  // 本 helper 构造"人工评审"场景：默认 autoCommit=true 会把干净提案直接
-  // accept（不出 pending、不发 proposed 通知），关掉以获得待审提案。
-  const settingsRepository = openRepository(fixture);
-  const initialSettings = settingsRepository.getSettings();
-  settingsRepository.updateSettings({
-    expectedVersion: initialSettings.version,
-    autoCommit: false,
-    idempotencyKey: `memory-test-manual-review:${sessionId}`,
-  });
-  settingsRepository.close();
-  await executeAgentRuntime(
-    {
-      prompt,
-      dir: fixture.workspace,
-      sessionSelection: { mode: "new", sessionId },
-      provider: "openai",
-      modelRouteId: "test/test",
-      // 记忆门控为模型工具触发（ffca119e）+ memory 工具组 deferred：
-      // 命令级放行并披露触发器工具，模拟宿主显式授权记忆场景。
-      allowedTools: ["memory_extract"],
-    },
-    {
-      provider: {
-        // 记忆门控为模型工具触发（ffca119e）：先举手 memory_extract 再回终稿
-        //（allowedTools 放行并披露触发器工具，见上方请求注释）。
-        async generate(_messages, tools) {
-          if (triggerCalls++ === 0 && tools?.some((tool) => tool.name === "memory_extract")) {
-            return {
-              role: "assistant",
-              content: "",
-              toolCalls: [
-                { id: "memory-enqueue-trigger", name: "memory_extract", arguments: "{}" },
-              ],
-            };
-          }
-          return { role: "assistant", content: "foreground complete" };
-        },
+  // Legacy workers retain isolated regression coverage without relying on removed production wiring.
+  const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+  const events = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
+  const runId = `run-${sessionId}`;
+  const userMessageEventId = `user-${sessionId}`,
+    terminalEventId = `terminal-${sessionId}`;
+  try {
+    await events.initializeSession({ sessionId, workDir: fixture.workspace });
+    const base = {
+      schemaVersion: 2 as const,
+      sessionId,
+      invocationId: `invocation-${sessionId}`,
+      runId,
+      turnId: `turn-${sessionId}`,
+      at: new Date().toISOString(),
+      partial: false,
+    };
+    await events.appendBatch([
+      {
+        ...base,
+        eventId: `started-${sessionId}`,
+        visibility: "internal",
+        kind: "run.started",
+        data: { workDir: fixture.workspace },
       },
-      picoHome: fixture.picoHome,
-      memoryTrustStore: trustStore,
-      memoryReviewDebounceMs: 0,
-    },
-  );
-  for (let attempt = 0; attempt < 100; attempt++) {
-    await waitForImmediate();
+      {
+        ...base,
+        eventId: userMessageEventId,
+        visibility: "model",
+        kind: "message.committed",
+        data: { message: { role: "user", content: prompt } },
+      },
+      {
+        ...base,
+        eventId: `assistant-${sessionId}`,
+        visibility: "model",
+        kind: "message.committed",
+        data: { message: { role: "assistant", content: "foreground complete" } },
+      },
+      {
+        ...base,
+        eventId: terminalEventId,
+        visibility: "internal",
+        kind: "run.terminal",
+        data: { status: "completed" },
+      },
+    ]);
     const repository = openRepository(fixture);
-    const jobs = repository.listJobs({ statuses: ["queued"], type: MEMORY_PROPOSAL_JOB_TYPE });
-    if (jobs.length > 0) {
-      for (const job of jobs) {
-        repository.updateJob({
-          jobId: job.jobId,
-          expectedVersion: job.version,
-          nextAttemptAt: null,
-          idempotencyKey: `memory-test-release-debounce:${job.jobId}:${job.version}`,
-        });
-      }
+    try {
+      const settings = repository.getSettings();
+      repository.updateSettings({
+        expectedVersion: settings.version,
+        autoCommit: false,
+        idempotencyKey: `manual-review:${sessionId}`,
+      });
+      new MemoryReviewScheduler(repository, { debounceMs: 0 }).enqueue({
+        sessionId,
+        runId,
+        userMessageEventId,
+        terminalEventId,
+      });
+    } finally {
       repository.close();
-      return;
     }
-    repository.close();
+  } finally {
+    events.close();
   }
-  throw new Error("Timed out waiting for the debounced memory review job");
+}
+
+function createAtomicModel(
+  fixture: { workspace: string; picoHome: string },
+  sessionId: string,
+  requested: boolean,
+  onProposal: () => void = () => {},
+): MemoryExtractionModel {
+  return {
+    async call(request) {
+      const paths = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome });
+      const events = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
+      const entries = await events.readSession(sessionId);
+      events.close();
+      const user = entries.findLast(
+        (event) =>
+          event.kind === "message.committed" &&
+          event.data.message.role === "user" &&
+          !event.data.message.toolCallId,
+      );
+      assert.ok(user?.kind === "message.committed");
+      const content = user.data.message.content;
+      const item = {
+        content,
+        kind: "context",
+        statementType: "fact",
+        temporalType: "undated",
+        scope: "workspace",
+        eventStartedAt: null,
+        eventEndedAt: null,
+        keys: [{ key: "memory", type: "concept" }],
+      };
+      if (request.stage === "canonicalize")
+        return JSON.stringify({
+          results: [{ candidateId: "candidate_0", status: "accepted", item }],
+        });
+      onProposal();
+      const proposed = {
+        ...item,
+        evidence: [{ sourceRef: `event:${user.eventId}`, quote: content }],
+      };
+      return JSON.stringify({
+        status: "complete",
+        coverageStatus: "processed",
+        requestedStatus: requested ? "resolved" : "not_applicable",
+        requestedItems: requested ? [proposed] : [],
+        incidentalItems: requested ? [] : [proposed],
+      });
+    },
+  };
+}
+
+async function waitForAtomicCursor(
+  fixture: { workspace: string; picoHome: string },
+  sessionId: string,
+): Promise<void> {
+  const key = resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome }).workspace.id;
+  for (let attempt = 0; attempt < 300; attempt++) {
+    await waitForImmediate();
+    const store = new SqliteMemoryItemStore(join(fixture.picoHome, "memory.sqlite"));
+    const cursor = await store.readExtractionCursor(memorySessionKey(key, sessionId));
+    store.close();
+    if (cursor && cursor.processedOrdinal > 0) return;
+  }
+  assert.fail(`atomic extraction did not settle for ${sessionId}`);
 }
 
 function waitForImmediate(): Promise<void> {
