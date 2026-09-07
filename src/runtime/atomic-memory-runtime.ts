@@ -1,3 +1,4 @@
+import { AtomicMemoryLifecycle } from "./atomic-memory-lifecycle.js";
 import { join } from "node:path";
 import { withProviderCallContext } from "../observability/provider-call-context.js";
 import type { Message, ToolDefinition } from "../schema/message.js";
@@ -59,6 +60,7 @@ export interface AtomicMemoryRuntimeOptions {
   readonly gate: () => Promise<MemoryGateResult>;
   readonly modelFactory: () => Promise<AtomicMemoryModelLease>;
   readonly supported: boolean;
+  readonly lifecycle?: AtomicMemoryLifecycle;
   readonly onChanged?: () => void;
 }
 
@@ -69,8 +71,10 @@ export class AtomicMemoryRuntime {
   private readonly background = new Set<Promise<unknown>>();
   private readonly workspaceKey: string;
   private readonly laneKey: string;
+  private readonly lifecycle: AtomicMemoryLifecycle;
 
   constructor(private readonly options: AtomicMemoryRuntimeOptions) {
+    this.lifecycle = options.lifecycle ?? new AtomicMemoryLifecycle();
     this.workspaceKey = resolvePicoPaths(options.workDir, {
       picoHome: options.picoHome,
     }).workspace.id;
@@ -94,11 +98,19 @@ export class AtomicMemoryRuntime {
     if (!this.options.supported || !this.source)
       return unavailable("provider_or_source_unavailable");
     const snapshot = { ...this.source, ...(signal ? { signal } : {}) };
-    return sessionMemoryLane.run(this.laneKey, "foreground", () => this.execute(snapshot));
+    return this.lifecycle.run(
+      "remember",
+      () => sessionMemoryLane.run(this.laneKey, "foreground", () => this.execute(snapshot)),
+      () => unavailable("draining"),
+    );
   }
 
   async requestExtract(): Promise<{ status: "accepted" | "unavailable" }> {
-    if (!this.options.supported || !(await this.options.gate()).allowed)
+    if (
+      !this.options.supported ||
+      !(await this.options.gate()).allowed ||
+      this.lifecycle.isDraining
+    )
       return { status: "unavailable" };
     this.extractRequested = true;
     return { status: "accepted" };
@@ -107,7 +119,7 @@ export class AtomicMemoryRuntime {
   async completed(runId: string): Promise<void> {
     if (!this.extractRequested) return;
     this.extractRequested = false;
-    try {
+    this.enqueue("extract", async () => {
       const entries = await this.readEntries();
       const terminal = entries.find(
         ({ event }) =>
@@ -117,16 +129,13 @@ export class AtomicMemoryRuntime {
           !event.data.recovered,
       );
       if (!terminal) return;
-      const snapshot = await this.snapshot("extract", terminal.sequence);
-      if (snapshot) this.enqueue(snapshot);
-    } catch (error) {
-      logger.warn({ error: String(error) }, "[Memory] post-terminal extraction unavailable");
-    }
+      return this.snapshot("extract", terminal.sequence);
+    });
   }
 
   async checkpoint(checkpointId: string): Promise<void> {
     if (!this.options.supported) return;
-    try {
+    this.enqueue("compaction", async () => {
       const entries = await this.readEntries();
       const checkpoint = entries.find(
         ({ event }) =>
@@ -140,23 +149,33 @@ export class AtomicMemoryRuntime {
           ? entries.find((entry) => entry.event.eventId === checkpointEvent.data.throughEventId)
           : undefined;
       if (snapshot && through)
-        this.enqueue({
+        return {
           ...snapshot,
           boundaryOrdinal: through.sequence,
           boundaryEventId: through.event.eventId,
           compactionCheckpointId: checkpointId,
-        });
-    } catch (error) {
-      logger.warn({ error: String(error) }, "[Memory] compaction extraction unavailable");
-    }
+        };
+      return undefined;
+    });
   }
 
   async drain(): Promise<void> {
-    await Promise.allSettled([...this.background]);
+    while (this.background.size > 0) await Promise.allSettled([...this.background]);
   }
 
-  private enqueue(snapshot: MemoryExtractionSnapshot): void {
-    const task = sessionMemoryLane.run(this.laneKey, "background", () => this.execute(snapshot));
+  private enqueue(
+    trigger: "extract" | "compaction",
+    prepare: () => Promise<MemoryExtractionSnapshot | undefined>,
+  ): void {
+    const task = this.lifecycle.run(
+      trigger,
+      async () => {
+        const snapshot = await prepare();
+        if (snapshot)
+          await sessionMemoryLane.run(this.laneKey, "background", () => this.execute(snapshot));
+      },
+      () => undefined,
+    );
     this.background.add(task);
     void task
       .catch((error) =>
@@ -177,9 +196,11 @@ export class AtomicMemoryRuntime {
         if (!(await this.sessionAvailable()))
           return { allowed: false, reason: "session_unavailable" };
         const settings = await store.readSettings(this.workspaceKey);
-        return settings.enabled && (snapshot.trigger === "remember" || settings.autoExtract)
-          ? { allowed: true }
-          : { allowed: false, reason: "memory_disabled" };
+        if (!settings.enabled || (snapshot.trigger !== "remember" && !settings.autoExtract))
+          return { allowed: false, reason: "memory_disabled" };
+        return this.lifecycle.isDraining
+          ? { allowed: false, reason: "draining" }
+          : { allowed: true };
       };
       const model: MemoryExtractionModel = {
         call: async (request) => {
@@ -193,8 +214,11 @@ export class AtomicMemoryRuntime {
       if (result.status !== "unavailable") this.options.onChanged?.();
       return result;
     } finally {
-      await lease?.dispose?.();
-      store.close();
+      try {
+        await lease?.dispose?.();
+      } finally {
+        store.close();
+      }
     }
   }
 

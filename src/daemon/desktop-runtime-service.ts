@@ -1,3 +1,4 @@
+import { type AtomicMemoryLifecycle } from "../runtime/atomic-memory-lifecycle.js";
 import { usagePricing } from "./usage-pricing.js";
 import { buildUsageDashboard, type UsageDashboardInput } from "./usage-dashboard.js";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
@@ -264,6 +265,7 @@ interface ResolvedRuntimeUserInput {
 }
 
 export interface DesktopRuntimeServiceOptions {
+  readonly memoryLifecycle?: AtomicMemoryLifecycle;
   readonly runtimeService: WorkspaceRuntimeService;
   readonly registrationStore?: WorkspaceRegistrationStore;
   readonly trustStore?: WorkspaceTrustStore;
@@ -833,7 +835,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     };
   }
 
+  beginDrain(): void {
+    this.options.memoryLifecycle?.beginDrain();
+  }
+
   close(): Promise<void> {
+    this.beginDrain();
     if (this.closePromise) return this.closePromise;
     this.lifecycleState = "closing";
     this.closePromise = this.closeOnce();
@@ -866,6 +873,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     // Keep the projection subscriber and RuntimeStore alive until those events are projected.
     try {
       await attempt(() => this.options.runtimeService.closeRuntimes());
+      await attempt(() => this.options.memoryLifecycle?.close());
       await attempt(() => this.transcriptPersistenceTail);
       for (const store of this.agentGraphStores.values()) await attempt(() => store.close());
       this.agentGraphStores.clear();

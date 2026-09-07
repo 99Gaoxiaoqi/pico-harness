@@ -170,7 +170,10 @@ async function createPicoDaemonComposition(
   // 归零，顺序恰好成立），从而"常驻 + SIGTERM 可优雅关停"两者兼得。
   const residency = context.acquireResidency();
 
-  const services = createProductionRuntimeServices(options);
+  const services = createProductionRuntimeServices({
+    ...options,
+    acquireMemoryResidency: () => context.acquireResidency(),
+  });
   const daemonHost = assembleProductionDaemonHost(services, options);
   const sessionContinuity = new SessionSubscriptionRegistry(
     context.hostEpoch,
@@ -220,6 +223,7 @@ async function createPicoDaemonComposition(
     },
     releaseConnection: bridge.releaseConnection,
     beginDrain() {
+      services.desktopService.beginDrain();
       // drain 期间停事件推送；cron 停止由 close() 统一收口（与旧 daemon 停机序一致）。
       bridge.beginDrain();
     },
