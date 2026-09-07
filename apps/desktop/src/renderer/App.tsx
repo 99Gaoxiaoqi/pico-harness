@@ -1,3 +1,5 @@
+import { ConversationGraphBoard } from "./conversation/ConversationGraphBoard.js";
+import "./conversation/graph-board.css";
 import { UsageSettingsPage } from "./usage/UsageSettingsPage.js";
 import "./usage/usage.css";
 import { parseSwarmCommand } from "./swarm-command.js";
@@ -138,7 +140,6 @@ import {
   WorkbarLauncher,
   createWorkbarToolTab,
   createWorkbarState,
-  graphModeWorkbarAction,
   getWorkbarTool,
   isWorkbarPanelActive,
   loadWorkbarState,
@@ -1561,6 +1562,7 @@ function ConversationPage() {
   const { data, actions, busy, preview, message } = runtime;
   const location = useLocation();
   const navigate = useNavigate();
+  const graphParentId = new URLSearchParams(location.search).get("graphParent");
   const workspacePath = workspacePathFromSearch(location.search) ?? "";
   const sessionRef = useMemo<WorkspaceSessionRef | undefined>(
     () => (sessionId && workspacePath ? { workspacePath, sessionId } : undefined),
@@ -2201,12 +2203,6 @@ function ConversationPage() {
   }, []);
 
   useEffect(() => {
-    if (!sessionId || !workspacePath) return;
-    const action = graphModeWorkbarAction(conversation?.settings?.orchestrationMode);
-    if (action) dispatchWorkbar(action);
-  }, [conversation?.settings?.orchestrationMode, sessionId, workspacePath]);
-
-  useEffect(() => {
     const handleShortcut = (event: globalThis.KeyboardEvent) => {
       const kind = resolveWorkbarShortcut(event);
       if (!kind || !sessionRef) return;
@@ -2268,6 +2264,14 @@ function ConversationPage() {
           sessionRef ? (
             <div className="conversation-session-header">
               <div className="conversation-session-header__identity">
+                {graphParentId && (
+                  <Link
+                    className="conversation-graph-parent"
+                    to={sessionHref({ workspacePath, sessionId: graphParentId })}
+                  >
+                    ← 返回主任务
+                  </Link>
+                )}
                 {workspacePath && (
                   <span className="conversation-session-project" title={workspacePath}>
                     <Folder aria-hidden="true" /> {workspaceLabel}
@@ -2306,7 +2310,10 @@ function ConversationPage() {
                     </Button>
                   </form>
                 ) : (
-                  <h1>{session?.title ?? (sessionId ? "正在载入会话…" : "新任务")}</h1>
+                  <h1>
+                    {session?.title ??
+                      (graphParentId ? "Graph 子任务" : sessionId ? "正在载入会话…" : "新任务")}
+                  </h1>
                 )}
               </div>
               <div className="conversation-session-header__meta">
@@ -2415,271 +2422,298 @@ function ConversationPage() {
           ) : undefined
         }
         composer={
-          pendingPrompt || pendingApproval ? (
-            <ConversationInteractionSlot
-              prompt={pendingPrompt}
-              approval={pendingPrompt ? undefined : pendingApproval}
-              busy={busy === "approval" || busy === "prompt"}
-              onApprovalDecision={respondToApproval}
-              onPromptAnswer={(answer) => {
-                if (pendingPrompt) void actions.respondPrompt(pendingPrompt.id, answer);
-              }}
-              onStop={activeRun ? () => void actions.stopRun(activeRun.id) : undefined}
-            />
-          ) : (
-            <div className="conversation-composer-region">
-              {usingOpenCodeFree && (
-                <p className="conversation-free-notice">
-                  OpenCode Free 免费试用 · 按 IP 限流，请勿提交个人或机密信息。
-                  <a href="https://opencode.ai/docs/zen#privacy" target="_blank" rel="noreferrer">
-                    数据使用说明
-                  </a>
-                </p>
-              )}
-              {catalogOpen && (
-                <ConversationContextMenu
-                  skills={data.catalogSkills}
-                  agents={data.catalogAgents}
-                  onClose={() => setCatalogOpen(false)}
-                  onSelect={(nextActivation) => {
-                    setActivation(nextActivation);
-                    setCatalogOpen(false);
-                    window.requestAnimationFrame(() =>
-                      document
-                        .querySelector<HTMLTextAreaElement>(".conversation-composer textarea")
-                        ?.focus(),
-                    );
-                  }}
-                />
-              )}
-              <ConversationComposer
-                value={draft}
-                onValueChange={handleDraftChange}
-                onSubmit={(value) => void submit(value.text, value.behavior)}
-                status={composerStatus}
-                behavior={behavior}
-                onBehaviorChange={setBehavior}
-                busy={preparingSend || busy === "send-message"}
-                disabled={Boolean(conversation?.loadError)}
-                submitDisabled={!composerReady}
-                placeholder={
-                  activation?.kind === "skill"
-                    ? `输入 ${activation.name} 的参数或补充要求…`
-                    : activation?.kind === "agent"
-                      ? `描述要委派给 ${activation.name} 的任务…`
-                      : sessionId
-                        ? "继续对话，或在运行中调整方向…"
-                        : !workspacePath
-                          ? "向 Pico 发送消息…"
-                          : legacyStorageBlocked
-                            ? "这个项目需要先迁移旧版会话数据…"
-                            : !workspaceReady
-                              ? "正在准备项目…"
-                              : "向 Pico 发送消息…"
+          <>
+            {sessionRef && !graphParentId && !preview && (
+              <ConversationGraphBoard
+                key={conversationKey}
+                workspacePath={workspacePath}
+                sessionId={sessionRef.sessionId}
+                enabled={
+                  conversation?.settings?.orchestrationMode === "graph" ||
+                  conversation?.settings?.orchestrationMode === "swarm"
                 }
-                statusText={
-                  conversation?.queuedCount
-                    ? `${conversation.queuedCount} 条消息正在排队`
-                    : undefined
+                refreshKey={`${activeRun?.id ?? "idle"}:${activeRun?.status ?? "idle"}:${conversation?.items.length ?? 0}`}
+                onDetails={() => openWorkbarTab("graph", "right")}
+                onOpenSession={(childSessionId) =>
+                  navigate(
+                    `${sessionHref({ workspacePath, sessionId: childSessionId })}&graphParent=${encodeURIComponent(sessionRef.sessionId)}`,
+                  )
                 }
-                onPause={activeRun ? () => void actions.pauseRun(activeRun.id) : undefined}
-                onResume={activeRun ? () => void actions.resumeRun(activeRun.id) : undefined}
+              />
+            )}
+            {pendingPrompt || pendingApproval ? (
+              <ConversationInteractionSlot
+                prompt={pendingPrompt}
+                approval={pendingPrompt ? undefined : pendingApproval}
+                busy={busy === "approval" || busy === "prompt"}
+                onApprovalDecision={respondToApproval}
+                onPromptAnswer={(answer) => {
+                  if (pendingPrompt) void actions.respondPrompt(pendingPrompt.id, answer);
+                }}
                 onStop={activeRun ? () => void actions.stopRun(activeRun.id) : undefined}
-                onAttach={composerStatus === "idle" && workspaceReady ? openCatalog : undefined}
-                modes={
-                  composerReady && (!sessionRef || conversation?.settings)
-                    ? {
-                        planActive:
-                          (sessionRef
-                            ? conversation?.settings?.collaborationMode
-                            : newTaskSettings.collaborationMode) === "plan",
-                        graphActive:
-                          (sessionRef
-                            ? conversation?.settings?.orchestrationMode
-                            : newTaskSettings.orchestrationMode) === "graph",
-                        disabled: Boolean(activeRun) || Boolean(busy),
-                        onPlanChange: changePlanMode,
-                        onGraphChange: changeGraphMode,
-                        swarmActive:
-                          (sessionRef
-                            ? conversation?.settings?.orchestrationMode
-                            : newTaskSettings.orchestrationMode) === "swarm",
-                        onSwarmChange: (active) => changeGraphMode(active, "swarm"),
-                      }
-                    : undefined
-                }
-                trailingAccessory={
-                  activation ? (
-                    <button
-                      type="button"
-                      className="conversation-activation-chip"
-                      onClick={() => setActivation(undefined)}
-                      aria-label={`移除 ${activation.kind === "skill" ? "Skill" : "子代理"} ${activation.name}`}
-                    >
-                      {activation.kind === "skill" ? "Skill" : "Agent"}: {activation.name} ×
-                    </button>
-                  ) : undefined
-                }
-                leadingAccessory={
-                  <>
-                    {!sessionRef ? (
-                      <>
-                        <label className="conversation-context-option conversation-project-option">
-                          <span className="conversation-sr-only">项目</span>
-                          <Folder aria-hidden="true" />
-                          <select
-                            name="workspace"
-                            aria-label="项目"
-                            value={
-                              workspace?.temporary
-                                ? TEMPORARY_PROJECT_OPTION_VALUE
-                                : workspacePath || ""
-                            }
-                            onChange={(event) => {
-                              const nextWorkspacePath = event.target.value;
-                              if (nextWorkspacePath === CHOOSE_PROJECT_OPTION_VALUE) {
-                                void chooseProjectFolder();
-                                return;
-                              }
-                              if (nextWorkspacePath === TEMPORARY_PROJECT_OPTION_VALUE) return;
-                              setNewTaskSettingOverrides((current) => ({
-                                ...current,
-                                [nextWorkspacePath || "unbound"]: newTaskSettings,
-                              }));
-                              if (draft)
-                                writePersistentDraft(
-                                  `new:${nextWorkspacePath || "unbound"}`,
-                                  draft,
-                                );
-                              navigate(newSessionHref(nextWorkspacePath));
-                            }}
-                          >
-                            <option value="">无项目</option>
-                            <option value={CHOOSE_PROJECT_OPTION_VALUE}>打开项目文件夹…</option>
-                            {workspace?.temporary && (
-                              <option value={TEMPORARY_PROJECT_OPTION_VALUE}>
-                                {workspaceLabel}
-                              </option>
-                            )}
-                            {projectWorkspaceOptions.map((workspace) => (
-                              <option key={workspace.path} value={workspace.path}>
-                                {workspaceDisplayName(workspace.path, workspace)}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                        {composerReady && (
-                          <>
-                            <ComposerModelPicker
-                              routes={newTaskModelRoutes}
-                              providers={data.providerConfig.providers}
-                              value={newTaskSettings.modelRouteId}
-                              onChange={(modelRouteId) => updateNewTaskSettings({ modelRouteId })}
-                              onConfigure={() => navigate("/settings/models")}
-                            />
-
-                            <label
-                              className={`conversation-context-option conversation-icon-select ${newTaskSettings.permissionMode === "yolo" ? "is-danger" : ""}`}
-                              title={`权限：${newTaskSettings.permissionMode === "yolo" ? "YOLO（完全访问）" : newTaskSettings.permissionMode === "auto" ? "自动" : "默认"}`}
-                            >
-                              <ShieldCheck aria-hidden="true" />
-                              <span className="conversation-sr-only">权限模式</span>
-                              <select
-                                name="initial-permission-mode"
-                                aria-label="权限模式"
-                                title="权限模式"
-                                value={newTaskSettings.permissionMode ?? "default"}
-                                onChange={(event) =>
-                                  updateNewTaskSettings({
-                                    permissionMode: event.target.value as
-                                      | "default"
-                                      | "auto"
-                                      | "yolo",
-                                  })
-                                }
-                              >
-                                <option value="default">权限：默认</option>
-                                <option value="auto">权限：自动</option>
-                                <option value="yolo">权限：YOLO（完全访问）</option>
-                              </select>
-                            </label>
-                          </>
-                        )}
-                      </>
-                    ) : (
-                      <span className="conversation-context-label">
-                        {data.workspaceMode === "git" ? (
-                          <FolderGit2 aria-hidden="true" />
-                        ) : (
-                          <Folder aria-hidden="true" />
-                        )}
-                        {workspaceLabel}
-                      </span>
-                    )}
-                    {sessionRef && conversation?.settings && (
-                      <>
-                        <ComposerModelPicker
-                          routes={data.modelRoutes}
-                          providers={data.providerConfig.providers}
-                          value={conversation.settings.modelRouteId}
-                          currentLabel={conversation.settings.model}
-                          disabled={Boolean(activeRun) || Boolean(busy)}
-                          hasHistory={conversation.items.length > 0}
-                          onChange={(modelRouteId) =>
-                            actions.updateSessionSettings(sessionRef, { modelRouteId })
-                          }
-                          onConfigure={() => navigate("/settings/models")}
-                        />
-
-                        <label className="conversation-context-option">
-                          <span className="conversation-sr-only">权限模式</span>
-                          <select
-                            name="permission-mode"
-                            aria-label="权限模式"
-                            title="权限模式"
-                            value={conversation.settings.permissionMode}
-                            disabled={Boolean(activeRun) || Boolean(busy)}
-                            onChange={(event) =>
-                              void actions.updateSessionSettings(sessionRef, {
-                                permissionMode: event.target.value as "default" | "auto" | "yolo",
-                              })
-                            }
-                          >
-                            <option value="default">权限：默认</option>
-                            <option value="auto">权限：自动</option>
-                            <option value="yolo">权限：YOLO（完全访问）</option>
-                          </select>
-                        </label>
-
-                        {conversation.settings.reasoningLevels.length > 0 && (
-                          <label className="conversation-context-option">
-                            <span className="conversation-sr-only">Thinking</span>
+              />
+            ) : graphParentId ? (
+              <div className="conversation-composer-region conversation-graph-child-notice">
+                子任务由主任务调度。
+                <Link to={sessionHref({ workspacePath, sessionId: graphParentId })}>
+                  返回主任务继续对话
+                </Link>
+              </div>
+            ) : (
+              <div className="conversation-composer-region">
+                {usingOpenCodeFree && (
+                  <p className="conversation-free-notice">
+                    OpenCode Free 免费试用 · 按 IP 限流，请勿提交个人或机密信息。
+                    <a href="https://opencode.ai/docs/zen#privacy" target="_blank" rel="noreferrer">
+                      数据使用说明
+                    </a>
+                  </p>
+                )}
+                {catalogOpen && (
+                  <ConversationContextMenu
+                    skills={data.catalogSkills}
+                    agents={data.catalogAgents}
+                    onClose={() => setCatalogOpen(false)}
+                    onSelect={(nextActivation) => {
+                      setActivation(nextActivation);
+                      setCatalogOpen(false);
+                      window.requestAnimationFrame(() =>
+                        document
+                          .querySelector<HTMLTextAreaElement>(".conversation-composer textarea")
+                          ?.focus(),
+                      );
+                    }}
+                  />
+                )}
+                <ConversationComposer
+                  value={draft}
+                  onValueChange={handleDraftChange}
+                  onSubmit={(value) => void submit(value.text, value.behavior)}
+                  status={composerStatus}
+                  behavior={behavior}
+                  onBehaviorChange={setBehavior}
+                  busy={preparingSend || busy === "send-message"}
+                  disabled={Boolean(conversation?.loadError)}
+                  submitDisabled={!composerReady}
+                  placeholder={
+                    activation?.kind === "skill"
+                      ? `输入 ${activation.name} 的参数或补充要求…`
+                      : activation?.kind === "agent"
+                        ? `描述要委派给 ${activation.name} 的任务…`
+                        : sessionId
+                          ? "继续对话，或在运行中调整方向…"
+                          : !workspacePath
+                            ? "向 Pico 发送消息…"
+                            : legacyStorageBlocked
+                              ? "这个项目需要先迁移旧版会话数据…"
+                              : !workspaceReady
+                                ? "正在准备项目…"
+                                : "向 Pico 发送消息…"
+                  }
+                  statusText={
+                    conversation?.queuedCount
+                      ? `${conversation.queuedCount} 条消息正在排队`
+                      : undefined
+                  }
+                  onPause={activeRun ? () => void actions.pauseRun(activeRun.id) : undefined}
+                  onResume={activeRun ? () => void actions.resumeRun(activeRun.id) : undefined}
+                  onStop={activeRun ? () => void actions.stopRun(activeRun.id) : undefined}
+                  onAttach={composerStatus === "idle" && workspaceReady ? openCatalog : undefined}
+                  modes={
+                    composerReady && (!sessionRef || conversation?.settings)
+                      ? {
+                          planActive:
+                            (sessionRef
+                              ? conversation?.settings?.collaborationMode
+                              : newTaskSettings.collaborationMode) === "plan",
+                          graphActive:
+                            (sessionRef
+                              ? conversation?.settings?.orchestrationMode
+                              : newTaskSettings.orchestrationMode) === "graph",
+                          disabled: Boolean(activeRun) || Boolean(busy),
+                          onPlanChange: changePlanMode,
+                          onGraphChange: changeGraphMode,
+                          swarmActive:
+                            (sessionRef
+                              ? conversation?.settings?.orchestrationMode
+                              : newTaskSettings.orchestrationMode) === "swarm",
+                          onSwarmChange: (active) => changeGraphMode(active, "swarm"),
+                        }
+                      : undefined
+                  }
+                  trailingAccessory={
+                    activation ? (
+                      <button
+                        type="button"
+                        className="conversation-activation-chip"
+                        onClick={() => setActivation(undefined)}
+                        aria-label={`移除 ${activation.kind === "skill" ? "Skill" : "子代理"} ${activation.name}`}
+                      >
+                        {activation.kind === "skill" ? "Skill" : "Agent"}: {activation.name} ×
+                      </button>
+                    ) : undefined
+                  }
+                  leadingAccessory={
+                    <>
+                      {!sessionRef ? (
+                        <>
+                          <label className="conversation-context-option conversation-project-option">
+                            <span className="conversation-sr-only">项目</span>
+                            <Folder aria-hidden="true" />
                             <select
-                              name="thinking-effort"
-                              aria-label="Thinking"
-                              value={conversation.settings.thinkingEffort}
-                              disabled={Boolean(activeRun) || Boolean(busy)}
-                              onChange={(event) =>
-                                void actions.updateSessionSettings(sessionRef, {
-                                  thinkingEffort: event.target.value,
-                                })
+                              name="workspace"
+                              aria-label="项目"
+                              value={
+                                workspace?.temporary
+                                  ? TEMPORARY_PROJECT_OPTION_VALUE
+                                  : workspacePath || ""
                               }
+                              onChange={(event) => {
+                                const nextWorkspacePath = event.target.value;
+                                if (nextWorkspacePath === CHOOSE_PROJECT_OPTION_VALUE) {
+                                  void chooseProjectFolder();
+                                  return;
+                                }
+                                if (nextWorkspacePath === TEMPORARY_PROJECT_OPTION_VALUE) return;
+                                setNewTaskSettingOverrides((current) => ({
+                                  ...current,
+                                  [nextWorkspacePath || "unbound"]: newTaskSettings,
+                                }));
+                                if (draft)
+                                  writePersistentDraft(
+                                    `new:${nextWorkspacePath || "unbound"}`,
+                                    draft,
+                                  );
+                                navigate(newSessionHref(nextWorkspacePath));
+                              }}
                             >
-                              {conversation.settings.reasoningLevels.map((level) => (
-                                <option key={level} value={level}>
-                                  {level}
+                              <option value="">无项目</option>
+                              <option value={CHOOSE_PROJECT_OPTION_VALUE}>打开项目文件夹…</option>
+                              {workspace?.temporary && (
+                                <option value={TEMPORARY_PROJECT_OPTION_VALUE}>
+                                  {workspaceLabel}
+                                </option>
+                              )}
+                              {projectWorkspaceOptions.map((workspace) => (
+                                <option key={workspace.path} value={workspace.path}>
+                                  {workspaceDisplayName(workspace.path, workspace)}
                                 </option>
                               ))}
                             </select>
                           </label>
-                        )}
-                      </>
-                    )}
-                  </>
-                }
-              />
-            </div>
-          )
+                          {composerReady && (
+                            <>
+                              <ComposerModelPicker
+                                routes={newTaskModelRoutes}
+                                providers={data.providerConfig.providers}
+                                value={newTaskSettings.modelRouteId}
+                                onChange={(modelRouteId) => updateNewTaskSettings({ modelRouteId })}
+                                onConfigure={() => navigate("/settings/models")}
+                              />
+
+                              <label
+                                className={`conversation-context-option conversation-icon-select ${newTaskSettings.permissionMode === "yolo" ? "is-danger" : ""}`}
+                                title={`权限：${newTaskSettings.permissionMode === "yolo" ? "YOLO（完全访问）" : newTaskSettings.permissionMode === "auto" ? "自动" : "默认"}`}
+                              >
+                                <ShieldCheck aria-hidden="true" />
+                                <span className="conversation-sr-only">权限模式</span>
+                                <select
+                                  name="initial-permission-mode"
+                                  aria-label="权限模式"
+                                  title="权限模式"
+                                  value={newTaskSettings.permissionMode ?? "default"}
+                                  onChange={(event) =>
+                                    updateNewTaskSettings({
+                                      permissionMode: event.target.value as
+                                        | "default"
+                                        | "auto"
+                                        | "yolo",
+                                    })
+                                  }
+                                >
+                                  <option value="default">权限：默认</option>
+                                  <option value="auto">权限：自动</option>
+                                  <option value="yolo">权限：YOLO（完全访问）</option>
+                                </select>
+                              </label>
+                            </>
+                          )}
+                        </>
+                      ) : (
+                        <span className="conversation-context-label">
+                          {data.workspaceMode === "git" ? (
+                            <FolderGit2 aria-hidden="true" />
+                          ) : (
+                            <Folder aria-hidden="true" />
+                          )}
+                          <span title={workspacePath}>{workspaceLabel}</span>
+                        </span>
+                      )}
+                      {sessionRef && conversation?.settings && (
+                        <>
+                          <ComposerModelPicker
+                            routes={data.modelRoutes}
+                            providers={data.providerConfig.providers}
+                            value={conversation.settings.modelRouteId}
+                            currentLabel={conversation.settings.model}
+                            disabled={Boolean(activeRun) || Boolean(busy)}
+                            hasHistory={conversation.items.length > 0}
+                            onChange={(modelRouteId) =>
+                              actions.updateSessionSettings(sessionRef, { modelRouteId })
+                            }
+                            onConfigure={() => navigate("/settings/models")}
+                          />
+
+                          <label className="conversation-context-option">
+                            <span className="conversation-sr-only">权限模式</span>
+                            <select
+                              name="permission-mode"
+                              aria-label="权限模式"
+                              title="权限模式"
+                              value={conversation.settings.permissionMode}
+                              disabled={Boolean(activeRun) || Boolean(busy)}
+                              onChange={(event) =>
+                                void actions.updateSessionSettings(sessionRef, {
+                                  permissionMode: event.target.value as "default" | "auto" | "yolo",
+                                })
+                              }
+                            >
+                              <option value="default">权限：默认</option>
+                              <option value="auto">权限：自动</option>
+                              <option value="yolo">权限：YOLO（完全访问）</option>
+                            </select>
+                          </label>
+
+                          {conversation.settings.reasoningLevels.length > 0 && (
+                            <label className="conversation-context-option">
+                              <span className="conversation-sr-only">Thinking</span>
+                              <select
+                                name="thinking-effort"
+                                aria-label="Thinking"
+                                value={conversation.settings.thinkingEffort}
+                                disabled={Boolean(activeRun) || Boolean(busy)}
+                                onChange={(event) =>
+                                  void actions.updateSessionSettings(sessionRef, {
+                                    thinkingEffort: event.target.value,
+                                  })
+                                }
+                              >
+                                {conversation.settings.reasoningLevels.map((level) => (
+                                  <option key={level} value={level}>
+                                    {level}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          )}
+                        </>
+                      )}
+                    </>
+                  }
+                />
+              </div>
+            )}
+          </>
         }
       >
         {conversation?.loadError ? (

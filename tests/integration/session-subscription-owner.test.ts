@@ -16,7 +16,7 @@ const workspacePath = "/workspace";
 const sessionId = "session-1";
 const watermark = {
   historyEpoch: "history-1",
-  projectorVersion: 3 as const,
+  projectorVersion: 4 as const,
   throughSequence: 7,
 };
 

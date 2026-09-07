@@ -114,6 +114,46 @@ test("foreground assembly failure seals only its empty epoch and allows linear m
   }
 });
 
+test("foreground Graph greeting completes without requiring a scheduled operator", async () => {
+  const fixture = await createProductionFixture({
+    rootModel: "test/coder",
+    agentRuntime: new (class extends AgentRuntime {
+      override execute(options: RunAgentCliOptions, dependencies: RunAgentCliDependencies) {
+        return super.execute(options, {
+          ...dependencies,
+          isolatedHeadless: true,
+          provider: {
+            modelName: "deterministic/greeting",
+            generate: async () => ({ role: "assistant", content: "你好，已收到。" }),
+          },
+        });
+      }
+    })(),
+  });
+  try {
+    const started = (await fixture.services.service.startForegroundRun({
+      workspacePath: fixture.workspacePath,
+      sessionId: fixture.rootSessionId,
+      prompt: "普通问候测试：你好",
+    })) as { runId: string };
+    const completed = await fixture.workspaceRuntime.waitForRun(started.runId);
+    assert.equal(completed.status, "succeeded", completed.error);
+    const graph = fixture.host.store.listGraphs(fixture.rootSessionId)[0]!;
+    assert.equal(graph.phase, "finished");
+    assert.equal(fixture.host.store.listActivationClaims(graph.graphId).length, 0);
+    const transcript = await fixture.rootSession.runtimeEventStore!.readTranscriptProjectionPage({
+      sessionId: fixture.rootSessionId,
+      maxBytes: 512 * 1024,
+      limit: 100,
+    });
+    const visibleTranscript = JSON.stringify(transcript.items.map((item) => item.payload));
+    assert.match(visibleTranscript, /普通问候测试：你好/u);
+    assert.match(visibleTranscript, /你好，已收到。/u);
+  } finally {
+    await fixture.close();
+  }
+});
+
 test("production operator assembly failure becomes terminal and wakes the root without a live ghost", async () => {
   let operatorDispatches = 0;
   let rootWakeDispatches = 0;

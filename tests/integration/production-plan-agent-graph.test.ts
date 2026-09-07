@@ -392,6 +392,28 @@ for (const recoverAfterFinish of [false, true]) {
           finishIndex >= 0 && completionIndex > finishIndex,
           "Plan completion must happen after the Graph finish result",
         );
+        let redundantPlanUpdates = 0;
+        const unsubscribe = services.service.subscribe((event) => {
+          if (event.topic === "plan.updated") redundantPlanUpdates++;
+        });
+        try {
+          for (let read = 0; read < 3; read++) {
+            const metadata = await services.desktopService.readSessionContinuityMetadata(
+              workspacePath,
+              sessionId,
+            );
+            assert.equal(metadata.activeRun, undefined);
+          }
+          assert.equal(
+            redundantPlanUpdates,
+            0,
+            "opening a completed Plan must not notify the renderer to reopen it again",
+          );
+          assert.equal(graphHost.store.listGraphs(sessionId).length, 1);
+          assert.equal(wakeCount, 2);
+        } finally {
+          unsubscribe();
+        }
       } finally {
         gates.forEach((gate) => gate.resolve());
         await services.desktopService.close();

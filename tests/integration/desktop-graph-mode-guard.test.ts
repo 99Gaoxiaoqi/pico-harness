@@ -464,3 +464,69 @@ test("desktop Graph wake retry enforces Session and Graph ownership", async () =
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("desktop stop replays delivery after Graph finish and rejects another Session's Graph", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-desktop-graph-stop-retry-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "home");
+  await mkdir(workspace, { recursive: true });
+  const canonical = await realpath(workspace);
+  const env = { PICO_HOME: picoHome };
+  const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
+  await trustStore.trust(canonical);
+  const store = new SqliteAgentGraphControlStore({
+    storageRoot: resolvePicoPaths(canonical, { picoHome }).workspace.root,
+  });
+  let deliveries = 0;
+  const desktop = new DesktopRuntimeService({
+    env,
+    trustStore,
+    runtimeService: new WorkspaceRuntimeService({ env, execute: async () => ({ ok: true }) }),
+    stopAgentGraph: async (_workspacePath, sessionId, graph) => {
+      assert.equal(graph.epoch, 1);
+      if (++deliveries === 1) {
+        store.commitScheduleRevision({
+          graphId: graph.graphId,
+          expectedRevision: 0,
+          operationId: "finish",
+          requestFingerprint: "finish",
+          kind: "finish",
+          command: { kind: "finish" },
+          sourceSessionId: sessionId,
+          sourceTurnId: "turn",
+          sourceRunId: "run",
+          sourceToolCallId: "stop",
+        });
+        throw new Error("stop delivery failed after finish");
+      }
+      return true;
+    },
+  });
+  try {
+    const create = async () =>
+      (await desktop.handle(
+        createRuntimeRequest("session.create", { workspacePath: canonical }),
+      )) as { session: { sessionId: string } };
+    const owner = (await create()).session.sessionId;
+    const other = (await create()).session.sessionId;
+    const graph = store.openRootEpoch(owner).record;
+    const stop = (sessionId: string) =>
+      desktop.handle(
+        createRuntimeRequest("session.graph.stop", {
+          workspacePath: canonical,
+          sessionId,
+          graphId: graph.graphId,
+        }),
+      );
+    await assert.rejects(stop(other), /不属于当前任务/u);
+    assert.equal(deliveries, 0);
+    await assert.rejects(stop(owner), /stop delivery failed after finish/u);
+    assert.equal(store.getGraph(graph.graphId)?.phase, "finished");
+    assert.deepEqual(await stop(owner), { stopped: true });
+    assert.equal(deliveries, 2);
+  } finally {
+    await desktop.close();
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -721,6 +721,7 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 
 async function createHostFixture(
   execute: CreateAgentGraphWorkspaceHostOptions["execute"],
+  stopOptions: Pick<CreateAgentGraphWorkspaceHostOptions, "requestStop"> = {},
 ): Promise<{
   readonly host: ReturnType<typeof createAgentGraphWorkspaceHost>;
   readonly owner: Awaited<ReturnType<SessionManager["getOrCreatePinned"]>>;
@@ -753,6 +754,7 @@ async function createHostFixture(
     sessionManager: manager,
     sessionOptions: { persistence: true, picoHome, runtimePort },
     execute,
+    ...stopOptions,
   });
   await host.start();
   return {
@@ -880,3 +882,56 @@ function agentOutputInput(
     },
   };
 }
+
+test("Graph stop retries exact foreground delivery without stopping a later linear or Graph run", async () => {
+  const stopped: string[] = [];
+  let fail = true;
+  const fixture = await createHostFixture(async () => undefined, {
+    requestStop: async ({ runId }) => {
+      stopped.push(runId);
+      if (fail) {
+        fail = false;
+        throw new Error("stop delivery interrupted");
+      }
+      return true;
+    },
+  });
+  try {
+    const graph = fixture.host.openRootEpoch("root-session");
+    const start = (runId: string, internal: boolean) =>
+      RuntimeRun.start({
+        capability: fixture.owner.session.runtimeEventCapability!,
+        runId,
+        turnId: `${runId}:turn`,
+        invocationId: runId,
+        ...(internal
+          ? {
+              presentation: {
+                audience: "internal" as const,
+                source: "agent_graph_control" as const,
+              },
+            }
+          : {}),
+      });
+    const rootRun = await start("foreground-root", true);
+    await assert.rejects(
+      fixture.host.retireRootSession("root-session", "stop", graph),
+      /stop delivery interrupted/u,
+    );
+    assert.equal(fixture.host.store.getGraph(graph.graphId)?.phase, "finished");
+    await fixture.host.retireRootSession("root-session", "retry", graph);
+    assert.deepEqual(stopped, ["foreground-root", "foreground-root"]);
+    await rootRun.finish("completed");
+    const linearRun = await start("later-linear", false);
+    await fixture.host.retireRootSession("root-session", "late retry", graph);
+    assert.deepEqual(stopped, ["foreground-root", "foreground-root"]);
+    await linearRun.finish("completed");
+    fixture.host.openRootEpoch("root-session");
+    const nextRun = await start("later-graph", true);
+    await fixture.host.retireRootSession("root-session", "old epoch retry", graph);
+    assert.deepEqual(stopped, ["foreground-root", "foreground-root"]);
+    await nextRun.finish("completed");
+  } finally {
+    await fixture.close();
+  }
+});

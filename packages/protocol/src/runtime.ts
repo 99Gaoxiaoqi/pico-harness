@@ -515,7 +515,7 @@ export type RuntimeTranscriptFragment = JsonObject & {
   readonly json: string;
 };
 
-export const TRANSCRIPT_PROJECTOR_VERSION = 3 as const;
+export const TRANSCRIPT_PROJECTOR_VERSION = 4 as const;
 
 export type RuntimeTranscriptWatermark = JsonObject & {
   readonly historyEpoch: string;
@@ -1125,6 +1125,10 @@ export type RuntimeMethodMap = {
       readonly limit?: number;
     };
     readonly result: JsonObject;
+  };
+  readonly "session.graph.stop": {
+    readonly params: WorkspaceParams & { readonly sessionId: SessionId; readonly graphId: string };
+    readonly result: { readonly stopped: boolean };
   };
   readonly "session.graph.retryWake": {
     readonly params: WorkspaceParams & {
@@ -2071,6 +2075,7 @@ export const RUNTIME_METHODS = [
   "session.trace.query",
   "session.graph.query",
   "session.graph.retryWake",
+  "session.graph.stop",
   "git.review.snapshot",
   "git.review.diff",
   "browser.agent.lease",
@@ -2212,6 +2217,7 @@ export const DESKTOP_RUNTIME_METHODS = [
   "session.trace.query",
   "session.graph.query",
   "session.graph.retryWake",
+  "session.graph.stop",
   "git.review.snapshot",
   "git.review.diff",
   "browser.agent.lease",
@@ -3403,6 +3409,11 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
       limit: positiveIntegerParam,
     },
   ),
+  "session.graph.stop": exactParamShape({
+    workspacePath: stringParam,
+    sessionId: stringParam,
+    graphId: boundedNonEmptyStringParam(512),
+  }),
   "session.graph.retryWake": exactParamShape({
     workspacePath: stringParam,
     sessionId: stringParam,
@@ -4988,6 +4999,7 @@ const RUNTIME_RESULT_VALIDATORS = {
     { nextAfterSequence: resultNonNegativeInteger },
   ),
   "session.graph.query": resultJsonObject,
+  "session.graph.stop": exactResultShape({ stopped: resultBoolean }),
   "session.graph.retryWake": exactResultShape({ retried: resultBoolean }),
   "git.review.snapshot": exactResultShape({
     revision: resultNonEmptyString,

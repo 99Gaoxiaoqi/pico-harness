@@ -303,9 +303,23 @@ export function parseGraphDetail(value: unknown): WorkbarGraphDetail {
       const role = stringField(candidate, "role");
       if (!operatorId || !role) throw new Error("Graph Operator 条目无效。");
       const profile = recordField(candidate, "profile");
+      const generation = numberField(candidate, "generation") ?? 1;
+      const provision = Array.isArray(value["provisions"])
+        ? value["provisions"].find(
+            (entry) =>
+              stringField(entry, "operatorId") === operatorId &&
+              numberField(entry, "generation") === generation,
+          )
+        : undefined;
+      const childSessionId = stringField(provision, "childSessionId");
       return {
         operatorId,
         role,
+        generation,
+        ...(stringField(candidate, "description")
+          ? { description: stringField(candidate, "description") }
+          : {}),
+        ...(childSessionId ? { childSessionId } : {}),
         ...(stringField(profile, "profileId")
           ? { profileId: stringField(profile, "profileId") }
           : {}),
@@ -316,7 +330,13 @@ export function parseGraphDetail(value: unknown): WorkbarGraphDetail {
       const operatorId = stringField(candidate, "operatorId");
       const instruction = stringField(candidate, "instruction");
       if (!intentId || !operatorId || !instruction) throw new Error("Graph Intent 条目无效。");
-      return { intentId, operatorId, instruction };
+      return {
+        intentId,
+        operatorId,
+        instruction,
+        operatorGeneration: numberField(candidate, "operatorGeneration") ?? 1,
+        createdAtRevision: numberField(candidate, "createdAtRevision") ?? 0,
+      };
     }),
     claims: value["claims"].map((candidate) => {
       const claimId = stringField(candidate, "claimId");
@@ -326,6 +346,9 @@ export function parseGraphDetail(value: unknown): WorkbarGraphDetail {
       return {
         claimId,
         intentId,
+        ...(stringField(candidate, "targetSessionId")
+          ? { targetSessionId: stringField(candidate, "targetSessionId") }
+          : {}),
         state: graphClaimDisplayState({
           controlState: state,
           runtimeStatus: runtimeByClaim.get(claimId),

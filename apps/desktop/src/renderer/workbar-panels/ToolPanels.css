@@ -621,6 +621,7 @@
 
 .graph-panel__epochs {
   display: flex;
+  flex: 0 0 auto;
   gap: 5px;
   padding: 7px 9px;
   overflow-x: auto;
@@ -629,6 +630,7 @@
 
 .graph-panel__epochs button {
   display: grid;
+  flex: 0 0 auto;
   min-width: 58px;
   gap: 1px;
   padding: 5px 8px;

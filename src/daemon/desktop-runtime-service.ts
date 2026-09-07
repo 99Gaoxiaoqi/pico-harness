@@ -291,6 +291,11 @@ export interface DesktopRuntimeServiceOptions {
   readonly onTranscriptAdvanced?: (workspacePath: string, sessionId: string) => void;
   readonly reconcilePlanControl?: (workspacePath: string, sessionId: string) => Promise<void>;
   readonly browserAgentBroker?: BrowserAgentCommandBroker;
+  readonly stopAgentGraph?: (
+    workspacePath: string,
+    rootSessionId: string,
+    graph: { readonly graphId: string; readonly epoch: number },
+  ) => Promise<boolean>;
   /** Production Graph lifecycle fence invoked before destructive root Session deletion. */
   readonly retireAgentGraphRootSession?: (
     workspacePath: string,
@@ -708,6 +713,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         "session.trace.query": this.querySessionTrace.bind(this),
         "session.graph.query": this.querySessionGraph.bind(this),
         "session.graph.retryWake": this.retrySessionGraphWake.bind(this),
+        "session.graph.stop": this.stopSessionGraph.bind(this),
       }),
       ...createDesktopMemoryRequestHandlers({
         list: (params) =>
@@ -1826,6 +1832,35 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       runtimeStore.close();
       store.close();
     }
+  }
+
+  private async stopSessionGraph(
+    params: RuntimeRequest<"session.graph.stop">["params"],
+  ): Promise<JsonValue> {
+    const canonical = await this.requireTrustedSession(params.workspacePath, params.sessionId);
+    const store = new SqliteAgentGraphControlStore({
+      storageRoot: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
+      now: this.now,
+    });
+    let graph;
+    try {
+      graph = store.getGraph(params.graphId);
+      if (!graph || graph.rootSessionId !== params.sessionId) {
+        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.NOT_FOUND, "Graph 不属于当前任务");
+      }
+    } finally {
+      store.close();
+    }
+    if (!this.options.stopAgentGraph) {
+      throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, "Graph 停止服务尚未就绪");
+    }
+    await this.options.runtimeService.getWorkspaceRuntime(canonical);
+    return {
+      stopped: await this.options.stopAgentGraph(canonical, params.sessionId, {
+        graphId: graph.graphId,
+        epoch: graph.epoch,
+      }),
+    };
   }
 
   private async retrySessionGraphWake(

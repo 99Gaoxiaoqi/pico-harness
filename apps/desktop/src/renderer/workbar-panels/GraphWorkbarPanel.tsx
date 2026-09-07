@@ -22,17 +22,23 @@ export interface WorkbarGraphDetail {
   readonly operators: readonly {
     readonly operatorId: string;
     readonly role: string;
+    readonly generation?: number;
+    readonly description?: string;
+    readonly childSessionId?: string;
     readonly profileId?: string;
   }[];
   readonly intents: readonly {
     readonly intentId: string;
     readonly operatorId: string;
     readonly instruction: string;
+    readonly operatorGeneration?: number;
+    readonly createdAtRevision?: number;
   }[];
   readonly claims: readonly {
     readonly claimId: string;
     readonly intentId: string;
     readonly state: string;
+    readonly targetSessionId?: string;
   }[];
   readonly diagnostics: readonly {
     readonly diagnosticId: string;
