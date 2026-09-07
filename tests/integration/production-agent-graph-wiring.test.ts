@@ -120,6 +120,7 @@ test("production host binds Graph root and installs detached exact execution", a
       toolPort: {},
       drivePort: {},
       supervisor: {},
+      graphSupervision: () => undefined,
       start: async () => {
         graphStartCount++;
       },
