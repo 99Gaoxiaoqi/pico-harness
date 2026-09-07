@@ -53,6 +53,7 @@ export interface RuntimeCompactionCheckpointOptions {
   readonly compactor: FullCompactor;
   readonly request: FullCompactionRequest;
   readonly hookService?: HookService;
+  readonly memoryDisposition?: () => Promise<"eligible" | "policy_denied" | undefined>;
   readonly signal?: AbortSignal;
 }
 
@@ -99,11 +100,26 @@ export async function recordRuntimeCompactionCheckpoint(
   if (!through) return undefined;
 
   const checkpointId = `checkpoint:${randomUUID()}`;
+  let disposition: "eligible" | "policy_denied" | undefined;
+  try {
+    disposition = await options.memoryDisposition?.();
+  } catch (error) {
+    // Temporary memory failures must not prevent the ordinary context checkpoint.
+    // Eligibility only permits recovery; extraction still checks live policy.
+    disposition = "eligible";
+    logger.warn(
+      { error: String(error), checkpointId },
+      "[Memory] checkpoint admission unavailable; recovery deferred",
+    );
+  }
   await runtimeRun.recordCheckpoint({
     checkpointId,
     coveredEventCount: covered.length,
     sourceDigest: computeCheckpointSourceDigest(covered),
     throughEventId: through.eventId,
+    ...(disposition
+      ? { memoryExtractionBoundary: { runtimeEventId: through.eventId, disposition } }
+      : {}),
     summary: {
       role: "assistant",
       content: preview.wrappedSummary,

@@ -2,7 +2,7 @@ import { AtomicMemoryLifecycle } from "./atomic-memory-lifecycle.js";
 import { join } from "node:path";
 import { withProviderCallContext } from "../observability/provider-call-context.js";
 import type { Message, ToolDefinition } from "../schema/message.js";
-import { isMessageHiddenFromTranscript } from "../schema/message.js";
+import { RUNTIME_MESSAGE_EVENT_ID, isMessageHiddenFromTranscript } from "../schema/message.js";
 import type { LLMProvider } from "../provider/interface.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
@@ -59,6 +59,9 @@ export interface AtomicMemoryRuntimeOptions {
   readonly gate: () => Promise<MemoryGateResult>;
   readonly modelFactory: () => Promise<AtomicMemoryModelLease>;
   readonly supported: boolean;
+  readonly preserveSourceTools?: boolean;
+  readonly contextWindowTokens?: number;
+  readonly reservedOutputTokens?: number;
   readonly lifecycle?: AtomicMemoryLifecycle;
   readonly onChanged?: () => void;
 }
@@ -85,7 +88,8 @@ export class AtomicMemoryRuntime {
     try {
       this.source = await this.snapshot("remember", await this.readDeletionRevision(), undefined, {
         messages: structuredClone(messages),
-        tools: structuredClone(tools),
+        tools: this.options.preserveSourceTools === false ? [] : structuredClone(tools),
+        positions: messageEventPositions(messages),
       });
     } catch (error) {
       this.source = undefined;
@@ -131,6 +135,24 @@ export class AtomicMemoryRuntime {
     });
   }
 
+  async compactionDisposition(): Promise<"eligible" | "policy_denied" | undefined> {
+    if (!this.options.supported) return undefined;
+    const store = new SqliteMemoryItemStore(atomicMemoryDatabasePath(this.options.picoHome));
+    try {
+      const settings = await store.readSettings(this.workspaceKey);
+      if (!settings.enabled || !settings.autoExtract) return "policy_denied";
+      const gate = await this.options.gate();
+      if (
+        !gate.allowed &&
+        !["unavailable", "draining", "configuration", "aborted"].includes(gate.reason)
+      )
+        return "policy_denied";
+      return "eligible";
+    } finally {
+      store.close();
+    }
+  }
+
   async checkpoint(checkpointId: string): Promise<void> {
     if (!this.options.supported) return;
     const deletionRevision = await this.readDeletionRevision();
@@ -140,7 +162,12 @@ export class AtomicMemoryRuntime {
         ({ event }) =>
           event.kind === "context.checkpoint.recorded" && event.data.checkpointId === checkpointId,
       );
-      if (!checkpoint) return;
+      if (
+        !checkpoint ||
+        checkpoint.event.kind !== "context.checkpoint.recorded" ||
+        !checkpoint.event.data.memoryExtractionBoundary
+      )
+        return;
       const snapshot = await this.snapshot("compaction", deletionRevision, checkpoint.sequence);
       const checkpointEvent = checkpoint.event;
       const through =
@@ -187,14 +214,16 @@ export class AtomicMemoryRuntime {
     const store = new SqliteMemoryItemStore(atomicMemoryDatabasePath(this.options.picoHome));
     let lease: AtomicMemoryModelLease | undefined;
     try {
-      const gate = async (): Promise<MemoryGateResult> => {
+      const gate = async (
+        trigger: MemoryExtractionSnapshot["trigger"],
+      ): Promise<MemoryGateResult> => {
         const upper = await this.options.gate();
         if (!upper.allowed) return upper;
         // Session deletion stops new extraction but does not remove committed memory.
         if (!(await this.sessionAvailable()))
           return { allowed: false, reason: "session_unavailable" };
         const settings = await store.readSettings(this.workspaceKey);
-        if (!settings.enabled || (snapshot.trigger !== "remember" && !settings.autoExtract))
+        if (!settings.enabled || (trigger !== "remember" && !settings.autoExtract))
           return { allowed: false, reason: "memory_disabled" };
         return this.lifecycle.isDraining
           ? { allowed: false, reason: "draining" }
@@ -257,6 +286,7 @@ export class AtomicMemoryRuntime {
     source?: {
       messages: readonly Message[];
       tools: readonly ToolDefinition[];
+      positions: Readonly<Record<string, readonly number[]>>;
     },
   ): Promise<MemoryExtractionSnapshot | undefined> {
     const all = await this.readEntries();
@@ -301,6 +331,9 @@ export class AtomicMemoryRuntime {
           checkpointId: event.data.checkpointId,
           ordinal: sequence,
           throughOrdinal: through.sequence,
+          ...(event.data.memoryExtractionBoundary
+            ? { disposition: event.data.memoryExtractionBoundary.disposition }
+            : { bootstrap: true }),
         },
       ];
     });
@@ -328,6 +361,17 @@ export class AtomicMemoryRuntime {
       events,
       checkpoints,
       sourceMessages: messages,
+      sourceEventMessagePositions:
+        source?.positions ??
+        (trigger === "extract" && this.source?.sourceMessages
+          ? this.source.sourceEventMessagePositions
+          : Object.fromEntries(
+              events
+                .filter((event) => event.role !== "other")
+                .map((event, index) => [event.eventId, [index]]),
+            )),
+      contextWindowTokens: this.options.contextWindowTokens,
+      reservedOutputTokens: this.options.reservedOutputTokens,
       ...(source?.tools
         ? { sourceTools: source.tools }
         : this.source?.sourceTools
@@ -339,4 +383,13 @@ export class AtomicMemoryRuntime {
 
 function unavailable(reason: string): AtomicMemoryResult {
   return { status: "unavailable", reason, requestedItems: [] };
+}
+
+function messageEventPositions(messages: readonly Message[]): Record<string, number[]> {
+  const positions: Record<string, number[]> = {};
+  messages.forEach((message, index) => {
+    const eventId = message[RUNTIME_MESSAGE_EVENT_ID];
+    if (eventId) (positions[eventId] ??= []).push(index);
+  });
+  return positions;
 }

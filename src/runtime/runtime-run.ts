@@ -40,7 +40,7 @@ import {
   projectTranscriptEvents,
   type DurableTranscriptEvent,
 } from "../presentation/transcript-event-store.js";
-import type { Message, ToolCall } from "../schema/message.js";
+import { RUNTIME_MESSAGE_EVENT_ID, type Message, type ToolCall } from "../schema/message.js";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION,
   assertRuntimeEvent,
@@ -239,6 +239,10 @@ export interface RuntimeCheckpointOptions {
   readonly coveredEventCount: number;
   readonly sourceDigest: string;
   readonly throughEventId: string;
+  readonly memoryExtractionBoundary?: {
+    readonly runtimeEventId: string;
+    readonly disposition: "eligible" | "policy_denied";
+  };
   readonly summary: Message;
   /** 滚动摘要链:上一个 checkpoint 的 id(若存在)。 */
   readonly previousCheckpointId?: string;
@@ -1104,7 +1108,7 @@ export class RuntimeRun {
     });
   }
 
-  async readModelHistory(): Promise<Message[]> {
+  async readModelHistory(includeEventIds = false): Promise<Message[]> {
     const {
       applyModelHistoryByteBudget,
       MAX_MODEL_HISTORY_BYTES,
@@ -1121,7 +1125,9 @@ export class RuntimeRun {
     const materialized = materializeRuntimeHistoryEntries(entries.map(({ event }) => event));
     return applyModelHistoryByteBudget(materialized, {
       maxTotalBytes: MAX_MODEL_HISTORY_BYTES,
-    }).map(({ message }) => message);
+    }).map(({ eventId, message }) =>
+      includeEventIds ? { ...message, [RUNTIME_MESSAGE_EVENT_ID]: eventId } : message,
+    );
   }
 
   /** True only when this run owns the Session's canonical workspace and durable store. */
@@ -1622,6 +1628,9 @@ export class RuntimeRun {
         coveredEventCount: options.coveredEventCount,
         sourceDigest: options.sourceDigest,
         throughEventId: options.throughEventId,
+        ...(options.memoryExtractionBoundary
+          ? { memoryExtractionBoundary: structuredClone(options.memoryExtractionBoundary) }
+          : {}),
         summary: structuredClone(options.summary),
         ...(options.previousCheckpointId
           ? { previousCheckpointId: options.previousCheckpointId }

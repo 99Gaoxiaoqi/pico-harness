@@ -1383,6 +1383,7 @@ export async function executeAgentRuntime(
       ...(credentialPool ? { credentialPool } : {}),
       providerDependencies,
     });
+    const contextRuntime = buildContextRuntime(kind, providerConfig.model);
     const trackedProvider = providerAssembly.provider;
     const rebuildProvider = providerAssembly.rebuildProvider;
     if (memoryRepository && (await memoryExtractionAllowed()).allowed) {
@@ -1395,6 +1396,9 @@ export async function executeAgentRuntime(
           ? { lifecycle: dependencies.atomicMemoryLifecycle }
           : {}),
         supported: kind !== "responses",
+        preserveSourceTools: !!trackedProvider.requestCapabilities?.toolChoiceNoneWithTools,
+        contextWindowTokens: contextRuntime.budget.contextWindowTokens,
+        reservedOutputTokens: contextRuntime.budget.reservedOutputTokens,
         ...(dependencies.memoryChangedSink ? { onChanged: dependencies.memoryChangedSink } : {}),
         modelFactory:
           dependencies.atomicMemoryModelFactory ??
@@ -1828,7 +1832,6 @@ export async function executeAgentRuntime(
     const reporter = dependencies.reporter ?? new TerminalReporter();
     const approvalNotifier =
       dependencies.approvalNotifier ?? buildFailClosedApprovalNotifier(approvalManager);
-    const contextRuntime = buildContextRuntime(kind, providerConfig.model);
     const engine = new AgentEngine({
       ...(atomicMemoryRuntime ? { memoryHooks: atomicMemoryRuntime } : {}),
       provider: trackedProvider,

@@ -71,6 +71,29 @@ test("atomic memory runtime saves before the next model call and rejects sibling
         const user = entries.find(
           (e) => e.event.kind === "message.committed" && e.event.data.message.content === prompt,
         )!;
+        const evidenceJson = request.prompt.match(
+          /<memory_evidence>\n([\s\S]*?)\n<\/memory_evidence>/u,
+        )?.[1];
+        assert.ok(evidenceJson);
+        const evidence = JSON.parse(evidenceJson) as Array<{
+          sourceRef: string;
+          messagePositions?: number[];
+          texts?: unknown;
+        }>;
+        const requestedEvidence = evidence.find(
+          (entry) => entry.sourceRef === `event:${user.event.eventId}`,
+        );
+        assert.ok(requestedEvidence?.messagePositions?.length);
+        assert.equal(
+          requestedEvidence.texts,
+          undefined,
+          "indexed evidence must not duplicate the source text",
+        );
+        assert.ok(
+          requestedEvidence.messagePositions.some((position) =>
+            request.sourceMessages?.[position]?.content.includes(prompt),
+          ),
+        );
         return JSON.stringify({
           status: "complete",
           coverageStatus: "processed",
@@ -281,6 +304,7 @@ test("atomic compaction persists its covered boundary and records disabled-polic
         maxAttempts: 1,
       }),
       request: { inputBudgetTokens: 4000, targetRetainedTokens: 1, trigger: "manual" },
+      memoryDisposition: async () => "policy_denied",
     });
     assert.ok(checkpoint);
     let calls = 0;
@@ -304,18 +328,17 @@ test("atomic compaction persists its covered boundary and records disabled-polic
     await lifecycle.close();
     assert.deepEqual(await runtime.requestExtract(), { status: "unavailable" });
     assert.equal(calls, 0);
-    const paths = resolvePicoPaths(workDir, { picoHome });
-    const store = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"));
-    try {
-      const denials = await store.readCompactionPolicyDenials(
-        memorySessionKey(paths.workspace.id, sessionId),
-      );
-      assert.equal(denials.length, 1);
-      assert.equal(denials[0]!.compactionCheckpointId, checkpoint.checkpointId);
-    } finally {
-      store.close();
-    }
     const entries = await session.runtimeEventStore!.readSessionEntries(sessionId);
+    const recorded = entries.find(
+      ({ event }) =>
+        event.kind === "context.checkpoint.recorded" &&
+        event.data.checkpointId === checkpoint.checkpointId,
+    )?.event;
+    assert.ok(recorded?.kind === "context.checkpoint.recorded");
+    assert.deepEqual(recorded.data.memoryExtractionBoundary, {
+      runtimeEventId: recorded.data.throughEventId,
+      disposition: "policy_denied",
+    });
     assert.equal(
       entries.some((entry) => entry.event.kind === "run.terminal"),
       false,

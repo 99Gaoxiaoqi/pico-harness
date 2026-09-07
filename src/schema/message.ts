@@ -77,8 +77,12 @@ export function toCanonicalUsage(usage: Usage): CanonicalUsage {
   };
 }
 
+/** Transient provenance: survives projection spreads, never JSON persistence or Provider serialization. */
+export const RUNTIME_MESSAGE_EVENT_ID = Symbol("runtimeMessageEventId");
+
 /** 上下文中传递的单条消息 */
 export interface Message {
+  [RUNTIME_MESSAGE_EVENT_ID]?: string;
   role: Role;
   /** 纯文本内容:存放系统提示词 / 用户输入 / 模型推理 / 工具观察结果 */
   content: string;
