@@ -195,6 +195,10 @@ export interface RuntimeCheckpointRecordedEventData {
   readonly coveredEventCount: number;
   readonly sourceDigest: string;
   readonly throughEventId: string;
+  readonly memoryExtractionBoundary?: {
+    readonly runtimeEventId: string;
+    readonly disposition: "eligible" | "policy_denied";
+  };
   readonly summary: Message;
   /** 滚动摘要链:上一个 checkpoint 的 id(若存在),用于增量更新。 */
   readonly previousCheckpointId?: string;

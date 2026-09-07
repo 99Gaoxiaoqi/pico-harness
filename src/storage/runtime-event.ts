@@ -279,7 +279,7 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
         throw new RuntimeEventIntegrityError("Runtime model call cost status is invalid");
       }
       return;
-    case "context.checkpoint.recorded":
+    case "context.checkpoint.recorded": {
       assertString(value["data"]["checkpointId"], "context.checkpoint.recorded.checkpointId");
       assertCheckpointSourceDigest(
         value["data"]["sourceDigest"],
@@ -291,8 +291,19 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
       ) {
         throw new RuntimeEventIntegrityError("Runtime checkpoint event count is invalid");
       }
+      const memoryBoundary = value["data"]["memoryExtractionBoundary"];
+      if (
+        memoryBoundary !== undefined &&
+        (!isRecord(memoryBoundary) ||
+          memoryBoundary["runtimeEventId"] !== value["data"]["throughEventId"] ||
+          (memoryBoundary["disposition"] !== "eligible" &&
+            memoryBoundary["disposition"] !== "policy_denied"))
+      ) {
+        throw new RuntimeEventIntegrityError("Runtime memory extraction boundary is invalid");
+      }
       assertCheckpointSummary(value["data"]);
       return;
+    }
     case "history.rewound":
       // legacy-only：只读不写。rewind/branchId 机制已移除（无生产者），
       // kind 不在 RUNTIME_EVENT_KINDS 中（append 校验会拒绝）；此处仅为

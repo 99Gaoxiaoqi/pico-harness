@@ -228,7 +228,7 @@ test("committed Session A atomic memory reaches Session B AgentRuntime prompt bu
           model: {
             async call(request) {
               stages.push(request.stage);
-              return successfulExtraction(request.prompt, MEMORY_CANARY);
+              return successfulExtraction(request.prompt, MEMORY_CANARY, request.sourceMessages);
             },
           },
         }),
@@ -560,7 +560,11 @@ test("default priced atomic extraction records memory_review without changing ma
         ) {
           return {
             role: "assistant",
-            content: successfulExtraction(extractionPrompt, "npm run priced-review"),
+            content: successfulExtraction(
+              extractionPrompt,
+              "npm run priced-review",
+              messages.slice(0, -1),
+            ),
             usage: { promptTokens: 40, completionTokens: 20 },
           };
         }
@@ -675,7 +679,11 @@ class DeltaReporter extends SilentReporter {
   }
 }
 
-function successfulExtraction(prompt: string, content: string): string {
+function successfulExtraction(
+  prompt: string,
+  content: string,
+  messages: readonly Message[] = [],
+): string {
   const item = {
     content,
     kind: "knowledge",
@@ -690,8 +698,18 @@ function successfulExtraction(prompt: string, content: string): string {
     return JSON.stringify({ results: [{ candidateId: "candidate_0", status: "accepted", item }] });
   const payload = prompt.split("<memory_evidence>\n")[1]?.split("\n</memory_evidence>")[0];
   assert.ok(payload);
-  const evidence = JSON.parse(payload) as { sourceRef: string; texts: string[] }[];
-  const source = evidence.find((entry) => entry.texts.some((text) => text.includes(content)));
+  const evidence = JSON.parse(payload) as {
+    sourceRef: string;
+    texts?: string[];
+    messagePositions?: number[];
+  }[];
+  const source = evidence.find((entry) =>
+    (
+      entry.messagePositions?.map((position) => messages[position]?.content ?? "") ??
+      entry.texts ??
+      []
+    ).some((text) => text.includes(content)),
+  );
   assert.ok(source, "fixture must cite actual durable user evidence");
   const proposed = { ...item, evidence: [{ sourceRef: source.sourceRef, quote: content }] };
   const requested = prompt.includes("The user explicitly requested memory.");

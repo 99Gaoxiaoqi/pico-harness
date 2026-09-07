@@ -624,6 +624,7 @@ export interface AgentEngineOptions {
   memoryHooks?: {
     capture(messages: readonly Message[], tools: readonly ToolDefinition[]): Promise<void>;
     checkpoint(checkpointId: string): Promise<void>;
+    compactionDisposition?(): Promise<"eligible" | "policy_denied" | undefined>;
   };
   /** 主循环最大轮次兜底(默认 50,防止失控烧穿 Token) */
   maxTurns?: number;
@@ -782,6 +783,7 @@ export class AgentEngine implements AgentRunner {
   private readonly memoryHooks?: {
     capture(messages: readonly Message[], tools: readonly ToolDefinition[]): Promise<void>;
     checkpoint(checkpointId: string): Promise<void>;
+    compactionDisposition?(): Promise<"eligible" | "policy_denied" | undefined>;
   };
   private readonly maxTurns: number;
   private readonly compactor?: Compactor;
@@ -1082,7 +1084,7 @@ export class AgentEngine implements AgentRunner {
   /** RuntimeEvent is the source of truth for production model history; Session is its UI projection. */
   private async readModelHistory(session: Session): Promise<Message[]> {
     const runtimeRun = this.runtimePort?.currentRun();
-    if (runtimeRun?.claimsSession(session)) return runtimeRun.readModelHistory();
+    if (runtimeRun?.claimsSession(session)) return runtimeRun.readModelHistory(!!this.memoryHooks);
     return session.getModelContext();
   }
 
@@ -1108,10 +1110,22 @@ export class AgentEngine implements AgentRunner {
       runtimeRun,
       compactor: this.fullCompactor,
       request,
+      ...(this.memoryHooks?.compactionDisposition
+        ? { memoryDisposition: () => this.memoryHooks!.compactionDisposition!() }
+        : {}),
       ...(this.hookService ? { hookService: this.hookService } : {}),
       ...(signal ? { signal } : {}),
     });
-    if (result) await this.memoryHooks?.checkpoint(result.checkpointId);
+    if (result) {
+      try {
+        await this.memoryHooks?.checkpoint(result.checkpointId);
+      } catch (error) {
+        logger.warn(
+          { error: String(error), checkpointId: result.checkpointId },
+          "[Memory] checkpoint dispatch unavailable; recovery deferred",
+        );
+      }
+    }
     return result?.preview;
   }
 

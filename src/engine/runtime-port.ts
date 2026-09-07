@@ -112,6 +112,10 @@ export interface EngineRuntimeCheckpointInput {
   readonly coveredEventCount: number;
   readonly sourceDigest: string;
   readonly throughEventId: string;
+  readonly memoryExtractionBoundary?: {
+    readonly runtimeEventId: string;
+    readonly disposition: "eligible" | "policy_denied";
+  };
   readonly summary: Message;
   /** 滚动摘要链:上一个 checkpoint 的 id(若存在)。 */
   readonly previousCheckpointId?: string;
@@ -136,7 +140,7 @@ export interface EngineRuntimeRun {
   claimsSession(session: Session): boolean;
   commitMessages(session: Session, messages: readonly Message[]): Promise<void>;
   commitMessageOnce(session: Session, eventId: string, message: Message): Promise<CommitReceipt>;
-  readModelHistory(): Promise<Message[]>;
+  readModelHistory(includeEventIds?: boolean): Promise<Message[]>;
   readModelHistoryEntries(): Promise<readonly EngineRuntimeHistoryEntry[]>;
   readSessionProjectionEntries(): Promise<readonly EngineRuntimeHistoryEntry[]>;
   /**

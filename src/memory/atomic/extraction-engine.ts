@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { memoryRequestFits } from "./extraction-budget.js";
 import {
   normalizeLongTermMemoryContent,
   validateMemoryTemporalBounds,
@@ -90,7 +91,7 @@ export class AtomicMemoryExtractionEngine {
   private async executeFrozen(snapshot: MemoryExtractionSnapshot): Promise<AtomicMemoryResult> {
     const store = this.options.store;
     const operationId = extractionOperationId(snapshot);
-    const gate = await this.options.gate();
+    const gate = await this.options.gate(snapshot.trigger);
     if (!gate.allowed || snapshot.signal?.aborted) {
       if (!gate.allowed && !temporaryDenial(gate.reason)) await this.recordDenial(snapshot);
       return unavailable(
@@ -111,6 +112,9 @@ export class AtomicMemoryExtractionEngine {
     const checkpoints = [...(snapshot.checkpoints ?? [])]
       .filter((checkpoint) => checkpoint.throughOrdinal <= snapshot.boundaryOrdinal)
       .sort((a, b) => a.throughOrdinal - b.throughOrdinal);
+    for (const checkpoint of checkpoints) {
+      if (checkpoint.disposition === "policy_denied") denied.add(checkpoint.checkpointId);
+    }
     if (checkpoints.some((checkpoint) => !validCheckpoint(snapshot, checkpoint)))
       return unavailable("invalid_checkpoint");
     if (!cursor && !pending && !checkpoints.some((checkpoint) => !checkpoint.bootstrap)) {
@@ -155,6 +159,7 @@ export class AtomicMemoryExtractionEngine {
         pendingBoundary,
         pending.firstTrigger,
         pending.compactionCheckpointId,
+        after,
       );
       const range = this.range(
         retrySnapshot,
@@ -170,9 +175,13 @@ export class AtomicMemoryExtractionEngine {
       const settled =
         pending.deletionRevision !== snapshot.deletionRevision
           ? await this.commit(range, [], [], undefined, "memory_deleted")
-          : await this.settle(await this.processRange(range));
+          : pending.compactionCheckpointId && denied.has(pending.compactionCheckpointId)
+            ? await this.commit(range, [], [], undefined, "policy_denied")
+            : await this.settle(await this.processRange(range));
       if (settled.kind !== "committed")
         return unavailable(settled.kind === "blocked" ? settled.reason : "retry_later");
+      if (settled.receipt.skipReason === "policy_denied" && pending.compactionCheckpointId)
+        denied.add(pending.compactionCheckpointId);
       after = settled.through;
     }
 
@@ -191,6 +200,7 @@ export class AtomicMemoryExtractionEngine {
         boundary,
         "compaction",
         checkpoint.checkpointId,
+        after,
       );
       const range = this.range(
         checkpointSnapshot,
@@ -204,6 +214,7 @@ export class AtomicMemoryExtractionEngine {
         : await this.settle(await this.processRange(range));
       if (result.kind !== "committed")
         return unavailable(result.kind === "blocked" ? result.reason : "retry_later");
+      if (result.receipt.skipReason === "policy_denied") denied.add(checkpoint.checkpointId);
       after = result.through;
     }
 
@@ -246,7 +257,7 @@ export class AtomicMemoryExtractionEngine {
         snapshot.trigger === "compaction"
           ? {
               ...snapshot,
-              sourceMessages: eventMessages(entries),
+              ...eventSourceContext(entries),
               sourceTools: undefined,
             }
           : snapshot,
@@ -264,42 +275,41 @@ export class AtomicMemoryExtractionEngine {
       (event) => event.ordinal > range.after && event.ordinal <= range.through,
     );
     if (entries.length === 0) return { kind: "blocked", reason: "coverage_missing" };
-    const evidence = projectAtomicMemoryEvidence(entries, snapshot.sourceMessages);
+    if (
+      snapshot.signal?.aborted ||
+      snapshot.deletionRevision !== (await this.options.store.readDeletionRevision())
+    )
+      return { kind: "blocked", reason: "policy_changed" };
+    const gate = await this.options.gate(snapshot.trigger);
+    if (!gate.allowed) {
+      if (snapshot.trigger === "remember" || temporaryDenial(gate.reason))
+        return { kind: "blocked", reason: gate.reason };
+      if (snapshot.compactionCheckpointId)
+        await this.options.store.recordCompactionPolicyDenial({
+          sessionId: snapshot.sessionId,
+          compactionCheckpointId: snapshot.compactionCheckpointId,
+          deniedAt: Date.now(),
+        });
+      // A denied historical automatic range must not block a new explicit request.
+      return this.commit(range, [], [], undefined, "policy_denied");
+    }
+    const evidence = projectAtomicMemoryEvidence(
+      entries,
+      snapshot.sourceMessages,
+      snapshot.sourceEventMessagePositions,
+    );
     const fitted = fitAtomicMemoryEvidence(evidence);
-    if (!fitted) {
-      // A split is still bounded: two independent segments, never recursive slicing.
-      const requestedStart =
-        snapshot.trigger === "remember"
-          ? entries.findIndex(
-              (event) => event.runId === snapshot.runId && event.turnId === snapshot.turnId,
-            )
-          : entries.length;
-      const splitIndex = Math.min(
-        Math.floor(entries.length / 2),
-        requestedStart < 0 ? entries.length - 1 : requestedStart,
-      );
-      if (!allowSplit || splitIndex < 1) return { kind: "failed", failureClass: "evidence", range };
-      const boundary = entries[splitIndex - 1]!;
-      const prefixSnapshot = historicalSnapshot(snapshot, boundary, "extract");
-      const prefix = this.range(
-        prefixSnapshot,
-        `memory_segment_${hash([range.operationId, boundary.ordinal])}`,
-        range.after,
-        boundary.ordinal,
-        range.historyAfter,
-      );
-      const first = await this.processRange(prefix, false);
-      if (first.kind !== "committed") return first;
-      return this.processRange(
-        this.range(
-          snapshot,
-          range.operationId,
-          boundary.ordinal,
-          range.through,
-          range.historyAfter,
-        ),
-        false,
-      );
+    const fits = fitted && (await this.proposalFits(snapshot, fitted));
+    if (!fitted || !fits) {
+      if (allowSplit) {
+        const split = await this.splitRange(range, entries);
+        if (split) {
+          const first = await this.processRange(split[0], false);
+          if (first.kind !== "committed") return first;
+          return this.processRange(split[1], false);
+        }
+      }
+      return { kind: "failed", failureClass: fitted ? "provider" : "evidence", range };
     }
     if (
       snapshot.trigger === "remember" &&
@@ -320,6 +330,85 @@ export class AtomicMemoryExtractionEngine {
       if (result.kind !== "failed") return result;
     } while (budget.remaining > 0);
     return result;
+  }
+
+  private proposalFits(
+    snapshot: MemoryExtractionSnapshot,
+    evidence: readonly AtomicMemoryEvidence[],
+  ): Promise<boolean> {
+    if (evidence.length === 0) return Promise.resolve(true);
+    return memoryRequestFits(
+      requestBudget(snapshot, "proposal"),
+      proposalPrompt(snapshot.trigger, renderAtomicMemoryEvidence(evidence)),
+      "proposal",
+    );
+  }
+
+  private async splitRange(
+    range: Range,
+    entries: readonly MemoryEvidenceEvent[],
+  ): Promise<readonly [Range, Range] | undefined> {
+    const { snapshot } = range;
+    const requestedStart =
+      snapshot.trigger === "remember"
+        ? entries.findIndex(
+            (event) => event.runId === snapshot.runId && event.turnId === snapshot.turnId,
+          )
+        : entries.length;
+    const candidates = entries
+      .map((event, index) => ({ event, index }))
+      .filter(
+        ({ event, index }) =>
+          index > 0 &&
+          index <= requestedStart &&
+          (entries[index - 1]!.runId !== event.runId ||
+            entries[index - 1]!.turnId !== event.turnId),
+      )
+      .sort(
+        (a, b) => Math.abs(a.index - entries.length / 2) - Math.abs(b.index - entries.length / 2),
+      );
+    for (const { index } of candidates) {
+      const boundary = entries[index - 1]!;
+      const prefixSnapshot = historicalSnapshot(snapshot, boundary, "extract");
+      const prefix = this.range(
+        {
+          ...prefixSnapshot,
+          ...rangeSourceContext(snapshot, entries.slice(0, index)),
+        },
+        `memory_segment_${hash([range.operationId, boundary.ordinal])}`,
+        range.after,
+        boundary.ordinal,
+        range.historyAfter,
+      );
+      const tail = this.range(
+        {
+          ...snapshot,
+          ...rangeSourceContext(snapshot, entries.slice(index)),
+        },
+        range.operationId,
+        boundary.ordinal,
+        range.through,
+        range.historyAfter,
+      );
+      let fits = true;
+      for (const part of [prefix, tail]) {
+        const evidence = fitAtomicMemoryEvidence(
+          projectAtomicMemoryEvidence(
+            part.snapshot.events.filter(
+              (event) => event.ordinal > part.after && event.ordinal <= part.through,
+            ),
+            part.snapshot.sourceMessages,
+            part.snapshot.sourceEventMessagePositions,
+          ),
+        );
+        if (!evidence || !(await this.proposalFits(part.snapshot, evidence))) {
+          fits = false;
+          break;
+        }
+      }
+      if (fits) return [prefix, tail];
+    }
+    return undefined;
   }
 
   private async attempt(
@@ -487,6 +576,10 @@ export class AtomicMemoryExtractionEngine {
     budget: Budget,
   ): Promise<string | Outcome> {
     if (budget.remaining <= 0) return { kind: "failed", failureClass: "provider", range };
+    if (!(await memoryRequestFits(requestBudget(range.snapshot, stage), prompt, stage))) {
+      budget.remaining = 0;
+      return { kind: "failed", failureClass: "provider", range };
+    }
     if (!(await this.allowed(range.snapshot))) return { kind: "blocked", reason: "policy_changed" };
     budget.remaining -= 1;
     const deadline = AbortSignal.timeout(60_000);
@@ -521,6 +614,7 @@ export class AtomicMemoryExtractionEngine {
       if (!(await this.allowed(range.snapshot)))
         return { kind: "blocked", reason: "policy_changed" };
       if (blockedModelError(error)) return { kind: "blocked", reason: "model_unavailable" };
+      if (contextWindowError(error)) budget.remaining = 0;
       return { kind: "failed", failureClass: "provider", range };
     } finally {
       if (onAbort) signal.removeEventListener("abort", onAbort);
@@ -583,7 +677,7 @@ export class AtomicMemoryExtractionEngine {
       snapshot.deletionRevision !== (await this.options.store.readDeletionRevision())
     )
       return false;
-    const gate = await this.options.gate();
+    const gate = await this.options.gate(snapshot.trigger);
     if (!gate.allowed && !temporaryDenial(gate.reason)) await this.recordDenial(snapshot);
     return gate.allowed;
   }
@@ -701,6 +795,7 @@ function historicalSnapshot(
   boundary: MemoryEvidenceEvent,
   trigger: MemoryExtractionSnapshot["trigger"],
   compactionCheckpointId?: string,
+  afterOrdinal = 0,
 ): MemoryExtractionSnapshot {
   const events = current.events.filter((event) => event.ordinal <= boundary.ordinal);
   return {
@@ -711,7 +806,7 @@ function historicalSnapshot(
     boundaryOrdinal: boundary.ordinal,
     boundaryEventId: boundary.eventId,
     events,
-    sourceMessages: eventMessages(events),
+    ...eventSourceContext(events.filter((event) => event.ordinal > afterOrdinal)),
     sourceTools: trigger === "compaction" ? undefined : current.sourceTools,
     compactionCheckpointId,
   };
@@ -766,10 +861,9 @@ function freezeSnapshot(input: MemoryExtractionSnapshot): MemoryExtractionSnapsh
   const snapshot = {
     ...input,
     events,
-    sourceMessages:
-      input.sourceMessages === undefined
-        ? eventMessages(events)
-        : memoryConversationMessages(structuredClone(input.sourceMessages)),
+    ...(input.sourceMessages === undefined
+      ? eventSourceContext(events)
+      : filteredSourceContext(input)),
     sourceTools: input.trigger === "compaction" ? undefined : structuredClone(input.sourceTools),
     checkpoints: structuredClone(input.checkpoints ?? []),
   };
@@ -789,16 +883,91 @@ function freezeSnapshot(input: MemoryExtractionSnapshot): MemoryExtractionSnapsh
   return snapshot;
 }
 
-function eventMessages(
+function eventSourceContext(events: readonly MemoryEvidenceEvent[]) {
+  const sourceMessages: ReturnType<typeof memoryConversationMessages> = [];
+  const sourceEventMessagePositions: Record<string, number[]> = {};
+  for (const event of events) {
+    if (event.role !== "user" && event.role !== "assistant") continue;
+    const messages = memoryConversationMessages([{ role: event.role, content: event.text }]);
+    sourceEventMessagePositions[event.eventId] = messages.map(
+      (_, offset) => sourceMessages.length + offset,
+    );
+    sourceMessages.push(...messages);
+  }
+  return { sourceMessages, sourceEventMessagePositions };
+}
+
+function filteredSourceContext(snapshot: MemoryExtractionSnapshot) {
+  const sourceMessages: ReturnType<typeof memoryConversationMessages> = [];
+  const remapped = new Map<number, number>();
+  for (const [position, message] of (snapshot.sourceMessages ?? []).entries()) {
+    const filtered = memoryConversationMessages([message]);
+    if (!filtered.length) continue;
+    remapped.set(position, sourceMessages.length);
+    sourceMessages.push(...filtered);
+  }
+  const sourceEventMessagePositions =
+    snapshot.sourceEventMessagePositions === undefined
+      ? undefined
+      : Object.fromEntries(
+          Object.entries(snapshot.sourceEventMessagePositions).map(([id, positions]) => [
+            id,
+            positions.every((position) => remapped.has(position))
+              ? positions.map((position) => remapped.get(position)!)
+              : [],
+          ]),
+        );
+  return { sourceMessages, sourceEventMessagePositions };
+}
+
+/** Rebuild a split's own prefix without widening the original Provider-visible text. */
+function rangeSourceContext(
+  snapshot: MemoryExtractionSnapshot,
   events: readonly MemoryEvidenceEvent[],
-): ReturnType<typeof memoryConversationMessages> {
-  return memoryConversationMessages(
-    events.flatMap((event) =>
-      event.role === "user" || event.role === "assistant"
-        ? [{ role: event.role, content: event.text }]
-        : [],
-    ),
-  );
+) {
+  const sourceMessages: ReturnType<typeof memoryConversationMessages> = [];
+  const sourceEventMessagePositions: Record<string, number[]> = {};
+  for (const event of events) {
+    if (event.role !== "user" && event.role !== "assistant") continue;
+    const texts =
+      event.role === "user"
+        ? projectAtomicMemoryEvidence(
+            [event],
+            snapshot.sourceMessages,
+            snapshot.sourceEventMessagePositions,
+          ).flatMap((entry) => entry.texts)
+        : (snapshot.sourceMessages ?? [])
+            .filter((message) => message.role === "assistant")
+            .flatMap((message) => {
+              const text = normalizeEvidenceText(message.content);
+              const original = normalizeEvidenceText(event.text);
+              return text && original.includes(text)
+                ? [text]
+                : original && text.includes(original)
+                  ? [original]
+                  : [];
+            });
+    sourceEventMessagePositions[event.eventId] = [...new Set(texts)].map((content) => {
+      const position = sourceMessages.length;
+      sourceMessages.push({ role: event.role as "user" | "assistant", content });
+      return position;
+    });
+  }
+  return { sourceMessages, sourceEventMessagePositions };
+}
+
+function requestBudget(snapshot: MemoryExtractionSnapshot, stage: MemoryModelRequest["stage"]) {
+  return {
+    ...snapshot,
+    sourceTools:
+      snapshot.trigger === "compaction" || stage !== "proposal" ? undefined : snapshot.sourceTools,
+  };
+}
+
+function contextWindowError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const candidate = error as { name?: string; code?: string };
+  return candidate.code === "context_window" || candidate.name === "ContextOverflowError";
 }
 
 function validCheckpoint(

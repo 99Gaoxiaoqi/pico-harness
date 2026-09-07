@@ -24,6 +24,7 @@ export interface MemoryCheckpointBoundary {
   readonly coverageHash?: string;
   /** Old checkpoints without recoverable memory coverage may bootstrap a new cursor. */
   readonly bootstrap?: boolean;
+  readonly disposition?: "eligible" | "policy_denied";
 }
 
 export interface MemoryExtractionSnapshot {
@@ -40,6 +41,9 @@ export interface MemoryExtractionSnapshot {
   readonly events: readonly MemoryEvidenceEvent[];
   readonly sourceMessages?: readonly Message[];
   readonly sourceTools?: readonly ToolDefinition[];
+  readonly sourceEventMessagePositions?: Readonly<Record<string, readonly number[]>>;
+  readonly contextWindowTokens?: number;
+  readonly reservedOutputTokens?: number;
   readonly checkpoints?: readonly MemoryCheckpointBoundary[];
   readonly compactionCheckpointId?: string;
   readonly signal?: AbortSignal;
@@ -96,7 +100,7 @@ export interface AtomicMemoryStore extends MemoryItemStore {
 export interface AtomicMemoryEngineOptions {
   readonly store: AtomicMemoryStore;
   readonly model: MemoryExtractionModel;
-  readonly gate: () => Promise<MemoryGateResult>;
+  readonly gate: (trigger: MemoryExtractionSnapshot["trigger"]) => Promise<MemoryGateResult>;
 }
 
 export type AtomicMemoryResult =
