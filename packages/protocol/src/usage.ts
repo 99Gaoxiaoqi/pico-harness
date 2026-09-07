@@ -41,9 +41,13 @@ export interface UsageBreakdown {
 }
 
 export interface UsagePrice {
+  readonly tier?: string;
+  readonly note?: string;
+  readonly sourceUrl?: string;
+  readonly verifiedAt?: string;
   readonly provider: string;
   readonly model: string;
-  readonly source: "configured" | "official_docs_snapshot" | "included";
+  readonly source: "configured" | "models_dev_snapshot" | "official_docs_snapshot" | "included";
   /** USD per million tokens, matching the billing configuration. */
   readonly inputPerMillion: number | null;
   readonly outputPerMillion: number | null;
@@ -105,7 +109,16 @@ export function parseUsageDashboard(value: unknown): UsageDashboardDetails {
       return {
         provider: text(row.provider),
         model: text(row.model),
-        source: choice(row.source, ["configured", "official_docs_snapshot", "included"] as const),
+        ...optionalText(row, "tier"),
+        ...optionalText(row, "note"),
+        ...optionalText(row, "sourceUrl"),
+        ...optionalText(row, "verifiedAt"),
+        source: choice(row.source, [
+          "configured",
+          "models_dev_snapshot",
+          "official_docs_snapshot",
+          "included",
+        ] as const),
         inputPerMillion: nullableNumber(row.inputPerMillion),
         outputPerMillion: nullableNumber(row.outputPerMillion),
         cacheReadPerMillion: nullableNumber(row.cacheReadPerMillion),

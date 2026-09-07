@@ -117,15 +117,16 @@ export function billingRouteForProvider(
     model: config.model,
     baseUrl: config.baseURL,
     cacheSupported: config.capabilities.cache,
-    pricing:
-      price?.source === "config"
-        ? {
+    ...(price?.source === "config"
+      ? {
+          pricing: {
             inputPerMillion: price.inputPerMillion,
             outputPerMillion: price.outputPerMillion,
             cacheReadPerMillion: price.cacheReadPerMillion,
             cacheWritePerMillion: price.cacheWritePerMillion,
             source: "configured",
-          }
-        : null,
+          },
+        }
+      : {}),
   };
 }

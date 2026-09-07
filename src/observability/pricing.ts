@@ -1,7 +1,12 @@
+import { catalogPricing } from "./catalog-pricing.js";
 import { toCanonicalUsage, type CanonicalUsage, type Usage } from "../schema/message.js";
 
 export type BillingMode = "metered" | "subscription_included";
-export type CostSource = "official_docs_snapshot" | "configured" | "included";
+export type CostSource =
+  | "models_dev_snapshot"
+  | "official_docs_snapshot"
+  | "configured"
+  | "included";
 export type CostStatus = "estimated" | "included" | "unknown";
 
 export interface BillingRoute {
@@ -77,6 +82,7 @@ export function getPricingEntry(route: BillingRoute): PricingEntry | null {
     return INCLUDED_PRICING;
   }
   if (Object.hasOwn(route, "pricing")) return route.pricing ?? null;
+  if (route.baseUrl) return catalogPricing(route);
   return OFFICIAL_PRICING[normalizeModelName(route.model)] ?? null;
 }
 

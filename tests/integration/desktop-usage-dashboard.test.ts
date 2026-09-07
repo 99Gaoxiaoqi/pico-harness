@@ -135,6 +135,13 @@ test("usage dashboard joins real model and tool ledgers across workspaces, prese
   const raw = await desktop.handle(createRuntimeRequest("usage.get", {}));
   const usage = parseUsage(raw);
   const details = usage.details!;
+  assert.ok(details.pricing.length > 1000);
+  const flash = details.pricing.find(
+    (row) => row.model === "deepseek-v4-flash" && row.tier === "低峰",
+  )!;
+  assert.equal(flash.inputPerMillion, 0.22);
+  assert.equal(flash.cacheWritePerMillion, null);
+  assert.match(flash.sourceUrl!, /^https:\/\/api-docs.deepseek.com/);
   assert.equal(usage.providerCallCount, 2);
   assert.equal(usage.totalTokens, 400);
   assert.equal(usage.costStatus, "partial");
