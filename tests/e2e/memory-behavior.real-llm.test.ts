@@ -143,6 +143,7 @@ realModelTest(
     const paths = resolvePicoPaths(workspace, { picoHome });
     const toolNames: string[] = [];
     const toolResults: string[] = [];
+    const saveResponses: AtomicModelDiagnostic[] = [];
     const reporter = new SilentReporter();
     reporter.onToolCall = (name) => {
       toolNames.push(name);
@@ -162,7 +163,11 @@ realModelTest(
         {
           picoHome,
           memoryTrustStore: trustStore,
-          provider: createProvider(configured.provider, configured.config),
+          provider: observeProvider(
+            createProvider(configured.provider, configured.config),
+            [],
+            saveResponses,
+          ),
           reporter,
         },
       );
@@ -172,7 +177,7 @@ realModelTest(
       );
       assert.ok(
         toolResults.some((text) => /"status"\s*:\s*"remembered"/u.test(text)),
-        `remember tool results=${JSON.stringify(toolResults)}`,
+        `remember tool results=${JSON.stringify(toolResults)}; fixture model responses=${JSON.stringify(saveResponses)}`,
       );
       store = new SqliteMemoryItemStore(atomicMemoryDatabasePath(picoHome));
       const items = await store.listItems({ workspaceKey: paths.workspace.id });
@@ -186,7 +191,7 @@ realModelTest(
         runtimeRequest(
           workspace,
           sessionIds[1]!,
-          "What is this workspace's build verification command? Use workspace memory and reply only with the exact command. If no memory supplies it, reply UNKNOWN.",
+          "What is this workspace's build verification command? Use only the atomic-memory-reference block already injected in this conversation. Do not call tools, inspect files, or search for memory. Reply in final plain text with only the exact command from that block. If the block is absent or supplies no command, reply exactly UNKNOWN.",
           configured,
           false,
         ),
@@ -259,7 +264,7 @@ realModelTest(
         runtimeRequest(
           workspace,
           sessionIds[2]!,
-          "What is this workspace's build verification command? Use workspace memory and reply only with the exact command. If no memory supplies it, reply UNKNOWN.",
+          "What is this workspace's build verification command? Use only the atomic-memory-reference block already injected in this conversation. Do not call tools, inspect files, or search for memory. Reply in final plain text with only the exact command from that block. If the block is absent or supplies no command, reply exactly UNKNOWN.",
           configured,
           false,
         ),
@@ -292,20 +297,51 @@ realModelTest(
   },
 );
 
-function observeProvider(provider: LLMProvider, snapshots: Message[][]): LLMProvider {
+interface AtomicModelDiagnostic {
+  readonly stage: "proposal" | "localized" | "canonicalize";
+  readonly content: string;
+  readonly toolCalls?: Message["toolCalls"];
+}
+
+function recordAtomicModelResponse(
+  messages: readonly Message[],
+  result: Message,
+  diagnostics?: AtomicModelDiagnostic[],
+): void {
+  if (!diagnostics) return;
+  const prompt = messages.at(-1)?.content ?? "";
+  const stage = prompt.includes("<user_evidence_candidates>")
+    ? "canonicalize"
+    : prompt.includes("<memory_evidence>")
+      ? prompt.includes("<interpretation_context_only>")
+        ? "localized"
+        : "proposal"
+      : undefined;
+  if (stage) diagnostics.push({ stage, content: result.content, toolCalls: result.toolCalls });
+}
+
+function observeProvider(
+  provider: LLMProvider,
+  snapshots: Message[][],
+  responses?: AtomicModelDiagnostic[],
+): LLMProvider {
   const observed: LLMProvider = {
     modelName: provider.modelName,
     requestCapabilities: provider.requestCapabilities,
     isRetryableError: provider.isRetryableError?.bind(provider),
     async generate(messages, tools, options) {
       snapshots.push(structuredClone(messages));
-      return provider.generate(messages, tools, options);
+      const result = await provider.generate(messages, tools, options);
+      recordAtomicModelResponse(messages, result, responses);
+      return result;
     },
   };
   if (provider.generateStream) {
     observed.generateStream = async (messages, tools, onDelta, options) => {
       snapshots.push(structuredClone(messages));
-      return provider.generateStream!(messages, tools, onDelta, options);
+      const result = await provider.generateStream!(messages, tools, onDelta, options);
+      recordAtomicModelResponse(messages, result, responses);
+      return result;
     };
   }
   return observed;
