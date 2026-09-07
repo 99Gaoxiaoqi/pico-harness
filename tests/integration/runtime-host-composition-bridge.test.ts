@@ -23,6 +23,7 @@ import {
   type RuntimeHostBridgeService,
 } from "../../src/daemon/index.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
+import { RUNTIME_REQUEST_RESULT_MAX_BYTES } from "../../src/daemon/runtime-host-operations.js";
 
 ensurePicoRuntimeHostOperationsRegistered();
 
@@ -176,6 +177,22 @@ test("runtime-host bridge: usage.get supports one global query without a workspa
   assert.equal(result.usage["scope"], "all");
   assert.equal(result.usage["currency"], "CNY");
   assert.ok(Array.isArray(result.usage["workspaces"]));
+});
+
+test("runtime-host bridge: usage.get rejects results above the frame budget without dropping the connection", async (t) => {
+  const oversizedService: RuntimeHostBridgeService = {
+    handle: async () => ({ usage: { note: "x".repeat(RUNTIME_REQUEST_RESULT_MAX_BYTES) } }),
+  };
+  const { connection } = await startBridgeHarness(t, { service: oversizedService });
+
+  await assert.rejects(connection.requestRegistered("usage.get", {}, 10000), (error: unknown) => {
+    assert.ok(error instanceof RuntimeHostOperationError);
+    assert.equal(error.operation, "usage.get");
+    assert.equal(error.code, "internal_failure");
+    return true;
+  });
+  assert.equal(connection.terminalError, undefined);
+  assert.equal((await connection.request("host.status", {}, 5000)).state, "ready");
 });
 
 test("runtime-host bridge: daemon INVALID_PARAMS maps to invalid_request without dropping the connection", async (t) => {
