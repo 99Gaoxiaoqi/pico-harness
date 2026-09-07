@@ -1,3 +1,4 @@
+import { AtomicMemoryLifecycle } from "../runtime/atomic-memory-lifecycle.js";
 import type { Session } from "../engine/session.js";
 import { loadAgentCatalog } from "../agents/catalog.js";
 import {
@@ -117,6 +118,7 @@ import {
 } from "../plugins/plugin-capability.js";
 
 export interface ProductionLocalDaemonHostOptions {
+  acquireMemoryResidency?: () => { release(): void };
   registrationStore?: WorkspaceRegistrationStore;
   trustStore?: WorkspaceTrustStore;
   agentRuntime?: AgentRuntime;
@@ -202,6 +204,7 @@ export function createProductionRuntimeServices(
   const trustStore =
     options.trustStore ?? new WorkspaceTrustStore({ userStateDirectory: picoHome });
   const agentRuntime = options.agentRuntime ?? new AgentRuntime();
+  const atomicMemoryLifecycle = new AtomicMemoryLifecycle(options.acquireMemoryResidency);
   const browserAgentBroker = new BrowserAgentCommandBroker();
   if (
     options.pluginRuntimeSnapshotRegistry &&
@@ -533,6 +536,7 @@ export function createProductionRuntimeServices(
                 },
               }
             : {}),
+          atomicMemoryLifecycle,
           memoryChangedSink: () =>
             service.publishDesktopNotification(
               createRuntimeNotification({
@@ -1141,6 +1145,7 @@ export function createProductionRuntimeServices(
                   },
                 }
               : {}),
+            atomicMemoryLifecycle,
             memoryChangedSink: () =>
               service.publishDesktopNotification(
                 createRuntimeNotification({
@@ -1515,6 +1520,7 @@ export function createProductionRuntimeServices(
   };
   const desktopService: DesktopRuntimeService = new DesktopRuntimeService({
     runtimeService: service,
+    memoryLifecycle: atomicMemoryLifecycle,
     initializeDefaultProvider: true,
     registrationStore,
     trustStore,

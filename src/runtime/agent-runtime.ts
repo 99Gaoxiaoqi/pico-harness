@@ -1,3 +1,4 @@
+import { type AtomicMemoryLifecycle } from "./atomic-memory-lifecycle.js";
 import { createAgentSwarmStatusTool } from "../tools/agent-swarm-status-tool.js";
 import { AGENT_SWARM_SUPERVISOR_TOOL_NAMES } from "../agent-graph/core/tool-names.js";
 import { isPlanGraphWaiting, reconcilePlanExecution } from "./plan-execution-recovery.js";
@@ -358,6 +359,7 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   memoryTrustStore?: WorkspaceTrustStore;
   /** @deprecated Legacy worker injection is no longer used by production. Use atomicMemoryModelFactory. */
   memoryProposalModelFactory?: MemoryProposalModelFactory;
+  atomicMemoryLifecycle?: AtomicMemoryLifecycle;
   atomicMemoryModelFactory?: () => Promise<AtomicMemoryModelLease>;
   /** @deprecated Atomic memory has no debounce or durable worker queue. */
   memoryReviewDebounceMs?: number;
@@ -1391,6 +1393,9 @@ export async function executeAgentRuntime(
         picoHome,
         sessionId: session.id,
         gate: memoryAllowed,
+        ...(dependencies.atomicMemoryLifecycle
+          ? { lifecycle: dependencies.atomicMemoryLifecycle }
+          : {}),
         supported: true,
         ...(dependencies.memoryChangedSink ? { onChanged: dependencies.memoryChangedSink } : {}),
         modelFactory:

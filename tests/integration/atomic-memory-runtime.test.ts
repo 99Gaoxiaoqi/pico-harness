@@ -1,3 +1,4 @@
+import { AtomicMemoryLifecycle } from "../../src/runtime/atomic-memory-lifecycle.js";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -259,7 +260,12 @@ test("atomic compaction persists its covered boundary and records disabled-polic
     });
     assert.ok(checkpoint);
     let calls = 0;
+    const lifecycle = new AtomicMemoryLifecycle(() => {
+      throw new Error("draining compaction must not acquire residency");
+    });
+    lifecycle.beginDrain();
     const runtime = new AtomicMemoryRuntime({
+      lifecycle,
       workDir,
       picoHome,
       sessionId,
@@ -271,7 +277,8 @@ test("atomic compaction persists its covered boundary and records disabled-polic
       },
     });
     await runtime.checkpoint(checkpoint.checkpointId);
-    await runtime.drain();
+    await lifecycle.close();
+    assert.deepEqual(await runtime.requestExtract(), { status: "unavailable" });
     assert.equal(calls, 0);
     const paths = resolvePicoPaths(workDir, { picoHome });
     const store = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"));
