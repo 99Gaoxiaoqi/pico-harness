@@ -49,6 +49,8 @@ export interface ProviderCallLedger {
 }
 
 export interface CostTrackerOptions {
+  /** Independent background calls must not append events to an inherited foreground run. */
+  recordRuntimeEvents?: boolean;
   ledger?: ProviderCallLedger;
   /** 每次请求前求值，使 conversation / goal 热切换后仍归入真实上下文。 */
   context?: ProviderCallContext | (() => ProviderCallContext);
@@ -248,6 +250,7 @@ export class CostTracker implements LLMProvider {
 
   /** Durable Session calls must already be enclosed by the host's canonical RuntimeRun. */
   private requireMatchingRuntimeRun() {
+    if (this.options.recordRuntimeEvents === false) return undefined;
     const runtimeRun = currentRuntimeRun();
     if (!this.session?.runtimeEventStore) return runtimeRun;
     if (
