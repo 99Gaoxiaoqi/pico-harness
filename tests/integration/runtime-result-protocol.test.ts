@@ -103,7 +103,7 @@ test("session continuity accepts projected tool identity metadata", () => {
     nextSequence: 1,
     watermark: {
       historyEpoch: "history-1",
-      projectorVersion: 3,
+      projectorVersion: 4,
       throughSequence: 1,
     },
     durableTail: [

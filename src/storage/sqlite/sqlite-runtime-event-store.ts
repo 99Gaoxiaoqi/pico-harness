@@ -2274,29 +2274,30 @@ export class SqliteRuntimeEventStore {
       start.data.presentation.source === "agent_graph_control";
     const durable = this.lease.database
       .prepare(
-        `SELECT MAX(hides_user_input) AS hides_user_input FROM (
-             SELECT root_session_id AS session_id, root_run_id AS run_id, 0 AS hides_user_input
+        `SELECT MAX(hides_user_input) AS hides_user_input, MAX(is_operator) AS is_operator FROM (
+             SELECT root_session_id AS session_id, root_run_id AS run_id, 0 AS hides_user_input, 0 AS is_operator
              FROM agent_graph_yield_interests
              UNION ALL
-             SELECT root_session_id AS session_id, target_run_id AS run_id, 1 AS hides_user_input
+             SELECT root_session_id AS session_id, target_run_id AS run_id, 1 AS hides_user_input, 0 AS is_operator
              FROM agent_graph_supervisor_wake_attempts
              UNION ALL
-             SELECT target_session_id AS session_id, target_run_id AS run_id, 1 AS hides_user_input
+             SELECT target_session_id AS session_id, target_run_id AS run_id, 1 AS hides_user_input, 1 AS is_operator
              FROM agent_graph_activation_claims
              UNION ALL
-             SELECT source_session_id AS session_id, source_run_id AS run_id, 0 AS hides_user_input
+             SELECT source_session_id AS session_id, source_run_id AS run_id, 0 AS hides_user_input, 0 AS is_operator
              FROM agent_graph_schedule_revisions
            ) WHERE session_id = ? AND run_id = ?`,
       )
-      .get(sessionId, runId) as { hides_user_input: number | null };
+      .get(sessionId, runId) as { hides_user_input: number | null; is_operator: number | null };
     const presentation = {
-      internal: hasProvenance || durable.hides_user_input !== null,
+      internal: durable.is_operator !== 1 && (hasProvenance || durable.hides_user_input !== null),
+      operator: durable.is_operator === 1,
       hidesUserInput: durable.hides_user_input === 1,
     };
     // A missing durable Graph identity is not stable: older hosts may append the
     // run start before persisting the schedule/wake fact. Cache only positive
     // classifications so a later event can observe that newly durable identity.
-    if (presentation.internal) {
+    if (presentation.internal || presentation.operator) {
       this.agentGraphPresentationByRun.set(cacheKey, presentation);
     }
     return presentation;
@@ -3513,6 +3514,7 @@ type TranscriptItemMutation =
   | { readonly op: "remove"; readonly itemId: string };
 
 interface AgentGraphRunPresentation {
+  readonly operator?: boolean;
   readonly internal: boolean;
   readonly hidesUserInput: boolean;
 }
@@ -3539,6 +3541,24 @@ function transcriptMutationsForEvent(
   current: (itemId: string) => RuntimeTranscriptProjectedItem | undefined,
   currentByKind: (kind: string) => readonly RuntimeTranscriptProjectedItem[],
 ): readonly TranscriptItemMutation[] {
+  if (event.kind === "agent.output" && agentGraphPresentation.operator) {
+    const itemId = `agent-output:${event.eventId}`;
+    return [
+      {
+        op: "upsert",
+        itemId,
+        positionSequence: sequence,
+        positionOrdinal: 0,
+        payload: {
+          id: itemId,
+          kind: "assistantMessage",
+          content: event.data.payload.output,
+          runId: event.runId,
+          turnId: event.turnId,
+        },
+      },
+    ];
+  }
   if (event.kind === "message.committed") {
     const message = event.data.message;
     if (

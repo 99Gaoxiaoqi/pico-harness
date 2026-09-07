@@ -100,7 +100,10 @@ import {
 import { LocalDaemonHost } from "./runtime-host.js";
 import { canonicalizeWorkspacePath } from "./workspace-registry.js";
 import { WorkspaceRegistrationStore } from "./workspace-registration.js";
-import { WorkspaceRuntimeService } from "./workspace-runtime-service.js";
+import {
+  INTERRUPTED_DAEMON_RUN_ERROR,
+  WorkspaceRuntimeService,
+} from "./workspace-runtime-service.js";
 import { agentGraphLaunchStateFromWorkspaceRun } from "./agent-graph-launch-state.js";
 import { BrowserAgentCommandBroker } from "./browser-agent-command-broker.js";
 import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
@@ -1102,8 +1105,17 @@ export function createProductionRuntimeServices(
                     if (!rootContext) {
                       throw new Error("Graph root Run is missing its trusted supervisor context");
                     }
-                    if (orchestrationMode === "swarm")
+                    // A direct reply has no scheduled work to finish. Seal only this Run's
+                    // untouched epoch; populated Graphs still require explicit finish/yield.
+                    const openGraph =
+                      foregroundGraphRuntime.host.store.getOpenRootEpoch(targetSessionId);
+                    if (
+                      openGraph?.graphId === foregroundGraphRuntime.graph.graphId &&
+                      openGraph.epoch === foregroundGraphRuntime.graph.epoch &&
+                      openGraph.headRevision === 0
+                    ) {
                       foregroundGraphRuntime.host.application.sealEmptyRootEpoch(targetSessionId);
+                    }
                     assertAgentGraphRootRunSettled(foregroundGraphRuntime.host.store, {
                       graphId: foregroundGraphRuntime.graph.graphId,
                       rootSessionId: targetSessionId,
@@ -1413,6 +1425,15 @@ export function createProductionRuntimeServices(
     for (const intent of await service.listPlanReviewRunIntents(workspacePath, sessionId)) {
       const review = intent.input.execution?.planReview;
       if (!review) continue;
+      const existingRun = await service.getWorkspaceRun(workspacePath, intent.runId);
+      // Reading session metadata must not replay an already admitted review notification:
+      // plan.updated makes clients reopen the session and would feed back into this read.
+      if (
+        existingRun &&
+        !(existingRun.status === "failed" && existingRun.error === INTERRUPTED_DAEMON_RUN_ERROR)
+      ) {
+        continue;
+      }
       let projection = await agentRuntime.readPlanProjection({
         sessionId,
         dir: workspacePath,
@@ -1448,6 +1469,14 @@ export function createProductionRuntimeServices(
           ).projection;
         }
       } else if (review.action === "execute") {
+        if (
+          projection.execution?.planId === review.planId &&
+          projection.execution.revision === review.expectedRevision &&
+          (projection.execution.status === "completed" ||
+            projection.execution.status === "cancelled")
+        ) {
+          continue;
+        }
         const pendingMatches =
           projection.pendingProposal?.planId === review.planId &&
           projection.pendingProposal.revision === review.expectedRevision;
@@ -1497,6 +1526,54 @@ export function createProductionRuntimeServices(
     credentialVault,
     pluginRuntimeSnapshotRegistry,
     ownsPluginRuntimeSnapshotRegistry,
+    stopAgentGraph: async (workspacePath, rootSessionId, graph) => {
+      const host = requireAgentGraphWorkspaceHost(agentGraphHosts, workspacePath);
+      const reason = "用户停止 Graph";
+      const lease = await globalSessionManager.getOrCreatePinned(rootSessionId, workspacePath, {
+        persistence: true,
+        picoHome,
+        runtimePort: createEngineRuntimePort(),
+      });
+      try {
+        if (!lease.session.runtimeEventStore)
+          throw new Error("Graph stop requires durable storage");
+        const coordinator = new PlanCoordinator(lease.session.runtimeEventStore, {
+          sessionId: rootSessionId,
+          invocationId: `graph-stop:${graph.graphId}`,
+          runId: `graph-stop:${graph.graphId}`,
+          turnId: `graph-stop:${graph.graphId}`,
+          writeGuard: lease.session,
+          retireGraph: (binding, stopReason) =>
+            host.retireRootSession(rootSessionId, stopReason, binding),
+        });
+        const before = await coordinator.project();
+        const execution = before.execution;
+        if (
+          execution?.graph?.graphId === graph.graphId &&
+          execution.graph.epoch === graph.epoch &&
+          (execution.status === "active" || execution.status === "interrupted")
+        ) {
+          const projection = await coordinator.cancel({
+            operationId: `graph-stop:${graph.graphId}:${before.sessionSequence}`,
+            expectedSessionSequence: before.sessionSequence,
+            planId: execution.planId,
+            reason,
+          });
+          await lease.session.refreshRuntimeProjection();
+          publishDesktopPlanProjection(
+            service,
+            workspacePath,
+            projection,
+            "updated",
+            nextDesktopResourceVersion,
+          );
+        }
+        await host.retireRootSession(rootSessionId, reason, graph);
+        return host.store.getGraph(graph.graphId)?.phase === "finished";
+      } finally {
+        lease.release();
+      }
+    },
     retireAgentGraphRootSession: async (workspacePath, rootSessionId, reason) => {
       const host = agentGraphHosts.get(workspacePath);
       return host ? host.retireRootSession(rootSessionId, reason) : false;

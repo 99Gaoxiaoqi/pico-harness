@@ -1,0 +1,172 @@
+.conversation-graph-board {
+  width: min(100%, var(--conversation-content-width));
+  margin: 0 auto 8px;
+  border: 1px solid var(--conversation-line);
+  border-radius: 10px;
+  background: var(--conversation-bg);
+  font-size: 12px;
+}
+.conversation-graph-board button,
+.conversation-graph-board select {
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  border: 0;
+  border-radius: 7px;
+  background: var(--conversation-bg-subtle);
+  padding: 5px 9px;
+  white-space: nowrap;
+}
+.conversation-graph-board button:hover {
+  background: var(--conversation-line);
+}
+.conversation-graph-board button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.conversation-graph-board button:focus-visible,
+.conversation-graph-board select:focus-visible {
+  outline: 2px solid var(--conversation-focus);
+  outline-offset: 2px;
+}
+.conversation-graph-board__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  flex-wrap: wrap;
+}
+.conversation-graph-board .conversation-graph-board__heading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 1;
+  background: transparent;
+  padding: 2px 0;
+  text-align: left;
+  flex-wrap: wrap;
+}
+.conversation-graph-board__heading span,
+.conversation-graph-board__caption,
+.conversation-graph-board__state {
+  color: var(--conversation-ink-muted);
+  font-size: 11px;
+}
+.conversation-graph-board__actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.conversation-graph-board .conversation-graph-board__icon {
+  display: inline-flex;
+  padding: 5px;
+  background: transparent;
+}
+.conversation-graph-board__body {
+  padding: 0 10px 10px;
+  max-height: min(260px, 30vh);
+  overflow-y: auto;
+}
+.conversation-graph-board__caption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 5px;
+}
+.conversation-graph-board__caption button {
+  background: transparent;
+  padding: 2px;
+  font-size: 11px;
+}
+.conversation-graph-board ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 5px;
+}
+.conversation-graph-board li {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 6px;
+  background: var(--conversation-bg-subtle);
+  padding: 7px 8px;
+}
+.conversation-graph-board__task {
+  min-width: 0;
+  flex: 1;
+}
+.conversation-graph-board__task strong {
+  font-weight: 550;
+}
+.conversation-graph-board__task p {
+  margin: 3px 0 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+.conversation-graph-board__dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: #a1a1aa;
+}
+.conversation-graph-board li[data-state="completed"] .conversation-graph-board__dot {
+  background: #3da65a;
+}
+.conversation-graph-board li[data-state="running"] .conversation-graph-board__dot {
+  background: #4e91d1;
+}
+.conversation-graph-board li[data-state="failed"] .conversation-graph-board__dot,
+.conversation-graph-board li[data-state="interrupted"] .conversation-graph-board__dot {
+  background: #cd665a;
+}
+.conversation-graph-board li[data-state="waiting_permission"] .conversation-graph-board__dot {
+  background: #cf963d;
+}
+.conversation-graph-board__empty {
+  margin: 4px 0;
+  color: var(--conversation-ink-muted);
+  line-height: 1.6;
+}
+.conversation-graph-board__error {
+  margin: 0;
+  padding: 7px 10px;
+  color: var(--conversation-danger, #b14c40);
+}
+.conversation-graph-board__error button {
+  margin-left: 8px;
+}
+.conversation-graph-parent {
+  color: var(--conversation-ink-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+@media (max-width: 640px) {
+  .conversation-graph-board__actions {
+    margin-left: auto;
+  }
+  .conversation-graph-board li {
+    gap: 5px;
+  }
+  .conversation-graph-board li button {
+    padding: 5px;
+    font-size: 11px;
+  }
+}
+
+.conversation-graph-child-notice {
+  padding: 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--conversation-ink-muted);
+}
+.conversation-graph-child-notice a {
+  margin-left: 6px;
+  color: inherit;
+}

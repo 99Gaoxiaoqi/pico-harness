@@ -422,7 +422,19 @@ export function createAgentGraphWorkspaceHost(
               (entry) => entry.event.kind === "run.started" && !terminalRuns.has(entry.event.runId),
             )
             .at(-1);
-          if (liveRoot)
+          const finishedAt = store.getGraph(graph.graphId)?.finishedAt;
+          // A completed Graph may be retried after a later linear Run has started.
+          // Fence both the epoch and the root's durable Graph provenance/lifetime.
+          const belongsToGraph =
+            liveRoot?.event.kind === "run.started" &&
+            liveRoot.event.data.presentation?.source === "agent_graph_control" &&
+            Date.parse(liveRoot.event.at) >= graph.createdAt &&
+            (finishedAt === undefined || Date.parse(liveRoot.event.at) <= finishedAt);
+          if (
+            liveRoot &&
+            belongsToGraph &&
+            store.listGraphs(rootSessionId).at(-1)?.graphId === graph.graphId
+          )
             await options.requestStop({
               sessionId: rootSessionId,
               runId: liveRoot.event.runId,

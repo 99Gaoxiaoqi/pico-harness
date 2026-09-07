@@ -1,3 +1,4 @@
+import { agentOutputFingerprint } from "../../src/tools/agent-output-tool.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
@@ -543,7 +544,7 @@ test("lazy rebuild rotates history and requires bootstrap from the rebuilt head"
   }
 });
 
-test("projector v3 rebuild removes durable Graph control history but keeps same-name linear tools", async () => {
+test("projector v4 rebuild removes durable Graph control history but keeps same-name linear tools", async () => {
   const root = mkdtempSync(join(tmpdir(), "pico-transcript-graph-upgrade-"));
   const workspace = join(root, "workspace");
   const storage = join(root, "storage");
@@ -738,7 +739,7 @@ test("projector v3 rebuild removes durable Graph control history but keeps same-
 
     store = new SqliteRuntimeEventStore({ storageRoot: storage });
     const rebuilt = await store.readTranscriptProjectionPage({ sessionId, maxBytes: 64 * 1024 });
-    assert.equal(rebuilt.watermark.projectorVersion, 3);
+    assert.equal(rebuilt.watermark.projectorVersion, 4);
     assert.notEqual(rebuilt.watermark.historyEpoch, before.historyEpoch);
     const visible = JSON.stringify(rebuilt.items.map((item) => item.payload));
     assert.doesNotMatch(visible, /Graph Supervisor wake/u);
@@ -1009,6 +1010,133 @@ test("durable finals atomically replace matching assistant and tool partial over
     );
   } finally {
     store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Graph child transcript exposes tools and formal output after upgrading an empty v3 projection", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pico-graph-child-transcript-"));
+  const storage = join(root, "storage");
+  const workspace = join(root, "workspace");
+  mkdirSync(workspace);
+  let store = new SqliteRuntimeEventStore({ storageRoot: storage });
+  const graph = new SqliteAgentGraphControlStore({ storageRoot: storage });
+  const sessionId = "child-session";
+  try {
+    await store.initializeSession({ sessionId, workDir: workspace });
+    graph.createGraph({ graphId: "child-graph", rootSessionId: "parent", epoch: 1 });
+    graph.commitScheduleRevision({
+      graphId: "child-graph",
+      expectedRevision: 0,
+      operationId: "add",
+      requestFingerprint: "add",
+      kind: "add",
+      command: { kind: "add" },
+      sourceSessionId: "parent",
+      sourceTurnId: "parent-turn",
+      sourceRunId: "parent-run",
+      sourceToolCallId: "parent-tool",
+    });
+    graph.ensureOperatorProvision({
+      provisionId: "provision",
+      graphId: "child-graph",
+      operatorId: "a",
+      generation: 1,
+      scheduleRevision: 1,
+      provisionFingerprint: "provision",
+      childSessionId: sessionId,
+      profileSnapshot: {},
+      workspaceBinding: { kind: "shared" },
+    });
+    graph.transitionOperatorProvision({
+      provisionId: "provision",
+      expectedVersion: 1,
+      from: "requested",
+      to: "provisioned",
+    });
+    graph.claimActivation({
+      claimId: "claim",
+      graphId: "child-graph",
+      intentId: "intent",
+      operatorId: "a",
+      operatorGeneration: 1,
+      expectedGraphRevision: 1,
+      intentFingerprint: "intent",
+      readinessFingerprint: "ready",
+      targetSessionId: sessionId,
+      targetTurnId: "turn-1",
+      targetRunId: "run-1",
+      targetInvocationId: "inv-1",
+      runStartedEventId: "start",
+    });
+    await store.append(started("start", sessionId, workspace));
+    await store.append(message("input", sessionId, "user", "hidden operator control input"));
+    await store.append(
+      transcriptToolStarted(
+        "read-start",
+        sessionId,
+        "run-1",
+        "turn-1",
+        "read",
+        "provider-read",
+        "read_file",
+        1,
+      ),
+    );
+    await store.append(toolResult("read-result", sessionId, "provider-read", "read_file", "run-1"));
+    const output = "子任务结果：CUA_BRANCH_A_17";
+    const idempotencyKey = `agent-output:${"a".repeat(64)}`;
+    const fingerprint = agentOutputFingerprint({
+      status: "success",
+      output,
+      evidenceRefs: [],
+      artifactRefs: [],
+    });
+    await store.append({
+      ...eventBase("formal-output", sessionId),
+      partial: false,
+      kind: "agent.output",
+      visibility: "internal",
+      refs: { toolCallId: "output-tool" },
+      data: {
+        toolCallId: "output-tool",
+        idempotencyKey,
+        fingerprint,
+        payload: {
+          schemaVersion: "pico.agent_output.v1",
+          graphId: "child-graph",
+          operatorId: "a",
+          operatorGeneration: 1,
+          activationId: "claim",
+          status: "success",
+          output,
+          outputBytes: Buffer.byteLength(output),
+          evidenceRefs: [],
+          artifactRefs: [],
+          idempotencyKey,
+          fingerprint,
+        },
+      },
+    });
+    const before = await store.readTranscriptWatermark(sessionId);
+    store.close();
+    const db = new DatabaseSync(operationalDatabasePath(storage));
+    db.prepare(
+      "UPDATE runtime_transcript_projection_state SET projector_version = 3 WHERE session_id = ?",
+    ).run(sessionId);
+    db.prepare("DELETE FROM runtime_transcript_item_versions WHERE session_id = ?").run(sessionId);
+    db.close();
+    store = new SqliteRuntimeEventStore({ storageRoot: storage });
+    const page = await store.readTranscriptProjectionPage({ sessionId, maxBytes: 64 * 1024 });
+    assert.notEqual(page.watermark.historyEpoch, before.historyEpoch);
+    assert.equal(page.watermark.projectorVersion, 4);
+    const serialized = JSON.stringify(page.items);
+    assert.match(serialized, /read_file/u);
+    assert.match(serialized, /子任务结果：CUA_BRANCH_A_17/u);
+    assert.doesNotMatch(serialized, /hidden operator control input/u);
+  } finally {
+    store.close();
+    graph.close();
     rmSync(root, { recursive: true, force: true });
   }
 });

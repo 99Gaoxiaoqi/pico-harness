@@ -9,7 +9,6 @@ import {
   WORKBAR_TOOL_REGISTRY,
   createWorkbarState,
   createWorkbarToolTab,
-  graphModeWorkbarAction,
   loadWorkbarState,
   isWorkbarPanelActive,
   parseWorkbarState,
@@ -60,15 +59,16 @@ test("Workbar Registry resolves the configured global shortcuts", () => {
   assert.equal(shortcut("p", { ctrlKey: true, shiftKey: true }), undefined);
 });
 
-test("Graph mode opens and selects the Graph panel in the right Dock", () => {
-  const action = graphModeWorkbarAction("graph");
-  assert.ok(action);
-  const state = reduceWorkbarState(createWorkbarState(), action);
+test("Graph details can be explicitly opened in the right Dock", () => {
+  const state = reduceWorkbarState(createWorkbarState(), {
+    type: "open",
+    tab: createWorkbarToolTab("graph"),
+    dock: "right",
+  });
 
   assert.equal(state.docks.right.collapsed, false);
   assert.equal(state.docks.right.activeTabId, "graph");
   assert.deepEqual(state.docks.right.tabs, [createWorkbarToolTab("graph")]);
-  assert.equal(graphModeWorkbarAction("default"), undefined);
 });
 
 test("Workbar exposes a strict active gate for mounted domain panels", () => {
