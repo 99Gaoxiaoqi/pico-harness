@@ -38,6 +38,7 @@ export class ProviderAtomicMemoryModel implements MemoryExtractionModel {
     const response = await this.provider.generate(messages, tools, {
       ...(request.signal ? { signal: request.signal } : {}),
       timeoutMs: 60_000,
+      purpose: "memory_review",
       ...(tools.length ? { toolChoice: "none" as const } : {}),
     });
     if (response.toolCalls?.length) throw new Error("memory_model_returned_tools");
