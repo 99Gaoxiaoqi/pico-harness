@@ -111,23 +111,27 @@ test("usage parser preserves global token and CNY cost semantics", () => {
   assert.equal(parsed.unavailableWorkspaceCount, 1);
 });
 
-test("usage settings expose an accessible time filter and never display dollars", async () => {
+test("usage settings expose an accessible time filter and CNY cost summaries", async () => {
   const app = await rendererSource("App.tsx");
-  const page = sourceSection(app, "function UsagePage", "function SettingsPage");
-  assert.match(page, /role="group"/u);
-  assert.match(page, /aria-pressed=\{period === value\}/u);
+  const host = sourceSection(app, "function UsagePage", "function SettingsPage");
+  const page = await rendererSource("usage/UsageSettingsPage.tsx");
+  assert.match(host, /<UsageSettingsPage/u);
+  assert.match(host, /onQuery=\{query\}/u);
+  assert.match(page, /role="group" aria-label="统计时间范围"/u);
+  assert.match(page, /aria-pressed=\{range === item.id\}/u);
   assert.match(page, /24 小时/u);
-  assert.match(page, /全部任务/u);
-  assert.match(page, /总 Tokens/u);
-  assert.match(page, /推理 Tokens/u);
-  assert.match(app, /`¥\$\{costCNY\.toFixed\(2\)\}`/u);
-  assert.doesNotMatch(page, /\$\$\{/u);
-  assert.match(page, /未显示虚假的 ¥0\.00/u);
-  assert.match(page, /usageRequestSequence/u);
-  assert.match(page, /requestSequence !== usageRequestSequence\.current/u);
-  assert.match(page, /无法确认这个范围是否为空/u);
-  assert.match(page, /totalRecords === 0[\s\S]+usage\.unavailableWorkspaceCount/u);
-  assert.match(page, /历史基线只保留 Token 与费用总数/u);
+  assert.match(page, /总 Token/u);
+  assert.match(page, /¥\$\{value.toLocaleString/u);
+  assert.match(page, /status === "unknown"\) return "未知"/u);
+  const summary = sourceSection(page, '<div className="usage-summary"', "{details && (");
+  assert.match(
+    summary,
+    /title="估算费用 · CNY" value=\{cost\(usage.costCNY, usage.costStatus\)\}/u,
+  );
+  assert.doesNotMatch(summary, /\$\$\{/u);
+  assert.match(host, /request !== sequence.current/u);
+  assert.match(page, /usage\.unavailableWorkspaceCount/u);
+  assert.match(page, /这些记录没有逐次调用明细/u);
 });
 
 test("changing the default model preserves every independent default axis", async () => {

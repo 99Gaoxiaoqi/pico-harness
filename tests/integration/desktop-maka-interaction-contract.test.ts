@@ -200,11 +200,23 @@ test("persisted approvals recover the interaction slot and disappear after termi
   );
   assert.match(appSource, /persistedPendingApproval/u);
   assert.match(appSource, /omitApprovalAuditItems/u);
-  assert.match(appSource, /item\.id\.startsWith\("approval:"\)/u);
   assert.match(
     appSource,
-    /Boolean\(activeRun\)[\s\S]*?item\.kind === "approval" \|\| item\.kind === "prompt"[\s\S]*?item\.state === "pending"/u,
+    /activeRun\s*\? pendingToolApprovalFromTranscript\(conversation\?\.items \?\? \[\]\)\s*:\s*undefined/u,
   );
+  const runtimeSource = await readFile(
+    new URL("../../apps/desktop/src/renderer/runtime.ts", import.meta.url),
+    "utf8",
+  );
+  const helper = runtimeSource.slice(
+    runtimeSource.indexOf("export function pendingToolApprovalFromTranscript"),
+    runtimeSource.indexOf(
+      "export function",
+      runtimeSource.indexOf("export function pendingToolApprovalFromTranscript") + 1,
+    ),
+  );
+  assert.match(helper, /item\.id\.startsWith\("approval:"\)/u);
+  assert.match(helper, /item\.state === "pending"/u);
 });
 
 test("a recovered continuity replica clears a transient conversation load error", async () => {
