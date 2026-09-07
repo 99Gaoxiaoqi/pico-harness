@@ -101,6 +101,20 @@ export interface SqliteMemoryItemStoreOptions {
   readonly migrationFailpoint?: (point: SqliteLongTermMemoryMigrationFailpoint) => void;
 }
 
+export interface LegacyMemoryMigrationInput {
+  readonly workspaceKey: string;
+  readonly reportJson: string;
+  readonly settings: Pick<AtomicMemorySettings, "enabled" | "autoExtract" | "recallEnabled">;
+  readonly items: readonly {
+    readonly operationId: string;
+    readonly item: MemoryItemWrite;
+    readonly archived: boolean;
+    readonly originJson: string;
+    readonly sourceEvents?: readonly { readonly sessionId: string; readonly eventId: string }[];
+  }[];
+  readonly suppressedEvents: readonly { readonly sessionId: string; readonly eventId: string }[];
+}
+
 interface NormalizedMemoryWrite {
   readonly content: string;
   readonly kind: MemoryItem["kind"];
@@ -897,6 +911,139 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
     });
   }
 
+  async readLegacyMigration(workspaceKey: string): Promise<string | undefined> {
+    this.#assertOpen();
+    const row = this.#database
+      .prepare("SELECT report_json FROM memory_workspace_migrations WHERE workspace_key = ?")
+      .get(normalizeIdentifier(workspaceKey, "workspaceKey")) as
+      | { report_json: string }
+      | undefined;
+    return row?.report_json;
+  }
+
+  async readMigrationOrigin(itemId: string): Promise<string | undefined> {
+    this.#assertOpen();
+    const row = this.#database
+      .prepare("SELECT origin_json FROM memory_migration_origins WHERE item_id = ?")
+      .get(normalizeIdentifier(itemId, "itemId")) as { origin_json: string } | undefined;
+    return row?.origin_json;
+  }
+
+  /** One new-database transaction owns the entire migration and its completion marker. */
+  async commitLegacyMigration(input: LegacyMemoryMigrationInput): Promise<string> {
+    this.#assertOpen();
+    const workspaceKey = normalizeIdentifier(input.workspaceKey, "workspaceKey");
+    const now = normalizeTimestamp((this.#options.now ?? Date.now)(), "current time");
+    const items = input.items.map((entry) => ({
+      ...entry,
+      operationId: normalizeIdentifier(entry.operationId, "operationId"),
+      item: normalizeWrite(entry.item),
+    }));
+    const suppressed = input.suppressedEvents.map((entry) => ({
+      sessionId: normalizeIdentifier(entry.sessionId, "sessionId"),
+      eventId: normalizeIdentifier(entry.eventId, "eventId"),
+    }));
+    JSON.parse(input.reportJson);
+    for (const value of Object.values(input.settings))
+      if (typeof value !== "boolean") throw new Error("Migration settings must be boolean");
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const prior = this.#database
+        .prepare("SELECT report_json FROM memory_workspace_migrations WHERE workspace_key = ?")
+        .get(workspaceKey) as { report_json: string } | undefined;
+      if (prior) {
+        this.#database.exec("COMMIT");
+        return prior.report_json;
+      }
+      for (const entry of items) {
+        if (
+          entry.item.origin !== "user_requested" ||
+          entry.item.sources.length !== 0 ||
+          entry.item.scopeType !== "workspace" ||
+          entry.item.scopeKey !== workspaceKey
+        )
+          throw new Error("Legacy migration must use a workspace manual overlay");
+        JSON.parse(entry.originJson);
+        const requestHash = hashCanonical({
+          item: entry.item,
+          archived: entry.archived,
+          originJson: entry.originJson,
+          sourceEvents: entry.sourceEvents ?? [],
+        });
+        this.#assertNotForgetOperation(entry.operationId);
+        const existing = this.#readOperationRow(entry.operationId);
+        if (existing) {
+          if (existing.request_hash !== requestHash)
+            throw new MemoryItemStoreConflictError(
+              "operation_reused",
+              "Legacy migration operation was reused",
+            );
+          continue;
+        }
+        const created = this.#createItem(entry.item, 0, now);
+        const results: MemoryMutationResult[] = [created];
+        if (entry.archived)
+          results.push(
+            this.#changeLifecycle(
+              { type: "archive", itemId: created.itemId, expectedVersion: 1 },
+              1,
+              now,
+              "archived",
+            ),
+          );
+        this.#database
+          .prepare("INSERT INTO memory_migration_origins(item_id, origin_json) VALUES (?, ?)")
+          .run(created.itemId, entry.originJson);
+        for (const event of entry.sourceEvents ?? []) {
+          const identity = {
+            sessionId: normalizeIdentifier(event.sessionId, "sessionId"),
+            eventId: normalizeIdentifier(event.eventId, "eventId"),
+          };
+          this.#database
+            .prepare(
+              "INSERT OR IGNORE INTO memory_migration_source_events(item_id, evidence_hash) VALUES (?, ?)",
+            )
+            .run(created.itemId, hashCanonical(identity));
+        }
+        this.#options.failpoint?.("before_operation_write");
+        this.#database
+          .prepare(
+            `INSERT INTO memory_write_operations(operation_id, operation_type, request_hash, result_json, committed_at) VALUES (?, 'batch', ?, ?, ?)`,
+          )
+          .run(entry.operationId, requestHash, JSON.stringify(results), now);
+      }
+      for (const entry of suppressed)
+        this.#database
+          .prepare("INSERT OR IGNORE INTO memory_suppressed_events(evidence_hash) VALUES (?)")
+          .run(hashCanonical(entry));
+      // All users must migrate before opening the new store. Do not silently replace
+      // an already edited atomic setting if a caller violated that ordering.
+      const settings = input.settings;
+      this.#database
+        .prepare(
+          `INSERT INTO memory_settings(workspace_key, version, enabled, auto_extract, recall_enabled) VALUES (?, 1, ?, ?, ?)
+        ON CONFLICT(workspace_key) DO NOTHING`,
+        )
+        .run(
+          workspaceKey,
+          Number(settings.enabled),
+          Number(settings.autoExtract),
+          Number(settings.recallEnabled),
+        );
+      this.#database
+        .prepare(
+          "INSERT INTO memory_workspace_migrations(workspace_key, report_json) VALUES (?, ?)",
+        )
+        .run(workspaceKey, input.reportJson);
+      this.#database.exec("COMMIT");
+      this.#options.failpoint?.("after_commit");
+      return input.reportJson;
+    } catch (error) {
+      rollback(this.#database);
+      throw error;
+    }
+  }
+
   async listItems(input: {
     workspaceKey: string;
     includeArchived?: boolean;
@@ -1001,6 +1148,12 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
   }
 
   #sourceSuppressed(source: MemoryItemSource): boolean {
+    if (
+      this.#database
+        .prepare("SELECT 1 FROM memory_suppressed_events WHERE evidence_hash = ?")
+        .get(hashCanonical({ sessionId: source.sessionId, eventId: source.eventId }))
+    )
+      return true;
     return (
       this.#database
         .prepare("SELECT 1 FROM memory_forgotten_sources WHERE source_hash = ?")
@@ -1068,6 +1221,9 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
         .all(itemId) as unknown as MemorySourceRow[];
       for (const source of history) {
         this.#database
+          .prepare("INSERT OR IGNORE INTO memory_suppressed_events(evidence_hash) VALUES (?)")
+          .run(hashCanonical({ sessionId: source.session_id, eventId: source.event_id }));
+        this.#database
           .prepare("INSERT OR IGNORE INTO memory_forgotten_sources(source_hash) VALUES (?)")
           .run(hashCanonical(decodeSource(source)));
       }
@@ -1092,6 +1248,12 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
           .prepare("UPDATE memory_extraction_receipts SET result_json = ? WHERE operation_id = ?")
           .run(JSON.stringify(redacted), receipt.operationId);
       }
+      this.#database
+        .prepare(
+          `INSERT OR IGNORE INTO memory_suppressed_events(evidence_hash)
+        SELECT evidence_hash FROM memory_migration_source_events WHERE item_id = ?`,
+        )
+        .run(itemId);
       this.#database.prepare("DELETE FROM memory_items WHERE item_id = ?").run(itemId);
       this.#options.failpoint?.("after_item_write");
       this.#options.failpoint?.("before_operation_write");
