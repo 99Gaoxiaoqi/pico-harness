@@ -991,7 +991,8 @@ test("client commands: running-class behaviors gate on availability and map sess
   const beforeSwarm = harness.requests.length;
   const swarmStatus = await processClientInput("/swarm status", harness.registry, harness.runtime);
   assert.equal(swarmStatus.kind, "local");
-  if (swarmStatus.kind === "local") assert.match(String(swarmStatus.result?.message), /Swarm Mode/u);
+  if (swarmStatus.kind === "local")
+    assert.match(String(swarmStatus.result?.message), /Swarm Mode/u);
   for (const command of ["/swarm on", "/swarm off", "/swarm Do work"]) {
     const blocked = await processClientInput(command, harness.registry, harness.runtime);
     assert.equal(blocked.kind, "local");

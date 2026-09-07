@@ -1,6 +1,7 @@
 // Generated from models.dev MIT data; Copyright (c) 2025 models.dev.
 // See resources/licenses/models-dev.txt. SHA-256: d314f08cb65d0d891f7dfd7638bcdd0cc62179411efbdd4130e305812490f1b0
 // Regenerate: node scripts/sync-model-pricing.mjs (offline); add --refresh to update.
+// prettier-ignore
 export const MODEL_PRICING = [
   {
     "provider": "anthropic",

@@ -31,7 +31,9 @@ test("global new task stays unbound until first send without inheriting a projec
   assert.match(submit, /workspacePath: targetWorkspacePath/u);
   assert.match(submit, /temporaryPathRef\.current = targetWorkspacePath/u);
   assert.match(submit, /sendRouteRef\.current !== sourceDraftKey/u);
-  assert.ok(submit.indexOf("if (!result.succeeded)") < submit.indexOf("clearDraft()"));
+  const sendResult = submit.slice(submit.indexOf("const result = await actions.sendMessage({"));
+  assert.ok(sendResult.indexOf("if (!result.succeeded)") >= 0);
+  assert.ok(sendResult.indexOf("if (!result.succeeded)") < sendResult.indexOf("clearDraft()"));
   assert.match(
     submit,
     /finally \{[\s\S]*?firstSendSourceRef\.current = undefined;[\s\S]*?setAwaitingFirstSession\(false\)/u,

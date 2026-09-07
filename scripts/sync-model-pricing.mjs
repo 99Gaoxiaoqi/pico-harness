@@ -67,7 +67,7 @@ for (const row of snapshot.rows) {
 }
 const payload = JSON.stringify(snapshot.rows);
 const hash = createHash("sha256").update(payload).digest("hex");
-const output = `// Generated from models.dev MIT data; Copyright (c) 2025 models.dev.\n// See resources/licenses/models-dev.txt. SHA-256: ${hash}\n// Regenerate: node scripts/sync-model-pricing.mjs (offline); add --refresh to update.\nexport const MODEL_PRICING = ${JSON.stringify(snapshot.rows, null, 2)};\n`;
+const output = `// Generated from models.dev MIT data; Copyright (c) 2025 models.dev.\n// See resources/licenses/models-dev.txt. SHA-256: ${hash}\n// Regenerate: node scripts/sync-model-pricing.mjs (offline); add --refresh to update.\n// prettier-ignore\nexport const MODEL_PRICING = ${JSON.stringify(snapshot.rows, null, 2)};\n`;
 if (process.argv.includes("--refresh"))
   await writeFile(snapshotPath, JSON.stringify(snapshot, null, 2) + "\n");
 await writeFile(target, output);
