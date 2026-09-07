@@ -179,3 +179,39 @@ T0 契约
 - [ ] T0–T3：Maka 原子核心复刻完成。
 - [ ] T4–T5：Pico 产品闭环补齐。
 - [ ] T6–T7：迁移切换与最终验证完成。
+
+## 6. 实现落点与验收记录（2026-09-07）
+
+T0–T7 已在独立分支 `codex/atomic-memory-integration-20260907` 实现；基线为本地 `main` 的 `f7fd6e69`。原工作区已有 Graph 改动，未暂存、提交、覆盖或迁移这些用户改动。生产用户数据未执行迁移；测试全部使用临时数据库，正式迁移在新版本首次访问受信工作区记忆时运行。
+
+| 任务 | 实现落点                                                                                           | 结果                                                                                                     |
+| ---- | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| T0   | `src/memory/atomic/contracts.ts`、`runtime-contracts.ts`、Protocol 的可选 `fact.atomic` 元数据     | 原子条目、来源、覆盖游标、回执及状态机契约落地；旧 wire envelope 用于客户端过渡                          |
+| T1   | `src/storage/sqlite/sqlite-memory-item-store.ts`、`atomic-memory-schema.ts`                        | 独立 `memory.sqlite`；事务、CAS、重放、失败恢复与来源抑制                                                |
+| T2   | `src/memory/atomic/extraction-*`                                                                   | 用户事件原文证据；独立 canonicalization；每覆盖段最多 3 次模型调用；下一触发重试 pending，失败后 discard |
+| T3   | `src/runtime/atomic-memory-runtime.ts`、`src/memory/atomic/session-lane.ts`、Engine/Executor hooks | 同步 remember 独占工具步骤；extract 成功终态后触发；压缩落盘后触发；前台优先、不抢占已运行后台工作       |
+| T4   | `src/memory/atomic/context-builder.ts`                                                             | exact/prefix 关键词与路径召回；当前 workspace + global；最多 3 条/320 token，包含低信任包装              |
+| T5   | `src/daemon/desktop-atomic-memory-service.ts`、`MemoryPage.tsx`、`memory-command.ts`               | 已保存/归档、正文编辑、来源与范围展示、恢复、遗忘、开关及本地命令                                        |
+| T6   | `src/memory/atomic/migration.ts`、新库迁移 marker/provenance                                       | 只读旧库；长正文按原子上限分块并保留迁移来源；pending 留在旧库；forgotten 仅迁移无正文抑制；双进程幂等   |
+
+生产 AgentRuntime、Desktop 默认管理服务和 `/memory` 已切换为新库。旧 Proposal/Worker/Repository 留作兼容数据及隔离回归，生产不再启动旧 worker、预算扫描或终态恢复扫描；不会自动 fallback 到旧库。旧审批列表为空，审批操作明确拒绝。
+
+范围边界：Responses Provider 不注册提取工具；不提供向量检索、模型记忆搜索/删除工具、跨操作语义去重或持久后台任务队列。归档停止召回；遗忘清除新库当前正文/keys/回执中的正文，并保留来源抑制。原始会话事件和保全的旧数据库仍存在，未宣称执行磁盘介质擦除。
+
+已完成的确定性验证：
+
+- 68 条相关集成测试全部通过、无跳过：`atomic-memory-*`、`desktop-atomic-memory-service`、`desktop-memory-ui`、`memory-runtime`、`compaction-rolling-digest`、`runtime-tool-result-contract`、`desktop-memory-service`。
+- `npm run typecheck`、`npm run desktop:typecheck`、`npm run build` 通过。
+- 本分支所有变更 TS/TSX 文件 ESLint、`git diff --check`、`node scripts/check-architecture-boundaries.mjs` 通过。
+- 额外定位并修复：持久边界 turn ID 与模型内存步骤 ID 不同步；关闭记忆时压缩拒绝记录被 Host 提前返回绕过；后台计费晚于前台终态时继承运行上下文。
+- 迁移验证旧库字节不变、双进程只导入一次、事务失败整体回滚；没有操作实际用户记忆库。
+
+真实模型使用 `deepseek/deepseek-v4-flash`（OpenAI 兼容 Provider），实际设置 `RUN_LLM_E2E=1`：
+
+- `tests/e2e/atomic-memory-behavior.real-llm.test.ts`：真实提取、助手虚构信息过滤、secret 前置拒绝通过，34.35 秒。
+- `tests/e2e/memory-behavior.real-llm.test.ts` 中 `atomic production runtime remembers...`：最终计费形态下，真实 remember → 新 Session 召回 → 遗忘 → 原 Session 终态重派不复活 → 第三个 Session 无记忆回答 UNKNOWN，通过，13.09 秒。问题明确限定消费已注入记忆，不检查文件、不调用工具。
+- 未运行整个真实模型测试套件，也未把旧 Proposal 质量测试的跳过视为通过。
+
+保留失败事实：中间一次完整 Runtime 复跑出现 `remember retry_later`，未复现、根因未确证；另一次主模型在无工具时输出 DSML 伪工具调用（未执行），明确上述测试任务边界后最终场景通过。这不等于通用模型波动已修复；失败仍由 3 次调用上限、pending/discard 和 unavailable 回执控制，不会伪报保存成功。测试已增加仅针对合成 canary 的辅助 stage/响应诊断，不输出配置或凭证。
+
+来源许可证：保留 Maka 源文件 Apache 头部，并在 `resources/licenses/maka/` 附完整 LICENSE/NOTICE，第三方声明记录上游 revision 和 Pico 的适配范围。
