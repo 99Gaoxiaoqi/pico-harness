@@ -340,7 +340,7 @@ export type MemoryItemStoreConflictReason =
   | "invalid_lifecycle_transition";
 
 export class MemoryItemStoreConflictError extends Error {
-  readonly name = "MemoryItemStoreConflictError";
+  override readonly name = "MemoryItemStoreConflictError";
 
   constructor(
     readonly reason: MemoryItemStoreConflictReason,
