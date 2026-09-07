@@ -167,10 +167,6 @@ import {
   type PrestartedRuntimeUserInput,
   type RuntimeRunExecutorInput,
 } from "./runtime-run-executor.js";
-import {
-  invalidateMemoryReviewRecoverySuccess,
-  recoverMemoryReviewJobs,
-} from "./memory-review-recovery.js";
 import { createEngineRuntimePort } from "./engine-runtime-port-adapter.js";
 import { createSessionForkRuntimePort } from "./session-fork-runtime-port-adapter.js";
 
@@ -188,20 +184,17 @@ import type {
   RuntimeExecution,
   RuntimeLifecycleEvent,
 } from "./runtime-contract.js";
-import { MemoryContextBuilder } from "../memory/context-builder.js";
-import { buildMemoryTriggerTools, type MemoryTriggerSlot } from "../memory/memory-trigger-tools.js";
-import { SqliteMemoryRepository } from "../storage/sqlite/sqlite-memory-repository.js";
+import { AtomicMemoryContextBuilder } from "../memory/atomic/context-builder.js";
+import { ensureAtomicMemoryWorkspace } from "../memory/atomic/migration.js";
+import { buildMemoryTriggerTools } from "../memory/memory-trigger-tools.js";
+import { SqliteMemoryItemStore } from "../storage/sqlite/sqlite-memory-item-store.js";
 import {
-  MemoryReviewScheduler,
-  type MemoryReviewSchedulerPort,
-} from "../memory/runtime-scheduler.js";
-import {
-  kickMemoryReviewWorker,
-  MemoryReviewWorker,
-  ProviderMemoryProposalModel,
-  type MemoryProposalModelFactory,
-  type MemoryProposalPublishedSink,
-} from "../memory/worker.js";
+  AtomicMemoryRuntime,
+  ProviderAtomicMemoryModel,
+  atomicMemoryDatabasePath,
+  type AtomicMemoryModelLease,
+} from "./atomic-memory-runtime.js";
+import type { MemoryProposalModelFactory, MemoryProposalPublishedSink } from "../memory/worker.js";
 export type {
   RunAgentCliOptions,
   RunAgentCliResult,
@@ -250,6 +243,7 @@ export interface RuntimeHost {
   onEvent?: (event: RuntimeLifecycleEvent) => void;
   /** Metadata-only observer for newly committed pending memory proposals. */
   memoryProposalSink?: MemoryProposalPublishedSink;
+  memoryChangedSink?: () => void;
   /** Metadata-only signal emitted after a Session Workbar authority changes. */
   sessionResourceChangedSink?: (notice: RuntimeSessionResourceChangedNotice) => void;
   /** Structured fail-closed safety/permission denial observer for non-interactive hosts. */
@@ -364,6 +358,7 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   memoryTrustStore?: WorkspaceTrustStore;
   /** Long-lived hosts with injected providers supply a fresh, self-owned worker model per claim. */
   memoryProposalModelFactory?: MemoryProposalModelFactory;
+  atomicMemoryModelFactory?: () => Promise<AtomicMemoryModelLease>;
   /** Test/host override; production automatic reviews wait for a short workspace debounce. */
   memoryReviewDebounceMs?: number;
   /** @internal Ignore project/user extension catalogs and host compatibility resources. */
@@ -913,11 +908,9 @@ export async function executeAgentRuntime(
   let ownedUsageStore: SqliteRuntimeControlStore | undefined;
   let ownsMcpManager = false;
   let cleanupMcpManager: McpConnectionManager | undefined;
-  let memoryRepository: SqliteMemoryRepository | undefined;
-  let memoryContextBuilder: MemoryContextBuilder | undefined;
-  let memoryReviewScheduler: MemoryReviewSchedulerPort | undefined;
-  let memoryReviewMode: string | undefined;
-  let kickMemoryWorker = (): void => undefined;
+  let memoryRepository: SqliteMemoryItemStore | undefined;
+  let memoryContextBuilder: AtomicMemoryContextBuilder | undefined;
+  let atomicMemoryRuntime: AtomicMemoryRuntime | undefined;
   let unsubscribeMcpStatus: (() => void) | undefined;
   const cleanupScope = new RuntimeCleanupScope((resource, error) => {
     logger.warn(
@@ -1074,53 +1067,34 @@ export async function executeAgentRuntime(
     }
     const memoryTrustStore =
       dependencies.memoryTrustStore ?? new WorkspaceTrustStore({ userStateDirectory: picoHome });
-    if (!backgroundPolicy && !dependencies.isolatedHeadless && collaborationMode() !== "plan") {
-      try {
-        const canonicalMemoryWorkspace = await memoryTrustStore.canonicalize(workDir);
-        if (await memoryTrustStore.isTrusted(canonicalMemoryWorkspace)) {
-          const memoryPaths = resolvePicoPaths(canonicalMemoryWorkspace, { picoHome });
-          memoryRepository = new SqliteMemoryRepository({
-            storageRoot: memoryPaths.workspace.root,
-            workspaceId: memoryPaths.workspace.id,
-          });
-          memoryContextBuilder = new MemoryContextBuilder(memoryRepository);
-          const memorySettings = memoryRepository.getSettings();
-          memoryReviewMode = memorySettings.reviewMode;
-          if (memorySettings.enabled && memorySettings.autoPropose) {
-            memoryReviewScheduler = {
-              enqueue: (input) => {
-                // This callback runs in RuntimeRunExecutor's detached host task, after the
-                // foreground result is available. Own the connection so AgentRuntime cleanup
-                // cannot close it before the durable enqueue begins.
-                const schedulerRepository = new SqliteMemoryRepository({
-                  storageRoot: memoryPaths.workspace.root,
-                  workspaceId: memoryPaths.workspace.id,
-                });
-                try {
-                  new MemoryReviewScheduler(schedulerRepository, {
-                    debounceMs: dependencies.memoryReviewDebounceMs,
-                  }).enqueue(input);
-                } catch (error) {
-                  invalidateMemoryReviewRecoverySuccess(memoryPaths.workspace.root);
-                  throw error;
-                } finally {
-                  schedulerRepository.close();
-                }
-                kickMemoryWorker();
-              },
-            };
-          }
-        }
-      } catch (error) {
-        logger.warn(
-          { workDir, error: error instanceof Error ? error.message : String(error) },
-          "[Memory] workspace runtime unavailable; continuing without recall/review",
+    const memoryAllowed = async () => {
+      if (
+        backgroundPolicy ||
+        dependencies.isolatedHeadless ||
+        sideConversation ||
+        dependencies.agentGraph?.kind === "operator" ||
+        collaborationMode() === "plan"
+      )
+        return { allowed: false as const, reason: "runtime_profile_disabled" };
+      const canonical = await memoryTrustStore.canonicalize(workDir);
+      return (await memoryTrustStore.isTrusted(canonical))
+        ? { allowed: true as const }
+        : { allowed: false as const, reason: "workspace_untrusted" };
+    };
+    try {
+      if ((await memoryAllowed()).allowed) {
+        await ensureAtomicMemoryWorkspace(workDir, picoHome);
+        const memoryPaths = resolvePicoPaths(workDir, { picoHome });
+        memoryRepository = new SqliteMemoryItemStore(atomicMemoryDatabasePath(picoHome));
+        memoryContextBuilder = new AtomicMemoryContextBuilder(
+          memoryRepository,
+          memoryPaths.workspace.id,
         );
-        memoryRepository?.close();
-        memoryRepository = undefined;
-        memoryContextBuilder = undefined;
-        memoryReviewScheduler = undefined;
       }
+    } catch (error) {
+      logger.warn({ workDir, error: String(error) }, "[Memory] atomic memory unavailable");
+      memoryRepository?.close();
+      memoryRepository = undefined;
     }
     const workspaceRoots = await WorkspaceRoots.create(
       workDir,
@@ -1411,59 +1385,36 @@ export async function executeAgentRuntime(
     });
     const trackedProvider = providerAssembly.provider;
     const rebuildProvider = providerAssembly.rebuildProvider;
-    const memoryModelFactory =
-      dependencies.memoryProposalModelFactory ??
-      (dependencies.provider === undefined
-        ? async () => {
-            const ledger = new SqliteRuntimeControlStore({
-              storageRoot: sessionStorageRoot,
-            });
-            const billingRoute = billingRouteForProvider(kind, currentConfig);
-            const provider = new CostTracker(
-              providerFactory(kind, currentConfig, undefined, providerDependencies),
-              billingRoute,
-              undefined,
-              {
-                ledger,
-                context: { purpose: "memory_review" },
-              },
-            );
-            return {
-              model: new ProviderMemoryProposalModel(provider, billingRoute),
-              dispose: () => ledger.close(),
-            };
-          }
-        : undefined);
-    if (memoryReviewScheduler && memoryModelFactory) {
-      const memoryPaths = resolvePicoPaths(workDir, { picoHome });
-      kickMemoryWorker = () =>
-        kickMemoryReviewWorker(
-          memoryPaths.workspace.id,
-          () =>
-            new MemoryReviewWorker({
-              workDir,
-              workspaceId: memoryPaths.workspace.id,
-              runtimeStorageRoot: memoryPaths.workspace.root,
-              trustStore: memoryTrustStore,
-              modelFactory: memoryModelFactory,
-              ...(dependencies.memoryProposalSink
-                ? { proposalSink: dependencies.memoryProposalSink }
-                : {}),
-            }),
-        );
-      // Rebuild jobs lost after a canonical terminal commit, then drain all durable work. Keep
-      // this detached from the foreground path: recovery degradation must not delay streaming.
-      void recoverMemoryReviewJobs({
-        runtimeStorageRoot: memoryPaths.workspace.root,
-        scheduler: memoryReviewScheduler,
-      })
-        .catch((error: unknown) =>
-          logger.warn(
-            { workDir, error: error instanceof Error ? error.message : String(error) },
-            "[Memory] runtime-ledger recovery failed",
-          ),
-        )
-        .finally(kickMemoryWorker);
+    if (memoryRepository && kind !== "responses") {
+      atomicMemoryRuntime = new AtomicMemoryRuntime({
+        workDir,
+        picoHome,
+        sessionId: session.id,
+        gate: memoryAllowed,
+        supported: true,
+        ...(dependencies.memoryChangedSink ? { onChanged: dependencies.memoryChangedSink } : {}),
+        modelFactory:
+          dependencies.atomicMemoryModelFactory ??
+          (async () => {
+            const ledger = new SqliteRuntimeControlStore({ storageRoot: sessionStorageRoot });
+            try {
+              const provider = new CostTracker(
+                dependencies.provider ??
+                  providerFactory(kind, currentConfig, undefined, providerDependencies),
+                billingRouteForProvider(kind, currentConfig),
+                undefined,
+                { ledger, context: { purpose: "memory_review" } },
+              );
+              return {
+                model: new ProviderAtomicMemoryModel(provider),
+                dispose: () => ledger.close(),
+              };
+            } catch (error) {
+              ledger.close();
+              throw error;
+            }
+          }),
+      });
     }
     let activeMcpManager = collaborationMode() === "plan" ? undefined : dependencies.mcpManager;
     const oneShotMcpCalls = new Set<string>();
@@ -1743,9 +1694,8 @@ export async function executeAgentRuntime(
       registry.register(new ScheduleTaskTool(dependencies.scheduleDraftCoordinator));
     }
     // 记忆触发器工具只标记意图；executor 在 completed terminal 落盘后统一入队。
-    const memoryTriggerSlot: MemoryTriggerSlot = { trigger: undefined };
-    if (!sideConversation && memoryReviewScheduler && memoryReviewMode !== "eco") {
-      for (const tool of buildMemoryTriggerTools(memoryTriggerSlot)) {
+    if (atomicMemoryRuntime) {
+      for (const tool of buildMemoryTriggerTools(atomicMemoryRuntime)) {
         registry.register(tool);
       }
     }
@@ -1873,6 +1823,7 @@ export async function executeAgentRuntime(
       dependencies.approvalNotifier ?? buildFailClosedApprovalNotifier(approvalManager);
     const contextRuntime = buildContextRuntime(kind, providerConfig.model);
     const engine = new AgentEngine({
+      ...(atomicMemoryRuntime ? { memoryHooks: atomicMemoryRuntime } : {}),
       provider: trackedProvider,
       registry,
       workDir,
@@ -2229,8 +2180,9 @@ export async function executeAgentRuntime(
         ? { completionGuard: dependencies.runCompletionGuard }
         : {}),
       ...(dependencies.runFailureGuard ? { failureGuard: dependencies.runFailureGuard } : {}),
-      ...(!sideConversation && memoryReviewScheduler ? { memoryReviewScheduler } : {}),
-      ...(!sideConversation && memoryReviewScheduler ? { memoryTriggerSlot } : {}),
+      ...(atomicMemoryRuntime
+        ? { atomicMemoryCompleted: (runId: string) => atomicMemoryRuntime!.completed(runId) }
+        : {}),
       planHandoff,
       planCoordinator: () => {
         const submitted = planHandoff.result();
