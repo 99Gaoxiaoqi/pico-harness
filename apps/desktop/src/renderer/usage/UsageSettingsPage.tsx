@@ -539,27 +539,44 @@ export function UsageSettingsPage({
             {tab === "pricing" && (
               <>
                 <p className="usage-coverage">
-                  价格单位：USD / 百万 Token。费用汇总以 CNY 显示；此处为当前定价的只读快照。
+                  价格单位：USD / 百万 Token。费用汇总以 CNY
+                  显示；此处为配置价格与官方参考价格，不会重算历史费用。官方价格仅适用于对应直连接口。
                 </p>
                 <Table
                   label="定价"
                   headers={["厂商", "模型", "输入", "输出", "缓存读取", "缓存写入", "来源"]}
                   rows={(details?.pricing ?? []).map((row) => ({
-                    id: `${row.provider}/${row.model}`,
+                    id: `${row.provider}/${row.model}/${row.tier ?? "configured"}`,
                     cells: [
                       row.provider,
-                      row.model,
+                      <span>
+                        {row.model}
+                        {row.tier && <small className="usage-cell-secondary">{row.tier}</small>}
+                        {row.note && <small className="usage-cell-secondary">{row.note}</small>}
+                      </span>,
                       ...[
                         row.inputPerMillion,
                         row.outputPerMillion,
                         row.cacheReadPerMillion,
                         row.cacheWritePerMillion,
                       ].map((value) => (value === null ? "未知" : `$${value}`)),
-                      {
-                        configured: "配置",
-                        official_docs_snapshot: "官方文档快照",
-                        included: "套餐内",
-                      }[row.source],
+                      <span>
+                        {row.sourceUrl?.startsWith("https://") ? (
+                          <a href={row.sourceUrl} target="_blank" rel="noreferrer">
+                            {row.source === "models_dev_snapshot" ? "models.dev 快照" : "官方定价"}
+                          </a>
+                        ) : (
+                          {
+                            models_dev_snapshot: "models.dev 快照",
+                            configured: "配置",
+                            official_docs_snapshot: "官方文档快照",
+                            included: "套餐内",
+                          }[row.source]
+                        )}
+                        {row.verifiedAt && (
+                          <small className="usage-cell-secondary">核实于 {row.verifiedAt}</small>
+                        )}
+                      </span>,
                     ],
                   }))}
                   page={page}

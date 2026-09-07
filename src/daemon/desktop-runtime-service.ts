@@ -1,4 +1,4 @@
-import type { UsagePrice } from "@pico/protocol";
+import { usagePricing } from "./usage-pricing.js";
 import { buildUsageDashboard, type UsageDashboardInput } from "./usage-dashboard.js";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { existsSync, unwatchFile, watchFile } from "node:fs";
@@ -3687,14 +3687,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     }
     const hasRange = from !== undefined || to !== undefined;
     const summary = summarizeUsageRecords(allCalls, allBaselines);
-    const pricing: UsagePrice[] = [];
     const userConfig = await this.userConfigStore.read();
-    for (const [provider, config] of Object.entries(userConfig.config.providers)) {
-      for (const [model, capabilities] of Object.entries(config.modelCapabilities ?? {})) {
-        if (capabilities.price)
-          pricing.push({ provider, model, source: "configured", ...capabilities.price });
-      }
-    }
+    const pricing = usagePricing(userConfig.config.providers);
     const dashboard = await buildUsageDashboard({
       sources,
       pricing,
