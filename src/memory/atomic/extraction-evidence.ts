@@ -8,6 +8,8 @@ export interface AtomicMemoryEvidence {
   readonly sourceRef: string;
   readonly event: MemoryEvidenceEvent;
   readonly texts: readonly string[];
+  /** Zero-based positions in the exact sourceMessages prefix, never a filtered copy. */
+  readonly messagePositions?: readonly number[];
 }
 
 export function normalizeEvidenceText(text: string): string {
@@ -53,6 +55,7 @@ export function memoryEvidenceCoverageHash(events: readonly MemoryEvidenceEvent[
 export function projectAtomicMemoryEvidence(
   events: readonly MemoryEvidenceEvent[],
   sourceMessages?: readonly Message[],
+  sourceEventMessagePositions?: Readonly<Record<string, readonly number[]>>,
 ): AtomicMemoryEvidence[] {
   const visible =
     sourceMessages === undefined
@@ -64,6 +67,35 @@ export function projectAtomicMemoryEvidence(
     if (event.role !== "user") return [];
     const text = normalizeEvidenceText(event.text);
     if (!text || isMessageHiddenFromTranscript({ role: "user", content: event.text })) return [];
+    const indexed = sourceEventMessagePositions?.[event.eventId];
+    if (indexed !== undefined) {
+      if (!sourceMessages || indexed.length === 0) return [];
+      const messagePositions = [...new Set(indexed)].sort((a, b) => a - b);
+      const texts: string[] = [];
+      for (const position of messagePositions) {
+        if (!Number.isSafeInteger(position) || position < 0) return [];
+        const message = sourceMessages[position];
+        if (
+          !message ||
+          message.role !== "user" ||
+          message.toolCallId !== undefined ||
+          isMessageHiddenFromTranscript(message)
+        )
+          return [];
+        const visibleText = normalizeEvidenceText(message.content);
+        // An index is identity, not permission to cite text absent from the event.
+        if (!visibleText || (!text.includes(visibleText) && !visibleText.includes(text))) return [];
+        texts.push(text.includes(visibleText) ? visibleText : text);
+      }
+      return [
+        {
+          sourceRef: `event:${event.eventId}`,
+          event,
+          texts: [...new Set(texts)],
+          messagePositions,
+        },
+      ];
+    }
     // Without event-to-message indexes, require exact containment in both authorities.
     // Never expose a hidden part of the ledger in a provider-prefix extraction request.
     const texts =
@@ -85,7 +117,9 @@ export function fitAtomicMemoryEvidence(
   for (let cap = 4_000; cap >= 32; cap = Math.floor(cap / 2)) {
     const fitted = evidence.map((entry) => ({
       ...entry,
-      texts: entry.texts.map((text) => Array.from(text).slice(0, cap).join("")),
+      texts: entry.messagePositions
+        ? entry.texts
+        : entry.texts.map((text) => Array.from(text).slice(0, cap).join("")),
     }));
     if (JSON.stringify(renderAtomicMemoryEvidence(fitted)).length <= 12_000) return fitted;
   }
@@ -93,10 +127,10 @@ export function fitAtomicMemoryEvidence(
 }
 
 export function renderAtomicMemoryEvidence(evidence: readonly AtomicMemoryEvidence[]): unknown {
-  return evidence.map(({ sourceRef, event, texts }) => ({
+  return evidence.map(({ sourceRef, event, texts, messagePositions }) => ({
     sourceRef,
     observedAt: event.observedAt,
-    texts,
+    ...(messagePositions ? { messagePositions } : { texts }),
   }));
 }
 
@@ -142,7 +176,7 @@ export function localizeAtomicMemoryHistory(
   const selected = new Set<number>();
   for (const hit of hits) {
     for (const index of [hit.index, hit.index - 1, hit.index + 1]) {
-      if (selected.size >= 3) break;
+      if (selected.size >= 7) break;
       if (index >= 0 && index < turns.length) selected.add(index);
     }
   }
@@ -153,7 +187,7 @@ export function memoryInterpretationContext(events: readonly MemoryEvidenceEvent
   return JSON.stringify(
     events.map((event) => ({
       role: event.role,
-      text: Array.from(event.text).slice(0, 1_000).join(""),
+      text: Array.from(event.text).slice(0, 2_000).join(""),
     })),
-  ).slice(0, 6_000);
+  ).slice(0, 12_000);
 }
