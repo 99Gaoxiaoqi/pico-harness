@@ -237,6 +237,9 @@ import { DesktopWorkbarTerminalService } from "./desktop-workbar-terminal-servic
 import { WorkbarGitReviewError } from "./workbar-git-review.js";
 import { SideChatAuthority, SideChatNoSettledTurnError } from "./side-chat-authority.js";
 import { DesktopMemoryService } from "./desktop-memory-service.js";
+import { DesktopAtomicMemoryService } from "./desktop-atomic-memory-service.js";
+import { sessionMemoryLane } from "../memory/atomic/session-lane.js";
+import { memorySessionKey } from "../memory/atomic/runtime-contracts.js";
 import type { ImagePart } from "../schema/message.js";
 import { createModelContextReport } from "../provider/model-runtime-report.js";
 import { createSessionHookRuntime } from "../hooks/runtime.js";
@@ -282,7 +285,7 @@ export interface DesktopRuntimeServiceOptions {
   readonly pluginRuntimeSnapshotRegistry?: PluginRuntimeSnapshotRegistry;
   /** Whether this service releases the injected registry after runtime shutdown. */
   readonly ownsPluginRuntimeSnapshotRegistry?: boolean;
-  readonly memoryService?: DesktopMemoryService;
+  readonly memoryService?: DesktopMemoryService | DesktopAtomicMemoryService;
   readonly ownsMemoryService?: boolean;
   /** Commit 完成后通知 Dedicated Session Channel 读取已提交水位。 */
   readonly onTranscriptAdvanced?: (workspacePath: string, sessionId: string) => void;
@@ -350,7 +353,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private readonly now: () => number;
   private readonly pluginRuntimeSnapshotRegistry: PluginRuntimeSnapshotRegistry;
   private readonly ownsPluginRuntimeSnapshotRegistry: boolean;
-  private readonly memoryService: DesktopMemoryService;
+  private readonly memoryService: DesktopMemoryService | DesktopAtomicMemoryService;
   private readonly ownsMemoryService: boolean;
   private readonly gitReviewService: DesktopWorkbarGitReviewService;
   private readonly terminalService: DesktopWorkbarTerminalService;
@@ -447,7 +450,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       options.pluginRuntimeSnapshotRegistry === undefined;
     this.memoryService =
       options.memoryService ??
-      new DesktopMemoryService({
+      new DesktopAtomicMemoryService({
         picoHome: this.picoHome,
         publish: (workspacePath, topic, payload) =>
           this.publishMemoryNotification(workspacePath, topic, payload),
@@ -1114,8 +1117,14 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   ): Promise<JsonValue> {
     const canonical = await canonicalizeWorkspacePath(workspacePath);
     await this.requireSession(canonical, sessionId);
-    await this.withWorkspaceSessionStore(canonical, (store) =>
-      store.setSessionArchived(sessionId, archived, this.now),
+    await sessionMemoryLane.run(
+      this.memoryLaneKey(canonical, sessionId),
+      "foreground",
+      async () => {
+        await this.withWorkspaceSessionStore(canonical, (store) =>
+          store.setSessionArchived(sessionId, archived, this.now),
+        );
+      },
     );
     if (archived) this.browserAgentBroker.invalidateSession(sessionId, "浏览器 Session 已归档");
     const session = await this.requireSession(canonical, sessionId);
@@ -1138,6 +1147,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return { session };
   }
 
+  private memoryLaneKey(workspacePath: string, sessionId: string): string {
+    const paths = resolvePicoPaths(workspacePath, { picoHome: this.picoHome });
+    return `${this.picoHome}:${memorySessionKey(paths.workspace.id, sessionId)}`;
+  }
+
   private async deleteSession(workspacePath: string, sessionId: string): Promise<JsonValue> {
     const canonical = await this.requireIdleTrustedSession(workspacePath, sessionId, "删除");
     await this.options.retireAgentGraphRootSession?.(canonical, sessionId, "Root Session deleted");
@@ -1156,28 +1170,31 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     }
     this.browserAgentBroker.invalidateSession(sessionId);
     await this.terminalService.stopSession({ workspacePath: canonical, sessionId });
-    const preparedMemory = this.memoryService.prepareSessionSourceInvalidation(
-      canonical,
-      sessionId,
-      { availability: "unavailable", code: "session_deleted" },
+    await sessionMemoryLane.run(
+      this.memoryLaneKey(canonical, sessionId),
+      "foreground",
+      async () => {
+        const legacy =
+          this.memoryService instanceof DesktopMemoryService ? this.memoryService : undefined;
+        const preparedMemory = legacy?.prepareSessionSourceInvalidation(canonical, sessionId, {
+          availability: "unavailable",
+          code: "session_deleted",
+        });
+        try {
+          const managed = globalSessionManager.delete(sessionId, canonical, {
+            picoHome: this.picoHome,
+          });
+          await managed?.close();
+          await Promise.all([
+            removeCliSessionFile(canonical, sessionId, { picoHome: this.picoHome }),
+            this.conversationStateStore.clearQueued(canonical, sessionId),
+          ]);
+          this.workbarRepository(canonical).purgeOrphanArtifactBlobs();
+        } finally {
+          if (preparedMemory) legacy!.commitSessionSourceInvalidation(preparedMemory);
+        }
+      },
     );
-    try {
-      const managed = globalSessionManager.delete(sessionId, canonical, {
-        picoHome: this.picoHome,
-      });
-      await managed?.close();
-      await Promise.all([
-        removeCliSessionFile(canonical, sessionId, { picoHome: this.picoHome }),
-        this.conversationStateStore.clearQueued(canonical, sessionId),
-      ]);
-      this.workbarRepository(canonical).purgeOrphanArtifactBlobs();
-    } catch (error) {
-      // Once destructive work starts, a rejection may represent partial durable success.
-      // Fail closed for privacy and converge source/proposal state through the prepared job.
-      this.memoryService.commitSessionSourceInvalidation(preparedMemory);
-      throw error;
-    }
-    this.memoryService.commitSessionSourceInvalidation(preparedMemory);
     return {
       sessionId,
       deleted: true,
@@ -4498,7 +4515,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private async withTrustedMemory<Result extends JsonValue>(
     workspacePath: string,
-    operation: (canonicalWorkspacePath: string) => Result,
+    operation: (canonicalWorkspacePath: string) => Result | Promise<Result>,
   ): Promise<Result> {
     const canonical = await this.requireTrustedWorkspace(workspacePath);
     return operation(canonical);
