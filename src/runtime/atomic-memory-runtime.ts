@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { withProviderCallContext } from "../observability/provider-call-context.js";
 import type { Message, ToolDefinition } from "../schema/message.js";
 import { isMessageHiddenFromTranscript } from "../schema/message.js";
 import type { LLMProvider } from "../provider/interface.js";
@@ -35,12 +36,13 @@ export class ProviderAtomicMemoryModel implements MemoryExtractionModel {
     const messages: Message[] = prefix.length
       ? [...prefix, { role: "user", content: request.prompt }]
       : [{ role: "system", content: request.prompt }];
-    const response = await this.provider.generate(messages, tools, {
-      ...(request.signal ? { signal: request.signal } : {}),
-      timeoutMs: 60_000,
-      purpose: "memory_review",
-      ...(tools.length ? { toolChoice: "none" as const } : {}),
-    });
+    const response = await withProviderCallContext({ purpose: "memory_review" }, () =>
+      this.provider.generate(messages, tools, {
+        ...(request.signal ? { signal: request.signal } : {}),
+        timeoutMs: 60_000,
+        ...(tools.length ? { toolChoice: "none" as const } : {}),
+      }),
+    );
     if (response.toolCalls?.length) throw new Error("memory_model_returned_tools");
     return response.content;
   }
