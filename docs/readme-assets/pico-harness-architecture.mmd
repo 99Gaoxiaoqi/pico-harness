@@ -13,6 +13,7 @@ flowchart LR
   TOOLS --> PROJECT["项目工作区"]
 
   RUNTIME --> DB[("workspace/pico.sqlite\n事实 · 投影 · 控制状态")]
+  RUNTIME --> MEMORY[("PICO_HOME/memory.sqlite\n原子长期记忆")]
   RUNTIME --> SIDECAR[("Trace · Blob · 临时 staging")]
 
   classDef input fill:#d3f9d8,stroke:#2f9e44,color:#1a1a1a
@@ -25,5 +26,5 @@ flowchart LR
   class RUNTIME,PROVIDER,CONTEXT process
   class TOOLS action
   class PROJECT output
-  class DB,SIDECAR storage
+  class DB,MEMORY,SIDECAR storage
   class CLIENT,BRIDGE,DAEMON,SERVICE meta

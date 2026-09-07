@@ -32,6 +32,7 @@ flowchart LR
   DAEMON --> SERVICE["WorkspaceRuntimeService"] --> RUNTIME["AgentRuntime / AgentEngine"]
   RUNTIME --> PROVIDER["Provider / Tools / Context"]
   RUNTIME --> DB[("workspace/pico.sqlite")]
+  RUNTIME --> MEMORY[("PICO_HOME/memory.sqlite")]
 ```
 
 [查看 Mermaid 源图](./docs/readme-assets/pico-harness-architecture.mmd)
@@ -76,12 +77,15 @@ Windows named pipe。当前承重边界是私有 endpoint、进程/文件权限�
 
 状态不是写进一份“万能文件”。Agent 事实与任务控制面共享 workspace 状态根目录，但使用不同逻辑账本和所有者：
 
-- 每个 workspace 使用一个 `$PICO_HOME/workspaces/<workspace-id>/pico.sqlite`；`node:sqlite`
-  以 WAL 和 `synchronous=FULL` 承载事实、控制状态和事务边界。
+- 每个 workspace 的会话与控制状态使用 `$PICO_HOME/workspaces/<workspace-id>/pico.sqlite`；
+  原子长期记忆另存用户级 `$PICO_HOME/memory.sqlite`。两者均用 `node:sqlite`、WAL 和
+  `synchronous=FULL`，各自拥有事务边界。
 - `SqliteRuntimeEventStore` 拥有 Session、Run、消息、工具调用与 Transcript 事实及其投影。
 - `SqliteTaskRunStore` 保存显式可恢复任务跨 Attempt 的输入、checkpoint、租约与启动凭据；它只引用 RuntimeEvent 边界，不复制 Agent 事件。
 - `SqliteRuntimeControlStore` 保存 Job、Cron、daemon run、usage、provider call 与生命周期控制状态。
-- `SqliteMemoryRepository` 保存 settings、sources、facts、proposals、审计与幂等记录；长期 Fact 与 Session/EventLog 生命周期分离。
+- `SqliteMemoryItemStore` 保存原子 Item、keys、sources、提取游标、回执和工作区开关；支持
+  global/当前 workspace 召回，与 Session 生命周期分离。提取经用户证据校验和独立模型
+  规范化后直接提交，不再走旧 Proposal 审批队列。详见[原子长期记忆](./docs/architecture/14-workspace-memory.md)。
 - Plan、Todo、会话目录、文件历史 manifest 和跨存储 operation 等状态也进入同一数据库的独立 scope；Trace、文件内容 blob 和临时 staging 仍按各自生命周期保留为 sidecar。
 - ToolResult 在入口处限制为 1 MiB：限内正文以 `storage: "inline"` 写入事实，超限改写为合成错误并提示模型缩小命令输出；旧 Evidence 引用只读兼容，`read_evidence` 已退役。
 
@@ -140,8 +144,8 @@ npm run dev
 }
 ```
 
-Runtime、Memory、TaskRun 和控制状态使用 Node 内置 `node:sqlite` 写入 workspace 的
-`pico.sqlite`，不依赖额外的原生数据库包。`npm run check:storage` 会在启动和验证前检查
+Runtime、TaskRun 和控制状态写入 workspace 的 `pico.sqlite`；原子长期记忆写入
+`$PICO_HOME/memory.sqlite`。两者均使用 Node 内置 `node:sqlite`，不依赖额外的原生数据库包。`npm run check:storage` 会在启动和验证前检查
 Node 版本是否满足 `node:sqlite` 能力要求。
 
 指定工作区和模型路由：

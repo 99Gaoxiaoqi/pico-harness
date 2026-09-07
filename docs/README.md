@@ -29,7 +29,9 @@
 1. TUI 已从进程内 Runtime 迁移为 daemon 瘦客户端；TUI 与 Desktop 都通过
    `LocalRuntimeClient` 使用 runtime-host。
 2. workspace 持久化已从 Session JSONL、目录锁和自研 commit journal 硬切为统一
-   `pico.sqlite`；Session、TaskRun、Control、Memory、Todo 等通过独立 SQLite scope 保持所有权。
+   `pico.sqlite`；Session、TaskRun、Control、Todo 等通过独立 SQLite scope 保持所有权。长期
+   记忆随后迁出到用户级 `$PICO_HOME/memory.sqlite`，按 global/workspace scope 隔离，经过
+   提取和规范化直接保存，旧 Proposal/Worker 不再是生产主路径。
 3. 新 ToolResult 不再进入 Evidence CAS；限内正文 inline 入库，超过 1 MiB 写合成错误，
    `read_evidence` 只剩退役协议的兼容/诊断边界。
 4. Plan 不再使用 `PLAN.md` / `TODO.md`。Plan 是 Session RuntimeEvent 状态机，普通 Todo 位于
@@ -52,7 +54,7 @@
 | [11 ToolResult Evidence](architecture/11-tool-result-evidence-projection.md) | 已取代     | 由决策记录 26 取代                                         |
 | [12 Compaction/ToolResult](architecture/12-compaction-and-tool-result.md)    | 部分过期   | Compaction 动机可参考；ToolResult 归档段已取代             |
 | [13 渐进披露](architecture/13-progressive-disclosure.md)                     | 部分过期   | 工具披露看 ADR 23；ToolResult 看 ADR 26                    |
-| [14 Workspace Memory](architecture/14-workspace-memory.md)                   | 部分过期   | 提案语义可参考；存储和生命周期已迁移                       |
+| [14 原子长期记忆](architecture/14-workspace-memory.md)                       | 当前事实   | 用户级原子库、提取/召回、管理、迁移及后台恢复边界          |
 | [15 Prompt Cache](architecture/15-prompt-cache.md)                           | 待专项复核 | 原理可参考，阈值和 Provider 细节以代码为准                 |
 | [18 Graph Mode](architecture/18-graph-mode.md)                               | 当前主线   | Graph v2 控制面、exact Run 与 yield/wake 恢复              |
 | [19 核心概念地图](architecture/19-concepts-map.md)                           | 历史快照   | 旧 JSONL、Evidence 与 Graph v1 叙述不代表当前实现          |
@@ -63,7 +65,7 @@
 | 文档                                                                                  | 状态                                          |
 | ------------------------------------------------------------------------------------- | --------------------------------------------- |
 | [16 Pico 与 Maka 状态对比](architecture/16-pico-vs-maka-state-architecture.md)        | 迁移前研究快照                                |
-| [17 Failure Journal](architecture/17-failure-journal.md)                              | 研究材料，不代表已实现能力                    |
+| [17 Failure Journal](architecture/17-failure-journal.md)                              | 原子记忆迁移前研究；旧分类与链路已过期        |
 | [20 架构审计与治理](architecture/20-architecture-audit-and-governance.md)             | 阶段性治理记录                                |
 | [21 Windows PowerShell Host](architecture/21-decision-windows-powershell-host.md)     | 已实施 ADR                                    |
 | [22 Child Run Capacity](architecture/22-decision-child-run-capacity.md)               | 已实施 ADR                                    |

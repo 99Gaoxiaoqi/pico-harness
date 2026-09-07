@@ -1,8 +1,9 @@
 # 第 4 章 · 记住上次聊到哪
 
 > 文档状态：历史课程快照。Session JSONL、`PLAN.md` / `TODO.md` 和文件事务描述已退役；
-> 当前 Session/Plan/Todo/Memory 使用 workspace `pico.sqlite` 中各自的逻辑 scope。当前事实见
-> [架构总览](architecture/00-overview.md)。
+> 当前 Session/Plan/Todo 使用 workspace `pico.sqlite`；原子长期记忆使用用户级
+> `$PICO_HOME/memory.sqlite`。当前事实见[架构总览](architecture/00-overview.md)和
+> [原子长期记忆](architecture/14-workspace-memory.md)。
 
 Agent 现在能做事了。但它有一个致命问题：**每次启动都失忆。**
 

@@ -1,7 +1,9 @@
 # Pico 与 Maka 状态管理架构对比分析
 
 > 文档状态：阶段性研究快照，不定义当前架构。Pico 已在本文之后完成 SQLite 与 EventLog
-> 语义收敛；当前事实见 [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md) 和决策记录 24—29。
+> 语义收敛，并切换到用户级 `memory.sqlite` 原子记忆。下文 MemoryRepository、Source/Fact
+> 和旧锁描述保留为历史材料；当前事实见 [ARCHITECTURE.md](../../ARCHITECTURE.md) 与
+> [原子长期记忆](./14-workspace-memory.md)，Maka 核验见[任务记录](../plans/2026-09-07-maka-atomic-memory-redesign.md)。
 
 > 本文对比 pico-harness 的"四账本事实所有权分离"和 maka-agent 的"log-first, projection-driven"两种状态管理架构，分析各自的设计取舍、优势、代价，以及 Pico 如果要向 Maka 思想对齐可以做什么、应该做什么、不应该做什么。
 
