@@ -261,6 +261,7 @@ export function proposalPrompt(
       ? "The user explicitly requested memory. Put exactly the requested information in requestedItems; incidentalItems may contain other durable user assertions. If the referent is missing, request one narrow history search. Do not invent a request."
       : "Incidental extraction: requestedItems must be empty and requestedStatus must be not_applicable. A narrow history search may resolve an elliptical user assertion.",
     "Use exact sourceRef and verbatim quotes. Both requested and incidental items may be global or workspace scoped; global requires evidence of reuse across workspaces. Timestamps are Unix milliseconds; never invent precision.",
+    "An evidence record with messagePositions points to zero-based messages in the sourceMessages conversation prefix above. Read the user text there; it is intentionally not duplicated in memory_evidence. Without messagePositions, use only the bounded texts in the evidence record.",
     TEMPORAL_RULES,
     'Complete: {"status":"complete","coverageStatus":"processed","requestedStatus":"resolved|not_applicable","requestedItems":[],"incidentalItems":[]}. resolved requires 1-10 requestedItems; not_applicable requires none. At most 10 incidentalItems.',
     interpretationContext === undefined
