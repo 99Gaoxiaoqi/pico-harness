@@ -18,11 +18,18 @@ import type {
   TerminalMemoryEvidenceRef,
   UserMemoryEvidence,
 } from "../../src/memory/proposal-contracts.js";
-import { ProviderMemoryProposalModel } from "../../src/memory/worker.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { createProvider } from "../../src/provider/factory.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
 import { executeAgentRuntime } from "../../src/runtime/agent-runtime.js";
+import {
+  AtomicMemoryRuntime,
+  ProviderAtomicMemoryModel,
+  atomicMemoryDatabasePath,
+} from "../../src/runtime/atomic-memory-runtime.js";
+import { SqliteMemoryItemStore } from "../../src/storage/sqlite/sqlite-memory-item-store.js";
+import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import type { Message } from "../../src/schema/message.js";
 import type { RunAgentCliOptions } from "../../src/runtime/runtime-contract.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 import {
@@ -39,7 +46,7 @@ const RUN_REAL_MODEL = process.env.RUN_LLM_E2E === "1";
 const realModelTest = RUN_REAL_MODEL ? test : test.skip;
 
 realModelTest(
-  "real model memory proposals meet the benign precision and recall baseline",
+  "legacy proposal model retains its benign precision and recall baseline",
   { timeout: TEST_TIMEOUT_MS },
   async () => {
     const configured = await configuredUserDefaultRealModel();
@@ -118,137 +125,164 @@ realModelTest(
 );
 
 realModelTest(
-  "deterministic memory is recalled across sessions without review-model calls",
+  "atomic production runtime remembers, recalls in a new session, and never revives forgotten evidence",
   { timeout: TEST_TIMEOUT_MS },
   async () => {
     const configured = await configuredUserDefaultRealModel();
-    const root = await mkdtemp(join(tmpdir(), "pico-memory-runtime-real-llm-"));
+    const root = await mkdtemp(join(tmpdir(), "pico-atomic-runtime-real-llm-"));
     const workspace = join(root, "workspace");
     const picoHome = join(root, "pico-home");
-    const sessionIds = [
-      "memory-real-runtime-a",
-      "memory-real-runtime-b",
-      "memory-real-runtime-disabled",
-    ];
-    const canary = "npm run real-reviewed-memory-canary";
-    let reviewCalls = 0;
-    const reviewModelFactory = () => {
-      reviewCalls++;
-      return {
-        model: new ProviderMemoryProposalModel(
-          createProvider(configured.provider, configured.config),
-        ),
-      };
-    };
+    const sessionIds = ["atomic-real-save", "atomic-real-recall", "atomic-real-forgotten"];
+    const canary = "npm run atomic-memory-canary-20260907";
     await Promise.all([
       mkdir(workspace, { recursive: true }),
       mkdir(picoHome, { recursive: true }),
     ]);
     const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
     await trustStore.trust(await trustStore.canonicalize(workspace));
-    // 此用例验证审批→接受→召回的闭环，关掉 autoCommit 保持 pending 等待语义。
-    {
-      const repo = openMemoryRepository(workspace, picoHome);
-      repo.updateSettings({
-        expectedVersion: repo.getSettings().version,
-        autoCommit: false,
-        idempotencyKey: "e2e-recall-autocommit-off",
-      });
-      repo.close();
-    }
-
+    const paths = resolvePicoPaths(workspace, { picoHome });
+    const toolNames: string[] = [];
+    const toolResults: string[] = [];
+    const reporter = new SilentReporter();
+    reporter.onToolCall = (name) => {
+      toolNames.push(name);
+    };
+    reporter.onToolResult = (result) => {
+      toolResults.push(result.projection.text);
+    };
+    let store: SqliteMemoryItemStore | undefined;
     try {
       await executeAgentRuntime(
         runtimeRequest(
           workspace,
           sessionIds[0]!,
-          `请记住这个稳定的项目事实：本项目固定使用 ${canary} 验证构建。`,
+          `Please remember this durable workspace fact by calling memory_remember with no arguments: this workspace's build verification command is ${canary}. Then briefly confirm what was saved. Do not execute the command.`,
           configured,
         ),
         {
           picoHome,
           memoryTrustStore: trustStore,
           provider: createProvider(configured.provider, configured.config),
-          memoryProposalModelFactory: reviewModelFactory,
-          memoryReviewDebounceMs: 0,
-          reporter: new SilentReporter(),
+          reporter,
         },
       );
+      assert.ok(
+        toolNames.includes("memory_remember"),
+        `real main model tool calls=${JSON.stringify(toolNames)}`,
+      );
+      assert.ok(
+        toolResults.some((text) => /"status"\s*:\s*"remembered"/u.test(text)),
+        `remember tool results=${JSON.stringify(toolResults)}`,
+      );
+      store = new SqliteMemoryItemStore(atomicMemoryDatabasePath(picoHome));
+      const items = await store.listItems({ workspaceKey: paths.workspace.id });
+      const saved = items.find(({ item }) => item.content.includes(canary));
+      assert.ok(saved, "the real extraction model must synchronously commit the requested command");
+      assert.ok(saved.sources.length > 0);
+      assert.equal(saved.item.origin, "user_requested");
 
-      const pending = await waitForPendingProposal(workspace, picoHome);
-      const pendingContent = pending.content;
-      if (pendingContent === null) assert.fail("Real-model proposal must include content");
-      assert.match(pendingContent, new RegExp(canary, "u"));
-      let repository = openMemoryRepository(workspace, picoHome);
-      repository.resolveProposal({
-        proposalId: pending.proposalId,
-        resolution: "accepted",
-        expectedVersion: pending.version,
-        idempotencyKey: "memory-real-runtime-accept",
-        factId: "memory-real-runtime-fact",
-      });
-      let settings = repository.getSettings();
-      repository.updateSettings({
-        expectedVersion: settings.version,
-        autoPropose: false,
-        idempotencyKey: "memory-real-runtime-disable-proposals",
-      });
-      const jobsAfterReview = repository.listJobs().length;
-      repository.close();
-      reviewCalls = 0;
-
+      const recallPrompts: Message[][] = [];
       const recalled = await executeAgentRuntime(
         runtimeRequest(
           workspace,
           sessionIds[1]!,
-          "根据工作区记忆，只回答这个项目用于验证构建的完整命令。",
+          "What is this workspace's build verification command? Use workspace memory and reply only with the exact command. If no memory supplies it, reply UNKNOWN.",
           configured,
           false,
         ),
         {
           picoHome,
           memoryTrustStore: trustStore,
-          provider: createProvider(configured.provider, configured.config),
-          memoryProposalModelFactory: reviewModelFactory,
-          memoryReviewDebounceMs: 0,
+          provider: observeProvider(
+            createProvider(configured.provider, configured.config),
+            recallPrompts,
+          ),
           reporter: new SilentReporter(),
         },
       );
-      assert.match(recalled.finalMessage, new RegExp(canary, "u"));
-      assert.equal(reviewCalls, 0);
+      assert.ok(
+        recalled.finalMessage.includes(canary),
+        `new session answer=${recalled.finalMessage}`,
+      );
+      assert.ok(
+        recallPrompts.some((messages) =>
+          messages.some(
+            (message) =>
+              message.content.includes("<atomic-memory-reference") &&
+              message.content.includes(canary),
+          ),
+        ),
+        "the fresh session receives the committed atomic memory in the real provider request",
+      );
 
-      repository = openMemoryRepository(workspace, picoHome);
-      assert.equal(repository.listJobs().length, jobsAfterReview);
-      settings = repository.getSettings();
-      repository.updateSettings({
-        expectedVersion: settings.version,
-        enabled: false,
-        idempotencyKey: "memory-real-runtime-disable-all",
+      // Forget through the same atomic store contract used by the management surfaces.
+      await store.forgetItem({
+        itemId: saved.item.itemId,
+        expectedVersion: saved.item.version,
+        operationId: "real-runtime-forget",
       });
-      repository.close();
+      for (const source of saved.sources)
+        assert.equal(await store.isEvidenceSuppressed(source), true);
+      assert.equal((await store.listItems({ workspaceKey: paths.workspace.id })).length, 0);
 
-      await executeAgentRuntime(
+      // Re-dispatch the original durable session's terminal through the production
+      // adapter. Forgotten provenance must not become a new memory during replay.
+      const events = new SqliteRuntimeEventStore({ storageRoot: paths.workspace.root });
+      let completedRunId: string | undefined;
+      try {
+        completedRunId = (await events.readSessionEntries(sessionIds[0]!)).find(
+          ({ event }) => event.kind === "run.terminal" && event.data.status === "completed",
+        )?.event.runId;
+      } finally {
+        events.close();
+      }
+      assert.ok(completedRunId);
+      const replay = new AtomicMemoryRuntime({
+        workDir: workspace,
+        picoHome,
+        sessionId: sessionIds[0]!,
+        supported: true,
+        gate: async () => ({ allowed: true }),
+        modelFactory: async () => ({
+          model: new ProviderAtomicMemoryModel(
+            createProvider(configured.provider, configured.config),
+          ),
+        }),
+      });
+      assert.equal((await replay.requestExtract()).status, "accepted");
+      await replay.completed(completedRunId);
+      await replay.drain();
+      assert.equal((await store.listItems({ workspaceKey: paths.workspace.id })).length, 0);
+
+      const forgottenPrompts: Message[][] = [];
+      const forgotten = await executeAgentRuntime(
         runtimeRequest(
           workspace,
           sessionIds[2]!,
-          "这是关闭记忆后的普通请求。只回答：done",
+          "What is this workspace's build verification command? Use workspace memory and reply only with the exact command. If no memory supplies it, reply UNKNOWN.",
           configured,
           false,
         ),
         {
           picoHome,
           memoryTrustStore: trustStore,
-          provider: createProvider(configured.provider, configured.config),
-          memoryProposalModelFactory: reviewModelFactory,
-          memoryReviewDebounceMs: 0,
+          provider: observeProvider(
+            createProvider(configured.provider, configured.config),
+            forgottenPrompts,
+          ),
           reporter: new SilentReporter(),
         },
       );
-      assert.equal(reviewCalls, 0);
-      repository = openMemoryRepository(workspace, picoHome);
-      assert.equal(repository.listJobs().length, jobsAfterReview);
-      repository.close();
+      assert.ok(!forgotten.finalMessage.includes(canary));
+      assert.match(forgotten.finalMessage, /UNKNOWN/u);
+      assert.ok(
+        forgottenPrompts.every((messages) =>
+          messages.every((message) => !message.content.includes(canary)),
+        ),
+      );
+      assert.equal((await store.listItems({ workspaceKey: paths.workspace.id })).length, 0);
     } finally {
+      store?.close();
       for (const sessionId of sessionIds) {
         const session = globalSessionManager.delete(sessionId, workspace, { picoHome });
         await session?.close();
@@ -257,6 +291,25 @@ realModelTest(
     }
   },
 );
+
+function observeProvider(provider: LLMProvider, snapshots: Message[][]): LLMProvider {
+  const observed: LLMProvider = {
+    modelName: provider.modelName,
+    requestCapabilities: provider.requestCapabilities,
+    isRetryableError: provider.isRetryableError?.bind(provider),
+    async generate(messages, tools, options) {
+      snapshots.push(structuredClone(messages));
+      return provider.generate(messages, tools, options);
+    },
+  };
+  if (provider.generateStream) {
+    observed.generateStream = async (messages, tools, onDelta, options) => {
+      snapshots.push(structuredClone(messages));
+      return provider.generateStream!(messages, tools, onDelta, options);
+    };
+  }
+  return observed;
+}
 
 class RealProposalModel implements MemoryProposalModelPort {
   calls = 0;
@@ -351,31 +404,4 @@ function runtimeRequest(
     modelCapabilities: configured.route.capabilities,
     allowedTools: memoryTools ? ["memory_remember", "memory_extract"] : [],
   };
-}
-
-function openMemoryRepository(workspace: string, picoHome: string): SqliteMemoryRepository {
-  const paths = resolvePicoPaths(workspace, { picoHome });
-  return new SqliteMemoryRepository({
-    storageRoot: paths.workspace.root,
-    workspaceId: paths.workspace.id,
-  });
-}
-
-async function waitForPendingProposal(workspace: string, picoHome: string) {
-  const deadline = Date.now() + 2 * 60_000;
-  while (Date.now() < deadline) {
-    const repository = openMemoryRepository(workspace, picoHome);
-    try {
-      const proposal = repository.listProposals({ statuses: ["pending"] })[0];
-      if (proposal) return proposal;
-      const job = repository.listJobs({ type: "terminal-extraction" })[0];
-      if (job?.status === "failed") {
-        throw new Error(`Memory review failed: ${job.errorCode ?? "unknown"}`);
-      }
-    } finally {
-      repository.close();
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error("Timed out waiting for a real-model memory proposal");
 }
