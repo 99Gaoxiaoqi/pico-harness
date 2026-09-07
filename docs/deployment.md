@@ -46,14 +46,23 @@ Runtime。模型 Provider 与默认路由只来自用户级 `config.json`；工�
 不再覆盖它们。MCP 合并 `$PICO_HOME/mcp.json` 与受信工作区 `.pico/mcp.json`，项目同名定义
 优先；旧 `.claw/mcp.json` 仅作兼容回退。
 
-每个 workspace 的 Session、TaskRun、控制面、Memory 和跨域 operation 都写入：
+每个 workspace 的 Session、TaskRun、控制面和跨域 operation 写入：
 
 ```text
 $PICO_HOME/workspaces/<workspace-id>/pico.sqlite
 ```
 
-数据库使用 Node 内置 `node:sqlite`、WAL 和 `synchronous=FULL`；`workspace_storage_binding`
-保存稳定 `storageRootId` 与当前物理目录身份。存储根被复制、替换或移动后会 fail-closed，只有
+原子长期记忆另存用户级 `$PICO_HOME/memory.sqlite`，含 global/各 workspace 的 Item 与
+工作区开关，使用独立事务。首次访问受信工作区记忆时，只读迁移 workspace `pico.sqlite`
+中的旧 memory 表；已保存 Fact 按原状态导入，pending 保全在旧库，forgotten 只迁移已有来源
+抑制。不会删除旧库，也不会在新库不可用时退回旧提案系统。
+
+备份需同时覆盖用户记忆库和工作区库；运行中的 SQLite 应用一致快照方式备份，不能漏掉 WAL。
+遗忘只清理新记忆库的当前内容，不删除原始对话、旧库或备份。详情见
+[原子长期记忆](architecture/14-workspace-memory.md)。
+
+两类数据库均使用 Node 内置 `node:sqlite`、WAL 和 `synchronous=FULL`；工作区库的
+`workspace_storage_binding` 保存稳定 `storageRootId` 与当前物理目录身份。存储根被复制、替换或移动后会 fail-closed，只有
 显式 adopt 流程可以更新绑定，普通启动不会静默接管。
 
 Desktop 打开或添加项目时会先只读检查存储绑定；发生身份变化时，提供“修复工作区 / 暂不修复”的原生确认。
@@ -66,7 +75,8 @@ Desktop 打开或添加项目时会先只读检查存储绑定；发生身份变
 
 旧 JSONL 纪元的 `.storage/`、`sessions/`、`task-runs/`、`control/` 与非空 `runtime/` 都是
 不兼容布局标记。产品路径不会自动导入、复制或删除它们；需要保留旧数据时应先执行明确的迁移
-或人工备份。旧 split-era `runtime.sqlite` / `memory.sqlite` 同样不是当前事实源。
+或人工备份。旧 workspace 子目录中的 split-era `runtime.sqlite` / `memory.sqlite` 同样不是
+当前事实源；这不包括当前使用的用户级 `$PICO_HOME/memory.sqlite`。
 
 运行中的 Run 固定使用启动时的配置快照，不会中途热换模型或凭证。daemon 在后续 Run
 装配时读取新配置，并通过 Runtime 事件通知客户端刷新；Desktop 在窗口重新聚焦时还会补一次

@@ -28,7 +28,7 @@ AgentRuntime
   ├─ AgentEngine
   ├─ Provider / ModelRouter
   ├─ ToolRegistry / approval / hooks / MCP
-  └─ RuntimeEventStore + TaskRunStore + RuntimeStore
+  └─ RuntimeEventStore + TaskRunStore + RuntimeStore + MemoryItemStore
 ```
 
 TUI 和 Desktop 是当前两种产品外壳。两者都通过 `LocalRuntimeClient` 调用本机 daemon；
@@ -82,16 +82,17 @@ canonical RuntimeEvent。单次 ToolResult 在入口处受 1 MiB 上限约束，
 
 ## 状态真源
 
-`$PICO_HOME/workspaces/<workspace-id>/` 下的状态按事实所有权拆分。RuntimeEventStore 是
+workspace 状态位于 `$PICO_HOME/workspaces/<workspace-id>/`，跨工作区的原子记忆位于
+`$PICO_HOME/memory.sqlite`，按事实所有权拆分。RuntimeEventStore 是
 Session/Agent 叙事的 canonical semantic log；TaskRun、Control 与 Memory 各自拥有独立事实，
 只通过稳定标识或弱外键引用 RuntimeEvent，不复制会话历史。
 
-| 组件                        | `pico.sqlite` 逻辑 scope | 负责的数据                                                                                  | 不负责的数据                           |
-| --------------------------- | ------------------------ | ------------------------------------------------------------------------------------------- | -------------------------------------- |
-| `SqliteRuntimeEventStore`   | sessions                 | Session、消息、工具、审批、压缩、rewind、run terminal 与 Transcript 投影                    | Job 调度、TaskRun 和长期记忆 Fact      |
-| `SqliteTaskRunStore`        | task-runs                | 显式可恢复任务跨 Attempt 的输入、checkpoint、租约、启动凭据与终态                           | Session Transcript 和 Cron 调度状态    |
-| `SqliteRuntimeControlStore` | control                  | Jobs、daemon/cron runs、attempts、leases、usage、provider calls、completion outbox 等控制面 | Session Transcript 和 TaskRun 事实     |
-| `SqliteMemoryRepository`    | memory                   | 版本化 settings、sources、facts、proposals、审计与幂等记录                                  | 原始对话事实（属于 RuntimeEventStore） |
+| 组件                        | 存储位置 / 逻辑 scope           | 负责的数据                                                                                  | 不负责的数据                        |
+| --------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------- | ----------------------------------- |
+| `SqliteRuntimeEventStore`   | sessions                        | Session、消息、工具、审批、压缩、rewind、run terminal 与 Transcript 投影                    | Job 调度、TaskRun 和长期记忆 Fact   |
+| `SqliteTaskRunStore`        | task-runs                       | 显式可恢复任务跨 Attempt 的输入、checkpoint、租约、启动凭据与终态                           | Session Transcript 和 Cron 调度状态 |
+| `SqliteRuntimeControlStore` | control                         | Jobs、daemon/cron runs、attempts、leases、usage、provider calls、completion outbox 等控制面 | Session Transcript 和 TaskRun 事实  |
+| `SqliteMemoryItemStore`     | 独立 `$PICO_HOME/memory.sqlite` | 原子 Item、keys、sources、提取 cursor/receipt、幂等操作、抑制记录和工作区设置               | 原始对话事实、旧 Proposal 审批      |
 
 `RuntimeEventStore` 是会话和 Agent 运行事实的唯一真源。Session 内存、Transcript 和
 Desktop ViewModel 都是可重建投影；损坏后应从 RuntimeEvent 重建，不建立第二套会话历史。
@@ -99,14 +100,18 @@ Desktop ViewModel 都是可重建投影；损坏后应从 RuntimeEvent 重建，
 Session 标题也属于 RuntimeEvent。Desktop session metadata 只保存 archive 等 UI 元数据；
 旧 metadata 由一次性迁移转换，正常读写只使用当前 schema，不以 metadata title 作为回退。
 
-所有 workspace Store 共用一个 `pico.sqlite`，但通过独立 schema scope、typed store API 和
-弱外键语义维持所有权边界。单库事务替代了旧 `.storage/` 目录锁、自研 commit journal 和
-跨 JSON/JSONL 文件协调；跨域生命周期操作仍先写 durable prepare，再执行或恢复收口。
+会话、TaskRun 和控制面等 workspace Store 共用 `pico.sqlite`，通过独立 schema scope、
+typed store API 和弱外键维持所有权。单库事务替代旧目录锁和跨 JSON/JSONL 协调；原子记忆
+使用独立库，不与 RuntimeEvent 共享事务。显式 remember 同步提交，自动后台提取则在
+terminal/checkpoint 持久化之后触发。
 
-`SqliteMemoryRepository` 是 RuntimeEvent 派生 provenance + 用户编辑意图的复合 authority：
-Source 可以由 RuntimeEvent 追溯，manual Fact、Fact 状态变更和 Proposal 裁决属于独立用户
-意图。Session 删除、自动 retention 或 EventLog hard cut 只让 Source unavailable，不删除
-已经提交的长期 Fact。`traces/` 保存可选运行 Span，不替代任何事实账本。
+`SqliteMemoryItemStore` 保存用户证据派生的内容和独立用户编辑意图。提取经独立规范化与
+校验后直接提交；Item、keys、sources、cursor 和 receipt 在记忆库内同事务保存。Session
+删除不删除已提交 Item；原事件不再可用时，记忆来源身份仍保留，但不保证可回读。归档可恢复，
+遗忘清除新库当前正文并保留来源抑制；原始会话、旧库和备份不在遗忘清理范围内。旧
+`SqliteMemoryRepository` 只保留兼容用途，工作区旧 memory 表由只读迁移保全，生产不双写。
+具体流程、召回预算和恢复限制见[原子长期记忆](./docs/architecture/14-workspace-memory.md)。
+`traces/` 保存可选运行 Span，不替代事实账本。
 
 ### Plan 执行与 DAG 调度
 
@@ -131,6 +136,8 @@ DAG 调度全部从 RuntimeEventStore 派生，不建立第二个 canonical stor
 ```text
 $PICO_HOME/
 ├── config.json
+├── memory.sqlite                       # 原子长期记忆：global + workspace
+├── memory.sqlite-wal / memory.sqlite-shm # SQLite 运行期文件
 ├── commands/
 ├── skills/
 ├── agents.yaml
@@ -164,10 +171,11 @@ $PICO_HOME/
 `<workDir>/.pico` 保存可跟随项目的声明式输入，不保存 Session 历史。旧 `.claw` 文件仅在
 明确标注的兼容读取边界中可能被识别，Pico 原生写入和事实源均不使用 `.claw`。
 
-旧 `.storage/`、`sessions/`、`task-runs/`、`control/`、`runtime/`、split-era
-`runtime.sqlite` / `memory.sqlite` 和 legacy task 文件都不属于当前布局。产品路径不会自动
-导入或删除这些内容；出现 JSONL 纪元目录标记时，SQLite 初始化会 fail-closed。需要保留数据
-时必须先走显式迁移或人工备份流程。
+旧 workspace 内的 `.storage/`、`sessions/`、`task-runs/`、`control/`、`runtime/`、split-era
+`runtime.sqlite` / `memory.sqlite` 和 legacy task 文件不属于当前布局；它们与当前用户级
+`$PICO_HOME/memory.sqlite` 不是同一位置。产品路径不会自动导入或删除这些旧文件，JSONL
+纪元目录标记仍使 SQLite 初始化 fail-closed。原子记忆只自动迁移现有 workspace `pico.sqlite`
+中的旧 memory 表，保全旧库且不提升 pending Proposal；备份必须同时考虑用户记忆库和工作区库。
 
 ## 并发与安全边界
 

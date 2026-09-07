@@ -4,6 +4,10 @@
 `pico.sqlite`，旧 JSONL 纪元不再提供产品读写路径。设计期个别实现选型后来发生调整：例如
 数据库副本当前使用 `VACUUM INTO`，不是下文最初设想的模块级 `backup()`；最终事实以代码为准。
 
+后续变更（2026-09-07）：原子长期记忆已迁出到用户级 `$PICO_HOME/memory.sqlite`，不再共用
+workspace 数据库。本文的单库/memory scope 描述保留为迁移阶段决策；当前边界及旧 memory 表
+只读迁移见[原子长期记忆](./14-workspace-memory.md)。
+
 ## 1. 背景实证
 
 文件载体(JSONL/JSON + 目录锁 + 自研 WAL)的三项结构性代价:

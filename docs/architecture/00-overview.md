@@ -22,7 +22,8 @@ Desktop Renderer ── Preload ── Electron Main ── current-user local d
                                     ├─ Context / Compaction
                                     ├─ ToolRegistry / Safety
                                     ├─ Hooks / MCP / Subagent
-                                    └─ workspace pico.sqlite
+                                    ├─ workspace pico.sqlite
+                                    └─ PICO_HOME/memory.sqlite
 ```
 
 - `pico` 和 `npm run dev` 启动的是 daemon 瘦客户端；TUI 进程不装配执行内核。
@@ -34,22 +35,22 @@ Desktop Renderer ── Preload ── Electron Main ── current-user local d
 
 ## 模块地图
 
-| 模块                                    | 当前职责                                                 |
-| --------------------------------------- | -------------------------------------------------------- |
-| `src/cli/`、`src/tui/`                  | CLI 参数、daemon 客户端、Ink UI 与本地交互适配           |
-| `apps/desktop/`                         | Electron Main/Preload/Renderer 与平台集成                |
-| `src/daemon/`、`packages/runtime-host/` | 本机 IPC、Runtime 宿主、Workspace 生命周期和协议 handler |
-| `src/runtime/`                          | `AgentRuntime` composition root、RuntimeRun 与恢复边界   |
-| `src/engine/`                           | ReAct 循环、Session、调度、预算和 Reporter               |
-| `src/provider/`                         | Provider 协议、模型路由、凭证解析、重试与计费            |
-| `src/tools/`                            | Tool Registry、安全中间件、资源调度、子代理和工具披露    |
-| `src/context/`                          | Prompt、请求投影、压缩、Skill 与恢复提示                 |
-| `src/storage/sqlite/`                   | workspace 单库 schema、typed store、投影与事务边界       |
-| `src/tasks/`、`src/memory/`             | Job/Cron/TaskRun 与长期记忆业务语义                      |
+| 模块                                    | 当前职责                                                  |
+| --------------------------------------- | --------------------------------------------------------- |
+| `src/cli/`、`src/tui/`                  | CLI 参数、daemon 客户端、Ink UI 与本地交互适配            |
+| `apps/desktop/`                         | Electron Main/Preload/Renderer 与平台集成                 |
+| `src/daemon/`、`packages/runtime-host/` | 本机 IPC、Runtime 宿主、Workspace 生命周期和协议 handler  |
+| `src/runtime/`                          | `AgentRuntime` composition root、RuntimeRun 与恢复边界    |
+| `src/engine/`                           | ReAct 循环、Session、调度、预算和 Reporter                |
+| `src/provider/`                         | Provider 协议、模型路由、凭证解析、重试与计费             |
+| `src/tools/`                            | Tool Registry、安全中间件、资源调度、子代理和工具披露     |
+| `src/context/`                          | Prompt、请求投影、压缩、Skill 与恢复提示                  |
+| `src/storage/sqlite/`                   | workspace 库与独立原子记忆库、typed store、投影与事务边界 |
+| `src/tasks/`、`src/memory/`             | Job/Cron/TaskRun 与长期记忆业务语义                       |
 
 ## 状态真源
 
-每个 workspace 的持久事实集中在：
+每个 workspace 的会话和控制事实保存在：
 
 ```text
 $PICO_HOME/workspaces/<workspace-id>/
@@ -62,16 +63,19 @@ $PICO_HOME/workspaces/<workspace-id>/
 └── hooks-state.json
 ```
 
-`pico.sqlite` 是统一物理载体，不代表所有状态属于同一个业务对象：
+原子长期记忆另存 `$PICO_HOME/memory.sqlite`，同一用户跨工作区共用；通过 global/workspace
+scope 限定可见范围。`pico.sqlite` 承载以下工作区状态，不代表它们属于同一个业务对象：
 
 - sessions scope：RuntimeEvent、Session、Run、Transcript 与相关投影；
 - task-runs scope：显式 recoverable 任务、Attempt、checkpoint、租约和启动凭据；
 - control scope：Job、Cron、daemon run、usage、provider call 和生命周期控制状态；
-- memory scope：Source、Fact、Proposal、settings、审计与幂等记录；
+- 旧 memory scope：仅作原子记忆的一次性只读迁移来源，不再用于生产提取或召回；
 - operations、attachments、retention、kv 等 scope：跨域操作、文件历史 manifest、配额与辅助状态。
 
 这些 scope 通过 typed store API 和事务边界维持所有权。RuntimeEvent 是 Agent 运行事实，
-TaskRun 是恢复协议事实，Control 是调度事实，Memory Fact 是独立长期意图；它们不能互相冒充。
+TaskRun 是恢复协议事实，Control 是调度事实。独立记忆库由 `SqliteMemoryItemStore` 管理
+Item、keys、sources、cursor/receipt 和工作区开关；不与 RuntimeEvent 共用事务。当前机制见
+[原子长期记忆](./14-workspace-memory.md)。
 
 ## ToolResult 与上下文
 
