@@ -241,7 +241,7 @@ export interface RuntimeHost {
   reporter?: Reporter;
   approvalNotifier?: ApprovalNotifier;
   onEvent?: (event: RuntimeLifecycleEvent) => void;
-  /** Metadata-only observer for newly committed pending memory proposals. */
+  /** @deprecated Atomic memory saves directly; use memoryChangedSink. Retained for legacy callers. */
   memoryProposalSink?: MemoryProposalPublishedSink;
   memoryChangedSink?: () => void;
   /** Metadata-only signal emitted after a Session Workbar authority changes. */
@@ -356,10 +356,10 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   pluginCapabilityRegistry?: PluginCapabilityRegistry;
   /** Explicit user-level trust authority for memory recall and review. */
   memoryTrustStore?: WorkspaceTrustStore;
-  /** Long-lived hosts with injected providers supply a fresh, self-owned worker model per claim. */
+  /** @deprecated Legacy worker injection is no longer used by production. Use atomicMemoryModelFactory. */
   memoryProposalModelFactory?: MemoryProposalModelFactory;
   atomicMemoryModelFactory?: () => Promise<AtomicMemoryModelLease>;
-  /** Test/host override; production automatic reviews wait for a short workspace debounce. */
+  /** @deprecated Atomic memory has no debounce or durable worker queue. */
   memoryReviewDebounceMs?: number;
   /** @internal Ignore project/user extension catalogs and host compatibility resources. */
   isolatedHeadless?: boolean;
