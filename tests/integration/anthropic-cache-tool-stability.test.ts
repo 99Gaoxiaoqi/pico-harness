@@ -106,7 +106,18 @@ test("Claude wire request keeps three cache breakpoints and degrades safely", as
   const server = createServer(async (request, response) => {
     requestBodies.push(await readJsonBody(request));
     response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ content: [{ type: "text", text: "ok" }] }));
+    response.end(
+      JSON.stringify({
+        id: "msg_cache_fixture",
+        type: "message",
+        role: "assistant",
+        model: "claude-test",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+    );
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -310,5 +321,28 @@ test("multi-turn engine requests reheat the deep history prefix without persisti
 });
 
 function anthropicSse(...payloads: ReadonlyArray<Record<string, unknown>>): string {
-  return `${payloads.map((payload) => `data: ${JSON.stringify(payload)}`).join("\n\n")}\n\n`;
+  const toolUse = payloads.some(
+    (payload) => (payload.content_block as { type?: string } | undefined)?.type === "tool_use",
+  );
+  const events = [
+    {
+      type: "message_start",
+      message: {
+        id: "msg_cache_fixture",
+        type: "message",
+        role: "assistant",
+        model: "claude-test",
+        content: [],
+        usage: { input_tokens: 1, output_tokens: 0 },
+      },
+    },
+    ...payloads.filter((payload) => payload.type !== "message_stop"),
+    {
+      type: "message_delta",
+      delta: { stop_reason: toolUse ? "tool_use" : "end_turn", stop_sequence: null },
+      usage: { output_tokens: 1 },
+    },
+    { type: "message_stop" },
+  ];
+  return `${events.map((payload) => `data: ${JSON.stringify(payload)}`).join("\n\n")}\n\n`;
 }

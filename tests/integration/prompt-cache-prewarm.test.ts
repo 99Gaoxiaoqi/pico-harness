@@ -266,6 +266,12 @@ test("Claude prewarm wire body uses max_tokens zero and keeps cache breakpoints"
   globalThis.fetch = async (_input, init) => {
     captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
     return Response.json({
+      id: "msg_prewarm_fixture",
+      type: "message",
+      role: "assistant",
+      model: "claude-sonnet-4-6",
+      stop_reason: "max_tokens",
+      stop_sequence: null,
       content: [],
       usage: {
         input_tokens: 0,
