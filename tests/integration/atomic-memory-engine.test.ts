@@ -86,6 +86,34 @@ test("atomic engine commits canonical user evidence synchronously, honors provid
   assert.equal(model.calls.length, 2);
 });
 
+test("atomic engine retries malformed canonicalization without rerunning the proposal", async (t) => {
+  const fixture = memoryFixture(t);
+  const user = event(1, "user", "Remember I prefer concise Chinese.");
+  const candidate = item("The user prefers concise Chinese.", user, "I prefer concise Chinese.");
+  const model = scriptedModel([
+    proposal([candidate]),
+    JSON.stringify({
+      results: [{ candidateId: "candidate_0", status: "accepted", item: candidate }],
+    }),
+    canonicalization(candidate),
+  ]);
+  const engine = new AtomicMemoryExtractionEngine({
+    store: fixture.store,
+    model,
+    gate: async () => ({ allowed: true }),
+  });
+  assert.equal((await engine.execute(source([user, event(2, "other", "")]))).status, "remembered");
+  assert.deepEqual(
+    model.calls.map((call) => call.stage),
+    ["proposal", "canonicalize", "canonicalize"],
+  );
+  assert.equal(
+    fixture.commits.length,
+    1,
+    "the candidate with an extra evidence field never commits",
+  );
+});
+
 test("atomic engine retries at most three calls per range, replays pending and discards before the next tail", async (t) => {
   const fixture = memoryFixture(t);
   const firstUser = event(1, "user", "Remember this preference.");
@@ -265,6 +293,22 @@ test("atomic engine recovers compaction before tail, bootstraps old checkpoints,
   assert.equal((await deniedFixture.cursor())?.processedOrdinal, 2);
   assert.equal(deniedFixture.commits[0]?.skipReason, "policy_denied");
   assert.equal((await deniedFixture.store.readCompactionPolicyDenials(SESSION)).length, 1);
+
+  const unavailableFixture = memoryFixture(t);
+  const unavailableEngine = new AtomicMemoryExtractionEngine({
+    store: unavailableFixture.store,
+    model: scriptedModel([]),
+    gate: async () => ({ allowed: false, reason: "session_unavailable" }),
+  });
+  await unavailableEngine.execute(
+    source([old, oldBoundary], {
+      trigger: "compaction",
+      checkpoints: [checkpoint],
+      compactionCheckpointId: checkpoint.checkpointId,
+    }),
+  );
+  assert.equal(await unavailableFixture.cursor(), undefined);
+  assert.deepEqual(await unavailableFixture.store.readCompactionPolicyDenials(SESSION), []);
 });
 
 test("atomic engine rejects hidden or fabricated requested citations and sensitive batches without false success", async (t) => {
