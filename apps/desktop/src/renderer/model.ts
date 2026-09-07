@@ -1,5 +1,6 @@
 import type { ConversationItemView } from "./conversation/types.js";
 import type {
+  UsageDashboardDetails,
   RuntimeCapabilityScope,
   RuntimeCollaborationMode,
   RuntimeInteractionMode,
@@ -243,6 +244,7 @@ export interface CapabilityScopeView {
 export type McpServerDraft = RuntimeMcpServerInput;
 
 export interface UsageView {
+  readonly details?: UsageDashboardDetails | undefined;
   readonly totalTokens?: number | undefined;
   readonly inputTokens?: number | undefined;
   readonly outputTokens?: number | undefined;
