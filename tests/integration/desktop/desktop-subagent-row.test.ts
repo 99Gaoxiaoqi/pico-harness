@@ -88,6 +88,7 @@ test("仅同轮次且调用标识明确匹配时合并 agent_spawn；历史缺�
     { id: "turn-two", kind: "userMessage", text: "检查项目" },
     spawn("tool:spawn-reader", "隐藏的稳定标识启动"),
     child,
+    { ...spawn("tool:live:run:turn:spawn-reader", "隐藏的实时启动"), toolCallId: "spawn-reader" },
     envelopeTool,
     { ...child, id: "subagent:envelope", toolCallId: "spawn-envelope" },
     { ...spawn("tool:another-tool", "保留的其他工具"), toolName: "read_file" },
@@ -97,7 +98,7 @@ test("仅同轮次且调用标识明确匹配时合并 agent_spawn；历史缺�
     spawn("unstructured-entry", "保留的非规范标识启动"),
     { ...child, id: "subagent:unknown", toolCallId: "unstructured-entry" },
   ]);
-  assert.doesNotMatch(markup, /隐藏的稳定标识启动|隐藏的结果关联启动/u);
+  assert.doesNotMatch(markup, /隐藏的稳定标识启动|隐藏的结果关联启动|隐藏的实时启动/u);
   assert.match(markup, /保留的先前轮次启动/u);
   assert.match(markup, /保留的其他工具/u);
   assert.match(markup, /保留的无关联启动/u);

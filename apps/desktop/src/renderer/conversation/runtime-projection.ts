@@ -275,6 +275,7 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
       id,
       kind: "tool",
       toolName: stringValue(item.name, "tool"),
+      toolCallId: stringValue(item.providerCallId) || undefined,
       title: stringValue(item.name, "工具调用"),
       detail: stringValue(item.args) || undefined,
       output: result?.projection.text || stringValue(item.summary) || undefined,
