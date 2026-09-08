@@ -34,6 +34,59 @@ import { ToolRegistry } from "../../src/tools/registry-impl.js";
 
 type PostToolHookEvent = "PostToolUse" | "PostToolUseFailure" | "PostToolBatch";
 
+test("parallel subagents keep streaming reporters isolated while sharing the parent token budget", async () => {
+  const bothStarted = deferred<void>();
+  let calls = 0;
+  const provider: LLMProvider = {
+    async generate() {
+      throw new Error("streaming provider should be used");
+    },
+    async generateStream(messages, _tools, onDelta, options) {
+      const task = messages[1]!.content.includes("child-alpha") ? "alpha" : "beta";
+      if (++calls === 2) bothStarted.resolve();
+      await bothStarted.promise;
+      onDelta(task);
+      options?.onReasoningDelta?.(`reasoning-${task}`);
+      return {
+        role: "assistant",
+        content: `${task} completed with verified evidence. `.repeat(10),
+        usage: { promptTokens: 10, completionTokens: 5 },
+      };
+    },
+  };
+  const streams = [[], []] as string[][];
+  const reasoning = [[], []] as string[][];
+  const reporters = streams.map(
+    (stream, index) =>
+      new (class extends SilentReporter {
+        onTextDelta(delta: string): void {
+          stream.push(delta);
+        }
+        onReasoningDelta(delta: string): void {
+          reasoning[index]!.push(delta);
+        }
+      })(),
+  );
+  const registry = new ToolRegistry();
+  const engine = new AgentEngine({
+    provider,
+    registry,
+    workDir: process.cwd(),
+    budgetConfig: { maxTokens: 20 },
+  });
+  const results = await Promise.all([
+    engine.runSub("child-alpha", registry, reporters[0]),
+    engine.runSub("child-beta", registry, reporters[1]),
+  ]);
+  assert.deepEqual(streams, [["alpha"], ["beta"]]);
+  assert.deepEqual(reasoning, [["reasoning-alpha"], ["reasoning-beta"]]);
+  assert.deepEqual(results.map(({ status }) => status).sort(), ["completed", "partial"]);
+  const blocked = await engine.runSub("child-after-budget", registry);
+  assert.equal(blocked.status, "partial");
+  assert.match(blocked.summary, /Token 预算/);
+  assert.equal(calls, 2, "already consumed shared budget stops the next child before provider IO");
+});
+
 test("Reporter failure happens after canonical ToolResult commit and keeps Session writable", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-tool-result-reporter-order-"));
   const workDir = join(root, "workspace");

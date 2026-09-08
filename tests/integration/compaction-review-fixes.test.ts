@@ -21,10 +21,9 @@ import { Session } from "../../src/engine/session.js";
 import { RuntimeRun } from "../../src/runtime/runtime-run.js";
 import { FULL_COMPACTION_SUMMARY_MARKER } from "../../src/context/compaction-markers.js";
 import { computeCheckpointSourceDigest } from "../../src/context/runtime-compaction-checkpoint.js";
-import { AgentEngine } from "../../src/engine/loop.js";
+import { compactSubagentContext } from "../../src/engine/subagent-context.js";
 import { Compactor, sanitizeToolPairs } from "../../src/context/compactor.js";
 import { CHARS_PER_TOKEN, estimateModelInputTokens } from "../../src/context/context-budget.js";
-import { ToolRegistry } from "../../src/tools/registry-impl.js";
 import type { Message } from "../../src/schema/message.js";
 
 const TEST_ROOT = process.env.PICO_TEST_TMPDIR ?? tmpdir();
@@ -208,15 +207,6 @@ test("wrapFullCompactionSummary 产生正确的 marker 前缀供 buildEvidenceSn
 // 未超预算)仍走 compactToBudget 默认 maxChars,compact() 的字符水位 gate 触发,把早期
 // 大段 assistant 推理折叠;修复后该路径显式跳过 compact(),只做 sanitizeToolPairs。
 test("compactSubContext 不在 token 未超预算时对英文内容触发字符水位压缩 (loop-9)", () => {
-  const engine = new AgentEngine({
-    workDir: process.cwd(),
-    registry: new ToolRegistry(),
-    provider: {
-      async generate() {
-        return { role: "assistant", content: "ok" };
-      },
-    },
-  });
   // maxChars 故意压低到 1500 字符;反推 tokenBudget = 1500/1.5 = 1000 token。
   const compactor = new Compactor({ maxChars: 1500, retainLastMsgs: 2 });
   // 单条 >REMOTE_THINKING_FOLD_THRESHOLD(200) 的英文正文;compact() 触发时早期条目会被折叠。
@@ -248,9 +238,7 @@ test("compactSubContext 不在 token 未超预算时对英文内容触发字符�
   );
 
   const expectedContents = sanitizeToolPairs(history).map((m) => m.content);
-  const result = (
-    engine as unknown as { compactSubContext: (h: Message[], c: Compactor) => Message[] }
-  ).compactSubContext(history, compactor);
+  const result = compactSubagentContext(history, compactor);
 
   // 修复后只做 sanitizeToolPairs,大段英文正文应原样保留(未被折叠/摘要)。
   assert.deepEqual(
@@ -262,15 +250,6 @@ test("compactSubContext 不在 token 未超预算时对英文内容触发字符�
 
 test("compactSubContext 仍在 token 超预算时按自适应预算压缩 (loop-9 回归守卫)", () => {
   // 守卫:确认上面跳过压缩的改动没有破坏"token 真的超预算时仍要压"的路径。
-  const engine = new AgentEngine({
-    workDir: process.cwd(),
-    registry: new ToolRegistry(),
-    provider: {
-      async generate() {
-        return { role: "assistant", content: "ok" };
-      },
-    },
-  });
   // maxChars 极小,使任意英文内容 token 维度也远超 tokenBudget。
   const compactor = new Compactor({ maxChars: 150, retainLastMsgs: 2 });
   const longBody =
@@ -291,9 +270,7 @@ test("compactSubContext 仍在 token 超预算时按自适应预算压缩 (loop-
   // 注意:compactSubContext 内部的 persistSubagentContext 会原地 splice 改写 history,
   // 故原始正文必须在调用前捕获。
   const originalBodies = history.filter((m) => m.role === "assistant").map((m) => m.content);
-  const result = (
-    engine as unknown as { compactSubContext: (h: Message[], c: Compactor) => Message[] }
-  ).compactSubContext(history, compactor);
+  const result = compactSubagentContext(history, compactor);
   // token 超预算时应触发自适应压缩:至少有一条早期大段正文被折叠/收紧(内容不再全等于原文)。
   const resultBodies = result.filter((m) => m.role === "assistant").map((m) => m.content);
   assert.ok(
