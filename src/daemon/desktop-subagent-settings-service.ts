@@ -6,6 +6,7 @@ import {
   type RuntimeSubagentConnection,
   type RuntimeSubagentSettingsSnapshot,
 } from "@pico/protocol";
+import { logger } from "../observability/logger.js";
 import { createConfiguredSubagentCatalog } from "../agents/configured-subagent-catalog.js";
 import { normalizePicoSubagentSettings } from "../input/subagent-settings.js";
 import {
@@ -54,7 +55,12 @@ export class DesktopSubagentSettingsService {
       throw error;
     }
     const snapshot = await this.snapshot(written);
-    await this.options.onUpdated?.(snapshot.revision);
+    // The config is already durable. Notification failures must not invite a duplicate save.
+    try {
+      await this.options.onUpdated?.(snapshot.revision);
+    } catch (error) {
+      logger.warn({ err: error }, "Subagent presets committed but refresh notification failed");
+    }
     return snapshot;
   }
 
