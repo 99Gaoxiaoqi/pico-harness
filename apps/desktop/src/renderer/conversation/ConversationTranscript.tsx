@@ -165,7 +165,9 @@ function visibleTurnItems(items: readonly ConversationItemView[]): readonly Conv
   return items.filter((item) => {
     if (item.kind !== "tool" || item.toolName !== "agent_spawn") return true;
     const toolCallId =
-      item.result?.toolCallId ?? (item.id.startsWith("tool:") ? item.id.slice(5) : undefined);
+      item.result?.toolCallId ??
+      item.toolCallId ??
+      (item.id.startsWith("tool:") ? item.id.slice(5) : undefined);
     return !toolCallId || !representedCalls.has(toolCallId);
   });
 }

@@ -1367,7 +1367,9 @@ function timelineItemToConversationItem(item: TimelineItem): ConversationItemVie
     return {
       id: item.id,
       kind: "tool",
-      toolName: item.title,
+      toolName: typeof item.data?.toolName === "string" ? item.data.toolName : item.title,
+      toolCallId:
+        typeof item.data?.providerCallId === "string" ? item.data.providerCallId : undefined,
       title: item.title,
       detail: item.detail,
       state: item.state ?? "active",

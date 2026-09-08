@@ -69,6 +69,7 @@ export interface PlanItemView extends ConversationItemBase {
 }
 
 export interface ToolItemView extends ConversationItemBase {
+  readonly toolCallId?: string | undefined;
   readonly kind: "tool";
   readonly toolName: string;
   readonly title: string;
