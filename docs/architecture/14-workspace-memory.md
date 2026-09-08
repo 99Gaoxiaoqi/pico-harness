@@ -177,9 +177,9 @@ global 条目在同一用户的受信工作区可管理，其他 workspace 的�
 拒绝。当前 UI 不提供任意修改 scope 的入口。
 
 协议仍保留 `fact`、`proposal`、`autoPropose` 等过渡名称；真正的类型和范围在 `fact.atomic`
-中。旧审核列表返回空，审核操作及 reviewMode/autoCommit 更新明确拒绝。TUI daemon 客户端
-的 `/memory status` 仍显示旧 Review/Pending 字段，undo 提示仍写 disabled；实际后端已经是
-直接保存/归档语义。这是尚待对齐的界面措辞，不是旧审核机制仍在运行。
+中。旧审核列表返回空，审核操作及 reviewMode/autoCommit 更新明确拒绝。TUI 的记忆命令经
+daemon 操作同一原子库：`/memory status` 显示记忆/召回/自动提取开关及活跃、归档数量；
+`/memory undo` 在版本匹配时归档条目，不显示旧审核队列或 disabled 语义。
 
 ## 6. 数据库结构与备份
 
@@ -205,7 +205,7 @@ global 条目在同一用户的受信工作区可管理，其他 workspace 的�
 | Item 契约与 SQLite 存储                  | [contracts.ts](../../src/memory/atomic/contracts.ts)、[sqlite-memory-item-store.ts](../../src/storage/sqlite/sqlite-memory-item-store.ts)                                                                                |
 | 关键词召回与预算                         | [context-builder.ts](../../src/memory/atomic/context-builder.ts)                                                                                                                                                         |
 | 管理与开关                               | [desktop-atomic-memory-service.ts](../../src/daemon/desktop-atomic-memory-service.ts)                                                                                                                                    |
-| 命令入口                                 | [client-commands.ts](../../src/tui/client-commands.ts)、[memory-command.ts](../../src/memory/memory-command.ts)                                                                                                          |
+| 命令入口                                 | [client-commands.ts](../../src/tui/client-commands.ts)                                                                                                                                                                   |
 
 确定性覆盖见 `tests/integration/memory/atomic-memory-*.test.ts`、
 `desktop-atomic-memory-service.test.ts` 和 `memory-runtime-quality.test.ts`；真实模型场景见
