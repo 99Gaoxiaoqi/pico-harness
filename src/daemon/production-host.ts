@@ -38,7 +38,6 @@ import {
   type CreateAgentGraphWorkspaceHostOptions,
   type ExecuteHostedAgentGraphRunInput,
 } from "../runtime/agent-graph-host.js";
-import type { MemoryProposalPublishedNotice } from "../memory/worker.js";
 import { createSessionRuntime } from "../runtime/session-runtime.js";
 import type {
   WorkspaceRunContext,
@@ -2586,29 +2585,6 @@ function resolveDesktopRequestedModel(
     );
   }
   return aliased;
-}
-
-/** Production adapter from the worker's metadata-only sink to the durable Runtime channel. */
-export function publishDesktopMemoryProposal(
-  service: Pick<WorkspaceRuntimeService, "publishDesktopNotification">,
-  workspacePath: string,
-  notice: MemoryProposalPublishedNotice,
-  nextResourceVersion: () => number,
-  now: () => number = Date.now,
-): void {
-  service.publishDesktopNotification(
-    createRuntimeNotification({
-      topic: "memory.proposed",
-      scope: { workspacePath },
-      resourceVersion: nextResourceVersion(),
-      at: now(),
-      payload: {
-        proposalId: notice.proposalId,
-        version: notice.version,
-        kind: notice.kind,
-      },
-    }),
-  );
 }
 
 function persistReporterOverlayDelta(

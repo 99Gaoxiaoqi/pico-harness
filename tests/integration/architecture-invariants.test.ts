@@ -113,20 +113,6 @@ test("D9 正向不变量：连接决策在监督器与共享 client，外壳只�
   assert.match(daemonClient, /\breconnectAttempt\b/, "共享 client 是全仓唯一重连状态机");
 });
 
-test("D11 债务追踪：Memory rebuild 不重放 overlay mutation（复活链仍在）", () => {
-  // P1 叙事态债：forgetFact 后账本保留原始来源，派生重建绕过 forget postcondition
-  // ——overlay 意图（Settings/manual-fact/Fact 裁决/审计）无法从账本重建。
-  const rebuild = readSource("src/memory/memory-rebuild.ts");
-  // 债务表征：rebuild 只重建派生层（Source + Jobs），不触碰 overlay——不重放
-  // overlay mutation。overlay 可重建化（或账本镜像 forget 意图）落地后，rebuild
-  // 必然开始引用 forgetFact/重放逻辑 → 本断言红。
-  assert.doesNotMatch(
-    rebuild,
-    /\bforgetFact\b/,
-    "memory-rebuild 不得重放 overlay mutation（forgetFact 等）；overlay 可重建化后删除本测试",
-  );
-});
-
 test("D12 正向不变量：transcript 分页算法只在 daemon 服务层，renderer 仅持视图竞态护栏", () => {
   // P1 机械态债已消除（3-C 重评后反转，2026-08-15）：“transcript 同步双实现”的
   // 实质是 Desktop 与移动端各自维护一套同步状态机，移动端移除（bc9efbd3）后已

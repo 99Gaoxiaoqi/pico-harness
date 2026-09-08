@@ -11,11 +11,8 @@ import type { CliSessionSelection } from "../cli/session-resolver.js";
 import { logger } from "../observability/logger.js";
 import { RuntimeRun } from "./runtime-run.js";
 import type { RuntimeRunContinuationOf } from "../engine/session-runtime-event.js";
-import type { MemoryReviewSchedulerPort } from "../memory/runtime-scheduler.js";
 import type { PlanHandoffController } from "../engine/plan-handoff.js";
 import type { PlanCoordinator } from "../plan/coordinator.js";
-import type { MemoryTriggerSlot } from "../memory/memory-trigger-tools.js";
-import { findPrecommittedDesktopMemoryEvidence } from "./memory-review-recovery.js";
 import type { SessionRuntime } from "./session-runtime.js";
 import type {
   RunAgentCliResult,
@@ -87,10 +84,6 @@ export interface RuntimeRunExecutorInput {
     readonly runId: string;
     readonly error: unknown;
   }) => Promise<void> | void;
-  /** Eligible foreground-only durable post-terminal memory scheduler. */
-  readonly memoryReviewScheduler?: MemoryReviewSchedulerPort;
-  /** Per-turn memory trigger slot: set by memory_remember/memory_extract tools. */
-  readonly memoryTriggerSlot?: MemoryTriggerSlot;
   readonly planHandoff?: PlanHandoffController;
   readonly planCoordinator?: () => PlanCoordinator;
 }
@@ -135,7 +128,6 @@ export class RuntimeRunExecutor {
       signal,
       onEvent,
       rewindPointSink,
-      memoryReviewScheduler,
       planHandoff,
       planCoordinator,
     } = this.input;
@@ -206,14 +198,6 @@ export class RuntimeRunExecutor {
               }
             : {}),
         }));
-      let submittedUserMessage =
-        memoryReviewScheduler && resumeExistingSession
-          ? findPrecommittedDesktopMemoryEvidence(
-              await runtimeRun.store.readSessionEntries(session.id),
-              runtimeRun.runId,
-              initialPrompt,
-            )
-          : undefined;
       emitRuntimeLifecycleEvent(onEvent, {
         type: "run.started",
         sessionId: session.id,
@@ -292,7 +276,6 @@ export class RuntimeRunExecutor {
               : {}),
             ...(images ? { images } : {}),
           });
-          submittedUserMessage = { eventId: userReceipt.eventId, content: prompt };
           await session.bindRewindPointSource(rewindPointId, userReceipt);
         }
 
@@ -332,41 +315,6 @@ export class RuntimeRunExecutor {
         }
       }, signal);
       await this.input.atomicMemoryCompleted?.(runtimeRun.runId);
-      if (memoryReviewScheduler && submittedUserMessage && this.input.memoryTriggerSlot?.trigger) {
-        try {
-          const terminalEntry = (await runtimeRun.store.readSessionEntries(session.id)).find(
-            ({ event }) =>
-              event.kind === "run.terminal" &&
-              event.runId === runtimeRun.runId &&
-              event.data.status === "completed" &&
-              event.data.recovered !== true,
-          );
-          if (terminalEntry?.event.kind === "run.terminal") {
-            const terminal = terminalEntry.event;
-            scheduleMemoryReviewEnqueue(
-              memoryReviewScheduler,
-              {
-                sessionId: session.id,
-                runId: runtimeRun.runId,
-                terminalEventId: terminal.eventId,
-                userMessageEventId: submittedUserMessage.eventId,
-                terminalSequence: terminalEntry.sequence,
-              },
-              { sessionId: session.id, runId: runtimeRun.runId },
-            );
-          }
-        } catch (error) {
-          // The completed terminal fact is canonical. Memory scheduling is degraded-only.
-          logger.warn(
-            {
-              sessionId: session.id,
-              runId: runtimeRun.runId,
-              error: error instanceof Error ? error.message : String(error),
-            },
-            "[Memory] post-terminal enqueue failed",
-          );
-        }
-      }
       const handoff = planHandoff?.result();
       if (handoff && planCoordinator) {
         const projection = await planCoordinator().project();
@@ -468,38 +416,6 @@ function prestartedRunClock(runStartedAt: string): () => Date {
     }
     return new Date();
   };
-}
-
-function scheduleMemoryReviewEnqueue(
-  scheduler: MemoryReviewSchedulerPort,
-  input: Parameters<MemoryReviewSchedulerPort["enqueue"]>[0],
-  context: { readonly sessionId: string; readonly runId: string },
-): void {
-  // The terminal fact is already durable. Schedule the observer in a new host task so neither a
-  // slow Promise nor synchronous storage lock contention can extend the foreground response path.
-  setImmediate(() => {
-    try {
-      const pending = scheduler.enqueue(input);
-      if (pending) {
-        void pending.catch((error: unknown) => logMemoryEnqueueFailure(context, error));
-      }
-    } catch (error) {
-      logMemoryEnqueueFailure(context, error);
-    }
-  });
-}
-
-function logMemoryEnqueueFailure(
-  context: { readonly sessionId: string; readonly runId: string },
-  error: unknown,
-): void {
-  logger.warn(
-    {
-      ...context,
-      error: error instanceof Error ? error.message : String(error),
-    },
-    "[Memory] post-terminal enqueue failed",
-  );
 }
 
 export function emitRuntimeLifecycleEvent(

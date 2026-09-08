@@ -1,8 +1,16 @@
-import { redactSensitiveText } from "../mcp/redact.js";
-import type {
-  MemoryProposalSanitization,
-  RawMemoryProposalCandidate,
-} from "./proposal-contracts.js";
+import { redactSensitiveText } from "../../mcp/redact.js";
+
+interface MemoryContentCandidate {
+  readonly title: string;
+  readonly content: string;
+  readonly reason: string;
+}
+type MemoryContentSanitization =
+  | { readonly disposition: "reject"; readonly safetyCodes: string[] }
+  | (MemoryContentCandidate & {
+      readonly disposition: "allow" | "quarantine";
+      readonly safetyCodes: string[];
+    });
 
 const PRIVATE_KEY_RE = /-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----/iu;
 const JWT_RE = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/u;
@@ -26,9 +34,9 @@ const INJECTION_PATTERNS = [
   /(?:调用|执行|运行).{0,16}(?:工具|命令|脚本)/iu,
 ] as const;
 
-export function sanitizeMemoryProposalCandidate(
-  candidate: RawMemoryProposalCandidate,
-): MemoryProposalSanitization {
+export function sanitizeMemoryContent(
+  candidate: MemoryContentCandidate,
+): MemoryContentSanitization {
   const title = normalizeStoredText(candidate.title);
   const content = normalizeStoredText(candidate.content);
   const reason = normalizeStoredText(candidate.reason);
@@ -62,15 +70,6 @@ export function sanitizeMemoryProposalCandidate(
     disposition: piiCodes.length > 0 ? "quarantine" : "allow",
     safetyCodes: [...new Set(piiCodes)],
   };
-}
-
-export function normalizeMemoryIdentityText(value: string): string {
-  return value
-    .normalize("NFKC")
-    .toLocaleLowerCase("en-US")
-    .replaceAll(/[\s\u00a0]+/gu, " ")
-    .replace(/[.!！?？。,，;；:：]+$/gu, "")
-    .trim();
 }
 
 function normalizeStoredText(value: string): string {

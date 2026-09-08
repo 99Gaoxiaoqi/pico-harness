@@ -194,7 +194,6 @@ import {
   atomicMemoryDatabasePath,
   type AtomicMemoryModelLease,
 } from "./atomic-memory-runtime.js";
-import type { MemoryProposalModelFactory, MemoryProposalPublishedSink } from "../memory/worker.js";
 export type {
   RunAgentCliOptions,
   RunAgentCliResult,
@@ -241,8 +240,6 @@ export interface RuntimeHost {
   reporter?: Reporter;
   approvalNotifier?: ApprovalNotifier;
   onEvent?: (event: RuntimeLifecycleEvent) => void;
-  /** @deprecated Atomic memory saves directly; use memoryChangedSink. Retained for legacy callers. */
-  memoryProposalSink?: MemoryProposalPublishedSink;
   memoryChangedSink?: () => void;
   /** Metadata-only signal emitted after a Session Workbar authority changes. */
   sessionResourceChangedSink?: (notice: RuntimeSessionResourceChangedNotice) => void;
@@ -356,12 +353,8 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   pluginCapabilityRegistry?: PluginCapabilityRegistry;
   /** Explicit user-level trust authority for memory recall and review. */
   memoryTrustStore?: WorkspaceTrustStore;
-  /** @deprecated Legacy worker injection is no longer used by production. Use atomicMemoryModelFactory. */
-  memoryProposalModelFactory?: MemoryProposalModelFactory;
   atomicMemoryLifecycle?: AtomicMemoryLifecycle;
   atomicMemoryModelFactory?: () => Promise<AtomicMemoryModelLease>;
-  /** @deprecated Atomic memory has no debounce or durable worker queue. */
-  memoryReviewDebounceMs?: number;
   /** @internal Ignore project/user extension catalogs and host compatibility resources. */
   isolatedHeadless?: boolean;
   /** Visible Electron browser authority. Omitted for CLI, background and headless hosts. */
