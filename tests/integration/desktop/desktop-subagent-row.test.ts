@@ -83,10 +83,20 @@ test("子代理以单个原生按钮展示摘要、状态、只读与耗时，�
   assert.match(markup, /data-state="active"/u);
   assert.match(markup, /运行中 · 只读 · 1\.3s/u);
   assert.match(markup, /conversation-subagent-row__dot/u);
+  assert.match(markup, /data-child="true">子智能体/u);
   assert.match(markup, /conversation-subagent-row__chevron/u);
   assert.match(markup, /conversation-subagent-row__action">查看运行/u);
   assert.doesNotMatch(markup, /disabled=|conversation-inline-card|<p\b|<header\b/u);
   assert.equal([...markup.matchAll(/<button\b/gu)].length, 1);
+  for (const assistantLabel of ["主智能体 · Pico", "子智能体 · Local Read"]) {
+    const response = renderToStaticMarkup(
+      React.createElement(ConversationTranscript, {
+        assistantLabel,
+        items: [{ id: "reply", kind: "assistantMessage", text: "已完成" }],
+      }),
+    );
+    assert.ok(response.includes(`<h3 class="conversation-message__author">${assistantLabel}</h3>`));
+  }
 
   const { detail: _detail, ...withoutDetail } = child;
   const completed = render([{ ...withoutDetail, state: "done", durationMs: 0 }]);

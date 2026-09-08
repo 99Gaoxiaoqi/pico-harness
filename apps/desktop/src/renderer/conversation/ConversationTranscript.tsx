@@ -27,6 +27,7 @@ import { MarkdownText } from "./MarkdownText.js";
 import { loadedAgentTools } from "./agent-capability.js";
 
 export interface ConversationTranscriptProps {
+  readonly assistantLabel?: string | undefined;
   readonly items: readonly ConversationItemView[];
   readonly label?: string | undefined;
   readonly emptyState?: ReactNode | undefined;
@@ -149,11 +150,18 @@ function SubagentRow({
       title={summary}
       onClick={canOpen ? () => onOpenItem?.(item) : undefined}
     >
-      <GitBranch className="conversation-subagent-row__icon" aria-hidden="true" />
-      <span className="conversation-subagent-row__dot" aria-hidden="true" />
-      <strong className="conversation-subagent-row__name">{item.name}</strong>
+      <span className="conversation-subagent-row__identity">
+        <GitBranch className="conversation-subagent-row__icon" aria-hidden="true" />
+        <span className="conversation-agent-role" data-child="true">
+          子智能体
+        </span>
+        <strong className="conversation-subagent-row__name">{item.name}</strong>
+      </span>
+      <span className="conversation-subagent-row__meta">
+        <span className="conversation-subagent-row__dot" aria-hidden="true" />
+        {metadata}
+      </span>
       <span className="conversation-subagent-row__summary">{summary}</span>
-      <span className="conversation-subagent-row__meta">{metadata}</span>
       {canOpen && (
         <span className="conversation-subagent-row__action">
           查看运行
@@ -182,6 +190,7 @@ function renderDefaultItem(
   item: ConversationItemView,
   renderText: NonNullable<ConversationTranscriptProps["renderText"]>,
   onOpenItem?: (item: ConversationItemView) => void,
+  assistantLabel?: string,
 ): ReactNode {
   switch (item.kind) {
     case "userMessage":
@@ -197,7 +206,9 @@ function renderDefaultItem(
           className="conversation-message conversation-message--assistant"
           data-streaming={item.streaming || undefined}
         >
-          <h3 className="conversation-sr-only">Pico</h3>
+          <h3 className={assistantLabel ? "conversation-message__author" : "conversation-sr-only"}>
+            {assistantLabel ?? "Pico"}
+          </h3>
           <div className="conversation-message__body">{renderText(item.text, item)}</div>
           {item.streaming && (
             <span className="conversation-streaming-label" role="status">
@@ -454,6 +465,7 @@ function renderDefaultItem(
 
 export function ConversationTranscript({
   items,
+  assistantLabel,
   label = "会话记录",
   emptyState,
   onOpenItem,
@@ -496,7 +508,7 @@ export function ConversationTranscript({
         <li className="conversation-turn" key={turn.key}>
           <ol className="conversation-turn__items">
             {visibleTurnItems(turn.items).map((item) => {
-              const fallback = renderDefaultItem(item, renderText, onOpenItem);
+              const fallback = renderDefaultItem(item, renderText, onOpenItem, assistantLabel);
               return (
                 <li
                   className="conversation-transcript__item"
