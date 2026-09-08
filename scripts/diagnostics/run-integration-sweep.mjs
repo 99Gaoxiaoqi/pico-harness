@@ -44,6 +44,7 @@ for (const f of files) {
         "--import",
         "./src/tui/preload-env.ts",
         "--test",
+        "--test-reporter=tap",
         "--test-concurrency=1",
         f,
       ],

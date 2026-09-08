@@ -10,15 +10,15 @@ import {
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
   WorkspaceRuntimeService,
-} from "../../src/daemon/index.js";
-import { WorkspaceRegistrationStore } from "../../src/daemon/workspace-registration.js";
-import { parseUserConfig, UserConfigStore } from "../../src/input/user-config-store.js";
+} from "../../../src/daemon/index.js";
+import { WorkspaceRegistrationStore } from "../../../src/daemon/workspace-registration.js";
+import { parseUserConfig, UserConfigStore } from "../../../src/input/user-config-store.js";
 import {
   credentialRefForProvider,
   type CredentialVault,
-} from "../../src/provider/credential-vault.js";
-import { ProviderOperationJournal } from "../../src/provider/provider-operation-journal.js";
-import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
+} from "../../../src/provider/credential-vault.js";
+import { ProviderOperationJournal } from "../../../src/provider/provider-operation-journal.js";
+import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
 
 const PROVIDER_ID = "revision-token-fixture";
 
