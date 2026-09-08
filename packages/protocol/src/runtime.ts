@@ -1,4 +1,5 @@
 // Public compatibility entry: domain contracts and validators are owned by runtime/*.ts.
+export * from "./runtime/subagents.js";
 import { automationParamValidators, automationResultValidators } from "./runtime/automation.js";
 import { isJsonValue } from "./runtime/base.js";
 import {
