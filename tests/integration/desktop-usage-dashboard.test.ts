@@ -14,7 +14,7 @@ import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";
 import { SqliteRuntimeControlStore } from "../../src/storage/sqlite/sqlite-runtime-control-store.js";
 import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
-import { parseUsage } from "../../apps/desktop/src/renderer/runtime.js";
+import { parseUsage } from "../../apps/desktop/src/renderer/usage/runtime-projection.js";
 import type { RuntimeEvent } from "../../src/engine/session-runtime-event.js";
 
 test("usage dashboard joins real model and tool ledgers across workspaces, preserves partial costs and filters sessions", async (t) => {

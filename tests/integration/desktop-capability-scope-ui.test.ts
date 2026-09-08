@@ -21,25 +21,22 @@ test("Skills 和 MCP 收拢到设置侧边栏，不会继承项目作用域", as
 });
 
 test("embedded MCP page keeps the user-level add action", async () => {
-  const source = await rendererSource("App.tsx");
-  const capabilityPage = source.slice(
-    source.indexOf("export function CapabilityPage"),
-    source.indexOf("function UsagePage"),
-  );
+  const source = await rendererSource("pages/ExtensionsPage.tsx");
+  const capabilityPage = source.slice(source.indexOf("export function CapabilityPage"));
   assert.match(capabilityPage, /embedded && kind === "mcp"/u);
   assert.match(capabilityPage, /添加用户级 MCP/u);
   assert.match(capabilityPage, /setAddingMcp\(\(visible\) => !visible\)/u);
 });
 
 test("composer no longer exposes the retired Discovery entry", async () => {
-  const source = await rendererSource("App.tsx");
+  const source = await rendererSource("pages/ConversationPage.tsx");
   assert.doesNotMatch(source, /name="discovery-depth"/u);
   assert.doesNotMatch(source, /startDiscovery|resumeDiscovery|cancelDiscovery/u);
   assert.doesNotMatch(source, /启动代码探索|取消探索|恢复探索/u);
 });
 
 test("changes panel describes completed-run checkpoints instead of live workspace state", async () => {
-  const source = await rendererSource("App.tsx");
+  const source = await rendererSource("conversation/ConversationEnvironmentPanel.tsx");
   assert.match(source, /运行结束后，这里会显示固化的变更检查点/u);
   assert.match(source, /仅展示已结束运行固化的变更/u);
   assert.doesNotMatch(source, /<strong>\{active \? "等待文件变更" : "工作区是干净的"\}<\/strong>/u);
@@ -64,16 +61,13 @@ test("启动只加载用户级能力，显式选择项目后才读取有效列�
   assert.match(source, /invoke\(bridge, "mcp\.effective\.list", \{ workspacePath \}\)/u);
   assert.match(source, /该项目尚未信任[\s\S]*已继续显示用户级列表/u);
 
-  const appSource = await rendererSource("App.tsx");
+  const appSource = await rendererSource("pages/ExtensionsPage.tsx");
   assert.match(appSource, /<option value="">仅用户级<\/option>/u);
   assert.match(
     appSource,
     /actions\.loadCapabilityScope\(kind, event\.target\.value \|\| undefined\)/u,
   );
-  const capabilityPage = appSource.slice(
-    appSource.indexOf("export function CapabilityPage"),
-    appSource.indexOf("function UsagePage"),
-  );
+  const capabilityPage = appSource.slice(appSource.indexOf("export function CapabilityPage"));
   assert.doesNotMatch(capabilityPage, /actions\.selectWorkspace/u);
 });
 
@@ -119,7 +113,7 @@ test("MCP 用户级增删使用 CAS 与幂等键，冲突后只刷新列表", as
     /label\.startsWith\("mcp-user-"\)[\s\S]+await loadUserCapabilities\(bridge\)/u,
   );
 
-  const appSource = await rendererSource("App.tsx");
+  const appSource = await rendererSource("pages/ExtensionsPage.tsx");
   assert.match(appSource, /只新增配置，不会连接或启动服务/u);
   assert.doesNotMatch(appSource, /envKeys|headerKeys|headers\s*:|env\s*:/u);
 });

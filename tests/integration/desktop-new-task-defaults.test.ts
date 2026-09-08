@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { parseUserDefaults } from "../../apps/desktop/src/renderer/runtime.js";
+import { parseUserDefaults } from "../../apps/desktop/src/renderer/runtime-projections/configuration.js";
 
 test("new task defaults preserve canonical session settings", () => {
   assert.deepEqual(
@@ -29,7 +29,7 @@ test("new task defaults retain only protocol-supported legacy mode values", () =
 
 test("new task falls back to the fail-closed Runtime default when user config is absent", async () => {
   const source = await readFile(
-    new URL("../../apps/desktop/src/renderer/App.tsx", import.meta.url),
+    new URL("../../apps/desktop/src/renderer/pages/ConversationPage.tsx", import.meta.url),
     "utf8",
   );
   assert.match(
@@ -40,7 +40,7 @@ test("new task falls back to the fail-closed Runtime default when user config is
 
 test("desktop permission selectors expose all modes with explicit labels", async () => {
   const source = await readFile(
-    new URL("../../apps/desktop/src/renderer/App.tsx", import.meta.url),
+    new URL("../../apps/desktop/src/renderer/pages/ConversationPage.tsx", import.meta.url),
     "utf8",
   );
   assert.match(source, /<option value="default">权限：默认<\/option>/u);

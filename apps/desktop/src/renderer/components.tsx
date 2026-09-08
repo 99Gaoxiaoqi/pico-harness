@@ -9,12 +9,15 @@ import {
   Circle,
   Clock3,
   Folder,
+  Layers3,
   LoaderCircle,
   ShieldAlert,
+  ShieldCheck,
+  Sparkles,
   X,
 } from "lucide-react";
 import { useEffect, useState, type ComponentProps, type ReactNode } from "react";
-import type { ApprovalView, CapabilityView, PromptView } from "./model.js";
+import type { ApprovalView, CapabilityView, PromptView, WorkspaceMode } from "./model.js";
 
 export function IconButton({
   label,
@@ -389,5 +392,61 @@ export function PathButton({
       <span>{name}</span>
       <ChevronRight aria-hidden="true" size={14} />
     </button>
+  );
+}
+
+export function WorkspaceModeBadge({ mode }: { readonly mode: WorkspaceMode | undefined }) {
+  return (
+    <span className={`workspace-mode-badge workspace-mode-badge--${mode ?? "folder"}`}>
+      {mode === "git" ? <ShieldCheck aria-hidden="true" /> : <Folder aria-hidden="true" />}
+      {mode === "git" ? "版本保护" : "基础模式"}
+    </span>
+  );
+}
+
+export function WorkspaceModeCard({ mode }: { readonly mode: WorkspaceMode | undefined }) {
+  const protectedMode = mode === "git";
+  return (
+    <section className="workspace-mode-card" aria-label="工作区模式">
+      <div>
+        <WorkspaceModeBadge mode={mode} />
+        <strong>{protectedMode ? "这个文件夹已启用版本保护" : "这个文件夹可以直接使用"}</strong>
+      </div>
+      <p>
+        {protectedMode
+          ? "Pico 可以隔离并行任务，并在确认后合并它们的更改。"
+          : "Pico 可以直接读写文件并运行并行分析子代理；可写子代理的隔离、分支和独立合并目前需要 Git。"}
+      </p>
+      {!protectedMode && (
+        <small>版本保护是一项进阶能力，由 Git 提供；不了解它也不影响现在开始。</small>
+      )}
+    </section>
+  );
+}
+
+export function CapabilityUnavailable({
+  title,
+  detail,
+}: {
+  readonly title: string;
+  readonly detail: string;
+}) {
+  return (
+    <EmptyState
+      icon={<Layers3 />}
+      title={title}
+      detail={detail}
+      action={
+        <InlineNotice tone="warning">此区域不会用本地 fixture 替代 Runtime 数据。</InlineNotice>
+      }
+    />
+  );
+}
+
+export function PreviewBadge() {
+  return (
+    <span className="preview-badge">
+      <Sparkles aria-hidden="true" size={13} /> Preview
+    </span>
   );
 }

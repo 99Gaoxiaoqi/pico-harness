@@ -32,8 +32,9 @@ test("全局 Provider 加载与工作区 effective config 保持独立", async (
     "const loadWorkspace = useCallback",
     "const loadConversation",
   );
+  const providerProjection = await rendererSource("runtime-projections/configuration.ts");
   const providerParser = sourceSection(
-    source,
+    providerProjection,
     "function parseProviderConfig",
     "function parseCatalogAgents",
   );

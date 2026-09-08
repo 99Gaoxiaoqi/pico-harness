@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { FULL_COMPACTION_SUMMARY_MARKER } from "../../src/context/compaction-markers.js";
-import { parseUsage } from "../../apps/desktop/src/renderer/runtime.js";
+import { parseUsage } from "../../apps/desktop/src/renderer/usage/runtime-projection.js";
 import {
   createRuntimeRequest,
   DesktopRuntimeService,

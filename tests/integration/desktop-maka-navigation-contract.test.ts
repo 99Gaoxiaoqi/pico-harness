@@ -14,7 +14,7 @@ test("desktop main sidebar follows the Maka task-first information architecture"
     [{ label: "定时任务", to: "/automations" }],
   );
 
-  const source = await rendererSource("App.tsx");
+  const source = await rendererSource("AppShell.tsx");
   assert.match(source, /aria-label="任务分组方式"/u);
   assert.match(source, /setGrouping\("time"\)/u);
   assert.match(source, /setGrouping\("project"\)/u);
@@ -41,7 +41,7 @@ test("settings replaces the task sidebar and owns tool capability routes", async
     "/settings/models?workspace=%2Ftmp%2Fpico",
   );
 
-  const source = await rendererSource("App.tsx");
+  const source = (await rendererSource("App.tsx")) + (await rendererSource("AppShell.tsx"));
   assert.match(source, /settingsRoute \? \(/u);
   assert.match(
     source,
@@ -61,10 +61,10 @@ test("settings replaces the task sidebar and owns tool capability routes", async
 });
 
 test("invalid workspace query falls back to an interactive new task", async () => {
-  const source = await rendererSource("App.tsx");
+  const source = await rendererSource("pages/ConversationPage.tsx");
   const newTaskPage = source.slice(
     source.indexOf("function NewTaskPage"),
-    source.indexOf("interface ConversationEnvironmentPanelProps"),
+    source.indexOf("export function ConversationPage"),
   );
   assert.match(
     newTaskPage,
@@ -73,7 +73,7 @@ test("invalid workspace query falls back to an interactive new task", async () =
 });
 
 test("sidebar pending state includes prompts and is scoped by workspace plus session", async () => {
-  const source = await rendererSource("App.tsx");
+  const source = await rendererSource("AppShell.tsx");
   const sidebarTasks = source.slice(
     source.indexOf("function SidebarTasks"),
     source.indexOf("function SidebarSessionRow"),
@@ -87,7 +87,7 @@ test("sidebar pending state includes prompts and is scoped by workspace plus ses
 });
 
 test("new task settings prefer canonical defaults and only use legacy mode as fallback", async () => {
-  const source = await rendererSource("App.tsx");
+  const source = await rendererSource("pages/ConversationPage.tsx");
   const defaults = source.slice(
     source.indexOf("const newTaskSettings"),
     source.indexOf("const updateNewTaskSettings"),
@@ -100,7 +100,7 @@ test("new task settings prefer canonical defaults and only use legacy mode as fa
 });
 
 test("deleting a session removes only its session-owned composer draft", async () => {
-  const source = await rendererSource("App.tsx");
+  const source = await rendererSource("AppShell.tsx");
   const deleteHandler = source.slice(
     source.indexOf("const handleDeleteSession"),
     source.indexOf("return (", source.indexOf("const handleDeleteSession")),
