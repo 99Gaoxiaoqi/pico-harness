@@ -21,6 +21,7 @@ resources/licenses/bubblewrap/bubblewrap-*.tar.xz
 coverage/
 test-results/
 playwright-report/
+.playwright-cli/
 output/playwright/
 output/benchmarks/
 __pycache__/
