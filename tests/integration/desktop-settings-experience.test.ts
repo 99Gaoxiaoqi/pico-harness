@@ -7,7 +7,7 @@ import {
   createDesktopPreferences,
   DesktopPreferencesStore,
 } from "../../apps/desktop/src/main/preferences.js";
-import { parseUsage } from "../../apps/desktop/src/renderer/runtime.js";
+import { parseUsage } from "../../apps/desktop/src/renderer/usage/runtime-projection.js";
 
 test("desktop background preference persists in main-owned storage and malformed data fails safe", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-desktop-preferences-"));
@@ -36,7 +36,12 @@ test("settings routes stay globally accessible and project management never sele
   assert.match(navigation, /to: "\/settings\/workspaces", label: "项目"/u);
   assert.doesNotMatch(navigation, /settings\/usage[^\n]+scoped: true/u);
 
-  const page = sourceSection(app, "function WorkspaceSettingsPage", "function SystemSettingsPage");
+  const settings = await rendererSource("pages/SettingsPage.tsx");
+  const page = sourceSection(
+    settings,
+    "function WorkspaceSettingsPage",
+    "function SystemSettingsPage",
+  );
   assert.doesNotMatch(page, /当前选择|selectWorkspace|chooseWorkspace/u);
   assert.match(page, /actions\.registerWorkspace\(\)/u);
   assert.match(page, /actions\.unregisterWorkspace\(workspace\.path\)/u);
@@ -52,7 +57,7 @@ test("settings routes stay globally accessible and project management never sele
 });
 
 test("general settings read background mode from main and preserve UI state on save failure", async () => {
-  const app = await rendererSource("App.tsx");
+  const app = await rendererSource("pages/SettingsPage.tsx");
   const runtime = await rendererSource("runtime.ts");
   const general = sourceSection(app, "function SettingsPage", "function WorkspaceSettingsPage");
   assert.doesNotMatch(general, /localStorage|pico\.background-mode/u);
@@ -112,8 +117,7 @@ test("usage parser preserves global token and CNY cost semantics", () => {
 });
 
 test("usage settings expose an accessible time filter and CNY cost summaries", async () => {
-  const app = await rendererSource("App.tsx");
-  const host = sourceSection(app, "function UsagePage", "function SettingsPage");
+  const host = await rendererSource("usage/UsagePage.tsx");
   const page = await rendererSource("usage/UsageSettingsPage.tsx");
   assert.match(host, /<UsageSettingsPage/u);
   assert.match(host, /onQuery=\{query\}/u);
@@ -165,7 +169,7 @@ test("deleting a locally stored provider credential requires confirmation", asyn
 });
 
 test("global feedback stays dismissible without covering settings actions", async () => {
-  const app = await rendererSource("App.tsx");
+  const app = await rendererSource("AppShell.tsx");
   const runtime = await rendererSource("runtime.ts");
   const styles = await rendererSource("styles.css");
   assert.match(app, /aria-label="关闭提示"/u);

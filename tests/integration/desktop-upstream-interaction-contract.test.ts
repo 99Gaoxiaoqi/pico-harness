@@ -195,7 +195,7 @@ test("approval audit items stay out of the main transcript", () => {
 
 test("persisted approvals recover the interaction slot and disappear after terminal runs", async () => {
   const appSource = await readFile(
-    new URL("../../apps/desktop/src/renderer/App.tsx", import.meta.url),
+    new URL("../../apps/desktop/src/renderer/pages/ConversationPage.tsx", import.meta.url),
     "utf8",
   );
   assert.match(appSource, /persistedPendingApproval/u);
@@ -205,7 +205,7 @@ test("persisted approvals recover the interaction slot and disappear after termi
     /activeRun\s*\? pendingToolApprovalFromTranscript\(conversation\?\.items \?\? \[\]\)\s*:\s*undefined/u,
   );
   const runtimeSource = await readFile(
-    new URL("../../apps/desktop/src/renderer/runtime.ts", import.meta.url),
+    new URL("../../apps/desktop/src/renderer/conversation/runtime-projection.ts", import.meta.url),
     "utf8",
   );
   const helper = runtimeSource.slice(
