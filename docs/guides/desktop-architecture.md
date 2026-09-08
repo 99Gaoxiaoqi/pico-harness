@@ -54,3 +54,10 @@ Pico daemon ── Agent Runtime / Session / Rewind / Automations
 - Approval 响应必须幂等；Pause 在当前不可中断工具结束后生效。
 - Rewind 在文件指纹变化时 fail-closed，外部副作用不会伪装成可回滚。
 - 未实现或不可用能力在 UI 中显示真实原因，不返回伪造成功状态。
+
+## daemon 配置所有权
+
+`DesktopRuntimeService` 负责协议装配和跨领域宿主协作；`DesktopProviderConfigService`
+统一拥有用户配置、有效配置解析、凭证 vault、operation journal、恢复和文件监视生命周期。
+Provider 写入、Automation 与 Session/Run 准入委托给同一条 dependency lock 队列，
+避免配置变化与依赖它的任务启动交叉。协议 handler 只映射请求，不持有另一份配置状态。
