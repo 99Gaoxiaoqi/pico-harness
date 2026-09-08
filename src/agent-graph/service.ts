@@ -379,7 +379,7 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
         );
         const workspacePolicy =
           (profileSnapshot.subagentPreset?.profile === "implementation" ||
-            profileSnapshot.profileId === "implementation") &&
+            profileSnapshot.capabilityProfile === "implementation") &&
           requested?.kind === "add" &&
           requested.operator.workspacePolicy.kind === "shared"
             ? requested.operator.workspacePolicy
@@ -390,6 +390,9 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
             ...operator,
             workspacePolicy,
             profileId: profileSnapshot.profileId,
+            ...(requested?.kind === "add" && requested.operator.legacyCapabilityId
+              ? { legacyCapabilityId: true }
+              : {}),
             ...(requested?.kind === "add" &&
             requested.operator.requireConfiguredPreset !== undefined
               ? { requireConfiguredPreset: requested.operator.requireConfiguredPreset }
@@ -596,9 +599,11 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
     return Promise.all(
       input.commands.map(async (command) => {
         if (command.kind !== "add") return command;
-        const { profileId, requireConfiguredPreset, ...operator } = command.operator;
+        const { profileId, requireConfiguredPreset, legacyCapabilityId, ...operator } =
+          command.operator;
         const selection = {
           profileId,
+          ...(legacyCapabilityId ? { legacyCapabilityId: true } : {}),
           rootModelRouteId: input.rootModelRouteId,
           ...(requireConfiguredPreset === undefined ? {} : { requireConfiguredPreset }),
         };
@@ -607,7 +612,7 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
         ) ?? this.operatorProfileCatalog.resolve(selection));
         const requiresIsolation =
           profileSnapshot.subagentPreset?.profile === "implementation" ||
-          profileId === "implementation";
+          profileSnapshot.capabilityProfile === "implementation";
         const workspacePolicy =
           requiresIsolation && operator.workspacePolicy.kind === "shared"
             ? { kind: "isolated-worktree" as const }

@@ -173,7 +173,6 @@ export function createConfiguredSubagentExecutor(
         artifactIds: [],
         ...(turnId ? { turnId } : {}),
         ...(runId ? { runId } : {}),
-        ref: `pico://session/${encodeURIComponent(result.sessionId)}`,
         summary: result.finalMessage,
       };
     };
@@ -255,7 +254,7 @@ export function createConfiguredSubagentExecutor(
         summary: error instanceof Error ? error.message : String(error),
       });
       throw new Error(
-        `Child task ${sessionId} failed: ${error instanceof Error ? error.message : String(error)} (pico://session/${sessionId})`,
+        `Child task ${sessionId} failed: ${error instanceof Error ? error.message : String(error)} (childSessionId=${sessionId}; use agent_output to inspect)`,
         { cause: error },
       );
     }

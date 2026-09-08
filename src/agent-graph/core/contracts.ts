@@ -25,6 +25,7 @@ export interface AgentGraphOperationSource {
 }
 
 export interface AgentGraphProfileSnapshot {
+  readonly capabilityProfile?: import("@pico/protocol").SubagentProfile;
   readonly subagentPreset?: import("@pico/protocol").RuntimeSubagentPreset;
   readonly schemaVersion: 1;
   readonly profileId: string;
