@@ -463,6 +463,20 @@ function runtimeSubagentActivity(data: JsonObject):
     status,
     mode,
     completionPolicy,
+    ...(optionalNonEmptyText(data["childSessionId"])
+      ? { childSessionId: optionalNonEmptyText(data["childSessionId"])! }
+      : {}),
+    ...(optionalNonEmptyText(data["childWorkspacePath"])
+      ? { childWorkspacePath: optionalNonEmptyText(data["childWorkspacePath"])! }
+      : {}),
+    ...(optionalNonEmptyText(data["toolCallId"])
+      ? { toolCallId: optionalNonEmptyText(data["toolCallId"])! }
+      : {}),
+    ...(typeof data["durationMs"] === "number" &&
+    Number.isFinite(data["durationMs"]) &&
+    data["durationMs"] >= 0
+      ? { durationMs: data["durationMs"] }
+      : {}),
     ...(agentName ? { agentName } : {}),
     ...(currentAction ? { currentAction } : {}),
     ...(summary ? { summary } : {}),

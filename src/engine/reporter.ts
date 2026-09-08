@@ -28,6 +28,11 @@ export type AssistantResponseSuppressionReason =
 
 /** 宿主可见的子代理活动快照；activityId 只用于更新同一张卡片。 */
 export interface SubagentActivityEvent {
+  childSessionId?: string;
+  childWorkspacePath?: string;
+  toolCallId?: string;
+  durationMs?: number;
+
   activityId: string;
   task: string;
   status: SubagentActivityStatus;

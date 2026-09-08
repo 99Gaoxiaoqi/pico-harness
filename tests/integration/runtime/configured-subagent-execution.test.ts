@@ -1,3 +1,11 @@
+import { ingestDesktopRuntimeNotification } from "../../../src/daemon/desktop-transcript-persistence.js";
+import { createRuntimeNotification } from "../../../src/daemon/protocol.js";
+import { parseConversation } from "../../../apps/desktop/src/renderer/conversation/runtime-projection.js";
+import {
+  subagentParent,
+  subagentSessionHref,
+} from "../../../apps/desktop/src/renderer/conversation/subagent-navigation.js";
+import type { SubagentActivityEvent } from "../../../src/engine/reporter.js";
 import { SqliteAgentGraphControlStoreAdapter } from "../../../src/agent-graph/sqlite-control-store-adapter.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -6,7 +14,7 @@ import { TaskRegistry } from "../../../src/tasks/task-registry.js";
 import { createAgentGraphApplicationService } from "../../../src/agent-graph/service.js";
 import { SqliteAgentGraphControlStore } from "../../../src/storage/sqlite/sqlite-agent-graph-control-store.js";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -167,7 +175,7 @@ test("one live preset catalog drives paginated discovery, foreground admission a
 });
 
 test("foreground agent_spawn uses a separate durable RuntimeRun and exact local capability without inheriting parent thinking", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pico-configured-subagent-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pico-configured-subagent-")));
   const workDir = join(root, "workspace");
   const picoHome = join(root, "home");
   await mkdir(workDir);
@@ -189,8 +197,11 @@ test("foreground agent_spawn uses a separate durable RuntimeRun and exact local 
   const levels: (string | undefined)[] = [];
   let childSessionId = "";
   let parentCalls = 0;
+  const activities: SubagentActivityEvent[] = [];
+  const reporter = new SilentReporter();
+  reporter.onSubagentActivity = (activity) => activities.push(structuredClone(activity));
   try {
-    await new AgentRuntime().execute(
+    const parentResult = await new AgentRuntime().execute(
       {
         prompt: "Delegate a bounded file read",
         dir: workDir,
@@ -206,7 +217,7 @@ test("foreground agent_spawn uses a separate durable RuntimeRun and exact local 
         picoHome,
         modelRouter: router,
         configuredSubagentCatalog: f.catalog,
-        reporter: new SilentReporter(),
+        reporter,
         hostKind: "desktop",
         maxTurns: 5,
         providerFactory: (_kind, config) => {
@@ -290,7 +301,58 @@ test("foreground agent_spawn uses a separate durable RuntimeRun and exact local 
     assert.ok(childSessionId.startsWith("subagent-"));
     assert.equal(new Set(childRuns).size, 1);
     assert.deepEqual(levels, ["nothink", "max"]);
+    const completed = activities.findLast((activity) => activity.status === "completed");
+    assert.equal(completed?.childSessionId, childSessionId);
+    assert.equal(completed?.childWorkspacePath, workDir);
+    assert.ok(completed?.toolCallId);
+    assert.ok(typeof completed?.durationMs === "number" && completed.durationMs >= 0);
+    assert.ok(
+      activities
+        .filter((activity) => activity.status === "running")
+        .every((activity) => activity.childSessionId === childSessionId),
+    );
     await globalSessionManager.clearAndDrain();
+    const parent = new Session(parentResult.sessionId, workDir, { persistence: true, picoHome });
+    try {
+      await parent.recover();
+      await ingestDesktopRuntimeNotification(
+        parent,
+        createRuntimeNotification({
+          topic: "run.timeline",
+          scope: { sessionId: parent.id, workspacePath: workDir, runId: "presentation-parent-run" },
+          at: Date.now(),
+          resourceVersion: 1,
+          payload: { item: { eventType: "subagent.activity", data: { ...completed! } } },
+        }),
+      );
+      const page = await parent.runtimeEventStore!.readTranscriptProjectionPage({
+        sessionId: parent.id,
+        maxBytes: 512 * 1024,
+      });
+      const conversation = parseConversation(
+        { items: page.items.map((item) => item.payload) },
+        workDir,
+        parent.id,
+      );
+      const childItem = conversation.items.find((item) => item.kind === "subagent");
+      assert.ok(childItem?.kind === "subagent");
+      assert.equal(childItem.childSessionId, childSessionId);
+      assert.equal(childItem.readOnly, true);
+      assert.equal(childItem.durationMs, completed?.durationMs);
+      assert.equal(childItem.toolCallId, completed?.toolCallId);
+      const href = subagentSessionHref(childItem, { sessionId: parent.id, workspacePath: workDir });
+      assert.ok(href);
+      const childRef = { sessionId: childSessionId, workspacePath: workDir };
+      // A reload has no cached parent conversation; the URL must preserve the parent route.
+      assert.equal(
+        subagentParent(href.slice(href.indexOf("?")), childRef, {})?.sessionId,
+        parent.id,
+      );
+      // Sidebar entry can recover the same relation from the loaded durable parent.
+      assert.equal(subagentParent("", childRef, { parent: conversation })?.sessionId, parent.id);
+    } finally {
+      await parent.close();
+    }
     const child = new Session(childSessionId, workDir, { persistence: true, picoHome });
     try {
       await child.recover();

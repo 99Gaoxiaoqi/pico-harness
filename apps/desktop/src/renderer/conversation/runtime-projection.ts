@@ -1,3 +1,4 @@
+import { subagentMetadata } from "./subagent-navigation.js";
 import {
   type RuntimeActiveOverlayEntry,
   type RuntimeConversationItem,
@@ -344,6 +345,7 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
       title: stringValue(item.title, "子代理活动"),
       detail: stringValue(item.detail) || undefined,
       state: subagentProgressState(item.state),
+      ...subagentMetadata(isRecord(item.data) ? item.data : {}, id),
       ...meta,
     };
   }

@@ -468,6 +468,14 @@ function projectStructuredItems(
             data: {
               ...(projected.subagentActivityId ? { activityId: projected.subagentActivityId } : {}),
               ...(entry.mode ? { mode: entry.mode } : {}),
+              ...(entry.childSessionId !== undefined
+                ? { childSessionId: entry.childSessionId }
+                : {}),
+              ...(entry.childWorkspacePath !== undefined
+                ? { childWorkspacePath: entry.childWorkspacePath }
+                : {}),
+              ...(entry.toolCallId !== undefined ? { toolCallId: entry.toolCallId } : {}),
+              ...(entry.durationMs !== undefined ? { durationMs: entry.durationMs } : {}),
             },
           }),
         );
