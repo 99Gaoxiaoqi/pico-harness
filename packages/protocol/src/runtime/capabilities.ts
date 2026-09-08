@@ -1,6 +1,7 @@
 // Agent, skill, MCP, and plugin capability contracts with their parameter/result rules.
 import { isJsonObject } from "./base.js";
 import type { EmptyParams, JsonObject, WorkspaceParams } from "./base.js";
+import { subagentPresetIdResult } from "./subagents.js";
 import { invalidParams, invalidResult } from "./errors.js";
 import {
   assertNestedShape,
@@ -33,6 +34,7 @@ export type RuntimeCatalogAgent = JsonObject & {
   readonly sourcePath: string;
   readonly tools: readonly string[];
   readonly modelRouteId?: string;
+  readonly subagentId?: string;
 };
 
 export type RuntimeCatalogSkill = JsonObject & {
@@ -260,7 +262,7 @@ const runtimeCatalogAgentResult = resultShape(
     sourcePath: resultString,
     tools: resultStringArray,
   },
-  { modelRouteId: resultString },
+  { modelRouteId: resultString, subagentId: subagentPresetIdResult },
 );
 
 const runtimeCatalogSkillResult = resultShape(
