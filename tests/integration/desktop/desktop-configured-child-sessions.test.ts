@@ -16,6 +16,12 @@ import { AgentRuntime } from "../../../src/runtime/agent-runtime.js";
 import { currentRuntimeRun } from "../../../src/runtime/runtime-run.js";
 import { ModelRouter } from "../../../src/provider/model-router.js";
 import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
+import {
+  parseSessionDetail,
+  parseSessions,
+} from "../../../apps/desktop/src/renderer/runtime-projections/workspace.js";
+import { subagentParent } from "../../../apps/desktop/src/renderer/conversation/subagent-navigation.js";
+import { workspaceSessionKey } from "../../../apps/desktop/src/renderer/workspace-session.js";
 
 function base(sessionId: string, suffix: string): RuntimeEventBase {
   return {
@@ -290,4 +296,16 @@ test("real configured executor persists its child admission before model output 
     workspacePath: workDir,
     agentName: "Reader",
   });
+  const child = { sessionId: childId, workspacePath: workDir };
+  const session = parseSessionDetail(detail, workDir)!;
+  assert.deepEqual(
+    subagentParent("", child, {
+      [workspaceSessionKey(child)]: { ...child, session, items: [], queuedCount: 0 },
+    }),
+    { sessionId: result.sessionId, workspacePath: workDir, name: "Reader" },
+  );
+  assert.deepEqual(
+    parseSessions(list, workDir).map((item) => item.id),
+    [result.sessionId],
+  );
 });
