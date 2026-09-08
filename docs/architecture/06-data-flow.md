@@ -168,7 +168,7 @@ fork 完成后，TUI 自动切换到新 Session（forkedSessionId）。
 > 注意：旧版的破坏性 rewind（追加 `history.rewound` 事件 + 切换 branchId +
 > 破坏性删除后续 FileHistory 快照）已移除。`history.rewound` 事件类型仅在
 > decoder 中保留用于读取存量会话。详见架构文档
-> [16-pico-vs-maka-state-architecture.md](16-pico-vs-maka-state-architecture.md)。
+> [16-pico-vs-maka-state-architecture.md](../history/architecture/16-pico-vs-maka-state-architecture.md)。
 
 ---
 

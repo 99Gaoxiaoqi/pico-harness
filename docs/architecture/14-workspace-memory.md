@@ -213,6 +213,6 @@ global 条目在同一用户的受信工作区可管理，其他 workspace 的�
 与 [memory-behavior.real-llm.test.ts](../../tests/e2e/memory-behavior.real-llm.test.ts)。历史验证数字
 只保存在任务记录中，不作为当前模型准确率保证。
 
-旧 `proposal-engine.ts`、`worker.ts`、`runtime-scheduler.ts`、`memory-review-recovery.ts` 和
-`SqliteMemoryRepository` 仍有兼容或隔离测试用途；生产记忆入口不再装配它们。复用旧清洗器和
-保留旧 wire 字段不意味着双写或双套记忆流程。
+旧 Proposal/Worker/Scheduler/Recovery、旧记忆管理服务和 `SqliteMemoryRepository` 已退役。
+原子记忆所需内容校验独立位于 `src/memory/atomic/content-safety.ts`；保留旧 wire 字段和
+workspace schema 兼容校验，不意味着双写或双套记忆流程。

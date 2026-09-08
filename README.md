@@ -4,7 +4,7 @@
 ![Node](https://img.shields.io/badge/node-22.19%2B%20%7C%2024.3%2B%20%7C%2026-339933.svg)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6.svg)
 
-![pico-harness：面向本地工程的 Agent Runtime](./docs/readme-assets/pico-harness-cover.png)
+![pico-harness：面向本地工程的 Agent Runtime](docs/readme-assets/pico-harness-cover.png)
 
 一个面向本地工程、用 TypeScript 实现的 Agent Harness。它把模型调用、上下文、工具、安全门禁、会话状态和后台任务装配成同一套 Runtime，并为 TUI 与 Desktop 提供一致的执行语义。
 
@@ -20,7 +20,7 @@
 | Desktop     | 仓库内开发入口    | macOS、Windows 持续做未签名 smoke 打包；签名、公证候选构建当前仅覆盖 macOS arm64/x64 |
 | 本机 daemon | 内部 Runtime 宿主 | 承载 TUI、Desktop 与持久 Cron；通过本机 IPC 通信，自身不监听网络端口                 |
 
-当前没有公开的 REST/WebSocket、ACP、one-shot/headless API、Docker 部署或 Linux Desktop 发布入口。根包为 `private: true`，当前安装方式是源码构建与本地链接，不是 npm 公共包。仓库内 benchmark 可使用[内部 Headless One-shot Runner](./docs/internal-headless-one-shot.md)；它同样不是产品入口。
+当前没有公开的 REST/WebSocket、ACP、one-shot/headless API、Docker 部署或 Linux Desktop 发布入口。根包为 `private: true`，当前安装方式是源码构建与本地链接，不是 npm 公共包。仓库内 benchmark 可使用[内部 Headless One-shot Runner](docs/guides/internal-headless-one-shot.md)；它同样不是产品入口。
 
 ## 架构概览
 
@@ -35,10 +35,10 @@ flowchart LR
   RUNTIME --> MEMORY[("PICO_HOME/memory.sqlite")]
 ```
 
-[查看 Mermaid 源图](./docs/readme-assets/pico-harness-architecture.mmd)
+[查看 Mermaid 源图](docs/readme-assets/pico-harness-architecture.mmd)
 
 两类正式前台入口都通过 `LocalRuntimeClient` 进入本机 daemon，并最终复用同一个
-[`AgentRuntime`](./src/runtime/agent-runtime.ts)：
+[`AgentRuntime`](src/runtime/agent-runtime.ts)：
 
 - TUI：`CLI → client-repl → LocalRuntimeClient → daemon → WorkspaceRuntimeService → AgentRuntime`。
 - Desktop：`Renderer → sandbox preload bridge → Electron Main → LocalRuntimeClient → daemon → WorkspaceRuntimeService → AgentRuntime`。
@@ -85,7 +85,7 @@ Windows named pipe。当前承重边界是私有 endpoint、进程/文件权限�
 - `SqliteRuntimeControlStore` 保存 Job、Cron、daemon run、usage、provider call 与生命周期控制状态。
 - `SqliteMemoryItemStore` 保存原子 Item、keys、sources、提取游标、回执和工作区开关；支持
   global/当前 workspace 召回，与 Session 生命周期分离。提取经用户证据校验和独立模型
-  规范化后直接提交，不再走旧 Proposal 审批队列。详见[原子长期记忆](./docs/architecture/14-workspace-memory.md)。
+  规范化后直接提交，不再走旧 Proposal 审批队列。详见[原子长期记忆](docs/architecture/14-workspace-memory.md)。
 - Plan、Todo、会话目录、文件历史 manifest 和跨存储 operation 等状态也进入同一数据库的独立 scope；Trace、文件内容 blob 和临时 staging 仍按各自生命周期保留为 sidecar。
 - ToolResult 在入口处限制为 1 MiB：限内正文以 `storage: "inline"` 写入事实，超限改写为合成错误并提示模型缩小命令输出；旧 Evidence 引用只读兼容，`read_evidence` 已退役。
 
@@ -203,7 +203,7 @@ TUI 与 Desktop 共用 `$PICO_HOME`，默认是 `~/.pico`：
 
 TUI 为避免 Pino 输出破坏 Ink 画面，会把进程日志级别固定为 `silent`；用户可见错误仍通过 UI Reporter 呈现。
 
-密钥不会进入 Session、IPC 响应或日志。用户级 `config.json` 可在 0600 文件中保存 `apiKey`；也可通过 `apiKeyEnv` 或可用的系统凭证后端解析。详见[部署与凭证边界](./docs/deployment.md)。
+密钥不会进入 Session、IPC 响应或日志。用户级 `config.json` 可在 0600 文件中保存 `apiKey`；也可通过 `apiKeyEnv` 或可用的系统凭证后端解析。详见[部署与凭证边界](docs/guides/deployment.md)。
 
 ## 安全模型
 
@@ -226,7 +226,7 @@ TUI 为避免 Pino 输出破坏 Ink 画面，会把进程日志级别固定为 `
 - 路径、文件元数据和原子写入会尽量复核，但同一用户下仍存在不可彻底消除的 TOCTOU 边界。
 - Explore/Worker 的隔离能力与平台有关；所需沙箱不可用时，可写 Worker 必须拒绝启动。
 
-更多细节见[基础设施安全](./docs/architecture/05-infra-safety.md)、[Hook 信任模型](./docs/architecture/07-hooks.md)和[本机 IPC 安全](./docs/architecture/local-ipc-security.md)。
+更多细节见[基础设施安全](docs/architecture/05-infra-safety.md)、[Hook 信任模型](docs/architecture/07-hooks.md)和[本机 IPC 安全](docs/architecture/local-ipc-security.md)。
 
 ## 平台与发布边界
 
@@ -272,18 +272,18 @@ npm pack --dry-run
 
 ## 深入阅读
 
-- [架构总览](./docs/architecture/00-overview.md)
-- [Engine 与会话](./docs/architecture/01-engine.md)
-- [工具系统](./docs/architecture/02-tools.md)
-- [上下文工程](./docs/architecture/03-context.md)
-- [Provider 与产品入口](./docs/architecture/04-provider-entry.md)
-- [完整数据流](./docs/architecture/06-data-flow.md)
-- [多 Agent 并发](./docs/architecture/08-multi-agent-concurrency.md)
-- [Desktop 架构](./docs/desktop-architecture.md)
-- [TUI 交互指南](./docs/tui-claude-code-parity.md)
-- [Terminal-Bench 2.1 内部 canary](./benchmarks/terminal_bench_2_1/README.md)
-- [课程章节索引](./docs/README.md)
+- [架构总览](docs/architecture/00-overview.md)
+- [Engine 与会话](docs/architecture/01-engine.md)
+- [工具系统](docs/architecture/02-tools.md)
+- [上下文工程](docs/architecture/03-context.md)
+- [Provider 与产品入口](docs/architecture/04-provider-entry.md)
+- [完整数据流](docs/architecture/06-data-flow.md)
+- [多 Agent 并发](docs/history/architecture/08-multi-agent-concurrency.md)
+- [Desktop 架构](docs/guides/desktop-architecture.md)
+- [TUI 交互指南](docs/guides/tui-claude-code-parity.md)
+- [Terminal-Bench 2.1 内部 canary](benchmarks/terminal_bench_2_1/README.md)
+- [课程章节索引](docs/README.md)
 
 ## License
 
-[MIT](./LICENSE)
+[MIT](LICENSE)
