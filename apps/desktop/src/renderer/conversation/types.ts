@@ -91,6 +91,11 @@ export interface SubagentItemView extends ConversationItemBase {
   readonly title: string;
   readonly detail?: string | undefined;
   readonly state: ConversationProgressState;
+  readonly childSessionId?: string | undefined;
+  readonly childWorkspacePath?: string | undefined;
+  readonly readOnly?: boolean | undefined;
+  readonly durationMs?: number | undefined;
+  readonly toolCallId?: string | undefined;
 }
 
 export interface ApprovalItemView extends ConversationItemBase {
