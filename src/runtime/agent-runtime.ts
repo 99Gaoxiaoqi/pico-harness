@@ -1,3 +1,8 @@
+import { createConfiguredSubagentOutputTool } from "../tools/configured-subagent-output.js";
+import {
+  createConfiguredSubagentOutputStore,
+  ConfiguredSubagentOutputNotFoundError,
+} from "./configured-subagent-output-store.js";
 import { WebSearchTool } from "../tools/web.js";
 import {
   ConfiguredAgentListTool,
@@ -2103,7 +2108,50 @@ export async function executeAgentRuntime(
       if (!registry.getTool("agent_list"))
         registry.register(new ConfiguredAgentListTool(toolOptions));
       registry.register(new ConfiguredAgentSpawnTool(toolOptions));
-      toolDisclosure.discloseTools(["agent_list", "agent_spawn"]);
+      if (session.runtimeEventStore) {
+        const childOutput = createConfiguredSubagentOutputTool({
+          port: createConfiguredSubagentOutputStore({
+            parentSessionId: session.id,
+            workDir,
+            picoHome,
+            eventStore: session.runtimeEventStore,
+          }),
+        });
+        const graphOutput = registry.getTool("agent_output");
+        if (graphOutput) {
+          const childDefinition = childOutput.definition();
+          const graphDefinition = graphOutput.definition();
+          registry.unregisterForHostPolicy("agent_output");
+          registry.register({
+            name: () => "agent_output",
+            readOnly: true,
+            fileSideEffects: childOutput.fileSideEffects,
+            definition: () => ({
+              ...childDefinition,
+              description: `${childDefinition.description} Graph正式结果也支持view=result与work_ids。`,
+              inputSchema: {
+                ...childDefinition.inputSchema,
+                properties: {
+                  ...(graphDefinition.inputSchema["properties"] as Record<string, unknown>),
+                  ...(childDefinition.inputSchema["properties"] as Record<string, unknown>),
+                },
+              },
+            }),
+            execute: async (args, context) => {
+              const value = JSON.parse(args) as Record<string, unknown>;
+              if (value && typeof value === "object" && "work_ids" in value)
+                return graphOutput.execute(args, context);
+              try {
+                return await childOutput.execute(args, context);
+              } catch (error) {
+                if (!(error instanceof ConfiguredSubagentOutputNotFoundError)) throw error;
+                return graphOutput.execute(JSON.stringify({ view: "result", ...value }), context);
+              }
+            },
+          });
+        } else registry.register(childOutput);
+      }
+      toolDisclosure.discloseTools(["agent_list", "agent_spawn", "agent_output"]);
     }
     if (backgroundPolicy) pruneRegistryToBackgroundAllowlist(registry, backgroundPolicy);
     dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
