@@ -1,0 +1,293 @@
+import assert from "node:assert/strict";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import {
+  createRuntimeRequest,
+  DesktopRuntimeService,
+  WorkspaceRuntimeService,
+} from "../../../src/daemon/index.js";
+import { parseRuntimeResult } from "../../../src/daemon/protocol.js";
+import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
+import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import type { RuntimeEventBase } from "../../../src/engine/session-runtime-event.js";
+import { AgentRuntime } from "../../../src/runtime/agent-runtime.js";
+import { currentRuntimeRun } from "../../../src/runtime/runtime-run.js";
+import { ModelRouter } from "../../../src/provider/model-router.js";
+import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
+
+function base(sessionId: string, suffix: string): RuntimeEventBase {
+  return {
+    schemaVersion: 2,
+    eventId: `${sessionId}-${suffix}`,
+    sessionId,
+    invocationId: `${sessionId}-run`,
+    runId: `${sessionId}-run`,
+    turnId: `${sessionId}-turn`,
+    at: "2026-09-09T00:00:00.000Z",
+    partial: false,
+    visibility: "transcript",
+  };
+}
+
+test("session list hides admitted children across workspaces and outcomes while detail retains parent navigation", async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pico-child-list-")));
+  const picoHome = join(root, "home");
+  const parentPath = join(root, "parent");
+  const childPath = join(root, "worktree");
+  await mkdir(parentPath);
+  await mkdir(childPath);
+  const runtime = new WorkspaceRuntimeService({
+    execute: async () => ({ ok: true }),
+    env: { PICO_HOME: picoHome },
+  });
+  const desktop = new DesktopRuntimeService({
+    runtimeService: runtime,
+    env: { PICO_HOME: picoHome },
+  });
+  const stores = [parentPath, childPath].map(
+    (path) =>
+      new SqliteRuntimeEventStore({
+        storageRoot: resolvePicoPaths(path, { picoHome }).workspace.root,
+      }),
+  );
+  const parent = stores[0]!;
+  const isolated = stores[1]!;
+  t.after(async () => {
+    for (const store of stores) store.close();
+    await desktop.close();
+    await runtime.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const create = async (workspacePath: string, sessionId: string) =>
+    (workspacePath === parentPath ? parent : isolated).initializeSession({
+      sessionId,
+      workDir: workspacePath,
+    });
+  await create(parentPath, "parent");
+  await parent.append({
+    ...base("parent", "start"),
+    kind: "run.started",
+    data: { workDir: parentPath },
+  });
+  for (const [id, workDir, status, legacy] of [
+    ["shared", parentPath, "completed", true],
+    ["isolated", childPath, "completed", false],
+    ["legacy-isolated", childPath, "failed", true],
+    ["cancelled", childPath, "cancelled", false],
+  ] as const) {
+    await create(workDir, id);
+    const store = workDir === parentPath ? parent : isolated;
+    await store.append({ ...base(id, "start"), kind: "run.started", data: { workDir } });
+    await store.append({
+      ...base(id, "admit"),
+      kind: "message.committed",
+      data: {
+        message: {
+          role: "assistant",
+          content: "child admission",
+          providerData: {
+            picoHiddenFromTranscript: true,
+            picoConfiguredChild: {
+              version: 1,
+              parentSessionId: "parent",
+              parentRunId: "parent-run",
+              parentToolCallId: "spawn",
+              childSessionId: id,
+              workDir,
+              agentName: "Reader",
+              status: "started",
+              runId: `${id}-run`,
+              turnId: `${id}-turn`,
+              ...(!legacy ? { parentWorkspacePath: parentPath } : {}),
+            },
+          },
+        },
+      },
+    });
+    // Growing history does not move the initial identity out of its bounded prefix.
+    if (id === "shared")
+      for (let i = 0; i < 110; i++)
+        await store.append({
+          ...base(id, `output-${i}`),
+          kind: "message.committed",
+          data: { message: { role: "assistant", content: "continued" } },
+        });
+    await store.append({ ...base(id, "terminal"), kind: "run.terminal", data: { status } });
+    const detail = parseRuntimeResult(
+      "session.get",
+      await desktop.handle(
+        createRuntimeRequest("session.get", { workspacePath: workDir, sessionId: id }),
+      ),
+    );
+    assert.deepEqual(detail.session.parentSession, {
+      sessionId: "parent",
+      workspacePath: parentPath,
+      agentName: "Reader",
+    });
+  }
+  // Forks can inherit admission text, but its child ID is still the source ID.
+  await create(parentPath, "fork");
+  const copied = (
+    await parent.readSessionEventsByKind("shared", "message.committed", { limit: 1 })
+  )[0]!.event;
+  assert.equal(copied.kind, "message.committed");
+  if (copied.kind !== "message.committed") throw new Error("Expected admission");
+  await parent.append({ ...copied, ...base("fork", "copied") });
+  await create(parentPath, "subagent-user-selected-id");
+  for (const includeArchived of [false, true]) {
+    const list = parseRuntimeResult(
+      "session.list",
+      await desktop.handle(
+        createRuntimeRequest("session.list", { workspacePath: parentPath, includeArchived }),
+      ),
+    );
+    assert.deepEqual(list.sessions.map((session) => session.sessionId).sort(), [
+      "fork",
+      "parent",
+      "subagent-user-selected-id",
+    ]);
+    const childList = parseRuntimeResult(
+      "session.list",
+      await desktop.handle(
+        createRuntimeRequest("session.list", { workspacePath: childPath, includeArchived }),
+      ),
+    );
+    assert.deepEqual(childList.sessions, []);
+  }
+  await parent.deleteSession("parent");
+  const orphan = parseRuntimeResult(
+    "session.get",
+    await desktop.handle(
+      createRuntimeRequest("session.get", { workspacePath: parentPath, sessionId: "shared" }),
+    ),
+  );
+  assert.equal(orphan.session.parentSession, undefined);
+  const remaining = parseRuntimeResult(
+    "session.list",
+    await desktop.handle(createRuntimeRequest("session.list", { workspacePath: parentPath })),
+  );
+  assert.ok(!remaining.sessions.some((session) => session.sessionId === "shared"));
+});
+
+test("real configured executor persists its child admission before model output and desktop hides that session", async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pico-child-admission-")));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "home");
+  await mkdir(workDir);
+  const runtime = new WorkspaceRuntimeService({
+    execute: async () => ({ ok: true }),
+    env: { PICO_HOME: picoHome },
+  });
+  const desktop = new DesktopRuntimeService({
+    runtimeService: runtime,
+    env: { PICO_HOME: picoHome },
+  });
+  t.after(async () => {
+    await desktop.close();
+    await runtime.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const route = {
+    id: "fixture/glm-5.2",
+    providerId: "fixture",
+    provider: "openai" as const,
+    model: "glm-5.2",
+    baseURL: "https://unused.example/v1",
+    apiKeyEnv: "UNUSED",
+    auth: "none" as const,
+    source: "config" as const,
+    capabilities: resolveModelRouteCapabilities("openai", "glm-5.2", undefined),
+  };
+  const router = new ModelRouter([route], {}, route.id);
+  let parentCalls = 0;
+  let childId = "";
+  const result = await new AgentRuntime().execute(
+    {
+      prompt: "Delegate reading",
+      dir: workDir,
+      modelRouteId: route.id,
+      provider: "openai",
+      model: route.model,
+      auth: "none",
+      baseURL: route.baseURL,
+      interactionMode: "default",
+    },
+    {
+      picoHome,
+      modelRouter: router,
+      hostKind: "desktop",
+      maxTurns: 3,
+      configuredSubagentCatalog: {
+        async list() {
+          return [
+            {
+              id: "reader",
+              name: "Reader",
+              description: "Read",
+              profile: "local_read",
+              connectionSlug: "fixture",
+              model: route.model,
+              enabled: true,
+              availability: { status: "available" },
+            },
+          ];
+        },
+        async resolve() {
+          return {
+            id: "reader",
+            name: "Reader",
+            description: "Read",
+            profile: "local_read",
+            connectionSlug: "fixture",
+            model: route.model,
+            enabled: true,
+            modelRouteId: route.id,
+          };
+        },
+      },
+      providerFactory: () => ({
+        async generate(_messages, tools) {
+          if (tools?.some((tool) => tool.name === "agent_spawn")) {
+            if (++parentCalls === 1)
+              return {
+                role: "assistant" as const,
+                content: "",
+                toolCalls: [
+                  {
+                    id: "spawn",
+                    name: "agent_spawn",
+                    arguments: JSON.stringify({ subagent_id: "reader", task: "Inspect workspace" }),
+                  },
+                ],
+              };
+            return { role: "assistant" as const, content: "Done" };
+          }
+          childId = currentRuntimeRun()!.sessionId;
+          return { role: "assistant" as const, content: "Read complete" };
+        },
+      }),
+    },
+  );
+  assert.ok(childId);
+  const list = parseRuntimeResult(
+    "session.list",
+    await desktop.handle(createRuntimeRequest("session.list", { workspacePath: workDir })),
+  );
+  assert.deepEqual(
+    list.sessions.map((session) => session.sessionId),
+    [result.sessionId],
+  );
+  const detail = parseRuntimeResult(
+    "session.get",
+    await desktop.handle(
+      createRuntimeRequest("session.get", { workspacePath: workDir, sessionId: childId }),
+    ),
+  );
+  assert.deepEqual(detail.session.parentSession, {
+    sessionId: result.sessionId,
+    workspacePath: workDir,
+    agentName: "Reader",
+  });
+});

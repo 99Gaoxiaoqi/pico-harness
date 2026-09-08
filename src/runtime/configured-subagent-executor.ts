@@ -78,6 +78,7 @@ export function createConfiguredSubagentExecutor(
     const childRecord = (status: string, result?: ConfiguredSubagentExecutionResult) => ({
       version: 1,
       parentSessionId: parentRun?.sessionId,
+      parentWorkspacePath: parentRun?.workDir,
       parentRunId: parentRun?.runId,
       parentToolCallId,
       childSessionId: sessionId,

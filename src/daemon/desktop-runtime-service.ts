@@ -1,3 +1,7 @@
+import {
+  configuredSubagentParent,
+  readConfiguredSubagentAdmission,
+} from "../runtime/configured-subagent-session.js";
 import { DesktopProviderConfigService } from "./desktop-provider-config-service.js";
 import {
   errorMessage,
@@ -1063,6 +1067,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     }
     // 归档/置顶已并入 sessions 表(catalog 投影行),desktop session-state.json 退役。
     const entries = await listCliSessionCatalogEntries(canonical, { picoHome: this.picoHome });
+    await this.withWorkspaceSessionStore(canonical, async (store) => {
+      for (const entry of entries) {
+        if (await readConfiguredSubagentAdmission(store, entry.summary.id))
+          hiddenSessionIds.add(entry.summary.id);
+      }
+    });
     const sessions = entries
       .filter(
         (entry) =>
@@ -2661,7 +2671,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       await this.getForkSourceSettings(workspacePath, session);
       await session.flushPersistence();
     });
-    return sessionPayload(entry);
+    const parentSession = await this.withWorkspaceSessionStore(workspacePath, (store) =>
+      configuredSubagentParent(store, sessionId, workspacePath, this.picoHome),
+    );
+    return { ...sessionPayload(entry), ...(parentSession ? { parentSession } : {}) };
   }
 
   /** 归档/置顶等 sessions 表级写:短生命周期打开 workspace 级 SqliteRuntimeEventStore。 */
