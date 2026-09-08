@@ -74,6 +74,7 @@ import {
   parseSessionContext,
   parseSessionSettings,
   parseSessions,
+  parseSessionDetail,
   parseWorkspaceCapabilities,
   parseWorkspaceList,
   parseWorkspaceMode,
@@ -1021,6 +1022,7 @@ export function useRuntimeStore(): RuntimeStore {
               sessionId,
               items: [],
               queuedCount: 0,
+              session: current.conversations[conversationKey]?.session,
               loadError: errorMessage(error),
             },
           },
@@ -1043,12 +1045,14 @@ export function useRuntimeStore(): RuntimeStore {
             run.sessionId === sessionId &&
             isTerminalRunStatus(run.status),
         )?.id;
-      const [sessionUsage, contextResult, settingsResult, goalResult] = await Promise.all([
-        optionalInvoke(bridge, "usage.get", { workspacePath, sessionId }),
-        optionalInvoke(bridge, "session.context.get", { workspacePath, sessionId }),
-        optionalInvoke(bridge, "session.settings.get", { workspacePath, sessionId }),
-        optionalInvoke(bridge, "goal.get", { workspacePath, sessionId }),
-      ]);
+      const [sessionUsage, contextResult, settingsResult, goalResult, sessionResult] =
+        await Promise.all([
+          optionalInvoke(bridge, "usage.get", { workspacePath, sessionId }),
+          optionalInvoke(bridge, "session.context.get", { workspacePath, sessionId }),
+          optionalInvoke(bridge, "session.settings.get", { workspacePath, sessionId }),
+          optionalInvoke(bridge, "goal.get", { workspacePath, sessionId }),
+          optionalInvoke(bridge, "session.get", { workspacePath, sessionId }),
+        ]);
       if (!isCurrentLoad()) return;
       const fragments = new Map<string, RuntimeTranscriptFragment[]>();
       transcriptFragmentsByConversation.current.set(conversationKey, fragments);
@@ -1060,6 +1064,9 @@ export function useRuntimeStore(): RuntimeStore {
       }
       let conversation: ConversationView = {
         ...parsedConversation,
+        session: !sessionResult.error
+          ? parseSessionDetail(sessionResult.value, workspacePath)
+          : dataRef.current.conversations[conversationKey]?.session,
         ...(activeRunId ? { runId: activeRunId } : {}),
         ...(!sessionUsage.error ? { usage: parseUsage(sessionUsage.value) } : {}),
         ...(!contextResult.error ? { context: parseSessionContext(contextResult.value) } : {}),
@@ -1850,6 +1857,7 @@ export function useRuntimeStore(): RuntimeStore {
               title: title.trim(),
             });
             await loadWorkspace(bridge, workspacePath);
+            await loadConversation(bridge, workspacePath, sessionId);
             return;
           }
           setData((current) => ({
@@ -1913,6 +1921,13 @@ export function useRuntimeStore(): RuntimeStore {
               workspacePath,
               sessionId,
             });
+          if (
+            !preview &&
+            !dataRef.current.sessions.some(
+              (session) => session.workspacePath === workspacePath && session.id === sessionId,
+            )
+          )
+            await loadConversation(bridge, workspacePath, sessionId);
           setData((current) => ({
             ...current,
             sessions: current.sessions.map((session) =>
@@ -1932,6 +1947,13 @@ export function useRuntimeStore(): RuntimeStore {
               workspacePath,
               sessionId,
             });
+          if (
+            !preview &&
+            !dataRef.current.sessions.some(
+              (session) => session.workspacePath === workspacePath && session.id === sessionId,
+            )
+          )
+            await loadConversation(bridge, workspacePath, sessionId);
           setData((current) => ({
             ...current,
             sessions: current.sessions

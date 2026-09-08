@@ -209,9 +209,9 @@ export function ConversationPage() {
     });
   }, [inspector]);
 
-  const session = data.sessions.find(
-    (item) => item.workspacePath === workspacePath && item.id === sessionId,
-  );
+  const session =
+    data.sessions.find((item) => item.workspacePath === workspacePath && item.id === sessionId) ??
+    (conversationKey ? data.conversations[conversationKey]?.session : undefined);
   const workspace = data.workspaces.find((candidate) => candidate.path === workspacePath);
   const projectWorkspaceOptions = data.workspaces.filter(
     (candidate) => candidate.temporary !== true,

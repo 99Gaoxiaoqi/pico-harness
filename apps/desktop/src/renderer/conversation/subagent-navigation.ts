@@ -1,5 +1,9 @@
 import type { ConversationView, JsonRecord } from "../model.js";
-import { sessionHref, type WorkspaceSessionRef } from "../workspace-session.js";
+import {
+  workspaceSessionKey,
+  sessionHref,
+  type WorkspaceSessionRef,
+} from "../workspace-session.js";
 import type { SubagentItemView } from "./types.js";
 
 /** Configured executors used the child session ID as activityId before explicit metadata existed. */
@@ -46,6 +50,17 @@ export function subagentParent(
   child: WorkspaceSessionRef,
   conversations: Readonly<Record<string, ConversationView>>,
 ) {
+  const persisted = conversations[workspaceSessionKey(child)]?.session?.parentSession;
+  if (
+    persisted &&
+    (persisted.sessionId !== child.sessionId || persisted.workspacePath !== child.workspacePath)
+  ) {
+    return {
+      sessionId: persisted.sessionId,
+      workspacePath: persisted.workspacePath,
+      name: persisted.agentName,
+    };
+  }
   const params = new URLSearchParams(search);
   const parentId = params.get("parentSession");
   const parentWorkspace = params.get("parentWorkspace");
