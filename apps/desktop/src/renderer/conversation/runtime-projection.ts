@@ -14,6 +14,7 @@ import {
 import { isRecord, numberValue, recordArray, stringValue } from "../runtime-projections/values.js";
 import { workspaceSessionKey } from "../workspace-session.js";
 import { conversationItemKey } from "./items.js";
+import { subagentProgressState } from "./subagent-state.js";
 import type { ConversationItemView, ConversationProgressState } from "./types.js";
 
 export type RuntimeTranscriptCursor = {
@@ -342,7 +343,7 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
       name: stringValue(item.name, "Agent"),
       title: stringValue(item.title, "子代理活动"),
       detail: stringValue(item.detail) || undefined,
-      state: progressState(item.state),
+      state: subagentProgressState(item.state),
       ...meta,
     };
   }
