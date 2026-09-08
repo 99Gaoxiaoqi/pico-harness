@@ -6,7 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { createElement } from "react";
 import { MarkdownText } from "../../apps/desktop/src/renderer/conversation/MarkdownText.js";
 import { ConversationTranscript } from "../../apps/desktop/src/renderer/conversation/ConversationTranscript.js";
-import { assembleConversationFragments } from "../../apps/desktop/src/renderer/runtime.js";
+import { assembleConversationFragments } from "../../apps/desktop/src/renderer/conversation/runtime-projection.js";
 import { projectRuntimeTranscript } from "../../src/daemon/desktop-transcript.js";
 import { createEmptyUsageSnapshot } from "../../src/engine/session-runtime.js";
 import { advanceRuntimeTranscriptPagingState } from "../../src/tui/client-session-runtime.js";

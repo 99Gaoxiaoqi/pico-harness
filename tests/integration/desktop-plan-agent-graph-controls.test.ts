@@ -7,7 +7,7 @@ import {
   approvalFromPlanControlSnapshot,
   conversationItemsFromReplica,
   pendingToolApprovalFromTranscript,
-} from "../../apps/desktop/src/renderer/runtime.js";
+} from "../../apps/desktop/src/renderer/conversation/runtime-projection.js";
 import { parseStrictRuntimeParams } from "../../packages/protocol/src/runtime.js";
 
 test("Desktop restores an active Graph Plan as progress with only CAS-protected cancellation", () => {

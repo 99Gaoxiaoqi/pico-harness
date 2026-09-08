@@ -7,7 +7,7 @@ import {
 import {
   approvalFromPlanControlSnapshot,
   approvalFromPlanProjection,
-} from "../../apps/desktop/src/renderer/runtime.js";
+} from "../../apps/desktop/src/renderer/conversation/runtime-projection.js";
 import { planReviewOperationId } from "../../src/plan/review-identity.js";
 
 test("Plan review protocol exposes CAS-protected three-action requests", () => {

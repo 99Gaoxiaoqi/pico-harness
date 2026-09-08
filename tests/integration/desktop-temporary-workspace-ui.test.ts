@@ -4,19 +4,19 @@ import test from "node:test";
 
 import { folderWorkspaceCapabilities } from "../../apps/desktop/src/renderer/model.js";
 import { shouldBatchHydrateRuntimeNotification } from "../../apps/desktop/src/renderer/runtime.js";
+import { TemporaryWorkspaceRequest } from "../../apps/desktop/src/renderer/temporary-workspace-request.js";
 import {
-  TEMPORARY_WORKSPACE_LABEL,
   TEMPORARY_WORKSPACE_GROUP_LABEL,
+  TEMPORARY_WORKSPACE_LABEL,
   newSessionHref,
   workspaceDisplayName,
 } from "../../apps/desktop/src/renderer/workspace-session.js";
-import { TemporaryWorkspaceRequest } from "../../apps/desktop/src/renderer/temporary-workspace-request.js";
 
 test("global new task stays unbound until first send without inheriting a project", async () => {
-  const appSource = await rendererSource("App.tsx");
+  const appSource = await rendererSource("pages/ConversationPage.tsx");
   const newTaskPage = appSource.slice(
     appSource.indexOf("function NewTaskPage"),
-    appSource.indexOf("interface ConversationEnvironmentPanelProps"),
+    appSource.indexOf("export function ConversationPage"),
   );
   assert.doesNotMatch(newTaskPage, /ensureTemporaryWorkspace/u);
   assert.match(newTaskPage, /return <ConversationPage \/>/u);
@@ -158,7 +158,8 @@ test("temporary workspace keeps a stable UI label and can switch to a real proje
   );
   assert.match(newSessionHref("/projects/pico"), /workspace=%2Fprojects%2Fpico/u);
 
-  const appSource = await rendererSource("App.tsx");
+  const appSource =
+    (await rendererSource("pages/ConversationPage.tsx")) + (await rendererSource("AppShell.tsx"));
   assert.match(appSource, /workspaceDisplayName\(workspacePath, workspace\)/u);
   assert.match(appSource, /!nested && workspace\?\.temporary/u);
   assert.match(appSource, /TEMPORARY_WORKSPACE_GROUP_LABEL/u);
@@ -194,7 +195,7 @@ test("temporary workspace keeps a stable UI label and can switch to a real proje
 });
 
 test("first send leaves the new-task shell as soon as its session appears", async () => {
-  const appSource = await rendererSource("App.tsx");
+  const appSource = await rendererSource("pages/ConversationPage.tsx");
   assert.match(appSource, /firstSendBaselineRef/u);
   assert.match(appSource, /firstSendSourceRef\.current !== draftKey/u);
   assert.match(appSource, /setAwaitingFirstSession\(true\)/u);
@@ -208,7 +209,7 @@ test("temporary workspace omits trust revocation and Git worktree capabilities",
   assert.equal(folderWorkspaceCapabilities.isolatedWorktrees, false);
   assert.equal(folderWorkspaceCapabilities.branchMerge, false);
 
-  const appSource = await rendererSource("App.tsx");
+  const appSource = await rendererSource("pages/SettingsPage.tsx");
   const settingsPage = appSource.slice(
     appSource.indexOf("function WorkspaceSettingsPage"),
     appSource.indexOf("function SystemSettingsPage"),
