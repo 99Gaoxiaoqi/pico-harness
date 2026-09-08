@@ -4,10 +4,6 @@ import type { ToolDefinition } from "../schema/message.js";
 import { ToolAccesses } from "../tools/tool-access.js";
 import type { AtomicMemoryResult } from "./atomic/runtime-contracts.js";
 
-/** Legacy scheduler input retained for stored-job recovery tooling only. */
-export interface MemoryTriggerSlot {
-  trigger: "remember" | "extract" | undefined;
-}
 export interface AtomicMemoryToolPort {
   remember(signal?: AbortSignal): Promise<AtomicMemoryResult>;
   requestExtract(): Promise<{ status: "accepted" | "unavailable" }>;

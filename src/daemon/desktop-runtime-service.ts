@@ -237,7 +237,6 @@ import { DesktopWorkbarGitReviewService } from "./desktop-workbar-git-review-ser
 import { DesktopWorkbarTerminalService } from "./desktop-workbar-terminal-service.js";
 import { WorkbarGitReviewError } from "./workbar-git-review.js";
 import { SideChatAuthority, SideChatNoSettledTurnError } from "./side-chat-authority.js";
-import { DesktopMemoryService } from "./desktop-memory-service.js";
 import { DesktopAtomicMemoryService } from "./desktop-atomic-memory-service.js";
 import { sessionMemoryLane } from "../memory/atomic/session-lane.js";
 import { memorySessionKey } from "../memory/atomic/runtime-contracts.js";
@@ -287,7 +286,7 @@ export interface DesktopRuntimeServiceOptions {
   readonly pluginRuntimeSnapshotRegistry?: PluginRuntimeSnapshotRegistry;
   /** Whether this service releases the injected registry after runtime shutdown. */
   readonly ownsPluginRuntimeSnapshotRegistry?: boolean;
-  readonly memoryService?: DesktopMemoryService | DesktopAtomicMemoryService;
+  readonly memoryService?: DesktopAtomicMemoryService;
   readonly ownsMemoryService?: boolean;
   /** Commit 完成后通知 Dedicated Session Channel 读取已提交水位。 */
   readonly onTranscriptAdvanced?: (workspacePath: string, sessionId: string) => void;
@@ -360,7 +359,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private readonly now: () => number;
   private readonly pluginRuntimeSnapshotRegistry: PluginRuntimeSnapshotRegistry;
   private readonly ownsPluginRuntimeSnapshotRegistry: boolean;
-  private readonly memoryService: DesktopMemoryService | DesktopAtomicMemoryService;
+  private readonly memoryService: DesktopAtomicMemoryService;
   private readonly ownsMemoryService: boolean;
   private readonly gitReviewService: DesktopWorkbarGitReviewService;
   private readonly terminalService: DesktopWorkbarTerminalService;
@@ -461,11 +460,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         picoHome: this.picoHome,
         publish: (workspacePath, topic, payload) =>
           this.publishMemoryNotification(workspacePath, topic, payload),
-        onDegraded: ({ code, workspaceId, operationId, error }) =>
-          logger.warn(
-            { code, workspaceId, operationId, error },
-            "Workspace memory maintenance deferred",
-          ),
       });
     this.ownsMemoryService = options.ownsMemoryService ?? options.memoryService === undefined;
     this.providerRecoveryReady = this.recoverProviderOperation().catch((error: unknown) => {
@@ -1188,25 +1182,15 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       this.memoryLaneKey(canonical, sessionId),
       "foreground",
       async () => {
-        const legacy =
-          this.memoryService instanceof DesktopMemoryService ? this.memoryService : undefined;
-        const preparedMemory = legacy?.prepareSessionSourceInvalidation(canonical, sessionId, {
-          availability: "unavailable",
-          code: "session_deleted",
+        const managed = globalSessionManager.delete(sessionId, canonical, {
+          picoHome: this.picoHome,
         });
-        try {
-          const managed = globalSessionManager.delete(sessionId, canonical, {
-            picoHome: this.picoHome,
-          });
-          await managed?.close();
-          await Promise.all([
-            removeCliSessionFile(canonical, sessionId, { picoHome: this.picoHome }),
-            this.conversationStateStore.clearQueued(canonical, sessionId),
-          ]);
-          this.workbarRepository(canonical).purgeOrphanArtifactBlobs();
-        } finally {
-          if (preparedMemory) legacy!.commitSessionSourceInvalidation(preparedMemory);
-        }
+        await managed?.close();
+        await Promise.all([
+          removeCliSessionFile(canonical, sessionId, { picoHome: this.picoHome }),
+          this.conversationStateStore.clearQueued(canonical, sessionId),
+        ]);
+        this.workbarRepository(canonical).purgeOrphanArtifactBlobs();
       },
     );
     return {
