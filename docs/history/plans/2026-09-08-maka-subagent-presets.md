@@ -58,3 +58,20 @@
 - Pico 当前 Provider 配置没有独立 enabled/retired 控件；目录协议支持这些可用性原因，宿主按实际已配置连接和模型投影，不新增虚假的开关。
 - 本次对齐范围是 Maka 的子 Agent 配置与执行闭环，沿用 Pico 的 UI 组件、Provider 和存储/执行引擎。真实模型验收覆盖 local_read 前台与 Graph；implementation 的 worktree/补丁由确定性集成验证，未声称三类能力均跑过真实模型。
 - 来源与 Apache 许可归属保留于 `resources/licenses/THIRD_PARTY_NOTICES.md`。
+
+
+## 真实桌面创建与调用复验（2026-09-08）
+
+通过 Computer Use 操作开发版 Electron 完成创建、保存、菜单选择、真实模型调用、独立子会话查看和持久结果回读。首次实测揭示并修复三处遗漏：
+
+- 用户配置已写入后，旧工作区的存储身份不匹配导致通知发布失败，曾被误报为保存失败。提交后的通知改为逐工作区隔离并记录日志，健康工作区继续刷新；未修改或自动采纳故障数据库。
+- 菜单启动 Preset 仅允许 `agent_spawn`，漏掉结果回读。现在允许 `agent_spawn` 与只读 `agent_output`，旧 Agent 入口保持不变。
+- 实时每条子代理事件曾形成重复卡片，持久 `completed` 被显示为进行中。现在按 activityId 归并活动，trace 不独立建卡，实时和历史都正确显示完成。
+
+最终创建 `cua-readonly-acceptance-v2` 后直接返回配置列表，无需刷新；通过菜单选中后，同一轮完成 `agent_spawn → agent_output`。随机文件内容不出现在任务提示中，回读准确返回 `PICO_FINAL_220102D7F69DD03D13F89CC9` 与 `expected_sum=73`，测试文件保持原样。流式阶段只有一张对应活动卡，完成及历史水合后均显示已完成。
+
+- 主会话：`cli-mts9unbx-a33db360`。
+- 最终子会话：`subagent-d88712ce-4f86-4a60-bc8e-e0ac09d1c625`；子 Run：`cf9cc4e3-3446-44da-b3f1-9cf7b53c4212`。
+- 工作区：`/private/var/folders/86/q61ychp53b3_6l4_2y138gfr0000gn/T/pico-cua-subagent-jplivcs8`。
+- 两个 CUA 测试配置均已停用，配置与会话保留供人工复查。
+- 本轮相关集成 13/13 通过（subagent presets、生产协议、通知失败、子代理 transcript、thinking visibility）；根类型、renderer 类型、构建和变更文件 ESLint 通过。
