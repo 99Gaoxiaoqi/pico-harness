@@ -1,3 +1,7 @@
+import {
+  configuredSubagentList,
+  type ConfiguredSubagentToolsOptions,
+} from "./configured-subagent-tools.js";
 import type { AgentSwarmStatusResult } from "../agent-graph/swarm-status.js";
 import type {
   AgentGraphWorkRequest,
@@ -56,6 +60,7 @@ export interface AgentGraphRequestedAddCommand {
   readonly kind: "add";
   readonly operator: Omit<AgentGraphOperator, "profileSnapshot"> & {
     readonly profileId: string;
+    readonly requireConfiguredPreset?: boolean;
   };
   readonly intent: AgentGraphActivationIntent;
 }
@@ -201,6 +206,7 @@ export interface AgentGraphSupervisorToolPort {
 }
 
 export interface CreateAgentGraphSupervisorToolsOptions {
+  readonly configuredSubagents?: ConfiguredSubagentToolsOptions;
   readonly swarm?: boolean;
   readonly getRootContext: () => AgentGraphRootToolContext | undefined;
   readonly port: AgentGraphSupervisorToolPort;
@@ -237,7 +243,7 @@ class UpdateAgentGraphTool extends AgentGraphSupervisorTool {
     return {
       name: this.name(),
       description: this.options.swarm
-        ? "安排 Graph 子任务。先调用 agent_list，operation=add_work 时提供 add_work 数组，以 target_kind=new_preset 和返回的 subagent_id 新建任务；target_kind=existing_operator 和已有 operator_id 追加任务。填写 instruction、可选 input_ids。替换失败任务时提供 replaces 和 replacement_mode=replace；replacement_mode=none 会忽略 replaces。新任务 workspace 默认 shared，隔离写入显式指定 isolated-worktree。operation=stop 提供 stop 数组；operation=finish 提供 finish.result_ids。仍有执行中的任务则 yield_agent_graph。旧 profile_id 调用保持兼容。"
+        ? "安排 Graph 子任务。先调用 agent_list，operation=add_work 时提供 add_work 数组，以 target_kind=new_preset 和返回的 subagent_id 新建任务；target_kind=existing_operator 和已有 operator_id 追加任务。填写 instruction、可选 input_ids。替换失败任务时提供 replaces 和 replacement_mode=replace；replacement_mode=none 会忽略 replaces。implementation 自动使用 isolated-worktree，其余任务默认 shared。operation=stop 提供 stop 数组；operation=finish 提供 finish.result_ids。仍有执行中的任务则 yield_agent_graph。旧 profile_id 调用保持兼容。"
         : "安排 Graph 子任务。operation=add_work 的 add_work 数组使用 view_agent_graph 返回的 profile_id 新建任务，或 operator_id 追加任务，填写 instruction 和可选 input_ids。operation=stop 提供 stop 数组；operation=finish 提供 finish.result_ids。仍有执行中的任务则 yield_agent_graph。",
       inputSchema: workRequestSchema(this.options.swarm),
     };
@@ -402,6 +408,8 @@ class AgentListTool extends AgentGraphSupervisorTool {
   async execute(args: string, execution?: ToolExecutionContext): Promise<string> {
     execution?.signal?.throwIfAborted();
     const root = this.rootContext();
+    if (this.options.configuredSubagents)
+      return configuredSubagentList(this.options.configuredSubagents, args);
     const input = parseJsonObject(args, this.name());
     assertKeys(input, ["view", "cursor"], [], this.name());
     const view = input["view"] ?? "selection";
@@ -1296,7 +1304,7 @@ function workRequestSchema(swarm = false): Record<string, unknown> {
               required: ["kind"],
               additionalProperties: false,
               description:
-                "只用于新任务；默认 shared。隔离任务可选 isolated-worktree，base_ref 默认 HEAD。",
+                "只用于新任务；implementation 强制 isolated-worktree，其余默认 shared，base_ref 默认 HEAD。",
             },
           },
           required: ["instruction"],
@@ -1418,6 +1426,8 @@ function parseWorkRequest(value: Record<string, unknown>): AgentGraphWorkRequest
       if (targetField) {
         requiredIdentity(work[targetField], `${path}.${targetField}`);
         for (const field of identities) if (field !== targetField) delete work[field];
+      } else if ("subagent_id" in work) {
+        for (const field of identities) if (field !== "subagent_id") delete work[field];
       } else if (identities.filter((field) => field in work).length !== 1) {
         throw new Error(`${path}: subagent_id、profile_id、agent_id 与 operator_id 必须选择一个。`);
       }
@@ -1459,6 +1469,7 @@ function parseWorkRequest(value: Record<string, unknown>): AgentGraphWorkRequest
       return {
         ...common,
         profileId: requiredIdentity(work["profile_id"], `${path}.profile_id`),
+        requireConfiguredPreset: "subagent_id" in work,
         workspace: parseWorkspace(
           objectField(work["workspace"] ?? { kind: "shared" }, `${path}.workspace`),
           `${path}.workspace`,

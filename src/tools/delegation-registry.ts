@@ -478,9 +478,12 @@ function attachHookService(registry: ToolRegistry, hookService?: HookService): T
   return registry;
 }
 
-function buildSubagentSafetyMiddleware(
+export function buildSubagentSafetyMiddleware(
   mode: "explore" | "worker",
-  config: ResolvedSubagentRegistryFactoryConfig,
+  config: Pick<
+    ResolvedSubagentRegistryFactoryConfig,
+    "workDir" | "workspaceRoots" | "processSandbox"
+  >,
 ): RequestMiddleware {
   return async (call) => {
     if (call.name === "read_file" || call.name === "grep") {

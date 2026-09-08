@@ -1,0 +1,263 @@
+import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import type { ModelRouter } from "../provider/model-router.js";
+import {
+  coordinateReasoningLevel,
+  type ResolvedModelReasoningCapability,
+} from "../provider/reasoning-capability.js";
+import { SilentReporter, type Reporter } from "../engine/reporter.js";
+import { ScopedSubagentActivityReporter } from "../tools/subagent-activity-reporter.js";
+import type {
+  ConfiguredSubagentExecutor,
+  ConfiguredSubagentExecutionResult,
+} from "../tools/configured-subagent-tools.js";
+import type { WorktreeSupervisor } from "../tasks/worktree-supervisor.js";
+import { AgentRuntime, type RunAgentCliDependencies } from "./agent-runtime.js";
+import { currentRuntimeRun, currentRuntimeToolCallId } from "./runtime-run.js";
+
+/** Public off uses the route's native disabled token; omitted means model default. */
+export function subagentThinkingLevel(
+  profile: ResolvedModelReasoningCapability,
+  requested?: string,
+): string | undefined {
+  const native =
+    requested === "off"
+      ? (["off", "none", "nothink"].find((level) => profile.levels.includes(level)) ?? requested)
+      : requested;
+  if (native !== undefined && !profile.levels.includes(native))
+    throw new Error(`Subagent thinking level ${requested} is unavailable for this model`);
+  return coordinateReasoningLevel(profile, native).level;
+}
+export interface CreateConfiguredSubagentExecutorOptions {
+  readonly workDir: string;
+  readonly modelRouter: ModelRouter;
+  readonly parentModelRouteId: string;
+  readonly worktreeSupervisor?: WorktreeSupervisor;
+  readonly reporter?: Reporter;
+  /** Only trusted runtime services, never parent Session, settings or thinking. */
+  readonly childDependencies?: Pick<
+    RunAgentCliDependencies,
+    | "env"
+    | "picoHome"
+    | "providerFactory"
+    | "providerDecorator"
+    | "approvalNotifier"
+    | "approvalManager"
+    | "toolResultRedactionSecrets"
+  >;
+  readonly executeChild?: AgentRuntime["execute"];
+}
+/** Reuses durable Session + RuntimeRun and the existing worktree lifecycle, without another loop. */
+export function createConfiguredSubagentExecutor(
+  options: CreateConfiguredSubagentExecutorOptions,
+): ConfiguredSubagentExecutor {
+  return async (input) => {
+    input.signal?.throwIfAborted();
+    const parentRun = currentRuntimeRun();
+    const parentToolCallId = currentRuntimeToolCallId();
+    const sessionId = `subagent-${randomUUID()}`;
+    const reporter: Reporter = options.reporter ?? new SilentReporter();
+    const scope = {
+      activityId: sessionId,
+      task: input.task,
+      agentName: input.preset?.name ?? input.definition.name,
+      mode: input.definition.workspace === "shared" ? ("explore" as const) : ("worker" as const),
+      completionPolicy: "required" as const,
+    };
+    const childReporter = new ScopedSubagentActivityReporter(reporter, scope);
+    let runId: string | undefined;
+    let turnId: string | undefined;
+    let childWorkDir = options.workDir;
+    const childRecord = (status: string, result?: ConfiguredSubagentExecutionResult) => ({
+      version: 1,
+      parentSessionId: parentRun?.sessionId,
+      parentRunId: parentRun?.runId,
+      parentToolCallId,
+      childSessionId: sessionId,
+      workDir: childWorkDir,
+      agentName: scope.agentName,
+      profile: input.definition.profile,
+      ...(input.preset ? { preset: input.preset } : {}),
+      status,
+      ...(runId ? { runId } : {}),
+      ...(turnId ? { turnId } : {}),
+      ...(result
+        ? {
+            summary: result.summary,
+            artifactIds: result.artifactIds ?? [],
+            ...(result.patch ? { patch: result.patch } : {}),
+          }
+        : {}),
+    });
+    const recordParent = async (status: string, result?: ConfiguredSubagentExecutionResult) => {
+      await parentRun?.recordTranscriptMessage({
+        role: "assistant",
+        content: `子任务 ${sessionId}: ${status}`,
+        providerData: {
+          picoHiddenFromTranscript: true,
+          picoConfiguredChild: childRecord(status, result),
+        },
+      });
+    };
+    const execute = async (
+      workDir: string,
+      signal?: AbortSignal,
+    ): Promise<ConfiguredSubagentExecutionResult> => {
+      childWorkDir = workDir;
+      await recordParent("started");
+      const routeId = input.preset?.modelRouteId ?? options.parentModelRouteId;
+      const route = options.modelRouter.require(routeId);
+      const thinking = subagentThinkingLevel(
+        route.capabilities.reasoningProfile,
+        input.preset?.thinkingLevel,
+      );
+      const resolved = options.modelRouter.providerConfig(routeId, thinking);
+      childReporter.onSubagentModelResolved({
+        resolvedModelRoute: routeId,
+        ...(thinking === undefined ? {} : { thinkingEffort: thinking }),
+        source: input.preset ? "profile" : "parent",
+      });
+      const result = await (
+        options.executeChild ?? new AgentRuntime().execute.bind(new AgentRuntime())
+      )(
+        {
+          prompt: input.task,
+          dir: workDir,
+          sessionSelection: { mode: "new", sessionId },
+          provider: resolved.provider,
+          baseURL: resolved.config.baseURL,
+          apiKey: resolved.config.apiKey,
+          ...(resolved.config.auth ? { auth: resolved.config.auth } : {}),
+          model: route.model,
+          modelRouteId: route.id,
+          modelCapabilities: route.capabilities,
+          ...(thinking === undefined ? {} : { thinkingEffort: thinking }),
+          interactionMode: "default",
+          orchestrationMode: "default",
+          allowedTools: input.definition.tools,
+        },
+        {
+          ...options.childDependencies,
+          modelRouter: options.modelRouter,
+          reporter: childReporter,
+          ...(signal ? { signal } : {}),
+          maxTurns: 20,
+          hostKind: "desktop",
+          configuredSubagentChild: {
+            definition: input.definition,
+            ...(input.preset ? { preset: input.preset } : {}),
+          },
+          onRunAdmission: async (run) => {
+            runId = run.runId;
+            turnId = run.currentTurnId;
+            await run.recordTranscriptMessage({
+              role: "assistant",
+              content: `子任务身份: ${scope.agentName}`,
+              providerData: {
+                picoHiddenFromTranscript: true,
+                picoConfiguredChild: childRecord("started"),
+              },
+            });
+          },
+        },
+      );
+      return {
+        status: "completed",
+        sessionId: result.sessionId,
+        childSessionId: result.sessionId,
+        agentName: scope.agentName,
+        permissionMode: "default",
+        artifactIds: [],
+        ...(turnId ? { turnId } : {}),
+        ...(runId ? { runId } : {}),
+        ref: `pico://session/${encodeURIComponent(result.sessionId)}`,
+        summary: result.finalMessage,
+      };
+    };
+    reporter.onSubagentActivity?.({ ...scope, status: "running" });
+    try {
+      let result: ConfiguredSubagentExecutionResult;
+      if (input.definition.workspace === "isolated-worktree") {
+        const supervisor = options.worktreeSupervisor;
+        if (!supervisor)
+          throw new Error("implementation requires an available worktree child executor");
+        let childResult: ConfiguredSubagentExecutionResult | undefined;
+        let baseCommit = "";
+        const task = supervisor.start(
+          {
+            description: input.task.slice(0, 240),
+            branchSlug: "subagent",
+            completionMode: "worktree_only",
+            data: {
+              subagentSessionId: sessionId,
+              ...(input.preset ? { subagentPreset: input.preset } : {}),
+            },
+          },
+          async (worktree) => {
+            baseCommit = (
+              await promisify(execFile)("git", ["rev-parse", "HEAD"], {
+                cwd: worktree.worktreePath,
+              })
+            ).stdout.trim();
+            const signal = input.signal
+              ? AbortSignal.any([input.signal, worktree.signal])
+              : worktree.signal;
+            childResult = await execute(worktree.worktreePath, signal);
+            return {
+              summary: childResult.summary,
+              data: { sessionId, ...(runId ? { runId } : {}) },
+            };
+          },
+        );
+        const abort = () => {
+          void supervisor.stop(task.taskId);
+        };
+        input.signal?.addEventListener("abort", abort, { once: true });
+        if (input.signal?.aborted) abort();
+        let settled;
+        try {
+          settled = await supervisor.wait(task.taskId);
+        } finally {
+          input.signal?.removeEventListener("abort", abort);
+        }
+        if (settled.status !== "completed" || !childResult)
+          throw new Error(settled.error ?? `Worktree child ${settled.status}`);
+        const patch = await promisify(execFile)(
+          "git",
+          ["diff", "--no-ext-diff", "--no-textconv", "--binary", baseCommit, "HEAD", "--"],
+          { cwd: settled.worktreePath, maxBuffer: 16 * 1024 * 1024 },
+        );
+        const outputDir = join(dirname(settled.worktreePath), ".pico-subagent-output");
+        await mkdir(outputDir, { recursive: true });
+        const patchPath = join(outputDir, `${sessionId}.patch`);
+        await writeFile(patchPath, patch.stdout, "utf8");
+        result = {
+          ...childResult,
+          artifactIds: [patchPath],
+          patch: { path: patchPath, worktree: settled.worktreePath, branch: settled.branch },
+        };
+      } else result = await execute(options.workDir, input.signal);
+      await recordParent("completed", result);
+      reporter.onSubagentActivity?.({
+        ...scope,
+        status: "completed",
+        summary: result.summary.slice(0, 2000),
+      });
+      return result;
+    } catch (error) {
+      await recordParent(input.signal?.aborted ? "cancelled" : "failed");
+      reporter.onSubagentActivity?.({
+        ...scope,
+        status: input.signal?.aborted ? "cancelled" : "failed",
+        summary: error instanceof Error ? error.message : String(error),
+      });
+      throw new Error(
+        `Child task ${sessionId} failed: ${error instanceof Error ? error.message : String(error)} (pico://session/${sessionId})`,
+        { cause: error },
+      );
+    }
+  };
+}

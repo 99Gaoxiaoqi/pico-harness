@@ -14,7 +14,11 @@ export type AgentGraphWorkRequest =
         readonly replacesIntentId?: string;
         readonly inputIds: readonly string[];
       } & (
-        | { readonly profileId: string; readonly workspace: AgentGraphWorkspacePolicy }
+        | {
+            readonly profileId: string;
+            readonly requireConfiguredPreset?: boolean;
+            readonly workspace: AgentGraphWorkspacePolicy;
+          }
         | { readonly operatorId: string }
       ))[];
     }
@@ -109,6 +113,9 @@ export function compileAgentGraphWork(
           generation,
           role: work.profileId,
           profileId: work.profileId,
+          ...(work.requireConfiguredPreset === undefined
+            ? {}
+            : { requireConfiguredPreset: work.requireConfiguredPreset }),
           workspacePolicy: work.workspace,
         },
         intent,
