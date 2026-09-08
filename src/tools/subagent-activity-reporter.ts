@@ -3,6 +3,11 @@ import type { Reporter, SubagentActivityEvent } from "../engine/reporter.js";
 import type { ToolResultEnvelope } from "../engine/tool-result-contract.js";
 
 export interface SubagentActivityScope {
+  childSessionId?: string;
+  childWorkspacePath?: string;
+  toolCallId?: string;
+  durationMs?: number;
+
   activityId: string;
   task: string;
   agentName?: string;

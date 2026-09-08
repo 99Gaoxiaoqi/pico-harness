@@ -60,7 +60,11 @@ export function createConfiguredSubagentExecutor(
     const parentToolCallId = currentRuntimeToolCallId();
     const sessionId = `subagent-${randomUUID()}`;
     const reporter: Reporter = options.reporter ?? new SilentReporter();
+    const startedAt = Date.now();
     const scope = {
+      childSessionId: sessionId,
+      childWorkspacePath: options.workDir,
+      ...(parentToolCallId ? { toolCallId: parentToolCallId } : {}),
       activityId: sessionId,
       task: input.task,
       agentName: input.preset?.name ?? input.definition.name,
@@ -107,6 +111,7 @@ export function createConfiguredSubagentExecutor(
       signal?: AbortSignal,
     ): Promise<ConfiguredSubagentExecutionResult> => {
       childWorkDir = workDir;
+      scope.childWorkspacePath = workDir;
       await recordParent("started");
       const routeId = input.preset?.modelRouteId ?? options.parentModelRouteId;
       const route = options.modelRouter.require(routeId);
@@ -242,6 +247,7 @@ export function createConfiguredSubagentExecutor(
       await recordParent("completed", result);
       reporter.onSubagentActivity?.({
         ...scope,
+        durationMs: Date.now() - startedAt,
         status: "completed",
         summary: result.summary.slice(0, 2000),
       });
@@ -250,6 +256,7 @@ export function createConfiguredSubagentExecutor(
       await recordParent(input.signal?.aborted ? "cancelled" : "failed");
       reporter.onSubagentActivity?.({
         ...scope,
+        durationMs: Date.now() - startedAt,
         status: input.signal?.aborted ? "cancelled" : "failed",
         summary: error instanceof Error ? error.message : String(error),
       });

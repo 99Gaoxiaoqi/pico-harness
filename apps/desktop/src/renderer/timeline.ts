@@ -52,6 +52,7 @@ export function applyTimelineNotification(
     sessionId: stringValue(event.scope.sessionId) || undefined,
     runId,
     eventType,
+    ...(activityId ? { data } : {}),
   };
   const inferenceStatus = eventType === "assistant.thinking";
   const retained = timeline.filter((candidate) =>

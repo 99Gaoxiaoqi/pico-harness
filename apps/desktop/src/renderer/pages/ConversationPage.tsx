@@ -1,3 +1,8 @@
+import {
+  subagentMetadata,
+  subagentParent,
+  subagentSessionHref,
+} from "../conversation/subagent-navigation.js";
 import type { RuntimeUserDefaults } from "@pico/protocol";
 import {
   AlertTriangle,
@@ -124,6 +129,18 @@ export function ConversationPage() {
     [sessionId, workspacePath],
   );
   const conversationKey = sessionRef ? workspaceSessionKey(sessionRef) : undefined;
+  const childParent = sessionRef
+    ? subagentParent(location.search, sessionRef, data.conversations)
+    : undefined;
+  const parentRef =
+    childParent ?? (graphParentId ? { workspacePath, sessionId: graphParentId } : undefined);
+  const parentTitle = parentRef
+    ? (data.sessions.find(
+        (candidate) =>
+          candidate.id === parentRef.sessionId &&
+          candidate.workspacePath === parentRef.workspacePath,
+      )?.title ?? "父任务")
+    : undefined;
   const draftKey = conversationKey ?? `new:${workspacePath || "unbound"}`;
   const {
     value: draft,
@@ -584,11 +601,9 @@ export function ConversationPage() {
       return;
     }
     if (item.kind === "subagent") {
-      setInspector({
-        title: item.name,
-        subtitle: "子代理会话",
-        content: <p>{item.detail ?? "详细会话仍在 Runtime 中同步。"}</p>,
-      });
+      if (!sessionRef) return;
+      const href = subagentSessionHref(item, sessionRef);
+      if (href) navigate(href);
     }
   };
 
@@ -819,18 +834,20 @@ export function ConversationPage() {
           sessionRef ? (
             <div className="conversation-session-header">
               <div className="conversation-session-header__identity">
-                {graphParentId && (
-                  <Link
-                    className="conversation-graph-parent"
-                    to={sessionHref({ workspacePath, sessionId: graphParentId })}
-                  >
-                    ← 返回主任务
-                  </Link>
-                )}
                 {workspacePath && (
                   <span className="conversation-session-project" title={workspacePath}>
                     <Folder aria-hidden="true" /> {workspaceLabel}
                   </span>
+                )}
+                {parentRef && (
+                  <Link
+                    className="conversation-graph-parent"
+                    aria-label={`返回父任务：${parentTitle}`}
+                    title={parentTitle}
+                    to={sessionHref(parentRef)}
+                  >
+                    ‹ {parentTitle}
+                  </Link>
                 )}
                 {editingTitle && sessionRef ? (
                   <form
@@ -866,7 +883,8 @@ export function ConversationPage() {
                   </form>
                 ) : (
                   <h1>
-                    {session?.title ??
+                    {childParent?.name ??
+                      session?.title ??
                       (graphParentId ? "Graph 子任务" : sessionId ? "正在载入会话…" : "新任务")}
                   </h1>
                 )}
@@ -1360,8 +1378,9 @@ function timelineItemToConversationItem(item: TimelineItem): ConversationItemVie
     return {
       id: item.id,
       kind: "subagent",
-      name: item.title,
+      name: typeof item.data?.agentName === "string" ? item.data.agentName : item.title,
       title: item.title,
+      ...subagentMetadata(item.data ?? {}, item.id),
       detail: item.detail,
       state: item.state ?? "active",
       at: item.at,

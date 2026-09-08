@@ -55,6 +55,7 @@ export interface TimelineItem {
   readonly sessionId?: string | undefined;
   readonly runId?: string | undefined;
   readonly eventType?: string | undefined;
+  readonly data?: JsonRecord | undefined;
 }
 
 export interface ConversationView {

@@ -75,6 +75,11 @@ export type TranscriptEntryData =
     }
   | {
       kind: "subagent-activity";
+      childSessionId?: string;
+      childWorkspacePath?: string;
+      toolCallId?: string;
+      durationMs?: number;
+
       task: string;
       status: SubagentActivityEvent["status"];
       agentName?: string;
@@ -732,6 +737,10 @@ function transcriptEntry(value: Record<string, unknown>): void {
         "resolvedModelRoute",
         "thinkingEffort",
         "modelSelectionSource",
+        "childSessionId",
+        "childWorkspacePath",
+        "toolCallId",
+        "durationMs",
       );
       transcriptSubagentActivity(value);
       return;
@@ -839,6 +848,10 @@ function transcriptSubagentActivity(value: Record<string, unknown>): void {
     "resolvedModelRoute",
     "thinkingEffort",
     "modelSelectionSource",
+    "childSessionId",
+    "childWorkspacePath",
+    "toolCallId",
+    "durationMs",
   );
   transcriptStrings(value, "task", "status", "mode", "completionPolicy");
   transcriptEnum(value, "status", [
@@ -862,6 +875,9 @@ function transcriptSubagentActivity(value: Record<string, unknown>): void {
   ]) {
     transcriptOptionalString(value, key);
   }
+  for (const key of ["childSessionId", "childWorkspacePath", "toolCallId"])
+    transcriptOptionalString(value, key);
+  transcriptOptionalFiniteNumber(value, "durationMs");
   transcriptOptionalEnum(value, "modelSelectionSource", ["ephemeral", "profile", "parent"]);
 }
 

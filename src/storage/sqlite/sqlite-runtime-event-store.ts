@@ -3824,7 +3824,22 @@ function transcriptMutationsForEvent(
               : {}),
             state: transcript.activity.status,
             at: transcript.createdAt,
-            data: { activityId: transcript.activityId, mode: transcript.activity.mode },
+            data: {
+              activityId: transcript.activityId,
+              mode: transcript.activity.mode,
+              ...(transcript.activity.childSessionId !== undefined
+                ? { childSessionId: transcript.activity.childSessionId }
+                : {}),
+              ...(transcript.activity.childWorkspacePath !== undefined
+                ? { childWorkspacePath: transcript.activity.childWorkspacePath }
+                : {}),
+              ...(transcript.activity.toolCallId !== undefined
+                ? { toolCallId: transcript.activity.toolCallId }
+                : {}),
+              ...(transcript.activity.durationMs !== undefined
+                ? { durationMs: transcript.activity.durationMs }
+                : {}),
+            },
           },
         },
       ];
@@ -3922,7 +3937,15 @@ function conversationPayloadForTranscriptEntry(
           : {}),
         state: entry.status,
         at,
-        data: { mode: entry.mode },
+        data: {
+          mode: entry.mode,
+          ...(entry.childSessionId !== undefined ? { childSessionId: entry.childSessionId } : {}),
+          ...(entry.childWorkspacePath !== undefined
+            ? { childWorkspacePath: entry.childWorkspacePath }
+            : {}),
+          ...(entry.toolCallId !== undefined ? { toolCallId: entry.toolCallId } : {}),
+          ...(entry.durationMs !== undefined ? { durationMs: entry.durationMs } : {}),
+        },
       };
   }
 }
