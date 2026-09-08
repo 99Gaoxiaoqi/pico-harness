@@ -1,0 +1,199 @@
+.subagent-settings {
+  max-width: 900px;
+  width: 100%;
+  margin-inline: auto;
+}
+.subagent-settings__list {
+  padding: 0;
+  overflow: hidden;
+}
+.subagent-settings__row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 20px 24px;
+}
+.subagent-settings__row + .subagent-settings__row {
+  border-top: 1px solid var(--line);
+}
+.subagent-settings__row-copy {
+  flex: 1;
+  min-width: 0;
+}
+.subagent-settings__row-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  overflow-wrap: anywhere;
+}
+.subagent-settings p,
+.subagent-settings small {
+  color: var(--ink-secondary);
+}
+.subagent-settings__row p {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.subagent-settings__badge {
+  border-radius: 5px;
+  padding: 3px 7px;
+  color: var(--warning);
+  background: var(--warning-soft);
+  font-size: 11px;
+}
+.subagent-settings__switch {
+  position: relative;
+  flex: 0 0 32px;
+  height: 20px;
+  cursor: pointer;
+}
+.subagent-settings__switch input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  margin: 0;
+  cursor: pointer;
+}
+.subagent-settings__switch span {
+  display: block;
+  height: 20px;
+  background: var(--line-strong);
+  border-radius: 12px;
+  pointer-events: none;
+}
+.subagent-settings__switch span::after {
+  content: "";
+  display: block;
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: white;
+  transition: transform var(--motion);
+}
+.subagent-settings__switch input:checked + span {
+  background: var(--accent);
+}
+.subagent-settings__switch input:checked + span::after {
+  transform: translateX(12px);
+}
+.subagent-settings__switch input:focus-visible + span {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+}
+.subagent-settings__switch input:disabled + span {
+  opacity: 0.5;
+}
+.subagent-settings__detail,
+.subagent-settings__form {
+  display: grid;
+  gap: 22px;
+}
+.subagent-settings__detail:focus {
+  outline: none;
+}
+.subagent-settings__detail-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+.subagent-settings__detail-header h2 {
+  margin: 0;
+  font-size: 20px;
+}
+.subagent-settings__detail-header p {
+  margin: 6px 0 0;
+}
+.subagent-settings__group {
+  margin: 0;
+  padding: 18px 24px 24px;
+  display: grid;
+  gap: 20px;
+  min-width: 0;
+}
+.subagent-settings__group legend {
+  padding: 0 6px;
+  font-weight: 600;
+}
+.subagent-settings__group label,
+.subagent-settings__id {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+.subagent-settings__group label > span,
+.subagent-settings__id > span {
+  font-weight: 500;
+}
+.subagent-settings__group input:not([type="checkbox"]),
+.subagent-settings__group textarea,
+.subagent-settings__group select {
+  width: 100%;
+  min-width: 0;
+  padding: 9px 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  color: var(--ink);
+  font: inherit;
+}
+.subagent-settings__group textarea {
+  resize: vertical;
+  line-height: 1.5;
+}
+.subagent-settings__group :is(input, textarea, select):focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.subagent-settings__group [aria-invalid="true"] {
+  border-color: var(--danger);
+}
+.subagent-settings__group .subagent-settings__field-error {
+  color: var(--danger);
+}
+.subagent-settings__group :disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.subagent-settings__group label.subagent-settings__enabled {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.subagent-settings__enabled input {
+  accent-color: var(--accent);
+}
+.subagent-settings__counter {
+  text-align: right;
+}
+.subagent-settings__id code {
+  overflow-wrap: anywhere;
+}
+.subagent-settings__danger {
+  padding: 24px;
+}
+.subagent-settings__danger h3 {
+  margin: 0;
+  font-size: 14px;
+}
+@media (max-width: 600px) {
+  .subagent-settings__row,
+  .subagent-settings__group,
+  .subagent-settings__danger {
+    padding: 16px;
+  }
+  .subagent-settings__detail-header {
+    flex-wrap: wrap;
+  }
+  .subagent-settings .page-intro {
+    align-items: flex-start;
+    gap: 12px;
+    flex-direction: column;
+  }
+}
