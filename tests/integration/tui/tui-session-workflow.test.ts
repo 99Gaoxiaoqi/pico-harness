@@ -1,13 +1,23 @@
 import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { resolveCliStartupSession } from "../../../src/cli/session-args.js";
-import { Session } from "../../../src/engine/session.js";
-import { createPicoCommandRegistry } from "../../../src/input/pico-command-registry.js";
-import { processUserInput } from "../../../src/input/process-user-input.js";
+import {
+  createClientCommandRegistry,
+  processClientInput,
+} from "../../../src/tui/client-commands.js";
+import {
+  ClientSessionRuntime,
+  type DaemonSessionClient,
+} from "../../../src/tui/client-session-runtime.js";
+import { TuiReporter } from "../../../src/tui/tui-reporter.js";
+import { DesktopRuntimeService } from "../../../src/daemon/desktop-runtime-service.js";
+import { WorkspaceRuntimeService } from "../../../src/daemon/workspace-runtime-service.js";
+import { createRuntimeRequest, type RuntimeMethod, type JsonValue } from "@pico/protocol";
+import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
 import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
 
 import { StorageOperationJournal } from "../../../src/storage/operation-journal.js";
@@ -47,32 +57,25 @@ test("--session and -S resume an existing session in the current workspace", asy
 
 test("/new requests an idle atomic switch without creating a session eagerly", async (context) => {
   const fixture = await createFixture("new-command");
-  context.after(() => fixture.dispose());
-  const registry = await createPicoCommandRegistry({
-    workDir: fixture.workspace,
-    picoHome: fixture.picoHome,
-    provider: "openai",
-    model: "test-model",
-    tools: [],
+  const client = await createCommandClient(fixture);
+  context.after(async () => {
+    await client.dispose();
+    await fixture.dispose();
   });
-
-  const processed = await processUserInput("/new", { registry });
-  assert.equal(processed.type, "local-command");
-  if (processed.type !== "local-command") return;
-  assert.deepEqual(processed.result.data, { mode: "new" });
-  assert.equal(processed.result.action, "resume");
+  const processed = await client.run("/new");
+  assert.deepEqual(processed.result?.data, { mode: "new" });
+  assert.equal(processed.result?.action, "resume");
+  assert.equal(client.runtime.activeSessionId, undefined);
+  assert.deepEqual(client.requests, []);
   assert.deepEqual(await fixture.store.listSessionManifests(), []);
 });
 
 test("/compact refuses legacy environment credentials without a user model router", async (context) => {
   const fixture = await createFixture("compact-user-model-route");
-  context.after(() => fixture.dispose());
-  const session = new Session("compact-user-model-route", fixture.workspace, {
-    persistence: false,
-    picoHome: fixture.picoHome,
+  await fixture.store.initializeSession({
+    sessionId: "compact-user-model-route",
+    workDir: fixture.workspace,
   });
-  context.after(() => session.close());
-
   const legacyEnvironment = {
     LLM_BASE_URL: process.env.LLM_BASE_URL,
     LLM_API_KEY: process.env.LLM_API_KEY,
@@ -87,66 +90,42 @@ test("/compact refuses legacy environment credentials without a user model route
     restoreEnvironment("LLM_MODEL", legacyEnvironment.LLM_MODEL);
   });
 
-  const registry = await createPicoCommandRegistry({
-    workDir: fixture.workspace,
-    picoHome: fixture.picoHome,
-    provider: "openai",
-    model: "legacy-model",
-    modelRouteId: "legacy/legacy-model",
-    session,
-    tools: [],
+  const client = await createCommandClient(fixture, "compact-user-model-route");
+  context.after(async () => {
+    await client.dispose();
+    await fixture.dispose();
   });
-  const processed = await processUserInput("/compact", { registry });
-  assert.equal(processed.type, "local-command");
-  if (processed.type !== "local-command") return;
-  assert.match(processed.result.message ?? "", /user model configuration is not available/u);
+  const processed = await client.run("/compact");
+  assert.equal(processed.kind, "local");
+  assert.match(processed.result?.message ?? "", /model|模型|provider/i);
+  assert.equal(client.providerCalls(), 0, "legacy environment cannot activate a model provider");
+  assert.deepEqual(client.requests, ["session.compact"]);
 });
 
 test("/plan and legacy mode commands keep collaboration and permission independent", async (context) => {
   const fixture = await createFixture("plan-command-compatibility");
-  context.after(() => fixture.dispose());
-  const registry = await createPicoCommandRegistry({
-    workDir: fixture.workspace,
-    picoHome: fixture.picoHome,
-    provider: "openai",
-    model: "test-model",
-    tools: [],
+  const client = await createCommandClient(fixture);
+  context.after(async () => {
+    await client.dispose();
+    await fixture.dispose();
   });
-
-  const plan = await processUserInput("/plan", { registry });
-  assert.equal(plan.type, "local-command");
-  if (plan.type !== "local-command") return;
-  assert.deepEqual(plan.result.data, {
-    ok: true,
-    collaborationMode: "plan",
-    permissionMode: "default",
-  });
-
-  const permission = await processUserInput("/mode auto", { registry });
-  assert.equal(permission.type, "local-command");
-  if (permission.type !== "local-command") return;
-  assert.equal((permission.result.data as { collaborationMode: string }).collaborationMode, "plan");
-  assert.equal((permission.result.data as { permissionMode: string }).permissionMode, "auto");
-
-  const compatibility = await processUserInput("/permissions plan", { registry });
-  assert.equal(compatibility.type, "local-command");
-  if (compatibility.type !== "local-command") return;
-  assert.equal(
-    (compatibility.result.data as { collaborationMode: string }).collaborationMode,
-    "plan",
-  );
-  assert.equal((compatibility.result.data as { permissionMode: string }).permissionMode, "auto");
-
-  const off = await processUserInput("/plan off", { registry });
-  assert.equal(off.type, "local-command");
-  if (off.type !== "local-command") return;
-  assert.equal((off.result.data as { collaborationMode: string }).collaborationMode, "agent");
-  assert.equal((off.result.data as { permissionMode: string }).permissionMode, "auto");
+  await client.run("/plan");
+  assert.equal(client.runtime.preSessionSettings.collaborationMode, "plan");
+  assert.equal(client.runtime.preSessionSettings.permissionMode, "default");
+  await client.run("/mode auto");
+  assert.equal(client.runtime.preSessionSettings.collaborationMode, "plan");
+  assert.equal(client.runtime.preSessionSettings.permissionMode, "auto");
+  await client.run("/permissions plan");
+  assert.equal(client.runtime.preSessionSettings.collaborationMode, "plan");
+  assert.equal(client.runtime.preSessionSettings.permissionMode, "auto");
+  await client.run("/plan off");
+  assert.equal(client.runtime.preSessionSettings.collaborationMode, "agent");
+  assert.equal(client.runtime.preSessionSettings.permissionMode, "auto");
+  assert.deepEqual(client.requests, []);
 });
 
 test("/resume and /fork reject an unpublished fork target", async (context) => {
   const fixture = await createFixture("unpublished-fork-command");
-  context.after(() => fixture.dispose());
   await fixture.store.initializeSession({
     sessionId: "unfinished-fork",
     workDir: fixture.workspace,
@@ -164,21 +143,18 @@ test("/resume and /fork reject an unpublished fork target", async (context) => {
     targetMode: "default",
     stagingDirectory: join(fixture.root, "staging", "unfinished-fork"),
   });
-  const registry = await createPicoCommandRegistry({
-    workDir: fixture.workspace,
-    picoHome: fixture.picoHome,
-    provider: "openai",
-    model: "test-model",
-    tools: [],
+  const client = await createCommandClient(fixture);
+  context.after(async () => {
+    await client.dispose();
+    await fixture.dispose();
   });
-
-  for (const command of ["/resume unfinished-fork", "/fork unfinished-fork"]) {
-    const processed = await processUserInput(command, { registry });
-    assert.equal(processed.type, "local-command");
-    if (processed.type !== "local-command") continue;
-    assert.equal(processed.result.action, "message");
-    assert.match(processed.result.message ?? "", /no saved session was found/u);
-  }
+  const resumed = await client.run("/resume unfinished-fork");
+  assert.match(resumed.result?.message ?? "", /不存在/u);
+  const forked = await client.run("/fork unfinished-fork");
+  assert.match(forked.result?.message ?? "", /分叉失败.*(?:不存在|not found|no saved session)/iu);
+  assert.equal(client.runtime.activeSessionId, undefined);
+  assert.deepEqual(client.requests, ["session.get", "session.fork"]);
+  assert.equal((await fixture.store.listSessionManifests()).length, 1);
 });
 
 async function createFixture(name: string): Promise<{
@@ -189,9 +165,10 @@ async function createFixture(name: string): Promise<{
   dispose(): Promise<void>;
 }> {
   const root = await mkdtemp(join(tmpdir(), `pico-${name}-`));
-  const workspace = join(root, "workspace");
+  const workspaceSeed = join(root, "workspace");
   const picoHome = join(root, "pico-home");
-  await mkdir(workspace, { recursive: true });
+  await mkdir(workspaceSeed, { recursive: true });
+  const workspace = await realpath(workspaceSeed);
   const store = new SqliteRuntimeEventStore({
     storageRoot: resolvePicoPaths(workspace, { picoHome }).workspace.root,
   });
@@ -210,4 +187,48 @@ async function createFixture(name: string): Promise<{
 function restoreEnvironment(name: string, value: string | undefined): void {
   if (value === undefined) delete process.env[name];
   else process.env[name] = value;
+}
+
+async function createCommandClient(
+  fixture: { workspace: string; picoHome: string },
+  sessionId?: string,
+) {
+  const trustStore = new WorkspaceTrustStore({ userStateDirectory: fixture.picoHome });
+  await trustStore.trust(fixture.workspace);
+  const env = { ...process.env, PICO_HOME: fixture.picoHome };
+  let calls = 0;
+  const desktop = new DesktopRuntimeService({
+    runtimeService: new WorkspaceRuntimeService({ env, execute: async () => undefined }),
+    trustStore,
+    env,
+    initializeDefaultProvider: false,
+    providerFactory: () => {
+      calls += 1;
+      throw new Error("unexpected model provider activation");
+    },
+  });
+  const requests: string[] = [];
+  const runtime = new ClientSessionRuntime({
+    client: {
+      request: (method: RuntimeMethod, params: JsonValue) => {
+        requests.push(method);
+        return desktop.handle(createRuntimeRequest(method, params));
+      },
+      subscribeSessionFrames: () => ({ dispose: () => undefined }),
+    } as unknown as DaemonSessionClient,
+    workspacePath: fixture.workspace,
+    sessionId,
+    reporter: new TuiReporter({ onProjectionUpdate: () => undefined }),
+  });
+  const registry = createClientCommandRegistry({ runtime, workspacePath: fixture.workspace });
+  return {
+    runtime,
+    requests,
+    providerCalls: () => calls,
+    run: (input: string) => processClientInput(input, registry, runtime),
+    dispose: async () => {
+      await runtime.dispose();
+      await desktop.close();
+    },
+  };
 }
