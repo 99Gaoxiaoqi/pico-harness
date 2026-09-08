@@ -200,6 +200,28 @@ test("foreground agent_spawn uses a separate durable RuntimeRun and exact local 
                       },
                     ],
                   };
+                if (parentCalls === 2) {
+                  f.set([]);
+                  return {
+                    role: "assistant" as const,
+                    content: "",
+                    toolCalls: [
+                      {
+                        id: "read-child-output",
+                        name: "agent_output",
+                        arguments: JSON.stringify({
+                          locator: "child_session_run",
+                          child_session_id: childSessionId,
+                          run_id: childRuns[0],
+                        }),
+                      },
+                    ],
+                  };
+                }
+                const output = _messages.find(
+                  (message) => message.toolCallId === "read-child-output",
+                );
+                assert.match(output?.content ?? "", /CHILD_EVIDENCE_73/);
                 return { role: "assistant" as const, content: "Parent complete" };
               }
               const run = currentRuntimeRun()!;
@@ -232,6 +254,7 @@ test("foreground agent_spawn uses a separate durable RuntimeRun and exact local 
         },
       },
     );
+    assert.equal(parentCalls, 3);
     assert.ok(childSessionId.startsWith("subagent-"));
     assert.equal(new Set(childRuns).size, 1);
     assert.deepEqual(levels, ["nothink", "max"]);
