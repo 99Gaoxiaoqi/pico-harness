@@ -6,7 +6,7 @@ type Awaitable<T> = T | Promise<T>;
 /**
  * Provider/config protocol mapping owned by the Desktop composition root.
  *
- * The controller keeps provider stores, credential vaults and recovery state;
+ * The Provider config service owns stores, credential vaults and recovery state;
  * this module only maps typed protocol requests to that already-owned domain.
  */
 export interface DesktopProviderRequestContext {

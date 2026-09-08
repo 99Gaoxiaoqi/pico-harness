@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import {
   createRuntimeRequest,
@@ -11,8 +12,12 @@ import {
   WorkspaceRuntimeService,
 } from "../../src/daemon/index.js";
 import { WorkspaceRegistrationStore } from "../../src/daemon/workspace-registration.js";
-import { UserConfigStore } from "../../src/input/user-config-store.js";
-import type { CredentialVault } from "../../src/provider/credential-vault.js";
+import { parseUserConfig, UserConfigStore } from "../../src/input/user-config-store.js";
+import {
+  credentialRefForProvider,
+  type CredentialVault,
+} from "../../src/provider/credential-vault.js";
+import { ProviderOperationJournal } from "../../src/provider/provider-operation-journal.js";
 import { WorkspaceTrustStore } from "../../src/security/workspace-trust.js";
 
 const PROVIDER_ID = "revision-token-fixture";
@@ -188,6 +193,33 @@ test("Desktop projects user-config revisions into process-private tokens", async
     "provider delete revision",
   );
   assert.notEqual(providerDeletedToken, (await userConfigStore.read()).revision);
+
+  const unsubscribeExternal = desktop.subscribe((notification) => notifications.push(notification));
+  context.after(unsubscribeExternal);
+  const beforeExternal = await userConfigStore.read();
+  const external = await userConfigStore.write(
+    { ...beforeExternal.config, defaults: { mode: "default" } },
+    { expectedRevision: beforeExternal.revision },
+  );
+  const afterExternal = asRecord(await desktop.handle(createRuntimeRequest("config.user.get", {})));
+  const externalToken = requiredSha256(
+    afterExternal["revision"],
+    "external config public revision",
+  );
+  const hasExternalNotification = () =>
+    notifications.some((entry) => {
+      const notification = asRecord(entry);
+      return (
+        notification["topic"] === "config.updated" &&
+        asRecord(notification["payload"])["revision"] === externalToken
+      );
+    });
+  for (let attempt = 0; attempt < 80 && !hasExternalNotification(); attempt++) await delay(25);
+  assert.ok(
+    hasExternalNotification(),
+    "the owned file watcher must publish external config updates",
+  );
+  assert.notEqual(externalToken, external.revision);
 });
 
 function createDesktop(
@@ -254,3 +286,208 @@ function asRecord(value: unknown): Record<string, unknown> {
   assert.ok(typeof value === "object" && value !== null && !Array.isArray(value));
   return value as Record<string, unknown>;
 }
+
+test(
+  "Provider config commits share admission locking with session.send and run.start",
+  { timeout: 10_000 },
+  async (context) => {
+    const root = await mkdtemp(join(tmpdir(), "pico-provider-admission-"));
+    const picoHome = join(root, "home");
+    const workspace = join(root, "workspace");
+    await mkdir(workspace);
+    const env = { PICO_HOME: picoHome };
+    const userConfigStore = new UserConfigStore({ picoHome });
+    const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
+    const runtime = new WorkspaceRuntimeService({ env, execute: async () => undefined });
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const pending: Promise<unknown>[] = [];
+    const originalWrite = userConfigStore.write.bind(userConfigStore);
+    userConfigStore.write = async (...args) => {
+      entered.resolve();
+      await release.promise;
+      return originalWrite(...args);
+    };
+    let forwardedRuns = 0;
+    const originalHandle = runtime.handle.bind(runtime);
+    runtime.handle = async (request) => {
+      if (request.method !== "run.start") return originalHandle(request);
+      forwardedRuns++;
+      assert.ok((await userConfigStore.read()).config.providers[PROVIDER_ID]);
+      return { runId: "admitted-after-config" };
+    };
+    const desktop = new DesktopRuntimeService({
+      runtimeService: runtime,
+      userConfigStore,
+      trustStore,
+      env,
+      credentialVault: unavailableVault(),
+    });
+    context.after(async () => {
+      release.resolve();
+      await Promise.allSettled(pending);
+      await desktop.close();
+      await rm(root, { recursive: true, force: true });
+    });
+    const initial = asRecord(await desktop.handle(createRuntimeRequest("provider.list", {})));
+    const writing = desktop.handle(
+      createRuntimeRequest("provider.upsert", {
+        provider: providerInput(),
+        expectedRevision: String(initial["revision"]),
+      }),
+    );
+    pending.push(writing);
+    await entered.promise;
+    let sendSettled = false;
+    const sending = desktop
+      .handle(
+        createRuntimeRequest("session.send", {
+          workspacePath: workspace,
+          input: { kind: "text", text: "hello" },
+          idempotencyKey: "provider-admission-send",
+        }),
+      )
+      .then((result) => {
+        sendSettled = true;
+        assert.equal(asRecord(result)["disposition"], "started");
+      });
+    const starting = desktop.handle(
+      createRuntimeRequest("run.start", { workspacePath: workspace, prompt: "hello" }),
+    );
+    pending.push(sending, starting);
+    await delay(40);
+    assert.equal(
+      sendSettled,
+      false,
+      "session.send must not enter workspace admission during a config write",
+    );
+    assert.equal(forwardedRuns, 0, "run.start must use the same dependency lock");
+    release.resolve();
+    await writing;
+    await sending;
+    assert.deepEqual(await starting, { runId: "admitted-after-config" });
+    assert.equal(forwardedRuns, 1, "the direct run.start request is forwarded once");
+  },
+);
+
+test(
+  "Provider journal recovery completes before admission and preserves concurrent configuration",
+  { timeout: 10_000 },
+  async (context) => {
+    const root = await mkdtemp(join(tmpdir(), "pico-provider-recovery-owner-"));
+    const env = { PICO_HOME: root };
+    const userConfigStore = new UserConfigStore({ picoHome: root });
+    const previous = await userConfigStore.read();
+    const { id, ...provider } = providerInput();
+    const target = parseUserConfig(
+      { version: 1, providers: { [id]: provider } },
+      "recovery fixture",
+    );
+    const journal = new ProviderOperationJournal({ picoHome: root, parseUserConfig });
+    const operation = await journal.prepare({
+      kind: "import",
+      previousUserConfig: previous.config,
+      targetUserConfig: target,
+      credentialRef: credentialRefForProvider({
+        providerId: id,
+        protocol: provider.protocol,
+        baseURL: provider.baseURL,
+      }),
+      credentialExistedBefore: false,
+      configRevision: previous.revision,
+    });
+    await journal.update(operation.operationId, { phase: "credential-imported" });
+    await userConfigStore.write(
+      { ...previous.config, defaults: { mode: "plan" } },
+      { expectedRevision: previous.revision },
+    );
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const vault: CredentialVault = {
+      ...unavailableVault(),
+      capability: () => ({ available: true, backend: "macos-keychain", diagnostic: "fixture" }),
+      has: async () => {
+        entered.resolve();
+        await release.promise;
+        return true;
+      },
+    };
+    const runtime = new WorkspaceRuntimeService({ env, execute: async () => undefined });
+    let forwarded = false;
+    const originalHandle = runtime.handle.bind(runtime);
+    runtime.handle = async (request) => {
+      if (request.method !== "run.start") return originalHandle(request);
+      assert.equal(
+        await journal.read(),
+        undefined,
+        "journal must be cleared after config commit before admission",
+      );
+      const snapshot = await userConfigStore.read();
+      assert.ok(snapshot.config.providers[id]);
+      assert.equal(snapshot.config.defaults?.mode, "plan");
+      forwarded = true;
+      return { runId: "recovered-admission" };
+    };
+    const desktop = new DesktopRuntimeService({
+      runtimeService: runtime,
+      userConfigStore,
+      providerOperationJournal: journal,
+      credentialVault: vault,
+      env,
+    });
+    const pending: Promise<unknown>[] = [];
+    context.after(async () => {
+      release.resolve();
+      await Promise.allSettled(pending);
+      await desktop.close();
+      await rm(root, { recursive: true, force: true });
+    });
+    await entered.promise;
+    const starting = desktop.handle(
+      createRuntimeRequest("run.start", { workspacePath: root, prompt: "hello" }),
+    );
+    pending.push(starting);
+    await delay(40);
+    assert.equal(forwarded, false);
+    release.resolve();
+    assert.deepEqual(await starting, { runId: "recovered-admission" });
+
+    await desktop.close();
+    const recovered = await userConfigStore.read();
+    const missingCredential = await journal.prepare({
+      kind: "import",
+      previousUserConfig: recovered.config,
+      targetUserConfig: recovered.config,
+      credentialRef: operation.credentialRef,
+      credentialExistedBefore: false,
+      configRevision: recovered.revision,
+    });
+    await journal.update(missingCredential.operationId, { phase: "credential-imported" });
+    const blockedRuntime = new WorkspaceRuntimeService({
+      env,
+      execute: async () => assert.fail("failed recovery must never admit a Run"),
+    });
+    const blockedDesktop = new DesktopRuntimeService({
+      runtimeService: blockedRuntime,
+      userConfigStore,
+      providerOperationJournal: journal,
+      credentialVault: { ...vault, has: async () => false },
+      env,
+    });
+    try {
+      await assert.rejects(
+        blockedDesktop.handle(
+          createRuntimeRequest("run.start", { workspacePath: root, prompt: "hello" }),
+        ),
+        (error: unknown) =>
+          error instanceof RuntimeProtocolError &&
+          error.code === RUNTIME_ERROR_CODES.CONFLICT &&
+          /恢复尚未完成/u.test(error.message),
+      );
+      assert.equal((await journal.read())?.phase, "credential-imported");
+      assert.equal((await userConfigStore.read()).revision, recovered.revision);
+    } finally {
+      await blockedDesktop.close();
+    }
+  },
+);
