@@ -92,7 +92,7 @@ Session/Agent 叙事的 canonical semantic log；TaskRun、Control 与 Memory �
 | `SqliteRuntimeEventStore`   | sessions                        | Session、消息、工具、审批、压缩、rewind、run terminal 与 Transcript 投影                    | Job 调度、TaskRun 和长期记忆 Fact   |
 | `SqliteTaskRunStore`        | task-runs                       | 显式可恢复任务跨 Attempt 的输入、checkpoint、租约、启动凭据与终态                           | Session Transcript 和 Cron 调度状态 |
 | `SqliteRuntimeControlStore` | control                         | Jobs、daemon/cron runs、attempts、leases、usage、provider calls、completion outbox 等控制面 | Session Transcript 和 TaskRun 事实  |
-| `SqliteMemoryItemStore`     | 独立 `$PICO_HOME/memory.sqlite` | 原子 Item、keys、sources、提取 cursor/receipt、幂等操作、抑制记录和工作区设置               | 原始对话事实、旧 Proposal 审批      |
+| `SqliteMemoryItemStore`     | 独立 `$PICO_HOME/memory.sqlite` | 原子 Item、keys、sources、提取 cursor/receipt、幂等操作、重试范围和工作区设置               | 原始对话事实、旧 Proposal 审批      |
 
 `RuntimeEventStore` 是会话和 Agent 运行事实的唯一真源。Session 内存、Transcript 和
 Desktop ViewModel 都是可重建投影；损坏后应从 RuntimeEvent 重建，不建立第二套会话历史。
@@ -108,9 +108,10 @@ terminal/checkpoint 持久化之后触发。
 `SqliteMemoryItemStore` 保存用户证据派生的内容和独立用户编辑意图。提取经独立规范化与
 校验后直接提交；Item、keys、sources、cursor 和 receipt 在记忆库内同事务保存。Session
 删除不删除已提交 Item；原事件不再可用时，记忆来源身份仍保留，但不保证可回读。归档可恢复，
-遗忘清除新库当前正文并保留来源抑制；原始会话、旧库和备份不在遗忘清理范围内。旧
-`SqliteMemoryRepository` 只保留兼容用途，工作区旧 memory 表由只读迁移保全，生产不双写。
-具体流程、召回预算和恢复限制见[原子长期记忆](./docs/architecture/14-workspace-memory.md)。
+删除清除记忆正文及关联记录，不建立来源黑名单；后续用户重新提供信息时可以再次保存。
+原始会话、旧库和备份不在清理范围内。旧记忆执行链已退役，工作区旧 memory 表仅保留
+schema 兼容校验，运行时不读取、不导入，也不双写。
+具体流程、召回预算和恢复限制见[原子长期记忆](docs/architecture/14-workspace-memory.md)。
 `traces/` 保存可选运行 Span，不替代事实账本。
 
 ### Plan 执行与 DAG 调度
@@ -174,8 +175,8 @@ $PICO_HOME/
 旧 workspace 内的 `.storage/`、`sessions/`、`task-runs/`、`control/`、`runtime/`、split-era
 `runtime.sqlite` / `memory.sqlite` 和 legacy task 文件不属于当前布局；它们与当前用户级
 `$PICO_HOME/memory.sqlite` 不是同一位置。产品路径不会自动导入或删除这些旧文件，JSONL
-纪元目录标记仍使 SQLite 初始化 fail-closed。原子记忆只自动迁移现有 workspace `pico.sqlite`
-中的旧 memory 表，保全旧库且不提升 pending Proposal；备份必须同时考虑用户记忆库和工作区库。
+纪元目录标记仍使 SQLite 初始化 fail-closed。运行时不导入 workspace `pico.sqlite` 中的旧
+memory 表；备份必须同时考虑用户记忆库和工作区库。
 
 ## 并发与安全边界
 
@@ -187,8 +188,8 @@ $PICO_HOME/
 - 文件改动由 FileHistory blob、SQLite manifest 和 operation journal 支持 rewind/fork 恢复。
 - Approval、Hardline、Plan、Workspace trust 和 Hook 位于工具执行前的安全链；Hook 改写后
   必须重新经过安全检查。
-- 子代理拥有独立上下文和工具集合。可写 Worker 的共享目录、OCC 和 worktree 升级规则见
-  [多 Agent 共享工作区并发规范](./docs/architecture/08-multi-agent-concurrency.md)。
+- 子代理拥有独立上下文和工具集合；运行身份、权限与共享预算由父运行约束。
+  [多 Agent 并发研究](docs/history/architecture/08-multi-agent-concurrency.md)是历史提案，不是当前可写 Worker 契约。
 - Desktop BrowserWindow 开启 context isolation、关闭 Node integration；私有 endpoint、
   当前用户文件/进程权限、typed root authority 和方法白名单共同构成本机信任边界。
 
@@ -196,13 +197,13 @@ $PICO_HOME/
 
 | 模块                | 入口                                                               |
 | ------------------- | ------------------------------------------------------------------ |
-| Engine 与 Session   | [01-engine.md](./docs/architecture/01-engine.md)                   |
-| 工具与子代理        | [02-tools.md](./docs/architecture/02-tools.md)                     |
-| 上下文与投影        | [03-context.md](./docs/architecture/03-context.md)                 |
-| Provider 与产品入口 | [04-provider-entry.md](./docs/architecture/04-provider-entry.md)   |
-| 基础设施与安全      | [05-infra-safety.md](./docs/architecture/05-infra-safety.md)       |
-| 核心数据流          | [06-data-flow.md](./docs/architecture/06-data-flow.md)             |
-| Hooks               | [07-hooks.md](./docs/architecture/07-hooks.md)                     |
-| 本机 IPC 安全       | [local-ipc-security.md](./docs/architecture/local-ipc-security.md) |
+| Engine 与 Session   | [01-engine.md](docs/architecture/01-engine.md)                   |
+| 工具与子代理        | [02-tools.md](docs/architecture/02-tools.md)                     |
+| 上下文与投影        | [03-context.md](docs/architecture/03-context.md)                 |
+| Provider 与产品入口 | [04-provider-entry.md](docs/architecture/04-provider-entry.md)   |
+| 基础设施与安全      | [05-infra-safety.md](docs/architecture/05-infra-safety.md)       |
+| 核心数据流          | [06-data-flow.md](docs/architecture/06-data-flow.md)             |
+| Hooks               | [07-hooks.md](docs/architecture/07-hooks.md)                     |
+| 本机 IPC 安全       | [local-ipc-security.md](docs/architecture/local-ipc-security.md) |
 
 架构判断以源码的实际依赖和事实源为准；历史课程章节只解释演进背景，不定义当前产品边界。

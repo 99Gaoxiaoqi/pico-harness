@@ -69,13 +69,13 @@ scope 限定可见范围。`pico.sqlite` 承载以下工作区状态，不代表
 - sessions scope：RuntimeEvent、Session、Run、Transcript 与相关投影；
 - task-runs scope：显式 recoverable 任务、Attempt、checkpoint、租约和启动凭据；
 - control scope：Job、Cron、daemon run、usage、provider call 和生命周期控制状态；
-- 旧 memory scope：仅作原子记忆的一次性只读迁移来源，不再用于生产提取或召回；
+- 旧 memory scope：仅保留 schema 兼容校验，不再导入或用于生产提取、召回；
 - operations、attachments、retention、kv 等 scope：跨域操作、文件历史 manifest、配额与辅助状态。
 
 这些 scope 通过 typed store API 和事务边界维持所有权。RuntimeEvent 是 Agent 运行事实，
 TaskRun 是恢复协议事实，Control 是调度事实。独立记忆库由 `SqliteMemoryItemStore` 管理
 Item、keys、sources、cursor/receipt 和工作区开关；不与 RuntimeEvent 共用事务。当前机制见
-[原子长期记忆](./14-workspace-memory.md)。
+[原子长期记忆](14-workspace-memory.md)。
 
 ## ToolResult 与上下文
 
@@ -98,7 +98,7 @@ Item、keys、sources、cursor/receipt 和工作区开关；不与 RuntimeEvent 
 ## 阅读顺序
 
 1. [`ARCHITECTURE.md`](../../ARCHITECTURE.md)：当前系统边界、状态所有权与安全边界。
-2. [`01-engine.md`](./01-engine.md) 至 [`07-hooks.md`](./07-hooks.md)：按模块理解实现；这些
+2. [`01-engine.md`](01-engine.md) 至 [`07-hooks.md`](07-hooks.md)：按模块理解实现；这些
    深入文档可能包含被后续 ADR 取代的局部段落，先看 [`docs/README.md`](../README.md) 的状态索引。
 3. 决策记录 21—29：理解当前实现为何选择 PowerShell、SQLite、入口定形和恢复协议。
 4. `docs/plans/`：阶段性交付证据，只用于追溯，不定义当前事实。

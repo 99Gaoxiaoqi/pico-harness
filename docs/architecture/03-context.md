@@ -1,7 +1,7 @@
 # 上下文管理层 (`src/context/`)
 
 > 文档状态：部分过期。Prompt、请求投影和压缩主线仍可参考；Evidence CAS、`read_evidence`、
-> Todo 文件路径和旧摘要段数已漂移。当前 ToolResult 见[决策记录 26](./26-decision-tool-result-entry-shaping.md)，
+> Todo 文件路径和旧摘要段数已漂移。当前 ToolResult 见[决策记录 26](../decisions/26-decision-tool-result-entry-shaping.md)，
 > Todo 见 `src/context/todo-store.ts`。
 
 > 大模型是 CPU，Context Window 是受限 RAM。上下文管理层是"内存管理器"。
@@ -23,7 +23,7 @@ System Prompt 被视为“操作系统内核”，按需组装以下层，每层
 | 层          | 内容                                                          | 触发条件           |
 | ----------- | ------------------------------------------------------------- | ------------------ |
 | 极简内核    | 硬编码身份认知 + 核心纪律                                     | 永远注入           |
-| Plan Mode   | 状态外部化规范（嗅探 PLAN.md/TODO.md）                        | `planMode=true`    |
+| Plan Mode   | Session RuntimeEvent 计划状态与工具约束                        | `planMode=true`    |
 | AGENTS.md   | 工作区项目专属规范                                            | 文件存在           |
 | Skills 清单 | 项目与用户 Pico Skill Catalog 元数据（仅 name + description） | 至少一个技能       |
 | TodoList    | 当前任务清单 Markdown                                         | TodoStore 非空     |
