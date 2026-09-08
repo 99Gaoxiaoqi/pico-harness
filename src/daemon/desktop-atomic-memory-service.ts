@@ -1,29 +1,39 @@
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
-import type { DesktopMemoryServiceOptions } from "./desktop-memory-service.js";
-import { RUNTIME_ERROR_CODES, RuntimeProtocolError } from "./protocol.js";
-import type {
-  RuntimeMemoryFact,
-  RuntimeMemoryKind,
-  RuntimeMemorySettings,
-  RuntimeParams,
-  RuntimeResult,
-} from "./protocol.js";
+import { sanitizeMemoryContent } from "../memory/atomic/content-safety.js";
 import { AtomicMemoryContextBuilder } from "../memory/atomic/context-builder.js";
+import type { MemoryItemRecord, MemoryItemWrite } from "../memory/atomic/contracts.js";
 import {
   MemoryItemStoreConflictError,
   normalizeLongTermMemoryContent,
 } from "../memory/atomic/contracts.js";
-import type { MemoryItemRecord, MemoryItemWrite } from "../memory/atomic/contracts.js";
 import type { AtomicMemorySettings } from "../memory/atomic/runtime-contracts.js";
-import { sanitizeMemoryProposalCandidate } from "../memory/proposal-sanitizer.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { SqliteMemoryItemStore } from "../storage/sqlite/sqlite-memory-item-store.js";
+import type {
+  RuntimeMemoryFact,
+  RuntimeMemoryKind,
+  RuntimeMemorySettings,
+  RuntimeNotificationMap,
+  RuntimeParams,
+  RuntimeResult,
+} from "./protocol.js";
+import { RUNTIME_ERROR_CODES, RuntimeProtocolError } from "./protocol.js";
+
+export interface DesktopAtomicMemoryServiceOptions {
+  readonly picoHome: string;
+  readonly now?: () => number;
+  readonly publish: <Topic extends "memory.changed" | "memory.forgotten">(
+    workspacePath: string,
+    topic: Topic,
+    payload: RuntimeNotificationMap[Topic],
+  ) => void;
+}
 
 /** Atomic Items are authoritative; legacy envelope names only preserve the desktop wire contract. */
 export class DesktopAtomicMemoryService {
   private closed = false;
-  constructor(private readonly options: DesktopMemoryServiceOptions) {}
+  constructor(private readonly options: DesktopAtomicMemoryServiceOptions) {}
 
   async list(
     workspacePath: string,
@@ -381,13 +391,10 @@ function projectFact({ item, sources }: MemoryItemRecord): RuntimeMemoryFact {
 function safeContent(value: string): string {
   const normalized = normalizeLongTermMemoryContent(value);
   if (!normalized.ok) throw invalid(normalized.message);
-  const sanitized = sanitizeMemoryProposalCandidate({
-    kind: "reference",
+  const sanitized = sanitizeMemoryContent({
     title: "记忆",
     content: normalized.value,
     reason: "用户手动保存",
-    confidence: 1,
-    evidenceEventIds: [],
   });
   if (sanitized.disposition !== "allow")
     throw invalid(`记忆安全扫描未通过：${sanitized.safetyCodes.join(", ")}`);
