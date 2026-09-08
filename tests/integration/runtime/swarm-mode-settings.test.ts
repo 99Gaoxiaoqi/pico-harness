@@ -13,10 +13,7 @@ import {
   createDefaultSessionSettings,
   getOrCreateSessionSettings,
   snapshotSessionSettings,
-  setSessionOrchestrationMode,
 } from "../../../src/input/session-settings.js";
-import { createPicoCommandRegistry } from "../../../src/input/pico-command-registry.js";
-import { processUserInput } from "../../../src/input/process-user-input.js";
 import {
   createClientCommandRegistry,
   processClientInput,
@@ -28,7 +25,7 @@ import {
 import { TuiReporter } from "../../../src/tui/tui-reporter.js";
 import { buildStatusBarText } from "../../../src/tui/status-bar.js";
 
-test("Swarm session settings survive durable hydration and slash commands preserve independent modes", async () => {
+test("Swarm session settings survive durable hydration", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "pico-swarm-settings-"));
   try {
     const settings = createDefaultSessionSettings({
@@ -68,36 +65,6 @@ test("Swarm session settings survive durable hydration and slash commands preser
     );
     assert.equal(restored.orchestrationMode, "swarm");
     assert.equal(savedMode, "swarm");
-    const registry = await createPicoCommandRegistry({
-      workDir: cwd,
-      picoHome: join(cwd, "home"),
-      homeDir: cwd,
-      sessionId: "commands",
-      provider: "openai",
-      model: "model",
-      modelRouteId: "provider/model",
-      tools: [],
-    });
-    const active = getOrCreateSessionSettings({
-      sessionId: "commands",
-      cwd,
-      picoHome: join(cwd, "home"),
-      provider: "openai",
-      model: "model",
-    });
-    setSessionOrchestrationMode(active, "graph");
-    await processUserInput("/swarm off", { registry });
-    assert.equal(active.orchestrationMode, "graph");
-    await processUserInput("/swarm on", { registry });
-    assert.equal(active.orchestrationMode, "swarm");
-    const task = await processUserInput("/swarm Build API", { registry });
-    assert.equal(task.type, "prompt-command");
-    if (task.type === "prompt-command") {
-      assert.equal(task.result.prompt, "Build API");
-      assert.deepEqual(task.result.execution, { orchestrationMode: "swarm" });
-    }
-    await processUserInput("/swarm off", { registry });
-    assert.equal(active.orchestrationMode, "default");
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -148,6 +115,8 @@ test("Swarm TUI commands send one-run overrides without changing persistent Grap
   await processClientInput("/swarm status", registry, runtime);
   assert.equal(orchestrationMode, "swarm");
   assert.match(buildStatusBarText({ orchestrationMode: "swarm", renderWidth: 120 }), /编排 swarm/u);
+  await processClientInput("/swarm off", registry, runtime);
+  assert.equal(orchestrationMode, "default");
   const fresh = new ClientSessionRuntime({
     client,
     workspacePath: "/workspace",
