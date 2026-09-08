@@ -1,14 +1,24 @@
-// 诊断探针：连真 .pico daemon，ping + 拉环形日志 + workspace 状态（尽力而为）。
+// 诊断探针：连接指定用户根；host 未运行时可能启动它。
+import { parseArgs } from "node:util";
+import { resolvePicoHome } from "../src/paths/pico-paths.js";
 import { LocalRuntimeClient } from "../src/daemon/index.js";
 import { connectOrSpawnRuntimeHost, RUNTIME_HOST_PROTOCOL_VERSION } from "@pico/runtime-host";
 
-const ROOT = "C:\\Users\\gaoxiaoqi\\.pico";
+const { values } = parseArgs({
+  options: { "pico-home": { type: "string" }, help: { type: "boolean", short: "h" } },
+});
+if (values.help) {
+  console.log("Usage: node --import tsx scripts/probe-daemon.ts [--pico-home PATH]");
+  console.log("Defaults to PICO_HOME or ~/.pico. May start the runtime host if it is not running.");
+  process.exit(0);
+}
+const rootPath = resolvePicoHome({ picoHome: values["pico-home"] });
 
 async function main() {
   console.log("== kernel 层探针 ==");
   try {
     const result = await connectOrSpawnRuntimeHost({
-      rootPath: ROOT,
+      rootPath,
       surface: "tui",
       protocol: { min: RUNTIME_HOST_PROTOCOL_VERSION, max: RUNTIME_HOST_PROTOCOL_VERSION },
       clientInstanceId: "diag-probe",
@@ -30,7 +40,7 @@ async function main() {
   }
 
   console.log("== 业务层探针（runtime.ping + workspace.list）==");
-  const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: ROOT });
+  const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: rootPath });
   try {
     const t0 = Date.now();
     await client.request("runtime.ping", {});

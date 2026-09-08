@@ -23,7 +23,7 @@ System Prompt 被视为“操作系统内核”，按需组装以下层，每层
 | 层          | 内容                                                          | 触发条件           |
 | ----------- | ------------------------------------------------------------- | ------------------ |
 | 极简内核    | 硬编码身份认知 + 核心纪律                                     | 永远注入           |
-| Plan Mode   | Session RuntimeEvent 计划状态与工具约束                        | `planMode=true`    |
+| Plan Mode   | Session RuntimeEvent 计划状态与工具约束                       | `planMode=true`    |
 | AGENTS.md   | 工作区项目专属规范                                            | 文件存在           |
 | Skills 清单 | 项目与用户 Pico Skill Catalog 元数据（仅 name + description） | 至少一个技能       |
 | TodoList    | 当前任务清单 Markdown                                         | TodoStore 非空     |

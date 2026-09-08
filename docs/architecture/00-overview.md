@@ -101,7 +101,7 @@ Item、keys、sources、cursor/receipt 和工作区开关；不与 RuntimeEvent 
 2. [`01-engine.md`](01-engine.md) 至 [`07-hooks.md`](07-hooks.md)：按模块理解实现；这些
    深入文档可能包含被后续 ADR 取代的局部段落，先看 [`docs/README.md`](../README.md) 的状态索引。
 3. 决策记录 21—29：理解当前实现为何选择 PowerShell、SQLite、入口定形和恢复协议。
-4. `docs/plans/`：阶段性交付证据，只用于追溯，不定义当前事实。
+4. `docs/plans/`：当前实施计划；`docs/history/`：已结束计划、课程与历史设计，不定义当前事实。
 
 ## 技术栈
 
