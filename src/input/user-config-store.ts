@@ -11,6 +11,7 @@ import {
   type FileHandle,
 } from "node:fs/promises";
 import { join } from "node:path";
+import { normalizePicoSubagentSettings, type PicoSubagentSettings } from "./subagent-settings.js";
 import { resolvePicoHome } from "../paths/pico-paths.js";
 import type { ModelProviderConfig } from "../provider/model-router.js";
 import { parseModelProviderConfigs, parseModelRouteId } from "./pico-config.js";
@@ -45,6 +46,7 @@ export interface PicoUserConfigV1 {
   readonly version: typeof USER_CONFIG_VERSION;
   readonly defaults?: PicoUserConfigDefaults;
   readonly providers: Readonly<Record<string, UserModelProviderConfig>>;
+  readonly subagents?: PicoSubagentSettings;
 }
 
 /** User-file-only Provider shape. EffectiveConfig and ModelRoute never expose this secret. */
@@ -515,6 +517,9 @@ export function parseUserConfig(value: unknown, configPath: string): PicoUserCon
     version: USER_CONFIG_VERSION,
     ...(defaults !== undefined ? { defaults } : {}),
     providers: parseUserModelProviderConfigs(value["providers"], configPath),
+    ...(value["subagents"] !== undefined
+      ? { subagents: normalizePicoSubagentSettings(value["subagents"]) }
+      : {}),
   };
 }
 

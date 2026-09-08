@@ -25,3 +25,7 @@ revision `c4eacc19c6e26bebd270f7a1cd3a81017c0fe5c9`.
 Pico adapts the storage driver and event/provider boundaries, and adds workspace migration,
 settings, recall, desktop management, and permanent item deletion with source suppression.
 Original license headers are retained in the adapted source files.
+
+The subagent preset normalization in `src/input/subagent-settings.ts` is adapted from Maka
+`packages/core/src/subagent-settings.ts`, revision `584652137`. Pico retains its validation,
+trimming, exact-ID deduplication, and limits, and uses shared Pico protocol types.
