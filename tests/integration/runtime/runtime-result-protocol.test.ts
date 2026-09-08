@@ -8,6 +8,39 @@ import {
   RuntimeProtocolError,
 } from "../../../packages/protocol/src/index.js";
 
+test("session.get accepts durable parent navigation while preserving legacy session results", () => {
+  const session = {
+    sessionId: "child",
+    workspacePath: "/child-worktree",
+    title: "Local Read",
+    status: "active",
+    pinned: false,
+    createdAt: 1,
+    updatedAt: 2,
+  };
+  assert.deepEqual(parseDesktopRuntimeResult("session.get", { session }), { session });
+  const linked = {
+    ...session,
+    parentSession: {
+      sessionId: "parent",
+      workspacePath: "/parent-project",
+      agentName: "Local Read",
+    },
+  };
+  assert.deepEqual(parseDesktopRuntimeResult("session.get", { session: linked }), {
+    session: linked,
+  });
+  for (const parentSession of [
+    null,
+    { sessionId: "parent" },
+    { sessionId: "", workspacePath: "/parent-project" },
+  ]) {
+    assert.throws(() =>
+      parseDesktopRuntimeResult("session.get", { session: { ...session, parentSession } }),
+    );
+  }
+});
+
 test("rewind.apply keeps one strict v2 request/result contract", () => {
   const baseParams = {
     workspacePath: "/workspace",
