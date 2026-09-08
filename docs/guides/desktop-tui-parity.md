@@ -8,7 +8,7 @@
 
 ## 事实来源与术语
 
-- TUI 命令及其可用状态以 [`src/input/pico-command-registry.ts`](../../src/input/pico-command-registry.ts) 和 [`src/input/command-availability.ts`](../../src/input/command-availability.ts) 为准。
+- TUI 命令及其可用状态以 [正式 TUI 命令入口](../../src/tui/client-commands.ts) 和 [`src/input/command-availability.ts`](../../src/input/command-availability.ts) 为准。
 - 运行中输入路由以 [`src/tui/client-repl.tsx`](../../src/tui/client-repl.tsx)、
   [`src/tui/client-session-runtime.ts`](../../src/tui/client-session-runtime.ts) 和
   [`src/tui/client-commands.ts`](../../src/tui/client-commands.ts) 为准：普通输入默认 Steer，

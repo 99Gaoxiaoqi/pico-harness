@@ -212,6 +212,10 @@ daemon 操作同一原子库：`/memory status` 显示记忆/召回/自动提取
 [atomic-memory-behavior.real-llm.test.ts](../../tests/e2e/atomic-memory-behavior.real-llm.test.ts)。历史验证数字
 只保存在任务记录中，不作为当前模型准确率保证。
 
+TUI 到真实 daemon 的手动记忆链见
+[tui-client-memory-real-daemon.test.ts](../../tests/integration/tui/tui-client-memory-real-daemon.test.ts)：
+覆盖未信任拒绝且不建库、保存、状态、归档撤销及工作区开关，不启动模型任务。
+
 旧 Proposal/Worker/Scheduler/Recovery、旧记忆管理服务和 `SqliteMemoryRepository` 已退役。
 原子记忆所需内容校验独立位于 `src/memory/atomic/content-safety.ts`；保留旧 wire 字段和
 workspace schema 兼容校验，不意味着双写或双套记忆流程。
