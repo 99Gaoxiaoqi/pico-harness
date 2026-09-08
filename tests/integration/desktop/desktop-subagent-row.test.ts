@@ -3,6 +3,9 @@ import test from "node:test";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ConversationTranscript } from "../../../apps/desktop/src/renderer/conversation/ConversationTranscript.js";
+import { LoadToolsTool } from "../../../src/tools/load-tools.js";
+import { ToolDisclosure } from "../../../src/tools/tool-disclosure.js";
+import { PICO_TOOL_GROUPS } from "../../../src/tools/tool-surface.js";
 import type {
   ConversationItemView,
   SubagentItemView,
@@ -37,6 +40,41 @@ function spawn(id: string, title: string): ToolItemView {
   return { id, kind: "tool", toolName: "agent_spawn", title, state: "done" };
 }
 
+test("真实工具组加载结果显示协作卡与折叠技术详情，失败和不完整记录不误报启用", async () => {
+  const loader = new LoadToolsTool(PICO_TOOL_GROUPS, new ToolDisclosure(), () => ["agent_spawn"]);
+  const output = await loader.execute(JSON.stringify({ group: "delegation" }));
+  const activation: ToolItemView = {
+    id: "load-agents",
+    kind: "tool",
+    toolName: "load_tools",
+    title: "load_tools",
+    state: "done",
+    output,
+  };
+  const markup = render([activation, child]);
+  assert.match(markup, /子智能体协作已启用/u);
+  assert.match(markup, /已加载 1 项协作工具/u);
+  assert.match(markup, /启动子任务后，点击子 Agent 名称可查看运行记录/u);
+  assert.match(
+    markup,
+    /<details class="conversation-agent-capability__details"><summary>技术详情<\/summary>/u,
+  );
+  assert.match(markup, /<code>agent_spawn<\/code>/u);
+  assert.match(markup, /查看加载记录/u);
+  assert.match(markup, /查看代码审查的会话/u);
+  assert.doesNotMatch(markup, /<code>spawn_subagent<\/code>/u);
+  for (const invalid of [
+    { ...activation, state: "failed" as const },
+    { ...activation, state: "active" as const },
+    { ...activation, output: output.replace("1 个工具", "2 个工具") },
+    { ...activation, toolName: "agent_spawn" },
+  ]) {
+    const fallback = render([invalid]);
+    assert.doesNotMatch(fallback, /子智能体协作已启用/u);
+    assert.match(fallback, /conversation-tool-record/u);
+  }
+});
+
 test("子代理以单个原生按钮展示摘要、状态、只读与耗时，仅真实会话提供入口", () => {
   const markup = render([child]);
   assert.match(markup, /<button type="button" class="conversation-subagent-row"/u);
@@ -46,6 +84,7 @@ test("子代理以单个原生按钮展示摘要、状态、只读与耗时，�
   assert.match(markup, /运行中 · 只读 · 1\.3s/u);
   assert.match(markup, /conversation-subagent-row__dot/u);
   assert.match(markup, /conversation-subagent-row__chevron/u);
+  assert.match(markup, /conversation-subagent-row__action">查看运行/u);
   assert.doesNotMatch(markup, /disabled=|conversation-inline-card|<p\b|<header\b/u);
   assert.equal([...markup.matchAll(/<button\b/gu)].length, 1);
 
@@ -57,7 +96,10 @@ test("子代理以单个原生按钮展示摘要、状态、只读与耗时，�
   const { childSessionId: _childSessionId, ...withoutSession } = child;
   for (const unavailable of [render([withoutSession]), render([child], false)]) {
     assert.match(unavailable, /disabled=""/u);
-    assert.doesNotMatch(unavailable, /aria-label="查看|conversation-subagent-row__chevron/u);
+    assert.doesNotMatch(
+      unavailable,
+      /aria-label="查看|conversation-subagent-row__chevron|查看运行/u,
+    );
   }
 });
 

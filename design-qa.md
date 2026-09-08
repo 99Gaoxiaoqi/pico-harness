@@ -1,0 +1,39 @@
+# 子智能体能力卡片对齐验收
+
+final result: passed
+
+范围：本次只验收能力启用卡片及其与原有子任务执行入口的衔接，不代表整个 Maka 交互已完成对齐。
+
+## 对照证据
+
+- 来源：`/Users/anxuan/.codex/visualizations/2026/09/08/01a07ed3-9f51-7013-bcb2-a518063f22b8/maka-interaction-audit/01-capability-details.jpg`
+- 实现：`/Users/anxuan/.codex/visualizations/2026/09/08/01a07ed3-9f51-7013-bcb2-a518063f22b8/pico-capability-card/expanded.jpg`
+- 两张原生窗口截图均为 1316 × 768，同为浅色主题、能力卡展开、技术详情展开，已在同一次视觉检查中并列打开。原生截图不报告 CSS deviceScaleFactor；未宣称逐像素一致。
+- 只比较卡片区域的层级、布局及交互；应用侧栏、正文列宽、模型回复和工具数量不相同。
+
+## 检查结果
+
+- 字体：复用 PiCO 字体和等宽工具名称，标题稍加粗，辅助说明使用弱化颜色。
+- 布局：分支图标、标题、说明、数量、折叠详情顺序与来源一致。文字及三项工具名称清楚，无裁切或覆盖。PiCO 保留现有正文列宽。
+- 颜色：复用背景、文字及分隔线 token；启用状态使用绿色图标。
+- 图像：采用已有 Lucide GitBranch 图标，无位图素材、拉伸或占位图。
+- 内容：数量来自实际 load_tools 成功返回；本次真实加载 3 项工具，未照抄 Maka 的 8 项或并行执行承诺。能力加载与实际 agent_spawn 分别呈现。
+- 交互：Computer Use 验证真实加载、详情展开、查看加载记录、整体收起/展开及刷新恢复。原有 Local Read 独立会话入口仍在。
+- 失败处理：运行中、失败、不完整结果和实际 agent_spawn 调用保持普通工具记录，不误报能力启用。
+
+## 验证
+
+- desktop-subagent-row 集成测试：3 项通过，覆盖真实加载工具输出与现有执行卡回归。
+- renderer TypeScript：通过。
+- 修改的 TypeScript/TSX ESLint：通过。
+- git diff --check：通过。
+
+无本次范围内的 P0/P1/P2 问题。独立 Token/耗时追踪面板及工具分组属于后续功能，不在本次卡片交付范围内。
+
+## 后续入口辨识度修复
+
+用户反馈无法辨识可点击的 Agent 入口，已将执行行增加分支图标、轻边框及明确的“查看运行”操作提示；整行仍为单个原生按钮。能力卡数量改为“已加载 N 项协作工具”，并说明子任务启动后可点击名称查看记录。无子会话的历史记录不提供假的跳转。
+
+Computer Use 实测点击更新后的 Local Read 行，成功进入子会话并看到 glob、read_file 工具记录和返回父任务入口。截图：`/Users/anxuan/.codex/visualizations/2026/09/08/01a07ed3-9f51-7013-bcb2-a518063f22b8/pico-capability-card/agent-entry.jpg`。标准窗口中名称、状态及“查看运行”均可见，无遮挡。该显式操作提示为用户本次要求的可发现性改进，不追求原始 Maka 行的逐像素复制。
+
+最终代码重新通过 3 项集成测试、renderer TypeScript、修改文件 ESLint 与 diff 检查。

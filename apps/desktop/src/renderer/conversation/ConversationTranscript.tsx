@@ -13,6 +13,7 @@ import {
   TerminalSquare,
   WandSparkles,
   SearchCode,
+  GitBranch,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import type {
@@ -23,6 +24,7 @@ import type {
 } from "./types.js";
 import { conversationItemKey, mergeConversationItemGroups } from "./items.js";
 import { MarkdownText } from "./MarkdownText.js";
+import { loadedAgentTools } from "./agent-capability.js";
 
 export interface ConversationTranscriptProps {
   readonly items: readonly ConversationItemView[];
@@ -147,12 +149,16 @@ function SubagentRow({
       title={summary}
       onClick={canOpen ? () => onOpenItem?.(item) : undefined}
     >
+      <GitBranch className="conversation-subagent-row__icon" aria-hidden="true" />
       <span className="conversation-subagent-row__dot" aria-hidden="true" />
       <strong className="conversation-subagent-row__name">{item.name}</strong>
       <span className="conversation-subagent-row__summary">{summary}</span>
       <span className="conversation-subagent-row__meta">{metadata}</span>
       {canOpen && (
-        <ChevronRight className="conversation-subagent-row__chevron" aria-hidden="true" />
+        <span className="conversation-subagent-row__action">
+          查看运行
+          <ChevronRight className="conversation-subagent-row__chevron" aria-hidden="true" />
+        </span>
       )}
     </button>
   );
@@ -275,7 +281,51 @@ function renderDefaultItem(
           {onOpenItem && <DetailButton label="查看探索详情" onClick={() => onOpenItem(item)} />}
         </section>
       );
-    case "tool":
+    case "tool": {
+      const loadedTools = loadedAgentTools(item);
+      if (loadedTools) {
+        return (
+          <details className="conversation-agent-activation" open>
+            <summary>
+              <CheckCircle2 aria-hidden="true" />
+              <strong>启用子智能体</strong>
+              <span>加载协作能力</span>
+              <ChevronRight className="conversation-agent-activation__chevron" aria-hidden="true" />
+            </summary>
+            <div className="conversation-agent-capability">
+              <span className="conversation-agent-capability__icon">
+                <GitBranch aria-hidden="true" />
+              </span>
+              <div className="conversation-agent-capability__content">
+                <strong>子智能体协作已启用</strong>
+                <p>可以分派子任务、查看执行进展并汇总结果。</p>
+                <p className="conversation-agent-capability__count">
+                  已加载 {loadedTools.length} 项协作工具
+                </p>
+                <p>启动子任务后，点击子 Agent 名称可查看运行记录。</p>
+                <details className="conversation-agent-capability__details">
+                  <summary>技术详情</summary>
+                  <dl>
+                    <dt>工具</dt>
+                    <dd>
+                      <ul>
+                        {loadedTools.map((name) => (
+                          <li key={name}>
+                            <code>{name}</code>
+                          </li>
+                        ))}
+                      </ul>
+                    </dd>
+                  </dl>
+                  {onOpenItem && (
+                    <DetailButton label="查看加载记录" onClick={() => onOpenItem(item)} />
+                  )}
+                </details>
+              </div>
+            </div>
+          </details>
+        );
+      }
       return (
         <details
           className="conversation-inline-card conversation-execution-record conversation-tool-record"
@@ -307,6 +357,7 @@ function renderDefaultItem(
           </div>
         </details>
       );
+    }
     case "subagent":
       return <SubagentRow item={item} onOpenItem={onOpenItem} />;
     case "status": {
