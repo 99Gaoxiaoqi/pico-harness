@@ -10,6 +10,7 @@ import {
   ReviewWorkbarPanel,
   TasksWorkbarPanel,
   TerminalWorkbarPanel,
+  WorkbarPanelHost,
   artifactChunkProgress,
   contextUsagePercent,
   createTaskUpdateRequest,
@@ -22,6 +23,41 @@ import {
   type WorkbarArtifactContent,
   type WorkbarTaskItem,
 } from "../../../apps/desktop/src/renderer/workbar-panels/index.js";
+
+test("Workbar Host assembles all six authority panels through its public entry point", (context) => {
+  Object.assign(globalThis, { React });
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { pico: { runtime: {} } },
+  });
+  context.after(() => {
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  });
+
+  const panels = [
+    ["graph", "Graph"],
+    ["tasks", "待办"],
+    ["files", "生成文件"],
+    ["inspector", "追踪"],
+    ["review", "变更"],
+    ["terminal", "终端"],
+  ] as const;
+  for (const [kind, label] of panels) {
+    const markup = renderToStaticMarkup(
+      React.createElement(WorkbarPanelHost, {
+        kind,
+        workspacePath: "/workspace",
+        sessionId: "session-a",
+        instanceId: `${kind}-1`,
+        active: false,
+        readOnly: false,
+      }),
+    );
+    assert.ok(markup.includes(`aria-label="${label}"`), `${kind} panel is rendered`);
+  }
+});
 
 test("Graph detail derives execution state from formal output and Runtime terminal facts", () => {
   const detail = parseGraphDetail({
