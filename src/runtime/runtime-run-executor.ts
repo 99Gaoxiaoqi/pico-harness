@@ -77,6 +77,7 @@ export interface RuntimeRunExecutorInput {
   readonly rewindPointSink?: (checkpointId: string) => void;
   /** Trusted host-owned assertion that must pass before the Runtime Run can complete. */
   readonly completionGuard?: () => Promise<void> | void;
+  readonly onRunAdmission?: (run: RuntimeRun) => Promise<void> | void;
   /** Trusted host-owned recovery hook invoked while the failed Runtime Run identity is live. */
   readonly failureGuard?: (input: {
     readonly sessionId: string;
@@ -206,6 +207,7 @@ export class RuntimeRunExecutor {
       });
       const runResult = await runtimeRun.run(async () => {
         signal?.throwIfAborted();
+        await this.input.onRunAdmission?.(runtimeRun);
         if (
           this.input.expectedAgentSwarmAuthorization !== undefined &&
           runtimeRun.agentSwarmAuthorization !== undefined &&
