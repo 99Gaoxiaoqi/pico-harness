@@ -33,6 +33,12 @@ Pico daemon ── Agent Runtime / Session / Rewind / Automations
 
 页面拆分共用原 Runtime 数据，不改变会话身份和重连边界。
 
+`workbar-panels/WorkbarPanelHost.tsx` 只负责面板选择及 workspace/session/instance 挂载
+身份。Graph、Tasks、Files、Inspector、Review、Terminal 各自的 PanelController 持有
+对应查询、投影和资源生命周期；共享 RPC 调用及资源帧订阅由窄模块复用。终端绑定表与
+stop/list/attach 保持在同一个 Terminal 控制器模块，关闭标签仍先等待终端停止。
+公开面板入口保留兼容导出，页面无需重建另一份资源状态。
+
 ## 数据所有权
 
 - `$PICO_HOME`：RuntimeEvent Session 账本、信任、daemon 注册等跨 CLI/App 的统一状态根。

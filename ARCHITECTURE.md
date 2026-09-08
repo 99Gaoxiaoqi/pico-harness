@@ -38,6 +38,15 @@ Preload 和 Electron Main 进入同一连接层。daemon 只提供当前用户�
 `packages/protocol` 定义 daemon 方法、参数、结果、事件和 Desktop 可访问方法白名单。
 Electron Main 只转发白名单内的方法，Renderer 只依赖 `DesktopBridge` 类型。
 
+协议包的 `runtime.ts` 保留兼容导出和严格解析聚合入口，`runtime/` 按 Session、Transcript、
+配置、记忆、Plan、能力、工作区、Automation、Workbar 与通知划分领域契约和校验。
+基础类型、错误与传输编解码独立复用；统一方法注册表及参数/结果 validator 的完备性约束
+仍由协议包维护，拆分不改变 wire、协议版本或访问白名单。
+
+TUI 的正式命令入口是 `src/tui/client-commands.ts`，领域 RPC、补全和格式化位于
+`src/tui/commands/`；通用输入解析与 CommandRegistry 继续复用。旧进程内命令执行注册器
+已退役，记忆撤销 token 的编解码独立为纯模块，客户端不通过它引入 daemon 记忆服务。
+
 ## 分层与所有权
 
 | 层次         | 主要模块                                                                                 | 所有权                                                     |
