@@ -12,6 +12,9 @@ import {
   type RuntimeParams,
   type RuntimeProviderInput,
   type RuntimeResult,
+  type RuntimeSubagentAvailability,
+  type RuntimeSubagentPreset,
+  type RuntimeSubagentSettingsSnapshot,
   type RuntimeUserDefaults,
 } from "@pico/protocol";
 import type { TranscriptReplicaView } from "@pico/transcript-replica";
@@ -277,6 +280,11 @@ function mergeLoadedData(
 }
 
 export interface RuntimeActions {
+  loadSubagentSettings(): Promise<RuntimeSubagentSettingsSnapshot>;
+  updateSubagentSettings(
+    presets: readonly RuntimeSubagentPreset[],
+    expectedRevision: string,
+  ): Promise<RuntimeSubagentSettingsSnapshot>;
   dismissMessage(): void;
   showMessage?(message: string): void;
   chooseWorkspace(): Promise<string | undefined>;
@@ -304,7 +312,7 @@ export interface RuntimeActions {
     readonly expectedRunId?: string;
     readonly activation?:
       | { readonly kind: "skill"; readonly name: string }
-      | { readonly kind: "agent"; readonly name: string };
+      | { readonly kind: "agent"; readonly name: string; readonly subagentId?: string };
   }): Promise<{
     readonly succeeded: boolean;
     readonly workspacePath?: string | undefined;
@@ -652,9 +660,10 @@ export function useRuntimeStore(): RuntimeStore {
       }));
       return;
     }
-    const [skillResult, mcpResult] = await Promise.all([
+    const [skillResult, mcpResult, subagentResult] = await Promise.all([
       optionalInvoke(bridge, "skills.user.list", {}),
       optionalInvoke(bridge, "mcp.user.list", {}),
+      optionalInvoke(bridge, "subagents.get", {}),
     ]);
     setData((current) => {
       const skills = skillResult.value?.skills.map(scopedSkill);
@@ -662,12 +671,15 @@ export function useRuntimeStore(): RuntimeStore {
       const skillRevision = skillResult.value?.revision;
       const mcpRevision = mcpResult.value?.revision;
       const notices = { ...current.notices };
+      if (subagentResult.error) notices.subagents = subagentResult.error;
+      else delete notices.subagents;
       if (skillResult.error) notices.skills = skillResult.error;
       else delete notices.skills;
       if (mcpResult.error) notices.mcp = mcpResult.error;
       else delete notices.mcp;
       return {
         ...current,
+        ...(subagentResult.value ? { subagentSettings: subagentResult.value } : {}),
         ...(skills && skillRevision
           ? {
               skills: current.skillScope.workspacePath ? current.skills : skills,
@@ -1420,7 +1432,12 @@ export function useRuntimeStore(): RuntimeStore {
         const changedCapabilities = Array.isArray(payload.capabilities)
           ? payload.capabilities.map((item) => stringValue(item))
           : [];
-        if (changedCapabilities.includes("skills") || changedCapabilities.includes("mcp")) {
+        if (
+          changedCapabilities.includes("skills") ||
+          changedCapabilities.includes("mcp") ||
+          changedCapabilities.includes("subagents") ||
+          Array.isArray(payload.providerIds)
+        ) {
           void loadUserCapabilities(bridge)
             .then(async () => {
               const current = dataRef.current;
@@ -1786,7 +1803,14 @@ export function useRuntimeStore(): RuntimeStore {
               input.activation?.kind === "skill"
                 ? { kind: "skill", name: input.activation.name, args: input.text.trim() }
                 : input.activation?.kind === "agent"
-                  ? { kind: "agent", name: input.activation.name, task: input.text.trim() }
+                  ? {
+                      kind: "agent",
+                      name: input.activation.name,
+                      task: input.text.trim(),
+                      ...(input.activation.subagentId
+                        ? { subagentId: input.activation.subagentId }
+                        : {}),
+                    }
                   : swarmCommand?.kind === "run_once"
                     ? {
                         kind: "text",
@@ -2351,6 +2375,51 @@ export function useRuntimeStore(): RuntimeStore {
           }
           setMessage(`MCP 服务 ${server.name} 已添加。`);
         });
+      },
+      async loadSubagentSettings() {
+        if (preview) {
+          const snapshot = dataRef.current.subagentSettings ?? {
+            presets: [],
+            connections: [],
+            revision: "preview",
+          };
+          if (!dataRef.current.subagentSettings)
+            setData((current) => ({ ...current, subagentSettings: snapshot }));
+          return snapshot;
+        }
+        const bridge = getBridge();
+        if (!bridge) throw new Error("本地 Runtime 未连接");
+        const snapshot = await invoke(bridge, "subagents.get", {});
+        setData((current) => ({ ...current, subagentSettings: snapshot }));
+        return snapshot;
+      },
+      async updateSubagentSettings(presets, expectedRevision) {
+        if (preview) {
+          const previous = dataRef.current.subagentSettings ?? {
+            presets: [],
+            connections: [],
+            revision: "preview",
+          };
+          const snapshot: RuntimeSubagentSettingsSnapshot = {
+            ...previous,
+            presets: presets.map((preset) => {
+              const availability: RuntimeSubagentAvailability = preset.enabled
+                ? { status: "available" }
+                : { status: "unavailable", reason: "disabled" };
+              return { ...preset, availability };
+            }),
+            revision: `${previous.revision}-next`,
+          };
+          setData((current) => ({ ...current, subagentSettings: snapshot }));
+          return snapshot;
+        }
+        const bridge = getBridge();
+        if (!bridge) throw new Error("本地 Runtime 未连接");
+        const snapshot = await invoke(bridge, "subagents.update", { presets, expectedRevision });
+        setData((current) => ({ ...current, subagentSettings: snapshot }));
+        const workspacePath = dataRef.current.workspacePath;
+        if (workspacePath) await loadWorkspace(bridge, workspacePath);
+        return snapshot;
       },
       async deleteUserMcp(serverName) {
         const revision = dataRef.current.mcpScope.userRevision;

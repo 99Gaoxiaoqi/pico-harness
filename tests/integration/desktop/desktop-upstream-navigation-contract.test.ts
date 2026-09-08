@@ -31,7 +31,7 @@ test("settings replaces the task sidebar and owns tool capability routes", async
     })),
     [
       { label: "偏好", items: ["通用", "项目"] },
-      { label: "能力", items: ["模型", "记忆", "Skills", "MCP"] },
+      { label: "能力", items: ["模型", "子 Agent", "记忆", "Skills", "MCP"] },
       { label: "活动", items: ["用量"] },
       { label: "系统", items: ["健康"] },
     ],

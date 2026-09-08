@@ -1,8 +1,12 @@
+import { subagentThinkingLevel } from "../runtime/configured-subagent-executor.js";
 import { AtomicMemoryLifecycle } from "../runtime/atomic-memory-lifecycle.js";
 import type { Session } from "../engine/session.js";
+import { createConfiguredSubagentCatalog } from "../agents/configured-subagent-catalog.js";
+import { listSubagentConnections } from "./subagent-connections.js";
 import { loadAgentCatalog } from "../agents/catalog.js";
 import {
   createCatalogAgentGraphOperatorProfileCatalog,
+  createConfiguredAgentGraphOperatorProfileCatalog,
   type MutableAgentGraphOperatorProfileCatalog,
 } from "../agent-graph/operator-profile-catalog.js";
 import type { AgentSwarmAuthorizationSource } from "../engine/session-runtime-event.js";
@@ -231,6 +235,10 @@ export function createProductionRuntimeServices(
   const credentialVault =
     options.credentialVault ?? createPlatformCredentialVault(process.platform, env);
   const userConfigStore = options.userConfigStore ?? new UserConfigStore({ picoHome });
+  const configuredSubagentCatalog = createConfiguredSubagentCatalog({
+    getPresets: async () => (await userConfigStore.read()).config.subagents?.presets ?? [],
+    getConnections: () => listSubagentConnections(userConfigStore),
+  });
   const userMcpConfigStore = options.userMcpConfigStore ?? new UserMcpConfigStore({ picoHome });
   const effectiveConfigResolver =
     options.effectiveConfigResolver ?? new EffectiveConfigResolver({ userConfigStore });
@@ -386,13 +394,15 @@ export function createProductionRuntimeServices(
       if (graphBinding.kind === "root" && !rootContext) {
         throw new Error("Graph root Run is missing its trusted supervisor context");
       }
-      const reasoningLevel = coordinateReasoningLevel(
-        route.capabilities.reasoningProfile,
-        operatorProfile?.thinkingEffort ??
-          (persistedSettings?.thinkingEffortExplicit
-            ? persistedSettings.thinkingEffort
-            : undefined),
-      ).level;
+      const reasoningLevel = operatorProfile?.subagentPreset
+        ? subagentThinkingLevel(route.capabilities.reasoningProfile, operatorProfile.thinkingEffort)
+        : coordinateReasoningLevel(
+            route.capabilities.reasoningProfile,
+            operatorProfile?.thinkingEffort ??
+              (persistedSettings?.thinkingEffortExplicit
+                ? persistedSettings.thinkingEffort
+                : undefined),
+          ).level;
       const effectiveMcp = operatorProfile
         ? { sources: [] as const }
         : await resolveTrustedEffectiveMcpSources(runWorkDir, {
@@ -483,6 +493,7 @@ export function createProductionRuntimeServices(
           runtimeSession: input.session,
           reporter: new SilentReporter(),
           modelRouter: route.modelRouter,
+          configuredSubagentCatalog,
           approvalNotifier: broker.notifyApproval,
           approvalManager: broker.approvalManager,
           askUserHandler: broker.askUserHandler,
@@ -638,7 +649,10 @@ export function createProductionRuntimeServices(
             : {}),
           storageRoot: runtimeStore.storageRoot,
           runtimeEventStore,
-          operatorProfileCatalog,
+          operatorProfileCatalog: createConfiguredAgentGraphOperatorProfileCatalog(
+            configuredSubagentCatalog,
+            operatorProfileCatalog,
+          ),
           sessionManager: globalSessionManager,
           sessionOptions: {
             persistence: true,
@@ -1088,6 +1102,7 @@ export function createProductionRuntimeServices(
             runtimeState,
             reporter,
             modelRouter: route.modelRouter,
+            configuredSubagentCatalog,
             approvalNotifier: broker.notifyApproval,
             approvalManager: broker.approvalManager,
             askUserHandler: broker.askUserHandler,

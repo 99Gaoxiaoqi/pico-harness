@@ -141,6 +141,7 @@ export function parseCatalogAgents(value: unknown): readonly CatalogAgentView[] 
   const result = isRecord(value) ? value : {};
   return recordArray(result.agents).map((agent) => ({
     name: stringValue(agent.name, "未命名 Agent"),
+    ...(typeof agent.subagentId === "string" ? { subagentId: agent.subagentId } : {}),
     description: stringValue(agent.description, "由当前 Runtime 提供。"),
     source: stringValue(agent.source, "runtime"),
     tools: Array.isArray(agent.tools)

@@ -7,7 +7,7 @@ import "./workbar-panels/ToolPanels.css";
 import "./workbar-panels/workbar-panels.css";
 
 import { Folder, RefreshCw, ShieldCheck } from "lucide-react";
-import { Component, type ReactNode } from "react";
+import { Component, useEffect, useState, type ReactNode } from "react";
 import {
   HashRouter,
   Link,
@@ -29,6 +29,8 @@ import { HomePage } from "./pages/HomePage.js";
 import { ReviewPage } from "./pages/ReviewPage.js";
 import { SessionsPage } from "./pages/SessionsPage.js";
 import { SettingsPage, SystemSettingsPage, WorkspaceSettingsPage } from "./pages/SettingsPage.js";
+import "./pages/subagent-settings.css";
+import { SubagentSettingsPage } from "./pages/SubagentSettingsPage.js";
 import { TaskPage } from "./pages/TaskPage.js";
 import { RuntimeContext, useRuntime } from "./runtime-context.js";
 import { useRuntimeStore } from "./runtime.js";
@@ -125,6 +127,7 @@ function AppStateRouter() {
         <Route path="settings" element={<SettingsPage />} />
         <Route path="settings/workspaces" element={<WorkspaceSettingsPage />} />
         <Route path="settings/models" element={<ProviderPageRoute />} />
+        <Route path="settings/subagents" element={<SubagentSettingsRoute />} />
         <Route
           path="settings/memory"
           element={
@@ -288,6 +291,36 @@ function NotFound() {
           返回新任务
         </Link>
       }
+    />
+  );
+}
+
+function SubagentSettingsRoute() {
+  const { data, actions } = useRuntime();
+  const [error, setError] = useState<string>();
+  useEffect(() => {
+    let active = true;
+    const refresh = () =>
+      void actions.loadSubagentSettings().catch((cause: unknown) => {
+        if (active) setError(cause instanceof Error ? cause.message : "读取子 Agent 配置失败");
+      });
+    refresh();
+    window.addEventListener("focus", refresh);
+    return () => {
+      active = false;
+      window.removeEventListener("focus", refresh);
+    };
+  }, [actions]);
+  if (!data.subagentSettings)
+    return (
+      <InlineNotice tone={error ? "warning" : "neutral"}>
+        {error ?? "正在读取子 Agent 配置…"}
+      </InlineNotice>
+    );
+  return (
+    <SubagentSettingsPage
+      snapshot={data.subagentSettings}
+      onUpdate={actions.updateSubagentSettings}
     />
   );
 }

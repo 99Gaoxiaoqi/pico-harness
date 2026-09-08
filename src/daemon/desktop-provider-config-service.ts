@@ -182,6 +182,7 @@ export class DesktopProviderConfigService {
     this.assertUserConfigRevision(expectedRevision, current.revision);
     const next = validatedUserConfig(
       {
+        ...(current.config.subagents ? { subagents: current.config.subagents } : {}),
         version: 1,
         ...(Object.keys(defaults).length > 0 ? { defaults } : {}),
         providers: current.config.providers,
@@ -290,6 +291,7 @@ export class DesktopProviderConfigService {
     const nextProvider = retainConfiguredCredential(config, previousProvider);
     const next = validatedUserConfig(
       {
+        ...(current.config.subagents ? { subagents: current.config.subagents } : {}),
         version: 1,
         ...(current.config.defaults ? { defaults: current.config.defaults } : {}),
         providers: { ...current.config.providers, [id]: nextProvider },
@@ -352,6 +354,7 @@ export class DesktopProviderConfigService {
     );
     const next = validatedUserConfig(
       {
+        ...(current.config.subagents ? { subagents: current.config.subagents } : {}),
         version: 1,
         defaults: {
           ...current.config.defaults,
@@ -440,6 +443,7 @@ export class DesktopProviderConfigService {
     delete providers[providerId];
     const next = validatedUserConfig(
       {
+        ...(current.config.subagents ? { subagents: current.config.subagents } : {}),
         version: 1,
         ...(current.config.defaults ? { defaults: current.config.defaults } : {}),
         providers,
@@ -527,6 +531,7 @@ export class DesktopProviderConfigService {
     const nextProvider = withConfiguredCredential(provider, secret);
     const next = validatedUserConfig(
       {
+        ...(current.config.subagents ? { subagents: current.config.subagents } : {}),
         version: 1,
         ...(current.config.defaults ? { defaults: current.config.defaults } : {}),
         providers: { ...current.config.providers, [providerId]: nextProvider },
@@ -573,6 +578,7 @@ export class DesktopProviderConfigService {
     const nextProvider = withoutConfiguredCredential(provider);
     const next = validatedUserConfig(
       {
+        ...(current.config.subagents ? { subagents: current.config.subagents } : {}),
         version: 1,
         ...(current.config.defaults ? { defaults: current.config.defaults } : {}),
         providers: { ...current.config.providers, [providerId]: nextProvider },
@@ -1025,6 +1031,7 @@ function reconcileProviderOperationConfig(
   }
   const next = validatedUserConfig(
     {
+      ...(current.subagents ? { subagents: current.subagents } : {}),
       version: 1,
       ...(Object.keys(defaults).length > 0 ? { defaults } : {}),
       providers,

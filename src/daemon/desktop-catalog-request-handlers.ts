@@ -1,3 +1,4 @@
+import type { ConfiguredSubagentCatalog } from "../agents/configured-subagent-catalog.js";
 import { createHash } from "node:crypto";
 import { basename } from "node:path";
 import {
@@ -35,6 +36,7 @@ type CapabilityScope = "user" | "project";
 
 /** Dependencies retained by the Desktop composition root. */
 export interface DesktopCatalogRequestContext {
+  readonly configuredSubagentCatalog?: ConfiguredSubagentCatalog;
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly picoHome: string;
   readonly pluginRuntimeSnapshotRegistry: PluginRuntimeSnapshotRegistry;
@@ -78,7 +80,19 @@ export function createDesktopCatalogRequestHandlers(
       picoHome: context.picoHome,
       pluginSnapshot,
     });
-    return { agents: toJsonValue(agents) };
+    const presets = (await context.configuredSubagentCatalog?.list()) ?? [];
+    const configured = presets
+      .filter((preset) => preset.availability.status === "available")
+      .map((preset) => ({
+        name: preset.name,
+        subagentId: preset.id,
+        description: preset.description,
+        source: "user-preset",
+        sourcePath: `preset:${preset.id}`,
+        tools: [],
+        modelRouteId: `${preset.connectionSlug}/${preset.model}`,
+      }));
+    return { agents: toJsonValue([...configured, ...agents]) };
   };
 
   const listSkills = async (
