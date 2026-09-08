@@ -1,14 +1,16 @@
-// 核心心脏:Agent 的 Main Loop (ReAct 循环)。
-// 经第 02/03/08/09 讲持续演进,本讲(第 11 讲)重构为 Session 驱动。
-//
-// 驾驭工程的极简之美:loop.ts 根本不关心 bash 怎么运行、Claude 的 HTTP 请求怎么发,
-// 它只负责维护这根脆弱但重要的"上下文时间线" (contextHistory)。
-// 它像一个忠实的书记员,严格执行 ReAct 范式:
-// 把模型的意图 (ToolCall) 交给执行层,再把物理世界的反馈 (Observation) 追加回内存。
-//
-// 第 11 讲:引擎彻底沦为"打工执行器"。它不内部维护状态,
-// 而是依靠喂给它的 Session 实例进行推理 —— 随时休眠、随时被唤醒的记忆连续体。
-// 每轮组装 = SystemPrompt + Session 完整历史投影，接近 token 水位时主动整理。
+// 主 Agent 调度：Session/Runtime 生命周期、模型轮次、工具提交与共享预算。
+// 子代理的独立会话执行和上下文压缩分别由 subagent-runner / subagent-context 承担；
+// 父子运行的权限 capability、归属及共享成本账本仍由本引擎持有。
+
+import { SubagentRunner, type SubagentExecutionRuntime } from "./subagent-runner.js";
+export type { SubagentExecutionRuntime } from "./subagent-runner.js";
+import { providerForReporter } from "./provider-reporting.js";
+import {
+  buildRuntimeToolResultInput,
+  buildEphemeralToolResult,
+  redactToolResult,
+} from "./tool-result-builder.js";
+import { buildEvidenceSnapshot, estimateTraceLength } from "./context-evidence.js";
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
@@ -35,21 +37,16 @@ import type {
   FullCompactionRequest,
   FullCompactor,
 } from "../context/full-compactor.js";
-import { FULL_COMPACTION_SUMMARY_MARKER } from "../context/compaction-markers.js";
 import {
   recordRuntimeCompactionCheckpoint,
   computeCheckpointSourceDigest,
 } from "../context/runtime-compaction-checkpoint.js";
 import type { ContextBudget } from "../context/context-budget.js";
-import {
-  CHARS_PER_TOKEN,
-  estimateModelInputTokens,
-  estimateMessagesTokens,
-} from "../context/context-budget.js";
+import { estimateModelInputTokens, estimateMessagesTokens } from "../context/context-budget.js";
 import { findSafeCompactionCut } from "../context/safe-compaction-boundary.js";
 import { withProviderCallContext } from "../observability/provider-call-context.js";
 import { PromptComposer, type PromptLayers } from "../context/composer.js";
-import { SkillLoader } from "../context/skill.js";
+import type { SkillLoader } from "../context/skill.js";
 import { RecoveryManager } from "../context/recovery.js";
 import { TodoStore } from "../context/todo-store.js";
 import {
@@ -73,21 +70,14 @@ import type { Session } from "./session.js";
 import type {
   EngineRuntimePort,
   EngineRuntimeRun,
-  EngineRuntimeToolResultInput,
   EngineRuntimeToolResultStatus,
 } from "./runtime-port.js";
 import { createToolResultEnvelope, type ToolResultEnvelope } from "./tool-result-contract.js";
 import type { CanonicalTranscriptToolStart } from "./transcript-tool-start.js";
 import { PlanHandoffController } from "./plan-handoff.js";
 import type { HookService } from "../hooks/service.js";
-import {
-  buildOverLimitRejectionText,
-  buildRuntimeToolResultProjection,
-  MAX_TOOL_RESULT_BYTES,
-} from "../tools/tool-result-observation.js";
 import { ToolAccesses } from "../tools/tool-access.js";
 import { ToolScheduler } from "../tools/tool-scheduler.js";
-import { SUBAGENT_OUTPUT_BUDGET } from "../tools/subagent-budget.js";
 import {
   promptCacheConversationShardSeed,
   snapshotToolDefinitions,
@@ -116,7 +106,7 @@ const EMERGENCY_RETAINED_CONTEXT_RATIO = 0.1;
  * 提前触发 checkpoint,避免下一轮才 reactive 发现(那时已在 provider 调用紧前)。
  */
 const MID_TURN_COMPACT_TRIGGER_RATIO = 0.75;
-const TOOL_RESULT_REDACTION_MARKER = "[REDACTED]";
+
 /**
  * 工具批次 settle 兜底超时:仅依赖工具协作收口(settleOnAbort/Promise.allSettled)
  * 存在死锁风险(未来工具/卡 IO 不响应 signal 时 allSettled 永远挂起,主循环卡死)。
@@ -150,75 +140,12 @@ function normalizeToolResultRedactionSecrets(
   );
 }
 
-function redactToolResult(result: ToolResult, secrets: readonly string[]): ToolResult {
-  if (secrets.length === 0) return result;
-  let output = result.output;
-  for (const secret of secrets) {
-    output = output.replaceAll(secret, TOOL_RESULT_REDACTION_MARKER);
-  }
-  return output === result.output ? result : { ...result, output };
-}
-
 function engineSessionCapability(session: Session): string {
   return JSON.stringify([
     canonicalizeWorkspacePath(session.workDir),
     session.id,
     session.runtimeEventStore?.storageRoot ?? null,
   ]);
-}
-
-/** 子代理 summary 低于此字数则触发一轮扩写(对齐 Kimi Code SUMMARY_MIN_LENGTH) */
-const SUBAGENT_SUMMARY_MIN_CHARS = 200;
-/** summary 续写提示词:要求子代理把过短的总结扩写成完整汇报 */
-const SUBAGENT_SUMMARY_CONTINUATION_PROMPT =
-  "你上一轮的总结过于简短,主架构师无法据此决策。请直接重写为结构化纯文本：先给结论，再列关键证据(文件:行号)、未验证风险和下一步。不要重放原始日志，不要调用任何工具。";
-const SUBAGENT_FINALIZE_PROMPT =
-  "[FINALIZE] 已进入预留的最终收口轮。立即停止探索和工具调用，只基于当前上下文中已收集的证据输出纯文本汇报：" +
-  "1) 结论；2) 已确认的事实与文件:行号证据；3) 未完成或未验证风险；4) 主 Agent 可直接采取的下一步。通常控制在 1000–2000 字符，简单任务可更短，不要重放原始日志。" +
-  "若任务整体无法完成，结论必须以「无法完成：原因」开头如实声明，不要用完成口吻收场。";
-const SUBAGENT_EMPTY_SUMMARY_FALLBACK =
-  "子代理未能生成可用的最终总结；请主 Agent 根据已回传的工具证据继续收口。";
-
-/** 子代理总结开篇的引导性标签（"总结：" / "- 结论：" / "1. Report:" 等），判定失败宣言前剥离。 */
-const SUBAGENT_SUMMARY_LEAD_RE =
-  /^(?:[#*\->\s]*|\d+[.、)]\s*)*(?:总结|汇报|报告|结论|任务状态|summary|report|result|status)\s*[:：\-—]*\s*/i;
-/** 失败宣言锚点：总结首行（剥标签后）以下列词开头才判定失败——保守锚定，正文中段的"修复了失败测试"等不误伤。 */
-const SUBAGENT_FAILURE_LEADS = [
-  "无法完成",
-  "未能完成",
-  "无法实现",
-  "无法达成",
-  "无法执行",
-  "任务失败",
-  "执行失败",
-  "我无法完成",
-  "我无法做到",
-  "未完成任务",
-  "unable to complete",
-  "failed to complete",
-  "could not complete",
-  "cannot complete",
-  "did not complete",
-  "task failed",
-  "did not finish",
-] as const;
-
-/**
- * D10④ 内容级熔断：子代理 loop 的"完成"是模型自报（不再调工具 + 总结可用），
- * 流程状态无法区分"真做完"与"做完样子但任务失败"。宿主若按 completed 记账
- * （例如 plan step completed），失败就被自报完成掩盖。Graph v2 Operator
- * 使用独立 RuntimeRun + agent_output 提交记录，不再经过本子代理结算路径。
- * 本函数只认总结开篇的明确失败宣言——保守换取零误伤：模糊表述交由宿主
- * 模型读 summary 自行判断，这里只兜底"模型亲口说失败"的下界。
- */
-function subagentDeclaresFailure(summary: string): boolean {
-  const firstLine = summary
-    .split("\n")
-    .map((line) => line.trim())
-    .find((line) => line.length > 0);
-  if (!firstLine) return false;
-  const head = firstLine.replace(SUBAGENT_SUMMARY_LEAD_RE, "").toLowerCase();
-  return SUBAGENT_FAILURE_LEADS.some((lead) => head.startsWith(lead));
 }
 
 const EXPLORE_SYNTHESIS_PROMPT =
@@ -747,19 +674,6 @@ export interface AgentEngineOptions {
   runtimePort?: EngineRuntimePort;
 }
 
-export interface SubagentExecutionRuntime {
-  provider: LLMProvider;
-  compactor?: Compactor;
-  thinkingEffort: string;
-  requestedModelRoute?: string;
-  resolvedModelRoute?: string;
-  source: "ephemeral" | "profile" | "parent";
-  /** 该 Provider 写入用量的 Session；显式路由与父路由都应指向主 Session。 */
-  usageSession?: Session;
-  /** 仅兼容继承父 Provider 的旧路径；显式路由 Runtime 默认不做跨路由 fallback。 */
-  onRateLimited?: (reporter: Reporter, signal?: AbortSignal) => LLMProvider | undefined;
-}
-
 export type SubagentModelRuntimeResolver = (
   request?: SubagentModelSelectionRequest,
 ) => SubagentExecutionRuntime;
@@ -901,55 +815,11 @@ export class AgentEngine implements AgentRunner {
     );
   }
 
-  /**
-   * 为单次运行构造绑定 Reporter 的流式 Provider 视图。
-   *
-   * Reporter 是调用级状态，不能存在 AgentEngine 的可变字段上：同一 Engine
-   * 可能并行运行多个子代理，共享 reporter 会把 child delta 泄漏到主流或
-   * 另一个 child。这个包装器每次 generate 都闭包当前调用的 sink，无全局可变状态。
-   */
-  private providerForReporter(
-    provider: LLMProvider,
-    reporter: Reporter,
-    signal?: AbortSignal,
-  ): LLMProvider {
-    const generateStreamFn = provider.generateStream;
-    if (!generateStreamFn) return provider;
-    return {
-      generate: (msgs: Message[], tools: ToolDefinition[], options?: LLMProviderRequestOptions) =>
-        generateStreamFn.call(
-          provider,
-          msgs,
-          tools,
-          (delta: string) => {
-            if (!signal?.aborted) reporter.onTextDelta?.(delta);
-          },
-          {
-            ...options,
-            onReasoningDelta: (delta: string) => {
-              if (!signal?.aborted) reporter.onReasoningDelta?.(delta);
-              options?.onReasoningDelta?.(delta);
-            },
-          },
-        ),
-      get modelName() {
-        return provider.modelName;
-      },
-      get requestCapabilities() {
-        return provider.requestCapabilities;
-      },
-      ...(provider.isRetryableError
-        ? { isRetryableError: provider.isRetryableError.bind(provider) }
-        : {}),
-      generateStream: generateStreamFn.bind(provider),
-    };
-  }
-
   private rotateProvider(reporter: Reporter, signal?: AbortSignal): LLMProvider | undefined {
     const provider = this.rebuildProvider?.();
     if (!provider) return undefined;
     this.provider = provider;
-    return this.providerForReporter(provider, reporter, signal);
+    return providerForReporter(provider, reporter, signal);
   }
 
   /**
@@ -1071,10 +941,6 @@ export class AgentEngine implements AgentRunner {
     };
   }
 
-  /** 子代 Agent 局部上下文的响应式降级次数；主 Agent 不使用此常量。 */
-  private static readonly MAX_OVERFLOW_RETRY = 3;
-  /** 每轮重试的字符预算降级系数(1.0 → 0.6 → 0.4 → 0.25) */
-  private static readonly OVERFLOW_BUDGET_FACTORS = [1.0, 0.6, 0.4, 0.25] as const;
   /**
    * 单轮工具并发上限(对齐 hermes _MAX_TOOL_WORKERS=8)。
    * 超出的任务进 queued 等名额释放,不报错不丢弃,保序返回。
@@ -1415,7 +1281,7 @@ export class AgentEngine implements AgentRunner {
     const generate = async (context: Message[]) => {
       await this.memoryHooks?.capture(context, tools);
       return generateWithRetry(
-        this.providerForReporter(this.provider, reporter, signal),
+        providerForReporter(this.provider, reporter, signal),
         context,
         tools,
         {
@@ -2883,7 +2749,7 @@ export class AgentEngine implements AgentRunner {
             finalOutput,
             runtimeStatus,
           )
-        : this.buildEphemeralToolResult(toolCall, result, finalOutput, runtimeStatus);
+        : buildEphemeralToolResult(toolCall, result, finalOutput, runtimeStatus);
       const { message, envelope } = builtResult;
 
       try {
@@ -2923,72 +2789,9 @@ export class AgentEngine implements AgentRunner {
     modelOutput: string,
     status: EngineRuntimeToolResultStatus,
   ): Promise<{ message: Message; envelope: ToolResultEnvelope }> {
-    const built = this.buildRuntimeToolResultInput(toolCall, result, modelOutput, status);
+    const built = buildRuntimeToolResultInput(toolCall, result, modelOutput, status);
     return {
       message: runtimeRun.registerToolResult(built.input),
-      envelope: built.envelope,
-    };
-  }
-
-  /**
-   * ADR 26(票 E1):工具结果全文 inline 入库,无 Evidence 归档分叉。
-   * 超过 MAX_TOOL_RESULT_BYTES 的结果在门口拒绝——inline 正文与投影替换为
-   * 合成错误(指引模型用 grep/head/tail 管道或 read_file 分段重取),事件
-   * 状态记为 rejected,调用本身照常入账。
-   */
-  private buildRuntimeToolResultInput(
-    toolCall: ToolCall,
-    result: ToolResult,
-    modelOutput: string,
-    status: EngineRuntimeToolResultStatus,
-  ): { input: EngineRuntimeToolResultInput; envelope: ToolResultEnvelope } {
-    const built = buildRuntimeToolResultProjection({
-      toolCall,
-      result,
-      modelOutput,
-    });
-    if (built.overLimit) {
-      logger.warn(
-        {
-          tool: toolCall.name,
-          toolCallId: toolCall.id,
-          rawSizeBytes: Buffer.byteLength(result.output, "utf8"),
-          maxToolResultBytes: MAX_TOOL_RESULT_BYTES,
-        },
-        "[ToolResult] 输出超限,结果已被入口上限门拒绝并替换为合成错误",
-      );
-    }
-    const input: EngineRuntimeToolResultInput = {
-      toolCallId: toolCall.id,
-      toolName: toolCall.name,
-      status: built.overLimit ? "rejected" : status,
-      body: {
-        storage: "inline",
-        content: built.inlineContent,
-        sha256: built.rawSha256,
-        sizeBytes: built.rawSizeBytes,
-      },
-      projection: built.projection,
-    };
-    return {
-      input,
-      envelope: createToolResultEnvelope(input),
-    };
-  }
-
-  private buildEphemeralToolResult(
-    toolCall: ToolCall,
-    result: ToolResult,
-    modelOutput: string,
-    status: EngineRuntimeToolResultStatus,
-  ): { message: Message; envelope: ToolResultEnvelope } {
-    const built = this.buildRuntimeToolResultInput(toolCall, result, modelOutput, status);
-    return {
-      message: {
-        role: "user",
-        content: built.input.projection.text,
-        toolCallId: toolCall.id,
-      },
       envelope: built.envelope,
     };
   }
@@ -3128,239 +2931,6 @@ export class AgentEngine implements AgentRunner {
     return decisions.find((decision) => !decision.allowed) ?? { allowed: true };
   }
 
-  /**
-   * runSub 专用的简化版响应式溢出重试。
-   *
-   * 子代理用独立 contextHistory 局部变量(非 Session 驱动),无法重取 WorkingMemory,
-   * 故仅用更小的 maxChars 预算对 contextHistory 重新 compactToBudget 重试,不改 limit。
-   * 降级系数复用 OVERFLOW_BUDGET_FACTORS(与主循环一致,便于心智模型统一)。
-   *
-   * 与 generateWithOverflowRetry 的差异:
-   *   - 不从 Session 重取 WorkingMemory(子代理无 Session)
-   *   - 仅压缩字符预算,条数不变
-   *   - 首轮压缩也由本方法内部完成(调用方直接传原始 contextHistory)
-   *
-   * @param contextHistory 子代理当前完整上下文(未经压缩)
-   * @param tools 本轮可用工具
-   * @returns 模型响应消息
-   */
-  private async generateSubWithOverflowRetry(
-    contextHistory: Message[],
-    tools: ToolDefinition[],
-    reporter: Reporter,
-    runtime: SubagentExecutionRuntime,
-    signal?: AbortSignal,
-    requestOptions?: Pick<LLMProviderRequestOptions, "toolChoice">,
-  ): Promise<Message> {
-    const promptCacheCapabilities = runtime.provider.requestCapabilities;
-    const preparePromptCacheSharding = promptCacheCapabilities?.preparePromptCacheSharding;
-    const routeThresholdActive = preparePromptCacheSharding?.();
-    const promptCacheRequest =
-      runtime.usageSession &&
-      preparePromptCacheSharding &&
-      promptCacheCapabilities.promptCacheRouteIdentity
-        ? runtime.usageSession.preparePromptCacheSharding(
-            promptCacheCapabilities.promptCacheRouteIdentity,
-            contextHistory,
-            routeThresholdActive ?? false,
-          )
-        : {
-            shardSeed: promptCacheConversationShardSeed(contextHistory),
-            active: routeThresholdActive,
-          };
-    if (!runtime.compactor) {
-      // 无 Compactor:子代理无法降级,叠加普通重试层(溢出则原样抛出)
-      return generateWithRetry(
-        this.providerForReporter(runtime.provider, reporter, signal),
-        contextHistory,
-        tools,
-        {
-          signal,
-          onRetry: this.makeRetryReporter(),
-          ...(promptCacheRequest.shardSeed
-            ? { promptCacheShardSeed: promptCacheRequest.shardSeed }
-            : {}),
-          ...(promptCacheRequest.active !== undefined
-            ? { promptCacheShardActive: promptCacheRequest.active }
-            : {}),
-          ...requestOptions,
-          ...(runtime.onRateLimited
-            ? { onRateLimited: () => runtime.onRateLimited?.(reporter, signal) }
-            : {}),
-        },
-      );
-    }
-    // 首轮:用默认预算压缩(attempt 0,系数 1.0);传入 tools 以启用 token 维度自适应校正(ctx-2)
-    let context = this.compactSubContext(contextHistory, runtime.compactor, undefined, tools);
-    for (let attempt = 0; ; attempt++) {
-      try {
-        // 【集成点】同 generateWithOverflowRetry,叠加普通重试层在内,
-        // 响应式压缩在外(子代理版仅降字符预算,不改 WorkingMemory 条数)。
-        return await generateWithRetry(
-          this.providerForReporter(runtime.provider, reporter, signal),
-          context,
-          tools,
-          {
-            signal,
-            onRetry: this.makeRetryReporter(),
-            ...(promptCacheRequest.shardSeed
-              ? { promptCacheShardSeed: promptCacheRequest.shardSeed }
-              : {}),
-            ...(promptCacheRequest.active !== undefined
-              ? { promptCacheShardActive: promptCacheRequest.active }
-              : {}),
-            ...requestOptions,
-            ...(runtime.onRateLimited
-              ? { onRateLimited: () => runtime.onRateLimited?.(reporter, signal) }
-              : {}),
-          },
-        );
-      } catch (err) {
-        if (!(err instanceof ContextOverflowError)) {
-          throw err;
-        }
-        if (attempt >= AgentEngine.MAX_OVERFLOW_RETRY) {
-          logger.error(
-            { attempt, maxRetry: AgentEngine.MAX_OVERFLOW_RETRY },
-            `[Subagent] 响应式压缩已用尽 ${AgentEngine.MAX_OVERFLOW_RETRY} 次降级仍溢出,抛出 ContextOverflowError`,
-          );
-          throw err;
-        }
-        const budgetFactor = AgentEngine.OVERFLOW_BUDGET_FACTORS[attempt + 1]!;
-        const newBudget = Math.max(1, Math.floor(runtime.compactor.maxChars * budgetFactor));
-        // contextHistory 已持久化上一档压缩结果；继续缩紧预算时从该结构化历史降级，
-        // 避免下一轮又从未压缩原文开始并重复探索。
-        context = this.compactSubContext(contextHistory, runtime.compactor, newBudget, tools);
-        logger.warn(
-          { attempt: attempt + 1, budget: newBudget },
-          `[Subagent] ⚠ 上下文溢出,响应式降级重试(attempt ${attempt + 1}):预算 ${newBudget} 字符`,
-        );
-      }
-    }
-  }
-
-  /**
-   * 子代理上下文压缩 + 硬重置兜底。
-   *
-   * 子代理没有 Session，因此压缩结果必须回写到这次 runSub 的局部历史；
-   * 否则 provider 本轮虽看到压缩请求，下轮仍会从未压缩原文重新开始。
-   * compactToBudget 完全失败时，保留 system/task 和一条结构化 evidence snapshot；
-   * 若连 snapshot 也放不下，才退化到只保留 system/task。
-   */
-  private compactSubContext(
-    contextHistory: Message[],
-    compactor: Compactor,
-    budget?: number,
-    tools: readonly ToolDefinition[] = [],
-  ): Message[] {
-    // ctx-2: 子代理预算闭环原本纯字符(maxChars = inputBudgetTokens * CHARS_PER_TOKEN,
-    // 而 CHARS_PER_TOKEN 是英文经验值,对中文失真 4-8 倍)。首轮(budget 未指定)先用
-    // BPE token 估算判断是否真的超预算(token 维度),而不是仅靠字符水位线。
-    //   - token 维度已超预算:按实际内容密度(chars/token)反推与 token 预算匹配的
-    //     自适应字符预算,而非沿用英文经验值。英文内容(chars/token≈4)自适应后与
-    //     旧 maxChars(tokens*4)量级一致、行为不变;中文内容(chars/token≈0.5-1)
-    //     自适应后会显著收紧,杜绝 4-8 倍超出窗口。
-    //   - token 维度未超预算:无内存压力,直接跳过 compact() 的字符水位 gate。否则
-    //     英文/代码内容(~4 chars/token,30k token ≈ 120k chars)会超过 maxChars
-    //     (≈ inputBudgetTokens*1.5 字符)而 token 还远未触顶,被提前误压(loop-9)。
-    //     这里只做与 compact() no-op 路径一致的 sanitizeToolPairs(维护 tool 配对
-    //     不变量),不经字符水位 gating。主循环的 token 维度触发逻辑不受影响。
-    if (budget === undefined && contextHistory.length > 0) {
-      const currentTokens = estimateModelInputTokens(contextHistory, tools);
-      // maxChars 由 inputBudgetTokens * CHARS_PER_TOKEN 换算而来,反推 token 预算。
-      const tokenBudget = Math.max(1, Math.floor(compactor.maxChars / CHARS_PER_TOKEN));
-      if (currentTokens > tokenBudget) {
-        const currentChars = compactor.estimateLength(contextHistory);
-        const adaptiveCharBudget =
-          currentTokens > 0
-            ? Math.max(1, Math.floor((tokenBudget * currentChars) / currentTokens))
-            : undefined;
-        if (adaptiveCharBudget !== undefined) {
-          budget = adaptiveCharBudget;
-          logger.warn(
-            { currentTokens, tokenBudget, currentChars, adaptiveCharBudget },
-            `[Subagent] ⚠ token 维度已超预算,按内容密度自适应收紧字符预算(英文经验值 CHARS_PER_TOKEN 对中文过度宽松)`,
-          );
-        }
-      } else {
-        // loop-9: token 维度未超预算时显式跳过字符水位压缩,避免英文/代码内容被误压。
-        return persistSubagentContext(contextHistory, sanitizeToolPairs(contextHistory));
-      }
-    }
-    // system prompt 不允许被 Compactor 裁剪。动态 workspace/tool 纪律可能使它大于
-    // 最低降级系数算出的预算；若不钳制可行下限，会在真正的 provider
-    // overflow 重试之前误抛 ContextCompactionError。
-    const effectiveBudget =
-      budget === undefined
-        ? undefined
-        : Math.max(budget, estimateTraceLength(contextHistory.slice(0, 1)) + 1);
-    try {
-      const compacted =
-        effectiveBudget !== undefined
-          ? compactor.compactToBudget(contextHistory, effectiveBudget)
-          : compactor.compactToBudget(contextHistory);
-      return persistSubagentContext(contextHistory, compacted);
-    } catch (err) {
-      if (err instanceof ContextCompactionError) {
-        const evidenceSnapshot = buildSubagentEvidenceSnapshot(contextHistory);
-        logger.warn(
-          {
-            beforeChars: err.beforeChars,
-            afterChars: err.afterChars,
-            maxChars: err.maxChars,
-            evidenceSnapshot: evidenceSnapshot !== undefined,
-          },
-          `[Subagent] ⚠ 压缩彻底失败,重置为任务指令与结构化证据快照`,
-        );
-        const taskBoundary = contextHistory.slice(0, 2);
-        const reset = evidenceSnapshot
-          ? [
-              ...taskBoundary,
-              {
-                role: "user" as const,
-                content: evidenceSnapshot,
-                providerData: {
-                  picoKind: "subagent_evidence_snapshot",
-                  picoHiddenFromTranscript: true,
-                },
-              },
-            ]
-          : taskBoundary;
-        try {
-          const compactedReset =
-            effectiveBudget !== undefined
-              ? compactor.compactToBudget(reset, effectiveBudget)
-              : compactor.compactToBudget(reset);
-          return persistSubagentContext(contextHistory, compactedReset);
-        } catch (resetError) {
-          if (!(resetError instanceof ContextCompactionError) || !evidenceSnapshot) {
-            throw resetError;
-          }
-          const compactedTask =
-            effectiveBudget !== undefined
-              ? compactor.compactToBudget(taskBoundary, effectiveBudget)
-              : compactor.compactToBudget(taskBoundary);
-          return persistSubagentContext(contextHistory, compactedTask);
-        }
-      }
-      throw err;
-    }
-  }
-
-  /**
-   * RunSub:专为 Subagent 拉起的一次性受限循环 (第 17 讲)。
-   *
-   * 不依赖外部 Session,打完就跑。子智能体拥有全新纯净上下文,
-   * 无论怎么折腾犯错,主干 contextHistory 依然纯洁如初。
-   *
-   * 防污染机制:
-   * - 仅传入受限 Registry(只读/受控工具,爆炸半径限制)
-   * - 专属 System/Task Prompt 注入可信 workspace root、实际工具定义与 Skill 索引
-   * - maxSubTurns 最后一轮预留为 tools=[] FINALIZE，耗尽时以 partial 返回证据
-   * - 正常退出条件:不调工具且生成非空总结
-   *
-   * @returns 子智能体的纯文本总结汇报（ADR 26 起报告全文 inline，无 Evidence 引用）
-   */
   private async reportMessage(
     reporter: Reporter,
     content: string,
@@ -3370,6 +2940,7 @@ export class AgentEngine implements AgentRunner {
     await this.hookService?.dispatch("MessageDisplay", { role: "assistant", content }, { signal });
   }
 
+  /** Resolve child execution dependencies, then keep its durable run inside the parent capability. */
   async runSub(
     taskPrompt: string,
     readOnlyRegistry: Registry,
@@ -3387,8 +2958,24 @@ export class AgentEngine implements AgentRunner {
         source: runtime.source,
       });
     }
-    const run = () =>
-      this.runSubInIsolatedCompactorScope(taskPrompt, readOnlyRegistry, runtime, reporter, opts);
+    const runner = new SubagentRunner({
+      workDir: this.workDir,
+      usageSession: this.usageSession,
+      runtimePort: this.runtimePort,
+      skillLoaderFactory: this.skillLoaderFactory,
+      recovery: this.recovery,
+      toolResultRedactionSecrets: this.toolResultRedactionSecrets,
+      maxToolConcurrency: AgentEngine.MAX_TOOL_CONCURRENCY,
+      onRetry: this.makeRetryReporter(),
+      budget: {
+        currentDecision: () => this.currentSubagentBudgetDecision(),
+        consumeResponse: (runtime, response, costBefore) =>
+          this.consumeSubagentResponseBudget(runtime, response, costBefore),
+      },
+      publishCommittedToolBatch: (reporter, calls, outcomes, order) =>
+        this.publishCommittedToolBatch(reporter, calls, outcomes, order),
+    });
+    const run = () => runner.run(taskPrompt, readOnlyRegistry, runtime, reporter, opts);
     const runAttributed = () =>
       withProviderCallContext({ purpose: "subagent", ...(opts.usageAttribution ?? {}) }, () =>
         runtime.compactor ? runtime.compactor.runInIsolatedScope(run) : run(),
@@ -3466,525 +3053,6 @@ export class AgentEngine implements AgentRunner {
       onRateLimited: (reporter, signal) => this.rotateProvider(reporter, signal),
     };
   }
-
-  /** 每个子代理保留注入 Compactor 的行为，但使用独立压缩进度。 */
-  private async runSubInIsolatedCompactorScope(
-    taskPrompt: string,
-    readOnlyRegistry: Registry,
-    runtime: SubagentExecutionRuntime,
-    reporter?: Reporter,
-    opts: SubagentRunOptions = {},
-  ): Promise<SubagentResult> {
-    const rep = reporter ?? new SilentReporter();
-    const signal = opts.signal;
-    signal?.throwIfAborted();
-    logger.info(
-      {
-        task: taskPrompt.slice(0, 100),
-        thinkingEffort: runtime.thinkingEffort,
-        modelRoute: runtime.resolvedModelRoute,
-      },
-      `[Subagent] 🚀 拉起探路者,任务: ${taskPrompt.slice(0, 100)} (thinkingEffort: ${runtime.thinkingEffort})`,
-    );
-
-    const initialTools = snapshotToolDefinitions(readOnlyRegistry.getAvailableTools());
-    const initialToolNames = new Set(initialTools.map((tool) => tool.name));
-    // 委派层会传入 host/worktree 的可信运行目录；不从任务 context 或模型输出猜测根目录。
-    const runtimeWorkspaceRoot = opts.workDir ?? this.workDir;
-    const canViewSkills = initialToolNames.has("skill_view");
-    const skillIndex = canViewSkills
-      ? await (
-          this.skillLoaderFactory?.(runtimeWorkspaceRoot) ?? new SkillLoader(runtimeWorkspaceRoot)
-        ).loadAll()
-      : "";
-    signal?.throwIfAborted();
-
-    // 子智能体专属 System Prompt:严厉警告必须用工具,不许凭空猜测。
-    // 若工作区配置了 Skills,只注入 name/description 索引;正文仍由 skill_view 按需读取。
-    // 支持调用方自定义:默认追加拼接(对标 kimi-code ROLE_ADDITIONAL),
-    // systemPromptOverride=true 时完全覆盖(对标 hermes ephemeral_system_prompt)。
-    const subSystemPrompt = buildSubagentSystemPrompt(
-      initialTools,
-      skillIndex,
-      runtimeWorkspaceRoot,
-      opts,
-    );
-    const effectiveTaskPrompt = buildSubagentTaskPrompt(runtimeWorkspaceRoot, taskPrompt);
-
-    // 全新纯净上下文:不共享主 Agent 的 Session
-    const contextHistory: Message[] = [
-      { role: "system", content: subSystemPrompt },
-      { role: "user", content: effectiveTaskPrompt },
-    ];
-    await this.runtimePort?.currentRun()?.recordTranscriptMessage(contextHistory[1]!);
-
-    // maxTurns 可由调用方覆盖(默认 10)。最后一轮始终预留为 tools=[] 收口，
-    // 不通过提高上限隐藏控制流问题。
-    const maxSubTurns = Math.max(1, opts.maxTurns ?? 10);
-    const depth = opts.depth ?? 0;
-    const maxSpawnDepth = opts.maxSpawnDepth ?? 2;
-    if (depth > maxSpawnDepth) {
-      throw new Error(`子智能体超过最大委派深度 ${maxSpawnDepth}`);
-    }
-    let turnCount = 0;
-
-    for (;;) {
-      signal?.throwIfAborted();
-      const availableBudget = this.currentSubagentBudgetDecision();
-      if (!availableBudget.allowed) {
-        return this.finalizeSubagentResult(
-          "partial",
-          `子代理已停止：${availableBudget.reason ?? "执行预算已用尽"}。`,
-          taskPrompt,
-        );
-      }
-      turnCount++;
-      const finalizing = turnCount >= maxSubTurns;
-      if (finalizing) {
-        contextHistory.push({
-          role: "user",
-          content: SUBAGENT_FINALIZE_PROMPT,
-          providerData: {
-            picoKind: "subagent_finalize",
-            picoHiddenFromTranscript: true,
-          },
-        });
-      }
-
-      // 【驾驭底线】普通探索轮仅能获取传入的受限 Registry。明确支持
-      // tool_choice:none + tools 的 Provider 在收口轮保留同一 Schema，
-      // 避免为了纯文本总结丢失稳定 tools 缓存前缀。
-      const retainFinalizeToolPrefix =
-        finalizing && runtime.provider.requestCapabilities?.toolChoiceNoneWithTools === true;
-      const availableTools = finalizing
-        ? retainFinalizeToolPrefix
-          ? initialTools
-          : []
-        : initialTools;
-
-      // 响应式溢出重试:子代理用独立 contextHistory(非 Session 驱动),无法重取
-      // WorkingMemory,故仅用更小的 maxChars 预算对 contextHistory 重新压缩重试。
-      let actionResp: Message;
-      const usageSession = runtime.usageSession ?? this.usageSession;
-      const costBefore = usageSession?.totalCostCNY ?? 0;
-      try {
-        actionResp = await this.generateSubWithOverflowRetry(
-          contextHistory,
-          availableTools,
-          rep,
-          runtime,
-          signal,
-          retainFinalizeToolPrefix ? { toolChoice: "none" } : undefined,
-        );
-      } catch (error) {
-        signal?.throwIfAborted();
-        if (isAbortError(error) || !finalizing) throw error;
-        logger.warn(
-          { error: error instanceof Error ? error.message : String(error), turns: turnCount },
-          `[Subagent] FINALIZE 调用失败，直接以 partial 返回已收集证据。`,
-        );
-        return this.finalizeSubagentResult(
-          "partial",
-          buildSubagentPartialSummary(contextHistory),
-          taskPrompt,
-        );
-      }
-      const budgetDecision = this.consumeSubagentResponseBudget(runtime, actionResp, costBefore);
-      contextHistory.push(actionResp);
-      await this.runtimePort?.currentRun()?.recordTranscriptMessage(actionResp);
-
-      if (actionResp.content) {
-        rep.onMessage(`[Subagent] ${actionResp.content}`);
-      }
-
-      // 并发子代理可能同时在途，因此限额最多被已在途的单次响应超出。
-      // 每个响应结算后立即停止该子代理，且其他子代理在下一次调用前会共享检查。
-      if (!budgetDecision.allowed) {
-        const evidence = buildSubagentPartialSummary(contextHistory);
-        return this.finalizeSubagentResult(
-          "partial",
-          `${evidence}\n\n子代理已停止：${budgetDecision.reason ?? "执行预算已用尽"}。`,
-          taskPrompt,
-        );
-      }
-
-      // 【核心退出条件】子智能体不调工具了,说明做好了总结汇报
-      const toolCalls = actionResp.toolCalls ?? [];
-      if (toolCalls.length === 0 || finalizing) {
-        if (finalizing) {
-          const summary =
-            toolCalls.length === 0 && usableSummary(actionResp.content)
-              ? actionResp.content
-              : buildSubagentPartialSummary(contextHistory);
-          logger.warn(
-            { turns: turnCount, maxSubTurns },
-            `[Subagent] 已进入预留收口轮，以 partial 状态返回已收集证据。`,
-          );
-          return this.finalizeSubagentResult("partial", summary, taskPrompt);
-        }
-
-        // 【改动 B】summary 续写:子代理最终汇报过短(< 200 字)时,
-        // 再给一轮强制扩写,防止主 Agent 因信息不足而"失忆"。
-        // 对齐 Kimi Code 的 SUMMARY_MIN_LENGTH / SUMMARY_CONTINUATION_ATTEMPTS 设计。
-        // 约束:最多续写 1 次,且复用 turnCount 预算,不会无限循环。
-        let summary = actionResp.content;
-        if (summary.length < SUBAGENT_SUMMARY_MIN_CHARS && turnCount < maxSubTurns) {
-          turnCount++;
-          contextHistory.push({
-            role: "user",
-            content: SUBAGENT_SUMMARY_CONTINUATION_PROMPT,
-          });
-          logger.info(
-            { turns: turnCount, summaryLen: summary.length },
-            `[Subagent] 📝 探路者总结过短,追加一轮扩写。`,
-          );
-          try {
-            const continuationBudget = this.currentSubagentBudgetDecision();
-            if (!continuationBudget.allowed) {
-              return this.finalizeSubagentResult(
-                "partial",
-                `${summary}\n\n子代理已停止：${continuationBudget.reason ?? "执行预算已用尽"}。`,
-                taskPrompt,
-              );
-            }
-            const continuationCostBefore = usageSession?.totalCostCNY ?? 0;
-            const continuationResp = await this.generateSubWithOverflowRetry(
-              contextHistory,
-              runtime.provider.requestCapabilities?.toolChoiceNoneWithTools === true
-                ? initialTools
-                : [],
-              rep,
-              runtime,
-              signal,
-              runtime.provider.requestCapabilities?.toolChoiceNoneWithTools === true
-                ? { toolChoice: "none" }
-                : undefined,
-            );
-            const continuationDecision = this.consumeSubagentResponseBudget(
-              runtime,
-              continuationResp,
-              continuationCostBefore,
-            );
-            contextHistory.push(continuationResp);
-            if (
-              (continuationResp.toolCalls?.length ?? 0) === 0 &&
-              usableSummary(continuationResp.content)
-            ) {
-              summary = continuationResp.content;
-              rep.onMessage(`[Subagent] ${continuationResp.content}`);
-            }
-            if (!continuationDecision.allowed) {
-              return this.finalizeSubagentResult(
-                "partial",
-                `${buildSubagentPartialSummary(contextHistory)}\n\n子代理已停止：${continuationDecision.reason ?? "执行预算已用尽"}。`,
-                taskPrompt,
-              );
-            }
-          } catch (error) {
-            signal?.throwIfAborted();
-            if (isAbortError(error)) throw error;
-            logger.warn(
-              { error: error instanceof Error ? error.message : String(error) },
-              `[Subagent] 总结扩写失败，保留上一版有效总结。`,
-            );
-          }
-        }
-        const completed = usableSummary(summary);
-        if (!completed) summary = buildSubagentPartialSummary(contextHistory);
-        logger.info(
-          { turns: turnCount, status: completed ? "completed" : "partial" },
-          `[Subagent] ✅ 探路者完成收口,返回总结。`,
-        );
-        const finalized = await this.finalizeSubagentResult(
-          completed ? "completed" : "partial",
-          summary,
-          taskPrompt,
-        );
-        // D10④ 内容级熔断：自报 completed 但总结开篇明确声明失败 → 降级 error，
-        // 宿主按失败结算（plan step 不落 completed）。
-        // 放在 finalize 之后：报告 inline 收口与上限门照常，只改终态。
-        if (finalized.status === "completed" && subagentDeclaresFailure(finalized.summary)) {
-          logger.warn(
-            { turns: turnCount, summaryHead: finalized.summary.slice(0, 80) },
-            `[Subagent] 🔌 内容级熔断：自报完成但总结开篇为失败宣言，降级 error。`,
-          );
-          return {
-            ...finalized,
-            status: "error",
-            error: "子代理自报任务失败（总结开篇失败宣言，内容级熔断降级）",
-          };
-        }
-        return finalized;
-      }
-
-      // 执行只读工具的并发循环(资源冲突图调度,复用主循环的调度策略)
-      const getAccesses = readOnlyRegistry.getAccesses;
-      const runtimeRun = this.runtimePort?.currentRun();
-      const completedToolReportIndexes: number[] = [];
-      const scheduler = new ToolScheduler<{
-        readonly message?: Message;
-        readonly input?: EngineRuntimeToolResultInput;
-        readonly report: ToolResultEnvelope;
-      }>({
-        maxConcurrency: AgentEngine.MAX_TOOL_CONCURRENCY,
-        signal,
-      });
-      const scheduled = toolCalls.map((tc, index) =>
-        scheduler.add({
-          accesses: getAccesses ? getAccesses.call(readOnlyRegistry, tc) : ToolAccesses.all(),
-          settleOnAbort: true,
-          start: async () => {
-            signal?.throwIfAborted();
-            rep.onToolCall(`[Subagent] ${tc.name}`, tc.arguments, tc.id);
-            await runtimeRun?.recordToolStarted(tc.id, tc.name, tc.arguments);
-            const rawResult = await (this.runtimePort
-              ? this.runtimePort.runWithToolCall(tc.id, () =>
-                  readOnlyRegistry.execute(tc, { signal }),
-                )
-              : readOnlyRegistry.execute(tc, { signal }));
-            const result = redactToolResult(rawResult, this.toolResultRedactionSecrets);
-            let finalOutput = result.output;
-            if (result.isError) {
-              finalOutput = this.recovery.analyzeAndInject(tc.name, result.output);
-            }
-            if (runtimeRun) {
-              const builtResult = this.buildRuntimeToolResultInput(
-                tc,
-                result,
-                finalOutput,
-                result.isError ? "failed" : "succeeded",
-              );
-              completedToolReportIndexes.push(index);
-              return { input: builtResult.input, report: builtResult.envelope };
-            }
-            const builtResult = this.buildEphemeralToolResult(
-              tc,
-              result,
-              finalOutput,
-              result.isError ? "failed" : "succeeded",
-            );
-            completedToolReportIndexes.push(index);
-            return { message: builtResult.message, report: builtResult.envelope };
-          },
-        }),
-      );
-      let subResults: Array<{
-        readonly message?: Message;
-        readonly input?: EngineRuntimeToolResultInput;
-        readonly report: ToolResultEnvelope;
-      }>;
-      try {
-        subResults = await Promise.all(scheduled);
-        signal?.throwIfAborted();
-      } catch (error) {
-        if (signal?.aborted) await Promise.allSettled(scheduled);
-        throw error;
-      } finally {
-        scheduler.dispose();
-      }
-
-      const observations = runtimeRun
-        ? [
-            ...(await runtimeRun.recordTranscriptToolResults(
-              subResults.map((result, index) => {
-                if (!result.input) {
-                  throw new Error(`Subagent ToolResult ${String(index)} has no Runtime input`);
-                }
-                return result.input;
-              }),
-            )),
-          ]
-        : subResults.map((result, index) => {
-            if (!result.message) {
-              throw new Error(`Subagent ToolResult ${String(index)} has no in-memory projection`);
-            }
-            return result.message;
-          });
-
-      contextHistory.push(...observations);
-      await this.publishCommittedToolBatch(
-        rep,
-        toolCalls,
-        observations.map((message, index) => ({
-          message,
-          report: subResults[index]!.report,
-        })),
-        completedToolReportIndexes,
-      );
-    }
-  }
-
-  /**
-   * ADR 26(票 E3):子代理报告不再外部化进 Evidence CAS——全文 inline 进
-   * subagent_report transcript 事件与回传 summary,与工具结果入口上限门同款
-   * 语义:超过 MAX_TOOL_RESULT_BYTES 时替换为指引主 Agent 有界重取的合成错误。
-   *
-   * 第 1 轮审查问题 3 修复:报告被上限门拒绝时,原始报告已永久丢弃,交付物
-   * 只剩合成错误文本——终态结算与工具结果入口门对齐(超限工具结果按
-   * isError/failed 结算),status 落 "error"(既有失败语义，plan step
-   * 不落 completed),不再以 completed/partial
-   * 收场掩盖"报告不可用"的事实。拒绝文本保留在 summary 供主 Agent 重取。
-   */
-  private async finalizeSubagentResult(
-    status: "completed" | "partial",
-    report: string,
-    _taskPrompt: string,
-  ): Promise<SubagentResult> {
-    const rawSizeBytes = Buffer.byteLength(report, "utf8");
-    if (rawSizeBytes > MAX_TOOL_RESULT_BYTES) {
-      logger.warn(
-        { status, rawSizeBytes, maxToolResultBytes: MAX_TOOL_RESULT_BYTES },
-        "[Subagent] 完整报告超过入口上限,已被上限门拒绝并替换为合成错误,终态按失败结算",
-      );
-      return {
-        status: "error",
-        summary: buildOverLimitRejectionText("子代理完整报告 ", rawSizeBytes),
-        evidenceRefs: [],
-        error: `子代理完整报告 ${rawSizeBytes} 字节超过入口上限 ${MAX_TOOL_RESULT_BYTES} 字节,已被上限门拒绝（原文未保存）`,
-      };
-    }
-    return { status, summary: report, evidenceRefs: [] };
-  }
-}
-
-function persistSubagentContext(contextHistory: Message[], compacted: Message[]): Message[] {
-  contextHistory.splice(0, contextHistory.length, ...compacted);
-  return contextHistory;
-}
-
-function buildSubagentEvidenceSnapshot(contextHistory: readonly Message[]): string | undefined {
-  return buildEvidenceSnapshot(contextHistory, 2, "[SUBAGENT EVIDENCE SNAPSHOT]");
-}
-
-/**
- * 从消息历史构造结构化证据快照。
- * @param messages 完整消息历史
- * @param skipPrefix 跳过前 N 条(system/task prompt),只处理其后消息
- * @param header 快照头部标识
- * @returns 证据快照文本,或 undefined(无证据可提取)
- */
-function buildEvidenceSnapshot(
-  messages: readonly Message[],
-  skipPrefix: number,
-  header: string,
-): string | undefined {
-  const toolNames = new Map<string, string>();
-  const evidence: string[] = [];
-  for (const message of messages.slice(skipPrefix)) {
-    if (message.role === "assistant") {
-      // 跳过上一轮 checkpoint summary（压缩产物而非真实对话），避免把截断的旧摘要当工作线索。
-      if (message.content.startsWith(FULL_COMPACTION_SUMMARY_MARKER)) continue;
-      for (const call of message.toolCalls ?? []) toolNames.set(call.id, call.name);
-      if (message.content.trim()) {
-        evidence.push(`[assistant checkpoint] ${truncate(message.content.trim(), 400)}`);
-      }
-      continue;
-    }
-    if (message.role === "user" && message.toolCallId) {
-      const toolName = toolNames.get(message.toolCallId) ?? "unknown_tool";
-      evidence.push(
-        `[tool evidence: ${toolName}; call=${message.toolCallId}] ${truncate(message.content, 700)}`,
-      );
-      continue;
-    }
-    // 纯 user 消息（用户原始请求/约束）:必须保留,否则硬重置后模型丢失任务目标和用户意图。
-    if (message.role === "user") {
-      evidence.push(`[user request] ${truncate(message.content.trim(), 300)}`);
-    }
-  }
-  if (evidence.length === 0) return undefined;
-  return [
-    `${header} 上下文已重置；以下是压缩前已收集的结构化证据，不要重复探索同一范围。`,
-    ...evidence.slice(-8),
-  ].join("\n");
-}
-
-function usableSummary(summary: string): boolean {
-  return summary.trim().length > 0;
-}
-
-function buildSubagentPartialSummary(contextHistory: readonly Message[]): string {
-  return buildSubagentEvidenceSnapshot(contextHistory) ?? SUBAGENT_EMPTY_SUMMARY_FALLBACK;
-}
-
-/**
- * 构造子代理的 system prompt。
- *
- * 自定义语义(对标 kimi-code ROLE_ADDITIONAL + hermes ephemeral_system_prompt):
- * - 未传 opts.systemPrompt:返回默认的"探路者"骨架(向后兼容)。
- * - 传 opts.systemPrompt 且 opts.systemPromptOverride !== true:默认骨架 + 追加拼接
- *   自定义片段。保留基本纪律 + 调用方追加要求(对标 kimi-code 的 ROLE_ADDITIONAL)。
- * - opts.systemPromptOverride === true 且有 systemPrompt:完全覆盖默认骨架
- *   (对标 hermes 的 ephemeral_system_prompt 替换语义),给需要完全定制的场景。
- */
-function buildSubagentSystemPrompt(
-  tools: readonly ToolDefinition[],
-  skillIndex: string,
-  runtimeWorkspaceRoot: string,
-  opts: SubagentRunOptions,
-): string {
-  // 完全覆盖模式:调用方显式声明,直接用自定义 prompt 替换默认骨架
-  if (opts.systemPromptOverride && opts.systemPrompt) {
-    return opts.systemPrompt;
-  }
-
-  const toolDiscipline = buildSubagentToolDiscipline(tools);
-
-  // 默认骨架：工作区与工具能力均从本次运行时注册表动态注入。
-  const base = `你是专门负责深度探索的探路者 (Explorer Subagent)。
-你的任务是根据主架构师的指令,在当前工作区内仔细阅读代码、查阅日志,搜集足够的信息。
-【运行时工作区边界】
-- 唯一真实 workspace root: ${JSON.stringify(runtimeWorkspaceRoot)}
-- 所有相对路径都基于该 root。任务 context 中若出现与它冲突的绝对路径，那是过期上下文，必须忽略，不得读写、切换或推断为当前工作区。
-【本次实际工具】
-${toolDiscipline}
-【核心纪律】
-1. 只能使用上面列出的实际工具；不得声称或调用未列出的工具。绝对不允许凭空猜测。
-2. 如果已注册可用工具且尚未找到确切答案，继续在真实 workspace root 内定点搜索；如果没有工具，明确报告证据边界。
-3. 当且仅当你找到了确切的线索后,停止调用工具,直接输出一段纯文本作为你的终极汇报。主架构师会根据你的汇报决定下一步。${
-    skillIndex ? `\n\n${skillIndex}` : ""
-  }`;
-
-  // 追加模式:默认骨架 + 自定义片段
-  return opts.systemPrompt ? `${base}\n\n${opts.systemPrompt}` : base;
-}
-
-function buildSubagentToolDiscipline(tools: readonly ToolDefinition[]): string {
-  if (tools.length === 0) {
-    return "- 本次 Registry 未注册任何工具。不得虚构任何工具；只能根据任务中已给出的证据总结。";
-  }
-  return tools
-    .map((tool) => `- ${tool.name}: ${truncate(tool.description.trim() || "无描述", 240)}`)
-    .join("\n");
-}
-
-function buildSubagentTaskPrompt(runtimeWorkspaceRoot: string, taskPrompt: string): string {
-  return [
-    "[RUNTIME WORKSPACE — AUTHORITATIVE]",
-    `workspace_root=${JSON.stringify(runtimeWorkspaceRoot)}`,
-    "该路径是本次执行的唯一权威工作区根。下方任务/context 中的其他绝对路径如与它冲突，必须忽略。",
-    "",
-    "[任务]",
-    taskPrompt,
-    "",
-    "[最终汇报合约]",
-    "- 先给可直接决策的结论，再列关键证据，不要重放搜索过程或原始日志。",
-    "- 证据尽量使用 `文件路径:行号`；明确标出未验证风险与建议下一步。",
-    `- 常规目标为 ${SUBAGENT_OUTPUT_BUDGET.summary.softMin}–${SUBAGENT_OUTPUT_BUDGET.summary.softMax} 字符；简单任务可以更短，单次硬上限 ${SUBAGENT_OUTPUT_BUDGET.summary.hardMax} 字符。`,
-  ].join("\n");
-}
-
-function estimateTraceLength(messages: Message[]): number {
-  let length = 0;
-  for (const message of messages) {
-    length += message.content.length;
-    if (message.toolCalls) {
-      for (const toolCall of message.toolCalls) {
-        length += toolCall.name.length + toolCall.arguments.length;
-      }
-    }
-  }
-  return length;
 }
 
 function recordCompaction(span: Span | undefined, beforeChars: number, afterChars: number): void {
