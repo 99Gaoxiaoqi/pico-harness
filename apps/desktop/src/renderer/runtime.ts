@@ -7,8 +7,6 @@ import {
   type RuntimeDiagnosticCheck,
   type RuntimeMcpServerInput,
   type RuntimeMemoryFact,
-  type RuntimeMemoryProposal,
-  type RuntimeMemoryReviewBudget,
   type RuntimeMemorySettings,
   type RuntimeNotification,
   type RuntimeParams,
@@ -43,7 +41,6 @@ import {
   type CapabilityView,
   type ConversationView,
   type MemoryFactPatch,
-  type MemoryProposalPatch,
   type MemorySettingsPatch,
   type ProviderDraft,
   type ProviderView,
@@ -408,18 +405,6 @@ export interface RuntimeActions {
     patch: MemoryFactPatch,
   ): Promise<RuntimeMemoryFact | undefined>;
   forgetMemoryFact(factId: string, expectedVersion: number): Promise<boolean>;
-  resolveMemoryProposal(
-    proposalId: string,
-    expectedVersion: number,
-    resolution: "accepted" | "rejected",
-    patch?: MemoryProposalPatch,
-  ): Promise<
-    | {
-        readonly proposal: RuntimeMemoryProposal;
-        readonly fact?: RuntimeMemoryFact | undefined;
-      }
-    | undefined
-  >;
   updateMemorySettings(
     expectedVersion: number,
     patch: MemorySettingsPatch,
@@ -853,7 +838,6 @@ export function useRuntimeStore(): RuntimeStore {
           memory: {
             workspacePath,
             facts: [],
-            proposals: [],
             status: "degraded",
             error: "当前 Runtime 未提供工作区记忆能力。请完整重启 Pico 后重试。",
           },
@@ -869,15 +853,10 @@ export function useRuntimeStore(): RuntimeStore {
         memory: { ...current.memory, workspacePath, status: "loading", error: undefined },
       }));
       try {
-        const [factsResult, proposalsResult, settingsResult] = await Promise.all([
+        const [factsResult, settingsResult] = await Promise.all([
           invoke(bridge, "memory.list", {
             workspacePath,
             states: ["active", "disabled", "archived"],
-            limit: 500,
-          }),
-          invoke(bridge, "memory.review.list", {
-            workspacePath,
-            statuses: ["pending"],
             limit: 500,
           }),
           invoke(bridge, "memory.settings.get", { workspacePath }),
@@ -888,9 +867,7 @@ export function useRuntimeStore(): RuntimeStore {
           memory: {
             workspacePath,
             facts: factsResult.facts,
-            proposals: proposalsResult.proposals,
             settings: settingsResult.settings,
-            reviewBudget: settingsResult.reviewBudget,
             status: "ready",
           },
         }));
@@ -982,7 +959,7 @@ export function useRuntimeStore(): RuntimeStore {
           memory:
             trusted && !switchingWorkspace
               ? current.memory
-              : { workspacePath, facts: [], proposals: [], status: "idle" },
+              : { workspacePath, facts: [], status: "idle" },
           ...(switchingWorkspace
             ? {
                 timeline: [],
@@ -2826,74 +2803,6 @@ export function useRuntimeStore(): RuntimeStore {
           setMessage("记忆已删除，无法撤销。");
         });
       },
-      async resolveMemoryProposal(proposalId, expectedVersion, resolution, patch) {
-        const workspacePath = dataRef.current.workspacePath;
-        if (!workspacePath || !dataRef.current.trusted) return undefined;
-        let resolved:
-          | { readonly proposal: RuntimeMemoryProposal; readonly fact?: RuntimeMemoryFact }
-          | undefined;
-        await perform("memory-review", async (bridge) => {
-          if (preview) {
-            const proposal = dataRef.current.memory.proposals.find(
-              (item) => item.proposalId === proposalId,
-            );
-            if (!proposal || proposal.version !== expectedVersion) return;
-            const reviewedProposal: RuntimeMemoryProposal = {
-              ...proposal,
-              ...patch,
-              status: resolution,
-              version: proposal.version + 1,
-              reviewedAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString(),
-              ...(resolution === "accepted" ? { resolvedFactId: `fact-${proposalId}` } : {}),
-            };
-            const fact: RuntimeMemoryFact | undefined =
-              resolution === "accepted"
-                ? {
-                    factId: `fact-${proposalId}`,
-                    kind: patch?.kind ?? proposal.kind,
-                    title: patch?.title ?? proposal.title,
-                    content: patch?.content ?? proposal.content,
-                    confidence: patch?.confidence ?? proposal.confidence,
-                    state: "active",
-                    pinned: false,
-                    ...(proposal.sourceId ? { sourceId: proposal.sourceId } : {}),
-                    version: 1,
-                    createdAt: new Date().toISOString(),
-                    updatedAt: new Date().toISOString(),
-                  }
-                : undefined;
-            resolved = { proposal: reviewedProposal, ...(fact ? { fact } : {}) };
-            setData((current) => ({
-              ...current,
-              memory: {
-                ...current.memory,
-                proposals: current.memory.proposals.filter(
-                  (item) => item.proposalId !== proposalId,
-                ),
-                facts: fact ? [fact, ...current.memory.facts] : current.memory.facts,
-              },
-            }));
-          } else {
-            const result = await invoke(bridge, "memory.review.resolve", {
-              workspacePath,
-              proposalId,
-              resolution,
-              expectedVersion,
-              idempotencyKey: crypto.randomUUID(),
-              ...(patch ? { patch } : {}),
-            });
-            resolved = result;
-            await loadMemory(bridge, workspacePath);
-          }
-          setMessage(
-            resolution === "accepted"
-              ? "建议已批准并写入工作区记忆。"
-              : "建议已拒绝；当前协议不支持撤销拒绝。",
-          );
-        });
-        return resolved;
-      },
       async updateMemorySettings(expectedVersion, patch) {
         const workspacePath = dataRef.current.workspacePath;
         if (!workspacePath || !dataRef.current.trusted) return undefined;
@@ -2915,10 +2824,6 @@ export function useRuntimeStore(): RuntimeStore {
               memory: {
                 ...current.memory,
                 settings: nextSettings,
-                reviewBudget: previewReviewBudget(
-                  nextSettings.reviewMode,
-                  current.memory.reviewBudget,
-                ),
               },
             }));
           } else {
@@ -3040,38 +2945,6 @@ export function useRuntimeStore(): RuntimeStore {
   );
 
   return { preview, connection, data, busy, message, actions };
-}
-
-function previewReviewBudget(
-  mode: RuntimeMemorySettings["reviewMode"],
-  current: RuntimeMemoryReviewBudget | undefined,
-): RuntimeMemoryReviewBudget {
-  const limits =
-    mode === "eco"
-      ? { maxCalls: 0, maxInputTokens: 0, maxOutputTokens: 0, maxCostUsd: 0 }
-      : mode === "balanced"
-        ? { maxCalls: 8, maxInputTokens: 16_000, maxOutputTokens: 2_000, maxCostUsd: 0.1 }
-        : { maxCalls: 16, maxInputTokens: 32_000, maxOutputTokens: 4_000, maxCostUsd: 0.25 };
-  const usage = {
-    calls: current?.calls ?? 0,
-    inputTokens: current?.inputTokens ?? 0,
-    outputTokens: current?.outputTokens ?? 0,
-    costUsd: current?.costUsd ?? 0,
-  };
-  const exhausted =
-    mode !== "eco" &&
-    (usage.calls >= limits.maxCalls ||
-      usage.inputTokens >= limits.maxInputTokens ||
-      usage.outputTokens >= limits.maxOutputTokens ||
-      usage.costUsd >= limits.maxCostUsd);
-  return {
-    mode,
-    allowed: mode !== "eco" && !exhausted,
-    reason: mode === "eco" ? "eco-mode" : exhausted ? "budget-exhausted" : "available",
-    ...usage,
-    ...limits,
-    ...(exhausted && current?.nextRecoveryAt ? { nextRecoveryAt: current.nextRecoveryAt } : {}),
-  };
 }
 
 function createPreviewBridge(): DesktopBridge {
