@@ -31,7 +31,7 @@ import { AutomationCredentialImportProposalStore } from "./automation-credential
  * ClientSessionRuntime.request 透传）。选择器结果沿用 LocalCommandResult 的
  * ui.open-selector/data 词汇，宿主（client-command-host）用数据化组件渲染。
  *
- * 延后（清单单一来源=tests/integration/tui-client-commands.test.ts 的 parity
+ * 延后（清单单一来源=tests/integration/tui/tui-client-commands.test.ts 的 parity
  * 测试，分 BLOCKED=协议缺口 / DEFERRED=tier2 镜像两类；勿在此重复维护名单）。
  * /context /operations 不在本批。
  */
