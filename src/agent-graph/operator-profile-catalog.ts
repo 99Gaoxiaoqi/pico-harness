@@ -1,3 +1,9 @@
+import type { RuntimeSubagentPreset } from "@pico/protocol";
+import {
+  SUBAGENT_CAPABILITIES,
+  requireSubagentCapability,
+  type ConfiguredSubagentCatalogPort,
+} from "../agents/subagent-profiles.js";
 import type { CatalogAgentProfile } from "../agents/catalog.js";
 import { KNOWN_TOOL_NAMES } from "../tools/agent-profile.js";
 import type { AgentGraphProfileSnapshot } from "./core/contracts.js";
@@ -12,11 +18,17 @@ export interface AgentGraphOperatorProfileSummary {
 export interface ResolveAgentGraphOperatorProfileInput {
   readonly profileId: string;
   readonly rootModelRouteId: string;
+  readonly requireConfiguredPreset?: boolean;
 }
 
 export interface AgentGraphOperatorProfileCatalog {
   listPublicProfiles(): readonly AgentGraphOperatorProfileSummary[];
   resolve(input: ResolveAgentGraphOperatorProfileInput): AgentGraphProfileSnapshot;
+  /** Live configuration is resolved before committing an immutable schedule. */
+  resolveForExecution?(
+    input: ResolveAgentGraphOperatorProfileInput,
+  ): Promise<AgentGraphProfileSnapshot>;
+  listAvailableProfiles?(): Promise<readonly AgentGraphOperatorProfileSummary[]>;
 }
 
 interface AgentGraphOperatorProfileDefinition {
@@ -211,6 +223,7 @@ export function assertValidAgentGraphOperatorProfileSnapshot(
   assertExactKeys(value, [
     ...(value["thinkingEffort"] === undefined ? [] : ["thinkingEffort"]),
     ...(value["maxTurns"] === undefined ? [] : ["maxTurns"]),
+    ...(value["subagentPreset"] === undefined ? [] : ["subagentPreset"]),
     "schemaVersion",
     "profileId",
     "profileRevision",
@@ -271,6 +284,9 @@ export function assertValidAgentGraphOperatorProfileSnapshot(
       ? {}
       : { thinkingEffort: value["thinkingEffort"] as string }),
     ...(value["maxTurns"] === undefined ? {} : { maxTurns: value["maxTurns"] as number }),
+    ...(value["subagentPreset"] === undefined
+      ? {}
+      : { subagentPreset: value["subagentPreset"] as RuntimeSubagentPreset }),
     tools,
     permissionPolicy: { mode: "default", allowSessionGrants: false },
     systemPrompt: {
@@ -279,6 +295,15 @@ export function assertValidAgentGraphOperatorProfileSnapshot(
     },
     extensionPolicy: "none",
   };
+  if (unsigned.subagentPreset) {
+    const preset = unsigned.subagentPreset;
+    const capability = requireSubagentCapability(preset.profile);
+    if (
+      preset.id !== unsigned.profileId ||
+      JSON.stringify(capability.tools) !== JSON.stringify(unsigned.tools)
+    )
+      throw new Error("Subagent snapshot capability mismatch");
+  }
   if (operatorProfileFingerprint(unsigned) !== fingerprint) {
     throw new Error("Agent Graph Operator profile snapshot fingerprint mismatch");
   }
@@ -332,4 +357,77 @@ function assertExactKeys(value: Record<string, unknown>, keys: readonly string[]
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Presets have fixed IDs; legacy YAML/built-in choices retain their own selectors. */
+export function createConfiguredAgentGraphOperatorProfileCatalog(
+  configured: ConfiguredSubagentCatalogPort,
+  legacy: AgentGraphOperatorProfileCatalog = createBuiltinAgentGraphOperatorProfileCatalog(),
+): AgentGraphOperatorProfileCatalog {
+  const capabilities = new BuiltinAgentGraphOperatorProfileCatalog(
+    SUBAGENT_CAPABILITIES.map((entry) => ({
+      id: entry.id,
+      revision: "1",
+      description: entry.description,
+      tools: entry.tools,
+      systemPrompt: entry.systemPrompt,
+    })),
+  );
+  return {
+    listPublicProfiles: () => legacy.listPublicProfiles(),
+    resolve: (input) =>
+      capabilities.listPublicProfiles().some((entry) => entry.profileId === input.profileId)
+        ? capabilities.resolve(input)
+        : legacy.resolve(input),
+    async listAvailableProfiles() {
+      const presets = (await configured.list()).filter(
+        (entry) => entry.availability.status === "available",
+      );
+      return [
+        ...presets.map((preset) => ({
+          profileId: preset.id,
+          description: preset.description || preset.name,
+          revision: deterministicFingerprint(preset),
+        })),
+        ...legacy
+          .listPublicProfiles()
+          .filter((entry) => !presets.some((preset) => preset.id === entry.profileId)),
+        ...capabilities
+          .listPublicProfiles()
+          .filter(
+            (entry) =>
+              !presets.some((preset) => preset.id === entry.profileId) &&
+              !legacy.listPublicProfiles().some((item) => item.profileId === entry.profileId),
+          ),
+      ];
+    },
+    async resolveForExecution(input) {
+      if (input.requireConfiguredPreset === false) return this.resolve(input);
+      // Existing configured IDs must fail closed even when disabled, never fall back by name.
+      if (
+        !input.requireConfiguredPreset &&
+        !(await configured.list()).some((preset) => preset.id === input.profileId)
+      )
+        return this.resolve(input);
+      const resolved = await configured.resolve(input.profileId);
+      const { modelRouteId, ...preset } = resolved;
+      const definition = requireSubagentCapability(preset.profile);
+      const unsigned: UnsignedProfileSnapshot = {
+        schemaVersion: 1,
+        profileId: preset.id,
+        profileRevision: deterministicFingerprint(preset),
+        modelRouteId,
+        ...(preset.thinkingLevel === undefined ? {} : { thinkingEffort: preset.thinkingLevel }),
+        subagentPreset: Object.freeze({ ...preset }),
+        tools: [...definition.tools],
+        permissionPolicy: { mode: "default", allowSessionGrants: false },
+        systemPrompt: { version: "1", content: definition.systemPrompt },
+        extensionPolicy: "none",
+      };
+      return Object.freeze({
+        ...unsigned,
+        profileFingerprint: operatorProfileFingerprint(unsigned),
+      });
+    },
+  };
 }
