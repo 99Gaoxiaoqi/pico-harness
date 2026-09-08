@@ -21,6 +21,7 @@ import {
 } from "../../../src/agents/subagent-profiles.js";
 import {
   createConfiguredAgentGraphOperatorProfileCatalog,
+  createCatalogAgentGraphOperatorProfileCatalog,
   assertValidAgentGraphOperatorProfileSnapshot,
 } from "../../../src/agent-graph/operator-profile-catalog.js";
 import { createConfiguredSubagentExecutor } from "../../../src/runtime/configured-subagent-executor.js";
@@ -132,6 +133,37 @@ test("one live preset catalog drives paginated discovery, foreground admission a
   assert.equal(runs, 1);
   assert.equal(snapshot.subagentPreset?.name, "Reader 0");
   assertValidAgentGraphOperatorProfileSnapshot(JSON.parse(JSON.stringify(snapshot)));
+  const legacy = createCatalogAgentGraphOperatorProfileCatalog([
+    {
+      name: "implementation",
+      description: "Original readonly profile",
+      systemPrompt: "Inspect",
+      tools: ["read_file"],
+      source: "project-native",
+      sourcePath: "/fixture/agents.yaml",
+    },
+  ]);
+  const collision = createConfiguredAgentGraphOperatorProfileCatalog(f.catalog, legacy);
+  assert.deepEqual(
+    (
+      await collision.resolveForExecution!({
+        profileId: "implementation",
+        rootModelRouteId: "root",
+        requireConfiguredPreset: false,
+      })
+    ).tools,
+    ["read_file"],
+  );
+  assert.ok(
+    (
+      await collision.resolveForExecution!({
+        profileId: "implementation",
+        rootModelRouteId: "root",
+        requireConfiguredPreset: false,
+        legacyCapabilityId: true,
+      })
+    ).tools.includes("write_file"),
+  );
 });
 
 test("foreground agent_spawn uses a separate durable RuntimeRun and exact local capability without inheriting parent thinking", async () => {

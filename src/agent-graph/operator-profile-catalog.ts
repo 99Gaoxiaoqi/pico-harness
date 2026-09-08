@@ -1,4 +1,4 @@
-import type { RuntimeSubagentPreset } from "@pico/protocol";
+import type { RuntimeSubagentPreset, SubagentProfile } from "@pico/protocol";
 import {
   SUBAGENT_CAPABILITIES,
   requireSubagentCapability,
@@ -19,6 +19,7 @@ export interface ResolveAgentGraphOperatorProfileInput {
   readonly profileId: string;
   readonly rootModelRouteId: string;
   readonly requireConfiguredPreset?: boolean;
+  readonly legacyCapabilityId?: boolean;
 }
 
 export interface AgentGraphOperatorProfileCatalog {
@@ -224,6 +225,7 @@ export function assertValidAgentGraphOperatorProfileSnapshot(
     ...(value["thinkingEffort"] === undefined ? [] : ["thinkingEffort"]),
     ...(value["maxTurns"] === undefined ? [] : ["maxTurns"]),
     ...(value["subagentPreset"] === undefined ? [] : ["subagentPreset"]),
+    ...(value["capabilityProfile"] === undefined ? [] : ["capabilityProfile"]),
     "schemaVersion",
     "profileId",
     "profileRevision",
@@ -284,6 +286,9 @@ export function assertValidAgentGraphOperatorProfileSnapshot(
       ? {}
       : { thinkingEffort: value["thinkingEffort"] as string }),
     ...(value["maxTurns"] === undefined ? {} : { maxTurns: value["maxTurns"] as number }),
+    ...(value["capabilityProfile"] === undefined
+      ? {}
+      : { capabilityProfile: value["capabilityProfile"] as SubagentProfile }),
     ...(value["subagentPreset"] === undefined
       ? {}
       : { subagentPreset: value["subagentPreset"] as RuntimeSubagentPreset }),
@@ -295,6 +300,12 @@ export function assertValidAgentGraphOperatorProfileSnapshot(
     },
     extensionPolicy: "none",
   };
+  if (
+    unsigned.capabilityProfile &&
+    JSON.stringify(requireSubagentCapability(unsigned.capabilityProfile).tools) !==
+      JSON.stringify(unsigned.tools)
+  )
+    throw new Error("Legacy subagent capability snapshot mismatch");
   if (unsigned.subagentPreset) {
     const preset = unsigned.subagentPreset;
     const capability = requireSubagentCapability(preset.profile);
@@ -375,10 +386,21 @@ export function createConfiguredAgentGraphOperatorProfileCatalog(
   );
   return {
     listPublicProfiles: () => legacy.listPublicProfiles(),
-    resolve: (input) =>
-      capabilities.listPublicProfiles().some((entry) => entry.profileId === input.profileId)
-        ? capabilities.resolve(input)
-        : legacy.resolve(input),
+    resolve: (input) => {
+      const definition = SUBAGENT_CAPABILITIES.find((entry) => entry.id === input.profileId);
+      if (
+        !definition ||
+        (!input.legacyCapabilityId &&
+          legacy.listPublicProfiles().some((entry) => entry.profileId === input.profileId))
+      )
+        return legacy.resolve(input);
+      const { profileFingerprint: _, ...base } = capabilities.resolve(input);
+      const unsigned = { ...base, capabilityProfile: definition.profile };
+      return Object.freeze({
+        ...unsigned,
+        profileFingerprint: operatorProfileFingerprint(unsigned),
+      });
+    },
     async listAvailableProfiles() {
       const presets = (await configured.list()).filter(
         (entry) => entry.availability.status === "available",

@@ -17,6 +17,7 @@ export type AgentGraphWorkRequest =
         | {
             readonly profileId: string;
             readonly requireConfiguredPreset?: boolean;
+            readonly legacyCapabilityId?: boolean;
             readonly workspace: AgentGraphWorkspacePolicy;
           }
         | { readonly operatorId: string }
@@ -113,6 +114,7 @@ export function compileAgentGraphWork(
           generation,
           role: work.profileId,
           profileId: work.profileId,
+          ...(work.legacyCapabilityId ? { legacyCapabilityId: true } : {}),
           ...(work.requireConfiguredPreset === undefined
             ? {}
             : { requireConfiguredPreset: work.requireConfiguredPreset }),

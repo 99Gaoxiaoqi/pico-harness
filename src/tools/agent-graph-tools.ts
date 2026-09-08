@@ -61,6 +61,7 @@ export interface AgentGraphRequestedAddCommand {
   readonly operator: Omit<AgentGraphOperator, "profileSnapshot"> & {
     readonly profileId: string;
     readonly requireConfiguredPreset?: boolean;
+    readonly legacyCapabilityId?: boolean;
   };
   readonly intent: AgentGraphActivationIntent;
 }
@@ -1470,6 +1471,7 @@ function parseWorkRequest(value: Record<string, unknown>): AgentGraphWorkRequest
         ...common,
         profileId: requiredIdentity(work["profile_id"], `${path}.profile_id`),
         requireConfiguredPreset: "subagent_id" in work,
+        ...("agent_id" in work ? { legacyCapabilityId: true } : {}),
         workspace: parseWorkspace(
           objectField(work["workspace"] ?? { kind: "shared" }, `${path}.workspace`),
           `${path}.workspace`,
