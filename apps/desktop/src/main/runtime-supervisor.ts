@@ -18,7 +18,7 @@ import { raceWithDeadlineReject } from "../../../../src/util/race-with-deadline.
  * raceWithDeadlineReject 显式叠加超时，超时同样计入连续失败。
  *
  * 纯依赖注入（ping 函数 + notify 回调），不 import Electron——决策逻辑在
- * 集成测试（tests/integration/desktop-runtime-supervisor.test.ts）里实盘验证。
+ * 集成测试（tests/integration/desktop/desktop-runtime-supervisor.test.ts）里实盘验证。
  */
 export type RuntimeSupervisorEvent = "unavailable" | "recovered";
 
