@@ -369,10 +369,33 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
       const original = previous.commands.map((command) => {
         if (command.kind !== "add") return command;
         const { profileSnapshot, ...operator } = command.operator;
-        if (profileSnapshot.modelRouteId !== input.rootModelRouteId) {
+        if (
+          !profileSnapshot.subagentPreset &&
+          profileSnapshot.modelRouteId !== input.rootModelRouteId
+        )
           throw new Error("Graph work replay model route conflicts with the original request");
-        }
-        return { ...command, operator: { ...operator, profileId: profileSnapshot.profileId } };
+        const requested = commands.find(
+          (entry) => entry.kind === "add" && entry.operator.operatorId === operator.operatorId,
+        );
+        const workspacePolicy =
+          (profileSnapshot.subagentPreset?.profile === "implementation" ||
+            profileSnapshot.profileId === "implementation") &&
+          requested?.kind === "add" &&
+          requested.operator.workspacePolicy.kind === "shared"
+            ? requested.operator.workspacePolicy
+            : operator.workspacePolicy;
+        return {
+          ...command,
+          operator: {
+            ...operator,
+            workspacePolicy,
+            profileId: profileSnapshot.profileId,
+            ...(requested?.kind === "add" &&
+            requested.operator.requireConfiguredPreset !== undefined
+              ? { requireConfiguredPreset: requested.operator.requireConfiguredPreset }
+              : {}),
+          },
+        };
       });
       if (deterministicFingerprint(commands) !== deterministicFingerprint(original)) {
         throw new Error("Graph work replay conflicts with the original request");
@@ -384,7 +407,7 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
   }
 
   async commitUpdate(input: CommitAgentGraphUpdateInput): Promise<CommitAgentGraphUpdateResult> {
-    return this.commitPreparedUpdate(input, this.materializeCommands(input));
+    return this.commitPreparedUpdate(input, await this.materializeCommands(input));
   }
 
   private commitPreparedUpdate(
@@ -418,7 +441,8 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
     this.requireBoundGraph(input.graphId, input.rootSessionId, input.epoch);
     return {
       ...(await readCompactSwarmStatus(this.store, this.control, this.runtime, input.graphId)),
-      availableOperatorProfiles: this.operatorProfileCatalog.listPublicProfiles(),
+      availableOperatorProfiles: await (this.operatorProfileCatalog.listAvailableProfiles?.() ??
+        this.operatorProfileCatalog.listPublicProfiles()),
     };
   }
 
@@ -472,7 +496,8 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
     ]);
     return {
       ...projection,
-      availableOperatorProfiles: this.operatorProfileCatalog.listPublicProfiles(),
+      availableOperatorProfiles: await (this.operatorProfileCatalog.listAvailableProfiles?.() ??
+        this.operatorProfileCatalog.listPublicProfiles()),
       intentReadiness,
       runtimeClaims,
       results: {
@@ -565,25 +590,36 @@ class AgentGraphToolApplicationService implements AgentGraphSupervisorToolPort {
     };
   }
 
-  private materializeCommands(
+  private async materializeCommands(
     input: CommitAgentGraphUpdateInput,
-  ): readonly AgentGraphScheduleCommand[] {
-    return input.commands.map((command) => {
-      if (command.kind !== "add") return command;
-      this.validateWorkspacePolicy?.(command.operator.workspacePolicy);
-      const { profileId, ...operator } = command.operator;
-      return {
-        kind: "add" as const,
-        operator: {
-          ...operator,
-          profileSnapshot: this.operatorProfileCatalog.resolve({
-            profileId,
-            rootModelRouteId: input.rootModelRouteId,
-          }),
-        },
-        intent: command.intent,
-      };
-    });
+  ): Promise<readonly AgentGraphScheduleCommand[]> {
+    return Promise.all(
+      input.commands.map(async (command) => {
+        if (command.kind !== "add") return command;
+        const { profileId, requireConfiguredPreset, ...operator } = command.operator;
+        const selection = {
+          profileId,
+          rootModelRouteId: input.rootModelRouteId,
+          ...(requireConfiguredPreset === undefined ? {} : { requireConfiguredPreset }),
+        };
+        const profileSnapshot = await (this.operatorProfileCatalog.resolveForExecution?.(
+          selection,
+        ) ?? this.operatorProfileCatalog.resolve(selection));
+        const requiresIsolation =
+          profileSnapshot.subagentPreset?.profile === "implementation" ||
+          profileId === "implementation";
+        const workspacePolicy =
+          requiresIsolation && operator.workspacePolicy.kind === "shared"
+            ? { kind: "isolated-worktree" as const }
+            : operator.workspacePolicy;
+        this.validateWorkspacePolicy?.(workspacePolicy);
+        return {
+          kind: "add" as const,
+          operator: { ...operator, workspacePolicy, profileSnapshot },
+          intent: command.intent,
+        };
+      }),
+    );
   }
 
   private selectViewRecords(

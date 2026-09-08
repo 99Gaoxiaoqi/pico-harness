@@ -1,3 +1,16 @@
+import { WebSearchTool } from "../tools/web.js";
+import {
+  ConfiguredAgentListTool,
+  ConfiguredAgentSpawnTool,
+  type ConfiguredSubagentExecutor,
+} from "../tools/configured-subagent-tools.js";
+import type {
+  ConfiguredSubagentCatalogPort,
+  SubagentCapabilityDefinition,
+} from "../agents/subagent-profiles.js";
+import type { RuntimeSubagentPreset } from "@pico/protocol";
+import { createConfiguredSubagentExecutor } from "./configured-subagent-executor.js";
+import { TOOL_CONSTRUCTORS, buildSubagentSafetyMiddleware } from "../tools/delegation-registry.js";
 import { type AtomicMemoryLifecycle } from "./atomic-memory-lifecycle.js";
 import { createAgentSwarmStatusTool } from "../tools/agent-swarm-status-tool.js";
 import { AGENT_SWARM_SUPERVISOR_TOOL_NAMES } from "../agent-graph/core/tool-names.js";
@@ -261,6 +274,14 @@ export interface RuntimePolicyDenial {
 }
 
 export interface RunAgentCliDependencies extends RuntimeHost {
+  configuredSubagentCatalog?: ConfiguredSubagentCatalogPort;
+  configuredSubagentExecutor?: ConfiguredSubagentExecutor;
+  /** Trusted child identity; disables extensions and enforces fixed capability tools. */
+  configuredSubagentChild?: {
+    readonly definition: SubagentCapabilityDefinition;
+    readonly preset?: RuntimeSubagentPreset;
+  };
+
   env?: RunAgentEnv;
   /** Trusted host-owned main-loop budget; omitted callers retain AgentEngine's 50-turn default. */
   maxTurns?: number;
@@ -309,6 +330,7 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   rewindPointSink?: (checkpointId: string) => void;
   /** @internal Trusted host assertion evaluated before a Runtime Run commits success. */
   runCompletionGuard?: () => Promise<void> | void;
+  onRunAdmission?: (run: RuntimeRun) => Promise<void> | void;
   /** @internal Trusted host recovery hook evaluated before a failed Runtime Run is sealed. */
   runFailureGuard?: NonNullable<RuntimeRunExecutorInput["failureGuard"]>;
   /** @internal 继续已存在的未完成轮次，不新增 user 消息或 rewind point。 */
@@ -1064,7 +1086,11 @@ export async function executeAgentRuntime(
     // Maka separates prompt reads from extraction admission. Plan can read;
     // side conversations and scheduled runs use the ordinary memory policy.
     const memoryRecallAllowed = async () => {
-      if (dependencies.isolatedHeadless || dependencies.agentGraph?.kind === "operator")
+      if (
+        dependencies.isolatedHeadless ||
+        dependencies.configuredSubagentChild ||
+        dependencies.agentGraph?.kind === "operator"
+      )
         return { allowed: false as const, reason: "runtime_profile_disabled" };
       const canonical = await memoryTrustStore.canonicalize(workDir);
       return (await memoryTrustStore.isTrusted(canonical))
@@ -1093,6 +1119,7 @@ export async function executeAgentRuntime(
       workDir,
       backgroundPolicy ||
         dependencies.agentGraph?.kind === "operator" ||
+        dependencies.configuredSubagentChild ||
         sessionSelection.mode === "fork"
         ? []
         : [
@@ -1126,7 +1153,9 @@ export async function executeAgentRuntime(
     );
     providerConfig.sessionId = session.id;
     const pluginSnapshot =
-      backgroundPolicy || dependencies.agentGraph?.kind === "operator"
+      backgroundPolicy ||
+      dependencies.configuredSubagentChild ||
+      dependencies.agentGraph?.kind === "operator"
         ? undefined
         : (dependencies.pluginSnapshot ??
           (await loadPluginRuntimeSnapshot({
@@ -1204,6 +1233,7 @@ export async function executeAgentRuntime(
         // LSP 是项目配置启动的子进程；后台策略尚未为其提供网络/写入沙箱。
         lspEnabled:
           !backgroundPolicy &&
+          !dependencies.configuredSubagentChild &&
           dependencies.agentGraph?.kind !== "operator" &&
           collaborationMode() !== "plan",
         lspServers: [...picoConfig.lspServers, ...(pluginSnapshot?.lspServers ?? [])],
@@ -1218,7 +1248,10 @@ export async function executeAgentRuntime(
           sessionSelection.mode === "resume" || sessionSelection.mode === "continue"
             ? "resume"
             : "startup",
-        ...(backgroundPolicy || dependencies.isolatedHeadless || collaborationMode() === "plan"
+        ...(backgroundPolicy ||
+        dependencies.configuredSubagentChild ||
+        dependencies.isolatedHeadless ||
+        collaborationMode() === "plan"
           ? { hooks: false as const }
           : {}),
         ...(collaborationMode() !== "plan" && dependencies.hookService
@@ -1654,6 +1687,9 @@ export async function executeAgentRuntime(
         getRootContext: dependencies.agentGraph.getRootContext,
         port: dependencies.agentGraph.toolPort,
         swarm: orchestrationMode() === "swarm",
+        ...(dependencies.configuredSubagentCatalog
+          ? { configuredSubagents: { catalog: dependencies.configuredSubagentCatalog } }
+          : {}),
       })) {
         registry.register(tool);
       }
@@ -1810,8 +1846,9 @@ export async function executeAgentRuntime(
         );
       }
       return {
-        systemPrompt:
-          dependencies.agentGraph?.kind === "operator"
+        systemPrompt: dependencies.configuredSubagentChild
+          ? dependencies.configuredSubagentChild.definition.systemPrompt
+          : dependencies.agentGraph?.kind === "operator"
             ? [
                 composed.systemPrompt,
                 "<graph-operator-profile>",
@@ -1954,8 +1991,9 @@ export async function executeAgentRuntime(
               });
             },
             allowSessionGrants:
-              dependencies.agentGraph?.kind !== "operator" ||
-              dependencies.agentGraph.profileSnapshot.permissionPolicy.allowSessionGrants,
+              !dependencies.configuredSubagentChild &&
+              (dependencies.agentGraph?.kind !== "operator" ||
+                dependencies.agentGraph.profileSnapshot.permissionPolicy.allowSessionGrants),
           },
         ),
       );
@@ -2021,6 +2059,51 @@ export async function executeAgentRuntime(
           : undefined,
         hostKind,
       );
+    }
+    if (
+      !backgroundPolicy &&
+      !sideConversation &&
+      !dependencies.configuredSubagentChild &&
+      dependencies.agentGraph?.kind !== "operator" &&
+      dependencies.configuredSubagentCatalog &&
+      hostKind === "desktop"
+    ) {
+      const configuredExecutor =
+        dependencies.configuredSubagentExecutor ??
+        (subagentModelRouter && parentModelRouteId
+          ? createConfiguredSubagentExecutor({
+              workDir,
+              modelRouter: subagentModelRouter,
+              parentModelRouteId,
+              worktreeSupervisor: runtimeState.taskHostRuntime?.supervisor,
+              reporter,
+              childDependencies: {
+                env: runtimeEnv,
+                picoHome,
+                providerFactory,
+                providerDecorator,
+                approvalNotifier,
+                approvalManager,
+                toolResultRedactionSecrets: dependencies.toolResultRedactionSecrets,
+              },
+            })
+          : undefined);
+      const toolOptions = {
+        catalog: dependencies.configuredSubagentCatalog,
+        ...(configuredExecutor ? { execute: configuredExecutor } : {}),
+        capabilityUnavailableReason: (definition: SubagentCapabilityDefinition) =>
+          !configuredExecutor
+            ? "Persistent child executor unavailable"
+            : definition.workspace === "isolated-worktree" &&
+                !runtimeState.taskHostRuntime?.supervisor &&
+                !dependencies.configuredSubagentExecutor
+              ? "Worktree child executor unavailable"
+              : undefined,
+      };
+      if (!registry.getTool("agent_list"))
+        registry.register(new ConfiguredAgentListTool(toolOptions));
+      registry.register(new ConfiguredAgentSpawnTool(toolOptions));
+      toolDisclosure.discloseTools(["agent_list", "agent_spawn"]);
     }
     if (backgroundPolicy) pruneRegistryToBackgroundAllowlist(registry, backgroundPolicy);
     dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
@@ -2122,6 +2205,37 @@ export async function executeAgentRuntime(
       // 剪枝，模型没有激活路径，永远看不到它已授权的工具。
       toolDisclosure.discloseTools([...backgroundPolicy.allowedTools]);
     }
+    if (dependencies.configuredSubagentChild) {
+      const definition = dependencies.configuredSubagentChild.definition;
+      const processSandbox = {
+        config: picoConfig.sandbox,
+        scratchRoot: join(picoHome, "sandboxes", session.id, "subagents"),
+      };
+      for (const name of definition.tools) {
+        const create = TOOL_CONSTRUCTORS[name];
+        if (!create) throw new Error(`Unsupported child capability tool: ${name}`);
+        registry.unregisterForHostPolicy(name);
+        registry.register(
+          name === "web_search"
+            ? new WebSearchTool(runtimeEnv)
+            : create(
+                workDir,
+                workspaceRoots,
+                processSandbox,
+                definition.workspace === "shared" ? "read-only" : "workspace-write",
+              ),
+        );
+      }
+      registry.useSafety(
+        buildSubagentSafetyMiddleware(definition.workspace === "shared" ? "explore" : "worker", {
+          workDir,
+          workspaceRoots,
+          processSandbox,
+        }),
+      );
+      pruneRegistryToCommandAllowlist(registry, definition.tools);
+      toolDisclosure.discloseTools([...definition.tools]);
+    }
     if (effectiveOptions.allowedTools !== undefined) {
       const requiredControlTools = [
         ...(collaborationMode() === "plan" ? ["submit_plan"] : []),
@@ -2179,6 +2293,7 @@ export async function executeAgentRuntime(
       ...(dependencies.signal ? { signal: dependencies.signal } : {}),
       ...(dependencies.onEvent ? { onEvent: dependencies.onEvent } : {}),
       ...(dependencies.rewindPointSink ? { rewindPointSink: dependencies.rewindPointSink } : {}),
+      ...(dependencies.onRunAdmission ? { onRunAdmission: dependencies.onRunAdmission } : {}),
       ...(dependencies.runCompletionGuard
         ? { completionGuard: dependencies.runCompletionGuard }
         : {}),

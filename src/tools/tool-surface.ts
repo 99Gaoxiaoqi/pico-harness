@@ -107,7 +107,7 @@ export const PICO_TOOL_GROUPS: readonly ToolGroupDef[] = [
     id: "delegation",
     label: "Delegation",
     description: "多代理编排：查询委派状态、派遣探索子代理",
-    toolNames: ["delegate_status", "spawn_subagent"],
+    toolNames: ["delegate_status", "spawn_subagent", "agent_spawn"],
     economy: "deferred",
   },
   {
@@ -149,6 +149,7 @@ const TOOL_HOST_AFFINITY: Readonly<Record<string, Partial<Record<ToolHostKind, T
     delegate_task: { background: "unsupported" },
     delegate_status: { background: "unsupported" },
     spawn_subagent: { background: "unsupported" },
+    agent_spawn: { background: "unsupported" },
     // headless 显式白名单（fail-closed）。read_evidence 已随 Evidence 回读协议
     // 退役（ADR 26，票 E3）；code_*/goal/skill/graph 等未列工具默认 unsupported。
     read_file: { headless: "supported" },
