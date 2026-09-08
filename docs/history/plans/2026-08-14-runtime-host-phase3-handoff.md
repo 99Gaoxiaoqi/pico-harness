@@ -66,7 +66,7 @@
 
 ## 3-B-1 已完成（本 session 追加）
 
-**交付**：`src/daemon/runtime-host-operations.ts`（spec 定义 + 注册）+ `src/daemon/runtime-host-composition.ts`（桥接 composition 工厂）+ `tests/integration/runtime-host-composition-bridge.test.ts`（5/5 通过）。根 package.json 增加 `@pico/runtime-host` 依赖。
+**交付**：`src/daemon/runtime-host-operations.ts`（spec 定义 + 注册）+ `src/daemon/runtime-host-composition.ts`（桥接 composition 工厂）+ `tests/integration/runtime/runtime-host-composition-bridge.test.ts`（5/5 通过）。根 package.json 增加 `@pico/runtime-host` 依赖。
 
 **验证**：`workspace.status` / `usage.get` 已走完整链路（帧解码 → decodeInput → handler → service.handle → decodeOutput → 应答）；错误映射（daemon INVALID_PARAMS → invalid_request）与 malformed input 拒绝均有实盘断言；host.status 无 activeOperations 泄漏。全部 21 个 runtime-host 测试 + 3 个 desktop-runtime-close 回归 + typecheck 0 + 架构门禁 0。
 

@@ -1,0 +1,154 @@
+/// <reference lib="dom" />
+/// <reference lib="dom.iterable" />
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { test } from "node:test";
+import type {} from "../../../apps/desktop/src/preload/global.js";
+import * as React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { MemoryPage, nextMemoryTabIndex } from "../../../apps/desktop/src/renderer/MemoryPage.js";
+import { previewData } from "../../../apps/desktop/src/renderer/fixture.js";
+import {
+  isMemoryConflict,
+  isMemoryNotificationTopic,
+  RuntimeInvocationError,
+  type RuntimeStore,
+} from "../../../apps/desktop/src/renderer/runtime.js";
+Object.assign(globalThis, { React });
+
+function previewRuntime(): RuntimeStore {
+  return {
+    preview: true,
+    connection: { kind: "ready" },
+    busy: undefined,
+    message: undefined,
+    actions: {} as RuntimeStore["actions"],
+    data: {
+      ...previewData,
+      memory: {
+        ...previewData.memory,
+        facts: previewData.memory.facts.map((fact, index) => ({
+          ...fact,
+          state: index === 0 ? "active" : "archived",
+          atomic: {
+            itemId: fact.factId,
+            kind: "knowledge",
+            scopeType: index === 0 ? "global" : "workspace",
+            scopeKey: index === 0 ? null : "workspace",
+            statementType: "fact",
+            temporalType: "undated",
+            observedAt: 1,
+            eventStartedAt: null,
+            eventEndedAt: null,
+            origin: "agent_extracted",
+          },
+        })),
+      },
+    },
+  };
+}
+
+test("atomic memory page renders saved and archived items, scope, provenance and management actions", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(MemoryPage, { runtime: previewRuntime(), forceNarrow: false }),
+  );
+  assert.match(html, /工作区记忆/);
+  assert.match(html, /添加记忆/);
+  assert.match(html, /aria-controls="memory-add-form"/);
+  assert.match(html, /已保存/);
+  assert.match(html, /已归档/);
+  assert.match(html, /全局 · 跨工作区/);
+  assert.match(html, /当前工作区/);
+  assert.match(html, /知识/);
+  assert.match(html, /时间类型/);
+  assert.match(html, /对话提取/);
+  assert.match(html, /aria-label="编辑/);
+  assert.match(html, /aria-label="归档/);
+  assert.match(html, /aria-label="恢复/);
+  assert.match(html, /aria-label="删除记忆/);
+  assert.match(html, /自动提取长期信息/);
+  assert.match(html, /会话召回/);
+  assert.doesNotMatch(html, /永久遗忘|待审核|批准|拒绝|自动审核|当前用量|质量优先|滚动 24 小时/);
+  assert.equal((html.match(/type="checkbox"/g) ?? []).length, 3);
+});
+
+test("atomic memory narrow layout has two keyboard-operated tabs and handles empty and untrusted states", () => {
+  const runtime = previewRuntime();
+  const html = renderToStaticMarkup(
+    React.createElement(MemoryPage, { runtime, forceNarrow: true }),
+  );
+  assert.match(html, /role="tablist"/);
+  assert.equal((html.match(/role="tab"/g) ?? []).length, 2);
+  assert.match(html, /role="tabpanel"/);
+  assert.match(html, /aria-selected="true"/);
+  assert.match(html, /tabindex="-1"/);
+  assert.equal(nextMemoryTabIndex(0, "ArrowRight"), 1);
+  assert.equal(nextMemoryTabIndex(0, "ArrowLeft"), 1);
+  assert.equal(nextMemoryTabIndex(1, "ArrowRight"), 0);
+  assert.equal(nextMemoryTabIndex(1, "Home"), 0);
+  assert.equal(nextMemoryTabIndex(0, "End"), 1);
+  const empty: RuntimeStore = {
+    ...runtime,
+    data: { ...runtime.data, memory: { ...runtime.data.memory, facts: [] } },
+  };
+  assert.match(
+    renderToStaticMarkup(React.createElement(MemoryPage, { runtime: empty, forceNarrow: false })),
+    /还没有已保存的记忆/,
+  );
+  const untrusted: RuntimeStore = { ...runtime, data: { ...runtime.data, trusted: false } };
+  assert.match(
+    renderToStaticMarkup(
+      React.createElement(MemoryPage, { runtime: untrusted, forceNarrow: false }),
+    ),
+    /信任当前工作区后可管理记忆/,
+  );
+});
+
+test("memory route, notifications, conflict refetch and unavailable-source presentation remain usable", async () => {
+  const app = await readFile(
+    new URL("../../../apps/desktop/src/renderer/App.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(app, /path="settings\/memory"/);
+  assert.match(app, /LegacySurfaceRedirect to="\/settings\/memory"/);
+  assert.equal(isMemoryNotificationTopic("memory.changed"), true);
+  assert.equal(isMemoryNotificationTopic("memory.forgotten"), true);
+  assert.equal(isMemoryConflict(new RuntimeInvocationError("CONFLICT", "stale", true)), true);
+  const source = await readFile(
+    new URL("../../../apps/desktop/src/renderer/runtime.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /if \(isMemoryNotificationTopic\(topic\)\) \{\s*scheduleMemoryRefresh\(\);/);
+  const runtime = previewRuntime();
+  const fact = runtime.data.memory.facts[0]!;
+  const degraded: RuntimeStore = {
+    ...runtime,
+    message: "记忆已在另一处更新，已重新加载最新内容。",
+    data: {
+      ...runtime.data,
+      memory: {
+        ...runtime.data.memory,
+        status: "degraded",
+        error: "当前记忆服务不可用。",
+        facts: [
+          {
+            ...fact,
+            source: {
+              sourceId: "source",
+              sessionId: "session",
+              availability: "unavailable",
+              createdAt: fact.createdAt,
+              updatedAt: fact.updatedAt,
+            },
+          },
+        ],
+      },
+    },
+  };
+  const html = renderToStaticMarkup(
+    React.createElement(MemoryPage, { runtime: degraded, forceNarrow: false }),
+  );
+  assert.match(html, /当前记忆服务不可用/);
+  assert.match(html, /来源不可用/);
+  assert.match(html, /已重新加载最新内容/);
+});

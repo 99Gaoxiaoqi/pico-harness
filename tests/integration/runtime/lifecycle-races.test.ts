@@ -1,0 +1,1480 @@
+import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { setImmediate as waitForImmediate, setTimeout as delay } from "node:timers/promises";
+import { test } from "node:test";
+import {
+  cleanupDesktopWorkbarResources,
+  createDesktopDaemonShutdownFence,
+  createDesktopTerminalCleanupFence,
+  DesktopTerminalGenerationController,
+  isDesktopRuntimeInvocationAllowed,
+  resumeDesktopTerminalGenerationWithUpgrade,
+  type DesktopDaemonShutdownFenceOptions,
+} from "../../../apps/desktop/src/main/daemon-controller.js";
+import {
+  installLocalDaemonShutdownHandlers,
+  LocalDaemonHost,
+  WorkspaceRegistrationStore,
+  WorkspaceRuntimeRegistry,
+  WorkspaceRuntimeService,
+  type DisposableLocalRuntimeService,
+} from "../../../src/daemon/index.js";
+import { loadHookSnapshot } from "../../../src/hooks/config.js";
+import { HookConfigReloader } from "../../../src/hooks/config/reloader.js";
+import { WorkspaceTaskRuntime } from "../../../src/runtime/workspace-runtime.js";
+import { JobService } from "../../../src/tasks/job-service.js";
+
+test("Workspace registry fences a get still canonicalizing when close begins", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-runtime-registry-close-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  let createCount = 0;
+  const registry = new WorkspaceRuntimeRegistry({
+    create: async (workspacePath) => {
+      createCount++;
+      return { workspacePath };
+    },
+  });
+
+  const getting = registry.get(root);
+  const rejectedGet = assert.rejects(getting, /registry 正在关闭/u);
+  const closing = registry.close();
+  assert.strictEqual(registry.close(), closing);
+  await closing;
+  await rejectedGet;
+  assert.equal(createCount, 0);
+});
+
+test("Workspace registry captures a runtime whose factory synchronously closes it", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-runtime-registry-reentrant-close-"));
+  const releaseOwnership = deferred();
+  context.after(async () => {
+    releaseOwnership.resolve();
+    await rm(root, { recursive: true, force: true });
+  });
+  let closeCount = 0;
+  let closing: Promise<void> | undefined;
+  const registry: WorkspaceRuntimeRegistry<{
+    workspacePath: string;
+    close(): Promise<void>;
+    hasPendingOwnership(): boolean;
+    waitForOwnershipRelease(): Promise<void>;
+  }> = new WorkspaceRuntimeRegistry({
+    create: async (workspacePath) => {
+      closing = registry.close();
+      return {
+        workspacePath,
+        close: async () => {
+          closeCount++;
+        },
+        hasPendingOwnership: () => true,
+        waitForOwnershipRelease: () => releaseOwnership.promise,
+      };
+    },
+  });
+
+  await assert.rejects(registry.get(root), /registry 正在关闭/u);
+  assert.ok(closing);
+  await closing;
+  assert.equal(closeCount, 1);
+  assert.equal(registry.hasPendingOwnership(), true);
+
+  releaseOwnership.resolve();
+  await registry.waitForOwnershipRelease();
+  assert.equal(registry.hasPendingOwnership(), false);
+});
+
+test("Workspace runtime close has a bounded drain and freezes a late executor", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-runtime-close-deadline-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  await mkdir(workspace, { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const runtime = await WorkspaceTaskRuntime.create({
+    workDir: workspace,
+    closeDrainTimeoutMs: 5,
+    generateRunId: () => "run-close-deadline",
+  });
+  const entered = deferred();
+  const release = deferred();
+  const executorReturned = deferred();
+  const services: WorkspaceRuntimeService[] = [];
+  const service = new WorkspaceRuntimeService({
+    env: { PICO_HOME: picoHome },
+    createWorkspaceRuntime: async () => runtime,
+    execute: async ({ context: runContext }) => {
+      entered.resolve();
+      await release.promise;
+      try {
+        runContext.bindSession("late-session");
+        return { late: true };
+      } finally {
+        executorReturned.resolve();
+      }
+    },
+  });
+  services.push(service);
+  context.after(async () => {
+    release.resolve();
+    await Promise.allSettled(services.map((candidate) => candidate.close()));
+    await runtime.close();
+  });
+  const liveTopics: string[] = [];
+  service.subscribe((event) => liveTopics.push(event.topic));
+  const run = asRecord(
+    await service.startForegroundRun({ workspacePath: workspace, prompt: "ignore abort" }),
+  );
+  const runId = requiredString(run["runId"], "runId");
+  await entered.promise;
+
+  const firstClose = runtime.close();
+  const repeatedClose = runtime.close();
+  assert.strictEqual(repeatedClose, firstClose);
+  const serviceClose = service.close();
+  await Promise.all([firstClose, serviceClose]);
+  assert.strictEqual(runtime.close(), firstClose);
+
+  const closedRun = runtime.getRun(runId);
+  assert.equal(closedRun?.status, "cancelled");
+  assert.equal(closedRun?.error, "workspace runtime close drain deadline exceeded");
+  assert.equal(closedRun?.version, 3);
+  assert.equal(liveTopics.filter((event) => event === "run.finished").length, 1);
+
+  const restarted = new WorkspaceRuntimeService({
+    env: { PICO_HOME: picoHome },
+    execute: async () => undefined,
+  });
+  services.push(restarted);
+  const beforeLateReturn = await restarted.replayEvents({ workspacePath: workspace });
+  const durableFinished = beforeLateReturn.events.filter((event) => event.topic === "run.finished");
+  assert.equal(durableFinished.length, 1);
+  const durableRun = asRecord(asRecord(durableFinished[0]?.payload)["run"]);
+  assert.equal(durableRun["status"], "cancelled");
+  assert.equal(durableRun["error"], "workspace runtime close drain deadline exceeded");
+
+  release.resolve();
+  await executorReturned.promise;
+  await waitForImmediate();
+  assert.equal(runtime.getRun(runId)?.status, "cancelled");
+  assert.equal(runtime.getRun(runId)?.sessionId, undefined);
+  assert.equal(runtime.getRun(runId)?.version, 3);
+  const afterLateReturn = await restarted.replayEvents({ workspacePath: workspace });
+  assert.equal(afterLateReturn.events.filter((event) => event.topic === "run.finished").length, 1);
+});
+
+test("Workspace close fences an executor admitted during run.started publication", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-runtime-close-admission-"));
+  await mkdir(root, { recursive: true });
+  const release = deferred();
+  const entered = deferred();
+  const runtime = await WorkspaceTaskRuntime.create({
+    workDir: root,
+    closeDrainTimeoutMs: 5,
+    generateRunId: () => "run-close-admission",
+  });
+  context.after(async () => {
+    release.resolve();
+    await runtime.waitForOwnershipRelease();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  let closing: Promise<void> | undefined;
+  runtime.subscribe((event) => {
+    if (event.type === "run.started") closing = runtime.close();
+  });
+  runtime.startRun({ description: "close while publishing" }, async () => {
+    entered.resolve();
+    await release.promise;
+  });
+
+  await entered.promise;
+  assert.ok(closing);
+  await completesWithin(closing, 500, "workspace close missed an admitted executor");
+  assert.equal(runtime.getRun("run-close-admission")?.status, "cancelled");
+  assert.equal(runtime.hasPendingOwnership(), true);
+
+  release.resolve();
+  await runtime.waitForOwnershipRelease();
+  assert.equal(runtime.hasPendingOwnership(), false);
+});
+
+test("Workspace close is stable when abort listeners synchronously close again", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-runtime-close-reentrant-"));
+  const entered = deferred();
+  const release = deferred();
+  const runtime = await WorkspaceTaskRuntime.create({
+    workDir: root,
+    closeDrainTimeoutMs: 5,
+    generateRunId: () => "run-close-reentrant",
+  });
+  context.after(async () => {
+    release.resolve();
+    await runtime.waitForOwnershipRelease();
+    await rm(root, { recursive: true, force: true });
+  });
+  let reentrantClose: Promise<void> | undefined;
+  runtime.startRun({ description: "reentrant close" }, async ({ signal }) => {
+    signal.addEventListener(
+      "abort",
+      () => {
+        reentrantClose = runtime.close();
+      },
+      { once: true },
+    );
+    entered.resolve();
+    await release.promise;
+  });
+  await entered.promise;
+
+  const firstClose = runtime.close();
+  assert.strictEqual(reentrantClose, firstClose);
+  await completesWithin(firstClose, 500, "reentrant workspace close exceeded its deadline");
+  release.resolve();
+  await runtime.waitForOwnershipRelease();
+});
+
+test("Daemon keeps service ownership until a timed-out executor actually settles", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-daemon-close-ownership-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const registrationStore = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
+  await mkdir(workspace, { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+
+  const entered = deferred();
+  const release = deferred();
+  const executorReturned = deferred();
+  let lateServiceAccessible = false;
+  const runtime = await WorkspaceTaskRuntime.create({
+    workDir: workspace,
+    closeDrainTimeoutMs: 5,
+    generateRunId: () => "run-daemon-close-ownership",
+  });
+  const service = new WorkspaceRuntimeService({
+    env: { PICO_HOME: picoHome },
+    registrationStore,
+    createWorkspaceRuntime: async () => runtime,
+    execute: async () => {
+      entered.resolve();
+      await release.promise;
+      await service.replayEvents({ workspacePath: workspace });
+      lateServiceAccessible = true;
+      executorReturned.resolve();
+      return { late: true };
+    },
+  });
+  const host = createLifecycleTestHost({
+    registrationStore,
+    service,
+  });
+  const candidates: LocalDaemonHost[] = [host];
+  context.after(async () => {
+    release.resolve();
+    await Promise.allSettled(candidates.map((candidate) => candidate.stop()));
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await host.start();
+  const run = asRecord(
+    await service.startForegroundRun({ workspacePath: workspace, prompt: "ignore abort" }),
+  );
+  const runId = requiredString(run["runId"], "runId");
+  await entered.promise;
+
+  await completesWithin(host.stop(), 500, "daemon stop exceeded its bounded drain");
+  const beforeSettle = await service.replayEvents({ workspacePath: workspace });
+  assert.equal(beforeSettle.events.filter((event) => event.topic === "run.finished").length, 1);
+
+  release.resolve();
+  await executorReturned.promise;
+  await service.shutdownOwnershipFence().released;
+  assert.equal(lateServiceAccessible, true);
+  assert.equal(runtime.getRun(runId)?.status, "cancelled");
+  assert.equal(runtime.getRun(runId)?.result, undefined);
+  await assert.rejects(service.replayEvents({ workspacePath: workspace }), /已关闭/u);
+
+  const restartedService = new WorkspaceRuntimeService({
+    env: { PICO_HOME: join(root, "restarted-pico-home") },
+    registrationStore,
+    execute: async () => undefined,
+  });
+  const restartedHost = createLifecycleTestHost({
+    registrationStore,
+    service: restartedService,
+  });
+  candidates.push(restartedHost);
+  await restartedHost.start();
+  assert.equal(restartedHost.status, "running");
+  await restartedHost.stop();
+});
+
+test("Daemon keeps TaskHost ownership until an abort-ignoring worktree runner settles", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-daemon-task-runner-ownership-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const registrationStore = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
+  await mkdir(workspace, { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  await initializeGitRepository(workspace);
+
+  const entered = deferred();
+  const release = deferred();
+  const runnerReturned = deferred();
+  const runtime = await WorkspaceTaskRuntime.create({
+    workDir: workspace,
+    closeDrainTimeoutMs: 5,
+    taskHostRuntimeOptions: { picoHome, runnerStopTimeoutMs: 5 },
+  });
+  const taskHost = runtime.taskHostRuntime;
+  assert.ok(taskHost);
+  const service = new WorkspaceRuntimeService({
+    env: { PICO_HOME: picoHome },
+    registrationStore,
+    createWorkspaceRuntime: async () => runtime,
+    execute: async () => undefined,
+  });
+  const host = createLifecycleTestHost({
+    registrationStore,
+    service,
+  });
+  const candidates: LocalDaemonHost[] = [host];
+  const taskIds: string[] = [];
+  context.after(async () => {
+    release.resolve();
+    await Promise.allSettled(taskIds.map((taskId) => taskHost.supervisor.wait(taskId)));
+    await Promise.allSettled([
+      runtime.waitForOwnershipRelease(),
+      ...candidates.map((candidate) => candidate.stop()),
+    ]);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await host.start();
+  assert.strictEqual(await service.getWorkspaceRuntime(workspace), runtime);
+  const task = runtime.startTask({ description: "ignore shutdown abort" }, async ({ signal }) => {
+    entered.resolve();
+    await release.promise;
+    assert.equal(signal.aborted, true);
+    runnerReturned.resolve();
+    return { summary: "late success must remain cancelled" };
+  });
+  taskIds.push(task.taskId);
+  await entered.promise;
+
+  await completesWithin(host.stop(), 500, "daemon stop waited forever for a worktree runner");
+  assert.equal(runtime.hasPendingOwnership(), true);
+  assert.equal(taskHost.jobService.get(task.taskId)?.job.status, "running");
+
+  release.resolve();
+  await runnerReturned.promise;
+  await service.shutdownOwnershipFence().released;
+  await runtime.waitForOwnershipRelease();
+  const settled = await taskHost.supervisor.wait(task.taskId);
+  assert.equal(settled.status, "stopped");
+  assert.equal(settled.registry.status, "killed");
+
+  const { service: probe } = await JobService.create({ workDir: workspace, picoHome });
+  try {
+    assert.equal(probe.get(task.taskId)?.job.status, "cancelled");
+  } finally {
+    probe.close();
+  }
+
+  const restartedService = new WorkspaceRuntimeService({
+    env: { PICO_HOME: join(root, "restarted-pico-home") },
+    registrationStore,
+    execute: async () => undefined,
+  });
+  const restartedHost = createLifecycleTestHost({
+    registrationStore,
+    service: restartedService,
+  });
+  candidates.push(restartedHost);
+  await restartedHost.start();
+  assert.equal(restartedHost.status, "running");
+  await restartedHost.stop();
+});
+
+test("TaskHost fences a task admission whose pending subscriber synchronously closes", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-task-admission-close-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  await mkdir(workspace, { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  await initializeGitRepository(workspace);
+
+  const runtime = await WorkspaceTaskRuntime.create({
+    workDir: workspace,
+    taskHostRuntimeOptions: { picoHome, runnerStopTimeoutMs: 5 },
+  });
+  const taskHost = runtime.taskHostRuntime;
+  assert.ok(taskHost);
+  const observed: { closing?: Promise<void>; taskId?: string } = {};
+  let runnerStarted = false;
+  const unsubscribe = taskHost.taskRegistry.subscribe((snapshot) => {
+    if (snapshot.status !== "pending" || snapshot.data?.["supervisor"] !== "worktree") return;
+    observed.taskId = snapshot.taskId;
+    observed.closing = taskHost.close();
+  });
+  context.after(async () => {
+    unsubscribe();
+    await Promise.allSettled([runtime.close(), runtime.waitForOwnershipRelease()]);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  assert.throws(
+    () =>
+      runtime.startTask({ description: "close during admission" }, async () => {
+        runnerStarted = true;
+      }),
+    /WorktreeSupervisor 正在关闭/u,
+  );
+  assert.ok(observed.closing);
+  assert.ok(observed.taskId);
+  await observed.closing;
+  await taskHost.waitForOwnershipRelease();
+  assert.equal(runnerStarted, false);
+  assert.equal(taskHost.taskRegistry.get(observed.taskId)?.status, "killed");
+
+  const { service: probe } = await JobService.create({ workDir: workspace, picoHome });
+  try {
+    assert.equal(probe.get(observed.taskId)?.job.status, "cancelled");
+  } finally {
+    probe.close();
+  }
+});
+
+test("Daemon stop waits for an in-flight start before closing ownership", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-daemon-start-stop-"));
+  const registrationStore = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
+  const listEntered = deferred();
+  const releaseList = deferred();
+  const originalList = registrationStore.list.bind(registrationStore);
+  let blockFirstList = true;
+  registrationStore.list = async () => {
+    if (blockFirstList) {
+      blockFirstList = false;
+      listEntered.resolve();
+      await releaseList.promise;
+    }
+    return originalList();
+  };
+  const service = new WorkspaceRuntimeService({
+    env: { PICO_HOME: join(root, "pico-home") },
+    registrationStore,
+    execute: async () => undefined,
+  });
+  const originalClose = service.close.bind(service);
+  let serviceCloseCount = 0;
+  service.close = () => {
+    serviceCloseCount++;
+    return originalClose();
+  };
+  const host = createLifecycleTestHost({
+    registrationStore,
+    service,
+  });
+  context.after(async () => {
+    releaseList.resolve();
+    await host.stop();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const starting = host.start();
+  await listEntered.promise;
+  const stopping = host.stop();
+  assert.strictEqual(host.stop(), stopping);
+  await waitForImmediate();
+  assert.equal(serviceCloseCount, 0, "start 未完成前不得关 service");
+
+  releaseList.resolve();
+  await starting;
+  await stopping;
+  assert.equal(host.status, "stopped");
+  assert.equal(serviceCloseCount, 1);
+});
+
+test("Daemon permanently consumes a service whose close rejects", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-daemon-close-service-reject-"));
+  const registrationStore = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
+  const service = new WorkspaceRuntimeService({
+    env: { PICO_HOME: join(root, "pico-home") },
+    registrationStore,
+    execute: async () => undefined,
+  });
+  service.close = async () => {
+    throw new Error("service close failed");
+  };
+  service.shutdownOwnershipFence = () => ({ pending: false, released: Promise.resolve() });
+  const host = createLifecycleTestHost({
+    registrationStore,
+    service,
+  });
+  const candidates: LocalDaemonHost[] = [host];
+  context.after(async () => {
+    await Promise.allSettled(candidates.map((candidate) => candidate.stop()));
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await host.start();
+  await assert.rejects(host.stop(), /service close failed/u);
+  assert.equal(host.status, "stopped");
+  await assert.rejects(host.start(), /host 已关闭/u);
+
+  const restartedService = new WorkspaceRuntimeService({
+    env: { PICO_HOME: join(root, "restarted-pico-home") },
+    registrationStore,
+    execute: async () => undefined,
+  });
+  const restartedHost = createLifecycleTestHost({
+    registrationStore,
+    service: restartedService,
+  });
+  candidates.push(restartedHost);
+  await restartedHost.start();
+  await restartedHost.stop();
+});
+
+test("Daemon stop fails loudly when service close fails without an ownership fence", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-daemon-close-no-fence-"));
+  const registrationStore = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
+  const service: DisposableLocalRuntimeService = {
+    handle: async () => ({}),
+    replayEvents: async () => ({ events: [], hasMore: false }),
+    subscribe: () => () => undefined,
+    close: async () => {
+      throw new Error("unfenced service close failed");
+    },
+  };
+  const host = createLifecycleTestHost({
+    registrationStore,
+    service,
+  });
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  await host.start();
+  await assert.rejects(host.stop(), /unfenced service close failed/u);
+});
+
+test("Daemon stop fails loudly when a Cron runtime cannot close", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-daemon-close-cron-failure-"));
+  const workspace = join(root, "workspace");
+  const registrationStore = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
+  await mkdir(workspace, { recursive: true });
+  await registrationStore.register(workspace);
+  const service = new WorkspaceRuntimeService({
+    env: { PICO_HOME: join(root, "pico-home") },
+    registrationStore,
+    execute: async () => undefined,
+  });
+  // 注：旧传输单例锁保留断言随 Phase 5 旧 socket 退役移除；保留关闭失败传播。
+  const host = new LocalDaemonHost({
+    registrationStore,
+    service,
+    cronRuntimeFactory: {
+      create: async () => ({
+        recoverInterruptedRuns: () => [],
+        start: () => undefined,
+        close: async () => {
+          throw new Error("cron runtime close failed");
+        },
+      }),
+    },
+  });
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  await host.start();
+  assert.equal(host.registeredWorkspaces.length, 1);
+  await assert.rejects(host.stop(), /cron runtime close failed/u);
+});
+
+test("Daemon signal handlers consume a rejecting stop promise", async (context) => {
+  const unhandledRejections: unknown[] = [];
+  const onUnhandledRejection = (reason: unknown): void => {
+    unhandledRejections.push(reason);
+  };
+  const previousHandlers = new Set(process.listeners("SIGTERM"));
+  let stopCount = 0;
+  const host = {
+    stop: async () => {
+      stopCount++;
+      throw new Error("signal shutdown failed");
+    },
+  } as unknown as LocalDaemonHost;
+  process.on("unhandledRejection", onUnhandledRejection);
+  const dispose = installLocalDaemonShutdownHandlers(host);
+  context.after(() => {
+    dispose();
+    process.off("unhandledRejection", onUnhandledRejection);
+  });
+  const installed = process
+    .listeners("SIGTERM")
+    .find((listener) => !previousHandlers.has(listener));
+  assert.ok(installed);
+
+  installed("SIGTERM");
+  // 第二次信号在新设计下强制 process.exit(130)：优雅关闭仍未结束则允许中断。
+  // stub process.exit 验证调用而不让测试进程真退出。
+  const originalExit = process.exit;
+  let forcedExitCode: number | undefined;
+  Object.defineProperty(process, "exit", {
+    value: (code?: number) => {
+      forcedExitCode = code ?? 0;
+      throw new Error("__forced_exit__");
+    },
+    configurable: true,
+  });
+  try {
+    assert.throws(() => installed("SIGTERM"), /__forced_exit__/u);
+  } finally {
+    Object.defineProperty(process, "exit", { value: originalExit, configurable: true });
+  }
+  await waitForImmediate();
+  await waitForImmediate();
+
+  assert.equal(stopCount, 1);
+  assert.equal(forcedExitCode, 130);
+  assert.deepEqual(unhandledRejections, []);
+  assert.equal(process.listeners("SIGTERM").includes(installed), false);
+});
+
+test("Desktop daemon shutdown fence times out once and clears a completed timer", async () => {
+  const timedOutStop = deferred();
+  const timeoutTimers = manualTimers();
+  let timeoutQuitCount = 0;
+  const timeoutErrors: unknown[] = [];
+  const timedOutFence = createDesktopDaemonShutdownFence(
+    { ownsProcess: true, stop: () => timedOutStop.promise },
+    () => timeoutQuitCount++,
+    (error) => timeoutErrors.push(error),
+    timeoutTimers.options,
+  );
+  let timeoutPrevented = 0;
+  timedOutFence({ preventDefault: () => timeoutPrevented++ });
+  timedOutFence({ preventDefault: () => timeoutPrevented++ });
+  await waitForImmediate();
+  assert.equal(timeoutPrevented, 2);
+  assert.equal(timeoutTimers.delay, 7);
+
+  timeoutTimers.fire();
+  assert.equal(timeoutQuitCount, 1);
+  assert.equal(timeoutErrors.length, 1);
+  assert.match(String(timeoutErrors[0]), /7ms/u);
+
+  timedOutStop.resolve();
+  await waitForImmediate();
+  assert.equal(timeoutQuitCount, 1);
+  assert.equal(timeoutErrors.length, 1);
+
+  const completedStop = deferred();
+  const completedTimers = manualTimers();
+  let completedQuitCount = 0;
+  const completedErrors: unknown[] = [];
+  const completedFence = createDesktopDaemonShutdownFence(
+    { ownsProcess: true, stop: () => completedStop.promise },
+    () => completedQuitCount++,
+    (error) => completedErrors.push(error),
+    completedTimers.options,
+  );
+  completedFence({ preventDefault: () => undefined });
+  await waitForImmediate();
+  completedStop.resolve();
+  await waitForImmediate();
+
+  assert.equal(completedQuitCount, 1);
+  assert.deepEqual(completedErrors, []);
+  assert.equal(completedTimers.cleared, true);
+  completedTimers.fire();
+  assert.equal(completedQuitCount, 1);
+  assert.deepEqual(completedErrors, []);
+});
+
+test("Desktop terminal cleanup fence blocks repeated quit until terminal groups are released", async () => {
+  const cleanup = deferred();
+  const timers = manualTimers();
+  let cleanupCount = 0;
+  let quitCount = 0;
+  let prevented = 0;
+  const errors: unknown[] = [];
+  const fence = createDesktopTerminalCleanupFence(
+    {
+      stopAll: async () => {
+        cleanupCount++;
+        await cleanup.promise;
+      },
+    },
+    () => quitCount++,
+    (error) => errors.push(error),
+    timers.options,
+  );
+
+  fence({ preventDefault: () => prevented++ });
+  fence({ preventDefault: () => prevented++ });
+  await waitForImmediate();
+  assert.equal(cleanupCount, 1);
+  assert.equal(prevented, 2);
+  assert.equal(quitCount, 0);
+
+  cleanup.resolve();
+  await waitForImmediate();
+  assert.equal(quitCount, 1);
+  assert.deepEqual(errors, []);
+  assert.equal(timers.cleared, true);
+  fence({ preventDefault: () => prevented++ });
+  assert.equal(prevented, 2, "cleanup 完成后的第二次 app.quit 必须放行");
+});
+
+test("Desktop browser cleanup failure still waits for terminal groups", async () => {
+  const terminalCleanup = deferred();
+  const browserErrors: unknown[] = [];
+  let settled = false;
+  const cleanup = cleanupDesktopWorkbarResources({
+    cleanupTerminals: () => terminalCleanup.promise,
+    disposeBrowser: async () => {
+      throw new Error("browser persistence failed");
+    },
+    onBrowserError: (error) => browserErrors.push(error),
+  }).then(() => {
+    settled = true;
+  });
+
+  await waitForImmediate();
+  assert.equal(settled, false, "Browser 失败不得提前释放 Terminal 退出栅栏");
+  assert.match(String(browserErrors[0]), /browser persistence failed/u);
+  terminalCleanup.resolve();
+  await cleanup;
+  assert.equal(settled, true);
+});
+
+test("Desktop 退出代际拒绝新的 terminal.create 但允许终态操作", () => {
+  assert.equal(isDesktopRuntimeInvocationAllowed("terminal.create", false), true);
+  assert.equal(isDesktopRuntimeInvocationAllowed("terminal.create", true), false);
+  assert.equal(isDesktopRuntimeInvocationAllowed("terminal.create", false, false), false);
+  assert.equal(isDesktopRuntimeInvocationAllowed("terminal.stop", true), true);
+});
+
+test("Desktop 窗口关闭清理完成后才允许重开代际", async () => {
+  const controller = new DesktopTerminalGenerationController();
+  const cleanupRelease = deferred();
+  let resumeCount = 0;
+  const cleanup = controller.cleanup(() => cleanupRelease.promise);
+  const opening = controller.open(async () => {
+    resumeCount++;
+  });
+
+  await waitForImmediate();
+  assert.equal(controller.isCreateAllowed(), false);
+  assert.equal(resumeCount, 0, "旧窗口 cleanup 完成前不得 resume 新窗口");
+  cleanupRelease.resolve();
+  await cleanup;
+  await opening;
+  assert.equal(resumeCount, 1);
+  assert.equal(controller.isCreateAllowed(), true);
+});
+
+test("Desktop cleanup 先提交 stopAll，再等待旧 create 响应完成", async () => {
+  const controller = new DesktopTerminalGenerationController();
+  await controller.open(async () => undefined);
+  const createResponse = deferred();
+  const createRequest = controller.submitCreate(() => createResponse.promise);
+  assert.ok(createRequest);
+  let stopAllCount = 0;
+  const cleanup = controller.cleanup(async () => {
+    stopAllCount++;
+  });
+  let cleanupFinished = false;
+  void cleanup.then(() => {
+    cleanupFinished = true;
+  });
+
+  await waitForImmediate();
+  assert.equal(
+    controller.submitCreate(async () => undefined),
+    undefined,
+  );
+  assert.equal(stopAllCount, 1, "create 请求已提交后必须立即把 stopAll 发给 Host");
+  assert.equal(cleanupFinished, false, "旧 create 响应未完成前 cleanup 不得开放下一代");
+  assert.equal(controller.isCreateAllowed(), false);
+  createResponse.resolve();
+  await createRequest;
+  await cleanup;
+  assert.equal(cleanupFinished, true);
+});
+
+test("Desktop 慢 create 不会阻塞 5s fence 前向 Host 提交 stopAll", async () => {
+  const controller = new DesktopTerminalGenerationController();
+  await controller.open(async () => undefined);
+  const createResponse = deferred();
+  const createRequest = controller.submitCreate(() => createResponse.promise);
+  assert.ok(createRequest);
+  const hostCleanup = deferred();
+  const timers = manualTimers();
+  let stopAllCount = 0;
+  let quitCount = 0;
+  const errors: unknown[] = [];
+  const fence = createDesktopTerminalCleanupFence(
+    {
+      stopAll: () =>
+        controller.cleanup(async () => {
+          stopAllCount++;
+          await hostCleanup.promise;
+        }),
+    },
+    () => quitCount++,
+    (error) => errors.push(error),
+    { ...timers.options, timeoutMs: 5_000 },
+  );
+
+  fence({ preventDefault: () => undefined });
+  await waitForImmediate();
+  assert.equal(stopAllCount, 1, "即使 create 响应挂起，Host admission 也必须在超时前被关闭");
+  assert.equal(timers.delay, 5_000);
+  timers.fire();
+  assert.equal(quitCount, 1);
+  assert.match(String(errors[0]), /cleanup exceeded/u);
+
+  hostCleanup.resolve();
+  createResponse.resolve();
+  await createRequest;
+});
+
+test("Desktop 打开过程中再次退出不会被迟到 resume 解封", async () => {
+  const controller = new DesktopTerminalGenerationController();
+  const resumeEntered = deferred();
+  const resumeRelease = deferred();
+  const cleanupEntered = deferred();
+  const cleanupRelease = deferred();
+  const opening = controller.open(async () => {
+    resumeEntered.resolve();
+    await resumeRelease.promise;
+  });
+  await resumeEntered.promise;
+  const cleanup = controller.cleanup(async () => {
+    cleanupEntered.resolve();
+    await cleanupRelease.promise;
+  });
+
+  resumeRelease.resolve();
+  await opening;
+  assert.equal(controller.isCreateAllowed(), false);
+  await cleanupEntered.promise;
+  cleanupRelease.resolve();
+  await cleanup;
+  assert.equal(controller.isCreateAllowed(), false);
+});
+
+test("Desktop cleanup 失败保持 sealed，open 重试成功后才 resume", async () => {
+  const controller = new DesktopTerminalGenerationController();
+  let cleanupAttempts = 0;
+  let resumeCount = 0;
+  const stopAll = async () => {
+    cleanupAttempts++;
+    if (cleanupAttempts < 3) throw new Error("cleanup unavailable");
+  };
+
+  await assert.rejects(controller.cleanup(stopAll), /cleanup unavailable/u);
+  assert.equal(controller.isCreateAllowed(), false);
+  await assert.rejects(
+    controller.open(async () => {
+      resumeCount++;
+    }),
+    /cleanup unavailable/u,
+  );
+  assert.equal(resumeCount, 0, "cleanup 重试失败时不得调用 resume");
+  assert.equal(controller.isCreateAllowed(), false);
+
+  await controller.open(async () => {
+    resumeCount++;
+  });
+  assert.equal(cleanupAttempts, 3);
+  assert.equal(resumeCount, 1);
+  assert.equal(controller.isCreateAllowed(), true);
+});
+
+test("Desktop 只在 resume 方法缺失时优雅接管旧 daemon", async () => {
+  const order: string[] = [];
+  let resumeAttempts = 0;
+  await resumeDesktopTerminalGenerationWithUpgrade({
+    resume: async () => {
+      order.push(`resume-${++resumeAttempts}`);
+      if (resumeAttempts === 1) throw new Error("method-not-found");
+    },
+    shutdownLegacyHost: async () => {
+      order.push("shutdown");
+    },
+    reconnect: async () => {
+      order.push("reconnect");
+    },
+    isMethodNotFound: (error) => String(error).includes("method-not-found"),
+  });
+  assert.deepEqual(order, ["resume-1", "shutdown", "reconnect", "resume-2"]);
+
+  await assert.rejects(
+    resumeDesktopTerminalGenerationWithUpgrade({
+      resume: async () => {
+        throw new Error("permission-denied");
+      },
+      shutdownLegacyHost: async () => assert.fail("非 method-not-found 不得关停 daemon"),
+      reconnect: async () => assert.fail("非 method-not-found 不得重连"),
+      isMethodNotFound: () => false,
+    }),
+    /permission-denied/u,
+  );
+});
+
+test("Hook reloader stop fences an in-flight reload and supports a fresh generation", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-hook-reloader-stop-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  await mkdir(workspace, { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const initial = await loadHookSnapshot({ workDir: workspace, picoHome });
+  const guardEntered = deferred();
+  const guardRelease = deferred<boolean>();
+  let swaps = 0;
+  let externalSnapshot = initial.snapshot;
+  const reloader = new HookConfigReloader({
+    workDir: workspace,
+    picoHome,
+    initial,
+    beforeSwap: async () => {
+      guardEntered.resolve();
+      return await guardRelease.promise;
+    },
+    onSwap: (result) => {
+      swaps++;
+      externalSnapshot = result.snapshot;
+    },
+  });
+  context.after(async () => {
+    guardRelease.resolve(true);
+    await reloader.stop();
+  });
+  await reloader.start();
+
+  const reloading = reloader.reload([join(workspace, ".pico", "hooks.json")]);
+  await guardEntered.promise;
+  let stopCompleted = false;
+  const stopping = reloader.stop().then(() => {
+    stopCompleted = true;
+  });
+  await waitForImmediate();
+  assert.equal(stopCompleted, false);
+
+  guardRelease.resolve(true);
+  assert.equal(await reloading, false);
+  await stopping;
+  assert.equal(swaps, 0);
+  assert.strictEqual(reloader.currentResult()?.snapshot, initial.snapshot);
+  assert.strictEqual(externalSnapshot, initial.snapshot);
+  assert.equal(await reloader.reload(), false);
+
+  await reloader.start();
+  assert.strictEqual(reloader.currentResult()?.snapshot, initial.snapshot);
+  assert.strictEqual(externalSnapshot, initial.snapshot);
+  assert.equal(await reloader.reload(), true);
+  assert.equal(swaps, 1);
+  assert.strictEqual(reloader.currentResult()?.snapshot, externalSnapshot);
+  await reloader.stop();
+});
+
+test("Hook reloader absorbs an obsolete guard rejection after restart", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-hook-reloader-stuck-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  await mkdir(workspace, { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const initial = await loadHookSnapshot({ workDir: workspace, picoHome });
+  const firstGuardEntered = deferred();
+  const firstGuardRelease = deferred<boolean>();
+  const unhandledRejections: unknown[] = [];
+  const onUnhandledRejection = (reason: unknown): void => {
+    unhandledRejections.push(reason);
+  };
+  process.on("unhandledRejection", onUnhandledRejection);
+  let guardCalls = 0;
+  let swaps = 0;
+  const reloader = new HookConfigReloader({
+    workDir: workspace,
+    picoHome,
+    initial,
+    stopDrainTimeoutMs: 5,
+    beforeSwap: async () => {
+      guardCalls++;
+      if (guardCalls !== 1) return true;
+      firstGuardEntered.resolve();
+      return await firstGuardRelease.promise;
+    },
+    onSwap: () => {
+      swaps++;
+    },
+  });
+  context.after(async () => {
+    process.off("unhandledRejection", onUnhandledRejection);
+    firstGuardRelease.resolve(true);
+    await reloader.stop();
+  });
+  await reloader.start();
+
+  const staleReload = reloader.reload();
+  await firstGuardEntered.promise;
+  await completesWithin(reloader.stop(), 500, "Hook reloader stop exceeded its bounded drain");
+  assert.equal(swaps, 0);
+
+  await reloader.start();
+  assert.equal(await reloader.reload(), true);
+  assert.equal(swaps, 1);
+
+  firstGuardRelease.reject(new Error("late stale guard failure"));
+  await waitForImmediate();
+  assert.deepEqual(unhandledRejections, []);
+  assert.equal(await staleReload, false);
+  assert.equal(swaps, 1, "旧 generation 的 guard 晚拒绝不能影响新代");
+  await reloader.stop();
+});
+
+test("Hook reloader keeps staged candidates paired across detached generations", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-hook-reloader-staging-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  await mkdir(workspace, { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const initial = await loadHookSnapshot({ workDir: workspace, picoHome });
+  const guardEntered = [deferred(), deferred()];
+  const guardRelease = [deferred<boolean>(), deferred<boolean>()];
+  const staged = new WeakMap<object, number>();
+  const applied: number[] = [];
+  let guardCalls = 0;
+  const reloader = new HookConfigReloader({
+    workDir: workspace,
+    picoHome,
+    initial,
+    stopDrainTimeoutMs: 5,
+    beforeSwap: async ({ candidate }) => {
+      const index = guardCalls++;
+      guardEntered[index]?.resolve();
+      const accepted = await guardRelease[index]?.promise;
+      if (accepted) staged.set(candidate, index + 1);
+      return accepted ?? false;
+    },
+    onSwap: (candidate) => {
+      applied.push(staged.get(candidate) ?? -1);
+      staged.delete(candidate);
+    },
+  });
+  context.after(async () => {
+    for (const guard of guardRelease) guard.resolve(false);
+    await reloader.stop();
+  });
+  await reloader.start();
+
+  const staleReload = reloader.reload();
+  await guardEntered[0]?.promise;
+  await completesWithin(reloader.stop(), 500, "Hook reloader stop exceeded its bounded drain");
+  await reloader.start();
+  const currentReload = reloader.reload();
+  await guardEntered[1]?.promise;
+
+  guardRelease[1]?.resolve(true);
+  guardRelease[0]?.resolve(true);
+
+  assert.equal(await currentReload, true);
+  assert.equal(await staleReload, false);
+  assert.deepEqual(applied, [2]);
+  await reloader.stop();
+});
+
+test("Hook reloader stop returns when an obsolete guard never settles", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-hook-reloader-never-guard-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  await mkdir(workspace, { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const initial = await loadHookSnapshot({ workDir: workspace, picoHome });
+  const guardEntered = deferred();
+  const neverSettles = new Promise<boolean>(() => undefined);
+  let guardCalls = 0;
+  let swaps = 0;
+  const reloader = new HookConfigReloader({
+    workDir: workspace,
+    picoHome,
+    initial,
+    stopDrainTimeoutMs: 5,
+    beforeSwap: async () => {
+      guardCalls++;
+      if (guardCalls !== 1) return true;
+      guardEntered.resolve();
+      return await neverSettles;
+    },
+    onSwap: () => {
+      swaps++;
+    },
+  });
+  context.after(async () => await reloader.stop());
+  await reloader.start();
+
+  void reloader.reload();
+  await guardEntered.promise;
+  await completesWithin(reloader.stop(), 500, "Hook reloader stop waited forever for beforeSwap");
+
+  await reloader.start();
+  assert.equal(await reloader.reload(), true);
+  assert.equal(swaps, 1);
+  await reloader.stop();
+});
+
+test("Hook reloader treats synchronous swap as the commit point", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-hook-reloader-commit-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const configPath = join(workspace, ".pico", "hooks.json");
+  await mkdir(join(workspace, ".pico"), { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  await writeFile(configPath, "{}\n");
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const initial = await loadHookSnapshot({ workDir: workspace, picoHome });
+  let externalSnapshot = initial.snapshot;
+  let swaps = 0;
+  let stopping: Promise<void> | undefined;
+  const reloader = new HookConfigReloader({
+    workDir: workspace,
+    picoHome,
+    initial,
+    debounceMs: 5,
+    onSwap: (result) => {
+      swaps++;
+      externalSnapshot = result.snapshot;
+      stopping = reloader.stop();
+    },
+  });
+  context.after(async () => await reloader.stop());
+  await reloader.start();
+
+  assert.equal(await reloader.reload(), true);
+  await stopping;
+  assert.equal(swaps, 1);
+  assert.strictEqual(reloader.currentResult()?.snapshot, externalSnapshot);
+  assert.notStrictEqual(externalSnapshot, initial.snapshot);
+
+  await writeFile(configPath, '{"SessionStart":[]}\n');
+  await delay(30);
+  assert.equal(swaps, 1, "await stop 后不能残留可触发的 watcher");
+
+  await reloader.start();
+  assert.strictEqual(reloader.currentResult()?.snapshot, externalSnapshot);
+  await writeFile(configPath, "{}\n");
+  await waitUntil(() => swaps === 2);
+  await stopping;
+});
+
+test("Hook reloader keeps the previous snapshot when synchronous swap throws", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-hook-reloader-swap-error-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  await mkdir(workspace, { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const initial = await loadHookSnapshot({ workDir: workspace, picoHome });
+  const reloader = new HookConfigReloader({
+    workDir: workspace,
+    picoHome,
+    initial,
+    onSwap: () => {
+      throw new Error("swap failed");
+    },
+  });
+  context.after(async () => await reloader.stop());
+  await reloader.start();
+
+  await assert.rejects(reloader.reload(), /swap failed/u);
+  assert.strictEqual(reloader.currentResult()?.snapshot, initial.snapshot);
+});
+
+test("Hook reloader swaps snapshot when the config file changes on disk", async (context) => {
+  // shell 化后 command hooks 不再监视脚本文件（命令是配置字节，无文件可钉）；
+  // 监视面剩配置文件与信任库本身。本例验证配置文件变更经 watcher 触发快照交换。
+  const root = await mkdtemp(join(tmpdir(), "pico-hook-reloader-watch-paths-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const configPath = join(workspace, ".pico", "hooks.json");
+  await mkdir(join(workspace, ".pico"), { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  await writeCommandHook(configPath, "node safe.js");
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const initial = await loadHookSnapshot({ workDir: workspace, picoHome });
+  let swaps = 0;
+  let guards = 0;
+  const rejects: string[] = [];
+  const reloader = new HookConfigReloader({
+    workDir: workspace,
+    picoHome,
+    initial,
+    debounceMs: 5,
+    beforeSwap: async () => {
+      guards++;
+      await delay(600);
+      return true;
+    },
+    onSwap: () => {
+      swaps++;
+    },
+    onReject: (message) => rejects.push(message),
+  });
+  context.after(async () => await reloader.stop());
+  await reloader.start();
+  await delay(350);
+  assert.equal(guards, 0, "watcher 初始化不能制造伪配置变更");
+
+  await writeCommandHook(configPath, "node changed.js");
+  await waitUntil(() => swaps >= 1 || rejects.length > 0, 3_000);
+  await delay(700);
+  assert.deepEqual(rejects, [], `watcher reload 被拒绝: ${rejects.join("; ")}`);
+  assert.equal(guards, 1, "快速通知与轮询兜底必须合并为一次配置变更");
+  assert.equal(swaps, 1);
+  const swapped = reloader.currentResult()?.snapshot.handlers.PreToolUse ?? [];
+  assert.equal(
+    swapped.some(
+      (entry) => entry.handler.type === "command" && entry.handler.command === "node changed.js",
+    ),
+    true,
+    "swap 后快照必须反映新配置",
+  );
+});
+
+test("Hook reloader preserves a newer config written while the prior candidate is guarded", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-hook-reloader-guarded-write-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const configPath = join(workspace, ".pico", "hooks.json");
+  await mkdir(join(workspace, ".pico"), { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  await writeCommandHook(configPath, "node initial.js");
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const initial = await loadHookSnapshot({ workDir: workspace, picoHome });
+  const firstGuardEntered = deferred();
+  const releaseFirstGuard = deferred();
+  const swappedCommands: string[] = [];
+  let guards = 0;
+  const reloader = new HookConfigReloader({
+    workDir: workspace,
+    picoHome,
+    initial,
+    debounceMs: 5,
+    beforeSwap: async () => {
+      guards++;
+      if (guards === 1) {
+        firstGuardEntered.resolve();
+        await releaseFirstGuard.promise;
+      }
+      return true;
+    },
+    onSwap: (result) => {
+      const command = result.snapshot.handlers.PreToolUse?.find(
+        (entry) => entry.handler.type === "command",
+      )?.handler;
+      if (command?.type === "command") swappedCommands.push(command.command);
+    },
+  });
+  context.after(async () => {
+    releaseFirstGuard.resolve();
+    await reloader.stop();
+  });
+  await reloader.start();
+
+  await writeCommandHook(configPath, "node candidate-b.js");
+  await firstGuardEntered.promise;
+  await writeCommandHook(configPath, "node candidate-c.js");
+  releaseFirstGuard.resolve();
+
+  await waitUntil(() => swappedCommands.includes("node candidate-c.js"), 3_000);
+  await delay(350);
+  assert.deepEqual(swappedCommands, ["node candidate-c.js"]);
+  assert.equal(guards, 2);
+});
+
+test("Hook reloader reconciles a config changed before watcher startup", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-hook-reloader-startup-gap-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const configPath = join(workspace, ".pico", "hooks.json");
+  await mkdir(join(workspace, ".pico"), { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  await writeCommandHook(configPath, "node initial.js");
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const initial = await loadHookSnapshot({ workDir: workspace, picoHome });
+  let swaps = 0;
+  const reloader = new HookConfigReloader({
+    workDir: workspace,
+    picoHome,
+    initial,
+    onSwap: () => {
+      swaps++;
+    },
+  });
+  context.after(async () => await reloader.stop());
+  await writeCommandHook(configPath, "node changed-before-start.js");
+
+  const started = await reloader.start();
+  const command = started.snapshot.handlers.PreToolUse?.find(
+    (entry) => entry.handler.type === "command",
+  )?.handler;
+  assert.equal(
+    command?.type === "command" ? command.command : undefined,
+    "node changed-before-start.js",
+  );
+  assert.equal(swaps, 1);
+  assert.equal(started.snapshot.version, initial.snapshot.version + 1);
+});
+
+interface Deferred<T = void> {
+  readonly promise: Promise<T>;
+  resolve(value: T): void;
+  reject(reason?: unknown): void;
+}
+
+function deferred<T = void>(): Deferred<T> {
+  let resolve = (_value: T): void => undefined;
+  let reject = (_reason?: unknown): void => undefined;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function createLifecycleTestHost(options: {
+  registrationStore: WorkspaceRegistrationStore;
+  service: DisposableLocalRuntimeService;
+}): LocalDaemonHost {
+  return new LocalDaemonHost({
+    ...options,
+    cronRuntimeFactory: {
+      create: async () => {
+        throw new Error("lifecycle test must not create a Cron runtime");
+      },
+    },
+  });
+}
+
+async function writeCommandHook(path: string, command: string): Promise<void> {
+  await writeFile(
+    path,
+    `${JSON.stringify({ PreToolUse: [{ hooks: [{ type: "command", command }] }] }, null, 2)}\n`,
+  );
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) await delay(10);
+  assert.equal(predicate(), true, `condition was not met within ${timeoutMs}ms`);
+}
+
+async function completesWithin(
+  promise: Promise<unknown>,
+  timeoutMs: number,
+  message: string,
+): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function manualTimers(): {
+  readonly options: DesktopDaemonShutdownFenceOptions;
+  readonly delay: number | undefined;
+  readonly cleared: boolean;
+  fire(): void;
+} {
+  const handle = {};
+  let callback: (() => void) | undefined;
+  let delay: number | undefined;
+  let cleared = false;
+  return {
+    options: {
+      timeoutMs: 7,
+      setTimeout: (nextCallback, nextDelay) => {
+        callback = nextCallback;
+        delay = nextDelay;
+        return handle;
+      },
+      clearTimeout: (candidate) => {
+        assert.strictEqual(candidate, handle);
+        cleared = true;
+      },
+    },
+    get delay() {
+      return delay;
+    },
+    get cleared() {
+      return cleared;
+    },
+    fire: () => callback?.(),
+  };
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError("Expected an object");
+  }
+  return value as Record<string, unknown>;
+}
+
+function requiredString(value: unknown, field: string): string {
+  if (typeof value !== "string") throw new TypeError(`${field} must be a string`);
+  return value;
+}
+
+async function initializeGitRepository(cwd: string): Promise<void> {
+  await runGit(["init", "--quiet", "--initial-branch=main"], cwd);
+  await runGit(
+    [
+      "-c",
+      "user.name=Pico Test",
+      "-c",
+      "user.email=pico@example.invalid",
+      "commit",
+      "--quiet",
+      "--allow-empty",
+      "-m",
+      "baseline",
+    ],
+    cwd,
+  );
+}
+
+function runGit(args: readonly string[], cwd: string): Promise<void> {
+  return new Promise((resolveRun, reject) => {
+    execFile("git", [...args], { cwd, encoding: "utf8" }, (error, _stdout, stderr) => {
+      if (error) {
+        reject(new Error(stderr.trim() || error.message));
+        return;
+      }
+      resolveRun();
+    });
+  });
+}

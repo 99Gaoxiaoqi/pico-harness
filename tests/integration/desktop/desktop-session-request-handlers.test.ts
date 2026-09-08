@@ -1,0 +1,115 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { createTypedRuntimeRequest } from "../../../src/daemon/protocol.js";
+import type { DesktopRequestHandlers } from "../../../src/daemon/desktop-request-router.js";
+import {
+  createDesktopSessionRequestHandlers,
+  type DesktopSessionRequestContext,
+} from "../../../src/daemon/desktop-session-request-handlers.js";
+
+test("desktop session handlers keep protocol mapping separate from the service owner", async () => {
+  const calls: string[] = [];
+  const context: DesktopSessionRequestContext = {
+    initializeWorkspace: async (workspacePath) => ({ workspacePath }),
+    listWorkspaces: async () => ({ workspaces: [] }),
+    getWorkspaceStatus: async (workspacePath) => ({ workspacePath }),
+    ensureTemporaryWorkspace: async () => ({ temporary: true }),
+    trustStatus: async () => ({ trusted: true }),
+    setTrust: async (_workspacePath, trusted) => ({ trusted }),
+    unregisterWorkspace: async (workspacePath) => ({ workspacePath, unregistered: true }),
+    listSessions: async () => ({ sessions: [] }),
+    getSession: async () => ({ session: {} }),
+    createSession: async () => ({ session: {} }),
+    setSessionArchived: async (_workspacePath, _sessionId, archived) => ({ archived }),
+    setSessionPinned: async (_workspacePath, _sessionId, pinned) => ({ pinned }),
+    deleteSession: async (_workspacePath, sessionId) => ({ sessionId, deleted: true }),
+    renameSession: async (_workspacePath, _sessionId, title) => ({ title }),
+    forkSession: async () => ({ session: {}, sourceSessionId: "source" }),
+    compactSession: async () => ({ session: {}, compacted: true }),
+    getRuntimeSessionSettings: async () => ({ settings: {} }),
+    getSessionContextReport: async () => ({ context: {} }),
+    addSessionDirectory: async () => ({ directories: [], added: true }),
+    updateRuntimeSessionSettings: async () => ({ settings: {} }),
+    getGoal: async () => ({ goal: null }),
+    sendSession: async (params) => {
+      calls.push(`send:${params.input.text}`);
+      return { disposition: "started" };
+    },
+    readSessionEvidence: async (params) => ({
+      evidenceUri: params.evidenceUri,
+      content: "page",
+    }),
+    cancelRun: async (_workspacePath, runId) => ({ runId, cancelled: true }),
+    withProviderDependencyLock: async (operation) => await operation(),
+    runStart: async () => ({ started: true }),
+  };
+  const handlers = createDesktopSessionRequestHandlers(context);
+
+  const send = handlers["session.send"] as DesktopRequestHandlers["session.send"];
+  assert.ok(send);
+  assert.deepEqual(
+    await send(
+      createTypedRuntimeRequest("session.send", {
+        workspacePath: "/workspace",
+        input: { kind: "text", text: "hello" },
+        idempotencyKey: "request-1",
+      }),
+    ),
+    { disposition: "started" },
+  );
+  assert.deepEqual(calls, ["send:hello"]);
+
+  const archive = handlers["session.archive"] as DesktopRequestHandlers["session.archive"];
+  assert.ok(archive);
+  assert.deepEqual(
+    await archive(
+      createTypedRuntimeRequest("session.archive", {
+        workspacePath: "/workspace",
+        sessionId: "session-1",
+      }),
+    ),
+    { archived: true },
+  );
+
+  const pin = handlers["session.pin"] as DesktopRequestHandlers["session.pin"];
+  assert.ok(pin);
+  assert.deepEqual(
+    await pin(
+      createTypedRuntimeRequest("session.pin", {
+        workspacePath: "/workspace",
+        sessionId: "session-1",
+      }),
+    ),
+    { pinned: true },
+  );
+
+  const remove = handlers["session.delete"] as DesktopRequestHandlers["session.delete"];
+  assert.ok(remove);
+  assert.deepEqual(
+    await remove(
+      createTypedRuntimeRequest("session.delete", {
+        workspacePath: "/workspace",
+        sessionId: "session-1",
+      }),
+    ),
+    { sessionId: "session-1", deleted: true },
+  );
+
+  const readEvidence = handlers[
+    "session.evidence.read"
+  ] as DesktopRequestHandlers["session.evidence.read"];
+  assert.ok(readEvidence);
+  assert.deepEqual(
+    await readEvidence(
+      createTypedRuntimeRequest("session.evidence.read", {
+        workspacePath: "/workspace",
+        sessionId: "session-1",
+        evidenceUri: `pico://evidence/session-1/${"a".repeat(64)}`,
+      }),
+    ),
+    {
+      evidenceUri: `pico://evidence/session-1/${"a".repeat(64)}`,
+      content: "page",
+    },
+  );
+});

@@ -1,7 +1,7 @@
 # 决策记录 22：子代理真实执行容量的 turn 域 FIFO 信号量（2026-08-18）
 
 > 提交：`a38b82eb`。实现见 `src/tools/child-run-limiter.ts`，测试见
-> `tests/integration/child-run-limiter.test.ts`。
+> `tests/integration/runtime/child-run-limiter.test.ts`。
 
 ## 背景与实证
 
