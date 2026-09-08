@@ -274,7 +274,7 @@ Desktop 的 MCP 目录查询与执行现在都复用同一个 `PluginRuntimeSnap
 | D12  | `DesktopRuntimeService.close` 截止线外推 + transcript 同步双实现                          | 机械      | P1   | 阶段 3                                                                                                                          |
 | D13  | `history.rewound`/`branchId` schema 化石、fork 预校验缺口、graph-reducer 注释漂移         | 叙事/调度 | P2   | 清理                                                                                                                            |
 
-核心结论：4 条设计原则在叙事态执行扎实（健康度 4/5），但调度态（2/5）和机械态（2.5/5）退化为"内存权威 + 补丁驱动"。治理机制（不变量测试 [`architecture-invariants.test.ts`](../../../tests/integration/architecture-invariants.test.ts) + 架构门禁横切唯一性规则）已建立；阶段 1（超时收敛）已落地；阶段 2（claim 推广）与阶段 3（统一网关层）待启动。
+核心结论：4 条设计原则在叙事态执行扎实（健康度 4/5），但调度态（2/5）和机械态（2.5/5）退化为"内存权威 + 补丁驱动"。治理机制（不变量测试 [`architecture-invariants.test.ts`](../../../tests/integration/engineering/architecture-invariants.test.ts) + 架构门禁横切唯一性规则）已建立；阶段 1（超时收敛）已落地；阶段 2（claim 推广）与阶段 3（统一网关层）待启动。
 
 ## 修整原则
 

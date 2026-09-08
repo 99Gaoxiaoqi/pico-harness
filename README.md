@@ -278,12 +278,14 @@ npm pack --dry-run
 - [上下文工程](docs/architecture/03-context.md)
 - [Provider 与产品入口](docs/architecture/04-provider-entry.md)
 - [完整数据流](docs/architecture/06-data-flow.md)
-- [多 Agent 并发](docs/history/architecture/08-multi-agent-concurrency.md)
+- [多 Agent 并发研究（历史提案）](docs/history/architecture/08-multi-agent-concurrency.md)
 - [Desktop 架构](docs/guides/desktop-architecture.md)
 - [TUI 交互指南](docs/guides/tui-claude-code-parity.md)
 - [Terminal-Bench 2.1 内部 canary](benchmarks/terminal_bench_2_1/README.md)
-- [课程章节索引](docs/README.md)
+- [技术文档与历史索引](docs/README.md)
 
 ## License
 
 [MIT](LICENSE)
+
+测试按领域归类，入口与专项边界见[测试目录](tests/README.md)；工程命令与手动探针见[脚本目录](scripts/README.md)。

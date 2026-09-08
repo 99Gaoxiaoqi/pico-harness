@@ -39,7 +39,7 @@ pico 前提：事件即事实（无第二状态机）；event_id 库级主键 + 
    扩展改 schema，仍不新增 kind。
 4. **派发顺序硬约束**：`tool.started` 必须先于 `registry.execute` 落库（现状即如此，
    它 是 F1/F2 分类的判定边界）。守护测试（2026-08-20 对抗审查 Finding 2 补）：
-   `tests/integration/tool-dispatch-order-guard.test.ts` 走真实 AgentEngine 断言账本序
+   `tests/integration/tools/tool-dispatch-order-guard.test.ts` 走真实 AgentEngine 断言账本序
    `message.committed(toolCall) < tool.started < tool.result.recorded`；派发点
    （src/engine/loop.ts runOneTool）带不变量注释。
 

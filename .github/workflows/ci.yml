@@ -91,12 +91,12 @@ jobs:
             node --import tsx --import ./src/tui/preload-env.ts \
               --test --test-concurrency=1 \
               --test-name-pattern="(Linux new-file staging|Linux missing-file revalidation)" \
-              tests/integration/file-write-safety.test.ts
+              tests/integration/safety/file-write-safety.test.ts
             apt-get install --no-install-recommends -y attr
             node --import tsx --import ./src/tui/preload-env.ts \
               --test --test-concurrency=1 \
               --test-name-pattern="(preserve Linux ACLs|Linux ACL-denied readers)" \
-              tests/integration/file-write-safety.test.ts
+              tests/integration/safety/file-write-safety.test.ts
           '
 
       - name: Build distributable
@@ -251,11 +251,11 @@ jobs:
 
       - name: Run Windows process sandbox contract integration
         timeout-minutes: 5
-        run: node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/process-sandbox.integration.test.ts
+        run: node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/safety/process-sandbox.integration.test.ts
 
       - name: Run Windows native process sandbox integration
         timeout-minutes: 5
-        run: node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/process-sandbox-native.integration.test.ts
+        run: node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/safety/process-sandbox-native.integration.test.ts
 
       - name: Cleanup temporary Windows ACL users
         if: always()
@@ -284,7 +284,7 @@ jobs:
       - name: Install ripgrep for the native Grep sandbox path
         run: brew install ripgrep
       - run: npm run verify:sandbox:resources
-      - run: node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/process-sandbox.integration.test.ts tests/integration/process-sandbox-native.integration.test.ts
+      - run: node --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/safety/process-sandbox.integration.test.ts tests/integration/safety/process-sandbox-native.integration.test.ts
 
   linux-process-sandbox:
     name: Linux process sandbox (${{ matrix.arch }})
@@ -337,7 +337,7 @@ jobs:
       - name: Run Linux process sandbox integration
         run: |
           node_executable="$(command -v node)"
-          PATH="/usr/bin:/bin:$PATH" "$node_executable" --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/process-sandbox.integration.test.ts tests/integration/process-sandbox-native.integration.test.ts
+          PATH="/usr/bin:/bin:$PATH" "$node_executable" --import tsx --import ./src/tui/preload-env.ts --test --test-concurrency=1 tests/integration/safety/process-sandbox.integration.test.ts tests/integration/safety/process-sandbox-native.integration.test.ts
 
   sandbox-publication:
     name: Verify complete native sandbox publication

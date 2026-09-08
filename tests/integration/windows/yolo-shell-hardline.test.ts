@@ -14,7 +14,7 @@ import {
 
 // Windows 宿主方言为 PowerShell:本文件锁定 PowerShell 宿主的
 // 解析、argv、确定性静态红线与只读分类契约。bash hardline 语义回归在 POSIX
-// 侧由 tests/integration/yolo-safety.integration.test.ts 覆盖。
+// 侧由 tests/integration/safety/yolo-safety.integration.test.ts 覆盖。
 
 test(
   "Windows 宿主解析为 PowerShell 且 argv 按方言生成",

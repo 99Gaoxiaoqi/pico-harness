@@ -119,7 +119,7 @@ RuntimeStore（Jobs、runs、leases、usage）是独立控制面，不替代 Run
 - `LLMProvider`、`Registry`、`SessionRuntime` 等接口允许 fake provider、fake registry 和确定性 SessionRuntime 注入；Provider 还支持 reasoning delta、abort signal 和 retry 判定等可观察契约。
 - `PluginRuntimeSnapshotRegistry` 将同一 canonical workspace 的快照缓存、并发去重和 dispose 集中到一个可测试 owner；全量清理后聚合上报失败。TUI 首个 bundle 失败也进入同一 Plugin/TaskHost/Cron/MCP 释放边界。
 - `diagnostics.resources` 现在返回 `pluginDiagnostics`，插件配置失败不会再静默表现为资源不存在。
-- `tests/integration/architecture-boundaries.test.ts` 直接执行架构门禁，防止只在文档中宣称边界。
+- `tests/integration/engineering/architecture-boundaries.test.ts` 直接执行架构门禁，防止只在文档中宣称边界。
 
 **后续治理（不扣分）**
 
@@ -136,7 +136,7 @@ RuntimeStore（Jobs、runs、leases、usage）是独立控制面，不替代 Run
 - 具体 Provider/Tool 激活返回带 `dispose()` 的 lease，并由 per-run/per-session `PluginCapabilityActivationScope` 拥有；scope 在清理前同步封口、反序 all-attempt 释放，Automation/冲突检查可先读取纯 `toolNames()` 而不分配资源。
 - `src/plugins/plugin-scope.ts` 统一 user/project/local 物理根、global user registry、优先级 winner、安装复制、fingerprint conflict 和 realpath 越界校验。
 - 快照可以贡献 Skill、Command、Agent、Hook、MCP、LSP 和 capability；`PluginRuntimeSnapshotRegistry` 保证 Desktop 资源目录查询和会话激活复用同一个 canonical workspace 快照。
-- `src/plugins/plugin-diagnostics.ts` 提供稳定跨壳诊断记录；`tests/integration/plugin-capability.test.ts`、`plugin-scope.test.ts`、`plugin-hook-trust.test.ts` 和 `desktop-plugin-parity.test.ts` 固定 declaration/factory、scope、trust/fingerprint、诊断和 dispose 语义。
+- `src/plugins/plugin-diagnostics.ts` 提供稳定跨壳诊断记录；`tests/integration/tools/plugin-capability.test.ts`、`plugin-scope.test.ts`、`plugin-hook-trust.test.ts` 和 `desktop-plugin-parity.test.ts` 固定 declaration/factory、scope、trust/fingerprint、诊断和 dispose 语义。
 
 **安全边界（不计入扣分）**
 

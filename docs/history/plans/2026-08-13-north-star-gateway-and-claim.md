@@ -5,7 +5,7 @@
 > 状态：**待实施**（方案已定稿，由新 session 执行）
 > 建立日期：2026-08-13
 > 关联：`docs/architecture/20-architecture-audit-and-governance.md` §4-5（诊断与设计）、`09` D7/D9/D10 债
-> 活体追踪器：`tests/integration/architecture-invariants.test.ts` 的 D7（records）、D9（三套状态机）、D10 相关
+> 活体追踪器：`tests/integration/engineering/architecture-invariants.test.ts` 的 D7（records）、D9（三套状态机）、D10 相关
 > 约束：提交信息遵循 Conventional Commits（中文），不提其它项目名；每个阶段独立提交、独立验收；改动前先跑相关集成测试固定基线
 
 ## 0. 一句话

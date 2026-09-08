@@ -8,7 +8,7 @@
 
 > 建立日期：2026-08-13
 > 标尺：[`19-concepts-map.md`](19-concepts-map.md) 的 4 条设计原则
-> 配套：[`tests/integration/architecture-invariants.test.ts`](../../../tests/integration/architecture-invariants.test.ts)（不变量）+ [`scripts/check-architecture-boundaries.mjs`](../../../scripts/check-architecture-boundaries.mjs)（门禁）
+> 配套：[`tests/integration/engineering/architecture-invariants.test.ts`](../../../tests/integration/engineering/architecture-invariants.test.ts)（不变量）+ [`scripts/check-architecture-boundaries.mjs`](../../../scripts/check-architecture-boundaries.mjs)（门禁）
 > 关联：[`09-architecture-debt-remediation.md`](09-architecture-debt-remediation.md)（D1-D6 旧债，基本已修）
 
 ## 0. 一句话
@@ -50,7 +50,7 @@ pico 的 4 条设计原则在**叙事态**（账本核心）执行扎实（4/5�
 
 漂移的根源是**原则只活在文档里、没有强制力**——补丁一急就绕过。治理的核心是反转成本结构：让违反原则的补丁在 CI 就失败。
 
-### 3.1 不变量测试（`tests/integration/architecture-invariants.test.ts`）
+### 3.1 不变量测试（`tests/integration/engineering/architecture-invariants.test.ts`）
 
 把 19 文档的关键断言变成可运行测试，文档与实现双向锁定：
 
