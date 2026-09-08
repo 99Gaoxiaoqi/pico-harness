@@ -118,6 +118,11 @@ export type RuntimeSession = JsonObject & {
   readonly pinned: boolean;
   readonly createdAt: number;
   readonly updatedAt: number;
+  readonly parentSession?: {
+    readonly sessionId: SessionId;
+    readonly workspacePath: string;
+    readonly agentName?: string;
+  };
 };
 
 const sessionBehaviorParam = oneOfParam(["auto", "steer", "queue", "replace"] as const);
@@ -188,15 +193,23 @@ const runtimeInputAttachmentsParam: RuntimeParamRule = (value, path) => {
   }
 };
 
-export const runtimeSessionResult = resultShape({
-  sessionId: resultString,
-  workspacePath: resultString,
-  title: resultString,
-  status: resultOneOf(["active", "archived"]),
-  pinned: resultBoolean,
-  createdAt: resultFiniteNumber,
-  updatedAt: resultFiniteNumber,
-});
+export const runtimeSessionResult = resultShape(
+  {
+    sessionId: resultString,
+    workspacePath: resultString,
+    title: resultString,
+    status: resultOneOf(["active", "archived"]),
+    pinned: resultBoolean,
+    createdAt: resultFiniteNumber,
+    updatedAt: resultFiniteNumber,
+  },
+  {
+    parentSession: resultShape(
+      { sessionId: resultNonEmptyString, workspacePath: resultNonEmptyString },
+      { agentName: resultNonEmptyString },
+    ),
+  },
+);
 
 export const runtimeRunStatusResult = resultOneOf([
   "queued",
