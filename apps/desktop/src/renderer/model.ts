@@ -6,8 +6,6 @@ import type {
   RuntimeInteractionMode,
   RuntimeMcpServerInput,
   RuntimeMemoryFact,
-  RuntimeMemoryProposal,
-  RuntimeMemoryReviewBudget,
   RuntimeMemorySettings,
   RuntimeOrchestrationMode,
   RuntimePermissionMode,
@@ -331,9 +329,7 @@ export interface AppData {
 export interface MemoryView {
   readonly workspacePath?: string | undefined;
   readonly facts: readonly RuntimeMemoryFact[];
-  readonly proposals: readonly RuntimeMemoryProposal[];
   readonly settings?: RuntimeMemorySettings | undefined;
-  readonly reviewBudget?: RuntimeMemoryReviewBudget | undefined;
   readonly status: "idle" | "loading" | "ready" | "degraded" | "error";
   readonly error?: string | undefined;
 }
@@ -352,17 +348,7 @@ export type MemoryFactPatch = Readonly<{
 export type MemorySettingsPatch = Readonly<{
   enabled?: boolean;
   autoPropose?: boolean;
-  autoCommit?: false;
   injectionEnabled?: boolean;
-  reviewMode?: RuntimeMemorySettings["reviewMode"];
-}>;
-
-export type MemoryProposalPatch = Readonly<{
-  kind?: RuntimeMemoryProposal["kind"];
-  title?: string;
-  content?: string;
-  reason?: string;
-  confidence?: number;
 }>;
 
 export const emptyData: AppData = {
@@ -394,6 +380,6 @@ export const emptyData: AppData = {
   catalogSkills: [],
   usage: {},
   configVersion: 0,
-  memory: { facts: [], proposals: [], status: "idle" },
+  memory: { facts: [], status: "idle" },
   notices: {},
 };
