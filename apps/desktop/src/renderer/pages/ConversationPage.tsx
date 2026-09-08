@@ -888,6 +888,9 @@ export function ConversationPage() {
                       (graphParentId ? "Graph 子任务" : sessionId ? "正在载入会话…" : "新任务")}
                   </h1>
                 )}
+                <span className="conversation-agent-role" data-child={Boolean(parentRef)}>
+                  {parentRef ? "子智能体" : session ? "主智能体" : "智能体"}
+                </span>
               </div>
               <div className="conversation-session-header__meta">
                 {preview && <PreviewBadge />}
@@ -1316,6 +1319,11 @@ export function ConversationPage() {
             )}
             <ConversationTranscript
               items={items}
+              assistantLabel={
+                parentRef
+                  ? `子智能体 · ${childParent?.name ?? session?.title ?? "执行记录"}`
+                  : "主智能体 · Pico"
+              }
               onOpenItem={openItem}
               emptyState={
                 busy === "load-session" ? (

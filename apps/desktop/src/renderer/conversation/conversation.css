@@ -1123,36 +1123,66 @@
   background: color-mix(in srgb, var(--conversation-danger-soft) 40%, transparent);
 }
 
+/* Identity and result occupy separate lines so the agent name stays readable. */
 .conversation-subagent-row {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   width: 100%;
   min-width: 0;
-  min-height: 40px;
-  align-items: center;
-  gap: 7px;
-  padding: 6px 8px;
+  gap: 8px 12px;
+  padding: 12px;
   border: 1px solid var(--conversation-line);
   border-radius: var(--conversation-radius);
-  background: transparent;
+  background: var(--conversation-bg);
   color: var(--conversation-ink-muted);
   font: inherit;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.5;
   text-align: left;
-  white-space: nowrap;
   cursor: pointer;
 }
-
 .conversation-subagent-row:enabled:hover {
-  background: color-mix(in srgb, var(--conversation-bg-subtle) 62%, transparent);
+  background: var(--conversation-bg-subtle);
 }
-
 .conversation-subagent-row:disabled {
   opacity: 1;
   cursor: default;
 }
-
+.conversation-subagent-row__identity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.conversation-subagent-row__icon {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  color: var(--conversation-accent);
+}
+.conversation-subagent-row__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--conversation-ink);
+  font-size: 14px;
+  font-weight: 600;
+}
+.conversation-subagent-row__summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.conversation-subagent-row__meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--conversation-ink-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
 .conversation-subagent-row__dot {
   width: 6px;
   height: 6px;
@@ -1160,68 +1190,54 @@
   border-radius: 50%;
   background: var(--conversation-ink-faint);
 }
-
-.conversation-subagent-row__icon {
-  width: 16px;
-  height: 16px;
-  flex: none;
-  color: var(--conversation-ink-muted);
-}
-
-.conversation-subagent-row__action {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  flex: none;
-  margin-left: auto;
-  color: var(--conversation-accent);
-  font-size: 12px;
-  font-weight: 500;
-}
-
 .conversation-subagent-row[data-state="active"] .conversation-subagent-row__dot {
   background: var(--conversation-accent);
   animation: conversation-subagent-pulse 1.6s ease-in-out infinite;
 }
-
 .conversation-subagent-row[data-state="done"] .conversation-subagent-row__dot {
   background: var(--conversation-accent);
 }
-
 .conversation-subagent-row[data-state="failed"] .conversation-subagent-row__dot {
   background: var(--conversation-danger);
 }
-
-.conversation-subagent-row__name,
-.conversation-subagent-row__summary {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.conversation-subagent-row__action {
+  display: inline-flex;
+  align-items: center;
+  justify-self: end;
+  gap: 3px;
+  color: var(--conversation-accent);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
 }
-
-.conversation-subagent-row__name {
-  max-width: 28%;
-  flex: 0 0 auto;
-  color: var(--conversation-ink);
-  font-weight: 500;
-}
-
-.conversation-subagent-row__summary {
-  flex: 1 1 100px;
-}
-
-.conversation-subagent-row__meta {
-  flex: none;
-  color: var(--conversation-ink-faint);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
-
 .conversation-subagent-row__chevron {
   width: 14px;
   height: 14px;
   flex: none;
-  color: var(--conversation-ink-faint);
+}
+.conversation-agent-role {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: var(--conversation-bg-strong);
+  color: var(--conversation-ink-muted);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.conversation-agent-role[data-child="true"] {
+  background: var(--conversation-accent-soft);
+  color: var(--conversation-accent);
+}
+.conversation-message__author {
+  margin: 0 0 8px;
+  color: var(--conversation-ink-muted);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
 }
 
 @keyframes conversation-subagent-pulse {
