@@ -33,6 +33,13 @@ export interface SessionView {
   readonly pinned?: boolean | undefined;
   readonly updatedAt: number;
   readonly summary?: string | undefined;
+  readonly parentSession?:
+    | {
+        readonly sessionId: string;
+        readonly workspacePath: string;
+        readonly agentName?: string | undefined;
+      }
+    | undefined;
 }
 
 export interface RunView {
@@ -61,6 +68,7 @@ export interface TimelineItem {
 export interface ConversationView {
   readonly sessionId: string;
   readonly workspacePath: string;
+  readonly session?: SessionView | undefined;
   readonly items: readonly ConversationItemView[];
   readonly revision?: string | undefined;
   readonly nextBefore?: string | undefined;

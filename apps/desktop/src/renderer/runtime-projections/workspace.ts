@@ -108,6 +108,30 @@ export function parseSessions(value: unknown, workspacePath: string): readonly S
     .sort(compareSessions);
 }
 
+/** Direct lookup stays on the conversation; it must never populate the task list. */
+export function parseSessionDetail(value: unknown, workspacePath: string): SessionView | undefined {
+  const result = isRecord(value) ? value : {};
+  if (!isRecord(result.session) || !stringValue(result.session.sessionId ?? result.session.id)) {
+    return undefined;
+  }
+  const session = parseSessions({ sessions: [result.session] }, workspacePath)[0]!;
+  const parent = isRecord(result.session.parentSession) ? result.session.parentSession : {};
+  const sessionId = stringValue(parent.sessionId);
+  const parentWorkspace = stringValue(parent.workspacePath);
+  return {
+    ...session,
+    ...(sessionId && parentWorkspace
+      ? {
+          parentSession: {
+            sessionId,
+            workspacePath: parentWorkspace,
+            agentName: stringValue(parent.agentName) || undefined,
+          },
+        }
+      : {}),
+  };
+}
+
 export function compareSessions(left: SessionView, right: SessionView): number {
   return (
     Number(Boolean(right.pinned)) - Number(Boolean(left.pinned)) || right.updatedAt - left.updatedAt
