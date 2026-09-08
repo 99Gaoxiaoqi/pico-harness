@@ -13,6 +13,7 @@ export function ConversationContextMenu({
   readonly onSelect: (activation: {
     readonly kind: "skill" | "agent";
     readonly name: string;
+    readonly subagentId?: string;
   }) => void;
   readonly onClose: () => void;
 }) {
@@ -25,11 +26,13 @@ export function ConversationContextMenu({
       ...skills.map((skill) => ({
         kind: "skill" as const,
         name: skill.name,
+        subagentId: undefined,
         description: skill.description,
       })),
       ...agents.map((agent) => ({
         kind: "agent" as const,
         name: agent.name,
+        subagentId: agent.subagentId,
         description: agent.description,
       })),
     ].filter(
@@ -72,7 +75,7 @@ export function ConversationContextMenu({
           entries.map((entry) => (
             <button
               type="button"
-              key={`${entry.kind}:${entry.name}`}
+              key={`${entry.kind}:${entry.subagentId ?? entry.name}`}
               onClick={() => onSelect(entry)}
             >
               {entry.kind === "skill" ? (

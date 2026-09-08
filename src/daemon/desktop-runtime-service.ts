@@ -138,6 +138,12 @@ import { SqliteDesktopConversationStateStore } from "../storage/sqlite/sqlite-de
 import type { PlanControlPort } from "./plan-control-port.js";
 import { PlanCoordinator } from "../plan/coordinator.js";
 import { createDesktopProviderRequestHandlers } from "./desktop-provider-request-handlers.js";
+import {
+  createConfiguredSubagentCatalog,
+  type ConfiguredSubagentCatalog,
+} from "../agents/configured-subagent-catalog.js";
+import { DesktopSubagentSettingsService } from "./desktop-subagent-settings-service.js";
+import { listSubagentConnections } from "./subagent-connections.js";
 import { createDesktopCatalogRequestHandlers } from "./desktop-catalog-request-handlers.js";
 import { createDesktopAutomationRequestHandlers } from "./desktop-automation-request-handlers.js";
 import { canonicalizeWorkspacePath, resolveGitBranch } from "./workspace-registry.js";
@@ -319,6 +325,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private readonly providerFactory: typeof createProvider;
   private readonly userMcpConfigStore: UserMcpConfigStore;
   private readonly providerConfig: DesktopProviderConfigService;
+  private readonly subagentSettings: DesktopSubagentSettingsService;
+  private readonly configuredSubagentCatalog: ConfiguredSubagentCatalog;
   private readonly createSessionId: () => string;
   private readonly now: () => number;
   private readonly pluginRuntimeSnapshotRegistry: PluginRuntimeSnapshotRegistry;
@@ -423,6 +431,19 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         this.options.automations?.providerReferences(providerId, workspacePaths) ?? [],
       publishUserConfigUpdated: this.publishUserConfigUpdated.bind(this),
     });
+    const getSubagentConnections = () =>
+      listSubagentConnections(this.providerConfig.userConfigStore);
+    this.configuredSubagentCatalog = createConfiguredSubagentCatalog({
+      getPresets: async () =>
+        (await this.providerConfig.userConfigStore.read()).config.subagents?.presets ?? [],
+      getConnections: getSubagentConnections,
+    });
+    this.subagentSettings = new DesktopSubagentSettingsService({
+      userConfigStore: this.providerConfig.userConfigStore,
+      revisionTokenKey: this.userConfigRevisionTokenKey,
+      getConnections: getSubagentConnections,
+      onUpdated: (revision) => this.publishCapabilityConfigUpdated("subagents", revision),
+    });
     this.unsubscribeRuntimeEvents = options.runtimeService.subscribe((event) => {
       const sessionId = event.scope.sessionId;
       if (!sessionId) return;
@@ -493,6 +514,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       "diagnostics.run": (request) => this.runDiagnostics(request.params.workspacePath),
       "diagnostics.resources": (request) =>
         this.runResourceDiagnostics(request.params.workspacePath),
+      "subagents.get": async (request) =>
+        toJsonValue(await this.subagentSettings.get(request.params)),
+      "subagents.update": async (request) =>
+        toJsonValue(await this.subagentSettings.update(request.params)),
       "config.get": (request) => this.providerConfig.getConfig(request.params.workspacePath),
       "config.providers": (request) =>
         this.providerConfig.listProviders(request.params.workspacePath),
@@ -617,6 +642,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           this.providerConfig.withProviderDependencyLock(operation),
       }),
       ...createDesktopCatalogRequestHandlers({
+        configuredSubagentCatalog: this.configuredSubagentCatalog,
         env: this.env,
         picoHome: this.picoHome,
         pluginRuntimeSnapshotRegistry: this.pluginRuntimeSnapshotRegistry,
@@ -2524,6 +2550,16 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const config = await loadPicoConfig(canonical);
     const compatibility = config.compatibility.claude;
     if (input.kind === "agent") {
+      if (input.subagentId !== undefined) {
+        const preset = await this.configuredSubagentCatalog.resolve(input.subagentId);
+        return {
+          prompt: [
+            "请把下面任务委派给指定子 Agent 执行。必须调用 agent_spawn。",
+            JSON.stringify({ subagent_id: preset.id, task: input.task }, null, 2),
+          ].join("\n"),
+          execution: { allowedTools: ["agent_spawn"] },
+        };
+      }
       const profiles = await loadAgentCatalog({
         workDir: canonical,
         includeBuiltins: true,
@@ -2755,7 +2791,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   }
 
   private async publishCapabilityConfigUpdated(
-    capability: "skills" | "mcp",
+    capability: "skills" | "mcp" | "subagents",
     revision: string,
   ): Promise<void> {
     for (const workspacePath of await this.registrationStore.list()) {

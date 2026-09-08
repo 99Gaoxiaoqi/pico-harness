@@ -9,6 +9,7 @@ import type {
   RuntimeMemorySettings,
   RuntimeOrchestrationMode,
   RuntimePermissionMode,
+  RuntimeSubagentSettingsSnapshot,
 } from "@pico/protocol";
 
 export type JsonRecord = Readonly<Record<string, unknown>>;
@@ -155,6 +156,7 @@ export interface ProviderConfigView {
 }
 
 export interface CatalogAgentView {
+  readonly subagentId?: string;
   readonly name: string;
   readonly description: string;
   readonly source: string;
@@ -294,6 +296,7 @@ export const folderWorkspaceCapabilities: WorkspaceCapabilities = {
 };
 
 export interface AppData {
+  readonly subagentSettings?: RuntimeSubagentSettingsSnapshot;
   readonly workspaces: readonly WorkspaceView[];
   readonly workspacePath?: string | undefined;
   readonly workspaceMode?: WorkspaceMode | undefined;

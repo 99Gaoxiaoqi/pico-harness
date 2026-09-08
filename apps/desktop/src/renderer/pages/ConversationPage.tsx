@@ -144,7 +144,7 @@ export function ConversationPage() {
   const [confirmCompact, setConfirmCompact] = useState(false);
   const [activation, setActivation] = useState<
     | { readonly kind: "skill"; readonly name: string }
-    | { readonly kind: "agent"; readonly name: string }
+    | { readonly kind: "agent"; readonly name: string; readonly subagentId?: string }
   >();
   const sendingRef = useRef(false);
   const temporaryPathRef = useRef<string | undefined>(undefined);

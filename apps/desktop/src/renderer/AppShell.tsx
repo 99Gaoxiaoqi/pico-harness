@@ -359,6 +359,7 @@ function SettingsSidebar({
     general: Settings,
     workspaces: Folder,
     models: BrainCircuit,
+    subagents: Network,
     memory: BrainCircuit,
     skills: WandSparkles,
     mcp: Network,
