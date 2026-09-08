@@ -5,7 +5,6 @@ import { join } from "node:path";
 import test from "node:test";
 import { DesktopAtomicMemoryService } from "../../../src/daemon/desktop-atomic-memory-service.js";
 import { globalSessionManager } from "../../../src/engine/session.js";
-import { createPicoCommandRegistry } from "../../../src/input/pico-command-registry.js";
 import {
   memorySessionKey,
   type MemoryExtractionModel,
@@ -533,46 +532,6 @@ test("manifest pages keep a fixed upper bound and DESC keyset across concurrent 
     scanned.some((manifest) => manifest.sessionId === "keyset-newer-than-upper-bound"),
     false,
   );
-});
-
-test("/memory registry command uses atomic storage, sanitizer, idempotency, settings and executable undo", async (context) => {
-  const fixture = await createFixture("command");
-  context.after(() => rmRetry(fixture.root));
-  const trustStore = await trustFixture(fixture);
-  const registry = await createPicoCommandRegistry({
-    workDir: fixture.workspace,
-    picoHome: fixture.picoHome,
-    provider: "openai",
-    model: "fixture",
-    memoryTrustStore: trustStore,
-  });
-  const command = registry.resolve("memory");
-  assert.ok(command);
-  const execute = async (argv: string[]) => {
-    const result = await command.execute(
-      { raw: `/memory ${argv.join(" ")}`, name: "memory", args: argv.join(" "), argv },
-      {},
-    );
-    assert.equal(result.type, "local");
-    return result.type === "local" ? (result.message ?? "") : "";
-  };
-  const remembered = await execute(["remember", "Use npm run test:memory"]);
-  const undo = remembered.match(/\/memory undo (\S+)/u)?.[1];
-  assert.ok(undo);
-  await execute(["remember", "Use npm run test:memory"]);
-  assert.match(await execute(["status"]), /Active facts: 1/);
-  assert.match(
-    await execute(["remember", "sk-abcdefghijklmnopqrstuvwxyz123456"]),
-    /安全扫描未通过/,
-  );
-  assert.doesNotMatch(await execute(["status"]), /Review budget|Pending proposals/);
-  await execute(["off"]);
-  assert.match(await execute(["status"]), /Memory: off[\s\S]*Injection: off/);
-  await execute(["on"]);
-  assert.match(await execute(["status"]), /Memory: on[\s\S]*Injection: on/);
-  await execute(["undo", undo]);
-  assert.match(await execute(["status"]), /Active facts: 0[\s\S]*Archived facts: 1/);
-  assert.match(await execute(["undo", undo]), /fact changed/);
 });
 
 test.after(async () => {

@@ -3,62 +3,88 @@ import { mkdir, mkdtemp, rm, access } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createMemoryCommand, decodeMemoryUndoToken } from "../../../src/memory/memory-command.js";
-import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
+import {
+  decodeMemoryUndoToken,
+  encodeMemoryUndoToken,
+} from "../../../src/memory/memory-undo-token.js";
+import { DesktopAtomicMemoryService } from "../../../src/daemon/desktop-atomic-memory-service.js";
 import { SqliteMemoryItemStore } from "../../../src/storage/sqlite/sqlite-memory-item-store.js";
 import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
 
-test("local memory commands use atomic storage after trust, preserving remember/status/toggle/undo", async () => {
+test("atomic management preserves manual deduplication, sanitizer, settings and versioned undo tokens", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-atomic-command-"));
-  const workDir = join(root, "workspace");
+  const workspacePath = join(root, "workspace");
   const picoHome = join(root, "home");
-  await mkdir(workDir);
-  const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
-  const command = createMemoryCommand({ workDir, picoHome, trustStore });
-  const execute = async (...argv: string[]) => {
-    const result = await command.execute(
-      { raw: `/memory ${argv.join(" ")}`, name: "memory", args: argv.join(" "), argv },
-      {},
-    );
-    assert.equal(result.type, "local");
-    return result.type === "local" ? (result.message ?? "") : "";
-  };
+  await mkdir(workspacePath);
+  const service = new DesktopAtomicMemoryService({ picoHome, publish: () => undefined });
   try {
-    assert.match(await execute("remember", "Prefer concise answers."), /not trusted/);
-    await assert.rejects(access(join(picoHome, "memory.sqlite")));
-    await trustStore.trust(await trustStore.canonicalize(workDir));
-    const remembered = await execute("remember", "Prefer concise answers.");
-    assert.match(remembered, /Remembered workspace fact/);
-    const token = remembered.match(/\/memory undo (\S+)/)?.[1];
-    assert.ok(token);
-    const id = decodeMemoryUndoToken(token).factId;
-    assert.match(await execute("remember", "Prefer concise answers."), new RegExp(id));
-    assert.match(await execute("status"), /Active facts: 1/);
-    assert.doesNotMatch(await execute("status"), /Review budget|Pending proposals/);
-    assert.match(
-      await execute("remember", "sk-abcdefghijklmnopqrstuvwxyz123456"),
+    const { fact } = await service.create(workspacePath, "Prefer concise answers.");
+    const token = encodeMemoryUndoToken({ factId: fact.factId, version: fact.version });
+    assert.deepEqual(decodeMemoryUndoToken(token), { factId: fact.factId, version: fact.version });
+    assert.equal(
+      (await service.create(workspacePath, "Prefer concise answers.")).fact.factId,
+      fact.factId,
+    );
+    assert.equal((await service.list(workspacePath, { workspacePath })).facts.length, 1);
+    await assert.rejects(
+      service.create(workspacePath, "sk-abcdefghijklmnopqrstuvwxyz123456"),
       /安全扫描未通过/,
     );
-    assert.match(await execute("off"), /Memory disabled/);
-    assert.match(await execute("status"), /Memory: off[\s\S]*Injection: off/);
-    assert.match(await execute("on"), /Memory enabled/);
-    assert.match(await execute("undo", token), /is archived/);
-    assert.match(await execute("undo", token), /fact changed/);
+    for (const enabled of [false, true]) {
+      const { settings } = await service.getSettings(workspacePath);
+      await service.updateSettings(workspacePath, {
+        workspacePath,
+        expectedVersion: settings.version,
+        idempotencyKey: `toggle:${enabled}`,
+        enabled,
+        injectionEnabled: enabled,
+      });
+      const updated = (await service.getSettings(workspacePath)).settings;
+      assert.equal(updated.enabled, enabled);
+      assert.equal(updated.injectionEnabled, enabled);
+    }
+    const payload = decodeMemoryUndoToken(token);
+    const { fact: archived } = await service.update(workspacePath, {
+      workspacePath,
+      factId: payload.factId,
+      expectedVersion: payload.version,
+      state: "archived",
+      idempotencyKey: `undo:${token}`,
+    });
+    assert.equal(archived.state, "archived");
+    assert.ok(archived.version > payload.version);
+    await assert.rejects(
+      service.update(workspacePath, {
+        workspacePath,
+        factId: payload.factId,
+        expectedVersion: payload.version,
+        state: "active",
+        idempotencyKey: "stale-token",
+      }),
+      /version|版本|conflict/i,
+    );
     const store = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"));
     try {
-      assert.equal((await store.readItem(id))?.item.lifecycleState, "archived");
+      assert.equal((await store.readItem(fact.factId))?.item.lifecycleState, "archived");
       assert.equal(
-        (await store.readSettings(resolvePicoPaths(workDir, { picoHome }).workspace.id)).enabled,
+        (await store.readSettings(resolvePicoPaths(workspacePath, { picoHome }).workspace.id))
+          .enabled,
         true,
       );
     } finally {
       store.close();
     }
-    // Fresh workspaces no longer create the legacy operational memory database on this path.
     await assert.rejects(
-      access(join(resolvePicoPaths(workDir, { picoHome }).workspace.root, "pico.sqlite")),
+      access(join(resolvePicoPaths(workspacePath, { picoHome }).workspace.root, "pico.sqlite")),
     );
+    for (const invalid of [
+      "bad-token",
+      encodeMemoryUndoToken({ factId: fact.factId, version: 0 }),
+    ]) {
+      assert.throws(() => decodeMemoryUndoToken(invalid), /invalid memory undo token/);
+    }
   } finally {
+    service.close();
     await rm(root, { recursive: true, force: true });
   }
 });
