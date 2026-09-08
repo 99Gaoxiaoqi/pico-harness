@@ -6,7 +6,7 @@ import test from "node:test";
 import { resolvePicoPaths, workspaceIdForPath } from "../../src/paths/pico-paths.js";
 import { StorageDoctor, type StorageDoctorFinding } from "../../src/storage/storage-doctor.js";
 import { SqliteRuntimeEventStore } from "../../src/storage/sqlite/sqlite-runtime-event-store.js";
-import { SqliteMemoryRepository } from "../../src/storage/sqlite/sqlite-memory-repository.js";
+import { withWorkspaceSqliteLease } from "../../src/storage/sqlite/workspace-scopes.js";
 import {
   closeAllOperationalDatabasesForTest,
   operationalDatabasePath,
@@ -172,11 +172,12 @@ test("doctor 对跨 workspace 会话与 memory 绑定错位 fail-closed", async 
     }
     const foreignWorkspace = join(fixture.root, "memory-owner-workspace");
     mkdirSync(foreignWorkspace, { recursive: true });
-    const repository = new SqliteMemoryRepository({
-      storageRoot: fixture.storageRoot,
-      workspaceId: workspaceIdForPath(foreignWorkspace),
+    // Retained legacy schema remains diagnosable without the retired repository.
+    withWorkspaceSqliteLease(fixture.storageRoot, ({ database }) => {
+      database
+        .prepare("INSERT INTO memory_metadata (key, value_json) VALUES (?, ?)")
+        .run("workspaceId", JSON.stringify(workspaceIdForPath(foreignWorkspace)));
     });
-    repository.close();
     const report = await new StorageDoctor({
       workDir: fixture.workspace,
       picoHome: fixture.picoHome,
