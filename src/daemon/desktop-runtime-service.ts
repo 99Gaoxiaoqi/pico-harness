@@ -2558,7 +2558,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
             "请把下面任务委派给指定子 Agent 执行。必须调用 agent_spawn。",
             JSON.stringify({ subagent_id: preset.id, task: input.task }, null, 2),
           ].join("\n"),
-          execution: { allowedTools: ["agent_spawn"] },
+          execution: { allowedTools: ["agent_spawn", "agent_output"] },
         };
       }
       const profiles = await loadAgentCatalog({
@@ -2796,19 +2796,27 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     revision: string,
   ): Promise<void> {
     for (const workspacePath of await this.registrationStore.list()) {
-      this.publish(
-        createRuntimeNotification({
-          topic: "config.updated",
-          scope: { workspacePath },
-          resourceVersion: this.nextResourceVersion(),
-          at: this.now(),
-          payload: {
-            scope: "user",
-            revision,
-            capabilities: [capability],
-          },
-        }),
-      );
+      try {
+        this.publish(
+          createRuntimeNotification({
+            topic: "config.updated",
+            scope: { workspacePath },
+            resourceVersion: this.nextResourceVersion(),
+            at: this.now(),
+            payload: {
+              scope: "user",
+              revision,
+              capabilities: [capability],
+            },
+          }),
+        );
+      } catch (error) {
+        // A refused workspace stays untouched; unrelated workspaces still receive the refresh.
+        logger.warn(
+          { err: error, workspacePath, capability },
+          "Capability config committed but workspace refresh notification failed",
+        );
+      }
     }
   }
 
