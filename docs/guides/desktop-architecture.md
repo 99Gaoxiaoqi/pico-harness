@@ -24,6 +24,15 @@ Pico daemon ── Agent Runtime / Session / Rewind / Automations
   0600；协议把连接主体限定为 `local_os_user`，业务操作还必须通过 typed root authority 与
   方法级校验。当前 runtime-host 握手不包含 bearer token。
 
+## Renderer 代码组织
+
+- `App.tsx` 装配路由、共享 RuntimeContext 与页面，`AppShell.tsx` 管理导航外壳。
+- `pages/` 按路由收纳会话、任务、设置、审核、自动化和扩展页面；`conversation/`、`usage/`、`workbar/` 收纳对应领域组件和投影。
+- `runtime.ts` 继续拥有唯一 `useRuntimeStore`，包括连接、订阅、会话切换、代次校验和异步操作生命周期。
+- `runtime-projections/` 只转换协议数据与配置值；会话和用量投影放在各自领域目录。投影不创建订阅或另一份 Store。
+
+页面拆分共用原 Runtime 数据，不改变会话身份和重连边界。
+
 ## 数据所有权
 
 - `$PICO_HOME`：RuntimeEvent Session 账本、信任、daemon 注册等跨 CLI/App 的统一状态根。

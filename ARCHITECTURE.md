@@ -71,7 +71,9 @@ Electron Main 只转发白名单内的方法，Renderer 只依赖 `DesktopBridge
                  └─ Reporter 将生命周期投影给当前外壳
 ```
 
-`src/engine/loop.ts` 只负责执行循环，不拥有产品 UI 或持久化路径。daemon 将运行状态投影为
+`src/engine/loop.ts` 负责主循环、父子运行能力与共享预算，不拥有产品 UI 或持久化路径。
+子代理的一次执行由 `subagent-runner.ts` 负责，独立上下文与溢出处理位于
+`subagent-context.ts`；Provider 事件包装与工具结果构造由小型专责模块复用。daemon 将运行状态投影为
 协议事件；TUI 的 `DaemonEventReporter` 再转给 `TuiReporter` 更新 Ink 界面，Desktop
 Renderer 则据此构造 Transcript 和 Timeline。
 

@@ -1,14 +1,14 @@
 // 诊断探针：连接指定用户根；host 未运行时可能启动它。
 import { parseArgs } from "node:util";
-import { resolvePicoHome } from "../src/paths/pico-paths.js";
-import { LocalRuntimeClient } from "../src/daemon/index.js";
+import { resolvePicoHome } from "../../src/paths/pico-paths.js";
+import { LocalRuntimeClient } from "../../src/daemon/index.js";
 import { connectOrSpawnRuntimeHost, RUNTIME_HOST_PROTOCOL_VERSION } from "@pico/runtime-host";
 
 const { values } = parseArgs({
   options: { "pico-home": { type: "string" }, help: { type: "boolean", short: "h" } },
 });
 if (values.help) {
-  console.log("Usage: node --import tsx scripts/probe-daemon.ts [--pico-home PATH]");
+  console.log("Usage: node --import tsx scripts/diagnostics/probe-daemon.ts [--pico-home PATH]");
   console.log("Defaults to PICO_HOME or ~/.pico. May start the runtime host if it is not running.");
   process.exit(0);
 }

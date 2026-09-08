@@ -13,7 +13,7 @@
  * 全链路 + 事件订阅；全程采样 registration pid；断连发生时记录窗口；结束时
  * 倒出 candidate-logs（stderr 落盘基础设施）+ host.diagnostics.query 环形日志。
  *
- * 运行：node --import tsx --import ./src/tui/preload-env.ts scripts/stress-daemon-diag.ts [rounds]
+ * 运行：node --import tsx --import ./src/tui/preload-env.ts scripts/diagnostics/stress-daemon-diag.ts [rounds]
  */
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -26,10 +26,10 @@ import {
   resolveStorageRoot,
   RUNTIME_HOST_PROTOCOL_VERSION,
 } from "@pico/runtime-host";
-import { LocalRuntimeClient } from "../src/daemon/index.js";
-import { UserConfigStore } from "../src/input/user-config-store.js";
-import { ClientSessionRuntime } from "../src/tui/client-session-runtime.js";
-import { TuiReporter } from "../src/tui/tui-reporter.js";
+import { LocalRuntimeClient } from "../../src/daemon/index.js";
+import { UserConfigStore } from "../../src/input/user-config-store.js";
+import { ClientSessionRuntime } from "../../src/tui/client-session-runtime.js";
+import { TuiReporter } from "../../src/tui/tui-reporter.js";
 
 const DEAD_ENDPOINT = "http://127.0.0.1:9";
 const ROUNDS = Number(process.argv[2] ?? 20);
