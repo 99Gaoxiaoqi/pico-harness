@@ -109,6 +109,7 @@ import type {
 import {
   createRuntimeNotification,
   createRuntimeRequest,
+  isSafeSubagentPresetId,
   parseRuntimeResult,
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
@@ -4331,10 +4332,15 @@ function normalizeRuntimeUserInput(value: RuntimeUserInput): RuntimeUserInput {
     };
   }
   if (kind === "agent") {
+    const subagentId = value["subagentId"];
+    if (subagentId !== undefined && !isSafeSubagentPresetId(subagentId)) {
+      throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, "input.subagentId 无效");
+    }
     return {
       kind,
       name: requireText(value["name"], "input.name"),
       task: requireText(value["task"], "input.task"),
+      ...(typeof subagentId === "string" ? { subagentId } : {}),
     };
   }
   throw new RuntimeProtocolError(

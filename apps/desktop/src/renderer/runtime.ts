@@ -2418,7 +2418,11 @@ export function useRuntimeStore(): RuntimeStore {
         const snapshot = await invoke(bridge, "subagents.update", { presets, expectedRevision });
         setData((current) => ({ ...current, subagentSettings: snapshot }));
         const workspacePath = dataRef.current.workspacePath;
-        if (workspacePath) await loadWorkspace(bridge, workspacePath);
+        if (workspacePath) {
+          void loadWorkspace(bridge, workspacePath).catch((cause: unknown) =>
+            setMessage(errorMessage(cause)),
+          );
+        }
         return snapshot;
       },
       async deleteUserMcp(serverName) {
