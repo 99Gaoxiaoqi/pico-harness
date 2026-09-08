@@ -209,8 +209,7 @@ global 条目在同一用户的受信工作区可管理，其他 workspace 的�
 
 确定性覆盖见 `tests/integration/atomic-memory-*.test.ts`、
 `desktop-atomic-memory-service.test.ts` 和 `memory-runtime-quality.test.ts`；真实模型场景见
-[atomic-memory-behavior.real-llm.test.ts](../../tests/e2e/atomic-memory-behavior.real-llm.test.ts)
-与 [memory-behavior.real-llm.test.ts](../../tests/e2e/memory-behavior.real-llm.test.ts)。历史验证数字
+[atomic-memory-behavior.real-llm.test.ts](../../tests/e2e/atomic-memory-behavior.real-llm.test.ts)。历史验证数字
 只保存在任务记录中，不作为当前模型准确率保证。
 
 旧 Proposal/Worker/Scheduler/Recovery、旧记忆管理服务和 `SqliteMemoryRepository` 已退役。
