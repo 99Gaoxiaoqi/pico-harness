@@ -5,7 +5,7 @@ import {
   subagentParent,
   subagentSessionHref,
 } from "../../../apps/desktop/src/renderer/conversation/subagent-navigation.js";
-import type { SubagentActivityEvent } from "../../../src/engine/reporter.js";
+import type { Reporter, SubagentActivityEvent } from "../../../src/engine/reporter.js";
 import { SqliteAgentGraphControlStoreAdapter } from "../../../src/agent-graph/sqlite-control-store-adapter.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -198,7 +198,7 @@ test("foreground agent_spawn uses a separate durable RuntimeRun and exact local 
   let childSessionId = "";
   let parentCalls = 0;
   const activities: SubagentActivityEvent[] = [];
-  const reporter = new SilentReporter();
+  const reporter: Reporter = new SilentReporter();
   reporter.onSubagentActivity = (activity) => activities.push(structuredClone(activity));
   try {
     const parentResult = await new AgentRuntime().execute(
@@ -340,6 +340,15 @@ test("foreground agent_spawn uses a separate durable RuntimeRun and exact local 
       assert.equal(childItem.readOnly, true);
       assert.equal(childItem.durationMs, completed?.durationMs);
       assert.equal(childItem.toolCallId, completed?.toolCallId);
+      const spawnItem = conversation.items.find(
+        (item) => item.kind === "tool" && item.toolName === "agent_spawn",
+      );
+      assert.ok(spawnItem?.kind === "tool");
+      assert.equal(
+        childItem.toolCallId,
+        spawnItem.result?.toolCallId,
+        "the execution row must refer to the exact spawn tool call",
+      );
       const href = subagentSessionHref(childItem, { sessionId: parent.id, workspacePath: workDir });
       assert.ok(href);
       const childRef = { sessionId: childSessionId, workspacePath: workDir };
