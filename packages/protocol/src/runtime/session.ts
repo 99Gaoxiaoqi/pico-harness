@@ -15,6 +15,7 @@ import type {
   SessionSendDisposition,
   WorkspaceParams,
 } from "./base.js";
+import { subagentPresetIdParam, subagentPresetIdResult } from "./subagents.js";
 import { runtimeUserDefaultsParam } from "./config.js";
 import type { RuntimeUserDefaults } from "./config.js";
 import { invalidParams, invalidResult } from "./errors.js";
@@ -82,6 +83,7 @@ export type RuntimeSkillUserInput = JsonObject & {
 
 export type RuntimeAgentUserInput = JsonObject & {
   readonly kind: "agent";
+  readonly subagentId?: string;
   readonly name: string;
   readonly task: string;
 };
@@ -134,11 +136,16 @@ const runtimeUserInputParam: RuntimeParamRule = (value, path) => {
     return;
   }
   if (value["kind"] === "agent") {
-    assertNestedShape(value, path, {
-      kind: oneOfParam(["agent"]),
-      name: stringParam,
-      task: stringParam,
-    });
+    assertNestedShape(
+      value,
+      path,
+      {
+        kind: oneOfParam(["agent"]),
+        name: stringParam,
+        task: stringParam,
+      },
+      { subagentId: subagentPresetIdParam },
+    );
     return;
   }
   assertNestedShape(
@@ -253,11 +260,14 @@ export const runtimeQueuedInputResult = exactResultShape({
       return;
     }
     if (value["kind"] === "agent") {
-      exactResultShape({
-        kind: resultOneOf(["agent"]),
-        name: resultString,
-        task: resultString,
-      })(value, path);
+      exactResultShape(
+        {
+          kind: resultOneOf(["agent"]),
+          name: resultString,
+          task: resultString,
+        },
+        { subagentId: subagentPresetIdResult },
+      )(value, path);
       return;
     }
     throw invalidResult(`${path}.kind 必须是 text | skill | agent 之一`);

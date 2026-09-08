@@ -7,6 +7,7 @@ import { protocolError } from "./errors.js";
 import type { MemoryMethodMap } from "./memory.js";
 import type { NotificationsMethodMap } from "./notifications.js";
 import type { PlanningMethodMap } from "./planning.js";
+import type { SubagentsMethodMap } from "./subagents.js";
 import type { SessionMethodMap } from "./session.js";
 import type { TranscriptMethodMap } from "./transcript.js";
 import type { WorkbarMethodMap } from "./workbar.js";
@@ -15,6 +16,7 @@ import type { WorkspaceMethodMap } from "./workspace.js";
 export type RuntimeMethodMap = SessionMethodMap &
   TranscriptMethodMap &
   ConfigMethodMap &
+  SubagentsMethodMap &
   MemoryMethodMap &
   PlanningMethodMap &
   CapabilitiesMethodMap &
@@ -128,6 +130,8 @@ export const RUNTIME_METHODS = [
   "provider.credential.status",
   "provider.credential.set",
   "provider.credential.delete",
+  "subagents.get",
+  "subagents.update",
   "catalog.agents",
   "catalog.skills",
   "config.skills",
@@ -267,6 +271,8 @@ export const DESKTOP_RUNTIME_METHODS = [
   "provider.credential.status",
   "provider.credential.set",
   "provider.credential.delete",
+  "subagents.get",
+  "subagents.update",
   "catalog.agents",
   "catalog.skills",
   "config.skills",

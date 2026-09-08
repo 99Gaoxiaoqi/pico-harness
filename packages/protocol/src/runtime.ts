@@ -6,6 +6,7 @@ import {
   capabilitiesParamValidators,
   capabilitiesResultValidators,
 } from "./runtime/capabilities.js";
+import { subagentsParamValidators, subagentsResultValidators } from "./runtime/subagents.js";
 import { configParamValidators, configResultValidators } from "./runtime/config.js";
 import { invalidResult } from "./runtime/errors.js";
 import { memoryParamValidators, memoryResultValidators } from "./runtime/memory.js";
@@ -31,6 +32,7 @@ const RUNTIME_RESULT_VALIDATORS = {
   ...sessionResultValidators,
   ...transcriptResultValidators,
   ...configResultValidators,
+  ...subagentsResultValidators,
   ...memoryResultValidators,
   ...planningResultValidators,
   ...capabilitiesResultValidators,
@@ -44,6 +46,7 @@ const STRICT_RUNTIME_PARAM_VALIDATORS = {
   ...sessionParamValidators,
   ...transcriptParamValidators,
   ...configParamValidators,
+  ...subagentsParamValidators,
   ...memoryParamValidators,
   ...planningParamValidators,
   ...capabilitiesParamValidators,
