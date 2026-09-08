@@ -1,6 +1,5 @@
 import {
   AlertCircle,
-  Bot,
   Check,
   CheckCircle2,
   ChevronRight,
@@ -20,6 +19,7 @@ import type {
   ConversationItemView,
   ConversationProgressState,
   RunBoundaryItemView,
+  SubagentItemView,
 } from "./types.js";
 import { conversationItemKey, mergeConversationItemGroups } from "./items.js";
 import { MarkdownText } from "./MarkdownText.js";
@@ -115,6 +115,59 @@ function DetailButton({
       <ChevronRight aria-hidden="true" size={15} />
     </button>
   );
+}
+
+function SubagentRow({
+  item,
+  onOpenItem,
+}: {
+  readonly item: SubagentItemView;
+  readonly onOpenItem?: ((item: ConversationItemView) => void) | undefined;
+}) {
+  const canOpen = Boolean(item.childSessionId && onOpenItem);
+  const summary = item.detail ?? item.title;
+  const duration =
+    item.durationMs !== undefined && Number.isFinite(item.durationMs) && item.durationMs >= 0
+      ? `${(item.durationMs / 1000).toFixed(1)}s`
+      : undefined;
+  const metadata = [
+    item.state === "active" ? "运行中" : stateLabels[item.state],
+    item.readOnly ? "只读" : undefined,
+    duration,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <button
+      type="button"
+      className="conversation-subagent-row"
+      data-state={item.state}
+      disabled={!canOpen}
+      aria-label={canOpen ? `查看${item.name}的会话` : `${item.name} · ${metadata}`}
+      title={summary}
+      onClick={canOpen ? () => onOpenItem?.(item) : undefined}
+    >
+      <span className="conversation-subagent-row__dot" aria-hidden="true" />
+      <strong className="conversation-subagent-row__name">{item.name}</strong>
+      <span className="conversation-subagent-row__summary">{summary}</span>
+      <span className="conversation-subagent-row__meta">{metadata}</span>
+      {canOpen && (
+        <ChevronRight className="conversation-subagent-row__chevron" aria-hidden="true" />
+      )}
+    </button>
+  );
+}
+
+function visibleTurnItems(items: readonly ConversationItemView[]): readonly ConversationItemView[] {
+  const representedCalls = new Set(
+    items.flatMap((item) => (item.kind === "subagent" && item.toolCallId ? [item.toolCallId] : [])),
+  );
+  return items.filter((item) => {
+    if (item.kind !== "tool" || item.toolName !== "agent_spawn") return true;
+    const toolCallId =
+      item.result?.toolCallId ?? (item.id.startsWith("tool:") ? item.id.slice(5) : undefined);
+    return !toolCallId || !representedCalls.has(toolCallId);
+  });
 }
 
 function renderDefaultItem(
@@ -253,24 +306,7 @@ function renderDefaultItem(
         </details>
       );
     case "subagent":
-      return (
-        <section className="conversation-inline-card conversation-inline-card--agent conversation-execution-record">
-          <header className="conversation-inline-card__header">
-            <Bot aria-hidden="true" />
-            <div>
-              <span className="conversation-kicker">子代理 {item.name}</span>
-              <strong>{item.title}</strong>
-            </div>
-            <span className="conversation-item-state">
-              <StateIcon state={item.state} /> {stateLabels[item.state]}
-            </span>
-          </header>
-          {item.detail && <p className="conversation-execution-detail">{item.detail}</p>}
-          {onOpenItem && (
-            <DetailButton label={`查看 ${item.name} 的会话`} onClick={() => onOpenItem(item)} />
-          )}
-        </section>
-      );
+      return <SubagentRow item={item} onOpenItem={onOpenItem} />;
     case "status": {
       const Icon = item.tone === "error" ? AlertCircle : item.tone === "success" ? Check : Circle;
       return (
@@ -406,7 +442,7 @@ export function ConversationTranscript({
       {turns.map((turn) => (
         <li className="conversation-turn" key={turn.key}>
           <ol className="conversation-turn__items">
-            {turn.items.map((item) => {
+            {visibleTurnItems(turn.items).map((item) => {
               const fallback = renderDefaultItem(item, renderText, onOpenItem);
               return (
                 <li

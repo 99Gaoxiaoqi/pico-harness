@@ -1107,8 +1107,92 @@
   background: color-mix(in srgb, var(--conversation-danger-soft) 40%, transparent);
 }
 
-.conversation-inline-card--agent {
+.conversation-subagent-row {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--conversation-radius);
   background: transparent;
+  color: var(--conversation-ink-muted);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.conversation-subagent-row:enabled:hover {
+  background: color-mix(in srgb, var(--conversation-bg-subtle) 62%, transparent);
+}
+
+.conversation-subagent-row:disabled {
+  opacity: 1;
+  cursor: default;
+}
+
+.conversation-subagent-row__dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--conversation-ink-faint);
+}
+
+.conversation-subagent-row[data-state="active"] .conversation-subagent-row__dot {
+  background: var(--conversation-accent);
+  animation: conversation-subagent-pulse 1.6s ease-in-out infinite;
+}
+
+.conversation-subagent-row[data-state="done"] .conversation-subagent-row__dot {
+  background: var(--conversation-accent);
+}
+
+.conversation-subagent-row[data-state="failed"] .conversation-subagent-row__dot {
+  background: var(--conversation-danger);
+}
+
+.conversation-subagent-row__name,
+.conversation-subagent-row__summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.conversation-subagent-row__name {
+  max-width: 28%;
+  flex: 0 1 auto;
+  color: var(--conversation-ink);
+  font-weight: 500;
+}
+
+.conversation-subagent-row__summary {
+  flex: 1;
+}
+
+.conversation-subagent-row__meta {
+  flex: none;
+  color: var(--conversation-ink-faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.conversation-subagent-row__chevron {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  color: var(--conversation-ink-faint);
+}
+
+@keyframes conversation-subagent-pulse {
+  50% {
+    opacity: 0.4;
+  }
 }
 
 .conversation-inline-card--goal {
@@ -2134,6 +2218,7 @@
 .conversation-composer button:focus-visible,
 .conversation-composer select:focus-visible,
 .conversation-detail-button:focus-visible,
+.conversation-subagent-row:focus-visible,
 .conversation-inspector button:focus-visible,
 .conversation-panel-toggle:focus-visible,
 .conversation-scroll-to-bottom:focus-visible,
@@ -2216,7 +2301,8 @@
   .conversation-message--assistant[data-streaming="true"] .conversation-message__body::after,
   .conversation-streaming-label svg,
   [data-state="active"] > .conversation-inline-card__header .conversation-item-state svg,
-  .conversation-plan li[data-state="active"] > svg {
+  .conversation-plan li[data-state="active"] > svg,
+  .conversation-subagent-row[data-state="active"] .conversation-subagent-row__dot {
     animation: none;
   }
 }
