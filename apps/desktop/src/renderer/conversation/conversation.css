@@ -101,6 +101,22 @@
   gap: 8px;
 }
 
+.conversation-graph-parent {
+  min-width: 0;
+  max-width: min(32vw, 320px);
+  flex: 0 2 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--conversation-ink-faint);
+  font-size: 11px;
+}
+
+.conversation-graph-parent + h1 {
+  flex-shrink: 0;
+  max-width: min(28vw, 300px);
+}
+
 .conversation-session-project {
   display: inline-flex;
   max-width: 190px;
