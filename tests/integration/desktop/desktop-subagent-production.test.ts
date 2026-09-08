@@ -23,6 +23,7 @@ import { WorkspaceRegistrationStore } from "../../../src/daemon/workspace-regist
 import { UserConfigStore } from "../../../src/input/user-config-store.js";
 import type { CredentialVault } from "../../../src/provider/credential-vault.js";
 import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
+import { SqliteDesktopConversationStateStore } from "../../../src/storage/sqlite/sqlite-desktop-conversation-state-store.js";
 
 // The executor seam avoids a model call while exercising production Desktop admission,
 // configuration ownership, catalog projection, and the exact frontend protocol contracts.
@@ -133,6 +134,21 @@ test(
         error instanceof RuntimeProtocolError && error.code === RUNTIME_ERROR_CODES.CONFLICT,
     );
     assert.equal((await request("subagents.get", {})).presets[0]?.id, preset.id);
+
+    const queue = new SqliteDesktopConversationStateStore({ picoHome });
+    const queued = await queue.enqueue(workspace, "queued-preset-session", {
+      kind: "agent",
+      name: "A stale queued display label",
+      subagentId: preset.id,
+      task: "Resume using the saved identity",
+    });
+    const reopenedQueue = new SqliteDesktopConversationStateStore({ picoHome });
+    assert.deepEqual(
+      (await reopenedQueue.listQueued(workspace, "queued-preset-session"))[0]?.input,
+      queued.input,
+      "SQLite queue reopening must preserve the preset identity",
+    );
+    await reopenedQueue.removeQueued(workspace, queued.queueId);
 
     const sent = await request("session.send", {
       workspacePath: workspace,

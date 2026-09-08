@@ -41,7 +41,9 @@ const STAGE_TIMEOUT_MS = {
   rootFinish: 90_000,
   exactTerminal: 30_000,
 } as const;
-const SWARM_E2E = process.env.GRAPH_E2E_MODE === "swarm";
+const PRESET_GRAPH_E2E = process.env.PICO_PRESET_GRAPH_E2E === "1";
+const PRESET_ID = "configured-graph-reader";
+const SWARM_E2E = PRESET_GRAPH_E2E || process.env.GRAPH_E2E_MODE === "swarm";
 const RUN_REAL_MODEL = process.env.RUN_LLM_E2E === "1";
 const realModelTest = RUN_REAL_MODEL ? test : test.skip;
 const LEGACY_GRAPH_TOOLS = new Set(["add_work", "view_graph", "close_graph"]);
@@ -110,6 +112,23 @@ realModelTest(
       {
         version: 1,
         defaults: { modelRouteId: model.route.id },
+        ...(PRESET_GRAPH_E2E
+          ? {
+              subagents: {
+                presets: [
+                  {
+                    id: PRESET_ID,
+                    name: "Configured graph reader",
+                    description: "Use this saved preset for the single graph verification task.",
+                    profile: "local_read" as const,
+                    connectionSlug: model.route.providerId,
+                    model: model.route.model,
+                    enabled: true,
+                  },
+                ],
+              },
+            }
+          : {}),
         providers: {
           [model.route.providerId]: {
             protocol: model.provider,
@@ -301,6 +320,14 @@ realModelTest(
         graphId,
       ).graph;
 
+      if (PRESET_GRAPH_E2E) {
+        const provisions = host.store.listOperatorProvisions(graphId);
+        assert.equal(provisions.length, 1);
+        const frozen = asRecord(provisions[0]!.profileSnapshot);
+        assert.equal(asRecord(frozen.subagentPreset).id, PRESET_ID);
+        assert.equal(frozen.modelRouteId, model.route.id);
+        assert.deepEqual(frozen.tools, ["read_file", "glob", "grep"]);
+      }
       const claims = host.store.listActivationClaims(graphId);
       assert.equal(claims.length, 1, "the one add command must create one Claim");
       assert.equal(claims[0]?.claimId, claim.claimId);
@@ -506,6 +533,11 @@ function initialRootPrompt(): string {
   return [
     "This is a deterministic Graph v2 end-to-end check. Follow these steps exactly.",
     `First call ${SWARM_E2E ? "agent_list" : "view_agent_graph"} exactly once to discover available profiles, then call update_agent_graph exactly once to create one explore subtask using the current work interface. This test explicitly needs exactly one child, even in swarm mode. Omit workspace to use the runtime default.`,
+    ...(PRESET_GRAPH_E2E
+      ? [
+          `Select only presets[].subagent_id equal to ${PRESET_ID}. Use update_agent_graph operation=add_work with add_work:[{target_kind:"new_preset",subagent_id:"${PRESET_ID}",instruction:...}]. Do not select a legacy profile or agent_id.`,
+        ]
+      : []),
     "The subtask instruction must be: Invent 32 random uppercase hexadecimal characters that are not present in this instruction. Call agent_output exactly once with status success and output equal to GRAPH_V2_OPERATOR_CANARY_ followed immediately by those 32 characters. Do not call any other tool and do not write files.",
     "After update_agent_graph succeeds, call yield_agent_graph exactly once.",
     "After yield_agent_graph succeeds, end this Run immediately. Do not call another tool and do not finish the Graph in this initial Run.",

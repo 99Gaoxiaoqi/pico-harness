@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import type { JsonObject, RuntimeUserInput } from "./protocol.js";
+import { isSafeSubagentPresetId } from "./protocol.js";
 
 const DESKTOP_CONVERSATION_STATE_VERSION = 2 as const;
 export const MAX_IDEMPOTENCY_RECORDS = 500;
@@ -164,10 +165,15 @@ function parseStoredInput(value: Record<string, unknown>, filePath: string): Run
     typeof candidate["name"] === "string" &&
     typeof candidate["task"] === "string"
   ) {
+    const subagentId = candidate["subagentId"];
+    if (subagentId !== undefined && !isSafeSubagentPresetId(subagentId)) {
+      throw new Error(`Desktop conversation queue contains an invalid subagent ID: ${filePath}`);
+    }
     return {
       kind,
       name: requireNonEmpty(candidate["name"], "input.name"),
       task: requireNonEmpty(candidate["task"], "input.task"),
+      ...(typeof subagentId === "string" ? { subagentId } : {}),
     };
   }
   throw new Error(`Desktop conversation queue contains an invalid input: ${filePath}`);
