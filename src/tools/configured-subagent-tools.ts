@@ -24,7 +24,6 @@ export interface ConfiguredSubagentExecutionResult {
   readonly permissionMode?: "default";
   readonly artifactIds?: readonly string[];
   readonly runId?: string;
-  readonly ref: string;
   readonly summary: string;
   readonly patch?: { readonly path: string; readonly worktree: string; readonly branch: string };
 }
@@ -140,7 +139,7 @@ export class ConfiguredAgentSpawnTool implements BaseTool {
     return {
       name: this.name(),
       description:
-        "前台等待一个有边界的持久子任务。先 agent_list 选择 subagent_id；同时提供 profile 时 subagent_id 优先。实现任务强制独立 worktree 并返回补丁，不能直接写回宿主。",
+        "前台等待一个有边界的持久子任务。先 agent_list 选择 subagent_id；同时提供 profile 时 subagent_id 优先。实现任务强制独立 worktree 并返回补丁，不能直接写回宿主。结果的 childSessionId/runId 可用于 agent_output 精确回读。",
       inputSchema: {
         type: "object",
         properties: {
