@@ -1,13 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { test } from "node:test";
 import { PassThrough } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import { render } from "ink";
 import { LOCAL_RUNTIME_PROTOCOL_VERSION, type RuntimeNotification } from "@pico/protocol";
-import { createPicoCommandRegistry } from "../../../src/input/pico-command-registry.js";
 import { AUTOMATION_TOOL_ALLOWLIST } from "../../../src/safety/automation-tool-policy.js";
 import { AutomationCredentialImportProposalStore } from "../../../src/tui/automation-credential-proposal.js";
 import {
@@ -38,6 +34,7 @@ interface Harness {
 
 function createHarness(options?: {
   readonly duplicateModelProvider?: boolean;
+  readonly staleMemoryUndo?: boolean;
   readonly sessionId?: string;
   readonly permissionMode?: "default" | "auto" | "yolo";
   readonly configuredPermissionMode?: "default" | "auto" | "yolo";
@@ -512,6 +509,14 @@ function createHarness(options?: {
               updatedAt: 4,
             },
           };
+        case "memory.get":
+          return {
+            fact: {
+              factId: String(params.factId),
+              version: options?.staleMemoryUndo ? 2 : 1,
+              state: "active",
+            },
+          };
         case "memory.create":
           return {
             fact: {
@@ -528,9 +533,12 @@ function createHarness(options?: {
             } as never,
           };
         case "memory.list":
-          return { facts: [{ factId: "manual-fact:abc" }] };
-        case "memory.review.list":
-          return { proposals: [] };
+          return {
+            facts: [
+              { factId: "manual-fact:abc", state: "active" },
+              { factId: "archived-fact", state: "archived" },
+            ],
+          };
         case "memory.settings.get":
           return {
             settings: {
@@ -567,7 +575,7 @@ function createHarness(options?: {
           };
         case "memory.update":
           return {
-            fact: { factId: String(params.factId ?? ""), version: 2, state: "disabled" } as never,
+            fact: { factId: String(params.factId ?? ""), version: 2, state: "archived" } as never,
           };
         case "mcp.effective.list":
           return {
@@ -1199,15 +1207,22 @@ test("client commands: tier2 mirrors map memory/provider/cron to RPCs", async (t
   assert.equal(harness.requests.at(-1)?.method, "memory.create");
   const token = String(remembered.result?.message).split("/memory undo ")[1] ?? "";
   const undone = await run(`/memory undo ${token}`);
-  assert.match(String(undone.result?.message), /disabled/);
+  assert.match(String(undone.result?.message), /archived/);
   const undoRequest = harness.requests.at(-1);
   assert.equal(undoRequest?.method, "memory.update");
-  assert.equal(undoRequest?.params.state, "disabled");
+  assert.equal(undoRequest?.params.state, "archived");
 
-  // /memory status → settings.get + list + review.list 聚合。
+  // /memory status 聚合原子记忆与设置，无 review RPC。
   const status = await run("/memory status");
   assert.match(String(status.result?.message), /Memory: on/);
   assert.match(String(status.result?.message), /Active facts: 1/);
+  assert.match(String(status.result?.message), /Archived facts: 1/);
+  assert.match(String(status.result?.message), /Automatic extraction: off/);
+  assert.doesNotMatch(String(status.result?.message), /Review mode|Pending proposals/);
+  assert.equal(
+    harness.requests.some((entry) => entry.method === "memory.review.list"),
+    false,
+  );
 
   // /provider list → provider.list + config.effective.get；delete 带 revision。
   harness.requests.length = 0;
@@ -1699,129 +1714,402 @@ test("client commands: /plugin maps to plugin.manage incl. two-phase trust", asy
   assert.match(String(bogus.result?.message), /Unknown Plugin action/);
 });
 
-test("client commands: registry metadata parity with in-process (drift gate)", async (t) => {
-  // 对抗评审 P1：手镜像元数据已漂移（6 别名缺失/availability 分叉）。本测试把
-  // 双注册表拉到同一断言下——镜像集的 name/aliases/availability/usage 必须与
-  // in-process 一致，有意分歧按豁免表声明（含理由）。
-  const root = await mkdtemp(join(tmpdir(), "pico-cmd-parity-"));
-  const workspaceSeed = join(root, "workspace");
-  const picoHome = join(root, "pico-home");
-  await mkdir(workspaceSeed, { recursive: true });
-  await mkdir(picoHome, { recursive: true });
-  t.after(() => rm(root, { recursive: true, force: true }));
-
-  const inProcess = await createPicoCommandRegistry({
-    workDir: workspaceSeed,
-    picoHome,
-    provider: "openai",
-    model: "test-model",
-    tools: [],
-  });
-  const harness = createHarness({ sessionId: "s1" });
-  const client = harness.registry;
-
-  // 有意分歧豁免（availability）：/skill /agent 经 session.send 排队，运行中合法。
-  const availabilityExemptions = new Set(["skill", "agent"]);
-  const mirrored = [
-    "status",
-    "model",
-    "thinking",
-    "mode",
-    "plan",
-    "permissions",
-    "graph",
-    "goal",
-    "rename",
-    "compact",
-    "rewind",
-    "changes",
-    "init",
-    "doctor",
-    "usage",
-    "sessions",
-    "resume",
-    "fork",
-    "new",
-    "steer",
-    "queue",
-    "replace",
-    "interrupt",
-    "skill",
-    "agent",
-    "skills",
-    "agents",
-    "explore",
-    "memory",
-    "provider",
-    "cron",
-    "help",
-    "clear",
-    "exit",
-  ];
-  for (const name of mirrored) {
-    const mine = client.resolve(name);
-    const reference = inProcess.resolve(name);
-    assert.ok(reference, `in-process 应有 /${name}（镜像集清单过期？）`);
-    assert.ok(mine, `客户端应有 /${name}`);
+test("client memory undo rejects stale and malformed tokens before an update RPC", async () => {
+  const harness = createHarness({ staleMemoryUndo: true });
+  try {
+    const remembered = await run(harness, "/memory remember Keep explanations concise.");
+    const token = remembered.result?.message?.split("/memory undo ")[1];
+    assert.ok(token);
+    harness.requests.length = 0;
+    const stale = await run(harness, `/memory undo ${token}`);
+    assert.match(stale.result?.message ?? "", /fact changed/);
     assert.deepEqual(
-      [...(mine.aliases ?? [])].sort(),
-      [...(reference.aliases ?? [])].sort(),
-      `/${name} 别名应与 in-process 一致`,
+      harness.requests.map((request) => request.method),
+      ["memory.get"],
     );
-    assert.equal(mine.usage, reference.usage, `/${name} usage 应与 in-process 一致`);
-    assert.equal(
-      mine.argumentHint ?? undefined,
-      reference.argumentHint ?? undefined,
-      `/${name} argumentHint 应与 in-process 一致（对抗评审二轮：补齐后入漂移门）`,
-    );
-    assert.equal(
-      mine.category ?? undefined,
-      reference.category ?? undefined,
-      `/${name} category 应与 in-process 一致`,
-    );
-    if (!availabilityExemptions.has(name)) {
-      assert.equal(
-        mine.availability ?? "always",
-        reference.availability ?? "always",
-        `/${name} availability 应与 in-process 一致（分歧须进豁免表并给理由）`,
-      );
-    }
+    harness.requests.length = 0;
+    const invalid = await run(harness, "/memory undo malformed-token");
+    assert.match(invalid.result?.message ?? "", /invalid memory undo token/);
+    assert.deepEqual(harness.requests, []);
+  } finally {
+    await harness.runtime.dispose();
   }
+});
 
-  // 覆盖清单：in-process 核心命令（builtin 源）要么被镜像，要么在延后清单里
-  //（用户技能/插件注入的命令不在此列）。延后分两类（对抗评审二轮重划）：
-  // BLOCKED=协议缺口（注释标缺失 RPC）；DEFERRED=优先级（RPC 已在，tier2 镜像）。
-  const deferred = new Set<string>([]);
-  // 注：/mcp 已镜像状态、enable/disable 和 reload 说明；活连接、
-  // Resources/Prompts 不在 TUI 命令面暴露。
-  // 注：/context 已镜像（session.context.get 新协议方法，daemon 复用
-  // createModelContextReport）；/snapshots 已镜像（rewind.* 等价能力，纯客户端）；
-  // /add-dir 已镜像（session.directories.add 新协议方法，daemon 校验+持久化）；
-  // /hooks 已镜像（hooks.manage 单方法六动作，daemon 每请求装配管理面）；
-  // /operations 已镜像（operations.manage 单方法四动作，daemon 复用
-  // SessionForkService——与 forkSession 同构装配）；
-  // /plugin 已镜像（plugin.manage 单方法七动作，trust 两阶段无状态化——
-  // confirm 以 fresh proposal 校验 confirmId+指纹，客户端不持有 pending）。
-  // BLOCKED 豁免表已清空（2026-08-16 全部收口）。
-  // 注：/memory /provider /cron 已镜像；/cron add/credential 通过
-  // automation.* 安全 RPC 创建并导入 write-only 凭据。/provider default clear 仍
-  // 明确降级为提示。model-usage/agents-usage 是过期豁免名
-  // （in-process 从无此命令），已删除。
-  // 注：/rewind /changes 已镜像（rewind.list/preview/apply + mode 参数）；
-  // discovery 不在清单——协议方法已被 daemon 下线（METHOD_NOT_FOUND）且
-  // in-process 无此命令，豁免注释过期已修正（3-D Phase 3 剩余收口）。
-  const coreInProcess = inProcess
-    .list({ includeHidden: false })
-    .filter((command) => (command.source ?? "builtin") === "builtin")
-    .map((command) => command.name)
-    .filter((name) => !deferred.has(name));
-  for (const name of coreInProcess) {
-    assert.ok(
-      client.resolve(name) !== undefined || deferred.has(name),
-      `in-process 核心命令 /${name} 应被客户端镜像或列入延后清单`,
-    );
-  }
-
+test("client commands preserve public metadata and registration order", () => {
+  const harness = createHarness({ sessionId: "s1" });
+  const metadata = harness.registry
+    .list()
+    .map(({ name, aliases, description, usage, argumentHint, category, availability }) => ({
+      name,
+      aliases,
+      description,
+      usage,
+      argumentHint,
+      category,
+      availability,
+    }));
+  assert.deepEqual(JSON.parse(JSON.stringify(metadata)), [
+    {
+      name: "help",
+      aliases: ["h", "?"],
+      description: "Show available slash commands",
+      usage: "/help [command]",
+      category: "help",
+      availability: "always",
+    },
+    {
+      name: "clear",
+      aliases: ["cls"],
+      description: "Clear the local transcript view",
+      usage: "/clear",
+      category: "system",
+      availability: "idle",
+    },
+    {
+      name: "exit",
+      aliases: ["quit", "q"],
+      description: "Exit the interactive session",
+      usage: "/exit",
+      category: "system",
+      availability: "idle",
+    },
+    {
+      name: "model",
+      aliases: ["models"],
+      description: "查看或切换模型路由",
+      usage: "/model [name]",
+      argumentHint: "[name]",
+      category: "model",
+      availability: "idle",
+    },
+    {
+      name: "thinking",
+      aliases: ["effort"],
+      description: "查看或设置思考强度",
+      usage: "/thinking [level]",
+      argumentHint: "[model level]",
+      category: "model",
+      availability: "idle",
+    },
+    {
+      name: "mode",
+      aliases: [],
+      description: "查看或切换协作模式",
+      usage: "/mode <default|plan|auto|yolo>",
+      argumentHint: "<default|plan|auto|yolo>",
+      category: "session",
+      availability: "idle",
+    },
+    {
+      name: "plan",
+      aliases: [],
+      description: "进入或退出计划模式",
+      usage: "/plan [on|off]",
+      argumentHint: "[on|off]",
+      category: "session",
+      availability: "idle",
+    },
+    {
+      name: "permissions",
+      aliases: ["permission"],
+      description: "查看或设置权限模式",
+      usage: "/permissions [default|auto|yolo|plan]",
+      argumentHint: "[default|auto|yolo|plan]",
+      category: "permissions",
+      availability: "idle",
+    },
+    {
+      name: "graph",
+      aliases: [],
+      description: "查看或切换 Graph Mode",
+      usage: "/graph [on|off]",
+      argumentHint: "[on|off]",
+      category: "session",
+      availability: "idle",
+    },
+    {
+      name: "swarm",
+      aliases: [],
+      description: "查看或切换 Swarm 编排，或用 Swarm 执行一次任务",
+      usage: "/swarm [on|off|status|task]",
+      argumentHint: "[on|off|status|task]",
+      category: "session",
+      availability: "idle",
+    },
+    {
+      name: "status",
+      aliases: ["st"],
+      description: "查看会话与配置状态",
+      usage: "/status",
+      category: "session",
+      availability: "always",
+    },
+    {
+      name: "goal",
+      aliases: [],
+      description: "查看当前目标",
+      usage: "/goal",
+      category: "session",
+      availability: "always",
+    },
+    {
+      name: "rename",
+      aliases: [],
+      description: "重命名当前会话",
+      usage: "/rename <title>",
+      argumentHint: "<title>",
+      category: "session",
+      availability: "idle",
+    },
+    {
+      name: "compact",
+      aliases: [],
+      description: "压缩当前会话上下文（daemon 侧执行）",
+      usage: "/compact",
+      category: "session",
+      availability: "idle",
+    },
+    {
+      name: "plugin",
+      aliases: ["plugins"],
+      description: "Install, inspect, trust, enable or disable local plugins",
+      usage:
+        "/plugin [list|install <path>|inspect <id>|trust <id>|enable <id>|disable <id>] [--scope user|project|local]",
+      category: "system",
+      availability: "idle",
+    },
+    {
+      name: "operations",
+      aliases: ["ops"],
+      description: "Inspect and dispose storage operations needing attention",
+      usage:
+        "Usage:\n  /operations list\n  /operations show <operation-id>\n  /operations retry <operation-id> <expected-version> [reason]\n  /operations abort <operation-id> <expected-version> [reason]",
+      argumentHint: "[list|show|retry|abort]",
+      category: "system",
+      availability: "idle",
+    },
+    {
+      name: "hooks",
+      aliases: [],
+      description: "List, review, trust, enable, disable, or reload Hooks",
+      usage: "/hooks [list|review|trust|enable|disable|reload] [handler-id]",
+      category: "system",
+      availability: "idle",
+    },
+    {
+      name: "add-dir",
+      aliases: [],
+      description: "Add a directory to the current session workspace",
+      usage: "/add-dir [directory]",
+      argumentHint: "[directory]",
+      category: "workspace",
+      availability: "idle",
+    },
+    {
+      name: "context",
+      aliases: [],
+      description: "Show the active route context budget and capabilities",
+      usage: "/context",
+      category: "model",
+      availability: "always",
+    },
+    {
+      name: "snapshots",
+      aliases: ["snapshot"],
+      description: "List current session rewind points",
+      usage: "/snapshots",
+      category: "session",
+      availability: "idle",
+    },
+    {
+      name: "rewind",
+      aliases: ["checkpoint"],
+      description: "Open the rewind menu for code and conversation checkpoints",
+      usage: "/rewind",
+      category: "session",
+      availability: "idle",
+    },
+    {
+      name: "changes",
+      aliases: [],
+      description: "Preview a message checkpoint and partially rewind one file",
+      usage: "/changes [message-id]",
+      argumentHint: "[message-id]",
+      category: "session",
+      availability: "idle",
+    },
+    {
+      name: "init",
+      aliases: [],
+      description: "生成项目上下文文件（daemon 侧执行）",
+      usage: "/init",
+      availability: "idle",
+    },
+    {
+      name: "doctor",
+      aliases: [],
+      description: "运行诊断",
+      usage: "/doctor [resources]",
+      argumentHint: "[resources]",
+      availability: "idle",
+    },
+    {
+      name: "usage",
+      aliases: [],
+      description: "查看用量",
+      usage: "/usage",
+      category: "model",
+      availability: "always",
+    },
+    {
+      name: "sessions",
+      aliases: ["session-list"],
+      description: "列出工作区会话",
+      usage: "/sessions",
+      category: "session",
+      availability: "idle",
+    },
+    {
+      name: "resume",
+      aliases: [],
+      description: "恢复指定会话",
+      usage: "/resume <session-id>",
+      argumentHint: "<session-id>",
+      category: "session",
+      availability: "idle",
+    },
+    {
+      name: "fork",
+      aliases: [],
+      description: "分叉指定会话",
+      usage: "/fork <session-id>",
+      argumentHint: "<session-id>",
+      category: "session",
+      availability: "idle",
+    },
+    {
+      name: "new",
+      aliases: [],
+      description: "开始新会话（下次发送时创建）",
+      usage: "/new",
+      category: "session",
+      availability: "idle",
+    },
+    {
+      name: "steer",
+      aliases: [],
+      description: "转向当前 run",
+      usage: "/steer <guidance>",
+      argumentHint: "<text>",
+      category: "session",
+      availability: "running",
+    },
+    {
+      name: "queue",
+      aliases: [],
+      description: "排队下一条输入",
+      usage: "/queue <prompt>",
+      argumentHint: "<text>",
+      category: "session",
+      availability: "running",
+    },
+    {
+      name: "replace",
+      aliases: [],
+      description: "替换当前 run",
+      usage: "/replace <prompt>",
+      argumentHint: "<text>",
+      category: "session",
+      availability: "running",
+    },
+    {
+      name: "interrupt",
+      aliases: [],
+      description: "中断当前 run",
+      usage: "/interrupt",
+      category: "session",
+      availability: "running",
+    },
+    {
+      name: "skill",
+      aliases: ["use-skill"],
+      description: "请求 agent 使用指定技能（daemon 侧解析）",
+      usage: "/skill <name> [arguments]",
+      argumentHint: "<name> [arguments]",
+      category: "skill",
+      availability: "always",
+    },
+    {
+      name: "agent",
+      aliases: [],
+      description: "派发命名 agent 任务（daemon 侧解析）",
+      usage: "/agent <name> <task>",
+      argumentHint: "<name> <task>",
+      category: "agent",
+      availability: "always",
+    },
+    {
+      name: "skills",
+      aliases: ["skill-list"],
+      description: "列出可用技能",
+      usage: "/skills",
+      category: "skill",
+      availability: "idle",
+    },
+    {
+      name: "agents",
+      aliases: [],
+      description: "列出可用 agent",
+      usage: "/agents",
+      availability: "idle",
+    },
+    {
+      name: "explore",
+      aliases: [],
+      description: "（已弃用）仓库探索已内建",
+      usage: "/explore",
+      category: "workspace",
+      availability: "idle",
+    },
+    {
+      name: "memory",
+      aliases: [],
+      description: "Remember a workspace fact or control workspace memory",
+      usage: "/memory remember <text>|status|off|on",
+      argumentHint: "remember <text>|status|off|on",
+      category: "workspace",
+      availability: "idle",
+    },
+    {
+      name: "provider",
+      aliases: [],
+      description: "Manage shared user providers without exposing credentials in command arguments",
+      usage:
+        "/provider [list | import-env <id> [--confirm] | default <provider/model|clear> | delete <id>]",
+      argumentHint: "[list | import-env | default | delete]",
+      category: "model",
+      availability: "idle",
+    },
+    {
+      name: "cron",
+      aliases: [],
+      description: "Manage persistent YOLO cron jobs for this workspace",
+      usage:
+        "/cron <status|list|credential|add|enable|disable|delete|runs> [--tool-network=allow|disabled|allowlist:host1,host2] [arguments]",
+      argumentHint: "<status|list|credential|add|enable|disable|delete|runs>",
+      category: "workspace",
+      availability: "idle",
+    },
+    {
+      name: "mcp",
+      aliases: [],
+      description: "Inspect and control MCP server connections",
+      usage: "/mcp [reload|enable <server>|disable <server>]",
+      category: "mcp",
+      availability: "always",
+    },
+  ]);
   harness.runtime.dispose();
 });
 

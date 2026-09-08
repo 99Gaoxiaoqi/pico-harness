@@ -6,7 +6,12 @@ import test from "node:test";
 
 import { runCli, type CliRuntime } from "../../../src/cli/main.js";
 import { PromptComposer } from "../../../src/context/composer.js";
-import { createPicoCommandRegistry } from "../../../src/input/pico-command-registry.js";
+import { createClientCommandRegistry } from "../../../src/tui/client-commands.js";
+import {
+  ClientSessionRuntime,
+  type DaemonSessionClient,
+} from "../../../src/tui/client-session-runtime.js";
+import { TuiReporter } from "../../../src/tui/tui-reporter.js";
 import type { ClientReplOptions } from "../../../src/tui/client-repl.js";
 import { PICO_TOOL_GROUPS } from "../../../src/tools/tool-surface.js";
 
@@ -96,19 +101,17 @@ test("CLI 和 /graph 帮助保留公开模式名且不再暴露旧调度器", as
     assert.doesNotMatch(cliHelp, new RegExp(`\\b${toolName}\\b`, "u"));
   }
 
-  const registry = await createPicoCommandRegistry({
-    workDir,
-    model: "fixture-model",
-    provider: "openai",
-    sessionId: "graph-help",
-    includeUserSkillResources: false,
-    includeClaudeProjectResources: false,
-    includeClaudeUserResources: false,
+  const clientRuntime = new ClientSessionRuntime({
+    client: {} as DaemonSessionClient,
+    workspacePath: workDir,
+    reporter: new TuiReporter({ onProjectionUpdate: () => undefined }),
   });
+  context.after(() => clientRuntime.dispose());
+  const registry = createClientCommandRegistry({ runtime: clientRuntime, workspacePath: workDir });
   const graph = registry.resolve("graph");
   assert.ok(graph);
   assert.equal(graph.usage, "/graph [on|off]");
-  assert.match(graph.description, /persistent Agent Graph orchestration mode/u);
+  assert.match(graph.description, /Graph Mode/u);
   const candidates = await graph.argumentCompleter?.("");
   assert.deepEqual(
     candidates?.map((candidate) => candidate.value),
