@@ -1,6 +1,7 @@
 import type { ConversationItemView } from "./conversation/types.js";
 import type {
   UsageDashboardDetails,
+  ApprovalSessionScopeView,
   RuntimeCapabilityScope,
   RuntimeCollaborationMode,
   RuntimeInteractionMode,
@@ -181,6 +182,10 @@ export interface CatalogSkillView {
 }
 
 export interface ApprovalView {
+  readonly diff?: string | undefined;
+  readonly sessionScope?: ApprovalSessionScopeView | undefined;
+  readonly toolName?: string | undefined;
+  readonly providerCallId?: string | undefined;
   readonly id: string;
   readonly runId: string;
   readonly sessionId?: string | undefined;
