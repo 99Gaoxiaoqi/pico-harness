@@ -388,10 +388,12 @@ export function ConversationPage() {
     const discovery = conversation?.discoveryItem ? [conversation.discoveryItem] : [];
     return omitApprovalAuditItems(
       mergeConversationItemGroups(persisted, goal, discovery, live, decisions),
+      pendingApproval?.providerCallId,
     );
   }, [
     activeRun,
     data.approvals,
+    pendingApproval?.providerCallId,
     conversation,
     data.prompts,
     data.timeline,

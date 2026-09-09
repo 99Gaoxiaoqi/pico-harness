@@ -4228,8 +4228,8 @@
 .approval-details {
   display: grid;
   min-width: 0;
-  gap: 12px;
-  margin-top: 12px;
+  gap: 6px;
+  margin-top: 0;
   font-size: 12px;
 }
 .approval-details__section,
@@ -4240,6 +4240,8 @@
 }
 .approval-details strong {
   font-size: 12px;
+  font-weight: 500;
+  color: var(--ink-secondary);
 }
 .approval-details p {
   margin: 0;
@@ -4250,9 +4252,9 @@
   overflow: auto;
   padding: 10px;
   margin: 0;
-  border: 1px solid var(--conversation-line, #d9d6cc);
+  border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--conversation-bg-strong, #f4f3ef);
+  background: var(--surface-muted);
   color: inherit;
   font-size: 12px;
   white-space: pre-wrap;
@@ -4260,11 +4262,12 @@
   tab-size: 2;
 }
 .approval-details__scope {
-  padding: 10px;
-  border-left: 2px solid var(--conversation-warning, #a87223);
+  padding: 0;
+  border: 0;
+  color: var(--ink-secondary);
 }
 .approval-details__technical {
-  color: var(--conversation-ink-muted, #68675f);
+  color: var(--ink-secondary);
 }
 .approval-details__technical summary {
   cursor: pointer;
@@ -4284,4 +4287,78 @@
 }
 .dialog:has(.approval-details) .dialog__actions {
   flex-wrap: wrap;
+}
+
+/* Approval uses the same neutral surfaces as the surrounding conversation. */
+.conversation-interaction-slot:has(.approval-details) {
+  gap: 8px;
+  padding: 12px;
+  border-color: var(--line);
+  border-radius: var(--conversation-radius);
+  background: var(--surface-raised);
+  box-shadow: none;
+}
+.conversation-interaction-slot:has(.approval-details)
+  .conversation-interaction-slot__heading
+  > span {
+  color: var(--ink-secondary);
+  font-weight: 500;
+}
+.conversation-interaction-slot:has(.approval-details) .conversation-interaction-slot__heading h2 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 3px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.conversation-interaction-slot:has(.approval-details) .approval-details pre {
+  background: var(--surface-muted);
+  border-color: var(--line);
+  font-family: var(--font-mono);
+}
+.conversation-interaction-slot:has(.approval-details) .conversation-interaction-slot__actions {
+  padding-top: 4px;
+}
+.conversation-interaction-slot:has(.approval-details)
+  .conversation-interaction-slot__actions
+  button:not(.is-primary) {
+  border-color: transparent;
+  background: var(--surface-muted);
+  color: var(--ink);
+}
+.conversation-interaction-slot:has(.approval-details)
+  .conversation-interaction-slot__actions
+  button:not(.is-primary):hover:not(:disabled) {
+  background: var(--surface-strong);
+}
+.dialog:has(.approval-details) .dialog__icon--warning {
+  background: var(--surface-muted);
+  color: var(--ink-secondary);
+}
+
+/* Keep the decision visible; expand the potentially long diff only on demand. */
+.approval-details__target {
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--surface-muted);
+  overflow-wrap: anywhere;
+}
+.approval-details__target code {
+  font-family: var(--font-mono);
+}
+.approval-details__section summary {
+  cursor: pointer;
+  color: var(--ink-secondary);
+}
+.approval-details__section[open] summary {
+  margin-bottom: 6px;
+}
+.conversation-interaction-slot:has(.approval-details)
+  .conversation-interaction-slot__heading
+  h2
+  svg {
+  width: 16px;
+  height: 16px;
+  color: var(--ink-secondary);
 }

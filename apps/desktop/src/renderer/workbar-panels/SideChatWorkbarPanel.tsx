@@ -1,6 +1,7 @@
 import { CircleAlert, GitFork, LoaderCircle, Send, Square, X } from "lucide-react";
 import type { FormEvent, KeyboardEvent, ReactNode } from "react";
 
+import { omitApprovalAuditItems } from "../conversation/items.js";
 import { ConversationTranscript } from "../conversation/ConversationTranscript.js";
 import type { ConversationItemView } from "../conversation/types.js";
 
@@ -35,6 +36,7 @@ export interface SideChatWorkbarPanelProps {
   readonly error?: SideChatPanelError | null;
   readonly pendingPrompt?: ReactNode;
   readonly pendingApproval?: ReactNode;
+  readonly pendingApprovalCallId?: string | undefined;
   readonly onSend: (message: string) => void;
   readonly onStop: () => void;
   readonly onDraftChange: (draft: string) => void;
@@ -66,6 +68,7 @@ export function SideChatWorkbarPanel({
   error,
   pendingPrompt,
   pendingApproval,
+  pendingApprovalCallId,
   onSend,
   onStop,
   onDraftChange,
@@ -150,7 +153,7 @@ export function SideChatWorkbarPanel({
           </div>
         ) : child.state === "live" ? (
           <ConversationTranscript
-            items={items}
+            items={omitApprovalAuditItems(items, pendingApprovalCallId)}
             label="临时分支会话记录"
             onOpenItem={onOpenItem}
             emptyState={
