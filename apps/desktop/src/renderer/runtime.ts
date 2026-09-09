@@ -1,8 +1,8 @@
+import { parseDesktopToolApproval } from "./runtime-projections/approval.js";
 import {
   CAPABILITY_SCOPE_RUNTIME_CAPABILITY,
   isJsonValue,
   isTerminalRunStatus,
-  parseApprovalRequestedPayload,
   type DesktopRuntimeMethod,
   type RuntimeDiagnosticCheck,
   type RuntimeMcpServerInput,
@@ -1319,24 +1319,20 @@ export function useRuntimeStore(): RuntimeStore {
       } else if (topic === "approval.requested") {
         // wire 语义读取经 @pico/protocol parseApprovalRequestedPayload（与 TUI
         // 客户端同源；planId 不回退 approvalId 的兜底语义由此回流）。
-        const approval = parseApprovalRequestedPayload(payload);
+        const approval = parseDesktopToolApproval(payload, {
+          runId: stringValue(scope.runId),
+          sessionId: stringValue(scope.sessionId) || undefined,
+        });
         // Plan cards are recovery-capable controls, so only the durable PlanControl
         // snapshot/projection may create them. Generic approval replay remains display
         // authority for non-Plan approvals only.
-        if (approval && approval.kind !== "plan") {
+        if (approval) {
           setData((current) => ({
             ...current,
             approvals: [
-              ...current.approvals.filter((item) => item.id !== approval.approvalId),
+              ...current.approvals.filter((item) => item.id !== approval.id),
               {
-                id: approval.approvalId,
-                runId: approval.runId ?? stringValue(scope.runId),
-                sessionId: stringValue(scope.sessionId) || undefined,
-                title: approval.title ?? "需要你的批准",
-                detail: approval.detail ?? "Runtime 请求执行受保护操作。",
-                command: approval.command,
-                risk: approval.risk,
-                kind: approval.kind,
+                ...approval,
               },
             ],
           }));

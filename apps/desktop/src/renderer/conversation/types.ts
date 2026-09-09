@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { RuntimeToolResultEnvelope } from "@pico/protocol";
+import type { ApprovalSessionScopeView, RuntimeToolResultEnvelope } from "@pico/protocol";
 
 export type ConversationRunStatus = "started" | "completed" | "interrupted" | "failed";
 
@@ -100,6 +100,12 @@ export interface SubagentItemView extends ConversationItemBase {
 }
 
 export interface ApprovalItemView extends ConversationItemBase {
+  readonly command?: string | undefined;
+  readonly risk?: "low" | "medium" | "high" | undefined;
+  readonly diff?: string | undefined;
+  readonly sessionScope?: ApprovalSessionScopeView | undefined;
+  readonly toolName?: string | undefined;
+  readonly providerCallId?: string | undefined;
   readonly kind: "approval";
   readonly approvalKind?: "tool" | "plan" | undefined;
   readonly title: string;

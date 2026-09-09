@@ -1,3 +1,4 @@
+import { parseDesktopToolApproval } from "../runtime-projections/approval.js";
 import { subagentMetadata } from "./subagent-navigation.js";
 import {
   type RuntimeActiveOverlayEntry,
@@ -353,10 +354,20 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
   if (item.kind === "approval") {
     const data = isRecord(item.data) ? item.data : {};
     const decision = stringValue(data.decision ?? item.state);
+    const approval = parseDesktopToolApproval({
+      approvalId: stringValue(data.approvalId, id),
+      request: data,
+    });
     return {
       id: structuredItemId("approval", data, id),
       kind: "approval",
       approvalKind: data.kind === "plan" || data.planId || data.plan ? "plan" : "tool",
+      command: approval?.command,
+      risk: approval?.risk,
+      diff: approval?.diff,
+      sessionScope: approval?.sessionScope,
+      toolName: approval?.toolName,
+      providerCallId: approval?.providerCallId,
       title: stringValue(item.title, "需要你的批准"),
       detail: stringValue(item.detail, "Runtime 请求执行受保护操作。"),
       state:
