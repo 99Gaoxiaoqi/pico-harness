@@ -1,6 +1,6 @@
 import { createConfiguredSubagentOutputStore } from "../../../src/runtime/configured-subagent-output-store.js";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, realpath, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -288,6 +288,54 @@ test("agent_spawn continues its completed child with durable history and rejects
       },
     );
     assert.equal(foreignCalls, 2);
+    // A normal UI/CLI resume carries no configuredSubagentChild dependency.
+    // Even a full-access request must restore the durable child's capability boundary.
+    await globalSessionManager.clearAndDrain();
+    let manualCalls = 0;
+    const manual = await new AgentRuntime().execute(
+      {
+        ...input,
+        sessionSelection: { mode: "resume", sessionId: childSessionId },
+        prompt: "Continue manually and try to write a file",
+        interactionMode: "yolo",
+        orchestrationMode: "swarm",
+      },
+      {
+        picoHome,
+        modelRouter,
+        reporter: new SilentReporter(),
+        hostKind: "desktop",
+        maxTurns: 3,
+        providerFactory: () => ({
+          async generate(messages, tools) {
+            assert.deepEqual(tools!.map((tool) => tool.name).sort(), ["glob", "grep", "read_file"]);
+            assert.ok(messages.some((m) => m.content.includes("OLD_CHILD_TOKEN_73")));
+            assert.ok(
+              messages.some((m) =>
+                m.content.includes(requireSubagentCapability("local_read").systemPrompt),
+              ),
+            );
+            if (++manualCalls === 1)
+              return {
+                role: "assistant" as const,
+                content: "",
+                toolCalls: [
+                  {
+                    id: "forbidden-write",
+                    name: "write_file",
+                    arguments: JSON.stringify({ path: "must-not-exist.txt", content: "bad" }),
+                  },
+                ],
+              };
+            assert.ok(messages.some((m) => m.toolCallId === "forbidden-write"));
+            return { role: "assistant" as const, content: "Manual continuation remains read-only" };
+          },
+        }),
+      },
+    );
+    assert.equal(manual.sessionId, childSessionId);
+    assert.equal(manualCalls, 2);
+    await assert.rejects(readFile(join(workDir, "must-not-exist.txt")), { code: "ENOENT" });
   } finally {
     await globalSessionManager.clearAndDrain();
     await rm(root, { recursive: true, force: true });

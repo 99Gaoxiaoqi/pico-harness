@@ -1,4 +1,5 @@
 import { createConfiguredSubagentOutputTool } from "../tools/configured-subagent-output.js";
+import { readConfiguredSubagentDefinition } from "./configured-subagent-session.js";
 import {
   createConfiguredSubagentOutputStore,
   ConfiguredSubagentOutputNotFoundError,
@@ -945,6 +946,36 @@ export async function executeAgentRuntime(
   cleanupScope.register("Workspace memory repository", () => memoryRepository?.close());
 
   try {
+    const childDefinition = session.runtimeEventStore
+      ? await readConfiguredSubagentDefinition(session.runtimeEventStore, session.id, workDir)
+      : undefined;
+    if (childDefinition) {
+      if (
+        dependencies.configuredSubagentChild &&
+        dependencies.configuredSubagentChild.definition.profile !== childDefinition.profile
+      )
+        throw new Error("Child session capability cannot change");
+      if (!dependencies.configuredSubagentChild && childDefinition.workspace !== "shared")
+        throw new Error("独立 worktree 子任务暂不支持续用，请从父任务启动新的子任务。");
+      dependencies = {
+        ...dependencies,
+        configuredSubagentChild: {
+          ...dependencies.configuredSubagentChild,
+          definition: childDefinition,
+        },
+      };
+    }
+    if (dependencies.configuredSubagentChild) {
+      if (backgroundPolicy || dependencies.agentGraph || options.approvedPlan)
+        throw new Error("Child session cannot switch execution policy");
+      options = {
+        ...options,
+        interactionMode: "default",
+        orchestrationMode: "default",
+        agentSwarmAuthorization: "none",
+        planMode: false,
+      };
+    }
     if (resumeExistingSession && dependencies.runtimeState === undefined) {
       throw new Error("resumeExistingSession requires an existing runtimeState.");
     }
@@ -989,7 +1020,9 @@ export async function executeAgentRuntime(
     if (!settings.collaborationMode) throw new Error("Session collaborationMode is unavailable");
     const sideConversation = settings.sideConversation === true;
     const collaborationMode = (): "agent" | "plan" =>
-      dependencies.agentGraph?.kind === "operator" ? "agent" : settings.collaborationMode!;
+      dependencies.configuredSubagentChild || dependencies.agentGraph?.kind === "operator"
+        ? "agent"
+        : settings.collaborationMode!;
     planRun = collaborationMode() === "plan";
     const inheritedAuthorization = await readInheritedRunSwarmAuthorization(
       session,
@@ -997,16 +1030,17 @@ export async function executeAgentRuntime(
       resumeExistingSession,
     );
     const requestedMode = options.orchestrationMode ?? settings.orchestrationMode ?? "default";
-    const agentSwarmAuthorization =
-      inheritedAuthorization ??
-      options.agentSwarmAuthorization ??
-      (requestedMode === "swarm"
-        ? options.orchestrationMode === "swarm"
-          ? "turn_override"
-          : "session_mode"
-        : "none");
+    const agentSwarmAuthorization = dependencies.configuredSubagentChild
+      ? "none"
+      : (inheritedAuthorization ??
+        options.agentSwarmAuthorization ??
+        (requestedMode === "swarm"
+          ? options.orchestrationMode === "swarm"
+            ? "turn_override"
+            : "session_mode"
+          : "none"));
     const orchestrationMode = (): "default" | "graph" | "swarm" =>
-      collaborationMode() === "plan"
+      dependencies.configuredSubagentChild || collaborationMode() === "plan"
         ? "default"
         : inheritedAuthorization !== undefined
           ? inheritedAuthorization !== "none"
@@ -1016,9 +1050,11 @@ export async function executeAgentRuntime(
               : requestedMode
           : requestedMode;
     const permissionMode = (): "default" | "auto" | "yolo" =>
-      dependencies.agentGraph?.kind === "operator"
-        ? dependencies.agentGraph.profileSnapshot.permissionPolicy.mode
-        : settings.permissionMode;
+      dependencies.configuredSubagentChild
+        ? "default"
+        : dependencies.agentGraph?.kind === "operator"
+          ? dependencies.agentGraph.profileSnapshot.permissionPolicy.mode
+          : settings.permissionMode;
     if (options.approvedPlan) {
       if (settings.collaborationMode !== "agent") {
         throw new Error("Approved plan execution requires collaborationMode=agent");
