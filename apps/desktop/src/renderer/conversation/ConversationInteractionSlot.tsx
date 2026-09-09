@@ -72,12 +72,21 @@ export function ConversationInteractionSlot({
   return (
     <section className="conversation-interaction-slot" aria-labelledby="pending-approval-title">
       <div className="conversation-interaction-slot__heading">
-        <span>
-          {activeGraphPlan ? <GitBranch aria-hidden="true" /> : <ShieldAlert aria-hidden="true" />}
-          {activeGraphPlan ? "计划执行进度" : planApproval ? "确认执行计划" : "等待操作授权"}
-        </span>
+        {planApproval && (
+          <span>
+            {activeGraphPlan ? (
+              <GitBranch aria-hidden="true" />
+            ) : (
+              <ShieldAlert aria-hidden="true" />
+            )}
+            {activeGraphPlan ? "计划执行进度" : "确认执行计划"}
+          </span>
+        )}
         <h2 id="pending-approval-title">
-          {planApproval ? (approval.planTitle ?? approval.title) : approvalActionTitle(approval)}
+          {!planApproval && <ShieldAlert aria-hidden="true" />}
+          {planApproval
+            ? (approval.planTitle ?? approval.title)
+            : `允许${approvalActionTitle(approval)}？`}
         </h2>
         <p>{approval.planOverview ?? approval.detail}</p>
       </div>

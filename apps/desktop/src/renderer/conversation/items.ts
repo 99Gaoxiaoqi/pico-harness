@@ -95,8 +95,18 @@ export function removeSupersededActiveTools(
 /** Approval decisions remain recoverable/auditable but belong outside the main transcript. */
 export function omitApprovalAuditItems(
   items: readonly ConversationItemView[],
+  pendingCallId?: string,
 ): readonly ConversationItemView[] {
-  return items.filter((item) => item.kind !== "approval");
+  return items.filter(
+    (item) =>
+      item.kind !== "approval" &&
+      !(
+        pendingCallId &&
+        item.kind === "tool" &&
+        item.state === "active" &&
+        item.toolCallId === pendingCallId
+      ),
+  );
 }
 
 /** Preserve only the still-live item for the exact active Run across transcript hydration. */

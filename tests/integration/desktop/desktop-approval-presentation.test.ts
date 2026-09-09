@@ -72,7 +72,8 @@ test("审批卡按真实 scope 展示授权范围、单次批准和变更预览"
     ])
       assert.ok(html.includes(text), text);
     assert.ok(html.includes("完整工具参数"));
-    assert.match(html, /<strong>路径<\/strong><pre>\/tmp\/report.txt<\/pre>/u);
+    assert.match(html, /aria-label="路径"><code>\/tmp\/report.txt<\/code>/u);
+    assert.match(html, /<details class="approval-details__section"><summary>查看修改<\/summary>/u);
     assert.match(html, /<details[^>]*><summary>技术详情<\/summary>/u);
     assert.doesNotMatch(html, /本任务内允许|风险等级/u);
   }

@@ -233,6 +233,7 @@ export function SideChatPanelController({
           />
         ) : undefined
       }
+      pendingApprovalCallId={pendingApproval?.providerCallId}
       onDraftChange={setDraft}
       onSend={(message) => {
         if (!targetSessionId) return;

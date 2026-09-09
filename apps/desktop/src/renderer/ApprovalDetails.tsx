@@ -34,16 +34,14 @@ export function approvalScopeLabel(scope: ApprovalSessionScopeView): string {
 function ScopeDescription({ scope }: { readonly scope: ApprovalSessionScopeView }) {
   switch (scope.type) {
     case "all-edits":
-      return <p>权限切换为“自动”：本任务内普通文件修改无需逐次确认，敏感操作仍可能需要授权。</p>;
+      return <p>选择自动允许后，权限切换为“自动”；本任务普通修改免审批，敏感操作仍需确认。</p>;
     case "directories":
       return (
         <>
           <p>{scope.access === "read" ? "读取" : "修改"} · 加入任务授权目录 · 本任务有效</p>
           <pre>{scope.directories.join("\n")}</pre>
           {scope.enableAutoEdits && (
-            <p>
-              同时将权限切换为“自动”：本任务内普通文件修改无需逐次确认，敏感操作仍可能需要授权。
-            </p>
+            <p>选择加入授权目录后，权限切换为“自动”；本任务普通修改免审批，敏感操作仍需确认。</p>
           )}
         </>
       );
@@ -109,14 +107,13 @@ export function ApprovalDetails({ approval }: { readonly approval: ApprovalView 
   return (
     <div className="approval-details">
       {approval.command && (
-        <div className="approval-details__section">
-          <strong>{operation.label}</strong>
-          <pre>{operation.text}</pre>
+        <div className="approval-details__target" aria-label={operation.label}>
+          <code>{operation.text}</code>
         </div>
       )}
       {approval.diff !== undefined && (
-        <div className="approval-details__section">
-          <strong>变更预览</strong>
+        <details className="approval-details__section">
+          <summary>查看修改</summary>
           <pre className="approval-details__diff" aria-label="文件变更预览">
             {approval.diff.split("\n").map((line, index) => (
               <span
@@ -135,11 +132,10 @@ export function ApprovalDetails({ approval }: { readonly approval: ApprovalView 
             ))}
           </pre>
           {approval.toolName === "bash" && <p>此预览表示写入意图，实际结果由命令执行决定。</p>}
-        </div>
+        </details>
       )}
       {approval.sessionScope && (
         <div className="approval-details__scope">
-          <strong>选择“{approvalScopeLabel(approval.sessionScope)}”的授权范围</strong>
           <ScopeDescription scope={approval.sessionScope} />
         </div>
       )}

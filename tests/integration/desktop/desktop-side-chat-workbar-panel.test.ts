@@ -148,3 +148,71 @@ test("Side Chat exposes pending interactions and running controls", () => {
   assert.match(markup, />停止</u);
   assert.match(markup, /下一步/u);
 });
+
+test("侧聊中的一次编辑审批只显示一个操作卡，审计记录不重复展示", async () => {
+  const { ConversationInteractionSlot } =
+    await import("../../../apps/desktop/src/renderer/conversation/ConversationInteractionSlot.js");
+  const markup = renderToStaticMarkup(
+    React.createElement(SideChatWorkbarPanel, {
+      child: {
+        panelId: "panel",
+        sourceSessionId: "parent",
+        targetSessionId: "child",
+        state: "live",
+      },
+      items: [
+        {
+          id: "approval:edit-1",
+          kind: "approval",
+          title: "重复审计标题",
+          detail: "edit file",
+          state: "pending",
+        },
+        {
+          id: "tool-1",
+          kind: "tool",
+          toolCallId: "call-1",
+          toolName: "edit_file",
+          title: "重复执行卡",
+          state: "active",
+        },
+        {
+          id: "tool-2",
+          kind: "tool",
+          toolCallId: "call-2",
+          toolName: "edit_file",
+          title: "另一编辑调用",
+          state: "active",
+        },
+      ],
+      pendingApprovalCallId: "call-1",
+      pendingApproval: React.createElement(ConversationInteractionSlot, {
+        approval: {
+          id: "edit-1",
+          runId: "run",
+          kind: "tool",
+          title: "批准",
+          detail: "edit file",
+          toolName: "edit_file",
+          risk: "medium",
+        },
+        busy: false,
+        onApprovalDecision: noop,
+        onPromptAnswer: noop,
+      }),
+      draft: "",
+      active: true,
+      running: true,
+      loading: false,
+      onSend: noop,
+      onStop: noop,
+      onDraftChange: noop,
+      onRetryCreate: noop,
+      onClose: noop,
+    }),
+  );
+  assert.equal((markup.match(/id="pending-approval-title"/gu) ?? []).length, 1);
+  assert.equal((markup.match(/仅允许这次/gu) ?? []).length, 1);
+  assert.doesNotMatch(markup, /重复审计标题|重复执行卡|等待审批/u);
+  assert.match(markup, /另一编辑调用/u);
+});
