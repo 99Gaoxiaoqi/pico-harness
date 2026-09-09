@@ -34,14 +34,16 @@ export function approvalScopeLabel(scope: ApprovalSessionScopeView): string {
 function ScopeDescription({ scope }: { readonly scope: ApprovalSessionScopeView }) {
   switch (scope.type) {
     case "all-edits":
-      return <p>本任务后续文件修改将自动允许，并切换到自动编辑模式（auto）。</p>;
+      return <p>权限切换为“自动”：本任务内普通文件修改无需逐次确认，敏感操作仍可能需要授权。</p>;
     case "directories":
       return (
         <>
           <p>{scope.access === "read" ? "读取" : "修改"} · 加入任务授权目录 · 本任务有效</p>
           <pre>{scope.directories.join("\n")}</pre>
           {scope.enableAutoEdits && (
-            <p>同时切换到自动编辑模式（auto），本任务后续文件修改将自动允许。</p>
+            <p>
+              同时将权限切换为“自动”：本任务内普通文件修改无需逐次确认，敏感操作仍可能需要授权。
+            </p>
           )}
         </>
       );
@@ -74,7 +76,12 @@ function ScopeDescription({ scope }: { readonly scope: ApprovalSessionScopeView 
 
 function operationPreview(approval: ApprovalView): { label: string; text: string | undefined } {
   const fallback = {
-    label: approval.toolName === "bash" ? "命令" : "操作内容",
+    label:
+      approval.toolName === "bash"
+        ? "命令"
+        : ["write_file", "edit_file", "read_file"].includes(approval.toolName ?? "")
+          ? "路径"
+          : "操作内容",
     text: approval.command,
   };
   if (!approval.command) return fallback;
