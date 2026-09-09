@@ -1,3 +1,4 @@
+import { ApprovalDetails, approvalActionTitle, approvalScopeLabel } from "./ApprovalDetails.js";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Tooltip from "@radix-ui/react-tooltip";
 import {
@@ -218,9 +219,15 @@ export function ApprovalDialog({
           <div className="dialog__icon dialog__icon--warning">
             <ShieldAlert aria-hidden="true" />
           </div>
-          <Dialog.Title>{approval.title}</Dialog.Title>
+          <Dialog.Title>
+            {planApproval ? approval.title : approvalActionTitle(approval)}
+          </Dialog.Title>
           <Dialog.Description id="approval-detail">{approval.detail}</Dialog.Description>
-          {approval.command && <pre className="command-preview">{approval.command}</pre>}
+          {planApproval ? (
+            approval.command && <pre className="command-preview">{approval.command}</pre>
+          ) : (
+            <ApprovalDetails approval={approval} />
+          )}
           {planApproval && (
             <div className="command-preview">
               {approval.planTitle && <strong>{approval.planTitle}</strong>}
@@ -246,10 +253,6 @@ export function ApprovalDialog({
               ) : null}
             </div>
           )}
-          <div className="risk-row">
-            <span>风险等级</span>
-            <StatusPill status={approval.risk === "low" ? "ready" : "attention"} />
-          </div>
           <div className="dialog__actions">
             {activeGraphPlan ? (
               <Button
@@ -307,9 +310,11 @@ export function ApprovalDialog({
                 <Button variant="danger" disabled={busy} onClick={() => onDecision("deny")}>
                   拒绝
                 </Button>
-                <Button disabled={busy} onClick={() => onDecision("allow_session")}>
-                  本任务内允许
-                </Button>
+                {approval.sessionScope && (
+                  <Button disabled={busy} onClick={() => onDecision("allow_session")}>
+                    {approvalScopeLabel(approval.sessionScope)}
+                  </Button>
+                )}
                 <Button variant="primary" disabled={busy} onClick={() => onDecision("allow_once")}>
                   仅允许这次
                 </Button>

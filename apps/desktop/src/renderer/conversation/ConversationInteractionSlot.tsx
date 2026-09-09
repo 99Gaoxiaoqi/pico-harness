@@ -1,5 +1,6 @@
 import { GitBranch, ShieldAlert, Square } from "lucide-react";
 import { useEffect, useState } from "react";
+import { ApprovalDetails, approvalActionTitle, approvalScopeLabel } from "../ApprovalDetails.js";
 import type { ApprovalView, PromptView } from "../model.js";
 
 type ApprovalDecision =
@@ -75,10 +76,16 @@ export function ConversationInteractionSlot({
           {activeGraphPlan ? <GitBranch aria-hidden="true" /> : <ShieldAlert aria-hidden="true" />}
           {activeGraphPlan ? "计划执行进度" : planApproval ? "确认执行计划" : "等待操作授权"}
         </span>
-        <h2 id="pending-approval-title">{approval.planTitle ?? approval.title}</h2>
+        <h2 id="pending-approval-title">
+          {planApproval ? (approval.planTitle ?? approval.title) : approvalActionTitle(approval)}
+        </h2>
         <p>{approval.planOverview ?? approval.detail}</p>
       </div>
-      {approval.command && <pre>{approval.command}</pre>}
+      {planApproval ? (
+        approval.command && <pre>{approval.command}</pre>
+      ) : (
+        <ApprovalDetails approval={approval} />
+      )}
       {approval.planSteps && (
         <ol>
           {approval.planSteps.map((step) => (
@@ -173,13 +180,15 @@ export function ConversationInteractionSlot({
             >
               拒绝
             </button>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => onApprovalDecision("allow_session")}
-            >
-              本任务内允许
-            </button>
+            {approval.sessionScope && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => onApprovalDecision("allow_session")}
+              >
+                {approvalScopeLabel(approval.sessionScope)}
+              </button>
+            )}
             <button
               type="button"
               className="is-primary"
