@@ -6,7 +6,12 @@ import { join } from "node:path";
 import test from "node:test";
 import type { ConfiguredSubagentCatalogPort } from "../../../src/agents/subagent-profiles.js";
 import { requireSubagentCapability } from "../../../src/agents/subagent-profiles.js";
-import { SilentReporter } from "../../../src/engine/reporter.js";
+import {
+  SilentReporter,
+  type Reporter,
+  type SubagentActivityEvent,
+} from "../../../src/engine/reporter.js";
+import { TranscriptEventStore } from "../../../src/presentation/transcript-event-store.js";
 import { Session, globalSessionManager } from "../../../src/engine/session.js";
 import { ModelRouter } from "../../../src/provider/model-router.js";
 import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
@@ -65,6 +70,11 @@ test("agent_spawn continues its completed child with durable history and rejects
   let childSessionId = "";
   let parentCalls = 0;
   let failedInitialization = false;
+  const activities: SubagentActivityEvent[] = [];
+  const reporter: Reporter = new SilentReporter();
+  reporter.onSubagentActivity = (activity) => {
+    activities.push(activity);
+  };
   const spawn = (id: string, args: Record<string, string>) => ({
     role: "assistant" as const,
     content: "",
@@ -75,7 +85,7 @@ test("agent_spawn continues its completed child with durable history and rejects
       picoHome,
       modelRouter,
       configuredSubagentCatalog: catalog,
-      reporter: new SilentReporter(),
+      reporter,
       hostKind: "desktop",
       maxTurns: 5,
       providerFactory: (_kind, config) => {
@@ -169,6 +179,22 @@ test("agent_spawn continues its completed child with durable history and rejects
     });
     assert.equal(parentCalls, 4);
     assert.equal(childRuns.length, 2);
+    const completed = activities.filter((activity) => activity.status === "completed");
+    assert.equal(completed.length, 2);
+    assert.notEqual(completed[0]!.activityId, completed[1]!.activityId);
+    assert.ok(completed.every((activity) => activity.childSessionId === childSessionId));
+    const transcript = new TranscriptEventStore();
+    for (const { activityId, ...activity } of activities) {
+      transcript.append({
+        type: "subagent.activity.updated",
+        entryId: `subagent:${activity.toolCallId}`,
+        activityId,
+        activity,
+      });
+    }
+    const cards = transcript.getProjection().entries;
+    assert.equal(cards.length, 3, "initial, failed continuation and retry keep separate cards");
+    assert.equal(new Set(cards.map((card) => card.id)).size, 3);
     assert.equal(catalogResolutions, 3);
     await globalSessionManager.clearAndDrain();
     for (const sessionId of [parent.sessionId, childSessionId]) {

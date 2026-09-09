@@ -70,7 +70,8 @@ export function createConfiguredSubagentExecutor(
       childSessionId: sessionId,
       childWorkspacePath: options.workDir,
       ...(parentToolCallId ? { toolCallId: parentToolCallId } : {}),
-      activityId: sessionId,
+      // A continuation shares the session, but owns a separate transcript card and trace.
+      activityId: input.continuation ? `subagent-activity-${randomUUID()}` : sessionId,
       task: input.task,
       agentName: input.continuation?.agentName ?? input.preset?.name ?? input.definition.name,
       mode: input.definition.workspace === "shared" ? ("explore" as const) : ("worker" as const),
