@@ -200,6 +200,9 @@ export class DesktopSessionContinuity {
     binding.advancing = true;
     try {
       do {
+        // A frame gap can invalidate an in-flight page while reopen is pending.
+        // Its retained watermark must not make this loop spin without an await.
+        if (binding.replica.view.phase !== "ready") return;
         binding.advanceAgain = false;
         let request = binding.replica.beginAdvance();
         while (request) {
