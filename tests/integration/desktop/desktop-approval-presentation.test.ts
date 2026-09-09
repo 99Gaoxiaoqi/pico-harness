@@ -33,7 +33,7 @@ function render(approval: ApprovalView): string {
 test("审批卡按真实 scope 展示授权范围、单次批准和变更预览", () => {
   const cases: readonly [ApprovalSessionScopeView, string, string][] = [
     [{ type: "file", path: "/tmp/report.txt", access: "edit" }, "允许修改此文件", "仅此文件"],
-    [{ type: "all-edits" }, "自动允许文件修改", "切换到自动编辑模式"],
+    [{ type: "all-edits" }, "自动允许文件修改", "权限切换为"],
     [
       {
         type: "directories",
@@ -47,7 +47,7 @@ test("审批卡按真实 scope 展示授权范围、单次批准和变更预览"
     [
       { type: "directories", directories: ["/tmp/reports"], access: "edit", enableAutoEdits: true },
       "加入任务授权目录",
-      "切换到自动编辑模式",
+      "权限切换为",
     ],
     [{ type: "bash-command", command: "git status", match: "exact" }, "允许此命令", "仅匹配此命令"],
     [
