@@ -4224,3 +4224,64 @@
     line-height: 1.5;
   }
 }
+
+.approval-details {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+  margin-top: 12px;
+  font-size: 12px;
+}
+.approval-details__section,
+.approval-details__scope {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+.approval-details strong {
+  font-size: 12px;
+}
+.approval-details p {
+  margin: 0;
+  line-height: 1.55;
+}
+.approval-details pre {
+  max-height: 180px;
+  overflow: auto;
+  padding: 10px;
+  margin: 0;
+  border: 1px solid var(--conversation-line, #d9d6cc);
+  border-radius: 8px;
+  background: var(--conversation-bg-strong, #f4f3ef);
+  color: inherit;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 2;
+}
+.approval-details__scope {
+  padding: 10px;
+  border-left: 2px solid var(--conversation-warning, #a87223);
+}
+.approval-details__technical {
+  color: var(--conversation-ink-muted, #68675f);
+}
+.approval-details__technical summary {
+  cursor: pointer;
+}
+.approval-details__technical code {
+  overflow-wrap: anywhere;
+}
+.approval-details__diff .is-added {
+  color: #287342;
+}
+.approval-details__diff .is-removed {
+  color: #b13f38;
+}
+.dialog:has(.approval-details) {
+  max-height: 85vh;
+  overflow-y: auto;
+}
+.dialog:has(.approval-details) .dialog__actions {
+  flex-wrap: wrap;
+}
