@@ -1,3 +1,4 @@
+import { createConfiguredSubagentOutputStore } from "../../../src/runtime/configured-subagent-output-store.js";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -36,7 +37,7 @@ test("agent_spawn continues its completed child with durable history and rejects
     },
     async resolve(id) {
       assert.equal(id, "memory-reader");
-      assert.equal(++catalogResolutions, 1, "continuation must use the saved preset");
+      catalogResolutions++; // Revalidate availability while retaining the original execution snapshot.
       return {
         id,
         name: "Memory Reader",
@@ -63,6 +64,7 @@ test("agent_spawn continues its completed child with durable history and rejects
   const childRuns: string[] = [];
   let childSessionId = "";
   let parentCalls = 0;
+  let failedInitialization = false;
   const spawn = (id: string, args: Record<string, string>) => ({
     role: "assistant" as const,
     content: "",
@@ -76,74 +78,98 @@ test("agent_spawn continues its completed child with durable history and rejects
       reporter: new SilentReporter(),
       hostKind: "desktop",
       maxTurns: 5,
-      providerFactory: (_kind, config) => ({
-        async generate(messages, tools) {
-          if (tools?.some((tool) => tool.name === "agent_spawn")) {
-            parentCalls++;
-            if (parentCalls === 1)
-              return spawn("initial-child", {
-                subagent_id: "memory-reader",
-                task: "Remember OLD_CHILD_TOKEN_73",
-              });
-            if (parentCalls === 2) {
-              assert.match(messages.find((m) => m.toolCallId === "initial-child")!.content, /^\{/);
+      providerFactory: (_kind, config) => {
+        if (parentCalls === 2 && !failedInitialization) {
+          failedInitialization = true;
+          throw new Error("simulated child provider initialization failure");
+        }
+        return {
+          async generate(messages, tools) {
+            if (tools?.some((tool) => tool.name === "agent_spawn")) {
+              parentCalls++;
+              if (parentCalls === 1)
+                return spawn("initial-child", {
+                  subagent_id: "memory-reader",
+                  task: "Remember OLD_CHILD_TOKEN_73",
+                });
+              if (parentCalls === 2) {
+                assert.match(
+                  messages.find((m) => m.toolCallId === "initial-child")!.content,
+                  /^\{/,
+                );
+                const result = JSON.parse(
+                  messages.find((m) => m.toolCallId === "initial-child")!.content,
+                );
+                assert.equal(result.sessionId, childSessionId);
+                assert.equal(result.runId, childRuns[0]);
+                assert.equal(result.status, "completed");
+                return spawn("failed-child", {
+                  child_session_id: childSessionId,
+                  task: "Recall the previous token and append NEW_CHILD_TOKEN_94",
+                });
+              }
+              if (parentCalls === 3) {
+                assert.match(
+                  messages.find((m) => m.toolCallId === "failed-child")!.content,
+                  /simulated child provider initialization failure/,
+                );
+                return spawn("continued-child", {
+                  child_session_id: childSessionId,
+                  task: "Recall the previous token and append NEW_CHILD_TOKEN_94",
+                });
+              }
+              assert.match(
+                messages.find((m) => m.toolCallId === "continued-child")!.content,
+                /^\{/,
+              );
               const result = JSON.parse(
-                messages.find((m) => m.toolCallId === "initial-child")!.content,
+                messages.find((m) => m.toolCallId === "continued-child")!.content,
               );
               assert.equal(result.sessionId, childSessionId);
-              assert.equal(result.runId, childRuns[0]);
+              assert.equal(result.runId, childRuns[1]);
+              assert.equal(result.resumedFromRunId, childRuns[0]);
               assert.equal(result.status, "completed");
-              return spawn("continued-child", {
-                child_session_id: childSessionId,
-                task: "Recall the previous token and append NEW_CHILD_TOKEN_94",
-              });
+              assert.match(result.summary, /OLD_CHILD_TOKEN_73.*NEW_CHILD_TOKEN_94/);
+              return { role: "assistant" as const, content: "Parent complete" };
             }
-            assert.match(messages.find((m) => m.toolCallId === "continued-child")!.content, /^\{/);
-            const result = JSON.parse(
-              messages.find((m) => m.toolCallId === "continued-child")!.content,
+            const run = currentRuntimeRun()!;
+            childRuns.push(run.runId);
+            assert.equal(config.model, route.model);
+            assert.equal(config.thinkingEffort, "nothink");
+            assert.deepEqual(tools?.map((tool) => tool.name).sort(), ["glob", "grep", "read_file"]);
+            assert.ok(
+              messages.some(
+                (m) =>
+                  m.role === "system" &&
+                  m.content.includes(requireSubagentCapability("local_read").systemPrompt),
+              ),
             );
-            assert.equal(result.sessionId, childSessionId);
-            assert.equal(result.runId, childRuns[1]);
-            assert.equal(result.status, "completed");
-            assert.match(result.summary, /OLD_CHILD_TOKEN_73.*NEW_CHILD_TOKEN_94/);
-            return { role: "assistant" as const, content: "Parent complete" };
-          }
-          const run = currentRuntimeRun()!;
-          childRuns.push(run.runId);
-          assert.equal(config.model, route.model);
-          assert.equal(config.thinkingEffort, "nothink");
-          assert.deepEqual(tools?.map((tool) => tool.name).sort(), ["glob", "grep", "read_file"]);
-          assert.ok(
-            messages.some(
-              (m) =>
-                m.role === "system" &&
-                m.content.includes(requireSubagentCapability("local_read").systemPrompt),
-            ),
-          );
-          if (childRuns.length === 1) {
-            childSessionId = run.sessionId;
-            return { role: "assistant" as const, content: "Remembered OLD_CHILD_TOKEN_73" };
-          }
-          assert.equal(run.sessionId, childSessionId);
-          assert.notEqual(run.runId, childRuns[0]);
-          assert.ok(
-            messages.some(
-              (m) => m.role === "assistant" && m.content.includes("Remembered OLD_CHILD_TOKEN_73"),
-            ),
-          );
-          assert.ok(
-            messages.some((m) => m.role === "user" && m.content.includes("NEW_CHILD_TOKEN_94")),
-          );
-          return {
-            role: "assistant" as const,
-            content: "OLD_CHILD_TOKEN_73 and NEW_CHILD_TOKEN_94",
-          };
-        },
-      }),
+            if (childRuns.length === 1) {
+              childSessionId = run.sessionId;
+              return { role: "assistant" as const, content: "Remembered OLD_CHILD_TOKEN_73" };
+            }
+            assert.equal(run.sessionId, childSessionId);
+            assert.notEqual(run.runId, childRuns[0]);
+            assert.ok(
+              messages.some(
+                (m) =>
+                  m.role === "assistant" && m.content.includes("Remembered OLD_CHILD_TOKEN_73"),
+              ),
+            );
+            assert.ok(
+              messages.some((m) => m.role === "user" && m.content.includes("NEW_CHILD_TOKEN_94")),
+            );
+            return {
+              role: "assistant" as const,
+              content: "OLD_CHILD_TOKEN_73 and NEW_CHILD_TOKEN_94",
+            };
+          },
+        };
+      },
     });
-    assert.equal(parentCalls, 3);
+    assert.equal(parentCalls, 4);
     assert.equal(childRuns.length, 2);
-    assert.equal(catalogResolutions, 1);
+    assert.equal(catalogResolutions, 3);
     await globalSessionManager.clearAndDrain();
     for (const sessionId of [parent.sessionId, childSessionId]) {
       const session = new Session(sessionId, workDir, { persistence: true, picoHome });
@@ -158,14 +184,34 @@ test("agent_spawn continues its completed child with durable history and rejects
           assert.match(history, /OLD_CHILD_TOKEN_73/);
           assert.match(history, /NEW_CHILD_TOKEN_94/);
         } else {
-          const records = session
-            .getHistory()
-            .flatMap((message) => {
-              const record = message.providerData?.picoConfiguredChild;
+          const records = (
+            await session.runtimeEventStore!.readSessionEventsByKind(sessionId, "message.committed")
+          )
+            .flatMap(({ event }) => {
+              const record =
+                event.kind === "message.committed"
+                  ? event.data.message.providerData?.picoConfiguredChild
+                  : undefined;
               return record ? [record as Record<string, unknown>] : [];
             })
             .filter((record) => record.status === "completed");
           assert.equal(records.length, 2);
+          const output = createConfiguredSubagentOutputStore({
+            parentSessionId: sessionId,
+            workDir,
+            picoHome,
+            eventStore: session.runtimeEventStore!,
+          });
+          const oldResult = await output.read({
+            locator: "child_session_run",
+            childSessionId,
+            runId: childRuns[0]!,
+            view: "result",
+            maxBytes: 4096,
+            maxEvents: 10,
+          });
+          assert.match(JSON.stringify(oldResult), /Remembered OLD_CHILD_TOKEN_73/);
+          assert.doesNotMatch(JSON.stringify(oldResult), /NEW_CHILD_TOKEN_94/);
           assert.deepEqual(
             records.map((record) => record.runId),
             childRuns,

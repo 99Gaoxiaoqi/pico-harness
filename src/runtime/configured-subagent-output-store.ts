@@ -84,7 +84,7 @@ export function createConfiguredSubagentOutputStore(
   };
 }
 
-async function findParentRecord(
+export async function findParentRecord(
   options: ConfiguredSubagentOutputStoreOptions,
   query: ConfiguredSubagentOutputQuery,
 ): Promise<ChildRecord | undefined> {
@@ -107,7 +107,9 @@ async function findParentRecord(
       )
         continue;
       if (
-        (query.childSessionId && record.childSessionId === query.childSessionId) ||
+        (query.childSessionId &&
+          record.childSessionId === query.childSessionId &&
+          (!query.runId || record.runId === query.runId)) ||
         (query.locator === "legacy_run" && record.runId === query.runId) ||
         (query.locator === "legacy_turn" && record.turnId === query.turnId)
       )

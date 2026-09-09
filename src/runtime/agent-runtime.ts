@@ -2078,6 +2078,7 @@ export async function executeAgentRuntime(
         (subagentModelRouter && parentModelRouteId
           ? createConfiguredSubagentExecutor({
               workDir,
+              catalog: dependencies.configuredSubagentCatalog,
               modelRouter: subagentModelRouter,
               parentModelRouteId,
               worktreeSupervisor: runtimeState.taskHostRuntime?.supervisor,
