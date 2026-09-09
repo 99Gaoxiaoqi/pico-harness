@@ -14,9 +14,18 @@ export interface ConfiguredSubagentExecutionInput {
   readonly definition: SubagentCapabilityDefinition;
   readonly preset?: RuntimeSubagentPreset & { modelRouteId: string };
   readonly signal?: AbortSignal;
+  /** Host-validated continuation; never accepted directly from model arguments. */
+  readonly continuation?: {
+    readonly childSessionId: string;
+    readonly sourceRunId: string;
+    readonly modelRouteId: string;
+    readonly thinkingEffort?: string;
+    readonly agentName?: string;
+  };
 }
 export interface ConfiguredSubagentExecutionResult {
   readonly status: "completed" | "error";
+  readonly resumedFromRunId?: string;
   readonly sessionId: string;
   readonly childSessionId?: string;
   readonly agentName?: string;
@@ -27,9 +36,14 @@ export interface ConfiguredSubagentExecutionResult {
   readonly summary: string;
   readonly patch?: { readonly path: string; readonly worktree: string; readonly branch: string };
 }
-export type ConfiguredSubagentExecutor = (
-  input: ConfiguredSubagentExecutionInput,
-) => Promise<ConfiguredSubagentExecutionResult>;
+export interface ConfiguredSubagentExecutor {
+  (input: ConfiguredSubagentExecutionInput): Promise<ConfiguredSubagentExecutionResult>;
+  resume?: (input: {
+    childSessionId: string;
+    task: string;
+    signal?: AbortSignal;
+  }) => Promise<ConfiguredSubagentExecutionResult>;
+}
 export interface ConfiguredSubagentToolsOptions {
   readonly catalog: ConfiguredSubagentCatalogPort;
   readonly execute?: ConfiguredSubagentExecutor;
@@ -139,10 +153,16 @@ export class ConfiguredAgentSpawnTool implements BaseTool {
     return {
       name: this.name(),
       description:
-        "前台等待一个有边界的持久子任务。先 agent_list 选择 subagent_id；同时提供 profile 时 subagent_id 优先。实现任务强制独立 worktree 并返回补丁，不能直接写回宿主。结果的 childSessionId/runId 可用于 agent_output 精确回读。",
+        "前台等待一个有边界的持久子任务。先 agent_list 选择 subagent_id；同时提供 profile 时 subagent_id 优先。实现任务强制独立 worktree 并返回补丁，不能直接写回宿主。结果的 childSessionId/runId 可用于 agent_output 精确回读。同一工作需要补充、验证或修复时，优先传 child_session_id 与 task 继续已完成的同工作区子会话，保留历史；无需再传角色或隔离参数，不能更改旧子任务配置。无关任务应新建。独立 worktree 子任务暂不支持续用。",
       inputSchema: {
         type: "object",
         properties: {
+          child_session_id: {
+            type: "string",
+            minLength: 1,
+            maxLength: 256,
+            description: "继续本父会话已完成的子会话；沿用历史、角色和工具范围。",
+          },
           subagent_id: { type: "string", maxLength: 128 },
           profile: { type: "string", enum: SUBAGENT_CAPABILITIES.map((entry) => entry.profile) },
           task: { type: "string", minLength: 1, maxLength: 60000 },
@@ -164,6 +184,31 @@ export class ConfiguredAgentSpawnTool implements BaseTool {
     if (typeof input["task"] !== "string" || !input["task"].trim() || input["task"].length > 60000)
       throw new Error("agent_spawn requires a bounded task (1–60000 characters)");
     context?.signal?.throwIfAborted();
+    if (input["child_session_id"] !== undefined) {
+      const childSessionId = input["child_session_id"];
+      if (typeof childSessionId !== "string" || !/^[A-Za-z0-9_-]{1,256}$/.test(childSessionId))
+        throw new Error("Invalid child_session_id");
+      if (["subagent_id", "profile"].some((key) => input[key] !== undefined))
+        throw new Error("Continuing a child cannot change its profile or workspace");
+      // Models sometimes repeat the original contract. Accept only identical shared-read values.
+      if (input["write_back"] !== undefined && input["write_back"] !== "summary")
+        throw new Error("Continuing a shared child requires write_back=summary");
+      if (
+        input["isolation"] !== undefined &&
+        !["shared", "same_workspace"].includes(String(input["isolation"]))
+      )
+        throw new Error("Continuing a child cannot change its workspace");
+      if (!this.options.execute?.resume)
+        throw new Error("Child continuation unavailable in this host");
+      return JSON.stringify({
+        kind: "subagent",
+        ...(await this.options.execute.resume({
+          childSessionId,
+          task: input["task"],
+          ...(context?.signal ? { signal: context.signal } : {}),
+        })),
+      });
+    }
     const id = input["subagent_id"];
     if (id !== undefined && !isSafeSubagentPresetId(id)) throw new Error("Invalid subagent_id");
     // Re-resolve at admission: a previously listed preset can be edited or disabled.

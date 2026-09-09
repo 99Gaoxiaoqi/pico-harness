@@ -1,3 +1,5 @@
+import { resolveConfiguredSubagentContinuation } from "./configured-subagent-continuation.js";
+import type { ConfiguredSubagentCatalogPort } from "../agents/subagent-profiles.js";
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -49,16 +51,19 @@ export interface CreateConfiguredSubagentExecutorOptions {
     | "toolResultRedactionSecrets"
   >;
   readonly executeChild?: AgentRuntime["execute"];
+  readonly catalog?: ConfiguredSubagentCatalogPort;
 }
+const continuingChildren = new Set<string>();
+
 /** Reuses durable Session + RuntimeRun and the existing worktree lifecycle, without another loop. */
 export function createConfiguredSubagentExecutor(
   options: CreateConfiguredSubagentExecutorOptions,
 ): ConfiguredSubagentExecutor {
-  return async (input) => {
+  const executeChild: ConfiguredSubagentExecutor = async (input) => {
     input.signal?.throwIfAborted();
     const parentRun = currentRuntimeRun();
     const parentToolCallId = currentRuntimeToolCallId();
-    const sessionId = `subagent-${randomUUID()}`;
+    const sessionId = input.continuation?.childSessionId ?? `subagent-${randomUUID()}`;
     const reporter: Reporter = options.reporter ?? new SilentReporter();
     const startedAt = Date.now();
     const scope = {
@@ -67,7 +72,7 @@ export function createConfiguredSubagentExecutor(
       ...(parentToolCallId ? { toolCallId: parentToolCallId } : {}),
       activityId: sessionId,
       task: input.task,
-      agentName: input.preset?.name ?? input.definition.name,
+      agentName: input.continuation?.agentName ?? input.preset?.name ?? input.definition.name,
       mode: input.definition.workspace === "shared" ? ("explore" as const) : ("worker" as const),
       completionPolicy: "required" as const,
     };
@@ -85,6 +90,11 @@ export function createConfiguredSubagentExecutor(
       workDir: childWorkDir,
       agentName: scope.agentName,
       profile: input.definition.profile,
+      modelRouteId:
+        input.continuation?.modelRouteId ??
+        input.preset?.modelRouteId ??
+        options.parentModelRouteId,
+      ...(input.continuation ? { resumedFromRunId: input.continuation.sourceRunId } : {}),
       ...(input.preset ? { preset: input.preset } : {}),
       status,
       ...(runId ? { runId } : {}),
@@ -113,12 +123,15 @@ export function createConfiguredSubagentExecutor(
     ): Promise<ConfiguredSubagentExecutionResult> => {
       childWorkDir = workDir;
       scope.childWorkspacePath = workDir;
-      await recordParent("started");
-      const routeId = input.preset?.modelRouteId ?? options.parentModelRouteId;
+      if (!input.continuation) await recordParent("started");
+      const routeId =
+        input.continuation?.modelRouteId ??
+        input.preset?.modelRouteId ??
+        options.parentModelRouteId;
       const route = options.modelRouter.require(routeId);
       const thinking = subagentThinkingLevel(
         route.capabilities.reasoningProfile,
-        input.preset?.thinkingLevel,
+        input.continuation?.thinkingEffort ?? input.preset?.thinkingLevel,
       );
       const resolved = options.modelRouter.providerConfig(routeId, thinking);
       childReporter.onSubagentModelResolved({
@@ -132,7 +145,7 @@ export function createConfiguredSubagentExecutor(
         {
           prompt: input.task,
           dir: workDir,
-          sessionSelection: { mode: "new", sessionId },
+          sessionSelection: { mode: input.continuation ? "resume" : "new", sessionId },
           provider: resolved.provider,
           baseURL: resolved.config.baseURL,
           apiKey: resolved.config.apiKey,
@@ -157,6 +170,17 @@ export function createConfiguredSubagentExecutor(
             ...(input.preset ? { preset: input.preset } : {}),
           },
           onRunAdmission: async (run) => {
+            if (input.continuation) {
+              const starts = await run.store.readSessionEventsByKind(sessionId, "run.started", {
+                order: "desc",
+                limit: 2,
+              });
+              if (
+                starts[0]?.event.runId !== run.runId ||
+                starts[1]?.event.runId !== input.continuation.sourceRunId
+              )
+                throw new Error("Child session changed while admitting continuation");
+            }
             runId = run.runId;
             turnId = run.currentTurnId;
             await run.recordTranscriptMessage({
@@ -167,11 +191,13 @@ export function createConfiguredSubagentExecutor(
                 picoConfiguredChild: childRecord("started"),
               },
             });
+            if (input.continuation) await recordParent("started");
           },
         },
       );
       return {
         status: "completed",
+        ...(input.continuation ? { resumedFromRunId: input.continuation.sourceRunId } : {}),
         sessionId: result.sessionId,
         childSessionId: result.sessionId,
         agentName: scope.agentName,
@@ -254,7 +280,8 @@ export function createConfiguredSubagentExecutor(
       });
       return result;
     } catch (error) {
-      await recordParent(input.signal?.aborted ? "cancelled" : "failed");
+      if (!input.continuation || runId)
+        await recordParent(input.signal?.aborted ? "cancelled" : "failed");
       reporter.onSubagentActivity?.({
         ...scope,
         durationMs: Date.now() - startedAt,
@@ -267,4 +294,22 @@ export function createConfiguredSubagentExecutor(
       );
     }
   };
+  executeChild.resume = async ({ childSessionId, task, signal }) => {
+    const key = `${options.childDependencies?.picoHome ?? ""}:${options.workDir}:${childSessionId}`;
+    if (continuingChildren.has(key))
+      throw new Error("Child session continuation is already running");
+    continuingChildren.add(key);
+    try {
+      signal?.throwIfAborted();
+      const resolved = await resolveConfiguredSubagentContinuation(
+        childSessionId,
+        options.workDir,
+        options.catalog,
+      );
+      return await executeChild({ ...resolved, task, ...(signal ? { signal } : {}) });
+    } finally {
+      continuingChildren.delete(key);
+    }
+  };
+  return executeChild;
 }
