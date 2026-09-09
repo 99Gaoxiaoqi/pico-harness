@@ -294,8 +294,13 @@ export function ConversationPage() {
           sessionId,
           title: persistedPendingApproval.title,
           detail: persistedPendingApproval.detail,
-          risk: "medium" as const,
+          risk: persistedPendingApproval.risk ?? ("medium" as const),
           kind: "tool" as const,
+          toolName: persistedPendingApproval.toolName,
+          providerCallId: persistedPendingApproval.providerCallId,
+          command: persistedPendingApproval.command,
+          diff: persistedPendingApproval.diff,
+          sessionScope: persistedPendingApproval.sessionScope,
         }
       : undefined) ??
     data.approvals.findLast((item) => item.kind === "plan" && item.sessionId === sessionId);
