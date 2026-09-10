@@ -2727,6 +2727,8 @@ export class AgentEngine implements AgentRunner {
             await runtimeRun?.recordToolStarted(finalCall.id, finalCall.name, finalCall.arguments, {
               step,
               origin: "model",
+              recoveryPolicy: this.registry.getRecoveryPolicy?.(finalCall.name, step),
+              argumentRedactionSecrets: this.toolResultRedactionSecrets,
             });
             dispatched = true;
           },

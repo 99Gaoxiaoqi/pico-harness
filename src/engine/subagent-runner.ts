@@ -396,7 +396,12 @@ export class SubagentRunner {
                   finalCall.id,
                   finalCall.name,
                   finalCall.arguments,
-                  { step, origin: "model" },
+                  {
+                    step,
+                    origin: "model",
+                    recoveryPolicy: readOnlyRegistry.getRecoveryPolicy?.(finalCall.name, step),
+                    argumentRedactionSecrets: this.options.toolResultRedactionSecrets,
+                  },
                 );
                 dispatched = true;
               },
