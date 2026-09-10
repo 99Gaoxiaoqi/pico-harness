@@ -1,8 +1,8 @@
 // 工具 Surface 目录（声明式工具分组 + 宿主亲和性 + economy 分层）。
 //
 // 三层职责统一在此声明：
-// 1. economy 分层：always 组每轮可见；deferred 组需经 load_tools 组级激活。
-//    组是"最小可用能力单元"——组内工具互相依赖，拆散了无法形成闭环。
+// 1. economy 分层：always 组每 Step 可见；deferred 工具经 search_tools 激活。
+//    分组提供检索元数据；load_tools 保留为受同一预算约束的兼容入口。
 // 2. 宿主亲和性：background/headless 等宿主的能力裁剪收编为声明，
 //    替代散落在 background-yolo-policy / headless-runner 的硬编码集合。
 //    亲和性是 per-tool 独立声明（与 economy 组正交：core 里的 ask_user
@@ -10,19 +10,9 @@
 // 3. Plan 模式工具面：planning 模式下 provider 只喂只读 + 协议工具，
 //    替代 loop.ts 的 PLAN_PROVIDER_TOOL_NAMES 硬编码白名单。
 //
-// 不属于任何组的工具（如 MCP/Plugin 动态工具）视为 extended 兜底层，
-// 经 search_tools 按 TF-IDF 检索单工具激活。
-//
-// 宿主失败模式对照（维护者必读）：
-// | 宿主        | 边界类型 | 误调不可用/未披露工具的结果       |
-// |-------------|----------|-----------------------------------|
-// | desktop/cli | 软边界   | registry 全集路由，调用仍成功     |
-// |             |          | （渐进披露只是认知过滤，非权限）  |
-// | background  | 硬边界   | unknown tool（注册期剪枝）或      |
-// |             |          | middleware 拒绝（三层防线）       |
-// | headless    | 硬边界   | 请求校验拒绝 + 注册期剪枝         |
-// 同一工具在 desktop 误调会静默成功、在 background/headless 报 unknown tool
-// ——能力边界用硬边界、认知面用软边界是有意分层，不是 bug。
+// 不属于任何组的工具（如 MCP/Plugin 动态工具）同样通过 search_tools 发现。
+// Run 绑定集限定能力上限，Turn 内累积激活，执行只接受当前 Step 的可见快照。
+// 宿主亲和性与权限仍独立生效；发现工具不会扩大 Run 的绑定或授权范围。
 
 /** 宿主类型——当前连接/执行环境的身份标识。 */
 export type ToolHostKind = "desktop" | "cli" | "background" | "headless";
