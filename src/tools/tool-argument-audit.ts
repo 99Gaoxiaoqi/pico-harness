@@ -1,6 +1,20 @@
 /** An audit limit, not a truncation policy: oversized calls must never cross T1. */
 export const MAX_TOOL_ARGUMENT_AUDIT_BYTES = 1024 * 1024;
 const REDACTED = "[REDACTED]";
+const auditRefusals = new WeakSet<Error>();
+
+/** Only this deterministic, pre-storage audit may mint a dispatch refusal. */
+class ToolArgumentAuditRefusal extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ToolArgumentAuditRefusal";
+    auditRefusals.add(this);
+  }
+}
+
+export function isToolArgumentAuditRefusal(error: unknown): error is Error {
+  return error instanceof Error && auditRefusals.has(error);
+}
 
 function sensitiveField(key: string): boolean {
   const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
@@ -19,7 +33,7 @@ function assertNoDuplicateJsonKeys(source: string): void {
     if (token === "{" || token === "[") {
       containers.push(token === "{" ? new Set<string>() : undefined);
       if (containers.length > 129)
-        throw new Error("Tool arguments exceed the durable audit nesting limit");
+        throw new ToolArgumentAuditRefusal("Tool arguments exceed the durable audit nesting limit");
     } else if (token === "}" || token === "]") {
       containers.pop();
     } else if (token === ":") {
@@ -27,7 +41,8 @@ function assertNoDuplicateJsonKeys(source: string): void {
       // before comparing, including keys such as password and pa\u0073sword.
       const keys = containers.at(-1)!;
       const key = JSON.parse(stringToken) as string;
-      if (keys.has(key)) throw new Error("Tool arguments contain duplicate JSON keys");
+      if (keys.has(key))
+        throw new ToolArgumentAuditRefusal("Tool arguments contain duplicate JSON keys");
       keys.add(key);
     } else {
       stringToken = token;
@@ -41,7 +56,7 @@ export function buildToolArgumentAudit(
   redactionSecrets: readonly string[] = [],
 ): { argumentsJson: string; argumentsRedacted: boolean } {
   if (Buffer.byteLength(argumentsJson, "utf8") > MAX_TOOL_ARGUMENT_AUDIT_BYTES) {
-    throw new Error("Tool arguments exceed the 1 MiB durable audit limit");
+    throw new ToolArgumentAuditRefusal("Tool arguments exceed the 1 MiB durable audit limit");
   }
   const secrets = [...new Set(redactionSecrets)]
     .filter(Boolean)
@@ -54,7 +69,8 @@ export function buildToolArgumentAudit(
     return output;
   };
   const visit = (value: unknown, depth: number): unknown => {
-    if (depth > 128) throw new Error("Tool arguments exceed the durable audit nesting limit");
+    if (depth > 128)
+      throw new ToolArgumentAuditRefusal("Tool arguments exceed the durable audit nesting limit");
     if (typeof value === "string") {
       // Tools may carry JSON inside a string (e.g. request bodies). Inspect it
       // before literal replacement so escaped secrets and sensitive keys survive decoding.
@@ -95,7 +111,9 @@ export function buildToolArgumentAudit(
   const audited = visit(parsed, 0);
   const auditJson = redacted ? JSON.stringify(audited) : argumentsJson;
   if (Buffer.byteLength(auditJson, "utf8") > MAX_TOOL_ARGUMENT_AUDIT_BYTES) {
-    throw new Error("Redacted tool arguments exceed the 1 MiB durable audit limit");
+    throw new ToolArgumentAuditRefusal(
+      "Redacted tool arguments exceed the 1 MiB durable audit limit",
+    );
   }
   return { argumentsJson: auditJson, argumentsRedacted: redacted };
 }

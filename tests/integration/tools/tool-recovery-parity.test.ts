@@ -189,24 +189,26 @@ test("重复JSON键在T1前拒绝且无副作用，独立对象中的同名键�
     '{"box":{"password":"private-value"},"box":null}',
   ];
   for (const [index, argumentsJson] of inputs.entries()) {
-    await assert.rejects(
-      run.executeNestedTool(
-        { id: `duplicate-${index}`, name: "inspect_effect", arguments: argumentsJson },
-        registry,
-        {
-          step: registry.captureStep(`duplicate-step-${index}`, ["inspect_effect"]),
-          parentToolCallId: "exec-parent",
-        },
-      ),
-      (error) =>
-        error instanceof ToolCommitBoundaryError &&
-        error.phase === "T1" &&
-        /duplicate JSON keys/.test(error.message),
+    const result = await run.executeNestedTool(
+      { id: `duplicate-${index}`, name: "inspect_effect", arguments: argumentsJson },
+      registry,
+      {
+        step: registry.captureStep(`duplicate-step-${index}`, ["inspect_effect"]),
+        parentToolCallId: "exec-parent",
+      },
     );
+    assert.equal(result.isError, true);
+    assert.match(result.output, /duplicate JSON keys/);
   }
   assert.deepEqual(received, [], "ambiguous audit must not dispatch physical work");
   const events = await state.session.runtimeEventStore!.readRun(state.session.id, run.runId);
   assert.equal(events.filter((event) => event.kind === "tool.started").length, 0);
+  assert.equal(
+    events.filter(
+      (event) => event.kind === "tool.result.recorded" && event.data.status === "rejected",
+    ).length,
+    inputs.length,
+  );
   assert.deepEqual(
     await state.session.runtimeEventStore!.listRunToolOperations(state.session.id, run.runId),
     [],
@@ -439,21 +441,20 @@ test("旧hash-only记录可读但不能probe；损坏审计拒绝，超限T1禁�
       }),
     /audit|contract/,
   );
-  await assert.rejects(
-    resumed.executeNestedTool(
-      {
-        id: "oversized",
-        name: "inspect_effect",
-        arguments: JSON.stringify({ value: "x".repeat(1024 * 1024) }),
-      },
-      registry,
-      {
-        step: registry.captureStep("step", ["inspect_effect"]),
-        parentToolCallId: "exec-parent",
-      },
-    ),
-    (error) => error instanceof ToolCommitBoundaryError && error.phase === "T1",
+  const oversized = await resumed.executeNestedTool(
+    {
+      id: "oversized",
+      name: "inspect_effect",
+      arguments: JSON.stringify({ value: "x".repeat(1024 * 1024) }),
+    },
+    registry,
+    {
+      step: registry.captureStep("step", ["inspect_effect"]),
+      parentToolCallId: "exec-parent",
+    },
   );
+  assert.equal(oversized.isError, true);
+  assert.match(oversized.output, /durable audit limit/);
   assert.equal(executions, 0);
   assert.equal(
     (await store.readRun(session.id, resumed.runId)).some((event) => event.kind === "tool.started"),
