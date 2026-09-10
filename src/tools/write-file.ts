@@ -20,6 +20,7 @@ import {
 } from "./file-helpers.js";
 
 export class WriteFileTool implements BaseTool {
+  readonly nesting = "nestable" as const;
   private readonly roots: WorkspaceRoots;
 
   constructor(workDirOrRoots: string | WorkspaceRoots) {
