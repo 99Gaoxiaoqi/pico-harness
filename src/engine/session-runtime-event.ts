@@ -107,6 +107,7 @@ export interface RuntimeToolRecoveryResolvedEvent extends RuntimeEventBase {
   readonly kind: "tool.recovery.resolved";
   readonly data: {
     readonly recoveryEventId: string;
+    readonly outcome: "effects_verified" | "not_dispatched_verified";
     readonly evidenceUri: string;
     readonly summary: string;
   };
