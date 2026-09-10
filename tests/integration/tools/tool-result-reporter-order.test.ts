@@ -31,6 +31,7 @@ import {
   type ToolExecutionContext,
 } from "../../../src/tools/registry.js";
 import { ToolRegistry } from "../../../src/tools/registry-impl.js";
+import { DelegateTaskTool } from "../../../src/tools/subagent.js";
 
 type PostToolHookEvent = "PostToolUse" | "PostToolUseFailure" | "PostToolBatch";
 
@@ -854,128 +855,157 @@ test("pre-execution budget closure keeps one durable start recoverable with its 
   }
 });
 
-test("required-first rejection publishes its durable ToolResult to every observer", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pico-tool-result-required-first-"));
-  const workDir = join(root, "workspace");
-  const picoHome = join(root, "pico-home");
-  const runtimePort = createEngineRuntimePort();
-  const session = new Session("tool-result-required-first", workDir, {
-    persistence: true,
-    picoHome,
-    runtimePort,
-  });
-  const registry = new ToolRegistry();
-  registry.register(outputTool("rejected_fixture", "must not execute"));
-  registry.register(
-    outputTool(
-      "delegate_task",
-      JSON.stringify({
-        status: "completed",
-        results: [{ status: "completed", summary: "delegation completed" }],
-      }),
-    ),
-  );
-  let turn = 0;
-  const provider: LLMProvider = {
-    async generate() {
-      turn++;
-      if (turn === 1) {
-        return {
-          role: "assistant",
-          content: "",
-          toolCalls: [
-            { id: "call:required-first-rejected", name: "rejected_fixture", arguments: "{}" },
-          ],
-        };
-      }
-      if (turn === 2) {
-        return {
-          role: "assistant",
-          content: "",
-          toolCalls: [
-            {
-              id: "call:required-first-delegate",
-              name: "delegate_task",
-              arguments: JSON.stringify({
-                goal: "Run the delegated fixture.",
-                mode: "worker",
-                completion_policy: "required",
-              }),
-            },
-          ],
-        };
-      }
-      return { role: "assistant", content: "Done." };
-    },
-  };
-  const reported: ToolResultEnvelope[] = [];
-  const reporter = new (class extends SilentReporter {
-    override onToolResult(result: ToolResultEnvelope): void {
-      reported.push(structuredClone(result));
-    }
-  })();
-  const hookInputs: HookInput[] = [];
-  const hookService = recordingHookService(
-    workDir,
-    session.id,
-    ["PostToolUse", "PostToolUseFailure", "PostToolBatch"],
-    hookInputs,
-  );
-
-  try {
-    await session.recover();
-    await session.commitMessages({
-      role: "user",
-      content: "请先启动一个子代理排查，再继续回答。",
-    });
-    const engine = new AgentEngine({
-      provider,
-      registry,
-      workDir,
+for (const userInput of [
+  "不得调用 shell、网络、子代理。直接回答即可。",
+  "请先启动多个子代理排查，再继续回答。",
+]) {
+  test(`natural-language delegation leaves model tool choices intact: ${userInput}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "pico-tool-result-delegation-choice-"));
+    const workDir = join(root, "workspace");
+    const picoHome = join(root, "pico-home");
+    const runtimePort = createEngineRuntimePort();
+    const session = new Session("tool-result-delegation-choice", workDir, {
+      persistence: true,
+      picoHome,
       runtimePort,
-      reporter,
-      hookService,
-      maxTurns: 4,
     });
-
-    await engine.run(session);
-
-    const rejectedReports = reported.filter(
-      (result) => result.toolCallId === "call:required-first-rejected",
+    const registry = new ToolRegistry();
+    registry.register(outputTool("ordinary_fixture", "ordinary tool completed"));
+    let childRuns = 0;
+    registry.register(
+      new DelegateTaskTool(
+        {
+          async runSub() {
+            childRuns++;
+            return { status: "completed", summary: "delegation completed", evidenceRefs: [] };
+          },
+        },
+        () => new ToolRegistry(),
+      ),
     );
-    assert.equal(rejectedReports.length, 1);
-    assert.equal(rejectedReports[0]?.status, "rejected");
-    const failureHooks = hookInputs.filter((input) => {
-      if (input.hook_event_name !== "PostToolUseFailure") return false;
-      const failure = input as HookInput<"PostToolUseFailure">;
-      return failure.payload.tool_call_id === "call:required-first-rejected";
-    });
-    assert.equal(failureHooks.length, 1);
-    const rejectedBatches = hookInputs.filter((input) => {
-      if (input.hook_event_name !== "PostToolBatch") return false;
-      const batch = input as HookInput<"PostToolBatch">;
-      return batch.payload.tools.some(
-        (tool) => tool.tool_call_id === "call:required-first-rejected",
+    let turn = 0;
+    const provider: LLMProvider = {
+      async generate(messages, tools) {
+        turn++;
+        assert.ok(
+          messages.some((message) => message.role === "user" && message.content === userInput),
+        );
+        assert.equal(
+          messages.some(
+            (message) =>
+              message.providerData?.["picoKind"] === "required_first_delegation" ||
+              message.content.includes("HIDDEN FIRST-TURN DELEGATION POLICY"),
+          ),
+          false,
+        );
+        assert.deepEqual(
+          tools.map((tool) => tool.name).sort(),
+          turn <= 2 ? ["delegate_task", "ordinary_fixture"] : [],
+        );
+        if (turn === 1) {
+          return {
+            role: "assistant",
+            content: "",
+            toolCalls: [{ id: "call:ordinary-choice", name: "ordinary_fixture", arguments: "{}" }],
+          };
+        }
+        if (turn === 2) {
+          return {
+            role: "assistant",
+            content: "",
+            toolCalls: [
+              {
+                id: "call:explicit-delegate",
+                name: "delegate_task",
+                arguments: JSON.stringify({
+                  goal: "Run the delegated fixture.",
+                  mode: "explore",
+                  completion_policy: "required",
+                }),
+              },
+            ],
+          };
+        }
+        return { role: "assistant", content: "Done." };
+      },
+    };
+    const reported: ToolResultEnvelope[] = [];
+    const reporter = new (class extends SilentReporter {
+      override onToolResult(result: ToolResultEnvelope): void {
+        reported.push(structuredClone(result));
+      }
+    })();
+    const hookInputs: HookInput[] = [];
+    const hookService = recordingHookService(
+      workDir,
+      session.id,
+      ["PostToolUse", "PostToolUseFailure", "PostToolBatch"],
+      hookInputs,
+    );
+
+    try {
+      await session.recover();
+      await session.commitMessages({
+        role: "user",
+        content: userInput,
+      });
+      const engine = new AgentEngine({
+        provider,
+        registry,
+        workDir,
+        runtimePort,
+        reporter,
+        hookService,
+        maxTurns: 4,
+      });
+
+      await engine.run(session);
+
+      assert.equal(turn, 3, "宿主不因自然语言增加强制委派重试");
+      assert.equal(childRuns, 1, "显式工具参数决定任务数量，宿主不从自然语言推断数量或合成调用");
+      const ordinaryReports = reported.filter(
+        (result) => result.toolCallId === "call:ordinary-choice",
       );
-    });
-    assert.equal(rejectedBatches.length, 1);
+      assert.equal(ordinaryReports.length, 1);
+      assert.equal(ordinaryReports[0]?.status, "succeeded");
+      assert.equal(
+        reported.find((result) => result.toolCallId === "call:explicit-delegate")?.status,
+        "succeeded",
+      );
+      assert.ok(
+        session
+          .getModelContext()
+          .some((message) => message.providerData?.["picoKind"] === "explore_delegation_synthesis"),
+      );
+      const successHooks = hookInputs.filter((input) => {
+        if (input.hook_event_name !== "PostToolUse") return false;
+        const success = input as HookInput<"PostToolUse">;
+        return success.payload.tool_call_id === "call:ordinary-choice";
+      });
+      assert.equal(successHooks.length, 1);
+      const ordinaryBatches = hookInputs.filter((input) => {
+        if (input.hook_event_name !== "PostToolBatch") return false;
+        const batch = input as HookInput<"PostToolBatch">;
+        return batch.payload.tools.some((tool) => tool.tool_call_id === "call:ordinary-choice");
+      });
+      assert.equal(ordinaryBatches.length, 1);
 
-    const events = await session.runtimeEventStore!.readSession(session.id);
-    const rejectedFacts = events.filter(
-      (event) =>
-        event.kind === "tool.result.recorded" &&
-        event.refs.toolCallId === "call:required-first-rejected",
-    );
-    assert.equal(rejectedFacts.length, 1);
-    assert.equal(rejectedFacts[0]?.kind, "tool.result.recorded");
-    if (rejectedFacts[0]?.kind === "tool.result.recorded") {
-      assert.equal(rejectedFacts[0].data.status, "rejected");
+      const events = await session.runtimeEventStore!.readSession(session.id);
+      const ordinaryFacts = events.filter(
+        (event) =>
+          event.kind === "tool.result.recorded" && event.refs.toolCallId === "call:ordinary-choice",
+      );
+      assert.equal(ordinaryFacts.length, 1);
+      assert.equal(ordinaryFacts[0]?.kind, "tool.result.recorded");
+      if (ordinaryFacts[0]?.kind === "tool.result.recorded") {
+        assert.equal(ordinaryFacts[0].data.status, "succeeded");
+      }
+    } finally {
+      await session.close();
+      await rm(root, { recursive: true, force: true });
     }
-  } finally {
-    await session.close();
-    await rm(root, { recursive: true, force: true });
-  }
-});
+  });
+}
 
 test("post-commit abort still publishes the durable ToolResult hooks once", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-tool-result-post-commit-abort-"));
