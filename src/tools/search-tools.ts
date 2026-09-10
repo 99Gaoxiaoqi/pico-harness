@@ -1,28 +1,20 @@
-// SearchToolsTool：单工具兜底检索（MCP/Plugin 动态工具激活路径）。
-//
-// 组级激活的主路径是 load_tools（枚举选择，零歧义）；本工具职责缩小为
-// 检索不属于预定义组的动态工具（MCP server 工具、Plugin 能力工具），
-// 使用 TF-IDF + 中文 bigram 混合检索（升级自纯子串匹配）。
-//
-// 纯只读、不触碰任何资源:只更新内存里的 disclosed 集合,与一切工具不冲突。
-
+// search_tools 是 Pico 已有的 provider 安全名称（OpenAI 保留 tool_search）。
+// 分组是检索元数据；全部 deferred 工具共用同一有界激活入口。
 import type { BaseTool } from "./registry.js";
 import type { ToolDefinition } from "../schema/message.js";
 import type { ToolAccesses } from "./tool-access.js";
 import { ToolAccesses as ToolAccessesNs } from "./tool-access.js";
-import type { ToolDisclosure } from "./tool-disclosure.js";
-import { findGroupForTool } from "./tool-surface.js";
+import {
+  type ToolDisclosure,
+  isDirectTool,
+  TOOL_SEARCH_DEFAULT_LIMIT,
+  TOOL_SEARCH_MAX_LIMIT,
+} from "./tool-disclosure.js";
+import { findGroupForTool, PICO_TOOL_GROUPS } from "./tool-surface.js";
 import { searchTools } from "./tool-search-index.js";
 
 export type ToolDefinitionSource = readonly ToolDefinition[] | (() => readonly ToolDefinition[]);
 
-/**
- * 候选排除名单：
- * - 披露连接器自身（search_tools / load_tools）——披露 load_tools 会造成
- *   pickForLLM 与 searchToolSchema 重复提供同一 schema；
- * - Plan 协议工具——planning 走 provider 白名单全量供给，execution 已预披露，
- *   经 search_tools 再披露没有意义且语义误导。
- */
 const CANDIDATE_EXCLUDED_NAMES = new Set([
   "search_tools",
   "load_tools",
@@ -31,26 +23,34 @@ const CANDIDATE_EXCLUDED_NAMES = new Set([
   "cancel_plan",
 ]);
 
+function isSearchable(tool: ToolDefinition): boolean {
+  return !CANDIDATE_EXCLUDED_NAMES.has(tool.name) && !isDirectTool(tool.name);
+}
+
 export function findMatchingTools(
   candidates: readonly ToolDefinition[],
   query: string,
+  limit = TOOL_SEARCH_DEFAULT_LIMIT,
 ): ToolDefinition[] {
-  return searchTools(candidates, query).map((r) => r.tool);
+  // 保留原始 schema；组元数据仅用于排名，不进入模型结果。
+  const originals = new Map(candidates.map((tool) => [tool.name, tool]));
+  const indexed = candidates.map((tool) => {
+    const group = findGroupForTool(tool.name);
+    return group
+      ? {
+          ...tool,
+          description: `${tool.description} ${group.id} ${group.label} ${group.description}`,
+        }
+      : tool;
+  });
+  return searchTools(indexed, query, limit).map((result) => originals.get(result.tool.name)!);
 }
 
-/**
- * 元工具:模型用它检索并激活动态扩展工具（MCP/Plugin）。
- *
- * 构造时注入工具定义数组或实时数据源,与 ToolDisclosure(状态机)。
- * 实时数据源使 registry 创建后动态注册的 MCP/Plugin 工具也可检索;
- * 只检索不属于预定义组的工具（组内工具走 load_tools 组级激活）。
- */
 export class SearchToolsTool implements BaseTool {
-  /** 纯只读:只更新内存 disclosed 集合,不触碰文件/网络等资源。 */
   readonly readOnly = true;
 
   constructor(
-    private readonly toolSource: ToolDefinitionSource,
+    _toolSource: ToolDefinitionSource,
     private readonly disclosure: ToolDisclosure,
   ) {}
 
@@ -59,17 +59,28 @@ export class SearchToolsTool implements BaseTool {
   }
 
   definition(): ToolDefinition {
+    // 不反查 registry.getAvailableTools：该方法本身正在调用 definition。
+    // 这里提供分组检索提示，候选上限始终由 execute 的 Run 绑定快照决定。
+    const inventory = PICO_TOOL_GROUPS.filter((group) => group.economy === "deferred").map(
+      (group) => `- ${group.id}: ${group.label}`,
+    );
     return {
       name: "search_tools",
-      description:
-        "检索并激活动态扩展工具(MCP/Plugin 工具)。已知分组的工具(代码智能、网络、目标等)请优先用 load_tools;此工具用于查找不属于预定义组的动态工具。支持 select:工具名 精确选择。",
+      description: [
+        "检索本 Run 绑定的延迟工具。成功后激活有界匹配结果，完整定义在下一个 Step 可调用。",
+        "激活在本 Turn 累积，下个 Turn 重新发现。支持 select:工具名 精确选择。",
+        "分组关键词提示（实际可用工具由当前 Run 决定）；另支持 MCP/Plugin 动态工具：",
+        ...inventory,
+      ].join("\n"),
       inputSchema: {
         type: "object",
         properties: {
-          query: {
-            type: "string",
-            description:
-              "要找什么工具,用关键词描述(如 'browser_navigate' 或 '数据库查询');select:前缀精确选择",
+          query: { type: "string", description: "能力关键词，或 select:工具名 精确选择" },
+          limit: {
+            type: "integer",
+            minimum: 1,
+            maximum: TOOL_SEARCH_MAX_LIMIT,
+            description: `本次最多激活工具数，默认 ${TOOL_SEARCH_DEFAULT_LIMIT}`,
           },
         },
         required: ["query"],
@@ -77,48 +88,41 @@ export class SearchToolsTool implements BaseTool {
     };
   }
 
-  /** 纯只读、不触碰资源:与一切工具都不冲突。 */
   accesses(_args: string): ToolAccesses {
     return ToolAccessesNs.none();
   }
 
   async execute(args: string): Promise<string> {
-    // 1. 延迟解析 JSON 参数,解析失败给模型明确的中文报错
-    let query: string;
+    let input: { query?: unknown; limit?: unknown };
     try {
-      const input = JSON.parse(args) as { query?: string };
-      query = input.query ?? "";
+      input = JSON.parse(args) as typeof input;
+      if (!input || typeof input !== "object") throw new Error("object required");
     } catch {
       throw new Error("参数解析失败:期望 JSON 含 query 字段");
     }
-    if (typeof query !== "string" || query.trim() === "") {
+    if (typeof input.query !== "string" || input.query.trim() === "") {
       throw new Error("参数解析失败:query 必须是非空字符串");
     }
-
-    // 2. 每次执行都取实时工具列表,只检索���预定义组的动态工具
-    //    （组内工具经 load_tools 激活;连接器与协议工具排除,见排除名单注释）。
-    const candidates = this.resolveTools().filter(
-      (tool) =>
-        !CANDIDATE_EXCLUDED_NAMES.has(tool.name) && findGroupForTool(tool.name) === undefined,
-    );
-    const hits = findMatchingTools(candidates, query);
-
-    // 3. 无命中提示（精确选择失败与关键词未命中区分开，帮模型闭环）
-    if (hits.length === 0) {
-      if (query.startsWith("select:")) {
-        const wanted = query.slice("select:".length).trim();
-        return `工具 "${wanted}" 不存在。候选: ${candidates.map((t) => t.name).join(", ")}`;
-      }
-      return "未找到匹配工具,试试其他关键词;已知分组的工具请用 load_tools。";
+    const limit = input.limit ?? TOOL_SEARCH_DEFAULT_LIMIT;
+    if (
+      typeof limit !== "number" ||
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > TOOL_SEARCH_MAX_LIMIT
+    ) {
+      throw new Error(`参数解析失败:limit 必须是 1 到 ${TOOL_SEARCH_MAX_LIMIT} 之间的整数`);
     }
-
-    // 4. 命中即 disclose(下一轮生效),返回激活说明
-    this.disclosure.discloseTools(hits.map((t) => t.name));
-    const lines = hits.map((t) => `- ${t.name}: ${t.description}`);
-    return `已激活 ${hits.length} 个工具,下一轮可直接调用:\n${lines.join("\n")}`;
-  }
-
-  private resolveTools(): readonly ToolDefinition[] {
-    return typeof this.toolSource === "function" ? this.toolSource() : this.toolSource;
+    const turn = this.disclosure.currentTurn();
+    // 只使用 Turn 所属 Run 绑定的快照；实时新增/替换工具不能通过搜索扩权。
+    const candidates = turn
+      .getBoundTools()
+      .filter((tool) => isSearchable(tool) && !turn.isToolVisible(tool.name));
+    const hits = findMatchingTools(candidates, input.query, TOOL_SEARCH_MAX_LIMIT);
+    return JSON.stringify(
+      turn.discloseTools(
+        hits.map((tool) => tool.name),
+        limit,
+      ),
+    );
   }
 }
