@@ -329,6 +329,12 @@ function enforceSubagentBudget(registry: ToolRegistry, request: SubagentRegistry
   const publishUsage = (): void => {
     request.onBudgetUsage?.({ toolCallsUsed, inspectedFiles: [...inspected] });
   };
+  // 预算也是最终参数的一部分：在 Hook/权限审批前规范化，不能在 execution
+  // 中间件内改写已授权调用。Hook 或权限改写后 Registry 会重新执行安全门。
+  registry.useSafety(async (call) => ({
+    allowed: true,
+    ...(SCANNING_TOOLS.has(call.name) ? { call: clampScanningCall(call, remaining) } : {}),
+  }));
   registry.useExecution(async (call, next) => {
     if (maxToolCalls !== undefined && toolCallsUsed >= maxToolCalls) {
       throw new Error("子代理工具调用预算已耗尽");
@@ -345,6 +351,14 @@ function enforceSubagentBudget(registry: ToolRegistry, request: SubagentRegistry
     await previous;
     try {
       if (remaining <= 0) throw new Error("子代理文件检查预算已耗尽");
+      // 权限等待和并发调用会消耗预算。持有预算锁后只复验，不偷偷缩小已经
+      // 授权的参数；过期调用在 T1 前失败，新的调用才能按最新余额重新准入。
+      if (
+        SCANNING_TOOLS.has(call.name) &&
+        clampScanningCall(call, remaining).arguments !== call.arguments
+      ) {
+        throw new Error("子代理文件检查预算已变化，请重新发起调用以应用当前剩余预算。");
+      }
 
       const explicitPath =
         call.name === "read_file"
@@ -354,9 +368,6 @@ function enforceSubagentBudget(registry: ToolRegistry, request: SubagentRegistry
             : undefined;
       if (explicitPath) recordInspectedFiles(inspected, [explicitPath], maxFiles);
 
-      const effectiveCall = SCANNING_TOOLS.has(call.name)
-        ? clampScanningCall(call, remaining)
-        : call;
       const repoScans = new Set<string>();
       const workspaceScans = new Set<string>();
       const publishScans = (): void => {
@@ -378,11 +389,11 @@ function enforceSubagentBudget(registry: ToolRegistry, request: SubagentRegistry
             observeWorkspaceFileScans(
               (report) => {
                 for (const path of report.scannedFiles) {
-                  workspaceScans.add(scanPathForCall(effectiveCall, path));
+                  workspaceScans.add(scanPathForCall(call, path));
                 }
                 publishScans();
               },
-              () => next(effectiveCall),
+              () => next(call),
             ),
           Number.isFinite(remaining) ? remaining : undefined,
         );
