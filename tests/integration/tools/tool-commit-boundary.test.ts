@@ -308,3 +308,42 @@ test("执行中间件并发 next 只派发一次，捕获 T1 失败仍不能伪�
   assert.equal(prepares, 2);
   assert.equal(await readFile(join(workDir, "once.txt"), "utf8"), "once");
 });
+
+test("嵌套结果在 T2 前应用宿主清理，清理失败不能返回普通工具结果", async (t) => {
+  const { registry, session, store } = await scene(t);
+  registry.register({
+    name: () => "secret_fixture",
+    nesting: "nestable",
+    readOnly: true,
+    definition: () => ({
+      name: "secret_fixture",
+      description: "fixture",
+      inputSchema: { type: "object", properties: {} },
+    }),
+    execute: async () => "private-canary",
+  });
+  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const call = { id: "sanitized", name: "secret_fixture", arguments: "{}" };
+  const context = {
+    parentToolCallId: "exec-parent",
+    step: registry.captureStep("step", [call.name]),
+  };
+  const result = await run.executeNestedTool(call, registry, {
+    ...context,
+    sanitizeResult: (raw) => ({ ...raw, output: "[REDACTED]" }),
+  });
+  assert.equal(result.output, "[REDACTED]");
+  assert.equal(
+    JSON.stringify(await store.readRun(session.id, run.runId)).includes("private-canary"),
+    false,
+  );
+  await assert.rejects(
+    run.executeNestedTool({ ...call, id: "sanitizer-failure" }, registry, {
+      ...context,
+      sanitizeResult: () => {
+        throw new Error("sanitize unavailable");
+      },
+    }),
+    (error) => error instanceof ToolCommitBoundaryError && error.phase === "T2",
+  );
+});

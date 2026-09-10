@@ -30,6 +30,8 @@ export interface ToolExecutionContext {
   readonly parentToolCallId?: string;
   /** Final validated call, after admission and immediately before physical dispatch. */
   readonly beforeDispatch?: (call: ToolCall) => Promise<void>;
+  /** Trusted host sanitization, applied before nested outcomes enter the ledger or sandbox. */
+  readonly sanitizeResult?: (result: ToolResult) => ToolResult;
 }
 
 export interface ToolExecutionStep {

@@ -1583,9 +1583,15 @@ export class RuntimeRun {
         dispatched = true;
       },
     };
-    const result = await runWithRuntimeToolCall(call.id, () =>
+    const rawResult = await runWithRuntimeToolCall(call.id, () =>
       registry.execute(call, nestedContext),
     );
+    let result: ToolResult;
+    try {
+      result = context.sanitizeResult?.(rawResult) ?? rawResult;
+    } catch (error) {
+      throw new ToolCommitBoundaryError("T2", error);
+    }
     const built = buildRuntimeToolResultInput(
       call,
       result,
@@ -1620,7 +1626,9 @@ export class RuntimeRun {
     } catch (error) {
       throw new ToolCommitBoundaryError("T2", error);
     }
-    return result;
+    return built.input.body.storage === "inline"
+      ? { ...result, output: built.input.body.content, isError: built.input.status !== "succeeded" }
+      : result;
   }
 
   async recordTranscriptToolStarts(
@@ -2160,9 +2168,9 @@ function findDanglingRuntimeToolCalls(
   const unresolvedByToolCallId = new Map<string, PendingRuntimeToolCall[]>();
 
   for (const event of events) {
-    // ADR 27 P0（F1/F2 判定边界）：tool.started 在 registry.execute 之前落库
-    // （src/engine/loop.ts runOneTool / 子代理并发循环均如此），因此它的存在
-    // 即“已派发”的 durable 事实。按 toolCallId 与 pending 队列保持与 result
+    // ADR 27 P0（F1/F2 判定边界）：tool.started 保留旧账本的派发语义；新调用
+    // 在 Registry 最终参数/权限/资源准入之后、物理执行之前提交该 durable 事实。
+    // 按 toolCallId 与 pending 队列保持与 result
     // 相同的 FIFO 配对口径（多 result/多 start 的重试场景逐个配对）。
     if (event.kind === "tool.started") {
       const startedCallId = event.refs?.toolCallId;
