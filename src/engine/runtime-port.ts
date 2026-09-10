@@ -1,4 +1,5 @@
-import type { Message, ToolCall } from "../schema/message.js";
+import type { Message, ToolCall, ToolResult } from "../schema/message.js";
+import type { Registry, ToolExecutionContext } from "../tools/registry.js";
 import type { CommitReceipt } from "./session-persistence.js";
 import type {
   RuntimeOwnerFence,
@@ -152,7 +153,23 @@ export interface EngineRuntimeRun {
   run<Result>(execute: () => Promise<Result>, signal?: AbortSignal): Promise<Result>;
   recordTurnStarted(turn: number): Promise<void>;
   recordCheckpoint(input: EngineRuntimeCheckpointInput): Promise<void>;
-  recordToolStarted(toolCallId: string, toolName: string, argumentsJson: string): Promise<void>;
+  recordToolStarted(
+    toolCallId: string,
+    toolName: string,
+    argumentsJson: string,
+    context?: ToolExecutionContext,
+  ): Promise<void>;
+  executeNestedTool(
+    call: ToolCall,
+    registry: Registry,
+    context: ToolExecutionContext,
+  ): Promise<ToolResult>;
+  assertNoUnresolvedToolEffects(): Promise<void>;
+  resolveToolRecovery(input: {
+    readonly recoveryEventId: string;
+    readonly evidenceUri: string;
+    readonly summary: string;
+  }): Promise<void>;
   recordTranscriptToolStarts(
     session: Session,
     toolCalls: readonly ToolCall[],

@@ -25,6 +25,30 @@ export interface ToolExecutionContext {
   readonly onOutput?: (output: ToolOutputChunk) => void;
   /** 当前 Provider tool call 的精确关联键。 */
   readonly toolCallId?: string;
+  readonly step?: ToolExecutionStep;
+  readonly origin?: "model" | "code_mode";
+  readonly parentToolCallId?: string;
+  /** Final validated call, after admission and immediately before physical dispatch. */
+  readonly beforeDispatch?: (call: ToolCall) => Promise<void>;
+}
+
+export interface ToolExecutionStep {
+  readonly id: string;
+  readonly visibleToolNames: ReadonlySet<string>;
+}
+
+/** Commit failures must escape tool-error conversion, including nested code cells. */
+export class ToolCommitBoundaryError extends Error {
+  constructor(
+    readonly phase: "T1" | "T2",
+    cause: unknown,
+  ) {
+    super(
+      `Tool ${phase} commit failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      { cause },
+    );
+    this.name = "ToolCommitBoundaryError";
+  }
 }
 
 export type ToolFileSideEffects =
@@ -75,6 +99,10 @@ export type MiddlewareFunc = RequestMiddleware;
  * 参数是原始 JSON 字符串,反序列化由各工具内部自行处理 —— 延迟解析、极致解耦。
  */
 export interface BaseTool {
+  /** Nested code execution is opt-in; absence means direct_only. */
+  nesting?: "nestable" | "direct_only";
+  /** Orchestrators acquire resources through their child calls. */
+  executionMode?: "orchestrator";
   /** 返回工具的全局唯一名称 (大模型通过这个名字调用它) */
   name(): string;
   /** 返回提交给大模型的工具元信息和参数 JSON Schema */
@@ -123,6 +151,12 @@ export interface Registry {
   useExecution?(mw: ExecutionMiddleware): void;
   /** 返回当前系统挂载的所有工具的 Schema,供 Main Loop 交给 Provider */
   getAvailableTools(): ToolDefinition[];
+  captureStep?(
+    id: string,
+    visibleToolNames: readonly string[],
+    boundStep?: ToolExecutionStep,
+  ): ToolExecutionStep;
+  getNesting?(name: string, step?: ToolExecutionStep): "nestable" | "direct_only";
   /** 实际路由并执行模型请求的工具调用 */
   execute(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult>;
   /**

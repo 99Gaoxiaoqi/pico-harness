@@ -7,8 +7,7 @@ import type {
 } from "./session-runtime-event.js";
 
 export type RuntimeModelHistoryEvent =
-  | RuntimeMessageCommittedEvent
-  | RuntimeToolResultRecordedEvent;
+  RuntimeMessageCommittedEvent | RuntimeToolResultRecordedEvent;
 
 export function runtimeEventHasModelHistoryEntry(
   event: RuntimeEvent,
@@ -36,6 +35,7 @@ const CLAIM_BY_KIND: Record<RuntimeEvent["kind"], RuntimeEventClaimKind> = {
   "message.committed": "message",
   "tool.started": "control",
   "tool.group.loaded": "control",
+  "tool.recovery.resolved": "control",
   "tool.result.recorded": "message",
   "agent.output": "control",
   "approval.requested": "control",

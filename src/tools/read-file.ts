@@ -30,6 +30,7 @@ function lineEndingStyleLabel(style: "lf" | "crlf" | "mixed"): string {
 }
 
 export class ReadFileTool implements BaseTool {
+  readonly nesting = "nestable" as const;
   readonly readOnly = true;
   private readonly roots: WorkspaceRoots;
 
