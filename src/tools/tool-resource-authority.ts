@@ -8,7 +8,11 @@ interface FileClaim {
   inode?: string;
   write: boolean;
 }
-type Claim = FileClaim | { kind: "all" } | { kind: "capacity"; key: string; limit: number };
+type Claim =
+  | FileClaim
+  | { kind: "all" }
+  | { kind: "resource"; key: string }
+  | { kind: "capacity"; key: string; limit: number };
 interface Waiter {
   claims?: readonly Claim[];
   signal?: AbortSignal;
@@ -38,6 +42,7 @@ async function resolveClaims(accesses: ToolAccesses): Promise<readonly Claim[]> 
   return Promise.all(
     accesses.map(async (access): Promise<Claim> => {
       if (access.kind === "all") return { kind: "all" };
+      if (access.kind === "resource") return { kind: "resource", key: access.key };
       if (!isAbsolute(access.path))
         throw new Error("Resource authority requires absolute file paths");
       const path = await canonicalPath(access.path);
@@ -68,6 +73,9 @@ function conflicts(left: readonly Claim[], right: readonly Claim[]): boolean {
     right.some((b) => {
       if (a.kind === "capacity" || b.kind === "capacity") return false;
       if (a.kind === "all" || b.kind === "all") return true;
+      if (a.kind === "resource" || b.kind === "resource") {
+        return a.kind === "resource" && b.kind === "resource" && a.key === b.key;
+      }
       return (
         (a.write || b.write) &&
         ((a.inode !== undefined && a.inode === b.inode) ||

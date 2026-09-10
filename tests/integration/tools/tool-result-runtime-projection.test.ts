@@ -40,7 +40,7 @@ test("large Runtime ToolResult (2048 token < size < 1MB) persists full inline wi
 
   // 渐进披露开启:read_evidence 已随回读协议退役(E3),工具面不披露、不注册。
   const toolDisclosure = new ToolDisclosure();
-  toolDisclosure.discloseTools([LARGE_TOOL_NAME]);
+  toolDisclosure.setBaselineTools([LARGE_TOOL_NAME]);
 
   const providerMessages: Message[][] = [];
   const availableToolsByTurn: string[][] = [];

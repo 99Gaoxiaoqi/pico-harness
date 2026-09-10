@@ -375,6 +375,7 @@ function truncate(text: string, maxChars: number): string {
 // ==========================================
 
 export class FetchURLTool implements BaseTool {
+  readonly nesting = "nestable" as const;
   readonly readOnly = true;
   private readonly request: FetchURLRequest;
   private authorizeUrl?: FetchURLAuthorizer;
@@ -540,6 +541,7 @@ function renderResults(results: SearchResult[], max: number): string {
 }
 
 export class WebSearchTool implements BaseTool {
+  readonly nesting = "nestable" as const;
   readonly readOnly = true;
 
   constructor(private readonly env: Readonly<Record<string, string | undefined>> = process.env) {}

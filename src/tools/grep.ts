@@ -478,6 +478,7 @@ function compileSearchPattern(pattern: string, caseSensitive: boolean): RegExp |
 }
 
 export class GrepTool implements BaseTool {
+  readonly nesting = "nestable" as const;
   readonly readOnly = true;
   private readonly roots: WorkspaceRoots;
 

@@ -33,13 +33,23 @@ export interface AllAccess {
   readonly kind: "all";
 }
 
+/** Identity of a stateful resource, e.g. one browser session or terminal actor. */
+export interface NamedResourceAccess {
+  readonly kind: "resource";
+  readonly key: string;
+}
+
 /** 单个资源访问声明 */
-export type ResourceAccess = FileAccess | AllAccess;
+export type ResourceAccess = FileAccess | AllAccess | NamedResourceAccess;
 
 /** 一个工具调用的全部资源访问集合 */
 export type ToolAccesses = readonly ResourceAccess[];
 
 export const ToolAccesses = {
+  resource(key: string): ToolAccesses {
+    if (!key.trim()) throw new Error("Resource key must not be empty");
+    return [{ kind: "resource", key }];
+  },
   /** 无副作用(如 echo、web 查询)。不与任何工具冲突。 */
   none(): ToolAccesses {
     return [];
@@ -78,6 +88,9 @@ export const ToolAccesses = {
 function resourceAccessesConflict(left: ResourceAccess, right: ResourceAccess): boolean {
   // 第一层:任一是 all → 全局互斥
   if (left.kind === "all" || right.kind === "all") return true;
+  if (left.kind === "resource" || right.kind === "resource") {
+    return left.kind === "resource" && right.kind === "resource" && left.key === right.key;
+  }
 
   // 第二层:操作类型 —— 双方都不含写则放行(read+read / read+search)
   if (!fileOperationWrites(left.operation) && !fileOperationWrites(right.operation)) {

@@ -50,6 +50,7 @@ const MAX_RESULTS = 100;
  *   - 点号:字面量
  */
 export class GlobTool implements BaseTool {
+  readonly nesting = "nestable" as const;
   readonly readOnly = true;
   private readonly roots: WorkspaceRoots;
 

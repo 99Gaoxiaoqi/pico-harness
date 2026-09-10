@@ -45,7 +45,8 @@ import { PromptComposer } from "../context/composer.js";
 import type { TodoStore } from "../context/todo-store.js";
 import type { AgentGraphProfileSnapshot } from "../agent-graph/core/contracts.js";
 import { SkillLoader, type Skill } from "../context/skill.js";
-import { ToolDisclosure, type ToolGroupLoadedEventLike } from "../tools/tool-disclosure.js";
+import { ToolDisclosure } from "../tools/tool-disclosure.js";
+import { createCodeModeTool } from "../tools/code-mode-tool.js";
 import { isToolSupportedForHost, type ToolHostKind } from "../tools/tool-surface.js";
 import {
   createRawProvider,
@@ -1561,6 +1562,8 @@ export async function executeAgentRuntime(
     });
     const { goalManager, todoStore, toolDisclosure, backgroundManager, delegationManager } =
       runtimeState;
+    // Host-required tools are a baseline, not discoveries inherited from an old Turn.
+    const baselineToolNames: string[] = [];
     const sessionTaskAuthority = {
       repository: new SqliteSessionWorkbarRepository({
         storageRoot: sessionStorageRoot,
@@ -1575,27 +1578,10 @@ export async function executeAgentRuntime(
         }),
     };
     if (activeExecutionPlanId) {
-      toolDisclosure.discloseTools(["update_plan", "cancel_plan"]);
+      baselineToolNames.push("update_plan", "cancel_plan");
     }
-    // durable 披露恢复：从本 session 的 ledger 重播 tool.group.loaded 事实，
-    // run 切换 / crash recovery 后已加载组自动恢复，模型无需重新 load_tools。
-    if (session.runtimeEventStore) {
-      try {
-        // kind 切片(票 04):披露恢复只消费 tool.group.loaded 事实。
-        const priorEntries = (
-          await session.runtimeEventStore.readSessionEntriesOfKinds(session.id, [
-            "tool.group.loaded",
-          ])
-        ).entries;
-        toolDisclosure.seedFromEvents(
-          priorEntries.map((entry) => entry.event as ToolGroupLoadedEventLike),
-        );
-      } catch {
-        // 恢复失败不阻塞 run：最坏情况是模型需重新 load_tools。
-      }
-    }
-    // load_tools 组级激活的 durable 写入：ledger 事实是 crash 恢复的唯一来源。
-    // 写失败不阻塞激活（内存态已生效），只损失恢复能力。
+    // Group-loaded events remain audit facts; new Turns never replay them as activation.
+    // Audit-write failure does not broaden the current Turn's bound tool set.
     // background 宿主刻意不写：YOLO allowlist 语义下披露状态属于单次 Job
     // 生命周期，且 fire-and-forget append 会绕过 executor 的 run 事件序列
     // （可打断 recoverable-task 的 high-water CAS），不值得为不可恢复的
@@ -1720,6 +1706,10 @@ export async function executeAgentRuntime(
       onToolGroupLoaded,
       sessionTaskAuthority,
     );
+    if (collaborationMode() !== "plan") {
+      registry.register(createCodeModeTool({ registry, getRuntimeRun: currentRuntimeRun }));
+      baselineToolNames.push("exec");
+    }
     if (dependencies.agentGraph?.kind === "root") {
       if (backgroundPolicy || orchestrationMode() === "default") {
         throw new Error("Graph root tools require a foreground Graph Mode Runtime");
@@ -1745,11 +1735,11 @@ export async function executeAgentRuntime(
           }),
         );
       }
-      toolDisclosure.discloseTools([
+      baselineToolNames.push(
         ...(orchestrationMode() === "swarm"
           ? AGENT_SWARM_SUPERVISOR_TOOL_NAMES
           : AGENT_GRAPH_SUPERVISOR_TOOL_NAMES),
-      ]);
+      );
     } else if (dependencies.agentGraph?.kind === "operator") {
       registry.register(
         createAgentOutputTool({
@@ -1757,7 +1747,7 @@ export async function executeAgentRuntime(
           port: dependencies.agentGraph.outputPort,
         }),
       );
-      toolDisclosure.discloseTools(["agent_output"]);
+      baselineToolNames.push("agent_output");
     }
     if (!backgroundPolicy && hostKind === "desktop" && dependencies.browserAgent) {
       for (const tool of createBrowserAgentTools(dependencies.browserAgent)) {
@@ -2188,7 +2178,7 @@ export async function executeAgentRuntime(
           });
         } else registry.register(childOutput);
       }
-      toolDisclosure.discloseTools(["agent_list", "agent_spawn", "agent_output"]);
+      baselineToolNames.push("agent_list", "agent_spawn", "agent_output");
     }
     if (backgroundPolicy) pruneRegistryToBackgroundAllowlist(registry, backgroundPolicy);
     dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
@@ -2288,7 +2278,7 @@ export async function executeAgentRuntime(
       // 否则 deferred 组成员（web_search/task_list 等）会被
       // 渐进披露层藏掉，而 background 下 load_tools/search_tools 可能已被
       // 剪枝，模型没有激活路径，永远看不到它已授权的工具。
-      toolDisclosure.discloseTools([...backgroundPolicy.allowedTools]);
+      baselineToolNames.push(...backgroundPolicy.allowedTools);
     }
     if (dependencies.configuredSubagentChild) {
       const definition = dependencies.configuredSubagentChild.definition;
@@ -2319,7 +2309,7 @@ export async function executeAgentRuntime(
         }),
       );
       pruneRegistryToCommandAllowlist(registry, definition.tools);
-      toolDisclosure.discloseTools([...definition.tools]);
+      baselineToolNames.push(...definition.tools);
     }
     if (effectiveOptions.allowedTools !== undefined) {
       const requiredControlTools = [
@@ -2331,9 +2321,11 @@ export async function executeAgentRuntime(
       // 命令级 allowlist 是宿主/请求方的显式选择——存活工具必须对模型可见，
       // 不能被渐进披露层藏掉（否则 headless/skill 激活场景下白名单里的
       // deferred 工具无激活路径，连接器又可能已被剪掉）。
-      toolDisclosure.discloseTools(commandAllowlist);
+      baselineToolNames.push(...commandAllowlist);
       dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
     }
+
+    toolDisclosure.setBaselineTools(baselineToolNames);
 
     // 阶段 4：在当前 Session 内串行执行一次 RuntimeRun。
     // RuntimeRunExecutor 不拥有任何资源；本函数仍负责阶段 3 的装配和 finally 清理。
