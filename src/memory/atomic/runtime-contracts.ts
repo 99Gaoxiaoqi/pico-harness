@@ -66,6 +66,7 @@ export type MemoryGateResult =
   | { readonly allowed: false; readonly reason: string };
 
 export interface AtomicMemorySettings {
+  /** Caller context retained for compatibility; policy values are shared across the host. */
   readonly workspaceKey: string;
   readonly enabled: boolean;
   readonly autoExtract: boolean;

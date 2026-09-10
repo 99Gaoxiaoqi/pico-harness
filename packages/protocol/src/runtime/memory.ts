@@ -21,7 +21,6 @@ import {
   resultOneOf,
   resultString,
   stringParam,
-  workspaceParams,
 } from "./validation.js";
 import type { RuntimeParamValidator, RuntimeResultRule } from "./validation.js";
 
@@ -164,11 +163,11 @@ function memoryUpdateParams(value: Record<string, unknown>): void {
 function memorySettingsUpdateParams(value: Record<string, unknown>): void {
   exactParamShape(
     {
-      workspacePath: stringParam,
       expectedVersion: positiveIntegerParam,
       idempotencyKey: boundedNonEmptyStringParam(512),
     },
     {
+      workspacePath: stringParam,
       enabled: booleanParam,
       autoPropose: booleanParam,
       autoCommit: (candidate, path) => {
@@ -389,14 +388,15 @@ export type MemoryMethodMap = {
     };
   };
   readonly "memory.settings.get": {
-    readonly params: WorkspaceParams;
+    readonly params: { readonly workspacePath?: string };
     readonly result: {
       readonly settings: RuntimeMemorySettings;
       readonly reviewBudget: RuntimeMemoryReviewBudget;
     };
   };
   readonly "memory.settings.update": {
-    readonly params: WorkspaceParams & {
+    readonly params: {
+      readonly workspacePath?: string;
       readonly expectedVersion: number;
       readonly idempotencyKey: string;
       readonly enabled?: boolean;
@@ -454,7 +454,7 @@ export const memoryParamValidators = {
     },
   ),
   "memory.review.resolve": memoryReviewResolveParams,
-  "memory.settings.get": workspaceParams,
+  "memory.settings.get": exactParamShape({}, { workspacePath: stringParam }),
   "memory.settings.update": memorySettingsUpdateParams,
   "memory.context.preview": exactParamShape(
     { workspacePath: stringParam },

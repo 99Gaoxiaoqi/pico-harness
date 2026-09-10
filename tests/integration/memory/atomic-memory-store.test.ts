@@ -201,7 +201,7 @@ test("atomic memory persists scoped assertions with transaction replay, rollback
         conflict("version_conflict"),
       );
       assert.equal((await second.readSettings("/workspace/a")).recallEnabled, false);
-      assert.equal((await second.readSettings("/workspace/b")).recallEnabled, true);
+      assert.equal((await second.readSettings("/workspace/b")).recallEnabled, false);
     } finally {
       second.close();
     }

@@ -281,6 +281,11 @@ function mergeLoadedData(
 }
 
 export interface RuntimeActions {
+  loadUserMemorySettings(): Promise<RuntimeMemorySettings>;
+  updateUserMemorySettings(
+    expectedVersion: number,
+    patch: MemorySettingsPatch,
+  ): Promise<RuntimeMemorySettings>;
   loadSubagentSettings(): Promise<RuntimeSubagentSettingsSnapshot>;
   updateSubagentSettings(
     presets: readonly RuntimeSubagentPreset[],
@@ -2931,6 +2936,25 @@ export function useRuntimeStore(): RuntimeStore {
         });
         return updated;
       },
+      async loadUserMemorySettings() {
+        const bridge = getBridge();
+        if (!bridge) throw new Error("本地 Runtime 未连接");
+        return (await invoke(bridge, "memory.settings.get", {})).settings;
+      },
+      async updateUserMemorySettings(expectedVersion, patch) {
+        const bridge = getBridge();
+        if (!bridge) throw new Error("本地 Runtime 未连接");
+        const result = await invoke(bridge, "memory.settings.update", {
+          expectedVersion,
+          idempotencyKey: crypto.randomUUID(),
+          ...patch,
+        });
+        setData((current) => ({
+          ...current,
+          memory: { ...current.memory, settings: result.settings },
+        }));
+        return result.settings;
+      },
       async setLaunchAtLogin(enabled) {
         await perform("launch-at-login", async (bridge) => {
           const result = await bridge.platform.setLaunchAtLogin(enabled);
@@ -2986,14 +3010,15 @@ export function useRuntimeStore(): RuntimeStore {
           }
           if (kind === "resources") {
             const value = await invoke(bridge, "diagnostics.resources", { workspacePath });
-            const entryChecks: RuntimeDiagnosticCheck[] = value.entries.map((entry, index) => ({
-              id: `resource:${entry.kind}:${index}`,
-              label: entry.kind,
-              status:
-                entry.status === "unsafe" ? "error" : entry.status === "missing" ? "warning" : "ok",
-              summary: entry.path,
-              ...(entry.reason ? { recommendation: entry.reason } : {}),
-            }));
+            const entryChecks: RuntimeDiagnosticCheck[] = value.entries
+              .filter((entry) => entry.status !== "missing")
+              .map((entry, index) => ({
+                id: `resource:${entry.kind}:${index}`,
+                label: entry.kind,
+                status: entry.status === "unsafe" ? "error" : "ok",
+                summary: entry.path,
+                ...(entry.reason ? { recommendation: entry.reason } : {}),
+              }));
             const findingChecks: RuntimeDiagnosticCheck[] = value.findings.map(
               (finding, index) => ({
                 id: `finding:${index}`,
@@ -3002,7 +3027,18 @@ export function useRuntimeStore(): RuntimeStore {
                 summary: finding,
               }),
             );
-            const checks = [...entryChecks, ...findingChecks];
+            const pluginChecks: RuntimeDiagnosticCheck[] = (value.pluginDiagnostics ?? [])
+              .filter((diagnostic) => diagnostic.severity !== "info")
+              .map((diagnostic, index) => ({
+                id: `plugin:${diagnostic.pluginId}:${index}`,
+                label: `插件 ${diagnostic.pluginId}`,
+                status:
+                  diagnostic.severity === "error" || diagnostic.compatibility === "blocked"
+                    ? "error"
+                    : "warning",
+                summary: diagnostic.message,
+              }));
+            const checks = [...entryChecks, ...findingChecks, ...pluginChecks];
             report = {
               kind,
               healthy: checks.every((check) => check.status !== "error"),

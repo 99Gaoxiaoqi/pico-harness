@@ -17,9 +17,7 @@ export const settingsNavigationGroups = [
     items: [
       { to: "/settings/models", label: "模型", kind: "models" },
       { to: "/settings/subagents", label: "子 Agent", kind: "subagents" },
-      { to: "/settings/memory", label: "记忆", kind: "memory", scoped: true },
-      { to: "/extensions/skills", label: "Skills", kind: "skills" },
-      { to: "/extensions/mcp", label: "MCP", kind: "mcp" },
+      { to: "/settings/memory", label: "记忆", kind: "memory" },
     ],
   },
   {

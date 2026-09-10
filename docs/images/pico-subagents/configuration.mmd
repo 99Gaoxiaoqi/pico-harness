@@ -1,0 +1,10 @@
+flowchart TB
+    U["设置页面<br/>保存配置"] --> H["设置服务<br/>校验版本与字段"]
+    H --> F["用户配置<br/>subagents.presets"]
+    F --> C["实时配置目录"]
+    M["主智能体"] --> L["agent_list"]
+    C --> L
+    L --> A["选择可用配置"]
+    A --> S["agent_spawn"]
+    C --> V["启动前重新校验"]
+    S --> V

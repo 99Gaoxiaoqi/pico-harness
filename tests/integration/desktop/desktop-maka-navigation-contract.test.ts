@@ -23,7 +23,7 @@ test("desktop main sidebar follows the Maka task-first information architecture"
   assert.doesNotMatch(source, /sidebar-project__header"[\s\S]{0,180}to=\{newSessionHref/u);
 });
 
-test("settings replaces the task sidebar and owns tool capability routes", async () => {
+test("settings replaces the task sidebar while extensions keep their dedicated routes", async () => {
   assert.deepEqual(
     settingsNavigationGroups.map((group) => ({
       label: group.label,
@@ -31,7 +31,7 @@ test("settings replaces the task sidebar and owns tool capability routes", async
     })),
     [
       { label: "偏好", items: ["通用", "项目"] },
-      { label: "能力", items: ["模型", "子 Agent", "记忆", "Skills", "MCP"] },
+      { label: "能力", items: ["模型", "子 Agent", "记忆"] },
       { label: "活动", items: ["用量"] },
       { label: "系统", items: ["健康"] },
     ],
@@ -48,6 +48,7 @@ test("settings replaces the task sidebar and owns tool capability routes", async
     /location\.pathname\.startsWith\("\/settings"\)[\s\S]{0,100}location\.pathname\.startsWith\("\/extensions"\)/u,
   );
   assert.match(source, /<SettingsSidebar/u);
+  assert.match(source, /path="extensions\/:kind" element=\{<ExtensionsPage \/>\}/u);
   assert.match(source, /path="settings" element=\{<SettingsPage \/>\}/u);
   const settingsRouteStart = source.indexOf('<Route path="settings"');
   const workspaceSettingsRouteStart = source.indexOf(

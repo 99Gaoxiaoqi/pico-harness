@@ -4,7 +4,7 @@ import { Link } from "react-router-dom";
 import { Button, InlineNotice, StatusPill, WorkspaceModeBadge } from "../components.js";
 import { useRuntime } from "../runtime-context.js";
 import type { DesktopDiagnosticReport } from "../runtime.js";
-import { workspaceDisplayName, workspaceHref } from "../workspace-session.js";
+import { workspaceDisplayName } from "../workspace-session.js";
 
 export function SettingsPage() {
   const { data, actions, busy } = useRuntime();
@@ -192,31 +192,52 @@ export function SystemSettingsPage() {
   const { data, actions, busy, connection } = useRuntime();
   const [diagnosticReport, setDiagnosticReport] = useState<DesktopDiagnosticReport>();
   const [diagnosticWorkspacePath, setDiagnosticWorkspacePath] = useState(
-    () => data.workspacePath ?? data.workspaces[0]?.path ?? "",
+    () =>
+      data.workspacePath ?? data.workspaces.find((workspace) => !workspace.temporary)?.path ?? "",
   );
-  const memoryHref = data.workspacePath
-    ? workspaceHref("/settings/memory", data.workspacePath)
-    : "/settings/memory";
+  const diagnosticWorkspaces = data.workspaces.filter(
+    (workspace) => !workspace.temporary || workspace.path === data.workspacePath,
+  );
+  const credentialIssues = data.providerConfig.providers.filter(
+    (provider) =>
+      provider.auth !== "none" && ["missing", "unsupported"].includes(provider.credentialStatus),
+  );
   return (
     <div className="page-stack settings-page">
       <section className="page-intro">
         <div>
           <span className="eyebrow">系统</span>
           <h2>健康</h2>
-          <p>查看真实连接状态，并按项目运行本地诊断。</p>
+          <p>查看当前运行主机的用户级连接与能力状态，不随聊天项目切换。</p>
         </div>
+        <Button disabled={Boolean(busy)} onClick={() => void actions.reload()}>
+          刷新状态
+        </Button>
       </section>
+      {credentialIssues.length > 0 && (
+        <InlineNotice tone="warning">
+          {credentialIssues.length} 个模型连接需要处理凭证：
+          {credentialIssues.map((provider) => provider.id).join("、")}。
+          <Link to="/settings/models">打开模型设置</Link>
+        </InlineNotice>
+      )}
       <section className="settings-section">
         <h3>当前状态</h3>
         <div className="settings-list">
           <SettingRow
             title="本地 Runtime"
-            detail="任务执行、工具调用和本地数据都由 Runtime Host 承载"
+            detail={connection.kind === "error" ? connection.detail : "本地任务执行服务的连接状态"}
           >
             <StatusPill status={connection.kind === "ready" ? "ready" : "attention"} />
           </SettingRow>
+          <SettingRow
+            title="连接验证"
+            detail="此页不发起模型请求；已配置或凭证已保存不代表连接测试通过。"
+          >
+            <span className="health-status-text">未验证</span>
+          </SettingRow>
           <SettingRow title="模型连接" detail="只根据当前已加载的模型路由判断，不执行网络探测">
-            {data.modelRoutes.length > 0 ? (
+            {data.providerConfig.providers.length > 0 ? (
               <span className="health-status-text health-status-text--ready">已配置</span>
             ) : (
               <Link className="button" to="/settings/models">
@@ -230,15 +251,93 @@ export function SystemSettingsPage() {
           >
             <span className="health-status-text">由会话控制</span>
           </SettingRow>
-          <SettingRow title="记忆" detail="记忆生成、审核与长期保留策略按项目管理">
-            <Link className="button" to={memoryHref}>
+          <SettingRow title="记忆" detail="用户级策略对所有项目生效，项目内容保持隔离">
+            <Link className="button" to="/settings/memory">
               打开记忆设置
             </Link>
           </SettingRow>
         </div>
       </section>
       <section className="settings-section">
-        <h3>项目诊断</h3>
+        <h3>模型与凭证</h3>
+        <p className="settings-section__note">用户级连接配置；项目覆盖配置可在高级诊断中检查。</p>
+        <div className="settings-list">
+          {data.providerConfig.providers.map((provider) => (
+            <SettingRow
+              key={provider.id}
+              title={provider.id}
+              detail={
+                provider.auth === "none"
+                  ? "此连接无需凭证"
+                  : provider.credentialStatus === "missing"
+                    ? "缺少凭证，此连接可能无法调用"
+                    : provider.credentialStatus === "unsupported"
+                      ? "当前凭证方式不受支持"
+                      : "已读取凭证配置，尚未在此页验证网络连接"
+              }
+            >
+              <Link className="button" to="/settings/models">
+                {provider.auth === "none"
+                  ? "无需凭证"
+                  : provider.credentialStatus === "missing" ||
+                      provider.credentialStatus === "unsupported"
+                    ? "处理凭证"
+                    : "查看配置"}
+              </Link>
+            </SettingRow>
+          ))}
+          {data.providerConfig.providers.length === 0 && (
+            <SettingRow title="模型配置" detail="尚无已加载的用户级连接">
+              <Link className="button" to="/settings/models">
+                配置模型
+              </Link>
+            </SettingRow>
+          )}
+        </div>
+        {data.notices.providers && (
+          <InlineNotice tone="warning">{data.notices.providers}</InlineNotice>
+        )}
+      </section>
+      <section className="settings-section">
+        <h3>扩展能力</h3>
+        <p className="settings-section__note">用户级 MCP 配置，不代表实时探测结果。</p>
+        <div className="settings-list">
+          {data.mcpScope.userItems.map((server) => (
+            <SettingRow
+              key={server.id}
+              title={server.name}
+              detail={server.description || server.meta || "MCP 服务"}
+            >
+              <span className="health-status-text">
+                {server.state === "attention"
+                  ? "需要处理"
+                  : server.state === "disabled"
+                    ? "未启用"
+                    : "已配置"}
+              </span>
+            </SettingRow>
+          ))}
+          {data.mcpScope.userItems.length === 0 && (
+            <SettingRow
+              title="MCP"
+              detail="当前范围没有已加载的 MCP 服务；未配置可选扩展不属于故障"
+            >
+              <span className="health-status-text">未配置</span>
+            </SettingRow>
+          )}
+        </div>
+        {!data.mcpScope.workspacePath && data.notices.mcp && (
+          <InlineNotice tone="warning">{data.notices.mcp}</InlineNotice>
+        )}
+        <Link className="button" to="/extensions/mcp">
+          管理扩展
+        </Link>
+      </section>
+      <details className="settings-section health-report__raw">
+        <summary>高级诊断</summary>
+        <p className="settings-section__note">
+          按需检查项目环境、本地存储和资源路径。不会发起模型请求或修复数据。
+        </p>
         <div className="settings-list">
           <SettingRow title="诊断项目" detail="只决定本次检查范围，不会切换当前会话">
             <select
@@ -251,9 +350,11 @@ export function SystemSettingsPage() {
               }}
             >
               <option value="">选择项目</option>
-              {data.workspaces.map((workspace) => (
+              {diagnosticWorkspaces.map((workspace) => (
                 <option key={workspace.path} value={workspace.path}>
-                  {workspaceDisplayName(workspace.path, workspace)}
+                  {workspace.temporary
+                    ? "当前无项目任务"
+                    : workspaceDisplayName(workspace.path, workspace)}
                 </option>
               ))}
             </select>
@@ -287,13 +388,15 @@ export function SystemSettingsPage() {
           <p className="settings-section__note">添加项目后可以检查目录、配置和本地资源。</p>
         )}
         {diagnosticReport && <DiagnosticReport report={diagnosticReport} />}
-      </section>
+      </details>
     </div>
   );
 }
 
 function DiagnosticReport({ report }: { readonly report: DesktopDiagnosticReport }) {
-  const visibleChecks = report.checks.filter((check) => check.id !== "provider");
+  const visibleChecks = report.checks.filter(
+    (check) => check.id !== "provider" && check.id !== "env-file",
+  );
   return (
     <section className="health-report" aria-label="诊断结果">
       <header>
@@ -304,7 +407,7 @@ function DiagnosticReport({ report }: { readonly report: DesktopDiagnosticReport
             <AlertTriangle aria-hidden="true" />
           )}
           <span>
-            <strong>{report.healthy ? "Pico 运行正常" : "发现需要处理的问题"}</strong>
+            <strong>{report.healthy ? "本次检查未发现阻断性错误" : "发现需要处理的问题"}</strong>
             <small>
               {report.kind === "runtime" ? "运行环境检查" : "本地资源扫描"} · {visibleChecks.length}{" "}
               项

@@ -8,6 +8,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { Link } from "react-router-dom";
 import type { RuntimeAtomicMemoryDetails, RuntimeMemoryFact } from "@pico/protocol";
 import { Button, EmptyState, IconButton, InlineNotice } from "./components.js";
 import type { RuntimeStore } from "./runtime.js";
@@ -163,14 +164,6 @@ export function MemoryPage({
       setEditor(undefined);
       setAnnouncement("记忆已删除。");
     }
-  };
-  const changeSetting = async (
-    key: "enabled" | "autoPropose" | "injectionEnabled",
-    value: boolean,
-  ) => {
-    if (!memory.settings) return;
-    if (await actions.updateMemorySettings(memory.settings.version, { [key]: value }))
-      setAnnouncement("记忆设置已更新。");
   };
   const renderList = (panel: PanelId) =>
     groups[panel].length ? (
@@ -429,36 +422,9 @@ export function MemoryPage({
           )}
         </>
       )}
-      {memory.settings && (
-        <section className="memory-settings" aria-labelledby="memory-settings-title">
-          <div>
-            <h3 id="memory-settings-title">记忆设置</h3>
-            <p>开关只影响当前工作区，已保存的内容仍可管理。</p>
-          </div>
-          <fieldset disabled={Boolean(busy) || !data.trusted}>
-            <legend className="sr-only">工作区记忆开关</legend>
-            {(
-              [
-                ["enabled", "启用记忆", "关闭后停止记忆提取和会话召回。"],
-                ["autoPropose", "自动提取长期信息", "对话中的长期信息经过验证后直接保存。"],
-                ["injectionEnabled", "会话召回", "按当前问题选取相关记忆；归档条目不会注入。"],
-              ] as const
-            ).map(([key, label, detail]) => (
-              <label key={key}>
-                <input
-                  type="checkbox"
-                  checked={memory.settings![key]}
-                  onChange={(event) => void changeSetting(key, event.target.checked)}
-                />
-                <span>
-                  <strong>{label}</strong>
-                  <small>{detail}</small>
-                </span>
-              </label>
-            ))}
-          </fieldset>
-        </section>
-      )}
+      <Link className="button" to="/settings/memory">
+        用户级记忆设置
+      </Link>
     </section>
   );
 }

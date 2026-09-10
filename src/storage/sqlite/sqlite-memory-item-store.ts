@@ -927,13 +927,15 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
 
   async readSettings(workspaceKey: string): Promise<AtomicMemorySettings> {
     this.#assertOpen();
-    return this.#readSettings(normalizeIdentifier(workspaceKey, "workspaceKey"));
+    return this.#readSnapshot(() =>
+      this.#readSettings(normalizeIdentifier(workspaceKey, "workspaceKey")),
+    );
   }
 
   #readSettings(workspaceKey: string): AtomicMemorySettings {
     const row = this.#database
       .prepare("SELECT * FROM memory_settings WHERE workspace_key = ?")
-      .get(workspaceKey) as
+      .get("__pico_user_memory_settings__") as
       | { version: number; enabled: number; auto_extract: number; recall_enabled: number }
       | undefined;
     return row
@@ -984,12 +986,16 @@ export class SqliteMemoryItemStore implements AtomicMemoryStore {
         enabled=excluded.enabled, auto_extract=excluded.auto_extract, recall_enabled=excluded.recall_enabled`,
         )
         .run(
-          workspaceKey,
+          "__pico_user_memory_settings__",
           next.version,
           Number(next.enabled),
           Number(next.autoExtract),
           Number(next.recallEnabled),
         );
+      // Remove obsolete project preferences atomically with the user-wide save.
+      this.#database
+        .prepare("DELETE FROM memory_settings WHERE workspace_key != ?")
+        .run("__pico_user_memory_settings__");
       this.#database.exec("COMMIT");
       return next;
     } catch (error) {

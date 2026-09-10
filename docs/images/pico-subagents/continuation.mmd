@@ -1,0 +1,11 @@
+flowchart TB
+    Q["请求续用 child_session_id"] --> A{"当前父会话拥有<br/>对应子任务记录？"}
+    A -- 否 --> X["拒绝，不降级为普通会话"]
+    A -- 是 --> W{"同工作区且<br/>不是 worktree 子任务？"}
+    W -- 否 --> X
+    W -- 是 --> T{"最新运行匹配且已终结？"}
+    T -- 否 --> X
+    T -- 是 --> C{"admission、模型及<br/>配置检查通过？"}
+    C -- 否 --> X
+    C -- 是 --> R["恢复原 Session 历史<br/>启动新 Run 与 Activity"]
+    R --> D["返回新 runId<br/>与 resumedFromRunId"]

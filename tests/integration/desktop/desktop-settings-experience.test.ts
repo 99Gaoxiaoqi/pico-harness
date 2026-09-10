@@ -27,7 +27,12 @@ test("settings routes stay globally accessible and project management never sele
   const navigation = await rendererSource("navigation.ts");
   const runtime = await rendererSource("runtime.ts");
 
-  for (const route of ["settings/workspaces", "settings/usage", "settings/system"]) {
+  for (const route of [
+    "settings/workspaces",
+    "settings/usage",
+    "settings/system",
+    "settings/memory",
+  ]) {
     const start = app.indexOf(`path="${route}"`);
     const end = app.indexOf("<Route", start + 1);
     assert.ok(start >= 0 && end > start, route);
