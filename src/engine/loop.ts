@@ -54,10 +54,6 @@ import { PromptComposer, type PromptLayers } from "../context/composer.js";
 import type { SkillLoader } from "../context/skill.js";
 import { RecoveryManager } from "../context/recovery.js";
 import { TodoStore } from "../context/todo-store.js";
-import {
-  createFirstTurnDelegationPolicy,
-  type RequestedDelegationCount,
-} from "../input/delegation-intent-policy.js";
 import { ToolDisclosure, type ToolDisclosureTurn } from "../tools/tool-disclosure.js";
 import { SilentReporter, type Reporter } from "./reporter.js";
 import { SteerQueue } from "./steer-queue.js";
@@ -162,10 +158,7 @@ const EXPLORE_SYNTHESIS_RETRY_PROMPT =
 const MAX_EXPLORE_SYNTHESIS_TOOL_RETRIES = 2;
 const EXPLORE_SYNTHESIS_FAILED_MESSAGE =
   "子代理已完成探索，但主模型连续违反纯文本总结协议，本次未能生成可靠的统一总结。";
-const MAX_REQUIRED_FIRST_DELEGATION_ATTEMPTS = 2;
 const MAX_PLAN_STOP_CONTINUATIONS = 2;
-const REQUIRED_FIRST_DELEGATION_FAILED_MESSAGE =
-  "模型未能按用户的明确要求启动 required 子代理，已停止主 Agent 自行探索。";
 const REQUIRED_DELEGATION_RECOVERY_PROMPT =
   "[DELEGATION RECOVERY] 上一批 required 委派没有产生可用的 completed/partial 证据。" +
   "本轮只允许再调用一次 required delegate_task，将任务缩小为一个最关键、可独立验证的缺口；" +
@@ -223,18 +216,6 @@ function buildSynthesisToolRejection(
   );
 }
 
-function buildRequiredFirstToolRejection(
-  toolCall: ToolCall,
-  runtimeRun?: EngineRuntimeRun,
-): ToolExecutionOutcome {
-  return buildRejectedToolResult(
-    toolCall,
-    "工具执行已拒绝：用户明确要求首先委派子代理，本轮只允许 required delegate_task。",
-    "required-first-delegation-rejection",
-    runtimeRun,
-  );
-}
-
 function buildDelegationRecoveryToolRejection(
   toolCall: ToolCall,
   runtimeRun?: EngineRuntimeRun,
@@ -278,31 +259,8 @@ function appendTurnTail(messages: Message[], turnTail: string): Message[] {
   return requestMessages;
 }
 
-function isSubagentCompletionWake(messages: readonly Message[]): boolean {
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const message = messages[index]!;
-    if (message.providerData?.["picoKind"] === "subagent_completion") return true;
-    if (
-      message.role === "user" &&
-      message.toolCallId === undefined &&
-      message.providerData?.["picoHiddenFromTranscript"] !== true
-    ) {
-      return false;
-    }
-  }
-  return false;
-}
-
 function requiredDelegationTaskCount(call: ToolCall): number {
   return call.name === "delegate_task" ? delegationTaskCountFromArguments(call.arguments) : 0;
-}
-
-function satisfiesRequestedDelegationCount(
-  call: ToolCall,
-  requestedCount: RequestedDelegationCount,
-): boolean {
-  const actual = requiredDelegationTaskCount(call);
-  return requestedCount === "multiple" ? actual >= 2 : actual >= 1;
 }
 
 interface RequiredDelegationAssessment {
@@ -1487,12 +1445,6 @@ export class AgentEngine implements AgentRunner {
     let turnTail = initialPromptLayers.turnTail;
     signal?.throwIfAborted();
 
-    const firstTurnDelegationPolicy = createFirstTurnDelegationPolicy(
-      this.isPlanning() || isSubagentCompletionWake(runHistory) ? "" : currentUserPrompt,
-    );
-    let requiredFirstDelegationPending =
-      firstTurnDelegationPolicy.kind === "required-first-delegation";
-    let requiredFirstDelegationAttempts = 0;
     let beforeLen = session.length;
     let turnCount = 0;
     let exhaustedReason: string | undefined;
@@ -1589,15 +1541,11 @@ export class AgentEngine implements AgentRunner {
           const availableTools = disclosureTurn
             ? [...disclosureTurn.snapshotForStep().tools]
             : allTools;
-          const requiredFirstDelegationActive =
-            requiredFirstDelegationPending &&
-            firstTurnDelegationPolicy.kind === "required-first-delegation" &&
-            allTools.some((tool) => tool.name === firstTurnDelegationPolicy.toolName);
           // explore-only required 委派收口后不再给主模型任何工具，
           // 从能力边界上阻断它重复阅读项目。worker/mixed 批次不受影响。
           const unrestrictedProviderTools = exploreSynthesisOnly
             ? availableTools.filter((tool) => this.exploreSynthesisAllowedTools.has(tool.name))
-            : requiredFirstDelegationActive || requiredDelegationRecoveryPending
+            : requiredDelegationRecoveryPending
               ? allTools.filter((tool) => tool.name === "delegate_task")
               : availableTools;
           // Plan 的终态只能由 submit_plan 形成。渐进披露不得把它（或 ask_user）
@@ -1689,26 +1637,8 @@ export class AgentEngine implements AgentRunner {
               providerData: { picoKind: "steer", picoHiddenFromTranscript: true },
             });
           }
-          if (
-            requiredFirstDelegationActive &&
-            !requiredDelegationRecoveryPending &&
-            firstTurnDelegationPolicy.kind === "required-first-delegation"
-          ) {
-            compactedContext.push({
-              role: "user",
-              content: firstTurnDelegationPolicy.hiddenConstraint,
-              providerData: {
-                picoKind: "required_first_delegation",
-                picoHiddenFromTranscript: true,
-              },
-            });
-          }
           graceCandidateTools =
-            !exploreSynthesisOnly &&
-            !requiredFirstDelegationActive &&
-            !requiredDelegationRecoveryPending
-              ? [...providerTools]
-              : [];
+            !exploreSynthesisOnly && !requiredDelegationRecoveryPending ? [...providerTools] : [];
           const actionSpan = turnSpan?.startChild("LLM.Action", {
             inputMessageCount: compactedContext.length,
             availableToolCount: providerTools.length,
@@ -1843,17 +1773,8 @@ export class AgentEngine implements AgentRunner {
           const requiredDelegationIndex = findRequiredDelegationIndex(toolCalls);
           const requiredDelegation =
             requiredDelegationIndex !== undefined ? toolCalls[requiredDelegationIndex] : undefined;
-          const requestedDelegationCount =
-            firstTurnDelegationPolicy.kind === "required-first-delegation"
-              ? firstTurnDelegationPolicy.intent.requestedCount
-              : "unspecified";
           const acceptedRecoveryDelegation =
             requiredDelegation !== undefined && requiredDelegationTaskCount(requiredDelegation) > 0;
-          const acceptedRequiredFirstDelegation =
-            requiredDelegation !== undefined &&
-            (requiredDelegationRecoveryPending
-              ? acceptedRecoveryDelegation
-              : satisfiesRequestedDelegationCount(requiredDelegation, requestedDelegationCount));
           if (requiredDelegationRecoveryPending && !acceptedRecoveryDelegation) {
             reporter.onAssistantResponseSuppressed?.("delegation-first-retry");
             const rejectedResponse: Message = {
@@ -1880,52 +1801,12 @@ export class AgentEngine implements AgentRunner {
             );
             const failedResponse: Message = {
               role: "assistant",
-              content: requiredFirstDelegationActive
-                ? REQUIRED_FIRST_DELEGATION_FAILED_MESSAGE
-                : REQUIRED_DELEGATION_RECOVERY_FAILED_MESSAGE,
+              content: REQUIRED_DELEGATION_RECOVERY_FAILED_MESSAGE,
             };
             await session.commitMessages(failedResponse);
             await this.reportMessage(reporter, failedResponse.content, signal);
             reporter.onFinish();
             break;
-          }
-          if (requiredFirstDelegationActive && !acceptedRequiredFirstDelegation) {
-            reporter.onAssistantResponseSuppressed?.("delegation-first-retry");
-            const rejectedResponse: Message = {
-              ...responseMsg,
-              content: "",
-              providerData: {
-                ...responseMsg.providerData,
-                picoKind: "required_first_delegation_rejected",
-                picoHiddenFromTranscript: true,
-              },
-            };
-            const runtimeRun = this.runtimePort?.currentRun();
-            const rejectedOutcomes = toolCalls.map((toolCall) =>
-              buildRequiredFirstToolRejection(toolCall, runtimeRun),
-            );
-            await session.commitMessages(rejectedResponse);
-            this.onTurn?.({ turn: turnCount, message: rejectedResponse });
-            await this.commitRejectedToolBatch(
-              session,
-              reporter,
-              toolCalls,
-              rejectedOutcomes,
-              runtimeRun,
-            );
-            requiredFirstDelegationAttempts++;
-
-            if (requiredFirstDelegationAttempts >= MAX_REQUIRED_FIRST_DELEGATION_ATTEMPTS) {
-              const failedResponse: Message = {
-                role: "assistant",
-                content: REQUIRED_FIRST_DELEGATION_FAILED_MESSAGE,
-              };
-              await session.commitMessages(failedResponse);
-              await this.reportMessage(reporter, failedResponse.content, signal);
-              reporter.onFinish();
-              break;
-            }
-            continue;
           }
           if (requiredDelegation && responseMsg.content) {
             responseMsg = {
@@ -2305,9 +2186,7 @@ export class AgentEngine implements AgentRunner {
               if (requiredDelegationRecoveryPending) {
                 const failedResponse: Message = {
                   role: "assistant",
-                  content: requiredFirstDelegationActive
-                    ? REQUIRED_FIRST_DELEGATION_FAILED_MESSAGE
-                    : REQUIRED_DELEGATION_RECOVERY_FAILED_MESSAGE,
+                  content: REQUIRED_DELEGATION_RECOVERY_FAILED_MESSAGE,
                 };
                 await session.commitMessages(failedResponse);
                 await this.reportMessage(reporter, failedResponse.content, signal);
@@ -2335,10 +2214,6 @@ export class AgentEngine implements AgentRunner {
               : currentExploreOnly;
             requiredDelegationRecoveryPending = false;
             requiredDelegationRecoveryExploreOnly = false;
-            if (requiredFirstDelegationActive) {
-              requiredFirstDelegationPending = false;
-              requiredFirstDelegationAttempts = 0;
-            }
             exploreSynthesisToolRetries = 0;
             await session.commitMessages({
               role: "user",
