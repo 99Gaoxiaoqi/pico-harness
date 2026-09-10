@@ -1570,6 +1570,7 @@ export class RuntimeRun {
     this.assertOpen();
     if (!context.parentToolCallId) throw new Error("Nested tool requires a parentToolCallId");
     let dispatched = false;
+    let committedCall = call;
     const nestedContext: ToolExecutionContext = {
       ...context,
       origin: "code_mode",
@@ -1581,11 +1582,23 @@ export class RuntimeRun {
           nestedContext,
         );
         dispatched = true;
+        committedCall = finalCall;
       },
     };
-    const rawResult = await runWithRuntimeToolCall(call.id, () =>
-      registry.execute(call, nestedContext),
-    );
+    let rawResult: ToolResult;
+    try {
+      rawResult = await runWithRuntimeToolCall(call.id, () =>
+        registry.execute(call, nestedContext),
+      );
+    } catch (error) {
+      // A cell-local cancellation may leave the parent Turn signal live. Once T1
+      // exists, an absent outcome must stop inference, not become a catchable cell
+      // diagnostic. Keep the prepared operation for conservative recovery.
+      if (dispatched && !(error instanceof ToolCommitBoundaryError)) {
+        throw new ToolCommitBoundaryError("T2", error);
+      }
+      throw error;
+    }
     let result: ToolResult;
     try {
       result = context.sanitizeResult?.(rawResult) ?? rawResult;
@@ -1623,6 +1636,9 @@ export class RuntimeRun {
       } else {
         await this.append(event);
       }
+      // T2's delivery boundary includes host notification. A notification failure
+      // cannot undo the settled fact or look like an ordinary retryable tool error.
+      await context.onCommittedResult?.(committedCall, built.envelope);
     } catch (error) {
       throw new ToolCommitBoundaryError("T2", error);
     }

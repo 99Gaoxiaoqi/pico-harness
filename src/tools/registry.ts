@@ -6,6 +6,7 @@
 import type { ToolCall, ToolDefinition, ToolResult } from "../schema/message.js";
 import type { ToolAccesses } from "./tool-access.js";
 import type { HookService } from "../hooks/service.js";
+import type { ToolResultEnvelope } from "../engine/tool-result-contract.js";
 
 export type ToolOutputStream = "stdout" | "stderr";
 
@@ -32,6 +33,8 @@ export interface ToolExecutionContext {
   readonly beforeDispatch?: (call: ToolCall) => Promise<void>;
   /** Trusted host sanitization, applied before nested outcomes enter the ledger or sandbox. */
   readonly sanitizeResult?: (result: ToolResult) => ToolResult;
+  /** Trusted host notification after the nested outcome is durably committed. */
+  readonly onCommittedResult?: (call: ToolCall, envelope: ToolResultEnvelope) => Promise<void>;
 }
 
 export interface ToolExecutionStep {
