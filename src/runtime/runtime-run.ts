@@ -1499,13 +1499,19 @@ export class RuntimeRun {
         ...(context?.origin ? { origin: context.origin } : {}),
       },
     };
+    // Audit refusals above prove no write was attempted. From this point on,
+    // even a similarly typed error is a commit failure with uncertain effects.
     const prepared = await this.writeCanonicalEvent((ownerFence) =>
       this.store.prepareToolOperation({
         dispatchEvent: event,
         toolCallId,
         ownerFence,
       }),
-    );
+    ).catch((error: unknown) => {
+      throw error instanceof ToolCommitBoundaryError
+        ? error
+        : new ToolCommitBoundaryError("T1", error);
+    });
     if (!prepared.events.at(-1)?.inserted) {
       throw new RuntimeEventStoreIntegrityError(
         `Runtime tool operation ${toolCallId} was already prepared; refusing uncertain side-effect retry`,

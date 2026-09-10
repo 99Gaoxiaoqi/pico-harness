@@ -208,7 +208,8 @@ export interface Registry {
   /**
    * 路由执行。实现与包装器必须保留完整 context：最终校验/权限/资源准入通过后，
    * 物理执行前必须 await beforeDispatch(finalCall) 且只调用一次；拒绝不得调用。
-   * 回调失败必须原样传播并禁止副作用，不能转换为普通 ToolResult。
+   * 受信的参数审计拒绝返回 isError 结果且不派发；其他回调失败必须作为
+   * ToolCommitBoundaryError 传播并禁止副作用，不能转换为普通 ToolResult。
    */
   execute(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult>;
   /**

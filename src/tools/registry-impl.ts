@@ -33,6 +33,7 @@ import {
 import type { ToolCall, ToolDefinition, ToolResult } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
 import { ToolAccesses } from "./tool-access.js";
+import { isToolArgumentAuditRefusal } from "./tool-argument-audit.js";
 import type { HookService } from "../hooks/service.js";
 
 export interface ToolRegistrationOwner {
@@ -524,6 +525,7 @@ export class ToolRegistry implements Registry {
 
     // 5. 执行工具逻辑:所有安全门 + Hook + 权限链都放行了
     let fatalFailure: ToolCommitBoundaryError | undefined;
+    let auditRefusal: Error | undefined;
     try {
       const executionContext: ToolExecutionContext = {
         ...(context ?? {}),
@@ -563,6 +565,10 @@ export class ToolRegistry implements Registry {
           try {
             await context?.beforeDispatch?.(Object.freeze({ ...currentCall }));
           } catch (error) {
+            if (isToolArgumentAuditRefusal(error)) {
+              auditRefusal = error;
+              throw error;
+            }
             fatalFailure =
               error instanceof ToolCommitBoundaryError
                 ? error
@@ -604,6 +610,8 @@ export class ToolRegistry implements Registry {
           failure ??= error;
         }
         if (fatalFailure) throw fatalFailure;
+        // Middleware cannot turn a refused physical dispatch into success.
+        if (auditRefusal) throw auditRefusal;
         if (failure !== undefined) throw failure;
         return output;
       };
