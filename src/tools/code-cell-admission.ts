@@ -50,5 +50,17 @@ export class CodeCellAdmission {
   }
 }
 
-/** Default scope is this host process, shared across tools, registries and sessions. */
+const ownerAdmissions = new WeakMap<object, CodeCellAdmission>();
+
+/** Stable live-runtime ownership survives Registry rebuilds without blocking other Sessions. */
+export function codeCellAdmissionFor(owner: object): CodeCellAdmission {
+  let admission = ownerAdmissions.get(owner);
+  if (!admission) {
+    admission = new CodeCellAdmission();
+    ownerAdmissions.set(owner, admission);
+  }
+  return admission;
+}
+
+/** Conservative fallback for standalone adapters without an explicit runtime owner. */
 export const sharedCodeCellAdmission = new CodeCellAdmission();

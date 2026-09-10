@@ -47,6 +47,7 @@ import type { AgentGraphProfileSnapshot } from "../agent-graph/core/contracts.js
 import { SkillLoader, type Skill } from "../context/skill.js";
 import { ToolDisclosure } from "../tools/tool-disclosure.js";
 import { createCodeModeTool } from "../tools/code-mode-tool.js";
+import { codeCellAdmissionFor } from "../tools/code-cell-admission.js";
 import { isToolSupportedForHost, type ToolHostKind } from "../tools/tool-surface.js";
 import {
   createRawProvider,
@@ -1710,6 +1711,7 @@ export async function executeAgentRuntime(
       registry.register(
         createCodeModeTool({
           registry,
+          admission: codeCellAdmissionFor(session),
           getRuntimeRun: currentRuntimeRun,
           redactionSecrets: dependencies.toolResultRedactionSecrets,
           hookService: activeHookService,

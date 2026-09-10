@@ -1543,6 +1543,14 @@ export class RuntimeRun {
     },
     signal?: AbortSignal,
   ): Promise<void> {
+    return this.resolveToolRecoveryAtBoundary(input, signal);
+  }
+
+  private async resolveToolRecoveryAtBoundary(
+    input: Parameters<RuntimeRun["resolveToolRecovery"]>[0],
+    signal?: AbortSignal,
+    assertBinding?: () => void,
+  ): Promise<void> {
     this.assertOpen();
     return serializeExternalMessageCommit(
       `tool-recovery:${this.canonicalWorkDir}:${this.sessionId}`,
@@ -1580,6 +1588,7 @@ export class RuntimeRun {
             data: { ...input },
           },
           signal,
+          assertBinding,
         );
       },
     );
@@ -1656,15 +1665,23 @@ export class RuntimeRun {
       return park("Recovery probe failed or was cancelled; effects remain unresolved");
     }
     if (input.signal?.aborted) return park("Recovery probe was cancelled");
-    const currentPolicy = registry.getRecoveryPolicy?.(started.data.toolName);
-    const currentBinding = registry.getRecoveryPolicy?.(started.data.toolName, step);
-    if (
-      currentPolicy?.mode !== policy.mode ||
-      currentPolicy.key !== policy.key ||
-      currentPolicy.reconcile !== policy.reconcile ||
-      currentBinding?.key !== policy.key
-    )
-      return park("Tool recovery binding changed while probing");
+    const bindingChanged = new Error("Tool recovery binding changed while probing");
+    const assertBinding = () => {
+      const currentPolicy = registry.getRecoveryPolicy?.(started.data.toolName);
+      const currentBinding = registry.getRecoveryPolicy?.(started.data.toolName, step);
+      if (
+        currentPolicy?.mode !== policy.mode ||
+        currentPolicy.key !== policy.key ||
+        currentPolicy.reconcile !== policy.reconcile ||
+        currentBinding?.key !== policy.key
+      )
+        throw bindingChanged;
+    };
+    try {
+      assertBinding();
+    } catch {
+      return park(bindingChanged.message);
+    }
     if (result?.outcome === "park") return park(result.reason || "Recovery probe has no evidence");
     if (
       (result?.outcome !== "effects_verified" && result?.outcome !== "not_dispatched_verified") ||
@@ -1675,7 +1692,7 @@ export class RuntimeRun {
     )
       return park("Recovery probe returned no verifiable evidence");
     try {
-      await this.resolveToolRecovery(
+      await this.resolveToolRecoveryAtBoundary(
         {
           recoveryEventId: recovery.eventId,
           outcome: result.outcome,
@@ -1683,9 +1700,11 @@ export class RuntimeRun {
           summary: result.summary,
         },
         input.signal,
+        assertBinding,
       );
     } catch (error) {
       if (input.signal?.aborted) return park("Recovery probe was cancelled");
+      if (error === bindingChanged) return park(bindingChanged.message);
       throw error;
     }
     return result;
@@ -2091,9 +2110,11 @@ export class RuntimeRun {
   private append(
     event: RuntimeEvent,
     signal?: AbortSignal,
+    assertBeforeCommit?: () => void,
   ): Promise<RuntimeEventStoreAppendResult> {
     return this.writeCanonicalEvent((ownerFence) => {
       signal?.throwIfAborted();
+      assertBeforeCommit?.();
       return appendRuntimeEventWithArbitration(this.store, event, { ownerFence });
     });
   }

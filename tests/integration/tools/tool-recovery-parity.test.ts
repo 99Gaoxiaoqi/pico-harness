@@ -231,6 +231,22 @@ test("probe缺证据、策略变化、异常与取消均Park，只有稳定合�
   } finally {
     store.readSession = readSession;
   }
+  reads = 0;
+  store.readSession = async (sessionId) => {
+    const events = await readSession(sessionId);
+    if (++reads === 2) tool.recoveryKey = "probe:changed-at-commit";
+    return events;
+  };
+  try {
+    assert.equal(
+      (await reconcile()).outcome,
+      "park",
+      "Binding changes while resolution reads/queues must be checked at the write boundary",
+    );
+  } finally {
+    store.readSession = readSession;
+    tool.recoveryKey = "probe:v1";
+  }
   assert.equal(
     (await session.runtimeEventStore!.readSession(session.id)).filter(
       (event) => event.kind === "tool.recovery.resolved",
