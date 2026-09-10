@@ -1,10 +1,12 @@
 import { realpath, stat } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { ToolAccesses } from "./tool-access.js";
 
 interface FileClaim {
   kind: "file";
   path: string;
+  /** Conservative creation alias only; never rewrites the path used for actual I/O. */
+  creationAlias: string;
   inode?: string;
   write: boolean;
 }
@@ -56,6 +58,7 @@ async function resolveClaims(accesses: ToolAccesses): Promise<readonly Claim[]> 
       return {
         kind: "file",
         path,
+        creationAlias: path.toLowerCase(),
         ...(inode ? { inode } : {}),
         write: access.operation !== "read",
       };
@@ -65,8 +68,12 @@ async function resolveClaims(accesses: ToolAccesses): Promise<readonly Claim[]> 
 
 function within(parent: string, child: string): boolean {
   const suffix = relative(parent, child);
-  return suffix === "" || (!suffix.startsWith("..") && !isAbsolute(suffix));
+  return (
+    suffix === "" || (suffix !== ".." && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix))
+  );
 }
+
+class ResourceVersionChanged extends Error {}
 
 function conflicts(left: readonly Claim[], right: readonly Claim[]): boolean {
   return left.some((a) =>
@@ -79,6 +86,8 @@ function conflicts(left: readonly Claim[], right: readonly Claim[]): boolean {
       return (
         (a.write || b.write) &&
         ((a.inode !== undefined && a.inode === b.inode) ||
+          ((a.inode === undefined || b.inode === undefined) &&
+            a.creationAlias === b.creationAlias) ||
           within(a.path, b.path) ||
           within(b.path, a.path))
       );
@@ -97,22 +106,34 @@ export class ToolResourceAuthority {
   private readonly queued: Waiter[] = [];
   private readonly capacities = new Map<string, number>();
 
-  run<T>(
+  async run<T>(
     accesses: ToolAccesses,
     signal: AbortSignal | undefined,
     operation: () => Promise<T>,
   ): Promise<T> {
-    return this.enqueue(resolveClaims(accesses), signal, async (claims) => {
-      // A queued path may have been retargeted. Fail before dispatch rather than run under the wrong lock.
-      const current = await resolveClaims(accesses);
-      if (JSON.stringify(current) !== JSON.stringify(claims)) {
-        throw new Error(
-          "Tool resource identity changed while awaiting admission; retry from a fresh step",
-        );
+    // Atomic file publication legitimately replaces the inode. Release and reacquire
+    // using the new identity; never keep an old inode lease or rerun an operation.
+    for (let attempt = 0; attempt < 8; attempt++) {
+      try {
+        return await this.enqueue(resolveClaims(accesses), signal, async (claims) => {
+          const current = await resolveClaims(accesses);
+          if (JSON.stringify(current) !== JSON.stringify(claims)) {
+            const retargeted = current.some((claim, index) => {
+              const old = claims[index];
+              return claim.kind === "file" && (old?.kind !== "file" || old.path !== claim.path);
+            });
+            if (retargeted)
+              throw new Error("Tool resource path was retargeted while awaiting admission");
+            throw new ResourceVersionChanged();
+          }
+          signal?.throwIfAborted();
+          return operation();
+        });
+      } catch (error) {
+        if (!(error instanceof ResourceVersionChanged)) throw error;
       }
-      signal?.throwIfAborted();
-      return operation();
-    });
+    }
+    throw new Error("Tool resource is changing too frequently for safe admission");
   }
 
   /** Capacity is separate from file exclusion; unrelated resources do not block on it. */

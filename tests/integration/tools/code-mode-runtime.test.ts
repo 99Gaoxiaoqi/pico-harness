@@ -32,6 +32,43 @@ function readableTool(name: string, execute: BaseTool["execute"]): BaseTool {
   };
 }
 
+test("Code Mode host redacts child output before either durable storage or sandbox observation", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-code-mode-redaction-"));
+  const session = new Session("code-mode-redaction", root, {
+    persistence: true,
+    picoHome: join(root, "pico-home"),
+    runtimePort: createEngineRuntimePort(),
+  });
+  t.after(async () => {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await session.recover();
+  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const secret = "synthetic-child-secret-never-persist";
+  const registry = new ToolRegistry();
+  registry.register(readableTool("lookup", async () => secret));
+  registry.register(
+    createCodeModeTool({ registry, getRuntimeRun: () => run, redactionSecrets: [secret] }),
+  );
+  await run.run(async () => {
+    await run.recordTurnStarted(1);
+    const result = await registry.execute(
+      {
+        id: "parent-redact",
+        name: "exec",
+        arguments: JSON.stringify({ code: "return await tools.lookup({value:1});" }),
+      },
+      { step: registry.captureStep("step-redact", ["exec", "lookup"]) },
+    );
+    assert.equal(result.isError, false, result.output);
+    assert.equal(JSON.parse(result.output).value, "[REDACTED]");
+  });
+  const events = await session.runtimeEventStore!.readRun(session.id, run.runId);
+  assert.ok(!JSON.stringify(events).includes(secret));
+  assert.match(JSON.stringify(events), /\[REDACTED\]/);
+});
+
 test("Code Mode host: nested calls commit hidden T1/T2 and preserve Step and parent identity", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-code-mode-runtime-"));
   const session = new Session("code-mode-runtime", join(root, "workspace"), {

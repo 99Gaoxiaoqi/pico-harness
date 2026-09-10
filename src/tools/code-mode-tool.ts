@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { EngineRuntimeRun } from "../engine/runtime-port.js";
+import { redactToolResult } from "../engine/tool-result-builder.js";
 import type { ToolDefinition } from "../schema/message.js";
 import { executeCodeCell } from "./code-mode.js";
 import {
@@ -14,6 +15,7 @@ export interface CodeModeToolOptions {
   readonly registry: Registry;
   /** Production hosts supply this callback; missing live authority fails closed. */
   readonly getRuntimeRun?: () => EngineRuntimeRun | undefined;
+  readonly redactionSecrets?: readonly string[];
 }
 
 /** Direct engine embeddings may omit durable authority; production must provide it. */
@@ -27,7 +29,12 @@ class CodeModeTool implements BaseTool {
   // The parent engine captures rollback history for possible nested writes.
   readonly fileSideEffects = WORKSPACE_FILE_SIDE_EFFECTS;
 
-  constructor(private readonly options: CodeModeToolOptions) {}
+  private readonly redactionSecrets: readonly string[];
+  constructor(private readonly options: CodeModeToolOptions) {
+    this.redactionSecrets = [...new Set(options.redactionSecrets ?? [])]
+      .filter((secret) => secret.length > 0)
+      .sort((a, b) => b.length - a.length);
+  }
 
   name(): string {
     return "exec";
@@ -96,10 +103,11 @@ class CodeModeTool implements BaseTool {
           parentToolCallId,
           step,
           origin: "code_mode",
+          sanitizeResult: (result) => redactToolResult(result, this.redactionSecrets),
         };
         const childResult = runtimeRun
           ? await runtimeRun.executeNestedTool(call, registry, childContext)
-          : await registry.execute(call, childContext);
+          : redactToolResult(await registry.execute(call, childContext), this.redactionSecrets);
         if (childResult.isError) throw new Error(childResult.output);
         return childResult.output;
       },
