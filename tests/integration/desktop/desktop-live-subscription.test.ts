@@ -26,13 +26,17 @@ test("普通会话运行持锁时，订阅重开、Graph只读查询和工具后
   const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
   await trustStore.trust(workspacePath);
   const runtime = new WorkspaceRuntimeService({ env, execute: async () => ({ ok: true }) });
-  let registry!: SessionSubscriptionRegistry;
   const desktop = new DesktopRuntimeService({
     runtimeService: runtime,
     trustStore,
     env,
-    onTranscriptAdvanced: (workspace, id) => registry?.publishTranscriptAdvanced(workspace, id),
+    onTranscriptAdvanced: (workspace, id) => registry.publishTranscriptAdvanced(workspace, id),
   });
+  const source = new SqliteSessionContinuitySource({
+    picoHome,
+    readMetadata: (workspace, id) => desktop.readSessionContinuityMetadata(workspace, id),
+  });
+  const registry = new SessionSubscriptionRegistry("live-test-host", source);
   const created = (await desktop.handle(
     createRuntimeRequest("session.create", { workspacePath }),
   )) as unknown as RuntimeResult<"session.create">;
@@ -41,11 +45,6 @@ test("普通会话运行持锁时，订阅重开、Graph只读查询和工具后
     persistence: true,
     picoHome,
   });
-  const source = new SqliteSessionContinuitySource({
-    picoHome,
-    readMetadata: (workspace, id) => desktop.readSessionContinuityMetadata(workspace, id),
-  });
-  registry = new SessionSubscriptionRegistry("live-test-host", source);
   let receiveFrame: ((frame: RuntimeSessionSubscriptionFrame) => void) | undefined;
   let receivedThinking!: () => void;
   const thinkingArrived = new Promise<void>((resolve) => {
