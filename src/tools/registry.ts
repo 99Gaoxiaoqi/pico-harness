@@ -29,12 +29,51 @@ export interface ToolExecutionContext {
   readonly step?: ToolExecutionStep;
   readonly origin?: "model" | "code_mode";
   readonly parentToolCallId?: string;
+  /** Host-owned original assistant batch size, not an execution ordering hint. */
+  readonly stepToolCallCount?: number;
+  readonly recoveryPolicy?: ToolRecoveryPolicy;
+  /** Host secrets to remove from the durable argument audit, never from execution. */
+  readonly argumentRedactionSecrets?: readonly string[];
   /** Final validated call, after admission and immediately before physical dispatch. */
   readonly beforeDispatch?: (call: ToolCall) => Promise<void>;
   /** Trusted host sanitization, applied before nested outcomes enter the ledger or sandbox. */
   readonly sanitizeResult?: (result: ToolResult) => ToolResult;
   /** Trusted host notification after the nested outcome is durably committed. */
   readonly onCommittedResult?: (call: ToolCall, envelope: ToolResultEnvelope) => Promise<void>;
+}
+
+export type ToolRecoveryMode =
+  | "replay_safe"
+  | "idempotent"
+  | "reconcile"
+  | "reattach"
+  | "outcome_unknown"
+  | "never_auto_retry";
+
+export interface ToolRecoveryProbeInput {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly argumentsJson: string;
+  readonly argumentsRedacted: boolean;
+  readonly signal?: AbortSignal;
+}
+
+export type ToolRecoveryProbeResult =
+  | { readonly outcome: "park"; readonly reason: string }
+  | {
+      readonly outcome: "effects_verified" | "not_dispatched_verified";
+      readonly evidenceUri: string;
+      readonly summary: string;
+    };
+
+export interface ToolRecoveryPolicy {
+  readonly mode: ToolRecoveryMode;
+  /** Stable host-owned contract version; a changed key cannot resolve an old operation. */
+  readonly key?: string;
+  /** Evidence-only recovery. Never re-execute the original operation in this callback. */
+  readonly reconcile?: (input: ToolRecoveryProbeInput) => Promise<ToolRecoveryProbeResult>;
 }
 
 export interface ToolExecutionStep {
@@ -108,6 +147,10 @@ export interface BaseTool {
   nesting?: "nestable" | "direct_only";
   /** Orchestrators acquire resources through their child calls. */
   executionMode?: "orchestrator";
+  executionSemantics?: "parallel" | "exclusive_step";
+  recoveryMode?: ToolRecoveryMode;
+  recoveryKey?: string;
+  reconcile?: ToolRecoveryPolicy["reconcile"];
   /** 返回工具的全局唯一名称 (大模型通过这个名字调用它) */
   name(): string;
   /** 返回提交给大模型的工具元信息和参数 JSON Schema */
@@ -162,6 +205,8 @@ export interface Registry {
     boundStep?: ToolExecutionStep,
   ): ToolExecutionStep;
   getNesting?(name: string, step?: ToolExecutionStep): "nestable" | "direct_only";
+  getRecoveryPolicy?(name: string, step?: ToolExecutionStep): ToolRecoveryPolicy;
+  getExecutionSemantics?(name: string, step?: ToolExecutionStep): "parallel" | "exclusive_step";
   /**
    * 路由执行。实现与包装器必须保留完整 context：最终校验/权限/资源准入通过后，
    * 物理执行前必须 await beforeDispatch(finalCall) 且只调用一次；拒绝不得调用。
