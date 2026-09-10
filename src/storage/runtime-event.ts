@@ -245,6 +245,13 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
       assertToolResultRecordedEvent(value);
       return;
     case "tool.recovery.resolved":
+      if (
+        value["data"]["outcome"] !== "effects_verified" &&
+        value["data"]["outcome"] !== "not_dispatched_verified"
+      )
+        throw new RuntimeEventIntegrityError(
+          "Tool recovery resolution must explicitly verify the effect outcome",
+        );
       assertString(value["data"]["recoveryEventId"], "tool.recovery.resolved.recoveryEventId");
       assertString(value["data"]["evidenceUri"], "tool.recovery.resolved.evidenceUri");
       assertString(value["data"]["summary"], "tool.recovery.resolved.summary");
@@ -472,7 +479,12 @@ function assertToolResultRecordedEvent(value: Record<string, unknown>): void {
     "tool.result.recorded",
   );
   if (
-    (value["visibility"] !== "model" && value["visibility"] !== "transcript") ||
+    (value["visibility"] !== "model" &&
+      value["visibility"] !== "transcript" &&
+      !(
+        value["visibility"] === "internal" &&
+        (value["data"] as Record<string, unknown>)["origin"] === "code_mode"
+      )) ||
     value["partial"] !== false
   ) {
     throw new RuntimeEventIntegrityError(
@@ -501,7 +513,7 @@ function assertToolResultRecordedEvent(value: Record<string, unknown>): void {
   }
   assertOnlyKeys(
     data,
-    ["toolName", "status", "body", "projection", "recovery"],
+    ["toolName", "status", "body", "projection", "recovery", "origin"],
     "tool.result.recorded.data",
   );
   assertString(data["toolName"], "tool.result.recorded.toolName");

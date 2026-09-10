@@ -98,7 +98,16 @@ export class RuntimeEventBoundaryInspector implements RuntimeBoundaryInspector {
     }
 
     const pendingApprovalIds = pendingApprovals(runEntries);
-    const pendingToolCallIds = pendingToolCalls(runEntries);
+    const initialPendingToolCallIds = pendingToolCalls(runEntries);
+    const pendingToolCallIds =
+      initialPendingToolCallIds.length === 0
+        ? initialPendingToolCallIds
+        : pendingToolCalls(
+            runEntries,
+            (await this.options.store.readSessionEntries(boundary.sessionId)).filter(
+              (entry) => entry.sequence <= headSequence,
+            ),
+          );
     const checkpointRefs = new Set(
       runEntries
         .filter(
@@ -274,7 +283,10 @@ function pendingApprovals(entries: readonly RuntimeEventStoreEntry[]): string[] 
   return [...pending].sort();
 }
 
-function pendingToolCalls(entries: readonly RuntimeEventStoreEntry[]): string[] {
+function pendingToolCalls(
+  entries: readonly RuntimeEventStoreEntry[],
+  sessionEntries: readonly RuntimeEventStoreEntry[] = entries,
+): string[] {
   const pending = new Set<string>();
   for (const { event } of entries) {
     if (event.kind === "tool.started") {
@@ -288,6 +300,19 @@ function pendingToolCalls(entries: readonly RuntimeEventStoreEntry[]): string[] 
     if (event.kind === "tool.result.recorded" && event.data.projection.mode !== "synthetic") {
       pending.delete(event.refs.toolCallId);
     }
+  }
+  const indeterminate = new Map(
+    entries.flatMap(({ event }) =>
+      event.kind === "tool.result.recorded" &&
+      event.data.recovery?.classification === "indeterminate"
+        ? [[event.eventId, event.refs.toolCallId] as const]
+        : [],
+    ),
+  );
+  for (const { event } of sessionEntries) {
+    if (event.kind !== "tool.recovery.resolved") continue;
+    const toolCallId = indeterminate.get(event.data.recoveryEventId);
+    if (toolCallId) pending.delete(toolCallId);
   }
   return [...pending].sort();
 }

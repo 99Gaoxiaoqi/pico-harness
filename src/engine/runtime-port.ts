@@ -167,6 +167,7 @@ export interface EngineRuntimeRun {
   assertNoUnresolvedToolEffects(): Promise<void>;
   resolveToolRecovery(input: {
     readonly recoveryEventId: string;
+    readonly outcome: "effects_verified" | "not_dispatched_verified";
     readonly evidenceUri: string;
     readonly summary: string;
   }): Promise<void>;
