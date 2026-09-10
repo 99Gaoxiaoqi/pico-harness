@@ -342,6 +342,10 @@ export class ToolRegistry implements Registry {
               : typeof dialect === "string" && dialect.includes("2019-09")
                 ? this.schemaValidator2019
                 : this.schemaValidator;
+          // Each bound tool supplies a self-contained schema. Keep its compiled
+          // validator, but do not let AJV's $id namespace leak across tools/Turns.
+          // removeSchema retains meta-schemas and already-compiled validators.
+          compiler.removeSchema();
           validator = compiler.compile(schema);
           this.validators.set(schema, validator);
         }
@@ -464,8 +468,10 @@ export class ToolRegistry implements Registry {
         toolCallId: currentCall.id,
       };
       let dispatchEntered = false;
+      let dispatchClosed = false;
       let dispatchPromise: Promise<string> | undefined;
       let chain: (nextCall: ToolCall) => Promise<string> = (nextCall) => {
+        if (dispatchClosed) return Promise.reject(new Error("Tool execution scope is closed"));
         if (dispatchEntered)
           return Promise.reject(
             new Error("Tool execution middleware attempted duplicate dispatch"),
@@ -524,6 +530,10 @@ export class ToolRegistry implements Registry {
           output = await chain(Object.freeze({ ...currentCall }));
         } catch (error) {
           failure = error;
+        } finally {
+          // A middleware may retain next without calling it. Once its chain has
+          // settled, that callback must not start work outside this resource lease.
+          dispatchClosed = true;
         }
         // Even middleware that forgets to await next cannot release the physical resource lock.
         try {
