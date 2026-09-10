@@ -87,8 +87,23 @@ export class ToolRegistry implements Registry {
     boundStep?: ToolExecutionStep,
   ): ToolExecutionStep {
     const names = new Set(visibleToolNames);
-    const step: ToolExecutionStep = Object.freeze({ id, visibleToolNames: names });
+    const visible: ReadonlySet<string> = Object.freeze({
+      get size() {
+        return names.size;
+      },
+      has: (name: string) => names.has(name),
+      entries: () => names.entries(),
+      keys: () => names.keys(),
+      values: () => names.values(),
+      [Symbol.iterator]: () => names[Symbol.iterator](),
+      forEach: (
+        callback: (value: string, key: string, set: ReadonlySet<string>) => void,
+        thisArg?: unknown,
+      ) => names.forEach((name) => callback.call(thisArg, name, name, visible)),
+    });
+    const step: ToolExecutionStep = Object.freeze({ id, visibleToolNames: visible });
     const bound = boundStep ? this.stepBindings.get(boundStep) : undefined;
+    if (boundStep && !bound) throw new Error("Tool Step must be issued by this Registry");
     this.stepBindings.set(
       step,
       new Map(
@@ -300,14 +315,15 @@ export class ToolRegistry implements Registry {
         const bindings = this.stepBindings.get(context.step);
         if (
           !context.step.visibleToolNames.has(call.name) ||
-          (bindings && bindings.get(call.name)?.tool !== tool)
+          !bindings ||
+          bindings.get(call.name)?.tool !== tool
         ) {
           return reject(`Tool '${call.name}' is not available in this Step snapshot.`);
         }
       }
       if (
         context?.origin === "code_mode" &&
-        this.getNesting(call.name, context.step) !== "nestable"
+        (!context.step || this.getNesting(call.name, context.step) !== "nestable")
       ) {
         return reject(`Tool '${call.name}' is direct_only and cannot execute from code.`);
       }
@@ -349,6 +365,7 @@ export class ToolRegistry implements Registry {
       forceApproval = false,
     ): Promise<ToolResult | undefined> => {
       for (const mw of middlewares) {
+        currentCall = Object.freeze({ ...currentCall });
         const {
           allowed,
           reason,

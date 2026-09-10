@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { Message, ToolCall, ToolDefinition } from "../schema/message.js";
 import type { LLMProvider } from "../provider/interface.js";
 import type { RetryInfo } from "../provider/retry.js";
@@ -128,6 +129,7 @@ export class SubagentRunner {
 
     const initialTools = snapshotToolDefinitions(readOnlyRegistry.getAvailableTools());
     const initialToolNames = new Set(initialTools.map((tool) => tool.name));
+    const boundStep = readOnlyRegistry.captureStep?.(randomUUID(), [...initialToolNames]);
     // 委派层会传入 host/worktree 的可信运行目录；不从任务 context 或模型输出猜测根目录。
     const runtimeWorkspaceRoot = opts.workDir ?? this.options.workDir;
     const canViewSkills = initialToolNames.has("skill_view");
@@ -201,6 +203,11 @@ export class SubagentRunner {
           ? initialTools
           : []
         : initialTools;
+      const step = readOnlyRegistry.captureStep?.(
+        randomUUID(),
+        availableTools.map((tool) => tool.name),
+        boundStep,
+      );
 
       // 响应式溢出重试:子代理用独立 contextHistory(非 Session 驱动),无法重取
       // WorkingMemory,故仅用更小的 maxChars 预算对 contextHistory 重新压缩重试。
@@ -383,11 +390,13 @@ export class SubagentRunner {
             let dispatched = false;
             const executionContext = {
               signal,
+              step,
               beforeDispatch: async (finalCall: ToolCall) => {
                 await runtimeRun?.recordToolStarted(
                   finalCall.id,
                   finalCall.name,
                   finalCall.arguments,
+                  { step, origin: "model" },
                 );
                 dispatched = true;
               },
