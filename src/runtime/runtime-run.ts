@@ -718,7 +718,7 @@ export class RuntimeRun {
             call.id,
           ]),
           at: recoveryAt,
-          partial: true,
+          partial: false,
           visibility: "internal",
           refs: { ...source.refs, toolCallId: call.id },
           kind: "tool.result.recorded",
@@ -1530,6 +1530,7 @@ export class RuntimeRun {
 
   async resolveToolRecovery(input: {
     readonly recoveryEventId: string;
+    readonly outcome: "effects_verified" | "not_dispatched_verified";
     readonly evidenceUri: string;
     readonly summary: string;
   }): Promise<void> {
@@ -1592,7 +1593,7 @@ export class RuntimeRun {
       dispatched ? (result.isError ? "failed" : "succeeded") : "rejected",
     );
     const event: RuntimeToolResultRecordedEvent = {
-      ...this.base(createRuntimeEventId("nested-tool-result"), true, "internal"),
+      ...this.base(createRuntimeEventId("nested-tool-result"), false, "internal"),
       refs: {
         ...this.refs({ toolCallId: call.id }),
         toolCallId: call.id,

@@ -23,6 +23,8 @@ import {
   ToolCommitBoundaryError,
 } from "./registry.js";
 import { Ajv, type ValidateFunction } from "ajv";
+import { Ajv2019 } from "ajv/dist/2019.js";
+import { Ajv2020 } from "ajv/dist/2020.js";
 import {
   sharedToolResourceAuthority,
   type ToolResourceAuthority,
@@ -69,6 +71,8 @@ export class ToolRegistry implements Registry {
   >();
   private readonly validators = new WeakMap<object, ValidateFunction>();
   private readonly schemaValidator = new Ajv({ strict: false, allErrors: true });
+  private readonly schemaValidator2019 = new Ajv2019({ strict: false, allErrors: true });
+  private readonly schemaValidator2020 = new Ajv2020({ strict: false, allErrors: true });
 
   constructor(
     private readonly resourceAuthority: Pick<
@@ -215,7 +219,15 @@ export class ToolRegistry implements Registry {
 
   getAvailableTools(): ToolDefinition[] {
     return [...this.tools.values()]
-      .map((tool) => tool.definition())
+      .map((tool) => {
+        const definition = tool.definition();
+        return tool.nesting === "nestable"
+          ? {
+              ...definition,
+              description: `${definition.description}\nCode Mode: nestable via tools.${definition.name}(args).`,
+            }
+          : definition;
+      })
       .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
   }
 
@@ -307,7 +319,14 @@ export class ToolRegistry implements Registry {
             : undefined) ?? tool.definition().inputSchema;
         let validator = this.validators.get(schema);
         if (!validator) {
-          validator = this.schemaValidator.compile(schema);
+          const dialect = schema["$schema"];
+          const compiler =
+            typeof dialect === "string" && dialect.includes("2020-12")
+              ? this.schemaValidator2020
+              : typeof dialect === "string" && dialect.includes("2019-09")
+                ? this.schemaValidator2019
+                : this.schemaValidator;
+          validator = compiler.compile(schema);
           this.validators.set(schema, validator);
         }
         if (!validator(args))
@@ -421,56 +440,93 @@ export class ToolRegistry implements Registry {
     }
 
     // 5. 执行工具逻辑:所有安全门 + Hook + 权限链都放行了
+    let fatalFailure: ToolCommitBoundaryError | undefined;
     try {
       const executionContext: ToolExecutionContext = {
         ...(context ?? {}),
         toolCallId: currentCall.id,
       };
-      let dispatched = false;
-      let chain: (nextCall: ToolCall) => Promise<string> = async (nextCall) => {
-        if (dispatched) throw new Error("Tool execution middleware attempted duplicate dispatch");
-        if (
-          nextCall.id !== currentCall.id ||
-          nextCall.name !== currentCall.name ||
-          nextCall.arguments !== currentCall.arguments
-        ) {
-          throw new Error("Execution middleware cannot rewrite an authorized call");
-        }
-        context?.signal?.throwIfAborted();
-        if (this.tools.get(currentCall.name) !== tool)
-          throw new Error("Tool binding changed before dispatch");
-        if (this.preWriteHook) {
-          try {
-            await this.preWriteHook(currentCall.name, currentCall.arguments);
-          } catch (err) {
-            logger.warn({ err, tool: currentCall.name }, "[Registry] preWriteHook 失败");
+      let dispatchEntered = false;
+      let dispatchPromise: Promise<string> | undefined;
+      let chain: (nextCall: ToolCall) => Promise<string> = (nextCall) => {
+        if (dispatchEntered)
+          return Promise.reject(
+            new Error("Tool execution middleware attempted duplicate dispatch"),
+          );
+        dispatchEntered = true;
+        dispatchPromise = (async () => {
+          if (
+            nextCall.id !== currentCall.id ||
+            nextCall.name !== currentCall.name ||
+            nextCall.arguments !== currentCall.arguments
+          ) {
+            throw new Error("Execution middleware cannot rewrite an authorized call");
           }
-        }
-        try {
-          await context?.beforeDispatch?.(Object.freeze({ ...currentCall }));
-        } catch (error) {
-          throw error instanceof ToolCommitBoundaryError
-            ? error
-            : new ToolCommitBoundaryError("T1", error);
-        }
-        dispatched = true;
-        return tool.execute(currentCall.arguments, executionContext);
+          context?.signal?.throwIfAborted();
+          if (this.tools.get(currentCall.name) !== tool)
+            throw new Error("Tool binding changed before dispatch");
+          if (this.preWriteHook) {
+            try {
+              await this.preWriteHook(currentCall.name, currentCall.arguments);
+            } catch (err) {
+              logger.warn({ err, tool: currentCall.name }, "[Registry] preWriteHook 失败");
+            }
+          }
+          context?.signal?.throwIfAborted();
+          if (this.tools.get(currentCall.name) !== tool)
+            throw new Error("Tool binding changed before dispatch");
+          try {
+            await context?.beforeDispatch?.(Object.freeze({ ...currentCall }));
+          } catch (error) {
+            fatalFailure =
+              error instanceof ToolCommitBoundaryError
+                ? error
+                : new ToolCommitBoundaryError("T1", error);
+            throw fatalFailure;
+          }
+          context?.signal?.throwIfAborted();
+          if (this.tools.get(currentCall.name) !== tool)
+            throw new ToolCommitBoundaryError("T1", new Error("Tool binding changed after T1"));
+          return tool.execute(currentCall.arguments, executionContext);
+        })().catch((error: unknown) => {
+          if (error instanceof ToolCommitBoundaryError) fatalFailure = error;
+          throw error;
+        });
+        void dispatchPromise.catch(() => {});
+        return dispatchPromise;
       };
       for (let i = this.executionMiddlewares.length - 1; i >= 0; i--) {
         const mw = this.executionMiddlewares[i]!;
         const next = chain;
         chain = (nextCall) => mw(nextCall, next, executionContext);
       }
+      const execute = async (): Promise<string> => {
+        let output = "";
+        let failure: unknown;
+        try {
+          output = await chain(Object.freeze({ ...currentCall }));
+        } catch (error) {
+          failure = error;
+        }
+        // Even middleware that forgets to await next cannot release the physical resource lock.
+        try {
+          await dispatchPromise;
+        } catch (error) {
+          failure ??= error;
+        }
+        if (fatalFailure) throw fatalFailure;
+        if (failure !== undefined) throw failure;
+        return output;
+      };
       return {
         toolCallId: currentCall.id,
         output: await (tool.executionMode === "orchestrator"
-          ? chain(Object.freeze({ ...currentCall }))
-          : this.resourceAuthority.run(this.getAccesses(currentCall), context?.signal, () =>
-              chain(Object.freeze({ ...currentCall })),
-            )),
+          ? execute()
+          : this.resourceAuthority.run(this.getAccesses(currentCall), context?.signal, execute)),
         isError: false,
       };
     } catch (err) {
+      if (fatalFailure) throw fatalFailure;
       if (err instanceof ToolCommitBoundaryError) throw err;
       // 6. 封装:底层物理错误也封成 isError 的 ToolResult
       if (context?.signal?.aborted) {
