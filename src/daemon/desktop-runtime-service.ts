@@ -40,7 +40,10 @@ import {
 } from "../diagnostics/workspace-doctor.js";
 import { SessionForkService } from "../engine/session-fork-service.js";
 import { StorageOperationJournal } from "../storage/operation-journal.js";
-import { projectRuntimeSessionActiveToolResultEntries } from "../engine/session-runtime-projection.js";
+import {
+  projectRuntimeSessionActiveToolResultEntries,
+  projectRuntimeSessionState,
+} from "../engine/session-runtime-projection.js";
 import { globalSessionManager, Session } from "../engine/session.js";
 import type { PersistedSessionSettings } from "../engine/session-runtime.js";
 import {
@@ -794,7 +797,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   }> {
     const canonical = await canonicalizeWorkspacePath(workspacePath);
     await this.options.reconcilePlanControl?.(canonical, sessionId);
-    await this.transcriptPersistenceTail;
+    // The subscription reads a fixed durable watermark. Pending desktop entries
+    // publish their own advance when committed; waiting for the writer queue here
+    // can wait for an entire running Session (and block the live subscription lane).
     const session = (await this.requireSession(canonical, sessionId)) as unknown as RuntimeSession;
     const activeRun = (await this.findActiveSessionRun(canonical, sessionId)) as
       | RuntimeRunRecord
@@ -2539,10 +2544,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     runId: string,
   ): Promise<boolean> {
     const canonical = await canonicalizeWorkspacePath(workspacePath);
-    const graphMode = await this.withSession(canonical, rootSessionId, async (session) =>
-      ["graph", "swarm"].includes(
-        session.getRuntimeStateSnapshot().settings?.orchestrationMode ?? "default",
-      ),
+    const graphMode = ["graph", "swarm"].includes(
+      (await this.readPersistedSessionSettings(canonical, rootSessionId))?.orchestrationMode ??
+        "default",
     );
     // Session orchestration mode is persisted before the host admits a foreground Run, so it is
     // available for run.started as well as terminal notifications. Yield/wake facts are created
@@ -2675,15 +2679,34 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     // Opening/resuming a legacy Session is an authorization boundary.  A missing
     // settings fact has no authority to inherit today's user/project YOLO default,
     // so materialize the same durable agent/default snapshot used by Fork first.
-    await this.withSession(workspacePath, sessionId, async (session) => {
-      if (session.getRuntimeStateSnapshot().settings !== undefined) return;
-      await this.getForkSourceSettings(workspacePath, session);
-      await session.flushPersistence();
-    });
+    // Existing settings are read-side data, not an execution-lock operation.
+    // Only a legacy Session without a durable settings fact needs serialization.
+    if ((await this.readPersistedSessionSettings(workspacePath, sessionId)) === undefined) {
+      await this.withSession(workspacePath, sessionId, async (session) => {
+        if (session.getRuntimeStateSnapshot().settings === undefined) {
+          await this.getForkSourceSettings(workspacePath, session);
+        }
+        await session.flushPersistence();
+      });
+    }
     const parentSession = await this.withWorkspaceSessionStore(workspacePath, (store) =>
       configuredSubagentParent(store, sessionId, workspacePath, this.picoHome),
     );
     return { ...sessionPayload(entry), ...(parentSession ? { parentSession } : {}) };
+  }
+
+  private async readPersistedSessionSettings(
+    workspacePath: string,
+    sessionId: string,
+  ): Promise<PersistedSessionSettings | undefined> {
+    const existing = await readExistingSqliteSessionEventSlice({
+      storageRoot: resolvePicoPaths(workspacePath, { picoHome: this.picoHome }).workspace.root,
+      sessionId,
+      kinds: ["session.state.committed"],
+    });
+    return existing
+      ? projectRuntimeSessionState(existing.slice.entries.map(({ event }) => event)).settings
+      : undefined;
   }
 
   /** 归档/置顶等 sessions 表级写:短生命周期打开 workspace 级 SqliteRuntimeEventStore。 */
