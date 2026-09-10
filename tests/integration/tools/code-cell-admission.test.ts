@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CodeCellAdmission } from "../../../src/tools/code-cell-admission.js";
+import { CodeCellAdmission, codeCellAdmissionFor } from "../../../src/tools/code-cell-admission.js";
 import { createCodeModeTool } from "../../../src/tools/code-mode-tool.js";
 import type { CodeModeExecutionResult } from "../../../src/tools/code-mode.js";
 import { ToolRegistry } from "../../../src/tools/registry-impl.js";
@@ -84,6 +84,27 @@ function assertFull(result: CodeModeExecutionResult) {
   if (!result.ok) assert.equal(result.error.kind, "limit_exceeded");
   assert.deepEqual(result.toolCalls, []);
 }
+
+test(
+  "Code Mode shares capacity within a runtime owner but isolates other Sessions",
+  { timeout: 10_000 },
+  async (t) => {
+    const owner = {};
+    const first = fixture(codeCellAdmissionFor(owner));
+    const rebuilt = fixture(codeCellAdmissionFor(owner));
+    const independent = fixture(codeCellAdmissionFor({}));
+    t.after(() => first.releaseHost.resolve());
+    const active = first.run("held");
+    await first.started.promise;
+    const waiting = rebuilt.run("queued");
+    assertFull(await rebuilt.run("overflow"));
+    assert.equal((await independent.run("independent")).ok, true);
+    assert.deepEqual(rebuilt.calls, []);
+    first.releaseHost.resolve();
+    assert.equal((await active).ok, true);
+    assert.equal((await waiting).ok, true);
+  },
+);
 
 test(
   "Code Mode shares one active cell and one waiter across default registries",
