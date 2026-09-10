@@ -86,7 +86,11 @@ export interface RuntimeMessageCommittedEvent extends RuntimeEventBase {
 
 export interface RuntimeToolStartedEvent extends RuntimeEventBase {
   readonly kind: "tool.started";
-  readonly data: { readonly toolName: string; readonly argumentsHash: string };
+  readonly data: {
+    readonly toolName: string;
+    readonly argumentsHash: string;
+    readonly origin?: "model" | "code_mode";
+  };
 }
 
 /** load_tools 组级激活的 durable 事实：披露状态经 ledger 重播恢复。 */
@@ -95,6 +99,16 @@ export interface RuntimeToolGroupLoadedEvent extends RuntimeEventBase {
   readonly data: {
     readonly groupId: string;
     readonly toolNames: readonly string[];
+  };
+}
+
+/** A trusted host's explicit evidence, never an inferred replay or replacement result. */
+export interface RuntimeToolRecoveryResolvedEvent extends RuntimeEventBase {
+  readonly kind: "tool.recovery.resolved";
+  readonly data: {
+    readonly recoveryEventId: string;
+    readonly evidenceUri: string;
+    readonly summary: string;
   };
 }
 
@@ -116,6 +130,7 @@ export interface RuntimeToolResultRecordedEvent extends RuntimeEventBase {
     readonly evidence?: RuntimeEvidenceReference;
   };
   readonly data: {
+    readonly origin?: "model" | "code_mode";
     readonly toolName: string;
     readonly status: RuntimeToolResultStatus;
     readonly body: RuntimeToolResultBody;
@@ -362,6 +377,7 @@ export type RuntimeEvent =
   | RuntimeMessageCommittedEvent
   | RuntimeToolStartedEvent
   | RuntimeToolGroupLoadedEvent
+  | RuntimeToolRecoveryResolvedEvent
   | RuntimeToolResultRecordedEvent
   | RuntimeAgentOutputEvent
   | RuntimeApprovalRequestedEvent

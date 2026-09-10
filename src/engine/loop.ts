@@ -23,7 +23,12 @@ import {
   type ToolDefinition,
   type ToolResult,
 } from "../schema/message.js";
-import type { Registry, ToolFileSideEffects } from "../tools/registry.js";
+import {
+  ToolCommitBoundaryError,
+  type Registry,
+  type ToolFileSideEffects,
+  type ToolExecutionStep,
+} from "../tools/registry.js";
 import type {
   AgentRunner,
   SubagentModelSelectionRequest,
@@ -53,7 +58,7 @@ import {
   createFirstTurnDelegationPolicy,
   type RequestedDelegationCount,
 } from "../input/delegation-intent-policy.js";
-import { ToolDisclosure } from "../tools/tool-disclosure.js";
+import { ToolDisclosure, type ToolDisclosureTurn } from "../tools/tool-disclosure.js";
 import { SilentReporter, type Reporter } from "./reporter.js";
 import { SteerQueue } from "./steer-queue.js";
 import { ReminderInjector, ToolGuardrailController, type GuardrailOptions } from "./reminder.js";
@@ -860,23 +865,6 @@ export class AgentEngine implements AgentRunner {
   }
 
   /**
-   * 从全量工具里挑出披露连接器的 schema(load_tools / search_tools,若已注册)。
-   * disclosure 启用时,连接器元工具必须始终暴露给 LLM,否则模型无法激活扩展工具。
-   * load_tools 组级激活是主路径;search_tools 兜底检索动态工具。
-   * 去重 + 全局 name 排序:防止异常路径把同一连接器拼两次,并保持
-   * provider-visible tools name-sorted 不变量(见 anthropic-cache-tool-stability 测试)。
-   * 注意:全局排序在调用方合并处完成(见下方 availableTools 拼接),本方法
-   * 只负责候选筛选 + 去重。
-   */
-  private searchToolSchema(
-    allTools: ToolDefinition[],
-    alreadyPicked: ReadonlySet<string>,
-  ): ToolDefinition[] {
-    const names = new Set(["load_tools", "search_tools"]);
-    return allTools.filter((t) => names.has(t.name) && !alreadyPicked.has(t.name));
-  }
-
-  /**
    * 退出 Plan Mode(ROADMAP 3.6)。
    * 由 ExitPlanModeTool 审批通过后经 onExit 回调间接触发。
    * 置 planMode=false,并通知 host 注入的 onPlanExit 监听者。
@@ -1388,20 +1376,34 @@ export class AgentEngine implements AgentRunner {
     }
     const run = () => {
       const context: EngineSessionExecutionContext = { capability, active: true };
-      return engineSessionContext.run(context, async () => {
-        try {
-          return await this.runInMainCompactorScope(
-            session,
-            runtimeReporter,
-            runtimeTracer,
-            signal,
-          );
-        } finally {
-          // Detached work inherits AsyncLocalStorage. Seal only this finished execution so a
-          // later exact Graph wake may reuse the same Session without weakening live re-entry.
-          context.active = false;
-        }
-      });
+      const boundTools = snapshotToolDefinitions(this.registry.getAvailableTools());
+      const disclosureTurn = this.toolDisclosure?.beginTurn(boundTools);
+      const boundStep = this.registry.captureStep?.(
+        randomUUID(),
+        boundTools.map((tool) => tool.name),
+      );
+      const executeTurn = () =>
+        engineSessionContext.run(context, async () => {
+          try {
+            return await this.runInMainCompactorScope(
+              session,
+              runtimeReporter,
+              runtimeTracer,
+              signal,
+              boundTools,
+              disclosureTurn,
+              boundStep,
+            );
+          } finally {
+            // Detached work inherits AsyncLocalStorage. Seal only this finished execution so a
+            // later exact Graph wake may reuse the same Session without weakening live re-entry.
+            context.active = false;
+            if (disclosureTurn) this.toolDisclosure?.endTurn(disclosureTurn);
+          }
+        });
+      return disclosureTurn && this.toolDisclosure
+        ? this.toolDisclosure.runInTurn(disclosureTurn, executeTurn)
+        : executeTurn();
     };
     const execute = () => (this.compactor ? this.compactor.runInMainScope(run) : run());
     const ambientRun = this.runtimePort?.currentRun();
@@ -1459,6 +1461,9 @@ export class AgentEngine implements AgentRunner {
     runtimeReporter?: Reporter,
     runtimeTracer?: Tracer,
     signal?: AbortSignal,
+    boundTools?: ToolDefinition[],
+    disclosureTurn?: ToolDisclosureTurn,
+    boundStep?: ToolExecutionStep,
   ): Promise<Message[]> {
     signal?.throwIfAborted();
     await session.flushPersistence();
@@ -1499,7 +1504,8 @@ export class AgentEngine implements AgentRunner {
     let consecutiveHookStopBlocks = 0;
     let planStopContinuations = 0;
     let graceCandidateTools: ToolDefinition[] = [];
-    let runToolSnapshot: ToolDefinition[] | undefined;
+    const runToolSnapshot =
+      boundTools ?? snapshotToolDefinitions(this.registry.getAvailableTools());
     const userRewindPointId = session.fileHistory.snapshots.findLast(
       (snapshot) => snapshot.messageId === session.fileHistory.currentMessageId,
     )?.messageId;
@@ -1536,6 +1542,7 @@ export class AgentEngine implements AgentRunner {
           break;
         }
         await this.runtimePort?.currentRun()?.recordTurnStarted(turnCount);
+        await this.runtimePort?.currentRun()?.assertNoUnresolvedToolEffects();
         // 首轮直接复用 run 开始时的分层结果，避免重复组装。后续轮次只刷新
         // turnTail，使 TodoStore/GoalManager 等共享状态可见；systemPrompt 保持冻结。
         if (turnCount > 1 && (this.promptLayersFactory || this.planMode)) {
@@ -1577,23 +1584,10 @@ export class AgentEngine implements AgentRunner {
 
         try {
           // 获取当前挂载的所有工具定义
-          const allTools =
-            runToolSnapshot ??
-            (runToolSnapshot = snapshotToolDefinitions(this.registry.getAvailableTools()));
-          // 渐进披露(ROADMAP 5.4):启用时只把核心组+已披露扩展组喂给 LLM,
-          // 主路径 load_tools 组级激活,search_tools 兜底检索动态工具。
-          // registry.execute 仍按全集路由(软安全网)。
-          // 未启用 disclosure 时 availableTools = allTools,行为不变。
-          const availableTools = this.toolDisclosure
-            ? (() => {
-                const picked = this.toolDisclosure.pickForLLM(allTools);
-                const pickedNames = new Set(picked.map((t) => t.name));
-                // 合并后全局 name 排序:保持 provider-visible tools name-sorted 不变量,
-                // 避免 load_tools/search_tools 追加在末尾破坏字典序。
-                return [...picked, ...this.searchToolSchema(allTools, pickedNames)].sort((a, b) =>
-                  a.name.localeCompare(b.name),
-                );
-              })()
+          const allTools = runToolSnapshot;
+          // 每次推理固定本 Step 可见集合；本轮工具披露在下一 Step 才生效。
+          const availableTools = disclosureTurn
+            ? [...disclosureTurn.snapshotForStep().tools]
             : allTools;
           const requiredFirstDelegationActive =
             requiredFirstDelegationPending &&
@@ -1612,6 +1606,14 @@ export class AgentEngine implements AgentRunner {
           const providerTools = this.isPlanning()
             ? allTools.filter((tool) => isPlanProviderTool(tool.name))
             : unrestrictedProviderTools;
+          const step = this.registry.captureStep?.(
+            randomUUID(),
+            providerTools.map((tool) => tool.name),
+            boundStep,
+          ) ?? {
+            id: randomUUID(),
+            visibleToolNames: new Set(providerTools.map((tool) => tool.name)),
+          };
 
           // 主 Agent 默认投影完整 Session 历史。只有超过 token 水位时，
           // 才先缩短旧 ToolResult，再在安全工具边界做持久化摘要。
@@ -1967,6 +1969,7 @@ export class AgentEngine implements AgentRunner {
             // loop-6:定时器句柄清理已收敛进 raceWithDeadline(范式同 retry.ts
             // abortableSleep 的 clearTimeout),杜绝正常批次下的悬挂定时器泄漏。
             await raceWithDeadline(scheduled, TOOL_SETTLE_TIMEOUT_MS);
+            if (error instanceof ToolCommitBoundaryError) throw error;
             // The assistant tool-call batch is durable, but no ToolResult may
             // become canonical until its structured starts are known durable.
             // Reconciliation will later close this still-pending model batch.
@@ -2228,9 +2231,9 @@ export class AgentEngine implements AgentRunner {
                               signal?.throwIfAborted();
                               return this.runtimePort
                                 ? this.runtimePort.runWithToolCall(tc.id, () =>
-                                    this.runOneTool(tc, reporter, turnSpan, signal),
+                                    this.runOneTool(tc, reporter, turnSpan, signal, step),
                                   )
-                                : this.runOneTool(tc, reporter, turnSpan, signal);
+                                : this.runOneTool(tc, reporter, turnSpan, signal, step);
                             },
                           });
                 scheduled.push(
@@ -2681,6 +2684,7 @@ export class AgentEngine implements AgentRunner {
     reporter: Reporter,
     parentSpan?: Span,
     signal?: AbortSignal,
+    step?: ToolExecutionStep,
   ): Promise<ToolExecutionOutcome> {
     const toolSpan = parentSpan?.startChild("Tool.Execute", {
       toolName: toolCall.name,
@@ -2693,6 +2697,7 @@ export class AgentEngine implements AgentRunner {
       const runtimeRun = this.runtimePort?.currentRun();
       let result: ToolResult;
       let runtimeStatus: EngineRuntimeToolResultStatus;
+      let dispatched = false;
       if (!guardDecision.allowed) {
         await this.hookService?.dispatch(
           "PermissionDenied",
@@ -2713,12 +2718,18 @@ export class AgentEngine implements AgentRunner {
         runtimeStatus = "rejected";
       } else {
         signal?.throwIfAborted();
-        // ADR 27 决策 4 写序不变量:tool.started 必须先于 registry.execute 落库——
-        // 它是恢复期 F1/F2 分类(not_dispatched vs indeterminate)的判定边界。
-        // 守护测试:tests/integration/tools/tool-dispatch-order-guard.test.ts。
-        await runtimeRun?.recordToolStarted(toolCall.id, toolCall.name, toolCall.arguments);
+        // Registry 在最终参数/权限与资源准入通过后，物理执行前提交 T1。
         result = await this.registry.execute(toolCall, {
           signal,
+          step,
+          origin: "model",
+          beforeDispatch: async (finalCall) => {
+            await runtimeRun?.recordToolStarted(finalCall.id, finalCall.name, finalCall.arguments, {
+              step,
+              origin: "model",
+            });
+            dispatched = true;
+          },
           onOutput: ({ stream, chunk }) => {
             // 精确值可能横跨多个 chunk，不能安全地逐块替换。启用宿主清理边界时
             // 禁止转发原始流；完成后的 ToolResult 仍会以已清理形式正常发布。
@@ -2727,7 +2738,7 @@ export class AgentEngine implements AgentRunner {
             }
           },
         });
-        runtimeStatus = result.isError ? "failed" : "succeeded";
+        runtimeStatus = !dispatched ? "rejected" : result.isError ? "failed" : "succeeded";
       }
       result = redactToolResult(result, this.toolResultRedactionSecrets);
 
@@ -2791,7 +2802,10 @@ export class AgentEngine implements AgentRunner {
   ): Promise<{ message: Message; envelope: ToolResultEnvelope }> {
     const built = buildRuntimeToolResultInput(toolCall, result, modelOutput, status);
     return {
-      message: runtimeRun.registerToolResult(built.input),
+      message:
+        status === "rejected"
+          ? runtimeRun.registerUndispatchedToolResult(built.input)
+          : runtimeRun.registerToolResult(built.input),
       envelope: built.envelope,
     };
   }

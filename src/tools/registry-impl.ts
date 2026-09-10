@@ -14,9 +14,19 @@ import type {
   Registry,
   RequestMiddleware,
   ToolExecutionContext,
+  ToolExecutionStep,
   ToolFileSideEffects,
 } from "./registry.js";
-import { NO_FILE_SIDE_EFFECTS, WORKSPACE_FILE_SIDE_EFFECTS } from "./registry.js";
+import {
+  NO_FILE_SIDE_EFFECTS,
+  WORKSPACE_FILE_SIDE_EFFECTS,
+  ToolCommitBoundaryError,
+} from "./registry.js";
+import { Ajv, type ValidateFunction } from "ajv";
+import {
+  sharedToolResourceAuthority,
+  type ToolResourceAuthority,
+} from "./tool-resource-authority.js";
 import type { ToolCall, ToolDefinition, ToolResult } from "../schema/message.js";
 import { logger } from "../observability/logger.js";
 import { ToolAccesses } from "./tool-access.js";
@@ -50,6 +60,61 @@ export class ToolRegistry implements Registry {
   private readonly executionMiddlewares: ExecutionMiddleware[] = [];
   private preWriteHook?: (toolName: string, args: string) => Promise<void>;
   private hookService?: HookService;
+  private readonly stepBindings = new WeakMap<
+    ToolExecutionStep,
+    ReadonlyMap<
+      string,
+      { tool: BaseTool; schema: Record<string, unknown>; nesting: "nestable" | "direct_only" }
+    >
+  >();
+  private readonly validators = new WeakMap<object, ValidateFunction>();
+  private readonly schemaValidator = new Ajv({ strict: false, allErrors: true });
+
+  constructor(
+    private readonly resourceAuthority: Pick<
+      ToolResourceAuthority,
+      "run"
+    > = sharedToolResourceAuthority,
+  ) {}
+
+  captureStep(
+    id: string,
+    visibleToolNames: readonly string[],
+    boundStep?: ToolExecutionStep,
+  ): ToolExecutionStep {
+    const names = new Set(visibleToolNames);
+    const step: ToolExecutionStep = Object.freeze({ id, visibleToolNames: names });
+    const bound = boundStep ? this.stepBindings.get(boundStep) : undefined;
+    this.stepBindings.set(
+      step,
+      new Map(
+        [...this.tools]
+          .filter(([name]) => names.has(name))
+          .flatMap(([name, tool]) => {
+            const binding = bound?.get(name);
+            return boundStep && !binding
+              ? []
+              : [
+                  [
+                    name,
+                    binding ?? {
+                      tool,
+                      schema: structuredClone(tool.definition().inputSchema),
+                      nesting: tool.nesting ?? "direct_only",
+                    },
+                  ] as const,
+                ];
+          }),
+      ),
+    );
+    return step;
+  }
+
+  getNesting(name: string, step?: ToolExecutionStep): "nestable" | "direct_only" {
+    if (!step) return this.tools.get(name)?.nesting ?? "direct_only";
+    const binding = this.stepBindings.get(step)?.get(name);
+    return binding && binding.tool === this.tools.get(name) ? binding.nesting : "direct_only";
+  }
 
   setPreWriteHook(hook: (toolName: string, args: string) => Promise<void>): void {
     this.preWriteHook = hook;
@@ -200,7 +265,7 @@ export class ToolRegistry implements Registry {
 
   async execute(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult> {
     // 1. 路由查找:找不到说明模型幻觉,返回 isError 让模型自纠
-    let currentCall = call;
+    let currentCall = Object.freeze({ ...call });
     const tool = this.tools.get(currentCall.name);
     if (!tool) {
       return {
@@ -209,6 +274,55 @@ export class ToolRegistry implements Registry {
         isError: true,
       };
     }
+
+    const reject = (reason: string): ToolResult => ({
+      toolCallId: call.id,
+      output: reason,
+      isError: true,
+    });
+    const validate = (): ToolResult | undefined => {
+      if (currentCall.id !== call.id || currentCall.name !== call.name) {
+        return reject("Tool middleware cannot change tool identity.");
+      }
+      if (context?.step) {
+        const bindings = this.stepBindings.get(context.step);
+        if (
+          !context.step.visibleToolNames.has(call.name) ||
+          (bindings && bindings.get(call.name)?.tool !== tool)
+        ) {
+          return reject(`Tool '${call.name}' is not available in this Step snapshot.`);
+        }
+      }
+      if (
+        context?.origin === "code_mode" &&
+        this.getNesting(call.name, context.step) !== "nestable"
+      ) {
+        return reject(`Tool '${call.name}' is direct_only and cannot execute from code.`);
+      }
+      try {
+        const args: unknown = JSON.parse(currentCall.arguments);
+        const schema =
+          (context?.step
+            ? this.stepBindings.get(context.step)?.get(call.name)?.schema
+            : undefined) ?? tool.definition().inputSchema;
+        let validator = this.validators.get(schema);
+        if (!validator) {
+          validator = this.schemaValidator.compile(schema);
+          this.validators.set(schema, validator);
+        }
+        if (!validator(args))
+          return reject(
+            `Invalid tool arguments: ${this.schemaValidator.errorsText(validator.errors)}`,
+          );
+      } catch (error) {
+        return reject(
+          `Invalid tool arguments: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      return undefined;
+    };
+    const invalidInput = validate();
+    if (invalidInput) return invalidInput;
 
     const runMiddlewares = async (
       middlewares: readonly RequestMiddleware[],
@@ -241,7 +355,11 @@ export class ToolRegistry implements Registry {
             isError: true,
           };
         }
-        if (rewrittenCall) currentCall = rewrittenCall;
+        if (rewrittenCall) {
+          currentCall = { ...rewrittenCall };
+          const invalid = validate();
+          if (invalid) return invalid;
+        }
       }
       return undefined;
     };
@@ -280,37 +398,64 @@ export class ToolRegistry implements Registry {
       forceApproval = hookResult.decision === "ask" || hookResult.decision === "defer";
       if (hookResult.modifiedInput !== undefined) {
         currentCall = { ...currentCall, arguments: JSON.stringify(hookResult.modifiedInput) };
+        const invalid = validate();
+        if (invalid) return invalid;
         const rewrittenRejection = await runMiddlewares(this.safetyMiddlewares, "safety");
         if (rewrittenRejection) return rewrittenRejection;
       }
     }
 
     // 4. Hook 改写并重过安全门后，才进入权限 Hook/人工审批。
-    const permissionRejection = await runMiddlewares(
-      [...this.permissionMiddlewares, ...this.requestMiddlewares],
-      "permission",
-      forceApproval,
-    );
-    if (permissionRejection) return permissionRejection;
+    for (let attempt = 0; ; attempt += 1) {
+      const authorizedArguments = currentCall.arguments;
+      const permissionRejection = await runMiddlewares(
+        [...this.permissionMiddlewares, ...this.requestMiddlewares],
+        "permission",
+        forceApproval,
+      );
+      if (permissionRejection) return permissionRejection;
+      if (authorizedArguments === currentCall.arguments) break;
+      if (attempt >= 3) return reject("Tool permission rewrites did not stabilize.");
+      const rejection = await runMiddlewares(this.safetyMiddlewares, "safety");
+      if (rejection) return rejection;
+    }
 
     // 5. 执行工具逻辑:所有安全门 + Hook + 权限链都放行了
-    if (this.preWriteHook) {
-      try {
-        await this.preWriteHook(currentCall.name, currentCall.arguments);
-      } catch (err) {
-        logger.warn(
-          { err: String(err), tool: currentCall.name },
-          `[Registry] preWriteHook 失败,继续执行工具 ${currentCall.name}`,
-        );
-      }
-    }
     try {
       const executionContext: ToolExecutionContext = {
         ...(context ?? {}),
         toolCallId: currentCall.id,
       };
-      let chain: (nextCall: ToolCall) => Promise<string> = async (nextCall) =>
-        tool.execute(nextCall.arguments, executionContext);
+      let dispatched = false;
+      let chain: (nextCall: ToolCall) => Promise<string> = async (nextCall) => {
+        if (dispatched) throw new Error("Tool execution middleware attempted duplicate dispatch");
+        if (
+          nextCall.id !== currentCall.id ||
+          nextCall.name !== currentCall.name ||
+          nextCall.arguments !== currentCall.arguments
+        ) {
+          throw new Error("Execution middleware cannot rewrite an authorized call");
+        }
+        context?.signal?.throwIfAborted();
+        if (this.tools.get(currentCall.name) !== tool)
+          throw new Error("Tool binding changed before dispatch");
+        if (this.preWriteHook) {
+          try {
+            await this.preWriteHook(currentCall.name, currentCall.arguments);
+          } catch (err) {
+            logger.warn({ err, tool: currentCall.name }, "[Registry] preWriteHook 失败");
+          }
+        }
+        try {
+          await context?.beforeDispatch?.(Object.freeze({ ...currentCall }));
+        } catch (error) {
+          throw error instanceof ToolCommitBoundaryError
+            ? error
+            : new ToolCommitBoundaryError("T1", error);
+        }
+        dispatched = true;
+        return tool.execute(currentCall.arguments, executionContext);
+      };
       for (let i = this.executionMiddlewares.length - 1; i >= 0; i--) {
         const mw = this.executionMiddlewares[i]!;
         const next = chain;
@@ -318,10 +463,15 @@ export class ToolRegistry implements Registry {
       }
       return {
         toolCallId: currentCall.id,
-        output: await chain(currentCall),
+        output: await (tool.executionMode === "orchestrator"
+          ? chain(Object.freeze({ ...currentCall }))
+          : this.resourceAuthority.run(this.getAccesses(currentCall), context?.signal, () =>
+              chain(Object.freeze({ ...currentCall })),
+            )),
         isError: false,
       };
     } catch (err) {
+      if (err instanceof ToolCommitBoundaryError) throw err;
       // 6. 封装:底层物理错误也封成 isError 的 ToolResult
       if (context?.signal?.aborted) {
         throw context.signal.reason instanceof Error
