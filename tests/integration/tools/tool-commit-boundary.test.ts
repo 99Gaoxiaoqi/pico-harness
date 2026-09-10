@@ -237,6 +237,17 @@ test("真实主循环权限拒绝不跨 T1，结果入账后才继续推理", as
 test("步骤绑定拒绝同名热替换与新增工具，执行中间件不能改写获批参数", async (t) => {
   const { registry, workDir } = await scene(t);
   const step = registry.captureStep("frozen", ["write_file"]);
+  assert.equal("add" in step.visibleToolNames, false);
+  const forged = { id: "forged", visibleToolNames: new Set(["write_file"]) };
+  assert.match(
+    (
+      await registry.execute(
+        { id: "forged", name: "write_file", arguments: '{"path":"out.txt","content":"no"}' },
+        { step: forged },
+      )
+    ).output,
+    /Step snapshot/,
+  );
   registry.register(new WriteFileTool(workDir));
   const call = { id: "frozen", name: "write_file", arguments: '{"path":"out.txt","content":"no"}' };
   assert.match((await registry.execute(call, { step })).output, /Step snapshot/);
