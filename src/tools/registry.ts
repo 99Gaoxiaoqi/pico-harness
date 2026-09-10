@@ -29,8 +29,6 @@ export interface ToolExecutionContext {
   readonly step?: ToolExecutionStep;
   readonly origin?: "model" | "code_mode";
   readonly parentToolCallId?: string;
-  /** Host-owned original assistant batch size, not an execution ordering hint. */
-  readonly stepToolCallCount?: number;
   readonly recoveryPolicy?: ToolRecoveryPolicy;
   /** Host secrets to remove from the durable argument audit, never from execution. */
   readonly argumentRedactionSecrets?: readonly string[];

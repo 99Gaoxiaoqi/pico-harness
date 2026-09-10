@@ -16,6 +16,7 @@ import type {
   ToolExecutionContext,
   ToolExecutionStep,
   ToolFileSideEffects,
+  ToolRecoveryPolicy,
 } from "./registry.js";
 import {
   NO_FILE_SIDE_EFFECTS,
@@ -66,8 +67,18 @@ export class ToolRegistry implements Registry {
     ToolExecutionStep,
     ReadonlyMap<
       string,
-      { tool: BaseTool; schema: Record<string, unknown>; nesting: "nestable" | "direct_only" }
+      {
+        tool: BaseTool;
+        schema: Record<string, unknown>;
+        nesting: "nestable" | "direct_only";
+        executionSemantics: "parallel" | "exclusive_step";
+        recoveryPolicy: ToolRecoveryPolicy;
+      }
     >
+  >();
+  private readonly stepAdmissions = new WeakMap<
+    ToolExecutionStep,
+    { callCount: number; exclusiveToolName?: string }
   >();
   private readonly validators = new WeakMap<object, ValidateFunction>();
   private readonly schemaValidator = new Ajv({ strict: false, allErrors: true });
@@ -120,6 +131,8 @@ export class ToolRegistry implements Registry {
                       tool,
                       schema: structuredClone(tool.definition().inputSchema),
                       nesting: tool.nesting ?? "direct_only",
+                      executionSemantics: tool.executionSemantics ?? "parallel",
+                      recoveryPolicy: this.recoveryPolicyFor(tool),
                     },
                   ] as const,
                 ];
@@ -133,6 +146,30 @@ export class ToolRegistry implements Registry {
     if (!step) return this.tools.get(name)?.nesting ?? "direct_only";
     const binding = this.stepBindings.get(step)?.get(name);
     return binding && binding.tool === this.tools.get(name) ? binding.nesting : "direct_only";
+  }
+
+  private recoveryPolicyFor(tool?: BaseTool): ToolRecoveryPolicy {
+    return Object.freeze({
+      mode: tool?.recoveryMode ?? "never_auto_retry",
+      ...(tool?.recoveryKey ? { key: tool.recoveryKey } : {}),
+      ...(tool?.reconcile ? { reconcile: tool.reconcile.bind(tool) } : {}),
+    });
+  }
+
+  getRecoveryPolicy(name: string, step?: ToolExecutionStep): ToolRecoveryPolicy {
+    if (!step) return this.recoveryPolicyFor(this.tools.get(name));
+    const binding = this.stepBindings.get(step)?.get(name);
+    return binding && binding.tool === this.tools.get(name)
+      ? binding.recoveryPolicy
+      : this.recoveryPolicyFor();
+  }
+
+  getExecutionSemantics(name: string, step?: ToolExecutionStep): "parallel" | "exclusive_step" {
+    if (!step) return this.tools.get(name)?.executionSemantics ?? "parallel";
+    const binding = this.stepBindings.get(step)?.get(name);
+    return binding && binding.tool === this.tools.get(name)
+      ? binding.executionSemantics
+      : "exclusive_step";
   }
 
   setPreWriteHook(hook: (toolName: string, args: string) => Promise<void>): void {
@@ -362,6 +399,22 @@ export class ToolRegistry implements Registry {
     };
     const invalidInput = validate();
     if (invalidInput) return invalidInput;
+
+    // Like Maka, the first admitted call owns the Step: a later exclusive call,
+    // or a sibling after an exclusive call, is rejected rather than merely queued.
+    // Nested leaves belong to the admitted exec tree, not to the provider batch.
+    if (context?.step && context.origin !== "code_mode") {
+      const admission = this.stepAdmissions.get(context.step) ?? { callCount: 0 };
+      const exclusive = this.getExecutionSemantics(call.name, context.step) === "exclusive_step";
+      if (admission.exclusiveToolName || (exclusive && admission.callCount > 0)) {
+        return reject(
+          `Tool '${call.name}' did not run: '${admission.exclusiveToolName ?? call.name}' cannot share an assistant Step with other calls. Send it alone in a later Step.`,
+        );
+      }
+      admission.callCount++;
+      if (exclusive) admission.exclusiveToolName = call.name;
+      this.stepAdmissions.set(context.step, admission);
+    }
 
     const runMiddlewares = async (
       middlewares: readonly RequestMiddleware[],
