@@ -284,7 +284,7 @@ explore_repo  │ top-N 文件结构片段           │   │ (本身即摘要,
 
 ### 会话态白名单优先级最高
 
-Plan Mode、explore-synthesis-only、required-first-delegation 这几种会话态会用更窄的白名单**覆盖**渐进披露的 `availableTools`。其中 Plan Mode 的处理最关键(`loop.ts:1610`):**渐进披露不得把 `submit_plan` 和 `ask_user` 隐藏**,否则模型看到 Plan Prompt 却没完成协议所需的工具。这体现了"渐进披露要让位于协议正确性"——能力完整性优先于上下文精简。
+Plan Mode、explore-synthesis-only、required-delegation-recovery 这几种会话态会用更窄的白名单**覆盖**渐进披露的 `availableTools`。其中 Plan Mode 的处理最关键：**渐进披露不得把 `submit_plan` 和 `ask_user` 隐藏**，否则模型看到 Plan Prompt 却没完成协议所需的工具。普通用户消息中的委派关键词不触发工具白名单或隐藏的首轮强制委派指令；实际 required 委派后的收口与恢复协议仍保留。这体现了“渐进披露要让位于协议正确性”——能力完整性优先于上下文精简。
 
 ---
 
