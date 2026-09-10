@@ -72,6 +72,7 @@ export const RUNTIME_EVENT_KINDS = [
   "message.committed",
   "tool.started",
   "tool.group.loaded",
+  "tool.recovery.resolved",
   "tool.result.recorded",
   "agent.output",
   "approval.requested",
@@ -223,6 +224,7 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
       }
       return;
     case "tool.started":
+      assertToolOrigin(value);
       assertString(value["data"]["toolName"], "tool.started.toolName");
       assertString(value["data"]["argumentsHash"], "tool.started.argumentsHash");
       return;
@@ -239,7 +241,15 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
       }
       return;
     case "tool.result.recorded":
+      assertToolOrigin(value);
       assertToolResultRecordedEvent(value);
+      return;
+    case "tool.recovery.resolved":
+      assertString(value["data"]["recoveryEventId"], "tool.recovery.resolved.recoveryEventId");
+      assertString(value["data"]["evidenceUri"], "tool.recovery.resolved.evidenceUri");
+      assertString(value["data"]["summary"], "tool.recovery.resolved.summary");
+      if (value["visibility"] !== "internal")
+        throw new RuntimeEventIntegrityError("Tool recovery evidence must be internal");
       return;
     case "agent.output":
       assertAgentOutputEvent(value);
@@ -366,6 +376,23 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
       throw new RuntimeEventIntegrityError(
         `Runtime event kind is invalid: ${String(value["kind"])}`,
       );
+  }
+}
+
+function assertToolOrigin(value: Record<string, unknown>): void {
+  const data = value["data"] as Record<string, unknown>;
+  if (
+    data["origin"] !== undefined &&
+    data["origin"] !== "model" &&
+    data["origin"] !== "code_mode"
+  ) {
+    throw new RuntimeEventIntegrityError("Runtime tool origin is invalid");
+  }
+  if (data["origin"] === "code_mode") {
+    const refs = value["refs"] as Record<string, unknown> | undefined;
+    assertString(refs?.["parentToolCallId"], "tool.parentToolCallId");
+    if (value["visibility"] !== "internal")
+      throw new RuntimeEventIntegrityError("Nested code tool events must be internal");
   }
 }
 

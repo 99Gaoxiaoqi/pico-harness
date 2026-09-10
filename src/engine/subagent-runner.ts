@@ -208,6 +208,7 @@ export class SubagentRunner {
       const usageSession = runtime.usageSession ?? this.options.usageSession;
       const costBefore = usageSession?.totalCostCNY ?? 0;
       try {
+        await this.options.runtimePort?.currentRun()?.assertNoUnresolvedToolEffects();
         actionResp = await generateSubagentResponse(
           contextHistory,
           availableTools,
@@ -289,6 +290,7 @@ export class SubagentRunner {
               );
             }
             const continuationCostBefore = usageSession?.totalCostCNY ?? 0;
+            await this.options.runtimePort?.currentRun()?.assertNoUnresolvedToolEffects();
             const continuationResp = await generateSubagentResponse(
               contextHistory,
               runtime.provider.requestCapabilities?.toolChoiceNoneWithTools === true
@@ -378,12 +380,23 @@ export class SubagentRunner {
           start: async () => {
             signal?.throwIfAborted();
             rep.onToolCall(`[Subagent] ${tc.name}`, tc.arguments, tc.id);
-            await runtimeRun?.recordToolStarted(tc.id, tc.name, tc.arguments);
+            let dispatched = false;
+            const executionContext = {
+              signal,
+              beforeDispatch: async (finalCall: ToolCall) => {
+                await runtimeRun?.recordToolStarted(
+                  finalCall.id,
+                  finalCall.name,
+                  finalCall.arguments,
+                );
+                dispatched = true;
+              },
+            };
             const rawResult = await (this.options.runtimePort
               ? this.options.runtimePort.runWithToolCall(tc.id, () =>
-                  readOnlyRegistry.execute(tc, { signal }),
+                  readOnlyRegistry.execute(tc, executionContext),
                 )
-              : readOnlyRegistry.execute(tc, { signal }));
+              : readOnlyRegistry.execute(tc, executionContext));
             const result = redactToolResult(rawResult, this.options.toolResultRedactionSecrets);
             let finalOutput = result.output;
             if (result.isError) {
@@ -394,7 +407,7 @@ export class SubagentRunner {
                 tc,
                 result,
                 finalOutput,
-                result.isError ? "failed" : "succeeded",
+                !dispatched ? "rejected" : result.isError ? "failed" : "succeeded",
               );
               completedToolReportIndexes.push(index);
               return { input: builtResult.input, report: builtResult.envelope };

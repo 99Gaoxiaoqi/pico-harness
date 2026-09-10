@@ -40,7 +40,18 @@ import {
   projectTranscriptEvents,
   type DurableTranscriptEvent,
 } from "../presentation/transcript-event-store.js";
-import { RUNTIME_MESSAGE_EVENT_ID, type Message, type ToolCall } from "../schema/message.js";
+import {
+  RUNTIME_MESSAGE_EVENT_ID,
+  type Message,
+  type ToolCall,
+  type ToolResult,
+} from "../schema/message.js";
+import {
+  ToolCommitBoundaryError,
+  type Registry,
+  type ToolExecutionContext,
+} from "../tools/registry.js";
+import { buildRuntimeToolResultInput } from "../engine/tool-result-builder.js";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION,
   assertRuntimeEvent,
@@ -653,8 +664,17 @@ export class RuntimeRun {
         );
       }
       const pendingIds = new Set(pendingToolCalls.map((pending) => pending.toolCall.id));
+      const nestedStarts = new Map(
+        events
+          .filter(
+            (event): event is RuntimeToolStartedEvent =>
+              event.kind === "tool.started" && event.data.origin === "code_mode",
+          )
+          .map((event) => [event.refs?.toolCallId, event]),
+      );
       const orphanedPrepared = preparedOperations.find(
-        (operation) => !pendingIds.has(operation.toolCallId),
+        (operation) =>
+          !pendingIds.has(operation.toolCallId) && !nestedStarts.has(operation.toolCallId),
       );
       if (orphanedPrepared) {
         throw new RuntimeEventStoreIntegrityError(
@@ -677,6 +697,45 @@ export class RuntimeRun {
         toolResults: syntheticToolResults,
         at: recoveryAt,
       });
+      for (const operation of preparedOperations) {
+        const source = nestedStarts.get(operation.toolCallId);
+        if (!source) continue;
+        const call = { id: operation.toolCallId, name: source.data.toolName, arguments: "{}" };
+        const content =
+          "工具执行状态未知：Code Mode 子调用已派发但结果未持久化；副作用可能已经发生，请先核查，禁止自动重放。";
+        const built = buildRuntimeToolResultInput(
+          call,
+          { toolCallId: call.id, output: content, isError: true },
+          content,
+          "interrupted",
+        );
+        syntheticToolResults.push({
+          ...source,
+          eventId: runtimeInterruptionRecoveryEventId("tool-result", [
+            sessionId,
+            runId,
+            "nested",
+            call.id,
+          ]),
+          at: recoveryAt,
+          partial: true,
+          visibility: "internal",
+          refs: { ...source.refs, toolCallId: call.id },
+          kind: "tool.result.recorded",
+          data: {
+            toolName: call.name,
+            origin: "code_mode",
+            status: "interrupted",
+            body: built.input.body,
+            projection: {
+              ...built.input.projection,
+              mode: "synthetic",
+              strategy: "runtime-interruption-recovery",
+            },
+            recovery: { classification: "indeterminate" },
+          },
+        });
+      }
       if (existingTerminal && syntheticToolResults.length === 0) continue;
       if (existingTerminal) {
         throw new RuntimeEventStoreIntegrityError(
@@ -1413,15 +1472,21 @@ export class RuntimeRun {
     toolCallId: string,
     toolName: string,
     argumentsJson: string,
+    context?: ToolExecutionContext,
   ): Promise<void> {
     this.assertOpen();
     const event: RuntimeToolStartedEvent = {
       ...this.base(createRuntimeEventId("tool-started"), true, "internal"),
-      refs: this.refs({ toolCallId }),
+      refs: {
+        ...this.refs({ toolCallId }),
+        ...(context?.parentToolCallId ? { parentToolCallId: context.parentToolCallId } : {}),
+        ...(context?.step ? { stepId: context.step.id } : {}),
+      },
       kind: "tool.started",
       data: {
         toolName,
         argumentsHash: createHash("sha256").update(argumentsJson).digest("hex"),
+        ...(context?.origin ? { origin: context.origin } : {}),
       },
     };
     const prepared = await this.writeCanonicalEvent((ownerFence) =>
@@ -1442,6 +1507,119 @@ export class RuntimeRun {
       );
     }
     this.toolOperations.set(toolCallId, prepared.operation);
+  }
+
+  async assertNoUnresolvedToolEffects(): Promise<void> {
+    const events = await this.store.readSession(this.sessionId);
+    const resolved = new Set(
+      events
+        .filter((event) => event.kind === "tool.recovery.resolved")
+        .map((event) => event.data.recoveryEventId),
+    );
+    const pending = events.filter(
+      (event) =>
+        event.kind === "tool.result.recorded" &&
+        event.data.recovery?.classification === "indeterminate" &&
+        !resolved.has(event.eventId),
+    );
+    if (pending.length > 0)
+      throw new Error(
+        `Unresolved tool effects require host evidence before model dispatch: ${pending.map((event) => event.refs?.toolCallId).join(", ")}`,
+      );
+  }
+
+  async resolveToolRecovery(input: {
+    readonly recoveryEventId: string;
+    readonly evidenceUri: string;
+    readonly summary: string;
+  }): Promise<void> {
+    this.assertOpen();
+    if (!input.evidenceUri.trim() || !input.summary.trim())
+      throw new Error("Tool recovery requires explicit evidence and a summary");
+    const events = await this.store.readSession(this.sessionId);
+    const recovery = events.find((event) => event.eventId === input.recoveryEventId);
+    if (
+      recovery?.kind !== "tool.result.recorded" ||
+      recovery.data.recovery?.classification !== "indeterminate"
+    )
+      throw new Error(
+        "Tool recovery resolution must reference an indeterminate fact in this Session",
+      );
+    if (
+      events.some(
+        (event) =>
+          event.kind === "tool.recovery.resolved" &&
+          event.data.recoveryEventId === input.recoveryEventId,
+      )
+    )
+      return;
+    await this.append({
+      ...this.base(createRuntimeEventId("tool-recovery-resolution"), true, "internal"),
+      kind: "tool.recovery.resolved",
+      data: { ...input },
+    });
+  }
+
+  /** Child observations settle durably before crossing back into the code sandbox. */
+  async executeNestedTool(
+    call: ToolCall,
+    registry: Registry,
+    context: ToolExecutionContext,
+  ): Promise<ToolResult> {
+    this.assertOpen();
+    if (!context.parentToolCallId) throw new Error("Nested tool requires a parentToolCallId");
+    let dispatched = false;
+    const nestedContext: ToolExecutionContext = {
+      ...context,
+      origin: "code_mode",
+      beforeDispatch: async (finalCall) => {
+        await this.recordToolStarted(
+          finalCall.id,
+          finalCall.name,
+          finalCall.arguments,
+          nestedContext,
+        );
+        dispatched = true;
+      },
+    };
+    const result = await runWithRuntimeToolCall(call.id, () =>
+      registry.execute(call, nestedContext),
+    );
+    const built = buildRuntimeToolResultInput(
+      call,
+      result,
+      result.output,
+      dispatched ? (result.isError ? "failed" : "succeeded") : "rejected",
+    );
+    const event: RuntimeToolResultRecordedEvent = {
+      ...this.base(createRuntimeEventId("nested-tool-result"), true, "internal"),
+      refs: {
+        ...this.refs({ toolCallId: call.id }),
+        toolCallId: call.id,
+        parentToolCallId: context.parentToolCallId,
+        ...(context.step ? { stepId: context.step.id } : {}),
+      },
+      kind: "tool.result.recorded",
+      data: {
+        toolName: call.name,
+        origin: "code_mode",
+        status: built.input.status,
+        body: built.input.body,
+        projection: built.input.projection,
+      },
+    };
+    try {
+      const operation = this.toolOperations.get(call.id);
+      if (dispatched && operation) {
+        const settled = await this.settleToolResult(event, operation.version);
+        this.toolOperations.set(call.id, settled.operation);
+      } else {
+        await this.append(event);
+      }
+    } catch (error) {
+      throw new ToolCommitBoundaryError("T2", error);
+    }
+    return result;
   }
 
   async recordTranscriptToolStarts(
@@ -1494,6 +1672,10 @@ export class RuntimeRun {
     const messages = events.map(projectRuntimeToolResultMessage);
     for (const event of events) {
       const operation = this.toolOperations.get(event.refs.toolCallId);
+      if (!operation && event.data.status === "rejected") {
+        await this.append(event);
+        continue;
+      }
       if (!operation || operation.state !== "prepared") {
         throw new Error(
           `Runtime transcript ToolResult ${event.refs.toolCallId} has no prepared operation`,
@@ -1834,15 +2016,21 @@ export class RuntimeRun {
     return persisted;
   }
 
-  private settleToolResult(event: RuntimeToolResultRecordedEvent, expectedVersion: number) {
-    return this.writeCanonicalEvent((ownerFence) =>
-      this.store.settleToolOperation({
-        resultEvent: event,
-        toolCallId: event.refs.toolCallId,
-        expectedVersion,
-        ownerFence,
-      }),
-    );
+  private async settleToolResult(event: RuntimeToolResultRecordedEvent, expectedVersion: number) {
+    try {
+      return await this.writeCanonicalEvent((ownerFence) =>
+        this.store.settleToolOperation({
+          resultEvent: event,
+          toolCallId: event.refs.toolCallId,
+          expectedVersion,
+          ownerFence,
+        }),
+      );
+    } catch (error) {
+      throw error instanceof ToolCommitBoundaryError
+        ? error
+        : new ToolCommitBoundaryError("T2", error);
+    }
   }
 
   /** Checks the live Session lease on both sides of every canonical write attempt. */
