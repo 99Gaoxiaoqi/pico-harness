@@ -32,6 +32,8 @@ function lineEndingStyleLabel(style: "lf" | "crlf" | "mixed"): string {
 export class ReadFileTool implements BaseTool {
   readonly nesting = "nestable" as const;
   readonly readOnly = true;
+  readonly recoveryMode = "replay_safe" as const;
+  readonly recoveryKey = "pico.read_file.v1";
   private readonly roots: WorkspaceRoots;
 
   constructor(workDirOrRoots: string | WorkspaceRoots) {

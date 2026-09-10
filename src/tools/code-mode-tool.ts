@@ -52,6 +52,7 @@ class CodeModeTool implements BaseTool {
       name: this.name(),
       description: [
         "Execute one bounded JavaScript orchestration cell over tools active in this Step.",
+        "Send exec alone in its assistant Step; do not combine it with other top-level calls.",
         "Call tools.<name>(object), using the tool names and input schemas shown alongside exec.",
         "Only tools explicitly enabled for nesting are callable; exec and direct-only tools are unavailable.",
         "Tool calls return their output as strings; use JSON.parse only when that tool returns JSON.",

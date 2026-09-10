@@ -52,6 +52,8 @@ const MAX_RESULTS = 100;
 export class GlobTool implements BaseTool {
   readonly nesting = "nestable" as const;
   readonly readOnly = true;
+  readonly recoveryMode = "replay_safe" as const;
+  readonly recoveryKey = "pico.glob.v1";
   private readonly roots: WorkspaceRoots;
 
   constructor(workDirOrRoots: string | WorkspaceRoots) {

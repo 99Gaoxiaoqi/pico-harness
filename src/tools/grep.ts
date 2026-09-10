@@ -480,6 +480,8 @@ function compileSearchPattern(pattern: string, caseSensitive: boolean): RegExp |
 export class GrepTool implements BaseTool {
   readonly nesting = "nestable" as const;
   readonly readOnly = true;
+  readonly recoveryMode = "replay_safe" as const;
+  readonly recoveryKey = "pico.grep.v1";
   private readonly roots: WorkspaceRoots;
 
   constructor(
