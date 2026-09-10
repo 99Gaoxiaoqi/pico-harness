@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { ChevronDown, ChevronUp, X } from "lucide-react";
 import {
   invokeWorkbarRuntime,
@@ -208,6 +208,7 @@ export function ConversationGraphBoard(props: {
   readonly onDetails: () => void;
 }) {
   const [graphs, setGraphs] = useState<readonly WorkbarGraphSummary[]>([]);
+  const hasGraph = useRef(false);
   const [detail, setDetail] = useState<WorkbarGraphDetail>();
   // Undefined follows the latest epoch; an explicit selection stays on history.
   const [selection, setSelection] = useState<string>();
@@ -234,6 +235,9 @@ export function ConversationGraphBoard(props: {
           }),
         );
         if (disposed) return;
+        // The list establishes history even if reading its detail subsequently fails.
+        hasGraph.current = list.length > 0;
+        setGraphs(list);
         const selected = list.find((graph) => graph.graphId === selection) ?? list.at(-1);
         const next = selected
           ? parseGraphDetail(
@@ -245,13 +249,15 @@ export function ConversationGraphBoard(props: {
             )
           : undefined;
         if (disposed) return;
-        setGraphs(list);
         setDetail(next);
         setError(undefined);
         poll = list.at(-1)?.phase === "open";
       } catch (cause) {
-        if (!disposed) setError(cause instanceof Error ? cause.message : String(cause));
-        poll = true;
+        // Linear conversations probe once for history; an unavailable Graph service
+        // alone must not create a board or start an endless retry loop.
+        poll = props.enabled || hasGraph.current;
+        if (!disposed)
+          setError(poll ? (cause instanceof Error ? cause.message : String(cause)) : undefined);
       } finally {
         if (!disposed) {
           setLoading(false);
@@ -271,7 +277,7 @@ export function ConversationGraphBoard(props: {
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [props.workspacePath, props.sessionId, props.enabled, props.refreshKey, selection, refresh]);
-  if (!props.enabled && !detail?.operators.length && graphs.length < 2 && !error) return null;
+  if (!props.enabled && graphs.length === 0) return null;
   const stop = stopState?.graphId === detail?.summary.graphId ? stopState : undefined;
   return (
     <GraphBoardView
