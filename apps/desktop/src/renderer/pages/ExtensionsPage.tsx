@@ -4,7 +4,6 @@ import { NavLink, Navigate, useParams } from "react-router-dom";
 import { Button, CapabilityList, InlineNotice } from "../components.js";
 import type { CapabilityView, McpServerDraft } from "../model.js";
 import { useRuntime } from "../runtime-context.js";
-import { workspaceDisplayName } from "../workspace-session.js";
 
 export function ExtensionsIndex() {
   const lastKind = window.localStorage.getItem("pico.extensions-kind") === "mcp" ? "mcp" : "skills";
@@ -53,13 +52,16 @@ export function CapabilityPage({
   const { data, actions, busy } = useRuntime();
   const [addingMcp, setAddingMcp] = useState(false);
   const scope = kind === "skills" ? data.skillScope : data.mcpScope;
+  useEffect(() => {
+    void actions.loadCapabilityScope(kind, undefined);
+  }, [actions, kind]);
   const config = {
     skills: {
       title: "Skills",
       eyebrow: "工作方式",
       detail: "Skills 告诉 Pico 如何稳定地完成特定类型的工作。",
       icon: WandSparkles,
-      items: data.skills,
+      items: data.skillScope.userItems,
       notice: data.notices.skills,
       empty: "没有发现 Skills",
     },
@@ -68,7 +70,7 @@ export function CapabilityPage({
       eyebrow: "外部能力",
       detail: "明确管理 Pico 可以访问的工具和数据来源。",
       icon: Network,
-      items: data.mcpServers,
+      items: data.mcpScope.userItems,
       notice: data.notices.mcp,
       empty: "没有发现 MCP 服务",
     },
@@ -105,29 +107,15 @@ export function CapabilityPage({
       <section className="panel capability-scope-picker" aria-label={`${config.title}作用域`}>
         <div>
           <strong>查看范围</strong>
-          <p>默认只显示用户级配置；选择项目后才读取该项目的有效配置。</p>
+          <p>
+            管理当前运行主机的用户级扩展，供所有项目使用。项目文件中的覆盖配置可通过高级诊断查看。
+          </p>
         </div>
-        <label>
-          <span className="sr-only">选择项目</span>
-          <select
-            className="select-control"
-            value={scope.workspacePath ?? ""}
-            disabled={busy === `capability-${kind}`}
-            onChange={(event) =>
-              void actions.loadCapabilityScope(kind, event.target.value || undefined)
-            }
-          >
-            <option value="">仅用户级</option>
-            {data.workspaces.map((workspace) => (
-              <option key={workspace.path} value={workspace.path}>
-                {workspaceDisplayName(workspace.path, workspace)}
-                {workspace.trusted ? "" : "（未信任）"}
-              </option>
-            ))}
-          </select>
-        </label>
+        <span>用户级</span>
       </section>
-      {config.notice && <InlineNotice tone="warning">{config.notice}</InlineNotice>}
+      {!scope.workspacePath && config.notice && (
+        <InlineNotice tone="warning">{config.notice}</InlineNotice>
+      )}
       {kind === "mcp" && addingMcp && (
         <McpAddForm
           busy={busy === "mcp-user-add"}

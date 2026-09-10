@@ -1,0 +1,15 @@
+{
+  "theme": "base",
+  "themeVariables": {
+    "fontFamily": "PingFang SC, Arial, sans-serif",
+    "fontSize": "18px",
+    "primaryColor": "#eef3f6",
+    "primaryTextColor": "#273641",
+    "primaryBorderColor": "#617d90",
+    "lineColor": "#617d90",
+    "secondaryColor": "#e9f3ee",
+    "tertiaryColor": "#faf8f4"
+  },
+  "flowchart": { "htmlLabels": false, "curve": "linear" },
+  "sequence": { "useMaxWidth": false }
+}

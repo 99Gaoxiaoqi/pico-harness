@@ -6,6 +6,7 @@ import { test } from "node:test";
 import type {} from "../../../apps/desktop/src/preload/global.js";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { MemoryRouter } from "react-router-dom";
 import { MemoryPage, nextMemoryTabIndex } from "../../../apps/desktop/src/renderer/MemoryPage.js";
 import { previewData } from "../../../apps/desktop/src/renderer/fixture.js";
 import {
@@ -15,6 +16,12 @@ import {
   type RuntimeStore,
 } from "../../../apps/desktop/src/renderer/runtime.js";
 Object.assign(globalThis, { React });
+
+function renderMemoryPage(props: React.ComponentProps<typeof MemoryPage>): string {
+  return renderToStaticMarkup(
+    React.createElement(MemoryRouter, null, React.createElement(MemoryPage, props)),
+  );
+}
 
 function previewRuntime(): RuntimeStore {
   return {
@@ -49,9 +56,7 @@ function previewRuntime(): RuntimeStore {
 }
 
 test("atomic memory page renders saved and archived items, scope, provenance and management actions", () => {
-  const html = renderToStaticMarkup(
-    React.createElement(MemoryPage, { runtime: previewRuntime(), forceNarrow: false }),
-  );
+  const html = renderMemoryPage({ runtime: previewRuntime(), forceNarrow: false });
   assert.match(html, /工作区记忆/);
   assert.match(html, /添加记忆/);
   assert.match(html, /aria-controls="memory-add-form"/);
@@ -66,17 +71,15 @@ test("atomic memory page renders saved and archived items, scope, provenance and
   assert.match(html, /aria-label="归档/);
   assert.match(html, /aria-label="恢复/);
   assert.match(html, /aria-label="删除记忆/);
-  assert.match(html, /自动提取长期信息/);
-  assert.match(html, /会话召回/);
+  assert.match(html, /href="\/settings\/memory"[^>]*>用户级记忆设置/);
+  assert.doesNotMatch(html, /自动提取长期信息/);
   assert.doesNotMatch(html, /永久遗忘|待审核|批准|拒绝|自动审核|当前用量|质量优先|滚动 24 小时/);
-  assert.equal((html.match(/type="checkbox"/g) ?? []).length, 3);
+  assert.equal((html.match(/type="checkbox"/g) ?? []).length, 0);
 });
 
 test("atomic memory narrow layout has two keyboard-operated tabs and handles empty and untrusted states", () => {
   const runtime = previewRuntime();
-  const html = renderToStaticMarkup(
-    React.createElement(MemoryPage, { runtime, forceNarrow: true }),
-  );
+  const html = renderMemoryPage({ runtime, forceNarrow: true });
   assert.match(html, /role="tablist"/);
   assert.equal((html.match(/role="tab"/g) ?? []).length, 2);
   assert.match(html, /role="tabpanel"/);
@@ -91,15 +94,10 @@ test("atomic memory narrow layout has two keyboard-operated tabs and handles emp
     ...runtime,
     data: { ...runtime.data, memory: { ...runtime.data.memory, facts: [] } },
   };
-  assert.match(
-    renderToStaticMarkup(React.createElement(MemoryPage, { runtime: empty, forceNarrow: false })),
-    /还没有已保存的记忆/,
-  );
+  assert.match(renderMemoryPage({ runtime: empty, forceNarrow: false }), /还没有已保存的记忆/);
   const untrusted: RuntimeStore = { ...runtime, data: { ...runtime.data, trusted: false } };
   assert.match(
-    renderToStaticMarkup(
-      React.createElement(MemoryPage, { runtime: untrusted, forceNarrow: false }),
-    ),
+    renderMemoryPage({ runtime: untrusted, forceNarrow: false }),
     /信任当前工作区后可管理记忆/,
   );
 });
@@ -110,7 +108,9 @@ test("memory route, notifications, conflict refetch and unavailable-source prese
     "utf8",
   );
   assert.match(app, /path="settings\/memory"/);
-  assert.match(app, /LegacySurfaceRedirect to="\/settings\/memory"/);
+  assert.match(app, /path="settings\/memory" element=\{<UserMemorySettingsPage \/>\}/);
+  assert.match(app, /path="memory"[\s\S]*?<WorkspaceRoute>\s*<MemoryPageRoute \/>/);
+  assert.doesNotMatch(app, /LegacySurfaceRedirect to="\/settings\/memory"/);
   assert.equal(isMemoryNotificationTopic("memory.changed"), true);
   assert.equal(isMemoryNotificationTopic("memory.forgotten"), true);
   assert.equal(isMemoryConflict(new RuntimeInvocationError("CONFLICT", "stale", true)), true);
@@ -145,9 +145,7 @@ test("memory route, notifications, conflict refetch and unavailable-source prese
       },
     },
   };
-  const html = renderToStaticMarkup(
-    React.createElement(MemoryPage, { runtime: degraded, forceNarrow: false }),
-  );
+  const html = renderMemoryPage({ runtime: degraded, forceNarrow: false });
   assert.match(html, /当前记忆服务不可用/);
   assert.match(html, /来源不可用/);
   assert.match(html, /已重新加载最新内容/);

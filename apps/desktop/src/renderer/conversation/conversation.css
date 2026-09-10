@@ -1630,13 +1630,6 @@
     box-shadow 140ms ease;
 }
 
-.conversation-composer:focus-within {
-  border-color: color-mix(in srgb, var(--conversation-focus) 62%, var(--conversation-line));
-  box-shadow:
-    0 0 0 2px color-mix(in srgb, var(--conversation-focus) 10%, transparent),
-    var(--conversation-composer-shadow);
-}
-
 .conversation-composer[data-status="running"] {
   border-color: color-mix(in srgb, var(--conversation-accent) 44%, var(--conversation-line));
 }
@@ -1659,6 +1652,10 @@
   font: inherit;
   font-size: 13px;
   line-height: 1.5;
+}
+
+.conversation-composer textarea:focus {
+  box-shadow: none;
 }
 
 .conversation-composer textarea::placeholder {

@@ -739,13 +739,17 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
             this.memoryService.resolveReview(canonical, params),
           ),
         getSettings: (params) =>
-          this.withTrustedMemory(params.workspacePath, (canonical) =>
-            this.memoryService.getSettings(canonical),
-          ),
+          params.workspacePath
+            ? this.withTrustedMemory(params.workspacePath, (canonical) =>
+                this.memoryService.getSettings(canonical),
+              )
+            : this.memoryService.getSettings(this.picoHome),
         updateSettings: (params) =>
-          this.withTrustedMemory(params.workspacePath, (canonical) =>
-            this.memoryService.updateSettings(canonical, params),
-          ),
+          params.workspacePath
+            ? this.withTrustedMemory(params.workspacePath, (canonical) =>
+                this.memoryService.updateSettings(canonical, params),
+              )
+            : this.memoryService.updateSettings(this.picoHome, params),
         previewContext: (params) =>
           this.withTrustedMemory(params.workspacePath, (canonical) =>
             this.memoryService.previewContext(canonical, params),

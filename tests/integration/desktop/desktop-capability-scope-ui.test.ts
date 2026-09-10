@@ -43,7 +43,7 @@ test("changes panel describes completed-run checkpoints instead of live workspac
   assert.doesNotMatch(source, /Pico 的写入会实时出现在这里/u);
 });
 
-test("启动只加载用户级能力，显式选择项目后才读取有效列表", async () => {
+test("扩展页保持用户级，项目有效能力仅由显式诊断入口加载", async () => {
   const source = await rendererSource("runtime.ts");
   const workspaceLoader = source.slice(
     source.indexOf("const loadWorkspace = useCallback"),
@@ -62,13 +62,12 @@ test("启动只加载用户级能力，显式选择项目后才读取有效列�
   assert.match(source, /该项目尚未信任[\s\S]*已继续显示用户级列表/u);
 
   const appSource = await rendererSource("pages/ExtensionsPage.tsx");
-  assert.match(appSource, /<option value="">仅用户级<\/option>/u);
-  assert.match(
-    appSource,
-    /actions\.loadCapabilityScope\(kind, event\.target\.value \|\| undefined\)/u,
-  );
+  assert.match(appSource, /<span>用户级<\/span>/u);
+  assert.match(appSource, /项目文件中的覆盖配置可通过高级诊断查看/u);
   const capabilityPage = appSource.slice(appSource.indexOf("export function CapabilityPage"));
   assert.doesNotMatch(capabilityPage, /actions\.selectWorkspace/u);
+  assert.match(capabilityPage, /actions\.loadCapabilityScope\(kind, undefined\)/u);
+  assert.doesNotMatch(capabilityPage, /actions\.loadCapabilityScope\(kind, event\.target\.value/u);
 });
 
 test("能力列表展示来源、只读、生效与遮蔽状态", () => {

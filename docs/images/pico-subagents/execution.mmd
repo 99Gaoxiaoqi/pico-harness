@@ -1,0 +1,18 @@
+sequenceDiagram
+    participant Main as 主智能体
+    participant Host as 配置型执行器
+    participant Child as 子会话 / AgentRuntime
+    participant Store as 持久事件存储
+    participant UI as 活动卡片
+    Main->>Host: agent_spawn：配置或 profile + task
+    Host->>Host: 校验配置与隔离条件
+    Host->>UI: 发布 running 活动
+    Host->>Host: 选择模型
+    Host->>Child: 新 Session + 新 Run + 受限工具
+    Child->>Store: 保存宿主 admission 身份记录
+    Child->>Child: 模型调用与工具执行
+    Child-->>UI: 活动状态和执行轨迹
+    Child-->>Host: 最终结果
+    Host->>Store: 保存父任务中的完成记录
+    Host-->>UI: completed 活动与耗时
+    Host-->>Main: 摘要、childSessionId、runId、可选补丁

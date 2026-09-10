@@ -19,6 +19,7 @@ import {
 } from "react-router-dom";
 import { AppShell } from "./AppShell.js";
 import { MemoryPage } from "./MemoryPage.js";
+import { UserMemorySettingsPage } from "./pages/UserMemorySettingsPage.js";
 import { ProviderPage } from "./ProviderPage.js";
 import { Button, EmptyState, InlineNotice, PreviewBadge } from "./components.js";
 import { legacySurfaceHref } from "./navigation.js";
@@ -128,17 +129,17 @@ function AppStateRouter() {
         <Route path="settings/workspaces" element={<WorkspaceSettingsPage />} />
         <Route path="settings/models" element={<ProviderPageRoute />} />
         <Route path="settings/subagents" element={<SubagentSettingsRoute />} />
+        <Route path="settings/memory" element={<UserMemorySettingsPage />} />
+        <Route path="settings/usage" element={<UsagePage />} />
+        <Route path="settings/system" element={<SystemSettingsPage />} />
         <Route
-          path="settings/memory"
+          path="memory"
           element={
             <WorkspaceRoute>
               <MemoryPageRoute />
             </WorkspaceRoute>
           }
         />
-        <Route path="settings/usage" element={<UsagePage />} />
-        <Route path="settings/system" element={<SystemSettingsPage />} />
-        <Route path="memory" element={<LegacySurfaceRedirect to="/settings/memory" />} />
         <Route path="skills" element={<LegacySurfaceRedirect to="/extensions/skills" />} />
         <Route path="mcp" element={<LegacySurfaceRedirect to="/extensions/mcp" />} />
         <Route path="providers" element={<LegacySurfaceRedirect to="/settings/models" />} />
