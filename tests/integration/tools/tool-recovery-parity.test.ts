@@ -169,6 +169,71 @@ test("T1保存最终完整脱敏参数和恢复合同，重启后probe读取审�
   await resumed.finish("completed");
 });
 
+test("重复JSON键在T1前拒绝且无副作用，独立对象中的同名键正常持久化", async (t) => {
+  const state = await scene(t);
+  const registry = new ToolRegistry();
+  const received: string[] = [];
+  registry.register(
+    fixture(async (args) => {
+      received.push(args);
+      return "done";
+    }),
+  );
+  const run = await RuntimeRun.start({ capability: state.session.runtimeEventCapability! });
+  const duplicated = '{"password":"private-value","password":"[REDACTED]"}';
+  const inputs = [
+    duplicated,
+    String.raw`{"pa\u0073sword":"private-value","password":"[REDACTED]"}`,
+    JSON.stringify({ body: duplicated }),
+    JSON.stringify({ bodies: [JSON.stringify({ body: duplicated })] }),
+    '{"box":{"password":"private-value"},"box":null}',
+  ];
+  for (const [index, argumentsJson] of inputs.entries()) {
+    await assert.rejects(
+      run.executeNestedTool(
+        { id: `duplicate-${index}`, name: "inspect_effect", arguments: argumentsJson },
+        registry,
+        {
+          step: registry.captureStep(`duplicate-step-${index}`, ["inspect_effect"]),
+          parentToolCallId: "exec-parent",
+        },
+      ),
+      (error) =>
+        error instanceof ToolCommitBoundaryError &&
+        error.phase === "T1" &&
+        /duplicate JSON keys/.test(error.message),
+    );
+  }
+  assert.deepEqual(received, [], "ambiguous audit must not dispatch physical work");
+  const events = await state.session.runtimeEventStore!.readRun(state.session.id, run.runId);
+  assert.equal(events.filter((event) => event.kind === "tool.started").length, 0);
+  assert.deepEqual(
+    await state.session.runtimeEventStore!.listRunToolOperations(state.session.id, run.runId),
+    [],
+  );
+  const safeArgs = JSON.stringify({
+    rows: [{ path: "one" }, { path: "two" }],
+    body: String.raw` { "text": "escaped quote: \" and colon: :", "nested": {"text":"safe"} } `,
+  });
+  await run.executeNestedTool(
+    { id: "valid", name: "inspect_effect", arguments: safeArgs },
+    registry,
+    {
+      step: registry.captureStep("valid-step", ["inspect_effect"]),
+      parentToolCallId: "exec-parent",
+    },
+  );
+  assert.deepEqual(received, [safeArgs]);
+  await run.finish("completed");
+  const session = await state.reopen();
+  const persisted = await session.runtimeEventStore!.readRun(session.id, run.runId);
+  const started = persisted.filter((event) => event.kind === "tool.started");
+  assert.equal(started.length, 1);
+  assert.equal(started[0]!.data.argumentsJson, safeArgs);
+  assert.equal(started[0]!.data.argumentsRedacted, false);
+  assert.ok(!JSON.stringify(persisted).includes("private-value"));
+});
+
 test("probe缺证据、策略变化、异常与取消均Park，只有稳定合同证据可追加解决事实", async (t) => {
   const { session } = await scene(t);
   const registry = new ToolRegistry();
