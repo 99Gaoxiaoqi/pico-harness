@@ -82,23 +82,12 @@ for (const stopViaBoard of [false, true])
                 }
                 if (turn === 1)
                   return toolCall("root-add", "update_agent_graph", {
-                    expected_revision: 0,
-                    operation_id: "add-cancellable-branches",
-                    commands: ["a", "b"].map((branch) => ({
-                      kind: "add",
-                      operator: {
-                        operator_id: `operator-${branch}`,
-                        generation: 1,
-                        role: "fixture",
-                        description: `Collect branch ${branch} evidence`,
-                        profile: { profile_id: "explore" },
-                        workspace: { kind: "shared" },
-                      },
-                      intent: {
-                        intent_id: `intent-${branch}`,
-                        instruction: "Wait for evidence.",
-                        input_record_ids: [],
-                      },
+                    operation: "add_work",
+                    add_work: ["a", "b"].map((branch) => ({
+                      profile_id: "explore",
+                      workspace: { kind: "shared" },
+                      instruction: `Collect branch ${branch} evidence. Wait for evidence.`,
+                      input_ids: [],
                     })),
                   });
                 assert.equal(turn, 2);

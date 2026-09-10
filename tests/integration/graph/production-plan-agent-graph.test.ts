@@ -106,8 +106,9 @@ for (const recoverAfterFinish of [false, true]) {
                 if (binding.kind === "operator") {
                   const activation = binding.getActivationContext();
                   assert.ok(activation);
-                  const index = activation.operatorId === "operator-a" ? 0 : 1;
-                  assert.equal(activation.operatorId, index === 0 ? "operator-a" : "operator-b");
+                  const branch = options.prompt.match(/Collect branch ([ab]) evidence/u)?.[1];
+                  assert.ok(branch, "operator must receive its scheduled branch instruction");
+                  const index = branch === "a" ? 0 : 1;
                   await gates[index]!.promise;
                   return turn === 1
                     ? toolCall(`output-${index}`, "agent_output", {
@@ -149,23 +150,12 @@ for (const recoverAfterFinish of [false, true]) {
                   );
                   if (turn === 1)
                     return toolCall("root-add", "update_agent_graph", {
-                      expected_revision: 0,
-                      operation_id: "add-plan-branches",
-                      commands: ["a", "b"].map((name) => ({
-                        kind: "add",
-                        operator: {
-                          operator_id: `operator-${name}`,
-                          generation: 1,
-                          role: "fixture",
-                          description: `Collect branch ${name} evidence`,
-                          profile: { profile_id: "explore" },
-                          workspace: { kind: "shared" },
-                        },
-                        intent: {
-                          intent_id: `intent-${name}`,
-                          instruction: "Return one agent_output.",
-                          input_record_ids: [],
-                        },
+                      operation: "add_work",
+                      add_work: ["a", "b"].map((name) => ({
+                        profile_id: "explore",
+                        workspace: { kind: "shared" },
+                        instruction: `Collect branch ${name} evidence. Return one agent_output.`,
+                        input_ids: [],
                       })),
                     });
                   assert.equal(turn, 2, "yield must end the initial approved Run");
@@ -204,14 +194,10 @@ for (const recoverAfterFinish of [false, true]) {
                 }
                 if (turn === 2)
                   return toolCall("finish-graph", "update_agent_graph", {
-                    expected_revision: 1,
-                    operation_id: "finish-plan-graph",
-                    commands: [
-                      {
-                        kind: "finish",
-                        selected_record_ids: view.results.records.map((record) => record.recordId),
-                      },
-                    ],
+                    operation: "finish",
+                    finish: {
+                      result_ids: view.results.records.map((record) => record.recordId),
+                    },
                   });
                 if (turn === 3) {
                   if (recoverAfterFinish) throw new Error("Simulated crash after Graph finish");

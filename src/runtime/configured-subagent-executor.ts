@@ -17,7 +17,7 @@ import type {
   ConfiguredSubagentExecutionResult,
 } from "../tools/configured-subagent-tools.js";
 import type { WorktreeSupervisor } from "../tasks/worktree-supervisor.js";
-import { AgentRuntime, type RunAgentCliDependencies } from "./agent-runtime.js";
+import type { AgentRuntime, RunAgentCliDependencies } from "./agent-runtime.js";
 import { currentRuntimeRun, currentRuntimeToolCallId } from "./runtime-run.js";
 
 /** Public off uses the route's native disabled token; omitted means model default. */
@@ -50,7 +50,8 @@ export interface CreateConfiguredSubagentExecutorOptions {
     | "approvalManager"
     | "toolResultRedactionSecrets"
   >;
-  readonly executeChild?: AgentRuntime["execute"];
+  /** The owning host supplies execution; this adapter does not construct its parent runtime. */
+  readonly executeChild: AgentRuntime["execute"];
   readonly catalog?: ConfiguredSubagentCatalogPort;
 }
 const continuingChildren = new Set<string>();
@@ -140,9 +141,7 @@ export function createConfiguredSubagentExecutor(
         ...(thinking === undefined ? {} : { thinkingEffort: thinking }),
         source: input.preset ? "profile" : "parent",
       });
-      const result = await (
-        options.executeChild ?? new AgentRuntime().execute.bind(new AgentRuntime())
-      )(
+      const result = await options.executeChild(
         {
           prompt: input.task,
           dir: workDir,

@@ -59,7 +59,6 @@
 - 本次对齐范围是 Maka 的子 Agent 配置与执行闭环，沿用 Pico 的 UI 组件、Provider 和存储/执行引擎。真实模型验收覆盖 local_read 前台与 Graph；implementation 的 worktree/补丁由确定性集成验证，未声称三类能力均跑过真实模型。
 - 来源与 Apache 许可归属保留于 `resources/licenses/THIRD_PARTY_NOTICES.md`。
 
-
 ## 真实桌面创建与调用复验（2026-09-08）
 
 通过 Computer Use 操作开发版 Electron 完成创建、保存、菜单选择、真实模型调用、独立子会话查看和持久结果回读。首次实测揭示并修复三处遗漏：

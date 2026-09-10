@@ -27,7 +27,11 @@ export interface CodeModeToolDefinition {
 
 export interface CodeModeDiagnostic {
   readonly kind:
-    "parse_error" | "execution_error" | "unknown_tool" | "limit_exceeded" | "tool_failure";
+    | "parse_error"
+    | "execution_error"
+    | "unknown_tool"
+    | "limit_exceeded"
+    | "tool_failure";
   readonly message: string;
 }
 

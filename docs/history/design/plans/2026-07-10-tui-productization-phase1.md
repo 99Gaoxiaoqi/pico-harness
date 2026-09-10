@@ -33,6 +33,7 @@
 ### 任务 1：真实中断链路
 
 **文件：**
+
 - 修改：`src/cli/run-agent.ts`
 - 修改：`src/engine/loop.ts`
 - 修改：`src/tui/repl.tsx`
@@ -78,6 +79,7 @@ git commit -m "fix(tui): 接通真实中断链路"
 ### 任务 2：焦点仲裁与审批状态更新
 
 **文件：**
+
 - 修改：`src/tui/app.tsx`
 - 修改：`src/tui/repl.tsx`
 - 修改：`src/tui/approval-panel.tsx`
@@ -122,6 +124,7 @@ git commit -m "fix(tui): 统一审批与输入焦点"
 ### 任务 3：统一 transcript 行模型
 
 **文件：**
+
 - 创建：`src/tui/transcript-layout.ts`
 - 修改：`src/tui/app.tsx`
 - 修改：`src/tui/message-list.tsx`
@@ -166,6 +169,7 @@ git commit -m "fix(tui): 修正长会话与中文滚动"
 ### 任务 4：命令真实性与 Session 启动语义
 
 **文件：**
+
 - 修改：`src/tui/repl.tsx`
 - 修改：`src/cli/main.ts`
 - 修改：`src/cli/run-agent.ts`
@@ -213,6 +217,7 @@ git commit -m "fix(cli): 接通模式权限与会话参数"
 ### 任务 5：命令目录与发现体验
 
 **文件：**
+
 - 修改：`src/input/command-registry.ts`
 - 修改：`src/input/markdown-command-loader.ts`
 - 修改：`src/input/slash-argument-hints.ts`
@@ -260,6 +265,7 @@ git commit -m "feat(tui): 统一命令发现与补全"
 ### 任务 6：Logo、状态行和结构化错误
 
 **文件：**
+
 - 修改：`src/tui/app.tsx`
 - 修改：`src/tui/message-list.tsx`
 - 修改：`src/tui/logo-panel.tsx`
@@ -307,6 +313,7 @@ git commit -m "feat(tui): 完成 Pico 产品外壳"
 ### 任务 7：集成验证与真实模型验收
 
 **文件：**
+
 - 创建或修改：`tests/e2e/tui-real-llm-e2e.test.ts`
 - 修改：`ROADMAP.md`
 

@@ -189,9 +189,8 @@ test("production operator assembly failure becomes terminal and wakes the root w
                         id: "finish-after-operator-failure",
                         name: "update_agent_graph",
                         arguments: JSON.stringify({
-                          expected_revision: 1,
-                          operation_id: "finish-after-operator-failure",
-                          commands: [{ kind: "finish", selected_record_ids: [] }],
+                          operation: "finish",
+                          finish: { result_ids: [] },
                         }),
                       },
                     ],

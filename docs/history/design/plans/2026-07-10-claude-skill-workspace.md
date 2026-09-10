@@ -27,6 +27,7 @@
 ### 任务 1（Agent A）：Skill 激活渲染核心
 
 **独占文件：**
+
 - 创建：`src/input/skill-activation.ts`
 - 修改：`src/input/markdown-command-loader.ts`
 - 创建：`tests/input/skill-activation.test.ts`
@@ -97,6 +98,7 @@ git commit -m "feat(skill): 增加显式技能激活语义"
 ### 任务 2（Agent B）：Workspace Roots 与文件工具边界
 
 **独占文件：**
+
 - 创建：`src/tools/workspace-roots.ts`
 - 修改：`src/tools/registry-impl.ts`
 - 修改：`src/tools/default-registry.ts`
@@ -133,7 +135,10 @@ it("rejects a workspace symlink that resolves outside", async () => {
 
 ```ts
 export class WorkspaceRoots {
-  static async create(primaryRoot: string, additionalRoots?: readonly string[]): Promise<WorkspaceRoots>;
+  static async create(
+    primaryRoot: string,
+    additionalRoots?: readonly string[],
+  ): Promise<WorkspaceRoots>;
   list(): readonly string[];
   async addDirectory(path: string): Promise<AddDirectoryResult>;
   resolve(path: string): string;
@@ -161,6 +166,7 @@ git commit -m "feat(workspace): 支持附加工作目录"
 ### 任务 3（Agent C）：Additional Directory 配置与命令
 
 **独占文件：**
+
 - 创建：`src/input/add-directory.ts`
 - 修改：`src/input/session-settings.ts`
 - 修改：`src/input/pico-command-registry.ts`
@@ -173,7 +179,10 @@ git commit -m "feat(workspace): 支持附加工作目录"
 ```ts
 it("adds a directory to the current session through /add-dir", async () => {
   const manager = new FakeAdditionalDirectoryManager();
-  const registry = await createPicoCommandRegistry({ ...defaults, additionalDirectoryManager: manager });
+  const registry = await createPicoCommandRegistry({
+    ...defaults,
+    additionalDirectoryManager: manager,
+  });
   const result = await processUserInput(`/add-dir ${outsideDir}`, { registry });
   expect(result.type).toBe("local-command");
   expect(manager.list()).toEqual([realOutsideDir]);
@@ -219,6 +228,7 @@ git commit -m "feat(workspace): 增加附加目录命令"
 ### 任务 4（主协调者）：共享接线与 TUI 可见事件
 
 **文件：**
+
 - 修改：`src/input/pico-command-registry.ts`
 - 修改：`src/input/types.ts`
 - 修改：`src/cli/main.ts`
@@ -297,6 +307,7 @@ registry.use(buildApprovalMiddleware(/* existing arguments */));
 ### 任务 5（主协调者）：真实模型 E2E、文档与收口
 
 **文件：**
+
 - 创建：`tests/e2e/skill-workspace-real-llm-e2e.test.ts`
 - 修改：`docs/tui-claude-code-parity.md`
 - 修改：`ROADMAP.md`
@@ -325,6 +336,7 @@ it.runIf(process.env.RUN_LLM_E2E === "1")(
 ```
 
 临时 Skill 要求创建 marker；显式调用后模型必须按 Skill 操作；未授权外部目录失败且没有审批；`/add-dir` 后同一路径进入正常写审批。
+
 - [x] **步骤 2：运行 mock 全量验证**：`npm test`
 - [x] **步骤 3：运行质量验证**：`npm run lint && npm run typecheck && npm run build && npm audit --audit-level=high`
 - [x] **步骤 4：运行真实模型验证**：`RUN_LLM_E2E=1 npm run test:e2e -- tests/e2e/skill-workspace-real-llm-e2e.test.ts`
