@@ -341,6 +341,7 @@ test("abnormal parallel batch reports settled and synthetic ToolResults once aft
     getFileSideEffects: (call) => ({ kind: "exact", paths: [`${call.name}.fixture`] }),
     getAccesses: () => ToolAccesses.none(),
     async execute(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult> {
+      await context?.beforeDispatch?.(call);
       markStarted();
       await bothStarted.promise;
       if (call.name === "fast_fixture") {
@@ -492,7 +493,8 @@ test("subagent parallel ToolResults commit in Provider order and publish the com
     isReadOnlyTool: () => true,
     getFileSideEffects: () => NO_FILE_SIDE_EFFECTS,
     getAccesses: () => ToolAccesses.none(),
-    async execute(call: ToolCall): Promise<ToolResult> {
+    async execute(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult> {
+      await context?.beforeDispatch?.(call);
       startedCount++;
       if (startedCount === 2) bothStarted.resolve();
       await bothStarted.promise;
@@ -1274,7 +1276,14 @@ function outputTool(name: string, output: string): BaseTool {
       description: "Returns one deterministic fixture.",
       inputSchema: {
         type: "object",
-        properties: {},
+        properties:
+          name === "delegate_task"
+            ? {
+                goal: { type: "string" },
+                mode: { enum: ["worker"] },
+                completion_policy: { enum: ["required"] },
+              }
+            : {},
         additionalProperties: false,
       },
     }),
