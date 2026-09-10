@@ -8,7 +8,10 @@ import { createRuntimeEventId } from "../../../src/storage/runtime-event-store-c
 import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import { LoadToolsTool, renderGroupCatalog } from "../../../src/tools/load-tools.js";
 import { SearchToolsTool } from "../../../src/tools/search-tools.js";
-import { ToolDisclosure } from "../../../src/tools/tool-disclosure.js";
+import {
+  ToolDisclosure,
+  TOOL_SEARCH_MAX_SCHEMA_CHARS,
+} from "../../../src/tools/tool-disclosure.js";
 import {
   AUTOMATION_TOOL_ALLOWLIST,
   filterAutomationAllowedTools,
@@ -99,74 +102,146 @@ test("CORE_TOOLS 从 surface 派生且 getTier 兼容", () => {
   assert.equal(getTier("web_search"), "extended");
 });
 
-test("ToolDisclosure 组级激活：pickForLLM = always 组 ∪ loaded 组", () => {
+test("Turn 激活单调累积、Step 冻结、Run 绑定上限与下一 Turn 重置", async () => {
   const disclosure = new ToolDisclosure();
   const allTools = [
     def("read_file"),
-    def("write_file"),
+    def("search_tools"),
     def("fetch_url"),
     def("web_search"),
-    def("task_list"),
     def("mcp__db__query"),
   ];
-  // 初始：只可见 core（always 组）
-  assert.deepEqual(
-    disclosure.pickForLLM(allTools).map((t) => t.name),
-    ["read_file", "write_file"],
-  );
-  // 组级激活 web 组
-  disclosure.discloseGroup("web", ["fetch_url", "web_search"]);
-  assert.deepEqual(
-    disclosure.pickForLLM(allTools).map((t) => t.name),
-    ["read_file", "write_file", "fetch_url", "web_search"],
-  );
-  assert.deepEqual(disclosure.getLoadedGroups(), ["web"]);
-  // 单工具兜底（MCP 动态工具）
-  disclosure.discloseTools(["mcp__db__query"]);
-  assert.deepEqual(
-    disclosure.pickForLLM(allTools).map((t) => t.name),
-    ["read_file", "write_file", "fetch_url", "web_search", "mcp__db__query"],
-  );
+  const turn = disclosure.beginTurn(allTools);
+  const search = new SearchToolsTool(() => allTools, disclosure);
+  const initial = turn.snapshotForStep();
+  allTools[0]!.description = "mutated";
+  allTools.push(def("late_tool", "database"));
+  await disclosure.runInTurn(turn, async () => {
+    assert.deepEqual(initial.toolNames, ["read_file", "search_tools"]);
+    assert.notEqual(initial.tools[0]!.description, "mutated");
+    assert.ok(Object.isFrozen(initial.tools[0]!.inputSchema));
+    assert.throws(() => {
+      initial.tools[0]!.description = "changed";
+    }, TypeError);
+    assert.deepEqual(JSON.parse(await search.execute('{"query":"select:late_tool"}')), {
+      activated: [],
+    });
+    assert.deepEqual(JSON.parse(await search.execute('{"query":"select:web_search"}')), {
+      activated: ["web_search"],
+    });
+    assert.deepEqual(initial.toolNames, ["read_file", "search_tools"], "本 Step 不因搜索而改变");
+    const second = turn.snapshotForStep();
+    assert.deepEqual(second.toolNames, ["read_file", "search_tools", "web_search"]);
+    assert.deepEqual(JSON.parse(await search.execute('{"query":"select:mcp__db__query"}')), {
+      activated: ["mcp__db__query"],
+    });
+    assert.deepEqual(turn.snapshotForStep().toolNames, [
+      "mcp__db__query",
+      "read_file",
+      "search_tools",
+      "web_search",
+    ]);
+    assert.deepEqual(JSON.parse(await search.execute('{"query":"select:web_search"}')), {
+      activated: [],
+    });
+  });
+  disclosure.endTurn(turn);
+  assert.throws(() => turn.snapshotForStep(), /已结束/);
+  const next = disclosure.beginTurn(allTools);
+  assert.deepEqual(next.snapshotForStep().toolNames, ["read_file", "search_tools"]);
+  assert.deepEqual(initial.toolNames, ["read_file", "search_tools"], "旧快照在 Turn 结束后仍不变");
+  disclosure.endTurn(next);
 });
 
-test("ToolDisclosure durable 重播：seedFromEvents 恢复组加载状态", () => {
+test("共享发现连接器并发执行时由不同 Turn owner 隔离", async () => {
+  const disclosure = new ToolDisclosure();
+  const bound = [def("read_file"), def("fetch_url"), def("web_search")];
+  const first = disclosure.beginTurn(bound);
+  const second = disclosure.beginTurn(bound);
+  const search = new SearchToolsTool(bound, disclosure);
+  let release!: () => void;
+  const barrier = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const pending = disclosure.runInTurn(first, async () => {
+    await barrier;
+    await search.execute('{"query":"select:fetch_url"}');
+    assert.deepEqual(disclosure.getDisclosedTools(), ["fetch_url"]);
+  });
+  await disclosure.runInTurn(second, async () => {
+    await search.execute('{"query":"select:web_search"}');
+    release();
+    await pending;
+    assert.deepEqual(disclosure.getDisclosedTools(), ["web_search"]);
+  });
+  disclosure.endTurn(first);
+  assert.deepEqual(second.snapshotForStep().toolNames, ["read_file", "web_search"]);
+  disclosure.endTurn(second);
+  await assert.rejects(() => search.execute('{"query":"web"}'), /Turn 作用域/);
+});
+
+test("search_tools 目录来自 Run 绑定且限制名称数量与字符，不包含工具 schema", () => {
+  const disclosure = new ToolDisclosure();
+  const search = new SearchToolsTool(() => {
+    throw new Error("不得递归读取 registry");
+  }, disclosure);
+  const bound = [
+    search.definition(),
+    ...Array.from({ length: 150 }, (_, i) => def(`mcp_bound_${i}`, "SECRET_DESCRIPTION")),
+  ];
+  const turn = disclosure.beginTurn(bound);
+  const description = turn.snapshotForStep().tools[0]!.description;
+  assert.match(description, /当前 Run 可发现工具/);
+  assert.match(description, /mcp_bound_/);
+  assert.match(description, /另有 50 个工具未列出/);
+  assert.doesNotMatch(description, /SECRET_DESCRIPTION|inputSchema/);
+  assert.ok(description.length < 9000);
+  bound.push(def("mcp_late"));
+  assert.doesNotMatch(turn.snapshotForStep().tools[0]!.description, /mcp_late/);
+});
+
+test("宿主 baseline 与 Turn 搜索激活分离，并受绑定上限约束", () => {
+  const disclosure = new ToolDisclosure();
+  disclosure.setBaselineTools(["web_search", "unbound"]);
+  const first = disclosure.beginTurn([def("read_file"), def("web_search"), def("fetch_url")]);
+  first.discloseTools(["fetch_url"]);
+  disclosure.setBaselineTools(["fetch_url"]);
+  assert.deepEqual(first.snapshotForStep().toolNames, ["fetch_url", "read_file", "web_search"]);
+  disclosure.endTurn(first);
+  const next = disclosure.beginTurn([def("read_file"), def("web_search"), def("fetch_url")]);
+  assert.deepEqual(next.snapshotForStep().toolNames, ["fetch_url", "read_file"]);
+});
+
+test("历史 tool.group.loaded 仅作审计，不恢复新 Turn 激活", () => {
   const disclosure = new ToolDisclosure();
   disclosure.seedFromEvents([
-    { kind: "run.started", data: {} },
     { kind: "tool.group.loaded", data: { groupId: "web", toolNames: ["fetch_url", "web_search"] } },
-    {
-      kind: "tool.group.loaded",
-      data: { groupId: "background-task", toolNames: ["task_list", "task_output", "task_stop"] },
-    },
-    // 畸形事件（无效 data）不得崩溃
     { kind: "tool.group.loaded", data: { groupId: 42, toolNames: null } },
-    { kind: "tool.group.loaded" },
   ]);
-  assert.deepEqual(disclosure.getLoadedGroups(), ["web", "background-task"]);
-  const allTools = [def("fetch_url"), def("web_search"), def("task_list"), def("read_file")];
-  assert.deepEqual(
-    disclosure.pickForLLM(allTools).map((t) => t.name),
-    ["fetch_url", "web_search", "task_list", "read_file"],
-  );
+  const turn = disclosure.beginTurn([def("read_file"), def("fetch_url"), def("web_search")]);
+  assert.deepEqual(turn.getLoadedGroups(), []);
+  assert.deepEqual(turn.snapshotForStep().toolNames, ["read_file"]);
 });
 
-test("LoadToolsTool 枚举激活：命中即 discloseGroup + 回调", async () => {
+test("LoadToolsTool 兼容组激活：受 Run 绑定限制并保留审计回调", async () => {
   const disclosure = new ToolDisclosure();
-  const groups = getAvailableDeferredGroups("desktop");
+  const turn = disclosure.beginTurn([def("fetch_url"), def("web_search")]);
   const loaded: Array<[string, string[]]> = [];
-  const tool = new LoadToolsTool(groups, disclosure, undefined, {
+  const tool = new LoadToolsTool(getAvailableDeferredGroups("desktop"), disclosure, undefined, {
     onGroupLoaded: (id, names) => loaded.push([id, [...names]]),
   });
-  const result = await tool.execute(JSON.stringify({ group: "web" }));
-  assert.match(result, /已加载/);
-  assert.match(result, /fetch_url/);
-  assert.deepEqual(disclosure.getLoadedGroups(), ["web"]);
-  assert.deepEqual(loaded, [["web", ["fetch_url", "web_search"]]]);
-
-  // 未知组报错并列出可用组
-  await assert.rejects(() => tool.execute(JSON.stringify({ group: "nope" })), /未知工具组 "nope"/);
-  // 参数解析失败
-  await assert.rejects(() => tool.execute("not json"), /参数解析失败/);
+  await disclosure.runInTurn(turn, async () => {
+    assert.deepEqual(JSON.parse(await tool.execute('{"group":"web"}')), {
+      activated: ["fetch_url", "web_search"],
+    });
+    assert.deepEqual(disclosure.getLoadedGroups(), ["web"]);
+    assert.deepEqual(loaded, [["web", ["fetch_url", "web_search"]]]);
+    await tool.execute('{"group":"web"}');
+    assert.equal(loaded.length, 1, "重复调用不制造新的激活事件");
+    await assert.rejects(() => tool.execute('{"group":"nope"}'), /未知工具组/);
+    await assert.rejects(() => tool.execute("not json"), /参数解析失败/);
+  });
+  disclosure.endTurn(turn);
 });
 
 test("LoadToolsTool description 渲染组目录", () => {
@@ -196,20 +271,61 @@ test("background 允许 memory 组，隔离 headless 仍不暴露", () => {
   assert.ok(background.includes("web"));
 });
 
-test("search_tools 只检索无预定义组的动态工具", async () => {
+test("search_tools 覆盖原有分组与动态工具，结果仅包含名称", async () => {
   const disclosure = new ToolDisclosure();
   const allTools = [
     def("read_file"),
     def("web_search"),
     def("mcp__db__query", "Query the postgres database with SQL"),
-    def("mcp__fs__list_dir", "List directory contents on the filesystem"),
   ];
   const tool = new SearchToolsTool(() => allTools, disclosure);
-  const result = await tool.execute(JSON.stringify({ query: "数据库 database" }));
-  assert.match(result, /mcp__db__query/);
-  assert.doesNotMatch(result, /web_search/);
-  assert.doesNotMatch(result, /read_file/);
-  assert.doesNotMatch(result, /mcp__fs__list_dir/);
+  const turn = disclosure.beginTurn(allTools);
+  await disclosure.runInTurn(turn, async () => {
+    assert.deepEqual(JSON.parse(await tool.execute('{"query":"database"}')), {
+      activated: ["mcp__db__query"],
+    });
+    assert.deepEqual(JSON.parse(await tool.execute('{"query":"select:web_search"}')), {
+      activated: ["web_search"],
+    });
+    assert.deepEqual(JSON.parse(await tool.execute('{"query":"select:read_file"}')), {
+      activated: [],
+    });
+    assert.deepEqual(JSON.parse(await tool.execute('{"query":"select:missing"}')), {
+      activated: [],
+    });
+    for (const limit of [0, 21, 1.5, "2"]) {
+      await assert.rejects(() => tool.execute(JSON.stringify({ query: "web", limit })), /limit/);
+    }
+  });
+});
+
+test("工具发现限制数量与 schema 预算，load_tools 不能绕过预算", async () => {
+  const disclosure = new ToolDisclosure();
+  const many = Array.from({ length: 25 }, (_, i) => def("mcp_database_" + i, "database query"));
+  const oversized = def("fetch_url", "x".repeat(TOOL_SEARCH_MAX_SCHEMA_CHARS));
+  const half = def("web_search", "web " + "x".repeat(40_000));
+  const other = def("mcp_large", "large " + "x".repeat(40_000));
+  const bound = [...many, oversized, half, other];
+  const turn = disclosure.beginTurn(bound);
+  const search = new SearchToolsTool(bound, disclosure);
+  await disclosure.runInTurn(turn, async () => {
+    assert.equal(JSON.parse(await search.execute('{"query":"database"}')).activated.length, 8);
+    assert.equal(
+      JSON.parse(await search.execute('{"query":"database","limit":20}')).activated.length,
+      17,
+    );
+    const oversizedResult = JSON.parse(await search.execute('{"query":"select:fetch_url"}'));
+    assert.deepEqual(oversizedResult.activated, []);
+    assert.equal(oversizedResult.blocked.reason, "schema_too_large");
+    const combined = turn.discloseTools(["web_search", "mcp_large"]);
+    assert.deepEqual(combined.activated, ["web_search"]);
+    assert.equal(combined.blocked?.reason, "schema_budget_exhausted");
+    const loader = new LoadToolsTool(getAvailableDeferredGroups("desktop"), disclosure);
+    const loadResult = JSON.parse(await loader.execute('{"group":"web"}'));
+    assert.deepEqual(loadResult.activated, []);
+    assert.equal(loadResult.blocked.reason, "schema_too_large");
+    assert.equal(turn.snapshotForStep().toolNames.includes("fetch_url"), false);
+  });
 });
 
 test("TF-IDF 检索：select 前缀精确选择 + 关键词排名", () => {
@@ -239,7 +355,7 @@ test("Plan 模式工具面从 surface 单源导出", () => {
 
 // ============ 对抗性审查修复验证 ============
 
-test("durable 往返：store append tool.group.loaded → readSessionEntries → seedFromEvents 恢复", async () => {
+test("审计往返：tool.group.loaded 落盘但不恢复工具激活", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-tool-surface-durable-"));
   try {
     const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "state") });
@@ -262,12 +378,12 @@ test("durable 往返：store append tool.group.loaded → readSessionEntries →
     assert.equal(loaded.length, 1, "事件必须真实落盘（审查 C1：曾被 assert 层硬拒）");
     const disclosure = new ToolDisclosure();
     disclosure.seedFromEvents(entries.map((entry) => entry.event as { kind: string }));
-    assert.deepEqual(disclosure.getLoadedGroups(), ["web"]);
+    assert.deepEqual(disclosure.getLoadedGroups(), []);
     assert.deepEqual(
       disclosure
         .pickForLLM([def("fetch_url"), def("web_search"), def("read_file")])
         .map((t) => t.name),
-      ["fetch_url", "web_search", "read_file"],
+      ["read_file"],
     );
     store.close();
   } finally {
@@ -275,39 +391,44 @@ test("durable 往返：store append tool.group.loaded → readSessionEntries →
   }
 });
 
-test("幻影组防御：组成员未注册时 load_tools 拒绝假承诺（审查 C2）", async () => {
+test("load_tools 拒绝未绑定组成员，实时注册不能扩大 Run 能力", async () => {
   const disclosure = new ToolDisclosure();
-  const groups = getAvailableDeferredGroups("desktop");
-  // registry 里只有 web 组成员，graph 组工具未注册（非 graph 模式会话的现实）
-  const registered = () => ["fetch_url", "web_search", "read_file"];
-  const tool = new LoadToolsTool(groups, disclosure, registered);
-  await assert.rejects(() => tool.execute(JSON.stringify({ group: "graph" })), /在当前环境不可用/);
-  assert.deepEqual(disclosure.getLoadedGroups(), [], "拒绝后不得留下任何加载状态");
-  // 部分注册：只披露真实存在的成员
-  const partial = new LoadToolsTool(groups, disclosure, () => ["fetch_url", "read_file"]);
-  const result = await partial.execute(JSON.stringify({ group: "web" }));
-  assert.match(result, /fetch_url/);
-  assert.doesNotMatch(result, /web_search/);
+  const turn = disclosure.beginTurn([def("read_file"), def("fetch_url")]);
+  const tool = new LoadToolsTool(getAvailableDeferredGroups("desktop"), disclosure, () => [
+    "read_file",
+    "fetch_url",
+    "web_search",
+  ]);
+  await disclosure.runInTurn(turn, async () => {
+    await assert.rejects(() => tool.execute('{"group":"graph"}'), /在当前环境不可用/);
+    assert.deepEqual(turn.getLoadedGroups(), []);
+    assert.deepEqual(JSON.parse(await tool.execute('{"group":"web"}')), {
+      activated: ["fetch_url"],
+    });
+  });
 });
 
-test("重复 schema 防御：search_tools 候选排除连接器与协议工具（审查 H1）", async () => {
+test("search_tools 候选排除连接器与协议工具", async () => {
   const disclosure = new ToolDisclosure();
-  const allTools = [
-    def("read_file"),
-    def("load_tools", "Load tool groups on demand"),
-    def("search_tools", "Search and activate dynamic tools"),
-    def("submit_plan"),
-    def("mcp__db__query", "Query the database"),
-  ];
-  const tool = new SearchToolsTool(() => allTools, disclosure);
-  // 搜 "load"/"tools"/"plan" 都不得把连接器或协议工具披露进集合
-  for (const query of ["load", "tools 工具", "plan 计划", "select:load_tools"]) {
-    await tool.execute(JSON.stringify({ query }));
-  }
-  const disclosed = disclosure.getDisclosedTools();
-  assert.equal(disclosed.includes("load_tools"), false);
-  assert.equal(disclosed.includes("search_tools"), false);
-  assert.equal(disclosed.includes("submit_plan"), false);
+  const bound = [
+    "read_file",
+    "load_tools",
+    "search_tools",
+    "submit_plan",
+    "update_plan",
+    "cancel_plan",
+  ].map((name) => def(name));
+  const turn = disclosure.beginTurn(bound);
+  const search = new SearchToolsTool(bound, disclosure);
+  await disclosure.runInTurn(turn, async () => {
+    for (const name of bound.map((tool) => tool.name)) {
+      assert.deepEqual(
+        JSON.parse(await search.execute(JSON.stringify({ query: "select:" + name }))),
+        { activated: [] },
+      );
+    }
+    assert.deepEqual(disclosure.getDisclosedTools(), []);
+  });
 });
 
 test("headless fail-closed：新工具入组但未显式声明 headless supported 即被拒（审查 H1）", () => {
@@ -320,14 +441,16 @@ test("headless fail-closed：新工具入组但未显式声明 headless supporte
   assert.equal(isToolSupportedForHost("hypothetical_new_tool", "background"), true);
 });
 
-test("seedFromEvents 的 stale groupId 防御：组被删除后旧事件不重播", () => {
+test("seedFromEvents 不影响正在执行的 Turn 激活", () => {
   const disclosure = new ToolDisclosure();
-  disclosure.seedFromEvents([
-    { kind: "tool.group.loaded", data: { groupId: "web", toolNames: ["fetch_url"] } },
-    // "legacy-group" 不在当前目录
-    { kind: "tool.group.loaded", data: { groupId: "legacy-group", toolNames: ["old_tool"] } },
-  ]);
-  assert.deepEqual(disclosure.getLoadedGroups(), ["web"]);
+  const turn = disclosure.beginTurn([def("web_search"), def("fetch_url")]);
+  disclosure.runInTurn(turn, () => {
+    disclosure.discloseTools(["web_search"]);
+    disclosure.seedFromEvents([
+      { kind: "tool.group.loaded", data: { groupId: "web", toolNames: ["fetch_url"] } },
+    ]);
+    assert.deepEqual(disclosure.getDisclosedTools(), ["web_search"]);
+  });
 });
 
 test("检索质量：标点 token 不污染 + 名称命中按内容排序（审查 M1/M3/M4）", () => {
