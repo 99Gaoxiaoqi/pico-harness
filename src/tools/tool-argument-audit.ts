@@ -9,6 +9,32 @@ function sensitiveField(key: string): boolean {
   );
 }
 
+/** Scan already-valid JSON before trusting its lossy JSON.parse representation. */
+function assertNoDuplicateJsonKeys(source: string): void {
+  const containers: (Set<string> | undefined)[] = [];
+  let stringToken = "";
+  // Quoted strings are consumed whole, so punctuation inside values is inert.
+  for (const match of source.matchAll(/"(?:\\[\s\S]|[^"\\])*"|[{}[\]:]/g)) {
+    const token = match[0];
+    if (token === "{" || token === "[") {
+      containers.push(token === "{" ? new Set<string>() : undefined);
+      if (containers.length > 129)
+        throw new Error("Tool arguments exceed the durable audit nesting limit");
+    } else if (token === "}" || token === "]") {
+      containers.pop();
+    } else if (token === ":") {
+      // In valid JSON only object keys are followed by a colon. Decode escapes
+      // before comparing, including keys such as password and pa\u0073sword.
+      const keys = containers.at(-1)!;
+      const key = JSON.parse(stringToken) as string;
+      if (keys.has(key)) throw new Error("Tool arguments contain duplicate JSON keys");
+      keys.add(key);
+    } else {
+      stringToken = token;
+    }
+  }
+}
+
 /** Redact a separate JSON audit; the caller retains the untouched execution arguments. */
 export function buildToolArgumentAudit(
   argumentsJson: string,
@@ -38,6 +64,9 @@ export function buildToolArgumentAudit(
       } catch {
         return redactLiteral(value);
       }
+      // Keep this outside the parse catch: ambiguous embedded JSON must reject
+      // the call, not fall back to persisting its unredacted source string.
+      assertNoDuplicateJsonKeys(value);
       if ((typeof embedded === "object" && embedded !== null) || typeof embedded === "string") {
         const transformed = visit(embedded, depth + 1);
         if (JSON.stringify(transformed) !== JSON.stringify(embedded)) {
@@ -61,7 +90,9 @@ export function buildToolArgumentAudit(
     }
     return value;
   };
-  const audited = visit(JSON.parse(argumentsJson), 0);
+  const parsed: unknown = JSON.parse(argumentsJson);
+  assertNoDuplicateJsonKeys(argumentsJson);
+  const audited = visit(parsed, 0);
   const auditJson = redacted ? JSON.stringify(audited) : argumentsJson;
   if (Buffer.byteLength(auditJson, "utf8") > MAX_TOOL_ARGUMENT_AUDIT_BYTES) {
     throw new Error("Redacted tool arguments exceed the 1 MiB durable audit limit");
