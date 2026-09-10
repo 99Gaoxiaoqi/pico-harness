@@ -80,6 +80,10 @@ export class ToolRegistry implements Registry {
     ToolExecutionStep,
     { callCount: number; exclusiveToolName?: string }
   >();
+  private readonly recoveryProbes = new WeakMap<
+    BaseTool,
+    { source: NonNullable<BaseTool["reconcile"]>; bound: NonNullable<BaseTool["reconcile"]> }
+  >();
   private readonly validators = new WeakMap<object, ValidateFunction>();
   private readonly schemaValidator = new Ajv({ strict: false, allErrors: true });
   private readonly schemaValidator2019 = new Ajv2019({ strict: false, allErrors: true });
@@ -149,10 +153,15 @@ export class ToolRegistry implements Registry {
   }
 
   private recoveryPolicyFor(tool?: BaseTool): ToolRecoveryPolicy {
+    let probe = tool ? this.recoveryProbes.get(tool) : undefined;
+    if (tool?.reconcile && probe?.source !== tool.reconcile) {
+      probe = { source: tool.reconcile, bound: tool.reconcile.bind(tool) };
+      this.recoveryProbes.set(tool, probe);
+    }
     return Object.freeze({
       mode: tool?.recoveryMode ?? "never_auto_retry",
       ...(tool?.recoveryKey ? { key: tool.recoveryKey } : {}),
-      ...(tool?.reconcile ? { reconcile: tool.reconcile.bind(tool) } : {}),
+      ...(tool?.reconcile ? { reconcile: probe!.bound } : {}),
     });
   }
 
