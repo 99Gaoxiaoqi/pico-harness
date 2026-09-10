@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { EngineRuntimeRun } from "../engine/runtime-port.js";
-import { redactToolResult } from "../engine/tool-result-builder.js";
+import { buildRuntimeToolResultInput, redactToolResult } from "../engine/tool-result-builder.js";
+import type { HookService } from "../hooks/service.js";
 import type { ToolDefinition } from "../schema/message.js";
 import { executeCodeCell } from "./code-mode.js";
 import {
@@ -16,6 +17,7 @@ export interface CodeModeToolOptions {
   /** Production hosts supply this callback; missing live authority fails closed. */
   readonly getRuntimeRun?: () => EngineRuntimeRun | undefined;
   readonly redactionSecrets?: readonly string[];
+  readonly hookService?: Pick<HookService, "dispatch">;
 }
 
 /** Direct engine embeddings may omit durable authority; production must provide it. */
@@ -104,10 +106,54 @@ class CodeModeTool implements BaseTool {
           step,
           origin: "code_mode",
           sanitizeResult: (result) => redactToolResult(result, this.redactionSecrets),
+          onCommittedResult: async (finalCall, envelope) => {
+            await this.options.hookService?.dispatch(
+              envelope.status === "succeeded" ? "PostToolUse" : "PostToolUseFailure",
+              {
+                tool_name: finalCall.name,
+                tool_input: JSON.parse(finalCall.arguments),
+                tool_call_id: finalCall.id,
+                tool_result: structuredClone(envelope),
+              },
+            );
+          },
         };
         const childResult = runtimeRun
           ? await runtimeRun.executeNestedTool(call, registry, childContext)
-          : redactToolResult(await registry.execute(call, childContext), this.redactionSecrets);
+          : await (async () => {
+              // Explicit in-memory embeddings retain the same bounded notification contract.
+              let finalCall = call;
+              let dispatched = false;
+              const result = redactToolResult(
+                await registry.execute(call, {
+                  ...childContext,
+                  beforeDispatch: async (validatedCall) => {
+                    finalCall = validatedCall;
+                    dispatched = true;
+                  },
+                }),
+                this.redactionSecrets,
+              );
+              const built = buildRuntimeToolResultInput(
+                finalCall,
+                result,
+                result.output,
+                !dispatched ? "rejected" : result.isError ? "failed" : "succeeded",
+              );
+              try {
+                await childContext.onCommittedResult?.(finalCall, built.envelope);
+              } catch (error) {
+                // A notification failure must not invite the cell to retry physical work.
+                throw new ToolCommitBoundaryError("T2", error);
+              }
+              return built.input.body.storage === "inline"
+                ? {
+                    ...result,
+                    output: built.input.body.content,
+                    isError: built.input.status !== "succeeded",
+                  }
+                : result;
+            })();
         if (childResult.isError) throw new Error(childResult.output);
         return childResult.output;
       },

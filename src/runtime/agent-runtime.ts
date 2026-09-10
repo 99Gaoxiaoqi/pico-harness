@@ -1712,6 +1712,7 @@ export async function executeAgentRuntime(
           registry,
           getRuntimeRun: currentRuntimeRun,
           redactionSecrets: dependencies.toolResultRedactionSecrets,
+          hookService: activeHookService,
         }),
       );
       baselineToolNames.push("exec");
