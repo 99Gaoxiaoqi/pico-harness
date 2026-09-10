@@ -144,6 +144,7 @@ export class ConfiguredAgentListTool implements BaseTool {
   }
 }
 export class ConfiguredAgentSpawnTool implements BaseTool {
+  readonly executionMode = "orchestrator" as const;
   readonly fileSideEffects = NO_FILE_SIDE_EFFECTS;
   constructor(private readonly options: ConfiguredSubagentToolsOptions) {}
   name() {

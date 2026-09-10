@@ -1707,7 +1707,13 @@ export async function executeAgentRuntime(
       sessionTaskAuthority,
     );
     if (collaborationMode() !== "plan") {
-      registry.register(createCodeModeTool({ registry, getRuntimeRun: currentRuntimeRun }));
+      registry.register(
+        createCodeModeTool({
+          registry,
+          getRuntimeRun: currentRuntimeRun,
+          redactionSecrets: dependencies.toolResultRedactionSecrets,
+        }),
+      );
       baselineToolNames.push("exec");
     }
     if (dependencies.agentGraph?.kind === "root") {

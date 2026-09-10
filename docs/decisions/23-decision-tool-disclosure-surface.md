@@ -1,5 +1,7 @@
 # 决策记录 23：工具披露重构——surface 组级激活 + durable 重播 + TF-IDF（2026-08-18）
 
+> 工具激活生命周期和执行边界已被[决策 30](./30-decision-maka-tool-runtime.md)取代：激活按 Turn 隔离，旧加载事件仅作审计；当前 Step 未披露的工具拒绝执行。下文保留为历史决策。
+
 > 提交：`9ce4775b`（主体）+ `3ac4488e`/`b6989475`（两轮对抗审查收尾）。
 > 本文取代 `13-progressive-disclosure.md` 中**工具披露章节**的描述（13 号其余
 > 披露机制——Skill/ToolResult/Repo Map/explore_repo——仍然有效，其头部横幅有
