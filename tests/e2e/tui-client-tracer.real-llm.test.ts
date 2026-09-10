@@ -15,6 +15,8 @@ import { resolvePicoHome } from "../../src/paths/pico-paths.js";
 import { ClientSessionRuntime } from "../../src/tui/client-session-runtime.js";
 import { createClientCommandRegistry, processClientInput } from "../../src/tui/client-commands.js";
 import { TuiReporter } from "../../src/tui/tui-reporter.js";
+import { redactProviderErrorText } from "../../src/provider/error-redaction.js";
+import { sendTuiTurn } from "./helpers/tui-turn.js";
 
 /**
  * 3-D Phase 3 E2E：TUI 客户端 tracer 挂真实 daemon + 真实模型完整回合。
@@ -49,6 +51,11 @@ realModelTest(
     await mkdir(workspaceSeed, { recursive: true });
     const workspaceDir = await realpath(workspaceSeed);
     const userConfig = (await new UserConfigStore({ picoHome: resolvePicoHome() }).read()).config;
+    const secrets = Object.values(userConfig.providers).flatMap((provider) =>
+      [provider.apiKey].filter(
+        (value): value is string => typeof value === "string" && value.length > 0,
+      ),
+    );
     await new UserConfigStore({ picoHome }).write(userConfig, {
       expectedRevision: EMPTY_USER_CONFIG_REVISION,
     });
@@ -84,6 +91,7 @@ realModelTest(
         DAEMON_CLEANUP_RPC_TIMEOUT_MS,
       );
       await stopScenarioDaemon(client, picoHome);
+      runtime.dispose();
       client.close();
       if (previousPicoHome === undefined) delete process.env.PICO_HOME;
       else process.env.PICO_HOME = previousPicoHome;
@@ -97,32 +105,24 @@ realModelTest(
     const registry = createClientCommandRegistry({ runtime, workspacePath: workspaceDir });
     await runtime.start();
 
-    // 完整回合：真实模型流式 + 终态 + 对账。resend 可能在 P1-2 窗口留下双回合
-    // （首 send 已达 daemon、响应丢失、重发被排队为第二回合）——所有 idle-only
-    // 断言前必须排水到 idle（对抗评审 P0：丢弃 waitForCondition 布尔曾让 141s
-    // 首败不可见）。
-    let accepted = await runtime.sendText("请只回复两个字符：ok");
-    if (!accepted) accepted = await runtime.sendText("请只回复两个字符：ok");
-    assert.ok(accepted, "session.send 应被接受（容忍一次残留 socket 竞态重试）");
-    assert.ok(runtime.activeSessionId);
-
-    const started = await waitForCondition(() => runningStates.includes(true), 120_000);
-    assert.ok(started, "run.started 应驱动 running=true");
-    const settled = await waitForCondition(() => runningStates.includes(false), 180_000);
-    assert.ok(settled, "真实回合应终态");
-    const answered = await waitForCondition(
-      () =>
-        reporter
-          .getProjection()
-          .entries.some(({ entry }) => entry.kind === "assistant" && entry.content.includes("ok")),
-      120_000,
+    // 验证真实传输/投影闭环；模型可能回复“好的”，不能把措辞当链路故障。
+    // sendTuiTurn 要求新 Run 成功终态和本轮新回复，不重发非幂等请求。
+    assert.ok(
+      await sendTuiTurn({
+        runtime,
+        reporter,
+        client,
+        workspacePath: workspaceDir,
+        text: "请只回复两个字符：ok",
+        redact: (text) => redactProviderErrorText(text, secrets),
+      }),
     );
-    assert.ok(answered, "transcript 对账后投影应含真实模型回复（含 ok）");
+    assert.ok(runtime.activeSessionId);
+    assert.ok(runningStates.includes(true), "run.started 应驱动 running=true");
+    assert.ok(runningStates.includes(false), "真实回合应终态");
 
-    // slash 真实链路：/rename 持久化 + /status 往返。排水等待必须断言（resend
-    // 排队的第二回合可能仍在跑，否则 /rename 被 availability 门拦下）。
-    const idleBeforeSlash = await waitForCondition(() => !runtime.running, 180_000);
-    assert.ok(idleBeforeSlash, "slash 前 run 应回到 idle（含 resend 双回合排水）");
+    // slash 真实链路：/rename 持久化 + /status 往返。
+    assert.equal(runtime.running, false, "slash 前 run 应回到 idle");
     const rename = await processClientInput("/rename e2e-真实回合", registry, runtime);
     assert.match(String(rename.result?.message), /e2e-真实回合/);
     const renamed = await client.request("session.get", {

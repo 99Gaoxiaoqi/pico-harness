@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { test } from "node:test";
+import { ApprovalManager } from "../../src/approval/manager.js";
 import { SilentReporter } from "../../src/engine/reporter.js";
 import type { LLMProvider } from "../../src/provider/interface.js";
 import type { ModelRoute } from "../../src/provider/model-router.js";
@@ -98,12 +99,16 @@ realModelTest(
     );
     const systems: string[] = [];
     const runtime = new AgentRuntime();
+    const approvalManager = new ApprovalManager();
+    let writeApprovals = 0;
     const planned = await runtime.execute(
       planningRequest(
         sandbox,
         model,
         [
           "Read TASK.txt and produce a one-step implementation plan.",
+          "Include in the plan: mark the step in_progress, write the exact requested file, read it back to verify, then mark the step completed.",
+          "For submit_plan and every later update_plan call, omit optional operationId so the runtime assigns a distinct operation identity. Preserve this instruction in the plan overview.",
           "Do not create canary.txt before approval. Finish by calling submit_plan exactly once.",
         ].join("\n"),
         "new",
@@ -127,33 +132,59 @@ realModelTest(
         execution: {
           ...modelRequest(model),
           sessionSelection: { mode: "resume", sessionId: sandbox.sessionId },
-          interactionMode: "yolo",
           allowedTools: ["read_file", "write_file", "update_plan", "cancel_plan"],
         },
       },
-      runtimeHost(sandbox, model, { systems }),
+      {
+        ...runtimeHost(sandbox, model, { systems }),
+        approvalManager,
+        approvalNotifier: (notice) => {
+          const args = JSON.parse(notice.args) as { path?: string; content?: string };
+          const allowed =
+            notice.toolName === "write_file" &&
+            typeof args.path === "string" &&
+            resolve(sandbox.workDir, args.path) === join(sandbox.workDir, "canary.txt") &&
+            args.content === `${canary}\n`;
+          if (allowed) writeApprovals++;
+          approvalManager.resolveApproval(
+            notice.taskId,
+            allowed,
+            "E2E permits only the approved canary write",
+          );
+        },
+      },
     );
 
-    assert.equal(executed.handoff, undefined);
-    assert.equal(await readFile(join(sandbox.workDir, "canary.txt"), "utf8"), `${canary}\n`);
     const events = await readRuntimeEvents(sandbox);
+    const diagnostic = planEventSummary(events, model.config.apiKey);
+    assert.equal(executed.handoff, undefined, diagnostic);
+    const output = await readFile(join(sandbox.workDir, "canary.txt"), "utf8").catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return undefined;
+        throw error;
+      },
+    );
+    assert.equal(output, `${canary}\n`, diagnostic);
+    assert.equal(writeApprovals, 1, diagnostic);
     const approvedIndex = events.findIndex((event) => event.kind === "plan.approved");
     const firstWriteIndex = events.findIndex(
       (event) => event.kind === "tool.started" && event.data.toolName === "write_file",
     );
-    assert.ok(approvedIndex >= 0 && firstWriteIndex > approvedIndex);
-    assert.equal(events.filter((event) => event.kind === "run.started").length, 2);
-    assert.equal(events.filter((event) => event.kind === "run.terminal").length, 2);
+    assert.ok(approvedIndex >= 0 && firstWriteIndex > approvedIndex, diagnostic);
+    assert.equal(events.filter((event) => event.kind === "run.started").length, 2, diagnostic);
+    assert.equal(events.filter((event) => event.kind === "run.terminal").length, 2, diagnostic);
     assert.equal(
       events.some((event) => event.kind === "plan.execution.started"),
       true,
+      diagnostic,
     );
     assert.equal(
       events.some((event) => event.kind === "plan.execution.completed"),
       true,
+      diagnostic,
     );
-    assert.equal(systems.filter(isPlanSystemPrompt).length >= 1, true);
-    assert.equal(isPlanSystemPrompt(systems.at(-1) ?? ""), false);
+    assert.equal(systems.filter(isPlanSystemPrompt).length >= 1, true, diagnostic);
+    assert.equal(isPlanSystemPrompt(systems.at(-1) ?? ""), false, diagnostic);
     assertMainModelSucceeded(events);
   },
 );
@@ -194,7 +225,7 @@ realModelTest(
     );
     assert.equal(answered, 1);
     const firstEvents = await readRuntimeEvents(sandbox);
-    assert.equal(first.handoff?.revision, 1, planEventSummary(firstEvents));
+    assert.equal(first.handoff?.revision, 1, planEventSummary(firstEvents, model.config.apiKey));
 
     const revisionOperationId = `revise:${randomUUID()}`;
     const revisionRequest = await runtime.requestPlanRevision({
@@ -417,13 +448,19 @@ function assertMainModelSucceeded(events: readonly RuntimeEvent[]): void {
   );
 }
 
-function planEventSummary(events: readonly RuntimeEvent[]): string {
+function planEventSummary(events: readonly RuntimeEvent[], secret: string): string {
+  const text = (value: string) => value.replaceAll(secret, "[redacted]").slice(0, 900);
   const summary: Record<string, unknown>[] = [];
   for (const event of events) {
     if (event.kind === "tool.started") {
       summary.push({ kind: event.kind, tool: event.data.toolName });
     } else if (event.kind === "tool.result.recorded") {
-      summary.push({ kind: event.kind, tool: event.data.toolName, status: event.data.status });
+      summary.push({
+        kind: event.kind,
+        tool: event.data.toolName,
+        status: event.data.status,
+        ...(event.data.status !== "succeeded" ? { error: text(event.data.projection.text) } : {}),
+      });
     } else if (event.kind === "model.call.settled") {
       summary.push({ kind: event.kind, status: event.data.status });
     } else if (event.kind === "run.terminal") {
@@ -431,9 +468,11 @@ function planEventSummary(events: readonly RuntimeEvent[]): string {
     } else if (event.kind === "message.committed") {
       const tools = event.data.message.toolCalls?.map((call) => call.name) ?? [];
       if (tools.length > 0) summary.push({ kind: event.kind, tools });
+      else if (event.data.message.role === "assistant")
+        summary.push({ kind: event.kind, text: text(event.data.message.content) });
     }
   }
-  return JSON.stringify(summary);
+  return JSON.stringify(summary.slice(-60));
 }
 
 async function workspaceHashes(workDir: string): Promise<Record<string, string>> {

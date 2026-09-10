@@ -240,10 +240,7 @@ realModelTest(
       );
       const claims = graphHost.store.listActivationClaims(graph.graphId);
       assert.equal(claims.length, 2, "two independent explore operators must run once each");
-      assert.deepEqual(claims.map((claim) => claim.operatorId).sort(), [
-        "operator-a",
-        "operator-b",
-      ]);
+      assert.equal(new Set(claims.map((claim) => claim.operatorId)).size, 2);
       const records = graphHost.store.listRecordRefs(graph.graphId);
       const schedule = new SqliteAgentGraphControlStoreAdapter(graphHost.store).getScheduleState(
         graph.graphId,
@@ -254,22 +251,26 @@ realModelTest(
       );
       assert.deepEqual(
         schedule.operators.map((operator) => operator.profileSnapshot.profileId),
-        ["explore", "explore"],
+        ["Explore", "Explore"],
       );
       assert.ok(
         schedule.intents.every((intent) => intent.inputRefs.length === 0),
         "both operators must be independently schedulable",
       );
+      const observedBranches: number[] = [];
       for (const claim of claims) {
+        const intent = schedule.intents.find((candidate) => candidate.intentId === claim.intentId);
+        assert.ok(intent);
+        const branch = /branch-([ab])\.txt/u.exec(intent.instruction)?.[1];
+        assert.ok(branch, "each branch intent must identify its assigned evidence file");
+        const branchIndex = branch === "a" ? 0 : 1;
+        observedBranches.push(branchIndex);
         sessions.add(claim.targetSessionId);
         const operatorEvents = await readEvents(workspacePath, picoHome, claim.targetSessionId);
         const outputs = operatorEvents.filter((event) => event.kind === "agent.output");
         assert.equal(outputs.length, 1);
         assert.equal(outputs[0]?.data.payload.status, "success");
-        assert.equal(
-          outputs[0]?.data.payload.output,
-          evidence[claim.operatorId === "operator-a" ? 0 : 1],
-        );
+        assert.equal(outputs[0]?.data.payload.output, evidence[branchIndex]);
         assert.equal(outputs[0]?.runId, claim.targetRunId);
         assert.ok(
           operatorEvents.some(
@@ -283,6 +284,11 @@ realModelTest(
           ),
         );
       }
+      assert.deepEqual(
+        observedBranches.sort(),
+        [0, 1],
+        "each evidence branch must run exactly once",
+      );
       const events = await readEvents(workspacePath, picoHome, sessionId);
       for (const kind of ["plan.proposed", "plan.execution.started", "plan.execution.completed"]) {
         assert.equal(
@@ -344,15 +350,47 @@ realModelTest(
           "root must inspect both durable evidence outputs before finishing",
         );
     } catch (error) {
-      const events = await readEvents(workspacePath, picoHome, sessionId);
-      const diagnostic = events
-        .filter((event) => event.kind === "tool.result.recorded" || event.kind === "run.terminal")
-        .map((event) =>
-          event.kind === "tool.result.recorded"
-            ? { tool: event.data.toolName, result: event.data.projection.text.slice(0, 900) }
-            : { terminal: event.data },
+      const text = (value: string) =>
+        value.replaceAll(model.config.apiKey, "[redacted]").slice(0, 900);
+      for (const run of runtime?.listRuns() ?? []) if (run.sessionId) sessions.add(run.sessionId);
+      for (const id of sessions) {
+        const events = await readEvents(workspacePath, picoHome, id);
+        const diagnostic = events.flatMap((event): Record<string, unknown>[] => {
+          if (event.kind === "tool.result.recorded")
+            return [
+              {
+                tool: event.data.toolName,
+                status: event.data.status,
+                ...(event.data.status !== "succeeded"
+                  ? { error: text(event.data.projection.text) }
+                  : {}),
+              },
+            ];
+          if (event.kind === "tool.started") return [{ started: event.data.toolName }];
+          if (event.kind === "run.terminal") return [{ terminal: event.data.status }];
+          if (event.kind === "model.call.started" || event.kind === "model.call.settled")
+            return [
+              {
+                kind: event.kind,
+                ...(event.kind === "model.call.settled" ? { status: event.data.status } : {}),
+              },
+            ];
+          if (event.kind === "message.committed" && event.data.message.role === "assistant")
+            return [
+              {
+                tools: event.data.message.toolCalls?.map((call) => call.name) ?? [],
+                text: text(event.data.message.content),
+              },
+            ];
+          return [];
+        });
+        console.error(
+          JSON.stringify({ sessionId: id, events: diagnostic.slice(-60) }).replaceAll(
+            model.config.apiKey,
+            "[redacted]",
+          ),
         );
-      console.error(JSON.stringify(diagnostic).replaceAll(model.config.apiKey, "[redacted]"));
+      }
       throw error;
     } finally {
       for (const run of runtime?.listRuns() ?? []) {
@@ -376,8 +414,8 @@ realModelTest(
 
 function planningTask(): string {
   const overview = [
-    "After approval use exactly two independent explore Graph operators: operator-a reads branch-a.txt; operator-b reads branch-b.txt. Use generation 1, shared workspace, intent IDs read-a/read-b and empty input_record_ids. Root must not read branch files itself.",
-    "Mark only step-a in_progress. Add both operators with update_agent_graph at expected_revision 0. Instruct each to read_file and agent_output success with output exactly the file line, without newline or commentary. Then yield_agent_graph immediately.",
+    "After approval use exactly two independent explore Graph operators: one reads branch-a.txt; the other reads branch-b.txt. Root must not read branch files itself. Operator and intent IDs are allocated by the runtime; never invent them.",
+    "Mark only step-a in_progress. For all Plan tools omit optional operationId so the runtime assigns a distinct identity. Call view_agent_graph, then add both branches in one update_agent_graph call with operation=add_work and add_work containing exactly two entries with profile_id=Explore (the case-sensitive catalog ID), instruction, input_ids=[] and workspace={kind:shared}. Omit target_kind, subagent_id, agent_id, operator_id and expected_revision. Instruct each to read_file its assigned branch file once and call agent_output once with status=success and output exactly the file line, without newline or commentary. Then yield_agent_graph immediately.",
     "On wake view_agent_graph first. Yield again if work remains; never add or reactivate operators. When both outputs are successful and claims terminal, finish Graph selecting both record IDs. Only then update_plan step-a and step-b completed. Never cancel or submit another plan.",
   ].join("\n");
   return [
@@ -389,7 +427,7 @@ function planningTask(): string {
         steps: ["a", "b"].map((branch) => ({
           id: `step-${branch}`,
           title: `Investigate branch ${branch}`,
-          description: `Delegate branch-${branch}.txt to operator-${branch}. Mark completed only after both branch outputs are collected and Graph is finished.`,
+          description: `Delegate branch-${branch}.txt to one independent explore operator. Mark completed only after both branch outputs are collected and Graph is finished.`,
         })),
       },
       null,

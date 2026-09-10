@@ -129,4 +129,3 @@ Markdown 命令只从明确的 command 根目录加载，跳过 `resources`、`r
 ## 测试策略
 
 所有行为遵循 TDD。纯函数和状态流使用 Vitest；Ink 组件使用 `ink-testing-library`；关键交互增加真实 PTY smoke，覆盖审批抢键、Ctrl+C、40x12 resize、CJK/Emoji、长回复滚动和工具聚合。功能完成后运行 typecheck、lint、完整单元测试、TUI smoke，并使用真实 LLM 验证一次中断/审批/工具流程。
-

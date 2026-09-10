@@ -187,7 +187,7 @@ test("desktop workspace unregister closes and evicts its cached Graph store", as
   }
 });
 
-test("desktop persists linear run boundaries but never an orphan Graph root boundary", async () => {
+test("desktop advances completed Graph transcripts without persisting internal run boundaries", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-desktop-graph-run-boundary-"));
   const workspace = join(root, "workspace");
   const picoHome = join(root, "pico-home");
@@ -199,6 +199,8 @@ test("desktop persists linear run boundaries but never an orphan Graph root boun
   const runtime = new WorkspaceRuntimeService({ env, execute: async () => ({ ok: true }) });
   let linearSessionId = "";
   let linearAdvances = 0;
+  let graphSessionId = "";
+  let graphAdvances = 0;
   let resolvePersisted!: () => void;
   const persisted = new Promise<void>((resolve) => {
     resolvePersisted = resolve;
@@ -209,6 +211,7 @@ test("desktop persists linear run boundaries but never an orphan Graph root boun
     env,
     onTranscriptAdvanced: (_workspacePath, sessionId) => {
       if (sessionId === linearSessionId && ++linearAdvances === 2) resolvePersisted();
+      if (sessionId === graphSessionId) graphAdvances++;
     },
   });
   let closed = false;
@@ -216,6 +219,7 @@ test("desktop persists linear run boundaries but never an orphan Graph root boun
     const graphSession = (await desktop.handle(
       createRuntimeRequest("session.create", { workspacePath: canonical }),
     )) as { session: { sessionId: string } };
+    graphSessionId = graphSession.session.sessionId;
     const linearSession = (await desktop.handle(
       createRuntimeRequest("session.create", { workspacePath: canonical }),
     )) as { session: { sessionId: string } };
@@ -242,6 +246,11 @@ test("desktop persists linear run boundaries but never an orphan Graph root boun
     await persisted;
     await desktop.close();
     closed = true;
+    assert.equal(
+      graphAdvances,
+      1,
+      "Graph completion must notify the current durable transcript watermark",
+    );
 
     const reloaded = new SqliteRuntimeEventStore({
       storageRoot: resolvePicoPaths(canonical, { picoHome }).workspace.root,

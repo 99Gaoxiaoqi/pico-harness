@@ -2113,6 +2113,8 @@ export async function executeAgentRuntime(
         (subagentModelRouter && parentModelRouteId
           ? createConfiguredSubagentExecutor({
               workDir,
+              executeChild: (input, childDependencies) =>
+                new AgentRuntime().execute(input, childDependencies),
               catalog: dependencies.configuredSubagentCatalog,
               modelRouter: subagentModelRouter,
               parentModelRouteId,

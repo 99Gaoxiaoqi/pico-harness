@@ -1512,7 +1512,7 @@ test("headless policy denial defaults to the compatible terminal outcome", async
   });
 });
 
-test("incident-mode policy denial remains recoverable after normal completion", async (context) => {
+test("incident mode recovers from an undisclosed tool rejection without counting a safety denial", async (context) => {
   const fixture = await createFixture(context, "policy");
   await configureFixture(fixture, "secret-canary-policy");
   let calls = 0;
@@ -1526,9 +1526,13 @@ test("incident-mode policy denial remains recoverable after normal completion", 
     {
       env: {},
       providerFactory: () => ({
-        async generate() {
+        async generate(messages, tools) {
           calls++;
           if (calls === 1) {
+            assert.deepEqual(
+              tools?.map((tool) => tool.name),
+              ["submit_plan"],
+            );
             return assistant("", { promptTokens: 7, completionTokens: 3 }, [
               {
                 id: "write-1",
@@ -1537,6 +1541,8 @@ test("incident-mode policy denial remains recoverable after normal completion", 
               },
             ]);
           }
+          const rejection = messages.find((message) => message.toolCallId === "write-1");
+          assert.match(rejection?.content ?? "", /not available in this Step snapshot/u);
           return assistant("", { promptTokens: 5, completionTokens: 2 }, [
             {
               id: "submit-after-policy-denial",
@@ -1557,28 +1563,27 @@ test("incident-mode policy denial remains recoverable after normal completion", 
   assert.equal(outcome.result.status, "completed");
   assert.equal(outcome.result.handoff?.kind, "plan_handoff");
   assert.equal(outcome.result.error, null);
-  assert.deepEqual(outcome.result.policyDenials, {
-    total: 1,
-    byCode: {
-      plan_mode: 1,
-      hardline: 0,
-      hook: 0,
-      approval: 0,
-    },
-    byReasonKind: policyReasonCounts({ plan_mode: 1 }),
-    first: {
-      source: "safety",
-      code: "plan_mode",
-      reasonKind: "plan_mode",
-      toolName: "write_file",
-    },
-    last: {
-      source: "safety",
-      code: "plan_mode",
-      reasonKind: "plan_mode",
-      toolName: "write_file",
-    },
+  // Snapshot validation precedes safety middleware; policyDenials counts only policy decisions.
+  assert.equal(outcome.result.policyDenials, undefined);
+  assert.equal(Object.hasOwn(outcome.result, "policyDenials"), false);
+  await assert.rejects(readFile(join(fixture.workspace, "blocked.txt")), { code: "ENOENT" });
+  const store = new SqliteRuntimeEventStore({
+    storageRoot: resolvePicoPaths(fixture.workspace, { picoHome: fixture.picoHome }).workspace.root,
   });
+  try {
+    const events = await store.readSession("session-policy-block");
+    const rejected = events.find(
+      (event) => event.kind === "tool.result.recorded" && event.refs?.toolCallId === "write-1",
+    );
+    assert.equal(rejected?.kind, "tool.result.recorded");
+    if (rejected?.kind === "tool.result.recorded") assert.equal(rejected.data.status, "rejected");
+    assert.equal(
+      events.some((event) => event.kind === "tool.started" && event.refs?.toolCallId === "write-1"),
+      false,
+    );
+  } finally {
+    store.close();
+  }
   assert.deepEqual(outcome.result.usage, {
     promptTokens: 12,
     completionTokens: 5,

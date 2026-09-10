@@ -83,26 +83,13 @@ async function runProductionRootWakeScenario(
             if (!rootWake) {
               if (turn === 1) {
                 return toolCall("root-update", "update_agent_graph", {
-                  expected_revision: 0,
-                  operation_id: "deterministic-add-operator",
-                  commands: [
+                  operation: "add_work",
+                  add_work: [
                     {
-                      kind: "add",
-                      operator: {
-                        operator_id: "deterministic-operator",
-                        generation: 1,
-                        role: "fixture",
-                        description: "commit one deterministic output",
-                        profile: {
-                          profile_id: "explore",
-                        },
-                        workspace: { kind: "shared" },
-                      },
-                      intent: {
-                        intent_id: "deterministic-intent",
-                        instruction: "Call agent_output exactly once.",
-                        input_record_ids: [],
-                      },
+                      profile_id: "explore",
+                      workspace: { kind: "shared" },
+                      instruction: "Call agent_output exactly once.",
+                      input_ids: [],
                     },
                   ],
                 });
@@ -150,9 +137,8 @@ async function runProductionRootWakeScenario(
               );
               const recordIds = view.results.records.map((record) => record.recordId);
               return toolCall("root-finish", "update_agent_graph", {
-                expected_revision: 1,
-                operation_id: "deterministic-finish-graph",
-                commands: [{ kind: "finish", selected_record_ids: recordIds }],
+                operation: "finish",
+                finish: { result_ids: recordIds },
               });
             }
             return assistant("root wake complete");

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { test } from "node:test";
 import type { ApprovalNotice } from "../../src/approval/manager.js";
@@ -21,6 +21,8 @@ import {
 import { createClientCommandRegistry, processClientInput } from "../../src/tui/client-commands.js";
 import { TuiReporter } from "../../src/tui/tui-reporter.js";
 import { diffStatFromRewindPreview } from "../../src/tui/rewind-client-bridge.js";
+import { redactProviderErrorText } from "../../src/provider/error-redaction.js";
+import { sendTuiTurn } from "./helpers/tui-turn.js";
 
 /**
  * 3-D Phase 4 全方位真机矩阵：默认客户端路径 + Phase 3 收口全部新能力的
@@ -53,6 +55,7 @@ interface ScenarioWorkspace {
   readonly client: LocalRuntimeClient;
   readonly workspaceDir: string;
   readonly visionSupported: boolean;
+  redact(text: string): string;
   trackSession(sessionId: string | undefined): void;
 }
 
@@ -75,6 +78,11 @@ async function createScenarioWorkspace(
   const model = separator < 0 ? "" : routeId.slice(separator + 1);
   const visionSupported =
     userConfig.providers[providerId]?.modelCapabilities?.[model]?.vision !== false;
+  const secrets = Object.values(userConfig.providers).flatMap((provider) =>
+    [provider.apiKey].filter(
+      (value): value is string => typeof value === "string" && value.length > 0,
+    ),
+  );
   const previousPicoHome = process.env.PICO_HOME;
   process.env.PICO_HOME = picoHome;
   const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome });
@@ -114,28 +122,34 @@ async function createScenarioWorkspace(
     client,
     workspaceDir,
     visionSupported,
+    redact: (text) => redactProviderErrorText(text, secrets),
     trackSession: (sessionId) => {
       if (sessionId) trackedSessionId = sessionId;
     },
   };
 }
 
-/** 发送并等真实回合终态：等投影出现 assistant 回复（真完成信号）+ 回到 idle
- * （含 resend 双回合排水——第二回合也是同文，同样产出 assistant）。 */
+/** 新 Run 的终态与本轮回复必须同时到达；异常/待审批立即给出脱敏诊断。 */
 async function sendAndDrain(
   runtime: ClientSessionRuntime,
   reporter: TuiReporter,
   text: string,
+  scenario: ScenarioWorkspace,
+  approve?: Parameters<typeof sendTuiTurn>[0]["approve"],
 ): Promise<boolean> {
-  let accepted = await runtime.sendText(text);
-  if (!accepted) accepted = await runtime.sendText(text);
-  if (!accepted) return false;
-  const answered = await waitForCondition(
-    () => reporter.getProjection().entries.some(({ entry }) => entry.kind === "assistant"),
-    180_000,
-  );
-  if (!answered) return false;
-  return waitForCondition(() => !runtime.running, 180_000);
+  try {
+    return await sendTuiTurn({
+      runtime,
+      reporter,
+      text,
+      client: scenario.client,
+      workspacePath: scenario.workspaceDir,
+      redact: scenario.redact,
+      ...(approve ? { approve } : {}),
+    });
+  } finally {
+    scenario.trackSession(runtime.activeSessionId);
+  }
 }
 
 realModelTest(
@@ -155,7 +169,9 @@ realModelTest(
     const overlayErrors: string[] = [];
     const originalPushError = reporter.pushError.bind(reporter);
     reporter.pushError = ((message: string, context?: unknown) => {
-      overlayErrors.push(`${message}${context instanceof Error ? ` (${context.message})` : ""}`);
+      overlayErrors.push(
+        scenario.redact(`${message}${context instanceof Error ? ` (${context.message})` : ""}`),
+      );
       return originalPushError(message, context as never);
     }) as typeof reporter.pushError;
     const runtime = new ClientSessionRuntime({
@@ -165,11 +181,12 @@ realModelTest(
       modelOverride: route,
       orchestrationModeOverride: "graph",
     });
+    t.after(() => runtime.dispose());
     await runtime.start();
     scenario.trackSession(runtime.activeSessionId);
 
     assert.ok(
-      await sendAndDrain(runtime, reporter, "请只回复两个字符：ok"),
+      await sendAndDrain(runtime, reporter, "请只回复两个字符：ok", scenario),
       "真实回合应终态（sessionId 确立后启动覆盖已应用）",
     );
     scenario.trackSession(runtime.activeSessionId);
@@ -198,8 +215,12 @@ realModelTest(
     const { client, workspaceDir } = scenario;
     const reporter = new TuiReporter();
     const runtime = new ClientSessionRuntime({ client, workspacePath: workspaceDir, reporter });
+    t.after(() => runtime.dispose());
     await runtime.start();
-    assert.ok(await sendAndDrain(runtime, reporter, "请只回复两个字符：ok"), "首回合应完成");
+    assert.ok(
+      await sendAndDrain(runtime, reporter, "请只回复两个字符：ok", scenario),
+      "首回合应完成",
+    );
     const sourceSessionId = runtime.activeSessionId!;
     scenario.trackSession(sourceSessionId);
     runtime.dispose();
@@ -227,6 +248,7 @@ realModelTest(
       sessionId: forked.session.sessionId,
       reporter: forkReporter,
     });
+    t.after(() => forkRuntime.dispose());
     await forkRuntime.start();
     const hydrated = await waitForCondition(
       () =>
@@ -266,11 +288,12 @@ realModelTest(
     const { client, workspaceDir } = scenario;
     const reporter = new TuiReporter();
     const runtime = new ClientSessionRuntime({ client, workspacePath: workspaceDir, reporter });
+    t.after(() => runtime.dispose());
     const registry = createClientCommandRegistry({ runtime, workspacePath: workspaceDir });
     await runtime.start();
     // 两个真实回合 → 至少两个 user-message checkpoint。
-    assert.ok(await sendAndDrain(runtime, reporter, "请只回复：一号"), "回合一应完成");
-    assert.ok(await sendAndDrain(runtime, reporter, "请只回复：二号"), "回合二应完成");
+    assert.ok(await sendAndDrain(runtime, reporter, "请只回复：一号", scenario), "回合一应完成");
+    assert.ok(await sendAndDrain(runtime, reporter, "请只回复：二号", scenario), "回合二应完成");
     const sessionId = runtime.activeSessionId!;
     scenario.trackSession(sessionId);
 
@@ -317,6 +340,12 @@ realModelTest(
       60_000,
     );
     assert.ok(forkHydrated, "conversation fork 水化应含回滚点之前的用户回合（一号）");
+    let fileApprovals = 0;
+    await client.request("session.settings.update", {
+      workspacePath: workspaceDir,
+      sessionId: applied.sessionId,
+      permissionMode: "default",
+    });
     assert.ok(
       !reporter
         .getProjection()
@@ -336,9 +365,26 @@ realModelTest(
         runtime,
         reporter,
         "请使用 write_file 工具在当前工作目录创建文件 matrix-changes.txt，内容为一行 hello。",
+        scenario,
+        (approval) => {
+          if (approval.kind !== "tool" || approval.toolName !== "write_file") return false;
+          const args: unknown = JSON.parse(approval.args ?? "{}");
+          if (typeof args !== "object" || args === null) return false;
+          const { path, content } = args as { path?: unknown; content?: unknown };
+          if (
+            typeof path !== "string" ||
+            resolve(workspaceDir, path) !== join(workspaceDir, "matrix-changes.txt") ||
+            typeof content !== "string" ||
+            content.trim() !== "hello"
+          )
+            return false;
+          fileApprovals++;
+          return true;
+        },
       ),
       "回合三（写文件）应完成",
     );
+    assert.ok(fileApprovals > 0, "合成文件写入必须经过真实 allow_once 审批");
     const changedFile = join(workspaceDir, "matrix-changes.txt");
     const fileCreated = await waitForCondition(() => existsSync(changedFile), 30_000);
     assert.ok(fileCreated, "模型应已真实写入 matrix-changes.txt（确定性锚点=文件存在）");
@@ -389,6 +435,7 @@ realModelTest(
       onPrompt: (request) => prompts.push(request),
       onPromptResolved: (promptId) => resolvedPromptIds.push(promptId),
     });
+    t.after(() => runtime.dispose());
     await runtime.start();
 
     // 自由文本提问：模型按指示调用 ask_user（freeText、无 options）。
@@ -461,6 +508,7 @@ realModelTest(
       onApproval: (notice) => approvals.push(notice),
       onApprovalResolved: (approvalId) => approvalsResolved.push(approvalId),
     });
+    t.after(() => runtime.dispose());
     await runtime.start();
 
     // 建会话回合（不锁模型字面输出，等 assistant + idle 双信号排水）。
@@ -551,6 +599,7 @@ realModelTest(
       workspacePath: workspaceDir,
       reporter,
     });
+    t.after(() => runtime.dispose());
     await runtime.start();
 
     // 64x64 纯红 PNG（RGB(220,20,20)，base64 仅 240 字符——纯色高压缩）——

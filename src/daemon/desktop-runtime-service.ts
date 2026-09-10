@@ -2516,6 +2516,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       isDesktopRunBoundaryNotification(event.topic) &&
       (await this.isInternalAgentGraphRun(event.scope.workspacePath, sessionId, runId))
     ) {
+      // Graph messages already live in the Runtime ledger. Hide the internal Run
+      // boundary, but publish its final durable watermark so clients can advance.
+      if (event.topic === "run.finished") {
+        this.publishTranscriptUpdate(event.scope.workspacePath, sessionId, "reload");
+      }
       return;
     }
     const persisted = await this.withSession(event.scope.workspacePath, sessionId, (session) =>

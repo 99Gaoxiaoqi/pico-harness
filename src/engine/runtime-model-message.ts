@@ -7,7 +7,8 @@ import type {
 } from "./session-runtime-event.js";
 
 export type RuntimeModelHistoryEvent =
-  RuntimeMessageCommittedEvent | RuntimeToolResultRecordedEvent;
+  | RuntimeMessageCommittedEvent
+  | RuntimeToolResultRecordedEvent;
 
 export function runtimeEventHasModelHistoryEntry(
   event: RuntimeEvent,

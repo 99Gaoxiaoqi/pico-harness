@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ConversationTranscript } from "../../../apps/desktop/src/renderer/conversation/ConversationTranscript.js";
 import { LoadToolsTool } from "../../../src/tools/load-tools.js";
+import { SearchToolsTool } from "../../../src/tools/search-tools.js";
 import { ToolDisclosure } from "../../../src/tools/tool-disclosure.js";
 import { PICO_TOOL_GROUPS } from "../../../src/tools/tool-surface.js";
 import type {
@@ -41,8 +43,20 @@ function spawn(id: string, title: string): ToolItemView {
 }
 
 test("真实工具组加载结果显示协作卡与折叠技术详情，失败和不完整记录不误报启用", async () => {
-  const loader = new LoadToolsTool(PICO_TOOL_GROUPS, new ToolDisclosure(), () => ["agent_spawn"]);
-  const output = await loader.execute(JSON.stringify({ group: "delegation" }));
+  const disclosure = new ToolDisclosure();
+  const definitions = [
+    { name: "agent_spawn", description: "Spawn an agent", inputSchema: { type: "object" } },
+  ];
+  const loader = new LoadToolsTool(PICO_TOOL_GROUPS, disclosure, () => ["agent_spawn"]);
+  const turn = disclosure.beginTurn(definitions);
+  let output: string;
+  try {
+    output = await disclosure.runInTurn(turn, () =>
+      loader.execute(JSON.stringify({ group: "delegation" })),
+    );
+  } finally {
+    disclosure.endTurn(turn);
+  }
   const activation: ToolItemView = {
     id: "load-agents",
     kind: "tool",
@@ -66,12 +80,74 @@ test("真实工具组加载结果显示协作卡与折叠技术详情，失败�
   for (const invalid of [
     { ...activation, state: "failed" as const },
     { ...activation, state: "active" as const },
-    { ...activation, output: output.replace("1 个工具", "2 个工具") },
+    ...[
+      '{"activated":[]}',
+      '{"activated":["memory_extract"]}',
+      '{"activated":["agent_spawn","agent_spawn"]}',
+      '{"activated":["agent_spawn",4]}',
+      '{"activated":["agent_spawn","bad-name"]}',
+      '{"activated":["agent_spawn"],"error":"failed"}',
+      '{"activated":["agent_spawn"],"blocked":{"name":"view_agent_graph","reason":"unknown","schemaChars":1}}',
+      '{"activated":["agent_spawn"],"blocked":{"name":"agent_spawn","reason":"schema_too_large","schemaChars":70000}}',
+      '{"activated":["agent_spawn"]',
+      "已加载 Delegation 组 2 个工具，下一轮可直接调用:\n- agent_spawn",
+    ].map((output) => ({ ...activation, output })),
     { ...activation, toolName: "agent_spawn" },
   ]) {
     const fallback = render([invalid]);
     assert.doesNotMatch(fallback, /子智能体协作已启用/u);
     assert.match(fallback, /conversation-tool-record/u);
+  }
+  const search = new SearchToolsTool(definitions, disclosure);
+  const searchTurn = disclosure.beginTurn(definitions);
+  try {
+    const searchOutput = await disclosure.runInTurn(searchTurn, () =>
+      search.execute('{"query":"select:agent_spawn"}'),
+    );
+    const result: NonNullable<ToolItemView["result"]> = {
+      version: 1,
+      toolCallId: "search-agents",
+      toolName: "search_tools",
+      status: "succeeded",
+      rawSizeBytes: Buffer.byteLength(searchOutput),
+      sha256: createHash("sha256").update(searchOutput).digest("hex"),
+      deliveryTruncated: false,
+      projection: {
+        version: 1,
+        mode: "full",
+        text: searchOutput,
+        strategy: "full",
+        truncated: false,
+      },
+    };
+    const searchItem: ToolItemView = {
+      ...activation,
+      toolName: "search_tools",
+      output: "ignored fallback",
+      result,
+    };
+    assert.match(render([searchItem]), /子智能体协作已启用/u);
+    for (const invalid of [
+      { ...searchItem, result: { ...result, status: "failed" as const } },
+      { ...searchItem, result: { ...result, toolName: "load_tools" } },
+      { ...searchItem, result: { ...result, deliveryTruncated: true } },
+      {
+        ...searchItem,
+        result: { ...result, projection: { ...result.projection, truncated: true } },
+      },
+    ])
+      assert.doesNotMatch(render([invalid]), /子智能体协作已启用/u);
+  } finally {
+    disclosure.endTurn(searchTurn);
+  }
+  for (const output of [
+    "已加载 Delegation 组 1 个工具，下一轮可直接调用:\n- agent_spawn",
+    "已加载 Graph 组 1 个工具，下一轮可直接调用:\n- view_agent_graph",
+    '{"activated":["agent_spawn","memory_extract"],"blocked":{"name":"view_agent_graph","reason":"schema_too_large","schemaChars":70000}}',
+  ]) {
+    const markup = render([{ ...activation, output }]);
+    assert.match(markup, /子智能体协作已启用/u);
+    assert.match(markup, /已加载 1 项协作工具/u);
   }
 });
 
