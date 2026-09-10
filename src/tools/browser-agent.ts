@@ -22,7 +22,8 @@ abstract class BrowserAgentTool implements BaseTool {
   }
 
   accesses() {
-    return ToolAccesses.all();
+    // Browser state has its own authority; it must not serialize unrelated file I/O.
+    return ToolAccesses.resource(`browser:${this.authority.sessionId}`);
   }
 
   async execute(args: string): Promise<string> {
@@ -97,7 +98,7 @@ class BrowserGetStateTool extends BrowserAgentTool {
     };
   }
   override accesses() {
-    return ToolAccesses.none();
+    return ToolAccesses.resource(`browser:${this.authority.sessionId}`);
   }
 }
 

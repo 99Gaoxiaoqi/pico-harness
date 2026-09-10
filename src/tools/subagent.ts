@@ -193,6 +193,7 @@ const MAX_MODEL_ROUTE_CATALOG_DESCRIPTION = 7_000;
  * 几万字的探索化作轻量 Summary,像普通 API 调用返回给主 Agent。
  */
 export class SpawnSubagentTool implements BaseTool {
+  readonly executionMode = "orchestrator" as const;
   readonly fileSideEffects = NO_FILE_SIDE_EFFECTS;
 
   constructor(
@@ -296,6 +297,7 @@ export interface DelegatePlanStepCoordinator {
 }
 
 export class DelegateTaskTool implements BaseTool {
+  readonly executionMode = "orchestrator" as const;
   /** 宿主统一 Agent 目录，按 agent_name 查询。 */
   private readonly profiles: AgentProfile[];
 
