@@ -1,5 +1,6 @@
 import type { DurableTranscriptEvent } from "../presentation/transcript-event-store.js";
 import type { Message, Usage } from "../schema/message.js";
+import type { ToolRecoveryMode } from "../tools/registry.js";
 import type {
   PlanOperationFact,
   PlanGraphBinding,
@@ -89,6 +90,11 @@ export interface RuntimeToolStartedEvent extends RuntimeEventBase {
   readonly data: {
     readonly toolName: string;
     readonly argumentsHash: string;
+    /** Legacy T1 facts may contain only the original argumentsHash. */
+    readonly argumentsJson?: string;
+    readonly argumentsRedacted?: boolean;
+    readonly recoveryMode?: ToolRecoveryMode;
+    readonly recoveryKey?: string;
     readonly origin?: "model" | "code_mode";
   };
 }

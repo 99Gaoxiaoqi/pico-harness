@@ -1,5 +1,5 @@
 import type { Message, ToolCall, ToolResult } from "../schema/message.js";
-import type { Registry, ToolExecutionContext } from "../tools/registry.js";
+import type { Registry, ToolExecutionContext, ToolRecoveryProbeResult } from "../tools/registry.js";
 import type { CommitReceipt } from "./session-persistence.js";
 import type {
   RuntimeOwnerFence,
@@ -165,12 +165,21 @@ export interface EngineRuntimeRun {
     context: ToolExecutionContext,
   ): Promise<ToolResult>;
   assertNoUnresolvedToolEffects(): Promise<void>;
-  resolveToolRecovery(input: {
+  /** Host-only evidence probe; never dispatches or replays the original tool. */
+  reconcileToolRecovery(input: {
     readonly recoveryEventId: string;
-    readonly outcome: "effects_verified" | "not_dispatched_verified";
-    readonly evidenceUri: string;
-    readonly summary: string;
-  }): Promise<void>;
+    readonly registry: Registry;
+    readonly signal?: AbortSignal;
+  }): Promise<ToolRecoveryProbeResult>;
+  resolveToolRecovery(
+    input: {
+      readonly recoveryEventId: string;
+      readonly outcome: "effects_verified" | "not_dispatched_verified";
+      readonly evidenceUri: string;
+      readonly summary: string;
+    },
+    signal?: AbortSignal,
+  ): Promise<void>;
   recordTranscriptToolStarts(
     session: Session,
     toolCalls: readonly ToolCall[],

@@ -50,7 +50,9 @@ import {
   ToolCommitBoundaryError,
   type Registry,
   type ToolExecutionContext,
+  type ToolRecoveryProbeResult,
 } from "../tools/registry.js";
+import { buildToolArgumentAudit } from "../tools/tool-argument-audit.js";
 import { buildRuntimeToolResultInput } from "../engine/tool-result-builder.js";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION,
@@ -700,7 +702,11 @@ export class RuntimeRun {
       for (const operation of preparedOperations) {
         const source = nestedStarts.get(operation.toolCallId);
         if (!source) continue;
-        const call = { id: operation.toolCallId, name: source.data.toolName, arguments: "{}" };
+        const call = {
+          id: operation.toolCallId,
+          name: source.data.toolName,
+          arguments: source.data.argumentsJson ?? "{}",
+        };
         const content =
           "工具执行状态未知：Code Mode 子调用已派发但结果未持久化；副作用可能已经发生，请先核查，禁止自动重放。";
         const built = buildRuntimeToolResultInput(
@@ -1475,6 +1481,7 @@ export class RuntimeRun {
     context?: ToolExecutionContext,
   ): Promise<void> {
     this.assertOpen();
+    const audit = buildToolArgumentAudit(argumentsJson, context?.argumentRedactionSecrets);
     const event: RuntimeToolStartedEvent = {
       ...this.base(createRuntimeEventId("tool-started"), true, "internal"),
       refs: {
@@ -1486,6 +1493,9 @@ export class RuntimeRun {
       data: {
         toolName,
         argumentsHash: createHash("sha256").update(argumentsJson).digest("hex"),
+        ...audit,
+        recoveryMode: context?.recoveryPolicy?.mode ?? "never_auto_retry",
+        ...(context?.recoveryPolicy?.key ? { recoveryKey: context.recoveryPolicy.key } : {}),
         ...(context?.origin ? { origin: context.origin } : {}),
       },
     };
@@ -1511,11 +1521,7 @@ export class RuntimeRun {
 
   async assertNoUnresolvedToolEffects(): Promise<void> {
     const events = await this.store.readSession(this.sessionId);
-    const resolved = new Set(
-      events
-        .filter((event) => event.kind === "tool.recovery.resolved")
-        .map((event) => event.data.recoveryEventId),
-    );
+    const resolved = toolRecoveryResolutions(events);
     const pending = events.filter(
       (event) =>
         event.kind === "tool.result.recorded" &&
@@ -1528,37 +1534,161 @@ export class RuntimeRun {
       );
   }
 
-  async resolveToolRecovery(input: {
-    readonly recoveryEventId: string;
-    readonly outcome: "effects_verified" | "not_dispatched_verified";
-    readonly evidenceUri: string;
-    readonly summary: string;
-  }): Promise<void> {
+  async resolveToolRecovery(
+    input: {
+      readonly recoveryEventId: string;
+      readonly outcome: "effects_verified" | "not_dispatched_verified";
+      readonly evidenceUri: string;
+      readonly summary: string;
+    },
+    signal?: AbortSignal,
+  ): Promise<void> {
     this.assertOpen();
-    if (!input.evidenceUri.trim() || !input.summary.trim())
-      throw new Error("Tool recovery requires explicit evidence and a summary");
+    return serializeExternalMessageCommit(
+      `tool-recovery:${this.canonicalWorkDir}:${this.sessionId}`,
+      input.recoveryEventId,
+      async () => {
+        signal?.throwIfAborted();
+        if (!input.evidenceUri.trim() || !input.summary.trim())
+          throw new Error("Tool recovery requires explicit evidence and a summary");
+        const events = await this.store.readSession(this.sessionId);
+        const recovery = events.find((event) => event.eventId === input.recoveryEventId);
+        if (
+          recovery?.kind !== "tool.result.recorded" ||
+          recovery.data.recovery?.classification !== "indeterminate"
+        )
+          throw new Error(
+            "Tool recovery resolution must reference an indeterminate fact in this Session",
+          );
+        const resolved = toolRecoveryResolutions(events).get(input.recoveryEventId);
+        if (resolved) {
+          if (!isDeepStrictEqual(resolved.data, input))
+            throw new RuntimeEventStoreIntegrityError(
+              "Tool recovery already has a different verified resolution",
+            );
+          return;
+        }
+        signal?.throwIfAborted();
+        await this.append(
+          {
+            ...this.base(
+              `tool-recovery-resolution:${createHash("sha256").update(input.recoveryEventId).digest("hex")}`,
+              true,
+              "internal",
+            ),
+            kind: "tool.recovery.resolved",
+            data: { ...input },
+          },
+          signal,
+        );
+      },
+    );
+  }
+
+  /** Reconcile by a current host binding's evidence probe, never by tool replay. */
+  async reconcileToolRecovery(input: {
+    readonly recoveryEventId: string;
+    readonly registry: Registry;
+    readonly signal?: AbortSignal;
+  }): Promise<ToolRecoveryProbeResult> {
+    this.assertOpen();
+    const park = (reason: string): ToolRecoveryProbeResult => ({ outcome: "park", reason });
+    if (input.signal?.aborted) return park("Recovery probe was cancelled");
     const events = await this.store.readSession(this.sessionId);
     const recovery = events.find((event) => event.eventId === input.recoveryEventId);
     if (
       recovery?.kind !== "tool.result.recorded" ||
       recovery.data.recovery?.classification !== "indeterminate"
     )
-      throw new Error(
-        "Tool recovery resolution must reference an indeterminate fact in this Session",
-      );
+      throw new RuntimeEventStoreIntegrityError("Recovery probe requires an indeterminate fact");
+    const priorResolution = toolRecoveryResolutions(events).get(recovery.eventId);
+    if (priorResolution) return { ...priorResolution.data };
+    const starts = events.filter(
+      (event): event is RuntimeToolStartedEvent =>
+        event.kind === "tool.started" &&
+        event.runId === recovery.runId &&
+        event.refs?.toolCallId === recovery.refs.toolCallId,
+    );
+    if (starts.length !== 1 || starts[0]!.data.toolName !== recovery.data.toolName)
+      throw new RuntimeEventStoreIntegrityError("Recovery probe has no unique matching T1");
+    const started = starts[0]!;
+    assertRuntimeEvent(started);
+    const operation = await this.store.readToolOperation(
+      this.sessionId,
+      recovery.runId,
+      recovery.refs.toolCallId,
+    );
     if (
-      events.some(
-        (event) =>
-          event.kind === "tool.recovery.resolved" &&
-          event.data.recoveryEventId === input.recoveryEventId,
-      )
+      !operation ||
+      operation.preparedEventId !== started.eventId ||
+      operation.toolName !== started.data.toolName ||
+      operation.argumentsHash !== started.data.argumentsHash
     )
-      return;
-    await this.append({
-      ...this.base(createRuntimeEventId("tool-recovery-resolution"), true, "internal"),
-      kind: "tool.recovery.resolved",
-      data: { ...input },
-    });
+      throw new RuntimeEventStoreIntegrityError(
+        "Recovery probe T1 journal identity does not match",
+      );
+    const { argumentsJson, argumentsRedacted, recoveryMode, recoveryKey } = started.data;
+    if (argumentsJson === undefined || argumentsRedacted === undefined || !recoveryKey)
+      return park("Legacy or incomplete tool audit has no probe authority");
+    if (recoveryMode !== "reconcile" && recoveryMode !== "reattach")
+      return park("Tool recovery contract does not permit evidence probes");
+    const { registry } = input;
+    const step = registry.captureStep?.(randomUUID(), [started.data.toolName]);
+    const policy = registry.getRecoveryPolicy?.(started.data.toolName, step);
+    if (policy?.mode !== recoveryMode || policy.key !== recoveryKey || !policy.reconcile)
+      return park("Current tool recovery binding differs from the committed contract");
+    let result: ToolRecoveryProbeResult;
+    try {
+      input.signal?.throwIfAborted();
+      result = await policy.reconcile(
+        Object.freeze({
+          sessionId: this.sessionId,
+          runId: started.runId,
+          toolCallId: recovery.refs.toolCallId,
+          toolName: started.data.toolName,
+          argumentsJson,
+          argumentsRedacted,
+          signal: input.signal,
+        }),
+      );
+    } catch {
+      // Do not persist a probe's exception message, which may contain credentials.
+      return park("Recovery probe failed or was cancelled; effects remain unresolved");
+    }
+    if (input.signal?.aborted) return park("Recovery probe was cancelled");
+    const currentPolicy = registry.getRecoveryPolicy?.(started.data.toolName);
+    const currentBinding = registry.getRecoveryPolicy?.(started.data.toolName, step);
+    if (
+      currentPolicy?.mode !== policy.mode ||
+      currentPolicy.key !== policy.key ||
+      currentPolicy.reconcile !== policy.reconcile ||
+      currentBinding?.key !== policy.key
+    )
+      return park("Tool recovery binding changed while probing");
+    if (result?.outcome === "park") return park(result.reason || "Recovery probe has no evidence");
+    if (
+      (result?.outcome !== "effects_verified" && result?.outcome !== "not_dispatched_verified") ||
+      typeof result.evidenceUri !== "string" ||
+      !result.evidenceUri.trim() ||
+      typeof result.summary !== "string" ||
+      !result.summary.trim()
+    )
+      return park("Recovery probe returned no verifiable evidence");
+    try {
+      await this.resolveToolRecovery(
+        {
+          recoveryEventId: recovery.eventId,
+          outcome: result.outcome,
+          evidenceUri: result.evidenceUri,
+          summary: result.summary,
+        },
+        input.signal,
+      );
+    } catch (error) {
+      if (input.signal?.aborted) return park("Recovery probe was cancelled");
+      throw error;
+    }
+    return result;
   }
 
   /** Child observations settle durably before crossing back into the code sandbox. */
@@ -1574,6 +1704,8 @@ export class RuntimeRun {
     const nestedContext: ToolExecutionContext = {
       ...context,
       origin: "code_mode",
+      recoveryPolicy:
+        context.recoveryPolicy ?? registry.getRecoveryPolicy?.(call.name, context.step),
       beforeDispatch: async (finalCall) => {
         await this.recordToolStarted(
           finalCall.id,
@@ -1956,10 +2088,14 @@ export class RuntimeRun {
     };
   }
 
-  private append(event: RuntimeEvent): Promise<RuntimeEventStoreAppendResult> {
-    return this.writeCanonicalEvent((ownerFence) =>
-      appendRuntimeEventWithArbitration(this.store, event, { ownerFence }),
-    );
+  private append(
+    event: RuntimeEvent,
+    signal?: AbortSignal,
+  ): Promise<RuntimeEventStoreAppendResult> {
+    return this.writeCanonicalEvent((ownerFence) => {
+      signal?.throwIfAborted();
+      return appendRuntimeEventWithArbitration(this.store, event, { ownerFence });
+    });
   }
 
   private appendBatch(
@@ -2409,6 +2545,18 @@ function runtimeInterruptionRecoveryEventId(
 function compactRefs(value: RuntimeEventRefs): RuntimeEventRefs | undefined {
   const entries = Object.entries(value).filter(([, entry]) => entry !== undefined);
   return entries.length > 0 ? (Object.fromEntries(entries) as RuntimeEventRefs) : undefined;
+}
+
+function toolRecoveryResolutions(events: readonly RuntimeEvent[]) {
+  const resolved = new Map<string, Extract<RuntimeEvent, { kind: "tool.recovery.resolved" }>>();
+  for (const event of events) {
+    if (event.kind !== "tool.recovery.resolved") continue;
+    const previous = resolved.get(event.data.recoveryEventId);
+    if (previous && !isDeepStrictEqual(previous.data, event.data))
+      throw new RuntimeEventStoreIntegrityError("Conflicting tool recovery resolutions");
+    resolved.set(event.data.recoveryEventId, event);
+  }
+  return resolved;
 }
 
 function serializeExternalMessageCommit<Result>(

@@ -60,6 +60,7 @@ import type {
 } from "../engine/session-runtime-event.js";
 import type { Message, Usage } from "../schema/message.js";
 import { PLAN_EVENT_KINDS, assertPlanEventData, isPlanEventKind } from "../plan/events.js";
+import { MAX_TOOL_ARGUMENT_AUDIT_BYTES } from "../tools/tool-argument-audit.js";
 
 /**
  * 可生产的 Runtime event kind 注册表（单源）。
@@ -227,6 +228,7 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
       assertToolOrigin(value);
       assertString(value["data"]["toolName"], "tool.started.toolName");
       assertString(value["data"]["argumentsHash"], "tool.started.argumentsHash");
+      assertToolArgumentAudit(value["data"]);
       return;
     case "tool.group.loaded":
       assertString(value["data"]["groupId"], "tool.group.loaded.groupId");
@@ -384,6 +386,38 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
         `Runtime event kind is invalid: ${String(value["kind"])}`,
       );
   }
+}
+
+function assertToolArgumentAudit(data: Record<string, unknown>): void {
+  const fields = ["argumentsJson", "argumentsRedacted", "recoveryMode", "recoveryKey"];
+  if (fields.every((field) => data[field] === undefined)) return;
+  if (
+    typeof data["argumentsJson"] !== "string" ||
+    typeof data["argumentsRedacted"] !== "boolean" ||
+    ![
+      "replay_safe",
+      "idempotent",
+      "reconcile",
+      "reattach",
+      "outcome_unknown",
+      "never_auto_retry",
+    ].includes(String(data["recoveryMode"])) ||
+    (data["recoveryKey"] !== undefined &&
+      (typeof data["recoveryKey"] !== "string" || !data["recoveryKey"].trim()))
+  )
+    throw new RuntimeEventIntegrityError("Invalid tool argument audit or recovery contract");
+  if (Buffer.byteLength(data["argumentsJson"], "utf8") > MAX_TOOL_ARGUMENT_AUDIT_BYTES)
+    throw new RuntimeEventIntegrityError("Tool argument audit exceeds 1 MiB");
+  try {
+    JSON.parse(data["argumentsJson"]);
+  } catch {
+    throw new RuntimeEventIntegrityError("Tool argument audit is not valid JSON");
+  }
+  if (
+    data["argumentsRedacted"] === false &&
+    createHash("sha256").update(data["argumentsJson"]).digest("hex") !== data["argumentsHash"]
+  )
+    throw new RuntimeEventIntegrityError("Tool argument audit does not match the original hash");
 }
 
 function assertToolOrigin(value: Record<string, unknown>): void {
