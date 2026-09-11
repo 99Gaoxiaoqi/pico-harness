@@ -272,17 +272,17 @@ npm pack --dry-run
 
 ## 深入阅读
 
+- [技术文档与历史索引（先从这里确认文档状态）](docs/README.md)
 - [架构总览](docs/architecture/00-overview.md)
-- [Engine 与会话](docs/architecture/01-engine.md)
-- [工具系统](docs/architecture/02-tools.md)
-- [上下文工程](docs/architecture/03-context.md)
+- [Engine 与会话（部分过期：JSONL/commit marker 已退役）](docs/architecture/01-engine.md)
+- [工具系统（部分过期：Evidence/read_evidence 已退役）](docs/architecture/02-tools.md)
+- [上下文工程（部分过期：Evidence、Todo 与摘要细节需回查索引）](docs/architecture/03-context.md)
 - [Provider 与产品入口](docs/architecture/04-provider-entry.md)
-- [完整数据流](docs/architecture/06-data-flow.md)
+- [完整数据流（部分过期：ToolResult/Evidence 仍含旧方案）](docs/architecture/06-data-flow.md)
 - [多 Agent 并发研究（历史提案）](docs/history/architecture/08-multi-agent-concurrency.md)
 - [Desktop 架构](docs/guides/desktop-architecture.md)
-- [TUI 交互指南](docs/guides/tui-claude-code-parity.md)
+- [TUI 交互指南（使用前按当前 client commands 复核）](docs/guides/tui-claude-code-parity.md)
 - [Terminal-Bench 2.1 内部 canary](benchmarks/terminal_bench_2_1/README.md)
-- [技术文档与历史索引](docs/README.md)
 
 ## License
 

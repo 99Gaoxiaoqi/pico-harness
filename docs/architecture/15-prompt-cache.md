@@ -188,12 +188,12 @@ GPT-5.6 支持显式断点（`prompt_cache_breakpoint`），Pico 在 `openai.ts:
 
 定义在 `src/provider/model-capabilities.ts:38-46`，每条路由独立配置：
 
-| 字段        | Claude               | OpenAI                               |
-| ----------- | -------------------- | ------------------------------------ |
-| `mode`      | `"explicit"`（必须） | `"implicit"` 或 `"explicit"`         |
-| `ttl`       | `"5m"` 或 `"1h"`     | �� `"30m"`（需 explicitBreakpoints） |
-| `keyShards` | 必须 `1`             | `1`-`64`                             |
-| `prewarm`   | 可选 `true`          | 不支持                               |
+| 字段        | Claude               | OpenAI                       |
+| ----------- | -------------------- | ---------------------------- |
+| `mode`      | `"explicit"`（必须） | `"implicit"` 或 `"explicit"` |
+| `ttl`       | `"5m"` 或 `"1h"`     | `"30m"`（仅显式断点模式）    |
+| `keyShards` | 必须 `1`             | `1`-`64`                     |
+| `prewarm`   | 可选 `true`          | 不支持                       |
 
 ---
 
@@ -300,7 +300,7 @@ Pico 有一套比"看命中率"更完整的诊断系统，分布在两个文件�
 | Claude sonnet | 1024     |
 | Claude haiku  | 2048     |
 
-���于门槛的请求会被标记 `prompt_below_minimum_threshold` 诊断。
+低于门槛的请求会被标记 `prompt_below_minimum_threshold` 诊断。
 
 ---
 

@@ -1,5 +1,5 @@
 ---
-title: 从一句话到一次可靠执行：pico-harness 架构通俗解读
+title: 历史快照：从一句话到一次可靠执行
 cover: ./images/pico-harness-architecture/cover.png
 tags:
   - Agent Harness
@@ -9,12 +9,14 @@ updated: 2026-07-30
 source_commit: a5d598f
 ---
 
-# 从一句话到一次可靠执行：pico-harness 架构通俗解读
+# 历史快照：从一句话到一次可靠执行
 
 ![驾驭大模型：pico-harness 架构文章封面](../images/pico-harness-architecture/cover.png)
 
-> 本文以 `a5d598f` 的当前源码为基线。阶段性配图保留其教学视角，当前产品与持久化边界以正文
-> 和 [`architecture/00-overview.md`](../architecture/00-overview.md) 为准。
+> 文档状态：历史教学快照。本文冻结于提交 `a5d598f`（2026-07-30），正文中的“当前”仅指该
+> 历史时点；其中进程内 TUI、Session JSONL、Evidence CAS 和 `memory/state.json` 均已退役，
+> 不可作为现行 Runtime 契约。当前边界请从[技术文档索引](../README.md)进入，并以
+> [架构总览](../architecture/00-overview.md)和根[架构文档](../../ARCHITECTURE.md)为准。配图保留原貌。
 
 如果把大模型直接接到一个聊天框里，它只能“说”。如果再给它几个文件工具，它开始能够“做”。但真正把它变成一个可以长期操作代码库的编码 Agent，还需要解决一串更麻烦的问题：上下文会不会爆掉、工具会不会互相冲突、危险命令谁来拦截、程序中断后怎么恢复、改坏的文件怎么撤销，多个子任务怎么隔离执行，以及用户如何看清它到底做了什么。
 
