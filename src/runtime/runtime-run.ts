@@ -77,6 +77,7 @@ import {
 import {
   RUNTIME_HISTORY_EVENT_KINDS,
   RUNTIME_MODEL_MESSAGE_EVENT_KINDS,
+  materializeRuntimeHistoryEntries,
   type RuntimeHistoryProjectionEntry,
 } from "../engine/session-runtime-read-model.js";
 import {
@@ -958,8 +959,10 @@ export class RuntimeRun {
         await forkRun.recordImportedSeedEntry(seedEntries[index]!, identity.seedEventId(index));
       }
       if (modelCheckpoint) {
-        const coveredEventIds = forkModelSeedEventIds(seedEntries, identity).slice(
-          0,
+        const coveredEventIds = forkCheckpointEventIds(
+          await store.readSession(options.targetSessionId),
+          seedEntries,
+          identity,
           modelCheckpoint.coveredMessageCount,
         );
         await forkRun.recordCheckpoint({
@@ -2750,6 +2753,9 @@ function assertRuntimeForkCheckpoint(
 ): void {
   const existing = events.find((event) => event.eventId === identity.checkpointEventId);
   if (!checkpoint) {
+    // Import flattens run/turn identities. Reject an ambiguous imported batch
+    // before publishing even when the fork has no summary checkpoint.
+    forkCheckpointEventIds(events, seedEntries, identity);
     if (existing) {
       throw runtimeForkConflict(
         `Runtime fork run ${identity.runId} has an unexpected checkpoint fact`,
@@ -2757,8 +2763,10 @@ function assertRuntimeForkCheckpoint(
     }
     return;
   }
-  const coveredEventIds = forkModelSeedEventIds(seedEntries, identity).slice(
-    0,
+  const coveredEventIds = forkCheckpointEventIds(
+    events,
+    seedEntries,
+    identity,
     checkpoint.coveredMessageCount,
   );
   if (
@@ -3185,13 +3193,29 @@ function countForkModelSeedEntries(entries: readonly RuntimeSessionForkSeedEntry
   return entries.reduce((count, entry) => count + (entry.kind === "model" ? 1 : 0), 0);
 }
 
-function forkModelSeedEventIds(
+function forkCheckpointEventIds(
+  events: readonly RuntimeEvent[],
   entries: readonly RuntimeSessionForkSeedEntry[],
   identity: RuntimeForkBootstrapIdentity,
+  coveredCount?: number,
 ): string[] {
-  return entries.flatMap((entry, index) =>
-    entry.kind === "model" ? [identity.seedEventId(index)] : [],
+  const ids = new Set(
+    entries.flatMap((entry, index) =>
+      entry.kind === "model" ? [identity.seedEventId(index)] : [],
+    ),
   );
+  // Imported facts keep their physical order; checkpoint digests must use the
+  // same recovered model order as normal reads and checkpoint replay.
+  const covered = materializeRuntimeHistoryEntries(
+    events.filter((event) => ids.has(event.eventId)),
+  ).slice(0, coveredCount);
+  if (
+    coveredCount !== undefined &&
+    (covered.length !== coveredCount || covered.at(-1)?.compactionBoundarySafe === false)
+  ) {
+    throw runtimeForkConflict("Runtime fork checkpoint splits interrupted recovery history");
+  }
+  return covered.map((entry) => entry.eventId);
 }
 
 function forkSeedPayload(entry: RuntimeSessionForkSeedEntry): unknown {

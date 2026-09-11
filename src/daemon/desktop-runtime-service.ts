@@ -2472,6 +2472,12 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       .digest("hex");
     const messageId = `desktop-input:${digest}`;
     await this.withSession(workspacePath, sessionId, async (session) => {
+      // Close abandoned tool batches before a new user message can separate a
+      // call from its recovery result. Keep recovery and input in the same lane.
+      const capability = session.runtimeEventCapability;
+      if (!capability) throw new Error("Desktop input requires a durable RuntimeEvent store");
+      await RuntimeRun.reconcileIncompleteRuns({ capability });
+      await RuntimeRun.repairSessionProjection(session, { capability });
       const hasMessage = session
         .getHistory()
         .some(

@@ -10,6 +10,8 @@ import type { RuntimeProjectionDiagnostic } from "./runtime-projection-diagnosti
 import { makeDiagnostic } from "./runtime-projection-diagnostics.js";
 
 export interface RuntimeHistoryProjectionEntry {
+  /** False when cutting here would split a reordered interruption-recovery span. */
+  readonly compactionBoundarySafe?: boolean;
   /** The immutable event that currently contributes this model-visible message. */
   readonly eventId: string;
   readonly message: Message;
@@ -174,6 +176,7 @@ export function materializeRuntimeHistoryProjection(
   diagnostics.push(...prefixDiagnostics);
   // assertToolCallPairing 检测的都是 hard 违规（配对错位/悬空/重复），仍直接 throw
   assertToolCallPairing(projected.map(({ message }) => message));
+  markUnsafeCompactionBoundaries(projected, events, eventIndexes);
   return { entries: projected, diagnostics };
 }
 
@@ -187,6 +190,7 @@ function materializePrefix(
 } {
   const prefixDiagnostics: RuntimeProjectionDiagnostic[] = [];
   const projected: RuntimeHistoryProjectionEntry[] = [];
+  let recoveryFloor = 0;
   for (let eventIndex = 0; eventIndex < endExclusive; eventIndex++) {
     const event = events[eventIndex]!;
     // history.rewound handling removed: rewind is now a non-destructive fork and
@@ -194,7 +198,10 @@ function materializePrefix(
     // through to the claim contract below and surfaces as an unclaimed control
     // fact diagnostic, which is harmless.
     if (event.kind === "context.checkpoint.recorded") {
+      restoreInterruptedResults(projected, recoveryFloor, events, eventIndexes);
       replaceProjectedPrefixWithCheckpoint(projected, event, eventIndexes, eventIndex);
+      // Never borrow a result from after a checkpoint to repair its prior history.
+      recoveryFloor = projected.length;
       continue;
     }
     // claim coverage 契约：每个 kind 必须显式 claim，未知 kind 不再静默丢失
@@ -235,7 +242,110 @@ function materializePrefix(
       prefixDiagnostics.push(makeDiagnostic("unclaimed_control_fact", event.eventId, event.kind));
     }
   }
+  restoreInterruptedResults(projected, recoveryFloor, events, eventIndexes);
   return { projected, prefixDiagnostics };
+}
+
+/** Only host-generated interruption receipts may cross ordinary user inputs.
+ * Work on the read projection, never rewrite durable facts or replay a tool.
+ */
+function restoreInterruptedResults(
+  projected: RuntimeHistoryProjectionEntry[],
+  floor: number,
+  events: readonly RuntimeEvent[],
+  indexes: ReadonlyMap<string, number>,
+): void {
+  for (let i = floor; i < projected.length; i++) {
+    const source = events[indexes.get(projected[i]!.eventId)!]!;
+    const calls = projected[i]!.message.toolCalls;
+    if (source.kind !== "message.committed" || !calls?.length) continue;
+    const pending = new Map(calls.map((call) => [call.id, call]));
+    if (pending.size !== calls.length) continue;
+    const results: RuntimeHistoryProjectionEntry[] = [];
+    const users: RuntimeHistoryProjectionEntry[] = [];
+    let end = i + 1;
+    for (; end < projected.length && pending.size > 0; end++) {
+      const entry = projected[end]!;
+      const message = entry.message;
+      if (message.role !== "user" || message.toolCalls?.length) break;
+      if (message.toolCallId === undefined) {
+        users.push(entry);
+        continue;
+      }
+      const result = events[indexes.get(entry.eventId)!]!;
+      const call = pending.get(message.toolCallId);
+      if (
+        !call ||
+        result.kind !== "tool.result.recorded" ||
+        result.sessionId !== source.sessionId ||
+        result.runId !== source.runId ||
+        result.turnId !== source.turnId ||
+        result.invocationId !== source.invocationId ||
+        result.data.toolName !== call.name
+      )
+        break;
+      if (
+        users.length > 0 &&
+        (result.data.status !== "interrupted" ||
+          result.data.projection.mode !== "synthetic" ||
+          result.data.projection.strategy !== "runtime-interruption-recovery" ||
+          !result.data.recovery ||
+          !["not_dispatched", "indeterminate"].includes(result.data.recovery.classification))
+      )
+        break;
+      // Reused provider IDs in different turns are fine; ambiguous batches in
+      // the same turn are not evidence for automatic repair.
+      if (
+        projected.some((candidate, index) => {
+          if (index === i || !candidate.message.toolCalls?.some((c) => c.id === call.id))
+            return false;
+          const other = events[indexes.get(candidate.eventId)!]!;
+          return (
+            other.sessionId === source.sessionId &&
+            other.runId === source.runId &&
+            other.turnId === source.turnId
+          );
+        })
+      )
+        break;
+      pending.delete(call.id);
+      results.push(entry);
+    }
+    if (pending.size === 0 && users.length > 0) {
+      projected.splice(i + 1, end - i - 1, ...results, ...users);
+      i += results.length;
+    }
+  }
+}
+
+function markUnsafeCompactionBoundaries(
+  projected: RuntimeHistoryProjectionEntry[],
+  events: readonly RuntimeEvent[],
+  indexes: ReadonlyMap<string, number>,
+): void {
+  // A summary represents its validated covered boundary, not the later sequence
+  // at which its wrapper was appended. This also supports rolling checkpoints.
+  const boundaries = new Map<string, number>();
+  for (const event of events) {
+    boundaries.set(
+      event.eventId,
+      event.kind === "context.checkpoint.recorded"
+        ? (boundaries.get(event.data.throughEventId) ?? indexes.get(event.eventId)!)
+        : indexes.get(event.eventId)!,
+    );
+  }
+  const positions = projected.map((entry) => boundaries.get(entry.eventId)!);
+  const suffixMin = new Array<number>(positions.length + 1).fill(Infinity);
+  for (let i = positions.length - 1; i >= 0; i--) {
+    suffixMin[i] = Math.min(positions[i]!, suffixMin[i + 1]!);
+  }
+  let prefixMax = -1;
+  for (let i = 0; i < projected.length; i++) {
+    prefixMax = Math.max(prefixMax, positions[i]!);
+    if (positions[i] !== prefixMax || prefixMax >= suffixMin[i + 1]!) {
+      projected[i] = { ...projected[i]!, compactionBoundarySafe: false };
+    }
+  }
 }
 
 function replaceProjectedPrefixWithCheckpoint(

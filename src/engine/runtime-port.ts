@@ -90,6 +90,8 @@ export function assertIssuedEngineRuntimeCapability(capability: EngineRuntimeCap
 }
 
 export interface EngineRuntimeHistoryEntry {
+  /** False when this model prefix is not also an immutable source prefix. */
+  readonly compactionBoundarySafe?: boolean;
   readonly eventId: string;
   readonly message: Message;
 }
