@@ -1,10 +1,11 @@
-# pico-harness 上下文管理：语义压缩与 Tool Result 归档
+# pico-harness 上下文管理：语义压缩与 Tool Result 入口定形
 
-> 文档状态：部分过期。Compaction 的动机与批次边界仍可参考；ToolResult 归档、Evidence CAS、
-> `read_evidence` 和相关阈值已经被[决策记录 26](../decisions/26-decision-tool-result-entry-shaping.md)
-> 取代。实现细节必须回查当前 `src/context/`、`src/engine/` 与 `src/tools/tool-result-observation.ts`。
+> 文档状态：Compaction 的动机与批次边界仍可参考；本页的 Tool Result 入口契约已按
+> [决策记录 26](../decisions/26-decision-tool-result-entry-shaping.md)校准。具体实现见
+> `src/tools/tool-result-observation.ts`，上下文读取与压缩细节仍需回查当前 `src/context/` 与
+> `src/engine/`。
 
-> 本文记录 pico-harness 如何管理 Agent 运行时的上下文窗口——当对话历史不断增长、工具返回结果越来越庞大时，系统如何在不丢失关键信息的前提下把上下文控制在 LLM 窗口内。涉及压缩的触发与策略、Tool Result 的归档与回读、以及失败场景下的降级兜底。
+> 本文记录 pico-harness 如何管理 Agent 运行时的上下文窗口——当对话历史不断增长、工具返回结果越来越庞大时，系统如何通过入口上限、读取侧投影与语义压缩把上下文控制在 LLM 窗口内。
 
 ---
 
@@ -20,92 +21,54 @@
 
 pico-harness 把这个问题拆成两个层面解决：
 
-1. **Tool Result 层**：单条工具结果在进入上下文**之前**就被截断/归档
-2. **上下文压缩层**：当累积的历史消息总量逼近窗口时，把旧前缀压缩成摘要
+1. **Tool Result 入口层**：单条结果必须先通过 1 MiB 字节上限，超限结果被拒绝并替换为有界合成错误。
+2. **上下文读取层**：限内结果完整 inline 入库；模型读取时再按预算投影，历史总量逼近窗口时压缩旧前缀。
 
 ---
 
-## 二、Tool Result 处理：投影与归档
+## 二、Tool Result 处理：1 MiB 入口上限与 inline 事实
 
-### 核心思想：原文只存一次，消费者只拿有界投影
+### 当前契约
 
-pico 的 Tool Result 处理有一条清晰的设计原则——**工具的原始输出只写入一次内容寻址存储（Evidence CAS），上下文里只保留一份有界的"投影"**。所有消费者（模型、Reporter、Hook、UI）都从这份投影读取，不会各自猜测大小。
+pico 不再按 token 阈值把新 Tool Result 分流到 Evidence CAS。`buildRuntimeToolResultProjection`
+先按 UTF-8 字节数执行 `MAX_TOOL_RESULT_BYTES = 1024 * 1024` 的入口检查：
 
-### 投影决策：2048 token 分水岭
-
-每条工具结果在进入 Session 之前，先经过 `buildRuntimeToolResultProjection`（`src/tools/tool-result-observation.ts:33`）做投影决策：
-
-```
-工具输出
-  │
-  ├─ ≤ 2048 token ──→ 原文保留（mode: "full"）
-  │
-  └─ > 2048 token ──→ 生成 1600 字符预览（mode: "preview"）
-                       原文按 SHA-256 写入 Evidence CAS
-                       模型只拿到 pico://evidence/... URI
+```text
+工具物理输出
+  ├─ ≤ 1 MiB ──→ 全文以 storage: "inline" 写入 canonical RuntimeEvent
+  │               Provider 投影为 mode: "full"
+  └─ > 1 MiB ──→ 原始输出不落盘
+                  有界重取指引以 storage: "inline" 写入 canonical RuntimeEvent
+                  Provider 投影为 mode: "synthetic"
 ```
 
-**2048 token** 是分水岭（`DEFAULT_RUNTIME_PROJECTION_THRESHOLD_TOKENS = 2048`）。低于这个值的工具结果原文进上下文；高于的，原文落盘到 Evidence CAS，模型只收到一份 **1600 字符**（`DEFAULT_SUMMARY_MAX_CHARS`）的 head-tail 预览。
+限内结果的 canonical 正文是工具物理输出；Recovery 指引可以只进入 Provider 投影，不改写
+canonical 正文或完整性元数据。超限时，canonical 正文和 Provider 投影都使用合成错误，说明
+原始字节数并引导模型通过 `grep`、`head`、`tail` 或 `read_file` 的 `offset`/`limit` 有界重取。
+原始超限正文会永久丢弃，因此不能把入口门描述成“截断但可回读”。
 
-### 历史 head-tail 预览
+新结果不生成 `pico://evidence/...` 引用，也不再提供 `read_evidence` 回读。旧账本中的
+`storage: "evidence"` / `mode: "preview"` 只在兼容读取边界容忍，不能为当前 Turn 扩权或
+恢复已经退役的写入协议。
 
-旧实现曾用统一 head-tail 截断生成预览；该写入路径已随 ADR 26 的入口定形退役。当前 `src/tools/tool-result-observation.ts` 对未超限输出全文 inline 入库，对超过 1MB 入口上限的输出写入有界的合成拒绝文本。
+### 读取侧瘦身
 
-之所以不做"按工具类型分策略的智能提取"（如只保留 tsc 错误行、只保留测试 FAIL 行），是因为：
-
-1. **原文不丢**——超过 2048 token 的结果已通过 Evidence CAS（SHA-256 寻址）持久化，模型可随时 `read_evidence` 分页回读完整原文
-2. **按需支付优于持续维护**——智能提取需要为每种工具输出形态手写正则识别器，上游工具版本升级就要跟随维护；而模型多一次 `read_evidence` 调用的成本是按需支付的（只在需要精确细节时才付）
-3. **通用性**——作为通用 agent，按特定工具类型分策略（tsc/vitest）不适用于 Python/Java/Go 等多语言场景，反而可能因误判导致比 head-tail 更差的效果
-
-### Evidence CAS：内容寻址 + 分页回读
-
-归档的原文通过 **SHA-256 内容寻址存储**（`src/context/evidence-archive.ts`）管理：
-
-```
-原始输出（如 2MB 日志）
-  │
-  ├─ stableJson → SHA-256 → 文件名（contentHash）
-  ├─ writeImmutableJson（临时文件 + hard link，原子写入）
-  └─ 返回 URI: pico://evidence/<sessionId>/<contentHash>
-```
-
-模型需要完整原文时，调用 `read_evidence` 工具按 **16KiB/页**分页回读（`DEFAULT_EVIDENCE_PAGE_LIMIT_BYTES`，上限 64KiB）：
-
-```
-模型看到预览 + "需要完整原文时调用 read_evidence(pico://evidence/...)"
-  │
-  ├─ read_evidence(ref, offsetBytes=0, limitBytes=16384)
-  │    → 返回第 0-16383 字节 + truncated: true + nextOffsetBytes: 16384
-  │
-  └─ read_evidence(ref, offsetBytes=16384, ...)
-       → 返回第 16384-32767 字节 ...
-```
-
-这个设计保证了三个性质：
-
-1. **单条大结果永远撑不爆上下文**——模型只持有 1600 字符预览
-2. **原文不丢失**——SHA-256 内容寻址，完整性可校验
-3. **可翻页回读**——模型按需分页获取，不需要一次性全量加载
+入口定形与模型上下文瘦身是两个独立阶段。限内原文先完整写入事实库；随后上下文组装按当前
+预算生成有界读取视图，必要时进入下面的 Compaction 降级链。读取侧投影不会回写或替换
+canonical RuntimeEvent。
 
 ### 各工具自身的输出自限
 
-除了统一的投影机制，每个工具还有自身的输出上限作为第一道防线：
-
-| 工具      | 限制                                    | 策略                                                 |
-| --------- | --------------------------------------- | ---------------------------------------------------- |
-| read_file | 500 行/页、2000 字符/行、16MiB/文件     | 行数分页，行号稳定                                   |
-| bash      | 10MiB 执行缓冲                          | 超限杀进程树，保留已捕获头部（按到达顺序的早期输出） |
-| grep      | 500 条匹配上限                          | 前 N 条 + 截断提示                                   |
-| glob      | 100 条上限                              | 前 100 条                                            |
-| web       | 2MiB 响应字节、默认 8K 字符（上限 50K） | 流式到 2MiB 停                                       |
-
-这些自限是工具层的保护，投影决策（2048 token 阈值）是运行时的第二道防线，Evidence CAS 是第三道。三层共同保证：**无论工具返回多大，进入上下文的永远是有界的**。
+部分工具会在自身边界内分页、截断或限制缓冲，这是进入统一入口门之前的局部保护，不改变
+Runtime 的 1 MiB 最终准入契约。调用方需要完整大文件或长命令输出时，应主动使用分页参数或
+Shell 管道生成小于入口上限的结果。
 
 ---
 
 ## 三、语义压缩：当历史总量逼近窗口
 
-Tool Result 投影解决的是"单条暴击"，但即使每条结果都被截断到 1600 字符，历史消息累积到一定轮数后仍然会逼近窗口。这时候就需要**语义压缩**——把旧前缀浓缩成一份结构化摘要。
+Tool Result 入口门解决的是“单条暴击”，读取侧投影也会约束每轮模型视图；但历史消息累积到
+一定轮数后仍然会逼近窗口。这时候就需要**语义压缩**——把旧前缀浓缩成一份结构化摘要。
 
 ### 触发机制：双触发 + 三级降级
 
@@ -374,14 +337,14 @@ RuntimeEvent Ledger（不可变）：
 
 这套系统做了几个明确的选择：
 
-| 取舍         | 选择                               | 理由                                               |
-| ------------ | ---------------------------------- | -------------------------------------------------- |
-| 摘要 vs 截断 | LLM 摘要                           | 截断丢语义，摘要保留任务上下文                     |
-| 何时摘要     | 推迟到必须时                       | 先用零成本字符级，LLM 摘像是最后手段               |
-| 单次 vs 滚动 | 滚动增量更新                       | 避免重复处理已折叠事件，降成本提正确性             |
-| 失败策略     | fail-open 而非 fail-fast           | 给 overflow 紧急压缩多一次机会，不立即丢上下文     |
-| 原文存储     | 内容寻址 CAS                       | 完整性可校验，分页回读，不丢失                     |
-| 预览策略     | 统一 head-tail + Evidence CAS 回读 | 原文不丢，预览精度差的代价只是多一次 read_evidence |
+| 取舍         | 选择                          | 理由                                                 |
+| ------------ | ----------------------------- | ---------------------------------------------------- |
+| 摘要 vs 截断 | LLM 摘要                      | 截断丢语义，摘要保留任务上下文                       |
+| 何时摘要     | 推迟到必须时                  | 先用零成本字符级，LLM 摘要是最后手段                 |
+| 单次 vs 滚动 | 滚动增量更新                  | 避免重复处理已折叠事件，降成本提正确性               |
+| 失败策略     | fail-open 而非 fail-fast      | 给 overflow 紧急压缩多一次机会，不立即丢上下文       |
+| 限内存储     | canonical RuntimeEvent inline | 保持单一事实，不建立新 Evidence 分叉                 |
+| 超限策略     | 合成拒绝并从源头有界重取      | 入口结果保持有界，不制造当前 Turn 无法兑现的回读引用 |
 
 它也有明确的**不做**：
 
@@ -411,4 +374,7 @@ L2/L3/L3-deep/L4 使用 `$PICO_HOME/config.json` 的用户默认真实模型验�
 
 pico-harness 的上下文管理哲学是：**把上下文窗口当成受限 RAM，压缩是内存管理器而非可选优化**。
 
-Tool Result 层在 durable 边界吸收单条暴击（Evidence CAS + 2048 token 投影），上下文压缩层在累积逼近时阶梯降级（字符级 → LLM 摘要 → overflow 紧急 → 硬重置），每一步都有 fail-open 兜底，每一步都不破坏不可变事实源。这让 Agent 能在长任务中持续运行，而不会因为上下文溢出而崩溃或丢失关键进度。
+Tool Result 层在 durable 边界以 1 MiB 入口门吸收单条暴击：限内正文 inline 入库，超限正文
+不落盘并替换为有界合成错误。上下文压缩层在累积逼近时阶梯降级（字符级 → LLM 摘要 →
+overflow 紧急 → 硬重置），读取侧变换不改写不可变事实源。这让 Agent 能在长任务中持续运行，
+同时避免恢复不了的 Evidence 回读分叉。

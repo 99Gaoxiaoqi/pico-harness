@@ -41,3 +41,4 @@
 - 待办 4：`executeAgentRuntime` 将主 Provider / 子代理模型路由装配下沉到 `runtime-assembly.ts`，将 Hook 模型运行端口下沉到 `runtime-hook-assembly.ts`；顶层函数保留装配顺序和资源生命周期，`agent-runtime.ts` 由 3444 行降至 3242 行。
 - 待办 4：`DesktopRewindService` 接管 rewind 的进程内幂等状态、耐久 claim 与 fork/file 事务流程；`DesktopRuntimeService` 只提供 Session/信任端口并维持原通知顺序，主文件由 4488 行降至 4271 行。`SqliteRuntimeEventStore` 未参与本轮拆分，避免为形式收口扩大 lease/事务 owner 风险。
 - 待办 4：Provider/子代理、Hook 与 Rewind 聚焦集成回归 33/33 通过；根 typecheck、Desktop typecheck、变更文件 ESLint/Prettier、严格架构检查、build 与 `git diff --check` 通过。全量确定性集成测试 1621 项：1609 通过、12 跳过、0 失败。
+- 最终审查：Tool Result 文档已改为当前 1 MiB inline/超限合成错误契约；Desktop 全流程原型中的能力缺口已明确限定为冻结时点，不代表当前产品状态。
