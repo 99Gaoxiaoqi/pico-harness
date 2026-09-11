@@ -283,10 +283,14 @@ export function ConversationPage() {
 
   const runIds = useMemo(() => new Set(sessionRuns.map((run) => run.id)), [sessionRuns]);
   const persistedPendingApproval = activeRun
-    ? pendingToolApprovalFromTranscript(conversation?.items ?? [])
+    ? pendingToolApprovalFromTranscript(conversation?.items ?? [], activeRun.id)
     : undefined;
   const pendingApproval =
-    data.approvals.filter((item) => runIds.has(item.runId)).at(-1) ??
+    data.approvals
+      .filter(
+        (item) => runIds.has(item.runId) && (item.kind === "plan" || item.runId === activeRun?.id),
+      )
+      .at(-1) ??
     (persistedPendingApproval && activeRun
       ? {
           id: persistedPendingApproval.id.slice("approval:".length),

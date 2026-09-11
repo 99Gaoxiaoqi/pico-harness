@@ -202,7 +202,7 @@ test("persisted approvals recover the interaction slot and disappear after termi
   assert.match(appSource, /omitApprovalAuditItems/u);
   assert.match(
     appSource,
-    /activeRun\s*\? pendingToolApprovalFromTranscript\(conversation\?\.items \?\? \[\]\)\s*:\s*undefined/u,
+    /activeRun\s*\? pendingToolApprovalFromTranscript\(conversation\?\.items \?\? \[\], activeRun\.id\)\s*:\s*undefined/u,
   );
   const runtimeSource = await readFile(
     new URL(
