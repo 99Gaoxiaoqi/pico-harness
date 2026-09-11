@@ -115,7 +115,7 @@
 
 ## 实施计划与历史档案
 
-`plans/` 只放正在执行的计划；当前为[项目结构收敛](plans/2026-09-12-project-structure-convergence.md)。已结束计划移入 `history/plans/`，历史未勾选项不自动成为当前待办。最近归档包括 [提交与全方位验证](history/plans/2026-09-10-submit-full-validation.md)、[全量回归问题修复](history/plans/full-regression-repair.md)与 [Maka 运行时对齐](history/plans/maka-runtime-alignment.md)。
+`plans/` 只放正在执行的计划；当前没有活动计划。已结束计划移入 `history/plans/`，历史未勾选项不自动成为当前待办。最近归档包括[项目结构收敛](history/plans/2026-09-12-project-structure-convergence.md)、[提交与全方位验证](history/plans/2026-09-10-submit-full-validation.md)、[全量回归问题修复](history/plans/full-regression-repair.md)与 [Maka 运行时对齐](history/plans/maka-runtime-alignment.md)。
 
 ## 仓库资产与工作流记录
 
