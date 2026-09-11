@@ -57,7 +57,7 @@
 | [10 架构质量评估](history/architecture/10-architecture-quality-assessment.md)        | 历史评估   | 评分和规模为阶段快照                                       |
 | [11 ToolResult Evidence](history/architecture/11-tool-result-evidence-projection.md) | 已取代     | 由决策记录 26 取代                                         |
 | [12 Compaction/ToolResult](architecture/12-compaction-and-tool-result.md)            | 部分过期   | Compaction 动机可参考；ToolResult 归档段已取代             |
-| [13 渐进披露](architecture/13-progressive-disclosure.md)                             | 部分过期   | 工具披露看 ADR 23；ToolResult 看 ADR 26                    |
+| [13 渐进披露](architecture/13-progressive-disclosure.md)                             | 部分过期   | 工具披露看 ADR 30；ToolResult 看 ADR 26                    |
 | [14 原子长期记忆](architecture/14-workspace-memory.md)                               | 当前事实   | 用户级原子库、提取/召回、管理及后台恢复边界                |
 | [15 Prompt Cache](architecture/15-prompt-cache.md)                                   | 待专项复核 | 原理可参考，阈值和 Provider 细节以代码为准                 |
 | [18 Graph Mode](architecture/18-graph-mode.md)                                       | 当前主线   | Graph v2 控制面、exact Run 与 yield/wake 恢复              |
@@ -73,7 +73,7 @@
 | [20 架构审计与治理](history/architecture/20-architecture-audit-and-governance.md)      | 阶段性治理记录                                |
 | [21 Windows PowerShell Host](decisions/21-decision-windows-powershell-host.md)         | 已实施 ADR                                    |
 | [22 Child Run Capacity](decisions/22-decision-child-run-capacity.md)                   | 已实施 ADR                                    |
-| [23 Tool Disclosure Surface](decisions/23-decision-tool-disclosure-surface.md)         | 已实施 ADR                                    |
+| [23 Tool Disclosure Surface](decisions/23-decision-tool-disclosure-surface.md)         | 已被 ADR 30 取代                              |
 | [24 SQLite Storage](decisions/24-decision-sqlite-storage-migration.md)                 | 已实施 ADR                                    |
 | [24a Session Catalog](decisions/24a-decision-session-catalog.md)                       | 原 JSONL 形态已退役，当前为 SQLite projection |
 | [25 Write Path Slimming](decisions/25-decision-write-path-slimming.md)                 | 已被 SQLite 硬切取代                          |
@@ -81,6 +81,7 @@
 | [27 Write Failure Recovery](decisions/27-decision-write-path-failure-recovery.md)      | 已实施 ADR                                    |
 | [28 Conversation State SQLite](decisions/28-decision-conversation-state-sqlite.md)     | 已实施 ADR                                    |
 | [29 Continuation Claim](decisions/29-decision-continuation-claim.md)                   | 已实施 ADR                                    |
+| [30 Maka Tool Runtime](decisions/30-decision-maka-tool-runtime.md)                     | 已实施 ADR；取代 ADR 23                       |
 
 ## 专题实现说明
 
@@ -90,7 +91,7 @@
 | [TodoList 实现](guides/todolist-implementation.md)              | 部分过期；当前存储为 SQLite `workspace_kv`  |
 | [Desktop/TUI parity](guides/desktop-tui-parity.md)              | 目标/验收规格，不是完成清单                 |
 | [TUI 交互指南](guides/tui-claude-code-parity.md)                | 使用前按当前 client commands 复核           |
-| [架构配图指南](guides/pico-harness-architecture-guide-image.md) | 视觉/教学资产，不定义 Runtime 行为          |
+| [架构配图指南](guides/pico-harness-architecture-guide-image.md) | 历史快照；基于 `a5d598f`，不定义当前行为    |
 
 ## 课程式构建记录
 

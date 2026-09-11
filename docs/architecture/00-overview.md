@@ -100,7 +100,8 @@ Item、keys、sources、cursor/receipt 和工作区开关；不与 RuntimeEvent 
 1. [`ARCHITECTURE.md`](../../ARCHITECTURE.md)：当前系统边界、状态所有权与安全边界。
 2. [`01-engine.md`](01-engine.md) 至 [`07-hooks.md`](07-hooks.md)：按模块理解实现；这些
    深入文档可能包含被后续 ADR 取代的局部段落，先看 [`docs/README.md`](../README.md) 的状态索引。
-3. 决策记录 21—29：理解当前实现为何选择 PowerShell、SQLite、入口定形和恢复协议。
+3. 决策记录 21—30：理解当前实现为何选择 PowerShell、SQLite、入口定形和恢复协议；
+   工具披露与运行时边界以取代决策 23 的[决策 30](../decisions/30-decision-maka-tool-runtime.md)为准。
 4. `docs/plans/`：当前实施计划；`docs/history/`：已结束计划、课程与历史设计，不定义当前事实。
 
 ## 技术栈

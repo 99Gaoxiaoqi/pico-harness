@@ -120,7 +120,12 @@ test("cli dispatch: BYOK/Graph 旗标传递与缺口旗标提示", async () => {
 test("cli dispatch: help/version 快速路径不起 TUI", async () => {
   const harness = harnessWithRuntime();
   assert.equal(await harness.run(["--help"]), 0);
-  assert.ok(!harness.stdout.join("").includes("--local"), "help 不再列出 --local");
+  const help = harness.stdout.join("");
+  assert.ok(!help.includes("--local"), "help 不再列出 --local");
+  assert.match(help, /Compatibility options \(accepted but not applied at daemon startup\)/u);
+  assert.match(help, /--provider[\s\S]*Ignored; choose a route with --model/u);
+  assert.match(help, /--mcp-config[\s\S]*Not supported; configure daemon MCP/u);
+  assert.match(help, /--add-dir[\s\S]*Not supported at startup; use \/add-dir/u);
   assert.equal(harness.clientCalls.length, 0);
   assert.equal(await harness.run(["--version"]), 0);
   assert.equal(harness.clientCalls.length, 0);

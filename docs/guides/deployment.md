@@ -53,9 +53,9 @@ $PICO_HOME/workspaces/<workspace-id>/pico.sqlite
 ```
 
 原子长期记忆另存用户级 `$PICO_HOME/memory.sqlite`，含 global/各 workspace 的 Item 与
-工作区开关，使用独立事务。首次访问受信工作区记忆时，只读迁移 workspace `pico.sqlite`
-中的旧 memory 表；已保存 Fact 按原状态导入，pending 保全在旧库，forgotten 只迁移已有来源
-抑制。不会删除旧库，也不会在新库不可用时退回旧提案系统。
+工作区开关，使用独立事务。workspace `pico.sqlite` 中的旧 memory 表仅参与 schema 兼容
+校验；当前 Runtime 不读取、不导入，也不双写旧记忆数据。旧库不会被自动删除，新记忆库
+不可用时也不会回退到旧提案系统。
 
 备份需同时覆盖用户记忆库和工作区库；运行中的 SQLite 应用一致快照方式备份，不能漏掉 WAL。
 遗忘只清理新记忆库的当前内容，不删除原始对话、旧库或备份。详情见

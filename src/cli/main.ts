@@ -55,12 +55,9 @@ const HELP_TEXT = `Usage: pico [options]
 Start the interactive Pico TUI in the current directory.
 
 Options:
-  --provider <openai|claude|responses> Provider protocol (default: openai)
   --thinking <off|low|medium|high>   Override the model's default reasoning level
   --dir <path>                       Workspace directory (default: current directory)
   --model <provider/model|name>      Model route or legacy model name
-  --mcp-config <path>                MCP server configuration file
-  --add-dir <path>                   Add an authorized workspace directory (repeatable)
   -S, --session <id>                 Resume a session by id
   -c, --continue                     Continue the latest session in this project
       --graph                        Start with persistent Agent Graph scheduling enabled
@@ -72,6 +69,11 @@ Options:
       --client                       Compatibility no-op: client mode is the default (Phase 4)
   -h, --help                         Show this help without starting the TUI
   -V, --version                      Show the installed version
+
+Compatibility options (accepted but not applied at daemon startup):
+  --provider <value>                 Ignored; choose a route with --model <provider/model>
+  --mcp-config <path>                Not supported; configure daemon MCP with Pico config files
+  --add-dir <path>                   Not supported at startup; use /add-dir after launch
 `;
 
 export interface CliRuntime {

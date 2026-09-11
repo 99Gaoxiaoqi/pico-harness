@@ -26,7 +26,7 @@ claim 成功 seal source）。
    - **孤儿 claim 幂等改绑（2026-08-20 对抗审查 Finding 1 修订）**：同 target 重复
      claim → `already_claimed`（纯幂等）；异 target 且旧 target 在账本中无 `run.started`
      （claim 成功但 target 起跑前崩溃）→ 改绑到新 target，返回 `claimed` +
-     `rebound:true`，锚点身���/digest/high_water/created_at 不变——否则该崩溃窗口会
+     `rebound:true`，锚点身份/digest/high_water/created_at 不变——否则该崩溃窗口会
      不可逆烧死 source 封口与 target 槽位。旧 target 已起跑则不可换绑。**调度接入
      契约：目标 run 须以 claim 的 targetRunId 起跑（RuntimeRun.start 传入 runId）。**
 3. **目标 run 关联**：`run.started` 事件 data 增加
