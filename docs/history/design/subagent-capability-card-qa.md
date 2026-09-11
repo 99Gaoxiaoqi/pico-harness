@@ -1,13 +1,15 @@
 # 子智能体能力卡片对齐验收
 
+> 归档说明：本文记录一次性视觉与交互验收，不定义当前产品行为。当时的原生截图位于验收者本机视觉工作区，未作为可移植的仓库资产保留。
+
 final result: passed
 
 范围：本次只验收能力启用卡片及其与原有子任务执行入口的衔接，不代表整个 Maka 交互已完成对齐。
 
 ## 对照证据
 
-- 来源：`/Users/anxuan/.codex/visualizations/2026/09/08/01a07ed3-9f51-7013-bcb2-a518063f22b8/maka-interaction-audit/01-capability-details.jpg`
-- 实现：`/Users/anxuan/.codex/visualizations/2026/09/08/01a07ed3-9f51-7013-bcb2-a518063f22b8/pico-capability-card/expanded.jpg`
+- 来源：当时本机保存的 Maka 原生能力详情截图（未随仓库归档）。
+- 实现：当时本机保存的 Pico 能力卡片展开截图（未随仓库归档）。
 - 两张原生窗口截图均为 1316 × 768，同为浅色主题、能力卡展开、技术详情展开，已在同一次视觉检查中并列打开。原生截图不报告 CSS deviceScaleFactor；未宣称逐像素一致。
 - 只比较卡片区域的层级、布局及交互；应用侧栏、正文列宽、模型回复和工具数量不相同。
 
@@ -34,6 +36,6 @@ final result: passed
 
 用户反馈无法辨识可点击的 Agent 入口，已将执行行增加分支图标、轻边框及明确的“查看运行”操作提示；整行仍为单个原生按钮。能力卡数量改为“已加载 N 项协作工具”，并说明子任务启动后可点击名称查看记录。无子会话的历史记录不提供假的跳转。
 
-Computer Use 实测点击更新后的 Local Read 行，成功进入子会话并看到 glob、read_file 工具记录和返回父任务入口。截图：`/Users/anxuan/.codex/visualizations/2026/09/08/01a07ed3-9f51-7013-bcb2-a518063f22b8/pico-capability-card/agent-entry.jpg`。标准窗口中名称、状态及“查看运行”均可见，无遮挡。该显式操作提示为用户本次要求的可发现性改进，不追求原始 Maka 行的逐像素复制。
+Computer Use 实测点击更新后的 Local Read 行，成功进入子会话并看到 glob、read_file 工具记录和返回父任务入口。当时的本机截图未随仓库归档；历史验收记录确认标准窗口中名称、状态及“查看运行”均可见，无遮挡。该显式操作提示为用户本次要求的可发现性改进，不追求原始 Maka 行的逐像素复制。
 
 最终代码重新通过 3 项集成测试、renderer TypeScript、修改文件 ESLint 与 diff 检查。

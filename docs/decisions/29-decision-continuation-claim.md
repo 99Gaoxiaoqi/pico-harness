@@ -1,6 +1,6 @@
 # 决策记录 29：continuation claim 最小协议——中断 run 的确定性续跑锚（2026-08-19）
 
-> 分支：`scratch/maka-gap-analysis`（调研依据：`.scratch/pico-vs-maka-flow-gaps.md` §2 P3；
+> 分支：`scratch/maka-gap-analysis`（调研依据：[历史调研记录](../history/architecture/pico-vs-maka-flow-gap-investigation.md) §2 P3；
 > 对照系 maka：`runtime_continuation_claims` + prefix_digest/high_water + source seal，
 > 设计文档 runtime-resume-phase3-phase4-workspace-checkpoint-design）。
 

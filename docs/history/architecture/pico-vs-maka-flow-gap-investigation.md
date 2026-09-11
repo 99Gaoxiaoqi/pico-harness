@@ -1,7 +1,9 @@
 # pico vs maka：写入路径与故障流程差距（2026-08-19 调研落盘）
 
+> 历史状态：本文是 2026-08 的实施前调查与落地记录；其 P0–P3 已由 ADR 27–29 及后续实现收口。文中 commit、行号、分支和 `.scratch` 命令均是当时证据，不是当前运行入口。
+
 来源：三个只读子代理调研（maka 全链路 / pico 全链路 / maka 文档考古）+ Crossref 文献检索，全部基于 2026-08-19 的两仓代码实况（pico = 19cca177 SQLite 迁移后；maka = main 工作区）。
-定位：scratch 调研记录，供后续实施会话直接引用；不是 ADR。若某项立项实施，须另写 ADR（模板见 §6）。
+定位：历史调研记录，保留实施时的证据与决策背景；不是 ADR。
 
 > **决策状态（2026-08-19）**：P0-P3 四项全部实施完成（用户指令扩围至 P2/P3）。
 > 落地顺序：ADR 27/28/29（53a3961a）→ P1（2c7f4477）+ P2（69bb4bdc）并行 → P0（ec58298e）→ P3（914da1c6）→ seal 收窄修订（8c29c6c5）。
@@ -17,7 +19,7 @@
 > **P3 调度接入落地（2026-08-20）**：executor 级自动锚定——reconcile 后自动 claim 最新未 claim 的 interrupted run，新 run 以 targetRunId 起跑携带 continuationOf（前台/goal/cron 统一生效；显式声明与 prestartedRun 优先）。store 新增 findLatestInterruptedUnclaimedRun。测试 continuation-auto-wiring.test.ts（claim→起跑→源封口→二次不重复锚定，1/1）；executor 面 33 过 4 挂全为预存 Memory 调度家族（stash 对照逐条复现）。ADR 29 §5 已更新。
 >
 > **第二轮对抗审查（2026-08-20，审 4df98341..3af702af 四笔）**：主攻面（自动封口×fork/记忆）攻不破（fork 写目标会话 bootstrap run/记忆写自有表/恢复写走独立 run 或幂等豁免；cancel≠interrupted 分界安全）；2 major 已修——
-> F1 迁移隔离误吞瞬态 IO（readFileSync 在 try 内，EBUSY/EPERM 会永久隔离好文件）→ 4aa2f41f：读取移出 try，永久分类=SyntaxError+"Desktop conversation*"形状错，附 F4 .failed 不覆盖历次副本（9/9 绿）；
+> F1 迁移隔离误吞瞬态 IO（readFileSync 在 try 内，EBUSY/EPERM 会永久隔离好文件）→ 4aa2f41f：读取移出 try，永久分类=SyntaxError+"Desktop conversation\*"形状错，附 F4 .failed 不覆盖历次副本（9/9 绿）；
 > F2 调度接入把跨进程 reconcile 盲区升级为致命封口 → a709f479：终态新鲜度门（缺省 10 分钟，门内不 claim 不封口、存活方继续可写；真实崩溃锚定延迟到窗口后），超长存活 run 残留记录 ADR 29（根治需 reconcile 跨进程活性检测，另立决策）。
 > minor 未修：F3 claim→start 跨进程窗口锚点脱钩（无生产读方，账面失真）、F5 LIMIT 32 滑窗死区（≥33 同批 interrupted 才触发）。审查者事故（junction 误删 node_modules）已恢复，desktop 依赖缺失后经 npm ci 补全，typecheck 全量通过。
 >
@@ -33,9 +35,9 @@
 > 验证法已备好：`node .scratch/run-integration-sweep.mjs .scratch/all-tests.txt`（逐文件扫跑器，单文件 300s 超时防 Windows hang；all-tests.txt 用 `dir /b tests\integration\*.test.ts > .scratch\all-tests.txt` 重新生成）。失败集经三次全量扫跑交叉验证，稳定 27 文件。按五族并行派工（文件面不相交），已知根因线索：
 >
 > - **族A 过时/结构性**：architecture-invariants（2 挂=ENOENT 读已删的旧 runtime-event-store.ts，断言迁到 sqlite-runtime-event-store.ts，口径反映新架构）、projection-diagnostics-evidence-ref（21/1）、session-runtime-dispose（3/1）、plugin-runtime-snapshot-registry（3/1）、plugin-hook-trust（0/1）、workspace-runtime-consistency（11/1，git rev-parse 正斜杠 vs realpath 反斜杠的 Windows 路径断言）。
-> - **族B memory 家族**：memory-quality（1/1）、memory-runtime-quality（2/3）、memory-runtime（**300s 挂起**）、runtime-run-executor 的 Memory 调度 4 条（其余用例绿）。历史实锤：过时 toolCall fake，修法=JSON content 形状；engine 门控变更。源面 src/memory/**。
-> - **族C desktop 环境族**：desktop-runtime-close（2/1）、desktop-plugin-parity（3/1）、desktop-memory-lifecycle-ordering（0/4）、desktop-memory-ui（6/1）。线索：隔离 fixture 报"没有可用模型路由"（基座就挂，与 ADR 28 无关）；~/.pico/config.json 有 lez-claude。源面 src/daemon/desktop-*，不动 src/memory。**附加任务 m-4**：重写 desktop-runtime-close / desktop-memory-lifecycle-ordering 时，把 src/daemon/desktop-conversation-state.ts 里的 JSON 版 DesktopConversationStateStore 类（生产零实例化）一并降级为 tests fixture 或删除（它耦合私有 helper retainFirstSendClaims/emptyState，迁移时同搬）。
-> - **族D terminal-bench 族（8 文件）**：normalizer（0/**33**，优先查——像 schema/快照漂移非环境）、container-policy（3 挂）、captured-process（2）、runtime-controls（2）、docker-cleanup（2）、bundle-lock（1）、task-timeout-preflight（1）。先探 `docker --version`。源面 scripts/terminal-bench/**。
+> - **族B memory 家族**：memory-quality（1/1）、memory-runtime-quality（2/3）、memory-runtime（**300s 挂起**）、runtime-run-executor 的 Memory 调度 4 条（其余用例绿）。历史实锤：过时 toolCall fake，修法=JSON content 形状；engine 门控变更。源面 src/memory/\*\*。
+> - **族C desktop 环境族**：desktop-runtime-close（2/1）、desktop-plugin-parity（3/1）、desktop-memory-lifecycle-ordering（0/4）、desktop-memory-ui（6/1）。线索：隔离 fixture 报"没有可用模型路由"（基座就挂，与 ADR 28 无关）；~/.pico/config.json 有 lez-claude。源面 src/daemon/desktop-\*，不动 src/memory。**附加任务 m-4**：重写 desktop-runtime-close / desktop-memory-lifecycle-ordering 时，把 src/daemon/desktop-conversation-state.ts 里的 JSON 版 DesktopConversationStateStore 类（生产零实例化）一并降级为 tests fixture 或删除（它耦合私有 helper retainFirstSendClaims/emptyState，迁移时同搬）。
+> - **族D terminal-bench 族（8 文件）**：normalizer（0/**33**，优先查——像 schema/快照漂移非环境）、container-policy（3 挂）、captured-process（2）、runtime-controls（2）、docker-cleanup（2）、bundle-lock（1）、task-timeout-preflight（1）。先探 `docker --version`。源面 scripts/terminal-bench/\*\*。
 > - **族E 杂项**：hook-full-flow（0/3，137s）、path-read-boundaries（0/4）、file-write-safety（5/2）、user-config-temp-recovery（1/3）、lifecycle-races（18/3，负载敏感恶化）、headless-one-shot-runner（**300s 挂起**，bootstrap 同类是绿的可对照）。线索：hooks 08-17 shell 化后现存 hooks 需 re-trust；win32 bash 语义须 skip。
 > - 规矩：单文件测试禁全量；每条失败分类可修/环境依赖（有 env-gate 先例才 skip）/真缺陷；不许为绿删断言；逐族提交。
 
@@ -160,6 +162,7 @@ session.send（idempotencyKey）→ DesktopRuntimeService.sendSession
 ## 5. 关键文件索引
 
 **pico**（19cca177）：
+
 - 投影同事务核心：`src/storage/sqlite/sqlite-runtime-event-store.ts:1094`（appendBatchLocked）
 - 事件构造/恢复：`src/runtime/runtime-run.ts`（commitMessages:927 / commitExternalMessageOnce:780 / reconcileIncompleteRuns:362 / finish:1268）
 - ReAct 循环：`src/engine/loop.ts`（tool result inline shaping:2943 / checkpoint:1246）
@@ -168,6 +171,7 @@ session.send（idempotencyKey）→ DesktopRuntimeService.sendSession
 - daemon 账本：`src/storage/sqlite/sqlite-runtime-control-store.ts:1312`（daemon_events+daemon_runs 同事务）
 
 **maka**（main）：
+
 - run 生命周期：`packages/runtime/src/agent-run.ts`（begin:650 / acceptMappedEvent:600 / 写失败仲裁:988）
 - 工具台账：`packages/runtime/src/tool-runtime.ts`（T1/T2）、`packages/storage/src/sqlite-runtime-store.ts`（commitToolPrepared:1645 / commitToolOutcome / seal:2594）
 - 消息投影：`packages/storage/src/sqlite-session-metadata-store.ts`（appendMessages:1352，64KB 分块）

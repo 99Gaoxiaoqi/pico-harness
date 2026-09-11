@@ -6,7 +6,7 @@
 
 - [x] 1. 修正文档事实：统一记忆迁移、工具运行时、CLI 参数与当前架构叙述；修复正文编码损坏；保持历史文档的历史属性。
 - [x] 2. 清理无生产入口代码：用生产依赖图和测试证明逐项确认，删除退役 TUI/命令链、死 UI/样式与只由测试保活的生产实现；不得删除仍承担兼容读取的 Evidence 边界。
-- [ ] 3. 整理仓库资产：归档已完成计划和一次性验收记录，为保留的 prototype / delivery / scratch 资产建立清晰入口或迁移到语义明确的位置。
+- [x] 3. 整理仓库资产：归档已完成计划和一次性验收记录，为保留的 prototype / delivery / scratch 资产建立清晰入口或迁移到语义明确的位置。
 - [ ] 4. 拆分核心热点：优先抽取 `executeAgentRuntime` 与 `DesktopRuntimeService` 的实现协作者；保持公开接口、Runtime 事件、SQLite 事务 owner 与桌面协议不变。SQLite Store 只拆纯投影/codec 协作者，不拆事务所有权。
 
 ## 执行约束
@@ -35,3 +35,6 @@
 - 待办 2：删除无 JSX 消费的 Desktop Environment/Inspector 组件、旧 Workbar wrapper、四个公共死组件及专属样式；保留 `ConversationPage` 活跃 inspector 样式。
 - 待办 2：根 typecheck、Desktop typecheck、严格架构检查、变更 TS/TSX ESLint/Prettier 与 `git diff --check` 通过；Desktop 29 项、Runtime/工具 69 项、TUI 12 项聚焦集成测试全部通过。
 - 待办 2：`EvidenceArchive` / `EvidenceBlobStore`、agent-graph evidence authority 与 TUI inspector legacy evidence 安全读取保持不变。
+- 待办 3：三份已结束计划、子智能体能力卡片验收与已落地的 Pico/Maka 故障流程调研已迁入 `docs/history/`；Desktop 全流程原型迁入 `apps/desktop/prototypes/` 并保留预览入口。
+- 待办 3：Terminal-Bench 交付状态仍为 `release-readiness: active`，发布、观察与接受待完成，因此保留 `.delivery/` 机器工作流原位并在文档索引说明。Windows 内网包说明与双击 TUI 入口互相引用后保留根目录。
+- 待办 3：旧资产路径全仓引用扫描无残留；变更 Markdown 相对链接、Prettier 和 `git diff --check` 通过；原型 JavaScript 语法检查通过，本地 HTTP 预览的 HTML / JS / CSS 均返回 200。

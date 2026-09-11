@@ -66,22 +66,23 @@
 
 ## 架构决策与研究
 
-| 文档                                                                                   | 状态                                          |
-| -------------------------------------------------------------------------------------- | --------------------------------------------- |
-| [16 Pico 与 Maka 状态对比](history/architecture/16-pico-vs-maka-state-architecture.md) | 迁移前研究快照                                |
-| [17 Failure Journal](history/architecture/17-failure-journal.md)                       | 原子记忆迁移前研究；旧分类与链路已过期        |
-| [20 架构审计与治理](history/architecture/20-architecture-audit-and-governance.md)      | 阶段性治理记录                                |
-| [21 Windows PowerShell Host](decisions/21-decision-windows-powershell-host.md)         | 已实施 ADR                                    |
-| [22 Child Run Capacity](decisions/22-decision-child-run-capacity.md)                   | 已实施 ADR                                    |
-| [23 Tool Disclosure Surface](decisions/23-decision-tool-disclosure-surface.md)         | 已被 ADR 30 取代                              |
-| [24 SQLite Storage](decisions/24-decision-sqlite-storage-migration.md)                 | 已实施 ADR                                    |
-| [24a Session Catalog](decisions/24a-decision-session-catalog.md)                       | 原 JSONL 形态已退役，当前为 SQLite projection |
-| [25 Write Path Slimming](decisions/25-decision-write-path-slimming.md)                 | 已被 SQLite 硬切取代                          |
-| [26 ToolResult Entry Shaping](decisions/26-decision-tool-result-entry-shaping.md)      | 已实施 ADR                                    |
-| [27 Write Failure Recovery](decisions/27-decision-write-path-failure-recovery.md)      | 已实施 ADR                                    |
-| [28 Conversation State SQLite](decisions/28-decision-conversation-state-sqlite.md)     | 已实施 ADR                                    |
-| [29 Continuation Claim](decisions/29-decision-continuation-claim.md)                   | 已实施 ADR                                    |
-| [30 Maka Tool Runtime](decisions/30-decision-maka-tool-runtime.md)                     | 已实施 ADR；取代 ADR 23                       |
+| 文档                                                                                          | 状态                                          |
+| --------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| [16 Pico 与 Maka 状态对比](history/architecture/16-pico-vs-maka-state-architecture.md)        | 迁移前研究快照                                |
+| [17 Failure Journal](history/architecture/17-failure-journal.md)                              | 原子记忆迁移前研究；旧分类与链路已过期        |
+| [20 架构审计与治理](history/architecture/20-architecture-audit-and-governance.md)             | 阶段性治理记录                                |
+| [Pico / Maka 写入与故障流程调研](history/architecture/pico-vs-maka-flow-gap-investigation.md) | ADR 27–29 实施前调查，已收口                  |
+| [21 Windows PowerShell Host](decisions/21-decision-windows-powershell-host.md)                | 已实施 ADR                                    |
+| [22 Child Run Capacity](decisions/22-decision-child-run-capacity.md)                          | 已实施 ADR                                    |
+| [23 Tool Disclosure Surface](decisions/23-decision-tool-disclosure-surface.md)                | 已被 ADR 30 取代                              |
+| [24 SQLite Storage](decisions/24-decision-sqlite-storage-migration.md)                        | 已实施 ADR                                    |
+| [24a Session Catalog](decisions/24a-decision-session-catalog.md)                              | 原 JSONL 形态已退役，当前为 SQLite projection |
+| [25 Write Path Slimming](decisions/25-decision-write-path-slimming.md)                        | 已被 SQLite 硬切取代                          |
+| [26 ToolResult Entry Shaping](decisions/26-decision-tool-result-entry-shaping.md)             | 已实施 ADR                                    |
+| [27 Write Failure Recovery](decisions/27-decision-write-path-failure-recovery.md)             | 已实施 ADR                                    |
+| [28 Conversation State SQLite](decisions/28-decision-conversation-state-sqlite.md)            | 已实施 ADR                                    |
+| [29 Continuation Claim](decisions/29-decision-continuation-claim.md)                          | 已实施 ADR                                    |
+| [30 Maka Tool Runtime](decisions/30-decision-maka-tool-runtime.md)                            | 已实施 ADR；取代 ADR 23                       |
 
 ## 专题实现说明
 
@@ -114,7 +115,18 @@
 
 ## 实施计划与历史档案
 
-`plans/` 只放正在执行的计划；最近完成的调整见[第二批结构调整记录](history/plans/2026-09-08-structure-second-pass.md)。上一批调整见 [项目结构调整记录](history/plans/2026-09-08-project-structure-cleanup.md)。已结束计划移入 `history/plans/`，历史未勾选项不自动成为当前待办。
+`plans/` 只放正在执行的计划；当前为[项目结构收敛](plans/2026-09-12-project-structure-convergence.md)。已结束计划移入 `history/plans/`，历史未勾选项不自动成为当前待办。最近归档包括 [提交与全方位验证](history/plans/2026-09-10-submit-full-validation.md)、[全量回归问题修复](history/plans/full-regression-repair.md)与 [Maka 运行时对齐](history/plans/maka-runtime-alignment.md)。
+
+## 仓库资产与工作流记录
+
+| 资产                                                                                       | 用途与状态                                                                                       |
+| ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
+| [Desktop 全流程原型](../apps/desktop/prototypes/full-flow/README.md)                       | 可直接本地预览的目标交互原型；不代表当前实现                                                     |
+| [Desktop 设计验收](history/design/desktop-design-qa.md)                                    | 一次性 Desktop 视觉验收快照                                                                      |
+| [子智能体能力卡片验收](history/design/subagent-capability-card-qa.md)                      | 一次性能力卡片验收；本机截图未作为仓库资产保留                                                   |
+| [Terminal-Bench 失败恢复交付状态](../.delivery/terminal-bench-failure-recovery/state.json) | 高风险机器工作流状态；当前仍为 `release-readiness: active`，发布、观察与接受待完成，因此保留原位 |
+
+根目录的 `启动TUI.bat` 是 Windows 内网包可双击入口，配套说明见 `内网使用说明.txt`；两者保留在根目录以避免破坏离线包的相对路径与双击体验。
 
 | 目录                                | 用途                                                   |
 | ----------------------------------- | ------------------------------------------------------ |

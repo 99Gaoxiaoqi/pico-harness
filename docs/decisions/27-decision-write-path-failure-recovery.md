@@ -1,6 +1,6 @@
 # 决策记录 27：写路径故障恢复协议——工具半执行 indeterminate 判定 + 写失败读回仲裁（2026-08-19）
 
-> 分支：`scratch/maka-gap-analysis`（调研依据：`.scratch/pico-vs-maka-flow-gaps.md` §2 P0/P1；
+> 分支：`scratch/maka-gap-analysis`（调研依据：[历史调研记录](../history/architecture/pico-vs-maka-flow-gap-investigation.md) §2 P0/P1；
 > 对照系 maka：`docs/architecture/runtime-resume-architecture.md` Ch.8、`runtime-recovery-resolver-adr.zh-CN.md`）。
 
 ## 背景与实证
