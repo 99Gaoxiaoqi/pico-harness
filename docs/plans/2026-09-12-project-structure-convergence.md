@@ -7,7 +7,7 @@
 - [x] 1. 修正文档事实：统一记忆迁移、工具运行时、CLI 参数与当前架构叙述；修复正文编码损坏；保持历史文档的历史属性。
 - [x] 2. 清理无生产入口代码：用生产依赖图和测试证明逐项确认，删除退役 TUI/命令链、死 UI/样式与只由测试保活的生产实现；不得删除仍承担兼容读取的 Evidence 边界。
 - [x] 3. 整理仓库资产：归档已完成计划和一次性验收记录，为保留的 prototype / delivery / scratch 资产建立清晰入口或迁移到语义明确的位置。
-- [ ] 4. 拆分核心热点：优先抽取 `executeAgentRuntime` 与 `DesktopRuntimeService` 的实现协作者；保持公开接口、Runtime 事件、SQLite 事务 owner 与桌面协议不变。SQLite Store 只拆纯投影/codec 协作者，不拆事务所有权。
+- [x] 4. 拆分核心热点：优先抽取 `executeAgentRuntime` 与 `DesktopRuntimeService` 的实现协作者；保持公开接口、Runtime 事件、SQLite 事务 owner 与桌面协议不变。SQLite Store 只拆纯投影/codec 协作者，不拆事务所有权。
 
 ## 执行约束
 
@@ -38,3 +38,6 @@
 - 待办 3：三份已结束计划、子智能体能力卡片验收与已落地的 Pico/Maka 故障流程调研已迁入 `docs/history/`；Desktop 全流程原型迁入 `apps/desktop/prototypes/` 并保留预览入口。
 - 待办 3：Terminal-Bench 交付状态仍为 `release-readiness: active`，发布、观察与接受待完成，因此保留 `.delivery/` 机器工作流原位并在文档索引说明。Windows 内网包说明与双击 TUI 入口互相引用后保留根目录。
 - 待办 3：旧资产路径全仓引用扫描无残留；变更 Markdown 相对链接、Prettier 和 `git diff --check` 通过；原型 JavaScript 语法检查通过，本地 HTTP 预览的 HTML / JS / CSS 均返回 200。
+- 待办 4：`executeAgentRuntime` 将主 Provider / 子代理模型路由装配下沉到 `runtime-assembly.ts`，将 Hook 模型运行端口下沉到 `runtime-hook-assembly.ts`；顶层函数保留装配顺序和资源生命周期，`agent-runtime.ts` 由 3444 行降至 3242 行。
+- 待办 4：`DesktopRewindService` 接管 rewind 的进程内幂等状态、耐久 claim 与 fork/file 事务流程；`DesktopRuntimeService` 只提供 Session/信任端口并维持原通知顺序，主文件由 4488 行降至 4271 行。`SqliteRuntimeEventStore` 未参与本轮拆分，避免为形式收口扩大 lease/事务 owner 风险。
+- 待办 4：Provider/子代理、Hook 与 Rewind 聚焦集成回归 33/33 通过；根 typecheck、Desktop typecheck、变更文件 ESLint/Prettier、严格架构检查、build 与 `git diff --check` 通过。全量确定性集成测试 1621 项：1609 通过、12 跳过、0 失败。
