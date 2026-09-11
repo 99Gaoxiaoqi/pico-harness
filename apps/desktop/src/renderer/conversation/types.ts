@@ -49,6 +49,7 @@ export interface SkillItemView extends ConversationItemBase {
 }
 
 export interface RunBoundaryItemView extends ConversationItemBase {
+  readonly runId?: string | undefined;
   readonly kind: "runBoundary";
   readonly status: ConversationRunStatus;
   readonly label: string;
@@ -100,6 +101,7 @@ export interface SubagentItemView extends ConversationItemBase {
 }
 
 export interface ApprovalItemView extends ConversationItemBase {
+  readonly runId?: string | undefined;
   readonly command?: string | undefined;
   readonly risk?: "low" | "medium" | "high" | undefined;
   readonly diff?: string | undefined;

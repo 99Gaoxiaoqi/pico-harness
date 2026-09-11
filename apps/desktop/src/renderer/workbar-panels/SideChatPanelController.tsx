@@ -141,7 +141,11 @@ export function SideChatPanelController({
   );
   const activeRun = sessionRuns.find((run) => !isTerminalRun(run.status));
   const runIds = useMemo(() => new Set(sessionRuns.map((run) => run.id)), [sessionRuns]);
-  const pendingApproval = data.approvals.filter((item) => runIds.has(item.runId)).at(-1);
+  const pendingApproval = data.approvals
+    .filter(
+      (item) => runIds.has(item.runId) && (item.kind === "plan" || item.runId === activeRun?.id),
+    )
+    .at(-1);
   const pendingPrompt = data.prompts.filter((item) => runIds.has(item.runId)).at(-1);
   const items = useMemo(() => {
     const live = activeRun

@@ -320,6 +320,7 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
     return {
       id,
       kind: "runBoundary",
+      runId: stringValue(item.runId) || undefined,
       status: viewStatus,
       label: labels[viewStatus],
       ...(duration ? { duration } : {}),
@@ -361,6 +362,7 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
     return {
       id: structuredItemId("approval", data, id),
       kind: "approval",
+      runId: stringValue(data.runId) || undefined,
       approvalKind: data.kind === "plan" || data.planId || data.plan ? "plan" : "tool",
       command: approval?.command,
       risk: approval?.risk,
@@ -454,11 +456,25 @@ export function conversationItemsFromReplica(view: TranscriptReplicaView): Conve
 
 export function pendingToolApprovalFromTranscript(
   items: readonly ConversationItemView[],
+  activeRunId?: string,
 ): Extract<ConversationItemView, { readonly kind: "approval" }> | undefined {
   // Plan controls come from the current projection, never from historical handoff cards.
+  // A new active run must never lend its identity to an old unresolved receipt.
+  // Unknown legacy identities cannot authorize a card for an explicit live run.
+  const boundaryIndex = items.findLastIndex(
+    (item) => item.kind === "userMessage" || item.kind === "runBoundary",
+  );
+  const terminalRunIds = new Set(
+    items.flatMap((item) =>
+      item.kind === "runBoundary" && item.status !== "started" && item.runId ? [item.runId] : [],
+    ),
+  );
   return items.findLast(
-    (item): item is Extract<ConversationItemView, { readonly kind: "approval" }> =>
+    (item, index): item is Extract<ConversationItemView, { readonly kind: "approval" }> =>
+      (activeRunId !== undefined || index > boundaryIndex) &&
       item.kind === "approval" &&
+      (activeRunId === undefined || item.runId === activeRunId) &&
+      !terminalRunIds.has(item.runId ?? "") &&
       item.approvalKind !== "plan" &&
       item.state === "pending" &&
       item.id.startsWith("approval:"),

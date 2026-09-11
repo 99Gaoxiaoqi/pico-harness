@@ -86,3 +86,117 @@ test("approval preview and exact authorization survive live delivery, durable re
   });
   assert.equal(malformed?.sessionScope, undefined);
 });
+
+test("重启后的旧待审批记录不会冒充新运行，当前审批仍能回放和解决", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-stale-approval-"));
+  const session = new Session("stale-approval", root, {
+    persistence: true,
+    picoHome: join(root, "home"),
+  });
+  context.after(async () => {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await session.recover();
+  let version = 0;
+  const approval = async (runId: string, id: string) =>
+    ingestDesktopRuntimeNotification(
+      session,
+      createRuntimeNotification({
+        eventId: id,
+        topic: "approval.requested",
+        scope: { workspacePath: root, sessionId: session.id, runId },
+        resourceVersion: ++version,
+        at: version,
+        payload: buildApprovalRequestedPayload(
+          {
+            taskId: id,
+            toolName: "bash",
+            args: '{"command":"echo check"}',
+            message: "执行命令",
+            preview: { target: "echo check", summary: "执行命令" },
+            providerCallId: `call-${id}`,
+          },
+          runId,
+        ),
+      }),
+    );
+  const boundary = async (runId: string, status: "running" | "failed") =>
+    ingestDesktopRuntimeNotification(
+      session,
+      createRuntimeNotification({
+        eventId: `${runId}-${status}`,
+        topic: status === "running" ? "run.started" : "run.finished",
+        scope: { workspacePath: root, sessionId: session.id, runId },
+        resourceVersion: ++version,
+        at: version,
+        payload: {
+          run: {
+            runId,
+            sessionId: session.id,
+            status,
+            startedAt: 1,
+            version,
+            ...(status === "failed" ? { finishedAt: version } : {}),
+          },
+        },
+      }),
+    );
+  const replay = async () =>
+    parseConversation(
+      projectRuntimeTranscript(await session.readHydrationSnapshot(), {}),
+      root,
+      session.id,
+    ).items;
+  await approval("old-run", "old-approval");
+  let items = await replay();
+  assert.equal(pendingToolApprovalFromTranscript(items, "old-run")?.runId, "old-run");
+  assert.equal(
+    pendingToolApprovalFromTranscript(items, "new-run"),
+    undefined,
+    "即使结束边界尚未同步也不能关联到新run",
+  );
+  assert.equal(await boundary("old-run", "failed"), true);
+  assert.equal(await boundary("new-run", "running"), true);
+  items = await replay();
+  assert.equal(pendingToolApprovalFromTranscript(items, "new-run"), undefined);
+  assert.equal(
+    pendingToolApprovalFromTranscript(items),
+    undefined,
+    "历史末尾有新运行边界，不回捞旧卡",
+  );
+  assert.ok(
+    items.some((item) => item.kind === "approval" && item.id === "approval:old-approval"),
+    "审计记录仍保留",
+  );
+  await approval("new-run", "new-approval");
+  items = await replay();
+  const pending = pendingToolApprovalFromTranscript(items, "new-run");
+  assert.equal(pending?.id, "approval:new-approval");
+  assert.equal(pending?.providerCallId, "call-new-approval");
+  assert.equal(pending?.command, "echo check");
+  assert.equal(
+    pendingToolApprovalFromTranscript(
+      items.map((item) => (item.kind === "approval" ? { ...item, runId: undefined } : item)),
+      "new-run",
+    ),
+    undefined,
+    "缺少运行身份的历史卡不能冒充当前审批",
+  );
+  await ingestDesktopRuntimeNotification(
+    session,
+    createRuntimeNotification({
+      eventId: "new-resolved",
+      topic: "approval.resolved",
+      scope: { workspacePath: root, sessionId: session.id, runId: "new-run" },
+      resourceVersion: ++version,
+      at: version,
+      payload: { approvalId: "new-approval", decision: "deny" },
+    }),
+  );
+  assert.equal(
+    pendingToolApprovalFromTranscript(await replay(), "new-run"),
+    undefined,
+    "解决新卡后也不能回退到旧卡",
+  );
+});
