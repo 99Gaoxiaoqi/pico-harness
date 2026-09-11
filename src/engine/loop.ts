@@ -1031,7 +1031,21 @@ export class AgentEngine implements AgentRunner {
     const currentIndex = entries.findIndex((entry) => entry.eventId === currentRequest.eventId);
     if (currentIndex === 0) return;
 
-    const covered = currentIndex > 0 ? entries.slice(0, currentIndex) : entries;
+    let coveredCount = currentIndex > 0 ? currentIndex : entries.length;
+    // A hard reset also creates a physical coverage boundary. Keep the whole
+    // recovered exchange (and any intervening user inputs) if it cannot be cut.
+    while (
+      coveredCount > 0 &&
+      (entries[coveredCount - 1]!.compactionBoundarySafe === false ||
+        entries[coveredCount]?.message.toolCallId !== undefined)
+    )
+      coveredCount--;
+    if (coveredCount === 0) {
+      throw new Error(
+        "Runtime hard reset has no safe boundary before interrupted recovery history",
+      );
+    }
+    const covered = entries.slice(0, coveredCount);
     const through = covered.at(-1);
     if (!through) return;
     const checkpointId = `hard-reset:${randomUUID()}`;

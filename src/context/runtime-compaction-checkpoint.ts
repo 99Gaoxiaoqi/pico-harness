@@ -98,6 +98,13 @@ export async function recordRuntimeCompactionCheckpoint(
   const covered = entries.slice(0, preview.compactedCount);
   const through = covered.at(-1);
   if (!through) return undefined;
+  if (through.compactionBoundarySafe === false) {
+    logger.warn(
+      { sessionId: session.id, throughEventId: through.eventId },
+      "[RuntimeCompaction] 跳过会拆分中断恢复历史的压缩边界",
+    );
+    return undefined;
+  }
 
   const checkpointId = `checkpoint:${randomUUID()}`;
   let disposition: "eligible" | "policy_denied" | undefined;
