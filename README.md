@@ -168,6 +168,8 @@ pico
 
 仓库内 `npm run dev` 会在存在时读取仓库根目录 `.env`，但裸 `LLM_*` 不再自动生成模型路由；这些变量只作为 `/provider import-env` 的迁移输入，或由用户 Provider 的 `apiKeyEnv` 显式引用。生产密钥不要写入仓库。
 
+Windows 内网部署包可按[内网使用说明](内网使用说明.txt)配置，并双击[启动 TUI](启动TUI.bat)；这两个根目录文件是离线包的明确入口。
+
 ### 启动 Desktop
 
 ```bash

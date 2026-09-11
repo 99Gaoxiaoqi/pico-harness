@@ -1,6 +1,6 @@
 # 决策记录 28：desktop conversation-state 收编 SQLite control scope（2026-08-19）
 
-> 分支：`scratch/upstream-gap-analysis`（调研依据：`.scratch/pico-vs-upstream-flow-gaps.md` §2 P2；
+> 分支：`scratch/upstream-gap-analysis`（调研依据：[历史调研记录](../history/architecture/pico-vs-upstream-flow-gap-investigation.md) §2 P2；
 > 对照系 upstream：`core_message_receipts` + `core_root_source_message_proofs` + `admitRootTurn`）。
 
 ## 背景与实证
