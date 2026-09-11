@@ -47,9 +47,9 @@ pico 的 Tool Result 处理有一条清晰的设计原则——**工具的原始
 
 **2048 token** 是分水岭（`DEFAULT_RUNTIME_PROJECTION_THRESHOLD_TOKENS = 2048`）。低于这个值的工具结果原文进上下文；高于的，原文落盘到 Evidence CAS，模型只收到一份 **1600 字符**（`DEFAULT_SUMMARY_MAX_CHARS`）的 head-tail 预览。
 
-### 统一 head-tail 预览
+### 历史 head-tail 预览
 
-预览采用统一的 head-tail 截断（`src/tools/result-summarizer.ts`）：保留输出的头尾各一半预算，中间标注省略字符数。头部保留开头（文件 import、配置、命令开始），尾部保留结尾（exit code、错误摘要、测试结果）。
+旧实现曾用统一 head-tail 截断生成预览；该写入路径已随 ADR 26 的入口定形退役。当前 `src/tools/tool-result-observation.ts` 对未超限输出全文 inline 入库，对超过 1MB 入口上限的输出写入有界的合成拒绝文本。
 
 之所以不做"按工具类型分策略的智能提取"（如只保留 tsc 错误行、只保留测试 FAIL 行），是因为：
 

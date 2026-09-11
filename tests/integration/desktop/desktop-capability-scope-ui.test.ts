@@ -35,14 +35,6 @@ test("composer no longer exposes the retired Discovery entry", async () => {
   assert.doesNotMatch(source, /启动代码探索|取消探索|恢复探索/u);
 });
 
-test("changes panel describes completed-run checkpoints instead of live workspace state", async () => {
-  const source = await rendererSource("conversation/ConversationEnvironmentPanel.tsx");
-  assert.match(source, /运行结束后，这里会显示固化的变更检查点/u);
-  assert.match(source, /仅展示已结束运行固化的变更/u);
-  assert.doesNotMatch(source, /<strong>\{active \? "等待文件变更" : "工作区是干净的"\}<\/strong>/u);
-  assert.doesNotMatch(source, /Pico 的写入会实时出现在这里/u);
-});
-
 test("扩展页保持用户级，项目有效能力仅由显式诊断入口加载", async () => {
   const source = await rendererSource("runtime.ts");
   const workspaceLoader = source.slice(

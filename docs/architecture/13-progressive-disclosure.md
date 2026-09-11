@@ -6,8 +6,8 @@
 
 > **[历史文档]** 工具披露部分已于 2026-08-18 被重构取代（surface 组级激活 +
 > durable 重播 + TF-IDF），现状与动机见 `23-decision-tool-disclosure-surface.md`。
-> 本文其余披露机制（Skill 二段式 / ToolResult 预览与 Evidence 回取 / Repo Map
-> 渐进索引 / explore_repo 侦察）的描述仍然有效。
+> Skill 二段式、Repo Map 渐进索引与 explore_repo 侦察章节仍可作设计说明；
+> ToolResult 预览与 Evidence 回取章节只记录 ADR 26 之前的历史语义。
 
 > 本文梳理 pico-harness 里所有"渐进式披露"(progressive disclosure)机制的统一设计与协作。核心不是"分了几套披露",而是同一个设计哲学的五种落地：**先给轻量摘要或入口,确有需要时再按需支付成本回取完整内容。**
 
@@ -45,7 +45,7 @@ pico 的应对是贯穿性的：**默认只暴露有界的摘要层,完整层按
 
 ### 分层判定
 
-`tool-tiers.ts` 用一个 `Set` 查表把工具分成两组：
+`tool-surface.ts` 在 `PICO_TOOL_GROUPS` 中直接声明 always/deferred 组：
 
 ```text
 CORE_TOOLS = { read_file, write_file, edit_file, bash,
@@ -54,7 +54,7 @@ CORE_TOOLS = { read_file, write_file, edit_file, bash,
 其余一切 = 扩展组（MCP 动态工具、代码智能、网络等也归扩展）
 ```
 
-判定函数 `getTier(name)`：在集合里是 `"core"`,否则 `"extended"`。
+消费方直接从该目录派生每个 Turn 的基线与可检索工具，不再维护独立 tier 适配层。
 
 为什么这 10 个进核心组,文件注释给了理由：
 
@@ -151,7 +151,7 @@ threshold = 2048 token
 
 ### head-tail 摘要
 
-`result-summarizer.ts` 的预览策略(默认 1600 字符)：
+旧 result summarizer 的预览策略(默认 1600 字符)：
 
 - 头部一半：保留开头(import、配置、命令开始)
 - 尾部一半：保留结尾(exit code、错误摘要、测试结果)
@@ -312,11 +312,11 @@ pico-harness 的渐进披露不是某一个开关,而是贯穿工具、技能、
 
 ## 代码索引
 
-- 工具分层：`src/tools/tool-tiers.ts`
+- 工具分组与宿主亲和性：`src/tools/tool-surface.ts`
 - 工具披露状态机：`src/tools/tool-disclosure.ts`
 - 检索元工具：`src/tools/search-tools.ts`
 - Skill Catalog 与二段式：`src/context/skill.ts`、`src/context/composer.ts`
-- Tool Result 预览与 Evidence 回读：`src/tools/result-summarizer.ts`、`src/tools/tool-result-observation.ts`、`src/tools/evidence-read.ts`
+- Tool Result 入口定形与 legacy Evidence 安全读取：`src/tools/tool-result-observation.ts`、`src/tools/evidence-read.ts`
 - Repo Map 渐进索引：`src/code-intelligence/repo-map.ts`、`src/tools/code-intelligence.ts`
 - explore_repo 侦察：`src/tools/explore-repo.ts`
 - Loop 集成与旁路披露：`src/engine/loop.ts`

@@ -5,24 +5,34 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   FilesWorkbarPanel,
-  GraphWorkbarPanel,
-  InspectorWorkbarPanel,
-  ReviewWorkbarPanel,
-  TasksWorkbarPanel,
-  TerminalWorkbarPanel,
-  WorkbarPanelHost,
   artifactChunkProgress,
+  type WorkbarArtifactContent,
+} from "../../../apps/desktop/src/renderer/workbar-panels/FilesWorkbarPanel.js";
+import { GraphWorkbarPanel } from "../../../apps/desktop/src/renderer/workbar-panels/GraphWorkbarPanel.js";
+import { tracePageView } from "../../../apps/desktop/src/renderer/workbar-panels/InspectorPanelController.js";
+import {
+  InspectorWorkbarPanel,
   contextUsagePercent,
-  createTaskUpdateRequest,
   groupInspectorTraceItems,
-  parseGraphDetail,
+} from "../../../apps/desktop/src/renderer/workbar-panels/InspectorWorkbarPanel.js";
+import {
+  ReviewWorkbarPanel,
   reviewSelectionKey,
+} from "../../../apps/desktop/src/renderer/workbar-panels/ReviewWorkbarPanel.js";
+import {
+  TasksWorkbarPanel,
+  createTaskUpdateRequest,
+  type WorkbarTaskItem,
+} from "../../../apps/desktop/src/renderer/workbar-panels/TasksWorkbarPanel.js";
+import {
+  TerminalWorkbarPanel,
   shouldPollTerminalPanel,
   terminalGridFromBounds,
-  tracePageView,
-  type WorkbarArtifactContent,
-  type WorkbarTaskItem,
-} from "../../../apps/desktop/src/renderer/workbar-panels/index.js";
+} from "../../../apps/desktop/src/renderer/workbar-panels/TerminalWorkbarPanel.js";
+import {
+  WorkbarPanelHost,
+  parseGraphDetail,
+} from "../../../apps/desktop/src/renderer/workbar-panels/WorkbarPanelHost.js";
 
 test("Workbar Host assembles all six authority panels through its public entry point", (context) => {
   Object.assign(globalThis, { React });

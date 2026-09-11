@@ -7,7 +7,7 @@ import {
   SideChatWorkbarPanel,
   shouldActivateSideChatData,
   sideChatCanSend,
-} from "../../../apps/desktop/src/renderer/workbar-panels/index.js";
+} from "../../../apps/desktop/src/renderer/workbar-panels/SideChatWorkbarPanel.js";
 import { resolveSideChatCreationTarget } from "../../../apps/desktop/src/renderer/workbar-panels/side-chat-creation.js";
 
 Object.assign(globalThis, { React });

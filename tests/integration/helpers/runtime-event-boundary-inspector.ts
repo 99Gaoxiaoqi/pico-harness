@@ -1,17 +1,17 @@
-import type { RuntimeEvent } from "../storage/runtime-event.js";
-import type { RuntimeEventStoreEntry } from "../storage/runtime-event-store-contracts.js";
-import type { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
-import { canonicalizeWorkspacePath } from "../paths/pico-paths.js";
+import type { RuntimeEvent } from "../../../src/storage/runtime-event.js";
+import type { RuntimeEventStoreEntry } from "../../../src/storage/runtime-event-store-contracts.js";
+import type { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { canonicalizeWorkspacePath } from "../../../src/paths/pico-paths.js";
 import type {
   RuntimeBoundaryInspection,
   RuntimeBoundaryInspector,
   RuntimeLaunchExpectation,
   RuntimeLaunchReconciliation,
-} from "./safe-boundary-resume.js";
+} from "../../../src/runtime/safe-boundary-resume.js";
 import {
   RECOVERABLE_TASK_LAUNCH_RECEIPT_SCHEMA_VERSION,
   type TaskRuntimeBoundary,
-} from "../tasks/task-run-contract.js";
+} from "../../../src/tasks/task-run-contract.js";
 
 export interface RuntimeEventBoundaryInspectorOptions {
   /**

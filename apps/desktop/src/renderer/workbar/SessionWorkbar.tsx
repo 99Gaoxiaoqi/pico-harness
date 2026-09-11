@@ -68,23 +68,6 @@ export interface SessionWorkbarDockProps {
   readonly onOpenLauncher: (dock: WorkbarDock) => void;
 }
 
-/** Legacy right-Dock props retained while App.tsx is migrated to SessionWorkbarLayout. */
-export interface SessionWorkbarProps {
-  readonly tabs: readonly SessionWorkbarTab[];
-  readonly activeTabId: string | undefined;
-  readonly collapsed: boolean;
-  readonly width: number;
-  readonly showRestoreButton?: boolean | undefined;
-  readonly launcher?: ReactNode | undefined;
-  readonly renderPanel: (tab: SessionWorkbarTab) => ReactNode;
-  readonly onSelect: (tabId: string) => void;
-  readonly onClose: (tabId: string) => void;
-  readonly onReorder: (tabId: string, targetIndex: number) => void;
-  readonly onToggleCollapsed: () => void;
-  readonly onResize: (width: number) => void;
-  readonly onOpenLauncher: () => void;
-}
-
 export interface SessionWorkbarLayoutProps {
   readonly state: WorkbarState;
   readonly children: ReactNode;
@@ -613,45 +596,6 @@ export function SessionWorkbarDock({
         </div>
       )}
     </div>
-  );
-}
-
-export function SessionWorkbar({
-  tabs,
-  activeTabId,
-  collapsed,
-  width,
-  showRestoreButton,
-  launcher,
-  renderPanel,
-  onSelect,
-  onClose,
-  onReorder,
-  onToggleCollapsed,
-  onResize,
-  onOpenLauncher,
-}: SessionWorkbarProps) {
-  return (
-    <SessionWorkbarDock
-      dock="right"
-      tabs={tabs}
-      activeTabId={activeTabId}
-      collapsed={collapsed}
-      size={width}
-      showRestoreButton={showRestoreButton}
-      launcher={launcher}
-      renderPanel={(tab) => renderPanel(tab)}
-      onSelect={(tabId) => onSelect(tabId)}
-      onClose={onClose}
-      onCloseOthers={() => undefined}
-      onCloseRight={() => undefined}
-      onReorder={(tabId, targetIndex) => onReorder(tabId, targetIndex)}
-      onMoveDock={() => undefined}
-      onPinPreview={() => undefined}
-      onToggleCollapsed={() => onToggleCollapsed()}
-      onResize={(nextSize) => onResize(nextSize)}
-      onOpenLauncher={() => onOpenLauncher()}
-    />
   );
 }
 

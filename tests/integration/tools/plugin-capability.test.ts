@@ -10,10 +10,6 @@ import {
   PluginCapabilityRegistry,
 } from "../../../src/plugins/plugin-capability.js";
 import type { PluginManagementService } from "../../../src/plugins/plugin-management-service.js";
-import {
-  createPluginCommand,
-  type PluginManagementCommandService,
-} from "../../../src/plugins/plugin-commands.js";
 import { resolvePluginContributions } from "../../../src/plugins/plugin-resolver.js";
 import {
   loadPluginRuntimeSnapshot,
@@ -175,60 +171,6 @@ test("runtime snapshot is the capability factory connection point", async () => 
   assert.equal(accepted.capabilities.length, 1);
   assert.equal(accepted.capabilities[0]?.kind, "provider");
   assert.deepEqual(accepted.diagnostics, []);
-  const inspectCommand = createPluginCommand({
-    workDir: "/tmp/workspace",
-    service: {
-      inspect: async () => ({
-        installed,
-        contributions,
-        trust: "active",
-        changedSinceInstall: false,
-        active: true,
-      }),
-    } as unknown as PluginManagementCommandService,
-    runtimeDiagnostics: [
-      {
-        pluginId: installed.id,
-        sourcePath: installed.installPath,
-        code: "plugin_capability_unknown",
-        message: "fixture runtime diagnostic",
-        scope: "local",
-      },
-      {
-        pluginId: installed.id,
-        sourcePath: "/tmp/project-copy",
-        code: "plugin_capability_factory_failed",
-        message: "wrong scope diagnostic",
-        scope: "project",
-      },
-    ],
-    runtimeCapabilities: [
-      ...accepted.capabilities,
-      { ...accepted.capabilities[0]!, pluginScope: "project" },
-    ],
-  });
-  const inspection = await inspectCommand.execute(
-    {
-      raw: "/plugin inspect fixture-plugin --scope local",
-      name: "plugin",
-      args: "inspect fixture-plugin --scope local",
-      argv: ["inspect", "fixture-plugin", "--scope", "local"],
-    },
-    {},
-  );
-  assert.equal(inspection.type, "local");
-  assert.match(
-    inspection.type === "local" ? (inspection.message ?? "") : "",
-    /plugin_capability_unknown/u,
-  );
-  assert.match(
-    inspection.type === "local" ? (inspection.message ?? "") : "",
-    /Active capabilities: 1\. provider:provider@1/u,
-  );
-  assert.doesNotMatch(
-    inspection.type === "local" ? (inspection.message ?? "") : "",
-    /wrong scope diagnostic/u,
-  );
   await accepted.dispose();
   assert.equal(disposed, 2);
 });
