@@ -49,12 +49,7 @@ import { ToolDisclosure } from "../tools/tool-disclosure.js";
 import { createCodeModeTool } from "../tools/code-mode-tool.js";
 import { codeCellAdmissionFor } from "../tools/code-cell-admission.js";
 import { isToolSupportedForHost, type ToolHostKind } from "../tools/tool-surface.js";
-import {
-  createRawProvider,
-  type ProviderKind,
-  type ProviderRuntimeDependencies,
-} from "../provider/factory.js";
-import { PromptCachePrewarmCoordinator } from "../provider/prompt-cache-prewarm.js";
+import { type ProviderKind } from "../provider/factory.js";
 import { ContextOverflowError, isAbortError } from "../provider/errors.js";
 import type { ProviderConfig } from "../provider/config.js";
 import type { CredentialResolver } from "../provider/credential-vault.js";
@@ -86,12 +81,10 @@ import {
   DelegateTaskTool,
   type DelegatePlanStepCoordinator,
   SpawnSubagentTool,
-  type SubagentModelSelectionRequest,
 } from "../tools/subagent.js";
 import { CostTracker, type CostTrackerOptions } from "../observability/tracker.js";
 import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
-import { resolveModelRouteCapabilities } from "../provider/model-capabilities.js";
-import { ModelRouter } from "../provider/model-router.js";
+import type { ModelRouter } from "../provider/model-router.js";
 import { Tracer } from "../observability/trace.js";
 import { logger } from "../observability/logger.js";
 import {
@@ -116,11 +109,7 @@ import { classifyBashCommand } from "../approval/bash-safety.js";
 import { classifyPowerShellCommand } from "../approval/powershell-safety.js";
 import { hostShellDialect } from "../os/shell.js";
 import { createSessionRuntime, type SessionRuntime } from "./session-runtime.js";
-import {
-  buildSubagentModelCatalog,
-  createInheritOnlySubagentModelCatalog,
-  type SubagentModelCatalog,
-} from "./subagent-model-catalog.js";
+import type { SubagentModelCatalog } from "./subagent-model-catalog.js";
 import type { MiddlewareFunc } from "../tools/registry.js";
 import {
   McpConnectionManager,
@@ -157,8 +146,6 @@ import {
   type BackgroundWorkspaceTrustVerifier,
   type PreparedBackgroundYoloPolicy,
 } from "../safety/background-yolo-policy.js";
-import { resolveSubagentModelSelection } from "./subagent-model-selection.js";
-import { createSubagentModelRuntime } from "./subagent-model-runtime.js";
 import {
   loadPluginRuntimeSnapshot,
   type PluginRuntimeSnapshot,
@@ -191,12 +178,13 @@ import {
 } from "./runtime-run-executor.js";
 import { createEngineRuntimePort } from "./engine-runtime-port-adapter.js";
 import { createSessionForkRuntimePort } from "./session-fork-runtime-port-adapter.js";
+import { bindRuntimeHookCapabilities } from "./runtime-hook-assembly.js";
 
 const livePlanAdmissions = new Set<string>();
 const PLAN_REVISION_FEEDBACK_MAX_CHARS = 4_000;
 const PLAN_REVISION_CONTEXT_FIELD_MAX_CHARS = 256;
 import {
-  assembleRuntimeProvider,
+  assembleRuntimeModels,
   billingRouteForProvider,
   type RuntimeProviderFactory,
 } from "./runtime-assembly.js";
@@ -1357,16 +1345,6 @@ export async function executeAgentRuntime(
       },
     };
     const currentConfig: ProviderConfig = providerConfig;
-    const routeCredentials =
-      dependencies.provider === undefined && dependencies.modelRouter && currentConfig.routeId
-        ? dependencies.modelRouter.credentialCandidates(currentConfig.routeId)
-        : [];
-    const credentialPool =
-      routeCredentials.length > 1 ? new CredentialPool([...routeCredentials]) : undefined;
-    const providerDependencies: ProviderRuntimeDependencies = {
-      promptCachePrewarm: PromptCachePrewarmCoordinator.shared(sessionStorageRoot),
-    };
-    const providerFactory = dependencies.providerFactory ?? createRawProvider;
     const providerDecorator = (provider: LLMProvider): LLMProvider => {
       const activated = activatePluginProviderCapabilities(
         pluginSnapshot,
@@ -1376,85 +1354,37 @@ export async function executeAgentRuntime(
       );
       return dependencies.providerDecorator ? dependencies.providerDecorator(activated) : activated;
     };
-    const subagentModelRouter =
-      dependencies.modelRouter ??
-      (effectiveOptions.modelRouteId && dependencies.provider === undefined
-        ? activeRouteModelRouter(kind, providerConfig, effectiveOptions.modelRouteId)
-        : undefined);
-    const parentModelRouteId = effectiveOptions.modelRouteId;
-    const parentModelDisplayId =
-      parentModelRouteId ?? dependencies.provider?.modelName ?? providerConfig.model;
-    const allowSubagentModelRouteOverride =
-      dependencies.modelRouter !== undefined &&
-      dependencies.provider === undefined &&
-      !backgroundPolicy;
-    const subagentModelCatalog =
-      subagentModelRouter && parentModelRouteId
-        ? buildSubagentModelCatalog({
-            router: subagentModelRouter,
-            parentRouteId: parentModelRouteId,
-            aliases: claudeCompatibility.enabled ? claudeCompatibility.modelAliases : {},
-            allowRouteOverride: allowSubagentModelRouteOverride,
-          })
-        : createInheritOnlySubagentModelCatalog(parentModelDisplayId);
-    const resolveSubagentModelRuntime =
-      subagentModelRouter && parentModelRouteId && dependencies.provider === undefined
-        ? (request?: SubagentModelSelectionRequest) => {
-            const requestedModelRoute = request?.ephemeralRouteId ?? request?.profileRouteId;
-            const selection = resolveSubagentModelSelection({
-              router: subagentModelRouter,
-              parentRouteId: parentModelRouteId,
-              ...(request?.ephemeralRouteId !== undefined
-                ? { ephemeralRouteId: request.ephemeralRouteId }
-                : {}),
-              ...(request?.profileRouteId !== undefined
-                ? { profileRouteId: request.profileRouteId }
-                : {}),
-              ...(request?.ephemeralThinkingEffort !== undefined
-                ? { ephemeralThinkingEffort: request.ephemeralThinkingEffort }
-                : {}),
-              ...(request?.profileThinkingEffort !== undefined
-                ? { profileThinkingEffort: request.profileThinkingEffort }
-                : {}),
-              parentThinkingEffort: effectiveOptions.thinkingEffort ?? "off",
-              modelAliases: picoConfig.compatibility.claude.modelAliases,
-              claudeCompatibilityEnabled: picoConfig.compatibility.claude.enabled,
-              allowRouteOverride: allowSubagentModelRouteOverride,
-            });
-            const runtime = createSubagentModelRuntime({
-              router: subagentModelRouter,
-              selection,
-              session,
-              providerFactory,
-              providerDecorator,
-              trackerOptions,
-              providerDependencies,
-            });
-            return {
-              provider: runtime.provider,
-              compactor: runtime.compactor,
-              usageSession: session,
-              thinkingEffort: runtime.thinkingEffort ?? "off",
-              ...(requestedModelRoute ? { requestedModelRoute } : {}),
-              resolvedModelRoute: runtime.route.id,
-              source: selection.source,
-            };
-          }
-        : undefined;
-    const providerAssembly = assembleRuntimeProvider({
+    const modelAssembly = assembleRuntimeModels({
       kind,
       config: currentConfig,
       session,
+      sessionStorageRoot,
       trackerOptions,
       ...(dependencies.provider !== undefined ? { provider: dependencies.provider } : {}),
-      providerFactory,
+      ...(dependencies.providerFactory ? { providerFactory: dependencies.providerFactory } : {}),
       providerDecorator,
-      ...(credentialPool ? { credentialPool } : {}),
-      providerDependencies,
+      ...(effectiveOptions.modelRouteId ? { modelRouteId: effectiveOptions.modelRouteId } : {}),
+      ...(effectiveOptions.thinkingEffort !== undefined
+        ? { thinkingEffort: effectiveOptions.thinkingEffort }
+        : {}),
+      ...(dependencies.modelRouter ? { modelRouter: dependencies.modelRouter } : {}),
+      background: backgroundPolicy !== undefined,
+      claudeCompatibility: {
+        enabled: claudeCompatibility.enabled,
+        modelAliases: claudeCompatibility.modelAliases,
+      },
     });
+    const {
+      providerFactory,
+      providerDependencies,
+      subagentModelRouter,
+      parentModelRouteId,
+      subagentModelCatalog,
+      resolveSubagentModelRuntime,
+    } = modelAssembly;
     const contextRuntime = buildContextRuntime(kind, providerConfig.model);
-    const trackedProvider = providerAssembly.provider;
-    const rebuildProvider = providerAssembly.rebuildProvider;
+    const trackedProvider = modelAssembly.provider;
+    const rebuildProvider = modelAssembly.rebuildProvider;
     if (memoryRepository && (await memoryExtractionAllowed()).allowed) {
       atomicMemoryRuntime = new AtomicMemoryRuntime({
         workDir,
@@ -1498,68 +1428,19 @@ export async function executeAgentRuntime(
     }
     let activeMcpManager = collaborationMode() === "plan" ? undefined : dependencies.mcpManager;
     const oneShotMcpCalls = new Set<string>();
-    runtimeState.bindHookRuntime({
+    bindRuntimeHookCapabilities({
+      session,
+      runtimeState,
       provider: trackedProvider,
-      modelRuntime: {
-        run: (execute, signal) => runHostOwnedRuntimeOperation(session, execute, signal),
-      },
-      mcpInvoker: {
-        async invokeConnectedTool(server, tool, input, context) {
-          if (!activeMcpManager) throw new Error("MCP manager 尚未连接");
-          return await activeMcpManager.invokeConnectedTool(server, tool, input, context);
-        },
-      },
-      agentVerifier: {
-        async verify(request) {
-          const verifierEngine = new AgentEngine({
-            provider: hookPurposeProvider(trackedProvider),
-            registry: new ToolRegistry(),
-            workDir,
-            runtimePort: createEngineRuntimePort(),
-            workspaceRoots,
-            usageSession: session,
-            goalManager: runtimeState.goalManager,
-            ...(dependencies.toolResultRedactionSecrets
-              ? { toolResultRedactionSecrets: dependencies.toolResultRedactionSecrets }
-              : {}),
-          });
-          const verifierRegistry = createSubagentRegistryFactory({
-            workDir,
-            workspaceRoots,
-            runner: verifierEngine,
-            manager: runtimeState.delegationManager,
-            maxSpawnDepth: 0,
-            processSandbox: {
-              config: picoConfig.sandbox,
-              scratchRoot: join(picoHome, "sandboxes", session.id, "subagents"),
-            },
-            ownerSessionId: session.id,
-            env: runtimeEnv,
-            codeIntelligence: runtimeState.codeIntelligence,
-          })({ mode: "explore", role: "leaf", depth: 0, maxSpawnDepth: 0 });
-          const task = [
-            request.prompt,
-            "",
-            "只读核验以下 Hook input。最终只输出单个 JSON 对象：",
-            '{"ok": boolean, "reason": string}',
-            JSON.stringify(request.input),
-          ].join("\n");
-          const result = await verifierEngine.runSub(task, verifierRegistry, undefined, {
-            maxTurns: request.maxTurns,
-            role: "leaf",
-            depth: 0,
-            maxSpawnDepth: 0,
-            signal: request.signal,
-            workDir,
-          });
-          return result.summary;
-        },
-      },
-      onAsyncRewake(handler, output) {
-        runtimeState.hookRewakeQueue.enqueue(
-          `[Hook asyncRewake ${handler.id}] ${output.reason ?? output.additionalContext ?? output.decision}`,
-        );
-      },
+      workDir,
+      workspaceRoots,
+      picoHome,
+      runtimeEnv,
+      sandboxConfig: picoConfig.sandbox,
+      mcpManager: () => activeMcpManager,
+      ...(dependencies.toolResultRedactionSecrets
+        ? { toolResultRedactionSecrets: dependencies.toolResultRedactionSecrets }
+        : {}),
     });
     const { goalManager, todoStore, toolDisclosure, backgroundManager, delegationManager } =
       runtimeState;
@@ -2895,89 +2776,6 @@ function buildContextRuntime(
       retainLastMsgs: 6,
     }),
   };
-}
-
-/** Hook verifier 的所有模型调用都显式覆盖为 purpose=hook。 */
-function hookPurposeProvider(provider: LLMProvider): LLMProvider {
-  return {
-    ...(provider.modelName ? { modelName: provider.modelName } : {}),
-    get requestCapabilities() {
-      return provider.requestCapabilities;
-    },
-    generate: (messages, tools, options) =>
-      provider.generate(messages, tools, { ...options, purpose: "hook" }),
-    ...(provider.generateStream
-      ? {
-          generateStream: (messages, tools, onDelta, options) =>
-            provider.generateStream!(messages, tools, onDelta, {
-              ...options,
-              purpose: "hook",
-            }),
-        }
-      : {}),
-  };
-}
-
-async function runHostOwnedRuntimeOperation<Result>(
-  session: Session,
-  execute: () => Promise<Result>,
-  signal: AbortSignal,
-): Promise<Result> {
-  const ambient = currentRuntimeRun();
-  if (ambient) {
-    if (!ambient.claimsSession(session) || ambient.runtimeEventWriteGuard !== session) {
-      throw new Error(
-        `Hook model handler cannot reuse RuntimeRun ${ambient.runId} for Session ${session.id}`,
-      );
-    }
-    return execute();
-  }
-
-  return session.serialize(async () => {
-    const runtimeCapability = session.runtimeEventCapability;
-    if (!runtimeCapability) {
-      throw new Error(`Hook model handler requires a durable Session: ${session.id}`);
-    }
-    await RuntimeRun.reconcileIncompleteRuns({
-      capability: runtimeCapability,
-    });
-    await RuntimeRun.repairSessionProjection(session, {
-      capability: runtimeCapability,
-    });
-    const runtimeRun = await RuntimeRun.start({
-      capability: runtimeCapability,
-    });
-    return runtimeRun.run(execute, signal);
-  });
-}
-
-function activeRouteModelRouter(
-  kind: ProviderKind,
-  config: ProviderConfig,
-  routeId: string,
-): ModelRouter {
-  const apiKeyEnv = "PICO_ACTIVE_MODEL_API_KEY";
-  return new ModelRouter(
-    [
-      {
-        id: routeId,
-        providerId: routeId.split("/", 1)[0] || "active",
-        provider: kind,
-        model: config.model,
-        baseURL: config.baseURL,
-        apiKeyEnv,
-        ...(config.auth ? { auth: config.auth } : {}),
-        source: "config",
-        capabilities:
-          config.capabilities ??
-          resolveModelRouteCapabilities(kind, config.model, undefined, {
-            baseURL: config.baseURL,
-          }),
-      },
-    ],
-    { [apiKeyEnv]: config.apiKey },
-    routeId,
-  );
 }
 
 export function buildApprovalMiddleware(
