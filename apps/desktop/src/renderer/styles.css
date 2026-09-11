@@ -441,28 +441,6 @@
     border-color: var(--focus);
     box-shadow: 0 0 0 3px rgb(54 116 90 / 0.11);
   }
-  .path-button {
-    display: flex;
-    width: 100%;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 9px;
-    border: 1px solid var(--line-strong);
-    border-radius: 8px;
-    background: var(--sidebar-raised);
-    color: var(--sidebar-ink);
-  }
-  .path-button span {
-    min-width: 0;
-    flex: 1;
-    overflow: hidden;
-    text-align: left;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .path-button > svg:last-child {
-    color: var(--sidebar-muted);
-  }
   .dialog-overlay {
     position: fixed;
     z-index: 60;
@@ -486,18 +464,6 @@
     animation: dialog-in var(--motion);
     overscroll-behavior: contain;
   }
-  .dialog__icon {
-    display: grid;
-    width: 42px;
-    height: 42px;
-    margin-bottom: 16px;
-    place-items: center;
-    border-radius: 12px;
-  }
-  .dialog__icon--warning {
-    background: var(--warning-soft);
-    color: var(--warning);
-  }
   .dialog h2 {
     padding-right: 32px;
     font-size: 20px;
@@ -517,46 +483,6 @@
     position: absolute;
     top: 17px;
     right: 17px;
-  }
-  .command-preview {
-    margin-top: 17px;
-    padding: 12px;
-    overflow-x: auto;
-    border: 1px solid #d9d6cc;
-    border-radius: 8px;
-    background: #292925;
-    color: #ebe9e0;
-    font-size: 12px;
-    white-space: pre-wrap;
-  }
-  .risk-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-top: 12px;
-    color: var(--ink-secondary);
-    font-size: 12px;
-  }
-  .choice-list {
-    display: grid;
-    gap: 8px;
-    margin-top: 20px;
-  }
-  .choice-list button {
-    display: flex;
-    min-height: 44px;
-    align-items: center;
-    justify-content: space-between;
-    padding: 10px 12px;
-    border: 1px solid var(--line);
-    border-radius: 9px;
-    background: var(--surface);
-    color: var(--ink);
-    text-align: left;
-  }
-  .choice-list button:hover {
-    border-color: #9ebcac;
-    background: var(--accent-soft);
   }
   @keyframes fade-in {
     from {
@@ -1004,14 +930,11 @@
   .sidebar--collapsed .nav-link span,
   .sidebar--collapsed .sidebar-nav__caption,
   .sidebar--collapsed .sidebar-tasks,
-  .sidebar--collapsed .path-button span,
-  .sidebar--collapsed .path-button svg:last-child,
   .sidebar--collapsed .runtime-health {
     display: none;
   }
   .sidebar--collapsed .sidebar-new-task,
-  .sidebar--collapsed .nav-link,
-  .sidebar--collapsed .path-button {
+  .sidebar--collapsed .nav-link {
     justify-content: center;
     padding-inline: 0;
   }
@@ -1935,16 +1858,6 @@
   .timeline li > svg {
     width: 18px;
     color: var(--ink-tertiary);
-  }
-  .step-icon--done {
-    color: var(--accent) !important;
-  }
-  .step-icon--active {
-    color: var(--warning) !important;
-    animation: spin 1.4s linear infinite;
-  }
-  .step-icon--failed {
-    color: var(--danger) !important;
   }
   .timeline time {
     color: var(--ink-tertiary);
@@ -4281,13 +4194,6 @@
 .approval-details__diff .is-removed {
   color: #b13f38;
 }
-.dialog:has(.approval-details) {
-  max-height: 85vh;
-  overflow-y: auto;
-}
-.dialog:has(.approval-details) .dialog__actions {
-  flex-wrap: wrap;
-}
 
 /* Approval uses the same neutral surfaces as the surrounding conversation. */
 .conversation-interaction-slot:has(.approval-details) {
@@ -4331,10 +4237,6 @@
   .conversation-interaction-slot__actions
   button:not(.is-primary):hover:not(:disabled) {
   background: var(--surface-strong);
-}
-.dialog:has(.approval-details) .dialog__icon--warning {
-  background: var(--surface-muted);
-  color: var(--ink-secondary);
 }
 
 /* Keep the decision visible; expand the potentially long diff only on demand. */

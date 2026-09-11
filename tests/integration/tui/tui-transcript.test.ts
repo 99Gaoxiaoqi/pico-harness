@@ -8,8 +8,6 @@ import { TuiReporter } from "../../../src/tui/tui-reporter.js";
 import { hydrateTuiEntries, hydrateTuiReporter } from "../../../src/tui/session-hydration.js";
 import type { SessionHydrationSnapshot } from "../../../src/engine/session-runtime.js";
 import type { TranscriptEvent } from "../../../src/presentation/transcript-event-store.js";
-import type { Session } from "../../../src/engine/session.js";
-import { applyTuiRewind } from "../../../src/tui/rewind-runtime.js";
 
 test("Transcript hard cut rejects legacy event shapes", () => {
   const base = { eventId: "legacy", sequence: 1, createdAt: 0 };
@@ -487,59 +485,6 @@ test("UI-only transcript clear is not persisted as a durable session fact", asyn
     persisted.some((event) => event.type === "transcript.cleared"),
     false,
   );
-});
-
-test("rewind after a local clear forks a new session and returns its id", async () => {
-  const durable = new TuiReporter();
-  durable.pushUserMessage("durable old user");
-  const hydration = {
-    schemaVersion: 1,
-    persistenceSequence: 1,
-    sessionId: "rewind-after-clear",
-    conversationId: "rewind-after-clear",
-    workDir: "/tmp",
-    identity: {},
-    createdAt: new Date(0).toISOString(),
-    updatedAt: new Date(0).toISOString(),
-    messages: [{ role: "user", content: "durable old user" }],
-    messageSequences: [1],
-    transcriptEvents: durable.getEvents(),
-    transcriptEventSequences: durable.getEvents().map((event) => event.sequence),
-    toolResults: [],
-    runtime: { stateVersion: 2, usage: {} },
-  } as unknown as SessionHydrationSnapshot;
-  const reporter = new TuiReporter();
-  hydrateTuiReporter(reporter, hydration);
-  reporter.clear();
-  reporter.pushUserMessage("local post-clear user");
-  // Non-destructive rewind: forkFromCheckpoint 返回新 session id，
-  // 原 session 与其 reporter 不变。调用方负责切换到 forkedSessionId。
-  const fakeSession = {
-    forkFromCheckpoint: async () => ({ targetSessionId: "forked-session" }),
-    readHydrationSnapshot: async () => hydration,
-  } as unknown as Session;
-  const stubForkPort = {} as unknown as Parameters<typeof applyTuiRewind>[0]["forkRuntimePort"];
-
-  const result = await applyTuiRewind({
-    session: fakeSession,
-    reporter,
-    snapshot: {
-      messageId: "rewind-point",
-      userPrompt: "original prompt",
-      messageIndex: 1,
-      transcriptIndex: 1,
-      timestamp: new Date(0).toISOString(),
-      trackedFileCount: 0,
-      backedUpFileCount: 0,
-      deletedFileCount: 0,
-    },
-    mode: "conversation",
-    forkRuntimePort: stubForkPort,
-    createTargetSessionId: () => "forked-session",
-  });
-
-  assert.equal(result.forkedSessionId, "forked-session");
-  assert.equal(result.inputText, "original prompt");
 });
 
 test("suppressing an assistant turn closes the reasoning stream so a retry does not concatenate (reporter-7)", () => {

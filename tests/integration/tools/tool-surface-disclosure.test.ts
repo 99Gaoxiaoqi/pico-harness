@@ -24,7 +24,6 @@ import {
   isToolSupportedForHost,
   PICO_TOOL_GROUPS,
 } from "../../../src/tools/tool-surface.js";
-import { CORE_TOOLS, getTier } from "../../../src/tools/tool-tiers.js";
 import { searchTools } from "../../../src/tools/tool-search-index.js";
 import type { ToolDefinition } from "../../../src/schema/message.js";
 
@@ -92,14 +91,13 @@ test("组目录互斥：无工具重复声明", () => {
   }
 });
 
-test("CORE_TOOLS 从 surface 派生且 getTier 兼容", () => {
-  assert.equal(CORE_TOOLS.size, 10);
-  assert.equal(getTier("read_file"), "core");
-  assert.equal(getTier("ask_user"), "core");
-  // MCP/未分组动态工具落 extended
-  assert.equal(getTier("mcp__server__tool"), "extended");
-  // deferred 组成员落 extended（激活前不可见）
-  assert.equal(getTier("web_search"), "extended");
+test("core 工具只由活跃 surface 目录声明", () => {
+  const core = PICO_TOOL_GROUPS.find((group) => group.id === "core");
+  assert.ok(core);
+  assert.equal(core.economy, "always");
+  assert.equal(core.toolNames.length, 10);
+  assert.ok(core.toolNames.includes("read_file"));
+  assert.ok(core.toolNames.includes("ask_user"));
 });
 
 test("Turn 激活单调累积、Step 冻结、Run 绑定上限与下一 Turn 重置", async () => {

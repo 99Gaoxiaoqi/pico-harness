@@ -47,7 +47,6 @@ const HANDWRITTEN_TIMEOUT_WHITELIST = new Map([
   ["src/daemon/instance-lock.ts", "既有：runtime.ping 超时包装"],
   ["src/daemon/ipc-auth.ts", "既有：Windows 工具执行超时包装"],
   ["src/hooks/executors/executor.ts", "既有：SIGKILL 升级超时"],
-  ["src/input/cron-daemon-bridge.ts", "既有：daemon 启动重试退避 sleep"],
   ["src/input/user-config-store.ts", "既有：delay() helper"],
   ["src/internal/headless-one-shot-runner.ts", "既有：delay() helper / cancel 超时"],
   ["src/mcp/http-client.ts", "既有：请求超时包装"],

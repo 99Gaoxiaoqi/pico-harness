@@ -16,7 +16,7 @@ import {
   type AgentRecoveryWorkerInstaller,
   type AgentRecoveryWorkerReceipt,
 } from "../../../src/runtime/agent-recoverable-task-adapter.js";
-import { RuntimeEventBoundaryInspector } from "../../../src/runtime/runtime-event-boundary-inspector.js";
+import { RuntimeEventBoundaryInspector } from "../helpers/runtime-event-boundary-inspector.js";
 import { RuntimeRunExecutor } from "../../../src/runtime/runtime-run-executor.js";
 import { currentRuntimeRun, RuntimeRun } from "../../../src/runtime/runtime-run.js";
 import {

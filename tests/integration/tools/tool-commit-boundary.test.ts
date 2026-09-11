@@ -9,7 +9,7 @@ import { SilentReporter } from "../../../src/engine/reporter.js";
 import { Session } from "../../../src/engine/session.js";
 import { HookService } from "../../../src/hooks/service.js";
 import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
-import { RuntimeEventBoundaryInspector } from "../../../src/runtime/runtime-event-boundary-inspector.js";
+import { RuntimeEventBoundaryInspector } from "../helpers/runtime-event-boundary-inspector.js";
 import { RuntimeRun } from "../../../src/runtime/runtime-run.js";
 import { ToolCommitBoundaryError } from "../../../src/tools/registry.js";
 import { ToolRegistry } from "../../../src/tools/registry-impl.js";

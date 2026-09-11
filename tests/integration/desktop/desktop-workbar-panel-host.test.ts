@@ -7,16 +7,18 @@ import type {
   DesktopResult,
 } from "../../../apps/desktop/src/preload/contract.js";
 import {
-  WorkbarReviewConflictError,
   appendArtifactStreamChunk,
-  appendTerminalOutput,
   artifactContentView,
+} from "../../../apps/desktop/src/renderer/workbar-panels/FilesPanelController.js";
+import type { WorkbarArtifact } from "../../../apps/desktop/src/renderer/workbar-panels/FilesWorkbarPanel.js";
+import { tracePageView } from "../../../apps/desktop/src/renderer/workbar-panels/InspectorPanelController.js";
+import {
+  WorkbarReviewConflictError,
   loadConsistentReviewSnapshot,
-  queryAllWorkbarTasks,
-  shouldRefreshWorkbarResource,
-  tracePageView,
-  type WorkbarArtifact,
-} from "../../../apps/desktop/src/renderer/workbar-panels/index.js";
+} from "../../../apps/desktop/src/renderer/workbar-panels/ReviewPanelController.js";
+import { queryAllWorkbarTasks } from "../../../apps/desktop/src/renderer/workbar-panels/TasksPanelController.js";
+import { appendTerminalOutput } from "../../../apps/desktop/src/renderer/workbar-panels/TerminalPanelController.js";
+import { shouldRefreshWorkbarResource } from "../../../apps/desktop/src/renderer/workbar-panels/useResourceFrame.js";
 
 test("resource_changed only refreshes the active matching Session authority", () => {
   const frame = resourceFrame({ sessionId: "session-a", resource: "tasks", revision: 4 });

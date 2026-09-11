@@ -19,7 +19,7 @@ import type {
   RuntimeToolResultRecordedEvent,
 } from "../../../src/engine/session-runtime-event.js";
 import type { LLMProvider } from "../../../src/provider/interface.js";
-import { RuntimeEventBoundaryInspector } from "../../../src/runtime/runtime-event-boundary-inspector.js";
+import { RuntimeEventBoundaryInspector } from "../helpers/runtime-event-boundary-inspector.js";
 import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
 import { RuntimeRun } from "../../../src/runtime/runtime-run.js";
 import type { Message } from "../../../src/schema/message.js";

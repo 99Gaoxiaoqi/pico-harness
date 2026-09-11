@@ -10,7 +10,8 @@ import {
   normalizeSessionRuntimeStatePatch,
   type PersistedSessionSettings,
 } from "../../../src/engine/session-runtime.js";
-import { PlanCoordinator, PlanConflictError } from "../../../src/plan/index.js";
+import { PlanConflictError } from "../../../src/plan/contract.js";
+import { PlanCoordinator } from "../../../src/plan/coordinator.js";
 import {
   createDefaultSessionSettings,
   exitSessionPlanMode,
