@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { access, mkdtemp, readFile, rm, unlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -13,7 +15,9 @@ import {
   parseProviderCredentialRef,
 } from "../../../src/provider/credential-vault.js";
 import {
+  ProviderOperationLockTimeoutError,
   ProviderOperationJournal,
+  type ProviderOperationPrepareInput,
   type ProviderOperationRecord,
 } from "../../../src/provider/provider-operation-journal.js";
 
@@ -73,6 +77,45 @@ test("provider journal redacts unrelated config keys and recovery preserves thei
   assert.equal(await journal.read(), undefined);
 });
 
+test("provider journal rejects malformed stale locks and recovers current dead-owner locks", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-provider-journal-lock-format-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const journal = new ProviderOperationJournal({
+    picoHome: root,
+    parseUserConfig,
+    lockTimeoutMs: 30,
+    staleLockMs: 1,
+  });
+  const malformed = `${JSON.stringify({
+    version: 1,
+    pid: process.pid,
+    acquiredAt: Date.now() - 60_000,
+  })}\n`;
+  await writeFile(journal.lockPath, malformed, { mode: 0o600 });
+  await ageLock(journal.lockPath);
+
+  await assert.rejects(journal.prepare(importOperationInput()), ProviderOperationLockTimeoutError);
+  assert.equal(await readFile(journal.lockPath, "utf8"), malformed);
+
+  await unlink(journal.lockPath);
+  const deadPid = await exitedProcessId();
+  await writeFile(
+    journal.lockPath,
+    `${JSON.stringify({
+      version: 1,
+      token: "current-dead-journal-writer",
+      pid: deadPid,
+      acquiredAt: Date.now() - 60_000,
+    })}\n`,
+    { mode: 0o600 },
+  );
+  await ageLock(journal.lockPath);
+
+  const prepared = await journal.prepare(importOperationInput());
+  assert.equal(prepared.phase, "prepared");
+  await assert.rejects(access(journal.lockPath), isMissing);
+});
+
 function userConfig(apiKey: string, includeProviderB: boolean): PicoUserConfig {
   return parseUserConfig(
     {
@@ -101,6 +144,43 @@ function userConfig(apiKey: string, includeProviderB: boolean): PicoUserConfig {
       },
     },
     "test-user-config",
+  );
+}
+
+function importOperationInput(): ProviderOperationPrepareInput {
+  const target = userConfig("synthetic-key", true);
+  return {
+    kind: "import",
+    previousUserConfig: { version: 1, providers: {} },
+    targetUserConfig: target,
+    credentialRef: credentialRefForProvider({
+      providerId: "provider-b",
+      protocol: "openai",
+      baseURL: target.providers["provider-b"]!.baseURL,
+    }),
+    credentialExistedBefore: false,
+    configRevision: "0".repeat(64),
+  };
+}
+
+async function exitedProcessId(): Promise<number> {
+  const child = spawn(process.execPath, ["-e", "process.exit(0)"], { stdio: "ignore" });
+  if (child.pid === undefined) throw new Error("failed to spawn lock owner process");
+  await once(child, "exit");
+  return child.pid;
+}
+
+async function ageLock(path: string): Promise<void> {
+  const old = new Date(Date.now() - 60_000);
+  await utimes(path, old, old);
+}
+
+function isMissing(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { readonly code?: unknown }).code === "ENOENT"
   );
 }
 

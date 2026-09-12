@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import {
   access,
   mkdir,
@@ -9,6 +11,7 @@ import {
   stat,
   symlink,
   unlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -67,6 +70,46 @@ test("active lock prevents recovery from deleting a live writer temporary", asyn
   await unlink(store.lockPath);
   await store.read();
   await assert.rejects(access(temporary), isMissing);
+});
+
+test("malformed stale locks fail closed while current dead-owner locks are recovered", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-user-config-lock-format-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const store = new UserConfigStore({ picoHome: root, lockTimeoutMs: 30, staleLockMs: 1 });
+  const initial = await store.read();
+  const malformed = `${JSON.stringify({
+    version: 1,
+    pid: process.pid,
+    acquiredAt: Date.now() - 60_000,
+  })}\n`;
+  await writeFile(store.lockPath, malformed, { mode: 0o600 });
+  await ageLock(store.lockPath);
+
+  await assert.rejects(
+    store.write(config("blocked"), { expectedRevision: initial.revision }),
+    UserConfigLockTimeoutError,
+  );
+  assert.equal(await readFile(store.lockPath, "utf8"), malformed);
+
+  await unlink(store.lockPath);
+  const deadPid = await exitedProcessId();
+  await writeFile(
+    store.lockPath,
+    `${JSON.stringify({
+      version: 1,
+      token: "current-dead-writer",
+      pid: deadPid,
+      acquiredAt: Date.now() - 60_000,
+    })}\n`,
+    { mode: 0o600 },
+  );
+  await ageLock(store.lockPath);
+
+  const recovered = await store.write(config("recovered"), {
+    expectedRevision: initial.revision,
+  });
+  assert.equal(recovered.config.providers.recovered?.models[0], "recovered-model");
+  await assert.rejects(access(store.lockPath), isMissing);
 });
 
 test("temporary recovery rejects symlinks and abnormal targets without following them", async (context) => {
@@ -132,6 +175,18 @@ function config(id: string): PicoUserConfig {
       },
     },
   };
+}
+
+async function exitedProcessId(): Promise<number> {
+  const child = spawn(process.execPath, ["-e", "process.exit(0)"], { stdio: "ignore" });
+  if (child.pid === undefined) throw new Error("failed to spawn lock owner process");
+  await once(child, "exit");
+  return child.pid;
+}
+
+async function ageLock(path: string): Promise<void> {
+  const old = new Date(Date.now() - 60_000);
+  await utimes(path, old, old);
 }
 
 function isMissing(error: unknown): boolean {

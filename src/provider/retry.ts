@@ -2,9 +2,8 @@
 // 把瞬时故障(429 限流、5xx 抖动、网络抖动)对上层 Main Loop 透明化。
 //
 // 设计参考 kimi-code packages/agent-core/src/loop/retry.ts 的 chatWithRetry,
-// 关键差异:pico-harness 的 provider 多数尚未实现 isRetryableError,
-// 因此即便 provider 没有自定义判定,也用 defaultIsRetryableError 兜底继续重试,
-// 而非像 kimi-code 那样直接走单次快路径(默认兜底始终生效)。
+// 关键差异:即便 provider 没有自定义判定,也会用
+// defaultIsRetryableError 统一处理结构化状态错误、超时和 fetch 网络错误。
 
 import type { LLMProvider, LLMProviderRequestOptions } from "./interface.js";
 import type { Message, ToolDefinition } from "../schema/message.js";
@@ -106,7 +105,7 @@ export function registerProviderRequestIdentity(
  * 在 Provider.generate 之上叠加指数退避重试。
  *
  * 判定优先级:provider 实现了 isRetryableError 时优先用其判定,
- * 否则用 defaultIsRetryableError 兜底(覆盖已改造与未改造 provider)。
+ * 否则用 defaultIsRetryableError 兜底。
  *
  * 不重试的硬性条件:
  * - abort 错误:永不重试(交给调用方处理);
@@ -221,13 +220,11 @@ export async function generateWithRetry(
 }
 
 /**
- * 默认可重试判定兜底(兼容未改造 provider):
+ * 默认可重试判定兜底:
  * - abort 错误:不重试(交给调用方)。
  * - ContextOverflowError:不重试(交给响应式压缩层)。
  * - LLMStatusError:statusCode ∈ 白名单则重试。
  * - TypeError:fetch 网络错误,重试。
- * - 裸 Error:从 message 正则提取 [数字] 状态码命中白名单则重试
- *   (兼容未抛 LLMStatusError、把状态码埋字符串里的 provider)。
  */
 export function defaultIsRetryableError(error: unknown): boolean {
   return classifyProviderError(error).retryable;
@@ -248,12 +245,6 @@ function isDefaultRetryableError(error: unknown): boolean {
   if (error instanceof Error) {
     // 网络错误:fetch 抛 TypeError("failed to fetch" / "fetch failed")
     if (error instanceof TypeError) return true;
-    // 兜底:从 message 提取 [429] 这类状态码,兼容未改造 provider
-    const match = /\[(\d{3})]/.exec(error.message);
-    if (match && match[1] !== undefined) {
-      const code = Number(match[1]);
-      if (RETRYABLE_STATUS_CODES.has(code)) return true;
-    }
   }
   return false;
 }
