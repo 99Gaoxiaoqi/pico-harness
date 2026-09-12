@@ -247,7 +247,7 @@ async function fixture(t: TestContext) {
           ...base,
           eventId: `started:${runId}`,
           kind: "run.started",
-          data: { workDir },
+          data: { workDir, agentSwarmAuthorization: "none" },
         },
         { ownerFence },
       );

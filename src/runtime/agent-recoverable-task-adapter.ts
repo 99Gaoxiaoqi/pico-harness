@@ -758,7 +758,7 @@ async function admitSuccessorRuntimeRun(
     );
   const agentSwarmAuthorization = existingStart
     ? existingStart.data.agentSwarmAuthorization
-    : (sourceStart.data.agentSwarmAuthorization ?? "none");
+    : sourceStart.data.agentSwarmAuthorization;
   const invocationId = `invocation:${context.expectedRuntimeRunId}`;
   const started: RuntimeRunStartedEvent = {
     schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
@@ -774,7 +774,7 @@ async function admitSuccessorRuntimeRun(
     kind: "run.started",
     data: {
       workDir: input.workspacePath,
-      ...(agentSwarmAuthorization !== undefined ? { agentSwarmAuthorization } : {}),
+      agentSwarmAuthorization,
     },
   };
   const ownerFence = await writeGuard.assertRuntimeEventWriteAllowed();

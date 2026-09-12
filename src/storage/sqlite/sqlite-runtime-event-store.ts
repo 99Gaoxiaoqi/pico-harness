@@ -991,7 +991,7 @@ export class SqliteRuntimeEventStore {
       kind: "run.started",
       data: {
         workDir: canonicalizeWorkspacePath(input.workDir),
-        ...(agentSwarmAuthorization !== undefined ? { agentSwarmAuthorization } : {}),
+        agentSwarmAuthorization,
         ...(input.presentation ? { presentation: input.presentation } : {}),
         continuationOf: {
           runId: claim.sourceRunId,

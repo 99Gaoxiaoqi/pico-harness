@@ -44,7 +44,7 @@ test("root wake starts one exact root RuntimeRun with deterministic identities",
             partial: false,
             visibility: "internal",
             kind: "run.started",
-            data: { workDir: input.workDir },
+            data: { workDir: input.workDir, agentSwarmAuthorization: "none" },
           },
         };
         return "started";

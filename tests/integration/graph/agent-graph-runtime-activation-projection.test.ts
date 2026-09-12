@@ -117,7 +117,7 @@ function runStartedEvent(): Extract<RuntimeEvent, { kind: "run.started" }> {
   return {
     ...eventBase(CLAIM.runStartedEventId),
     kind: "run.started",
-    data: { workDir: "/workspace" },
+    data: { workDir: "/workspace", agentSwarmAuthorization: "none" },
   };
 }
 

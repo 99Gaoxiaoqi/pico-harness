@@ -178,7 +178,7 @@ async function createFixture(t: { after(fn: () => void): void }) {
       partial: false,
       visibility: "internal",
       kind: "run.started",
-      data: { workDir: workspace },
+      data: { workDir: workspace, agentSwarmAuthorization: "none" },
     },
     { ownerFence: fence },
   );

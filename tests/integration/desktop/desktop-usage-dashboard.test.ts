@@ -76,7 +76,7 @@ test("usage dashboard joins real model and tool ledgers across workspaces, prese
         eventId: "start",
         at: new Date(1000).toISOString(),
         kind: "run.started",
-        data: { workDir: path },
+        data: { workDir: path, agentSwarmAuthorization: "none" },
       },
       {
         ...base,
@@ -84,7 +84,13 @@ test("usage dashboard joins real model and tool ledgers across workspaces, prese
         at: new Date(1500).toISOString(),
         kind: "tool.started",
         refs: { toolCallId: "tool" },
-        data: { toolName: "read_file", argumentsHash: "a".repeat(64) },
+        data: {
+          toolName: "read_file",
+          argumentsHash: "a".repeat(64),
+          argumentsJson: "{}",
+          argumentsRedacted: true,
+          recoveryMode: "never_auto_retry",
+        },
       },
       {
         ...base,
