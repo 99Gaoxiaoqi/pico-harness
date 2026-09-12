@@ -54,7 +54,9 @@ async function canonicalizeEntry(
       });
     });
     if (!parentInfo.isDirectory()) {
-      throw new Error(`Sandbox boundary exact-path parent must be a directory: ${parent}`);
+      throw new Error(`Sandbox boundary exact-path parent must be a directory: ${parent}`, {
+        cause: error,
+      });
     }
     return { ...entry, path: resolve(await realpath(parent), basename(entry.path)) };
   }
