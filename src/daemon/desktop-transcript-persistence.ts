@@ -15,14 +15,7 @@ import {
   type RuntimeNotification,
 } from "@pico/protocol";
 
-const RUN_BOUNDARY_TOPICS = new Set([
-  "run.started",
-  "run.pause_requested",
-  "run.paused",
-  "run.resumed",
-  "run.cancel_requested",
-  "run.finished",
-]);
+const RUN_BOUNDARY_TOPICS = new Set(["run.started", "run.updated", "run.finished"]);
 
 export function isDesktopTranscriptNotification(topic: string): boolean {
   return (
@@ -302,7 +295,7 @@ async function persistPromptResolved(
     entry: {
       kind: "prompt",
       title: "Question answered",
-      state: "resolved",
+      state: "answered",
       data: compactInteractionData({ promptId, runId: notification.scope.runId }),
     },
   });

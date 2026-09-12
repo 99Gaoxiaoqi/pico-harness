@@ -182,7 +182,7 @@ test("session continuity accepts projected tool identity metadata", () => {
           name: "write_file",
           args: '{"path":"smoke.txt"}',
           status: "running",
-          data: { toolCallId: "call-1", entryId: "entry-1" },
+          data: { toolCallId: "call-1", providerCallId: "provider-1", entryId: "entry-1" },
         },
       },
     ],
@@ -191,4 +191,167 @@ test("session continuity accepts projected tool identity metadata", () => {
   } as const;
 
   assert.deepEqual(parseRuntimeResult("session.subscription.open", result), result);
+});
+
+test("transcript result boundary rejects retired tool, run and interaction aliases", () => {
+  const envelope = {
+    version: 1,
+    toolCallId: "provider-1",
+    toolName: "read_file",
+    status: "succeeded",
+    rawSizeBytes: 2,
+    sha256: "a".repeat(64),
+    deliveryTruncated: false,
+    projection: {
+      version: 1,
+      mode: "full",
+      text: "ok",
+      strategy: "full",
+      truncated: false,
+    },
+  } as const;
+  const result = (item: unknown) => ({
+    watermark: {
+      historyEpoch: "history-1",
+      projectorVersion: 4,
+      throughSequence: 1,
+    },
+    items: [
+      {
+        itemId: "item-1",
+        itemRevision: 1,
+        positionSequence: 1,
+        positionOrdinal: 0,
+        item,
+      },
+    ],
+  });
+  const terminal = {
+    id: "tool:call-1",
+    kind: "tool",
+    name: "read_file",
+    args: "{}",
+    status: "success",
+    data: { providerCallId: "provider-1" },
+    result: envelope,
+  } as const;
+  assert.deepEqual(
+    parseRuntimeResult("session.transcript.page", result(terminal)),
+    result(terminal),
+  );
+  for (const current of [
+    {
+      id: "approval:tool",
+      kind: "approval",
+      title: "Approve tool",
+      detail: "Run read_file",
+      state: "waiting",
+      data: {
+        approvalId: "tool",
+        runId: "run-1",
+        kind: "tool",
+        title: "Approve tool",
+        detail: "Run read_file",
+        risk: "low",
+        toolName: "read_file",
+        args: "{}",
+        providerCallId: "provider-1",
+      },
+    },
+    {
+      id: "approval:plan",
+      kind: "approval",
+      title: "Approve plan",
+      detail: "Execute plan",
+      state: "waiting",
+      data: {
+        approvalId: "plan",
+        runId: "run-1",
+        kind: "plan",
+        title: "Approve plan",
+        detail: "Execute plan",
+        risk: "high",
+        planId: "plan-1",
+        expectedRevision: 1,
+        expectedSessionSequence: 0,
+        controlEpoch: "epoch-1",
+        operationId: "operation-1",
+      },
+    },
+    {
+      id: "approval:done",
+      kind: "approval",
+      title: "Approval granted",
+      state: "allow_session",
+      data: { approvalId: "done", runId: "run-1", decision: "allow_session" },
+    },
+    {
+      id: "prompt:waiting",
+      kind: "prompt",
+      title: "Choose",
+      state: "waiting",
+      data: { promptId: "waiting", runId: "run-1", options: [{ optionId: "1" }] },
+    },
+    {
+      id: "prompt:answered",
+      kind: "prompt",
+      title: "Question answered",
+      state: "answered",
+      data: { promptId: "answered", runId: "run-1" },
+    },
+  ]) {
+    assert.deepEqual(
+      parseRuntimeResult("session.transcript.page", result(current)),
+      result(current),
+    );
+  }
+
+  for (const retired of [
+    { ...terminal, result: undefined },
+    {
+      id: "tool:call-1",
+      kind: "tool",
+      name: "read_file",
+      args: "{}",
+      status: "running",
+      data: { toolCallId: "call-1", providerCallId: "provider-1", entryId: "entry-1" },
+      result: envelope,
+    },
+    { ...terminal, providerCallId: "provider-1" },
+    { ...terminal, result: { ...envelope, toolName: "write_file" } },
+    { ...terminal, result: { ...envelope, status: "failed" } },
+    {
+      id: "run:1",
+      kind: "runBoundary",
+      runId: "run-1",
+      status: "completed",
+      startedAt: 1,
+    },
+    {
+      id: "run:1",
+      kind: "runBoundary",
+      runId: "run-1",
+      status: "failed",
+      startedAt: 1,
+      detail: "old failure alias",
+    },
+    {
+      id: "approval:1",
+      kind: "approval",
+      title: "Approval granted",
+      state: "allowed",
+      data: { approvalId: "1", runId: "run-1", decision: "allowed" },
+    },
+    {
+      id: "prompt:1",
+      kind: "prompt",
+      title: "Question answered",
+      state: "resolved",
+      data: { promptId: "1", runId: "run-1" },
+    },
+    { id: "message:1", kind: "userMessage", content: "hello", providerCallId: "old" },
+    { id: "message:1", kind: "userMessage", content: "hello", truncated: true },
+  ]) {
+    assert.throws(() => parseRuntimeResult("session.transcript.page", result(retired)));
+  }
 });
