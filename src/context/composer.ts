@@ -206,12 +206,6 @@ ${agentsContent}
       turnTail: turnTailParts.join("\n\n"),
     };
   }
-
-  /** 兼容旧调用方：仍返回完整提示词，只是不再表达 Provider 的分层边界。 */
-  async build(): Promise<string> {
-    const { systemPrompt, turnTail } = await this.buildLayers();
-    return [systemPrompt, turnTail].filter((part) => part.length > 0).join("\n\n");
-  }
 }
 
 /** Plan Mode 的稳定 system 约束；结构化计划由 RuntimeEvent JSONL 持久化。 */

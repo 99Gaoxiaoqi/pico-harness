@@ -16,7 +16,6 @@ import { toAiSdkMessages, fromAiSdkContent } from "./ai-sdk-messages.js";
 import { OpenAIRequestPolicy } from "./openai-request-policy.js";
 import { applyAnthropicCacheControl } from "./anthropic-cache.js";
 import { applyReasoningRequestPatch } from "./reasoning-capability.js";
-import { isLegacyThinkingEffort, toAnthropicThinkingConfig } from "./thinking.js";
 import { defaultToolChoiceNoneWithTools } from "./model-capabilities.js";
 import { snapshotToolDefinitions } from "./prompt-cache.js";
 import { openCodeClientHeaders } from "./opencode-headers.js";
@@ -286,10 +285,6 @@ export class AiSdkProvider implements LLMProvider {
     )
       body.tool_choice = { type: "none" };
     body.max_tokens = this.profile.maxOutputTokens;
-    if (!capability && isLegacyThinkingEffort(effort)) {
-      const thinking = toAnthropicThinkingConfig(effort);
-      if (thinking) body.thinking = thinking;
-    }
     if (
       this.profile.supportsPromptCache &&
       (capability?.cache === true ||

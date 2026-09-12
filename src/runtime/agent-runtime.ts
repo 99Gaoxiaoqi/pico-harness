@@ -59,7 +59,6 @@ import { ContextOverflowError, isAbortError } from "../provider/errors.js";
 import type { ProviderConfig } from "../provider/config.js";
 import type { CredentialResolver } from "../provider/credential-vault.js";
 import type { LLMProvider } from "../provider/interface.js";
-import { CredentialPool } from "../provider/credential-pool.js";
 import { resolveProviderProfile } from "../provider/profile.js";
 import { ToolRegistry } from "../tools/registry-impl.js";
 import { buildDefaultToolRegistry } from "../tools/default-registry.js";
@@ -3804,17 +3803,6 @@ function resolveProviderConfig(
     ...(options.modelCapabilities ? { capabilities: options.modelCapabilities } : {}),
     ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
   };
-}
-
-/**
- * @deprecated Compatibility helper for explicit test/host assembly. Production Runtime no longer
- * calls it or derives a model route from bare LLM environment variables.
- */
-export function createRuntimeCredentialPool(env: RunAgentEnv): CredentialPool | undefined {
-  const keys = env.LLM_API_KEYS?.split(",")
-    .map((key) => key.trim())
-    .filter(Boolean);
-  return keys && keys.length > 1 ? new CredentialPool(keys) : undefined;
 }
 
 async function resolveWorkDir(dir: string | undefined): Promise<string> {

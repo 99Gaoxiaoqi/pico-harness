@@ -1,9 +1,8 @@
-// Pico request policy around the SDK transport: cache routing, compatibility fallback and budgets.
+// Pico request policy around the SDK transport: cache routing, capability fallback and budgets.
 import { providerRequestSignal, type LLMProviderRequestOptions } from "./interface.js";
 import type { Message, ToolDefinition } from "../schema/message.js";
 import type { ProviderConfig } from "./config.js";
 import { type ProviderProfile } from "./profile.js";
-import { isLegacyThinkingEffort, toOpenAIReasoningEffort } from "./thinking.js";
 import { applyReasoningRequestPatch } from "./reasoning-capability.js";
 import { logger } from "../observability/logger.js";
 import {
@@ -189,18 +188,15 @@ export class OpenAIRequestPolicy {
       ...(errorText !== undefined ? { errorText } : {}),
     };
   }
-  /** 路由请求严格使用模型 profile；无 profile 的旧直连调用保留四档映射。 */
+  /** 推理参数只由当前模型路由的能力 profile 决定。 */
   private applyThinkingLevel(body: Record<string, unknown>): Record<string, unknown> {
     const capability = this.config.capabilities?.reasoningProfile;
-    if (capability) {
-      return applyReasoningRequestPatch(body, capability, this.thinkingEffort, "openai");
-    }
-    if (!isLegacyThinkingEffort(this.thinkingEffort)) return body;
-    const reasoningEffort = toOpenAIReasoningEffort(this.thinkingEffort);
-    return reasoningEffort === undefined ? body : { ...body, reasoning_effort: reasoningEffort };
+    return capability
+      ? applyReasoningRequestPatch(body, capability, this.thinkingEffort, "openai")
+      : body;
   }
 
-  /** Canonical routes restore the output budget last; legacy direct calls cannot safely guess the field. */
+  /** Canonical routes restore the route-owned output budget last. */
   finalizeRequestBody(
     body: Record<string, unknown>,
     messages: readonly Message[],
