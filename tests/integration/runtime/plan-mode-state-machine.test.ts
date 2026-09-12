@@ -6,10 +6,7 @@ import test from "node:test";
 import { projectRuntimeSessionState } from "../../../src/engine/session-runtime-projection.js";
 import { Session, SessionManager } from "../../../src/engine/session.js";
 import { SessionForkService } from "../../../src/engine/session-fork-service.js";
-import {
-  normalizeSessionRuntimeStatePatch,
-  type PersistedSessionSettings,
-} from "../../../src/engine/session-runtime.js";
+import type { PersistedSessionSettings } from "../../../src/engine/session-runtime.js";
 import { PlanConflictError } from "../../../src/plan/contract.js";
 import { PlanCoordinator } from "../../../src/plan/coordinator.js";
 import {
@@ -552,34 +549,10 @@ test("Plan reducer enforces review, step and rewind invariants", async (t) => {
     }),
     PlanConflictError,
   );
-  // Note: branchId rewind invariants were removed during log-first alignment
-  // (commit bf828a35). The history.rewound kind is kept for legacy decode
-  // compatibility but no longer drives plan projection restoration.
+  // Destructive branch rewind invariants were removed during log-first alignment.
 });
 
-test("v2 settings migrate to split axes and v3 snapshots omit legacy fields", async () => {
-  const base = {
-    provider: "openai",
-    model: "m",
-    modelRouteId: "openai/m",
-    thinkingEffort: "off",
-    thinkingEffortExplicit: false,
-    additionalDirectories: [],
-  } as const;
-  const legacyPlan = normalizeSessionRuntimeStatePatch({ settings: { ...base, mode: "plan" } })!;
-  assert.equal(legacyPlan.settings?.collaborationMode, "plan");
-  assert.equal(legacyPlan.settings?.permissionMode, "ask");
-  const legacyAuto = normalizeSessionRuntimeStatePatch({ settings: { ...base, mode: "auto" } })!;
-  assert.equal(legacyAuto.settings?.collaborationMode, "agent");
-  assert.equal(legacyAuto.settings?.permissionMode, "auto");
-  const missingAxes = normalizeSessionRuntimeStatePatch({ settings: base })!;
-  assert.equal(missingAxes.settings?.collaborationMode, "agent");
-  assert.equal(missingAxes.settings?.permissionMode, "ask");
-  const missingPermission = normalizeSessionRuntimeStatePatch({
-    settings: { ...base, collaborationMode: "plan" },
-  })!;
-  assert.equal(missingPermission.settings?.collaborationMode, "plan");
-  assert.equal(missingPermission.settings?.permissionMode, "ask");
+test("v3 settings snapshots persist only split axes", async () => {
   const settings = createDefaultSessionSettings({
     sessionId: "s",
     cwd: process.cwd(),
@@ -685,7 +658,6 @@ test("Session fork inherits pending plans and interrupts active execution", asyn
   await service.fork({
     sourceSessionId: "source",
     targetSessionId: "pending-target",
-    targetMode: "full-access",
   });
   const pending = await new PlanCoordinator(store, {
     sessionId: "pending-target",
@@ -737,7 +709,6 @@ test("Session fork inherits pending plans and interrupts active execution", asyn
   await service.fork({
     sourceSessionId: "source",
     targetSessionId: "active-target",
-    targetMode: "full-access",
   });
   const active = await new PlanCoordinator(store, {
     sessionId: "active-target",

@@ -43,8 +43,6 @@ export interface SessionSettings {
   collaborationMode?: "agent" | "plan";
   /** Orchestration axis: "default" = direct execution, "graph" / "swarm" = coordinated execution. */
   orchestrationMode?: "default" | "graph" | "swarm";
-  /** @deprecated Legacy v2 read compatibility only; new SessionSettings never sets it. */
-  prePlanMode?: Exclude<InteractionMode, "plan">;
   model: string;
   /** Stable providerID/modelID identity. Endpoint and credentials stay in ModelRouter. */
   modelRouteId?: string;
@@ -849,13 +847,9 @@ function applyPersistedSessionSettings(
   settings.provider = persisted.provider;
   settings.model = persisted.model;
   settings.modelRouteId = persisted.modelRouteId;
-  settings.collaborationMode =
-    persisted.collaborationMode ?? (persisted.mode === "plan" ? "plan" : "agent");
+  settings.collaborationMode = persisted.collaborationMode;
   settings.orchestrationMode = persisted.orchestrationMode ?? "default";
-  settings.permissionMode =
-    persisted.permissionMode ??
-    (persisted.mode === "plan" ? (persisted.prePlanMode ?? "ask") : persisted.mode) ??
-    "ask";
+  settings.permissionMode = persisted.permissionMode;
   settings.thinkingEffort = persisted.thinkingEffort;
   settings.thinkingEffortExplicit = persisted.thinkingEffortExplicit;
   settings.additionalDirectories = createAdditionalDirectorySnapshot(
@@ -915,10 +909,7 @@ function reconcileExecutionBoundary(
   }
   return current.kind === "managed"
     ? current
-    : createManagedExecutionBoundary(
-        createWorkspaceWritePermissionProfile(),
-        current.revision + 1,
-      );
+    : createManagedExecutionBoundary(createWorkspaceWritePermissionProfile(), current.revision + 1);
 }
 
 function withInteractionModeAlias(

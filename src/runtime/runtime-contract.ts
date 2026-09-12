@@ -3,7 +3,7 @@ import type { ImagePart, Message } from "../schema/message.js";
 import type { ProviderKind } from "../provider/factory.js";
 import type { CredentialRef } from "../provider/credential-vault.js";
 import type { ModelRouteCapabilities } from "../provider/model-capabilities.js";
-import type { SessionSettings } from "../input/session-settings.js";
+import type { InteractionMode, SessionSettings } from "../input/session-settings.js";
 import type { BackgroundAutonomousPolicySnapshotData } from "../safety/background-autonomous-policy-schema.js";
 import type { PlanHandoff } from "../engine/plan-handoff.js";
 
@@ -24,7 +24,7 @@ export interface RuntimeRunOptions {
   /** 宿主可选记录该消息发送时的交互模式。 */
   rewindInteractionMode?: SessionSettings["mode"];
   /** 该消息在 plan 模式下发送时，记录进入 plan 前的模式。 */
-  rewindPrePlanMode?: NonNullable<SessionSettings["prePlanMode"]>;
+  rewindPrePlanMode?: Exclude<InteractionMode, "plan">;
   /** 图片附件路径:读取为 ImagePart 附到本轮 user 消息。 */
   imagePath?: string;
   /** TUI/宿主已解析好的图片附件。 */

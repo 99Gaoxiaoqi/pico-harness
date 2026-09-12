@@ -32,7 +32,6 @@ import {
   RUNTIME_EVENT_SCHEMA_VERSION,
   decodeRuntimeEvent,
   decodeRuntimeEventJson,
-  isLegacyDecodeOnlyKind,
   type RuntimeEvent,
 } from "../runtime-event.js";
 import {
@@ -4259,11 +4258,6 @@ function canonicalizeRuntimeEvent(event: RuntimeEvent): RuntimeEvent {
     if (canonical.partial) {
       throw new RuntimeEventStoreIntegrityError(
         `Runtime event ${canonical.eventId} is partial; use the mutable partial lane`,
-      );
-    }
-    if (isLegacyDecodeOnlyKind(canonical.kind)) {
-      throw new RuntimeEventStoreIntegrityError(
-        `Runtime event kind ${canonical.kind} is legacy-only and cannot be appended`,
       );
     }
     return canonical;

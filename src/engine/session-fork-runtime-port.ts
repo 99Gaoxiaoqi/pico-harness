@@ -3,7 +3,7 @@ import type { Session } from "./session.js";
 import type { RuntimeEvent } from "./session-runtime-event.js";
 import type { EngineRuntimeCapability, EngineRuntimePort } from "./runtime-port.js";
 import type { RuntimeSessionForkSeedEntry } from "./session-runtime-projection.js";
-import type { PersistedInteractionMode, SessionRuntimeStateWritePatch } from "./session-runtime.js";
+import type { SessionRuntimeStateWritePatch } from "./session-runtime.js";
 import type { PersistedSessionSettings } from "./session-runtime.js";
 import type { FileHistoryRewindTransactionHooks } from "../safety/file-history.js";
 import type { ExecutionBoundary } from "../safety/permission-profile.js";
@@ -96,8 +96,6 @@ export interface SessionForkRuntimePort {
     readonly targetSessionId: string;
     /** Durable caller-owned identity used to resume the same fork after a crash. */
     readonly operationId?: string;
-    /** @deprecated Accepted for source compatibility but ignored by canonical forks. */
-    readonly targetMode?: PersistedInteractionMode;
     readonly throughEventId?: string;
     /** Safe settings frozen by the host when a historical boundary predates settings facts. */
     readonly fallbackSettings?: PersistedSessionSettings;

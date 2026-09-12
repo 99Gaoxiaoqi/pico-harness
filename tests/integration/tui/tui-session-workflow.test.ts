@@ -140,7 +140,8 @@ test("/resume and /fork reject an unpublished fork target", async (context) => {
     sourceSessionId: "source",
     sourceCursor: { logId: "source", seq: 1, epoch: 0, eventId: "source-event" },
     targetSessionId: "unfinished-fork",
-    targetMode: "ask",
+    targetCollaborationMode: "agent",
+    targetPermissionMode: "ask",
     stagingDirectory: join(fixture.root, "staging", "unfinished-fork"),
   });
   const client = await createCommandClient(fixture);

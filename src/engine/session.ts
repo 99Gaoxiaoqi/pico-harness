@@ -29,6 +29,7 @@ import {
   normalizeSessionRuntimeStateWritePatch,
   normalizeSessionUsageSnapshot,
   SESSION_RUNTIME_STATE_VERSION,
+  type PersistedInteractionMode,
   type PersistedSessionSettings,
   type PersistedPromptCacheState,
   type SessionHydrationSnapshot,
@@ -1170,8 +1171,8 @@ export class Session
   async beginRewindPoint(input: {
     userPrompt: string;
     transcriptIndex?: number;
-    interactionMode?: PersistedSessionSettings["mode"];
-    prePlanMode?: NonNullable<PersistedSessionSettings["prePlanMode"]>;
+    interactionMode?: PersistedInteractionMode;
+    prePlanMode?: Exclude<PersistedInteractionMode, "plan">;
     messageId?: string;
   }): Promise<string> {
     this.assertWritable();
@@ -1221,7 +1222,7 @@ export class Session
 
   /**
    * 非破坏性 code rewind：仅回滚工作区文件到 checkpoint 状态。
-   * 不追加 history.rewound、不丢弃后续 FileHistory 快照。
+   * 不追加 Runtime 控制事件、不丢弃后续 FileHistory 快照。
    * 被 {@link forkFromCheckpoint} 的 code / both 模式复用。
    */
   async rewindCode(
@@ -1791,8 +1792,7 @@ function runtimeCursorForEntry(
   entries: readonly RuntimeEventStoreEntry[],
   entry: RuntimeEventStoreEntry,
 ): SessionCursor {
-  // Rewind/branch mechanism removed: epoch is always 0 (no history.rewound is produced).
-  // The field is retained in SessionCursor for persisted-schema stability.
+  // Epoch remains 0; the field is retained in SessionCursor for persisted-schema stability.
   void entries;
   return {
     logId: sessionId,

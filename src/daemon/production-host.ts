@@ -919,7 +919,7 @@ export function createProductionRuntimeServices(
           workspaceTrustStore: trustStore,
           processSandbox: {
             profile:
-              persistedSettings?.collaborationMode === "plan" || persistedSettings?.mode === "plan"
+              persistedSettings?.collaborationMode === "plan"
                 ? "read-only"
                 : persistedSettings?.permissionMode === "full-access"
                   ? "danger-full-access"
@@ -1093,9 +1093,16 @@ export function createProductionRuntimeServices(
             agentSwarmAuthorization,
             ...(reasoningLevel !== undefined ? { thinkingEffort: reasoningLevel } : {}),
             ...(planning ? { planMode: true } : {}),
-            ...(persistedSettings?.mode ? { rewindInteractionMode: persistedSettings.mode } : {}),
-            ...(persistedSettings?.mode === "plan" && persistedSettings.prePlanMode
-              ? { rewindPrePlanMode: persistedSettings.prePlanMode }
+            ...(persistedSettings
+              ? {
+                  rewindInteractionMode:
+                    persistedSettings.collaborationMode === "plan"
+                      ? ("plan" as const)
+                      : persistedSettings.permissionMode,
+                }
+              : {}),
+            ...(persistedSettings?.collaborationMode === "plan"
+              ? { rewindPrePlanMode: persistedSettings.permissionMode }
               : {}),
             ...(orchestrationMode === "graph"
               ? { allowedTools: AGENT_GRAPH_SUPERVISOR_TOOL_NAMES }

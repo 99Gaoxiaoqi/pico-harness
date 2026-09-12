@@ -16,7 +16,6 @@ import {
 import { materializeRuntimeHistoryEntries } from "../../../src/engine/session-runtime-read-model.js";
 import { materializeRuntimeHistoryEntries as runtimeMaterializeHistoryEntries } from "../../../src/engine/session-runtime-read-model.js";
 import {
-  LEGACY_SESSION_RUNTIME_STATE_VERSION,
   SESSION_RUNTIME_STATE_VERSION,
   normalizeSessionRuntimeStatePatch,
   normalizeSessionRuntimeStateWritePatch,
@@ -34,13 +33,14 @@ test("Runtime adapters preserve the engine-owned durable Session contracts", () 
   assert.strictEqual(runtimeMaterializeHistoryEntries, materializeRuntimeHistoryEntries);
 });
 
-test("Graph v1 RuntimeEvent kinds are fully retired", () => {
+test("retired RuntimeEvent kinds are rejected", () => {
   for (const kind of [
     "graph.work.added",
     "graph.work.dispatched",
     "graph.work.recorded",
     "graph.work.failed",
     "graph.closed",
+    "history.rewound",
   ]) {
     assert.throws(
       () =>
@@ -67,7 +67,8 @@ test("Session runtime state rejects pre-route settings and unknown persisted fie
     provider: "openai" as const,
     model: "test-model",
     modelRouteId: "test/test-model",
-    mode: "ask" as const,
+    collaborationMode: "agent" as const,
+    permissionMode: "ask" as const,
     thinkingEffort: "off",
     thinkingEffortExplicit: false,
     additionalDirectories: [],
@@ -87,9 +88,9 @@ test("Session runtime state rejects pre-route settings and unknown persisted fie
 
   const event = {
     schemaVersion: runtimeSchemaVersion,
-    eventId: "session-state-v2",
-    sessionId: "session-v2",
-    invocationId: "session:session-v2:state",
+    eventId: "session-state-v3",
+    sessionId: "session-v3",
+    invocationId: "session:session-v3:state",
     runId: "session-state",
     turnId: "session-state",
     at: "2026-07-28T00:00:00.000Z",
@@ -102,12 +103,13 @@ test("Session runtime state rejects pre-route settings and unknown persisted fie
     },
   };
   assert.equal(decodeRuntimeEvent(event).kind, "session.state.committed");
-  assert.equal(
-    decodeRuntimeEvent({
-      ...event,
-      data: { ...event.data, stateVersion: LEGACY_SESSION_RUNTIME_STATE_VERSION },
-    }).kind,
-    "session.state.committed",
+  assert.throws(
+    () =>
+      decodeRuntimeEvent({
+        ...event,
+        data: { ...event.data, stateVersion: 2 },
+      }),
+    /session state version is invalid/u,
   );
   assert.throws(
     () =>
@@ -212,7 +214,7 @@ test("Session boundary survives update, snapshot, and durable recovery", async (
   }
 });
 
-test("durable Session modes migrate once while canonical writes reject aliases and conflicts", () => {
+test("durable Session settings accept only v3 split axes", () => {
   const base = {
     provider: "openai",
     model: "test-model",
@@ -221,41 +223,21 @@ test("durable Session modes migrate once while canonical writes reject aliases a
     thinkingEffortExplicit: false,
     additionalDirectories: [],
   };
-  for (const [mode, collaborationMode, permissionMode] of [
-    ["default", "agent", "ask"],
-    ["yolo", "agent", "full-access"],
-    ["plan", "plan", "ask"],
-  ] as const) {
-    const decoded = normalizeSessionRuntimeStatePatch({ settings: { ...base, mode } });
-    assert.equal(decoded?.settings?.collaborationMode, collaborationMode);
-    assert.equal(decoded?.settings?.permissionMode, permissionMode);
-    assert.equal(Object.hasOwn(decoded?.settings ?? {}, "mode"), false);
+  for (const mode of ["default", "yolo", "ask", "plan", "auto", "full-access"] as const) {
+    assert.equal(normalizeSessionRuntimeStatePatch({ settings: { ...base, mode } }), undefined);
+    assert.equal(
+      normalizeSessionRuntimeStateWritePatch({ settings: { ...base, mode } }),
+      undefined,
+    );
   }
-  const restoredPlan = normalizeSessionRuntimeStatePatch({
-    settings: { ...base, mode: "plan", prePlanMode: "yolo" },
-  });
-  assert.equal(restoredPlan?.settings?.collaborationMode, "plan");
-  assert.equal(restoredPlan?.settings?.permissionMode, "full-access");
-
-  assert.equal(
-    normalizeSessionRuntimeStateWritePatch({ settings: { ...base, mode: "default" } }),
-    undefined,
-  );
-  assert.equal(
-    normalizeSessionRuntimeStateWritePatch({ settings: { ...base, mode: "yolo" } }),
-    undefined,
-  );
-  assert.equal(
-    normalizeSessionRuntimeStatePatch({
-      settings: {
-        ...base,
-        mode: "yolo",
-        collaborationMode: "agent",
-        permissionMode: "ask",
-      },
-    }),
-    undefined,
-  );
+  for (const settings of [
+    base,
+    { ...base, collaborationMode: "agent" },
+    { ...base, permissionMode: "ask" },
+    { ...base, collaborationMode: "plan", permissionMode: "ask", prePlanMode: "auto" },
+  ]) {
+    assert.equal(normalizeSessionRuntimeStatePatch({ settings }), undefined);
+  }
   assert.deepEqual(
     normalizeSessionRuntimeStateWritePatch({
       settings: { ...base, collaborationMode: "plan", permissionMode: "ask" },
@@ -269,7 +251,7 @@ test("durable Session modes migrate once while canonical writes reject aliases a
   );
 });
 
-test("Session runtime state restores an opaque cache shard seed and drops legacy counters", () => {
+test("Session runtime state accepts canonical cache sharding and rejects retired fields", () => {
   const shardSeed = "a".repeat(64);
   assert.deepEqual(
     normalizeSessionRuntimeStatePatch({
@@ -287,23 +269,14 @@ test("Session runtime state restores an opaque cache shard seed and drops legacy
       },
     },
   );
-  assert.deepEqual(
-    normalizeSessionRuntimeStatePatch({
-      promptCache: {
-        stateVersion: 1,
-        shardSeed,
-        routeCallCounts: { ["b".repeat(64)]: 9 },
-        activeRouteDigests: ["d".repeat(64)],
-      },
-    }),
-    {
-      promptCache: {
-        stateVersion: 1,
-        shardSeed,
-        routeShardDecisions: { ["d".repeat(64)]: true },
-      },
-    },
-  );
+  for (const retired of [
+    { routeCallCounts: { ["b".repeat(64)]: 9 } },
+    { activeRouteDigests: ["d".repeat(64)] },
+  ]) {
+    const patch = { promptCache: { stateVersion: 1, shardSeed, ...retired } };
+    assert.equal(normalizeSessionRuntimeStatePatch(patch), undefined);
+    assert.equal(normalizeSessionRuntimeStateWritePatch(patch), undefined);
+  }
   assert.equal(
     normalizeSessionRuntimeStatePatch({
       promptCache: { stateVersion: 1, shardSeed: "raw-session-id" },

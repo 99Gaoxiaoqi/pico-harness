@@ -75,7 +75,8 @@ function forkOperationInput(overrides: Record<string, unknown> = {}) {
     sourceSessionId: "source-session",
     sourceCursor: { logId: "source-session", seq: 4, epoch: 0, eventId: "event-4" },
     targetSessionId: "target-session",
-    targetMode: "ask" as const,
+    targetCollaborationMode: "agent" as const,
+    targetPermissionMode: "ask" as const,
     stagingDirectory: "unused-staging",
     ...overrides,
   };
@@ -167,8 +168,8 @@ test("fork journal accepts only an atomic canonical interaction pair", async (co
     journal.create(
       forkOperationInput({
         operationId: "fork-partial-collaboration",
-        targetMode: undefined,
         targetCollaborationMode: "plan",
+        targetPermissionMode: undefined,
       }),
     ),
     /Invalid storage operation/u,
@@ -176,9 +177,8 @@ test("fork journal accepts only an atomic canonical interaction pair", async (co
   await assert.rejects(
     journal.create(
       forkOperationInput({
-        operationId: "fork-ambiguous-interaction",
-        targetCollaborationMode: "agent",
-        targetPermissionMode: "ask",
+        operationId: "fork-retired-interaction",
+        targetMode: "ask",
       }),
     ),
     /Invalid storage operation/u,
@@ -186,7 +186,6 @@ test("fork journal accepts only an atomic canonical interaction pair", async (co
   const canonical = await journal.create(
     forkOperationInput({
       operationId: "fork-canonical-interaction",
-      targetMode: undefined,
       targetCollaborationMode: "plan",
       targetPermissionMode: "auto",
     }),
@@ -198,7 +197,7 @@ test("fork journal accepts only an atomic canonical interaction pair", async (co
   }
 });
 
-test("operation journal migrates durable legacy modes but rejects them on create", async (context) => {
+test("operation journal rejects retired interaction modes on create and read", async (context) => {
   const fixture = await workspaceFixture(context, "pico-ops-legacy-permission-");
   const journal = new StorageOperationJournal({
     workDir: fixture.workDir,
@@ -212,7 +211,6 @@ test("operation journal migrates durable legacy modes but rejects them on create
   const seeded = await journal.create(
     forkOperationInput({
       operationId: "legacy-plan",
-      targetMode: undefined,
       targetCollaborationMode: "agent",
       targetPermissionMode: "ask",
     }),
@@ -229,12 +227,44 @@ test("operation journal migrates durable legacy modes but rejects them on create
     .run(JSON.stringify(legacyPlan), seeded.operationId);
   database.close();
 
-  const decoded = await journal.get(seeded.operationId);
-  assert.equal(decoded?.kind, "fork");
-  if (decoded?.kind === "fork") {
-    assert.equal(decoded.targetMode, undefined);
-    assert.equal(decoded.targetCollaborationMode, "plan");
-    assert.equal(decoded.targetPermissionMode, "ask");
+  await assert.rejects(journal.get(seeded.operationId), /journal row is malformed/u);
+
+  for (const [operationId, interactionMode, prePlanMode] of [
+    ["legacy-default", "default", undefined],
+    ["legacy-yolo", "plan", "yolo"],
+  ] as const) {
+    const rewind = await journal.create({
+      kind: "rewind",
+      operationId,
+      sessionId: "source-session",
+      mode: "conversation",
+      precondition: {
+        sessionLastSeq: 1,
+        effectiveHistoryDigest: "digest",
+        fileHistoryRevision: 1,
+      },
+      target: {
+        messageId: operationId,
+        sourceMessageEventId: `user-message:${operationId}`,
+        messageIndex: 0,
+        userPrompt: "prompt",
+        interactionMode: interactionMode === "plan" ? "plan" : "ask",
+        ...(interactionMode === "plan" ? { prePlanMode: "ask" as const } : {}),
+      },
+      files: [],
+    });
+    assert.equal(rewind.kind, "rewind");
+    if (rewind.kind !== "rewind") throw new Error("expected rewind operation");
+    const retired = {
+      ...rewind,
+      target: { ...rewind.target, interactionMode, ...(prePlanMode ? { prePlanMode } : {}) },
+    };
+    const connection = new DatabaseSync(join(fixture.storageRoot, "pico.sqlite"));
+    connection
+      .prepare("UPDATE storage_operations SET operation_json = ? WHERE operation_id = ?")
+      .run(JSON.stringify(retired), operationId);
+    connection.close();
+    await assert.rejects(journal.get(operationId), /journal row is malformed/u);
   }
 });
 

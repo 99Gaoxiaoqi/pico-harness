@@ -9,13 +9,9 @@ import type { ToolResultEnvelope } from "./tool-result-contract.js";
 
 /** Session runtime-state event schema version. */
 export const SESSION_RUNTIME_STATE_VERSION = 3 as const;
-export const LEGACY_SESSION_RUNTIME_STATE_VERSION = 2 as const;
-export type SessionRuntimeStateVersion =
-  | typeof LEGACY_SESSION_RUNTIME_STATE_VERSION
-  | typeof SESSION_RUNTIME_STATE_VERSION;
+export type SessionRuntimeStateVersion = typeof SESSION_RUNTIME_STATE_VERSION;
 
 export type PersistedInteractionMode = "ask" | "plan" | "auto" | "full-access";
-type DurableLegacyInteractionMode = PersistedInteractionMode | "default" | "yolo";
 
 /** 会话恢复时需要覆盖启动默认值的设置。密钥、endpoint 和 tools 不落盘。 */
 export interface PersistedSessionSettings {
@@ -28,12 +24,9 @@ export interface PersistedSessionSettings {
   provider: ProviderKind;
   model: string;
   modelRouteId: string;
-  /** @deprecated v2 read compatibility only; canonical normalized settings omit it. */
-  mode?: PersistedInteractionMode;
-  prePlanMode?: Exclude<PersistedInteractionMode, "plan">;
-  /** Canonical v3 interaction axis. Legacy readers may continue using mode. */
+  /** Canonical collaboration axis. */
   collaborationMode: "agent" | "plan";
-  /** Canonical v3 permission axis. */
+  /** Canonical permission axis. */
   permissionMode: Exclude<PersistedInteractionMode, "plan">;
   /** Canonical orchestration axis: "default" = direct execution, "graph" / "swarm" = coordinated execution. */
   orchestrationMode?: "default" | "graph" | "swarm";
@@ -43,25 +36,8 @@ export interface PersistedSessionSettings {
   additionalDirectories: readonly string[];
 }
 
-/** Raw v2 compatibility input accepted only by the durable read normalizer. */
-export type LegacyPersistedSessionSettings = Omit<
-  PersistedSessionSettings,
-  "collaborationMode" | "permissionMode" | "mode" | "prePlanMode"
-> & {
-  readonly mode: DurableLegacyInteractionMode;
-  readonly prePlanMode?: Exclude<DurableLegacyInteractionMode, "plan">;
-  readonly collaborationMode?: never;
-  readonly permissionMode?: never;
-};
-
-/** Canonical v3 wire settings. Legacy interaction fields are deliberately absent. */
-export type PersistedSessionSettingsWrite = Omit<
-  PersistedSessionSettings,
-  "mode" | "prePlanMode"
-> & {
-  readonly collaborationMode: "agent" | "plan";
-  readonly permissionMode: Exclude<PersistedInteractionMode, "plan">;
-};
+/** Canonical v3 wire settings. */
+export type PersistedSessionSettingsWrite = PersistedSessionSettings;
 
 /** Session 维度的累计用量；这些值在 undo/rewind 后也不回退。 */
 export interface SessionUsageSnapshot {
@@ -176,7 +152,7 @@ export function createEmptyUsageSnapshot(): SessionUsageSnapshot {
   };
 }
 
-/** Durable RuntimeEvent decoder; canonical write paths use the stricter function below. */
+/** Strict v3 RuntimeEvent decoder. */
 export function normalizeSessionRuntimeStatePatch(
   value: unknown,
 ): SessionRuntimeStatePatch | undefined {
@@ -224,7 +200,7 @@ export function normalizeSessionRuntimeStateWritePatch(
   const patch: SessionRuntimeStateWritePatch = {};
   let sections = 0;
   if ("settings" in value) {
-    const settings = normalizePersistedSessionSettings(value["settings"], false);
+    const settings = normalizePersistedSessionSettings(value["settings"]);
     if (!settings) return undefined;
     patch.settings = settings;
     sections++;
@@ -284,10 +260,7 @@ export function normalizeGoalManagerSnapshot(value: unknown): GoalManagerSnapsho
   return { stateVersion: 1, sequence, activeGoalId, goals };
 }
 
-function normalizePersistedSessionSettings(
-  value: unknown,
-  allowDurableLegacyModes = true,
-): PersistedSessionSettings | undefined {
+function normalizePersistedSessionSettings(value: unknown): PersistedSessionSettings | undefined {
   if (
     !isRecord(value) ||
     !hasOnlyKeys(value, [
@@ -297,8 +270,6 @@ function normalizePersistedSessionSettings(
       "provider",
       "model",
       "modelRouteId",
-      "mode",
-      "prePlanMode",
       "collaborationMode",
       "permissionMode",
       "orchestrationMode",
@@ -311,8 +282,6 @@ function normalizePersistedSessionSettings(
   }
   const provider = value["provider"];
   const model = value["model"];
-  const mode = value["mode"];
-  const prePlanMode = value["prePlanMode"];
   const collaborationMode = value["collaborationMode"];
   const permissionMode = value["permissionMode"];
   const orchestrationMode = value["orchestrationMode"];
@@ -327,26 +296,10 @@ function normalizePersistedSessionSettings(
   if (!isProviderKind(provider) || typeof model !== "string" || model.trim().length === 0) {
     return undefined;
   }
-  const normalizedMode = allowDurableLegacyModes
-    ? normalizeDurableInteractionMode(mode, true)
-    : undefined;
-  if (mode !== undefined && (!allowDurableLegacyModes || normalizedMode === undefined)) {
+  if (collaborationMode !== "agent" && collaborationMode !== "plan") {
     return undefined;
   }
-  if (
-    collaborationMode !== undefined &&
-    collaborationMode !== "agent" &&
-    collaborationMode !== "plan"
-  ) {
-    return undefined;
-  }
-  if (permissionMode !== undefined && !isNonPlanMode(permissionMode)) return undefined;
-  if (
-    !allowDurableLegacyModes &&
-    (collaborationMode === undefined || permissionMode === undefined)
-  ) {
-    return undefined;
-  }
+  if (!isNonPlanMode(permissionMode)) return undefined;
   if (!isReasoningLevel(thinkingEffort)) return undefined;
   if (typeof thinkingEffortExplicit !== "boolean") return undefined;
   if (
@@ -359,24 +312,6 @@ function normalizePersistedSessionSettings(
   if (title !== undefined && !isSessionTitle(title)) return undefined;
   if (forkFrom !== undefined && !isNonBlankString(forkFrom)) return undefined;
   if (sideConversation !== undefined && typeof sideConversation !== "boolean") return undefined;
-  const normalizedPrePlanMode = allowDurableLegacyModes
-    ? normalizeDurableNonPlanMode(prePlanMode, true)
-    : undefined;
-  if (
-    prePlanMode !== undefined &&
-    (!allowDurableLegacyModes || normalizedPrePlanMode === undefined)
-  ) {
-    return undefined;
-  }
-  if (normalizedMode !== "plan" && prePlanMode !== undefined) return undefined;
-  // A combined legacy axis and canonical split axes may not coexist: even an apparently
-  // equivalent pair is ambiguous after a partial/corrupt migration, so fail closed.
-  if (
-    normalizedMode !== undefined &&
-    (collaborationMode !== undefined || permissionMode !== undefined)
-  ) {
-    return undefined;
-  }
   if (
     orchestrationMode !== undefined &&
     orchestrationMode !== "default" &&
@@ -385,15 +320,6 @@ function normalizePersistedSessionSettings(
   ) {
     return undefined;
   }
-  const canonicalCollaborationMode: "agent" | "plan" =
-    collaborationMode ?? (normalizedMode === "plan" ? "plan" : "agent");
-  const canonicalPermissionMode: Exclude<PersistedInteractionMode, "plan"> =
-    permissionMode ??
-    (normalizedMode === "plan"
-      ? (normalizedPrePlanMode ?? "ask")
-      : normalizedMode === "ask" || normalizedMode === "auto" || normalizedMode === "full-access"
-        ? normalizedMode
-        : "ask");
   return {
     ...(title !== undefined ? { title } : {}),
     ...(forkFrom !== undefined ? { forkFrom } : {}),
@@ -401,13 +327,13 @@ function normalizePersistedSessionSettings(
     provider,
     model,
     modelRouteId,
-    collaborationMode: canonicalCollaborationMode,
-    permissionMode: canonicalPermissionMode,
+    collaborationMode,
+    permissionMode,
     orchestrationMode: orchestrationMode ?? "default",
     thinkingEffort,
     thinkingEffortExplicit,
     additionalDirectories: [...new Set(additionalDirectories)],
-  } as unknown as PersistedSessionSettings;
+  };
 }
 
 function isSessionTitle(value: unknown): value is string {
@@ -485,37 +411,10 @@ export function normalizeSessionUsageSnapshot(value: unknown): SessionUsageSnaps
 function normalizePersistedPromptCacheState(value: unknown): PersistedPromptCacheState | undefined {
   if (
     !isRecord(value) ||
-    !hasOnlyKeys(value, [
-      "stateVersion",
-      "shardSeed",
-      "routeShardDecisions",
-      "activeRouteDigests",
-      "routeCallCounts",
-    ]) ||
+    !hasOnlyKeys(value, ["stateVersion", "shardSeed", "routeShardDecisions"]) ||
     value["stateVersion"] !== 1 ||
     typeof value["shardSeed"] !== "string" ||
     !/^[a-f0-9]{64}$/u.test(value["shardSeed"])
-  ) {
-    return undefined;
-  }
-  // Early P3 builds persisted per-session route counters. Route RPM now lives in a bounded
-  // process-level window, but accepting and discarding this legacy field keeps recovery safe.
-  const legacyCounts = value["routeCallCounts"];
-  if (legacyCounts !== undefined) {
-    if (!isRecord(legacyCounts) || Object.keys(legacyCounts).length > 64) return undefined;
-    for (const [key, count] of Object.entries(legacyCounts)) {
-      if (!/^[a-f0-9]{64}$/u.test(key) || !isNonNegativeInteger(count)) return undefined;
-    }
-  }
-  const activeRouteDigests = value["activeRouteDigests"];
-  if (
-    activeRouteDigests !== undefined &&
-    (!Array.isArray(activeRouteDigests) ||
-      activeRouteDigests.length > 64 ||
-      new Set(activeRouteDigests).size !== activeRouteDigests.length ||
-      activeRouteDigests.some(
-        (digest) => typeof digest !== "string" || !/^[a-f0-9]{64}$/u.test(digest),
-      ))
   ) {
     return undefined;
   }
@@ -530,14 +429,9 @@ function normalizePersistedPromptCacheState(value: unknown): PersistedPromptCach
   ) {
     return undefined;
   }
-  const routeShardDecisions: Record<string, boolean> = {
-    ...(isRecord(rawRouteShardDecisions)
-      ? (rawRouteShardDecisions as Record<string, boolean>)
-      : {}),
-  };
-  if (Array.isArray(activeRouteDigests)) {
-    for (const digest of activeRouteDigests as string[]) routeShardDecisions[digest] = true;
-  }
+  const routeShardDecisions: Record<string, boolean> = isRecord(rawRouteShardDecisions)
+    ? { ...(rawRouteShardDecisions as Record<string, boolean>) }
+    : {};
   return {
     stateVersion: 1,
     shardSeed: value["shardSeed"],
@@ -608,31 +502,8 @@ function isProviderKind(value: unknown): value is ProviderKind {
   return value === "openai" || value === "claude" || value === "responses";
 }
 
-function isInteractionMode(value: unknown): value is PersistedInteractionMode {
-  return value === "ask" || value === "plan" || value === "auto" || value === "full-access";
-}
-
 function isNonPlanMode(value: unknown): value is Exclude<PersistedInteractionMode, "plan"> {
   return value === "ask" || value === "auto" || value === "full-access";
-}
-
-function normalizeDurableInteractionMode(
-  value: unknown,
-  allowLegacy: boolean,
-): PersistedInteractionMode | undefined {
-  if (isInteractionMode(value)) return value;
-  if (!allowLegacy) return undefined;
-  if (value === "default") return "ask";
-  if (value === "yolo") return "full-access";
-  return undefined;
-}
-
-function normalizeDurableNonPlanMode(
-  value: unknown,
-  allowLegacy: boolean,
-): Exclude<PersistedInteractionMode, "plan"> | undefined {
-  const normalized = normalizeDurableInteractionMode(value, allowLegacy);
-  return normalized === "plan" ? undefined : normalized;
 }
 
 function isReasoningLevel(value: unknown): value is string {

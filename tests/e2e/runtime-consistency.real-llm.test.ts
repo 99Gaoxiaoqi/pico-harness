@@ -100,7 +100,6 @@ realModelTest(
       provider: model.route.provider,
       model: model.route.model,
       modelRouteId: "removed-provider/removed-model",
-      mode: "full-access",
       collaborationMode: "agent",
       permissionMode: "full-access",
       thinkingEffort: "off",
