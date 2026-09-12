@@ -44,9 +44,9 @@ test("fresh memory management retains workspace switches", async (t) => {
   await mkdir(workspace);
   const service = new DesktopAtomicMemoryService({ picoHome, publish: () => {} });
   try {
-    assert.deepEqual((await service.list(workspace, { workspacePath: workspace })).facts, []);
+    assert.deepEqual((await service.list(workspace, { workspacePath: workspace })).items, []);
     const created = await service.create(workspace, "Current memory only");
-    assert.equal(created.fact.content, "Current memory only");
+    assert.equal(created.item.content, "Current memory only");
     const current = await service.getSettings(workspace);
     await service.updateSettings(workspace, {
       workspacePath: workspace,

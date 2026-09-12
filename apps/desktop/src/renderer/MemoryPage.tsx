@@ -9,14 +9,14 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Link } from "react-router-dom";
-import type { RuntimeAtomicMemoryDetails, RuntimeMemoryFact } from "@pico/protocol";
+import type { RuntimeMemoryItem } from "@pico/protocol";
 import { Button, EmptyState, IconButton, InlineNotice } from "./components.js";
 import type { RuntimeStore } from "./runtime.js";
 
 const panels = ["saved", "archived"] as const;
 type PanelId = (typeof panels)[number];
 const panelLabels = { saved: "已保存", archived: "已归档" };
-const kindLabels: Record<RuntimeAtomicMemoryDetails["kind"], string> = {
+const kindLabels: Record<RuntimeMemoryItem["kind"], string> = {
   preference: "偏好",
   identity: "身份",
   context: "背景",
@@ -107,8 +107,8 @@ export function MemoryPage({
     const submitted = draft;
     creatingRef.current = true;
     try {
-      const fact = await actions.createMemoryFact(submitted.content.trim());
-      if (!fact || workspaceRef.current !== submitted.workspacePath) return;
+      const item = await actions.createMemoryItem(submitted.content.trim());
+      if (!item || workspaceRef.current !== submitted.workspacePath) return;
       setDraft((current) => (current === submitted ? undefined : current));
       setActivePanel("saved");
       setCreationNotice("记忆已保存到当前工作区。");
@@ -119,8 +119,8 @@ export function MemoryPage({
   };
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const groups = {
-    saved: memory.facts.filter((fact) => fact.state === "active"),
-    archived: memory.facts.filter((fact) => fact.state === "archived" || fact.state === "disabled"),
+    saved: memory.items.filter((item) => item.lifecycleState === "active"),
+    archived: memory.items.filter((item) => item.lifecycleState === "archived"),
   };
   useEffect(() => {
     if (
@@ -138,21 +138,21 @@ export function MemoryPage({
     setActivePanel(panels[next]!);
     tabRefs.current[next]?.focus();
   };
-  const changeState = async (fact: RuntimeMemoryFact) => {
-    const state = fact.state === "active" ? "archived" : "active";
-    if (await actions.updateMemoryFact(fact.factId, fact.version, { state }))
-      setAnnouncement(state === "active" ? "记忆已恢复。" : "记忆已归档，不再参与召回。");
+  const changeState = async (item: RuntimeMemoryItem) => {
+    const lifecycleState = item.lifecycleState === "active" ? "archived" : "active";
+    if (await actions.updateMemoryItem(item.itemId, item.version, { lifecycleState }))
+      setAnnouncement(lifecycleState === "active" ? "记忆已恢复。" : "记忆已归档，不再参与召回。");
   };
-  const save = async (fact: RuntimeMemoryFact) => {
-    if (!editor || editor.id !== fact.factId || !editor.content.trim()) return;
+  const save = async (item: RuntimeMemoryItem) => {
+    if (!editor || editor.id !== item.itemId || !editor.content.trim()) return;
     if (
-      await actions.updateMemoryFact(fact.factId, fact.version, { content: editor.content.trim() })
+      await actions.updateMemoryItem(item.itemId, item.version, { content: editor.content.trim() })
     ) {
       setEditor(undefined);
       setAnnouncement("记忆已保存。");
     }
   };
-  const forget = async (fact: RuntimeMemoryFact) => {
+  const deleteItem = async (item: RuntimeMemoryItem) => {
     if (
       typeof window === "undefined" ||
       !window.confirm(
@@ -160,7 +160,7 @@ export function MemoryPage({
       )
     )
       return;
-    if (await actions.forgetMemoryFact(fact.factId, fact.version)) {
+    if (await actions.deleteMemoryItem(item.itemId, item.version)) {
       setEditor(undefined);
       setAnnouncement("记忆已删除。");
     }
@@ -168,14 +168,14 @@ export function MemoryPage({
   const renderList = (panel: PanelId) =>
     groups[panel].length ? (
       <div className="memory-list" role="list">
-        {groups[panel].map((fact) => (
-          <article className="memory-card" role="listitem" key={fact.factId}>
+        {groups[panel].map((item) => (
+          <article className="memory-card" role="listitem" key={item.itemId}>
             <header className="memory-card__meta">
-              <span>{fact.atomic ? kindLabels[fact.atomic.kind] : "记忆"}</span>
-              <span>{fact.atomic?.scopeType === "global" ? "全局 · 跨工作区" : "当前工作区"}</span>
-              {fact.atomic && <span>{statementLabels[fact.atomic.statementType]}</span>}
+              <span>{kindLabels[item.kind]}</span>
+              <span>{item.scopeType === "global" ? "全局 · 跨工作区" : "当前工作区"}</span>
+              <span>{statementLabels[item.statementType]}</span>
             </header>
-            {editor?.id === fact.factId ? (
+            {editor?.id === item.itemId ? (
               <div className="memory-editor">
                 <label>
                   记忆内容
@@ -184,22 +184,22 @@ export function MemoryPage({
                     maxLength={2000}
                     value={editor.content}
                     onChange={(event) =>
-                      setEditor({ id: fact.factId, content: event.target.value })
+                      setEditor({ id: item.itemId, content: event.target.value })
                     }
                   />
                 </label>
               </div>
             ) : (
-              <p>{fact.content || "没有可显示的内容。"}</p>
+              <p>{item.content}</p>
             )}
-            <SourceDetails fact={fact} />
+            <SourceDetails item={item} />
             <div className="memory-card__actions">
-              {editor?.id === fact.factId ? (
+              {editor?.id === item.itemId ? (
                 <>
                   <Button
                     variant="primary"
                     disabled={Boolean(busy) || !editor.content.trim()}
-                    onClick={() => void save(fact)}
+                    onClick={() => void save(item)}
                   >
                     保存
                   </Button>
@@ -214,27 +214,27 @@ export function MemoryPage({
               ) : (
                 <>
                   <IconButton
-                    label={`编辑 ${fact.title || "记忆"}`}
+                    label={`编辑 ${memoryItemLabel(item)}`}
                     disabled={Boolean(busy)}
-                    onClick={() => setEditor({ id: fact.factId, content: fact.content ?? "" })}
+                    onClick={() => setEditor({ id: item.itemId, content: item.content })}
                   >
                     <Pencil aria-hidden="true" />
                   </IconButton>
                   <IconButton
-                    label={`${fact.state === "active" ? "归档" : "恢复"} ${fact.title || "记忆"}`}
+                    label={`${item.lifecycleState === "active" ? "归档" : "恢复"} ${memoryItemLabel(item)}`}
                     disabled={Boolean(busy)}
-                    onClick={() => void changeState(fact)}
+                    onClick={() => void changeState(item)}
                   >
-                    {fact.state === "active" ? (
+                    {item.lifecycleState === "active" ? (
                       <Archive aria-hidden="true" />
                     ) : (
                       <ArchiveRestore aria-hidden="true" />
                     )}
                   </IconButton>
                   <IconButton
-                    label={`删除记忆 ${fact.title || "记忆"}`}
+                    label={`删除记忆 ${memoryItemLabel(item)}`}
                     disabled={Boolean(busy)}
-                    onClick={() => void forget(fact)}
+                    onClick={() => void deleteItem(item)}
                   >
                     <Trash2 aria-hidden="true" />
                   </IconButton>
@@ -348,7 +348,7 @@ export function MemoryPage({
                 />
                 <small id="memory-add-length">{draft.content.length} / 2000</small>
               </div>
-              {(!memory.settings?.enabled || !memory.settings?.injectionEnabled) &&
+              {(!memory.settings?.enabled || !memory.settings?.recallEnabled) &&
                 memory.settings && (
                   <InlineNotice>
                     当前记忆或会话召回已关闭，仍可保存；开启后才会参与召回。
@@ -429,76 +429,69 @@ export function MemoryPage({
   );
 }
 
-function SourceDetails({ fact }: { readonly fact: RuntimeMemoryFact }) {
-  const atomic = fact.atomic;
+function SourceDetails({ item }: { readonly item: RuntimeMemoryItem }) {
+  const source = item.sources[0];
   return (
     <details className="memory-source">
       <summary>
-        {atomic?.origin === "user_requested"
-          ? fact.source
+        {item.origin === "user_requested"
+          ? source
             ? "用户保存"
             : "手动保存"
-          : atomic?.origin === "agent_extracted"
+          : item.origin === "agent_extracted"
             ? "对话提取"
             : "来源信息"}
       </summary>
       <dl>
-        {fact.source ? (
+        {source ? (
           <>
             <div>
               <dt>来源会话</dt>
-              <dd>{fact.source.sessionId}</dd>
+              <dd>{source.sessionId}</dd>
             </div>
             <div>
               <dt>来源引用</dt>
-              <dd>{fact.source.sourceId}</dd>
+              <dd>{source.eventId}</dd>
             </div>
           </>
         ) : (
           <div>
             <dt>来源</dt>
-            <dd>
-              {atomic?.origin === "user_requested" ? "手动内容，无会话引用" : "来源详情未提供"}
-            </dd>
+            <dd>{item.origin === "user_requested" ? "手动内容，无会话引用" : "来源详情未提供"}</dd>
           </div>
         )}
-        {fact.source?.availability === "unavailable" && (
+        <>
           <div>
-            <dt>会话状态</dt>
-            <dd>来源不可用，已保存内容仍保留</dd>
+            <dt>作用域</dt>
+            <dd>{item.scopeType === "global" ? "全局" : "当前工作区"}</dd>
           </div>
-        )}
-        {atomic && (
-          <>
+          <div>
+            <dt>时间类型</dt>
+            <dd>{temporalLabels[item.temporalType]}</dd>
+          </div>
+          <div>
+            <dt>记录时间</dt>
+            <dd>{formatTime(item.observedAt)}</dd>
+          </div>
+          {item.eventStartedAt !== null && (
             <div>
-              <dt>作用域</dt>
-              <dd>{atomic.scopeType === "global" ? "全局" : "当前工作区"}</dd>
+              <dt>开始</dt>
+              <dd>{formatTime(item.eventStartedAt)}</dd>
             </div>
+          )}
+          {item.eventEndedAt !== null && (
             <div>
-              <dt>时间类型</dt>
-              <dd>{temporalLabels[atomic.temporalType]}</dd>
+              <dt>结束</dt>
+              <dd>{formatTime(item.eventEndedAt)}</dd>
             </div>
-            <div>
-              <dt>记录时间</dt>
-              <dd>{formatTime(atomic.observedAt)}</dd>
-            </div>
-            {atomic.eventStartedAt !== null && (
-              <div>
-                <dt>开始</dt>
-                <dd>{formatTime(atomic.eventStartedAt)}</dd>
-              </div>
-            )}
-            {atomic.eventEndedAt !== null && (
-              <div>
-                <dt>结束</dt>
-                <dd>{formatTime(atomic.eventEndedAt)}</dd>
-              </div>
-            )}
-          </>
-        )}
+          )}
+        </>
       </dl>
     </details>
   );
+}
+function memoryItemLabel(item: RuntimeMemoryItem): string {
+  return [...item.content].slice(0, 60).join("") || "记忆";
 }
 function formatTime(value: number): string {
   return new Date(value).toLocaleString("zh-CN");

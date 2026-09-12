@@ -5,7 +5,7 @@ import type {
   RuntimeCapabilityScope,
   RuntimeCollaborationMode,
   RuntimeMcpServerInput,
-  RuntimeMemoryFact,
+  RuntimeMemoryItem,
   RuntimeMemorySettings,
   RuntimeOrchestrationMode,
   RuntimePermissionMode,
@@ -341,27 +341,22 @@ export interface AppData {
 
 export interface MemoryView {
   readonly workspacePath?: string | undefined;
-  readonly facts: readonly RuntimeMemoryFact[];
+  readonly items: readonly RuntimeMemoryItem[];
   readonly settings?: RuntimeMemorySettings | undefined;
   readonly status: "idle" | "loading" | "ready" | "degraded" | "error";
   readonly error?: string | undefined;
 }
 
-export type MemoryFactPatch = Readonly<{
-  kind?: RuntimeMemoryFact["kind"];
-  title?: string;
+export type MemoryItemPatch = Readonly<{
+  kind?: RuntimeMemoryItem["kind"];
   content?: string;
-  confidence?: number;
-  state?: Exclude<RuntimeMemoryFact["state"], "forgotten">;
-  pinned?: boolean;
-  expiresAt?: string | null;
-  lastUsedAt?: string | null;
+  lifecycleState?: RuntimeMemoryItem["lifecycleState"];
 }>;
 
 export type MemorySettingsPatch = Readonly<{
   enabled?: boolean;
-  autoPropose?: boolean;
-  injectionEnabled?: boolean;
+  autoExtract?: boolean;
+  recallEnabled?: boolean;
 }>;
 
 export const emptyData: AppData = {
@@ -393,6 +388,6 @@ export const emptyData: AppData = {
   catalogSkills: [],
   usage: {},
   configVersion: 0,
-  memory: { facts: [], status: "idle" },
+  memory: { items: [], status: "idle" },
   notices: {},
 };

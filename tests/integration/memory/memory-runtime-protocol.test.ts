@@ -10,247 +10,209 @@ import {
   RUNTIME_ERROR_CODES,
   RUNTIME_METHODS,
   RuntimeProtocolError,
-  type RuntimeMemoryFact,
+  type RuntimeMemoryItem,
 } from "../../../packages/protocol/src/index.js";
 
 const memoryMethods = [
   "memory.list",
   "memory.get",
+  "memory.create",
   "memory.update",
-  "memory.forget",
-  "memory.review.list",
-  "memory.review.resolve",
+  "memory.delete",
   "memory.settings.get",
   "memory.settings.update",
   "memory.context.preview",
 ] as const;
 
-test("workspace memory methods are explicit Desktop capabilities with strict write contracts", () => {
+test("atomic Memory Item methods are explicit Desktop capabilities", () => {
   for (const method of memoryMethods) {
     assert.equal(RUNTIME_METHODS.includes(method), true);
     assert.equal(DESKTOP_RUNTIME_METHODS.includes(method), true);
     assert.equal(isRuntimeMethod(method), true);
   }
-  assert.equal(isRuntimeMethod("memory.not-a-method"), false);
+  for (const retired of ["memory.forget", "memory.review.list", "memory.review.resolve"]) {
+    assert.equal(isRuntimeMethod(retired), false);
+  }
+});
 
+test("Memory Item writes accept current fields and reject Fact compatibility fields", () => {
   assert.deepEqual(
     parseStrictRuntimeParams("memory.update", {
       workspacePath: "/workspace",
-      factId: "fact-1",
+      itemId: "item-1",
       expectedVersion: 1,
       idempotencyKey: "request-1",
       content: "new body",
+      kind: "knowledge",
     }),
     {
       workspacePath: "/workspace",
-      factId: "fact-1",
+      itemId: "item-1",
       expectedVersion: 1,
       idempotencyKey: "request-1",
       content: "new body",
+      kind: "knowledge",
     },
   );
-  assertProtocolError(
-    () =>
-      parseStrictRuntimeParams("memory.update", {
-        workspacePath: "/workspace",
-        factId: "fact-1",
-        expectedVersion: 1,
-        content: "missing idempotency key",
-      }),
-    RUNTIME_ERROR_CODES.INVALID_PARAMS,
-  );
   assert.deepEqual(
-    parseStrictRuntimeParams("memory.settings.update", {
+    parseStrictRuntimeParams("memory.update", {
       workspacePath: "/workspace",
+      itemId: "item-1",
       expectedVersion: 1,
-      idempotencyKey: "review-mode-balanced",
-      reviewMode: "balanced",
+      idempotencyKey: "archive-1",
+      lifecycleState: "archived",
     }),
     {
       workspacePath: "/workspace",
+      itemId: "item-1",
       expectedVersion: 1,
-      idempotencyKey: "review-mode-balanced",
-      reviewMode: "balanced",
+      idempotencyKey: "archive-1",
+      lifecycleState: "archived",
     },
   );
+  for (const legacyPatch of [
+    { factId: "fact-1", content: "old id" },
+    { itemId: "item-1", state: "archived" },
+    { itemId: "item-1", kind: "project_fact" },
+    { itemId: "item-1", pinned: true },
+  ]) {
+    assertProtocolError(
+      () =>
+        parseStrictRuntimeParams("memory.update", {
+          workspacePath: "/workspace",
+          expectedVersion: 1,
+          idempotencyKey: "legacy",
+          ...legacyPatch,
+        }),
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+    );
+  }
+});
+
+test("memory settings expose only current extraction and recall switches", () => {
+  const params = {
+    workspacePath: "/workspace",
+    expectedVersion: 1,
+    idempotencyKey: "settings-1",
+    enabled: true,
+    autoExtract: false,
+    recallEnabled: true,
+  } as const;
+  assert.deepEqual(parseStrictRuntimeParams("memory.settings.update", params), params);
+  for (const alias of [
+    { autoPropose: true },
+    { autoCommit: false },
+    { injectionEnabled: true },
+    { reviewMode: "balanced" },
+  ]) {
+    assertProtocolError(
+      () =>
+        parseStrictRuntimeParams("memory.settings.update", {
+          workspacePath: "/workspace",
+          expectedVersion: 1,
+          idempotencyKey: "legacy-settings",
+          ...alias,
+        }),
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+    );
+  }
+
+  const settings = { enabled: true, autoExtract: false, recallEnabled: true, version: 2 };
+  assert.deepEqual(parseDesktopRuntimeResult("memory.settings.get", { settings }), { settings });
   assertProtocolError(
     () =>
-      parseStrictRuntimeParams("memory.settings.update", {
-        workspacePath: "/workspace",
-        expectedVersion: 1,
-        idempotencyKey: "review-mode-invalid",
-        reviewMode: "unlimited",
+      parseDesktopRuntimeResult("memory.settings.get", {
+        settings: { ...settings, autoPropose: false },
       }),
-    RUNTIME_ERROR_CODES.INVALID_PARAMS,
-  );
-  assert.deepEqual(
-    parseStrictRuntimeParams("memory.review.resolve", {
-      workspacePath: "/workspace",
-      proposalId: "proposal-1",
-      resolution: "accepted",
-      expectedVersion: 1,
-      idempotencyKey: "review-1",
-      patch: {
-        kind: "project_fact",
-        title: "Edited title",
-        content: "Edited content",
-        confidence: 0.95,
-      },
-    }),
-    {
-      workspacePath: "/workspace",
-      proposalId: "proposal-1",
-      resolution: "accepted",
-      expectedVersion: 1,
-      idempotencyKey: "review-1",
-      patch: {
-        kind: "project_fact",
-        title: "Edited title",
-        content: "Edited content",
-        confidence: 0.95,
-      },
-    },
+    RUNTIME_ERROR_CODES.INVALID_REQUEST,
   );
   assertProtocolError(
-    () =>
-      parseStrictRuntimeParams("memory.review.resolve", {
-        workspacePath: "/workspace",
-        proposalId: "proposal-1",
-        resolution: "rejected",
-        expectedVersion: 1,
-        idempotencyKey: "review-rejected-patch",
-        patch: { content: "must not apply" },
-      }),
-    RUNTIME_ERROR_CODES.INVALID_PARAMS,
-  );
-  assertProtocolError(
-    () =>
-      parseStrictRuntimeParams("memory.settings.update", {
-        workspacePath: "/workspace",
-        expectedVersion: 1,
-        idempotencyKey: "auto-commit-true",
-        autoCommit: true,
-      }),
-    RUNTIME_ERROR_CODES.INVALID_PARAMS,
-  );
-  assertProtocolError(
-    () =>
-      parseStrictRuntimeParams("memory.settings.update", {
-        workspacePath: "/workspace",
-        expectedVersion: 1,
-        idempotencyKey: "request-2",
-        storageRoot: "/private/memory",
-      }),
-    RUNTIME_ERROR_CODES.INVALID_PARAMS,
+    () => parseDesktopRuntimeResult("memory.settings.get", { settings, reviewBudget: {} }),
+    RUNTIME_ERROR_CODES.INVALID_REQUEST,
   );
 });
 
-test("memory results reject undeclared storage fields", () => {
-  const fact = runtimeFact();
-  assert.deepEqual(parseDesktopRuntimeResult("memory.get", { fact }), { fact });
+test("memory results expose direct atomic Items and reject legacy envelopes", () => {
+  const item = runtimeItem();
+  assert.deepEqual(parseDesktopRuntimeResult("memory.get", { item }), { item });
+  assert.deepEqual(parseDesktopRuntimeResult("memory.list", { items: [item] }), {
+    items: [item],
+  });
+  assert.deepEqual(
+    parseDesktopRuntimeResult("memory.delete", { itemId: item.itemId, deleted: true }),
+    { itemId: item.itemId, deleted: true },
+  );
+  assertProtocolError(
+    () => parseDesktopRuntimeResult("memory.get", { fact: item }),
+    RUNTIME_ERROR_CODES.INVALID_REQUEST,
+  );
   assertProtocolError(
     () =>
       parseDesktopRuntimeResult("memory.get", {
-        fact: { ...fact, storageRoot: "/private/memory" },
+        item: { ...item, atomic: { itemId: item.itemId } },
       }),
     RUNTIME_ERROR_CODES.INVALID_REQUEST,
   );
 });
 
-test("memory settings results strictly validate the rolling review budget", () => {
-  const settings = {
-    enabled: true,
-    autoPropose: true,
-    autoCommit: false,
-    injectionEnabled: true,
-    reviewMode: "balanced",
-    version: 1,
-    updatedAt: "2026-07-22T00:00:00.000Z",
-  } as const;
-  const reviewBudget = {
-    mode: "balanced",
-    allowed: false,
-    reason: "budget-exhausted",
-    calls: 8,
-    inputTokens: 12_000,
-    outputTokens: 1_000,
-    costUsd: 0.08,
-    maxCalls: 8,
-    maxInputTokens: 16_000,
-    maxOutputTokens: 2_000,
-    maxCostUsd: 0.1,
-    nextRecoveryAt: "2026-07-22T02:00:00.000Z",
-  } as const;
-  for (const method of ["memory.settings.get", "memory.settings.update"] as const) {
-    assert.deepEqual(parseDesktopRuntimeResult(method, { settings, reviewBudget }), {
-      settings,
-      reviewBudget,
-    });
-    assertProtocolError(
-      () => parseDesktopRuntimeResult(method, { settings }),
-      RUNTIME_ERROR_CODES.INVALID_REQUEST,
-    );
-    assertProtocolError(
-      () =>
-        parseDesktopRuntimeResult(method, {
-          settings,
-          reviewBudget: { ...reviewBudget, calls: -1 },
-        }),
-      RUNTIME_ERROR_CODES.INVALID_REQUEST,
-    );
-    assertProtocolError(
-      () =>
-        parseDesktopRuntimeResult(method, {
-          settings,
-          reviewBudget: { ...reviewBudget, storageRoot: "/private/memory" },
-        }),
-      RUNTIME_ERROR_CODES.INVALID_REQUEST,
-    );
-  }
-});
-
-test("durable memory notifications accept metadata and reject bodies or evidence", () => {
-  const valid = createRuntimeNotification({
+test("durable memory notifications use Item changed/deleted metadata only", () => {
+  const changed = createRuntimeNotification({
     topic: "memory.changed",
     scope: { workspacePath: "/workspace" },
     resourceVersion: 2,
     at: 1,
     payload: {
-      entityType: "fact",
-      entityId: "fact-1",
+      entityType: "item",
+      entityId: "item-1",
       version: 2,
       change: "updated",
     },
   });
-  assert.equal(isMemoryRuntimeNotification(valid), true);
+  const deleted = createRuntimeNotification({
+    topic: "memory.deleted",
+    scope: { workspacePath: "/workspace" },
+    resourceVersion: 3,
+    at: 2,
+    payload: { itemId: "item-1", version: 3 },
+  });
+  assert.equal(isMemoryRuntimeNotification(changed), true);
+  assert.equal(isMemoryRuntimeNotification(deleted), true);
   assert.equal(
     isMemoryRuntimeNotification({
-      ...valid,
-      payload: { ...valid.payload, content: "must not enter durable events" },
+      ...changed,
+      payload: { ...changed.payload, content: "must not enter durable events" },
     }),
     false,
   );
   assert.equal(
     isMemoryRuntimeNotification({
-      ...valid,
-      payload: { ...valid.payload, evidence: { quote: "raw transcript" } },
+      ...deleted,
+      topic: "memory.forgotten",
+      payload: { factId: "fact-1", version: 3 },
     }),
     false,
   );
 });
 
-function runtimeFact(): RuntimeMemoryFact {
+function runtimeItem(): RuntimeMemoryItem {
   return {
-    factId: "fact-1",
-    kind: "project_fact",
-    title: "Build",
-    content: "Use npm run build",
-    confidence: 0.9,
-    state: "active",
-    pinned: false,
+    itemId: "item-1",
     version: 1,
-    createdAt: "2026-07-20T00:00:00.000Z",
-    updatedAt: "2026-07-20T00:00:00.000Z",
+    content: "Use npm run build",
+    kind: "knowledge",
+    statementType: "fact",
+    temporalType: "undated",
+    scopeType: "workspace",
+    scopeKey: "workspace-key",
+    eventStartedAt: null,
+    eventEndedAt: null,
+    observedAt: 1,
+    lifecycleState: "active",
+    origin: "agent_extracted",
+    contentHash: "hash",
+    createdAt: 1,
+    updatedAt: 1,
+    sources: [{ sessionId: "session-1", runId: "run-1", turnId: "turn-1", eventId: "event-1" }],
   };
 }
 

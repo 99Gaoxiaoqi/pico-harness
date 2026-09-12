@@ -6,7 +6,7 @@ import {
   type DesktopRuntimeMethod,
   type RuntimeDiagnosticCheck,
   type RuntimeMcpServerInput,
-  type RuntimeMemoryFact,
+  type RuntimeMemoryItem,
   type RuntimeMemorySettings,
   type RuntimeNotification,
   type RuntimeParams,
@@ -43,7 +43,7 @@ import {
   type AppRuntimePhase,
   type CapabilityView,
   type ConversationView,
-  type MemoryFactPatch,
+  type MemoryItemPatch,
   type MemorySettingsPatch,
   type ProviderDraft,
   type ProviderView,
@@ -102,7 +102,7 @@ const WORKSPACE_MEMORY_CAPABILITY = "workspace-memory-v1";
 const MAX_RENDERER_SEEN_EVENT_IDS = 10_000;
 
 export function isMemoryNotificationTopic(topic: string): boolean {
-  return topic === "memory.proposed" || topic === "memory.changed" || topic === "memory.forgotten";
+  return topic === "memory.changed" || topic === "memory.deleted";
 }
 
 export function shouldBatchHydrateRuntimeNotification(topic: string): boolean {
@@ -412,13 +412,13 @@ export interface RuntimeActions {
   ): Promise<boolean>;
   deleteProviderCredential(providerId: string, expectedRevision: string): Promise<boolean>;
   refreshMemory(): Promise<void>;
-  createMemoryFact(text: string): Promise<RuntimeMemoryFact | undefined>;
-  updateMemoryFact(
-    factId: string,
+  createMemoryItem(text: string): Promise<RuntimeMemoryItem | undefined>;
+  updateMemoryItem(
+    itemId: string,
     expectedVersion: number,
-    patch: MemoryFactPatch,
-  ): Promise<RuntimeMemoryFact | undefined>;
-  forgetMemoryFact(factId: string, expectedVersion: number): Promise<boolean>;
+    patch: MemoryItemPatch,
+  ): Promise<RuntimeMemoryItem | undefined>;
+  deleteMemoryItem(itemId: string, expectedVersion: number): Promise<boolean>;
   updateMemorySettings(
     expectedVersion: number,
     patch: MemorySettingsPatch,
@@ -855,7 +855,7 @@ export function useRuntimeStore(): RuntimeStore {
           ...current,
           memory: {
             workspacePath,
-            facts: [],
+            items: [],
             status: "degraded",
             error: "当前 Runtime 未提供工作区记忆能力。请完整重启 Pico 后重试。",
           },
@@ -871,10 +871,10 @@ export function useRuntimeStore(): RuntimeStore {
         memory: { ...current.memory, workspacePath, status: "loading", error: undefined },
       }));
       try {
-        const [factsResult, settingsResult] = await Promise.all([
+        const [itemsResult, settingsResult] = await Promise.all([
           invoke(bridge, "memory.list", {
             workspacePath,
-            states: ["active", "disabled", "archived"],
+            lifecycleStates: ["active", "archived"],
             limit: 500,
           }),
           invoke(bridge, "memory.settings.get", { workspacePath }),
@@ -884,7 +884,7 @@ export function useRuntimeStore(): RuntimeStore {
           ...current,
           memory: {
             workspacePath,
-            facts: factsResult.facts,
+            items: itemsResult.items,
             settings: settingsResult.settings,
             status: "ready",
           },
@@ -977,7 +977,7 @@ export function useRuntimeStore(): RuntimeStore {
           memory:
             trusted && !switchingWorkspace
               ? current.memory
-              : { workspacePath, facts: [], status: "idle" },
+              : { workspacePath, items: [], status: "idle" },
           ...(switchingWorkspace
             ? {
                 timeline: [],
@@ -2739,44 +2739,39 @@ export function useRuntimeStore(): RuntimeStore {
           await loadMemory(bridge, workspacePath);
         });
       },
-      async createMemoryFact(text) {
+      async createMemoryItem(text) {
         const workspacePath = dataRef.current.workspacePath;
         const content = text.trim();
         if (!workspacePath || !dataRef.current.trusted || !content) return undefined;
-        let created: RuntimeMemoryFact | undefined;
+        let created: RuntimeMemoryItem | undefined;
         setMessage(undefined);
         await perform("memory-create", async (bridge) => {
           if (preview) {
             const now = Date.now();
-            const factId = crypto.randomUUID();
+            const itemId = crypto.randomUUID();
             created = {
-              factId,
-              kind: "reference",
-              title: null,
-              content,
-              confidence: 1,
-              state: "active",
-              pinned: false,
+              itemId,
               version: 1,
-              createdAt: new Date(now).toISOString(),
-              updatedAt: new Date(now).toISOString(),
-              atomic: {
-                itemId: factId,
-                kind: "note",
-                scopeType: "workspace",
-                scopeKey: workspacePath,
-                statementType: "fact",
-                temporalType: "undated",
-                observedAt: now,
-                eventStartedAt: null,
-                eventEndedAt: null,
-                origin: "user_requested",
-              },
+              content,
+              kind: "note",
+              statementType: "fact",
+              temporalType: "undated",
+              scopeType: "workspace",
+              scopeKey: workspacePath,
+              eventStartedAt: null,
+              eventEndedAt: null,
+              observedAt: now,
+              lifecycleState: "active",
+              origin: "user_requested",
+              contentHash: `preview:${itemId}`,
+              createdAt: now,
+              updatedAt: now,
+              sources: [],
             };
           } else {
             try {
               created = (await invoke(bridge, "memory.create", { workspacePath, text: content }))
-                .fact;
+                .item;
             } catch (error) {
               if (
                 error instanceof RuntimeInvocationError &&
@@ -2791,7 +2786,7 @@ export function useRuntimeStore(): RuntimeStore {
             }
           }
           if (dataRef.current.workspacePath !== workspacePath) return;
-          const fact = created;
+          const item = created;
           // The write is already durable. Show its result even if the follow-up read fails.
           setData((current) =>
             current.workspacePath !== workspacePath
@@ -2801,12 +2796,12 @@ export function useRuntimeStore(): RuntimeStore {
                   memory: {
                     ...current.memory,
                     workspacePath,
-                    facts: [
-                      fact,
+                    items: [
+                      item,
                       ...(current.memory.workspacePath === workspacePath
-                        ? current.memory.facts
+                        ? current.memory.items
                         : []
-                      ).filter((item) => item.factId !== fact.factId),
+                      ).filter((candidate) => candidate.itemId !== item.itemId),
                     ],
                   },
                 },
@@ -2822,44 +2817,30 @@ export function useRuntimeStore(): RuntimeStore {
         });
         return created;
       },
-      async updateMemoryFact(factId, expectedVersion, patch) {
+      async updateMemoryItem(itemId, expectedVersion, patch) {
         const workspacePath = dataRef.current.workspacePath;
         if (!workspacePath || !dataRef.current.trusted) return undefined;
-        let updated: RuntimeMemoryFact | undefined;
+        let updated: RuntimeMemoryItem | undefined;
         await perform("memory-update", async (bridge) => {
           if (preview) {
-            const fact = dataRef.current.memory.facts.find((item) => item.factId === factId);
-            if (!fact || fact.version !== expectedVersion) return;
-            const { expiresAt: oldExpiresAt, lastUsedAt: oldLastUsedAt, ...baseFact } = fact;
-            const { expiresAt, lastUsedAt, ...basePatch } = patch;
+            const item = dataRef.current.memory.items.find(
+              (candidate) => candidate.itemId === itemId,
+            );
+            if (!item || item.version !== expectedVersion) return;
             updated = {
-              ...baseFact,
-              ...basePatch,
-              ...(expiresAt === undefined
-                ? oldExpiresAt
-                  ? { expiresAt: oldExpiresAt }
-                  : {}
-                : expiresAt === null
-                  ? {}
-                  : { expiresAt }),
-              ...(lastUsedAt === undefined
-                ? oldLastUsedAt
-                  ? { lastUsedAt: oldLastUsedAt }
-                  : {}
-                : lastUsedAt === null
-                  ? {}
-                  : { lastUsedAt }),
-              version: fact.version + 1,
-              updatedAt: new Date().toISOString(),
+              ...item,
+              ...patch,
+              version: item.version + 1,
+              updatedAt: Date.now(),
             };
-            const nextFact = updated;
+            const nextItem = updated;
             setData((current) => {
               return {
                 ...current,
                 memory: {
                   ...current.memory,
-                  facts: current.memory.facts.map((item) =>
-                    item.factId === factId ? nextFact : item,
+                  items: current.memory.items.map((candidate) =>
+                    candidate.itemId === itemId ? nextItem : candidate,
                   ),
                 },
               };
@@ -2867,34 +2848,34 @@ export function useRuntimeStore(): RuntimeStore {
           } else {
             const result = await invoke(bridge, "memory.update", {
               workspacePath,
-              factId,
+              itemId,
               expectedVersion,
               idempotencyKey: crypto.randomUUID(),
               ...patch,
             });
-            updated = result.fact;
+            updated = result.item;
             await loadMemory(bridge, workspacePath);
           }
           setMessage("记忆已更新。");
         });
         return updated;
       },
-      async forgetMemoryFact(factId, expectedVersion) {
+      async deleteMemoryItem(itemId, expectedVersion) {
         const workspacePath = dataRef.current.workspacePath;
         if (!workspacePath || !dataRef.current.trusted) return false;
-        return perform("memory-forget", async (bridge) => {
+        return perform("memory-delete", async (bridge) => {
           if (preview) {
             setData((current) => ({
               ...current,
               memory: {
                 ...current.memory,
-                facts: current.memory.facts.filter((item) => item.factId !== factId),
+                items: current.memory.items.filter((item) => item.itemId !== itemId),
               },
             }));
           } else {
-            await invoke(bridge, "memory.forget", {
+            await invoke(bridge, "memory.delete", {
               workspacePath,
-              factId,
+              itemId,
               expectedVersion,
               idempotencyKey: crypto.randomUUID(),
             });
@@ -2914,9 +2895,7 @@ export function useRuntimeStore(): RuntimeStore {
             const nextSettings: RuntimeMemorySettings = {
               ...settings,
               ...patch,
-              autoCommit: false,
               version: settings.version + 1,
-              updatedAt: new Date().toISOString(),
             };
             updated = nextSettings;
             setData((current) => ({

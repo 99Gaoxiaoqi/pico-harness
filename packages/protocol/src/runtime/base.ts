@@ -5,9 +5,9 @@ export const LOCAL_RUNTIME_PROTOCOL_VERSION = 2;
 export const LOCAL_RUNTIME_AUTH_VERSION = 1;
 
 /** Increment when the Desktop-required result schema changes incompatibly. */
-export const DESKTOP_RUNTIME_SCHEMA_REVISION = 16;
+export const DESKTOP_RUNTIME_SCHEMA_REVISION = 17;
 
-export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v16";
+export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v17";
 
 export const CAPABILITY_SCOPE_RUNTIME_CAPABILITY = "capability-scopes-v1";
 
@@ -80,12 +80,7 @@ export type RuntimePermissionMode = "ask" | "auto" | "full-access";
 
 export type RuntimeProviderKind = "openai" | "claude" | "responses";
 
-export type RuntimeConfigSource =
-  | "user"
-  | "project"
-  | "environment"
-  | "session"
-  | "cli";
+export type RuntimeConfigSource = "user" | "project" | "environment" | "session" | "cli";
 
 export type RuntimeCredentialStatus = "ready" | "missing" | "environment" | "unsupported";
 

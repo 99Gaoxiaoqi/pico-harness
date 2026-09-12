@@ -35,8 +35,8 @@ test("用户级策略不继承旧项目开关、保存时清理旧配置并保�
   const first = (await service.getSettings(home)).settings;
   assert.equal(first.version, 1);
   assert.equal(first.enabled, true);
-  assert.equal(first.autoPropose, true);
-  assert.equal(first.injectionEnabled, true);
+  assert.equal(first.autoExtract, true);
+  assert.equal(first.recallEnabled, true);
   assert.deepEqual(
     (await service.getSettings(a)).settings,
     (await service.getSettings(b)).settings,
@@ -46,7 +46,7 @@ test("用户级策略不继承旧项目开关、保存时清理旧配置并保�
     expectedVersion: first.version,
     idempotencyKey: "enable",
     enabled: true,
-    injectionEnabled: true,
+    recallEnabled: true,
   });
   const env = { PICO_HOME: home };
   const desktop = new DesktopRuntimeService({
@@ -62,7 +62,7 @@ test("用户级策略不继承旧项目开关、保存时清理旧配置并保�
   assert.equal((await service.getSettings(b)).settings.enabled, true);
   await assert.rejects(service.updateSettings(a, params), /版本已改变/);
   await service.create(a, "Private project A note");
-  assert.equal((await service.list(b, { workspacePath: b })).facts.length, 0);
+  assert.equal((await service.list(b, { workspacePath: b })).items.length, 0);
   const store = new SqliteMemoryItemStore(dbPath);
   try {
     const key = resolvePicoPaths(a, { picoHome: home }).workspace.id;

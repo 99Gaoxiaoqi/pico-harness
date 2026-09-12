@@ -18,14 +18,14 @@ test("atomic management preserves manual deduplication, sanitizer, settings and 
   await mkdir(workspacePath);
   const service = new DesktopAtomicMemoryService({ picoHome, publish: () => undefined });
   try {
-    const { fact } = await service.create(workspacePath, "Prefer concise answers.");
-    const token = encodeMemoryUndoToken({ factId: fact.factId, version: fact.version });
-    assert.deepEqual(decodeMemoryUndoToken(token), { factId: fact.factId, version: fact.version });
+    const { item } = await service.create(workspacePath, "Prefer concise answers.");
+    const token = encodeMemoryUndoToken({ itemId: item.itemId, version: item.version });
+    assert.deepEqual(decodeMemoryUndoToken(token), { itemId: item.itemId, version: item.version });
     assert.equal(
-      (await service.create(workspacePath, "Prefer concise answers.")).fact.factId,
-      fact.factId,
+      (await service.create(workspacePath, "Prefer concise answers.")).item.itemId,
+      item.itemId,
     );
-    assert.equal((await service.list(workspacePath, { workspacePath })).facts.length, 1);
+    assert.equal((await service.list(workspacePath, { workspacePath })).items.length, 1);
     await assert.rejects(
       service.create(workspacePath, "sk-abcdefghijklmnopqrstuvwxyz123456"),
       /安全扫描未通过/,
@@ -37,35 +37,35 @@ test("atomic management preserves manual deduplication, sanitizer, settings and 
         expectedVersion: settings.version,
         idempotencyKey: `toggle:${enabled}`,
         enabled,
-        injectionEnabled: enabled,
+        recallEnabled: enabled,
       });
       const updated = (await service.getSettings(workspacePath)).settings;
       assert.equal(updated.enabled, enabled);
-      assert.equal(updated.injectionEnabled, enabled);
+      assert.equal(updated.recallEnabled, enabled);
     }
     const payload = decodeMemoryUndoToken(token);
-    const { fact: archived } = await service.update(workspacePath, {
+    const { item: archived } = await service.update(workspacePath, {
       workspacePath,
-      factId: payload.factId,
+      itemId: payload.itemId,
       expectedVersion: payload.version,
-      state: "archived",
+      lifecycleState: "archived",
       idempotencyKey: `undo:${token}`,
     });
-    assert.equal(archived.state, "archived");
+    assert.equal(archived.lifecycleState, "archived");
     assert.ok(archived.version > payload.version);
     await assert.rejects(
       service.update(workspacePath, {
         workspacePath,
-        factId: payload.factId,
+        itemId: payload.itemId,
         expectedVersion: payload.version,
-        state: "active",
+        lifecycleState: "active",
         idempotencyKey: "stale-token",
       }),
       /version|版本|conflict/i,
     );
     const store = new SqliteMemoryItemStore(join(picoHome, "memory.sqlite"));
     try {
-      assert.equal((await store.readItem(fact.factId))?.item.lifecycleState, "archived");
+      assert.equal((await store.readItem(item.itemId))?.item.lifecycleState, "archived");
       assert.equal(
         (await store.readSettings(resolvePicoPaths(workspacePath, { picoHome }).workspace.id))
           .enabled,
@@ -79,7 +79,7 @@ test("atomic management preserves manual deduplication, sanitizer, settings and 
     );
     for (const invalid of [
       "bad-token",
-      encodeMemoryUndoToken({ factId: fact.factId, version: 0 }),
+      encodeMemoryUndoToken({ itemId: item.itemId, version: 0 }),
     ]) {
       assert.throws(() => decodeMemoryUndoToken(invalid), /invalid memory undo token/);
     }

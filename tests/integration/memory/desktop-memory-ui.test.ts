@@ -32,25 +32,7 @@ function previewRuntime(): RuntimeStore {
     actions: {} as RuntimeStore["actions"],
     data: {
       ...previewData,
-      memory: {
-        ...previewData.memory,
-        facts: previewData.memory.facts.map((fact, index) => ({
-          ...fact,
-          state: index === 0 ? "active" : "archived",
-          atomic: {
-            itemId: fact.factId,
-            kind: "knowledge",
-            scopeType: index === 0 ? "global" : "workspace",
-            scopeKey: index === 0 ? null : "workspace",
-            statementType: "fact",
-            temporalType: "undated",
-            observedAt: 1,
-            eventStartedAt: null,
-            eventEndedAt: null,
-            origin: "agent_extracted",
-          },
-        })),
-      },
+      memory: previewData.memory,
     },
   };
 }
@@ -92,7 +74,7 @@ test("atomic memory narrow layout has two keyboard-operated tabs and handles emp
   assert.equal(nextMemoryTabIndex(0, "End"), 1);
   const empty: RuntimeStore = {
     ...runtime,
-    data: { ...runtime.data, memory: { ...runtime.data.memory, facts: [] } },
+    data: { ...runtime.data, memory: { ...runtime.data.memory, items: [] } },
   };
   assert.match(renderMemoryPage({ runtime: empty, forceNarrow: false }), /还没有已保存的记忆/);
   const untrusted: RuntimeStore = { ...runtime, data: { ...runtime.data, trusted: false } };
@@ -102,7 +84,7 @@ test("atomic memory narrow layout has two keyboard-operated tabs and handles emp
   );
 });
 
-test("memory route, notifications, conflict refetch and unavailable-source presentation remain usable", async () => {
+test("memory route, notifications, conflict refetch and Item provenance remain usable", async () => {
   const app = await readFile(
     new URL("../../../apps/desktop/src/renderer/App.tsx", import.meta.url),
     "utf8",
@@ -112,7 +94,8 @@ test("memory route, notifications, conflict refetch and unavailable-source prese
   assert.match(app, /path="memory"[\s\S]*?<WorkspaceRoute>\s*<MemoryPageRoute \/>/);
   assert.doesNotMatch(app, /LegacySurfaceRedirect to="\/settings\/memory"/);
   assert.equal(isMemoryNotificationTopic("memory.changed"), true);
-  assert.equal(isMemoryNotificationTopic("memory.forgotten"), true);
+  assert.equal(isMemoryNotificationTopic("memory.deleted"), true);
+  assert.equal(isMemoryNotificationTopic("memory.forgotten"), false);
   assert.equal(isMemoryConflict(new RuntimeInvocationError("CONFLICT", "stale", true)), true);
   const source = await readFile(
     new URL("../../../apps/desktop/src/renderer/runtime.ts", import.meta.url),
@@ -120,7 +103,6 @@ test("memory route, notifications, conflict refetch and unavailable-source prese
   );
   assert.match(source, /if \(isMemoryNotificationTopic\(topic\)\) \{\s*scheduleMemoryRefresh\(\);/);
   const runtime = previewRuntime();
-  const fact = runtime.data.memory.facts[0]!;
   const degraded: RuntimeStore = {
     ...runtime,
     message: "记忆已在另一处更新，已重新加载最新内容。",
@@ -130,23 +112,12 @@ test("memory route, notifications, conflict refetch and unavailable-source prese
         ...runtime.data.memory,
         status: "degraded",
         error: "当前记忆服务不可用。",
-        facts: [
-          {
-            ...fact,
-            source: {
-              sourceId: "source",
-              sessionId: "session",
-              availability: "unavailable",
-              createdAt: fact.createdAt,
-              updatedAt: fact.updatedAt,
-            },
-          },
-        ],
       },
     },
   };
   const html = renderMemoryPage({ runtime: degraded, forceNarrow: false });
   assert.match(html, /当前记忆服务不可用/);
-  assert.match(html, /来源不可用/);
+  assert.match(html, /来源会话/);
+  assert.match(html, /session-atlas/);
   assert.match(html, /已重新加载最新内容/);
 });

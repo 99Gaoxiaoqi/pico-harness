@@ -237,12 +237,12 @@ test("atomic memory extraction waits for a successful durable terminal and stops
   const entries = await events.readSessionEntries(sessionId);
   const terminal = entries.find((e) => e.event.kind === "run.terminal")!;
   const management = new DesktopAtomicMemoryService({ picoHome, publish: () => {} });
-  const saved = (await management.create(workDir, "A note to delete during the pending run.")).fact;
+  const saved = (await management.create(workDir, "A note to delete during the pending run.")).item;
   await runtime.capture([{ role: "user", content: "你好" }], []);
   await runtime.requestExtract();
-  await management.forget(workDir, {
+  await management.delete(workDir, {
     workspacePath: workDir,
-    factId: saved.factId,
+    itemId: saved.itemId,
     expectedVersion: saved.version,
     idempotencyKey: "delete-before-terminal",
   });

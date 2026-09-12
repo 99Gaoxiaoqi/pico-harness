@@ -8,13 +8,7 @@ export interface DesktopMemoryRequestContext {
   readonly get: (params: RuntimeRequest<"memory.get">["params"]) => Awaitable<JsonValue>;
   readonly create: (params: RuntimeRequest<"memory.create">["params"]) => Awaitable<JsonValue>;
   readonly update: (params: RuntimeRequest<"memory.update">["params"]) => Awaitable<JsonValue>;
-  readonly forget: (params: RuntimeRequest<"memory.forget">["params"]) => Awaitable<JsonValue>;
-  readonly listReviews: (
-    params: RuntimeRequest<"memory.review.list">["params"],
-  ) => Awaitable<JsonValue>;
-  readonly resolveReview: (
-    params: RuntimeRequest<"memory.review.resolve">["params"],
-  ) => Awaitable<JsonValue>;
+  readonly delete: (params: RuntimeRequest<"memory.delete">["params"]) => Awaitable<JsonValue>;
   readonly getSettings: (
     params: RuntimeRequest<"memory.settings.get">["params"],
   ) => Awaitable<JsonValue>;
@@ -34,9 +28,7 @@ export function createDesktopMemoryRequestHandlers(
   | "memory.get"
   | "memory.create"
   | "memory.update"
-  | "memory.forget"
-  | "memory.review.list"
-  | "memory.review.resolve"
+  | "memory.delete"
   | "memory.settings.get"
   | "memory.settings.update"
   | "memory.context.preview"
@@ -46,9 +38,7 @@ export function createDesktopMemoryRequestHandlers(
     "memory.get": (request) => context.get(request.params),
     "memory.create": (request) => context.create(request.params),
     "memory.update": (request) => context.update(request.params),
-    "memory.forget": (request) => context.forget(request.params),
-    "memory.review.list": (request) => context.listReviews(request.params),
-    "memory.review.resolve": (request) => context.resolveReview(request.params),
+    "memory.delete": (request) => context.delete(request.params),
     "memory.settings.get": (request) => context.getSettings(request.params),
     "memory.settings.update": (request) => context.updateSettings(request.params),
     "memory.context.preview": (request) => context.previewContext(request.params),

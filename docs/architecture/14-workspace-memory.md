@@ -143,11 +143,11 @@ receipt。修改用 expected version，提取覆盖推进用 cursor CAS；operat
 桌面记忆页提供手动添加、已保存/已归档列表、正文编辑、范围和来源展示、归档/恢复、删除，以及三个
 按工作区生效的开关：
 
-| 存储字段        | 含义                                                     | 兼容协议字段       |
-| --------------- | -------------------------------------------------------- | ------------------ |
-| `enabled`       | 总开关                                                   | `enabled`          |
-| `autoExtract`   | 控制后台 extract 和 compaction 提取，不阻止显式 remember | `autoPropose`      |
-| `recallEnabled` | 是否注入已有记忆                                         | `injectionEnabled` |
+| 设置字段        | 含义                                                     |
+| --------------- | -------------------------------------------------------- |
+| `enabled`       | 总开关                                                   |
+| `autoExtract`   | 控制后台 extract 和 compaction 提取，不阻止显式 remember |
+| `recallEnabled` | 是否注入已有记忆                                         |
 
 开关默认均开启。`/memory off` 同时关闭总开关和召回；`on` 将两者打开，但保留原自动提取
 设置。常用命令：
@@ -170,16 +170,18 @@ receipt。修改用 expected version，提取覆盖推进用 cursor CAS；operat
 所有旧代次任务失效，新任务正常运行。待重试失败范围也记录代次；旧代次范围以
 `skipped / memory_deleted` 空结算并推进游标，不重新执行删除前的显式保存请求。
 
-Session 删除不删除已提交 Item；删除后不再为该 Session 新提取。当前管理协议只投影第一条
-来源，未实时验证原事件是否仍可打开，不能把显示的来源等同于永久可用的证据链接。
+Session 删除不删除已提交 Item；删除后不再为该 Session 新提取。管理协议返回 Item 的当前
+`sources`，但不实时验证原事件是否仍可打开，不能把显示的来源等同于永久可用的证据链接。
 
 global 条目在同一用户的受信工作区可管理，其他 workspace 的局部条目即使按 ID 访问也会被
 拒绝。当前 UI 不提供任意修改 scope 的入口。
 
-协议仍保留 `fact`、`proposal`、`autoPropose` 等过渡名称；真正的类型和范围在 `fact.atomic`
-中。旧审核列表返回空，审核操作及 reviewMode/autoCommit 更新明确拒绝。TUI 的记忆命令经
-daemon 操作同一原子库：`/memory status` 显示记忆/召回/自动提取开关及活跃、归档数量；
-`/memory undo` 在版本匹配时归档条目，不显示旧审核队列或 disabled 语义。
+Desktop 与 TUI 通过同一 Item 协议访问原子库：`memory.list/get/create/update/delete` 直接使用
+`itemId`、原子 `kind`、`lifecycleState`、范围、时间与来源字段；`memory.settings.*` 直接使用
+`enabled / autoExtract / recallEnabled`，`memory.context.preview` 返回被选中的 `items` 与预算。
+旧 Fact/Proposal/review 方法、审核预算、`disabled/forgotten` 状态和 settings 别名不再属于当前
+协议。`/memory status` 显示记忆/召回/自动提取开关及活跃、归档数量；`/memory undo` 在版本
+匹配时归档条目。
 
 ## 6. 数据库结构与备份
 
@@ -218,5 +220,5 @@ TUI 到真实 daemon 的手动记忆链见
 覆盖未信任拒绝且不建库、保存、状态、归档撤销及工作区开关，不启动模型任务。
 
 旧 Proposal/Worker/Scheduler/Recovery、旧记忆管理服务和 `SqliteMemoryRepository` 已退役。
-原子记忆所需内容校验独立位于 `src/memory/atomic/content-safety.ts`；保留旧 wire 字段和
-响应名称不意味着保留旧 workspace schema、双写或双套记忆流程。
+原子记忆所需内容校验独立位于 `src/memory/atomic/content-safety.ts`；Desktop wire、存储和
+Runtime 都以同一 Item 术语工作，不存在旧 workspace schema 的双写或第二套记忆流程。
