@@ -29,7 +29,8 @@ import {
   normalizeSessionRuntimeStateWritePatch,
   normalizeSessionUsageSnapshot,
   SESSION_RUNTIME_STATE_VERSION,
-  type PersistedInteractionMode,
+  type PersistedCollaborationMode,
+  type PersistedPermissionMode,
   type PersistedSessionSettings,
   type PersistedPromptCacheState,
   type SessionHydrationSnapshot,
@@ -1171,13 +1172,13 @@ export class Session
   async beginRewindPoint(input: {
     userPrompt: string;
     transcriptIndex?: number;
-    interactionMode?: PersistedInteractionMode;
-    prePlanMode?: Exclude<PersistedInteractionMode, "plan">;
+    collaborationMode?: PersistedCollaborationMode;
+    permissionMode?: PersistedPermissionMode;
     messageId?: string;
   }): Promise<string> {
     this.assertWritable();
-    if (input.prePlanMode !== undefined && input.interactionMode !== "plan") {
-      throw new Error("prePlanMode requires interactionMode=plan");
+    if ((input.collaborationMode === undefined) !== (input.permissionMode === undefined)) {
+      throw new Error("rewind collaborationMode and permissionMode must be provided together");
     }
     const messageId = input.messageId ?? randomUUID();
     await this.flushPersistence();
@@ -1191,8 +1192,10 @@ export class Session
         userPrompt: input.userPrompt,
         messageIndex: this.messageLedger.length,
         ...(input.transcriptIndex !== undefined ? { transcriptIndex: input.transcriptIndex } : {}),
-        ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
-        ...(input.prePlanMode !== undefined ? { prePlanMode: input.prePlanMode } : {}),
+        ...(input.collaborationMode !== undefined
+          ? { collaborationMode: input.collaborationMode }
+          : {}),
+        ...(input.permissionMode !== undefined ? { permissionMode: input.permissionMode } : {}),
       },
       this.id,
       this.fileHistoryIo,
@@ -1288,7 +1291,6 @@ export class Session
     expectedFingerprints?: Record<string, string>,
     options: {
       readonly fileTransactionHooks?: FileHistoryRewindTransactionHooks;
-      readonly fallbackSettings?: PersistedSessionSettings;
       readonly operationId?: string;
     } = {},
   ): Promise<{ targetSessionId: string }> {
@@ -1337,7 +1339,6 @@ export class Session
       targetSessionId,
       ...(options.operationId ? { operationId: options.operationId } : {}),
       ...(throughEventId ? { throughEventId } : {}),
-      ...(options.fallbackSettings ? { fallbackSettings: options.fallbackSettings } : {}),
       ...(mode === "both"
         ? {
             cleanupOnlyOnFailure: true,

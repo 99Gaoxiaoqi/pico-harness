@@ -78,9 +78,6 @@ export type RuntimeOrchestrationMode = "default" | "graph" | "swarm";
 
 export type RuntimePermissionMode = "ask" | "auto" | "full-access";
 
-/** @deprecated Compatibility input accepted by older clients. */
-export type RuntimeInteractionMode = RuntimePermissionMode | "plan";
-
 export type RuntimeProviderKind = "openai" | "claude" | "responses";
 
 export type RuntimeConfigSource =

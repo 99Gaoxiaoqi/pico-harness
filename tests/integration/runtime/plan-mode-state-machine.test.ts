@@ -12,7 +12,9 @@ import { PlanCoordinator } from "../../../src/plan/coordinator.js";
 import {
   createDefaultSessionSettings,
   exitSessionPlanMode,
-  setSessionMode,
+  getOrCreateSessionSettings,
+  setSessionCollaborationMode,
+  setSessionPermissionMode,
   snapshotSessionSettings,
 } from "../../../src/input/session-settings.js";
 import { RUNTIME_EVENT_SCHEMA_VERSION } from "../../../src/storage/runtime-event.js";
@@ -559,10 +561,10 @@ test("v3 settings snapshots persist only split axes", async () => {
     provider: "openai",
     model: "m",
     modelRouteId: "openai/m",
-    mode: "plan",
+    collaborationMode: "plan",
     permissionMode: "auto",
   });
-  setSessionMode(settings, "ask");
+  setSessionPermissionMode(settings, "ask");
   assert.equal(
     settings.collaborationMode,
     "plan",
@@ -593,13 +595,14 @@ test("v3 settings snapshots persist only split axes", async () => {
     provider: "openai",
     model: "m",
     modelRouteId: "openai/m",
-    mode: "full-access",
+    collaborationMode: "agent",
+    permissionMode: "full-access",
   });
-  setSessionMode(independent, "plan");
+  setSessionCollaborationMode(independent, "plan");
   assert.equal(independent.collaborationMode, "plan");
   assert.equal(independent.permissionMode, "full-access");
-  setSessionMode(independent, "auto");
-  assert.equal(independent.mode, "plan");
+  setSessionPermissionMode(independent, "auto");
+  assert.equal(independent.collaborationMode, "plan");
   assert.equal(independent.permissionMode, "auto");
   exitSessionPlanMode(independent);
   assert.equal(independent.collaborationMode, "agent");
@@ -626,6 +629,19 @@ test("Session fork inherits pending plans and interrupts active execution", asyn
     picoHome,
     runtimePort: createEngineRuntimePort(),
   });
+  getOrCreateSessionSettings(
+    {
+      sessionId: "source",
+      cwd: workDir,
+      picoHome,
+      provider: "openai",
+      model: "test",
+      modelRouteId: "openai/test",
+      collaborationMode: "plan",
+      permissionMode: "auto",
+    },
+    { persistence: source },
+  );
   await source.commitMessages({ role: "user", content: "seed" });
   const store = source.runtimeEventStore!;
   const coordinator = new PlanCoordinator(

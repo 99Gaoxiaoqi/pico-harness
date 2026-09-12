@@ -507,7 +507,8 @@ export function createProductionRuntimeServices(
           model: route.model,
           modelRouteId: route.modelRouteId,
           modelCapabilities: route.capabilities,
-          interactionMode: operatorBinding ? operatorExecutionPermissionMode : "ask",
+          collaborationMode: "agent",
+          permissionMode: operatorBinding ? operatorExecutionPermissionMode : "ask",
           orchestrationMode: input.orchestrationMode,
           agentSwarmAuthorization: input.prestartedRun.agentSwarmAuthorization ?? "none",
           ...(reasoningLevel !== undefined ? { thinkingEffort: reasoningLevel } : {}),
@@ -1092,14 +1093,9 @@ export function createProductionRuntimeServices(
             ...(planning ? { planMode: true } : {}),
             ...(persistedSettings
               ? {
-                  rewindInteractionMode:
-                    persistedSettings.collaborationMode === "plan"
-                      ? ("plan" as const)
-                      : persistedSettings.permissionMode,
+                  rewindCollaborationMode: persistedSettings.collaborationMode,
+                  rewindPermissionMode: persistedSettings.permissionMode,
                 }
-              : {}),
-            ...(persistedSettings?.collaborationMode === "plan"
-              ? { rewindPrePlanMode: persistedSettings.permissionMode }
               : {}),
             ...(orchestrationMode === "graph"
               ? { allowedTools: AGENT_GRAPH_SUPERVISOR_TOOL_NAMES }

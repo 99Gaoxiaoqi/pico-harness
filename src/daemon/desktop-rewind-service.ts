@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { StorageOperationJournal } from "../storage/operation-journal.js";
 import type { Session } from "../engine/session.js";
-import type { SessionSettings } from "../input/session-settings.js";
 import { createSessionForkRuntimePort } from "../runtime/session-fork-runtime-port-adapter.js";
 import {
   RUNTIME_ERROR_CODES,
@@ -29,10 +28,6 @@ export interface DesktopRewindServiceOptions {
     sessionId: string,
     operation: (session: Session) => Promise<Result>,
   ) => Promise<Result>;
-  readonly prepareForkSourceSettings: (
-    workspacePath: string,
-    session: Session,
-  ) => Promise<SessionSettings>;
   readonly notifyCommitted: (input: {
     readonly workspacePath: string;
     readonly sessionId: string;
@@ -165,15 +160,10 @@ export class DesktopRewindService {
       params.sessionId,
       async (session) => {
         const mode = params.mode ?? "both";
-        const fallbackSettings =
-          mode === "code"
-            ? undefined
-            : (await this.options.prepareForkSourceSettings(canonical, session),
-              session.getRuntimeStateSnapshot().settings);
-        if (mode !== "code" && !fallbackSettings) {
+        if (mode !== "code" && !session.getRuntimeStateSnapshot().settings) {
           throw new RuntimeProtocolError(
-            RUNTIME_ERROR_CODES.INTERNAL_ERROR,
-            "Rewind 未能冻结安全 Session settings",
+            RUNTIME_ERROR_CODES.RESET_REQUIRED,
+            `Session ${session.id} 缺少当前版本 settings，不能 rewind`,
           );
         }
         const forkJournal =
@@ -200,7 +190,6 @@ export class DesktopRewindService {
           () => targetSessionId,
           expectedFingerprints,
           {
-            ...(fallbackSettings ? { fallbackSettings } : {}),
             ...(mode === "code" ? {} : { operationId }),
           },
         );

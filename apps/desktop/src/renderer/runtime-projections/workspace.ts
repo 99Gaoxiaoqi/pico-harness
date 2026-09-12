@@ -15,28 +15,23 @@ export function parseSessionSettings(value: unknown): SessionSettingsView | unde
   const result = isRecord(value) ? value : {};
   const settings = isRecord(result.settings) ? result.settings : result;
   const model = stringValue(settings.model);
-  const legacyMode = settings.mode;
   const collaborationMode =
     settings.collaborationMode === "plan" || settings.collaborationMode === "agent"
       ? settings.collaborationMode
-      : legacyMode === "plan"
-        ? "plan"
-        : "agent";
+      : undefined;
   const permissionMode =
     settings.permissionMode === "ask" ||
     settings.permissionMode === "auto" ||
     settings.permissionMode === "full-access"
       ? settings.permissionMode
-      : legacyMode === "ask" || legacyMode === "auto" || legacyMode === "full-access"
-        ? legacyMode
-        : "ask";
+      : undefined;
   const orchestrationMode =
     settings.orchestrationMode === "swarm"
       ? "swarm"
       : settings.orchestrationMode === "graph"
         ? "graph"
         : "default";
-  if (!model) {
+  if (!model || !collaborationMode || !permissionMode) {
     return undefined;
   }
   return {

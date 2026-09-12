@@ -118,10 +118,10 @@ export interface FileHistorySnapshot {
   timestamp: Date;
   /** 该用户消息进入 TUI transcript 前的条目下标。 */
   transcriptIndex?: number;
-  /** 预留给宿主恢复 ask/plan/full-access 等交互模式。 */
-  interactionMode?: string;
-  /** 进入 plan 前的交互模式。 */
-  prePlanMode?: string;
+  /** 该用户消息发送时的协作轴。 */
+  collaborationMode?: "agent" | "plan";
+  /** 该用户消息发送时的权限轴。 */
+  permissionMode?: "ask" | "auto" | "full-access";
   /** 本条用户消息执行期间实际触碰过的文件。 */
   editedFilePaths: Set<string>;
   /** 本条消息的文件事务未完整覆盖工作区时的可见警告。 */
@@ -664,8 +664,8 @@ export async function fileHistoryBeginRewindPoint(
     messageIndex: number;
     userPrompt: string;
     transcriptIndex?: number;
-    interactionMode?: string;
-    prePlanMode?: string;
+    collaborationMode?: "agent" | "plan";
+    permissionMode?: "ask" | "auto" | "full-access";
   },
   sessionId: string,
   io: FileHistoryIo,
@@ -684,8 +684,10 @@ export async function fileHistoryBeginRewindPoint(
     timestamp: new Date(),
     editedFilePaths: new Set(),
     ...(input.transcriptIndex !== undefined ? { transcriptIndex: input.transcriptIndex } : {}),
-    ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
-    ...(input.prePlanMode !== undefined ? { prePlanMode: input.prePlanMode } : {}),
+    ...(input.collaborationMode !== undefined
+      ? { collaborationMode: input.collaborationMode }
+      : {}),
+    ...(input.permissionMode !== undefined ? { permissionMode: input.permissionMode } : {}),
   };
 
   for (const filePath of state.trackedFiles) {
@@ -2080,8 +2082,8 @@ interface PersistedFileHistorySnapshotV2 {
   }>;
   timestamp: string;
   transcriptIndex?: number;
-  interactionMode?: string;
-  prePlanMode?: string;
+  collaborationMode?: "agent" | "plan";
+  permissionMode?: "ask" | "auto" | "full-access";
   editedFilePaths: PersistedFileLocationV2[];
   journalWarnings?: string[];
 }
@@ -2128,10 +2130,12 @@ function manifestToRow(
         ...(snapshot.transcriptIndex !== undefined
           ? { transcriptIndex: snapshot.transcriptIndex }
           : {}),
-        ...(snapshot.interactionMode !== undefined
-          ? { interactionMode: snapshot.interactionMode }
+        ...(snapshot.collaborationMode !== undefined
+          ? { collaborationMode: snapshot.collaborationMode }
           : {}),
-        ...(snapshot.prePlanMode !== undefined ? { prePlanMode: snapshot.prePlanMode } : {}),
+        ...(snapshot.permissionMode !== undefined
+          ? { permissionMode: snapshot.permissionMode }
+          : {}),
         ...(snapshot.journalWarnings !== undefined
           ? { journalWarnings: snapshot.journalWarnings }
           : {}),
@@ -2214,10 +2218,12 @@ async function saveFileHistoryStateUnlocked(
         ...(snapshot.transcriptIndex !== undefined
           ? { transcriptIndex: snapshot.transcriptIndex }
           : {}),
-        ...(snapshot.interactionMode !== undefined
-          ? { interactionMode: snapshot.interactionMode }
+        ...(snapshot.collaborationMode !== undefined
+          ? { collaborationMode: snapshot.collaborationMode }
           : {}),
-        ...(snapshot.prePlanMode !== undefined ? { prePlanMode: snapshot.prePlanMode } : {}),
+        ...(snapshot.permissionMode !== undefined
+          ? { permissionMode: snapshot.permissionMode }
+          : {}),
         editedFilePaths: Array.from(snapshot.editedFilePaths, (filePath) =>
           encodeFileLocation(filePath, roots),
         ),
@@ -2463,10 +2469,10 @@ function hydrateFileHistoryV2(
     ...(snapshot.transcriptIndex !== undefined
       ? { transcriptIndex: snapshot.transcriptIndex }
       : {}),
-    ...(snapshot.interactionMode !== undefined
-      ? { interactionMode: snapshot.interactionMode }
+    ...(snapshot.collaborationMode !== undefined
+      ? { collaborationMode: snapshot.collaborationMode }
       : {}),
-    ...(snapshot.prePlanMode !== undefined ? { prePlanMode: snapshot.prePlanMode } : {}),
+    ...(snapshot.permissionMode !== undefined ? { permissionMode: snapshot.permissionMode } : {}),
     editedFilePaths: new Set(
       snapshot.editedFilePaths.map((location) => decodeFileLocation(location, roots)),
     ),
@@ -2770,20 +2776,34 @@ function optionalSnapshotFieldsV2(
 > {
   return {
     ...optionalIntegerField(snapshot, "transcriptIndex", `snapshots[${index}]`),
-    ...optionalStringField(snapshot, "interactionMode", `snapshots[${index}]`),
-    ...optionalStringField(snapshot, "prePlanMode", `snapshots[${index}]`),
+    ...optionalCollaborationModeField(snapshot, index),
+    ...optionalPermissionModeField(snapshot, index),
     ...optionalStringArrayField(snapshot, "journalWarnings", `snapshots[${index}]`, false),
   };
 }
 
-function optionalStringField(
-  record: Record<string, unknown>,
-  key: string,
-  label: string,
-): Record<string, string> {
-  const value = record[key];
+function optionalCollaborationModeField(
+  snapshot: Record<string, unknown>,
+  index: number,
+): Pick<PersistedFileHistorySnapshotV2, "collaborationMode"> {
+  const value = snapshot["collaborationMode"];
   if (value === undefined) return {};
-  return { [key]: requireString(value, `${label}.${key}`) };
+  if (value !== "agent" && value !== "plan") {
+    throw new Error(`snapshots[${index}].collaborationMode 无效`);
+  }
+  return { collaborationMode: value };
+}
+
+function optionalPermissionModeField(
+  snapshot: Record<string, unknown>,
+  index: number,
+): Pick<PersistedFileHistorySnapshotV2, "permissionMode"> {
+  const value = snapshot["permissionMode"];
+  if (value === undefined) return {};
+  if (value !== "ask" && value !== "auto" && value !== "full-access") {
+    throw new Error(`snapshots[${index}].permissionMode 无效`);
+  }
+  return { permissionMode: value };
 }
 
 function optionalIntegerField(

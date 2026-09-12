@@ -4,7 +4,6 @@ import type { RuntimeEvent } from "./session-runtime-event.js";
 import type { EngineRuntimeCapability, EngineRuntimePort } from "./runtime-port.js";
 import type { RuntimeSessionForkSeedEntry } from "./session-runtime-projection.js";
 import type { SessionRuntimeStateWritePatch } from "./session-runtime.js";
-import type { PersistedSessionSettings } from "./session-runtime.js";
 import type { FileHistoryRewindTransactionHooks } from "../safety/file-history.js";
 import type { ExecutionBoundary } from "../safety/permission-profile.js";
 
@@ -97,8 +96,6 @@ export interface SessionForkRuntimePort {
     /** Durable caller-owned identity used to resume the same fork after a crash. */
     readonly operationId?: string;
     readonly throughEventId?: string;
-    /** Safe settings frozen by the host when a historical boundary predates settings facts. */
-    readonly fallbackSettings?: PersistedSessionSettings;
     /** If publication fails after an external file transaction, dispositions must only clean up. */
     readonly cleanupOnlyOnFailure?: boolean;
     /** Durable workspace phase for a combined conversation + code rewind. */

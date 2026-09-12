@@ -92,7 +92,9 @@ test("Maka memory admission separates recall from extraction across runtime prof
             ...runtimeRequest(fixture.workspace, sessionId, "What is the build command?"),
             provider: profile === "responses" ? "responses" : "openai",
             allowedTools: hasTriggers ? triggers : [],
-            ...(profile === "plan" ? { interactionMode: "plan" as const } : {}),
+            ...(profile === "plan"
+              ? { collaborationMode: "plan" as const, permissionMode: "ask" as const }
+              : {}),
             ...(background
               ? {
                   execution: {

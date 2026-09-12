@@ -34,7 +34,6 @@ const USER_CONFIG_TEMPORARY_NAME =
 
 export const EMPTY_USER_CONFIG_REVISION = sha256("");
 
-export type PicoInteractionMode = "ask" | "plan" | "auto" | "full-access";
 export type PicoCollaborationMode = "agent" | "plan";
 export type PicoPermissionMode = "ask" | "auto" | "full-access";
 export type PicoOrchestrationMode = "default" | "graph" | "swarm";
@@ -581,11 +580,7 @@ function parseDefaults(value: unknown, configPath: string): PicoUserConfigDefaul
     permissionMode !== "auto" &&
     permissionMode !== "full-access"
   ) {
-    throw configError(
-      configPath,
-      "defaults.permissionMode",
-      "must be ask, auto, or full-access",
-    );
+    throw configError(configPath, "defaults.permissionMode", "must be ask, auto, or full-access");
   }
   const orchestrationMode = value["orchestrationMode"];
   if (
@@ -594,11 +589,7 @@ function parseDefaults(value: unknown, configPath: string): PicoUserConfigDefaul
     orchestrationMode !== "graph" &&
     orchestrationMode !== "swarm"
   ) {
-    throw configError(
-      configPath,
-      "defaults.orchestrationMode",
-      "must be default, graph, or swarm",
-    );
+    throw configError(configPath, "defaults.orchestrationMode", "must be default, graph, or swarm");
   }
   const thinkingEffort = value["thinkingEffort"];
   if (

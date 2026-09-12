@@ -294,7 +294,8 @@ function planningRequest(
     prompt,
     dir: sandbox.workDir,
     sessionSelection: { mode, sessionId: sandbox.sessionId },
-    interactionMode: "plan",
+    collaborationMode: "plan",
+    permissionMode: "ask",
     allowedTools: [
       "read_file",
       "glob",

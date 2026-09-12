@@ -229,7 +229,7 @@ test("operation journal rejects retired interaction modes on create and read", a
 
   await assert.rejects(journal.get(seeded.operationId), /journal row is malformed/u);
 
-  for (const [operationId, interactionMode, prePlanMode] of [
+  for (const [operationId, legacyInteractionMode, legacyPrePlanMode] of [
     ["legacy-default", "default", undefined],
     ["legacy-yolo", "plan", "yolo"],
   ] as const) {
@@ -248,8 +248,8 @@ test("operation journal rejects retired interaction modes on create and read", a
         sourceMessageEventId: `user-message:${operationId}`,
         messageIndex: 0,
         userPrompt: "prompt",
-        interactionMode: interactionMode === "plan" ? "plan" : "ask",
-        ...(interactionMode === "plan" ? { prePlanMode: "ask" as const } : {}),
+        collaborationMode: "agent",
+        permissionMode: "ask",
       },
       files: [],
     });
@@ -257,7 +257,13 @@ test("operation journal rejects retired interaction modes on create and read", a
     if (rewind.kind !== "rewind") throw new Error("expected rewind operation");
     const retired = {
       ...rewind,
-      target: { ...rewind.target, interactionMode, ...(prePlanMode ? { prePlanMode } : {}) },
+      target: {
+        ...rewind.target,
+        collaborationMode: undefined,
+        permissionMode: undefined,
+        interactionMode: legacyInteractionMode,
+        ...(legacyPrePlanMode ? { prePlanMode: legacyPrePlanMode } : {}),
+      },
     };
     const connection = new DatabaseSync(join(fixture.storageRoot, "pico.sqlite"));
     connection
@@ -329,25 +335,26 @@ test("operation journal serves fork publication lookup as one query", async (con
   });
   await journal.create(forkOperationInput({ operationId: "fork-a", targetSessionId: "target-a" }));
   await journal.create(forkOperationInput({ operationId: "fork-b", targetSessionId: "target-b" }));
-  await journal.create(
-    forkOperationInput({
-      operationId: "rewind-1",
-      kind: "rewind",
-      mode: "both",
-      precondition: {
-        sessionLastSeq: 3,
-        effectiveHistoryDigest: "d".repeat(8),
-        fileHistoryRevision: 2,
-      },
-      target: {
-        messageId: "m1",
-        sourceMessageEventId: "user-message:m1",
-        messageIndex: 0,
-        userPrompt: "p",
-      },
-      files: [],
-    }),
-  );
+  await journal.create({
+    operationId: "rewind-1",
+    kind: "rewind",
+    sessionId: "source-session",
+    mode: "both",
+    precondition: {
+      sessionLastSeq: 3,
+      effectiveHistoryDigest: "d".repeat(8),
+      fileHistoryRevision: 2,
+    },
+    target: {
+      messageId: "m1",
+      sourceMessageEventId: "user-message:m1",
+      messageIndex: 0,
+      userPrompt: "p",
+      collaborationMode: "agent",
+      permissionMode: "ask",
+    },
+    files: [],
+  });
   // completed 需走完整 Saga 链(prepared→…→completed),单步直达 completed 非法。
   await journal.advance({
     operationId: "fork-a",

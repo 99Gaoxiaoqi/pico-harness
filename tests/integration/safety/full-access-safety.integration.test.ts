@@ -86,7 +86,7 @@ test(
   async () => {
     const workDir = process.cwd();
     const roots = WorkspaceRoots.createSync(workDir);
-    const safety = buildForegroundSafetyMiddleware(workDir, { mode: "full-access" }, roots);
+    const safety = buildForegroundSafetyMiddleware(workDir, { collaborationMode: "agent" }, roots);
     const cases = [
       {
         command: "printf blocked > /etc/PICO_REDIRECT_INPUT_CANARY",
@@ -657,14 +657,14 @@ test(
 
     const foregroundSafety = buildForegroundSafetyMiddleware(
       workDir,
-      { mode: "full-access" },
+      { collaborationMode: "agent" },
       roots,
     );
     assert.equal((await foregroundSafety(hardlineCall)).allowed, false);
     assert.equal((await foregroundSafety(ordinaryCall)).allowed, true);
     const rootForegroundSafety = buildForegroundSafetyMiddleware(
       "/",
-      { mode: "full-access" },
+      { collaborationMode: "agent" },
       roots,
     );
     assert.equal((await rootForegroundSafety(relativeSystemCall)).allowed, false);

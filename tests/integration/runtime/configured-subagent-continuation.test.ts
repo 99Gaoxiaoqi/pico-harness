@@ -75,7 +75,8 @@ test("agent_spawn continues its completed child with durable history and rejects
     model: route.model,
     auth: route.auth,
     baseURL: route.baseURL,
-    interactionMode: "ask" as const,
+    collaborationMode: "agent" as const,
+    permissionMode: "ask" as const,
   };
   const childRuns: string[] = [];
   let childSessionId = "";
@@ -308,7 +309,8 @@ test("agent_spawn continues its completed child with durable history and rejects
         ...input,
         sessionSelection: { mode: "resume", sessionId: childSessionId },
         prompt: "Continue manually and try to write a file",
-        interactionMode: "full-access",
+        collaborationMode: "agent",
+        permissionMode: "full-access",
         orchestrationMode: "swarm",
       },
       {
@@ -556,7 +558,8 @@ test("managed configured child freezes its physical boundary for the admitted Ru
         model: route.model,
         auth: route.auth,
         baseURL: route.baseURL,
-        interactionMode: "ask",
+        collaborationMode: "agent",
+        permissionMode: "ask",
       },
       {
         picoHome,

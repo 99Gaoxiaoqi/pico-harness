@@ -255,11 +255,11 @@ export class RuntimeRunExecutor {
               ...(options.rewindTranscriptIndex !== undefined
                 ? { transcriptIndex: options.rewindTranscriptIndex }
                 : {}),
-              ...(options.rewindInteractionMode !== undefined
-                ? { interactionMode: options.rewindInteractionMode }
+              ...(options.rewindCollaborationMode !== undefined
+                ? { collaborationMode: options.rewindCollaborationMode }
                 : {}),
-              ...(options.rewindPrePlanMode !== undefined
-                ? { prePlanMode: options.rewindPrePlanMode }
+              ...(options.rewindPermissionMode !== undefined
+                ? { permissionMode: options.rewindPermissionMode }
                 : {}),
             });
           }

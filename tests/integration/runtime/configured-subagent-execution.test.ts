@@ -219,7 +219,8 @@ test("foreground agent_spawn uses a separate durable RuntimeRun and exact local 
         auth: "none",
         baseURL: route.baseURL,
         thinkingEffort: "nothink",
-        interactionMode: "full-access",
+        collaborationMode: "agent",
+        permissionMode: "full-access",
       },
       {
         picoHome,
@@ -423,7 +424,8 @@ test("implementation returns a patch including new files while the host checkout
       worktreeSupervisor: supervisor,
       executeChild: async (options, dependencies) => {
         assert.notEqual(options.dir, workDir);
-        assert.equal(options.interactionMode, "full-access");
+        assert.equal(options.collaborationMode, "agent");
+        assert.equal(options.permissionMode, "full-access");
         assert.deepEqual(options.allowedTools, requireSubagentCapability("implementation").tools);
         const ceiling = dependencies?.configuredSubagentChild?.executionBoundaryCeiling;
         assert.equal(ceiling?.kind, "bypass");
@@ -477,7 +479,8 @@ test("a managed parent keeps a shared configured child in ask mode under a read-
     parentExecutionBoundary: () =>
       createManagedExecutionBoundary(createReadOnlyPermissionProfile()),
     executeChild: async (options, dependencies) => {
-      assert.equal(options.interactionMode, "ask");
+      assert.equal(options.collaborationMode, "agent");
+      assert.equal(options.permissionMode, "ask");
       const ceiling = dependencies?.configuredSubagentChild?.executionBoundaryCeiling;
       assert.ok(ceiling?.kind === "managed");
       assert.equal(ceiling.profile.name, "read-only");

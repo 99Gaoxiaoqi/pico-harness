@@ -43,7 +43,7 @@ async function decide(
     workDir,
     undefined,
     manager,
-    { sessionId: `permission-matrix-${mode}`, mode, additionalDirectories: [] },
+    { sessionId: `permission-matrix-${mode}`, permissionMode: mode, additionalDirectories: [] },
     WorkspaceRoots.createSync(workDir),
     undefined,
     undefined,

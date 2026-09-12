@@ -15,8 +15,8 @@ export interface FileHistorySnapshotSummary {
   changeSummary?: string;
   messageIndex: number;
   transcriptIndex?: number;
-  interactionMode?: string;
-  prePlanMode?: string;
+  collaborationMode?: "agent" | "plan";
+  permissionMode?: "ask" | "auto" | "full-access";
   changedFileCount?: number;
   addedLines?: number;
   removedLines?: number;
@@ -80,10 +80,10 @@ export function listFileHistorySnapshotSummaries(session: Session): FileHistoryS
       ...(snapshot.transcriptIndex !== undefined
         ? { transcriptIndex: snapshot.transcriptIndex }
         : {}),
-      ...(snapshot.interactionMode !== undefined
-        ? { interactionMode: snapshot.interactionMode }
+      ...(snapshot.collaborationMode !== undefined
+        ? { collaborationMode: snapshot.collaborationMode }
         : {}),
-      ...(snapshot.prePlanMode !== undefined ? { prePlanMode: snapshot.prePlanMode } : {}),
+      ...(snapshot.permissionMode !== undefined ? { permissionMode: snapshot.permissionMode } : {}),
       ...(snapshot.journalWarnings?.length
         ? { incomplete: true, warnings: [...snapshot.journalWarnings] }
         : {}),

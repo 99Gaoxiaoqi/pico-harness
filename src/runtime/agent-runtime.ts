@@ -139,7 +139,6 @@ import { looksLikeScheduleCreationIntent, ScheduleTaskTool } from "../tools/sche
 import { BackgroundManager } from "../tools/background-manager.js";
 import type { HookService } from "../hooks/service.js";
 import {
-  getOrCreateFailClosedLegacySessionSettings,
   getOrCreateSessionSettings,
   setSessionAdditionalDirectories,
   toolStatusFromRegistry,
@@ -1038,7 +1037,8 @@ export async function executeAgentRuntime(
       );
       options = {
         ...options,
-        interactionMode: configuredChildBoundaryCeiling.kind === "bypass" ? "full-access" : "ask",
+        collaborationMode: "agent",
+        permissionMode: configuredChildBoundaryCeiling.kind === "bypass" ? "full-access" : "ask",
         orchestrationMode: "default",
         agentSwarmAuthorization: "none",
         planMode: false,
@@ -1052,8 +1052,14 @@ export async function executeAgentRuntime(
       sessionLease.release();
       sessionLeaseTransferred = true;
     }
-    const legacyHistoryMissingSettings =
-      sessionSelection.mode !== "new" && session.getRuntimeStateSnapshot().settings === undefined;
+    if (
+      sessionSelection.mode !== "new" &&
+      session.getRuntimeStateSnapshot().settings === undefined
+    ) {
+      throw new Error(
+        `Session ${sessionSelection.sessionId} has no persisted settings and cannot be resumed`,
+      );
+    }
     const sessionSettingDefaults = {
       sessionId: sessionSelection.sessionId,
       sessionMode: sessionSelection.mode,
@@ -1074,23 +1080,15 @@ export async function executeAgentRuntime(
               ...(options.permissionMode !== undefined
                 ? { permissionMode: options.permissionMode }
                 : {}),
-              ...(options.interactionMode !== undefined ? { mode: options.interactionMode } : {}),
             }),
       model: defaultConfigModel,
       ...(options.modelRouteId !== undefined ? { modelRouteId: options.modelRouteId } : {}),
       ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
     };
-    const settings = legacyHistoryMissingSettings
-      ? getOrCreateFailClosedLegacySessionSettings(sessionSettingDefaults, {
-          persistence: session,
-        })
-      : getOrCreateSessionSettings(sessionSettingDefaults, {
-          persistence: session,
-          ...(backgroundPolicy ? { restore: false } : {}),
-        });
-    if (legacyHistoryMissingSettings) {
-      await session.flushPersistence();
-    }
+    const settings = getOrCreateSessionSettings(sessionSettingDefaults, {
+      persistence: session,
+      ...(backgroundPolicy ? { restore: false } : {}),
+    });
     if (configuredChildBoundaryCeiling) {
       const boundaryAfterSettingsRestore = session.getRuntimeStateSnapshot().boundary;
       if (
@@ -1108,12 +1106,11 @@ export async function executeAgentRuntime(
     // widen this Run's physical filesystem, subprocess, or network authority.
     const runtimeExecutionBoundary = (): ExecutionBoundary | undefined =>
       configuredChildBoundaryCeiling ?? session.getRuntimeStateSnapshot().boundary;
-    if (!settings.collaborationMode) throw new Error("Session collaborationMode is unavailable");
     const sideConversation = settings.sideConversation === true;
     const collaborationMode = (): "agent" | "plan" =>
       dependencies.configuredSubagentChild || dependencies.agentGraph?.kind === "operator"
         ? "agent"
-        : settings.collaborationMode!;
+        : settings.collaborationMode;
     planRun = collaborationMode() === "plan";
     const inheritedAuthorization = await readInheritedRunSwarmAuthorization(
       session,
@@ -2674,11 +2671,11 @@ export async function executeAgentRuntime(
         ...(effectiveOptions.rewindTranscriptIndex !== undefined
           ? { rewindTranscriptIndex: effectiveOptions.rewindTranscriptIndex }
           : {}),
-        ...(effectiveOptions.rewindInteractionMode !== undefined
-          ? { rewindInteractionMode: effectiveOptions.rewindInteractionMode }
+        ...(effectiveOptions.rewindCollaborationMode !== undefined
+          ? { rewindCollaborationMode: effectiveOptions.rewindCollaborationMode }
           : {}),
-        ...(effectiveOptions.rewindPrePlanMode !== undefined
-          ? { rewindPrePlanMode: effectiveOptions.rewindPrePlanMode }
+        ...(effectiveOptions.rewindPermissionMode !== undefined
+          ? { rewindPermissionMode: effectiveOptions.rewindPermissionMode }
           : {}),
         ...(effectiveOptions.imagePath !== undefined
           ? { imagePath: effectiveOptions.imagePath }
@@ -3329,7 +3326,7 @@ export function buildApprovalMiddleware(
   workDir: string,
   signal?: AbortSignal,
   approvalManager: ApprovalManager = globalApprovalManager,
-  settings?: Pick<SessionSettings, "sessionId" | "mode"> &
+  settings?: Pick<SessionSettings, "sessionId" | "collaborationMode" | "permissionMode"> &
     Partial<Pick<SessionSettings, "additionalDirectories">>,
   workspaceRoots?: WorkspaceRoots,
   picoHome?: string,
@@ -3354,13 +3351,13 @@ export function buildApprovalMiddleware(
 /** Hardline / Plan / Trust 属于不可审批绕过的前置安全门。 */
 export function buildForegroundSafetyMiddleware(
   workDir: string,
-  settings?: Pick<SessionSettings, "mode">,
+  settings?: Pick<SessionSettings, "collaborationMode">,
   workspaceRoots?: WorkspaceRoots,
   denialSink?: (event: RuntimePolicyDenial) => void,
   collaborationMode?: () => "agent" | "plan",
 ): MiddlewareFunc {
   return async (call) => {
-    const mode = collaborationMode?.() ?? (settings?.mode === "plan" ? "plan" : "agent");
+    const mode = collaborationMode?.() ?? settings?.collaborationMode ?? "agent";
     const planModeDenial = await planModeDenialReason(call, mode, workDir, workspaceRoots);
     if (planModeDenial !== undefined) {
       denialSink?.({
@@ -3411,7 +3408,7 @@ export function buildPermissionMiddleware(
   workDir: string,
   signal?: AbortSignal,
   approvalManager: ApprovalManager = globalApprovalManager,
-  settings?: Pick<SessionSettings, "sessionId" | "mode"> &
+  settings?: Pick<SessionSettings, "sessionId" | "permissionMode"> &
     Partial<Pick<SessionSettings, "additionalDirectories">>,
   workspaceRoots?: WorkspaceRoots,
   hookService?: HookService,
@@ -3431,8 +3428,7 @@ export function buildPermissionMiddleware(
   } = {},
 ): MiddlewareFunc {
   return async (call, context) => {
-    const mode =
-      permissionMode?.() ?? (settings?.mode === "plan" ? "ask" : (settings?.mode ?? "ask"));
+    const mode = permissionMode?.() ?? settings?.permissionMode ?? "ask";
     const sessionId = settings?.sessionId ?? "cli";
     const workspaceAccesses = workspaceAccessesFromCall(call);
     const childCeilingDenial = configuredChildCeilingDenial(

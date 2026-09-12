@@ -22,6 +22,7 @@ import {
 } from "../../../apps/desktop/src/renderer/runtime-projections/workspace.js";
 import { subagentParent } from "../../../apps/desktop/src/renderer/conversation/subagent-navigation.js";
 import { workspaceSessionKey } from "../../../apps/desktop/src/renderer/workspace-session.js";
+import { SESSION_RUNTIME_STATE_VERSION } from "../../../src/engine/session-runtime.js";
 
 function base(sessionId: string, suffix: string): RuntimeEventBase {
   return {
@@ -66,11 +67,33 @@ test("session list hides admitted children across workspaces and outcomes while 
     await runtime.close();
     await rm(root, { recursive: true, force: true });
   });
-  const create = async (workspacePath: string, sessionId: string) =>
-    (workspacePath === parentPath ? parent : isolated).initializeSession({
+  const create = async (workspacePath: string, sessionId: string) => {
+    const store = workspacePath === parentPath ? parent : isolated;
+    await store.initializeSession({
       sessionId,
       workDir: workspacePath,
     });
+    await store.append({
+      ...base(sessionId, "settings"),
+      visibility: "internal",
+      kind: "session.state.committed",
+      data: {
+        stateVersion: SESSION_RUNTIME_STATE_VERSION,
+        patch: {
+          settings: {
+            provider: "openai",
+            model: "test",
+            modelRouteId: "test/test",
+            collaborationMode: "agent",
+            permissionMode: "ask",
+            thinkingEffort: "off",
+            thinkingEffortExplicit: false,
+            additionalDirectories: [],
+          },
+        },
+      },
+    });
+  };
   await create(parentPath, "parent");
   await parent.append({
     ...base("parent", "start"),
@@ -218,7 +241,8 @@ test("real configured executor persists its child admission before model output 
       model: route.model,
       auth: "none",
       baseURL: route.baseURL,
-      interactionMode: "ask",
+      collaborationMode: "agent",
+      permissionMode: "ask",
     },
     {
       picoHome,
