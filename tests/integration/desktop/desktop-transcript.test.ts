@@ -6,10 +6,12 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { createElement } from "react";
 import { MarkdownText } from "../../../apps/desktop/src/renderer/conversation/MarkdownText.js";
 import { ConversationTranscript } from "../../../apps/desktop/src/renderer/conversation/ConversationTranscript.js";
-import { assembleConversationFragments } from "../../../apps/desktop/src/renderer/conversation/runtime-projection.js";
+import {
+  assembleConversationFragments,
+  parseConversation,
+} from "../../../apps/desktop/src/renderer/conversation/runtime-projection.js";
 import { projectRuntimeTranscript } from "../../../src/daemon/desktop-transcript.js";
 import { createEmptyUsageSnapshot } from "../../../src/engine/session-runtime.js";
-import { advanceRuntimeTranscriptPagingState } from "../../../src/tui/client-session-runtime.js";
 import {
   createToolResultEnvelope,
   type ToolResultEnvelope,
@@ -618,29 +620,24 @@ test("Desktop transcript pages older and newer through one fixed watermark curso
   );
 });
 
-test("oversized transcript item crosses UTF-8 pages and reassembles before id de-duplication", () => {
+test("Desktop reassembles an oversized transcript item across UTF-8 pages", () => {
   const content = `prefix-${"😀".repeat(2_000)}-suffix`;
   const source = snapshot([{ role: "assistant", content }]);
   let page = projectRuntimeTranscript(source, { maxBytes: 1_024 });
-  let state = { items: [] } as ReturnType<typeof advanceRuntimeTranscriptPagingState>;
+  const fragmentParts = new Map();
+  let items: ReturnType<typeof parseConversation>["items"] = [];
   let pageCount = 0;
   for (;;) {
     pageCount += 1;
-    state = advanceRuntimeTranscriptPagingState(state, {
-      session: {} as never,
-      queuedInputs: [],
-      ...page,
-    });
+    const parsed = parseConversation(page, "/workspace", "session", fragmentParts);
+    items = [...parsed.items, ...items];
     if (!page.nextCursor) break;
     page = projectRuntimeTranscript(source, { cursor: page.nextCursor, maxBytes: 1_024 });
   }
   assert.ok(pageCount > 2);
-  assert.equal(state.items.length, 1);
-  assert.equal(state.items[0]?.kind, "assistantMessage");
-  assert.equal(
-    state.items[0]?.kind === "assistantMessage" ? state.items[0].content : undefined,
-    content,
-  );
+  assert.equal(items.length, 1);
+  assert.equal(items[0]?.kind, "assistantMessage");
+  assert.equal(items[0]?.kind === "assistantMessage" ? items[0].text : undefined, content);
 });
 
 test("newer cursor resumes an oversized item then advances to its following item", () => {

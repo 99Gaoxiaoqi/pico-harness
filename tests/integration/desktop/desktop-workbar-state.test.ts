@@ -40,6 +40,12 @@ const shortcut = (
 test("Workbar v2 starts collapsed and exposes the eight tools in the intended order", () => {
   const state = createWorkbarState();
 
+  assert.deepEqual(Object.keys(state).toSorted(), [
+    "bottomHeight",
+    "docks",
+    "focusedDock",
+    "rightWidth",
+  ]);
   assert.deepEqual(state.docks.right.tabs, []);
   assert.deepEqual(state.docks.bottom.tabs, []);
   assert.equal(state.docks.right.collapsed, true);
@@ -255,7 +261,8 @@ test("Workbar v2 persistence keeps layouts and only canonical restart-safe stati
   );
 });
 
-test("Workbar migrates v1 overview and context tabs into one Inspector tab", () => {
+test("Workbar rejects retired v1 state instead of migrating it", () => {
+  const fallback = createWorkbarState({ rightWidth: 512 });
   const restored = parseWorkbarState(
     JSON.stringify({
       version: 1,
@@ -268,16 +275,10 @@ test("Workbar migrates v1 overview and context tabs into one Inspector tab", () 
       activeTabId: "context",
       mruTabIds: ["context", "review", "overview"],
     }),
+    fallback,
   );
 
-  assert.deepEqual(restored.docks.right.tabs, [
-    { id: "inspector", kind: "inspector", label: "追踪" },
-    { id: "review", kind: "review", label: "变更" },
-  ]);
-  assert.equal(restored.docks.right.activeTabId, "inspector");
-  assert.deepEqual(restored.docks.right.mruTabIds, ["inspector", "review"]);
-  assert.equal(restored.rightWidth, 444);
-  assert.equal(restored.docks.bottom.collapsed, true);
+  assert.equal(restored, fallback);
 });
 
 test("Workbar persistence fails safe for corrupt state and unavailable storage", () => {

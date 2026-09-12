@@ -157,7 +157,7 @@ export function ConversationPage() {
   const [inspector, setInspector] = useState<ConversationInspectorView>();
   const [catalogOpen, setCatalogOpen] = useState(false);
   const [workbar, dispatchWorkbar] = useReducer(reduceWorkbarState, undefined, () => {
-    const fallback = createWorkbarState({ collapsed: true });
+    const fallback = createWorkbarState();
     return typeof window === "undefined"
       ? fallback
       : loadWorkbarState(window.localStorage, fallback);
@@ -1407,7 +1407,7 @@ function timelineItemToConversationItem(item: TimelineItem): ConversationItemVie
       kind: "subagent",
       name: typeof item.data?.agentName === "string" ? item.data.agentName : item.title,
       title: item.title,
-      ...subagentMetadata(item.data ?? {}, item.id),
+      ...subagentMetadata(item.data ?? {}),
       detail: item.detail,
       state: item.state ?? "active",
       at: item.at,

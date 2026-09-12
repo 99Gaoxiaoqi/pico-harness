@@ -6,15 +6,9 @@ import {
 } from "../workspace-session.js";
 import type { SubagentItemView } from "./types.js";
 
-/** Configured executors used the child session ID as activityId before explicit metadata existed. */
-export function subagentMetadata(data: JsonRecord, itemId: string) {
-  const activityId =
-    typeof data.activityId === "string" ? data.activityId : itemId.replace(/^subagent:/u, "");
-  const legacyChild = /^subagent-[0-9a-f]{8}-[0-9a-f-]{27}$/iu.test(activityId)
-    ? activityId
-    : undefined;
+export function subagentMetadata(data: JsonRecord) {
   return {
-    childSessionId: typeof data.childSessionId === "string" ? data.childSessionId : legacyChild,
+    childSessionId: typeof data.childSessionId === "string" ? data.childSessionId : undefined,
     childWorkspacePath:
       typeof data.childWorkspacePath === "string" ? data.childWorkspacePath : undefined,
     toolCallId: typeof data.toolCallId === "string" ? data.toolCallId : undefined,

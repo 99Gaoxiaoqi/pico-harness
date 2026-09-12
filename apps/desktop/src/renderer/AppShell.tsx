@@ -707,7 +707,7 @@ function SidebarNav({
 }
 
 function routeTitle(pathname: string): string {
-  if (pathname.startsWith("/task/")) return pathname === "/task/new" ? "新任务" : "任务运行";
+  if (pathname === "/task/new") return "新任务";
   if (pathname.startsWith("/session/")) return "会话";
   if (pathname.startsWith("/extensions")) return "扩展";
   if (pathname.startsWith("/settings")) return "设置";

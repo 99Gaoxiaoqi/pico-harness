@@ -23,7 +23,6 @@ import { SessionsPage } from "./pages/SessionsPage.js";
 import { SettingsPage, SystemSettingsPage, WorkspaceSettingsPage } from "./pages/SettingsPage.js";
 import "./pages/subagent-settings.css";
 import { SubagentSettingsPage } from "./pages/SubagentSettingsPage.js";
-import { TaskPage } from "./pages/TaskPage.js";
 import { RuntimeContext, useRuntime } from "./runtime-context.js";
 import { useRuntimeStore } from "./runtime.js";
 import { UsagePage } from "./usage/UsagePage.js";
@@ -82,14 +81,6 @@ function AppStateRouter() {
         <Route path="home" element={<HomePage />} />
         <Route path="sessions" element={<SessionsPage />} />
         <Route path="task/new" element={<NewTaskPage />} />
-        <Route
-          path="task/:runId"
-          element={
-            <WorkspaceRoute>
-              <TaskPage />
-            </WorkspaceRoute>
-          }
-        />
         <Route
           path="session/:sessionId"
           element={
