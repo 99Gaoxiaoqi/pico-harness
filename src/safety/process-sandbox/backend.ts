@@ -245,9 +245,7 @@ export function buildMacosProfile(
     ),
     ...readAliases.map((root) => `(allow file-map-executable (subpath ${sbplString(root)}))`),
     ...policy.writeRoots.map((root) => `(allow file-write* (subpath ${sbplString(root)}))`),
-    ...(policy.writeFiles ?? []).map(
-      (path) => `(allow file-write* (literal ${sbplString(path)}))`,
-    ),
+    ...(policy.writeFiles ?? []).map((path) => `(allow file-write* (literal ${sbplString(path)}))`),
   ];
   if (policy.network === "allow") rules.push("(allow network*)");
   return rules.join("\n");

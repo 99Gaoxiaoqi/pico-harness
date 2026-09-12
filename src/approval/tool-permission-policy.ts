@@ -172,7 +172,16 @@ const GIT_DESTRUCTIVE_PATTERNS: readonly RegExp[] = [
   /^git\s+rebase\s+-i\b/u,
 ];
 
-const WRAPPER_COMMANDS = new Set(["nohup", "nice", "time", "timeout", "env", "command", "exec", "stdbuf"]);
+const WRAPPER_COMMANDS = new Set([
+  "nohup",
+  "nice",
+  "time",
+  "timeout",
+  "env",
+  "command",
+  "exec",
+  "stdbuf",
+]);
 
 const NESTED_SHELLS: ReadonlyArray<{ readonly head: RegExp; readonly flag: RegExp }> = [
   { head: /^(sh|bash|zsh)$/u, flag: /(?:^|\s)-\w*c\s+([\s\S]+)$/u },
