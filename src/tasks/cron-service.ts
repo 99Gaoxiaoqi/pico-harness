@@ -40,8 +40,8 @@ export interface CreateCronJobInput {
   timeZone?: string;
   prompt: string;
   policySnapshot: AutonomousPolicySnapshot;
-  credentialRef?: CredentialRef;
-  modelRouteId?: string;
+  credentialRef: CredentialRef;
+  modelRouteId: string;
   enabled?: boolean;
 }
 

@@ -56,7 +56,7 @@ export const CONTROL_SCOPE: SqliteSchemaScope = {
         cron_job_id TEXT PRIMARY KEY, workspace_path TEXT NOT NULL, name TEXT NOT NULL,
         schedule TEXT NOT NULL, time_zone TEXT NOT NULL, prompt TEXT NOT NULL,
         enabled INTEGER NOT NULL, policy_snapshot_json TEXT NOT NULL,
-        credential_ref TEXT, model_route_id TEXT,
+        credential_ref TEXT NOT NULL, model_route_id TEXT NOT NULL,
         version INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
       );
       CREATE TABLE cron_runs (

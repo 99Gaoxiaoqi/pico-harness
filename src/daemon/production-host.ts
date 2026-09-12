@@ -61,12 +61,10 @@ import { redactSensitiveText } from "../mcp/redact.js";
 import { UserMcpConfigStore } from "../mcp/user-config-store.js";
 import {
   assertCredentialRefMatchesProvider,
-  assertCredentialRefMatchesModelRoute,
   credentialRefForProvider,
-  credentialRefForModelRoute,
   createPlatformCredentialVault,
   normalizeProviderEndpoint,
-  parseAnyCredentialRef,
+  parseProviderCredentialRef,
   type CredentialVault,
 } from "../provider/credential-vault.js";
 import { resolveModelRouteCapabilities } from "../provider/model-capabilities.js";
@@ -269,7 +267,6 @@ export function createProductionRuntimeServices(
       if (deniedTools.length > 0) {
         throw new Error(`Cron Job 包含未显式授权的工具: ${deniedTools.join(", ")}`);
       }
-      if (!job.credentialRef) throw new Error("Cron Job 缺少 credentialRef");
       const route = await resolveCronModelRoute(job, effectiveConfigResolver);
       if (route.auth !== "none" && !(await credentialVault.has(job.credentialRef))) {
         throw new Error(`系统凭证库中不存在 ${job.credentialRef}`);
@@ -1355,10 +1352,7 @@ export function createProductionRuntimeServices(
   const automations: DesktopAutomationService = new DesktopAutomationService({
     picoHome,
     prepareSecurity: async (workspacePath) => {
-      const route = await resolveDesktopAutomationRoute(
-        workspacePath,
-        effectiveConfigResolver,
-      );
+      const route = await resolveDesktopAutomationRoute(workspacePath, effectiveConfigResolver);
       const userProvider = (await userConfigStore.read()).config.providers[route.providerId];
       const useSharedProviderCredential =
         userProvider !== undefined &&
@@ -1370,13 +1364,17 @@ export function createProductionRuntimeServices(
           "持久 Automation 不支持仅由当前进程环境提供的 Provider，请先导入用户 Provider",
         );
       }
-      const credentialRef = useSharedProviderCredential
-        ? credentialRefForProvider({
-            providerId: route.providerId,
-            protocol: userProvider.protocol,
-            baseURL: route.baseURL,
-          })
-        : credentialRefForModelRoute(route, workspacePath);
+      if (!useSharedProviderCredential) {
+        throw new RuntimeProtocolError(
+          RUNTIME_ERROR_CODES.FORBIDDEN,
+          "持久 Automation 只接受已导入的用户 Provider",
+        );
+      }
+      const credentialRef = credentialRefForProvider({
+        providerId: route.providerId,
+        protocol: userProvider.protocol,
+        baseURL: route.baseURL,
+      });
       if (route.auth !== "none" && !(await credentialVault.has(credentialRef))) {
         throw new RuntimeProtocolError(
           RUNTIME_ERROR_CODES.FORBIDDEN,
@@ -2439,7 +2437,6 @@ export function assembleProductionDaemonHost(
           : { allowed: false, reason: "background_policy_version_mismatch" },
     },
     execute: async (job, context) => {
-      if (!job.credentialRef) throw new Error("Cron Job 缺少 credentialRef");
       const route = await resolveCronModelRoute(job, effectiveConfigResolver);
       const result = await agentRuntime.execute(
         {
@@ -2529,12 +2526,8 @@ async function resolveCronModelRoute(
   job: CronJobRecord,
   effectiveConfigResolver: EffectiveConfigResolver,
 ) {
-  if (!job.credentialRef) throw new Error("Cron Job 缺少 credentialRef");
-  const parsedCredential = parseAnyCredentialRef(job.credentialRef);
-  const modelRouteId =
-    job.modelRouteId ??
-    (parsedCredential.version === "v1" ? parsedCredential.modelRouteId : undefined);
-  if (!modelRouteId) throw new Error("v2 Cron Job 缺少固定 modelRouteId");
+  parseProviderCredentialRef(job.credentialRef);
+  const modelRouteId = job.modelRouteId;
   const slash = modelRouteId.indexOf("/");
   const providerId = modelRouteId.slice(0, slash);
   const model = modelRouteId.slice(slash + 1);
@@ -2563,15 +2556,11 @@ async function resolveCronModelRoute(
       { baseURL: provider.baseURL },
     ),
   };
-  if (parsedCredential.version === "v1") {
-    assertCredentialRefMatchesModelRoute(job.credentialRef, resolved, job.workspacePath);
-  } else {
-    assertCredentialRefMatchesProvider(job.credentialRef, {
-      providerId,
-      protocol: provider.protocol,
-      baseURL: provider.baseURL,
-    });
-  }
+  assertCredentialRefMatchesProvider(job.credentialRef, {
+    providerId,
+    protocol: provider.protocol,
+    baseURL: provider.baseURL,
+  });
   return resolved;
 }
 

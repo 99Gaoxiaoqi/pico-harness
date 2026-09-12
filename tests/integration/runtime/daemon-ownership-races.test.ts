@@ -11,6 +11,7 @@ import {
   type DisposableLocalRuntimeService,
   type ManagedCronWorkspaceRuntime,
 } from "../../../src/daemon/index.js";
+import { credentialRefForProvider } from "../../../src/provider/credential-vault.js";
 import { WorkspaceTaskRuntime } from "../../../src/runtime/workspace-runtime.js";
 
 // 注：本文件原含旧传输单例锁（instance-lock）保留语义的断言，随 3-D Phase 5
@@ -149,6 +150,12 @@ test("Daemon stop is bounded during an active Cron tick and the fence releases a
     workspacePath: workspace,
     schedule: "* * * * *",
     prompt: "keep the Cron tick active",
+    credentialRef: credentialRefForProvider({
+      providerId: "test-provider",
+      protocol: "openai",
+      baseURL: "https://test.invalid/v1",
+    }),
+    modelRouteId: "test-provider/test-model",
     policySnapshot: {
       mode: "full-access",
       backgroundEnabled: true,
