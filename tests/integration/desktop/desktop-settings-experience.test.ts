@@ -124,6 +124,23 @@ test("usage parser preserves global token and CNY cost semantics", () => {
   assert.equal(parsed.unavailableWorkspaceCount, 1);
 });
 
+test("usage parser ignores retired bare and snake_case aliases", () => {
+  const parsed = parseUsage({
+    totalTokens: 99,
+    input_tokens: 90,
+    output_tokens: 9,
+    cache_read_tokens: 50,
+    cost: 2,
+    period: "legacy",
+  });
+  assert.equal(parsed.totalTokens, undefined);
+  assert.equal(parsed.inputTokens, undefined);
+  assert.equal(parsed.outputTokens, undefined);
+  assert.equal(parsed.cacheReadTokens, undefined);
+  assert.equal(parsed.costCNY, undefined);
+  assert.equal(parsed.period, "");
+});
+
 test("usage settings expose an accessible time filter and CNY cost summaries", async () => {
   const host = await rendererSource("usage/UsagePage.tsx");
   const page = await rendererSource("usage/UsageSettingsPage.tsx");

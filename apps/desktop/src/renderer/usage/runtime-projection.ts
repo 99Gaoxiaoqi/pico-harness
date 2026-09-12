@@ -9,22 +9,22 @@ import {
 
 export function parseUsage(value: unknown): UsageView {
   const result = isRecord(value) ? value : {};
-  const usage = isRecord(result.usage) ? result.usage : result;
-  const total = isRecord(usage.total) ? usage.total : usage;
+  const usage = isRecord(result.usage) ? result.usage : {};
+  const total = isRecord(usage.total) ? usage.total : {};
   const cache = isRecord(usage.cache) ? usage.cache : {};
   const unavailableWorkspaces = recordArray(usage.unavailableWorkspaces);
   // Cache metrics are provider_calls-only. Baselines lack per-call coverage and must not be mixed
   // into the cache token cards or ratios.
-  const cacheReadTokens = optionalNumberValue(cache.cacheReadTokens ?? cache.cache_read_tokens);
-  const cacheWriteTokens = optionalNumberValue(cache.cacheWriteTokens ?? cache.cache_write_tokens);
+  const cacheReadTokens = optionalNumberValue(cache.cacheReadTokens);
+  const cacheWriteTokens = optionalNumberValue(cache.cacheWriteTokens);
   const cacheAlerts = recordArray(cache.operationalAlerts)
     .map((alert) => stringValue(alert.message))
     .filter((message) => message.length > 0);
   return {
     ...(usage.details === undefined ? {} : { details: parseUsageDashboard(usage.details) }),
     totalTokens: optionalNumberValue(total.totalTokens),
-    inputTokens: optionalNumberValue(total.inputTokens ?? total.input_tokens),
-    outputTokens: optionalNumberValue(total.outputTokens ?? total.output_tokens),
+    inputTokens: optionalNumberValue(total.inputTokens),
+    outputTokens: optionalNumberValue(total.outputTokens),
     reasoningTokens: optionalNumberValue(total.reasoningTokens),
     cacheReadTokens,
     cacheWriteTokens,
@@ -33,7 +33,7 @@ export function parseUsage(value: unknown): UsageView {
     cachePromptTokenReuseRate: optionalNumberValue(cache.promptTokenReuseRate),
     cacheReadToWriteRatio: optionalNumberValue(cache.cacheReadToWriteRatio),
     ...(cacheAlerts.length > 0 ? { cacheAlerts } : {}),
-    costCNY: optionalNumberValue(total.costCNY ?? total.cost),
+    costCNY: optionalNumberValue(total.costCNY),
     costStatus:
       usage.costStatus === "none" ||
       usage.costStatus === "estimated" ||
@@ -51,6 +51,6 @@ export function parseUsage(value: unknown): UsageView {
         : undefined,
     workspacePath: stringValue(usage.workspacePath) || undefined,
     unavailableWorkspaceCount: unavailableWorkspaces.length || undefined,
-    period: stringValue(usage.period || usage.rangeAccuracy),
+    period: stringValue(usage.rangeAccuracy),
   };
 }

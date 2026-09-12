@@ -11,6 +11,7 @@ import { HomePage } from "../../../apps/desktop/src/renderer/pages/HomePage.js";
 import { RuntimeContext } from "../../../apps/desktop/src/renderer/runtime-context.js";
 import type { RuntimeStore } from "../../../apps/desktop/src/renderer/runtime.js";
 import {
+  parseRuns,
   parseSessionDetail,
   parseSessions,
 } from "../../../apps/desktop/src/renderer/runtime-projections/workspace.js";
@@ -33,6 +34,12 @@ test("子代理导航只接受显式 childSessionId，不再从 activityId 推�
     subagentMetadata({ activityId, childSessionId: "child-session" }).childSessionId,
     "child-session",
   );
+});
+
+test("桌面会话与运行投影只接受当前显式身份字段", () => {
+  assert.deepEqual(parseSessions({ sessions: [{ id: "old-session" }] }, "/workspace"), []);
+  assert.equal(parseSessionDetail({ session: { id: "old-session" } }, "/workspace"), undefined);
+  assert.deepEqual(parseRuns({ runs: [{ id: "old-run" }] }, "/workspace"), []);
 });
 
 test("隐藏子会话按详情冷启动及刷新，跨工作区返回父任务且首页列表不回添", () => {
