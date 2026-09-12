@@ -100,7 +100,7 @@ Session/Agent 叙事的 canonical semantic log；TaskRun、Control 与 Memory �
 
 | 组件                        | 存储位置 / 逻辑 scope           | 负责的数据                                                                                  | 不负责的数据                        |
 | --------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------- | ----------------------------------- |
-| `SqliteRuntimeEventStore`   | sessions                        | Session、消息、工具、审批、压缩、rewind、run terminal 与 Transcript 投影                    | Job 调度、TaskRun 和长期记忆 Fact   |
+| `SqliteRuntimeEventStore`   | sessions                        | Session、消息、工具、审批、压缩、rewind、run terminal 与 Transcript 投影                    | Job 调度、TaskRun 和长期记忆 Item   |
 | `SqliteTaskRunStore`        | task-runs                       | 显式可恢复任务跨 Attempt 的输入、checkpoint、租约、启动凭据与终态                           | Session Transcript 和 Cron 调度状态 |
 | `SqliteRuntimeControlStore` | control                         | Jobs、daemon/cron runs、attempts、leases、usage、provider calls、completion outbox 等控制面 | Session Transcript 和 TaskRun 事实  |
 | `SqliteMemoryItemStore`     | 独立 `$PICO_HOME/memory.sqlite` | 原子 Item、keys、sources、提取 cursor/receipt、幂等操作、重试范围和工作区设置               | 原始对话事实、旧 Proposal 审批      |
@@ -120,8 +120,8 @@ terminal/checkpoint 持久化之后触发。
 校验后直接提交；Item、keys、sources、cursor 和 receipt 在记忆库内同事务保存。Session
 删除不删除已提交 Item；原事件不再可用时，记忆来源身份仍保留，但不保证可回读。归档可恢复，
 删除清除记忆正文及关联记录，不建立来源黑名单；后续用户重新提供信息时可以再次保存。
-原始会话、旧库和备份不在清理范围内。旧记忆执行链已退役，工作区旧 memory 表仅保留
-schema 兼容校验，运行时不读取、不导入，也不双写。
+旧记忆执行链及工作区 Fact/Proposal memory scope 已完全退役；当前 workspace schema 不再
+创建、查询或兼容这些表。原子记忆只使用独立用户级数据库。
 具体流程、召回预算和恢复限制见[原子长期记忆](docs/architecture/14-workspace-memory.md)。
 `traces/` 保存可选运行 Span，不替代事实账本。
 

@@ -214,130 +214,6 @@ function insertTerminalWeakReferences(database: DatabaseSync): void {
     .run(AT, AT);
 }
 
-function insertMemory(database: DatabaseSync): void {
-  database.prepare("INSERT INTO memory_metadata VALUES ('revision', '4')").run();
-  database
-    .prepare(
-      `INSERT INTO memory_sources VALUES (
-         'source-derived', 'session-old', 'run-old', NULL, '["runtime-event"]', 1, 1, 'digest', ?,
-         'available', NULL, NULL, NULL, 1, ?, ?
-       )`,
-    )
-    .run(
-      JSON.stringify({
-        schemaVersion: "pico.evidence_ref.v1",
-        sessionId: "session-old",
-        runId: "run-old",
-        coverage: {
-          ledger: "session_runtime_event",
-          streamId: "session-old",
-          highSequence: 1,
-          eventIds: ["runtime-event"],
-          eventCount: 1,
-        },
-        digest: "digest",
-      }),
-      AT,
-      AT,
-    );
-  database
-    .prepare(
-      `INSERT INTO memory_facts VALUES (
-         'fact-derived', 'project_fact', 'edited title', 'edited durable body', 1, 'source-derived',
-         'active', 1, NULL, ?, 3, ?, ?, NULL
-       )`,
-    )
-    .run(AT, AT, AT);
-  database
-    .prepare(
-      `INSERT INTO memory_facts VALUES (
-         'fact-derived-archived', 'reference', 'archived source fact', 'keep archived body', 0.8,
-         'source-derived', 'archived', 0, NULL, NULL, 2, ?, ?, NULL
-       )`,
-    )
-    .run(AT, AT);
-  database
-    .prepare(
-      `INSERT INTO memory_facts VALUES (
-         'fact-manual', 'preference', 'manual', 'keep', 1, NULL,
-         'active', 1, NULL, NULL, 1, ?, ?, NULL
-       )`,
-    )
-    .run(AT, AT);
-  database
-    .prepare(
-      `INSERT INTO memory_proposals VALUES (
-         'proposal-derived', 'project_fact', 'derived', 'derived', 'reason', 1,
-         'source-derived', 'pending', 'none', NULL, NULL, 1, ?, ?, NULL, NULL
-       )`,
-    )
-    .run(AT, AT);
-  database
-    .prepare(
-      `INSERT INTO memory_proposals VALUES (
-         'proposal-accepted', 'project_fact', 'accepted', 'accepted body', 'accepted reason', 1,
-         'source-derived', 'accepted', 'resolved', NULL, 'fact-derived', 2, ?, ?, ?, NULL
-       )`,
-    )
-    .run(AT, AT, AT);
-  database
-    .prepare(
-      `INSERT INTO memory_proposals VALUES (
-         'proposal-manual', 'preference', 'manual', 'keep', 'reason', 1,
-         NULL, 'accepted', 'resolved', 'fact-derived', 'fact-derived', 1, ?, ?, ?, NULL
-       )`,
-    )
-    .run(AT, AT, AT);
-  database
-    .prepare(
-      `INSERT INTO memory_jobs VALUES (
-         'memory-terminal', 'terminal-extraction', 'succeeded', 'runtime-event', 'v1',
-         '{"sessionId":"session-old"}', 'source-derived', 1, 1, NULL, NULL,
-         0, 0, 0, 0, 1, ?, ?, ?
-       )`,
-    )
-    .run(AT, AT, AT);
-  database
-    .prepare(
-      `INSERT INTO memory_jobs VALUES (
-         'memory-retryable', 'terminal-extraction', 'failed', 'runtime-event-retry', 'v1',
-         '{"sessionId":"session-old"}', 'source-derived', 1, 3, ?, 'model_error',
-         1, 10, 5, 0.01, 2, ?, ?, ?
-       )`,
-    )
-    .run(AT, AT, AT, AT);
-  database
-    .prepare(
-      `INSERT INTO memory_jobs VALUES (
-         'memory-orphan-retryable', 'terminal-extraction', 'failed', 'orphan-runtime-event', 'v1',
-         '{"sessionId":"session-already-deleted"}', NULL, 1, 3, ?, 'model_error',
-         1, 10, 5, 0.01, 2, ?, ?, ?
-       )`,
-    )
-    .run(AT, AT, AT, AT);
-  for (const [sequence, entityType, entityId, action] of [
-    [1, "source", "source-derived", "source.created"],
-    [2, "fact", "fact-derived", "fact.created"],
-    [3, "proposal", "proposal-derived", "proposal.created"],
-    [4, "fact", "fact-manual", "fact.created"],
-    [5, "fact", "fact-derived-archived", "fact.created"],
-    [6, "proposal", "proposal-accepted", "proposal.accepted"],
-    [7, "job", "memory-terminal", "job.created"],
-    [8, "job", "memory-retryable", "job.created"],
-    [9, "job", "memory-orphan-retryable", "job.created"],
-  ] as const) {
-    database
-      .prepare(
-        `INSERT INTO memory_mutations
-         VALUES (?, ?, ?, ?, ?, NULL, 1, NULL, ?)`,
-      )
-      .run(sequence, `mutation-${sequence}`, entityType, entityId, action, AT);
-  }
-  database
-    .prepare("INSERT INTO memory_idempotency VALUES ('manual-overlay', 'request-hash', '{}', ?)")
-    .run(AT);
-}
-
 function insertAttachments(database: DatabaseSync): void {
   const evidence = JSON.stringify({
     kind: "tool-exchange",
@@ -372,23 +248,7 @@ function count(database: DatabaseSync, table: string): number {
     .count;
 }
 
-function records(database: DatabaseSync, sql: string): Array<Record<string, unknown>> {
-  return (database.prepare(sql).all() as Array<Record<string, unknown>>).map((row) => ({ ...row }));
-}
-
-function memorySnapshot(database: DatabaseSync): Record<string, unknown> {
-  return {
-    metadata: records(database, "SELECT * FROM memory_metadata ORDER BY key"),
-    sources: records(database, "SELECT * FROM memory_sources ORDER BY source_id"),
-    facts: records(database, "SELECT * FROM memory_facts ORDER BY fact_id"),
-    proposals: records(database, "SELECT * FROM memory_proposals ORDER BY proposal_id"),
-    mutations: records(database, "SELECT * FROM memory_mutations ORDER BY sequence"),
-    jobs: records(database, "SELECT * FROM memory_jobs ORDER BY job_id"),
-    idempotency: records(database, "SELECT * FROM memory_idempotency ORDER BY operation_key"),
-  };
-}
-
-test("event log hard cut: clears old sessions while preserving committed memory facts", () => {
+test("event log hard cut: clears old sessions while preserving independent ledgers", () => {
   const current = fixture();
   const exclusiveFile = join(current.root, "exclusive-asset");
   writeFileSync(exclusiveFile, "keep until GC worker");
@@ -398,14 +258,7 @@ test("event log hard cut: clears old sessions while preserving committed memory 
       .prepare("UPDATE runtime_storage_assets SET storage_uri = ? WHERE asset_id = 'asset'")
       .run(exclusiveFile);
     insertTerminalWeakReferences(current.database);
-    insertMemory(current.database);
     insertAttachments(current.database);
-    const factsBefore = records(current.database, "SELECT * FROM memory_facts ORDER BY fact_id");
-    const independentProposalBefore = records(
-      current.database,
-      "SELECT * FROM memory_proposals WHERE proposal_id = 'proposal-manual'",
-    );
-    const idempotencyBefore = records(current.database, "SELECT * FROM memory_idempotency");
 
     const result = coordinateEventLogHardCut(current.database, {
       now: () => new Date(AT),
@@ -456,99 +309,6 @@ test("event log hard cut: clears old sessions while preserving committed memory 
       { session_id: null, checkpoint_id: null },
     );
     assert.deepEqual(
-      records(current.database, "SELECT * FROM memory_facts ORDER BY fact_id"),
-      factsBefore,
-      "hard cut must not alter source-linked, pinned, edited, archived, or independent facts",
-    );
-    assert.deepEqual(
-      records(
-        current.database,
-        `SELECT source_id, availability, evidence_ref_json, invalidated_at, invalidation_code
-         FROM memory_sources ORDER BY source_id`,
-      ),
-      [
-        {
-          source_id: "source-derived",
-          availability: "unavailable",
-          evidence_ref_json: null,
-          invalidated_at: AT,
-          invalidation_code: "event_log_hard_cut",
-        },
-      ],
-    );
-    assert.deepEqual(
-      records(
-        current.database,
-        `SELECT proposal_id, title, content, reason, status, source_id,
-                conflict_fact_id, resolved_fact_id, deleted_at
-         FROM memory_proposals WHERE source_id IS NOT NULL ORDER BY proposal_id`,
-      ),
-      [
-        {
-          proposal_id: "proposal-accepted",
-          title: null,
-          content: null,
-          reason: null,
-          status: "deleted",
-          source_id: "source-derived",
-          conflict_fact_id: null,
-          resolved_fact_id: "fact-derived",
-          deleted_at: AT,
-        },
-        {
-          proposal_id: "proposal-derived",
-          title: null,
-          content: null,
-          reason: null,
-          status: "deleted",
-          source_id: "source-derived",
-          conflict_fact_id: null,
-          resolved_fact_id: null,
-          deleted_at: AT,
-        },
-      ],
-    );
-    assert.deepEqual(
-      records(
-        current.database,
-        "SELECT * FROM memory_proposals WHERE proposal_id = 'proposal-manual'",
-      ),
-      independentProposalBefore,
-      "independent proposal overlays must stay intact",
-    );
-    assert.deepEqual(
-      records(
-        current.database,
-        `SELECT job_id, status, error_code FROM memory_jobs
-         WHERE type = 'terminal-extraction' ORDER BY job_id`,
-      ),
-      [
-        {
-          job_id: "memory-orphan-retryable",
-          status: "cancelled",
-          error_code: "memory_source_unavailable",
-        },
-        {
-          job_id: "memory-retryable",
-          status: "cancelled",
-          error_code: "memory_source_unavailable",
-        },
-        { job_id: "memory-terminal", status: "succeeded", error_code: null },
-      ],
-    );
-    assert.deepEqual(
-      records(current.database, "SELECT * FROM memory_idempotency"),
-      idempotencyBefore,
-    );
-    assert.equal(
-      (
-        current.database
-          .prepare("SELECT value_json FROM memory_metadata WHERE key = 'revision'")
-          .get() as { value_json: string }
-      ).value_json,
-      "5",
-    );
-    assert.deepEqual(
       result.gcIntents.map((intent) => [intent.assetScope, intent.contentDigest]),
       [
         ["evidence_blob", DIGEST_A],
@@ -572,17 +332,6 @@ test("event log hard cut: active work blocks without changing facts or projectio
   const current = fixture();
   try {
     insertSession(current.database);
-    insertMemory(current.database);
-    current.database
-      .prepare(
-        `INSERT INTO memory_jobs VALUES (
-           'memory-active', 'terminal-extraction', 'queued', 'runtime-event-active', 'v1',
-           '{"sessionId":"session-old"}', 'source-derived', 0, 3, NULL, NULL,
-           0, 0, 0, 0, 1, ?, ?, NULL
-         )`,
-      )
-      .run(AT, AT);
-    const memoryBefore = memorySnapshot(current.database);
     const started = JSON.stringify({
       schemaVersion: 1,
       eventId: "attempt-started",
@@ -620,7 +369,7 @@ test("event log hard cut: active work blocks without changing facts or projectio
     if (result.status !== "blocked") assert.fail("expected blocked result");
     assert.deepEqual(
       result.blockers.map((blocker) => blocker.kind),
-      ["task_run", "task_attempt", "control_job", "memory_job"],
+      ["task_run", "task_attempt", "control_job"],
     );
     assert.equal(count(current.database, "sessions"), 1);
     assert.equal(count(current.database, "event_log_epoch"), 0);
@@ -633,7 +382,6 @@ test("event log hard cut: active work blocks without changing facts or projectio
       (current.database.prepare("SELECT status FROM jobs").get() as { status: string }).status,
       "queued",
     );
-    assert.deepEqual(memorySnapshot(current.database), memoryBefore);
   } finally {
     cleanup(current);
   }
@@ -643,8 +391,6 @@ test("event log hard cut: a crash before commit rolls back cleanup, marker, and 
   const current = fixture();
   try {
     insertSession(current.database);
-    insertMemory(current.database);
-    const memoryBefore = memorySnapshot(current.database);
     assert.throws(
       () =>
         coordinateEventLogHardCut(current.database, {
@@ -658,28 +404,11 @@ test("event log hard cut: a crash before commit rolls back cleanup, marker, and 
     assert.equal(count(current.database, "runtime_events"), 1);
     assert.equal(count(current.database, "event_log_epoch"), 0);
     assert.equal(count(current.database, "event_log_blob_gc_intents"), 0);
-    assert.deepEqual(
-      memorySnapshot(current.database),
-      memoryBefore,
-      "the failpoint must roll back Memory invalidation and tombstones with the EventLog cut",
-    );
 
     const recovered = coordinateEventLogHardCut(current.database, { now: () => new Date(AT) });
     assert.equal(recovered.status, "cut");
     assert.equal(count(current.database, "sessions"), 0);
     assert.equal(count(current.database, "event_log_epoch"), 1);
-    assert.equal(
-      (
-        current.database
-          .prepare("SELECT availability FROM memory_sources WHERE source_id = 'source-derived'")
-          .get() as { availability: string }
-      ).availability,
-      "unavailable",
-    );
-    assert.deepEqual(
-      records(current.database, "SELECT * FROM memory_facts ORDER BY fact_id"),
-      memoryBefore["facts"],
-    );
   } finally {
     cleanup(current);
   }
@@ -715,6 +444,24 @@ test("event log hard cut: the single writable prepare path cuts once and reopens
     const firstMarker = first.lease.database
       .prepare("SELECT epoch, protocol_marker, cutover_id FROM event_log_epoch")
       .get() as Record<string, unknown>;
+    assert.equal(
+      first.lease.database
+        .prepare("SELECT 1 FROM operational_schema_migrations WHERE scope = 'memory'")
+        .get(),
+      undefined,
+    );
+    assert.deepEqual(
+      first.lease.database
+        .prepare(
+          `SELECT name FROM sqlite_schema
+           WHERE type = 'table' AND name IN (
+             'memory_metadata', 'memory_sources', 'memory_facts', 'memory_proposals',
+             'memory_mutations', 'memory_jobs', 'memory_idempotency'
+           ) ORDER BY name`,
+        )
+        .all(),
+      [],
+    );
     first.lease.release();
 
     const second = prepareCurrentWorkspaceSqliteStorageSync(root);

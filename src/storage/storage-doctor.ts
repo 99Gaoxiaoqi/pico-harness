@@ -10,7 +10,6 @@ import {
   type StorageOperation,
 } from "./operation-journal.js";
 import { canonicalizeWorkspacePath, resolvePicoPaths } from "../paths/pico-paths.js";
-import type { WorkspaceId } from "../paths/pico-paths.js";
 import { SqliteRuntimeEventStore } from "./sqlite/sqlite-runtime-event-store.js";
 import type { RuntimeSessionManifest } from "./runtime-event-store-contracts.js";
 import { SqliteTaskRunStore } from "./sqlite/sqlite-task-run-store.js";
@@ -29,8 +28,8 @@ import type { WorkspaceStorageRootIdentity } from "./sqlite/sqlite-workspace-sto
  * SQLite 纪元的跨持久层只读诊断器(票 09 重写,ADR 24 §5/M6)。
  *
  * scan = PRAGMA 一致性(integrity_check/foreign_key_check)+ workspace binding
- * 身份校验 + 各 scope 行扫描(sessions 投影重放、task_runs 巡检、memory
- * workspaceId 绑定、operations journal、file-history manifest+blob 对账)。
+ * 身份校验 + 各 scope 行扫描(sessions 投影重放、task_runs 巡检、
+ * operations journal、file-history manifest+blob 对账)。
  * JSONL 纪元的锁仪式、commit.json WAL 与 manifest.json 投影重建已随旧存储面
  * 退役;旧布局(.storage/sessions/task-runs/control/memory/storage-operations/
  * todo.json)按 legacy 残留报告——SQLite 纪元不迁移历史,pico.sqlite 是当前
@@ -59,7 +58,6 @@ export const STORAGE_DOCTOR_COMPONENTS = [
   "session",
   "runtime",
   "task",
-  "memory",
   "operation",
   "file_history",
   "projection",
@@ -117,7 +115,6 @@ export class StorageDoctor {
   private readonly picoHome?: string;
   private readonly fileHistoryDir: string;
   private readonly runtimeStorageRoot: string;
-  private readonly workspaceId: WorkspaceId;
   private readonly legacyStoragePaths: readonly string[];
   private readonly legacyJsonRuntimePath: string;
   private readonly legacyTasksPath: string;
@@ -131,7 +128,6 @@ export class StorageDoctor {
     });
     this.fileHistoryDir = resolve(options.fileHistoryDir ?? join(paths.home.root, "file-history"));
     this.runtimeStorageRoot = resolve(options.runtimeStorageRoot ?? paths.workspace.root);
-    this.workspaceId = paths.workspace.id;
     this.legacyStoragePaths = [
       ...["", "-wal", "-shm"].map((suffix) =>
         resolve(paths.workspace.root, `runtime.sqlite${suffix}`),
@@ -360,7 +356,6 @@ export class StorageDoctor {
     // 这里不再叠加误导性 finding。
     if (this.hasLegacyStorageMarkers()) return;
 
-    this.scanMemoryBinding(findings, scanned);
     await this.scanSessions(findings, scanned);
     await this.scanTaskRuns(findings, scanned);
   }
@@ -369,57 +364,6 @@ export class StorageDoctor {
     return LEGACY_SESSION_CENTRIC_ENTRIES.some((marker) =>
       existsSync(join(this.runtimeStorageRoot, marker)),
     );
-  }
-
-  private scanMemoryBinding(
-    findings: StorageDoctorFinding[],
-    scanned: Record<StorageDoctorComponent, number>,
-  ): void {
-    const databasePath = operationalDatabasePath(this.runtimeStorageRoot);
-    let workspaceId: string | undefined;
-    try {
-      const database = openOperationalDatabaseReadOnly(this.runtimeStorageRoot);
-      try {
-        const row = database
-          .prepare("SELECT value_json FROM memory_metadata WHERE key = 'workspaceId'")
-          .get() as { value_json?: unknown } | undefined;
-        if (typeof row?.["value_json"] === "string") {
-          const decoded = JSON.parse(row["value_json"]) as unknown;
-          if (typeof decoded === "string") workspaceId = decoded;
-        }
-      } finally {
-        database.close();
-      }
-    } catch (error) {
-      // memory scope 未迁移(schema 版本落后)时只报告,不阻断其余扫描。
-      findings.push(
-        finding(
-          "memory_scope_unreadable",
-          "error",
-          "memory",
-          databasePath,
-          errorMessage(error),
-          "Open the workspace with the current pico build to migrate the memory schema, then re-run the doctor",
-          "authoritative",
-        ),
-      );
-      return;
-    }
-    if (workspaceId === undefined) return;
-    scanned.memory++;
-    if (workspaceId !== this.workspaceId) {
-      findings.push(
-        finding(
-          "memory_workspace_mismatch",
-          "critical",
-          "memory",
-          databasePath,
-          `Memory storage is bound to workspace ${workspaceId}, but this doctor scanned ${this.workspaceId}`,
-          "Preserve the database; memory facts are workspace-private and must not be read across workspaces",
-          "authoritative",
-        ),
-      );
-    }
   }
 
   private async scanSessions(
@@ -720,7 +664,7 @@ export class StorageDoctor {
    */
   private async scanPrivateModes(
     root: string,
-    component: Extract<StorageDoctorComponent, "runtime" | "memory">,
+    component: Extract<StorageDoctorComponent, "runtime">,
     findings: StorageDoctorFinding[],
     allowedRootEntries: ReadonlySet<string>,
   ): Promise<void> {
@@ -738,7 +682,7 @@ export class StorageDoctor {
 
   private async assertPrivateNode(
     path: string,
-    component: Extract<StorageDoctorComponent, "runtime" | "memory">,
+    component: Extract<StorageDoctorComponent, "runtime">,
     findings: StorageDoctorFinding[],
   ): Promise<void> {
     let metadata;
@@ -865,7 +809,7 @@ function isRealDirectory(metadata: Stats): boolean {
 
 function invalidStorageDirectoryFinding(
   path: string,
-  component: Extract<StorageDoctorComponent, "runtime" | "memory">,
+  component: Extract<StorageDoctorComponent, "runtime">,
   metadata: Stats,
 ): StorageDoctorFinding {
   return finding(

@@ -5,8 +5,8 @@
 数据库副本当前使用 `VACUUM INTO`，不是下文最初设想的模块级 `backup()`；最终事实以代码为准。
 
 后续变更（2026-09-07）：原子长期记忆已迁出到用户级 `$PICO_HOME/memory.sqlite`，不再共用
-workspace 数据库。本文的单库/memory scope 描述保留为迁移阶段决策；当前边界及旧 memory 表
-只读迁移见[原子长期记忆](../architecture/14-workspace-memory.md)。
+workspace 数据库。本文的单库/memory scope 描述仅保留为迁移阶段历史；当前代码已移除该
+scope，不提供兼容读取或迁移。现行边界见[原子长期记忆](../architecture/14-workspace-memory.md)。
 
 ## 1. 背景实证
 

@@ -69,13 +69,15 @@ scope 限定可见范围。`pico.sqlite` 承载以下工作区状态，不代表
 - sessions scope：RuntimeEvent、Session、Run、Transcript 与相关投影；
 - task-runs scope：显式 recoverable 任务、Attempt、checkpoint、租约和启动凭据；
 - control scope：Job、Cron、daemon run、usage、provider call 和生命周期控制状态；
-- 旧 memory scope：仅保留 schema 兼容校验，不再导入或用于生产提取、召回；
 - operations、attachments、retention、kv 等 scope：跨域操作、文件历史 manifest、配额与辅助状态。
 
 这些 scope 通过 typed store API 和事务边界维持所有权。RuntimeEvent 是 Agent 运行事实，
 TaskRun 是恢复协议事实，Control 是调度事实。独立记忆库由 `SqliteMemoryItemStore` 管理
 Item、keys、sources、cursor/receipt 和工作区开关；不与 RuntimeEvent 共用事务。当前机制见
 [原子长期记忆](14-workspace-memory.md)。
+
+旧 Fact/Proposal workspace memory scope 已从当前 schema 移除；带有这些旧表的 workspace
+数据库不走兼容读取或迁移，需在可恢复归档后重建。
 
 ## ToolResult 与上下文
 

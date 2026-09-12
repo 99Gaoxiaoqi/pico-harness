@@ -8,7 +8,6 @@ import { AGENT_GRAPH_SCOPE } from "./agent-graph-scope.js";
 import { CONTROL_SCOPE } from "./control-scope.js";
 import { EVENT_LOG_HARD_CUT_SCOPE } from "./event-log-hard-cut-scope.js";
 import { KV_SCOPE } from "./kv-scope.js";
-import { MEMORY_SCOPE } from "./memory-scope.js";
 import { OPERATIONS_SCOPE } from "./operations-scope.js";
 import { RETENTION_SCOPE } from "./retention-scope.js";
 import { SESSIONS_SCOPE } from "./sessions-scope.js";
@@ -27,14 +26,13 @@ import type { SqliteSchemaScope } from "./sqlite-schema.js";
  * `prepareWorkspaceSqliteStorageSync` 的形状断言按**传入集合** fail-closed:
  * 少传 scope 会在库内出现 "unexpected <table>" 误炸,多传则漏迁移。因此所有
  * workspace 级 prepare 调用必须走本导出,三个 store 构造器也���例外;新增
- * scope(memory/operations/attachments/kv)在各自票落库时加入本数组即可。
+ * scope(operations/attachments/kv)在各自票落库时加入本数组即可。
  */
 
 export const ALL_WORKSPACE_SQLITE_SCOPES: readonly SqliteSchemaScope[] = [
   SESSIONS_SCOPE,
   TASK_RUNS_SCOPE,
   CONTROL_SCOPE,
-  MEMORY_SCOPE,
   OPERATIONS_SCOPE,
   ATTACHMENTS_SCOPE,
   RETENTION_SCOPE,
