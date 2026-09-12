@@ -39,7 +39,3 @@ export function sortSidebarTasks<
       right.updatedAt - left.updatedAt,
   );
 }
-
-export function legacySurfaceHref(target: string, search: string): string {
-  return `${target}${search}`;
-}

@@ -13,10 +13,8 @@ Object.assign(globalThis, { React });
 test("Skills 和 MCP 收拢到设置侧边栏，不会继承项目作用域", async () => {
   const source = await rendererSource("App.tsx");
   assert.match(source, /path="extensions\/:kind" element=\{<ExtensionsPage \/>\}/u);
-  assert.match(source, /LegacySurfaceRedirect to="\/extensions\/skills"/u);
-  assert.match(source, /LegacySurfaceRedirect to="\/extensions\/mcp"/u);
-  assert.match(source, /to="\/extensions\/skills"/u);
-  assert.match(source, /to="\/extensions\/mcp"/u);
+  assert.doesNotMatch(source, /path="(?:skills|mcp|providers|usage)"/u);
+  assert.doesNotMatch(source, /LegacySurfaceRedirect/u);
   assert.doesNotMatch(source, /resourceNav/u);
 });
 

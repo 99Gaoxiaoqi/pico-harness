@@ -3,7 +3,6 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   appPrimaryNavigation,
-  legacySurfaceHref,
   settingsNavigationGroups,
   sortSidebarTasks,
 } from "../../../apps/desktop/src/renderer/navigation.js";
@@ -36,11 +35,6 @@ test("settings replaces the task sidebar while extensions keep their dedicated r
       { label: "系统", items: ["健康"] },
     ],
   );
-  assert.equal(
-    legacySurfaceHref("/settings/models", "?workspace=%2Ftmp%2Fpico"),
-    "/settings/models?workspace=%2Ftmp%2Fpico",
-  );
-
   const source = (await rendererSource("App.tsx")) + (await rendererSource("AppShell.tsx"));
   assert.match(source, /settingsRoute \? \(/u);
   assert.match(
