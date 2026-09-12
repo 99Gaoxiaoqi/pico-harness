@@ -54,6 +54,7 @@ test("RuntimeRunExecutor executes one assembled turn without owning its resource
       picoHome,
       prompt: "hello",
       resumeExistingSession: false,
+      agentSwarmAuthorization: "none",
       traceEnabled: false,
       options: runtimeOptions,
       onEvent: (event) => {
@@ -90,7 +91,7 @@ test("Run headers persist authorization for small turns without a graph across S
   let session = openSession();
   try {
     await session.recover();
-    for (const authorization of [undefined, "session_mode", "turn_override"] as const) {
+    for (const authorization of ["none", "session_mode", "turn_override"] as const) {
       await new RuntimeRunExecutor({
         session,
         runtimeState: {
@@ -107,9 +108,9 @@ test("Run headers persist authorization for small turns without a graph across S
         picoHome,
         prompt: "simple question",
         resumeExistingSession: false,
+        agentSwarmAuthorization: authorization,
         traceEnabled: false,
         options: {},
-        ...(authorization ? { agentSwarmAuthorization: authorization } : {}),
       }).execute();
     }
     await session.close();
@@ -126,6 +127,86 @@ test("Run headers persist authorization for small turns without a graph across S
       events.some((event) => event.kind.startsWith("agent.")),
       false,
     );
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("prestarted Runs reject missing or mismatched durable authorization before dispatch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-prestarted-authorization-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const session = new Session("prestarted-authorization", workDir, {
+    persistence: true,
+    picoHome,
+    runtimePort: createEngineRuntimePort(),
+  });
+  let dispatches = 0;
+  try {
+    await session.recover();
+    const execute = (prestartedRun: {
+      runId: string;
+      turnId: string;
+      invocationId: string;
+      runStartedEventId: string;
+      runStartedAt: string;
+      agentSwarmAuthorization: "none";
+    }) =>
+      new RuntimeRunExecutor({
+        session,
+        runtimeState: {
+          dispatchHook: async (): Promise<HookOutput> => ({ decision: "allow" }),
+        } as unknown as SessionRuntime,
+        engine: {
+          run: async () => {
+            dispatches += 1;
+            return [];
+          },
+        } as unknown as AgentEngine,
+        sessionSelection: { mode: "resume", sessionId: session.id },
+        workDir,
+        picoHome,
+        prompt: "prestarted prompt",
+        resumeExistingSession: false,
+        agentSwarmAuthorization: "none",
+        prestartedRun,
+        prestartedUserInput: { messageId: `input:${prestartedRun.runId}` },
+        traceEnabled: false,
+        options: {},
+      }).execute();
+
+    const missing = {
+      runId: "missing-prestarted-run",
+      turnId: "missing-prestarted-turn",
+      invocationId: "missing-prestarted-invocation",
+      runStartedEventId: "missing-prestarted-start",
+      runStartedAt: "2026-01-01T00:00:00.000Z",
+      agentSwarmAuthorization: "none" as const,
+    };
+    await assert.rejects(execute(missing), /not a safely attachable admission/u);
+
+    const admitted = await RuntimeRun.admitExact({
+      capability: session.runtimeEventCapability!,
+      runId: "mismatched-prestarted-run",
+      turnId: "mismatched-prestarted-turn",
+      invocationId: "mismatched-prestarted-invocation",
+      runStartedEventId: "mismatched-prestarted-start",
+      startedAt: "2026-01-01T00:00:01.000Z",
+      agentSwarmAuthorization: "turn_override",
+    });
+    await assert.rejects(
+      execute({
+        runId: admitted.startEvent.runId,
+        turnId: admitted.startEvent.turnId,
+        invocationId: admitted.startEvent.invocationId,
+        runStartedEventId: admitted.startEvent.eventId,
+        runStartedAt: admitted.startEvent.at,
+        agentSwarmAuthorization: "none",
+      }),
+      /does not match its persisted run.started fact/u,
+    );
+    assert.equal(dispatches, 0);
   } finally {
     await session.close();
     await rm(root, { recursive: true, force: true });
@@ -160,6 +241,7 @@ test("RuntimeRunExecutor fails the canonical Run when its host completion guard 
         picoHome,
         prompt: "start graph",
         resumeExistingSession: false,
+        agentSwarmAuthorization: "none",
         traceEnabled: false,
         options: {},
         completionGuard: () => {
@@ -209,6 +291,7 @@ test("RuntimeRunExecutor isolates lifecycle observer failures from canonical run
       picoHome,
       prompt: "hello",
       resumeExistingSession: false,
+      agentSwarmAuthorization: "none",
       traceEnabled: false,
       options: {},
       onEvent: () => {
@@ -258,7 +341,10 @@ test("commitMessageOnce remains idempotent inside an active RuntimeRun", async (
     await session.recover();
     const idleMessage = { role: "user" as const, content: "precommitted" };
     const idle = await session.commitMessageOnce("message-once:idle", idleMessage);
-    const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+    const run = await RuntimeRun.start({
+      capability: session.runtimeEventCapability!,
+      agentSwarmAuthorization: "none",
+    });
     const receipts = await run.run(async () => {
       const idleRetry = await session.commitMessageOnce("message-once:idle", idleMessage);
       const activeMessage = { role: "user" as const, content: "active" };

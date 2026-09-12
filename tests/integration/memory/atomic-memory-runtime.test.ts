@@ -284,7 +284,10 @@ test("atomic compaction persists its covered boundary and records disabled-polic
     await rm(root, { recursive: true, force: true });
   });
   await session.recover();
-  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   await run.run(async () => {
     await run.commitMessages(session, [
       { role: "user", content: "My old project uses Rust. " + "old context ".repeat(80) },
@@ -381,7 +384,10 @@ test("background memory billing can settle after the parent run terminal without
       { ledger, recordRuntimeEvents: false, context: { purpose: "main", sessionId: session.id } },
     ),
   );
-  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   let pending!: Promise<string>;
   await run.run(async () => {
     pending = model.call({ stage: "canonicalize", prompt: "test" });

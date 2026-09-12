@@ -150,7 +150,7 @@ export class SqliteAgentGraphExactRunPort implements AgentGraphExactRunPort {
           turnId: input.turnId,
           invocationId: input.invocationId,
           runStartedEventId: input.runStartedEventId,
-          agentSwarmAuthorization: input.agentSwarmAuthorization ?? "none",
+          agentSwarmAuthorization: input.agentSwarmAuthorization,
           presentation: {
             audience: "internal",
             source: "agent_graph_control",
@@ -306,6 +306,13 @@ function assertStartInput(input: StartExactAgentGraphRunInput): void {
       throw new Error(`Graph exact RuntimeRun ${field} must not be empty`);
     }
   }
+  if (!isAgentSwarmAuthorization(input.agentSwarmAuthorization)) {
+    throw new Error("Graph exact RuntimeRun agentSwarmAuthorization is invalid");
+  }
+}
+
+function isAgentSwarmAuthorization(value: unknown): boolean {
+  return value === "none" || value === "session_mode" || value === "turn_override";
 }
 
 function assertSessionAuthority(

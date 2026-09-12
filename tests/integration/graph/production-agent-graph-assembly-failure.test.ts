@@ -24,6 +24,7 @@ import {
 import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
 import { compileRuntimePermissionProfile } from "../../../src/safety/permission-profile.js";
 import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
+import { RUNTIME_EVENT_SCHEMA_VERSION } from "../../../src/storage/runtime-event.js";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 
 const ROOT_WAKE_TOOLS = ["view_agent_graph", "update_agent_graph", "yield_agent_graph"] as const;
@@ -41,7 +42,20 @@ test("production root assembly failure settles one wake attempt into backoff wit
   const wakeId = "wake-root-assembly-failure";
   try {
     fixture.host.store.createGraph({ graphId, rootSessionId: fixture.rootSessionId, epoch: 1 });
-    fixture.host.store.enqueueSupervisorWake({
+    await appendRootRunStarted(
+      fixture,
+      "root-run-before-root-assembly-failure",
+      "root-turn-before-root-assembly-failure",
+    );
+    fixture.host.store.registerYieldInterest({
+      permitId: "permit-root-assembly-failure",
+      graphId,
+      rootSessionId: fixture.rootSessionId,
+      rootTurnId: "root-turn-before-root-assembly-failure",
+      rootRunId: "root-run-before-root-assembly-failure",
+      toolCallId: "yield-before-root-assembly-failure",
+    });
+    fixture.host.store.enqueueSupervisorWakeForYield({
       wakeId,
       graphId,
       dedupeKey: "fixture:root-assembly-failure",
@@ -207,6 +221,11 @@ test("production operator assembly failure becomes terminal and wakes the root w
   const graphId = `graph:${fixture.rootSessionId}`;
   try {
     fixture.host.store.createGraph({ graphId, rootSessionId: fixture.rootSessionId, epoch: 1 });
+    await appendRootRunStarted(
+      fixture,
+      "root-run-before-operator-failure",
+      "root-turn-before-operator-failure",
+    );
     fixture.host.store.registerYieldInterest({
       permitId: "permit-operator-assembly-failure",
       graphId,
@@ -383,6 +402,32 @@ async function createProductionFixture(input: {
       await rm(root, { recursive: true, force: true });
     },
   };
+}
+
+async function appendRootRunStarted(
+  fixture: Awaited<ReturnType<typeof createProductionFixture>>,
+  runId: string,
+  turnId: string,
+): Promise<void> {
+  await fixture.rootSession.runtimeEventStore!.append(
+    {
+      schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
+      eventId: `run-started:${runId}`,
+      sessionId: fixture.rootSessionId,
+      invocationId: `invocation:${runId}`,
+      runId,
+      turnId,
+      at: new Date().toISOString(),
+      partial: false,
+      visibility: "internal",
+      kind: "run.started",
+      data: {
+        workDir: fixture.rootSession.workDir,
+        agentSwarmAuthorization: "none",
+      },
+    },
+    { ownerFence: await fixture.rootSession.assertRuntimeEventWriteAllowed() },
+  );
 }
 
 async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {

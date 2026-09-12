@@ -40,7 +40,10 @@ async function createScene(context: test.TestContext, name: string): Promise<Sce
 }
 
 async function interrupted(scene: Scene, content = "source-prefix"): Promise<RuntimeRun> {
-  const run = await RuntimeRun.start({ capability: scene.session.runtimeEventCapability! });
+  const run = await RuntimeRun.start({
+    capability: scene.session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   await run.recordTurnStarted(1);
   await run.commitMessages(scene.session, [{ role: "user", content }]);
   await run.finish("interrupted", "test interruption");
@@ -222,6 +225,7 @@ test("伪造 continuationOf 无法绕过原子续跑入口", async (context) => 
   await assert.rejects(
     RuntimeRun.start({
       capability: scene.session.runtimeEventCapability!,
+      agentSwarmAuthorization: "none",
       continuationOf: { runId: source.runId, highWater: 1, prefixDigest: "0".repeat(64) },
     } as Parameters<typeof RuntimeRun.start>[0]),
     /startContinuation/u,

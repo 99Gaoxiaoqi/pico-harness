@@ -14,6 +14,7 @@ import type { RuntimeRunContinuationOf } from "../engine/session-runtime-event.j
 import type { PlanHandoffController } from "../engine/plan-handoff.js";
 import type { PlanCoordinator } from "../plan/coordinator.js";
 import type { SessionRuntime } from "./session-runtime.js";
+import { RuntimeEventStoreIntegrityError } from "../storage/runtime-event-store-contracts.js";
 import type {
   RunAgentCliResult,
   RuntimeRunOptions,
@@ -43,7 +44,7 @@ export interface RuntimeRunExecutorInput {
   /** Approval/resume is a new durable control instruction even when reusing the user turn. */
   readonly planExecutionPrompt?: { readonly messageId: string; readonly content: string };
   readonly presentation?: "internal";
-  readonly agentSwarmAuthorization?: RuntimeRun["agentSwarmAuthorization"];
+  readonly agentSwarmAuthorization: RuntimeRun["agentSwarmAuthorization"];
   /**
    * Durable H+1 admission already published by a recoverable-task adapter.
    * RuntimeRun.start reuses this exact fact; it must not create another run.started.
@@ -97,7 +98,7 @@ export interface PrestartedRuntimeRun {
   readonly runStartedAt: string;
   readonly parentRunId?: string;
   readonly presentation?: "internal";
-  readonly agentSwarmAuthorization?: RuntimeRun["agentSwarmAuthorization"];
+  readonly agentSwarmAuthorization: RuntimeRun["agentSwarmAuthorization"];
 }
 
 export interface PrestartedRuntimeUserInput {
@@ -166,6 +167,7 @@ export class RuntimeRunExecutor {
           ? { prestartedAllowedEventIds: [`user-message:${prestartedUserInput.messageId}`] }
           : {}),
       });
+      if (prestartedRun) await assertPersistedPrestartedRuntimeRun(session, prestartedRun);
       await RuntimeRun.repairSessionProjection(session, {
         capability: runtimeCapability,
       });
@@ -179,7 +181,9 @@ export class RuntimeRunExecutor {
         automaticContinuation ??
         (await RuntimeRun.start({
           capability: runtimeCapability,
-          agentSwarmAuthorization: this.input.agentSwarmAuthorization ?? "none",
+          agentSwarmAuthorization: prestartedRun
+            ? prestartedRun.agentSwarmAuthorization
+            : this.input.agentSwarmAuthorization,
           ...(presentation === "internal"
             ? {
                 presentation: {
@@ -372,7 +376,7 @@ export class RuntimeRunExecutor {
       sourceRunId: candidate.runId,
       // A resumed user turn inherits its original grant; a new input gets a new decision.
       ...(!this.input.resumeExistingSession
-        ? { agentSwarmAuthorization: this.input.agentSwarmAuthorization ?? "none" }
+        ? { agentSwarmAuthorization: this.input.agentSwarmAuthorization }
         : {}),
       targetRunId: randomUUID(),
       ...(this.input.presentation === "internal"
@@ -405,6 +409,35 @@ function assertPrestartedRuntimeRun(value: PrestartedRuntimeRun): void {
   const startedAt = new Date(value.runStartedAt);
   if (!Number.isFinite(startedAt.getTime()) || startedAt.toISOString() !== value.runStartedAt) {
     throw new Error("Prestarted RuntimeRun runStartedAt must be a canonical timestamp");
+  }
+  if (
+    value.agentSwarmAuthorization !== "none" &&
+    value.agentSwarmAuthorization !== "session_mode" &&
+    value.agentSwarmAuthorization !== "turn_override"
+  ) {
+    throw new Error("Prestarted RuntimeRun agentSwarmAuthorization is invalid");
+  }
+}
+
+async function assertPersistedPrestartedRuntimeRun(
+  session: Session,
+  expected: PrestartedRuntimeRun,
+): Promise<void> {
+  const events = await session.runtimeEventStore!.readRun(session.id, expected.runId);
+  const starts = events.filter((event) => event.kind === "run.started");
+  const start = starts[0];
+  if (
+    starts.length !== 1 ||
+    !start ||
+    start.eventId !== expected.runStartedEventId ||
+    start.invocationId !== expected.invocationId ||
+    (expected.turnId !== undefined && start.turnId !== expected.turnId) ||
+    start.at !== expected.runStartedAt ||
+    start.data.agentSwarmAuthorization !== expected.agentSwarmAuthorization
+  ) {
+    throw new RuntimeEventStoreIntegrityError(
+      `Prestarted Runtime run ${expected.runId} does not match its persisted run.started fact`,
+    );
   }
 }
 

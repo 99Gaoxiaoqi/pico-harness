@@ -94,6 +94,7 @@ test("root wake defers while the source root Session is still active", async () 
   let starts = 0;
   const port = new AgentGraphRootWakeRuntimePort({
     workDir: "/tmp/graph-root",
+    resolveAgentSwarmAuthorization: async () => "none" as const,
     preflight: () => "source_root_active",
     exactRuns: {
       inspectExactRun: async () => ({ status: "not_started" }),
@@ -113,6 +114,7 @@ test("root wake defers while the source root Session is still active", async () 
 test("failed root wake after provider dispatch requires manual intervention", async () => {
   const port = new AgentGraphRootWakeRuntimePort({
     workDir: "/tmp/graph-root",
+    resolveAgentSwarmAuthorization: async () => "none" as const,
     exactRuns: {
       inspectExactRun: async () => ({
         status: "terminal",
@@ -134,4 +136,27 @@ test("failed root wake after provider dispatch requires manual intervention", as
     error: "Root Supervisor Run ended after a durable dispatch as failed",
     blockingEventIds: ["model-call-1"],
   });
+});
+
+test("root wake fails closed when its durable authorization source is unavailable", async () => {
+  let starts = 0;
+  const port = new AgentGraphRootWakeRuntimePort({
+    workDir: "/tmp/graph-root",
+    resolveAgentSwarmAuthorization: async () => {
+      throw new Error("source Run is missing run.started");
+    },
+    exactRuns: {
+      inspectExactRun: async () => ({ status: "not_started" }),
+      startExactRun: async () => {
+        starts += 1;
+        return "started";
+      },
+    },
+  });
+
+  assert.deepEqual(await port.startOrResume({ ...identity, payload: {} }), {
+    status: "failed",
+    error: "source Run is missing run.started",
+  });
+  assert.equal(starts, 0);
 });

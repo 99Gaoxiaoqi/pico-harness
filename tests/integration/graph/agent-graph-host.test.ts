@@ -334,7 +334,16 @@ test("workspace Graph host executes one exact root wake and observes its termina
       rootSessionId: fixture.owner.session.id,
       epoch: 1,
     });
-    fixture.host.store.enqueueSupervisorWake({
+    await appendRootRunStarted(fixture, "root-run-before-wake", "root-turn-before-wake");
+    fixture.host.store.registerYieldInterest({
+      permitId: "yield-before-root-wake",
+      graphId: "graph-root-wake",
+      rootSessionId: fixture.owner.session.id,
+      rootTurnId: "root-turn-before-wake",
+      rootRunId: "root-run-before-wake",
+      toolCallId: "yield-tool-before-root-wake",
+    });
+    fixture.host.store.enqueueSupervisorWakeForYield({
       wakeId: "wake-root-execute",
       graphId: "graph-root-wake",
       dedupeKey: "record:operator-completed",
@@ -513,6 +522,11 @@ test("workspace Graph host recovers a non-live indeterminate operator on startup
       rootSessionId: fixture.owner.session.id,
       epoch: 1,
     });
+    await appendRootRunStarted(
+      fixture,
+      "root-run-before-indeterminate-crash",
+      "root-turn-before-indeterminate-crash",
+    );
     fixture.host.store.registerYieldInterest({
       permitId: "yield-before-indeterminate-crash",
       graphId,
@@ -965,8 +979,35 @@ async function attachHostedRuntimeRun(
     turnId: input.prestartedRun.turnId,
     invocationId: input.prestartedRun.invocationId,
     runStartedEventId: input.prestartedRun.runStartedEventId,
+    agentSwarmAuthorization: input.prestartedRun.agentSwarmAuthorization,
     now: () => new Date(input.prestartedRun.runStartedAt),
   });
+}
+
+async function appendRootRunStarted(
+  fixture: Awaited<ReturnType<typeof createHostFixture>>,
+  runId: string,
+  turnId: string,
+): Promise<void> {
+  await fixture.owner.session.runtimeEventStore!.append(
+    {
+      schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
+      eventId: `run-started:${runId}`,
+      sessionId: fixture.owner.session.id,
+      invocationId: `invocation:${runId}`,
+      runId,
+      turnId,
+      at: new Date().toISOString(),
+      partial: false,
+      visibility: "internal",
+      kind: "run.started",
+      data: {
+        workDir: fixture.owner.session.workDir,
+        agentSwarmAuthorization: "none",
+      },
+    },
+    { ownerFence: await fixture.owner.session.assertRuntimeEventWriteAllowed() },
+  );
 }
 
 function agentOutputInput(
@@ -1026,6 +1067,7 @@ test("Graph stop retries exact foreground delivery without stopping a later line
     const start = (runId: string, internal: boolean) =>
       RuntimeRun.start({
         capability: fixture.owner.session.runtimeEventCapability!,
+        agentSwarmAuthorization: "none",
         runId,
         turnId: `${runId}:turn`,
         invocationId: runId,

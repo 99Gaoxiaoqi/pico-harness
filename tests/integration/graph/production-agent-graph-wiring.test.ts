@@ -303,6 +303,7 @@ test("production host binds Graph root and installs detached exact execution", a
       invocationId: "graph-exact-invocation-1",
       runStartedEventId: "graph-exact-start-1",
       runStartedAt: new Date(0).toISOString(),
+      agentSwarmAuthorization: "none",
     },
     prestartedUserInput: { messageId: "graph-exact-input-1" },
     binding: {
@@ -370,6 +371,7 @@ test("production host binds Graph root and installs detached exact execution", a
         invocationId: `${runId}-invocation`,
         runStartedEventId: `${runId}-start`,
         runStartedAt: new Date(10 + rejectedBoundaryIndex).toISOString(),
+        agentSwarmAuthorization: "none",
       },
       prestartedUserInput: { messageId: `${runId}-input` },
     });
@@ -451,6 +453,7 @@ test("production host binds Graph root and installs detached exact execution", a
       invocationId: `${networkApprovalRunId}-invocation`,
       runStartedEventId: `${networkApprovalRunId}-start`,
       runStartedAt: new Date(20).toISOString(),
+      agentSwarmAuthorization: "none",
     },
     prestartedUserInput: { messageId: `${networkApprovalRunId}-input` },
   });
@@ -483,6 +486,7 @@ test("production host binds Graph root and installs detached exact execution", a
       invocationId: `${writeApprovalRunId}-invocation`,
       runStartedEventId: `${writeApprovalRunId}-start`,
       runStartedAt: new Date(20).toISOString(),
+      agentSwarmAuthorization: "none",
     },
     prestartedUserInput: { messageId: `${writeApprovalRunId}-input` },
   });
@@ -523,6 +527,7 @@ test("production host binds Graph root and installs detached exact execution", a
       invocationId: `${isolatedRunId}-invocation`,
       runStartedEventId: `${isolatedRunId}-start`,
       runStartedAt: new Date(21).toISOString(),
+      agentSwarmAuthorization: "none",
     },
     prestartedUserInput: { messageId: `${isolatedRunId}-input` },
   });
@@ -545,6 +550,7 @@ test("production host binds Graph root and installs detached exact execution", a
       invocationId: `${fullAccessRunId}-invocation`,
       runStartedEventId: `${fullAccessRunId}-start`,
       runStartedAt: new Date(22).toISOString(),
+      agentSwarmAuthorization: "none",
     },
     prestartedUserInput: { messageId: `${fullAccessRunId}-input` },
   });
@@ -572,6 +578,7 @@ test("production host binds Graph root and installs detached exact execution", a
       invocationId: "graph-exact-invocation-retry",
       runStartedEventId: "graph-exact-start-retry",
       runStartedAt: new Date(1).toISOString(),
+      agentSwarmAuthorization: "none",
     },
     prestartedUserInput: { messageId: "graph-exact-input-retry" },
     onTerminal: () => {
@@ -602,6 +609,7 @@ test("production host binds Graph root and installs detached exact execution", a
       invocationId: "graph-exact-invocation-broker",
       runStartedEventId: "graph-exact-start-broker",
       runStartedAt: new Date(2).toISOString(),
+      agentSwarmAuthorization: "none",
     },
     prestartedUserInput: { messageId: "graph-exact-input-broker" },
     onTerminal: () => {
@@ -690,6 +698,7 @@ test("production host binds Graph root and installs detached exact execution", a
       invocationId: "graph-exact-invocation-model-failure",
       runStartedEventId: "graph-exact-start-model-failure",
       runStartedAt: new Date(3).toISOString(),
+      agentSwarmAuthorization: "none",
     },
     prestartedUserInput: { messageId: "graph-exact-input-model-failure" },
     binding: {
@@ -828,6 +837,7 @@ for (const scenario of [
           invocationId: `graph-exact-${scenario.kind}-failure-invocation`,
           runStartedEventId: `graph-exact-${scenario.kind}-failure-start`,
           runStartedAt: new Date(0).toISOString(),
+          agentSwarmAuthorization: "none",
         },
         prestartedUserInput: { messageId: `graph-exact-${scenario.kind}-failure-input` },
         binding: {

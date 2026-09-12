@@ -50,7 +50,10 @@ test("Desktop 新输入先收尾中断批次，再开始执行；重复请求不
     await globalSessionManager.delete(sessionId, workspacePath, { picoHome })?.close();
     await rm(root, { recursive: true, force: true });
   });
-  const abandoned = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const abandoned = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   await abandoned.recordTurnStarted(1);
   await abandoned.commitMessages(session, [
     {

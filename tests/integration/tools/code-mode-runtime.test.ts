@@ -44,7 +44,10 @@ test("Code Mode host redacts child output before either durable storage or sandb
     await rm(root, { recursive: true, force: true });
   });
   await session.recover();
-  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   const secret = "synthetic-child-secret-never-persist";
   const registry = new ToolRegistry();
   registry.register(readableTool("lookup", async () => secret));
@@ -81,7 +84,10 @@ test("Code Mode host: nested calls commit hidden T1/T2 and preserve Step and par
     await rm(root, { recursive: true, force: true });
   });
   await session.recover();
-  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   const registry = new ToolRegistry();
   const seenIds = new Set<string>();
   registry.register(

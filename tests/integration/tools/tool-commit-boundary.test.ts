@@ -64,7 +64,10 @@ test("最终 Hook 参数与权限先于 T1，拒绝和非法改写不产生派�
     assert.equal(JSON.parse(call.arguments).path, "final.txt");
     return { allowed: true };
   });
-  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   const call = {
     id: "final",
     name: "write_file",
@@ -108,7 +111,10 @@ test("最终 Hook 参数与权限先于 T1，拒绝和非法改写不产生派�
 
 test("T1 写失败禁止文件副作用；T2 失败不返回沙箱且恢复保留隐藏未决阻断", async (t) => {
   const { session, registry, workDir, store } = await scene(t);
-  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   const context = {
     parentToolCallId: "exec-parent",
     step: registry.captureStep("step", ["write_file"]),
@@ -172,7 +178,10 @@ test("T1 写失败禁止文件副作用；T2 失败不返回沙箱且恢复保�
   });
   await assert.rejects(engine.run(session), /Unresolved tool effects/);
   assert.equal(modelCalls, 0);
-  const resumed = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const resumed = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   await assert.rejects(resumed.assertNoUnresolvedToolEffects(), /Unresolved tool effects/);
   await resumed.resolveToolRecovery({
     recoveryEventId: recovered.eventId,
@@ -322,7 +331,10 @@ test("嵌套结果在 T2 前应用宿主清理，清理失败不能返回普通�
     }),
     execute: async () => "private-canary",
   });
-  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   const call = { id: "sanitized", name: "secret_fixture", arguments: "{}" };
   const context = {
     parentToolCallId: "exec-parent",

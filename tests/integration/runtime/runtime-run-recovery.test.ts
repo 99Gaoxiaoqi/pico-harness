@@ -12,7 +12,10 @@ import { currentRuntimeRun, RuntimeRun } from "../../../src/runtime/runtime-run.
 test("late async work cannot reuse a terminal RuntimeRun context", async (context) => {
   const fixture = await createFixture(context, "late-context");
   const { session } = fixture;
-  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   let release!: () => void;
   const gate = new Promise<void>((resolve) => {
     release = resolve;
@@ -43,7 +46,10 @@ test("late async work cannot reuse a terminal RuntimeRun context", async (contex
 test("reconciliation fails closed when transcript T2 cannot close the active model tool call", async (context) => {
   const { session } = await createFixture(context, "rewritten-active-start");
   await session.commitMessages({ role: "user", content: "kept" });
-  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   await run.recordTurnStarted(1);
   const toolCall = {
     id: "call:rewritten-start",

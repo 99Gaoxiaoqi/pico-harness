@@ -221,7 +221,10 @@ test("persistent host hydration restores model-visible ToolResults after restart
     name: "grep",
     args: '{"pattern":"needle"}',
   });
-  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   await run.recordToolStarted("call:main-restart", "grep", '{"pattern":"needle"}');
   const result = run.registerToolResult({
     toolCallId: "call:main-restart",
@@ -278,7 +281,10 @@ test("transcript-only ToolResults without durable trace do not pollute host hydr
   });
 
   await session.recover();
-  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   await run.recordToolStarted("call:subagent", "grep", '{"pattern":"needle"}');
   await run.recordTranscriptToolResults([
     {

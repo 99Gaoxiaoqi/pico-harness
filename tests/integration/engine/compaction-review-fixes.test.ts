@@ -107,7 +107,10 @@ test("findLastCompactionCheckpoint: 遇 hard-reset checkpoint 返回 undefined",
     { role: "user" as const, content: "latest" },
     { role: "assistant" as const, content: "reply" },
   ];
-  const seedRun = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const seedRun = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   await seedRun.run(async () => {
     await seedRun.commitMessages(session, history);
     const beforeNormal = await seedRun.readModelHistoryEntries();
@@ -137,7 +140,10 @@ test("findLastCompactionCheckpoint: 遇 hard-reset checkpoint 返回 undefined",
 
   // hard-reset 之后的 findLastCompactionCheckpoint 应返回 undefined
   // （hard-reset 使之前的 checkpoint 失效，不再向前查找）
-  const run2 = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run2 = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   const result = await run2.findLastCompactionCheckpoint();
   assert.equal(result, undefined, "遇 hard-reset 应返回 undefined，不返回更早的 checkpoint");
 });
@@ -162,7 +168,10 @@ test("findLastCompactionCheckpoint: 标签缺失时返回 undefined", async (t) 
     { role: "user" as const, content: `msg ${"context ".repeat(40)}` },
     { role: "assistant" as const, content: `resp ${"context ".repeat(40)}` },
   ];
-  const seedRun = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const seedRun = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   await seedRun.run(async () => {
     await seedRun.commitMessages(session, history);
     const entries = await seedRun.readModelHistoryEntries();
@@ -179,7 +188,10 @@ test("findLastCompactionCheckpoint: 标签缺失时返回 undefined", async (t) 
     });
   });
 
-  const run2 = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run2 = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   const result = await run2.findLastCompactionCheckpoint();
   assert.equal(result, undefined, "标签缺失时应返回 undefined，不 fallback 到 content.trim()");
 });

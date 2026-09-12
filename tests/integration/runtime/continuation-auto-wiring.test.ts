@@ -33,7 +33,7 @@ test("executor 自动锚定 interrupted 续跑：claim→targetRunId 起跑→�
     await session.recover();
     // 崩溃 run:起跑+落一条消息,无终态(模拟进程中断)。
     const capability = session.runtimeEventCapability!;
-    const crashed = await RuntimeRun.start({ capability });
+    const crashed = await RuntimeRun.start({ capability, agentSwarmAuthorization: "none" });
     await crashed.recordTurnStarted(1);
     await crashed.commitMessages(session, [{ role: "user", content: "崩溃前的输入" }]);
 
@@ -107,7 +107,7 @@ test("executor 自动锚定 interrupted 续跑：claim→targetRunId 起跑→�
 
     // 新鲜度门(审查 F2):新崩溃 run 的终态刚被 reconcile 补写,默认窗口(10 分钟)
     // 内不锚定不封口——跨进程存活保护;窗口 0 后的下一轮 executor 正常锚定。
-    const crashed2 = await RuntimeRun.start({ capability });
+    const crashed2 = await RuntimeRun.start({ capability, agentSwarmAuthorization: "none" });
     await crashed2.recordTurnStarted(1);
     await crashed2.commitMessages(session, [{ role: "user", content: "第二次崩溃" }]);
     await newExecutor(session, workDir, picoHome).execute();
@@ -219,5 +219,6 @@ function newExecutor(
     options,
     onEvent: (event) => lifecycleEvents.push(event),
     ...extra,
+    agentSwarmAuthorization: extra?.agentSwarmAuthorization ?? "none",
   });
 }

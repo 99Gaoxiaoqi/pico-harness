@@ -264,11 +264,7 @@ export function createAgentGraphWorkspaceHost(
           throw new Error("Cannot execute a wake for a finished Graph");
         const authorization = input.prestartedRun.agentSwarmAuthorization;
         const supervision =
-          authorization === undefined
-            ? app.graphSupervision(recoverable.graph.graphId)
-            : authorization === "none"
-              ? undefined
-              : { mode: "swarm" as const, authorization };
+          authorization === "none" ? undefined : { mode: "swarm" as const, authorization };
         const root: AgentGraphRootToolContext = {
           kind: "graph_root_supervisor",
           ...(supervision ? { supervision } : {}),
@@ -349,13 +345,17 @@ export function createAgentGraphWorkspaceHost(
         interest.graphId !== identity.graphId ||
         interest.rootSessionId !== identity.rootSessionId
       )
-        return "none";
+        throw new Error(`Graph root wake ${identity.wakeId} is missing its durable source binding`);
       const events = await options.runtimeEventStore.readRun(
         identity.rootSessionId,
         interest.rootRunId,
       );
       const start = events.find((event) => event.kind === "run.started");
-      if (!start) return "none";
+      if (!start) {
+        throw new Error(
+          `Graph root wake ${identity.wakeId} source Run ${interest.rootRunId} is missing run.started`,
+        );
+      }
       return start.data.agentSwarmAuthorization;
     },
     preflight: ({ rootSessionId }) =>

@@ -114,7 +114,10 @@ async function createArbitrationScene(
   // 测试注入缝:替换 Session 的私有 store 引用,使 capability 与 RuntimeRun
   // 都经由包装后的 store 写入(私有字段无公开注入口,测试用受控替换)。
   (session as unknown as { store: SqliteRuntimeEventStore }).store = seam.wrapped;
-  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   currentRunRef.run = run;
   return { session, realStore, arm: seam.arm, cleanup };
 }

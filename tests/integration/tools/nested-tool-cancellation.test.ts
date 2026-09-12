@@ -134,7 +134,10 @@ test("嵌套结果通知只在 T2 后运行，使用最终参数且通知失败�
     allowed: true,
     call: { ...call, arguments: '{"value":2}' },
   }));
-  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   const call = { id: "notified", name: "lookup", arguments: '{"value":1}' };
   const context = {
     parentToolCallId: "exec-parent",

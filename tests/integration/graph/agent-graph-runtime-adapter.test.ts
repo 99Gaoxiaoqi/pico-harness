@@ -72,6 +72,7 @@ test("Graph runtime starts one exact Run and only observes it on replay", async 
     provision: PROVISION,
     workDir: "/workspace",
     prompt: "research",
+    agentSwarmAuthorization: "session_mode" as const,
   };
 
   const [first, concurrent] = await Promise.all([
@@ -91,6 +92,7 @@ test("Graph runtime starts one exact Run and only observes it on replay", async 
     runStartedEventId: "child-run-started-1",
     workDir: "/workspace",
     prompt: "research",
+    agentSwarmAuthorization: "session_mode",
   });
   assert.equal(first.disposition, "started");
   assert.equal(concurrent.disposition, "started");
@@ -243,6 +245,7 @@ test("Graph runtime projects terminal facts and never dispatches an existing Run
     provision: PROVISION,
     workDir: "/workspace",
     prompt: "research",
+    agentSwarmAuthorization: "none",
   });
 
   assert.equal(result.disposition, "observed");
@@ -265,6 +268,7 @@ test("Graph runtime fails closed when an existing Run does not match the Claim s
       provision: PROVISION,
       workDir: "/workspace",
       prompt: "research",
+      agentSwarmAuthorization: "none",
     }),
     /does not match its preallocated Claim identity/u,
   );
@@ -459,7 +463,13 @@ class FakeRunPort implements AgentGraphExactRunPort {
     ) {
       return "observed" as const;
     }
-    if (before.status === "not_started") this.events.push(runStartedEvent(CLAIM));
+    if (before.status === "not_started") {
+      const started = runStartedEvent(CLAIM);
+      this.events.push({
+        ...started,
+        data: { ...started.data, agentSwarmAuthorization: input.agentSwarmAuthorization },
+      });
+    }
     this.live = true;
     this.providerDispatches++;
     return "started" as const;
@@ -588,6 +598,7 @@ function activationInput() {
     provision: PROVISION,
     workDir: "/workspace",
     prompt: "research",
+    agentSwarmAuthorization: "none" as const,
   };
 }
 

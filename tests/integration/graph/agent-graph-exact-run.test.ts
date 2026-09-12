@@ -35,6 +35,7 @@ const EXACT_RUN: StartExactAgentGraphRunInput = {
   runStartedEventId: "graph-child-run-started-1",
   workDir: "/replaced-by-fixture",
   prompt: "research exact-run recovery",
+  agentSwarmAuthorization: "none",
 };
 
 test("RuntimeRun exact admission atomically inserts or observes one canonical start", async () => {
@@ -46,6 +47,7 @@ test("RuntimeRun exact admission atomically inserts or observes one canonical st
       turnId: "graph-admission-race-turn",
       invocationId: "graph-admission-race-invocation",
       runStartedEventId: "graph-admission-race-start",
+      agentSwarmAuthorization: "none" as const,
     };
     const outcomes = await Promise.all([
       RuntimeRun.admitExact({ ...identity, startedAt: "2026-01-01T00:00:00.000Z" }),
@@ -181,6 +183,7 @@ test("Graph exact Run safely attaches after run.started and deterministic input 
   const crashed = fixture.createPort(async (input) => {
     const runtimeRun = await RuntimeRun.start({
       capability: input.session.runtimeEventCapability!,
+      agentSwarmAuthorization: input.prestartedRun.agentSwarmAuthorization,
       runId: input.prestartedRun.runId,
       turnId: input.prestartedRun.turnId,
       invocationId: input.prestartedRun.invocationId,
@@ -237,6 +240,7 @@ test("Graph exact Run is indeterminate and never redispatches after provider dis
   const crashed = fixture.createPort(async (input) => {
     const runtimeRun = await RuntimeRun.start({
       capability: input.session.runtimeEventCapability!,
+      agentSwarmAuthorization: input.prestartedRun.agentSwarmAuthorization,
       runId: input.prestartedRun.runId,
       turnId: input.prestartedRun.turnId,
       invocationId: input.prestartedRun.invocationId,
@@ -617,6 +621,7 @@ function exactRun(fixture: Fixture, suffix: string): StartExactAgentGraphRunInpu
     runStartedEventId: `run-started-${suffix}`,
     workDir: fixture.workDir,
     prompt: `execute ${suffix}`,
+    agentSwarmAuthorization: "none",
   };
 }
 
@@ -634,6 +639,7 @@ function startRuntimeRun(
 ): Promise<RuntimeRun> {
   return RuntimeRun.start({
     capability: fixture.session.runtimeEventCapability!,
+    agentSwarmAuthorization: input.agentSwarmAuthorization,
     runId: input.runId,
     turnId: input.turnId,
     invocationId: input.invocationId,
@@ -722,7 +728,7 @@ async function executePrestarted(
     prompt: input.prompt,
     resumeExistingSession: false,
     presentation: "internal",
-    agentSwarmAuthorization: "turn_override",
+    agentSwarmAuthorization: input.prestartedRun.agentSwarmAuthorization,
     prestartedRun: input.prestartedRun,
     prestartedUserInput: input.prestartedUserInput,
     traceEnabled: false,

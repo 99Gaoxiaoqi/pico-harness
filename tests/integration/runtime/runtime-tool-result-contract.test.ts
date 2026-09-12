@@ -174,7 +174,10 @@ test("RuntimeRun registers one structured fact and commits its projected Message
     await rm(root, { recursive: true, force: true });
   });
   await session.recover();
-  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   const assistant: Message = {
     role: "assistant",
     content: "",
@@ -229,7 +232,10 @@ test("RuntimeRun retries one canonical message batch without duplicating non-too
     await rm(root, { recursive: true, force: true });
   });
   await session.recover();
-  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   const assistant: Message = {
     role: "assistant",
     content: "",
@@ -288,7 +294,10 @@ test("RuntimeRun rejects an unregistered Message ToolResult before appending the
     await rm(root, { recursive: true, force: true });
   });
   await session.recover();
-  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
 
   await assert.rejects(
     run.commitMessages(session, [
@@ -351,7 +360,10 @@ test("Runtime compaction records a checkpoint and preserves the immutable Sessio
     { role: "user" as const, content: "latest request" },
     { role: "assistant" as const, content: "latest response" },
   ];
-  const seedRun = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const seedRun = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   await seedRun.run(async () => {
     await seedRun.commitMessages(session, originalHistory);
   });
@@ -361,7 +373,10 @@ test("Runtime compaction records a checkpoint and preserves the immutable Sessio
       return { role: "assistant", content: "canonical checkpoint summary" };
     },
   };
-  const compactionRun = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const compactionRun = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   const result = await compactionRun.run(() =>
     recordRuntimeCompactionCheckpoint({
       session,
@@ -401,7 +416,10 @@ test("RuntimeRun durably records transcript ToolResult without polluting model h
     await rm(root, { recursive: true, force: true });
   });
   await session.recover();
-  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   await run.recordToolStarted("call:subagent", "grep", '{"pattern":"needle"}');
   const [result] = await run.recordTranscriptToolResults([
     {

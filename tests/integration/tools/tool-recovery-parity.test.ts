@@ -66,7 +66,10 @@ async function interrupt(
   secrets: readonly string[] = [],
 ) {
   const store = session.runtimeEventStore!;
-  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   const settle = store.settleToolOperation.bind(store);
   store.settleToolOperation = async () => {
     throw new Error("T2 failpoint");
@@ -147,7 +150,10 @@ test("T1保存最终完整脱敏参数和恢复合同，重启后probe读取审�
       summary: "Host verified the effect",
     };
   };
-  const resumed = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const resumed = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   assert.equal(
     (await resumed.reconcileToolRecovery({ recoveryEventId: recovery.eventId, registry })).outcome,
     "effects_verified",
@@ -175,7 +181,10 @@ test("重复JSON键在T1前拒绝且无副作用，独立对象中的同名键�
       return "done";
     }),
   );
-  const run = await RuntimeRun.start({ capability: state.session.runtimeEventCapability! });
+  const run = await RuntimeRun.start({
+    capability: state.session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   const duplicated = '{"password":"private-value","password":"[REDACTED]"}';
   const inputs = [
     duplicated,
@@ -242,7 +251,10 @@ test("probe缺证据、策略变化、异常与取消均Park，只有稳定合�
   });
   registry.register(tool);
   const { recovery } = await interrupt(session, registry, "park");
-  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   const reconcile = (signal?: AbortSignal) =>
     run.reconcileToolRecovery({ recoveryEventId: recovery.eventId, registry, signal });
   const verified = {
@@ -330,8 +342,14 @@ test("同一未决调用并发probe或人工判决只能提交一个一致结论
   const tool = fixture(async () => "done");
   registry.register(tool);
   const { recovery } = await interrupt(session, registry, "concurrent");
-  const first = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
-  const second = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const first = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
+  const second = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   let release!: () => void;
   const bothProbing = new Promise<void>((resolve) => {
     release = resolve;
@@ -392,7 +410,10 @@ test("当前T1合同缺字段时拒绝，recoveryKey保持可选，超限T1禁�
   });
   tool.reconcile = async () => assert.fail("缺少 recoveryKey 时不得调用证据探针");
   registry.register(tool);
-  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   const admitted = (await store.readRun(session.id, run.runId))[0]!;
   assert.equal(admitted.kind, "run.started");
   assert.throws(
@@ -451,7 +472,10 @@ test("当前T1合同缺字段时拒绝，recoveryKey保持可选，超限T1禁�
     (event) => event.kind === "tool.result.recorded",
   );
   assert.ok(recovery?.kind === "tool.result.recorded");
-  const resumed = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const resumed = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   assert.deepEqual(
     await resumed.reconcileToolRecovery({ recoveryEventId: recovery.eventId, registry }),
     {

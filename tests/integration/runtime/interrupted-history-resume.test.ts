@@ -28,7 +28,10 @@ test("恢复历史遇到上下文溢出时硬重置保留完整交换，运行�
   });
   await session.recover();
   await session.commitMessages({ role: "user", content: "old request" });
-  const abandoned = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const abandoned = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   await abandoned.recordTurnStarted(1);
   await abandoned.commitMessages(session, [
     {
@@ -61,7 +64,10 @@ test("恢复历史遇到上下文溢出时硬重置保留完整交换，运行�
       },
     },
   });
-  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   await run.run(() => engine.run(session));
   assert.equal(calls, 2);
   const events = await session.runtimeEventStore!.readSession(session.id);
@@ -85,7 +91,10 @@ test("旧错序中断历史只读恢复，多工具分类保留，安全压缩�
   });
   await session.recover();
   await session.commitMessages({ role: "user", content: "original request" });
-  const abandoned = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const abandoned = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   await abandoned.recordTurnStarted(1);
   const calls = [
     { id: "pending", name: "read_file", arguments: "{}" },
@@ -103,7 +112,10 @@ test("旧错序中断历史只读恢复，多工具分类保留，安全压缩�
     receipts.map((e) => e.data.recovery?.classification),
     ["not_dispatched", "indeterminate"],
   );
-  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   const history = await run.readModelHistoryEntries();
   assert.deepEqual(
     history.map((e) => e.message.toolCallId ?? e.message.content),
@@ -163,7 +175,10 @@ test("旧错序中断历史只读恢复，多工具分类保留，安全压缩�
   await session.close();
   session = new Session("interrupted-history", join(root, "workspace"), options);
   await session.recover();
-  const next = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const next = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   assert.deepEqual(
     (await next.readModelHistory()).map((m) => m.content),
     ["summary", "continued"],
