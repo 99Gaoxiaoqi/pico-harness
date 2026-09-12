@@ -56,12 +56,12 @@ export function mergeConversationItemGroups(
 
 /**
  * A terminal Run must not leave durable tool-start placeholders looking live.
- * Prefer an explicit terminal boundary, then retain the legacy approval/result
- * pairing fallback for transcripts written before Run boundaries were durable.
+ * Only an explicit durable Run boundary may close a preceding active tool. Tool
+ * names and approval ordering are not invocation identities and must not be used
+ * to guess that another tool result supersedes it.
  */
 export function removeSupersededActiveTools(
   items: readonly ConversationItemView[],
-  runActive: boolean,
 ): readonly ConversationItemView[] {
   const filtered = items.filter((item, index) => {
     if (item.kind !== "tool" || item.state !== "active") return true;
@@ -79,15 +79,7 @@ export function removeSupersededActiveTools(
     ) {
       return false;
     }
-    if (runActive) return true;
-    const terminalIndex = laterItems.findIndex(
-      (candidate) =>
-        candidate.kind === "tool" &&
-        candidate.state !== "active" &&
-        candidate.toolName === item.toolName,
-    );
-    if (terminalIndex < 0) return true;
-    return !laterItems.slice(0, terminalIndex).some((candidate) => candidate.kind === "approval");
+    return true;
   });
   return filtered.length === items.length ? items : filtered;
 }

@@ -351,10 +351,7 @@ export function ConversationPage() {
   }, [editingTitle, session?.title]);
 
   const items = useMemo<readonly ConversationItemView[]>(() => {
-    const persisted = removeSupersededActiveTools(
-      conversation?.items ?? [],
-      Boolean(activeRun),
-    ).filter(
+    const persisted = removeSupersededActiveTools(conversation?.items ?? []).filter(
       (item) =>
         Boolean(activeRun) ||
         !((item.kind === "approval" || item.kind === "prompt") && item.state === "pending"),
