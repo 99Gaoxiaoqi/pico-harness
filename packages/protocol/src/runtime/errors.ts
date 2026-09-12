@@ -14,9 +14,6 @@ export const RUNTIME_ERROR_CODES = {
   NOT_FOUND: "NOT_FOUND",
   FORBIDDEN: "FORBIDDEN",
   INTERNAL_ERROR: "INTERNAL_ERROR",
-  LEGACY_INVALID_MESSAGE: "invalid_message",
-  LEGACY_INVALID_REQUEST: "invalid_request",
-  LEGACY_RUNTIME_ERROR: "runtime_error",
 } as const;
 
 export type RuntimeErrorCode = (typeof RUNTIME_ERROR_CODES)[keyof typeof RUNTIME_ERROR_CODES];
@@ -24,15 +21,11 @@ export type RuntimeErrorCode = (typeof RUNTIME_ERROR_CODES)[keyof typeof RUNTIME
 export class RuntimeProtocolError extends Error {
   readonly code: RuntimeErrorCode;
 
-  constructor(message: string);
   constructor(code: RuntimeErrorCode, message: string);
-  constructor(codeOrMessage: RuntimeErrorCode | string, message?: string) {
-    super(message ?? codeOrMessage);
+  constructor(code: RuntimeErrorCode, message: string) {
+    super(message);
     this.name = "RuntimeProtocolError";
-    this.code =
-      message === undefined
-        ? RUNTIME_ERROR_CODES.INVALID_REQUEST
-        : (codeOrMessage as RuntimeErrorCode);
+    this.code = code;
   }
 }
 

@@ -100,8 +100,6 @@ export function mapRuntimeErrorCode(code: RuntimeErrorCode): BridgeErrorCode {
     case RUNTIME_ERROR_CODES.INVALID_PARAMS:
     case RUNTIME_ERROR_CODES.INVALID_REQUEST:
     case RUNTIME_ERROR_CODES.INVALID_JSON:
-    case RUNTIME_ERROR_CODES.LEGACY_INVALID_MESSAGE:
-    case RUNTIME_ERROR_CODES.LEGACY_INVALID_REQUEST:
       return "invalid_request";
     case RUNTIME_ERROR_CODES.NOT_FOUND:
       return "not_found";
