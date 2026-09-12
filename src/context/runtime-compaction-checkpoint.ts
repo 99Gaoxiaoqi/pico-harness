@@ -10,7 +10,7 @@ import type {
   FullCompactor,
 } from "./full-compactor.js";
 
-/** 内容哈希 digest 版本前缀,与旧格式(纯 hex eventId 序列)区分,向后兼容。 */
+/** 内容哈希 digest 的当前版本前缀。 */
 export const CONTENT_DIGEST_V1_PREFIX = "sha256-content:v1:";
 
 /** covered 事件条目:用于内容哈希的最小结构。 */
@@ -22,11 +22,11 @@ export interface CheckpointDigestEntry {
 /**
  * 计算 checkpoint 的内容哈希 digest(对标 maka historyCompactSourceDigest)。
  *
- * 与旧逻辑(只哈希 eventId 序列)不同,这里对每个事件的 eventId + message 全内容取哈希。
+ * 对每个事件的 eventId + message 全内容取哈希。
  * 格式:`length:eventId\0length:body;`,用字节长度前缀 + 分隔符防前缀碰撞,
  * 字节长度而非字符长度防多字节字符漏检。
  *
- * 返回带版本前缀 `sha256-content:v1:`,便于重放端按前缀路由新旧校验逻辑。
+ * 返回带版本前缀 `sha256-content:v1:` 的当前格式。
  */
 export function computeCheckpointSourceDigest(entries: readonly CheckpointDigestEntry[]): string {
   const hash = createHash("sha256");

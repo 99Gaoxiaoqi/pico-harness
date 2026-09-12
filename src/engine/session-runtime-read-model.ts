@@ -1,11 +1,7 @@
-import { createHash } from "node:crypto";
 import type { Message, ToolCall } from "../schema/message.js";
 import type { RuntimeCheckpointRecordedEvent, RuntimeEvent } from "./session-runtime-event.js";
 import { claimKindForEvent, projectRuntimeModelMessage } from "./runtime-model-message.js";
-import {
-  computeCheckpointSourceDigest,
-  CONTENT_DIGEST_V1_PREFIX,
-} from "../context/runtime-compaction-checkpoint.js";
+import { computeCheckpointSourceDigest } from "../context/runtime-compaction-checkpoint.js";
 import type { RuntimeProjectionDiagnostic } from "./runtime-projection-diagnostics.js";
 import { makeDiagnostic } from "./runtime-projection-diagnostics.js";
 
@@ -358,13 +354,8 @@ function replaceProjectedPrefixWithCheckpoint(
     `Runtime checkpoint ${checkpoint.eventId}`,
   );
   const covered = projected.slice(0, throughProjectedIndex + 1);
-  // 内容哈希校验(新格式 v1)或旧格式(eventId 序列哈希)兼容。
   const storedDigest = checkpoint.data.sourceDigest;
-  const recomputedDigest = storedDigest.startsWith(CONTENT_DIGEST_V1_PREFIX)
-    ? computeCheckpointSourceDigest(covered)
-    : createHash("sha256")
-        .update(covered.map(({ eventId }) => eventId).join("\n"))
-        .digest("hex");
+  const recomputedDigest = computeCheckpointSourceDigest(covered);
   if (checkpoint.data.coveredEventCount !== covered.length || storedDigest !== recomputedDigest) {
     throw new RuntimeEventReadModelIntegrityError(
       `Runtime checkpoint ${checkpoint.eventId} does not match its covered model prefix`,

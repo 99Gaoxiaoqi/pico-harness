@@ -144,7 +144,7 @@ test("Runtime transcript rejects presentation-only tool completion facts", () =>
   );
 });
 
-test("legacy Runtime checkpoints without a summary boundary are rejected", () => {
+test("unversioned Runtime checkpoint digests are rejected", () => {
   assert.throws(
     () =>
       decodeRuntimeEvent({
@@ -154,6 +154,8 @@ test("legacy Runtime checkpoints without a summary boundary are rejected", () =>
           checkpointId: "legacy-checkpoint",
           coveredEventCount: 1,
           sourceDigest: sha256("legacy"),
+          throughEventId: "covered-event",
+          summary: { role: "assistant", content: "summary" },
         },
       }),
     (error: unknown) =>
