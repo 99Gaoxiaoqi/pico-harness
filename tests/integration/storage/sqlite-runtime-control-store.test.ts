@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { credentialRefForProvider } from "../../../src/provider/credential-vault.js";
 import {
   operationalDatabasePath,
   openOperationalDatabaseReadOnly,
@@ -357,6 +358,12 @@ test("sqlite control store: cron job/run 生命周期与中断恢复(recoverInte
       schedule: "* * * * *",
       timeZone: "UTC",
       prompt: "do the thing",
+      credentialRef: credentialRefForProvider({
+        providerId: "test-provider",
+        protocol: "openai",
+        baseURL: "https://test.invalid/v1",
+      }),
+      modelRouteId: "test-provider/test-model",
       policySnapshot: testPolicySnapshot(),
     });
     assert.equal(job.version, 1);

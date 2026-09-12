@@ -2,7 +2,7 @@ import type { EffectiveConfigResolver } from "../input/effective-config.js";
 import type { UserConfigStore } from "../input/user-config-store.js";
 import { resolveAutomationCredentialTarget } from "../provider/automation-credential.js";
 import {
-  parseAnyCredentialRef,
+  parseProviderCredentialRef,
   type CredentialRef,
   type CredentialVault,
 } from "../provider/credential-vault.js";
@@ -31,8 +31,8 @@ import {
 export interface DesktopAutomationSecurity {
   readonly policySnapshot: AutonomousPolicySnapshot;
   readonly credentialRef: CredentialRef;
-  /** 创建时固定的 Provider/模型路由；v1 兼容调用方可省略并由 credentialRef 反推。 */
-  readonly modelRouteId?: string;
+  /** 创建时固定的 Provider/模型路由。 */
+  readonly modelRouteId: string;
 }
 
 export interface DesktopAutomationServiceOptions {
@@ -211,11 +211,9 @@ export class DesktopAutomationService {
   enabledProviderReferences(
     providerId: string,
     workspacePaths: readonly string[],
-  ): Array<EnabledAutomationReference & { readonly modelRouteId: string }> {
+  ): EnabledAutomationReference[] {
     return this.enabledReferences(workspacePaths).filter(
-      (reference): reference is EnabledAutomationReference & { readonly modelRouteId: string } =>
-        providerIdForRoute(reference.modelRouteId) === providerId &&
-        reference.modelRouteId !== undefined,
+      (reference) => providerIdForRoute(reference.modelRouteId) === providerId,
     );
   }
 
@@ -248,8 +246,8 @@ export class DesktopAutomationService {
           references.push({
             workspacePath,
             jobId: job.cronJobId,
-            ...(job.modelRouteId ? { modelRouteId: job.modelRouteId } : {}),
-            ...(job.credentialRef ? { credentialRef: job.credentialRef } : {}),
+            modelRouteId: job.modelRouteId,
+            credentialRef: job.credentialRef,
           });
         }
       });
@@ -268,8 +266,8 @@ export class DesktopAutomationService {
             workspacePath,
             jobId: job.cronJobId,
             runId: run.cronRunId,
-            ...(job.modelRouteId ? { modelRouteId: job.modelRouteId } : {}),
-            ...(job.credentialRef ? { credentialRef: job.credentialRef } : {}),
+            modelRouteId: job.modelRouteId,
+            credentialRef: job.credentialRef,
           });
         }
       });
@@ -478,7 +476,6 @@ async function resolveDesktopAutomationTarget(
     return {
       ...resolveAutomationCredentialTarget({
         route,
-        workspacePath,
         ...(userProvider ? { userProvider } : {}),
         configSource: effective.sources[`providers.${providerId}`],
       }),
@@ -495,8 +492,8 @@ async function resolveDesktopAutomationTarget(
 export interface EnabledAutomationReference {
   readonly workspacePath: string;
   readonly jobId: string;
-  readonly modelRouteId?: string;
-  readonly credentialRef?: CredentialRef;
+  readonly modelRouteId: string;
+  readonly credentialRef: CredentialRef;
 }
 
 export interface ActiveAutomationReference extends EnabledAutomationReference {
@@ -508,17 +505,14 @@ export type AutomationProviderReference = EnabledAutomationReference | ActiveAut
 function providerIdForReference(reference: AutomationProviderReference): string | undefined {
   const routeProviderId = providerIdForRoute(reference.modelRouteId);
   if (routeProviderId) return routeProviderId;
-  if (!reference.credentialRef) return undefined;
   try {
-    const parsed = parseAnyCredentialRef(reference.credentialRef);
-    return parsed.version === "v2" ? parsed.providerId : providerIdForRoute(parsed.modelRouteId);
+    return parseProviderCredentialRef(reference.credentialRef).providerId;
   } catch {
     return undefined;
   }
 }
 
-function providerIdForRoute(modelRouteId: string | undefined): string | undefined {
-  if (!modelRouteId) return undefined;
+function providerIdForRoute(modelRouteId: string): string | undefined {
   const separator = modelRouteId.indexOf("/");
   return separator > 0 ? modelRouteId.slice(0, separator) : undefined;
 }

@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { resolve } from "node:path";
 import type { SQLInputValue, StatementSync } from "node:sqlite";
-import { parseAnyCredentialRef } from "../../provider/credential-vault.js";
+import { parseProviderCredentialRef } from "../../provider/credential-vault.js";
 import { generateRuntimeId } from "../../tasks/runtime-store-contracts.js";
 import { parseBackgroundAutonomousPolicySnapshot } from "../../safety/background-autonomous-policy-schema.js";
 import {
@@ -840,9 +840,8 @@ export class SqliteRuntimeControlStore {
         throw new RuntimeConflictError(`Cron Job ${input.cronJobId} 已存在`);
       }
       const policySnapshot = parseBackgroundAutonomousPolicySnapshot(input.policySnapshot);
-      const parsedCredential =
-        input.credentialRef === undefined ? undefined : parseAnyCredentialRef(input.credentialRef);
-      const modelRouteId = normalizeOptionalModelRouteId(input.modelRouteId);
+      const parsedCredential = parseProviderCredentialRef(input.credentialRef);
+      const modelRouteId = normalizeModelRouteId(input.modelRouteId);
       validateCredentialRoute(parsedCredential, modelRouteId);
       const now = this.now();
       const job: CronJobRecord = compact({
@@ -854,7 +853,7 @@ export class SqliteRuntimeControlStore {
         prompt: input.prompt,
         enabled: input.enabled !== false,
         policySnapshot,
-        credentialRef: parsedCredential?.ref,
+        credentialRef: parsedCredential.ref,
         modelRouteId,
         version: 1,
         createdAt: now,
@@ -873,8 +872,8 @@ export class SqliteRuntimeControlStore {
         input.prompt,
         job.enabled ? 1 : 0,
         canonicalJson(policySnapshot),
-        job.credentialRef ?? null,
-        job.modelRouteId ?? null,
+        job.credentialRef,
+        job.modelRouteId,
         now,
         now,
       );
@@ -2307,7 +2306,7 @@ function rowToLease(row: Row): RuntimeLeaseRecord {
 }
 
 function rowToCronJob(row: Row): CronJobRecord {
-  const credentialRef = optionalTextField(row, "credential_ref");
+  const credentialRef = textField(row, "credential_ref");
   return compact({
     cronJobId: textField(row, "cron_job_id"),
     workspacePath: textField(row, "workspace_path"),
@@ -2317,9 +2316,8 @@ function rowToCronJob(row: Row): CronJobRecord {
     prompt: textField(row, "prompt"),
     enabled: numberField(row, "enabled") === 1,
     policySnapshot: parseBackgroundAutonomousPolicySnapshot(jsonField(row, "policy_snapshot_json")),
-    credentialRef:
-      credentialRef === undefined ? undefined : parseAnyCredentialRef(credentialRef).ref,
-    modelRouteId: optionalTextField(row, "model_route_id"),
+    credentialRef: parseProviderCredentialRef(credentialRef).ref,
+    modelRouteId: normalizeModelRouteId(textField(row, "model_route_id")),
     version: numberField(row, "version"),
     createdAt: numberField(row, "created_at"),
     updatedAt: numberField(row, "updated_at"),
@@ -2495,30 +2493,15 @@ function daemonCommandKey(commandType: string, idempotencyKey: string): string {
 }
 
 function validateCredentialRoute(
-  credential: ReturnType<typeof parseAnyCredentialRef> | undefined,
-  modelRouteId: string | undefined,
+  credential: ReturnType<typeof parseProviderCredentialRef>,
+  modelRouteId: string,
 ): void {
-  if (credential?.version === "v2" && modelRouteId === undefined) {
-    throw new Error("v2 Provider credentialRef 必须配套固定 modelRouteId");
-  }
-  if (
-    credential?.version === "v1" &&
-    modelRouteId !== undefined &&
-    credential.modelRouteId !== modelRouteId
-  ) {
-    throw new Error("modelRouteId 与 v1 credentialRef 绑定的路由不一致");
-  }
-  if (
-    credential?.version === "v2" &&
-    modelRouteId !== undefined &&
-    providerIdFromModelRoute(modelRouteId) !== credential.providerId
-  ) {
-    throw new Error("modelRouteId 与 v2 credentialRef 绑定的 Provider 不一致");
+  if (providerIdFromModelRoute(modelRouteId) !== credential.providerId) {
+    throw new Error("modelRouteId 与 credentialRef 绑定的 Provider 不一致");
   }
 }
 
-function normalizeOptionalModelRouteId(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
+function normalizeModelRouteId(value: string): string {
   const normalized = value.trim();
   if (!/^[^/\s]+\/.+$/u.test(normalized)) {
     throw new Error("modelRouteId 必须使用 providerID/modelID 格式");

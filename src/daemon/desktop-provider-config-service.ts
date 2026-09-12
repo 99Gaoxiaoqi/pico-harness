@@ -18,14 +18,12 @@ import {
   type UserConfigSnapshot,
 } from "../input/user-config-store.js";
 import {
-  assertCredentialRefMatchesModelRoute,
   assertCredentialRefMatchesProvider,
   createPlatformCredentialVault,
   CredentialNotFoundError,
   credentialRefForProvider,
   importProviderCredential,
   normalizeProviderEndpoint,
-  parseAnyCredentialRef,
   parseProviderCredentialRef,
   type CredentialRef,
   type CredentialVault,
@@ -826,26 +824,11 @@ export class DesktopProviderConfigService {
         );
       }
       try {
-        const parsed = parseAnyCredentialRef(reference.credentialRef);
-        if (parsed.version === "v2") {
-          assertCredentialRefMatchesProvider(
-            reference.credentialRef,
-            providerCredentialIdentity(providerId, provider),
-          );
-        } else {
-          assertCredentialRefMatchesModelRoute(
-            reference.credentialRef,
-            {
-              id: modelRouteId!,
-              provider: provider.modelProtocols?.[model] ?? provider.protocol,
-              baseURL: provider.baseURL,
-              model,
-              apiKeyEnv: provider.apiKeyEnv,
-              ...(provider.auth ? { auth: provider.auth } : {}),
-            },
-            reference.workspacePath,
-          );
-        }
+        parseProviderCredentialRef(reference.credentialRef);
+        assertCredentialRefMatchesProvider(
+          reference.credentialRef,
+          providerCredentialIdentity(providerId, provider),
+        );
       } catch (error) {
         throw new RuntimeProtocolError(
           RUNTIME_ERROR_CODES.CONFLICT,
@@ -1108,13 +1091,7 @@ function requireProviderFromUserConfig(
 function normalizeRuntimeUserDefaults(value: unknown): PicoUserConfigDefaults {
   const record = assertExactObjectKeys(
     value,
-    [
-      "modelRouteId",
-      "collaborationMode",
-      "orchestrationMode",
-      "permissionMode",
-      "thinkingEffort",
-    ],
+    ["modelRouteId", "collaborationMode", "orchestrationMode", "permissionMode", "thinkingEffort"],
     "defaults",
   );
   const modelRouteId = record["modelRouteId"];
@@ -1131,10 +1108,7 @@ function normalizeRuntimeUserDefaults(value: unknown): PicoUserConfigDefaults {
       "defaults.modelRouteId 必须使用 providerID/modelID 格式",
     );
   }
-  if (
-    collaborationMode !== undefined &&
-    !isOneOf(collaborationMode, ["agent", "plan"] as const)
-  ) {
+  if (collaborationMode !== undefined && !isOneOf(collaborationMode, ["agent", "plan"] as const)) {
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.INVALID_PARAMS,
       "defaults.collaborationMode 必须是 agent 或 plan",
@@ -1173,9 +1147,7 @@ function normalizeRuntimeUserDefaults(value: unknown): PicoUserConfigDefaults {
     ...(isOneOf(orchestrationMode, ["default", "graph", "swarm"] as const)
       ? { orchestrationMode }
       : {}),
-    ...(isOneOf(permissionMode, ["ask", "auto", "full-access"] as const)
-      ? { permissionMode }
-      : {}),
+    ...(isOneOf(permissionMode, ["ask", "auto", "full-access"] as const) ? { permissionMode } : {}),
     ...(typeof thinkingEffort === "string" ? { thinkingEffort: thinkingEffort.trim() } : {}),
   };
 }

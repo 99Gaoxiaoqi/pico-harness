@@ -252,17 +252,17 @@ export type TerminalCronRunStatus = (typeof TERMINAL_CRON_RUN_STATUSES)[number];
 export interface CronJobRecord {
   cronJobId: string;
   workspacePath: string;
-  /** Desktop-facing label; legacy rows are backfilled from their prompt. */
+  /** Desktop-facing label. */
   name: string;
   schedule: string;
   timeZone: string;
   prompt: string;
   enabled: boolean;
   policySnapshot: AutonomousPolicySnapshot;
-  /** 非秘密的系统凭证库引用；旧 Job 迁移后可能为空并由 daemon fail-closed。 */
-  credentialRef?: CredentialRef;
-  /** 创建时固定的 providerID/modelID；旧 v1 Job 可从 credentialRef 反推。 */
-  modelRouteId?: string;
+  /** 非秘密的系统凭证库引用。 */
+  credentialRef: CredentialRef;
+  /** 创建时固定的 providerID/modelID。 */
+  modelRouteId: string;
   version: number;
   createdAt: number;
   updatedAt: number;

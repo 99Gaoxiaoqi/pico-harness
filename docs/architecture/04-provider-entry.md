@@ -58,10 +58,10 @@ $PICO_HOME/config.json 中的 Provider 路由（Desktop + TUI 共享）
 
 每个 Run 固定使用启动时的配置快照。TUI 在下一轮 Run 前重新解析配置和凭证；daemon 通过 `config.updated` 通知 Desktop，Renderer 在事件后刷新，并在窗口重新聚焦时补读。刷新不会热换正在运行的 Provider，Session 显式路由仍优先；损坏配置与过期 revision 都 fail-closed。
 
-凭证引用分两代：
-
-- v2 按 `providerId + protocol + normalized endpoint + slot` 绑定，用于设备级共享 Provider。
-- v1 按工作区与完整 model route 绑定，只为读取和校验已持久 Automation 保留；新的 Provider 与 Automation 使用 v2。
+凭证引用只接受当前 v2 格式，按
+`providerId + protocol + normalized endpoint + slot` 绑定设备级共享 Provider。
+Automation 必须同时固定 `providerID/modelID` 路由；工作区级 model-route v1
+引用不再读取、校验或迁移，遇到时明确拒绝。
 
 ### 重试 + 凭证轮换
 

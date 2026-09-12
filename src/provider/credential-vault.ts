@@ -1,11 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { realpathSync } from "node:fs";
 import type { ProviderKind } from "./factory.js";
-import type { ModelRoute } from "./model-router.js";
 
-const MODEL_ROUTE_CREDENTIAL_REF_PREFIX = "pico-keychain://model-route/";
-const MODEL_ROUTE_CREDENTIAL_REF_VERSION = "v1";
 const PROVIDER_CREDENTIAL_REF_PREFIX = "pico-keychain://provider/";
 const PROVIDER_CREDENTIAL_REF_VERSION = "v2";
 const DEFAULT_PROVIDER_CREDENTIAL_SLOT = "api-key";
@@ -21,7 +17,7 @@ export interface CredentialVaultCapability {
   available: boolean;
   backend: "macos-keychain" | "unavailable";
   diagnostic: string;
-  /** Metadata lookup/deletion for legacy entries; never permits storing or resolving plaintext. */
+  /** Metadata lookup/deletion remains available; never permits storing or resolving plaintext. */
   cleanupAvailable?: boolean;
 }
 
@@ -50,29 +46,17 @@ export class CredentialNotFoundError extends Error {
   }
 }
 
-export type CredentialRouteIdentity = Pick<
-  ModelRoute,
-  "id" | "provider" | "baseURL" | "model" | "apiKeyEnv"
->;
-
 /**
  * Device-level Provider credential identity.
  *
- * Unlike the legacy model-route identity, this intentionally excludes workspace,
- * model and environment-variable names so Desktop and TUI can share one secret.
+ * This intentionally excludes workspace, model and environment-variable names so
+ * Desktop and TUI can share one secret.
  */
 export interface ProviderCredentialIdentity {
   readonly providerId: string;
   readonly protocol: ProviderKind;
   readonly baseURL: string;
   readonly credentialSlot?: string;
-}
-
-export interface ParsedModelRouteCredentialRef {
-  readonly ref: CredentialRef;
-  readonly modelRouteId: string;
-  readonly workspaceFingerprint: string;
-  readonly routeFingerprint: string;
 }
 
 export interface ParsedProviderCredentialRef {
@@ -82,62 +66,6 @@ export interface ParsedProviderCredentialRef {
   readonly credentialSlot: string;
   readonly endpointFingerprint: string;
   readonly identityFingerprint: string;
-}
-
-export type ParsedAnyCredentialRef =
-  | ({ readonly version: "v1" } & ParsedModelRouteCredentialRef)
-  | ({ readonly version: "v2" } & ParsedProviderCredentialRef);
-
-export function credentialRefForModelRoute(
-  route: CredentialRouteIdentity,
-  workspacePath: string,
-): CredentialRef {
-  const normalized = route.id.trim();
-  if (!/^[^/\s]+\/.+$/u.test(normalized)) {
-    throw new Error("credentialRef 只接受 providerID/modelID 路由");
-  }
-  const workspaceFingerprint = fingerprint(realpathSync(workspacePath));
-  const routeFingerprint = fingerprint(
-    JSON.stringify([
-      normalized,
-      route.provider,
-      route.baseURL.trim().replace(/\/+$/u, ""),
-      route.model.trim(),
-      route.apiKeyEnv.trim(),
-    ]),
-  );
-  return `${MODEL_ROUTE_CREDENTIAL_REF_PREFIX}${MODEL_ROUTE_CREDENTIAL_REF_VERSION}/${workspaceFingerprint}/${routeFingerprint}/${encodeURIComponent(normalized)}` as CredentialRef;
-}
-
-/** Strict legacy v1 parser retained for Cron and persisted job compatibility. */
-export function parseCredentialRef(ref: string): ParsedModelRouteCredentialRef {
-  if (!ref.startsWith(MODEL_ROUTE_CREDENTIAL_REF_PREFIX)) {
-    throw new Error("不支持的 v1 credentialRef");
-  }
-  const parts = ref.slice(MODEL_ROUTE_CREDENTIAL_REF_PREFIX.length).split("/");
-  if (
-    parts.length !== 4 ||
-    parts[0] !== MODEL_ROUTE_CREDENTIAL_REF_VERSION ||
-    !isFingerprint(parts[1]) ||
-    !isFingerprint(parts[2]) ||
-    !parts[3]
-  ) {
-    throw new Error("credentialRef 结构无效");
-  }
-  const [, workspaceFingerprint, routeFingerprint, encoded] = parts as [
-    string,
-    string,
-    string,
-    string,
-  ];
-  let modelRouteId: string;
-  try {
-    modelRouteId = decodeURIComponent(encoded);
-  } catch {
-    throw new Error("credentialRef 编码无效");
-  }
-  if (!/^[^/\s]+\/.+$/u.test(modelRouteId)) throw new Error("credentialRef 路由无效");
-  return { ref: ref as CredentialRef, modelRouteId, workspaceFingerprint, routeFingerprint };
 }
 
 /** Create a device-level v2 reference shared by Desktop and TUI. */
@@ -190,27 +118,6 @@ export function parseProviderCredentialRef(ref: string): ParsedProviderCredentia
   };
 }
 
-export function parseAnyCredentialRef(ref: string): ParsedAnyCredentialRef {
-  if (ref.startsWith(MODEL_ROUTE_CREDENTIAL_REF_PREFIX)) {
-    return { version: "v1", ...parseCredentialRef(ref) };
-  }
-  if (ref.startsWith(PROVIDER_CREDENTIAL_REF_PREFIX)) {
-    return { version: "v2", ...parseProviderCredentialRef(ref) };
-  }
-  throw new Error("不支持的 credentialRef");
-}
-
-export function assertCredentialRefMatchesModelRoute(
-  ref: CredentialRef,
-  route: CredentialRouteIdentity,
-  workspacePath: string,
-): void {
-  const expected = credentialRefForModelRoute(route, workspacePath);
-  if (ref !== expected) {
-    throw new Error("credentialRef 与当前工作区或模型路由不匹配，后台执行已阻断");
-  }
-}
-
 export function assertCredentialRefMatchesProvider(
   ref: CredentialRef,
   identity: ProviderCredentialIdentity,
@@ -231,23 +138,6 @@ export async function importProviderCredential(input: {
   validateSecret(input.secret);
   const ref = credentialRefForProvider(input.provider);
   await input.vault.put(ref, input.secret);
-  return ref;
-}
-
-export async function importModelRouteCredential(input: {
-  route: ModelRoute;
-  workspacePath: string;
-  vault: CredentialVault;
-  env?: Readonly<Record<string, string | undefined>>;
-}): Promise<CredentialRef> {
-  const raw = (input.env ?? process.env)[input.route.apiKeyEnv]?.trim();
-  const secret = raw
-    ?.split(",")
-    .map((value) => value.trim())
-    .find(Boolean);
-  if (!secret) throw new Error(`缺少凭证环境变量 ${input.route.apiKeyEnv}，无法导入。`);
-  const ref = credentialRefForModelRoute(input.route, input.workspacePath);
-  await input.vault.put(ref, secret);
   return ref;
 }
 
@@ -364,7 +254,7 @@ export class MacOsKeychainCredentialVault implements CredentialVault {
   }
 
   async put(ref: CredentialRef, secret: string): Promise<void> {
-    parseAnyCredentialRef(ref);
+    parseProviderCredentialRef(ref);
     validateSecret(secret);
     // `-w` intentionally remains last: security then reads the password from stdin,
     // keeping the secret out of argv, process listings, transcripts and shell history.
@@ -375,7 +265,7 @@ export class MacOsKeychainCredentialVault implements CredentialVault {
   }
 
   async resolve(ref: CredentialRef): Promise<string> {
-    parseAnyCredentialRef(ref);
+    parseProviderCredentialRef(ref);
     try {
       const secret = await this.runner.run([
         "find-generic-password",
@@ -396,7 +286,7 @@ export class MacOsKeychainCredentialVault implements CredentialVault {
   }
 
   async has(ref: CredentialRef): Promise<boolean> {
-    parseAnyCredentialRef(ref);
+    parseProviderCredentialRef(ref);
     try {
       // Deliberately omit `-w`: status/list operations must not read plaintext credentials
       // into daemon memory merely to determine whether a Keychain item exists.
@@ -409,7 +299,7 @@ export class MacOsKeychainCredentialVault implements CredentialVault {
   }
 
   async delete(ref: CredentialRef): Promise<void> {
-    parseAnyCredentialRef(ref);
+    parseProviderCredentialRef(ref);
     try {
       await this.runner.run(["delete-generic-password", "-a", ref, "-s", KEYCHAIN_SERVICE]);
     } catch (error) {

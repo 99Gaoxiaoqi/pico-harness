@@ -308,7 +308,6 @@ async function resolveClientAutomationAuthority(input: {
   const source = effectiveResult.config.sources[`providers.${providerId}`];
   const target = resolveAutomationCredentialTarget({
     route,
-    workspacePath: input.workspacePath,
     ...(userProvider ? { userProvider } : {}),
     ...(typeof source === "string"
       ? { configSource: source as "user" | "environment" | "session" | "cli" }
