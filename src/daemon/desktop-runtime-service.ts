@@ -724,7 +724,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           ),
         get: (params) =>
           this.withTrustedMemory(params.workspacePath, (canonical) =>
-            this.memoryService.get(canonical, params.factId),
+            this.memoryService.get(canonical, params.itemId),
           ),
         create: (params) =>
           this.withTrustedMemory(params.workspacePath, (canonical) =>
@@ -734,17 +734,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           this.withTrustedMemory(params.workspacePath, (canonical) =>
             this.memoryService.update(canonical, params),
           ),
-        forget: (params) =>
+        delete: (params) =>
           this.withTrustedMemory(params.workspacePath, (canonical) =>
-            this.memoryService.forget(canonical, params),
-          ),
-        listReviews: (params) =>
-          this.withTrustedMemory(params.workspacePath, (canonical) =>
-            this.memoryService.listReviews(canonical, params),
-          ),
-        resolveReview: (params) =>
-          this.withTrustedMemory(params.workspacePath, (canonical) =>
-            this.memoryService.resolveReview(canonical, params),
+            this.memoryService.delete(canonical, params),
           ),
         getSettings: (params) =>
           params.workspacePath
@@ -3546,16 +3538,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       resourceVersion: this.nextResourceVersion(),
       at: this.now(),
     };
-    if (topic === "memory.proposed") {
-      this.publish(
-        createRuntimeNotification({
-          ...base,
-          topic: "memory.proposed",
-          payload: payload as RuntimeNotificationMap["memory.proposed"],
-        }),
-      );
-      return;
-    }
     if (topic === "memory.changed") {
       this.publish(
         createRuntimeNotification({
@@ -3569,8 +3551,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     this.publish(
       createRuntimeNotification({
         ...base,
-        topic: "memory.forgotten",
-        payload: payload as RuntimeNotificationMap["memory.forgotten"],
+        topic: "memory.deleted",
+        payload: payload as RuntimeNotificationMap["memory.deleted"],
       }),
     );
   }

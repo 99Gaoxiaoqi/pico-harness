@@ -51,8 +51,8 @@ export function UserMemorySettingsPage() {
             {(
               [
                 ["enabled", "启用记忆", "关闭后，所有项目停止提取和召回；已保存的内容保留。"],
-                ["autoPropose", "自动提取长期信息", "从对话中提取经过验证的长期信息。"],
-                ["injectionEnabled", "会话召回", "根据当前问题召回相关记忆，遵循项目隔离。"],
+                ["autoExtract", "自动提取长期信息", "从对话中提取经过验证的长期信息。"],
+                ["recallEnabled", "会话召回", "根据当前问题召回相关记忆，遵循项目隔离。"],
               ] as const
             ).map(([key, label, detail]) => (
               <label key={key}>

@@ -53,7 +53,7 @@ test("session deletion waits for atomic memory work and preserves committed item
     async () => {
       entered.resolve();
       await release.promise;
-      itemId = (await memory.create(canonical, "项目发布前运行 npm test。")).fact.factId;
+      itemId = (await memory.create(canonical, "项目发布前运行 npm test。")).item.itemId;
     },
   );
   pendingWork.push(memoryWork);
@@ -88,9 +88,9 @@ test("session deletion waits for atomic memory work and preserves committed item
     publish: () => undefined,
   });
   try {
-    const item = (await restarted.get(canonical, itemId)).fact;
+    const item = (await restarted.get(canonical, itemId)).item;
     assert.equal(item.content, "项目发布前运行 npm test。");
-    assert.equal(item.state, "active");
+    assert.equal(item.lifecycleState, "active");
   } finally {
     restarted.close();
   }

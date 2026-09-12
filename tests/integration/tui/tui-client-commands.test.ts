@@ -511,71 +511,56 @@ function createHarness(options?: {
           };
         case "memory.get":
           return {
-            fact: {
-              factId: String(params.factId),
+            item: {
+              itemId: String(params.itemId),
               version: options?.staleMemoryUndo ? 2 : 1,
-              state: "active",
+              lifecycleState: "active",
             },
           };
         case "memory.create":
           return {
-            fact: {
-              factId: "manual-fact:abc",
+            item: {
+              itemId: "manual-item:abc",
               version: 1,
-              kind: "project_fact",
-              title: "t",
+              kind: "note",
               content: "c",
-              confidence: 1,
-              state: "active",
+              lifecycleState: "active",
               createdAt: 1,
               updatedAt: 1,
-              pinned: false,
             } as never,
           };
         case "memory.list":
           return {
-            facts: [
-              { factId: "manual-fact:abc", state: "active" },
-              { factId: "archived-fact", state: "archived" },
+            items: [
+              { itemId: "manual-item:abc", lifecycleState: "active" },
+              { itemId: "archived-item", lifecycleState: "archived" },
             ],
           };
         case "memory.settings.get":
           return {
             settings: {
               enabled: true,
-              autoPropose: false,
-              autoCommit: false,
-              injectionEnabled: true,
-              reviewMode: "balanced",
+              autoExtract: false,
+              recallEnabled: true,
               version: 3,
-              updatedAt: "t",
-            },
-            reviewBudget: {
-              allowed: true,
-              budget: { maxCalls: 10, maxInputTokens: 100, maxOutputTokens: 100, maxCostUsd: 1 },
-              usage: { calls: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 },
             },
           };
         case "memory.settings.update":
           return {
             settings: {
               enabled: params.enabled === true,
-              autoPropose: false,
-              autoCommit: false,
-              injectionEnabled: params.injectionEnabled === true,
-              reviewMode: "balanced",
+              autoExtract: false,
+              recallEnabled: params.recallEnabled === true,
               version: 4,
-              updatedAt: "t",
-            },
-            reviewBudget: {
-              allowed: true,
-              budget: { maxCalls: 10, maxInputTokens: 100, maxOutputTokens: 100, maxCostUsd: 1 },
-              usage: { calls: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 },
             },
           };
         case "memory.update":
           return {
-            fact: { factId: String(params.factId ?? ""), version: 2, state: "archived" } as never,
+            item: {
+              itemId: String(params.itemId ?? ""),
+              version: 2,
+              lifecycleState: "archived",
+            } as never,
           };
         case "mcp.effective.list":
           return {
@@ -1226,26 +1211,22 @@ test("client commands: tier2 mirrors map memory/provider/cron to RPCs", async (t
   // /memory remember → memory.create；undo token 回流 memory.update。
   harness.requests.length = 0;
   const remembered = await run("/memory remember 首选包管理器是 pnpm");
-  assert.match(String(remembered.result?.message), /manual-fact:/);
+  assert.match(String(remembered.result?.message), /manual-item:/);
   assert.equal(harness.requests.at(-1)?.method, "memory.create");
   const token = String(remembered.result?.message).split("/memory undo ")[1] ?? "";
   const undone = await run(`/memory undo ${token}`);
   assert.match(String(undone.result?.message), /archived/);
   const undoRequest = harness.requests.at(-1);
   assert.equal(undoRequest?.method, "memory.update");
-  assert.equal(undoRequest?.params.state, "archived");
+  assert.equal(undoRequest?.params.lifecycleState, "archived");
 
-  // /memory status 聚合原子记忆与设置，无 review RPC。
+  // /memory status 聚合原子 Item 与当前设置。
   const status = await run("/memory status");
   assert.match(String(status.result?.message), /Memory: on/);
-  assert.match(String(status.result?.message), /Active facts: 1/);
-  assert.match(String(status.result?.message), /Archived facts: 1/);
+  assert.match(String(status.result?.message), /Active items: 1/);
+  assert.match(String(status.result?.message), /Archived items: 1/);
   assert.match(String(status.result?.message), /Automatic extraction: off/);
   assert.doesNotMatch(String(status.result?.message), /Review mode|Pending proposals/);
-  assert.equal(
-    harness.requests.some((entry) => entry.method === "memory.review.list"),
-    false,
-  );
 
   // /provider list → provider.list + config.effective.get；delete 带 revision。
   harness.requests.length = 0;
@@ -1745,7 +1726,7 @@ test("client memory undo rejects stale and malformed tokens before an update RPC
     assert.ok(token);
     harness.requests.length = 0;
     const stale = await run(harness, `/memory undo ${token}`);
-    assert.match(stale.result?.message ?? "", /fact changed/);
+    assert.match(stale.result?.message ?? "", /item changed/);
     assert.deepEqual(
       harness.requests.map((request) => request.method),
       ["memory.get"],
@@ -2098,7 +2079,7 @@ test("client commands preserve public metadata and registration order", () => {
     {
       name: "memory",
       aliases: [],
-      description: "Remember a workspace fact or control workspace memory",
+      description: "Remember a workspace item or control workspace memory",
       usage: "/memory remember <text>|status|off|on",
       argumentHint: "remember <text>|status|off|on",
       category: "workspace",

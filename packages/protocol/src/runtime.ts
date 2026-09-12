@@ -136,16 +136,15 @@ export type {
 } from "./runtime/base.js";
 
 export type {
-  RuntimeMemoryKind,
-  RuntimeMemoryFactState,
-  RuntimeMemoryProposalStatus,
-  RuntimeMemoryProposalConflictStatus,
-  RuntimeMemoryFact,
-  RuntimeAtomicMemoryDetails,
-  RuntimeMemorySourceMetadata,
-  RuntimeMemoryProposal,
+  RuntimeMemoryItemKind,
+  RuntimeMemoryStatementType,
+  RuntimeMemoryTemporalType,
+  RuntimeMemoryScopeType,
+  RuntimeMemoryLifecycleState,
+  RuntimeMemoryItemOrigin,
+  RuntimeMemoryItemSource,
+  RuntimeMemoryItem,
   RuntimeMemorySettings,
-  RuntimeMemoryReviewBudget,
   RuntimeMemoryContextBudget,
 } from "./runtime/memory.js";
 

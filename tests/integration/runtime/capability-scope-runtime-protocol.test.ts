@@ -277,8 +277,8 @@ test("scoped capability results expose opaque provenance without source paths or
 });
 
 test("runtime schema and config notifications advertise scoped capabilities without secret data", () => {
-  assert.equal(DESKTOP_RUNTIME_SCHEMA_REVISION, 16);
-  assert.equal(DESKTOP_RUNTIME_SCHEMA_CAPABILITY, "desktop-runtime-schema-v16");
+  assert.equal(DESKTOP_RUNTIME_SCHEMA_REVISION, 17);
+  assert.equal(DESKTOP_RUNTIME_SCHEMA_CAPABILITY, "desktop-runtime-schema-v17");
   const ping = {
     pong: true,
     protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,

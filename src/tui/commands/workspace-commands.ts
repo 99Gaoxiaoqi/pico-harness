@@ -298,7 +298,7 @@ export function createWorkspaceCommands(deps: ClientCommandRegistryDeps) {
     }),
     memory: rpcCommand({
       name: "memory",
-      description: "Remember a workspace fact or control workspace memory",
+      description: "Remember a workspace item or control workspace memory",
       usage: "/memory remember <text>|status|off|on",
       argumentHint: "remember <text>|status|off|on",
       category: "workspace",
@@ -315,24 +315,24 @@ export function createWorkspaceCommands(deps: ClientCommandRegistryDeps) {
             case "remember": {
               const text = rest.join(" ").trim();
               if (!text) return msg("Usage: /memory remember <text>");
-              const { fact } = await runtime.request("memory.create", { workspacePath, text });
+              const { item } = await runtime.request("memory.create", { workspacePath, text });
               return msg(
-                `Remembered workspace fact ${fact.factId}. Undo: /memory undo ${encodeMemoryUndoToken({ factId: fact.factId, version: fact.version })}`,
+                `Remembered workspace item ${item.itemId}. Undo: /memory undo ${encodeMemoryUndoToken({ itemId: item.itemId, version: item.version })}`,
               );
             }
             case "status": {
-              const [settingsResult, facts] = await Promise.all([
+              const [settingsResult, items] = await Promise.all([
                 runtime.request("memory.settings.get", { workspacePath }),
                 runtime.request("memory.list", { workspacePath, limit: 1000 }),
               ]);
               return msg(
                 [
                   `Memory: ${settingsResult.settings.enabled ? "on" : "off"}`,
-                  `Injection: ${settingsResult.settings.injectionEnabled ? "on" : "off"}`,
-                  `Automatic extraction: ${settingsResult.settings.autoPropose ? "on" : "off"}`,
+                  `Injection: ${settingsResult.settings.recallEnabled ? "on" : "off"}`,
+                  `Automatic extraction: ${settingsResult.settings.autoExtract ? "on" : "off"}`,
                   "Validated memories are saved directly.",
-                  `Active facts: ${facts.facts.filter((fact) => fact.state === "active").length}`,
-                  `Archived facts: ${facts.facts.filter((fact) => fact.state === "archived").length}`,
+                  `Active items: ${items.items.filter((item) => item.lifecycleState === "active").length}`,
+                  `Archived items: ${items.items.filter((item) => item.lifecycleState === "archived").length}`,
                 ].join("\n"),
               );
             }
@@ -342,7 +342,7 @@ export function createWorkspaceCommands(deps: ClientCommandRegistryDeps) {
               const current = await runtime.request("memory.settings.get", { workspacePath });
               if (
                 current.settings.enabled === enabled &&
-                current.settings.injectionEnabled === enabled
+                current.settings.recallEnabled === enabled
               ) {
                 return msg(`Memory is already ${enabled ? "on" : "off"}.`);
               }
@@ -350,7 +350,7 @@ export function createWorkspaceCommands(deps: ClientCommandRegistryDeps) {
                 workspacePath,
                 expectedVersion: current.settings.version,
                 enabled,
-                injectionEnabled: enabled,
+                recallEnabled: enabled,
                 idempotencyKey: `memory-toggle:${enabled ? "on" : "off"}:${current.settings.version}`,
               });
               return msg(
@@ -364,23 +364,23 @@ export function createWorkspaceCommands(deps: ClientCommandRegistryDeps) {
               if (!token) return msg("Usage: /memory undo <token>");
               try {
                 const payload = decodeMemoryUndoToken(token);
-                const { fact } = await runtime.request("memory.get", {
+                const { item } = await runtime.request("memory.get", {
                   workspacePath,
-                  factId: payload.factId,
+                  itemId: payload.itemId,
                 });
-                if (fact.version !== payload.version || fact.state !== "active") {
+                if (item.version !== payload.version || item.lifecycleState !== "active") {
                   return msg(
-                    "Undo unavailable: the fact changed after this undo token was issued.",
+                    "Undo unavailable: the item changed after this undo token was issued.",
                   );
                 }
                 await runtime.request("memory.update", {
                   workspacePath,
-                  factId: payload.factId,
+                  itemId: payload.itemId,
                   expectedVersion: payload.version,
-                  state: "archived",
-                  idempotencyKey: `memory-undo:${payload.factId}:${payload.version}`,
+                  lifecycleState: "archived",
+                  idempotencyKey: `memory-undo:${payload.itemId}:${payload.version}`,
                 });
-                return msg(`Undone: workspace fact ${payload.factId} is archived.`);
+                return msg(`Undone: workspace item ${payload.itemId} is archived.`);
               } catch (error) {
                 return msg(
                   `Undo unavailable: ${error instanceof Error ? error.message : String(error)}`,

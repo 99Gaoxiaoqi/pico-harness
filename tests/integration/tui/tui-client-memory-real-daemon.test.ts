@@ -53,18 +53,24 @@ test("TUI memory commands persist and archive atomic memories through the real d
   const remembered = await command(`/memory remember ${content}`);
   const undo = remembered.match(/\/memory undo (\S+)/)?.[1];
   assert.ok(undo, remembered);
-  const { facts } = await client.request("memory.list", { workspacePath, states: ["active"] });
-  assert.equal(facts.length, 1);
-  assert.equal(facts[0]?.content, content);
-  assert.ok(facts[0]?.atomic, "the daemon must return an atomic memory projection");
+  const { items } = await client.request("memory.list", {
+    workspacePath,
+    lifecycleStates: ["active"],
+  });
+  assert.equal(items.length, 1);
+  assert.equal(items[0]?.content, content);
+  assert.equal(items[0]?.kind, "note", "the daemon must return the atomic Memory Item");
   const status = await command("/memory status");
   assert.match(status, /Automatic extraction: on/);
-  assert.match(status, /Active facts: 1/);
+  assert.match(status, /Active items: 1/);
   assert.doesNotMatch(status, /Review mode|Pending proposals/);
   assert.match(await command(`/memory undo ${undo}`), /archived/);
-  const archived = await client.request("memory.get", { workspacePath, factId: facts[0]!.factId });
-  assert.equal(archived.fact.state, "archived");
-  assert.match(await command("/memory status"), /Archived facts: 1/);
+  const archived = await client.request("memory.get", {
+    workspacePath,
+    itemId: items[0]!.itemId,
+  });
+  assert.equal(archived.item.lifecycleState, "archived");
+  assert.match(await command("/memory status"), /Archived items: 1/);
   await command("/memory off");
   assert.equal(
     (await client.request("memory.settings.get", { workspacePath })).settings.enabled,

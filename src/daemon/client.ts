@@ -70,7 +70,6 @@ const KERNEL_RETRY_SAFE_METHODS: ReadonlySet<RuntimeMethod> = new Set<RuntimeMet
   "prompt.cancel",
   "memory.list",
   "memory.get",
-  "memory.review.list",
   "memory.settings.get",
   "memory.context.preview",
   "jobs.list",

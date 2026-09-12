@@ -23,7 +23,6 @@ import type {
 } from "./base.js";
 import { invalidResult } from "./errors.js";
 import type { RuntimeErrorCode } from "./errors.js";
-import type { RuntimeMemoryKind } from "./memory.js";
 import type { RuntimeDiscoveryProjection, RuntimePlanProjection } from "./planning.js";
 import type { RuntimeRun, RuntimeSession, RuntimeSessionSettings } from "./session.js";
 import {
@@ -90,19 +89,14 @@ export type RuntimeNotificationMap = {
     readonly sourceSessionId?: SessionId;
     readonly checkpointId: CheckpointId;
   };
-  readonly "memory.proposed": {
-    readonly proposalId: string;
-    readonly version: number;
-    readonly kind: RuntimeMemoryKind;
-  };
   readonly "memory.changed": {
-    readonly entityType: "fact" | "proposal" | "settings" | "source";
+    readonly entityType: "item" | "settings" | "source";
     readonly entityId: string;
     readonly version: number;
-    readonly change: "updated" | "resolved" | "source_unavailable";
+    readonly change: "updated";
   };
-  readonly "memory.forgotten": {
-    readonly factId: string;
+  readonly "memory.deleted": {
+    readonly itemId: string;
     readonly version: number;
   };
   readonly "job.updated": { readonly job: RuntimeJob };
@@ -256,31 +250,23 @@ export function isDiscoveryRuntimeNotification(
 /** Memory events are durable, so their payload is deliberately exact and body-free. */
 export function isMemoryRuntimeNotification(
   value: unknown,
-): value is RuntimeNotification<"memory.proposed" | "memory.changed" | "memory.forgotten"> {
+): value is RuntimeNotification<"memory.changed" | "memory.deleted"> {
   if (!isJsonObject(value) || !isRuntimeNotificationEnvelope(value)) return false;
   const payload = value.payload;
   if (!isJsonObject(payload)) return false;
-  if (value.topic === "memory.proposed") {
-    return (
-      hasExactKeys(payload, ["proposalId", "version", "kind"]) &&
-      nonEmptyString(payload.proposalId) &&
-      nonNegativeSafeInteger(payload.version) &&
-      ["preference", "correction", "project_fact", "reference"].includes(String(payload.kind))
-    );
-  }
   if (value.topic === "memory.changed") {
     return (
       hasExactKeys(payload, ["entityType", "entityId", "version", "change"]) &&
-      ["fact", "proposal", "settings", "source"].includes(String(payload.entityType)) &&
+      ["item", "settings", "source"].includes(String(payload.entityType)) &&
       nonEmptyString(payload.entityId) &&
       nonNegativeSafeInteger(payload.version) &&
-      ["updated", "resolved", "source_unavailable"].includes(String(payload.change))
+      payload.change === "updated"
     );
   }
-  if (value.topic === "memory.forgotten") {
+  if (value.topic === "memory.deleted") {
     return (
-      hasExactKeys(payload, ["factId", "version"]) &&
-      nonEmptyString(payload.factId) &&
+      hasExactKeys(payload, ["itemId", "version"]) &&
+      nonEmptyString(payload.itemId) &&
       nonNegativeSafeInteger(payload.version)
     );
   }

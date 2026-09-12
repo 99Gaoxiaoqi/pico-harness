@@ -11,8 +11,7 @@ import type { AtomicMemorySettings } from "../memory/atomic/runtime-contracts.js
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import { SqliteMemoryItemStore } from "../storage/sqlite/sqlite-memory-item-store.js";
 import type {
-  RuntimeMemoryFact,
-  RuntimeMemoryKind,
+  RuntimeMemoryItem,
   RuntimeMemorySettings,
   RuntimeNotificationMap,
   RuntimeParams,
@@ -23,14 +22,14 @@ import { RUNTIME_ERROR_CODES, RuntimeProtocolError } from "./protocol.js";
 export interface DesktopAtomicMemoryServiceOptions {
   readonly picoHome: string;
   readonly now?: () => number;
-  readonly publish: <Topic extends "memory.changed" | "memory.forgotten">(
+  readonly publish: <Topic extends "memory.changed" | "memory.deleted">(
     workspacePath: string,
     topic: Topic,
     payload: RuntimeNotificationMap[Topic],
   ) => void;
 }
 
-/** Atomic Items are authoritative; legacy envelope names only preserve the desktop wire contract. */
+/** Desktop management surface backed directly by authoritative atomic Memory Items. */
 export class DesktopAtomicMemoryService {
   private closed = false;
   constructor(private readonly options: DesktopAtomicMemoryServiceOptions) {}
@@ -42,21 +41,21 @@ export class DesktopAtomicMemoryService {
     return this.withStore(workspacePath, async (store, workspaceKey) => {
       const records = await store.listItems({ workspaceKey, includeArchived: true, limit: 1000 });
       return {
-        facts: records
-          .map(projectFact)
+        items: records
+          .map(projectItem)
           .filter(
-            (fact) =>
-              (!params.states || params.states.includes(fact.state)) &&
-              (!params.kinds || params.kinds.includes(fact.kind)),
+            (item) =>
+              (!params.lifecycleStates || params.lifecycleStates.includes(item.lifecycleState)) &&
+              (!params.kinds || params.kinds.includes(item.kind)),
           )
           .slice(0, params.limit ?? 100),
       };
     });
   }
 
-  async get(workspacePath: string, factId: string): Promise<RuntimeResult<"memory.get">> {
+  async get(workspacePath: string, itemId: string): Promise<RuntimeResult<"memory.get">> {
     return this.withStore(workspacePath, async (store, key) => ({
-      fact: projectFact(await authorizedItem(store, key, factId)),
+      item: projectItem(await authorizedItem(store, key, itemId)),
     }));
   }
 
@@ -83,7 +82,7 @@ export class DesktopAtomicMemoryService {
         }
         const record = await authorizedItem(store, workspaceKey, existing.item.itemId);
         this.changed(workspacePath, record);
-        return { fact: projectFact(record) };
+        return { item: projectItem(record) };
       }
       const saved = await store.applyMutations({
         operationId: previous ? `${operationId}:${randomUUID()}` : operationId,
@@ -107,7 +106,7 @@ export class DesktopAtomicMemoryService {
       });
       const record = await authorizedItem(store, workspaceKey, saved.results[0]!.itemId);
       this.changed(workspacePath, record);
-      return { fact: projectFact(record) };
+      return { item: projectItem(record) };
     });
   }
 
@@ -116,25 +115,17 @@ export class DesktopAtomicMemoryService {
     params: RuntimeParams<"memory.update">,
   ): Promise<RuntimeResult<"memory.update">> {
     return this.withStore(workspacePath, async (store, key) => {
-      const current = await authorizedItem(store, key, params.factId);
-      const editing =
-        params.content !== undefined || params.title !== undefined || params.kind !== undefined;
-      if (
-        params.pinned !== undefined ||
-        params.confidence !== undefined ||
-        params.expiresAt !== undefined ||
-        params.lastUsedAt !== undefined
-      ) {
-        throw invalid("原子记忆不支持置顶、置信度或旧版过期字段");
-      }
-      if (editing && params.state !== undefined) throw invalid("请分别保存内容和更改归档状态");
-      if (!editing && params.state === undefined) throw invalid("没有可更新的记忆字段");
+      const current = await authorizedItem(store, key, params.itemId);
+      const editing = params.content !== undefined || params.kind !== undefined;
+      if (editing && params.lifecycleState !== undefined)
+        throw invalid("请分别保存内容和更改归档状态");
+      if (!editing && params.lifecycleState === undefined) throw invalid("没有可更新的记忆字段");
       const operationId = operationKey(key, params.idempotencyKey);
       if (editing) {
-        const content = safeContent(params.content ?? params.title ?? current.item.content);
+        const content = safeContent(params.content ?? current.item.content);
         const item: MemoryItemWrite = {
           content,
-          kind: params.kind ? atomicKind(params.kind) : current.item.kind,
+          kind: params.kind ?? current.item.kind,
           statementType: current.item.statementType,
           temporalType: current.item.temporalType,
           scopeType: current.item.scopeType,
@@ -151,7 +142,7 @@ export class DesktopAtomicMemoryService {
           mutations: [
             {
               type: "update",
-              itemId: params.factId,
+              itemId: params.itemId,
               expectedVersion: params.expectedVersion,
               item,
             },
@@ -162,71 +153,44 @@ export class DesktopAtomicMemoryService {
           operationId,
           mutations: [
             {
-              type: params.state === "active" ? "restore" : "archive",
-              itemId: params.factId,
+              type: params.lifecycleState === "active" ? "restore" : "archive",
+              itemId: params.itemId,
               expectedVersion: params.expectedVersion,
             },
           ],
         });
       }
-      const record = await authorizedItem(store, key, params.factId);
+      const record = await authorizedItem(store, key, params.itemId);
       this.changed(workspacePath, record);
-      return { fact: projectFact(record) };
+      return { item: projectItem(record) };
     });
   }
 
-  async forget(
+  async delete(
     workspacePath: string,
-    params: RuntimeParams<"memory.forget">,
-  ): Promise<RuntimeResult<"memory.forget">> {
+    params: RuntimeParams<"memory.delete">,
+  ): Promise<RuntimeResult<"memory.delete">> {
     return this.withStore(workspacePath, async (store, key) => {
-      const record = await authorizedItem(store, key, params.factId);
+      const record = await authorizedItem(store, key, params.itemId);
       await store.deleteItem({
-        itemId: params.factId,
+        itemId: params.itemId,
         expectedVersion: params.expectedVersion,
         operationId: operationKey(key, params.idempotencyKey),
       });
-      const at = new Date(this.now()).toISOString();
-      const fact: RuntimeMemoryFact = {
-        factId: params.factId,
-        kind: legacyKind(record.item.kind),
-        title: null,
-        content: null,
-        confidence: 0,
-        state: "forgotten",
-        pinned: false,
-        version: record.item.version + 1,
-        createdAt: new Date(record.item.createdAt).toISOString(),
-        updatedAt: at,
-        forgottenAt: at,
-      };
+      const version = record.item.version + 1;
       this.publish(() =>
-        this.options.publish(workspacePath, "memory.forgotten", {
-          factId: fact.factId,
-          version: fact.version,
+        this.options.publish(workspacePath, "memory.deleted", {
+          itemId: params.itemId,
+          version,
         }),
       );
-      return { fact };
+      return { itemId: params.itemId, deleted: true };
     });
-  }
-
-  async listReviews(
-    _workspacePath: string,
-    _params: RuntimeParams<"memory.review.list">,
-  ): Promise<RuntimeResult<"memory.review.list">> {
-    return { proposals: [] };
-  }
-
-  async resolveReview(
-    _workspacePath: string,
-    _params: RuntimeParams<"memory.review.resolve">,
-  ): Promise<RuntimeResult<"memory.review.resolve">> {
-    throw invalid("原子记忆直接保存，不再提供旧版审核操作");
   }
 
   async getSettings(workspacePath: string): Promise<RuntimeResult<"memory.settings.get">> {
     return this.withStore(workspacePath, async (store, key) =>
-      settingsResult(await store.readSettings(key), this.now()),
+      settingsResult(await store.readSettings(key)),
     );
   }
 
@@ -235,16 +199,12 @@ export class DesktopAtomicMemoryService {
     params: RuntimeParams<"memory.settings.update">,
   ): Promise<RuntimeResult<"memory.settings.update">> {
     return this.withStore(workspacePath, async (store, workspaceKey) => {
-      if (params.autoCommit !== undefined || params.reviewMode !== undefined)
-        throw invalid("原子记忆直接保存，请使用启用、自动提取和会话召回开关");
       const settings = await store.updateSettings({
         workspaceKey,
         expectedVersion: params.expectedVersion,
         ...(params.enabled !== undefined ? { enabled: params.enabled } : {}),
-        ...(params.autoPropose !== undefined ? { autoExtract: params.autoPropose } : {}),
-        ...(params.injectionEnabled !== undefined
-          ? { recallEnabled: params.injectionEnabled }
-          : {}),
+        ...(params.autoExtract !== undefined ? { autoExtract: params.autoExtract } : {}),
+        ...(params.recallEnabled !== undefined ? { recallEnabled: params.recallEnabled } : {}),
       });
       this.publish(() =>
         this.options.publish(workspacePath, "memory.changed", {
@@ -254,7 +214,7 @@ export class DesktopAtomicMemoryService {
           change: "updated",
         }),
       );
-      return settingsResult(settings, this.now());
+      return settingsResult(settings);
     });
   }
 
@@ -264,16 +224,16 @@ export class DesktopAtomicMemoryService {
   ): Promise<RuntimeResult<"memory.context.preview">> {
     return this.withStore(workspacePath, async (store, key) => {
       const result = await new AtomicMemoryContextBuilder(store, key).build();
-      const maxFacts = Math.min(params.maxFacts ?? 3, 3);
+      const maxItems = Math.min(params.maxItems ?? 3, 3);
       const maxTokens = Math.min(params.maxTokens ?? 320, 320);
-      const fits = result.items.length <= maxFacts && result.tokenCount <= maxTokens;
-      const facts = fits ? result.items.map(projectFact) : [];
+      const fits = result.items.length <= maxItems && result.tokenCount <= maxTokens;
+      const items = fits ? result.items.map(projectItem) : [];
       return {
-        facts,
+        items,
         budget: {
-          maxFacts,
+          maxItems,
           maxTokens,
-          usedFacts: facts.length,
+          usedItems: items.length,
           usedTokens: fits ? result.tokenCount : 0,
           truncated: result.truncated || !fits,
         },
@@ -319,7 +279,7 @@ export class DesktopAtomicMemoryService {
   private changed(workspacePath: string, record: MemoryItemRecord): void {
     this.publish(() =>
       this.options.publish(workspacePath, "memory.changed", {
-        entityType: "fact",
+        entityType: "item",
         entityId: record.item.itemId,
         version: record.item.version,
         change: "updated",
@@ -348,43 +308,30 @@ async function authorizedItem(
   return record;
 }
 
-function projectFact({ item, sources }: MemoryItemRecord): RuntimeMemoryFact {
-  const source = sources[0];
+function projectItem({ item, sources }: MemoryItemRecord): RuntimeMemoryItem {
   return {
-    factId: item.itemId,
-    kind: legacyKind(item.kind),
-    title: [...item.content].slice(0, 60).join(""),
-    content: item.content,
-    confidence: 1,
-    state: item.lifecycleState,
-    pinned: false,
+    itemId: item.itemId,
     version: item.version,
-    createdAt: new Date(item.createdAt).toISOString(),
-    updatedAt: new Date(item.updatedAt).toISOString(),
-    atomic: {
-      itemId: item.itemId,
-      kind: item.kind,
-      scopeType: item.scopeType,
-      scopeKey: item.scopeKey,
-      statementType: item.statementType,
-      temporalType: item.temporalType,
-      observedAt: item.observedAt,
-      eventStartedAt: item.eventStartedAt,
-      eventEndedAt: item.eventEndedAt,
-      origin: item.origin,
-    },
-    ...(source
-      ? {
-          sourceId: source.eventId,
-          source: {
-            sourceId: source.eventId,
-            sessionId: source.sessionId,
-            availability: "available" as const,
-            createdAt: new Date(item.createdAt).toISOString(),
-            updatedAt: new Date(item.updatedAt).toISOString(),
-          },
-        }
-      : {}),
+    content: item.content,
+    kind: item.kind,
+    statementType: item.statementType,
+    temporalType: item.temporalType,
+    scopeType: item.scopeType,
+    scopeKey: item.scopeKey,
+    eventStartedAt: item.eventStartedAt,
+    eventEndedAt: item.eventEndedAt,
+    observedAt: item.observedAt,
+    lifecycleState: item.lifecycleState,
+    origin: item.origin,
+    contentHash: item.contentHash,
+    createdAt: item.createdAt,
+    updatedAt: item.updatedAt,
+    sources: sources.map((source) => ({
+      sessionId: source.sessionId,
+      runId: source.runId,
+      turnId: source.turnId,
+      eventId: source.eventId,
+    })),
   };
 }
 
@@ -414,24 +361,6 @@ function manualKeys(content: string): MemoryItemWrite["keys"] {
   return [...terms].slice(0, 32).map((key) => ({ key, keyType: "concept", keyOrigin: "user" }));
 }
 
-function legacyKind(kind: MemoryItemWrite["kind"]): RuntimeMemoryKind {
-  return kind === "preference"
-    ? "preference"
-    : kind === "failure"
-      ? "correction"
-      : kind === "context" || kind === "identity"
-        ? "project_fact"
-        : "reference";
-}
-function atomicKind(kind: RuntimeMemoryKind): MemoryItemWrite["kind"] {
-  return kind === "preference"
-    ? "preference"
-    : kind === "correction"
-      ? "failure"
-      : kind === "project_fact"
-        ? "context"
-        : "knowledge";
-}
 function operationKey(workspaceKey: string, value: string): string {
   return `desktop:${createHash("sha256")
     .update(JSON.stringify([workspaceKey, value]))
@@ -440,33 +369,12 @@ function operationKey(workspaceKey: string, value: string): string {
 function invalid(message: string): RuntimeProtocolError {
   return new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, message);
 }
-function settingsResult(
-  value: AtomicMemorySettings,
-  now: number,
-): RuntimeResult<"memory.settings.get"> {
+function settingsResult(value: AtomicMemorySettings): RuntimeResult<"memory.settings.get"> {
   const settings: RuntimeMemorySettings = {
     enabled: value.enabled,
-    autoPropose: value.autoExtract,
-    autoCommit: true,
-    injectionEnabled: value.recallEnabled,
-    reviewMode: "balanced",
+    autoExtract: value.autoExtract,
+    recallEnabled: value.recallEnabled,
     version: value.version,
-    updatedAt: new Date(now).toISOString(),
   };
-  return {
-    settings,
-    reviewBudget: {
-      mode: "balanced",
-      allowed: true,
-      reason: "available",
-      calls: 0,
-      inputTokens: 0,
-      outputTokens: 0,
-      costUsd: 0,
-      maxCalls: 3,
-      maxInputTokens: 0,
-      maxOutputTokens: 0,
-      maxCostUsd: 0,
-    },
-  };
+  return { settings };
 }
