@@ -9,20 +9,17 @@ import type {
 } from "../agent-graph/work-request.js";
 import type {
   AgentGraph,
-  AgentGraphActivateCommand,
   AgentGraphActivationClaim,
   AgentGraphActivationIntent,
   AgentGraphOperator,
   AgentGraphOperatorProvision,
   AgentGraphRecordRef,
-  AgentGraphFinishCommand,
   AgentGraphScheduleCommand,
   AgentGraphStopCommand,
   AgentGraphOperationSource,
 } from "../agent-graph/core/contracts.js";
 export { AGENT_GRAPH_SUPERVISOR_TOOL_NAMES } from "../agent-graph/core/tool-names.js";
 import type { AgentGraphOperatorProfileSummary } from "../agent-graph/operator-profile-catalog.js";
-import { agentOutputRecordIdFor } from "../agent-graph/core/ids.js";
 import type { AgentGraphRuntimeStatus } from "../agent-graph/runtime-port.js";
 import type { ToolDefinition } from "../schema/message.js";
 import { ToolAccesses } from "./tool-access.js";
@@ -39,7 +36,6 @@ export const AGENT_GRAPH_MAX_JSON_BYTES = 64 * 1024;
 
 const MAX_IDENTITY_BYTES = 1024;
 const MAX_SHORT_TEXT_BYTES = 2 * 1024;
-const MAX_DESCRIPTION_BYTES = 8 * 1024;
 const AGENT_GRAPH_VIEW_MAX_RECORD_BYTES = 16 * 1024;
 const AGENT_GRAPH_VIEW_MAX_TOTAL_BYTES = 48 * 1024;
 
@@ -245,7 +241,7 @@ class UpdateAgentGraphTool extends AgentGraphSupervisorTool {
     return {
       name: this.name(),
       description: this.options.swarm
-        ? "安排 Graph 子任务。先调用 agent_list，operation=add_work 时提供 add_work 数组，以 target_kind=new_preset 和返回的 subagent_id 新建任务；target_kind=existing_operator 和已有 operator_id 追加任务。填写 instruction、可选 input_ids。替换失败任务时提供 replaces 和 replacement_mode=replace；replacement_mode=none 会忽略 replaces。implementation 自动使用 isolated-worktree，其余任务默认 shared。operation=stop 提供 stop 数组；operation=finish 提供 finish.result_ids。仍有执行中的任务则 yield_agent_graph。旧 profile_id 调用保持兼容。"
+        ? "安排 Graph 子任务。先调用 agent_list，operation=add_work 时提供 add_work 数组，以 target_kind=new_preset 和返回的 subagent_id 新建任务；target_kind=new_agent 和 agent_id 选择内置能力；target_kind=existing_operator 和已有 operator_id 追加任务。填写 instruction、可选 input_ids。替换失败任务时提供 replaces 和 replacement_mode=replace；replacement_mode=none 会忽略 replaces。implementation 自动使用 isolated-worktree，其余任务默认 shared。operation=stop 提供 stop 数组；operation=finish 提供 finish.result_ids。仍有执行中的任务则 yield_agent_graph。"
         : "安排 Graph 子任务。operation=add_work 的 add_work 数组使用 view_agent_graph 返回的 profile_id 新建任务，或 operator_id 追加任务，填写 instruction 和可选 input_ids。operation=stop 提供 stop 数组；operation=finish 提供 finish.result_ids。仍有执行中的任务则 yield_agent_graph。",
       inputSchema: workRequestSchema(this.options.swarm),
     };
@@ -256,58 +252,51 @@ class UpdateAgentGraphTool extends AgentGraphSupervisorTool {
     const root = this.rootContext();
     const toolCallId = requiredIdentity(execution?.toolCallId, "toolCallId");
     const value = parseJsonObject(args, "update_agent_graph");
-    // Decode old persisted invocations, but advertise only the model-facing work interface.
-    let result: CommitAgentGraphUpdateResult;
-    if ("commands" in value && !("operation" in value)) {
-      result = await this.options.port.commitUpdate(parseUpdateInput(args, root, toolCallId));
-    } else {
-      if (this.options.swarm) {
-        const operation = value["operation"];
-        if (operation === "add_work" || operation === "stop" || operation === "finish") {
-          for (const other of ["add_work", "stop", "finish"])
-            if (other !== operation) delete value[other];
-        }
-        if (operation === "stop" && Array.isArray(value["stop"])) {
-          const projection = await this.options.port.readProjection({
-            graphId: root.graphId,
-            epoch: root.epoch,
-            rootSessionId: root.rootSessionId,
-            recordIds: [],
-          });
-          validateProjection(projection, root);
-          value["stop"] = value["stop"].map((entry) => {
-            const target = { ...objectField(entry, "stop") };
-            if (!("target_id" in target)) return target;
-            const id = requiredIdentity(target["target_id"], "stop.target_id");
-            if ("operator_id" in target || "intent_id" in target)
-              throw new Error("stop: target_id 不能与旧身份字段混用。");
-            delete target["target_id"];
-            if (projection.intents.some((intent) => intent.intentId === id))
-              target["intent_id"] = id;
-            else if (projection.operators.some((operator) => operator.operatorId === id))
-              target["operator_id"] = id;
-            else throw new Error(`Unknown stop target_id: ${id}`);
-            return target;
-          });
-        }
+    if (this.options.swarm) {
+      const operation = value["operation"];
+      if (operation === "add_work" || operation === "stop" || operation === "finish") {
+        for (const other of ["add_work", "stop", "finish"])
+          if (other !== operation) delete value[other];
       }
-      const request = parseWorkRequest(value);
-      if (!this.options.port.commitWork)
-        throw new Error("Graph application does not support work requests");
-      result = await this.options.port.commitWork({
-        graphId: root.graphId,
-        epoch: root.epoch,
-        rootModelRouteId: requiredExactIdentity(root.rootModelRouteId, "rootModelRouteId"),
-        source: {
-          sessionId: root.rootSessionId,
-          turnId: root.rootTurnId,
-          runId: root.rootRunId,
-          toolCallId,
-        },
-        request,
-        ...(root.supervision ? { supervision: root.supervision } : {}),
-      });
+      if (operation === "stop" && Array.isArray(value["stop"])) {
+        const projection = await this.options.port.readProjection({
+          graphId: root.graphId,
+          epoch: root.epoch,
+          rootSessionId: root.rootSessionId,
+          recordIds: [],
+        });
+        validateProjection(projection, root);
+        value["stop"] = value["stop"].map((entry) => {
+          const target = { ...objectField(entry, "stop") };
+          if (!("target_id" in target)) return target;
+          const id = requiredIdentity(target["target_id"], "stop.target_id");
+          if ("operator_id" in target || "intent_id" in target)
+            throw new Error("stop: target_id 不能与旧身份字段混用。");
+          delete target["target_id"];
+          if (projection.intents.some((intent) => intent.intentId === id)) target["intent_id"] = id;
+          else if (projection.operators.some((operator) => operator.operatorId === id))
+            target["operator_id"] = id;
+          else throw new Error(`Unknown stop target_id: ${id}`);
+          return target;
+        });
+      }
     }
+    const request = parseWorkRequest(value, this.options.swarm);
+    if (!this.options.port.commitWork)
+      throw new Error("Graph application does not support work requests");
+    const result = await this.options.port.commitWork({
+      graphId: root.graphId,
+      epoch: root.epoch,
+      rootModelRouteId: requiredExactIdentity(root.rootModelRouteId, "rootModelRouteId"),
+      source: {
+        sessionId: root.rootSessionId,
+        turnId: root.rootTurnId,
+        runId: root.rootRunId,
+        toolCallId,
+      },
+      request,
+      ...(root.supervision ? { supervision: root.supervision } : {}),
+    });
     execution?.signal?.throwIfAborted();
     validateProjection(result.projection, root);
     if (!Number.isSafeInteger(result.revision) || result.revision < 0) {
@@ -674,209 +663,6 @@ export function createAgentGraphSupervisorTools(
   ];
 }
 
-function parseUpdateInput(
-  args: string,
-  root: AgentGraphRootToolContext,
-  toolCallId: string,
-): CommitAgentGraphUpdateInput {
-  const value = parseJsonObject(args, "update_agent_graph");
-  assertKeys(
-    value,
-    ["expected_revision", "operation_id", "commands"],
-    ["expected_revision", "operation_id", "commands"],
-  );
-  const expectedRevision = nonNegativeInteger(value["expected_revision"], "expected_revision");
-  const operationId = requiredIdentity(value["operation_id"], "operation_id");
-  const rawCommands = value["commands"];
-  if (!Array.isArray(rawCommands) || rawCommands.length < 1) {
-    throw new Error("update_agent_graph 参数无效：commands 必须是非空数组。");
-  }
-  if (rawCommands.length > AGENT_GRAPH_MAX_COMMANDS) {
-    throw new Error(
-      `update_agent_graph 参数无效：commands 不得超过 ${AGENT_GRAPH_MAX_COMMANDS} 项。`,
-    );
-  }
-  const source: AgentGraphOperationSource = {
-    sessionId: root.rootSessionId,
-    turnId: root.rootTurnId,
-    runId: root.rootRunId,
-    toolCallId,
-  };
-  const commands = rawCommands.map((command, index) =>
-    parseCommand(command, index, root.graphId, expectedRevision + 1, source),
-  );
-  const finishIndexes = commands.flatMap((command, index) =>
-    command.kind === "finish" ? [index] : [],
-  );
-  if (
-    finishIndexes.length > 1 ||
-    (finishIndexes.length === 1 && finishIndexes[0] !== commands.length - 1)
-  ) {
-    throw new Error("update_agent_graph 参数无效：finish 最多一条且必须是最后一条命令。");
-  }
-  if (
-    finishIndexes.length === 1 &&
-    commands.some((command) => command.kind === "add" || command.kind === "activate")
-  ) {
-    throw new Error("update_agent_graph 参数无效：finish 不能与 add 或 activate 同批提交。");
-  }
-  return {
-    graphId: root.graphId,
-    epoch: root.epoch,
-    expectedRevision,
-    operationId,
-    source,
-    rootModelRouteId: requiredExactIdentity(root.rootModelRouteId, "rootModelRouteId"),
-    commands,
-  };
-}
-
-function parseCommand(
-  value: unknown,
-  index: number,
-  graphId: string,
-  createdAtRevision: number,
-  source: AgentGraphOperationSource,
-): AgentGraphRequestedScheduleCommand {
-  if (!isRecord(value)) {
-    throw new Error(`update_agent_graph 参数无效：commands[${index}] 必须是对象。`);
-  }
-  const kind = value["kind"];
-  if (kind === "add") return parseAddCommand(value, index, graphId, createdAtRevision, source);
-  if (kind === "activate") {
-    return parseActivateCommand(value, index, graphId, createdAtRevision, source);
-  }
-  if (kind === "stop") return parseStopCommand(value, index);
-  if (kind === "finish") return parseFinishCommand(value, index);
-  throw new Error(
-    `update_agent_graph 参数无效：commands[${index}].kind 必须是 add、activate、stop 或 finish。`,
-  );
-}
-
-function parseAddCommand(
-  value: Record<string, unknown>,
-  index: number,
-  graphId: string,
-  createdAtRevision: number,
-  source: AgentGraphOperationSource,
-): AgentGraphRequestedAddCommand {
-  const path = `commands[${index}]`;
-  assertKeys(value, ["kind", "operator", "intent"], ["kind", "operator", "intent"], path);
-  const rawOperator = objectField(value["operator"], `${path}.operator`);
-  assertKeys(
-    rawOperator,
-    ["operator_id", "generation", "role", "description", "profile", "workspace"],
-    ["operator_id", "generation", "role", "profile", "workspace"],
-    `${path}.operator`,
-  );
-  const rawProfile = objectField(rawOperator["profile"], `${path}.operator.profile`);
-  assertKeys(rawProfile, ["profile_id"], ["profile_id"], `${path}.operator.profile`);
-  const rawWorkspace = objectField(rawOperator["workspace"], `${path}.operator.workspace`);
-  const workspace = parseWorkspace(rawWorkspace, `${path}.operator.workspace`);
-  const operatorId = requiredIdentity(rawOperator["operator_id"], `${path}.operator.operator_id`);
-  const generation = positiveInteger(rawOperator["generation"], `${path}.operator.generation`);
-  const operator: AgentGraphRequestedAddCommand["operator"] = {
-    graphId,
-    operatorId,
-    generation,
-    role: requiredText(rawOperator["role"], `${path}.operator.role`, MAX_SHORT_TEXT_BYTES),
-    ...(rawOperator["description"] === undefined
-      ? {}
-      : {
-          description: requiredText(
-            rawOperator["description"],
-            `${path}.operator.description`,
-            MAX_DESCRIPTION_BYTES,
-          ),
-        }),
-    profileId: requiredIdentity(rawProfile["profile_id"], `${path}.operator.profile.profile_id`),
-    workspacePolicy: workspace,
-  };
-  const intent = parseActivationIntent(
-    value["intent"],
-    `${path}.intent`,
-    graphId,
-    operatorId,
-    generation,
-    createdAtRevision,
-    source,
-  );
-  return { kind: "add", operator, intent };
-}
-
-function parseActivateCommand(
-  value: Record<string, unknown>,
-  index: number,
-  graphId: string,
-  createdAtRevision: number,
-  source: AgentGraphOperationSource,
-): AgentGraphActivateCommand {
-  const path = `commands[${index}]`;
-  assertKeys(value, ["kind", "operator", "intent"], ["kind", "operator", "intent"], path);
-  const rawOperator = objectField(value["operator"], `${path}.operator`);
-  assertKeys(
-    rawOperator,
-    ["operator_id", "generation"],
-    ["operator_id", "generation"],
-    `${path}.operator`,
-  );
-  const operatorId = requiredIdentity(rawOperator["operator_id"], `${path}.operator.operator_id`);
-  const generation = positiveInteger(rawOperator["generation"], `${path}.operator.generation`);
-  return {
-    kind: "activate",
-    intent: parseActivationIntent(
-      value["intent"],
-      `${path}.intent`,
-      graphId,
-      operatorId,
-      generation,
-      createdAtRevision,
-      source,
-    ),
-  };
-}
-
-function parseActivationIntent(
-  value: unknown,
-  path: string,
-  graphId: string,
-  operatorId: string,
-  generation: number,
-  createdAtRevision: number,
-  source: AgentGraphOperationSource,
-): AgentGraphActivationIntent {
-  const rawIntent = objectField(value, path);
-  assertKeys(
-    rawIntent,
-    ["intent_id", "instruction", "input_record_ids"],
-    ["intent_id", "instruction"],
-    path,
-  );
-  const inputRecordIds = identityArray(
-    rawIntent["input_record_ids"] ?? [],
-    `${path}.input_record_ids`,
-    AGENT_GRAPH_MAX_INPUT_REFS,
-  );
-  return {
-    graphId,
-    intentId: requiredIdentity(rawIntent["intent_id"], `${path}.intent_id`),
-    operatorId,
-    operatorGeneration: generation,
-    instruction: requiredText(
-      rawIntent["instruction"],
-      `${path}.instruction`,
-      AGENT_GRAPH_MAX_INSTRUCTION_BYTES,
-    ),
-    expectedOutputRecordId: agentOutputRecordIdFor(
-      graphId,
-      requiredIdentity(rawIntent["intent_id"], `${path}.intent_id`),
-    ),
-    inputRefs: inputRecordIds.map((recordId) => ({ recordId })),
-    createdAtRevision,
-    requestedBy: source,
-  };
-}
-
 function parseWorkspace(
   value: Record<string, unknown>,
   path: string,
@@ -896,58 +682,6 @@ function parseWorkspace(
     };
   }
   throw new Error(`update_agent_graph 参数无效：${path}.kind 必须是 shared 或 isolated-worktree。`);
-}
-
-function parseStopCommand(value: Record<string, unknown>, index: number): AgentGraphStopCommand {
-  const path = `commands[${index}]`;
-  assertKeys(value, ["kind", "target", "reason"], ["kind", "target"], path);
-  const rawTarget = objectField(value["target"], `${path}.target`);
-  let target: AgentGraphStopCommand["target"];
-  if (rawTarget["kind"] === "intent") {
-    assertKeys(rawTarget, ["kind", "intent_id"], ["kind", "intent_id"], `${path}.target`);
-    target = {
-      kind: "intent",
-      intentId: requiredIdentity(rawTarget["intent_id"], `${path}.target.intent_id`),
-    };
-  } else if (rawTarget["kind"] === "operator") {
-    assertKeys(
-      rawTarget,
-      ["kind", "operator_id", "generation"],
-      ["kind", "operator_id", "generation"],
-      `${path}.target`,
-    );
-    target = {
-      kind: "operator",
-      operatorId: requiredIdentity(rawTarget["operator_id"], `${path}.target.operator_id`),
-      generation: positiveInteger(rawTarget["generation"], `${path}.target.generation`),
-    };
-  } else {
-    throw new Error(`update_agent_graph 参数无效：${path}.target.kind 必须是 intent 或 operator。`);
-  }
-  return {
-    kind: "stop",
-    target,
-    ...(value["reason"] === undefined
-      ? {}
-      : { reason: requiredText(value["reason"], `${path}.reason`, MAX_SHORT_TEXT_BYTES) }),
-  };
-}
-
-function parseFinishCommand(
-  value: Record<string, unknown>,
-  index: number,
-): AgentGraphFinishCommand {
-  const path = `commands[${index}]`;
-  assertKeys(value, ["kind", "selected_record_ids"], ["kind"], path);
-  const selectedRecordIds = identityArray(
-    value["selected_record_ids"] ?? [],
-    `${path}.selected_record_ids`,
-    AGENT_GRAPH_MAX_SELECTED_RECORDS,
-  );
-  return {
-    kind: "finish",
-    ...(selectedRecordIds.length > 0 ? { selectedRecordIds } : {}),
-  };
 }
 
 function parseEmptyInput(args: string, toolName: string): void {
@@ -1253,10 +987,10 @@ function workRequestSchema(swarm = false): Record<string, unknown> {
             target_kind: {
               type: "string",
               enum: ["new_preset", "existing_operator", "new_agent"],
-              description: "优先 new_preset；显式选择后忽略其余身份占位字段。",
+              description: "Swarm 必填；显式选择后忽略其余身份占位字段。",
             },
             subagent_id: { ...identity, description: "agent_list 返回的可用 subagent_id。" },
-            agent_id: { ...identity, description: "兼容旧调用的 profile ID；优先 subagent_id。" },
+            agent_id: { ...identity, description: "agent_list.legacy_profiles 返回的 agent_id。" },
             replacement_mode: { type: "string", enum: ["none", "replace"] },
             profile_id: {
               ...identity,
@@ -1287,7 +1021,7 @@ function workRequestSchema(swarm = false): Record<string, unknown> {
                 "只用于新任务；implementation 强制 isolated-worktree，其余默认 shared，base_ref 默认 HEAD。",
             },
           },
-          required: ["instruction"],
+          required: [...(swarm ? ["target_kind"] : []), "instruction"],
           additionalProperties: false,
         },
       },
@@ -1323,7 +1057,7 @@ function workRequestSchema(swarm = false): Record<string, unknown> {
   };
 }
 
-function parseWorkRequest(value: Record<string, unknown>): AgentGraphWorkRequest {
+function parseWorkRequest(value: Record<string, unknown>, swarm = false): AgentGraphWorkRequest {
   const operation = value["operation"];
   if (operation !== "add_work" && operation !== "stop" && operation !== "finish") {
     throw new Error("update_agent_graph: operation 必须是 add_work、stop 或 finish。");
@@ -1388,7 +1122,7 @@ function parseWorkRequest(value: Record<string, unknown>): AgentGraphWorkRequest
           "replaces",
           "replacement_mode",
         ],
-        ["instruction"],
+        [...(swarm ? ["target_kind"] : []), "instruction"],
         path,
       );
       const targetKind = work["target_kind"];

@@ -136,6 +136,23 @@ test("Swarm selects approved catalog presets and compiles Maka target/replacemen
   assert.equal(JSON.stringify(list).includes(profile.systemPrompt), false);
   assert.deepEqual(f.reads[0]!.recordIds, []);
   const update = f.tools.get("update_agent_graph")!;
+  assert.match(
+    JSON.stringify(update.definition().inputSchema),
+    /"required":\["target_kind","instruction"\]/u,
+  );
+  for (const [index, input] of [
+    { profile_id: profile.name, instruction: "Retired profile inference" },
+    { subagent_id: profile.name, instruction: "Missing discriminator" },
+    { target_kind: "new_preset", instruction: "Missing preset identity" },
+  ].entries()) {
+    await assert.rejects(
+      update.execute(JSON.stringify({ operation: "add_work", add_work: [input] }), {
+        toolCallId: `invalid-target-${index}`,
+      }),
+      /target_kind|subagent_id/u,
+    );
+  }
+  assert.equal(f.commands.length, 0);
   const scheduled = JSON.parse(
     await update.execute(
       JSON.stringify({
@@ -249,7 +266,7 @@ test("Root agent_output reads only selected formal results by work or Maka execu
   await f.tools.get("update_agent_graph")!.execute(
     JSON.stringify({
       operation: "add_work",
-      add_work: [{ subagent_id: profile.name, instruction: "Review" }],
+      add_work: [{ target_kind: "new_preset", subagent_id: profile.name, instruction: "Review" }],
     }),
     { toolCallId: "schedule" },
   );
