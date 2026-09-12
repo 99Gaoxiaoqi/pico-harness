@@ -131,7 +131,7 @@ function routePriority(
 ): number {
   if (route.id === parentRouteId) return 0;
   if (aliasesByRoute.has(route.id)) return 1;
-  if (route.source === "config" || route.source === "legacy") return 2;
+  if (route.source === "config") return 2;
   return 3;
 }
 

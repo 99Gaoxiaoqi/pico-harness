@@ -986,7 +986,7 @@ export class ClientSessionRuntime {
         }
       }
       this.reporter.pushError(
-        `--model ${override} 未匹配任何已配置路由（config.effective.get）。请在 daemon 配置（.pico/config.json 或 LLM_* env）中配置后重试，或去掉 --model 使用默认路由。`,
+        `--model ${override} 未匹配任何用户级已配置路由（config.effective.get）。请在 $PICO_HOME/config.json 中配置后重试，或去掉 --model 使用默认路由。`,
         { retryable: false, action: "--model" },
       );
     } catch (error) {

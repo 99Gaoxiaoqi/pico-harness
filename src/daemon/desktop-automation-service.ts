@@ -49,7 +49,6 @@ export interface DesktopAutomationAuthorityDependencies {
   readonly credentialVault: CredentialVault;
   readonly effectiveConfigResolver: EffectiveConfigResolver;
   readonly userConfigStore: UserConfigStore;
-  readonly env: Readonly<Record<string, string | undefined>>;
   /** Foreground-only Plugin tools rejected before an Automation is persisted. */
   readonly foregroundOnlyTools?: ReadonlySet<string>;
   readonly now?: () => number;
@@ -450,7 +449,6 @@ async function resolveDesktopAutomationTarget(
   const effective = await dependencies.effectiveConfigResolver.resolve({
     workDir: workspacePath,
     projectTrusted: true,
-    env: dependencies.env,
   });
   const provider = effective.providers[providerId];
   if (!provider || !provider.models.includes(model)) {

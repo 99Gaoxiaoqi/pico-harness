@@ -240,11 +240,6 @@ export async function importModelRouteCredential(input: {
   vault: CredentialVault;
   env?: Readonly<Record<string, string | undefined>>;
 }): Promise<CredentialRef> {
-  if (input.route.source === "legacy") {
-    throw new Error(
-      "持久 Cron 不支持仅由 shell 环境提供的 legacy 路由；请先在 .pico/config.json 配置 provider。",
-    );
-  }
   const raw = (input.env ?? process.env)[input.route.apiKeyEnv]?.trim();
   const secret = raw
     ?.split(",")

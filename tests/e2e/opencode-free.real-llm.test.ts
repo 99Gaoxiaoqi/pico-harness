@@ -21,8 +21,6 @@ test(
         providers: { "opencode-free": OPENCODE_FREE_PROVIDER },
       },
       env: {},
-      legacyProvider: "openai",
-      legacyModel: "unused",
     });
     const selected = router.providerConfig(OPENCODE_FREE_ROUTE_ID);
     assert.equal(selected.config.auth, "none");

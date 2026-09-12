@@ -111,7 +111,7 @@ export interface ModelRouteView {
   readonly label: string;
 }
 
-export type ProviderOrigin = "user" | "project-legacy" | "environment";
+export type ProviderOrigin = "user" | "environment";
 export type ProviderProtocol = "openai" | "claude" | "responses";
 export type ProviderCredentialStatus = "ready" | "missing" | "environment" | "unsupported";
 export type ProviderCredentialSource = "config" | "keychain" | "environment" | "none";

@@ -111,8 +111,6 @@ test("user config apiKey stays private and powers the effective model runtime wi
   const effective = await resolver.resolve({
     workDir,
     projectTrusted: false,
-    env: {},
-    legacyProvider: "openai",
   });
   const publicSnapshot = JSON.stringify(effective);
   assert.equal(publicSnapshot.includes(secret), false);
@@ -145,8 +143,6 @@ test("user config apiKey stays private and powers the effective model runtime wi
   const runtime = await loadEffectiveModelRuntime({
     workDir,
     projectTrusted: false,
-    legacyProvider: "openai",
-    legacyModel: "test-model",
     env: { KEYCHAIN_API_KEY: "environment-secret-must-not-win" },
     userConfigStore: store,
     configResolver: resolver,

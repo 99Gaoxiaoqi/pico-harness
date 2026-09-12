@@ -311,7 +311,7 @@ async function resolveClientAutomationAuthority(input: {
     workspacePath: input.workspacePath,
     ...(userProvider ? { userProvider } : {}),
     ...(typeof source === "string"
-      ? { configSource: source as "user" | "project-legacy" | "environment" | "session" | "cli" }
+      ? { configSource: source as "user" | "environment" | "session" | "cli" }
       : {}),
   });
   return { route, provider, target };

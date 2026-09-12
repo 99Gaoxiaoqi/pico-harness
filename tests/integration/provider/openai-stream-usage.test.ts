@@ -109,8 +109,6 @@ test("official OpenAI configured and discovered routes use max_completion_tokens
       },
     },
     env: { OPENAI_TEST_KEY: "test-key" },
-    legacyProvider: "openai",
-    legacyModel: "unused",
   });
   assert.equal(
     configured.require("official/o3").capabilities.outputTokenField,
@@ -130,8 +128,6 @@ test("official OpenAI configured and discovered routes use max_completion_tokens
       },
     },
     env: { OPENAI_TEST_KEY: "test-key" },
-    legacyProvider: "openai",
-    legacyModel: "unused",
     fetch: async () => Response.json({ data: [{ id: "o4-mini" }] }),
   });
   assert.equal(
@@ -152,13 +148,11 @@ test("official OpenAI configured and discovered routes use max_completion_tokens
       },
     },
     env: { COMPATIBLE_TEST_KEY: "test-key" },
-    legacyProvider: "openai",
-    legacyModel: "unused",
   });
   assert.equal(compatible.require("compatible/o3").capabilities.outputTokenField, "max_tokens");
 });
 
-test("legacy OpenAI-compatible calls do not guess an output-token field", async (context) => {
+test("OpenAI-compatible calls without route capabilities do not guess an output-token field", async (context) => {
   const originalFetch = globalThis.fetch;
   const requestBodies: Record<string, unknown>[] = [];
   context.after(() => {
@@ -183,7 +177,7 @@ test("legacy OpenAI-compatible calls do not guess an output-token field", async 
   const provider = new OpenAIProvider({
     baseURL: "https://provider.invalid/v1",
     apiKey: "test-key",
-    model: "legacy-compatible-model",
+    model: "compatible-model",
   });
   await provider.generate([{ role: "user", content: "test" }], []);
   await provider.generateStream([{ role: "user", content: "test" }], [], () => undefined);

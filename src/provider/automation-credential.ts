@@ -42,9 +42,7 @@ export function resolveAutomationCredentialTarget(input: {
     };
   }
   if (
-    input.configSource === "environment" ||
-    route.source === "legacy" ||
-    route.providerId === "legacy"
+    input.configSource === "environment"
   ) {
     throw new Error(
       "持久 Automation 不支持仅由当前进程环境提供的 Provider；请先使用 /provider import-env 导入共享 Provider。",

@@ -804,9 +804,6 @@ async function loadTrustedModelRuntime(
     loadEffectiveModelRuntime({
       workDir,
       projectTrusted: false,
-      legacyProvider: selectedProvider.protocol,
-      legacyModel: routeParts.modelId,
-      legacyModelExplicit: false,
       env: Object.freeze(modelEnv),
       userConfigStore: { read: async () => filteredSnapshot },
       configResolver: { resolve: async () => config },

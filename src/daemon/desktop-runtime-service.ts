@@ -674,7 +674,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         effectiveConfigResolver: this.providerConfig.effectiveConfigResolver,
         userConfigStore: this.providerConfig.userConfigStore,
         pluginRuntimeSnapshotRegistry: this.pluginRuntimeSnapshotRegistry,
-        env: this.env,
         now: this.now,
         requireTrustedWorkspace: this.requireTrustedWorkspace.bind(this),
         publishJob: this.publishJob.bind(this),
@@ -1342,7 +1341,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const canonical = await this.requireTrustedSession(workspacePath, sessionId);
     return this.withSession(canonical, sessionId, async (session) => {
       const settings = await this.getSessionSettings(canonical, session);
-      const router = await this.getSessionModelRouter(canonical, settings);
+      const router = await this.getSessionModelRouter(canonical);
       return { settings: runtimeSessionSettings(settings, router) };
     });
   }
@@ -1472,7 +1471,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
           );
         }
       }
-      const router = await this.getSessionModelRouter(canonical, current);
+      const router = await this.getSessionModelRouter(canonical);
       const selectedRoute = resolveRequestedModelRoute(router, params.modelRouteId);
       if (params.thinkingEffort !== undefined) {
         validateRequestedThinkingEffort(
@@ -1559,7 +1558,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const canonical = await this.requireTrustedSession(workspacePath, sessionId);
     return this.withSession(canonical, sessionId, async (session) => {
       const settings = await this.getSessionSettings(canonical, session);
-      const runtime = await this.loadSessionModelRuntime(canonical, settings);
+      const runtime = await this.loadSessionModelRuntime(canonical);
       const route = runtime.router.require(settings.modelRouteId);
       const traceWatermark = this.workbarRepository(canonical).queryTrace({
         sessionId,
@@ -1928,7 +1927,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     const canonical = await this.requireIdleTrustedSession(workspacePath, sessionId, "压缩");
     const result = await this.withSession(canonical, sessionId, async (session) => {
       const settings = await this.getSessionSettings(canonical, session);
-      const effective = await this.loadSessionModelRuntime(canonical, settings);
+      const effective = await this.loadSessionModelRuntime(canonical);
       const active = effective.router.providerConfig(settings.modelRouteId);
       active.config.sessionId = session.id;
       const pluginSnapshot = await this.pluginRuntimeSnapshotRegistry.get(canonical);
@@ -3312,23 +3311,14 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     return this.getSessionSettings(workspacePath, session);
   }
 
-  private async getSessionModelRouter(
-    workspacePath: string,
-    settings: SessionSettings,
-  ): Promise<ModelRouter> {
-    return (await this.loadSessionModelRuntime(workspacePath, settings)).router;
+  private async getSessionModelRouter(workspacePath: string): Promise<ModelRouter> {
+    return (await this.loadSessionModelRuntime(workspacePath)).router;
   }
 
-  private loadSessionModelRuntime(
-    workspacePath: string,
-    settings?: Pick<SessionSettings, "provider" | "model">,
-  ): Promise<EffectiveModelRuntime> {
+  private loadSessionModelRuntime(workspacePath: string): Promise<EffectiveModelRuntime> {
     return loadEffectiveModelRuntime({
       workDir: workspacePath,
       projectTrusted: true,
-      legacyProvider: settings?.provider ?? "openai",
-      legacyModel: settings?.model ?? "",
-      legacyModelExplicit: false,
       env: this.env,
       credentialVault: this.providerConfig.credentialVault,
       userConfigStore: this.providerConfig.userConfigStore,

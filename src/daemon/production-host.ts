@@ -71,7 +71,6 @@ import {
 } from "../provider/credential-vault.js";
 import { resolveModelRouteCapabilities } from "../provider/model-capabilities.js";
 import { loadEffectiveModelRuntime } from "../provider/effective-model-runtime.js";
-import type { ProviderKind } from "../provider/factory.js";
 import { logger } from "../observability/logger.js";
 import { resolvePicoHome } from "../paths/pico-paths.js";
 import { coordinateReasoningLevel } from "../provider/reasoning-capability.js";
@@ -271,7 +270,7 @@ export function createProductionRuntimeServices(
         throw new Error(`Cron Job 包含未显式授权的工具: ${deniedTools.join(", ")}`);
       }
       if (!job.credentialRef) throw new Error("Cron Job 缺少 credentialRef");
-      const route = await resolveCronModelRoute(job, effectiveConfigResolver, env);
+      const route = await resolveCronModelRoute(job, effectiveConfigResolver);
       if (route.auth !== "none" && !(await credentialVault.has(job.credentialRef))) {
         throw new Error(`系统凭证库中不存在 ${job.credentialRef}`);
       }
@@ -403,7 +402,6 @@ export function createProductionRuntimeServices(
         userConfigStore,
         effectiveConfigResolver,
         operatorProfile?.modelRouteId ?? input.requestedModel ?? persistedSettings?.modelRouteId,
-        persistedSettings?.provider,
         env,
       );
       if (operatorProfile && route.modelRouteId !== operatorProfile.modelRouteId) {
@@ -885,7 +883,6 @@ export function createProductionRuntimeServices(
           userConfigStore,
           effectiveConfigResolver,
           execution?.requestedModel ?? persistedSettings?.modelRouteId,
-          persistedSettings?.provider,
           env,
         );
         const reasoningLevel = coordinateReasoningLevel(
@@ -1365,7 +1362,6 @@ export function createProductionRuntimeServices(
       const route = await resolveDesktopAutomationRoute(
         workspacePath,
         effectiveConfigResolver,
-        env,
       );
       const userProvider = (await userConfigStore.read()).config.providers[route.providerId];
       const useSharedProviderCredential =
@@ -2448,7 +2444,7 @@ export function assembleProductionDaemonHost(
     },
     execute: async (job, context) => {
       if (!job.credentialRef) throw new Error("Cron Job 缺少 credentialRef");
-      const route = await resolveCronModelRoute(job, effectiveConfigResolver, env);
+      const route = await resolveCronModelRoute(job, effectiveConfigResolver);
       const result = await agentRuntime.execute(
         {
           prompt: job.prompt,
@@ -2499,12 +2495,10 @@ export function createProductionLocalDaemonHost(
 async function resolveDesktopAutomationRoute(
   workspacePath: string,
   effectiveConfigResolver: EffectiveConfigResolver,
-  env: Readonly<Record<string, string | undefined>>,
 ) {
   const config = await effectiveConfigResolver.resolve({
     workDir: workspacePath,
     projectTrusted: true,
-    env,
   });
   const modelRouteId = config.defaultModelRouteId;
   if (!modelRouteId) {
@@ -2538,7 +2532,6 @@ async function resolveDesktopAutomationRoute(
 async function resolveCronModelRoute(
   job: CronJobRecord,
   effectiveConfigResolver: EffectiveConfigResolver,
-  env: Readonly<Record<string, string | undefined>>,
 ) {
   if (!job.credentialRef) throw new Error("Cron Job 缺少 credentialRef");
   const parsedCredential = parseAnyCredentialRef(job.credentialRef);
@@ -2552,7 +2545,6 @@ async function resolveCronModelRoute(
   const config = await effectiveConfigResolver.resolve({
     workDir: job.workspacePath,
     projectTrusted: true,
-    env,
   });
   const provider = config.providers[providerId];
   if (!provider) throw new Error(`配置模型路由 ${modelRouteId} 的 provider 已不存在`);
@@ -2611,7 +2603,6 @@ async function resolveDesktopModelRoute(
   userConfigStore: UserConfigStore,
   effectiveConfigResolver: EffectiveConfigResolver,
   requestedModel?: string,
-  legacyProvider: ProviderKind = "openai",
   env: Readonly<Record<string, string | undefined>> = process.env,
 ) {
   const projectConfig = await loadPicoConfig(workspacePath);
@@ -2620,9 +2611,6 @@ async function resolveDesktopModelRoute(
     const runtime = await loadEffectiveModelRuntime({
       workDir: workspacePath,
       projectTrusted: true,
-      legacyProvider,
-      legacyModel: "",
-      legacyModelExplicit: false,
       env,
       credentialVault,
       userConfigStore,

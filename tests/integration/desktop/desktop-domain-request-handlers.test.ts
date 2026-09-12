@@ -48,7 +48,6 @@ test("Desktop Automation handlers preserve CRUD routing and dependency locking",
     effectiveConfigResolver: {} as never,
     userConfigStore: {} as never,
     pluginRuntimeSnapshotRegistry: {} as never,
-    env: {},
     now: () => 1,
     requireTrustedWorkspace: async (workspacePath) => {
       calls.push(`trust:${workspacePath}`);
@@ -164,7 +163,6 @@ test("Desktop Automation handlers keep missing services and lock failures fail-c
     effectiveConfigResolver: {} as never,
     userConfigStore: {} as never,
     pluginRuntimeSnapshotRegistry: {} as never,
-    env: {},
     now: () => 1,
     requireTrustedWorkspace: async () => "/canonical",
     publishJob: () => undefined,

@@ -34,7 +34,7 @@ interface LLMProvider {
 | **assistant 角色** | `assistant`                                            | `assistant`                       | `model`（注意不是 assistant）     |
 | **工具调用参数**   | JSON 字符串                                            | 对象（input）                     | 对象（args）                      |
 
-带显式模型能力的 OpenAI 兼容路由把 `output` 作为线上请求硬上限，不只用于上下文预算。`https://api.openai.com` 官方端点默认写入 `max_completion_tokens`，其他兼容端点默认写入 `max_tokens`；模型配置的 `outputTokenField` 可显式覆盖默认值。Reasoning level 的请求 patch 最后还会被该上限覆盖，不能删除、抬高或同时写入两个互斥字段。生成与流式请求共用同一收口逻辑。旧环境变量直连没有端点能力元数据，适配器不会猜测这两个互斥字段，以保留任意兼容端点的原有 wire 行为；需要硬上限时应迁移到显式 route。
+带显式模型能力的 OpenAI 兼容路由把 `output` 作为线上请求硬上限，不只用于上下文预算。`https://api.openai.com` 官方端点默认写入 `max_completion_tokens`，其他兼容端点默认写入 `max_tokens`；模型配置的 `outputTokenField` 可显式覆盖默认值。Reasoning level 的请求 patch 最后还会被该上限覆盖，不能删除、抬高或同时写入两个互斥字段。生成与流式请求共用同一收口逻辑。未携带路由能力的底层适配器调用不会猜测这两个互斥字段；产品入口应通过用户级 Provider 路由提供端点与能力配置。
 
 流式解析按 SSE 行协议增量消费 `LF`、`CRLF` 和 bare `CR`，支持跨网络 chunk 的行分隔符、多行 `data:` 与 EOF 前没有空行的最后事件。Usage-only 终态 chunk 会先落账再判断内容 delta；`[DONE]` 后主动取消并释放 reader。
 
@@ -49,23 +49,19 @@ interface LLMProvider {
 ```text
 Session / CLI 显式选择
           ↓
-已信任项目 .pico/config.json
-          ↓
-$PICO_HOME/config.json（Desktop + TUI 共享）
-          ↓
-LLM_* 环境变量（兼容入口）
+$PICO_HOME/config.json 中的 Provider 路由（Desktop + TUI 共享）
 ```
 
-上图只描述非秘密配置和模型路由的优先级。`EffectiveConfigResolver` 为每个字段保留来源；工作区未信任时不读取项目配置；同 ID Provider 的协议或规范化 Endpoint 冲突时直接拒绝合并。`UserConfigStore` 以内容 SHA-256 revision 执行 OCC，在短锁内复查 revision 并原子替换文件。
+模型 Provider、模型列表与默认路由只来自用户级配置；项目配置和裸 `LLM_*` 环境变量都不会创建或覆盖路由。项目配置仍受工作区信任门保护，但其中已退役的 `model` / `providers` 不进入 `EffectiveConfigSnapshot`。`EffectiveConfigResolver` 为有效字段记录用户来源；`UserConfigStore` 以内容 SHA-256 revision 执行 OCC，在短锁内复查 revision 并原子替换文件。OpenAI-compatible 能力仍由用户 Provider 的 `protocol: "openai"`、自定义 `baseURL` 和模型能力配置提供。
 
-`loadEffectiveModelRuntime` 是 TUI、Desktop 前台运行、Compact 和子代理的统一模型解析入口。它先解析配置，再按“Provider 指定的宿主环境变量 > 匹配 authority 的 v2 凭证 > 项目路由 v1 凭证”向 `ModelRouter` 注入进程内 secret。环境凭证会遮蔽但不会改写已存的系统凭证。secret 不属于 `EffectiveConfigSnapshot`；经过本机认证的 TUI/Desktop 可以用 write-only Runtime 请求在进程间短暂传递 secret，但它不得出现在 Runtime 响应、事件、持久配置、Renderer Store 或日志中，也不得写入请求之外的长期内存状态。发布构建默认禁用持久凭证并 fail-closed：现有 `/usr/bin/security` 适配无法阻止同一 macOS 用户下的 Agent Shell 读取条目，只允许本地开发通过 `PICO_UNSAFE_KEYCHAIN_CLI=1` 显式启用，不得用于发布。正式 macOS 版本必须改用签名的 Pico Credential Broker/XPC 进程；在该后端和其他平台安全后端完成前，只支持环境变量兼容入口。
+`loadEffectiveModelRuntime` 是 TUI、Desktop 前台运行、Compact 和子代理的统一模型解析入口。它先解析配置，再按“用户配置内 API Key > 匹配 Provider authority 的 v2 凭证 > 该 Provider 显式声明的宿主环境变量”向 `ModelRouter` 注入进程内 secret。裸环境变量不能自行创建路由。secret 不属于 `EffectiveConfigSnapshot`；经过本机认证的 TUI/Desktop 可以用 write-only Runtime 请求在进程间短暂传递 secret，但它不得出现在 Runtime 响应、事件、持久配置、Renderer Store 或日志中，也不得写入请求之外的长期内存状态。发布构建默认禁用持久凭证并 fail-closed：现有 `/usr/bin/security` 适配无法阻止同一 macOS 用户下的 Agent Shell 读取条目，只允许本地开发通过 `PICO_UNSAFE_KEYCHAIN_CLI=1` 显式启用，不得用于发布。正式 macOS 版本必须改用签名的 Pico Credential Broker/XPC 进程；在该后端和其他平台安全后端完成前，只支持用户配置内凭证或由用户 Provider 显式声明的环境变量。
 
-每个 Run 固定使用启动时的配置快照。TUI 在下一轮 Run 前重新解析配置和凭证；daemon 通过 `config.updated` 通知 Desktop，Renderer 在事件后刷新，并在窗口重新聚焦时补读。刷新不会热换正在运行的 Provider，Session 显式路由仍优先；损坏配置、过期 revision 与 authority 冲突都 fail-closed。
+每个 Run 固定使用启动时的配置快照。TUI 在下一轮 Run 前重新解析配置和凭证；daemon 通过 `config.updated` 通知 Desktop，Renderer 在事件后刷新，并在窗口重新聚焦时补读。刷新不会热换正在运行的 Provider，Session 显式路由仍优先；损坏配置与过期 revision 都 fail-closed。
 
 凭证引用分两代：
 
 - v2 按 `providerId + protocol + normalized endpoint + slot` 绑定，用于设备级共享 Provider。
-- v1 按工作区与完整 model route 绑定，仅保留给旧项目配置和已持久 Automation。
+- v1 按工作区与完整 model route 绑定，只为读取和校验已持久 Automation 保留；新的 Provider 与 Automation 使用 v2。
 
 ### 重试 + 凭证轮换
 
