@@ -1,4 +1,3 @@
-import { join } from "node:path";
 import { logger } from "../observability/logger.js";
 import type { SlashCommand } from "../input/types.js";
 import {
@@ -32,7 +31,7 @@ import {
 
 export interface SessionHookRuntimeOptions extends Pick<
   LoadHookSnapshotOptions,
-  "workDir" | "userHome" | "picoHome" | "extensionSources"
+  "workDir" | "picoHome" | "extensionSources"
 > {
   sessionId: string;
   /** Environment inherited by Hook processes. Hosts should pair it with picoHome. */
@@ -80,20 +79,14 @@ export async function createSessionHookRuntime(
   const trustStore =
     options.trustStore ??
     new HookTrustStore({
-      ...(options.userHome ? { userHome: options.userHome } : {}),
       ...(options.picoHome ? { picoHome: options.picoHome } : {}),
       ...(options.env ? { env: options.env } : {}),
     });
   const stateStore = new HookLocalStateStore(options.workDir, {
-    ...(options.picoHome
-      ? { picoHome: options.picoHome }
-      : options.userHome
-        ? { picoHome: join(options.userHome, ".pico") }
-        : {}),
+    ...(options.picoHome ? { picoHome: options.picoHome } : {}),
   });
   const loadOptions = {
     workDir: options.workDir,
-    ...(options.userHome ? { userHome: options.userHome } : {}),
     ...(options.picoHome ? { picoHome: options.picoHome } : {}),
     trustStore,
     stateStore,

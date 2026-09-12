@@ -74,7 +74,6 @@ export interface SessionRuntimeOptions {
   hooks?: false;
   /** 测试或宿主可注入自管 HookService；注入时不创建默认 watcher/management。 */
   hookService?: HookService;
-  hookUserHome?: string;
   /** 已由 Plugin 信任层冻结的扩展 Hook 来源。 */
   hookExtensionSources?: readonly HookConfigSourceSpec[];
   /**
@@ -308,7 +307,6 @@ async function createPinnedSessionRuntime(
           picoHome,
           ...(options.env ? { env: options.env } : {}),
           ...(options.processSandbox ? { processSandbox: options.processSandbox } : {}),
-          ...(options.hookUserHome ? { userHome: options.hookUserHome } : {}),
           ...(options.hookExtensionSources
             ? { extensionSources: options.hookExtensionSources }
             : {}),
