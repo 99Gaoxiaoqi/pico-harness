@@ -245,7 +245,7 @@ export class StorageDoctor {
       this.runtimeStorageRoot,
       "runtime",
       findings,
-      new Set(["evidence", "traces", "fork-staging", "agent-recovery-launch-intents"]),
+      new Set(["evidence", "traces", "fork-staging", "plugins", "agent-recovery-launch-intents"]),
     );
 
     let database: ReturnType<typeof openOperationalDatabaseReadOnly> | undefined;
@@ -659,7 +659,7 @@ export class StorageDoctor {
   }
 
   /**
-   * 只巡查当前纪元仍存活的文件面(pico.sqlite、evidence/traces/fork-staging、
+   * 只巡查当前纪元仍存活的文件面(pico.sqlite、evidence/traces/fork-staging/plugins、
    * agent-recovery intents);legacy 目录已由 scanLegacyStorage 报告,不重复噪声。
    */
   private async scanPrivateModes(

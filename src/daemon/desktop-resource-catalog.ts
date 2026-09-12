@@ -203,8 +203,6 @@ function skillSourceLabel(sourceId: string): string {
       return "Claude 用户级";
     case "project-pico":
       return "Pico 项目级";
-    case "project-claw-legacy":
-      return "Pico 项目级（.claw 兼容）";
     case "project-claude":
       return "Claude 项目级";
     default: {

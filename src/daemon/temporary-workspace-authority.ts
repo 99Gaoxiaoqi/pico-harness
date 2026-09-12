@@ -5,7 +5,6 @@ import {
   canonicalizeWorkspacePath,
   resolvePicoHome,
   resolvePicoIsolatedTemporaryWorkspace,
-  resolvePicoTemporaryWorkspace,
 } from "../paths/pico-paths.js";
 
 const TEMPORARY_WORKSPACE_MODE = 0o700;
@@ -32,11 +31,9 @@ export interface TemporaryWorkspaceAuthorityOptions {
 export class TemporaryWorkspaceAuthority {
   private inFlight?: Promise<string>;
   private readonly picoHome: string;
-  private readonly legacyWorkspacePath: string;
 
   constructor(private readonly options: TemporaryWorkspaceAuthorityOptions) {
     this.picoHome = resolvePicoHome({ picoHome: options.picoHome });
-    this.legacyWorkspacePath = resolvePicoTemporaryWorkspace({ picoHome: options.picoHome });
   }
 
   ensure(): Promise<string> {
@@ -52,7 +49,6 @@ export class TemporaryWorkspaceAuthority {
 
   matches(workspacePath: string): boolean {
     const canonical = canonicalizeWorkspacePath(workspacePath);
-    if (canonical === canonicalizeWorkspacePath(this.legacyWorkspacePath)) return true;
     return (
       canonicalizeWorkspacePath(dirname(canonical)) === canonicalizeWorkspacePath(this.picoHome) &&
       ISOLATED_TEMPORARY_WORKSPACE_PATTERN.test(basename(canonical))

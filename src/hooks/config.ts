@@ -31,7 +31,6 @@ const CONDITION_OPERATORS = new Set(["equals", "contains", "regex", "exists"]);
 export interface HookConfigSourceSpec {
   kind: HookSourceKind;
   path: string;
-  format?: "canonical" | "legacy";
   componentId?: string;
   /** plugin/managed 由宿主显式提供；加载器不会自行发现或启用 plugin runtime。 */
   enabled?: boolean;
@@ -80,12 +79,6 @@ export function defaultHookConfigSources(
   return [
     { kind: "user", path: join(resolvedPicoHome, "hooks.json") },
     { kind: "project", path: join(workDir, ".pico", "hooks.json") },
-    { kind: "local", path: join(workDir, ".claw", "hooks.local.json") },
-    {
-      kind: "legacy",
-      path: join(workDir, ".claw", "settings.json"),
-      format: "legacy",
-    },
   ];
 }
 
@@ -222,11 +215,9 @@ export async function loadSource(
       return { source, status: "invalid", error: `JSON 解析失败: ${errorMessage(error)}` };
     }
   }
-  const legacy = spec.format === "legacy" || spec.kind === "legacy";
-  const field = legacy ? objectField(parsed, "hooks") : parsed;
-  if (field === undefined) return { source, status: "missing" };
+  if (parsed === undefined) return { source, status: "missing" };
   try {
-    const config = normalizeHooksConfig(field, { legacy });
+    const config = normalizeHooksConfig(parsed);
     return config ? { source, status: "loaded", config } : { source, status: "missing" };
   } catch (error) {
     return { source, status: "invalid", error: errorMessage(error) };
@@ -234,25 +225,20 @@ export async function loadSource(
 }
 
 export function normalizeCanonicalHooksConfig(input: unknown): HooksConfig | undefined {
-  return normalizeHooksConfig(input, { legacy: false });
+  return normalizeHooksConfig(input);
 }
 
-function normalizeHooksConfig(
-  input: unknown,
-  options: { legacy: boolean },
-): HooksConfig | undefined {
+function normalizeHooksConfig(input: unknown): HooksConfig | undefined {
   if (!isRecord(input)) {
-    if (options.legacy) return undefined;
     throw new Error("hooks 顶层必须是对象");
   }
   const config: HooksConfig = {};
   let count = 0;
   for (const [eventName, rawGroups] of Object.entries(input)) {
     if (!EVENT_SET.has(eventName)) {
-      if (options.legacy) continue;
       throw new Error(`不支持的 Hook 事件: ${eventName}`);
     }
-    const groups = normalizeGroups(rawGroups, options);
+    const groups = normalizeGroups(rawGroups);
     if (groups.length > 0) {
       config[eventName as HookEvent] = groups;
       count += groups.reduce((total, group) => total + group.hooks.length, 0);
@@ -261,53 +247,38 @@ function normalizeHooksConfig(
   return count > 0 ? config : undefined;
 }
 
-function normalizeGroups(input: unknown, options: { legacy: boolean }): HookMatcherGroup[] {
-  if (!Array.isArray(input)) return invalidOrEmpty(options, "matcher group 必须是数组");
+function normalizeGroups(input: unknown): HookMatcherGroup[] {
+  if (!Array.isArray(input)) throw new Error("matcher group 必须是数组");
   const groups: HookMatcherGroup[] = [];
   for (const raw of input) {
-    try {
-      if (!isRecord(raw)) throw new Error("matcher group 必须是对象");
-      if (!options.legacy) assertOnlyKeys(raw, ["matcher", "if", "hooks"], "matcher group");
-      const matcher = optionalString(raw.matcher, "matcher");
-      if (matcher !== undefined) validateRegexOrMatcher(matcher);
-      const condition = raw.if === undefined ? undefined : normalizeCondition(raw.if);
-      if (!Array.isArray(raw.hooks)) throw new Error("matcher group.hooks 必须是数组");
-      const hooks: HookHandler[] = [];
-      for (const hook of raw.hooks) {
-        try {
-          hooks.push(normalizeHandler(hook, options));
-        } catch (error) {
-          if (!options.legacy) throw error;
-        }
-      }
-      if (hooks.length === 0) {
-        if (!options.legacy) throw new Error("matcher group 至少需要一个有效 handler");
-        continue;
-      }
-      groups.push({
-        ...(matcher === undefined ? {} : { matcher }),
-        ...(condition === undefined ? {} : { if: condition }),
-        hooks,
-      });
-    } catch (error) {
-      if (!options.legacy) throw error;
-    }
+    if (!isRecord(raw)) throw new Error("matcher group 必须是对象");
+    assertOnlyKeys(raw, ["matcher", "if", "hooks"], "matcher group");
+    const matcher = optionalString(raw.matcher, "matcher");
+    if (matcher !== undefined) validateRegexOrMatcher(matcher);
+    const condition = raw.if === undefined ? undefined : normalizeCondition(raw.if);
+    if (!Array.isArray(raw.hooks)) throw new Error("matcher group.hooks 必须是数组");
+    const hooks = raw.hooks.map(normalizeHandler);
+    if (hooks.length === 0) throw new Error("matcher group 至少需要一个有效 handler");
+    groups.push({
+      ...(matcher === undefined ? {} : { matcher }),
+      ...(condition === undefined ? {} : { if: condition }),
+      hooks,
+    });
   }
   return groups;
 }
 
-function normalizeHandler(input: unknown, options: { legacy: boolean }): HookHandler {
+function normalizeHandler(input: unknown): HookHandler {
   if (!isRecord(input)) throw new Error("handler 必须是对象");
   const type = requiredString(input.type, "handler.type");
-  const common = normalizeHandlerCommon(input, options);
+  const common = normalizeHandlerCommon(input);
   switch (type) {
     case "command": {
-      if (!options.legacy)
-        assertOnlyKeys(
-          input,
-          ["type", "command", "args", "async", "asyncRewake", "env", "timeout", "if", "enabled"],
-          "command handler",
-        );
+      assertOnlyKeys(
+        input,
+        ["type", "command", "args", "async", "asyncRewake", "env", "timeout", "if", "enabled"],
+        "command handler",
+      );
       const command = requiredNonEmpty(input.command, "command");
       const args = optionalStringArray(input.args, "args");
       const env = optionalStringRecord(input.env, "env");
@@ -324,22 +295,21 @@ function normalizeHandler(input: unknown, options: { legacy: boolean }): HookHan
       } satisfies CommandHookHandler;
     }
     case "http": {
-      if (!options.legacy)
-        assertOnlyKeys(
-          input,
-          [
-            "type",
-            "url",
-            "headers",
-            "allowedEnv",
-            "maxResponseBytes",
-            "maxRedirects",
-            "timeout",
-            "if",
-            "enabled",
-          ],
-          "http handler",
-        );
+      assertOnlyKeys(
+        input,
+        [
+          "type",
+          "url",
+          "headers",
+          "allowedEnv",
+          "maxResponseBytes",
+          "maxRedirects",
+          "timeout",
+          "if",
+          "enabled",
+        ],
+        "http handler",
+      );
       const url = requiredNonEmpty(input.url, "url");
       const parsed = new URL(url);
       if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
@@ -366,12 +336,11 @@ function normalizeHandler(input: unknown, options: { legacy: boolean }): HookHan
       } satisfies HttpHookHandler;
     }
     case "mcp_tool":
-      if (!options.legacy)
-        assertOnlyKeys(
-          input,
-          ["type", "server", "tool", "input", "timeout", "if", "enabled"],
-          "mcp_tool handler",
-        );
+      assertOnlyKeys(
+        input,
+        ["type", "server", "tool", "input", "timeout", "if", "enabled"],
+        "mcp_tool handler",
+      );
       return {
         type,
         server: requiredNonEmpty(input.server, "server"),
@@ -380,12 +349,11 @@ function normalizeHandler(input: unknown, options: { legacy: boolean }): HookHan
         ...(input.input === undefined ? {} : { input: input.input }),
       } satisfies McpToolHookHandler;
     case "prompt":
-      if (!options.legacy)
-        assertOnlyKeys(
-          input,
-          ["type", "prompt", "model", "timeout", "if", "enabled"],
-          "prompt handler",
-        );
+      assertOnlyKeys(
+        input,
+        ["type", "prompt", "model", "timeout", "if", "enabled"],
+        "prompt handler",
+      );
       return {
         type,
         prompt: requiredNonEmpty(input.prompt, "prompt"),
@@ -393,12 +361,11 @@ function normalizeHandler(input: unknown, options: { legacy: boolean }): HookHan
         ...(input.model === undefined ? {} : { model: requiredNonEmpty(input.model, "model") }),
       } satisfies PromptHookHandler;
     case "agent": {
-      if (!options.legacy)
-        assertOnlyKeys(
-          input,
-          ["type", "prompt", "model", "maxTurns", "timeout", "if", "enabled"],
-          "agent handler",
-        );
+      assertOnlyKeys(
+        input,
+        ["type", "prompt", "model", "maxTurns", "timeout", "if", "enabled"],
+        "agent handler",
+      );
       const maxTurns =
         input.maxTurns === undefined
           ? undefined
@@ -419,7 +386,6 @@ function normalizeHandler(input: unknown, options: { legacy: boolean }): HookHan
 
 function normalizeHandlerCommon(
   input: Record<string, unknown>,
-  options: { legacy: boolean },
 ): Omit<CommandHookHandler, "type" | "command" | "args" | "async" | "asyncRewake" | "env"> {
   const timeout =
     input.timeout === undefined ? undefined : requiredPositiveNumber(input.timeout, "timeout");
@@ -427,9 +393,7 @@ function normalizeHandlerCommon(
   const enabled =
     input.enabled === undefined ? undefined : requiredBoolean(input.enabled, "enabled");
   return {
-    ...(timeout === undefined
-      ? {}
-      : { timeout, timeoutMs: options.legacy ? timeout : timeout * 1000 }),
+    ...(timeout === undefined ? {} : { timeout, timeoutMs: timeout * 1000 }),
     ...(condition === undefined ? {} : { if: condition }),
     ...(enabled === undefined ? {} : { enabled }),
   };
@@ -542,10 +506,6 @@ function assertOnlyKeys(
   if (unknown.length > 0) throw new Error(`${label} 包含未知字段: ${unknown.join(", ")}`);
 }
 
-function objectField(input: unknown, key: string): unknown {
-  return isRecord(input) ? input[key] : undefined;
-}
-
 function optionalString(input: unknown, field: string): string | undefined {
   return input === undefined ? undefined : requiredString(input, field);
 }
@@ -603,11 +563,6 @@ function optionalStringRecord(
     throw new Error(`${field} 必须是字符串对象`);
   }
   return Object.freeze({ ...input } as Record<string, string>);
-}
-
-function invalidOrEmpty(options: { legacy: boolean }, message: string): [] {
-  if (options.legacy) return [];
-  throw new Error(message);
 }
 
 function isRecord(input: unknown): input is Record<string, unknown> {

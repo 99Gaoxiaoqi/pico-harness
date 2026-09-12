@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createSessionHookRuntime } from "../../../src/hooks/runtime.js";
+import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
 import { PluginManagementService } from "../../../src/plugins/plugin-management-service.js";
 import { resolvePluginScopeRoots } from "../../../src/plugins/plugin-manager.js";
 import { loadPluginRuntimeSnapshot } from "../../../src/plugins/plugin-runtime-snapshot.js";
@@ -23,7 +24,10 @@ test("materialized plugin Hook trust survives a new snapshot and is revoked on d
   assert.equal(scopeRoots.user, join(picoHome, "plugins"));
   const canonicalWorkspace = await realpath(workspace);
   assert.equal(scopeRoots.project, join(canonicalWorkspace, ".pico", "plugins"));
-  assert.equal(scopeRoots.local, join(canonicalWorkspace, ".claw", "plugins"));
+  assert.equal(
+    scopeRoots.local,
+    resolvePicoPaths(canonicalWorkspace, { picoHome }).workspace.plugins,
+  );
   await writeFile(
     join(pluginRoot, ".pico", "plugin.json"),
     JSON.stringify({ name: "fixture-plugin" }),

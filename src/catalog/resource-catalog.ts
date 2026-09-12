@@ -2,12 +2,7 @@ import type { HookTrustAuthority } from "../hooks/trust/store.js";
 
 export type ResourceCatalogScope = "project" | "user" | "builtin" | "external";
 
-export type ResourceCatalogFormat =
-  | "pico-native"
-  | "pico-legacy"
-  | "claude-compat"
-  | "builtin"
-  | "external";
+export type ResourceCatalogFormat = "pico-native" | "claude-compat" | "builtin" | "external";
 
 export interface ResourceCatalogSource {
   readonly id: string;

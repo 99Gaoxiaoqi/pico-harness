@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 
-export type ResourceOrigin = "claude-compat" | "legacy" | "pico-native" | "runtime-state";
+export type ResourceOrigin = "claude-compat" | "pico-native" | "runtime-state";
 export type ResourceStatus = "missing" | "present" | "unsafe";
 
 export interface ResourceDiagnosticEntry {
@@ -49,7 +49,6 @@ export class ResourceDoctor {
     });
     const claudeProject = join(paths.canonicalWorkDir, ".claude");
     const claudeUser = join(home, ".claude");
-    const legacyRoot = join(paths.canonicalWorkDir, ".claw");
     const candidates: ResourceCandidate[] = [
       candidate("commands", "pico-native", paths.project.commands, paths.project.root, 40),
       candidate("commands", "claude-compat", join(claudeProject, "commands"), claudeProject, 30),
@@ -68,7 +67,6 @@ export class ResourceDoctor {
       candidate("mcp", "pico-native", paths.project.mcp, paths.project.root, 40),
       candidate("plugins", "pico-native", paths.project.plugins, paths.project.root, 40),
       candidate("plugins", "pico-native", paths.home.plugins, paths.home.root, 20),
-      candidate("legacy-root", "legacy", legacyRoot, paths.canonicalWorkDir, 1),
       candidate("workspace-state", "runtime-state", paths.workspace.root, paths.home.root, 1),
     ];
 
@@ -86,9 +84,6 @@ export class ResourceDoctor {
     }));
     const findings = entries.flatMap((entry) => {
       if (entry.status === "unsafe") return [`${entry.kind}: ${entry.reason ?? "unsafe path"}`];
-      if (entry.origin === "legacy" && entry.status === "present") {
-        return [`检测到 legacy .claw，运行迁移前保持只读兼容。`];
-      }
       return [];
     });
     return {

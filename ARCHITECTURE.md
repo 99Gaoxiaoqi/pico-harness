@@ -167,6 +167,7 @@ $PICO_HOME/
     ├── evidence/
     ├── traces/
     ├── fork-staging/
+    ├── plugins/
     ├── plugins.json
     └── hooks-state.json
 
@@ -180,8 +181,8 @@ $PICO_HOME/
 └── plugins/
 ```
 
-`<workDir>/.pico` 保存可跟随项目的声明式输入，不保存 Session 历史。旧 `.claw` 文件仅在
-明确标注的兼容读取边界中可能被识别，Pico 原生写入和事实源均不使用 `.claw`。
+`<workDir>/.pico` 保存可跟随项目的声明式输入，不保存 Session 历史。Pico 不读取旧
+`.claw` 配置；该目录名只在文件工具的忽略规则与敏感路径保护中保留。
 
 旧 workspace 内的 `.storage/`、`sessions/`、`task-runs/`、`control/`、`runtime/`、split-era
 `runtime.sqlite` / `memory.sqlite` 和 legacy task 文件不属于当前布局；它们与当前用户级

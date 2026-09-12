@@ -45,6 +45,8 @@ export interface PicoWorkspacePaths {
   readonly traces: string;
   /** Ephemeral fork staging directories owned by the fork operation coordinator. */
   readonly forkStaging: string;
+  /** Managed local-scope Plugin installs, private to this workspace identity. */
+  readonly plugins: string;
   readonly pluginState: string;
   readonly hookState: string;
 }
@@ -65,11 +67,6 @@ export interface ResolvePicoPathsOptions {
 export function resolvePicoHome(options: ResolvePicoPathsOptions = {}): string {
   const configured = options.picoHome ?? (options.env ?? process.env)["PICO_HOME"];
   return resolve(configured?.trim() || join(options.homeDir ?? homedir(), ".pico"));
-}
-
-/** Legacy Runtime-owned scratch directory retained for existing Desktop sessions. */
-export function resolvePicoTemporaryWorkspace(options: ResolvePicoPathsOptions = {}): string {
-  return join(resolvePicoHome(options), "temporary-workspace");
 }
 
 /** Runtime-owned isolated workspace allocated for one new Desktop task. */
@@ -147,6 +144,7 @@ export function resolvePicoPaths(
       evidence: join(workspaceRoot, "evidence"),
       traces: join(workspaceRoot, "traces"),
       forkStaging: join(workspaceRoot, "fork-staging"),
+      plugins: join(workspaceRoot, "plugins"),
       pluginState: join(workspaceRoot, "plugins.json"),
       hookState: join(workspaceRoot, "hooks-state.json"),
     },

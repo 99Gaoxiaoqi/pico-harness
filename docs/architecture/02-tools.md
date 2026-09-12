@@ -168,7 +168,6 @@ L4 逐行去缩进 + 缩进重对齐
 ### 自定义角色（`.pico/agents.yaml` / `$PICO_HOME/agents.yaml`）
 
 按 `profile.tools` 白名单实例化工具，支持自定义 system prompt + maxTurns。
-旧 `.claw/agents.yaml` 只作为低优先级兼容输入，不是原生写入路径。
 
 ---
 

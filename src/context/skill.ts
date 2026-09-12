@@ -274,14 +274,6 @@ export class SkillLoader {
         ? []
         : [
             source("project-pico", "project", "pico-native", paths.project.skills, 50),
-            // `.claw` 只作为旧 Pico 版本过渡输入，不再是原生事实源。
-            source(
-              "project-claw-legacy",
-              "project",
-              "pico-legacy",
-              join(this.workDir, ".claw", "skills"),
-              45,
-            ),
             ...(this.options.includeClaudeProjectResources === false
               ? []
               : [

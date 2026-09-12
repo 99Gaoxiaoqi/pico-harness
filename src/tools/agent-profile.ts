@@ -1,4 +1,4 @@
-// 自定义子代理角色加载器:从 .claw/agents.yaml 读取用户声明的角色。
+// 自定义子代理角色加载器:从 .pico/agents.yaml 读取用户声明的角色。
 //
 // 路线 A(配置预定义):对标 kimi-code profile/load.ts,但极简化——
 // 无 extends 继承、无 nunjucks 模板,YAML 直读。
@@ -75,7 +75,7 @@ export interface AgentProfileLoadResult {
 }
 
 export interface AgentProfileLoaderOptions {
-  /** 显式原生 Agent YAML；省略时保持旧 `.claw/agents.yaml` 兼容入口。 */
+  /** 显式原生 Agent YAML；省略时读取工作区 `.pico/agents.yaml`。 */
   readonly filePath?: string;
 }
 
@@ -97,7 +97,7 @@ interface RawAgent {
 }
 
 /**
- * AgentProfileLoader:从指定 Pico agents.yaml 加载自定义子代理角色；默认保留 .claw 兼容入口。
+ * AgentProfileLoader:从指定 Pico agents.yaml 加载自定义子代理角色。
  *
  * 设计对标 SkillLoader:
  * - 文件不存在静默返回 [](ENOENT 不报错,工作区没配就是没自定义角色)
@@ -108,7 +108,7 @@ export class AgentProfileLoader {
   private readonly filePath: string;
 
   constructor(workDir: string, options: AgentProfileLoaderOptions = {}) {
-    this.filePath = options.filePath ?? join(workDir, ".claw", "agents.yaml");
+    this.filePath = options.filePath ?? join(workDir, ".pico", "agents.yaml");
   }
 
   /**
