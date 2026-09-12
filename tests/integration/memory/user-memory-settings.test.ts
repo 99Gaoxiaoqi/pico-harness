@@ -5,15 +5,14 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { DesktopAtomicMemoryService } from "../../../src/daemon/desktop-atomic-memory-service.js";
-import { parseStrictRuntimeParams } from "../../../src/daemon/protocol.js";
+import {
+  createRuntimeRequest,
+  parseStrictRuntimeParams,
+} from "../../../packages/protocol/src/index.js";
 import { SqliteMemoryItemStore } from "../../../src/storage/sqlite/sqlite-memory-item-store.js";
 import { AtomicMemoryContextBuilder } from "../../../src/memory/atomic/context-builder.js";
 import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import {
-  DesktopRuntimeService,
-  WorkspaceRuntimeService,
-  createRuntimeRequest,
-} from "../../../src/daemon/index.js";
+import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
 import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
 
 test("用户级策略不继承旧项目开关、保存时清理旧配置并保持记忆内容隔离", async (t) => {

@@ -11,7 +11,7 @@ import {
 import {
   isJsonObject,
   isJsonValue,
-  parseDesktopRuntimeResult,
+  parseRuntimeResult,
   parseStrictRuntimeParams,
   RUNTIME_ERROR_CODES,
   type RuntimeErrorCode,
@@ -25,7 +25,7 @@ import {
  * the server a strict decodeInput/decodeOutput contract for each bridged method.
  *
  * Field-level validation is delegated to @pico/protocol's existing strict rules
- * (parseStrictRuntimeParams / parseDesktopRuntimeResult) so each method has a single
+ * (parseStrictRuntimeParams / parseRuntimeResult) so each method has a single
  * source of truth instead of a second hand-written validator. Only structural checks
  * the protocol layer does not cover (e.g. usage.get result shape, byte bounds) live here.
  *
@@ -216,7 +216,7 @@ export const PICO_RUNTIME_HOST_OPERATION_SPECS = {
     decodeInput: (value): WorkspaceStatusBridgeInput =>
       parseStrictRuntimeParams("workspace.status", value),
     decodeOutput: (value): WorkspaceStatusBridgeOutput =>
-      parseDesktopRuntimeResult("workspace.status", value),
+      parseRuntimeResult("workspace.status", value),
   }),
   [RUNTIME_HOST_BRIDGE_USAGE_GET]: defineOperation({
     mode: "query",
@@ -225,7 +225,7 @@ export const PICO_RUNTIME_HOST_OPERATION_SPECS = {
     decodeInput: (value): UsageGetBridgeInput => parseStrictRuntimeParams("usage.get", value),
     decodeOutput: (value): UsageGetBridgeOutput => {
       requireEncodedByteLimit(value, "usage.get result", RUNTIME_REQUEST_RESULT_MAX_BYTES);
-      return parseDesktopRuntimeResult("usage.get", value);
+      return parseRuntimeResult("usage.get", value);
     },
   }),
   [RUNTIME_HOST_BRIDGE_RUNTIME_REQUEST]: defineOperation({
@@ -290,7 +290,7 @@ export const PICO_RUNTIME_HOST_EVENT_OPERATION_SPECS = {
     decodeInput: (value): EventsSubscribeBridgeInput =>
       parseStrictRuntimeParams("events.subscribe", value),
     decodeOutput: (value): EventsSubscribeBridgeOutput =>
-      parseDesktopRuntimeResult("events.subscribe", value) as EventsSubscribeBridgeOutput,
+      parseRuntimeResult("events.subscribe", value) as EventsSubscribeBridgeOutput,
   }),
   [RUNTIME_HOST_BRIDGE_EVENTS_REPLAY]: defineOperation({
     mode: "query",
@@ -299,7 +299,7 @@ export const PICO_RUNTIME_HOST_EVENT_OPERATION_SPECS = {
     decodeInput: (value): EventsReplayBridgeInput =>
       parseStrictRuntimeParams("events.replay", value),
     decodeOutput: (value): EventsReplayBridgeOutput =>
-      parseDesktopRuntimeResult("events.replay", value) as EventsReplayBridgeOutput,
+      parseRuntimeResult("events.replay", value) as EventsReplayBridgeOutput,
   }),
 } satisfies Record<string, AnyOperationSpec>;
 
@@ -309,28 +309,28 @@ export const PICO_RUNTIME_HOST_SESSION_CONTINUITY_OPERATION_SPECS = {
     availability: "ready",
     errors: BRIDGE_ERRORS,
     decodeInput: (value) => parseStrictRuntimeParams("session.subscription.open", value),
-    decodeOutput: (value) => parseDesktopRuntimeResult("session.subscription.open", value),
+    decodeOutput: (value) => parseRuntimeResult("session.subscription.open", value),
   }),
   [RUNTIME_HOST_BRIDGE_SESSION_SUBSCRIPTION_CLOSE]: defineOperation({
     mode: "control",
     availability: "ready",
     errors: BRIDGE_ERRORS,
     decodeInput: (value) => parseStrictRuntimeParams("session.subscription.close", value),
-    decodeOutput: (value) => parseDesktopRuntimeResult("session.subscription.close", value),
+    decodeOutput: (value) => parseRuntimeResult("session.subscription.close", value),
   }),
   [RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_PAGE]: defineOperation({
     mode: "query",
     availability: "ready",
     errors: BRIDGE_ERRORS,
     decodeInput: (value) => parseStrictRuntimeParams("session.transcript.page", value),
-    decodeOutput: (value) => parseDesktopRuntimeResult("session.transcript.page", value),
+    decodeOutput: (value) => parseRuntimeResult("session.transcript.page", value),
   }),
   [RUNTIME_HOST_BRIDGE_SESSION_TRANSCRIPT_ADVANCE]: defineOperation({
     mode: "query",
     availability: "ready",
     errors: BRIDGE_ERRORS,
     decodeInput: (value) => parseStrictRuntimeParams("session.transcript.advance", value),
-    decodeOutput: (value) => parseDesktopRuntimeResult("session.transcript.advance", value),
+    decodeOutput: (value) => parseRuntimeResult("session.transcript.advance", value),
   }),
 } satisfies Record<string, AnyOperationSpec>;
 

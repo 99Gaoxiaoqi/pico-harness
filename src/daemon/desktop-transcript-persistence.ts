@@ -12,7 +12,7 @@ import {
   type JsonObject,
   type JsonValue,
   type RuntimeNotification,
-} from "./protocol.js";
+} from "@pico/protocol";
 
 const RUN_BOUNDARY_TOPICS = new Set([
   "run.started",

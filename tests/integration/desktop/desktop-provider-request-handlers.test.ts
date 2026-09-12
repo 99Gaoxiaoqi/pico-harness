@@ -4,7 +4,7 @@ import {
   createRuntimeRequest,
   parseStrictRuntimeParams,
   type RuntimeRequest,
-} from "../../../src/daemon/protocol.js";
+} from "../../../packages/protocol/src/index.js";
 import { createDesktopProviderRequestHandlers } from "../../../src/daemon/desktop-provider-request-handlers.js";
 
 test("Desktop provider handlers keep protocol mapping and dependency locking in one boundary", async () => {

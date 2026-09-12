@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
-import type { JsonObject, RuntimeUserInput } from "./protocol.js";
-import { isSafeSubagentPresetId } from "./protocol.js";
+import type { JsonObject, RuntimeUserInput } from "@pico/protocol";
+import { isSafeSubagentPresetId } from "@pico/protocol";
 
 export const MAX_IDEMPOTENCY_RECORDS = 500;
 export const MAX_FIRST_SEND_CLAIMS = 500;

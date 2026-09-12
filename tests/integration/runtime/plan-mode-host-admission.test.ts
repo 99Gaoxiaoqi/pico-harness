@@ -6,7 +6,7 @@ import test from "node:test";
 import { createRuntimeRequest } from "../../../packages/protocol/src/runtime.js";
 import { createProductionRuntimeServices } from "../../../src/daemon/production-host.js";
 import { WorkspaceRuntimeService } from "../../../src/daemon/workspace-runtime-service.js";
-import { RUNTIME_ERROR_CODES, RuntimeProtocolError } from "../../../src/daemon/protocol.js";
+import { RUNTIME_ERROR_CODES, RuntimeProtocolError } from "../../../packages/protocol/src/index.js";
 import { globalSessionManager } from "../../../src/engine/session.js";
 import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
 import { PlanCoordinator } from "../../../src/plan/coordinator.js";

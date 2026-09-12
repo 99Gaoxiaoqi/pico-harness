@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { createProductionRuntimeServices } from "../../../src/daemon/production-host.js";
-import { createRuntimeRequest } from "../../../src/daemon/protocol.js";
+import { createRuntimeRequest } from "../../../packages/protocol/src/index.js";
 import { globalSessionManager } from "../../../src/engine/session.js";
 import {
   AgentRuntime,

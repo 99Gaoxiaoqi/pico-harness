@@ -3,17 +3,14 @@ import { cp, mkdir, mkdtemp, readFile, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
 import {
   createRuntimeRequest,
-  DesktopRuntimeService,
-  WorkspaceRuntimeService,
-} from "../../../src/daemon/index.js";
-import {
   isJsonObject,
   parseRuntimeResult,
   type RuntimeNotification,
   type RuntimeSubagentPreset,
-} from "../../../src/daemon/protocol.js";
+} from "../../../packages/protocol/src/index.js";
 import { WorkspaceRegistrationStore } from "../../../src/daemon/workspace-registration.js";
 import { UserConfigStore } from "../../../src/input/user-config-store.js";
 import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";

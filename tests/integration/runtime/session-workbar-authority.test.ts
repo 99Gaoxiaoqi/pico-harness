@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { createRuntimeRequest } from "../../../packages/protocol/src/index.js";
 import type { RuntimeEvent } from "../../../src/engine/session-runtime-event.js";
 import { SESSION_RUNTIME_STATE_VERSION } from "../../../src/engine/session-runtime.js";
 import {
@@ -14,11 +15,7 @@ import {
 } from "../../../src/storage/sqlite/sqlite-session-workbar-repository.js";
 import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import { withWorkspaceSqliteLease } from "../../../src/storage/sqlite/workspace-scopes.js";
-import {
-  createRuntimeRequest,
-  DesktopRuntimeService,
-  WorkspaceRuntimeService,
-} from "../../../src/daemon/index.js";
+import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
 import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
 import {
   buildSessionTaskPromptBlock,

@@ -3,11 +3,8 @@ import test from "node:test";
 import { mkdtemp, mkdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  createRuntimeRequest,
-  DesktopRuntimeService,
-  WorkspaceRuntimeService,
-} from "../../../src/daemon/index.js";
+import { createRuntimeRequest } from "../../../packages/protocol/src/index.js";
+import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
 import { parseDesktopQueuedInputRecord } from "../../../src/daemon/desktop-conversation-state.js";
 import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
 import { renderToStaticMarkup } from "react-dom/server";

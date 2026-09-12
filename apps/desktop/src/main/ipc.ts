@@ -7,7 +7,7 @@ import {
   type WebContents,
 } from "electron";
 import {
-  parseDesktopRuntimeResult,
+  parseRuntimeResult,
   parseStrictRuntimeParams,
   RUNTIME_ERROR_CODES,
   RuntimeNotificationBuffer,
@@ -155,7 +155,7 @@ export function registerDesktopIpcHandlers(options: {
         }
         throw error;
       });
-      const result = parseDesktopRuntimeResult(envelope.method, response);
+      const result = parseRuntimeResult(envelope.method, response);
       if (
         envelope.method === "session.delete" ||
         envelope.method === "session.archive" ||
@@ -236,7 +236,7 @@ export function registerDesktopIpcHandlers(options: {
           true,
         );
       }
-      const replay = parseDesktopRuntimeResult("events.subscribe", subscription.replay);
+      const replay = parseRuntimeResult("events.subscribe", subscription.replay);
       managedSubscription = {
         ownerId: event.sender.id,
         dispose,

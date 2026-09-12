@@ -3,12 +3,12 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
 import {
   createRuntimeRequest,
-  DesktopRuntimeService,
-  WorkspaceRuntimeService,
-} from "../../../src/daemon/index.js";
-import { RuntimeProtocolError, RUNTIME_ERROR_CODES } from "../../../src/daemon/protocol.js";
+  RuntimeProtocolError,
+  RUNTIME_ERROR_CODES,
+} from "../../../packages/protocol/src/index.js";
 import { UserMcpConfigStore } from "../../../src/mcp/user-config-store.js";
 import { PluginRuntimeSnapshotRegistry } from "../../../src/plugins/plugin-runtime-snapshot-registry.js";
 import type { PluginRuntimeSnapshot } from "../../../src/plugins/plugin-runtime-snapshot.js";

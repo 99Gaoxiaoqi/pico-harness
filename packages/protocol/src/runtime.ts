@@ -1,4 +1,4 @@
-// Public compatibility entry: domain contracts and validators are owned by runtime/*.ts.
+// Public runtime barrel: domain contracts and validators are owned by runtime/*.ts.
 export * from "./runtime/subagents.js";
 import { automationParamValidators, automationResultValidators } from "./runtime/automation.js";
 import { isJsonValue } from "./runtime/base.js";
@@ -11,12 +11,7 @@ import { configParamValidators, configResultValidators } from "./runtime/config.
 import { invalidResult } from "./runtime/errors.js";
 import { memoryParamValidators, memoryResultValidators } from "./runtime/memory.js";
 import { parseRuntimeParams } from "./runtime/methods.js";
-import type {
-  DesktopRuntimeMethod,
-  RuntimeMethod,
-  RuntimeParams,
-  RuntimeResult,
-} from "./runtime/methods.js";
+import type { RuntimeMethod, RuntimeParams, RuntimeResult } from "./runtime/methods.js";
 import {
   notificationsParamValidators,
   notificationsResultValidators,
@@ -69,8 +64,6 @@ export function parseStrictRuntimeParams<Method extends RuntimeMethod>(
   return params;
 }
 
-type DesktopRuntimeBoundaryMethod = DesktopRuntimeMethod | "events.subscribe";
-
 /**
  * Applies the method-specific response contract at every Runtime client boundary.
  */
@@ -81,14 +74,6 @@ export function parseRuntimeResult<Method extends RuntimeMethod>(
   if (!isJsonValue(value)) throw invalidResult(`${method} result 必须是 JSON 值`);
   RUNTIME_RESULT_VALIDATORS[method](value, `${method} result`);
   return value as RuntimeResult<Method>;
-}
-
-/** Desktop-compatible alias retained for the preload/Main boundary. */
-export function parseDesktopRuntimeResult<Method extends DesktopRuntimeBoundaryMethod>(
-  method: Method,
-  value: unknown,
-): RuntimeResult<Method> {
-  return parseRuntimeResult(method, value);
 }
 
 export {

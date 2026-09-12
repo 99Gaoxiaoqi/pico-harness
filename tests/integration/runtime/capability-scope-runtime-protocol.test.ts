@@ -9,7 +9,7 @@ import {
   isRuntimeNotification,
   isRuntimeMethod,
   LOCAL_RUNTIME_PROTOCOL_VERSION,
-  parseDesktopRuntimeResult,
+  parseRuntimeResult,
   parseStrictRuntimeParams,
   RUNTIME_ERROR_CODES,
   RUNTIME_METHODS,
@@ -178,35 +178,35 @@ test("scoped capability results expose opaque provenance without source paths or
   } as const satisfies RuntimeScopedMcpServer;
 
   assert.deepEqual(
-    parseDesktopRuntimeResult("skills.user.list", {
+    parseRuntimeResult("skills.user.list", {
       skills: [userSkill],
       revision: "user-revision",
     }),
     { skills: [userSkill], revision: "user-revision" },
   );
   assert.deepEqual(
-    parseDesktopRuntimeResult("skills.effective.list", {
+    parseRuntimeResult("skills.effective.list", {
       skills: [userSkill, projectSkill],
       revisions: revisions(),
     }),
     { skills: [userSkill, projectSkill], revisions: revisions() },
   );
   assert.deepEqual(
-    parseDesktopRuntimeResult("mcp.user.list", {
+    parseRuntimeResult("mcp.user.list", {
       servers: [userServer],
       revision: "user-revision",
     }),
     { servers: [userServer], revision: "user-revision" },
   );
   assert.deepEqual(
-    parseDesktopRuntimeResult("mcp.user.upsert", {
+    parseRuntimeResult("mcp.user.upsert", {
       server: userServer,
       revision: "next-user-revision",
     }),
     { server: userServer, revision: "next-user-revision" },
   );
   assert.deepEqual(
-    parseDesktopRuntimeResult("mcp.user.delete", {
+    parseRuntimeResult("mcp.user.delete", {
       serverName: "github",
       deleted: true,
       revision: "next-user-revision",
@@ -214,7 +214,7 @@ test("scoped capability results expose opaque provenance without source paths or
     { serverName: "github", deleted: true, revision: "next-user-revision" },
   );
   assert.deepEqual(
-    parseDesktopRuntimeResult("mcp.effective.list", {
+    parseRuntimeResult("mcp.effective.list", {
       servers: [userServer, pluginServer],
       revisions: revisions(),
     }),
@@ -233,7 +233,7 @@ test("scoped capability results expose opaque provenance without source paths or
   ]) {
     const error = assertProtocolError(
       () =>
-        parseDesktopRuntimeResult("mcp.user.list", {
+        parseRuntimeResult("mcp.user.list", {
           servers: [unsafeServer],
           revision: "user-revision",
         }),
@@ -259,7 +259,7 @@ test("scoped capability results expose opaque provenance without source paths or
   ]) {
     const error = assertProtocolError(
       () =>
-        parseDesktopRuntimeResult("mcp.effective.list", {
+        parseRuntimeResult("mcp.effective.list", {
           servers: [unsafeSummary],
           revisions: revisions(),
         }),
@@ -269,7 +269,7 @@ test("scoped capability results expose opaque provenance without source paths or
   }
   assertProtocolError(
     () =>
-      parseDesktopRuntimeResult("skills.user.list", {
+      parseRuntimeResult("skills.user.list", {
         skills: [{ ...userSkill, sourcePath: "/private/user/skills/review/SKILL.md" }],
         revision: "user-revision",
       }),
@@ -291,14 +291,14 @@ test("runtime schema and config notifications advertise scoped capabilities with
     ],
     picoHome: "/state/pico",
   } as const;
-  assert.deepEqual(parseDesktopRuntimeResult("runtime.ping", ping), ping);
+  assert.deepEqual(parseRuntimeResult("runtime.ping", ping), ping);
   assertProtocolError(() => {
     const { picoHome: _picoHome, ...legacyPing } = ping;
-    parseDesktopRuntimeResult("runtime.ping", legacyPing);
+    parseRuntimeResult("runtime.ping", legacyPing);
   }, RUNTIME_ERROR_CODES.INVALID_REQUEST);
   assertProtocolError(
     () =>
-      parseDesktopRuntimeResult("runtime.ping", {
+      parseRuntimeResult("runtime.ping", {
         ...ping,
         capabilities: [DESKTOP_RUNTIME_SCHEMA_CAPABILITY],
       }),
@@ -306,7 +306,7 @@ test("runtime schema and config notifications advertise scoped capabilities with
   );
   assertProtocolError(
     () =>
-      parseDesktopRuntimeResult("runtime.ping", {
+      parseRuntimeResult("runtime.ping", {
         ...ping,
         capabilities: [DESKTOP_RUNTIME_SCHEMA_CAPABILITY, CAPABILITY_SCOPE_RUNTIME_CAPABILITY],
       }),

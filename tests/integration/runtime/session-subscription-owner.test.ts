@@ -5,7 +5,7 @@ import {
   type RuntimeParams,
   type RuntimeResult,
   type RuntimeSessionSubscriptionFrame,
-} from "../../../src/daemon/protocol.js";
+} from "../../../packages/protocol/src/index.js";
 import {
   SessionSubscriptionRegistry,
   type SessionContinuityDataSource,

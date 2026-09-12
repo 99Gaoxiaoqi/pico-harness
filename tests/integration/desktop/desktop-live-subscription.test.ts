@@ -3,14 +3,14 @@ import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { RuntimeResult, RuntimeSessionSubscriptionFrame } from "@pico/protocol";
-import { DesktopSessionContinuity } from "../../../apps/desktop/src/renderer/session-continuity.js";
 import {
   createRuntimeNotification,
   createRuntimeRequest,
-  DesktopRuntimeService,
-  WorkspaceRuntimeService,
-} from "../../../src/daemon/index.js";
+  type RuntimeResult,
+  type RuntimeSessionSubscriptionFrame,
+} from "@pico/protocol";
+import { DesktopSessionContinuity } from "../../../apps/desktop/src/renderer/session-continuity.js";
+import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
 import { DesktopReporter } from "../../../src/daemon/desktop-reporter.js";
 import { SessionSubscriptionRegistry } from "../../../src/daemon/session-subscription-owner.js";
 import { SqliteSessionContinuitySource } from "../../../src/daemon/sqlite-session-continuity-source.js";

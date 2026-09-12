@@ -6,11 +6,11 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   createRuntimeRequest,
-  DesktopRuntimeService,
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
-  WorkspaceRuntimeService,
-} from "../../../src/daemon/index.js";
+  type RuntimeResult,
+} from "@pico/protocol";
+import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
 import { WorkspaceRegistrationStore } from "../../../src/daemon/workspace-registration.js";
 import { EffectiveConfigResolver } from "../../../src/input/effective-config.js";
 import { loadPicoProjectConfig } from "../../../src/input/pico-config.js";
@@ -27,7 +27,6 @@ import {
 } from "../../../src/provider/credential-vault.js";
 import { loadEffectiveModelRuntime } from "../../../src/provider/effective-model-runtime.js";
 import { assertPrivatePermissions } from "../helpers/private-file-mode.js";
-import type { RuntimeResult } from "@pico/protocol";
 import { saveProviderConnection } from "../../../apps/desktop/src/renderer/provider-connection.js";
 
 const PROVIDER_ID = "config-key-fixture";

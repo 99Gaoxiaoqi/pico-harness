@@ -13,7 +13,7 @@ import {
   RuntimeProtocolError,
   type RuntimeParams,
   type RuntimeResult,
-} from "./protocol.js";
+} from "@pico/protocol";
 
 /** Candidates stay in the database-owning daemon; the Desktop main process obtains confirmation. */
 export class WorkspaceStorageRepairService {

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { DesktopRuntimeService } from "../../../src/daemon/desktop-runtime-service.js";
-import { createRuntimeRequest } from "../../../src/daemon/protocol.js";
+import { createRuntimeRequest } from "../../../packages/protocol/src/index.js";
 import { WorkspaceRuntimeService } from "../../../src/daemon/workspace-runtime-service.js";
 import { UserConfigStore } from "../../../src/input/user-config-store.js";
 import {

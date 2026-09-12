@@ -7,7 +7,7 @@ import test from "node:test";
 
 import { SqliteAgentGraphControlStoreAdapter } from "../../src/agent-graph/sqlite-control-store-adapter.js";
 import { createProductionRuntimeServices } from "../../src/daemon/production-host.js";
-import { createRuntimeRequest } from "../../src/daemon/protocol.js";
+import { createRuntimeRequest } from "../../packages/protocol/src/index.js";
 import { globalSessionManager } from "../../src/engine/session.js";
 import { EMPTY_USER_CONFIG_REVISION, UserConfigStore } from "../../src/input/user-config-store.js";
 import { resolvePicoPaths } from "../../src/paths/pico-paths.js";

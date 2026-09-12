@@ -5,7 +5,7 @@ import {
   serializeRuntimeNotification,
   type RuntimeNotification,
   type RuntimeNotificationPage,
-} from "./protocol.js";
+} from "@pico/protocol";
 import { canonicalizeWorkspacePath } from "./workspace-registry.js";
 import { transportSafeRuntimeNotificationWithin } from "./workspace-runtime-service.js";
 import type { RuntimeNotificationCursor } from "./service.js";

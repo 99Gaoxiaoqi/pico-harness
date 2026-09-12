@@ -14,7 +14,7 @@ import {
   RuntimeProtocolError,
   type JsonValue,
   type RuntimeRequest,
-} from "./protocol.js";
+} from "@pico/protocol";
 
 /** Dependencies retained by the Desktop composition root. */
 export interface DesktopAutomationRequestContext {

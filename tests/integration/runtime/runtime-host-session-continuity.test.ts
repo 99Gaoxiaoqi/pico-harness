@@ -29,8 +29,8 @@ import type {
   RuntimeParams,
   RuntimeResult,
   RuntimeSessionSubscriptionFrame,
-} from "../../../src/daemon/protocol.js";
-import { RUNTIME_ERROR_CODES, RuntimeProtocolError } from "../../../src/daemon/protocol.js";
+} from "../../../packages/protocol/src/index.js";
+import { RUNTIME_ERROR_CODES, RuntimeProtocolError } from "../../../packages/protocol/src/index.js";
 
 ensurePicoRuntimeHostOperationsRegistered();
 ensurePicoRuntimeHostSessionContinuityOperationsRegistered();

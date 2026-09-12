@@ -4,12 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
+import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
 import {
   createRuntimeRequest,
-  DesktopRuntimeService,
-  WorkspaceRuntimeService,
-} from "../../../src/daemon/index.js";
-import {
   parseRuntimeResult,
   parseStrictRuntimeParams,
   RUNTIME_ERROR_CODES,
@@ -18,7 +15,7 @@ import {
   type RuntimeParams,
   type RuntimeResult,
   type RuntimeSubagentPreset,
-} from "../../../src/daemon/protocol.js";
+} from "../../../packages/protocol/src/index.js";
 import { WorkspaceRegistrationStore } from "../../../src/daemon/workspace-registration.js";
 import { UserConfigStore } from "../../../src/input/user-config-store.js";
 import type { CredentialVault } from "../../../src/provider/credential-vault.js";

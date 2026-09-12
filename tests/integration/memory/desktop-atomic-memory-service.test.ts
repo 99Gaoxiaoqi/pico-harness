@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { DesktopAtomicMemoryService } from "../../../src/daemon/desktop-atomic-memory-service.js";
-import { parseRuntimeResult, RuntimeProtocolError } from "../../../src/daemon/protocol.js";
+import { parseRuntimeResult, RuntimeProtocolError } from "../../../packages/protocol/src/index.js";
 import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
 import { SqliteMemoryItemStore } from "../../../src/storage/sqlite/sqlite-memory-item-store.js";
 

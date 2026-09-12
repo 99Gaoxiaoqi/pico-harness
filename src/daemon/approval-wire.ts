@@ -1,5 +1,5 @@
 import type { ApprovalNotice } from "../approval/manager.js";
-import { isJsonObject, isJsonValue, type JsonObject } from "./protocol.js";
+import { isJsonObject, isJsonValue, type JsonObject } from "@pico/protocol";
 
 /**
  * approval.requested 通知 payload 的唯一构造点（3-D 漏账补齐，2026-08-16）。

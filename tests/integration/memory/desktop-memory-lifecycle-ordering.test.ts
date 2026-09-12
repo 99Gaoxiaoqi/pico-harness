@@ -5,12 +5,14 @@ import { join } from "node:path";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import {
-  DesktopAtomicMemoryService,
-  DesktopRuntimeService,
+  createRuntimeRequest,
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
+} from "../../../packages/protocol/src/index.js";
+import {
+  DesktopAtomicMemoryService,
+  DesktopRuntimeService,
   WorkspaceRuntimeService,
-  createRuntimeRequest,
 } from "../../../src/daemon/index.js";
 import { memorySessionKey } from "../../../src/memory/atomic/runtime-contracts.js";
 import { sessionMemoryLane } from "../../../src/memory/atomic/session-lane.js";

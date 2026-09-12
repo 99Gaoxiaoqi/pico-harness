@@ -16,20 +16,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
-import type { JsonObject } from "@pico/protocol";
+import {
+  createRuntimeRequest,
+  parseRuntimeResult,
+  RUNTIME_ERROR_CODES,
+  RuntimeProtocolError,
+  type JsonObject,
+} from "@pico/protocol";
 import {
   findCliSessionCatalogEntry,
   listCliSessionCatalogEntries,
   resolveCliSession,
 } from "../../../src/cli/session-resolver.js";
-import {
-  createRuntimeRequest,
-  DesktopRuntimeService,
-  parseRuntimeResult,
-  RUNTIME_ERROR_CODES,
-  RuntimeProtocolError,
-  WorkspaceRuntimeService,
-} from "../../../src/daemon/index.js";
+import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
 import { globalSessionManager, type Session } from "../../../src/engine/session.js";
 import { SessionForkService } from "../../../src/engine/session-fork-service.js";
 import type { SessionForkRuntimePort } from "../../../src/engine/session-fork-runtime-port.js";

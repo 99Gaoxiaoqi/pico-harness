@@ -109,7 +109,7 @@ import {
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
   type JsonObject,
-} from "./protocol.js";
+} from "@pico/protocol";
 import { LocalDaemonHost } from "./runtime-host.js";
 import { canonicalizeWorkspacePath } from "./workspace-registry.js";
 import { WorkspaceRegistrationStore } from "./workspace-registration.js";

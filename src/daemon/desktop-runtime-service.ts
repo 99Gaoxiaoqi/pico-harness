@@ -130,7 +130,7 @@ import {
   type RuntimeSession,
   type RuntimeUserDefaults,
   type RuntimeUserInput,
-} from "./protocol.js";
+} from "@pico/protocol";
 import type {
   DisposableLocalRuntimeService,
   RuntimeNotificationCursor,
@@ -186,7 +186,7 @@ import {
   workspaceStatusResult,
   type DaemonRunExecution,
 } from "./workspace-runtime-service.js";
-import type { WorkspaceStatusResult } from "./protocol.js";
+import type { WorkspaceStatusResult } from "@pico/protocol";
 import { DesktopAutomationService } from "./desktop-automation-service.js";
 import {
   assertDesktopChangesComplete,

@@ -6,11 +6,10 @@ import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import {
   createRuntimeRequest,
-  DesktopRuntimeService,
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
-  WorkspaceRuntimeService,
-} from "../../../src/daemon/index.js";
+} from "../../../packages/protocol/src/index.js";
+import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
 import { WorkspaceRegistrationStore } from "../../../src/daemon/workspace-registration.js";
 import { parseUserConfig, UserConfigStore } from "../../../src/input/user-config-store.js";
 import {

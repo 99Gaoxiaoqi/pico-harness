@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   MAX_RUNTIME_FRAME_BYTES,
-  parseDesktopRuntimeResult,
+  parseRuntimeResult,
   type RuntimeSession,
   type RuntimeTranscriptItemFragment,
   type RuntimeTranscriptItemRecord,
@@ -91,7 +91,7 @@ test("continuity source and replica reassemble oversized UTF-8 open/page/advance
 
     const replica = new TranscriptReplica(sessionId);
     const openToken = replica.beginOpen();
-    const openResult = parseDesktopRuntimeResult("session.subscription.open", {
+    const openResult = parseRuntimeResult("session.subscription.open", {
       ...openSnapshot,
       hostEpoch: "host-large-item",
       subscriptionId: "subscription-large-item",
@@ -105,7 +105,7 @@ test("continuity source and replica reassemble oversized UTF-8 open/page/advance
     let olderRequest = replica.beginOlderPage();
     let olderPages = 0;
     while (olderRequest) {
-      const page = parseDesktopRuntimeResult(
+      const page = parseRuntimeResult(
         "session.transcript.page",
         await source.readTranscriptPage({
           workspacePath,
@@ -148,7 +148,7 @@ test("continuity source and replica reassemble oversized UTF-8 open/page/advance
     const advanceOffsets = new Map<string, number>();
     let advancePages = 0;
     for (;;) {
-      const page = parseDesktopRuntimeResult(
+      const page = parseRuntimeResult(
         "session.transcript.advance",
         await source.readTranscriptAdvance({
           workspacePath,

@@ -13,7 +13,7 @@ import type {
   RuntimeTranscriptItemRecord,
   RuntimeTranscriptPageCursor,
   RuntimeTranscriptWatermark,
-} from "./protocol.js";
+} from "@pico/protocol";
 import { canonicalizeWorkspacePath, resolvePicoPaths } from "../paths/pico-paths.js";
 import type {
   RuntimeEventStoreEntry,

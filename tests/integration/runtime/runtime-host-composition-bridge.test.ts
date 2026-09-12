@@ -14,12 +14,12 @@ import {
   tryAcquireInteractiveRootOwner,
   type RuntimeHostConnection,
 } from "@pico/runtime-host";
+import type { JsonValue } from "@pico/protocol";
 import {
   createRuntimeHostCompositionFactory,
   DesktopRuntimeService,
   ensurePicoRuntimeHostOperationsRegistered,
   WorkspaceRuntimeService,
-  type JsonValue,
   type RuntimeHostBridgeService,
 } from "../../../src/daemon/index.js";
 import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";

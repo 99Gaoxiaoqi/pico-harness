@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { parseStrictRuntimeParams } from "../../../src/daemon/protocol.js";
+import { parseStrictRuntimeParams } from "../../../packages/protocol/src/index.js";
 
 test("模型设置只保留当前全局设置路由", async () => {
   const source = await rendererSource("App.tsx");

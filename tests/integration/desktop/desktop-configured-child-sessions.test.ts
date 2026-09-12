@@ -3,12 +3,8 @@ import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import {
-  createRuntimeRequest,
-  DesktopRuntimeService,
-  WorkspaceRuntimeService,
-} from "../../../src/daemon/index.js";
-import { parseRuntimeResult } from "../../../src/daemon/protocol.js";
+import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
+import { createRuntimeRequest, parseRuntimeResult } from "../../../packages/protocol/src/index.js";
 import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
 import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import type { RuntimeEventBase } from "../../../src/engine/session-runtime-event.js";

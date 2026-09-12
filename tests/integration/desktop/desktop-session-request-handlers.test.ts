@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createTypedRuntimeRequest } from "../../../src/daemon/protocol.js";
+import { createTypedRuntimeRequest } from "../../../packages/protocol/src/index.js";
 import type { DesktopRequestHandlers } from "../../../src/daemon/desktop-request-router.js";
 import {
   createDesktopSessionRequestHandlers,

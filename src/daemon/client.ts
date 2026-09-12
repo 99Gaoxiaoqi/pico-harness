@@ -25,7 +25,7 @@ import {
   type RuntimeParams,
   type RuntimeResult,
   type RuntimeSessionSubscriptionFrame,
-} from "./protocol.js";
+} from "@pico/protocol";
 import { resolveCanonicalPicoHome } from "../paths/pico-paths.js";
 import { retireSessionOwnerLeasesForTerminatedProcess } from "../storage/session-owner-lease.js";
 import {
