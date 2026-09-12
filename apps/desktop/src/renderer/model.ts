@@ -125,6 +125,7 @@ export interface ProviderView {
   readonly models: readonly string[];
   readonly discoverModels: boolean;
   readonly modelCapabilities?: JsonRecord | undefined;
+  readonly resolvedModelCapabilities?: JsonRecord | undefined;
   readonly origin: ProviderOrigin;
   readonly fingerprint: string;
   readonly credentialStatus: ProviderCredentialStatus;
@@ -151,7 +152,13 @@ export interface UserDefaultsView {
   readonly orchestrationMode?: RuntimeOrchestrationMode | undefined;
   readonly permissionMode?: RuntimePermissionMode | undefined;
   readonly thinkingEffort?: string | undefined;
+  readonly webSearch?: WebSearchSettingsView | undefined;
 }
+
+export type WebSearchSettingsView = {
+  readonly enabled: boolean;
+  readonly source: "model" | "external";
+};
 
 export interface ProviderConfigView {
   readonly supported: boolean;

@@ -1,5 +1,6 @@
 import { parseDesktopToolApproval } from "../runtime-projections/approval.js";
 import { subagentMetadata } from "./subagent-navigation.js";
+import { parseWebSearchRecord } from "./WebSearchRecord.js";
 import {
   TRANSCRIPT_PROJECTOR_VERSION,
   type RuntimeActiveOverlayEntry,
@@ -258,11 +259,14 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
   };
   if (item.kind === "userMessage" || item.kind === "assistantMessage") {
     const text = stringValue(item.content);
-    if (!text) return undefined;
+    const webSearch =
+      item.kind === "assistantMessage" ? parseWebSearchRecord(item.webSearch) : undefined;
+    if (!text && !webSearch) return undefined;
     return {
       id,
       kind: item.kind,
       text,
+      ...(webSearch ? { webSearch } : {}),
       ...(item.kind === "assistantMessage" && stringValue(item.runId)
         ? { runId: stringValue(item.runId) }
         : {}),
