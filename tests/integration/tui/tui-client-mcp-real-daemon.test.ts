@@ -76,7 +76,7 @@ test("real daemon: /mcp status + enable/disable round trip over user mcp.json", 
     delete process.env.PICO_HOME;
   });
 
-  const client = new LocalRuntimeClient(undefined, {
+  const client = new LocalRuntimeClient({
     runtimeHostRootPath: picoHome,
     candidateLauncher: candidates.launcher,
   });

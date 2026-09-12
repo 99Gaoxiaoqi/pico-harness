@@ -46,7 +46,6 @@ export interface ConnectOrSpawnRuntimeHostInput {
   /** Forwarded to a spawned candidate (its server-side operation deadline). */
   operationDeadlineMs?: number;
   candidateEntrypoint?: string | URL;
-  legacyConfigurationRoot?: string;
   /**
    * Extra env merged into a spawned candidate (overrides the client's own env).
    * Domain candidates may need it, e.g. a pico daemon candidate resolving a
@@ -165,9 +164,6 @@ export async function connectOrSpawnRuntimeHostWithDependencies(
           ...(input.candidateEntrypoint === undefined
             ? {}
             : { entrypoint: input.candidateEntrypoint }),
-          ...(input.legacyConfigurationRoot === undefined
-            ? {}
-            : { legacyConfigurationRoot: input.legacyConfigurationRoot }),
           ...(input.env === undefined ? {} : { env: input.env }),
           logDirectory: input.candidateLogDirectory ?? join(controlDirectory, "candidate-logs"),
         });

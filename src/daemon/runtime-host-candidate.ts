@@ -52,7 +52,6 @@ export interface PicoDaemonCandidateOptions {
   rootPath: string;
   /** 严格校验 rootId（connectOrSpawn spawn 路径传入）；无参自举时省略。 */
   expectedRootId?: string;
-  legacyConfigurationRoot?: string;
   idleGraceMs?: number;
   handshakeTimeoutMs?: number;
   operationDeadlineMs?: number;
@@ -81,9 +80,6 @@ export function parsePicoDaemonCandidateArguments(
   return {
     rootPath: parsed.rootPath,
     expectedRootId: parsed.expectedRootId,
-    ...(parsed.legacyConfigurationRoot === undefined
-      ? {}
-      : { legacyConfigurationRoot: parsed.legacyConfigurationRoot }),
     ...(parsed.idleGraceMs === undefined ? {} : { idleGraceMs: parsed.idleGraceMs }),
     ...(parsed.handshakeTimeoutMs === undefined
       ? {}

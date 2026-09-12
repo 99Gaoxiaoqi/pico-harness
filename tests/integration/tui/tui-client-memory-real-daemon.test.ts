@@ -21,7 +21,7 @@ test("TUI memory commands persist and archive atomic memories through the real d
   const previousHome = process.env.PICO_HOME;
   process.env.PICO_HOME = picoHome;
   const candidates = new TestRuntimeHostCandidateTracker();
-  const client = new LocalRuntimeClient(undefined, {
+  const client = new LocalRuntimeClient({
     runtimeHostRootPath: picoHome,
     candidateLauncher: candidates.launcher,
   });

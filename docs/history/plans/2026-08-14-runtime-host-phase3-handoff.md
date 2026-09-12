@@ -190,14 +190,14 @@
 
 ## 3-D TUI 已完成 Phase 1-3（daemon 客户端迁移，2026-08-15 追加）
 
-**详细立项与逐阶段记录见 `docs/plans/2026-08-15-tui-daemon-client-migration.md`（单一来源）**。终态：交互 TUI = daemon 瘦客户端（`pico --client`）；交互进程内路径**最终退役**（用户拍板）；headless 永久直连。
+**详细立项与逐阶段记录见 `docs/plans/2026-08-15-tui-daemon-client-migration.md`（单一来源）**。终态：交互 TUI = daemon 瘦客户端（直接运行 `pico`）；交互进程内路径**最终退役**（用户拍板）；headless 永久直连。
 
 ### Phase 进度总览（截至今）
 
 | Phase        | 内容                                                                                                                                                                                                         | 状态                                                                 |
 | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------- |
 | 1            | run.live 扩展 tool/subagent 实时事件（协议 union + ToolLiveCoalescer 50ms + 前向兼容契约）                                                                                                                   | ✅ 08833ce0 + 2eadb002（补 args）                                    |
-| 2            | TUI 客户端 tracer：`pico --client` 四件套（transcript-item-hydration / daemon-event-reporter / client-session-runtime / client-repl Ink 壳，TuiReporter 零改动复用）+ 真机冒烟                               | ✅ 8b01dd81 + aeda783a（冒烟逮到 daemon 双规范化 bug → b875b390 修） |
+| 2            | TUI 客户端 tracer：client-repl 四件套（transcript-item-hydration / daemon-event-reporter / client-session-runtime / client-repl Ink 壳，TuiReporter 零改动复用）+ 真机冒烟                                   | ✅ 8b01dd81 + aeda783a（冒烟逮到 daemon 双规范化 bug → b875b390 修） |
 | 3 首批       | plan 审批字段映射（plan.respond 闭环）/ BYOK 合并（--model/--thinking 生效）/ wake 回归                                                                                                                      | ✅ 95b479d2 + 0f10f65f + a20bd320                                    |
 | 3 主体       | **slash tier1 29 命令**：前置跨会话泄漏修复 + client-commands 注册表（四类，复用 in-process 解析/建议管线）+ 可测宿主 + 建议源 + 真机 slash 链 + e2e 真实模型                                                | ✅ eb0f2eb5 + e79db76a + d7b019ec + 68623ff2                         |
 | 对抗评审两轮 | 一轮 P0×5/P1×6/P2×8 + 二轮 P0×1/P1×6/P2 若干，全分级修复                                                                                                                                                     | ✅ d6c15c4c + ea13ec10                                               |
@@ -239,7 +239,7 @@
 ### 当前客户端架构（Phase 3 后）
 
 ```
-pico --client → client-repl.tsx（Ink 壳：App props 桥/对话框桥/建议源）
+pico → client-repl.tsx（Ink 壳：App props 桥/对话框桥/建议源）
   ├─ client-session-runtime.ts（无 Ink 核心：sendInput/request 透传/switchSession
   │   + hydrateSerial 串行对账 + scope 过滤 + BYOK + settings 快照）
   ├─ daemon-event-reporter.ts（通知→TuiReporter：run.live append-only/工具卡/

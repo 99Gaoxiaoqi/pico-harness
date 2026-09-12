@@ -40,7 +40,7 @@ async function main() {
   }
 
   console.log("== 业务层探针（runtime.ping + workspace.list）==");
-  const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: rootPath });
+  const client = new LocalRuntimeClient({ runtimeHostRootPath: rootPath });
   try {
     const t0 = Date.now();
     await client.request("runtime.ping", {});

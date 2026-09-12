@@ -86,7 +86,7 @@ async function main(): Promise<void> {
   await configureDeadEndpointModel(picoHome);
 
   // 长驻基准客户端：全程并发 ping（探测"其他连接不受影响"还是"整宿主卡死"）。
-  const baselineClient = new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome });
+  const baselineClient = new LocalRuntimeClient({ runtimeHostRootPath: picoHome });
   let baselinePingStop = false;
   const baselinePing = (async () => {
     while (!baselinePingStop) {
@@ -102,7 +102,7 @@ async function main(): Promise<void> {
   const pidBefore = await samplePid("start");
 
   for (let round = 1; round <= ROUNDS; round += 1) {
-    const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome });
+    const client = new LocalRuntimeClient({ runtimeHostRootPath: picoHome });
     try {
       await client.request("workspace.register", { workspacePath: workspaceDir });
       await client.request("workspace.trust", { workspacePath: workspaceDir, trusted: true });

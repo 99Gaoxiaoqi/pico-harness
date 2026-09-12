@@ -7,7 +7,6 @@ import { RuntimeHostKernel } from "./host-kernel.js";
 export interface RuntimeHostCandidateOptions {
   rootPath: string;
   expectedRootId: string;
-  legacyConfigurationRoot?: string;
   idleGraceMs?: number;
   handshakeTimeoutMs?: number;
   operationDeadlineMs?: number;

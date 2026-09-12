@@ -108,13 +108,7 @@ Skill 正文支持 Claude Code 风格参数：`$ARGUMENTS` 保留完整参数，
 
 目录加入当前会话后，Read、Write、Edit、Glob、Grep、审批 diff 和文件历史会共享同一组工作区根。`/add-dir` 本身只更新当前会话，不修改配置文件。
 
-启动时也可以重复传入 CLI 参数：
-
-```bash
-pico --add-dir ../shared --add-dir /absolute/generated
-```
-
-需要长期配置时，在项目的 `.pico/config.json` 中声明：
+需要启动时生效或长期配置时，在项目的 `.pico/config.json` 中声明：
 
 ```json
 {

@@ -28,7 +28,6 @@ export async function resolveCliStartupSession(
       continue: { type: "boolean", short: "c" },
       resume: { type: "string" },
       fork: { type: "string" },
-      "fork-session": { type: "string" },
     },
   });
   const workDir =
@@ -39,11 +38,7 @@ export async function resolveCliStartupSession(
     ...(typeof values.session === "string" ? { session: values.session } : {}),
     ...(values["continue"] === true ? { continueSession: true } : {}),
     ...(typeof values.resume === "string" ? { resumeSession: values.resume } : {}),
-    ...(typeof values["fork"] === "string"
-      ? { forkSession: values["fork"] }
-      : typeof values["fork-session"] === "string"
-        ? { forkSession: values["fork-session"] }
-        : {}),
+    ...(typeof values["fork"] === "string" ? { forkSession: values["fork"] } : {}),
   });
 
   return { workDir, sessionSelection };

@@ -6,7 +6,7 @@
 
 Pico 当前存在两个不一致行为：显式 Skill 命令有时只展示或裸注入 `SKILL.md`，缺少“已激活并执行”的确定语义；写入工作区外文件时先弹审批，批准后又被 `safeResolve()` 拒绝。后者让审批成为无效操作。
 
-本设计采用 Claude Code 风格的权限边界：文件工具只能访问主工作区与显式加入的 additional directories。工作区外路径不能通过单次写入审批穿透，必须先用 `/add-dir`、启动参数 `--add-dir` 或项目配置加入工作区。
+本设计采用 Claude Code 风格的权限边界：文件工具只能访问主工作区与显式加入的 additional directories。工作区外路径不能通过单次写入审批穿透，必须先用 `/add-dir` 或项目配置加入工作区。
 
 ## 目标
 
@@ -14,7 +14,7 @@ Pico 当前存在两个不一致行为：显式 Skill 命令有时只展示或�
 2. `/skill <name> [args]` 与 `/<skill-name> [args]` 语义一致；`/skills` 只负责列出可用 Skill。
 3. Skill 参数遵循 Claude Code 的 `$ARGUMENTS`、`$ARGUMENTS[N]`、`$N` 规则；无占位符时追加 `ARGUMENTS: ...`。
 4. 所有路径型文件工具共享一份 Workspace Roots 能力，不再各自维护不一致的路径边界。
-5. `/add-dir` 支持当前 session 添加目录；`--add-dir` 支持启动时重复传入目录；`.pico/config.json` 支持 `permissions.additionalDirectories` 持久配置。
+5. `/add-dir` 支持当前 session 添加目录；`.pico/config.json` 支持 `permissions.additionalDirectories` 持久配置。
 6. TUI 对 Skill 激活和 additional directory 变更留下持久 transcript 条目；确定性路径拒绝不弹审批。
 
 ## 非目标
@@ -81,8 +81,7 @@ class WorkspaceRoots {
 目录来源按以下顺序合并并去重：
 
 1. `.pico/config.json` 的 `permissions.additionalDirectories`
-2. 重复的 CLI `--add-dir <path>`
-3. 当前 session 中执行 `/add-dir <path>` 的新增项
+2. 当前 session 中执行 `/add-dir <path>` 的新增项
 
 配置文件中的相对路径相对于主工作区解析。`/add-dir` 只修改当前 session，不写配置文件；命令无参数时列出当前 roots。恢复同一进程内 session 时复用 `SessionSettings.additionalDirectories`。
 

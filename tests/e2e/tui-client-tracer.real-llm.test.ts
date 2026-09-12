@@ -61,7 +61,7 @@ realModelTest(
     });
     const previousPicoHome = process.env.PICO_HOME;
     process.env.PICO_HOME = picoHome;
-    const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome });
+    const client = new LocalRuntimeClient({ runtimeHostRootPath: picoHome });
     const reporter = new TuiReporter();
     const runningStates: boolean[] = [];
     const runtime = new ClientSessionRuntime({

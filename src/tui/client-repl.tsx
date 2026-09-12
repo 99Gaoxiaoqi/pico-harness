@@ -30,7 +30,7 @@ import type { FileHistorySnapshotSummary, RewindMode } from "../cli/file-history
 import type { FileHistoryDiffStat } from "../safety/file-history.js";
 
 /**
- * TUI 客户端 tracer 入口（3-D Phase 2，`pico --client`）。
+ * TUI 客户端 tracer 入口。
  *
  * 薄壳：LocalRuntimeClient（kernel 模式，connectOrSpawn 拉起/连上常驻 daemon）+
  * ClientSessionRuntime（send/事件/审批核心，无 Ink 可测）+ 复用 <App> 展示层。

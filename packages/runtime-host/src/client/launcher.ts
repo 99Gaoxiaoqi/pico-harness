@@ -21,7 +21,6 @@ import {
 export interface DetachedCandidateInput {
   rootPath: string;
   expectedRootId: string;
-  legacyConfigurationRoot?: string;
   idleGraceMs?: number;
   handshakeTimeoutMs?: number;
   operationDeadlineMs?: number;
@@ -153,7 +152,6 @@ export function launchDetachedRuntimeHostCandidate(
   appendArgument(args, "--idle-grace-ms", input.idleGraceMs);
   appendArgument(args, "--handshake-timeout-ms", input.handshakeTimeoutMs);
   appendArgument(args, "--operation-deadline-ms", input.operationDeadlineMs);
-  appendArgument(args, "--legacy-configuration-root", input.legacyConfigurationRoot);
 
   // spawn() commits the side effect synchronously; spawned only reports that commit's outcome.
   const logSink = prepareCandidateLogSink(input);

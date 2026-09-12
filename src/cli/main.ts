@@ -19,7 +19,6 @@ import { LocalRuntimeClient, RuntimeClientError } from "../daemon/client.js";
 import { resolveCanonicalPicoHome } from "../daemon/endpoint.js";
 import { sleepForRetry } from "../provider/retry.js";
 import { primeTokenizer } from "../context/token-counter.js";
-import type { ProviderKind } from "../provider/factory.js";
 import { resolveThinkingEffort, type ThinkingEffort } from "../provider/thinking.js";
 import { ensureWorkspaceTrusted } from "../security/workspace-trust.js";
 import { startClientRepl, type ClientReplOptions } from "../tui/client-repl.js";
@@ -64,16 +63,9 @@ Options:
       --swarm                        Start with autonomous Swarm orchestration (exclusive with --graph)
   --resume <id>                      Resume a session by id
   --fork <id>                        Fork a saved session into a new session
-  --fork-session <id>                Alias for --fork
       --daemon-stop                  Stop the resident local daemon gracefully
-      --client                       Compatibility no-op: client mode is the default (Phase 4)
   -h, --help                         Show this help without starting the TUI
   -V, --version                      Show the installed version
-
-Compatibility options (accepted but not applied at daemon startup):
-  --provider <value>                 Ignored; choose a route with --model <provider/model>
-  --mcp-config <path>                Not supported; configure daemon MCP with Pico config files
-  --add-dir <path>                   Not supported at startup; use /add-dir after launch
 `;
 
 export interface CliRuntime {
@@ -92,36 +84,27 @@ export interface CliRuntime {
 }
 
 interface ParsedCliOptions {
-  provider: ProviderKind;
   thinkingEffort?: ThinkingEffort;
   dir?: string;
   model?: string;
-  mcpConfigPath?: string;
-  addDirs?: string[];
   graph: boolean;
   swarm: boolean;
   help: boolean;
   version: boolean;
   daemonStop: boolean;
-  client: boolean;
 }
 
 interface ParsedCliValues {
-  provider?: string;
   thinking?: string;
   dir?: string;
   model?: string;
-  "mcp-config"?: string;
-  "add-dir"?: string[];
   session?: string;
   continue?: boolean;
   graph?: boolean;
   swarm?: boolean;
   resume?: string;
   fork?: string;
-  "fork-session"?: string;
   "daemon-stop"?: boolean;
-  client?: boolean;
   help?: boolean;
   version?: boolean;
 }
@@ -156,21 +139,13 @@ export async function runCli(args: readonly string[], runtime: CliRuntime): Prom
     // 瘦客户端（connectOrSpawn 拉起/连上常驻 daemon），本进程零引擎装配。
     // 模型路由归 daemon（BYOK 旗标经 --model/--thinking 合并）；
     // --continue/--fork/-S 启动会话三式全支持；--graph 经
-    // session.settings.update 应用；--client 兼容保留（已是默认）。
+    // session.settings.update 应用。
     const clientSessionId =
       sessionSelection &&
       (sessionSelection.mode === "resume" || sessionSelection.mode === "continue")
         ? sessionSelection.sessionId
         : undefined;
     const forkFrom = sessionSelection?.mode === "fork" ? sessionSelection.sessionId : undefined;
-    if (options.provider !== "openai" && options.model === undefined) {
-      runtime.writeStderr(
-        "提示：--provider 由模型路由隐含决定（裸旗标无 daemon 等价物），请用 --model <provider/model> 指定路由。\n",
-      );
-    }
-    if (options.mcpConfigPath !== undefined || options.addDirs !== undefined) {
-      runtime.writeStderr("提示：--mcp-config/--add-dir 暂不支持（MCP 归 daemon 侧装配）。\n");
-    }
     await runtime.startClientRepl({
       workDir,
       ...(clientSessionId ? { sessionId: clientSessionId } : {}),
@@ -200,21 +175,16 @@ function parseCliOptions(args: readonly string[]): ParsedCliOptions {
     const parsed = parseArgs({
       args: [...args],
       options: {
-        provider: { type: "string", default: "openai" },
         thinking: { type: "string" },
         dir: { type: "string" },
         model: { type: "string" },
-        "mcp-config": { type: "string" },
-        "add-dir": { type: "string", multiple: true },
         session: { type: "string", short: "S" },
         continue: { type: "boolean", short: "c" },
         graph: { type: "boolean" },
         swarm: { type: "boolean" },
         resume: { type: "string" },
         fork: { type: "string" },
-        "fork-session": { type: "string" },
         "daemon-stop": { type: "boolean" },
-        client: { type: "boolean" },
         help: { type: "boolean", short: "h" },
         version: { type: "boolean", short: "V" },
       },
@@ -228,29 +198,18 @@ function parseCliOptions(args: readonly string[]): ParsedCliOptions {
     throw new CliUsageError("--graph 与 --swarm 不能同时使用，请选择一种编排模式。");
   }
 
-  const provider = values.provider;
-  if (!isProviderKind(provider)) {
-    throw new CliUsageError(
-      `不支持的 provider: ${String(provider)}。可选值: openai / claude / responses。`,
-    );
-  }
-
   const thinkingEffort =
     values.thinking === undefined ? undefined : resolveThinkingEffort(values.thinking);
 
   return {
-    provider,
     ...(thinkingEffort !== undefined ? { thinkingEffort } : {}),
     ...(typeof values.dir === "string" ? { dir: values.dir } : {}),
     ...(typeof values.model === "string" ? { model: values.model } : {}),
-    ...(typeof values["mcp-config"] === "string" ? { mcpConfigPath: values["mcp-config"] } : {}),
-    ...(Array.isArray(values["add-dir"]) ? { addDirs: values["add-dir"] } : {}),
     graph: values.graph === true,
     swarm: values.swarm === true,
     help: values.help === true,
     version: values.version === true,
     daemonStop: values["daemon-stop"] === true,
-    client: values.client === true,
   };
 }
 
@@ -284,10 +243,6 @@ function formatCliError(error: unknown): string {
   return `TUI 启动失败: ${error instanceof Error ? error.message : String(error)}`;
 }
 
-function isProviderKind(value: unknown): value is ProviderKind {
-  return value === "openai" || value === "claude" || value === "responses";
-}
-
 async function loadPackageVersion(): Promise<string> {
   const packagePath = new URL("../../package.json", import.meta.url);
   const parsed = JSON.parse(await readFile(packagePath, "utf8")) as { version?: unknown };
@@ -311,7 +266,7 @@ async function stopLocalDaemon(runtime: CliRuntime): Promise<number> {
     runtime.writeStdout("本机 Runtime daemon 未在运行。\n");
     return 0;
   }
-  const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome });
+  const client = new LocalRuntimeClient({ runtimeHostRootPath: picoHome });
   try {
     await client.shutdownDaemon();
   } catch (error) {
