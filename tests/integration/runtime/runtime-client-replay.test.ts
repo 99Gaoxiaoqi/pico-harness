@@ -146,7 +146,7 @@ test("Runtime client keeps a recovery fence after replay overflow", async (conte
   };
   let kernel = await RuntimeHostKernel.start({ owner, compositionFactory });
 
-  const client = new LocalRuntimeClient(undefined, {
+  const client = new LocalRuntimeClient({
     runtimeHostRootPath: picoHome,
     reconnectDelayMs: 50,
     maxReconnectDelayMs: 50,

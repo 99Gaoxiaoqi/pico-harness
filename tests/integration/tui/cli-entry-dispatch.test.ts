@@ -7,8 +7,7 @@ import type { CliStartupSession } from "../../../src/cli/session-args.js";
 /**
  * 3-D Phase 4/5：CLI 入口分派。交互进程内路径已退役（Phase 5），TUI 唯一
  * 形态是 daemon 瘦客户端；会话旗标三式（-S/--continue/--fork）与 --graph
- * 传递到 ClientReplOptions；缺口旗标（--mcp-config/--add-dir）显式提示不
- * 静默丢弃；--local 已入 RETIRED_OPTIONS（明确报错）。
+ * 传递到 ClientReplOptions；--local 已入 RETIRED_OPTIONS（明确报错）。
  */
 
 interface DispatchHarness {
@@ -59,7 +58,7 @@ test("cli dispatch: 默认（无旗标）走客户端瘦 TUI", async () => {
   assert.equal(harness.clientCalls[0]!.sessionId, undefined, "新会话不带 sessionId");
 });
 
-test("cli dispatch: --local 已退役明确报错；--client 兼容仍是客户端", async () => {
+test("cli dispatch: --local 已退役并给出明确诊断", async () => {
   const harness = harnessWithRuntime();
   assert.equal(await harness.run(["--local"]), 1, "--local 退役后是使用错误");
   assert.equal(harness.clientCalls.length, 0, "不触达任何 TUI");
@@ -67,9 +66,21 @@ test("cli dispatch: --local 已退役明确报错；--client 兼容仍是客户�
     harness.stderr.some((line) => line.includes("--local")),
     "报错应点名 --local",
   );
+});
 
-  assert.equal(await harness.run(["--client"]), 0);
-  assert.equal(harness.clientCalls.length, 1, "--client 兼容保留（已是默认）");
+test("cli dispatch: 已删除的兼容旗标按未知参数拒绝", async () => {
+  for (const [option, args] of [
+    ["--client", ["--client"]],
+    ["--provider", ["--provider", "claude"]],
+    ["--mcp-config", ["--mcp-config", "mcp.json"]],
+    ["--add-dir", ["--add-dir", "D:\\extra"]],
+    ["--fork-session", ["--fork-session", "source"]],
+  ] as const) {
+    const harness = harnessWithRuntime();
+    assert.equal(await harness.run([...args]), 1, `${option} 应被拒绝`);
+    assert.equal(harness.clientCalls.length, 0, `${option} 不应启动 TUI`);
+    assert.match(harness.stderr.join(""), new RegExp(`未知启动参数: ${option}`, "u"));
+  }
 });
 
 test("cli dispatch: 会话旗标三式传递（-S resume / --continue / --fork）", async () => {
@@ -100,21 +111,13 @@ test("cli dispatch: 会话旗标三式传递（-S resume / --continue / --fork�
   );
 });
 
-test("cli dispatch: BYOK/Graph 旗标传递与缺口旗标提示", async () => {
+test("cli dispatch: BYOK/Graph 旗标传递", async () => {
   const harness = harnessWithRuntime();
   await harness.run(["--model", "p1/m1", "--thinking", "high", "--graph"]);
   const call = harness.clientCalls.at(-1)!;
   assert.equal(call.model, "p1/m1");
   assert.equal(call.thinkingEffort, "high");
   assert.equal(call.graphMode, true);
-
-  await harness.run(["--mcp-config", "mcp.json", "--add-dir", "D:\\extra"]);
-  assert.ok(
-    harness.stderr.some((line) => line.includes("--mcp-config")),
-    "缺口旗标显式提示（不静默丢弃）",
-  );
-  const mcpCall = harness.clientCalls.at(-1)!;
-  assert.equal(mcpCall.graphMode, undefined);
 });
 
 test("cli dispatch: help/version 快速路径不起 TUI", async () => {
@@ -122,10 +125,9 @@ test("cli dispatch: help/version 快速路径不起 TUI", async () => {
   assert.equal(await harness.run(["--help"]), 0);
   const help = harness.stdout.join("");
   assert.ok(!help.includes("--local"), "help 不再列出 --local");
-  assert.match(help, /Compatibility options \(accepted but not applied at daemon startup\)/u);
-  assert.match(help, /--provider[\s\S]*Ignored; choose a route with --model/u);
-  assert.match(help, /--mcp-config[\s\S]*Not supported; configure daemon MCP/u);
-  assert.match(help, /--add-dir[\s\S]*Not supported at startup; use \/add-dir/u);
+  for (const removed of ["--client", "--provider", "--mcp-config", "--add-dir", "--fork-session"]) {
+    assert.ok(!help.includes(removed), `help 不应列出已删除的 ${removed}`);
+  }
   assert.equal(harness.clientCalls.length, 0);
   assert.equal(await harness.run(["--version"]), 0);
   assert.equal(harness.clientCalls.length, 0);

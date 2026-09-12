@@ -170,7 +170,7 @@ interface RuntimeTransportConnection {
     method: Method,
     params: RuntimeParams<Method>,
   ): Promise<RuntimeResult<Method>>;
-  /** 请求常驻 daemon 优雅关停（仅 kernel 承载传输支持；旧 socket 注入面不提供）。 */
+  /** 请求常驻 daemon 优雅关停。 */
   shutdownHost?(): Promise<void>;
   close(): void;
 }
@@ -179,9 +179,8 @@ interface RuntimeTransportConnection {
  * Shared local Runtime transport. Requests reuse one connection; every
  * long-lived subscription owns its own connection（kernel 承载下一连接一订阅）。
  *
- * 3-D Phase 5（2026-08-16）：唯一承载是 runtime-host kernel（connectOrSpawn 拉起
- * daemon candidate，runtime.request 通用桥接 + events.* 类型化桥接）。旧 socket
- * 传输（显式 endpoint 注入面 + LocalRuntimeDaemon）已随 in-process 路径退役。
+ * 唯一承载是 runtime-host kernel（connectOrSpawn 拉起 daemon candidate，
+ * runtime.request 通用桥接 + events.* 类型化桥接）。
  */
 export class LocalRuntimeClient implements RuntimeClient {
   private readonly requestConnection: RuntimeTransportConnection;
@@ -198,12 +197,7 @@ export class LocalRuntimeClient implements RuntimeClient {
   private readonly sessionDisconnectListeners = new Set<() => void>();
   private closed = false;
 
-  constructor(_endpoint?: unknown, options: LocalRuntimeClientOptions = {}) {
-    if (_endpoint !== undefined && _endpoint !== null) {
-      throw new Error(
-        "显式 endpoint 注入已退役（3-D Phase 5）：LocalRuntimeClient 唯一承载是 runtime-host kernel，用 options.runtimeHostRootPath 指定根路径。",
-      );
-    }
+  constructor(options: LocalRuntimeClientOptions = {}) {
     this.reconnectDelayMs = positiveDelay(options.reconnectDelayMs, DEFAULT_RECONNECT_DELAY_MS);
     this.maxReconnectDelayMs = Math.max(
       this.reconnectDelayMs,

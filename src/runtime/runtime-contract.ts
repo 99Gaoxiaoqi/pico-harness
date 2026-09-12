@@ -72,7 +72,7 @@ export interface RunAgentCliOptions extends RuntimeRunOptions {
   orchestrationMode?: "default" | "graph" | "swarm";
   /** Enable per-request JSON trace export. Also enabled by PICO_TRACE=1. */
   trace?: boolean;
-  /** MCP 配置文件路径(--mcp-config)。提供则启动时连接所有 MCP server 并注册工具 */
+  /** MCP 配置文件路径。提供则启动时连接所有 MCP server 并注册工具 */
   mcpConfigPath?: string;
   /** Steer text injected once before the run starts. */
   steer?: string;

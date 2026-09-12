@@ -6,6 +6,7 @@ import { test } from "node:test";
 import {
   connectOrSpawnRuntimeHost,
   connectOrSpawnRuntimeHostWithDependencies,
+  parseRuntimeHostCandidateArguments,
   resolveStorageRoot,
   RUNTIME_HOST_PROTOCOL_VERSION,
 } from "../../../packages/runtime-host/src/index.js";
@@ -20,6 +21,21 @@ const TEST_CANDIDATE_INPUT = {
   rootPath: tmpdir(),
   expectedRootId: "0".repeat(64),
 };
+
+test("runtime-host spawn: candidate CLI rejects the removed legacy root option", () => {
+  assert.throws(
+    () =>
+      parseRuntimeHostCandidateArguments([
+        "--root",
+        tmpdir(),
+        "--expected-root-id",
+        "0".repeat(64),
+        "--legacy-configuration-root",
+        tmpdir(),
+      ]),
+    /Invalid Runtime Host candidate argument: --legacy-configuration-root/u,
+  );
+});
 
 test("runtime-host spawn: teardown owns a late candidate before it ever registers", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "pico-runtime-host-late-candidate-"));

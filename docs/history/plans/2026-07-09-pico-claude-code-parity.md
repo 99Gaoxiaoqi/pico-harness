@@ -44,7 +44,7 @@
 - [x] 默认启动时创建新的 session id，不再按工作目录固定复用同一个 session。
 - [x] 增加 `--continue` / `-c`：继续当前项目最近一次 session。
 - [x] 增加 `--resume <session-id>` / `-r <session-id>`：恢复指定 session。
-- [x] 增加 `--fork-session <session-id>`：从指定 session 派生新 session id。
+- [x] 增加 `--fork <session-id>`：从指定 session 派生新 session id。
 - [x] 把 session 选择结果显示给 TUI header/status 使用。
 
 **验收命令：**

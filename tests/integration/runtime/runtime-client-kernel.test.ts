@@ -31,7 +31,7 @@ import {
 } from "../helpers/test-runtime-daemon.js";
 
 /**
- * 3-B-3 kernel 承载客户端实盘验证：默认构造（不注入 endpoint）的 LocalRuntimeClient
+ * 3-B-3 kernel 承载客户端实盘验证：LocalRuntimeClient
  * 经 connectOrSpawn 拉起 daemon candidate，请求走 runtime.request 通用桥接、订阅走
  * events.* 类型化桥接；host 错误码反查回 daemon 码（INVALID_PARAMS cursor 自动重置）；
  * daemon 进程被杀后下一次请求触发重生。
@@ -69,7 +69,7 @@ async function startKernelClientHarness(t: {
     workspacePath: await realpath(workspaceDir),
     candidates,
     createClient: (options = {}) =>
-      new LocalRuntimeClient(undefined, {
+      new LocalRuntimeClient({
         ...options,
         runtimeHostRootPath: picoHome,
         candidateLauncher: candidates.launcher,

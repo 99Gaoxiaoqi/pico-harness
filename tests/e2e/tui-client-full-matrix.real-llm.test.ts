@@ -85,7 +85,7 @@ async function createScenarioWorkspace(
   );
   const previousPicoHome = process.env.PICO_HOME;
   process.env.PICO_HOME = picoHome;
-  const client = new LocalRuntimeClient(undefined, { runtimeHostRootPath: picoHome });
+  const client = new LocalRuntimeClient({ runtimeHostRootPath: picoHome });
   let trackedSessionId: string | undefined;
   // node:test 按注册顺序执行同级 after hook，因此必须把依赖 client/注册文件的
   // 清理合并到同一个 hook，并确保最后才恢复环境、删除临时 root。

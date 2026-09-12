@@ -44,7 +44,7 @@ test("client session runtime over a real spawned daemon: send + lifecycle + reco
     delete process.env.PICO_HOME;
   });
 
-  const client = new LocalRuntimeClient(undefined, {
+  const client = new LocalRuntimeClient({
     runtimeHostRootPath: picoHome,
     candidateLauncher: candidates.launcher,
   });
@@ -115,7 +115,7 @@ test("client commands over a real spawned daemon: slash chains (dead-endpoint mo
     delete process.env.PICO_HOME;
   });
 
-  const client = new LocalRuntimeClient(undefined, {
+  const client = new LocalRuntimeClient({
     runtimeHostRootPath: picoHome,
     candidateLauncher: candidates.launcher,
   });

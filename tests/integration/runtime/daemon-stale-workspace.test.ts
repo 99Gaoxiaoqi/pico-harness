@@ -41,7 +41,7 @@ test("workspace.list tolerates registrations whose directory no longer exists", 
     await rm(root, { recursive: true, force: true }).catch(() => undefined);
   });
 
-  const client = new LocalRuntimeClient(undefined, {
+  const client = new LocalRuntimeClient({
     runtimeHostRootPath: picoHome,
     candidateLauncher: candidates.launcher,
   });
@@ -95,7 +95,7 @@ test("workspace.list isolates a registered workspace with legacy storage", async
     await rm(root, { recursive: true, force: true }).catch(() => undefined);
   });
 
-  const client = new LocalRuntimeClient(undefined, {
+  const client = new LocalRuntimeClient({
     runtimeHostRootPath: picoHome,
     candidateLauncher: candidates.launcher,
   });
