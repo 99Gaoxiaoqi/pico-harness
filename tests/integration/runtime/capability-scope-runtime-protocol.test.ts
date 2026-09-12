@@ -6,6 +6,7 @@ import {
   DESKTOP_RUNTIME_METHODS,
   DESKTOP_RUNTIME_SCHEMA_CAPABILITY,
   DESKTOP_RUNTIME_SCHEMA_REVISION,
+  isRuntimeNotification,
   isRuntimeMethod,
   LOCAL_RUNTIME_PROTOCOL_VERSION,
   parseDesktopRuntimeResult,
@@ -338,6 +339,21 @@ test("runtime schema and config notifications advertise scoped capabilities with
     },
   });
   assert.equal(JSON.stringify(serialized).includes("secret"), false);
+  assert.equal(isRuntimeNotification(serialized), true);
+  assert.equal(
+    isRuntimeNotification({
+      ...serialized,
+      payload: { version: 1 },
+    }),
+    false,
+  );
+  assert.equal(
+    isRuntimeNotification({
+      ...serialized,
+      payload: { scope: "user", capabilities: ["skills"] },
+    }),
+    false,
+  );
 });
 
 function workspaceParams(): { readonly workspacePath: string } {

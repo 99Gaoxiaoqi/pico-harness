@@ -260,6 +260,7 @@ export type {
 
 export {
   isEphemeralRuntimeNotificationTopic,
+  isRuntimeNotification,
   createRuntimeNotification,
   serializeRuntimeNotification,
   isDiscoveryRuntimeNotification,

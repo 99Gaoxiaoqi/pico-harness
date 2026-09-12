@@ -101,14 +101,17 @@ export type RuntimeNotificationMap = {
   };
   readonly "job.updated": { readonly job: RuntimeJob };
   readonly "job.runFinished": { readonly jobId: JobId; readonly run: RuntimeRun };
-  readonly "config.updated": {
-    /** Legacy project-config version retained for older clients. */
-    readonly version?: number;
-    readonly scope?: "user" | "project";
-    readonly revision?: string;
-    readonly providerIds?: readonly string[];
-    readonly capabilities?: readonly ("skills" | "mcp")[];
-  };
+  readonly "config.updated":
+    | {
+        readonly scope: "user";
+        readonly revision: string;
+        readonly providerIds: readonly string[];
+      }
+    | {
+        readonly scope: "user";
+        readonly revision: string;
+        readonly capabilities: readonly ("skills" | "mcp" | "subagents")[];
+      };
   readonly "usage.updated": { readonly usage: JsonObject };
   readonly "runtime.error": {
     readonly code: RuntimeErrorCode;
@@ -211,10 +214,30 @@ function isRuntimeNotificationEnvelope(value: Record<string, unknown>): boolean 
 export function isRuntimeNotification(value: Record<string, unknown>): boolean {
   if (!isRuntimeNotificationEnvelope(value)) return false;
   if (value.topic === "discovery.updated") return isDiscoveryRuntimeNotification(value);
+  if (value.topic === "config.updated") return isConfigRuntimeNotification(value);
   if (typeof value.topic === "string" && value.topic.startsWith("memory.")) {
     return isMemoryRuntimeNotification(value);
   }
   return true;
+}
+
+export function isConfigRuntimeNotification(
+  value: unknown,
+): value is RuntimeNotification<"config.updated"> {
+  if (!isJsonObject(value) || !isRuntimeNotificationEnvelope(value)) return false;
+  if (value.topic !== "config.updated" || !isJsonObject(value.payload)) return false;
+  const payload = value.payload;
+  if (payload.scope !== "user" || !nonEmptyString(payload.revision)) return false;
+  if (hasExactKeys(payload, ["scope", "revision", "providerIds"])) {
+    return Array.isArray(payload.providerIds) && payload.providerIds.every(nonEmptyString);
+  }
+  if (!hasExactKeys(payload, ["scope", "revision", "capabilities"])) return false;
+  return (
+    Array.isArray(payload.capabilities) &&
+    payload.capabilities.every((capability) =>
+      ["skills", "mcp", "subagents"].includes(String(capability)),
+    )
+  );
 }
 
 export function isDiscoveryRuntimeNotification(
