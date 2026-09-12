@@ -8,8 +8,9 @@ import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
 import { PluginManagementService } from "../../../src/plugins/plugin-management-service.js";
 import { resolvePluginScopeRoots } from "../../../src/plugins/plugin-manager.js";
 import { loadPluginRuntimeSnapshot } from "../../../src/plugins/plugin-runtime-snapshot.js";
+import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
 
-test("materialized plugin Hook trust survives a new snapshot and is revoked on dispose", async (context) => {
+test("materialized plugin Hook requires current workspace trust and is revoked on dispose", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-plugin-hook-trust-"));
   const workspace = join(root, "workspace");
   const picoHome = join(root, "pico-home");
@@ -73,15 +74,29 @@ test("materialized plugin Hook trust survives a new snapshot and is revoked on d
     proposal.resourceDigest,
     "the Hook authority carries the PluginTrustStore fingerprint identity",
   );
+  const workspaceTrustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
   const firstRuntime = await createSessionHookRuntime({
     workDir: workspace,
     picoHome,
     sessionId: "plugin-hook-first",
     env,
     extensionSources: first.hookSources,
+    workspaceTrustStore,
   });
   context.after(async () => await firstRuntime.dispose());
   assert.equal(firstRuntime.service.currentSnapshot().handlers.PreToolUse[0]?.trusted, true);
+  const untrustedDispatch = await firstRuntime.service.dispatch("PreToolUse", {
+    tool_name: "read_file",
+    tool_input: {},
+  });
+  assert.equal(
+    await exists(marker),
+    false,
+    "untrusted workspace must keep the Hook from executing",
+  );
+  assert.ok(untrustedDispatch.diagnostics?.some((item) => /信任已失效/u.test(item.message)));
+
+  await workspaceTrustStore.trust(canonicalWorkspace);
   const firstDispatch = await firstRuntime.service.dispatch("PreToolUse", {
     tool_name: "read_file",
     tool_input: {},
@@ -99,6 +114,7 @@ test("materialized plugin Hook trust survives a new snapshot and is revoked on d
     picoHome,
     sessionId: "plugin-component-hook",
     env,
+    workspaceTrustStore,
   });
   await componentRuntime.activateComponentSource({
     kind: "skill",
@@ -137,6 +153,7 @@ test("materialized plugin Hook trust survives a new snapshot and is revoked on d
     sessionId: "plugin-hook-second",
     env,
     extensionSources: second.hookSources,
+    workspaceTrustStore,
   });
   context.after(async () => await secondRuntime.dispose());
   assert.equal(secondRuntime.service.currentSnapshot().handlers.PreToolUse[0]?.trusted, true);

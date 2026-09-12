@@ -40,10 +40,9 @@ export interface SessionHookRuntimeOptions extends Pick<
   trustStore?: HookTrustStore;
   /**
    * workspace trust 锚（2026-08-17 威胁模型对齐）：executable hooks 在每次 dispatch
-   * 边界复验工作区信任，撤销信任后自然失效（memory 同款每边界复验）。未注入时维持
-   * 现状（测试/headless 兼容）。
+   * 边界复验工作区信任，撤销信任后自然失效（memory 同款每边界复验）。
    */
-  workspaceTrustStore?: WorkspaceTrustStore;
+  workspaceTrustStore: WorkspaceTrustStore;
   processSandbox?: {
     profile?: SandboxProfile;
     config?: Partial<SandboxConfig>;
@@ -148,7 +147,6 @@ export async function createSessionHookRuntime(
           handler: entry.handler,
         })) === "active";
       if (!fingerprintActive) return false;
-      if (!options.workspaceTrustStore) return true;
       const canonical = await options.workspaceTrustStore.canonicalize(options.workDir);
       return await options.workspaceTrustStore.isTrusted(canonical);
     },

@@ -3332,6 +3332,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       workDir: canonical,
       picoHome: this.picoHome,
       env: this.env,
+      workspaceTrustStore: this.trustStore,
       ...(pluginSnapshot.hookSources.length > 0
         ? { extensionSources: pluginSnapshot.hookSources }
         : {}),
