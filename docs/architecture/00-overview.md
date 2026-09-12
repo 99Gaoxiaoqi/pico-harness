@@ -59,6 +59,7 @@ $PICO_HOME/workspaces/<workspace-id>/
 ├── traces/
 ├── evidence/                           # 旧引用兼容或专用资产，不是新 ToolResult 主路径
 ├── fork-staging/
+├── plugins/                            # workspace 私有 local-scope Plugin
 ├── plugins.json
 └── hooks-state.json
 ```

@@ -49,8 +49,7 @@ export function resolvePluginScopeRoots(
   return Object.freeze({
     user: paths.home.plugins,
     project: paths.project.plugins,
-    // Local is intentionally outside .pico so it remains an explicit, workspace-local override.
-    local: join(paths.canonicalWorkDir, ".claw", "plugins"),
+    local: paths.workspace.plugins,
   });
 }
 

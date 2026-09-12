@@ -158,7 +158,7 @@ export class HookConfigReloader {
           // candidate 读取与 watcher 基线捕获之间发生了变化；交给串行尾重新加载，
           // 不能把较新的磁盘状态误认成旧 candidate 的监视基线。
           for (const path of watcherBaseline.exactPaths) this.schedule(path, generation);
-          this.schedule(resolve(this.options.workDir, ".claw"), generation);
+          this.schedule(resolve(this.options.workDir, ".pico"), generation);
           return;
         }
         const guard = await this.options.beforeSwap?.({
@@ -379,7 +379,7 @@ export class HookConfigReloader {
       if (!isPreparedActive() || next === hookifyFingerprint.value) return false;
       hookifyFingerprint.value = next;
       dirtySinceBaseline = true;
-      this.schedule(resolve(this.options.workDir, ".claw"), generation, next);
+      this.schedule(resolve(this.options.workDir, ".pico"), generation, next);
       return true;
     };
     const prepared: PreparedHookWatchers = {
@@ -530,7 +530,7 @@ export class HookConfigReloader {
       this.scheduledFingerprints.set(path, fingerprint);
     }
     this.scheduledFingerprints.set(
-      resolve(this.options.workDir, ".claw"),
+      resolve(this.options.workDir, ".pico"),
       next.hookifyFingerprint.value,
     );
     for (const watcher of previous) safeCloseWatcher(watcher);
@@ -544,7 +544,7 @@ export class HookConfigReloader {
     for (const [path, fingerprint] of accepted.fingerprints) {
       if (this.scheduledFingerprints.get(path) === fingerprint) this.changed.delete(path);
     }
-    const hookifyPath = resolve(this.options.workDir, ".claw");
+    const hookifyPath = resolve(this.options.workDir, ".pico");
     if (this.scheduledFingerprints.get(hookifyPath) === accepted.hookifyFingerprint) {
       this.changed.delete(hookifyPath);
     }
@@ -628,7 +628,7 @@ function statsFingerprint(stats: Stats): string {
 }
 
 async function hookifyFilesFingerprint(workDir: string): Promise<string> {
-  const directory = resolve(workDir, ".claw");
+  const directory = resolve(workDir, ".pico");
   const names = await readdir(directory).catch(() => [] as string[]);
   const hookifyNames = names
     .filter((name) => isHookifyFile(resolve(directory, name), workDir))
@@ -641,7 +641,7 @@ async function hookifyFilesFingerprint(workDir: string): Promise<string> {
 
 function isHookifyFile(path: string, workDir: string): boolean {
   return (
-    dirname(path) === resolve(workDir, ".claw") &&
+    dirname(path) === resolve(workDir, ".pico") &&
     /^hookify\.[a-z0-9-]+\.local\.md$/.test(basename(path))
   );
 }

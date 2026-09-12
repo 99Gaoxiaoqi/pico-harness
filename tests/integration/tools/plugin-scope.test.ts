@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { test } from "node:test";
+import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
 import {
   describePluginScopeRegistry,
   isPluginPathWithinScope,
@@ -33,6 +34,7 @@ test("plugin scopes resolve to isolated roots and deterministic priority winners
   assert.equal(rootsA.user, rootsB.user);
   assert.notEqual(rootsA.project, rootsB.project);
   assert.notEqual(rootsA.local, rootsB.local);
+  assert.equal(rootsA.local, resolvePicoPaths(workspaceA, { picoHome }).workspace.plugins);
   assert.equal(pluginScopePriority("user"), 1);
   assert.equal(pluginScopePriority("project"), 2);
   assert.equal(pluginScopePriority("local"), 3);
@@ -44,6 +46,7 @@ test("plugin scopes resolve to isolated roots and deterministic priority winners
   assert.equal(registry.userStatePath, join(picoHome, "plugins.json"));
   assert.match(registry.workspaceStatePath, /workspaces/u);
   assert.equal(registry.roots.local, rootsA.local);
+  assert.equal(registry.roots.local, join(picoHome, "workspaces", registry.workspaceId, "plugins"));
 
   const winners = selectPluginScopeWinners([
     { id: "formatter", scope: "user" as const },

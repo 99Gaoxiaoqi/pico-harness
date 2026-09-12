@@ -41,7 +41,6 @@ export type HookSourceKind =
   | "user"
   | "project"
   | "local"
-  | "legacy"
   | "skill"
   | "agent"
   | "managed"
@@ -58,7 +57,7 @@ export interface HookSource {
 }
 
 interface HookHandlerBase {
-  /** Canonical 配置单位为秒；legacy 加载器会在归一化时换算为毫秒。 */
+  /** Canonical 配置单位为秒。 */
   timeout?: number;
   /** 归一化后的实际超时，运行时只读取此字段。 */
   timeoutMs?: number;

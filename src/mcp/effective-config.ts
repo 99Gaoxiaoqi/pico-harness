@@ -17,7 +17,7 @@ export interface EffectiveMcpServerDefinition {
   readonly name: string;
   readonly config: McpServerConfig;
   readonly scope: EffectiveMcpDefinitionScope;
-  readonly sourceId: "user" | "project" | "project-legacy";
+  readonly sourceId: "user" | "project";
   readonly sourceLabel: string;
   readonly readOnly: boolean;
   readonly effective: boolean;
@@ -88,8 +88,8 @@ export async function resolveTrustedEffectiveMcpSources(
       config,
       scope: "project" as const,
       sourceId: project.sourceId,
-      sourceLabel: project.sourceId === "project" ? "项目级" : "项目级（旧版兼容）",
-      readOnly: project.sourceId === "project-legacy",
+      sourceLabel: "项目级",
+      readOnly: false,
       effective: true,
     })),
   ].sort(
@@ -107,7 +107,7 @@ export async function resolveTrustedEffectiveMcpSources(
 async function readProjectConfig(workspacePath: string): Promise<{
   readonly config: McpConfig;
   readonly revision: string;
-  readonly sourceId: "project" | "project-legacy";
+  readonly sourceId: "project";
 }> {
   const resolution = await resolveProjectMcpConfigPath(workspacePath);
   if (!resolution.exists) {
@@ -121,7 +121,7 @@ async function readProjectConfig(workspacePath: string): Promise<{
   return {
     config: parseMcpConfig(JSON.parse(raw) as unknown, resolution.path),
     revision: createHash("sha256").update(raw).digest("hex"),
-    sourceId: resolution.source === "pico" ? "project" : "project-legacy",
+    sourceId: "project",
   };
 }
 

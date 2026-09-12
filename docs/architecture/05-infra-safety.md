@@ -143,8 +143,7 @@ resolveProjectMcpConfigPath(.pico/mcp.json)
   → closeAll(退出时并行 close)
 ```
 
-`.pico/mcp.json` 是 Pico 原生配置。旧 `.claw/mcp.json` 只在原生文件不存在时作为只读
-兼容输入，所有新建和修改都以 `.pico` 为目标。
+`.pico/mcp.json` 是 Pico 原生项目配置，所有新建和修改都以该路径为目标。
 
 ### 工具名限定
 

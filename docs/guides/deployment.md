@@ -44,7 +44,7 @@ TUI 和 Desktop 从同一个 `PICO_HOME`（默认 `~/.pico`）读取设备级配
 `PICO_HOME` 也参与本地 daemon endpoint 命名；两个不同的 `PICO_HOME` 不会误连到对方的
 Runtime。模型 Provider 与默认路由只来自用户级 `config.json`；工作区 `.pico/config.json`
 不再覆盖它们。MCP 合并 `$PICO_HOME/mcp.json` 与受信工作区 `.pico/mcp.json`，项目同名定义
-优先；旧 `.claw/mcp.json` 仅作兼容回退。
+优先。
 
 每个 workspace 的 Session、TaskRun、控制面和跨域 operation 写入：
 

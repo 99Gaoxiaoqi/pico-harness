@@ -42,7 +42,7 @@ stop/list/attach 保持在同一个 Terminal 控制器模块，关闭标签仍�
 ## 数据所有权
 
 - `$PICO_HOME`：RuntimeEvent Session 账本、信任、daemon 注册等跨 CLI/App 的统一状态根。
-- 工作区 `.pico`：项目配置，受工作区信任边界约束；`.claw` 仅是只读 legacy 来源。Runtime 数据不写入项目目录。
+- 工作区 `.pico`：项目配置，受工作区信任边界约束。Runtime 数据不写入项目目录。
 - Electron `userData`：当前只持久化窗口 bounds 与 maximized 状态；主题和更新通道不在该
   store 的已实现范围内。
 - Provider 密钥：Runtime 只返回状态与 `credentialRef`；保存时原始值通过类型化 write-only 请求送到 daemon，不进入响应、事件、Renderer Store、持久配置或日志。发布构建默认禁用持久密钥；macOS `/usr/bin/security` 仅是显式开启的不安全本地开发兼容层，正式版本需由签名的 Pico Credential Broker/XPC 直接访问 Keychain。

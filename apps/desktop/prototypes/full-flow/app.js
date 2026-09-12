@@ -848,7 +848,8 @@ document.addEventListener("click", (event) => {
     },
     "open-settings": () => routeTo("settings", { tab: "providers" }),
     "open-editor": () => showToast("将在外部编辑器中打开当前文件"),
-    "export-trace": () => showToast("Trace 导出已准备：.claw/traces/trace-7F2A.json"),
+    "export-trace": () =>
+      showToast("Trace 导出已准备：PICO_HOME/workspaces/…/traces/trace-7F2A.json"),
     archive: () => showToast("任务已归档 · Session、Trace 与 Usage 仍然保留"),
     "new-automation": () => updateRouteParams({ dialog: "new-automation" }),
     "create-automation": () => {

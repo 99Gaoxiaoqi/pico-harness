@@ -2086,7 +2086,7 @@ export async function executeAgentRuntime(
         registry.register(tool);
       }
     }
-    // 前台只使用会话级 HookService；legacy .claw source 也由它统一加载并校验信任。
+    // 前台只使用会话级 HookService；所有项目 source 都由它统一加载并校验信任。
     if (activeHookService) {
       registry.setHookService?.(activeHookService);
     }

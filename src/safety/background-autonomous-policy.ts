@@ -359,48 +359,7 @@ async function loadStrictHooksConfig(workDir: string): Promise<StrictHooksConfig
     }
   }
 
-  const settingsPath = join(workDir, ".claw", "settings.json");
-  let raw: string;
-  try {
-    raw = await readFile(settingsPath, "utf8");
-  } catch (error) {
-    if (isErrnoCode(error, "ENOENT")) return { config: {} };
-    throw new BackgroundPolicyViolationError(
-      "hook_config_invalid",
-      `无法读取 Hook 配置: ${settingsPath}`,
-      { cause: error },
-    );
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw) as unknown;
-  } catch (error) {
-    throw new BackgroundPolicyViolationError(
-      "hook_config_invalid",
-      `Hook 配置不是合法 JSON: ${settingsPath}`,
-      { cause: error },
-    );
-  }
-  if (!isRecord(parsed)) {
-    throw new BackgroundPolicyViolationError("hook_config_invalid", "settings.json 必须是对象。");
-  }
-  const hooks = parsed["hooks"];
-  if (hooks === undefined || hooks === null) return { config: {} };
-  if (!isRecord(hooks)) {
-    throw new BackgroundPolicyViolationError("hook_config_invalid", "hooks 必须是对象。");
-  }
-
-  const result: HooksConfig = {};
-  for (const [event, groups] of Object.entries(hooks)) {
-    if (event !== "PreToolUse" && event !== "PostToolUse" && event !== "PostToolUseFailure") {
-      throw new BackgroundPolicyViolationError(
-        "hook_config_invalid",
-        `无法验证的 Hook 事件: ${event}`,
-      );
-    }
-    result[event] = assertHookGroups(groups, event);
-  }
-  return { config: result };
+  return { config: {} };
 }
 
 function strictNativeToolHooks(config: HooksConfig): HooksConfig {
@@ -472,76 +431,6 @@ async function assertNativeHooksTrusted(
       }
     }
   }
-}
-
-function assertHookGroups(value: unknown, event: string): HookMatcherGroup[] {
-  if (!Array.isArray(value)) {
-    throw new BackgroundPolicyViolationError("hook_config_invalid", `${event} Hook 必须是数组。`);
-  }
-  return value.map((group, groupIndex) => {
-    if (!isRecord(group) || !Array.isArray(group["hooks"]) || group["hooks"].length === 0) {
-      throw new BackgroundPolicyViolationError(
-        "hook_config_invalid",
-        `${event}[${groupIndex}] 必须包含非空 hooks 数组。`,
-      );
-    }
-    const matcher = group["matcher"];
-    if (matcher !== undefined && typeof matcher !== "string") {
-      throw new BackgroundPolicyViolationError(
-        "hook_config_invalid",
-        `${event}[${groupIndex}].matcher 必须是字符串。`,
-      );
-    }
-    if (
-      typeof matcher === "string" &&
-      matcher !== "" &&
-      matcher !== "*" &&
-      !/^[A-Za-z0-9_|]+$/.test(matcher)
-    ) {
-      try {
-        new RegExp(matcher);
-      } catch (error) {
-        throw new BackgroundPolicyViolationError(
-          "hook_config_invalid",
-          `${event}[${groupIndex}].matcher 不是合法正则。`,
-          { cause: error },
-        );
-      }
-    }
-    return {
-      ...(typeof matcher === "string" ? { matcher } : {}),
-      hooks: group["hooks"].map((handler, handlerIndex) =>
-        assertHookHandler(handler, event, groupIndex, handlerIndex),
-      ),
-    };
-  });
-}
-
-function assertHookHandler(
-  value: unknown,
-  event: string,
-  groupIndex: number,
-  handlerIndex: number,
-): HookHandler {
-  if (
-    !isRecord(value) ||
-    value["type"] !== "command" ||
-    !isNonEmptyString(value["command"]) ||
-    (value["timeout"] !== undefined &&
-      (typeof value["timeout"] !== "number" ||
-        !Number.isFinite(value["timeout"]) ||
-        value["timeout"] <= 0))
-  ) {
-    throw new BackgroundPolicyViolationError(
-      "hook_config_invalid",
-      `${event}[${groupIndex}].hooks[${handlerIndex}] 无法验证。`,
-    );
-  }
-  return {
-    type: "command",
-    command: value["command"],
-    ...(typeof value["timeout"] === "number" ? { timeout: value["timeout"] } : {}),
-  };
 }
 
 export interface StrictHookResult {
@@ -790,10 +679,6 @@ function parseToolInput(argumentsJson: string): unknown {
 function jsonStringField(argumentsJson: string, field: string): string | undefined {
   const input = parseToolInput(argumentsJson);
   return isRecord(input) && typeof input[field] === "string" ? input[field] : undefined;
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0;
 }
 
 function stringValue(value: unknown): string | undefined {

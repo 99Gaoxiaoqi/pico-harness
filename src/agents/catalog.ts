@@ -116,7 +116,7 @@ const BUILTIN_PROFILES: readonly CatalogAgentProfile[] = Object.freeze([
 
 /**
  * 加载统一 Agent 目录。后加入者整条覆盖同名项，禁止把不同来源的 prompt、工具或模型拼接。
- * 优先级：project Pico > project legacy > project Claude > user Pico > user Claude > builtin。
+ * 优先级：project Pico > project Claude > user Pico > user Claude > builtin。
  */
 export async function loadAgentCatalog(
   options: LoadAgentCatalogOptions,
@@ -133,13 +133,6 @@ export async function loadAgentCatalog(
   });
   const sources = [
     agentSource("project-pico", "project", "pico-native", paths.project.agents, 50),
-    agentSource(
-      "project-claw-legacy",
-      "project",
-      "pico-legacy",
-      join(options.workDir, ".claw", "agents.yaml"),
-      45,
-    ),
     ...(options.includeClaudeProjectResources === false
       ? []
       : [

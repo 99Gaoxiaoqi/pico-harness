@@ -97,7 +97,7 @@ test("temporary workspace authority allocates one private directory per new task
   });
   assert.equal(restarted.matches(first), true);
   assert.equal(restarted.matches(second), true);
-  assert.equal(restarted.matches(join(picoHome, "temporary-workspace")), true);
+  assert.equal(restarted.matches(join(picoHome, "temporary-workspace")), false);
   assert.equal(restarted.matches(join(picoHome, "temporary-workspace-not-a-uuid")), false);
   assert.notEqual(await restarted.ensure(), first);
 });

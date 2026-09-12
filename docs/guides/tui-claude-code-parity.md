@@ -35,7 +35,7 @@ npx tsx --env-file=/path/to/pico-harness/.env \
 PICO_TRACE=1 pico
 ```
 
-开启后，每次请求都会把 span tree 写到当前项目的 `.claw/traces/trace_<session>_<timestamp>.json`。TUI 会在本轮结束后追加一条 system message，直接显示保存路径；内部 Runtime 调用可从 `executeAgentRuntime()` 的 `result.tracePath` 读取同一路径。
+开启后，每次请求都会把 span tree 写到 `$PICO_HOME/workspaces/<workspace-id>/traces/trace_<session>_<timestamp>.json`。TUI 会在本轮结束后追加一条 system message，直接显示保存路径；内部 Runtime 调用可从 `executeAgentRuntime()` 的 `result.tracePath` 读取同一路径。
 
 ## Session 启动语义
 
@@ -74,7 +74,7 @@ Pico 的 CLI session 以当前项目目录为边界：
 | `/rewind`      | 打开用户消息选择器，按提示词/时间/文件变化恢复 code、conversation 或二者。                                           |
 | `/agents`      | 列出内置 Agent 和项目 `.claude/agents/*.md`。                                                                        |
 | `/agent`       | 把任务委派给指定 Agent：`/agent <name> <task>`。                                                                     |
-| `/skills`      | 列出当前项目 `.claw/skills` 中可用 Skill。                                                                           |
+| `/skills`      | 列出当前项目 `.pico/skills` 与兼容的 Claude 资源中可用 Skill。                                                       |
 | `/skill`       | 显式激活 Skill 并交给 Agent 执行：`/skill <name> [arguments]`。                                                      |
 | `/add-dir`     | 列出或添加当前会话可访问的工作目录：`/add-dir [directory]`。                                                         |
 
@@ -126,7 +126,7 @@ Skill 正文支持 Claude Code 风格参数：`$ARGUMENTS` 保留完整参数，
 
 Task ID、TaskRegistry、worktree supervisor 和合并队列是主 Agent 的内部能力，不作为用户 slash command 暴露。目标产品契约中，可写 Worker 默认在 Shared Folder 内按 `writeScopes` 和文件 OCC 协作；高冲突、动态写、强隔离或独立交付时才升级到 branch/worktree 和 OS 沙箱。没有 Git 只关闭 branch、commit、merge、PR 与 worktree，不关闭 Shared Worker。当前 Worker 代码仍强制 worktree，属于迁移阶段；切换默认值前必须完成 OCC 验收，详见[多 Agent 共享工作区并发规范](../history/architecture/08-multi-agent-concurrency.md)。
 
-`.claw/tasks/state.json` 持久化内部任务账本，并将重启后遗留的 `running` 记录明确收口为失败；它不会复活上一个 Node/LLM 进程。宿主提交/合并不执行仓库 hooks、fsmonitor、签名程序或凭据助手；检测到自定义 clean/smudge/process filter 或 merge driver 时 fail-closed。
+任务与运行事实持久化在 `$PICO_HOME/workspaces/<workspace-id>/pico.sqlite`，并将重启后遗留的运行记录明确收口；它不会复活上一个 Node/LLM 进程。宿主提交/合并不执行仓库 hooks、fsmonitor、签名程序或凭据助手；检测到自定义 clean/smudge/process filter 或 merge driver 时 fail-closed。
 
 ### 项目配置与键位
 

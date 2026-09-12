@@ -92,11 +92,9 @@ export async function applyHookifyProposal(
 
 export async function loadHookifyRules(workDir: string): Promise<readonly HookifyRule[]> {
   const paths = resolvePicoPaths(workDir);
-  const legacy = await loadHookifyRulesFromDirectory(resolve(workDir, ".claw"));
-  const native = await loadHookifyRulesFromDirectory(paths.project.root);
-  const byId = new Map(legacy.map((rule) => [rule.id, rule]));
-  for (const rule of native) byId.set(rule.id, rule);
-  return [...byId.values()].sort((left, right) => left.id.localeCompare(right.id));
+  return (await loadHookifyRulesFromDirectory(paths.project.root)).sort((left, right) =>
+    left.id.localeCompare(right.id),
+  );
 }
 
 async function loadHookifyRulesFromDirectory(directory: string): Promise<HookifyRule[]> {

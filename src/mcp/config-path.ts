@@ -2,9 +2,8 @@ import { lstat, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export const PICO_PROJECT_MCP_RELATIVE_PATH = ".pico/mcp.json";
-export const LEGACY_PROJECT_MCP_RELATIVE_PATH = ".claw/mcp.json";
 
-export type ProjectMcpConfigSource = "pico" | "claw-compat";
+export type ProjectMcpConfigSource = "pico";
 
 export interface ProjectMcpConfigPathResolution {
   readonly path: string;
@@ -13,8 +12,7 @@ export interface ProjectMcpConfigPathResolution {
 }
 
 /**
- * Resolves the read authority for project MCP configuration. Pico-native config always wins;
- * legacy `.claw` is consulted only when the native path is absent and is never a write target.
+ * Resolves the read authority for Pico-native project MCP configuration.
  */
 export async function resolveProjectMcpConfigPath(
   workspacePath: string,
@@ -25,12 +23,6 @@ export async function resolveProjectMcpConfigPath(
   const picoConfig = await resolveSafeConfigFile(realWorkspace, picoPath);
   if (picoConfig !== undefined) {
     return { path: picoConfig, source: "pico", exists: true };
-  }
-
-  const legacyPath = join(requestedWorkspace, LEGACY_PROJECT_MCP_RELATIVE_PATH);
-  const legacyConfig = await resolveSafeConfigFile(realWorkspace, legacyPath);
-  if (legacyConfig !== undefined) {
-    return { path: legacyConfig, source: "claw-compat", exists: true };
   }
 
   return { path: picoPath, source: "pico", exists: false };
