@@ -26,7 +26,6 @@ import {
   resultNonNegativeInteger,
   resultOneOf,
   resultPositiveInteger,
-  resultShape,
   resultString,
   stringParam,
 } from "./validation.js";
@@ -229,18 +228,38 @@ export type RuntimeConversationItem = (
       readonly kind: "tool";
       readonly name: string;
       readonly args: string;
-      readonly status: "running" | "success" | "error";
+      readonly status: "running";
       readonly summary?: string;
-      /** Stable projector metadata used to reconcile tool start/result records. */
-      readonly data?: JsonObject;
-      /** Present only after a canonical tool.result.recorded fact exists. */
-      readonly result?: RuntimeToolResultEnvelope;
+      /** Stable projector metadata used to reconcile the current tool start. */
+      readonly data: JsonObject & {
+        readonly toolCallId: string;
+        readonly providerCallId: string;
+        readonly entryId: string;
+      };
+      readonly result?: never;
+      readonly at?: number;
+    })
+  | (JsonObject & {
+      readonly id: string;
+      readonly kind: "tool";
+      readonly name: string;
+      readonly args: string;
+      readonly status: "success" | "error";
+      readonly summary?: string;
+      /** Stable projector metadata retained from the matching tool start when available. */
+      readonly data: JsonObject & {
+        readonly providerCallId: string;
+        readonly toolCallId?: string;
+        readonly entryId?: string;
+      };
+      /** Canonical tool.result.recorded projection for every terminal tool. */
+      readonly result: RuntimeToolResultEnvelope;
       readonly at?: number;
     })
   | (JsonObject & {
       readonly id: string;
       readonly kind: "runBoundary";
-      readonly runId?: RunId;
+      readonly runId: RunId;
       readonly status: RuntimeRunStatus;
       readonly startedAt: number;
       readonly finishedAt?: number;
@@ -249,12 +268,39 @@ export type RuntimeConversationItem = (
     })
   | (JsonObject & {
       readonly id: string;
-      readonly kind: "approval" | "prompt" | "changes" | "goal";
+      readonly kind: "approval";
       readonly title: string;
       readonly detail?: string;
-      readonly state?: string;
+      readonly state: "waiting" | "allow_once" | "allow_session" | "deny";
       readonly at?: number;
-      readonly data?: JsonObject;
+      readonly data: JsonObject;
+    })
+  | (JsonObject & {
+      readonly id: string;
+      readonly kind: "prompt";
+      readonly title: string;
+      readonly detail?: string;
+      readonly state: "waiting" | "answered";
+      readonly at?: number;
+      readonly data: JsonObject;
+    })
+  | (JsonObject & {
+      readonly id: string;
+      readonly kind: "changes";
+      readonly title: string;
+      readonly detail?: string;
+      readonly state: "ready" | "applied";
+      readonly at?: number;
+      readonly data: JsonObject;
+    })
+  | (JsonObject & {
+      readonly id: string;
+      readonly kind: "goal";
+      readonly title: string;
+      readonly detail?: string;
+      readonly state: "active";
+      readonly at?: number;
+      readonly data: JsonObject;
     })
   | (JsonObject & {
       readonly id: string;
@@ -410,70 +456,52 @@ const runtimeToolResultEnvelopeResult: RuntimeResultRule = (value, path) => {
 const runtimeConversationItemResult: RuntimeResultRule = (value, path) => {
   if (!isJsonObject(value)) throw invalidResult(`${path} 必须是对象`);
   const kind = value["kind"];
-  resultShape(
-    {
-      id: resultString,
-      kind: resultOneOf([
-        "userMessage",
-        "assistantMessage",
-        "systemNotice",
-        "error",
-        "thinking",
-        "skill",
-        "plan",
-        "tool",
-        "runBoundary",
-        "approval",
-        "prompt",
-        "changes",
-        "subagent",
-        "goal",
-      ]),
-    },
-    {
-      at: resultFiniteNumber,
-      truncated: resultOneOf([true]),
-      originalBytes: resultFiniteNumber,
-    },
-  )(value, path);
+  if (typeof kind !== "string") throw invalidResult(`${path}.kind 必须是字符串`);
+  const exactItem = (
+    required: Readonly<Record<string, RuntimeResultRule>>,
+    optional: Readonly<Record<string, RuntimeResultRule>> = {},
+  ): void => {
+    exactResultShape(
+      { id: resultString, kind: resultOneOf([kind]), ...required },
+      {
+        at: resultFiniteNumber,
+        truncated: resultOneOf([true]),
+        originalBytes: resultPositiveInteger,
+        ...optional,
+      },
+    )(value, path);
+    if ((value["truncated"] === true) !== (value["originalBytes"] !== undefined)) {
+      throw invalidResult(`${path}.truncated 与 originalBytes 必须成对出现`);
+    }
+  };
+
   if (kind === "userMessage" || kind === "systemNotice" || kind === "error") {
-    resultShape({ content: resultString })(value, path);
+    exactItem({ content: resultString });
     return;
   }
   if (kind === "assistantMessage" || kind === "thinking") {
-    resultShape({ content: resultString }, { runId: resultString, turnId: resultString })(
-      value,
-      path,
-    );
+    exactItem({ content: resultString }, { runId: resultString, turnId: resultString });
     return;
   }
   if (kind === "skill") {
-    resultShape({
+    exactItem({
       name: resultString,
       args: resultString,
       trigger: resultOneOf(["user-slash", "model-tool"]),
-    })(value, path);
+    });
     return;
   }
-  if (
-    kind === "plan" ||
-    ["approval", "prompt", "changes", "subagent", "goal"].includes(String(kind))
-  ) {
-    resultShape(
+  if (kind === "plan") {
+    exactItem(
       { title: resultString },
-      {
-        detail: resultString,
-        state: resultString,
-        ...(kind === "subagent" ? { name: resultString } : {}),
-      },
-    )(value, path);
+      { detail: resultString, state: resultOneOf(["waiting", "active", "done", "failed"]) },
+    );
     return;
   }
   if (kind === "tool") {
-    exactResultShape(
+    const status = value["status"];
+    exactItem(
       {
-        id: resultString,
-        kind: resultOneOf(["tool"]),
         name: resultString,
         args: resultString,
         status: resultOneOf(["running", "success", "error"]),
@@ -482,20 +510,128 @@ const runtimeConversationItemResult: RuntimeResultRule = (value, path) => {
         summary: resultString,
         data: resultJsonObject,
         result: runtimeToolResultEnvelopeResult,
-        at: resultFiniteNumber,
-        truncated: resultOneOf([true]),
-        originalBytes: resultNonNegativeInteger,
       },
-    )(value, path);
+    );
+    const data = value["data"];
+    const result = value["result"];
+    if (status === "running") {
+      if (result !== undefined) {
+        throw invalidResult(`${path}.result 不得出现在 running 工具上`);
+      }
+      exactResultShape({
+        toolCallId: resultNonEmptyString,
+        providerCallId: resultNonEmptyString,
+        entryId: resultNonEmptyString,
+      })(data, `${path}.data`);
+      return;
+    }
+    if (!isJsonObject(result)) {
+      throw invalidResult(`${path}.result 是终态工具的必填字段`);
+    }
+    exactResultShape(
+      { providerCallId: resultNonEmptyString },
+      { toolCallId: resultNonEmptyString, entryId: resultNonEmptyString },
+    )(data, `${path}.data`);
+    if (result["toolName"] !== value["name"]) {
+      throw invalidResult(`${path}.result.toolName 与 name 不一致`);
+    }
+    if (isJsonObject(data) && result["toolCallId"] !== data["providerCallId"]) {
+      throw invalidResult(`${path}.result.toolCallId 与 data.providerCallId 不一致`);
+    }
+    if (
+      (status === "success" && result["status"] !== "succeeded") ||
+      (status === "error" && result["status"] === "succeeded")
+    ) {
+      throw invalidResult(`${path}.result.status 与 status 不一致`);
+    }
     return;
   }
   if (kind === "runBoundary") {
-    resultShape(
-      { status: runtimeRunStatusResult, startedAt: resultFiniteNumber },
-      { runId: resultString, finishedAt: resultFiniteNumber, error: resultString },
-    )(value, path);
+    exactItem(
+      {
+        runId: resultNonEmptyString,
+        status: runtimeRunStatusResult,
+        startedAt: resultFiniteNumber,
+      },
+      { finishedAt: resultFiniteNumber, error: resultString },
+    );
+    if (value["error"] !== undefined && value["status"] !== "failed") {
+      throw invalidResult(`${path}.error 只能出现在 failed 运行边界上`);
+    }
     return;
   }
+  if (kind === "approval") {
+    exactItem(
+      {
+        title: resultString,
+        state: resultOneOf(["waiting", "allow_once", "allow_session", "deny"]),
+        data: resultJsonObject,
+      },
+      { detail: resultString },
+    );
+    if (!isJsonObject(value["data"])) return;
+    if (value["state"] === "waiting") {
+      if (value["data"]["kind"] !== "tool" && value["data"]["kind"] !== "plan") {
+        throw invalidResult(`${path}.data.kind 必须是 tool 或 plan`);
+      }
+    } else if (value["data"]["decision"] !== value["state"]) {
+      throw invalidResult(`${path}.data.decision 与 state 不一致`);
+    }
+    return;
+  }
+  if (kind === "prompt") {
+    exactItem(
+      {
+        title: resultString,
+        state: resultOneOf(["waiting", "answered"]),
+        data: resultJsonObject,
+      },
+      { detail: resultString },
+    );
+    return;
+  }
+  if (kind === "changes") {
+    exactItem(
+      {
+        title: resultString,
+        state: resultOneOf(["ready", "applied"]),
+        data: resultJsonObject,
+      },
+      { detail: resultString },
+    );
+    return;
+  }
+  if (kind === "goal") {
+    exactItem(
+      {
+        title: resultString,
+        state: resultOneOf(["active"]),
+        data: resultJsonObject,
+      },
+      { detail: resultString },
+    );
+    return;
+  }
+  if (kind === "subagent") {
+    exactItem(
+      {
+        title: resultString,
+        state: resultOneOf([
+          "queued",
+          "running",
+          "completed",
+          "partial",
+          "failed",
+          "timed_out",
+          "cancelled",
+        ]),
+        data: resultJsonObject,
+      },
+      { name: resultString, detail: resultString },
+    );
+    return;
+  }
+  throw invalidResult(`${path}.kind 不是已知 transcript item kind`);
 };
 
 const transcriptItemRecordResult: RuntimeResultRule = exactResultShape({

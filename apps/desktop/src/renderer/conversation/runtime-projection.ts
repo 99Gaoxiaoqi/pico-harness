@@ -140,23 +140,85 @@ export function approvalFromPlanControlSnapshot(
 }
 
 function runtimeToolResultEnvelope(value: unknown): RuntimeToolResultEnvelope | undefined {
+  const exactKeys = (
+    record: JsonRecord,
+    required: readonly string[],
+    optional: readonly string[],
+  ) => {
+    const allowed = new Set([...required, ...optional]);
+    return (
+      required.every((key) => Object.prototype.hasOwnProperty.call(record, key)) &&
+      Object.keys(record).every((key) => allowed.has(key))
+    );
+  };
   if (
     !isRecord(value) ||
+    !exactKeys(
+      value,
+      [
+        "version",
+        "toolCallId",
+        "toolName",
+        "status",
+        "rawSizeBytes",
+        "sha256",
+        "deliveryTruncated",
+        "projection",
+      ],
+      ["evidence"],
+    ) ||
     value.version !== 1 ||
     typeof value.toolCallId !== "string" ||
+    !value.toolCallId ||
     typeof value.toolName !== "string" ||
-    typeof value.status !== "string" ||
-    typeof value.rawSizeBytes !== "number" ||
+    !value.toolName ||
+    (value.status !== "succeeded" &&
+      value.status !== "failed" &&
+      value.status !== "rejected" &&
+      value.status !== "cancelled" &&
+      value.status !== "interrupted") ||
+    !Number.isSafeInteger(value.rawSizeBytes) ||
+    (value.rawSizeBytes as number) < 0 ||
     typeof value.sha256 !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(value.sha256) ||
     typeof value.deliveryTruncated !== "boolean" ||
     !isRecord(value.projection) ||
+    !exactKeys(value.projection, ["version", "mode", "text", "strategy", "truncated"], []) ||
     value.projection.version !== 1 ||
-    typeof value.projection.mode !== "string" ||
+    (value.projection.mode !== "full" &&
+      value.projection.mode !== "preview" &&
+      value.projection.mode !== "synthetic") ||
     typeof value.projection.text !== "string" ||
     typeof value.projection.strategy !== "string" ||
+    !value.projection.strategy ||
     typeof value.projection.truncated !== "boolean"
   ) {
     return undefined;
+  }
+  if (
+    value.projection.mode === "synthetic" &&
+    (value.status === "succeeded" || value.status === "failed")
+  ) {
+    return undefined;
+  }
+  if (value.evidence !== undefined) {
+    if (
+      !isRecord(value.evidence) ||
+      !exactKeys(value.evidence, ["uri", "ref"], []) ||
+      typeof value.evidence.uri !== "string" ||
+      !isRecord(value.evidence.ref) ||
+      !exactKeys(value.evidence.ref, ["schemaVersion", "contentHash", "sessionId", "kind"], []) ||
+      value.evidence.ref.schemaVersion !== 2 ||
+      typeof value.evidence.ref.contentHash !== "string" ||
+      !/^[a-f0-9]{64}$/u.test(value.evidence.ref.contentHash) ||
+      typeof value.evidence.ref.sessionId !== "string" ||
+      !value.evidence.ref.sessionId ||
+      value.evidence.ref.kind !== "tool-exchange" ||
+      value.evidence.uri !==
+        `pico://evidence/${encodeURIComponent(value.evidence.ref.sessionId)}/${value.evidence.ref.contentHash}`
+    ) {
+      return undefined;
+    }
   }
   return value as unknown as RuntimeToolResultEnvelope;
 }
@@ -233,16 +295,29 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
     };
   }
   if (item.kind === "tool") {
+    const status = item.status;
     const result = runtimeToolResultEnvelope(item.result);
+    const runningData = isRecord(item.data) ? item.data : undefined;
+    if (
+      (status !== "running" && status !== "success" && status !== "error") ||
+      (status === "running" && (!runningData || !stringValue(runningData.toolCallId))) ||
+      (status === "running" && result !== undefined) ||
+      (status !== "running" &&
+        (!result ||
+          result.toolName !== item.name ||
+          (status === "success" ? result.status !== "succeeded" : result.status === "succeeded")))
+    ) {
+      return undefined;
+    }
     return {
       id,
       kind: "tool",
       toolName: stringValue(item.name, "tool"),
-      toolCallId: stringValue(item.providerCallId) || undefined,
+      toolCallId: status === "running" ? stringValue(runningData?.toolCallId) : result?.toolCallId,
       title: stringValue(item.name, "工具调用"),
       detail: stringValue(item.args) || undefined,
-      output: result?.projection.text || stringValue(item.summary) || undefined,
-      state: item.status === "success" ? "done" : item.status === "error" ? "failed" : "active",
+      output: status === "running" ? undefined : result?.projection.text || undefined,
+      state: status === "success" ? "done" : status === "error" ? "failed" : "active",
       ...(result ? { result } : {}),
       ...meta,
     };
@@ -263,13 +338,25 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
     };
   }
   if (item.kind === "runBoundary") {
-    const status = stringValue(item.status);
+    const status = item.status;
+    if (
+      status !== "queued" &&
+      status !== "running" &&
+      status !== "pause_requested" &&
+      status !== "paused" &&
+      status !== "cancelling" &&
+      status !== "cancelled" &&
+      status !== "failed" &&
+      status !== "succeeded"
+    ) {
+      return undefined;
+    }
     const viewStatus =
       status === "failed"
         ? "failed"
         : status === "cancelled"
           ? "interrupted"
-          : status === "succeeded" || status === "completed"
+          : status === "succeeded"
             ? "completed"
             : "started";
     const labels = {
@@ -286,9 +373,7 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
       status: viewStatus,
       label: labels[viewStatus],
       ...(duration ? { duration } : {}),
-      ...(stringValue(item.detail ?? item.error)
-        ? { detail: stringValue(item.detail ?? item.error) }
-        : {}),
+      ...(stringValue(item.error) ? { detail: stringValue(item.error) } : {}),
       ...meta,
     };
   }
@@ -316,7 +401,15 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
   }
   if (item.kind === "approval") {
     const data = isRecord(item.data) ? item.data : {};
-    const decision = stringValue(data.decision ?? item.state);
+    const decision = item.state;
+    if (
+      decision !== "waiting" &&
+      decision !== "allow_once" &&
+      decision !== "allow_session" &&
+      decision !== "deny"
+    ) {
+      return undefined;
+    }
     const runId = stringValue(data.runId);
     const approval =
       data.kind === "tool" && runId
@@ -355,9 +448,9 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
       title: stringValue(item.title, "需要你的批准"),
       detail: stringValue(item.detail, "Runtime 请求执行受保护操作。"),
       state:
-        decision === "deny" || decision === "denied"
+        decision === "deny"
           ? "denied"
-          : decision === "allow_once" || decision === "allow_session" || decision === "allowed"
+          : decision === "allow_once" || decision === "allow_session"
             ? "allowed"
             : "pending",
       ...meta,
@@ -365,13 +458,14 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
   }
   if (item.kind === "prompt") {
     const data = isRecord(item.data) ? item.data : {};
-    const state = stringValue(item.state);
+    const state = item.state;
+    if (state !== "waiting" && state !== "answered") return undefined;
     return {
       id: structuredItemId("prompt", data, id),
       kind: "prompt",
       question: stringValue(item.title, "Pico 需要你的回答"),
       detail: stringValue(item.detail) || undefined,
-      state: state === "answered" || state === "resolved" ? "answered" : "pending",
+      state: state === "answered" ? "answered" : "pending",
       ...meta,
     };
   }
@@ -569,8 +663,7 @@ export function resolveApprovalState(
     ? workspaceSessionKey({ workspacePath: input.workspacePath, sessionId })
     : undefined;
   const conversation = conversationKey ? current.conversations[conversationKey] : undefined;
-  const state: "allowed" | "denied" =
-    input.decision === "deny" || input.decision === "denied" ? "denied" : "allowed";
+  const state: "allowed" | "denied" = input.decision === "deny" ? "denied" : "allowed";
 
   if (!sessionId || !conversationKey || !conversation) {
     return {
