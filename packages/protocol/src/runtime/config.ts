@@ -56,7 +56,7 @@ export type RuntimeProviderProfile = RuntimeProviderInput & {
   readonly fingerprint: string;
   readonly credentialStatus: RuntimeCredentialStatus;
   readonly credentialSource: RuntimeCredentialSource;
-  /** A durable config or legacy keychain credential exists. */
+  /** A durable config or provider-scoped system credential exists. */
   readonly storedCredentialPresent: boolean;
 };
 
