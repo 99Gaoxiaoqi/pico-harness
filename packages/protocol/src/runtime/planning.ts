@@ -236,7 +236,7 @@ const runtimePlanProposalResult = resultShape(
   { overview: resultString, risks: resultStringArray },
 );
 
-const runtimePlanProjectionResult = resultShape(
+export const runtimePlanProjectionResult = resultShape(
   {
     sessionId: resultString,
     sessionSequence: resultFiniteNumber,

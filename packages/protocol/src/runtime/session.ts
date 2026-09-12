@@ -233,7 +233,7 @@ export const runtimeRunResult = resultShape(
   { sessionId: resultString, finishedAt: resultFiniteNumber, error: resultString },
 );
 
-const runtimeSessionSettingsResult = exactResultShape(
+export const runtimeSessionSettingsResult = exactResultShape(
   {
     sessionId: resultString,
     provider: resultOneOf(["openai", "claude", "responses"]),

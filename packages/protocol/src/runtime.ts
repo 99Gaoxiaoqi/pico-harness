@@ -242,8 +242,11 @@ export type {
 
 export {
   isEphemeralRuntimeNotificationTopic,
+  isRuntimeNotificationTopic,
   isRuntimeNotification,
+  parseRuntimeNotification,
   createRuntimeNotification,
+  RUNTIME_NOTIFICATION_TOPICS,
   serializeRuntimeNotification,
   isDiscoveryRuntimeNotification,
   isApprovalRequestedRuntimeNotification,

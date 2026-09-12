@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createRuntimeNotification, type RuntimeNotification } from "@pico/protocol";
+import {
+  createRuntimeNotification,
+  type RuntimeNotification,
+  type RuntimeNotificationTopic,
+} from "@pico/protocol";
 import { DaemonEventReporter } from "../../../src/tui/daemon-event-reporter.js";
 import { buildTranscriptLayout } from "../../../src/tui/transcript-layout.js";
 import type { TranscriptEntry } from "../../../src/presentation/transcript-event-store.js";
@@ -13,7 +17,7 @@ import { TuiReporter } from "../../../src/tui/tui-reporter.js";
  */
 
 function notification(
-  topic: RuntimeNotification["topic"],
+  topic: RuntimeNotificationTopic,
   payload: Record<string, unknown>,
   runId = "run_1",
 ): RuntimeNotification {
