@@ -87,6 +87,7 @@ test("session list hides admitted children across workspaces and outcomes while 
               modelRouteId: "test/test",
               collaborationMode: "agent",
               permissionMode: "ask",
+              orchestrationMode: "default",
               thinkingEffort: "off",
               thinkingEffortExplicit: false,
               additionalDirectories: [],

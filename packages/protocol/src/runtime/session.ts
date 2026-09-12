@@ -46,7 +46,7 @@ export type RuntimeSessionSettings = {
   readonly sessionId: SessionId;
   readonly provider: RuntimeProviderKind;
   readonly model: string;
-  readonly modelRouteId?: string;
+  readonly modelRouteId: string;
   readonly collaborationMode: RuntimeCollaborationMode;
   readonly orchestrationMode: RuntimeOrchestrationMode;
   readonly permissionMode: RuntimePermissionMode;
@@ -238,6 +238,7 @@ const runtimeSessionSettingsResult = exactResultShape(
     sessionId: resultString,
     provider: resultOneOf(["openai", "claude", "responses"]),
     model: resultString,
+    modelRouteId: resultString,
     collaborationMode: resultOneOf(["agent", "plan"]),
     orchestrationMode: resultOneOf(["default", "graph", "swarm"]),
     permissionMode: resultOneOf(["ask", "auto", "full-access"]),
@@ -245,7 +246,7 @@ const runtimeSessionSettingsResult = exactResultShape(
     thinkingEffortExplicit: resultBoolean,
     reasoningLevels: resultStringArray,
   },
-  { modelRouteId: resultString, additionalDirectories: resultStringArray },
+  { additionalDirectories: resultStringArray },
 );
 
 export const runtimeQueuedInputResult = exactResultShape({

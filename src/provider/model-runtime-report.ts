@@ -116,10 +116,7 @@ export function createModelUsageReport(
     totalCalls,
   );
   const promptTokens = usageField(usage.totalPromptTokens, usageReports, totalCalls);
-  const cacheReadCoverageComplete =
-    totalCalls > 0 &&
-    usage.totalCacheReadReports === totalCalls &&
-    usage.totalCacheHitCalls !== null;
+  const cacheReadCoverageComplete = totalCalls > 0 && usage.totalCacheReadReports === totalCalls;
   return {
     routeId: route.id,
     providerCalls: totalCalls,
@@ -138,7 +135,7 @@ export function createModelUsageReport(
     },
     cache: {
       requestHitRate: cacheReadCoverageComplete
-        ? (usage.totalCacheHitCalls ?? 0) / usage.totalCacheReadReports
+        ? usage.totalCacheHitCalls / usage.totalCacheReadReports
         : null,
       promptTokenReuseRate:
         promptTokens.status !== "reported" ||

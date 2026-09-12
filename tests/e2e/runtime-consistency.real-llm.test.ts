@@ -102,6 +102,7 @@ realModelTest(
       modelRouteId: "removed-provider/removed-model",
       collaborationMode: "agent",
       permissionMode: "full-access",
+      orchestrationMode: "default",
       thinkingEffort: "off",
       thinkingEffortExplicit: false,
       additionalDirectories: [],

@@ -35,12 +35,21 @@ test("new task defaults reject the removed combined mode field", () => {
 test("session settings projection requires the current split permission axes", () => {
   assert.deepEqual(
     parseSessionSettings({
-      model: "coder",
-      collaborationMode: "agent",
-      permissionMode: "ask",
+      settings: {
+        sessionId: "session-1",
+        provider: "openai",
+        modelRouteId: "openai/coder",
+        model: "coder",
+        collaborationMode: "agent",
+        orchestrationMode: "default",
+        permissionMode: "ask",
+        thinkingEffort: "off",
+        thinkingEffortExplicit: false,
+        reasoningLevels: [],
+      },
     }),
     {
-      modelRouteId: undefined,
+      modelRouteId: "openai/coder",
       model: "coder",
       collaborationMode: "agent",
       orchestrationMode: "default",
@@ -50,6 +59,19 @@ test("session settings projection requires the current split permission axes", (
     },
   );
   assert.equal(parseSessionSettings({ model: "coder", mode: "full-access" }), undefined);
+  assert.equal(
+    parseSessionSettings({
+      settings: {
+        model: "coder",
+        collaborationMode: "agent",
+        orchestrationMode: "default",
+        permissionMode: "ask",
+        thinkingEffort: "off",
+        reasoningLevels: [],
+      },
+    }),
+    undefined,
+  );
 });
 
 test("new task falls back to the fail-closed Runtime default when user config is absent", async () => {

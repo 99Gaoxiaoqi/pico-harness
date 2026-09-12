@@ -96,7 +96,7 @@ export interface SessionContextView {
 }
 
 export interface SessionSettingsView {
-  readonly modelRouteId?: string | undefined;
+  readonly modelRouteId: string;
   readonly model: string;
   readonly collaborationMode: "agent" | "plan";
   readonly orchestrationMode: "default" | "graph" | "swarm";

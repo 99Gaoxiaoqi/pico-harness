@@ -475,7 +475,6 @@ test("Desktop usage parser reads canonical cache fields and preserves zero value
       cacheReadTokens: 0,
       cacheWriteTokens: 5,
       uncachedInputTokens: 10,
-      cachedTokens: 0,
       cacheRequestHitRate: 0,
       cachePromptTokenReuseRate: 0,
       cacheReadToWriteRatio: 0,
@@ -575,24 +574,6 @@ test("/model usage reports session cache hit and token ratios", () => {
     ).cache.requestHitRate,
     null,
     "missing provider usage must keep the request hit rate unknown",
-  );
-
-  assert.equal(
-    createModelUsageReport(
-      {
-        id: "openai/cache-test",
-        providerId: "openai",
-        provider: "openai",
-        model: "cache-test",
-        baseURL: "https://api.openai.com/v1",
-        apiKeyEnv: "OPENAI_API_KEY",
-        source: "config",
-        capabilities: resolveModelRouteCapabilities("openai", "cache-test", undefined),
-      },
-      { ...usage, totalCacheHitCalls: null },
-    ).cache.requestHitRate,
-    null,
-    "legacy snapshots without a hit-call counter must not be reported as zero percent",
   );
 });
 
