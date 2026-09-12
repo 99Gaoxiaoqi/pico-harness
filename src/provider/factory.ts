@@ -2,8 +2,6 @@
 
 import type { ProviderConfig } from "./config.js";
 import { AiSdkProvider } from "./ai-sdk-provider.js";
-import { ClaudeProvider } from "./claude.js";
-import { OpenAIProvider } from "./openai.js";
 import type { LLMProvider } from "./interface.js";
 import { coordinateReasoningLevel, type ReasoningLevel } from "./reasoning-capability.js";
 import { CapabilityPreflightProvider } from "./capability-preflight.js";
@@ -56,13 +54,11 @@ export function createRawProvider(
   let provider: LLMProvider;
   switch (kind) {
     case "openai":
-      provider = new OpenAIProvider(cfg, profile);
-      break;
     case "responses":
       provider = new AiSdkProvider(kind, cfg, profile);
       break;
     case "claude":
-      provider = new ClaudeProvider(cfg, profile);
+      provider = new AiSdkProvider(kind, cfg, profile);
       break;
   }
   provider = withProviderErrorRedaction(provider, [cfg.apiKey]);

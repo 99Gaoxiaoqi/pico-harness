@@ -5,7 +5,7 @@ import {
   OPENCODE_FREE_ROUTE_ID,
 } from "../../src/input/default-provider.js";
 import { loadModelRouter } from "../../src/provider/model-router.js";
-import { OpenAIProvider } from "../../src/provider/openai.js";
+import { AiSdkProvider } from "../../src/provider/ai-sdk-provider.js";
 
 // Explicit opt-in: sends only a synthetic, non-sensitive prompt to the public free endpoint.
 test(
@@ -25,7 +25,7 @@ test(
     const selected = router.providerConfig(OPENCODE_FREE_ROUTE_ID);
     assert.equal(selected.config.auth, "none");
     assert.equal(selected.config.apiKey, "");
-    const provider = new OpenAIProvider({
+    const provider = new AiSdkProvider("openai", {
       ...selected.config,
       sessionId: "pico-public-free-smoke",
     });

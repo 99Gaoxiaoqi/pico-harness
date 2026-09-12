@@ -4,7 +4,7 @@ import { parseModelProviderConfigs } from "../../../src/input/pico-config.js";
 import { createProvider } from "../../../src/provider/factory.js";
 import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
 import { loadModelRouter } from "../../../src/provider/model-router.js";
-import { OpenAIProvider } from "../../../src/provider/openai.js";
+import { AiSdkProvider } from "../../../src/provider/ai-sdk-provider.js";
 
 function streamResponse(chunks: Uint8Array[]): Response {
   return new Response(
@@ -171,7 +171,7 @@ test("OpenAI-compatible calls without route capabilities do not guess an output-
     });
   };
 
-  const provider = new OpenAIProvider({
+  const provider = new AiSdkProvider("openai", {
     baseURL: "https://provider.invalid/v1",
     apiKey: "test-key",
     model: "compatible-model",
@@ -307,7 +307,7 @@ test("OpenAI stream requests and consumes the terminal Usage-only chunk", async 
   };
 
   const deltas: string[] = [];
-  const response = await new OpenAIProvider({
+  const response = await new AiSdkProvider("openai", {
     baseURL: "https://provider.invalid/v1",
     apiKey: "test-key",
     model: "test-model",
@@ -350,7 +350,7 @@ test("OpenAI stream keeps reasoning separate from the final answer", async (cont
 
   const textDeltas: string[] = [];
   const reasoningDeltas: string[] = [];
-  const response = await new OpenAIProvider({
+  const response = await new AiSdkProvider("openai", {
     baseURL: "https://provider.invalid/v1",
     apiKey: "test-key",
     model: "test-model",
@@ -385,7 +385,7 @@ test("OpenAI-compatible routes omit stream_options unless explicitly enabled", a
     );
   };
 
-  const response = await new OpenAIProvider({
+  const response = await new AiSdkProvider("openai", {
     baseURL: "https://provider.invalid/v1",
     apiKey: "test-key",
     model: "legacy-compatible-model",
@@ -424,7 +424,7 @@ test("OpenAI stream accepts CRLF, bare CR, and SSE fields across chunk boundarie
     ]);
 
   const deltas: string[] = [];
-  const response = await new OpenAIProvider({
+  const response = await new AiSdkProvider("openai", {
     baseURL: "https://provider.invalid/v1",
     apiKey: "test-key",
     model: "test-model",
@@ -483,7 +483,7 @@ test("OpenAI stream consumes the final event at EOF without a trailing blank lin
     ]);
 
   const deltas: string[] = [];
-  const response = await new OpenAIProvider({
+  const response = await new AiSdkProvider("openai", {
     baseURL: "https://provider.invalid/v1",
     apiKey: "test-key",
     model: "test-model",

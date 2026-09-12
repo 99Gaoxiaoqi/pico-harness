@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ClaudeProvider } from "../../../src/provider/claude.js";
+import { AiSdkProvider } from "../../../src/provider/ai-sdk-provider.js";
 import { LLMStatusError } from "../../../src/provider/errors.js";
 import type { LLMProvider, LLMProviderRequestOptions } from "../../../src/provider/interface.js";
 import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
-import { OpenAIProvider } from "../../../src/provider/openai.js";
 import {
   openAIPromptCacheKey,
   promptCacheRevisions,
@@ -64,7 +63,7 @@ test("OpenAI explicit cache key is stable, private, and route-scoped", async (co
       keyShards: 4,
     },
   });
-  const provider = new OpenAIProvider({
+  const provider = new AiSdkProvider("openai", {
     baseURL: "https://api.openai.com/v1",
     apiKey: "never-in-cache-key",
     model: "gpt-test",
@@ -99,7 +98,7 @@ test("OpenAI explicit cache key is stable, private, and route-scoped", async (co
     ["alpha", "zeta"],
   );
 
-  const compatible = new OpenAIProvider({
+  const compatible = new AiSdkProvider("openai", {
     baseURL: "https://gateway.invalid/v1",
     apiKey: "test-key",
     model: "gpt-test",
@@ -129,7 +128,7 @@ test("OpenAI implicit cache sends a stable key and legacy retention", async (con
     });
   };
 
-  const provider = new OpenAIProvider({
+  const provider = new AiSdkProvider("openai", {
     baseURL: "https://api.openai.com/v1",
     apiKey: "test-key",
     model: "gpt-legacy-test",
@@ -200,7 +199,7 @@ test("OpenAI appends the API path before preserving routing query parameters", a
     });
   };
 
-  await new OpenAIProvider({
+  await new AiSdkProvider("openai", {
     baseURL:
       "https://gateway.invalid/v1?deployment=cache-a&api-version=2026-01-01&api_key=transport-only",
     apiKey: "test-key",
@@ -239,7 +238,7 @@ test("OpenAI compatible route rejects cache key without disabling breakpoints", 
     cache: true,
     promptCache: { mode: "explicit", ttl: "30m", explicitBreakpoints: true },
   });
-  const provider = new OpenAIProvider({
+  const provider = new AiSdkProvider("openai", {
     baseURL: "https://gateway.invalid/v1",
     apiKey: "test-key",
     model: "gpt-test",
@@ -247,7 +246,7 @@ test("OpenAI compatible route rejects cache key without disabling breakpoints", 
   });
   await provider.generate(messages("first"), tools);
   await provider.generate(messages("second"), tools);
-  await new OpenAIProvider({
+  await new AiSdkProvider("openai", {
     baseURL: "https://gateway.invalid/v1",
     apiKey: "rotated-test-key",
     model: "gpt-test",
@@ -295,8 +294,8 @@ test("OpenAI compatible implicit route remembers a rejected cache key", async (c
     model: "gpt-implicit-downgrade",
     capabilities,
   };
-  await new OpenAIProvider(config).generate(messages("first"), tools);
-  await new OpenAIProvider({ ...config, apiKey: "rotated-key" }).generate(
+  await new AiSdkProvider("openai", config).generate(messages("first"), tools);
+  await new AiSdkProvider("openai", { ...config, apiKey: "rotated-key" }).generate(
     messages("second"),
     tools,
   );
@@ -338,8 +337,8 @@ test("OpenAI compatible route rejects retention without disabling cache key", as
     model: "gpt-retention-downgrade",
     capabilities,
   };
-  await new OpenAIProvider(config).generate(messages("first"), tools);
-  await new OpenAIProvider({ ...config, apiKey: "rotated-key" }).generate(
+  await new AiSdkProvider("openai", config).generate(messages("first"), tools);
+  await new AiSdkProvider("openai", { ...config, apiKey: "rotated-key" }).generate(
     messages("second"),
     tools,
   );
@@ -395,8 +394,8 @@ test("OpenAI compatible route rejects breakpoints without disabling cache key", 
       },
     },
   ];
-  await new OpenAIProvider(config).generate(messages("first"), schemaCollisionTools);
-  await new OpenAIProvider({ ...config, apiKey: "rotated-key" }).generate(
+  await new AiSdkProvider("openai", config).generate(messages("first"), schemaCollisionTools);
+  await new AiSdkProvider("openai", { ...config, apiKey: "rotated-key" }).generate(
     messages("second"),
     schemaCollisionTools,
   );
@@ -430,7 +429,7 @@ test("OpenAI key shards use an opaque stable conversation seed", async (context)
     });
   };
 
-  const provider = new OpenAIProvider({
+  const provider = new AiSdkProvider("openai", {
     baseURL: "https://api.openai.com/v1",
     apiKey: "test-key",
     model: "gpt-test",
@@ -466,7 +465,7 @@ test("OpenAI sharding activates after the route RPM threshold and stays active n
   context.after(() => {
     Date.now = originalNow;
   });
-  const provider = new OpenAIProvider({
+  const provider = new AiSdkProvider("openai", {
     baseURL: "https://route-threshold.invalid/v1",
     apiKey: "test-key",
     model: "gpt-route-threshold-test",
@@ -540,7 +539,7 @@ test("OpenAI stream reports cache writes only when the provider sends the field"
       ].join("\n"),
       { status: 200, headers: { "content-type": "text/event-stream" } },
     );
-  const response = await new OpenAIProvider({
+  const response = await new AiSdkProvider("openai", {
     baseURL: "https://gateway.invalid/v1",
     apiKey: "test-key",
     model: "test-model",
@@ -574,7 +573,7 @@ test("OpenAI stream preserves tools while sending tool_choice none on supported 
       { status: 200, headers: { "content-type": "text/event-stream" } },
     );
   };
-  const provider = new OpenAIProvider({
+  const provider = new AiSdkProvider("openai", {
     baseURL: "https://api.openai.com/v1",
     apiKey: "test-key",
     model: "gpt-tool-choice-test",
@@ -614,7 +613,7 @@ test("Claude applies 1h only to stable prefix and omits cache controls on unknow
       usage: { input_tokens: 1, output_tokens: 1 },
     });
   };
-  const cached = new ClaudeProvider({
+  const cached = new AiSdkProvider("claude", {
     baseURL: "https://compatible.invalid/v1",
     apiKey: "test-key",
     model: "claude-test",
@@ -642,7 +641,7 @@ test("Claude applies 1h only to stable prefix and omits cache controls on unknow
   assert.equal(cacheTools.at(-1)?.cache_control?.ttl, "1h");
   assert.equal(history?.content.at(-1)?.cache_control?.ttl, undefined);
 
-  const unknownGateway = new ClaudeProvider({
+  const unknownGateway = new AiSdkProvider("claude", {
     baseURL: "https://compatible.invalid/v1",
     apiKey: "test-key",
     model: "claude-test",
