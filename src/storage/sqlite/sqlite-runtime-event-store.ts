@@ -975,9 +975,14 @@ export class SqliteRuntimeEventStore {
         (event): event is Extract<RuntimeEvent, { kind: "run.started" }> =>
           event.kind === "run.started",
       );
+    if (!sourceStart) {
+      throw new RuntimeEventStoreIntegrityError(
+        `Runtime continuation source ${input.sourceRunId} is missing its run.started fact`,
+      );
+    }
     const agentSwarmAuthorization = admitted
       ? admitted.data.agentSwarmAuthorization
-      : (input.agentSwarmAuthorization ?? sourceStart?.data.agentSwarmAuthorization ?? "none");
+      : (input.agentSwarmAuthorization ?? sourceStart.data.agentSwarmAuthorization);
     return canonicalizeRuntimeEvent({
       schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
       eventId: input.startEventId,

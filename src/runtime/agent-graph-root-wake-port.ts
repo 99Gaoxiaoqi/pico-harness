@@ -16,11 +16,11 @@ export interface AgentGraphRootWakeRuntimePortOptions {
     Partial<Pick<SqliteAgentGraphExactRunPort, "readRunEvents" | "inspectLaunch">>;
   readonly workDir: string;
   /** Resolve from the original root Run header, never from mutable Session settings. */
-  readonly resolveAgentSwarmAuthorization?: (
+  readonly resolveAgentSwarmAuthorization: (
     input: RootSupervisorRunIdentity,
   ) =>
-    | NonNullable<StartExactAgentGraphRunInput["agentSwarmAuthorization"]>
-    | Promise<NonNullable<StartExactAgentGraphRunInput["agentSwarmAuthorization"]>>;
+    | StartExactAgentGraphRunInput["agentSwarmAuthorization"]
+    | Promise<StartExactAgentGraphRunInput["agentSwarmAuthorization"]>;
   readonly preflight?: (
     input: RootSupervisorRunIdentity,
   ) => "ready" | "source_root_active" | "workspace_busy";
@@ -35,7 +35,17 @@ export class AgentGraphRootWakeRuntimePort implements AgentGraphRootWakePort {
   }
 
   async inspect(input: RootSupervisorRunIdentity): Promise<RootSupervisorRunState> {
-    const inspection = await this.options.exactRuns.inspectExactRun(this.exactInput(input));
+    const authorization = await this.options.resolveAgentSwarmAuthorization(input);
+    return this.inspectWithAuthorization(input, authorization);
+  }
+
+  private async inspectWithAuthorization(
+    input: RootSupervisorRunIdentity,
+    authorization: StartExactAgentGraphRunInput["agentSwarmAuthorization"],
+  ): Promise<RootSupervisorRunState> {
+    const inspection = await this.options.exactRuns.inspectExactRun(
+      this.exactInput(input, authorization),
+    );
     if (
       inspection.status === "terminal" &&
       inspection.terminalEvent.data.status !== "completed" &&
@@ -102,22 +112,23 @@ export class AgentGraphRootWakeRuntimePort implements AgentGraphRootWakePort {
   async startOrResume(
     input: RootSupervisorRunIdentity & { readonly payload: unknown },
   ): Promise<RootSupervisorRunState> {
-    const before = await this.inspect(input);
-    if (before.status !== "not_started") return before;
     try {
-      const exact = {
-        ...this.exactInput(input, renderRootWakePrompt(input, input.payload)),
-        agentSwarmAuthorization:
-          (await this.options.resolveAgentSwarmAuthorization?.(input)) ?? "none",
-      };
+      const authorization = await this.options.resolveAgentSwarmAuthorization(input);
+      const before = await this.inspectWithAuthorization(input, authorization);
+      if (before.status !== "not_started") return before;
+      const exact = this.exactInput(
+        input,
+        authorization,
+        renderRootWakePrompt(input, input.payload),
+      );
       await this.options.exactRuns.startExactRun(exact);
+      return this.inspectWithAuthorization(input, authorization);
     } catch (error) {
       if (isPermissionBoundaryError(error)) {
         return { status: "waiting_permission", error: errorMessage(error) };
       }
       return { status: "failed", error: errorMessage(error) };
     }
-    return this.inspect(input);
   }
 
   private preflight(input: RootSupervisorRunIdentity): RootSupervisorRunState {
@@ -129,6 +140,7 @@ export class AgentGraphRootWakeRuntimePort implements AgentGraphRootWakePort {
 
   private exactInput(
     input: RootSupervisorRunIdentity,
+    agentSwarmAuthorization: StartExactAgentGraphRunInput["agentSwarmAuthorization"],
     prompt = renderRootWakePrompt(input),
   ): StartExactAgentGraphRunInput {
     const identity = stableRootWakeIdentity(input);
@@ -141,6 +153,7 @@ export class AgentGraphRootWakeRuntimePort implements AgentGraphRootWakePort {
       runStartedEventId: `graph-root-run-started:${identity}`,
       workDir: this.options.workDir,
       prompt,
+      agentSwarmAuthorization,
     };
   }
 }

@@ -50,7 +50,10 @@ async function createScene(context: test.TestContext, sessionId: string): Promis
   await session.recover();
   const store = session.runtimeEventStore;
   assert.ok(store, "durable session must expose its runtime event store");
-  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   await run.recordTurnStarted(1);
   return { session, store, run };
 }

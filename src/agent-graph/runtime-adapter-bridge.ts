@@ -192,6 +192,7 @@ export class AgentGraphRuntimePortBridge implements AgentGraphRuntimePort {
       provision,
       workDir: held.workspace.workDir,
       prompt: renderActivationPrompt(input.intent.instruction, handoff.prompt),
+      agentSwarmAuthorization: input.intent.supervision?.authorization ?? "none",
     });
     return projectionFromRuntime(result.projection, input.claim);
   }

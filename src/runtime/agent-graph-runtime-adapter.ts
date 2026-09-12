@@ -40,7 +40,7 @@ export interface StartExactAgentGraphRunInput {
   readonly runStartedEventId: string;
   readonly workDir: string;
   readonly prompt: string;
-  readonly agentSwarmAuthorization?: RuntimeRunStartedEvent["data"]["agentSwarmAuthorization"];
+  readonly agentSwarmAuthorization: RuntimeRunStartedEvent["data"]["agentSwarmAuthorization"];
 }
 
 export type AgentGraphExactRunIndeterminateReason =
@@ -149,6 +149,8 @@ export interface StartOrObserveAgentGraphActivationInput {
   readonly provision: AgentGraphOperatorProvisionRecord;
   readonly workDir: string;
   readonly prompt: string;
+  /** Authorization frozen by the durable activation Intent. */
+  readonly agentSwarmAuthorization: RuntimeRunStartedEvent["data"]["agentSwarmAuthorization"];
 }
 
 export interface StartOrObserveAgentGraphActivationResult {
@@ -425,6 +427,7 @@ export class AgentGraphRuntimeAdapter implements AgentOutputCommitPort {
       runStartedEventId: input.claim.runStartedEventId,
       workDir: input.workDir,
       prompt: input.prompt,
+      agentSwarmAuthorization: input.agentSwarmAuthorization,
     } satisfies StartExactAgentGraphRunInput;
     const before = await this.options.runPort.inspectExactRun(exactRun);
     if (

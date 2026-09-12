@@ -97,6 +97,7 @@ test("core Agent adapter reuses one deterministic admission and never synthesize
   const projection = await port.inspect(first.launchId);
   assert.equal(projection?.state, "terminal");
   assert.equal(projection?.intent.resumeExistingSession, true);
+  assert.equal(projection?.intent.agentSwarmAuthorization, "turn_override");
   assert.equal("prompt" in (projection?.intent ?? {}), false);
 
   const repeated = await adapter.resume(fixture.input, fixture.resumeContext);
@@ -467,7 +468,10 @@ async function createFixture(
   const capability = session.runtimeEventCapability;
   assert.ok(store);
   assert.ok(capability);
-  const sourceRun = await RuntimeRun.start({ capability, agentSwarmAuthorization });
+  const sourceRun = await RuntimeRun.start({
+    capability,
+    agentSwarmAuthorization: agentSwarmAuthorization ?? "none",
+  });
   await sourceRun.commitMessages(session, [{ role: "user", content: "original durable prompt" }]);
   await sourceRun.finish("interrupted", "source process exited");
   const sourceEntries = await store.readSessionEntries(session.id);
@@ -582,6 +586,7 @@ async function executePrestartedWorker(
     picoHome: fixture.picoHome,
     prompt: "",
     resumeExistingSession: true,
+    agentSwarmAuthorization: intent.agentSwarmAuthorization,
     prestartedRun: runtimeRunAdmissionFromAgentRecoveryIntent(intent),
     traceEnabled: false,
     options: {},

@@ -86,6 +86,7 @@ export type AgentRecoveryLaunchIntent = Readonly<{
   runStartedEventId: string;
   runStartedSequence: number;
   runStartedAt: string;
+  agentSwarmAuthorization: RuntimeRunStartedEvent["data"]["agentSwarmAuthorization"];
   resumeExistingSession: true;
 }>;
 
@@ -613,6 +614,7 @@ export function createAgentRecoverableTaskAdapter(
         runStartedEventId: context.expectedRunStartedEventId,
         runStartedSequence: admission.sequence,
         runStartedAt: admission.at,
+        agentSwarmAuthorization: admission.agentSwarmAuthorization,
         resumeExistingSession: true,
       });
       await options.launchIntents.installOrConfirm(intent);
@@ -638,6 +640,7 @@ export function runtimeRunAdmissionFromAgentRecoveryIntent(
   runStartedEventId: string;
   runStartedAt: string;
   parentRunId: string;
+  agentSwarmAuthorization: RuntimeRunStartedEvent["data"]["agentSwarmAuthorization"];
 }> {
   return Object.freeze({
     runId: intent.runId,
@@ -645,6 +648,7 @@ export function runtimeRunAdmissionFromAgentRecoveryIntent(
     runStartedEventId: intent.runStartedEventId,
     runStartedAt: intent.runStartedAt,
     parentRunId: intent.sourceRunId,
+    agentSwarmAuthorization: intent.agentSwarmAuthorization,
   });
 }
 
@@ -718,7 +722,12 @@ async function admitSuccessorRuntimeRun(
   writeGuard: EngineRuntimeWriteGuard,
   input: AgentRecoverableTaskInput,
   context: RecoverableTaskResumeContext,
-): Promise<{ readonly sequence: number; readonly invocationId: string; readonly at: string }> {
+): Promise<{
+  readonly sequence: number;
+  readonly invocationId: string;
+  readonly at: string;
+  readonly agentSwarmAuthorization: RuntimeRunStartedEvent["data"]["agentSwarmAuthorization"];
+}> {
   const manifest = await store.readSessionManifest(input.sessionId);
   if (!manifest) {
     throw new Error(`Agent recovery Runtime session ${input.sessionId} is missing`);
@@ -799,6 +808,7 @@ async function admitSuccessorRuntimeRun(
     sequence: result.cursor.seq,
     invocationId,
     at: started.at,
+    agentSwarmAuthorization,
   };
 }
 
@@ -808,6 +818,7 @@ function decodeAgentRecoveryLaunchIntent(value: unknown): AgentRecoveryLaunchInt
     !hasExactKeys(value, [
       "attemptId",
       "attemptNumber",
+      "agentSwarmAuthorization",
       "checkpointRef",
       "executionId",
       "invocationId",
@@ -828,6 +839,9 @@ function decodeAgentRecoveryLaunchIntent(value: unknown): AgentRecoveryLaunchInt
     ]) ||
     value["schemaVersion"] !== AGENT_RECOVERY_LAUNCH_INTENT_SCHEMA_VERSION ||
     value["resumeExistingSession"] !== true ||
+    !["none", "session_mode", "turn_override"].includes(
+      value["agentSwarmAuthorization"] as string,
+    ) ||
     !isPositiveSafeInteger(value["attemptNumber"]) ||
     !isPositiveSafeInteger(value["sourceEventHighWater"]) ||
     !isPositiveSafeInteger(value["runStartedSequence"]) ||
@@ -858,6 +872,9 @@ function decodeAgentRecoveryLaunchIntent(value: unknown): AgentRecoveryLaunchInt
     runStartedEventId: requiredIdentifier(value["runStartedEventId"], "runStartedEventId"),
     runStartedSequence: value["runStartedSequence"] as number,
     runStartedAt: requiredTimestamp(value["runStartedAt"], "runStartedAt"),
+    agentSwarmAuthorization: value[
+      "agentSwarmAuthorization"
+    ] as RuntimeRunStartedEvent["data"]["agentSwarmAuthorization"],
     resumeExistingSession: true,
   });
 }

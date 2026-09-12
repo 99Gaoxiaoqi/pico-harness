@@ -1971,6 +1971,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         const budget = createContextBudget(profile);
         const runtimeRun = await RuntimeRun.start({
           capability: runtimeCapability,
+          agentSwarmAuthorization: "none",
         });
         const checkpoint = await runtimeRun.run(async () => {
           const entries = await runtimeRun.readModelHistoryEntries();

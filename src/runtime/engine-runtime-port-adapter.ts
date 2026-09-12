@@ -41,6 +41,7 @@ export function createEngineRuntimePort(): EngineRuntimePort {
         ...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),
         ...(options.parentToolCallId ? { parentToolCallId: options.parentToolCallId } : {}),
         capability: options.capability,
+        agentSwarmAuthorization: "none",
       }),
     commitExternalMessages: (session, messages) =>
       RuntimeRun.commitExternalMessages(session, messages),

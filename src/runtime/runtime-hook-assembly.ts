@@ -132,7 +132,10 @@ async function runHostOwnedRuntimeOperation<Result>(
     }
     await RuntimeRun.reconcileIncompleteRuns({ capability: runtimeCapability });
     await RuntimeRun.repairSessionProjection(session, { capability: runtimeCapability });
-    const runtimeRun = await RuntimeRun.start({ capability: runtimeCapability });
+    const runtimeRun = await RuntimeRun.start({
+      capability: runtimeCapability,
+      agentSwarmAuthorization: "none",
+    });
     return runtimeRun.run(execute, signal);
   });
 }

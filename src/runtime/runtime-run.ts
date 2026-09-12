@@ -129,7 +129,7 @@ interface RuntimeRunBaseOptions {
   readonly parentToolCallId?: string;
   readonly now?: () => Date;
   readonly presentation?: RuntimeRunStartedEvent["data"]["presentation"];
-  readonly agentSwarmAuthorization?: RuntimeRunStartedEvent["data"]["agentSwarmAuthorization"];
+  readonly agentSwarmAuthorization: RuntimeRunStartedEvent["data"]["agentSwarmAuthorization"];
 }
 
 export interface RuntimeRunStartOptions extends Omit<
@@ -159,6 +159,7 @@ export interface RuntimeRunContinuationStartOptions {
   readonly runStartedEventId?: string;
   readonly startedAt?: string;
   readonly presentation?: RuntimeRunStartedEvent["data"]["presentation"];
+  /** Omission means inherit the source Run's persisted current authorization. */
   readonly agentSwarmAuthorization?: RuntimeRunStartedEvent["data"]["agentSwarmAuthorization"];
 }
 
@@ -170,7 +171,7 @@ export interface RuntimeRunExactAdmissionOptions {
   readonly runStartedEventId: string;
   readonly startedAt?: string;
   readonly presentation?: RuntimeRunStartedEvent["data"]["presentation"];
-  readonly agentSwarmAuthorization?: RuntimeRunStartedEvent["data"]["agentSwarmAuthorization"];
+  readonly agentSwarmAuthorization: RuntimeRunStartedEvent["data"]["agentSwarmAuthorization"];
 }
 
 export type RuntimeRunExactAdmissionOutcome = Readonly<{
@@ -397,7 +398,7 @@ export class RuntimeRun {
       ...(options.parentToolCallId ? { parentToolCallId: options.parentToolCallId } : {}),
     });
     this.presentation = options.presentation;
-    this.agentSwarmAuthorization = options.agentSwarmAuthorization ?? "none";
+    this.agentSwarmAuthorization = options.agentSwarmAuthorization;
     this.turnId = options.turnId ?? `turn:${this.runId}:input`;
     this.stepId = `step:${this.runId}:input`;
   }
@@ -460,7 +461,7 @@ export class RuntimeRun {
       invocationId: options.invocationId,
       runStartedEventId: options.runStartedEventId,
       now: () => new Date(startedAt),
-      agentSwarmAuthorization: options.agentSwarmAuthorization ?? "none",
+      agentSwarmAuthorization: options.agentSwarmAuthorization,
       ...(options.presentation ? { presentation: options.presentation } : {}),
     });
     const guardedFence = await capability.writeGuard.assertRuntimeEventWriteAllowed();
@@ -571,7 +572,7 @@ export class RuntimeRun {
       store,
       agentSwarmAuthorization: existingStart
         ? existingStart.data.agentSwarmAuthorization
-        : (options.agentSwarmAuthorization ?? "none"),
+        : options.agentSwarmAuthorization,
     });
     const guardedFence = await options.writeGuard.assertRuntimeEventWriteAllowed();
     assertActiveRuntimeOwnerFence(`Runtime run ${run.runId}`, options.sessionId, guardedFence);
@@ -936,6 +937,9 @@ export class RuntimeRun {
         invocationId: identity.invocationId,
         runStartedEventId: identity.runStartedEventId,
         terminalEventId: identity.terminalEventId,
+        agentSwarmAuthorization: existingStart
+          ? existingStart.data.agentSwarmAuthorization
+          : "none",
         now: () => new Date(bootstrapAt),
         store,
         writeGuard,
@@ -1039,6 +1043,7 @@ export class RuntimeRun {
       invocationId: identity.invocationId,
       runStartedEventId: identity.runStartedEventId,
       terminalEventId: identity.terminalEventId,
+      agentSwarmAuthorization: started.data.agentSwarmAuthorization,
       now: () => new Date(started.at),
       store,
       writeGuard,
@@ -1118,7 +1123,7 @@ export class RuntimeRun {
     if (!capability) return false;
     const store = runtimeEventStoreFromCapability(capability);
     if (!(await store.readSessionManifest(session.id))) return false;
-    const run = await RuntimeRun.start({ capability });
+    const run = await RuntimeRun.start({ capability, agentSwarmAuthorization: "none" });
     await run.run(() => run.commitMessages(session, canonicalMessages));
     return true;
   }
@@ -1156,7 +1161,7 @@ export class RuntimeRun {
         await session.commitRuntimeProjectionBatch([persisted]);
         return runtimeCommitReceipt(persisted);
       }
-      const run = await RuntimeRun.start({ capability });
+      const run = await RuntimeRun.start({ capability, agentSwarmAuthorization: "none" });
       return run.run(() => run.commitMessageOnce(session, eventId, canonicalMessage));
     });
   }

@@ -85,6 +85,7 @@ import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
 import type { ModelRouter } from "../provider/model-router.js";
 import { Tracer } from "../observability/trace.js";
 import { logger } from "../observability/logger.js";
+import { RuntimeEventStoreIntegrityError } from "../storage/runtime-event-store-contracts.js";
 import {
   globalApprovalManager,
   classifyHardlineCommand,
@@ -3637,7 +3638,14 @@ async function readInheritedRunSwarmAuthorization(
   resume: boolean,
 ): Promise<RunAgentCliOptions["agentSwarmAuthorization"]> {
   const store = session.runtimeEventStore;
-  if (!store) return undefined;
+  if (!store) {
+    if (prestarted) {
+      throw new RuntimeEventStoreIntegrityError(
+        `Prestarted Runtime run ${prestarted.runId} has no durable event store`,
+      );
+    }
+    return undefined;
+  }
   let sourceRunId = prestarted?.runId;
   if (!sourceRunId && resume) {
     const candidate = await store.findLatestInterruptedUnclaimedRun(session.id);
@@ -3650,5 +3658,15 @@ async function readInheritedRunSwarmAuthorization(
   if (!sourceRunId) return undefined;
   const events = await store.readRun(session.id, sourceRunId);
   const start = events.find((event) => event.kind === "run.started");
-  return start?.data.agentSwarmAuthorization;
+  if (!start) {
+    throw new RuntimeEventStoreIntegrityError(
+      `Runtime authorization source ${sourceRunId} is missing its run.started fact`,
+    );
+  }
+  if (prestarted && start.data.agentSwarmAuthorization !== prestarted.agentSwarmAuthorization) {
+    throw new RuntimeEventStoreIntegrityError(
+      `Prestarted Runtime run ${prestarted.runId} authorization does not match its persisted start`,
+    );
+  }
+  return start.data.agentSwarmAuthorization;
 }

@@ -75,6 +75,7 @@ test("durable CostTracker requires and records the matching host RuntimeRun", as
           assertRuntimeEventWriteAllowed: () => session.assertRuntimeEventWriteAllowed(),
         },
       },
+      agentSwarmAuthorization: "none",
     }),
     /was not issued/u,
   );
@@ -106,12 +107,13 @@ test("durable CostTracker requires and records the matching host RuntimeRun", as
   await assert.rejects(
     RuntimeRun.start({
       capability: { ...capability, runtimeAuthority: foreignStore },
+      agentSwarmAuthorization: "none",
     }),
     /was not issued/u,
   );
   assert.equal(providerCalls, 0);
 
-  const run = await RuntimeRun.start({ capability });
+  const run = await RuntimeRun.start({ capability, agentSwarmAuthorization: "none" });
   const response = await run.run(() => tracked.generate([{ role: "user", content: "inside" }], []));
   assert.equal(response.content, "tracked");
   assert.equal(providerCalls, 1);

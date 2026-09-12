@@ -133,7 +133,10 @@ test("readModelHistory: 大全文会话组装字节有界,末尾工作集完整,
     await rm(root, { recursive: true, force: true });
   });
   await session.recover();
-  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   const bigOutput = "x".repeat(300 * 1024);
   await run.run(async () => {
     await run.commitMessages(session, [
@@ -213,7 +216,10 @@ test("readModelHistory: 预算内的常规会话不被 gate 触碰", async (t) =
     await rm(root, { recursive: true, force: true });
   });
   await session.recover();
-  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   await run.run(async () => {
     await run.commitMessages(session, [
       { role: "user", content: "常规输入" },
@@ -306,10 +312,9 @@ test("readTranscriptProjectionPage: 字节预算与固定 watermark 分页保持
   );
   assert.ok(latestBytes <= maxBytes, `projection 页必须受字节预算约束，实际 ${latestBytes}`);
 
-  await fixture.store.append(
-    messageEvent(`${id}-e5`, id, "2026-08-19T00:00:05.000Z", "new-head"),
-    { ownerFence },
-  );
+  await fixture.store.append(messageEvent(`${id}-e5`, id, "2026-08-19T00:00:05.000Z", "new-head"), {
+    ownerFence,
+  });
   const older = await fixture.store.readTranscriptProjectionPage({
     sessionId: id,
     through,

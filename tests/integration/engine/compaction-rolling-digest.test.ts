@@ -95,12 +95,18 @@ test("Runtime checkpoint 使用内容哈希 digest 且重放校验通过", async
   await session.recover();
 
   const originalHistory = paddedHistory();
-  const seedRun = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const seedRun = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   await seedRun.run(async () => {
     await seedRun.commitMessages(session, originalHistory);
   });
 
-  const compactionRun = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const compactionRun = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   const result = await compactionRun.run(() =>
     recordRuntimeCompactionCheckpoint({
       session,
@@ -140,7 +146,10 @@ test("滚动摘要:连续两次压缩,第二个 checkpoint 带 previousCheckpoin
 
   // 初始长 history
   const history1 = paddedHistory();
-  const seedRun = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const seedRun = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   await seedRun.run(async () => {
     await seedRun.commitMessages(session, history1);
   });
@@ -157,7 +166,10 @@ test("滚动摘要:连续两次压缩,第二个 checkpoint 带 previousCheckpoin
     },
   };
 
-  const run1 = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run1 = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   const result1 = await run1.run(() =>
     recordRuntimeCompactionCheckpoint({
       session,
@@ -169,7 +181,10 @@ test("滚动摘要:连续两次压缩,第二个 checkpoint 带 previousCheckpoin
   assert.ok(result1, "第一次压缩应成功");
 
   // 追加更多内容,制造第二次压缩需求
-  const run2 = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run2 = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   await run2.run(async () => {
     await run2.commitMessages(session, [
       { role: "user", content: `new user ${"padding ".repeat(40)}` },
@@ -180,7 +195,10 @@ test("滚动摘要:连续两次压缩,第二个 checkpoint 带 previousCheckpoin
   });
 
   // 第二次压缩
-  const run3 = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run3 = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   const result2 = await run3.run(() =>
     recordRuntimeCompactionCheckpoint({
       session,
@@ -223,13 +241,19 @@ test("findLastCompactionCheckpoint 返回上一个 checkpoint 的摘要正文", 
   await session.recover();
 
   const history = paddedHistory();
-  const seedRun = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const seedRun = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   await seedRun.run(async () => {
     await seedRun.commitMessages(session, history);
   });
 
   // 压缩前:无 checkpoint
-  const run1 = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run1 = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   const before = await run1.findLastCompactionCheckpoint();
   assert.equal(before, undefined, "压缩前应无上一个 checkpoint");
 
@@ -247,7 +271,10 @@ test("findLastCompactionCheckpoint 返回上一个 checkpoint 的摘要正文", 
   );
 
   // 压缩后:findLastCompactionCheckpoint 应返回摘要正文(去掉 REFERENCE-ONLY 包装)
-  const run2 = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run2 = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   const after = await run2.findLastCompactionCheckpoint();
   assert.ok(after, "压缩后应返回上一个 checkpoint");
   assert.ok(after.summaryText.includes("findLast 测试"), "摘要正文应不含 REFERENCE-ONLY 包装");
@@ -267,13 +294,19 @@ test("findLastCompactionCheckpoint:末条为 hard-reset checkpoint 时增量基�
   await session.recover();
 
   const history = paddedHistory();
-  const seedRun = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const seedRun = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   await seedRun.run(async () => {
     await seedRun.commitMessages(session, history);
   });
 
   // 先落一个正常 checkpoint:末条查找命中它。
-  const compactRun = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const compactRun = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   await compactRun.run(() =>
     recordRuntimeCompactionCheckpoint({
       session,
@@ -285,14 +318,20 @@ test("findLastCompactionCheckpoint:末条为 hard-reset checkpoint 时增量基�
       request: { inputBudgetTokens: 4_000, targetRetainedTokens: 1, trigger: "manual" },
     }),
   );
-  const probeBefore = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const probeBefore = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   const before = await probeBefore.findLastCompactionCheckpoint();
   assert.ok(before, "正常 checkpoint 应作为增量基线");
   assert.ok(before.summaryText.includes("hard-reset 基线"));
 
   // 再落一个 hard-reset checkpoint(引擎 loop.ts 硬重置路径的持久化形态):
   // 末条即 hard-reset,之前的 checkpoint 全部失效 → findLast 返回 undefined。
-  const resetRun = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const resetRun = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   await resetRun.run(async () => {
     await resetRun.recordCheckpoint({
       checkpointId: `hard-reset:${randomUUID()}`,
@@ -310,7 +349,10 @@ test("findLastCompactionCheckpoint:末条为 hard-reset checkpoint 时增量基�
     });
   });
 
-  const probeAfter = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const probeAfter = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   assert.equal(
     await probeAfter.findLastCompactionCheckpoint(),
     undefined,

@@ -147,7 +147,10 @@ for (const scenario of [
     };
     await updateAutoExtract(scenario.initialAuto);
     const firstRuntime = createRuntime();
-    const firstRun = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+    const firstRun = await RuntimeRun.start({
+      capability: session.runtimeEventCapability!,
+      agentSwarmAuthorization: "none",
+    });
     const checkpoint = await firstRun.run(async () => {
       await firstRun.commitMessages(session, [
         { role: "user", content: `${oldFact} ${"Old context. ".repeat(80)}` },
@@ -220,7 +223,10 @@ for (const scenario of [
       await recovered.drain();
       assert.equal(requests.length, 0, "manual checkpoint dispatch must remain a no-op");
     }
-    const newRun = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+    const newRun = await RuntimeRun.start({
+      capability: session.runtimeEventCapability!,
+      agentSwarmAuthorization: "none",
+    });
     await newRun.run(async () => {
       await newRun.commitMessages(session, [{ role: "user", content: newPrompt }]);
       const entries = await session.runtimeEventStore!.readSessionEntries(sessionId);

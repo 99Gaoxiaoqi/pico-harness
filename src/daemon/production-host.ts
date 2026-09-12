@@ -507,7 +507,7 @@ export function createProductionRuntimeServices(
           collaborationMode: "agent",
           permissionMode: operatorBinding ? operatorExecutionPermissionMode : "ask",
           orchestrationMode: input.orchestrationMode,
-          agentSwarmAuthorization: input.prestartedRun.agentSwarmAuthorization ?? "none",
+          agentSwarmAuthorization: input.prestartedRun.agentSwarmAuthorization,
           ...(reasoningLevel !== undefined ? { thinkingEffort: reasoningLevel } : {}),
           ...(operatorProfile
             ? { allowedTools: [...operatorProfile.tools, "agent_output"] }
@@ -1102,22 +1102,7 @@ export function createProductionRuntimeServices(
           };
           foregroundGraphBinding =
             graphHost && admittedGraph
-              ? rootAgentGraphBinding(
-                  graphHost,
-                  admittedGraph,
-                  targetSessionId,
-                  route.modelRouteId,
-                  graphHost.application.graphSupervision(admittedGraph.graphId) ??
-                    (orchestrationMode === "swarm"
-                      ? {
-                          mode: "swarm",
-                          authorization:
-                            agentSwarmAuthorization === "turn_override"
-                              ? "turn_override"
-                              : "session_mode",
-                        }
-                      : undefined),
-                )
+              ? rootAgentGraphBinding(graphHost, admittedGraph, targetSessionId, route.modelRouteId)
               : undefined;
           const foregroundGraphRuntime =
             graphHost && admittedGraph && foregroundGraphBinding
@@ -2060,6 +2045,7 @@ async function sealGraphPreDispatchFailure(
       runStartedEventId: input.prestartedRun.runStartedEventId,
       workDir: input.session.workDir,
       prompt: input.prompt,
+      agentSwarmAuthorization: input.prestartedRun.agentSwarmAuthorization,
     },
     events,
     false,
@@ -2080,6 +2066,7 @@ async function sealGraphPreDispatchFailure(
     ...(input.prestartedRun.turnId ? { turnId: input.prestartedRun.turnId } : {}),
     invocationId: input.prestartedRun.invocationId,
     runStartedEventId: input.prestartedRun.runStartedEventId,
+    agentSwarmAuthorization: input.prestartedRun.agentSwarmAuthorization,
     now: () => new Date(input.prestartedRun.runStartedAt),
   });
   await runtimeRun.finish(status, safeGraphExecutionError(error).message);
@@ -2362,7 +2349,6 @@ function rootAgentGraphBinding(
   graph: AgentGraph,
   rootSessionId: string,
   rootModelRouteId: string,
-  supervision?: import("../agent-graph/core/contracts.js").AgentGraphActivationIntent["supervision"],
 ): Extract<AgentGraphRunToolBinding, { readonly kind: "root" }> {
   return {
     kind: "root",
@@ -2383,15 +2369,11 @@ function rootAgentGraphBinding(
         rootTurnId,
         rootRunId: run.runId,
         rootModelRouteId,
-        ...(run.agentSwarmAuthorization === undefined
-          ? supervision
-            ? { supervision }
-            : {}
-          : run.agentSwarmAuthorization === "none"
-            ? {}
-            : {
-                supervision: { mode: "swarm" as const, authorization: run.agentSwarmAuthorization },
-              }),
+        ...(run.agentSwarmAuthorization === "none"
+          ? {}
+          : {
+              supervision: { mode: "swarm" as const, authorization: run.agentSwarmAuthorization },
+            }),
       };
     },
     toolPort: host.application.toolPort,
@@ -3206,5 +3188,10 @@ async function readPlanSwarmAuthorization(
   if (!proposal) return undefined;
   const events = await store.readRun(session.id, proposal.runId);
   const started = events.find((event) => event.kind === "run.started");
-  return started?.data.agentSwarmAuthorization;
+  if (!started) {
+    throw new Error(
+      `Plan ${planId} proposing Run ${proposal.runId} is missing its run.started authorization`,
+    );
+  }
+  return started.data.agentSwarmAuthorization;
 }

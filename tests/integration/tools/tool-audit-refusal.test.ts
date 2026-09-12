@@ -176,7 +176,10 @@ for (const mode of ["nested", "hook-final", "after-success"] as const) {
     assert.ok(
       !recovered.some((event) => event.kind === "tool.result.recorded" && event.data.recovery),
     );
-    const run = await RuntimeRun.start({ capability: reopened.runtimeEventCapability! });
+    const run = await RuntimeRun.start({
+      capability: reopened.runtimeEventCapability!,
+      agentSwarmAuthorization: "none",
+    });
     await run.assertNoUnresolvedToolEffects();
     await run.finish("completed");
   });
@@ -184,7 +187,10 @@ for (const mode of ["nested", "hook-final", "after-success"] as const) {
 
 test("字节和深度审计拒绝不触及存储；伪造拒绝与存储内审计异常仍为 T1 故障", async (t) => {
   const { session, registry, root } = await scene(t);
-  const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
+  const run = await RuntimeRun.start({
+    capability: session.runtimeEventCapability!,
+    agentSwarmAuthorization: "none",
+  });
   const store = session.runtimeEventStore!;
   const prepare = store.prepareToolOperation.bind(store);
   let writes = 0;
