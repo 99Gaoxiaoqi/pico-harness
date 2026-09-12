@@ -4,11 +4,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import {
-  createRuntimeRequest,
-  RUNTIME_ERROR_CODES,
-  RuntimeProtocolError,
-} from "../../../packages/protocol/src/index.js";
+import { createRuntimeRequest, RUNTIME_ERROR_CODES, RuntimeProtocolError } from "@pico/protocol";
 import {
   canonicalizeWorkspacePath,
   resolveGitBranch,
@@ -16,7 +12,9 @@ import {
   WorkspaceRuntimeService,
 } from "../../../src/daemon/index.js";
 import type { WorkspaceTaskRuntime } from "../../../src/runtime/workspace-runtime.js";
+import { credentialRefForProvider } from "../../../src/provider/credential-vault.js";
 import { SqliteRuntimeControlStore } from "../../../src/storage/sqlite/sqlite-runtime-control-store.js";
+import { openOperationalDatabaseForBindingRepairSync } from "../../../src/storage/sqlite/sqlite-database.js";
 import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
 import { TaskHostRuntime } from "../../../src/tasks/task-runtime.js";
 import { DesktopRuntimeService } from "../../../src/daemon/desktop-runtime-service.js";
@@ -342,6 +340,7 @@ test("Run projection and Runtime event roll back together when event append fail
     topic: "test.seed",
     workspacePath: canonicalWorkspace,
     createdAt: 1_500,
+    payload: notificationEnvelope(canonicalWorkspace),
   });
 
   assert.throws(
@@ -352,6 +351,7 @@ test("Run projection and Runtime event roll back together when event append fail
           topic: "run.finished",
           workspacePath: canonicalWorkspace,
           createdAt: 2_000,
+          payload: notificationEnvelope(canonicalWorkspace),
         },
         {
           daemonRun: {
@@ -371,6 +371,119 @@ test("Run projection and Runtime event roll back together when event append fail
     store.listRuntimeEvents({ workspacePath: canonicalWorkspace }).map((event) => event.topic),
     ["test.seed"],
   );
+});
+
+for (const [label, corruptEnvelope] of [
+  ["missing-envelope", undefined],
+  ["missing-scope", { resourceVersion: 1, payload: { registered: true } }],
+  ["missing-resource-version", { scope: { workspacePath: "replace" }, payload: {} }],
+  ["missing-payload", { scope: { workspacePath: "replace" }, resourceVersion: 1 }],
+  [
+    "extra-envelope-field",
+    { scope: { workspacePath: "replace" }, resourceVersion: 1, payload: {}, legacy: true },
+  ],
+] as const) {
+  test(`Runtime replay 对 ${label} 的旧或损坏通知账本 fail-closed`, async () => {
+    const fixture = await createFixture(`corrupt-runtime-ledger-${label}`);
+    const canonicalWorkspace = await realpath(fixture.workspace);
+    const storageRoot = resolvePicoPaths(canonicalWorkspace, {
+      picoHome: fixture.picoHome,
+    }).workspace.root;
+    const seed = new SqliteRuntimeControlStore({ storageRoot });
+    seed.appendRuntimeEvent({
+      eventId: "corrupt-runtime-notification",
+      topic: "workspace.registered",
+      workspacePath: canonicalWorkspace,
+      payload: {
+        scope: { workspacePath: canonicalWorkspace },
+        resourceVersion: 1,
+        payload: { registered: true },
+      },
+    });
+    seed.close();
+
+    const database = openOperationalDatabaseForBindingRepairSync(storageRoot);
+    try {
+      const encoded =
+        corruptEnvelope === undefined
+          ? null
+          : JSON.stringify(corruptEnvelope, (_key, value) =>
+              value === "replace" ? canonicalWorkspace : value,
+            );
+      database
+        .prepare("UPDATE daemon_events SET payload_json = ? WHERE event_id = ?")
+        .run(encoded, "corrupt-runtime-notification");
+    } finally {
+      database.close();
+    }
+
+    const service = new WorkspaceRuntimeService({
+      env: { PICO_HOME: fixture.picoHome },
+      execute: async () => undefined,
+    });
+    try {
+      await assert.rejects(
+        service.replayEvents({ workspacePath: fixture.workspace }),
+        (error: unknown) =>
+          error instanceof Error &&
+          (error as Error & { readonly code?: string }).code ===
+            RUNTIME_ERROR_CODES.RESET_REQUIRED &&
+          /不符合当前 envelope/u.test(error.message),
+      );
+    } finally {
+      await service.close();
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("Runtime replay 隔离 Cron 内部审计 topic 并推进 cursor", async () => {
+  const fixture = await createFixture("cron-audit-replay-isolation");
+  const canonicalWorkspace = await realpath(fixture.workspace);
+  const storageRoot = resolvePicoPaths(canonicalWorkspace, { picoHome: fixture.picoHome }).workspace
+    .root;
+  const seed = new SqliteRuntimeControlStore({ storageRoot });
+  seed.createCronJob({
+    cronJobId: "cron-audit-only",
+    workspacePath: canonicalWorkspace,
+    name: "internal audit only",
+    schedule: "* * * * *",
+    timeZone: "UTC",
+    prompt: "internal",
+    policySnapshot: {
+      mode: "full-access",
+      backgroundEnabled: true,
+      trustedWorkspace: true,
+      toolNetworkPolicy: "disabled",
+      allowedTools: [],
+      hardlineVersion: "test-hardline",
+      hookVersion: "test-hooks",
+      createdAt: 1,
+    },
+    credentialRef: credentialRefForProvider({
+      providerId: "test",
+      protocol: "openai",
+      baseURL: "https://example.invalid/v1",
+    }),
+    modelRouteId: "test/model",
+  });
+  const highWatermarkEventId = seed.getRuntimeEventHighWatermark(canonicalWorkspace)?.eventId;
+  seed.close();
+
+  const service = new WorkspaceRuntimeService({
+    env: { PICO_HOME: fixture.picoHome },
+    execute: async () => undefined,
+  });
+  try {
+    const replay = await service.replayEvents({ workspacePath: fixture.workspace });
+    assert.deepEqual(replay.events, []);
+    assert.equal(replay.hasMore, false);
+    assert.equal(replay.nextAfterEventId, highWatermarkEventId);
+    assert.equal(replay.highWatermarkEventId, highWatermarkEventId);
+  } finally {
+    await service.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
 });
 
 test(
@@ -628,6 +741,10 @@ async function createFixture(label: string): Promise<{
   await mkdir(workspace, { recursive: true });
   await mkdir(picoHome, { recursive: true });
   return { root, workspace, picoHome };
+}
+
+function notificationEnvelope(workspacePath: string) {
+  return { scope: { workspacePath }, resourceVersion: 1, payload: {} };
 }
 
 function asRun(value: unknown): { runId: string; status: string } {

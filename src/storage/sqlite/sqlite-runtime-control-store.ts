@@ -21,12 +21,18 @@ import {
   type MergeRequestRecord,
   type MergeRequestStatus,
   type ProviderCallRecord,
+  type CronAuditEventRecord,
   type RuntimeEventRecord,
   type RuntimeLeaseRecord,
+  type RuntimeNotificationEventRecord,
+  type RuntimeNotificationLedgerJsonValue,
   type UsageBaselineRecord,
   type UsageLedgerFilter,
   type UsageLedgerSummary,
   type UsageLedgerTotals,
+  isCronAuditEventRecord,
+  isCronAuditEventTopic,
+  isRuntimeNotificationLedgerEnvelope,
 } from "../../tasks/runtime-types.js";
 import type {
   CancelQueuedJobInput,
@@ -110,6 +116,16 @@ interface ControlWriteTx {
   eventSequenceCache: number | undefined;
   savepointCounter: number;
 }
+
+type RuntimeEventInsert =
+  | (Omit<RuntimeNotificationEventRecord, "eventId" | "createdAt"> & {
+      readonly eventId?: string;
+      readonly createdAt?: number;
+    })
+  | (Omit<CronAuditEventRecord, "eventId" | "createdAt"> & {
+      readonly eventId?: string;
+      readonly createdAt?: number;
+    });
 
 const activeControlWrites = new Map<string, ControlWriteTx>();
 
@@ -878,6 +894,7 @@ export class SqliteRuntimeControlStore {
         now,
       );
       this.insertRuntimeEvent(tx, {
+        ledgerKind: "cron_audit",
         topic: "cron.job.created",
         workspacePath: input.workspacePath,
         cronJobId: input.cronJobId,
@@ -916,6 +933,7 @@ export class SqliteRuntimeControlStore {
         input.cronJobId,
       );
       this.insertRuntimeEvent(tx, {
+        ledgerKind: "cron_audit",
         topic: "cron.job.updated",
         workspacePath: current.workspacePath,
         cronJobId: input.cronJobId,
@@ -968,6 +986,7 @@ export class SqliteRuntimeControlStore {
         cronJobId,
       );
       this.insertRuntimeEvent(tx, {
+        ledgerKind: "cron_audit",
         topic: enabled ? "cron.job.enabled" : "cron.job.disabled",
         workspacePath: current.workspacePath,
         cronJobId,
@@ -992,8 +1011,10 @@ export class SqliteRuntimeControlStore {
       }
       this.mutate(`DELETE FROM cron_jobs WHERE cron_job_id = ?`, cronJobId);
       this.insertRuntimeEvent(tx, {
+        ledgerKind: "cron_audit",
         topic: "cron.job.deleted",
         workspacePath: current.workspacePath,
+        cronJobId,
         payload: { cronJobId },
       });
       return current;
@@ -1053,6 +1074,7 @@ export class SqliteRuntimeControlStore {
         reason ?? null,
       );
       this.insertRuntimeEvent(tx, {
+        ledgerKind: "cron_audit",
         topic: `cron.run.${status}`,
         workspacePath: job.workspacePath,
         cronJobId: job.cronJobId,
@@ -1134,6 +1156,7 @@ export class SqliteRuntimeControlStore {
           });
         }
         this.insertRuntimeEvent(tx, {
+          ledgerKind: "cron_audit",
           topic: "cron.run.failed",
           workspacePath: current.workspacePath,
           cronJobId: current.cronJobId,
@@ -1173,6 +1196,7 @@ export class SqliteRuntimeControlStore {
         input.cronRunId,
       );
       this.insertRuntimeEvent(tx, {
+        ledgerKind: "cron_audit",
         topic: "cron.run.running",
         workspacePath: current.workspacePath,
         cronJobId: current.cronJobId,
@@ -1213,6 +1237,7 @@ export class SqliteRuntimeControlStore {
         input.cronRunId,
       );
       this.insertRuntimeEvent(tx, {
+        ledgerKind: "cron_audit",
         topic: `cron.run.${input.status}`,
         workspacePath: current.workspacePath,
         cronJobId: current.cronJobId,
@@ -1297,12 +1322,18 @@ export class SqliteRuntimeControlStore {
   }
 
   appendRuntimeEvent(
-    input: Omit<RuntimeEventRecord, "eventId" | "createdAt"> & {
+    input: Omit<RuntimeNotificationEventRecord, "ledgerKind" | "eventId" | "createdAt"> & {
       eventId?: string;
       createdAt?: number;
     },
     projection?: { daemonRun: DaemonRunRecord },
-  ): RuntimeEventRecord {
+  ): RuntimeNotificationEventRecord {
+    if (isCronAuditEventTopic(input.topic)) {
+      throw new Error(`Cron audit topic ${input.topic} 不能通过 public Runtime 通知入口写入`);
+    }
+    if (!isRuntimeNotificationLedgerEnvelope(input.payload, input.workspacePath)) {
+      throw new Error("Runtime notification ledger payload 必须是当前完整 envelope");
+    }
     if (projection && projection.daemonRun.workspacePath !== input.workspacePath) {
       throw new RuntimeConflictError(
         `Run ${projection.daemonRun.runId} 的工作区与事件工作区不一致`,
@@ -1310,7 +1341,10 @@ export class SqliteRuntimeControlStore {
     }
     return this.write((tx) => {
       if (projection) this.persistDaemonRun(projection.daemonRun);
-      return this.insertRuntimeEvent(tx, input);
+      return this.insertRuntimeEvent(tx, {
+        ...input,
+        ledgerKind: "runtime_notification",
+      }) as RuntimeNotificationEventRecord;
     });
   }
 
@@ -1944,22 +1978,26 @@ export class SqliteRuntimeControlStore {
     return sequence;
   }
 
-  private insertRuntimeEvent(
-    tx: ControlWriteTx,
-    input: Omit<RuntimeEventRecord, "eventId" | "createdAt"> & {
-      eventId?: string;
-      createdAt?: number;
-    },
-  ): RuntimeEventRecord {
+  private insertRuntimeEvent(tx: ControlWriteTx, input: RuntimeEventInsert): RuntimeEventRecord {
     const eventId = input.eventId ?? generateRuntimeId("event");
     if (this.getRow(`SELECT 1 AS one FROM daemon_events WHERE event_id = ?`, eventId)) {
       throw new RuntimeConflictError(`Runtime event ID ${eventId} 已存在`);
     }
-    const event: RuntimeEventRecord = compact({
+    const event = compact({
       ...input,
       eventId,
       createdAt: input.createdAt ?? this.now(),
-    });
+    }) as RuntimeEventRecord;
+    if (event.ledgerKind === "cron_audit") {
+      if (!isCronAuditEventRecord(event)) {
+        throw new Error(`Cron audit event ${eventId} 不符合当前内部 schema`);
+      }
+    } else if (
+      isCronAuditEventTopic(event.topic) ||
+      !isRuntimeNotificationLedgerEnvelope(event.payload, event.workspacePath)
+    ) {
+      throw new Error(`Runtime notification event ${event.eventId} 不符合当前 envelope`);
+    }
     const sequence = this.allocateEventSequence(tx);
     this.mutate(
       `INSERT INTO daemon_events (event_id, tx_id, sequence, topic, workspace_path, cron_job_id,
@@ -2237,6 +2275,7 @@ export class SqliteRuntimeControlStore {
         cronRunId,
       );
       this.insertRuntimeEvent(tx, {
+        ledgerKind: "cron_audit",
         topic: `cron.run.${status}`,
         workspacePath: current.workspacePath,
         cronJobId: current.cronJobId,
@@ -2416,7 +2455,7 @@ function rowToMerge(row: Row): MergeRequestRecord {
 }
 
 function rowToRuntimeEvent(row: Row): RuntimeEventRecord {
-  return compact({
+  const common = {
     eventId: textField(row, "event_id"),
     topic: textField(row, "topic"),
     workspacePath: optionalTextField(row, "workspace_path") ?? "",
@@ -2424,7 +2463,18 @@ function rowToRuntimeEvent(row: Row): RuntimeEventRecord {
     cronRunId: optionalTextField(row, "cron_run_id"),
     payload: jsonRecordField(row, "payload_json"),
     createdAt: numberField(row, "created_at"),
-  });
+  };
+  if (isCronAuditEventTopic(common.topic)) {
+    const cronAuditEvent = compact({ ...common, ledgerKind: "cron_audit" });
+    if (!isCronAuditEventRecord(cronAuditEvent)) {
+      throw corrupt(`daemon_events.${common.eventId}.cron_audit`);
+    }
+    return cronAuditEvent;
+  }
+  return compact({
+    ...common,
+    ledgerKind: "runtime_notification",
+  }) as RuntimeNotificationEventRecord;
 }
 
 function rowToProviderCall(row: Row): ProviderCallRecord {
@@ -2529,11 +2579,12 @@ function interruptedCompletionPayload(job: JobRecord, reason: string): Record<st
   return { reason, executionClass: job.executionClass };
 }
 
-function daemonRunRecoveryEvent(run: DaemonRunRecord): RuntimeEventRecord {
+function daemonRunRecoveryEvent(run: DaemonRunRecord): RuntimeNotificationEventRecord {
   const eventId = `${DAEMON_RUN_RECOVERY_EVENT_PREFIX}${createHash("sha256")
     .update(`${run.workspacePath}\0${run.runId}\0${run.version}`)
     .digest("hex")}`;
   return {
+    ledgerKind: "runtime_notification",
     eventId,
     topic: "run.finished",
     workspacePath: run.workspacePath,
@@ -2557,7 +2608,7 @@ function daemonRunRecoveryEvent(run: DaemonRunRecord): RuntimeEventRecord {
           error: run.error,
           result: run.result,
           version: run.version,
-        }),
+        }) as unknown as RuntimeNotificationLedgerJsonValue,
       },
     },
     createdAt: run.finishedAt ?? run.updatedAt,
