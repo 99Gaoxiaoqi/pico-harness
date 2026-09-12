@@ -43,7 +43,7 @@ const originLabels: Readonly<Record<ProviderOrigin, string>> = {
 const credentialLabels: Readonly<Record<ProviderCredentialStatus, string>> = {
   ready: "API Key 已配置",
   missing: "尚未配置 API Key",
-  environment: "环境变量（兼容）",
+  environment: "环境变量",
   unsupported: "当前来源不可配置",
 };
 
@@ -622,14 +622,12 @@ function CredentialDialog({
           </div>
           {provider.credentialSource === "environment" && (
             <InlineNotice tone="neutral">
-              当前仍从环境变量 {provider.apiKeyEnv} 读取旧配置。它仅作为只读兼容来源；在这里保存 API
-              Key 后，用户配置将优先生效。
+              当前从环境变量 {provider.apiKeyEnv} 读取 API Key。在这里保存后，用户配置将优先生效。
             </InlineNotice>
           )}
           {provider.credentialSource === "keychain" && (
             <InlineNotice tone="neutral">
-              当前仍在使用旧版系统安全存储中的凭证。它仅作为只读兼容来源；在这里保存 API Key
-              后，用户配置将优先生效。
+              当前使用 Pico 系统安全存储中的凭证。在这里保存 API Key 后，用户配置将优先生效。
             </InlineNotice>
           )}
           <form className="provider-credential-form" onSubmit={(event) => void handleSubmit(event)}>

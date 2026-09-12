@@ -316,7 +316,7 @@ export class DesktopProviderConfigService {
     if (previousProvider && configuredCredential(previousProvider) !== undefined) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.CONFLICT,
-        `Provider ${id} 已在用户配置中保存 API Key，请先删除配置中的 Key 再导入旧版环境凭证`,
+        `Provider ${id} 已在用户配置中保存 API Key，请先删除配置中的 Key 再导入环境凭证`,
       );
     }
     const workspacePaths = await this.options.listWorkspacePaths();
@@ -612,7 +612,7 @@ export class DesktopProviderConfigService {
     if (stored) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.CONFLICT,
-        `Provider ${providerId} 仍有旧版系统凭证，请先清理后再修改 Endpoint 或协议`,
+        `Provider ${providerId} 仍有已保存的系统凭证，请先清理后再修改 Endpoint 或协议`,
       );
     }
   }
