@@ -68,7 +68,8 @@ realTest(
           model: model.route.model,
           modelRouteId: model.route.id,
           modelCapabilities: model.route.capabilities,
-          interactionMode: "ask",
+          collaborationMode: "agent",
+          permissionMode: "ask",
           allowedTools: ["agent_list", "agent_spawn", "agent_output"],
         },
         {

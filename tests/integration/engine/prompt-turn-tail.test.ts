@@ -314,7 +314,7 @@ test("AgentRuntime puts schedule intent in the current turn tail, not durable ev
   assert.doesNotMatch(JSON.stringify(runtimeEvents), /schedule-task-intent|current-turn-context/u);
 });
 
-test("AgentRuntime resume durably fail-closes a legacy history without settings", async (context) => {
+test("AgentRuntime rejects a retired history without current settings", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-legacy-resume-settings-"));
   const workDir = join(root, "workspace");
   const picoHome = join(root, "pico-home");
@@ -337,39 +337,33 @@ test("AgentRuntime resume durably fail-closes a legacy history without settings"
   assert.equal(legacy.getRuntimeStateSnapshot().settings, undefined);
   await legacy.close();
 
-  await executeAgentRuntime(
-    {
-      prompt: "resume safely",
-      dir: workDir,
-      sessionSelection: { mode: "resume", sessionId },
-      provider: "openai",
-      modelRouteId: "test/test",
-      interactionMode: "full-access",
-    },
-    {
-      provider: {
-        async generate() {
-          return { role: "assistant", content: "done" };
-        },
+  await assert.rejects(
+    executeAgentRuntime(
+      {
+        prompt: "resume safely",
+        dir: workDir,
+        sessionSelection: { mode: "resume", sessionId },
+        provider: "openai",
+        modelRouteId: "test/test",
+        collaborationMode: "agent",
+        permissionMode: "full-access",
       },
-      picoHome,
-      reporter: new SilentReporter(),
-    },
+      {
+        provider: {
+          async generate() {
+            return { role: "assistant", content: "must not run" };
+          },
+        },
+        picoHome,
+        reporter: new SilentReporter(),
+      },
+    ),
+    /no persisted settings/u,
   );
 
   const resumed = globalSessionManager.get(sessionId, workDir, { picoHome });
   assert.ok(resumed);
-  assert.deepEqual(resumed.getRuntimeStateSnapshot().settings, {
-    provider: "openai",
-    model: "glm-5.2",
-    modelRouteId: "test/test",
-    collaborationMode: "agent",
-    orchestrationMode: "default",
-    thinkingEffort: "off",
-    thinkingEffortExplicit: false,
-    permissionMode: "ask",
-    additionalDirectories: [],
-  });
+  assert.equal(resumed.getRuntimeStateSnapshot().settings, undefined);
 });
 
 test("isolated headless runtime adds the autonomous completion contract only to its system prompt", async (context) => {
@@ -399,7 +393,8 @@ test("isolated headless runtime adds the autonomous completion contract only to 
         sessionSelection: { mode: "new", sessionId },
         provider: "openai",
         modelRouteId: "test/test",
-        interactionMode: "auto",
+        collaborationMode: "agent",
+        permissionMode: "auto",
       },
       {
         provider,

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { parseUserDefaults } from "../../../apps/desktop/src/renderer/runtime-projections/configuration.js";
+import { parseSessionSettings } from "../../../apps/desktop/src/renderer/runtime-projections/workspace.js";
 
 test("new task defaults preserve canonical session settings", () => {
   assert.deepEqual(
@@ -29,6 +30,26 @@ test("new task defaults reject the removed combined mode field", () => {
   assert.deepEqual(parseUserDefaults({ mode: "full-access" }), {});
   assert.deepEqual(parseUserDefaults({ mode: "default" }), {});
   assert.deepEqual(parseUserDefaults({ mode: "yolo" }), {});
+});
+
+test("session settings projection requires the current split permission axes", () => {
+  assert.deepEqual(
+    parseSessionSettings({
+      model: "coder",
+      collaborationMode: "agent",
+      permissionMode: "ask",
+    }),
+    {
+      modelRouteId: undefined,
+      model: "coder",
+      collaborationMode: "agent",
+      orchestrationMode: "default",
+      permissionMode: "ask",
+      thinkingEffort: "off",
+      reasoningLevels: [],
+    },
+  );
+  assert.equal(parseSessionSettings({ model: "coder", mode: "full-access" }), undefined);
 });
 
 test("new task falls back to the fail-closed Runtime default when user config is absent", async () => {

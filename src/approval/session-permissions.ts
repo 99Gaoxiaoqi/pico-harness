@@ -3,8 +3,8 @@ import type { ToolCall } from "../schema/message.js";
 import { sessionScopeKey } from "../engine/session-scope.js";
 import {
   setSessionAdditionalDirectories,
-  setSessionMode,
-  type InteractionMode,
+  setSessionPermissionMode,
+  type PermissionMode,
   type SessionSettings,
 } from "../input/session-settings.js";
 import type { WorkspaceRoots } from "../tools/workspace-roots.js";
@@ -142,7 +142,7 @@ function keyIncludesSessionId(key: string, sessionId: string): boolean {
 export const globalSessionPermissionGrants = new SessionPermissionGrants();
 
 export interface PermissionRuntimeSettings {
-  mode: InteractionMode;
+  permissionMode: PermissionMode;
   additionalDirectories?: readonly string[];
 }
 
@@ -172,11 +172,13 @@ export async function applySessionPermissionScope(
         ...added,
       ]);
     }
-    if (scope.enableAutoEdits) setSessionMode(options.settings as SessionSettings, "auto");
+    if (scope.enableAutoEdits) {
+      setSessionPermissionMode(options.settings as SessionSettings, "auto");
+    }
   } else if (scope.type === "all-edits") {
-    setSessionMode(options.settings as SessionSettings, "auto");
+    setSessionPermissionMode(options.settings as SessionSettings, "auto");
   }
-  // all-edits 由权威 mode=auto 表达，directory 由 WorkspaceRoots 表达；
+  // all-edits 由权威 permissionMode=auto 表达，directory 由 WorkspaceRoots 表达；
   // 仅无法投影到这两者的规则进入结构化 grant store。
   if (scope.type !== "all-edits" && scope.type !== "directories") {
     globalSessionPermissionGrants.add(options.sessionId, options.workDir, scope, options.picoHome);

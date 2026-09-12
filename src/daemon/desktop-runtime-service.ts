@@ -47,7 +47,6 @@ import {
 import { globalSessionManager, Session } from "../engine/session.js";
 import type { PersistedSessionSettings } from "../engine/session-runtime.js";
 import {
-  getOrCreateFailClosedLegacySessionSettings,
   getOrCreateSessionSettings,
   migrateSessionModelRoute,
   sessionReasoningCandidates,
@@ -401,7 +400,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       createSessionId: this.createSessionId,
       requireIdleTrustedSession: this.requireIdleTrustedSession.bind(this),
       withSession: this.withSession.bind(this),
-      prepareForkSourceSettings: this.getForkSourceSettings.bind(this),
       notifyCommitted: async ({ workspacePath, sessionId, sourceSessionId, checkpointId }) => {
         const session = await this.requireSession(workspacePath, sessionId);
         this.publishSession(session);
@@ -1116,8 +1114,8 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     });
     try {
       await session.recover();
+      const settings = await this.initializeSessionSettings(canonical, session);
       if (title !== undefined) {
-        const settings = await this.getSessionSettings(canonical, session);
         const result = setSessionTitle(settings, requireText(title, "title"));
         if (!result.ok) {
           throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.INVALID_PARAMS, result.message);
@@ -2693,18 +2691,11 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         `Session ${sessionId} 不存在于工作区 ${workspacePath}`,
       );
     }
-    // Opening/resuming a legacy Session is an authorization boundary.  A missing
-    // settings fact has no authority to inherit today's mutable user/project permission default,
-    // so materialize the same durable agent/default snapshot used by Fork first.
-    // Existing settings are read-side data, not an execution-lock operation.
-    // Only a legacy Session without a durable settings fact needs serialization.
     if ((await this.readPersistedSessionSettings(workspacePath, sessionId)) === undefined) {
-      await this.withSession(workspacePath, sessionId, async (session) => {
-        if (session.getRuntimeStateSnapshot().settings === undefined) {
-          await this.getForkSourceSettings(workspacePath, session);
-        }
-        await session.flushPersistence();
-      });
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.RESET_REQUIRED,
+        `Session ${sessionId} 缺少当前版本 settings，请新建 Session`,
+      );
     }
     const parentSession = await this.withWorkspaceSessionStore(workspacePath, (store) =>
       configuredSubagentParent(store, sessionId, workspacePath, this.picoHome),
@@ -3253,40 +3244,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
   private async getSessionSettings(workspacePath: string, session: Session) {
     const persisted = session.getRuntimeStateSnapshot().settings;
     if (!persisted) {
-      let defaults: Pick<PersistedSessionSettings, "provider" | "model" | "modelRouteId"> & {
-        thinkingEffort?: string;
-      };
-      try {
-        defaults = effectiveSessionSettingDefaults(
-          await this.loadSessionModelRuntime(workspacePath),
-        );
-      } catch (error) {
-        // Legacy state may predate model routing and tests/headless recovery can have
-        // no configured route. Persist a deliberately unavailable route rather than
-        // inheriting a later mutable route or permission mode; Resume then fails closed
-        // until the user explicitly selects a model.
-        logger.warn(
-          { error, sessionId: session.id },
-          "legacy Session has no durable model route; materializing fail-closed settings",
-        );
-        defaults = {
-          provider: "openai",
-          model: "unconfigured",
-          modelRouteId: "openai/unconfigured",
-          thinkingEffort: "off",
-        };
-      }
-      return getOrCreateFailClosedLegacySessionSettings(
-        {
-          sessionId: session.id,
-          cwd: workspacePath,
-          picoHome: this.picoHome,
-          provider: defaults.provider,
-          model: defaults.model,
-          modelRouteId: defaults.modelRouteId,
-          ...(defaults.thinkingEffort ? { thinkingEffort: defaults.thinkingEffort } : {}),
-        },
-        { persistence: session },
+      throw new RuntimeProtocolError(
+        RUNTIME_ERROR_CODES.RESET_REQUIRED,
+        `Session ${session.id} 缺少当前版本 settings，请新建 Session`,
       );
     }
     return getOrCreateSessionSettings(
@@ -3306,7 +3266,30 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     );
   }
 
-  /** Missing historical settings have no authorization to inherit mutable defaults. */
+  private async initializeSessionSettings(workspacePath: string, session: Session) {
+    const persisted = session.getRuntimeStateSnapshot().settings;
+    if (persisted) return this.getSessionSettings(workspacePath, session);
+    const defaults = effectiveSessionSettingDefaults(
+      await this.loadSessionModelRuntime(workspacePath),
+    );
+    return getOrCreateSessionSettings(
+      {
+        sessionId: session.id,
+        sessionMode: "new",
+        cwd: workspacePath,
+        picoHome: this.picoHome,
+        provider: defaults.provider,
+        model: defaults.model,
+        modelRouteId: defaults.modelRouteId,
+        collaborationMode: "agent",
+        permissionMode: "ask",
+        ...(defaults.thinkingEffort ? { thinkingEffort: defaults.thinkingEffort } : {}),
+      },
+      { persistence: session },
+    );
+  }
+
+  /** Fork sources must already own a complete current-version settings fact. */
   private async getForkSourceSettings(workspacePath: string, session: Session) {
     return this.getSessionSettings(workspacePath, session);
   }
@@ -3890,7 +3873,7 @@ function runtimeSessionSettings(settings: SessionSettings, router: ModelRouter):
     provider: settings.provider,
     model: settings.model,
     modelRouteId: settings.modelRouteId,
-    collaborationMode: settings.collaborationMode ?? (settings.mode === "plan" ? "plan" : "agent"),
+    collaborationMode: settings.collaborationMode,
     orchestrationMode: settings.orchestrationMode ?? "default",
     permissionMode: settings.permissionMode,
     thinkingEffort: settings.thinkingEffort,

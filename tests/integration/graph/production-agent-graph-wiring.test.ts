@@ -75,7 +75,8 @@ test("production host binds Graph root and installs detached exact execution", a
         throw new Error("attach failed before AgentRuntime completed");
       }
       if (options.prompt === "exercise broker boundaries") {
-        assert.equal(options.interactionMode, "ask");
+        assert.equal(options.collaborationMode, "agent");
+        assert.equal(options.permissionMode, "ask");
         assert.ok(host.approvalManager);
         assert.ok(host.approvalNotifier);
         assert.ok(host.askUserHandler);
@@ -136,7 +137,8 @@ test("production host binds Graph root and installs detached exact execution", a
         );
       }
       if (options.prompt === "inherit operator full access") {
-        assert.equal(options.interactionMode, "full-access");
+        assert.equal(options.collaborationMode, "agent");
+        assert.equal(options.permissionMode, "full-access");
         assert.equal(
           (host.agentGraph as { readonly executionPermissionMode?: string } | undefined)
             ?.executionPermissionMode,
@@ -323,7 +325,8 @@ test("production host binds Graph root and installs detached exact execution", a
   await waitUntil(() => calls.length === 2);
   assert.equal(runtime.getRun(exactInput.prestartedRun.runId)?.status, "running");
   assert.equal(terminalCount, 0);
-  assert.equal(calls[1]?.options.interactionMode, "ask");
+  assert.equal(calls[1]?.options.collaborationMode, "agent");
+  assert.equal(calls[1]?.options.permissionMode, "ask");
   assert.equal(calls[1]?.options.orchestrationMode, "default");
   assert.deepEqual(calls[1]?.options.allowedTools, [...operatorProfile.tools, "agent_output"]);
   assert.equal(calls[1]?.host.agentGraph?.kind, "operator");

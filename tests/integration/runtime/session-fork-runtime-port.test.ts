@@ -225,6 +225,19 @@ test("session fork runtime port composes the coordinator for Session callers", a
     runtimePort: createEngineRuntimePort(),
   });
   try {
+    getOrCreateSessionSettings(
+      {
+        sessionId: sourceSessionId,
+        cwd: workDir,
+        picoHome,
+        provider: "openai",
+        model: "test",
+        modelRouteId: "openai/test",
+        collaborationMode: "agent",
+        permissionMode: "ask",
+      },
+      { persistence: source },
+    );
     await source.commitMessages({ role: "user", content: "seed through composed port" });
     await createSessionForkRuntimePort().forkSession({
       workDir,
@@ -280,7 +293,8 @@ test("fork inherits both interaction axes and survives target Resume", async () 
           provider: "openai",
           model: "test",
           modelRouteId: "openai/test",
-          mode: permissionMode,
+          collaborationMode,
+          permissionMode,
         },
         { persistence: source },
       );
@@ -389,7 +403,8 @@ test("historical fork cannot re-expand the source's current managed boundary", a
         provider: "openai",
         model: "test",
         modelRouteId: "openai/test",
-        mode: "full-access",
+        collaborationMode: "agent",
+        permissionMode: "full-access",
       },
       { persistence: source },
     );
@@ -436,7 +451,8 @@ test("historical fork cannot re-expand the source's current managed boundary", a
           provider: "openai",
           model: "ignored-on-restore",
           modelRouteId: "openai/ignored-on-restore",
-          mode: "full-access",
+          collaborationMode: "agent",
+          permissionMode: "full-access",
         },
         { persistence: target },
       );
@@ -452,7 +468,7 @@ test("historical fork cannot re-expand the source's current managed boundary", a
   }
 });
 
-test("settings-less fork recovery materializes fail-closed axes before publication", async () => {
+test("settings-less fork recovery rejects the obsolete frozen bundle", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-session-fork-legacy-permission-"));
   const workDir = join(root, "workspace");
   const picoHome = join(root, "pico-home");
@@ -490,7 +506,8 @@ test("settings-less fork recovery materializes fail-closed axes before publicati
         provider: "openai",
         model: "test",
         modelRouteId: "openai/test",
-        mode: "ask",
+        collaborationMode: "agent",
+        permissionMode: "ask",
       },
       { persistence: source },
     );
@@ -513,24 +530,6 @@ test("settings-less fork recovery materializes fail-closed axes before publicati
     manifest["contentSha256"] = createHash("sha256").update(frozenContents).digest("hex");
     manifest["sizeBytes"] = Buffer.byteLength(frozenContents);
     await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`);
-
-    // Mutable source/user state may now be FULL_ACCESS; the missing historical fact has
-    // no authority to inherit it.
-    const mutableSettings = getOrCreateSessionSettings(
-      {
-        sessionId: sourceSessionId,
-        cwd: workDir,
-        picoHome,
-        provider: "openai",
-        model: "test",
-        modelRouteId: "openai/test",
-        mode: "full-access",
-      },
-      { persistence: source, restore: false },
-    );
-    setSessionCollaborationMode(mutableSettings, "plan");
-    setSessionPermissionMode(mutableSettings, "full-access");
-    await source.flushPersistence();
 
     const database = new DatabaseSync(
       operationalDatabasePath(source.runtimeEventStore!.storageRoot),
@@ -557,20 +556,9 @@ test("settings-less fork recovery materializes fail-closed axes before publicati
     assert.equal(failed?.state, "sidecars_committed");
     injectFailure = false;
     await service.reconcileUnfinished();
-
-    const resumed = new Session(targetSessionId, workDir, {
-      persistence: true,
-      picoHome,
-      runtimePort: createEngineRuntimePort(),
-    });
-    try {
-      await resumed.recover();
-      assert.equal(resumed.getRuntimeStateSnapshot().settings?.collaborationMode, "agent");
-      assert.equal(resumed.getRuntimeStateSnapshot().settings?.permissionMode, "ask");
-      assert.deepEqual(resumed.getRuntimeStateSnapshot().settings?.additionalDirectories, []);
-    } finally {
-      await resumed.close();
-    }
+    const rejected = await journal.get(operationId);
+    assert.equal(rejected?.state, "needs_attention");
+    assert.match(rejected?.error?.message ?? "", /Invalid frozen Runtime state/u);
   } finally {
     service.close();
     await manager.delete(sourceSessionId, workDir, { picoHome })?.close();

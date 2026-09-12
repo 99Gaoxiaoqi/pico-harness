@@ -11,7 +11,8 @@ import type { ToolResultEnvelope } from "./tool-result-contract.js";
 export const SESSION_RUNTIME_STATE_VERSION = 3 as const;
 export type SessionRuntimeStateVersion = typeof SESSION_RUNTIME_STATE_VERSION;
 
-export type PersistedInteractionMode = "ask" | "plan" | "auto" | "full-access";
+export type PersistedCollaborationMode = "agent" | "plan";
+export type PersistedPermissionMode = "ask" | "auto" | "full-access";
 
 /** 会话恢复时需要覆盖启动默认值的设置。密钥、endpoint 和 tools 不落盘。 */
 export interface PersistedSessionSettings {
@@ -25,9 +26,9 @@ export interface PersistedSessionSettings {
   model: string;
   modelRouteId: string;
   /** Canonical collaboration axis. */
-  collaborationMode: "agent" | "plan";
+  collaborationMode: PersistedCollaborationMode;
   /** Canonical permission axis. */
-  permissionMode: Exclude<PersistedInteractionMode, "plan">;
+  permissionMode: PersistedPermissionMode;
   /** Canonical orchestration axis: "default" = direct execution, "graph" / "swarm" = coordinated execution. */
   orchestrationMode?: "default" | "graph" | "swarm";
   /** Current model reasoning level. */
@@ -502,7 +503,7 @@ function isProviderKind(value: unknown): value is ProviderKind {
   return value === "openai" || value === "claude" || value === "responses";
 }
 
-function isNonPlanMode(value: unknown): value is Exclude<PersistedInteractionMode, "plan"> {
+function isNonPlanMode(value: unknown): value is PersistedPermissionMode {
   return value === "ask" || value === "auto" || value === "full-access";
 }
 

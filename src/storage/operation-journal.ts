@@ -67,8 +67,8 @@ export interface RewindStorageOperation extends StorageOperationBase {
     /** TUI 崩溃恢复 handoff 使用同一 canonical 用户输入。 */
     userPrompt: string;
     transcriptIndex?: number;
-    interactionMode?: "ask" | "plan" | "auto" | "full-access";
-    prePlanMode?: "ask" | "auto" | "full-access";
+    collaborationMode?: "agent" | "plan";
+    permissionMode?: "ask" | "auto" | "full-access";
   };
   files: Array<{
     rootId: string;
@@ -541,17 +541,49 @@ function parseRewindOperation(value: Record<string, unknown>): RewindStorageOper
   const precondition = value["precondition"];
   const target = value["target"];
   const files = value["files"];
-  const interactionMode = normalizeInteractionMode(
-    isRecord(target) ? target["interactionMode"] : undefined,
+  const collaborationMode = normalizeCollaborationMode(
+    isRecord(target) ? target["collaborationMode"] : undefined,
   );
-  const prePlanMode = normalizeNonPlanMode(isRecord(target) ? target["prePlanMode"] : undefined);
+  const permissionMode = normalizePermissionMode(
+    isRecord(target) ? target["permissionMode"] : undefined,
+  );
   if (
+    !hasOnlyKeys(value, [
+      "schemaVersion",
+      "operationId",
+      "version",
+      "state",
+      "sessionId",
+      "createdAt",
+      "updatedAt",
+      "error",
+      "dispositions",
+      "kind",
+      "mode",
+      "precondition",
+      "target",
+      "files",
+    ]) ||
     !isRewindMode(value["mode"]) ||
     !isRecord(precondition) ||
+    !hasOnlyKeys(precondition, [
+      "sessionLastSeq",
+      "effectiveHistoryDigest",
+      "fileHistoryRevision",
+    ]) ||
     !isNonNegativeInteger(precondition["sessionLastSeq"]) ||
     typeof precondition["effectiveHistoryDigest"] !== "string" ||
     !isNonNegativeInteger(precondition["fileHistoryRevision"]) ||
     !isRecord(target) ||
+    !hasOnlyKeys(target, [
+      "messageId",
+      "sourceMessageEventId",
+      "messageIndex",
+      "userPrompt",
+      "transcriptIndex",
+      "collaborationMode",
+      "permissionMode",
+    ]) ||
     typeof target["messageId"] !== "string" ||
     target["messageId"].length === 0 ||
     typeof target["sourceMessageEventId"] !== "string" ||
@@ -560,21 +592,20 @@ function parseRewindOperation(value: Record<string, unknown>): RewindStorageOper
     typeof target["userPrompt"] !== "string" ||
     target["userPrompt"].length === 0 ||
     !isOptionalNonNegativeInteger(target["transcriptIndex"]) ||
-    (target["interactionMode"] !== undefined && interactionMode === undefined) ||
-    (target["prePlanMode"] !== undefined && prePlanMode === undefined) ||
-    (prePlanMode !== undefined && interactionMode !== "plan") ||
+    (target["collaborationMode"] !== undefined && collaborationMode === undefined) ||
+    (target["permissionMode"] !== undefined && permissionMode === undefined) ||
+    (collaborationMode === undefined) !== (permissionMode === undefined) ||
     !Array.isArray(files) ||
     !files.every(isStoredFileTransition)
   ) {
     return undefined;
   }
-  const effectivePrePlanMode = interactionMode === "plan" ? (prePlanMode ?? "ask") : undefined;
   return {
     ...(structuredClone(value) as unknown as RewindStorageOperation),
     target: {
       ...(structuredClone(target) as RewindStorageOperation["target"]),
-      ...(interactionMode !== undefined ? { interactionMode } : {}),
-      ...(effectivePrePlanMode !== undefined ? { prePlanMode: effectivePrePlanMode } : {}),
+      ...(collaborationMode !== undefined ? { collaborationMode } : {}),
+      ...(permissionMode !== undefined ? { permissionMode } : {}),
     },
   };
 }
@@ -706,24 +737,14 @@ function isRewindMode(value: unknown): value is RewindStorageOperation["mode"] {
   return value === "code" || value === "conversation" || value === "both";
 }
 
-function normalizeInteractionMode(
-  value: unknown,
-): "ask" | "plan" | "auto" | "full-access" | undefined {
-  if (
-    value === undefined ||
-    value === "ask" ||
-    value === "plan" ||
-    value === "auto" ||
-    value === "full-access"
-  ) {
-    return value;
-  }
-  return undefined;
+function normalizeCollaborationMode(value: unknown): "agent" | "plan" | undefined {
+  return value === undefined || value === "agent" || value === "plan" ? value : undefined;
 }
 
-function normalizeNonPlanMode(value: unknown): "ask" | "auto" | "full-access" | undefined {
-  const normalized = normalizeInteractionMode(value);
-  return normalized === "plan" ? undefined : normalized;
+function normalizePermissionMode(value: unknown): "ask" | "auto" | "full-access" | undefined {
+  return value === undefined || value === "ask" || value === "auto" || value === "full-access"
+    ? value
+    : undefined;
 }
 
 function isOptionalNonNegativeInteger(value: unknown): boolean {

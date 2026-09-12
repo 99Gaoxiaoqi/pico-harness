@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { ApprovalManager, type ApprovalNotice } from "../../../src/approval/manager.js";
 import { buildApprovalRequestedPayload } from "../../../src/daemon/approval-wire.js";
 import { parseApprovalRequestedPayload } from "@pico/protocol";
-import { DEFAULT_INTERACTION_MODE } from "../../../src/input/session-settings.js";
+import { DEFAULT_PERMISSION_MODE } from "../../../src/input/session-settings.js";
 import { buildPermissionMiddleware } from "../../../src/runtime/agent-runtime.js";
 import { globalSessionPermissionGrants } from "../../../src/approval/session-permissions.js";
 import { WorkspaceRoots } from "../../../src/tools/workspace-roots.js";
@@ -113,7 +113,7 @@ test("fresh ask mode asks before the first workspace write", async () => {
     process.cwd(),
     undefined,
     manager,
-    { sessionId: "fresh-session", mode: DEFAULT_INTERACTION_MODE },
+    { sessionId: "fresh-session", permissionMode: DEFAULT_PERMISSION_MODE },
   );
 
   const decision = await middleware({
@@ -122,7 +122,7 @@ test("fresh ask mode asks before the first workspace write", async () => {
     arguments: JSON.stringify({ path: "first-write.txt", content: "blocked" }),
   });
 
-  assert.equal(DEFAULT_INTERACTION_MODE, "ask");
+  assert.equal(DEFAULT_PERMISSION_MODE, "ask");
   assert.equal(requested?.toolName, "write_file");
   assert.equal(decision.allowed, false);
 });
@@ -132,7 +132,11 @@ test("disabled session grants neither inherit nor persist approval scope", async
   const sessionId = "isolated-graph-operator-session";
   const workDir = process.cwd();
   const workspaceRoots = WorkspaceRoots.createSync(workDir);
-  const settings = { sessionId, mode: DEFAULT_INTERACTION_MODE, additionalDirectories: [] };
+  const settings = {
+    sessionId,
+    permissionMode: DEFAULT_PERMISSION_MODE,
+    additionalDirectories: [],
+  };
   let requested = 0;
   globalSessionPermissionGrants.add(sessionId, workDir, {
     type: "file",
@@ -165,7 +169,7 @@ test("disabled session grants neither inherit nor persist approval scope", async
     assert.equal((await middleware(call)).allowed, true);
     assert.equal((await middleware({ ...call, id: "isolated-write-again" })).allowed, true);
     assert.equal(requested, 2);
-    assert.equal(settings.mode, "ask");
+    assert.equal(settings.permissionMode, "ask");
   } finally {
     globalSessionPermissionGrants.clear(sessionId, workDir);
   }

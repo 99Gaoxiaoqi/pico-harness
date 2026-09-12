@@ -129,7 +129,6 @@ export type {
   RuntimeCollaborationMode,
   RuntimeOrchestrationMode,
   RuntimePermissionMode,
-  RuntimeInteractionMode,
   RuntimeProviderKind,
   RuntimeConfigSource,
   RuntimeCredentialStatus,

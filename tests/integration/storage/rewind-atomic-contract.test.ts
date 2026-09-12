@@ -72,7 +72,7 @@ interface RewindFixture {
   close(): Promise<void>;
 }
 
-async function createFixture(label: string): Promise<RewindFixture> {
+async function createFixture(label: string, withSettings = true): Promise<RewindFixture> {
   const root = await mkdtemp(join(tmpdir(), `pico-rewind-atomic-${label}-`));
   const workDirInput = join(root, "workspace");
   const picoHome = join(root, "pico-home");
@@ -86,6 +86,21 @@ async function createFixture(label: string): Promise<RewindFixture> {
     runtimePort: createEngineRuntimePort(),
   });
   const session = lease.session;
+  if (withSettings) {
+    getOrCreateSessionSettings(
+      {
+        sessionId,
+        cwd: workDir,
+        picoHome,
+        provider: "openai",
+        model: "test",
+        modelRouteId: "openai/test",
+        collaborationMode: "agent",
+        permissionMode: "ask",
+      },
+      { persistence: session },
+    );
+  }
   await session.commitMessages({ role: "system", content: "rewind fixture seed" });
   const firstFile = join(workDir, "a.txt");
   const secondFile = join(workDir, "b.txt");
@@ -95,7 +110,8 @@ async function createFixture(label: string): Promise<RewindFixture> {
     messageId: `checkpoint-${label}`,
     userPrompt: "change both files",
     transcriptIndex: 1,
-    interactionMode: "ask",
+    collaborationMode: "agent",
+    permissionMode: "ask",
   });
   await fileHistoryTrackEdit(
     session.fileHistory,
@@ -393,7 +409,6 @@ for (const cut of ["prepared-journal", "first-file", "last-file", "sidecars"] as
           targetSessionId: input.targetSessionId,
           ...(input.operationId ? { operationId: input.operationId } : {}),
           ...(input.throughEventId ? { throughEventId: input.throughEventId } : {}),
-          ...(input.fallbackSettings ? { fallbackSettings: input.fallbackSettings } : {}),
           ...(input.rewind ? { rewind: input.rewind } : {}),
         });
       },
@@ -471,7 +486,6 @@ test("rewind both safely replays a frozen bundle cut before journal creation", a
         targetSessionId: input.targetSessionId,
         ...(input.operationId ? { operationId: input.operationId } : {}),
         ...(input.throughEventId ? { throughEventId: input.throughEventId } : {}),
-        ...(input.fallbackSettings ? { fallbackSettings: input.fallbackSettings } : {}),
         ...(input.rewind ? { rewind: input.rewind } : {}),
       });
     },
@@ -626,7 +640,6 @@ for (const tamper of ["bundle-root", "manifest-path", "missing-manifest-bundle-r
           targetSessionId: input.targetSessionId,
           ...(input.operationId ? { operationId: input.operationId } : {}),
           ...(input.throughEventId ? { throughEventId: input.throughEventId } : {}),
-          ...(input.fallbackSettings ? { fallbackSettings: input.fallbackSettings } : {}),
           ...(input.rewind ? { rewind: input.rewind } : {}),
         });
       },
@@ -1049,7 +1062,8 @@ test("rewind fork keeps the current cumulative boundary instead of its historica
         provider: "openai",
         model: "test",
         modelRouteId: "openai/test",
-        mode: "ask",
+        collaborationMode: "agent",
+        permissionMode: "ask",
       },
       { persistence: source },
     );
@@ -1063,7 +1077,8 @@ test("rewind fork keeps the current cumulative boundary instead of its historica
       messageId: "rewind-current-boundary-checkpoint",
       userPrompt: "continue after the boundary checkpoint",
       transcriptIndex: 1,
-      interactionMode: "ask",
+      collaborationMode: "agent",
+      permissionMode: "ask",
     });
     await source.commitMessages({
       role: "user",
@@ -1095,7 +1110,8 @@ test("rewind fork keeps the current cumulative boundary instead of its historica
           provider: "openai",
           model: "ignored-on-restore",
           modelRouteId: "openai/ignored-on-restore",
-          mode: "ask",
+          collaborationMode: "agent",
+          permissionMode: "ask",
         },
         { persistence: targetLease.session },
       );
@@ -1355,8 +1371,8 @@ test("conversation rewind ignores incomplete FileHistory while code and both fai
   }
 });
 
-test("legacy missing settings rewind freezes durable agent/default on the target", async () => {
-  const fixture = await createFixture("legacy-safe-settings");
+test("rewind rejects a retired Session without current settings", async () => {
+  const fixture = await createFixture("retired-settings", false);
   const targetSessionId = "rewind-legacy-safe-settings-target";
   const env = { PICO_HOME: fixture.picoHome };
   const trustStore = new WorkspaceTrustStore({ userStateDirectory: fixture.picoHome });
@@ -1370,47 +1386,22 @@ test("legacy missing settings rewind freezes durable agent/default on the target
   });
   try {
     assert.equal(fixture.session.getRuntimeStateSnapshot().settings, undefined);
-    const preview = parseRuntimeResult(
-      "rewind.preview",
-      await desktop.handle(
+    await assert.rejects(
+      desktop.handle(
         createRuntimeRequest("rewind.preview", {
           workspacePath: fixture.workDir,
           sessionId: fixture.session.id,
           checkpointId: fixture.checkpointId,
         }),
       ),
+      /缺少当前版本 settings/u,
     );
-    await desktop.handle(
-      createRuntimeRequest("rewind.apply", {
-        workspacePath: fixture.workDir,
-        sessionId: fixture.session.id,
-        checkpointId: fixture.checkpointId,
-        expectedFingerprint: preview.fingerprint,
-        mode: "conversation",
-        idempotencyKey: "legacy-safe-settings",
-      }),
-    );
-    const targetLease = await globalSessionManager.getOrCreatePinned(
-      targetSessionId,
-      fixture.workDir,
-      {
-        persistence: true,
+    assert.equal(
+      await findCliSessionCatalogEntry(fixture.workDir, targetSessionId, {
         picoHome: fixture.picoHome,
-        runtimePort: createEngineRuntimePort(),
-      },
+      }),
+      undefined,
     );
-    try {
-      const runtime = targetLease.session.getRuntimeStateSnapshot();
-      assert.equal(runtime.settings?.collaborationMode, "agent");
-      assert.equal(runtime.settings?.permissionMode, "ask");
-      assert.deepEqual(runtime.settings?.additionalDirectories, []);
-      assert.deepEqual(
-        runtime.boundary,
-        createManagedExecutionBoundary(createWorkspaceWritePermissionProfile()),
-      );
-    } finally {
-      targetLease.release();
-    }
   } finally {
     await desktop.close();
     await fixture.close();

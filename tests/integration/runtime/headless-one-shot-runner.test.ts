@@ -155,7 +155,6 @@ test("headless preserves independent collaboration and permission axes at the Ru
   assert.equal(outcome.exitCode, 0, JSON.stringify(outcome.result));
   assert.equal(received?.collaborationMode, "plan");
   assert.equal(received?.permissionMode, "full-access");
-  assert.equal(received?.interactionMode, undefined);
   assert.equal(outcome.result.effective.collaborationMode, "plan");
   assert.equal(outcome.result.effective.permissionMode, "full-access");
 });

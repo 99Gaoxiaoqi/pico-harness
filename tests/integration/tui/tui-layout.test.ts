@@ -161,7 +161,7 @@ test("reasoning 状态显示已配置档位的中文说明", () => {
     sessionMode: "new",
     cwd: "/tmp",
     provider: "openai",
-    mode: "full-access",
+    collaborationMode: "agent",
     permissionMode: "full-access",
     model: "gpt-5.4",
     modelRouteId: route.id,

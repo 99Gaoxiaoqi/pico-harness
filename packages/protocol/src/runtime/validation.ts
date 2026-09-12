@@ -147,8 +147,6 @@ export function assertNestedShape(
   }
 }
 
-export const interactionModeParam = oneOfParam(["ask", "plan", "auto", "full-access"] as const);
-
 export const collaborationModeParam = oneOfParam(["agent", "plan"] as const);
 
 export const orchestrationModeParam = oneOfParam(["default", "graph", "swarm"] as const);

@@ -3,7 +3,7 @@ import type { ImagePart, Message } from "../schema/message.js";
 import type { ProviderKind } from "../provider/factory.js";
 import type { CredentialRef } from "../provider/credential-vault.js";
 import type { ModelRouteCapabilities } from "../provider/model-capabilities.js";
-import type { InteractionMode, SessionSettings } from "../input/session-settings.js";
+import type { CollaborationMode, PermissionMode } from "../input/session-settings.js";
 import type { BackgroundAutonomousPolicySnapshotData } from "../safety/background-autonomous-policy-schema.js";
 import type { PlanHandoff } from "../engine/plan-handoff.js";
 
@@ -21,10 +21,10 @@ export interface RuntimeRunOptions {
   rewindPrompt?: string;
   /** 用户消息写入可见 transcript 前的条目下标。 */
   rewindTranscriptIndex?: number;
-  /** 宿主可选记录该消息发送时的交互模式。 */
-  rewindInteractionMode?: SessionSettings["mode"];
-  /** 该消息在 plan 模式下发送时，记录进入 plan 前的模式。 */
-  rewindPrePlanMode?: Exclude<InteractionMode, "plan">;
+  /** 宿主可选记录该消息发送时的协作轴。必须与 permissionMode 成对提供。 */
+  rewindCollaborationMode?: CollaborationMode;
+  /** 宿主可选记录该消息发送时的权限轴。必须与 collaborationMode 成对提供。 */
+  rewindPermissionMode?: PermissionMode;
   /** 图片附件路径:读取为 ImagePart 附到本轮 user 消息。 */
   imagePath?: string;
   /** TUI/宿主已解析好的图片附件。 */
@@ -57,14 +57,10 @@ export interface RunAgentCliOptions extends RuntimeRunOptions {
   /** Stable providerID/modelID identity required by every durable Runtime Session. */
   modelRouteId: string;
   modelCapabilities?: ModelRouteCapabilities;
-  /**
-   * @deprecated Combined compatibility input. New hosts should pass both axes below.
-   */
-  interactionMode?: SessionSettings["mode"];
   /** Host-selected collaboration policy for a new foreground Session. */
-  collaborationMode?: "agent" | "plan";
+  collaborationMode?: CollaborationMode;
   /** Host-selected permission policy for a new foreground Session. */
-  permissionMode?: "ask" | "auto" | "full-access";
+  permissionMode?: PermissionMode;
   /** Active model reasoning level. Legacy CLI callers still pass off/low/medium/high. */
   thinkingEffort?: string;
   planMode?: boolean;
