@@ -108,11 +108,8 @@ export async function findParentRecord(
       )
         continue;
       if (
-        (query.childSessionId &&
-          record.childSessionId === query.childSessionId &&
-          (!query.runId || record.runId === query.runId)) ||
-        (query.locator === "legacy_run" && record.runId === query.runId) ||
-        (query.locator === "legacy_turn" && record.turnId === query.turnId)
+        record.childSessionId === query.childSessionId &&
+        (!query.runId || record.runId === query.runId)
       )
         return record;
     }

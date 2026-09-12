@@ -476,11 +476,10 @@ class ReadAgentOutputTool extends AgentGraphSupervisorTool {
           },
           locator: {
             type: "string",
-            enum: ["child_session_run", "child_session_latest", "legacy_run", "legacy_turn"],
+            enum: ["child_session_run", "child_session_latest"],
           },
           child_session_id: { type: "string" },
           run_id: { type: "string" },
-          turn_id: { type: "string" },
         },
         required: ["view"],
         additionalProperties: false,
@@ -493,7 +492,7 @@ class ReadAgentOutputTool extends AgentGraphSupervisorTool {
     const value = parseJsonObject(args, this.name());
     assertKeys(
       value,
-      ["view", "work_ids", "locator", "child_session_id", "run_id", "turn_id"],
+      ["view", "work_ids", "locator", "child_session_id", "run_id"],
       ["view"],
       this.name(),
     );
@@ -503,7 +502,7 @@ class ReadAgentOutputTool extends AgentGraphSupervisorTool {
     validateSupervisorView(projection, root, []);
     let workIds: readonly string[];
     if ("work_ids" in value) {
-      if (["locator", "child_session_id", "run_id", "turn_id"].some((key) => key in value))
+      if (["locator", "child_session_id", "run_id"].some((key) => key in value))
         throw new Error("agent_output: work_ids 不能与执行定位字段混用。");
       workIds = identityArray(
         value["work_ids"],
@@ -514,35 +513,14 @@ class ReadAgentOutputTool extends AgentGraphSupervisorTool {
       if (!workIds.length) throw new Error("agent_output: work_ids must not be empty");
     } else {
       const locator =
-        value["locator"] ??
-        (value["child_session_id"]
-          ? value["run_id"]
-            ? "child_session_run"
-            : "child_session_latest"
-          : value["run_id"]
-            ? "legacy_run"
-            : "legacy_turn");
-      if (
-        !["child_session_run", "child_session_latest", "legacy_run", "legacy_turn"].includes(
-          String(locator),
-        )
-      )
+        value["locator"] ?? (value["run_id"] ? "child_session_run" : "child_session_latest");
+      if (!["child_session_run", "child_session_latest"].includes(String(locator)))
         throw new Error("agent_output: unsupported locator");
-      const sessionId =
-        locator === "child_session_run" || locator === "child_session_latest"
-          ? requiredIdentity(value["child_session_id"], "child_session_id")
-          : undefined;
+      const sessionId = requiredIdentity(value["child_session_id"], "child_session_id");
       const runId =
-        locator === "child_session_run" || locator === "legacy_run"
-          ? requiredIdentity(value["run_id"], "run_id")
-          : undefined;
-      const turnId =
-        locator === "legacy_turn" ? requiredIdentity(value["turn_id"], "turn_id") : undefined;
+        locator === "child_session_run" ? requiredIdentity(value["run_id"], "run_id") : undefined;
       const claims = projection.claims.filter(
-        (claim) =>
-          (!sessionId || claim.targetSessionId === sessionId) &&
-          (!runId || claim.targetRunId === runId) &&
-          (!turnId || claim.targetTurnId === turnId),
+        (claim) => claim.targetSessionId === sessionId && (!runId || claim.targetRunId === runId),
       );
       const claim = claims.sort(
         (a, b) => b.scheduleRevision - a.scheduleRevision || b.claimedAt - a.claimedAt,

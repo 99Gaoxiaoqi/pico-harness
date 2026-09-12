@@ -3,10 +3,9 @@ import { NO_FILE_SIDE_EFFECTS, type BaseTool, type ToolExecutionContext } from "
 import { ToolAccesses } from "./tool-access.js";
 
 export interface ConfiguredSubagentOutputQuery {
-  readonly locator: "child_session_latest" | "child_session_run" | "legacy_run" | "legacy_turn";
-  readonly childSessionId?: string;
+  readonly locator: "child_session_latest" | "child_session_run";
+  readonly childSessionId: string;
   readonly runId?: string;
-  readonly turnId?: string;
   readonly view: "result" | "events" | "runtime_events" | "all";
   readonly maxEvents: number;
   readonly maxBytes: number;
@@ -35,11 +34,10 @@ export function createConfiguredSubagentOutputTool(options: {
           properties: {
             locator: {
               type: "string",
-              enum: ["child_session_latest", "child_session_run", "legacy_run", "legacy_turn"],
+              enum: ["child_session_latest", "child_session_run"],
             },
             child_session_id: { type: "string", minLength: 1, maxLength: 256 },
             run_id: { type: "string", minLength: 1, maxLength: 256 },
-            turn_id: { type: "string", minLength: 1, maxLength: 256 },
             view: { type: "string", enum: ["result", "events", "runtime_events", "all"] },
             max_events: { type: "integer", minimum: 1, maximum: 100 },
             max_bytes: { type: "integer", minimum: 1024, maximum: 131072 },
@@ -61,59 +59,23 @@ export function createConfiguredSubagentOutputTool(options: {
 function parseQuery(args: string): ConfiguredSubagentOutputQuery {
   const value: unknown = JSON.parse(args);
   if (!isRecord(value)) throw new Error("agent_output requires a JSON object");
-  const allowed = [
-    "locator",
-    "child_session_id",
-    "run_id",
-    "turn_id",
-    "view",
-    "max_events",
-    "max_bytes",
-  ];
+  const allowed = ["locator", "child_session_id", "run_id", "view", "max_events", "max_bytes"];
   if (Object.keys(value).some((key) => !allowed.includes(key)))
     throw new Error("agent_output does not accept paths or unknown fields");
   const childSessionId = identity(value["child_session_id"]);
   const runId = identity(value["run_id"]);
-  const turnId = identity(value["turn_id"]);
-  const locator =
-    value["locator"] ??
-    (childSessionId
-      ? runId
-        ? "child_session_run"
-        : "child_session_latest"
-      : runId && !turnId
-        ? "legacy_run"
-        : turnId && !runId
-          ? "legacy_turn"
-          : undefined);
-  if (value["locator"] === undefined && childSessionId && turnId)
-    throw new Error(
-      "agent_output cannot combine child_session_id and turn_id without an explicit locator",
-    );
-  if (
-    locator !== "child_session_latest" &&
-    locator !== "child_session_run" &&
-    locator !== "legacy_run" &&
-    locator !== "legacy_turn"
-  )
-    throw new Error("agent_output requires a valid child or legacy locator");
-  if (
-    (locator === "child_session_latest" && !childSessionId) ||
-    (locator === "child_session_run" && (!childSessionId || !runId)) ||
-    (locator === "legacy_run" && !runId) ||
-    (locator === "legacy_turn" && !turnId)
-  )
+  const locator = value["locator"] ?? (runId ? "child_session_run" : "child_session_latest");
+  if (locator !== "child_session_latest" && locator !== "child_session_run")
+    throw new Error("agent_output requires a valid child-session locator");
+  if (!childSessionId || (locator === "child_session_run" && !runId))
     throw new Error(`agent_output locator ${locator} is missing its required identity`);
   const view = value["view"] ?? "runtime_events";
   if (view !== "result" && view !== "events" && view !== "runtime_events" && view !== "all")
     throw new Error("agent_output view is invalid");
   return {
     locator,
-    ...(locator === "child_session_latest" || locator === "child_session_run"
-      ? { childSessionId }
-      : {}),
-    ...(locator === "child_session_run" || locator === "legacy_run" ? { runId } : {}),
-    ...(locator === "legacy_turn" ? { turnId } : {}),
+    childSessionId,
+    ...(locator === "child_session_run" ? { runId } : {}),
     view,
     maxEvents: boundedInteger(value["max_events"], 30, 1, 100),
     maxBytes: boundedInteger(value["max_bytes"], 16 * 1024, 1024, 128 * 1024),

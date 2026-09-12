@@ -180,12 +180,12 @@ test("root agent_output reads only admitted children and reopens canonical histo
   assert.deepEqual(reopened.patch, completed.patch);
   assert.ok(reopened.runtimeEvents.length <= 2);
   assert.equal(JSON.stringify(reopened).includes("pico://"), false);
-  const legacy = JSON.parse(
-    await tool().execute(
+  await assert.rejects(
+    tool().execute(
       JSON.stringify({ locator: "legacy_turn", turn_id: "child-turn", view: "result" }),
     ),
+    /does not accept paths or unknown fields/u,
   );
-  assert.equal(legacy.childSessionId, "child");
 
   await rm(resolvePicoPaths(childWorkDir, { picoHome }).workspace.root, {
     recursive: true,
