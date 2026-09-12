@@ -14,13 +14,6 @@ const IMPORT_DECLARATION =
 const DYNAMIC_IMPORT = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
 
 /**
- * These are deliberately explicit, temporary exceptions. They make the gate useful before the
- * remaining legacy edges are migrated: a newly introduced edge fails immediately, while the
- * existing debt remains visible in the command output and in the baseline file.
- */
-const BASELINE_PATH = resolve(REPOSITORY_ROOT, "scripts/architecture-boundaries-baseline.json");
-
-/**
  * 手写超时原语白名单（2026-08-13 全仓共现扫描基线，逐文件核验后落档）。
  *
  * 语义：同文件同时出现 `new Promise` 构造与 `setTimeout` 调用，即手写
@@ -33,7 +26,7 @@ const BASELINE_PATH = resolve(REPOSITORY_ROOT, "scripts/architecture-boundaries-
  *   setTimeout 不在任何 Promise executor 内。
  * - 既有手写原语（25）：delay/sleep helper 与请求/握手超时包装，收敛迁移候选。
  *   规则只拦截新增文件/新增共现，既有无声豁免（与 baseline 哲学一致，避免
- *   破坏 --strict 的"0 条受控边界记录"断言）。
+ *   破坏当前仓库的"0 条受控边界记录"断言）。
  */
 const HANDWRITTEN_TIMEOUT_WHITELIST = new Map([
   // canonical：统一超时/排空原语本体。
@@ -221,18 +214,9 @@ function effectiveSourceArea(path, repositoryRoot, cache, source, visiting = new
   return area;
 }
 
-function loadBaseline() {
-  if (!existsSync(BASELINE_PATH)) return new Map();
-  const records = JSON.parse(readFileSync(BASELINE_PATH, "utf8"));
-  return new Map(
-    records.map((record) => [`${record.rule}|${record.source}|${record.target}`, record]),
-  );
-}
-
 /**
- * Scan source imports and return both current violations and the subset covered by the explicit
- * legacy baseline. This function is exported so integration tests can exercise the gate without
- * duplicating its import-resolution logic.
+ * Scan source imports for current architecture violations. This function is exported so
+ * integration tests can exercise the gate without duplicating its import-resolution logic.
  */
 export function scanArchitectureBoundaries({ repositoryRoot = REPOSITORY_ROOT } = {}) {
   const sourceFiles = SOURCE_ROOTS.flatMap((root) =>
@@ -594,16 +578,6 @@ export function scanManagedProcessEntrypoints({ repositoryRoot = REPOSITORY_ROOT
   return violations;
 }
 
-export function evaluateArchitectureBoundaries(violations, baseline = loadBaseline()) {
-  const known = [];
-  const unexpected = [];
-  for (const violation of violations) {
-    const key = `${violation.rule}|${violation.source}|${violation.target}`;
-    (baseline.has(key) ? known : unexpected).push(violation);
-  }
-  return { known, unexpected };
-}
-
 function printViolations(title, violations) {
   if (violations.length === 0) return;
   console.error(`[architecture-boundaries] ${title} (${violations.length})`);
@@ -613,17 +587,9 @@ function printViolations(title, violations) {
   }
 }
 
-function printUsage() {
-  console.error("用法: node scripts/check-architecture-boundaries.mjs [--strict]");
-  console.error(
-    "默认模式阻止新增逆依赖，同时报告已登记的架构债务；--strict 将现有债务也视为失败。",
-  );
-}
-
 function main() {
-  const args = new Set(process.argv.slice(2));
-  if ([...args].some((arg) => arg !== "--strict")) {
-    printUsage();
+  if (process.argv.length > 2) {
+    console.error("用法: node scripts/check-architecture-boundaries.mjs");
     process.exitCode = 2;
     return;
   }
@@ -635,22 +601,15 @@ function main() {
     ...scanCanonicalPrimitiveRedefinitions(),
     ...scanManagedProcessEntrypoints(),
   ];
-  const { known, unexpected } = evaluateArchitectureBoundaries(violations);
   console.log(
     `[architecture-boundaries] 扫描 ${SOURCE_ROOTS.join(", ")}，发现 ${violations.length} 条受控边界记录。`,
   );
-  printViolations("现有架构债务（baseline）", known);
-  printViolations("新增边界违规", unexpected);
-  if (args.has("--strict") && known.length > 0) {
-    console.error(
-      "[architecture-boundaries] strict 模式拒绝现有 baseline；请先迁移后删除对应记录。",
-    );
-  }
-  if (unexpected.length > 0 || (args.has("--strict") && known.length > 0)) {
+  printViolations("边界违规", violations);
+  if (violations.length > 0) {
     process.exitCode = 1;
     return;
   }
-  console.log("[architecture-boundaries] 通过：没有新增逆依赖。");
+  console.log("[architecture-boundaries] 通过：没有逆依赖。");
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
