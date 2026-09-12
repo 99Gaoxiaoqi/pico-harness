@@ -101,7 +101,21 @@ test("session workbar authority enforces CAS/idempotency and projects trace", as
     const taskList = new TaskListTool(new BackgroundManager(), {
       list: () => fixture.repository.queryTasks({ sessionId: "source", limit: 200 }),
     });
-    assert.deepEqual(JSON.parse(await taskList.execute("{}")), []);
+    const taskListSchema = taskList.definition().inputSchema as {
+      required?: string[];
+      additionalProperties?: boolean;
+    };
+    assert.deepEqual(taskListSchema.required, ["scope"]);
+    assert.equal(taskListSchema.additionalProperties, false);
+    await assert.rejects(() => taskList.execute("{}"), /scope 必须是 background 或 session/);
+    await assert.rejects(
+      () => taskList.execute(JSON.stringify({ scope: "background", extra: true })),
+      /只接受 scope 字段/,
+    );
+    assert.deepEqual(
+      JSON.parse(await taskList.execute(JSON.stringify({ scope: "background" }))),
+      [],
+    );
     const sessionTaskList = JSON.parse(
       await taskList.execute(JSON.stringify({ scope: "session" })),
     ) as { revision: number; tasks: unknown[] };

@@ -7,9 +7,7 @@
 // 设计原则(极简):
 // - 轮询策略:简单 round-robin,不搞权重 / 健康分。
 // - 冷却期:默认 60 秒(对齐常见 API 限流恢复窗口),到期自动恢复。
-// - 全限流兜底:所有 key 都在限流期 → 取最早到期的那个,不抛错,
-//   让上层 retry 层根据退避时长决定等多久。
-// - 单 key 兼容:keys.length <= 1 时 getNext 总返回那一个(行为等同现有单 key)。
+// - 全限流:返回 undefined，让上层 retry 层根据退避时长决定等多久。
 
 /** 默认限流冷却时间(ms),对齐常见 API 限流恢复窗口。 */
 const DEFAULT_COOLDOWN_MS = 60_000;
@@ -32,41 +30,10 @@ export class CredentialPool {
   }
 
   /**
-   * 轮询取下一个可用 key。
-   *
-   * - 跳过仍在限流期的 key。
-   * - 单 key / 空池:总返回那���个(空池返回空串,保留单 key 兼容语义)。
-   * - 全限流:取最早到期的那个(不抛错,让 retry 层决定退避多久)。
-   */
-  getNext(): string {
-    // 单 key / 空池快路径:无轮换可言,直接返回(行为等同现有单 key 流程)
-    if (this.keys.length <= 1) {
-      return this.keys[0] ?? "";
-    }
-
-    const availableKey = this.getNextAvailable();
-    if (availableKey !== undefined) return availableKey;
-
-    // 全限流兜底:取最早到期的那个(retry 层会据退避时长等待)
-    const earliestKey = this.earliestExpiryKey();
-    if (earliestKey !== undefined) {
-      // 推进 index,避免全限流时一直卡在同一 key
-      const pos = this.keys.indexOf(earliestKey);
-      this.index = (pos + 1) % this.keys.length;
-      return earliestKey;
-    }
-
-    // 理论不可达(sweepExpired 后若无标记,上面 for 必命中),保险兜底
-    const key = this.keys[this.index] ?? "";
-    this.index = (this.index + 1) % this.keys.length;
-    return key;
-  }
-
-  /**
    * 只返回当前未冷却的 key。
    *
-   * 与 getNext() 的兼容兜底不同,全限流时返回 undefined,
-   * 供 retry/CLI 判断"没有真正轮换到可用凭证",从而走退避等待。
+   * 全限流时返回 undefined，供 retry 判断“没有真正轮换到可用凭证”，
+   * 从而走退避等待。
    */
   getNextAvailable(): string | undefined {
     if (this.keys.length === 0) return undefined;
@@ -146,18 +113,5 @@ export class CredentialPool {
         this.rateLimited.delete(key);
       }
     }
-  }
-
-  /** 取限流到期时间最早的 key(全限流兜底用)。 */
-  private earliestExpiryKey(): string | undefined {
-    let earliestKey: string | undefined;
-    let earliestExpiry = Infinity;
-    for (const [key, expiry] of this.rateLimited) {
-      if (expiry < earliestExpiry) {
-        earliestExpiry = expiry;
-        earliestKey = key;
-      }
-    }
-    return earliestKey;
   }
 }

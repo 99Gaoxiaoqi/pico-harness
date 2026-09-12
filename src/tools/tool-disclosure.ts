@@ -20,12 +20,6 @@ export function formatToolDisclosureItem(tool: ToolDisclosureItem): string {
   return `- ${tool.name} - ${access} - risk: ${risk}`;
 }
 
-/** 旧事件继续保留在 ledger 中，仅作审计，不恢复激活。 */
-export interface ToolGroupLoadedEventLike {
-  readonly kind: string;
-  readonly data?: { readonly groupId?: unknown; readonly toolNames?: unknown };
-}
-
 export interface ToolActivationResult {
   readonly activated: string[];
   readonly blocked?: {
@@ -222,10 +216,6 @@ export class ToolDisclosure {
     return this.currentTurn().discloseTools(names, limit);
   }
 
-  seedFromEvents(_events: readonly ToolGroupLoadedEventLike[]): void {
-    // 兼容旧调用方。ledger 事件是历史事实，不是本 Turn 的授权或激活状态。
-  }
-
   pickForLLM(allTools: readonly ToolDefinition[]): ToolDefinition[] {
     const turn = this.scope.getStore();
     return turn
@@ -245,10 +235,5 @@ export class ToolDisclosure {
   }
   getDisclosedTools(): readonly string[] {
     return this.scope.getStore()?.getDisclosedTools() ?? [];
-  }
-
-  /** 兼容入口只能结束当前 owner；不会清空其他正在执行的 Turn。 */
-  reset(): void {
-    this.scope.getStore()?.endTurn();
   }
 }

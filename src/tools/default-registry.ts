@@ -98,10 +98,7 @@ export interface DefaultToolRegistryOptions {
    * background/headless 宿主下部分工具不注册；deferred 组列表按宿主过滤。
    */
   hostKind?: ToolHostKind;
-  /**
-   * load_tools 组级激活成功的 durable 回调（写入 RuntimeEvent ledger，
-   * crash/重开后由 seedFromEvents 重播恢复披露状态）。
-   */
+  /** load_tools 组级激活成功的 durable 审计回调；新 Turn 不恢复历史激活。 */
   onToolGroupLoaded?: (groupId: string, toolNames: readonly string[]) => void;
   /** 仅在宿主提供结构化交互 UI 时注册 ask_user，避免无 UI 的运行永久等待。 */
   askUserHandler?: AskUserHandler;

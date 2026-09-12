@@ -19,9 +19,6 @@
 
 import { ToolAccesses, type ToolAccesses as ToolAccessesType } from "./tool-access.js";
 
-/** 默认不限制并发(保持原行为,向后兼容) */
-const DEFAULT_MAX_CONCURRENCY = Infinity;
-
 /** AbortSignal 不可用时用作 fallback 的中止错误 */
 function makeAbortError(signal?: AbortSignal): Error {
   if (signal?.reason instanceof Error) return signal.reason;
@@ -48,13 +45,13 @@ interface ScheduledTask<R> extends ToolCallTask<R> {
   running?: Promise<void>;
 }
 
-/** 调度器配置:并发上限 + 中止信号,全可选,向后兼容无参构造 */
+/** 调度器配置：调用方必须显式选择并发上限。 */
 export interface ToolSchedulerOptions {
   /**
    * 最大并发执行数。超出 maxConcurrency 的任务进 queued 等名额释放。
-   * 默认 Infinity(不限制,保持原行为)。对齐 hermes _MAX_TOOL_WORKERS=8。
+   * 对齐 hermes _MAX_TOOL_WORKERS=8。
    */
-  readonly maxConcurrency?: number;
+  readonly maxConcurrency: number;
   /**
    * 中止信号。abort 时:
    *   - queued 中所有任务立即 reject(不泄漏,否则 Promise.all 永久卡死)
@@ -68,12 +65,9 @@ export interface ToolSchedulerOptions {
  * ToolScheduler:单批 tool_call 的并发调度器。
  *
  * 用法:
- *   const scheduler = new ToolScheduler<Result>();
+ *   const scheduler = new ToolScheduler<Result>({ maxConcurrency: 8, signal: ctrl.signal });
  *   const promises = toolCalls.map(tc => scheduler.add({ accesses, start: () => exec(tc) }));
  *   const results = await Promise.all(promises);  // 按 add 顺序,即 provider order
- *
- * 带护栏:
- *   const scheduler = new ToolScheduler<Result>({ maxConcurrency: 8, signal: ctrl.signal });
  */
 export class ToolScheduler<R> {
   /** 正在并行执行的任务(两两不冲突,且不超过 maxConcurrency) */
@@ -86,12 +80,12 @@ export class ToolScheduler<R> {
   /** 是否已中止(避免重复处理,也用于 add 时短路) */
   private aborted = false;
 
-  constructor(options: ToolSchedulerOptions = {}) {
-    const maxConcurrency = options.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY;
+  constructor(options: ToolSchedulerOptions) {
+    const maxConcurrency = options.maxConcurrency;
     // fail-fast:无效并发上限立即抛错,避免 isBlocked 恒真导致所有任务进 queued、
     // Promise.all 静默死锁(参考 compactor 的 ContextCompactionError 哲学:宁可崩溃不可静默错)
-    if (maxConcurrency < 1) {
-      throw new Error(`maxConcurrency must be >= 1, got: ${maxConcurrency}`);
+    if (!Number.isSafeInteger(maxConcurrency) || maxConcurrency < 1) {
+      throw new Error(`maxConcurrency must be a positive safe integer, got: ${maxConcurrency}`);
     }
     this.maxConcurrency = maxConcurrency;
     this.signal = options.signal;
