@@ -142,9 +142,7 @@ export class WorkspaceRoots {
           fileSystem: {
             ...cloned.fileSystem,
             entries: cloned.fileSystem.entries.map((entry) =>
-              entry.kind === "path"
-                ? { ...entry, path: this.resolveUnchecked(entry.path) }
-                : entry,
+              entry.kind === "path" ? { ...entry, path: this.resolveUnchecked(entry.path) } : entry,
             ),
           },
         }

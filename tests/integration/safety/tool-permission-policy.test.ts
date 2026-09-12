@@ -28,7 +28,10 @@ const ALL_CATEGORIES: readonly ToolPermissionCategory[] = [
 ];
 
 const EXPECTED: Readonly<
-  Record<RuntimePermissionMode, Readonly<Record<ToolPermissionCategory, "allow" | "prompt" | "deny">>>
+  Record<
+    RuntimePermissionMode,
+    Readonly<Record<ToolPermissionCategory, "allow" | "prompt" | "deny">>
+  >
 > = {
   ask: {
     read: "allow",
@@ -64,10 +67,9 @@ const EXPECTED: Readonly<
     subagent: "allow",
     bounded_control: "allow",
   },
-  "full-access": Object.fromEntries(ALL_CATEGORIES.map((category) => [category, "allow"])) as Record<
-    ToolPermissionCategory,
-    "allow"
-  >,
+  "full-access": Object.fromEntries(
+    ALL_CATEGORIES.map((category) => [category, "allow"]),
+  ) as Record<ToolPermissionCategory, "allow">,
 };
 
 test("permission evaluator exhaustively applies ask, auto and full-access policy", () => {
@@ -106,10 +108,7 @@ test("unknown tools fail closed through registry and classifier fallbacks", () =
 test("MCP and browser names retain host-owned classifications", () => {
   const misleadingMetadata = () => "read" as const;
   assert.equal(
-    classifyToolPermission(
-      { name: "mcp__fixture__mutate", arguments: "{}" },
-      misleadingMetadata,
-    ),
+    classifyToolPermission({ name: "mcp__fixture__mutate", arguments: "{}" }, misleadingMetadata),
     "network_send",
   );
   assert.equal(

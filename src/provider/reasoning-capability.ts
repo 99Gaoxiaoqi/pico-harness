@@ -1,10 +1,6 @@
 import type { ProviderProtocol } from "./profile.js";
 
-export type ReasoningCapabilitySource =
-  | "config"
-  | "provider_metadata"
-  | "model_rule"
-  | "unknown";
+export type ReasoningCapabilitySource = "config" | "provider_metadata" | "model_rule" | "unknown";
 
 export type ReasoningLevel = string;
 

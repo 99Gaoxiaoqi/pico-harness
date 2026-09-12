@@ -1,9 +1,6 @@
 export type PluginScope = "user" | "project" | "local";
 
-export type PluginManifestSource =
-  | "pico-native"
-  | "claude-compatible"
-  | "manifestless";
+export type PluginManifestSource = "pico-native" | "claude-compatible" | "manifestless";
 
 export type PluginCompatibility = "compatible" | "degraded" | "blocked";
 
