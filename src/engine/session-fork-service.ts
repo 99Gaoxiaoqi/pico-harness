@@ -41,7 +41,6 @@ import type {
   PersistedSessionSettings,
   PersistedSessionSettingsWrite,
   SessionRuntimeStatePatch,
-  SessionRuntimeStateWritePatch,
 } from "./session-runtime.js";
 import { normalizeSessionRuntimeStatePatch } from "./session-runtime.js";
 import {
@@ -52,6 +51,7 @@ import {
 } from "./session.js";
 import type {
   SessionForkModelCheckpoint,
+  SessionForkRuntimeStateWritePatch,
   SessionForkRuntimePort,
 } from "./session-fork-runtime-port.js";
 import {
@@ -75,9 +75,14 @@ import { decodeRuntimeEvent } from "../storage/runtime-event.js";
 import type { RuntimePlanEvent } from "./session-runtime-event.js";
 import { planOperationFingerprint, PlanConflictError } from "../plan/contract.js";
 import { projectActivePlanEntries, projectPlanEntries, reducePlanEvent } from "../plan/reducer.js";
+import {
+  compileRuntimePermissionProfile,
+  executionBoundaryContains,
+  type ExecutionBoundary,
+} from "../safety/permission-profile.js";
 
 const SAFE_SESSION_ID = /^[A-Za-z0-9._-]+$/u;
-const FROZEN_FORK_BUNDLE_VERSION = 7 as const;
+const FROZEN_FORK_BUNDLE_VERSION = 8 as const;
 const FROZEN_FORK_BUNDLE_NAME = "runtime-fork.json";
 const SAFE_FORK_SETTINGS_VERSION = 1 as const;
 const SAFE_FORK_SETTINGS_NAME = "safe-settings.json";
@@ -171,6 +176,8 @@ interface FrozenForkBundle {
   /** In-memory marker: historical bundle lacked authority and was repaired fail-closed. */
   readonly settingsFallback?: true;
   readonly goal?: NonNullable<SessionRuntimeStatePatch["goal"]>;
+  readonly boundary: ExecutionBoundary;
+  readonly permissionMode: Exclude<PersistedInteractionMode, "plan">;
   readonly rewind?: FileHistoryDurableRewindPlan;
 }
 
@@ -309,6 +316,10 @@ export class SessionForkService {
       const snapshot = input.throughEventId
         ? await source.readDurableForkSnapshotAt(input.throughEventId)
         : await source.readDurableForkSnapshot();
+      // Boundary is Session authority, not historical conversation state. A rewind
+      // truncates the model/transcript seed but inherits the source's current,
+      // cumulative authorization boundary with its original revision.
+      const sourceRuntime = source.getRuntimeStateSnapshot();
       const operationId = input.operationId ?? this.createOperationId();
       const stagingDirectory = join(this.workspacePaths.forkStaging, operationId);
       const rewind = input.rewind
@@ -319,8 +330,15 @@ export class SessionForkService {
               : undefined,
           )
         : undefined;
-      const frozen = createFrozenForkBundle(operationId, input, snapshot, rewind);
-      const inheritedInteraction = resolveForkInteraction(frozen.settings);
+      const frozen = createFrozenForkBundle(
+        operationId,
+        input,
+        snapshot,
+        sourceRuntime.boundary,
+        sourceRuntime.settings?.permissionMode,
+        rewind,
+      );
+      const inheritedInteraction = resolveForkInteraction(frozen.settings, frozen.permissionMode);
 
       // Coordinator 会先将该 immutable payload 与 manifest 同时耐久化，再让
       // prepared journal 可见。无 journal 的完整 orphan manifest 只能被同请求消费。
@@ -704,15 +722,11 @@ export class SessionForkService {
         runtimeAuthority: this.runtimeStore,
         publication,
         ...(workflowEvents.length > 0 ? { workflowEvents } : {}),
-        ...(runtimePatch
-          ? {
-              statePublication: {
-                patch: runtimePatch,
-                eventId: runtimeStateEventId(operation.operationId),
-                at: operation.createdAt,
-              },
-            }
-          : {}),
+        statePublication: {
+          patch: runtimePatch,
+          eventId: runtimeStateEventId(operation.operationId),
+          at: operation.createdAt,
+        },
       });
     } catch (error) {
       if (error instanceof ForkOperationConflictError) throw error;
@@ -730,16 +744,14 @@ export class SessionForkService {
     seedEntries: readonly RuntimeSessionForkSeedEntry[],
     modelCheckpoint: SessionForkModelCheckpoint | undefined,
     sourceThroughEventId: string | undefined,
-    runtimePatch: SessionRuntimeStateWritePatch | undefined,
+    runtimePatch: SessionForkRuntimeStateWritePatch,
   ): readonly RuntimePlanEvent[] {
     if (frozen.planEntries.length === 0) return [];
-    const statePublication = runtimePatch
-      ? {
-          patch: runtimePatch,
-          eventId: runtimeStateEventId(operation.operationId),
-          at: operation.createdAt,
-        }
-      : undefined;
+    const statePublication = {
+      patch: runtimePatch,
+      eventId: runtimeStateEventId(operation.operationId),
+      at: operation.createdAt,
+    };
     const runId = this.runtimePort.deriveBootstrapRunId({
       sourceSessionId: operation.sourceSessionId,
       targetSessionId: operation.targetSessionId,
@@ -748,7 +760,7 @@ export class SessionForkService {
       seedEntries,
       ...(modelCheckpoint ? { modelCheckpoint } : {}),
       ...(sourceThroughEventId ? { sourceThroughEventId } : {}),
-      ...(statePublication ? { statePublication } : {}),
+      statePublication,
       workDir: this.workDir,
       runtimeAuthority: this.runtimeStore,
     });
@@ -859,15 +871,11 @@ export class SessionForkService {
       operationCreatedAt: operation.createdAt,
       seedEntries,
       ...(modelCheckpoint ? { modelCheckpoint } : {}),
-      ...(runtimePatch
-        ? {
-            statePublication: {
-              patch: runtimePatch,
-              eventId: runtimeStateEventId(operation.operationId),
-              at: operation.createdAt,
-            },
-          }
-        : {}),
+      statePublication: {
+        patch: runtimePatch,
+        eventId: runtimeStateEventId(operation.operationId),
+        at: operation.createdAt,
+      },
       workDir: this.workDir,
       runtimeAuthority: this.runtimeStore,
     });
@@ -922,7 +930,10 @@ export class SessionForkService {
       if (frozen.settings) return frozen;
       return {
         ...frozen,
-        settings: await this.readOrCreateSafeForkSettings(operation),
+        settings: withForkPermissionMode(
+          await this.readOrCreateSafeForkSettings(operation),
+          frozen.permissionMode,
+        ),
         settingsFallback: true,
       };
     } catch (error) {
@@ -970,7 +981,7 @@ export class SessionForkService {
       model: persisted?.model ?? "unconfigured",
       modelRouteId: persisted?.modelRouteId ?? "openai/unconfigured",
       collaborationMode: "agent",
-      permissionMode: "default",
+      permissionMode: "ask",
       orchestrationMode: persisted?.orchestrationMode ?? "default",
       thinkingEffort: persisted?.thinkingEffort ?? "off",
       thinkingEffortExplicit: persisted?.thinkingEffortExplicit ?? false,
@@ -1076,9 +1087,14 @@ function createFrozenForkBundle(
   operationId: string,
   input: ForkSessionInput,
   snapshot: DurableSessionForkSnapshot,
+  sourceBoundary: ExecutionBoundary | undefined,
+  sourcePermissionMode: Exclude<PersistedInteractionMode, "plan"> | undefined,
   rewind?: FileHistoryDurableRewindPlan,
 ): FrozenForkBundle {
   const sourceTitle = sourceDisplayTitle(snapshot);
+  const boundary = inheritForkBoundary(sourceBoundary);
+  const permissionMode = inheritForkPermissionMode(boundary, sourcePermissionMode);
+  const sourceSettings = snapshot.hydration.runtime.settings ?? input.fallbackSettings;
   return {
     schemaVersion: FROZEN_FORK_BUNDLE_VERSION,
     operationId,
@@ -1096,14 +1112,16 @@ function createFrozenForkBundle(
         }
       : {}),
     ...(sourceTitle ? { sourceTitle } : {}),
-    ...((snapshot.hydration.runtime.settings ?? input.fallbackSettings)
+    ...(sourceSettings
       ? {
-          settings: structuredClone(snapshot.hydration.runtime.settings ?? input.fallbackSettings!),
+          settings: withForkPermissionMode(sourceSettings, permissionMode),
         }
       : {}),
     ...(snapshot.hydration.runtime.goal
       ? { goal: structuredClone(snapshot.hydration.runtime.goal) }
       : {}),
+    boundary,
+    permissionMode,
     ...(rewind ? { rewind: structuredClone(rewind) } : {}),
   };
 }
@@ -1112,16 +1130,50 @@ function filteredRuntimePatch(
   frozen: FrozenForkBundle,
   interaction: ForkInteractionSettings,
   forkCreatedAt: string,
-): SessionRuntimeStateWritePatch | undefined {
+): SessionForkRuntimeStateWritePatch {
   const settings = frozen.settings
     ? filterForkSettings(frozen.settings, frozen.sourceSessionId, interaction, frozen.sourceTitle)
     : undefined;
-  return settings || frozen.goal
-    ? {
-        ...(settings ? { settings } : {}),
-        ...(frozen.goal ? { goal: resetForkGoalUsage(frozen.goal, forkCreatedAt) } : {}),
-      }
-    : undefined;
+  return {
+    ...(settings ? { settings } : {}),
+    ...(frozen.goal ? { goal: resetForkGoalUsage(frozen.goal, forkCreatedAt) } : {}),
+    boundary: structuredClone(frozen.boundary),
+  };
+}
+
+function inheritForkBoundary(source: ExecutionBoundary | undefined): ExecutionBoundary {
+  const inherited = structuredClone(
+    source ??
+      compileRuntimePermissionProfile({
+        collaborationMode: "agent",
+        permissionMode: "ask",
+      }),
+  );
+  if (
+    source &&
+    (!executionBoundaryContains(source, inherited) ||
+      source.revision !== inherited.revision ||
+      !isDeepStrictEqual(source, inherited))
+  ) {
+    throw new Error("Fork execution boundary must exactly inherit source Session authority");
+  }
+  return inherited;
+}
+
+function inheritForkPermissionMode(
+  boundary: ExecutionBoundary,
+  source: Exclude<PersistedInteractionMode, "plan"> | undefined,
+): Exclude<PersistedInteractionMode, "plan"> {
+  if (boundary.kind === "bypass") return "full-access";
+  if (boundary.kind === "external") return source ?? "ask";
+  return source === "ask" || source === "auto" ? source : "ask";
+}
+
+function withForkPermissionMode(
+  settings: PersistedSessionSettings,
+  permissionMode: Exclude<PersistedInteractionMode, "plan">,
+): PersistedSessionSettings {
+  return { ...structuredClone(settings), permissionMode };
 }
 
 /** A fork retains the task definition but begins a new independent budget window. */
@@ -1168,10 +1220,11 @@ interface ForkInteractionSettings {
 
 function resolveForkInteraction(
   source: PersistedSessionSettings | undefined,
+  permissionMode?: Exclude<PersistedInteractionMode, "plan">,
 ): ForkInteractionSettings {
   return {
     collaborationMode: source?.collaborationMode ?? "agent",
-    permissionMode: source?.permissionMode ?? "default",
+    permissionMode: permissionMode ?? source?.permissionMode ?? "ask",
   };
 }
 
@@ -1180,7 +1233,7 @@ function resolveForkOperationInteraction(
   source: PersistedSessionSettings | undefined,
   settingsFallback?: true,
 ): ForkInteractionSettings {
-  if (settingsFallback) return { collaborationMode: "agent", permissionMode: "default" };
+  if (settingsFallback) return resolveForkInteraction(source);
   if (
     operation.targetCollaborationMode !== undefined &&
     operation.targetPermissionMode !== undefined
@@ -1191,7 +1244,7 @@ function resolveForkOperationInteraction(
     };
   }
   // Old journals only recorded a combined targetMode. Re-derive from the frozen
-  // source rather than treating a historical yolo default as authorization.
+  // source rather than treating a historical full-access default as authorization.
   return resolveForkInteraction(source);
 }
 
@@ -1228,7 +1281,8 @@ function parseFrozenForkBundle(value: unknown): FrozenForkBundle {
       value["schemaVersion"] === 3 ||
       value["schemaVersion"] === 4 ||
       value["schemaVersion"] === 5 ||
-      value["schemaVersion"] === 6)
+      value["schemaVersion"] === 6 ||
+      value["schemaVersion"] === 7)
   ) {
     throw new Error(
       `Frozen Runtime fork bundle v${String(value["schemaVersion"])} is no longer supported; recreate the fork from canonical Runtime facts`,
@@ -1262,6 +1316,8 @@ function parseFrozenForkBundle(value: unknown): FrozenForkBundle {
     "sourceTitle",
     "settings",
     "goal",
+    "boundary",
+    "permissionMode",
     "rewind",
   ]);
   const seedEntries = parseFrozenRuntimeSeedEntries(value["seedEntries"]);
@@ -1283,18 +1339,25 @@ function parseFrozenForkBundle(value: unknown): FrozenForkBundle {
   const hasGoal = value["goal"] !== undefined;
   const rewind =
     value["rewind"] === undefined ? undefined : parseFileHistoryDurableRewindPlan(value["rewind"]);
-  const normalized =
-    hasSettings || hasGoal
-      ? normalizeSessionRuntimeStatePatch({
-          ...(hasSettings ? { settings: value["settings"] } : {}),
-          ...(hasGoal ? { goal: value["goal"] } : {}),
-        })
-      : undefined;
+  const normalized = normalizeSessionRuntimeStatePatch({
+    ...(hasSettings ? { settings: value["settings"] } : {}),
+    ...(hasGoal ? { goal: value["goal"] } : {}),
+    boundary: value["boundary"],
+  });
+  const permissionMode = parseForkPermissionMode(value["permissionMode"]);
+  const permissionMatchesBoundary =
+    normalized?.boundary !== undefined &&
+    permissionMode !== undefined &&
+    inheritForkPermissionMode(normalized.boundary, permissionMode) === permissionMode;
   if (
     (hasSettings && !normalized?.settings) ||
     (hasGoal && !normalized?.goal) ||
     (!hasSettings && normalized?.settings) ||
-    (!hasGoal && normalized?.goal)
+    (!hasGoal && normalized?.goal) ||
+    !normalized?.boundary ||
+    !permissionMode ||
+    !permissionMatchesBoundary ||
+    (normalized.settings !== undefined && normalized.settings.permissionMode !== permissionMode)
   ) {
     throw new Error("Invalid frozen Runtime state");
   }
@@ -1311,8 +1374,16 @@ function parseFrozenForkBundle(value: unknown): FrozenForkBundle {
     ...(value["sourceTitle"] !== undefined ? { sourceTitle: value["sourceTitle"] } : {}),
     ...(normalized?.settings ? { settings: normalized.settings } : {}),
     ...(normalized?.goal ? { goal: normalized.goal } : {}),
+    boundary: normalized.boundary,
+    permissionMode,
     ...(rewind ? { rewind } : {}),
   };
+}
+
+function parseForkPermissionMode(
+  value: unknown,
+): Exclude<PersistedInteractionMode, "plan"> | undefined {
+  return value === "ask" || value === "auto" || value === "full-access" ? value : undefined;
 }
 
 function parseSafeForkSettings(value: unknown): SafeForkSettingsBundle {

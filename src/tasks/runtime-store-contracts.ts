@@ -8,7 +8,7 @@ import type {
   JobExecutionClass,
   JobRecord,
   TerminalJobStatus,
-  YoloPolicySnapshot,
+  AutonomousPolicySnapshot,
 } from "./runtime-types.js";
 
 /**
@@ -133,7 +133,7 @@ export interface CreateCronJobInput {
   schedule: string;
   timeZone: string;
   prompt: string;
-  policySnapshot: YoloPolicySnapshot;
+  policySnapshot: AutonomousPolicySnapshot;
   credentialRef?: CredentialRef;
   modelRouteId?: string;
   enabled?: boolean;

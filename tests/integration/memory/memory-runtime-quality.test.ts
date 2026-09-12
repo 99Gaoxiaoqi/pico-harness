@@ -98,7 +98,7 @@ test("Maka memory admission separates recall from extraction across runtime prof
                   execution: {
                     kind: "background" as const,
                     policy: {
-                      mode: "yolo" as const,
+                      mode: "full-access" as const,
                       backgroundEnabled: true,
                       trustedWorkspace: true,
                       toolNetworkPolicy: "disabled" as const,

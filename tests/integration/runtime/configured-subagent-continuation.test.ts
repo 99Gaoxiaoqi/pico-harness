@@ -1,7 +1,7 @@
 import { createConfiguredSubagentOutputStore } from "../../../src/runtime/configured-subagent-output-store.js";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, realpath, rm, readFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { ConfiguredSubagentCatalogPort } from "../../../src/agents/subagent-profiles.js";
@@ -17,6 +17,17 @@ import { ModelRouter } from "../../../src/provider/model-router.js";
 import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
 import { AgentRuntime } from "../../../src/runtime/agent-runtime.js";
 import { currentRuntimeRun } from "../../../src/runtime/runtime-run.js";
+import {
+  createBypassExecutionBoundary,
+  createManagedExecutionBoundary,
+  createReadOnlyPermissionProfile,
+  createWorkspaceWritePermissionProfile,
+} from "../../../src/safety/permission-profile.js";
+import { ApprovalManager } from "../../../src/approval/manager.js";
+import {
+  managedProcessLauncher,
+  type ManagedSpawnRequest,
+} from "../../../src/safety/process-sandbox/index.js";
 
 test("agent_spawn continues its completed child with durable history and rejects another parent's child", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "pico-child-continuation-")));
@@ -64,7 +75,7 @@ test("agent_spawn continues its completed child with durable history and rejects
     model: route.model,
     auth: route.auth,
     baseURL: route.baseURL,
-    interactionMode: "default" as const,
+    interactionMode: "ask" as const,
   };
   const childRuns: string[] = [];
   let childSessionId = "";
@@ -297,7 +308,7 @@ test("agent_spawn continues its completed child with durable history and rejects
         ...input,
         sessionSelection: { mode: "resume", sessionId: childSessionId },
         prompt: "Continue manually and try to write a file",
-        interactionMode: "yolo",
+        interactionMode: "full-access",
         orchestrationMode: "swarm",
       },
       {
@@ -336,6 +347,279 @@ test("agent_spawn continues its completed child with durable history and rejects
     assert.equal(manual.sessionId, childSessionId);
     assert.equal(manualCalls, 2);
     await assert.rejects(readFile(join(workDir, "must-not-exist.txt")), { code: "ENOENT" });
+
+    await globalSessionManager.clearAndDrain();
+    const baseline = new Session(childSessionId, workDir, { persistence: true, picoHome });
+    let baselineRevision = -1;
+    try {
+      await baseline.recover();
+      const boundary = baseline.getRuntimeStateSnapshot().boundary;
+      assert.equal(boundary?.kind, "managed");
+      assert.equal(baseline.getRuntimeStateSnapshot().settings?.permissionMode, "ask");
+      baselineRevision = boundary!.revision;
+    } finally {
+      await baseline.close();
+    }
+
+    const definition = requireSubagentCapability("local_read");
+    let enterBypassRun!: () => void;
+    const bypassRunEntered = new Promise<void>((resolve) => {
+      enterBypassRun = resolve;
+    });
+    let releaseBypassRun!: () => void;
+    const bypassRunGate = new Promise<void>((resolve) => {
+      releaseBypassRun = resolve;
+    });
+    let bypassProviderCalls = 0;
+    const bypassRun = new AgentRuntime().execute(
+      {
+        ...input,
+        sessionSelection: { mode: "resume", sessionId: childSessionId },
+        prompt: "Continue under the parent's bypass ceiling",
+      },
+      {
+        picoHome,
+        modelRouter,
+        reporter: new SilentReporter(),
+        hostKind: "desktop",
+        configuredSubagentChild: {
+          definition,
+          executionBoundaryCeiling: createBypassExecutionBoundary(),
+        },
+        providerFactory: () => ({
+          async generate() {
+            bypassProviderCalls++;
+            enterBypassRun();
+            await bypassRunGate;
+            return { role: "assistant", content: "Bypass continuation complete" };
+          },
+        }),
+      },
+    );
+    await bypassRunEntered;
+
+    let concurrentProviderCalls = 0;
+    const concurrentManaged = new AgentRuntime()
+      .execute(
+        {
+          ...input,
+          sessionSelection: { mode: "resume", sessionId: childSessionId },
+          prompt: "Race the active bypass continuation with a managed ceiling",
+        },
+        {
+          picoHome,
+          modelRouter,
+          reporter: new SilentReporter(),
+          hostKind: "desktop",
+          configuredSubagentChild: {
+            definition,
+            executionBoundaryCeiling: createManagedExecutionBoundary(
+              createReadOnlyPermissionProfile(),
+            ),
+          },
+          providerFactory: () => {
+            concurrentProviderCalls++;
+            return {
+              async generate() {
+                return { role: "assistant", content: "unreachable" };
+              },
+            };
+          },
+        },
+      )
+      .then(
+        () => ({ status: "resolved" as const }),
+        (error: unknown) => ({ status: "rejected" as const, error }),
+      );
+    let concurrentTimeout!: ReturnType<typeof setTimeout>;
+    const concurrentOutcome = await Promise.race([
+      concurrentManaged,
+      new Promise<{ status: "timeout" }>((resolve) => {
+        concurrentTimeout = setTimeout(() => resolve({ status: "timeout" }), 1_000);
+      }),
+    ]);
+    clearTimeout(concurrentTimeout);
+    releaseBypassRun();
+    const bypassResult = await bypassRun;
+    if (concurrentOutcome.status === "timeout") {
+      await concurrentManaged;
+      assert.fail("concurrent admission must fail fast");
+    }
+    assert.equal(concurrentOutcome.status, "rejected");
+    if (concurrentOutcome.status === "rejected") {
+      assert.match(String(concurrentOutcome.error), /already has an active admission/);
+    }
+    assert.equal(concurrentProviderCalls, 0);
+    assert.equal(bypassProviderCalls, 1);
+    assert.equal(bypassResult.finalMessage, "Bypass continuation complete");
+
+    await globalSessionManager.clearAndDrain();
+    const widened = new Session(childSessionId, workDir, { persistence: true, picoHome });
+    try {
+      await widened.recover();
+      const boundary = widened.getRuntimeStateSnapshot().boundary;
+      assert.equal(boundary?.kind, "bypass");
+      assert.equal(boundary?.revision, baselineRevision + 1);
+      assert.equal(widened.getRuntimeStateSnapshot().settings?.permissionMode, "full-access");
+    } finally {
+      await widened.close();
+    }
+
+    const managedResult = await new AgentRuntime().execute(
+      {
+        ...input,
+        sessionSelection: { mode: "resume", sessionId: childSessionId },
+        prompt: "Continue under the parent's managed ceiling",
+      },
+      {
+        picoHome,
+        modelRouter,
+        reporter: new SilentReporter(),
+        hostKind: "desktop",
+        configuredSubagentChild: {
+          definition,
+          executionBoundaryCeiling: createManagedExecutionBoundary(
+            createReadOnlyPermissionProfile(),
+          ),
+        },
+        providerFactory: () => ({
+          async generate() {
+            return { role: "assistant", content: "Managed continuation complete" };
+          },
+        }),
+      },
+    );
+    assert.equal(managedResult.finalMessage, "Managed continuation complete");
+
+    await globalSessionManager.clearAndDrain();
+    const narrowed = new Session(childSessionId, workDir, { persistence: true, picoHome });
+    try {
+      await narrowed.recover();
+      const boundary = narrowed.getRuntimeStateSnapshot().boundary;
+      assert.equal(boundary?.kind, "managed");
+      assert.equal(boundary?.revision, baselineRevision + 2);
+      assert.equal(narrowed.getRuntimeStateSnapshot().settings?.permissionMode, "ask");
+      if (boundary?.kind === "managed") {
+        assert.equal(boundary.profile.name, "read-only");
+      }
+    } finally {
+      await narrowed.close();
+    }
+  } finally {
+    await globalSessionManager.clearAndDrain();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("managed configured child freezes its physical boundary for the admitted Run", async (context) => {
+  const root = await realpath(
+    await mkdtemp(join(homedir(), ".pico-configured-child-boundary-freeze-")),
+  );
+  const workDir = join(root, "workspace");
+  const outsideDir = join(root, "outside");
+  const picoHome = join(root, "home");
+  await Promise.all([mkdir(workDir), mkdir(outsideDir), mkdir(picoHome)]);
+  const sessionId = "configured-child-boundary-freeze";
+  const route = {
+    id: "test/boundary-freeze",
+    providerId: "test",
+    provider: "openai" as const,
+    model: "boundary-freeze",
+    baseURL: "https://unused.example/v1",
+    apiKeyEnv: "UNUSED",
+    auth: "none" as const,
+    source: "config" as const,
+    capabilities: resolveModelRouteCapabilities("openai", "boundary-freeze", undefined),
+  };
+  const modelRouter = new ModelRouter([route], {}, route.id);
+  const approvalManager = new ApprovalManager();
+  const launches: ManagedSpawnRequest[] = [];
+  context.mock.method(managedProcessLauncher, "launch", (request: ManagedSpawnRequest) => {
+    launches.push(request);
+    throw new Error("physical sandbox launch intercepted");
+  });
+  const target = join(outsideDir, "escaped.txt");
+  const python = [
+    "import pathlib,socket",
+    `pathlib.Path(${JSON.stringify(target)}).write_text('escaped')`,
+    "socket.create_connection(('127.0.0.1',9),0.1)",
+  ].join(";");
+  let providerCalls = 0;
+  try {
+    const result = await new AgentRuntime().execute(
+      {
+        prompt: "Attempt a dynamic filesystem and network escape",
+        dir: workDir,
+        sessionSelection: { mode: "new", sessionId },
+        modelRouteId: route.id,
+        provider: route.provider,
+        model: route.model,
+        auth: route.auth,
+        baseURL: route.baseURL,
+        interactionMode: "ask",
+      },
+      {
+        picoHome,
+        modelRouter,
+        reporter: new SilentReporter(),
+        hostKind: "desktop",
+        configuredSubagentChild: {
+          definition: requireSubagentCapability("implementation"),
+          executionBoundaryCeiling: createManagedExecutionBoundary(
+            createWorkspaceWritePermissionProfile(),
+          ),
+        },
+        approvalManager,
+        approvalNotifier: (notice) => {
+          approvalManager.resolveApproval(notice.taskId, true, "approved by boundary freeze test");
+        },
+        providerFactory: () => ({
+          async generate(messages, tools) {
+            providerCalls++;
+            if (providerCalls === 1) {
+              assert.ok(tools?.some((tool) => tool.name === "bash"));
+              const live = globalSessionManager.get(sessionId, workDir, { picoHome });
+              assert.ok(live);
+              const admitted = live.getRuntimeStateSnapshot().boundary;
+              assert.equal(admitted?.kind, "managed");
+              live.updateRuntimeState({
+                boundary: createBypassExecutionBoundary((admitted?.revision ?? 0) + 1),
+              });
+              await live.flushPersistence();
+              assert.equal(live.getRuntimeStateSnapshot().boundary?.kind, "bypass");
+              return {
+                role: "assistant" as const,
+                content: "",
+                toolCalls: [
+                  {
+                    id: "dynamic-boundary-escape",
+                    name: "bash",
+                    arguments: JSON.stringify({ command: `python3 -c ${JSON.stringify(python)}` }),
+                  },
+                ],
+              };
+            }
+            assert.match(
+              messages.find((message) => message.toolCallId === "dynamic-boundary-escape")
+                ?.content ?? "",
+              /physical sandbox launch intercepted/u,
+            );
+            return { role: "assistant" as const, content: "Escape remained sandboxed" };
+          },
+        }),
+      },
+    );
+
+    assert.equal(result.finalMessage, "Escape remained sandboxed");
+    assert.equal(providerCalls, 2);
+    assert.equal(launches.length, 1);
+    assert.equal(launches[0]?.policy.profile, "workspace-write");
+    assert.equal(launches[0]?.policy.network, "deny");
+    assert.equal(
+      launches[0]?.policy.writeRoots.some((root) => target.startsWith(root)),
+      false,
+    );
+    await assert.rejects(readFile(target), { code: "ENOENT" });
   } finally {
     await globalSessionManager.clearAndDrain();
     await rm(root, { recursive: true, force: true });

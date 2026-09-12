@@ -90,11 +90,22 @@ test("Desktop projects user-config revisions into process-private tokens", async
   const updatedConfig = asRecord(
     await desktop.handle(
       createRuntimeRequest("config.user.update", {
-        defaults: { mode: "plan" },
+        defaults: {
+          collaborationMode: "plan",
+          orchestrationMode: "graph",
+          permissionMode: "full-access",
+        },
         expectedRevision: providerToken,
       }),
     ),
   );
+  const updatedDefaults = asRecord(asRecord(updatedConfig["config"])["defaults"]);
+  assert.deepEqual(updatedDefaults, {
+    collaborationMode: "plan",
+    orchestrationMode: "graph",
+    permissionMode: "full-access",
+  });
+  assert.equal(Object.hasOwn(updatedDefaults, "mode"), false);
   const configToken = requiredSha256(updatedConfig["revision"], "updated config revision");
   const configRawRevision = (await userConfigStore.read()).revision;
   assert.notEqual(configToken, configRawRevision);
@@ -198,7 +209,10 @@ test("Desktop projects user-config revisions into process-private tokens", async
   context.after(unsubscribeExternal);
   const beforeExternal = await userConfigStore.read();
   const external = await userConfigStore.write(
-    { ...beforeExternal.config, defaults: { mode: "default" } },
+    {
+      ...beforeExternal.config,
+      defaults: { collaborationMode: "agent", permissionMode: "ask" },
+    },
     { expectedRevision: beforeExternal.revision },
   );
   const afterExternal = asRecord(await desktop.handle(createRuntimeRequest("config.user.get", {})));
@@ -398,7 +412,10 @@ test(
     });
     await journal.update(operation.operationId, { phase: "credential-imported" });
     await userConfigStore.write(
-      { ...previous.config, defaults: { mode: "plan" } },
+      {
+        ...previous.config,
+        defaults: { collaborationMode: "plan", permissionMode: "ask" },
+      },
       { expectedRevision: previous.revision },
     );
     const entered = Promise.withResolvers<void>();
@@ -424,7 +441,8 @@ test(
       );
       const snapshot = await userConfigStore.read();
       assert.ok(snapshot.config.providers[id]);
-      assert.equal(snapshot.config.defaults?.mode, "plan");
+      assert.equal(snapshot.config.defaults?.collaborationMode, "plan");
+      assert.equal(snapshot.config.defaults?.permissionMode, "ask");
       forwarded = true;
       return { runId: "recovered-admission" };
     };

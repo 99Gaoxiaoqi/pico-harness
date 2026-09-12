@@ -344,7 +344,7 @@ test("AgentRuntime resume durably fail-closes a legacy history without settings"
       sessionSelection: { mode: "resume", sessionId },
       provider: "openai",
       modelRouteId: "test/test",
-      interactionMode: "yolo",
+      interactionMode: "full-access",
     },
     {
       provider: {
@@ -367,7 +367,7 @@ test("AgentRuntime resume durably fail-closes a legacy history without settings"
     orchestrationMode: "default",
     thinkingEffort: "off",
     thinkingEffortExplicit: false,
-    permissionMode: "default",
+    permissionMode: "ask",
     additionalDirectories: [],
   });
 });

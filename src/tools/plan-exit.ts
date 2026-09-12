@@ -28,6 +28,7 @@ interface SubmitPlanArgs {
 /** Submits a durable proposal and latches a normal engine handoff. */
 export class SubmitPlanTool implements BaseTool {
   readonly readOnly = false;
+  readonly permissionCategory = "bounded_control" as const;
   readonly fileSideEffects = { kind: "none" } as const;
 
   constructor(
@@ -159,6 +160,7 @@ function sameProposalContent(
 
 export class UpdatePlanTool implements BaseTool {
   readonly readOnly = false;
+  readonly permissionCategory = "bounded_control" as const;
   readonly fileSideEffects = { kind: "none" } as const;
   constructor(
     private readonly coordinator: PlanCoordinatorFactory,
@@ -224,6 +226,7 @@ function updatePlanOperationId(
 
 export class CancelPlanTool implements BaseTool {
   readonly readOnly = false;
+  readonly permissionCategory = "bounded_control" as const;
   readonly fileSideEffects = { kind: "none" } as const;
   constructor(
     private readonly coordinator: PlanCoordinatorFactory,

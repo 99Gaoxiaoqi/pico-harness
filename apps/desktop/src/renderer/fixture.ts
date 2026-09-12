@@ -164,7 +164,7 @@ export const previewData: AppData = {
         model: "gpt-5.4",
         collaborationMode: "agent",
         orchestrationMode: "default",
-        permissionMode: "default",
+        permissionMode: "ask",
         thinkingEffort: "high",
         reasoningLevels: ["off", "low", "medium", "high"],
       },
@@ -341,7 +341,8 @@ export const previewData: AppData = {
     defaultModelRouteId: "openai/gpt-5.4",
     userDefaults: {
       modelRouteId: "openai/gpt-5.4",
-      mode: "default",
+      collaborationMode: "plan",
+      permissionMode: "full-access",
       thinkingEffort: "high",
     },
     providers: [

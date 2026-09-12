@@ -234,7 +234,11 @@ function buildUserConfig(
   );
   return {
     version: 1,
-    defaults: { modelRouteId: request.route.id, mode: "yolo" },
+    defaults: {
+      modelRouteId: request.route.id,
+      collaborationMode: "agent",
+      permissionMode: "full-access",
+    },
     providers,
   };
 }

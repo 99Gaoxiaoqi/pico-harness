@@ -27,7 +27,7 @@ function freshRoot(): string {
 
 function testPolicySnapshot() {
   return {
-    mode: "yolo" as const,
+    mode: "full-access" as const,
     backgroundEnabled: true as const,
     trustedWorkspace: true as const,
     toolNetworkPolicy: "disabled" as const,

@@ -38,7 +38,7 @@ import {
   runHeadlessOneShotJson,
   terminalBenchAgentControlledProxyCapability,
   type HeadlessOneShotPolicyDenialSummary,
-  type HeadlessOneShotRequestV1,
+  type HeadlessOneShotRequestV2,
 } from "../../../src/internal/headless-one-shot-runner.js";
 import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
 import type {
@@ -92,6 +92,7 @@ function policyReasonCounts(
     destructive_system: 0,
     hook_denied: 0,
     approval_denied: 0,
+    policy_denied: 0,
     unknown_hardline: 0,
     ...overrides,
   };
@@ -133,6 +134,32 @@ test("internal headless runner succeeds through the shared Runtime and redacts r
   assert.equal(JSON.stringify(outcome.result).includes(secret), false);
 });
 
+test("headless preserves independent collaboration and permission axes at the Runtime boundary", async (context) => {
+  const fixture = await createFixture(context, "independent-policy-axes");
+  await configureFixture(fixture, "secret-canary-independent-policy-axes");
+  let received: RunAgentCliOptions | undefined;
+  const request = {
+    ...requestFor(fixture, "independent-policy-axes"),
+    collaborationMode: "plan" as const,
+    permissionMode: "full-access" as const,
+    trace: false,
+  };
+  const outcome = await runHeadlessOneShotJson(JSON.stringify(request), {
+    env: {},
+    executeRuntime: async (options) => {
+      received = options;
+      return runtimeResult(options, "axes received");
+    },
+  });
+
+  assert.equal(outcome.exitCode, 0, JSON.stringify(outcome.result));
+  assert.equal(received?.collaborationMode, "plan");
+  assert.equal(received?.permissionMode, "full-access");
+  assert.equal(received?.interactionMode, undefined);
+  assert.equal(outcome.result.effective.collaborationMode, "plan");
+  assert.equal(outcome.result.effective.permissionMode, "full-access");
+});
+
 test("headless Plan persists a pending handoff without approval or workspace mutation", async (context) => {
   const fixture = await createFixture(context, "plan-pending");
   await configureFixture(fixture, "secret-canary-plan-pending");
@@ -141,7 +168,8 @@ test("headless Plan persists a pending handoff without approval or workspace mut
   const request = {
     ...requestFor(fixture, "plan-pending"),
     prompt: "调查后提交计划，但不要执行或修改任何文件",
-    permissionMode: "plan" as const,
+    collaborationMode: "plan" as const,
+    permissionMode: "ask" as const,
     trace: false,
   };
   let providerCalls = 0;
@@ -206,7 +234,8 @@ test("headless Plan continues when the model stops before submit_plan", async (c
   const request = {
     ...requestFor(fixture, "plan-continuation"),
     prompt: "必须调用 submit_plan 提交计划",
-    permissionMode: "plan" as const,
+    collaborationMode: "plan" as const,
+    permissionMode: "ask" as const,
     trace: false,
   };
   let providerCalls = 0;
@@ -968,10 +997,27 @@ test("invalid JSON, unknown fields, untrusted workspaces, and wrong routes fail 
   assert.equal(unknownField.result.error?.code, "UNKNOWN_FIELD");
 
   const wrongVersion = await runHeadlessOneShotJson(
-    JSON.stringify({ ...requestFor(fixture, "version"), schemaVersion: 2 }),
+    JSON.stringify({ ...requestFor(fixture, "version"), schemaVersion: 1 }),
     dependencies,
   );
   assert.equal(wrongVersion.result.error?.code, "UNSUPPORTED_SCHEMA_VERSION");
+  for (const permissionMode of ["default", "plan", "yolo"]) {
+    const legacyPermission = await runHeadlessOneShotJson(
+      JSON.stringify({ ...requestFor(fixture, `legacy-${permissionMode}`), permissionMode }),
+      dependencies,
+    );
+    assert.equal(legacyPermission.result.error?.code, "INVALID_PERMISSION_MODE");
+  }
+  const missingCollaboration = { ...requestFor(fixture, "missing-collaboration") } as Record<
+    string,
+    unknown
+  >;
+  delete missingCollaboration["collaborationMode"];
+  assert.equal(
+    (await runHeadlessOneShotJson(JSON.stringify(missingCollaboration), dependencies)).result.error
+      ?.code,
+    "MISSING_FIELD",
+  );
 
   const projectConfigDirectory = join(fixture.workspace, ".pico");
   await mkdir(projectConfigDirectory);
@@ -1280,7 +1326,7 @@ test(
     const outcome = await runHeadlessOneShotJson(
       JSON.stringify({
         ...requestFor(fixture, "controlled-proxy-bash"),
-        permissionMode: "yolo",
+        permissionMode: "full-access",
         allowedTools: ["bash", "task_output"],
       }),
       {
@@ -1495,6 +1541,7 @@ test("headless policy denial defaults to the compatible terminal outcome", async
       hardline: 0,
       hook: 0,
       approval: 0,
+      policy: 0,
     },
     byReasonKind: policyReasonCounts({ plan_mode: 1 }),
     first: {
@@ -1520,7 +1567,8 @@ test("incident mode recovers from an undisclosed tool rejection without counting
     JSON.stringify({
       ...requestFor(fixture, "policy-block"),
       allowedTools: ["write_file"],
-      permissionMode: "plan",
+      collaborationMode: "plan",
+      permissionMode: "ask",
       policyDenialMode: "incident",
     }),
     {
@@ -1604,7 +1652,7 @@ test(
       JSON.stringify({
         ...requestFor(fixture, "policy-reason-kind"),
         allowedTools: ["bash"],
-        permissionMode: "yolo",
+        permissionMode: "full-access",
         policyDenialMode: "incident",
       }),
       {
@@ -1636,6 +1684,7 @@ test(
         hardline: 1,
         hook: 0,
         approval: 0,
+        policy: 0,
       },
       byReasonKind: policyReasonCounts({ protected_redirect: 1 }),
       first: {
@@ -1698,6 +1747,7 @@ test("policy denial incidents preserve Runtime failure and timeout terminal stat
       hardline: 1,
       hook: 1,
       approval: 0,
+      policy: 0,
     },
     byReasonKind: policyReasonCounts({
       plan_mode: 1,
@@ -1751,6 +1801,7 @@ test("policy denial incidents preserve Runtime failure and timeout terminal stat
       hardline: 0,
       hook: 0,
       approval: 1,
+      policy: 0,
     },
     byReasonKind: policyReasonCounts({ approval_denied: 1 }),
     first: {
@@ -2300,15 +2351,16 @@ async function trustFixture(fixture: Fixture): Promise<void> {
   await store.trust(await store.canonicalize(fixture.workspace));
 }
 
-function requestFor(fixture: Fixture, id: string): HeadlessOneShotRequestV1 {
+function requestFor(fixture: Fixture, id: string): HeadlessOneShotRequestV2 {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     requestId: `request-${id}`,
     workspacePath: fixture.workspace,
     picoHome: fixture.picoHome,
     sessionId: `session-${id}`,
     prompt: `respond to ${id}`,
     modelRouteId: ROUTE_ID,
+    collaborationMode: "agent",
     permissionMode: "auto",
     allowedTools: [],
     timeoutMs: 30_000,

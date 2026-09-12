@@ -33,7 +33,7 @@ import { sendTuiTurn } from "./helpers/tui-turn.js";
  * （list → preview 指纹 → apply conversation 模式 → fork 切换）；④ ask_user
  * 自由文本真机（模型真实调用工具 → prompt.requested → respond 文本 →
  * textAnswer 回流模型）；⑤ prompt.cancel（模型收到 cancelled）；⑥ 审批
- * wire 真机（default 模式编辑触发 → diff/sessionScope/providerCallId 到达
+ * wire 真机（ask 模式编辑触发 → diff/sessionScope/providerCallId 到达
  * 客户端 → allow_session 授权 → 同类编辑免审复用）；⑦ 图片附件端到端
  * （客户端附件 → 协议 wire → daemon commit → 模型视觉识别）。
  *
@@ -344,7 +344,7 @@ realModelTest(
     await client.request("session.settings.update", {
       workspacePath: workspaceDir,
       sessionId: applied.sessionId,
-      permissionMode: "default",
+      permissionMode: "ask",
     });
     assert.ok(
       !reporter
@@ -525,11 +525,11 @@ realModelTest(
     assert.ok(drained, "建会话回合应完成");
     const sessionId = runtime.activeSessionId;
     assert.ok(sessionId, "建会话回合应确立 sessionId");
-    // 收紧权限模式：default 下 write/edit 一律审批（引擎 isAgentOpsDangerousCommand）。
+    // 收紧权限模式：ask 下 workspace_write 能力一律审批。
     await client.request("session.settings.update", {
       workspacePath: workspaceDir,
       sessionId,
-      permissionMode: "default",
+      permissionMode: "ask",
     });
 
     // 第一回合：模型编辑文件 → approval.requested 到达客户端，wire 应带
@@ -541,7 +541,7 @@ realModelTest(
     if (!sent) sent = await runtime.sendText("请按上一条指示用 edit_file 修改 approval-e2e.txt。");
     assert.ok(sent, "编辑回合 session.send 应被接受");
     const approvalArrived = await waitForCondition(() => approvals.length > 0, 180_000);
-    assert.ok(approvalArrived, "default 模式下文件编辑应触发审批");
+    assert.ok(approvalArrived, "ask 模式下文件编辑应触发审批");
     const notice = approvals[0]!;
     assert.ok(
       notice.toolName === "edit_file" || notice.toolName === "write_file",

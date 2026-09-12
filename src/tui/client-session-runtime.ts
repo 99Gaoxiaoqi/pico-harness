@@ -338,7 +338,7 @@ export class ClientSessionRuntime {
   private settingsOverrideInFlight = false;
   private configuredInitialSettings: RuntimeUserDefaults = {
     collaborationMode: "agent",
-    permissionMode: "default",
+    permissionMode: "ask",
   };
   private pendingInitialSettings: RuntimeUserDefaults = this.configuredInitialSettings;
   private pendingInitialSettingsTouched = false;
@@ -699,7 +699,7 @@ export class ClientSessionRuntime {
     } catch {
       this.configuredInitialSettings = {
         collaborationMode: "agent",
-        permissionMode: "default",
+        permissionMode: "ask",
       };
       if (!this.pendingInitialSettingsTouched) {
         this.pendingInitialSettings = this.configuredInitialSettings;
@@ -718,7 +718,7 @@ export class ClientSessionRuntime {
     if (this.sessionId !== undefined) return;
     this.options.onSettingsSnapshot?.({
       collaborationMode: this.pendingInitialSettings.collaborationMode ?? "agent",
-      permissionMode: this.pendingInitialSettings.permissionMode ?? "default",
+      permissionMode: this.pendingInitialSettings.permissionMode ?? "ask",
       ...(this.pendingInitialSettings.orchestrationMode
         ? { orchestrationMode: this.pendingInitialSettings.orchestrationMode }
         : {}),
@@ -1153,18 +1153,10 @@ export class ClientSessionRuntime {
 }
 
 function resolvePreSessionDefaults(defaults: RuntimeUserDefaults): RuntimeUserDefaults {
-  const legacyMode = defaults.mode;
-  const collaborationMode =
-    defaults.collaborationMode ?? (legacyMode === "plan" ? "plan" : "agent");
-  const permissionMode =
-    defaults.permissionMode ??
-    (legacyMode === "default" || legacyMode === "auto" || legacyMode === "yolo"
-      ? legacyMode
-      : "default");
   return {
     ...(defaults.modelRouteId ? { modelRouteId: defaults.modelRouteId } : {}),
-    collaborationMode,
-    permissionMode,
+    collaborationMode: defaults.collaborationMode ?? "agent",
+    permissionMode: defaults.permissionMode ?? "ask",
     ...(defaults.orchestrationMode ? { orchestrationMode: defaults.orchestrationMode } : {}),
     ...(defaults.thinkingEffort ? { thinkingEffort: defaults.thinkingEffort } : {}),
   };

@@ -19,7 +19,7 @@ import { WorkspaceRoots, workspaceAccessesFromCall } from "../tools/workspace-ro
 import { isToolSupportedForHost } from "../tools/tool-surface.js";
 import type { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import { verifyBackgroundMcpConfig } from "./background-mcp-policy.js";
-import { evaluateYoloToolCall, type SandboxNetworkPolicy } from "./yolo-sandbox.js";
+import { evaluateWorkspaceToolCall, type SandboxNetworkPolicy } from "./workspace-sandbox.js";
 import {
   createSandboxPolicy,
   defaultSandboxScratchRoot,
@@ -28,11 +28,11 @@ import {
 } from "./process-sandbox/index.js";
 import { resolveShell, shellCommandArgs } from "../os/shell.js";
 import {
-  BackgroundYoloPolicySnapshotError,
+  BackgroundAutonomousPolicySnapshotError,
   normalizeExactHostname,
-  parseBackgroundYoloPolicySnapshot,
-  type BackgroundYoloPolicySnapshotData,
-} from "./background-yolo-policy-schema.js";
+  parseBackgroundAutonomousPolicySnapshot,
+  type BackgroundAutonomousPolicySnapshotData,
+} from "./background-autonomous-policy-schema.js";
 
 export const BACKGROUND_HARDLINE_VERSION = "builtin-v1" as const;
 export const BACKGROUND_HOOK_VERSION = "workspace-v1" as const;
@@ -40,7 +40,7 @@ export const BACKGROUND_HOOK_VERSION = "workspace-v1" as const;
 const DEFAULT_HOOK_TIMEOUT_MS = 60_000;
 const MAX_HOOK_OUTPUT_BYTES = 1024 * 1024;
 
-export type BackgroundYoloPolicySnapshot = BackgroundYoloPolicySnapshotData;
+export type BackgroundAutonomousPolicySnapshot = BackgroundAutonomousPolicySnapshotData;
 
 /** background 宿主亲和性单源在 tool-surface.ts（原硬编码 UNSAFE_BACKGROUND_TOOLS 已收编）。 */
 export function filterBackgroundEligibleTools(tools: readonly string[]): string[] {
@@ -54,8 +54,8 @@ export interface BackgroundWorkspaceTrustVerifier {
   isTrusted(canonicalWorkspacePath: string): Promise<boolean>;
 }
 
-export interface PreparedBackgroundYoloPolicy {
-  readonly snapshot: BackgroundYoloPolicySnapshot;
+export interface PreparedBackgroundAutonomousPolicy {
+  readonly snapshot: BackgroundAutonomousPolicySnapshot;
   readonly workspacePath: string;
   readonly allowedTools: ReadonlySet<string>;
   readonly allowedToolNetworkHosts: ReadonlySet<string>;
@@ -96,13 +96,13 @@ export class BackgroundPolicyViolationError extends Error {
   }
 }
 
-export async function prepareBackgroundYoloPolicy(input: {
+export async function prepareBackgroundAutonomousPolicy(input: {
   workDir: string;
   policy: unknown;
   trustStore: BackgroundWorkspaceTrustVerifier | WorkspaceTrustStore;
   hookTrustStore?: HookTrustStore;
-}): Promise<PreparedBackgroundYoloPolicy> {
-  const snapshot = assertBackgroundYoloPolicy(input.policy);
+}): Promise<PreparedBackgroundAutonomousPolicy> {
+  const snapshot = assertBackgroundAutonomousPolicy(input.policy);
   if (snapshot.hardlineVersion !== BACKGROUND_HARDLINE_VERSION) {
     throw new BackgroundPolicyViolationError(
       "policy_version_mismatch",
@@ -189,8 +189,8 @@ export async function prepareBackgroundYoloPolicy(input: {
   };
 }
 
-export function buildBackgroundYoloMiddleware(input: {
-  policy: PreparedBackgroundYoloPolicy;
+export function buildBackgroundAutonomousMiddleware(input: {
+  policy: PreparedBackgroundAutonomousPolicy;
   workspaceRoots: WorkspaceRoots;
   sessionId: string;
 }): RequestMiddleware {
@@ -230,7 +230,7 @@ export function buildBackgroundYoloMiddleware(input: {
 
 function validateBackgroundToolCall(
   call: ToolCall,
-  policy: PreparedBackgroundYoloPolicy,
+  policy: PreparedBackgroundAutonomousPolicy,
   workspaceRoots: WorkspaceRoots,
 ): RequestMiddlewareResult {
   if (!policy.allowedTools.has(call.name)) {
@@ -248,7 +248,7 @@ function validateBackgroundToolCall(
   if (isHardlineCommand(call.name, call.arguments, policy.workspacePath)) {
     return {
       allowed: false,
-      reason: "[background:hardline_denied] Hardline 高危命令不可由后台 YOLO 绕过。",
+      reason: "[background:hardline_denied] Hardline 高危命令不可由后台无人值守执行绕过。",
     };
   }
   for (const access of workspaceAccessesFromCall(call)) {
@@ -260,7 +260,7 @@ function validateBackgroundToolCall(
     }
   }
 
-  const sandboxDecision = evaluateYoloToolCall(call, policy.workspacePath, workspaceRoots, {
+  const sandboxDecision = evaluateWorkspaceToolCall(call, policy.workspacePath, workspaceRoots, {
     // allow 是用户明确确认的无人值守网络边界；allowlist 仍只开放可验证 URL 工具。
     network: backgroundNetworkPolicy(policy.snapshot),
   });
@@ -272,7 +272,7 @@ function validateBackgroundToolCall(
 
 function validateNetworkToolCall(
   call: ToolCall,
-  policy: PreparedBackgroundYoloPolicy,
+  policy: PreparedBackgroundAutonomousPolicy,
 ): RequestMiddlewareResult {
   if (policy.snapshot.toolNetworkPolicy === "allow") return { allowed: true };
   if (call.name === "web_search") {
@@ -310,14 +310,14 @@ function validateNetworkToolCall(
   return { allowed: true };
 }
 
-function assertBackgroundYoloPolicy(value: unknown): BackgroundYoloPolicySnapshot {
+function assertBackgroundAutonomousPolicy(value: unknown): BackgroundAutonomousPolicySnapshot {
   if (!isRecord(value)) {
     throw new BackgroundPolicyViolationError("missing_policy", "后台执行缺少 policySnapshot。 ");
   }
   try {
-    return parseBackgroundYoloPolicySnapshot(value);
+    return parseBackgroundAutonomousPolicySnapshot(value);
   } catch (error) {
-    if (!(error instanceof BackgroundYoloPolicySnapshotError)) throw error;
+    if (!(error instanceof BackgroundAutonomousPolicySnapshotError)) throw error;
     throw new BackgroundPolicyViolationError("invalid_policy", error.message, { cause: error });
   }
 }
@@ -725,7 +725,9 @@ export class StrictBackgroundHookRunner {
   }
 }
 
-function backgroundNetworkPolicy(snapshot: BackgroundYoloPolicySnapshot): SandboxNetworkPolicy {
+function backgroundNetworkPolicy(
+  snapshot: BackgroundAutonomousPolicySnapshot,
+): SandboxNetworkPolicy {
   return snapshot.toolNetworkPolicy === "allow" ? "allow" : "deny";
 }
 

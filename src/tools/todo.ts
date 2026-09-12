@@ -51,6 +51,7 @@ function statusMark(status: TodoStatus): string {
 export class TodoTool implements BaseTool {
   /** 非只读:所有 action 都可能写 todo.json */
   readonly readOnly = false;
+  readonly permissionCategory = "bounded_control" as const;
   /** Todo 是会话内部状态，不属于 code rewind 范围。 */
   readonly fileSideEffects = NO_FILE_SIDE_EFFECTS;
 

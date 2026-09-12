@@ -67,8 +67,8 @@ export interface RewindStorageOperation extends StorageOperationBase {
     /** TUI 崩溃恢复 handoff 使用同一 canonical 用户输入。 */
     userPrompt: string;
     transcriptIndex?: number;
-    interactionMode?: "default" | "plan" | "auto" | "yolo";
-    prePlanMode?: "default" | "auto" | "yolo";
+    interactionMode?: "ask" | "plan" | "auto" | "full-access";
+    prePlanMode?: "ask" | "auto" | "full-access";
   };
   files: Array<{
     rootId: string;
@@ -89,10 +89,10 @@ export interface ForkStorageOperation extends StorageOperationBase {
   };
   targetSessionId: string;
   /** @deprecated v1 journal compatibility; canonical writes use split axes below. */
-  targetMode?: "default" | "plan" | "auto" | "yolo";
+  targetMode?: "ask" | "plan" | "auto" | "full-access";
   /** 恢复 prepared 操作时不能猜测的目标协作与权限轴。 */
   targetCollaborationMode?: "agent" | "plan";
-  targetPermissionMode?: "default" | "auto" | "yolo";
+  targetPermissionMode?: "ask" | "auto" | "full-access";
   /** Durable disposition: cleanup_only can never be retried forward. */
   recoveryPolicy?: "forward" | "cleanup_only";
   stagingDirectory: string;
@@ -159,7 +159,7 @@ export class StorageOperationJournal {
       createdAt: now,
       updatedAt: now,
     } as StorageOperation;
-    const parsed = parseStorageOperation(operation);
+    const parsed = parseStorageOperation(operation, false);
     if (!parsed) throw new Error("Invalid storage operation");
     await this.write(parsed, "insert");
     return parsed;
@@ -450,6 +450,7 @@ function listOperationsLocked(statement: { all(): unknown[] }): StorageOperation
 function parseOperationRow(value: unknown, identity: string): StorageOperation {
   const parsed = parseStorageOperation(
     typeof value === "string" ? (JSON.parse(value) as unknown) : undefined,
+    true,
   );
   if (!parsed) {
     throw new FileStorageIntegrityError(`Storage operation journal row is malformed: ${identity}`);
@@ -517,7 +518,10 @@ function isTerminal(state: StorageOperationState): boolean {
   return state === "completed" || state === "aborted" || state === "needs_attention";
 }
 
-function parseStorageOperation(value: unknown): StorageOperation | undefined {
+function parseStorageOperation(
+  value: unknown,
+  allowDurableLegacyModes: boolean,
+): StorageOperation | undefined {
   if (!isRecord(value) || value["schemaVersion"] !== STORAGE_OPERATION_VERSION) return undefined;
   if (
     typeof value["operationId"] !== "string" ||
@@ -532,15 +536,28 @@ function parseStorageOperation(value: unknown): StorageOperation | undefined {
   ) {
     return undefined;
   }
-  if (value["kind"] === "rewind") return parseRewindOperation(value);
-  if (value["kind"] === "fork") return parseForkOperation(value);
+  if (value["kind"] === "rewind") {
+    return parseRewindOperation(value, allowDurableLegacyModes);
+  }
+  if (value["kind"] === "fork") return parseForkOperation(value, allowDurableLegacyModes);
   return undefined;
 }
 
-function parseRewindOperation(value: Record<string, unknown>): RewindStorageOperation | undefined {
+function parseRewindOperation(
+  value: Record<string, unknown>,
+  allowDurableLegacyModes: boolean,
+): RewindStorageOperation | undefined {
   const precondition = value["precondition"];
   const target = value["target"];
   const files = value["files"];
+  const interactionMode = normalizeInteractionMode(
+    isRecord(target) ? target["interactionMode"] : undefined,
+    allowDurableLegacyModes,
+  );
+  const prePlanMode = normalizeNonPlanMode(
+    isRecord(target) ? target["prePlanMode"] : undefined,
+    allowDurableLegacyModes,
+  );
   if (
     !isRewindMode(value["mode"]) ||
     !isRecord(precondition) ||
@@ -556,35 +573,44 @@ function parseRewindOperation(value: Record<string, unknown>): RewindStorageOper
     typeof target["userPrompt"] !== "string" ||
     target["userPrompt"].length === 0 ||
     !isOptionalNonNegativeInteger(target["transcriptIndex"]) ||
-    !isOptionalInteractionMode(target["interactionMode"]) ||
-    !isOptionalPrePlanMode(target["prePlanMode"]) ||
-    (target["prePlanMode"] !== undefined && target["interactionMode"] !== "plan") ||
+    (target["interactionMode"] !== undefined && interactionMode === undefined) ||
+    (target["prePlanMode"] !== undefined && prePlanMode === undefined) ||
+    (prePlanMode !== undefined && interactionMode !== "plan") ||
     !Array.isArray(files) ||
     !files.every(isStoredFileTransition)
   ) {
     return undefined;
   }
-  return structuredClone(value) as unknown as RewindStorageOperation;
+  const effectivePrePlanMode =
+    interactionMode === "plan" ? (prePlanMode ?? "ask") : undefined;
+  return {
+    ...(structuredClone(value) as unknown as RewindStorageOperation),
+    target: {
+      ...(structuredClone(target) as RewindStorageOperation["target"]),
+      ...(interactionMode !== undefined ? { interactionMode } : {}),
+      ...(effectivePrePlanMode !== undefined ? { prePlanMode: effectivePrePlanMode } : {}),
+    },
+  };
 }
 
-function parseForkOperation(value: Record<string, unknown>): ForkStorageOperation | undefined {
+function parseForkOperation(
+  value: Record<string, unknown>,
+  allowDurableLegacyModes: boolean,
+): ForkStorageOperation | undefined {
   const cursor = value["sourceCursor"];
   const bundleManifest = value["bundleManifest"];
+  const targetMode = normalizeInteractionMode(value["targetMode"], allowDurableLegacyModes);
   if (
     typeof value["sourceSessionId"] !== "string" ||
     typeof value["targetSessionId"] !== "string" ||
-    (value["targetMode"] !== undefined &&
-      value["targetMode"] !== "default" &&
-      value["targetMode"] !== "yolo" &&
-      value["targetMode"] !== "auto" &&
-      value["targetMode"] !== "plan") ||
+    (value["targetMode"] !== undefined && targetMode === undefined) ||
     (value["targetCollaborationMode"] !== undefined &&
       value["targetCollaborationMode"] !== "agent" &&
       value["targetCollaborationMode"] !== "plan") ||
     (value["targetPermissionMode"] !== undefined &&
-      value["targetPermissionMode"] !== "default" &&
+      value["targetPermissionMode"] !== "ask" &&
       value["targetPermissionMode"] !== "auto" &&
-      value["targetPermissionMode"] !== "yolo") ||
+      value["targetPermissionMode"] !== "full-access") ||
     (value["targetCollaborationMode"] === undefined) !==
       (value["targetPermissionMode"] === undefined) ||
     (value["targetMode"] !== undefined && value["targetCollaborationMode"] !== undefined) ||
@@ -601,7 +627,14 @@ function parseForkOperation(value: Record<string, unknown>): ForkStorageOperatio
   ) {
     return undefined;
   }
-  return structuredClone(value) as unknown as ForkStorageOperation;
+  const normalized = structuredClone(value) as unknown as ForkStorageOperation;
+  if (targetMode === undefined) return normalized;
+  const { targetMode: _targetMode, ...withoutLegacyMode } = normalized;
+  return {
+    ...withoutLegacyMode,
+    targetCollaborationMode: targetMode === "plan" ? "plan" : "agent",
+    targetPermissionMode: targetMode === "plan" ? "ask" : targetMode,
+  };
 }
 
 function isOptionalForkBundleManifest(value: unknown): boolean {
@@ -685,18 +718,31 @@ function isRewindMode(value: unknown): value is RewindStorageOperation["mode"] {
   return value === "code" || value === "conversation" || value === "both";
 }
 
-function isOptionalInteractionMode(value: unknown): boolean {
-  return (
+function normalizeInteractionMode(
+  value: unknown,
+  allowDurableLegacyModes: boolean,
+): "ask" | "plan" | "auto" | "full-access" | undefined {
+  if (
     value === undefined ||
-    value === "default" ||
+    value === "ask" ||
     value === "plan" ||
     value === "auto" ||
-    value === "yolo"
-  );
+    value === "full-access"
+  ) {
+    return value;
+  }
+  if (!allowDurableLegacyModes) return undefined;
+  if (value === "default") return "ask";
+  if (value === "yolo") return "full-access";
+  return undefined;
 }
 
-function isOptionalPrePlanMode(value: unknown): boolean {
-  return value === undefined || value === "default" || value === "auto" || value === "yolo";
+function normalizeNonPlanMode(
+  value: unknown,
+  allowDurableLegacyModes: boolean,
+): "ask" | "auto" | "full-access" | undefined {
+  const normalized = normalizeInteractionMode(value, allowDurableLegacyModes);
+  return normalized === "plan" ? undefined : normalized;
 }
 
 function isOptionalNonNegativeInteger(value: unknown): boolean {

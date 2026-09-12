@@ -20,6 +20,11 @@ import {
   setSessionCollaborationMode,
   setSessionPermissionMode,
 } from "../../../src/input/session-settings.js";
+import {
+  createManagedExecutionBoundary,
+  createWorkspaceWritePermissionProfile,
+  type ExecutionBoundary,
+} from "../../../src/safety/permission-profile.js";
 
 /** Windows:分离的后台任务(memory recovery 等)可能短暂持有 pico.sqlite 句柄,
  * 删除临时目录按 EBUSY 有界重试,等待分离 drain 归还 lease。 */
@@ -58,11 +63,13 @@ test("session fork runtime port preserves the durable fork lifecycle", async () 
       eventId: "fork:fork-port-operation:state",
       at: "2026-01-01T00:00:00.000Z",
       patch: {
+        boundary: createManagedExecutionBoundary(createWorkspaceWritePermissionProfile(), 3),
         settings: {
           provider: "openai" as const,
           model: "test",
           modelRouteId: "test/test",
-          mode: "default" as const,
+          collaborationMode: "agent" as const,
+          permissionMode: "ask" as const,
           thinkingEffort: "off",
           thinkingEffortExplicit: false,
           additionalDirectories: [],
@@ -165,6 +172,7 @@ test("session fork runtime port preserves the durable fork lifecycle", async () 
         statePublication: {
           ...bootstrap.statePublication,
           patch: {
+            ...bootstrap.statePublication.patch,
             settings: { ...bootstrap.statePublication.patch.settings, model: "conflict" },
           },
         },
@@ -224,7 +232,7 @@ test("session fork runtime port composes the coordinator for Session callers", a
       fileHistoryBaseDir: source.fileHistoryBaseDir,
       sourceSessionId,
       targetSessionId,
-      targetMode: "default",
+      targetMode: "ask",
     });
 
     const targetEvents = await source.runtimeEventStore!.readSession(targetSessionId);
@@ -248,12 +256,12 @@ test("fork inherits both interaction axes and survives target Resume", async () 
   const picoHome = join(root, "pico-home");
   const manager = new SessionManager();
   const cases = [
-    ["agent", "default"],
+    ["agent", "ask"],
     ["agent", "auto"],
-    ["agent", "yolo"],
-    ["plan", "default"],
+    ["agent", "full-access"],
+    ["plan", "ask"],
     ["plan", "auto"],
-    ["plan", "yolo"],
+    ["plan", "full-access"],
   ] as const;
 
   try {
@@ -281,6 +289,33 @@ test("fork inherits both interaction axes and survives target Resume", async () 
       assert.equal(setSessionPermissionMode(settings, permissionMode).ok, true);
       await source.commitMessages({ role: "user", content: `seed ${index}` });
       await source.flushPersistence();
+      const initialBoundary = source.getRuntimeStateSnapshot().boundary;
+      assert.ok(initialBoundary);
+      const sourceBoundary: ExecutionBoundary =
+        initialBoundary.kind === "managed"
+          ? {
+              kind: "managed",
+              revision: index + 11,
+              profile: {
+                ...structuredClone(initialBoundary.profile),
+                name: "custom",
+                fileSystem: {
+                  ...structuredClone(initialBoundary.profile.fileSystem),
+                  entries: [
+                    ...structuredClone(initialBoundary.profile.fileSystem.entries),
+                    {
+                      kind: "path",
+                      access: "write",
+                      path: join(workDir, `granted-${index}`),
+                      match: "subtree",
+                    },
+                  ],
+                },
+              },
+            }
+          : { ...initialBoundary, revision: index + 11 };
+      source.updateRuntimeState({ boundary: sourceBoundary });
+      await source.flushPersistence();
 
       const journal = new StorageOperationJournal({ workDir, picoHome });
       const operationId = `fork-permission-op-${index}`;
@@ -298,7 +333,7 @@ test("fork inherits both interaction axes and survives target Resume", async () 
           sourceSessionId,
           targetSessionId,
           // Compatibility input cannot override the source's canonical axes.
-          targetMode: permissionMode === "yolo" ? "default" : "yolo",
+          targetMode: permissionMode === "full-access" ? "ask" : "full-access",
         });
       } finally {
         service.close();
@@ -319,10 +354,12 @@ test("fork inherits both interaction axes and survives target Resume", async () 
       });
       try {
         await resumed.recover();
-        const inherited = resumed.getRuntimeStateSnapshot().settings;
-        assert.equal(inherited?.collaborationMode, collaborationMode);
-        assert.equal(inherited?.permissionMode, permissionMode);
-        assert.deepEqual(inherited?.additionalDirectories, []);
+        const inherited = resumed.getRuntimeStateSnapshot();
+        assert.equal(inherited.settings?.collaborationMode, collaborationMode);
+        assert.equal(inherited.settings?.permissionMode, permissionMode);
+        assert.deepEqual(inherited.settings?.additionalDirectories, []);
+        assert.deepEqual(inherited.boundary, sourceBoundary);
+        assert.equal(inherited.boundary?.revision, sourceBoundary.revision);
       } finally {
         await resumed.close();
       }
@@ -331,6 +368,90 @@ test("fork inherits both interaction axes and survives target Resume", async () 
     for (const index of cases.keys()) {
       await manager.delete(`fork-permission-source-${index}`, workDir, { picoHome })?.close();
     }
+    await rmRetry(root);
+  }
+});
+
+test("historical fork cannot re-expand the source's current managed boundary", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-session-historical-fork-boundary-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  const manager = new SessionManager();
+  const sourceSessionId = "historical-fork-boundary-source";
+  const targetSessionId = "historical-fork-boundary-target";
+  const source = await manager.getOrCreate(sourceSessionId, workDir, {
+    persistence: true,
+    picoHome,
+    runtimePort: createEngineRuntimePort(),
+  });
+  try {
+    const sourceSettings = getOrCreateSessionSettings(
+      {
+        sessionId: sourceSessionId,
+        cwd: workDir,
+        picoHome,
+        provider: "openai",
+        model: "test",
+        modelRouteId: "openai/test",
+        mode: "full-access",
+      },
+      { persistence: source },
+    );
+    await source.commitMessages({ role: "user", content: "historical full-access seed" });
+    await source.flushPersistence();
+    const throughEventId = (await source.readDurableForkSnapshot()).runtimeSeedEntries.findLast(
+      (entry) => entry.kind === "model",
+    )?.event.eventId;
+    assert.ok(throughEventId);
+
+    assert.equal(setSessionPermissionMode(sourceSettings, "auto").ok, true);
+    const currentBoundary = createManagedExecutionBoundary(
+      createWorkspaceWritePermissionProfile(),
+      17,
+    );
+    source.updateRuntimeState({ boundary: currentBoundary });
+    await source.flushPersistence();
+
+    const service = new SessionForkService({
+      workDir,
+      picoHome,
+      sessionManager: manager,
+      runtimeStore: source.runtimeEventStore!,
+      runtimePort: createSessionForkRuntimePort(),
+    });
+    try {
+      await service.fork({ sourceSessionId, targetSessionId, throughEventId });
+    } finally {
+      service.close();
+    }
+
+    const target = new Session(targetSessionId, workDir, {
+      persistence: true,
+      picoHome,
+      runtimePort: createEngineRuntimePort(),
+    });
+    try {
+      await target.recover();
+      const targetSettings = getOrCreateSessionSettings(
+        {
+          sessionId: targetSessionId,
+          cwd: workDir,
+          picoHome,
+          provider: "openai",
+          model: "ignored-on-restore",
+          modelRouteId: "openai/ignored-on-restore",
+          mode: "full-access",
+        },
+        { persistence: target },
+      );
+      await target.flushPersistence();
+      assert.equal(targetSettings.permissionMode, "auto");
+      assert.deepEqual(target.getRuntimeStateSnapshot().boundary, currentBoundary);
+    } finally {
+      await target.close();
+    }
+  } finally {
+    await manager.delete(sourceSessionId, workDir, { picoHome })?.close();
     await rmRetry(root);
   }
 });
@@ -373,7 +494,7 @@ test("legacy settings-less fork journal recovery materializes agent/default befo
         provider: "openai",
         model: "test",
         modelRouteId: "openai/test",
-        mode: "default",
+        mode: "ask",
       },
       { persistence: source },
     );
@@ -397,7 +518,7 @@ test("legacy settings-less fork journal recovery materializes agent/default befo
     manifest["sizeBytes"] = Buffer.byteLength(frozenContents);
     await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`);
 
-    // Mutable source/user state may now be YOLO; the missing historical fact has
+    // Mutable source/user state may now be FULL_ACCESS; the missing historical fact has
     // no authority to inherit it.
     const mutableSettings = getOrCreateSessionSettings(
       {
@@ -407,12 +528,12 @@ test("legacy settings-less fork journal recovery materializes agent/default befo
         provider: "openai",
         model: "test",
         modelRouteId: "openai/test",
-        mode: "yolo",
+        mode: "full-access",
       },
       { persistence: source, restore: false },
     );
     setSessionCollaborationMode(mutableSettings, "plan");
-    setSessionPermissionMode(mutableSettings, "yolo");
+    setSessionPermissionMode(mutableSettings, "full-access");
     await source.flushPersistence();
 
     const database = new DatabaseSync(
@@ -425,7 +546,7 @@ test("legacy settings-less fork journal recovery materializes agent/default befo
       const legacy = JSON.parse(row.operation_json) as Record<string, unknown>;
       delete legacy["targetCollaborationMode"];
       delete legacy["targetPermissionMode"];
-      legacy["targetMode"] = "yolo";
+      legacy["targetMode"] = "full-access";
       legacy["bundleManifest"] = {
         manifestPath,
         stagedBundlePath: frozenPath,
@@ -452,7 +573,7 @@ test("legacy settings-less fork journal recovery materializes agent/default befo
     try {
       await resumed.recover();
       assert.equal(resumed.getRuntimeStateSnapshot().settings?.collaborationMode, "agent");
-      assert.equal(resumed.getRuntimeStateSnapshot().settings?.permissionMode, "default");
+      assert.equal(resumed.getRuntimeStateSnapshot().settings?.permissionMode, "ask");
       assert.deepEqual(resumed.getRuntimeStateSnapshot().settings?.additionalDirectories, []);
     } finally {
       await resumed.close();
@@ -478,11 +599,13 @@ test("completed fork rejects a state fact appended after its publication marker"
     eventId: "fork:marker-order:state",
     at: "2026-01-01T00:00:00.000Z",
     patch: {
+      boundary: createManagedExecutionBoundary(createWorkspaceWritePermissionProfile(), 4),
       settings: {
         provider: "openai" as const,
         model: "test",
         modelRouteId: "test/test",
-        mode: "default" as const,
+        collaborationMode: "agent" as const,
+        permissionMode: "ask" as const,
         thinkingEffort: "off",
         thinkingEffortExplicit: false,
         additionalDirectories: [],
@@ -565,11 +688,13 @@ test("completed fork cannot add state after its publication marker", async () =>
           eventId: "fork:state-barrier:state",
           at: "2026-01-01T00:00:00.000Z",
           patch: {
+            boundary: createManagedExecutionBoundary(createWorkspaceWritePermissionProfile(), 5),
             settings: {
               provider: "openai",
               model: "test",
               modelRouteId: "test/test",
-              mode: "default",
+              collaborationMode: "agent",
+              permissionMode: "ask",
               thinkingEffort: "off",
               thinkingEffortExplicit: false,
               additionalDirectories: [],
@@ -619,7 +744,7 @@ test("session fork rejects a Runtime store that differs from the source Session"
       service.fork({
         sourceSessionId: source.id,
         targetSessionId: "fork-store-target",
-        targetMode: "default",
+        targetMode: "ask",
       }),
       /does not match source Session store/u,
     );
@@ -631,7 +756,7 @@ test("session fork rejects a Runtime store that differs from the source Session"
   }
 });
 
-test("SessionForkService explicitly rejects legacy v1/v2/v3/v4/v5 fork bundles", async () => {
+test("SessionForkService explicitly rejects legacy v1-v7 fork bundles", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-session-fork-legacy-bundle-"));
   const workDir = join(root, "workspace");
   const picoHome = join(root, "pico-home");
@@ -643,7 +768,7 @@ test("SessionForkService explicitly rejects legacy v1/v2/v3/v4/v5 fork bundles",
     runtimePort: createSessionForkRuntimePort(),
   });
   try {
-    for (const version of [1, 2, 3, 4, 5] as const) {
+    for (const version of [1, 2, 3, 4, 5, 6, 7] as const) {
       const operationId = `legacy-fork-v${version}`;
       const stagingDirectory = join(root, "staging", operationId);
       const sourceCursor = {
@@ -685,7 +810,7 @@ test("SessionForkService explicitly rejects legacy v1/v2/v3/v4/v5 fork bundles",
         sourceSessionId: "legacy-source",
         sourceCursor,
         targetSessionId: `legacy-target-v${version}`,
-        targetMode: "default",
+        targetMode: "ask",
         stagingDirectory,
         bundleManifest: {
           manifestPath,
@@ -697,7 +822,7 @@ test("SessionForkService explicitly rejects legacy v1/v2/v3/v4/v5 fork bundles",
     }
 
     await service.reconcileUnfinished();
-    for (const version of [1, 2, 3, 4] as const) {
+    for (const version of [1, 2, 3, 4, 5, 6, 7] as const) {
       const operation = await journal.get(`legacy-fork-v${version}`);
       assert.equal(operation?.state, "needs_attention");
       assert.match(

@@ -201,7 +201,7 @@ realModelTest(
             model: model.route.model,
             modelRouteId: model.route.id,
             collaborationMode: "agent",
-            permissionMode: "yolo",
+            permissionMode: "full-access",
             orchestrationMode: SWARM_E2E ? "default" : "graph",
             thinkingEffort: "off",
             thinkingEffortExplicit: false,

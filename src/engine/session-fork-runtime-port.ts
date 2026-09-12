@@ -6,6 +6,7 @@ import type { RuntimeSessionForkSeedEntry } from "./session-runtime-projection.j
 import type { PersistedInteractionMode, SessionRuntimeStateWritePatch } from "./session-runtime.js";
 import type { PersistedSessionSettings } from "./session-runtime.js";
 import type { FileHistoryRewindTransactionHooks } from "../safety/file-history.js";
+import type { ExecutionBoundary } from "../safety/permission-profile.js";
 
 /**
  * Engine-side contract for the durable fork lifecycle.
@@ -30,6 +31,10 @@ export interface SessionForkModelCheckpoint {
 export interface SessionForkPublicationCapability {
   assertOwned(): Promise<void>;
 }
+
+export type SessionForkRuntimeStateWritePatch = SessionRuntimeStateWritePatch & {
+  readonly boundary: ExecutionBoundary;
+};
 
 /** A durable target fact conflicts with the frozen fork payload. */
 export class SessionForkRuntimeConflictError extends Error {
@@ -64,7 +69,8 @@ export interface SessionForkBootstrapSeed {
   readonly modelCheckpoint?: SessionForkModelCheckpoint;
   readonly sourceThroughEventId?: string;
   readonly statePublication?: {
-    readonly patch: SessionRuntimeStateWritePatch;
+    /** Canonical forks publish the complete inherited authority boundary atomically. */
+    readonly patch: SessionForkRuntimeStateWritePatch;
     readonly eventId: string;
     readonly at: string;
   };

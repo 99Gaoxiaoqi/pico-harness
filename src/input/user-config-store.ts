@@ -34,11 +34,16 @@ const USER_CONFIG_TEMPORARY_NAME =
 
 export const EMPTY_USER_CONFIG_REVISION = sha256("");
 
-export type PicoInteractionMode = "default" | "plan" | "auto" | "yolo";
+export type PicoInteractionMode = "ask" | "plan" | "auto" | "full-access";
+export type PicoCollaborationMode = "agent" | "plan";
+export type PicoPermissionMode = "ask" | "auto" | "full-access";
+export type PicoOrchestrationMode = "default" | "graph" | "swarm";
 
 export interface PicoUserConfigDefaults {
   readonly modelRouteId?: string;
-  readonly mode?: PicoInteractionMode;
+  readonly collaborationMode?: PicoCollaborationMode;
+  readonly orchestrationMode?: PicoOrchestrationMode;
+  readonly permissionMode?: PicoPermissionMode;
   readonly thinkingEffort?: string;
 }
 
@@ -241,7 +246,7 @@ export class UserConfigStore {
       } catch (error) {
         throw new Error(`用户配置 JSON 已损坏: ${this.filePath}`, { cause: error });
       }
-      return { config: parseUserConfig(parsed, this.filePath), revision: sha256(raw) };
+      return { config: parsePersistedUserConfig(parsed, this.filePath), revision: sha256(raw) };
     } finally {
       await handle?.close().catch(() => undefined);
     }
@@ -508,11 +513,24 @@ export class UserConfigStore {
 }
 
 export function parseUserConfig(value: unknown, configPath: string): PicoUserConfig {
+  return parseUserConfigValue(value, configPath, false);
+}
+
+/** Durable config.json decoder only. Live config/RPC writes use parseUserConfig above. */
+function parsePersistedUserConfig(value: unknown, configPath: string): PicoUserConfig {
+  return parseUserConfigValue(value, configPath, true);
+}
+
+function parseUserConfigValue(
+  value: unknown,
+  configPath: string,
+  allowLegacyModes: boolean,
+): PicoUserConfig {
   if (!isRecord(value)) throw configError(configPath, "root", "must be an object");
   if (value["version"] !== USER_CONFIG_VERSION) {
     throw configError(configPath, "version", `must equal ${USER_CONFIG_VERSION}`);
   }
-  const defaults = parseDefaults(value["defaults"], configPath);
+  const defaults = parseDefaults(value["defaults"], configPath, allowLegacyModes);
   return {
     version: USER_CONFIG_VERSION,
     ...(defaults !== undefined ? { defaults } : {}),
@@ -545,7 +563,11 @@ function parseUserModelProviderConfigs(
   );
 }
 
-function parseDefaults(value: unknown, configPath: string): PicoUserConfigDefaults | undefined {
+function parseDefaults(
+  value: unknown,
+  configPath: string,
+  allowLegacyModes: boolean,
+): PicoUserConfigDefaults | undefined {
   if (value === undefined) return undefined;
   if (!isRecord(value)) throw configError(configPath, "defaults", "must be an object");
   const modelRouteId = parseModelRouteId(
@@ -553,9 +575,55 @@ function parseDefaults(value: unknown, configPath: string): PicoUserConfigDefaul
     configPath,
     "defaults.modelRouteId",
   );
-  const mode = value["mode"];
-  if (mode !== undefined && !isRuntimeInteractionMode(mode)) {
-    throw configError(configPath, "defaults.mode", "must be default, plan, auto, or yolo");
+  const rawMode = value["mode"];
+  if (rawMode !== undefined && !allowLegacyModes) {
+    throw configError(
+      configPath,
+      "defaults.mode",
+      "is a persisted-file migration field; use collaborationMode and permissionMode",
+    );
+  }
+  const migratedMode = normalizePersistedInteractionMode(rawMode);
+  if (rawMode !== undefined && migratedMode === undefined) {
+    throw configError(
+      configPath,
+      "defaults.mode",
+      "must be ask, plan, auto, full-access, default, or yolo",
+    );
+  }
+  const collaborationMode = value["collaborationMode"];
+  if (
+    collaborationMode !== undefined &&
+    collaborationMode !== "agent" &&
+    collaborationMode !== "plan"
+  ) {
+    throw configError(configPath, "defaults.collaborationMode", "must be agent or plan");
+  }
+  const permissionMode = value["permissionMode"];
+  if (
+    permissionMode !== undefined &&
+    permissionMode !== "ask" &&
+    permissionMode !== "auto" &&
+    permissionMode !== "full-access"
+  ) {
+    throw configError(
+      configPath,
+      "defaults.permissionMode",
+      "must be ask, auto, or full-access",
+    );
+  }
+  const orchestrationMode = value["orchestrationMode"];
+  if (
+    orchestrationMode !== undefined &&
+    orchestrationMode !== "default" &&
+    orchestrationMode !== "graph" &&
+    orchestrationMode !== "swarm"
+  ) {
+    throw configError(
+      configPath,
+      "defaults.orchestrationMode",
+      "must be default, graph, or swarm",
+    );
   }
   const thinkingEffort = value["thinkingEffort"];
   if (
@@ -566,7 +634,17 @@ function parseDefaults(value: unknown, configPath: string): PicoUserConfigDefaul
   }
   return {
     ...(modelRouteId !== undefined ? { modelRouteId } : {}),
-    ...(mode !== undefined ? { mode } : {}),
+    ...(collaborationMode !== undefined
+      ? { collaborationMode }
+      : migratedMode !== undefined
+        ? { collaborationMode: migratedMode === "plan" ? "plan" : "agent" }
+        : {}),
+    ...(orchestrationMode !== undefined ? { orchestrationMode } : {}),
+    ...(permissionMode !== undefined
+      ? { permissionMode }
+      : migratedMode !== undefined
+        ? { permissionMode: migratedMode === "plan" ? "ask" : migratedMode }
+        : {}),
     ...(typeof thinkingEffort === "string" ? { thinkingEffort: thinkingEffort.trim() } : {}),
   };
 }
@@ -666,7 +744,16 @@ function isUnsupportedDirectorySync(error: unknown): boolean {
 }
 
 function isRuntimeInteractionMode(value: unknown): value is PicoInteractionMode {
-  return value === "default" || value === "plan" || value === "auto" || value === "yolo";
+  return value === "ask" || value === "plan" || value === "auto" || value === "full-access";
+}
+
+function normalizePersistedInteractionMode(
+  value: unknown,
+): PicoInteractionMode | undefined {
+  if (isRuntimeInteractionMode(value)) return value;
+  if (value === "default") return "ask";
+  if (value === "yolo") return "full-access";
+  return undefined;
 }
 
 function configError(configPath: string, field: string, detail: string): Error {

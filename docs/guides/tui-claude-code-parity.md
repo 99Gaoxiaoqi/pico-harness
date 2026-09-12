@@ -53,30 +53,30 @@ Pico 的 CLI session 以当前项目目录为边界：
 
 当前交互层支持这些内置命令：
 
-| 命令           | 说明                                                                                       |
-| -------------- | ------------------------------------------------------------------------------------------ |
-| `/status`      | 查看当前 session、cwd、provider、model route、thinking、mode 和 fork 来源。                |
-| `/mode`        | 查看或切换唯一交互模式：`default`、`plan`、`auto`、`yolo`；默认是 `yolo`。                 |
-| `/model`       | 从已配置/发现的 `providerID/modelID` 路由中切换完整 provider、端点、凭证来源和模型。       |
-| `/provider`    | 查看设备级 Provider，导入旧环境变量，设置用户默认模型或删除用户 Provider。                 |
-| `/thinking`    | 查看或切换思考强度：`off`、`low`、`medium`、`high`。别名：`/effort`。                      |
-| `/permissions` | `/mode` 的兼容别名；不再维护第二套权限状态。                                               |
-| `/help`        | 列出命令；`/help <command>` 查看单个命令用法。                                             |
-| `/clear`       | 清空本地 TUI transcript 视图。                                                             |
-| `/compact`     | 对当前 session 历史做摘要压缩；缺少模型配置时会说明不可用原因。                            |
-| `/init`        | 在当前项目创建轻量入口文件：`AGENTS.md` 和 `.pico/config.json`，不会覆盖已有 `AGENTS.md`。 |
-| `/doctor`      | 检查 cwd、有效配置来源、provider 凭证状态、model、兼容 `LLM_*` 变量和 Node 版本。          |
-| `/sessions`    | 打开当前项目的会话选择器；按标题、相对时间、消息数和 fork 来源识别会话。                   |
-| `/rename`      | 为当前 session 设置 1–120 字符的可读标题：`/rename <title>`。                              |
-| `/resume`      | 切换到指定 session；补全和选择器都优先展示会话标题。                                       |
-| `/fork`        | 从指定 session 创建对话分支；新分支会标记父会话，但仍共享同一个工作区文件。                |
-| `/snapshots`   | 诊断性列出当前 session 的文件历史数据。                                                    |
-| `/rewind`      | 打开用户消息选择器，按提示词/时间/文件变化恢复 code、conversation 或二者。                 |
-| `/agents`      | 列出内置 Agent 和项目 `.claude/agents/*.md`。                                              |
-| `/agent`       | 把任务委派给指定 Agent：`/agent <name> <task>`。                                           |
-| `/skills`      | 列出当前项目 `.claw/skills` 中可用 Skill。                                                 |
-| `/skill`       | 显式激活 Skill 并交给 Agent 执行：`/skill <name> [arguments]`。                            |
-| `/add-dir`     | 列出或添加当前会话可访问的工作目录：`/add-dir [directory]`。                               |
+| 命令           | 说明                                                                                                                 |
+| -------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `/status`      | 查看当前 session、cwd、provider、model route、thinking、mode 和 fork 来源。                                          |
+| `/mode`        | 查看或切换交互模式：请求批准（`ask`）、`plan`、帮我批准（`auto`）、完全访问权限（`full-access`）；默认权限是 `ask`。 |
+| `/model`       | 从已配置/发现的 `providerID/modelID` 路由中切换完整 provider、端点、凭证来源和模型。                                 |
+| `/provider`    | 查看设备级 Provider，导入旧环境变量，设置用户默认模型或删除用户 Provider。                                           |
+| `/thinking`    | 查看或切换思考强度：`off`、`low`、`medium`、`high`。别名：`/effort`。                                                |
+| `/permissions` | 查看或切换 `ask` / `auto` / `full-access` 权限模式；不接受 `plan`。                                                  |
+| `/help`        | 列出命令；`/help <command>` 查看单个命令用法。                                                                       |
+| `/clear`       | 清空本地 TUI transcript 视图。                                                                                       |
+| `/compact`     | 对当前 session 历史做摘要压缩；缺少模型配置时会说明不可用原因。                                                      |
+| `/init`        | 在当前项目创建轻量入口文件：`AGENTS.md` 和 `.pico/config.json`，不会覆盖已有 `AGENTS.md`。                           |
+| `/doctor`      | 检查 cwd、有效配置来源、provider 凭证状态、model、兼容 `LLM_*` 变量和 Node 版本。                                    |
+| `/sessions`    | 打开当前项目的会话选择器；按标题、相对时间、消息数和 fork 来源识别会话。                                             |
+| `/rename`      | 为当前 session 设置 1–120 字符的可读标题：`/rename <title>`。                                                        |
+| `/resume`      | 切换到指定 session；补全和选择器都优先展示会话标题。                                                                 |
+| `/fork`        | 从指定 session 创建对话分支；新分支会标记父会话，但仍共享同一个工作区文件。                                          |
+| `/snapshots`   | 诊断性列出当前 session 的文件历史数据。                                                                              |
+| `/rewind`      | 打开用户消息选择器，按提示词/时间/文件变化恢复 code、conversation 或二者。                                           |
+| `/agents`      | 列出内置 Agent 和项目 `.claude/agents/*.md`。                                                                        |
+| `/agent`       | 把任务委派给指定 Agent：`/agent <name> <task>`。                                                                     |
+| `/skills`      | 列出当前项目 `.claw/skills` 中可用 Skill。                                                                           |
+| `/skill`       | 显式激活 Skill 并交给 Agent 执行：`/skill <name> [arguments]`。                                                      |
+| `/add-dir`     | 列出或添加当前会话可访问的工作目录：`/add-dir [directory]`。                                                         |
 
 项目或用户自定义 Markdown 命令也会进入同一套 slash command registry。内置命令名优先保留，避免项目命令覆盖关键控制命令。
 
@@ -94,10 +94,11 @@ Skill 正文支持 Claude Code 风格参数：`$ARGUMENTS` 保留完整参数，
 
 主 Agent 的路径权限按 mode 处理：
 
-- `yolo`（默认）：按启动 Pico 的 OS 用户权限执行普通 Read/Write/Edit/Bash/网络操作，工作区外与敏感路径不弹日常审批。
-- `default`：审批框显示目标和 diff，可选择 `Yes`、`Yes, allow … during this session` 或 `No`。`Yes` 只授权当前调用；session 选项才会把目录加入当前会话并对普通编辑切换为 `auto`。
+- 请求批准（`ask`）：已声明的只读和有界内部编排工具直接执行；Shell、文件编辑、公网读取和开放世界工具请求审批。审批框显示目标、原因和 diff，可选择 `Yes`、`Yes, allow … during this session` 或 `No`。`Yes` 只授权当前调用；session 选项才会持久到当前会话范围。
+- 帮我批准（`auto`）：自动执行已声明的只读和有界内部编排工具、工作区内 `write_file` / `edit_file` 和内置公网只读工具；所有 Shell、MCP/未分类的开放世界工具、越界或敏感访问及 Hook `ask/defer` 请求审批。
+- 完全访问权限（`full-access`）：按启动 Pico 的 OS 用户权限直通普通 Read/Write/Edit/Bash/网络操作，不因 Hook `ask/defer` 进入人工审批；hardline 和直接 deny 仍可拒绝。
 - `plan`：只允许宿主能保守证明为只读的工具调用；审批不能放行 Bash、MCP 或 `delegate_task` 可写/递归委派。需要只读子代理时使用 `spawn_subagent`。
-- hardline 命令和显式 Hook deny 在任何 mode 下都不可通过审批绕过。hardline 只分析可见文本和已建模入口，不把 YOLO 变成任意 executable 的 OS 沙箱。
+- hardline 命令和显式 Hook deny 在任何 mode 下都不可通过审批绕过。hardline 只分析可见文本和已建模入口，不把完全访问权限（`full-access`）变成任意 executable 的 OS 沙箱。
 
 也可以在执行前手动加入目录：
 

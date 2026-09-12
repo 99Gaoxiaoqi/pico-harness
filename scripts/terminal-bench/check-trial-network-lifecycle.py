@@ -918,7 +918,7 @@ async def assert_runtime_retry_contract(adapter: Any) -> None:
                 )
                 outcome = self.outcomes[self.launch_count - 1]
                 result = {
-                    "schemaVersion": 1,
+                    "schemaVersion": 2,
                     "requestId": request["requestId"],
                     "status": outcome["status"],
                     "usage": outcome["usage"],

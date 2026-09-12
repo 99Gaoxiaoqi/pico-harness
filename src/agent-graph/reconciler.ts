@@ -213,20 +213,24 @@ export class AgentGraphReconciler {
     intentsById: ReadonlyMap<string, AgentGraphActivationIntent>,
     pass: MutablePassResult,
   ): Promise<void> {
+    const graphFinished = state.graph.admissionPhase === "sealed";
     await Promise.all(
       claims.map(async (claim) => {
         if (claim.state === "cancelled") return;
         const intent = intentsById.get(claim.intentId);
-        if (!intent || !isIntentStopped(state, intent)) return;
-        const stop = [...state.stops]
-          .reverse()
-          .find((candidate) =>
-            candidate.target.kind === "intent"
-              ? candidate.target.intentId === intent.intentId
-              : candidate.target.operatorId === intent.operatorId &&
-                candidate.target.generation === intent.operatorGeneration,
-          );
-        const reason = stop?.reason ?? "Stopped by Graph schedule";
+        if (!graphFinished && (!intent || !isIntentStopped(state, intent))) return;
+        const stop = intent
+          ? [...state.stops]
+              .reverse()
+              .find((candidate) =>
+                candidate.target.kind === "intent"
+                  ? candidate.target.intentId === intent.intentId
+                  : candidate.target.operatorId === intent.operatorId &&
+                    candidate.target.generation === intent.operatorGeneration,
+              )
+          : undefined;
+        const reason =
+          stop?.reason ?? (graphFinished ? "Graph finished" : "Stopped by Graph schedule");
         try {
           if (claim.state === "executing") {
             await this.runtime.stopActivation({ claim, reason });
@@ -247,12 +251,14 @@ export class AgentGraphReconciler {
     const currentClaims = this.store.listActivationClaims(state.graph.graphId);
     for (const provision of provisions) {
       if (provision.state === "stopped") continue;
-      const stopped = state.stops.some(
-        (stop) =>
-          stop.target.kind === "operator" &&
-          stop.target.operatorId === provision.operatorId &&
-          stop.target.generation === provision.operatorGeneration,
-      );
+      const stopped =
+        graphFinished ||
+        state.stops.some(
+          (stop) =>
+            stop.target.kind === "operator" &&
+            stop.target.operatorId === provision.operatorId &&
+            stop.target.generation === provision.operatorGeneration,
+        );
       if (!stopped) continue;
       const hasActiveClaim = currentClaims.some(
         (claim) =>

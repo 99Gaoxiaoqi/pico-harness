@@ -16,6 +16,7 @@ import type {
   ToolExecutionContext,
   ToolExecutionStep,
   ToolFileSideEffects,
+  ToolPermissionCategory,
   ToolRecoveryPolicy,
 } from "./registry.js";
 import {
@@ -305,6 +306,11 @@ export class ToolRegistry implements Registry {
   /** 判断工具是否只读 (默认 false,保守视为写操作) */
   isReadOnlyTool(name: string): boolean {
     return this.tools.get(name)?.readOnly ?? false;
+  }
+
+  getPermissionCategory(name: string): ToolPermissionCategory {
+    const tool = this.tools.get(name);
+    return tool?.permissionCategory ?? (tool?.readOnly ? "read" : "custom_tool");
   }
 
   getFileSideEffects(call: ToolCall): ToolFileSideEffects {

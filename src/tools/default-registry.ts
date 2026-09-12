@@ -33,22 +33,39 @@ import type { AskUserHandler } from "./ask-user.js";
 import { WorkspaceRoots, buildWorkspaceBoundaryMiddleware } from "./workspace-roots.js";
 import type { CodeIntelligenceService } from "../code-intelligence/types.js";
 import { createCodeIntelligenceTools } from "./code-intelligence.js";
-import type { YoloSandboxConfig } from "../safety/yolo-sandbox.js";
+import type { WorkspaceSandboxConfig } from "../safety/workspace-sandbox.js";
 import type { SandboxProfile } from "../safety/process-sandbox/index.js";
 import { ExploreRepoTool } from "./explore-repo.js";
 import { createSessionTaskTools, type BoundSessionTaskAuthority } from "./session-tasks.js";
+import {
+  RequestSandboxBoundaryTool,
+  type RequestSandboxBoundaryHandler,
+} from "./request-sandbox-boundary.js";
+
+export interface DefaultProcessSandboxDescriptor {
+  readonly profile: SandboxProfile;
+  readonly config?: Partial<WorkspaceSandboxConfig>;
+  readonly scratchRoot?: string;
+  readonly generation?: number;
+  /** True when deny/protected-metadata rules cannot be represented by the OS process policy. */
+  readonly hasUnsupportedDenyEntries?: boolean;
+  readonly readRoots?: readonly string[];
+  readonly writeRoots?: readonly string[];
+  readonly readFiles?: readonly string[];
+  readonly writeFiles?: readonly string[];
+}
 
 export interface DefaultToolRegistryOptions {
   /** Read/Write/Edit/Glob/Grep 与请求边界共享的工作区根集合。 */
   workspaceRoots?: WorkspaceRoots;
-  /** Host 将工作区 ask/yolo 与审批合并处理时，关闭这里的严格前置拒绝。 */
+  /** Host 将工作区 ask/full-access 与审批合并处理时，关闭这里的严格前置拒绝。 */
   deferWorkspaceBoundary?: boolean;
   /** 仅可信宿主注入的进程沙箱策略；未传表示 danger-full-access。 */
-  processSandbox?: {
-    profile: SandboxProfile;
-    config?: Partial<YoloSandboxConfig>;
-    scratchRoot?: string;
-    generation?: number;
+  processSandbox?: DefaultProcessSandboxDescriptor & {
+    /** Resolve the latest durable Session boundary for each Bash invocation. */
+    resolveSandbox?: () => DefaultProcessSandboxDescriptor;
+    /** Consumes a Host-approved one-shot expansion or reads a Session expansion. */
+    consumeNetworkAuthorization?: (toolCallId: string | undefined) => boolean;
   };
   backgroundManager?: BackgroundManager;
   /** Session-scoped durable task authority shared by model tools and prompt injection. */
@@ -88,7 +105,9 @@ export interface DefaultToolRegistryOptions {
   onToolGroupLoaded?: (groupId: string, toolNames: readonly string[]) => void;
   /** 仅在宿主提供结构化交互 UI 时注册 ask_user，避免无 UI 的运行永久等待。 */
   askUserHandler?: AskUserHandler;
-  /** Plan/只读子代理可动态隐藏凭据文件；YOLO 主会话保持完整读权。 */
+  /** 只有宿主持有完整边界审批与应用事务时才暴露请求工具。 */
+  requestSandboxBoundaryHandler?: RequestSandboxBoundaryHandler;
+  /** Plan/只读子代理可动态隐藏凭据文件；`full-access` 主会话保持完整读权。 */
   excludeSensitiveGrepFiles?: boolean | ((path: string | undefined) => boolean);
   /** 宿主启动后注入的 LSP / Repo Map 统一服务。 */
   codeIntelligence?: CodeIntelligenceService;
@@ -122,6 +141,7 @@ export function buildDefaultToolRegistry(
     todoStore,
     toolDisclosure,
     askUserHandler,
+    requestSandboxBoundaryHandler,
     excludeSensitiveGrepFiles,
     codeIntelligence,
     activateSkillHooks,
@@ -154,7 +174,28 @@ export function buildDefaultToolRegistry(
               ...(processSandbox.generation !== undefined
                 ? { generation: processSandbox.generation }
                 : {}),
+              ...(processSandbox.hasUnsupportedDenyEntries !== undefined
+                ? { hasUnsupportedDenyEntries: processSandbox.hasUnsupportedDenyEntries }
+                : {}),
+              ...(processSandbox.readRoots ? { readRoots: processSandbox.readRoots } : {}),
+              ...(processSandbox.writeRoots ? { writeRoots: processSandbox.writeRoots } : {}),
+              ...(processSandbox.readFiles ? { readFiles: processSandbox.readFiles } : {}),
+              ...(processSandbox.writeFiles ? { writeFiles: processSandbox.writeFiles } : {}),
+              ...(processSandbox.consumeNetworkAuthorization
+                ? { consumeNetworkAuthorization: processSandbox.consumeNetworkAuthorization }
+                : {}),
             },
+          }
+        : {}),
+      ...(processSandbox?.resolveSandbox
+        ? {
+            resolveSandbox: () => ({
+              workspaceRoots: roots,
+              ...processSandbox.resolveSandbox!(),
+              ...(processSandbox.consumeNetworkAuthorization
+                ? { consumeNetworkAuthorization: processSandbox.consumeNetworkAuthorization }
+                : {}),
+            }),
           }
         : {}),
       ...(env ? { env } : {}),
@@ -193,8 +234,23 @@ export function buildDefaultToolRegistry(
               ...(processSandbox.generation !== undefined
                 ? { generation: processSandbox.generation }
                 : {}),
+              ...(processSandbox.hasUnsupportedDenyEntries !== undefined
+                ? { hasUnsupportedDenyEntries: processSandbox.hasUnsupportedDenyEntries }
+                : {}),
+              ...(processSandbox.readRoots ? { readRoots: processSandbox.readRoots } : {}),
+              ...(processSandbox.writeRoots ? { writeRoots: processSandbox.writeRoots } : {}),
+              ...(processSandbox.readFiles ? { readFiles: processSandbox.readFiles } : {}),
+              ...(processSandbox.writeFiles ? { writeFiles: processSandbox.writeFiles } : {}),
               ...(env ? { env } : {}),
             },
+          }
+        : {}),
+      ...(processSandbox?.resolveSandbox
+        ? {
+            resolveSandbox: () => ({
+              ...processSandbox.resolveSandbox!(),
+              ...(env ? { env } : {}),
+            }),
           }
         : {}),
     }),
@@ -223,6 +279,9 @@ export function buildDefaultToolRegistry(
     registry.register(new UpdateGoalTool(goalManager));
   }
   if (askUserHandler) registerAskUserTool(registry, askUserHandler);
+  if (requestSandboxBoundaryHandler) {
+    registry.register(new RequestSandboxBoundaryTool(requestSandboxBoundaryHandler));
+  }
   registry.register(new FetchURLTool());
   registry.register(new WebSearchTool(env));
   if (codeIntelligence) {

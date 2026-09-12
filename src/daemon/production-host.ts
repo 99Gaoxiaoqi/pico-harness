@@ -9,10 +9,14 @@ import {
   createConfiguredAgentGraphOperatorProfileCatalog,
   type MutableAgentGraphOperatorProfileCatalog,
 } from "../agent-graph/operator-profile-catalog.js";
+import { bindAgentGraphOperatorExecutionBoundary } from "../agent-graph/execution-boundary.js";
 import type { AgentSwarmAuthorizationSource } from "../engine/session-runtime-event.js";
 import { SqliteAgentGraphControlStoreAdapter } from "../agent-graph/sqlite-control-store-adapter.js";
 import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import type { ApprovalNotice, ApprovalNotifier } from "../approval/manager.js";
+import { bashCommandFromArgs } from "../approval/bash-paths.js";
 import { assertValidAgentGraphOperatorProfileSnapshot } from "../agent-graph/operator-profile-catalog.js";
 import { createCliSessionId, listCliSessionCatalogEntries } from "../cli/session-resolver.js";
 import { globalSessionManager } from "../engine/session.js";
@@ -74,9 +78,17 @@ import { coordinateReasoningLevel } from "../provider/reasoning-capability.js";
 import {
   BACKGROUND_HARDLINE_VERSION,
   BACKGROUND_HOOK_VERSION,
-  prepareBackgroundYoloPolicy,
-} from "../safety/background-yolo-policy.js";
+  prepareBackgroundAutonomousPolicy,
+} from "../safety/background-autonomous-policy.js";
 import { automationDeniedTools } from "../safety/automation-tool-policy.js";
+import {
+  assessSandboxBoundaryExpansion,
+  type ExecutionBoundary,
+  type SandboxBoundaryExpansion,
+} from "../safety/permission-profile.js";
+import { hasExplicitNetworkIntent } from "../safety/workspace-sandbox.js";
+import { canonicalizeSandboxBoundaryExpansion } from "../safety/sandbox-boundary-path.js";
+import { workspaceAccessesFromCall } from "../tools/workspace-roots.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import type { CronJobRecord, CronRunRecord } from "../tasks/runtime-types.js";
 import { createCronWorkspaceRuntimeFactory } from "./cron-workspace-runtime.js";
@@ -249,7 +261,7 @@ export function createProductionRuntimeServices(
     job: CronJobRecord,
   ): Promise<{ allowed: boolean; reason?: string }> => {
     try {
-      await prepareBackgroundYoloPolicy({
+      await prepareBackgroundAutonomousPolicy({
         workDir: job.workspacePath,
         policy: job.policySnapshot,
         trustStore,
@@ -363,9 +375,27 @@ export function createProductionRuntimeServices(
       if (!input.session.runtimeEventStore) {
         throw new Error(`Production Graph requires durable Session: ${targetSessionId}`);
       }
-      const operatorProfile =
-        input.binding.kind === "operator" ? input.binding.profileSnapshot : undefined;
+      const operatorBinding = input.binding.kind === "operator" ? input.binding : undefined;
+      const operatorProfile = operatorBinding?.profileSnapshot;
       if (operatorProfile) assertValidAgentGraphOperatorProfileSnapshot(operatorProfile);
+      const operatorExecutionBoundary = operatorBinding
+        ? await bindAgentGraphOperatorExecutionBoundary({
+            sessionManager: globalSessionManager,
+            rootSessionId: operatorBinding.rootSessionId,
+            childSessionId: input.session.id,
+            parentWorkDir: workspacePath,
+            childWorkDir: input.session.workDir,
+            workspacePolicy: operatorBinding.workspacePolicy.kind,
+            sessionOptions: {
+              persistence: true,
+              picoHome,
+              runtimeStorageRoot: input.session.runtimeStorageRoot,
+              runtimePort: createEngineRuntimePort(),
+            },
+          })
+        : undefined;
+      const operatorExecutionPermissionMode =
+        operatorExecutionBoundary?.child.kind === "bypass" ? "full-access" : "ask";
       const persistedSettings = (await input.session.readHydrationSnapshot()).runtime.settings;
       const route = await resolveDesktopModelRoute(
         runWorkDir,
@@ -388,7 +418,9 @@ export function createProductionRuntimeServices(
               return context ? { ...context, rootModelRouteId: route.modelRouteId } : undefined;
             },
           }
-        : input.binding;
+        : operatorBinding
+          ? { ...operatorBinding, executionPermissionMode: operatorExecutionPermissionMode }
+          : input.binding;
       if (graphBinding.kind === "root") await refreshGraphOperatorCatalog(workspacePath);
       const rootContext = graphBinding.kind === "root" ? graphBinding.getRootContext() : undefined;
       if (graphBinding.kind === "root" && !rootContext) {
@@ -477,7 +509,7 @@ export function createProductionRuntimeServices(
           model: route.model,
           modelRouteId: route.modelRouteId,
           modelCapabilities: route.capabilities,
-          interactionMode: "default",
+          interactionMode: operatorBinding ? operatorExecutionPermissionMode : "ask",
           orchestrationMode: input.orchestrationMode,
           agentSwarmAuthorization: input.prestartedRun.agentSwarmAuthorization ?? "none",
           ...(reasoningLevel !== undefined ? { thinkingEffort: reasoningLevel } : {}),
@@ -494,7 +526,17 @@ export function createProductionRuntimeServices(
           reporter: new SilentReporter(),
           modelRouter: route.modelRouter,
           configuredSubagentCatalog,
-          approvalNotifier: broker.notifyApproval,
+          approvalNotifier:
+            operatorExecutionBoundary?.child.kind === "managed"
+              ? boundedAgentGraphOperatorApprovalNotifier({
+                  boundary: operatorExecutionBoundary.child,
+                  workDir: runWorkDir,
+                  manager: broker.approvalManager,
+                  notify: broker.notifyApproval,
+                })
+              : operatorExecutionBoundary?.child.kind === "bypass"
+                ? automaticallyApproveFullAccessAgentGraphOperator(broker.approvalManager)
+                : broker.notifyApproval,
           approvalManager: broker.approvalManager,
           askUserHandler: broker.askUserHandler,
           waitAtSafeBoundary: context.waitAtSafeBoundary,
@@ -879,7 +921,7 @@ export function createProductionRuntimeServices(
             profile:
               persistedSettings?.collaborationMode === "plan" || persistedSettings?.mode === "plan"
                 ? "read-only"
-                : persistedSettings?.permissionMode === "yolo"
+                : persistedSettings?.permissionMode === "full-access"
                   ? "danger-full-access"
                   : "workspace-write",
             config: projectConfig.sandbox,
@@ -1348,7 +1390,7 @@ export function createProductionRuntimeServices(
         // The current desktop protocol has no tool/network-policy fields. Keep the
         // first release fail-closed: model-only jobs are real, tools stay unavailable.
         policySnapshot: {
-          mode: "yolo",
+          mode: "full-access",
           backgroundEnabled: true,
           trustedWorkspace: true,
           toolNetworkPolicy: "disabled",
@@ -2109,6 +2151,213 @@ function requireAgentGraphWorkspaceHost(
   const host = hosts.get(workspacePath);
   if (!host) throw new Error(`Graph workspace host is unavailable: ${workspacePath}`);
   return host;
+}
+
+function boundedAgentGraphOperatorApprovalNotifier(input: {
+  readonly boundary: ExecutionBoundary;
+  readonly workDir: string;
+  readonly manager: { resolveApproval(taskId: string, allowed: boolean, reason: string): boolean };
+  readonly notify: ApprovalNotifier;
+}): ApprovalNotifier {
+  return (notice) => {
+    void agentGraphOperatorApprovalWithinBoundary(notice, input.boundary, input.workDir).then(
+      (allowed) => {
+        if (allowed) input.notify(notice);
+        else rejectAgentGraphOperatorApproval(input.manager, notice.taskId);
+      },
+      () => rejectAgentGraphOperatorApproval(input.manager, notice.taskId),
+    );
+  };
+}
+
+function automaticallyApproveFullAccessAgentGraphOperator(manager: {
+  resolveApproval(taskId: string, allowed: boolean, reason: string): boolean;
+}): ApprovalNotifier {
+  return (notice) => {
+    manager.resolveApproval(
+      notice.taskId,
+      true,
+      "Graph Operator inherited full-access from its parent Session.",
+    );
+  };
+}
+
+function rejectAgentGraphOperatorApproval(
+  manager: { resolveApproval(taskId: string, allowed: boolean, reason: string): boolean },
+  taskId: string,
+): void {
+  manager.resolveApproval(
+    taskId,
+    false,
+    "Graph Operator 请求超出父 Session execution boundary，已安全拒绝。",
+  );
+}
+
+async function agentGraphOperatorApprovalWithinBoundary(
+  notice: ApprovalNotice,
+  boundary: ExecutionBoundary,
+  workDir: string,
+): Promise<boolean> {
+  if (boundary.kind !== "managed") return false;
+  const command = notice.toolName === "bash" ? bashCommandFromArgs(notice.args) : undefined;
+  const requestsNetwork =
+    notice.sessionScope?.type === "network" ||
+    notice.toolName === "fetch_url" ||
+    notice.toolName === "web_search" ||
+    notice.toolName.startsWith("mcp__") ||
+    (command !== undefined && hasExplicitNetworkIntent(command));
+  if (requestsNetwork && boundary.profile.network.kind !== "enabled") return false;
+
+  const scope = notice.sessionScope;
+  if (!scope) return false;
+  if (scope.type === "network") {
+    if (boundary.profile.network.kind !== "enabled") return false;
+    if (notice.toolName === "fetch_url" || notice.toolName === "web_search") return true;
+    if (notice.toolName !== "bash" || command === undefined || !hasExplicitNetworkIntent(command)) {
+      return false;
+    }
+    return approvalExpansionContained(boundary, workDir, [
+      { path: workDir, access: "write", scope: "subtree" },
+      ...workspaceAccessesFromCall({
+        id: notice.providerCallId,
+        name: notice.toolName,
+        arguments: notice.args,
+      }).map((access) => ({
+        path: resolve(workDir, access.path),
+        access: access.access,
+        scope: "exact" as const,
+      })),
+    ]);
+  }
+  if (scope.type === "directories") {
+    const accesses = workspaceAccessesFromCall({
+      id: notice.providerCallId,
+      name: notice.toolName,
+      arguments: notice.args,
+    });
+    const requiredAccess = scope.access === "edit" ? "write" : "read";
+    if (accesses.length === 0 || accesses.some((access) => access.access !== requiredAccess)) {
+      return false;
+    }
+    return (
+      (await approvalExpansionContained(
+        boundary,
+        workDir,
+        scope.directories.map((path) => ({
+          path: resolve(workDir, path),
+          access: requiredAccess,
+          scope: "subtree" as const,
+        })),
+      )) &&
+      (await approvalExpansionContained(
+        boundary,
+        workDir,
+        accesses.map((access) => ({
+          path: resolve(workDir, access.path),
+          access: access.access,
+          scope: "exact" as const,
+        })),
+      ))
+    );
+  }
+  if (scope.type === "file") {
+    const accesses = workspaceAccessesFromCall({
+      id: notice.providerCallId,
+      name: notice.toolName,
+      arguments: notice.args,
+    });
+    const requiredAccess = scope.access === "edit" ? "write" : "read";
+    if (
+      accesses.length !== 1 ||
+      accesses[0]!.access !== requiredAccess ||
+      resolve(workDir, accesses[0]!.path) !== resolve(workDir, scope.path)
+    ) {
+      return false;
+    }
+    return approvalExpansionContained(boundary, workDir, [
+      {
+        path: resolve(workDir, accesses[0]!.path),
+        access: accesses[0]!.access,
+        scope: "exact",
+      },
+    ]);
+  }
+  if (scope.type === "all-edits") {
+    if (notice.toolName !== "write_file" && notice.toolName !== "edit_file") return false;
+    const accesses = workspaceAccessesFromCall({
+      id: notice.providerCallId,
+      name: notice.toolName,
+      arguments: notice.args,
+    });
+    return (
+      accesses.length > 0 &&
+      (await approvalExpansionContained(boundary, workDir, [
+        { path: workDir, access: "write", scope: "subtree" },
+      ])) &&
+      (await approvalExpansionContained(
+        boundary,
+        workDir,
+        accesses.map((access) => ({
+          path: resolve(workDir, access.path),
+          access: access.access,
+          scope: "exact" as const,
+        })),
+      ))
+    );
+  }
+  if (scope.type === "bash-command") {
+    if (notice.toolName !== "bash" || command === undefined || command.length === 0) return false;
+    if (
+      (scope.match === "exact" && scope.command !== command) ||
+      (scope.match === "prefix" && !command.startsWith(scope.command))
+    ) {
+      return false;
+    }
+    const accesses = workspaceAccessesFromCall({
+      id: notice.providerCallId,
+      name: notice.toolName,
+      arguments: notice.args,
+    });
+    return (
+      (await approvalExpansionContained(boundary, workDir, [
+        { path: workDir, access: "write", scope: "subtree" },
+      ])) &&
+      (await approvalExpansionContained(
+        boundary,
+        workDir,
+        accesses.map((access) => ({
+          path: resolve(workDir, access.path),
+          access: access.access,
+          scope: "exact" as const,
+        })),
+      ))
+    );
+  }
+  if (scope.type === "tool") {
+    return (
+      (notice.toolName === "fetch_url" || notice.toolName === "web_search") &&
+      scope.toolName === notice.toolName &&
+      boundary.profile.network.kind === "enabled"
+    );
+  }
+  return false;
+}
+
+async function approvalExpansionContained(
+  boundary: Extract<ExecutionBoundary, { readonly kind: "managed" }>,
+  workDir: string,
+  entries: NonNullable<SandboxBoundaryExpansion["filesystem"]>["entries"],
+): Promise<boolean> {
+  if (entries.length === 0) return true;
+  const expansion = await canonicalizeSandboxBoundaryExpansion({ filesystem: { entries } });
+  return (
+    assessSandboxBoundaryExpansion(boundary.profile, expansion, {
+      root: workDir,
+      workspaceRoots: [workDir],
+      tmpdir: tmpdir(),
+      slashTmp: "/tmp",
+    }).outcome === "noop"
+  );
 }
 
 function rootAgentGraphBinding(

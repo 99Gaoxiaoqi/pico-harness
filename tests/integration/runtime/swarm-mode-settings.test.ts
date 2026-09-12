@@ -127,7 +127,7 @@ test("Swarm TUI commands send one-run overrides without changing persistent Grap
   await fresh.sendText("first message");
   assert.deepEqual(
     requests.filter((entry) => entry.method === "session.send").at(-1)?.params.initialSettings,
-    { collaborationMode: "agent", permissionMode: "default", orchestrationMode: "swarm" },
+    { collaborationMode: "agent", permissionMode: "ask", orchestrationMode: "swarm" },
   );
   await fresh.dispose();
   await runtime.dispose();

@@ -162,7 +162,15 @@ test(
       assert.equal(allowed.code, 0, allowed.stderr);
       assert.equal(allowed.stdout, "ok");
     }
-    const denied = await runNode(fixture, "read-only", clientScript);
+    const denied = await runNode(
+      fixture,
+      "read-only",
+      clientScript,
+      fixture.workspace,
+      process.env,
+      [],
+      "deny",
+    );
     assert.notEqual(denied.code, 0);
 
     const listener = await runNode(
@@ -178,6 +186,10 @@ test(
       fixture,
       "read-only",
       'const s=require("node:net").createServer();s.on("error",()=>process.exit(24));s.listen(0,"127.0.0.1",()=>process.exit(0));',
+      fixture.workspace,
+      process.env,
+      [],
+      "deny",
     );
     if (process.platform === "linux" || process.platform === "win32") {
       // Bubblewrap denies host/external access with a fresh network namespace. Binding an
@@ -526,13 +538,14 @@ async function runNode(
   cwd = fixture.workspace,
   env: NodeJS.ProcessEnv = process.env,
   readRoots: readonly string[] = [],
+  network: "allow" | "deny" = "allow",
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   const policy = createSandboxPolicy({
     profile,
     workspaceRoots: [fixture.workspace],
     scratchRoot: fixture.scratch,
     readRoots,
-    config: { network: "allow" },
+    config: { network },
   });
   const request: ManagedSpawnRequest = {
     command: process.execPath,

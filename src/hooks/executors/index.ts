@@ -4,4 +4,6 @@ export {
   type HookAgentVerifier,
   type HookAgentVerifierRequest,
   type HookHandlerExecutorOptions,
+  type HookHostNetworkGate,
+  type HookHostNetworkRequest,
 } from "./executor.js";

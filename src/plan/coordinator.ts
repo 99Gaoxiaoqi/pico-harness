@@ -156,7 +156,7 @@ export class PlanCoordinator {
           permissionMode:
             input.settings.permissionMode ??
             input.settings.prePlanMode ??
-            (input.settings.mode === "plan" ? "yolo" : input.settings.mode),
+            (input.settings.mode === "plan" ? "ask" : input.settings.mode),
         },
       });
       if (!patch) throw new PlanConflictError("Session settings are invalid");
@@ -313,7 +313,7 @@ export class PlanCoordinator {
           permissionMode:
             input.settings.permissionMode ??
             input.settings.prePlanMode ??
-            (input.settings.mode === "plan" ? "yolo" : input.settings.mode),
+            (input.settings.mode === "plan" ? "ask" : input.settings.mode),
         },
       });
       if (!patch) throw new PlanConflictError("Session settings are invalid");
@@ -375,7 +375,7 @@ export class PlanCoordinator {
           permissionMode:
             input.settings.permissionMode ??
             input.settings.prePlanMode ??
-            (input.settings.mode === "plan" ? "yolo" : input.settings.mode),
+            (input.settings.mode === "plan" ? "ask" : input.settings.mode),
         },
       });
       if (!patch) throw new PlanConflictError("Session settings are invalid");

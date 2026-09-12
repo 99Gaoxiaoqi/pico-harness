@@ -47,7 +47,7 @@ import { LeaseConflictError, OwnerLease } from "../storage/owner-lease.js";
 import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
 import { ensureWorkspaceTrusted, WorkspaceTrustStore } from "../security/workspace-trust.js";
 
-const SCHEMA_VERSION = 1 as const;
+const SCHEMA_VERSION = 2 as const;
 const MAX_INPUT_BYTES = 2 * 1024 * 1024;
 const MAX_PROMPT_LENGTH = 1024 * 1024;
 const MAX_SHUTDOWN_GRACE_MS = 60_000;
@@ -93,6 +93,7 @@ const REQUEST_FIELDS = new Set([
   "providerTimeoutMs",
   "providerAdmissionDeadlineMs",
   "thinkingEffort",
+  "collaborationMode",
   "permissionMode",
   "policyDenialMode",
   "allowedTools",
@@ -110,13 +111,15 @@ const REQUIRED_REQUEST_FIELDS = [
   "sessionId",
   "prompt",
   "modelRouteId",
+  "collaborationMode",
   "permissionMode",
   "allowedTools",
   "timeoutMs",
   "shutdownGraceMs",
   "trace",
 ] as const;
-const INTERACTION_MODES = new Set<SessionSettings["mode"]>(["default", "auto", "plan", "yolo"]);
+const COLLABORATION_MODES = new Set<SessionSettings["collaborationMode"]>(["agent", "plan"]);
+const PERMISSION_MODES = new Set<SessionSettings["permissionMode"]>(["ask", "auto", "full-access"]);
 const EMPTY_USAGE: RunAgentUsage = Object.freeze({
   promptTokens: 0,
   completionTokens: 0,
@@ -141,7 +144,7 @@ export type HeadlessOneShotStatus =
   | "policy_blocked"
   | "invalid_request";
 
-export interface HeadlessOneShotRequestV1 {
+export interface HeadlessOneShotRequestV2 {
   readonly schemaVersion: typeof SCHEMA_VERSION;
   readonly requestId: string;
   readonly workspacePath: string;
@@ -155,7 +158,8 @@ export interface HeadlessOneShotRequestV1 {
   /** Adapter-signed wall-clock cutoff for beginning a provider HTTP request. */
   readonly providerAdmissionDeadlineMs?: number;
   readonly thinkingEffort?: string;
-  readonly permissionMode: SessionSettings["mode"];
+  readonly collaborationMode: NonNullable<SessionSettings["collaborationMode"]>;
+  readonly permissionMode: SessionSettings["permissionMode"];
   readonly policyDenialMode?: "terminal" | "incident";
   readonly allowedTools: readonly string[];
   readonly maxTurns?: number;
@@ -168,7 +172,8 @@ export interface HeadlessOneShotRequestV1 {
 export interface HeadlessOneShotEffectivePolicy {
   readonly modelRouteId: string | null;
   readonly thinkingEffort: string | null;
-  readonly permissionMode: SessionSettings["mode"] | null;
+  readonly collaborationMode: NonNullable<SessionSettings["collaborationMode"]> | null;
+  readonly permissionMode: SessionSettings["permissionMode"] | null;
   readonly allowedTools: readonly string[];
 }
 
@@ -192,7 +197,7 @@ export interface HeadlessOneShotPolicyDenialSummary {
   readonly last: HeadlessOneShotPolicyDenial;
 }
 
-export interface HeadlessOneShotResultV1 {
+export interface HeadlessOneShotResultV2 {
   readonly schemaVersion: typeof SCHEMA_VERSION;
   readonly requestId: string | null;
   readonly status: HeadlessOneShotStatus;
@@ -213,7 +218,7 @@ export interface HeadlessOneShotResultV1 {
 }
 
 export interface HeadlessOneShotOutcome {
-  readonly result: HeadlessOneShotResultV1;
+  readonly result: HeadlessOneShotResultV2;
   readonly exitCode: 0 | 2 | 3 | 4 | 124 | 130 | 143;
   /** False means the grace deadline elapsed before Runtime cleanup settled. */
   readonly shutdownConfirmed: boolean;
@@ -268,7 +273,7 @@ class ExclusiveCaseLocks {
   private constructor(private leases: OwnerLease[]) {}
 
   static async acquire(
-    request: HeadlessOneShotRequestV1,
+    request: HeadlessOneShotRequestV2,
     workDir: string,
     picoHome: string,
     root = join(tmpdir(), "pico-headless-one-shot-locks"),
@@ -369,7 +374,7 @@ export async function runHeadlessOneShotJson(
     return invalidOutcome(undefined, requestError, elapsed(startedAt, dependencies.now));
   }
 
-  let request: HeadlessOneShotRequestV1;
+  let request: HeadlessOneShotRequestV2;
   try {
     request = parseRequest(parsed);
   } catch (error) {
@@ -391,13 +396,14 @@ export function terminalBenchAgentControlledProxyCapability(
 }
 
 async function runValidatedRequest(
-  request: HeadlessOneShotRequestV1,
+  request: HeadlessOneShotRequestV2,
   startedAt: number,
   dependencies: HeadlessOneShotDependencies,
 ): Promise<HeadlessOneShotOutcome> {
   let effective: HeadlessOneShotEffectivePolicy = {
     modelRouteId: request.modelRouteId,
     thinkingEffort: request.thinkingEffort ?? null,
+    collaborationMode: request.collaborationMode,
     permissionMode: request.permissionMode,
     allowedTools: request.allowedTools,
   };
@@ -483,6 +489,7 @@ async function runValidatedRequest(
     effective = {
       modelRouteId: selected.route.id,
       thinkingEffort: effectiveThinking ?? null,
+      collaborationMode: request.collaborationMode,
       permissionMode: request.permissionMode,
       allowedTools: request.allowedTools,
     };
@@ -563,10 +570,11 @@ async function runValidatedRequest(
         model: selected.config.model,
         modelRouteId: selected.route.id,
         modelCapabilities: selected.route.capabilities,
-        interactionMode: request.permissionMode,
+        collaborationMode: request.collaborationMode,
+        permissionMode: request.permissionMode,
         ...(effectiveThinking !== undefined ? { thinkingEffort: effectiveThinking } : {}),
         allowedTools:
-          request.permissionMode === "plan"
+          request.collaborationMode === "plan"
             ? [...new Set([...request.allowedTools, "submit_plan"])]
             : request.allowedTools,
         trace: request.trace,
@@ -739,7 +747,7 @@ async function runValidatedRequest(
 }
 
 async function loadTrustedModelRuntime(
-  request: HeadlessOneShotRequestV1,
+  request: HeadlessOneShotRequestV2,
   workDir: string,
   picoHome: string,
   dependencies: HeadlessOneShotDependencies,
@@ -767,7 +775,8 @@ async function loadTrustedModelRuntime(
       version: 1,
       defaults: Object.freeze({
         modelRouteId: request.modelRouteId,
-        mode: request.permissionMode,
+        collaborationMode: request.collaborationMode,
+        permissionMode: request.permissionMode,
         ...(request.thinkingEffort ? { thinkingEffort: request.thinkingEffort } : {}),
       }),
       providers: Object.freeze({ [routeParts.providerId]: selectedProvider }),
@@ -934,7 +943,7 @@ async function racePreflight<T>(
   return first.value;
 }
 
-function parseRequest(value: unknown): HeadlessOneShotRequestV1 {
+function parseRequest(value: unknown): HeadlessOneShotRequestV2 {
   if (!isRecord(value)) {
     throw new HeadlessRequestError("INVALID_REQUEST", "The request must be a JSON object.");
   }
@@ -951,7 +960,7 @@ function parseRequest(value: unknown): HeadlessOneShotRequestV1 {
   if (value["schemaVersion"] !== SCHEMA_VERSION) {
     throw new HeadlessRequestError(
       "UNSUPPORTED_SCHEMA_VERSION",
-      "Only headless request schemaVersion 1 is supported.",
+      "Only headless request schemaVersion 2 is supported.",
     );
   }
 
@@ -962,11 +971,21 @@ function parseRequest(value: unknown): HeadlessOneShotRequestV1 {
   const prompt = requiredString(value["prompt"], "prompt", MAX_PROMPT_LENGTH, false);
   const imagePaths = parseImagePaths(value["imagePaths"]);
   const modelRouteId = requiredString(value["modelRouteId"], "modelRouteId", 512);
+  const collaborationMode = value["collaborationMode"];
+  if (
+    typeof collaborationMode !== "string" ||
+    !COLLABORATION_MODES.has(collaborationMode as never)
+  ) {
+    throw new HeadlessRequestError(
+      "INVALID_COLLABORATION_MODE",
+      "collaborationMode must be one of agent or plan.",
+    );
+  }
   const permissionMode = value["permissionMode"];
-  if (typeof permissionMode !== "string" || !INTERACTION_MODES.has(permissionMode as never)) {
+  if (typeof permissionMode !== "string" || !PERMISSION_MODES.has(permissionMode as never)) {
     throw new HeadlessRequestError(
       "INVALID_PERMISSION_MODE",
-      "permissionMode must be one of default, auto, plan, or yolo.",
+      "permissionMode must be one of ask, auto, or full-access.",
     );
   }
   if (!Array.isArray(value["allowedTools"]) || value["allowedTools"].length > 128) {
@@ -1109,7 +1128,8 @@ function parseRequest(value: unknown): HeadlessOneShotRequestV1 {
     ...(providerTimeoutMs !== undefined ? { providerTimeoutMs } : {}),
     ...(providerAdmissionDeadlineMs !== undefined ? { providerAdmissionDeadlineMs } : {}),
     ...(thinkingEffort !== undefined ? { thinkingEffort } : {}),
-    permissionMode: permissionMode as SessionSettings["mode"],
+    collaborationMode: collaborationMode as NonNullable<SessionSettings["collaborationMode"]>,
+    permissionMode: permissionMode as SessionSettings["permissionMode"],
     ...(policyDenialMode !== undefined ? { policyDenialMode } : {}),
     allowedTools: Object.freeze(allowedTools),
     ...(maxTurns !== undefined ? { maxTurns } : {}),
@@ -1183,7 +1203,7 @@ function singleNonStreamingProvider(
 }
 
 async function canonicalizeCasePaths(
-  request: HeadlessOneShotRequestV1,
+  request: HeadlessOneShotRequestV2,
 ): Promise<{ workDir: string; picoHome: string }> {
   let workDir: string;
   let picoHome: string;
@@ -1492,7 +1512,7 @@ async function settleRuntime(
 }
 
 function cancellationOutcome(
-  request: HeadlessOneShotRequestV1,
+  request: HeadlessOneShotRequestV2,
   workDir: string | null,
   effective: HeadlessOneShotEffectivePolicy,
   cause: CancelCause,
@@ -1530,7 +1550,7 @@ function cancellationOutcome(
 }
 
 function invalidOutcome(
-  request: HeadlessOneShotRequestV1 | { requestId?: string; sessionId?: string } | undefined,
+  request: HeadlessOneShotRequestV2 | { requestId?: string; sessionId?: string } | undefined,
   error: HeadlessRequestError,
   durationMs: number,
   workDir: string | null = null,
@@ -1553,7 +1573,7 @@ function invalidOutcome(
 }
 
 function failedOutcome(
-  request: HeadlessOneShotRequestV1,
+  request: HeadlessOneShotRequestV2,
   workDir: string | null,
   effective: HeadlessOneShotEffectivePolicy,
   code: string,
@@ -1577,7 +1597,7 @@ function failedOutcome(
 }
 
 function resultPayload(input: {
-  request: HeadlessOneShotRequestV1 | { requestId?: string; sessionId?: string } | undefined;
+  request: HeadlessOneShotRequestV2 | { requestId?: string; sessionId?: string } | undefined;
   status: HeadlessOneShotStatus;
   workDir: string | null;
   effective: HeadlessOneShotEffectivePolicy;
@@ -1589,7 +1609,7 @@ function resultPayload(input: {
   terminationConfirmed?: boolean;
   policyDenials?: HeadlessOneShotPolicyDenialSummary;
   handoff?: PlanHandoff;
-}): HeadlessOneShotResultV1 {
+}): HeadlessOneShotResultV2 {
   return {
     schemaVersion: SCHEMA_VERSION,
     requestId: input.request?.requestId ?? null,
@@ -1618,6 +1638,7 @@ function createPolicyDenialAccumulator(): {
     hardline: 0,
     hook: 0,
     approval: 0,
+    policy: 0,
   };
   const byReasonKind: Record<RuntimePolicyDenialReasonKind, number> = {
     plan_mode: 0,
@@ -1630,6 +1651,7 @@ function createPolicyDenialAccumulator(): {
     destructive_system: 0,
     hook_denied: 0,
     approval_denied: 0,
+    policy_denied: 0,
     unknown_hardline: 0,
   };
   let first: HeadlessOneShotPolicyDenial | undefined;
@@ -1670,12 +1692,13 @@ function normalizedPolicyReasonKind(event: RuntimePolicyDenial): RuntimePolicyDe
 }
 
 function emptyEffective(
-  request: HeadlessOneShotRequestV1 | { requestId?: string; sessionId?: string } | undefined,
+  request: HeadlessOneShotRequestV2 | { requestId?: string; sessionId?: string } | undefined,
 ): HeadlessOneShotEffectivePolicy {
-  const candidate = request as Partial<HeadlessOneShotRequestV1> | undefined;
+  const candidate = request as Partial<HeadlessOneShotRequestV2> | undefined;
   return {
     modelRouteId: candidate?.modelRouteId ?? null,
     thinkingEffort: candidate?.thinkingEffort ?? null,
+    collaborationMode: candidate?.collaborationMode ?? null,
     permissionMode: candidate?.permissionMode ?? null,
     allowedTools: candidate?.allowedTools ?? [],
   };

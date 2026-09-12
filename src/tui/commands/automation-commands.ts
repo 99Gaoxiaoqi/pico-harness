@@ -3,7 +3,7 @@ import { type ClientSessionRuntime } from "../client-session-runtime.js";
 import { resolveAutomationCredentialTarget } from "../../provider/automation-credential.js";
 import { resolveModelRouteCapabilities } from "../../provider/model-capabilities.js";
 import { AUTOMATION_TOOL_ALLOWLIST } from "../../safety/automation-tool-policy.js";
-import { normalizeExactHostname } from "../../safety/background-yolo-policy-schema.js";
+import { normalizeExactHostname } from "../../safety/background-autonomous-policy-schema.js";
 import { AutomationCredentialImportProposalStore } from "../automation-credential-proposal.js";
 import type { ClientCommandRegistryDeps } from "./types.js";
 import { rpcCommand, sessionAccess } from "./shared.js";
@@ -17,7 +17,7 @@ export function createAutomationCommands(deps: ClientCommandRegistryDeps) {
   return {
     cron: rpcCommand({
       name: "cron",
-      description: "Manage persistent YOLO cron jobs for this workspace",
+      description: "管理此工作区的持久后台 Cron 任务",
       usage:
         "/cron <status|list|credential|add|enable|disable|delete|runs> [--tool-network=allow|disabled|allowlist:host1,host2] [arguments]",
       argumentHint: "<status|list|credential|add|enable|disable|delete|runs>",
@@ -139,9 +139,9 @@ export function createAutomationCommands(deps: ClientCommandRegistryDeps) {
               workspacePath,
               sessionId: sid,
             });
-            if (settings.settings.permissionMode !== "yolo") {
+            if (settings.settings.permissionMode !== "full-access") {
               return msg(
-                "Cron jobs require /mode yolo; interactive permission modes cannot run unattended.",
+                "Cron jobs require /mode full-access; interactive permission modes cannot run unattended.",
               );
             }
             const toolNetwork = parseClientCronToolNetwork(args);

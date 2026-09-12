@@ -177,7 +177,7 @@ async function runProductionRootWakeScenario(
         model: "coder",
         modelRouteId: "test/coder",
         collaborationMode: "agent",
-        permissionMode: "default",
+        permissionMode: "ask",
         orchestrationMode: "graph",
         thinkingEffort: "medium",
         thinkingEffortExplicit: false,

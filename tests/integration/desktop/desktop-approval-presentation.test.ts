@@ -32,8 +32,9 @@ function render(approval: ApprovalView): string {
 
 test("审批卡按真实 scope 展示授权范围、单次批准和变更预览", () => {
   const cases: readonly [ApprovalSessionScopeView, string, string][] = [
+    [{ type: "network" }, "允许本任务联网", "后续网络访问将自动允许"],
     [{ type: "file", path: "/tmp/report.txt", access: "edit" }, "允许修改此文件", "仅此文件"],
-    [{ type: "all-edits" }, "自动允许文件修改", "权限切换为"],
+    [{ type: "all-edits" }, "自动允许文件修改", "权限切换为“帮我批准”"],
     [
       {
         type: "directories",
@@ -47,7 +48,7 @@ test("审批卡按真实 scope 展示授权范围、单次批准和变更预览"
     [
       { type: "directories", directories: ["/tmp/reports"], access: "edit", enableAutoEdits: true },
       "加入任务授权目录",
-      "权限切换为",
+      "权限切换为“帮我批准”",
     ],
     [{ type: "bash-command", command: "git status", match: "exact" }, "允许此命令", "仅匹配此命令"],
     [
@@ -76,6 +77,7 @@ test("审批卡按真实 scope 展示授权范围、单次批准和变更预览"
     assert.match(html, /<details class="approval-details__section"><summary>查看修改<\/summary>/u);
     assert.match(html, /<details[^>]*><summary>技术详情<\/summary>/u);
     assert.doesNotMatch(html, /本任务内允许|风险等级/u);
+    assert.doesNotMatch(html, /权限切换为“自动”/u);
   }
 });
 

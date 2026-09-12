@@ -30,7 +30,7 @@ export interface ConfiguredSubagentExecutionResult {
   readonly childSessionId?: string;
   readonly agentName?: string;
   readonly turnId?: string;
-  readonly permissionMode?: "default";
+  readonly permissionMode?: "ask" | "full-access";
   readonly artifactIds?: readonly string[];
   readonly runId?: string;
   readonly summary: string;
@@ -145,6 +145,7 @@ export class ConfiguredAgentListTool implements BaseTool {
 }
 export class ConfiguredAgentSpawnTool implements BaseTool {
   readonly executionMode = "orchestrator" as const;
+  readonly permissionCategory = "subagent" as const;
   readonly fileSideEffects = NO_FILE_SIDE_EFFECTS;
   constructor(private readonly options: ConfiguredSubagentToolsOptions) {}
   name() {

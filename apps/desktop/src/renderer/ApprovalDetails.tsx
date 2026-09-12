@@ -18,6 +18,8 @@ export function approvalActionTitle(approval: ApprovalView): string {
 
 export function approvalScopeLabel(scope: ApprovalSessionScopeView): string {
   switch (scope.type) {
+    case "network":
+      return "允许本任务联网";
     case "all-edits":
       return "自动允许文件修改";
     case "directories":
@@ -33,15 +35,19 @@ export function approvalScopeLabel(scope: ApprovalSessionScopeView): string {
 
 function ScopeDescription({ scope }: { readonly scope: ApprovalSessionScopeView }) {
   switch (scope.type) {
+    case "network":
+      return <p>本任务后续网络访问将自动允许；文件与命令风险仍按当前模式判断。</p>;
     case "all-edits":
-      return <p>选择自动允许后，权限切换为“自动”；本任务普通修改免审批，敏感操作仍需确认。</p>;
+      return <p>选择自动允许后，权限切换为“帮我批准”；本任务普通修改免审批，敏感操作仍需确认。</p>;
     case "directories":
       return (
         <>
           <p>{scope.access === "read" ? "读取" : "修改"} · 加入任务授权目录 · 本任务有效</p>
           <pre>{scope.directories.join("\n")}</pre>
           {scope.enableAutoEdits && (
-            <p>选择加入授权目录后，权限切换为“自动”；本任务普通修改免审批，敏感操作仍需确认。</p>
+            <p>
+              选择加入授权目录后，权限切换为“帮我批准”；本任务普通修改免审批，敏感操作仍需确认。
+            </p>
           )}
         </>
       );

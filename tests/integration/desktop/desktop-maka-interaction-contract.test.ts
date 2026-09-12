@@ -83,7 +83,7 @@ test("new-task send accepts settings that must apply before the first run", asyn
         workspacePath: workspace,
         sessionId,
         input: { kind: "text", text: "不应覆盖既有会话设置" },
-        initialSettings: { permissionMode: "yolo" },
+        initialSettings: { permissionMode: "full-access" },
         idempotencyKey: "existing-session-settings-1",
       }),
     ),

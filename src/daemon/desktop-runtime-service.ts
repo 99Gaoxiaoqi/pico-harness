@@ -33,6 +33,7 @@ import { recordRuntimeCompactionCheckpoint } from "../context/runtime-compaction
 import { SkillLoader } from "../context/skill.js";
 import { AgentGraphReadOnlyQueryService } from "../agent-graph/query-service.js";
 import { findAgentProfile, loadAgentCatalog } from "../agents/catalog.js";
+import { globalSessionPermissionGrants } from "../approval/session-permissions.js";
 import { ResourceDoctor, renderResourceDoctorReport } from "../diagnostics/resource-doctor.js";
 import {
   runWorkspaceDoctor,
@@ -49,7 +50,6 @@ import {
   getOrCreateFailClosedLegacySessionSettings,
   getOrCreateSessionSettings,
   migrateSessionModelRoute,
-  normalizeInteractionMode,
   sessionReasoningCandidates,
   setSessionCollaborationMode,
   setSessionOrchestrationMode,
@@ -1150,7 +1150,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         );
       },
     );
-    if (archived) this.browserAgentBroker.invalidateSession(sessionId, "浏览器 Session 已归档");
+    if (archived) {
+      this.browserAgentBroker.invalidateSession(sessionId, "浏览器 Session 已归档");
+      globalSessionPermissionGrants.clear(sessionId, canonical, this.picoHome);
+    }
     const session = await this.requireSession(canonical, sessionId);
     this.publishSession(session);
     return { session };
@@ -1193,6 +1196,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       await sideChats.cleanup(lease.targetSessionId);
     }
     this.browserAgentBroker.invalidateSession(sessionId);
+    globalSessionPermissionGrants.clear(sessionId, canonical, this.picoHome);
     await this.terminalService.stopSession({ workspacePath: canonical, sessionId });
     await sessionMemoryLane.run(
       this.memoryLaneKey(canonical, sessionId),
@@ -1350,8 +1354,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     readonly collaborationMode?: string;
     readonly orchestrationMode?: string;
     readonly permissionMode?: string;
-    readonly mode?: string;
-    readonly permissions?: string;
     readonly thinkingEffort?: string;
   }): Promise<JsonValue> {
     if (
@@ -1359,8 +1361,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       params.collaborationMode === undefined &&
       params.orchestrationMode === undefined &&
       params.permissionMode === undefined &&
-      params.mode === undefined &&
-      params.permissions === undefined &&
       params.thinkingEffort === undefined
     ) {
       throw new RuntimeProtocolError(
@@ -1368,28 +1368,9 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         "session.settings.update 至少需要一个设置字段",
       );
     }
-    const legacyMode = normalizeInteractionMode(params.mode ?? params.permissions);
-    const requestedCollaborationMode =
-      params.collaborationMode ?? (legacyMode === "plan" ? "plan" : undefined);
-    const requestedPermissionMode =
-      params.permissionMode ?? (legacyMode && legacyMode !== "plan" ? legacyMode : undefined);
+    const requestedCollaborationMode = params.collaborationMode;
+    const requestedPermissionMode = params.permissionMode;
     const requestedOrchestrationMode = params.orchestrationMode;
-    if ((params.mode !== undefined || params.permissions !== undefined) && !legacyMode) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.INVALID_PARAMS,
-        "mode/permissions 必须是 default、plan、auto 或 yolo",
-      );
-    }
-    if (
-      params.mode !== undefined &&
-      params.permissions !== undefined &&
-      normalizeInteractionMode(params.mode) !== normalizeInteractionMode(params.permissions)
-    ) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.INVALID_PARAMS,
-        "permissions 是 mode 的别名，二者不能指定不同值",
-      );
-    }
     if (
       requestedCollaborationMode !== undefined &&
       requestedCollaborationMode !== "agent" &&
@@ -1413,13 +1394,13 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     }
     if (
       requestedPermissionMode !== undefined &&
-      requestedPermissionMode !== "default" &&
+      requestedPermissionMode !== "ask" &&
       requestedPermissionMode !== "auto" &&
-      requestedPermissionMode !== "yolo"
+      requestedPermissionMode !== "full-access"
     ) {
       throw new RuntimeProtocolError(
         RUNTIME_ERROR_CODES.INVALID_PARAMS,
-        "permissionMode 必须是 default、auto 或 yolo",
+        "permissionMode 必须是 ask、auto 或 full-access",
       );
     }
 
@@ -1430,17 +1411,40 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     );
     const settings = await this.withSession(canonical, params.sessionId, async (session) => {
       const current = await this.getSessionSettings(canonical, session);
-      if (
+      const permissionModeChanging =
+        requestedPermissionMode !== undefined && requestedPermissionMode !== current.permissionMode;
+      const orchestrationModeChanging =
         requestedOrchestrationMode !== undefined &&
         requestedOrchestrationMode !== current.orchestrationMode &&
-        current.orchestrationMode !== "default"
-      ) {
+        current.orchestrationMode !== "default";
+      if (permissionModeChanging || orchestrationModeChanging) {
         const graphStore = new SqliteAgentGraphControlStore({
           storageRoot: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
           now: this.now,
         });
         try {
-          if (graphStore.getOpenRootEpoch(params.sessionId)) {
+          const openGraph = graphStore.getOpenRootEpoch(params.sessionId);
+          if (permissionModeChanging) {
+            const hasOperatorAuthority = graphStore
+              .listGraphs()
+              .some((graph) =>
+                graphStore
+                  .listOperatorProvisions(graph.graphId)
+                  .some(
+                    (provision) =>
+                      provision.state !== "stopped" &&
+                      (graph.rootSessionId === params.sessionId ||
+                        provision.childSessionId === params.sessionId),
+                  ),
+              );
+            if (openGraph || hasOperatorAuthority) {
+              throw new RuntimeProtocolError(
+                RUNTIME_ERROR_CODES.CONFLICT,
+                "当前 Graph 周期或 Operator 权限仍未结束，请先结束 Graph 调度后再切换权限模式",
+              );
+            }
+          }
+          if (orchestrationModeChanging && openGraph) {
             throw new RuntimeProtocolError(
               RUNTIME_ERROR_CODES.CONFLICT,
               "当前 Graph 周期仍未结束，请先让根 Agent 完成调度后再切换为线性模式",
@@ -2691,7 +2695,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       );
     }
     // Opening/resuming a legacy Session is an authorization boundary.  A missing
-    // settings fact has no authority to inherit today's user/project YOLO default,
+    // settings fact has no authority to inherit today's mutable user/project permission default,
     // so materialize the same durable agent/default snapshot used by Fork first.
     // Existing settings are read-side data, not an execution-lock operation.
     // Only a legacy Session without a durable settings fact needs serialization.
@@ -3722,6 +3726,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
 
   private async removeEphemeralSideChat(workspacePath: string, sessionId: string): Promise<void> {
     await this.terminalService.stopSession({ workspacePath, sessionId });
+    globalSessionPermissionGrants.clear(sessionId, workspacePath, this.picoHome);
     const managed = globalSessionManager.delete(sessionId, workspacePath, {
       picoHome: this.picoHome,
     });
@@ -3956,7 +3961,6 @@ function effectiveSessionSettingDefaults(runtime: EffectiveModelRuntime): {
   provider: ProviderKind;
   model: string;
   modelRouteId: string;
-  mode?: SessionSettings["mode"];
   thinkingEffort?: string;
 } {
   const route = runtime.router.require(runtime.config.defaultModelRouteId);
@@ -3964,7 +3968,6 @@ function effectiveSessionSettingDefaults(runtime: EffectiveModelRuntime): {
     provider: route.provider,
     model: route.model,
     modelRouteId: route.id,
-    ...(runtime.config.defaults.mode ? { mode: runtime.config.defaults.mode } : {}),
     ...(runtime.config.defaults.thinkingEffort
       ? { thinkingEffort: runtime.config.defaults.thinkingEffort }
       : {}),

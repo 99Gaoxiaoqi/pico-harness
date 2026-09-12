@@ -10,7 +10,7 @@ import {
 } from "../../../src/approval/bash-hardline.js";
 import { classifyHardlineCommand, isHardlineCommand } from "../../../src/approval/manager.js";
 import { buildForegroundSafetyMiddleware } from "../../../src/runtime/agent-runtime.js";
-import { evaluateYoloToolCall } from "../../../src/safety/yolo-sandbox.js";
+import { evaluateWorkspaceToolCall } from "../../../src/safety/workspace-sandbox.js";
 import { WorkspaceRoots } from "../../../src/tools/workspace-roots.js";
 import {
   resolveShell,
@@ -50,7 +50,7 @@ test("host shell argv 按方言生成且拒绝不支持的 shell", () => {
 });
 
 // 以下 bash hardline 语义回归依赖宿主为 bash 方言,仅在 POSIX 运行;
-// Windows(PowerShell 宿主)的对应行为由 tests/integration/windows/yolo-shell-hardline.test.ts 覆盖。
+// Windows(PowerShell 宿主)的对应行为由 tests/integration/windows/full-access-shell-hardline.test.ts 覆盖。
 test(
   "hardline reasonKind 使用固定脱敏分类且不改变拒绝语义",
   { skip: process.platform === "win32" },
@@ -86,7 +86,7 @@ test(
   async () => {
     const workDir = process.cwd();
     const roots = WorkspaceRoots.createSync(workDir);
-    const safety = buildForegroundSafetyMiddleware(workDir, { mode: "yolo" }, roots);
+    const safety = buildForegroundSafetyMiddleware(workDir, { mode: "full-access" }, roots);
     const cases = [
       {
         command: "printf blocked > /etc/PICO_REDIRECT_INPUT_CANARY",
@@ -130,7 +130,7 @@ test(
 );
 
 test(
-  "YOLO hardline 拒绝受保护目标的 shell 展开与非 -rf 破坏路径",
+  "FULL_ACCESS hardline 拒绝受保护目标的 shell 展开与非 -rf 破坏路径",
   { skip: process.platform === "win32" },
   () => {
     const workDir = process.cwd();
@@ -476,7 +476,7 @@ test(
 );
 
 test(
-  "YOLO hardline 覆盖 rm 等价参数、系统目标与 shell 组合",
+  "FULL_ACCESS hardline 覆盖 rm 等价参数、系统目标与 shell 组合",
   { skip: process.platform === "win32" },
   async () => {
     const workDir = process.cwd();
@@ -646,25 +646,33 @@ test(
     const roots = WorkspaceRoots.createSync(workDir);
     const hardlineCall = toolCall("rm --recursive --force -- /");
     const ordinaryCall = toolCall("rm --recursive --force -- ./dist");
-    const sandboxDecision = evaluateYoloToolCall(hardlineCall, workDir, roots);
+    const sandboxDecision = evaluateWorkspaceToolCall(hardlineCall, workDir, roots);
     assert.equal(sandboxDecision.allowed, false);
     assert.match(sandboxDecision.reason ?? "", /Hardline/u);
-    assert.equal(evaluateYoloToolCall(ordinaryCall, workDir, roots).allowed, true);
+    assert.equal(evaluateWorkspaceToolCall(ordinaryCall, workDir, roots).allowed, true);
 
     const relativeSystemCall = toolCall("rm -f etc/passwd");
-    assert.equal(evaluateYoloToolCall(relativeSystemCall, "/", roots).allowed, false);
+    assert.equal(evaluateWorkspaceToolCall(relativeSystemCall, "/", roots).allowed, false);
     assert.equal(isHardlineCommand("bash", ordinaryCall.arguments), true);
 
-    const foregroundSafety = buildForegroundSafetyMiddleware(workDir, { mode: "yolo" }, roots);
+    const foregroundSafety = buildForegroundSafetyMiddleware(
+      workDir,
+      { mode: "full-access" },
+      roots,
+    );
     assert.equal((await foregroundSafety(hardlineCall)).allowed, false);
     assert.equal((await foregroundSafety(ordinaryCall)).allowed, true);
-    const rootForegroundSafety = buildForegroundSafetyMiddleware("/", { mode: "yolo" }, roots);
+    const rootForegroundSafety = buildForegroundSafetyMiddleware(
+      "/",
+      { mode: "full-access" },
+      roots,
+    );
     assert.equal((await rootForegroundSafety(relativeSystemCall)).allowed, false);
   },
 );
 
 test(
-  "YOLO hardline 不把隐藏工作区误判为整个用户目录通配目标",
+  "FULL_ACCESS hardline 不把隐藏工作区误判为整个用户目录通配目标",
   { skip: process.platform === "win32" },
   () => {
     const hiddenWorkspace = "/Users/alice/.pico/temporary-workspace";
@@ -691,7 +699,7 @@ test(
 );
 
 test(
-  "YOLO hardline 对真实 POSIX Shell stdin 执行入口 fail-closed",
+  "FULL_ACCESS hardline 对真实 POSIX Shell stdin 执行入口 fail-closed",
   { skip: process.platform === "win32" },
   () => {
     const script = "printf 'stdin-shell-ran\\n'\n";

@@ -203,6 +203,7 @@ export function projectRuntimeSessionState(
   let settings: SessionRuntimeStateSnapshot["settings"];
   let goal: SessionRuntimeStateSnapshot["goal"];
   let promptCache: SessionRuntimeStateSnapshot["promptCache"];
+  let boundary: SessionRuntimeStateSnapshot["boundary"];
   for (const event of events) {
     if (event.kind !== "session.state.committed") continue;
     const patch = normalizeSessionRuntimeStatePatch(event.data.patch);
@@ -212,12 +213,14 @@ export function projectRuntimeSessionState(
     if (patch.promptCache) {
       promptCache = structuredClone(patch.promptCache);
     }
+    if (patch.boundary) boundary = structuredClone(patch.boundary);
   }
   return {
     stateVersion: SESSION_RUNTIME_STATE_VERSION,
     ...(settings ? { settings } : {}),
     ...(goal ? { goal } : {}),
     ...(promptCache ? { promptCache } : {}),
+    ...(boundary ? { boundary } : {}),
     usage: projectRuntimeSessionUsage(events),
   };
 }

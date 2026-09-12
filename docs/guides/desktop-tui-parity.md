@@ -56,16 +56,24 @@ Workspace
 
 ## Composer、模型与权限入口
 
-| TUI 入口                                   | TUI 行为与状态                                          | Desktop 等价入口                                                   | 等级   | 验收标准                                                                                                           |
-| ------------------------------------------ | ------------------------------------------------------- | ------------------------------------------------------------------ | ------ | ------------------------------------------------------------------------------------------------------------------ |
-| `/model [name]`                            | 查看或切换模型路由；`idle`                              | Composer 底栏模型选择器                                            | 主路径 | 选项来自 Runtime 模型路由；切换只影响当前 Session；运行中禁用并说明原因                                            |
-| `/mode <default\|plan\|auto\|yolo>`        | 查看或切换交互模式；`idle`                              | Composer 底栏模式选择器                                            | 主路径 | 四种模式与 TUI 值一一对应；变更持久化到当前 Session，不能仅改 Renderer 状态                                        |
-| `/permissions [default\|auto\|yolo\|plan]` | `/mode` 的权限语义别名；`idle`                          | Composer 底栏权限/访问级别按钮，打开的仍是同一个模式选择器         | 主路径 | Desktop 不维护第二个 permission mode；从任一入口修改后，模式和权限文案立即一致                                     |
-| `/thinking [level]`                        | 查看或切换当前模型支持的推理强度；`idle`                | Composer 底栏 Thinking 选择器                                      | 主路径 | 仅显示当前模型路由支持的级别；切换模型后重新校验，不保留非法旧值                                                   |
-| `/skill <name> [arguments]`                | 激活 Skill 并作为 Prompt 启动 Agent；`idle`             | Composer “+”菜单 → Skill，选择后插入结构化 Skill 引用及可编辑参数  | 主路径 | Skill 身份不退化为普通文本；发送遵循首次创建或空闲续聊语义；运行中禁用                                             |
-| `/agent <name> <task>`                     | 将指定 Agent 资料渲染为委派 Prompt；无显式 availability | Composer “+”菜单 → Subagent，选择 Agent 后在同一 Composer 描述任务 | 主路径 | Agent 选项来自同一 Catalog；提交后主 Transcript 显示委派条目，子 Session 在右侧详情打开；运行中提交遵循 Steer 语义 |
+| TUI 入口                                      | TUI 行为与状态                                          | Desktop 等价入口                                                   | 等级   | 验收标准                                                                                                           |
+| --------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------ | ------ | ------------------------------------------------------------------------------------------------------------------ |
+| `/model [name]`                               | 查看或切换模型路由；`idle`                              | Composer 底栏模型选择器                                            | 主路径 | 选项来自 Runtime 模型路由；切换只影响当前 Session；运行中禁用并说明原因                                            |
+| `/mode <agent\|plan\|ask\|auto\|full-access>` | 查看或切换协作轴或权限轴；`idle`                        | Composer 的 Plan 开关与权限选择器                                  | 主路径 | `agent`/`plan` 只更新 `collaborationMode`，其余值只更新 `permissionMode`；不再发送合并 `mode` 字段                 |
+| `/permissions [ask\|auto\|full-access]`       | 查看或切换权限模式；`idle`                              | Composer 底栏权限/访问级别按钮，打开权限选择器                     | 主路径 | Desktop 将三个权限值依次显示为“请求批准”“帮我批准”“完全访问权限”；从任一入口修改后，模式和权限文案立即一致         |
+| `/thinking [level]`                           | 查看或切换当前模型支持的推理强度；`idle`                | Composer 底栏 Thinking 选择器                                      | 主路径 | 仅显示当前模型路由支持的级别；切换模型后重新校验，不保留非法旧值                                                   |
+| `/skill <name> [arguments]`                   | 激活 Skill 并作为 Prompt 启动 Agent；`idle`             | Composer “+”菜单 → Skill，选择后插入结构化 Skill 引用及可编辑参数  | 主路径 | Skill 身份不退化为普通文本；发送遵循首次创建或空闲续聊语义；运行中禁用                                             |
+| `/agent <name> <task>`                        | 将指定 Agent 资料渲染为委派 Prompt；无显式 availability | Composer “+”菜单 → Subagent，选择 Agent 后在同一 Composer 描述任务 | 主路径 | Agent 选项来自同一 Catalog；提交后主 Transcript 显示委派条目，子 Session 在右侧详情打开；运行中提交遵循 Steer 语义 |
 
 Composer 仍保留 Slash 自动补全作为上述能力的高级等价入口。图形入口和 Slash 入口必须调用同一领域接口；不得通过拼接 `/model ...` 等文本绕过类型化协议。
+
+当前进程边界以双轴的有效组合为准：Plan 协作优先使用 managed `read-only`；Agent 下的
+`ask` 与 `auto` 使用 managed `workspace-write`，子进程网络默认关闭；Agent 下的
+`full-access` 绕过 OS 沙箱。当前 Session 的 `ExecutionBoundary` 持久化并带 revision；Agent
+需要额外精确文件、目录子树或进程网络时，通过 `request_sandbox_boundary` 发起结构化
+扩权审批。批准结果以 CAS 写入 Session，不只是 Renderer 内存状态，并在同一运行中刷新
+文件边界、本地子进程、MCP 与 Hook 网络门禁。内置 `web_search` / `fetch_url` 走独立的
+宿主公网只读门禁；它们在 `auto` 自动执行，不代表 Bash、MCP 或 Hook 获得了网络权限。
 
 ## 运行中输入与控制
 
@@ -102,7 +110,7 @@ File History 只接受带 `sourceMessageEventId`、`beforeSessionSeq`、`message
 | `/skills`                                                          | 列出 Loader 发现的 Skills；`idle`                    | 侧栏 Skills 页面                                     | 主路径   | 与 TUI 使用相同来源和禁用原因；刷新后不展示演示数据                                                  |
 | `/agents`                                                          | 列出 Agent Catalog；`idle`                           | Composer 的 Subagent 选择器和右侧 Subagents 面板空态 | 主路径   | 展示名称、来源、说明、允许工具和模型路由；不能把“多 Agent”绑定为 Git 前置条件                        |
 | `/cron status`、`list`、`runs`                                     | 查看 Workspace 后台任务、daemon 和运行历史；`idle`   | 侧栏 Automations 页面                                | 主路径   | 数据按 Workspace 隔离；后台 daemon 不可用时显示“已保存但不会运行”                                    |
-| `/cron add`、`enable`、`disable`、`delete`                         | 管理持久 YOLO Cron；`idle`                           | Automations 新建、编辑、启停和删除操作               | 主路径   | Job 固定创建时的模型路由、凭据引用、Automation 独立静态工具白名单和网络策略；新工具默认不授权        |
+| `/cron add`、`enable`、`disable`、`delete`                         | 管理持久完全访问 Cron；`idle`                        | Automations 新建、编辑、启停和删除操作               | 主路径   | Job 固定创建时的模型路由、凭据引用、Automation 独立静态工具白名单和网络策略；新工具默认不授权        |
 | `/cron credential status`、`import [route] --confirm <proposalId>` | 检查或导入后台 Provider 凭据                         | Automation Provider 设置                             | 高级入口 | 导入先返回 5 分钟一次性提案；确认绑定当前路由、配置、credentialRef 与 secret 指纹，且 secret 不回显  |
 
 ## 补充注册入口

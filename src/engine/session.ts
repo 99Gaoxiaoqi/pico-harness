@@ -14,6 +14,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import type { ExecutionBoundary } from "../safety/permission-profile.js";
 import { type CanonicalUsage, type Message, type UsageReportedField } from "../schema/message.js";
 import type { CostStatus } from "../observability/pricing.js";
 import { logger } from "../observability/logger.js";
@@ -25,7 +26,6 @@ import type { CommitReceipt, SessionCursor } from "./session-persistence.js";
 import { createSessionIdentity, type SessionIdentity } from "./session-identity.js";
 import type { GoalManager } from "./goal-manager.js";
 import {
-  normalizeSessionRuntimeStatePatch,
   normalizeSessionRuntimeStateWritePatch,
   normalizeSessionUsageSnapshot,
   SESSION_RUNTIME_STATE_VERSION,
@@ -273,6 +273,7 @@ export class Session
   private persistedSettings?: PersistedSessionSettings;
   private persistedGoal?: ReturnType<GoalManager["snapshot"]>;
   private persistedPromptCache?: PersistedPromptCacheState;
+  private persistedBoundary?: ExecutionBoundary;
   private goalBinding?: { unsubscribe: () => void };
 
   /**
@@ -357,6 +358,7 @@ export class Session
       this.persistedSettings = runtime.settings;
       this.persistedGoal = runtime.goal;
       this.persistedPromptCache = runtime.promptCache;
+      this.persistedBoundary = runtime.boundary;
       this.restoreUsage(runtime.usage);
       this.messageLedger.replace(structuredClone(recovery.messages));
       const cursor = recovery.cursor;
@@ -458,6 +460,7 @@ export class Session
     this.persistedSettings = runtime.settings;
     this.persistedGoal = runtime.goal;
     this.persistedPromptCache = runtime.promptCache;
+    this.persistedBoundary = runtime.boundary;
     this.restoreUsage(runtime.usage);
     this.applyRuntimeHistoryProjection(projection);
   }
@@ -648,6 +651,7 @@ export class Session
       ...(this.persistedSettings ? { settings: this.persistedSettings } : {}),
       ...(this.persistedGoal ? { goal: this.persistedGoal } : {}),
       ...(this.persistedPromptCache ? { promptCache: this.persistedPromptCache } : {}),
+      ...(this.persistedBoundary ? { boundary: this.persistedBoundary } : {}),
       usage: this.getUsageSnapshot(),
     };
     return structuredClone(snapshot);
@@ -656,20 +660,20 @@ export class Session
   /** 更新一个完整 section，内存立即生效，然后追加 session.state.committed。 */
   updateRuntimeState(patch: SessionRuntimeStateWritePatch): void {
     this.assertWritable();
-    const normalized = normalizeSessionRuntimeStatePatch(patch);
+    const normalized = normalizeSessionRuntimeStateWritePatch(patch);
     if (!normalized) {
       throw new Error("Runtime session state update is invalid");
     }
     if (normalized.settings) this.persistedSettings = normalized.settings;
     if (normalized.goal) this.persistedGoal = normalized.goal;
     if (normalized.promptCache) this.persistedPromptCache = normalized.promptCache;
+    if (normalized.boundary) this.persistedBoundary = normalized.boundary;
     this.updatedAt = new Date();
 
     if (this.store) {
-      const persisted = normalizeSessionRuntimeStateWritePatch(normalized)!;
       void this.enqueuePersistence("runtime state", async (store, ownerFence) => {
         await this.ensureRuntimeSession();
-        return store.appendSessionState(this.id, persisted, { ownerFence });
+        return store.appendSessionState(this.id, normalized, { ownerFence });
       }).catch((error: unknown) => {
         logger.error({ error: String(error) }, "[session] runtime state 持久化失败");
       });

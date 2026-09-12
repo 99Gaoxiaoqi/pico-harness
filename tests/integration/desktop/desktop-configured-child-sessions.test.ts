@@ -218,7 +218,7 @@ test("real configured executor persists its child admission before model output 
       model: route.model,
       auth: "none",
       baseURL: route.baseURL,
-      interactionMode: "default",
+      interactionMode: "ask",
     },
     {
       picoHome,

@@ -209,21 +209,25 @@ TUI 为避免 Pino 输出破坏 Ink 画面，会把进程日志级别固定为 `
 
 ## 安全模型
 
-| 模式/边界      | 行为                                                                                                             |
-| -------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `yolo`（默认） | 以当前 OS 用户权限执行普通工具，不增加工作区/网络/敏感写沙箱或日常审批；hardline 与显式 `PreToolUse` deny 仍生效 |
-| `default`      | 外部路径、高风险动作和 Hook `ask/defer` 进入结构化权限或显式审批；使用 `/mode default` 切换                      |
-| `auto`         | 自动接受普通编辑；外部路径、危险命令、MCP 及 Hook `ask/defer` 仍进入权限或审批                                   |
-| `plan`         | 在 hardline 之外额外拒绝写操作、可写委派及无法证明只读的外部副作用                                               |
-| 后台 Job       | 使用独立 strict runner 和创建时冻结的工作区、工具、网络、模型与凭证引用                                          |
+| 模式/边界                     | 行为                                                                                                            |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| 请求批准（`ask`，默认）       | 已声明的只读和有界内部编排直接执行；Shell、文件编辑、公网读取和开放世界工具请求审批                             |
+| 帮我批准（`auto`）            | 自动执行只读、有界内部编排、工作区内结构化编辑和内置公网只读工具；Shell、MCP/未分类工具、越界或敏感访问请求审批 |
+| 完全访问权限（`full-access`） | 普通权限链直通，以当前 OS 用户权限执行；hardline 和直接 deny 仍可拒绝                                           |
+| `plan`                        | 在 hardline 之外额外拒绝写操作、可写委派及无法证明只读的外部副作用                                              |
+| 后台 Job                      | 使用独立 strict runner 和创建时冻结的工作区、工具、网络、模型与凭证引用                                         |
 
-前台工具调用的主要防线顺序是：**hardline / Plan → `PreToolUse` → 改写后重跑 hardline / Plan → 模式对应的 PermissionRequest / 审批 → 执行 → 有界 Post Hook**。YOLO 通常跳过权限链，但 Hook 的 `ask/defer` 可以强制审批；工作区外路径检查属于非 YOLO 权限链，不是 YOLO 沙箱。
+前台工具调用的主要防线顺序是：**hardline / Plan → `PreToolUse` → 改写后重跑 hardline / Plan → 模式对应的 PermissionRequest / 审批 → 执行 → 有界 Post Hook**。完全访问权限（`full-access`）跳过普通权限链，也不会因 Hook `ask/defer` 进入人工审批，但 hardline 和直接 deny 仍可拒绝；工作区外路径检查属于非 `full-access` 权限链，不是 `full-access` 沙箱。
+
+`ask` / `auto` 的放行依据是 Registry 中受信的工具能力分类，不是命令或文件正文里是否命中危险关键词。有界内部编排仅能更新当前 Pico 的任务、计划或隔离子代理控制面，不等同于外部系统操作。Shell 始终视为可启动任意程序的开放边界；未声明能力的非只读工具默认 fail closed。`web_search` / `fetch_url` 是受 SSRF 防护的公网只读工具，因此只在 `auto` 自动执行；Shell 中的 `curl`、上传和其他网络行为仍会请求批准。
+
+每个 Session 还有一份持久化、带 revision 的 `ExecutionBoundary`。`ask` / `auto` 初始为 managed `workspace-write` 且子进程网络关闭；需要额外的精确文件、目录子树或进程网络时，Agent 必须通过 `request_sandbox_boundary` 说明扩权范围并等待审批。批准后以 CAS 合并到当前边界并立即刷新文件、子进程、MCP 与 Hook 的强制约束；恢复、fork 与 rewind 不会悄然扩权。内置 Web 只读工具走独立的宿主网络与 SSRF 门禁，不等同于给 Bash/MCP/Hook 开启进程网络。
 
 `command`、`http`、`mcp_tool` 等可执行 Hook 需要显式信任；其定义变化会回到 pending。`command` Hook 的脚本字节或 executable identity 变化同样失效。`prompt` / `agent` Hook 不使用这套 executable 信任状态。
 
 这些机制用于降低误操作和扩展供应链风险，但不是完整 OS 沙箱：
 
-- 主 Agent 的 YOLO 与 daemon 都运行在当前用户权限下。
+- 主 Agent 的完全访问权限（`full-access`）与 daemon 都运行在当前用户权限下。
 - hardline 只能分析可见命令及已建模入口，不能证明任意 executable 的全部行为。
 - 路径、文件元数据和原子写入会尽量复核，但同一用户下仍存在不可彻底消除的 TOCTOU 边界。
 - Explore/Worker 的隔离能力与平台有关；所需沙箱不可用时，可写 Worker 必须拒绝启动。
@@ -242,19 +246,19 @@ Linux 上完整验证 ACL/xattr/文件能力需要 `acl`、`attr`、`libcap2-bin
 
 ## 开发与验证
 
-| 命令                               | 验证内容                                              |
-| ---------------------------------- | ----------------------------------------------------- |
-| `npm run check:storage`            | Node 版本与内置 `node:sqlite` 能力                    |
-| `npm run typecheck`                | Runtime、TUI 与共享 TypeScript 类型                   |
-| `npm run desktop:typecheck`        | Desktop main、preload、renderer 类型边界              |
-| `npm run lint`                     | 根项目、Desktop、测试与脚本的 ESLint 检查             |
-| `npm run format`                   | Prettier 格式检查，不会改写文件                       |
-| `npm run test:integration`         | 不访问真实模型的确定性集成测试                        |
-| `npm run test:integration:windows` | Windows Hook、ACL 与 YOLO shell hardline 安全集成测试 |
-| `npm run build`                    | 构建 `dist/` 与可执行 `dist/cli/main.js`              |
-| `npm pack --dry-run`               | 检查根包内容和 `pico` bin 映射                        |
-| `npm run desktop:package`          | 生成当前平台的未签名 Desktop smoke 包                 |
-| `npm run test:llm-e2e`             | 使用真实 Provider、凭证和网络验证 Runtime 闭环        |
+| 命令                               | 验证内容                                                 |
+| ---------------------------------- | -------------------------------------------------------- |
+| `npm run check:storage`            | Node 版本与内置 `node:sqlite` 能力                       |
+| `npm run typecheck`                | Runtime、TUI 与共享 TypeScript 类型                      |
+| `npm run desktop:typecheck`        | Desktop main、preload、renderer 类型边界                 |
+| `npm run lint`                     | 根项目、Desktop、测试与脚本的 ESLint 检查                |
+| `npm run format`                   | Prettier 格式检查，不会改写文件                          |
+| `npm run test:integration`         | 不访问真实模型的确定性集成测试                           |
+| `npm run test:integration:windows` | Windows Hook、ACL 与完全访问 shell hardline 安全集成测试 |
+| `npm run build`                    | 构建 `dist/` 与可执行 `dist/cli/main.js`                 |
+| `npm pack --dry-run`               | 检查根包内容和 `pico` bin 映射                           |
+| `npm run desktop:package`          | 生成当前平台的未签名 Desktop smoke 包                    |
+| `npm run test:llm-e2e`             | 使用真实 Provider、凭证和网络验证 Runtime 闭环           |
 
 推荐的本地确定性门禁：
 

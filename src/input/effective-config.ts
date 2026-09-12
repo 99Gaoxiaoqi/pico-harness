@@ -5,7 +5,9 @@ import type { ModelProviderConfig } from "../provider/model-router.js";
 import { loadPicoProjectConfig, type PicoProjectConfig } from "./pico-config.js";
 import {
   UserConfigStore,
-  type PicoInteractionMode,
+  type PicoCollaborationMode,
+  type PicoOrchestrationMode,
+  type PicoPermissionMode,
   type PicoUserConfigDefaults,
 } from "./user-config-store.js";
 
@@ -13,7 +15,9 @@ export type ConfigSource = "user" | "project-legacy" | "environment" | "session"
 
 export interface EffectiveConfigDefaults {
   readonly modelRouteId?: string;
-  readonly mode?: PicoInteractionMode;
+  readonly collaborationMode?: PicoCollaborationMode;
+  readonly orchestrationMode?: PicoOrchestrationMode;
+  readonly permissionMode?: PicoPermissionMode;
   readonly thinkingEffort?: string;
 }
 
@@ -117,16 +121,26 @@ function resolveDefaults(
 ): EffectiveConfigDefaults {
   const defaults: {
     modelRouteId?: string;
-    mode?: PicoInteractionMode;
+    collaborationMode?: PicoCollaborationMode;
+    orchestrationMode?: PicoOrchestrationMode;
+    permissionMode?: PicoPermissionMode;
     thinkingEffort?: string;
   } = {};
   if (userDefaults?.modelRouteId !== undefined) {
     defaults.modelRouteId = userDefaults.modelRouteId;
     sources["defaults.modelRouteId"] = "user";
   }
-  if (userDefaults?.mode !== undefined) {
-    defaults.mode = userDefaults.mode;
-    sources["defaults.mode"] = "user";
+  if (userDefaults?.collaborationMode !== undefined) {
+    defaults.collaborationMode = userDefaults.collaborationMode;
+    sources["defaults.collaborationMode"] = "user";
+  }
+  if (userDefaults?.orchestrationMode !== undefined) {
+    defaults.orchestrationMode = userDefaults.orchestrationMode;
+    sources["defaults.orchestrationMode"] = "user";
+  }
+  if (userDefaults?.permissionMode !== undefined) {
+    defaults.permissionMode = userDefaults.permissionMode;
+    sources["defaults.permissionMode"] = "user";
   }
   if (userDefaults?.thinkingEffort !== undefined) {
     defaults.thinkingEffort = userDefaults.thinkingEffort;

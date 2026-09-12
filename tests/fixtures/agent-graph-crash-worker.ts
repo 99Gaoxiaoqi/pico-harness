@@ -281,7 +281,7 @@ function profileSnapshot(): AgentGraphProfileSnapshot {
     profileFingerprint: "sha256:test",
     modelRouteId: "test-model",
     tools: ["bash"],
-    permissionPolicy: { mode: "default", allowSessionGrants: false },
+    permissionPolicy: { mode: "ask", allowSessionGrants: false },
     systemPrompt: { version: "test", content: "test" },
     extensionPolicy: "none",
   };

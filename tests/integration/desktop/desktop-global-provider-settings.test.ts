@@ -120,13 +120,31 @@ test("Provider 和用户默认配置协议只接受全局参数", () => {
   );
   assert.deepEqual(
     parseStrictRuntimeParams("config.user.update", {
-      defaults: { modelRouteId: "fixture/fixture-model" },
+      defaults: {
+        modelRouteId: "fixture/fixture-model",
+        collaborationMode: "plan",
+        orchestrationMode: "graph",
+        permissionMode: "full-access",
+      },
       expectedRevision: "revision",
     }),
     {
-      defaults: { modelRouteId: "fixture/fixture-model" },
+      defaults: {
+        modelRouteId: "fixture/fixture-model",
+        collaborationMode: "plan",
+        orchestrationMode: "graph",
+        permissionMode: "full-access",
+      },
       expectedRevision: "revision",
     },
+  );
+  assert.throws(
+    () =>
+      parseStrictRuntimeParams("config.user.update", {
+        defaults: { mode: "plan" },
+        expectedRevision: "revision",
+      } as never),
+    /mode/u,
   );
   assert.throws(
     () =>

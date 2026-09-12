@@ -1,6 +1,6 @@
 // 跨协程审批中枢:Human-in-the-loop 的人工审批管理器。
 //
-// 解决痛点:Agent 接入企业 IM 并操作远端服务器/生产数据库时,YOLO 模式下
+// 解决痛点:Agent 接入企业 IM 并操作远端服务器/生产数据库时,低约束模式下
 // 会毫不犹豫执行 rm -rf 等不可逆高危命令。安全性绝不能依赖大模型"理智",
 // 更不能寄希望于 System Prompt 那句"千万别删库"。
 //
@@ -117,13 +117,15 @@ export class ApprovalManager {
     notify: ApprovalNotifier,
     diff: string | undefined,
     signal: AbortSignal | undefined,
-    options: { sessionScope?: PermissionSessionScope; providerCallId: string },
+    options: { sessionScope?: PermissionSessionScope; providerCallId: string; reason?: string },
   ): Promise<ApprovalResult> {
     signal?.throwIfAborted();
-    const message = `⚠ **高危操作审批请求**
+    const reason = options.reason ?? "工具调用需要交互审批";
+    const message = `⚠ **操作审批请求**
 Agent 试图执行以下动作:
 - 工具: ${toolName}
 - 参数: ${args}
+- 原因: ${reason}
 任务 ID: **${taskId}**
 👉 请回复 "approve ${taskId}" 同意放行,或 "reject ${taskId}" 拒绝执行。`;
 
@@ -177,7 +179,7 @@ Agent 试图执行以下动作:
         args,
         providerCallId: options.providerCallId,
         message,
-        preview: buildApprovalPreview(toolName, args, diff),
+        preview: buildApprovalPreview(toolName, args, diff, reason),
         ...(diff !== undefined ? { diff } : {}),
         ...(options.sessionScope ? { sessionScope: options.sessionScope } : {}),
       });
@@ -295,14 +297,14 @@ Agent 试图执行以下动作:
 export const globalApprovalManager = new ApprovalManager();
 
 /**
- * 高危命令检测：普通危险操作使用保守正则，hardline Bash 使用结构化判定。
- * 纯读取工具默认 YOLO 放行;bash/write_file/edit_file 命中危险模式则需审批。
+ * 启发式风险标签：只作为隔离 worker 的纵深拒绝信号，不能证明未命中操作安全。
+ * 前台 ask/auto 的允许或询问由受信工具能力分类决定，不使用本黑名单作为授权依据。
  *
  * 【架构师注】本实现为硬编码演示。生产环境应改造为支持外部配置
  * (.claw/permissions.yaml)+ 运行时热更新 (Hot-Reload) 的动态权限判定引擎,
  * 参考 Claude Code 的 allow/ask/deny 三态分类。
  *
- * 黑名单设计原则:宁可误拦(让用户审批),不可漏放(不可逆破坏)。
+ * 黑名单设计原则:宁可误报,不可把“未命中”解释成安全。
  * 覆盖所有已知删除/破坏/提权/覆盖变体。
  */
 const DANGEROUS_PATTERNS: RegExp[] = [
@@ -342,15 +344,9 @@ const DANGEROUS_PATTERNS: RegExp[] = [
 ];
 
 const BASH_WRITE_REDIRECT_RE = /\d*>>?\s*(?!&)([^\s|;&]+)/u;
-const BASH_WRITE_INTENT_PATTERNS: RegExp[] = [
-  BASH_WRITE_REDIRECT_RE,
-  /\btee\s+(-a\s+)?[^\s|;&]+/iu,
-  /\bsed\s+(-i|--in-place)\b/iu,
-  /\bperl\s+-pi\b/iu,
-];
 
 export function isDangerousCommand(toolName: string, args: string): boolean {
-  // 纯读取工具默认 YOLO 模式,全部放行
+  // 纯读取工具不属于危险操作，直接返回 false。
   if (toolName !== "bash" && toolName !== "write_file" && toolName !== "edit_file") {
     return false;
   }
@@ -373,7 +369,7 @@ export function classifyHardlineCommand(
 ): HardlineReasonKind | undefined {
   if (toolName !== "bash") return undefined;
   // hardline 的语法模型只覆盖 Bash。宿主 shell 无法解析时必须在
-  // YOLO/审批/后台策略之前 fail closed，不能让其他 shell 解释同一段文本。
+  // 权限模式、审批和后台策略之前 fail closed，不能让其他 shell 解释同一段文本。
   let dialect: HostShellDialect;
   try {
     dialect = hostShellDialect();
@@ -391,11 +387,17 @@ export function isHardlineCommand(toolName: string, args: string, workDir?: stri
   return classifyHardlineCommand(toolName, args, workDir) !== undefined;
 }
 
-function buildApprovalPreview(toolName: string, args: string, diff?: string): ApprovalPreview {
+function buildApprovalPreview(
+  toolName: string,
+  args: string,
+  diff?: string,
+  reason?: string,
+): ApprovalPreview {
   const target = approvalPreviewTarget(toolName, args);
+  const summary = approvalPreviewSummary(toolName, target, args);
   const preview: ApprovalPreview = {
     target,
-    summary: approvalPreviewSummary(toolName, target, args),
+    summary: reason ? `${summary}；${reason}` : summary,
   };
   if (diff !== undefined) {
     preview.diff = diff;
@@ -467,28 +469,4 @@ function findBashWriteRedirectTarget(command: string): string | undefined {
 function compactPreview(value: string, max: number): string {
   if (value.length <= max) return value;
   return `${value.slice(0, max - 1)}…`;
-}
-
-/**
- * AgentOps 生产运维策略:
- * - 读操作继续 YOLO 放行
- * - 任意 write/edit 都必须审批
- * - bash 复用通用危险命令黑名单
- */
-export function isAgentOpsDangerousCommand(toolName: string, args: string): boolean {
-  if (toolName === "write_file" || toolName === "edit_file") {
-    return true;
-  }
-  if (toolName === "bash") {
-    const command = parseBashCommand(args);
-    if (command && hasBashWriteIntent(command)) {
-      return true;
-    }
-  }
-
-  return isDangerousCommand(toolName, args);
-}
-
-function hasBashWriteIntent(command: string): boolean {
-  return BASH_WRITE_INTENT_PATTERNS.some((pattern) => pattern.test(command));
 }

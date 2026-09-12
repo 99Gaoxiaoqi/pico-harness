@@ -1,4 +1,5 @@
 import type { ChildProcess, SpawnOptions } from "node:child_process";
+import type { SandboxBoundaryExpansion } from "../permission-profile.js";
 
 export type SandboxProfile = "read-only" | "workspace-write" | "danger-full-access";
 export type SandboxNetworkPolicy = "deny" | "allow";
@@ -19,7 +20,7 @@ export type SandboxBackend =
   | "unavailable";
 
 export interface SandboxConfig {
-  /** workspace-write 的网络策略；read-only 固定拒绝，danger-full-access 不读取。 */
+  /** Managed profile 的独立网络策略；read-only 未显式配置时默认拒绝。 */
   network: SandboxNetworkPolicy;
 }
 
@@ -32,6 +33,9 @@ export interface SandboxPolicy {
   network: SandboxNetworkPolicy;
   readRoots: readonly string[];
   writeRoots: readonly string[];
+  /** Exact-file grants stay exact instead of widening authority to their parent directory. */
+  readFiles?: readonly string[];
+  writeFiles?: readonly string[];
   scratchRoot: string;
   generation: number;
 }
@@ -89,6 +93,7 @@ export type SandboxViolationCode =
   | "policy_compilation_failed"
   | "workspace_write_denied"
   | "network_denied"
+  | "sandbox_boundary_required"
   | "sandbox_runtime_denied"
   | "sandbox_cleanup_failed";
 
@@ -98,6 +103,7 @@ export class SandboxViolationError extends Error {
   constructor(
     readonly code: SandboxViolationCode,
     message: string,
+    readonly requiredExpansion?: SandboxBoundaryExpansion,
   ) {
     super(`[sandbox:${code}] ${message}`);
   }

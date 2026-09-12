@@ -13,10 +13,14 @@ import { automationDeniedTools } from "../safety/automation-tool-policy.js";
 import {
   BACKGROUND_HARDLINE_VERSION,
   BACKGROUND_HOOK_VERSION,
-} from "../safety/background-yolo-policy.js";
+} from "../safety/background-autonomous-policy.js";
 import { CronService } from "../tasks/cron-service.js";
 import { RuntimeConflictError } from "../storage/sqlite/sqlite-runtime-control-store.js";
-import type { CronJobRecord, CronRunRecord, YoloPolicySnapshot } from "../tasks/runtime-types.js";
+import type {
+  CronJobRecord,
+  CronRunRecord,
+  AutonomousPolicySnapshot,
+} from "../tasks/runtime-types.js";
 import {
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
@@ -25,7 +29,7 @@ import {
 } from "./protocol.js";
 
 export interface DesktopAutomationSecurity {
-  readonly policySnapshot: YoloPolicySnapshot;
+  readonly policySnapshot: AutonomousPolicySnapshot;
   readonly credentialRef: CredentialRef;
   /** 创建时固定的 Provider/模型路由；v1 兼容调用方可省略并由 credentialRef 反推。 */
   readonly modelRouteId?: string;
@@ -413,7 +417,7 @@ export async function createTrustedDesktopAutomation(
       credentialRef: target.ref,
       modelRouteId: input.modelRouteId,
       policySnapshot: {
-        mode: "yolo",
+        mode: "full-access",
         backgroundEnabled: true,
         trustedWorkspace: true,
         toolNetworkPolicy: input.toolNetworkPolicy,

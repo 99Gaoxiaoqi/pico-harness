@@ -333,7 +333,7 @@ export interface RuntimeActions {
       modelRouteId?: string;
       collaborationMode?: "agent" | "plan";
       orchestrationMode?: "default" | "graph" | "swarm";
-      permissionMode?: "default" | "auto" | "yolo";
+      permissionMode?: "ask" | "auto" | "full-access";
       thinkingEffort?: string;
     }>,
   ): Promise<void>;
@@ -2610,7 +2610,6 @@ export function useRuntimeStore(): RuntimeStore {
           ...(providerConfig.userDefaults.permissionMode
             ? { permissionMode: providerConfig.userDefaults.permissionMode }
             : {}),
-          ...(providerConfig.userDefaults.mode ? { mode: providerConfig.userDefaults.mode } : {}),
           ...(providerConfig.userDefaults.thinkingEffort
             ? { thinkingEffort: providerConfig.userDefaults.thinkingEffort }
             : {}),

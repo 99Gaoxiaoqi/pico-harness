@@ -215,6 +215,7 @@ export interface CreateAgentGraphSupervisorToolsOptions {
 
 abstract class AgentGraphSupervisorTool implements BaseTool {
   readonly fileSideEffects = NO_FILE_SIDE_EFFECTS;
+  readonly permissionCategory = "bounded_control" as const;
   readonly toolset = "agent-graph";
   abstract readonly readOnly: boolean;
 

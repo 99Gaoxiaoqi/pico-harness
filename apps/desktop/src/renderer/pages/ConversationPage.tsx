@@ -94,6 +94,12 @@ const CHOOSE_PROJECT_OPTION_VALUE = "__choose-project__";
 
 const TEMPORARY_PROJECT_OPTION_VALUE = "__temporary-project__";
 
+const PERMISSION_MODE_LABELS = {
+  ask: "请求批准",
+  auto: "帮我批准",
+  "full-access": "完全访问权限",
+} as const;
+
 export function NewTaskPage() {
   const { data, actions } = useRuntime();
   const location = useLocation();
@@ -244,16 +250,13 @@ export function ConversationPage() {
   }, [workspacePath, data.modelRoutes, data.providerConfig.providers]);
   const newTaskSettings = useMemo<RuntimeUserDefaults>(() => {
     const defaults = data.providerConfig.userDefaults;
-    const legacyMode = defaults.mode;
     const modelRouteId =
       defaults.modelRouteId ?? data.providerConfig.defaultModelRouteId ?? newTaskModelRoutes[0]?.id;
     return {
       ...(modelRouteId ? { modelRouteId } : {}),
-      collaborationMode: defaults.collaborationMode ?? (legacyMode === "plan" ? "plan" : "agent"),
+      collaborationMode: defaults.collaborationMode ?? "agent",
       orchestrationMode: defaults.orchestrationMode ?? "default",
-      permissionMode:
-        defaults.permissionMode ??
-        (legacyMode === "auto" || legacyMode === "yolo" ? legacyMode : "default"),
+      permissionMode: defaults.permissionMode ?? "ask",
       ...(defaults.thinkingEffort ? { thinkingEffort: defaults.thinkingEffort } : {}),
       ...newTaskSettingOverrides[workspacePath || "unbound"],
     };
@@ -1199,28 +1202,28 @@ export function ConversationPage() {
                               />
 
                               <label
-                                className={`conversation-context-option conversation-icon-select ${newTaskSettings.permissionMode === "yolo" ? "is-danger" : ""}`}
-                                title={`权限：${newTaskSettings.permissionMode === "yolo" ? "YOLO（完全访问）" : newTaskSettings.permissionMode === "auto" ? "自动" : "默认"}`}
+                                className={`conversation-context-option conversation-icon-select ${newTaskSettings.permissionMode === "full-access" ? "is-danger" : ""}`}
+                                title={`权限：${PERMISSION_MODE_LABELS[newTaskSettings.permissionMode ?? "ask"]}`}
                               >
                                 <ShieldCheck aria-hidden="true" />
                                 <span className="conversation-sr-only">权限模式</span>
                                 <select
                                   name="initial-permission-mode"
                                   aria-label="权限模式"
-                                  title="权限模式"
-                                  value={newTaskSettings.permissionMode ?? "default"}
+                                  title={`权限：${PERMISSION_MODE_LABELS[newTaskSettings.permissionMode ?? "ask"]}`}
+                                  value={newTaskSettings.permissionMode ?? "ask"}
                                   onChange={(event) =>
                                     updateNewTaskSettings({
                                       permissionMode: event.target.value as
-                                        | "default"
+                                        | "ask"
                                         | "auto"
-                                        | "yolo",
+                                        | "full-access",
                                     })
                                   }
                                 >
-                                  <option value="default">权限：默认</option>
-                                  <option value="auto">权限：自动</option>
-                                  <option value="yolo">权限：YOLO（完全访问）</option>
+                                  <option value="ask">权限：请求批准</option>
+                                  <option value="auto">权限：帮我批准</option>
+                                  <option value="full-access">权限：完全访问权限</option>
                                 </select>
                               </label>
                             </>
@@ -1256,18 +1259,21 @@ export function ConversationPage() {
                             <select
                               name="permission-mode"
                               aria-label="权限模式"
-                              title="权限模式"
+                              title={`权限：${PERMISSION_MODE_LABELS[conversation.settings.permissionMode]}`}
                               value={conversation.settings.permissionMode}
                               disabled={Boolean(activeRun) || Boolean(busy)}
                               onChange={(event) =>
                                 void actions.updateSessionSettings(sessionRef, {
-                                  permissionMode: event.target.value as "default" | "auto" | "yolo",
+                                  permissionMode: event.target.value as
+                                    | "ask"
+                                    | "auto"
+                                    | "full-access",
                                 })
                               }
                             >
-                              <option value="default">权限：默认</option>
-                              <option value="auto">权限：自动</option>
-                              <option value="yolo">权限：YOLO（完全访问）</option>
+                              <option value="ask">权限：请求批准</option>
+                              <option value="auto">权限：帮我批准</option>
+                              <option value="full-access">权限：完全访问权限</option>
                             </select>
                           </label>
 

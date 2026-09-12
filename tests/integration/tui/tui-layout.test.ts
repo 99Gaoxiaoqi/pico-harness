@@ -69,16 +69,16 @@ test("唯一状态栏同时呈现会话、权限和 MCP 状态", () => {
       phase: "idle",
       sessionMode: "new",
       collaborationMode: "plan",
-      permissionMode: "yolo",
+      permissionMode: "full-access",
       mcpSummary: "MCP 0/0",
       renderWidth: 120,
     }),
-    "状态 空闲 · 模式 new · 协作 plan · 权限 yolo · 编排 default · MCP 0/0",
+    "状态 空闲 · 模式 new · 协作 plan · 权限 完全访问权限 · 编排 default · MCP 0/0",
   );
 });
 
-test("全新 TUI 状态栏安全回退为 default 权限", () => {
-  assert.match(buildStatusBarText({ renderWidth: 120 }), /协作 agent · 权限 default/u);
+test("全新 TUI 状态栏安全回退为请求批准权限", () => {
+  assert.match(buildStatusBarText({ renderWidth: 120 }), /协作 agent · 权限 请求批准/u);
 });
 
 test("Plan 审批卡片提供三个专用动作且继续修改要求反馈", () => {
@@ -161,8 +161,8 @@ test("reasoning 状态显示已配置档位的中文说明", () => {
     sessionMode: "new",
     cwd: "/tmp",
     provider: "openai",
-    mode: "yolo",
-    permissionMode: "yolo",
+    mode: "full-access",
+    permissionMode: "full-access",
     model: "gpt-5.4",
     modelRouteId: route.id,
     thinkingEffort: "off",

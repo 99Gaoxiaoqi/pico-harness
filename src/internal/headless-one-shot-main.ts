@@ -3,7 +3,7 @@
 import { stdin, stdout } from "node:process";
 import type {
   HeadlessOneShotOutcome,
-  HeadlessOneShotResultV1,
+  HeadlessOneShotResultV2,
 } from "./headless-one-shot-runner.js";
 
 const MAX_STDIN_BYTES = 2 * 1024 * 1024;
@@ -79,8 +79,8 @@ async function collectStdin(): Promise<string> {
 
 function signalBeforeRequest(signal: "SIGINT" | "SIGTERM"): HeadlessOneShotOutcome {
   const exitCode = signal === "SIGTERM" ? 143 : 130;
-  const result: HeadlessOneShotResultV1 = {
-    schemaVersion: 1,
+  const result: HeadlessOneShotResultV2 = {
+    schemaVersion: 2,
     requestId: null,
     status: "canceled",
     sessionId: null,
@@ -92,6 +92,7 @@ function signalBeforeRequest(signal: "SIGINT" | "SIGTERM"): HeadlessOneShotOutco
     effective: {
       modelRouteId: null,
       thinkingEffort: null,
+      collaborationMode: null,
       permissionMode: null,
       allowedTools: [],
     },
@@ -105,8 +106,8 @@ function signalBeforeRequest(signal: "SIGINT" | "SIGTERM"): HeadlessOneShotOutco
 }
 
 function fallbackFailure(): HeadlessOneShotOutcome {
-  const result: HeadlessOneShotResultV1 = {
-    schemaVersion: 1,
+  const result: HeadlessOneShotResultV2 = {
+    schemaVersion: 2,
     requestId: null,
     status: "invalid_request",
     sessionId: null,
@@ -118,6 +119,7 @@ function fallbackFailure(): HeadlessOneShotOutcome {
     effective: {
       modelRouteId: null,
       thinkingEffort: null,
+      collaborationMode: null,
       permissionMode: null,
       allowedTools: [],
     },

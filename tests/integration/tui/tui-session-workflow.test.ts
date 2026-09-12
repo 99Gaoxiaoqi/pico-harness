@@ -102,7 +102,7 @@ test("/compact refuses legacy environment credentials without a user model route
   assert.deepEqual(client.requests, ["session.compact"]);
 });
 
-test("/plan and legacy mode commands keep collaboration and permission independent", async (context) => {
+test("/plan and /mode keep collaboration and permission independent", async (context) => {
   const fixture = await createFixture("plan-command-compatibility");
   const client = await createCommandClient(fixture);
   context.after(async () => {
@@ -111,15 +111,15 @@ test("/plan and legacy mode commands keep collaboration and permission independe
   });
   await client.run("/plan");
   assert.equal(client.runtime.preSessionSettings.collaborationMode, "plan");
-  assert.equal(client.runtime.preSessionSettings.permissionMode, "default");
+  assert.equal(client.runtime.preSessionSettings.permissionMode, "ask");
   await client.run("/mode auto");
   assert.equal(client.runtime.preSessionSettings.collaborationMode, "plan");
   assert.equal(client.runtime.preSessionSettings.permissionMode, "auto");
-  await client.run("/permissions plan");
-  assert.equal(client.runtime.preSessionSettings.collaborationMode, "plan");
-  assert.equal(client.runtime.preSessionSettings.permissionMode, "auto");
-  await client.run("/plan off");
+  await client.run("/mode agent");
   assert.equal(client.runtime.preSessionSettings.collaborationMode, "agent");
+  assert.equal(client.runtime.preSessionSettings.permissionMode, "auto");
+  await client.run("/mode plan");
+  assert.equal(client.runtime.preSessionSettings.collaborationMode, "plan");
   assert.equal(client.runtime.preSessionSettings.permissionMode, "auto");
   assert.deepEqual(client.requests, []);
 });
@@ -140,7 +140,7 @@ test("/resume and /fork reject an unpublished fork target", async (context) => {
     sourceSessionId: "source",
     sourceCursor: { logId: "source", seq: 1, epoch: 0, eventId: "source-event" },
     targetSessionId: "unfinished-fork",
-    targetMode: "default",
+    targetMode: "ask",
     stagingDirectory: join(fixture.root, "staging", "unfinished-fork"),
   });
   const client = await createCommandClient(fixture);

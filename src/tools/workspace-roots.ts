@@ -4,6 +4,13 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { ToolCall } from "../schema/message.js";
 import type { RequestMiddleware } from "./registry.js";
 import { bashCommandFromArgs, extractBashWritePaths } from "../approval/bash-paths.js";
+import {
+  canReadPath,
+  canWritePath,
+  isDeniedPath,
+  isProtectedWritePath,
+  type ManagedPermissionProfile,
+} from "../safety/permission-profile.js";
 
 const OUTSIDE_WORKSPACE_MESSAGE = "路径不在当前工作区。请先运行 /add-dir <directory> 授权该目录。";
 
@@ -24,10 +31,18 @@ export interface AssertAllowedOptions {
    * 完成 mkdir 后再校验并消耗，缩小符号链接竞态窗口。
    */
   consumeAuthorization?: boolean;
+  /** Defaults to read; callers that can mutate must opt into write authority. */
+  access?: WorkspaceAccess["access"];
+}
+
+export interface WorkspaceBoundaryEntry extends WorkspaceAccess {
+  scope: "exact" | "subtree";
 }
 
 export class WorkspaceRoots {
   private readonly oneCallPaths = new Map<string, number>();
+  private boundaryEntries: readonly WorkspaceBoundaryEntry[] = [];
+  private boundaryProfile: ManagedPermissionProfile | undefined;
   private policyGeneration = 0;
 
   private constructor(
@@ -96,6 +111,71 @@ export class WorkspaceRoots {
     return Object.freeze([...new Set([...this.roots, ...this.oneCallPaths.keys()])]);
   }
 
+  /** Replace the durable ExecutionBoundary projection without mutating configured roots. */
+  replaceBoundaryEntries(entries: readonly WorkspaceBoundaryEntry[]): void {
+    const next = Object.freeze(
+      entries.map((entry) =>
+        Object.freeze({
+          path: this.resolveUnchecked(entry.path),
+          access: entry.access,
+          scope: entry.scope,
+        }),
+      ),
+    );
+    if (
+      this.boundaryProfile === undefined &&
+      JSON.stringify(next) === JSON.stringify(this.boundaryEntries)
+    ) {
+      return;
+    }
+    this.boundaryProfile = undefined;
+    this.boundaryEntries = next;
+    this.policyGeneration++;
+  }
+
+  /** Apply the complete managed profile to direct file tools without treating process tmp as workspace. */
+  replaceBoundaryProfile(profile: ManagedPermissionProfile | undefined): void {
+    const cloned = profile ? structuredClone(profile) : undefined;
+    const next = cloned
+      ? {
+          ...cloned,
+          fileSystem: {
+            ...cloned.fileSystem,
+            entries: cloned.fileSystem.entries.map((entry) =>
+              entry.kind === "path"
+                ? { ...entry, path: this.resolveUnchecked(entry.path) }
+                : entry,
+            ),
+          },
+        }
+      : undefined;
+    if (
+      JSON.stringify(next) === JSON.stringify(this.boundaryProfile) &&
+      (next !== undefined || this.boundaryEntries.length === 0)
+    ) {
+      return;
+    }
+    this.boundaryProfile = next;
+    this.boundaryEntries = Object.freeze(
+      (next?.fileSystem.entries ?? []).flatMap((entry) =>
+        entry.kind === "path" && entry.access !== "deny"
+          ? [
+              Object.freeze({
+                path: this.resolveUnchecked(entry.path),
+                access: entry.access,
+                scope: entry.match ?? "subtree",
+              }),
+            ]
+          : [],
+      ),
+    );
+    this.policyGeneration++;
+  }
+
+  boundarySnapshot(): readonly WorkspaceBoundaryEntry[] {
+    return Object.freeze(this.boundaryEntries.map((entry) => Object.freeze({ ...entry })));
+  }
+
   generation(): number {
     return this.policyGeneration;
   }
@@ -117,9 +197,9 @@ export class WorkspaceRoots {
     return { added: true, path: canonicalPath };
   }
 
-  resolve(path: string): string {
+  resolve(path: string, access: WorkspaceAccess["access"] = "read"): string {
     const target = this.resolveUnchecked(path);
-    if (!this.isAllowed(target)) {
+    if (!this.isAllowed(target, access)) {
       throw outsideWorkspaceError(path);
     }
     return target;
@@ -130,8 +210,8 @@ export class WorkspaceRoots {
     return canonicalizeTargetSync(lexicalTarget);
   }
 
-  isAllowedPath(path: string): boolean {
-    return this.isAllowed(this.resolveUnchecked(path));
+  isAllowedPath(path: string, access: WorkspaceAccess["access"] = "read"): boolean {
+    return this.isAllowed(this.resolveUnchecked(path), access);
   }
 
   directoryForPath(path: string): string {
@@ -151,8 +231,10 @@ export class WorkspaceRoots {
 
   async assertAllowed(path: string, options: AssertAllowedOptions = {}): Promise<string> {
     const target = this.resolveUnchecked(path);
+    const requestedAccess = options.access ?? "read";
+    if (this.isPolicyDenied(target, requestedAccess)) throw outsideWorkspaceError(path);
     let usedOneCallPermission = false;
-    if (!this.isAllowed(target)) {
+    if (!this.isAllowed(target, requestedAccess)) {
       const authorization = [...this.oneCallPaths.keys()].find((root) => isWithin(root, target));
       const remaining = authorization ? (this.oneCallPaths.get(authorization) ?? 0) : 0;
       if (remaining <= 0) throw outsideWorkspaceError(path);
@@ -164,10 +246,11 @@ export class WorkspaceRoots {
     }
     const existingAncestor = await nearestExistingAncestor(target);
     const canonicalAncestor = await realpathAsync(existingAncestor);
-    if (!this.isAllowed(canonicalAncestor) && !usedOneCallPermission) {
+    const canonicalTarget = resolve(canonicalAncestor, relative(existingAncestor, target));
+    if (!this.isAllowed(canonicalTarget, requestedAccess) && !usedOneCallPermission) {
       throw outsideWorkspaceError(path);
     }
-    return target;
+    return canonicalTarget;
   }
 
   authorizeOnce(path: string): string {
@@ -183,16 +266,58 @@ export class WorkspaceRoots {
     }
   }
 
-  private isAllowed(path: string): boolean {
-    return this.roots.some((root) => isWithin(root, path));
+  private isAllowed(path: string, access: WorkspaceAccess["access"] = "read"): boolean {
+    if (this.boundaryProfile) {
+      const directFileProfile = directFilePermissionProfile(this.boundaryProfile);
+      const context = this.boundaryMatchContext();
+      return access === "write"
+        ? canWritePath(directFileProfile, path, context)
+        : canReadPath(directFileProfile, path, context);
+    }
+    if (this.roots.some((root) => isWithin(root, path))) return true;
+    return this.boundaryEntries.some(
+      (entry) =>
+        (access === "read" || entry.access === "write") &&
+        (entry.scope === "exact" ? entry.path === path : isWithin(entry.path, path)),
+    );
   }
+
+  private isPolicyDenied(path: string, access: WorkspaceAccess["access"]): boolean {
+    if (!this.boundaryProfile) return false;
+    const context = this.boundaryMatchContext();
+    return (
+      isDeniedPath(this.boundaryProfile, path, context) ||
+      (access === "write" && isProtectedWritePath(this.boundaryProfile, path, context))
+    );
+  }
+
+  private boundaryMatchContext() {
+    return { root: this.primaryRoot, workspaceRoots: this.roots };
+  }
+}
+
+/** tmp/minimal are process-runtime support paths, not implicit direct-file authority. */
+function directFilePermissionProfile(profile: ManagedPermissionProfile): ManagedPermissionProfile {
+  if (profile.fileSystem.kind === "unrestricted") return profile;
+  return {
+    ...profile,
+    fileSystem: {
+      ...profile.fileSystem,
+      entries: profile.fileSystem.entries.filter(
+        (entry) =>
+          entry.kind === "path" ||
+          entry.special === ":workspace_roots" ||
+          entry.special === ":root",
+      ),
+    },
+  };
 }
 
 export function buildWorkspaceBoundaryMiddleware(roots: WorkspaceRoots): RequestMiddleware {
   return async (call) => {
     for (const access of workspaceAccessesFromCall(call)) {
       try {
-        await roots.assertAllowed(access.path);
+        await roots.assertAllowed(access.path, { access: access.access });
       } catch (error) {
         return {
           allowed: false,

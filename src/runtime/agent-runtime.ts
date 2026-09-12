@@ -15,7 +15,10 @@ import type {
   SubagentCapabilityDefinition,
 } from "../agents/subagent-profiles.js";
 import type { RuntimeSubagentPreset } from "@pico/protocol";
-import { createConfiguredSubagentExecutor } from "./configured-subagent-executor.js";
+import {
+  configuredSubagentExecutionBoundary,
+  createConfiguredSubagentExecutor,
+} from "./configured-subagent-executor.js";
 import { TOOL_CONSTRUCTORS, buildSubagentSafetyMiddleware } from "../tools/delegation-registry.js";
 import { type AtomicMemoryLifecycle } from "./atomic-memory-lifecycle.js";
 import { createAgentSwarmStatusTool } from "../tools/agent-swarm-status-tool.js";
@@ -23,11 +26,13 @@ import { AGENT_SWARM_SUPERVISOR_TOOL_NAMES } from "../agent-graph/core/tool-name
 import { isPlanGraphWaiting, reconcilePlanExecution } from "./plan-execution-recovery.js";
 import { randomUUID } from "node:crypto";
 import { mkdir, realpath } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { AgentEngine, isPlanProviderTool } from "../engine/loop.js";
 import { PlanHandoffController } from "../engine/plan-handoff.js";
 import type { GoalManager } from "../engine/goal-manager.js";
 import { globalSessionManager, type Session } from "../engine/session.js";
+import { sessionEntryKey } from "../engine/session-manager-state.js";
 import type { SessionManagerLease } from "../engine/session-manager.js";
 import {
   reconcileUnfinishedSessionForksOrThrow,
@@ -90,10 +95,9 @@ import { logger } from "../observability/logger.js";
 import {
   globalApprovalManager,
   classifyHardlineCommand,
-  isAgentOpsDangerousCommand,
-  isDangerousCommand,
   type ApprovalManager,
   type ApprovalNotifier,
+  type ApprovalResult,
   type HardlineReasonKind,
 } from "../approval/manager.js";
 import {
@@ -104,16 +108,26 @@ import {
   permissionScopeForCall,
   type PermissionRuntimeSettings,
 } from "../approval/session-permissions.js";
+import { bashCommandFromArgs } from "../approval/bash-paths.js";
 import { computeApprovalDiff } from "../approval/diff.js";
-import { classifyBashCommand } from "../approval/bash-safety.js";
-import { classifyPowerShellCommand } from "../approval/powershell-safety.js";
-import { hostShellDialect } from "../os/shell.js";
+import {
+  classifyToolPermission,
+  evaluateToolPermission,
+  permissionReasonForCategory,
+  type RuntimePermissionMode,
+  type ToolPermissionCategory,
+} from "../approval/tool-permission-policy.js";
 import { createSessionRuntime, type SessionRuntime } from "./session-runtime.js";
+import type {
+  PersistedSessionSettings,
+  PersistedSessionSettingsWrite,
+} from "../engine/session-runtime.js";
 import type { SubagentModelCatalog } from "./subagent-model-catalog.js";
 import type { MiddlewareFunc } from "../tools/registry.js";
 import {
   McpConnectionManager,
   type McpConfigSource,
+  type McpRemoteNetworkRequest,
   type McpStatusSnapshot,
 } from "../mcp/manager.js";
 import { isMcpToolName } from "../mcp/types.js";
@@ -133,19 +147,31 @@ import {
   type SessionSettings,
 } from "../input/session-settings.js";
 import { createIsolatedPicoConfig, loadPicoConfig } from "../input/pico-config.js";
-import type { YoloSandboxConfig } from "../safety/yolo-sandbox.js";
+import {
+  hasExplicitNetworkIntent,
+  type WorkspaceSandboxConfig,
+} from "../safety/workspace-sandbox.js";
 import { createSandboxPolicy, normalizeRoots } from "../safety/process-sandbox/index.js";
+import { compileRuntimeProcessSandbox } from "../safety/runtime-process-sandbox.js";
+import {
+  applyExecutionBoundaryExpansion,
+  canReadPath,
+  canWritePath,
+  executionBoundaryContains,
+  type ExecutionBoundary,
+} from "../safety/permission-profile.js";
+import { canonicalizeSandboxBoundaryExpansion } from "../safety/sandbox-boundary-path.js";
 import { resolveCliSession, type CliSessionSelection } from "../cli/session-resolver.js";
 import type { WorktreeSupervisor } from "../tasks/worktree-supervisor.js";
 import { SqliteRuntimeControlStore } from "../storage/sqlite/sqlite-runtime-control-store.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import {
   BackgroundPolicyViolationError,
-  buildBackgroundYoloMiddleware,
-  prepareBackgroundYoloPolicy,
+  buildBackgroundAutonomousMiddleware,
+  prepareBackgroundAutonomousPolicy,
   type BackgroundWorkspaceTrustVerifier,
-  type PreparedBackgroundYoloPolicy,
-} from "../safety/background-yolo-policy.js";
+  type PreparedBackgroundAutonomousPolicy,
+} from "../safety/background-autonomous-policy.js";
 import {
   loadPluginRuntimeSnapshot,
   type PluginRuntimeSnapshot,
@@ -179,8 +205,11 @@ import {
 import { createEngineRuntimePort } from "./engine-runtime-port-adapter.js";
 import { createSessionForkRuntimePort } from "./session-fork-runtime-port-adapter.js";
 import { bindRuntimeHookCapabilities } from "./runtime-hook-assembly.js";
+import type { HookHostNetworkRequest } from "../hooks/executors/index.js";
+import type { RequestSandboxBoundaryHandler } from "../tools/request-sandbox-boundary.js";
 
 const livePlanAdmissions = new Set<string>();
+const liveConfiguredChildAdmissions = new Set<string>();
 const PLAN_REVISION_FEEDBACK_MAX_CHARS = 4_000;
 const PLAN_REVISION_CONTEXT_FIELD_MAX_CHARS = 256;
 import {
@@ -259,12 +288,13 @@ export interface RuntimeHost {
 export type RuntimePolicyDenialReasonKind =
   | "plan_mode"
   | HardlineReasonKind
+  | "policy_denied"
   | "hook_denied"
   | "approval_denied";
 
 export interface RuntimePolicyDenial {
   readonly source: "safety" | "permission";
-  readonly code: "plan_mode" | "hardline" | "hook" | "approval";
+  readonly code: "plan_mode" | "hardline" | "policy" | "hook" | "approval";
   readonly reasonKind: RuntimePolicyDenialReasonKind;
   readonly toolName: string;
 }
@@ -276,6 +306,7 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   configuredSubagentChild?: {
     readonly definition: SubagentCapabilityDefinition;
     readonly preset?: RuntimeSubagentPreset;
+    readonly executionBoundaryCeiling: ExecutionBoundary;
   };
 
   env?: RunAgentEnv;
@@ -352,6 +383,8 @@ export interface RunAgentCliDependencies extends RuntimeHost {
         readonly getActivationContext: () => GraphOperatorActivationContext | undefined;
         readonly outputPort: AgentOutputCommitPort;
         readonly profileSnapshot: AgentGraphProfileSnapshot;
+        /** Trusted host projection of the inherited durable execution boundary. */
+        readonly executionPermissionMode: "ask" | "full-access";
       };
   /** 仅用于后台执行的实时信任校验；生产默认读取用户级 WorkspaceTrustStore。 */
   backgroundTrustStore?: BackgroundWorkspaceTrustVerifier;
@@ -888,6 +921,19 @@ export async function executeAgentRuntime(
       ...(options.forkSession ? { forkSession: options.forkSession } : {}),
     }));
   const defaultConfigModel = options.model ?? defaultModel(kind);
+  if (
+    dependencies.configuredSubagentChild &&
+    liveConfiguredChildAdmissions.has(
+      sessionEntryKey(
+        sessionSelection.sessionId,
+        workDir,
+        picoHome,
+        dependencies.runtimeSession?.runtimeStorageRoot,
+      ),
+    )
+  ) {
+    throw new Error("Configured child session already has an active admission");
+  }
 
   // 阶段 2：获取持久化 Session，并推导会话级有效配置。
   const injectedSession = dependencies.runtimeSession;
@@ -913,6 +959,7 @@ export async function executeAgentRuntime(
   let activeExecutionPlanId: string | undefined;
   let planRun = false;
   let livePlanAdmission: string | undefined;
+  let liveConfiguredChildAdmission: string | undefined;
   let planExecutionPromptId: string | undefined;
   const ownsRuntimeState = dependencies.runtimeState === undefined;
   let sessionLeaseTransferred = false;
@@ -936,6 +983,7 @@ export async function executeAgentRuntime(
   cleanupScope.register("Workspace memory repository", () => memoryRepository?.close());
 
   try {
+    let configuredChildBoundaryCeiling: ExecutionBoundary | undefined;
     const childDefinition = session.runtimeEventStore
       ? await readConfiguredSubagentDefinition(session.runtimeEventStore, session.id, workDir)
       : undefined;
@@ -952,15 +1000,45 @@ export async function executeAgentRuntime(
         configuredSubagentChild: {
           ...dependencies.configuredSubagentChild,
           definition: childDefinition,
+          executionBoundaryCeiling:
+            dependencies.configuredSubagentChild?.executionBoundaryCeiling ??
+            configuredSubagentExecutionBoundary(childDefinition),
         },
       };
     }
     if (dependencies.configuredSubagentChild) {
       if (backgroundPolicy || dependencies.agentGraph || options.approvedPlan)
         throw new Error("Child session cannot switch execution policy");
+      const capabilityBoundary = configuredSubagentExecutionBoundary(
+        dependencies.configuredSubagentChild.definition,
+      );
+      const expectedBoundary = dependencies.configuredSubagentChild.executionBoundaryCeiling;
+      if (
+        expectedBoundary.kind !== "bypass" &&
+        (!executionBoundaryContains(capabilityBoundary, expectedBoundary) ||
+          !executionBoundaryContains(expectedBoundary, capabilityBoundary))
+      ) {
+        throw new Error("Configured child execution boundary ceiling changed");
+      }
+      const configuredChildAdmission = sessionEntryKey(
+        session.id,
+        session.workDir,
+        session.picoHome,
+        session.runtimeStorageRoot,
+      );
+      if (liveConfiguredChildAdmissions.has(configuredChildAdmission)) {
+        throw new Error("Configured child session already has an active admission");
+      }
+      liveConfiguredChildAdmissions.add(configuredChildAdmission);
+      liveConfiguredChildAdmission = configuredChildAdmission;
+      configuredChildBoundaryCeiling = await reconcileConfiguredChildExecutionBoundary(
+        session,
+        expectedBoundary,
+        sessionSelection.mode,
+      );
       options = {
         ...options,
-        interactionMode: "default",
+        interactionMode: configuredChildBoundaryCeiling.kind === "bypass" ? "full-access" : "ask",
         orchestrationMode: "default",
         agentSwarmAuthorization: "none",
         planMode: false,
@@ -988,10 +1066,16 @@ export async function executeAgentRuntime(
       ...(sessionSelection.mode === "fork"
         ? {}
         : backgroundPolicy
-          ? { mode: "yolo" as const }
-          : options.interactionMode !== undefined
-            ? { mode: options.interactionMode }
-            : {}),
+          ? { collaborationMode: "agent" as const, permissionMode: "full-access" as const }
+          : {
+              ...(options.collaborationMode !== undefined
+                ? { collaborationMode: options.collaborationMode }
+                : {}),
+              ...(options.permissionMode !== undefined
+                ? { permissionMode: options.permissionMode }
+                : {}),
+              ...(options.interactionMode !== undefined ? { mode: options.interactionMode } : {}),
+            }),
       model: defaultConfigModel,
       ...(options.modelRouteId !== undefined ? { modelRouteId: options.modelRouteId } : {}),
       ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
@@ -1007,6 +1091,23 @@ export async function executeAgentRuntime(
     if (legacyHistoryMissingSettings) {
       await session.flushPersistence();
     }
+    if (configuredChildBoundaryCeiling) {
+      const boundaryAfterSettingsRestore = session.getRuntimeStateSnapshot().boundary;
+      if (
+        !boundaryAfterSettingsRestore ||
+        !sameExecutionBoundaryCapability(
+          configuredChildBoundaryCeiling,
+          boundaryAfterSettingsRestore,
+        )
+      ) {
+        throw new Error("Configured child execution boundary changed during admission");
+      }
+    }
+    // A configured child executes against the boundary admitted above for its entire Run.
+    // External settings writes may update the durable Session concurrently, but must not
+    // widen this Run's physical filesystem, subprocess, or network authority.
+    const runtimeExecutionBoundary = (): ExecutionBoundary | undefined =>
+      configuredChildBoundaryCeiling ?? session.getRuntimeStateSnapshot().boundary;
     if (!settings.collaborationMode) throw new Error("Session collaborationMode is unavailable");
     const sideConversation = settings.sideConversation === true;
     const collaborationMode = (): "agent" | "plan" =>
@@ -1039,11 +1140,13 @@ export async function executeAgentRuntime(
               ? "default"
               : requestedMode
           : requestedMode;
-    const permissionMode = (): "default" | "auto" | "yolo" =>
+    const permissionMode = (): "ask" | "auto" | "full-access" =>
       dependencies.configuredSubagentChild
-        ? "default"
+        ? configuredChildBoundaryCeiling?.kind === "bypass"
+          ? "full-access"
+          : "ask"
         : dependencies.agentGraph?.kind === "operator"
-          ? dependencies.agentGraph.profileSnapshot.permissionPolicy.mode
+          ? dependencies.agentGraph.executionPermissionMode
           : settings.permissionMode;
     if (options.approvedPlan) {
       if (settings.collaborationMode !== "agent") {
@@ -1159,7 +1262,27 @@ export async function executeAgentRuntime(
             ...settings.additionalDirectories,
           ],
     );
+    applyExecutionBoundaryToWorkspaceRoots(workspaceRoots, runtimeExecutionBoundary());
     setSessionAdditionalDirectories(settings, workspaceRoots.list().slice(1));
+    const processSandboxScratchRoot = join(picoHome, "sandboxes", session.id);
+    const currentMainProcessSandbox = (): NonNullable<
+      DefaultToolRegistryOptions["processSandbox"]
+    > => {
+      const executionBoundary = runtimeExecutionBoundary();
+      return compileRuntimeProcessSandbox({
+        collaborationMode: collaborationMode(),
+        permissionMode: permissionMode(),
+        workspaceGeneration: workspaceRoots.generation(),
+        scratchRoot: processSandboxScratchRoot,
+        networkEnabled:
+          !dependencies.configuredSubagentChild &&
+          globalSessionPermissionGrants.allowsNetwork(session.id, workDir, session.picoHome),
+        ...(executionBoundary ? { executionBoundary } : {}),
+        ...(backgroundPolicy
+          ? { backgroundNetworkPolicy: backgroundPolicy.snapshot.toolNetworkPolicy }
+          : {}),
+      });
+    };
     const traceEnabled = options.trace === true || isTruthyEnv(runtimeEnv.PICO_TRACE);
     const effectiveOptions: RunAgentCliOptions = {
       ...options,
@@ -1269,11 +1392,8 @@ export async function executeAgentRuntime(
           collaborationMode() !== "plan",
         lspServers: [...picoConfig.lspServers, ...(pluginSnapshot?.lspServers ?? [])],
         processSandbox: {
-          profile: permissionMode() === "yolo" ? "danger-full-access" : "workspace-write",
-          config: picoConfig.sandbox,
-          scratchRoot: join(picoHome, "sandboxes", session.id),
+          ...currentMainProcessSandbox(),
           workspaceRoots: workspaceRoots.list(),
-          generation: workspaceRoots.generation(),
         },
         sessionStartSource:
           sessionSelection.mode === "resume" || sessionSelection.mode === "continue"
@@ -1295,9 +1415,20 @@ export async function executeAgentRuntime(
     if (ownsRuntimeState) sessionLeaseTransferred = true;
     cleanupRuntimeState = runtimeState;
     if (!ownsRuntimeState) {
-      await runtimeState.setCodeIntelligenceEnabled(
-        dependencies.agentGraph?.kind !== "operator" && collaborationMode() !== "plan",
-      );
+      const codeIntelligenceEnabled =
+        dependencies.agentGraph?.kind !== "operator" && collaborationMode() !== "plan";
+      // 关闭时先停进程再换边界；开启时先换边界再启动，确保一次切换且
+      // LSP 从未短暂运行在上一种权限模式的进程沙箱中。
+      if (!codeIntelligenceEnabled) {
+        await runtimeState.setCodeIntelligenceEnabled(false);
+      }
+      await runtimeState.refreshProcessSandbox({
+        ...currentMainProcessSandbox(),
+        workspaceRoots: workspaceRoots.list(),
+      });
+      if (codeIntelligenceEnabled) {
+        await runtimeState.setCodeIntelligenceEnabled(true);
+      }
     }
     if (collaborationMode() !== "plan" && dependencies.hookService) {
       runtimeState.attachHookService(dependencies.hookService);
@@ -1426,8 +1557,183 @@ export async function executeAgentRuntime(
           }),
       });
     }
+    const approvalManager = dependencies.approvalManager ?? globalApprovalManager;
+    const approvalNotifier =
+      dependencies.approvalNotifier ?? buildFailClosedApprovalNotifier(approvalManager);
     let activeMcpManager = collaborationMode() === "plan" ? undefined : dependencies.mcpManager;
     const oneShotMcpCalls = new Set<string>();
+    const oneShotRemoteMcpCalls = new Set<string>();
+    const admittedHookMcpCalls = new Set<string>();
+    let refreshRuntimeBoundary: (options?: {
+      updateMcp?: boolean;
+    }) => Promise<void> = async () => {};
+
+    const executionBoundaryContext = () => ({
+      workspaceRoots: workspaceRoots.list(),
+      tmpdir: tmpdir(),
+      slashTmp: "/tmp",
+    });
+    const currentBoundaryAllowsNetwork = (): boolean => {
+      if (backgroundPolicy) return true;
+      if (collaborationMode() === "plan") return false;
+      const boundary = runtimeExecutionBoundary();
+      return (
+        boundary?.kind === "bypass" ||
+        (boundary?.kind === "managed" && boundary.profile.network.kind === "enabled") ||
+        (!dependencies.configuredSubagentChild &&
+          globalSessionPermissionGrants.allowsNetwork(session.id, workDir, session.picoHome))
+      );
+    };
+    const ensureDurableNetworkBoundary = async (): Promise<boolean> => {
+      if (dependencies.configuredSubagentChild) return false;
+      let changed = false;
+      await session.withSerializedExecution(async () => {
+        const current = session.getRuntimeStateSnapshot().boundary;
+        if (!current || current.kind !== "managed" || current.profile.network.kind === "enabled") {
+          return;
+        }
+        const applied = applyExecutionBoundaryExpansion(
+          current,
+          current.revision,
+          { network: { enabled: true } },
+          executionBoundaryContext(),
+        );
+        if (applied.outcome !== "applied") return;
+        session.updateRuntimeState({ boundary: applied.boundary });
+        await session.flushPersistence();
+        changed = true;
+      });
+      return changed;
+    };
+    const waitForRuntimeApproval = async (input: {
+      readonly toolName: string;
+      readonly providerCallId: string;
+      readonly args: string;
+      readonly reason: string;
+      readonly signal?: AbortSignal;
+      readonly sessionScope?: Parameters<ApprovalManager["waitForApproval"]>[6]["sessionScope"];
+    }): Promise<{ readonly approvalId: string; readonly result: ApprovalResult }> => {
+      const approvalId = `approval_${randomUUID()}`;
+      const run = currentRuntimeRun();
+      const record = run?.claimsSession(session) === true;
+      if (record) {
+        await run.recordApprovalRequested(approvalId, input.providerCallId, input.toolName);
+      }
+      let result: ApprovalResult;
+      try {
+        result = await approvalManager.waitForApproval(
+          approvalId,
+          input.toolName,
+          input.args,
+          approvalNotifier,
+          undefined,
+          input.signal ?? dependencies.signal,
+          {
+            providerCallId: input.providerCallId,
+            reason: input.reason,
+            ...(input.sessionScope ? { sessionScope: input.sessionScope } : {}),
+          },
+        );
+      } catch (error) {
+        if (record) await run.recordApprovalSettled(approvalId, "rejected");
+        throw error;
+      }
+      if (record) {
+        await run.recordApprovalSettled(approvalId, result.allowed ? "approved" : "rejected");
+      }
+      return { approvalId, result };
+    };
+    const requestHostNetworkApproval = async (input: {
+      readonly toolName: string;
+      readonly providerCallId: string;
+      readonly args: string;
+      readonly reason: string;
+      readonly signal?: AbortSignal;
+      /** MCP physical gates cannot restart/close the manager that is currently calling them. */
+      readonly deferMcpRefresh?: boolean;
+    }): Promise<boolean> => {
+      const boundary = runtimeExecutionBoundary();
+      if (boundary?.kind === "external") return false;
+      if (
+        (dependencies.configuredSubagentChild || dependencies.agentGraph?.kind === "operator") &&
+        !currentBoundaryAllowsNetwork()
+      ) {
+        return false;
+      }
+      const { result } = await waitForRuntimeApproval({
+        ...input,
+        ...(input.deferMcpRefresh ? {} : { sessionScope: { type: "network" as const } }),
+      });
+      if (!result.allowed) return false;
+      if (
+        result.allowForSession &&
+        !input.deferMcpRefresh &&
+        !dependencies.configuredSubagentChild
+      ) {
+        globalSessionPermissionGrants.addNetwork(session.id, workDir, session.picoHome);
+        if (await ensureDurableNetworkBoundary()) {
+          await refreshRuntimeBoundary();
+        }
+      }
+      return true;
+    };
+    const remoteNetworkGate = async (request: McpRemoteNetworkRequest): Promise<boolean> => {
+      const toolCallId = request.toolCallId;
+      if (
+        toolCallId &&
+        (oneShotRemoteMcpCalls.delete(toolCallId) || admittedHookMcpCalls.delete(toolCallId))
+      ) {
+        return true;
+      }
+      if (currentBoundaryAllowsNetwork()) return true;
+      return requestHostNetworkApproval({
+        toolName: request.tool ? `mcp__${request.server}__${request.tool}` : "mcp_network",
+        providerCallId: toolCallId ?? `mcp-network:${request.server}:${request.operation}`,
+        args: JSON.stringify({
+          server: request.server,
+          transport: request.transport,
+          url: request.url,
+          operation: request.operation,
+          ...(request.tool ? { tool: request.tool } : {}),
+        }),
+        reason: `MCP ${request.server} 将通过公网执行 ${request.operation}`,
+        ...(request.signal ? { signal: request.signal } : {}),
+        deferMcpRefresh: true,
+      });
+    };
+    const hostNetworkGate = async (request: HookHostNetworkRequest): Promise<boolean> => {
+      if (currentBoundaryAllowsNetwork()) return true;
+      const providerCallId =
+        request.operation === "mcp_tool_call"
+          ? request.toolCallId
+          : `hook-network:${request.handlerId}:${request.redirect}`;
+      const allowed = await requestHostNetworkApproval({
+        toolName: "hook_network",
+        providerCallId,
+        args: JSON.stringify({
+          operation: request.operation,
+          handlerId: request.handlerId,
+          event: request.event,
+          source: {
+            kind: request.source.kind,
+            path: request.source.path,
+            version: request.source.version,
+          },
+          ...(request.operation === "http_request"
+            ? { url: request.url, redirect: request.redirect }
+            : { server: request.server, tool: request.tool }),
+        }),
+        reason:
+          request.operation === "http_request"
+            ? `Hook ${request.handlerId} 将访问 ${request.url}`
+            : `Hook ${request.handlerId} 将调用远程 MCP ${request.server}/${request.tool}`,
+        signal: request.signal,
+      });
+      if (allowed && request.operation === "mcp_tool_call") {
+        admittedHookMcpCalls.add(request.toolCallId);
+      }
+      return allowed;
+    };
     bindRuntimeHookCapabilities({
       session,
       runtimeState,
@@ -1436,8 +1742,9 @@ export async function executeAgentRuntime(
       workspaceRoots,
       picoHome,
       runtimeEnv,
-      sandboxConfig: picoConfig.sandbox,
+      sandboxConfig: { ...picoConfig.sandbox, network: "deny" },
       mcpManager: () => activeMcpManager,
+      hostNetworkGate,
       ...(dependencies.toolResultRedactionSecrets
         ? { toolResultRedactionSecrets: dependencies.toolResultRedactionSecrets }
         : {}),
@@ -1464,7 +1771,7 @@ export async function executeAgentRuntime(
     }
     // Group-loaded events remain audit facts; new Turns never replay them as activation.
     // Audit-write failure does not broaden the current Turn's bound tool set.
-    // background 宿主刻意不写：YOLO allowlist 语义下披露状态属于单次 Job
+    // background 宿主刻意不写：无人值守 allowlist 语义下披露状态属于单次 Job
     // 生命周期，且 fire-and-forget append 会绕过 executor 的 run 事件序列
     // （可打断 recoverable-task 的 high-water CAS），不值得为不可恢复的
     // 场景引入该窗口。
@@ -1489,7 +1796,6 @@ export async function executeAgentRuntime(
             });
           }
         : undefined;
-    const approvalManager = dependencies.approvalManager ?? globalApprovalManager;
     const planHandoff = new PlanHandoffController();
     const planRegistryOptions: DefaultToolRegistryOptions["plan"] = {
       handoff: planHandoff,
@@ -1523,34 +1829,139 @@ export async function executeAgentRuntime(
       : dependencies.isolatedHeadless
         ? "headless"
         : (dependencies.hostKind ?? "desktop");
-    const processSandboxScratchRoot = join(picoHome, "sandboxes", session.id);
-    const mainProcessSandbox: DefaultToolRegistryOptions["processSandbox"] = backgroundPolicy
-      ? {
-          profile: "workspace-write",
-          config: {
-            network: backgroundPolicy.snapshot.toolNetworkPolicy === "allow" ? "allow" : "deny",
-          },
-          scratchRoot: processSandboxScratchRoot,
-        }
-      : permissionMode() === "yolo"
-        ? {
-            profile: "danger-full-access",
-            scratchRoot: processSandboxScratchRoot,
-          }
-        : {
-            profile: collaborationMode() === "plan" ? "read-only" : "workspace-write",
-            config: picoConfig.sandbox,
-            scratchRoot: processSandboxScratchRoot,
-          };
+    let mainProcessSandbox = currentMainProcessSandbox();
     let mainProcessPolicy = createSandboxPolicy({
       profile: mainProcessSandbox.profile,
       workspaceRoots: workspaceRoots.list(),
       scratchRoot: mainProcessSandbox.scratchRoot ?? processSandboxScratchRoot,
       ...(mainProcessSandbox.config ? { config: mainProcessSandbox.config } : {}),
+      ...(mainProcessSandbox.readRoots ? { readRoots: mainProcessSandbox.readRoots } : {}),
+      ...(mainProcessSandbox.writeRoots ? { writeRoots: mainProcessSandbox.writeRoots } : {}),
+      ...(mainProcessSandbox.readFiles ? { readFiles: mainProcessSandbox.readFiles } : {}),
+      ...(mainProcessSandbox.writeFiles ? { writeFiles: mainProcessSandbox.writeFiles } : {}),
       ...(mainProcessSandbox.generation !== undefined
         ? { generation: mainProcessSandbox.generation }
         : {}),
     });
+    refreshRuntimeBoundary = async ({ updateMcp = true } = {}) => {
+      applyExecutionBoundaryToWorkspaceRoots(workspaceRoots, runtimeExecutionBoundary());
+      const roots = workspaceRoots.list();
+      mainProcessSandbox = currentMainProcessSandbox();
+      mainProcessPolicy = createSandboxPolicy({
+        profile: mainProcessSandbox.profile,
+        workspaceRoots: roots,
+        scratchRoot: mainProcessSandbox.scratchRoot ?? processSandboxScratchRoot,
+        generation: mainProcessSandbox.generation,
+        ...(mainProcessSandbox.config ? { config: mainProcessSandbox.config } : {}),
+        ...(mainProcessSandbox.readRoots ? { readRoots: mainProcessSandbox.readRoots } : {}),
+        ...(mainProcessSandbox.writeRoots ? { writeRoots: mainProcessSandbox.writeRoots } : {}),
+        ...(mainProcessSandbox.readFiles ? { readFiles: mainProcessSandbox.readFiles } : {}),
+        ...(mainProcessSandbox.writeFiles ? { writeFiles: mainProcessSandbox.writeFiles } : {}),
+      });
+      await runtimeState.refreshProcessSandbox({
+        ...mainProcessSandbox,
+        workspaceRoots: roots,
+      });
+      if (updateMcp && activeMcpManager) {
+        await activeMcpManager.updateProcessSandbox(mainProcessPolicy);
+      }
+    };
+    const requestSandboxBoundaryHandler: RequestSandboxBoundaryHandler | undefined =
+      !backgroundPolicy &&
+      !dependencies.isolatedHeadless &&
+      !dependencies.configuredSubagentChild &&
+      dependencies.agentGraph?.kind !== "operator" &&
+      !sideConversation &&
+      collaborationMode() === "agent" &&
+      runtimeExecutionBoundary()?.kind === "managed"
+        ? async (rawExpansion, justification, context) => {
+            const expansion = await canonicalizeSandboxBoundaryExpansion(rawExpansion);
+            const base = runtimeExecutionBoundary();
+            if (!base || base.kind !== "managed") {
+              return {
+                status: "conflict",
+                ...(base ? { boundaryRevision: base.revision } : {}),
+                reason: "当前 Session 不是可扩展的 managed boundary",
+              };
+            }
+            const assessment = applyExecutionBoundaryExpansion(
+              base,
+              base.revision,
+              expansion,
+              executionBoundaryContext(),
+            );
+            if (assessment.outcome === "noop") {
+              return { status: "noop", boundaryRevision: base.revision };
+            }
+            if (assessment.outcome === "conflict") {
+              return {
+                status: "conflict",
+                boundaryRevision: base.revision,
+                reason: assessment.reason,
+              };
+            }
+
+            const { approvalId, result } = await waitForRuntimeApproval({
+              toolName: "request_sandbox_boundary",
+              providerCallId:
+                context?.toolCallId ?? `sandbox-boundary:${session.id}:${base.revision}`,
+              args: JSON.stringify({
+                baseRevision: base.revision,
+                expansion,
+                justification,
+              }),
+              reason: justification,
+              ...(context?.signal ? { signal: context.signal } : {}),
+            });
+            if (!result.allowed) {
+              return {
+                status: "denied",
+                requestId: approvalId,
+                boundaryRevision: base.revision,
+                reason: result.reason,
+              };
+            }
+
+            let settlement:
+              | { status: "applied"; boundaryRevision: number }
+              | { status: "noop"; boundaryRevision: number }
+              | { status: "conflict"; boundaryRevision: number; reason: string };
+            await session.withSerializedExecution(async () => {
+              const latest = session.getRuntimeStateSnapshot().boundary;
+              if (!latest) {
+                settlement = {
+                  status: "conflict",
+                  boundaryRevision: base.revision,
+                  reason: "execution_boundary_missing",
+                };
+                return;
+              }
+              const applied = applyExecutionBoundaryExpansion(
+                latest,
+                base.revision,
+                expansion,
+                executionBoundaryContext(),
+              );
+              if (applied.outcome === "conflict") {
+                settlement = {
+                  status: "conflict",
+                  boundaryRevision: applied.boundary.revision,
+                  reason: applied.reason,
+                };
+                return;
+              }
+              if (applied.outcome === "noop") {
+                settlement = { status: "noop", boundaryRevision: applied.boundary.revision };
+                return;
+              }
+              session.updateRuntimeState({ boundary: applied.boundary });
+              await session.flushPersistence();
+              settlement = { status: "applied", boundaryRevision: applied.boundary.revision };
+            });
+            if (settlement!.status === "applied") await refreshRuntimeBoundary();
+            return { ...settlement!, requestId: approvalId };
+          }
+        : undefined;
     const registry = buildRegistry(
       workDir,
       backgroundManager,
@@ -1561,11 +1972,24 @@ export async function executeAgentRuntime(
       dependencies.askUserHandler,
       runtimeState.codeIntelligence,
       (path) => {
-        if (permissionMode() === "yolo") return false;
+        if (permissionMode() === "full-access") return false;
         if (collaborationMode() === "plan" || path === undefined) return true;
         return !isSensitiveCredentialPath(workspaceRoots.resolveUnchecked(path));
       },
-      mainProcessSandbox,
+      {
+        ...mainProcessSandbox,
+        // Boundary approval is durable and may settle between two tool Steps.
+        // Process-backed tools must sample the new descriptor at invocation
+        // time instead of retaining the registry-construction snapshot.
+        resolveSandbox: currentMainProcessSandbox,
+        consumeNetworkAuthorization: (toolCallId) =>
+          globalSessionPermissionGrants.consumeNetworkAuthorization(
+            session.id,
+            workDir,
+            toolCallId,
+            session.picoHome,
+          ),
+      },
       activeHookService
         ? async (skill) => {
             if (!skill.sourcePath || skill.hooks === undefined) return;
@@ -1587,6 +2011,7 @@ export async function executeAgentRuntime(
       hostKind,
       onToolGroupLoaded,
       sessionTaskAuthority,
+      requestSandboxBoundaryHandler,
     );
     if (collaborationMode() !== "plan") {
       registry.register(
@@ -1781,8 +2206,6 @@ export async function executeAgentRuntime(
       };
     };
     const reporter = dependencies.reporter ?? new TerminalReporter();
-    const approvalNotifier =
-      dependencies.approvalNotifier ?? buildFailClosedApprovalNotifier(approvalManager);
     const engine = new AgentEngine({
       ...(atomicMemoryRuntime ? { memoryHooks: atomicMemoryRuntime } : {}),
       provider: trackedProvider,
@@ -1858,7 +2281,7 @@ export async function executeAgentRuntime(
 
     if (backgroundPolicy) {
       registry.useSafety?.(
-        buildBackgroundYoloMiddleware({
+        buildBackgroundAutonomousMiddleware({
           policy: backgroundPolicy,
           workspaceRoots,
           sessionId: session.id,
@@ -1888,25 +2311,19 @@ export async function executeAgentRuntime(
           permissionMode,
           {
             onSessionPolicyChanged: async () => {
-              const generation = workspaceRoots.generation();
-              const roots = workspaceRoots.list();
-              await runtimeState.refreshProcessSandbox(roots, generation);
-              if (activeMcpManager) {
-                mainProcessPolicy = createSandboxPolicy({
-                  profile: mainProcessSandbox.profile,
-                  workspaceRoots: roots,
-                  scratchRoot: mainProcessSandbox.scratchRoot ?? processSandboxScratchRoot,
-                  generation,
-                  ...(mainProcessSandbox.config ? { config: mainProcessSandbox.config } : {}),
-                });
-                await activeMcpManager.updateProcessSandbox(mainProcessPolicy);
+              if (
+                globalSessionPermissionGrants.allowsNetwork(session.id, workDir, session.picoHome)
+              ) {
+                await ensureDurableNetworkBoundary();
               }
+              await refreshRuntimeBoundary();
             },
             onOneShotMcpAuthorization: async (call, directories) => {
               oneShotMcpCalls.add(call.id);
-              if (directories.length === 0) return;
+              oneShotRemoteMcpCalls.add(call.id);
               await activeMcpManager?.restartStdioServerForTool(call.name, {
                 ...mainProcessPolicy,
+                network: "allow",
                 readRoots: normalizeRoots([...mainProcessPolicy.readRoots, ...directories]),
                 writeRoots: normalizeRoots([...mainProcessPolicy.writeRoots, ...directories]),
               });
@@ -1915,6 +2332,10 @@ export async function executeAgentRuntime(
               !dependencies.configuredSubagentChild &&
               (dependencies.agentGraph?.kind !== "operator" ||
                 dependencies.agentGraph.profileSnapshot.permissionPolicy.allowSessionGrants),
+            ...(configuredChildBoundaryCeiling
+              ? { executionBoundaryCeiling: configuredChildBoundaryCeiling }
+              : {}),
+            getToolPermissionCategory: (name) => registry.getPermissionCategory(name),
           },
         ),
       );
@@ -1922,6 +2343,8 @@ export async function executeAgentRuntime(
         try {
           return await next(call);
         } finally {
+          oneShotRemoteMcpCalls.delete(call.id);
+          admittedHookMcpCalls.delete(call.id);
           if (oneShotMcpCalls.delete(call.id)) {
             await activeMcpManager?.restartStdioServerForTool(call.name);
           }
@@ -1947,9 +2370,9 @@ export async function executeAgentRuntime(
         delegationManager,
         workspaceRoots,
         // 主会话的 mode 只控制主 Agent 权限。worker/explore 是独立的不可信执行边界，
-        // 必须始终使用 worktree + OS 沙箱，不得因 default/auto 模式退化为无沙箱 Bash。
+        // 必须始终使用 worktree + OS 沙箱，不得因 ask/auto 模式退化为无沙箱 Bash。
         {
-          config: picoConfig.sandbox,
+          config: { ...picoConfig.sandbox, network: "deny" },
           scratchRoot: join(picoHome, "sandboxes", session.id, "subagents"),
         },
         session.id,
@@ -1979,6 +2402,7 @@ export async function executeAgentRuntime(
           ? createDelegatePlanStepCoordinator(() => planRegistryOptions!.coordinator())
           : undefined,
         hostKind,
+        permissionMode() === "full-access" && collaborationMode() !== "plan",
       );
     }
     if (
@@ -1999,6 +2423,7 @@ export async function executeAgentRuntime(
               catalog: dependencies.configuredSubagentCatalog,
               modelRouter: subagentModelRouter,
               parentModelRouteId,
+              parentExecutionBoundary: () => session.getRuntimeStateSnapshot().boundary,
               worktreeSupervisor: runtimeState.taskHostRuntime?.supervisor,
               reporter,
               childDependencies: {
@@ -2094,6 +2519,7 @@ export async function executeAgentRuntime(
         (mcpConfigPath || hostMcpSources.length > 0 || pluginMcpSources.length > 0
           ? new McpConnectionManager(registry, {
               stdioCwd: workDir,
+              remoteNetworkGate,
               ...(!backgroundPolicy ? { processSandbox: mainProcessPolicy } : {}),
               ...(backgroundPolicy?.snapshot.mcpConfigFingerprint
                 ? { expectedConfigFingerprint: backgroundPolicy.snapshot.mcpConfigFingerprint }
@@ -2175,7 +2601,7 @@ export async function executeAgentRuntime(
     if (dependencies.configuredSubagentChild) {
       const definition = dependencies.configuredSubagentChild.definition;
       const processSandbox = {
-        config: picoConfig.sandbox,
+        config: { ...picoConfig.sandbox, network: "deny" as const },
         scratchRoot: join(picoHome, "sandboxes", session.id, "subagents"),
       };
       for (const name of definition.tools) {
@@ -2330,10 +2756,126 @@ export async function executeAgentRuntime(
     throw error;
   } finally {
     if (livePlanAdmission) livePlanAdmissions.delete(livePlanAdmission);
+    if (liveConfiguredChildAdmission) {
+      liveConfiguredChildAdmissions.delete(liveConfiguredChildAdmission);
+    }
     // 阶段 5：只释放本次调用持有的资源。
     // 非 TUI 调用仍按轮关闭；TUI 注入的 manager 由宿主在退出时统一关闭。
     await cleanupScope.dispose();
   }
+}
+
+async function reconcileConfiguredChildExecutionBoundary(
+  session: Session,
+  expectedBoundary: ExecutionBoundary,
+  sessionMode: CliSessionSelection["mode"],
+): Promise<ExecutionBoundary> {
+  if (expectedBoundary.kind === "external") {
+    throw new Error("Configured child cannot use an external execution boundary");
+  }
+  return session.withSerializedExecution(async () => {
+    const snapshot = session.getRuntimeStateSnapshot();
+    const current = snapshot.boundary;
+    const permissionMode = expectedBoundary.kind === "bypass" ? "full-access" : "ask";
+    const settings = snapshot.settings
+      ? configuredChildSettingsWithPermissionMode(snapshot.settings, permissionMode)
+      : undefined;
+    const settingsChanged = snapshot.settings?.permissionMode !== permissionMode;
+    if (!current) {
+      if (sessionMode !== "new") {
+        throw new Error("Configured child execution boundary is unavailable");
+      }
+      session.updateRuntimeState({
+        boundary: expectedBoundary,
+        ...(settings ? { settings } : {}),
+      });
+      await session.flushPersistence();
+      return expectedBoundary;
+    }
+    const boundaryChanged = !sameExecutionBoundaryCapability(current, expectedBoundary);
+    if (!boundaryChanged && !settingsChanged) return current;
+    if (current.kind === "external") {
+      throw new Error("Configured child durable execution boundary is externally owned");
+    }
+    const store = session.runtimeEventStore;
+    if (!store) throw new Error("Configured child execution boundary requires durable storage");
+    for (const runId of await store.listRunIds(session.id)) {
+      const run = await store.readRunProjection(session.id, runId);
+      if (run?.startedEventId && !run.terminalEventId) {
+        throw new Error("Configured child execution boundary cannot change during an active run");
+      }
+    }
+    const latest = session.getRuntimeStateSnapshot().boundary;
+    if (
+      !latest ||
+      latest.revision !== current.revision ||
+      !sameExecutionBoundaryCapability(latest, current)
+    ) {
+      throw new Error("Configured child execution boundary revision changed during admission");
+    }
+    if (boundaryChanged && current.revision >= Number.MAX_SAFE_INTEGER) {
+      throw new Error("Configured child execution boundary revision is exhausted");
+    }
+    const aligned: ExecutionBoundary = boundaryChanged
+      ? expectedBoundary.kind === "bypass"
+        ? { kind: "bypass", revision: current.revision + 1 }
+        : {
+            kind: "managed",
+            profile: expectedBoundary.profile,
+            revision: current.revision + 1,
+          }
+      : current;
+    session.updateRuntimeState({
+      boundary: aligned,
+      ...(settings ? { settings } : {}),
+    });
+    await session.flushPersistence();
+    const committedSnapshot = session.getRuntimeStateSnapshot();
+    const committed = committedSnapshot.boundary;
+    if (
+      !committed ||
+      committed.revision !== aligned.revision ||
+      !sameExecutionBoundaryCapability(committed, aligned) ||
+      (settings && committedSnapshot.settings?.permissionMode !== permissionMode)
+    ) {
+      throw new Error("Configured child execution boundary did not commit atomically");
+    }
+    return committed;
+  });
+}
+
+function configuredChildSettingsWithPermissionMode(
+  settings: PersistedSessionSettings,
+  permissionMode: "ask" | "full-access",
+): PersistedSessionSettingsWrite {
+  return {
+    ...(settings.title !== undefined ? { title: settings.title } : {}),
+    ...(settings.forkFrom !== undefined ? { forkFrom: settings.forkFrom } : {}),
+    ...(settings.sideConversation === true ? { sideConversation: true } : {}),
+    provider: settings.provider,
+    model: settings.model,
+    modelRouteId: settings.modelRouteId,
+    collaborationMode: "agent",
+    orchestrationMode: settings.orchestrationMode ?? "default",
+    permissionMode,
+    thinkingEffort: settings.thinkingEffort,
+    thinkingEffortExplicit: settings.thinkingEffortExplicit,
+    additionalDirectories: settings.additionalDirectories,
+  };
+}
+
+function sameExecutionBoundaryCapability(
+  left: ExecutionBoundary,
+  right: ExecutionBoundary,
+): boolean {
+  return executionBoundaryContains(left, right) && executionBoundaryContains(right, left);
+}
+
+function applyExecutionBoundaryToWorkspaceRoots(
+  roots: WorkspaceRoots,
+  boundary: ExecutionBoundary | undefined,
+): void {
+  roots.replaceBoundaryProfile(boundary?.kind === "managed" ? boundary.profile : undefined);
 }
 
 async function interruptOpenPlanExecution(
@@ -2512,6 +3054,7 @@ function buildRegistry(
   hostKind?: ToolHostKind,
   onToolGroupLoaded?: (groupId: string, toolNames: readonly string[]) => void,
   sessionTasks?: DefaultToolRegistryOptions["sessionTasks"],
+  requestSandboxBoundaryHandler?: RequestSandboxBoundaryHandler,
 ): ToolRegistry {
   return buildDefaultToolRegistry(workDir, {
     deferWorkspaceBoundary: true,
@@ -2532,6 +3075,7 @@ function buildRegistry(
     ...(hostKind !== undefined ? { hostKind } : {}),
     ...(onToolGroupLoaded !== undefined ? { onToolGroupLoaded } : {}),
     ...(sessionTasks !== undefined ? { sessionTasks } : {}),
+    ...(requestSandboxBoundaryHandler !== undefined ? { requestSandboxBoundaryHandler } : {}),
   });
 }
 
@@ -2541,9 +3085,9 @@ async function prepareBackgroundExecution(
   options: RunAgentCliOptions,
   dependencies: RunAgentCliDependencies,
   picoHome: string,
-): Promise<PreparedBackgroundYoloPolicy> {
+): Promise<PreparedBackgroundAutonomousPolicy> {
   if (options.planMode === true) {
-    throw new BackgroundPolicyViolationError("invalid_policy", "后台 YOLO 不支持 planMode。");
+    throw new BackgroundPolicyViolationError("invalid_policy", "后台无人值守执行不支持 planMode。");
   }
   if ((options.addDirs?.length ?? 0) > 0) {
     throw new BackgroundPolicyViolationError(
@@ -2574,7 +3118,7 @@ async function prepareBackgroundExecution(
       "后台执行不得复用可能携带前台 LSP、权限或未完成轮次的 runtimeState。",
     );
   }
-  return prepareBackgroundYoloPolicy({
+  return prepareBackgroundAutonomousPolicy({
     workDir,
     policy: execution.policy,
     trustStore:
@@ -2585,7 +3129,7 @@ async function prepareBackgroundExecution(
 
 function pruneRegistryToBackgroundAllowlist(
   registry: ToolRegistry,
-  policy: PreparedBackgroundYoloPolicy,
+  policy: PreparedBackgroundAutonomousPolicy,
 ): void {
   for (const tool of registry.getAvailableTools()) {
     if (!policy.allowedTools.has(tool.name)) registry.unregisterForHostPolicy(tool.name);
@@ -2696,7 +3240,7 @@ function registerDelegationTools(
   manager: DelegationManager,
   workspaceRoots: WorkspaceRoots,
   processSandbox: {
-    config?: Partial<YoloSandboxConfig>;
+    config?: Partial<WorkspaceSandboxConfig>;
     scratchRoot?: string;
     generation?: number;
   },
@@ -2712,6 +3256,7 @@ function registerDelegationTools(
   activateAgentHooks?: (profile: AgentProfile) => Promise<() => void | Promise<void>>,
   planStepCoordinator?: DelegatePlanStepCoordinator,
   hostKind: ToolHostKind = "desktop",
+  allowHostNetwork = false,
 ): void {
   const registryFactory = createSubagentRegistryFactory({
     workDir,
@@ -2729,6 +3274,7 @@ function registerDelegationTools(
     ...(activateAgentHooks ? { activateAgentHooks } : {}),
     ...(worktreeSupervisor ? { worktreeSupervisor } : {}),
     ...(profiles.length > 0 ? { profiles } : {}),
+    allowHostNetwork,
   });
   const delegateTaskOptions = {
     workDir,
@@ -2871,7 +3417,7 @@ export function buildPermissionMiddleware(
   hookService?: HookService,
   picoHome?: string,
   denialSink?: (event: RuntimePolicyDenial) => void,
-  permissionMode?: () => "default" | "auto" | "yolo",
+  permissionMode?: () => RuntimePermissionMode,
   options: {
     onSessionPolicyChanged?: () => Promise<void>;
     onOneShotMcpAuthorization?: (
@@ -2879,26 +3425,69 @@ export function buildPermissionMiddleware(
       externalDirectories: readonly string[],
     ) => Promise<void>;
     allowSessionGrants?: boolean;
+    /** Hard ceiling for a configured child; human approval cannot widen it. */
+    executionBoundaryCeiling?: ExecutionBoundary;
+    getToolPermissionCategory?: (name: string) => ToolPermissionCategory;
   } = {},
 ): MiddlewareFunc {
   return async (call, context) => {
     const mode =
-      permissionMode?.() ?? (settings?.mode === "plan" ? "default" : (settings?.mode ?? "default"));
+      permissionMode?.() ?? (settings?.mode === "plan" ? "ask" : (settings?.mode ?? "ask"));
     const sessionId = settings?.sessionId ?? "cli";
     const workspaceAccesses = workspaceAccessesFromCall(call);
+    const childCeilingDenial = configuredChildCeilingDenial(
+      call,
+      workspaceAccesses,
+      options.executionBoundaryCeiling,
+      workDir,
+      workspaceRoots,
+    );
+    if (childCeilingDenial) {
+      denialSink?.({
+        source: "permission",
+        code: "policy",
+        reasonKind: "policy_denied",
+        toolName: call.name,
+      });
+      return {
+        allowed: false,
+        reason: childCeilingDenial,
+        denialSource: "permission",
+      };
+    }
 
-    // 主 TUI 的 YOLO 是全程放权：普通工具不审批，也不施加工作区、网络或
+    // 完全访问全程跳过人工审批：Hook ask/defer 也不能将它降级。
+    // Hardline、Plan 和 Hook deny 依然位于审批链之前，命中时会直接拒绝。
+    // 普通工具不施加工作区、网络或
     // 敏感写沙箱。直接文件工具仍需给自身的 WorkspaceRoots 一次性通行证；
     // worker 使用独立 registry/worktree，继续保留显式沙箱隔离。
-    if (mode === "yolo" && context?.forceApproval !== true) {
+    if (mode === "full-access") {
       if (workspaceRoots) {
         for (const access of workspaceAccesses) workspaceRoots.authorizeOnce(access.path);
       }
-      return { allowed: true, reason: "YOLO 模式全程放行" };
+      return { allowed: true, reason: "完全访问权限跳过人工审批" };
+    }
+
+    const permissionCategory = classifyToolPermission(call, options.getToolPermissionCategory);
+    const policyDecision = evaluateToolPermission(mode, permissionCategory);
+    if (policyDecision.kind === "deny") {
+      denialSink?.({
+        source: "permission",
+        code: "policy",
+        reasonKind: "policy_denied",
+        toolName: call.name,
+      });
+      return {
+        allowed: false,
+        reason: policyDecision.reason,
+        denialSource: "permission",
+      };
     }
 
     const externalAccesses = workspaceRoots
-      ? workspaceAccesses.filter((access) => !workspaceRoots.isAllowedPath(access.path))
+      ? workspaceAccesses.filter(
+          (access) => !workspaceRoots.isAllowedPath(access.path, access.access),
+        )
       : [];
     const externalDirectories = workspaceRoots
       ? await externalAuthorizationDirectories(externalAccesses, workspaceRoots)
@@ -2927,15 +3516,22 @@ export function buildPermissionMiddleware(
       return { allowed: true, reason: "本会话结构化权限规则放行" };
     }
 
+    // ToolCategory 只选择审批策略与理由；真实能力仍由 workspace/process sandbox 执行。
+    // Bash 分类器永远至少返回 shell_unsafe，因此漏掉危险语法不会造成自动放行。
     const needsApproval =
       context?.forceApproval === true ||
       safetyPath !== undefined ||
       externalDirectories.length > 0 ||
-      bashNeedsApproval(call) ||
-      isMcpToolName(call.name) ||
-      (mode === "default" && isAgentOpsDangerousCommand(call.name, call.arguments)) ||
-      (mode === "auto" && isDangerousCommand(call.name, call.arguments));
+      policyDecision.kind === "prompt";
     if (!needsApproval) return { allowed: true, reason: `${mode} 模式自动放行` };
+
+    const approvalReason = permissionApprovalReason({
+      forceApproval: context?.forceApproval === true,
+      safetyPath,
+      externalDirectories,
+      permissionCategory,
+      policyReason: policyDecision.kind === "prompt" ? policyDecision.reason : undefined,
+    });
 
     if (hookService) {
       const hookDecision = await hookService.dispatch(
@@ -2944,7 +3540,7 @@ export function buildPermissionMiddleware(
           tool_name: call.name,
           tool_input: parseHookToolInput(call.arguments),
           tool_call_id: call.id,
-          reason: "工具调用需要交互审批",
+          reason: approvalReason,
         },
         { signal },
       );
@@ -2995,7 +3591,7 @@ export function buildPermissionMiddleware(
         notifier,
         diff,
         signal,
-        { sessionScope: scope, providerCallId: call.id },
+        { sessionScope: scope, providerCallId: call.id, reason: approvalReason },
       );
     } catch (error) {
       if (runtimeApprovalRecorded) {
@@ -3019,6 +3615,9 @@ export function buildPermissionMiddleware(
     }
 
     if (result.allowForSession && allowSessionGrants) {
+      if (callRequiresProcessNetwork(call)) {
+        globalSessionPermissionGrants.addNetwork(sessionId, workDir, picoHome);
+      }
       await applySessionPermissionScope(scope, {
         sessionId,
         workDir,
@@ -3041,12 +3640,66 @@ export function buildPermissionMiddleware(
       await options.onSessionPolicyChanged?.();
     } else {
       for (const directory of externalDirectories) workspaceRoots.authorizeOnce(directory);
+      if (call.name === "bash" && callRequiresProcessNetwork(call)) {
+        globalSessionPermissionGrants.authorizeNetworkOnce(sessionId, workDir, call.id, picoHome);
+      }
       if (isMcpToolName(call.name)) {
         await options.onOneShotMcpAuthorization?.(call, externalDirectories);
       }
     }
     return result;
   };
+}
+
+function configuredChildCeilingDenial(
+  call: ToolCall,
+  accesses: ReturnType<typeof workspaceAccessesFromCall>,
+  ceiling: ExecutionBoundary | undefined,
+  workDir: string,
+  workspaceRoots?: WorkspaceRoots,
+): string | undefined {
+  if (!ceiling || ceiling.kind === "bypass") return undefined;
+  if (ceiling.kind !== "managed") {
+    return "配置型子任务的 execution boundary 不允许本地工具执行。";
+  }
+  if (callRequiresNetworkAuthority(call) && ceiling.profile.network.kind !== "enabled") {
+    return "配置型子任务请求的网络能力超出父任务 execution boundary，已直接拒绝。";
+  }
+  const context = {
+    root: workDir,
+    workspaceRoots: workspaceRoots?.list() ?? [workDir],
+    tmpdir: tmpdir(),
+    slashTmp: "/tmp",
+  };
+  for (const access of accesses) {
+    let path: string;
+    try {
+      path = workspaceRoots?.resolveUnchecked(access.path) ?? resolve(workDir, access.path);
+    } catch {
+      return "配置型子任务请求的文件路径无法安全解析，已直接拒绝。";
+    }
+    const allowed =
+      access.access === "write"
+        ? canWritePath(ceiling.profile, path, context)
+        : canReadPath(ceiling.profile, path, context);
+    if (!allowed) {
+      return "配置型子任务请求的文件能力超出父任务 execution boundary，已直接拒绝。";
+    }
+  }
+  return undefined;
+}
+
+function callRequiresProcessNetwork(call: Pick<ToolCall, "name" | "arguments">): boolean {
+  if (isMcpToolName(call.name)) return true;
+  if (call.name !== "bash") return false;
+  const command = bashCommandFromArgs(call.arguments);
+  return command !== undefined && hasExplicitNetworkIntent(command);
+}
+
+function callRequiresNetworkAuthority(call: Pick<ToolCall, "name" | "arguments">): boolean {
+  return (
+    call.name === "fetch_url" || call.name === "web_search" || callRequiresProcessNetwork(call)
+  );
 }
 
 function parseHookToolInput(argumentsJson: string): unknown {
@@ -3063,7 +3716,7 @@ async function externalAuthorizationDirectories(
 ): Promise<string[]> {
   const directories = await Promise.all(
     accesses
-      .filter((access) => !workspaceRoots.isAllowedPath(access.path))
+      .filter((access) => !workspaceRoots.isAllowedPath(access.path, access.access))
       .map((access) => workspaceRoots.authorizationDirectoryForPath(access.path)),
   );
   return [...new Set(directories)];
@@ -3088,28 +3741,19 @@ async function planModeDenialReason(
   return undefined;
 }
 
-function bashNeedsApproval(call: { name: string; arguments: string }): boolean {
-  if (call.name !== "bash") return false;
-  const command = parseJsonStringField(call.arguments, "command");
-  if (command === undefined) return true;
-  // 只读判定按宿主方言分派;方言无法解析时按需审批 fail-closed
-  try {
-    return hostShellDialect() === "powershell"
-      ? classifyPowerShellCommand(command).kind !== "read-only"
-      : classifyBashCommand(command).kind !== "read-only";
-  } catch {
-    return true;
+function permissionApprovalReason(input: {
+  readonly forceApproval: boolean;
+  readonly safetyPath: string | undefined;
+  readonly externalDirectories: readonly string[];
+  readonly permissionCategory: ToolPermissionCategory;
+  readonly policyReason: string | undefined;
+}): string {
+  if (input.forceApproval) return "Hook 或宿主策略要求人工批准";
+  if (input.safetyPath !== undefined) return `操作涉及敏感或控制面路径 ${input.safetyPath}`;
+  if (input.externalDirectories.length > 0) {
+    return `操作超出当前工作区：${input.externalDirectories.join(", ")}`;
   }
-}
-
-function parseJsonStringField(args: string, field: string): string | undefined {
-  try {
-    const parsed = JSON.parse(args) as Record<string, unknown>;
-    const value = parsed[field];
-    return typeof value === "string" ? value : undefined;
-  } catch {
-    return undefined;
-  }
+  return input.policyReason ?? permissionReasonForCategory(input.permissionCategory);
 }
 
 /** A headless runtime settles the same manager it asked, so it never waits for absent UI. */

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { ChildProcess } from "node:child_process";
 import { signalProcessTree } from "../../os/process-tree.js";
 import { logger } from "../../observability/logger.js";
@@ -42,7 +43,7 @@ export interface ConnectedMcpToolInvoker {
     server: string,
     tool: string,
     input: Record<string, unknown>,
-    context?: { readonly signal?: AbortSignal },
+    context?: { readonly signal?: AbortSignal; readonly toolCallId?: string },
   ): Promise<McpToolResult>;
 }
 
@@ -65,6 +66,31 @@ export interface HookModelRuntime {
   run<Result>(execute: () => Promise<Result>, signal: AbortSignal): Promise<Result>;
 }
 
+export type HookHostNetworkRequest =
+  | {
+      readonly operation: "http_request";
+      readonly handlerId: string;
+      readonly event: ResolvedHookHandler["event"];
+      readonly source: ResolvedHookHandler["source"];
+      readonly url: string;
+      readonly redirect: number;
+      readonly signal: AbortSignal;
+    }
+  | {
+      readonly operation: "mcp_tool_call";
+      readonly handlerId: string;
+      readonly event: ResolvedHookHandler["event"];
+      readonly source: ResolvedHookHandler["source"];
+      readonly server: string;
+      readonly tool: string;
+      /** Correlates the Hook admission with the MCP manager's physical network gate. */
+      readonly toolCallId: string;
+      readonly signal: AbortSignal;
+    };
+
+/** Host policy admission checked immediately before a Hook crosses the network boundary. */
+export type HookHostNetworkGate = (request: HookHostNetworkRequest) => boolean | Promise<boolean>;
+
 export interface HookHandlerExecutorOptions {
   workDir: string;
   provider?: LLMProvider;
@@ -74,6 +100,8 @@ export interface HookHandlerExecutorOptions {
   fetch?: typeof globalThis.fetch;
   env?: Readonly<NodeJS.ProcessEnv>;
   processSandbox?: SandboxPolicy;
+  /** Missing means deny: loading/trusting Hook config never grants Host network access. */
+  hostNetworkGate?: HookHostNetworkGate;
   /** Product runtime capability that returns one currently trusted, fully resolved invocation. */
   authorizeCommandExecution?: (
     handler: ResolvedHookHandler,
@@ -100,7 +128,12 @@ export class DefaultHookExecutor implements HookExecutor {
     dependencies: Partial<
       Pick<
         HookHandlerExecutorOptions,
-        "provider" | "mcpInvoker" | "agentVerifier" | "modelRuntime" | "onAsyncRewake"
+        | "provider"
+        | "mcpInvoker"
+        | "agentVerifier"
+        | "modelRuntime"
+        | "hostNetworkGate"
+        | "onAsyncRewake"
       >
     >,
   ): void {
@@ -248,6 +281,15 @@ export class DefaultHookExecutor implements HookExecutor {
     );
 
     for (let redirect = 0; ; redirect++) {
+      await this.requireHostNetworkAccess({
+        operation: "http_request",
+        handlerId: resolved.id,
+        event: resolved.event,
+        source: resolved.source,
+        url: url.href,
+        redirect,
+        signal,
+      });
       const response = await fetcher(url, {
         method: "POST",
         headers,
@@ -279,16 +321,38 @@ export class DefaultHookExecutor implements HookExecutor {
   ): Promise<HookOutput> {
     if (!this.options.mcpInvoker) return failOpen(resolved, "MCP handler 未配置连接管理器");
     const signal = handlerSignal(parentSignal, timeoutMs(handler));
+    const toolCallId = `hook-network_${randomUUID()}`;
+    await this.requireHostNetworkAccess({
+      operation: "mcp_tool_call",
+      handlerId: resolved.id,
+      event: resolved.event,
+      source: resolved.source,
+      server: handler.server,
+      tool: handler.tool,
+      toolCallId,
+      signal,
+    });
     const toolInput = asRecord(handler.input ?? input);
     const result = await this.options.mcpInvoker.invokeConnectedTool(
       handler.server,
       handler.tool,
       toolInput,
-      { signal },
+      { signal, toolCallId },
     );
     if (result.isError)
       return failOpen(resolved, `MCP tool 返回 isError: ${mcpResultToText(result)}`);
     return parseProtocolOutput(mcpResultToText(result), resolved, "MCP handler 返回了非法输出");
+  }
+
+  private async requireHostNetworkAccess(request: HookHostNetworkRequest): Promise<void> {
+    request.signal.throwIfAborted();
+    const allowed = (await this.options.hostNetworkGate?.(request)) === true;
+    request.signal.throwIfAborted();
+    if (!allowed) {
+      const target =
+        request.operation === "http_request" ? request.url : `${request.server}/${request.tool}`;
+      throw new Error(`Hook ${request.operation} 缺少宿主网络授权: ${target}`);
+    }
   }
 
   private async executePrompt(

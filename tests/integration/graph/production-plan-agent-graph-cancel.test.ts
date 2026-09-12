@@ -123,7 +123,7 @@ for (const stopViaBoard of [false, true])
             model: "coder",
             modelRouteId: "test/coder",
             collaborationMode: "plan",
-            permissionMode: "default",
+            permissionMode: "ask",
             orchestrationMode: "graph",
             thinkingEffort: "medium",
             thinkingEffortExplicit: false,

@@ -150,11 +150,11 @@ test("changing the default model preserves every independent default axis", asyn
     "collaborationMode",
     "orchestrationMode",
     "permissionMode",
-    "mode",
     "thinkingEffort",
   ]) {
     assert.match(action, new RegExp(`providerConfig\\.userDefaults\\.${field}`, "u"), field);
   }
+  assert.doesNotMatch(action, /providerConfig\.userDefaults\.mode\b/u);
 });
 
 test("deleting a locally stored provider credential requires confirmation", async () => {

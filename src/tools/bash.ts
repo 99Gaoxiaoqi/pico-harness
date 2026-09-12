@@ -1,5 +1,5 @@
 // BashTool:执行任意 Shell 命令。
-// 对应课程第 06 讲,YOLO 哲学核心,极简工具集原语之一。
+// 对应课程第 06 讲，Bash 是极简工具集原语之一。
 // 4 条驾驭底线:超时控制、工作区绑定、错误原样回传、有界执行缓冲。
 //
 // 独立文件实现,不进 registry-impl.ts,由 default-registry.ts 在合并阶段统一挂载。
@@ -26,17 +26,26 @@ import { classifyPowerShellHardlineCommand } from "../approval/powershell-safety
 import {
   evaluateSandboxCommand,
   SandboxViolationError,
-  type YoloSandboxConfig,
-} from "../safety/yolo-sandbox.js";
+  type WorkspaceSandboxConfig,
+} from "../safety/workspace-sandbox.js";
 import {
+  DEFAULT_SANDBOX_CONFIG,
   createSandboxPolicy,
   defaultSandboxScratchRoot,
+  isWithinRoot,
   managedProcessLauncher,
   shellRuntimeReadRoots,
   type ManagedProcessOrigin,
   type ManagedSpawnRequest,
   type SandboxProfile,
 } from "../safety/process-sandbox/index.js";
+import {
+  MAX_SANDBOX_BOUNDARY_FILESYSTEM_ENTRIES,
+  MAX_SANDBOX_BOUNDARY_PATH_CHARS,
+  type SandboxBoundaryExpansion,
+  type SandboxBoundaryFilesystemEntry,
+} from "../safety/permission-profile.js";
+import { canonicalizeSandboxBoundaryExpansion } from "../safety/sandbox-boundary-path.js";
 
 /** bash 命令默认执行时间与可信宿主可配置边界。 */
 export const DEFAULT_BASH_TIMEOUT_MS = 30_000;
@@ -61,30 +70,47 @@ export function resolveBashTimeoutMs(value?: unknown): number {
   return value;
 }
 
+export interface BashSandboxPolicyDescriptor {
+  readonly profile?: SandboxProfile;
+  readonly config?: Partial<WorkspaceSandboxConfig>;
+  readonly scratchRoot?: string;
+  readonly generation?: number;
+  /** True when deny/protected-metadata rules cannot be represented by the OS process policy. */
+  readonly hasUnsupportedDenyEntries?: boolean;
+  readonly readRoots?: readonly string[];
+  readonly writeRoots?: readonly string[];
+  readonly readFiles?: readonly string[];
+  readonly writeFiles?: readonly string[];
+}
+
+export interface BashSandboxDescriptor extends BashSandboxPolicyDescriptor {
+  readonly workspaceRoots: WorkspaceRoots;
+  readonly consumeNetworkAuthorization?: (toolCallId: string | undefined) => boolean;
+}
+
+export interface BashToolOptions {
+  readonly allowBackground?: boolean;
+  /** Legacy static descriptor. Dynamic hosts should prefer resolveSandbox. */
+  readonly sandbox?: BashSandboxDescriptor;
+  /** Trusted live descriptor resolver, sampled exactly once at the start of each invocation. */
+  readonly resolveSandbox?: () => BashSandboxDescriptor;
+  /** 子代理 registry 用独立来源标记，便于审计模型进程平面。 */
+  readonly origin?: ManagedProcessOrigin;
+  /** 子代理 Bash 由宿主注入最小环境；主 Bash 未设置时仍继承当前用户环境。 */
+  readonly env?: NodeJS.ProcessEnv;
+  /** 仅由可信宿主注入；未设置时保持 30 秒默认值。 */
+  readonly timeoutMs?: number;
+}
+
 export class BashTool implements BaseTool {
+  readonly permissionCategory = "shell_unsafe" as const;
   readonly fileSideEffects = WORKSPACE_FILE_SIDE_EFFECTS;
   private readonly timeoutMs: number;
 
   constructor(
     private readonly workDir: string,
     private readonly backgroundManager = new BackgroundManager(),
-    private readonly options: {
-      allowBackground?: boolean;
-      /** 仅由可信宿主注入；一旦注入，无 OS 后端时 Bash fail-closed。 */
-      sandbox?: {
-        workspaceRoots: WorkspaceRoots;
-        config?: Partial<YoloSandboxConfig>;
-        profile?: SandboxProfile;
-        scratchRoot?: string;
-        generation?: number;
-      };
-      /** 子代理 registry 用独立来源标记，便于审计模型进程平面。 */
-      origin?: ManagedProcessOrigin;
-      /** 子代理 Bash 由宿主注入最小环境；主 Bash 未设置时仍继承当前用户环境。 */
-      env?: NodeJS.ProcessEnv;
-      /** 仅由可信宿主注入；未设置时保持 30 秒默认值。 */
-      timeoutMs?: number;
-    } = {},
+    private readonly options: BashToolOptions = {},
   ) {
     this.timeoutMs = resolveBashTimeoutMs(options.timeoutMs);
   }
@@ -109,8 +135,8 @@ export class BashTool implements BaseTool {
     return {
       name: "bash",
       description: windows
-        ? "在当前工作区执行任意 PowerShell 命令。支持分号链接多命令与管道;注意 && 与 || 仅 PowerShell 7+ 可用。返回标准输出与错误的合并结果。"
-        : "在当前工作区执行任意的 bash 命令。支持链式命令(如 &&)、管道和环境变量。返回标准输出与错误的合并结果。",
+        ? "在当前工作区执行任意 PowerShell 命令。支持分号链接多命令与管道;注意 && 与 || 仅 PowerShell 7+ 可用。命令受当前 Session sandbox boundary 约束。"
+        : "在当前工作区执行任意 bash 命令。支持链式命令、管道和环境变量。命令受当前 Session sandbox boundary 约束。",
       inputSchema: {
         type: "object",
         properties: {
@@ -124,26 +150,47 @@ export class BashTool implements BaseTool {
             type: "boolean",
             description: "为 true 时后台启动命令并立即返回 taskId/pid/status,不等待命令结束。",
           },
+          boundary_intent: {
+            type: "string",
+            enum: ["current", "expand"],
+            default: "current",
+            description:
+              "省略时为 current，仅使用当前边界。只有命令依赖明确的额外文件系统或进程网络能力时才用 expand，并声明 required_boundary；未覆盖时先调用 request_sandbox_boundary。",
+          },
+          required_boundary: sandboxBoundaryExpansionInputSchema(),
         },
         required: ["command"],
+        allOf: [
+          {
+            if: {
+              properties: { boundary_intent: { const: "expand" } },
+              required: ["boundary_intent"],
+            },
+            then: { required: ["required_boundary"] },
+          },
+        ],
+        additionalProperties: false,
       },
     };
   }
 
   async execute(args: string, context?: ToolExecutionContext): Promise<string> {
-    let command: string;
-    let background: boolean;
-    try {
-      const input = JSON.parse(args) as { command?: string; background?: boolean };
-      command = input.command ?? "";
-      background = input.background === true;
-    } catch {
-      throw new Error("参数解析失败: 期望 JSON 含 command 字段");
-    }
+    const input = parseBashInput(args);
+    const { command, background } = input;
+    // A durable boundary may change after request_sandbox_boundary in the same run.
+    // Sample one coherent descriptor per invocation and reuse it for declaration
+    // preflight, static command checks, and the eventual managed spawn request.
+    const sandbox = this.options.resolveSandbox?.() ?? this.options.sandbox;
+    this.assertSandboxDescriptorSupported(sandbox);
+    this.assertCommandNotHardline(command);
+    const requiredBoundary = await selectedBashBoundaryExpansion(input);
+    this.assertDeclaredBoundaryCovered(requiredBoundary, sandbox, command);
 
     const sandboxRequest = this.buildSandboxRequest(
       command,
       background ? "background-bash" : (this.options.origin ?? "bash"),
+      sandbox,
+      context?.toolCallId,
     );
 
     if (background) {
@@ -215,19 +262,26 @@ export class BashTool implements BaseTool {
     return stdout;
   }
 
-  private buildSandboxRequest(command: string, origin: ManagedProcessOrigin): ManagedSpawnRequest {
-    const hardline =
-      hostShellDialect() === "bash"
-        ? isHardlineBashCommand(command, this.workDir)
-        : classifyPowerShellHardlineCommand(command) !== undefined;
-    if (hardline) {
-      throw new Error("Hardline 高危命令不可审批绕过，系统直接拒绝。");
-    }
-    const sandbox = this.options.sandbox;
+  private buildSandboxRequest(
+    command: string,
+    origin: ManagedProcessOrigin,
+    sandbox: BashSandboxDescriptor | undefined,
+    toolCallId?: string,
+  ): ManagedSpawnRequest {
     const roots = sandbox?.workspaceRoots.processRoots() ?? [this.workDir];
     const profile = sandbox?.profile ?? "danger-full-access";
+    const networkAuthorized = sandbox?.consumeNetworkAuthorization?.(toolCallId) === true;
+    const sandboxConfig = networkAuthorized
+      ? { ...sandbox?.config, network: "allow" as const }
+      : sandbox?.config;
     if (sandbox && profile !== "danger-full-access") {
-      const decision = evaluateSandboxCommand(command, this.workDir, roots, sandbox.config);
+      const writablePaths = [
+        ...(profile === "workspace-write" ? roots : []),
+        ...(sandbox.writeRoots ?? []),
+        ...(sandbox.writeFiles ?? []),
+        sandbox.scratchRoot ?? defaultSandboxScratchRoot(this.workDir),
+      ];
+      const decision = evaluateSandboxCommand(command, this.workDir, writablePaths, sandboxConfig);
       if (!decision.allowed) {
         throw new SandboxViolationError(
           decision.code ?? "workspace_write_denied",
@@ -247,14 +301,207 @@ export class BashTool implements BaseTool {
         profile,
         workspaceRoots: roots,
         scratchRoot: sandbox?.scratchRoot ?? defaultSandboxScratchRoot(this.workDir),
-        readRoots: shellRuntimeReadRoots(command, processEnvironment),
-        ...(sandbox?.config ? { config: sandbox.config } : {}),
+        readRoots: [
+          ...shellRuntimeReadRoots(command, processEnvironment),
+          ...(sandbox?.readRoots ?? []),
+        ],
+        ...(sandbox?.writeRoots ? { writeRoots: sandbox.writeRoots } : {}),
+        ...(sandbox?.readFiles ? { readFiles: sandbox.readFiles } : {}),
+        ...(sandbox?.writeFiles ? { writeFiles: sandbox.writeFiles } : {}),
+        ...(sandboxConfig ? { config: sandboxConfig } : {}),
         generation: sandbox?.generation ?? sandbox?.workspaceRoots.generation() ?? 0,
       }),
     };
     sandbox?.workspaceRoots.consumeAllProcessAuthorizations();
     return request;
   }
+
+  private assertDeclaredBoundaryCovered(
+    requiredBoundary: SandboxBoundaryExpansion | undefined,
+    sandbox: BashSandboxDescriptor | undefined,
+    command: string,
+  ): void {
+    if (
+      !requiredBoundary ||
+      !sandbox ||
+      (sandbox.profile ?? "danger-full-access") === "danger-full-access"
+    ) {
+      return;
+    }
+
+    const missingFilesystem = (requiredBoundary.filesystem?.entries ?? []).filter(
+      (entry) =>
+        !sandboxDescriptorCoversEntry(sandbox, this.workDir, command, this.options.env, entry),
+    );
+    const missingNetwork =
+      requiredBoundary.network?.enabled === true && !sandboxDescriptorAllowsNetwork(sandbox);
+    if (missingFilesystem.length === 0 && !missingNetwork) return;
+
+    const missing = [
+      ...(missingFilesystem.length > 0 ? ["filesystem"] : []),
+      ...(missingNetwork ? ["network"] : []),
+    ].join(" and ");
+    throw new SandboxViolationError(
+      "sandbox_boundary_required",
+      `Bash required_boundary 的 ${missing} 权限尚未被当前 sandbox descriptor 覆盖，未启动任何进程。请先调用 request_sandbox_boundary；批准后使用相同 boundary_intent=expand 与 required_boundary 重试。required_boundary=${JSON.stringify(requiredBoundary)}`,
+      requiredBoundary,
+    );
+  }
+
+  private assertSandboxDescriptorSupported(sandbox: BashSandboxDescriptor | undefined): void {
+    if (sandbox?.hasUnsupportedDenyEntries !== true) return;
+    throw new SandboxViolationError(
+      "policy_compilation_failed",
+      "当前 managed permission profile 包含 OS 进程沙箱尚不能表达的显式 deny 或 protectedMetadata deny_write 限制；为防止降权失效，Bash 已 fail-closed，未启动任何进程。",
+    );
+  }
+
+  private assertCommandNotHardline(command: string): void {
+    const hardline =
+      hostShellDialect() === "bash"
+        ? isHardlineBashCommand(command, this.workDir)
+        : classifyPowerShellHardlineCommand(command) !== undefined;
+    if (hardline) {
+      throw new Error("Hardline 高危命令不可审批绕过，系统直接拒绝。");
+    }
+  }
+}
+
+interface ParsedBashInput {
+  readonly command: string;
+  readonly background: boolean;
+  readonly boundaryIntent: "current" | "expand";
+  readonly requiredBoundary?: unknown;
+}
+
+function parseBashInput(args: string): ParsedBashInput {
+  let value: unknown;
+  try {
+    value = JSON.parse(args);
+  } catch {
+    throw new Error("参数解析失败: 期望 JSON 含 command 字段");
+  }
+  if (!isRecord(value)) throw new Error("参数解析失败: 期望 JSON 含 command 字段");
+  const boundaryIntent = value["boundary_intent"] ?? "current";
+  if (boundaryIntent !== "current" && boundaryIntent !== "expand") {
+    throw new Error("bash boundary_intent 必须是 current 或 expand");
+  }
+  return {
+    command: typeof value["command"] === "string" ? value["command"] : "",
+    background: value["background"] === true,
+    boundaryIntent,
+    ...("required_boundary" in value ? { requiredBoundary: value["required_boundary"] } : {}),
+  };
+}
+
+async function selectedBashBoundaryExpansion(
+  input: ParsedBashInput,
+): Promise<SandboxBoundaryExpansion | undefined> {
+  if (input.boundaryIntent === "current") return undefined;
+  if (input.requiredBoundary === undefined) {
+    throw new Error("bash required_boundary is required when boundary_intent is expand");
+  }
+  try {
+    return await canonicalizeSandboxBoundaryExpansion(input.requiredBoundary);
+  } catch (error) {
+    throw new Error(
+      `bash required_boundary 无效: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+}
+
+function sandboxDescriptorCoversEntry(
+  sandbox: BashSandboxDescriptor,
+  workDir: string,
+  command: string,
+  env: NodeJS.ProcessEnv | undefined,
+  entry: SandboxBoundaryFilesystemEntry,
+): boolean {
+  const profile = sandbox.profile ?? "danger-full-access";
+  if (profile === "danger-full-access") return true;
+  const workspaceRoots = sandbox.workspaceRoots.processRoots();
+  const scratchRoot = sandbox.scratchRoot ?? defaultSandboxScratchRoot(workDir);
+  const writeRoots = [
+    ...(profile === "workspace-write" ? workspaceRoots : []),
+    ...(sandbox.writeRoots ?? []),
+    scratchRoot,
+  ];
+  const processEnvironment = sanitizeShellProcessEnvironment(env ?? process.env);
+  const readRoots = [
+    ...shellRuntimeReadRoots(command, processEnvironment),
+    ...(sandbox.readRoots ?? []),
+    ...workspaceRoots,
+    ...writeRoots,
+  ];
+  const writeFiles = sandbox.writeFiles ?? [];
+  const readFiles = [...(sandbox.readFiles ?? []), ...writeFiles];
+  const roots = entry.access === "write" ? writeRoots : readRoots;
+  if (roots.some((root) => isWithinRoot(root, entry.path))) return true;
+  if (entry.scope !== "exact") return false;
+  const files = entry.access === "write" ? writeFiles : readFiles;
+  return files.some((path) => sameSandboxPath(path, entry.path));
+}
+
+function sandboxDescriptorAllowsNetwork(sandbox: BashSandboxDescriptor): boolean {
+  const profile = sandbox.profile ?? "danger-full-access";
+  if (profile === "danger-full-access") return true;
+  if (profile === "read-only") return sandbox.config?.network === "allow";
+  return (sandbox.config?.network ?? DEFAULT_SANDBOX_CONFIG.network) === "allow";
+}
+
+function sameSandboxPath(left: string, right: string): boolean {
+  return isWithinRoot(left, right) && isWithinRoot(right, left);
+}
+
+function sandboxBoundaryExpansionInputSchema(): Record<string, unknown> {
+  return {
+    type: "object",
+    description:
+      "仅在 boundary_intent=expand 时使用。声明命令所需的最小、规范化绝对路径或进程网络能力；批准后重试时原样重复。",
+    properties: {
+      filesystem: {
+        type: "object",
+        properties: {
+          entries: {
+            type: "array",
+            minItems: 1,
+            maxItems: MAX_SANDBOX_BOUNDARY_FILESYSTEM_ENTRIES,
+            items: {
+              type: "object",
+              properties: {
+                path: {
+                  type: "string",
+                  minLength: 1,
+                  maxLength: MAX_SANDBOX_BOUNDARY_PATH_CHARS,
+                  description: "规范化绝对路径；文件用 exact，已存在目录用 subtree。",
+                },
+                access: { type: "string", enum: ["read", "write"] },
+                scope: { type: "string", enum: ["exact", "subtree"] },
+              },
+              required: ["path", "access", "scope"],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ["entries"],
+        additionalProperties: false,
+      },
+      network: {
+        type: "object",
+        description: "仅当进程需要套接字（包括 loopback 或监听端口）时声明。",
+        properties: { enabled: { type: "boolean", const: true } },
+        required: ["enabled"],
+        additionalProperties: false,
+      },
+    },
+    anyOf: [{ required: ["filesystem"] }, { required: ["network"] }],
+    additionalProperties: false,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 interface ForegroundCommandResult {

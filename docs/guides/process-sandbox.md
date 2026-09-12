@@ -1,10 +1,24 @@
 # Process sandbox
 
-Pico routes every model-triggerable local process through `ManagedProcessLauncher`. The policy has
-three profiles: `read-only`, `workspace-write`, and `danger-full-access`. Plan and Explore use
-`read-only`; normal agents, workers, background jobs, MCP servers, and command hooks use
-`workspace-write`; the main agent in Yolo uses the launcher without an OS sandbox and still passes
-the Hardline checks.
+Pico routes every model-triggerable local process through `ManagedProcessLauncher`. The foreground
+boundary is compiled from two independent axes. Plan collaboration takes priority and uses managed
+`read-only`. Agent collaboration with `ask` or `auto` uses managed `workspace-write`, with subprocess
+network access denied by default. Agent collaboration with `full-access` bypasses the OS sandbox and
+still passes the Hardline checks. Background jobs retain their separately frozen process and network
+policy rather than inheriting the foreground mode.
+
+The effective `ExecutionBoundary` is durable Session state with a revision; it is not recomputed
+from a UI label on every launch. An approved `request_sandbox_boundary` can add exact-file or
+subtree read/write entries and can enable managed process networking. The Host applies the update
+with revision CAS and refreshes the file tools, process descriptor, MCP manager, and Hook gates in
+the same run. Switching between `ask` and `auto` preserves a managed expansion; leaving
+`full-access` creates a fresh default managed boundary instead of deriving grants from bypass.
+
+Process networking is intentionally separate from Pico's built-in public read-only Web tools.
+`web_search` and `fetch_url` use a Host HTTP path with DNS pinning and SSRF checks on every redirect;
+allowing them in `auto` does not enable networking for Bash, stdio/remote MCP, or Hooks. Remote MCP
+and HTTP/MCP Hooks sample the current durable boundary before each physical request and fail closed
+when no Host gate is installed.
 
 The model process plane includes Bash, background Bash, stdio MCP, command Hooks, LSP, ripgrep,
 and subagent tools. Daemon installation, credential access, Git/worktree integration, updates, and
@@ -23,6 +37,13 @@ Workspace roots are readable; `workspace-write` also makes them writable. Files 
 `.env`, and `AGENTS.md` do not receive a special OS-level rule when they are inside an authorized
 workspace. `/dev/null`, `/dev/tty`, and Windows `NUL` are treated as devices rather than external
 write paths.
+
+Approved exact-file grants stay exact on macOS and Linux rather than widening to their parent
+directory. Windows AppContainer currently cannot express exact-file grants, so a managed process
+that needs one fails closed instead of widening it; direct file tools still enforce the exact
+boundary. Managed profiles containing explicit deny entries, protected-metadata write denial, or
+unrestricted filesystem combined with restricted network also fail process-policy compilation
+when the OS policy cannot represent them without broadening authority.
 
 ## Native backends
 

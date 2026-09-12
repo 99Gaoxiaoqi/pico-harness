@@ -1,10 +1,14 @@
 import { resolveConfiguredSubagentContinuation } from "./configured-subagent-continuation.js";
-import type { ConfiguredSubagentCatalogPort } from "../agents/subagent-profiles.js";
+import type {
+  ConfiguredSubagentCatalogPort,
+  SubagentCapabilityDefinition,
+} from "../agents/subagent-profiles.js";
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 import type { ModelRouter } from "../provider/model-router.js";
 import {
   coordinateReasoningLevel,
@@ -19,6 +23,15 @@ import type {
 import type { WorktreeSupervisor } from "../tasks/worktree-supervisor.js";
 import type { AgentRuntime, RunAgentCliDependencies } from "./agent-runtime.js";
 import { currentRuntimeRun, currentRuntimeToolCallId } from "./runtime-run.js";
+import {
+  canWritePath,
+  createBypassExecutionBoundary,
+  createManagedExecutionBoundary,
+  createReadOnlyPermissionProfile,
+  createWorkspaceWritePermissionProfile,
+  executionBoundaryContains,
+  type ExecutionBoundary,
+} from "../safety/permission-profile.js";
 
 /** Public off uses the route's native disabled token; omitted means model default. */
 export function subagentThinkingLevel(
@@ -37,6 +50,8 @@ export interface CreateConfiguredSubagentExecutorOptions {
   readonly workDir: string;
   readonly modelRouter: ModelRouter;
   readonly parentModelRouteId: string;
+  /** Live parent authority, re-read at every spawn/continuation admission. */
+  readonly parentExecutionBoundary: () => ExecutionBoundary | undefined;
   readonly worktreeSupervisor?: WorktreeSupervisor;
   readonly reporter?: Reporter;
   /** Only trusted runtime services, never parent Session, settings or thinking. */
@@ -62,6 +77,19 @@ export function createConfiguredSubagentExecutor(
 ): ConfiguredSubagentExecutor {
   const executeChild: ConfiguredSubagentExecutor = async (input) => {
     input.signal?.throwIfAborted();
+    const parentExecutionBoundary = options.parentExecutionBoundary();
+    const childPermissionMode =
+      parentExecutionBoundary?.kind === "bypass" ? ("full-access" as const) : ("ask" as const);
+    const childExecutionBoundaryCeiling =
+      parentExecutionBoundary?.kind === "bypass"
+        ? createBypassExecutionBoundary(parentExecutionBoundary.revision)
+        : configuredSubagentExecutionBoundary(input.definition);
+    assertParentCanDelegateConfiguredChild(
+      parentExecutionBoundary,
+      childExecutionBoundaryCeiling,
+      input.definition,
+      options.workDir,
+    );
     const parentRun = currentRuntimeRun();
     const parentToolCallId = currentRuntimeToolCallId();
     const sessionId = input.continuation?.childSessionId ?? `subagent-${randomUUID()}`;
@@ -154,7 +182,7 @@ export function createConfiguredSubagentExecutor(
           modelRouteId: route.id,
           modelCapabilities: route.capabilities,
           ...(thinking === undefined ? {} : { thinkingEffort: thinking }),
-          interactionMode: "default",
+          interactionMode: childPermissionMode,
           orchestrationMode: "default",
           allowedTools: input.definition.tools,
         },
@@ -167,6 +195,7 @@ export function createConfiguredSubagentExecutor(
           hostKind: "desktop",
           configuredSubagentChild: {
             definition: input.definition,
+            executionBoundaryCeiling: childExecutionBoundaryCeiling,
             ...(input.preset ? { preset: input.preset } : {}),
           },
           onRunAdmission: async (run) => {
@@ -201,7 +230,7 @@ export function createConfiguredSubagentExecutor(
         sessionId: result.sessionId,
         childSessionId: result.sessionId,
         agentName: scope.agentName,
-        permissionMode: "default",
+        permissionMode: childPermissionMode,
         artifactIds: [],
         ...(turnId ? { turnId } : {}),
         ...(runId ? { runId } : {}),
@@ -312,4 +341,63 @@ export function createConfiguredSubagentExecutor(
     }
   };
   return executeChild;
+}
+
+export function configuredSubagentExecutionBoundary(
+  definition: SubagentCapabilityDefinition,
+): ExecutionBoundary {
+  if (definition.profile === "web_research") {
+    const readOnly = createReadOnlyPermissionProfile();
+    return createManagedExecutionBoundary({
+      ...readOnly,
+      name: "custom",
+      network: { kind: "enabled" },
+    });
+  }
+  return createManagedExecutionBoundary(
+    definition.workspace === "shared"
+      ? createReadOnlyPermissionProfile()
+      : createWorkspaceWritePermissionProfile(),
+  );
+}
+
+function assertParentCanDelegateConfiguredChild(
+  parent: ExecutionBoundary | undefined,
+  child: ExecutionBoundary,
+  definition: SubagentCapabilityDefinition,
+  parentWorkDir: string,
+): void {
+  if (!parent) throw new Error("Parent execution boundary is unavailable");
+  if (definition.workspace === "shared") {
+    if (!executionBoundaryContains(parent, child)) {
+      if (
+        definition.profile === "web_research" &&
+        parent.kind === "managed" &&
+        parent.profile.network.kind !== "enabled"
+      ) {
+        throw new Error(
+          "Parent execution boundary has no network access; approve a network boundary expansion before spawning web research",
+        );
+      }
+      throw new Error("Parent execution boundary does not allow this shared child");
+    }
+    return;
+  }
+
+  // The child's :workspace_roots resolves in a different worktree. Generic
+  // symbolic containment would compare equal spellings without proving equal
+  // physical roots, so isolated admission checks the parent's own write class
+  // and relies on the trusted supervisor to provision the child root.
+  if (parent.kind === "bypass") return;
+  if (
+    parent.kind !== "managed" ||
+    !canWritePath(parent.profile, join(parentWorkDir, ".pico-child-write-boundary"), {
+      root: parentWorkDir,
+      workspaceRoots: [parentWorkDir],
+      tmpdir: tmpdir(),
+      slashTmp: "/tmp",
+    })
+  ) {
+    throw new Error("Parent execution boundary cannot create a writable isolated child");
+  }
 }

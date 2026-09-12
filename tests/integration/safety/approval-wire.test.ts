@@ -58,6 +58,14 @@ test("buildApprovalRequestedPayload carries providerCallId/diff/sessionScope on 
   assert.deepEqual(view.sessionScope, { type: "file", path: "a.txt", access: "edit" });
 });
 
+test("network session scope survives the approval wire", () => {
+  const payload = buildApprovalRequestedPayload(
+    toolNotice({ toolName: "hook_network", sessionScope: { type: "network" } }),
+    "run_network",
+  );
+  assert.deepEqual(parseApprovalRequestedPayload(payload)?.sessionScope, { type: "network" });
+});
+
 test("buildApprovalRequestedPayload omits absent optionals and keeps plan shape", () => {
   // bash 无 diff/无 sessionScope（引擎 computeApprovalDiff 对非编辑工具返回 undefined）。
   const toolPayload = buildApprovalRequestedPayload(
@@ -94,7 +102,7 @@ test("buildApprovalRequestedPayload omits absent optionals and keeps plan shape"
   assert.deepEqual(view?.planSteps, ["步骤一"]);
 });
 
-test("fresh default mode asks before the first workspace write", async () => {
+test("fresh ask mode asks before the first workspace write", async () => {
   const manager = new ApprovalManager(60_000);
   let requested: ApprovalNotice | undefined;
   const middleware = buildPermissionMiddleware(
@@ -114,7 +122,7 @@ test("fresh default mode asks before the first workspace write", async () => {
     arguments: JSON.stringify({ path: "first-write.txt", content: "blocked" }),
   });
 
-  assert.equal(DEFAULT_INTERACTION_MODE, "default");
+  assert.equal(DEFAULT_INTERACTION_MODE, "ask");
   assert.equal(requested?.toolName, "write_file");
   assert.equal(decision.allowed, false);
 });
@@ -144,7 +152,7 @@ test("disabled session grants neither inherit nor persist approval scope", async
     undefined,
     undefined,
     undefined,
-    () => "default",
+    () => "ask",
     { allowSessionGrants: false },
   );
   const call = {
@@ -157,7 +165,7 @@ test("disabled session grants neither inherit nor persist approval scope", async
     assert.equal((await middleware(call)).allowed, true);
     assert.equal((await middleware({ ...call, id: "isolated-write-again" })).allowed, true);
     assert.equal(requested, 2);
-    assert.equal(settings.mode, "default");
+    assert.equal(settings.mode, "ask");
   } finally {
     globalSessionPermissionGrants.clear(sessionId, workDir);
   }

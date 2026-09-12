@@ -32,8 +32,6 @@ const SETTINGS: PersistedSessionSettings = {
   provider: "openai",
   model: "test",
   modelRouteId: "openai/test",
-  mode: "plan",
-  prePlanMode: "auto",
   collaborationMode: "plan",
   permissionMode: "auto",
   thinkingEffort: "medium",
@@ -570,18 +568,18 @@ test("v2 settings migrate to split axes and v3 snapshots omit legacy fields", as
   } as const;
   const legacyPlan = normalizeSessionRuntimeStatePatch({ settings: { ...base, mode: "plan" } })!;
   assert.equal(legacyPlan.settings?.collaborationMode, "plan");
-  assert.equal(legacyPlan.settings?.permissionMode, "default");
+  assert.equal(legacyPlan.settings?.permissionMode, "ask");
   const legacyAuto = normalizeSessionRuntimeStatePatch({ settings: { ...base, mode: "auto" } })!;
   assert.equal(legacyAuto.settings?.collaborationMode, "agent");
   assert.equal(legacyAuto.settings?.permissionMode, "auto");
   const missingAxes = normalizeSessionRuntimeStatePatch({ settings: base })!;
   assert.equal(missingAxes.settings?.collaborationMode, "agent");
-  assert.equal(missingAxes.settings?.permissionMode, "default");
+  assert.equal(missingAxes.settings?.permissionMode, "ask");
   const missingPermission = normalizeSessionRuntimeStatePatch({
     settings: { ...base, collaborationMode: "plan" },
   })!;
   assert.equal(missingPermission.settings?.collaborationMode, "plan");
-  assert.equal(missingPermission.settings?.permissionMode, "default");
+  assert.equal(missingPermission.settings?.permissionMode, "ask");
   const settings = createDefaultSessionSettings({
     sessionId: "s",
     cwd: process.cwd(),
@@ -591,18 +589,30 @@ test("v2 settings migrate to split axes and v3 snapshots omit legacy fields", as
     mode: "plan",
     permissionMode: "auto",
   });
-  setSessionMode(settings, "default");
+  setSessionMode(settings, "ask");
   assert.equal(
     settings.collaborationMode,
     "plan",
     "/mode changes permission without leaving Plan collaboration",
   );
-  assert.equal(settings.permissionMode, "default");
+  assert.equal(settings.permissionMode, "ask");
   const snapshot = snapshotSessionSettings(settings) as unknown as Record<string, unknown>;
   assert.equal(snapshot.collaborationMode, "plan");
-  assert.equal(snapshot.permissionMode, "default");
+  assert.equal(snapshot.permissionMode, "ask");
   assert.equal(Object.hasOwn(snapshot, "mode"), false);
   assert.equal(Object.hasOwn(snapshot, "prePlanMode"), false);
+
+  const explicitAxes = createDefaultSessionSettings({
+    sessionId: "explicit-axes",
+    cwd: process.cwd(),
+    provider: "openai",
+    model: "m",
+    modelRouteId: "openai/m",
+    collaborationMode: "plan",
+    permissionMode: "full-access",
+  });
+  assert.equal(explicitAxes.collaborationMode, "plan");
+  assert.equal(explicitAxes.permissionMode, "full-access");
 
   const independent = createDefaultSessionSettings({
     sessionId: "independent",
@@ -610,11 +620,11 @@ test("v2 settings migrate to split axes and v3 snapshots omit legacy fields", as
     provider: "openai",
     model: "m",
     modelRouteId: "openai/m",
-    mode: "yolo",
+    mode: "full-access",
   });
   setSessionMode(independent, "plan");
   assert.equal(independent.collaborationMode, "plan");
-  assert.equal(independent.permissionMode, "yolo");
+  assert.equal(independent.permissionMode, "full-access");
   setSessionMode(independent, "auto");
   assert.equal(independent.mode, "plan");
   assert.equal(independent.permissionMode, "auto");
@@ -675,7 +685,7 @@ test("Session fork inherits pending plans and interrupts active execution", asyn
   await service.fork({
     sourceSessionId: "source",
     targetSessionId: "pending-target",
-    targetMode: "yolo",
+    targetMode: "full-access",
   });
   const pending = await new PlanCoordinator(store, {
     sessionId: "pending-target",
@@ -727,7 +737,7 @@ test("Session fork inherits pending plans and interrupts active execution", asyn
   await service.fork({
     sourceSessionId: "source",
     targetSessionId: "active-target",
-    targetMode: "yolo",
+    targetMode: "full-access",
   });
   const active = await new PlanCoordinator(store, {
     sessionId: "active-target",

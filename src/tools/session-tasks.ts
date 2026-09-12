@@ -40,6 +40,7 @@ abstract class SessionTaskTool implements BaseTool {
 
 export class SessionTaskCreateTool extends SessionTaskTool {
   readonly readOnly = false;
+  readonly permissionCategory = "bounded_control" as const;
   name(): string {
     return "task_create";
   }
@@ -74,6 +75,7 @@ export class SessionTaskCreateTool extends SessionTaskTool {
 
 export class SessionTaskUpdateTool extends SessionTaskTool {
   readonly readOnly = false;
+  readonly permissionCategory = "bounded_control" as const;
   name(): string {
     return "task_update";
   }
