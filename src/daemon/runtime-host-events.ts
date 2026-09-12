@@ -23,23 +23,21 @@ import {
 } from "./runtime-host-operations.js";
 
 /**
- * 3-B-2 event bridge: carries the daemon's events.subscribe / events.replay
- * semantics over the Runtime Host protocol.
+ * Event bridge for events.subscribe / events.replay over the Runtime Host protocol.
  *
- * Daemon semantics preserved (see src/daemon/server.ts + workspace-runtime-service.ts):
+ * Current semantics:
  * - exclusive eventId cursor per workspace ledger; an expired cursor surfaces as
  *   INVALID_PARAMS (→ invalid_request) so clients reset and replay from scratch;
  * - high-watermark captured by the first page and fixed across pagination;
  *   hasMore means "cursor has not reached the high-watermark";
  * - subscribe = register listener first, then first replay page; live events may
- *   overtake the response — clients dedupe by eventId (daemon clients already do);
+ *   overtake the response — clients dedupe by eventId;
  * - one subscription per connection; connection teardown disposes it;
  * - fence-on-error: a push that cannot be delivered tears the connection down
  *   (kernel-side), the client reconnects and replays from its durable cursor.
  *
- * The one deliberate deviation: the runtime-host wire caps frames at 96KB (the
- * daemon IPC allowed 1MiB). Live pushes trim their payload against a byte
- * budget (same tiered trimming as the daemon's transport-safe notifications);
+ * The Runtime Host wire caps frames at 1 MiB. Live pushes reserve envelope space
+ * and trim their payload against the remaining byte budget;
  * replay pages are repacked greedily to fit. A single durable event whose
  * serialized form exceeds the budget cannot be carried — it fails that replay
  * request with an explicit error instead of silently skipping the event.
@@ -100,8 +98,8 @@ export function createRuntimeHostEventBridge(
         throw new Error("events.subscribe 需要带推送通道的连接上下文");
       }
       const { pushEvent, connectionId } = context;
-      // 每连接至多一个活跃订阅；重订阅覆盖旧的（对齐 daemon server 的 setSubscription
-      // 覆盖语义——客户端 cursor 失效重置后的重订流程依赖它，不能拒绝）。
+      // 每连接至多一个活跃订阅；重订阅覆盖先前订阅。客户端 cursor 失效重置后的
+      // 重订流程依赖覆盖语义，不能拒绝。
       const previousDispose = subscriptions.get(connectionId);
       if (previousDispose) {
         subscriptions.delete(connectionId);
@@ -109,7 +107,7 @@ export function createRuntimeHostEventBridge(
       }
       const workspacePath = await canonicalizeWorkspacePath(input.workspacePath);
       // subscribe-then-replay：先注册 live 监听，再取首页。期间 live 事件可能先于
-      // response 到达客户端，靠 eventId 去重衔接（daemon 同款顺序）。
+      // response 到达客户端，靠 eventId 去重衔接。
       const dispose = eventSource.subscribe((event) => {
         if (event.scope.workspacePath !== workspacePath) return;
         deliverLiveEvent(event, pushEvent, () => releaseConnection(connectionId));

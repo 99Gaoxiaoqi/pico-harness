@@ -264,10 +264,10 @@ export class OwnerLease {
 }
 
 /**
- * Compatibility-only retirement for a process already proven terminated by
- * its host lifecycle. Exact pid + hostname matching prevents this path from
- * touching another machine/process; the leaseId recheck + retained tombstone
- * preserves the normal acquisition protocol's ABA fence.
+ * Retire leases for a process already proven terminated by its host lifecycle.
+ * Exact pid + hostname matching prevents this path from touching another
+ * machine/process; the leaseId recheck + retained tombstone preserves the normal
+ * acquisition protocol's ABA fence.
  */
 export async function retireOwnerLeaseForTerminatedProcess(
   options: RetireTerminatedOwnerLeaseOptions,

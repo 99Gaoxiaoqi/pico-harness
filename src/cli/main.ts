@@ -15,8 +15,8 @@ import {
   resolveRootControlNamespace,
   resolveStorageRoot,
 } from "@pico/runtime-host";
-import { LocalRuntimeClient, RuntimeClientError } from "../daemon/client.js";
-import { resolveCanonicalPicoHome } from "../daemon/endpoint.js";
+import { LocalRuntimeClient } from "../daemon/client.js";
+import { resolveCanonicalPicoHome } from "../paths/pico-paths.js";
 import { sleepForRetry } from "../provider/retry.js";
 import { primeTokenizer } from "../context/token-counter.js";
 import { isValidThinkingEffort, type ThinkingEffort } from "../provider/thinking.js";
@@ -264,8 +264,8 @@ async function loadPackageVersion(): Promise<string> {
  * `pico --daemon-stop`：请求常驻 daemon 优雅关停（3-B-4）。先按 registration
  * 探测是否真有 daemon 在跑——没有就报"未在运行"直接返回，绝不借 connectOrSpawn
  * 拉起一个新 daemon 再停掉（那会把"停 daemon"变成"启动一次完整装配"的副作用）。
- * 请求返回后 daemon 仍在收尾（composition.close → 守卫锁释放 → residency 归零），
- * 这里轮询 registration 消失/进程退出作有界确认。
+ * 客户端只在成功响应刷出、registration 消失且原进程退出后返回；这里再次读取
+ * registration，避免 CLI 在状态根并发变化时误报。
  */
 async function stopLocalDaemon(runtime: CliRuntime): Promise<number> {
   const picoHome = resolveCanonicalPicoHome({ env: runtime.env });
@@ -277,16 +277,13 @@ async function stopLocalDaemon(runtime: CliRuntime): Promise<number> {
   const client = new LocalRuntimeClient({ runtimeHostRootPath: picoHome });
   try {
     await client.shutdownDaemon();
-  } catch (error) {
-    if (!(error instanceof RuntimeClientError)) throw error;
-    // daemon 可能在请求到达前自行退出（如 idle 自退竞态）：按"已停止"处理。
-    runtime.writeStdout(`本机 Runtime daemon 已停止。\n`);
-    return 0;
+  } finally {
+    client.close();
   }
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
     const current = await readLocalDaemonRegistration(picoHome);
-    if (!current || !(await isProcessAlive(current.pid))) {
+    if (!current || current.pid !== registration.pid || !(await isProcessAlive(registration.pid))) {
       runtime.writeStdout("本机 Runtime daemon 已优雅停止。\n");
       return 0;
     }

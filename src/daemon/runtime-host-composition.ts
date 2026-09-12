@@ -131,7 +131,7 @@ export function createRuntimeHostComposition(
   ): Promise<BridgeHandlerOutcome<RuntimeRequestBridgeOutput>> => {
     try {
       // 单源校验：未知方法 / 未知参数键在进 service 前被 parseStrictRuntimeParams
-      // 拒绝（invalid_request），与旧 daemon 传输层行为一致。
+      // 拒绝（invalid_request）。
       const method = input.method as RuntimeMethod;
       const params = parseStrictRuntimeParams(method, input.params ?? {}) as JsonValue;
       const rawResult = await service.handle(createRuntimeRequest(method, params));

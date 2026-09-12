@@ -1,8 +1,6 @@
 # 本机 Runtime IPC 安全边界
 
-> 文档类型：当前安全边界。这里描述 `packages/runtime-host` 承载的生产传输；
-> `src/daemon/ipc-auth.ts`、旧 socket server 和 instance-lock token 只服务退役传输的升级守卫，
-> 不是当前 TUI/Desktop 握手协议。
+> 文档类型：当前安全边界。这里描述 `packages/runtime-host` 承载的唯一生产传输。
 
 ## 信任模型
 
@@ -47,6 +45,14 @@ Runtime Host 面向同一台机器、同一个 OS 用户下的 TUI 与 Desktop�
 Host 返回 accepted、incompatible 或 draining。握手用于版本协商与生命周期收敛，**不携带
 bearer token**。后续帧使用 4 字节长度前缀 JSON，单帧上限 1 MiB；未知 operation、非法参数、
 不兼容版本和越界帧都会被拒绝。
+
+## 启动与关停
+
+- Candidate 只能由当前 `connectOrSpawn` 协议启动，并必须同时收到 canonical storage root 与
+  `expectedRootId`；不存在无参自举或第二套本机 endpoint。
+- `runtime.shutdown` 必须先把成功响应刷入 transport，再进入 drain。客户端不会把响应前 EOF
+  当作成功；收到响应后仍会确认原 PID 已退出、原 registration 已移除，再按精确 PID 和 hostname
+  安全清理残留的 Session owner lease。
 
 ## Root authority
 

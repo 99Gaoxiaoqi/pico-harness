@@ -25,13 +25,13 @@ const BASELINE_PATH = resolve(REPOSITORY_ROOT, "scripts/architecture-boundaries-
  *
  * 语义：同文件同时出现 `new Promise` 构造与 `setTimeout` 调用，即手写
  * "Promise + 定时器"原语（race-with-deadline 的雏形），应统一收敛到
- * src/util/race-with-deadline.ts。全仓实测共现 31 个文件，其中：
+ * src/util/race-with-deadline.ts。当前基线共 28 个文件，其中：
  *
  * - canonical（1）：race-with-deadline.ts 是统一原语本体，豁免。
- * - 误报（3）：setTimeout 与 new Promise 无语义关联——auth 超时定时器直接
- *   destroy socket、pending 队列 promise + worker 调度 debounce、ws close
- *   事件 promise + 独立 auth 定时器。setTimeout 不在任何 Promise executor 内。
- * - 既有手写原语（27）：delay/sleep helper 与请求/握手超时包装，收敛迁移候选。
+ * - 误报（2）：setTimeout 与 new Promise 无语义关联——pending 队列 promise +
+ *   worker 调度 debounce、ws close 事件 promise + 独立 auth 定时器。
+ *   setTimeout 不在任何 Promise executor 内。
+ * - 既有手写原语（25）：delay/sleep helper 与请求/握手超时包装，收敛迁移候选。
  *   规则只拦截新增文件/新增共现，既有无声豁免（与 baseline 哲学一致，避免
  *   破坏 --strict 的"0 条受控边界记录"断言）。
  */
@@ -39,13 +39,10 @@ const HANDWRITTEN_TIMEOUT_WHITELIST = new Map([
   // canonical：统一超时/排空原语本体。
   ["src/util/race-with-deadline.ts", "canonical 原语本体"],
   // 误报：setTimeout 不在 Promise executor 内，与 new Promise 无因果。
-  ["src/daemon/server.ts", "误报：auth 超时定时器直接 destroy socket，promise 为事件驱动"],
   // 既有手写超时原语（收敛迁移候选）。
   ["src/approval/manager.ts", "既有：审批等待超时包装（executor 内 setTimeout reject）"],
   ["src/code-intelligence/lsp-client.ts", "既有：LSP 请求超时 / 子进程 SIGKILL 升级（2 处）"],
   ["src/daemon/client.ts", "既有：connectWithTimeout 超时包装"],
-  ["src/daemon/instance-lock.ts", "既有：runtime.ping 超时包装"],
-  ["src/daemon/ipc-auth.ts", "既有：Windows 工具执行超时包装"],
   ["src/hooks/executors/executor.ts", "既有：SIGKILL 升级超时"],
   ["src/input/user-config-store.ts", "既有：delay() helper"],
   ["src/internal/headless-one-shot-runner.ts", "既有：delay() helper / cancel 超时"],

@@ -2404,9 +2404,8 @@ function isTerminalWorkspaceRunStatus(status: WorkspaceRunStatus): boolean {
 
 /**
  * Shared assembly of the LocalDaemonHost lifecycle wrapper over production services.
- * 3-D Phase 5（2026-08-16）：旧传输（endpoint/instance-lock/LocalRuntimeDaemon）已退役，
- * host 只编排 service + cron runtime 生命周期；单例与传输由 kernel 的 flock 选主
- * 与 NDJSON endpoint 承担（runtime-host candidate 嵌入同一装配）。
+ * This host only coordinates service and cron lifecycles; Runtime Host owns election,
+ * registration and transport.
  */
 export function assembleProductionDaemonHost(
   services: ProductionRuntimeServices,

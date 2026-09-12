@@ -136,24 +136,25 @@ test("Desktop storage repair: cancellation is read-only, confirmation preserves 
         "renderer cannot obtain or submit repair tokens",
       );
     }
-    const oldDaemon = createDesktopWorkspaceStorageRecovery({
-      runtime: {
-        request: async () => {
-          throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.METHOD_NOT_FOUND, "older daemon");
-        },
-      },
-      confirmRepair: async () => {
-        throw new Error("legacy daemon must not show a repair dialog");
-      },
-    });
-    assert.equal(
-      await oldDaemon(f.workspace),
-      false,
-      "legacy daemon leaves ordinary workspace loading available",
-    );
   } finally {
     rmSync(f.base, { recursive: true, force: true });
   }
+});
+
+test("Desktop storage repair propagates a missing current Runtime method", async () => {
+  const methodNotFound = new RuntimeProtocolError(
+    RUNTIME_ERROR_CODES.METHOD_NOT_FOUND,
+    "workspace.storageRepair.prepare is unavailable",
+  );
+  const recover = createDesktopWorkspaceStorageRecovery({
+    runtime: {
+      request: async () => {
+        throw methodNotFound;
+      },
+    },
+    confirmRepair: async () => assert.fail("方法缺失时不得进入确认流程"),
+  });
+  await assert.rejects(recover("/current-workspace"), (error: unknown) => error === methodNotFound);
 });
 
 test("Desktop storage repair refuses stale confirmation and active connections without adopting another database", async () => {

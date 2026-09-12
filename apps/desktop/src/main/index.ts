@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import { join } from "node:path";
-import { parseDesktopRuntimeResult, RUNTIME_ERROR_CODES } from "@pico/protocol";
+import { parseRuntimeResult } from "@pico/protocol";
 import { DESKTOP_IPC_CHANNELS } from "../preload/contract.js";
 import { createPlatformServices } from "../platform/index.js";
 import { registerDesktopIpcHandlers } from "./ipc.js";
@@ -17,7 +17,6 @@ import {
   cleanupDesktopWorkbarResources,
   createDesktopTerminalCleanupFence,
   DesktopTerminalGenerationController,
-  resumeDesktopTerminalGenerationWithUpgrade,
 } from "./daemon-controller.js";
 
 let mainWindow: BrowserWindow | undefined;
@@ -66,17 +65,7 @@ const cleanupDesktopTerminalGeneration = async (): Promise<void> => {
 };
 const openDesktopTerminalGeneration = (): Promise<void> =>
   terminalGeneration.open(async () => {
-    await resumeDesktopTerminalGenerationWithUpgrade({
-      resume: async () => {
-        await runtime.request("terminal.resume", {});
-      },
-      shutdownLegacyHost: () => runtime.shutdownDaemon(),
-      reconnect: async () => {
-        parseDesktopRuntimeResult("runtime.ping", await pingUntilReady());
-      },
-      isMethodNotFound: (error) =>
-        error instanceof RuntimeClientError && error.code === RUNTIME_ERROR_CODES.METHOD_NOT_FOUND,
-    });
+    await runtime.request("terminal.resume", {});
   });
 const terminalCleanupFence = createDesktopTerminalCleanupFence(
   { stopAll: cleanupDesktopTerminalGeneration },
@@ -102,8 +91,7 @@ function startRuntimeProbe(): () => void {
     );
   };
   return startRuntimeSupervisor({
-    ping: async () =>
-      parseDesktopRuntimeResult("runtime.ping", await runtime.request("runtime.ping", {})),
+    ping: async () => parseRuntimeResult("runtime.ping", await runtime.request("runtime.ping", {})),
     notify,
   });
 }
@@ -146,7 +134,7 @@ if (!app.requestSingleInstanceLock()) {
       // daemon 的 recover 窗口（reconcile 注册工作区 + 启动 cron，可达秒级）内
       // 操作会被 host 以 host_not_ready 拒绝（RUNTIME_UNAVAILABLE，可重试）——
       // 有限退避重试覆盖该窗口，避免把正常的冷启动误报成启动失败。
-      parseDesktopRuntimeResult("runtime.ping", await pingUntilReady());
+      parseRuntimeResult("runtime.ping", await pingUntilReady());
       if (lifecycle.isQuitting()) return;
       const platform = createPlatformServices();
       disposeIpc = registerDesktopIpcHandlers({

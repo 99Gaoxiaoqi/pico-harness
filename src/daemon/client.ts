@@ -1,4 +1,4 @@
-import { readFile, realpath } from "node:fs/promises";
+import { realpath } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,7 +9,6 @@ import {
   resolveRootControlNamespace,
   resolveStorageRoot,
   RUNTIME_HOST_PROTOCOL_VERSION,
-  RuntimeHostTransportError,
   type HostRegistration,
   type ConnectOrSpawnRuntimeHostInput,
   type RuntimeHostConnection,
@@ -27,8 +26,7 @@ import {
   type RuntimeResult,
   type RuntimeSessionSubscriptionFrame,
 } from "./protocol.js";
-import { resolveCanonicalPicoHome, resolveLocalDaemonEndpoint } from "./endpoint.js";
-import { resolveLocalDaemonLockPath } from "./instance-lock.js";
+import { resolveCanonicalPicoHome } from "../paths/pico-paths.js";
 import { retireSessionOwnerLeasesForTerminatedProcess } from "../storage/session-owner-lease.js";
 import {
   ensurePicoRuntimeHostEventOperationsRegistered,
@@ -101,8 +99,8 @@ const KERNEL_RETRY_SAFE_METHODS: ReadonlySet<RuntimeMethod> = new Set<RuntimeMet
   "events.replay",
 ]);
 const KERNEL_RETRY_BACKOFF_MS = 200;
-const LEGACY_SHUTDOWN_CONFIRMATION_TIMEOUT_MS = 12_000;
-const LEGACY_SHUTDOWN_CONFIRMATION_POLL_MS = 100;
+const SHUTDOWN_CONFIRMATION_TIMEOUT_MS = 12_000;
+const SHUTDOWN_CONFIRMATION_POLL_MS = 100;
 
 function sleep(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -169,7 +167,7 @@ interface RuntimeTransportConnection {
     params: RuntimeParams<Method>,
   ): Promise<RuntimeResult<Method>>;
   /** 请求常驻 daemon 优雅关停。 */
-  shutdownHost?(): Promise<void>;
+  shutdownHost(): Promise<void>;
   close(): void;
 }
 
@@ -272,17 +270,9 @@ export class LocalRuntimeClient implements RuntimeClient {
     };
   }
 
-  /** 请求常驻 daemon 优雅关停（3-B-4）。仅在 kernel 承载模式可用；旧 socket
-   *  注入面不提供（对应 daemon 没有 kernel 生命周期可关）。 */
+  /** 请求当前 Runtime Host daemon 优雅关停。 */
   async shutdownDaemon(): Promise<void> {
     this.assertOpen();
-    if (!this.requestConnection.shutdownHost) {
-      throw new RuntimeClientError(
-        "RUNTIME_UNAVAILABLE",
-        "当前连接模式不支持 daemon 关停（kernel 承载专属）",
-        false,
-      );
-    }
     await this.requestConnection.open();
     await this.requestConnection.shutdownHost();
   }
@@ -604,18 +594,14 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
     if (!connection || !registration) {
       throw new RuntimeClientError("RUNTIME_DISCONNECTED", "本机 Runtime daemon 连接已断开", true);
     }
-    let disconnectCause: unknown;
+    // 当前协议保证成功响应先刷入 transport，再进入 drain。响应前 EOF 或连接关闭
+    // 必须原样失败，不能被解释为关停成功。
     try {
-      // 新 daemon 在响应刷出后进入排空；旧 daemon 可能已经接受关停并退出，却在
-      // 客户端读到响应前断开。无论收到成功响应还是兼容旧端断连，都必须确认旧
-      // 进程、registration 与升级锁均退出，避免把仍持有 Session lease 的旧端
-      // 误判成可升级。
       await connection.requestRegistered("runtime.shutdown", {});
     } catch (error) {
-      if (!isShutdownDisconnect(error)) throw error;
-      disconnectCause = error;
+      throw translateKernelRequestError(error);
     }
-    await this.confirmShutdownCompletion(registration, disconnectCause);
+    await this.confirmShutdownCompletion(registration);
   }
 
   async open(): Promise<void> {
@@ -767,23 +753,16 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
     this.disconnectListener?.();
   }
 
-  private async confirmShutdownCompletion(
-    registration: HostRegistration,
-    cause?: unknown,
-  ): Promise<void> {
+  private async confirmShutdownCompletion(registration: HostRegistration): Promise<void> {
     const capability = await resolveStorageRoot({ path: this.rootPath, kind: "interactive" });
     const controlDirectory = join(resolveRootControlNamespace(), capability.rootId);
-    const legacyLockPath = resolveLocalDaemonLockPath(
-      resolveLocalDaemonEndpoint({ picoHome: this.rootPath }),
-    );
-    const deadline = performance.now() + LEGACY_SHUTDOWN_CONFIRMATION_TIMEOUT_MS;
+    const deadline = performance.now() + SHUTDOWN_CONFIRMATION_TIMEOUT_MS;
     let lastState: string;
     do {
       const currentRegistration = await readHostRegistration(controlDirectory);
       const processExited = !isProcessAlive(registration.pid);
       const registrationExited = currentRegistration?.hostEpoch !== registration.hostEpoch;
-      const legacyLockExited = await legacyLockReleasedBy(legacyLockPath, registration.pid);
-      if (processExited && registrationExited && legacyLockExited) {
+      if (processExited && registrationExited) {
         try {
           await retireSessionOwnerLeasesForTerminatedProcess({
             picoHome: this.rootPath,
@@ -799,29 +778,17 @@ class KernelRuntimeConnection implements RuntimeTransportConnection {
           );
         }
       }
-      lastState = `pidExited=${processExited}, registrationExited=${registrationExited}, legacyLockExited=${legacyLockExited}`;
+      lastState = `pidExited=${processExited}, registrationExited=${registrationExited}`;
       await sleep(
-        Math.min(LEGACY_SHUTDOWN_CONFIRMATION_POLL_MS, Math.max(0, deadline - performance.now())),
+        Math.min(SHUTDOWN_CONFIRMATION_POLL_MS, Math.max(0, deadline - performance.now())),
       );
     } while (performance.now() < deadline);
     throw new RuntimeClientError(
       "RUNTIME_SHUTDOWN_UNCONFIRMED",
       `Runtime daemon 响应关停后仍未完成退出确认（PID ${registration.pid}；${lastState}）`,
       true,
-      { cause },
     );
   }
-}
-
-function isShutdownDisconnect(error: unknown): boolean {
-  if (error instanceof RuntimeHostTransportError) {
-    return error.code === "read_eof" || error.code === "closed";
-  }
-  const code =
-    typeof error === "object" && error !== null && "code" in error
-      ? (error as { code?: unknown }).code
-      : undefined;
-  return code === "ECONNRESET" || code === "EPIPE";
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -834,29 +801,6 @@ function isProcessAlive(pid: number): boolean {
       error !== null &&
       "code" in error &&
       (error as { code?: unknown }).code === "EPERM"
-    );
-  }
-}
-
-async function legacyLockReleasedBy(lockPath: string, previousPid: number): Promise<boolean> {
-  if (!existsSync(lockPath)) return true;
-  try {
-    const owner: unknown = JSON.parse(await readFile(join(lockPath, "owner.json"), "utf8"));
-    return (
-      typeof owner === "object" &&
-      owner !== null &&
-      "pid" in owner &&
-      typeof (owner as { pid?: unknown }).pid === "number" &&
-      (owner as { pid: number }).pid !== previousPid
-    );
-  } catch (error) {
-    // 锁目录并发释放后的 ENOENT 等价于旧 owner 已退出；其他不可读状态保持
-    // fail-closed，由有界确认窗口继续重试而不是误判成功。
-    return (
-      typeof error === "object" &&
-      error !== null &&
-      "code" in error &&
-      (error as { code?: unknown }).code === "ENOENT"
     );
   }
 }
@@ -903,8 +847,6 @@ function describeElectionFailure(
   switch (result.reason) {
     case "storage_root_incompatible":
       return "存储根身份不兼容——候选 daemon 无法启动，请检查 PICO_HOME / .pico-storage-root.json 后重试";
-    case "legacy_daemon_running":
-      return "旧版本 Runtime daemon 仍在运行，请先执行 pico --daemon-stop";
     case "internal_startup_failure":
       return "候选 daemon 启动失败（详见 candidate-logs）";
     case "host_unresponsive":

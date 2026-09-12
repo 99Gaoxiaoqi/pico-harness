@@ -4,23 +4,20 @@
  * residency 阻止 idle 自退），Electron 主进程只做瘦客户端。quit 时 daemon 保持
  * 常驻（cron 调度依赖），不再需要"own 进程 + 优雅关停"的控制器。
  *
- * 保留 shutdown fence 纯函数：它仍被 lifecycle-races 集成测试覆盖其语义
- * （before-quit 期间阻止重复退出直到 daemon 停完）。
+ * before-quit 只需 fenced cleanup 当前 Desktop 拥有的 Workbar 资源。
  */
 
 export interface DesktopBeforeQuitEvent {
   preventDefault(): void;
 }
 
-export interface DesktopDaemonShutdownFenceOptions {
-  /** Owned daemon 排空的硬上限。 */
+export interface DesktopTerminalCleanupFenceOptions {
+  /** Desktop Workbar 资源排空的硬上限。 */
   timeoutMs?: number;
   /** 测试可注入手动 timer，生产默认使用 Node timer。 */
   setTimeout?: (callback: () => void, delayMs: number) => unknown;
   clearTimeout?: (handle: unknown) => void;
 }
-
-export type DesktopTerminalCleanupFenceOptions = DesktopDaemonShutdownFenceOptions;
 
 /** Browser persistence failures must not release the quit fence before terminals stop. */
 export async function cleanupDesktopWorkbarResources(options: {
@@ -143,23 +140,6 @@ export class DesktopTerminalGenerationController {
   }
 }
 
-export async function resumeDesktopTerminalGenerationWithUpgrade(options: {
-  readonly resume: () => Promise<void>;
-  readonly shutdownLegacyHost: () => Promise<void>;
-  readonly reconnect: () => Promise<void>;
-  readonly isMethodNotFound: (error: unknown) => boolean;
-}): Promise<void> {
-  try {
-    await options.resume();
-    return;
-  } catch (error) {
-    if (!options.isMethodNotFound(error)) throw error;
-  }
-  await options.shutdownLegacyHost();
-  await options.reconnect();
-  await options.resume();
-}
-
 /**
  * Workbar terminals are not restored across Desktop restarts, while the Runtime daemon is.
  * Fence Electron shutdown until the daemon has released every terminal it still owns.
@@ -213,66 +193,6 @@ export function createDesktopTerminalCleanupFence(
     void cleanupPromise.then(
       () => finish(),
       (error) => finish(error),
-    );
-  };
-}
-
-/** Keeps every repeated before-quit event fenced until the owned daemon finishes draining. */
-export function createDesktopDaemonShutdownFence(
-  daemon: { ownsProcess: boolean; stop(): Promise<void> },
-  quit: () => void,
-  onStopError: (error: unknown) => void,
-  options: DesktopDaemonShutdownFenceOptions = {},
-): (event: DesktopBeforeQuitEvent) => void {
-  let stoppingPromise: Promise<void> | undefined;
-  let timeoutHandle: unknown;
-  let timeoutPending = false;
-  let finished = false;
-  const timeoutMs = options.timeoutMs ?? 10_000;
-  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
-    throw new RangeError("Desktop daemon shutdown timeoutMs 必须是非负有限数");
-  }
-  const scheduleTimeout =
-    options.setTimeout ??
-    ((callback: () => void, delayMs: number) => setTimeout(callback, delayMs));
-  const cancelTimeout =
-    options.clearTimeout ??
-    ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
-
-  const finish = (outcome: { readonly error?: never } | { readonly error: unknown }): void => {
-    if (finished) return;
-    finished = true;
-    if (timeoutPending) {
-      cancelTimeout(timeoutHandle);
-      timeoutPending = false;
-      timeoutHandle = undefined;
-    }
-    if (!("error" in outcome)) {
-      quit();
-      return;
-    }
-    try {
-      onStopError(outcome.error);
-    } finally {
-      quit();
-    }
-  };
-
-  return (event) => {
-    if (finished) return;
-    if (!stoppingPromise && !daemon.ownsProcess) return;
-    event.preventDefault();
-    if (stoppingPromise) return;
-    stoppingPromise = Promise.resolve().then(() => daemon.stop());
-    timeoutHandle = scheduleTimeout(() => {
-      timeoutPending = false;
-      timeoutHandle = undefined;
-      finish({ error: new Error(`Pico desktop daemon stop exceeded ${timeoutMs}ms`) });
-    }, timeoutMs);
-    timeoutPending = true;
-    void stoppingPromise.then(
-      () => finish({}),
-      (error) => finish({ error }),
     );
   };
 }

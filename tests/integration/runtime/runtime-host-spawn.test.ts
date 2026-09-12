@@ -22,7 +22,15 @@ const TEST_CANDIDATE_INPUT = {
   expectedRootId: "0".repeat(64),
 };
 
-test("runtime-host spawn: candidate CLI rejects the removed legacy root option", () => {
+test("runtime-host spawn: candidate CLI requires the current root identity", () => {
+  assert.throws(() => parseRuntimeHostCandidateArguments([]), /requires --root/u);
+  assert.throws(
+    () => parseRuntimeHostCandidateArguments(["--root", tmpdir()]),
+    /requires a valid --expected-root-id/u,
+  );
+});
+
+test("runtime-host spawn: candidate CLI rejects unknown options", () => {
   assert.throws(
     () =>
       parseRuntimeHostCandidateArguments([
@@ -30,10 +38,10 @@ test("runtime-host spawn: candidate CLI rejects the removed legacy root option",
         tmpdir(),
         "--expected-root-id",
         "0".repeat(64),
-        "--legacy-configuration-root",
+        "--unexpected",
         tmpdir(),
       ]),
-    /Invalid Runtime Host candidate argument: --legacy-configuration-root/u,
+    /Invalid Runtime Host candidate argument: --unexpected/u,
   );
 });
 
@@ -272,7 +280,7 @@ test("runtime-host spawn: non-permanent startup failure does not brake, reason c
   // 预创建 storage root marker，稳定 rootId。
   await resolveStorageRoot({ path: root, kind: "interactive" });
 
-  // 非永久失败（legacy 守卫拒绝/内部启动失败）不刹车——循环继续按节流补发
+  // 非永久的内部启动失败不刹车——循环继续按节流补发
   // 到 deadline；收场时 failed.reason 携带上报的失败类，区分"候选在失败"
   // 与"什么都没出现"。
   let launches = 0;
@@ -290,7 +298,7 @@ test("runtime-host spawn: non-permanent startup failure does not brake, reason c
         return {
           spawned: Promise.resolve({
             pid: 42_000 + launches,
-            startupFailure: Promise.resolve({ reason: "legacy_daemon_running" as const }),
+            startupFailure: Promise.resolve({ reason: "internal_startup_failure" as const }),
           }),
         };
       },
@@ -300,7 +308,7 @@ test("runtime-host spawn: non-permanent startup failure does not brake, reason c
 
   assert.equal(result.kind, "failed");
   if (result.kind === "failed") {
-    assert.equal(result.reason, "legacy_daemon_running");
+    assert.equal(result.reason, "internal_startup_failure");
   }
   assert.ok(launches >= 2, `非永久失败不应刹车，窗口内应多次补发（实际 ${launches} 个）`);
 });

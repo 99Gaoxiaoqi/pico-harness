@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, platform as operatingSystemPlatform } from "node:os";
 import { basename, join, normalize, resolve } from "node:path";
 
 declare const workspaceIdBrand: unique symbol;
@@ -64,9 +64,27 @@ export interface ResolvePicoPathsOptions {
   readonly picoHome?: string;
 }
 
+export interface ResolveCanonicalPicoHomeOptions extends ResolvePicoPathsOptions {
+  readonly platform?: NodeJS.Platform;
+}
+
 export function resolvePicoHome(options: ResolvePicoPathsOptions = {}): string {
   const configured = options.picoHome ?? (options.env ?? process.env)["PICO_HOME"];
   return resolve(configured?.trim() || join(options.homeDir ?? homedir(), ".pico"));
+}
+
+/** Resolve the device-local state root to the physical, platform-canonical path. */
+export function resolveCanonicalPicoHome(options: ResolveCanonicalPicoHomeOptions = {}): string {
+  let physical = resolvePicoHome(options);
+  try {
+    physical = realpathSync.native(physical);
+  } catch {
+    // The directory may not exist before first launch; the normalized absolute path is stable.
+  }
+  const canonical = normalize(physical).normalize("NFC");
+  return (options.platform ?? operatingSystemPlatform()) === "win32"
+    ? canonical.toLowerCase()
+    : canonical;
 }
 
 /** Runtime-owned isolated workspace allocated for one new Desktop task. */
