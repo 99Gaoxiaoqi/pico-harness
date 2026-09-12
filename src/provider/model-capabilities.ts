@@ -1,3 +1,7 @@
+import {
+  resolveNativeWebSearchCapability,
+  type NativeWebSearchCapability,
+} from "./model-web-search.js";
 import type { ProviderKind } from "./factory.js";
 import { resolveProviderProfile, type ProviderProfile, type ProviderProtocol } from "./profile.js";
 import {
@@ -50,6 +54,7 @@ export interface PromptCachePolicy {
  * callers never need to infer support from a model name at execution time.
  */
 export interface ModelRouteCapabilities {
+  nativeWebSearch?: NativeWebSearchCapability;
   contextWindowTokens: number;
   contextSource: CapabilityValueSource;
   maxOutputTokens: number | undefined;
@@ -73,6 +78,7 @@ export interface ModelRouteCapabilities {
 
 /** User-configurable route capability overrides. Omitted fields keep legacy profile defaults. */
 export interface ModelCapabilityConfig {
+  webSearch?: boolean;
   context?: number;
   output?: number;
   /** Official OpenAI defaults to max_completion_tokens; compatible endpoints keep max_tokens. */
@@ -103,6 +109,12 @@ export function resolveModelRouteCapabilities(
     config: override?.reasoning,
   });
   return {
+    nativeWebSearch: resolveNativeWebSearchCapability({
+      provider,
+      model,
+      baseURL: context.baseURL,
+      webSearch: override?.webSearch,
+    }),
     contextWindowTokens: override?.context ?? profile.contextWindowTokens,
     contextSource: override?.context === undefined ? "profile_default" : "config",
     maxOutputTokens: override?.output,
