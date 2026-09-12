@@ -324,53 +324,6 @@ class UpdateAgentGraphTool extends AgentGraphSupervisorTool {
   }
 }
 
-class ReadAgentGraphResultsTool extends AgentGraphSupervisorTool {
-  readonly readOnly = true;
-  name() {
-    return "agent_graph_results";
-  }
-  definition(): ToolDefinition {
-    return {
-      name: this.name(),
-      description:
-        "按 agent_swarm_status 返回的 workId 读取已提交的最终结果。只返回这些任务的正文与来源，不含日志或中间输出。使用返回的 recordId 选定 finish.result_ids。",
-      inputSchema: {
-        type: "object",
-        properties: {
-          work_ids: {
-            type: "array",
-            minItems: 1,
-            maxItems: AGENT_GRAPH_MAX_VIEW_RECORDS,
-            items: { type: "string" },
-          },
-        },
-        required: ["work_ids"],
-        additionalProperties: false,
-      },
-    };
-  }
-  async execute(args: string, execution?: ToolExecutionContext): Promise<string> {
-    execution?.signal?.throwIfAborted();
-    const root = this.rootContext();
-    const value = parseJsonObject(args, this.name());
-    assertKeys(value, ["work_ids"], ["work_ids"], this.name());
-    const workIds = identityArray(value["work_ids"], "work_ids", AGENT_GRAPH_MAX_VIEW_RECORDS);
-    if (!workIds.length) throw new Error("work_ids must not be empty");
-    const input = { graphId: root.graphId, epoch: root.epoch, rootSessionId: root.rootSessionId };
-    const view = await this.options.port.readProjection({ ...input, recordIds: [] });
-    validateProjection(view, root);
-    const recordIds = workIds.map((id) => {
-      const intent = view.intents.find((item) => item.intentId === id);
-      if (!intent) throw new Error(`Unknown workId: ${id}`);
-      return intent.expectedOutputRecordId;
-    });
-    const results = await this.options.port.readProjection({ ...input, recordIds });
-    validateProjection(results, root);
-    execution?.signal?.throwIfAborted();
-    return JSON.stringify(results.results);
-  }
-}
-
 /** Root discovery uses the same approved profile catalog that commitWork resolves. */
 class AgentListTool extends AgentGraphSupervisorTool {
   readonly readOnly = true;
@@ -527,13 +480,6 @@ class ReadAgentOutputTool extends AgentGraphSupervisorTool {
     execution?.signal?.throwIfAborted();
     return JSON.stringify(result.results);
   }
-}
-
-/** Compatibility-only factory; Swarm advertises agent_output instead. */
-export function createAgentGraphResultsTool(
-  options: CreateAgentGraphSupervisorToolsOptions,
-): BaseTool {
-  return new ReadAgentGraphResultsTool(options);
 }
 
 class ViewAgentGraphTool extends AgentGraphSupervisorTool {

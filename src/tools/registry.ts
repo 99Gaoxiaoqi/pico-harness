@@ -241,12 +241,3 @@ export interface Registry {
   /** 挂载会话级 HookService；Registry 重建时必须复用同一实例。 */
   setHookService?(service: HookService): void;
 }
-
-/**
- * 把 BaseTool 适配成第 02 讲遗留的 Tool 接口 (definition 属性 + execute(call))。
- * 新代码应直接实现 BaseTool;此适配器仅为过渡兼容。
- */
-export interface Tool {
-  definition: ToolDefinition;
-  execute(call: ToolCall): Promise<ToolResult>;
-}

@@ -99,7 +99,7 @@ export interface RuntimeToolStartedEvent extends RuntimeEventBase {
   };
 }
 
-/** load_tools 组级激活的 durable 事实：披露状态经 ledger 重播恢复。 */
+/** load_tools 组级激活的 durable 审计事实；新 Turn 不继承历史激活。 */
 export interface RuntimeToolGroupLoadedEvent extends RuntimeEventBase {
   readonly kind: "tool.group.loaded";
   readonly data: {

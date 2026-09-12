@@ -214,17 +214,6 @@ test("宿主 baseline 与 Turn 搜索激活分离，并受绑定上限约束", (
   assert.deepEqual(next.snapshotForStep().toolNames, ["fetch_url", "read_file"]);
 });
 
-test("历史 tool.group.loaded 仅作审计，不恢复新 Turn 激活", () => {
-  const disclosure = new ToolDisclosure();
-  disclosure.seedFromEvents([
-    { kind: "tool.group.loaded", data: { groupId: "web", toolNames: ["fetch_url", "web_search"] } },
-    { kind: "tool.group.loaded", data: { groupId: 42, toolNames: null } },
-  ]);
-  const turn = disclosure.beginTurn([def("read_file"), def("fetch_url"), def("web_search")]);
-  assert.deepEqual(turn.getLoadedGroups(), []);
-  assert.deepEqual(turn.snapshotForStep().toolNames, ["read_file"]);
-});
-
 test("LoadToolsTool 兼容组激活：受 Run 绑定限制并保留审计回调", async () => {
   const disclosure = new ToolDisclosure();
   const turn = disclosure.beginTurn([def("fetch_url"), def("web_search")]);
@@ -385,8 +374,6 @@ test("审计往返：tool.group.loaded 落盘但不恢复工具激活", async ()
     const loaded = entries.filter((entry) => entry.event.kind === "tool.group.loaded");
     assert.equal(loaded.length, 1, "事件必须真实落盘（审查 C1：曾被 assert 层硬拒）");
     const disclosure = new ToolDisclosure();
-    disclosure.seedFromEvents(entries.map((entry) => entry.event as { kind: string }));
-    assert.deepEqual(disclosure.getLoadedGroups(), []);
     assert.deepEqual(
       disclosure
         .pickForLLM([def("fetch_url"), def("web_search"), def("read_file")])
@@ -447,18 +434,6 @@ test("headless fail-closed：新工具入组但未显式声明 headless supporte
   assert.equal(isToolSupportedForHost("code_definition", "headless"), false);
   // background 保持 fail-open 姿势：未声明 = supported
   assert.equal(isToolSupportedForHost("hypothetical_new_tool", "background"), true);
-});
-
-test("seedFromEvents 不影响正在执行的 Turn 激活", () => {
-  const disclosure = new ToolDisclosure();
-  const turn = disclosure.beginTurn([def("web_search"), def("fetch_url")]);
-  disclosure.runInTurn(turn, () => {
-    disclosure.discloseTools(["web_search"]);
-    disclosure.seedFromEvents([
-      { kind: "tool.group.loaded", data: { groupId: "web", toolNames: ["fetch_url"] } },
-    ]);
-    assert.deepEqual(disclosure.getDisclosedTools(), ["web_search"]);
-  });
 });
 
 test("检索质量：标点 token 不污染 + 名称命中按内容排序（审查 M1/M3/M4）", () => {

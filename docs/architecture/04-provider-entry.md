@@ -69,13 +69,13 @@ Automation 必须同时固定 `providerID/modelID` 路由；工作区级 model-r
 generateWithRetry (retry.ts)
   ├─ 429/5xx → 指数退避(300ms~5s) 重试 3 次
   ├─ 429 + onRateLimited → 切 key 跳过退避
-  │   └─ credentialPool.markRateLimited(currentKey) → getNext()
+  │   └─ credentialPool.markRateLimited(currentKey) → getNextAvailable()
   └─ ContextOverflowError → 不重试(交给压缩层)
 
 CredentialPool (credential-pool.ts)
   ├─ round-robin 轮询 + 60s 冷却
   ├─ markRateLimitedWithInfo: 用 RateLimit header 精确冷却
-  └─ 全限流兜底: 取最早到期的 key
+  └─ 全限流返回 undefined，由 retry 层退避
 ```
 
 CredentialPool 由每次 `AgentRuntime` 执行根据显式 `runtimeEnv` 创建，轮换状态不会在不同

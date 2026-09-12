@@ -34,16 +34,18 @@ export class TaskListTool implements BaseTool {
     return {
       name: "task_list",
       description:
-        "列出任务。无参或 scope=background 保持旧语义：列出 bash background=true 后台进程；scope=session 读取当前 Session 的持久化任务账本。",
+        "列出指定任务域。scope=background 列出 bash background=true 后台进程；scope=session 读取当前 Session 的持久化任务账本。",
       inputSchema: {
         type: "object",
         properties: {
           scope: {
             type: "string",
             enum: ["background", "session"],
-            description: "任务域；缺省为 background，保持旧客户端兼容。",
+            description: "必填任务域。",
           },
         },
+        required: ["scope"],
+        additionalProperties: false,
       },
     };
   }
@@ -65,14 +67,26 @@ export class TaskListTool implements BaseTool {
 }
 
 function parseTaskListScope(args: string): "background" | "session" {
-  if (!args.trim()) return "background";
+  if (!args.trim()) throw new Error("参数解析失败: scope 必须是 background 或 session");
   try {
-    const input = JSON.parse(args) as { scope?: unknown };
-    if (input.scope === undefined || input.scope === "background") return "background";
-    if (input.scope === "session") return "session";
+    const input = JSON.parse(args) as unknown;
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+      throw new Error("参数解析失败: 期望 JSON 对象");
+    }
+    const record = input as Record<string, unknown>;
+    if (Object.keys(record).some((key) => key !== "scope")) {
+      throw new Error("参数解析失败: task_list 只接受 scope 字段");
+    }
+    if (record.scope === "background") return "background";
+    if (record.scope === "session") return "session";
     throw new Error("scope 必须是 background 或 session");
   } catch (error) {
-    if (error instanceof Error && error.message.startsWith("scope ")) throw error;
+    if (
+      error instanceof Error &&
+      (error.message.startsWith("scope ") || error.message.startsWith("参数解析失败:"))
+    ) {
+      throw error;
+    }
     throw new Error("参数解析失败: 期望 JSON 对象", { cause: error });
   }
 }

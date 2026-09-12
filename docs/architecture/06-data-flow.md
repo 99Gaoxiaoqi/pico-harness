@@ -122,10 +122,10 @@ generateWithRetry 内层捕获
     │   │   AgentRuntime 的 CredentialRotationCoordinator:
     │   │   ├─ credentialPool.markRateLimited(currentKey)
     │   │   │   └─ 标记限流,60s 冷却
-    │   │   ├─ nextKey = credentialPool.getNext()
+    │   │   ├─ nextKey = credentialPool.getNextAvailable()
     │   │   │   └─ round-robin 找未限流 key
-    │   │   ├─ nextKey === currentKey? (全限流)
-    │   │   │   ├─ YES → 返回 undefined → retry 回退同 key 退避
+    │   │   ├─ nextKey === undefined? (全限流)
+    │   │   │   ├─ YES → retry 回退同 key 退避
     │   │   │   └─ NO → 重建 provider 链(new CostTracker(new provider))
     │   │   └─ 返回新 provider
     │   │   │
