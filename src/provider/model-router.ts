@@ -6,6 +6,7 @@ import {
   type ModelRouteCapabilities,
 } from "./model-capabilities.js";
 import type { ReasoningLevel } from "./reasoning-capability.js";
+import { isOfficialEndpoint } from "./model-web-search.js";
 
 const DEFAULT_DISCOVERY_TIMEOUT_MS = 3_000;
 
@@ -20,6 +21,22 @@ export interface ModelProviderConfig {
   discoverModels: boolean;
   /** Optional per-model metadata; built-in defaults cover omitted and discovery-only entries. */
   modelCapabilities?: Readonly<Record<string, ModelCapabilityConfig>>;
+}
+
+/** A model override always wins; automatic migration is restricted to official DeepSeek V4. */
+export function resolveModelProtocol(
+  provider: Pick<ModelProviderConfig, "protocol" | "baseURL" | "modelProtocols">,
+  model: string,
+): ProviderKind {
+  const explicit = provider.modelProtocols?.[model];
+  if (explicit !== undefined) return explicit;
+  if (
+    provider.protocol === "openai" &&
+    isOfficialEndpoint(provider.baseURL, "api.deepseek.com") &&
+    /^deepseek-v4-(?:flash|pro)$/u.test(model)
+  )
+    return "responses";
+  return provider.protocol;
 }
 
 export interface ModelRoutingConfig {
@@ -212,13 +229,13 @@ export async function loadModelRouter(options: LoadModelRouterOptions): Promise<
     models.map<ModelRoute>((model) => ({
       id: `${provider.id}/${model}`,
       providerId: provider.id,
-      provider: provider.config.modelProtocols?.[model] ?? provider.config.protocol,
+      provider: resolveModelProtocol(provider.config, model),
       model,
       baseURL: provider.config.baseURL,
       apiKeyEnv: provider.config.apiKeyEnv,
       ...(provider.config.auth ? { auth: provider.config.auth } : {}),
       capabilities: resolveModelRouteCapabilities(
-        provider.config.modelProtocols?.[model] ?? provider.config.protocol,
+        resolveModelProtocol(provider.config, model),
         model,
         provider.config.modelCapabilities?.[model],
         { baseURL: provider.config.baseURL },

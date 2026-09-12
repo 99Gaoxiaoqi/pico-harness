@@ -17,6 +17,7 @@ export interface EffectiveConfigDefaults {
   readonly orchestrationMode?: PicoOrchestrationMode;
   readonly permissionMode?: PicoPermissionMode;
   readonly thinkingEffort?: string;
+  readonly webSearch?: PicoUserConfigDefaults["webSearch"];
 }
 
 export interface EffectiveConfigSnapshot {
@@ -95,6 +96,7 @@ function resolveDefaults(
     orchestrationMode?: PicoOrchestrationMode;
     permissionMode?: PicoPermissionMode;
     thinkingEffort?: string;
+    webSearch?: PicoUserConfigDefaults["webSearch"];
   } = {};
   if (userDefaults?.modelRouteId !== undefined) {
     defaults.modelRouteId = userDefaults.modelRouteId;
@@ -115,6 +117,10 @@ function resolveDefaults(
   if (userDefaults?.thinkingEffort !== undefined) {
     defaults.thinkingEffort = userDefaults.thinkingEffort;
     sources["defaults.thinkingEffort"] = "user";
+  }
+  if (userDefaults?.webSearch !== undefined) {
+    defaults.webSearch = Object.freeze({ ...userDefaults.webSearch });
+    sources["defaults.webSearch"] = "user";
   }
   return defaults;
 }

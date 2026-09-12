@@ -44,6 +44,7 @@ import {
   type ProviderDraft,
   type ProviderView,
   type UsageView,
+  type WebSearchSettingsView,
   type WorkspaceView,
 } from "./model.js";
 import { saveProviderConnection } from "./provider-connection.js";
@@ -386,6 +387,7 @@ export interface RuntimeActions {
   ): Promise<boolean>;
   deleteProvider(providerId: string): Promise<boolean>;
   setDefaultModelRoute(modelRouteId?: string): Promise<boolean>;
+  setWebSearch(settings: WebSearchSettingsView): Promise<boolean>;
   queryUsage(input?: {
     readonly workspacePath?: string;
     readonly from?: number;
@@ -2576,6 +2578,9 @@ export function useRuntimeStore(): RuntimeStore {
           ...(providerConfig.userDefaults.thinkingEffort
             ? { thinkingEffort: providerConfig.userDefaults.thinkingEffort }
             : {}),
+          ...(providerConfig.userDefaults.webSearch
+            ? { webSearch: providerConfig.userDefaults.webSearch }
+            : {}),
         };
         return perform("provider-default", async (bridge) => {
           if (!preview) {
@@ -2600,6 +2605,33 @@ export function useRuntimeStore(): RuntimeStore {
             }));
           }
           setMessage(modelRouteId ? "默认模型已更新。" : "已清除用户默认模型。");
+        });
+      },
+      async setWebSearch(webSearch) {
+        const providerConfig = dataRef.current.providerConfig;
+        if (!providerConfig.writable) return false;
+        return perform("web-search-settings", async (bridge) => {
+          if (!preview) {
+            try {
+              await invoke(bridge, "config.user.update", {
+                defaults: { ...providerConfig.userDefaults, webSearch },
+                expectedRevision: providerConfig.revision,
+              });
+            } finally {
+              // Recover the current revision after conflicts or unknown write outcomes.
+              await loadGlobalProviderConfig(bridge);
+            }
+          } else {
+            setData((current) => ({
+              ...current,
+              providerConfig: {
+                ...current.providerConfig,
+                revision: `${current.providerConfig.revision}-next`,
+                userDefaults: { ...current.providerConfig.userDefaults, webSearch },
+              },
+            }));
+          }
+          setMessage("联网搜索设置已保存，下一次运行生效。");
         });
       },
       async queryUsage(input = {}) {

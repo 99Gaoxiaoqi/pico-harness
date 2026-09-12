@@ -26,6 +26,18 @@ export interface AssistantMessageItemView extends ConversationItemBase {
   readonly liveTerminal?: boolean | undefined;
   readonly terminalRun?: boolean | undefined;
   readonly cleared?: boolean | undefined;
+  readonly webSearch?: WebSearchRecordView | undefined;
+}
+
+export interface WebSearchRecordView {
+  readonly calls: readonly {
+    readonly toolCallId: string;
+    readonly toolName: string;
+    readonly status: "completed" | "error" | "pending";
+    readonly input: string;
+    readonly error?: string | undefined;
+  }[];
+  readonly sources: readonly { readonly url: string; readonly title: string }[];
 }
 
 export interface ThinkingItemView extends ConversationItemBase {

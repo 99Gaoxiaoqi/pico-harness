@@ -1,3 +1,4 @@
+import { resolveNativeWebSearchCapability } from "../provider/model-web-search.js";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { unwatchFile, watchFile } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -10,6 +11,7 @@ import {
 } from "../input/pico-config.js";
 import {
   parseUserConfig,
+  parseUserWebSearch,
   UserConfigLockTimeoutError,
   UserConfigRevisionConflictError,
   UserConfigStore,
@@ -28,7 +30,7 @@ import {
   type CredentialRef,
   type CredentialVault,
 } from "../provider/credential-vault.js";
-import { type ModelProviderConfig } from "../provider/model-router.js";
+import { resolveModelProtocol, type ModelProviderConfig } from "../provider/model-router.js";
 import {
   ProviderOperationJournal,
   type ProviderOperationRecord,
@@ -626,6 +628,21 @@ export class DesktopProviderConfigService {
   ): Promise<JsonObject> {
     return {
       ...runtimeProviderInput(id, provider),
+      resolvedModelCapabilities: Object.fromEntries(
+        provider.models.map((model) => [
+          model,
+          {
+            nativeWebSearch: toJsonValue(
+              resolveNativeWebSearchCapability({
+                provider: resolveModelProtocol(provider, model),
+                model,
+                baseURL: provider.baseURL,
+                webSearch: provider.modelCapabilities?.[model]?.webSearch,
+              }),
+            ),
+          },
+        ]),
+      ),
       origin,
       fingerprint: providerFingerprint(id, provider),
       ...(await this.projectCredentialStatus(id, credentialProvider, supportsSharedCredential)),
@@ -1079,7 +1096,14 @@ function requireProviderFromUserConfig(
 function normalizeRuntimeUserDefaults(value: unknown): PicoUserConfigDefaults {
   const record = assertExactObjectKeys(
     value,
-    ["modelRouteId", "collaborationMode", "orchestrationMode", "permissionMode", "thinkingEffort"],
+    [
+      "modelRouteId",
+      "collaborationMode",
+      "orchestrationMode",
+      "permissionMode",
+      "thinkingEffort",
+      "webSearch",
+    ],
     "defaults",
   );
   const modelRouteId = record["modelRouteId"];
@@ -1087,6 +1111,15 @@ function normalizeRuntimeUserDefaults(value: unknown): PicoUserConfigDefaults {
   const orchestrationMode = record["orchestrationMode"];
   const permissionMode = record["permissionMode"];
   const thinkingEffort = record["thinkingEffort"];
+  let webSearch: PicoUserConfigDefaults["webSearch"];
+  try {
+    webSearch = parseUserWebSearch(record["webSearch"], "runtime");
+  } catch (error) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      error instanceof Error ? error.message : String(error),
+    );
+  }
   if (
     modelRouteId !== undefined &&
     (typeof modelRouteId !== "string" || !/^[^/\s]+\/.+$/u.test(modelRouteId.trim()))
@@ -1130,6 +1163,7 @@ function normalizeRuntimeUserDefaults(value: unknown): PicoUserConfigDefaults {
     );
   }
   return {
+    ...(webSearch !== undefined ? { webSearch } : {}),
     ...(typeof modelRouteId === "string" ? { modelRouteId: modelRouteId.trim() } : {}),
     ...(isOneOf(collaborationMode, ["agent", "plan"] as const) ? { collaborationMode } : {}),
     ...(isOneOf(orchestrationMode, ["default", "graph", "swarm"] as const)

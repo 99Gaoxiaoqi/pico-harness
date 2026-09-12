@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import type { ModelProviderConfig } from "../provider/model-router.js";
+import { resolveModelProtocol, type ModelProviderConfig } from "../provider/model-router.js";
 import type { ModelCapabilityConfig } from "../provider/model-capabilities.js";
 import type {
   JsonValue,
@@ -356,6 +356,7 @@ export function parseModelProviderConfigs(
       configPath,
       `${field}.models`,
       modelProtocols,
+      baseURL,
     );
     for (const model of Object.keys(modelProtocols)) {
       if (!parsedModels.models.includes(model)) {
@@ -373,6 +374,7 @@ export function parseModelProviderConfigs(
       configPath,
       `${field}.modelCapabilities`,
       modelProtocols,
+      baseURL,
     );
     const modelCapabilities = {
       ...parsedModels.capabilities,
@@ -404,6 +406,7 @@ function parseNormalizedModelCapabilities(
   configPath: string,
   field: string,
   modelProtocols: Readonly<Record<string, ProviderKind>> = {},
+  baseURL = "",
 ): Record<string, ModelCapabilityConfig> {
   if (value === undefined) return {};
   if (!isRecord(value)) throw configError(configPath, field, "must be an object");
@@ -419,7 +422,7 @@ function parseNormalizedModelCapabilities(
     }
     capabilities[model] = parseModelCapabilities(
       rawCapabilities,
-      modelProtocols[model] ?? protocol,
+      resolveModelProtocol({ protocol, baseURL, modelProtocols }, model),
       configPath,
       modelField,
     );
@@ -433,6 +436,7 @@ function parseModels(
   configPath: string,
   field: string,
   modelProtocols: Readonly<Record<string, ProviderKind>> = {},
+  baseURL = "",
 ): { models: string[]; capabilities: Record<string, ModelCapabilityConfig> } {
   if (value === undefined) return { models: [], capabilities: {} };
   if (Array.isArray(value)) {
@@ -460,7 +464,7 @@ function parseModels(
     models.push(model);
     capabilities[model] = parseModelCapabilities(
       rawCapabilities,
-      modelProtocols[model] ?? protocol,
+      resolveModelProtocol({ protocol, baseURL, modelProtocols }, model),
       configPath,
       modelField,
     );
@@ -484,6 +488,7 @@ function parseModelCapabilities(
     result[key] = candidate as number;
   }
   for (const key of [
+    "webSearch",
     "vision",
     "toolCall",
     "cache",
