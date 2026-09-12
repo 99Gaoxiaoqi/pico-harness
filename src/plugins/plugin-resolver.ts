@@ -24,7 +24,6 @@ import type {
 const MANIFEST_CANDIDATES = [
   { source: "pico-native", relativePath: ".pico/plugin.json" },
   { source: "claude-compatible", relativePath: ".claude-plugin/plugin.json" },
-  { source: "legacy-root", relativePath: "plugin.json" },
 ] as const satisfies readonly {
   source: Exclude<PluginManifestSource, "manifestless">;
   relativePath: string;
@@ -260,18 +259,6 @@ async function resolveManifest(pluginPath: string): Promise<ManifestResolution> 
   }
 
   const diagnostics: PluginDiagnostic[] = [];
-  if (candidate.source === "legacy-root") {
-    diagnostics.push(
-      diagnostic(
-        "warning",
-        "degraded",
-        "legacy_root_manifest",
-        "Root plugin.json is supported for compatibility; prefer .pico/plugin.json.",
-        candidate.path,
-        "manifest",
-      ),
-    );
-  }
 
   let parsed: unknown;
   try {
