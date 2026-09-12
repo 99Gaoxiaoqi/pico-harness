@@ -23,7 +23,6 @@ export interface DesktopAutomationRequestContext {
   readonly effectiveConfigResolver: EffectiveConfigResolver;
   readonly userConfigStore: UserConfigStore;
   readonly pluginRuntimeSnapshotRegistry: PluginRuntimeSnapshotRegistry;
-  readonly env: Readonly<Record<string, string | undefined>>;
   readonly now: () => number;
   readonly requireTrustedWorkspace: (workspacePath: string) => Promise<string>;
   readonly publishJob: (job: JsonValue) => void;
@@ -69,7 +68,6 @@ export function createDesktopAutomationRequestHandlers(
       credentialVault: context.credentialVault,
       effectiveConfigResolver: context.effectiveConfigResolver,
       userConfigStore: context.userConfigStore,
-      env: context.env,
     });
   };
 
@@ -95,7 +93,6 @@ export function createDesktopAutomationRequestHandlers(
       credentialVault: context.credentialVault,
       effectiveConfigResolver: context.effectiveConfigResolver,
       userConfigStore: context.userConfigStore,
-      env: context.env,
       foregroundOnlyTools,
       now: context.now,
     });

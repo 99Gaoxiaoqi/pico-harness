@@ -37,7 +37,6 @@ const protocolBaseURLPlaceholders: Readonly<Record<ProviderProtocol, string>> = 
 
 const originLabels: Readonly<Record<ProviderOrigin, string>> = {
   user: "当前设备",
-  "project-legacy": "工作区兼容配置",
   environment: "当前进程环境",
 };
 

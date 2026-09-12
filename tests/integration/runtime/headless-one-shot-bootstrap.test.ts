@@ -65,8 +65,6 @@ test("headless bootstrap writes secret-free pinned routes and trusts the isolate
         providers: snapshot.config.providers,
       },
       env: { PICO_TB_GATEWAY_TOKEN: "process-local-fixture-token" },
-      legacyProvider: "openai",
-      legacyModel: "unused-legacy-model",
     });
     const route = router.require(modelRouteId);
     assert.equal(route.capabilities.maxOutputTokens, 8_192, modelId);
@@ -149,8 +147,6 @@ test("headless bootstrap keeps non-pinned routes compatible with optional output
         providers: snapshot.config.providers,
       },
       env: { PICO_TB_GATEWAY_TOKEN: "process-local-fixture-token" },
-      legacyProvider: "openai",
-      legacyModel: "unused-legacy-model",
     });
     const route = router.require(candidate.routeId);
     // 2acfbcf2d 起：未配置 output 时 maxOutputTokens 为 undefined（不传，用

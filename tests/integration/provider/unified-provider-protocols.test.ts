@@ -209,8 +209,6 @@ test("one provider and key survive RPC round trips and route Chat, Messages and 
   const effective = await loadEffectiveModelRuntime({
     workDir: workspacePath,
     projectTrusted: true,
-    legacyProvider: "openai",
-    legacyModel: "",
     env,
     userConfigStore: new UserConfigStore({ picoHome }),
     configResolver: new EffectiveConfigResolver({ userConfigStore: store }),

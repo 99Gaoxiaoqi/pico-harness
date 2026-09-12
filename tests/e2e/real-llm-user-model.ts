@@ -60,9 +60,6 @@ export async function loadUserDefaultRealModel(
     // 不参与。项目侧 model 默认路由已退役（2026-08-17），此处不再是绕开手段，
     // 只是纯粹的测试隔离。
     projectTrusted: false,
-    legacyProvider: "openai",
-    legacyModel: "unused-real-model-e2e-legacy-route",
-    legacyModelExplicit: false,
     env,
     userConfigStore,
     configResolver,

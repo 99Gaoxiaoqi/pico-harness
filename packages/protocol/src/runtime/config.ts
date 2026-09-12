@@ -52,7 +52,7 @@ export type RuntimeProviderInput = JsonObject & {
 };
 
 export type RuntimeProviderProfile = RuntimeProviderInput & {
-  readonly origin: Extract<RuntimeConfigSource, "user" | "project-legacy" | "environment">;
+  readonly origin: Extract<RuntimeConfigSource, "user" | "environment">;
   readonly fingerprint: string;
   readonly credentialStatus: RuntimeCredentialStatus;
   readonly credentialSource: RuntimeCredentialSource;
@@ -158,7 +158,7 @@ const runtimeProviderProfileResult = resultShape(
     apiKeyEnv: resultString,
     models: resultStringArray,
     discoverModels: resultBoolean,
-    origin: resultOneOf(["user", "project-legacy", "environment"]),
+    origin: resultOneOf(["user", "environment"]),
     fingerprint: resultString,
     credentialStatus: resultOneOf(["ready", "missing", "environment", "unsupported"]),
     credentialSource: resultOneOf(["config", "keychain", "environment", "none"]),

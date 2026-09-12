@@ -80,7 +80,7 @@ Desktop 打开或添加项目时会先只读检查存储绑定；发生身份变
 
 运行中的 Run 固定使用启动时的配置快照，不会中途热换模型或凭证。daemon 在后续 Run
 装配时读取新配置，并通过 Runtime 事件通知客户端刷新；Desktop 在窗口重新聚焦时还会补一次
-状态读取。损坏配置、revision 冲突或 Provider authority 冲突都会 fail-closed。
+状态读取。损坏配置或 revision 冲突都会 fail-closed。
 
 ## 环境变量迁移
 

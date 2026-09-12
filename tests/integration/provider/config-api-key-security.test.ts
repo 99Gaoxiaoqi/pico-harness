@@ -277,9 +277,6 @@ test("effective provider assembly resolves a config key with an empty environmen
   const runtime = await loadEffectiveModelRuntime({
     workDir: workspace,
     projectTrusted: false,
-    legacyProvider: "openai",
-    legacyModel: "unused-legacy-model",
-    legacyModelExplicit: false,
     env: {},
     userConfigStore: store,
     configResolver: resolver,
@@ -298,16 +295,13 @@ test("bare LLM environment is not a route while configured env and Keychain cred
   context.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(workspace, { recursive: true });
 
-  const environmentSecret = syntheticSecret("legacy-environment");
+  const environmentSecret = syntheticSecret("bare-environment");
   const emptyStore = new UserConfigStore({ picoHome: join(picoHome, "environment") });
   const environmentRuntime = await loadEffectiveModelRuntime({
     workDir: workspace,
     projectTrusted: false,
-    legacyProvider: "openai",
-    legacyModel: MODEL_ID,
-    legacyModelExplicit: true,
     env: {
-      LLM_BASE_URL: "https://legacy-environment.example/v1",
+      LLM_BASE_URL: "https://bare-environment.example/v1",
       LLM_MODEL: MODEL_ID,
       LLM_API_KEY: environmentSecret,
     },
@@ -333,9 +327,6 @@ test("bare LLM environment is not a route while configured env and Keychain cred
   const configuredEnvironmentRuntime = await loadEffectiveModelRuntime({
     workDir: workspace,
     projectTrusted: false,
-    legacyProvider: "openai",
-    legacyModel: "unused-legacy-model",
-    legacyModelExplicit: false,
     env: { [API_KEY_ENV]: configuredEnvironmentSecret },
     userConfigStore: configuredEnvironmentStore,
     configResolver: new EffectiveConfigResolver({ userConfigStore: configuredEnvironmentStore }),
@@ -353,9 +344,6 @@ test("bare LLM environment is not a route while configured env and Keychain cred
   const rotatingRuntime = await loadEffectiveModelRuntime({
     workDir: workspace,
     projectTrusted: false,
-    legacyProvider: "openai",
-    legacyModel: "unused-legacy-model",
-    legacyModelExplicit: false,
     env: {
       [API_KEY_ENV]: `${firstRotatingSecret}, ${secondRotatingSecret}`,
       LLM_API_KEYS: syntheticSecret("unrelated-bare-environment"),
@@ -369,7 +357,7 @@ test("bare LLM environment is not a route while configured env and Keychain cred
     secondRotatingSecret,
   ]);
 
-  const keychainSecret = syntheticSecret("legacy-keychain");
+  const keychainSecret = syntheticSecret("provider-keychain");
   const keychainStore = new UserConfigStore({ picoHome: join(picoHome, "keychain") });
   await keychainStore.write(userConfigWithoutKey(), {
     expectedRevision: EMPTY_USER_CONFIG_REVISION,
@@ -386,16 +374,13 @@ test("bare LLM environment is not a route while configured env and Keychain cred
   const keychainRuntime = await loadEffectiveModelRuntime({
     workDir: workspace,
     projectTrusted: false,
-    legacyProvider: "openai",
-    legacyModel: "unused-legacy-model",
-    legacyModelExplicit: false,
     env: {},
     userConfigStore: keychainStore,
     configResolver: new EffectiveConfigResolver({ userConfigStore: keychainStore }),
     credentialVault: keychainVault,
   });
   assertSecretMatches(
-    "legacy Keychain provider config",
+    "provider Keychain config",
     keychainRuntime.router.providerConfig(`${PROVIDER_ID}/${MODEL_ID}`).config.apiKey,
     keychainSecret,
   );

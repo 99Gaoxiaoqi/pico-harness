@@ -133,8 +133,6 @@ test("production startup seeds an anonymous default; config projection and real 
   const effective = await loadEffectiveModelRuntime({
     workDir: picoHome,
     projectTrusted: false,
-    legacyProvider: "openai",
-    legacyModel: "",
     env,
     credentialVault: noVault,
     userConfigStore,
@@ -158,8 +156,6 @@ test("production startup seeds an anonymous default; config projection and real 
       },
     },
     env,
-    legacyProvider: "openai",
-    legacyModel: "",
   });
   assert.equal(discovered.routes[0]?.id, "local/local-model");
   assert.deepEqual(seen[1], { url: "/v1/models", authorization: undefined });
@@ -168,8 +164,6 @@ test("production startup seeds an anonymous default; config projection and real 
       providers: { paid: { ...OPENCODE_FREE_PROVIDER, auth: "api-key", baseURL: localURL } },
     },
     env: {},
-    legacyProvider: "openai",
-    legacyModel: "",
   });
   assert.equal(ordinary.validate(ordinary.routes[0]!.id).ok, false);
   assert.throws(() => ordinary.providerConfig(undefined), /缺少凭证/);

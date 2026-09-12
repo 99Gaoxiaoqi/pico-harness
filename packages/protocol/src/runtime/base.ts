@@ -86,7 +86,6 @@ export type RuntimeProviderKind = "openai" | "claude" | "responses";
 export type RuntimeConfigSource =
   | "user"
   | "project"
-  | "project-legacy"
   | "environment"
   | "session"
   | "cli";

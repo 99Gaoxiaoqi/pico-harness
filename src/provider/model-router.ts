@@ -37,19 +37,13 @@ export interface ModelRoute {
   /** Environment variable name only. Secret values never enter session settings or UI data. */
   apiKeyEnv: string;
   auth?: "api-key" | "none";
-  source: "config" | "discovered" | "legacy";
+  source: "config" | "discovered";
   capabilities: ModelRouteCapabilities;
 }
 
 export interface LoadModelRouterOptions {
   config: ModelRoutingConfig;
   env?: Readonly<Record<string, string | undefined>>;
-  /** @deprecated Retained for host-call compatibility; bare legacy routes are no longer built. */
-  legacyProvider: ProviderKind;
-  /** @deprecated Retained for host-call compatibility; bare legacy routes are no longer built. */
-  legacyModel: string;
-  /** @deprecated Retained for host-call compatibility; bare legacy routes are no longer built. */
-  legacyModelExplicit?: boolean;
   fetch?: typeof fetch;
   discoveryTimeoutMs?: number;
   /**
@@ -64,8 +58,6 @@ export interface ResolvedModelSecrets {
   readonly providers?: Readonly<Record<string, string>>;
   /** Provider-scoped rotation candidates resolved only from that user's declared apiKeyEnv. */
   readonly providerPools?: Readonly<Record<string, readonly string[]>>;
-  /** Route-level credentials, used by strict legacy workspace credential references. */
-  readonly routes?: Readonly<Record<string, string>>;
 }
 
 interface ProviderSource {
@@ -79,7 +71,6 @@ export class ModelRouter {
   private readonly byId: ReadonlyMap<string, ModelRoute>;
   private readonly providerSecrets: ReadonlyMap<string, string>;
   private readonly providerPools: ReadonlyMap<string, readonly string[]>;
-  private readonly routeSecrets: ReadonlyMap<string, string>;
 
   constructor(
     routes: readonly ModelRoute[],
@@ -92,7 +83,6 @@ export class ModelRouter {
     this.defaultRouteId = defaultRouteId;
     this.providerSecrets = secretMap(resolvedSecrets.providers);
     this.providerPools = secretListMap(resolvedSecrets.providerPools);
-    this.routeSecrets = secretMap(resolvedSecrets.routes);
   }
 
   readonly routes: readonly ModelRoute[];
@@ -189,9 +179,6 @@ export class ModelRouter {
   credentialCandidates(routeId: string | undefined): readonly string[] {
     const route = this.require(routeId);
     if (route.auth === "none") return Object.freeze([]);
-    const routeSecret = this.routeSecrets.get(route.id);
-    if (routeSecret) return Object.freeze([routeSecret]);
-
     const providerPool = this.providerPools.get(route.providerId);
     if (providerPool) return providerPool;
 

@@ -3,12 +3,10 @@ import type { PicoUserConfig, UserModelProviderConfig } from "../input/user-conf
 import {
   createPlatformCredentialVault,
   CredentialNotFoundError,
-  credentialRefForModelRoute,
   credentialRefForProvider,
   normalizeProviderEndpoint,
   type CredentialVault,
 } from "./credential-vault.js";
-import type { ProviderKind } from "./factory.js";
 import {
   loadModelRouter,
   type ModelProviderConfig,
@@ -43,9 +41,6 @@ export interface EffectiveModelRuntime {
 export interface LoadEffectiveModelRuntimeOptions {
   readonly workDir: string;
   readonly projectTrusted: boolean;
-  readonly legacyProvider: ProviderKind;
-  readonly legacyModel: string;
-  readonly legacyModelExplicit?: boolean;
   readonly env?: Readonly<Record<string, string | undefined>>;
   /** Read-only durable config dependency supplied by the host composition root. */
   readonly userConfigStore: ModelRuntimeUserConfigStore;
@@ -69,21 +64,15 @@ export async function loadEffectiveModelRuntime(
     options.configResolver,
     options.userConfigStore,
     options,
-    env,
   );
   const vault = options.credentialVault ?? createPlatformCredentialVault();
-  const resolved = await resolveSecrets(config, userConfig.providers, options.workDir, env, vault);
+  const resolved = await resolveSecrets(config, userConfig.providers, env, vault);
   const router = await loadModelRouter({
     config: {
       ...(config.defaultModelRouteId ? { model: config.defaultModelRouteId } : {}),
       providers: config.providers,
     },
     env,
-    legacyProvider: options.legacyProvider,
-    legacyModel: options.legacyModel,
-    ...(options.legacyModelExplicit !== undefined
-      ? { legacyModelExplicit: options.legacyModelExplicit }
-      : {}),
     ...(options.fetch ? { fetch: options.fetch } : {}),
     ...(options.discoveryTimeoutMs !== undefined
       ? { discoveryTimeoutMs: options.discoveryTimeoutMs }
@@ -102,14 +91,11 @@ async function resolveStableConfiguration(
   resolver: ModelRuntimeConfigResolver,
   userConfigStore: ModelRuntimeUserConfigStore,
   options: LoadEffectiveModelRuntimeOptions,
-  env: Readonly<Record<string, string | undefined>>,
 ): Promise<{ config: EffectiveConfigSnapshot; userConfig: PicoUserConfig }> {
   for (let attempt = 0; attempt < 3; attempt++) {
     const config = await resolver.resolve({
       workDir: options.workDir,
       projectTrusted: options.projectTrusted,
-      env,
-      legacyProvider: options.legacyProvider,
     });
     const user = await userConfigStore.read();
     if (user.revision === config.revisions.user) {
@@ -122,7 +108,6 @@ async function resolveStableConfiguration(
 async function resolveSecrets(
   config: EffectiveConfigSnapshot,
   userProviders: Readonly<Record<string, UserModelProviderConfig>>,
-  workDir: string,
   env: Readonly<Record<string, string | undefined>>,
   vault: CredentialVault,
 ): Promise<{
@@ -131,7 +116,6 @@ async function resolveSecrets(
 }> {
   const providerSecrets: Record<string, string> = {};
   const providerPools: Record<string, readonly string[]> = {};
-  const routeSecrets: Record<string, string> = {};
   const statuses: Record<string, EffectiveProviderCredentialStatus> = {};
 
   await Promise.all(
@@ -170,32 +154,9 @@ async function resolveSecrets(
         }
       }
 
-      if (configSource === "project-legacy") {
-        let found = false;
-        for (const model of provider.models) {
-          const routeId = `${providerId}/${model}`;
-          const secret = await resolveVaultSecret(
-            vault,
-            credentialRefForModelRoute(legacyCredentialRoute(routeId, provider, model), workDir),
-          );
-          if (!secret) continue;
-          routeSecrets[routeId] = secret;
-          found = true;
-        }
-        if (found) {
-          statuses[providerId] = { providerId, configSource, state: "keychain" };
-          return;
-        }
-      }
-
-      // Environment credentials remain a compatibility fallback for legacy configurations. A
-      // configured user key or an existing keychain entry always wins and needs no environment.
-      // A project-legacy provider with no matching user-configured authority is untrusted, though:
-      // it may be a malicious injection crafted to exfiltrate ambient env secrets (e.g.
-      // LLM_API_KEY) to an attacker-controlled baseURL. Such providers must never touch env, so
-      // they can only be satisfied from the user config or the credential vault above.
-      const allowEnvFallback = !(configSource === "project-legacy" && !userProviderMatches);
-      const environmentSecrets = allowEnvFallback ? readSecrets(env[provider.apiKeyEnv]) : [];
+      // A configured user key or an existing keychain entry always wins. Environment credentials
+      // remain available only through the apiKeyEnv declared by an effective Provider.
+      const environmentSecrets = readSecrets(env[provider.apiKeyEnv]);
       const environmentSecret = environmentSecrets[0];
       if (environmentSecret) {
         providerSecrets[providerId] = environmentSecret;
@@ -207,10 +168,7 @@ async function resolveSecrets(
       statuses[providerId] = {
         providerId,
         configSource,
-        state:
-          userProviderMatches || configSource === "project-legacy"
-            ? unavailableState(vault)
-            : "missing",
+        state: userProviderMatches ? unavailableState(vault) : "missing",
       };
     }),
   );
@@ -219,19 +177,8 @@ async function resolveSecrets(
     secrets: {
       providers: providerSecrets,
       providerPools,
-      routes: routeSecrets,
     },
     statuses,
-  };
-}
-
-function legacyCredentialRoute(routeId: string, provider: ModelProviderConfig, model: string) {
-  return {
-    id: routeId,
-    provider: provider.modelProtocols?.[model] ?? provider.protocol,
-    baseURL: provider.baseURL,
-    model,
-    apiKeyEnv: provider.apiKeyEnv,
   };
 }
 

@@ -33,7 +33,7 @@ function providerProtocol(value: unknown): ProviderProtocol {
 }
 
 function providerOrigin(value: unknown): ProviderOrigin {
-  return value === "project-legacy" || value === "environment" ? value : "user";
+  return value === "environment" ? value : "user";
 }
 
 function providerCredentialStatus(value: unknown): ProviderCredentialStatus {

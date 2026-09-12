@@ -56,7 +56,7 @@ Start the interactive Pico TUI in the current directory.
 Options:
   --thinking <off|low|medium|high>   Override the model's default reasoning level
   --dir <path>                       Workspace directory (default: current directory)
-  --model <provider/model|name>      Model route or legacy model name
+  --model <provider/model|name>      Configured model route or unique model name
   -S, --session <id>                 Resume a session by id
   -c, --continue                     Continue the latest session in this project
       --graph                        Start with persistent Agent Graph scheduling enabled

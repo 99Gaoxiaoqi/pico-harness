@@ -2,11 +2,7 @@ import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { unwatchFile, watchFile } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import {
-  EffectiveConfigResolver,
-  ProviderIdConflictError,
-  type ConfigSource,
-} from "../input/effective-config.js";
+import { EffectiveConfigResolver, type ConfigSource } from "../input/effective-config.js";
 import {
   loadPicoConfig,
   parseModelProviderConfigs,
@@ -203,19 +199,10 @@ export class DesktopProviderConfigService {
     const workspacePath = await this.options.requireTrustedWorkspace(
       requireText(record["workspacePath"], "workspacePath"),
     );
-    let snapshot;
-    try {
-      snapshot = await this.effectiveConfigResolver.resolve({
-        workDir: workspacePath,
-        projectTrusted: true,
-        env: this.env,
-      });
-    } catch (error) {
-      if (error instanceof ProviderIdConflictError) {
-        throw new RuntimeProtocolError(RUNTIME_ERROR_CODES.CONFLICT, error.message);
-      }
-      throw error;
-    }
+    const snapshot = await this.effectiveConfigResolver.resolve({
+      workDir: workspacePath,
+      projectTrusted: true,
+    });
     const userProviders = (await this.userConfigStore.read()).config.providers;
     const providers = await Promise.all(
       Object.entries(snapshot.providers)
@@ -647,7 +634,7 @@ export class DesktopProviderConfigService {
   private async projectProviderProfile(
     id: string,
     provider: ModelProviderConfig,
-    origin: "user" | "project-legacy" | "environment",
+    origin: "user" | "environment",
     supportsSharedCredential = true,
     credentialProvider = provider,
   ): Promise<JsonObject> {
@@ -1400,10 +1387,8 @@ function sameProviderEndpoint(left: string, right: string): boolean {
   }
 }
 
-function providerOrigin(
-  source: ConfigSource | undefined,
-): "user" | "project-legacy" | "environment" {
-  if (source === "user" || source === "project-legacy" || source === "environment") {
+function providerOrigin(source: ConfigSource | undefined): "user" | "environment" {
+  if (source === "user" || source === "environment") {
     return source;
   }
   throw new RuntimeProtocolError(
