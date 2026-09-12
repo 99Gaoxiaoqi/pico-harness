@@ -919,8 +919,8 @@ export async function executeAgentRuntime(
     ...(dependencies.webSearchSettings ??
       (dependencies.isolatedHeadless
         ? DEFAULT_WEB_SEARCH_SETTINGS
-        : (await new UserConfigStore({ picoHome }).read()).config.defaults?.webSearch ??
-          DEFAULT_WEB_SEARCH_SETTINGS)),
+        : ((await new UserConfigStore({ picoHome }).read()).config.defaults?.webSearch ??
+          DEFAULT_WEB_SEARCH_SETTINGS))),
   });
   let searchUnavailableReason: string | undefined;
   const claudeCompatibility = picoConfig.compatibility.claude;
@@ -1508,14 +1508,34 @@ export async function executeAgentRuntime(
     const { providerFactory, providerDependencies, subagentModelRouter, parentModelRouteId } =
       modelAssembly;
     const contextRuntime = buildContextRuntime(kind, providerConfig.model);
-    const nativeSearchNetworkAllowed = () => backgroundPolicy
-      ? backgroundPolicy.snapshot.toolNetworkPolicy === "allow"
-      : currentBoundaryAllowsNetwork();
-    const trackedProvider = guardNativeSearchRequests(modelAssembly.provider, nativeSearchNetworkAllowed);
+    const nativeSearchAdmissionReason = (): string | undefined => {
+      if (backgroundPolicy && backgroundPolicy.snapshot.toolNetworkPolicy !== "allow")
+        return "后台网络策略无法授权供应商原生搜索。";
+      if (
+        backgroundPolicy?.hookRunner ||
+        activeHookService?.requiresLocalToolAdmission("web_search")
+      )
+        return "当前搜索需要执行本地 Hook 准入，原生搜索不可用；可明确选择外部搜索来源。";
+      if (
+        !backgroundPolicy &&
+        evaluateToolPermission(permissionMode(), "web_read").kind !== "allow"
+      )
+        return "当前权限模式要求逐次审批搜索，原生搜索不可用；可明确选择外部搜索来源。";
+      if (!backgroundPolicy && !currentBoundaryAllowsNetwork())
+        return "原生搜索受当前任务网络权限限制；需要时通过 request_sandbox_boundary 请求网络权限。";
+      return undefined;
+    };
+    const nativeSearchNetworkAllowed = () => nativeSearchAdmissionReason() === undefined;
+    const trackedProvider = guardNativeSearchRequests(
+      modelAssembly.provider,
+      nativeSearchNetworkAllowed,
+    );
     const rebuildProvider = modelAssembly.rebuildProvider
       ? (failure: Parameters<NonNullable<typeof modelAssembly.rebuildProvider>>[0]) => {
           const rebuilt = modelAssembly.rebuildProvider!(failure);
-          return rebuilt ? guardNativeSearchRequests(rebuilt, nativeSearchNetworkAllowed) : undefined;
+          return rebuilt
+            ? guardNativeSearchRequests(rebuilt, nativeSearchNetworkAllowed)
+            : undefined;
         }
       : undefined;
     if (memoryRepository && (await memoryExtractionAllowed()).allowed) {
@@ -2128,8 +2148,14 @@ export async function executeAgentRuntime(
       const turnTailParts = composed.turnTail ? [composed.turnTail] : [];
       if (searchUnavailableReason) {
         turnTailParts.push(`[WEB SEARCH] ${searchUnavailableReason} 不得声称已经完成联网搜索。`);
-      } else if (webSearchSettings.enabled && webSearchSettings.source === "model" && !nativeSearchNetworkAllowed()) {
-        turnTailParts.push("[WEB SEARCH] 原生搜索受当前任务网络权限限制。确有需要时通过 request_sandbox_boundary 请求网络权限；获批后才会向模型提供原生搜索工具。后台受限域名策略不支持原生搜索。");
+      } else if (
+        webSearchSettings.enabled &&
+        webSearchSettings.source === "model" &&
+        !nativeSearchNetworkAllowed()
+      ) {
+        turnTailParts.push(
+          `[WEB SEARCH] ${nativeSearchAdmissionReason()} 不得声称已经完成联网搜索。`,
+        );
       }
       if (
         activeExecutionPlanId &&
@@ -2393,14 +2419,15 @@ export async function executeAgentRuntime(
             ? "Persistent child executor unavailable"
             : definition.profile === "web_research" && !webSearchSettings.enabled
               ? "联网搜索已关闭"
-              : definition.profile === "web_research" && webSearchSettings.source === "external" &&
+              : definition.profile === "web_research" &&
+                  webSearchSettings.source === "external" &&
                   webSearchUnavailableReason(webSearchSettings, undefined, runtimeEnv)
                 ? webSearchUnavailableReason(webSearchSettings, undefined, runtimeEnv)
-            : definition.workspace === "isolated-worktree" &&
-                !runtimeState.taskHostRuntime?.supervisor &&
-                !dependencies.configuredSubagentExecutor
-              ? "Worktree child executor unavailable"
-              : undefined,
+                : definition.workspace === "isolated-worktree" &&
+                    !runtimeState.taskHostRuntime?.supervisor &&
+                    !dependencies.configuredSubagentExecutor
+                  ? "Worktree child executor unavailable"
+                  : undefined,
       };
       if (!registry.getTool("agent_list"))
         registry.register(new ConfiguredAgentListTool(toolOptions));
@@ -2599,11 +2626,12 @@ export async function executeAgentRuntime(
     searchUnavailableReason = routeRuntimeWebSearch(
       registry,
       webSearchSettings,
-      providerConfig.capabilities?.nativeWebSearch ?? resolveNativeWebSearchCapability({
-        provider: kind,
-        model: providerConfig.model,
-        baseURL: providerConfig.baseURL,
-      }),
+      providerConfig.capabilities?.nativeWebSearch ??
+        resolveNativeWebSearchCapability({
+          provider: kind,
+          model: providerConfig.model,
+          baseURL: providerConfig.baseURL,
+        }),
       runtimeEnv,
     );
     if (registry.getTool("web_search")) baselineToolNames.push("web_search");

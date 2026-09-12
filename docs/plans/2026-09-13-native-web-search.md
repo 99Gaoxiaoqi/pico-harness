@@ -12,7 +12,7 @@
 2. 对话选中的 modelRouteId 决定连接和模型。逐模型 modelProtocols 显式设置优先；缺省时只为官方 DeepSeek V4 Flash/Pro 补 Responses 默认值。其他连接沿用明确协议，不试错切换。
 3. 能力判断同时检查协议、端点、模型和显式 webSearch 能力覆盖；未知兼容端点默认不可用。实现不支持的 SDK 路径不能被能力覆盖强行启用。
 4. 开关关闭则移除 web_search；external 仅使用现有外部服务；model 仅注入匹配 SDK 的 provider tool。不可用时提供原因，不更换搜索来源。
-5. 主对话、配置型子代理与 Graph/Swarm 操作员在运行时使用相同装配规则。子代理工具白名单和网络边界是权限上限；原生搜索不绕过网络授权。后台限定域名无法约束供应商搜索，只有网络 allow 才允许原生搜索。辅助模型调用与 tool_choice:none 不携带原生搜索。
+5. 主对话、配置型子代理与 Graph/Swarm 操作员在运行时使用相同装配规则。子代理工具白名单和网络边界是权限上限；原生搜索不绕过网络授权。后台限定域名无法约束供应商搜索，只有网络 allow 才允许原生搜索。需要逐次工具审批的 ask 模式，或者存在匹配搜索的 PreToolUse/Hookify 准入规则时，原生搜索不可用（供应商执行前拿不到真实搜索参数，不能绕过这些规则）。可明确选择 external 走现有本地工具审批。辅助模型调用与 tool_choice:none 不携带原生搜索。
 6. Provider 使用 SDK 原生搜索工具，原生 call/result 不进入 Pico 本地工具执行。保存真实搜索事件和来源供 UI 展示，并保留供应商数据供下一轮重放。只返回文字或链接不能当作搜索执行成功。
 
 ## 分工
@@ -36,4 +36,11 @@
 
 ## 验证结果
 
-待实现完成后填入实际执行结果。
+- 83 项相关集成测试通过：25 项联网配置/SDK/运行时/桌面/Hook/子代理回归，58 项协议及会话历史连续性回归。
+- 根项目 TypeScript、桌面 main/preload/renderer 类型检查、桌面 renderer 生产构建通过。
+- 使用用户已配置的官方 DeepSeek V4 Flash 凭证执行真实 Responses 验证：普通回答通过，原生搜索明确不可用且没有产生伪搜索记录。
+- 正向真实原生搜索探针已提供，但当前没有已确认支持的连接用于此项验证，保持跳过；模拟服务已验证 OpenAI Responses / Anthropic 两条 SDK 路径，不能将其等同于真实服务搜索成功。
+- 搜索记录进入持久化会话投影，投影版本 4 → 5，旧投影按现有机制重建；相关连续性/重放测试通过。
+- 现有用户配置未自动开启联网，运行中的任务未重启。新版本从“设置 → 通用 → 联网搜索”开启并选择来源。
+
+资料：[DeepSeek 当前 Responses 兼容说明](https://api-docs.deepseek.com/guides/responses_api/)、[OpenAI 原生搜索](https://developers.openai.com/api/docs/guides/tools-web-search)、[Anthropic 原生搜索](https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-search-tool)。

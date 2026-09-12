@@ -35,7 +35,10 @@ test("全局联网设置投影真实模型能力，默认关闭且仅保存搜�
       },
     ],
   };
-  const render = (userDefaults: Record<string, unknown>, providerRegistry = registry) => {
+  const render = (
+    userDefaults: Record<string, unknown>,
+    providerRegistry: Record<string, unknown> = registry,
+  ) => {
     const config = parseProviderConfig(
       {
         userConfig: { config: { defaults: userDefaults }, revision: "revision-1" },

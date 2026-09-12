@@ -83,10 +83,13 @@ export function guardNativeSearchRequests(
     ...(provider.isRetryableError
       ? { isRetryableError: (error: unknown) => provider.isRetryableError!(error) }
       : {}),
-    generate: (messages, tools, options) => provider.generate(messages, visible(tools, options), options),
+    generate: (messages, tools, options) =>
+      provider.generate(messages, visible(tools, options), options),
     ...(provider.generateStream
-      ? { generateStream: (messages, tools, onDelta, options) =>
-          provider.generateStream!(messages, visible(tools, options), onDelta, options) }
+      ? {
+          generateStream: (messages, tools, onDelta, options) =>
+            provider.generateStream!(messages, visible(tools, options), onDelta, options),
+        }
       : {}),
   };
 }
