@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { AgentEngine } from "../../../src/engine/loop.js";
 import { Session } from "../../../src/engine/session.js";
-import { ClaudeProvider } from "../../../src/provider/claude.js";
+import { AiSdkProvider } from "../../../src/provider/ai-sdk-provider.js";
 import type { BaseTool } from "../../../src/tools/registry.js";
 import { ToolDisclosure } from "../../../src/tools/tool-disclosure.js";
 import { ToolRegistry } from "../../../src/tools/registry-impl.js";
@@ -136,7 +136,7 @@ test("Claude wire request keeps three cache breakpoints and degrades safely", as
 
   try {
     const address = server.address() as AddressInfo;
-    const provider = new ClaudeProvider({
+    const provider = new AiSdkProvider("claude", {
       baseURL: `http://127.0.0.1:${address.port}`,
       apiKey: "test-key",
       model: "claude-test",
@@ -245,7 +245,7 @@ test("multi-turn engine requests reheat the deep history prefix without persisti
   });
   try {
     const address = server.address() as AddressInfo;
-    const provider = new ClaudeProvider({
+    const provider = new AiSdkProvider("claude", {
       baseURL: `http://127.0.0.1:${address.port}`,
       apiKey: "test-key",
       model: "claude-test",

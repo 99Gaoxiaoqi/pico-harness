@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
-import { ClaudeProvider } from "../../../src/provider/claude.js";
+import { AiSdkProvider } from "../../../src/provider/ai-sdk-provider.js";
 import type { ProviderConfig } from "../../../src/provider/config.js";
 import type { LLMProvider, LLMProviderRequestOptions } from "../../../src/provider/interface.js";
 import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
@@ -281,7 +281,7 @@ test("Claude prewarm wire body uses max_tokens zero and keeps cache breakpoints"
       },
     });
   };
-  const provider = new ClaudeProvider(adaptiveConfig());
+  const provider = new AiSdkProvider("claude", adaptiveConfig());
   const response = await provider.generate(
     [
       { role: "system", content: "stable system" },

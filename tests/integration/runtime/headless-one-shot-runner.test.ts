@@ -25,8 +25,7 @@ import {
   type LLMProvider,
   type LLMProviderRequestOptions,
 } from "../../../src/provider/interface.js";
-import { ClaudeProvider } from "../../../src/provider/claude.js";
-import { OpenAIProvider } from "../../../src/provider/openai.js";
+import { AiSdkProvider } from "../../../src/provider/ai-sdk-provider.js";
 import type { Message } from "../../../src/schema/message.js";
 import { createToolResultEnvelope } from "../../../src/engine/tool-result-contract.js";
 import { globalSessionManager } from "../../../src/engine/session.js";
@@ -750,8 +749,8 @@ test("OpenAI and Claude transports forward the trusted provider timeout", async 
     model: "fixture-model",
   };
   const messages: Message[] = [{ role: "user", content: "timeout contract" }];
-  await new OpenAIProvider(config).generate(messages, [], { timeoutMs: 330_000 });
-  await new ClaudeProvider(config).generate(messages, [], { timeoutMs: 330_000 });
+  await new AiSdkProvider("openai", config).generate(messages, [], { timeoutMs: 330_000 });
+  await new AiSdkProvider("claude", config).generate(messages, [], { timeoutMs: 330_000 });
 
   assert.deepEqual(observedTimeouts, [330_000, 330_000]);
 });
@@ -802,8 +801,8 @@ test("OpenAI and Claude transports preserve bounded multi-image order and MIME",
     apiKey: "provider-images-test-secret",
     model: "fixture-model",
   };
-  await new OpenAIProvider(config).generate(messages, []);
-  await new ClaudeProvider(config).generate(messages, []);
+  await new AiSdkProvider("openai", config).generate(messages, []);
+  await new AiSdkProvider("claude", config).generate(messages, []);
 
   assert.equal(requestBodies.length, 2);
   for (const request of requestBodies) {

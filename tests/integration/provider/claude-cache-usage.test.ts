@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ClaudeProvider } from "../../../src/provider/claude.js";
+import { AiSdkProvider } from "../../../src/provider/ai-sdk-provider.js";
 import { toCanonicalUsage, type Usage } from "../../../src/schema/message.js";
 
 const expectedUsage: Usage = {
@@ -71,7 +71,7 @@ test("Claude keeps uncached input separate from prompt-cache usage", async (cont
     });
   };
 
-  const provider = new ClaudeProvider({
+  const provider = new AiSdkProvider("claude", {
     baseURL: "https://provider.invalid/v1",
     apiKey: "test-key",
     model: "claude-test",
