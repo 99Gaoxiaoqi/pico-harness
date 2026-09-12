@@ -205,7 +205,7 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
         .update(`${sessionId}\0${snapshot.messageId}\0${mode}\0${expectedFingerprint}`)
         .digest("hex"),
     });
-    if (result.sourceSessionId !== undefined && result.sourceSessionId !== sessionId) {
+    if (result.sourceSessionId !== sessionId) {
       throw new Error(
         `rewind.apply 源 Session 不一致: expected=${sessionId} actual=${result.sourceSessionId}`,
       );

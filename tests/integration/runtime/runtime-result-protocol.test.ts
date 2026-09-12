@@ -47,6 +47,8 @@ test("rewind.apply keeps one strict v2 request/result contract", () => {
     sessionId: "source",
     checkpointId: "checkpoint",
     expectedFingerprint: "fingerprint",
+    mode: "both",
+    idempotencyKey: "rewind-both",
   } as const;
   assert.deepEqual(parseStrictRuntimeParams("rewind.apply", baseParams), baseParams);
   for (const mode of ["code", "conversation", "both"] as const) {
@@ -59,11 +61,15 @@ test("rewind.apply keeps one strict v2 request/result contract", () => {
   assert.throws(() =>
     parseStrictRuntimeParams("rewind.apply", { ...baseParams, idempotencyKey: "" }),
   );
+  const { mode: _mode, ...withoutMode } = baseParams;
+  assert.throws(() => parseStrictRuntimeParams("rewind.apply", withoutMode));
+  const { idempotencyKey: _idempotencyKey, ...withoutIdempotencyKey } = baseParams;
+  assert.throws(() => parseStrictRuntimeParams("rewind.apply", withoutIdempotencyKey));
 
   const legacy = { applied: true, sessionId: "target" } as const;
   const current = { ...legacy, sourceSessionId: "source" } as const;
-  assert.deepEqual(parseRuntimeResult("rewind.apply", legacy), legacy);
   assert.deepEqual(parseRuntimeResult("rewind.apply", current), current);
+  assert.throws(() => parseRuntimeResult("rewind.apply", legacy));
   assert.throws(() =>
     parseRuntimeResult("rewind.apply", { ...current, unexpected: "protocol-drift" }),
   );

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -323,6 +324,9 @@ realModelTest(
       checkpointId: target.messageId,
       expectedFingerprint: preview.fingerprint,
       mode: "conversation",
+      idempotencyKey: createHash("sha256")
+        .update(`${sessionId}\0${target.messageId}\0conversation\0${preview.fingerprint}`)
+        .digest("hex"),
     });
     assert.equal(applied.applied, true);
     assert.notEqual(applied.sessionId, sessionId, "rewind 应 fork 出新会话");
