@@ -24,6 +24,51 @@ test("legacy permission names are not accepted as compatibility aliases", () => 
   }
 });
 
+test("persisted settings without a durable execution boundary are rejected", () => {
+  const sessionId = "settings-missing-boundary";
+  const cwd = "/tmp/pico-settings-missing-boundary";
+  const picoHome = "/tmp/pico-settings-missing-boundary-home";
+  const settings: PersistedSessionSettings = {
+    provider: "openai",
+    model: "test",
+    modelRouteId: "openai/test",
+    collaborationMode: "agent",
+    orchestrationMode: "default",
+    permissionMode: "ask",
+    thinkingEffort: "off",
+    thinkingEffortExplicit: false,
+    additionalDirectories: [],
+  };
+  const persistence: SessionRuntimePersistence = {
+    getRuntimeStateSnapshot() {
+      return {
+        stateVersion: SESSION_RUNTIME_STATE_VERSION,
+        settings,
+        usage: createEmptyUsageSnapshot(),
+      };
+    },
+    updateRuntimeState() {
+      assert.fail("invalid persisted settings must not be rewritten");
+    },
+  };
+
+  assert.throws(
+    () =>
+      getOrCreateSessionSettings(
+        {
+          sessionId,
+          cwd,
+          picoHome,
+          provider: "openai",
+          model: "test",
+          modelRouteId: "openai/test",
+        },
+        { persistence },
+      ),
+    /has no durable execution boundary/u,
+  );
+});
+
 test("persisted permission modes reconcile the durable execution boundary without losing managed grants", () => {
   const sessionId = "settings-execution-boundary";
   const cwd = "/tmp/pico-settings-execution-boundary";

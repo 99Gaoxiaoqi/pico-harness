@@ -245,7 +245,6 @@ test("runtime sandbox compiles profile capabilities instead of trusting its labe
 function compileDescriptor(profile: ManagedPermissionProfile) {
   return compileRuntimeProcessSandbox({
     collaborationMode: "agent",
-    permissionMode: "ask",
     workspaceGeneration: 0,
     scratchRoot: "/tmp/pico-bash-boundary-restriction-test",
     executionBoundary: createManagedExecutionBoundary(profile),

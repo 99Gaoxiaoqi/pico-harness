@@ -123,10 +123,11 @@ export function getOrCreateSessionSettings(
   defaults: SessionSettingsDefaults,
   persistenceOptions?: SessionSettingsPersistenceOptions,
 ): SessionSettings {
-  const restored =
-    persistenceOptions?.restore === false
-      ? undefined
-      : persistenceOptions?.persistence.getRuntimeStateSnapshot().settings;
+  const runtimeSnapshot = persistenceOptions?.persistence.getRuntimeStateSnapshot();
+  const restored = persistenceOptions?.restore === false ? undefined : runtimeSnapshot?.settings;
+  if (restored !== undefined && runtimeSnapshot?.boundary === undefined) {
+    throw new Error(`Session ${defaults.sessionId} has no durable execution boundary`);
+  }
   const key = sessionSettingsKey(defaults.sessionId, defaults.cwd, defaults.picoHome);
   const existing = settingsBySession.get(key);
   if (existing !== undefined) {

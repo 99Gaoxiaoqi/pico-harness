@@ -1,4 +1,3 @@
-import type { RuntimePermissionMode } from "../approval/tool-permission-policy.js";
 import { tmpdir } from "node:os";
 import {
   compileRuntimePermissionProfile,
@@ -26,17 +25,30 @@ export interface RuntimeProcessSandboxDescriptor {
   readonly writeFiles?: readonly string[];
 }
 
-export interface CompileRuntimeProcessSandboxInput {
-  readonly collaborationMode: RuntimeCollaborationMode;
-  readonly permissionMode: RuntimePermissionMode;
+interface RuntimeProcessSandboxInputBase {
   readonly workspaceGeneration: number;
   readonly scratchRoot: string;
-  readonly backgroundNetworkPolicy?: "disabled" | "allowlist" | "allow";
+}
+
+export interface CompileForegroundRuntimeProcessSandboxInput extends RuntimeProcessSandboxInputBase {
+  readonly collaborationMode: RuntimeCollaborationMode;
   /** Approved managed-boundary expansion. Ignored by Plan and full-access. */
   readonly networkEnabled?: boolean;
-  /** Durable authority. When present it wins over the permission-mode compatibility input. */
-  readonly executionBoundary?: ExecutionBoundary;
+  /** Durable authority required for every foreground subprocess. */
+  readonly executionBoundary: ExecutionBoundary;
+  readonly backgroundNetworkPolicy?: never;
 }
+
+export interface CompileBackgroundRuntimeProcessSandboxInput extends RuntimeProcessSandboxInputBase {
+  readonly backgroundNetworkPolicy: "disabled" | "allowlist" | "allow";
+  readonly collaborationMode?: never;
+  readonly networkEnabled?: never;
+  readonly executionBoundary?: never;
+}
+
+export type CompileRuntimeProcessSandboxInput =
+  | CompileForegroundRuntimeProcessSandboxInput
+  | CompileBackgroundRuntimeProcessSandboxInput;
 
 /**
  * Compile every local subprocess origin from the same permission profile.
@@ -60,17 +72,12 @@ export function compileRuntimeProcessSandbox(
     };
   }
 
-  const configuredBoundary =
-    input.executionBoundary ??
-    compileRuntimePermissionProfile({
-      collaborationMode: "agent",
-      permissionMode: input.permissionMode,
-    });
+  const configuredBoundary = input.executionBoundary;
   const boundary =
     input.collaborationMode === "plan"
       ? compileRuntimePermissionProfile({
           collaborationMode: "plan",
-          permissionMode: input.permissionMode,
+          permissionMode: "ask",
           revision: configuredBoundary.revision,
         })
       : configuredBoundary;
@@ -89,7 +96,7 @@ export function compileRuntimeProcessSandbox(
   const generation = generationFor(
     input.workspaceGeneration,
     profileTag,
-    input.executionBoundary?.revision ?? 0,
+    input.executionBoundary.revision,
   );
   if (boundary.kind === "bypass") {
     return {
