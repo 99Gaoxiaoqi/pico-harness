@@ -8,21 +8,12 @@ import "./workbar-panels/workbar-panels.css";
 
 import { Folder, RefreshCw, ShieldCheck } from "lucide-react";
 import { Component, useEffect, useState, type ReactNode } from "react";
-import {
-  HashRouter,
-  Link,
-  Navigate,
-  Route,
-  Routes,
-  useLocation,
-  useNavigate,
-} from "react-router-dom";
+import { HashRouter, Link, Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import { AppShell } from "./AppShell.js";
 import { MemoryPage } from "./MemoryPage.js";
 import { UserMemorySettingsPage } from "./pages/UserMemorySettingsPage.js";
 import { ProviderPage } from "./ProviderPage.js";
 import { Button, EmptyState, InlineNotice, PreviewBadge } from "./components.js";
-import { legacySurfaceHref } from "./navigation.js";
 import { AutomationsPage } from "./pages/AutomationsPage.js";
 import { ConversationPage, NewTaskPage } from "./pages/ConversationPage.js";
 import { ExtensionsIndex, ExtensionsPage } from "./pages/ExtensionsPage.js";
@@ -140,10 +131,6 @@ function AppStateRouter() {
             </WorkspaceRoute>
           }
         />
-        <Route path="skills" element={<LegacySurfaceRedirect to="/extensions/skills" />} />
-        <Route path="mcp" element={<LegacySurfaceRedirect to="/extensions/mcp" />} />
-        <Route path="providers" element={<LegacySurfaceRedirect to="/settings/models" />} />
-        <Route path="usage" element={<LegacySurfaceRedirect to="/settings/usage" />} />
         <Route path="*" element={<NotFound />} />
       </Route>
     </Routes>
@@ -275,11 +262,6 @@ function ProviderPageRoute() {
 
 function MemoryPageRoute() {
   return <MemoryPage runtime={useRuntime()} />;
-}
-
-function LegacySurfaceRedirect({ to }: { readonly to: string }) {
-  const location = useLocation();
-  return <Navigate replace to={legacySurfaceHref(to, location.search)} />;
 }
 
 function NotFound() {
