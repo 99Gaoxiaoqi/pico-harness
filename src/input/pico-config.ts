@@ -32,9 +32,6 @@ export interface PicoProjectConfig {
   commandsDir: string;
   additionalDirectories: string[];
   keybindings: KeybindingMap;
-  // model 字段已退役（2026-08-17）：模型路由与用户凭据强耦合，只支持用户级。
-  // parser 按字段提取、忽略未知键，旧仓库 config.json 里的 model 残值静默失效。
-  providers: Record<string, ModelProviderConfig>;
   sandbox: WorkspaceSandboxConfig;
   lspServers: LspServerConfig[];
   compatibility: PicoCompatibilityConfig;
@@ -70,22 +67,17 @@ export async function loadPicoProjectConfig(workDir: string): Promise<PicoProjec
   if (!isRecord(parsed)) {
     throw configError(configPath, "root", "must be an object");
   }
+  rejectRetiredProjectRoutingFields(parsed, configPath);
 
   return {
     version: parseVersion(parsed["version"], configPath),
     commandsDir: parseCommandsDir(parsed["commandsDir"], workDir, configPath),
     additionalDirectories: parseAdditionalDirectories(parsed["permissions"], configPath),
     keybindings: parseKeybindings(parsed["keybindings"], configPath),
-    providers: parseModelProviderConfigs(parsed["providers"], configPath),
     sandbox: parseSandbox(parsed["sandbox"], configPath),
     lspServers: parseLspServers(parsed["lsp"], configPath),
     compatibility: parseCompatibility(parsed["compatibility"], configPath),
   };
-}
-
-/** Compatibility entrypoint retained for existing TUI and Runtime callers. */
-export function loadPicoConfig(workDir: string): Promise<PicoProjectConfig> {
-  return loadPicoProjectConfig(workDir);
 }
 
 /** @internal Host-owned empty project snapshot for isolated non-interactive execution. */
@@ -95,7 +87,6 @@ export function createIsolatedPicoConfig(workDir: string): PicoProjectConfig {
     commandsDir: join(workDir, ".pico", "commands"),
     additionalDirectories: [],
     keybindings: {},
-    providers: {},
     sandbox: { network: "allow" },
     lspServers: [],
     compatibility: {
@@ -107,6 +98,21 @@ export function createIsolatedPicoConfig(workDir: string): PicoProjectConfig {
       },
     },
   };
+}
+
+function rejectRetiredProjectRoutingFields(
+  config: Readonly<Record<string, unknown>>,
+  configPath: string,
+): void {
+  for (const field of ["model", "providers"] as const) {
+    if (Object.hasOwn(config, field)) {
+      throw configError(
+        configPath,
+        field,
+        "is no longer supported in project config; configure it in the user config",
+      );
+    }
+  }
 }
 
 function defaultPicoConfig(workDir: string): PicoProjectConfig {
@@ -390,7 +396,7 @@ export function parseModelProviderConfigs(
   return providers;
 }
 
-/** Accept the normalized in-memory shape emitted by UserConfigStore as well as project syntax. */
+/** Accept the normalized in-memory shape emitted by UserConfigStore and user-config syntax. */
 function parseNormalizedModelCapabilities(
   value: unknown,
   models: readonly string[],

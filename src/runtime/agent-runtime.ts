@@ -144,7 +144,7 @@ import {
   type SessionToolStatus,
   type SessionSettings,
 } from "../input/session-settings.js";
-import { createIsolatedPicoConfig, loadPicoConfig } from "../input/pico-config.js";
+import { createIsolatedPicoConfig, loadPicoProjectConfig } from "../input/pico-config.js";
 import {
   hasExplicitNetworkIntent,
   type WorkspaceSandboxConfig,
@@ -905,7 +905,7 @@ export async function executeAgentRuntime(
   const backgroundApiKey = await resolveBackgroundCredential(options, execution, dependencies);
   const picoConfig = dependencies.isolatedHeadless
     ? createIsolatedPicoConfig(workDir)
-    : await loadPicoConfig(workDir);
+    : await loadPicoProjectConfig(workDir);
   const claudeCompatibility = picoConfig.compatibility.claude;
   const configuredAdditionalDirectories = picoConfig.additionalDirectories;
   const sessionSelection =

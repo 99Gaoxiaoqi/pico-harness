@@ -132,7 +132,7 @@ Task ID、TaskRegistry、worktree supervisor 和合并队列是主 Agent 的内�
 
 `.pico/config.json` 还可以设置项目命令目录和 TUI 键位：
 
-Pico 首次打开一个工作区时会先显示信任确认。信任门通过前不会读取本项目配置、AGENTS / Skills 或 Session，也不会启动 LSP、MCP、Hook 和 Provider 发现。记录保存在 `$PICO_HOME/trusted-workspaces.json`（默认 `~/.pico/trusted-workspaces.json`），项目本身不能声明已信任。
+Pico 首次打开一个工作区时会先显示信任确认。信任门通过前不会读取本项目配置、AGENTS / Skills 或 Session，也不会启动 LSP、MCP 和 Hook。记录保存在 `$PICO_HOME/trusted-workspaces.json`（默认 `~/.pico/trusted-workspaces.json`），项目本身不能声明已信任。
 
 ```json
 {
@@ -156,6 +156,7 @@ Pico 首次打开一个工作区时会先显示信任确认。信任门通过前
 模型工具由 Agent 按任务自动选择，并通过内部延迟披露机制按需加载；TUI 不提供 `/tools` 命令。MCP 连接状态使用 `/mcp`，审批策略使用 `/permissions`。
 
 键位值可以是内置 action、`command:/...` slash command，或 `null` 用于解绑默认键。已知字段会在启动时严格校验，错误会带配置路径和字段名；`commandsDir` 必须保持在项目目录内。
+项目级 `model` / `providers` 已退役并会被明确拒绝；模型目录与默认路由只能配置在用户级 `$PICO_HOME/config.json`。
 
 ### 设备级 Provider 配置
 

@@ -159,23 +159,6 @@ export function parseCatalogSkills(value: unknown): readonly CatalogSkillView[] 
   }));
 }
 
-export function capability(item: JsonRecord, index: number): CapabilityView {
-  const enabled = item.enabled;
-  const configured = item.configured;
-  return {
-    id: stringValue(item.id ?? item.name, `capability-${index}`),
-    name: stringValue(item.name ?? item.id, "未命名能力"),
-    description: stringValue(item.description, "由当前 Runtime 提供。"),
-    state:
-      configured === false || enabled === false
-        ? ("disabled" as const)
-        : item.error
-          ? ("attention" as const)
-          : ("ready" as const),
-    meta: stringValue(item.model ?? item.version ?? item.status),
-  };
-}
-
 function capabilitySource(
   source: RuntimeScopedSkill["source"] | RuntimeScopedMcpServer["source"],
 ): CapabilitySourceView {

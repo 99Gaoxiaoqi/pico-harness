@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { AgentEngine } from "../../../src/engine/loop.js";
 import { Session } from "../../../src/engine/session.js";
-import { loadPicoProjectConfig } from "../../../src/input/pico-config.js";
+import { parseModelProviderConfigs } from "../../../src/input/pico-config.js";
 import { CostTracker } from "../../../src/observability/tracker.js";
 import { createRawProvider } from "../../../src/provider/factory.js";
 import type { LLMProvider, LLMProviderRequestOptions } from "../../../src/provider/interface.js";
@@ -161,7 +161,7 @@ test("Claude grace keeps action tools/system cache prefix and disables tool choi
   assert.equal(persistedGrace?.toolCalls, undefined, "grace history must stay protocol-closed");
 });
 
-test("Claude-compatible routes require an explicit tool_choice:none capability opt-in", async (context) => {
+test("Claude-compatible routes require an explicit tool_choice:none capability opt-in", () => {
   const gatewayUrl = "https://claude-gateway.invalid/v1";
   const unknownCapabilities = resolveModelRouteCapabilities("claude", "claude-test", undefined, {
     baseURL: gatewayUrl,
@@ -216,31 +216,20 @@ test("Claude-compatible routes require an explicit tool_choice:none capability o
     false,
   );
 
-  const root = await mkdtemp(join(tmpdir(), "pico-claude-tool-choice-config-"));
-  context.after(() => rm(root, { recursive: true, force: true }));
-  await mkdir(join(root, ".pico"), { recursive: true });
-  await writeFile(
-    join(root, ".pico", "config.json"),
-    JSON.stringify({
-      version: 1,
-      providers: {
-        gateway: {
-          protocol: "claude",
-          baseURL: gatewayUrl,
-          apiKeyEnv: "TEST_ANTHROPIC_KEY",
-          models: {
-            "claude-test": { toolChoiceNoneWithTools: true },
-          },
+  const parsed = parseModelProviderConfigs(
+    {
+      gateway: {
+        protocol: "claude",
+        baseURL: gatewayUrl,
+        apiKeyEnv: "TEST_ANTHROPIC_KEY",
+        models: {
+          "claude-test": { toolChoiceNoneWithTools: true },
         },
       },
-    }),
-    "utf8",
+    },
+    "tool-choice-config-test",
   );
-  const parsed = await loadPicoProjectConfig(root);
-  assert.equal(
-    parsed.providers.gateway?.modelCapabilities?.["claude-test"]?.toolChoiceNoneWithTools,
-    true,
-  );
+  assert.equal(parsed.gateway?.modelCapabilities?.["claude-test"]?.toolChoiceNoneWithTools, true);
 });
 
 test("official OpenAI supports tool_choice none with tools while compatible routes opt in", () => {

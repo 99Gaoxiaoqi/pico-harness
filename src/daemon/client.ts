@@ -75,7 +75,6 @@ const KERNEL_RETRY_SAFE_METHODS: ReadonlySet<RuntimeMethod> = new Set<RuntimeMet
   "jobs.list",
   "jobs.history",
   "config.get",
-  "config.providers",
   "config.user.get",
   "config.effective.get",
   "provider.list",

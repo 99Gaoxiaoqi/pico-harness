@@ -6,7 +6,7 @@ import {
   projectTranscriptEntriesForRendering,
   type TranscriptProjection,
 } from "../presentation/transcript-event-store.js";
-import { loadPicoConfig } from "../input/pico-config.js";
+import { loadPicoProjectConfig } from "../input/pico-config.js";
 import { FileIndex } from "../input/file-index.js";
 import { App } from "./app.js";
 import type { UserKeybindingConfig } from "./keybindings/resolver.js";
@@ -312,7 +312,7 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
       runningSink.current = setRunning;
       settingsSink.current = setSettings;
       inputReplacementSink.current = setInputReplacement;
-      void loadPicoConfig(options.workDir)
+      void loadPicoProjectConfig(options.workDir)
         .then((config) => setKeybindings(config.keybindings))
         .catch(() => undefined);
       return () => {

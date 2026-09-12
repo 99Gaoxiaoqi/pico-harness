@@ -53,7 +53,7 @@ import type {
   WorkspaceTaskRuntime,
 } from "../runtime/workspace-runtime.js";
 import { SilentReporter } from "../engine/reporter.js";
-import { loadPicoConfig } from "../input/pico-config.js";
+import { loadPicoProjectConfig } from "../input/pico-config.js";
 import { EffectiveConfigResolver } from "../input/effective-config.js";
 import { UserConfigStore } from "../input/user-config-store.js";
 import { resolveTrustedEffectiveMcpSources } from "../mcp/effective-config.js";
@@ -321,7 +321,7 @@ export function createProductionRuntimeServices(
     const catalog = host && graphOperatorCatalogs.get(host);
     if (!catalog) return;
     const [config, snapshot] = await Promise.all([
-      loadPicoConfig(workspacePath),
+      loadPicoProjectConfig(workspacePath),
       pluginRuntimeSnapshotRegistry.get(workspacePath),
     ]);
     catalog.replaceProfiles(
@@ -897,7 +897,7 @@ export function createProductionRuntimeServices(
         // it and cannot attach extension Hook sources retroactively.
         const pluginSnapshot = await pluginRuntimeSnapshotRegistry.get(workspacePath);
         if (graphHost) await refreshGraphOperatorCatalog(workspacePath);
-        const projectConfig = await loadPicoConfig(workspacePath);
+        const projectConfig = await loadPicoProjectConfig(workspacePath);
         const persistedAdditionalDirectories = persistedSettings?.additionalDirectories ?? [];
         const processWorkspaceRoots = [
           workspacePath,
@@ -2590,7 +2590,7 @@ async function resolveDesktopModelRoute(
   requestedModel?: string,
   env: Readonly<Record<string, string | undefined>> = process.env,
 ) {
-  const projectConfig = await loadPicoConfig(workspacePath);
+  const projectConfig = await loadPicoProjectConfig(workspacePath);
   const requested = resolveDesktopRequestedModel(projectConfig, requestedModel);
   try {
     const runtime = await loadEffectiveModelRuntime({
@@ -2808,7 +2808,7 @@ function publishDesktopPlanProjection(
 }
 
 function resolveDesktopRequestedModel(
-  config: Awaited<ReturnType<typeof loadPicoConfig>>,
+  config: Awaited<ReturnType<typeof loadPicoProjectConfig>>,
   requestedModel?: string,
 ): string | undefined {
   const requested = requestedModel?.trim();
@@ -2817,17 +2817,6 @@ function resolveDesktopRequestedModel(
   const aliased = config.compatibility.claude.enabled
     ? (config.compatibility.claude.modelAliases[requested] ?? requested)
     : requested;
-  if (aliased.includes("/")) return aliased;
-  const matches = Object.entries(config.providers)
-    .filter(([, provider]) => provider.models.includes(aliased))
-    .map(([providerId]) => `${providerId}/${aliased}`);
-  if (matches.length === 1) return matches[0];
-  if (matches.length > 1) {
-    throw new RuntimeProtocolError(
-      RUNTIME_ERROR_CODES.INVALID_PARAMS,
-      `Skill 模型 ${aliased} 匹配多个 Provider，请使用 provider/model 路由`,
-    );
-  }
   return aliased;
 }
 

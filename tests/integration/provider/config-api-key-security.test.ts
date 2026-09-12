@@ -233,7 +233,7 @@ test("provider delete and legacy import reject a configured key before durable s
   );
 });
 
-test("project .pico/config.json rejects plaintext apiKey", async (context) => {
+test("project .pico/config.json rejects retired providers without exposing plaintext", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-project-config-key-reject-"));
   const secret = syntheticSecret("project-reject");
   context.after(() => rm(root, { recursive: true, force: true }));
@@ -258,7 +258,8 @@ test("project .pico/config.json rejects plaintext apiKey", async (context) => {
   } catch (error) {
     rejection = error;
   }
-  assert.ok(rejection instanceof Error, "project apiKey must fail closed");
+  assert.ok(rejection instanceof Error, "project providers must fail closed");
+  assert.match(rejection.message, /providers.*no longer supported in project config/u);
   assertSecretAbsent("project config rejection", serializeError(rejection), secret);
 });
 

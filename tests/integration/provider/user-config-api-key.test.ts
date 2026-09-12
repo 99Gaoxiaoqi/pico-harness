@@ -176,7 +176,7 @@ test("user config apiKey stays private and powers the effective model runtime wi
   assert.equal(authorization, `Bearer ${secret}`);
 });
 
-test("project config rejects plaintext apiKey without echoing its value", async (context) => {
+test("project config rejects retired providers without echoing plaintext", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-project-config-api-key-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   const configDir = join(root, ".pico");
@@ -201,7 +201,7 @@ test("project config rejects plaintext apiKey without echoing its value", async 
 
   await assert.rejects(loadPicoProjectConfig(root), (error: unknown) => {
     assert.ok(error instanceof Error);
-    assert.match(error.message, /providers\.forbidden\.apiKey/u);
+    assert.match(error.message, /providers.*no longer supported in project config/u);
     assert.equal(error.message.includes(secret), false);
     return true;
   });

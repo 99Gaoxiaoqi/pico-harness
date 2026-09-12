@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { EffectiveConfigResolver, type ConfigSource } from "../input/effective-config.js";
 import {
-  loadPicoConfig,
+  loadPicoProjectConfig,
   parseModelProviderConfigs,
   type PicoProjectConfig,
 } from "../input/pico-config.js";
@@ -137,22 +137,10 @@ export class DesktopProviderConfigService {
   async getConfig(workspacePath: string): Promise<JsonValue> {
     const canonical = await this.options.requireTrustedWorkspace(workspacePath);
     const [config, version] = await Promise.all([
-      loadPicoConfig(canonical),
+      loadPicoProjectConfig(canonical),
       configContentVersion(canonical),
     ]);
     return { config: safeConfig(config), version };
-  }
-
-  async listProviders(workspacePath: string): Promise<JsonValue> {
-    const canonical = await this.options.requireTrustedWorkspace(workspacePath);
-    const config = await loadPicoConfig(canonical);
-    return {
-      providers: toJsonValue(
-        Object.entries(config.providers).map(([id, provider]) =>
-          runtimeProviderInput(id, provider),
-        ),
-      ),
-    };
   }
 
   async getUserConfig(params: unknown): Promise<JsonValue> {

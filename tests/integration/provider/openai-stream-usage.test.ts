@@ -1,9 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { test } from "node:test";
-import { loadPicoProjectConfig } from "../../../src/input/pico-config.js";
+import { parseModelProviderConfigs } from "../../../src/input/pico-config.js";
 import { createProvider } from "../../../src/provider/factory.js";
 import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
 import { loadModelRouter } from "../../../src/provider/model-router.js";
@@ -504,45 +501,30 @@ test("OpenAI stream consumes the final event at EOF without a trailing blank lin
   });
 });
 
-test("OpenAI wire capabilities are parsed and reject invalid values", async (context) => {
-  const workDir = await mkdtemp(join(tmpdir(), "pico-stream-usage-config-"));
-  const configPath = join(workDir, ".pico", "config.json");
-  await mkdir(join(workDir, ".pico"), { recursive: true });
-  context.after(() => rm(workDir, { recursive: true, force: true }));
+test("OpenAI wire capabilities are parsed and reject invalid values", () => {
+  const config = (capabilities: Record<string, unknown>) => ({
+    test: {
+      protocol: "openai",
+      baseURL: "https://provider.invalid/v1",
+      apiKeyEnv: "PICO_TEST_TOKEN",
+      discoverModels: false,
+      models: { coder: capabilities },
+    },
+  });
 
-  const config = (capabilities: Record<string, unknown>): string =>
-    JSON.stringify({
-      version: 1,
-      model: "test/coder",
-      providers: {
-        test: {
-          protocol: "openai",
-          baseURL: "https://provider.invalid/v1",
-          apiKeyEnv: "PICO_TEST_TOKEN",
-          discoverModels: false,
-          models: { coder: capabilities },
-        },
-      },
-    });
-
-  await writeFile(
-    configPath,
+  const parsed = parseModelProviderConfigs(
     config({ streamUsage: true, outputTokenField: "max_completion_tokens" }),
-    "utf8",
+    "stream-usage-test",
   );
-  const parsed = await loadPicoProjectConfig(workDir);
-  assert.equal(parsed.providers.test?.modelCapabilities?.coder?.streamUsage, true);
-  assert.equal(
-    parsed.providers.test?.modelCapabilities?.coder?.outputTokenField,
-    "max_completion_tokens",
+  assert.equal(parsed.test?.modelCapabilities?.coder?.streamUsage, true);
+  assert.equal(parsed.test?.modelCapabilities?.coder?.outputTokenField, "max_completion_tokens");
+
+  assert.throws(
+    () => parseModelProviderConfigs(config({ streamUsage: "yes" }), "stream-usage-test"),
+    /streamUsage.*must be a boolean/u,
   );
-
-  await writeFile(configPath, config({ streamUsage: "yes" }), "utf8");
-  await assert.rejects(loadPicoProjectConfig(workDir), /streamUsage.*must be a boolean/u);
-
-  await writeFile(configPath, config({ outputTokenField: "automatic" }), "utf8");
-  await assert.rejects(
-    loadPicoProjectConfig(workDir),
+  assert.throws(
+    () => parseModelProviderConfigs(config({ outputTokenField: "automatic" }), "stream-usage-test"),
     /outputTokenField.*must be max_tokens or max_completion_tokens/u,
   );
 });

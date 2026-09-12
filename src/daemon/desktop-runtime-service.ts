@@ -59,7 +59,7 @@ import {
   addSessionAdditionalDirectory,
   type SessionSettings,
 } from "../input/session-settings.js";
-import { loadPicoConfig } from "../input/pico-config.js";
+import { loadPicoProjectConfig } from "../input/pico-config.js";
 import type { EffectiveConfigResolver } from "../input/effective-config.js";
 import type { UserConfigStore } from "../input/user-config-store.js";
 import { renderAgentDispatchPrompt } from "../input/agent-activation.js";
@@ -533,8 +533,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       "subagents.update": async (request) =>
         toJsonValue(await this.subagentSettings.update(request.params)),
       "config.get": (request) => this.providerConfig.getConfig(request.params.workspacePath),
-      "config.providers": (request) =>
-        this.providerConfig.listProviders(request.params.workspacePath),
       "config.effective.get": (request) => this.providerConfig.getEffectiveConfig(request.params),
       "usage.get": (request) => this.getUsage(request.params),
       "changes.list": (request) =>
@@ -2578,7 +2576,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
     }
     const canonical = await this.requireTrustedWorkspace(workspacePath);
     const pluginSnapshot = await this.pluginRuntimeSnapshotRegistry.get(canonical);
-    const config = await loadPicoConfig(canonical);
+    const config = await loadPicoProjectConfig(canonical);
     const compatibility = config.compatibility.claude;
     if (input.kind === "agent") {
       if (input.subagentId !== undefined) {
