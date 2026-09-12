@@ -55,7 +55,7 @@ for (const stopViaBoard of [false, true])
               modelName: "deterministic/plan-graph-cancel",
               generate: async () => {
                 turn++;
-                if (options.planMode)
+                if (options.collaborationMode === "plan")
                   return toolCall("plan-submit", "submit_plan", {
                     title: "Investigate two independent branches",
                     steps: [

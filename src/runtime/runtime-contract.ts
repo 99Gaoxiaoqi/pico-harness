@@ -55,7 +55,6 @@ export interface RunAgentCliOptions extends RuntimeRunOptions {
   permissionMode?: PermissionMode;
   /** Active model reasoning level. Legacy CLI callers still pass off/low/medium/high. */
   thinkingEffort?: string;
-  planMode?: boolean;
   /** Turn-level orchestration override: "graph" or "swarm" enables coordinated execution for this run. */
   orchestrationMode?: "default" | "graph" | "swarm";
   /** Enable per-request JSON trace export. Also enabled by PICO_TRACE=1. */

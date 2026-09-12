@@ -54,7 +54,7 @@ for (const recoverAfterFinish of [false, true]) {
       const fakeAgentRuntime = new (class extends AgentRuntime {
         override async execute(options: RunAgentCliOptions, dependencies: RunAgentCliDependencies) {
           const binding = dependencies.agentGraph;
-          const isPlanning = options.planMode === true;
+          const isPlanning = options.collaborationMode === "plan";
           const wake = options.prompt.startsWith("[Graph Supervisor wake]") ? ++wakeCount : 0;
           if (wake) {
             assert.ok(dependencies.prestartedRun);
