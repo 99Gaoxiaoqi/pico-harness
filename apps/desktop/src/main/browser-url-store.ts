@@ -8,14 +8,6 @@ const BROWSER_URL_STATE_FILE = "browser-urls.json";
 const DEFAULT_WRITE_DEBOUNCE_MS = 250;
 const DEFAULT_RETRY_DELAY_MS = 1_000;
 
-interface StoredBrowserUrlStateV1 {
-  readonly version: 1;
-  readonly sessions: readonly {
-    readonly sessionId: string;
-    readonly url: string;
-  }[];
-}
-
 interface StoredBrowserUrlState {
   readonly version: typeof BROWSER_URL_STATE_VERSION;
   readonly sessions: readonly {
@@ -68,9 +60,6 @@ export class BrowserUrlStore {
     this.#generationStateSafe = loaded.safe;
     if (!loaded.safe) {
       this.#onError(new Error(`浏览器状态损坏，已拒绝签发新的视口代际: ${this.filePath}`));
-    } else if (loaded.needsMigration) {
-      this.#revision = 1;
-      this.#schedule(this.#writeDebounceMs);
     }
   }
 
@@ -204,7 +193,6 @@ function readState(path: string): {
   readonly urls: Map<string, string>;
   readonly generationFloors: Map<string, number>;
   readonly safe: boolean;
-  readonly needsMigration: boolean;
 } {
   try {
     const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
@@ -218,22 +206,14 @@ function readState(path: string): {
           Math.max(generationFloor, generationFloors.get(sessionId) ?? 0),
         );
       }
-      return { urls, generationFloors, safe: true, needsMigration: false };
+      return { urls, generationFloors, safe: true };
     }
-    if (isStoredBrowserUrlStateV1(parsed)) {
-      return {
-        urls: new Map(parsed.sessions.map(({ sessionId, url }) => [sessionId, url])),
-        generationFloors: new Map(),
-        safe: true,
-        needsMigration: true,
-      };
-    }
-    return { urls: new Map(), generationFloors: new Map(), safe: false, needsMigration: false };
+    return { urls: new Map(), generationFloors: new Map(), safe: false };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return { urls: new Map(), generationFloors: new Map(), safe: true, needsMigration: false };
+      return { urls: new Map(), generationFloors: new Map(), safe: true };
     }
-    return { urls: new Map(), generationFloors: new Map(), safe: false, needsMigration: false };
+    return { urls: new Map(), generationFloors: new Map(), safe: false };
   }
 }
 
@@ -256,24 +236,5 @@ function isStoredBrowserUrlState(value: unknown): value is StoredBrowserUrlState
         ((candidate as { generationFloor: number }).generationFloor ?? -1) >= 0
       );
     })
-  );
-}
-
-function isStoredBrowserUrlStateV1(value: unknown): value is StoredBrowserUrlStateV1 {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const state = value as Partial<StoredBrowserUrlStateV1>;
-  return (
-    state.version === 1 &&
-    Array.isArray(state.sessions) &&
-    state.sessions.every(
-      (entry) =>
-        Boolean(entry) &&
-        typeof entry === "object" &&
-        !Array.isArray(entry) &&
-        typeof entry.sessionId === "string" &&
-        entry.sessionId.length > 0 &&
-        typeof entry.url === "string" &&
-        normalizeBrowserAddress(entry.url) === entry.url,
-    )
   );
 }

@@ -295,7 +295,7 @@ test("browser close fence releases after failure without reviving its entry or U
   assert.deepEqual(notifications, [closeGeneration]);
 });
 
-test("browser URL store migrates v1 and fails safe on corrupt generation state", async (context) => {
+test("browser URL store rejects v1 and corrupt generation state", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-browser-generation-migration-"));
   context.after(async () => await rm(root, { recursive: true, force: true }));
   const filePath = join(root, "browser-urls.json");
@@ -307,11 +307,15 @@ test("browser URL store migrates v1 and fails safe on corrupt generation state",
     }),
     "utf8",
   );
-  const migrated = new BrowserUrlStore(root);
-  assert.equal(migrated.get("session-a"), "https://example.com/legacy");
-  assert.equal(migrated.getGenerationFloor("session-a"), 0);
-  await migrated.flush();
-  assert.equal(JSON.parse(await readFile(filePath, "utf8")).version, 2);
+  const obsoleteErrors: unknown[] = [];
+  const obsolete = new BrowserUrlStore(root, {
+    onError: (error) => obsoleteErrors.push(error),
+  });
+  assert.equal(obsolete.get("session-a"), undefined);
+  assert.throws(() => obsolete.getGenerationFloor("session-a"), /拒绝当前操作/u);
+  assert.equal(obsoleteErrors.length, 1);
+  await obsolete.flush();
+  assert.equal(JSON.parse(await readFile(filePath, "utf8")).version, 1);
 
   await writeFile(filePath, "{corrupt", "utf8");
   const errors: unknown[] = [];
