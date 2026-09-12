@@ -19,7 +19,7 @@ import { LocalRuntimeClient, RuntimeClientError } from "../daemon/client.js";
 import { resolveCanonicalPicoHome } from "../daemon/endpoint.js";
 import { sleepForRetry } from "../provider/retry.js";
 import { primeTokenizer } from "../context/token-counter.js";
-import { resolveThinkingEffort, type ThinkingEffort } from "../provider/thinking.js";
+import { isValidThinkingEffort, type ThinkingEffort } from "../provider/thinking.js";
 import { ensureWorkspaceTrusted } from "../security/workspace-trust.js";
 import { startClientRepl, type ClientReplOptions } from "../tui/client-repl.js";
 import {
@@ -199,7 +199,7 @@ function parseCliOptions(args: readonly string[]): ParsedCliOptions {
   }
 
   const thinkingEffort =
-    values.thinking === undefined ? undefined : resolveThinkingEffort(values.thinking);
+    values.thinking === undefined ? undefined : parseCliThinkingEffort(values.thinking);
 
   return {
     ...(thinkingEffort !== undefined ? { thinkingEffort } : {}),
@@ -211,6 +211,14 @@ function parseCliOptions(args: readonly string[]): ParsedCliOptions {
     version: values.version === true,
     daemonStop: values["daemon-stop"] === true,
   };
+}
+
+function parseCliThinkingEffort(raw: string): ThinkingEffort {
+  const normalized = raw.trim().toLowerCase();
+  if (!isValidThinkingEffort(normalized)) {
+    throw new CliUsageError(`--thinking 只接受 off、low、medium 或 high；收到 ${raw || "(空值)"}`);
+  }
+  return normalized;
 }
 
 function findRetiredOption(args: readonly string[]): string | undefined {

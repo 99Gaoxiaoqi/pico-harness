@@ -120,6 +120,15 @@ test("cli dispatch: BYOK/Graph 旗标传递", async () => {
   assert.equal(call.graphMode, true);
 });
 
+test("cli dispatch: --thinking 拒绝旧布尔值与未知档位", async () => {
+  for (const value of ["true", "false", "turbo"]) {
+    const harness = harnessWithRuntime();
+    assert.equal(await harness.run(["--thinking", value]), 1);
+    assert.equal(harness.clientCalls.length, 0);
+    assert.match(harness.stderr.join(""), /--thinking 只接受 off、low、medium 或 high/u);
+  }
+});
+
 test("cli dispatch: help/version 快速路径不起 TUI", async () => {
   const harness = harnessWithRuntime();
   assert.equal(await harness.run(["--help"]), 0);

@@ -425,7 +425,8 @@ test("plan tool projection and registry safety are the same deny-by-default boun
 });
 
 test("plan prompt is investigation-only and has no PLAN/TODO authority", async () => {
-  const prompt = await new PromptComposer(process.cwd(), true).build();
+  const layers = await new PromptComposer(process.cwd(), true).buildLayers();
+  const prompt = [layers.systemPrompt, layers.turnTail].filter(Boolean).join("\n\n");
   assert.match(prompt, /只能调查、澄清需求并提交实施计划/u);
   assert.match(prompt, /submit_plan/u);
   assert.doesNotMatch(prompt, /使用 write_file 创建 PLAN\.md|开始执行 TODO\.md/u);
