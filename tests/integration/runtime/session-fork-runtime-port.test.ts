@@ -12,6 +12,7 @@ import { SessionForkRuntimeConflictError } from "../../../src/engine/session-for
 import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
 import { createSessionForkRuntimePort } from "../../../src/runtime/session-fork-runtime-port-adapter.js";
 import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 import { operationalDatabasePath } from "../../../src/storage/sqlite/sqlite-database.js";
 import { RuntimeRun } from "../../../src/runtime/runtime-run.js";
 import { StorageOperationJournal } from "../../../src/storage/operation-journal.js";
@@ -593,6 +594,11 @@ test("completed fork rejects a state fact appended after its publication marker"
       },
     },
   };
+  const { ownerFence } = await initializeRuntimeEventOwner(canonicalStore, {
+    sessionId: targetSessionId,
+    workDir,
+    now: () => new Date("2026-01-01T00:00:00.000Z"),
+  });
   const bootstrap = {
     sourceSessionId: "fork-marker-order-source",
     targetSessionId,
@@ -602,13 +608,17 @@ test("completed fork rejects a state fact appended after its publication marker"
     statePublication,
     workDir,
     store: canonicalStore,
-    writeGuard: { async assertRuntimeEventWriteAllowed() {} },
+    writeGuard: {
+      async assertRuntimeEventWriteAllowed() {
+        return ownerFence;
+      },
+    },
   };
   try {
     await RuntimeRun.bootstrapFork(bootstrap);
     const canonical = await canonicalStore.readSession(targetSessionId);
     const eventByKind = new Map(canonical.map((event) => [event.kind, event]));
-    await reorderedStore.initializeSession({
+    const { ownerFence: reorderedFence } = await initializeRuntimeEventOwner(reorderedStore, {
       sessionId: targetSessionId,
       workDir,
       now: () => new Date("2026-01-01T00:00:00.000Z"),
@@ -621,7 +631,7 @@ test("completed fork rejects a state fact appended after its publication marker"
     ] as const) {
       const event = eventByKind.get(kind);
       assert.ok(event, `missing canonical ${kind}`);
-      await reorderedStore.append(event);
+      await reorderedStore.append(event, { ownerFence: reorderedFence });
     }
 
     await assert.rejects(

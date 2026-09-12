@@ -137,8 +137,8 @@ export interface RuntimeTranscriptAdvancePage {
 }
 
 /**
- * 数据库持有者代际。epoch=0 是迁移兼容态：尚未启用 fence 的旧调用仍可写入；
- * 任一 owner 将 epoch 推进到正数后，所有写入都必须携带完全匹配的 fence。
+ * 数据库持有者代际。epoch=0 只是 session 初始化后、owner 尚未领取令牌的暂态；
+ * 任何 Runtime Event 写入都必须携带与当前 session 完全匹配的正数 fence。
  */
 export interface RuntimeOwnerFence {
   readonly sessionId: string;
@@ -146,7 +146,7 @@ export interface RuntimeOwnerFence {
 }
 
 export interface RuntimeFencedWriteOptions {
-  readonly ownerFence?: RuntimeOwnerFence;
+  readonly ownerFence: RuntimeOwnerFence;
 }
 
 export interface AppendRuntimeEventBatchOptions {
@@ -154,11 +154,8 @@ export interface AppendRuntimeEventBatchOptions {
   readonly expectedSessionHighWater?: Readonly<Record<string, number>>;
   /** Optional exactly-once identity for one Plan/Graph transition. */
   readonly planOperation?: { readonly operationId: string; readonly fingerprint: string };
-  /**
-   * 单 session 写 fence；提供时 batch 内全部事件必须属于该 session。
-   * 缺省只兼容尚处于 epoch=0 的历史调用方。
-   */
-  readonly ownerFence?: RuntimeOwnerFence;
+  /** 单 session 写 fence；batch 内全部事件必须属于该 session。 */
+  readonly ownerFence: RuntimeOwnerFence;
 }
 
 export interface RuntimeRunProjection {
@@ -329,7 +326,9 @@ export class RuntimeEventStoreOwnerFenceError extends RuntimeEventStoreIntegrity
   ) {
     super(
       expectedEpoch === undefined
-        ? `Runtime session ${sessionId} requires owner fence epoch ${actualEpoch}`
+        ? actualEpoch > 0
+          ? `Runtime session ${sessionId} requires owner fence epoch ${actualEpoch}`
+          : `Runtime session ${sessionId} requires an active positive owner fence`
         : `Runtime session ${sessionId} owner fence ${expectedEpoch} is stale; current epoch is ${actualEpoch}`,
     );
     this.name = "RuntimeEventStoreOwnerFenceError";

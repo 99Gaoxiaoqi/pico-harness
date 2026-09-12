@@ -2931,7 +2931,6 @@ async function acquireRuntimeSessionWithStore(
     if (!runtimeCapability || !runtimeStore) {
       throw new Error(`AgentRuntime requires a durable Session: ${sessionSelection.sessionId}`);
     }
-    await runtimeStore.initializeSession({ sessionId: lease.session.id, workDir });
     await RuntimeRun.repairSessionProjection(lease.session, { capability: runtimeCapability });
     return lease;
   } catch (error) {

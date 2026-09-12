@@ -14,6 +14,7 @@ import { operationalDatabasePath } from "../../../src/storage/sqlite/sqlite-data
 import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import { PLAN_EVENT_KINDS } from "../../../src/plan/events.js";
 import { projectPlanEntries } from "../../../src/plan/reducer.js";
+import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
 /**
  * Ticket 02 acceptance: SQLite session ledger (store-layer slice).
@@ -127,7 +128,7 @@ test("sqlite sessions: initialize + multi-turn append + readback projections + s
   const fixture = createFixture("pico-sqlite-sessions-basic-");
   try {
     const id = "sqlite-basic";
-    const manifest = await fixture.store.initializeSession({
+    const { manifest, ownerFence } = await initializeRuntimeEventOwner(fixture.store, {
       sessionId: id,
       workDir: fixture.workspace,
     });
@@ -152,9 +153,9 @@ test("sqlite sessions: initialize + multi-turn append + readback projections + s
     const round3 = [userMessage(`${id}-e5`, id, "2026-08-18T00:00:05.000Z", "message five")];
     const allEvents = [...round1, ...round2, ...round3];
 
-    const r1 = await fixture.store.appendBatch(round1);
-    const r2 = await fixture.store.appendBatch(round2);
-    const r3 = await fixture.store.appendBatch(round3);
+    const r1 = await fixture.store.appendBatch(round1, { ownerFence });
+    const r2 = await fixture.store.appendBatch(round2, { ownerFence });
+    const r3 = await fixture.store.appendBatch(round3, { ownerFence });
     const expectedSeqs = [[1, 2, 3], [4, 5], [6]];
     for (const [results, seqs, events] of [
       [r1, expectedSeqs[0]!, round1],
@@ -256,9 +257,11 @@ test("sqlite sessions: initialize + multi-turn append + readback projections + s
       thinkingEffortExplicit: false,
       additionalDirectories: [],
     } as const;
-    const stateResult = await fixture.store.appendSessionState(id, {
-      settings: { ...fullSettings, title: "title A" },
-    });
+    const stateResult = await fixture.store.appendSessionState(
+      id,
+      { settings: { ...fullSettings, title: "title A" } },
+      { ownerFence },
+    );
     assert.equal(stateResult.inserted, true);
     assert.equal(stateResult.cursor.seq, 7);
     assert.deepEqual(await fixture.store.listRunIds(id), ["run-1", "run-2"]);
@@ -314,13 +317,16 @@ test("sqlite sessions: same-tx replay does not double-write + conflicting eventI
   const fixture = createFixture("pico-sqlite-sessions-idem-");
   try {
     const id = "sqlite-idempotent";
-    await fixture.store.initializeSession({ sessionId: id, workDir: fixture.workspace });
+    const { ownerFence } = await initializeRuntimeEventOwner(fixture.store, {
+      sessionId: id,
+      workDir: fixture.workspace,
+    });
     const batch = [
       userMessage(`${id}-e1`, id, "2026-08-18T00:00:01.000Z", "message one"),
       userMessage(`${id}-e2`, id, "2026-08-18T00:00:02.000Z", "message two"),
       userMessage(`${id}-e3`, id, "2026-08-18T00:00:03.000Z", "message three"),
     ];
-    const first = await fixture.store.appendBatch(batch);
+    const first = await fixture.store.appendBatch(batch, { ownerFence });
     assert.deepEqual(
       first.map((result) => [result.inserted, result.cursor.seq]),
       [
@@ -342,7 +348,7 @@ test("sqlite sessions: same-tx replay does not double-write + conflicting eventI
 
       // Replay the whole batch (order shuffled): all idempotent, no new rows or txs.
       const replayBatch = [...batch].reverse();
-      const replay = await fixture.store.appendBatch(replayBatch);
+      const replay = await fixture.store.appendBatch(replayBatch, { ownerFence });
       assert.deepEqual(
         replay.map((result) => [result.inserted, result.cursor.seq, result.cursor.eventId]),
         replayBatch.map((event) => [
@@ -367,7 +373,7 @@ test("sqlite sessions: same-tx replay does not double-write + conflicting eventI
         data: { message: { role: "user", content: "tampered" } },
       } as RuntimeEvent;
       await assert.rejects(
-        () => fixture.store.appendBatch([mutated]),
+        () => fixture.store.appendBatch([mutated], { ownerFence }),
         (error: unknown) =>
           error instanceof RuntimeEventStoreIntegrityError &&
           /already bound to another payload/.test(error.message),
@@ -377,10 +383,16 @@ test("sqlite sessions: same-tx replay does not double-write + conflicting eventI
       const fresh = userMessage(`${id}-e9`, id, "2026-08-18T00:00:09.000Z", "new message");
       await assert.rejects(
         () =>
-          fixture.store.appendBatch([
-            fresh,
-            { ...fresh, data: { message: { role: "user", content: "different" } } } as RuntimeEvent,
-          ]),
+          fixture.store.appendBatch(
+            [
+              fresh,
+              {
+                ...fresh,
+                data: { message: { role: "user", content: "different" } },
+              } as RuntimeEvent,
+            ],
+            { ownerFence },
+          ),
         /conflicting payloads in one append batch/,
       );
 
@@ -421,6 +433,7 @@ test("sqlite sessions: same-tx replay does not double-write + conflicting eventI
         operationId: "op-1",
         fingerprint,
         expectedSessionSequence: 3,
+        ownerFence,
       });
       assert.deepEqual(
         opFirst.map((result) => [result.inserted, result.cursor.seq]),
@@ -430,6 +443,7 @@ test("sqlite sessions: same-tx replay does not double-write + conflicting eventI
         operationId: "op-1",
         fingerprint,
         expectedSessionSequence: 3,
+        ownerFence,
       });
       assert.deepEqual(
         opReplay.map((result) => [result.inserted, result.cursor.seq]),
@@ -441,6 +455,7 @@ test("sqlite sessions: same-tx replay does not double-write + conflicting eventI
             operationId: "op-1",
             fingerprint: sha256Fingerprint("other"),
             expectedSessionSequence: 4,
+            ownerFence,
           }),
         (error: unknown) =>
           error instanceof RuntimeEventStoreIntegrityError &&
@@ -450,16 +465,16 @@ test("sqlite sessions: same-tx replay does not double-write + conflicting eventI
       // the bound eventId must fail closed in the replay branch too, not be
       // acknowledged as an idempotent replay of a foreign session's row.
       const otherSession = `${id}-cross`;
-      await fixture.store.initializeSession({
+      const { ownerFence: otherOwnerFence } = await initializeRuntimeEventOwner(fixture.store, {
         sessionId: otherSession,
         workDir: fixture.workspace,
       });
       await assert.rejects(
         () =>
-          fixture.store.appendBatch(
-            [opEvent, { ...opEvent, sessionId: otherSession } as RuntimeEvent],
-            { planOperation: { operationId: "op-1", fingerprint } },
-          ),
+          fixture.store.appendBatch([{ ...opEvent, sessionId: otherSession } as RuntimeEvent], {
+            planOperation: { operationId: "op-1", fingerprint },
+            ownerFence: otherOwnerFence,
+          }),
         (error: unknown) =>
           error instanceof RuntimeEventStoreIntegrityError &&
           /belongs to another session/.test(error.message),
@@ -478,6 +493,7 @@ test("sqlite sessions: same-tx replay does not double-write + conflicting eventI
               operationId: "op-2",
               fingerprint,
               expectedSessionSequence: 0,
+              ownerFence,
             },
           ),
         (error: unknown) =>
@@ -490,7 +506,9 @@ test("sqlite sessions: same-tx replay does not double-write + conflicting eventI
       // e42d80e7 in-batch idempotence, not an event_id PK constraint failure.
       const dupEvent = userMessage(`${id}-d1`, id, "2026-08-18T00:00:11.000Z", "dup message");
       const otherNew = userMessage(`${id}-d2`, id, "2026-08-18T00:00:12.000Z", "other message");
-      const dupResults = await fixture.store.appendBatch([dupEvent, otherNew, dupEvent]);
+      const dupResults = await fixture.store.appendBatch([dupEvent, otherNew, dupEvent], {
+        ownerFence,
+      });
       assert.deepEqual(
         dupResults.map((result) => [result.inserted, result.cursor.seq]),
         [
@@ -517,20 +535,23 @@ test("sqlite sessions: partial RuntimeEvents never enter the canonical ledger", 
   const fixture = createFixture("pico-sqlite-sessions-partial-lane-");
   try {
     const sessionId = "sqlite-partial-lane";
-    await fixture.store.initializeSession({ sessionId, workDir: fixture.workspace });
+    const { ownerFence } = await initializeRuntimeEventOwner(fixture.store, {
+      sessionId,
+      workDir: fixture.workspace,
+    });
     const partial = {
       ...userMessage(`${sessionId}-partial`, sessionId, "2026-08-18T00:00:01.000Z", "streaming"),
       partial: true,
     } as RuntimeEvent;
 
     await assert.rejects(
-      () => fixture.store.append(partial),
+      () => fixture.store.append(partial, { ownerFence }),
       (error: unknown) =>
         error instanceof RuntimeEventStoreIntegrityError &&
         /use the mutable partial lane/u.test(error.message),
     );
     await assert.rejects(
-      () => fixture.store.appendBatch([partial]),
+      () => fixture.store.appendBatch([partial], { ownerFence }),
       (error: unknown) =>
         error instanceof RuntimeEventStoreIntegrityError &&
         /use the mutable partial lane/u.test(error.message),
@@ -568,15 +589,22 @@ test("sqlite sessions: fork target conflict detection and session.forked mainten
   try {
     const parent = "sqlite-fork-parent";
     const child = "sqlite-fork-child";
-    await fixture.store.initializeSession({ sessionId: parent, workDir: fixture.workspace });
-    await fixture.store.appendBatch([
-      userMessage(`${parent}-e1`, parent, "2026-08-18T00:00:01.000Z", "parent message"),
-    ]);
-
-    const childManifest = await fixture.store.initializeSession({
-      sessionId: child,
+    const { ownerFence: parentFence } = await initializeRuntimeEventOwner(fixture.store, {
+      sessionId: parent,
       workDir: fixture.workspace,
     });
+    await fixture.store.appendBatch(
+      [userMessage(`${parent}-e1`, parent, "2026-08-18T00:00:01.000Z", "parent message")],
+      { ownerFence: parentFence },
+    );
+
+    const { manifest: childManifest, ownerFence: childFence } = await initializeRuntimeEventOwner(
+      fixture.store,
+      {
+        sessionId: child,
+        workDir: fixture.workspace,
+      },
+    );
     // Target occupied: same-workspace duplicate init is idempotent, foreign init refused.
     assert.deepEqual(
       await fixture.store.initializeSession({ sessionId: child, workDir: fixture.workspace }),
@@ -593,7 +621,7 @@ test("sqlite sessions: fork target conflict detection and session.forked mainten
 
     // Publishing session.forked maintains fork_parent_session_id in the same tx.
     const forkEvent = sessionForked(`${child}-f1`, child, "2026-08-18T00:00:02.000Z", parent);
-    const published = await fixture.store.appendBatch([forkEvent]);
+    const published = await fixture.store.appendBatch([forkEvent], { ownerFence: childFence });
     assert.deepEqual(
       published.map((result) => [result.inserted, result.cursor.seq]),
       [[true, 1]],
@@ -609,7 +637,7 @@ test("sqlite sessions: fork target conflict detection and session.forked mainten
       assert.equal(forkParentOf(parent), null, "root session has no fork parent");
 
       // Replaying the same fork fact is idempotent; fork_parent stays.
-      const replay = await fixture.store.appendBatch([forkEvent]);
+      const replay = await fixture.store.appendBatch([forkEvent], { ownerFence: childFence });
       assert.equal(replay[0]?.inserted, false);
       assert.equal(replay[0]?.cursor.seq, 1);
       assert.equal(forkParentOf(child), parent);
@@ -618,9 +646,10 @@ test("sqlite sessions: fork target conflict detection and session.forked mainten
       // refused and the transaction rolls back without residue.
       await assert.rejects(
         () =>
-          fixture.store.appendBatch([
-            sessionForked(`${child}-f2`, child, "2026-08-18T00:00:03.000Z", "sqlite-other"),
-          ]),
+          fixture.store.appendBatch(
+            [sessionForked(`${child}-f2`, child, "2026-08-18T00:00:03.000Z", "sqlite-other")],
+            { ownerFence: childFence },
+          ),
         (error: unknown) =>
           error instanceof RuntimeEventStoreIntegrityError &&
           /already forked from another parent/.test(error.message),
@@ -653,13 +682,16 @@ test("sqlite sessions: kind slice + first/last of kind + run view 索引查询�
   const fixture = createFixture("pico-sqlite-kind-slice-");
   try {
     const id = "sqlite-kind-slice";
-    await fixture.store.initializeSession({ sessionId: id, workDir: fixture.workspace });
+    const { ownerFence } = await initializeRuntimeEventOwner(fixture.store, {
+      sessionId: id,
+      workDir: fixture.workspace,
+    });
     const events = [
       runStarted(`${id}-e0`, id, "2026-08-19T00:00:00.000Z", fixture.workspace),
       userMessage(`${id}-e1`, id, "2026-08-19T00:00:01.000Z", "message one"),
       userMessage(`${id}-e2`, id, "2026-08-19T00:00:02.000Z", "message two", "run-2"),
     ];
-    await fixture.store.appendBatch(events);
+    await fixture.store.appendBatch(events, { ownerFence });
     const full = await fixture.store.readSessionEntries(id);
 
     // kind 全集切片与全量读逐条相等,headSequence 为全会话水位。
@@ -716,13 +748,16 @@ test("sqlite sessions: projection delta 校验窄化——锚点/头部点查 + 
   const fixture = createFixture("pico-sqlite-delta-window-");
   try {
     const id = "sqlite-delta-window";
-    await fixture.store.initializeSession({ sessionId: id, workDir: fixture.workspace });
+    const { ownerFence } = await initializeRuntimeEventOwner(fixture.store, {
+      sessionId: id,
+      workDir: fixture.workspace,
+    });
     const events = [
       ...[1, 2, 3, 4, 5].map((index) =>
         userMessage(`${id}-e${index}`, id, `2026-08-19T00:00:0${index}.000Z`, `message ${index}`),
       ),
     ];
-    await fixture.store.appendBatch(events);
+    await fixture.store.appendBatch(events, { ownerFence });
 
     const cursor = (seq: number, eventId: string) => ({
       logId: id,
@@ -780,7 +815,10 @@ test("sqlite sessions: plan 投影 kind 切片 + 显式水位与全量读口径�
   const fixture = createFixture("pico-sqlite-plan-slice-");
   try {
     const id = "sqlite-plan-slice";
-    await fixture.store.initializeSession({ sessionId: id, workDir: fixture.workspace });
+    const { ownerFence } = await initializeRuntimeEventOwner(fixture.store, {
+      sessionId: id,
+      workDir: fixture.workspace,
+    });
     const planEvent = {
       schemaVersion: 2,
       eventId: `${id}-p1`,
@@ -818,7 +856,7 @@ test("sqlite sessions: plan 投影 kind 切片 + 显式水位与全量读口径�
       userMessage(`${id}-e1`, id, "2026-08-19T00:00:03.000Z", "message one"),
       userMessage(`${id}-e2`, id, "2026-08-19T00:00:04.000Z", "message two"),
     ];
-    await fixture.store.appendBatch(events);
+    await fixture.store.appendBatch(events, { ownerFence });
     const full = await fixture.store.readSessionEntries(id);
 
     // plan 投影:kind 切片 + 显式 headSequence 与全量折叠逐字段相等

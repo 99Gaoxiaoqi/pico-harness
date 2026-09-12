@@ -38,6 +38,7 @@ import {
   type RuntimeToolResultRecordedEvent,
 } from "../../../src/storage/runtime-event.js";
 import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
 const SESSION_ID = "projection-service-equivalence";
 const WORK_DIR = join(tmpdir(), "projection-service-workdir");
@@ -72,7 +73,10 @@ test("RuntimeProjectionService outputs are deepStrictEqual with the underlying p
   });
 
   const store = new SqliteRuntimeEventStore({ storageRoot: root });
-  await store.initializeSession({ sessionId: SESSION_ID, workDir: WORK_DIR });
+  const { ownerFence } = await initializeRuntimeEventOwner(store, {
+    sessionId: SESSION_ID,
+    workDir: WORK_DIR,
+  });
 
   // 构造一组多样化的 RuntimeEvent：user -> assistant(toolCall) -> toolResult -> state -> usage -> transcript
   const userMessageId = createRuntimeEventId("msg-user");
@@ -135,7 +139,9 @@ test("RuntimeProjectionService outputs are deepStrictEqual with the underlying p
   };
 
   // 追加前三个事件，随后插入一个有效 checkpoint 覆盖这三个 model 事件。
-  await store.appendBatch([userMessageEvent, assistantMessageEvent, toolResultEvent]);
+  await store.appendBatch([userMessageEvent, assistantMessageEvent, toolResultEvent], {
+    ownerFence,
+  });
 
   const coveredEvents = await store.readSession(SESSION_ID);
   const coveredEntries = coveredEvents
@@ -153,25 +159,28 @@ test("RuntimeProjectionService outputs are deepStrictEqual with the underlying p
     role: "assistant",
     content: "checkpoint summary",
   };
-  await store.append({
-    schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
-    eventId: checkpointEventId,
-    sessionId: SESSION_ID,
-    invocationId: INVOCATION_ID,
-    runId: RUN_ID,
-    turnId: TURN_ID,
-    at: AT,
-    partial: false,
-    visibility: "internal",
-    kind: "context.checkpoint.recorded",
-    data: {
-      checkpointId: "checkpoint-1",
-      coveredEventCount: coveredEntries.length,
-      sourceDigest: computeCheckpointSourceDigest(coveredEntries),
-      throughEventId: coveredEntries.at(-1)!.eventId,
-      summary: checkpointSummary,
+  await store.append(
+    {
+      schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
+      eventId: checkpointEventId,
+      sessionId: SESSION_ID,
+      invocationId: INVOCATION_ID,
+      runId: RUN_ID,
+      turnId: TURN_ID,
+      at: AT,
+      partial: false,
+      visibility: "internal",
+      kind: "context.checkpoint.recorded",
+      data: {
+        checkpointId: "checkpoint-1",
+        coveredEventCount: coveredEntries.length,
+        sourceDigest: computeCheckpointSourceDigest(coveredEntries),
+        throughEventId: coveredEntries.at(-1)!.eventId,
+        summary: checkpointSummary,
+      },
     },
-  });
+    { ownerFence },
+  );
 
   // state + usage + transcript 事件（不参与 model 投影，但参与 state/usage/transcript 投影）。
   const boundary = createManagedExecutionBoundary(createWorkspaceWritePermissionProfile(), 3);
@@ -227,16 +236,20 @@ test("RuntimeProjectionService outputs are deepStrictEqual with the underlying p
       costStatus: "estimated",
     },
   };
-  await store.appendBatch([stateEvent, modelSettledEvent]);
+  await store.appendBatch([stateEvent, modelSettledEvent], { ownerFence });
 
-  await store.appendTranscriptEvent(SESSION_ID, {
-    eventId: transcriptEventId,
-    sequence: 1,
-    createdAt: Date.parse(AT),
-    type: "entry.appended",
-    entryId: "entry-1",
-    entry: { kind: "user", content: "transcript user entry" },
-  });
+  await store.appendTranscriptEvent(
+    SESSION_ID,
+    {
+      eventId: transcriptEventId,
+      sequence: 1,
+      createdAt: Date.parse(AT),
+      type: "entry.appended",
+      entryId: "entry-1",
+      entry: { kind: "user", content: "transcript user entry" },
+    },
+    { ownerFence },
+  );
 
   const service = new RuntimeProjectionService(store);
   const events = await store.readSession(SESSION_ID);
@@ -341,7 +354,10 @@ test("RuntimeProjectionService propagates underlying projection failures", async
   });
 
   const store = new SqliteRuntimeEventStore({ storageRoot: root });
-  await store.initializeSession({ sessionId: SESSION_ID, workDir: WORK_DIR });
+  const { ownerFence } = await initializeRuntimeEventOwner(store, {
+    sessionId: SESSION_ID,
+    workDir: WORK_DIR,
+  });
 
   // 一个悬空 tool result（没有前置 assistant toolCall batch）→ assertToolCallPairing 抛错
   const danglingToolResult: RuntimeToolResultRecordedEvent = {
@@ -369,7 +385,7 @@ test("RuntimeProjectionService propagates underlying projection failures", async
       },
     },
   };
-  await store.appendBatch([danglingToolResult]);
+  await store.appendBatch([danglingToolResult], { ownerFence });
 
   const service = new RuntimeProjectionService(store);
   await assert.rejects(

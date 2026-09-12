@@ -19,6 +19,7 @@ import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
 import { closeAllOperationalDatabasesForTest } from "../../../src/storage/sqlite/sqlite-database.js";
 import { SqliteMemoryItemStore } from "../../../src/storage/sqlite/sqlite-memory-item-store.js";
 import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
 /** Windows: release SQLite owners before retrying temporary directory cleanup. */
 async function rmRetry(target: string): Promise<void> {
@@ -327,66 +328,72 @@ test("startup does not extract historical completed turns without a memory trigg
   const sessionId = "memory-terminal-job-gap";
   const runId = "run-before-crash";
   const at = "2026-07-22T00:00:00.000Z";
-  await runtimeStore.initializeSession({ sessionId, workDir: fixture.workspace });
-  await runtimeStore.appendBatch([
-    {
-      schemaVersion: 2,
-      eventId: "started-before-crash",
-      sessionId,
-      invocationId: "invocation-before-crash",
-      runId,
-      turnId: "turn-before-crash",
-      at,
-      partial: false,
-      visibility: "internal",
-      kind: "run.started",
-      data: { workDir: fixture.workspace },
-    },
-    {
-      schemaVersion: 2,
-      eventId: "user-before-crash",
-      sessionId,
-      invocationId: "invocation-before-crash",
-      runId,
-      turnId: "turn-before-crash",
-      at,
-      partial: false,
-      visibility: "model",
-      kind: "message.committed",
-      data: {
-        message: {
-          role: "user",
-          content: "请记住：这个项目固定使用 npm run recovered-gap 。",
+  const { ownerFence } = await initializeRuntimeEventOwner(runtimeStore, {
+    sessionId,
+    workDir: fixture.workspace,
+  });
+  await runtimeStore.appendBatch(
+    [
+      {
+        schemaVersion: 2,
+        eventId: "started-before-crash",
+        sessionId,
+        invocationId: "invocation-before-crash",
+        runId,
+        turnId: "turn-before-crash",
+        at,
+        partial: false,
+        visibility: "internal",
+        kind: "run.started",
+        data: { workDir: fixture.workspace },
+      },
+      {
+        schemaVersion: 2,
+        eventId: "user-before-crash",
+        sessionId,
+        invocationId: "invocation-before-crash",
+        runId,
+        turnId: "turn-before-crash",
+        at,
+        partial: false,
+        visibility: "model",
+        kind: "message.committed",
+        data: {
+          message: {
+            role: "user",
+            content: "请记住：这个项目固定使用 npm run recovered-gap 。",
+          },
         },
       },
-    },
-    {
-      schemaVersion: 2,
-      eventId: "assistant-before-crash",
-      sessionId,
-      invocationId: "invocation-before-crash",
-      runId,
-      turnId: "turn-before-crash",
-      at,
-      partial: false,
-      visibility: "model",
-      kind: "message.committed",
-      data: { message: { role: "assistant", content: "foreground complete" } },
-    },
-    {
-      schemaVersion: 2,
-      eventId: "terminal-before-crash",
-      sessionId,
-      invocationId: "invocation-before-crash",
-      runId,
-      turnId: "turn-before-crash",
-      at,
-      partial: false,
-      visibility: "internal",
-      kind: "run.terminal",
-      data: { status: "completed" },
-    },
-  ]);
+      {
+        schemaVersion: 2,
+        eventId: "assistant-before-crash",
+        sessionId,
+        invocationId: "invocation-before-crash",
+        runId,
+        turnId: "turn-before-crash",
+        at,
+        partial: false,
+        visibility: "model",
+        kind: "message.committed",
+        data: { message: { role: "assistant", content: "foreground complete" } },
+      },
+      {
+        schemaVersion: 2,
+        eventId: "terminal-before-crash",
+        sessionId,
+        invocationId: "invocation-before-crash",
+        runId,
+        turnId: "turn-before-crash",
+        at,
+        partial: false,
+        visibility: "internal",
+        kind: "run.terminal",
+        data: { status: "completed" },
+      },
+    ],
+    { ownerFence },
+  );
   runtimeStore.close();
 
   const result = await executeAgentRuntime(

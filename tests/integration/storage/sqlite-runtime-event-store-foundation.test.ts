@@ -277,18 +277,31 @@ test("sessions v6 to v7 migration backs up then removes the retired transcript c
   }
 });
 
-test("owner fence is epoch-zero compatible then rejects missing and stale owners", async () => {
+test("owner fence rejects missing and epoch-zero writes, accepts current owner, and rejects stale owners", async () => {
   const value = fixture("pico-eventlog-fence-");
   try {
     const sessionId = "fenced-session";
     await value.store.initializeSession({ sessionId, workDir: value.workspace });
     assert.deepEqual(await value.store.readOwnerFence(sessionId), { sessionId, epoch: 0 });
-    await value.store.append(started("e01", sessionId, value.workspace));
+    const appendWithoutFence = value.store.append.bind(value.store) as unknown as (
+      event: RuntimeEvent,
+    ) => Promise<unknown>;
+    await assert.rejects(
+      () => appendWithoutFence(started("e01", sessionId, value.workspace)),
+      RuntimeEventStoreOwnerFenceError,
+    );
+    await assert.rejects(
+      () =>
+        value.store.append(started("e01", sessionId, value.workspace), {
+          ownerFence: { sessionId, epoch: 0 },
+        }),
+      /owner fence epoch must be positive/u,
+    );
 
     const fence1 = await value.store.advanceOwnerFence(sessionId, 0);
     assert.deepEqual(fence1, { sessionId, epoch: 1 });
     await assert.rejects(
-      () => value.store.append(message("e02", sessionId, "missing")),
+      () => appendWithoutFence(message("e02", sessionId, "missing")),
       RuntimeEventStoreOwnerFenceError,
     );
     await assert.rejects(
@@ -296,8 +309,9 @@ test("owner fence is epoch-zero compatible then rejects missing and stale owners
         value.store.append(message("e02", sessionId, "stale"), {
           ownerFence: { sessionId, epoch: 0 },
         }),
-      RuntimeEventStoreOwnerFenceError,
+      /owner fence epoch must be positive/u,
     );
+    await value.store.append(started("e01", sessionId, value.workspace), { ownerFence: fence1 });
     await value.store.append(message("e02", sessionId, "current"), { ownerFence: fence1 });
     const fence2 = await value.store.advanceOwnerFence(sessionId, 1);
     await assert.rejects(

@@ -51,7 +51,7 @@ function startInput(
   scene: Scene,
   sourceRunId: string,
   targetRunId: string,
-): StartRuntimeContinuationInput {
+): Omit<StartRuntimeContinuationInput, "ownerFence"> {
   return {
     sessionId: scene.session.id,
     sourceRunId,
@@ -64,7 +64,10 @@ function startInput(
   };
 }
 
-async function startContinuation(scene: Scene, input: StartRuntimeContinuationInput) {
+async function startContinuation(
+  scene: Scene,
+  input: Omit<StartRuntimeContinuationInput, "ownerFence">,
+) {
   return scene.store.startContinuation({
     ...input,
     ownerFence: await scene.session.assertRuntimeEventWriteAllowed(),

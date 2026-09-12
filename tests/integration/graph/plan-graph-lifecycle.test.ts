@@ -14,6 +14,7 @@ import { createAgentGraphWorkspaceHost } from "../../../src/runtime/agent-graph-
 import { RUNTIME_EVENT_SCHEMA_VERSION } from "../../../src/storage/runtime-event.js";
 import { SqliteAgentGraphControlStore } from "../../../src/storage/sqlite/sqlite-agent-graph-control-store.js";
 import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
 const SETTINGS: PersistedSessionSettings = {
   provider: "openai",
@@ -170,8 +171,18 @@ async function fixture(t: TestContext) {
     await rm(root, { recursive: true, force: true });
   });
   const sessionId = "root-session";
-  await store.initializeSession({ sessionId, workDir });
-  const context = { sessionId, invocationId: "plan-inv", runId: "plan-run", turnId: "plan-turn" };
+  await initializeRuntimeEventOwner(store, { sessionId, workDir });
+  const writeGuard = {
+    assertRuntimeEventAuthority: () => undefined,
+    assertRuntimeEventWriteAllowed: () => store.readOwnerFence(sessionId),
+  };
+  const context = {
+    sessionId,
+    invocationId: "plan-inv",
+    runId: "plan-run",
+    turnId: "plan-turn",
+    writeGuard,
+  };
   const coordinator = new PlanCoordinator(store, context);
   const graph = graphStore.openRootEpoch(sessionId).record;
   const binding = { graphId: graph.graphId, epoch: graph.epoch };
@@ -230,18 +241,25 @@ async function fixture(t: TestContext) {
         partial: false,
         visibility: "internal" as const,
       };
-      await store.append({
-        ...base,
-        eventId: `started:${runId}`,
-        kind: "run.started",
-        data: { workDir },
-      });
-      await store.append({
-        ...base,
-        eventId: `terminal:${runId}`,
-        kind: "run.terminal",
-        data: { status },
-      });
+      const ownerFence = await writeGuard.assertRuntimeEventWriteAllowed();
+      await store.append(
+        {
+          ...base,
+          eventId: `started:${runId}`,
+          kind: "run.started",
+          data: { workDir },
+        },
+        { ownerFence },
+      );
+      await store.append(
+        {
+          ...base,
+          eventId: `terminal:${runId}`,
+          kind: "run.terminal",
+          data: { status },
+        },
+        { ownerFence },
+      );
     },
   };
 }

@@ -3,6 +3,10 @@ import { SessionForkService } from "../engine/session-fork-service.js";
 import { materializeRuntimeHistory } from "../engine/session-runtime-read-model.js";
 import { deriveRuntimeForkBootstrapRunId, RuntimeRun } from "./runtime-run.js";
 import { SqliteRuntimeEventStore } from "../storage/sqlite/sqlite-runtime-event-store.js";
+import {
+  RuntimeEventStoreOwnerFenceError,
+  type RuntimeOwnerFence,
+} from "../storage/runtime-event-store-contracts.js";
 import { createEngineRuntimePort } from "./engine-runtime-port-adapter.js";
 
 /** Runtime-owned implementation of the narrow fork lifecycle contract. */
@@ -50,6 +54,30 @@ export function createSessionForkRuntimePort(): SessionForkRuntimePort {
       }),
     bootstrapFork: async (options) => {
       const store = requireRuntimeEventStore(options.runtimeAuthority);
+      let ownerFence: RuntimeOwnerFence | undefined;
+      const writeGuard = {
+        assertRuntimeEventWriteAllowed: async (): Promise<RuntimeOwnerFence> => {
+          await options.publication.assertOwned();
+          if (!ownerFence) {
+            await store.initializeSession({
+              sessionId: options.targetSessionId,
+              workDir: options.workDir,
+            });
+            const current = await store.readOwnerFence(options.targetSessionId);
+            ownerFence = await store.advanceOwnerFence(options.targetSessionId, current.epoch);
+            return ownerFence;
+          }
+          const current = await store.readOwnerFence(options.targetSessionId);
+          if (current.epoch !== ownerFence.epoch) {
+            throw new RuntimeEventStoreOwnerFenceError(
+              options.targetSessionId,
+              ownerFence.epoch,
+              current.epoch,
+            );
+          }
+          return ownerFence;
+        },
+      };
       await RuntimeRun.bootstrapFork({
         sourceSessionId: options.sourceSessionId,
         targetSessionId: options.targetSessionId,
@@ -64,9 +92,7 @@ export function createSessionForkRuntimePort(): SessionForkRuntimePort {
         ...(options.workflowEvents ? { workflowEvents: options.workflowEvents } : {}),
         workDir: options.workDir,
         store,
-        writeGuard: {
-          assertRuntimeEventWriteAllowed: () => options.publication.assertOwned(),
-        },
+        writeGuard,
       });
     },
     deriveBootstrapRunId: (options) => {
