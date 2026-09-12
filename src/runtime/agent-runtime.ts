@@ -1092,8 +1092,13 @@ export async function executeAgentRuntime(
     // A configured child executes against the boundary admitted above for its entire Run.
     // External settings writes may update the durable Session concurrently, but must not
     // widen this Run's physical filesystem, subprocess, or network authority.
-    const runtimeExecutionBoundary = (): ExecutionBoundary | undefined =>
-      configuredChildBoundaryCeiling ?? session.getRuntimeStateSnapshot().boundary;
+    const runtimeExecutionBoundary = (): ExecutionBoundary => {
+      const boundary = configuredChildBoundaryCeiling ?? session.getRuntimeStateSnapshot().boundary;
+      if (!boundary) {
+        throw new Error(`Session ${session.id} has no durable execution boundary`);
+      }
+      return boundary;
+    };
     const sideConversation = settings.sideConversation === true;
     const collaborationMode = (): "agent" | "plan" =>
       dependencies.configuredSubagentChild || dependencies.agentGraph?.kind === "operator"
@@ -1253,19 +1258,22 @@ export async function executeAgentRuntime(
     const currentMainProcessSandbox = (): NonNullable<
       DefaultToolRegistryOptions["processSandbox"]
     > => {
+      if (backgroundPolicy) {
+        return compileRuntimeProcessSandbox({
+          workspaceGeneration: workspaceRoots.generation(),
+          scratchRoot: processSandboxScratchRoot,
+          backgroundNetworkPolicy: backgroundPolicy.snapshot.toolNetworkPolicy,
+        });
+      }
       const executionBoundary = runtimeExecutionBoundary();
       return compileRuntimeProcessSandbox({
         collaborationMode: collaborationMode(),
-        permissionMode: permissionMode(),
         workspaceGeneration: workspaceRoots.generation(),
         scratchRoot: processSandboxScratchRoot,
         networkEnabled:
           !dependencies.configuredSubagentChild &&
           globalSessionPermissionGrants.allowsNetwork(session.id, workDir, session.picoHome),
-        ...(executionBoundary ? { executionBoundary } : {}),
-        ...(backgroundPolicy
-          ? { backgroundNetworkPolicy: backgroundPolicy.snapshot.toolNetworkPolicy }
-          : {}),
+        executionBoundary,
       });
     };
     const traceEnabled = options.trace === true || isTruthyEnv(runtimeEnv.PICO_TRACE);
