@@ -27,7 +27,7 @@ const terminalGeneration = new DesktopTerminalGenerationController();
 // 3-B-3 硬切后默认构造走 kernel 承载：首次请求（下方 runtime.ping）经
 // connectOrSpawn 自动拉起 detached 常驻 daemon candidate（自持 residency，
 // 不随本 app 退出；cron 调度依赖其常驻）。Electron 主进程只做瘦客户端。
-const runtime = new LocalDaemonRuntimeClientAdapter(undefined, {
+const runtime = new LocalDaemonRuntimeClientAdapter({
   // The daemon is a separate Vite target beside main.cjs. Supplying its concrete
   // artifact keeps both development and packaged startup independent from
   // import.meta.url rewriting inside the shared client bundle.
