@@ -4,11 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
-import {
-  createRuntimeRequest,
-  RUNTIME_ERROR_CODES,
-  RuntimeProtocolError,
-} from "../../../packages/protocol/src/index.js";
+import { createRuntimeRequest, RUNTIME_ERROR_CODES, RuntimeProtocolError } from "@pico/protocol";
 import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
 import { WorkspaceRegistrationStore } from "../../../src/daemon/workspace-registration.js";
 import { parseUserConfig, UserConfigStore } from "../../../src/input/user-config-store.js";

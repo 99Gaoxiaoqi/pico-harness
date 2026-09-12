@@ -10,6 +10,7 @@ import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
 import { renderToStaticMarkup } from "react-dom/server";
 import React, { createElement } from "react";
 import { ConversationComposerMenu } from "../../../apps/desktop/src/renderer/conversation/ConversationComposerMenu.js";
+import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 
 test("desktop persists Swarm beside Plan and delivers a single-turn override without changing defaults", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-desktop-swarm-"));
@@ -17,6 +18,7 @@ test("desktop persists Swarm beside Plan and delivers a single-turn override wit
   const picoHome = join(root, "home");
   await mkdir(workspace);
   await mkdir(picoHome);
+  await writeDesktopModelRouting(picoHome);
   const canonical = await realpath(workspace);
   const env = { PICO_HOME: picoHome };
   const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });

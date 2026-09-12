@@ -16,11 +16,13 @@ import { SessionSubscriptionRegistry } from "../../../src/daemon/session-subscri
 import { SqliteSessionContinuitySource } from "../../../src/daemon/sqlite-session-continuity-source.js";
 import { globalSessionManager } from "../../../src/engine/session.js";
 import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
+import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 
 test("普通会话运行持锁时，订阅重开、Graph只读查询和工具后推理仍实时到达界面", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-desktop-live-subscription-"));
   const picoHome = join(root, "home");
   await mkdir(join(root, "workspace"));
+  await writeDesktopModelRouting(picoHome);
   const workspacePath = await realpath(join(root, "workspace"));
   const env = { PICO_HOME: picoHome };
   const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });

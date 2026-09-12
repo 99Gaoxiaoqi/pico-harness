@@ -17,6 +17,10 @@ import { SqliteMemoryItemStore } from "../../../src/storage/sqlite/sqlite-memory
 import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
 import { memorySessionKey } from "../../../src/memory/atomic/runtime-contracts.js";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
+import {
+  createManagedExecutionBoundary,
+  createWorkspaceWritePermissionProfile,
+} from "../../../src/safety/permission-profile.js";
 
 test(
   "production shutdown waits for background memory and disposal after the foreground completes",
@@ -113,6 +117,7 @@ test(
         thinkingEffortExplicit: false,
         additionalDirectories: [],
       },
+      boundary: createManagedExecutionBoundary(createWorkspaceWritePermissionProfile()),
     });
     lease.release();
     const runtime = await services.service.getWorkspaceRuntime(workspacePath);

@@ -24,6 +24,7 @@ import {
 } from "../../../src/tui/client-session-runtime.js";
 import { TuiReporter } from "../../../src/tui/tui-reporter.js";
 import { buildStatusBarText } from "../../../src/tui/status-bar.js";
+import { compileRuntimePermissionProfile } from "../../../src/safety/permission-profile.js";
 
 test("Swarm session settings survive durable hydration", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "pico-swarm-settings-"));
@@ -46,6 +47,10 @@ test("Swarm session settings survive durable hydration", async () => {
       getRuntimeStateSnapshot: () => ({
         stateVersion: 3,
         settings: persisted,
+        boundary: compileRuntimePermissionProfile({
+          collaborationMode: "agent",
+          permissionMode: "ask",
+        }),
         usage: createEmptyUsageSnapshot(),
       }),
       updateRuntimeState: (patch) => {

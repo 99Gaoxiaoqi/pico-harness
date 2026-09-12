@@ -15,7 +15,7 @@ import {
   type RuntimeParams,
   type RuntimeResult,
   type RuntimeSubagentPreset,
-} from "../../../packages/protocol/src/index.js";
+} from "@pico/protocol";
 import { WorkspaceRegistrationStore } from "../../../src/daemon/workspace-registration.js";
 import { UserConfigStore } from "../../../src/input/user-config-store.js";
 import type { CredentialVault } from "../../../src/provider/credential-vault.js";

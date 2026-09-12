@@ -17,6 +17,7 @@ import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runt
 import { withWorkspaceSqliteLease } from "../../../src/storage/sqlite/workspace-scopes.js";
 import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
 import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
+import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 import {
   buildSessionTaskPromptBlock,
   createSessionTaskTools,
@@ -320,6 +321,7 @@ test("desktop runtime exposes real workbar authorities and publishes revision si
   const picoHome = join(root, "pico-home");
   await mkdir(workspace, { recursive: true });
   await mkdir(picoHome, { recursive: true });
+  await writeDesktopModelRouting(picoHome);
   const canonical = await realpath(workspace);
   const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
   await trustStore.trust(canonical);
