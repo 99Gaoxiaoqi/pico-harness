@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { loadAgentCatalog, summarizeAgentProfiles } from "../agents/catalog.js";
 import { SkillLoader } from "../context/skill.js";
 import { projectResourceCatalog } from "../catalog/resource-catalog.js";
-import { loadPicoConfig } from "../input/pico-config.js";
+import { loadPicoProjectConfig } from "../input/pico-config.js";
 import { resolveProjectMcpConfigPath } from "../mcp/config-path.js";
 import { McpConnectionManager } from "../mcp/manager.js";
 import type { PluginRuntimeSnapshot } from "../plugins/plugin-runtime-snapshot.js";
@@ -91,7 +91,7 @@ export async function listDesktopAgents(
   workspacePath: string,
   options: DesktopResourceCatalogOptions,
 ) {
-  const config = await loadPicoConfig(workspacePath);
+  const config = await loadPicoProjectConfig(workspacePath);
   const compatibility = config.compatibility.claude;
   const agents = await loadAgentCatalog({
     workDir: workspacePath,
@@ -154,7 +154,7 @@ async function loadDesktopSkillLoader(
   workspacePath: string,
   options: DesktopResourceCatalogOptions,
 ): Promise<SkillLoader> {
-  const config = await loadPicoConfig(workspacePath);
+  const config = await loadPicoProjectConfig(workspacePath);
   const compatibility = config.compatibility.claude;
   return new SkillLoader(workspacePath, {
     includeUserResources: true,

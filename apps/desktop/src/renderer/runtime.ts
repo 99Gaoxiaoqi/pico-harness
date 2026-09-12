@@ -52,7 +52,6 @@ import {
 } from "./model.js";
 import { saveProviderConnection } from "./provider-connection.js";
 import {
-  capability,
   parseCatalogAgents,
   parseCatalogSkills,
   parseModelRoutes,
@@ -221,7 +220,6 @@ function mergeLoadedData(
   const workspaceResult = isRecord(results.workspace) ? results.workspace : {};
   const workspaceMode = parseWorkspaceMode(workspaceResult.mode, base.workspaceMode);
   const jobResult = isRecord(results.jobs) ? results.jobs : {};
-  const providerResult = isRecord(results.legacyProviders) ? results.legacyProviders : {};
   const usageResult = isRecord(results.usage) ? results.usage : {};
   const usage = isRecord(usageResult.usage) ? usageResult.usage : {};
   const configResult = isRecord(results.config) ? results.config : {};
@@ -257,7 +255,6 @@ function mergeLoadedData(
       status: stringValue(item.status, "idle"),
       updatedAt: numberValue(item.updatedAt, Date.now()),
     })),
-    providers: recordArray(providerResult.providers).map(capability),
     modelRoutes:
       isRecord(results.effectiveConfig) && isRecord(results.effectiveConfig.config)
         ? parseModelRoutes(results.effectiveConfig.config)
@@ -914,7 +911,6 @@ export function useRuntimeStore(): RuntimeStore {
     workspaceLoadGenerationRef.current = generation;
     const isCurrentLoad = () => workspaceLoadGenerationRef.current === generation;
     const params = { workspacePath };
-    const sharedConfigSupported = runtimeCapabilitiesRef.current.has(SHARED_CONFIG_CAPABILITY);
     // Main may be awaiting native storage-repair confirmation. Do not open dependent stores yet.
     const workspaceEntry = await optionalEntry("workspace", bridge, "workspace.status", params);
     if (!isCurrentLoad()) return;
@@ -924,14 +920,11 @@ export function useRuntimeStore(): RuntimeStore {
       optionalEntry("sessions", bridge, "session.list", { ...params, includeArchived: true }),
       optionalEntry("runs", bridge, "runs.list", params),
       optionalEntry("jobs", bridge, "jobs.list", params),
-      optionalEntry("legacyProviders", bridge, "config.providers", params),
       optionalEntry("agentCatalog", bridge, "catalog.agents", params),
       optionalEntry("skillCatalog", bridge, "catalog.skills", params),
       optionalEntry("usage", bridge, "usage.get", params),
       optionalEntry("config", bridge, "config.get", params),
-      ...(sharedConfigSupported
-        ? ([optionalEntry("effectiveConfig", bridge, "config.effective.get", params)] as const)
-        : []),
+      optionalEntry("effectiveConfig", bridge, "config.effective.get", params),
     ];
     const entries = await Promise.all(requests);
     const values: Record<string, unknown> = {};

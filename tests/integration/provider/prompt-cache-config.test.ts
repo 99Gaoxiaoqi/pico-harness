@@ -1,9 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { test } from "node:test";
-import { loadPicoProjectConfig } from "../../../src/input/pico-config.js";
+import { parseModelProviderConfigs } from "../../../src/input/pico-config.js";
 import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
 
 test("prompt-cache policies resolve provider defaults and configured behavior", () => {
@@ -76,151 +73,124 @@ test("prompt-cache policies resolve provider defaults and configured behavior", 
   );
 });
 
-test("project config validates prompt-cache policy against its provider protocol", async (context) => {
-  const root = await mkdtemp(join(tmpdir(), "pico-prompt-cache-config-"));
-  context.after(() => rm(root, { recursive: true, force: true }));
-  await mkdir(join(root, ".pico"), { recursive: true });
-  const configPath = join(root, ".pico", "config.json");
-
-  await writeFile(
-    configPath,
-    JSON.stringify({
-      version: 1,
-      providers: {
-        claude: {
-          protocol: "claude",
-          baseURL: "https://api.anthropic.com/v1",
-          apiKeyEnv: "ANTHROPIC_API_KEY",
-          models: {
-            "claude-test": {
-              cache: true,
-              promptCache: { mode: "explicit", ttl: "1h", prewarm: true },
-            },
+test("provider parser validates prompt-cache policy against its protocol", () => {
+  const parsed = parseModelProviderConfigs(
+    {
+      claude: {
+        protocol: "claude",
+        baseURL: "https://api.anthropic.com/v1",
+        apiKeyEnv: "ANTHROPIC_API_KEY",
+        models: {
+          "claude-test": {
+            cache: true,
+            promptCache: { mode: "explicit", ttl: "1h", prewarm: true },
           },
         },
       },
-    }),
-    "utf8",
+    },
+    "prompt-cache-test",
   );
-  const parsed = await loadPicoProjectConfig(root);
-  assert.deepEqual(parsed.providers["claude"]?.modelCapabilities?.["claude-test"]?.promptCache, {
+  assert.deepEqual(parsed["claude"]?.modelCapabilities?.["claude-test"]?.promptCache, {
     mode: "explicit",
     ttl: "1h",
     prewarm: true,
   });
 
-  await writeFile(
-    configPath,
-    JSON.stringify({
-      version: 1,
-      providers: {
-        claude: {
-          protocol: "claude",
-          baseURL: "https://api.anthropic.com/v1",
-          apiKeyEnv: "ANTHROPIC_API_KEY",
-          models: {
-            "claude-test": {
-              cache: true,
-              promptCache: { mode: "implicit", ttl: "30m" },
+  assert.throws(
+    () =>
+      parseModelProviderConfigs(
+        {
+          claude: {
+            protocol: "claude",
+            baseURL: "https://api.anthropic.com/v1",
+            apiKeyEnv: "ANTHROPIC_API_KEY",
+            models: {
+              "claude-test": {
+                cache: true,
+                promptCache: { mode: "implicit", ttl: "30m" },
+              },
             },
           },
         },
-      },
-    }),
-    "utf8",
-  );
-  await assert.rejects(loadPicoProjectConfig(root), /promptCache\.mode.*explicit for claude/u);
-
-  await writeFile(
-    configPath,
-    JSON.stringify({
-      version: 1,
-      providers: {
-        openai: {
-          protocol: "openai",
-          baseURL: "https://api.openai.com/v1",
-          apiKeyEnv: "OPENAI_API_KEY",
-          models: {
-            "gpt-legacy": {
-              cache: true,
-              promptCache: { mode: "implicit", retention: "in_memory", keyShards: 2 },
-            },
-          },
-        },
-      },
-    }),
-    "utf8",
-  );
-  const openAIParsed = await loadPicoProjectConfig(root);
-  assert.deepEqual(
-    openAIParsed.providers["openai"]?.modelCapabilities?.["gpt-legacy"]?.promptCache,
-    { mode: "implicit", retention: "in_memory", keyShards: 2 },
+        "prompt-cache-test",
+      ),
+    /promptCache\.mode.*explicit for claude/u,
   );
 
-  await writeFile(
-    configPath,
-    JSON.stringify({
-      version: 1,
-      providers: {
-        openai: {
-          protocol: "openai",
-          baseURL: "https://api.openai.com/v1",
-          apiKeyEnv: "OPENAI_API_KEY",
-          models: {
-            "gpt-invalid": {
-              cache: true,
-              promptCache: { mode: "explicit", retention: "24h" },
-            },
+  const openAIParsed = parseModelProviderConfigs(
+    {
+      openai: {
+        protocol: "openai",
+        baseURL: "https://api.openai.com/v1",
+        apiKeyEnv: "OPENAI_API_KEY",
+        models: {
+          "gpt-legacy": {
+            cache: true,
+            promptCache: { mode: "implicit", retention: "in_memory", keyShards: 2 },
           },
         },
       },
-    }),
-    "utf8",
+    },
+    "prompt-cache-test",
   );
-  await assert.rejects(
-    loadPicoProjectConfig(root),
+  assert.deepEqual(openAIParsed["openai"]?.modelCapabilities?.["gpt-legacy"]?.promptCache, {
+    mode: "implicit",
+    retention: "in_memory",
+    keyShards: 2,
+  });
+
+  assert.throws(
+    () =>
+      parseModelProviderConfigs(
+        {
+          openai: {
+            protocol: "openai",
+            baseURL: "https://api.openai.com/v1",
+            apiKeyEnv: "OPENAI_API_KEY",
+            models: {
+              "gpt-invalid": {
+                cache: true,
+                promptCache: { mode: "explicit", retention: "24h" },
+              },
+            },
+          },
+        },
+        "prompt-cache-test",
+      ),
     /promptCache\.retention.*requires promptCache\.mode=implicit/u,
   );
 
-  await writeFile(
-    configPath,
-    JSON.stringify({
-      version: 1,
-      providers: {
-        openai: {
-          protocol: "openai",
-          baseURL: "https://api.openai.com/v1",
-          apiKeyEnv: "OPENAI_API_KEY",
-          models: { "gpt-retired-reasoning": { reasoning: true } },
+  assert.throws(
+    () =>
+      parseModelProviderConfigs(
+        {
+          openai: {
+            protocol: "openai",
+            baseURL: "https://api.openai.com/v1",
+            apiKeyEnv: "OPENAI_API_KEY",
+            models: { "gpt-retired-reasoning": { reasoning: true } },
+          },
         },
-      },
-    }),
-    "utf8",
-  );
-  await assert.rejects(
-    loadPicoProjectConfig(root),
+        "prompt-cache-test",
+      ),
     /reasoning.*must be a reasoning capability object/u,
   );
 
-  await writeFile(
-    configPath,
-    JSON.stringify({
-      version: 1,
-      providers: {
-        removed: {
-          protocol: "gemini",
-          baseURL: "https://provider.invalid/v1",
-          apiKeyEnv: "REMOVED_PROVIDER_API_KEY",
-          models: {
-            "removed-model": {},
+  assert.throws(
+    () =>
+      parseModelProviderConfigs(
+        {
+          removed: {
+            protocol: "gemini",
+            baseURL: "https://provider.invalid/v1",
+            apiKeyEnv: "REMOVED_PROVIDER_API_KEY",
+            models: {
+              "removed-model": {},
+            },
           },
         },
-      },
-    }),
-    "utf8",
-  );
-  await assert.rejects(
-    loadPicoProjectConfig(root),
+        "prompt-cache-test",
+      ),
     /protocol.*must be openai, claude or responses/u,
   );
 });

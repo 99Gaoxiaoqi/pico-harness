@@ -3,14 +3,16 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import {
+  DESKTOP_RUNTIME_METHODS,
+  isRuntimeMethod,
+  RUNTIME_METHODS,
+} from "../../../packages/protocol/src/index.js";
 import { EffectiveConfigResolver } from "../../../src/input/effective-config.js";
+import { loadPicoProjectConfig } from "../../../src/input/pico-config.js";
 import { UserConfigStore } from "../../../src/input/user-config-store.js";
 
-// 项目侧 model 默认路由退役（2026-08-17）：模型路由与用户凭据强耦合，
-// 项目配置只能引用路由 ID、无法保证其存在于用户侧。实测事故：项目钉死
-// 已删除的 provider（lez/qwen3.8-max），用户级默认已切新路由，但工作区
-// 所有新会话仍按项目值解析并直接报错挡启动。字段解析保留，值不再参与。
-test("project model 字段不再覆盖用户级默认路由（即使指向不存在的路由）", async (context) => {
+test("current project config loads while model routes remain user-scoped", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-project-model-retired-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   const picoHome = join(root, "pico-home");
@@ -37,13 +39,21 @@ test("project model 字段不再覆盖用户级默认路由（即使指向不存
     { expectedRevision: empty.revision },
   );
 
-  // 项目配置钉一个用户侧根本不存在的路由——退役前这会覆盖用户级默认。
   await mkdir(join(workDir, ".pico"), { recursive: true });
   await writeFile(
     join(workDir, ".pico", "config.json"),
-    JSON.stringify({ version: 1, model: "ghost-provider/ghost-model" }),
+    JSON.stringify({
+      version: 1,
+      commandsDir: "project-commands",
+      sandbox: { network: "allow" },
+      extensionOwnedField: { enabled: true },
+    }),
     { flag: "w" },
   );
+
+  const project = await loadPicoProjectConfig(workDir);
+  assert.equal(project.commandsDir, join(workDir, "project-commands"));
+  assert.equal("providers" in project, false);
 
   const resolver = new EffectiveConfigResolver({ userConfigStore: store });
   const effective = await resolver.resolve({
@@ -51,11 +61,7 @@ test("project model 字段不再覆盖用户级默认路由（即使指向不存
     projectTrusted: true,
   });
 
-  assert.equal(
-    effective.defaultModelRouteId,
-    "user-side/default-model",
-    "默认路由必须来自用户级，不受项目 model 字段影响",
-  );
+  assert.equal(effective.defaultModelRouteId, "user-side/default-model", "默认路由必须来自用户级");
   assert.equal(
     effective.sources["defaults.modelRouteId"],
     "user",
@@ -63,28 +69,27 @@ test("project model 字段不再覆盖用户级默认路由（即使指向不存
   );
 });
 
-test("用户级未配置默认时项目 model 也不注入（不再回落到项目值）", async (context) => {
-  const root = await mkdtemp(join(tmpdir(), "pico-project-model-retired-nouser-"));
+test("project config rejects retired model and providers fields", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-project-model-retired-"));
   context.after(() => rm(root, { recursive: true, force: true }));
-  const picoHome = join(root, "pico-home");
   const workDir = join(root, "workspace");
   await mkdir(join(workDir, ".pico"), { recursive: true });
-  await writeFile(
-    join(workDir, ".pico", "config.json"),
-    JSON.stringify({ version: 1, model: "ghost-provider/ghost-model" }),
-    { flag: "w" },
-  );
+  const configPath = join(workDir, ".pico", "config.json");
 
-  const store = new UserConfigStore({ picoHome });
-  const resolver = new EffectiveConfigResolver({ userConfigStore: store });
-  const effective = await resolver.resolve({
-    workDir,
-    projectTrusted: true,
-  });
+  for (const [field, retired] of [
+    ["model", { model: "ghost-provider/ghost-model" }],
+    ["providers", { providers: {} }],
+  ] as const) {
+    await writeFile(configPath, JSON.stringify({ version: 1, ...retired }), { flag: "w" });
+    await assert.rejects(
+      loadPicoProjectConfig(workDir),
+      new RegExp(`${field}.*no longer supported in project config`, "u"),
+    );
+  }
+});
 
-  assert.equal(
-    effective.defaultModelRouteId,
-    undefined,
-    "用户级无默认时，项目 model 不得注入默认路由",
-  );
+test("runtime contracts no longer expose project provider listing", () => {
+  assert.equal((RUNTIME_METHODS as readonly string[]).includes("config.providers"), false);
+  assert.equal((DESKTOP_RUNTIME_METHODS as readonly string[]).includes("config.providers"), false);
+  assert.equal(isRuntimeMethod("config.providers"), false);
 });

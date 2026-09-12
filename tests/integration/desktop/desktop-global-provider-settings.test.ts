@@ -5,13 +5,10 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { parseStrictRuntimeParams } from "../../../src/daemon/protocol.js";
 
-test("模型设置收拢到全局设置且保留旧路由兼容", async () => {
+test("模型设置只保留当前全局设置路由", async () => {
   const source = await rendererSource("App.tsx");
   assert.match(source, /path="settings\/models" element=\{<ProviderPageRoute \/>\}/u);
-  assert.match(
-    source,
-    /path="providers" element=\{<LegacySurfaceRedirect to="\/settings\/models" \/>\}/u,
-  );
+  assert.doesNotMatch(source, /path="providers"|LegacySurfaceRedirect/u);
   assert.doesNotMatch(source, /resourceNav/u);
 
   const providerRouteStart = source.indexOf('<Route path="settings/models"');
@@ -53,7 +50,10 @@ test("全局 Provider 加载与工作区 effective config 保持独立", async (
   assert.match(globalLoader, /"provider\.list", \{\}/u);
   assert.match(globalLoader, /"config\.user\.get", \{\}/u);
   assert.doesNotMatch(globalLoader, /config\.effective\.get|workspacePath/u);
-  assert.doesNotMatch(workspaceLoader, /provider\.list|config\.user\.get/u);
+  assert.doesNotMatch(
+    workspaceLoader,
+    /provider\.list|config\.user\.get|config\.providers|legacyProviders/u,
+  );
   assert.doesNotMatch(workspaceLoader, /providerConfig:/u);
   assert.match(workspaceLoader, /config\.effective\.get/u);
   assert.match(
@@ -62,6 +62,7 @@ test("全局 Provider 加载与工作区 effective config 保持独立", async (
     "切换工作区时必须先清空上一工作区的模型路由",
   );
   assert.doesNotMatch(workspaceMerge, /providerConfig:/u);
+  assert.doesNotMatch(workspaceMerge, /legacyProviders|providerResult/u);
   assert.match(
     workspaceMerge,
     /modelRoutes:[\s\S]+results\.effectiveConfig[\s\S]+parseModelRoutes[\s\S]+base\.modelRoutes/u,

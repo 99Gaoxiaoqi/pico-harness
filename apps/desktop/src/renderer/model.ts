@@ -326,7 +326,6 @@ export interface AppData {
   readonly mcpServers: readonly CapabilityView[];
   readonly skillScope: CapabilityScopeView;
   readonly mcpScope: CapabilityScopeView;
-  readonly providers: readonly CapabilityView[];
   readonly providerConfig: ProviderConfigView;
   readonly modelRoutes: readonly ModelRouteView[];
   readonly catalogAgents: readonly CatalogAgentView[];
@@ -375,7 +374,6 @@ export const emptyData: AppData = {
   mcpServers: [],
   skillScope: { userItems: [], userRevision: "" },
   mcpScope: { userItems: [], userRevision: "" },
-  providers: [],
   providerConfig: {
     supported: false,
     writable: false,

@@ -71,7 +71,7 @@ test("real-model configuration uses the user default without persisting credenti
   const projectConfigPath = join(workDir, ".pico", "config.json");
   await writeFile(
     projectConfigPath,
-    JSON.stringify({ version: 1, model: "project-provider/project-model" }),
+    JSON.stringify({ version: 1, commandsDir: ".pico/commands" }),
     "utf8",
   );
   const syntheticCredential = "synthetic-real-llm-test-credential";

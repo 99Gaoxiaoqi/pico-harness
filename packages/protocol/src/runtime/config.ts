@@ -210,10 +210,6 @@ export type ConfigMethodMap = {
     };
     readonly result: { readonly config: JsonObject; readonly version: number };
   };
-  readonly "config.providers": {
-    readonly params: WorkspaceParams;
-    readonly result: { readonly providers: readonly JsonObject[] };
-  };
   readonly "config.user.get": {
     readonly params: EmptyParams;
     readonly result: { readonly config: RuntimeUserConfig; readonly revision: string };
@@ -314,7 +310,6 @@ export const configParamValidators = {
     patch: jsonObjectParam,
     expectedVersion: finiteNumberParam,
   }),
-  "config.providers": workspaceParams,
   "config.user.get": noParams,
   "config.user.update": exactParamShape({
     defaults: runtimeUserDefaultsParam,
@@ -348,7 +343,6 @@ export const configParamValidators = {
 export const configResultValidators = {
   "config.get": exactResultShape({ config: resultJsonObject, version: resultFiniteNumber }),
   "config.update": exactResultShape({ config: resultJsonObject, version: resultFiniteNumber }),
-  "config.providers": exactResultShape({ providers: resultArray(resultJsonObject) }),
   "config.user.get": exactResultShape({
     config: runtimeUserConfigResult,
     revision: resultString,

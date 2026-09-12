@@ -59,12 +59,6 @@ export class EffectiveConfigResolver {
       : undefined;
 
     const providers = user.config.providers;
-    // 项目侧 providers 已退役（2026-08-17）：provider 凭据只支持用户侧，
-    // 项目配置里的 providers 段是 legacy 残留，解析保留但不再并入有效配置
-    // 项目侧 model 默认路由同步退役（同日）：模型路由与用户凭据强耦合，
-    // 项目侧只能引用无法保证存在的路由 ID（实测：项目钉死已删除的 provider
-    // 会挡死整个工作区的新会话）。字段连同解析整体移除——parser 忽略未知键，
-    // 旧仓库的 model 残值静默失效，格式非法也不再阻断配置加载。
 
     const sources: Record<string, ConfigSource> = {};
     for (const id of Object.keys(providers)) {

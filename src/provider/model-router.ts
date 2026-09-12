@@ -18,7 +18,7 @@ export interface ModelProviderConfig {
   auth?: "api-key" | "none";
   models: readonly string[];
   discoverModels: boolean;
-  /** Per-model metadata; absent on legacy configs and discovery-only entries. */
+  /** Optional per-model metadata; built-in defaults cover omitted and discovery-only entries. */
   modelCapabilities?: Readonly<Record<string, ModelCapabilityConfig>>;
 }
 

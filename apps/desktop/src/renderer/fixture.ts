@@ -324,22 +324,6 @@ export const previewData: AppData = {
     ],
     userRevision: "preview-mcp-revision",
   },
-  providers: [
-    {
-      id: "provider-openai",
-      name: "OpenAI",
-      description: "用于任务规划、代码生成与审查。",
-      state: "ready",
-      meta: "gpt-5.4",
-    },
-    {
-      id: "provider-local",
-      name: "本地模型",
-      description: "在设备上运行，不发送项目内容。",
-      state: "disabled",
-      meta: "未配置",
-    },
-  ],
   providerConfig: {
     supported: true,
     writable: true,

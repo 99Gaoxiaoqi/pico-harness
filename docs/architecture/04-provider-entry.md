@@ -52,7 +52,7 @@ Session / CLI 显式选择
 $PICO_HOME/config.json 中的 Provider 路由（Desktop + TUI 共享）
 ```
 
-模型 Provider、模型列表与默认路由只来自用户级配置；项目配置和裸 `LLM_*` 环境变量都不会创建或覆盖路由。项目配置仍受工作区信任门保护，但其中已退役的 `model` / `providers` 不进入 `EffectiveConfigSnapshot`。`EffectiveConfigResolver` 为有效字段记录用户来源；`UserConfigStore` 以内容 SHA-256 revision 执行 OCC，在短锁内复查 revision 并原子替换文件。OpenAI-compatible 能力仍由用户 Provider 的 `protocol: "openai"`、自定义 `baseURL` 和模型能力配置提供。
+模型 Provider、模型列表与默认路由只来自用户级配置；项目配置和裸 `LLM_*` 环境变量都不会创建或覆盖路由。项目配置仍受工作区信任门保护；其中已退役的 `model` / `providers` 会被明确拒绝，不能以静默忽略或旧 Runtime RPC 的方式继续生效。`EffectiveConfigResolver` 为有效字段记录用户来源；`UserConfigStore` 以内容 SHA-256 revision 执行 OCC，在短锁内复查 revision 并原子替换文件。OpenAI-compatible 能力仍由用户 Provider 的 `protocol: "openai"`、自定义 `baseURL` 和模型能力配置提供。
 
 `loadEffectiveModelRuntime` 是 TUI、Desktop 前台运行、Compact 和子代理的统一模型解析入口。它先解析配置，再按“用户配置内 API Key > 匹配 Provider authority 的 v2 凭证 > 该 Provider 显式声明的宿主环境变量”向 `ModelRouter` 注入进程内 secret。裸环境变量不能自行创建路由。secret 不属于 `EffectiveConfigSnapshot`；经过本机认证的 TUI/Desktop 可以用 write-only Runtime 请求在进程间短暂传递 secret，但它不得出现在 Runtime 响应、事件、持久配置、Renderer Store 或日志中，也不得写入请求之外的长期内存状态。发布构建默认禁用持久凭证并 fail-closed：现有 `/usr/bin/security` 适配无法阻止同一 macOS 用户下的 Agent Shell 读取条目，只允许本地开发通过 `PICO_UNSAFE_KEYCHAIN_CLI=1` 显式启用，不得用于发布。正式 macOS 版本必须改用签名的 Pico Credential Broker/XPC 进程；在该后端和其他平台安全后端完成前，只支持用户配置内凭证或由用户 Provider 显式声明的环境变量。
 
