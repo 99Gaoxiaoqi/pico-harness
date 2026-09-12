@@ -82,7 +82,7 @@ export function parseChanges(value: unknown): {
 
 export function parseSessionContext(value: unknown): SessionContextView {
   const result = isRecord(value) ? value : {};
-  const context = isRecord(result.context) ? result.context : result;
+  const context = isRecord(result.context) ? result.context : {};
   return {
     routeId: stringValue(context.routeId, "未知路由"),
     estimatedInputTokens: numberValue(context.estimatedInputTokens),
@@ -104,8 +104,9 @@ export function parseWorkspaceList(value: unknown): readonly JsonRecord[] {
 export function parseSessions(value: unknown, workspacePath: string): readonly SessionView[] {
   const result = isRecord(value) ? value : {};
   return recordArray(result.sessions)
-    .map((item, index) => ({
-      id: stringValue(item.sessionId ?? item.id, `session-${index}`),
+    .filter((item) => stringValue(item.sessionId).length > 0)
+    .map((item) => ({
+      id: stringValue(item.sessionId),
       workspacePath,
       title: stringValue(item.title, "未命名任务"),
       status: item.status === "archived" ? ("archived" as const) : ("active" as const),
@@ -119,7 +120,7 @@ export function parseSessions(value: unknown, workspacePath: string): readonly S
 /** Direct lookup stays on the conversation; it must never populate the task list. */
 export function parseSessionDetail(value: unknown, workspacePath: string): SessionView | undefined {
   const result = isRecord(value) ? value : {};
-  if (!isRecord(result.session) || !stringValue(result.session.sessionId ?? result.session.id)) {
+  if (!isRecord(result.session) || !stringValue(result.session.sessionId)) {
     return undefined;
   }
   const session = parseSessions({ sessions: [result.session] }, workspacePath)[0]!;
@@ -149,8 +150,9 @@ export function compareSessions(left: SessionView, right: SessionView): number {
 export function parseRuns(value: unknown, workspacePath: string): readonly RunView[] {
   const result = isRecord(value) ? value : {};
   return recordArray(result.runs)
-    .map((item, index) => ({
-      id: stringValue(item.runId ?? item.id, `run-${index}`),
+    .filter((item) => stringValue(item.runId).length > 0)
+    .map((item) => ({
+      id: stringValue(item.runId),
       workspacePath,
       sessionId: stringValue(item.sessionId) || undefined,
       description: stringValue(item.description, "任务运行"),
