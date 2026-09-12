@@ -51,7 +51,7 @@ import {
   type ConversationItemView,
 } from "../conversation/index.js";
 import { pendingToolApprovalFromTranscript } from "../conversation/runtime-projection.js";
-import type { TimelineItem } from "../model.js";
+import type { ApprovalView, PlanApprovalView, TimelineItem, ToolApprovalView } from "../model.js";
 import { useRuntime } from "../runtime-context.js";
 import { parseSwarmCommand } from "../swarm-command.js";
 import { formatCompact, isTerminalRun } from "../view-format.js";
@@ -288,28 +288,30 @@ export function ConversationPage() {
   const persistedPendingApproval = activeRun
     ? pendingToolApprovalFromTranscript(conversation?.items ?? [], activeRun.id)
     : undefined;
-  const pendingApproval =
-    data.approvals
-      .filter(
-        (item) => runIds.has(item.runId) && (item.kind === "plan" || item.runId === activeRun?.id),
-      )
-      .at(-1) ??
-    (persistedPendingApproval && activeRun
+  const persistedApprovalView: ToolApprovalView | undefined =
+    persistedPendingApproval?.toolName && persistedPendingApproval.providerCallId && activeRun
       ? {
           id: persistedPendingApproval.id.slice("approval:".length),
           runId: activeRun.id,
           sessionId,
           title: persistedPendingApproval.title,
           detail: persistedPendingApproval.detail,
-          risk: persistedPendingApproval.risk ?? ("medium" as const),
-          kind: "tool" as const,
+          risk: persistedPendingApproval.risk ?? "medium",
+          kind: "tool",
           toolName: persistedPendingApproval.toolName,
           providerCallId: persistedPendingApproval.providerCallId,
           command: persistedPendingApproval.command,
           diff: persistedPendingApproval.diff,
           sessionScope: persistedPendingApproval.sessionScope,
         }
-      : undefined) ??
+      : undefined;
+  const pendingApproval: ApprovalView | undefined =
+    data.approvals
+      .filter(
+        (item) => runIds.has(item.runId) && (item.kind === "plan" || item.runId === activeRun?.id),
+      )
+      .at(-1) ??
+    persistedApprovalView ??
     data.approvals.findLast((item) => item.kind === "plan" && item.sessionId === sessionId);
   const pendingPrompt = data.prompts.filter((item) => runIds.has(item.runId)).at(-1);
   const legacyStorageBlocked = Boolean(
@@ -496,17 +498,18 @@ export function ConversationPage() {
       return;
     }
     const pendingPlan = data.approvals.find(
-      (approval) => approval.kind === "plan" && approval.sessionId === sessionRef.sessionId,
+      (approval): approval is PlanApprovalView =>
+        approval.kind === "plan" && approval.sessionId === sessionRef.sessionId,
     );
     if (!active && conversation?.settings?.collaborationMode === "plan" && pendingPlan) {
       if (!window.confirm("当前计划仍待审批。退出 Plan 将拒绝并放弃这份计划，是否继续？")) return;
       await actions.respondPlan({
         sessionId: sessionRef.sessionId,
-        planId: pendingPlan.planId ?? pendingPlan.id,
+        planId: pendingPlan.planId,
         action: "reject_exit",
-        expectedRevision: pendingPlan.expectedRevision ?? 0,
-        expectedSessionSequence: pendingPlan.expectedSessionSequence ?? 0,
-        controlEpoch: pendingPlan.controlEpoch ?? "",
+        expectedRevision: pendingPlan.expectedRevision,
+        expectedSessionSequence: pendingPlan.expectedSessionSequence,
+        controlEpoch: pendingPlan.controlEpoch,
         feedback: "用户从协作模式开关退出 Plan。",
       });
       return;
@@ -609,7 +612,7 @@ export function ConversationPage() {
     feedback?: string,
   ) => {
     if (!pendingApproval) return;
-    const operation =
+    if (
       pendingApproval.kind === "plan" &&
       (decision === "execute" ||
         decision === "continue_editing" ||
@@ -617,22 +620,25 @@ export function ConversationPage() {
         decision === "resume_execution" ||
         decision === "cancel_execution" ||
         decision === "replan_execution")
-        ? actions.respondPlan({
-            planId: pendingApproval.planId ?? "",
-            sessionId: sessionId ?? "",
-            action: decision,
-            expectedRevision: pendingApproval.expectedRevision ?? 0,
-            expectedSessionSequence: pendingApproval.expectedSessionSequence ?? 0,
-            controlEpoch: pendingApproval.controlEpoch ?? "",
-            ...(feedback || pendingApproval.planFeedback
-              ? { feedback: feedback ?? pendingApproval.planFeedback }
-              : {}),
-          })
-        : actions.respondApproval(
-            pendingApproval.id,
-            decision as "allow_once" | "allow_session" | "deny",
-          );
-    void operation;
+    ) {
+      if (!sessionId) return;
+      void actions.respondPlan({
+        planId: pendingApproval.planId,
+        sessionId,
+        action: decision,
+        expectedRevision: pendingApproval.expectedRevision,
+        expectedSessionSequence: pendingApproval.expectedSessionSequence,
+        controlEpoch: pendingApproval.controlEpoch,
+        ...(feedback || pendingApproval.planFeedback
+          ? { feedback: feedback ?? pendingApproval.planFeedback }
+          : {}),
+      });
+      return;
+    }
+    void actions.respondApproval(
+      pendingApproval.id,
+      decision as "allow_once" | "allow_session" | "deny",
+    );
   };
 
   const workbarChangeCount = conversation?.changes?.length ?? 0;

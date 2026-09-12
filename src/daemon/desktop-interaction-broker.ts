@@ -130,8 +130,6 @@ export class DesktopInteractionBroker {
   }
 
   readonly notifyApproval: ApprovalNotifier = (notice) => {
-    // Plan proposals are durable Runtime projections. The broker may derive a live card,
-    // but must never become their owner or erase them when the proposing Run ends.
     if (this.closed || !this.ready) {
       this.approvalManager.cancelApproval(
         notice.taskId,
@@ -139,34 +137,27 @@ export class DesktopInteractionBroker {
       );
       return;
     }
-    const planApproval = isPlanApprovalNotice(notice);
-    if (!planApproval) {
-      this.pendingApprovals.set(notice.taskId, notice);
-      this.scheduleApprovalExpiry(notice.taskId);
+    this.pendingApprovals.set(notice.taskId, notice);
+    this.scheduleApprovalExpiry(notice.taskId);
+    const version = this.nextVersion();
+    const at = this.now();
+    if (
+      !this.recordPending(
+        {
+          kind: "approval",
+          interactionId: notice.taskId,
+          metadata: { toolName: notice.toolName, providerCallId: notice.providerCallId },
+        },
+        version,
+        at,
+      )
+    ) {
+      this.pendingApprovals.delete(notice.taskId);
+      this.clearApprovalExpiry(notice.taskId);
+      this.approvalManager.cancelApproval(notice.taskId, "重复的桌面交互 ID 已被拒绝。");
+      return;
     }
-    if (!planApproval) {
-      const version = this.nextVersion();
-      const at = this.now();
-      if (
-        !this.recordPending(
-          {
-            kind: "approval",
-            interactionId: notice.taskId,
-            metadata: { toolName: notice.toolName, providerCallId: notice.providerCallId },
-          },
-          version,
-          at,
-        )
-      ) {
-        this.pendingApprovals.delete(notice.taskId);
-        this.clearApprovalExpiry(notice.taskId);
-        this.approvalManager.cancelApproval(notice.taskId, "重复的桌面交互 ID 已被拒绝。");
-        return;
-      }
-      this.publish({ kind: "approval.pending", notice }, version, at);
-    } else {
-      this.emit({ kind: "approval.pending", notice });
-    }
+    this.publish({ kind: "approval.pending", notice }, version, at);
   };
 
   async recover(): Promise<readonly DesktopInteractionRecord[]> {
@@ -1066,10 +1057,6 @@ function positiveInteger(value: number, name: string): number {
     throw new Error(`${name} must be a positive integer`);
   }
   return value;
-}
-
-function isPlanApprovalNotice(notice: ApprovalNotice): boolean {
-  return notice.toolName === "exit_plan_mode" || notice.toolName === "submit_plan";
 }
 
 function desktopDecisionReason(decision: "approve" | "approve-session" | "reject"): string {

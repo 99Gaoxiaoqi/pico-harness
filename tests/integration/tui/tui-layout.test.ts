@@ -3,6 +3,7 @@ import { PassThrough } from "node:stream";
 import test from "node:test";
 import React from "react";
 import { render } from "ink";
+import type { ApprovalNotice } from "../../../src/approval/manager.js";
 import {
   formatSessionReasoningStatus,
   type SessionSettings,
@@ -90,7 +91,10 @@ test("Plan 审批卡片提供三个专用动作且继续修改要求反馈", () 
     message: "Plan ready",
     diff: "1. inspect\n2. implement",
   };
-  const rendered = formatApprovalPanel(notice, { selectedIndex: 1, feedback: "补充失败路径" });
+  const rendered = formatApprovalPanel(notice as unknown as ApprovalNotice, {
+    selectedIndex: 1,
+    feedback: "补充失败路径",
+  });
   assert.match(rendered, /执行计划/u);
   assert.match(rendered, /继续修改/u);
   assert.match(rendered, /拒绝并退出/u);
@@ -114,7 +118,7 @@ test("中断计划卡片提供继续、取消与重新规划入口", () => {
     args: "{}",
     message: "Plan interrupted",
   };
-  const rendered = formatApprovalPanel(notice, { selectedIndex: 2 });
+  const rendered = formatApprovalPanel(notice as unknown as ApprovalNotice, { selectedIndex: 2 });
   assert.match(rendered, /继续执行/u);
   assert.match(rendered, /取消执行/u);
   assert.match(rendered, /重新规划/u);

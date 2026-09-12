@@ -9,6 +9,7 @@ import {
 } from "../presentation/transcript-event-store.js";
 import {
   isJsonValue,
+  parseApprovalRequestedPayload,
   type JsonObject,
   type JsonValue,
   type RuntimeNotification,
@@ -189,36 +190,48 @@ async function persistApprovalRequested(
   notification: RuntimeNotification,
 ): Promise<boolean> {
   const sessionId = notification.scope.sessionId;
+  const runId = notification.scope.runId;
   const payload = isJsonRecord(notification.payload) ? notification.payload : undefined;
-  const approvalId = payload && optionalNonEmptyText(payload["approvalId"]);
-  const request = payload && isJsonRecord(payload["request"]) ? payload["request"] : undefined;
-  if (!sessionId || !approvalId || !request) return false;
-  const title = optionalNonEmptyText(request["title"]) ?? "Approval required";
-  const detail = optionalNonEmptyText(request["detail"]);
+  const approval = payload ? parseApprovalRequestedPayload(payload) : undefined;
+  if (!sessionId || !runId || !approval || approval.runId !== runId) return false;
   return persistTranscriptEntry(session, {
     sourceEventId: notification.eventId,
-    entryId: runtimeTranscriptId("approval-requested", approvalId, notification.eventId),
+    entryId: runtimeTranscriptId("approval-requested", approval.approvalId, notification.eventId),
     createdAt: notification.at,
     entry: {
       kind: "approval",
-      title,
-      ...(detail ? { detail } : {}),
+      title: approval.title,
+      detail: approval.detail,
       state: "waiting",
-      data: compactInteractionData({
-        approvalId,
-        runId: notification.scope.runId,
-        toolName: request["toolName"],
-        command: request["command"],
-        diff: request["diff"],
-        sessionScope: request["sessionScope"],
-        providerCallId: request["providerCallId"],
-        risk: request["risk"],
-        kind: request["kind"],
-        planId: request["planId"],
-        expectedRevision: request["expectedRevision"],
-        expectedSessionSequence: request["expectedSessionSequence"],
-        plan: request["plan"],
-      }),
+      data:
+        approval.kind === "tool"
+          ? compactInteractionData({
+              approvalId: approval.approvalId,
+              runId,
+              kind: approval.kind,
+              title: approval.title,
+              detail: approval.detail,
+              risk: approval.risk,
+              toolName: approval.toolName,
+              args: approval.args,
+              providerCallId: approval.providerCallId,
+              command: approval.command,
+              diff: approval.diff,
+              sessionScope: approval.sessionScope,
+            })
+          : compactInteractionData({
+              approvalId: approval.approvalId,
+              runId,
+              kind: approval.kind,
+              title: approval.title,
+              detail: approval.detail,
+              risk: approval.risk,
+              planId: approval.planId,
+              expectedRevision: approval.expectedRevision,
+              expectedSessionSequence: approval.expectedSessionSequence,
+              controlEpoch: approval.controlEpoch,
+              operationId: approval.operationId,
+            }),
     },
   });
 }
@@ -395,17 +408,10 @@ function compactInteractionData(
 }
 
 function isPlanTimelineTool(name: string): boolean {
-  return (
-    name === "todo" ||
-    name === "submit_plan" ||
-    name === "update_plan" ||
-    name === "cancel_plan" ||
-    name === "exit_plan_mode"
-  );
+  return name === "todo" || name === "update_plan" || name === "cancel_plan";
 }
 
 function planTimelineTitle(name: string): string {
-  if (name === "exit_plan_mode" || name === "submit_plan") return "Plan ready for approval";
   if (name === "cancel_plan") return "Plan cancelled";
   return name === "todo" ? "Plan updated" : "Plan";
 }

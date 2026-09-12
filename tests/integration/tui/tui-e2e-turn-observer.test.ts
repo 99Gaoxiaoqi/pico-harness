@@ -70,7 +70,15 @@ test("TUI E2E turn observes a new reply and resolves the actual one-shot approva
     f.emit("approval.requested", {
       approvalId: "approval",
       runId: "run",
-      request: { toolName: "write_file" },
+      request: {
+        kind: "tool",
+        title: "需要批准",
+        detail: "写入文件",
+        risk: "high",
+        toolName: "write_file",
+        args: "{}",
+        providerCallId: "call-write",
+      },
     });
     return true;
   };

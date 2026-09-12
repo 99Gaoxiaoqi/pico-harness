@@ -86,7 +86,21 @@ test("缺少 scope 的审批只提供本次批准与拒绝，计划仍使用原�
   assert.equal((html.match(/<button /gu) ?? []).length, 2);
   assert.ok(html.includes("仅允许这次"));
   assert.doesNotMatch(html, /授权范围|允许修改此文件|自动允许文件修改/u);
-  const plan = render({ ...base, kind: "plan", title: "执行计划", planTitle: "整理报告" });
+  const plan = render({
+    id: "plan-1",
+    runId: "run-1",
+    kind: "plan",
+    title: "执行计划",
+    detail: "请审阅",
+    risk: "high",
+    planControlMode: "review",
+    planId: "plan-1",
+    expectedRevision: 1,
+    expectedSessionSequence: 3,
+    controlEpoch: "plan:epoch:1",
+    planOperationId: "submit-plan:1",
+    planTitle: "整理报告",
+  });
   assert.ok(plan.includes("整理报告"));
   assert.ok(plan.includes("拒绝并退出"));
   assert.doesNotMatch(plan, /文件变更预览|仅允许这次/u);

@@ -130,7 +130,7 @@ export function planApprovalNoticeFromProjection(
       expectedRevision: pending.revision,
       expectedSessionSequence: projection.sessionSequence,
       controlEpoch: projection.controlEpoch,
-    } as ApprovalNotice;
+    } as unknown as ApprovalNotice;
   }
   const execution = projection.execution;
   if (execution?.status === "interrupted") {
@@ -145,7 +145,7 @@ export function planApprovalNoticeFromProjection(
       expectedRevision: execution.revision,
       expectedSessionSequence: projection.sessionSequence,
       controlEpoch: projection.controlEpoch,
-    } as ApprovalNotice;
+    } as unknown as ApprovalNotice;
   }
   return undefined;
 }
@@ -252,7 +252,7 @@ export class ClientSessionRuntime {
     this.sessionId = options.sessionId;
     this.eventReporter = new DaemonEventReporter({
       reporter: this.reporter,
-      onApprovalRequested: (payload) => this.handleApprovalRequested(payload),
+      onApprovalRequested: (payload, scope) => this.handleApprovalRequested(payload, scope.runId),
       onPromptRequested: (payload) => this.handlePromptRequested(payload),
       onRunStateChanged: (running) => {
         // 回合终态重试启动覆盖（真机实测逮到的竞态）：sendText 返回后 run 注册
@@ -924,20 +924,22 @@ export class ClientSessionRuntime {
     }
   }
 
-  private handleApprovalRequested(payload: RuntimeNotificationMap["approval.requested"]): void {
-    // wire 语义读取经 @pico/protocol parseApprovalRequestedPayload（与 Desktop
-    // renderer 同源：planId 不回退 approvalId 的兜底语义一处收口）。
+  private handleApprovalRequested(
+    payload: RuntimeNotificationMap["approval.requested"],
+    scopedRunId: string | undefined,
+  ): void {
     const approval = parseApprovalRequestedPayload(payload);
-    if (!approval) return;
+    if (!approval || approval.runId !== scopedRunId) return;
     // Plan controls are rebuilt only from the durable Plan projection. Replaying an
     // old approval.requested event would otherwise resurrect a stale executable card.
     if (approval.kind === "plan") return;
     const notice = {
+      kind: "tool" as const,
       taskId: approval.approvalId,
-      toolName: approval.toolName ?? "",
-      args: approval.args ?? "",
-      providerCallId: approval.providerCallId ?? "",
-      message: approval.title ?? approval.detail ?? "daemon 请求审批",
+      toolName: approval.toolName,
+      args: approval.args,
+      providerCallId: approval.providerCallId,
+      message: approval.title,
       ...(approval.diff ? { diff: approval.diff } : {}),
       ...(approval.sessionScope ? { sessionScope: approval.sessionScope } : {}),
     };

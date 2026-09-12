@@ -182,7 +182,7 @@ export function SideChatPanelController({
       if (!pendingApproval || !targetSessionId) return;
       if (pendingApproval.kind === "plan") {
         void actions.respondPlan({
-          planId: pendingApproval.planId ?? "",
+          planId: pendingApproval.planId,
           sessionId: targetSessionId,
           action: decision as
             | "execute"
@@ -191,9 +191,9 @@ export function SideChatPanelController({
             | "resume_execution"
             | "cancel_execution"
             | "replan_execution",
-          expectedRevision: pendingApproval.expectedRevision ?? 0,
-          expectedSessionSequence: pendingApproval.expectedSessionSequence ?? 0,
-          controlEpoch: pendingApproval.controlEpoch ?? "",
+          expectedRevision: pendingApproval.expectedRevision,
+          expectedSessionSequence: pendingApproval.expectedSessionSequence,
+          controlEpoch: pendingApproval.controlEpoch,
           ...(feedback ? { feedback } : {}),
         });
         return;

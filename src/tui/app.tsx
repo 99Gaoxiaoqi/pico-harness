@@ -983,6 +983,7 @@ function approvalNoticeFromContent(content: React.ReactNode): ApprovalNotice | u
     return undefined;
   }
   return {
+    kind: "tool",
     taskId: props.taskId,
     toolName: props.toolName,
     args: props.args,

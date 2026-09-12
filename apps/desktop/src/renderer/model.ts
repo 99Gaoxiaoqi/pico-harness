@@ -178,30 +178,54 @@ export interface CatalogSkillView {
   readonly model?: string | undefined;
 }
 
-export interface ApprovalView {
-  readonly diff?: string | undefined;
-  readonly sessionScope?: ApprovalSessionScopeView | undefined;
-  readonly toolName?: string | undefined;
-  readonly providerCallId?: string | undefined;
+interface ApprovalViewBase {
   readonly id: string;
   readonly runId: string;
   readonly sessionId?: string | undefined;
   readonly title: string;
   readonly detail: string;
-  readonly command?: string | undefined;
   readonly risk: "low" | "medium" | "high";
-  readonly kind?: "tool" | "plan" | undefined;
-  readonly planControlMode?: "review" | "revision" | "interrupted" | "graph_active" | undefined;
-  readonly planId?: string | undefined;
-  readonly expectedRevision?: number | undefined;
-  readonly expectedSessionSequence?: number | undefined;
-  readonly controlEpoch?: string | undefined;
+}
+
+export interface ToolApprovalView extends ApprovalViewBase {
+  readonly kind: "tool";
+  readonly diff?: string | undefined;
+  readonly sessionScope?: ApprovalSessionScopeView | undefined;
+  readonly toolName: string;
+  readonly providerCallId: string;
+  readonly command?: string | undefined;
+  readonly planControlMode?: never;
+  readonly planId?: never;
+  readonly expectedRevision?: never;
+  readonly expectedSessionSequence?: never;
+  readonly controlEpoch?: never;
+  readonly planOperationId?: never;
+  readonly planFeedback?: never;
+  readonly planTitle?: never;
+  readonly planOverview?: never;
+  readonly planSteps?: never;
+}
+
+export interface PlanApprovalView extends ApprovalViewBase {
+  readonly kind: "plan";
+  readonly planControlMode: "review" | "revision" | "interrupted" | "graph_active";
+  readonly planId: string;
+  readonly expectedRevision: number;
+  readonly expectedSessionSequence: number;
+  readonly controlEpoch: string;
+  readonly planOperationId: string;
   readonly planTitle?: string | undefined;
   readonly planOverview?: string | undefined;
   readonly planSteps?: readonly string[] | undefined;
-  readonly planOperationId?: string | undefined;
   readonly planFeedback?: string | undefined;
+  readonly diff?: never;
+  readonly sessionScope?: never;
+  readonly toolName?: never;
+  readonly providerCallId?: never;
+  readonly command?: never;
 }
+
+export type ApprovalView = ToolApprovalView | PlanApprovalView;
 
 export interface PromptView {
   readonly id: string;

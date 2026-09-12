@@ -26,6 +26,7 @@ test("approval preview and exact authorization survive live delivery, durable re
   await session.recover();
   const payload = buildApprovalRequestedPayload(
     {
+      kind: "tool",
       taskId: "approval-preview-1",
       toolName: "edit_file",
       providerCallId: "call-1",
@@ -37,7 +38,7 @@ test("approval preview and exact authorization survive live delivery, durable re
     },
     "run-1",
   );
-  const live = parseDesktopToolApproval(payload, { sessionId: session.id });
+  const live = parseDesktopToolApproval(payload, { runId: "run-1", sessionId: session.id });
   assert.ok(live);
   await ingestDesktopRuntimeNotification(
     session,
@@ -79,11 +80,24 @@ test("approval preview and exact authorization survive live delivery, durable re
     }),
   );
   assert.equal(pendingToolApprovalFromTranscript((await replay()).items), undefined);
-  const malformed = parseDesktopToolApproval({
-    approvalId: "bad",
-    request: { sessionScope: { type: "directories", directories: ["/tmp"] } },
-  });
-  assert.equal(malformed?.sessionScope, undefined);
+  const malformed = parseDesktopToolApproval(
+    {
+      approvalId: "bad",
+      runId: "run-1",
+      request: {
+        kind: "tool",
+        title: "bad",
+        detail: "bad",
+        risk: "medium",
+        toolName: "edit_file",
+        args: "{}",
+        providerCallId: "call-bad",
+        sessionScope: { type: "directories", directories: ["/tmp"] },
+      },
+    },
+    { runId: "run-1" },
+  );
+  assert.equal(malformed, undefined);
 });
 
 test("重启后的旧待审批记录不会冒充新运行，当前审批仍能回放和解决", async (context) => {
@@ -109,6 +123,7 @@ test("重启后的旧待审批记录不会冒充新运行，当前审批仍能�
         at: version,
         payload: buildApprovalRequestedPayload(
           {
+            kind: "tool",
             taskId: id,
             toolName: "bash",
             args: '{"command":"echo check"}',

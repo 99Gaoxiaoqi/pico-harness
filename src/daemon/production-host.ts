@@ -2770,7 +2770,8 @@ function publishDesktopPlanHandoff(
   handoff: PlanHandoff,
   nextResourceVersion: () => number,
 ): void {
-  const proposal = handoff.projection.pendingProposal ?? handoff.projection.latestProposal;
+  const proposal = handoff.projection.pendingProposal;
+  if (!proposal) throw new Error("Plan handoff must carry a pending durable proposal");
   service.publishDesktopNotification(
     createRuntimeNotification({
       topic: "approval.requested",
@@ -2781,16 +2782,16 @@ function publishDesktopPlanHandoff(
         approvalId: handoff.planId,
         runId: handoff.runId,
         request: jsonObject({
-          title: proposal?.title ?? "计划等待审批",
-          detail: proposal?.overview ?? "请审阅计划后选择下一步。",
+          title: proposal.title,
+          detail: proposal.overview ?? "请审阅计划后选择下一步。",
           kind: "plan",
-          toolName: "submit_plan",
           risk: "high",
           planId: handoff.planId,
           expectedRevision: handoff.revision,
           expectedSessionSequence: handoff.expectedSessionSequence,
-          ...(proposal ? { plan: proposal } : {}),
-          actions: ["execute", "continue_editing", "reject_exit"],
+          controlEpoch: handoff.controlEpoch,
+          operationId: handoff.operationId,
+          plan: proposal,
         }),
       },
     }),
@@ -3058,19 +3059,10 @@ function publishInteractionEvent(
     runId: interaction.runId,
   };
   if (event.kind === "approval.pending") {
-    const planNotice = event.notice as typeof event.notice & {
-      readonly kind?: string;
-    };
-    const isPlan =
-      planNotice.kind === "plan" ||
-      event.notice.toolName === "exit_plan_mode" ||
-      event.notice.toolName === "submit_plan";
-    if (!isPlan) {
-      pendingApprovals.set(
-        interactionKey(interaction.workspacePath, event.notice.taskId),
-        interaction,
-      );
-    }
+    pendingApprovals.set(
+      interactionKey(interaction.workspacePath, event.notice.taskId),
+      interaction,
+    );
     service.publishDesktopNotification(
       createRuntimeNotification({
         topic: "approval.requested",

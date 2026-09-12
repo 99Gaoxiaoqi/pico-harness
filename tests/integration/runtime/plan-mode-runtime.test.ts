@@ -83,9 +83,17 @@ test("submit_plan persists a proposal and marks a machine-readable handoff", asy
         operationId: "submit-1",
       }),
     ),
-  ) as { kind: string; planId: string; revision: number };
+  ) as {
+    kind: string;
+    planId: string;
+    revision: number;
+    controlEpoch: string;
+    operationId: string;
+  };
   assert.equal(output.kind, "plan_handoff");
   assert.equal(output.revision, 1);
+  assert.equal(output.operationId, "submit-1");
+  assert.match(output.controlEpoch, /submit-1/u);
   assert.equal(handoff.hasPending(), true);
   assert.equal((await coordinator.project()).pendingProposal?.planId, output.planId);
   const repeated = JSON.parse(

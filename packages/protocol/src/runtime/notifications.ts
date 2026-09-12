@@ -37,6 +37,7 @@ import {
 } from "./validation.js";
 import type { RuntimeParamValidator, RuntimeResultRule } from "./validation.js";
 import type { RuntimeWorkspaceInitResult } from "./workspace.js";
+import { parseApprovalRequestedPayload } from "../runtime-normalize.js";
 
 export type RuntimeNotificationMap = {
   readonly "workspace.registered": { readonly registered: true };
@@ -213,12 +214,28 @@ function isRuntimeNotificationEnvelope(value: Record<string, unknown>): boolean 
 
 export function isRuntimeNotification(value: Record<string, unknown>): boolean {
   if (!isRuntimeNotificationEnvelope(value)) return false;
+  if (value.topic === "approval.requested") return isApprovalRequestedRuntimeNotification(value);
   if (value.topic === "discovery.updated") return isDiscoveryRuntimeNotification(value);
   if (value.topic === "config.updated") return isConfigRuntimeNotification(value);
   if (typeof value.topic === "string" && value.topic.startsWith("memory.")) {
     return isMemoryRuntimeNotification(value);
   }
   return true;
+}
+
+export function isApprovalRequestedRuntimeNotification(
+  value: unknown,
+): value is RuntimeNotification<"approval.requested"> {
+  if (
+    !isJsonObject(value) ||
+    !isRuntimeNotificationEnvelope(value) ||
+    value.topic !== "approval.requested" ||
+    !isJsonObject(value.scope)
+  ) {
+    return false;
+  }
+  const approval = parseApprovalRequestedPayload(value.payload);
+  return approval !== undefined && value.scope.runId === approval.runId;
 }
 
 export function isConfigRuntimeNotification(

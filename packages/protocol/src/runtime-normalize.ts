@@ -42,33 +42,54 @@ export function isInterruptedRunStatus(status: string): boolean {
   return status === "cancelled" || status === "failed";
 }
 
-/** approval.requested payload 的结构化读取（两侧视图各自映射，wire 语义一处收口）。 */
-export interface ApprovalRequestedView {
+interface ApprovalRequestedBaseView {
   readonly approvalId: string;
-  /** payload.runId（protocol 类型必填；缺失时调用方按 scope 兜底）。 */
-  readonly runId?: string;
-  readonly kind: "tool" | "plan";
-  readonly title?: string;
-  /** request.detail ?? request.description（wire 两名并存）。 */
-  readonly detail?: string;
-  readonly command?: string;
+  readonly runId: string;
+  readonly title: string;
+  readonly detail: string;
   readonly risk: "low" | "medium" | "high";
-  readonly toolName?: string;
-  readonly args?: string;
-  readonly providerCallId?: string;
+}
+
+export interface ToolApprovalRequestedView extends ApprovalRequestedBaseView {
+  readonly kind: "tool";
+  readonly toolName: string;
+  readonly args: string;
+  readonly providerCallId: string;
+  readonly command?: string;
   /** request.diff——引擎 computeApprovalDiff 的 before/after 预览（bash 等无 diff 工具为 undefined）。 */
   readonly diff?: string;
   /** request.sessionScope——"本会话内允许"的结构化授权形状；缺失=审批面板只渲染 2 选项。 */
   readonly sessionScope?: ApprovalSessionScopeView;
-  /** request.planId ?? request.plan.planId——都未带则 undefined（不回退 approvalId，回退会构造 bogus plan.respond）。 */
-  readonly planId?: string;
-  /** request.expectedRevision ?? request.plan.revision。 */
-  readonly expectedRevision?: number;
-  readonly expectedSessionSequence?: number;
-  readonly planTitle?: string;
-  readonly planOverview?: string;
-  readonly planSteps?: readonly string[];
+  readonly planId?: never;
+  readonly expectedRevision?: never;
+  readonly expectedSessionSequence?: never;
+  readonly controlEpoch?: never;
+  readonly operationId?: never;
+  readonly planTitle?: never;
+  readonly planOverview?: never;
+  readonly planSteps?: never;
 }
+
+export interface PlanApprovalRequestedView extends ApprovalRequestedBaseView {
+  readonly kind: "plan";
+  readonly planId: string;
+  readonly expectedRevision: number;
+  readonly expectedSessionSequence: number;
+  readonly controlEpoch: string;
+  readonly operationId: string;
+  readonly planTitle: string;
+  readonly planOverview?: string;
+  readonly planSteps: readonly string[];
+  readonly toolName?: never;
+  readonly args?: never;
+  readonly providerCallId?: never;
+  readonly command?: never;
+  readonly diff?: never;
+  readonly sessionScope?: never;
+}
+
+/** Current approval.requested is a strict discriminated tool/Plan wire contract. */
+export type ApprovalRequestedView = ToolApprovalRequestedView | PlanApprovalRequestedView;
 
 /**
  * PermissionSessionScope 的 wire 投影（结构对齐 src/approval/session-permissions.ts；
@@ -101,59 +122,143 @@ function stringOrUndefined(value: unknown): string | undefined {
   return typeof value === "string" && value !== "" ? value : undefined;
 }
 
-function numberOrUndefined(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+function exactKeys(record: Record<string, unknown>, allowed: readonly string[]): boolean {
+  const keys = Object.keys(record);
+  return keys.length === allowed.length && keys.every((key) => allowed.includes(key));
 }
 
 /**
- * 解析 approval.requested 事件 payload（开放 JsonObject 的严格读取）。缺
- * approvalId 视为 malformed 返回 undefined——调用方按不可渲染丢弃；runId
- * 缺失不致命（调用方按事件 scope 兜底）。
+ * 解析 current approval.requested payload。任何缺字段、别名、分支混用或
+ * malformed session scope 均整体拒绝，调用方不得构造可执行卡片。
  */
 export function parseApprovalRequestedPayload(payload: unknown): ApprovalRequestedView | undefined {
   if (typeof payload !== "object" || payload === null) return undefined;
   const record = payload as Record<string, unknown>;
   const approvalId = stringOrUndefined(record["approvalId"]);
-  if (!approvalId) return undefined;
   const runId = stringOrUndefined(record["runId"]);
-  const request =
-    typeof record["request"] === "object" && record["request"] !== null
-      ? (record["request"] as Record<string, unknown>)
-      : {};
-  const plan =
-    typeof request["plan"] === "object" && request["plan"] !== null
-      ? (request["plan"] as Record<string, unknown>)
-      : {};
-  const steps = Array.isArray(plan["steps"])
-    ? plan["steps"]
-        .map((step) =>
-          typeof step === "object" && step !== null
-            ? (stringOrUndefined((step as Record<string, unknown>)["title"]) ??
-              stringOrUndefined((step as Record<string, unknown>)["description"]))
-            : undefined,
-        )
-        .filter((step): step is string => step !== undefined)
-    : undefined;
+  if (!approvalId || !runId || !exactKeys(record, ["approvalId", "runId", "request"])) {
+    return undefined;
+  }
+  if (typeof record["request"] !== "object" || record["request"] === null) return undefined;
+  const request = record["request"] as Record<string, unknown>;
+  const title = stringOrUndefined(request["title"]);
+  const detail = stringOrUndefined(request["detail"]);
+  const risk =
+    request["risk"] === "low" || request["risk"] === "medium" || request["risk"] === "high"
+      ? request["risk"]
+      : undefined;
+  if (!title || !detail || !risk) return undefined;
+
+  if (request["kind"] === "tool") {
+    const allowed = [
+      "kind",
+      "title",
+      "detail",
+      "risk",
+      "toolName",
+      "args",
+      "providerCallId",
+      ...(request["command"] === undefined ? [] : ["command"]),
+      ...(request["diff"] === undefined ? [] : ["diff"]),
+      ...(request["sessionScope"] === undefined ? [] : ["sessionScope"]),
+    ];
+    const toolName = stringOrUndefined(request["toolName"]);
+    const providerCallId = stringOrUndefined(request["providerCallId"]);
+    if (
+      !exactKeys(request, allowed) ||
+      !toolName ||
+      typeof request["args"] !== "string" ||
+      !providerCallId ||
+      (request["command"] !== undefined && !stringOrUndefined(request["command"])) ||
+      (request["diff"] !== undefined && typeof request["diff"] !== "string")
+    ) {
+      return undefined;
+    }
+    const sessionScope = parseApprovalSessionScope(request["sessionScope"]);
+    if (request["sessionScope"] !== undefined && !sessionScope) return undefined;
+    return {
+      approvalId,
+      runId,
+      kind: "tool",
+      title,
+      detail,
+      risk,
+      toolName,
+      args: request["args"],
+      providerCallId,
+      ...(stringOrUndefined(request["command"]) ? { command: request["command"] as string } : {}),
+      ...(typeof request["diff"] === "string" ? { diff: request["diff"] } : {}),
+      ...(sessionScope ? { sessionScope } : {}),
+    };
+  }
+
+  if (request["kind"] !== "plan") return undefined;
+  if (
+    !exactKeys(request, [
+      "kind",
+      "title",
+      "detail",
+      "risk",
+      "planId",
+      "expectedRevision",
+      "expectedSessionSequence",
+      "controlEpoch",
+      "operationId",
+      "plan",
+    ])
+  ) {
+    return undefined;
+  }
+  const planId = stringOrUndefined(request["planId"]);
+  const controlEpoch = stringOrUndefined(request["controlEpoch"]);
+  const operationId = stringOrUndefined(request["operationId"]);
+  const expectedRevision = request["expectedRevision"];
+  const expectedSessionSequence = request["expectedSessionSequence"];
+  if (
+    !planId ||
+    !controlEpoch ||
+    !operationId ||
+    !Number.isSafeInteger(expectedRevision) ||
+    (expectedRevision as number) < 1 ||
+    !Number.isSafeInteger(expectedSessionSequence) ||
+    (expectedSessionSequence as number) < 0 ||
+    typeof request["plan"] !== "object" ||
+    request["plan"] === null
+  ) {
+    return undefined;
+  }
+  const plan = request["plan"] as Record<string, unknown>;
+  const planTitle = stringOrUndefined(plan["title"]);
+  if (
+    plan["planId"] !== planId ||
+    plan["revision"] !== expectedRevision ||
+    !planTitle ||
+    !Array.isArray(plan["steps"]) ||
+    plan["steps"].length === 0
+  ) {
+    return undefined;
+  }
+  const planSteps = plan["steps"].map((step) => {
+    if (typeof step !== "object" || step === null) return undefined;
+    return stringOrUndefined((step as Record<string, unknown>)["title"]);
+  });
+  if (planSteps.some((step) => step === undefined)) return undefined;
+  const planOverview = stringOrUndefined(plan["overview"]);
   return {
     approvalId,
-    ...(runId ? { runId } : {}),
-    kind: request["kind"] === "plan" ? "plan" : "tool",
-    title: stringOrUndefined(request["title"]),
-    detail: stringOrUndefined(request["detail"]) ?? stringOrUndefined(request["description"]),
-    command: stringOrUndefined(request["command"]),
-    risk: request["risk"] === "high" || request["risk"] === "medium" ? request["risk"] : "low",
-    toolName: stringOrUndefined(request["toolName"]),
-    args: stringOrUndefined(request["args"]),
-    providerCallId: stringOrUndefined(request["providerCallId"]),
-    diff: stringOrUndefined(request["diff"]),
-    sessionScope: parseApprovalSessionScope(request["sessionScope"]),
-    planId: stringOrUndefined(request["planId"]) ?? stringOrUndefined(plan["planId"]),
-    expectedRevision:
-      numberOrUndefined(request["expectedRevision"]) ?? numberOrUndefined(plan["revision"]),
-    expectedSessionSequence: numberOrUndefined(request["expectedSessionSequence"]),
-    planTitle: stringOrUndefined(plan["title"]),
-    planOverview: stringOrUndefined(plan["overview"]),
-    ...(steps && steps.length > 0 ? { planSteps: steps } : {}),
+    runId,
+    kind: "plan",
+    title,
+    detail,
+    risk,
+    planId,
+    expectedRevision: expectedRevision as number,
+    expectedSessionSequence: expectedSessionSequence as number,
+    controlEpoch,
+    operationId,
+    planTitle,
+    ...(planOverview ? { planOverview } : {}),
+    planSteps: planSteps as string[],
   };
 }
 
@@ -166,20 +271,25 @@ export function parseApprovalSessionScope(value: unknown): ApprovalSessionScopeV
   const record = value as Record<string, unknown>;
   const access =
     record["access"] === "edit" ? "edit" : record["access"] === "read" ? "read" : undefined;
-  const safety = record["safety"] === true ? true : undefined;
+  const safety = typeof record["safety"] === "boolean" ? record["safety"] : undefined;
+  if (record["safety"] !== undefined && safety === undefined) return undefined;
   switch (record["type"]) {
     case "network":
-      return { type: "network" };
+      return exactKeys(record, ["type"]) ? { type: "network" } : undefined;
     case "all-edits":
-      return { type: "all-edits" };
+      return exactKeys(record, ["type"]) ? { type: "all-edits" } : undefined;
     case "directories": {
-      if (!access) return undefined;
-      const directories = Array.isArray(record["directories"])
-        ? record["directories"].filter(
-            (item): item is string => typeof item === "string" && item !== "",
-          )
-        : undefined;
-      if (!directories || directories.length === 0) return undefined;
+      if (!exactKeys(record, ["type", "directories", "access", "enableAutoEdits"]) || !access) {
+        return undefined;
+      }
+      const directories = record["directories"];
+      if (
+        !Array.isArray(directories) ||
+        directories.length === 0 ||
+        !directories.every((item): item is string => typeof item === "string" && item !== "")
+      ) {
+        return undefined;
+      }
       if (typeof record["enableAutoEdits"] !== "boolean") return undefined;
       return {
         type: "directories",
@@ -189,20 +299,38 @@ export function parseApprovalSessionScope(value: unknown): ApprovalSessionScopeV
       };
     }
     case "file": {
+      if (
+        !exactKeys(record, ["type", "path", "access", ...(safety === undefined ? [] : ["safety"])])
+      ) {
+        return undefined;
+      }
       const path = stringOrUndefined(record["path"]);
       if (!path || !access) return undefined;
-      return safety ? { type: "file", path, access, safety } : { type: "file", path, access };
+      return safety === undefined
+        ? { type: "file", path, access }
+        : { type: "file", path, access, safety };
     }
     case "bash-command": {
+      if (
+        !exactKeys(record, [
+          "type",
+          "command",
+          "match",
+          ...(safety === undefined ? [] : ["safety"]),
+        ])
+      ) {
+        return undefined;
+      }
       const command = stringOrUndefined(record["command"]);
       const match =
         record["match"] === "prefix" || record["match"] === "exact" ? record["match"] : undefined;
       if (!command || !match) return undefined;
-      return safety
-        ? { type: "bash-command", command, match, safety }
-        : { type: "bash-command", command, match };
+      return safety === undefined
+        ? { type: "bash-command", command, match }
+        : { type: "bash-command", command, match, safety };
     }
     case "tool": {
+      if (!exactKeys(record, ["type", "toolName"])) return undefined;
       const toolName = stringOrUndefined(record["toolName"]);
       if (!toolName) return undefined;
       return { type: "tool", toolName };

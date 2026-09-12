@@ -246,6 +246,7 @@ export {
   createRuntimeNotification,
   serializeRuntimeNotification,
   isDiscoveryRuntimeNotification,
+  isApprovalRequestedRuntimeNotification,
   isMemoryRuntimeNotification,
 } from "./runtime/notifications.js";
 

@@ -121,6 +121,7 @@ export class SubmitPlanTool implements BaseTool {
     context?.signal?.throwIfAborted();
     const pending = projection.pendingProposal;
     if (!pending) throw new Error("Plan submission did not create a pending proposal");
+    if (!projection.controlEpoch) throw new Error("Plan submission did not create a control epoch");
     const handoff = {
       kind: "plan_handoff" as const,
       sessionId: this.sessionId,
@@ -128,6 +129,8 @@ export class SubmitPlanTool implements BaseTool {
       planId: pending.planId,
       revision: pending.revision,
       expectedSessionSequence: projection.sessionSequence,
+      controlEpoch: projection.controlEpoch,
+      operationId,
       projection,
     };
     this.handoff.mark(handoff);

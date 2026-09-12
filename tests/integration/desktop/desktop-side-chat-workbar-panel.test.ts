@@ -194,6 +194,7 @@ test("侧聊中的一次编辑审批只显示一个操作卡，审计记录不�
           title: "批准",
           detail: "edit file",
           toolName: "edit_file",
+          providerCallId: "call-1",
           risk: "medium",
         },
         busy: false,

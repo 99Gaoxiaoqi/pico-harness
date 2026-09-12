@@ -8,6 +8,8 @@ export interface PlanHandoff {
   readonly planId: string;
   readonly revision: number;
   readonly expectedSessionSequence: number;
+  readonly controlEpoch: string;
+  readonly operationId: string;
   readonly projection: PlanProjection;
 }
 

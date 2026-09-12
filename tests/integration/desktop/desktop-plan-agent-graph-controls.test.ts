@@ -15,6 +15,7 @@ test("Desktop restores an active Graph Plan as progress with only CAS-protected 
     sessionId: "session-graph-plan",
     sessionSequence: 12,
     controlEpoch: "plan-step-a-completed",
+    operationId: "update-plan:step-a",
     proposals: [],
     execution: {
       planId: "plan-graph",
@@ -73,19 +74,10 @@ test("Desktop restores an active Graph Plan as progress with only CAS-protected 
     state: "pending" as const,
   };
   assert.equal(pendingToolApprovalFromTranscript([toolApproval, ...transcript]), toolApproval);
-  const persistedApproval = pendingToolApprovalFromTranscript(transcript);
-  const selectedApproval = persistedApproval
-    ? {
-        ...persistedApproval,
-        kind: "tool" as const,
-        runId: "active-run",
-        risk: "medium" as const,
-      }
-    : approval;
   Object.assign(globalThis, { React });
   const html = renderToStaticMarkup(
     React.createElement(ConversationInteractionSlot, {
-      approval: selectedApproval,
+      approval,
       busy: false,
       onApprovalDecision: () => undefined,
       onPromptAnswer: () => undefined,

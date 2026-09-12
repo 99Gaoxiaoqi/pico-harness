@@ -74,6 +74,7 @@ export type RuntimePlanProjection = JsonObject & {
   readonly sessionId: SessionId;
   readonly sessionSequence: number;
   readonly controlEpoch?: string;
+  readonly operationId?: string;
   readonly proposals: readonly RuntimePlanProposal[];
   readonly latestProposal?: RuntimePlanProposal;
   readonly pendingProposal?: RuntimePlanProposal;
@@ -256,6 +257,7 @@ const runtimePlanProjectionResult = resultShape(
       { reason: resultString },
     ),
     controlEpoch: resultString,
+    operationId: resultString,
     revisionRequest: resultShape({
       planId: resultString,
       expectedRevision: resultFiniteNumber,
