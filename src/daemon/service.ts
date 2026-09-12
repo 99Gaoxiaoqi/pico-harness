@@ -30,14 +30,14 @@ export interface LocalRuntimeService {
 
 /** Separates bounded API shutdown from the point where another daemon may safely take ownership. */
 export interface ShutdownOwnershipFence {
-  /** True when callers must not wait inline for `released`. */
+  /** True when bounded close returned before ownership was fully released. */
   readonly pending: boolean;
   /** Rejects when safe ownership release cannot be proven; callers must then fail closed. */
   readonly released: Promise<void>;
 }
 
-/** Optional capability for services that need orderly daemon shutdown. */
+/** Required lifecycle contract for every daemon-owned local Runtime service. */
 export interface DisposableLocalRuntimeService extends LocalRuntimeService {
-  close?(): Promise<void> | void;
-  shutdownOwnershipFence?(): ShutdownOwnershipFence;
+  close(): Promise<void> | void;
+  shutdownOwnershipFence(): ShutdownOwnershipFence;
 }

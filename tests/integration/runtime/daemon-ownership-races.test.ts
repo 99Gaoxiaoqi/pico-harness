@@ -66,8 +66,8 @@ test("Cron unregister close failure remains owned while later refreshes stay usa
   assert.equal(firstCloseCount, 2, "stop 应再次尝试关闭失败的 runtime");
 });
 
-test("Cron runtime with pending ownership but no release fence fails closes loudly", async (context) => {
-  const root = await mkdtemp(join(tmpdir(), "pico-daemon-cron-incomplete-fence-"));
+test("Cron ownership fence read failure propagates through refresh and stop", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-daemon-cron-fence-failure-"));
   const workspace = join(root, "workspace");
   const registrationStore = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
   await mkdir(workspace, { recursive: true });
@@ -80,8 +80,9 @@ test("Cron runtime with pending ownership but no release fence fails closes loud
       create: async () =>
         testCronRuntime({
           hasPendingOwnership: () => true,
-          // 显式缺失释放口：pending 无 waitForOwnershipRelease = fence 不完整。
-          waitForOwnershipRelease: undefined,
+          waitForOwnershipRelease: () => {
+            throw new Error("Cron ownership fence failed");
+          },
         }),
     },
   });
@@ -92,8 +93,8 @@ test("Cron runtime with pending ownership but no release fence fails closes loud
 
   await host.start();
   await registrationStore.unregister(workspace);
-  await assert.rejects(host.refreshRegisteredWorkspaces(), /ownership fence 不完整/u);
-  await assert.rejects(host.stop(), /ownership fence 不完整/u);
+  await assert.rejects(host.refreshRegisteredWorkspaces(), /Cron ownership fence failed/u);
+  await assert.rejects(host.stop(), /Cron ownership fence failed/u);
 });
 
 test("Daemon stop is bounded during an active Cron tick and the fence releases after drain", async (context) => {
@@ -247,6 +248,7 @@ function testService(): DisposableLocalRuntimeService {
     replayEvents: async () => ({ events: [], hasMore: false }),
     subscribe: () => () => undefined,
     close: async () => undefined,
+    shutdownOwnershipFence: () => ({ pending: false, released: Promise.resolve() }),
   };
 }
 
@@ -255,7 +257,11 @@ function testCronRuntime(
 ): ManagedCronWorkspaceRuntime {
   return {
     recoverInterruptedRuns: () => undefined,
+    runNow: () => {
+      throw new Error("test Cron runtime has no Jobs");
+    },
     start: () => undefined,
+    beginClose: () => undefined,
     close: async () => undefined,
     hasPendingOwnership: () => false,
     waitForOwnershipRelease: async () => undefined,

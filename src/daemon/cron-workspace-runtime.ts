@@ -123,14 +123,13 @@ export interface CronWorkspaceRuntimeFactoryInput {
 
 export interface ManagedCronWorkspaceRuntime {
   recoverInterruptedRuns(reason?: string): readonly CronRunRecord[];
-  /** Optional for legacy/test factories; production runtimes always implement it. */
-  runNow?(cronJobId: string): CronRunRecord;
+  runNow(cronJobId: string): CronRunRecord;
   start(): void;
   /** Stops timers and rejects new manual Runs before asynchronous drain begins. */
-  beginClose?(): void;
+  beginClose(): void;
   close(): Promise<void>;
-  hasPendingOwnership?(): boolean;
-  waitForOwnershipRelease?(): Promise<void>;
+  hasPendingOwnership(): boolean;
+  waitForOwnershipRelease(): Promise<void>;
 }
 
 export interface CronWorkspaceRuntimeFactory {
