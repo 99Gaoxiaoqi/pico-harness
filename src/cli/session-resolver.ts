@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { rememberResolvedCliSession } from "../input/session-settings.js";
 import { resolvePicoPaths } from "../paths/pico-paths.js";
 import {
   SqliteRuntimeEventStore,
@@ -16,11 +15,9 @@ import { StorageOperationJournal } from "../storage/operation-journal.js";
 export type CliSessionMode = "new" | "continue" | "resume" | "fork";
 export type { CliSessionSummary, CliSessionHistorySource } from "../engine/session-summary.js";
 
-export interface CliSessionSelection {
-  mode: CliSessionMode;
-  sessionId: string;
-  sourceSessionId?: string;
-}
+export type CliSessionSelection =
+  | { readonly mode: "new" | "continue" | "resume"; readonly sessionId: string }
+  | { readonly mode: "fork"; readonly sessionId: string; readonly sourceSessionId: string };
 
 export interface ListCliSessionSummariesOptions {
   picoHome?: string;
@@ -29,7 +26,6 @@ export interface ListCliSessionSummariesOptions {
 export interface ResolveCliSessionOptions {
   workDir: string;
   picoHome?: string;
-  session?: string;
   continueSession?: boolean;
   resumeSession?: string;
   forkSession?: string;
@@ -43,16 +39,7 @@ export async function resolveCliSession(
   if (options.resumeSession) {
     const sessionId = options.resumeSession;
     await assertRuntimeSessionExists(options.workDir, sessionId, "resume", options.picoHome);
-    return rememberSelection({ mode: "resume", sessionId }, options.workDir, options.picoHome);
-  }
-
-  if (options.session) {
-    await assertRuntimeSessionExists(options.workDir, options.session, "resume", options.picoHome);
-    return rememberSelection(
-      { mode: "resume", sessionId: options.session },
-      options.workDir,
-      options.picoHome,
-    );
+    return { mode: "resume", sessionId };
   }
 
   if (options.forkSession) {
@@ -62,33 +49,21 @@ export async function resolveCliSession(
       "fork",
       options.picoHome,
     );
-    return rememberSelection(
-      {
-        mode: "fork",
-        sessionId: createCliSessionId(),
-        sourceSessionId: options.forkSession,
-      },
-      options.workDir,
-      options.picoHome,
-    );
+    return {
+      mode: "fork",
+      sessionId: createCliSessionId(),
+      sourceSessionId: options.forkSession,
+    };
   }
 
   if (options.continueSession) {
     const latest = await findLatestSessionId(options.workDir, options.picoHome);
     if (latest) {
-      return rememberSelection(
-        { mode: "continue", sessionId: latest },
-        options.workDir,
-        options.picoHome,
-      );
+      return { mode: "continue", sessionId: latest };
     }
   }
 
-  return rememberSelection(
-    { mode: "new", sessionId: createCliSessionId() },
-    options.workDir,
-    options.picoHome,
-  );
+  return { mode: "new", sessionId: createCliSessionId() };
 }
 
 export function createCliSessionId(): string {
@@ -150,7 +125,6 @@ export async function listCliSessionSummaries(
 
 function assertSingleSessionMode(options: ResolveCliSessionOptions): void {
   const modes = [
-    options.session !== undefined,
     options.continueSession === true,
     options.resumeSession !== undefined,
     options.forkSession !== undefined,
@@ -218,13 +192,4 @@ function createRuntimeEventStore(workDir: string, picoHome?: string): SqliteRunt
   return new SqliteRuntimeEventStore({
     storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
   });
-}
-
-function rememberSelection(
-  selection: CliSessionSelection,
-  workDir: string,
-  picoHome?: string,
-): CliSessionSelection {
-  rememberResolvedCliSession(selection, workDir, picoHome);
-  return selection;
 }

@@ -150,7 +150,7 @@ import {
   type ExecutionBoundary,
 } from "../safety/permission-profile.js";
 import { canonicalizeSandboxBoundaryExpansion } from "../safety/sandbox-boundary-path.js";
-import { resolveCliSession, type CliSessionSelection } from "../cli/session-resolver.js";
+import type { CliSessionSelection } from "../cli/session-resolver.js";
 import { SqliteRuntimeControlStore } from "../storage/sqlite/sqlite-runtime-control-store.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import {
@@ -483,7 +483,7 @@ export class AgentRuntime {
           {
             ...input.execution,
             dir: workDir,
-            session: session.id,
+            sessionSelection: { mode: "resume", sessionId: session.id },
             prompt: approvedPlanExecutionPrompt(proposal),
             approvedPlan: {
               planId: proposal.planId,
@@ -601,7 +601,7 @@ export class AgentRuntime {
           {
             ...input.execution,
             dir: workDir,
-            session: session.id,
+            sessionSelection: { mode: "resume", sessionId: session.id },
             prompt: resumedPlanExecutionPrompt(projection),
             approvedPlan: {
               planId: input.planId,
@@ -682,7 +682,7 @@ export class AgentRuntime {
         {
           ...input.execution,
           dir: workDir,
-          session: session.id,
+          sessionSelection: { mode: "resume", sessionId: session.id },
           prompt: input.prompt,
           planMode: true,
         },
@@ -704,7 +704,10 @@ export interface PlanApprovalExecutionRequest {
     readonly operationId?: string;
     readonly claimOperationId?: string;
   };
-  readonly execution: Omit<RunAgentCliOptions, "prompt" | "session" | "dir" | "approvedPlan">;
+  readonly execution: Omit<
+    RunAgentCliOptions,
+    "prompt" | "dir" | "sessionSelection" | "approvedPlan"
+  >;
 }
 
 export interface PlanSessionRequest {
@@ -732,12 +735,18 @@ export interface PlanRevisionRequest extends PlanSessionRequest {
 }
 
 export interface PlanResumeExecutionRequest extends PlanInterruptedControlRequest {
-  readonly execution: Omit<RunAgentCliOptions, "prompt" | "session" | "dir" | "approvedPlan">;
+  readonly execution: Omit<
+    RunAgentCliOptions,
+    "prompt" | "dir" | "sessionSelection" | "approvedPlan"
+  >;
 }
 
 export interface PlanReplanExecutionRequest extends PlanInterruptedControlRequest {
   readonly prompt: string;
-  readonly execution: Omit<RunAgentCliOptions, "prompt" | "session" | "dir" | "approvedPlan">;
+  readonly execution: Omit<
+    RunAgentCliOptions,
+    "prompt" | "dir" | "sessionSelection" | "approvedPlan"
+  >;
 }
 
 function approvedPlanExecutionPrompt(proposal: PlanProposal): string {
@@ -898,16 +907,7 @@ export async function executeAgentRuntime(
     : await loadPicoProjectConfig(workDir);
   const claudeCompatibility = picoConfig.compatibility.claude;
   const configuredAdditionalDirectories = picoConfig.additionalDirectories;
-  const sessionSelection =
-    options.sessionSelection ??
-    (await resolveCliSession({
-      workDir,
-      picoHome,
-      ...(options.session ? { session: options.session } : {}),
-      ...(options.continueSession ? { continueSession: true } : {}),
-      ...(options.resumeSession ? { resumeSession: options.resumeSession } : {}),
-      ...(options.forkSession ? { forkSession: options.forkSession } : {}),
-    }));
+  const sessionSelection = options.sessionSelection;
   const defaultConfigModel = options.model ?? defaultModel(kind);
   if (
     dependencies.configuredSubagentChild &&
@@ -1052,9 +1052,7 @@ export async function executeAgentRuntime(
     const sessionSettingDefaults = {
       sessionId: sessionSelection.sessionId,
       sessionMode: sessionSelection.mode,
-      ...(sessionSelection.sourceSessionId !== undefined
-        ? { forkFrom: sessionSelection.sourceSessionId }
-        : {}),
+      ...(sessionSelection.mode === "fork" ? { forkFrom: sessionSelection.sourceSessionId } : {}),
       cwd: workDir,
       picoHome: session.picoHome,
       provider: kind,
@@ -1282,7 +1280,6 @@ export async function executeAgentRuntime(
       ...options,
       ...(backgroundApiKey !== undefined ? { apiKey: backgroundApiKey } : {}),
       dir: workDir,
-      session: sessionSelection.sessionId,
       sessionSelection,
       model: options.model ?? settings.model,
       planMode: backgroundPolicy ? false : collaborationMode() === "plan",
@@ -2858,7 +2855,7 @@ async function acquireRuntimeSessionWithStore(
   },
 ): Promise<SessionManagerLease> {
   let targetManifest = await runtimeEventStore.readSessionManifest(sessionSelection.sessionId);
-  if (sessionSelection.mode === "fork" && sessionSelection.sourceSessionId) {
+  if (sessionSelection.mode === "fork") {
     const sourceManifest = await runtimeEventStore.readSessionManifest(
       sessionSelection.sourceSessionId,
     );

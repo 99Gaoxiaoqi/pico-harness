@@ -131,7 +131,6 @@ realModelTest(
         },
         execution: {
           ...modelRequest(model),
-          sessionSelection: { mode: "resume", sessionId: sandbox.sessionId },
           allowedTools: ["read_file", "write_file", "update_plan", "cancel_plan"],
         },
       },

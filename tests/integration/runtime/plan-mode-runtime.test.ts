@@ -311,7 +311,6 @@ test("a provider 400 after the final update_plan cannot replace completion with 
         execution: {
           provider: "openai",
           modelRouteId: "test/test",
-          sessionSelection: { mode: "resume", sessionId },
           collaborationMode: "agent",
           permissionMode: "full-access",
         },
@@ -942,7 +941,6 @@ test("Plan Run isolates and restores code intelligence owned by an injected Sess
       execution: {
         provider: "openai",
         modelRouteId: "test/test",
-        sessionSelection: { mode: "resume", sessionId },
         collaborationMode: "agent",
         permissionMode: "full-access",
       },

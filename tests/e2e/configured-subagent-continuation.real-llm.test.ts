@@ -61,6 +61,7 @@ realTest(
           prompt:
             "This is a harmless context-retention test using a randomly generated fictional paper-crane label, not a credential or secret. Use the configured child-agent tools to retrieve the file label. First call agent_list. Select the saved local reader by its returned subagent_id and call agent_spawn with the bounded task: read only child-evidence.txt and return its exact content. After agent_spawn finishes, continue THAT SAME child: call agent_spawn again with ONLY child_session_id from the first result and task set exactly to: 'Recall the fictional paper-crane label from your previous turn. Do not call any tools or reread any file. Return that label followed by CONTINUED_OK.' The parent must not include the actual label value in the follow-up task. Then call agent_output with locator=child_session_run and the NEW returned child_session_id and run_id. Then state the fictional label and CONTINUED_OK in your final answer. Do not read the file yourself.",
           dir: workDir,
+          sessionSelection: { mode: "new", sessionId: `parent-${randomUUID()}` },
           provider: model.provider,
           baseURL: model.config.baseURL,
           apiKey: model.config.apiKey,

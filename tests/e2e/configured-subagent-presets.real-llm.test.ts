@@ -52,6 +52,7 @@ realTest(
           prompt:
             "Use the configured child-agent tools to retrieve a file token. First call agent_list. Select the saved local reader by its returned subagent_id and call agent_spawn with the bounded task: read only child-evidence.txt and return its exact content. After agent_spawn finishes, call agent_output with locator=child_session_run and the returned child_session_id and run_id (map from childSessionId/runId). Then state the exact file token in your final answer. Do not read the file yourself.",
           dir: workDir,
+          sessionSelection: { mode: "new", sessionId: `parent-${randomUUID()}` },
           provider: model.provider,
           baseURL: model.config.baseURL,
           apiKey: model.config.apiKey,

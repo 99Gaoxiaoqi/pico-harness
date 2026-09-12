@@ -213,6 +213,7 @@ test("foreground agent_spawn uses a separate durable RuntimeRun and exact local 
       {
         prompt: "Delegate a bounded file read",
         dir: workDir,
+        sessionSelection: { mode: "new", sessionId: "configured-execution-parent" },
         modelRouteId: route.id,
         provider: "openai",
         model: route.model,

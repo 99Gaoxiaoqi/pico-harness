@@ -90,20 +90,13 @@ export interface SessionSettingsPersistenceOptions {
 
 const settingsBySession = new Map<string, SessionSettings>();
 const persistenceBySettings = new WeakMap<SessionSettings, SessionRuntimePersistence>();
-const resolvedCliSessionSemantics = new Map<
-  string,
-  { sessionId: string; sessionMode: SessionMode; forkFrom?: string }
->();
 export function createDefaultSessionSettings(defaults: SessionSettingsDefaults): SessionSettings {
-  const resolvedSemantics = resolvedCliSessionSemantics.get(
-    sessionSettingsKey(defaults.sessionId, defaults.cwd, defaults.picoHome),
-  );
-  const forkFrom = defaults.forkFrom ?? resolvedSemantics?.forkFrom;
+  const forkFrom = defaults.forkFrom;
   const title = normalizeSessionTitle(defaults.title);
   return {
     sessionId: defaults.sessionId,
     ...(title !== undefined ? { title } : {}),
-    sessionMode: defaults.sessionMode ?? resolvedSemantics?.sessionMode ?? "new",
+    sessionMode: defaults.sessionMode ?? "new",
     ...(forkFrom !== undefined ? { forkFrom } : {}),
     cwd: defaults.cwd,
     provider: defaults.provider,
@@ -131,9 +124,8 @@ export function getOrCreateSessionSettings(
   const key = sessionSettingsKey(defaults.sessionId, defaults.cwd, defaults.picoHome);
   const existing = settingsBySession.get(key);
   if (existing !== undefined) {
-    const resolvedSemantics = resolvedCliSessionSemantics.get(key);
-    const sessionMode = defaults.sessionMode ?? resolvedSemantics?.sessionMode;
-    const forkFrom = defaults.forkFrom ?? resolvedSemantics?.forkFrom;
+    const sessionMode = defaults.sessionMode;
+    const forkFrom = defaults.forkFrom;
     if (sessionMode !== undefined) {
       existing.sessionMode = sessionMode;
     }
@@ -197,22 +189,6 @@ export function getOrCreateSessionSettings(
   return created;
 }
 
-export function rememberResolvedCliSession(
-  selection: {
-    sessionId: string;
-    mode: SessionMode;
-    sourceSessionId?: string;
-  },
-  cwd: string,
-  picoHome?: string,
-): void {
-  resolvedCliSessionSemantics.set(sessionSettingsKey(selection.sessionId, cwd, picoHome), {
-    sessionId: selection.sessionId,
-    sessionMode: selection.mode,
-    ...(selection.sourceSessionId !== undefined ? { forkFrom: selection.sourceSessionId } : {}),
-  });
-}
-
 export function getStoredSessionSettings(
   sessionId: string,
   cwd?: string,
@@ -237,13 +213,6 @@ export function forgetSessionSettings(sessionId: string, cwd?: string, picoHome?
       if (settings.sessionId !== sessionId) continue;
       persistenceBySettings.delete(settings);
       settingsBySession.delete(key);
-    }
-  }
-  if (cwd !== undefined) {
-    resolvedCliSessionSemantics.delete(sessionSettingsKey(sessionId, cwd, picoHome));
-  } else {
-    for (const [key, semantics] of resolvedCliSessionSemantics) {
-      if (semantics.sessionId === sessionId) resolvedCliSessionSemantics.delete(key);
     }
   }
 }

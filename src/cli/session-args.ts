@@ -24,9 +24,8 @@ export async function resolveCliStartupSession(
     strict: false,
     options: {
       dir: { type: "string" },
-      session: { type: "string", short: "S" },
       continue: { type: "boolean", short: "c" },
-      resume: { type: "string" },
+      resume: { type: "string", short: "S" },
       fork: { type: "string" },
     },
   });
@@ -35,7 +34,6 @@ export async function resolveCliStartupSession(
     (await resolveCliWorkDir(typeof values.dir === "string" ? values.dir : undefined));
   const sessionSelection = await resolveCliSession({
     workDir,
-    ...(typeof values.session === "string" ? { session: values.session } : {}),
     ...(values["continue"] === true ? { continueSession: true } : {}),
     ...(typeof values.resume === "string" ? { resumeSession: values.resume } : {}),
     ...(typeof values["fork"] === "string" ? { forkSession: values["fork"] } : {}),

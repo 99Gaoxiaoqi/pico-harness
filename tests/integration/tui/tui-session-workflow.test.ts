@@ -22,7 +22,7 @@ import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
 
 import { StorageOperationJournal } from "../../../src/storage/operation-journal.js";
 
-test("--session and -S reject a missing session in the current workspace", async (context) => {
+test("--resume and -S reject a missing session in the current workspace", async (context) => {
   const fixture = await createFixture("strict-resume");
   context.after(() => fixture.dispose());
   const previousPicoHome = process.env.PICO_HOME;
@@ -30,7 +30,7 @@ test("--session and -S reject a missing session in the current workspace", async
   context.after(() => restoreEnvironment("PICO_HOME", previousPicoHome));
 
   await assert.rejects(
-    resolveCliStartupSession(["--dir", fixture.workspace, "--session", "missing"]),
+    resolveCliStartupSession(["--dir", fixture.workspace, "--resume", "missing"]),
     /无法恢复 session missing/u,
   );
   await assert.rejects(
@@ -41,7 +41,7 @@ test("--session and -S reject a missing session in the current workspace", async
   assert.equal(await fixture.store.readSessionManifest("missing"), undefined);
 });
 
-test("--session and -S resume an existing session in the current workspace", async (context) => {
+test("--resume and -S resume an existing session in the current workspace", async (context) => {
   const fixture = await createFixture("existing-resume");
   context.after(() => fixture.dispose());
   const previousPicoHome = process.env.PICO_HOME;
@@ -49,7 +49,7 @@ test("--session and -S resume an existing session in the current workspace", asy
   context.after(() => restoreEnvironment("PICO_HOME", previousPicoHome));
   await fixture.store.initializeSession({ sessionId: "known", workDir: fixture.workspace });
 
-  for (const flag of ["--session", "-S"] as const) {
+  for (const flag of ["--resume", "-S"] as const) {
     const resolved = await resolveCliStartupSession(["--dir", fixture.workspace, flag, "known"]);
     assert.deepEqual(resolved.sessionSelection, { mode: "resume", sessionId: "known" });
   }
