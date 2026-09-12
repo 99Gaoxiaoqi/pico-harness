@@ -109,11 +109,12 @@ test("desktop transcript groups execution records under the preceding user turn"
   );
 });
 
-test("terminal transcript removes only an approval-gated stale active tool duplicate", () => {
+test("same-name terminal tools never guess which active invocation they supersede", () => {
   const items = [
     {
       id: "tool-before-approval",
       kind: "tool" as const,
+      toolCallId: "call-1",
       toolName: "write_file",
       title: "write_file",
       detail: '{"path":"result.txt"}',
@@ -129,6 +130,7 @@ test("terminal transcript removes only an approval-gated stale active tool dupli
     {
       id: "tool-completed",
       kind: "tool" as const,
+      toolCallId: "call-2",
       toolName: "write_file",
       title: "write_file",
       detail: "Tool completed · 55 bytes",
@@ -137,10 +139,33 @@ test("terminal transcript removes only an approval-gated stale active tool dupli
   ];
 
   assert.deepEqual(
-    removeSupersededActiveTools(items, false).map((item) => item.id),
-    ["approval", "tool-completed"],
+    removeSupersededActiveTools(items).map((item) => item.id),
+    ["tool-before-approval", "approval", "tool-completed"],
   );
-  assert.equal(removeSupersededActiveTools(items, true), items);
+  assert.equal(removeSupersededActiveTools(items), items);
+});
+
+test("an active tool remains without an explicit terminal run boundary", () => {
+  const items = [
+    {
+      id: "tool-active",
+      kind: "tool" as const,
+      toolCallId: "call-1",
+      toolName: "bash",
+      title: "bash",
+      state: "active" as const,
+    },
+    {
+      id: "tool-terminal",
+      kind: "tool" as const,
+      toolCallId: "call-1",
+      toolName: "bash",
+      title: "bash",
+      state: "done" as const,
+    },
+  ];
+
+  assert.equal(removeSupersededActiveTools(items), items);
 });
 
 test("terminal run boundaries clear unresolved tool-start placeholders", () => {
@@ -169,7 +194,7 @@ test("terminal run boundaries clear unresolved tool-start placeholders", () => {
   ];
 
   assert.deepEqual(
-    removeSupersededActiveTools(items, true).map((item) => item.id),
+    removeSupersededActiveTools(items).map((item) => item.id),
     ["run-completed", "next-user", "current-tool"],
   );
 });
