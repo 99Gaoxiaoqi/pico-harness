@@ -8,12 +8,14 @@ import type {
   PermissionState,
 } from "../approval/permission-state.js";
 import { resolveKeybinding, type UserKeybindingConfig } from "./keybindings/resolver.js";
+import type { PlanControlNotice } from "./plan-control-notice.js";
 import { wrappedVisualRows } from "./terminal-width.js";
 
 const DEFAULT_DIFF_PREVIEW_LINES = 22;
 const LAYOUT_SHELL_HORIZONTAL_PADDING = 2;
 const APPROVAL_PANEL_HORIZONTAL_PADDING = 2;
 const APPROVAL_DIALOG_PREFIX = "approval:pending:";
+const PLAN_CONTROL_DIALOG_PREFIX = "plan-control:pending:";
 
 export function approvalDialogId(taskId: string): string {
   return `${APPROVAL_DIALOG_PREFIX}${taskId}`;
@@ -23,25 +25,37 @@ export function isApprovalDialogId(id: string): boolean {
   return id.startsWith(APPROVAL_DIALOG_PREFIX);
 }
 
+export function planControlDialogId(controlId: string): string {
+  return `${PLAN_CONTROL_DIALOG_PREFIX}${controlId}`;
+}
+
+export function isPlanControlDialogId(id: string): boolean {
+  return id.startsWith(PLAN_CONTROL_DIALOG_PREFIX);
+}
+
 export interface ApprovalPanelProps extends ApprovalNotice {
   diffExpanded?: boolean;
   selectedIndex?: number;
   feedback?: string;
 }
+export type PlanControlPanelProps = PlanControlNotice & {
+  diffExpanded?: boolean;
+  selectedIndex?: number;
+  feedback?: string;
+};
 export interface PermissionPanelProps {
   state: PermissionState;
 }
-export type ApprovalPanelAction =
-  | "approve"
-  | "approve-session"
-  | "reject"
+export type ApprovalPanelAction = "approve" | "approve-session" | "reject";
+export type PlanControlPanelAction =
   | "execute"
   | "continue-editing"
   | "reject-exit"
   | "resume-execution"
   | "cancel-execution"
   | "replan-execution";
-export type ApprovalPanelKeyAction = ApprovalPanelAction | "toggle-diff" | "move-up" | "move-down";
+export type DecisionPanelAction = ApprovalPanelAction | PlanControlPanelAction;
+export type ApprovalPanelKeyAction = DecisionPanelAction | "toggle-diff" | "move-up" | "move-down";
 export interface ApprovalPanelState {
   diffExpanded: boolean;
   selectedIndex: number;
@@ -54,6 +68,27 @@ export interface InteractiveApprovalPanelProps extends ApprovalPanelProps {
   onDiffExpandedChange?: (expanded: boolean) => void;
   keybindings?: UserKeybindingConfig;
 }
+export type InteractivePlanControlPanelProps = PlanControlPanelProps & {
+  onAction: (
+    action: PlanControlPanelAction,
+    feedback?: string,
+  ) => boolean | void | Promise<boolean | void>;
+  onDiffExpandedChange?: (expanded: boolean) => void;
+  keybindings?: UserKeybindingConfig;
+};
+
+type DecisionNotice = ApprovalNotice | PlanControlNotice;
+
+interface InteractiveDecisionPanelProps {
+  readonly notice: DecisionNotice;
+  readonly onAction: (
+    action: DecisionPanelAction,
+    feedback?: string,
+  ) => boolean | void | Promise<boolean | void>;
+  readonly onDiffExpandedChange?: (expanded: boolean) => void;
+  readonly diffExpanded?: boolean;
+  readonly keybindings?: UserKeybindingConfig;
+}
 
 export function InteractiveApprovalPanel({
   onAction,
@@ -62,16 +97,53 @@ export function InteractiveApprovalPanel({
   keybindings,
   ...notice
 }: InteractiveApprovalPanelProps): React.ReactNode {
+  return (
+    <InteractiveDecisionPanel
+      notice={notice}
+      onAction={onAction as InteractiveDecisionPanelProps["onAction"]}
+      onDiffExpandedChange={onDiffExpandedChange}
+      diffExpanded={diffExpanded}
+      keybindings={keybindings}
+    />
+  );
+}
+
+export function InteractivePlanControlPanel({
+  onAction,
+  onDiffExpandedChange,
+  diffExpanded,
+  keybindings,
+  ...notice
+}: InteractivePlanControlPanelProps): React.ReactNode {
+  return (
+    <InteractiveDecisionPanel
+      notice={notice}
+      onAction={onAction as InteractiveDecisionPanelProps["onAction"]}
+      onDiffExpandedChange={onDiffExpandedChange}
+      diffExpanded={diffExpanded}
+      keybindings={keybindings}
+    />
+  );
+}
+
+function InteractiveDecisionPanel({
+  notice,
+  onAction,
+  onDiffExpandedChange,
+  diffExpanded,
+  keybindings,
+}: InteractiveDecisionPanelProps): React.ReactNode {
   const [state, setState] = useState<ApprovalPanelState>(() => ({
-    diffExpanded: diffExpanded ?? Boolean(notice.diff ?? notice.preview?.diff),
+    diffExpanded: diffExpanded ?? Boolean(decisionDetails(notice)),
     selectedIndex: 0,
   }));
   const [feedback, setFeedback] = useState("");
   const submittedTaskId = useRef<string | null>(null);
   const expanded = diffExpanded ?? state.diffExpanded;
-  const planExit = isPlanExitApproval(notice);
-  const interruptedPlan = notice.toolName === "interrupted_plan_execution";
-  const optionCount = interruptedPlan || planExit ? 3 : notice.sessionScope ? 3 : 2;
+  const planControl = notice.kind === "plan-control";
+  const interruptedPlan = planControl && notice.mode === "interrupted";
+  const hasSessionOption = notice.kind === "tool" && notice.sessionScope !== undefined;
+  const optionCount = planControl ? 3 : hasSessionOption ? 3 : 2;
 
   useInput((input, key) => {
     const action = resolveApprovalPanelKey(
@@ -79,8 +151,8 @@ export function InteractiveApprovalPanel({
       key,
       keybindings,
       state.selectedIndex,
-      notice.sessionScope !== undefined,
-      planExit,
+      hasSessionOption,
+      planControl,
       interruptedPlan,
     );
     if (!action) return;
@@ -97,8 +169,9 @@ export function InteractiveApprovalPanel({
       return;
     }
     if (action === "continue-editing" && feedback.trim().length === 0) return;
-    if (submittedTaskId.current === notice.taskId) return;
-    submittedTaskId.current = notice.taskId;
+    const decisionId = notice.kind === "tool" ? notice.taskId : notice.controlId;
+    if (submittedTaskId.current === decisionId) return;
+    submittedTaskId.current = decisionId;
     const outcome = onAction(action, action === "continue-editing" ? feedback.trim() : undefined);
     if (outcome instanceof Promise) {
       void outcome.then(
@@ -115,7 +188,8 @@ export function InteractiveApprovalPanel({
   });
 
   useInput((input, key) => {
-    if (!planExit || state.selectedIndex !== 1 || key.return || key.escape) return;
+    if (!planControl || interruptedPlan || state.selectedIndex !== 1 || key.return || key.escape)
+      return;
     const extendedKey = key as typeof key & { backspace?: boolean; delete?: boolean };
     if (extendedKey.backspace || extendedKey.delete) {
       setFeedback((current) => current.slice(0, -1));
@@ -127,8 +201,8 @@ export function InteractiveApprovalPanel({
   });
 
   return (
-    <ApprovalPanel
-      {...notice}
+    <DecisionPanel
+      notice={notice}
       diffExpanded={expanded}
       selectedIndex={state.selectedIndex}
       feedback={feedback}
@@ -143,6 +217,43 @@ export function ApprovalPanel({
   ...notice
 }: ApprovalPanelProps): React.ReactNode {
   return (
+    <DecisionPanel
+      notice={notice}
+      diffExpanded={diffExpanded}
+      selectedIndex={selectedIndex}
+      feedback={feedback}
+    />
+  );
+}
+
+export function PlanControlPanel({
+  diffExpanded = false,
+  selectedIndex = 0,
+  feedback,
+  ...notice
+}: PlanControlPanelProps): React.ReactNode {
+  return (
+    <DecisionPanel
+      notice={notice}
+      diffExpanded={diffExpanded}
+      selectedIndex={selectedIndex}
+      feedback={feedback}
+    />
+  );
+}
+
+function DecisionPanel({
+  notice,
+  diffExpanded,
+  selectedIndex,
+  feedback,
+}: {
+  readonly notice: DecisionNotice;
+  readonly diffExpanded: boolean;
+  readonly selectedIndex: number;
+  readonly feedback?: string;
+}): React.ReactNode {
+  return (
     <Box
       flexDirection="column"
       borderStyle="single"
@@ -152,7 +263,7 @@ export function ApprovalPanel({
       borderBottom={false}
       paddingX={1}
     >
-      {formatApprovalPanel(notice, { diffExpanded, selectedIndex, feedback })
+      {formatDecisionPanel(notice, { diffExpanded, selectedIndex, feedback })
         .split("\n")
         .map((line, index) => (
           <Text key={`${index}:${line}`}>{line}</Text>
@@ -183,43 +294,86 @@ export function formatApprovalPanel(
     feedback?: string;
   } = {},
 ): string {
-  const target = notice.preview?.target ?? approvalTarget(notice.toolName, notice.args);
-  const summary = notice.preview?.summary ?? approvalSummary(notice.message);
-  const diff = notice.preview?.diff ?? notice.diff;
+  return formatDecisionPanel(notice, options);
+}
+
+export function formatPlanControlPanel(
+  notice: PlanControlNotice,
+  options: {
+    diffExpanded?: boolean;
+    includeDiff?: boolean;
+    maxDiffPreviewLines?: number;
+    selectedIndex?: number;
+    feedback?: string;
+  } = {},
+): string {
+  return formatDecisionPanel(notice, options);
+}
+
+function formatDecisionPanel(
+  notice: DecisionNotice,
+  options: {
+    diffExpanded?: boolean;
+    includeDiff?: boolean;
+    maxDiffPreviewLines?: number;
+    selectedIndex?: number;
+    feedback?: string;
+  },
+): string {
+  const planControl = notice.kind === "plan-control";
+  const interruptedPlan = planControl && notice.mode === "interrupted";
+  const target = planControl
+    ? notice.mode === "review"
+      ? notice.proposal.title
+      : notice.message
+    : (notice.preview?.target ?? approvalTarget(notice.toolName, notice.args));
+  const summary = planControl
+    ? notice.message
+    : (notice.preview?.summary ?? approvalSummary(notice.message));
+  const diff = decisionDetails(notice);
   const diffExpanded = options.diffExpanded ?? options.includeDiff ?? Boolean(diff);
-  const hasSessionOption = notice.sessionScope !== undefined;
-  const planExit = isPlanExitApproval(notice);
-  const approvalOptions: Array<{ label: string; action: ApprovalPanelAction }> =
-    notice.toolName === "interrupted_plan_execution"
+  const hasSessionOption = notice.kind === "tool" && notice.sessionScope !== undefined;
+  const approvalOptions: Array<{ label: string; action: DecisionPanelAction }> = interruptedPlan
+    ? [
+        { label: "继续执行", action: "resume-execution" },
+        { label: "取消执行", action: "cancel-execution" },
+        { label: "重新规划", action: "replan-execution" },
+      ]
+    : planControl
       ? [
-          { label: "继续执行", action: "resume-execution" },
-          { label: "取消执行", action: "cancel-execution" },
-          { label: "重新规划", action: "replan-execution" },
+          { label: "执行计划", action: "execute" },
+          { label: "继续修改（需输入反馈）", action: "continue-editing" },
+          { label: "拒绝并退出", action: "reject-exit" },
         ]
-      : planExit
-        ? [
-            { label: "执行计划", action: "execute" },
-            { label: "继续修改（需输入反馈）", action: "continue-editing" },
-            { label: "拒绝并退出", action: "reject-exit" },
-          ]
-        : [
-            { label: "允许", action: "approve" },
-            ...(hasSessionOption
-              ? [
-                  {
-                    label: formatPermissionSessionScope(notice.sessionScope!),
-                    action: "approve-session" as const,
-                  },
-                ]
-              : []),
-            { label: "拒绝", action: "reject" },
-          ];
+      : [
+          { label: "允许", action: "approve" },
+          ...(hasSessionOption
+            ? [
+                {
+                  label: formatPermissionSessionScope(notice.sessionScope!),
+                  action: "approve-session" as const,
+                },
+              ]
+            : []),
+          { label: "拒绝", action: "reject" },
+        ];
   const selectedIndex = clampSelection(options.selectedIndex ?? 0, approvalOptions.length);
-  const lines = [approvalQuestion(notice.toolName, target), `  ${target}`];
+  const lines = [
+    planControl
+      ? interruptedPlan
+        ? "计划执行已中断，请选择下一步："
+        : "是否执行此计划？"
+      : approvalQuestion(notice.toolName, target),
+    `  ${target}`,
+  ];
   if (diffExpanded && diff) {
-    lines.push(formatDiffPreview(diff, options.maxDiffPreviewLines));
+    lines.push(
+      planControl
+        ? formatPlanDetailsPreview(diff, options.maxDiffPreviewLines)
+        : formatDiffPreview(diff, options.maxDiffPreviewLines),
+    );
   } else if (diff) {
-    lines.push(formatDiffSummary(diff, false));
+    lines.push(planControl ? "计划详情已折叠" : formatDiffSummary(diff, false));
   }
   if (!diff && summary !== target) lines.push(`  ${summary}`);
   lines.push(
@@ -228,7 +382,7 @@ export function formatApprovalPanel(
     ),
     "  ↑/↓ or J/K to move · Enter to select · Esc to cancel · E to toggle diff",
   );
-  if (planExit && selectedIndex === 1) {
+  if (planControl && !interruptedPlan && selectedIndex === 1) {
     lines.push(
       `  反馈: ${options.feedback?.trim() || "（直接打字输入修改意见，输入后按 Enter 提交）"}`,
     );
@@ -249,6 +403,19 @@ export function measureApprovalPanelRows(
   return 1 + contentRows;
 }
 
+export function measurePlanControlPanelRows(
+  notice: PlanControlNotice,
+  options: { diffExpanded: boolean; wrapWidth: number },
+): number {
+  const contentRows = formatPlanControlPanel(notice, { diffExpanded: options.diffExpanded })
+    .split("\n")
+    .reduce(
+      (total, line) => total + wrappedVisualRows(line, Math.max(1, options.wrapWidth)).length,
+      0,
+    );
+  return 1 + contentRows;
+}
+
 export function approvalPanelContentWidth(terminalColumns: number): number {
   const columns = Number.isFinite(terminalColumns) ? Math.floor(terminalColumns) : 80;
   return Math.max(1, columns - LAYOUT_SHELL_HORIZONTAL_PADDING - APPROVAL_PANEL_HORIZONTAL_PADDING);
@@ -260,7 +427,7 @@ export function resolveApprovalPanelKey(
   keybindings?: UserKeybindingConfig,
   selectedIndex = 0,
   hasSessionOption = true,
-  planExit = false,
+  planControl = false,
   interruptedPlan = false,
 ): ApprovalPanelKeyAction | null {
   const arrowKey = key as typeof key & { upArrow?: boolean; downArrow?: boolean };
@@ -269,14 +436,17 @@ export function resolveApprovalPanelKey(
     return "move-down";
   const normalized = input.toLowerCase();
   if (key.return && !key.ctrl && !key.meta) {
-    return planExit
+    return planControl
       ? interruptedPlan
         ? ((["resume-execution", "cancel-execution", "replan-execution"] as const)[selectedIndex] ??
           "resume-execution")
         : ((["execute", "continue-editing", "reject-exit"] as const)[selectedIndex] ?? "execute")
       : actionAtSelection(selectedIndex, hasSessionOption);
   }
-  if (key.escape) return interruptedPlan ? "cancel-execution" : planExit ? "reject-exit" : "reject";
+  if (key.escape)
+    return interruptedPlan ? "cancel-execution" : planControl ? "reject-exit" : "reject";
+  if (normalized === "e" && !key.ctrl && !key.meta) return "toggle-diff";
+  if (planControl) return null;
   if (normalized === "y" && !key.ctrl && !key.meta) return "approve";
   if (normalized === "a" && !key.ctrl && !key.meta) {
     return hasSessionOption ? "approve-session" : null;
@@ -289,17 +459,7 @@ export function resolveApprovalPanelKey(
   if (resolved?.kind === "action" && resolved.action === "confirmation:cancel") {
     return "reject";
   }
-
-  if (normalized === "e" && !key.ctrl && !key.meta) return "toggle-diff";
   return null;
-}
-
-export function isPlanExitApproval(notice: Pick<ApprovalNotice, "toolName">): boolean {
-  return (
-    notice.toolName === "exit_plan_mode" ||
-    notice.toolName === "submit_plan" ||
-    notice.toolName === "interrupted_plan_execution"
-  );
 }
 
 export function nextApprovalPanelState(
@@ -334,6 +494,32 @@ export function formatDiffPreview(diff: string, maxLines = DEFAULT_DIFF_PREVIEW_
   const hidden = Math.max(0, lines.length - visible.length);
   const suffix = hidden > 0 ? [`... 已隐藏 ${hidden} 行`] : [];
   return ["Diff preview:", ...visible, ...suffix].join("\n");
+}
+
+function decisionDetails(notice: DecisionNotice): string | undefined {
+  if (notice.kind === "tool") return notice.preview?.diff ?? notice.diff;
+
+  const source = notice.mode === "review" ? notice.proposal : notice.execution;
+  const lines = [
+    `版本: ${source.revision}`,
+    ...(notice.mode === "review" && notice.proposal.overview ? [notice.proposal.overview] : []),
+    ...source.steps.map(
+      (step, index) =>
+        `${index + 1}. [${step.status}] ${step.title}${step.description ? ` — ${step.description}` : ""}${step.note ? ` (${step.note})` : ""}`,
+    ),
+    ...(notice.mode === "review" && notice.proposal.risks?.length
+      ? ["风险:", ...notice.proposal.risks.map((risk) => `- ${risk}`)]
+      : []),
+  ];
+  return lines.join("\n");
+}
+
+function formatPlanDetailsPreview(details: string, maxLines = DEFAULT_DIFF_PREVIEW_LINES): string {
+  const lines = details.split("\n");
+  const visible = lines.slice(0, Math.max(0, maxLines));
+  const hidden = Math.max(0, lines.length - visible.length);
+  const suffix = hidden > 0 ? [`... 已隐藏 ${hidden} 行`] : [];
+  return ["计划详情:", ...visible, ...suffix].join("\n");
 }
 
 export function formatPermissionPanel(state: PermissionState): string {

@@ -4,6 +4,7 @@ import test from "node:test";
 import React from "react";
 import { render } from "ink";
 import type { ApprovalNotice } from "../../../src/approval/manager.js";
+import type { PlanControlNotice } from "../../../src/tui/plan-control-notice.js";
 import {
   formatSessionReasoningStatus,
   type SessionSettings,
@@ -13,7 +14,11 @@ import { ModelRouter, type ModelRoute } from "../../../src/provider/model-router
 import { buildSeparatorLine } from "../../../src/tui/message-list.js";
 import { MarkdownText } from "../../../src/tui/markdown-text.js";
 import { buildStatusBarText } from "../../../src/tui/status-bar.js";
-import { formatApprovalPanel, resolveApprovalPanelKey } from "../../../src/tui/approval-panel.js";
+import {
+  formatApprovalPanel,
+  formatPlanControlPanel,
+  resolveApprovalPanelKey,
+} from "../../../src/tui/approval-panel.js";
 import { createTuiTerminalGridSession } from "../../../src/tui/terminal-grid.js";
 import { buildTranscriptLayout } from "../../../src/tui/transcript-layout.js";
 import { transcriptContentRows } from "../../../src/tui/viewport-rows.js";
@@ -82,16 +87,30 @@ test("全新 TUI 状态栏安全回退为请求批准权限", () => {
   assert.match(buildStatusBarText({ renderWidth: 120 }), /协作 agent · 权限 请求批准/u);
 });
 
-test("Plan 审批卡片提供三个专用动作且继续修改要求反馈", () => {
-  const notice = {
-    taskId: "plan-1",
-    providerCallId: "call-1",
-    toolName: "submit_plan",
-    args: "{}",
+test("PlanControl 审核卡片提供三个专用动作且继续修改要求反馈", () => {
+  const notice: PlanControlNotice = {
+    kind: "plan-control",
+    mode: "review",
+    controlId: "review:plan-1:epoch-1",
+    sessionId: "session-1",
+    planId: "plan-1",
+    expectedRevision: 1,
+    expectedSessionSequence: 7,
+    controlEpoch: "epoch-1",
     message: "Plan ready",
-    diff: "1. inspect\n2. implement",
+    proposal: {
+      planId: "plan-1",
+      revision: 1,
+      title: "Plan ready",
+      steps: [
+        { id: "s1", title: "inspect", description: "inspect", status: "pending" },
+        { id: "s2", title: "implement", description: "implement", status: "pending" },
+      ],
+      status: "pending",
+      proposedAt: "2026-09-12T00:00:00.000Z",
+    },
   };
-  const rendered = formatApprovalPanel(notice as unknown as ApprovalNotice, {
+  const rendered = formatPlanControlPanel(notice, {
     selectedIndex: 1,
     feedback: "补充失败路径",
   });
@@ -108,17 +127,35 @@ test("Plan 审批卡片提供三个专用动作且继续修改要求反馈", () 
     resolveApprovalPanelKey("", { escape: true }, undefined, 0, false, true),
     "reject-exit",
   );
+  assert.equal(
+    resolveApprovalPanelKey("y", {}, undefined, 0, false, true),
+    null,
+    "PlanControl must not accept ordinary tool-approval shortcuts",
+  );
 });
 
 test("中断计划卡片提供继续、取消与重新规划入口", () => {
-  const notice = {
-    taskId: "plan-1",
-    providerCallId: "call-1",
-    toolName: "interrupted_plan_execution",
-    args: "{}",
+  const notice: PlanControlNotice = {
+    kind: "plan-control",
+    mode: "interrupted",
+    controlId: "interrupted:plan-1:epoch-1",
+    sessionId: "session-1",
+    planId: "plan-1",
+    expectedRevision: 1,
+    expectedSessionSequence: 8,
+    controlEpoch: "epoch-1",
     message: "Plan interrupted",
+    execution: {
+      planId: "plan-1",
+      revision: 1,
+      status: "interrupted",
+      steps: [],
+      startedAt: "2026-09-12T00:00:00.000Z",
+      updatedAt: "2026-09-12T00:01:00.000Z",
+      reason: "Plan interrupted",
+    },
   };
-  const rendered = formatApprovalPanel(notice as unknown as ApprovalNotice, { selectedIndex: 2 });
+  const rendered = formatPlanControlPanel(notice, { selectedIndex: 2 });
   assert.match(rendered, /继续执行/u);
   assert.match(rendered, /取消执行/u);
   assert.match(rendered, /重新规划/u);
@@ -130,6 +167,20 @@ test("中断计划卡片提供继续、取消与重新规划入口", () => {
     resolveApprovalPanelKey("", { escape: true }, undefined, 0, false, true, true),
     "cancel-execution",
   );
+});
+
+test("名为 submit_plan 的普通工具审批不会被识别为 PlanControl", () => {
+  const notice: ApprovalNotice = {
+    kind: "tool",
+    taskId: "approval-1",
+    providerCallId: "call-1",
+    toolName: "submit_plan",
+    args: "{}",
+    message: "tool approval",
+  };
+  const rendered = formatApprovalPanel(notice);
+  assert.match(rendered, /允许/u);
+  assert.doesNotMatch(rendered, /执行计划/u);
 });
 
 test("运行中为紧随消息的 spinner 预留一行 transcript 空间", () => {
