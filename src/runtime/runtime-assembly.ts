@@ -9,6 +9,7 @@ import type { ReasoningLevel } from "../provider/reasoning-capability.js";
 import { CredentialRotationCoordinator } from "../provider/credential-rotation.js";
 import { CredentialPool } from "../provider/credential-pool.js";
 import type { LLMProvider } from "../provider/interface.js";
+import type { RateLimitFailure } from "../provider/retry.js";
 import { resolveModelRouteCapabilities } from "../provider/model-capabilities.js";
 import { ModelRouter } from "../provider/model-router.js";
 import { CostTracker, type CostTrackerOptions } from "../observability/tracker.js";
@@ -51,7 +52,7 @@ export interface RuntimeProviderAssembly {
   /** Provider wrapped with the runtime's usage and durable-call tracking. */
   readonly provider: LLMProvider;
   /** Rebuilds the tracked route after a rate-limit failure, when rotation is enabled. */
-  readonly rebuildProvider?: () => LLMProvider | undefined;
+  readonly rebuildProvider?: (failure: RateLimitFailure) => LLMProvider | undefined;
 }
 
 export interface RuntimeModelAssemblyContext extends RuntimeProviderAssemblyContext {
@@ -114,7 +115,7 @@ export function assembleRuntimeProvider(
     );
     return {
       provider: rotation.provider,
-      rebuildProvider: () => rotation.rotate(),
+      rebuildProvider: (failure) => rotation.rotate(failure),
     };
   }
 

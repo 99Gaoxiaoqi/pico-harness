@@ -1,11 +1,7 @@
 import type { ProviderConfig } from "./config.js";
 import { CredentialPool } from "./credential-pool.js";
 import type { LLMProvider, LLMProviderRequestOptions } from "./interface.js";
-import {
-  currentRateLimitFailure,
-  registerProviderRequestIdentity,
-  type RateLimitFailure,
-} from "./retry.js";
+import { registerProviderRequestIdentity, type RateLimitFailure } from "./retry.js";
 import type { Message, ToolDefinition } from "../schema/message.js";
 
 export type CredentialRouteProviderFactory = (config: ProviderConfig) => LLMProvider;
@@ -34,13 +30,8 @@ export class CredentialRotationCoordinator {
     return this.current.provider;
   }
 
-  /**
-   * 标记实际失败 key 并轮换。failure 可省略，以兼容 Engine 现有无参回调；
-   * 此时从 generateWithRetry 的同步失败上下文中取得同一份路由身份。
-   */
-  rotate(
-    failure: RateLimitFailure | undefined = currentRateLimitFailure(),
-  ): LLMProvider | undefined {
+  /** 标记实际失败 key 并轮换。 */
+  rotate(failure: RateLimitFailure): LLMProvider | undefined {
     const failedCredential = failure?.failedCredential ?? this.current.config.apiKey;
     this.pool.markRateLimited(failedCredential);
 

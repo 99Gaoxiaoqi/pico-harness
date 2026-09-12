@@ -91,7 +91,6 @@ export interface RetryInfo {
 }
 
 const providerRequestIdentities = new WeakMap<object, ProviderRequestIdentity>();
-let activeRateLimitFailure: RateLimitFailure | undefined;
 
 /** @internal 将实际失败路由绑定到错误，避免并发轮换误用全局当前路由。 */
 export function registerProviderRequestIdentity(
@@ -101,14 +100,6 @@ export function registerProviderRequestIdentity(
   if (typeof error === "object" && error !== null) {
     providerRequestIdentities.set(error, identity);
   }
-}
-
-/**
- * @internal 兼容当前 Engine 的无参 rebuildProvider 桥接。
- * onRateLimited 是同步回调，因此栈式恢复可以保证并发调用不串路由。
- */
-export function currentRateLimitFailure(): RateLimitFailure | undefined {
-  return activeRateLimitFailure;
 }
 
 /**
@@ -196,10 +187,7 @@ export async function generateWithRetry(
       // 切换成功后跳过退避(新 key 通常立即可用),直接重试;
       // 切换失败(无多 key / 全限流)→ 回退到同 key 指数退避。
       if (maybeStatusCode(error) === 429 && onRateLimited) {
-        const rotated = invokeRateLimitHandler(
-          onRateLimited,
-          buildRateLimitFailure(activeProvider, error),
-        );
+        const rotated = onRateLimited(buildRateLimitFailure(activeProvider, error));
         if (rotated && rotated !== activeProvider) {
           logger.warn(
             { attempt: `${attempt}/${maxAttempts}`, keyRotated: true },
@@ -284,19 +272,6 @@ function buildRateLimitFailure(activeProvider: LLMProvider, error: unknown): Rat
     ...(identity?.routeId !== undefined ? { failedRouteId: identity.routeId } : {}),
     ...(identity?.model !== undefined ? { failedModel: identity.model } : {}),
   };
-}
-
-function invokeRateLimitHandler(
-  handler: NonNullable<RetryOptions["onRateLimited"]>,
-  failure: RateLimitFailure,
-): LLMProvider | undefined {
-  const previous = activeRateLimitFailure;
-  activeRateLimitFailure = failure;
-  try {
-    return handler(failure);
-  } finally {
-    activeRateLimitFailure = previous;
-  }
 }
 
 /**
