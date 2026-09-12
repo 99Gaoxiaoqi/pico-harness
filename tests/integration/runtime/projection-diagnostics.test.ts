@@ -25,7 +25,11 @@ function makeEvent(
 
 test("投影诊断：控制事实产 soft 诊断，不阻断投影", () => {
   const events: RuntimeEvent[] = [
-    makeEvent({ kind: "run.started", eventId: "e1", data: { workDir: "/tmp" } }),
+    makeEvent({
+      kind: "run.started",
+      eventId: "e1",
+      data: { workDir: "/tmp", agentSwarmAuthorization: "none" },
+    }),
     makeEvent({
       kind: "message.committed",
       eventId: "e2",

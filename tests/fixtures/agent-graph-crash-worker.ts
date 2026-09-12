@@ -158,7 +158,7 @@ async function seedRuntimeFacts(): Promise<void> {
       ...base,
       eventId: "runtime-started",
       kind: "run.started",
-      data: { workDir: config.repoRoot },
+      data: { workDir: config.repoRoot, agentSwarmAuthorization: "none" },
     },
     { ownerFence: fence },
   );

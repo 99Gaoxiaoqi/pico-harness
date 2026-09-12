@@ -95,7 +95,7 @@ function runStarted(eventId: string, sessionId: string, at: string, workDir: str
     partial: false,
     visibility: "internal",
     kind: "run.started",
-    data: { workDir },
+    data: { workDir, agentSwarmAuthorization: "none" },
   } as RuntimeEvent;
 }
 

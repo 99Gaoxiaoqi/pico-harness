@@ -345,7 +345,7 @@ test("startup does not extract historical completed turns without a memory trigg
         partial: false,
         visibility: "internal",
         kind: "run.started",
-        data: { workDir: fixture.workspace },
+        data: { workDir: fixture.workspace, agentSwarmAuthorization: "none" },
       },
       {
         schemaVersion: 2,

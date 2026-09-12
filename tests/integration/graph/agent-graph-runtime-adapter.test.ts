@@ -542,7 +542,7 @@ function runStartedEvent(
   return {
     ...eventBase(claim, claim.runStartedEventId),
     kind: "run.started",
-    data: { workDir: "/workspace" },
+    data: { workDir: "/workspace", agentSwarmAuthorization: "none" },
   };
 }
 
@@ -572,7 +572,13 @@ function dispatchEvent(
     ...eventBase(claim, "tool-dispatch-1"),
     kind: "tool.started",
     refs: { stepId: "step-1", toolCallId: "tool-call-1" },
-    data: { toolName: "bash", argumentsHash: "sha256:arguments" },
+    data: {
+      toolName: "bash",
+      argumentsHash: "sha256:arguments",
+      argumentsJson: "{}",
+      argumentsRedacted: true,
+      recoveryMode: "never_auto_retry",
+    },
   };
 }
 

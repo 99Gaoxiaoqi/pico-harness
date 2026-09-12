@@ -12,11 +12,7 @@ import {
   type RuntimeToolStartedEvent,
 } from "../../../src/storage/runtime-event.js";
 import { ToolRegistry } from "../../../src/tools/registry-impl.js";
-import {
-  ToolCommitBoundaryError,
-  type BaseTool,
-  type ToolRecoveryProbeResult,
-} from "../../../src/tools/registry.js";
+import { ToolCommitBoundaryError, type BaseTool } from "../../../src/tools/registry.js";
 import { ToolAccesses } from "../../../src/tools/tool-access.js";
 
 async function scene(t: test.TestContext) {
@@ -385,7 +381,7 @@ test("同一未决调用并发probe或人工判决只能提交一个一致结论
   await second.finish("completed");
 });
 
-test("旧hash-only记录可读但不能probe；损坏审计拒绝，超限T1禁止副作用", async (t) => {
+test("当前T1合同缺字段时拒绝，recoveryKey保持可选，超限T1禁止副作用", async (t) => {
   const { session } = await scene(t);
   const store = session.runtimeEventStore!;
   const registry = new ToolRegistry();
@@ -394,28 +390,60 @@ test("旧hash-only记录可读但不能probe；损坏审计拒绝，超限T1禁�
     executions++;
     return "done";
   });
-  tool.reconcile = async (): Promise<ToolRecoveryProbeResult> =>
-    assert.fail("Legacy calls have no probe authority");
+  tool.reconcile = async () => assert.fail("缺少 recoveryKey 时不得调用证据探针");
   registry.register(tool);
   const run = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
-  const started = (await store.readRun(session.id, run.runId))[0]!;
-  const legacy: RuntimeToolStartedEvent = {
-    ...started,
-    eventId: "legacy-start",
+  const admitted = (await store.readRun(session.id, run.runId))[0]!;
+  assert.equal(admitted.kind, "run.started");
+  assert.throws(
+    () =>
+      assertRuntimeEvent({
+        ...admitted,
+        data: { workDir: admitted.data.workDir },
+      }),
+    /agentSwarmAuthorization/,
+  );
+  const currentWithoutRecoveryKey: RuntimeToolStartedEvent = {
+    ...admitted,
+    eventId: "current-start",
     kind: "tool.started",
     partial: false,
     visibility: "internal",
-    refs: { toolCallId: "legacy", parentToolCallId: "exec-parent" },
+    refs: { toolCallId: "current", parentToolCallId: "exec-parent" },
     data: {
       toolName: "inspect_effect",
       origin: "code_mode",
       argumentsHash: createHash("sha256").update("{}").digest("hex"),
+      argumentsJson: "{}",
+      argumentsRedacted: false,
+      recoveryMode: "reconcile",
     },
   };
-  assertRuntimeEvent(legacy);
+  assert.doesNotThrow(() => assertRuntimeEvent(currentWithoutRecoveryKey));
+  for (const field of ["argumentsJson", "argumentsRedacted", "recoveryMode"] as const) {
+    assert.throws(
+      () =>
+        assertRuntimeEvent({
+          ...currentWithoutRecoveryKey,
+          data: { ...currentWithoutRecoveryKey.data, [field]: undefined },
+        }),
+      /audit|contract/,
+    );
+  }
+  assert.throws(
+    () =>
+      assertRuntimeEvent({
+        ...currentWithoutRecoveryKey,
+        data: {
+          ...currentWithoutRecoveryKey.data,
+          recoveryMode: "invalid",
+        },
+      }),
+    /audit|contract/,
+  );
   await store.prepareToolOperation({
-    dispatchEvent: legacy,
-    toolCallId: "legacy",
+    dispatchEvent: currentWithoutRecoveryKey,
+    toolCallId: "current",
     ownerFence: await session.assertRuntimeEventWriteAllowed(),
   });
   await RuntimeRun.reconcileIncompleteRuns({ capability: session.runtimeEventCapability! });
@@ -424,22 +452,12 @@ test("旧hash-only记录可读但不能probe；损坏审计拒绝，超限T1禁�
   );
   assert.ok(recovery?.kind === "tool.result.recorded");
   const resumed = await RuntimeRun.start({ capability: session.runtimeEventCapability! });
-  assert.equal(
-    (await resumed.reconcileToolRecovery({ recoveryEventId: recovery.eventId, registry })).outcome,
-    "park",
-  );
-  assert.throws(
-    () =>
-      assertRuntimeEvent({
-        ...legacy,
-        data: {
-          ...legacy.data,
-          argumentsJson: "{}",
-          argumentsRedacted: false,
-          recoveryMode: "invalid",
-        },
-      }),
-    /audit|contract/,
+  assert.deepEqual(
+    await resumed.reconcileToolRecovery({ recoveryEventId: recovery.eventId, registry }),
+    {
+      outcome: "park",
+      reason: "Committed evidence-probe contract has no recovery key",
+    },
   );
   const oversized = await resumed.executeNestedTool(
     {

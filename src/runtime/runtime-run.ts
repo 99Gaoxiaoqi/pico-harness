@@ -356,7 +356,7 @@ export class RuntimeRun {
   readonly invocationId: string;
   readonly store: SqliteRuntimeEventStore;
   readonly runtimeCapability?: EngineRuntimeCapability;
-  readonly agentSwarmAuthorization?: RuntimeRunStartedEvent["data"]["agentSwarmAuthorization"];
+  readonly agentSwarmAuthorization: RuntimeRunStartedEvent["data"]["agentSwarmAuthorization"];
   private readonly canonicalWorkDir: string;
   private readonly now: () => Date;
   private readonly runStartedEventId?: string;
@@ -397,7 +397,7 @@ export class RuntimeRun {
       ...(options.parentToolCallId ? { parentToolCallId: options.parentToolCallId } : {}),
     });
     this.presentation = options.presentation;
-    this.agentSwarmAuthorization = options.agentSwarmAuthorization;
+    this.agentSwarmAuthorization = options.agentSwarmAuthorization ?? "none";
     this.turnId = options.turnId ?? `turn:${this.runId}:input`;
     this.stepId = `step:${this.runId}:input`;
   }
@@ -557,8 +557,8 @@ export class RuntimeRun {
 
   private static async startInternal(options: RuntimeRunConstructionOptions): Promise<RuntimeRun> {
     const store = options.store;
-    // An already-admitted Run owns its authorization forever, including a legacy
-    // header with no authorization. A later Session mode or host override cannot amend it.
+    // An already-admitted Run owns its frozen authorization forever. A later Session mode
+    // or host override cannot amend it.
     const existingStart =
       options.runId && options.runStartedEventId
         ? (await store.readRun(options.sessionId, options.runId)).find(
@@ -691,7 +691,7 @@ export class RuntimeRun {
         const call = {
           id: operation.toolCallId,
           name: source.data.toolName,
-          arguments: source.data.argumentsJson ?? "{}",
+          arguments: source.data.argumentsJson,
         };
         const content =
           "工具执行状态未知：Code Mode 子调用已派发但结果未持久化；副作用可能已经发生，请先核查，禁止自动重放。";
@@ -1631,10 +1631,9 @@ export class RuntimeRun {
         "Recovery probe T1 journal identity does not match",
       );
     const { argumentsJson, argumentsRedacted, recoveryMode, recoveryKey } = started.data;
-    if (argumentsJson === undefined || argumentsRedacted === undefined || !recoveryKey)
-      return park("Legacy or incomplete tool audit has no probe authority");
     if (recoveryMode !== "reconcile" && recoveryMode !== "reattach")
       return park("Tool recovery contract does not permit evidence probes");
+    if (!recoveryKey) return park("Committed evidence-probe contract has no recovery key");
     const { registry } = input;
     const step = registry.captureStep?.(randomUUID(), [started.data.toolName]);
     const policy = registry.getRecoveryPolicy?.(started.data.toolName, step);
@@ -2052,9 +2051,7 @@ export class RuntimeRun {
       kind: "run.started",
       data: {
         workDir: this.canonicalWorkDir,
-        ...(this.agentSwarmAuthorization !== undefined
-          ? { agentSwarmAuthorization: this.agentSwarmAuthorization }
-          : {}),
+        agentSwarmAuthorization: this.agentSwarmAuthorization,
         ...(this.presentation ? { presentation: this.presentation } : {}),
       },
     };

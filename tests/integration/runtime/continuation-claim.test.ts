@@ -241,6 +241,7 @@ test("伪造 continuationOf 无法绕过原子续跑入口", async (context) => 
         kind: "run.started",
         data: {
           workDir: scene.session.workDir,
+          agentSwarmAuthorization: "none",
           continuationOf: { runId: source.runId, highWater: 1, prefixDigest: "0".repeat(64) },
         },
       } as RuntimeEvent,

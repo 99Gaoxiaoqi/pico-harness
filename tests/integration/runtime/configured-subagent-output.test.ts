@@ -62,7 +62,7 @@ test("root agent_output reads only admitted children and reopens canonical histo
     {
       ...base("child-start", "child", "child-run", "child-turn"),
       kind: "run.started",
-      data: { workDir: childWorkDir },
+      data: { workDir: childWorkDir, agentSwarmAuthorization: "none" },
     },
     { ownerFence: childFence },
   );

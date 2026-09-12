@@ -65,14 +65,14 @@ export interface RuntimeRunContinuationOf {
   readonly prefixDigest: string;
 }
 
-/** Trusted host decision frozen when a Run is admitted; absence means legacy/unauthorized. */
+/** Trusted host decision frozen as part of every current Run admission. */
 export type AgentSwarmAuthorizationSource = "none" | "session_mode" | "turn_override";
 
 export interface RuntimeRunStartedEvent extends RuntimeEventBase {
   readonly kind: "run.started";
   readonly data: {
     readonly workDir: string;
-    readonly agentSwarmAuthorization?: AgentSwarmAuthorizationSource;
+    readonly agentSwarmAuthorization: AgentSwarmAuthorizationSource;
     /** Host-owned presentation identity; model/runtime facts remain durable. */
     readonly presentation?: RuntimePresentationProvenance;
     /** 仅续跑目标 run 携带;普通 run 不得设置。 */
@@ -90,10 +90,10 @@ export interface RuntimeToolStartedEvent extends RuntimeEventBase {
   readonly data: {
     readonly toolName: string;
     readonly argumentsHash: string;
-    /** Legacy T1 facts may contain only the original argumentsHash. */
-    readonly argumentsJson?: string;
-    readonly argumentsRedacted?: boolean;
-    readonly recoveryMode?: ToolRecoveryMode;
+    readonly argumentsJson: string;
+    readonly argumentsRedacted: boolean;
+    readonly recoveryMode: ToolRecoveryMode;
+    /** Present only when the committed recovery policy has a stable binding key. */
     readonly recoveryKey?: string;
     readonly origin?: "model" | "code_mode";
   };

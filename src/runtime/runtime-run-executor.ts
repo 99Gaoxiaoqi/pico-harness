@@ -172,8 +172,8 @@ export class RuntimeRunExecutor {
       // reconcile 把崩溃 run 定形为 interrupted 后，store 原子落下 claim
       // 与 target run.started；prestartedRun 走已有的独立 admission 路径。
       const automaticContinuation = await this.startAutomaticContinuation(session);
-      // Exact legacy starts must be re-attached byte-for-byte; only inherit host provenance when
-      // this executor is admitting a fresh RuntimeRun.
+      // Prestarted admissions must be re-attached byte-for-byte; only inherit host provenance
+      // when this executor is admitting a fresh RuntimeRun.
       const presentation = prestartedRun ? prestartedRun.presentation : this.input.presentation;
       const runtimeRun =
         automaticContinuation ??
@@ -210,7 +210,6 @@ export class RuntimeRunExecutor {
         await this.input.onRunAdmission?.(runtimeRun);
         if (
           this.input.expectedAgentSwarmAuthorization !== undefined &&
-          runtimeRun.agentSwarmAuthorization !== undefined &&
           runtimeRun.agentSwarmAuthorization !== this.input.expectedAgentSwarmAuthorization
         ) {
           throw new Error(

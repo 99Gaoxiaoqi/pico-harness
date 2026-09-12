@@ -54,6 +54,7 @@ test("RuntimeRun exact admission atomically inserts or observes one canonical st
 
     assert.deepEqual(outcomes.map(({ status }) => status).sort(), ["admitted", "observed"]);
     assert.equal(new Set(outcomes.map(({ startEvent }) => JSON.stringify(startEvent))).size, 1);
+    assert.equal(outcomes[0]!.startEvent.data.agentSwarmAuthorization, "none");
     assert.equal(
       (
         await fixture.session.runtimeEventStore!.readRun(
@@ -107,17 +108,17 @@ test("Graph exact Run admits once under concurrency and replays the terminal led
   }
 });
 
-test("exact Run attachment preserves committed authorization and legacy absence despite later overrides", async () => {
+test("exact Run attachment preserves each committed current authorization despite later overrides", async () => {
   const fixture = await createFixture();
   try {
-    for (const authorization of [undefined, "none", "session_mode", "turn_override"] as const) {
-      const run = exactRun(fixture, `authorization-${authorization ?? "legacy"}`);
+    for (const authorization of ["none", "session_mode", "turn_override"] as const) {
+      const run = exactRun(fixture, `authorization-${authorization}`);
       const start = exactStartEvent(run);
       const admitted = {
         ...start,
         data: {
           ...start.data,
-          ...(authorization !== undefined ? { agentSwarmAuthorization: authorization } : {}),
+          agentSwarmAuthorization: authorization,
         },
       };
       await fixture.store.append(admitted, {
@@ -299,14 +300,20 @@ test("Graph exact inspection rejects a tool dispatch without pretending it is at
       ...base,
       eventId: input.runStartedEventId,
       kind: "run.started",
-      data: { workDir: input.workDir },
+      data: { workDir: input.workDir, agentSwarmAuthorization: "none" },
     },
     {
       ...base,
       eventId: "tool-started-indeterminate",
       refs: { stepId: "step-1", toolCallId: "tool-call-1" },
       kind: "tool.started",
-      data: { toolName: "bash", argumentsHash: "hash" },
+      data: {
+        toolName: "bash",
+        argumentsHash: "hash",
+        argumentsJson: "{}",
+        argumentsRedacted: true,
+        recoveryMode: "never_auto_retry",
+      },
     },
   ]);
   assert.equal(inspection.status, "indeterminate");
@@ -654,7 +661,7 @@ function exactStartEvent(
     ...exactEventBase(input),
     eventId: input.runStartedEventId,
     kind: "run.started",
-    data: { workDir: input.workDir },
+    data: { workDir: input.workDir, agentSwarmAuthorization: "none" },
   };
 }
 

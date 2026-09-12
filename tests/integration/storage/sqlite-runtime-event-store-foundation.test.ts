@@ -61,7 +61,7 @@ function started(eventId: string, sessionId: string, workDir: string): RuntimeEv
   return {
     ...eventBase(eventId, sessionId),
     kind: "run.started",
-    data: { workDir },
+    data: { workDir, agentSwarmAuthorization: "none" },
   };
 }
 
@@ -94,7 +94,13 @@ function toolStarted(
     ...eventBase(eventId, sessionId),
     refs: { toolCallId, providerCallId: "provider-1" },
     kind: "tool.started",
-    data: { toolName: "read", argumentsHash: "args-hash" },
+    data: {
+      toolName: "read",
+      argumentsHash: "args-hash",
+      argumentsJson: "{}",
+      argumentsRedacted: true,
+      recoveryMode: "never_auto_retry",
+    },
   };
 }
 

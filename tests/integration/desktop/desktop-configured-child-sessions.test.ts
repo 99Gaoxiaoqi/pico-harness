@@ -102,7 +102,7 @@ test("session list hides admitted children across workspaces and outcomes while 
     {
       ...base("parent", "start"),
       kind: "run.started",
-      data: { workDir: parentPath },
+      data: { workDir: parentPath, agentSwarmAuthorization: "none" },
     },
     { ownerFence: ownerFences.get(`${parentPath}\0parent`)! },
   );
@@ -115,7 +115,11 @@ test("session list hides admitted children across workspaces and outcomes while 
     const store = workDir === parentPath ? parent : isolated;
     const ownerFence = ownerFences.get(`${workDir}\0${id}`)!;
     await store.append(
-      { ...base(id, "start"), kind: "run.started", data: { workDir } },
+      {
+        ...base(id, "start"),
+        kind: "run.started",
+        data: { workDir, agentSwarmAuthorization: "none" },
+      },
       { ownerFence },
     );
     await store.append(
@@ -180,7 +184,7 @@ test("session list hides admitted children across workspaces and outcomes while 
     {
       ...base("missing-parent-path", "start"),
       kind: "run.started",
-      data: { workDir: childPath },
+      data: { workDir: childPath, agentSwarmAuthorization: "none" },
     },
     { ownerFence: malformedFence },
   );

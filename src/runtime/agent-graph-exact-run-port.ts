@@ -166,9 +166,7 @@ export class SqliteAgentGraphExactRunPort implements AgentGraphExactRunPort {
         invocationId: input.invocationId,
         runStartedEventId: input.runStartedEventId,
         runStartedAt: admitted.startEvent.at,
-        ...(admitted.startEvent.data.agentSwarmAuthorization !== undefined
-          ? { agentSwarmAuthorization: admitted.startEvent.data.agentSwarmAuthorization }
-          : {}),
+        agentSwarmAuthorization: admitted.startEvent.data.agentSwarmAuthorization,
         ...(admitted.startEvent.data.presentation ? { presentation: "internal" as const } : {}),
       };
       await this.options.execute({

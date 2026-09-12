@@ -179,7 +179,6 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
       assertString(value["data"]["workDir"], "run.started.workDir");
       assertRuntimePresentationProvenance(value["data"]["presentation"]);
       if (
-        value["data"]["agentSwarmAuthorization"] !== undefined &&
         !["none", "session_mode", "turn_override"].includes(
           value["data"]["agentSwarmAuthorization"] as string,
         )
@@ -359,8 +358,6 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
 }
 
 function assertToolArgumentAudit(data: Record<string, unknown>): void {
-  const fields = ["argumentsJson", "argumentsRedacted", "recoveryMode", "recoveryKey"];
-  if (fields.every((field) => data[field] === undefined)) return;
   if (
     typeof data["argumentsJson"] !== "string" ||
     typeof data["argumentsRedacted"] !== "boolean" ||

@@ -59,7 +59,7 @@ function started(
     ...eventBase(eventId, sessionId, runId),
     visibility: "internal",
     kind: "run.started",
-    data: { workDir },
+    data: { workDir, agentSwarmAuthorization: "none" },
   };
 }
 

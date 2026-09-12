@@ -356,12 +356,7 @@ export function createAgentGraphWorkspaceHost(
       );
       const start = events.find((event) => event.kind === "run.started");
       if (!start) return "none";
-      if (start.data.agentSwarmAuthorization !== undefined)
-        return start.data.agentSwarmAuthorization;
-      // Legacy Runs had no authorization header. Only their durable Graph intent is proof.
-      return (
-        requireApplication(application).graphSupervision(identity.graphId)?.authorization ?? "none"
-      );
+      return start.data.agentSwarmAuthorization;
     },
     preflight: ({ rootSessionId }) =>
       options.isRootSourceActive?.(rootSessionId)
