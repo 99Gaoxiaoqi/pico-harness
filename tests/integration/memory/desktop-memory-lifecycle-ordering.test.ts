@@ -4,11 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import {
-  createRuntimeRequest,
-  RUNTIME_ERROR_CODES,
-  RuntimeProtocolError,
-} from "../../../packages/protocol/src/index.js";
+import { createRuntimeRequest, RUNTIME_ERROR_CODES, RuntimeProtocolError } from "@pico/protocol";
 import {
   DesktopAtomicMemoryService,
   DesktopRuntimeService,

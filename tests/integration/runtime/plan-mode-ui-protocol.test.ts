@@ -59,6 +59,7 @@ test("Desktop hydration rebuilds pending, revision, and interrupted Plan control
       sessionId: "session-1",
       sessionSequence: 7,
       controlEpoch: "plan:pending:2",
+      operationId: "proposal-operation-1",
       pendingProposal: {
         planId: "plan-1",
         revision: 2,
@@ -76,6 +77,7 @@ test("Desktop hydration rebuilds pending, revision, and interrupted Plan control
       sessionId: "session-1",
       sessionSequence: 9,
       controlEpoch: "plan:revision:2",
+      operationId: "revision-operation-1",
       revisionRequest: {
         planId: "plan-1",
         expectedRevision: 2,
@@ -96,6 +98,7 @@ test("Desktop hydration rebuilds pending, revision, and interrupted Plan control
       sessionId: "session-1",
       sessionSequence: 11,
       controlEpoch: "plan:interrupted:2",
+      operationId: "interrupted-operation-1",
       execution: {
         planId: "plan-1",
         revision: 2,
@@ -130,6 +133,7 @@ test("Desktop consumes the versioned PlanControl snapshot and hides unavailable/
     sessionId: "session-1",
     sessionSequence: 7,
     controlEpoch: "plan:proposal:1",
+    operationId: "proposal-operation-1",
     proposals: [],
     pendingProposal: {
       planId: "plan-1",

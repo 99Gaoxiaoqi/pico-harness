@@ -20,6 +20,7 @@ import {
   COMPACTION_SUMMARY_OPEN_TAG,
   COMPACTION_SUMMARY_CLOSE_TAG,
 } from "../context/compaction-markers.js";
+import { computeCheckpointSourceDigest } from "../context/runtime-compaction-checkpoint.js";
 import {
   projectRuntimeModelMessage,
   projectRuntimeToolResultMessage,
@@ -948,7 +949,7 @@ export class RuntimeRun {
         await forkRun.recordImportedSeedEntry(seedEntries[index]!, identity.seedEventId(index));
       }
       if (modelCheckpoint) {
-        const coveredEventIds = forkCheckpointEventIds(
+        const coveredEntries = forkCheckpointEntries(
           await store.readSession(options.targetSessionId),
           seedEntries,
           identity,
@@ -958,8 +959,8 @@ export class RuntimeRun {
           eventId: identity.checkpointEventId,
           checkpointId: identity.checkpointId,
           coveredEventCount: modelCheckpoint.coveredMessageCount,
-          sourceDigest: runtimeEventIdDigest(coveredEventIds),
-          throughEventId: coveredEventIds.at(-1)!,
+          sourceDigest: computeCheckpointSourceDigest(coveredEntries),
+          throughEventId: coveredEntries.at(-1)!.eventId,
           summary: modelCheckpoint.summary,
         });
       }
@@ -2765,7 +2766,7 @@ function assertRuntimeForkCheckpoint(
     }
     return;
   }
-  const coveredEventIds = forkCheckpointEventIds(
+  const coveredEntries = forkCheckpointEntries(
     events,
     seedEntries,
     identity,
@@ -2777,8 +2778,8 @@ function assertRuntimeForkCheckpoint(
     existing.runId !== identity.runId ||
     existing.data.checkpointId !== identity.checkpointId ||
     existing.data.coveredEventCount !== checkpoint.coveredMessageCount ||
-    existing.data.sourceDigest !== runtimeEventIdDigest(coveredEventIds) ||
-    existing.data.throughEventId !== coveredEventIds.at(-1) ||
+    existing.data.sourceDigest !== computeCheckpointSourceDigest(coveredEntries) ||
+    existing.data.throughEventId !== coveredEntries.at(-1)?.eventId ||
     !isDeepStrictEqual(existing.data.summary, checkpoint.summary)
   ) {
     throw runtimeForkConflict(
@@ -2954,10 +2955,6 @@ function requiredForkEventIndex(
 
 function runtimeForkConflict(message: string): SessionForkRuntimeConflictError {
   return new SessionForkRuntimeConflictError(message, "target_conflict");
-}
-
-function runtimeEventIdDigest(eventIds: readonly string[]): string {
-  return createHash("sha256").update(eventIds.join("\n")).digest("hex");
 }
 
 function runtimeForkBootstrapAt(operationCreatedAt: string | undefined): string {
@@ -3201,6 +3198,17 @@ function forkCheckpointEventIds(
   identity: RuntimeForkBootstrapIdentity,
   coveredCount?: number,
 ): string[] {
+  return forkCheckpointEntries(events, entries, identity, coveredCount).map(
+    (entry) => entry.eventId,
+  );
+}
+
+function forkCheckpointEntries(
+  events: readonly RuntimeEvent[],
+  entries: readonly RuntimeSessionForkSeedEntry[],
+  identity: RuntimeForkBootstrapIdentity,
+  coveredCount?: number,
+): RuntimeHistoryProjectionEntry[] {
   const ids = new Set(
     entries.flatMap((entry, index) =>
       entry.kind === "model" ? [identity.seedEventId(index)] : [],
@@ -3217,7 +3225,7 @@ function forkCheckpointEventIds(
   ) {
     throw runtimeForkConflict("Runtime fork checkpoint splits interrupted recovery history");
   }
-  return covered.map((entry) => entry.eventId);
+  return covered;
 }
 
 function forkSeedPayload(entry: RuntimeSessionForkSeedEntry): unknown {

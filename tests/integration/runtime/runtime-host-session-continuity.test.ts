@@ -25,12 +25,8 @@ import {
   type SessionContinuityDataSource,
   type SessionSubscriptionSnapshot,
 } from "../../../src/daemon/session-subscription-owner.js";
-import type {
-  RuntimeParams,
-  RuntimeResult,
-  RuntimeSessionSubscriptionFrame,
-} from "../../../packages/protocol/src/index.js";
-import { RUNTIME_ERROR_CODES, RuntimeProtocolError } from "../../../packages/protocol/src/index.js";
+import type { RuntimeParams, RuntimeResult, RuntimeSessionSubscriptionFrame } from "@pico/protocol";
+import { RUNTIME_ERROR_CODES, RuntimeProtocolError } from "@pico/protocol";
 
 ensurePicoRuntimeHostOperationsRegistered();
 ensurePicoRuntimeHostSessionContinuityOperationsRegistered();

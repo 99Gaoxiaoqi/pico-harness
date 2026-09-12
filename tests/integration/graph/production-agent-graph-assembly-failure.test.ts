@@ -4,11 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import {
-  agentOutputRecordIdFor,
-  graphIdFor,
-  wakeIdFor,
-} from "../../../src/agent-graph/core/ids.js";
+import { agentOutputRecordIdFor, graphIdFor } from "../../../src/agent-graph/core/ids.js";
 import { createProductionRuntimeServices } from "../../../src/daemon/production-host.js";
 import { createRuntimeRequest } from "../../../packages/protocol/src/index.js";
 import { globalSessionManager } from "../../../src/engine/session.js";
@@ -173,7 +169,7 @@ test("foreground Graph greeting completes without requiring a scheduled operator
   }
 });
 
-test("production operator assembly failure becomes terminal and wakes the root without a live ghost", async () => {
+test("production operator settings assembly failure stays pre-admission without a live ghost", async () => {
   let operatorDispatches = 0;
   let rootWakeDispatches = 0;
   const fixture = await createProductionFixture({
@@ -279,35 +275,24 @@ test("production operator assembly failure becomes terminal and wakes the root w
     await fixture.host.application.supervisor.notifyGraph(graphId);
     await waitUntil(() => fixture.host.store.listActivationClaims(graphId).length === 1);
     const claim = fixture.host.store.listActivationClaims(graphId)[0]!;
-    const workspaceRun = await fixture.workspaceRuntime.waitForRun(claim.targetRunId);
-    assert.equal(workspaceRun.status, "failed");
-
     const events = await fixture.rootSession.runtimeEventStore!.readRun(
       claim.targetSessionId,
       claim.targetRunId,
     );
-    const terminal = events.find((event) => event.kind === "run.terminal");
-    assert.ok(terminal);
-    const wakeId = wakeIdFor(graphId, `runtime-terminal:${claim.targetRunId}:${terminal.eventId}`);
-    await waitUntil(() => fixture.host.store.getSupervisorWake(wakeId)?.status === "delivered");
-    assert.equal(terminal.data.status, "failed");
-    assert.equal(
-      events.some((event) => event.kind === "model.call.started"),
-      false,
-    );
-    assert.equal(
-      events.some((event) => event.kind === "tool.started"),
-      false,
+    assert.deepEqual(events, [], "settings assembly must fail before exact-run admission");
+    assert.equal(fixture.workspaceRuntime.getRun(claim.targetRunId), undefined);
+    assert.match(
+      fixture.host.store.listGraphDiagnostics(graphId, { unresolvedOnly: true })[0]?.message ?? "",
+      /missing\/operator-assembly-model/u,
     );
     const yieldSnapshot = await fixture.host.application.drivePort.readYieldSnapshot(graphId);
-    assert.equal(yieldSnapshot.executing, 0, "terminal operator must not remain live/executing");
+    assert.equal(yieldSnapshot.executing, 0, "pre-admission failure must not appear live");
     assert.equal(operatorDispatches, 0);
-    assert.equal(rootWakeDispatches, 1);
+    assert.equal(rootWakeDispatches, 0, "no terminal fact means no false root wake");
 
-    const terminalVersion = workspaceRun.version;
     await delay(150);
-    assert.equal(fixture.workspaceRuntime.getRun(claim.targetRunId)?.version, terminalVersion);
-    assert.equal(operatorDispatches, 0, "terminal operator assembly failure must not redispatch");
+    assert.equal(fixture.workspaceRuntime.getRun(claim.targetRunId), undefined);
+    assert.equal(operatorDispatches, 0, "pre-admission settings failure must not dispatch");
   } finally {
     await fixture.close();
   }

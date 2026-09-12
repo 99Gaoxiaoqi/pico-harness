@@ -8,7 +8,7 @@ import {
   createRuntimeRequest,
   RuntimeProtocolError,
   RUNTIME_ERROR_CODES,
-} from "../../../packages/protocol/src/index.js";
+} from "@pico/protocol";
 
 import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
 import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
@@ -25,12 +25,14 @@ import {
 import { createBuiltinAgentGraphOperatorProfileCatalog } from "../../../src/agent-graph/operator-profile-catalog.js";
 import { AgentGraphReconciler } from "../../../src/agent-graph/reconciler.js";
 import { SqliteAgentGraphControlStoreAdapter } from "../../../src/agent-graph/sqlite-control-store-adapter.js";
+import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 
 test("desktop rejects orchestration and permission switches while the root epoch is open", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-desktop-graph-mode-guard-"));
   const workspace = join(root, "workspace");
   const picoHome = join(root, "pico-home");
   await Promise.all([mkdir(workspace, { recursive: true }), mkdir(picoHome, { recursive: true })]);
+  await writeDesktopModelRouting(picoHome);
   const canonical = await realpath(workspace);
   const env = { PICO_HOME: picoHome };
   const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
@@ -90,6 +92,7 @@ test("finished Graph reconciliation retires operator authority before permission
   const workspace = join(root, "workspace");
   const picoHome = join(root, "pico-home");
   await Promise.all([mkdir(workspace, { recursive: true }), mkdir(picoHome, { recursive: true })]);
+  await writeDesktopModelRouting(picoHome);
   const canonical = await realpath(workspace);
   const env = { PICO_HOME: picoHome };
   const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
@@ -237,6 +240,7 @@ test("desktop session index excludes durable Graph operator Sessions", async () 
   const workspace = join(root, "workspace");
   const picoHome = join(root, "pico-home");
   await Promise.all([mkdir(workspace, { recursive: true }), mkdir(picoHome, { recursive: true })]);
+  await writeDesktopModelRouting(picoHome);
   const canonical = await realpath(workspace);
   const env = { PICO_HOME: picoHome };
   const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
@@ -311,6 +315,7 @@ test("desktop workspace unregister closes and evicts its cached Graph store", as
   const workspace = join(root, "workspace");
   const picoHome = join(root, "pico-home");
   await Promise.all([mkdir(workspace, { recursive: true }), mkdir(picoHome, { recursive: true })]);
+  await writeDesktopModelRouting(picoHome);
   const canonical = await realpath(workspace);
   const env = { PICO_HOME: picoHome };
   const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
@@ -358,6 +363,7 @@ test("desktop advances completed Graph transcripts without persisting internal r
   const workspace = join(root, "workspace");
   const picoHome = join(root, "pico-home");
   await Promise.all([mkdir(workspace, { recursive: true }), mkdir(picoHome, { recursive: true })]);
+  await writeDesktopModelRouting(picoHome);
   const canonical = await realpath(workspace);
   const env = { PICO_HOME: picoHome };
   const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
@@ -461,6 +467,7 @@ test("desktop deletion retires the root Graph before removing its Session", asyn
   const workspace = join(root, "workspace");
   const picoHome = join(root, "pico-home");
   await Promise.all([mkdir(workspace, { recursive: true }), mkdir(picoHome, { recursive: true })]);
+  await writeDesktopModelRouting(picoHome);
   const canonical = await realpath(workspace);
   const env = { PICO_HOME: picoHome };
   const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
@@ -541,6 +548,7 @@ test("desktop Graph wake retry enforces Session and Graph ownership", async () =
   const workspace = join(root, "workspace");
   const picoHome = join(root, "pico-home");
   await Promise.all([mkdir(workspace, { recursive: true }), mkdir(picoHome, { recursive: true })]);
+  await writeDesktopModelRouting(picoHome);
   const canonical = await realpath(workspace);
   const env = { PICO_HOME: picoHome };
   const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
@@ -645,6 +653,7 @@ test("desktop stop replays delivery after Graph finish and rejects another Sessi
   const workspace = join(root, "workspace");
   const picoHome = join(root, "home");
   await mkdir(workspace, { recursive: true });
+  await writeDesktopModelRouting(picoHome);
   const canonical = await realpath(workspace);
   const env = { PICO_HOME: picoHome };
   const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });

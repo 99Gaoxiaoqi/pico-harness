@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createRuntimeRequest } from "../../../packages/protocol/src/index.js";
+import { createRuntimeRequest } from "@pico/protocol";
 import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
 import { globalSessionManager } from "../../../src/engine/session.js";
 import { materializeRuntimeHistory } from "../../../src/engine/session-runtime-read-model.js";
@@ -30,14 +30,15 @@ test("Desktop 新输入先收尾中断批次，再开始执行；重复请求不
       return { ok: true };
     },
   });
-  const sessionId = "interrupted-input";
   const desktop = new DesktopRuntimeService({
     runtimeService: runtime,
     trustStore,
     env,
-    createSessionId: () => sessionId,
   });
-  await desktop.handle(createRuntimeRequest("session.create", { workspacePath }));
+  const created = (await desktop.handle(
+    createRuntimeRequest("session.create", { workspacePath }),
+  )) as { session: { sessionId: string } };
+  const sessionId = created.session.sessionId;
   const lease = await globalSessionManager.getOrCreatePinned(sessionId, workspacePath, {
     persistence: true,
     picoHome,

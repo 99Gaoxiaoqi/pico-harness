@@ -185,7 +185,7 @@ test("transcript item hydration: RPC items convert into a projectable transcript
     ],
     "s1",
   );
-  assert.equal(events.length, 5, "goal 无 TranscriptEntry 对应 kind，应跳过");
+  assert.equal(events.length, 6, "goal 应跳过，终态工具应水化为起止两个事件");
   const store = new TranscriptEventStore({ initialEvents: events });
   const kinds = store.getProjection().entries.map(({ entry }) => entry.kind);
   assert.deepEqual([...new Set(kinds)].sort(), [

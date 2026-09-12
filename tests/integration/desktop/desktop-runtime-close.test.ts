@@ -5,11 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate as waitForImmediate } from "node:timers/promises";
 import { test } from "node:test";
-import {
-  createRuntimeRequest,
-  RUNTIME_ERROR_CODES,
-  RuntimeProtocolError,
-} from "../../../packages/protocol/src/index.js";
+import { createRuntimeRequest, RUNTIME_ERROR_CODES, RuntimeProtocolError } from "@pico/protocol";
 import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
 import { globalSessionManager } from "../../../src/engine/session.js";
 import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";

@@ -211,6 +211,8 @@ test("daemon candidate: runtime.shutdown gracefully stops the resident daemon", 
   assert.equal(result.kind, "connected", `期望 connected，实际 ${JSON.stringify(result)}`);
   if (result.kind !== "connected") return;
   const connection = result.connection;
+  const status = await waitForReadyStatus(connection, 15_000);
+  assert.equal(status.state, "ready");
 
   const registration = await readHostRegistration(controlDirectory);
   assert.ok(registration, "daemon 应有 registration");
