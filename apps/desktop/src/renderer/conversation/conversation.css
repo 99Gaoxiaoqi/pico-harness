@@ -2171,6 +2171,24 @@
   height: 14px;
   flex: none;
 }
+
+.conversation-web-search {
+  margin-top: 10px;
+  color: var(--conversation-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.conversation-web-search summary {
+  cursor: pointer;
+}
+.conversation-web-search pre {
+  white-space: pre-wrap;
+  max-height: 160px;
+  overflow: auto;
+}
+.conversation-web-search li {
+  margin: 6px 0;
+}
 .composer-model-notice {
   display: flex;
   gap: 6px;

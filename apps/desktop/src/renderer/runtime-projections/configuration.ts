@@ -68,6 +68,9 @@ function parseProviderProfile(value: JsonRecord, index: number): ProviderView {
       : [],
     discoverModels: booleanValue(value.discoverModels),
     ...(isRecord(value.modelCapabilities) ? { modelCapabilities: value.modelCapabilities } : {}),
+    ...(isRecord(value.resolvedModelCapabilities)
+      ? { resolvedModelCapabilities: value.resolvedModelCapabilities }
+      : {}),
     origin: providerOrigin(value.origin),
     fingerprint: stringValue(value.fingerprint),
     credentialStatus: providerCredentialStatus(value.credentialStatus),
@@ -96,6 +99,11 @@ export function parseUserDefaults(value: unknown): UserDefaultsView {
       : {}),
     ...(stringValue(defaults.thinkingEffort)
       ? { thinkingEffort: stringValue(defaults.thinkingEffort) }
+      : {}),
+    ...(isRecord(defaults.webSearch) &&
+    typeof defaults.webSearch.enabled === "boolean" &&
+    (defaults.webSearch.source === "model" || defaults.webSearch.source === "external")
+      ? { webSearch: { enabled: defaults.webSearch.enabled, source: defaults.webSearch.source } }
       : {}),
   };
 }

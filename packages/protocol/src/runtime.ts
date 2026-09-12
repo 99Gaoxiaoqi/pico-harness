@@ -136,6 +136,7 @@ export type {
 export type {
   RuntimeProviderInput,
   RuntimeProviderProfile,
+  RuntimeModelRouteCapabilities,
   RuntimeUserDefaults,
   RuntimeUserConfig,
   RuntimeEffectiveConfig,

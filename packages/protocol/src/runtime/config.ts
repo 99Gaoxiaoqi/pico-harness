@@ -51,7 +51,16 @@ export type RuntimeProviderInput = JsonObject & {
   readonly modelCapabilities?: JsonObject;
 };
 
+export type RuntimeModelRouteCapabilities = {
+  readonly nativeWebSearch: {
+    readonly available: boolean;
+    readonly reason: string;
+    readonly adapter?: "openai-web-search" | "anthropic-web-search";
+  };
+};
+
 export type RuntimeProviderProfile = RuntimeProviderInput & {
+  readonly resolvedModelCapabilities?: Readonly<Record<string, RuntimeModelRouteCapabilities>>;
   readonly origin: Extract<RuntimeConfigSource, "user" | "environment">;
   readonly fingerprint: string;
   readonly credentialStatus: RuntimeCredentialStatus;
@@ -66,6 +75,7 @@ export type RuntimeUserDefaults = JsonObject & {
   readonly orchestrationMode?: RuntimeOrchestrationMode;
   readonly permissionMode?: RuntimePermissionMode;
   readonly thinkingEffort?: string;
+  readonly webSearch?: { readonly enabled: boolean; readonly source: "model" | "external" };
 };
 
 export type RuntimeUserConfig = JsonObject & {
@@ -130,6 +140,11 @@ export const runtimeUserDefaultsParam: RuntimeParamRule = (value, path) => {
       orchestrationMode: orchestrationModeParam,
       permissionMode: permissionModeParam,
       thinkingEffort: stringParam,
+      webSearch: (value, path) =>
+        assertNestedShape(value, path, {
+          enabled: booleanParam,
+          source: oneOfParam(["model", "external"]),
+        }),
     },
   );
 };
@@ -150,6 +165,21 @@ const runtimeProviderInputResult = resultShape(
   },
 );
 
+const resolvedModelCapabilitiesResult: RuntimeResultRule = (value, path) => {
+  resultJsonObject(value, path);
+  const capability = exactResultShape({
+    nativeWebSearch: exactResultShape(
+      {
+        available: resultBoolean,
+        reason: resultString,
+      },
+      { adapter: resultOneOf(["openai-web-search", "anthropic-web-search"]) },
+    ),
+  });
+  for (const [model, metadata] of Object.entries(value as JsonObject))
+    capability(metadata, `${path}.${model}`);
+};
+
 const runtimeProviderProfileResult = resultShape(
   {
     id: resultString,
@@ -165,6 +195,7 @@ const runtimeProviderProfileResult = resultShape(
     storedCredentialPresent: resultBoolean,
   },
   {
+    resolvedModelCapabilities: resolvedModelCapabilitiesResult,
     modelCapabilities: resultJsonObject,
     modelProtocols: resultJsonObject,
     auth: resultOneOf(["api-key", "none"]),
@@ -179,6 +210,10 @@ const runtimeUserDefaultsResult = exactResultShape(
     orchestrationMode: resultOneOf(["default", "graph", "swarm"]),
     permissionMode: resultOneOf(["ask", "auto", "full-access"]),
     thinkingEffort: resultString,
+    webSearch: exactResultShape({
+      enabled: resultBoolean,
+      source: resultOneOf(["model", "external"]),
+    }),
   },
 );
 

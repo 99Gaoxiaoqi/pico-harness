@@ -44,6 +44,7 @@ export interface PicoUserConfigDefaults {
   readonly orchestrationMode?: PicoOrchestrationMode;
   readonly permissionMode?: PicoPermissionMode;
   readonly thinkingEffort?: string;
+  readonly webSearch?: { readonly enabled: boolean; readonly source: "model" | "external" };
 }
 
 export interface PicoUserConfigV1 {
@@ -600,13 +601,35 @@ function parseDefaults(value: unknown, configPath: string): PicoUserConfigDefaul
   ) {
     throw configError(configPath, "defaults.thinkingEffort", "must be a non-empty string");
   }
+  const webSearch = parseUserWebSearch(value["webSearch"], configPath);
   return {
+    ...(webSearch !== undefined ? { webSearch } : {}),
     ...(modelRouteId !== undefined ? { modelRouteId } : {}),
     ...(collaborationMode !== undefined ? { collaborationMode } : {}),
     ...(orchestrationMode !== undefined ? { orchestrationMode } : {}),
     ...(permissionMode !== undefined ? { permissionMode } : {}),
     ...(typeof thinkingEffort === "string" ? { thinkingEffort: thinkingEffort.trim() } : {}),
   };
+}
+
+export function parseUserWebSearch(
+  value: unknown,
+  configPath: string,
+): PicoUserConfigDefaults["webSearch"] {
+  if (value === undefined) return undefined;
+  if (
+    !isRecord(value) ||
+    Object.keys(value).some((key) => key !== "enabled" && key !== "source") ||
+    typeof value["enabled"] !== "boolean" ||
+    (value["source"] !== "model" && value["source"] !== "external")
+  ) {
+    throw configError(
+      configPath,
+      "defaults.webSearch",
+      "must contain only enabled:boolean and source:model|external",
+    );
+  }
+  return { enabled: value["enabled"], source: value["source"] };
 }
 
 function emptyUserConfig(): PicoUserConfig {
