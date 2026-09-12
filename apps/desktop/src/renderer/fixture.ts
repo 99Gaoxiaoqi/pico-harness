@@ -200,10 +200,13 @@ export const previewData: AppData = {
     {
       id: "approval-test",
       runId: "run-atlas",
+      kind: "tool",
       title: "允许执行测试命令？",
       detail: "命令只会读取项目文件，并在本地临时目录写入测试产物。",
       command: "npm test -- sync-conflict.integration.test.ts",
       risk: "low",
+      toolName: "bash",
+      providerCallId: "preview-call",
     },
   ],
   prompts: [

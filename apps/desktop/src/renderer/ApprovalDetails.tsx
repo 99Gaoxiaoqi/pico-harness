@@ -1,7 +1,7 @@
 import type { ApprovalSessionScopeView } from "@pico/protocol";
-import type { ApprovalView } from "./model.js";
+import type { ToolApprovalView } from "./model.js";
 
-export function approvalActionTitle(approval: ApprovalView): string {
+export function approvalActionTitle(approval: ToolApprovalView): string {
   switch (approval.toolName) {
     case "write_file":
       return "写入文件";
@@ -78,7 +78,7 @@ function ScopeDescription({ scope }: { readonly scope: ApprovalSessionScopeView 
   }
 }
 
-function operationPreview(approval: ApprovalView): { label: string; text: string | undefined } {
+function operationPreview(approval: ToolApprovalView): { label: string; text: string | undefined } {
   const fallback = {
     label:
       approval.toolName === "bash"
@@ -108,7 +108,7 @@ function operationPreview(approval: ApprovalView): { label: string; text: string
   return fallback;
 }
 
-export function ApprovalDetails({ approval }: { readonly approval: ApprovalView }) {
+export function ApprovalDetails({ approval }: { readonly approval: ToolApprovalView }) {
   const operation = operationPreview(approval);
   return (
     <div className="approval-details">

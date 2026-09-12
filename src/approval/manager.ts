@@ -48,6 +48,8 @@ export interface ApprovalPreview {
 }
 
 export interface ApprovalNotice {
+  /** Human approval manager only emits ordinary tool approvals. */
+  readonly kind: "tool";
   taskId: string;
   toolName: string;
   args: string;
@@ -64,8 +66,6 @@ export interface ApprovalNotice {
   diff?: string;
   /** 当前审批可应用的结构化 session 权限更新。 */
   sessionScope?: PermissionSessionScope;
-  /** Plan-only: identity of the durable plan.* fact backing this control card. */
-  controlEpoch?: string;
 }
 
 /** 通知回调:由调用方注入(飞书发卡片 / 终端打印 / HTTP 推送) */
@@ -174,6 +174,7 @@ Agent 试图执行以下动作:
 
       // 通过通知通道发送审批请求(diff 可选,计算失败时为 undefined)
       notify({
+        kind: "tool",
         taskId,
         toolName,
         args,

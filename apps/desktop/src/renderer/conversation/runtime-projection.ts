@@ -26,6 +26,7 @@ export function approvalFromPlanProjection(
 ): ApprovalView | undefined {
   const projection = isRecord(value) ? value : undefined;
   const controlEpoch = projection ? stringValue(projection.controlEpoch) : "";
+  const projectionOperationId = projection ? stringValue(projection.operationId) : "";
   const pending =
     projection && isRecord(projection.pendingProposal) ? projection.pendingProposal : undefined;
   const execution = projection && isRecord(projection.execution) ? projection.execution : undefined;
@@ -35,6 +36,7 @@ export function approvalFromPlanProjection(
   if (
     !projection ||
     !controlEpoch ||
+    !projectionOperationId ||
     isRecord(projection.reviewClaim) ||
     (!pending && execution?.status !== "interrupted" && !graphExecution && !revisionRequest)
   ) {
@@ -86,6 +88,7 @@ export function approvalFromPlanProjection(
       expectedRevision: revision,
       expectedSessionSequence: sessionSequence,
       controlEpoch,
+      planOperationId: projectionOperationId,
       planSteps: recordArray(execution.steps)
         .map((step) => stringValue(step.title))
         .filter(Boolean),
@@ -112,6 +115,7 @@ export function approvalFromPlanProjection(
     expectedRevision: revision,
     expectedSessionSequence: sessionSequence,
     controlEpoch,
+    planOperationId: projectionOperationId,
     planTitle: stringValue(pending.title) || undefined,
     planOverview: stringValue(pending.overview) || undefined,
     planSteps: steps.length ? steps : undefined,
@@ -313,15 +317,35 @@ function conversationItem(item: JsonRecord, index: number): ConversationItemView
   if (item.kind === "approval") {
     const data = isRecord(item.data) ? item.data : {};
     const decision = stringValue(data.decision ?? item.state);
-    const approval = parseDesktopToolApproval({
-      approvalId: stringValue(data.approvalId, id),
-      request: data,
-    });
+    const runId = stringValue(data.runId);
+    const approval =
+      data.kind === "tool" && runId
+        ? parseDesktopToolApproval(
+            {
+              approvalId: stringValue(data.approvalId),
+              runId,
+              request: {
+                kind: data.kind,
+                title: data.title,
+                detail: data.detail,
+                risk: data.risk,
+                toolName: data.toolName,
+                args: data.args,
+                providerCallId: data.providerCallId,
+                ...(data.command === undefined ? {} : { command: data.command }),
+                ...(data.diff === undefined ? {} : { diff: data.diff }),
+                ...(data.sessionScope === undefined ? {} : { sessionScope: data.sessionScope }),
+              },
+            },
+            { runId },
+          )
+        : undefined;
+    if (item.state === "waiting" && data.kind !== "plan" && !approval) return undefined;
     return {
       id: structuredItemId("approval", data, id),
       kind: "approval",
-      runId: stringValue(data.runId) || undefined,
-      approvalKind: data.kind === "plan" || data.planId || data.plan ? "plan" : "tool",
+      runId: runId || undefined,
+      approvalKind: data.kind === "plan" ? "plan" : data.kind === "tool" ? "tool" : undefined,
       command: approval?.command,
       risk: approval?.risk,
       diff: approval?.diff,

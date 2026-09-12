@@ -16,40 +16,20 @@ import { isJsonObject, isJsonValue, type JsonObject } from "@pico/protocol";
  * transportSafeRuntimeNotification 分级裁剪兜底，无需发射侧截断。
  */
 export function buildApprovalRequestedPayload(notice: ApprovalNotice, runId: string): JsonObject {
-  const planNotice = notice as ApprovalNotice & {
-    readonly kind?: string;
-    readonly planId?: string;
-    readonly expectedRevision?: number;
-    readonly expectedSessionSequence?: number;
-    readonly plan?: unknown;
-  };
-  const isPlan =
-    planNotice.kind === "plan" ||
-    notice.toolName === "exit_plan_mode" ||
-    notice.toolName === "submit_plan";
   return jsonObject({
     approvalId: notice.taskId,
     runId,
     request: {
+      kind: "tool",
       title: "需要你的批准",
       detail: notice.preview?.summary ?? notice.message,
       toolName: notice.toolName,
       args: notice.args,
-      ...(notice.providerCallId ? { providerCallId: notice.providerCallId } : {}),
+      providerCallId: notice.providerCallId,
       ...(notice.preview?.target ? { command: notice.preview.target } : {}),
       ...(notice.diff ? { diff: notice.diff } : {}),
       ...(notice.sessionScope ? { sessionScope: notice.sessionScope } : {}),
       risk: "high",
-      ...(isPlan
-        ? {
-            kind: "plan",
-            planId: planNotice.planId ?? notice.taskId,
-            expectedRevision: planNotice.expectedRevision ?? 0,
-            expectedSessionSequence: planNotice.expectedSessionSequence ?? 0,
-            ...(planNotice.plan !== undefined ? { plan: planNotice.plan } : {}),
-            actions: ["execute", "continue_editing", "reject_exit"],
-          }
-        : {}),
     },
   });
 }

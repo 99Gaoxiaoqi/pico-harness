@@ -58,6 +58,8 @@ export interface PlanProjection {
   readonly sessionSequence: number;
   /** Stable identity of the latest durable plan.* control fact. */
   readonly controlEpoch?: string;
+  /** Operation identity carried by the latest durable plan.* control fact. */
+  readonly operationId?: string;
   readonly proposals: readonly PlanProposal[];
   readonly latestProposal?: PlanProposal;
   readonly pendingProposal?: PlanProposal;

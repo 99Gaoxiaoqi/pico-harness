@@ -284,6 +284,7 @@ export function reducePlanEvent(state: PlanProjection, event: RuntimeEvent): Pla
     sessionId: state.sessionId,
     sessionSequence: state.sessionSequence,
     controlEpoch: event.eventId,
+    operationId: event.data.operationId,
     proposals,
     ...(proposals.at(-1) ? { latestProposal: proposals.at(-1) } : {}),
     ...(pendingProposal ? { pendingProposal } : {}),

@@ -4,16 +4,16 @@ import type { ApprovalView } from "../model.js";
 /** Preserve the same authorized scope and preview on live notifications and replay. */
 export function parseDesktopToolApproval(
   payload: unknown,
-  context: { readonly runId?: string; readonly sessionId?: string } = {},
+  context: { readonly runId: string; readonly sessionId?: string },
 ): ApprovalView | undefined {
   const approval = parseApprovalRequestedPayload(payload);
-  if (!approval || approval.kind === "plan") return undefined;
+  if (!approval || approval.kind === "plan" || approval.runId !== context.runId) return undefined;
   return {
     id: approval.approvalId,
-    runId: approval.runId ?? context.runId ?? "",
+    runId: approval.runId,
     sessionId: context.sessionId,
-    title: approval.title ?? "需要你的批准",
-    detail: approval.detail ?? "Runtime 请求执行受保护操作。",
+    title: approval.title,
+    detail: approval.detail,
     command: approval.command,
     risk: approval.risk,
     kind: approval.kind,

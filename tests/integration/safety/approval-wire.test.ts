@@ -26,6 +26,7 @@ function toolNotice(overrides: Partial<ApprovalNotice> = {}): ApprovalNotice {
     message: "需要修改 a.txt",
     preview: { target: "a.txt", summary: "修改 a.txt" },
     ...overrides,
+    kind: "tool",
   };
 }
 
@@ -48,6 +49,7 @@ test("buildApprovalRequestedPayload carries providerCallId/diff/sessionScope on 
   assert.equal(payload["approvalId"], "approval_1");
   assert.equal(payload["runId"], "run_1");
   assert.equal(request["command"], "a.txt");
+  assert.equal(request["kind"], "tool");
   assert.equal(request["risk"], "high");
 
   // 构造 → 解析成对：view 读回全部新字段（TUI 消费面同源语义）。
@@ -66,7 +68,7 @@ test("network session scope survives the approval wire", () => {
   assert.deepEqual(parseApprovalRequestedPayload(payload)?.sessionScope, { type: "network" });
 });
 
-test("buildApprovalRequestedPayload omits absent optionals and keeps plan shape", () => {
+test("buildApprovalRequestedPayload omits absent optionals and never infers Plan from tool name", () => {
   // bash 无 diff/无 sessionScope（引擎 computeApprovalDiff 对非编辑工具返回 undefined）。
   const toolPayload = buildApprovalRequestedPayload(
     toolNotice({ toolName: "bash", diff: undefined, sessionScope: undefined, preview: undefined }),
@@ -77,29 +79,11 @@ test("buildApprovalRequestedPayload omits absent optionals and keeps plan shape"
   assert.ok(!("sessionScope" in toolRequest));
   assert.ok(!("command" in toolRequest));
 
-  const planPayload = buildApprovalRequestedPayload(
-    toolNotice({
-      toolName: "exit_plan_mode",
-      providerCallId: "",
-      ...({
-        kind: "plan",
-        planId: "plan_42",
-        expectedRevision: 3,
-        expectedSessionSequence: 7,
-        plan: { title: "计划", steps: [{ title: "步骤一" }] },
-      } as unknown as Partial<ApprovalNotice>),
-    }),
+  const namedLikeOldPlan = buildApprovalRequestedPayload(
+    toolNotice({ toolName: "submit_plan" }),
     "run_1",
   );
-  const planRequest = planPayload["request"] as Record<string, unknown>;
-  assert.equal(planRequest["kind"], "plan");
-  assert.equal(planRequest["planId"], "plan_42");
-  assert.equal(planRequest["expectedRevision"], 3);
-  assert.deepEqual(planRequest["actions"], ["execute", "continue_editing", "reject_exit"]);
-  assert.ok(!("providerCallId" in planRequest), "空 providerCallId 不上 wire");
-  const view = parseApprovalRequestedPayload(planPayload);
-  assert.equal(view?.kind, "plan");
-  assert.deepEqual(view?.planSteps, ["步骤一"]);
+  assert.equal((namedLikeOldPlan["request"] as Record<string, unknown>)["kind"], "tool");
 });
 
 test("fresh ask mode asks before the first workspace write", async () => {

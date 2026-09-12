@@ -90,11 +90,7 @@ export function ConversationInteractionSlot({
         </h2>
         <p>{approval.planOverview ?? approval.detail}</p>
       </div>
-      {planApproval ? (
-        approval.command && <pre>{approval.command}</pre>
-      ) : (
-        <ApprovalDetails approval={approval} />
-      )}
+      {approval.kind === "tool" && <ApprovalDetails approval={approval} />}
       {approval.planSteps && (
         <ol>
           {approval.planSteps.map((step) => (
