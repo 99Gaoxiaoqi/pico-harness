@@ -72,7 +72,7 @@ export function SettingsPage() {
         </div>
         {webSearch.source === "model" && (
           <p className="settings-section__note">
-            工作区或会话选择其他模型时，以该模型能力为准。
+            工作区或会话选择其他模型时，以该模型能力为准。原生搜索无法逐次审批；任务需要审批或执行搜索拦截规则时，请选择外部搜索服务。
             <Link to="/settings/models">模型设置</Link>
           </p>
         )}

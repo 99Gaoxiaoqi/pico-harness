@@ -183,7 +183,7 @@ test("session continuity accepts projected tool identity metadata", () => {
     nextSequence: 1,
     watermark: {
       historyEpoch: "history-1",
-      projectorVersion: 4,
+      projectorVersion: 5,
       throughSequence: 1,
     },
     durableTail: [
@@ -229,7 +229,7 @@ test("transcript result boundary rejects retired tool, run and interaction alias
   const result = (item: unknown) => ({
     watermark: {
       historyEpoch: "history-1",
-      projectorVersion: 4,
+      projectorVersion: 5,
       throughSequence: 1,
     },
     items: [

@@ -482,9 +482,14 @@ const runtimeConversationItemResult: RuntimeResultRule = (value, path) => {
     return;
   }
   if (kind === "assistantMessage" || kind === "thinking") {
-    exactItem({ content: resultString }, { runId: resultString, turnId: resultString,
-      ...(kind === "assistantMessage" ? { webSearch: resultJsonObject } : {}),
-    });
+    exactItem(
+      { content: resultString },
+      {
+        runId: resultString,
+        turnId: resultString,
+        ...(kind === "assistantMessage" ? { webSearch: resultJsonObject } : {}),
+      },
+    );
     return;
   }
   if (kind === "skill") {

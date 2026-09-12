@@ -3430,9 +3430,10 @@ function transcriptMutationsForEvent(
         },
       });
     }
-    const webSearch = message.role === "assistant"
-      ? asJsonRecord(message.providerData?.["picoWebSearch"])
-      : undefined;
+    const webSearch =
+      message.role === "assistant"
+        ? asJsonRecord(message.providerData?.["picoWebSearch"])
+        : undefined;
     if (message.role === "assistant" && (content || webSearch)) {
       const itemId = `message:${event.turnId}:assistant`;
       mutations.push({

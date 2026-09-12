@@ -77,3 +77,66 @@ test(
     );
   },
 );
+
+// The user's current official DeepSeek route supports Responses but does not establish native search.
+// Run separately from the positive probe; this is an explicit compatibility/unsupported-path check.
+test(
+  "real official DeepSeek Responses answers normally while native search remains unavailable",
+  { skip: process.env.PICO_DEEPSEEK_RESPONSES_E2E !== "1", timeout: 130_000 },
+  async () => {
+    const { resolveModelRouteCapabilities } =
+      await import("../../src/provider/model-capabilities.js");
+    const { resolveNativeWebSearchCapability } =
+      await import("../../src/provider/model-web-search.js");
+    const model = process.env.PICO_NATIVE_SEARCH_MODEL ?? "deepseek-v4-flash";
+    const baseURL = "https://api.deepseek.com";
+    const apiKey = process.env.PICO_NATIVE_SEARCH_API_KEY;
+    assert.ok(apiKey, "Set PICO_NATIVE_SEARCH_API_KEY for the official DeepSeek route");
+    const capabilities = resolveModelRouteCapabilities(
+      "responses",
+      model,
+      { output: 128 },
+      { baseURL },
+    );
+    const provider = new AiSdkProvider("responses", {
+      model,
+      baseURL,
+      apiKey,
+      capabilities,
+      thinkingEffort: "none",
+    });
+    let prepared = false;
+    const answer = await provider.generate([{ role: "user", content: "Reply only OK." }], [], {
+      timeoutMs: 120_000,
+      onRequestPrepared: ({ provider: wire, body }) => {
+        prepared = true;
+        assert.equal(wire, "responses");
+        assert.equal(body.model, model);
+        assert.ok(
+          !Array.isArray(body.tools) || !body.tools.some((tool) => tool.type === "web_search"),
+        );
+      },
+    });
+    assert.ok(prepared);
+    assert.match(answer.content, /OK/i);
+    assert.equal(answer.providerData?.picoWebSearch, undefined);
+    assert.equal(
+      resolveNativeWebSearchCapability({ provider: "responses", model, baseURL }).available,
+      false,
+    );
+    await assert.rejects(
+      provider.generate(
+        [{ role: "user", content: "Search now." }],
+        [
+          {
+            name: "web_search",
+            description: "Search",
+            inputSchema: { type: "object" },
+            providerTool: { kind: "openai-web-search" },
+          },
+        ],
+      ),
+      /DeepSeek|native|原生/i,
+    );
+  },
+);
