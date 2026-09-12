@@ -55,7 +55,7 @@ for (const planning of [false, true]) {
               modelName: "test/swarm-parity",
               generate: async (messages, tools) => {
                 const names = tools?.map((tool) => tool.name) ?? [];
-                if (options.planMode) {
+                if (options.collaborationMode === "plan") {
                   assert.equal(dependencies.agentGraph, undefined);
                   assert.equal(names.includes("update_agent_graph"), false);
                   return toolCall("submit", "submit_plan", {

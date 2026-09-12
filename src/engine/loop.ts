@@ -345,7 +345,7 @@ export interface AgentEngineOptions {
   registry: Registry;
   /** 工作区:借鉴 OpenClaw 理念,Agent 必须有明确的物理边界 */
   workDir: string;
-  /** 系统提示词;由 PromptComposer 动态组装。planMode 开启时此项被忽略 */
+  /** 系统提示词;由 PromptComposer 动态组装。Plan 协作模式开启时此项被忽略 */
   systemPrompt?: string;
   /** Host-owned prompt composition with session-scoped memory and runtime state. */
   systemPromptFactory?: () => Promise<string>;
@@ -363,13 +363,7 @@ export interface AgentEngineOptions {
   thinkingEffort?: string;
   /** 当前主会话的稳定模型路由标识。 */
   modelRouteId?: string;
-  /**
-   * 计划模式开关 (第 13 讲)。
-   * 开启后,每次 run 动态用 PromptComposer 组装 System Prompt,
-   * 注入"状态外部化强制规范",引导大模型读写 PLAN.md / TODO.md 管理长程任务。
-   */
-  planMode?: boolean;
-  /** Runtime-owned dynamic collaboration mode; takes precedence over legacy planMode. */
+  /** Runtime-owned dynamic collaboration mode. */
   collaborationMode?: () => "agent" | "plan";
   /** Run-scoped latch marked by submit_plan after durable proposal creation. */
   planHandoff?: PlanHandoffController;
@@ -415,14 +409,14 @@ export interface AgentEngineOptions {
   usageSession?: Session;
   /**
    * Goal Manager 单例(ROADMAP 3.5 Goal Mode)。
-   * 注入后:planMode 时 PromptComposer 会把 active goal 注入本轮 turn tail。
+   * 注入后:Plan 协作模式时 PromptComposer 会把 active goal 注入本轮 turn tail。
    * 必须与 buildDefaultToolRegistry 传入的是同一实例,确保工具与引擎状态一致。
    * 未提供则 Goal Mode 不生效,行为不变。
    */
   goalManager?: GoalManager;
   /**
    * TodoStore 单例(ROADMAP 补充任务 2026-07-07)。
-   * 注入后:planMode 时 PromptComposer 每轮动态重组会复用此实例,
+   * 注入后:Plan 协作模式时 PromptComposer 每轮动态重组会复用此实例,
    * 与 TodoTool 共享同一实例,确保工具改的状态 prompt 立即可见。
    * 必须与 buildDefaultToolRegistry 传入的是同一实例(根治跨实例不可见 bug)。
    * 未提供则行为不变(单进程单实例场景不受影响)。
@@ -445,11 +439,6 @@ export interface AgentEngineOptions {
    * Runtime 持久化、Hook 与 trace 前按完整字符串替换；工具参数不能扩充此列表。
    */
   toolResultRedactionSecrets?: readonly string[];
-  /**
-   * Plan Mode 退出回调(ROADMAP 3.6)。
-   * ExitPlanModeTool 审批通过、engine.exitPlanMode() 触发后调用,供 host 监听。
-   */
-  onPlanExit?: () => void;
   /** 输出 Reporter;默认静默 (第 09 讲) */
   reporter?: Reporter;
   /**
@@ -511,8 +500,6 @@ export class AgentEngine {
   private readonly promptLayersFactory?: AgentEngineOptions["promptLayersFactory"];
   private readonly thinkingEffort: string;
   private readonly modelRouteId?: string;
-  // planMode 非 readonly:ExitPlanMode 审批通过后由 exitPlanMode() 置 false。
-  private planMode: boolean;
   private readonly contextBudget?: ContextBudget;
   private readonly autoCompactTriggerRatio: number;
   private readonly memoryHooks?: {
@@ -538,16 +525,14 @@ export class AgentEngine {
    * 避免每个请求都用自己的 costBefore 导致重复计费。
    */
   private readonly accountedSessionCostCNY = new WeakMap<Session, number>();
-  /** Goal Manager 单例(可选);planMode 注入本轮 turn tail 并执行预算控制 */
+  /** Goal Manager 单例(可选);Plan 协作模式下注入本轮 turn tail 并执行预算控制 */
   private readonly goalManager?: GoalManager;
-  /** TodoStore 单例(可选);planMode 下 PromptComposer 复用,与 TodoTool 共享 */
+  /** TodoStore 单例(可选);Plan 协作模式下 PromptComposer 复用,与 TodoTool 共享 */
   private readonly todoStore?: TodoStore;
   /** 工具渐进披露(可选);注入后每轮只把核心+已披露工具喂给 LLM */
   private readonly toolDisclosure?: ToolDisclosure;
   private readonly onTurn?: (info: { turn: number; message: Message }) => void;
   private readonly toolResultRedactionSecrets: readonly string[];
-  /** Plan Mode 退出回调(ExitPlanMode 审批通过后触发),供 host 监听 */
-  private readonly onPlanExit?: () => void;
   private readonly reporter: Reporter;
   private readonly tracer?: Tracer;
   /**
@@ -583,7 +568,6 @@ export class AgentEngine {
     this.promptLayersFactory = opts.promptLayersFactory;
     this.thinkingEffort = opts.thinkingEffort ?? "off";
     this.modelRouteId = opts.modelRouteId;
-    this.planMode = opts.planMode ?? false;
     this.contextBudget = opts.contextBudget;
     this.memoryHooks = opts.memoryHooks;
     this.autoCompactTriggerRatio =
@@ -605,7 +589,6 @@ export class AgentEngine {
     this.toolResultRedactionSecrets = normalizeToolResultRedactionSecrets(
       opts.toolResultRedactionSecrets,
     );
-    this.onPlanExit = opts.onPlanExit;
     this.reporter = opts.reporter ?? new SilentReporter();
     this.tracer = opts.tracer;
     this.steerQueue = opts.steerQueue;
@@ -625,10 +608,7 @@ export class AgentEngine {
   }
 
   private isPlanning(): boolean {
-    return (
-      this.collaborationMode?.() === "plan" ||
-      (this.collaborationMode === undefined && this.planMode)
-    );
+    return this.collaborationMode?.() === "plan";
   }
 
   private rotateProvider(
@@ -659,8 +639,8 @@ export class AgentEngine {
         turnTail: "",
       };
     }
-    if (this.planMode) {
-      // 兼容直接构造 AgentEngine 的调用方，同时把动态状态移出 system prefix。
+    if (this.isPlanning()) {
+      // 直接构造 AgentEngine 时也只读取当前协作状态，并把动态状态移出 system prefix。
       const opts: ConstructorParameters<typeof PromptComposer>[2] = {};
       if (this.goalManager) opts.goalManager = this.goalManager;
       if (this.todoStore) opts.todoStore = this.todoStore;
@@ -677,16 +657,6 @@ export class AgentEngine {
       systemPrompt: this.systemPrompt,
       turnTail: "",
     };
-  }
-
-  /**
-   * 退出 Plan Mode(ROADMAP 3.6)。
-   * 由 ExitPlanModeTool 审批通过后经 onExit 回调间接触发。
-   * 置 planMode=false,并通知 host 注入的 onPlanExit 监听者。
-   */
-  exitPlanMode(): void {
-    this.planMode = false;
-    this.onPlanExit?.();
   }
 
   /**
@@ -1295,15 +1265,16 @@ export class AgentEngine {
     await session.flushPersistence();
     const reporter = runtimeReporter ?? this.reporter;
     const tracer = runtimeTracer ?? this.tracer;
+    const collaborationMode = this.collaborationMode?.() ?? "agent";
     const rootSpan = tracer?.startRoot("Agent.Run", {
       sessionId: session.id,
       workDir: session.workDir,
-      planMode: this.planMode,
+      collaborationMode,
     });
     reporter.onStart(this.workDir);
     logger.info(
-      { sessionId: session.id, workDir: session.workDir, planMode: this.planMode },
-      `[Engine] 唤醒会话 [${session.id}],锁定工作区: ${session.workDir} (PlanMode: ${this.planMode})`,
+      { sessionId: session.id, workDir: session.workDir, collaborationMode },
+      `[Engine] 唤醒会话 [${session.id}],锁定工作区: ${session.workDir} (CollaborationMode: ${collaborationMode})`,
     );
 
     const runHistory = await this.readModelHistory(session);
@@ -1358,7 +1329,7 @@ export class AgentEngine {
         await this.runtimePort?.currentRun()?.assertNoUnresolvedToolEffects();
         // 首轮直接复用 run 开始时的分层结果，避免重复组装。后续轮次只刷新
         // turnTail，使 TodoStore/GoalManager 等共享状态可见；systemPrompt 保持冻结。
-        if (turnCount > 1 && (this.promptLayersFactory || this.planMode)) {
+        if (turnCount > 1 && (this.promptLayersFactory || this.isPlanning())) {
           const fresh = await this.buildPromptLayers(currentUserPrompt, signal);
           turnTail = fresh.turnTail;
         }

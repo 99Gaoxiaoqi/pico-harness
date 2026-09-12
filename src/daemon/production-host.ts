@@ -1087,10 +1087,10 @@ export function createProductionRuntimeServices(
             model: route.model,
             modelRouteId: route.modelRouteId,
             modelCapabilities: route.capabilities,
+            collaborationMode: planning ? ("plan" as const) : ("agent" as const),
             orchestrationMode,
             agentSwarmAuthorization,
             ...(reasoningLevel !== undefined ? { thinkingEffort: reasoningLevel } : {}),
-            ...(planning ? { planMode: true } : {}),
             ...(persistedSettings
               ? {
                   rewindCollaborationMode: persistedSettings.collaborationMode,
@@ -1233,7 +1233,7 @@ export function createProductionRuntimeServices(
                       operationId: planTransitionOperationId,
                       claimOperationId: planReview.operationId,
                     },
-                    execution: { ...runtimeOptions, planMode: false },
+                    execution: runtimeOptions,
                   },
                   runtimeHost,
                 )
@@ -1246,7 +1246,7 @@ export function createProductionRuntimeServices(
                       expectedSessionSequence: planReview.expectedSessionSequence,
                       operationId: planTransitionOperationId!,
                       claimOperationId: planReview.operationId,
-                      execution: { ...runtimeOptions, planMode: false },
+                      execution: runtimeOptions,
                     },
                     runtimeHost,
                   )
@@ -1260,7 +1260,7 @@ export function createProductionRuntimeServices(
                         operationId: planTransitionOperationId!,
                         claimOperationId: planReview.operationId,
                         prompt: planReview.feedback ?? "请根据中断原因重新规划后续步骤。",
-                        execution: { ...runtimeOptions, planMode: true },
+                        execution: runtimeOptions,
                       },
                       runtimeHost,
                     )
@@ -1269,7 +1269,6 @@ export function createProductionRuntimeServices(
                         ? {
                             ...runtimeOptions,
                             prompt: `[PLAN REVISION FEEDBACK]\n${planReview.feedback ?? "请继续修改计划。"}`,
-                            planMode: true,
                           }
                         : runtimeOptions,
                       runtimeHost,

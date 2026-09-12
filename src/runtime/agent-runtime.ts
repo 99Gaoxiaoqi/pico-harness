@@ -684,7 +684,6 @@ export class AgentRuntime {
           dir: workDir,
           sessionSelection: { mode: "resume", sessionId: session.id },
           prompt: input.prompt,
-          planMode: true,
         },
         planControlExecutionHost(input, host),
       );
@@ -1030,7 +1029,6 @@ export async function executeAgentRuntime(
         permissionMode: configuredChildBoundaryCeiling.kind === "bypass" ? "full-access" : "ask",
         orchestrationMode: "default",
         agentSwarmAuthorization: "none",
-        planMode: false,
       };
     }
     if (resumeExistingSession && dependencies.runtimeState === undefined) {
@@ -1282,7 +1280,7 @@ export async function executeAgentRuntime(
       dir: workDir,
       sessionSelection,
       model: options.model ?? settings.model,
-      planMode: backgroundPolicy ? false : collaborationMode() === "plan",
+      collaborationMode: backgroundPolicy ? "agent" : collaborationMode(),
       orchestrationMode: backgroundPolicy ? "default" : orchestrationMode(),
       trace: traceEnabled,
       addDirs: backgroundPolicy ? [] : [...settings.additionalDirectories],
@@ -2196,7 +2194,6 @@ export async function executeAgentRuntime(
       ...(effectiveOptions.modelRouteId !== undefined
         ? { modelRouteId: effectiveOptions.modelRouteId }
         : {}),
-      planMode: effectiveOptions.planMode ?? false,
       collaborationMode,
       planHandoff,
       ...(dependencies.agentGraph?.kind === "root"
@@ -3003,8 +3000,11 @@ async function prepareBackgroundExecution(
   dependencies: RunAgentCliDependencies,
   picoHome: string,
 ): Promise<PreparedBackgroundAutonomousPolicy> {
-  if (options.planMode === true) {
-    throw new BackgroundPolicyViolationError("invalid_policy", "后台无人值守执行不支持 planMode。");
+  if (options.collaborationMode === "plan") {
+    throw new BackgroundPolicyViolationError(
+      "invalid_policy",
+      "后台无人值守执行不支持 Plan 协作模式。",
+    );
   }
   if ((options.addDirs?.length ?? 0) > 0) {
     throw new BackgroundPolicyViolationError(
