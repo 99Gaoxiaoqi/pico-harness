@@ -289,7 +289,6 @@ class ExclusiveCaseLocks {
     try {
       for (const key of keys) {
         const hash = createHash("sha256").update(key).digest("hex");
-        await recoverLegacyLock(root, hash);
         acquired.push(
           await OwnerLease.acquire({
             leaseDirectory: join(root, `${hash}.lease`),
@@ -1782,27 +1781,6 @@ async function secureLockDirectory(path: string): Promise<void> {
   await chmod(path, LOCK_DIRECTORY_MODE);
 }
 
-async function recoverLegacyLock(root: string, hash: string): Promise<void> {
-  const path = join(root, `${hash}.lock`);
-  let raw: string;
-  try {
-    raw = await readFile(path, "utf8");
-  } catch (error) {
-    if (isErrnoCode(error, "ENOENT")) return;
-    throw error;
-  }
-  const pid = Number(raw.trim());
-  if (!Number.isSafeInteger(pid) || pid <= 0 || isProcessAlive(pid)) {
-    throw new HeadlessRequestError(
-      "CASE_RESOURCE_CONFLICT",
-      "Another live or unverifiable headless case owns one of the requested resources.",
-    );
-  }
-  await unlink(path).catch((error: unknown) => {
-    if (!isErrnoCode(error, "ENOENT")) throw error;
-  });
-}
-
 async function releaseCaseLocks(locks: ExclusiveCaseLocks): Promise<boolean> {
   try {
     await locks.release();
@@ -1831,15 +1809,6 @@ function clearPendingLockRelease(locks: ExclusiveCaseLocks): void {
   const state = pendingLockReleases.get(locks);
   if (state?.timer) clearTimeout(state.timer);
   pendingLockReleases.delete(locks);
-}
-
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return !isErrnoCode(error, "ESRCH");
-  }
 }
 
 function credentialCandidates(...credentials: readonly string[]): readonly string[] {
