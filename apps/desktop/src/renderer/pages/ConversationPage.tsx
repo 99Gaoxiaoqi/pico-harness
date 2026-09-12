@@ -571,7 +571,7 @@ export function ConversationPage() {
     if (item.kind === "tool") {
       const result = item.result;
       const evidenceUri = result?.evidence?.uri;
-      const inspectorContent = (content: string, pageLabel?: string) => (
+      const inspectorContent = (content: string) => (
         <div>
           {result && (
             <p>
@@ -580,8 +580,7 @@ export function ConversationPage() {
               {result.deliveryTruncated ? " · Host 投影已截断" : ""}
             </p>
           )}
-          {evidenceUri && <p>Evidence：{evidenceUri}</p>}
-          {pageLabel && <p>{pageLabel}</p>}
+          {evidenceUri && <p>旧 Evidence 引用（仅保留元数据，不可回读）：{evidenceUri}</p>}
           <pre className="conversation-inspector-output">{content}</pre>
         </div>
       );
@@ -590,28 +589,6 @@ export function ConversationPage() {
         subtitle: item.toolName,
         content: inspectorContent(item.output ?? item.detail ?? "没有可显示的输出。"),
       });
-      if (evidenceUri && sessionId) {
-        void actions
-          .readToolEvidence({
-            workspacePath,
-            sessionId,
-            evidenceUri,
-            limitBytes: 64 * 1024,
-          })
-          .then((page) => {
-            if (!page) return;
-            setInspector({
-              title: item.title,
-              subtitle: item.toolName,
-              content: inspectorContent(
-                page.content,
-                `Evidence bytes ${page.offsetBytes}-${page.endOffsetBytes} / ${page.totalBytes}${
-                  page.truncated ? " · 尚有后续分页" : ""
-                }`,
-              ),
-            });
-          });
-      }
       return;
     }
     if (item.kind === "subagent") {

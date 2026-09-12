@@ -27,7 +27,6 @@ import {
   removeCliSessionFile,
 } from "../cli/session-resolver.js";
 import { createContextBudget, estimateMessagesTokens } from "../context/context-budget.js";
-import { EvidenceArchive, parseEvidenceUri } from "../context/evidence-archive.js";
 import { FullCompactor } from "../context/full-compactor.js";
 import { recordRuntimeCompactionCheckpoint } from "../context/runtime-compaction-checkpoint.js";
 import { SkillLoader } from "../context/skill.js";
@@ -40,10 +39,7 @@ import {
   workspaceConfigurationDiagnosticFromRuntime,
 } from "../diagnostics/workspace-doctor.js";
 import { SessionForkService } from "../engine/session-fork-service.js";
-import {
-  projectRuntimeSessionActiveToolResultEntries,
-  projectRuntimeSessionState,
-} from "../engine/session-runtime-projection.js";
+import { projectRuntimeSessionState } from "../engine/session-runtime-projection.js";
 import { globalSessionManager, Session } from "../engine/session.js";
 import type { PersistedSessionSettings } from "../engine/session-runtime.js";
 import {
@@ -78,11 +74,7 @@ import {
 import { type CredentialVault } from "../provider/credential-vault.js";
 import { resolveProviderProfile } from "../provider/profile.js";
 import type { ProviderOperationJournal } from "../provider/provider-operation-journal.js";
-import {
-  canonicalizeWorkspacePath as canonicalizeManifestWorkspaceForm,
-  resolvePicoHome,
-  resolvePicoPaths,
-} from "../paths/pico-paths.js";
+import { resolvePicoHome, resolvePicoPaths } from "../paths/pico-paths.js";
 import {
   readExistingSqliteSessionEventSlice,
   SqliteRuntimeEventStore,
@@ -151,17 +143,6 @@ import { createDesktopCatalogRequestHandlers } from "./desktop-catalog-request-h
 import { createDesktopAutomationRequestHandlers } from "./desktop-automation-request-handlers.js";
 import { canonicalizeWorkspacePath, resolveGitBranch } from "./workspace-registry.js";
 import { WorkspaceStorageRepairService } from "./workspace-storage-repair.js";
-
-/**
- * manifest.workDir 的写入侧（engine 经 pico-paths 的 canonicalizeWorkspacePath）
- * 与本服务读取校验侧（workspace-registry 的同名函数）是两套规范化：前者在
- * win32 上小写化物理路径，后者保留大小写并解析 git 顶��——两者在 Windows
- * 上凡路径含大写即分叉，会话归属校验必然误判（3-D 冒烟首次触发的既有 bug）。
- * 归属比较必须用写入侧的规范化形态复现：registry canonical → pico-paths 形态。
- */
-function manifestWorkspaceForm(registryCanonical: string): string {
-  return canonicalizeManifestWorkspaceForm(registryCanonical);
-}
 
 function unavailableWorkspaceStatus(workspacePath: string): WorkspaceStatusResult {
   return {
@@ -699,7 +680,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         updateRuntimeSessionSettings: this.updateRuntimeSessionSettings.bind(this),
         getGoal: this.getGoal.bind(this),
         sendSession: this.sendSession.bind(this),
-        readSessionEvidence: this.readSessionEvidence.bind(this),
         cancelRun: this.cancelRun.bind(this),
         withProviderDependencyLock: (operation) =>
           this.providerConfig.withProviderDependencyLock(operation),
@@ -2287,76 +2267,6 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       await this.conversationStateStore.clearQueued(canonical, sessionId);
     }
     return result;
-  }
-
-  private async readSessionEvidence(
-    params: RuntimeRequest<"session.evidence.read">["params"],
-  ): Promise<JsonValue> {
-    const canonical = await canonicalizeWorkspacePath(params.workspacePath);
-    await this.requireSession(canonical, params.sessionId);
-    // 票 04:evidence 授权点查只消费 tool.result.recorded(跨可见度的 active
-    // ToolResult 投影),kind 切片 + manifest,不再全量投影。
-    // 票 E3(ADR 26 §2.4):Evidence 回读协议已退役,本 RPC 降级为旧
-    // `storage:"evidence"` 事件的诊断分页读——新会话不再产生 evidence 引用。
-    const sliceSnapshot = await readExistingSqliteSessionEventSlice({
-      storageRoot: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.root,
-      sessionId: params.sessionId,
-      kinds: ["tool.result.recorded"],
-    });
-    if (!sliceSnapshot || sliceSnapshot.manifest.workDir !== manifestWorkspaceForm(canonical)) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.NOT_FOUND,
-        `Session ${params.sessionId} 不属于工作区 ${canonical}`,
-      );
-    }
-
-    let uriReference;
-    try {
-      uriReference = parseEvidenceUri(params.evidenceUri);
-    } catch (error) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.INVALID_PARAMS,
-        error instanceof Error ? error.message : String(error),
-      );
-    }
-    // Fork 会保留 source-session Evidence ref。授权边界不是 URI 内的 sessionId，
-    // 而是当前 active branch 是否确实包含引用它的 canonical ToolResult。
-    const reference = projectRuntimeSessionActiveToolResultEntries(sliceSnapshot.slice.entries)
-      .map(({ envelope }) => envelope.evidence?.ref)
-      .find(
-        (candidate) =>
-          candidate?.sessionId === uriReference.sessionId &&
-          candidate.contentHash === uriReference.contentHash &&
-          candidate.kind === "tool-exchange",
-      );
-    if (!reference) {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.NOT_FOUND,
-        "当前 Session 未引用该 Evidence",
-      );
-    }
-    const page = await new EvidenceArchive({
-      baseDir: resolvePicoPaths(canonical, { picoHome: this.picoHome }).workspace.evidence,
-    }).readEvidencePage(reference, {
-      ...(params.offsetBytes !== undefined ? { offsetBytes: params.offsetBytes } : {}),
-      ...(params.limitBytes !== undefined ? { limitBytes: params.limitBytes } : {}),
-    });
-    if (page.kind !== "tool-exchange") {
-      throw new RuntimeProtocolError(
-        RUNTIME_ERROR_CODES.NOT_FOUND,
-        "Evidence 不是 ToolResult exchange",
-      );
-    }
-    return {
-      evidenceUri: params.evidenceUri,
-      content: page.content,
-      offsetBytes: page.offsetBytes,
-      endOffsetBytes: page.endOffsetBytes,
-      totalBytes: page.totalBytes,
-      limitBytes: page.limitBytes,
-      truncated: page.truncated,
-      ...(page.nextOffsetBytes !== undefined ? { nextOffsetBytes: page.nextOffsetBytes } : {}),
-    };
   }
 
   private async ensureSessionForMessage(

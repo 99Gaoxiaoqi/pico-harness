@@ -7,9 +7,12 @@ import {
   isRuntimeMethod,
 } from "@pico/protocol";
 
-test("session continuity v2 rejects removed transcript and workspace live paths", () => {
+test("session continuity v2 rejects removed transcript, Evidence, and workspace live paths", () => {
   assert.equal(isRuntimeMethod("session.transcript"), false);
   assert.equal(RUNTIME_METHODS.includes("session.transcript" as never), false);
   assert.equal(DESKTOP_RUNTIME_METHODS.includes("session.transcript" as never), false);
+  assert.equal(isRuntimeMethod("session.evidence.read"), false);
+  assert.equal(RUNTIME_METHODS.includes("session.evidence.read" as never), false);
+  assert.equal(DESKTOP_RUNTIME_METHODS.includes("session.evidence.read" as never), false);
   assert.equal(isEphemeralRuntimeNotificationTopic("run.live"), false);
 });

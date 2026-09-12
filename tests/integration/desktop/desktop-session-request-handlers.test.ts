@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createTypedRuntimeRequest } from "../../../packages/protocol/src/index.js";
+import {
+  createTypedRuntimeRequest,
+  DESKTOP_RUNTIME_METHODS,
+  RUNTIME_METHODS,
+} from "../../../packages/protocol/src/index.js";
 import type { DesktopRequestHandlers } from "../../../src/daemon/desktop-request-router.js";
 import {
   createDesktopSessionRequestHandlers,
@@ -35,10 +39,6 @@ test("desktop session handlers keep protocol mapping separate from the service o
       calls.push(`send:${params.input.text}`);
       return { disposition: "started" };
     },
-    readSessionEvidence: async (params) => ({
-      evidenceUri: params.evidenceUri,
-      content: "page",
-    }),
     cancelRun: async (_workspacePath, runId) => ({ runId, cancelled: true }),
     withProviderDependencyLock: async (operation) => await operation(),
     runStart: async () => ({ started: true }),
@@ -95,21 +95,10 @@ test("desktop session handlers keep protocol mapping separate from the service o
     { sessionId: "session-1", deleted: true },
   );
 
-  const readEvidence = handlers[
-    "session.evidence.read"
-  ] as DesktopRequestHandlers["session.evidence.read"];
-  assert.ok(readEvidence);
-  assert.deepEqual(
-    await readEvidence(
-      createTypedRuntimeRequest("session.evidence.read", {
-        workspacePath: "/workspace",
-        sessionId: "session-1",
-        evidenceUri: `pico://evidence/session-1/${"a".repeat(64)}`,
-      }),
-    ),
-    {
-      evidenceUri: `pico://evidence/session-1/${"a".repeat(64)}`,
-      content: "page",
-    },
+  assert.equal(Object.hasOwn(handlers, "session.evidence.read"), false);
+  assert.equal((RUNTIME_METHODS as readonly string[]).includes("session.evidence.read"), false);
+  assert.equal(
+    (DESKTOP_RUNTIME_METHODS as readonly string[]).includes("session.evidence.read"),
+    false,
   );
 });

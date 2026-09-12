@@ -4,7 +4,6 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { seedRuntimeToolExchange } from "../helpers/legacy-evidence-fixture.js";
 import { DesktopReporter } from "../../../src/daemon/desktop-reporter.js";
 import type { SessionHydrationSnapshot } from "../../../src/engine/session-runtime.js";
 import {
@@ -15,11 +14,7 @@ import { createCanonicalTranscriptToolStart } from "../../../src/engine/transcri
 import { Session } from "../../../src/engine/session.js";
 import type { DurableTranscriptEvent } from "../../../src/presentation/transcript-event-store.js";
 import { RuntimeRun } from "../../../src/runtime/runtime-run.js";
-import {
-  createEvidenceInspectorContext,
-  createToolInspectorSource,
-  readInspectorPage,
-} from "../../../src/tui/inspector.js";
+import { createToolInspectorSource, readInspectorPage } from "../../../src/tui/inspector.js";
 import { hydrateTuiEntries, hydrateTuiReporter } from "../../../src/tui/session-hydration.js";
 import { TuiReporter } from "../../../src/tui/tui-reporter.js";
 
@@ -84,21 +79,14 @@ test("TUI projects a Runtime-owned tool start without persisting it twice", asyn
   assert.equal(tool.providerCallId, start.providerCallId);
 });
 
-test("TUI Inspector pages canonical Evidence retained from a fork source Session", async (context) => {
-  const root = await mkdtemp(join(tmpdir(), "pico-tool-result-inspector-"));
-  context.after(() => rm(root, { recursive: true, force: true }));
-  // pico-paths 布局:<storageRoot>/evidence,清单行落 <storageRoot>/pico.sqlite。
-  const evidenceRoot = join(root, "evidence");
+test("TUI Inspector keeps only bounded preview and metadata for retired Evidence", async () => {
   const raw = "第一行\nsecond line\n";
-  const reference = await seedRuntimeToolExchange({
-    evidenceRoot,
+  const reference = {
+    schemaVersion: 2 as const,
     sessionId: "session-a",
-    toolCallId: "call-evidence",
-    toolName: "bash",
-    rawArguments: "{}",
-    rawOutput: raw,
-    isError: false,
-  });
+    contentHash: "a".repeat(64),
+    kind: "tool-exchange" as const,
+  };
   const envelope = createToolResultEnvelope({
     toolCallId: "call-evidence",
     toolName: "bash",
@@ -124,25 +112,13 @@ test("TUI Inspector pages canonical Evidence retained from a fork source Session
   assert.ok(tool);
   assert.equal(tool.resultAvailability, "evidence");
 
-  const contextA = createEvidenceInspectorContext({
-    workDir: "/unused",
-    sessionId: "session-a",
-    evidenceBaseDir: evidenceRoot,
-  });
-  const source = createToolInspectorSource(tool, contextA);
-  assert.equal(source?.kind, "evidence");
-  assert.equal((await readInspectorPage(source!, { limitBytes: 256 })).content, raw);
-
-  const forkSource = createToolInspectorSource(
-    tool,
-    createEvidenceInspectorContext({
-      workDir: "/unused",
-      sessionId: "session-b",
-      evidenceBaseDir: evidenceRoot,
-    }),
-  );
-  assert.equal(forkSource?.kind, "evidence");
-  assert.equal((await readInspectorPage(forkSource!, { limitBytes: 256 })).content, raw);
+  const source = createToolInspectorSource(tool);
+  assert.equal(source?.kind, "inline");
+  assert.equal(source?.availability, "unavailable");
+  const page = await readInspectorPage(source!, { limitBytes: 256 });
+  assert.match(page.content, /第一行/u);
+  assert.match(page.content, new RegExp(`pico://evidence/session-a/${reference.contentHash}`, "u"));
+  assert.doesNotMatch(page.content, /second line/u);
 });
 
 test("Desktop Reporter forwards raw size, hash and Evidence metadata from one envelope", () => {
