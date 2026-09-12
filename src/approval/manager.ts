@@ -300,10 +300,6 @@ export const globalApprovalManager = new ApprovalManager();
  * 启发式风险标签：只作为隔离 worker 的纵深拒绝信号，不能证明未命中操作安全。
  * 前台 ask/auto 的允许或询问由受信工具能力分类决定，不使用本黑名单作为授权依据。
  *
- * 【架构师注】本实现为硬编码演示。生产环境应改造为支持外部配置
- * (.claw/permissions.yaml)+ 运行时热更新 (Hot-Reload) 的动态权限判定引擎,
- * 参考 Claude Code 的 allow/ask/deny 三态分类。
- *
  * 黑名单设计原则:宁可误报,不可把“未命中”解释成安全。
  * 覆盖所有已知删除/破坏/提权/覆盖变体。
  */

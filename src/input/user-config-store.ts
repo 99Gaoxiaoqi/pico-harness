@@ -246,7 +246,7 @@ export class UserConfigStore {
       } catch (error) {
         throw new Error(`用户配置 JSON 已损坏: ${this.filePath}`, { cause: error });
       }
-      return { config: parsePersistedUserConfig(parsed, this.filePath), revision: sha256(raw) };
+      return { config: parseUserConfig(parsed, this.filePath), revision: sha256(raw) };
     } finally {
       await handle?.close().catch(() => undefined);
     }
@@ -513,24 +513,11 @@ export class UserConfigStore {
 }
 
 export function parseUserConfig(value: unknown, configPath: string): PicoUserConfig {
-  return parseUserConfigValue(value, configPath, false);
-}
-
-/** Durable config.json decoder only. Live config/RPC writes use parseUserConfig above. */
-function parsePersistedUserConfig(value: unknown, configPath: string): PicoUserConfig {
-  return parseUserConfigValue(value, configPath, true);
-}
-
-function parseUserConfigValue(
-  value: unknown,
-  configPath: string,
-  allowLegacyModes: boolean,
-): PicoUserConfig {
   if (!isRecord(value)) throw configError(configPath, "root", "must be an object");
   if (value["version"] !== USER_CONFIG_VERSION) {
     throw configError(configPath, "version", `must equal ${USER_CONFIG_VERSION}`);
   }
-  const defaults = parseDefaults(value["defaults"], configPath, allowLegacyModes);
+  const defaults = parseDefaults(value["defaults"], configPath);
   return {
     version: USER_CONFIG_VERSION,
     ...(defaults !== undefined ? { defaults } : {}),
@@ -563,11 +550,7 @@ function parseUserModelProviderConfigs(
   );
 }
 
-function parseDefaults(
-  value: unknown,
-  configPath: string,
-  allowLegacyModes: boolean,
-): PicoUserConfigDefaults | undefined {
+function parseDefaults(value: unknown, configPath: string): PicoUserConfigDefaults | undefined {
   if (value === undefined) return undefined;
   if (!isRecord(value)) throw configError(configPath, "defaults", "must be an object");
   const modelRouteId = parseModelRouteId(
@@ -576,19 +559,11 @@ function parseDefaults(
     "defaults.modelRouteId",
   );
   const rawMode = value["mode"];
-  if (rawMode !== undefined && !allowLegacyModes) {
+  if (rawMode !== undefined) {
     throw configError(
       configPath,
       "defaults.mode",
-      "is a persisted-file migration field; use collaborationMode and permissionMode",
-    );
-  }
-  const migratedMode = normalizePersistedInteractionMode(rawMode);
-  if (rawMode !== undefined && migratedMode === undefined) {
-    throw configError(
-      configPath,
-      "defaults.mode",
-      "must be ask, plan, auto, full-access, default, or yolo",
+      "is not supported; use collaborationMode and permissionMode",
     );
   }
   const collaborationMode = value["collaborationMode"];
@@ -634,17 +609,9 @@ function parseDefaults(
   }
   return {
     ...(modelRouteId !== undefined ? { modelRouteId } : {}),
-    ...(collaborationMode !== undefined
-      ? { collaborationMode }
-      : migratedMode !== undefined
-        ? { collaborationMode: migratedMode === "plan" ? "plan" : "agent" }
-        : {}),
+    ...(collaborationMode !== undefined ? { collaborationMode } : {}),
     ...(orchestrationMode !== undefined ? { orchestrationMode } : {}),
-    ...(permissionMode !== undefined
-      ? { permissionMode }
-      : migratedMode !== undefined
-        ? { permissionMode: migratedMode === "plan" ? "ask" : migratedMode }
-        : {}),
+    ...(permissionMode !== undefined ? { permissionMode } : {}),
     ...(typeof thinkingEffort === "string" ? { thinkingEffort: thinkingEffort.trim() } : {}),
   };
 }
@@ -741,19 +708,6 @@ function isUnsupportedDirectorySync(error: unknown): boolean {
     isErrnoCode(error, "ENOTSUP") ||
     isErrnoCode(error, "EPERM")
   );
-}
-
-function isRuntimeInteractionMode(value: unknown): value is PicoInteractionMode {
-  return value === "ask" || value === "plan" || value === "auto" || value === "full-access";
-}
-
-function normalizePersistedInteractionMode(
-  value: unknown,
-): PicoInteractionMode | undefined {
-  if (isRuntimeInteractionMode(value)) return value;
-  if (value === "default") return "ask";
-  if (value === "yolo") return "full-access";
-  return undefined;
 }
 
 function configError(configPath: string, field: string, detail: string): Error {
