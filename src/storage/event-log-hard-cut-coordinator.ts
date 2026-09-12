@@ -24,8 +24,6 @@ const CRON_RUN_TERMINAL_STATUSES = [
   "blocked",
   "skipped",
 ] as const;
-const MEMORY_JOB_TERMINAL_STATUSES = new Set(["succeeded", "failed", "cancelled"]);
-
 export type EventLogHardCutBlockerKind =
   | "task_run"
   | "task_attempt"
@@ -34,7 +32,6 @@ export type EventLogHardCutBlockerKind =
   | "control_daemon_run"
   | "control_cron_run"
   | "control_completion"
-  | "memory_job"
   | "storage_operation";
 
 export interface EventLogHardCutBlocker {
@@ -144,7 +141,7 @@ export function coordinateEventLogHardCut(
     }
 
     const sessionIds = readStringColumn(database, "SELECT session_id AS id FROM sessions", "id");
-    const blockers = collectBlockers(database, new Set(sessionIds));
+    const blockers = collectBlockers(database);
     if (blockers.length > 0) {
       database.exec("COMMIT");
       return { status: "blocked", blockers };
@@ -154,7 +151,6 @@ export function coordinateEventLogHardCut(
     const cutoverId = randomUUID();
     const candidates = collectGcCandidates(database);
     persistGcIntents(database, cutoverId, committedAt, candidates);
-    invalidateMemorySessionReferences(database, cutoverId, committedAt);
     clearControlWeakReferences(database);
     database.prepare("DELETE FROM storage_operations").run();
     clearAttachmentRows(database);
@@ -242,10 +238,7 @@ function assertCompatibleEpoch(marker: EventLogEpochMarker): void {
   }
 }
 
-function collectBlockers(
-  database: DatabaseSync,
-  sessionIds: ReadonlySet<string>,
-): EventLogHardCutBlocker[] {
+function collectBlockers(database: DatabaseSync): EventLogHardCutBlocker[] {
   const blockers = [
     ...collectTaskRunBlockers(database),
     queryBlocker(
@@ -281,7 +274,6 @@ function collectBlockers(
          AND (j.owner_session_id IS NOT NULL OR j.child_session_id IS NOT NULL)
        ORDER BY c.completion_id`,
     ),
-    ...collectMemoryJobBlockers(database, sessionIds),
     queryBlocker(
       database,
       "storage_operation",
@@ -356,150 +348,6 @@ function collectTaskRunBlockers(database: DatabaseSync): EventLogHardCutBlocker[
   ];
 }
 
-function collectMemoryJobBlockers(
-  database: DatabaseSync,
-  sessionIds: ReadonlySet<string>,
-): EventLogHardCutBlocker[] {
-  const affected = readAffectedMemoryJobs(database, sessionIds);
-  return [
-    blockerFromIds(
-      "memory_job",
-      affected
-        .filter((job) => !MEMORY_JOB_TERMINAL_STATUSES.has(job.status))
-        .map((job) => job.jobId)
-        .sort(),
-    ),
-  ];
-}
-
-/**
- * The EventLog epoch owns transcripts and Session projections, not committed Memory facts.
- * Preserve every Fact and its provenance identity while making the deleted evidence impossible
- * to dereference. Source-bound proposal bodies are no longer reviewable without that evidence,
- * and retryable failed extraction jobs must not replay against the new epoch.
- */
-function invalidateMemorySessionReferences(
-  database: DatabaseSync,
-  cutoverId: string,
-  at: string,
-): void {
-  const sourceMutations = sqliteChanges(
-    database
-      .prepare(
-        `INSERT INTO memory_mutations (
-           sequence, mutation_id, entity_type, entity_id, action,
-           from_version, to_version, idempotency_key_hash, created_at
-         )
-         SELECT
-           (SELECT COALESCE(MAX(sequence), 0) FROM memory_mutations)
-             + ROW_NUMBER() OVER (ORDER BY source_id),
-           ? || source_id, 'source', source_id, 'source.updated',
-           version, version + 1, NULL, ?
-         FROM memory_sources
-         WHERE availability <> 'unavailable'
-            OR evidence_ref_json IS NOT NULL
-            OR invalidated_at IS NULL
-            OR invalidation_code IS NULL
-         ORDER BY source_id`,
-      )
-      .run(`event-log-hard-cut:${cutoverId}:source:`, at),
-  );
-  const sourceUpdates = sqliteChanges(
-    database
-      .prepare(
-        `UPDATE memory_sources SET
-         evidence_ref_json = NULL,
-         availability = 'unavailable',
-         invalidated_at = COALESCE(invalidated_at, ?),
-         invalidation_code = CASE
-           WHEN availability = 'available' OR invalidation_code IS NULL
-             THEN 'event_log_hard_cut'
-           ELSE invalidation_code
-         END,
-         version = version + 1,
-         updated_at = ?
-       WHERE availability <> 'unavailable'
-          OR evidence_ref_json IS NOT NULL
-          OR invalidated_at IS NULL
-          OR invalidation_code IS NULL`,
-      )
-      .run(at, at),
-  );
-  assertMutationProjectionParity("Source", sourceMutations, sourceUpdates);
-
-  const proposalMutations = sqliteChanges(
-    database
-      .prepare(
-        `INSERT INTO memory_mutations (
-           sequence, mutation_id, entity_type, entity_id, action,
-           from_version, to_version, idempotency_key_hash, created_at
-         )
-         SELECT
-           (SELECT COALESCE(MAX(sequence), 0) FROM memory_mutations)
-             + ROW_NUMBER() OVER (ORDER BY proposal_id),
-           ? || proposal_id, 'proposal', proposal_id, 'proposal.deleted',
-           version, version + 1, NULL, ?
-         FROM memory_proposals
-         WHERE source_id IS NOT NULL AND status <> 'deleted'
-         ORDER BY proposal_id`,
-      )
-      .run(`event-log-hard-cut:${cutoverId}:proposal:`, at),
-  );
-  const proposalUpdates = sqliteChanges(
-    database
-      .prepare(
-        `UPDATE memory_proposals SET
-           title = NULL,
-           content = NULL,
-           reason = NULL,
-           status = 'deleted',
-           version = version + 1,
-           updated_at = ?,
-           deleted_at = ?
-         WHERE source_id IS NOT NULL AND status <> 'deleted'`,
-      )
-      .run(at, at),
-  );
-  assertMutationProjectionParity("Proposal", proposalMutations, proposalUpdates);
-
-  const jobMutations = sqliteChanges(
-    database
-      .prepare(
-        `INSERT INTO memory_mutations (
-           sequence, mutation_id, entity_type, entity_id, action,
-           from_version, to_version, idempotency_key_hash, created_at
-         )
-         SELECT
-           (SELECT COALESCE(MAX(sequence), 0) FROM memory_mutations)
-             + ROW_NUMBER() OVER (ORDER BY job_id),
-           ? || job_id, 'job', job_id, 'job.updated',
-           version, version + 1, NULL, ?
-         FROM memory_jobs
-         WHERE type = 'terminal-extraction' AND status = 'failed'
-         ORDER BY job_id`,
-      )
-      .run(`event-log-hard-cut:${cutoverId}:job:`, at),
-  );
-  const jobUpdates = sqliteChanges(
-    database
-      .prepare(
-        `UPDATE memory_jobs SET
-           status = 'cancelled',
-           next_attempt_at = NULL,
-           error_code = 'memory_source_unavailable',
-           version = version + 1,
-           updated_at = ?,
-           terminal_at = ?
-         WHERE type = 'terminal-extraction' AND status = 'failed'`,
-      )
-      .run(at, at),
-  );
-  assertMutationProjectionParity("Memory Job", jobMutations, jobUpdates);
-
-  if (sourceUpdates + proposalUpdates + jobUpdates === 0) return;
-  bumpJsonRevision(database, "memory_metadata");
-}
-
 function clearControlWeakReferences(database: DatabaseSync): void {
   let changes = 0;
   changes += sqliteChanges(
@@ -536,7 +384,7 @@ function clearControlWeakReferences(database: DatabaseSync): void {
   changes += sqliteChanges(database.prepare("DELETE FROM desktop_rewind_claims").run());
   changes += sqliteChanges(database.prepare("DELETE FROM desktop_idempotency").run());
   changes += sqliteChanges(database.prepare("DELETE FROM daemon_commands").run());
-  if (changes > 0) bumpJsonRevision(database, "control_metadata");
+  if (changes > 0) bumpControlRevision(database);
 }
 
 function clearAttachmentRows(database: DatabaseSync): void {
@@ -698,34 +546,6 @@ function persistGcIntents(
   }
 }
 
-function readAffectedMemoryJobs(
-  database: DatabaseSync,
-  sessionIds: ReadonlySet<string>,
-): Array<{ readonly jobId: string; readonly status: string }> {
-  const rows = database
-    .prepare("SELECT job_id, type, status, source_id, cursor_json FROM memory_jobs ORDER BY job_id")
-    .all() as Array<Record<string, unknown>>;
-  const affected: Array<{ jobId: string; status: string }> = [];
-  for (const row of rows) {
-    const jobId = requireString(row["job_id"], "memory_jobs.job_id");
-    const type = requireString(row["type"], `memory_jobs[${jobId}].type`);
-    const status = requireString(row["status"], `memory_jobs[${jobId}].status`);
-    const cursor = parseJsonRecord(row["cursor_json"], `memory_jobs[${jobId}].cursor_json`);
-    const cursorSessionId = requireString(
-      cursor["sessionId"],
-      `memory_jobs[${jobId}].cursor.sessionId`,
-    );
-    if (
-      type === "terminal-extraction" ||
-      row["source_id"] !== null ||
-      sessionIds.has(cursorSessionId)
-    ) {
-      affected.push({ jobId, status });
-    }
-  }
-  return affected;
-}
-
 function readEpochMarker(database: DatabaseSync): EventLogEpochMarker | undefined {
   const row = database
     .prepare(
@@ -811,22 +631,23 @@ function readJsonColumn(database: DatabaseSync, sql: string): unknown[] {
   );
 }
 
-function bumpJsonRevision(
-  database: DatabaseSync,
-  table: "memory_metadata" | "control_metadata",
-): void {
-  const row = database.prepare(`SELECT value_json FROM ${table} WHERE key = 'revision'`).get() as
-    | { value_json?: unknown }
-    | undefined;
+function bumpControlRevision(database: DatabaseSync): void {
+  const row = database
+    .prepare("SELECT value_json FROM control_metadata WHERE key = 'revision'")
+    .get() as { value_json?: unknown } | undefined;
   if (!row) {
-    throw new FileStorageIntegrityError(`${table}.revision is missing during EventLog hard cut`);
+    throw new FileStorageIntegrityError(
+      "control_metadata.revision is missing during EventLog hard cut",
+    );
   }
-  const current = parseJson(row.value_json, `${table}.revision`);
+  const current = parseJson(row.value_json, "control_metadata.revision");
   if (typeof current !== "number" || !Number.isSafeInteger(current) || current < 0) {
-    throw new FileStorageIntegrityError(`${table}.revision is invalid during EventLog hard cut`);
+    throw new FileStorageIntegrityError(
+      "control_metadata.revision is invalid during EventLog hard cut",
+    );
   }
   database
-    .prepare(`UPDATE ${table} SET value_json = ? WHERE key = 'revision'`)
+    .prepare("UPDATE control_metadata SET value_json = ? WHERE key = 'revision'")
     .run(JSON.stringify(current + 1));
 }
 
@@ -922,18 +743,6 @@ function requireFlag(value: unknown, field: string): boolean {
 
 function sqliteChanges(result: { readonly changes: number | bigint }): number {
   return typeof result.changes === "number" ? result.changes : Number(result.changes);
-}
-
-function assertMutationProjectionParity(
-  entity: string,
-  mutationCount: number,
-  projectionCount: number,
-): void {
-  if (mutationCount !== projectionCount) {
-    throw new FileStorageIntegrityError(
-      `${entity} mutation count ${mutationCount} does not match projection count ${projectionCount}`,
-    );
-  }
 }
 
 function canonicalTimestamp(value: Date): string {

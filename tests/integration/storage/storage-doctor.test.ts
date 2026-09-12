@@ -3,10 +3,9 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { resolvePicoPaths, workspaceIdForPath } from "../../../src/paths/pico-paths.js";
+import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
 import { StorageDoctor, type StorageDoctorFinding } from "../../../src/storage/storage-doctor.js";
 import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
-import { withWorkspaceSqliteLease } from "../../../src/storage/sqlite/workspace-scopes.js";
 import {
   closeAllOperationalDatabasesForTest,
   operationalDatabasePath,
@@ -22,7 +21,7 @@ import { createRuntimeEventId } from "../../../src/storage/runtime-event-store-c
  * 1) 干净扫描:pico.sqlite 纪元 workspace 无 finding;
  * 2) 空 workspace(库不存在)不初始化新库且健康;
  * 3) JSONL 纪元残留按 legacy 报告(不 fail、不迁移);
- * 4) 会话跨 workspace / memory 绑定错位 fail-closed。
+ * 4) 会话跨 workspace 时 fail-closed。
  */
 
 interface Fixture {
@@ -88,7 +87,6 @@ test("doctor 扫描 SQLite 纪元 workspace 干净", async () => {
     assert.equal(report.healthy, true);
     assert.equal(report.scanned.runtime, 1);
     assert.equal(report.scanned.session, 1);
-    assert.equal(report.scanned.memory, 0);
   } finally {
     cleanupFixture(fixture);
   }
@@ -157,7 +155,7 @@ test("doctor 把 JSONL 纪元残留报告为 legacy 而不阻塞扫描", async (
   }
 });
 
-test("doctor 对跨 workspace 会话与 memory 绑定错位 fail-closed", async () => {
+test("doctor 对跨 workspace 会话 fail-closed", async () => {
   const fixture = createFixture("pico-doctor-sqlite-mismatch-");
   try {
     const store = new SqliteRuntimeEventStore({ storageRoot: fixture.storageRoot });
@@ -170,14 +168,6 @@ test("doctor 对跨 workspace 会话与 memory 绑定错位 fail-closed", async 
     } finally {
       store.close();
     }
-    const foreignWorkspace = join(fixture.root, "memory-owner-workspace");
-    mkdirSync(foreignWorkspace, { recursive: true });
-    // Retained legacy schema remains diagnosable without the retired repository.
-    withWorkspaceSqliteLease(fixture.storageRoot, ({ database }) => {
-      database
-        .prepare("INSERT INTO memory_metadata (key, value_json) VALUES (?, ?)")
-        .run("workspaceId", JSON.stringify(workspaceIdForPath(foreignWorkspace)));
-    });
     const report = await new StorageDoctor({
       workDir: fixture.workspace,
       picoHome: fixture.picoHome,
@@ -187,10 +177,6 @@ test("doctor 对跨 workspace 会话与 memory 绑定错位 fail-closed", async 
       report.findings.some(
         (finding) => finding.code === "session_replay_failed" && finding.severity === "critical",
       ),
-      report.findings.map((finding) => finding.code).join(","),
-    );
-    assert.ok(
-      report.findings.some((finding) => finding.code === "memory_workspace_mismatch"),
       report.findings.map((finding) => finding.code).join(","),
     );
   } finally {

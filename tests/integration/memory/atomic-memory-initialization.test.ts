@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { DesktopAtomicMemoryService } from "../../../src/daemon/desktop-atomic-memory-service.js";
-import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
 import { SqliteMemoryItemStore } from "../../../src/storage/sqlite/sqlite-memory-item-store.js";
 
 const retiredTables = [
@@ -37,21 +36,12 @@ test("opening an incompatible memory database rejects it without upgrading or cl
   }
 });
 
-test("fresh memory management ignores legacy workspace data and retains workspace switches", async (t) => {
-  const root = await mkdtemp(join(tmpdir(), "pico-memory-no-import-"));
+test("fresh memory management retains workspace switches", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-memory-settings-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const workspace = join(root, "workspace"),
     picoHome = join(root, "home");
   await mkdir(workspace);
-  const paths = resolvePicoPaths(workspace, { picoHome });
-  await mkdir(paths.workspace.root, { recursive: true });
-  const oldPath = join(paths.workspace.root, "pico.sqlite");
-  const old = new DatabaseSync(oldPath);
-  old.exec(
-    "CREATE TABLE memory_facts(content TEXT); INSERT INTO memory_facts VALUES ('Do not import me');",
-  );
-  old.close();
-  const before = await readFile(oldPath);
   const service = new DesktopAtomicMemoryService({ picoHome, publish: () => {} });
   try {
     assert.deepEqual((await service.list(workspace, { workspacePath: workspace })).facts, []);
@@ -65,7 +55,6 @@ test("fresh memory management ignores legacy workspace data and retains workspac
       enabled: false,
     });
     assert.equal((await service.getSettings(workspace)).settings.enabled, false);
-    assert.deepEqual(await readFile(oldPath), before);
   } finally {
     service.close();
   }

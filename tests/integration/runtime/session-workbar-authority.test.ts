@@ -231,16 +231,10 @@ test("artifacts are chunked CAS facts and fork/delete preserve lifecycle rules",
       WorkbarForbiddenError,
     );
 
-    insertMemoryFact(fixture.storageRoot);
     await fixture.store.deleteSession("source");
     assert.throws(
       () => fixture.repository.queryTasks({ sessionId: "source" }),
       WorkbarNotFoundError,
-    );
-    assert.equal(
-      tableCount(fixture.storageRoot, "memory_facts"),
-      1,
-      "committed memory fact survives session delete",
     );
     assert.equal(
       tableCount(fixture.storageRoot, "artifact_blobs"),
@@ -424,18 +418,6 @@ function tableCount(storageRoot: string, table: string): number {
       count: number;
     };
     return row.count;
-  });
-}
-
-function insertMemoryFact(storageRoot: string): void {
-  withWorkspaceSqliteLease(storageRoot, ({ database }) => {
-    database
-      .prepare(
-        `INSERT INTO memory_facts
-         (fact_id, kind, title, content, confidence, source_id, state, pinned, version, created_at, updated_at)
-         VALUES ('fact-1', 'project_fact', 'stable', 'keep me', 1, NULL, 'active', 0, 1, ?, ?)`,
-      )
-      .run("2026-08-23T00:00:00.000Z", "2026-08-23T00:00:00.000Z");
   });
 }
 

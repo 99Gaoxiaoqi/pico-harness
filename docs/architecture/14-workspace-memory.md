@@ -185,7 +185,8 @@ daemon 操作同一原子库：`/memory status` 显示记忆/召回/自动提取
 
 原子记忆库 Schema 为 v9，共 9 张业务表。工作区开关继续保存在 `memory_settings`。
 其余八张表保存条目、关键词、当前来源、写入操作、提取游标、回执、失败范围和压缩策略拒绝记录。
-运行时不再检查或导入旧 Fact/Proposal 数据，也不从旧库读取记忆设置或回退召回。
+旧 Fact/Proposal workspace scope 已从当前 workspace schema 移除。运行时不再创建、检查、
+导入或清理这些旧表，也不从旧库读取记忆设置或回退召回；含旧表的 workspace 数据库需归档后重建。
 
 新库直接在一个事务中创建当前 9 张表和索引，不执行历史版本升级脚本。
 已有当前版本库只校验结构并打开；其他版本或非空且未标记版本的库明确拒绝打开，
@@ -218,4 +219,4 @@ TUI 到真实 daemon 的手动记忆链见
 
 旧 Proposal/Worker/Scheduler/Recovery、旧记忆管理服务和 `SqliteMemoryRepository` 已退役。
 原子记忆所需内容校验独立位于 `src/memory/atomic/content-safety.ts`；保留旧 wire 字段和
-workspace schema 兼容校验，不意味着双写或双套记忆流程。
+响应名称不意味着保留旧 workspace schema、双写或双套记忆流程。
