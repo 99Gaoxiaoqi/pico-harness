@@ -19,6 +19,7 @@ import {
 } from "../../../src/runtime/agent-graph-host.js";
 import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
 import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
+import { compileRuntimePermissionProfile } from "../../../src/safety/permission-profile.js";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 
 for (const planning of [false, true]) {
@@ -162,6 +163,10 @@ for (const planning of [false, true]) {
             thinkingEffortExplicit: false,
             additionalDirectories: [],
           },
+          boundary: compileRuntimePermissionProfile({
+            collaborationMode: "agent",
+            permissionMode: "ask",
+          }),
         });
         await session.flushPersistence();
         lease.release();

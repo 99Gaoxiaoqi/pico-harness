@@ -1,5 +1,9 @@
 import type { SessionManager } from "../engine/session-manager.js";
 import type { SessionOptions } from "../engine/session.js";
+import type {
+  PersistedSessionSettings,
+  PersistedSessionSettingsWrite,
+} from "../engine/session-runtime.js";
 import { tmpdir } from "node:os";
 import {
   assessSandboxBoundaryExpansion,
@@ -18,6 +22,10 @@ export interface BindAgentGraphOperatorExecutionBoundaryInput {
   readonly childWorkDir: string;
   readonly workspacePolicy: "shared" | "isolated-worktree";
   readonly sessionOptions?: SessionOptions;
+  /** Production-only current settings, resolved from the immutable Operator profile. */
+  readonly createChildSettings?: (input: {
+    readonly permissionMode: "ask" | "full-access";
+  }) => PersistedSessionSettingsWrite;
 }
 
 /** Bind or verify the child authority before exact-run admission. */
@@ -45,6 +53,7 @@ export async function bindAgentGraphOperatorExecutionBoundary(
       input.childWorkDir,
       input.sessionOptions,
     );
+    const childSession = childLease.session;
     const parent = rootLease.session.getRuntimeStateSnapshot().boundary;
     if (!parent) throw new Error("Graph root Session has no durable execution boundary");
     if (parent.kind === "external") {
@@ -58,46 +67,120 @@ export async function bindAgentGraphOperatorExecutionBoundary(
             revision: parent.revision,
           };
 
-    const existing = childLease.session.getRuntimeStateSnapshot().boundary;
+    const snapshot = childSession.getRuntimeStateSnapshot();
+    const existing = snapshot.boundary;
+    const existingSettings = snapshot.settings;
+    if (
+      input.createChildSettings &&
+      (existing === undefined) !== (existingSettings === undefined)
+    ) {
+      throw new Error("Graph Operator Session has an incomplete current runtime state");
+    }
+
+    let aligned = ceiling;
+    let boundaryChanged = existing === undefined;
     if (existing) {
       if (parent.kind === "bypass") {
         if (existing.kind === "external") {
           throw new Error("Graph Operator cannot replace an external execution boundary");
         }
         if (existing.kind === "bypass") {
-          return { parent: structuredClone(parent), child: structuredClone(existing) };
+          aligned = existing;
+          boundaryChanged = false;
+        } else {
+          boundaryChanged = true;
         }
-        childLease.session.updateRuntimeState({ boundary: ceiling });
-        await childLease.session.flushPersistence();
-        const persisted = childLease.session.getRuntimeStateSnapshot().boundary;
-        if (!persisted || persisted.kind !== "bypass") {
-          throw new Error("Graph Operator full-access boundary was not durably inherited");
+      } else {
+        if (existing.kind !== "managed") {
+          throw new Error(`Graph Operator cannot run with a ${existing.kind} execution boundary`);
         }
-        return { parent: structuredClone(parent), child: structuredClone(persisted) };
+        if (!executionBoundaryContainsForChildWorkspace(ceiling, existing, input.childWorkDir)) {
+          throw new Error("Graph Operator execution boundary exceeds its parent boundary");
+        }
+        aligned = existing;
+        boundaryChanged = false;
       }
-      if (existing.kind !== "managed") {
-        throw new Error(`Graph Operator cannot run with a ${existing.kind} execution boundary`);
-      }
-      if (!executionBoundaryContainsForChildWorkspace(ceiling, existing, input.childWorkDir)) {
-        throw new Error("Graph Operator execution boundary exceeds its parent boundary");
-      }
-      return { parent: structuredClone(parent), child: structuredClone(existing) };
     }
 
-    childLease.session.updateRuntimeState({ boundary: ceiling });
-    await childLease.session.flushPersistence();
-    const persisted = childLease.session.getRuntimeStateSnapshot().boundary;
+    const permissionMode = aligned.kind === "bypass" ? "full-access" : "ask";
+    const initializedSettings = input.createChildSettings?.({ permissionMode });
+    if (initializedSettings) {
+      if (
+        initializedSettings.collaborationMode !== "agent" ||
+        initializedSettings.orchestrationMode !== "default"
+      ) {
+        throw new Error("Graph Operator settings must use agent/default execution axes");
+      }
+      if (initializedSettings.permissionMode !== permissionMode) {
+        throw new Error("Graph Operator settings exceed its inherited execution boundary");
+      }
+    }
+    let settingsToCommit: PersistedSessionSettingsWrite | undefined;
+    if (initializedSettings) {
+      if (existingSettings) {
+        assertOperatorSettingsMatchProfile(existingSettings, initializedSettings);
+        const existingPermissionMode = existing!.kind === "bypass" ? "full-access" : "ask";
+        if (existingSettings.permissionMode !== existingPermissionMode) {
+          throw new Error("Graph Operator settings disagree with its durable execution boundary");
+        }
+        if (existingSettings.permissionMode !== permissionMode) {
+          settingsToCommit = { ...existingSettings, permissionMode };
+        }
+      } else {
+        settingsToCommit = initializedSettings;
+      }
+    }
+
+    if (boundaryChanged || settingsToCommit) {
+      childSession.updateRuntimeState({
+        ...(boundaryChanged ? { boundary: aligned } : {}),
+        ...(settingsToCommit ? { settings: settingsToCommit } : {}),
+      });
+      await childSession.flushPersistence();
+    }
+
+    const committed = childSession.getRuntimeStateSnapshot();
     if (
-      !persisted ||
-      persisted.kind !== ceiling.kind ||
-      !executionBoundaryContainsForChildWorkspace(ceiling, persisted, input.childWorkDir)
+      !committed.boundary ||
+      committed.boundary.kind !== aligned.kind ||
+      !executionBoundaryContainsForChildWorkspace(ceiling, committed.boundary, input.childWorkDir)
     ) {
       throw new Error("Graph Operator execution boundary was not durably inherited");
     }
-    return { parent: structuredClone(parent), child: structuredClone(persisted) };
+    if (initializedSettings) {
+      if (!committed.settings) {
+        throw new Error("Graph Operator settings were not durably initialized");
+      }
+      assertOperatorSettingsMatchProfile(committed.settings, initializedSettings);
+      if (committed.settings.permissionMode !== permissionMode) {
+        throw new Error("Graph Operator settings and execution boundary did not commit atomically");
+      }
+    }
+    return { parent: structuredClone(parent), child: structuredClone(committed.boundary) };
   } finally {
     childLease?.release();
     rootLease.release();
+  }
+}
+
+function assertOperatorSettingsMatchProfile(
+  actual: PersistedSessionSettings,
+  expected: PersistedSessionSettingsWrite,
+): void {
+  if (
+    actual.provider !== expected.provider ||
+    actual.model !== expected.model ||
+    actual.modelRouteId !== expected.modelRouteId ||
+    actual.collaborationMode !== "agent" ||
+    actual.orchestrationMode !== "default" ||
+    actual.thinkingEffort !== expected.thinkingEffort ||
+    actual.thinkingEffortExplicit !== expected.thinkingEffortExplicit ||
+    actual.additionalDirectories.length !== expected.additionalDirectories.length ||
+    actual.additionalDirectories.some(
+      (directory, index) => directory !== expected.additionalDirectories[index],
+    )
+  ) {
+    throw new Error("Graph Operator persisted settings no longer match its frozen profile");
   }
 }
 

@@ -21,6 +21,7 @@ import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-por
 import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
 import type { RuntimeEvent } from "../../../src/storage/runtime-event.js";
 import { isMessageHiddenFromTranscript } from "../../../src/schema/message.js";
+import { compileRuntimePermissionProfile } from "../../../src/safety/permission-profile.js";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 
 test("production exact root wake reads durable output before finish", () =>
@@ -183,6 +184,10 @@ async function runProductionRootWakeScenario(
         thinkingEffortExplicit: false,
         additionalDirectories: [],
       },
+      boundary: compileRuntimePermissionProfile({
+        collaborationMode: "agent",
+        permissionMode: "ask",
+      }),
     });
     rootLease.release();
 
