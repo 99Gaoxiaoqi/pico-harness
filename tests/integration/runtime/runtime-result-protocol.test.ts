@@ -7,7 +7,7 @@ import {
   RuntimeProtocolError,
 } from "../../../packages/protocol/src/index.js";
 
-test("session.get accepts durable parent navigation while preserving legacy session results", () => {
+test("session.get accepts durable parent navigation and current optional metadata", () => {
   const session = {
     sessionId: "child",
     workspacePath: "/child-worktree",
@@ -38,6 +38,32 @@ test("session.get accepts durable parent navigation while preserving legacy sess
       parseRuntimeResult("session.get", { session: { ...session, parentSession } }),
     );
   }
+});
+
+test("resource diagnostics reject the retired legacy origin", () => {
+  const result = {
+    workDir: "/workspace",
+    picoHome: "/state",
+    workspaceStateRoot: "/state/workspaces/demo",
+    entries: [
+      {
+        kind: "skills",
+        origin: "pico-native",
+        path: "/workspace/.pico/skills",
+        status: "present",
+        authority: true,
+      },
+    ],
+    findings: [],
+    output: "ok",
+  } as const;
+  assert.deepEqual(parseRuntimeResult("diagnostics.resources", result), result);
+  assert.throws(() =>
+    parseRuntimeResult("diagnostics.resources", {
+      ...result,
+      entries: [{ ...result.entries[0], origin: "legacy" }],
+    }),
+  );
 });
 
 test("rewind.apply keeps one strict v2 request/result contract", () => {
