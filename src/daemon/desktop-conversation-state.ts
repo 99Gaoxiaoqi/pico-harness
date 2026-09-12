@@ -2,7 +2,6 @@ import { resolve } from "node:path";
 import type { JsonObject, RuntimeUserInput } from "./protocol.js";
 import { isSafeSubagentPresetId } from "./protocol.js";
 
-const DESKTOP_CONVERSATION_STATE_VERSION = 2 as const;
 export const MAX_IDEMPOTENCY_RECORDS = 500;
 export const MAX_FIRST_SEND_CLAIMS = 500;
 export const FIRST_SEND_CLAIM_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
@@ -42,17 +41,9 @@ export interface DesktopRewindClaim {
   readonly createdAt: number;
 }
 
-export interface DesktopConversationStateFile {
-  readonly version: typeof DESKTOP_CONVERSATION_STATE_VERSION;
-  readonly queuedInputs: readonly DesktopQueuedInput[];
-  readonly idempotency: readonly DesktopIdempotencyRecord[];
-  readonly firstSendClaims: readonly DesktopFirstSendClaim[];
-}
-
 /**
- * 对外契约(ADR 28):JSON 与 SQLite 两个实现共同满足的形状,调用方
- * (DesktopRuntimeService)只依赖本接口。`removeQueued` 携带 workspacePath:
- * SQLite 实现按 workspace 库分片,queueId 只有在 workspace 上下文内才可定位。
+ * DesktopRuntimeService 依赖的会话状态存储契约。`removeQueued` 携带
+ * workspacePath，因为 SQLite 按 workspace 分片，queueId 只在该上下文内定位。
  */
 export interface DesktopConversationStateStoreLike {
   listQueued(workspacePath: string, sessionId: string): Promise<DesktopQueuedInput[]>;
@@ -89,48 +80,6 @@ export interface DesktopConversationStateStoreLike {
     requestFingerprint: string,
     result: JsonObject,
   ): Promise<void>;
-}
-
-/** Legacy JSON 文件的 fail-closed 解析(供 SQLite 一次性迁移复用)。 */
-export function parseDesktopConversationStateFile(
-  value: unknown,
-  filePath: string,
-): DesktopConversationStateFile {
-  if (
-    !isRecord(value) ||
-    value["version"] !== DESKTOP_CONVERSATION_STATE_VERSION ||
-    !Array.isArray(value["queuedInputs"]) ||
-    !Array.isArray(value["idempotency"]) ||
-    !Array.isArray(value["firstSendClaims"])
-  ) {
-    throw new Error(`Desktop conversation state format is invalid: ${filePath}`);
-  }
-  return {
-    version: DESKTOP_CONVERSATION_STATE_VERSION,
-    queuedInputs: value["queuedInputs"].map((item) => parseQueued(item, filePath)),
-    idempotency: value["idempotency"].map((item) => parseIdempotency(item, filePath)),
-    firstSendClaims: value["firstSendClaims"].map((item) => parseFirstSendClaim(item, filePath)),
-  };
-}
-
-function parseQueued(value: unknown, filePath: string): DesktopQueuedInput {
-  if (
-    !isRecord(value) ||
-    typeof value["queueId"] !== "string" ||
-    typeof value["workspacePath"] !== "string" ||
-    typeof value["sessionId"] !== "string" ||
-    typeof value["createdAt"] !== "number" ||
-    !Number.isFinite(value["createdAt"])
-  ) {
-    throw new Error(`Desktop conversation queue contains an invalid entry: ${filePath}`);
-  }
-  return {
-    queueId: requireNonEmpty(value["queueId"], "queueId"),
-    workspacePath: normalizeWorkspacePath(value["workspacePath"]),
-    sessionId: requireNonEmpty(value["sessionId"], "sessionId"),
-    input: parseStoredInput(value, filePath),
-    createdAt: value["createdAt"],
-  };
 }
 
 function parseStoredInput(value: Record<string, unknown>, filePath: string): RuntimeUserInput {
@@ -185,48 +134,6 @@ export function parseDesktopQueuedInputRecord(value: unknown): RuntimeUserInput 
     throw new Error("Desktop conversation queue row contains an invalid input payload");
   }
   return parseStoredInput({ input: value }, "desktop_input_queue");
-}
-
-function parseIdempotency(value: unknown, filePath: string): DesktopIdempotencyRecord {
-  if (
-    !isRecord(value) ||
-    typeof value["workspacePath"] !== "string" ||
-    typeof value["key"] !== "string" ||
-    typeof value["requestFingerprint"] !== "string" ||
-    !isRecord(value["result"]) ||
-    typeof value["createdAt"] !== "number" ||
-    !Number.isFinite(value["createdAt"])
-  ) {
-    throw new Error(`Desktop conversation idempotency contains an invalid entry: ${filePath}`);
-  }
-  return {
-    workspacePath: normalizeWorkspacePath(value["workspacePath"]),
-    key: requireNonEmpty(value["key"], "idempotencyKey"),
-    requestFingerprint: requireNonEmpty(value["requestFingerprint"], "requestFingerprint"),
-    result: value["result"] as JsonObject,
-    createdAt: value["createdAt"],
-  };
-}
-
-function parseFirstSendClaim(value: unknown, filePath: string): DesktopFirstSendClaim {
-  if (
-    !isRecord(value) ||
-    typeof value["workspacePath"] !== "string" ||
-    typeof value["key"] !== "string" ||
-    typeof value["sessionId"] !== "string" ||
-    typeof value["requestFingerprint"] !== "string" ||
-    typeof value["createdAt"] !== "number" ||
-    !Number.isFinite(value["createdAt"])
-  ) {
-    throw new Error(`Desktop first-send claim contains an invalid entry: ${filePath}`);
-  }
-  return {
-    workspacePath: normalizeWorkspacePath(value["workspacePath"]),
-    key: requireNonEmpty(value["key"], "idempotencyKey"),
-    sessionId: requireNonEmpty(value["sessionId"], "sessionId"),
-    requestFingerprint: requireNonEmpty(value["requestFingerprint"], "requestFingerprint"),
-    createdAt: value["createdAt"],
-  };
 }
 
 export function normalizeWorkspacePath(workspacePath: string): string {
