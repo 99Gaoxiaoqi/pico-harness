@@ -187,6 +187,26 @@ test("project config validates prompt-cache policy against its provider protocol
     JSON.stringify({
       version: 1,
       providers: {
+        openai: {
+          protocol: "openai",
+          baseURL: "https://api.openai.com/v1",
+          apiKeyEnv: "OPENAI_API_KEY",
+          models: { "gpt-retired-reasoning": { reasoning: true } },
+        },
+      },
+    }),
+    "utf8",
+  );
+  await assert.rejects(
+    loadPicoProjectConfig(root),
+    /reasoning.*must be a reasoning capability object/u,
+  );
+
+  await writeFile(
+    configPath,
+    JSON.stringify({
+      version: 1,
+      providers: {
         removed: {
           protocol: "gemini",
           baseURL: "https://provider.invalid/v1",

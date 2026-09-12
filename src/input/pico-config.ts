@@ -690,10 +690,9 @@ function parseModelReasoning(
   value: unknown,
   configPath: string,
   field: string,
-): boolean | ModelReasoningCapabilityConfig {
-  if (typeof value === "boolean") return value;
+): ModelReasoningCapabilityConfig {
   if (!isRecord(value)) {
-    throw configError(configPath, field, "must be a boolean or reasoning capability object");
+    throw configError(configPath, field, "must be a reasoning capability object");
   }
   const enabled = value["enabled"];
   if (typeof enabled !== "boolean") {

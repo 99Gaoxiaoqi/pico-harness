@@ -61,7 +61,7 @@ test("memory budget agrees with actual auxiliary requests for history, Chinese, 
   const capabilities = resolveModelRouteCapabilities("openai", "memory-test", {
     context: contextWindowTokens,
     output: reservedOutputTokens,
-    reasoning: false,
+    reasoning: { enabled: false },
     toolCall: true,
   });
   for (const scenario of scenarios) {

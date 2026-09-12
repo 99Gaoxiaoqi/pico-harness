@@ -366,7 +366,7 @@ function realBenchmarkConfig(): RealBenchmarkConfig {
     model,
     {
       output: 768,
-      reasoning: false,
+      reasoning: { enabled: false },
       toolCall: true,
       cache: true,
       promptCache,
