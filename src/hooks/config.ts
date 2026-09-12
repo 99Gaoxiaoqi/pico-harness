@@ -45,8 +45,7 @@ export interface HookConfigSourceSpec {
 
 export interface LoadHookSnapshotOptions {
   workDir: string;
-  userHome?: string;
-  /** Host-owned Pico state root. Takes precedence over the legacy userHome seam. */
+  /** Host-owned Pico state root. */
   picoHome?: string;
   trustStore?: HookTrustStore;
   stateStore?: HookLocalStateStore;
@@ -72,10 +71,9 @@ export interface LoadHookSnapshotResult {
 
 export function defaultHookConfigSources(
   workDir: string,
-  userHome?: string,
   picoHome?: string,
 ): readonly HookConfigSourceSpec[] {
-  const resolvedPicoHome = picoHome ?? (userHome ? join(userHome, ".pico") : resolvePicoHome());
+  const resolvedPicoHome = picoHome ?? resolvePicoHome();
   return [
     { kind: "user", path: join(resolvedPicoHome, "hooks.json") },
     { kind: "project", path: join(workDir, ".pico", "hooks.json") },
@@ -87,24 +85,19 @@ export async function loadHookSnapshot(
 ): Promise<LoadHookSnapshotResult> {
   const workspace = await canonicalPath(options.workDir);
   const specs = [
-    ...defaultHookConfigSources(workspace, options.userHome, options.picoHome),
+    ...defaultHookConfigSources(workspace, options.picoHome),
     ...(options.componentSources ?? []),
     ...(options.extensionSources ?? []),
   ];
   const trustStore =
     options.trustStore ??
     new HookTrustStore({
-      ...(options.userHome ? { userHome: options.userHome } : {}),
       ...(options.picoHome ? { picoHome: options.picoHome } : {}),
     });
   const stateStore =
     options.stateStore ??
     new HookLocalStateStore(workspace, {
-      ...(options.picoHome
-        ? { picoHome: options.picoHome }
-        : options.userHome
-          ? { picoHome: join(options.userHome, ".pico") }
-          : {}),
+      ...(options.picoHome ? { picoHome: options.picoHome } : {}),
     });
   let localState: Readonly<Record<string, boolean>> = {};
   let stateError: string | undefined;

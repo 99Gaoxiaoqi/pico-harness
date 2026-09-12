@@ -69,8 +69,7 @@ interface HookTrustFile {
 }
 
 export interface HookTrustStoreOptions {
-  userHome?: string;
-  /** Host-owned Pico state root. Takes precedence over the legacy userHome seam. */
+  /** Host-owned Pico state root. */
   picoHome?: string;
   filePath?: string;
   /** Host environment shared by trust resolution and command execution. */
@@ -83,8 +82,7 @@ export class HookTrustStore {
   private readonly environment: Readonly<NodeJS.ProcessEnv>;
 
   constructor(options: HookTrustStoreOptions = {}) {
-    const picoHome =
-      options.picoHome ?? (options.userHome ? join(options.userHome, ".pico") : resolvePicoHome());
+    const picoHome = options.picoHome ?? resolvePicoHome();
     this.filePath = options.filePath ?? join(picoHome, "trusted-hooks.json");
     this.environment = options.env ?? process.env;
   }
