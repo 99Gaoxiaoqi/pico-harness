@@ -16,6 +16,7 @@ import {
   DESKTOP_RUNTIME_SCHEMA_REVISION,
   isEphemeralRuntimeNotificationTopic,
   isJsonObject,
+  isRuntimeNotification,
   encodeRuntimeFrame,
   LOCAL_RUNTIME_PROTOCOL_VERSION,
   MAX_RUNTIME_FRAME_BYTES,
@@ -39,7 +40,12 @@ import {
   SqliteRuntimeControlStore,
 } from "../storage/sqlite/sqlite-runtime-control-store.js";
 import { type DaemonIdempotentCommandResult } from "../tasks/runtime-store-contracts.js";
-import type { DaemonRunRecord, RuntimeEventRecord } from "../tasks/runtime-types.js";
+import {
+  isRuntimeNotificationLedgerEnvelope,
+  type DaemonRunRecord,
+  type RuntimeEventRecord,
+  type RuntimeNotificationEventRecord,
+} from "../tasks/runtime-types.js";
 import {
   canonicalizeWorkspacePath,
   resolveGitBranch,
@@ -625,14 +631,12 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
       1,
       Math.min(cursor.limit ?? DEFAULT_REPLAY_EVENT_LIMIT, MAX_REPLAY_EVENT_LIMIT),
     );
-    const candidates = store
-      .listRuntimeEvents({
-        ...(cursor.afterEventId ? { afterEventId: cursor.afterEventId } : {}),
-        throughEventId: highWatermarkEventId,
-        workspacePath,
-        limit: Math.min(eventLimit + 1, MAX_REPLAY_QUERY_LIMIT),
-      })
-      .map(runtimeNotificationFromLedger);
+    const candidates = store.listRuntimeEvents({
+      ...(cursor.afterEventId ? { afterEventId: cursor.afterEventId } : {}),
+      throughEventId: highWatermarkEventId,
+      workspacePath,
+      limit: Math.min(eventLimit + 1, MAX_REPLAY_QUERY_LIMIT),
+    });
     if (
       cursor.afterEventId &&
       cursor.afterEventId !== highWatermarkEventId &&
@@ -646,7 +650,12 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
     const events: RuntimeNotification[] = [];
     let eventsBytes = 2;
     let nextAfterEventId = cursor.afterEventId;
-    for (const event of candidates.slice(0, eventLimit)) {
+    for (const candidate of candidates.slice(0, eventLimit)) {
+      if (candidate.ledgerKind === "cron_audit") {
+        nextAfterEventId = candidate.eventId;
+        continue;
+      }
+      const event = runtimeNotificationFromLedger(candidate);
       if (isEphemeralRuntimeNotificationTopic(event.topic)) {
         nextAfterEventId = event.eventId;
         continue;
@@ -1038,8 +1047,17 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
     // Recovery events are deterministic and Transcript ingestion is idempotent. Catch up the
     // complete workspace recovery stream once per service lifetime so a prior commit-before-notify
     // crash cannot strand either the terminal projection or a durable queued input.
-    for (const event of created.listDaemonRunRecoveryEvents(workspacePath)) {
-      this.notifyPersisted(runtimeNotificationFromLedger(event));
+    try {
+      for (const event of created.listDaemonRunRecoveryEvents(workspacePath)) {
+        if (event.ledgerKind !== "runtime_notification") {
+          throw incompatibleRuntimeNotificationLedgerEvent(event);
+        }
+        this.notifyPersisted(runtimeNotificationFromLedger(event));
+      }
+    } catch (error) {
+      this.eventStores.delete(workspacePath);
+      created.close();
+      throw error;
     }
     return created;
   }
@@ -1292,38 +1310,38 @@ function workspaceRunSnapshot(run: DaemonRunRecord): WorkspaceRunSnapshot {
   };
 }
 
-function runtimeNotificationFromLedger(event: RuntimeEventRecord): RuntimeNotification {
-  const envelope = event.payload;
-  const scopeValue = envelope?.["scope"];
-  const scope = isScope(scopeValue) ? scopeValue : { workspacePath: event.workspacePath };
-  const resourceVersion = envelope?.["resourceVersion"];
-  const payload = envelope?.["payload"];
-  return {
+function runtimeNotificationFromLedger(event: RuntimeNotificationEventRecord): RuntimeNotification {
+  if (
+    !event.eventId.trim() ||
+    !event.topic.trim() ||
+    !event.workspacePath.trim() ||
+    !Number.isFinite(event.createdAt) ||
+    event.cronJobId !== undefined ||
+    event.cronRunId !== undefined ||
+    !isRuntimeNotificationLedgerEnvelope(event.payload, event.workspacePath)
+  ) {
+    throw incompatibleRuntimeNotificationLedgerEvent(event);
+  }
+  const notification = {
     protocolVersion: LOCAL_RUNTIME_PROTOCOL_VERSION,
     eventId: event.eventId,
     topic: event.topic,
-    scope,
-    resourceVersion:
-      typeof resourceVersion === "number" && Number.isFinite(resourceVersion) ? resourceVersion : 1,
+    scope: event.payload.scope,
+    resourceVersion: event.payload.resourceVersion,
     at: event.createdAt,
-    payload: isJsonPayload(payload) ? payload : isJsonPayload(event.payload) ? event.payload : {},
+    payload: event.payload.payload,
   };
+  if (!isRuntimeNotification(notification)) {
+    throw incompatibleRuntimeNotificationLedgerEvent(event);
+  }
+  return notification as RuntimeNotification;
 }
 
-function isScope(value: unknown): value is RuntimeNotification["scope"] {
-  if (!isRecord(value) || typeof value["workspacePath"] !== "string") return false;
-  return ["sessionId", "runId", "jobId"].every(
-    (key) => value[key] === undefined || typeof value[key] === "string",
+function incompatibleRuntimeNotificationLedgerEvent(
+  event: RuntimeEventRecord,
+): RuntimeProtocolError {
+  return new RuntimeProtocolError(
+    RUNTIME_ERROR_CODES.RESET_REQUIRED,
+    `Runtime 通知账本事件 ${event.eventId || "<missing>"} 不符合当前 envelope，请清理旧状态后重试`,
   );
-}
-
-function isJsonPayload(value: unknown): value is JsonValue {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
-  if (typeof value === "number") return Number.isFinite(value);
-  if (Array.isArray(value)) return value.every(isJsonPayload);
-  return isRecord(value) && Object.values(value).every(isJsonPayload);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

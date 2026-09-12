@@ -26,6 +26,10 @@ function freshRoot(): string {
   return mkdtempSync(join(tmpdir(), "pico-sqlite-control-store-"));
 }
 
+function notificationEnvelope(workspacePath: string) {
+  return { scope: { workspacePath }, resourceVersion: 1, payload: {} };
+}
+
 function testPolicySnapshot() {
   return {
     mode: "full-access" as const,
@@ -191,13 +195,23 @@ test("sqlite control store: 单 BEGIN IMMEDIATE 事务原子性 + revision CAS +
   const store = new SqliteRuntimeControlStore({ storageRoot: root, now: () => now });
   try {
     // 原子性:事件追加与 daemon run 投影同事务;重复 eventId 让整个事务回滚。
-    store.appendRuntimeEvent({ eventId: "event-1", topic: "run.started", workspacePath: root });
+    store.appendRuntimeEvent({
+      eventId: "event-1",
+      topic: "run.started",
+      workspacePath: root,
+      payload: notificationEnvelope(root),
+    });
     const revisionSeeded = readRevision(root);
     assert.ok(revisionSeeded >= 1, "首个写事务必须落 revision");
     assert.throws(
       () =>
         store.appendRuntimeEvent(
-          { eventId: "event-1", topic: "run.failed", workspacePath: root },
+          {
+            eventId: "event-1",
+            topic: "run.failed",
+            workspacePath: root,
+            payload: notificationEnvelope(root),
+          },
           {
             daemonRun: {
               runId: "rolled-back-run",
@@ -322,6 +336,7 @@ test("sqlite control store: 单 BEGIN IMMEDIATE 事务原子性 + revision CAS +
       eventId: "event-2",
       topic: "run.finished",
       workspacePath: root,
+      payload: notificationEnvelope(root),
     });
     assert.equal(second.eventId, "event-2");
     assert.deepEqual(
@@ -340,6 +355,38 @@ test("sqlite control store: 单 BEGIN IMMEDIATE 事务原子性 + revision CAS +
     assert.equal(store.hasRuntimeEvent("missing", root), false);
     assert.equal(store.getRuntimeEventHighWatermark(root)?.eventId, "event-2");
     assert.equal(store.getRuntimeEventHighWatermark("other-workspace"), undefined);
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("sqlite control store: public Runtime 通知只接受当前完整 envelope", () => {
+  const root = freshRoot();
+  const store = new SqliteRuntimeControlStore({ storageRoot: root });
+  const invalidEnvelopes: readonly unknown[] = [
+    undefined,
+    {},
+    { resourceVersion: 1, payload: {} },
+    { scope: { workspacePath: root }, payload: {} },
+    { scope: { workspacePath: root }, resourceVersion: 1 },
+    { scope: { workspacePath: root }, resourceVersion: 1, payload: {}, legacy: true },
+    { scope: { workspacePath: `${root}-other` }, resourceVersion: 1, payload: {} },
+  ];
+  try {
+    for (const [index, payload] of invalidEnvelopes.entries()) {
+      assert.throws(
+        () =>
+          store.appendRuntimeEvent({
+            eventId: `invalid-envelope-${index}`,
+            topic: "run.started",
+            workspacePath: root,
+            payload: payload as ReturnType<typeof notificationEnvelope>,
+          }),
+        /必须是当前完整 envelope/u,
+      );
+    }
+    assert.deepEqual(store.listRuntimeEvents(), []);
   } finally {
     store.close();
     rmSync(root, { recursive: true, force: true });
@@ -654,7 +701,12 @@ test("sqlite control store: control/ 三文件不再产生", () => {
       completionPolicy: "detached",
       description: "no jsonl",
     });
-    store.appendRuntimeEvent({ eventId: "event-1", topic: "run.started", workspacePath: root });
+    store.appendRuntimeEvent({
+      eventId: "event-1",
+      topic: "run.started",
+      workspacePath: root,
+      payload: notificationEnvelope(root),
+    });
     store.recordProviderCall({
       callId: "call-1",
       purpose: "main",
