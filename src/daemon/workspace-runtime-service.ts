@@ -28,6 +28,7 @@ import {
   type RuntimeNotification,
   type RuntimeNotificationPage,
   type RuntimeRequest,
+  type RuntimeRun,
   type WorkspaceStatusResult,
 } from "@pico/protocol";
 import type {
@@ -272,20 +273,10 @@ export class WorkspaceRuntimeService implements DisposableLocalRuntimeService {
             taskHostRuntimeOptions: { picoHome: this.picoHome },
           }));
         const unsubscribe = runtime.subscribe((event) => {
-          this.publish(
-            createRuntimeNotification({
-              topic: event.type,
-              scope: {
-                workspacePath: event.workspace,
-                ...(event.run?.sessionId ? { sessionId: event.run.sessionId } : {}),
-                ...(event.run ? { runId: event.run.runId } : {}),
-              },
-              resourceVersion: event.resourceVersion,
-              at: event.at,
-              payload: eventPayload(event),
-            }),
-            event.run ? daemonRunRecord(event.run) : undefined,
-          );
+          const notification = projectWorkspaceRuntimeNotification(event);
+          if (notification) {
+            this.publish(notification, event.run ? daemonRunRecord(event.run) : undefined);
+          }
           this.scheduleBlobGc(workspacePath);
         });
         this.unsubscribers.set(workspacePath, unsubscribe);
@@ -1231,36 +1222,36 @@ function normalizeIdempotencyKey(value: string): string {
   return normalized;
 }
 
-function eventPayload(
+function projectWorkspaceRuntimeNotification(
   event: import("../runtime/workspace-runtime.js").WorkspaceRuntimeEvent,
-): JsonValue {
-  return {
-    ...(event.run ? { run: runPayload(event.run) } : {}),
-    ...(event.task
-      ? {
-          task: {
-            taskId: event.task.taskId,
-            description: event.task.description,
-            status: event.task.status,
-          },
-        }
-      : {}),
-  };
+): RuntimeNotification | undefined {
+  if (event.type === "workspace.ready" || event.type === "task.updated") return undefined;
+  if (!event.run) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INTERNAL_ERROR,
+      `Workspace Runtime event ${event.type} 缺少 Run 快照`,
+    );
+  }
+  const topic =
+    event.type === "run.started"
+      ? "run.started"
+      : event.type === "run.finished"
+        ? "run.finished"
+        : "run.updated";
+  return createRuntimeNotification({
+    topic,
+    scope: {
+      workspacePath: event.workspace,
+      ...(event.run.sessionId ? { sessionId: event.run.sessionId } : {}),
+      runId: event.run.runId,
+    },
+    resourceVersion: event.resourceVersion,
+    at: event.at,
+    payload: { run: runPayload(event.run) },
+  });
 }
 
-function runPayload(run: {
-  runId: string;
-  workspace: string;
-  sessionId?: string;
-  description: string;
-  status: string;
-  startedAt: number;
-  updatedAt: number;
-  finishedAt?: number;
-  error?: string;
-  result?: Record<string, unknown>;
-  version: number;
-}): Record<string, JsonValue> {
+function runPayload(run: WorkspaceRunSnapshot): RuntimeRun {
   return {
     runId: run.runId,
     workspacePath: run.workspace,

@@ -11,8 +11,8 @@ import {
   resultArray,
   resultBoolean,
   resultFiniteNumber,
+  resultNonEmptyString,
   resultOneOf,
-  resultShape,
   resultString,
   stringArrayParam,
   stringParam,
@@ -32,12 +32,12 @@ export type RuntimeJob = JsonObject & {
   readonly updatedAt: number;
 };
 
-const runtimeJobResult = resultShape({
-  jobId: resultString,
-  workspacePath: resultString,
-  name: resultString,
-  prompt: resultString,
-  schedule: resultString,
+export const runtimeJobResult = exactResultShape({
+  jobId: resultNonEmptyString,
+  workspacePath: resultNonEmptyString,
+  name: resultNonEmptyString,
+  prompt: resultNonEmptyString,
+  schedule: resultNonEmptyString,
   enabled: resultBoolean,
   status: resultOneOf(["idle", "running", "failed", "succeeded"]),
   updatedAt: resultFiniteNumber,

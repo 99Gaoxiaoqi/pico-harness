@@ -16,6 +16,7 @@ import {
 } from "@pico/runtime-host";
 import {
   isEphemeralRuntimeNotificationTopic,
+  parseRuntimeNotification,
   parseRuntimeResult,
   RuntimeNotificationBuffer,
   RuntimeProtocolError,
@@ -337,7 +338,7 @@ class RuntimeSubscription {
     this.lastEventId = options.params.afterEventId;
     if (this.lastEventId) this.rememberEventId(this.lastEventId);
     options.connection.setEventListener((event) =>
-      this.handleEvent(event as unknown as RuntimeNotification),
+      this.handleEvent(parseRuntimeNotification(event)),
     );
     options.connection.setDisconnectListener(() => this.scheduleReconnect());
   }

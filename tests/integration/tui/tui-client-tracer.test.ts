@@ -4,6 +4,7 @@ import {
   createRuntimeNotification,
   TRANSCRIPT_PROJECTOR_VERSION,
   type RuntimeNotification,
+  type RuntimeNotificationTopic,
   type RuntimeSessionSubscriptionFrame,
 } from "@pico/protocol";
 import { TranscriptEventStore } from "../../../src/presentation/transcript-event-store.js";
@@ -23,7 +24,7 @@ import type { ApprovalNotice } from "../../../src/approval/manager.js";
  */
 
 function notification(
-  topic: RuntimeNotification["topic"],
+  topic: RuntimeNotificationTopic,
   scope: Record<string, string>,
   payload: Record<string, unknown>,
   runId = "run_1",

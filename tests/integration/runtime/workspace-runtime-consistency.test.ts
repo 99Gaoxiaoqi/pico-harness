@@ -614,6 +614,67 @@ test(
   },
 );
 
+test("Workspace Run 控制阶段统一投影为公开 run.updated", async (context) => {
+  const fixture = await createFixture("run-control-notification-projection");
+  const finish = deferred();
+  const service = new WorkspaceRuntimeService({
+    env: { PICO_HOME: fixture.picoHome },
+    execute: async ({ context: runContext }) => {
+      await finish.promise;
+      runContext.signal.throwIfAborted();
+    },
+  });
+  context.after(async () => {
+    finish.resolve();
+    await service.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  });
+  const live: { readonly topic: string; readonly status?: unknown }[] = [];
+  service.subscribe((event) => {
+    const payload = asRecord(event.payload);
+    const run = payload["run"] === undefined ? undefined : asRecord(payload["run"]);
+    live.push({ topic: event.topic, ...(run ? { status: run["status"] } : {}) });
+  });
+
+  const started = asRun(
+    await service.startForegroundRun({
+      workspacePath: fixture.workspace,
+      sessionId: "session-control",
+      prompt: "control projection",
+      idempotencyKey: "control-projection",
+    }),
+  );
+  const runtime = await service.getWorkspaceRuntime(fixture.workspace);
+  runtime.steer(started.runId, "继续");
+  runtime.pause(started.runId);
+  runtime.resume(started.runId);
+  runtime.cancel(started.runId);
+  finish.resolve();
+  await runtime.waitForRun(started.runId);
+
+  assert.deepEqual(
+    live.map((event) => event.topic),
+    ["run.started", "run.updated", "run.updated", "run.updated", "run.updated", "run.finished"],
+  );
+  assert.deepEqual(
+    live.map((event) => event.status),
+    ["running", "running", "pause_requested", "running", "cancelling", "cancelled"],
+  );
+  const replay = await service.replayEvents({ workspacePath: fixture.workspace });
+  assert.equal(
+    replay.events.some((event) =>
+      [
+        "run.steer_requested",
+        "run.pause_requested",
+        "run.paused",
+        "run.resumed",
+        "run.cancel_requested",
+      ].includes(event.topic),
+    ),
+    false,
+  );
+});
+
 test(
   "interrupted daemon Run recovery publishes one durable run.finished fact",
   { timeout: 15_000 },

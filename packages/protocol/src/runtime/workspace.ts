@@ -111,7 +111,7 @@ export type WorkspaceStatusResult = JsonObject & {
   eventLog: EventLogStorageStatusResult | null;
 };
 
-const runtimeWorkspaceInitResult = exactResultShape({
+export const runtimeWorkspaceInitResult = exactResultShape({
   workspacePath: resultString,
   files: resultArray(
     exactResultShape({

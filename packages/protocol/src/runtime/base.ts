@@ -5,9 +5,9 @@ export const LOCAL_RUNTIME_PROTOCOL_VERSION = 2;
 export const LOCAL_RUNTIME_AUTH_VERSION = 1;
 
 /** Increment when the Desktop-required result schema changes incompatibly. */
-export const DESKTOP_RUNTIME_SCHEMA_REVISION = 17;
+export const DESKTOP_RUNTIME_SCHEMA_REVISION = 18;
 
-export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v17";
+export const DESKTOP_RUNTIME_SCHEMA_CAPABILITY = "desktop-runtime-schema-v18";
 
 export const CAPABILITY_SCOPE_RUNTIME_CAPABILITY = "capability-scopes-v1";
 
