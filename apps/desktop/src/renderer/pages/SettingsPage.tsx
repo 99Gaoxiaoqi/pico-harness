@@ -5,17 +5,82 @@ import { Button, InlineNotice, StatusPill, WorkspaceModeBadge } from "../compone
 import { useRuntime } from "../runtime-context.js";
 import type { DesktopDiagnosticReport } from "../runtime.js";
 import { workspaceDisplayName } from "../workspace-session.js";
+import { defaultModelWebSearch } from "../web-search.js";
 
 export function SettingsPage() {
   const { data, actions, busy } = useRuntime();
+  const webSearch = data.providerConfig.userDefaults.webSearch ?? {
+    enabled: false,
+    source: "model",
+  };
+  const searchCapability = defaultModelWebSearch(data.providerConfig);
+  const searchDisabled = Boolean(busy) || !data.providerConfig.writable;
   return (
     <div className="page-stack settings-page">
       <section className="page-intro">
         <div>
           <span className="eyebrow">偏好</span>
           <h2>通用</h2>
-          <p>设置 Pico Desktop 的启动和后台行为。</p>
+          <p>设置 Pico Desktop 的通用偏好和后台行为。</p>
         </div>
+      </section>
+      <section className="settings-section" aria-labelledby="web-search-heading">
+        <h3 id="web-search-heading">联网搜索</h3>
+        <p className="settings-section__note">
+          对所有项目生效，下一次运行生效。开启后允许模型按需搜索，不保证每次都联网；受当前任务网络权限限制。
+        </p>
+        <div className="settings-list">
+          <SettingRow title="允许联网搜索" detail="关闭时不提供原生搜索或外部搜索工具">
+            <Toggle
+              checked={webSearch.enabled}
+              disabled={searchDisabled}
+              label="允许联网搜索"
+              onChange={(enabled) => void actions.setWebSearch({ ...webSearch, enabled })}
+            />
+          </SettingRow>
+          <SettingRow
+            title="搜索来源"
+            detail={
+              webSearch.source === "external"
+                ? "依赖现有 SEARCH_API_BASE 和 SEARCH_API_KEY 环境配置。"
+                : "使用当前运行所选模型提供的原生搜索能力。"
+            }
+          >
+            <select
+              className="select-control"
+              aria-label="搜索来源"
+              value={webSearch.source}
+              disabled={searchDisabled}
+              onChange={(event) =>
+                void actions.setWebSearch({
+                  ...webSearch,
+                  source: event.target.value === "external" ? "external" : "model",
+                })
+              }
+            >
+              <option value="model">当前模型原生搜索</option>
+              <option value="external">外部搜索服务</option>
+            </select>
+          </SettingRow>
+          {webSearch.source === "model" && (
+            <SettingRow title="用户默认模型的原生搜索" detail={searchCapability.detail}>
+              <span className="health-status-text">
+                {searchCapability.available ? "可用" : "不可用"}
+              </span>
+            </SettingRow>
+          )}
+        </div>
+        {webSearch.source === "model" && (
+          <p className="settings-section__note">
+            工作区或会话选择其他模型时，以该模型能力为准。
+            <Link to="/settings/models">模型设置</Link>
+          </p>
+        )}
+        {!data.providerConfig.writable && (
+          <InlineNotice tone="warning">
+            全局配置尚未完整加载，暂时无法修改联网搜索设置。
+          </InlineNotice>
+        )}
       </section>
       <section className="settings-section">
         <h3>桌面行为</h3>

@@ -25,6 +25,7 @@ import type {
 import { conversationItemKey, mergeConversationItemGroups } from "./items.js";
 import { MarkdownText } from "./MarkdownText.js";
 import { loadedAgentTools } from "./agent-capability.js";
+import { WebSearchRecord } from "./WebSearchRecord.js";
 
 export interface ConversationTranscriptProps {
   readonly assistantLabel?: string | undefined;
@@ -210,6 +211,7 @@ function renderDefaultItem(
             {assistantLabel ?? "Pico"}
           </h3>
           <div className="conversation-message__body">{renderText(item.text, item)}</div>
+          {item.webSearch && <WebSearchRecord record={item.webSearch} />}
           {item.streaming && (
             <span className="conversation-streaming-label" role="status">
               <LoaderCircle aria-hidden="true" /> 正在回复

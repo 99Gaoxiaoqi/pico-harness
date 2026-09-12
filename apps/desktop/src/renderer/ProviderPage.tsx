@@ -22,6 +22,7 @@ import type {
 import type { RuntimeStore } from "./runtime.js";
 import { ProviderOnboarding } from "./ProviderOnboarding.js";
 import { selectedModelProtocols } from "./provider-presets.js";
+import { defaultModelWebSearch } from "./web-search.js";
 
 const protocolLabels: Readonly<Record<ProviderProtocol, string>> = {
   openai: "OpenAI-compatible",
@@ -90,6 +91,7 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
   const models = useMemo(() => routeOptions(config.providers), [config.providers]);
   const isBusy = Boolean(busy);
   const defaultRouteId = config.userDefaults.modelRouteId ?? config.defaultModelRouteId;
+  const webSearchCapability = defaultModelWebSearch(config);
 
   const handleDefaultChange = (modelRouteId: string) => {
     void actions.setDefaultModelRoute(modelRouteId || undefined);
@@ -162,6 +164,10 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
             <div>
               <h3 id="provider-default-heading">用户默认模型</h3>
               <p>新会话优先使用这个选择；可信工作区和会话显式选择仍可覆盖它。</p>
+              <p>
+                原生联网搜索{webSearchCapability.available ? "可用" : "不可用"}：
+                {webSearchCapability.detail}
+              </p>
             </div>
           </div>
           <label className="provider-default-select">
