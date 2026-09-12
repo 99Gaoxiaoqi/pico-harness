@@ -70,8 +70,7 @@ export interface ConversationView {
   readonly workspacePath: string;
   readonly session?: SessionView | undefined;
   readonly items: readonly ConversationItemView[];
-  readonly revision?: string | undefined;
-  readonly nextBefore?: string | undefined;
+  readonly hasEarlier?: boolean | undefined;
   readonly queuedCount: number;
   readonly runId?: string | undefined;
   readonly changes?: readonly ChangeView[] | undefined;

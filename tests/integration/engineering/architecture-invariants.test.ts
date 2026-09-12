@@ -90,27 +90,33 @@ test("D9 正向不变量：连接决策在监督器与共享 client，外壳只�
   assert.match(daemonClient, /\breconnectAttempt\b/, "共享 client 是全仓唯一重连状态机");
 });
 
-test("D12 正向不变量：transcript 分页算法只在 daemon 服务层，renderer 仅持视图竞态护栏", () => {
+test("D12 正向不变量：transcript 分页只有 storage projection，renderer 仅持视图竞态护栏", () => {
   // P1 机械态债已消除（3-C 重评后反转，2026-08-15）：“transcript 同步双实现”的
   // 实质是 Desktop 与移动端各自维护一套同步状态机，移动端移除（bc9efbd3）后已
   // 消解。剩余的过期响应护栏是视图层竞态职责（与 workspaceLoadGenerationRef 同
-  // 类），不应下沉传输层——收编为单一职责模块 ConversationLoadTracker，分页/
-  // 游标算法保持只在 daemon 服务层一处。
+  // 类），不应下沉传输层——收编为单一职责模块 ConversationLoadTracker；分页/
+  // 游标只由 SQLite projection 实现，daemon continuity source 仅做协议映射。
   const desktopRuntime = readSource("apps/desktop/src/renderer/runtime.ts");
   const tracker = readSource("apps/desktop/src/renderer/conversation-load-tracker.ts");
-  const daemonTranscript = readSource("src/daemon/desktop-transcript.ts");
+  const continuitySource = readSource("src/daemon/sqlite-session-continuity-source.ts");
+  const storageProjection = readSource("src/storage/sqlite/sqlite-runtime-event-store.ts");
   // 负向：renderer 裸 ref 形态的 generation 追踪已收编。
   assert.doesNotMatch(
     desktopRuntime,
     /\bconversationLoadGenerationsRef\b/,
     "transcript 加载护栏应收编在 ConversationLoadTracker（分页算法不得进 renderer）",
   );
-  // 正向：护栏模块存在且只做代数判定；分页/游标算法在 daemon 服务层唯一所在。
+  // 正向：护栏模块只做代数判定；continuity source 直接消费唯一 storage 投影。
   assert.match(tracker, /\bisCurrent\b/, "ConversationLoadTracker 提供过期加载判定");
   assert.match(
-    daemonTranscript,
-    /\bselectPage\b/,
-    "transcript 分页/游标算法在 daemon 服务层唯一实现",
+    continuitySource,
+    /store\.readTranscriptProjectionPage\(/,
+    "daemon continuity source 应直接消费 storage-backed transcript projection",
+  );
+  assert.match(
+    storageProjection,
+    /private readTranscriptProjectionPageLocked\(/,
+    "transcript 分页/游标算法应由 SQLite projection 唯一实现",
   );
 });
 

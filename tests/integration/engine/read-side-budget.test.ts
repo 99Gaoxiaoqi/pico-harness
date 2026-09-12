@@ -3,8 +3,8 @@
  * 1) 模型历史组装(readModelHistory)按字节预算 gate:大输出会话的 provider
  *    消息总字节有界(票面:上下文组装按预算裁剪,provider 消息有界);
  * 2) 超预算降级为带诊断标记的截断视图(事件定位),不静默;末尾工作集永不裁剪;
- * 3) transcript 深读两段式:SQL 先测长,按 maxPayloadBytes 预算取事件 payload,
- *    累积语义的 state 事件不占预算永远全取(票面:不再切片整读)。
+ * 3) transcript 直接读取 storage projection，在固定 watermark 下按页数和字节预算
+ *    返回稳定窗口，超大项使用可续传分片。
  */
 
 import assert from "node:assert/strict";
@@ -23,12 +23,10 @@ import {
 import { Session } from "../../../src/engine/session.js";
 import { RuntimeRun } from "../../../src/runtime/runtime-run.js";
 import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
-import { projectRuntimeTranscriptEntries } from "../../../src/daemon/desktop-transcript.js";
 import {
   createCanonicalTranscriptToolStart,
   createRuntimeTranscriptToolStartEvent,
 } from "../../../src/engine/transcript-tool-start.js";
-import { SESSION_RUNTIME_STATE_VERSION } from "../../../src/engine/session-runtime.js";
 import type { RuntimeEvent } from "../../../src/engine/session-runtime-event.js";
 import type { Message } from "../../../src/schema/message.js";
 
@@ -230,7 +228,7 @@ test("readModelHistory: 预算内的常规会话不被 gate 触碰", async (t) =
 });
 
 // ============================================================
-// 3) transcript 深读两段式(store 层 + 投影组合)
+// 3) storage-backed transcript projection
 // ============================================================
 
 interface StoreFixture {
@@ -264,26 +262,7 @@ function messageEvent(
   } as RuntimeEvent;
 }
 
-function stateEvent(eventId: string, sessionId: string, at: string): RuntimeEvent {
-  return {
-    schemaVersion: 2,
-    eventId,
-    sessionId,
-    invocationId: "inv-e2",
-    runId: "run-e2",
-    turnId: "turn-e2",
-    at,
-    partial: false,
-    visibility: "internal",
-    kind: "session.state.committed",
-    data: {
-      stateVersion: SESSION_RUNTIME_STATE_VERSION,
-      patch: { goal: { stateVersion: 1, sequence: 1, activeGoalId: null, goals: [] } },
-    },
-  } as RuntimeEvent;
-}
-
-test("readSessionEventSliceWithinBudget: 先测长按预算取 suffix,累积 state 事件永远全取", async (t) => {
+test("readTranscriptProjectionPage: 字节预算与固定 watermark 分页保持稳定", async (t) => {
   const fixture = createStoreFixture("pico-e2-transcript-budget-");
   t.after(async () => {
     fixture.store.close();
@@ -293,81 +272,50 @@ test("readSessionEventSliceWithinBudget: 先测长按预算取 suffix,累积 sta
   const workspace = join(fixture.root, "workspace");
   await fixture.store.initializeSession({ sessionId: id, workDir: workspace });
   const big = (fill: string) => fill.repeat(60 * 1024);
-  await fixture.store.appendBatch([
-    stateEvent(`${id}-e1`, id, "2026-08-19T00:00:01.000Z"),
-    messageEvent(`${id}-e2`, id, "2026-08-19T00:00:02.000Z", "small-early"),
-    messageEvent(`${id}-e3`, id, "2026-08-19T00:00:03.000Z", big("a")),
-    messageEvent(`${id}-e4`, id, "2026-08-19T00:00:04.000Z", big("b")),
-    messageEvent(`${id}-e5`, id, "2026-08-19T00:00:05.000Z", "small-latest"),
+  const appended = await fixture.store.appendBatch([
+    messageEvent(`${id}-e1`, id, "2026-08-19T00:00:01.000Z", "small-early"),
+    messageEvent(`${id}-e2`, id, "2026-08-19T00:00:02.000Z", big("a")),
+    messageEvent(`${id}-e3`, id, "2026-08-19T00:00:03.000Z", big("b")),
+    messageEvent(`${id}-e4`, id, "2026-08-19T00:00:04.000Z", "small-latest"),
   ]);
-
-  const kinds = ["message.committed", "session.state.committed"];
-  const alwaysIncludeKinds = ["session.state.committed"];
-
-  // 预算充足:全量取回,不截断。
-  const full = await fixture.store.readSessionEventSliceWithinBudget(id, kinds, {
-    maxPayloadBytes: 10 * 1024 * 1024,
-    alwaysIncludeKinds,
+  const through = appended.at(-1)!.transcriptWatermark!;
+  const maxBytes = 70 * 1024;
+  const latest = await fixture.store.readTranscriptProjectionPage({
+    sessionId: id,
+    through,
+    limit: 2,
+    maxBytes,
   });
-  assert.equal(full.entries.length, 5);
-  assert.equal(full.headSequence, 5);
-  assert.equal(full.budgetWindow.truncated, false);
-  assert.equal(full.budgetWindow.fromSequence, 2);
 
-  // 预算 ~70KB:最新 small-latest + 一条 60KB 大消息入选,更早的 e2/e3 截断;
-  // e1(state,累积语义)无论水位如何永远全取。
-  const windowed = await fixture.store.readSessionEventSliceWithinBudget(id, kinds, {
-    maxPayloadBytes: 70 * 1024,
-    alwaysIncludeKinds,
-  });
+  assert.deepEqual(latest.watermark, through);
   assert.deepEqual(
-    windowed.entries.map(({ sequence }) => sequence),
-    [1, 4, 5],
+    latest.items.map(({ itemId }) => itemId),
+    [`message:${id}-e3:user`, `message:${id}-e4:user`],
   );
-  assert.equal(windowed.headSequence, 5);
-  assert.equal(windowed.budgetWindow.truncated, true);
-  assert.equal(windowed.budgetWindow.fromSequence, 4);
-  const budgetedBytes = windowed.entries
-    .filter(({ event }) => event.kind === "message.committed")
-    .reduce((sum, { event }) => sum + Buffer.byteLength(JSON.stringify(event), "utf8"), 0);
-  assert.ok(budgetedBytes <= 70 * 1024, `窗口内 message payload 应落入预算,实际 ${budgetedBytes}`);
-  assert.equal(
-    windowed.entries[0]!.event.kind,
-    "session.state.committed",
-    "早于水位的 state 事件必须仍在窗口内(goal 等累积投影不丢)",
+  assert.ok(latest.nextCursor, "更早记录必须由结构化 cursor 暴露");
+  const latestBytes = latest.items.reduce(
+    (sum, item) => sum + Buffer.byteLength(JSON.stringify(item), "utf8"),
+    0,
   );
+  assert.ok(latestBytes <= maxBytes, `projection 页必须受字节预算约束，实际 ${latestBytes}`);
 
-  // 窗口切片可直接喂 transcript 投影,产出有效页;revision 只基于全会话水位
-  // (窗口无关的稳定值,不再携带窗口内容摘要)。
-  const page = projectRuntimeTranscriptEntries(id, windowed.entries, {
-    persistenceSequence: windowed.headSequence,
+  await fixture.store.append(messageEvent(`${id}-e5`, id, "2026-08-19T00:00:05.000Z", "new-head"));
+  const older = await fixture.store.readTranscriptProjectionPage({
+    sessionId: id,
+    through,
+    cursor: latest.nextCursor,
+    limit: 2,
+    maxBytes,
   });
-  assert.ok(
-    page.items.some((item) => item.kind === "userMessage" && item.content === "small-latest"),
+  assert.deepEqual(older.watermark, through, "翻页期间追加事件不得推进已捕获水位");
+  assert.deepEqual(
+    older.items.map(({ itemId }) => itemId),
+    [`message:${id}-e1:user`, `message:${id}-e2:user`],
   );
-  assert.equal(page.revision, "5");
-
-  // 参数校验 fail-closed(async 方法统一走 rejects)。
-  await assert.rejects(
-    fixture.store.readSessionEventSliceWithinBudget(id, kinds, {
-      maxPayloadBytes: 0,
-    }),
-    /maxPayloadBytes/u,
-  );
-  await assert.rejects(
-    fixture.store.readSessionEventSliceWithinBudget(id, kinds, {
-      maxPayloadBytes: 1024,
-      alwaysIncludeKinds: ["run.started"],
-    }),
-    /subset/u,
-  );
+  assert.equal(older.nextCursor, undefined);
 });
 
-test("readSessionEventSliceWithinBudget: 水位拆开工具配对时回退窗口,transcript 水合投影不再 fail-closed", async (t) => {
-  // 第 1 轮审查问题 1 复现:start 卡片(~8.7KB)+ 大结果(payload 双份全文,
-  // ~99KB)+ 尾部 message;预算取在 result+tail 与 result+tail+start 之间——
-  // 纯字节水位落在 start 与 result 之间,窗口有 result 无 start,水合投影
-  // (rejectUnmatchedResults)原样喂会抛 "has no structured tool start"。
+test("readTranscriptProjectionPage: 工具开始与结果投影为同一张完成卡", async (t) => {
   const fixture = createStoreFixture("pico-e2-transcript-pairing-");
   t.after(async () => {
     fixture.store.close();
@@ -431,41 +379,26 @@ test("readSessionEventSliceWithinBudget: 水位拆开工具配对时回退窗口
     messageEvent(`${id}-tail`, id, "2026-08-19T00:00:03.000Z", `tail:${"t".repeat(1024)}`),
   ]);
 
-  const kinds = ["message.committed", "tool.result.recorded", "transcript.event.recorded"];
-  const budget = 104 * 1024;
-  const windowed = await fixture.store.readSessionEventSliceWithinBudget(id, kinds, {
-    maxPayloadBytes: budget,
+  const page = await fixture.store.readTranscriptProjectionPage({
+    sessionId: id,
+    maxBytes: 104 * 1024,
   });
-
-  // 配对安全回退:水位回到 start(seq 1),窗口同时含 start 与 result。
-  assert.deepEqual(
-    windowed.entries.map(({ sequence }) => sequence),
-    [1, 2, 3],
-  );
-  assert.equal(windowed.entries[0]!.event.kind, "transcript.event.recorded");
-  assert.equal(windowed.budgetWindow.fromSequence, 1);
-  assert.equal(windowed.budgetWindow.truncated, false);
-  // 字节预算是软目标:为配对完整允许小幅超出。
-  const totalBytes = windowed.entries.reduce(
-    (sum, { event }) => sum + Buffer.byteLength(JSON.stringify(event), "utf8"),
-    0,
-  );
-  assert.ok(totalBytes > budget, `配对回退后窗口允许超出预算,实际 ${totalBytes} > ${budget}`);
-
-  // 窗口喂 desktop transcript 投影:配对完整,不再抛 fail-closed 错误。
-  const page = projectRuntimeTranscriptEntries(id, windowed.entries, {
-    persistenceSequence: windowed.headSequence,
-  });
-  const toolItem = page.items.find((item) => item.kind === "tool");
+  const toolRecord = page.items.find(({ itemId }) => itemId === `tool:${start.toolCallId}`);
+  const toolItem = toolRecord?.payload as { readonly kind?: unknown; readonly status?: unknown };
   assert.equal(
-    toolItem && toolItem.kind === "tool" ? toolItem.status : undefined,
+    toolItem.kind === "tool" ? toolItem.status : undefined,
     "success",
-    "窗口内 start+result 配对后,工具项应投影为已完成",
+    "storage projection 应在同一稳定项内完成工具配对",
   );
   assert.ok(
-    page.items.some((item) => item.kind === "userMessage" && item.content.startsWith("tail:")),
+    page.items.some(
+      ({ payload }) =>
+        (payload as { readonly kind?: unknown; readonly content?: unknown }).kind ===
+          "userMessage" &&
+        String((payload as { readonly content?: unknown }).content).startsWith("tail:"),
+    ),
   );
-  assert.equal(page.revision, "3");
+  assert.equal(page.watermark.throughSequence, 3);
 });
 
 test("materializeRuntimeHistoryEntries 与 gate 组合后仍满足工具配对不变量(降级保留 toolCallId)", () => {
@@ -530,128 +463,4 @@ test("materializeRuntimeHistoryEntries 与 gate 组合后仍满足工具配对�
     messages[0]!.toolCalls?.map((call) => call.id),
     ["call-pair"],
   );
-});
-
-test("readSessionEventSliceWithinBudget: 窗口头截掉早期非工具 transcript 事件时,水合重定基不再抛 sequence mismatch", async (t) => {
-  // 第 2 轮审查 blocker 复现:entry.appended(seq1)被预算切出窗口,窗口首事件
-  // sequence=2;水合入口的严格 reducer(transcript-event-store 的连续性断言)原样
-  // 喂窗口事件会抛 "Transcript event sequence mismatch: 2, expected 1"。
-  // 修复:hydrateCanonicalTranscriptEvents 对喂入 reducer 的副本重定基。
-  const fixture = createStoreFixture("pico-e2-transcript-rebase-");
-  t.after(async () => {
-    fixture.store.close();
-    await rm(fixture.root, { recursive: true, force: true });
-  });
-  const id = "e2-transcript-rebase";
-  const workspace = join(fixture.root, "workspace");
-  await fixture.store.initializeSession({ sessionId: id, workDir: workspace });
-  const bigOutput = "r".repeat(48 * 1024);
-  const start = createCanonicalTranscriptToolStart({
-    sessionId: id,
-    runId: "run-e2",
-    turnId: "turn-e2",
-    callIndex: 0,
-    toolCall: {
-      id: "call-budget-rebase",
-      name: "read_file",
-      arguments: JSON.stringify({ path: `a${"x".repeat(8 * 1024)}.txt` }),
-    },
-    sequence: 2,
-    createdAt: 2,
-  });
-  const appendEntryCard = (eventId: string, entrySequence: number, at: string) =>
-    ({
-      schemaVersion: 2,
-      eventId,
-      sessionId: id,
-      invocationId: "inv-e2",
-      runId: "run-e2",
-      turnId: "turn-e2",
-      at,
-      partial: false,
-      visibility: "transcript",
-      kind: "transcript.event.recorded",
-      data: {
-        event: {
-          eventId: `${eventId}-te`,
-          sequence: entrySequence,
-          createdAt: entrySequence,
-          type: "entry.appended",
-          entryId: `entry-${entrySequence}`,
-          entry: { kind: "system", content: "early".repeat(64) },
-        },
-      },
-    }) as RuntimeEvent;
-
-  await fixture.store.appendBatch([
-    appendEntryCard(`${id}-early-entry`, 1, "2026-08-19T00:00:01.000Z"),
-    createRuntimeTranscriptToolStartEvent({
-      sessionId: id,
-      invocationId: "inv-e2",
-      runId: "run-e2",
-      turnId: "turn-e2",
-      start,
-    }),
-    {
-      schemaVersion: 2,
-      eventId: `${id}-result`,
-      sessionId: id,
-      invocationId: "inv-e2",
-      runId: "run-e2",
-      turnId: "turn-e2",
-      at: "2026-08-19T00:00:03.000Z",
-      partial: false,
-      visibility: "model",
-      refs: { toolCallId: "call-budget-rebase" },
-      kind: "tool.result.recorded",
-      data: {
-        toolName: "read_file",
-        status: "succeeded",
-        body: {
-          storage: "inline",
-          content: bigOutput,
-          sha256: createHash("sha256").update(bigOutput, "utf8").digest("hex"),
-          sizeBytes: Buffer.byteLength(bigOutput, "utf8"),
-        },
-        projection: {
-          version: 1,
-          mode: "full",
-          text: bigOutput,
-          strategy: "original",
-          truncated: false,
-        },
-      },
-    } as RuntimeEvent,
-    messageEvent(`${id}-tail`, id, "2026-08-19T00:00:04.000Z", `tail:${"t".repeat(8 * 1024)}`),
-  ]);
-
-  const kinds = ["message.committed", "tool.result.recorded", "transcript.event.recorded"];
-  // 预算恰好容纳后三条(尾部 message 8KB + result 双份 ~96KB + start 卡 ~8.7KB),
-  // 切掉 seq1 的 entry.appended——窗口首 transcript 事件 sequence=2。
-  const windowed = await fixture.store.readSessionEventSliceWithinBudget(id, kinds, {
-    maxPayloadBytes: 113 * 1024,
-  });
-  assert.deepEqual(
-    windowed.entries.map(({ sequence }) => sequence),
-    [2, 3, 4],
-    "预算应切掉早期 entry.appended,窗口从 seq 2 起",
-  );
-  assert.equal(windowed.budgetWindow.fromSequence, 2);
-  assert.equal(windowed.budgetWindow.truncated, true);
-
-  // 修复点:窗口首 transcript 事件 sequence=2,重定基后严格 reducer 不再抛
-  // "Transcript event sequence mismatch: 2, expected 1";工具配对正常投影。
-  const page = projectRuntimeTranscriptEntries(id, windowed.entries, {
-    persistenceSequence: windowed.headSequence,
-  });
-  const toolItem = page.items.find((item) => item.kind === "tool");
-  assert.equal(
-    toolItem && toolItem.kind === "tool" ? toolItem.status : undefined,
-    "success",
-    "窗口内 start+result 配对后,工具项应投影为已完成",
-  );
-  assert.ok(
-    page.items.some((item) => item.kind === "userMessage" && item.content.startsWith("tail:")),
-  );
-  assert.equal(page.revision, "4");
 });

@@ -23,8 +23,6 @@ import type { DesktopBridge, DesktopResult } from "../preload/contract.js";
 import { ConversationLoadTracker } from "./conversation-load-tracker.js";
 import { mergeHydratedConversationItems } from "./conversation/items.js";
 import {
-  type RuntimeTranscriptCursor,
-  type RuntimeTranscriptFragment,
   type ToolEvidencePage,
   approvalFromPlanControlSnapshot,
   conversationItemsFromReplica,
@@ -474,10 +472,6 @@ export function useRuntimeStore(): RuntimeStore {
   const memoryLoadGenerationRef = useRef(0);
   const conversationLoadTracker = useRef(new ConversationLoadTracker());
   const temporaryWorkspaceRequest = useRef(new TemporaryWorkspaceRequest());
-  const transcriptCursorByConversation = useRef(new Map<string, RuntimeTranscriptCursor>());
-  const transcriptFragmentsByConversation = useRef(
-    new Map<string, Map<string, RuntimeTranscriptFragment[]>>(),
-  );
   const desktopContinuityRef = useRef<DesktopSessionContinuity | undefined>(undefined);
   const desktopContinuityBridgeRef = useRef<DesktopBridge | undefined>(undefined);
   const pendingSendRef = useRef<
@@ -515,6 +509,7 @@ export function useRuntimeStore(): RuntimeStore {
             [conversationKey]: {
               ...conversationWithoutRun,
               items: conversationItemsFromReplica(view),
+              hasEarlier: view.olderCursor !== undefined,
               queuedCount: view.queuedInputs.length,
               ...(activeRun ? { runId: activeRun.runId } : {}),
             },
@@ -1052,14 +1047,7 @@ export function useRuntimeStore(): RuntimeStore {
           optionalInvoke(bridge, "session.get", { workspacePath, sessionId }),
         ]);
       if (!isCurrentLoad()) return;
-      const fragments = new Map<string, RuntimeTranscriptFragment[]>();
-      transcriptFragmentsByConversation.current.set(conversationKey, fragments);
-      const parsedConversation = parseConversation(record, workspacePath, sessionId, fragments);
-      if (parsedConversation.nextCursor) {
-        transcriptCursorByConversation.current.set(conversationKey, parsedConversation.nextCursor);
-      } else {
-        transcriptCursorByConversation.current.delete(conversationKey);
-      }
+      const parsedConversation = parseConversation(record, workspacePath, sessionId);
       let conversation: ConversationView = {
         ...parsedConversation,
         session: !sessionResult.error
@@ -1103,6 +1091,7 @@ export function useRuntimeStore(): RuntimeStore {
             ...(latestReplicaView
               ? {
                   items: conversationItemsFromReplica(latestReplicaView),
+                  hasEarlier: latestReplicaView.olderCursor !== undefined,
                   queuedCount: latestReplicaView.queuedInputs.length,
                 }
               : {
