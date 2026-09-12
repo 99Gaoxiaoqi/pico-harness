@@ -222,6 +222,7 @@ function lineByLineReplace(
 
 export class EditFileTool implements BaseTool {
   readonly nesting = "nestable" as const;
+  readonly permissionCategory = "file_write" as const;
   private readonly roots: WorkspaceRoots;
 
   constructor(workDirOrRoots: string | WorkspaceRoots) {
@@ -288,7 +289,7 @@ export class EditFileTool implements BaseTool {
       throw new Error("参数解析失败: 期望 JSON 含 path、old_text、new_text 字段");
     }
 
-    const fullPath = await this.roots.assertAllowed(path);
+    const fullPath = await this.roots.assertAllowed(path, { access: "write" });
     const snapshot = await readBoundedFileSnapshot(fullPath, READ_FILE_MAX_BYTES, path);
     await access(fullPath, constants.W_OK);
     const modelView = toModelTextView(snapshot.content);

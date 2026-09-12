@@ -19,11 +19,11 @@ import {
   type SandboxViolationCode,
 } from "./process-sandbox/index.js";
 
-/** @deprecated 兼容旧调用方；配置现用于 workspace-write，而非 yolo。 */
-export type YoloSandboxConfig = SandboxConfig;
+/** 工作区写入进程沙箱配置。 */
+export type WorkspaceSandboxConfig = SandboxConfig;
 export type { SandboxBackend, SandboxNetworkPolicy, SandboxViolationCode };
 export { SandboxViolationError, detectSandboxBackend };
-export const DEFAULT_YOLO_SANDBOX_CONFIG = DEFAULT_SANDBOX_CONFIG;
+export const DEFAULT_WORKSPACE_SANDBOX_CONFIG = DEFAULT_SANDBOX_CONFIG;
 
 export interface SandboxDecision {
   allowed: boolean;
@@ -39,25 +39,25 @@ export interface SandboxRequest {
   shellArgs: readonly string[];
   cwd: string;
   writableRoots: readonly string[];
-  config?: Partial<YoloSandboxConfig>;
+  config?: Partial<WorkspaceSandboxConfig>;
   platform?: NodeJS.Platform;
   backendExecutable?: string;
 }
 
-/** 旧名称保留给后台策略；Hardline 与工作区边界仍是确定性预检。 */
-export function evaluateYoloToolCall(
+/** 对工作区写入工具执行 Hardline 与路径边界预检。 */
+export function evaluateWorkspaceToolCall(
   call: ToolCall,
   workDir: string,
   workspaceRoots: WorkspaceRoots,
-  config: Partial<YoloSandboxConfig> = {},
+  config: Partial<WorkspaceSandboxConfig> = {},
 ): SandboxDecision {
   if (isHardlineCommand(call.name, call.arguments, workDir)) {
-    return denied("workspace_write_denied", "Hardline 高危命令不可通过 YOLO 绕过。");
+    return denied("workspace_write_denied", "Hardline 高危命令不可通过工作区沙箱绕过。");
   }
   if (call.name === "write_file" || call.name === "edit_file") {
     const path = jsonStringField(call.arguments, "path");
     if (!path) return { allowed: true };
-    if (!workspaceRoots.isAllowedPath(workspaceRoots.resolveUnchecked(path))) {
+    if (!workspaceRoots.isAllowedPath(workspaceRoots.resolveUnchecked(path), "write")) {
       return denied(
         "workspace_write_denied",
         `写入目标不在授权工作区: ${path}。请先使用 /add-dir 显式授权。`,
@@ -78,7 +78,7 @@ export function evaluateSandboxCommand(
   command: string,
   cwd: string,
   writableRoots: readonly string[],
-  config: Partial<YoloSandboxConfig> = {},
+  config: Partial<WorkspaceSandboxConfig> = {},
 ): SandboxDecision {
   const effective = { ...DEFAULT_SANDBOX_CONFIG, ...config };
   for (const path of extractBashWritePaths(command)) {
@@ -133,7 +133,7 @@ function isPseudoDevice(path: string): boolean {
   return normalized === "/dev/null" || normalized === "/dev/tty" || normalized === "nul";
 }
 
-function hasExplicitNetworkIntent(command: string): boolean {
+export function hasExplicitNetworkIntent(command: string): boolean {
   return EXPLICIT_NETWORK_COMMAND_RE.test(command) || NETWORK_URL_RE.test(command);
 }
 

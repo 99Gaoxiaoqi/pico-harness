@@ -23,13 +23,13 @@ export function parseSessionSettings(value: unknown): SessionSettingsView | unde
         ? "plan"
         : "agent";
   const permissionMode =
-    settings.permissionMode === "default" ||
+    settings.permissionMode === "ask" ||
     settings.permissionMode === "auto" ||
-    settings.permissionMode === "yolo"
+    settings.permissionMode === "full-access"
       ? settings.permissionMode
-      : legacyMode === "default" || legacyMode === "auto" || legacyMode === "yolo"
+      : legacyMode === "ask" || legacyMode === "auto" || legacyMode === "full-access"
         ? legacyMode
-        : "default";
+        : "ask";
   const orchestrationMode =
     settings.orchestrationMode === "swarm"
       ? "swarm"

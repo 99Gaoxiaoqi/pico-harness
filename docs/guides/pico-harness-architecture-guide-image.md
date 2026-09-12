@@ -130,9 +130,9 @@ Engine 残留一次性状态，又能保证连续对话不会失忆。
 
 - Workspace Trust：读取项目级配置、Skill、Hook、MCP 或 LSP 之前，先确认真实工作区受信。
 - Hardline Guard：不可逆的极端危险命令直接阻断。
-- YOLO / Plan / Worker Boundary：主 YOLO 按当前 OS 用户权限放权；Plan 只允许保守只读；worker 无论主会话模式如何，都进入独立 worktree 和 OS 沙箱。
+- Full-access / Plan / Worker Boundary：主会话的完全访问权限（`full-access`）按当前 OS 用户权限放权；Plan 只允许保守只读；`delegate_task` 的可写 worker 无论主会话模式如何，都进入独立 worktree 和 OS 沙箱。共享工作区的配置型子智能体则是只读边界，不应与可写 worker 混为一类。
 - Hooks：允许项目通过 PreToolUse 和 PostToolUse 扩展规则；输入被 Hook 改写后重新经过 Hardline / Plan 检查。
-- Permission / Approval：非 YOLO 模式按路径与风险决定允许、询问还是拒绝；需要用户确认时暂停执行，等待当前前台宿主审批。
+- Permission / Approval：请求批准（`ask`）与帮我批准（`auto`）按各自策略决定允许、询问还是拒绝；需要用户确认时暂停执行，等待当前前台宿主审批。
 - File History：写入前保存原内容，或者为无法精确预测的 Bash 写入建立变化 Journal。
 
 如果同一轮有多个工具调用，`ToolScheduler` 会根据“读什么、写什么”判断是否冲突。两个读取可以并行，写不同文件也可能并行；同一文件上存在写冲突时则等待。结果最终仍按照模型原始调用顺序返回，避免破坏 Tool Call 与 Tool Result 的配对关系。
@@ -237,7 +237,7 @@ Session 可以恢复，文件可以 Rewind，Transcript 可以重新投影，模
 
 ### 4. 主会话和 worker 必须区别对待
 
-主会话 YOLO 的目标是少打扰，按当前 OS 用户权限执行普通操作；但 worker 是不可信并行
+主会话完全访问权限（`full-access`）的目标是少打扰，按当前 OS 用户权限执行普通操作；但可写 worker 是不可信并行
 执行单元，必须进入独立 worktree、独立分支、OS 沙箱和网络策略。这样既让主交互足够顺滑，
 又把并行写入的风险关在更小的空间里。
 

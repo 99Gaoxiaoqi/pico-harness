@@ -194,6 +194,7 @@ const MAX_MODEL_ROUTE_CATALOG_DESCRIPTION = 7_000;
  */
 export class SpawnSubagentTool implements BaseTool {
   readonly executionMode = "orchestrator" as const;
+  readonly permissionCategory = "subagent" as const;
   readonly fileSideEffects = NO_FILE_SIDE_EFFECTS;
 
   constructor(
@@ -298,6 +299,7 @@ export interface DelegatePlanStepCoordinator {
 
 export class DelegateTaskTool implements BaseTool {
   readonly executionMode = "orchestrator" as const;
+  readonly permissionCategory = "subagent" as const;
   /** 宿主统一 Agent 目录，按 agent_name 查询。 */
   private readonly profiles: AgentProfile[];
 

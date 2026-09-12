@@ -125,7 +125,7 @@ realModelTest(
             model: model.route.model,
             modelRouteId: model.route.id,
             collaborationMode: "plan",
-            permissionMode: "yolo",
+            permissionMode: "full-access",
             orchestrationMode: "graph",
             thinkingEffort: "off",
             thinkingEffortExplicit: false,

@@ -4,7 +4,6 @@ import type {
   ApprovalSessionScopeView,
   RuntimeCapabilityScope,
   RuntimeCollaborationMode,
-  RuntimeInteractionMode,
   RuntimeMcpServerInput,
   RuntimeMemoryFact,
   RuntimeMemorySettings,
@@ -102,7 +101,7 @@ export interface SessionSettingsView {
   readonly model: string;
   readonly collaborationMode: "agent" | "plan";
   readonly orchestrationMode: "default" | "graph" | "swarm";
-  readonly permissionMode: "default" | "auto" | "yolo";
+  readonly permissionMode: "ask" | "auto" | "full-access";
   readonly thinkingEffort: string;
   readonly reasoningLevels: readonly string[];
 }
@@ -152,7 +151,6 @@ export interface UserDefaultsView {
   readonly collaborationMode?: RuntimeCollaborationMode | undefined;
   readonly orchestrationMode?: RuntimeOrchestrationMode | undefined;
   readonly permissionMode?: RuntimePermissionMode | undefined;
-  readonly mode?: RuntimeInteractionMode | undefined;
   readonly thinkingEffort?: string | undefined;
 }
 

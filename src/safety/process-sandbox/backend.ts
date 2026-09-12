@@ -57,7 +57,8 @@ export function buildManagedSpawnPlan(request: ManagedSpawnRequest): SandboxSpaw
     request.backendExecutable ?? resolveBundledSandboxExecutable(platform, request.arch);
   if (
     request.backendExecutable === undefined &&
-    policy.writeRoots.some((root) => isWithinRoot(root, backendPath))
+    (policy.writeRoots.some((root) => isWithinRoot(root, backendPath)) ||
+      policy.writeFiles?.some((path) => resolve(path) === resolve(backendPath)))
   ) {
     throw new SandboxViolationError(
       "sandbox_unavailable",
@@ -93,6 +94,12 @@ export function buildManagedSpawnPlan(request: ManagedSpawnRequest): SandboxSpaw
         profile: policy.profile,
       };
     case "windows-appcontainer": {
+      if ((policy.readFiles?.length ?? 0) > 0 || (policy.writeFiles?.length ?? 0) > 0) {
+        throw new SandboxViolationError(
+          "policy_compilation_failed",
+          "Windows AppContainer 暂不支持精确文件边界，已拒绝扩大到父目录。",
+        );
+      }
       const controlRoot =
         request.controlRoot ?? resolve(dirname(policy.scratchRoot), ".windows-broker-control");
       if (policy.readRoots.some((root) => isWithinRoot(root, controlRoot))) {
@@ -194,6 +201,8 @@ export function buildMacosProfile(
   const metadataRoots = macosMetadataAncestors([
     ...policy.readRoots,
     ...policy.writeRoots,
+    ...(policy.readFiles ?? []),
+    ...(policy.writeFiles ?? []),
     ...readAliases,
   ]);
   const rules = [
@@ -222,11 +231,23 @@ export function buildMacosProfile(
       (root) => `(allow file-read* file-test-existence (subpath ${sbplString(root)}))`,
     ),
     ...policy.readRoots.map((root) => `(allow file-map-executable (subpath ${sbplString(root)}))`),
+    ...(policy.readFiles ?? []).map(
+      (path) => `(allow file-read* file-test-existence (literal ${sbplString(path)}))`,
+    ),
+    ...(policy.writeFiles ?? []).map(
+      (path) => `(allow file-read* file-test-existence (literal ${sbplString(path)}))`,
+    ),
+    ...(policy.readFiles ?? []).map(
+      (path) => `(allow file-map-executable (literal ${sbplString(path)}))`,
+    ),
     ...readAliases.map(
       (root) => `(allow file-read* file-test-existence (subpath ${sbplString(root)}))`,
     ),
     ...readAliases.map((root) => `(allow file-map-executable (subpath ${sbplString(root)}))`),
     ...policy.writeRoots.map((root) => `(allow file-write* (subpath ${sbplString(root)}))`),
+    ...(policy.writeFiles ?? []).map(
+      (path) => `(allow file-write* (literal ${sbplString(path)}))`,
+    ),
   ];
   if (policy.network === "allow") rules.push("(allow network*)");
   return rules.join("\n");
@@ -277,6 +298,8 @@ export function buildBubblewrapArgs(
   }
   for (const root of readRoots) result.push("--ro-bind-try", root, root);
   for (const root of writeRoots) result.push("--bind", root, root);
+  for (const path of policy.readFiles ?? []) result.push("--ro-bind-try", path, path);
+  for (const path of policy.writeFiles ?? []) result.push("--bind", path, path);
   result.push("--chdir", cwd, "--", command, ...args);
   return result;
 }

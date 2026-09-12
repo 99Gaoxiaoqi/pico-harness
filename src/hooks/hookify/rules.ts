@@ -37,7 +37,7 @@ export interface CreateHookifyProposalOptions {
 }
 
 export interface ApplyHookifyProposalOptions {
-  /** 所有 permission mode（包括 yolo）都必须由宿主展示完整 diff 并确认。 */
+  /** 所有 permission mode（包括 full-access）都必须由宿主展示完整 diff 并确认。 */
   confirm: (proposal: HookifyProposal) => boolean | Promise<boolean>;
   onApplied?: (path: string) => void | Promise<void>;
 }

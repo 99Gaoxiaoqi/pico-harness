@@ -93,7 +93,7 @@ Local Read 是本地只读能力的默认名字，不是子智能体的统一名
 
 _图 3：图中给出新建任务的主要成功路径。失败、取消也有对应终态；可点击卡片不是执行事实的唯一存储。_
 
-执行器复用 `AgentRuntime.execute`，新任务通过 `sessionSelection: { mode: "new", sessionId }` 启动。配置存在时使用配置模型，否则使用父任务模型路由。子任务默认权限为 `default`，不直接继承父任务的完全访问模式；配置型执行器将 `maxTurns` 设为 20。
+执行器复用 `AgentRuntime.execute`，新任务通过 `sessionSelection: { mode: "new", sessionId }` 启动。配置存在时使用配置模型，否则使用父任务模型路由。子任务默认权限为 `ask`，不直接继承父任务的完全访问模式；配置型执行器将 `maxTurns` 设为 20。共享工作区能力的子边界上限是 managed `read-only` + restricted network；隔离 worktree 实现型的上限是 managed `workspace-write` + restricted network。父 Session 的当前持久边界必须能容纳该上限；父任务即使为 `full-access`，子任务也不会变成 bypass。
 
 新子任务有独立的消息历史，不会直接复制父任务整段对话。必要背景需要主智能体放进 `task`。运行时仍会按自身规则组装上下文，所以“独立历史”不应被理解为整个执行环境没有任何其他上下文来源。
 
@@ -172,10 +172,11 @@ _图 5：两条入口共享执行能力边界；各入口的模型选择与父�
 统一入口的约束包括：
 
 1. 不能通过请求传入不同能力覆盖子会话的持久身份；身份已确认但能力快照缺失或未知时拒绝执行。
-2. 有效权限强制为 `default`，编排模式为 `default`，Swarm 授权为 `none`；普通续聊传入完全访问或 Swarm 不会扩权。
-3. 配置型子任务不加载普通插件快照、不加入额外工作目录，也不获得再次委派工具。
-4. 工具注册表按能力白名单裁剪；后续请求级 allowlist 只能进一步限制可用工具，不能把已移除工具加回来。
-5. 手动续用独立 worktree 子任务会明确拒绝；不能利用普通会话入口绕过专用续用的类型限制。
+2. 有效权限强制为 `ask`，编排模式为 `default`，Swarm 授权为 `none`；普通续聊传入完全访问或 Swarm 不会扩权。
+3. 新建子 Session 会在 Provider 与工具装配前持久它的 `ExecutionBoundary` 上限；续用时在设置恢复前后都复核。缺失、bypass、external 或比能力定义更宽的持久边界都 fail closed，Session network grant 与普通扩权流程不能抬高这个上限。
+4. 配置型子任务不加载普通插件快照、不加入额外工作目录，也不获得再次委派或 `request_sandbox_boundary` 工具。
+5. 工具注册表按能力白名单裁剪；后续请求级 allowlist 只能进一步限制可用工具，不能把已移除工具加回来。
+6. 手动续用独立 worktree 子任务会明确拒绝；不能利用普通会话入口绕过专用续用的类型限制。
 
 工具边界不是只写在系统提示词里。`buildSubagentSafetyMiddleware` 还检查敏感凭据路径和危险操作，并结合具体工具、工作区及沙箱策略处理调用。系统提示词提供行为要求，宿主检查负责执行约束。
 
@@ -220,7 +221,7 @@ node --import tsx --test \
   tests/integration/desktop/desktop-configured-child-sessions.test.ts
 ```
 
-截至本文基线，这组 8 项测试通过。手动续聊回归使用真实 `AgentRuntime` 和确定性 Provider：先通过主任务创建子会话，再模拟普通 UI/CLI 续聊，不传 `configuredSubagentChild`，同时请求 YOLO 与 Swarm。测试确认模型只获得三个只读工具，原角色提示与历史仍在；即使 Provider 强行返回 `write_file` 调用，也不会生成目标文件。
+截至本文基线，这组 8 项测试通过。手动续聊回归使用真实 `AgentRuntime` 和确定性 Provider：先通过主任务创建子会话，再模拟普通 UI/CLI 续聊，不传 `configuredSubagentChild`，同时请求完全访问权限（`full-access`）与 Swarm。测试确认模型只获得三个只读工具，原角色提示与历史仍在；即使 Provider 强行返回 `write_file` 调用，也不会生成目标文件。
 
 专用续用还有真实模型 E2E：[`configured-subagent-continuation.real-llm.test.ts`](../tests/e2e/configured-subagent-continuation.real-llm.test.ts)。它通过前后两轮回忆虚构标签验证上下文续用，而不是只检查 ID 相等。该测试需要真实模型配置，不属于纯本地确定性检查。
 

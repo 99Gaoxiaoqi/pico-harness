@@ -81,7 +81,6 @@ export function parseUserDefaults(value: unknown): UserDefaultsView {
   const collaborationMode = defaults.collaborationMode;
   const orchestrationMode = defaults.orchestrationMode;
   const permissionMode = defaults.permissionMode;
-  const mode = defaults.mode;
   return {
     ...(stringValue(defaults.modelRouteId)
       ? { modelRouteId: stringValue(defaults.modelRouteId) }
@@ -92,11 +91,8 @@ export function parseUserDefaults(value: unknown): UserDefaultsView {
     orchestrationMode === "swarm"
       ? { orchestrationMode }
       : {}),
-    ...(permissionMode === "default" || permissionMode === "auto" || permissionMode === "yolo"
+    ...(permissionMode === "ask" || permissionMode === "auto" || permissionMode === "full-access"
       ? { permissionMode }
-      : {}),
-    ...(mode === "default" || mode === "plan" || mode === "auto" || mode === "yolo"
-      ? { mode }
       : {}),
     ...(stringValue(defaults.thinkingEffort)
       ? { thinkingEffort: stringValue(defaults.thinkingEffort) }

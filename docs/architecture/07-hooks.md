@@ -47,7 +47,7 @@ Hookify 只生成 `<workspace>/.pico/hookify.<slug>.local.md` 受限规则；同
 - action：`warn | block`；
 - condition：`regex | contains | equals`。
 
-规则不能承载 Shell。`/hookify` 先展示完整 diff，再由 `confirm/cancel` 显式收口；`yolo` 模式也不例外。`/hooks` 无参打开独立管理 dialog，支持审查、双击确认信任、启停和重载；无头子命令仍保留。两者都只接收 handler id，不接收任意命令字符串。
+规则不能承载 Shell。`/hookify` 先展示完整 diff，再由 `confirm/cancel` 显式收口；`full-access` 模式也不例外。`/hooks` 无参打开独立管理 dialog，支持审查、双击确认信任、启停和重载；无头子命令仍保留。两者都只接收 handler id，不接收任意命令字符串。
 
 ## MCP 与异步回唤
 

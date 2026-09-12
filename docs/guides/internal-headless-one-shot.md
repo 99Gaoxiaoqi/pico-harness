@@ -15,14 +15,15 @@ Runner 只是一层宿主适配器，执行链固定为：
 ```bash
 npm run --silent internal:headless:dev <<'JSON'
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "requestId": "case-001",
   "workspacePath": "/absolute/path/to/workspace-copy",
   "picoHome": "/absolute/path/to/exclusive-pico-home",
   "sessionId": "eval-case-001",
   "prompt": "Inspect the repository and summarize the result.",
   "modelRouteId": "provider-id/model-id",
-  "permissionMode": "plan",
+  "collaborationMode": "plan",
+  "permissionMode": "ask",
   "allowedTools": ["read_file", "grep"],
   "timeoutMs": 2700000,
   "shutdownGraceMs": 10000,
@@ -38,14 +39,14 @@ npm run build
 node dist/internal/headless-one-shot-main.js < request.json
 ```
 
-开发态命令中的 `--silent` 用来阻止 npm 自己把 lifecycle 标题写到 stdout；需要精确保留退出码的自动化调用应直接执行构建入口。stdin 必须只包含一个 `schemaVersion: 1` JSON 对象。Runner 的 stdout 对成功、请求错误和运行失败都只输出一行 JSON；机器入口会在动态加载 Runtime 前把内部日志固定为静默，stdout/stderr 都不会混入 Runtime 日志。请求不接受 `apiKey`、`baseURL`、resume、continue 或 fork 字段，未知字段直接拒绝。
+开发态命令中的 `--silent` 用来阻止 npm 自己把 lifecycle 标题写到 stdout；需要精确保留退出码的自动化调用应直接执行构建入口。stdin 必须只包含一个 `schemaVersion: 2` JSON 对象。Runner 的 stdout 对成功、请求错误和运行失败都只输出一行 JSON；机器入口会在动态加载 Runtime 前把内部日志固定为静默，stdout/stderr 都不会混入 Runtime 日志。请求不接受 `apiKey`、`baseURL`、resume、continue 或 fork 字段，未知字段直接拒绝。
 
 `thinkingEffort` 是可选的显式 route 能力选择；省略时使用有效配置的 route 默认值。若显式值不被该 route 支持，请求会在模型生成前失败。
 
 其他可选请求字段包括：`imagePaths`、仅供受控评测的
 `providerRequestMode: "single_non_stream"` 及其 `providerTimeoutMs` /
 `providerAdmissionDeadlineMs`、`policyDenialMode`、`maxTurns` 和 `bashTimeoutMs`。未知字段仍会
-被严格拒绝；完整 schema 以 `HeadlessOneShotRequestV1` 为准。
+被严格拒绝；完整 schema 以 `HeadlessOneShotRequestV2` 为准。
 
 ## 隔离与权限
 
@@ -54,11 +55,11 @@ node dist/internal/headless-one-shot-main.js < request.json
 - workspace 必须预先记录在该 `PICO_HOME/trusted-workspaces.json` 中。Runner 不显示信任提示，未知 workspace 会在读取项目配置前 fail-closed。
 - `modelRouteId` 只从隔离 `PICO_HOME/config.json` 的用户模型目录精确解析。Runner 不读取项目 Provider，不使用旧 `LLM_*` 路由；传给模型装配的环境也只包含该可信 route 声明的一个凭证变量。
 - Runtime 使用隔离的 `HOME`/XDG 根和显式空 Plugin 快照，不加载宿主或项目的 Claude、Plugin、Skill、Agent、MCP、LSP、Hook、Memory 资源。
-- `permissionMode` 和 `allowedTools` 必填，不继承新 Session 的默认 YOLO。支持 `default`、
-  `auto`、`plan`、`yolo`；工具白名单只接受 `read_file`、`write_file`、`edit_file`、`bash`、
+- `collaborationMode`、`permissionMode` 和 `allowedTools` 必填，不继承用户或项目的交互默认值。`collaborationMode` 只接受 `agent` 或 `plan`；`permissionMode` 支持请求批准（`ask`）、
+  帮我批准（`auto`）和完全访问权限（`full-access`）；工具白名单只接受 `read_file`、`write_file`、`edit_file`、`bash`、
   `glob`、`grep`、`todo`、`task_list`、`task_output`、`task_stop`、`fetch_url`、`web_search`，
   无 UI 的审批请求会立即拒绝。
-- YOLO 是当前 OS 用户权限下的全程放权，不是完整沙箱。外层调度器必须使用一次性低权限账户或容器、独占 `PICO_HOME` 和可丢弃 workspace copy/worktree。
+- 完全访问权限（`full-access`）让普通权限链在当前 OS 用户权限下直通，不因 Hook `ask/defer` 进入人工审批，但 hardline 和直接 deny 仍可拒绝，也不是完整沙箱。外层调度器必须使用一次性低权限账户或容器、独占 `PICO_HOME` 和可丢弃 workspace copy/worktree。
 - 同机并发通过 `PICO_HOME`、workspace、Session 三个按序获取的 owner lease fail-closed；部分获取会回滚，正常/失败/已确认取消会请求释放。瞬态删除失败时，进程内的持久清理队列会继续持有 owner，并以最大 1 秒的有界退避重试到成功；进程崩溃后的 dead owner 可由下一个 case 安全接管。已有 Session ID 也会在 Runtime 执行前拒绝。
 
 ## 输出与退出码
@@ -67,7 +68,7 @@ node dist/internal/headless-one-shot-main.js < request.json
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "requestId": "case-001",
   "status": "completed",
   "sessionId": "eval-case-001",
@@ -83,7 +84,8 @@ node dist/internal/headless-one-shot-main.js < request.json
   "effective": {
     "modelRouteId": "provider-id/model-id",
     "thinkingEffort": null,
-    "permissionMode": "plan",
+    "collaborationMode": "plan",
+    "permissionMode": "ask",
     "allowedTools": ["read_file", "grep"]
   },
   "error": null,
@@ -92,7 +94,7 @@ node dist/internal/headless-one-shot-main.js < request.json
 ```
 
 若运行观察到策略拒绝，结果可附带 metadata-only `policyDenials` 汇总；完成的 Plan run 也可
-附带待审阅的 `handoff`。完整结果类型以 `HeadlessOneShotResultV1` 为准。
+附带待审阅的 `handoff`。完整结果类型以 `HeadlessOneShotResultV2` 为准。
 
 失败只输出稳定错误码和脱敏摘要，不输出 stack、完整 Messages 或原始 ToolResult。
 Headless 的 Tracer 在字符串属性进入内存 Span 时就执行 metadata-only policy，因此首次写盘前，工具 arguments、输出预览、错误文本和路径已统一替换为 `[REDACTED]`，SIGKILL/断电不会留下原文窗口。Runner 仍对本 case/Session 绑定的 Trace（包括 Runtime reject 后没有返回 `tracePath` 的失败终态）执行落盘后净化作为纵深防御；取消后延迟 settle 的 Runtime 也完成该步骤后才释放租约。

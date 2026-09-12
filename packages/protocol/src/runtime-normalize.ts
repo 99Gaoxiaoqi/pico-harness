@@ -75,6 +75,7 @@ export interface ApprovalRequestedView {
  * 协议包不 import 引擎源码，两侧字段语义由 parseApprovalRequestedPayload 测试锚定）。
  */
 export type ApprovalSessionScopeView =
+  | { readonly type: "network" }
   | { readonly type: "all-edits" }
   | {
       readonly type: "directories";
@@ -167,6 +168,8 @@ export function parseApprovalSessionScope(value: unknown): ApprovalSessionScopeV
     record["access"] === "edit" ? "edit" : record["access"] === "read" ? "read" : undefined;
   const safety = record["safety"] === true ? true : undefined;
   switch (record["type"]) {
+    case "network":
+      return { type: "network" };
     case "all-edits":
       return { type: "all-edits" };
     case "directories": {

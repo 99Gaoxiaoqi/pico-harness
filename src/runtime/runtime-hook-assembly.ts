@@ -2,8 +2,9 @@ import { join } from "node:path";
 import { AgentEngine } from "../engine/loop.js";
 import type { Session } from "../engine/session.js";
 import type { McpConnectionManager } from "../mcp/manager.js";
+import type { HookHostNetworkGate } from "../hooks/executors/index.js";
 import type { LLMProvider } from "../provider/interface.js";
-import type { YoloSandboxConfig } from "../safety/yolo-sandbox.js";
+import type { WorkspaceSandboxConfig } from "../safety/workspace-sandbox.js";
 import { ToolRegistry } from "../tools/registry-impl.js";
 import { createSubagentRegistryFactory } from "../tools/delegation-registry.js";
 import type { WorkspaceRoots } from "../tools/workspace-roots.js";
@@ -19,8 +20,10 @@ export interface RuntimeHookAssemblyInput {
   readonly workspaceRoots: WorkspaceRoots;
   readonly picoHome: string;
   readonly runtimeEnv: Readonly<Record<string, string | undefined>>;
-  readonly sandboxConfig: YoloSandboxConfig;
+  readonly sandboxConfig: WorkspaceSandboxConfig;
   readonly mcpManager: () => McpConnectionManager | undefined;
+  /** Rechecked immediately before every Hook HTTP/MCP network operation. */
+  readonly hostNetworkGate?: HookHostNetworkGate;
   readonly toolResultRedactionSecrets?: readonly string[];
 }
 
@@ -38,6 +41,7 @@ export function bindRuntimeHookCapabilities(input: RuntimeHookAssemblyInput): vo
         return await manager.invokeConnectedTool(server, tool, toolInput, context);
       },
     },
+    ...(input.hostNetworkGate ? { hostNetworkGate: input.hostNetworkGate } : {}),
     agentVerifier: {
       async verify(request) {
         const verifierEngine = new AgentEngine({

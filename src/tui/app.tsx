@@ -150,7 +150,7 @@ export function App({
   collaborationMode = "agent",
   graphMode = false,
   orchestrationMode,
-  permissionMode = "default",
+  permissionMode = "ask",
   thinkingEffort,
   mcpSummary,
   taskSummary,

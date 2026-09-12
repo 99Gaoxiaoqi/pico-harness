@@ -31,17 +31,23 @@ import {
  */
 export class McpToolBridge implements BaseTool {
   readonly readOnly = false;
+  readonly permissionCategory = "network_send" as const;
   readonly fileSideEffects = WORKSPACE_FILE_SIDE_EFFECTS;
   readonly toolset = "mcp";
 
   private readonly qualifiedName: string;
-  private readonly toolDefinition: ToolDefinition;
+  private toolDefinition: ToolDefinition;
+  private tool: McpTool;
+  private readonly resolveClient: () => McpClient | undefined;
 
   constructor(
-    private readonly client: McpClient,
+    client: McpClient | (() => McpClient | undefined),
     private readonly serverName: string,
-    private readonly tool: McpTool,
+    tool: McpTool,
+    private readonly authorizeCall?: (context?: ToolExecutionContext) => Promise<void>,
   ) {
+    this.resolveClient = typeof client === "function" ? client : () => client;
+    this.tool = tool;
     this.qualifiedName = qualifyMcpToolName(serverName, tool.name);
     this.toolDefinition = {
       name: this.qualifiedName,
@@ -56,6 +62,27 @@ export class McpToolBridge implements BaseTool {
 
   definition(): ToolDefinition {
     return this.toolDefinition;
+  }
+
+  /**
+   * A policy-only stdio restart must not replace the Registry binding that was
+   * admitted for the current Step. The manager may refresh descriptive metadata
+   * only when the executable input contract is unchanged.
+   */
+  rebindCompatibleTool(tool: McpTool): void {
+    if (!this.isCompatibleTool(tool)) {
+      throw new Error(`MCP tool ${this.qualifiedName} changed its input contract during restart`);
+    }
+    this.tool = tool;
+    this.toolDefinition = {
+      name: this.qualifiedName,
+      description: this.buildDescription(),
+      inputSchema: assertMcpInputSchema(tool.name, tool.inputSchema),
+    };
+  }
+
+  isCompatibleTool(tool: McpTool): boolean {
+    return tool.name === this.tool.name && sameJsonValue(tool.inputSchema, this.tool.inputSchema);
   }
 
   /** MCP 工具默认副作用未知，必须与其他工具全局互斥。 */
@@ -74,7 +101,11 @@ export class McpToolBridge implements BaseTool {
     }
 
     try {
-      const result = await this.client.callTool(this.tool.name, parsedArgs, context);
+      const client = this.resolveClient();
+      if (!client) throw new Error(`MCP server ${this.serverName} is reconnecting`);
+      await this.authorizeCall?.(context);
+      context?.signal?.throwIfAborted();
+      const result = await client.callTool(this.tool.name, parsedArgs, context);
       context?.signal?.throwIfAborted();
       if (result.isError) {
         // server 报 isError:把内容拼成错误信息返回(不抛异常,保持 BaseTool 契约)
@@ -101,4 +132,28 @@ export class McpToolBridge implements BaseTool {
     const base = this.tool.description || `(无描述,来自 MCP server "${this.serverName}")`;
     return `${base} [MCP: ${this.serverName}/${this.tool.name}]`;
   }
+}
+
+function sameJsonValue(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (typeof left !== typeof right || left === null || right === null) return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => sameJsonValue(value, right[index]))
+    );
+  }
+  if (typeof left !== "object" || typeof right !== "object") return false;
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const leftKeys = Object.keys(leftRecord).sort();
+  const rightKeys = Object.keys(rightRecord).sort();
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every(
+      (key, index) => key === rightKeys[index] && sameJsonValue(leftRecord[key], rightRecord[key]),
+    )
+  );
 }

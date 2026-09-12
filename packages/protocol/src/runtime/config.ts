@@ -6,7 +6,6 @@ import type {
   RuntimeConfigSource,
   RuntimeCredentialSource,
   RuntimeCredentialStatus,
-  RuntimeInteractionMode,
   RuntimeOrchestrationMode,
   RuntimePermissionMode,
   RuntimeProviderKind,
@@ -20,7 +19,6 @@ import {
   exactParamShape,
   exactResultShape,
   finiteNumberParam,
-  interactionModeParam,
   jsonObjectParam,
   noParams,
   oneOfParam,
@@ -67,7 +65,6 @@ export type RuntimeUserDefaults = JsonObject & {
   readonly collaborationMode?: RuntimeCollaborationMode;
   readonly orchestrationMode?: RuntimeOrchestrationMode;
   readonly permissionMode?: RuntimePermissionMode;
-  readonly mode?: RuntimeInteractionMode;
   readonly thinkingEffort?: string;
 };
 
@@ -132,7 +129,6 @@ export const runtimeUserDefaultsParam: RuntimeParamRule = (value, path) => {
       collaborationMode: collaborationModeParam,
       orchestrationMode: orchestrationModeParam,
       permissionMode: permissionModeParam,
-      mode: interactionModeParam,
       thinkingEffort: stringParam,
     },
   );
@@ -181,8 +177,7 @@ const runtimeUserDefaultsResult = exactResultShape(
     modelRouteId: resultString,
     collaborationMode: resultOneOf(["agent", "plan"]),
     orchestrationMode: resultOneOf(["default", "graph", "swarm"]),
-    permissionMode: resultOneOf(["default", "auto", "yolo"]),
-    mode: resultOneOf(["default", "plan", "auto", "yolo"]),
+    permissionMode: resultOneOf(["ask", "auto", "full-access"]),
     thinkingEffort: resultString,
   },
 );

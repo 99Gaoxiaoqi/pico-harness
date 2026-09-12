@@ -23,7 +23,7 @@ import { executeAgentRuntime } from "../../../src/runtime/agent-runtime.js";
 import {
   BACKGROUND_HARDLINE_VERSION,
   BACKGROUND_HOOK_VERSION,
-} from "../../../src/safety/background-yolo-policy.js";
+} from "../../../src/safety/background-autonomous-policy.js";
 
 test("user MCP store enforces private permissions, CAS and durable idempotency", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-user-mcp-store-"));
@@ -308,7 +308,7 @@ test("background runs reject injected user MCP sources before model or tool exec
         execution: {
           kind: "background",
           policy: {
-            mode: "yolo",
+            mode: "full-access",
             backgroundEnabled: true,
             trustedWorkspace: true,
             toolNetworkPolicy: "disabled",

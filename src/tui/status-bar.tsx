@@ -33,7 +33,7 @@ export function buildStatusItems({
   sessionMode = "new",
   forkFrom,
   collaborationMode = "agent",
-  permissionMode = "default",
+  permissionMode = "ask",
   graphMode = false,
   orchestrationMode,
   mcpSummary,
@@ -48,7 +48,7 @@ export function buildStatusItems({
   if (forkFrom !== undefined) {
     items.push(["forkFrom", shortSessionId(forkFrom)]);
   }
-  items.push(["collab", collaborationMode], ["perm", permissionMode]);
+  items.push(["collab", collaborationMode], ["perm", permissionModeLabel(permissionMode)]);
   if (graphMode) items.push(["graph", "on"]);
   items.push(["orchestration", orchestrationMode ?? (graphMode ? "graph" : "default")]);
   if (mcpSummary) items.push(["mcp", mcpSummary]);
@@ -106,4 +106,11 @@ function fitStatusParts(parts: string[], width: number): string {
 function shortSessionId(sessionId: string): string {
   if (sessionId.length <= 12) return sessionId;
   return `${sessionId.slice(0, 4)}...${sessionId.slice(-6)}`;
+}
+
+function permissionModeLabel(mode: string): string {
+  if (mode === "ask") return "请求批准";
+  if (mode === "auto") return "帮我批准";
+  if (mode === "full-access") return "完全访问权限";
+  return mode;
 }

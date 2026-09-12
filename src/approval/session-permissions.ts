@@ -14,6 +14,7 @@ export type PermissionAccess = "read" | "edit";
 
 /** Claude Code 风格的 session permission update；不保存完整工具参数 JSON。 */
 export type PermissionSessionScope =
+  | { type: "network" }
   | { type: "all-edits" }
   | {
       type: "directories";
@@ -30,6 +31,9 @@ export class SessionPermissionGrants {
     string,
     { sessionId: string; scopes: PermissionSessionScope[] }
   >();
+  /** Session-wide process-network expansion, mirroring a managed ExecutionBoundary grant. */
+  private readonly networkBySession = new Set<string>();
+  private readonly oneShotNetworkBySession = new Map<string, Set<string>>();
 
   allows(
     sessionId: string,
@@ -65,18 +69,73 @@ export class SessionPermissionGrants {
     this.bySession.set(key, { sessionId, scopes: [...current, cloneScope(scope)] });
   }
 
+  allowsNetwork(sessionId: string, workDir: string, picoHome?: string): boolean {
+    return this.networkBySession.has(sessionScopeKey(sessionId, workDir, picoHome));
+  }
+
+  addNetwork(sessionId: string, workDir: string, picoHome?: string): void {
+    this.networkBySession.add(sessionScopeKey(sessionId, workDir, picoHome));
+  }
+
+  authorizeNetworkOnce(
+    sessionId: string,
+    workDir: string,
+    toolCallId: string,
+    picoHome?: string,
+  ): void {
+    const key = sessionScopeKey(sessionId, workDir, picoHome);
+    const calls = this.oneShotNetworkBySession.get(key) ?? new Set<string>();
+    calls.add(toolCallId);
+    this.oneShotNetworkBySession.set(key, calls);
+  }
+
+  consumeNetworkAuthorization(
+    sessionId: string,
+    workDir: string,
+    toolCallId: string | undefined,
+    picoHome?: string,
+  ): boolean {
+    const key = sessionScopeKey(sessionId, workDir, picoHome);
+    if (this.networkBySession.has(key)) return true;
+    if (!toolCallId) return false;
+    const calls = this.oneShotNetworkBySession.get(key);
+    if (!calls?.delete(toolCallId)) return false;
+    if (calls.size === 0) this.oneShotNetworkBySession.delete(key);
+    return true;
+  }
+
   clear(sessionId?: string, workDir?: string, picoHome?: string): void {
     if (sessionId === undefined) {
       this.bySession.clear();
+      this.networkBySession.clear();
+      this.oneShotNetworkBySession.clear();
       return;
     }
     if (workDir !== undefined) {
-      this.bySession.delete(sessionScopeKey(sessionId, workDir, picoHome));
+      const key = sessionScopeKey(sessionId, workDir, picoHome);
+      this.bySession.delete(key);
+      this.networkBySession.delete(key);
+      this.oneShotNetworkBySession.delete(key);
       return;
     }
     for (const [key, entry] of this.bySession) {
       if (entry.sessionId === sessionId) this.bySession.delete(key);
     }
+    for (const key of this.networkBySession) {
+      if (keyIncludesSessionId(key, sessionId)) this.networkBySession.delete(key);
+    }
+    for (const key of this.oneShotNetworkBySession.keys()) {
+      if (keyIncludesSessionId(key, sessionId)) this.oneShotNetworkBySession.delete(key);
+    }
+  }
+}
+
+function keyIncludesSessionId(key: string, sessionId: string): boolean {
+  try {
+    const value = JSON.parse(key) as unknown;
+    return Array.isArray(value) && value[1] === sessionId;
+  } catch {
+    return false;
   }
 }
 
@@ -97,6 +156,10 @@ export async function applySessionPermissionScope(
     picoHome?: string;
   },
 ): Promise<void> {
+  if (scope.type === "network") {
+    globalSessionPermissionGrants.addNetwork(options.sessionId, options.workDir, options.picoHome);
+    return;
+  }
   if (scope.type === "directories") {
     const added: string[] = [];
     for (const directory of scope.directories) {
@@ -150,7 +213,7 @@ export function permissionScopeForCall(
   return { type: "tool", toolName: call.name };
 }
 
-/** 非 YOLO 模式下必须显式确认的文件安全路径。 */
+/** 非 `full-access` 模式下必须显式确认的文件安全路径。 */
 export function bypassImmuneSafetyPath(
   call: Pick<ToolCall, "name" | "arguments">,
   workDir: string,
@@ -170,7 +233,7 @@ export function bypassImmuneSafetyPath(
     .map((path) => workspaceRoots?.resolveUnchecked(path) ?? resolve(workDir, path))
     .find((path) => {
       const insideAuthorizedWorkspace = workspaceRoots
-        ? workspaceRoots.isAllowedPath(path)
+        ? workspaceRoots.isAllowedPath(path, readAccess ? "read" : "write")
         : isWithinDirectory(resolve(workDir), path);
       if (insideAuthorizedWorkspace) return false;
       return isSensitiveCredentialPath(path) || (!readAccess && isControlPlaneSafetyPath(path));
@@ -211,6 +274,8 @@ function isControlPlaneSafetyPath(absolutePath: string): boolean {
 
 export function formatPermissionSessionScope(scope: PermissionSessionScope): string {
   switch (scope.type) {
+    case "network":
+      return "Yes, allow network access during this session";
     case "all-edits":
       return "Yes, allow all edits during this session";
     case "directories": {
@@ -239,6 +304,7 @@ function scopeAllowsCall(
   workDir: string,
   workspaceRoots?: WorkspaceRoots,
 ): boolean {
+  if (scope.type === "network") return false;
   if (scope.type === "all-edits") return call.name === "write_file" || call.name === "edit_file";
   if (scope.type === "tool") return call.name === scope.toolName;
   if (scope.type === "bash-command") {
@@ -295,6 +361,8 @@ function normalizeCommand(command: string): string {
 
 function scopeKey(scope: PermissionSessionScope): string {
   switch (scope.type) {
+    case "network":
+      return scope.type;
     case "all-edits":
       return scope.type;
     case "directories":

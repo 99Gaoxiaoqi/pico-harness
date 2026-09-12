@@ -3,6 +3,6 @@ flowchart TB
     B["用户进入子会话<br/>直接手动续聊"] --> R
     R --> I["读取目标会话自己的<br/>宿主 admission"]
     I --> P["恢复能力类型<br/>校验工作目录与冲突"]
-    P --> M["固定有效模式<br/>协作：agent<br/>权限：default<br/>编排：default"]
+    P --> M["固定有效模式<br/>协作：agent<br/>权限：ask<br/>编排：default"]
     M --> T["重建工具与安全检查<br/>裁剪至 profile 白名单"]
     T --> E["执行新一轮"]

@@ -15,6 +15,9 @@ export interface CreateSandboxPolicyOptions {
   workspaceRoots: readonly string[];
   scratchRoot: string;
   readRoots?: readonly string[];
+  writeRoots?: readonly string[];
+  readFiles?: readonly string[];
+  writeFiles?: readonly string[];
   config?: Partial<SandboxConfig>;
   generation?: number;
 }
@@ -27,21 +30,40 @@ export function createSandboxPolicy(options: CreateSandboxPolicyOptions): Sandbo
   scratchRoot = canonicalize(scratchRoot);
   const workspaceRoots = normalizeRoots(options.workspaceRoots);
   const explicitReadRoots = normalizeRoots(options.readRoots ?? []);
-  const writeRoots =
-    profile === "workspace-write"
-      ? normalizeRoots([...workspaceRoots, scratchRoot])
-      : [scratchRoot];
+  const explicitWriteRoots = normalizeRoots(options.writeRoots ?? []);
+  const writeRoots = normalizeRoots([
+    ...(profile === "workspace-write" ? workspaceRoots : []),
+    ...explicitWriteRoots,
+    scratchRoot,
+  ]);
   const readRoots = normalizeRoots([...explicitReadRoots, ...workspaceRoots, ...writeRoots]);
+  const writeFiles = normalizeExactPaths(options.writeFiles ?? []).filter(
+    (path) => !writeRoots.some((root) => isWithinRoot(root, path)),
+  );
+  const writeFileSet = new Set(writeFiles);
+  const readFiles = normalizeExactPaths(options.readFiles ?? []).filter(
+    (path) => !writeFileSet.has(path) && !readRoots.some((root) => isWithinRoot(root, path)),
+  );
   const network: SandboxNetworkPolicy =
-    profile === "read-only" ? "deny" : profile === "danger-full-access" ? "allow" : config.network;
+    profile === "danger-full-access"
+      ? "allow"
+      : profile === "read-only"
+        ? (options.config?.network ?? "deny")
+        : config.network;
   return Object.freeze({
     profile,
     network,
     readRoots: Object.freeze(readRoots),
     writeRoots: Object.freeze(writeRoots),
+    ...(readFiles.length > 0 ? { readFiles: Object.freeze(readFiles) } : {}),
+    ...(writeFiles.length > 0 ? { writeFiles: Object.freeze(writeFiles) } : {}),
     scratchRoot,
     generation: options.generation ?? 0,
   });
+}
+
+function normalizeExactPaths(paths: readonly string[]): string[] {
+  return [...new Set(paths.map(canonicalize))].sort();
 }
 
 export function defaultSandboxScratchRoot(cwd: string): string {

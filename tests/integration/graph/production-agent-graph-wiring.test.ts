@@ -20,6 +20,11 @@ import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-por
 import type { RunAgentCliDependencies } from "../../../src/runtime/agent-runtime.js";
 import { PluginRuntimeSnapshotRegistry } from "../../../src/plugins/plugin-runtime-snapshot-registry.js";
 import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
+import {
+  compileRuntimePermissionProfile,
+  createBypassExecutionBoundary,
+  createManagedExecutionBoundary,
+} from "../../../src/safety/permission-profile.js";
 import { createAskUserRequestId } from "../../../src/tools/ask-user.js";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 
@@ -48,6 +53,11 @@ test("production host binds Graph root and installs detached exact execution", a
     readonly promptId: string;
   }>();
   let brokerApproval: { readonly allowed: boolean; readonly allowForSession?: boolean } | undefined;
+  let networkBoundaryApproval: { readonly allowed: boolean; readonly reason: string } | undefined;
+  let writeBoundaryApproval: { readonly allowed: boolean; readonly reason: string } | undefined;
+  let fullAccessBoundaryApproval:
+    | { readonly allowed: boolean; readonly reason: string }
+    | undefined;
   let brokerAnswer: { readonly kind: string; readonly optionId?: string } | undefined;
   let reattachAttempts = 0;
   let rootEpochAdmitted = false;
@@ -65,7 +75,7 @@ test("production host binds Graph root and installs detached exact execution", a
         throw new Error("attach failed before AgentRuntime completed");
       }
       if (options.prompt === "exercise broker boundaries") {
-        assert.equal(options.interactionMode, "default");
+        assert.equal(options.interactionMode, "ask");
         assert.ok(host.approvalManager);
         assert.ok(host.approvalNotifier);
         assert.ok(host.askUserHandler);
@@ -80,7 +90,7 @@ test("production host binds Graph root and installs detached exact execution", a
           host.signal,
           {
             providerCallId: "provider-call-approval-1",
-            sessionScope: { type: "tool", toolName: "bash" },
+            sessionScope: { type: "bash-command", command: "sensitive", match: "exact" },
           },
         );
         const answer = host.askUserHandler.waitForAnswer(
@@ -96,6 +106,54 @@ test("production host binds Graph root and installs detached exact execution", a
         );
         brokerPending.resolve({ approvalId, promptId });
         [brokerApproval, brokerAnswer] = await Promise.all([approval, answer]);
+      }
+      if (options.prompt === "reject operator network approval") {
+        networkBoundaryApproval = await host.approvalManager!.waitForApproval(
+          "graph-network-approval",
+          "web_search",
+          '{"query":"must stay offline"}',
+          host.approvalNotifier!,
+          undefined,
+          host.signal,
+          {
+            providerCallId: "provider-call-network-boundary",
+            sessionScope: { type: "tool", toolName: "web_search" },
+          },
+        );
+      }
+      if (options.prompt === "reject operator write approval") {
+        writeBoundaryApproval = await host.approvalManager!.waitForApproval(
+          "graph-write-approval",
+          "write_file",
+          '{"path":"blocked.txt","content":"blocked"}',
+          host.approvalNotifier!,
+          undefined,
+          host.signal,
+          {
+            providerCallId: "provider-call-write-boundary",
+            sessionScope: { type: "all-edits" },
+          },
+        );
+      }
+      if (options.prompt === "inherit operator full access") {
+        assert.equal(options.interactionMode, "full-access");
+        assert.equal(
+          (host.agentGraph as { readonly executionPermissionMode?: string } | undefined)
+            ?.executionPermissionMode,
+          "full-access",
+        );
+        fullAccessBoundaryApproval = await host.approvalManager!.waitForApproval(
+          "graph-full-access-approval",
+          "write_file",
+          '{"path":"full-access.txt","content":"allowed"}',
+          host.approvalNotifier!,
+          undefined,
+          host.signal,
+          {
+            providerCallId: "provider-call-full-access-boundary",
+            sessionScope: { type: "all-edits" },
+          },
+        );
       }
       if (host.agentGraph?.kind === "operator") await operatorGate;
       return {
@@ -188,12 +246,16 @@ test("production host binds Graph root and installs detached exact execution", a
       model: "coder",
       modelRouteId: "test/coder",
       collaborationMode: "agent",
-      permissionMode: "default",
+      permissionMode: "ask",
       orchestrationMode: "graph",
       thinkingEffort: "medium",
       thinkingEffortExplicit: false,
       additionalDirectories: [],
     },
+    boundary: compileRuntimePermissionProfile({
+      collaborationMode: "agent",
+      permissionMode: "ask",
+    }),
   });
 
   const foreground = asRecord(
@@ -243,6 +305,9 @@ test("production host binds Graph root and installs detached exact execution", a
     prestartedUserInput: { messageId: "graph-exact-input-1" },
     binding: {
       kind: "operator",
+      rootSessionId: rootLease.session.id,
+      workspacePolicy: { kind: "shared" },
+      executionPermissionMode: "ask",
       getActivationContext: () => undefined,
       outputPort: {} as never,
       profileSnapshot: operatorProfile,
@@ -258,7 +323,7 @@ test("production host binds Graph root and installs detached exact execution", a
   await waitUntil(() => calls.length === 2);
   assert.equal(runtime.getRun(exactInput.prestartedRun.runId)?.status, "running");
   assert.equal(terminalCount, 0);
-  assert.equal(calls[1]?.options.interactionMode, "default");
+  assert.equal(calls[1]?.options.interactionMode, "ask");
   assert.equal(calls[1]?.options.orchestrationMode, "default");
   assert.deepEqual(calls[1]?.options.allowedTools, [...operatorProfile.tools, "agent_output"]);
   assert.equal(calls[1]?.host.agentGraph?.kind, "operator");
@@ -269,10 +334,229 @@ test("production host binds Graph root and installs detached exact execution", a
   assert.equal(calls[1]?.host.pluginSnapshot, undefined);
   assert.equal(calls[1]?.host.mcpConfigSources, undefined);
   assert.equal(calls[1]?.host.browserAgent, undefined);
+  assert.deepEqual(
+    operatorLease.session.getRuntimeStateSnapshot().boundary,
+    rootLease.session.getRuntimeStateSnapshot().boundary,
+  );
 
   releaseOperator();
   assert.equal((await runtime.waitForRun(exactInput.prestartedRun.runId)).status, "succeeded");
   assert.equal(terminalCount, 1);
+
+  const parentBoundary = rootLease.session.getRuntimeStateSnapshot().boundary;
+  assert.ok(parentBoundary?.kind === "managed");
+  const outsidePath = "/graph-boundary-outside-parent";
+  let rejectedBoundaryIndex = 0;
+  const assertRejectedBoundary = async (
+    label: string,
+    childBoundary: Parameters<typeof operatorLease.session.updateRuntimeState>[0]["boundary"],
+    expected: RegExp,
+  ) => {
+    rejectedBoundaryIndex++;
+    operatorLease.session.updateRuntimeState({ boundary: childBoundary! });
+    await operatorLease.session.flushPersistence();
+    const callsBefore = calls.length;
+    const runId = `graph-exact-boundary-rejected-${rejectedBoundaryIndex}`;
+    await graphFactoryOptions!.execute({
+      ...exactInput,
+      claimId: `claim-boundary-rejected-${rejectedBoundaryIndex}`,
+      prompt: `reject ${label} boundary`,
+      prestartedRun: {
+        runId,
+        turnId: `${runId}-turn`,
+        invocationId: `${runId}-invocation`,
+        runStartedEventId: `${runId}-start`,
+        runStartedAt: new Date(10 + rejectedBoundaryIndex).toISOString(),
+      },
+      prestartedUserInput: { messageId: `${runId}-input` },
+    });
+    const failed = await runtime.waitForRun(runId);
+    assert.equal(failed.status, "failed");
+    assert.match(failed.error ?? "", expected);
+    assert.equal(calls.length, callsBefore, `${label} boundary must fail before AgentRuntime`);
+  };
+
+  await assertRejectedBoundary(
+    "network",
+    createManagedExecutionBoundary(
+      { ...parentBoundary.profile, network: { kind: "enabled" } },
+      parentBoundary.revision + 1,
+    ),
+    /exceeds its parent boundary/u,
+  );
+  await assertRejectedBoundary(
+    "additional path",
+    createManagedExecutionBoundary(
+      {
+        ...parentBoundary.profile,
+        name: "custom",
+        fileSystem: {
+          ...parentBoundary.profile.fileSystem,
+          entries: [
+            ...parentBoundary.profile.fileSystem.entries,
+            { kind: "path", access: "write", path: outsidePath, match: "subtree" },
+          ],
+        },
+      },
+      parentBoundary.revision + 1,
+    ),
+    /exceeds its parent boundary/u,
+  );
+  await assertRejectedBoundary(
+    "bypass",
+    createBypassExecutionBoundary(parentBoundary.revision + 1),
+    /cannot run with a bypass execution boundary/u,
+  );
+
+  const denyBoundary = createManagedExecutionBoundary(
+    {
+      ...parentBoundary.profile,
+      name: "custom",
+      fileSystem: {
+        ...parentBoundary.profile.fileSystem,
+        entries: [
+          ...parentBoundary.profile.fileSystem.entries,
+          { kind: "path", access: "deny", path: outsidePath, match: "subtree" },
+        ],
+      },
+    },
+    parentBoundary.revision + 1,
+  );
+  rootLease.session.updateRuntimeState({ boundary: denyBoundary });
+  await rootLease.session.flushPersistence();
+  await assertRejectedBoundary(
+    "missing custom deny",
+    parentBoundary,
+    /exceeds its parent boundary/u,
+  );
+  rootLease.session.updateRuntimeState({ boundary: parentBoundary });
+  operatorLease.session.updateRuntimeState({ boundary: parentBoundary });
+  await Promise.all([
+    rootLease.session.flushPersistence(),
+    operatorLease.session.flushPersistence(),
+  ]);
+
+  const callsBeforeNetworkApproval = calls.length;
+  const networkApprovalRunId = "graph-exact-network-approval";
+  await graphFactoryOptions.execute({
+    ...exactInput,
+    claimId: "claim-network-approval",
+    prompt: "reject operator network approval",
+    prestartedRun: {
+      runId: networkApprovalRunId,
+      turnId: `${networkApprovalRunId}-turn`,
+      invocationId: `${networkApprovalRunId}-invocation`,
+      runStartedEventId: `${networkApprovalRunId}-start`,
+      runStartedAt: new Date(20).toISOString(),
+    },
+    prestartedUserInput: { messageId: `${networkApprovalRunId}-input` },
+  });
+  assert.equal((await runtime.waitForRun(networkApprovalRunId)).status, "succeeded");
+  assert.equal(calls.length, callsBeforeNetworkApproval + 1);
+  assert.deepEqual(networkBoundaryApproval, {
+    allowed: false,
+    reason: "Graph Operator 请求超出父 Session execution boundary，已安全拒绝。",
+  });
+
+  const readOnlyBoundary = compileRuntimePermissionProfile({
+    collaborationMode: "plan",
+    permissionMode: "ask",
+    revision: parentBoundary.revision + 1,
+  });
+  rootLease.session.updateRuntimeState({ boundary: readOnlyBoundary });
+  operatorLease.session.updateRuntimeState({ boundary: readOnlyBoundary });
+  await Promise.all([
+    rootLease.session.flushPersistence(),
+    operatorLease.session.flushPersistence(),
+  ]);
+  const writeApprovalRunId = "graph-exact-write-approval";
+  await graphFactoryOptions.execute({
+    ...exactInput,
+    claimId: "claim-write-approval",
+    prompt: "reject operator write approval",
+    prestartedRun: {
+      runId: writeApprovalRunId,
+      turnId: `${writeApprovalRunId}-turn`,
+      invocationId: `${writeApprovalRunId}-invocation`,
+      runStartedEventId: `${writeApprovalRunId}-start`,
+      runStartedAt: new Date(20).toISOString(),
+    },
+    prestartedUserInput: { messageId: `${writeApprovalRunId}-input` },
+  });
+  assert.equal((await runtime.waitForRun(writeApprovalRunId)).status, "succeeded");
+  assert.deepEqual(writeBoundaryApproval, {
+    allowed: false,
+    reason: "Graph Operator 请求超出父 Session execution boundary，已安全拒绝。",
+  });
+  rootLease.session.updateRuntimeState({ boundary: parentBoundary });
+  operatorLease.session.updateRuntimeState({ boundary: parentBoundary });
+  await Promise.all([
+    rootLease.session.flushPersistence(),
+    operatorLease.session.flushPersistence(),
+  ]);
+
+  const isolatedWorkspace = join(root, "isolated-operator-workdir");
+  await mkdir(isolatedWorkspace, { recursive: true });
+  const isolatedLease = await globalSessionManager.getOrCreatePinned(
+    "graph-isolated-operator-session",
+    isolatedWorkspace,
+    {
+      persistence: true,
+      picoHome,
+      runtimePort: createEngineRuntimePort(),
+    },
+  );
+  sessionLeases.push(isolatedLease);
+  const callsBeforeIsolated = calls.length;
+  const isolatedRunId = "graph-exact-isolated-boundary";
+  await graphFactoryOptions.execute({
+    ...exactInput,
+    claimId: "claim-isolated-boundary",
+    session: isolatedLease.session,
+    prompt: "reject different operator workDir",
+    prestartedRun: {
+      runId: isolatedRunId,
+      turnId: `${isolatedRunId}-turn`,
+      invocationId: `${isolatedRunId}-invocation`,
+      runStartedEventId: `${isolatedRunId}-start`,
+      runStartedAt: new Date(21).toISOString(),
+    },
+    prestartedUserInput: { messageId: `${isolatedRunId}-input` },
+  });
+  const isolatedFailure = await runtime.waitForRun(isolatedRunId);
+  assert.equal(isolatedFailure.status, "failed");
+  assert.match(isolatedFailure.error ?? "", /workDir differs.*cannot be proven/u);
+  assert.equal(calls.length, callsBeforeIsolated);
+
+  const bypassBoundary = createBypassExecutionBoundary(parentBoundary.revision + 1);
+  rootLease.session.updateRuntimeState({ boundary: bypassBoundary });
+  await rootLease.session.flushPersistence();
+  const fullAccessRunId = "graph-exact-full-access-boundary";
+  await graphFactoryOptions.execute({
+    ...exactInput,
+    claimId: "claim-full-access-boundary",
+    prompt: "inherit operator full access",
+    prestartedRun: {
+      runId: fullAccessRunId,
+      turnId: `${fullAccessRunId}-turn`,
+      invocationId: `${fullAccessRunId}-invocation`,
+      runStartedEventId: `${fullAccessRunId}-start`,
+      runStartedAt: new Date(22).toISOString(),
+    },
+    prestartedUserInput: { messageId: `${fullAccessRunId}-input` },
+  });
+  assert.equal((await runtime.waitForRun(fullAccessRunId)).status, "succeeded");
+  assert.equal(operatorLease.session.getRuntimeStateSnapshot().boundary?.kind, "bypass");
+  assert.deepEqual(fullAccessBoundaryApproval, {
+    allowed: true,
+    reason: "Graph Operator inherited full-access from its parent Session.",
+  });
+  rootLease.session.updateRuntimeState({ boundary: parentBoundary });
+  operatorLease.session.updateRuntimeState({ boundary: parentBoundary });
+  await Promise.all([
+    rootLease.session.flushPersistence(),
+    operatorLease.session.flushPersistence(),
+  ]);
 
   let retryTerminalCount = 0;
   const retryInput: ExecuteHostedAgentGraphRunInput = {
@@ -436,8 +720,13 @@ test("production host binds Graph root and installs detached exact execution", a
   );
 
   operatorLease.release();
+  isolatedLease.release();
   rootLease.release();
   await services.desktopService.close();
+  const isolatedSession = globalSessionManager.delete(isolatedLease.session.id, isolatedWorkspace, {
+    picoHome,
+  });
+  await isolatedSession?.close();
   assert.equal(graphCloseCount, 1);
   for (const sessionId of ["graph-root-session", "graph-operator-session"]) {
     const session = globalSessionManager.delete(sessionId, canonicalWorkspace, { picoHome });

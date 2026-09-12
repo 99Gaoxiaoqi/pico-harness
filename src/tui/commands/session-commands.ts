@@ -37,7 +37,7 @@ export function createSessionCommands(deps: ClientCommandRegistryDeps) {
             `模型路由：${settings.settings.modelRouteId ?? "(默认)"}`,
             `思考强度：${settings.settings.thinkingEffort ?? "(默认)"}`,
             `协作模式：${settings.settings.collaborationMode ?? "agent"}`,
-            `权限模式：${settings.settings.permissionMode ?? "default"}`,
+            `权限模式：${settings.settings.permissionMode ?? "ask"}`,
             `编排模式：${settings.settings.orchestrationMode ?? "default"}`,
           ].join(" · "),
         };

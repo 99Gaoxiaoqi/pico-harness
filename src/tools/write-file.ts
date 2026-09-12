@@ -21,6 +21,7 @@ import {
 
 export class WriteFileTool implements BaseTool {
   readonly nesting = "nestable" as const;
+  readonly permissionCategory = "file_write" as const;
   private readonly roots: WorkspaceRoots;
 
   constructor(workDirOrRoots: string | WorkspaceRoots) {
@@ -70,9 +71,12 @@ export class WriteFileTool implements BaseTool {
 
     // 先校验但不消耗一次性授权；创建父目录后重新解析真实路径，
     // 防止父目录在 mkdir 期间被替换为越界符号链接。
-    const initialPath = await this.roots.assertAllowed(path, { consumeAuthorization: false });
+    const initialPath = await this.roots.assertAllowed(path, {
+      consumeAuthorization: false,
+      access: "write",
+    });
     await mkdir(dirname(initialPath), { recursive: true });
-    const fullPath = await this.roots.assertAllowed(path);
+    const fullPath = await this.roots.assertAllowed(path, { access: "write" });
 
     const precondition = await captureAtomicFilePrecondition(fullPath);
     const isNewFile = precondition.kind === "missing";

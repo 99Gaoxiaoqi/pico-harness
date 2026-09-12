@@ -13,14 +13,21 @@ import type {
   SessionRuntimePersistence,
 } from "../engine/session-runtime.js";
 import { sessionScopeKey } from "../engine/session-scope.js";
+import {
+  compileRuntimePermissionProfile,
+  createBypassExecutionBoundary,
+  createManagedExecutionBoundary,
+  createWorkspaceWritePermissionProfile,
+  type ExecutionBoundary,
+} from "../safety/permission-profile.js";
 
 export interface SessionToolStatus {
   name: string;
   readOnly: boolean;
 }
 
-export type InteractionMode = "default" | "plan" | "auto" | "yolo";
-export const DEFAULT_INTERACTION_MODE: InteractionMode = "default";
+export type InteractionMode = "ask" | "plan" | "auto" | "full-access";
+export const DEFAULT_INTERACTION_MODE: InteractionMode = "ask";
 export type SessionMode = "new" | "continue" | "resume" | "fork";
 
 export interface SessionSettings {
@@ -44,7 +51,7 @@ export interface SessionSettings {
   /** Current model reasoning level. Field name is retained for persisted-session compatibility. */
   thinkingEffort: string;
   thinkingEffortExplicit: boolean;
-  /** @deprecated `/permissions` 兼容别名；读写都代理到 mode，不保存第二份状态。 */
+  /** Canonical foreground permission axis. */
   permissionMode: Exclude<InteractionMode, "plan">;
   tools: readonly SessionToolStatus[];
   additionalDirectories: readonly string[];
@@ -59,6 +66,8 @@ export interface SessionSettingsDefaults {
   /** Host-owned Pico state root used only to isolate process-local session state. */
   picoHome?: string;
   provider: ProviderKind;
+  collaborationMode?: "agent" | "plan";
+  /** @deprecated Combined compatibility input. */
   mode?: InteractionMode;
   model: string;
   modelRouteId?: string;
@@ -87,15 +96,7 @@ const resolvedCliSessionSemantics = new Map<
   string,
   { sessionId: string; sessionMode: SessionMode; forkFrom?: string }
 >();
-const permissionCommandModes = new Set([
-  "ask",
-  "default",
-  "auto",
-  "acceptedits",
-  "yolo",
-  "bypasspermissions",
-  "plan",
-]);
+const permissionCommandModes = new Set(["ask", "auto", "full-access"]);
 
 export function createDefaultSessionSettings(defaults: SessionSettingsDefaults): SessionSettings {
   const resolvedSemantics = resolvedCliSessionSemantics.get(
@@ -103,9 +104,14 @@ export function createDefaultSessionSettings(defaults: SessionSettingsDefaults):
   );
   const forkFrom = defaults.forkFrom ?? resolvedSemantics?.forkFrom;
   const title = normalizeSessionTitle(defaults.title);
-  const mode =
-    normalizeInteractionMode(defaults.mode ?? defaults.permissionMode) ?? DEFAULT_INTERACTION_MODE;
-  const compatibilityPreviousMode = normalizeInteractionMode(defaults.permissionMode);
+  const compatibilityMode = normalizeInteractionMode(defaults.mode);
+  const requestedPermissionMode = normalizeInteractionMode(defaults.permissionMode);
+  const permissionMode =
+    requestedPermissionMode && requestedPermissionMode !== "plan"
+      ? requestedPermissionMode
+      : compatibilityMode && compatibilityMode !== "plan"
+        ? compatibilityMode
+        : DEFAULT_INTERACTION_MODE;
   const settings = {
     sessionId: defaults.sessionId,
     ...(title !== undefined ? { title } : {}),
@@ -113,14 +119,10 @@ export function createDefaultSessionSettings(defaults: SessionSettingsDefaults):
     ...(forkFrom !== undefined ? { forkFrom } : {}),
     cwd: defaults.cwd,
     provider: defaults.provider,
-    collaborationMode: mode === "plan" ? "plan" : "agent",
+    collaborationMode:
+      defaults.collaborationMode ?? (compatibilityMode === "plan" ? "plan" : "agent"),
     orchestrationMode: defaults.orchestrationMode ?? "default",
-    permissionMode:
-      mode === "plan"
-        ? compatibilityPreviousMode === "plan" || !compatibilityPreviousMode
-          ? "default"
-          : compatibilityPreviousMode
-        : mode,
+    permissionMode,
     model: defaults.model,
     ...(defaults.modelRouteId !== undefined ? { modelRouteId: defaults.modelRouteId } : {}),
     thinkingEffort: defaults.thinkingEffort ?? "off",
@@ -227,7 +229,7 @@ export function getOrCreateFailClosedLegacySessionSettings(
   if (!settings) {
     settings = createDefaultSessionSettings({
       ...defaults,
-      mode: "default",
+      mode: "ask",
       orchestrationMode: "default",
       additionalDirectories: [],
     });
@@ -246,7 +248,7 @@ export function getOrCreateFailClosedLegacySessionSettings(
     if (defaults.modelRouteId !== undefined) settings.modelRouteId = defaults.modelRouteId;
     else delete settings.modelRouteId;
     settings.collaborationMode = "agent";
-    settings.permissionMode = "default";
+    settings.permissionMode = "ask";
     settings.orchestrationMode = "default";
     settings.thinkingEffort = defaults.thinkingEffort ?? "off";
     settings.thinkingEffortExplicit = defaults.thinkingEffort !== undefined;
@@ -440,7 +442,7 @@ export function setSessionMode(settings: SessionSettings, mode: string): Session
   if (!normalized) {
     return {
       ok: false,
-      message: `Current mode: ${settings.mode}\nUsage: /mode <default|plan|auto|yolo>`,
+      message: `Current mode: ${settings.mode}\nUsage: /mode <ask|plan|auto|full-access>`,
     };
   }
   applySessionMode(settings, normalized);
@@ -458,7 +460,7 @@ export function restoreSessionInteractionMode(
   if (normalized === undefined) {
     return {
       ok: false,
-      message: `Current mode: ${settings.mode}\nUsage: /mode <default|plan|auto|yolo>`,
+      message: `Current mode: ${settings.mode}\nUsage: /mode <ask|plan|auto|full-access>`,
     };
   }
   const normalizedPrePlanMode = normalizeInteractionMode(prePlanMode);
@@ -470,7 +472,7 @@ export function restoreSessionInteractionMode(
   ) {
     return {
       ok: false,
-      message: "prePlanMode must be default, auto, or yolo and requires mode=plan",
+      message: "prePlanMode must be ask, auto, or full-access and requires mode=plan",
     };
   }
 
@@ -546,12 +548,12 @@ export function setSessionPermissionMode(
   if (!permissionCommandModes.has(normalized)) {
     return {
       ok: false,
-      message: `Current mode: ${settings.mode}\nUsage: /permissions <default|auto|yolo|plan>`,
+      message: `Current permission mode: ${settings.permissionMode}\nUsage: /permissions <ask|auto|full-access>`,
     };
   }
 
   const result = setSessionMode(settings, normalized);
-  return { ...result, message: `Mode set to ${settings.mode} (/permissions is an alias)` };
+  return { ...result, message: `Permission mode set to ${settings.permissionMode}` };
 }
 
 export function setSessionThinkingEffort(
@@ -694,9 +696,8 @@ export function formatSessionStatus(settings: SessionSettings): string {
 
 export function formatPermissionStatus(settings: SessionSettings): string {
   return [
-    `Mode: ${settings.mode}`,
-    "/permissions is a compatibility alias for /mode.",
-    "Usage: /permissions <default|auto|yolo|plan>",
+    `Permission mode: ${settings.permissionMode}`,
+    "Usage: /permissions <ask|auto|full-access>",
   ].join("\n");
 }
 
@@ -793,9 +794,9 @@ function applyReasoningLevelSelection(
 
 export function normalizeInteractionMode(mode: string | undefined): InteractionMode | undefined {
   const normalized = mode?.trim().toLowerCase();
-  if (normalized === "ask" || normalized === "default") return "default";
-  if (normalized === "auto" || normalized === "acceptedits") return "auto";
-  if (normalized === "yolo" || normalized === "bypasspermissions") return "yolo";
+  if (normalized === "ask") return "ask";
+  if (normalized === "auto") return "auto";
+  if (normalized === "full-access") return "full-access";
   if (normalized === "plan") return "plan";
   return undefined;
 }
@@ -853,8 +854,8 @@ function applyPersistedSessionSettings(
   settings.orchestrationMode = persisted.orchestrationMode ?? "default";
   settings.permissionMode =
     persisted.permissionMode ??
-    (persisted.mode === "plan" ? (persisted.prePlanMode ?? "default") : persisted.mode) ??
-    "default";
+    (persisted.mode === "plan" ? (persisted.prePlanMode ?? "ask") : persisted.mode) ??
+    "ask";
   settings.thinkingEffort = persisted.thinkingEffort;
   settings.thinkingEffortExplicit = persisted.thinkingEffortExplicit;
   settings.additionalDirectories = createAdditionalDirectorySnapshot(
@@ -884,9 +885,40 @@ function bindSessionSettingsPersistence(
 }
 
 function persistSessionSettings(settings: SessionSettings): void {
-  persistenceBySettings
-    .get(settings)
-    ?.updateRuntimeState({ settings: snapshotSessionSettings(settings) });
+  const persistence = persistenceBySettings.get(settings);
+  if (!persistence) return;
+  const boundary = reconcileExecutionBoundary(
+    persistence.getRuntimeStateSnapshot().boundary,
+    settings.permissionMode,
+  );
+  persistence.updateRuntimeState({ settings: snapshotSessionSettings(settings), boundary });
+}
+
+/** Keep the durable boundary authoritative while the permission label changes. */
+function reconcileExecutionBoundary(
+  current: ExecutionBoundary | undefined,
+  permissionMode: SessionSettings["permissionMode"],
+): ExecutionBoundary {
+  if (!current) {
+    return compileRuntimePermissionProfile({
+      collaborationMode: "agent",
+      permissionMode,
+    });
+  }
+  // An externally isolated session is owned by another sandbox authority. Local
+  // settings writes must never silently replace that boundary.
+  if (current.kind === "external") return current;
+  if (permissionMode === "full-access") {
+    return current.kind === "bypass"
+      ? current
+      : createBypassExecutionBoundary(current.revision + 1);
+  }
+  return current.kind === "managed"
+    ? current
+    : createManagedExecutionBoundary(
+        createWorkspaceWritePermissionProfile(),
+        current.revision + 1,
+      );
 }
 
 function withInteractionModeAlias(

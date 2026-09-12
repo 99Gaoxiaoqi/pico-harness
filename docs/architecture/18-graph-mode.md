@@ -150,7 +150,7 @@ Operator = {
   profileSnapshot: {
     schemaVersion, profileId, profileRevision, profileFingerprint,
     modelRouteId, tools,
-    permissionPolicy: { mode: default, allowSessionGrants: false },
+    permissionPolicy: { mode: ask, allowSessionGrants: false },
     systemPrompt: { version, content },
     extensionPolicy: none
   },
@@ -161,7 +161,9 @@ Operator = {
 关键点：
 
 - 公共 `add` 只接受宿主目录中的 `profile_id`。应用服务在 schedule 提交前解析并冻结完整快照；未知 profile、损坏快照、指纹不匹配或模型路由失效均 fail closed，不做隐式回退；
-- production Operator 只消费持久快照中的精确模型路由、工具集、权限边界和 system prompt。运行时强制 `default` 权限，禁止 Session grant 累积，并在装配前关闭 MCP、Plugin、Hook、LSP、Browser 和 memory worker；
+- production Operator 只消费持久快照中的精确模型路由、工具集、权限边界和 system prompt。运行时强制 `ask` 权限，禁止 Session grant 累积，并在装配前关闭 MCP、Plugin、Hook、LSP、Browser 和 memory worker；
+- exact Run 准入前，宿主读取 root Session 当前的持久 `ExecutionBoundary` 并把它作为 Operator 上限。root 为 managed 时子 Session 只能继承相同或更窄的 managed 边界；root 为 bypass 时也只投影为 managed `workspace-write` + restricted network；external、子边界为 bypass/越界、或 shared workspace 无法证明同目录时均在 provider 与工具执行前 fail closed；
+- Operator 不暴露 `request_sandbox_boundary`。它的审批通知器只转发已能证明被子边界包含的文件/目录范围；network、无结构 scope 或越界请求直接拒绝，不会把根任务的完全访问权限变成子任务的隐式授权；
 - Supervisor 投影只暴露 profile ID/revision 及有界目录摘要，不返回 system prompt 正文、权限细节或模型路由；
 - `generation` 为替换同一逻辑角色保留代际边界，stop 可精确落到某一代；
 - workspace policy 也是不可变调度输入。`shared` 复用根工作目录；`isolated-worktree` 由宿主持久资源权威解析为确定性 worktree 路径、分支与 immutable base commit。普通文件夹工作区会在 schedule 持久化前拒绝隔离策略；

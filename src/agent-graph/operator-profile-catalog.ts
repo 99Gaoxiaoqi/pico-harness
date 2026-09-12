@@ -126,7 +126,7 @@ class BuiltinAgentGraphOperatorProfileCatalog implements AgentGraphOperatorProfi
         : { thinkingEffort: definition.thinkingEffort }),
       ...(definition.maxTurns === undefined ? {} : { maxTurns: definition.maxTurns }),
       tools: [...definition.tools],
-      permissionPolicy: { mode: "default", allowSessionGrants: false },
+      permissionPolicy: { mode: "ask", allowSessionGrants: false },
       systemPrompt: { version: definition.revision, content: definition.systemPrompt },
       extensionPolicy: "none",
     };
@@ -261,7 +261,7 @@ export function assertValidAgentGraphOperatorProfileSnapshot(
     throw new Error("Agent Graph Operator permission policy must be an object");
   }
   assertExactKeys(permissionPolicy, ["mode", "allowSessionGrants"]);
-  if (permissionPolicy["mode"] !== "default" || permissionPolicy["allowSessionGrants"] !== false) {
+  if (permissionPolicy["mode"] !== "ask" || permissionPolicy["allowSessionGrants"] !== false) {
     throw new Error("Agent Graph Operator permission policy exceeds the allowed boundary");
   }
   const systemPrompt = value["systemPrompt"];
@@ -293,7 +293,7 @@ export function assertValidAgentGraphOperatorProfileSnapshot(
       ? {}
       : { subagentPreset: value["subagentPreset"] as RuntimeSubagentPreset }),
     tools,
-    permissionPolicy: { mode: "default", allowSessionGrants: false },
+    permissionPolicy: { mode: "ask", allowSessionGrants: false },
     systemPrompt: {
       version: systemPrompt["version"] as string,
       content,
@@ -442,7 +442,7 @@ export function createConfiguredAgentGraphOperatorProfileCatalog(
         ...(preset.thinkingLevel === undefined ? {} : { thinkingEffort: preset.thinkingLevel }),
         subagentPreset: Object.freeze({ ...preset }),
         tools: [...definition.tools],
-        permissionPolicy: { mode: "default", allowSessionGrants: false },
+        permissionPolicy: { mode: "ask", allowSessionGrants: false },
         systemPrompt: { version: "1", content: definition.systemPrompt },
         extensionPolicy: "none",
       };

@@ -75,7 +75,7 @@ function forkOperationInput(overrides: Record<string, unknown> = {}) {
     sourceSessionId: "source-session",
     sourceCursor: { logId: "source-session", seq: 4, epoch: 0, eventId: "event-4" },
     targetSessionId: "target-session",
-    targetMode: "default" as const,
+    targetMode: "ask" as const,
     stagingDirectory: "unused-staging",
     ...overrides,
   };
@@ -178,7 +178,7 @@ test("fork journal accepts only an atomic canonical interaction pair", async (co
       forkOperationInput({
         operationId: "fork-ambiguous-interaction",
         targetCollaborationMode: "agent",
-        targetPermissionMode: "default",
+        targetPermissionMode: "ask",
       }),
     ),
     /Invalid storage operation/u,
@@ -195,6 +195,46 @@ test("fork journal accepts only an atomic canonical interaction pair", async (co
   if (canonical.kind === "fork") {
     assert.equal(canonical.targetCollaborationMode, "plan");
     assert.equal(canonical.targetPermissionMode, "auto");
+  }
+});
+
+test("operation journal migrates durable legacy modes but rejects them on create", async (context) => {
+  const fixture = await workspaceFixture(context, "pico-ops-legacy-permission-");
+  const journal = new StorageOperationJournal({
+    workDir: fixture.workDir,
+    picoHome: fixture.picoHome,
+  });
+  await assert.rejects(
+    journal.create(forkOperationInput({ operationId: "new-yolo", targetMode: "yolo" })),
+    /Invalid storage operation/u,
+  );
+
+  const seeded = await journal.create(
+    forkOperationInput({
+      operationId: "legacy-plan",
+      targetMode: undefined,
+      targetCollaborationMode: "agent",
+      targetPermissionMode: "ask",
+    }),
+  );
+  const legacyPlan = {
+    ...seeded,
+    targetMode: "plan",
+    targetCollaborationMode: undefined,
+    targetPermissionMode: undefined,
+  };
+  const database = new DatabaseSync(join(fixture.storageRoot, "pico.sqlite"));
+  database
+    .prepare("UPDATE storage_operations SET operation_json = ? WHERE operation_id = ?")
+    .run(JSON.stringify(legacyPlan), seeded.operationId);
+  database.close();
+
+  const decoded = await journal.get(seeded.operationId);
+  assert.equal(decoded?.kind, "fork");
+  if (decoded?.kind === "fork") {
+    assert.equal(decoded.targetMode, undefined);
+    assert.equal(decoded.targetCollaborationMode, "plan");
+    assert.equal(decoded.targetPermissionMode, "ask");
   }
 });
 

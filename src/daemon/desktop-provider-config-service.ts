@@ -1121,11 +1121,19 @@ function requireProviderFromUserConfig(
 function normalizeRuntimeUserDefaults(value: unknown): PicoUserConfigDefaults {
   const record = assertExactObjectKeys(
     value,
-    ["modelRouteId", "mode", "thinkingEffort"],
+    [
+      "modelRouteId",
+      "collaborationMode",
+      "orchestrationMode",
+      "permissionMode",
+      "thinkingEffort",
+    ],
     "defaults",
   );
   const modelRouteId = record["modelRouteId"];
-  const mode = record["mode"];
+  const collaborationMode = record["collaborationMode"];
+  const orchestrationMode = record["orchestrationMode"];
+  const permissionMode = record["permissionMode"];
   const thinkingEffort = record["thinkingEffort"];
   if (
     modelRouteId !== undefined &&
@@ -1136,10 +1144,31 @@ function normalizeRuntimeUserDefaults(value: unknown): PicoUserConfigDefaults {
       "defaults.modelRouteId 必须使用 providerID/modelID 格式",
     );
   }
-  if (mode !== undefined && !isOneOf(mode, ["default", "plan", "auto", "yolo"] as const)) {
+  if (
+    collaborationMode !== undefined &&
+    !isOneOf(collaborationMode, ["agent", "plan"] as const)
+  ) {
     throw new RuntimeProtocolError(
       RUNTIME_ERROR_CODES.INVALID_PARAMS,
-      "defaults.mode 必须是 default、plan、auto 或 yolo",
+      "defaults.collaborationMode 必须是 agent 或 plan",
+    );
+  }
+  if (
+    orchestrationMode !== undefined &&
+    !isOneOf(orchestrationMode, ["default", "graph", "swarm"] as const)
+  ) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      "defaults.orchestrationMode 必须是 default、graph 或 swarm",
+    );
+  }
+  if (
+    permissionMode !== undefined &&
+    !isOneOf(permissionMode, ["ask", "auto", "full-access"] as const)
+  ) {
+    throw new RuntimeProtocolError(
+      RUNTIME_ERROR_CODES.INVALID_PARAMS,
+      "defaults.permissionMode 必须是 ask、auto 或 full-access",
     );
   }
   if (
@@ -1153,7 +1182,13 @@ function normalizeRuntimeUserDefaults(value: unknown): PicoUserConfigDefaults {
   }
   return {
     ...(typeof modelRouteId === "string" ? { modelRouteId: modelRouteId.trim() } : {}),
-    ...(isOneOf(mode, ["default", "plan", "auto", "yolo"] as const) ? { mode } : {}),
+    ...(isOneOf(collaborationMode, ["agent", "plan"] as const) ? { collaborationMode } : {}),
+    ...(isOneOf(orchestrationMode, ["default", "graph", "swarm"] as const)
+      ? { orchestrationMode }
+      : {}),
+    ...(isOneOf(permissionMode, ["ask", "auto", "full-access"] as const)
+      ? { permissionMode }
+      : {}),
     ...(typeof thinkingEffort === "string" ? { thinkingEffort: thinkingEffort.trim() } : {}),
   };
 }

@@ -126,7 +126,10 @@ test("MCP source replacement fails closed and clears stale tools when client clo
       if (closeFails) throw new Error("fixture close failed");
     },
   } satisfies McpClient;
-  const manager = new McpConnectionManager(registry, { clientFactory: () => client });
+  const manager = new McpConnectionManager(registry, {
+    clientFactory: () => client,
+    remoteNetworkGate: () => true,
+  });
   const qualifiedName = qualifyMcpToolName("old", "echo");
   await manager.replaceSources([
     {
@@ -197,7 +200,10 @@ test("MCP connection fails closed when a plugin owns the qualified tool name", a
     },
     async close() {},
   } satisfies McpClient;
-  const manager = new McpConnectionManager(registry, { clientFactory: () => client });
+  const manager = new McpConnectionManager(registry, {
+    clientFactory: () => client,
+    remoteNetworkGate: () => true,
+  });
   try {
     await manager.replaceSources([
       {
@@ -251,7 +257,10 @@ test("MCP registry switch preserves the previous bridge when the target conflict
     },
     async close() {},
   } satisfies McpClient;
-  const manager = new McpConnectionManager(firstRegistry, { clientFactory: () => client });
+  const manager = new McpConnectionManager(firstRegistry, {
+    clientFactory: () => client,
+    remoteNetworkGate: () => true,
+  });
   try {
     await manager.replaceSources([
       {

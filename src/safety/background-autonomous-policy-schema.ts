@@ -9,8 +9,8 @@ export type ToolNetworkPolicy = "disabled" | "allowlist" | "allow";
  * 这里只约束 Agent 工具（fetch_url/web_search/Bash/Hook/MCP）的出站访问；
  * Provider 调用模型所需的网络连接不属于该策略。
  */
-export interface BackgroundYoloPolicySnapshotData {
-  mode: "yolo";
+export interface BackgroundAutonomousPolicySnapshotData {
+  mode: "full-access";
   backgroundEnabled: true;
   trustedWorkspace: true;
   toolNetworkPolicy: ToolNetworkPolicy;
@@ -29,11 +29,11 @@ interface LegacyToolNetworkPolicyFields {
   allowedNetworkHosts?: unknown;
 }
 
-export class BackgroundYoloPolicySnapshotError extends Error {
-  override readonly name = "BackgroundYoloPolicySnapshotError";
+export class BackgroundAutonomousPolicySnapshotError extends Error {
+  override readonly name = "BackgroundAutonomousPolicySnapshotError";
 }
 
-export interface ParseBackgroundYoloPolicySnapshotOptions {
+export interface ParseBackgroundAutonomousPolicySnapshotOptions {
   /**
    * 旧账本可能在后台 MCP 支持前保存过 mcp__ 工具，但没有配置指纹。
    * 读取时移除这些当时本就不可执行的工具；新写入仍严格要求指纹。
@@ -45,10 +45,26 @@ export interface ParseBackgroundYoloPolicySnapshotOptions {
  * Job 创建与后台执行共用的严格解析器，避免“保存成功、执行时才 blocked”。
  * 返回值始终是规范化的新字段形态，可直接持久化。
  */
-export function parseBackgroundYoloPolicySnapshot(
+export function parseBackgroundAutonomousPolicySnapshot(
   value: unknown,
-  options: ParseBackgroundYoloPolicySnapshotOptions = {},
-): BackgroundYoloPolicySnapshotData {
+  options: ParseBackgroundAutonomousPolicySnapshotOptions = {},
+): BackgroundAutonomousPolicySnapshotData {
+  return parsePolicySnapshot(value, options, false);
+}
+
+/** Durable Cron-row decoder only. Creation and live execution use the strict parser above. */
+export function parsePersistedBackgroundAutonomousPolicySnapshot(
+  value: unknown,
+  options: ParseBackgroundAutonomousPolicySnapshotOptions = {},
+): BackgroundAutonomousPolicySnapshotData {
+  return parsePolicySnapshot(value, options, true);
+}
+
+function parsePolicySnapshot(
+  value: unknown,
+  options: ParseBackgroundAutonomousPolicySnapshotOptions,
+  allowLegacyMode: boolean,
+): BackgroundAutonomousPolicySnapshotData {
   if (!isRecord(value)) throw invalid("policySnapshot 必须是对象");
 
   const legacy = value as LegacyToolNetworkPolicyFields;
@@ -70,8 +86,10 @@ export function parseBackgroundYoloPolicySnapshot(
   const rawHosts = canonicalHosts ?? legacyHosts;
   const allowedTools = value["allowedTools"];
 
+  const rawMode = value["mode"];
+  const mode = rawMode === "full-access" || (allowLegacyMode && rawMode === "yolo");
   if (
-    value["mode"] !== "yolo" ||
+    !mode ||
     value["backgroundEnabled"] !== true ||
     value["trustedWorkspace"] !== true ||
     (toolNetworkPolicy !== "disabled" &&
@@ -84,7 +102,7 @@ export function parseBackgroundYoloPolicySnapshot(
     typeof value["createdAt"] !== "number" ||
     !Number.isFinite(value["createdAt"])
   ) {
-    throw invalid("只接受完整的 trusted workspace + yolo policySnapshot");
+    throw invalid("只接受完整的 trusted workspace + full-access policySnapshot");
   }
 
   if (toolNetworkPolicy !== "allowlist" && rawHosts !== undefined) {
@@ -120,7 +138,7 @@ export function parseBackgroundYoloPolicySnapshot(
   }
 
   return {
-    mode: "yolo",
+    mode: "full-access",
     backgroundEnabled: true,
     trustedWorkspace: true,
     toolNetworkPolicy,
@@ -174,8 +192,8 @@ export function normalizeExactHostname(value: string): string {
   return ascii;
 }
 
-function invalid(message: string): BackgroundYoloPolicySnapshotError {
-  return new BackgroundYoloPolicySnapshotError(message);
+function invalid(message: string): BackgroundAutonomousPolicySnapshotError {
+  return new BackgroundAutonomousPolicySnapshotError(message);
 }
 
 function isNonEmptyString(value: unknown): value is string {

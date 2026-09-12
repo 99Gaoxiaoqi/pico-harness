@@ -150,7 +150,7 @@ test("Daemon stop is bounded during an active Cron tick and the fence releases a
     schedule: "* * * * *",
     prompt: "keep the Cron tick active",
     policySnapshot: {
-      mode: "yolo",
+      mode: "full-access",
       backgroundEnabled: true,
       trustedWorkspace: true,
       toolNetworkPolicy: "disabled",

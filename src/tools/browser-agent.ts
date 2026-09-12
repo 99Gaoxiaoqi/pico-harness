@@ -1,4 +1,5 @@
 import type { JsonObject, RuntimeBrowserAgentAction } from "@pico/protocol";
+import type { ToolPermissionCategory } from "../approval/tool-permission-policy.js";
 import type { ToolDefinition } from "../schema/message.js";
 import { ToolAccesses } from "./tool-access.js";
 import { NO_FILE_SIDE_EFFECTS, type BaseTool } from "./registry.js";
@@ -12,6 +13,7 @@ abstract class BrowserAgentTool implements BaseTool {
   readonly fileSideEffects = NO_FILE_SIDE_EFFECTS;
   readonly toolset = "browser";
   readonly readOnly: boolean = false;
+  readonly permissionCategory: ToolPermissionCategory = "browser";
 
   constructor(protected readonly authority: BoundBrowserAgentAuthority) {}
   abstract name(): string;
@@ -87,6 +89,7 @@ class BrowserReloadTool extends BrowserAgentTool {
 class BrowserGetStateTool extends BrowserAgentTool {
   protected readonly action = "get_state" as const;
   override readonly readOnly = true;
+  override readonly permissionCategory = "read" as const;
   name(): string {
     return "browser_get_state";
   }

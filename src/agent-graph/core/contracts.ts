@@ -36,7 +36,7 @@ export interface AgentGraphProfileSnapshot {
   readonly maxTurns?: number;
   readonly tools: readonly string[];
   readonly permissionPolicy: {
-    readonly mode: "default";
+    readonly mode: "ask";
     readonly allowSessionGrants: false;
   };
   readonly systemPrompt: {

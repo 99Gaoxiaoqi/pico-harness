@@ -171,4 +171,16 @@ test("session settings protocol separates collaboration and permission axes", ()
   });
   assert.equal(parsed.collaborationMode, "plan");
   assert.equal(parsed.permissionMode, "auto");
+
+  for (const legacyField of ["mode", "permissions"] as const) {
+    assert.throws(
+      () =>
+        parseStrictRuntimeParams("session.settings.update", {
+          workspacePath: "/workspace",
+          sessionId: "session-1",
+          [legacyField]: "full-access",
+        }),
+      new RegExp(`不允许字段 ${legacyField}`, "u"),
+    );
+  }
 });

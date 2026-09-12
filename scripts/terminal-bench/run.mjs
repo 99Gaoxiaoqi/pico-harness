@@ -330,7 +330,8 @@ const manifest = {
     pricingSha256,
   },
   policy: {
-    permissionMode: "yolo",
+    collaborationMode: "agent",
+    permissionMode: "full-access",
     policyDenialMode: "incident",
     allowedTools: [
       "bash",

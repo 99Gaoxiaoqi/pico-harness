@@ -8,8 +8,8 @@ import {
   BACKGROUND_HARDLINE_VERSION,
   BACKGROUND_HOOK_VERSION,
   BackgroundPolicyViolationError,
-  prepareBackgroundYoloPolicy,
-} from "../../../src/safety/background-yolo-policy.js";
+  prepareBackgroundAutonomousPolicy,
+} from "../../../src/safety/background-autonomous-policy.js";
 
 test("background policy rejects an untrusted PostToolUseFailure command hook", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-background-failure-hook-trust-"));
@@ -29,10 +29,10 @@ test("background policy rejects an untrusted PostToolUseFailure command hook", a
     );
 
     await assert.rejects(
-      prepareBackgroundYoloPolicy({
+      prepareBackgroundAutonomousPolicy({
         workDir,
         policy: {
-          mode: "yolo",
+          mode: "full-access",
           backgroundEnabled: true,
           trustedWorkspace: true,
           toolNetworkPolicy: "disabled",

@@ -11,7 +11,7 @@ import type {
 } from "../provider/reasoning-capability.js";
 import type { ProviderKind } from "../provider/factory.js";
 import type { LspServerConfig } from "../code-intelligence/lsp-server-discovery.js";
-import type { YoloSandboxConfig } from "../safety/yolo-sandbox.js";
+import type { WorkspaceSandboxConfig } from "../safety/workspace-sandbox.js";
 import {
   KEYBINDING_ACTIONS,
   KEYBINDING_CONTEXTS,
@@ -35,7 +35,7 @@ export interface PicoProjectConfig {
   // model 字段已退役（2026-08-17）：模型路由与用户凭据强耦合，只支持用户级。
   // parser 按字段提取、忽略未知键，旧仓库 config.json 里的 model 残值静默失效。
   providers: Record<string, ModelProviderConfig>;
-  sandbox: YoloSandboxConfig;
+  sandbox: WorkspaceSandboxConfig;
   lspServers: LspServerConfig[];
   compatibility: PicoCompatibilityConfig;
 }
@@ -194,7 +194,7 @@ function parseStringMap(value: unknown, configPath: string, field: string): Reco
   return result;
 }
 
-function parseSandbox(value: unknown, configPath: string): YoloSandboxConfig {
+function parseSandbox(value: unknown, configPath: string): WorkspaceSandboxConfig {
   if (value === undefined) return { network: "allow" };
   if (!isRecord(value)) throw configError(configPath, "sandbox", "must be an object");
   const network = value["network"] ?? "allow";

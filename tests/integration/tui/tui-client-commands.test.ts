@@ -36,8 +36,8 @@ function createHarness(options?: {
   readonly duplicateModelProvider?: boolean;
   readonly staleMemoryUndo?: boolean;
   readonly sessionId?: string;
-  readonly permissionMode?: "default" | "auto" | "yolo";
-  readonly configuredPermissionMode?: "default" | "auto" | "yolo";
+  readonly permissionMode?: "ask" | "auto" | "full-access";
+  readonly configuredPermissionMode?: "ask" | "auto" | "full-access";
   readonly configuredCollaborationMode?: "agent" | "plan";
   readonly echoAutomationCredentialError?: boolean;
   readonly credentialEnv?: Readonly<Record<string, string | undefined>>;
@@ -62,7 +62,7 @@ function createHarness(options?: {
     thinkingEffort: "medium",
     reasoningLevels: ["low", "medium", "high"],
     collaborationMode: "agent",
-    permissionMode: options?.permissionMode ?? "default",
+    permissionMode: options?.permissionMode ?? "ask",
     orchestrationMode: "default",
   };
   const client = {
@@ -311,7 +311,7 @@ function createHarness(options?: {
               defaultModelRouteId: "p1/m1",
               defaults: {
                 collaborationMode: options?.configuredCollaborationMode ?? "agent",
-                permissionMode: options?.configuredPermissionMode ?? "default",
+                permissionMode: options?.configuredPermissionMode ?? "ask",
               },
               providers: [
                 {
@@ -845,25 +845,48 @@ test("client commands: settings-class commands map to session.settings.update", 
     "非法思考强度不应发 settings.update（settings.get 是校验数据源，合法）",
   );
 
-  // /mode /permissions /graph /plan：合法值设置 + 非法 usage。/mode 走 SessionMode
-  // 语义（deprecated mode param，对抗评审对齐）。
-  await run(harness, "/mode plan");
+  // /mode /permissions /graph /plan：合法值设置 + 非法 usage。
+  const planMode = await run(harness, "/mode plan");
   assert.equal(
-    harness.requests.find((entry) => entry.method === "session.settings.update")?.params.mode,
+    harness.requests.find((entry) => entry.method === "session.settings.update")?.params
+      .collaborationMode,
     "plan",
   );
-  await run(harness, "/permissions yolo");
+  assert.match(String(planMode.result?.message), /协作模式已切换：plan/u);
+  assert.equal(
+    Object.hasOwn(
+      harness.requests.find((entry) => entry.method === "session.settings.update")?.params ?? {},
+      "mode",
+    ),
+    false,
+  );
+  await run(harness, "/mode agent");
+  assert.equal(
+    harness.requests.filter((entry) => entry.method === "session.settings.update").at(-1)?.params
+      .collaborationMode,
+    "agent",
+  );
+  const autoMode = await run(harness, "/mode auto");
   assert.equal(
     harness.requests.filter((entry) => entry.method === "session.settings.update").at(-1)?.params
       .permissionMode,
-    "yolo",
+    "auto",
   );
-  // plan 走 deprecated permissions 别名（permissionMode 枚举无 plan——对抗评审 P0）。
-  await run(harness, "/permissions plan");
+  assert.match(String(autoMode.result?.message), /权限模式已设置：帮我批准/u);
+  await run(harness, "/permissions full-access");
   assert.equal(
     harness.requests.filter((entry) => entry.method === "session.settings.update").at(-1)?.params
-      .permissions,
-    "plan",
+      .permissionMode,
+    "full-access",
+  );
+  const permissionUpdateCount = harness.requests.filter(
+    (entry) => entry.method === "session.settings.update",
+  ).length;
+  const invalidPermission = await run(harness, "/permissions plan");
+  assert.match(String(invalidPermission.result?.message), /Usage/u);
+  assert.equal(
+    harness.requests.filter((entry) => entry.method === "session.settings.update").length,
+    permissionUpdateCount,
   );
   await run(harness, "/graph on");
   assert.equal(
@@ -1193,7 +1216,7 @@ test("client commands: dynamic argument completers ride RPCs with TTL cache", as
 });
 
 test("client commands: tier2 mirrors map memory/provider/cron to RPCs", async (t) => {
-  const harness = createHarness({ sessionId: "s1", permissionMode: "yolo" });
+  const harness = createHarness({ sessionId: "s1", permissionMode: "full-access" });
   const run = async (text: string) => {
     const outcome = await processClientInput(text, harness.registry, harness.runtime);
     assert.equal(outcome.kind, "local", `${text} 应本地执行`);
@@ -1321,13 +1344,13 @@ test("client commands: tier2 mirrors map memory/provider/cron to RPCs", async (t
     "非法网络策略不得创建 Job",
   );
 
-  const interactiveHarness = createHarness({ sessionId: "s1", permissionMode: "default" });
+  const interactiveHarness = createHarness({ sessionId: "s1", permissionMode: "ask" });
   const interactive = await processClientInput(
     "/cron add 0 9 * * * 提示词",
     interactiveHarness.registry,
     interactiveHarness.runtime,
   );
-  assert.match(String(interactive.result?.message), /require \/mode yolo/);
+  assert.match(String(interactive.result?.message), /require \/mode full-access/);
   assert.equal(
     interactiveHarness.requests.some((entry) => entry.method === "automation.create"),
     false,
@@ -1337,7 +1360,7 @@ test("client commands: tier2 mirrors map memory/provider/cron to RPCs", async (t
   // daemon 错误即使携带原凭据，TUI 也必须精确脱敏。
   const failingHarness = createHarness({
     sessionId: "s1",
-    permissionMode: "yolo",
+    permissionMode: "full-access",
     echoAutomationCredentialError: true,
   });
   const failingPreview = await processClientInput(
@@ -1383,7 +1406,7 @@ test("client cron credential proposals bind preview state, expire, and reject re
   });
   const harness = createHarness({
     sessionId: "s1",
-    permissionMode: "yolo",
+    permissionMode: "full-access",
     credentialEnv,
     automationCredentialProposals: proposals,
   });
@@ -1795,9 +1818,9 @@ test("client commands preserve public metadata and registration order", () => {
     {
       name: "mode",
       aliases: [],
-      description: "查看或切换协作模式",
-      usage: "/mode <default|plan|auto|yolo>",
-      argumentHint: "<default|plan|auto|yolo>",
+      description: "查看或切换协作与权限模式",
+      usage: "/mode <agent|plan|ask|auto|full-access>",
+      argumentHint: "<agent|plan|ask|auto|full-access>",
       category: "session",
       availability: "idle",
     },
@@ -1814,8 +1837,8 @@ test("client commands preserve public metadata and registration order", () => {
       name: "permissions",
       aliases: ["permission"],
       description: "查看或设置权限模式",
-      usage: "/permissions [default|auto|yolo|plan]",
-      argumentHint: "[default|auto|yolo|plan]",
+      usage: "/permissions [ask|auto|full-access]",
+      argumentHint: "[ask|auto|full-access]",
       category: "permissions",
       availability: "idle",
     },
@@ -2094,7 +2117,7 @@ test("client commands preserve public metadata and registration order", () => {
     {
       name: "cron",
       aliases: [],
-      description: "Manage persistent YOLO cron jobs for this workspace",
+      description: "管理此工作区的持久后台 Cron 任务",
       usage:
         "/cron <status|list|credential|add|enable|disable|delete|runs> [--tool-network=allow|disabled|allowlist:host1,host2] [arguments]",
       argumentHint: "<status|list|credential|add|enable|disable|delete|runs>",
@@ -2149,9 +2172,12 @@ test("fresh TUI can choose safe settings before the first atomic session.send", 
 
   assert.equal(harness.runtime.preSessionSettings.permissionMode, "auto");
   assert.equal(harness.runtime.preSessionSettings.collaborationMode, "agent");
-  assert.match(String((await run(harness, "/permissions")).result?.message), /auto/u);
+  assert.match(String((await run(harness, "/permissions")).result?.message), /帮我批准/u);
 
-  assert.match(String((await run(harness, "/permissions yolo")).result?.message), /首条消息/u);
+  assert.match(
+    String((await run(harness, "/permissions full-access")).result?.message),
+    /首条消息/u,
+  );
   assert.match(String((await run(harness, "/plan on")).result?.message), /计划模式/u);
   assert.equal(
     harness.requests.some((entry) => entry.method === "session.settings.update"),
@@ -2162,7 +2188,7 @@ test("fresh TUI can choose safe settings before the first atomic session.send", 
   const firstSend = harness.requests.find((entry) => entry.method === "session.send");
   assert.deepEqual(firstSend?.params.initialSettings, {
     collaborationMode: "plan",
-    permissionMode: "yolo",
+    permissionMode: "full-access",
   });
 
   await harness.runtime.switchSession(undefined);

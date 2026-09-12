@@ -6,7 +6,7 @@ import test from "node:test";
 
 import { agentOutputRecordIdFor, graphIdFor } from "../../../src/agent-graph/core/index.js";
 import { formatEvidenceUri } from "../../../src/context/evidence-archive.js";
-import { wakeIdFor } from "../../../src/agent-graph/core/ids.js";
+import { deterministicFingerprint, wakeIdFor } from "../../../src/agent-graph/core/ids.js";
 import { Session } from "../../../src/engine/session.js";
 import { SessionManager } from "../../../src/engine/session-manager.js";
 import {
@@ -30,6 +30,11 @@ import { SqliteSessionWorkbarRepository } from "../../../src/storage/sqlite/sqli
 import { SqliteAgentGraphControlStore } from "../../../src/storage/sqlite/sqlite-agent-graph-control-store.js";
 import { withWorkspaceSqliteLease } from "../../../src/storage/sqlite/workspace-scopes.js";
 import { seedRuntimeToolExchange } from "../helpers/legacy-evidence-fixture.js";
+import {
+  compileRuntimePermissionProfile,
+  createBypassExecutionBoundary,
+  createManagedExecutionBoundary,
+} from "../../../src/safety/permission-profile.js";
 
 test("workspace Graph host exposes one root binding and owns application lifecycle", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-agent-graph-host-"));
@@ -350,6 +355,111 @@ test("workspace Graph host executes one exact root wake and observes its termina
     assert.equal(events.filter((event) => event.kind === "run.started").length, 1);
     assert.equal(events.filter((event) => event.kind === "run.terminal").length, 1);
   } finally {
+    await fixture.close();
+  }
+});
+
+test("workspace Graph host rejects an overbroad operator boundary before run admission", async () => {
+  let executions = 0;
+  const fixture = await createHostFixture(async () => {
+    executions++;
+  });
+  let childLease: Awaited<ReturnType<SessionManager["getOrCreatePinned"]>> | undefined;
+  try {
+    const graphId = graphIdFor(fixture.owner.session.id, 1);
+    const childSessionId = `graph-session_${deterministicFingerprint([graphId, "researcher", 1]).slice("sha256:".length, 39)}`;
+    childLease = await fixture.manager.getOrCreatePinned(
+      childSessionId,
+      fixture.owner.session.workDir,
+      {
+        persistence: true,
+        picoHome: fixture.owner.session.picoHome,
+        runtimePort: createEngineRuntimePort(),
+      },
+    );
+    childLease.session.updateRuntimeState({ boundary: createBypassExecutionBoundary() });
+    await childLease.session.flushPersistence();
+
+    await scheduleOperator(fixture, graphId, "intent-overbroad-boundary");
+    const claim = fixture.host.store.listActivationClaims(graphId)[0];
+    assert.ok(claim);
+    const events = await fixture.owner.session.runtimeEventStore!.readRun(
+      childSessionId,
+      claim.targetRunId,
+    );
+    assert.equal(events.length, 0, "boundary rejection must precede run.started admission");
+    assert.equal(executions, 0, "boundary rejection must precede provider/tool assembly");
+    assert.match(
+      fixture.host.store.listGraphDiagnostics(graphId, { unresolvedOnly: true })[0]?.message ?? "",
+      /cannot run with a bypass execution boundary/u,
+    );
+  } finally {
+    childLease?.release();
+    await fixture.close();
+  }
+});
+
+test("workspace Graph host projects a managed parent boundary into an isolated worktree", async () => {
+  let isolatedWorkDir = "";
+  let execution: Parameters<CreateAgentGraphWorkspaceHostOptions["execute"]>[0] | undefined;
+  let childLease: Awaited<ReturnType<SessionManager["getOrCreatePinned"]>> | undefined;
+  const fixture = await createHostFixture(
+    async (input) => {
+      execution = input;
+      const runtimeRun = await attachHostedRuntimeRun(input);
+      await runtimeRun.finish("completed");
+      input.onTerminal();
+    },
+    {},
+    { resolveOperatorWorkspace: () => ({ workDir: isolatedWorkDir }) },
+  );
+  try {
+    isolatedWorkDir = join(fixture.owner.session.workDir, "isolated-worktree");
+    await mkdir(isolatedWorkDir, { recursive: true });
+    const graphId = graphIdFor(fixture.owner.session.id, 1);
+    const childSessionId = `graph-session_${deterministicFingerprint([graphId, "researcher", 1]).slice("sha256:".length, 39)}`;
+    const narrowerBoundary = createManagedExecutionBoundary({
+      type: "managed",
+      name: "custom",
+      fileSystem: {
+        kind: "restricted",
+        entries: [
+          { kind: "special", access: "read", special: ":workspace_roots" },
+          {
+            kind: "path",
+            access: "write",
+            path: join(isolatedWorkDir, "narrow-output.txt"),
+            match: "exact",
+          },
+        ],
+      },
+      network: { kind: "restricted" },
+    });
+    childLease = await fixture.manager.getOrCreatePinned(childSessionId, isolatedWorkDir, {
+      persistence: true,
+      picoHome: fixture.owner.session.picoHome,
+      runtimeStorageRoot: fixture.owner.session.runtimeEventStore!.storageRoot,
+      runtimePort: createEngineRuntimePort(),
+    });
+    childLease.session.updateRuntimeState({ boundary: narrowerBoundary });
+    await childLease.session.flushPersistence();
+    await scheduleOperator(fixture, graphId, "intent-isolated-boundary", {
+      kind: "isolated-worktree",
+    });
+    assert.ok(execution);
+    assert.equal(execution.session.workDir, isolatedWorkDir);
+    assert.equal(execution.binding.kind, "operator");
+    if (execution.binding.kind === "operator") {
+      assert.deepEqual(execution.binding.workspacePolicy, { kind: "isolated-worktree" });
+      assert.equal(execution.binding.executionPermissionMode, "ask");
+    }
+    assert.deepEqual(
+      execution.session.getRuntimeStateSnapshot().boundary,
+      narrowerBoundary,
+      "an existing child may stay narrower after symbolic roots move into its workDir",
+    );
+  } finally {
+    childLease?.release();
     await fixture.close();
   }
 });
@@ -725,6 +835,7 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 async function createHostFixture(
   execute: CreateAgentGraphWorkspaceHostOptions["execute"],
   stopOptions: Pick<CreateAgentGraphWorkspaceHostOptions, "requestStop"> = {},
+  workspaceOptions: Pick<CreateAgentGraphWorkspaceHostOptions, "resolveOperatorWorkspace"> = {},
 ): Promise<{
   readonly host: ReturnType<typeof createAgentGraphWorkspaceHost>;
   readonly owner: Awaited<ReturnType<SessionManager["getOrCreatePinned"]>>;
@@ -750,6 +861,13 @@ async function createHostFixture(
     picoHome,
     runtimePort,
   });
+  owner.session.updateRuntimeState({
+    boundary: compileRuntimePermissionProfile({
+      collaborationMode: "agent",
+      permissionMode: "ask",
+    }),
+  });
+  await owner.session.flushPersistence();
   const host = createAgentGraphWorkspaceHost({
     workDir,
     storageRoot: owner.session.runtimeEventStore!.storageRoot,
@@ -758,6 +876,7 @@ async function createHostFixture(
     sessionOptions: { persistence: true, picoHome, runtimePort },
     execute,
     ...stopOptions,
+    ...workspaceOptions,
   });
   await host.start();
   return {
@@ -777,6 +896,9 @@ async function scheduleOperator(
   fixture: Awaited<ReturnType<typeof createHostFixture>>,
   graphId: string,
   intentId: string,
+  workspacePolicy: import("../../../src/agent-graph/core/contracts.js").AgentGraphWorkspacePolicy = {
+    kind: "shared",
+  },
 ): Promise<void> {
   const graph = fixture.host.openRootEpoch(fixture.owner.session.id);
   assert.equal(graph.graphId, graphId);
@@ -802,7 +924,7 @@ async function scheduleOperator(
           generation: 1,
           role: "researcher",
           profileId: "explore",
-          workspacePolicy: { kind: "shared" },
+          workspacePolicy,
         },
         intent: {
           graphId,

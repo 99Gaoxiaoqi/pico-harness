@@ -32,6 +32,8 @@ export interface CodeIntelligenceManagerOptions {
     scratchRoot?: string;
     generation?: number;
     workspaceRoots?: readonly string[];
+    readRoots?: readonly string[];
+    readFiles?: readonly string[];
   };
 }
 
@@ -99,6 +101,8 @@ export class CodeIntelligenceManager {
         scratchRoot:
           this.processSandbox?.scratchRoot ?? defaultSandboxScratchRoot(this.options.rootDir),
         ...(this.processSandbox?.config ? { config: this.processSandbox.config } : {}),
+        ...(this.processSandbox?.readRoots ? { readRoots: this.processSandbox.readRoots } : {}),
+        ...(this.processSandbox?.readFiles ? { readFiles: this.processSandbox.readFiles } : {}),
         ...(this.processSandbox?.generation !== undefined
           ? { generation: this.processSandbox.generation }
           : {}),
@@ -141,6 +145,9 @@ export class CodeIntelligenceManager {
   ): Promise<CodeIntelligenceStatus> {
     if (this.processSandbox?.generation === processSandbox.generation) return this.currentStatus;
     this.processSandbox = processSandbox;
+    // Repo Map 不启动子进程。禁用 LSP 时只替换下一次启动将使用的边界，
+    // 避免先按新边界重启、随后又因 Plan 策略关闭的双重生命周期切换。
+    if (!this.lspEnabled) return this.currentStatus;
     await this.close();
     return await this.start();
   }

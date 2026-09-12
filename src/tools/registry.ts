@@ -7,6 +7,9 @@ import type { ToolCall, ToolDefinition, ToolResult } from "../schema/message.js"
 import type { ToolAccesses } from "./tool-access.js";
 import type { HookService } from "../hooks/service.js";
 import type { ToolResultEnvelope } from "../engine/tool-result-contract.js";
+import type { ToolPermissionCategory } from "../approval/tool-permission-policy.js";
+
+export type { ToolPermissionCategory } from "../approval/tool-permission-policy.js";
 
 export type ToolOutputStream = "stdout" | "stderr";
 
@@ -98,6 +101,10 @@ export type ToolFileSideEffects =
   | { readonly kind: "exact"; readonly paths: readonly string[] }
   | { readonly kind: "workspace" };
 
+/**
+ * 交互权限只信任工具声明的能力类别，不从参数文本猜测是否安全。
+ * 未声明的非只读工具由 Registry 保守归类为 open_world。
+ */
 export const NO_FILE_SIDE_EFFECTS = { kind: "none" } as const satisfies ToolFileSideEffects;
 export const WORKSPACE_FILE_SIDE_EFFECTS = {
   kind: "workspace",
@@ -163,6 +170,8 @@ export interface BaseTool {
    * 默认 false (保守视为写操作)。
    */
   readOnly?: boolean;
+  /** 用于人工审批的受信能力分类；不声明时 fail closed。 */
+  permissionCategory?: ToolPermissionCategory;
   /**
    * 声明本次调用要访问的资源(资源冲突图调度用,对标 kimi-code ToolAccesses)。
    *
@@ -218,6 +227,8 @@ export interface Registry {
    * 默认返回 false (保守视为写操作)。
    */
   isReadOnlyTool?(name: string): boolean;
+  /** 返回受信的工具权限类别；未知或未声明的非只读工具为 open_world。 */
+  getPermissionCategory?(name: string): ToolPermissionCategory;
   /** 解析单次调用的文件副作范围。 */
   getFileSideEffects?(call: ToolCall): ToolFileSideEffects;
   /**

@@ -1,4 +1,4 @@
-import type { BackgroundYoloPolicySnapshotData } from "../safety/background-yolo-policy-schema.js";
+import type { BackgroundAutonomousPolicySnapshotData } from "../safety/background-autonomous-policy-schema.js";
 
 export const JOB_STATUSES = [
   "queued",
@@ -227,7 +227,7 @@ export interface JobWithAttempts {
  * 后台 Job 在创建时冻结的安全边界。它是审计事实，不是可变的全局配置引用。
  * daemon 可在每次启动 Run 前额外用当前策略重新校验此快照。
  */
-export type YoloPolicySnapshot = BackgroundYoloPolicySnapshotData;
+export type AutonomousPolicySnapshot = BackgroundAutonomousPolicySnapshotData;
 
 export const CRON_RUN_STATUSES = [
   "queued",
@@ -258,7 +258,7 @@ export interface CronJobRecord {
   timeZone: string;
   prompt: string;
   enabled: boolean;
-  policySnapshot: YoloPolicySnapshot;
+  policySnapshot: AutonomousPolicySnapshot;
   /** 非秘密的系统凭证库引用；旧 Job 迁移后可能为空并由 daemon fail-closed。 */
   credentialRef?: CredentialRef;
   /** 创建时固定的 providerID/modelID；旧 v1 Job 可从 credentialRef 反推。 */

@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   RUNTIME_EVENT_SCHEMA_VERSION,
@@ -13,10 +16,17 @@ import {
 import { materializeRuntimeHistoryEntries } from "../../../src/engine/session-runtime-read-model.js";
 import { materializeRuntimeHistoryEntries as runtimeMaterializeHistoryEntries } from "../../../src/engine/session-runtime-read-model.js";
 import {
+  LEGACY_SESSION_RUNTIME_STATE_VERSION,
   SESSION_RUNTIME_STATE_VERSION,
   normalizeSessionRuntimeStatePatch,
+  normalizeSessionRuntimeStateWritePatch,
 } from "../../../src/engine/session-runtime.js";
 import { Session } from "../../../src/engine/session.js";
+import {
+  createManagedExecutionBoundary,
+  decodeExecutionBoundary,
+  type ExecutionBoundary,
+} from "../../../src/safety/permission-profile.js";
 
 test("Runtime adapters preserve the engine-owned durable Session contracts", () => {
   assert.equal(runtimeSchemaVersion, RUNTIME_EVENT_SCHEMA_VERSION);
@@ -57,7 +67,7 @@ test("Session runtime state rejects pre-route settings and unknown persisted fie
     provider: "openai" as const,
     model: "test-model",
     modelRouteId: "test/test-model",
-    mode: "default" as const,
+    mode: "ask" as const,
     thinkingEffort: "off",
     thinkingEffortExplicit: false,
     additionalDirectories: [],
@@ -92,6 +102,13 @@ test("Session runtime state rejects pre-route settings and unknown persisted fie
     },
   };
   assert.equal(decodeRuntimeEvent(event).kind, "session.state.committed");
+  assert.equal(
+    decodeRuntimeEvent({
+      ...event,
+      data: { ...event.data, stateVersion: LEGACY_SESSION_RUNTIME_STATE_VERSION },
+    }).kind,
+    "session.state.committed",
+  );
   assert.throws(
     () =>
       decodeRuntimeEvent({
@@ -110,6 +127,145 @@ test("Session runtime state rejects pre-route settings and unknown persisted fie
         },
       }),
     /session state patch is invalid/u,
+  );
+});
+
+test("Session boundary codec round-trips complete snapshots and rejects malformed authority", () => {
+  const boundary = testExecutionBoundary(4);
+  const decoded = decodeExecutionBoundary(JSON.parse(JSON.stringify(boundary)) as unknown);
+  assert.deepEqual(decoded, boundary);
+  assert.notStrictEqual(decoded, boundary);
+  assert.deepEqual(normalizeSessionRuntimeStatePatch({ boundary }), { boundary });
+  assert.deepEqual(normalizeSessionRuntimeStateWritePatch({ boundary }), { boundary });
+
+  for (const invalid of [
+    { kind: "managed", revision: 0 },
+    { kind: "bypass", revision: -1 },
+    { kind: "external", revision: 1, profile: {} },
+    { kind: "unknown", revision: 0 },
+    {
+      ...boundary,
+      profile: { ...boundary.profile, unexpected: true },
+    },
+    {
+      ...boundary,
+      profile: {
+        ...boundary.profile,
+        fileSystem: {
+          ...boundary.profile.fileSystem,
+          entries: [{ kind: "path", access: "write", path: "relative" }],
+        },
+      },
+    },
+  ]) {
+    assert.throws(() => decodeExecutionBoundary(invalid));
+    assert.equal(normalizeSessionRuntimeStatePatch({ boundary: invalid }), undefined);
+    assert.equal(normalizeSessionRuntimeStateWritePatch({ boundary: invalid }), undefined);
+  }
+
+  const oversized = {
+    ...boundary,
+    profile: {
+      ...boundary.profile,
+      fileSystem: {
+        ...boundary.profile.fileSystem,
+        entries: Array.from({ length: 300 }, (_, index) => ({
+          kind: "path" as const,
+          access: "read" as const,
+          path: `/outside/${index}-${"x".repeat(3_900)}`,
+          match: "exact" as const,
+        })),
+      },
+    },
+  };
+  assert.throws(() => decodeExecutionBoundary(oversized), /serialized size limit/u);
+  assert.equal(normalizeSessionRuntimeStateWritePatch({ boundary: oversized }), undefined);
+});
+
+test("Session boundary survives update, snapshot, and durable recovery", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-session-boundary-"));
+  const workDir = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  await mkdir(workDir, { recursive: true });
+  const boundary = testExecutionBoundary(6);
+
+  try {
+    const first = new Session("boundary-recovery", workDir, { persistence: true, picoHome });
+    try {
+      await first.recover();
+      first.updateRuntimeState({ boundary });
+      assert.deepEqual(first.getRuntimeStateSnapshot().boundary, boundary);
+      await first.flushPersistence();
+    } finally {
+      await first.close();
+    }
+
+    const resumed = new Session("boundary-recovery", workDir, { persistence: true, picoHome });
+    try {
+      await resumed.recover();
+      assert.deepEqual(resumed.getRuntimeStateSnapshot().boundary, boundary);
+    } finally {
+      await resumed.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("durable Session modes migrate once while canonical writes reject aliases and conflicts", () => {
+  const base = {
+    provider: "openai",
+    model: "test-model",
+    modelRouteId: "test/test-model",
+    thinkingEffort: "off",
+    thinkingEffortExplicit: false,
+    additionalDirectories: [],
+  };
+  for (const [mode, collaborationMode, permissionMode] of [
+    ["default", "agent", "ask"],
+    ["yolo", "agent", "full-access"],
+    ["plan", "plan", "ask"],
+  ] as const) {
+    const decoded = normalizeSessionRuntimeStatePatch({ settings: { ...base, mode } });
+    assert.equal(decoded?.settings?.collaborationMode, collaborationMode);
+    assert.equal(decoded?.settings?.permissionMode, permissionMode);
+    assert.equal(Object.hasOwn(decoded?.settings ?? {}, "mode"), false);
+  }
+  const restoredPlan = normalizeSessionRuntimeStatePatch({
+    settings: { ...base, mode: "plan", prePlanMode: "yolo" },
+  });
+  assert.equal(restoredPlan?.settings?.collaborationMode, "plan");
+  assert.equal(restoredPlan?.settings?.permissionMode, "full-access");
+
+  assert.equal(
+    normalizeSessionRuntimeStateWritePatch({ settings: { ...base, mode: "default" } }),
+    undefined,
+  );
+  assert.equal(
+    normalizeSessionRuntimeStateWritePatch({ settings: { ...base, mode: "yolo" } }),
+    undefined,
+  );
+  assert.equal(
+    normalizeSessionRuntimeStatePatch({
+      settings: {
+        ...base,
+        mode: "yolo",
+        collaborationMode: "agent",
+        permissionMode: "ask",
+      },
+    }),
+    undefined,
+  );
+  assert.deepEqual(
+    normalizeSessionRuntimeStateWritePatch({
+      settings: { ...base, collaborationMode: "plan", permissionMode: "ask" },
+    })?.settings,
+    {
+      ...base,
+      collaborationMode: "plan",
+      permissionMode: "ask",
+      orchestrationMode: "default",
+    },
   );
 });
 
@@ -182,3 +338,24 @@ test("Session cache shard identity and first route decision never drift", async 
   assert.doesNotMatch(first.shardSeed ?? "", /cache-shard-stability|private/u);
   await session.close();
 });
+
+function testExecutionBoundary(revision: number): Extract<ExecutionBoundary, { kind: "managed" }> {
+  const boundary = createManagedExecutionBoundary(
+    {
+      type: "managed",
+      name: "custom",
+      fileSystem: {
+        kind: "restricted",
+        entries: [
+          { kind: "special", access: "write", special: ":workspace_roots" },
+          { kind: "path", access: "read", path: "/outside/report.txt", match: "exact" },
+        ],
+        protectedMetadata: { access: "deny_write", names: [".git", ".codex"] },
+      },
+      network: { kind: "restricted" },
+    },
+    revision,
+  );
+  if (boundary.kind !== "managed") throw new Error("Expected managed execution boundary");
+  return boundary;
+}

@@ -156,7 +156,7 @@ for (const planning of [false, true]) {
             model: "coder",
             modelRouteId: "test/coder",
             collaborationMode: planning ? "plan" : "agent",
-            permissionMode: "default",
+            permissionMode: "ask",
             orchestrationMode: "default",
             thinkingEffort: "off",
             thinkingEffortExplicit: false,

@@ -4,7 +4,6 @@ import type {
   JsonObject,
   RunId,
   RuntimeCollaborationMode,
-  RuntimeInteractionMode,
   RuntimeOrchestrationMode,
   RuntimePermissionMode,
   RuntimeProviderKind,
@@ -26,7 +25,6 @@ import {
   collaborationModeParam,
   exactParamShape,
   exactResultShape,
-  interactionModeParam,
   oneOfParam,
   orchestrationModeParam,
   permissionModeParam,
@@ -242,7 +240,7 @@ const runtimeSessionSettingsResult = exactResultShape(
     model: resultString,
     collaborationMode: resultOneOf(["agent", "plan"]),
     orchestrationMode: resultOneOf(["default", "graph", "swarm"]),
-    permissionMode: resultOneOf(["default", "auto", "yolo"]),
+    permissionMode: resultOneOf(["ask", "auto", "full-access"]),
     thinkingEffort: resultString,
     thinkingEffortExplicit: resultBoolean,
     reasoningLevels: resultStringArray,
@@ -370,10 +368,6 @@ export type SessionMethodMap = {
       readonly collaborationMode?: RuntimeCollaborationMode;
       readonly orchestrationMode?: RuntimeOrchestrationMode;
       readonly permissionMode?: RuntimePermissionMode;
-      /** @deprecated Legacy combined mode. `plan` enters planning; all other values update permission only. */
-      readonly mode?: RuntimeInteractionMode;
-      /** @deprecated Legacy permission alias. `plan` enters planning. */
-      readonly permissions?: RuntimeInteractionMode;
       readonly thinkingEffort?: string;
     };
     readonly result: { readonly settings: RuntimeSessionSettings };
@@ -474,8 +468,6 @@ export const sessionParamValidators = {
       collaborationMode: collaborationModeParam,
       orchestrationMode: orchestrationModeParam,
       permissionMode: permissionModeParam,
-      mode: interactionModeParam,
-      permissions: interactionModeParam,
       thinkingEffort: stringParam,
     },
   ),

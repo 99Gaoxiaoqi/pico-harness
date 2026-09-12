@@ -90,14 +90,24 @@ waitForApproval(taskId, toolName, args, notify, diff?) → Promise<ApprovalResul
 再检查当前 Session 的结构化授权范围；仍需人工确认时才交给 ApprovalManager。
 会话授权不会作为一条独立 Policy 提前短路后续安全检查。
 
-### 危险命令与 YOLO hardline
+### 持久 ExecutionBoundary
 
-- **普通危险操作**在非 YOLO 模式仍进入审批策略；YOLO 只有通过 hardline 后才按当前 OS 用户权限直通。
-- **YOLO hardline** 是不可审批绕过的纯判定器。它解析 Shell 词、引号、展开、重定向、子 Shell、`eval`、`xargs/find`、常见命令转发器、已知 Shell 组合选项和已审计解释器入口，并传播静态工作目录；系统根、用户根、设备、关机、受保护 Git 远端以及无法证明目标安全的动态破坏操作直接 deny。
-- `cd`、wrapper `-C/--chdir/--directory`、子 Shell 和条件分支会更新各自的目录上下文；目录来自动态展开、命令替换或不能静态确定时，后续相对破坏目标 fail-closed。工作区内可静态证明的普通操作仍保留 YOLO 直通语义。
+权限模式决定“什么时候询问”，`ExecutionBoundary` 决定“即使已批准，宿主实际允许到哪里”。它是 Session Runtime State 中带 revision 的持久事实：Plan 固定收紧为 managed `read-only`；Agent 的 `ask` / `auto` 初始为 managed `workspace-write` 和 restricted process network；`full-access` 则转为 bypass。`ask` 与 `auto` 互换不丢失已持久的 managed 扩展；离开 `full-access` 会重建默认 managed `workspace-write`，不从 bypass 倒推隐式授权。
+
+`request_sandbox_boundary` 是前台主 Agent 的显式扩权入口，只接受有上限的 exact/subtree 文件系统范围和 process-network 开关。它先规范化路径和检查显式 deny，再请求人工批准，最后以 revision CAS 合并、落盘并刷新 WorkspaceRoots、进程沙箱、MCP 和 Hook 网络门禁。子代理、Graph Operator、Plan、后台任务和隔离 headless 不暴露这个扩权入口，只能在宿主绑定的上限内运行。
+
+network 有两条不同的数据面：managed boundary 的 network 开关约束 Bash 等子进程、远程 MCP 物理请求以及 HTTP/MCP Hook；内置 `web_search` / `fetch_url` 则使用宿主公网只读通道，每次跳转都重做 URL、DNS 和 SSRF 检查。因此 `auto` 可以自动公网只读，但不会顺带为 Shell、MCP 或 Hook 打开网络。
+
+### 危险命令与完全访问权限 hardline
+
+- **交互权限分类**不使用危险词黑名单决定静默放行。请求批准（`ask`）只自动执行已声明的只读和有界内部编排工具；帮我批准（`auto`）额外自动执行工作区内结构化写入和内置公网只读工具。Shell、MCP 与未声明能力的非只读工具在两种模式下都请求审批。
+- **完全访问权限**（`full-access`）只有通过 hardline 后才按当前 OS 用户权限直通。
+- **完全访问权限 hardline** 是不可审批绕过的纯判定器。POSIX Bash 版解析 Shell 词、引号、展开、重定向、子 Shell、`eval`、`xargs/find`、常见命令转发器、已知 Shell 组合选项和已审计解释器入口，并传播静态工作目录；系统根、用户根、设备、关机、受保护 Git 远端以及无法证明目标安全的动态破坏操作直接 deny。
+- Windows PowerShell 使用独立且更小的高置信 hardline，拒绝已建模的强推、磁盘/系统破坏、受保护根目录删除和不透明执行入口。它不复制 Bash 语法模型，未命中也不构成“命令已证明安全”；`ask` / `auto` 仍对所有 Shell 请求审批。
+- `cd`、wrapper `-C/--chdir/--directory`、子 Shell 和条件分支会更新各自的目录上下文；目录来自动态展开、命令替换或不能静态确定时，后续相对破坏目标 fail-closed。工作区内可静态证明的普通操作仍保留 `full-access` 直通语义。
 - Pico 自己启动的 Bash 使用 `--noprofile --norc -c`，并移除环境中的 Shell 启动脚本、导出函数和相关调试入口。命令文本内跨语句设置的 `BASH_ENV`、`ENV`、`ZDOTDIR` 与 Bash 导出函数会继续传播到已建模 Shell 调用并 fail-closed。
 - 已建模的 POSIX Shell 只有静态 `-c` 文本、静态 no-exec 解析或纯帮助/版本查询可以继续分析；脚本文件、stdin、`source`/`.`、启动文件和环境注入入口直接 fail-closed。语法不兼容的已知 Shell 只允许帮助/版本查询。Python、Node、Perl、Ruby 的内联入口会先解析已审计的前置选项，再保留系统级破坏字面量拒绝底线。
-- hardline 不是任意 executable、动态 loader、任意程序自己的配置文件或子进程行为的能力沙箱。它只保证宿主 Shell 启动边界、可见命令文本及已建模入口的拒绝底线；YOLO 主 Agent 的其他程序仍以当前 OS 用户权限执行。
+- hardline 不是任意 executable、动态 loader、任意程序自己的配置文件或子进程行为的能力沙箱。它只保证宿主 Shell 启动边界、可见命令文本及已建模入口的拒绝底线；使用完全访问权限（`full-access`）的主 Agent 其他程序仍以当前 OS 用户权限执行。
 - 判定测试只传入命令文本和临时路径，绝不执行真实删除、设备写入或远端推送。
 
 ### diff 预览 (`diff.ts`)

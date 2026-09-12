@@ -870,7 +870,7 @@ rm -f {remote_archive}
             attempt_request_id = bounded_attempt_identity(request_id, attempt)
             attempt_session_id = bounded_attempt_identity(session_id, attempt)
             headless_request = {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "requestId": attempt_request_id,
                 "workspacePath": workspace,
                 "picoHome": pico_home,
@@ -890,7 +890,8 @@ rm -f {remote_archive}
                     if route_config.get("thinkingEffort")
                     else {}
                 ),
-                "permissionMode": "yolo",
+                "collaborationMode": "agent",
+                "permissionMode": "full-access",
                 "policyDenialMode": self._POLICY_DENIAL_MODE,
                 "allowedTools": [
                     "bash",
@@ -2729,7 +2730,7 @@ async def assert_running_container_policy(
             or host.get("PortBindings")
             or any("docker.sock" in item for item in host.get("Binds") or [])
         ):
-            raise RuntimeError("Harbor container violates the Pico yolo isolation policy")
+            raise RuntimeError("Harbor container violates the Pico full-access isolation policy")
         configured_env = value.get("Config", {}).get("Env") or []
         if any(item.startswith("PICO_TB_PROVIDER_API_KEY=") for item in configured_env):
             raise RuntimeError("Harbor container received the host provider credential")
@@ -3975,7 +3976,7 @@ def parse_exit_code(raw: str | None) -> int:
 def validate_headless_result(
     result: dict[str, Any], exit_code: int, request_id: str
 ) -> None:
-    if result.get("schemaVersion") != 1 or result.get("requestId") != request_id:
+    if result.get("schemaVersion") != 2 or result.get("requestId") != request_id:
         raise RuntimeError("Pico headless result identity is invalid")
     expected = {
         "completed": {0},

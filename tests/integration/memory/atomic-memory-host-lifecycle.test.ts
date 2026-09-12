@@ -108,7 +108,7 @@ test(
         modelRouteId: "test/coder",
         orchestrationMode: "default",
         collaborationMode: "agent",
-        permissionMode: "default",
+        permissionMode: "ask",
         thinkingEffort: "medium",
         thinkingEffortExplicit: false,
         additionalDirectories: [],

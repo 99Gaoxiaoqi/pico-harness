@@ -317,7 +317,7 @@ const composer = () => `
       <div class="composer-bar">
         <button class="meta-button" data-action="input-mode">调整当前任务（Steer）⌄</button>
         <button class="meta-button" data-action="model-menu">GPT-5.4⌄</button>
-        <button class="meta-button" data-action="permission-menu">逐次确认⌄</button>
+        <button class="meta-button" data-action="permission-menu">请求批准⌄</button>
         <div class="composer-spacer"></div><span class="composer-cost">¥0.84 · 45.1k</span>
         <button class="send-button" data-action="send" aria-label="发送指令">↑</button>
       </div>
@@ -403,7 +403,7 @@ const controlbar = (view) => {
     return `<footer class="controlbar"><span class="control-meta">现场已保留 · checkpoint-02</span><div class="control-spacer"></div><button class="control-button" data-action="rewind">↶ Rewind</button><button class="control-button" data-action="open-settings">修改配置</button><button class="control-button primary" data-action="retry">重试此步骤</button></footer>`;
   if (view === "task-completed")
     return `<footer class="controlbar"><span class="control-meta">已完成 · main · trace-91DF</span><div class="control-spacer"></div><button class="control-button" data-action="sessions">查看 Session</button><button class="control-button" data-action="archive">归档</button></footer>`;
-  return `<footer class="controlbar"><span class="control-meta">GPT-5.4 · 逐次确认</span><div class="control-spacer"></div><button class="control-button primary" data-action="steer">→ Steer <kbd>⌘↵</kbd></button><button class="control-button" data-action="pause">${state.paused ? "▶ 继续" : "Ⅱ 暂停"}</button><button class="control-button" data-action="stop">■ 停止</button><button class="control-button" data-action="rewind">↶ Rewind <kbd>⌘R</kbd></button><span class="control-meta">12:42 · 45.1k tok · ¥0.84</span></footer>`;
+  return `<footer class="controlbar"><span class="control-meta">GPT-5.4 · 请求批准</span><div class="control-spacer"></div><button class="control-button primary" data-action="steer">→ Steer <kbd>⌘↵</kbd></button><button class="control-button" data-action="pause">${state.paused ? "▶ 继续" : "Ⅱ 暂停"}</button><button class="control-button" data-action="stop">■ 停止</button><button class="control-button" data-action="rewind">↶ Rewind <kbd>⌘R</kbd></button><span class="control-meta">12:42 · 45.1k tok · ¥0.84</span></footer>`;
 };
 
 const taskView = (view, params) => {
@@ -510,7 +510,7 @@ const settingsView = (params) => {
   const tabs = `<div class="page-tabs">${["providers", "permissions", "usage", "notifications"].map((item) => `<button class="page-tab ${tab === item ? "active" : ""}" data-action="page-tab" data-section="settings" data-tab="${item}">${{ providers: "Providers & Models", permissions: "Permissions & Trust", usage: "Usage & Trace", notifications: "Notifications" }[item]}</button>`).join("")}</div>`;
   let content = "";
   if (tab === "permissions")
-    content = `<section class="settings-section"><h2>默认交互模式</h2><p>Desktop 默认使用逐次确认；hardline 和 Hook deny 在任何模式都不可绕过。</p><div class="setting-row"><div class="setting-copy"><strong>新任务默认模式</strong><span>影响文件写入、命令和网络访问</span></div><div class="setting-control"><select class="select" aria-label="新任务默认模式"><option>逐次确认（default）</option><option>自动编辑（auto）</option><option>计划模式（plan）</option><option>完全自主（yolo）</option></select></div></div></section><section class="settings-section"><h2>已信任工作区</h2><div class="setting-row"><div class="setting-copy"><strong>~/Code/pico-harness</strong><span>真实路径 · 2026-07-10 信任</span></div><div class="setting-control"><button class="danger-button" data-action="revoke-trust">撤销信任</button></div></div></section><section class="settings-section"><h2>额外授权目录</h2><div class="setting-row"><div class="setting-copy"><strong>~/shared/generated</strong><span>仅当前 Session 可写</span></div><div class="setting-control"><button class="ghost-button" data-action="remove-root">移除</button></div></div></section>`;
+    content = `<section class="settings-section"><h2>默认权限模式</h2><p>Desktop 默认使用请求批准；hardline 和 Hook deny 在任何模式都不可绕过。</p><div class="setting-row"><div class="setting-copy"><strong>新任务默认模式</strong><span>影响文件写入、命令和网络访问</span></div><div class="setting-control"><select class="select" aria-label="新任务默认模式"><option>请求批准（ask）</option><option>帮我批准（auto）</option><option>完全访问权限（full-access）</option></select></div></div></section><section class="settings-section"><h2>已信任工作区</h2><div class="setting-row"><div class="setting-copy"><strong>~/Code/pico-harness</strong><span>真实路径 · 2026-07-10 信任</span></div><div class="setting-control"><button class="danger-button" data-action="revoke-trust">撤销信任</button></div></div></section><section class="settings-section"><h2>额外授权目录</h2><div class="setting-row"><div class="setting-copy"><strong>~/shared/generated</strong><span>仅当前 Session 可写</span></div><div class="setting-control"><button class="ghost-button" data-action="remove-root">移除</button></div></div></section>`;
   else if (tab === "usage")
     content = `<section class="settings-section"><h2>本月 Usage</h2><p>成本状态保留“估算、订阅已包含、部分报告、未知”，不会用 0 代替缺失。</p><div class="metric-grid" style="margin-top:14px"><div class="metric"><span>Provider Calls</span><strong>284</strong></div><div class="metric"><span>Token</span><strong>1.84M</strong></div><div class="metric"><span>估算成本</span><strong>¥42.60</strong></div><div class="metric"><span>数据覆盖</span><strong>91%</strong></div></div></section><section class="settings-section"><h2>Trace</h2><div class="setting-row"><div class="setting-copy"><strong>记录完整 Trace</strong><span>保存模型、工具、子代理和审批 Span</span></div><div class="setting-control"><button class="toggle on" data-action="toggle-generic" aria-label="记录完整 Trace"></button></div></div></section>`;
   else if (tab === "notifications")
@@ -569,7 +569,7 @@ const newTaskModal = () =>
     title: "新建任务",
     description: "任务绑定当前 Workspace；运行环境、模型与权限在开始前明确确认。",
     size: "large",
-    body: `<div class="form-grid"><div class="form-row span-2"><label for="task-prompt">你希望 Pico 完成什么？</label><textarea id="task-prompt" class="prompt-field" name="task-prompt" autocomplete="off" data-autofocus placeholder="例如：修复 Session 恢复时的状态丢失，并增加一条集成测试…"></textarea><div class="form-help">支持拖入文件、图片或使用 @ 引用项目文件。</div></div><div class="form-row"><label>运行环境</label><div class="segmented"><button class="segment active">当前目录</button><button class="segment">独立 Worktree</button></div></div><div class="form-row"><label for="task-model">模型</label><select id="task-model" class="select"><option>zhipu/glm-5.2</option><option>anthropic/claude-opus</option></select></div><div class="form-row"><label for="task-mode">权限模式</label><select id="task-mode" class="select"><option>逐次确认（推荐）</option><option>自动编辑</option><option>计划模式</option><option>完全自主</option></select></div><div class="form-row"><label for="task-budget">成本预算</label><select id="task-budget" class="select"><option>¥5.00</option><option>¥10.00</option><option>不设置</option></select></div></div><div class="notice" style="margin-top:14px">当前目录有 2 个未提交文件。Pico 会保留来源，不会把它们归因给新任务。</div>`,
+    body: `<div class="form-grid"><div class="form-row span-2"><label for="task-prompt">你希望 Pico 完成什么？</label><textarea id="task-prompt" class="prompt-field" name="task-prompt" autocomplete="off" data-autofocus placeholder="例如：修复 Session 恢复时的状态丢失，并增加一条集成测试…"></textarea><div class="form-help">支持拖入文件、图片或使用 @ 引用项目文件。</div></div><div class="form-row"><label>运行环境</label><div class="segmented"><button class="segment active">当前目录</button><button class="segment">独立 Worktree</button></div></div><div class="form-row"><label for="task-model">模型</label><select id="task-model" class="select"><option>zhipu/glm-5.2</option><option>anthropic/claude-opus</option></select></div><div class="form-row"><label for="task-mode">权限模式</label><select id="task-mode" class="select"><option>请求批准（推荐）</option><option>帮我批准</option><option>计划模式</option><option>完全访问权限</option></select></div><div class="form-row"><label for="task-budget">成本预算</label><select id="task-budget" class="select"><option>¥5.00</option><option>¥10.00</option><option>不设置</option></select></div></div><div class="notice" style="margin-top:14px">当前目录有 2 个未提交文件。Pico 会保留来源，不会把它们归因给新任务。</div>`,
     actions:
       '<button class="ghost-button" data-action="close-dialog">取消</button><button class="primary-button" data-action="preview-plan">生成计划</button>',
   });
@@ -579,7 +579,7 @@ const planModal = () =>
     title: "开始前确认计划",
     description: "Plan 阶段只读取项目，不会修改文件或运行有副作用的命令。",
     size: "large",
-    body: `<div class="notice"><strong>任务目标</strong><br>${escapeHtml(state.draftPrompt)}</div><div class="plan-list" style="margin-top:14px"><div class="plan-line"><span>1</span><span>复现目标行为并保留证据</span><time>只读</time></div><div class="plan-line"><span>2</span><span>定位 Runtime 事件与持久化边界</span><time>只读</time></div><div class="plan-line"><span>3</span><span>实现最小修复并增加集成测试</span><time>写入</time></div><div class="plan-line"><span>4</span><span>运行针对性测试并汇总 Diff</span><time>命令</time></div></div><div class="impact-grid" style="margin-top:16px"><span>环境　<b>当前目录</b></span><span>模型　<b>zhipu/glm-5.2</b></span><span>权限　<b>逐次确认</b></span><span>预算　<b>¥5.00</b></span></div>`,
+    body: `<div class="notice"><strong>任务目标</strong><br>${escapeHtml(state.draftPrompt)}</div><div class="plan-list" style="margin-top:14px"><div class="plan-line"><span>1</span><span>复现目标行为并保留证据</span><time>只读</time></div><div class="plan-line"><span>2</span><span>定位 Runtime 事件与持久化边界</span><time>只读</time></div><div class="plan-line"><span>3</span><span>实现最小修复并增加集成测试</span><time>写入</time></div><div class="plan-line"><span>4</span><span>运行针对性测试并汇总 Diff</span><time>命令</time></div></div><div class="impact-grid" style="margin-top:16px"><span>环境　<b>当前目录</b></span><span>模型　<b>zhipu/glm-5.2</b></span><span>权限　<b>请求批准</b></span><span>预算　<b>¥5.00</b></span></div>`,
     actions:
       '<button class="ghost-button" data-action="back-new-task">返回修改</button><button class="secondary-button" data-action="save-plan">保存 Plan</button><button class="primary-button" data-action="start-task">批准计划并开始</button>',
   });
@@ -762,7 +762,7 @@ document.addEventListener("click", (event) => {
     "start-task": () => {
       state.selectedTask = "desktop";
       routeTo("work/task-running");
-      showToast("任务已开始 · 当前目录 · 逐次确认");
+      showToast("任务已开始 · 当前目录 · 请求批准");
     },
     approval: () => updateRouteParams({ dialog: "approval" }),
     "approve-once": () => {

@@ -11,7 +11,7 @@
 import { classifyGitCommand } from "./bash-safety.js";
 import type { HardlineBashReasonKind } from "./bash-hardline.js";
 
-/** Windows YOLO 仍保留不可审批绕过的确定性红线；这里只拦截高置信破坏语义。 */
+/** Windows `full-access` 仍保留不可审批绕过的确定性红线；这里只拦截高置信破坏语义。 */
 export function classifyPowerShellHardlineCommand(
   command: string,
 ): HardlineBashReasonKind | undefined {

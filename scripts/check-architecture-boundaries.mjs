@@ -57,7 +57,7 @@ const HANDWRITTEN_TIMEOUT_WHITELIST = new Map([
   ["src/provider/retry.ts", "既有：sleep/abortableSleep（canonical 注释引为 clearTimeout 范式）"],
   ["src/runtime/agent-recoverable-task-adapter.ts", "既有：delay() helper"],
   ["src/runtime/runtime-run.ts", "既有：事件写重试退避（3 处）"],
-  ["src/safety/background-yolo-policy.ts", "既有：hook 超时 fail-closed"],
+  ["src/safety/background-autonomous-policy.ts", "既有：hook 超时 fail-closed"],
   ["src/storage/atomic-json.ts", "既有：sleep() helper"],
   ["src/storage/file-history-mutation-lease.ts", "既有：租约冲突重试退避"],
   ["src/storage/local-file-storage.ts", "既有：租约冲突重试退避"],
@@ -573,7 +573,7 @@ const MODEL_PROCESS_ENTRYPOINTS = new Set([
   "src/mcp/stdio-client.ts",
   "src/hooks/executors/executor.ts",
   "src/hooks/config/command-shell.ts",
-  "src/safety/background-yolo-policy.ts",
+  "src/safety/background-autonomous-policy.ts",
   "src/code-intelligence/lsp-client.ts",
 ]);
 

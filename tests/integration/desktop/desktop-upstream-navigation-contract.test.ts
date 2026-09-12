@@ -87,17 +87,16 @@ test("sidebar pending state includes prompts and is scoped by workspace plus ses
   assert.match(sidebarTasks, /activeWorkspacePath === session\.workspacePath/u);
 });
 
-test("new task settings prefer canonical defaults and only use legacy mode as fallback", async () => {
+test("new task settings use only canonical independent defaults", async () => {
   const source = await rendererSource("pages/ConversationPage.tsx");
   const defaults = source.slice(
     source.indexOf("const newTaskSettings"),
     source.indexOf("const updateNewTaskSettings"),
   );
-  assert.match(defaults, /defaults\.collaborationMode \?\?/u);
+  assert.match(defaults, /defaults\.collaborationMode \?\? "agent"/u);
   assert.match(defaults, /defaults\.orchestrationMode \?\? "default"/u);
-  assert.match(defaults, /defaults\.permissionMode \?\?/u);
-  assert.match(defaults, /legacyMode === "plan"/u);
-  assert.match(defaults, /legacyMode === "auto" \|\| legacyMode === "yolo"/u);
+  assert.match(defaults, /defaults\.permissionMode \?\? "ask"/u);
+  assert.doesNotMatch(defaults, /legacyMode/u);
 });
 
 test("deleting a session removes only its session-owned composer draft", async () => {

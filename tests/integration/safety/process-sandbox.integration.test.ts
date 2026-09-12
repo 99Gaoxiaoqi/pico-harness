@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -18,28 +27,48 @@ import {
   shellRuntimeReadRoots,
   WINDOWS_RESTRICTED_NODE_OPTIONS,
 } from "../../../src/safety/process-sandbox/index.js";
-import { evaluateSandboxCommand } from "../../../src/safety/yolo-sandbox.js";
+import { evaluateSandboxCommand } from "../../../src/safety/workspace-sandbox.js";
 import { createIsolatedPicoConfig } from "../../../src/input/pico-config.js";
 import { McpConnectionManager } from "../../../src/mcp/manager.js";
 import type { McpClient } from "../../../src/mcp/types.js";
 import { BashTool } from "../../../src/tools/bash.js";
+import { ToolRegistry } from "../../../src/tools/registry-impl.js";
 import { WorkspaceRoots } from "../../../src/tools/workspace-roots.js";
 
 test("sandbox profile 固定模式与网络语义", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-policy-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   const workspace = join(root, "workspace");
+  const explicitWriteRoot = join(root, "explicit-write-root");
+  const exactWriteFile = join(root, "exact-write.txt");
   const scratch = join(root, "scratch");
+  await mkdir(workspace);
+  await mkdir(explicitWriteRoot);
+  await writeFile(exactWriteFile, "", "utf8");
+  const canonicalWorkspace = await realpath(workspace);
+  const canonicalExplicitWriteRoot = await realpath(explicitWriteRoot);
+  const canonicalExactWriteFile = await realpath(exactWriteFile);
 
   const readonly = createSandboxPolicy({
     profile: "read-only",
     workspaceRoots: [workspace],
     scratchRoot: scratch,
     config: { network: "allow" },
+    writeRoots: [explicitWriteRoot],
+    writeFiles: [exactWriteFile],
   });
-  assert.equal(readonly.network, "deny");
-  assert.deepEqual(readonly.writeRoots, [readonly.scratchRoot]);
-  assert.ok(readonly.readRoots.includes(workspace));
+  assert.equal(readonly.network, "allow");
+  assert.ok(readonly.writeRoots.includes(canonicalExplicitWriteRoot));
+  assert.equal(readonly.writeRoots.includes(canonicalWorkspace), false);
+  assert.deepEqual(readonly.writeFiles, [canonicalExactWriteFile]);
+  assert.ok(readonly.readRoots.includes(canonicalWorkspace));
+
+  const defaultReadonly = createSandboxPolicy({
+    profile: "read-only",
+    workspaceRoots: [workspace],
+    scratchRoot: scratch,
+  });
+  assert.equal(defaultReadonly.network, "deny");
 
   const writable = createSandboxPolicy({
     profile: "workspace-write",
@@ -47,7 +76,7 @@ test("sandbox profile 固定模式与网络语义", async (context) => {
     scratchRoot: scratch,
   });
   assert.equal(writable.network, "allow");
-  assert.ok(writable.writeRoots.includes(workspace));
+  assert.ok(writable.writeRoots.includes(canonicalWorkspace));
 
   const unrestricted = createSandboxPolicy({
     profile: "danger-full-access",
@@ -267,6 +296,112 @@ test("会话授权提升策略代次并重启 stdio MCP", async (context) => {
   ]);
 });
 
+test("审批阶段重启 stdio MCP 保留已准入 bridge 并执行同一调用", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-mcp-stable-bridge-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const registry = new ToolRegistry();
+  const clients: Array<{ id: number; connects: number; calls: number; closes: number }> = [];
+  const baseline = createSandboxPolicy({
+    profile: "workspace-write",
+    workspaceRoots: [root],
+    scratchRoot: join(root, "scratch"),
+    config: { network: "deny" },
+    generation: 0,
+  });
+  const manager = new McpConnectionManager(registry, {
+    processSandbox: baseline,
+    clientFactory: () => {
+      const state = { id: clients.length + 1, connects: 0, calls: 0, closes: 0 };
+      clients.push(state);
+      return {
+        toolCancellationScope: "process_tree",
+        async connect() {
+          state.connects++;
+        },
+        async listTools() {
+          return [
+            {
+              name: "do",
+              description: `fixture-${state.id}`,
+              inputSchema: { type: "object", additionalProperties: false },
+            },
+          ];
+        },
+        async callTool() {
+          state.calls++;
+          return {
+            content: [{ type: "text", text: `client-${state.id}` }],
+            isError: false,
+          };
+        },
+        async listResources() {
+          return { resources: [] };
+        },
+        async readResource() {
+          return { contents: [] };
+        },
+        async listPrompts() {
+          return { prompts: [] };
+        },
+        async getPrompt() {
+          return { messages: [] };
+        },
+        async close() {
+          state.closes++;
+        },
+      } satisfies McpClient;
+    },
+  });
+  context.after(() => manager.closeAll());
+  await manager.replaceSources([
+    {
+      id: "test",
+      config: {
+        mcpServers: {
+          local: { name: "local", transport: "stdio", command: "fixture" },
+        },
+      },
+    },
+  ]);
+  await manager.connectAll();
+
+  const toolName = "mcp__local__do";
+  const admittedBridge = registry.getTool(toolName);
+  assert.ok(admittedBridge);
+  const step = registry.captureStep("approved-mcp", [toolName]);
+  let approvals = 0;
+  registry.usePermission(async () => {
+    approvals++;
+    await manager.restartStdioServerForTool(toolName, {
+      ...baseline,
+      network: "allow",
+      generation: 1,
+    });
+    return { allowed: true };
+  });
+  registry.useExecution(async (call, next) => {
+    try {
+      return await next(call);
+    } finally {
+      await manager.restartStdioServerForTool(toolName);
+    }
+  });
+
+  const result = await registry.execute(
+    { id: "approved-call", name: toolName, arguments: "{}" },
+    { step },
+  );
+  assert.equal(result.isError, false);
+  assert.equal(result.output, "client-2");
+  assert.equal(approvals, 1);
+  assert.strictEqual(registry.getTool(toolName), admittedBridge);
+  assert.deepEqual(clients, [
+    { id: 1, connects: 1, calls: 0, closes: 1 },
+    { id: 2, connects: 1, calls: 1, closes: 1 },
+    { id: 3, connects: 1, calls: 0, closes: 0 },
+  ]);
+});
+
 test("受限环境只继承系统白名单、恢复显式变量并拒绝加载器注入", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-env-"));
   context.after(() => rm(root, { recursive: true, force: true }));
@@ -317,7 +452,7 @@ test("受限环境只继承系统白名单、恢复显式变量并拒绝加载�
 });
 
 test("danger-full-access 保留完整宿主环境且不应用受限显式键规则", async (context) => {
-  const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-env-yolo-"));
+  const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-env-full-access-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   const policy = createSandboxPolicy({
     profile: "danger-full-access",
@@ -383,6 +518,70 @@ test("Bubblewrap profile 使用空命名空间、只读运行根和工作区写�
   assert.ok(
     args.some(
       (value, index) => value === "--bind" && policy.writeRoots.includes(args[index + 1] ?? ""),
+    ),
+  );
+});
+
+test("exact file grants stay literal in Seatbelt and file-scoped in Bubblewrap", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-process-sandbox-exact-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const workspace = join(root, "workspace");
+  const readable = join(root, "readable.txt");
+  const writable = join(root, "writable.txt");
+  await mkdir(workspace);
+  await writeFile(readable, "read", "utf8");
+  await writeFile(writable, "write", "utf8");
+  const policy = createSandboxPolicy({
+    profile: "workspace-write",
+    workspaceRoots: [workspace],
+    scratchRoot: join(root, "scratch"),
+    readFiles: [readable],
+    writeFiles: [writable],
+    config: { network: "deny" },
+  });
+
+  const canonicalReadable = policy.readFiles?.[0];
+  const canonicalWritable = policy.writeFiles?.[0];
+  assert.ok(canonicalReadable);
+  assert.ok(canonicalWritable);
+  assert.equal(
+    policy.readRoots.some((candidate) => canonicalReadable.startsWith(`${candidate}/`)),
+    false,
+  );
+  assert.equal(
+    policy.writeRoots.some((candidate) => canonicalWritable.startsWith(`${candidate}/`)),
+    false,
+  );
+
+  const seatbelt = buildMacosProfile(policy);
+  assert.match(
+    seatbelt,
+    new RegExp(`\\(literal ${escapeRegExp(JSON.stringify(canonicalReadable))}\\)`),
+  );
+  assert.match(
+    seatbelt,
+    new RegExp(`\\(literal ${escapeRegExp(JSON.stringify(canonicalWritable))}\\)`),
+  );
+  assert.doesNotMatch(
+    seatbelt,
+    new RegExp(`\\(subpath ${escapeRegExp(JSON.stringify(join(root)))}\\)`),
+  );
+
+  const bwrap = buildBubblewrapArgs(policy, "/bin/sh", ["-c", "true"], workspace);
+  assert.ok(
+    bwrap.some(
+      (value, index) =>
+        value === "--ro-bind-try" &&
+        bwrap[index + 1] === canonicalReadable &&
+        bwrap[index + 2] === canonicalReadable,
+    ),
+  );
+  assert.ok(
+    bwrap.some(
+      (value, index) =>
+        value === "--bind" &&
+        bwrap[index + 1] === canonicalWritable &&
+        bwrap[index + 2] === canonicalWritable,
     ),
   );
 });

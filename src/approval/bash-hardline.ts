@@ -42,7 +42,7 @@ export type HardlineBashReasonKind =
 
 /**
  * Bash hardline 纯判定。只识别不可审批绕过的系统级破坏，
- * 工作区内的普通递归删除仍交给 YOLO 正常执行。
+ * 工作区内的普通递归删除仍交给 `full-access` 正常执行。
  */
 export function isHardlineBashCommand(command: string, initialCwd?: string): boolean {
   return classifyHardlineBashCommand(command, initialCwd) !== undefined;

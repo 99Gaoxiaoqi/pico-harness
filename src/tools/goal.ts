@@ -124,6 +124,7 @@ function parseBudgetConfig(parsed: Record<string, unknown>): BudgetConfig | unde
 export class CreateGoalTool implements BaseTool {
   /** 非只读:create 改 GoalManager 全局状态 */
   readonly readOnly = false;
+  readonly permissionCategory = "bounded_control" as const;
   readonly fileSideEffects = NO_FILE_SIDE_EFFECTS;
 
   constructor(private readonly manager: GoalManager) {}
@@ -256,6 +257,7 @@ export class GetGoalTool implements BaseTool {
 export class UpdateGoalTool implements BaseTool {
   /** 非只读:update 改 GoalManager 全局状态 */
   readonly readOnly = false;
+  readonly permissionCategory = "bounded_control" as const;
   readonly fileSideEffects = NO_FILE_SIDE_EFFECTS;
 
   constructor(private readonly manager: GoalManager) {}

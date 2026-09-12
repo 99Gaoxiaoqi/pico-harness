@@ -22,6 +22,7 @@ import {
   type AgentGraphWorkspaceHost,
 } from "../../../src/runtime/agent-graph-host.js";
 import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
+import { compileRuntimePermissionProfile } from "../../../src/safety/permission-profile.js";
 import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 
@@ -342,18 +343,23 @@ async function createProductionFixture(input: {
     },
   );
   rootLease.session.updateRuntimeState({
+    boundary: compileRuntimePermissionProfile({
+      collaborationMode: "agent",
+      permissionMode: "ask",
+    }),
     settings: {
       provider: "openai",
       model: input.rootModel.split("/").at(-1)!,
       modelRouteId: input.rootModel,
       collaborationMode: "agent",
-      permissionMode: "default",
+      permissionMode: "ask",
       orchestrationMode: "graph",
       thinkingEffort: "medium",
       thinkingEffortExplicit: false,
       additionalDirectories: [],
     },
   });
+  await rootLease.session.flushPersistence();
   return {
     host,
     workspaceRuntime,

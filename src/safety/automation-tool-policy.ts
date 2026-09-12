@@ -1,7 +1,7 @@
 /**
  * Automation/Cron tool authority is intentionally independent from the general
  * background host surface. Adding or exposing a new tool elsewhere must never
- * grant it unattended YOLO authority automatically.
+ * grant it unattended FULL_ACCESS authority automatically.
  */
 export const AUTOMATION_TOOL_ALLOWLIST: readonly string[] = Object.freeze([
   "read_file",

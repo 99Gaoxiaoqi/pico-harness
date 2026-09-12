@@ -2,7 +2,7 @@ flowchart LR
     A[可信运行态]
 
     subgraph SAFE[安全]
-        Y1[YOLO 策略] --> Y2[宿主沙箱] --> Y3[越界拒绝]
+        Y1[完全访问策略] --> Y2[宿主沙箱] --> Y3[越界拒绝]
     end
 
     subgraph MODEL[模型]

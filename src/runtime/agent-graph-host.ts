@@ -14,7 +14,10 @@ import {
   assertValidAgentGraphOperatorProfileSnapshot,
   type AgentGraphOperatorProfileCatalog,
 } from "../agent-graph/operator-profile-catalog.js";
-import type { AgentGraphProfileSnapshot } from "../agent-graph/core/contracts.js";
+import type {
+  AgentGraphProfileSnapshot,
+  AgentGraphWorkspacePolicy,
+} from "../agent-graph/core/contracts.js";
 import { SqliteAgentGraphControlStore } from "../storage/sqlite/sqlite-agent-graph-control-store.js";
 import type {
   AgentGraphActivationClaimRecord,
@@ -41,6 +44,7 @@ import {
 } from "./agent-graph-exact-run-port.js";
 import { SqliteAgentGraphOutputLedger } from "./agent-graph-output-ledger.js";
 import { AgentGraphRootWakeRuntimePort } from "./agent-graph-root-wake-port.js";
+import { bindAgentGraphOperatorExecutionBoundary } from "../agent-graph/execution-boundary.js";
 
 export type AgentGraphRunToolBinding =
   | {
@@ -55,6 +59,12 @@ export type AgentGraphRunToolBinding =
     }
   | {
       readonly kind: "operator";
+      /** Host-derived parent authority; model/profile payloads never supply this identity. */
+      readonly rootSessionId: string;
+      /** Durable workspace policy resolved by the Graph host, never by model input. */
+      readonly workspacePolicy: AgentGraphWorkspacePolicy;
+      /** Parent-derived runtime mode; the frozen operator profile cannot widen this authority. */
+      readonly executionPermissionMode: "ask" | "full-access";
       readonly getActivationContext: () => GraphOperatorActivationContext | undefined;
       readonly outputPort: AgentOutputCommitPort;
       readonly profileSnapshot: AgentGraphProfileSnapshot;
@@ -180,13 +190,29 @@ export function createAgentGraphWorkspaceHost(
     },
     ...(options.requestStop ? { requestStop: options.requestStop } : {}),
     ...(options.inspectLaunch ? { inspectLaunch: options.inspectLaunch } : {}),
-    validateStart: (input) => {
+    validateStart: async (input) => {
       const claim = store.getActivationClaim(input.claimId);
-      if (claim) requireValidProvisionProfile(store, claim);
+      const provision = claim ? requireValidProvisionProfile(store, claim) : undefined;
       const graphId =
         claim?.graphId ?? store.getSupervisorWake(rootWakeIdFromClaim(input.claimId))?.graphId;
       if (!graphId || store.getGraph(graphId)?.phase !== "open")
         throw new Error("Cannot start a Run for a finished Graph");
+      if (claim && provision) {
+        const graph = store.getGraph(claim.graphId);
+        if (!graph) throw new Error(`Graph does not exist: ${claim.graphId}`);
+        await bindAgentGraphOperatorExecutionBoundary({
+          sessionManager: options.sessionManager,
+          rootSessionId: graph.rootSessionId,
+          childSessionId: provision.childSessionId,
+          parentWorkDir: options.workDir,
+          childWorkDir: input.workDir,
+          workspacePolicy: provisionWorkspacePolicy(provision).kind,
+          sessionOptions: {
+            ...options.sessionOptions,
+            runtimeStorageRoot: options.storageRoot,
+          },
+        });
+      }
     },
     execute: async (input) => {
       const app = requireApplication(application);
@@ -212,8 +238,17 @@ export function createAgentGraphWorkspaceHost(
           runId: claim.targetRunId,
         };
         const profileSnapshot = provision.profileSnapshot;
+        const graph = store.getGraph(claim.graphId);
+        if (!graph) throw new Error(`Graph does not exist: ${claim.graphId}`);
+        const childBoundary = input.session.getRuntimeStateSnapshot().boundary;
+        if (!childBoundary || childBoundary.kind === "external") {
+          throw new Error("Graph Operator is missing its inherited execution boundary");
+        }
         binding = {
           kind: "operator",
+          rootSessionId: graph.rootSessionId,
+          workspacePolicy: provisionWorkspacePolicy(provision),
+          executionPermissionMode: childBoundary.kind === "bypass" ? "full-access" : "ask",
           getActivationContext: () => activation,
           outputPort: runtime,
           profileSnapshot,
@@ -543,4 +578,23 @@ function requireValidProvisionProfile(
   return provision as AgentGraphOperatorProvisionRecord & {
     readonly profileSnapshot: AgentGraphProfileSnapshot;
   };
+}
+
+function provisionWorkspacePolicy(
+  provision: AgentGraphOperatorProvisionRecord,
+): AgentGraphWorkspacePolicy {
+  const binding = provision.workspaceBinding;
+  if (!binding || typeof binding !== "object" || Array.isArray(binding)) {
+    throw new Error(`Graph provision ${provision.provisionId} has an invalid workspace binding`);
+  }
+  const kind = (binding as Record<string, unknown>)["kind"];
+  if (kind === "shared") return { kind };
+  if (kind === "isolated-worktree") {
+    const baseRef = (binding as Record<string, unknown>)["baseRef"];
+    if (baseRef !== undefined && typeof baseRef !== "string") {
+      throw new Error(`Graph provision ${provision.provisionId} has an invalid workspace baseRef`);
+    }
+    return { kind, ...(baseRef === undefined ? {} : { baseRef }) };
+  }
+  throw new Error(`Graph provision ${provision.provisionId} has an unknown workspace binding`);
 }

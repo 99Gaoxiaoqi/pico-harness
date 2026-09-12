@@ -4,13 +4,13 @@ import type { ProviderKind } from "../provider/factory.js";
 import type { CredentialRef } from "../provider/credential-vault.js";
 import type { ModelRouteCapabilities } from "../provider/model-capabilities.js";
 import type { SessionSettings } from "../input/session-settings.js";
-import type { BackgroundYoloPolicySnapshotData } from "../safety/background-yolo-policy-schema.js";
+import type { BackgroundAutonomousPolicySnapshotData } from "../safety/background-autonomous-policy-schema.js";
 import type { PlanHandoff } from "../engine/plan-handoff.js";
 
 /** Runtime execution mode selected by the host. */
 export type RuntimeExecution =
   | { readonly kind: "foreground" }
-  | { readonly kind: "background"; readonly policy: BackgroundYoloPolicySnapshotData };
+  | { readonly kind: "background"; readonly policy: BackgroundAutonomousPolicySnapshotData };
 
 /** Options consumed by the already-assembled RuntimeRun executor. */
 export interface RuntimeRunOptions {
@@ -58,10 +58,13 @@ export interface RunAgentCliOptions extends RuntimeRunOptions {
   modelRouteId: string;
   modelCapabilities?: ModelRouteCapabilities;
   /**
-   * Host-selected interaction policy for a new foreground Session.
-   * Non-interactive hosts must provide this explicitly instead of inheriting the YOLO default.
+   * @deprecated Combined compatibility input. New hosts should pass both axes below.
    */
   interactionMode?: SessionSettings["mode"];
+  /** Host-selected collaboration policy for a new foreground Session. */
+  collaborationMode?: "agent" | "plan";
+  /** Host-selected permission policy for a new foreground Session. */
+  permissionMode?: "ask" | "auto" | "full-access";
   /** Active model reasoning level. Legacy CLI callers still pass off/low/medium/high. */
   thinkingEffort?: string;
   planMode?: boolean;

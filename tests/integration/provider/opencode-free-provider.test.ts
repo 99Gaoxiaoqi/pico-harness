@@ -297,7 +297,7 @@ test("headless uses the trusted anonymous route through the real Runtime and loc
   await trust.trust(await trust.canonicalize(workspacePath));
   const outcome = await runHeadlessOneShotJson(
     JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: 2,
       requestId: "anonymous-headless",
       workspacePath,
       picoHome,
@@ -306,6 +306,7 @@ test("headless uses the trusted anonymous route through the real Runtime and loc
       modelRouteId: OPENCODE_FREE_ROUTE_ID,
       providerRequestMode: "single_non_stream",
       providerAdmissionDeadlineMs: Date.now() + 30000,
+      collaborationMode: "agent",
       permissionMode: "auto",
       allowedTools: [],
       timeoutMs: 30000,

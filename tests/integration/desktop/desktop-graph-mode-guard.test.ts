@@ -18,8 +18,16 @@ import { SqliteAgentGraphControlStore } from "../../../src/storage/sqlite/sqlite
 import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import { createAgentGraphApplicationService } from "../../../src/agent-graph/service.js";
 import type { AgentGraphApplicationService } from "../../../src/agent-graph/service.js";
+import {
+  agentOutputRecordIdFor,
+  intentIdFor,
+  operatorIdFor,
+} from "../../../src/agent-graph/core/index.js";
+import { createBuiltinAgentGraphOperatorProfileCatalog } from "../../../src/agent-graph/operator-profile-catalog.js";
+import { AgentGraphReconciler } from "../../../src/agent-graph/reconciler.js";
+import { SqliteAgentGraphControlStoreAdapter } from "../../../src/agent-graph/sqlite-control-store-adapter.js";
 
-test("desktop rejects Graph to linear mode switch while the root epoch is open", async () => {
+test("desktop rejects orchestration and permission switches while the root epoch is open", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-desktop-graph-mode-guard-"));
   const workspace = join(root, "workspace");
   const picoHome = join(root, "pico-home");
@@ -41,6 +49,7 @@ test("desktop rejects Graph to linear mode switch while the root epoch is open",
         workspacePath: canonical,
         sessionId,
         orchestrationMode: "graph",
+        permissionMode: "ask",
       }),
     );
     graphStore = new SqliteAgentGraphControlStore({
@@ -59,8 +68,166 @@ test("desktop rejects Graph to linear mode switch while the root epoch is open",
       (error: unknown) =>
         error instanceof RuntimeProtocolError && error.code === RUNTIME_ERROR_CODES.CONFLICT,
     );
+    await assert.rejects(
+      desktop.handle(
+        createRuntimeRequest("session.settings.update", {
+          workspacePath: canonical,
+          sessionId,
+          permissionMode: "full-access",
+        }),
+      ),
+      (error: unknown) =>
+        error instanceof RuntimeProtocolError && error.code === RUNTIME_ERROR_CODES.CONFLICT,
+    );
   } finally {
     graphStore?.close();
+    await desktop.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("finished Graph reconciliation retires operator authority before permission switches", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-desktop-graph-permission-guard-"));
+  const workspace = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  await Promise.all([mkdir(workspace, { recursive: true }), mkdir(picoHome, { recursive: true })]);
+  const canonical = await realpath(workspace);
+  const env = { PICO_HOME: picoHome };
+  const trustStore = new WorkspaceTrustStore({ userStateDirectory: picoHome });
+  await trustStore.trust(canonical);
+  const runtime = new WorkspaceRuntimeService({ env, execute: async () => ({ ok: true }) });
+  const desktop = new DesktopRuntimeService({ runtimeService: runtime, trustStore, env });
+  const graphStore = new SqliteAgentGraphControlStore({
+    storageRoot: resolvePicoPaths(canonical, { picoHome }).workspace.root,
+  });
+  try {
+    const createSession = async () =>
+      (await desktop.handle(
+        createRuntimeRequest("session.create", { workspacePath: canonical }),
+      )) as { session: { sessionId: string } };
+    const rootSessionId = (await createSession()).session.sessionId;
+    const childSessionId = (await createSession()).session.sessionId;
+    for (const sessionId of [rootSessionId, childSessionId]) {
+      await desktop.handle(
+        createRuntimeRequest("session.settings.update", {
+          workspacePath: canonical,
+          sessionId,
+          permissionMode: "ask",
+        }),
+      );
+    }
+
+    const graphId = "graph-permission-guard";
+    const source = {
+      sessionId: rootSessionId,
+      turnId: "root-turn",
+      runId: "root-run",
+      toolCallId: "root-tool",
+    };
+    graphStore.createGraph({ graphId, rootSessionId, epoch: 1 });
+    const control = new SqliteAgentGraphControlStoreAdapter(graphStore);
+    const operatorId = operatorIdFor(graphId, "permission-guard");
+    const intentId = intentIdFor(graphId, "permission-guard", 0);
+    const profileSnapshot = createBuiltinAgentGraphOperatorProfileCatalog().resolve({
+      profileId: "explore",
+      rootModelRouteId: "test/model",
+    });
+    control.commitScheduleRevision({
+      graphId,
+      expectedPreviousRevision: 0,
+      operationId: "graph-permission-guard-add",
+      source,
+      commands: [
+        {
+          kind: "add",
+          operator: {
+            graphId,
+            operatorId,
+            generation: 1,
+            role: "permission-guard",
+            profileSnapshot,
+            workspacePolicy: { kind: "shared" },
+          },
+          intent: {
+            graphId,
+            intentId,
+            operatorId,
+            operatorGeneration: 1,
+            instruction: "Keep the permission epoch stable",
+            expectedOutputRecordId: agentOutputRecordIdFor(graphId, intentId),
+            inputRefs: [],
+            createdAtRevision: 1,
+            requestedBy: source,
+          },
+        },
+      ],
+    });
+    const provision = graphStore.ensureOperatorProvision({
+      provisionId: "graph-permission-guard-provision",
+      graphId,
+      operatorId,
+      generation: 1,
+      scheduleRevision: 1,
+      provisionFingerprint: "graph-permission-guard-provision-fingerprint",
+      childSessionId,
+      profileSnapshot,
+      workspaceBinding: { kind: "shared" },
+    }).record;
+    graphStore.transitionOperatorProvision({
+      provisionId: provision.provisionId,
+      expectedVersion: provision.version,
+      from: "requested",
+      to: "provisioned",
+    });
+    control.commitScheduleRevision({
+      graphId,
+      expectedPreviousRevision: 1,
+      operationId: "graph-permission-guard-finish",
+      source: { ...source, toolCallId: "root-tool-finish" },
+      commands: [{ kind: "finish" }],
+    });
+
+    const switchPermission = (sessionId: string) =>
+      desktop.handle(
+        createRuntimeRequest("session.settings.update", {
+          workspacePath: canonical,
+          sessionId,
+          permissionMode: "full-access",
+        }),
+      );
+    for (const sessionId of [rootSessionId, childSessionId]) {
+      await assert.rejects(
+        switchPermission(sessionId),
+        (error: unknown) =>
+          error instanceof RuntimeProtocolError && error.code === RUNTIME_ERROR_CODES.CONFLICT,
+      );
+    }
+
+    const unreachable = async (): Promise<never> => {
+      throw new Error("finished Graph must only retire existing authority");
+    };
+    const reconciled = await new AgentGraphReconciler({
+      store: control,
+      runtime: {
+        resolveInputFacts: unreachable,
+        ensureOperator: unreachable,
+        startOrObserveActivation: unreachable,
+        observeActivation: unreachable,
+        stopActivation: unreachable,
+      },
+    }).reconcile(graphId);
+    assert.equal(reconciled.quiescent, true);
+    assert.deepEqual(reconciled.errors, []);
+    assert.equal(graphStore.listOperatorProvisions(graphId)[0]?.state, "stopped");
+
+    for (const sessionId of [rootSessionId, childSessionId]) {
+      const updated = (await switchPermission(sessionId)) as {
+        settings: { permissionMode: string };
+      };
+      assert.equal(updated.settings.permissionMode, "full-access");
+    }
+  } finally {
+    graphStore.close();
     await desktop.close();
     await rm(root, { recursive: true, force: true });
   }

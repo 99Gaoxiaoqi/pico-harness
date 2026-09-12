@@ -7,6 +7,7 @@ import { isDeepStrictEqual } from "node:util";
 import test from "node:test";
 import { computeCheckpointSourceDigest } from "../../../src/context/runtime-compaction-checkpoint.js";
 import { RuntimeProjectionService } from "../../../src/engine/runtime-projection-service.js";
+import { SESSION_RUNTIME_STATE_VERSION } from "../../../src/engine/session-runtime.js";
 import {
   materializeRuntimeHistory,
   materializeRuntimeHistoryEntries,
@@ -21,6 +22,10 @@ import {
   projectRuntimeSessionUsage,
 } from "../../../src/engine/session-runtime-projection.js";
 import type { Message } from "../../../src/schema/message.js";
+import {
+  createManagedExecutionBoundary,
+  createWorkspaceWritePermissionProfile,
+} from "../../../src/safety/permission-profile.js";
 import {
   createRuntimeEventId,
   type RuntimeEventStoreEntry,
@@ -169,6 +174,7 @@ test("RuntimeProjectionService outputs are deepStrictEqual with the underlying p
   });
 
   // state + usage + transcript 事件（不参与 model 投影，但参与 state/usage/transcript 投影）。
+  const boundary = createManagedExecutionBoundary(createWorkspaceWritePermissionProfile(), 3);
   const stateEvent: RuntimeEvent = {
     schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
     eventId: stateEventId,
@@ -181,17 +187,19 @@ test("RuntimeProjectionService outputs are deepStrictEqual with the underlying p
     visibility: "internal",
     kind: "session.state.committed",
     data: {
-      stateVersion: 2,
+      stateVersion: SESSION_RUNTIME_STATE_VERSION,
       patch: {
         settings: {
           provider: "openai",
           model: "test-model",
           modelRouteId: "test/test-model",
-          mode: "default",
+          collaborationMode: "agent",
+          permissionMode: "ask",
           thinkingEffort: "off",
           thinkingEffortExplicit: false,
           additionalDirectories: [],
         },
+        boundary,
       },
     },
   };
@@ -282,6 +290,7 @@ test("RuntimeProjectionService outputs are deepStrictEqual with the underlying p
     "getState must equal projectRuntimeSessionState",
   );
   assert.equal(serviceState.usage.totalProviderCalls, 1);
+  assert.deepEqual(serviceState.boundary, boundary);
 
   // getUsage vs projectRuntimeSessionUsage
   const serviceUsage = await service.getUsage(SESSION_ID);

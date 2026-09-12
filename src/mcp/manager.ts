@@ -45,6 +45,7 @@ interface ServerEntry {
   closingClient?: McpClient;
   tools: McpTool[];
   toolNames: string[];
+  toolBridges: Map<string, McpToolBridge>;
   toolOwner?: ToolRegistrationOwner;
   error?: string;
 }
@@ -102,6 +103,32 @@ export interface McpOAuthRequest {
 export type McpOAuthHandler = (request: McpOAuthRequest) => Promise<McpOAuthCredentials>;
 export type McpStatusListener = (snapshot: McpStatusSnapshot) => void;
 
+export type McpRemoteNetworkOperation =
+  | "initialize_and_list_tools"
+  | "tools/call"
+  | "resources/list"
+  | "resources/read"
+  | "prompts/list"
+  | "prompts/get";
+
+/**
+ * A remote MCP config describes where a server lives; it is not authority to contact it.
+ * The host must admit every physical HTTP/SSE boundary explicitly. The initial operation
+ * covers connect/initialize/tools-list because tool definitions cannot be known offline.
+ */
+export interface McpRemoteNetworkRequest {
+  readonly server: string;
+  readonly transport: "http" | "sse";
+  readonly url: string;
+  readonly operation: McpRemoteNetworkOperation;
+  readonly tool?: string;
+  /** Present for Registry-dispatched MCP tools so the host can consume one-shot authority. */
+  readonly toolCallId?: string;
+  readonly signal?: AbortSignal;
+}
+
+export type McpRemoteNetworkGate = (request: McpRemoteNetworkRequest) => boolean | Promise<boolean>;
+
 export interface McpConnectionManagerOptions {
   /** stdio 子进程的默认 cwd。 */
   stdioCwd?: string;
@@ -117,6 +144,11 @@ export interface McpConnectionManagerOptions {
   duplicateServerPolicy?: "reject" | "keep-first";
   /** stdio MCP 共享的会话策略；策略代次变更后由宿主重建 manager。 */
   processSandbox?: SandboxPolicy;
+  /**
+   * Host-owned admission for remote HTTP/SSE traffic. Missing means deny. This is
+   * deliberately separate from mcp.json so merely loading config never grants network.
+   */
+  remoteNetworkGate?: McpRemoteNetworkGate;
 }
 
 /**
@@ -319,12 +351,22 @@ export class McpConnectionManager {
       if (owner.config.transport !== "stdio") return;
       if (oneShotPolicy) this.processSandboxOverrides.set(owner.name, oneShotPolicy);
       else this.processSandboxOverrides.delete(owner.name);
-      await this.closeEntryClient(owner);
-      this.clearEntryTools(owner);
+      const preserveToolBindings = this.canPreserveToolBindings(owner);
+      if (preserveToolBindings) {
+        owner.status = "pending";
+        this.emitSnapshot();
+      }
+      try {
+        await this.closeEntryClient(owner, preserveToolBindings);
+      } catch (error) {
+        if (preserveToolBindings) this.clearEntryTools(owner);
+        throw error;
+      }
+      if (!preserveToolBindings) this.clearEntryTools(owner);
       owner.status = "pending";
       owner.error = undefined;
       this.emitSnapshot();
-      await this.connectOne(owner);
+      await this.connectOne(owner, preserveToolBindings);
     });
   }
 
@@ -333,13 +375,25 @@ export class McpConnectionManager {
       if (this.options.processSandbox?.generation === policy.generation) return;
       this.options.processSandbox = policy;
       this.processSandboxOverrides.clear();
+      const preservedEntries = new Set<ServerEntry>();
       for (const entry of this.entries.values()) {
-        await this.closeEntryClient(entry);
-        this.clearEntryTools(entry);
+        const preserveToolBindings = this.canPreserveToolBindings(entry);
+        if (preserveToolBindings) {
+          entry.status = "pending";
+          this.emitSnapshot();
+        }
+        try {
+          await this.closeEntryClient(entry, preserveToolBindings);
+        } catch (error) {
+          if (preserveToolBindings) this.clearEntryTools(entry);
+          throw error;
+        }
+        if (preserveToolBindings) preservedEntries.add(entry);
+        else this.clearEntryTools(entry);
         entry.status = entry.config.enabled === false ? "disabled" : "pending";
         entry.error = undefined;
       }
-      await this.connectAllInternal();
+      await this.connectAllInternal(preservedEntries);
     });
   }
 
@@ -377,15 +431,15 @@ export class McpConnectionManager {
   }
 
   async listResources(name: string, cursor?: string): Promise<McpResourceListResult> {
-    return this.callServer(name, (client) => client.listResources(cursor));
+    return this.callServer(name, "resources/list", (client) => client.listResources(cursor));
   }
 
   async readResource(name: string, uri: string): Promise<McpResourceReadResult> {
-    return this.callServer(name, (client) => client.readResource(uri));
+    return this.callServer(name, "resources/read", (client) => client.readResource(uri));
   }
 
   async listPrompts(name: string, cursor?: string): Promise<McpPromptListResult> {
-    return this.callServer(name, (client) => client.listPrompts(cursor));
+    return this.callServer(name, "prompts/list", (client) => client.listPrompts(cursor));
   }
 
   async getPrompt(
@@ -393,7 +447,9 @@ export class McpConnectionManager {
     promptName: string,
     args?: Record<string, string>,
   ): Promise<McpPromptGetResult> {
-    return this.callServer(serverName, (client) => client.getPrompt(promptName, args));
+    return this.callServer(serverName, "prompts/get", (client) =>
+      client.getPrompt(promptName, args),
+    );
   }
 
   /**
@@ -414,6 +470,7 @@ export class McpConnectionManager {
       throw new Error(`MCP server "${serverName}" 未发现工具 "${toolName}"`);
     }
     try {
+      await this.requireRemoteNetworkAccess(entry, "tools/call", context, toolName);
       return await entry.client.callTool(toolName, input, context);
     } catch (err) {
       throw new Error(safeErrorMessage(err), { cause: err });
@@ -551,6 +608,7 @@ export class McpConnectionManager {
         status: disabled ? "disabled" : "pending",
         tools: [],
         toolNames: [],
+        toolBridges: new Map(),
       });
     }
   }
@@ -590,16 +648,18 @@ export class McpConnectionManager {
     return { config: this.validateConfig(data, absPath), path: absPath };
   }
 
-  private async connectAllInternal(): Promise<void> {
+  private async connectAllInternal(
+    preserveToolBindings: ReadonlySet<ServerEntry> = new Set(),
+  ): Promise<void> {
     const tasks = [...this.entries.values()]
       .filter((entry) => entry.status === "pending")
-      .map((entry) => this.connectOne(entry));
+      .map((entry) => this.connectOne(entry, preserveToolBindings.has(entry)));
     await Promise.allSettled(tasks);
     this.emitSnapshot();
     this.logSummary();
   }
 
-  private async connectOne(entry: ServerEntry): Promise<void> {
+  private async connectOne(entry: ServerEntry, preserveToolBindings = false): Promise<void> {
     if (entry.client) {
       const error = new Error(`MCP server "${entry.name}" 上一客户端尚未成功关闭，拒绝创建新实例`);
       this.unregisterEntryTools(entry);
@@ -608,14 +668,20 @@ export class McpConnectionManager {
       this.emitSnapshot();
       throw error;
     }
-    const timeoutMs = entry.config.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
-    const client = this.createClient(entry.config);
-    entry.client = client;
     entry.status = "pending";
     entry.error = undefined;
-    this.attachLifecycle(entry, client);
     this.emitSnapshot();
+    let client: McpClient | undefined;
     try {
+      // Remote discovery necessarily performs initialize + tools/list. It cannot be made
+      // lazy without a trusted cached schema, so require a distinct host admission before
+      // even constructing an injected client (whose factory may itself have side effects).
+      await this.requireRemoteNetworkAccess(entry, "initialize_and_list_tools");
+      const timeoutMs = entry.config.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
+      client = this.createClient(entry.config);
+      entry.client = client;
+      this.attachLifecycle(entry, client);
+      this.emitSnapshot();
       await raceWithDeadlineReject(
         client.connect(),
         timeoutMs,
@@ -630,7 +696,7 @@ export class McpConnectionManager {
         await client.close().catch(() => {});
         return;
       }
-      entry.tools = discovered.filter((tool) => {
+      const tools = discovered.filter((tool) => {
         try {
           assertMcpInputSchema(tool.name, tool.inputSchema);
           return true;
@@ -642,28 +708,35 @@ export class McpConnectionManager {
           return false;
         }
       });
-      entry.toolNames = entry.tools.map((tool) => tool.name);
+      if (preserveToolBindings) {
+        this.rebindEntryTools(entry, tools);
+      } else {
+        entry.tools = tools;
+        entry.toolNames = tools.map((tool) => tool.name);
+      }
       entry.status = "connected";
-      this.registerEntryTools(entry);
+      if (!preserveToolBindings) this.registerEntryTools(entry);
       this.emitSnapshot();
       logger.info(
         { server: entry.name, tools: entry.tools.length },
         `[MCP] server "${entry.name}" 连接成功，发现 ${entry.tools.length} 个工具`,
       );
     } catch (err) {
-      if (entry.client !== client) return;
-      try {
-        await this.closeEntryClient(entry);
-      } catch (closeError) {
-        logger.error(
-          {
-            server: entry.name,
-            err: safeErrorMessage(err),
-            closeErr: safeErrorMessage(closeError),
-          },
-          `[MCP] server "${entry.name}" 连接失败且旧客户端未能关闭`,
-        );
-        throw closeError;
+      if (client && entry.client !== client) return;
+      if (client) {
+        try {
+          await this.closeEntryClient(entry);
+        } catch (closeError) {
+          logger.error(
+            {
+              server: entry.name,
+              err: safeErrorMessage(err),
+              closeErr: safeErrorMessage(closeError),
+            },
+            `[MCP] server "${entry.name}" 连接失败且旧客户端未能关闭`,
+          );
+          throw closeError;
+        }
       }
       this.clearEntryTools(entry);
       const message = safeErrorMessage(err);
@@ -700,10 +773,10 @@ export class McpConnectionManager {
     }
   }
 
-  private async closeEntryClient(entry: ServerEntry): Promise<void> {
+  private async closeEntryClient(entry: ServerEntry, preserveToolBindings = false): Promise<void> {
     const client = entry.client;
     if (!client) return;
-    this.unregisterEntryTools(entry);
+    if (!preserveToolBindings) this.unregisterEntryTools(entry);
     entry.closingClient = client;
     try {
       await client.close();
@@ -725,6 +798,7 @@ export class McpConnectionManager {
     this.unregisterEntryTools(entry);
     entry.tools = [];
     entry.toolNames = [];
+    entry.toolBridges.clear();
   }
 
   private assertRegistryAttachable(registry: ToolRegistry): void {
@@ -753,8 +827,49 @@ export class McpConnectionManager {
     const owner = createToolRegistrationOwner("mcp", entry.name);
     entry.toolOwner = owner;
     for (const tool of entry.tools) {
-      registry.registerOwned(new McpToolBridge(client, entry.name, tool), owner);
+      const bridge =
+        entry.toolBridges.get(tool.name) ??
+        new McpToolBridge(
+          () => (entry.status === "connected" ? entry.client : undefined),
+          entry.name,
+          tool,
+          async (context) =>
+            await this.requireRemoteNetworkAccess(entry, "tools/call", context, tool.name),
+        );
+      bridge.rebindCompatibleTool(tool);
+      entry.toolBridges.set(tool.name, bridge);
+      registry.registerOwned(bridge, owner);
     }
+  }
+
+  private canPreserveToolBindings(entry: ServerEntry): boolean {
+    return (
+      this.registry !== undefined &&
+      entry.status === "connected" &&
+      entry.toolOwner !== undefined &&
+      entry.toolNames.length > 0 &&
+      entry.toolNames.length === entry.toolBridges.size &&
+      entry.toolNames.every((name) => entry.toolBridges.has(name))
+    );
+  }
+
+  private rebindEntryTools(entry: ServerEntry, tools: readonly McpTool[]): void {
+    if (tools.length !== entry.toolBridges.size) {
+      throw new Error(`MCP server "${entry.name}" changed its tool set during policy restart`);
+    }
+    const nextNames = new Set(tools.map((tool) => tool.name));
+    if (nextNames.size !== tools.length) {
+      throw new Error(`MCP server "${entry.name}" returned duplicate tools during policy restart`);
+    }
+    for (const [name, bridge] of entry.toolBridges) {
+      const tool = tools.find((candidate) => candidate.name === name);
+      if (!tool || !bridge.isCompatibleTool(tool)) {
+        throw new Error(`MCP server "${entry.name}" changed tool "${name}" during policy restart`);
+      }
+    }
+    for (const tool of tools) entry.toolBridges.get(tool.name)!.rebindCompatibleTool(tool);
+    entry.tools = [...tools];
+    entry.toolNames = tools.map((tool) => tool.name);
   }
 
   private unregisterEntryTools(entry: ServerEntry, registry = this.registry): void {
@@ -787,17 +902,45 @@ export class McpConnectionManager {
 
   private async callServer<T>(
     name: string,
-    operation: (client: McpClient) => Promise<T>,
+    operation: Exclude<McpRemoteNetworkOperation, "initialize_and_list_tools" | "tools/call">,
+    execute: (client: McpClient) => Promise<T>,
   ): Promise<T> {
     const entry = this.requireEntry(name);
     if (entry.status !== "connected" || !entry.client) {
       throw new Error(`MCP server "${name}" 未连接(当前状态: ${entry.status})`);
     }
     try {
-      return await operation(entry.client);
+      await this.requireRemoteNetworkAccess(entry, operation);
+      return await execute(entry.client);
     } catch (err) {
       // method not found 只影响本次请求，不把整个 server 标记为失败。
       throw new Error(safeErrorMessage(err), { cause: err });
+    }
+  }
+
+  private async requireRemoteNetworkAccess(
+    entry: ServerEntry,
+    operation: McpRemoteNetworkOperation,
+    context?: ToolExecutionContext,
+    tool?: string,
+  ): Promise<void> {
+    if (entry.config.transport === "stdio") return;
+    context?.signal?.throwIfAborted();
+    const url = entry.config.url;
+    if (!url) throw new Error(`MCP server "${entry.name}" 缺少远程 URL`);
+    const allowed =
+      (await this.options.remoteNetworkGate?.({
+        server: entry.name,
+        transport: entry.config.transport,
+        url,
+        operation,
+        ...(tool !== undefined ? { tool } : {}),
+        ...(context?.toolCallId !== undefined ? { toolCallId: context.toolCallId } : {}),
+        ...(context?.signal !== undefined ? { signal: context.signal } : {}),
+      })) === true;
+    context?.signal?.throwIfAborted();
+    if (!allowed) {
+      throw new Error(`MCP server "${entry.name}" 的远程网络操作 ${operation} 缺少宿主显式授权`);
     }
   }
 

@@ -2,7 +2,10 @@ import { resolve } from "node:path";
 import { HttpMcpClient } from "../mcp/http-client.js";
 import { StdioMcpClient } from "../mcp/stdio-client.js";
 import type { McpClient, McpServerConfig } from "../mcp/types.js";
-import { normalizeExactHostname, type ToolNetworkPolicy } from "./background-yolo-policy-schema.js";
+import {
+  normalizeExactHostname,
+  type ToolNetworkPolicy,
+} from "./background-autonomous-policy-schema.js";
 import { createSandboxPolicy, defaultSandboxScratchRoot } from "./process-sandbox/index.js";
 
 export function createBackgroundMcpClient(

@@ -32,13 +32,21 @@ import {
   createCatalogAgentGraphOperatorProfileCatalog,
   assertValidAgentGraphOperatorProfileSnapshot,
 } from "../../../src/agent-graph/operator-profile-catalog.js";
-import { createConfiguredSubagentExecutor } from "../../../src/runtime/configured-subagent-executor.js";
+import {
+  configuredSubagentExecutionBoundary,
+  createConfiguredSubagentExecutor,
+} from "../../../src/runtime/configured-subagent-executor.js";
 import { AgentRuntime } from "../../../src/runtime/agent-runtime.js";
 import { SilentReporter } from "../../../src/engine/reporter.js";
 import { ModelRouter } from "../../../src/provider/model-router.js";
 import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
 import { currentRuntimeRun } from "../../../src/runtime/runtime-run.js";
 import { Session, globalSessionManager } from "../../../src/engine/session.js";
+import {
+  createBypassExecutionBoundary,
+  createManagedExecutionBoundary,
+  createReadOnlyPermissionProfile,
+} from "../../../src/safety/permission-profile.js";
 
 function fixture() {
   let presets: RuntimeConfiguredSubagent[] = Array.from(
@@ -211,7 +219,7 @@ test("foreground agent_spawn uses a separate durable RuntimeRun and exact local 
         auth: "none",
         baseURL: route.baseURL,
         thinkingEffort: "nothink",
-        interactionMode: "default",
+        interactionMode: "full-access",
       },
       {
         picoHome,
@@ -365,6 +373,8 @@ test("foreground agent_spawn uses a separate durable RuntimeRun and exact local 
     const child = new Session(childSessionId, workDir, { persistence: true, picoHome });
     try {
       await child.recover();
+      const boundary = child.getRuntimeStateSnapshot().boundary;
+      assert.equal(boundary?.kind, "bypass");
       const events = await child.runtimeEventStore!.readRun(childSessionId, childRuns[0]!);
       assert.ok(events.some((event) => event.kind === "run.terminal"));
       assert.ok(JSON.stringify(events).includes("CHILD_EVIDENCE_73"));
@@ -409,10 +419,14 @@ test("implementation returns a patch including new files while the host checkout
       workDir,
       modelRouter: new ModelRouter([route], {}, route.id),
       parentModelRouteId: route.id,
+      parentExecutionBoundary: () => createBypassExecutionBoundary(),
       worktreeSupervisor: supervisor,
-      executeChild: async (options) => {
+      executeChild: async (options, dependencies) => {
         assert.notEqual(options.dir, workDir);
+        assert.equal(options.interactionMode, "full-access");
         assert.deepEqual(options.allowedTools, requireSubagentCapability("implementation").tools);
+        const ceiling = dependencies?.configuredSubagentChild?.executionBoundaryCeiling;
+        assert.equal(ceiling?.kind, "bypass");
         await writeFile(join(options.dir!, "original.txt"), "after\n");
         await writeFile(join(options.dir!, "new.txt"), "new content\n");
         return {
@@ -437,10 +451,100 @@ test("implementation returns a patch including new files while the host checkout
     assert.equal(await readFile(join(workDir, "original.txt"), "utf8"), "before\n");
     assert.equal((await git(["status", "--porcelain", "--untracked-files=no"])).stdout.trim(), "");
     assert.deepEqual(result.artifactIds, [result.patch.path]);
+    assert.equal(result.permissionMode, "full-access");
   } finally {
     await supervisor.beginShutdown().released;
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("a managed parent keeps a shared configured child in ask mode under a read-only ceiling", async () => {
+  const route = {
+    id: "test/model",
+    providerId: "test",
+    provider: "openai" as const,
+    model: "model",
+    baseURL: "https://unused.example/v1",
+    apiKeyEnv: "UNUSED",
+    auth: "none" as const,
+    source: "config" as const,
+    capabilities: resolveModelRouteCapabilities("openai", "model", undefined),
+  };
+  const execute = createConfiguredSubagentExecutor({
+    workDir: process.cwd(),
+    modelRouter: new ModelRouter([route], {}, route.id),
+    parentModelRouteId: route.id,
+    parentExecutionBoundary: () =>
+      createManagedExecutionBoundary(createReadOnlyPermissionProfile()),
+    executeChild: async (options, dependencies) => {
+      assert.equal(options.interactionMode, "ask");
+      const ceiling = dependencies?.configuredSubagentChild?.executionBoundaryCeiling;
+      assert.ok(ceiling?.kind === "managed");
+      assert.equal(ceiling.profile.name, "read-only");
+      assert.equal(ceiling.profile.network.kind, "restricted");
+      return {
+        sessionId: options.sessionSelection!.sessionId,
+        sessionSelection: options.sessionSelection!,
+        workDir: options.dir!,
+        finalMessage: "Read only",
+        messages: [],
+        usage: { promptTokens: 0, completionTokens: 0, costCNY: 0 },
+      };
+    },
+  });
+
+  const result = await execute({
+    task: "Read a file",
+    definition: requireSubagentCapability("local_read"),
+  });
+
+  assert.equal(result.permissionMode, "ask");
+});
+
+test("web research declares network in its managed child ceiling", () => {
+  const boundary = configuredSubagentExecutionBoundary(requireSubagentCapability("web_research"));
+  assert.equal(boundary.kind, "managed");
+  if (boundary.kind !== "managed") return;
+  assert.equal(boundary.profile.network.kind, "enabled");
+  assert.equal(
+    boundary.profile.fileSystem.entries.some((entry) => entry.access === "write"),
+    false,
+  );
+});
+
+test("a read-only parent rejects a writable isolated child before worktree execution", async () => {
+  const route = {
+    id: "test/model",
+    providerId: "test",
+    provider: "openai" as const,
+    model: "model",
+    baseURL: "https://unused.example/v1",
+    apiKeyEnv: "UNUSED",
+    auth: "none" as const,
+    source: "config" as const,
+    capabilities: resolveModelRouteCapabilities("openai", "model", undefined),
+  };
+  let childCalls = 0;
+  const execute = createConfiguredSubagentExecutor({
+    workDir: process.cwd(),
+    modelRouter: new ModelRouter([route], {}, route.id),
+    parentModelRouteId: route.id,
+    parentExecutionBoundary: () =>
+      createManagedExecutionBoundary(createReadOnlyPermissionProfile()),
+    executeChild: async () => {
+      childCalls++;
+      throw new Error("must not execute");
+    },
+  });
+
+  await assert.rejects(
+    execute({
+      task: "Attempt a write",
+      definition: requireSubagentCapability("implementation"),
+    }),
+    /cannot create a writable isolated child/,
+  );
+  assert.equal(childCalls, 0);
 });
 
 test("Graph admission persists the selected preset and enforces worktree isolation across replay and deletion", async () => {

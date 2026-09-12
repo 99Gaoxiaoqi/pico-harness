@@ -51,7 +51,13 @@ export interface SessionHookRuntimeOptions extends Pick<
     scratchRoot?: string;
     generation?: number;
     workspaceRoots?: readonly string[];
+    readRoots?: readonly string[];
+    writeRoots?: readonly string[];
+    readFiles?: readonly string[];
+    writeFiles?: readonly string[];
   };
+  /** Host-owned network admission for HTTP/MCP handlers; absent is fail-closed. */
+  hostNetworkGate?: HookHandlerExecutorOptions["hostNetworkGate"];
 }
 
 export interface SessionHookRuntime {
@@ -113,10 +119,19 @@ export async function createSessionHookRuntime(
       scratchRoot:
         options.processSandbox?.scratchRoot ?? defaultSandboxScratchRoot(options.workDir),
       ...(options.processSandbox?.config ? { config: options.processSandbox.config } : {}),
+      ...(options.processSandbox?.readRoots ? { readRoots: options.processSandbox.readRoots } : {}),
+      ...(options.processSandbox?.writeRoots
+        ? { writeRoots: options.processSandbox.writeRoots }
+        : {}),
+      ...(options.processSandbox?.readFiles ? { readFiles: options.processSandbox.readFiles } : {}),
+      ...(options.processSandbox?.writeFiles
+        ? { writeFiles: options.processSandbox.writeFiles }
+        : {}),
       ...(options.processSandbox?.generation !== undefined
         ? { generation: options.processSandbox.generation }
         : {}),
     }),
+    ...(options.hostNetworkGate ? { hostNetworkGate: options.hostNetworkGate } : {}),
     authorizeCommandExecution: async (entry, shell) =>
       await (entry.source.trustAuthority ?? trustStore).authorizeCommandExecution(
         {
@@ -325,7 +340,12 @@ function errorMessage(error: unknown): string {
 export type HookRuntimeBinding = Partial<
   Pick<
     HookHandlerExecutorOptions,
-    "provider" | "mcpInvoker" | "agentVerifier" | "modelRuntime" | "onAsyncRewake"
+    | "provider"
+    | "mcpInvoker"
+    | "agentVerifier"
+    | "modelRuntime"
+    | "hostNetworkGate"
+    | "onAsyncRewake"
   >
 >;
 

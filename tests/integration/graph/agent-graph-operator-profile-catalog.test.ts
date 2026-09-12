@@ -19,7 +19,7 @@ test("builtin Graph Operator catalog resolves immutable least-privilege snapshot
 
   assert.deepEqual(first, replay);
   assert.notEqual(first.profileFingerprint, otherRoute.profileFingerprint);
-  assert.deepEqual(first.permissionPolicy, { mode: "default", allowSessionGrants: false });
+  assert.deepEqual(first.permissionPolicy, { mode: "ask", allowSessionGrants: false });
   assert.equal(first.extensionPolicy, "none");
   assert.deepEqual(first.tools, ["read_file", "glob", "grep", "repo_map"]);
   assertValidAgentGraphOperatorProfileSnapshot(first);
@@ -38,7 +38,7 @@ test("Graph Operator snapshot validation fails closed on every execution-boundar
     { ...snapshot, schemaVersion: 2 },
     { ...snapshot, modelRouteId: "route-b" },
     { ...snapshot, tools: [...snapshot.tools, "agent_output"] },
-    { ...snapshot, permissionPolicy: { mode: "yolo", allowSessionGrants: true } },
+    { ...snapshot, permissionPolicy: { mode: "full-access", allowSessionGrants: true } },
     { ...snapshot, systemPrompt: { ...snapshot.systemPrompt, content: "tampered" } },
     { ...snapshot, extensionPolicy: "workspace" },
     { ...snapshot, extra: true },

@@ -7,12 +7,12 @@ export function createSettingsCommands(deps: ClientCommandRegistryDeps) {
   return {
     mode: rpcCommand({
       name: "mode",
-      description: "查看或切换协作模式",
-      usage: "/mode <default|plan|auto|yolo>",
-      argumentHint: "<default|plan|auto|yolo>",
+      description: "查看或切换协作与权限模式",
+      usage: "/mode <agent|plan|ask|auto|full-access>",
+      argumentHint: "<agent|plan|ask|auto|full-access>",
       category: "session",
       availability: "idle",
-      argumentCompleter: staticCompleter(["default", "plan", "auto", "yolo"]),
+      argumentCompleter: staticCompleter(["agent", "plan", "ask", "auto", "full-access"]),
       execute: async (input) => {
         const target = input.argv[0];
         const sid = session();
@@ -21,7 +21,7 @@ export function createSettingsCommands(deps: ClientCommandRegistryDeps) {
             return {
               type: "local",
               action: "message",
-              message: `协作模式：${runtime.preSessionSettings.collaborationMode ?? "agent"} · 权限：${runtime.preSessionSettings.permissionMode ?? "default"}（新会话预设）`,
+              message: `协作模式：${runtime.preSessionSettings.collaborationMode ?? "agent"} · 权限：${permissionModeLabel(runtime.preSessionSettings.permissionMode ?? "ask")}（新会话预设）`,
             };
           }
           const current = await runtime.request("session.settings.get", {
@@ -31,38 +31,49 @@ export function createSettingsCommands(deps: ClientCommandRegistryDeps) {
           return {
             type: "local",
             action: "message",
-            message: `协作模式：${current.settings.collaborationMode ?? "agent"} · 权限：${current.settings.permissionMode ?? "default"}`,
+            message: `协作模式：${current.settings.collaborationMode ?? "agent"} · 权限：${permissionModeLabel(current.settings.permissionMode ?? "ask")}`,
           };
         }
-        if (!["default", "plan", "auto", "yolo"].includes(target)) {
+        if (!["agent", "plan", "ask", "auto", "full-access"].includes(target)) {
           return {
             type: "local",
             action: "message",
-            message: "Usage: /mode <default|plan|auto|yolo>",
+            message: "Usage: /mode <agent|plan|ask|auto|full-access>",
           };
         }
+        const collaborationTarget = target === "agent" || target === "plan";
         if (sid === undefined) {
-          const updated =
-            target === "plan"
-              ? runtime.setPreSessionCollaborationMode("plan")
-              : runtime.setPreSessionPermissionMode(target as "default" | "auto" | "yolo");
+          const updated = collaborationTarget
+            ? runtime.setPreSessionCollaborationMode(target)
+            : runtime.setPreSessionPermissionMode(target as PermissionMode);
           return {
             type: "local",
             action: "message",
             message: updated
-              ? target === "plan"
-                ? "新会话协作模式预设为 plan（首条消息创建时生效）。"
-                : `新会话权限预设为 ${target}（首条消息创建时生效）。`
+              ? collaborationTarget
+                ? `新会话协作模式预设为 ${target}（首条消息创建时生效）。`
+                : `新会话权限预设为 ${permissionModeLabel(target as PermissionMode)}（首条消息创建时生效）。`
               : "当前无法修改新会话预设。",
           };
         }
-        // 保留 /mode 的兼容语义：plan 更新协作模式，其余更新权限。
+        if (collaborationTarget) {
+          await runtime.request("session.settings.update", {
+            workspacePath,
+            sessionId: sid,
+            collaborationMode: target,
+          });
+          return { type: "local", action: "message", message: `协作模式已切换：${target}` };
+        }
         await runtime.request("session.settings.update", {
           workspacePath,
           sessionId: sid,
-          mode: target as "default" | "plan" | "auto" | "yolo",
+          permissionMode: target as PermissionMode,
         });
-        return { type: "local", action: "message", message: `协作模式已切换：${target}` };
+        return {
+          type: "local",
+          action: "message",
+          message: `权限模式已设置：${permissionModeLabel(target as PermissionMode)}`,
+        };
       },
     }),
     plan: rpcCommand({
@@ -104,11 +115,11 @@ export function createSettingsCommands(deps: ClientCommandRegistryDeps) {
       name: "permissions",
       aliases: ["permission"],
       description: "查看或设置权限模式",
-      usage: "/permissions [default|auto|yolo|plan]",
-      argumentHint: "[default|auto|yolo|plan]",
+      usage: "/permissions [ask|auto|full-access]",
+      argumentHint: "[ask|auto|full-access]",
       category: "permissions",
       availability: "idle",
-      argumentCompleter: staticCompleter(["default", "auto", "yolo", "plan"]),
+      argumentCompleter: staticCompleter(["ask", "auto", "full-access"]),
       execute: async (input) => {
         const target = input.argv[0];
         const sid = session();
@@ -117,7 +128,7 @@ export function createSettingsCommands(deps: ClientCommandRegistryDeps) {
             return {
               type: "local",
               action: "message",
-              message: `权限模式：${runtime.preSessionSettings.permissionMode ?? "default"}（新会话预设）`,
+              message: `权限模式：${permissionModeLabel(runtime.preSessionSettings.permissionMode ?? "ask")}（新会话预设）`,
             };
           }
           const current = await runtime.request("session.settings.get", {
@@ -127,44 +138,34 @@ export function createSettingsCommands(deps: ClientCommandRegistryDeps) {
           return {
             type: "local",
             action: "message",
-            message: `权限模式：${current.settings.permissionMode ?? "default"}`,
+            message: `权限模式：${permissionModeLabel(current.settings.permissionMode ?? "ask")}`,
           };
         }
-        if (!["default", "auto", "yolo", "plan"].includes(target)) {
+        if (!["ask", "auto", "full-access"].includes(target)) {
           return {
             type: "local",
             action: "message",
-            message: "Usage: /permissions [default|auto|yolo|plan]",
+            message: "Usage: /permissions [ask|auto|full-access]",
           };
         }
         if (sid === undefined) {
-          if (target === "plan") runtime.setPreSessionCollaborationMode("plan");
-          else runtime.setPreSessionPermissionMode(target as "default" | "auto" | "yolo");
+          runtime.setPreSessionPermissionMode(target as "ask" | "auto" | "full-access");
           return {
             type: "local",
             action: "message",
-            message:
-              target === "plan"
-                ? "新会话将以计划模式开始，权限保持当前安全预设。"
-                : `新会话权限预设为 ${target}（首条消息创建时生效）。`,
+            message: `新会话权限预设为 ${permissionModeLabel(target as PermissionMode)}（首条消息创建时生效）。`,
           };
-        }
-        // permissionMode 枚举无 "plan"（协议 :695）；plan 走 deprecated permissions
-        // 保留 /permissions plan 进入规划的兼容用法。
-        if (target === "plan") {
-          await runtime.request("session.settings.update", {
-            workspacePath,
-            sessionId: sid,
-            permissions: "plan",
-          });
-          return { type: "local", action: "message", message: "权限模式已设置：plan（进入规划）" };
         }
         await runtime.request("session.settings.update", {
           workspacePath,
           sessionId: sid,
-          permissionMode: target as "default" | "auto" | "yolo",
+          permissionMode: target as "ask" | "auto" | "full-access",
         });
-        return { type: "local", action: "message", message: `权限模式已设置：${target}` };
+        return {
+          type: "local",
+          action: "message",
+          message: `权限模式已设置：${permissionModeLabel(target as PermissionMode)}`,
+        };
       },
     }),
     graph: rpcCommand({
@@ -257,4 +258,12 @@ export function createSettingsCommands(deps: ClientCommandRegistryDeps) {
       },
     }),
   };
+}
+
+type PermissionMode = "ask" | "auto" | "full-access";
+
+function permissionModeLabel(mode: PermissionMode): string {
+  if (mode === "ask") return "请求批准";
+  if (mode === "auto") return "帮我批准";
+  return "完全访问权限";
 }

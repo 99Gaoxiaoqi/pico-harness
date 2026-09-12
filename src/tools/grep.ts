@@ -21,9 +21,32 @@ import {
   createSandboxPolicy,
   defaultSandboxScratchRoot,
   managedProcessLauncher,
+  SandboxViolationError,
   type SandboxConfig,
   type SandboxProfile,
 } from "../safety/process-sandbox/index.js";
+
+export interface GrepProcessSandboxDescriptor {
+  readonly profile: SandboxProfile;
+  readonly config?: Partial<SandboxConfig>;
+  readonly scratchRoot?: string;
+  readonly generation?: number;
+  /** Deny/protected-metadata restrictions are not yet expressible by the OS process policy. */
+  readonly hasUnsupportedDenyEntries?: boolean;
+  readonly env?: NodeJS.ProcessEnv;
+  readonly readRoots?: readonly string[];
+  readonly writeRoots?: readonly string[];
+  readonly readFiles?: readonly string[];
+  readonly writeFiles?: readonly string[];
+}
+
+export interface GrepToolOptions {
+  readonly excludeSensitiveFiles?: boolean | ((path: string | undefined) => boolean);
+  /** Legacy static descriptor. Dynamic hosts should prefer resolveSandbox. */
+  readonly processSandbox?: GrepProcessSandboxDescriptor;
+  /** Trusted live descriptor resolver, sampled exactly once per invocation. */
+  readonly resolveSandbox?: () => GrepProcessSandboxDescriptor;
+}
 
 /** 搜索结果默认上限,避免海量匹配撑爆 Context。 */
 const DEFAULT_MAX_RESULTS = 50;
@@ -265,13 +288,8 @@ function searchWithRg(opts: {
   maxResults: number;
   excludeSensitiveFiles?: boolean;
   signal?: AbortSignal;
-  sandbox?: {
-    profile: SandboxProfile;
+  sandbox?: GrepProcessSandboxDescriptor & {
     workspaceRoots: readonly string[];
-    config?: Partial<SandboxConfig>;
-    scratchRoot?: string;
-    generation?: number;
-    env?: NodeJS.ProcessEnv;
   };
 }): Promise<string> {
   return new Promise((resolvePromise, reject) => {
@@ -305,6 +323,10 @@ function searchWithRg(opts: {
       workspaceRoots: opts.sandbox?.workspaceRoots ?? [opts.searchRoot],
       scratchRoot: opts.sandbox?.scratchRoot ?? defaultSandboxScratchRoot(opts.searchRoot),
       ...(opts.sandbox?.config ? { config: opts.sandbox.config } : {}),
+      ...(opts.sandbox?.readRoots ? { readRoots: opts.sandbox.readRoots } : {}),
+      ...(opts.sandbox?.writeRoots ? { writeRoots: opts.sandbox.writeRoots } : {}),
+      ...(opts.sandbox?.readFiles ? { readFiles: opts.sandbox.readFiles } : {}),
+      ...(opts.sandbox?.writeFiles ? { writeFiles: opts.sandbox.writeFiles } : {}),
       ...(opts.sandbox?.generation !== undefined ? { generation: opts.sandbox.generation } : {}),
     });
     let child;
@@ -486,16 +508,7 @@ export class GrepTool implements BaseTool {
 
   constructor(
     workDirOrRoots: string | WorkspaceRoots,
-    private readonly options: {
-      excludeSensitiveFiles?: boolean | ((path: string | undefined) => boolean);
-      processSandbox?: {
-        profile: SandboxProfile;
-        config?: Partial<SandboxConfig>;
-        scratchRoot?: string;
-        generation?: number;
-        env?: NodeJS.ProcessEnv;
-      };
-    } = {},
+    private readonly options: GrepToolOptions = {},
   ) {
     this.roots =
       typeof workDirOrRoots === "string"
@@ -552,6 +565,13 @@ export class GrepTool implements BaseTool {
   async execute(args: string, context?: ToolExecutionContext): Promise<string> {
     const { pattern, path, glob, caseSensitive, lineNumber, maxResults, maxFiles } =
       parseGrepArgs(args);
+    const processSandbox = this.options.resolveSandbox?.() ?? this.options.processSandbox;
+    if (processSandbox?.hasUnsupportedDenyEntries === true) {
+      throw new SandboxViolationError(
+        "policy_compilation_failed",
+        "当前 managed permission profile 包含 OS 进程沙箱尚不能表达的显式 deny 或 protectedMetadata deny_write 限制；为防止递归搜索读取被禁子树，Grep 已 fail-closed，未启动 ripgrep 也未执行 Node.js 降级搜索。",
+      );
+    }
     const excludeSensitiveFiles =
       typeof this.options.excludeSensitiveFiles === "function"
         ? this.options.excludeSensitiveFiles(path)
@@ -580,12 +600,12 @@ export class GrepTool implements BaseTool {
           lineNumber,
           maxResults,
           excludeSensitiveFiles,
-          ...(this.options.processSandbox
+          ...(processSandbox
             ? {
                 sandbox: {
-                  ...this.options.processSandbox,
+                  ...processSandbox,
                   workspaceRoots: processRoots,
-                  generation: this.options.processSandbox.generation ?? this.roots.generation(),
+                  generation: processSandbox.generation ?? this.roots.generation(),
                 },
               }
             : {}),
@@ -597,7 +617,7 @@ export class GrepTool implements BaseTool {
         if (context?.signal?.aborted) throw err;
         // 一旦宿主要求受限进程，任何 launcher/backend/rg 失败都必须 fail closed；
         // 不得改用宿主 Node.js 读取来绕过同一 OS 沙箱边界。
-        if (this.options.processSandbox) throw err;
+        if (processSandbox) throw err;
         // rg 路径异常 → 标记不可用,降级到 Node.js
         rgExecutable = false;
         logger.warn({ err }, "grep 的 rg 路径失败,降级到 Node.js 实现");

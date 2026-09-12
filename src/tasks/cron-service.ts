@@ -11,7 +11,7 @@ import {
   type RuntimeLeaseRecord,
   type RuntimeEventRecord,
   type TerminalCronRunStatus,
-  type YoloPolicySnapshot,
+  type AutonomousPolicySnapshot,
 } from "./runtime-types.js";
 import { resolveWorkspaceSqliteStorageRoot } from "../storage/sqlite/workspace-scopes.js";
 
@@ -39,7 +39,7 @@ export interface CreateCronJobInput {
   /** IANA zone，在创建时固定，默认当前系统时区。 */
   timeZone?: string;
   prompt: string;
-  policySnapshot: YoloPolicySnapshot;
+  policySnapshot: AutonomousPolicySnapshot;
   credentialRef?: CredentialRef;
   modelRouteId?: string;
   enabled?: boolean;
@@ -248,8 +248,12 @@ export class CronService {
 
   private evaluate(job: CronJobRecord): CronPolicyDecision {
     const snapshot = job.policySnapshot;
-    if (snapshot.mode !== "yolo" || !snapshot.backgroundEnabled || !snapshot.trustedWorkspace) {
-      return { allowed: false, reason: "background_yolo_required" };
+    if (
+      snapshot.mode !== "full-access" ||
+      !snapshot.backgroundEnabled ||
+      !snapshot.trustedWorkspace
+    ) {
+      return { allowed: false, reason: "background_full-access_required" };
     }
     return this.policyGuard?.evaluate(job) ?? { allowed: true };
   }

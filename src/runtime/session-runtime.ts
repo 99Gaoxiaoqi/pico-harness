@@ -51,6 +51,18 @@ import {
 } from "../safety/process-sandbox/index.js";
 
 /** UI-independent services scoped to one persisted session. */
+export interface SessionProcessSandboxConfig {
+  profile?: SandboxProfile;
+  config?: Partial<SandboxConfig>;
+  scratchRoot?: string;
+  generation?: number;
+  workspaceRoots?: readonly string[];
+  readRoots?: readonly string[];
+  writeRoots?: readonly string[];
+  readFiles?: readonly string[];
+  writeFiles?: readonly string[];
+}
+
 export interface SessionRuntimeOptions {
   /** Exact persisted Session that owns every session-scoped runtime service. */
   session: Session;
@@ -63,13 +75,7 @@ export interface SessionRuntimeOptions {
   toolDisclosure?: ToolDisclosure;
   lspEnabled?: boolean;
   lspServers?: readonly LspServerConfig[];
-  processSandbox?: {
-    profile?: SandboxProfile;
-    config?: Partial<SandboxConfig>;
-    scratchRoot?: string;
-    generation?: number;
-    workspaceRoots?: readonly string[];
-  };
+  processSandbox?: SessionProcessSandboxConfig;
   taskHostRuntime?: TaskHostRuntime;
   /** Durable completion outbox 的活态发现间隔。 */
   completionPollIntervalMs?: number;
@@ -107,7 +113,11 @@ export interface SessionRuntime {
   readonly codeIntelligenceManager: CodeIntelligenceManager;
   /** Keep code-intelligence processes aligned with persisted collaboration mode. */
   setCodeIntelligenceEnabled(enabled: boolean): Promise<void>;
-  refreshProcessSandbox(workspaceRoots: readonly string[], generation: number): Promise<void>;
+  /**
+   * Replace the complete subprocess boundary. Callers must not update only roots:
+   * permission-mode changes also need to restart LSP/Hook processes under the new profile.
+   */
+  refreshProcessSandbox(processSandbox: SessionProcessSandboxConfig): Promise<void>;
   readonly hookService?: HookService;
   readonly hookCommands: readonly SlashCommand[];
   readonly hookManagement?: HookManagementService;
@@ -798,7 +808,7 @@ class DefaultSessionRuntime implements SessionRuntime {
   readonly codeIntelligenceManager: CodeIntelligenceManager;
   private _hookService?: HookService;
   private readonly hookRuntime?: SessionHookRuntime;
-  private readonly processSandbox?: SessionRuntimeOptions["processSandbox"];
+  private processSandbox?: SessionRuntimeOptions["processSandbox"];
   private readonly pendingHookEvents = new Set<Promise<unknown>>();
   private readonly componentHookDisposers: Array<() => Promise<void>> = [];
   private readonly taskStatuses = new Map<string, TaskSnapshot["status"]>();
@@ -882,26 +892,49 @@ class DefaultSessionRuntime implements SessionRuntime {
     });
   }
 
-  async refreshProcessSandbox(
-    workspaceRoots: readonly string[],
-    generation: number,
-  ): Promise<void> {
+  async refreshProcessSandbox(processSandbox: SessionProcessSandboxConfig): Promise<void> {
     await this.withCodeIntelligenceTransition(async () => {
       if (this.codeIntelligenceDisposing) throw new Error("SessionRuntime is disposing");
+      this.processSandbox = {
+        ...processSandbox,
+        ...(processSandbox.workspaceRoots
+          ? { workspaceRoots: [...processSandbox.workspaceRoots] }
+          : {}),
+        ...(processSandbox.readRoots ? { readRoots: [...processSandbox.readRoots] } : {}),
+        ...(processSandbox.writeRoots ? { writeRoots: [...processSandbox.writeRoots] } : {}),
+        ...(processSandbox.readFiles ? { readFiles: [...processSandbox.readFiles] } : {}),
+        ...(processSandbox.writeFiles ? { writeFiles: [...processSandbox.writeFiles] } : {}),
+      };
       const scratchRoot =
         this.processSandbox?.scratchRoot ?? resolve(this.picoHome, "sandboxes", this.sessionId);
       await this.codeIntelligenceManager.updateProcessSandbox({
-        workspaceRoots,
-        generation,
+        workspaceRoots: this.processSandbox.workspaceRoots ?? [this.workDir],
+        generation: this.processSandbox.generation ?? 0,
         scratchRoot,
+        readRoots: [
+          ...(this.processSandbox.readRoots ?? []),
+          ...(this.processSandbox.writeRoots ?? []),
+        ],
+        readFiles: [
+          ...(this.processSandbox.readFiles ?? []),
+          ...(this.processSandbox.writeFiles ?? []),
+        ],
         ...(this.processSandbox?.config ? { config: this.processSandbox.config } : {}),
       });
       this.hookRuntime?.updateProcessSandbox(
         createSandboxPolicy({
           profile: this.processSandbox?.profile ?? "workspace-write",
-          workspaceRoots,
+          workspaceRoots: this.processSandbox.workspaceRoots ?? [this.workDir],
           scratchRoot,
-          generation,
+          generation: this.processSandbox.generation ?? 0,
+          ...(this.processSandbox.readRoots ? { readRoots: this.processSandbox.readRoots } : {}),
+          ...(this.processSandbox.writeRoots
+            ? { writeRoots: this.processSandbox.writeRoots }
+            : {}),
+          ...(this.processSandbox.readFiles ? { readFiles: this.processSandbox.readFiles } : {}),
+          ...(this.processSandbox.writeFiles
+            ? { writeFiles: this.processSandbox.writeFiles }
+            : {}),
           ...(this.processSandbox?.config ? { config: this.processSandbox.config } : {}),
         }),
       );

@@ -413,7 +413,7 @@ test("update_agent_graph rejects retired profile fields and duplicate command id
           profile: {
             ...(addCommand() as { operator: { profile: Record<string, unknown> } }).operator
               .profile,
-            permission_policy: { mode: "default" },
+            permission_policy: { mode: "ask" },
           },
         },
       }),

@@ -4,6 +4,7 @@ import type { Message } from "../schema/message.js";
 import type { Goal, GoalManagerSnapshot, GoalStatus } from "./goal-manager.js";
 import type { SessionIdentity } from "./session-identity.js";
 import type { DurableTranscriptEvent } from "../presentation/transcript-event-store.js";
+import { decodeExecutionBoundary, type ExecutionBoundary } from "../safety/permission-profile.js";
 import type { ToolResultEnvelope } from "./tool-result-contract.js";
 
 /** Session runtime-state event schema version. */
@@ -13,7 +14,8 @@ export type SessionRuntimeStateVersion =
   | typeof LEGACY_SESSION_RUNTIME_STATE_VERSION
   | typeof SESSION_RUNTIME_STATE_VERSION;
 
-export type PersistedInteractionMode = "default" | "plan" | "auto" | "yolo";
+export type PersistedInteractionMode = "ask" | "plan" | "auto" | "full-access";
+type DurableLegacyInteractionMode = PersistedInteractionMode | "default" | "yolo";
 
 /** 会话恢复时需要覆盖启动默认值的设置。密钥、endpoint 和 tools 不落盘。 */
 export interface PersistedSessionSettings {
@@ -41,13 +43,13 @@ export interface PersistedSessionSettings {
   additionalDirectories: readonly string[];
 }
 
-/** Raw v2 compatibility input accepted only at normalization/write boundaries. */
+/** Raw v2 compatibility input accepted only by the durable read normalizer. */
 export type LegacyPersistedSessionSettings = Omit<
   PersistedSessionSettings,
   "collaborationMode" | "permissionMode" | "mode" | "prePlanMode"
 > & {
-  readonly mode: PersistedInteractionMode;
-  readonly prePlanMode?: Exclude<PersistedInteractionMode, "plan">;
+  readonly mode: DurableLegacyInteractionMode;
+  readonly prePlanMode?: Exclude<DurableLegacyInteractionMode, "plan">;
   readonly collaborationMode?: never;
   readonly permissionMode?: never;
 };
@@ -97,15 +99,14 @@ export interface SessionRuntimeStatePatch {
   settings?: PersistedSessionSettings;
   goal?: GoalManagerSnapshot;
   promptCache?: PersistedPromptCacheState;
+  boundary?: ExecutionBoundary;
 }
 
 export interface SessionRuntimeStateWritePatch {
-  settings?:
-    | PersistedSessionSettings
-    | PersistedSessionSettingsWrite
-    | LegacyPersistedSessionSettings;
+  settings?: PersistedSessionSettingsWrite;
   goal?: GoalManagerSnapshot;
   promptCache?: PersistedPromptCacheState;
+  boundary?: ExecutionBoundary;
 }
 
 export interface SessionRuntimeStateSnapshot {
@@ -113,6 +114,7 @@ export interface SessionRuntimeStateSnapshot {
   settings?: PersistedSessionSettings;
   goal?: GoalManagerSnapshot;
   promptCache?: PersistedPromptCacheState;
+  boundary?: ExecutionBoundary;
   usage: SessionUsageSnapshot;
 }
 
@@ -174,10 +176,11 @@ export function createEmptyUsageSnapshot(): SessionUsageSnapshot {
   };
 }
 
+/** Durable RuntimeEvent decoder; canonical write paths use the stricter function below. */
 export function normalizeSessionRuntimeStatePatch(
   value: unknown,
 ): SessionRuntimeStatePatch | undefined {
-  if (!isRecord(value) || !hasOnlyKeys(value, ["settings", "goal", "promptCache"])) {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["settings", "goal", "promptCache", "boundary"])) {
     return undefined;
   }
 
@@ -202,17 +205,57 @@ export function normalizeSessionRuntimeStatePatch(
     patch.promptCache = promptCache;
     sections++;
   }
+  if ("boundary" in value) {
+    const boundary = normalizeExecutionBoundary(value["boundary"]);
+    if (!boundary) return undefined;
+    patch.boundary = boundary;
+    sections++;
+  }
   return sections > 0 ? patch : undefined;
 }
 
 export function normalizeSessionRuntimeStateWritePatch(
   value: unknown,
 ): SessionRuntimeStateWritePatch | undefined {
-  const normalized = normalizeSessionRuntimeStatePatch(value);
-  if (!normalized) return undefined;
-  if (!normalized.settings) return normalized;
-  const { mode: _mode, prePlanMode: _prePlanMode, ...settings } = normalized.settings;
-  return { ...normalized, settings } as SessionRuntimeStateWritePatch;
+  if (!isRecord(value) || !hasOnlyKeys(value, ["settings", "goal", "promptCache", "boundary"])) {
+    return undefined;
+  }
+
+  const patch: SessionRuntimeStateWritePatch = {};
+  let sections = 0;
+  if ("settings" in value) {
+    const settings = normalizePersistedSessionSettings(value["settings"], false);
+    if (!settings) return undefined;
+    patch.settings = settings;
+    sections++;
+  }
+  if ("goal" in value) {
+    const goal = normalizeGoalManagerSnapshot(value["goal"]);
+    if (!goal) return undefined;
+    patch.goal = goal;
+    sections++;
+  }
+  if ("promptCache" in value) {
+    const promptCache = normalizePersistedPromptCacheState(value["promptCache"]);
+    if (!promptCache) return undefined;
+    patch.promptCache = promptCache;
+    sections++;
+  }
+  if ("boundary" in value) {
+    const boundary = normalizeExecutionBoundary(value["boundary"]);
+    if (!boundary) return undefined;
+    patch.boundary = boundary;
+    sections++;
+  }
+  return sections > 0 ? patch : undefined;
+}
+
+function normalizeExecutionBoundary(value: unknown): ExecutionBoundary | undefined {
+  try {
+    return decodeExecutionBoundary(value);
+  } catch {
+    return undefined;
+  }
 }
 
 /** runtime_state 中 Goal section 的唯一入口校验。 */
@@ -241,7 +284,10 @@ export function normalizeGoalManagerSnapshot(value: unknown): GoalManagerSnapsho
   return { stateVersion: 1, sequence, activeGoalId, goals };
 }
 
-function normalizePersistedSessionSettings(value: unknown): PersistedSessionSettings | undefined {
+function normalizePersistedSessionSettings(
+  value: unknown,
+  allowDurableLegacyModes = true,
+): PersistedSessionSettings | undefined {
   if (
     !isRecord(value) ||
     !hasOnlyKeys(value, [
@@ -281,7 +327,12 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
   if (!isProviderKind(provider) || typeof model !== "string" || model.trim().length === 0) {
     return undefined;
   }
-  if (mode !== undefined && !isInteractionMode(mode)) return undefined;
+  const normalizedMode = allowDurableLegacyModes
+    ? normalizeDurableInteractionMode(mode, true)
+    : undefined;
+  if (mode !== undefined && (!allowDurableLegacyModes || normalizedMode === undefined)) {
+    return undefined;
+  }
   if (
     collaborationMode !== undefined &&
     collaborationMode !== "agent" &&
@@ -290,6 +341,12 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
     return undefined;
   }
   if (permissionMode !== undefined && !isNonPlanMode(permissionMode)) return undefined;
+  if (
+    !allowDurableLegacyModes &&
+    (collaborationMode === undefined || permissionMode === undefined)
+  ) {
+    return undefined;
+  }
   if (!isReasoningLevel(thinkingEffort)) return undefined;
   if (typeof thinkingEffortExplicit !== "boolean") return undefined;
   if (
@@ -302,8 +359,24 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
   if (title !== undefined && !isSessionTitle(title)) return undefined;
   if (forkFrom !== undefined && !isNonBlankString(forkFrom)) return undefined;
   if (sideConversation !== undefined && typeof sideConversation !== "boolean") return undefined;
-  if (prePlanMode !== undefined && !isNonPlanMode(prePlanMode)) return undefined;
-  if (mode !== "plan" && prePlanMode !== undefined) return undefined;
+  const normalizedPrePlanMode = allowDurableLegacyModes
+    ? normalizeDurableNonPlanMode(prePlanMode, true)
+    : undefined;
+  if (
+    prePlanMode !== undefined &&
+    (!allowDurableLegacyModes || normalizedPrePlanMode === undefined)
+  ) {
+    return undefined;
+  }
+  if (normalizedMode !== "plan" && prePlanMode !== undefined) return undefined;
+  // A combined legacy axis and canonical split axes may not coexist: even an apparently
+  // equivalent pair is ambiguous after a partial/corrupt migration, so fail closed.
+  if (
+    normalizedMode !== undefined &&
+    (collaborationMode !== undefined || permissionMode !== undefined)
+  ) {
+    return undefined;
+  }
   if (
     orchestrationMode !== undefined &&
     orchestrationMode !== "default" &&
@@ -313,14 +386,14 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
     return undefined;
   }
   const canonicalCollaborationMode: "agent" | "plan" =
-    collaborationMode ?? (mode === "plan" ? "plan" : "agent");
+    collaborationMode ?? (normalizedMode === "plan" ? "plan" : "agent");
   const canonicalPermissionMode: Exclude<PersistedInteractionMode, "plan"> =
     permissionMode ??
-    (mode === "plan"
-      ? (prePlanMode ?? "default")
-      : mode === "default" || mode === "auto" || mode === "yolo"
-        ? mode
-        : "default");
+    (normalizedMode === "plan"
+      ? (normalizedPrePlanMode ?? "ask")
+      : normalizedMode === "ask" || normalizedMode === "auto" || normalizedMode === "full-access"
+        ? normalizedMode
+        : "ask");
   return {
     ...(title !== undefined ? { title } : {}),
     ...(forkFrom !== undefined ? { forkFrom } : {}),
@@ -536,11 +609,30 @@ function isProviderKind(value: unknown): value is ProviderKind {
 }
 
 function isInteractionMode(value: unknown): value is PersistedInteractionMode {
-  return value === "default" || value === "plan" || value === "auto" || value === "yolo";
+  return value === "ask" || value === "plan" || value === "auto" || value === "full-access";
 }
 
 function isNonPlanMode(value: unknown): value is Exclude<PersistedInteractionMode, "plan"> {
-  return value === "default" || value === "auto" || value === "yolo";
+  return value === "ask" || value === "auto" || value === "full-access";
+}
+
+function normalizeDurableInteractionMode(
+  value: unknown,
+  allowLegacy: boolean,
+): PersistedInteractionMode | undefined {
+  if (isInteractionMode(value)) return value;
+  if (!allowLegacy) return undefined;
+  if (value === "default") return "ask";
+  if (value === "yolo") return "full-access";
+  return undefined;
+}
+
+function normalizeDurableNonPlanMode(
+  value: unknown,
+  allowLegacy: boolean,
+): Exclude<PersistedInteractionMode, "plan"> | undefined {
+  const normalized = normalizeDurableInteractionMode(value, allowLegacy);
+  return normalized === "plan" ? undefined : normalized;
 }
 
 function isReasoningLevel(value: unknown): value is string {

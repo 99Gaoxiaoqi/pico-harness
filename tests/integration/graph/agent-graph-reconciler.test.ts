@@ -179,7 +179,7 @@ test("concurrent stop or finish wins revision CAS before a fresh claim", async (
   }
 });
 
-test("finish preserves exact claimed work and intent stop does not retire its Operator", async () => {
+test("finish retires exact claimed work and intent stop does not retire its Operator", async () => {
   await withGraph(async ({ raw, store, graphId }) => {
     const command = addCommand(graphId, "long-running", 1);
     store.commitScheduleRevision({
@@ -203,9 +203,10 @@ test("finish preserves exact claimed work and intent stop does not retire its Op
       commands: [{ kind: "finish" }],
     });
     await reconciler.reconcile(graphId);
-    assert.equal(raw.listActivationClaims(graphId)[0]?.state, "executing");
+    assert.equal(raw.listActivationClaims(graphId)[0]?.state, "cancelled");
     assert.equal(raw.listActivationClaims(graphId)[0]?.targetRunId, exactRunId);
-    assert.ok(runtime.observedRunIds.includes(exactRunId));
+    assert.deepEqual(runtime.stoppedRunIds, [exactRunId]);
+    assert.equal(raw.listOperatorProvisions(graphId)[0]?.state, "stopped");
   });
 
   await withGraph(async ({ raw, store, graphId }) => {
@@ -356,6 +357,7 @@ class CompletingRuntime implements AgentGraphRuntimePort {
 
 class RunningRuntime implements AgentGraphRuntimePort {
   readonly observedRunIds: string[] = [];
+  readonly stoppedRunIds: string[] = [];
   failNextStop = false;
 
   async resolveInputFacts(input: ResolveAgentGraphInputsRequest) {
@@ -373,11 +375,12 @@ class RunningRuntime implements AgentGraphRuntimePort {
     return { status: "running" as const, records: [] };
   }
 
-  async stopActivation(_input: StopAgentGraphActivationRequest): Promise<void> {
+  async stopActivation(input: StopAgentGraphActivationRequest): Promise<void> {
     if (this.failNextStop) {
       this.failNextStop = false;
       throw new Error("runtime stop failed");
     }
+    this.stoppedRunIds.push(input.claim.targetRunId);
   }
 }
 

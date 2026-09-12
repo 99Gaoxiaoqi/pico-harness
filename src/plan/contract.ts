@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 export type CollaborationMode = "agent" | "plan";
-export type PermissionMode = "default" | "auto" | "yolo";
+export type PermissionMode = "ask" | "auto" | "full-access";
 export type PlanReviewedBy = "user" | "system";
 export type PlanProposalStatus = "pending" | "stale" | "approved" | "rejected";
 export type PlanStepStatus = "pending" | "in_progress" | "completed" | "skipped";

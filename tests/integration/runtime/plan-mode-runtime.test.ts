@@ -165,7 +165,7 @@ test("update_plan derives stable scoped identities from toolCallId and commits c
       model: "test",
       modelRouteId: "test/test",
       collaborationMode: "plan",
-      permissionMode: "default",
+      permissionMode: "ask",
       orchestrationMode: "default",
       thinkingEffort: "medium",
       thinkingEffortExplicit: false,
@@ -301,7 +301,7 @@ test("a provider 400 after the final update_plan cannot replace completion with 
           provider: "openai",
           modelRouteId: "test/test",
           sessionSelection: { mode: "resume", sessionId },
-          interactionMode: "yolo",
+          interactionMode: "full-access",
         },
       },
       { provider: executionProvider, picoHome, reporter: new SilentReporter() },
@@ -352,7 +352,7 @@ test("cancel and replan race commits exactly one interrupted Plan terminal", asy
     model: "test",
     modelRouteId: "test/test",
     collaborationMode: "plan" as const,
-    permissionMode: "default" as const,
+    permissionMode: "ask" as const,
     orchestrationMode: "default" as const,
     thinkingEffort: "medium",
     thinkingEffortExplicit: false,
@@ -921,7 +921,7 @@ test("Plan Run isolates and restores code intelligence owned by an injected Sess
         provider: "openai",
         modelRouteId: "test/test",
         sessionSelection: { mode: "resume", sessionId },
-        interactionMode: "yolo",
+        interactionMode: "full-access",
       },
     },
     { provider: executionProvider, picoHome, runtimeState, reporter: new SilentReporter() },
@@ -1153,7 +1153,7 @@ test("approval recovers its crash gap and replay never starts a second execution
       provider: "openai" as const,
       modelRouteId: "test/test",
       sessionSelection: { mode: "resume" as const, sessionId },
-      interactionMode: "yolo" as const,
+      interactionMode: "full-access" as const,
     },
   };
   await runtime.approvePlanAndExecute(request, {
@@ -1315,7 +1315,7 @@ test("concurrent approval replay preserves a live pre-Run admission", async (t) 
       provider: "openai" as const,
       modelRouteId: "test/test",
       sessionSelection: { mode: "resume" as const, sessionId },
-      interactionMode: "yolo" as const,
+      interactionMode: "full-access" as const,
     },
   };
   let providerCalls = 0;

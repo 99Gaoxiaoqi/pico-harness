@@ -36,10 +36,19 @@ import type { SessionForkRuntimePort } from "../../../src/engine/session-fork-ru
 import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
 import { createSessionForkRuntimePort } from "../../../src/runtime/session-fork-runtime-port-adapter.js";
 import {
+  getOrCreateSessionSettings,
+  setSessionPermissionMode,
+} from "../../../src/input/session-settings.js";
+import {
   fileHistoryApplyDurableRewindPlan,
   fileHistoryChanges,
   fileHistoryTrackEdit,
 } from "../../../src/safety/file-history.js";
+import {
+  createBypassExecutionBoundary,
+  createManagedExecutionBoundary,
+  createWorkspaceWritePermissionProfile,
+} from "../../../src/safety/permission-profile.js";
 import { projectDesktopCheckpoint } from "../../../src/daemon/desktop-review.js";
 import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
 import { operationalDatabasePath } from "../../../src/storage/sqlite/sqlite-database.js";
@@ -86,7 +95,7 @@ async function createFixture(label: string): Promise<RewindFixture> {
     messageId: `checkpoint-${label}`,
     userPrompt: "change both files",
     transcriptIndex: 1,
-    interactionMode: "default",
+    interactionMode: "ask",
   });
   await fileHistoryTrackEdit(
     session.fileHistory,
@@ -1016,6 +1025,96 @@ for (const mode of ["code", "conversation", "both"] as const) {
   });
 }
 
+test("rewind fork keeps the current cumulative boundary instead of its historical value", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pico-rewind-current-boundary-"));
+  const workDirInput = join(root, "workspace");
+  const picoHome = join(root, "pico-home");
+  await mkdir(workDirInput, { recursive: true });
+  await mkdir(picoHome, { recursive: true });
+  const workDir = await realpath(workDirInput);
+  const sourceSessionId = "rewind-current-boundary-source";
+  const targetSessionId = "rewind-current-boundary-target";
+  const source = await globalSessionManager.getOrCreate(sourceSessionId, workDir, {
+    persistence: true,
+    picoHome,
+    runtimePort: createEngineRuntimePort(),
+  });
+  try {
+    await source.commitMessages({ role: "system", content: "boundary rewind seed" });
+    const sourceSettings = getOrCreateSessionSettings(
+      {
+        sessionId: sourceSessionId,
+        cwd: workDir,
+        picoHome,
+        provider: "openai",
+        model: "test",
+        modelRouteId: "openai/test",
+        mode: "ask",
+      },
+      { persistence: source },
+    );
+    const historicalBoundary = createManagedExecutionBoundary(
+      createWorkspaceWritePermissionProfile(),
+      2,
+    );
+    source.updateRuntimeState({ boundary: historicalBoundary });
+    await source.flushPersistence();
+    const checkpointId = await source.beginRewindPoint({
+      messageId: "rewind-current-boundary-checkpoint",
+      userPrompt: "continue after the boundary checkpoint",
+      transcriptIndex: 1,
+      interactionMode: "ask",
+    });
+    await source.commitMessages({
+      role: "user",
+      content: "continue after the boundary checkpoint",
+    });
+    assert.equal(setSessionPermissionMode(sourceSettings, "full-access").ok, true);
+    const currentBoundary = createBypassExecutionBoundary(9);
+    source.updateRuntimeState({ boundary: currentBoundary });
+    await source.flushPersistence();
+
+    await source.forkFromCheckpoint(
+      checkpointId,
+      "conversation",
+      createSessionForkRuntimePort(),
+      () => targetSessionId,
+    );
+
+    const targetLease = await globalSessionManager.getOrCreatePinned(targetSessionId, workDir, {
+      persistence: true,
+      picoHome,
+      runtimePort: createEngineRuntimePort(),
+    });
+    try {
+      const targetSettings = getOrCreateSessionSettings(
+        {
+          sessionId: targetSessionId,
+          cwd: workDir,
+          picoHome,
+          provider: "openai",
+          model: "ignored-on-restore",
+          modelRouteId: "openai/ignored-on-restore",
+          mode: "ask",
+        },
+        { persistence: targetLease.session },
+      );
+      await targetLease.session.flushPersistence();
+      const inherited = targetLease.session.getRuntimeStateSnapshot();
+      assert.equal(targetSettings.permissionMode, "full-access");
+      assert.deepEqual(inherited.boundary, currentBoundary);
+      assert.equal(inherited.boundary?.revision, 9);
+      assert.notDeepEqual(inherited.boundary, historicalBoundary);
+    } finally {
+      targetLease.release();
+    }
+  } finally {
+    await globalSessionManager.delete(sourceSessionId, workDir, { picoHome })?.close();
+    await globalSessionManager.delete(targetSessionId, workDir, { picoHome })?.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 for (const variant of ["conversation", "omitted-both"] as const) {
   test(`rewind.apply ${variant} replays one durable idempotent result`, async () => {
     const fixture = await createFixture(`idempotent-${variant}`);
@@ -1301,10 +1400,14 @@ test("legacy missing settings rewind freezes durable agent/default on the target
       },
     );
     try {
-      const settings = targetLease.session.getRuntimeStateSnapshot().settings;
-      assert.equal(settings?.collaborationMode, "agent");
-      assert.equal(settings?.permissionMode, "default");
-      assert.deepEqual(settings?.additionalDirectories, []);
+      const runtime = targetLease.session.getRuntimeStateSnapshot();
+      assert.equal(runtime.settings?.collaborationMode, "agent");
+      assert.equal(runtime.settings?.permissionMode, "ask");
+      assert.deepEqual(runtime.settings?.additionalDirectories, []);
+      assert.deepEqual(
+        runtime.boundary,
+        createManagedExecutionBoundary(createWorkspaceWritePermissionProfile()),
+      );
     } finally {
       targetLease.release();
     }

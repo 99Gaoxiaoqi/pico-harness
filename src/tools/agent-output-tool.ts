@@ -86,6 +86,7 @@ interface NormalizedAgentOutputInput {
 
 class AgentOutputTool implements BaseTool {
   readonly readOnly = false;
+  readonly permissionCategory = "bounded_control" as const;
   readonly fileSideEffects = NO_FILE_SIDE_EFFECTS;
 
   constructor(private readonly options: CreateAgentOutputToolOptions) {}

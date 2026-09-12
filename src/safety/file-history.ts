@@ -118,7 +118,7 @@ export interface FileHistorySnapshot {
   timestamp: Date;
   /** 该用户消息进入 TUI transcript 前的条目下标。 */
   transcriptIndex?: number;
-  /** 预留给宿主恢复 default/plan/yolo 等交互模式。 */
+  /** 预留给宿主恢复 ask/plan/full-access 等交互模式。 */
   interactionMode?: string;
   /** 进入 plan 前的交互模式。 */
   prePlanMode?: string;

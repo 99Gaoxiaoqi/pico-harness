@@ -4,7 +4,7 @@
 // 1. economy 分层：always 组每 Step 可见；deferred 工具经 search_tools 激活。
 //    分组提供检索元数据；load_tools 保留为受同一预算约束的兼容入口。
 // 2. 宿主亲和性：background/headless 等宿主的能力裁剪收编为声明，
-//    替代散落在 background-yolo-policy / headless-runner 的硬编码集合。
+//    替代散落在 background-autonomous-policy / headless-runner 的硬编码集合。
 //    亲和性是 per-tool 独立声明（与 economy 组正交：core 里的 ask_user
 //    也可以声明 background unsupported）。
 // 3. Plan 模式工具面：planning 模式下 provider 只喂只读 + 协议工具，
@@ -54,6 +54,7 @@ export const PICO_TOOL_GROUPS: readonly ToolGroupDef[] = [
       "ask_user",
       "delegate_task",
       "schedule_task",
+      "request_sandbox_boundary",
     ],
     economy: "always",
   },
@@ -140,6 +141,7 @@ const TOOL_HOST_AFFINITY: Readonly<Record<string, Partial<Record<ToolHostKind, T
     delegate_status: { background: "unsupported" },
     spawn_subagent: { background: "unsupported" },
     agent_spawn: { background: "unsupported" },
+    request_sandbox_boundary: { background: "unsupported" },
     // headless 显式白名单（fail-closed）。read_evidence 已随 Evidence 回读协议
     // 退役（ADR 26，票 E3）；code_*/goal/skill/graph 等未列工具默认 unsupported。
     read_file: { headless: "supported" },

@@ -24,7 +24,10 @@ import { GlobTool } from "./glob.js";
 import { GrepTool } from "./grep.js";
 import { FetchURLTool, WebSearchTool } from "./web.js";
 import { buildWorkspaceBoundaryMiddleware, WorkspaceRoots } from "./workspace-roots.js";
-import { evaluateYoloToolCall, type YoloSandboxConfig } from "../safety/yolo-sandbox.js";
+import {
+  evaluateWorkspaceToolCall,
+  type WorkspaceSandboxConfig,
+} from "../safety/workspace-sandbox.js";
 import type { WorktreeSupervisor } from "../tasks/worktree-supervisor.js";
 import { classifyBashCommand, type BashSafetyClassification } from "../approval/bash-safety.js";
 import {
@@ -53,7 +56,7 @@ export interface SubagentRegistryFactoryConfig {
   profiles?: AgentProfile[];
   /** 可写 worker/explore 的独立宿主边界；TUI 无论主会话 mode 都应注入。 */
   processSandbox?: {
-    config?: Partial<YoloSandboxConfig>;
+    config?: Partial<WorkspaceSandboxConfig>;
     scratchRoot?: string;
     generation?: number;
   };
@@ -73,6 +76,8 @@ export interface SubagentRegistryFactoryConfig {
   modelCatalog?: SubagentModelCatalog;
   /** 父会话持有的只读 LSP / Repo Map 服务，供 Explore 复用同一索引。 */
   codeIntelligence?: CodeIntelligenceService;
+  /** Host-side web tools bypass the process sandbox and require an explicit parent grant. */
+  allowHostNetwork?: boolean;
 }
 
 /**
@@ -198,6 +203,7 @@ function buildProfileRegistry(
   );
   for (const toolName of profile.tools) {
     if (request.mode === "explore" && EXPLORE_WRITE_TOOLS.has(toolName)) continue;
+    if (!config.allowHostNetwork && NETWORK_TOOLS.has(toolName)) continue;
     if (request.maxToolCalls !== undefined && toolName === "bash") continue;
     if (toolName === "skill_view" && config.skillLoaderFactory) {
       registry.register(new SkillViewTool(config.skillLoaderFactory(config.workDir)));
@@ -294,9 +300,12 @@ function buildModeRegistry(
   );
 
   if (request.mode === "explore") {
-    // 探索语义:联网搜索是 explore 的合理扩展(全只读,无副作用)
-    registry.register(new FetchURLTool());
-    registry.register(new WebSearchTool(config.env));
+    // Host-side web tools do not pass through the subprocess sandbox. A managed
+    // parent cannot delegate around its own network approval boundary.
+    if (config.allowHostNetwork) {
+      registry.register(new FetchURLTool());
+      registry.register(new WebSearchTool(config.env));
+    }
     if (config.codeIntelligence) {
       for (const tool of createCodeIntelligenceTools(config.workDir, config.codeIntelligence)) {
         registry.register(tool);
@@ -317,6 +326,8 @@ function buildModeRegistry(
   enforceSubagentBudget(registry, request);
   return attachHookService(registry, config.hookService);
 }
+
+const NETWORK_TOOLS: ReadonlySet<string> = new Set(["fetch_url", "web_search"]);
 
 function enforceSubagentBudget(registry: ToolRegistry, request: SubagentRegistryRequest): void {
   const maxFiles = request.maxFiles;
@@ -507,7 +518,7 @@ export function buildSubagentSafetyMiddleware(
       }
     }
     if (config.processSandbox) {
-      const decision = evaluateYoloToolCall(
+      const decision = evaluateWorkspaceToolCall(
         call,
         config.workDir,
         config.workspaceRoots,
