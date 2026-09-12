@@ -232,7 +232,6 @@ test("session fork runtime port composes the coordinator for Session callers", a
       fileHistoryBaseDir: source.fileHistoryBaseDir,
       sourceSessionId,
       targetSessionId,
-      targetMode: "ask",
     });
 
     const targetEvents = await source.runtimeEventStore!.readSession(targetSessionId);
@@ -332,8 +331,6 @@ test("fork inherits both interaction axes and survives target Resume", async () 
         await service.fork({
           sourceSessionId,
           targetSessionId,
-          // Compatibility input cannot override the source's canonical axes.
-          targetMode: permissionMode === "full-access" ? "ask" : "full-access",
         });
       } finally {
         service.close();
@@ -344,7 +341,6 @@ test("fork inherits both interaction axes and survives target Resume", async () 
       if (operation?.kind === "fork") {
         assert.equal(operation.targetCollaborationMode, collaborationMode);
         assert.equal(operation.targetPermissionMode, permissionMode);
-        assert.equal(operation.targetMode, undefined);
       }
 
       const resumed = new Session(targetSessionId, workDir, {
@@ -456,7 +452,7 @@ test("historical fork cannot re-expand the source's current managed boundary", a
   }
 });
 
-test("legacy settings-less fork journal recovery materializes agent/default before publication", async () => {
+test("settings-less fork recovery materializes fail-closed axes before publication", async () => {
   const root = await mkdtemp(join(tmpdir(), "pico-session-fork-legacy-permission-"));
   const workDir = join(root, "workspace");
   const picoHome = join(root, "pico-home");
@@ -543,11 +539,8 @@ test("legacy settings-less fork journal recovery materializes agent/default befo
       const row = database
         .prepare("SELECT operation_json FROM storage_operations WHERE operation_id = ?")
         .get(operationId) as { operation_json: string };
-      const legacy = JSON.parse(row.operation_json) as Record<string, unknown>;
-      delete legacy["targetCollaborationMode"];
-      delete legacy["targetPermissionMode"];
-      legacy["targetMode"] = "full-access";
-      legacy["bundleManifest"] = {
+      const canonical = JSON.parse(row.operation_json) as Record<string, unknown>;
+      canonical["bundleManifest"] = {
         manifestPath,
         stagedBundlePath: frozenPath,
         contentSha256: manifest["contentSha256"],
@@ -555,7 +548,7 @@ test("legacy settings-less fork journal recovery materializes agent/default befo
       };
       database
         .prepare("UPDATE storage_operations SET operation_json = ? WHERE operation_id = ?")
-        .run(JSON.stringify(legacy), operationId);
+        .run(JSON.stringify(canonical), operationId);
     } finally {
       database.close();
     }
@@ -744,7 +737,6 @@ test("session fork rejects a Runtime store that differs from the source Session"
       service.fork({
         sourceSessionId: source.id,
         targetSessionId: "fork-store-target",
-        targetMode: "ask",
       }),
       /does not match source Session store/u,
     );
@@ -810,7 +802,8 @@ test("SessionForkService explicitly rejects legacy v1-v7 fork bundles", async ()
         sourceSessionId: "legacy-source",
         sourceCursor,
         targetSessionId: `legacy-target-v${version}`,
-        targetMode: "ask",
+        targetCollaborationMode: "agent",
+        targetPermissionMode: "ask",
         stagingDirectory,
         bundleManifest: {
           manifestPath,

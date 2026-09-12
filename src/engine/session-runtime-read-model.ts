@@ -193,10 +193,6 @@ function materializePrefix(
   let recoveryFloor = 0;
   for (let eventIndex = 0; eventIndex < endExclusive; eventIndex++) {
     const event = events[eventIndex]!;
-    // history.rewound handling removed: rewind is now a non-destructive fork and
-    // no new rewound events are produced. A legacy rewound fact (if any) falls
-    // through to the claim contract below and surfaces as an unclaimed control
-    // fact diagnostic, which is harmless.
     if (event.kind === "context.checkpoint.recorded") {
       restoreInterruptedResults(projected, recoveryFloor, events, eventIndexes);
       replaceProjectedPrefixWithCheckpoint(projected, event, eventIndexes, eventIndex);

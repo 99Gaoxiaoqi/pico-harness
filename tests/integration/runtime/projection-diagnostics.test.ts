@@ -111,7 +111,7 @@ test("投影诊断：重复 eventId 仍 throw（hard fail-closed 不变）", () 
   );
 });
 
-test("adversarial: 无 throughEventId 的 rewound 产 soft 诊断，不与空输入混淆", () => {
+test("adversarial: retired rewound facts fail closed in the read model", () => {
   const events = [
     makeEvent({
       kind: "message.committed",
@@ -121,7 +121,8 @@ test("adversarial: 无 throughEventId 的 rewound 产 soft 诊断，不与空输
     makeEvent({ kind: "history.rewound" as string, eventId: "e2", data: {} }),
   ] as unknown as RuntimeEvent[];
 
-  const { entries, diagnostics } = materializeRuntimeHistoryProjection(events);
-  assert.equal(entries.length, 1);
-  assert.ok(diagnostics.some((item) => item.code === "unclaimed_control_fact"));
+  assert.throws(
+    () => materializeRuntimeHistoryProjection(events),
+    RuntimeEventReadModelIntegrityError,
+  );
 });

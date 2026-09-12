@@ -49,7 +49,8 @@ test("fork coordinator scopes Runtime publication to the active target lease", a
       sourceSessionId: "source",
       sourceCursor: { logId: "log", seq: 1, epoch: 0, eventId: "source-event" },
       targetSessionId: "target",
-      targetMode: "ask",
+      targetCollaborationMode: "agent",
+      targetPermissionMode: "ask",
       stagingDirectory: join(root, "staging", "fork-publication-capability"),
     });
 
@@ -102,7 +103,8 @@ test("fork target publication competes with the normal Session owner lease", asy
         sourceSessionId: "source",
         sourceCursor: { logId: "log", seq: 1, epoch: 0, eventId: "source-event" },
         targetSessionId: "target",
-        targetMode: "ask",
+        targetCollaborationMode: "agent",
+        targetPermissionMode: "ask",
         stagingDirectory: join(root, "staging", "fork-shared-owner-lease"),
       }),
       ForkOperationLeaseTimeoutError,

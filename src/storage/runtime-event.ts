@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { assertDurableTranscriptEvent } from "../presentation/transcript-event-store.js";
 import {
   SESSION_RUNTIME_STATE_VERSION,
-  LEGACY_SESSION_RUNTIME_STATE_VERSION,
   normalizeSessionRuntimeStatePatch,
 } from "../engine/session-runtime.js";
 import { RUNTIME_EVENT_SCHEMA_VERSION } from "../engine/session-runtime-event.js";
@@ -27,7 +26,6 @@ export type {
   RuntimeEventRefs,
   RuntimeEventVisibility,
   RuntimeToolGroupLoadedEvent,
-  RuntimeHistoryRewoundEvent,
   RuntimeMessageCommittedEvent,
   RuntimeModelCallSettledEvent,
   RuntimeModelCallStartedEvent,
@@ -62,12 +60,7 @@ import type { Message, Usage } from "../schema/message.js";
 import { PLAN_EVENT_KINDS, assertPlanEventData, isPlanEventKind } from "../plan/events.js";
 import { MAX_TOOL_ARGUMENT_AUDIT_BYTES } from "../tools/tool-argument-audit.js";
 
-/**
- * 可生产的 Runtime event kind 注册表（单源）。
- * history.rewound 已从本表移除：rewind/branch 机制删除后无生产者，
- * 新代码不得 append 该 kind（append 校验会拒绝）。旧账本中的
- * history.rewound 仍可解码，见 {@link LEGACY_DECODE_ONLY_KINDS}。
- */
+/** 可生产、可读取的 Runtime event kind 注册表（单源）。 */
 export const RUNTIME_EVENT_KINDS = [
   "run.started",
   "message.committed",
@@ -88,18 +81,6 @@ export const RUNTIME_EVENT_KINDS = [
   ...PLAN_EVENT_KINDS,
 ] as const satisfies readonly RuntimeEvent["kind"][];
 
-/**
- * 仅旧账本解码用的遗留 kind：读路径（decode）必须接受，写路径（append）
- * 必须拒绝。当前唯一成员是 history.rewound——rewind/branch 机制移除后
- * 不再产生该事件，但历史账本里的记录仍需能读取。
- */
-export const LEGACY_DECODE_ONLY_KINDS = ["history.rewound"] as const;
-
-/** append 校验用：遗留 kind 不得再写入账本。 */
-export function isLegacyDecodeOnlyKind(kind: string): boolean {
-  return LEGACY_DECODE_ONLY_KIND_SET.has(kind);
-}
-
 export const RUNTIME_EVENT_DECODE_ERROR_CODES = [
   "malformed_json",
   "unsupported_legacy_version",
@@ -111,7 +92,6 @@ export const RUNTIME_EVENT_DECODE_ERROR_CODES = [
 export type RuntimeEventDecodeErrorCode = (typeof RUNTIME_EVENT_DECODE_ERROR_CODES)[number];
 
 const RUNTIME_EVENT_KIND_SET = new Set<string>(RUNTIME_EVENT_KINDS);
-const LEGACY_DECODE_ONLY_KIND_SET = new Set<string>(LEGACY_DECODE_ONLY_KINDS);
 
 /** Decodes a supported event without rewriting or upgrading the persisted fact. */
 export function decodeRuntimeEvent(value: unknown): RuntimeEvent {
@@ -137,8 +117,7 @@ export function decodeRuntimeEvent(value: unknown): RuntimeEvent {
       schemaVersion === RUNTIME_EVENT_SCHEMA_VERSION &&
       typeof kind === "string" &&
       kind.length > 0 &&
-      !RUNTIME_EVENT_KIND_SET.has(kind) &&
-      !LEGACY_DECODE_ONLY_KIND_SET.has(kind)
+      !RUNTIME_EVENT_KIND_SET.has(kind)
     ) {
       throw new RuntimeEventDecodeError(
         "unknown_kind",
@@ -323,12 +302,6 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
       assertCheckpointSummary(value["data"]);
       return;
     }
-    case "history.rewound":
-      // legacy-only：只读不写。rewind/branchId 机制已移除（无生产者），
-      // kind 不在 RUNTIME_EVENT_KINDS 中（append 校验会拒绝）；此处仅为
-      // 旧账本里的历史事件解码保留，且由 LEGACY_DECODE_ONLY_KINDS 放行
-      // 未知 kind 守卫。
-      return;
     case "session.forked":
       assertString(value["data"]["parentSessionId"], "session.forked.parentSessionId");
       if (
@@ -348,10 +321,7 @@ export function assertRuntimeEvent(value: unknown): asserts value is RuntimeEven
       return;
     case "session.state.committed": {
       assertOnlyKeys(value["data"], ["stateVersion", "patch"], "session.state.committed.data");
-      if (
-        value["data"]["stateVersion"] !== SESSION_RUNTIME_STATE_VERSION &&
-        value["data"]["stateVersion"] !== LEGACY_SESSION_RUNTIME_STATE_VERSION
-      ) {
+      if (value["data"]["stateVersion"] !== SESSION_RUNTIME_STATE_VERSION) {
         throw new RuntimeEventIntegrityError("Runtime session state version is invalid");
       }
       const patch = normalizeSessionRuntimeStatePatch(value["data"]["patch"]);

@@ -44,7 +44,6 @@ const CLAIM_BY_KIND: Record<RuntimeEvent["kind"], RuntimeEventClaimKind> = {
   "model.call.started": "control",
   "model.call.settled": "control",
   "context.checkpoint.recorded": "control",
-  "history.rewound": "control",
   "session.forked": "control",
   "session.state.committed": "control",
   "transcript.event.recorded": "control",

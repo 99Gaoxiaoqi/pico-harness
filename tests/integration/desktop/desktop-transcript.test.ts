@@ -39,7 +39,7 @@ function snapshot(
     transcriptEvents,
     transcriptEventSequences: transcriptEvents.map((event) => event.sequence),
     toolResults,
-    runtime: { stateVersion: 2 as const, usage: createEmptyUsageSnapshot() },
+    runtime: { stateVersion: 3 as const, usage: createEmptyUsageSnapshot() },
   };
 }
 

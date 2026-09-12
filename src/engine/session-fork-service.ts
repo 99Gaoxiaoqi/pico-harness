@@ -117,8 +117,6 @@ export interface ForkSessionInput {
   readonly sourceSessionId: string;
   readonly targetSessionId: string;
   readonly operationId?: string;
-  /** @deprecated Accepted for source compatibility but ignored: forks always inherit source axes. */
-  readonly targetMode?: PersistedInteractionMode;
   /**
    * Non-destructive rewind: 仅截取到 source 中该 RuntimeEvent 为止（含）
    * 的条目作为 fork 边界。省略时与原行为一致——从 source 当前 head fork。
@@ -173,8 +171,6 @@ interface FrozenForkBundle {
   readonly modelCheckpoint?: SessionForkModelCheckpoint;
   readonly sourceTitle?: string;
   readonly settings?: PersistedSessionSettings;
-  /** In-memory marker: historical bundle lacked authority and was repaired fail-closed. */
-  readonly settingsFallback?: true;
   readonly goal?: NonNullable<SessionRuntimeStatePatch["goal"]>;
   readonly boundary: ExecutionBoundary;
   readonly permissionMode: Exclude<PersistedInteractionMode, "plan">;
@@ -699,7 +695,7 @@ export class SessionForkService {
     try {
       const runtimePatch = filteredRuntimePatch(
         frozen,
-        resolveForkOperationInteraction(operation, frozen.settings, frozen.settingsFallback),
+        resolveForkOperationInteraction(operation),
         operation.createdAt,
       );
       const workflowEvents = this.buildForkWorkflowEntries(
@@ -861,7 +857,7 @@ export class SessionForkService {
     );
     const runtimePatch = filteredRuntimePatch(
       frozen,
-      resolveForkOperationInteraction(operation, frozen.settings, frozen.settingsFallback),
+      resolveForkOperationInteraction(operation),
       operation.createdAt,
     );
     const expectedRunId = this.runtimePort.deriveBootstrapRunId({
@@ -934,7 +930,6 @@ export class SessionForkService {
           await this.readOrCreateSafeForkSettings(operation),
           frozen.permissionMode,
         ),
-        settingsFallback: true,
       };
     } catch (error) {
       if (error instanceof ForkOperationConflictError) throw error;
@@ -1228,24 +1223,11 @@ function resolveForkInteraction(
   };
 }
 
-function resolveForkOperationInteraction(
-  operation: ForkStorageOperation,
-  source: PersistedSessionSettings | undefined,
-  settingsFallback?: true,
-): ForkInteractionSettings {
-  if (settingsFallback) return resolveForkInteraction(source);
-  if (
-    operation.targetCollaborationMode !== undefined &&
-    operation.targetPermissionMode !== undefined
-  ) {
-    return {
-      collaborationMode: operation.targetCollaborationMode,
-      permissionMode: operation.targetPermissionMode,
-    };
-  }
-  // Old journals only recorded a combined targetMode. Re-derive from the frozen
-  // source rather than treating a historical full-access default as authorization.
-  return resolveForkInteraction(source);
+function resolveForkOperationInteraction(operation: ForkStorageOperation): ForkInteractionSettings {
+  return {
+    collaborationMode: operation.targetCollaborationMode,
+    permissionMode: operation.targetPermissionMode,
+  };
 }
 
 function stripMessageUsage(message: Message): Message {

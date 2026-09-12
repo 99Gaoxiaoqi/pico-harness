@@ -22,7 +22,6 @@ export function createSessionForkRuntimePort(): SessionForkRuntimePort {
             sourceSessionId: input.sourceSessionId,
             targetSessionId: input.targetSessionId,
             ...(input.operationId ? { operationId: input.operationId } : {}),
-            ...(input.targetMode !== undefined ? { targetMode: input.targetMode } : {}),
             ...(input.throughEventId ? { throughEventId: input.throughEventId } : {}),
             ...(input.fallbackSettings ? { fallbackSettings: input.fallbackSettings } : {}),
             ...(input.rewind ? { rewind: input.rewind } : {}),
