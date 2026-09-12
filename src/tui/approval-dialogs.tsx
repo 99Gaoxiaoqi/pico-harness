@@ -1,34 +1,29 @@
 import { globalApprovalManager, type ApprovalNotice } from "../approval/manager.js";
 import type { DialogRequest } from "./dialog-arbiter.js";
-import { approvalDialogId, InteractiveApprovalPanel } from "./approval-panel.js";
-import type { ApprovalPanelAction } from "./approval-panel.js";
+import {
+  approvalDialogId,
+  InteractiveApprovalPanel,
+  InteractivePlanControlPanel,
+  planControlDialogId,
+} from "./approval-panel.js";
+import type { ApprovalPanelAction, PlanControlPanelAction } from "./approval-panel.js";
+import type { PlanControlNotice } from "./plan-control-notice.js";
 import type { TuiReporter } from "./tui-reporter.js";
 
 /**
  * 审批对话框共享装配（3-D Phase 2 提取，repl.tsx 与 client-repl.tsx 共同消费）。
  *
- * 两路 action 路由：普通审批（approve/approve-session/reject/modify）默认走
- * 进程内 globalApprovalManager——client 模式不复用该实现（跨进程不可达），但
- * 复用对话框工厂与 plan 路由的操作映射；plan 类动作经 deps.planControl.respond
- * （进程内 = AgentRuntime 计划控制；client 模式 = plan.respond RPC 的同形适配器）。
+ * 普通工具审批与 PlanControl 使用独立的 notice、面板和 action 路由。
+ * 工具审批默认走进程内 globalApprovalManager；client 模式注入
+ * approval.respond。PlanControl 始终通过显式 port 发送 plan.respond。
  */
 
 export const APPROVAL_DIALOG_PRIORITY = 80;
 
-export type PlanApprovalAction = Extract<
-  ApprovalPanelAction,
-  | "execute"
-  | "continue-editing"
-  | "reject-exit"
-  | "resume-execution"
-  | "cancel-execution"
-  | "replan-execution"
->;
+/** modify 仅来自命令解析，不在面板联合内。 */
+export type PlainApprovalAction = ApprovalPanelAction;
 
-/** plan 动作之外的普通审批动作（modify 仅来自命令解析，不在面板联合内）。 */
-export type PlainApprovalAction = Exclude<ApprovalPanelAction, PlanApprovalAction>;
-
-export interface PlanApprovalControl {
+export interface PlanControlPort {
   respond(input: {
     readonly sessionId: string;
     readonly planId: string;
@@ -49,8 +44,6 @@ export interface PlanApprovalControl {
 export interface ApprovalDialogDeps {
   readonly reporter: Pick<TuiReporter, "pushSystemMessage">;
   readonly closeDialog?: ((id: string) => void) | undefined;
-  readonly sessionId?: string | undefined;
-  readonly planControl?: PlanApprovalControl | undefined;
   /**
    * 覆盖普通审批动作解析（client 模式注入：approval.respond RPC，异步）。
    * 缺省走进程内 globalApprovalManager（跨进程不可达）。
@@ -63,15 +56,10 @@ export interface ApprovalDialogDeps {
     | undefined;
 }
 
-export function isPlanApprovalAction(action: ApprovalPanelAction): action is PlanApprovalAction {
-  return (
-    action === "execute" ||
-    action === "continue-editing" ||
-    action === "reject-exit" ||
-    action === "resume-execution" ||
-    action === "cancel-execution" ||
-    action === "replan-execution"
-  );
+export interface PlanControlDialogDeps {
+  readonly reporter: Pick<TuiReporter, "pushSystemMessage">;
+  readonly closeDialog?: ((id: string) => void) | undefined;
+  readonly planControl: PlanControlPort;
 }
 
 export function createApprovalDialogRequest(
@@ -85,10 +73,7 @@ export function createApprovalDialogRequest(
     content: (
       <InteractiveApprovalPanel
         {...notice}
-        onAction={(action, feedback) => {
-          if (isPlanApprovalAction(action)) {
-            return resolvePlanApprovalAction(notice, action, feedback, deps);
-          }
+        onAction={(action) => {
           if (deps.resolvePlain) {
             return resolveApprovalActionVia(deps.resolvePlain, action, notice.taskId, deps);
           }
@@ -99,36 +84,40 @@ export function createApprovalDialogRequest(
   };
 }
 
-export async function resolvePlanApprovalAction(
-  notice: ApprovalNotice,
-  action: PlanApprovalAction,
-  feedback: string | undefined,
-  deps: ApprovalDialogDeps,
-): Promise<boolean> {
-  const metadata = notice as ApprovalNotice & {
-    readonly planId?: string;
-    readonly planControlMode?: "review" | "interrupted";
-    readonly expectedRevision?: number;
-    readonly expectedSessionSequence?: number;
-    readonly controlEpoch?: string;
+export function createPlanControlDialogRequest(
+  notice: PlanControlNotice,
+  deps: PlanControlDialogDeps,
+): DialogRequest {
+  return {
+    id: planControlDialogId(notice.controlId),
+    layer: "modal",
+    priority: APPROVAL_DIALOG_PRIORITY,
+    content: (
+      <InteractivePlanControlPanel
+        {...notice}
+        onAction={(action, feedback) => resolvePlanControlAction(notice, action, feedback, deps)}
+      />
+    ),
   };
-  if (!deps.planControl || !deps.sessionId) {
-    deps.reporter.pushSystemMessage(
-      "Plan review is unavailable until the Runtime PlanControl port is connected.",
-    );
-    return false;
-  }
+}
+
+export async function resolvePlanControlAction(
+  notice: PlanControlNotice,
+  action: PlanControlPanelAction,
+  feedback: string | undefined,
+  deps: PlanControlDialogDeps,
+): Promise<boolean> {
   try {
     await deps.planControl.respond({
-      sessionId: deps.sessionId,
-      planId: metadata.planId ?? notice.taskId,
+      sessionId: notice.sessionId,
+      planId: notice.planId,
       action: mapPlanActionToProtocol(action),
-      expectedRevision: metadata.expectedRevision ?? 0,
-      expectedSessionSequence: metadata.expectedSessionSequence ?? 0,
-      controlEpoch: metadata.controlEpoch ?? "",
+      expectedRevision: notice.expectedRevision,
+      expectedSessionSequence: notice.expectedSessionSequence,
+      controlEpoch: notice.controlEpoch,
       ...(feedback ? { feedback } : {}),
     });
-    deps.closeDialog?.(approvalDialogId(notice.taskId));
+    deps.closeDialog?.(planControlDialogId(notice.controlId));
     return true;
   } catch (error) {
     deps.reporter.pushSystemMessage(
@@ -139,7 +128,7 @@ export async function resolvePlanApprovalAction(
 }
 
 function mapPlanActionToProtocol(
-  action: PlanApprovalAction,
+  action: PlanControlPanelAction,
 ):
   | "execute"
   | "continue_editing"

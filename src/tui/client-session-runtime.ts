@@ -21,8 +21,9 @@ import {
 import { TranscriptReplica } from "@pico/transcript-replica";
 import type { ApprovalNotice } from "../approval/manager.js";
 import type { AskUserOption } from "../tools/ask-user.js";
-import type { PlanApprovalControl } from "./approval-dialogs.js";
+import type { PlanControlPort } from "./approval-dialogs.js";
 import { DaemonEventReporter } from "./daemon-event-reporter.js";
+import { planControlNoticeFromProjection, type PlanControlNotice } from "./plan-control-notice.js";
 import { transcriptEventsFromRuntimeItems } from "./transcript-item-hydration.js";
 import type { TuiReporter } from "./tui-reporter.js";
 
@@ -84,6 +85,10 @@ export interface ClientSessionRuntimeOptions {
   readonly onApproval?: (notice: ApprovalNotice) => void;
   /** 审批被解析（含对端/超时解析）——宿主清理残留对话框。 */
   readonly onApprovalResolved?: (approvalId: string) => void;
+  /** 可操作的持久化 PlanControl 投影——不经工具审批链。 */
+  readonly onPlanControl?: (notice: PlanControlNotice) => void;
+  /** PlanControl 变为不可操作或被新 epoch 替换。 */
+  readonly onPlanControlResolved?: (controlId: string) => void;
   /** ask-user 问题到达（已从 wire prompt 映射为 AskUserRequest 形状；宿主开对话框）。 */
   readonly onPrompt?: (request: ClientPromptRequest) => void;
   /** 问题被解析（含对端取消/answered）——宿主清理残留对话框。 */
@@ -111,43 +116,6 @@ export interface ClientSessionRuntimeOptions {
   readonly thinkingOverride?: string;
   /** --graph / --swarm 启动覆盖，在首次发送或恢复会话时生效。 */
   readonly orchestrationModeOverride?: "graph" | "swarm";
-}
-
-export function planApprovalNoticeFromProjection(
-  projection: RuntimePlanProjection,
-): ApprovalNotice | undefined {
-  if (!projection.controlEpoch) return undefined;
-  const pending = projection.pendingProposal;
-  if (pending) {
-    return {
-      taskId: `${pending.planId}:${projection.controlEpoch}`,
-      toolName: "submit_plan",
-      args: JSON.stringify(pending),
-      providerCallId: "",
-      message: pending.title || "计划等待审批",
-      planId: pending.planId,
-      planControlMode: "review",
-      expectedRevision: pending.revision,
-      expectedSessionSequence: projection.sessionSequence,
-      controlEpoch: projection.controlEpoch,
-    } as unknown as ApprovalNotice;
-  }
-  const execution = projection.execution;
-  if (execution?.status === "interrupted") {
-    return {
-      taskId: `interrupted:${execution.planId}:${projection.controlEpoch}`,
-      toolName: "interrupted_plan_execution",
-      args: JSON.stringify(execution),
-      providerCallId: "",
-      message: execution.reason || "计划执行已中断，请选择下一步。",
-      planId: execution.planId,
-      planControlMode: "interrupted",
-      expectedRevision: execution.revision,
-      expectedSessionSequence: projection.sessionSequence,
-      controlEpoch: projection.controlEpoch,
-    } as unknown as ApprovalNotice;
-  }
-  return undefined;
 }
 
 function planControlSnapshotFromProjection(
@@ -209,6 +177,7 @@ export class ClientSessionRuntime {
   private readonly workspacePath: string;
   private readonly reporter: TuiReporter;
   private readonly onApproval: ClientSessionRuntimeOptions["onApproval"];
+  private readonly onPlanControl: ClientSessionRuntimeOptions["onPlanControl"];
   private readonly eventReporter: DaemonEventReporter;
   private subscription: { dispose(): void } | undefined;
   private sessionFrameSubscription: { dispose(): void } | undefined;
@@ -249,6 +218,7 @@ export class ClientSessionRuntime {
     this.workspacePath = options.workspacePath;
     this.reporter = options.reporter;
     this.onApproval = options.onApproval;
+    this.onPlanControl = options.onPlanControl;
     this.sessionId = options.sessionId;
     this.eventReporter = new DaemonEventReporter({
       reporter: this.reporter,
@@ -441,8 +411,8 @@ export class ClientSessionRuntime {
     }
   };
 
-  /** plan 类审批控制（approval-dialogs 的 PlanApprovalControl → plan.respond RPC）。 */
-  createPlanControl(): PlanApprovalControl {
+  /** 持久化 PlanControl 动作端口 → plan.respond RPC。 */
+  createPlanControl(): PlanControlPort {
     return {
       respond: async (input) => {
         if (!this.planControlConnected) {
@@ -953,7 +923,7 @@ export class ClientSessionRuntime {
 
   private dismissPlanControl(): void {
     if (this.currentPlanControlId) {
-      this.options.onApprovalResolved?.(this.currentPlanControlId);
+      this.options.onPlanControlResolved?.(this.currentPlanControlId);
       this.currentPlanControlId = undefined;
     }
   }
@@ -966,7 +936,12 @@ export class ClientSessionRuntime {
     const actionable =
       control.availability === "ready" &&
       (control.state === "pending_review" || control.state === "interrupted");
-    const notice = actionable ? planApprovalNoticeFromProjection(projection) : undefined;
+    const notice = actionable
+      ? planControlNoticeFromProjection(
+          projection,
+          control.state === "interrupted" ? "interrupted" : "review",
+        )
+      : undefined;
     if (!this.planControlConnected || !notice) {
       this.dismissPlanControl();
       const revisionRequest = projection.revisionRequest;
@@ -996,11 +971,11 @@ export class ClientSessionRuntime {
       return;
     }
     this.surfacedRevisionRequestId = undefined;
-    if (this.currentPlanControlId && this.currentPlanControlId !== notice.taskId) {
-      this.options.onApprovalResolved?.(this.currentPlanControlId);
+    if (this.currentPlanControlId && this.currentPlanControlId !== notice.controlId) {
+      this.options.onPlanControlResolved?.(this.currentPlanControlId);
     }
-    this.currentPlanControlId = notice.taskId;
-    this.onApproval?.(notice);
+    this.currentPlanControlId = notice.controlId;
+    this.onPlanControl?.(notice);
   }
 
   /** ask-user 对话框动作 → prompt.respond RPC（幂等键新生成；answer=optionId/label/自由文本）。 */

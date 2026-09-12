@@ -10,8 +10,8 @@ import { loadPicoProjectConfig } from "../input/pico-config.js";
 import { FileIndex } from "../input/file-index.js";
 import { App } from "./app.js";
 import type { UserKeybindingConfig } from "./keybindings/resolver.js";
-import { approvalDialogId } from "./approval-panel.js";
-import { createApprovalDialogRequest } from "./approval-dialogs.js";
+import { approvalDialogId, planControlDialogId } from "./approval-panel.js";
+import { createApprovalDialogRequest, createPlanControlDialogRequest } from "./approval-dialogs.js";
 import { askUserDialogId, createAskUserDialogRequest } from "./ask-user-dialog.js";
 import type { AskUserRequest } from "../tools/ask-user.js";
 import type { InputBoxSubmission } from "./input-box.js";
@@ -95,8 +95,6 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
           reporter,
           closeDialog: (id) =>
             setDialogRequests?.((items) => items.filter((item) => item.id !== id)),
-          sessionId: runtime.activeSessionId,
-          planControl: planControl,
           resolvePlain: (action, taskId) => runtime.resolvePlain(action, taskId),
         }),
       ]);
@@ -104,6 +102,22 @@ export async function startClientRepl(options: ClientReplOptions): Promise<void>
     onApprovalResolved: (approvalId) => {
       setDialogRequests?.((items) =>
         items.filter((item) => item.id !== approvalDialogId(approvalId)),
+      );
+    },
+    onPlanControl: (notice) => {
+      setDialogRequests?.((items) => [
+        ...items.filter((item) => item.id !== planControlDialogId(notice.controlId)),
+        createPlanControlDialogRequest(notice, {
+          reporter,
+          closeDialog: (id) =>
+            setDialogRequests?.((items) => items.filter((item) => item.id !== id)),
+          planControl,
+        }),
+      ]);
+    },
+    onPlanControlResolved: (controlId) => {
+      setDialogRequests?.((items) =>
+        items.filter((item) => item.id !== planControlDialogId(controlId)),
       );
     },
     // ask-user：daemon prompt.requested → AskUserDialog（选项 + freeText 文本

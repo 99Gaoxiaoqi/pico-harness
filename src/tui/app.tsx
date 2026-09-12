@@ -36,11 +36,17 @@ import {
 } from "./help-panel.js";
 import {
   approvalPanelContentWidth,
+  InteractiveApprovalPanel,
+  InteractivePlanControlPanel,
   isApprovalDialogId,
+  isPlanControlDialogId,
   measureApprovalPanelRows,
+  measurePlanControlPanelRows,
   type InteractiveApprovalPanelProps,
+  type InteractivePlanControlPanelProps,
 } from "./approval-panel.js";
 import type { ApprovalNotice } from "../approval/manager.js";
+import type { PlanControlNotice } from "./plan-control-notice.js";
 import {
   parseSgrMouseInput,
   suspendProcessUntilContinued,
@@ -204,18 +210,26 @@ export function App({
       ? undefined
       : navigationItems.find((item) => item.id === agentNavigation.activeId);
   const inputDisabled = focusedDialog !== null || activeAgent !== undefined;
-  const inlineModal = focusedDialog?.layer === "modal" && isApprovalDialogId(focusedDialog.id);
+  const inlineModal =
+    focusedDialog?.layer === "modal" &&
+    (isApprovalDialogId(focusedDialog.id) || isPlanControlDialogId(focusedDialog.id));
   const transcriptWrapWidth = Math.max(1, columns - 6);
-  const approvalNotice = inlineModal ? approvalNoticeFromContent(focusedDialog.content) : undefined;
+  const decisionNotice = inlineModal ? decisionNoticeFromContent(focusedDialog.content) : undefined;
   const [approvalDiffExpanded, setApprovalDiffExpanded] = useState(true);
   const controlledApproval =
-    inlineModal && React.isValidElement<InteractiveApprovalPanelProps>(focusedDialog.content)
+    inlineModal && isInteractiveApprovalPanelElement(focusedDialog.content)
       ? React.cloneElement(focusedDialog.content, {
           diffExpanded: approvalDiffExpanded,
           onDiffExpandedChange: setApprovalDiffExpanded,
           keybindings,
         })
-      : focusedDialog?.content;
+      : inlineModal && isInteractivePlanControlPanelElement(focusedDialog.content)
+        ? React.cloneElement(focusedDialog.content, {
+            diffExpanded: approvalDiffExpanded,
+            onDiffExpandedChange: setApprovalDiffExpanded,
+            keybindings,
+          })
+        : focusedDialog?.content;
   const dialogLayout = measureGenericDialogLayout(controlledApproval, {
     active: focusedDialog !== null && !inlineModal,
     rows,
@@ -224,11 +238,16 @@ export function App({
   const overlay =
     focusedDialog?.layer === "overlay" || inlineModal ? dialogLayout.content : undefined;
   const modal = focusedDialog?.layer === "modal" && !inlineModal ? dialogLayout.content : undefined;
-  const approvalRows = approvalNotice
-    ? measureApprovalPanelRows(approvalNotice, {
-        diffExpanded: approvalDiffExpanded,
-        wrapWidth: approvalPanelContentWidth(columns),
-      })
+  const approvalRows = decisionNotice
+    ? decisionNotice.kind === "plan-control"
+      ? measurePlanControlPanelRows(decisionNotice, {
+          diffExpanded: approvalDiffExpanded,
+          wrapWidth: approvalPanelContentWidth(columns),
+        })
+      : measureApprovalPanelRows(decisionNotice, {
+          diffExpanded: approvalDiffExpanded,
+          wrapWidth: approvalPanelContentWidth(columns),
+        })
     : 0;
   const genericDialogRows = dialogLayout.rows;
   const [expandedToolKey, setExpandedToolKey] = useState<string | null>(null);
@@ -470,7 +489,7 @@ export function App({
 
   useEffect(() => {
     setApprovalDiffExpanded(true);
-  }, [approvalNotice?.taskId]);
+  }, [decisionNotice?.kind === "plan-control" ? decisionNotice.controlId : decisionNotice?.taskId]);
 
   // 诊断:记录每次渲染的 entries 状态
   dbg(workDir, `render: entries=${entries.length} running=${running} streaming=${isStreaming}`);
@@ -479,7 +498,7 @@ export function App({
     dbg(workDir, `  [${i}] ${e.kind}: ${c}`);
   });
 
-  const phase = approvalNotice
+  const phase = decisionNotice
     ? "approval"
     : queuedCount > 0
       ? "queued"
@@ -970,26 +989,22 @@ function transcriptItemStartRow(
   return rows;
 }
 
-function approvalNoticeFromContent(content: React.ReactNode): ApprovalNotice | undefined {
-  if (!React.isValidElement<Partial<InteractiveApprovalPanelProps>>(content)) return undefined;
-  const props = content.props;
-  if (
-    typeof props.taskId !== "string" ||
-    typeof props.toolName !== "string" ||
-    typeof props.args !== "string" ||
-    typeof props.providerCallId !== "string" ||
-    typeof props.message !== "string"
-  ) {
-    return undefined;
-  }
-  return {
-    kind: "tool",
-    taskId: props.taskId,
-    toolName: props.toolName,
-    args: props.args,
-    providerCallId: props.providerCallId,
-    message: props.message,
-    ...(props.preview ? { preview: props.preview } : {}),
-    ...(props.diff ? { diff: props.diff } : {}),
-  };
+function decisionNoticeFromContent(
+  content: React.ReactNode,
+): ApprovalNotice | PlanControlNotice | undefined {
+  if (isInteractiveApprovalPanelElement(content)) return content.props;
+  if (isInteractivePlanControlPanelElement(content)) return content.props;
+  return undefined;
+}
+
+function isInteractiveApprovalPanelElement(
+  content: React.ReactNode,
+): content is React.ReactElement<InteractiveApprovalPanelProps> {
+  return React.isValidElement(content) && content.type === InteractiveApprovalPanel;
+}
+
+function isInteractivePlanControlPanelElement(
+  content: React.ReactNode,
+): content is React.ReactElement<InteractivePlanControlPanelProps> {
+  return React.isValidElement(content) && content.type === InteractivePlanControlPanel;
 }

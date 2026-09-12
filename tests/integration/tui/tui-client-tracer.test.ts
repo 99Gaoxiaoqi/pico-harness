@@ -4,6 +4,7 @@ import {
   createRuntimeNotification,
   TRANSCRIPT_PROJECTOR_VERSION,
   type RuntimeNotification,
+  type RuntimeNotificationMap,
   type RuntimeNotificationTopic,
   type RuntimeSessionSubscriptionFrame,
 } from "@pico/protocol";
@@ -16,6 +17,8 @@ import {
 } from "../../../src/tui/client-session-runtime.js";
 import { TuiReporter } from "../../../src/tui/tui-reporter.js";
 import type { ApprovalNotice } from "../../../src/approval/manager.js";
+import type { PlanControlNotice } from "../../../src/tui/plan-control-notice.js";
+import { resolvePlanControlAction } from "../../../src/tui/approval-dialogs.js";
 
 /**
  * 3-D Phase 2 TUI 客户端 tracer：驱动组件层之下（无 Ink）——
@@ -61,11 +64,11 @@ test("daemon event reporter: durable run lifecycle drives TuiReporter", () => {
 
 test("daemon event reporter: cancelled run drives onInterrupted; approval events pass through", () => {
   const reporter = new TuiReporter();
-  const approvals: ApprovalNotice[] = [];
+  const approvals: RuntimeNotificationMap["approval.requested"][] = [];
   const adapter = new DaemonEventReporter({
     reporter,
     onApprovalRequested: (payload) => {
-      approvals.push(payload as unknown as ApprovalNotice);
+      approvals.push(payload);
     },
   });
   adapter.handleNotification(
@@ -441,7 +444,8 @@ test("client session runtime: durable PlanControl snapshot owns restart and reco
   const harness = createFakeClient();
   const reporter = new TuiReporter();
   const approvals: ApprovalNotice[] = [];
-  const resolved: string[] = [];
+  const planControls: PlanControlNotice[] = [];
+  const resolvedPlanControls: string[] = [];
   const projection = (revision: number, sessionSequence: number) => ({
     sessionId: "s1",
     sessionSequence,
@@ -468,10 +472,12 @@ test("client session runtime: durable PlanControl snapshot owns restart and reco
     sessionId: "s1",
     reporter,
     onApproval: (notice) => approvals.push(notice),
-    onApprovalResolved: (id) => resolved.push(id),
+    onPlanControl: (notice) => planControls.push(notice),
+    onPlanControlResolved: (id) => resolvedPlanControls.push(id),
   });
   await runtime.start();
-  assert.equal(approvals.at(-1)?.taskId, "plan-1:plan:revision:1");
+  assert.equal(planControls.at(-1)?.controlId, "review:plan-1:plan:revision:1");
+  assert.equal(approvals.length, 0, "PlanControl must not enter the tool approval channel");
 
   harness.setPlanControl({
     version: 1,
@@ -481,8 +487,8 @@ test("client session runtime: durable PlanControl snapshot owns restart and reco
   });
   harness.disconnect();
   assert.equal(
-    resolved.at(-1),
-    "plan-1:plan:revision:1",
+    resolvedPlanControls.at(-1),
+    "review:plan-1:plan:revision:1",
     "disconnect immediately removes executable control",
   );
   const planRequestsBeforeDisconnectClick = harness.requests.filter(
@@ -518,7 +524,7 @@ test("client session runtime: durable PlanControl snapshot owns restart and reco
     ),
   );
   assert.equal(
-    approvals.length,
+    planControls.length,
     1,
     "terminal snapshot must dominate replayed historical approval.requested",
   );
@@ -830,6 +836,7 @@ test("client session runtime: approvals map to approval.respond and dialog callb
   const harness = createFakeClient();
   const reporter = new TuiReporter();
   const approvals: ApprovalNotice[] = [];
+  const planControls: PlanControlNotice[] = [];
   const resolved: string[] = [];
   const runtime = new ClientSessionRuntime({
     client: harness.client,
@@ -838,6 +845,9 @@ test("client session runtime: approvals map to approval.respond and dialog callb
     reporter,
     onApproval: (notice) => {
       approvals.push(notice);
+    },
+    onPlanControl: (notice) => {
+      planControls.push(notice);
     },
     onApprovalResolved: (approvalId) => {
       resolved.push(approvalId);
@@ -947,19 +957,28 @@ test("client session runtime: approvals map to approval.respond and dialog callb
       },
     ),
   );
-  const planNotice = approvals.at(-1) as ApprovalNotice & {
-    planId?: string;
-    expectedRevision?: number;
-    expectedSessionSequence?: number;
-  };
-  assert.equal(planNotice.taskId, "plan_42:plan:proposal:3");
-  assert.equal(planNotice.toolName, "submit_plan");
+  const planNotice = planControls.at(-1);
+  assert.ok(planNotice);
+  assert.equal(planNotice.kind, "plan-control");
+  assert.equal(planNotice.mode, "review");
+  assert.equal(planNotice.controlId, "review:plan_42:plan:proposal:3");
+  assert.equal(planNotice.sessionId, "s1");
   assert.equal(planNotice.planId, "plan_42");
   assert.equal(planNotice.expectedRevision, 3);
   assert.equal(planNotice.expectedSessionSequence, 7);
+  assert.equal(planNotice.controlEpoch, "plan:proposal:3");
+  assert.equal(approvals.at(-1)?.taskId, "ap_diff", "PlanControl must not replace tool approval");
 
-  const planControl = runtime.createPlanControl();
-  await planControl.respond({
+  assert.equal(
+    await resolvePlanControlAction(planNotice, "execute", undefined, {
+      planControl: runtime.createPlanControl(),
+      reporter,
+    }),
+    true,
+  );
+  const planRespond = harness.requests.find((entry) => entry.method === "plan.respond");
+  assert.deepEqual(planRespond?.params, {
+    workspacePath: "C:\\ws",
     sessionId: "s1",
     planId: "plan_42",
     action: "execute",
@@ -967,11 +986,6 @@ test("client session runtime: approvals map to approval.respond and dialog callb
     expectedSessionSequence: 7,
     controlEpoch: "plan:proposal:3",
   });
-  const planRespond = harness.requests.find((entry) => entry.method === "plan.respond");
-  assert.ok(planRespond, "应发出 plan.respond");
-  assert.equal(planRespond?.params.planId, "plan_42");
-  assert.equal(planRespond?.params.action, "execute");
-  assert.equal(planRespond?.params.expectedRevision, 3);
 
   runtime.dispose();
 });
