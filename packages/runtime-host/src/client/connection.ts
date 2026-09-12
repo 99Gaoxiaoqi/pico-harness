@@ -135,8 +135,8 @@ export interface RuntimeHostConnection {
   ): Promise<OperationOutput<K>>;
   /**
    * Typed access to operations registered outside the static OperationKey
-   * surface (currently only test-only specs registered via
-   * registerHostOperationSpecsForTesting). Runtime behavior is identical to
+   * surface (including domain and test specs registered via
+   * registerHostOperationSpecs). Runtime behavior is identical to
    * request(): domain keys go through slot allocation/retirement, and
    * host.status remains the only non-domain key.
    */

@@ -8,7 +8,7 @@ import {
   RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION,
   decodeClientFrame,
   prepareRuntimeHostEndpoint,
-  registerHostOperationSpecsForTesting,
+  registerHostOperationSpecs,
   writeHostRegistration,
   FramedTransport,
   type HostStatusResult,
@@ -40,7 +40,7 @@ let testOperationsRegistered = false;
 export function ensureTestOperationsRegistered(): void {
   if (testOperationsRegistered) return;
   testOperationsRegistered = true;
-  registerHostOperationSpecsForTesting({
+  registerHostOperationSpecs({
     [TEST_DOMAIN_OPERATION]: defineOperation({
       mode: "query",
       availability: "ready",
