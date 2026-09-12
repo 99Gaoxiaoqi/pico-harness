@@ -1072,13 +1072,35 @@ test("Swarm waits for the batch, wakes on failure, replaces work and survives re
     });
   try {
     await service.start();
+    await assert.rejects(
+      call(
+        "update_agent_graph",
+        {
+          operation: "add_work",
+          add_work: [{ profile_id: "explore", instruction: "Retired Swarm target" }],
+        },
+        "reject-retired-target",
+      ),
+      /target_kind/u,
+    );
+    assert.equal(store.getGraph(graph.graphId)?.headRevision, 0);
     const added = await call(
       "update_agent_graph",
       {
         operation: "add_work",
         add_work: [
-          { profile_id: "explore", instruction: "Branch A" },
-          { profile_id: "review", instruction: "Branch B" },
+          {
+            target_kind: "new_agent",
+            agent_id: "explore",
+            instruction: "Branch A",
+            replacement_mode: "none",
+          },
+          {
+            target_kind: "new_agent",
+            agent_id: "review",
+            instruction: "Branch B",
+            replacement_mode: "none",
+          },
         ],
       },
       "swarm-add",
@@ -1108,9 +1130,11 @@ test("Swarm waits for the batch, wakes on failure, replaces work and survives re
           operation: "add_work",
           add_work: [
             {
-              profile_id: "explore",
+              target_kind: "new_agent",
+              agent_id: "explore",
               instruction: "Duplicate success",
               replaces: added.work[0].workId,
+              replacement_mode: "replace",
             },
           ],
         },
@@ -1130,7 +1154,13 @@ test("Swarm waits for the batch, wakes on failure, replaces work and survives re
       {
         operation: "add_work",
         add_work: [
-          { profile_id: "explore", instruction: "Retry Branch B", replaces: added.work[1].workId },
+          {
+            target_kind: "new_agent",
+            agent_id: "explore",
+            instruction: "Retry Branch B",
+            replaces: added.work[1].workId,
+            replacement_mode: "replace",
+          },
         ],
       },
       "replace-failed",
