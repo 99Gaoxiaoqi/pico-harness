@@ -1098,7 +1098,7 @@ test("client commands: /rewind and /changes map to rewind.* RPC with selector da
     snapshots: {
       messageId: string;
       userPrompt: string;
-      changedFileCount?: number;
+      changedFileCount: number;
       incomplete?: boolean;
     }[];
     viewOnly?: boolean;

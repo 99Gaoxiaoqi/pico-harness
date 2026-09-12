@@ -101,6 +101,22 @@ test("rewind.apply keeps one strict v2 request/result contract", () => {
   assert.throws(() => parseRuntimeResult("rewind.apply", { ...legacy, sourceSessionId: "" }));
 });
 
+test("rewind.list requires the current changed-file summary", () => {
+  const checkpoint = {
+    checkpointId: "checkpoint",
+    label: "prompt",
+    createdAt: 1,
+    changedFileCount: 2,
+    additions: 3,
+    deletions: 1,
+  } as const;
+  assert.deepEqual(parseRuntimeResult("rewind.list", { checkpoints: [checkpoint] }), {
+    checkpoints: [checkpoint],
+  });
+  const { changedFileCount: _changedFileCount, ...retiredSummary } = checkpoint;
+  assert.throws(() => parseRuntimeResult("rewind.list", { checkpoints: [retiredSummary] }));
+});
+
 test("Runtime result boundary rejects malformed responses for previously unchecked methods", () => {
   assert.throws(
     () => parseRuntimeResult("config.get", { config: [], version: "1" }),

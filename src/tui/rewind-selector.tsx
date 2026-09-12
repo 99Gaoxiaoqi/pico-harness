@@ -304,7 +304,7 @@ function codeRestoreActions(partial: boolean): readonly [RewindConfirmAction, st
 }
 
 function formatSnapshotChange(snapshot: FileHistorySnapshotSummary): string {
-  const count = snapshot.changedFileCount ?? snapshot.trackedFileCount;
+  const count = snapshot.changedFileCount;
   if (count === 0)
     return snapshot.incomplete ? "No known code changes · Partial restore" : "No code changes";
   const name =

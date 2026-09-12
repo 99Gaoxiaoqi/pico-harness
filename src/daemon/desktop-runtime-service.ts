@@ -2985,7 +2985,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         checkpointId: checkpoint.messageId,
         label: checkpoint.userPrompt,
         createdAt: Date.parse(checkpoint.timestamp),
-        changedFileCount: checkpoint.changedFileCount ?? 0,
+        changedFileCount: checkpoint.changedFileCount,
         additions: checkpoint.addedLines ?? 0,
         deletions: checkpoint.removedLines ?? 0,
         ...(checkpoint.incomplete ? { incomplete: true } : {}),

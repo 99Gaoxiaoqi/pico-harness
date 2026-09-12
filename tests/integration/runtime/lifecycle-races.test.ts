@@ -35,7 +35,7 @@ test("Workspace registry fences a get still canonicalizing when close begins", a
     create: async (workspacePath) => {
       createCount++;
       return {
-        workspacePath,
+        workspace: workspacePath,
         close: async () => undefined,
         hasPendingOwnership: () => false,
         waitForOwnershipRelease: async () => undefined,
@@ -62,7 +62,7 @@ test("Workspace registry captures a runtime whose factory synchronously closes i
   let closeCount = 0;
   let closing: Promise<void> | undefined;
   const registry: WorkspaceRuntimeRegistry<{
-    workspacePath: string;
+    workspace: string;
     close(): Promise<void>;
     hasPendingOwnership(): boolean;
     waitForOwnershipRelease(): Promise<void>;
@@ -70,7 +70,7 @@ test("Workspace registry captures a runtime whose factory synchronously closes i
     create: async (workspacePath) => {
       closing = registry.close();
       return {
-        workspacePath,
+        workspace: workspacePath,
         close: async () => {
           closeCount++;
         },

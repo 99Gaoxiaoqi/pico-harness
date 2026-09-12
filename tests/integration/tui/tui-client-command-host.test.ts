@@ -143,7 +143,6 @@ test("command host: rewind selector dialog carries snapshots (3-D /rewind /chang
       messageId: "msg_1",
       timestamp: new Date(1_000).toISOString(),
       userPrompt: "第一条",
-      trackedFileCount: 0,
       backedUpFileCount: 0,
       deletedFileCount: 0,
       messageIndex: 0,

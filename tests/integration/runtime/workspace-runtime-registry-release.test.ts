@@ -14,7 +14,7 @@ test("workspace registry peek never constructs a runtime", async (context) => {
     create: async (workspacePath) => {
       creates++;
       return {
-        workspacePath,
+        workspace: workspacePath,
         close: async () => undefined,
         hasPendingOwnership: () => false,
         waitForOwnershipRelease: async () => undefined,
@@ -44,7 +44,7 @@ test("workspace replacement waits until the previous Runtime releases ownership"
     create: async (workspacePath) => {
       creates++;
       return {
-        workspacePath,
+        workspace: workspacePath,
         close: async () => {
           closeStarted.resolve();
         },
@@ -89,7 +89,7 @@ test("get re-fetches a runtime released while its create was still pending", asy
   const firstCreateReleased = deferred();
   let creates = 0;
   const registry = new WorkspaceRuntimeRegistry<{
-    workspacePath: string;
+    workspace: string;
     close(): Promise<void>;
     hasPendingOwnership(): boolean;
     waitForOwnershipRelease(): Promise<void>;
@@ -99,7 +99,7 @@ test("get re-fetches a runtime released while its create was still pending", asy
         creates++;
         if (creates === 1) await firstCreateReleased.promise;
         return {
-          workspacePath,
+          workspace: workspacePath,
           close: async () => undefined,
           hasPendingOwnership: () => false,
           waitForOwnershipRelease: async () => undefined,
@@ -132,7 +132,7 @@ test("get re-fetches a runtime released while its create was still pending", asy
   const [first, second] = await Promise.all([firstGet, secondGet]);
   assert.equal(creates, 2, "应重新创建而非复用被 release 的 runtime");
   assert.equal(first, second);
-  assert.ok(first.workspacePath, "重新创建的 runtime 应携带 workspacePath");
+  assert.ok(first.workspace, "重新创建的 runtime 应携带规范 workspace");
 });
 
 function deferred(): {

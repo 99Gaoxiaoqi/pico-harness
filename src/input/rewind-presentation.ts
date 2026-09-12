@@ -15,7 +15,7 @@ export function formatRewindSelector(
   ];
   for (const snapshot of visible) {
     const prompt = oneLine(snapshot.userPrompt);
-    const changed = snapshot.changedFileCount ?? snapshot.trackedFileCount;
+    const changed = snapshot.changedFileCount;
     lines.push(`  ${truncate(prompt, 72)} · ${snapshot.messageId}`);
     lines.push(
       `    ${changed === 1 ? "1 file changed" : `${changed} files changed`} · ${relativeTime(Date.parse(snapshot.timestamp))}`,
