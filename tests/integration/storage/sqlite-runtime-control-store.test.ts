@@ -148,7 +148,7 @@ test("sqlite control store: job 建→claim(lease)→心跳→finish→completio
     const job2Completion = store.getCompletion("completion:attempt-2");
     assert.ok(job2Completion);
     assert.equal(job2Completion.status, "interrupted");
-    assert.ok(job2Completion.payload?.["delegationCompletion"]);
+    assert.equal(job2Completion.payload?.["reason"], "owner_lost");
 
     store.close();
     const reopened = new SqliteRuntimeControlStore({ storageRoot: root, now: () => now });

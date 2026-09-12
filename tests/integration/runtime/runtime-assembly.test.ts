@@ -6,14 +6,10 @@ import { test } from "node:test";
 import { Session } from "../../../src/engine/session.js";
 import { CredentialPool } from "../../../src/provider/credential-pool.js";
 import type { LLMProvider } from "../../../src/provider/interface.js";
-import { ModelRouter, type ModelRoute } from "../../../src/provider/model-router.js";
-import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
 import {
   assembleRuntimeProvider,
   type RuntimeProviderFactory,
 } from "../../../src/runtime/runtime-assembly.js";
-import { createSubagentModelRuntime } from "../../../src/runtime/subagent-model-runtime.js";
-import { resolveSubagentModelSelection } from "../../../src/runtime/subagent-model-selection.js";
 
 test("runtime provider assembly decorates an injected provider without taking ownership", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-runtime-assembly-injected-"));
@@ -120,58 +116,5 @@ test("runtime provider assembly keeps usage tracking outside provider decorators
   assert.equal(response.content, "decorated");
   assert.equal(decoratorCalls, 1);
   assert.equal(rawCalls, 0);
-  assert.equal(session.getRuntimeStateSnapshot().usage.totalProviderCalls, 1);
-});
-
-test("subagent model runtime applies the shared decorator inside usage tracking", async (context) => {
-  const root = await mkdtemp(join(tmpdir(), "pico-subagent-provider-decorator-"));
-  const session = new Session("subagent-provider-decorator", root, { persistence: false });
-  context.after(async () => {
-    await session.close();
-    await rm(root, { recursive: true, force: true });
-  });
-  const route: ModelRoute = {
-    id: "fixture/subagent",
-    providerId: "fixture",
-    provider: "openai",
-    model: "subagent-model",
-    baseURL: "http://example.test",
-    apiKeyEnv: "SUBAGENT_TEST_KEY",
-    source: "config",
-    capabilities: resolveModelRouteCapabilities("openai", "subagent-model", undefined),
-  };
-  const router = new ModelRouter([route], { SUBAGENT_TEST_KEY: "key" }, route.id);
-  const selection = resolveSubagentModelSelection({
-    router,
-    parentRouteId: route.id,
-    allowRouteOverride: false,
-  });
-  let decoratorCalls = 0;
-  const runtime = createSubagentModelRuntime({
-    router,
-    selection,
-    session,
-    providerFactory: () => ({
-      async generate() {
-        return { role: "assistant", content: "raw" };
-      },
-    }),
-    providerDecorator: () => {
-      decoratorCalls++;
-      return {
-        async generate() {
-          return {
-            role: "assistant",
-            content: "decorated-subagent",
-            usage: { promptTokens: 2, completionTokens: 1 },
-          };
-        },
-      };
-    },
-  });
-
-  const response = await runtime.provider.generate([{ role: "user", content: "hello" }], []);
-  assert.equal(response.content, "decorated-subagent");
-  assert.equal(decoratorCalls, 1);
   assert.equal(session.getRuntimeStateSnapshot().usage.totalProviderCalls, 1);
 });

@@ -50,7 +50,7 @@ pico 的应对是贯穿性的：**默认只暴露有界的摘要层,完整层按
 ```text
 CORE_TOOLS = { read_file, write_file, edit_file, bash,
                glob, grep, todo, ask_user,
-               delegate_task, schedule_task }   ← 10 个,每轮始终暴露
+               schedule_task, request_sandbox_boundary }   ← 10 个,每轮始终暴露
 其余一切 = 扩展组（MCP 动态工具、代码智能、网络等也归扩展）
 ```
 
@@ -59,7 +59,7 @@ CORE_TOOLS = { read_file, write_file, edit_file, bash,
 为什么这 10 个进核心组,文件注释给了理由：
 
 - `todo` —— 状态外部化的核心,prompt 已注入 todo 状态,模型频繁同步
-- `delegate_task` —— 主 Agent 的一级编排入口,藏在检索后面会导致多子代理请求不稳定
+- `agent_spawn` 与 Graph 工具属于扩展组，按宿主能力注册并按需披露
 - 其余是基础文件/搜索/交互能力,移除任一都会让基本功能受损
 
 ### 状态机
@@ -85,7 +85,7 @@ pickForLLM(allTools) = allTools.filter(
 - 命中后调 `disclosure.disclose(...)`,**下一轮生效**
 - 自动排除 `search_tools` 自身(它也是 extended,防自激活)
 - 只读、不触碰资源(返回 `none()`),与一切工具不冲突
-- 工具源是**实时数据源** `() => registry.getAvailableTools()`,所以 host 后续动态注册的委派/MCP 工具也立即可检索
+- 工具源是**实时数据源** `() => registry.getAvailableTools()`,所以 host 后续动态注册的 Agent/MCP 工具也立即可检索
 
 ### Loop 集成
 
@@ -284,7 +284,7 @@ explore_repo  │ top-N 文件结构片段           │   │ (本身即摘要,
 
 ### 会话态白名单优先级最高
 
-Plan Mode、explore-synthesis-only、required-delegation-recovery 这几种会话态会用更窄的白名单**覆盖**渐进披露的 `availableTools`。其中 Plan Mode 的处理最关键：**渐进披露不得把 `submit_plan` 和 `ask_user` 隐藏**，否则模型看到 Plan Prompt 却没完成协议所需的工具。普通用户消息中的委派关键词不触发工具白名单或隐藏的首轮强制委派指令；实际 required 委派后的收口与恢复协议仍保留。这体现了“渐进披露要让位于协议正确性”——能力完整性优先于上下文精简。
+Plan Mode 会用更窄的白名单**覆盖**渐进披露的 `availableTools`：渐进披露不得把 `submit_plan` 和 `ask_user` 隐藏，否则模型看到 Plan Prompt 却没有完成协议所需的工具。Graph/Swarm 则由宿主注册对应控制工具并冻结 Run 能力上限。这体现了“渐进披露要让位于协议正确性”——能力完整性优先于上下文精简。
 
 ---
 

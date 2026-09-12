@@ -103,23 +103,24 @@ Engine 为每批 toolCalls 创建 `ToolScheduler`：
 
 ## 3. 工具分层
 
-工具由宿主按会话模式和可用能力条件注册；MCP、代码智能、交互和委派工具都可能动态加入，因此这里不维护易漂移的“全部工具”快照。
+工具由宿主按会话模式和可用能力条件注册；MCP、代码智能、交互和 Agent 工具都可能动态加入，因此这里不维护易漂移的“全部工具”快照。
 
 ### 核心组（每轮始终暴露，渐进披露）
 
-稳定核心包括 `read_file`、`write_file`、`edit_file`、`bash`、`glob`、`grep`、`todo`、`ask_user`、`delegate_task` 和 `schedule_task`。其中需要 UI、后台运行时或委派宿主的工具仅在对应依赖已注入时注册。
+稳定核心包括 `read_file`、`write_file`、`edit_file`、`bash`、`glob`、`grep`、`todo`、`ask_user`、`schedule_task` 和 `request_sandbox_boundary`。其中需要 UI 或后台运行时的工具仅在对应依赖已注入时注册。
 
 ### 扩展组（按需披露，search_tools 激活）
 
 扩展组包括 `read_evidence`、`skill_view`、后台任务控制、网络工具、Plan/Goal 工具和宿主动态注册的代码智能/MCP 工具。启用渐进披露时，`search_tools` 负责检索并激活扩展工具。
 
-### 子代理工具（host 单独注册）
+### Agent 工具（host 单独注册）
 
-| name              | 用途                                    |
-| ----------------- | --------------------------------------- |
-| `spawn_subagent`  | 单任务子代理委派（只读 registry）       |
-| `delegate_task`   | 批量/explore/worker 委派（Hermes 风格） |
-| `delegate_status` | 查询 background 委派状态                |
+| name           | 用途                                     |
+| -------------- | ---------------------------------------- |
+| `agent_list`   | 列出可用 Preset 与兼容 Agent Profile     |
+| `agent_spawn`  | 启动或续用配置型持久子会话               |
+| `agent_output` | 按精确 Session/Run 身份读取子任务结果    |
+| Agent Graph    | 持久调度 `new_agent` / `new_preset` 工作 |
 
 ---
 
@@ -151,23 +152,25 @@ L4 逐行去缩进 + 缩进重对齐
 
 ### 防污染设计
 
-- 全新纯净 contextHistory（不依赖外部 Session）
-- 仅挂载受限 Registry（explore 只读 / worker 受控写）
-- `maxSubTurns=10` 防卡死，`maxSpawnDepth=2` 防无限委派
-- 强制关闭慢思考
+- 每个配置型子任务拥有独立 Session 与 RuntimeRun
+- `local_read` 和 `web_research` 使用共享目录下的受限工具面
+- `implementation` 固定进入独立 Git worktree，并返回补丁供宿主集成
+- Profile、模型路由和工具白名单在宿主准入边界冻结
 
-### explore vs worker
+### 配置型能力
 
-| 模式    | 工具                                                               | 限制                                                       |
-| ------- | ------------------------------------------------------------------ | ---------------------------------------------------------- |
-| explore | read_file/skill_view/bash(强制只读)/glob/grep/fetch_url/web_search | 禁止任何写操作                                             |
-| worker  | 上述 + write_file/edit_file                                        | 必须在独立 Git worktree 和 Worker 沙箱中执行；不可用即拒绝 |
+| Profile        | 工具                                          | 限制                              |
+| -------------- | --------------------------------------------- | --------------------------------- |
+| local_read     | read_file/glob/grep                           | 共享目录，只读                    |
+| web_research   | web_search                                    | 仅网络研究工具                    |
+| implementation | read_file/write_file/edit_file/bash/glob/grep | 独立 Git worktree，完成后返回补丁 |
 
-当前没有 Shared Worker、`writeScopes` 或跨 Agent 文件 OCC。Worker 完成后由宿主审查和集成 worktree 结果，不会静默写入主工作区。
+实现任务完成后由宿主审查和集成 worktree 结果，不会静默写入主工作区。
 
 ### 自定义角色（`.pico/agents.yaml` / `$PICO_HOME/agents.yaml`）
 
-按 `profile.tools` 白名单实例化工具，支持自定义 system prompt + maxTurns。
+Agent Profile 目录由 `agent_list` 的 `legacy_profiles` 与 Graph `new_agent` / `agent_id`
+消费；Graph 会把 profile snapshot 持久化后再启动 Operator。
 
 ---
 

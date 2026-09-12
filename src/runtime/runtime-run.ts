@@ -311,7 +311,7 @@ export function isRuntimeRunLive(sessionId: string, runId: string): boolean {
   return liveRuntimeRuns.has(runtimeRunLiveKey(sessionId, runId));
 }
 
-/** The tool that caused the current nested Agent work, including a delegated child run. */
+/** The tool that caused the current nested Agent work, including a configured child run. */
 export function currentRuntimeToolCallId(): string | undefined {
   return runtimeToolCallContext.getStore();
 }

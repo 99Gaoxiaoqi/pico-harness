@@ -73,7 +73,7 @@ Pico 的 CLI session 以当前项目目录为边界：
 | `/snapshots`   | 诊断性列出当前 session 的文件历史数据。                                                                              |
 | `/rewind`      | 打开用户消息选择器，按提示词/时间/文件变化恢复 code、conversation 或二者。                                           |
 | `/agents`      | 列出内置 Agent 和项目 `.claude/agents/*.md`。                                                                        |
-| `/agent`       | 把任务委派给指定 Agent：`/agent <name> <task>`。                                                                     |
+| `/agent`       | 为指定 Agent 创建 Graph 工作：`/agent <name> <task>`。                                                               |
 | `/skills`      | 列出当前项目 `.pico/skills` 与兼容的 Claude 资源中可用 Skill。                                                       |
 | `/skill`       | 显式激活 Skill 并交给 Agent 执行：`/skill <name> [arguments]`。                                                      |
 | `/add-dir`     | 列出或添加当前会话可访问的工作目录：`/add-dir [directory]`。                                                         |
@@ -97,7 +97,7 @@ Skill 正文支持 Claude Code 风格参数：`$ARGUMENTS` 保留完整参数，
 - 请求批准（`ask`）：已声明的只读和有界内部编排工具直接执行；Shell、文件编辑、公网读取和开放世界工具请求审批。审批框显示目标、原因和 diff，可选择 `Yes`、`Yes, allow … during this session` 或 `No`。`Yes` 只授权当前调用；session 选项才会持久到当前会话范围。
 - 帮我批准（`auto`）：自动执行已声明的只读和有界内部编排工具、工作区内 `write_file` / `edit_file` 和内置公网只读工具；所有 Shell、MCP/未分类的开放世界工具、越界或敏感访问及 Hook `ask/defer` 请求审批。
 - 完全访问权限（`full-access`）：按启动 Pico 的 OS 用户权限直通普通 Read/Write/Edit/Bash/网络操作，不因 Hook `ask/defer` 进入人工审批；hardline 和直接 deny 仍可拒绝。
-- `plan`：只允许宿主能保守证明为只读的工具调用；审批不能放行 Bash、MCP 或 `delegate_task` 可写/递归委派。需要只读子代理时使用 `spawn_subagent`。
+- `plan`：只允许宿主能保守证明为只读的工具调用；审批不能放行 Bash、MCP 或 Agent 启动工具。子代理工作应在 Agent/Graph 模式中执行。
 - hardline 命令和显式 Hook deny 在任何 mode 下都不可通过审批绕过。hardline 只分析可见文本和已建模入口，不把完全访问权限（`full-access`）变成任意 executable 的 OS 沙箱。
 
 也可以在执行前手动加入目录：
@@ -122,7 +122,7 @@ Skill 正文支持 Claude Code 风格参数：`$ARGUMENTS` 保留完整参数，
 
 ### 子代理活动
 
-主 Agent 批量委派时，TUI 会为每个子代理显示独立活动卡片：任务目标、角色/模式、queued/running/completed/failed 状态、最近工具目标和完成摘要。同一子代理的更新原位替换同一张卡片，多个子代理可并行展示。
+主 Agent 并行启动任务时，TUI 会为每个子代理显示独立活动卡片：任务目标、角色/模式、queued/running/completed/failed 状态、最近工具目标和完成摘要。同一子代理的更新原位替换同一张卡片，多个子代理可并行展示。
 
 Task ID、TaskRegistry、worktree supervisor 和合并队列是主 Agent 的内部能力，不作为用户 slash command 暴露。目标产品契约中，可写 Worker 默认在 Shared Folder 内按 `writeScopes` 和文件 OCC 协作；高冲突、动态写、强隔离或独立交付时才升级到 branch/worktree 和 OS 沙箱。没有 Git 只关闭 branch、commit、merge、PR 与 worktree，不关闭 Shared Worker。当前 Worker 代码仍强制 worktree，属于迁移阶段；切换默认值前必须完成 OCC 验收，详见[多 Agent 共享工作区并发规范](../history/architecture/08-multi-agent-concurrency.md)。
 
@@ -195,7 +195,7 @@ Pico 会加载项目级 Claude agent profile：
 <cwd>/.claude/agents/*.md
 ```
 
-每个文件可用 frontmatter 声明 `name`、`description`、`tools`，正文作为 Agent instructions。`/agents` 会列出这些 Agent；`/agent <name> <task>` 会生成委派 prompt，要求主 Agent 调用 `delegate_task`。
+每个文件可用 frontmatter 声明 `name`、`description`、`tools`，正文作为 Agent instructions。`/agents` 会列出这些 Agent；`/agent <name> <task>` 会通过 Graph `new_agent` / `agent_id` 启动对应 Profile。
 
 当前 TUI 默认还会提供内置 Agent：`Explore`、`Plan`、`general-purpose`。项目级 `.claude/agents` 可以覆盖同名内置 Agent。
 

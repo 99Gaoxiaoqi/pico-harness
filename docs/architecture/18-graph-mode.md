@@ -21,23 +21,23 @@ Graph 控制面不会把模型执行结果复制进调度表。`RecordRef` 只�
 
 ## 2. 为什么有 v1 和 v2
 
-v1 使用 `graph.work.*` RuntimeEvent 投影工作状态，由 `DelegationManager` 启动子代理，并依靠 engine continuation 和 Graph work lease 补偿。它可以表达简单的 record 依赖，但调度和执行纠缠在同一条 Session 事件流与进程内委派生命周期中：
+v1 使用 `graph.work.*` RuntimeEvent 投影工作状态，并依靠进程内执行控制、engine continuation 和 Graph work lease 补偿。它可以表达简单的 record 依赖，但调度和执行纠缠在同一条 Session 事件流与进程内生命周期中：
 
 - 没有独立、原子的 schedule revision，根 Agent 更新与后台调度竞争时缺少明确 CAS 边界；
 - 没有持久 Provision 和唯一 Claim，无法先锁定 child Session、Turn、Run、Invocation、start event，再安全执行；
-- 子代理生命周期依赖 `DelegationManager`，进程崩溃后只能把 orphan 判失败，不能根据精确 RuntimeRun 事实安全 attach；
+- 子代理生命周期依赖进程内状态，进程崩溃后只能把 orphan 判失败，不能根据精确 RuntimeRun 事实安全 attach；
 - 根 Agent 的等待依赖 engine continuation，不是持久的 yield/wake 协议；
-- Graph settle、lease、continuation 分散在 tools、engine、SessionRuntime 和 DelegationManager，恢复权威不唯一。
+- Graph settle、lease、continuation 分散在 tools、engine 和 SessionRuntime，恢复权威不唯一。
 
 v2 因此不是 v1 schema 的增量扩展，而是重新划分权威：SQLite Graph 控制面只决定“谁可以执行、用什么精确身份执行”，Runtime ledger 只证明“实际执行了什么”。
 
 ### 为什么直接硬切
 
-如果 v1 和 v2 同时可写，会同时存在事件投影、DelegationManager、lease 和 SQLite Claim 多套调度权威。同一工作可能被两边各启动一次，finish/stop 也可能只约束其中一边。为避免双执行和不可解释的恢复，本次采用硬切：
+如果 v1 和 v2 同时可写，会同时存在事件投影、进程内状态、lease 和 SQLite Claim 多套调度权威。同一工作可能被两边各启动一次，finish/stop 也可能只约束其中一边。为避免双执行和不可解释的恢复，本次采用硬切：
 
 - Graph 模式只暴露 `view_agent_graph`、`update_agent_graph`、`yield_agent_graph`；
 - Operator 只通过 `agent_output` 提交正式结果；
-- 删除 v1 `graph-tools`、reconcile/recover/work-lease、DelegationManager Graph 分支和 engine Graph continuation 写路径；
+- 删除 v1 `graph-tools`、reconcile/recover/work-lease 和 engine Graph continuation 写路径；
 - 旧 `graph.*` RuntimeEvent 历史数据已清理，codec、类型、reducer 与写入入口全部删除；这些 kind 现在按未知事件拒绝。
 
 公开的 `orchestrationMode="graph"` 以及 CLI/TUI/Desktop 开关名称保持不变；变化的是内部协议和工具面。

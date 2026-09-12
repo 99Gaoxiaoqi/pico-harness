@@ -1826,11 +1826,11 @@ test("a non-policy rejected envelope does not become policy_blocked", async (con
     {
       env: {},
       executeRuntime: async (options, dependencies) => {
-        const content = "required delegation retry";
+        const content = "internal control rejection";
         dependencies?.reporter?.onToolResult(
           createToolResultEnvelope({
             toolCallId: "control-rejected",
-            toolName: "delegate_task",
+            toolName: "internal_control_fixture",
             status: "rejected",
             body: {
               storage: "inline",
@@ -1842,7 +1842,7 @@ test("a non-policy rejected envelope does not become policy_blocked", async (con
               version: 1,
               mode: "synthetic",
               text: content,
-              strategy: "required-delegation",
+              strategy: "internal-control",
               truncated: false,
             },
           }),

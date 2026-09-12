@@ -84,7 +84,7 @@ export function createConfiguredSubagentExecutor(
       parentExecutionBoundary?.kind === "bypass"
         ? createBypassExecutionBoundary(parentExecutionBoundary.revision)
         : configuredSubagentExecutionBoundary(input.definition);
-    assertParentCanDelegateConfiguredChild(
+    assertParentCanStartConfiguredChild(
       parentExecutionBoundary,
       childExecutionBoundaryCeiling,
       input.definition,
@@ -362,7 +362,7 @@ export function configuredSubagentExecutionBoundary(
   );
 }
 
-function assertParentCanDelegateConfiguredChild(
+function assertParentCanStartConfiguredChild(
   parent: ExecutionBoundary | undefined,
   child: ExecutionBoundary,
   definition: SubagentCapabilityDefinition,

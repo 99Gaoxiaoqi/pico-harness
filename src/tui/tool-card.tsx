@@ -244,12 +244,7 @@ function buildPrioritizedHeader(options: {
 }
 
 export function isAgentToolName(name: string): boolean {
-  return (
-    name === "spawn_subagent" ||
-    name === "delegate_task" ||
-    name === "delegate_status" ||
-    name.startsWith("[Subagent]")
-  );
+  return name === "agent_spawn" || name.startsWith("[Subagent]");
 }
 
 function agentToolMeta(
@@ -272,31 +267,10 @@ function agentToolMeta(
     };
   }
 
-  if (name === "delegate_task") {
-    const batch = delegateBatchMeta(parsed);
-    return {
-      label: "Agents",
-      detail: firstString(parsed, ["agent_name", "mode"]) ?? batch?.detail,
-      task:
-        batch?.task ?? firstString(parsed, ["goal", "task", "description"]) ?? "Delegating tasks…",
-      color: "cyan",
-    };
-  }
-
-  if (name === "delegate_status") {
-    return {
-      label: "Agents",
-      detail: "status",
-      task: firstString(parsed, ["delegationId", "delegation_id"]) ?? "Checking progress…",
-      color: "cyan",
-    };
-  }
-
   return {
     label: "Agent",
-    detail: firstString(parsed, ["agent_name", "mode"]),
-    task:
-      firstString(parsed, ["task_prompt", "goal", "task", "description"]) ?? "Starting subagent…",
+    detail: firstString(parsed, ["subagent_id", "profile", "child_session_id"]),
+    task: firstString(parsed, ["task"]) ?? "Starting subagent…",
     color: "cyan",
   };
 }
@@ -317,21 +291,6 @@ function firstString(value: unknown, keys: string[]): string | undefined {
     if (typeof raw === "string" && raw.trim()) return compactText(raw.trim(), 88);
   }
   return undefined;
-}
-
-function delegateBatchMeta(value: unknown): { detail: string; task: string } | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const tasks = (value as Record<string, unknown>)["tasks"];
-  if (!Array.isArray(tasks) || tasks.length === 0) return undefined;
-  const firstTask = tasks.find((task) => task && typeof task === "object" && !Array.isArray(task));
-  const firstGoal =
-    firstTask && typeof firstTask === "object"
-      ? firstString(firstTask, ["goal", "task", "description"])
-      : undefined;
-  return {
-    detail: `${tasks.length} agents`,
-    task: compactText(`1/${tasks.length} queued${firstGoal ? ` · ${firstGoal}` : ""}`, 96),
-  };
 }
 
 function agentResultText(status: ToolCardStatus, summary: string | undefined): string {

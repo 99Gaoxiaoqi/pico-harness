@@ -41,7 +41,7 @@
 
 [记忆功能技术图解](pico-memory-technical-guide.md)：从用户证据、提取与规范化，到事务保存、失败恢复和关键词召回，附三张流程图。
 
-[子智能体技术图解](pico-subagents-technical-guide.md)：从配置创建、持久执行到续用、活动卡片与统一权限边界，附概念封面和五张技术图，并区分旧委派工具与 Graph。
+[子智能体技术图解](pico-subagents-technical-guide.md)：从配置创建、持久执行到续用、活动卡片与统一权限边界，附概念封面和五张技术图，并说明配置型子会话与 Graph。
 
 | 文档                                                                                 | 状态       | 阅读提示                                                   |
 | ------------------------------------------------------------------------------------ | ---------- | ---------------------------------------------------------- |
@@ -73,7 +73,6 @@
 | [20 架构审计与治理](history/architecture/20-architecture-audit-and-governance.md)             | 阶段性治理记录                                |
 | [Pico / Maka 写入与故障流程调研](history/architecture/pico-vs-maka-flow-gap-investigation.md) | ADR 27–29 实施前调查，已收口                  |
 | [21 Windows PowerShell Host](decisions/21-decision-windows-powershell-host.md)                | 已实施 ADR                                    |
-| [22 Child Run Capacity](decisions/22-decision-child-run-capacity.md)                          | 已实施 ADR                                    |
 | [23 Tool Disclosure Surface](decisions/23-decision-tool-disclosure-surface.md)                | 已被 ADR 30 取代                              |
 | [24 SQLite Storage](decisions/24-decision-sqlite-storage-migration.md)                        | 已实施 ADR                                    |
 | [24a Session Catalog](decisions/24a-decision-session-catalog.md)                              | 原 JSONL 形态已退役，当前为 SQLite projection |

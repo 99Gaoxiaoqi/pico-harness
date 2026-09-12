@@ -29,7 +29,7 @@ export const SUBAGENT_CAPABILITIES: readonly SubagentCapabilityDefinition[] = [
     workspace: "shared",
     writeBack: "summary",
     systemPrompt:
-      "只用提供的文件读取和检索工具完成有边界的探索。不得使用 shell、网络、写入或嵌套委派。返回简洁结论与具体文件证据。",
+      "只用提供的文件读取和检索工具完成有边界的探索。不得使用 shell、网络、写入或启动嵌套 Agent。返回简洁结论与具体文件证据。",
   },
   {
     id: "web-research",

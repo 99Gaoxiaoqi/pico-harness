@@ -2,7 +2,12 @@
 // 子代理的独立会话执行和上下文压缩分别由 subagent-runner / subagent-context 承担；
 // 父子运行的权限 capability、归属及共享成本账本仍由本引擎持有。
 
-import { SubagentRunner, type SubagentExecutionRuntime } from "./subagent-runner.js";
+import {
+  SubagentRunner,
+  type SubagentExecutionRuntime,
+  type SubagentRunOptions,
+  type SubagentResult,
+} from "./subagent-runner.js";
 export type { SubagentExecutionRuntime } from "./subagent-runner.js";
 import { providerForReporter } from "./provider-reporting.js";
 import {
@@ -29,12 +34,6 @@ import {
   type ToolFileSideEffects,
   type ToolExecutionStep,
 } from "../tools/registry.js";
-import type {
-  AgentRunner,
-  SubagentModelSelectionRequest,
-  SubagentRunOptions,
-  SubagentResult,
-} from "../tools/subagent.js";
 import type { Compactor } from "../context/compactor.js";
 import { ContextCompactionError, sanitizeToolPairs } from "../context/compactor.js";
 import type {
@@ -83,11 +82,6 @@ import {
   promptCacheConversationShardSeed,
   snapshotToolDefinitions,
 } from "../provider/prompt-cache.js";
-import {
-  delegationTaskCountFromArguments,
-  isExploreOnlyRequiredDelegationArguments,
-  isRequiredDelegationArguments,
-} from "../tools/delegation-contract.js";
 import {
   fileHistoryAddJournalWarning,
   fileHistoryBeginJournal,
@@ -149,22 +143,7 @@ function engineSessionCapability(session: Session): string {
   ]);
 }
 
-const EXPLORE_SYNTHESIS_PROMPT =
-  "[DELEGATION SYNTHESIS] 本批 required 委派的实际任务均为 explore，子代理已全部收口。" +
-  "你现在只能基于上述聚合结果直接给出统一结论；不得调用任何工具，不得重新阅读、搜索或验证项目。";
-const EXPLORE_SYNTHESIS_RETRY_PROMPT =
-  "[DELEGATION SYNTHESIS RETRY] 上一次回复违反了纯文本总结协议，所有工具调用均已拒绝。" +
-  "请立即基于已有聚合结果输出最终统一总结，只输出纯文本。";
-const MAX_EXPLORE_SYNTHESIS_TOOL_RETRIES = 2;
-const EXPLORE_SYNTHESIS_FAILED_MESSAGE =
-  "子代理已完成探索，但主模型连续违反纯文本总结协议，本次未能生成可靠的统一总结。";
 const MAX_PLAN_STOP_CONTINUATIONS = 2;
-const REQUIRED_DELEGATION_RECOVERY_PROMPT =
-  "[DELEGATION RECOVERY] 上一批 required 委派没有产生可用的 completed/partial 证据。" +
-  "本轮只允许再调用一次 required delegate_task，将任务缩小为一个最关键、可独立验证的缺口；" +
-  "不得改用主 Agent 工具大范围重读项目，不得输出解释性正文。";
-const REQUIRED_DELEGATION_RECOVERY_FAILED_MESSAGE =
-  "required 子代理在一次缩小范围的恢复委派后仍未产生可用证据，已停止主 Agent 自行大范围重读。";
 
 function isBackgroundBashCall(call: ToolCall): boolean {
   if (call.name !== "bash") return false;
@@ -182,50 +161,6 @@ function parseHookToolArguments(argumentsJson: string): unknown {
   } catch {
     return {};
   }
-}
-
-/**
- * required delegate_task 是引擎控制流边界，不是普通并行工具。
- * 与 DelegateTaskTool 的兼容规则保持一致：明确 optional/detached 或旧式
- * background=true 才是非阻塞，其余（包括省略策略与无效 JSON）均按 required
- * 安全地独占执行。
- */
-function isRequiredDelegateTaskCall(call: ToolCall): boolean {
-  return call.name === "delegate_task" && isRequiredDelegationArguments(call.arguments);
-}
-
-function findRequiredDelegationIndex(toolCalls: readonly ToolCall[]): number | undefined {
-  const index = toolCalls.findIndex(isRequiredDelegateTaskCall);
-  return index >= 0 ? index : undefined;
-}
-
-/** 与 DelegateTaskTool 的任务归一化规则保持一致：省略/无效 mode 默认 explore。 */
-function isExploreOnlyRequiredDelegation(call: ToolCall): boolean {
-  return call.name === "delegate_task" && isExploreOnlyRequiredDelegationArguments(call.arguments);
-}
-
-function buildSynthesisToolRejection(
-  toolCall: ToolCall,
-  runtimeRun?: EngineRuntimeRun,
-): ToolExecutionOutcome {
-  return buildRejectedToolResult(
-    toolCall,
-    "工具执行已拒绝：explore-only required 委派收口后必须直接基于聚合结果输出纯文本总结。",
-    "explore-synthesis-rejection",
-    runtimeRun,
-  );
-}
-
-function buildDelegationRecoveryToolRejection(
-  toolCall: ToolCall,
-  runtimeRun?: EngineRuntimeRun,
-): ToolExecutionOutcome {
-  return buildRejectedToolResult(
-    toolCall,
-    "工具执行已拒绝：required 委派恢复轮只允许一次缩小范围的 required delegate_task。",
-    "required-delegation-recovery-rejection",
-    runtimeRun,
-  );
 }
 
 function latestVisibleUserInput(messages: readonly Message[]): string {
@@ -257,15 +192,6 @@ function appendTurnTail(messages: Message[], turnTail: string): Message[] {
     content: `${currentUser.content}\n\n<current-turn-context>\n${normalizedTail}\n</current-turn-context>`,
   };
   return requestMessages;
-}
-
-function requiredDelegationTaskCount(call: ToolCall): number {
-  return call.name === "delegate_task" ? delegationTaskCountFromArguments(call.arguments) : 0;
-}
-
-interface RequiredDelegationAssessment {
-  usableResults: number;
-  batchFailed: boolean;
 }
 
 interface ToolExecutionOutcome {
@@ -368,17 +294,6 @@ function buildRejectedToolResult(
   };
 }
 
-function buildRejectedToolObservation(
-  toolCall: ToolCall,
-  requiredDelegation: ToolCall,
-  runtimeRun?: EngineRuntimeRun,
-): ToolExecutionOutcome {
-  const content =
-    `工具执行已拒绝：同一模型响应中的 required delegate_task ` +
-    `(${requiredDelegation.id}) 必须独占执行并等待所有子代理收口。`;
-  return buildRejectedToolResult(toolCall, content, "exclusive-delegation-rejection", runtimeRun);
-}
-
 function buildPlanSubmitSiblingRejection(
   toolCall: ToolCall,
   submitCall: ToolCall,
@@ -390,48 +305,6 @@ function buildPlanSubmitSiblingRejection(
     "exclusive-plan-submit-rejection",
     runtimeRun,
   );
-}
-
-function assessRequiredDelegationResult(message: Message): RequiredDelegationAssessment {
-  try {
-    const parsed = JSON.parse(message.content) as {
-      status?: unknown;
-      results?: unknown;
-      omittedResults?: unknown;
-      error?: unknown;
-    };
-    const batchFailed =
-      typeof parsed.error === "string" ||
-      parsed.status === "error" ||
-      parsed.status === "timed_out" ||
-      parsed.status === "cancelled";
-    if (!Array.isArray(parsed.results)) return { usableResults: 0, batchFailed: true };
-
-    let usableResults = 0;
-    for (const result of parsed.results) {
-      if (typeof result !== "object" || result === null) continue;
-      const record = result as Record<string, unknown>;
-      if (record["status"] !== "completed" && record["status"] !== "partial") continue;
-      const hasSummary =
-        typeof record["summary"] === "string" && record["summary"].trim().length > 0;
-      const hasEvidenceRefs =
-        Array.isArray(record["evidenceRefs"]) && record["evidenceRefs"].length > 0;
-      if (hasSummary || hasEvidenceRefs) usableResults++;
-    }
-    if (
-      (parsed.status === "completed" || parsed.status === "partial") &&
-      typeof parsed.omittedResults === "number" &&
-      Number.isSafeInteger(parsed.omittedResults) &&
-      parsed.omittedResults > 0
-    ) {
-      // 工具输出在批量总预算下可能只保留 omittedResults。顶层终态已证明
-      // 这些结果可用，不能因为文本被预算裁剪就误判为整批失败并重复委派。
-      usableResults += parsed.omittedResults;
-    }
-    return { usableResults, batchFailed };
-  } catch {
-    return { usableResults: 0, batchFailed: true };
-  }
 }
 
 function fileSideEffectKind(registry: Registry, call: ToolCall): ToolFileSideEffects["kind"] {
@@ -490,8 +363,6 @@ export interface AgentEngineOptions {
   thinkingEffort?: string;
   /** 当前主会话的稳定模型路由标识。 */
   modelRouteId?: string;
-  /** 可信宿主为每次子代理执行创建独立 Provider/Compactor。 */
-  resolveSubagentModelRuntime?: SubagentModelRuntimeResolver;
   /**
    * 计划模式开关 (第 13 讲)。
    * 开启后,每次 run 动态用 PromptComposer 组装 System Prompt,
@@ -596,11 +467,6 @@ export interface AgentEngineOptions {
   /** Host pause gate. The engine awaits it only at boundaries where no tool is in flight. */
   waitAtSafeBoundary?: () => Promise<void>;
   /**
-   * turn 边界通知（每个模型 turn 开始时同步调用）。宿主用于按轮重置的
-   * 配套状态，如子代理执行容量闸（DelegationManager.resetTurnState）。
-   */
-  onTurnBoundary?: () => void;
-  /**
    * 非工具停止后,host 可决定是否续接(ROADMAP 3.7)。
    * 模型跑完一轮没调工具(toolCalls.length === 0)时,正常是 onFinish + break 退出。
    * host 可借此回调让 Agent 继续(如"任务还没完,接着干"):
@@ -625,8 +491,6 @@ export interface AgentEngineOptions {
   hookService?: HookService;
   /** 宿主在 committed ToolResult 边界执行的 Hook；不得在工具执行期读取 raw 输出。 */
   postToolResultHook?: (call: ToolCall, result: ToolResultEnvelope) => Promise<void>;
-  /** Explore required delegation may use only these tools for final direct verification. */
-  exploreSynthesisAllowedTools?: readonly string[];
   /** 主循环正常结束、仍位于 RuntimeRun capability 内时执行的宿主收口。 */
   onRunComplete?: () => Promise<void>;
   /** 主循环异常或取消时执行的宿主中断收口。 */
@@ -637,12 +501,8 @@ export interface AgentEngineOptions {
   runtimePort?: EngineRuntimePort;
 }
 
-export type SubagentModelRuntimeResolver = (
-  request?: SubagentModelSelectionRequest,
-) => SubagentExecutionRuntime;
-
 /** 微型 OS 的核心驱动 */
-export class AgentEngine implements AgentRunner {
+export class AgentEngine {
   private provider: LLMProvider;
   private readonly registry: Registry;
   private readonly workDir: string;
@@ -652,7 +512,6 @@ export class AgentEngine implements AgentRunner {
   private readonly promptLayersFactory?: AgentEngineOptions["promptLayersFactory"];
   private readonly thinkingEffort: string;
   private readonly modelRouteId?: string;
-  private readonly resolveSubagentModelRuntime?: SubagentModelRuntimeResolver;
   // planMode 非 readonly:ExitPlanMode 审批通过后由 exitPlanMode() 置 false。
   private planMode: boolean;
   private readonly contextBudget?: ContextBudget;
@@ -698,14 +557,12 @@ export class AgentEngine implements AgentRunner {
    */
   private steerQueue?: SteerQueue;
   private readonly waitAtSafeBoundary?: () => Promise<void>;
-  private readonly onTurnBoundary?: () => void;
   /** 非工具停止后续接回调(ROADMAP 3.7):host 可决定让 Agent 接着跑 */
   private readonly shouldContinueAfterStop?: AgentEngineOptions["shouldContinueAfterStop"];
   /** 凭证轮换回调(4.2):429 时切换 key 重建 provider;无多 key 时为 undefined */
   private readonly rebuildProvider?: () => LLMProvider | undefined;
   private readonly hookService?: HookService;
   private readonly postToolResultHook?: AgentEngineOptions["postToolResultHook"];
-  private readonly exploreSynthesisAllowedTools: ReadonlySet<string>;
   private readonly onRunComplete?: AgentEngineOptions["onRunComplete"];
   private readonly onRunInterrupted?: AgentEngineOptions["onRunInterrupted"];
   private readonly skillLoaderFactory?: (workDir: string) => SkillLoader;
@@ -727,7 +584,6 @@ export class AgentEngine implements AgentRunner {
     this.promptLayersFactory = opts.promptLayersFactory;
     this.thinkingEffort = opts.thinkingEffort ?? "off";
     this.modelRouteId = opts.modelRouteId;
-    this.resolveSubagentModelRuntime = opts.resolveSubagentModelRuntime;
     this.planMode = opts.planMode ?? false;
     this.contextBudget = opts.contextBudget;
     this.memoryHooks = opts.memoryHooks;
@@ -755,12 +611,10 @@ export class AgentEngine implements AgentRunner {
     this.tracer = opts.tracer;
     this.steerQueue = opts.steerQueue;
     this.waitAtSafeBoundary = opts.waitAtSafeBoundary;
-    this.onTurnBoundary = opts.onTurnBoundary;
     this.shouldContinueAfterStop = opts.shouldContinueAfterStop;
     this.rebuildProvider = opts.rebuildProvider;
     this.hookService = opts.hookService;
     this.postToolResultHook = opts.postToolResultHook;
-    this.exploreSynthesisAllowedTools = new Set(opts.exploreSynthesisAllowedTools ?? []);
     this.onRunComplete = opts.onRunComplete;
     this.onRunInterrupted = opts.onRunInterrupted;
     this.skillLoaderFactory = opts.skillLoaderFactory;
@@ -887,10 +741,7 @@ export class AgentEngine implements AgentRunner {
     };
   }
 
-  /**
-   * 单轮工具并发上限(对齐 hermes _MAX_TOOL_WORKERS=8)。
-   * 超出的任务进 queued 等名额释放,不报错不丢弃,保序返回。
-   */
+  /** 单轮工具并发上限；超出的任务排队等待名额释放并保序返回。 */
   private static readonly MAX_TOOL_CONCURRENCY = 8;
 
   /** RuntimeEvent is the source of truth for production model history; Session is its UI projection. */
@@ -1463,10 +1314,6 @@ export class AgentEngine implements AgentRunner {
     let turnCount = 0;
     let exhaustedReason: string | undefined;
     let hardResetTriggered = false;
-    let exploreSynthesisOnly = false;
-    let exploreSynthesisToolRetries = 0;
-    let requiredDelegationRecoveryPending = false;
-    let requiredDelegationRecoveryExploreOnly = false;
     let consecutiveHookStopBlocks = 0;
     let planStopContinuations = 0;
     let graceCandidateTools: ToolDefinition[] = [];
@@ -1486,9 +1333,6 @@ export class AgentEngine implements AgentRunner {
         await this.waitAtSafeBoundary?.();
         signal?.throwIfAborted();
         turnCount++;
-        // turn 边界通知（如子代理执行容量闸的按轮换新）：新 turn 满血配速，
-        // 上一 turn 仍在排队的容量等待者被拒绝（饱和背压）。
-        this.onTurnBoundary?.();
         const turnBudget = this.budget.canStartTurn(turnCount);
         if (!turnBudget.allowed) {
           exhaustedReason = turnBudget.reason ?? `已达到最大轮次 ${this.maxTurns}`;
@@ -1555,19 +1399,12 @@ export class AgentEngine implements AgentRunner {
           const availableTools = disclosureTurn
             ? [...disclosureTurn.snapshotForStep().tools]
             : allTools;
-          // explore-only required 委派收口后不再给主模型任何工具，
-          // 从能力边界上阻断它重复阅读项目。worker/mixed 批次不受影响。
-          const unrestrictedProviderTools = exploreSynthesisOnly
-            ? availableTools.filter((tool) => this.exploreSynthesisAllowedTools.has(tool.name))
-            : requiredDelegationRecoveryPending
-              ? allTools.filter((tool) => tool.name === "delegate_task")
-              : availableTools;
           // Plan 的终态只能由 submit_plan 形成。渐进披露不得把它（或 ask_user）
           // 隐藏，否则模型会看到 Plan Prompt，却没有完成协议所需的工具。
           // 这里仍使用与 safety middleware 相同的严格白名单，不扩大能力面。
           const providerTools = this.isPlanning()
             ? allTools.filter((tool) => isPlanProviderTool(tool.name))
-            : unrestrictedProviderTools;
+            : availableTools;
           const step = this.registry.captureStep?.(
             randomUUID(),
             providerTools.map((tool) => tool.name),
@@ -1651,8 +1488,7 @@ export class AgentEngine implements AgentRunner {
               providerData: { picoKind: "steer", picoHiddenFromTranscript: true },
             });
           }
-          graceCandidateTools =
-            !exploreSynthesisOnly && !requiredDelegationRecoveryPending ? [...providerTools] : [];
+          graceCandidateTools = [...providerTools];
           const actionSpan = turnSpan?.startChild("LLM.Action", {
             inputMessageCount: compactedContext.length,
             availableToolCount: providerTools.length,
@@ -1728,114 +1564,7 @@ export class AgentEngine implements AgentRunner {
               },
             };
           }
-          if (
-            exploreSynthesisOnly &&
-            toolCalls.some((toolCall) => !this.exploreSynthesisAllowedTools.has(toolCall.name))
-          ) {
-            reporter.onAssistantResponseSuppressed?.("explore-synthesis-retry");
-            // 某些 provider/模型可能在 tools=[] 时仍幻觉产生 tool_calls。
-            // 保留 assistant tool call 与逐一 tool result 的协议配对，但绝不进入 Registry。
-            const rejectedResponse: Message = {
-              ...responseMsg,
-              content: "",
-              providerData: {
-                ...responseMsg.providerData,
-                picoKind: "explore_synthesis_tool_rejected",
-                picoHiddenFromTranscript: true,
-              },
-            };
-            const runtimeRun = this.runtimePort?.currentRun();
-            const rejectedOutcomes = toolCalls.map((toolCall) =>
-              buildSynthesisToolRejection(toolCall, runtimeRun),
-            );
-            await session.commitMessages(rejectedResponse);
-            this.onTurn?.({ turn: turnCount, message: rejectedResponse });
-            await this.commitRejectedToolBatch(
-              session,
-              reporter,
-              toolCalls,
-              rejectedOutcomes,
-              runtimeRun,
-            );
-
-            if (exploreSynthesisToolRetries >= MAX_EXPLORE_SYNTHESIS_TOOL_RETRIES) {
-              const failedResponse: Message = {
-                role: "assistant",
-                content: EXPLORE_SYNTHESIS_FAILED_MESSAGE,
-              };
-              await session.commitMessages(failedResponse);
-              await this.reportMessage(reporter, failedResponse.content, signal);
-              reporter.onFinish();
-              break;
-            }
-
-            exploreSynthesisToolRetries++;
-            await session.commitMessages({
-              role: "user",
-              content: EXPLORE_SYNTHESIS_RETRY_PROMPT,
-              providerData: {
-                picoKind: "explore_synthesis_retry",
-                picoHiddenFromTranscript: true,
-              },
-            });
-            continue;
-          }
-          if (exploreSynthesisOnly && toolCalls.length === 0) {
-            exploreSynthesisOnly = false;
-            exploreSynthesisToolRetries = 0;
-          }
-          const requiredDelegationIndex = findRequiredDelegationIndex(toolCalls);
-          const requiredDelegation =
-            requiredDelegationIndex !== undefined ? toolCalls[requiredDelegationIndex] : undefined;
-          const acceptedRecoveryDelegation =
-            requiredDelegation !== undefined && requiredDelegationTaskCount(requiredDelegation) > 0;
-          if (requiredDelegationRecoveryPending && !acceptedRecoveryDelegation) {
-            reporter.onAssistantResponseSuppressed?.("delegation-first-retry");
-            const rejectedResponse: Message = {
-              ...responseMsg,
-              content: "",
-              providerData: {
-                ...responseMsg.providerData,
-                picoKind: "required_delegation_recovery_rejected",
-                picoHiddenFromTranscript: true,
-              },
-            };
-            const runtimeRun = this.runtimePort?.currentRun();
-            const rejectedOutcomes = toolCalls.map((toolCall) =>
-              buildDelegationRecoveryToolRejection(toolCall, runtimeRun),
-            );
-            await session.commitMessages(rejectedResponse);
-            this.onTurn?.({ turn: turnCount, message: rejectedResponse });
-            await this.commitRejectedToolBatch(
-              session,
-              reporter,
-              toolCalls,
-              rejectedOutcomes,
-              runtimeRun,
-            );
-            const failedResponse: Message = {
-              role: "assistant",
-              content: REQUIRED_DELEGATION_RECOVERY_FAILED_MESSAGE,
-            };
-            await session.commitMessages(failedResponse);
-            await this.reportMessage(reporter, failedResponse.content, signal);
-            reporter.onFinish();
-            break;
-          }
-          if (requiredDelegation && responseMsg.content) {
-            responseMsg = {
-              ...responseMsg,
-              content: "",
-              providerData: {
-                ...responseMsg.providerData,
-                picoKind: "required_delegation_dispatch",
-                picoHiddenFromTranscript: true,
-              },
-            };
-          }
-
-          // 将大模型的行动响应持久化到 Session。required 委派轮只保留
-          // tool calls，不让委派前的解释正文再次进入主上下文。
+          // 将大模型的行动响应持久化到 Session。
           await session.commitMessages(responseMsg);
           compactedContext.push(responseMsg);
           const settledResults: Array<ToolExecutionOutcome | undefined> = new Array(
@@ -2041,11 +1770,8 @@ export class AgentEngine implements AgentRunner {
           //   - 不冲突(read+read / write 不同文件)→ 并行
           //   - 冲突(同文件含写 / kind:"all")→ 串行
           // 结果按 provider 原始顺序回传(add 顺序即 resolve 顺序)。
-          // Kimi AgentSwarm 式独占语义：required delegate_task 是这一轮唯一
-          // 允许真实执行的工具。保留原始 toolCalls 和每个对应 observation，
-          // 以维持 provider 要求的 tool-call/result 完整配对。
-          // maxConcurrency 限制并发执行的工具数(对齐 hermes _MAX_TOOL_WORKERS=8),
-          // 防止一批大量不冲突只读工具同时打 IO 把系统压垮。
+          // maxConcurrency 限制并发执行的工具数，防止一批大量不冲突的
+          // 只读工具同时发起 I/O。
           let scheduler: ToolScheduler<ToolExecutionOutcome> | undefined;
           let results: ToolExecutionOutcome[] = [];
           const submitPlanIndex = toolCalls.findIndex((call) => call.name === "submit_plan");
@@ -2053,10 +1779,8 @@ export class AgentEngine implements AgentRunner {
           try {
             try {
               const getAccesses = this.registry.getAccesses;
-              const fileSideEffectKinds = toolCalls.map((call, index) =>
-                requiredDelegationIndex === undefined || index === requiredDelegationIndex
-                  ? fileSideEffectKind(this.registry, call)
-                  : "none",
+              const fileSideEffectKinds = toolCalls.map((call) =>
+                fileSideEffectKind(this.registry, call),
               );
               const hasFileEffects = fileSideEffectKinds.some((kind) => kind !== "none");
               if (hasFileEffects && journalRoots.length > 0 && userRewindPointId) {
@@ -2067,15 +1791,7 @@ export class AgentEngine implements AgentRunner {
                   session.fileHistoryBaseDir,
                 );
                 activeFileJournal = runFileJournal;
-                if (
-                  runFileJournal &&
-                  toolCalls.some(
-                    (call, index) =>
-                      (requiredDelegationIndex === undefined ||
-                        index === requiredDelegationIndex) &&
-                      isBackgroundBashCall(call),
-                  )
-                ) {
+                if (runFileJournal && toolCalls.some((call) => isBackgroundBashCall(call))) {
                   fileHistoryAddJournalWarning(
                     runFileJournal,
                     "background bash 在工具返回后仍可继续写入，本轮 rewind 只覆盖返回前的变化",
@@ -2088,7 +1804,7 @@ export class AgentEngine implements AgentRunner {
               });
               for (const [index, tc] of toolCalls.entries()) {
                 const execution: Promise<ToolExecutionOutcome> =
-                  memoryStepRejects(toolCalls, index) && !submitPlanCall && !requiredDelegation
+                  memoryStepRejects(toolCalls, index) && !submitPlanCall
                     ? Promise.resolve(
                         buildRejectedToolResult(
                           tc,
@@ -2105,32 +1821,24 @@ export class AgentEngine implements AgentRunner {
                             this.runtimePort?.currentRun(),
                           ),
                         )
-                      : requiredDelegation && index !== requiredDelegationIndex
-                        ? Promise.resolve(
-                            buildRejectedToolObservation(
-                              tc,
-                              requiredDelegation,
-                              this.runtimePort?.currentRun(),
-                            ),
-                          )
-                        : scheduler.add({
-                            accesses: getAccesses
-                              ? getAccesses.call(this.registry, tc)
-                              : ToolAccesses.all(),
-                            // 文件事务只能在活跃写任务的 start Promise 真实收口后提交，
-                            // 故所有文件类工具在 abort 时一律等待 settle。文件写很快完成、
-                            // 不会无限挂起；即便工具不协作 signal，failToolProtocol / finally
-                            // 的 10s 超时兜底也会强制收口，防止主循环卡死（loop-1）。
-                            settleOnAbort: fileSideEffectKinds[index] !== "none",
-                            start: async () => {
-                              signal?.throwIfAborted();
-                              return this.runtimePort
-                                ? this.runtimePort.runWithToolCall(tc.id, () =>
-                                    this.runOneTool(tc, reporter, turnSpan, signal, step),
-                                  )
-                                : this.runOneTool(tc, reporter, turnSpan, signal, step);
-                            },
-                          });
+                      : scheduler.add({
+                          accesses: getAccesses
+                            ? getAccesses.call(this.registry, tc)
+                            : ToolAccesses.all(),
+                          // 文件事务只能在活跃写任务的 start Promise 真实收口后提交，
+                          // 故所有文件类工具在 abort 时一律等待 settle。文件写很快完成、
+                          // 不会无限挂起；即便工具不协作 signal，failToolProtocol / finally
+                          // 的 10s 超时兜底也会强制收口，防止主循环卡死（loop-1）。
+                          settleOnAbort: fileSideEffectKinds[index] !== "none",
+                          start: async () => {
+                            signal?.throwIfAborted();
+                            return this.runtimePort
+                              ? this.runtimePort.runWithToolCall(tc.id, () =>
+                                  this.runOneTool(tc, reporter, turnSpan, signal, step),
+                                )
+                              : this.runOneTool(tc, reporter, turnSpan, signal, step);
+                          },
+                        });
                 scheduled.push(
                   execution.then((result) => {
                     settledResults[index] = result;
@@ -2188,59 +1896,6 @@ export class AgentEngine implements AgentRunner {
             this.planHandoff.consume();
             reporter.onFinish();
             break;
-          }
-          if (requiredDelegation && requiredDelegationIndex !== undefined) {
-            const assessment = assessRequiredDelegationResult(
-              observations[requiredDelegationIndex]!,
-            );
-            const hasUsableResult = !assessment.batchFailed && assessment.usableResults > 0;
-            if (!hasUsableResult) {
-              exploreSynthesisOnly = false;
-              exploreSynthesisToolRetries = 0;
-              if (requiredDelegationRecoveryPending) {
-                const failedResponse: Message = {
-                  role: "assistant",
-                  content: REQUIRED_DELEGATION_RECOVERY_FAILED_MESSAGE,
-                };
-                await session.commitMessages(failedResponse);
-                await this.reportMessage(reporter, failedResponse.content, signal);
-                reporter.onFinish();
-                break;
-              }
-
-              requiredDelegationRecoveryPending = true;
-              requiredDelegationRecoveryExploreOnly =
-                isExploreOnlyRequiredDelegation(requiredDelegation);
-              await session.commitMessages({
-                role: "user",
-                content: REQUIRED_DELEGATION_RECOVERY_PROMPT,
-                providerData: {
-                  picoKind: "required_delegation_recovery",
-                  picoHiddenFromTranscript: true,
-                },
-              });
-              continue;
-            }
-
-            const currentExploreOnly = isExploreOnlyRequiredDelegation(requiredDelegation);
-            exploreSynthesisOnly = requiredDelegationRecoveryPending
-              ? requiredDelegationRecoveryExploreOnly && currentExploreOnly
-              : currentExploreOnly;
-            requiredDelegationRecoveryPending = false;
-            requiredDelegationRecoveryExploreOnly = false;
-            exploreSynthesisToolRetries = 0;
-            await session.commitMessages({
-              role: "user",
-              content: exploreSynthesisOnly
-                ? EXPLORE_SYNTHESIS_PROMPT
-                : "[DELEGATION JOIN] required 子代理已全部收口（结果可能包含失败）。" +
-                  "请吸收上述聚合结果并继续集成、定点验证或统一总结；" +
-                  "不要重复子代理已完成范围的大规模探索。",
-              providerData: {
-                picoKind: exploreSynthesisOnly ? "explore_delegation_synthesis" : "delegation_join",
-                picoHiddenFromTranscript: true,
-              },
-            });
           }
           if (reminderMessages.length > 0) {
             await session.commitMessages(...reminderMessages);
@@ -2338,46 +1993,6 @@ export class AgentEngine implements AgentRunner {
     const runMessages = session.getHistory().slice(beforeLen);
     assertRunProducedModelOutput(runMessages);
     return runMessages;
-  }
-
-  private async commitRejectedToolBatch(
-    session: Session,
-    reporter: Reporter,
-    toolCalls: readonly ToolCall[],
-    outcomes: readonly ToolExecutionOutcome[],
-    runtimeRun: EngineRuntimeRun | undefined,
-  ): Promise<void> {
-    let toolStartsRecorded = toolCalls.length === 0;
-    let startNotificationError: unknown;
-    try {
-      const durableStarts = await this.recordAcceptedToolCalls(session, toolCalls, runtimeRun);
-      toolStartsRecorded = true;
-      this.publishAcceptedToolCalls(reporter, toolCalls, durableStarts);
-    } catch (error) {
-      if (!toolStartsRecorded) throw error;
-      startNotificationError = error;
-    }
-
-    try {
-      await session.commitMessages(...outcomes.map((outcome) => outcome.message));
-      await this.publishCommittedToolBatch(
-        reporter,
-        toolCalls,
-        outcomes,
-        toolCalls.map((_toolCall, index) => index),
-      );
-    } catch (error) {
-      if (startNotificationError !== undefined) {
-        throw new AggregateError(
-          [startNotificationError, error],
-          "Accepted tool starts were reported with an error and the rejected batch failed to close",
-          { cause: error },
-        );
-      }
-      throw error;
-    }
-
-    if (startNotificationError !== undefined) throw startNotificationError;
   }
 
   /**
@@ -2852,7 +2467,7 @@ export class AgentEngine implements AgentRunner {
     reporter?: Reporter,
     opts: SubagentRunOptions = {},
   ): Promise<SubagentResult> {
-    const runtime = this.subagentExecutionRuntime(opts.modelSelection);
+    const runtime = this.subagentExecutionRuntime();
     if (runtime.resolvedModelRoute) {
       reporter?.onSubagentModelResolved?.({
         ...(runtime.requestedModelRoute
@@ -2882,7 +2497,7 @@ export class AgentEngine implements AgentRunner {
     });
     const run = () => runner.run(taskPrompt, readOnlyRegistry, runtime, reporter, opts);
     const runAttributed = () =>
-      withProviderCallContext({ purpose: "subagent", ...(opts.usageAttribution ?? {}) }, () =>
+      withProviderCallContext({ purpose: "subagent" }, () =>
         runtime.compactor ? runtime.compactor.runInIsolatedScope(run) : run(),
       );
     const runtimePort = this.runtimePort;
@@ -2923,38 +2538,16 @@ export class AgentEngine implements AgentRunner {
     }, opts.signal);
   }
 
-  private subagentExecutionRuntime(
-    request?: SubagentModelSelectionRequest,
-  ): SubagentExecutionRuntime {
-    if (this.resolveSubagentModelRuntime) return this.resolveSubagentModelRuntime(request);
-
-    const requestedRoute = request?.ephemeralRouteId ?? request?.profileRouteId;
-    const requestedThinking = request?.ephemeralThinkingEffort ?? request?.profileThinkingEffort;
-    if (
-      requestedRoute !== undefined &&
-      requestedRoute !== "inherit" &&
-      requestedRoute !== this.modelRouteId
-    ) {
-      throw new Error(`当前宿主没有可用的子代理模型路由器，无法切换到 ${requestedRoute}`);
-    }
-    if (requestedThinking !== undefined && requestedThinking !== this.thinkingEffort) {
-      throw new Error(`当前宿主不能为子代理独立设置 thinking_effort=${requestedThinking}`);
-    }
+  private subagentExecutionRuntime(): SubagentExecutionRuntime {
     return {
       provider: this.provider,
       ...(this.compactor ? { compactor: this.compactor } : {}),
       ...(this.usageSession ? { usageSession: this.usageSession } : {}),
       thinkingEffort: this.thinkingEffort,
-      ...(requestedRoute ? { requestedModelRoute: requestedRoute } : {}),
       ...(this.modelRouteId || this.provider.modelName
         ? { resolvedModelRoute: this.modelRouteId ?? this.provider.modelName }
         : {}),
-      source:
-        request?.ephemeralRouteId !== undefined
-          ? "ephemeral"
-          : request?.profileRouteId !== undefined
-            ? "profile"
-            : "parent",
+      source: "parent",
       onRateLimited: (reporter, signal) => this.rotateProvider(reporter, signal),
     };
   }

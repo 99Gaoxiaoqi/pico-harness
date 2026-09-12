@@ -172,25 +172,25 @@ fork 完成后，TUI 自动切换到新 Session（forkedSessionId）。
 
 ---
 
-## 5. 子代理委派流程
+## 5. 配置型子代理流程
 
-下面展示 `explore` 的只读数据流。可写 `worker` 使用另一条固定路径：宿主必须先创建独立 Git worktree 和 Worker 沙箱；能力不可用时直接拒绝，不降级写主工作区。
+下面展示 `local_read` 的只读数据流。可写 `implementation` 使用另一条固定路径：宿主必须先创建独立 Git worktree 和 Worker 沙箱；能力不可用时直接拒绝，不降级写主工作区。
 
 ```
 主 Agent: "搜索所有 TODO 注释并总结"
     │
     ▼
-delegate_task({task_prompt:"搜索TODO", mode:"explore"})
+agent_list() → agent_spawn({profile:"local_read", task:"搜索TODO"})
     │
     ▼
-AgentEngine.runSub():
-  ├─ 创建全新 contextHistory(不依赖主 Session)
+ConfiguredSubagentExecutor:
+  ├─ 创建独立持久 Session 与 RuntimeRun
   ├─ 构建只读 registry:
   │   ├─ read_file / glob / grep / skill_view
   │   ├─ bash(强制 readOnly=true)
   │   └─ fetch_url / web_search
   ├─ 专属 System Prompt(严厉警告必须用工具)
-  ├─ maxSubTurns 默认 10，思考档位来自已解析的子代理模型路由
+  ├─ 最大轮次与思考档位来自冻结的 Profile/Preset
   │
   │  ┌─ 子 Agent Turn 1-N ──────────────────┐
   │  │  grep "TODO" → 找到 15 个文件           │
@@ -200,11 +200,10 @@ AgentEngine.runSub():
   │  └───────────────────────────────────────┘
   │
   ├─ summary < 200 字? → 追加一轮强制扩写
-  └─ return {summary, evidenceRefs[]}
-      └─ evidenceRefs: 长报告写入 Evidence CAS，返回 pico://evidence/... 引用
+  └─ return {childSessionId, runId, summary}
 
-主 Agent 收到浓缩 summary(几百字) + Evidence 引用
-  └─ contextHistory 不被几百个文件内容污染
+主 Agent 收到有界 summary；需要时用 agent_output 按精确身份回读
+  └─ 子会话历史不污染主 Agent contextHistory
 ```
 
 ---

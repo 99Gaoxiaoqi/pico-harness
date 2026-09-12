@@ -465,12 +465,7 @@ export function assertTranscriptEvent(value: unknown): asserts value is Transcri
     case "assistant.response.suppressed":
       transcriptExactKeys(value, "eventId", "sequence", "createdAt", "type", "entryId", "reason");
       transcriptStrings(value, "entryId", "reason");
-      transcriptEnum(value, "reason", [
-        "required-delegation",
-        "delegation-first-retry",
-        "explore-synthesis-retry",
-        "network-retry",
-      ]);
+      transcriptEnum(value, "reason", ["internal-control", "network-retry"]);
       return;
     case "tool.started":
       transcriptExactKeys(

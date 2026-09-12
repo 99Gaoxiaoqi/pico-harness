@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -64,29 +64,6 @@ test("压缩不改账本、只追加 checkpoint（读模型变化）", () => {
 // 断言"债务表征当前存在"。债务在 → 测试绿；债务被修复 → 表征消失 → 测试红，
 // 提醒开发者删除/反转本测试。这是活体追踪——修复落地时由红测试强制显式处理，
 // 而不是靠人记。修复对应债务后：删除该测试，或按注释转为正向断言。
-
-test("D7 正向不变量：DelegationManager 不再承担 graph 调度职责", () => {
-  // Graph v2 的去重、claim 与收口已归持久化调度器所有。DelegationManager
-  // 只管普通委派与 plan settle，不再接收 graph 身份、lease 或 settle 回调。
-  const manager = readSource("src/tools/delegation-manager.ts");
-  assert.doesNotMatch(manager, /graphWorkId/, "DelegationManager 不得携带 graph work 身份");
-  assert.doesNotMatch(manager, /GraphWorkLease/, "DelegationManager 不得消费 graph lease");
-  assert.doesNotMatch(manager, /onGraphWorkSettled/, "DelegationManager 不得回调 graph settle 链");
-  assert.doesNotMatch(manager, /\bliveDelegationIds\b/, "liveDelegationIds 内存负信号已移除");
-  assert.doesNotMatch(
-    manager,
-    /\bsettleFinalized\b/,
-    "settleFinalized 标志已移除（lease + records.delete 取代）",
-  );
-});
-
-test("D10 正向不变量：旧 graph work lease 协议已删除", () => {
-  // Graph v2 由 SQLite Provision/Claim CAS 与 exact RuntimeRun admission 持有执行主权，
-  // 不再保留 v1 DelegationManager graph work lease 协议。
-  const manager = readSource("src/tools/delegation-manager.ts");
-  assert.equal(existsSync(join(repositoryRoot, "src/graph/work-lease.ts")), false);
-  assert.doesNotMatch(manager, /GRAPH_WORK_LEASE_TTL_MS|graphWorkLeaseKey|heartbeatGraphWorkLease/);
-});
 
 test("D9 正向不变量：连接决策在监督器与共享 client，外壳只渲染推送相位", () => {
   // P0 机械态债已消除（3-C，2026-08-15）：连接探活/降级/恢复广播收口在主进程

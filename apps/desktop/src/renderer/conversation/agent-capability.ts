@@ -1,8 +1,6 @@
 import type { ToolItemView } from "./types.js";
 
 const AGENT_TOOLS = new Set([
-  "delegate_status",
-  "spawn_subagent",
   "agent_spawn",
   "update_agent_graph",
   "view_agent_graph",
@@ -65,7 +63,7 @@ export function loadedAgentTools(item: ToolItemView): readonly string[] | undefi
   const match = receipt
     ?.trim()
     .match(
-      /^已加载 (?:Delegation|Graph) 组 (\d+) 个工具，下一轮可直接调用:\n((?:- [a-zA-Z0-9_]+(?:\n|$))+)$/u,
+      /^已加载 (?:Agents|Graph) 组 (\d+) 个工具，下一轮可直接调用:\n((?:- [a-zA-Z0-9_]+(?:\n|$))+)$/u,
     );
   if (!match) return undefined;
   const tools = match[2]!

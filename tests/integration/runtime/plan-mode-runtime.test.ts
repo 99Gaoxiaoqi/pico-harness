@@ -406,7 +406,7 @@ test("cancel and replan race commits exactly one interrupted Plan terminal", asy
 test("plan tool projection and registry safety are the same deny-by-default boundary", async () => {
   const allowed = ["read_file", "grep", "skill_view", "repo_map", "ask_user", "submit_plan"];
   for (const name of allowed) assert.equal(isPlanProviderTool(name), true, name);
-  const denied = ["bash", "write_file", "edit_file", "web_search", "delegate_task", "mcp__x__y"];
+  const denied = ["bash", "write_file", "edit_file", "web_search", "agent_spawn", "mcp__x__y"];
   const safety = buildForegroundSafetyMiddleware(
     process.cwd(),
     { collaborationMode: "plan" },

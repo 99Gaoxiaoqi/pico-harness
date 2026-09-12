@@ -142,12 +142,7 @@ function hydrationTimestamp(value: string): number {
 }
 
 function isAgentToolName(toolName: string): boolean {
-  return (
-    toolName === "spawn_subagent" ||
-    toolName === "delegate_task" ||
-    toolName === "delegate_status" ||
-    toolName.startsWith("[Subagent]")
-  );
+  return toolName === "agent_spawn" || toolName.startsWith("[Subagent]");
 }
 
 function toolTargetSummary(toolName: string, args: string): string | undefined {
@@ -180,12 +175,12 @@ function summarizeAgentResult(toolName: string, result: string): string {
   if (topLevelError) return formatErrorSummary(topLevelError);
 
   const status = stringField(parsed, "status");
-  const delegationId = stringField(parsed, "delegationId") ?? stringField(parsed, "delegation_id");
-  const batch = extractDelegationBatch(parsed);
-  if (batch) return summarizeDelegationBatch(batch);
   if (status) {
-    const idPart = delegationId ? ` · ${compactText(delegationId, 48)}` : "";
-    return `${status}${idPart}`;
+    const childSessionId = stringField(parsed, "childSessionId");
+    const summary = stringField(parsed, "summary");
+    const idPart = childSessionId ? ` · ${compactText(childSessionId, 48)}` : "";
+    const summaryPart = summary ? ` · ${compactText(summary, 120)}` : "";
+    return `${status}${idPart}${summaryPart}`;
   }
   return summarizePlainAgentResult(toolName, result);
 }
@@ -193,37 +188,6 @@ function summarizeAgentResult(toolName: string, result: string): string {
 function summarizePlainAgentResult(toolName: string, result: string): string {
   const label = toolName.startsWith("[Subagent]") ? "Subagent" : "Agent";
   return `${label} · ${formatOutputPreview(result, 3)}`;
-}
-
-function extractDelegationBatch(
-  value: Record<string, unknown>,
-): { results: Record<string, unknown>[] } | undefined {
-  const direct = value["results"];
-  if (Array.isArray(direct)) return { results: direct.filter(isRecord) };
-  const nestedResult = value["result"];
-  if (!isRecord(nestedResult)) return undefined;
-  const nested = nestedResult["results"];
-  return Array.isArray(nested) ? { results: nested.filter(isRecord) } : undefined;
-}
-
-function summarizeDelegationBatch(batch: { results: Record<string, unknown>[] }): string {
-  const total = batch.results.length;
-  const completed = batch.results.filter(
-    (item) => stringField(item, "status") === "completed",
-  ).length;
-  const failed = batch.results.filter((item) => stringField(item, "status") === "error").length;
-  const parts = [`${completed}/${total} completed`];
-  if (failed > 0) parts.push(`${failed} failed`);
-
-  const success = batch.results.find((item) => stringField(item, "status") === "completed");
-  const failure = batch.results.find((item) => stringField(item, "status") === "error");
-  const successSummary = success ? stringField(success, "summary") : undefined;
-  const failureSummary = failure
-    ? (stringField(failure, "error") ?? stringField(failure, "summary"))
-    : undefined;
-  if (successSummary) parts.push(`ok: ${compactText(successSummary, 72)}`);
-  if (failureSummary) parts.push(`failed: ${compactText(failureSummary, 88)}`);
-  return compactText(parts.join(" · "), 220);
 }
 
 function formatOutputPreview(output: string, maxLines: number): string {

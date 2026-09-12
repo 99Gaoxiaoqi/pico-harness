@@ -60,14 +60,14 @@ Workspace
 
 ## Composer、模型与权限入口
 
-| TUI 入口                                      | TUI 行为与状态                                          | Desktop 等价入口                                                   | 等级   | 验收标准                                                                                                           |
-| --------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------ | ------ | ------------------------------------------------------------------------------------------------------------------ |
-| `/model [name]`                               | 查看或切换模型路由；`idle`                              | Composer 底栏模型选择器                                            | 主路径 | 选项来自 Runtime 模型路由；切换只影响当前 Session；运行中禁用并说明原因                                            |
-| `/mode <agent\|plan\|ask\|auto\|full-access>` | 查看或切换协作轴或权限轴；`idle`                        | Composer 的 Plan 开关与权限选择器                                  | 主路径 | `agent`/`plan` 只更新 `collaborationMode`，其余值只更新 `permissionMode`；不再发送合并 `mode` 字段                 |
-| `/permissions [ask\|auto\|full-access]`       | 查看或切换权限模式；`idle`                              | Composer 底栏权限/访问级别按钮，打开权限选择器                     | 主路径 | Desktop 将三个权限值依次显示为“请求批准”“帮我批准”“完全访问权限”；从任一入口修改后，模式和权限文案立即一致         |
-| `/thinking [level]`                           | 查看或切换当前模型支持的推理强度；`idle`                | Composer 底栏 Thinking 选择器                                      | 主路径 | 仅显示当前模型路由支持的级别；切换模型后重新校验，不保留非法旧值                                                   |
-| `/skill <name> [arguments]`                   | 激活 Skill 并作为 Prompt 启动 Agent；`idle`             | Composer “+”菜单 → Skill，选择后插入结构化 Skill 引用及可编辑参数  | 主路径 | Skill 身份不退化为普通文本；发送遵循首次创建或空闲续聊语义；运行中禁用                                             |
-| `/agent <name> <task>`                        | 将指定 Agent 资料渲染为委派 Prompt；无显式 availability | Composer “+”菜单 → Subagent，选择 Agent 后在同一 Composer 描述任务 | 主路径 | Agent 选项来自同一 Catalog；提交后主 Transcript 显示委派条目，子 Session 在右侧详情打开；运行中提交遵循 Steer 语义 |
+| TUI 入口                                      | TUI 行为与状态                                        | Desktop 等价入口                                                   | 等级   | 验收标准                                                                                                              |
+| --------------------------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------ | ------ | --------------------------------------------------------------------------------------------------------------------- |
+| `/model [name]`                               | 查看或切换模型路由；`idle`                            | Composer 底栏模型选择器                                            | 主路径 | 选项来自 Runtime 模型路由；切换只影响当前 Session；运行中禁用并说明原因                                               |
+| `/mode <agent\|plan\|ask\|auto\|full-access>` | 查看或切换协作轴或权限轴；`idle`                      | Composer 的 Plan 开关与权限选择器                                  | 主路径 | `agent`/`plan` 只更新 `collaborationMode`，其余值只更新 `permissionMode`；不再发送合并 `mode` 字段                    |
+| `/permissions [ask\|auto\|full-access]`       | 查看或切换权限模式；`idle`                            | Composer 底栏权限/访问级别按钮，打开权限选择器                     | 主路径 | Desktop 将三个权限值依次显示为“请求批准”“帮我批准”“完全访问权限”；从任一入口修改后，模式和权限文案立即一致            |
+| `/thinking [level]`                           | 查看或切换当前模型支持的推理强度；`idle`              | Composer 底栏 Thinking 选择器                                      | 主路径 | 仅显示当前模型路由支持的级别；切换模型后重新校验，不保留非法旧值                                                      |
+| `/skill <name> [arguments]`                   | 激活 Skill 并作为 Prompt 启动 Agent；`idle`           | Composer “+”菜单 → Skill，选择后插入结构化 Skill 引用及可编辑参数  | 主路径 | Skill 身份不退化为普通文本；发送遵循首次创建或空闲续聊语义；运行中禁用                                                |
+| `/agent <name> <task>`                        | 以指定 Agent 资料创建 Graph 工作；无显式 availability | Composer “+”菜单 → Subagent，选择 Agent 后在同一 Composer 描述任务 | 主路径 | Agent 选项来自同一 Catalog；提交后主 Transcript 显示 Agent 条目，子 Session 在右侧详情打开；运行中提交遵循 Steer 语义 |
 
 Composer 仍保留 Slash 自动补全作为上述能力的高级等价入口。图形入口和 Slash 入口必须调用同一领域接口；不得通过拼接 `/model ...` 等文本绕过类型化协议。
 

@@ -52,7 +52,7 @@ test("真实工具组加载结果显示协作卡与折叠技术详情，失败�
   let output: string;
   try {
     output = await disclosure.runInTurn(turn, () =>
-      loader.execute(JSON.stringify({ group: "delegation" })),
+      loader.execute(JSON.stringify({ group: "agents" })),
     );
   } finally {
     disclosure.endTurn(turn);
@@ -76,7 +76,6 @@ test("真实工具组加载结果显示协作卡与折叠技术详情，失败�
   assert.match(markup, /<code>agent_spawn<\/code>/u);
   assert.match(markup, /查看加载记录/u);
   assert.match(markup, /查看代码审查的会话/u);
-  assert.doesNotMatch(markup, /<code>spawn_subagent<\/code>/u);
   for (const invalid of [
     { ...activation, state: "failed" as const },
     { ...activation, state: "active" as const },
@@ -90,7 +89,7 @@ test("真实工具组加载结果显示协作卡与折叠技术详情，失败�
       '{"activated":["agent_spawn"],"blocked":{"name":"view_agent_graph","reason":"unknown","schemaChars":1}}',
       '{"activated":["agent_spawn"],"blocked":{"name":"agent_spawn","reason":"schema_too_large","schemaChars":70000}}',
       '{"activated":["agent_spawn"]',
-      "已加载 Delegation 组 2 个工具，下一轮可直接调用:\n- agent_spawn",
+      "已加载 Agents 组 2 个工具，下一轮可直接调用:\n- agent_spawn",
     ].map((output) => ({ ...activation, output })),
     { ...activation, toolName: "agent_spawn" },
   ]) {
@@ -141,7 +140,7 @@ test("真实工具组加载结果显示协作卡与折叠技术详情，失败�
     disclosure.endTurn(searchTurn);
   }
   for (const output of [
-    "已加载 Delegation 组 1 个工具，下一轮可直接调用:\n- agent_spawn",
+    "已加载 Agents 组 1 个工具，下一轮可直接调用:\n- agent_spawn",
     "已加载 Graph 组 1 个工具，下一轮可直接调用:\n- view_agent_graph",
     '{"activated":["agent_spawn","memory_extract"],"blocked":{"name":"view_agent_graph","reason":"schema_too_large","schemaChars":70000}}',
   ]) {

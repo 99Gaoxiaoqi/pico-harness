@@ -6,7 +6,7 @@ import type { HookHostNetworkGate } from "../hooks/executors/index.js";
 import type { LLMProvider } from "../provider/interface.js";
 import type { WorkspaceSandboxConfig } from "../safety/workspace-sandbox.js";
 import { ToolRegistry } from "../tools/registry-impl.js";
-import { createSubagentRegistryFactory } from "../tools/delegation-registry.js";
+import { createHookVerifierRegistry } from "../tools/child-agent-policy.js";
 import type { WorkspaceRoots } from "../tools/workspace-roots.js";
 import { createEngineRuntimePort } from "./engine-runtime-port-adapter.js";
 import { currentRuntimeRun, RuntimeRun } from "./runtime-run.js";
@@ -56,20 +56,16 @@ export function bindRuntimeHookCapabilities(input: RuntimeHookAssemblyInput): vo
             ? { toolResultRedactionSecrets: input.toolResultRedactionSecrets }
             : {}),
         });
-        const verifierRegistry = createSubagentRegistryFactory({
+        const verifierRegistry = createHookVerifierRegistry({
           workDir: input.workDir,
           workspaceRoots: input.workspaceRoots,
-          runner: verifierEngine,
-          manager: input.runtimeState.delegationManager,
-          maxSpawnDepth: 0,
           processSandbox: {
             config: input.sandboxConfig,
             scratchRoot: join(input.picoHome, "sandboxes", input.session.id, "subagents"),
           },
-          ownerSessionId: input.session.id,
           env: input.runtimeEnv,
           codeIntelligence: input.runtimeState.codeIntelligence,
-        })({ mode: "explore", role: "leaf", depth: 0, maxSpawnDepth: 0 });
+        });
         const task = [
           request.prompt,
           "",
@@ -79,9 +75,6 @@ export function bindRuntimeHookCapabilities(input: RuntimeHookAssemblyInput): vo
         ].join("\n");
         const result = await verifierEngine.runSub(task, verifierRegistry, undefined, {
           maxTurns: request.maxTurns,
-          role: "leaf",
-          depth: 0,
-          maxSpawnDepth: 0,
           signal: request.signal,
           workDir: input.workDir,
         });

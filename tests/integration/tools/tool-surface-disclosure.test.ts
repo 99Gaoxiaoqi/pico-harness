@@ -20,6 +20,7 @@ import {
 import {
   getAvailableDeferredGroups,
   getSupportedToolNames,
+  findGroupForTool,
   isPlanModeTool,
   isToolSupportedForHost,
   PICO_TOOL_GROUPS,
@@ -53,19 +54,20 @@ test("headless 宿主派生与白名单完全一致（read_evidence 已随 E3 �
   assert.equal(isToolSupportedForHost("read_evidence", "headless"), false);
 });
 
-test("background 宿主亲和性收编原 UNSAFE_BACKGROUND_TOOLS 语义", () => {
-  for (const name of [
-    "ask_user",
-    "schedule_task",
-    "delegate_task",
-    "delegate_status",
-    "spawn_subagent",
-  ]) {
+test("background 宿主亲和性拒绝交互与 Agent 启动工具", () => {
+  for (const name of ["ask_user", "schedule_task", "agent_spawn"]) {
     assert.equal(isToolSupportedForHost(name, "background"), false, name);
   }
   for (const name of ["read_file", "bash", "grep", "task_list"]) {
     assert.equal(isToolSupportedForHost(name, "background"), true, name);
   }
+});
+
+test("旧委派工具不再属于运行时工具目录", () => {
+  for (const name of ["delegate_task", "delegate_status", "spawn_subagent"]) {
+    assert.equal(findGroupForTool(name), undefined, name);
+  }
+  assert.equal(findGroupForTool("agent_spawn")?.id, "agents");
 });
 
 test("Automation 工具权限独立 fail-closed，新工具不会随 background surface 自动扩权", () => {
@@ -95,7 +97,7 @@ test("core 工具只由活跃 surface 目录声明", () => {
   const core = PICO_TOOL_GROUPS.find((group) => group.id === "core");
   assert.ok(core);
   assert.equal(core.economy, "always");
-  assert.equal(core.toolNames.length, 11);
+  assert.equal(core.toolNames.length, 10);
   assert.ok(core.toolNames.includes("read_file"));
   assert.ok(core.toolNames.includes("ask_user"));
   assert.ok(core.toolNames.includes("request_sandbox_boundary"));

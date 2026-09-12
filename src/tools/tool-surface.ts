@@ -52,7 +52,6 @@ export const PICO_TOOL_GROUPS: readonly ToolGroupDef[] = [
       "grep",
       "todo",
       "ask_user",
-      "delegate_task",
       "schedule_task",
       "request_sandbox_boundary",
     ],
@@ -95,10 +94,10 @@ export const PICO_TOOL_GROUPS: readonly ToolGroupDef[] = [
     economy: "deferred",
   },
   {
-    id: "delegation",
-    label: "Delegation",
-    description: "多代理编排：查询委派状态、派遣探索子代理",
-    toolNames: ["delegate_status", "spawn_subagent", "agent_spawn"],
+    id: "agents",
+    label: "Agents",
+    description: "运行已配置的持久子代理",
+    toolNames: ["agent_spawn"],
     economy: "deferred",
   },
   {
@@ -137,9 +136,6 @@ const TOOL_HOST_AFFINITY: Readonly<Record<string, Partial<Record<ToolHostKind, T
   {
     ask_user: { background: "unsupported" },
     schedule_task: { background: "unsupported" },
-    delegate_task: { background: "unsupported" },
-    delegate_status: { background: "unsupported" },
-    spawn_subagent: { background: "unsupported" },
     agent_spawn: { background: "unsupported" },
     request_sandbox_boundary: { background: "unsupported" },
     // headless 显式白名单（fail-closed）。read_evidence 已随 Evidence 回读协议
