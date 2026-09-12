@@ -242,8 +242,8 @@ function mergeLoadedData(
     runs: [
       ...replaceWorkspaceItems(base.runs, workspacePath, parseRuns(results.runs, workspacePath)),
     ].sort((left, right) => right.updatedAt - left.updatedAt),
-    jobs: recordArray(jobResult.jobs).map((item, index) => ({
-      id: stringValue(item.jobId ?? item.id, `job-${index}`),
+    jobs: recordArray(jobResult.jobs).map((item) => ({
+      id: stringValue(item.jobId),
       name: stringValue(item.name, "未命名自动化"),
       prompt: stringValue(item.prompt),
       schedule: stringValue(item.schedule),
