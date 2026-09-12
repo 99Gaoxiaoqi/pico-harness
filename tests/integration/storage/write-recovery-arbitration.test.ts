@@ -48,7 +48,7 @@ function attachFailureSeam(
       if (property === "appendBatch") {
         return (
           events: readonly RuntimeEvent[],
-          options?: AppendRuntimeEventBatchOptions,
+          options: AppendRuntimeEventBatchOptions,
         ): Promise<readonly RuntimeEventStoreAppendResult[]> => {
           if (!injectNextAppendBatch) return target.appendBatch(events, options);
           injectNextAppendBatch = false;

@@ -192,7 +192,7 @@ export class SqliteRuntimeEventStore {
 
   async append(
     event: RuntimeEvent,
-    options: RuntimeFencedWriteOptions = {},
+    options: RuntimeFencedWriteOptions,
   ): Promise<RuntimeEventStoreAppendResult> {
     const results = await this.appendBatch([event], options);
     return results[0]!;
@@ -238,7 +238,7 @@ export class SqliteRuntimeEventStore {
 
   async sealRun(
     terminalEvent: Extract<RuntimeEvent, { kind: "run.terminal" }>,
-    options: RuntimeFencedWriteOptions = {},
+    options: RuntimeFencedWriteOptions,
   ): Promise<RuntimeEventStoreAppendResult> {
     return this.append(terminalEvent, options);
   }
@@ -365,7 +365,7 @@ export class SqliteRuntimeEventStore {
    */
   async appendBatch(
     events: readonly RuntimeEvent[],
-    options: AppendRuntimeEventBatchOptions = {},
+    options: AppendRuntimeEventBatchOptions,
   ): Promise<readonly RuntimeEventStoreAppendResult[]> {
     const canonicalEvents = events.map(canonicalizeRuntimeEvent);
     if (canonicalEvents.length === 0) return [];
@@ -595,7 +595,7 @@ export class SqliteRuntimeEventStore {
       readonly operationId: string;
       readonly fingerprint: string;
       readonly expectedSessionSequence: number;
-      readonly ownerFence?: RuntimeOwnerFence;
+      readonly ownerFence: RuntimeOwnerFence;
     },
   ): Promise<readonly RuntimeEventStoreAppendResult[]> {
     const sessionId = events[0]?.sessionId;
@@ -612,7 +612,7 @@ export class SqliteRuntimeEventStore {
   async appendSessionState(
     sessionId: string,
     patch: SessionRuntimeStateWritePatch,
-    options: AppendRuntimeSessionStateOptions = {},
+    options: AppendRuntimeSessionStateOptions,
   ): Promise<RuntimeEventStoreAppendResult> {
     const normalized = normalizeSessionRuntimeStateWritePatch(patch);
     if (!normalized) throw new Error("Runtime session state write patch is invalid");
@@ -626,7 +626,7 @@ export class SqliteRuntimeEventStore {
   async appendTranscriptEvent(
     sessionId: string,
     event: DurableTranscriptEvent,
-    options: AppendRuntimeTranscriptEventOptions = {},
+    options: AppendRuntimeTranscriptEventOptions,
   ): Promise<RuntimeEventStoreAppendResult> {
     return appendRuntimeEventWithArbitration(
       this,
@@ -2380,7 +2380,7 @@ export class SqliteRuntimeEventStore {
 
   private appendBatchLocked(
     canonicalEvents: readonly RuntimeEvent[],
-    options: AppendRuntimeEventBatchOptions,
+    options: AppendRuntimeEventBatchOptions | undefined,
     txId: string,
     transactionCommittedAt: string,
     continuationClaim?: RuntimeContinuationClaim,
@@ -2406,8 +2406,9 @@ export class SqliteRuntimeEventStore {
       contexts.set(event.sessionId, this.requireSessionAppendContext(event.sessionId));
     }
 
+    this.assertOwnerFenceLocked([...contexts.keys()], options?.ownerFence);
     for (const [sessionId, expectedHighWater] of Object.entries(
-      options.expectedSessionHighWater ?? {},
+      options?.expectedSessionHighWater ?? {},
     )) {
       if (!Number.isSafeInteger(expectedHighWater) || expectedHighWater < 0) {
         throw new Error(`Runtime session ${sessionId} expected high-water is invalid`);
@@ -2418,12 +2419,11 @@ export class SqliteRuntimeEventStore {
         );
       }
     }
-    this.assertOwnerFenceLocked([...contexts.keys()], options.ownerFence);
     for (const [sessionId, context] of contexts) {
       this.ensureTranscriptProjectionCurrentLocked(sessionId, context.row.last_event_seq);
     }
 
-    if (options.planOperation) {
+    if (options?.planOperation) {
       const { operationId, fingerprint } = options.planOperation;
       if (!operationId.trim() || !/^sha256:[a-f0-9]{64}$/u.test(fingerprint)) {
         throw new Error("Plan operation identity is invalid");
@@ -2525,7 +2525,7 @@ export class SqliteRuntimeEventStore {
     }
 
     for (const [sessionId, expectedHighWater] of Object.entries(
-      options.expectedSessionHighWater ?? {},
+      options?.expectedSessionHighWater ?? {},
     )) {
       const context = contexts.get(sessionId)!;
       if (context.row.last_event_seq !== expectedHighWater) {
@@ -2701,26 +2701,27 @@ export class SqliteRuntimeEventStore {
     sessionIds: readonly string[],
     ownerFence: RuntimeOwnerFence | undefined,
   ): void {
-    if (ownerFence) {
-      assertNonNegativeInteger(ownerFence.epoch, "owner fence epoch");
-      if (
-        sessionIds.length !== 1 ||
-        sessionIds[0] !== ownerFence.sessionId ||
-        !ownerFence.sessionId.trim()
-      ) {
-        throw new RuntimeEventStoreIntegrityError(
-          "Runtime owner fence must match the append batch's single session",
-        );
-      }
+    if (!ownerFence) {
+      const sessionId = sessionIds[0] ?? "unknown";
+      const actualEpoch = sessionIds.length === 1 ? this.readOwnerFenceEpochLocked(sessionId) : 0;
+      throw new RuntimeEventStoreOwnerFenceError(sessionId, undefined, actualEpoch);
+    }
+    if (!Number.isSafeInteger(ownerFence.epoch) || ownerFence.epoch <= 0) {
+      throw new RuntimeEventStoreIntegrityError("Runtime owner fence epoch must be positive");
+    }
+    if (
+      sessionIds.length !== 1 ||
+      sessionIds[0] !== ownerFence.sessionId ||
+      !ownerFence.sessionId.trim()
+    ) {
+      throw new RuntimeEventStoreIntegrityError(
+        "Runtime owner fence must match the append batch's single session",
+      );
     }
     for (const sessionId of sessionIds) {
       const actualEpoch = this.readOwnerFenceEpochLocked(sessionId);
-      const expectedEpoch = ownerFence?.sessionId === sessionId ? ownerFence.epoch : undefined;
-      if (actualEpoch > 0 && expectedEpoch === undefined) {
-        throw new RuntimeEventStoreOwnerFenceError(sessionId, undefined, actualEpoch);
-      }
-      if (expectedEpoch !== undefined && expectedEpoch !== actualEpoch) {
-        throw new RuntimeEventStoreOwnerFenceError(sessionId, expectedEpoch, actualEpoch);
+      if (ownerFence.epoch !== actualEpoch) {
+        throw new RuntimeEventStoreOwnerFenceError(sessionId, ownerFence.epoch, actualEpoch);
       }
     }
   }
@@ -3173,7 +3174,7 @@ export interface RuntimeEventPointRead {
 export async function appendRuntimeEventBatchWithArbitration(
   store: SqliteRuntimeEventStore,
   events: readonly RuntimeEvent[],
-  options: AppendRuntimeEventBatchOptions = {},
+  options: AppendRuntimeEventBatchOptions,
 ): Promise<readonly RuntimeEventStoreAppendResult[]> {
   try {
     return await store.appendBatch(events, options);
@@ -3205,7 +3206,7 @@ function isDeterministicStoreRefusal(error: unknown): boolean {
 export async function appendRuntimeEventWithArbitration(
   store: SqliteRuntimeEventStore,
   event: RuntimeEvent,
-  options: AppendRuntimeEventBatchOptions = {},
+  options: AppendRuntimeEventBatchOptions,
 ): Promise<RuntimeEventStoreAppendResult> {
   const results = await appendRuntimeEventBatchWithArbitration(store, [event], options);
   return results[0]!;

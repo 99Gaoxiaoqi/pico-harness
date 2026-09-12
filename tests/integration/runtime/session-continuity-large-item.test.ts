@@ -16,6 +16,7 @@ import type { RuntimeEvent } from "../../../src/engine/session-runtime-event.js"
 import { SqliteSessionContinuitySource } from "../../../src/daemon/sqlite-session-continuity-source.js";
 import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
 import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
 function message(
   eventId: string,
@@ -61,11 +62,17 @@ test("continuity source and replica reassemble oversized UTF-8 open/page/advance
     readMetadata: async () => ({ session, queuedInputs: [] }),
   });
   try {
-    await store.initializeSession({ sessionId, workDir: workspacePath });
-    await store.append(message("older", sessionId, "user", "older", "turn-older"));
+    const { ownerFence } = await initializeRuntimeEventOwner(store, {
+      sessionId,
+      workDir: workspacePath,
+    });
+    await store.append(message("older", sessionId, "user", "older", "turn-older"), {
+      ownerFence,
+    });
     const openContent = "你🙂好🌍".repeat(1_500);
     await store.append(
       message("open-large", sessionId, "assistant", openContent, "turn-open-large"),
+      { ownerFence },
     );
 
     const openSnapshot = await source.readOpenSnapshot({
@@ -127,6 +134,7 @@ test("continuity source and replica reassemble oversized UTF-8 open/page/advance
     const advanceContent = "漢字🤖字节".repeat(1_600);
     const appended = await store.append(
       message("advance-large", sessionId, "assistant", advanceContent, "turn-advance-large"),
+      { ownerFence },
     );
     assert.ok(appended.transcriptWatermark);
     const advanceWatermark: RuntimeTranscriptWatermark = {

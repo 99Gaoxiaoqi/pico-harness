@@ -23,6 +23,8 @@ import {
 import { subagentParent } from "../../../apps/desktop/src/renderer/conversation/subagent-navigation.js";
 import { workspaceSessionKey } from "../../../apps/desktop/src/renderer/workspace-session.js";
 import { SESSION_RUNTIME_STATE_VERSION } from "../../../src/engine/session-runtime.js";
+import type { RuntimeOwnerFence } from "../../../src/storage/runtime-event-store-contracts.js";
+import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
 function base(sessionId: string, suffix: string): RuntimeEventBase {
   return {
@@ -61,6 +63,7 @@ test("session list hides admitted children across workspaces and outcomes while 
   );
   const parent = stores[0]!;
   const isolated = stores[1]!;
+  const ownerFences = new Map<string, RuntimeOwnerFence>();
   t.after(async () => {
     for (const store of stores) store.close();
     await desktop.close();
@@ -69,37 +72,44 @@ test("session list hides admitted children across workspaces and outcomes while 
   });
   const create = async (workspacePath: string, sessionId: string) => {
     const store = workspacePath === parentPath ? parent : isolated;
-    await store.initializeSession({
+    const { ownerFence } = await initializeRuntimeEventOwner(store, {
       sessionId,
       workDir: workspacePath,
     });
-    await store.append({
-      ...base(sessionId, "settings"),
-      visibility: "internal",
-      kind: "session.state.committed",
-      data: {
-        stateVersion: SESSION_RUNTIME_STATE_VERSION,
-        patch: {
-          settings: {
-            provider: "openai",
-            model: "test",
-            modelRouteId: "test/test",
-            collaborationMode: "agent",
-            permissionMode: "ask",
-            thinkingEffort: "off",
-            thinkingEffortExplicit: false,
-            additionalDirectories: [],
+    ownerFences.set(`${workspacePath}\0${sessionId}`, ownerFence);
+    await store.append(
+      {
+        ...base(sessionId, "settings"),
+        visibility: "internal",
+        kind: "session.state.committed",
+        data: {
+          stateVersion: SESSION_RUNTIME_STATE_VERSION,
+          patch: {
+            settings: {
+              provider: "openai",
+              model: "test",
+              modelRouteId: "test/test",
+              collaborationMode: "agent",
+              permissionMode: "ask",
+              thinkingEffort: "off",
+              thinkingEffortExplicit: false,
+              additionalDirectories: [],
+            },
           },
         },
       },
-    });
+      { ownerFence },
+    );
   };
   await create(parentPath, "parent");
-  await parent.append({
-    ...base("parent", "start"),
-    kind: "run.started",
-    data: { workDir: parentPath },
-  });
+  await parent.append(
+    {
+      ...base("parent", "start"),
+      kind: "run.started",
+      data: { workDir: parentPath },
+    },
+    { ownerFence: ownerFences.get(`${parentPath}\0parent`)! },
+  );
   for (const [id, workDir, status, legacy] of [
     ["shared", parentPath, "completed", true],
     ["isolated", childPath, "completed", false],
@@ -108,42 +118,55 @@ test("session list hides admitted children across workspaces and outcomes while 
   ] as const) {
     await create(workDir, id);
     const store = workDir === parentPath ? parent : isolated;
-    await store.append({ ...base(id, "start"), kind: "run.started", data: { workDir } });
-    await store.append({
-      ...base(id, "admit"),
-      kind: "message.committed",
-      data: {
-        message: {
-          role: "assistant",
-          content: "child admission",
-          providerData: {
-            picoHiddenFromTranscript: true,
-            picoConfiguredChild: {
-              version: 1,
-              parentSessionId: "parent",
-              parentRunId: "parent-run",
-              parentToolCallId: "spawn",
-              childSessionId: id,
-              workDir,
-              agentName: "Reader",
-              status: "started",
-              runId: `${id}-run`,
-              turnId: `${id}-turn`,
-              ...(!legacy ? { parentWorkspacePath: parentPath } : {}),
+    const ownerFence = ownerFences.get(`${workDir}\0${id}`)!;
+    await store.append(
+      { ...base(id, "start"), kind: "run.started", data: { workDir } },
+      { ownerFence },
+    );
+    await store.append(
+      {
+        ...base(id, "admit"),
+        kind: "message.committed",
+        data: {
+          message: {
+            role: "assistant",
+            content: "child admission",
+            providerData: {
+              picoHiddenFromTranscript: true,
+              picoConfiguredChild: {
+                version: 1,
+                parentSessionId: "parent",
+                parentRunId: "parent-run",
+                parentToolCallId: "spawn",
+                childSessionId: id,
+                workDir,
+                agentName: "Reader",
+                status: "started",
+                runId: `${id}-run`,
+                turnId: `${id}-turn`,
+                ...(!legacy ? { parentWorkspacePath: parentPath } : {}),
+              },
             },
           },
         },
       },
-    });
+      { ownerFence },
+    );
     // Growing history does not move the initial identity out of its bounded prefix.
     if (id === "shared")
       for (let i = 0; i < 110; i++)
-        await store.append({
-          ...base(id, `output-${i}`),
-          kind: "message.committed",
-          data: { message: { role: "assistant", content: "continued" } },
-        });
-    await store.append({ ...base(id, "terminal"), kind: "run.terminal", data: { status } });
+        await store.append(
+          {
+            ...base(id, `output-${i}`),
+            kind: "message.committed",
+            data: { message: { role: "assistant", content: "continued" } },
+          },
+          { ownerFence },
+        );
+    await store.append(
+      { ...base(id, "terminal"), kind: "run.terminal", data: { status } },
+      { ownerFence },
+    );
     const detail = parseRuntimeResult(
       "session.get",
       await desktop.handle(
@@ -163,7 +186,10 @@ test("session list hides admitted children across workspaces and outcomes while 
   )[0]!.event;
   assert.equal(copied.kind, "message.committed");
   if (copied.kind !== "message.committed") throw new Error("Expected admission");
-  await parent.append({ ...copied, ...base("fork", "copied") });
+  await parent.append(
+    { ...copied, ...base("fork", "copied") },
+    { ownerFence: ownerFences.get(`${parentPath}\0fork`)! },
+  );
   await create(parentPath, "subagent-user-selected-id");
   for (const includeArchived of [false, true]) {
     const list = parseRuntimeResult(

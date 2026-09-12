@@ -6,6 +6,7 @@ import test from "node:test";
 import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
 import { StorageDoctor, type StorageDoctorFinding } from "../../../src/storage/storage-doctor.js";
 import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 import {
   closeAllOperationalDatabasesForTest,
   operationalDatabasePath,
@@ -67,11 +68,11 @@ test("doctor 扫描 SQLite 纪元 workspace 干净", async () => {
   try {
     const store = new SqliteRuntimeEventStore({ storageRoot: fixture.storageRoot });
     try {
-      await store.initializeSession({
+      const { ownerFence } = await initializeRuntimeEventOwner(store, {
         sessionId: "doctor-clean-session",
         workDir: fixture.workspace,
       });
-      await store.append(userMessage("doctor-clean-session", "hello"));
+      await store.append(userMessage("doctor-clean-session", "hello"), { ownerFence });
     } finally {
       store.close();
     }

@@ -26,6 +26,8 @@ import {
 } from "../../../src/tools/session-tasks.js";
 import { BackgroundManager } from "../../../src/tools/background-manager.js";
 import { TaskListTool } from "../../../src/tools/task.js";
+import type { RuntimeOwnerFence } from "../../../src/storage/runtime-event-store-contracts.js";
+import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
 test("session workbar authority enforces CAS/idempotency and projects trace", async () => {
   const fixture = await createFixture();
@@ -109,17 +111,27 @@ test("session workbar authority enforces CAS/idempotency and projects trace", as
     assert.equal(sessionTaskList.revision, 3);
     assert.equal(sessionTaskList.tasks.length, 2);
 
-    await fixture.store.append(internalStateEvent("state-1", "source"));
-    await fixture.store.appendTranscriptEvent("source", {
-      eventId: "transcript-1",
-      sequence: 1,
-      createdAt: Date.parse("2026-08-23T00:00:00.000Z"),
-      type: "entry.appended",
-      entryId: "approval-entry",
-      entry: { kind: "approval", title: "Approved", state: "allow" },
+    await fixture.store.append(internalStateEvent("state-1", "source"), {
+      ownerFence: fixture.sourceFence,
     });
-    await fixture.store.append(messageEvent("event-1", "source", "hello"));
-    await fixture.store.append(messageEvent("event-2", "source", "world"));
+    await fixture.store.appendTranscriptEvent(
+      "source",
+      {
+        eventId: "transcript-1",
+        sequence: 1,
+        createdAt: Date.parse("2026-08-23T00:00:00.000Z"),
+        type: "entry.appended",
+        entryId: "approval-entry",
+        entry: { kind: "approval", title: "Approved", state: "allow" },
+      },
+      { ownerFence: fixture.sourceFence },
+    );
+    await fixture.store.append(messageEvent("event-1", "source", "hello"), {
+      ownerFence: fixture.sourceFence,
+    });
+    await fixture.store.append(messageEvent("event-2", "source", "world"), {
+      ownerFence: fixture.sourceFence,
+    });
     const firstTracePage = fixture.repository.queryTrace({ sessionId: "source", limit: 1 });
     assert.equal(firstTracePage.throughSequence, 4);
     assert.equal(firstTracePage.events.length, 1);
@@ -350,6 +362,7 @@ test("desktop runtime exposes real workbar authorities and publishes revision si
 async function createFixture(): Promise<{
   readonly storageRoot: string;
   readonly store: SqliteRuntimeEventStore;
+  readonly sourceFence: RuntimeOwnerFence;
   readonly repository: SqliteSessionWorkbarRepository;
   readonly close: () => Promise<void>;
 }> {
@@ -358,8 +371,11 @@ async function createFixture(): Promise<{
   const storageRoot = join(root, "storage");
   mkdirSync(workspace, { recursive: true });
   const store = new SqliteRuntimeEventStore({ storageRoot });
-  await store.initializeSession({ sessionId: "source", workDir: workspace });
-  await store.initializeSession({ sessionId: "target", workDir: workspace });
+  const { ownerFence: sourceFence } = await initializeRuntimeEventOwner(store, {
+    sessionId: "source",
+    workDir: workspace,
+  });
+  await initializeRuntimeEventOwner(store, { sessionId: "target", workDir: workspace });
   let id = 0;
   const repository = new SqliteSessionWorkbarRepository({
     storageRoot,
@@ -369,6 +385,7 @@ async function createFixture(): Promise<{
   return {
     storageRoot,
     store,
+    sourceFence,
     repository,
     close: async () => {
       await store.close();

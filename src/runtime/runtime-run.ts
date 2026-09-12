@@ -180,7 +180,7 @@ export type RuntimeRunExactAdmissionOutcome = Readonly<{
 
 /** Narrow capability that proves a live Session may still append canonical RuntimeEvents. */
 export interface RuntimeEventWriteGuard {
-  assertRuntimeEventWriteAllowed(): Promise<RuntimeOwnerFence | void>;
+  assertRuntimeEventWriteAllowed(): Promise<RuntimeOwnerFence>;
 }
 
 export interface ReconcileRuntimeRunsOptions {
@@ -464,17 +464,12 @@ export class RuntimeRun {
       ...(options.presentation ? { presentation: options.presentation } : {}),
     });
     const guardedFence = await capability.writeGuard.assertRuntimeEventWriteAllowed();
-    await store.initializeSession({
-      sessionId: capability.sessionId,
-      workDir: capability.workDir,
-    });
-    await capability.writeGuard.assertRuntimeEventWriteAllowed();
-    if (guardedFence?.sessionId === capability.sessionId && guardedFence.epoch > 0) {
-      run.ownerFence = guardedFence;
-    } else {
-      const currentFence = await store.readOwnerFence(capability.sessionId);
-      run.ownerFence = await store.advanceOwnerFence(capability.sessionId, currentFence.epoch);
-    }
+    assertActiveRuntimeOwnerFence(
+      `Runtime exact admission ${options.runId}`,
+      capability.sessionId,
+      guardedFence,
+    );
+    run.ownerFence = guardedFence;
     try {
       const append = await run.recordRunStarted();
       return {
@@ -579,18 +574,8 @@ export class RuntimeRun {
         : (options.agentSwarmAuthorization ?? "none"),
     });
     const guardedFence = await options.writeGuard.assertRuntimeEventWriteAllowed();
-    await store.initializeSession({
-      sessionId: options.sessionId,
-      workDir: options.workDir,
-      ...(options.now ? { now: options.now } : {}),
-    });
-    await options.writeGuard.assertRuntimeEventWriteAllowed();
-    if (guardedFence?.sessionId === options.sessionId && guardedFence.epoch > 0) {
-      run.ownerFence = guardedFence;
-    } else {
-      const currentFence = await store.readOwnerFence(options.sessionId);
-      run.ownerFence = await store.advanceOwnerFence(options.sessionId, currentFence.epoch);
-    }
+    assertActiveRuntimeOwnerFence(`Runtime run ${run.runId}`, options.sessionId, guardedFence);
+    run.ownerFence = guardedFence;
     await run.recordRunStarted();
     return run;
   }
@@ -2275,7 +2260,7 @@ function runtimeRunLiveKey(sessionId: string, runId: string): string {
 
 async function writeWithRuntimeEventGuard<Result>(
   guard: RuntimeEventWriteGuard,
-  write: (ownerFence: RuntimeOwnerFence | undefined) => Promise<Result>,
+  write: (ownerFence: RuntimeOwnerFence) => Promise<Result>,
   operation: string,
   expectedFence?: RuntimeOwnerFence,
 ): Promise<Result> {
@@ -2283,10 +2268,11 @@ async function writeWithRuntimeEventGuard<Result>(
   // 只有 LeaseConflictError（leaseId 不匹配 = 真正丢锁）才不可重试；其余重试。
   const GUARD_RETRY_LIMIT = 3;
   for (let attempt = 0; attempt < GUARD_RETRY_LIMIT; attempt += 1) {
-    let guardedFence: RuntimeOwnerFence | undefined;
+    let guardedFence: RuntimeOwnerFence;
     try {
-      guardedFence = (await guard.assertRuntimeEventWriteAllowed()) || undefined;
-      assertMatchingRuntimeFence(operation, expectedFence, guardedFence);
+      guardedFence = await guard.assertRuntimeEventWriteAllowed();
+      assertActiveRuntimeOwnerFence(operation, guardedFence.sessionId, guardedFence);
+      if (expectedFence) assertMatchingRuntimeFence(operation, expectedFence, guardedFence);
     } catch (error) {
       if (error instanceof LeaseConflictError || attempt === GUARD_RETRY_LIMIT - 1) throw error;
       await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
@@ -2297,8 +2283,8 @@ async function writeWithRuntimeEventGuard<Result>(
       result = await write(expectedFence ?? guardedFence);
     } catch (writeError) {
       try {
-        const currentFence = (await guard.assertRuntimeEventWriteAllowed()) || undefined;
-        assertMatchingRuntimeFence(operation, expectedFence, currentFence);
+        const currentFence = await guard.assertRuntimeEventWriteAllowed();
+        assertMatchingRuntimeFence(operation, expectedFence ?? guardedFence, currentFence);
       } catch (guardError) {
         if (
           !(guardError instanceof LeaseConflictError) &&
@@ -2317,8 +2303,8 @@ async function writeWithRuntimeEventGuard<Result>(
       throw writeError;
     }
     try {
-      const currentFence = (await guard.assertRuntimeEventWriteAllowed()) || undefined;
-      assertMatchingRuntimeFence(operation, expectedFence, currentFence);
+      const currentFence = await guard.assertRuntimeEventWriteAllowed();
+      assertMatchingRuntimeFence(operation, expectedFence ?? guardedFence, currentFence);
     } catch (error) {
       if (error instanceof LeaseConflictError || attempt === GUARD_RETRY_LIMIT - 1) throw error;
       await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
@@ -2331,14 +2317,28 @@ async function writeWithRuntimeEventGuard<Result>(
 
 function assertMatchingRuntimeFence(
   operation: string,
-  expected: RuntimeOwnerFence | undefined,
-  actual: RuntimeOwnerFence | undefined,
+  expected: RuntimeOwnerFence,
+  actual: RuntimeOwnerFence,
 ): void {
-  if (!expected || !actual) return;
   if (expected.sessionId !== actual.sessionId || expected.epoch !== actual.epoch) {
     throw new LeaseConflictError(
       `${operation} owner fence changed from ${expected.sessionId}:${expected.epoch} to ${actual.sessionId}:${actual.epoch}`,
     );
+  }
+}
+
+function assertActiveRuntimeOwnerFence(
+  operation: string,
+  sessionId: string,
+  fence: RuntimeOwnerFence,
+): void {
+  if (
+    fence.sessionId !== sessionId ||
+    !fence.sessionId.trim() ||
+    !Number.isSafeInteger(fence.epoch) ||
+    fence.epoch <= 0
+  ) {
+    throw new RuntimeEventStoreIntegrityError(`${operation} has no active owner fence`);
   }
 }
 

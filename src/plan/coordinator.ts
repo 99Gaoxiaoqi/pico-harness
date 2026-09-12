@@ -611,7 +611,7 @@ export class PlanCoordinator {
           operationId: input.operationId,
           fingerprint,
           expectedSessionSequence: slice.headSequence,
-          ...(ownerFence ? { ownerFence } : {}),
+          ownerFence,
         });
         break;
       } catch (error) {
@@ -631,16 +631,12 @@ export class PlanCoordinator {
     return this.project();
   }
 
-  private async ownerFence(): Promise<RuntimeOwnerFence | undefined> {
+  private async ownerFence(): Promise<RuntimeOwnerFence> {
     const writeGuard = this.context.writeGuard;
     if (!writeGuard) {
-      const current = await this.store.readOwnerFence(this.context.sessionId);
-      if (current.epoch > 0) {
-        throw new Error(
-          `Plan mutation for Session ${this.context.sessionId} requires its Runtime write guard`,
-        );
-      }
-      return undefined;
+      throw new Error(
+        `Plan mutation for Session ${this.context.sessionId} requires its Runtime write guard`,
+      );
     }
     const ownerFence = await writeGuard.assertRuntimeEventWriteAllowed();
     if (ownerFence.sessionId !== this.context.sessionId || ownerFence.epoch <= 0) {
@@ -649,8 +645,12 @@ export class PlanCoordinator {
     return ownerFence;
   }
 
-  private async confirmOwnerFence(expected: RuntimeOwnerFence | undefined): Promise<void> {
-    if (!expected || !this.context.writeGuard) return;
+  private async confirmOwnerFence(expected: RuntimeOwnerFence): Promise<void> {
+    if (!this.context.writeGuard) {
+      throw new Error(
+        `Plan mutation for Session ${this.context.sessionId} requires its Runtime write guard`,
+      );
+    }
     const actual = await this.context.writeGuard.assertRuntimeEventWriteAllowed();
     if (actual.sessionId !== expected.sessionId || actual.epoch !== expected.epoch) {
       throw new Error(`Plan owner fence changed during Session ${this.context.sessionId} write`);

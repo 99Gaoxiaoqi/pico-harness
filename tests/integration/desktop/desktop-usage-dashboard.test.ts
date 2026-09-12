@@ -16,6 +16,7 @@ import { SqliteRuntimeControlStore } from "../../../src/storage/sqlite/sqlite-ru
 import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import { parseUsage } from "../../../apps/desktop/src/renderer/usage/runtime-projection.js";
 import type { RuntimeEvent } from "../../../src/engine/session-runtime-event.js";
+import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
 test("usage dashboard joins real model and tool ledgers across workspaces, preserves partial costs and filters sessions", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-usage-dashboard-"));
@@ -58,7 +59,10 @@ test("usage dashboard joins real model and tool ledgers across workspaces, prese
     calls.close();
     const store = new SqliteRuntimeEventStore({ storageRoot });
     const sessionId = index === 0 ? "parent" : "child";
-    await store.initializeSession({ sessionId, workDir: path });
+    const { ownerFence } = await initializeRuntimeEventOwner(store, {
+      sessionId,
+      workDir: path,
+    });
     const base = {
       schemaVersion: 2 as const,
       sessionId,
@@ -118,7 +122,7 @@ test("usage dashboard joins real model and tool ledgers across workspaces, prese
         data: { status: "completed" },
       },
     ];
-    await store.appendBatch(events);
+    await store.appendBatch(events, { ownerFence });
     store.close();
   }
   const runtime = new WorkspaceRuntimeService({ env, execute: async () => undefined });

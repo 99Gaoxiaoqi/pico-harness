@@ -18,6 +18,7 @@ import {
   SqliteRuntimeEventStore,
 } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import { SqliteAgentGraphControlStore } from "../../../src/storage/sqlite/sqlite-agent-graph-control-store.js";
+import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
 function eventBase(eventId: string, sessionId: string, runId = "run-1", turnId = "turn-1") {
   return {
@@ -136,13 +137,19 @@ test("transcript projection keeps fixed watermarks and advances from the change 
   const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "storage") });
   try {
     const sessionId = "projection-session";
-    await store.initializeSession({ sessionId, workDir: workspace });
-    const first = await store.append(message("user-event", sessionId, "user", "hello"));
+    const { ownerFence } = await initializeRuntimeEventOwner(store, {
+      sessionId,
+      workDir: workspace,
+    });
+    const first = await store.append(message("user-event", sessionId, "user", "hello"), {
+      ownerFence,
+    });
     assert.equal(first.transcriptWatermark?.throughSequence, 1);
     const firstWatermark = first.transcriptWatermark!;
 
     const second = await store.append(
       message("assistant-event", sessionId, "assistant", "world", "run-a", "turn-a"),
+      { ownerFence },
     );
     const secondWatermark = second.transcriptWatermark!;
     assert.equal(secondWatermark.throughSequence, 2);
@@ -193,11 +200,17 @@ test("projection page and advance resume one oversized item on UTF-8 boundaries"
   const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "storage") });
   try {
     const sessionId = "fragment-session";
-    await store.initializeSession({ sessionId, workDir: workspace });
-    const before = await store.append(message("older-event", sessionId, "user", "older"));
+    const { ownerFence } = await initializeRuntimeEventOwner(store, {
+      sessionId,
+      workDir: workspace,
+    });
+    const before = await store.append(message("older-event", sessionId, "user", "older"), {
+      ownerFence,
+    });
     const content = "你🙂好🌍".repeat(180);
     const appended = await store.append(
       message("large-event", sessionId, "assistant", content, "run-large", "turn-large"),
+      { ownerFence },
     );
 
     let pageCursor: RuntimeTranscriptProjectionCursor | undefined;
@@ -278,10 +291,15 @@ test("transcript truncation rotates history and invalidates old fixed watermarks
   const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "storage") });
   try {
     const sessionId = "truncate-session";
-    await store.initializeSession({ sessionId, workDir: workspace });
-    await store.append(message("first", sessionId, "user", "first"));
-    await store.append(message("second", sessionId, "user", "second"));
-    const old = await store.append(message("third", sessionId, "user", "third"));
+    const { ownerFence } = await initializeRuntimeEventOwner(store, {
+      sessionId,
+      workDir: workspace,
+    });
+    await store.append(message("first", sessionId, "user", "first"), { ownerFence });
+    await store.append(message("second", sessionId, "user", "second"), { ownerFence });
+    const old = await store.append(message("third", sessionId, "user", "third"), {
+      ownerFence,
+    });
     const truncated = await store.appendTranscriptEvent(
       sessionId,
       {
@@ -292,7 +310,7 @@ test("transcript truncation rotates history and invalidates old fixed watermarks
         entryCount: 1,
         operationId: "truncate-operation",
       },
-      { eventId: "runtime-truncate" },
+      { eventId: "runtime-truncate", ownerFence },
     );
     assert.notEqual(
       truncated.transcriptWatermark?.historyEpoch,
@@ -339,7 +357,10 @@ test("tool projection updates one source-stable item revision", async () => {
   const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "storage") });
   try {
     const sessionId = "tool-session";
-    await store.initializeSession({ sessionId, workDir: workspace });
+    const { ownerFence } = await initializeRuntimeEventOwner(store, {
+      sessionId,
+      workDir: workspace,
+    });
     const started = await store.appendTranscriptEvent(
       sessionId,
       {
@@ -353,9 +374,11 @@ test("tool projection updates one source-stable item revision", async () => {
         name: "read",
         args: '{"path":"README.md"}',
       },
-      { eventId: "runtime-tool-started" },
+      { eventId: "runtime-tool-started", ownerFence },
     );
-    const settled = await store.append(toolResult("runtime-tool-result", sessionId, "provider-1"));
+    const settled = await store.append(toolResult("runtime-tool-result", sessionId, "provider-1"), {
+      ownerFence,
+    });
     const advance = await store.readTranscriptAdvancePage({
       sessionId,
       after: started.transcriptWatermark!,
@@ -411,7 +434,10 @@ test("structured interactions and goals update stable projection items in place"
   const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "storage") });
   try {
     const sessionId = "stable-item-session";
-    await store.initializeSession({ sessionId, workDir: workspace });
+    const { ownerFence } = await initializeRuntimeEventOwner(store, {
+      sessionId,
+      workDir: workspace,
+    });
     const interactions = [
       { kind: "approval", stableKey: "approvalId", stableId: "approval-1", state: "waiting" },
       { kind: "approval", stableKey: "approvalId", stableId: "approval-1", state: "allow" },
@@ -423,19 +449,23 @@ test("structured interactions and goals update stable projection items in place"
     let transcriptSequence = 0;
     for (const interaction of interactions) {
       transcriptSequence += 1;
-      await store.appendTranscriptEvent(sessionId, {
-        eventId: `interaction-${transcriptSequence}`,
-        sequence: transcriptSequence,
-        createdAt: Date.parse("2026-08-23T00:00:00.000Z") + transcriptSequence,
-        type: "entry.appended",
-        entryId: `entry-${transcriptSequence}`,
-        entry: {
-          kind: interaction.kind,
-          title: `${interaction.kind} ${interaction.state}`,
-          state: interaction.state,
-          data: { [interaction.stableKey]: interaction.stableId },
+      await store.appendTranscriptEvent(
+        sessionId,
+        {
+          eventId: `interaction-${transcriptSequence}`,
+          sequence: transcriptSequence,
+          createdAt: Date.parse("2026-08-23T00:00:00.000Z") + transcriptSequence,
+          type: "entry.appended",
+          entryId: `entry-${transcriptSequence}`,
+          entry: {
+            kind: interaction.kind,
+            title: `${interaction.kind} ${interaction.state}`,
+            state: interaction.state,
+            data: { [interaction.stableKey]: interaction.stableId },
+          },
         },
-      });
+        { ownerFence },
+      );
     }
     const interactionPage = await store.readTranscriptProjectionPage({
       sessionId,
@@ -462,9 +492,11 @@ test("structured interactions and goals update stable projection items in place"
       createdAt: 1,
       budgetUsage: { turns: 0, tokens: 0, costCNY: 0, startedAt: 1 },
     };
-    const active = await store.appendSessionState(sessionId, {
-      goal: { stateVersion: 1, sequence: 1, activeGoalId: goal.id, goals: [goal] },
-    });
+    const active = await store.appendSessionState(
+      sessionId,
+      { goal: { stateVersion: 1, sequence: 1, activeGoalId: goal.id, goals: [goal] } },
+      { ownerFence },
+    );
     const activePage = await store.readTranscriptProjectionPage({
       sessionId,
       through: active.transcriptWatermark!,
@@ -480,14 +512,18 @@ test("structured interactions and goals update stable projection items in place"
       data: { goalId: goal.id },
     });
 
-    const completed = await store.appendSessionState(sessionId, {
-      goal: {
-        stateVersion: 1,
-        sequence: 2,
-        activeGoalId: null,
-        goals: [{ ...goal, status: "complete" }],
+    const completed = await store.appendSessionState(
+      sessionId,
+      {
+        goal: {
+          stateVersion: 1,
+          sequence: 2,
+          activeGoalId: null,
+          goals: [{ ...goal, status: "complete" }],
+        },
       },
-    });
+      { ownerFence },
+    );
     const advance = await store.readTranscriptAdvancePage({
       sessionId,
       after: active.transcriptWatermark!,
@@ -509,8 +545,13 @@ test("lazy rebuild rotates history and requires bootstrap from the rebuilt head"
   let store = new SqliteRuntimeEventStore({ storageRoot: storage });
   try {
     const sessionId = "rebuild-session";
-    await store.initializeSession({ sessionId, workDir: workspace });
-    const appended = await store.append(message("old-event", sessionId, "user", "durable"));
+    const { ownerFence } = await initializeRuntimeEventOwner(store, {
+      sessionId,
+      workDir: workspace,
+    });
+    const appended = await store.append(message("old-event", sessionId, "user", "durable"), {
+      ownerFence,
+    });
     const oldWatermark = appended.transcriptWatermark!;
     store.close();
 
@@ -555,7 +596,10 @@ test("projector v4 rebuild removes durable Graph control history but keeps same-
   let store = new SqliteRuntimeEventStore({ storageRoot: storage });
   const graphStore = new SqliteAgentGraphControlStore({ storageRoot: storage });
   try {
-    await store.initializeSession({ sessionId, workDir: workspace });
+    const { ownerFence } = await initializeRuntimeEventOwner(store, {
+      sessionId,
+      workDir: workspace,
+    });
     graphStore.createGraph({ graphId: "graph-upgrade", rootSessionId: sessionId, epoch: 1 });
     graphStore.commitScheduleRevision({
       graphId: "graph-upgrade",
@@ -586,7 +630,7 @@ test("projector v4 rebuild removes durable Graph control history but keeps same-
       targetRunId: graphRunId,
     });
 
-    await store.append(started("graph-start", sessionId, workspace, graphRunId));
+    await store.append(started("graph-start", sessionId, workspace, graphRunId), { ownerFence });
     await store.append(
       message(
         "graph-user",
@@ -596,6 +640,7 @@ test("projector v4 rebuild removes durable Graph control history but keeps same-
         graphRunId,
         "graph-turn",
       ),
+      { ownerFence },
     );
     await store.append(
       transcriptToolStarted(
@@ -608,6 +653,7 @@ test("projector v4 rebuild removes durable Graph control history but keeps same-
         "view_agent_graph",
         1,
       ),
+      { ownerFence },
     );
     await store.append(
       toolResult(
@@ -617,20 +663,25 @@ test("projector v4 rebuild removes durable Graph control history but keeps same-
         "view_agent_graph",
         graphRunId,
       ),
+      { ownerFence },
     );
-    await store.appendTranscriptEvent(sessionId, {
-      eventId: "graph-boundary-transcript",
-      sequence: 2,
-      createdAt: 5,
-      type: "entry.appended",
-      entryId: "graph-boundary",
-      entry: {
-        kind: "run-boundary",
-        runId: graphRunId,
-        status: "running",
-        startedAt: 1,
+    await store.appendTranscriptEvent(
+      sessionId,
+      {
+        eventId: "graph-boundary-transcript",
+        sequence: 2,
+        createdAt: 5,
+        type: "entry.appended",
+        entryId: "graph-boundary",
+        entry: {
+          kind: "run-boundary",
+          runId: graphRunId,
+          status: "running",
+          startedAt: 1,
+        },
       },
-    });
+      { ownerFence },
+    );
     await store.append(
       message(
         "graph-final",
@@ -640,9 +691,10 @@ test("projector v4 rebuild removes durable Graph control history but keeps same-
         graphRunId,
         "graph-final-turn",
       ),
+      { ownerFence },
     );
 
-    await store.append(started("linear-start", sessionId, workspace, linearRunId));
+    await store.append(started("linear-start", sessionId, workspace, linearRunId), { ownerFence });
     await store.append(
       transcriptToolStarted(
         "linear-tool-start",
@@ -654,6 +706,7 @@ test("projector v4 rebuild removes durable Graph control history but keeps same-
         "view_agent_graph",
         3,
       ),
+      { ownerFence },
     );
     await store.append(
       toolResult(
@@ -663,6 +716,7 @@ test("projector v4 rebuild removes durable Graph control history but keeps same-
         "view_agent_graph",
         linearRunId,
       ),
+      { ownerFence },
     );
     const before = await store.readTranscriptWatermark(sessionId);
     store.close();
@@ -785,11 +839,14 @@ test("projector rechecks a legacy run after its Graph identity becomes durable",
   const store = new SqliteRuntimeEventStore({ storageRoot: storage });
   const graphStore = new SqliteAgentGraphControlStore({ storageRoot: storage });
   try {
-    await store.initializeSession({ sessionId, workDir: workspace });
+    const { ownerFence } = await initializeRuntimeEventOwner(store, {
+      sessionId,
+      workDir: workspace,
+    });
 
     // A legacy host can append the start before its durable Graph schedule fact.
     // The initial negative lookup must not remain cached for later run events.
-    await store.append(started("legacy-start", sessionId, workspace, runId));
+    await store.append(started("legacy-start", sessionId, workspace, runId), { ownerFence });
     graphStore.createGraph({ graphId: "graph-late-identity", rootSessionId: sessionId, epoch: 1 });
     graphStore.commitScheduleRevision({
       graphId: "graph-late-identity",
@@ -814,6 +871,7 @@ test("projector rechecks a legacy run after its Graph identity becomes durable",
         "view_agent_graph",
         1,
       ),
+      { ownerFence },
     );
 
     const projection = await store.readTranscriptProjectionPage({
@@ -845,8 +903,13 @@ test("normal append and advance do not decode canonical full history", async () 
   let store = new SqliteRuntimeEventStore({ storageRoot: storage });
   try {
     const sessionId = "suffix-session";
-    await store.initializeSession({ sessionId, workDir: workspace });
-    const first = await store.append(message("first-event", sessionId, "user", "first"));
+    const { ownerFence } = await initializeRuntimeEventOwner(store, {
+      sessionId,
+      workDir: workspace,
+    });
+    const first = await store.append(message("first-event", sessionId, "user", "first"), {
+      ownerFence,
+    });
     store.close();
 
     // Deliberately make the old canonical payload undecodable after its projection is current.
@@ -860,6 +923,7 @@ test("normal append and advance do not decode canonical full history", async () 
     store = new SqliteRuntimeEventStore({ storageRoot: storage });
     const second = await store.append(
       message("second-event", sessionId, "assistant", "second", "run-2", "turn-2"),
+      { ownerFence },
     );
     const advance = await store.readTranscriptAdvancePage({
       sessionId,
@@ -886,8 +950,11 @@ test("durable finals atomically replace matching assistant and tool partial over
   const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "storage") });
   try {
     const sessionId = "final-overlay-session";
-    await store.initializeSession({ sessionId, workDir: workspace });
-    const initial = await store.append(started("run-start", sessionId, workspace));
+    const { ownerFence } = await initializeRuntimeEventOwner(store, {
+      sessionId,
+      workDir: workspace,
+    });
+    const initial = await store.append(started("run-start", sessionId, workspace), { ownerFence });
     for (const [partialId, itemId] of [
       ["assistant-partial", "message:turn:run-1:1:assistant"],
       ["thinking-partial", "message:turn:run-1:1:thinking"],
@@ -900,6 +967,7 @@ test("durable finals atomically replace matching assistant and tool partial over
         kind: "assistant",
         expectedVersion: 0,
         payload: { itemId, content: "streaming" },
+        ownerFence,
       });
     }
     await store.appendPartialSegment({
@@ -908,6 +976,7 @@ test("durable finals atomically replace matching assistant and tool partial over
       partialId: "assistant-partial",
       segmentIndex: 0,
       payload: { delta: "streaming" },
+      ownerFence,
     });
 
     const finalAssistant = message(
@@ -920,11 +989,14 @@ test("durable finals atomically replace matching assistant and tool partial over
     );
     await assert.rejects(
       () =>
-        store.appendBatch([
-          finalAssistant,
-          terminal("terminal-in-rollback", sessionId),
-          message("sealed-tail", sessionId, "user", "must roll back"),
-        ]),
+        store.appendBatch(
+          [
+            finalAssistant,
+            terminal("terminal-in-rollback", sessionId),
+            message("sealed-tail", sessionId, "user", "must roll back"),
+          ],
+          { ownerFence },
+        ),
       RuntimeEventStoreRunSealedError,
     );
     assert.equal(await store.readSessionEvent(sessionId, "assistant-final"), undefined);
@@ -945,7 +1017,7 @@ test("durable finals atomically replace matching assistant and tool partial over
       [],
     );
 
-    const assistantResult = await store.append(finalAssistant);
+    const assistantResult = await store.append(finalAssistant, { ownerFence });
     const afterAssistantFinal = await store.readRunPartials(sessionId, "run-1");
     assert.deepEqual(
       afterAssistantFinal.snapshots.map(({ partialId }) => partialId),
@@ -965,17 +1037,21 @@ test("durable finals atomically replace matching assistant and tool partial over
       ["message:turn:run-1:1:assistant"],
     );
 
-    const toolStart = await store.appendTranscriptEvent(sessionId, {
-      eventId: "tool-start",
-      sequence: 1,
-      createdAt: Date.parse("2026-08-23T00:00:00.000Z"),
-      type: "tool.started",
-      entryId: "tool-entry-final",
-      toolCallId: "canonical-final",
-      providerCallId: "provider-final",
-      name: "read",
-      args: "{}",
-    });
+    const toolStart = await store.appendTranscriptEvent(
+      sessionId,
+      {
+        eventId: "tool-start",
+        sequence: 1,
+        createdAt: Date.parse("2026-08-23T00:00:00.000Z"),
+        type: "tool.started",
+        entryId: "tool-entry-final",
+        toolCallId: "canonical-final",
+        providerCallId: "provider-final",
+        name: "read",
+        args: "{}",
+      },
+      { ownerFence },
+    );
     await store.upsertPartialSnapshot({
       sessionId,
       runId: "run-1",
@@ -983,6 +1059,7 @@ test("durable finals atomically replace matching assistant and tool partial over
       kind: "tool",
       expectedVersion: 0,
       payload: { itemId: "tool:canonical-final", status: "running" },
+      ownerFence,
     });
     await store.appendPartialSegment({
       sessionId,
@@ -990,8 +1067,11 @@ test("durable finals atomically replace matching assistant and tool partial over
       partialId: "tool-partial",
       segmentIndex: 0,
       payload: { delta: "output" },
+      ownerFence,
     });
-    const toolFinal = await store.append(toolResult("tool-final", sessionId, "provider-final"));
+    const toolFinal = await store.append(toolResult("tool-final", sessionId, "provider-final"), {
+      ownerFence,
+    });
     assert.deepEqual(
       (await store.readRunPartials(sessionId, "run-1")).snapshots.map(({ partialId }) => partialId),
       ["unrelated-partial"],
@@ -1023,7 +1103,10 @@ test("Graph child transcript exposes tools and formal output after upgrading an 
   const graph = new SqliteAgentGraphControlStore({ storageRoot: storage });
   const sessionId = "child-session";
   try {
-    await store.initializeSession({ sessionId, workDir: workspace });
+    const { ownerFence } = await initializeRuntimeEventOwner(store, {
+      sessionId,
+      workDir: workspace,
+    });
     graph.createGraph({ graphId: "child-graph", rootSessionId: "parent", epoch: 1 });
     graph.commitScheduleRevision({
       graphId: "child-graph",
@@ -1069,8 +1152,10 @@ test("Graph child transcript exposes tools and formal output after upgrading an 
       targetInvocationId: "inv-1",
       runStartedEventId: "start",
     });
-    await store.append(started("start", sessionId, workspace));
-    await store.append(message("input", sessionId, "user", "hidden operator control input"));
+    await store.append(started("start", sessionId, workspace), { ownerFence });
+    await store.append(message("input", sessionId, "user", "hidden operator control input"), {
+      ownerFence,
+    });
     await store.append(
       transcriptToolStarted(
         "read-start",
@@ -1082,8 +1167,12 @@ test("Graph child transcript exposes tools and formal output after upgrading an 
         "read_file",
         1,
       ),
+      { ownerFence },
     );
-    await store.append(toolResult("read-result", sessionId, "provider-read", "read_file", "run-1"));
+    await store.append(
+      toolResult("read-result", sessionId, "provider-read", "read_file", "run-1"),
+      { ownerFence },
+    );
     const output = "子任务结果：CUA_BRANCH_A_17";
     const idempotencyKey = `agent-output:${"a".repeat(64)}`;
     const fingerprint = agentOutputFingerprint({
@@ -1092,32 +1181,35 @@ test("Graph child transcript exposes tools and formal output after upgrading an 
       evidenceRefs: [],
       artifactRefs: [],
     });
-    await store.append({
-      ...eventBase("formal-output", sessionId),
-      partial: false,
-      kind: "agent.output",
-      visibility: "internal",
-      refs: { toolCallId: "output-tool" },
-      data: {
-        toolCallId: "output-tool",
-        idempotencyKey,
-        fingerprint,
-        payload: {
-          schemaVersion: "pico.agent_output.v1",
-          graphId: "child-graph",
-          operatorId: "a",
-          operatorGeneration: 1,
-          activationId: "claim",
-          status: "success",
-          output,
-          outputBytes: Buffer.byteLength(output),
-          evidenceRefs: [],
-          artifactRefs: [],
+    await store.append(
+      {
+        ...eventBase("formal-output", sessionId),
+        partial: false,
+        kind: "agent.output",
+        visibility: "internal",
+        refs: { toolCallId: "output-tool" },
+        data: {
+          toolCallId: "output-tool",
           idempotencyKey,
           fingerprint,
+          payload: {
+            schemaVersion: "pico.agent_output.v1",
+            graphId: "child-graph",
+            operatorId: "a",
+            operatorGeneration: 1,
+            activationId: "claim",
+            status: "success",
+            output,
+            outputBytes: Buffer.byteLength(output),
+            evidenceRefs: [],
+            artifactRefs: [],
+            idempotencyKey,
+            fingerprint,
+          },
         },
       },
-    });
+      { ownerFence },
+    );
     const before = await store.readTranscriptWatermark(sessionId);
     store.close();
     const db = new DatabaseSync(operationalDatabasePath(storage));

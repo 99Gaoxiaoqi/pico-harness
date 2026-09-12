@@ -26,6 +26,14 @@ import { RuntimeEventStorePlanOperationConflictError } from "../../../src/storag
 import { SubmitPlanTool, UpdatePlanTool } from "../../../src/tools/plan-exit.js";
 import { buildDefaultToolRegistry } from "../../../src/tools/default-registry.js";
 import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
+
+function runtimeWriteGuard(store: SqliteRuntimeEventStore, sessionId: string) {
+  return {
+    assertRuntimeEventAuthority: () => undefined,
+    assertRuntimeEventWriteAllowed: () => store.readOwnerFence(sessionId),
+  };
+}
 
 /** Windows:分离的后台任务(memory recovery 等)可能短暂持有 pico.sqlite 句柄,
  * 删除临时目录按 EBUSY 有界重试,等待分离 drain 归还 lease。 */
@@ -50,12 +58,13 @@ test("submit_plan persists a proposal and marks a machine-readable handoff", asy
     return rmRetry(root);
   });
   const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "state") });
-  await store.initializeSession({ sessionId: "session-1", workDir });
+  await initializeRuntimeEventOwner(store, { sessionId: "session-1", workDir });
   const coordinator = new PlanCoordinator(store, {
     sessionId: "session-1",
     invocationId: "inv-1",
     runId: "run-1",
     turnId: "turn-1",
+    writeGuard: runtimeWriteGuard(store, "session-1"),
   });
   const handoff = new PlanHandoffController();
   const tool = new SubmitPlanTool(
@@ -133,12 +142,13 @@ test("update_plan derives stable scoped identities from toolCallId and commits c
     store.close();
     await rmRetry(root);
   });
-  await store.initializeSession({ sessionId: "session-update-retry", workDir });
+  await initializeRuntimeEventOwner(store, { sessionId: "session-update-retry", workDir });
   const coordinator = new PlanCoordinator(store, {
     sessionId: "session-update-retry",
     invocationId: "update-retry",
     runId: "update-retry",
     turnId: "update-retry",
+    writeGuard: runtimeWriteGuard(store, "session-update-retry"),
   });
   const proposed = await coordinator.propose({
     operationId: "update-retry-propose",
@@ -333,12 +343,13 @@ test("cancel and replan race commits exactly one interrupted Plan terminal", asy
     store.close();
     await rmRetry(root);
   });
-  await store.initializeSession({ sessionId: "session-race", workDir });
+  await initializeRuntimeEventOwner(store, { sessionId: "session-race", workDir });
   const coordinator = new PlanCoordinator(store, {
     sessionId: "session-race",
     invocationId: "race",
     runId: "race",
     turnId: "race",
+    writeGuard: runtimeWriteGuard(store, "session-race"),
   });
   const proposed = await coordinator.propose({
     operationId: "race-propose",

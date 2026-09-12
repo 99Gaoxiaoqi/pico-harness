@@ -25,6 +25,14 @@ import {
 import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
 import { createSessionForkRuntimePort } from "../../../src/runtime/session-fork-runtime-port-adapter.js";
 import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
+
+function runtimeWriteGuard(store: SqliteRuntimeEventStore, sessionId: string) {
+  return {
+    assertRuntimeEventAuthority: () => undefined,
+    assertRuntimeEventWriteAllowed: () => store.readOwnerFence(sessionId),
+  };
+}
 
 const AT = new Date("2026-08-05T00:00:00.000Z");
 const SETTINGS: PersistedSessionSettings = {
@@ -48,10 +56,17 @@ test("Plan coordinator persists revisions, atomic approval and terminal executio
     return rm(root, { recursive: true, force: true });
   });
   const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "state") });
-  await store.initializeSession({ sessionId: "session-1", workDir });
+  await initializeRuntimeEventOwner(store, { sessionId: "session-1", workDir });
+  const writeGuard = runtimeWriteGuard(store, "session-1");
   const coordinator = new PlanCoordinator(
     store,
-    { sessionId: "session-1", invocationId: "inv-1", runId: "run-1", turnId: "turn-1" },
+    {
+      sessionId: "session-1",
+      invocationId: "inv-1",
+      runId: "run-1",
+      turnId: "turn-1",
+      writeGuard,
+    },
     () => AT,
   );
   const proposal = {
@@ -131,7 +146,13 @@ test("Plan coordinator persists revisions, atomic approval and terminal executio
   const reopenedStore = new SqliteRuntimeEventStore({ storageRoot: join(root, "state") });
   const reopened = new PlanCoordinator(
     reopenedStore,
-    { sessionId: "session-1", invocationId: "inv-1", runId: "run-1", turnId: "turn-1" },
+    {
+      sessionId: "session-1",
+      invocationId: "inv-1",
+      runId: "run-1",
+      turnId: "turn-1",
+      writeGuard,
+    },
     () => AT,
   );
   assert.equal((await reopened.project()).execution?.status, "completed");
@@ -146,10 +167,11 @@ test("Plan operation retries are idempotent and conflicting reuse is rejected", 
     return rm(root, { recursive: true, force: true });
   });
   const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "state") });
-  await store.initializeSession({ sessionId: "session-1", workDir });
+  await initializeRuntimeEventOwner(store, { sessionId: "session-1", workDir });
+  const writeGuard = runtimeWriteGuard(store, "session-1");
   const coordinator = new PlanCoordinator(
     store,
-    { sessionId: "session-1", invocationId: "inv", runId: "run", turnId: "turn" },
+    { sessionId: "session-1", invocationId: "inv", runId: "run", turnId: "turn", writeGuard },
     () => AT,
   );
   const proposal = {
@@ -179,7 +201,8 @@ test("concurrent identical Plan review claims converge despite different event t
     return rm(root, { recursive: true, force: true });
   });
   const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "state") });
-  await store.initializeSession({ sessionId: "session-review-race", workDir });
+  await initializeRuntimeEventOwner(store, { sessionId: "session-review-race", workDir });
+  const writeGuard = runtimeWriteGuard(store, "session-review-race");
   const proposalCoordinator = new PlanCoordinator(
     store,
     {
@@ -187,6 +210,7 @@ test("concurrent identical Plan review claims converge despite different event t
       invocationId: "proposal",
       runId: "proposal",
       turnId: "proposal",
+      writeGuard,
     },
     () => AT,
   );
@@ -209,7 +233,13 @@ test("concurrent identical Plan review claims converge despite different event t
   };
   const first = new PlanCoordinator(
     store,
-    { sessionId: "session-review-race", invocationId: "first", runId: "first", turnId: "first" },
+    {
+      sessionId: "session-review-race",
+      invocationId: "first",
+      runId: "first",
+      turnId: "first",
+      writeGuard,
+    },
     () => AT,
   );
   const second = new PlanCoordinator(
@@ -219,6 +249,7 @@ test("concurrent identical Plan review claims converge despite different event t
       invocationId: "second",
       runId: "second",
       turnId: "second",
+      writeGuard,
     },
     () => new Date(AT.getTime() + 1_000),
   );
@@ -242,10 +273,11 @@ test("revision requests and interrupted controls are durable CAS operations", as
     return rm(root, { recursive: true, force: true });
   });
   const store = new SqliteRuntimeEventStore({ storageRoot });
-  await store.initializeSession({ sessionId: "session-1", workDir });
+  await initializeRuntimeEventOwner(store, { sessionId: "session-1", workDir });
+  const writeGuard = runtimeWriteGuard(store, "session-1");
   const coordinator = new PlanCoordinator(
     store,
-    { sessionId: "session-1", invocationId: "inv", runId: "run", turnId: "turn" },
+    { sessionId: "session-1", invocationId: "inv", runId: "run", turnId: "turn", writeGuard },
     () => AT,
   );
   const proposal = {
@@ -315,7 +347,13 @@ test("revision requests and interrupted controls are durable CAS operations", as
   const reopenedStore = new SqliteRuntimeEventStore({ storageRoot });
   const reopened = new PlanCoordinator(
     reopenedStore,
-    { sessionId: "session-1", invocationId: "reopen", runId: "run", turnId: "turn" },
+    {
+      sessionId: "session-1",
+      invocationId: "reopen",
+      runId: "run",
+      turnId: "turn",
+      writeGuard,
+    },
     () => AT,
   );
   assert.equal((await reopened.project()).revisionRequest?.operationId, "request-revision");
@@ -380,10 +418,17 @@ test("revision requests and interrupted controls are durable CAS operations", as
   const runtime = projectRuntimeSessionState(await store.readSession("session-1"));
   assert.equal(runtime.settings?.collaborationMode, "plan");
 
-  await store.initializeSession({ sessionId: "session-cancel", workDir });
+  await initializeRuntimeEventOwner(store, { sessionId: "session-cancel", workDir });
+  const cancelWriteGuard = runtimeWriteGuard(store, "session-cancel");
   const cancelCoordinator = new PlanCoordinator(
     store,
-    { sessionId: "session-cancel", invocationId: "inv", runId: "run", turnId: "turn" },
+    {
+      sessionId: "session-cancel",
+      invocationId: "inv",
+      runId: "run",
+      turnId: "turn",
+      writeGuard: cancelWriteGuard,
+    },
     () => AT,
   );
   await cancelCoordinator.propose({ operationId: "propose", expectedSessionSequence: 0, proposal });
@@ -431,10 +476,11 @@ test("reject and exit atomically preserves permission mode", async (t) => {
     return rm(root, { recursive: true, force: true });
   });
   const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "state") });
-  await store.initializeSession({ sessionId: "session-1", workDir });
+  await initializeRuntimeEventOwner(store, { sessionId: "session-1", workDir });
+  const writeGuard = runtimeWriteGuard(store, "session-1");
   const coordinator = new PlanCoordinator(
     store,
-    { sessionId: "session-1", invocationId: "inv", runId: "run", turnId: "turn" },
+    { sessionId: "session-1", invocationId: "inv", runId: "run", turnId: "turn", writeGuard },
     () => AT,
   );
   await coordinator.propose({
@@ -473,10 +519,11 @@ test("Plan reducer enforces review, step and rewind invariants", async (t) => {
     return rm(root, { recursive: true, force: true });
   });
   const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "state") });
-  await store.initializeSession({ sessionId: "s", workDir });
+  await initializeRuntimeEventOwner(store, { sessionId: "s", workDir });
+  const writeGuard = runtimeWriteGuard(store, "s");
   const coordinator = new PlanCoordinator(
     store,
-    { sessionId: "s", invocationId: "i", runId: "r", turnId: "t" },
+    { sessionId: "s", invocationId: "i", runId: "r", turnId: "t", writeGuard },
     () => AT,
   );
   const proposal = {

@@ -10,6 +10,7 @@ import {
 import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
 import type { RuntimeEvent } from "../../../src/engine/session-runtime-event.js";
+import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
 /**
  * 窄路径集成测试：findCliSessionSummary（requireSession 的单会话直读路径）
@@ -28,7 +29,10 @@ test("findCliSessionSummary 单会话直读与全列表摘要一致", async () =
   try {
     const sessionIds = ["resolver-session-a", "resolver-session-b"];
     for (const [index, sessionId] of sessionIds.entries()) {
-      await eventStore.initializeSession({ sessionId, workDir: workspace });
+      const { ownerFence } = await initializeRuntimeEventOwner(eventStore, {
+        sessionId,
+        workDir: workspace,
+      });
       const events: RuntimeEvent[] = [
         {
           schemaVersion: 2,
@@ -57,7 +61,7 @@ test("findCliSessionSummary 单会话直读与全列表摘要一致", async () =
           data: { message: { role: "assistant", content: `会话 ${sessionId} 的回复` } },
         } as RuntimeEvent,
       ];
-      await eventStore.appendBatch(events);
+      await eventStore.appendBatch(events, { ownerFence });
     }
 
     const summaries = await listCliSessionSummaries(workspace, { picoHome });

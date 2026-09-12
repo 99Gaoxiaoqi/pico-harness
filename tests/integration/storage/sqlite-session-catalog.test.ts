@@ -16,6 +16,7 @@ import {
   listCliSessionSummaries,
   resolveCliSession,
 } from "../../../src/cli/session-resolver.js";
+import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
 /**
  * Ticket 03 acceptance: catalog/messages projections + assembly switch.
@@ -139,22 +140,27 @@ test("sqlite catalog: incremental fold equals the full fold (title/settings/prev
   const fixture = createFixture("pico-sqlite-catalog-fold-");
   try {
     const id = "catalog-fold";
-    const manifest = await fixture.store.initializeSession({
+    const { manifest, ownerFence } = await initializeRuntimeEventOwner(fixture.store, {
       sessionId: id,
       workDir: fixture.workspace,
     });
 
     // Round 1: user + assistant messages.
-    await fixture.store.appendBatch([
-      userMessage(`${id}-e1`, id, "2026-08-18T00:00:01.000Z", "first user message"),
-      assistantMessage(`${id}-e2`, id, "2026-08-18T00:00:02.000Z", "assistant reply"),
-      userMessage(`${id}-e3`, id, "2026-08-18T00:00:03.000Z", "middle user message"),
-    ]);
+    await fixture.store.appendBatch(
+      [
+        userMessage(`${id}-e1`, id, "2026-08-18T00:00:01.000Z", "first user message"),
+        assistantMessage(`${id}-e2`, id, "2026-08-18T00:00:02.000Z", "assistant reply"),
+        userMessage(`${id}-e3`, id, "2026-08-18T00:00:03.000Z", "middle user message"),
+      ],
+      { ownerFence },
+    );
 
     // Round 2: settings title replaces the firstMessage-derived title.
-    await fixture.store.appendSessionState(id, {
-      settings: { ...FULL_SETTINGS, title: "settings title" },
-    });
+    await fixture.store.appendSessionState(
+      id,
+      { settings: { ...FULL_SETTINGS, title: "settings title" } },
+      { ownerFence },
+    );
 
     // Round 3: mutable partial state and a transcript-only message must NOT fold or
     // materialize; the long final message exercises the <=96 preview column.
@@ -167,14 +173,18 @@ test("sqlite catalog: incremental fold equals the full fold (title/settings/prev
       expectedVersion: 0,
       payload: { text: "partial draft" },
       at: "2026-08-18T00:00:05.000Z",
+      ownerFence,
     });
-    await fixture.store.appendBatch([
-      {
-        ...userMessage(`${id}-e6`, id, "2026-08-18T00:00:06.000Z", "transcript only"),
-        visibility: "transcript",
-      },
-      userMessage(`${id}-e7`, id, "2026-08-18T00:00:07.000Z", longContent),
-    ] as RuntimeEvent[]);
+    await fixture.store.appendBatch(
+      [
+        {
+          ...userMessage(`${id}-e6`, id, "2026-08-18T00:00:06.000Z", "transcript only"),
+          visibility: "transcript",
+        },
+        userMessage(`${id}-e7`, id, "2026-08-18T00:00:07.000Z", longContent),
+      ] as RuntimeEvent[],
+      { ownerFence },
+    );
     assert.equal((await fixture.store.readRunPartials(id, "run-1")).snapshots.length, 1);
 
     const entry = await fixture.store.findSessionCatalogEntry(id);
@@ -233,15 +243,25 @@ test("sqlite catalog: keyset pagination over activity_at DESC, session_id ASC", 
   try {
     // Three sessions with interleaved activity: b is the most recently active.
     const ids = ["page-a", "page-b", "page-c"];
+    const ownerFences = new Map<
+      string,
+      Awaited<ReturnType<typeof initializeRuntimeEventOwner>>["ownerFence"]
+    >();
     for (const [index, id] of ids.entries()) {
-      await fixture.store.initializeSession({ sessionId: id, workDir: fixture.workspace });
-      await fixture.store.appendBatch([
-        userMessage(`${id}-e1`, id, `2026-08-18T00:0${index}:00.000Z`, "m"),
-      ]);
+      const { ownerFence } = await initializeRuntimeEventOwner(fixture.store, {
+        sessionId: id,
+        workDir: fixture.workspace,
+      });
+      ownerFences.set(id, ownerFence);
+      await fixture.store.appendBatch(
+        [userMessage(`${id}-e1`, id, `2026-08-18T00:0${index}:00.000Z`, "m")],
+        { ownerFence },
+      );
     }
-    await fixture.store.appendBatch([
-      userMessage("page-b-e2", "page-b", "2026-08-18T00:09:00.000Z", "latest"),
-    ]);
+    await fixture.store.appendBatch(
+      [userMessage("page-b-e2", "page-b", "2026-08-18T00:09:00.000Z", "latest")],
+      { ownerFence: ownerFences.get("page-b")! },
+    );
 
     const expectedOrder = ["page-b", "page-c", "page-a"];
     assert.deepEqual(
@@ -282,10 +302,14 @@ test("sqlite catalog: archive/pin live in sessions (session-state.json never wri
   const fixture = createFixture("pico-sqlite-catalog-archive-");
   try {
     const id = "archive-target";
-    await fixture.store.initializeSession({ sessionId: id, workDir: fixture.workspace });
-    await fixture.store.appendBatch([
-      userMessage(`${id}-e1`, id, "2026-08-18T00:00:01.000Z", "message"),
-    ]);
+    const { ownerFence } = await initializeRuntimeEventOwner(fixture.store, {
+      sessionId: id,
+      workDir: fixture.workspace,
+    });
+    await fixture.store.appendBatch(
+      [userMessage(`${id}-e1`, id, "2026-08-18T00:00:01.000Z", "message")],
+      { ownerFence },
+    );
 
     let entry = await fixture.store.findSessionCatalogEntry(id);
     assert.equal(entry?.isArchived, false);
@@ -343,18 +367,23 @@ test("sqlite messages + catalog: full rebuild from events (disposable derived st
   const fixture = createFixture("pico-sqlite-catalog-rebuild-");
   try {
     const id = "rebuild-target";
-    const manifest = await fixture.store.initializeSession({
+    const { manifest, ownerFence } = await initializeRuntimeEventOwner(fixture.store, {
       sessionId: id,
       workDir: fixture.workspace,
     });
-    await fixture.store.appendBatch([
-      userMessage(`${id}-e1`, id, "2026-08-18T00:00:01.000Z", "one"),
-      assistantMessage(`${id}-e2`, id, "2026-08-18T00:00:02.000Z", "two"),
-      userMessage(`${id}-e3`, id, "2026-08-18T00:00:03.000Z", "three"),
-    ]);
-    await fixture.store.appendSessionState(id, {
-      settings: { ...FULL_SETTINGS, title: "before corruption" },
-    });
+    await fixture.store.appendBatch(
+      [
+        userMessage(`${id}-e1`, id, "2026-08-18T00:00:01.000Z", "one"),
+        assistantMessage(`${id}-e2`, id, "2026-08-18T00:00:02.000Z", "two"),
+        userMessage(`${id}-e3`, id, "2026-08-18T00:00:03.000Z", "three"),
+      ],
+      { ownerFence },
+    );
+    await fixture.store.appendSessionState(
+      id,
+      { settings: { ...FULL_SETTINGS, title: "before corruption" } },
+      { ownerFence },
+    );
 
     const before = await fixture.store.findSessionCatalogEntry(id);
     assert.ok(before, "catalog entry must exist before corruption");
@@ -406,10 +435,11 @@ test("session resolver: list/find/--continue/-S/--resume/--fork against the SQLi
     const older = "resolver-older";
     const newer = "resolver-newer";
     for (const [index, id] of [older, newer].entries()) {
-      await store.initializeSession({ sessionId: id, workDir });
-      await store.appendBatch([
-        userMessage(`${id}-e1`, id, `2026-08-18T00:0${index}:00.000Z`, `message ${id}`),
-      ]);
+      const { ownerFence } = await initializeRuntimeEventOwner(store, { sessionId: id, workDir });
+      await store.appendBatch(
+        [userMessage(`${id}-e1`, id, `2026-08-18T00:0${index}:00.000Z`, `message ${id}`)],
+        { ownerFence },
+      );
     }
 
     // Listing: newest activity first, publication filter passes plain sessions.
@@ -467,7 +497,8 @@ test("session recover: startup reads materialized messages + state events direct
     storageRoot: resolvePicoPaths(workDir, { picoHome }).workspace.root,
   });
   try {
-    const ownerFence = await store.readOwnerFence(id);
+    const priorFence = await store.readOwnerFence(id);
+    const ownerFence = await store.advanceOwnerFence(id, priorFence.epoch);
     await store.appendBatch(
       [
         userMessage(`${id}-e1`, id, "2026-08-18T00:00:01.000Z", "user asks"),

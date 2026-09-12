@@ -29,6 +29,7 @@ import {
 } from "../../../src/engine/transcript-tool-start.js";
 import type { RuntimeEvent } from "../../../src/engine/session-runtime-event.js";
 import type { Message } from "../../../src/schema/message.js";
+import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
 const DEGRADED_MARKER_PATTERN = /历史输出已按上下文预算裁剪/u;
 
@@ -270,14 +271,20 @@ test("readTranscriptProjectionPage: 字节预算与固定 watermark 分页保持
   });
   const id = "e2-transcript-budget";
   const workspace = join(fixture.root, "workspace");
-  await fixture.store.initializeSession({ sessionId: id, workDir: workspace });
+  const { ownerFence } = await initializeRuntimeEventOwner(fixture.store, {
+    sessionId: id,
+    workDir: workspace,
+  });
   const big = (fill: string) => fill.repeat(60 * 1024);
-  const appended = await fixture.store.appendBatch([
-    messageEvent(`${id}-e1`, id, "2026-08-19T00:00:01.000Z", "small-early"),
-    messageEvent(`${id}-e2`, id, "2026-08-19T00:00:02.000Z", big("a")),
-    messageEvent(`${id}-e3`, id, "2026-08-19T00:00:03.000Z", big("b")),
-    messageEvent(`${id}-e4`, id, "2026-08-19T00:00:04.000Z", "small-latest"),
-  ]);
+  const appended = await fixture.store.appendBatch(
+    [
+      messageEvent(`${id}-e1`, id, "2026-08-19T00:00:01.000Z", "small-early"),
+      messageEvent(`${id}-e2`, id, "2026-08-19T00:00:02.000Z", big("a")),
+      messageEvent(`${id}-e3`, id, "2026-08-19T00:00:03.000Z", big("b")),
+      messageEvent(`${id}-e4`, id, "2026-08-19T00:00:04.000Z", "small-latest"),
+    ],
+    { ownerFence },
+  );
   const through = appended.at(-1)!.transcriptWatermark!;
   const maxBytes = 70 * 1024;
   const latest = await fixture.store.readTranscriptProjectionPage({
@@ -299,7 +306,10 @@ test("readTranscriptProjectionPage: 字节预算与固定 watermark 分页保持
   );
   assert.ok(latestBytes <= maxBytes, `projection 页必须受字节预算约束，实际 ${latestBytes}`);
 
-  await fixture.store.append(messageEvent(`${id}-e5`, id, "2026-08-19T00:00:05.000Z", "new-head"));
+  await fixture.store.append(
+    messageEvent(`${id}-e5`, id, "2026-08-19T00:00:05.000Z", "new-head"),
+    { ownerFence },
+  );
   const older = await fixture.store.readTranscriptProjectionPage({
     sessionId: id,
     through,
@@ -323,7 +333,10 @@ test("readTranscriptProjectionPage: 工具开始与结果投影为同一张完�
   });
   const id = "e2-transcript-pairing";
   const workspace = join(fixture.root, "workspace");
-  await fixture.store.initializeSession({ sessionId: id, workDir: workspace });
+  const { ownerFence } = await initializeRuntimeEventOwner(fixture.store, {
+    sessionId: id,
+    workDir: workspace,
+  });
   const bigOutput = "r".repeat(48 * 1024);
   const start = createCanonicalTranscriptToolStart({
     sessionId: id,
@@ -338,46 +351,49 @@ test("readTranscriptProjectionPage: 工具开始与结果投影为同一张完�
     sequence: 1,
     createdAt: 1,
   });
-  await fixture.store.appendBatch([
-    createRuntimeTranscriptToolStartEvent({
-      sessionId: id,
-      invocationId: "inv-e2",
-      runId: "run-e2",
-      turnId: "turn-e2",
-      start,
-    }),
-    {
-      schemaVersion: 2,
-      eventId: `${id}-result`,
-      sessionId: id,
-      invocationId: "inv-e2",
-      runId: "run-e2",
-      turnId: "turn-e2",
-      at: "2026-08-19T00:00:02.000Z",
-      partial: false,
-      visibility: "model",
-      refs: { toolCallId: "call-budget-pair" },
-      kind: "tool.result.recorded",
-      data: {
-        toolName: "read_file",
-        status: "succeeded",
-        body: {
-          storage: "inline",
-          content: bigOutput,
-          sha256: createHash("sha256").update(bigOutput, "utf8").digest("hex"),
-          sizeBytes: Buffer.byteLength(bigOutput, "utf8"),
+  await fixture.store.appendBatch(
+    [
+      createRuntimeTranscriptToolStartEvent({
+        sessionId: id,
+        invocationId: "inv-e2",
+        runId: "run-e2",
+        turnId: "turn-e2",
+        start,
+      }),
+      {
+        schemaVersion: 2,
+        eventId: `${id}-result`,
+        sessionId: id,
+        invocationId: "inv-e2",
+        runId: "run-e2",
+        turnId: "turn-e2",
+        at: "2026-08-19T00:00:02.000Z",
+        partial: false,
+        visibility: "model",
+        refs: { toolCallId: "call-budget-pair" },
+        kind: "tool.result.recorded",
+        data: {
+          toolName: "read_file",
+          status: "succeeded",
+          body: {
+            storage: "inline",
+            content: bigOutput,
+            sha256: createHash("sha256").update(bigOutput, "utf8").digest("hex"),
+            sizeBytes: Buffer.byteLength(bigOutput, "utf8"),
+          },
+          projection: {
+            version: 1,
+            mode: "full",
+            text: bigOutput,
+            strategy: "original",
+            truncated: false,
+          },
         },
-        projection: {
-          version: 1,
-          mode: "full",
-          text: bigOutput,
-          strategy: "original",
-          truncated: false,
-        },
-      },
-    } as RuntimeEvent,
-    messageEvent(`${id}-tail`, id, "2026-08-19T00:00:03.000Z", `tail:${"t".repeat(1024)}`),
-  ]);
+      } as RuntimeEvent,
+      messageEvent(`${id}-tail`, id, "2026-08-19T00:00:03.000Z", `tail:${"t".repeat(1024)}`),
+    ],
+    { ownerFence },
+  );
 
   const page = await fixture.store.readTranscriptProjectionPage({
     sessionId: id,

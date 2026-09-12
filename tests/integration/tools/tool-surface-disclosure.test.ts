@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { RUNTIME_EVENT_SCHEMA_VERSION } from "../../../src/engine/session-runtime-event.js";
 import { createRuntimeEventId } from "../../../src/storage/runtime-event-store-contracts.js";
 import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
+import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 import { LoadToolsTool, renderGroupCatalog } from "../../../src/tools/load-tools.js";
 import { SearchToolsTool } from "../../../src/tools/search-tools.js";
 import {
@@ -360,20 +361,26 @@ test("审计往返：tool.group.loaded 落盘但不恢复工具激活", async ()
   const root = await mkdtemp(join(tmpdir(), "pico-tool-surface-durable-"));
   try {
     const store = new SqliteRuntimeEventStore({ storageRoot: join(root, "state") });
-    await store.initializeSession({ sessionId: "sess-durable", workDir: root });
-    await store.append({
-      schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
-      eventId: createRuntimeEventId("tool-group"),
+    const { ownerFence } = await initializeRuntimeEventOwner(store, {
       sessionId: "sess-durable",
-      invocationId: "inv-1",
-      runId: "run-1",
-      turnId: "turn-1",
-      at: new Date().toISOString(),
-      partial: false,
-      visibility: "internal",
-      kind: "tool.group.loaded",
-      data: { groupId: "web", toolNames: ["fetch_url", "web_search"] },
+      workDir: root,
     });
+    await store.append(
+      {
+        schemaVersion: RUNTIME_EVENT_SCHEMA_VERSION,
+        eventId: createRuntimeEventId("tool-group"),
+        sessionId: "sess-durable",
+        invocationId: "inv-1",
+        runId: "run-1",
+        turnId: "turn-1",
+        at: new Date().toISOString(),
+        partial: false,
+        visibility: "internal",
+        kind: "tool.group.loaded",
+        data: { groupId: "web", toolNames: ["fetch_url", "web_search"] },
+      },
+      { ownerFence },
+    );
     const entries = await store.readSessionEntries("sess-durable");
     const loaded = entries.filter((entry) => entry.event.kind === "tool.group.loaded");
     assert.equal(loaded.length, 1, "事件必须真实落盘（审查 C1：曾被 assert 层硬拒）");

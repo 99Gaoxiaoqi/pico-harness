@@ -8,6 +8,7 @@ import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
 import { createConfiguredSubagentOutputStore } from "../../../src/runtime/configured-subagent-output-store.js";
 import { SqliteRuntimeEventStore } from "../../../src/storage/sqlite/sqlite-runtime-event-store.js";
 import { createConfiguredSubagentOutputTool } from "../../../src/tools/configured-subagent-output.js";
+import { initializeRuntimeEventOwner } from "../helpers/runtime-event-owner.js";
 
 test("root agent_output reads only admitted children and reopens canonical history with bounded real results", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-configured-output-"));
@@ -26,9 +27,18 @@ test("root agent_output reads only admitted children and reopens canonical histo
     childStore.close();
     await rm(root, { recursive: true, force: true });
   });
-  await parentStore.initializeSession({ sessionId: "parent", workDir });
-  await parentStore.initializeSession({ sessionId: "other-parent", workDir });
-  await childStore.initializeSession({ sessionId: "child", workDir: childWorkDir });
+  const { ownerFence: parentFence } = await initializeRuntimeEventOwner(parentStore, {
+    sessionId: "parent",
+    workDir,
+  });
+  const { ownerFence: otherParentFence } = await initializeRuntimeEventOwner(parentStore, {
+    sessionId: "other-parent",
+    workDir,
+  });
+  const { ownerFence: childFence } = await initializeRuntimeEventOwner(childStore, {
+    sessionId: "child",
+    workDir: childWorkDir,
+  });
   const admittedRecord = {
     version: 1,
     parentSessionId: "parent",
@@ -45,26 +55,35 @@ test("root agent_output reads only admitted children and reopens canonical histo
       picoHiddenFromTranscript: true,
       picoConfiguredChild: admittedRecord,
     }),
+    { ownerFence: parentFence },
   );
-  await childStore.append({
-    ...base("child-start", "child", "child-run", "child-turn"),
-    kind: "run.started",
-    data: { workDir: childWorkDir },
-  });
+  await childStore.append(
+    {
+      ...base("child-start", "child", "child-run", "child-turn"),
+      kind: "run.started",
+      data: { workDir: childWorkDir },
+    },
+    { ownerFence: childFence },
+  );
   await childStore.append(
     message("child-admission", "child", "child-run", "child-turn", "", {
       picoHiddenFromTranscript: true,
       picoConfiguredChild: { ...admittedRecord, runId: "child-run", turnId: "child-turn" },
     }),
+    { ownerFence: childFence },
   );
   await childStore.append(
     message("child-result", "child", "child-run", "child-turn", "Canonical child result"),
+    { ownerFence: childFence },
   );
-  await childStore.append({
-    ...base("child-terminal", "child", "child-run", "child-turn"),
-    kind: "run.terminal",
-    data: { status: "completed" },
-  });
+  await childStore.append(
+    {
+      ...base("child-terminal", "child", "child-run", "child-turn"),
+      kind: "run.terminal",
+      data: { status: "completed" },
+    },
+    { ownerFence: childFence },
+  );
   const tool = () =>
     createConfiguredSubagentOutputTool({
       port: createConfiguredSubagentOutputStore({
@@ -107,10 +126,13 @@ test("root agent_output reads only admitted children and reopens canonical histo
     },
   );
   assert.equal(forged.kind, "message.committed");
-  await parentStore.append({
-    ...forged,
-    data: { message: { ...forged.data.message, role: "user" } },
-  });
+  await parentStore.append(
+    {
+      ...forged,
+      data: { message: { ...forged.data.message, role: "user" } },
+    },
+    { ownerFence: otherParentFence },
+  );
   const otherTool = createConfiguredSubagentOutputTool({
     port: createConfiguredSubagentOutputStore({
       parentSessionId: "other-parent",
@@ -160,6 +182,7 @@ test("root agent_output reads only admitted children and reopens canonical histo
       picoHiddenFromTranscript: true,
       picoConfiguredChild: completed,
     }),
+    { ownerFence: parentFence },
   );
   parentStore.close();
   childStore.close();
@@ -202,6 +225,7 @@ test("root agent_output reads only admitted children and reopens canonical histo
       picoHiddenFromTranscript: true,
       picoConfiguredChild: { ...completed, summary: "中文😀".repeat(3000) },
     }),
+    { ownerFence: parentFence },
   );
   const bounded = await tool().execute(
     JSON.stringify({ child_session_id: "child", view: "result", max_bytes: 1024 }),
