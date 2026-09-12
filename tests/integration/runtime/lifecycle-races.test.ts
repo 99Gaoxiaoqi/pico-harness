@@ -34,7 +34,12 @@ test("Workspace registry fences a get still canonicalizing when close begins", a
   const registry = new WorkspaceRuntimeRegistry({
     create: async (workspacePath) => {
       createCount++;
-      return { workspacePath };
+      return {
+        workspacePath,
+        close: async () => undefined,
+        hasPendingOwnership: () => false,
+        waitForOwnershipRelease: async () => undefined,
+      };
     },
   });
 
@@ -237,7 +242,7 @@ test("Workspace close is stable when abort listeners synchronously close again",
   await runtime.waitForOwnershipRelease();
 });
 
-test("Daemon keeps service ownership until a timed-out executor actually settles", async (context) => {
+test("Daemon stop waits for service ownership until a timed-out executor settles", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-daemon-close-ownership-"));
   const workspace = join(root, "workspace");
   const picoHome = join(root, "pico-home");
@@ -285,13 +290,23 @@ test("Daemon keeps service ownership until a timed-out executor actually settles
   const runId = requiredString(run["runId"], "runId");
   await entered.promise;
 
-  await completesWithin(host.stop(), 500, "daemon stop exceeded its bounded drain");
+  const stopping = host.stop();
+  let stopSettled = false;
+  void stopping.then(() => {
+    stopSettled = true;
+  });
+  await waitUntil(() => service.shutdownOwnershipFence().pending);
+  assert.equal(stopSettled, false, "service ownership 未释放前 daemon stop 不得完成");
   const beforeSettle = await service.replayEvents({ workspacePath: workspace });
   assert.equal(beforeSettle.events.filter((event) => event.topic === "run.finished").length, 1);
 
   release.resolve();
   await executorReturned.promise;
-  await service.shutdownOwnershipFence().released;
+  await completesWithin(
+    stopping,
+    500,
+    "daemon stop did not finish after service ownership release",
+  );
   assert.equal(lateServiceAccessible, true);
   assert.equal(runtime.getRun(runId)?.status, "cancelled");
   assert.equal(runtime.getRun(runId)?.result, undefined);
@@ -312,7 +327,7 @@ test("Daemon keeps service ownership until a timed-out executor actually settles
   await restartedHost.stop();
 });
 
-test("Daemon keeps TaskHost ownership until an abort-ignoring worktree runner settles", async (context) => {
+test("Daemon stop waits for TaskHost ownership until an abort-ignoring runner settles", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-daemon-task-runner-ownership-"));
   const workspace = join(root, "workspace");
   const picoHome = join(root, "pico-home");
@@ -365,13 +380,19 @@ test("Daemon keeps TaskHost ownership until an abort-ignoring worktree runner se
   taskIds.push(task.taskId);
   await entered.promise;
 
-  await completesWithin(host.stop(), 500, "daemon stop waited forever for a worktree runner");
+  const stopping = host.stop();
+  let stopSettled = false;
+  void stopping.then(() => {
+    stopSettled = true;
+  });
+  await waitUntil(() => service.shutdownOwnershipFence().pending);
+  assert.equal(stopSettled, false, "TaskHost ownership 未释放前 daemon stop 不得完成");
   assert.equal(runtime.hasPendingOwnership(), true);
   assert.equal(taskHost.jobService.get(task.taskId)?.job.status, "running");
 
   release.resolve();
   await runnerReturned.promise;
-  await service.shutdownOwnershipFence().released;
+  await completesWithin(stopping, 500, "daemon stop did not finish after TaskHost release");
   await runtime.waitForOwnershipRelease();
   const settled = await taskHost.supervisor.wait(task.taskId);
   assert.equal(settled.status, "stopped");
@@ -539,16 +560,16 @@ test("Daemon permanently consumes a service whose close rejects", async (context
   await restartedHost.stop();
 });
 
-test("Daemon stop fails loudly when service close fails without an ownership fence", async (context) => {
-  const root = await mkdtemp(join(tmpdir(), "pico-daemon-close-no-fence-"));
+test("Daemon stop propagates service ownership fence failure", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-daemon-service-fence-failure-"));
   const registrationStore = new WorkspaceRegistrationStore(join(root, "workspaces.json"));
+  const ownership = deferred();
   const service: DisposableLocalRuntimeService = {
     handle: async () => ({}),
     replayEvents: async () => ({ events: [], hasMore: false }),
     subscribe: () => () => undefined,
-    close: async () => {
-      throw new Error("unfenced service close failed");
-    },
+    close: async () => undefined,
+    shutdownOwnershipFence: () => ({ pending: true, released: ownership.promise }),
   };
   const host = createLifecycleTestHost({
     registrationStore,
@@ -557,7 +578,9 @@ test("Daemon stop fails loudly when service close fails without an ownership fen
   context.after(() => rm(root, { recursive: true, force: true }));
 
   await host.start();
-  await assert.rejects(host.stop(), /unfenced service close failed/u);
+  const stopping = host.stop();
+  ownership.reject(new Error("service ownership release failed"));
+  await assert.rejects(stopping, /service ownership release failed/u);
 });
 
 test("Daemon stop fails loudly when a Cron runtime cannot close", async (context) => {
@@ -578,10 +601,16 @@ test("Daemon stop fails loudly when a Cron runtime cannot close", async (context
     cronRuntimeFactory: {
       create: async () => ({
         recoverInterruptedRuns: () => [],
+        runNow: () => {
+          throw new Error("test Cron runtime has no Jobs");
+        },
         start: () => undefined,
+        beginClose: () => undefined,
         close: async () => {
           throw new Error("cron runtime close failed");
         },
+        hasPendingOwnership: () => false,
+        waitForOwnershipRelease: async () => undefined,
       }),
     },
   });

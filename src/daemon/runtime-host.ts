@@ -106,7 +106,6 @@ export class LocalDaemonHost {
     const canonical = await canonicalizeWorkspacePath(workspacePath);
     const runtime = this.cronRuntimes.get(canonical);
     if (!runtime) throw new Error(`工作区尚未启动 Cron runtime: ${canonical}`);
-    if (!runtime.runNow) throw new Error("当前 Cron runtime 不支持立即运行");
     return runtime.runNow(cronJobId);
   }
 
@@ -157,7 +156,7 @@ export class LocalDaemonHost {
       this.cronRuntimes.delete(workspacePath);
       this.cronShutdownRuntimes.set(workspacePath, runtime);
       try {
-        runtime.beginClose?.();
+        runtime.beginClose();
         await runtime.close();
         this.trackCronOwnershipRelease(workspacePath, runtime);
       } catch (error) {
@@ -200,14 +199,8 @@ export class LocalDaemonHost {
     runtime: ManagedCronWorkspaceRuntime,
   ): void {
     const ownership = readCronOwnershipFence(runtime);
-    if (ownership.error !== undefined) {
+    if ("error" in ownership) {
       this.cronShutdownFailures.set(workspacePath, ownership.error);
-      return;
-    }
-    if (!ownership.fence) {
-      if (this.cronShutdownRuntimes.get(workspacePath) === runtime) {
-        this.cronShutdownRuntimes.delete(workspacePath);
-      }
       return;
     }
     void ownership.fence.released.then(
@@ -237,7 +230,7 @@ export class LocalDaemonHost {
     ];
     this.cronRuntimes.clear();
     const runtimeClosePromises = runtimes.map(async (runtime) => {
-      runtime.beginClose?.();
+      runtime.beginClose();
       await runtime.close();
     });
     let serviceCloseError: unknown;
@@ -251,7 +244,7 @@ export class LocalDaemonHost {
     const priorRuntimeCloseFailure = this.cronShutdownFailures.values().next();
     const cronOwnership = runtimes.map(readCronOwnershipFence);
     const cronOwnershipFailure = cronOwnership.find(
-      (ownership) => ownership.error !== undefined,
+      (ownership): ownership is { error: unknown } => "error" in ownership,
     )?.error;
     if (serviceCloseError !== undefined) throw serviceCloseError;
     if (runtimeCloseFailure?.status === "rejected") throw runtimeCloseFailure.reason;
@@ -263,41 +256,45 @@ export class LocalDaemonHost {
     if (this.serviceClosePromise) return this.serviceClosePromise;
     // A DisposableLocalRuntimeService is single-use even when its close reports failure.
     this.serviceClosed = true;
-    let resolveClose: () => void = () => undefined;
-    let rejectClose: (reason: unknown) => void = () => undefined;
-    const closePromise = new Promise<void>((resolve, reject) => {
-      resolveClose = resolve;
-      rejectClose = reject;
-    });
+    const closePromise = this.closeServiceOnce();
     this.serviceClosePromise = closePromise;
-    try {
-      Promise.resolve(this.options.service.close?.()).then(resolveClose, rejectClose);
-    } catch (error) {
-      rejectClose(error);
-    }
     return closePromise;
+  }
+
+  private async closeServiceOnce(): Promise<void> {
+    let closeError: unknown;
+    try {
+      await this.options.service.close();
+    } catch (error) {
+      closeError = error;
+    }
+
+    let ownershipError: unknown;
+    try {
+      await this.options.service.shutdownOwnershipFence().released;
+    } catch (error) {
+      ownershipError = error;
+    }
+
+    if (closeError !== undefined && ownershipError !== undefined) {
+      throw new AggregateError(
+        [closeError, ownershipError],
+        "Runtime service close and ownership release failed",
+      );
+    }
+    if (closeError !== undefined) throw closeError;
+    if (ownershipError !== undefined) throw ownershipError;
   }
 }
 
-function readCronOwnershipFence(runtime: ManagedCronWorkspaceRuntime): {
-  fence?: ShutdownOwnershipFence;
-  error?: unknown;
-} {
-  const readPending = runtime.hasPendingOwnership;
-  const waitForRelease = runtime.waitForOwnershipRelease;
-  if (!readPending && !waitForRelease) return {};
-  if (!readPending || !waitForRelease) {
-    return {
-      error: new Error(
-        "Cron runtime ownership fence 不完整：hasPendingOwnership 与 waitForOwnershipRelease 必须同时提供",
-      ),
-    };
-  }
+function readCronOwnershipFence(
+  runtime: ManagedCronWorkspaceRuntime,
+): { fence: ShutdownOwnershipFence } | { error: unknown } {
   try {
     return {
       fence: {
-        pending: readPending.call(runtime),
-        released: waitForRelease.call(runtime),
+        pending: runtime.hasPendingOwnership(),
+        released: runtime.waitForOwnershipRelease(),
       },
     };
   } catch (error) {

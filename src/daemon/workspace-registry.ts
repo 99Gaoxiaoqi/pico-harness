@@ -4,11 +4,11 @@ import { resolve } from "node:path";
 
 export interface WorkspaceRuntime {
   readonly workspacePath: string;
-  close?(): Promise<void> | void;
+  close(): Promise<void> | void;
   /** Whether bounded close returned while this runtime still owns live execution resources. */
-  hasPendingOwnership?(): boolean;
+  hasPendingOwnership(): boolean;
   /** Settles only when those resources are safe for a replacement daemon to own. */
-  waitForOwnershipRelease?(): Promise<void>;
+  waitForOwnershipRelease(): Promise<void>;
 }
 
 export interface WorkspaceRuntimeFactory<T extends WorkspaceRuntime> {
@@ -118,10 +118,10 @@ export class WorkspaceRuntimeRegistry<T extends WorkspaceRuntime> {
     const resolved = resolutions.flatMap((result) =>
       result.status === "fulfilled" ? [result.value] : [],
     );
-    const closes = await Promise.allSettled(resolved.map(async (runtime) => runtime.close?.()));
+    const closes = await Promise.allSettled(resolved.map(async (runtime) => runtime.close()));
     const closeFailure = closes.find((result) => result.status === "rejected");
     const ownershipRelease = Promise.all(
-      resolved.map(async (runtime) => runtime.waitForOwnershipRelease?.()),
+      resolved.map(async (runtime) => runtime.waitForOwnershipRelease()),
     ).then(() => {
       if (closeFailure?.status === "rejected") throw closeFailure.reason;
     });

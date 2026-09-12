@@ -52,7 +52,7 @@ export type { BridgeErrorCode } from "./runtime-host-operations.js";
  */
 export interface RuntimeHostBridgeService {
   handle(request: RuntimeRequest): Promise<JsonValue>;
-  close?(): Promise<void> | void;
+  close(): Promise<void> | void;
 }
 
 export interface RuntimeHostCompositionOptions {
@@ -185,7 +185,7 @@ export function createRuntimeHostComposition(
     async close() {
       eventBridge?.unsubscribeAll();
       sessionBridge?.beginDrain();
-      await service.close?.();
+      await service.close();
     },
   };
 }

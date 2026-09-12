@@ -122,7 +122,7 @@ test("session open flushes its snapshot response before activating queued live f
     compositionFactory: async (context) => {
       registry = new SessionSubscriptionRegistry(context.hostEpoch, source);
       return createRuntimeHostComposition({
-        service: { handle: async () => ({}) },
+        service: { handle: async () => ({}), close: () => undefined },
         sessionContinuity: registry,
       });
     },

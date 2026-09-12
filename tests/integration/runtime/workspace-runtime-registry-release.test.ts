@@ -13,7 +13,12 @@ test("workspace registry peek never constructs a runtime", async (context) => {
   const registry = new WorkspaceRuntimeRegistry({
     create: async (workspacePath) => {
       creates++;
-      return { workspacePath, close: async () => undefined };
+      return {
+        workspacePath,
+        close: async () => undefined,
+        hasPendingOwnership: () => false,
+        waitForOwnershipRelease: async () => undefined,
+      };
     },
   });
   context.after(async () => {
@@ -83,12 +88,22 @@ test("get re-fetches a runtime released while its create was still pending", asy
   await mkdir(workspace, { recursive: true });
   const firstCreateReleased = deferred();
   let creates = 0;
-  const registry = new WorkspaceRuntimeRegistry<{ workspacePath: string; close(): Promise<void> }>(
+  const registry = new WorkspaceRuntimeRegistry<{
+    workspacePath: string;
+    close(): Promise<void>;
+    hasPendingOwnership(): boolean;
+    waitForOwnershipRelease(): Promise<void>;
+  }>(
     {
       create: async (workspacePath) => {
         creates++;
         if (creates === 1) await firstCreateReleased.promise;
-        return { workspacePath, close: async () => undefined };
+        return {
+          workspacePath,
+          close: async () => undefined,
+          hasPendingOwnership: () => false,
+          waitForOwnershipRelease: async () => undefined,
+        };
       },
     },
     async (workspacePath) => workspacePath,

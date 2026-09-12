@@ -87,6 +87,8 @@ class ReplayOverflowService implements LocalRuntimeService {
     return () => this.listeners.delete(listener);
   }
 
+  close(): void {}
+
   emitDurable(eventId: string, title = eventId): void {
     const event = createRuntimeNotification({
       eventId,

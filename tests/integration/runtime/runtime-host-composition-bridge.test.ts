@@ -182,6 +182,7 @@ test("runtime-host bridge: usage.get supports one global query without a workspa
 test("runtime-host bridge: usage.get rejects results above the frame budget without dropping the connection", async (t) => {
   const oversizedService: RuntimeHostBridgeService = {
     handle: async () => ({ usage: { note: "x".repeat(RUNTIME_REQUEST_RESULT_MAX_BYTES) } }),
+    close: () => undefined,
   };
   const { connection } = await startBridgeHarness(t, { service: oversizedService });
 
@@ -250,6 +251,7 @@ test("runtime-host bridge: malformed handler output is rejected by spec.decodeOu
   // strict output-decoding boundary: the dispatcher must surface internal_failure.
   const brokenService: RuntimeHostBridgeService = {
     handle: async () => ({}) as JsonValue,
+    close: () => undefined,
   };
   const { connection } = await startBridgeHarness(t, { service: brokenService });
 
@@ -287,6 +289,7 @@ test("runtime-host bridge: runtime.request carries an un-specced daemon method e
 test("runtime-host bridge: runtime.request rejects a malformed method result", async (t) => {
   const brokenService: RuntimeHostBridgeService = {
     handle: async () => ({ config: [], version: "1" }) as unknown as JsonValue,
+    close: () => undefined,
   };
   const { connection, workspacePath } = await startBridgeHarness(t, { service: brokenService });
 
@@ -313,6 +316,7 @@ test("runtime-host bridge: a 950KB result rides the kernel wire — former dead 
   const bigPayload = "x".repeat(950 * 1024);
   const bigResultService: RuntimeHostBridgeService = {
     handle: async () => ({ note: bigPayload }) as JsonValue,
+    close: () => undefined,
   };
   const { connection, workspacePath } = await startBridgeHarness(t, {
     service: bigResultService,
