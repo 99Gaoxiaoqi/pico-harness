@@ -103,7 +103,9 @@ interface JournalLockIdentity {
   readonly ino: number;
 }
 
-interface JournalLockSnapshot extends JournalLockIdentity {
+interface JournalLockSnapshot {
+  readonly dev: number;
+  readonly ino: number;
   readonly raw: string;
   readonly mtimeMs: number;
   readonly record?: JournalLockRecord;
@@ -374,8 +376,9 @@ export class ProviderOperationJournal {
   private async removeStaleLock(): Promise<boolean> {
     const snapshot = await this.readLockSnapshot(this.lockPath);
     if (snapshot === undefined) return true;
+    if (snapshot.record === undefined) return false;
     if (Date.now() - snapshot.mtimeMs < this.staleLockMs) return false;
-    if (snapshot.record !== undefined && isProcessAlive(snapshot.record.pid)) return false;
+    if (isProcessAlive(snapshot.record.pid)) return false;
     return this.claimAndRemoveLock(snapshot, "stale");
   }
 
@@ -394,7 +397,7 @@ export class ProviderOperationJournal {
     requireToken = true,
   ): Promise<boolean> {
     const claimPath = `${this.lockPath}.${purpose}-${sha256(
-      `${expected.dev}:${expected.ino}:${expected.token}:${sha256(expected.raw)}`,
+      `${expected.dev}:${expected.ino}:${sha256(expected.raw)}`,
     )}`;
     let createdClaim = false;
     let matchedClaim = false;
@@ -458,7 +461,6 @@ export class ProviderOperationJournal {
       if (!sameFile(opened, after)) return undefined;
       const record = parseLockRecord(raw);
       return {
-        token: record?.token ?? `legacy:${sha256(raw)}`,
         dev: opened.dev,
         ino: opened.ino,
         raw,
@@ -735,6 +737,7 @@ function parseLockRecord(raw: string): JournalLockRecord | undefined {
   }
   if (
     !isRecord(value) ||
+    Object.keys(value).length !== 4 ||
     value["version"] !== 1 ||
     typeof value["token"] !== "string" ||
     value["token"].length === 0 ||
@@ -773,7 +776,7 @@ function matchesIdentity(
   return (
     snapshot.dev === identity.dev &&
     snapshot.ino === identity.ino &&
-    (!requireToken || snapshot.token === identity.token)
+    (!requireToken || snapshot.record?.token === identity.token)
   );
 }
 
@@ -782,7 +785,12 @@ function matchesSnapshot(
   expected: JournalLockSnapshot,
   requireToken: boolean,
 ): boolean {
-  return matchesIdentity(actual, expected, requireToken) && actual.raw === expected.raw;
+  return (
+    sameFile(actual, expected) &&
+    actual.raw === expected.raw &&
+    (!requireToken ||
+      (expected.record !== undefined && actual.record?.token === expected.record.token))
+  );
 }
 
 function sameFile(
