@@ -37,7 +37,11 @@ Workspace
 
 - 点击“新任务”只进入空白对话和 Composer；首次发送时创建 Session 与首轮 Run。
 - Run 完成后仍停留在 `/session/:sessionId`，下一次发送复用同一 Session。
+- 已有工作只通过 `/session/:sessionId` 打开；Desktop 不再注册 `/task/:runId`，也不从
+  缺少 Session 身份的 Run 推断导航目标。
 - Plan、工具、审批、Ask User、Changes、Goal 和子代理均为 Transcript 条目或其详情面板，不是独立任务仪表盘。
+- 子代理会话入口只使用 Runtime 明确投影的 `childSessionId` 和 `childWorkspacePath`，不把
+  `activityId` 当作 Session 身份。
 - Slash 命令是图形能力的键盘入口，不得在 Renderer 中解析成另一套业务逻辑。
 
 ## 会话与工作区入口
@@ -132,7 +136,7 @@ File History 只接受带 `sourceMessageEventId`、`beforeSessionSeq`、`message
 
 Desktop 主链已经切换为会话模型；后续实现和回归按以下顺序验收：
 
-1. 用 `/session/:sessionId`、连续 Transcript 和固定 Composer 替代 Run 主页面；旧 `/task/:runId` 只做兼容定位。
+1. 以 `/session/:sessionId`、连续 Transcript 和固定 Composer 作为唯一已有任务主页面。
 2. 接通首次发送、空闲续聊、Steer、Queue、Replace、Interrupt，并以 Session 隔离所有事件。
 3. 接入模型、模式、Thinking、Skill、Agent 和审批等 Composer 主路径。
 4. 接入 Session 管理、Changes/Rewind、MCP、Skills、Automations 和诊断等详情入口。

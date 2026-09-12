@@ -27,7 +27,7 @@ Pico daemon ── Agent Runtime / Session / Rewind / Automations
 ## Renderer 代码组织
 
 - `App.tsx` 装配路由、共享 RuntimeContext 与页面，`AppShell.tsx` 管理导航外壳。
-- `pages/` 按路由收纳会话、任务、设置、审核、自动化和扩展页面；`conversation/`、`usage/`、`workbar/` 收纳对应领域组件和投影。
+- `pages/` 按路由收纳会话、设置、审核、自动化和扩展页面；`conversation/`、`usage/`、`workbar/` 收纳对应领域组件和投影。已有任务只使用 `/session/:sessionId`，不保留 Run 页面回退。
 - `runtime.ts` 继续拥有唯一 `useRuntimeStore`，包括连接、订阅、会话切换、代次校验和异步操作生命周期。
 - `runtime-projections/` 只转换协议数据与配置值；会话和用量投影放在各自领域目录。投影不创建订阅或另一份 Store。
 
@@ -38,6 +38,9 @@ Pico daemon ── Agent Runtime / Session / Rewind / Automations
 对应查询、投影和资源生命周期；共享 RPC 调用及资源帧订阅由窄模块复用。终端绑定表与
 stop/list/attach 保持在同一个 Terminal 控制器模块，关闭标签仍先等待终端停止。
 公开面板入口保留兼容导出，页面无需重建另一份资源状态。
+
+Workbar 只持久化 v2 双 Dock 结构。Renderer State 只暴露 `docks`、`focusedDock`、
+`rightWidth` 和 `bottomHeight`；v1 单 Dock payload 不再迁移，读取时按损坏状态回退到安全默认值。
 
 ## 数据所有权
 
@@ -59,6 +62,8 @@ stop/list/attach 保持在同一个 Terminal 控制器模块，关闭标签仍�
 - daemon 先建立 live subscribe，再按工作区回放通知账本；首个回放页固定 `highWatermarkEventId`，后续页用 exclusive `eventId` cursor 补齐，期间 live 事件在客户端缓冲。`resourceVersion` 是资源局部版本，不是全局回放序号。
 - Approval 响应必须幂等；Pause 在当前不可中断工具结束后生效。
 - Rewind 在文件指纹变化时 fail-closed，外部副作用不会伪装成可回滚。
+- 子代理导航只接受显式 `childSessionId`；Usage 投影只暴露 canonical `cacheReadTokens`，不从
+  `activityId` 推断会话，也不生成旧 `cachedTokens` 别名。
 - 未实现或不可用能力在 UI 中显示真实原因，不返回伪造成功状态。
 
 ## daemon 配置所有权

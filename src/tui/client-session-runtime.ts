@@ -15,8 +15,6 @@ import {
   type RuntimePlanProjection,
   type RuntimeActiveOverlayEntry,
   type RuntimeSessionSubscriptionFrame,
-  type RuntimeTranscriptCursor,
-  type RuntimeTranscriptFragment,
   type RuntimeUserInput,
   type RuntimeUserDefaults,
 } from "@pico/protocol";
@@ -115,15 +113,6 @@ export interface ClientSessionRuntimeOptions {
   readonly orchestrationModeOverride?: "graph" | "swarm";
 }
 
-/** 仅供旧投影 Oracle/迁移测试复用；不属于 v2 客户端读路径。 */
-export interface RuntimeTranscriptPagingState {
-  readonly items: readonly RuntimeConversationItem[];
-  readonly fragments?: Readonly<Record<string, readonly RuntimeTranscriptFragment[]>>;
-  readonly revision?: string;
-  readonly nextCursor?: RuntimeTranscriptCursor;
-  readonly nextBefore?: string;
-}
-
 export function planApprovalNoticeFromProjection(
   projection: RuntimePlanProjection,
 ): ApprovalNotice | undefined {
@@ -187,101 +176,6 @@ function planControlSnapshotFromProjection(
                 ? "terminal"
                 : "none";
   return { version: 1, availability: "ready", state, projection };
-}
-
-interface LegacyTranscriptOraclePage {
-  readonly session?: unknown;
-  readonly queuedInputs?: readonly unknown[];
-  readonly items: readonly RuntimeConversationItem[];
-  readonly fragments?: readonly RuntimeTranscriptFragment[];
-  readonly revision: string;
-  readonly nextCursor?: RuntimeTranscriptCursor;
-  readonly nextBefore?: string;
-}
-
-export function advanceRuntimeTranscriptPagingState(
-  state: RuntimeTranscriptPagingState,
-  page: LegacyTranscriptOraclePage,
-): RuntimeTranscriptPagingState {
-  if (state.revision !== undefined && page.revision !== state.revision) {
-    throw new Error(
-      `Session transcript revision changed during hydration (${state.revision} -> ${page.revision})`,
-    );
-  }
-  if (page.nextCursor && page.nextCursor.revision !== page.revision) {
-    throw new Error("Session transcript cursor revision does not match its page");
-  }
-  if (
-    state.nextCursor &&
-    page.nextCursor &&
-    state.nextCursor.throughTranscriptSequence !== page.nextCursor.throughTranscriptSequence
-  ) {
-    throw new Error("Session transcript high-watermark changed during hydration");
-  }
-  const fragments: Record<string, readonly RuntimeTranscriptFragment[]> = {
-    ...(state.fragments ?? {}),
-  };
-  const completed: RuntimeConversationItem[] = [];
-  for (const fragment of page.fragments ?? []) {
-    if (
-      fragment.byteLength !== Buffer.byteLength(fragment.json, "utf8") ||
-      fragment.byteOffset + fragment.byteLength > fragment.totalBytes
-    ) {
-      throw new Error("Session transcript fragment byte range is invalid");
-    }
-    const prior = fragments[fragment.itemId] ?? [];
-    for (const part of prior) {
-      if (
-        part.totalBytes !== fragment.totalBytes ||
-        part.position !== fragment.position ||
-        part.ordinal !== fragment.ordinal
-      ) {
-        throw new Error("Session transcript fragments disagree on item metadata");
-      }
-      const sameRange =
-        part.byteOffset === fragment.byteOffset && part.byteLength === fragment.byteLength;
-      if (sameRange && part.json !== fragment.json) {
-        throw new Error("Session transcript fragments disagree on range content");
-      }
-      const overlaps =
-        part.byteOffset < fragment.byteOffset + fragment.byteLength &&
-        fragment.byteOffset < part.byteOffset + part.byteLength;
-      if (overlaps && !sameRange) {
-        throw new Error("Session transcript fragment ranges overlap");
-      }
-    }
-    const duplicate = prior.some(
-      (part) => part.byteOffset === fragment.byteOffset && part.byteLength === fragment.byteLength,
-    );
-    const unique = [...prior, ...(duplicate ? [] : [fragment])].toSorted(
-      (left, right) => left.byteOffset - right.byteOffset,
-    );
-    fragments[fragment.itemId] = unique;
-    let offset = 0;
-    for (const part of unique) {
-      if (part.byteOffset !== offset) break;
-      offset += part.byteLength;
-    }
-    if (offset === fragment.totalBytes) {
-      const parsed = JSON.parse(
-        unique.map((part) => part.json).join(""),
-      ) as RuntimeConversationItem;
-      if (parsed.id !== fragment.itemId) {
-        throw new Error("Session transcript fragment item ID changed");
-      }
-      completed.push(parsed);
-      delete fragments[fragment.itemId];
-    }
-  }
-  const known = new Set(state.items.map((item) => item.id));
-  const older = [...completed, ...page.items].filter((item) => !known.has(item.id));
-  return {
-    items: [...older, ...state.items],
-    ...(Object.keys(fragments).length > 0 ? { fragments } : {}),
-    revision: state.revision ?? page.revision,
-    ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
-    ...(!page.nextCursor && page.nextBefore ? { nextBefore: page.nextBefore } : {}),
-  };
 }
 
 function overlayConversationItem(overlay: RuntimeActiveOverlayEntry): RuntimeConversationItem {

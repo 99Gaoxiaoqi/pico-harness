@@ -15,6 +15,7 @@ import {
   parseSessions,
 } from "../../../apps/desktop/src/renderer/runtime-projections/workspace.js";
 import {
+  subagentMetadata,
   subagentParent,
   subagentSessionHref,
 } from "../../../apps/desktop/src/renderer/conversation/subagent-navigation.js";
@@ -24,6 +25,15 @@ import {
 } from "../../../apps/desktop/src/renderer/workspace-session.js";
 
 Object.assign(globalThis, { React });
+
+test("子代理导航只接受显式 childSessionId，不再从 activityId 推断会话", () => {
+  const activityId = "subagent-12345678-1234-1234-1234-123456789abc";
+  assert.equal(subagentMetadata({ activityId }).childSessionId, undefined);
+  assert.equal(
+    subagentMetadata({ activityId, childSessionId: "child-session" }).childSessionId,
+    "child-session",
+  );
+});
 
 test("隐藏子会话按详情冷启动及刷新，跨工作区返回父任务且首页列表不回添", () => {
   const parent = { workspacePath: "/project/parent", sessionId: "same-id" };

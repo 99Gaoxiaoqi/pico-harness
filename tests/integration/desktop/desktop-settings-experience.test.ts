@@ -111,11 +111,14 @@ test("usage parser preserves global token and CNY cost semantics", () => {
         reasoningTokens: 20,
         costCNY: 1.25,
       },
+      cache: { cacheReadTokens: 40 },
     },
   });
   assert.equal(parsed.scope, "all");
   assert.equal(parsed.totalTokens, 150);
   assert.equal(parsed.reasoningTokens, 20);
+  assert.equal(parsed.cacheReadTokens, 40);
+  assert.equal("cachedTokens" in parsed, false);
   assert.equal(parsed.costCNY, 1.25);
   assert.equal(parsed.costStatus, "partial");
   assert.equal(parsed.unavailableWorkspaceCount, 1);

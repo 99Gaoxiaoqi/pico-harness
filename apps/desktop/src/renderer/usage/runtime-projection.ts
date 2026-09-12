@@ -29,8 +29,6 @@ export function parseUsage(value: unknown): UsageView {
     cacheReadTokens,
     cacheWriteTokens,
     uncachedInputTokens: optionalNumberValue(cache.uncachedInputTokens),
-    // cachedTokens is a backwards-compatible view; the canonical daemon field is cacheReadTokens.
-    cachedTokens: cacheReadTokens,
     cacheRequestHitRate: optionalNumberValue(cache.requestHitRate),
     cachePromptTokenReuseRate: optionalNumberValue(cache.promptTokenReuseRate),
     cacheReadToWriteRatio: optionalNumberValue(cache.cacheReadToWriteRatio),

@@ -3,17 +3,12 @@ import { Link } from "react-router-dom";
 import { EmptyState } from "../components.js";
 import { useRuntime } from "../runtime-context.js";
 import { formatElapsed, isTerminalRun } from "../view-format.js";
-import {
-  newSessionHref,
-  sessionHref,
-  workspaceHref,
-  workspaceSessionKey,
-} from "../workspace-session.js";
+import { newSessionHref, sessionHref, workspaceSessionKey } from "../workspace-session.js";
 import { SessionRow } from "./SessionsPage.js";
 
 export function HomePage() {
   const { data } = useRuntime();
-  const latestRun = data.runs.find((run) => !isTerminalRun(run.status));
+  const latestRun = data.runs.find((run) => run.sessionId && !isTerminalRun(run.status));
   const recentSessions = [...data.sessions]
     .filter((session) => session.status !== "archived")
     .sort((left, right) => right.updatedAt - left.updatedAt)
@@ -49,17 +44,13 @@ export function HomePage() {
           </div>
           <Link to="/sessions">查看全部</Link>
         </header>
-        {latestRun && (
+        {latestRun?.sessionId && (
           <Link
             className="launch-active-run"
-            to={
-              latestRun.sessionId
-                ? sessionHref({
-                    workspacePath: latestRun.workspacePath,
-                    sessionId: latestRun.sessionId,
-                  })
-                : workspaceHref(`/task/${latestRun.id}`, latestRun.workspacePath)
-            }
+            to={sessionHref({
+              workspacePath: latestRun.workspacePath,
+              sessionId: latestRun.sessionId,
+            })}
           >
             <span className="launch-active-run__pulse" aria-hidden="true" />
             <span>

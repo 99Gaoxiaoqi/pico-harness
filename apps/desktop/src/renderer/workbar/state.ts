@@ -52,26 +52,19 @@ export function isWorkbarPanelActive(
 }
 
 export function createWorkbarState(options: WorkbarStateOptions = {}): WorkbarState {
-  const rightOptions: WorkbarDockStateOptions = {
-    tabs: options.docks?.right?.tabs ?? options.tabs ?? DEFAULT_WORKBAR_TABS,
-    activeTabId: options.docks?.right?.activeTabId ?? options.activeTabId,
-    mruTabIds: options.docks?.right?.mruTabIds ?? options.mruTabIds,
-    collapsed: options.docks?.right?.collapsed ?? options.collapsed,
-    launcherOpen: options.docks?.right?.launcherOpen,
-  };
-  const right = createDockState(rightOptions);
+  const right = createDockState(options.docks?.right);
   const rightIds = new Set(right.tabs.map((tab) => tab.id));
   const bottom = createDockState({
     ...options.docks?.bottom,
     tabs: options.docks?.bottom?.tabs?.filter((tab) => !rightIds.has(tab.id)),
   });
 
-  return withCompatibilityAliases({
+  return {
     docks: { right, bottom },
     focusedDock: options.focusedDock ?? "right",
-    rightWidth: clampWorkbarWidth(options.rightWidth ?? options.width ?? WORKBAR_DEFAULT_WIDTH),
+    rightWidth: clampWorkbarWidth(options.rightWidth ?? WORKBAR_DEFAULT_WIDTH),
     bottomHeight: clampWorkbarHeight(options.bottomHeight ?? WORKBAR_DEFAULT_HEIGHT),
-  });
+  };
 }
 
 export function reduceWorkbarState(state: WorkbarState, action: WorkbarAction): WorkbarState {
@@ -249,24 +242,18 @@ export function reduceWorkbarState(state: WorkbarState, action: WorkbarAction): 
       const rightWidth = Number.isFinite(action.width)
         ? clampWorkbarWidth(action.width)
         : state.rightWidth;
-      return rightWidth === state.rightWidth
-        ? state
-        : withCompatibilityAliases({ ...state, rightWidth });
+      return rightWidth === state.rightWidth ? state : { ...state, rightWidth };
     }
 
     case "setHeight": {
       const bottomHeight = Number.isFinite(action.height)
         ? clampWorkbarHeight(action.height)
         : state.bottomHeight;
-      return bottomHeight === state.bottomHeight
-        ? state
-        : withCompatibilityAliases({ ...state, bottomHeight });
+      return bottomHeight === state.bottomHeight ? state : { ...state, bottomHeight };
     }
 
     case "focusDock":
-      return state.focusedDock === action.dock
-        ? state
-        : withCompatibilityAliases({ ...state, focusedDock: action.dock });
+      return state.focusedDock === action.dock ? state : { ...state, focusedDock: action.dock };
   }
 }
 
@@ -324,25 +311,10 @@ function updateDock(
   dock: WorkbarDock,
   dockState: WorkbarDockState,
 ): WorkbarState {
-  return withCompatibilityAliases({
+  return {
     ...state,
     docks: { ...state.docks, [dock]: dockState },
     focusedDock: dock,
-  });
-}
-
-function withCompatibilityAliases(
-  state: Omit<WorkbarState, "tabs" | "activeTabId" | "mruTabIds" | "collapsed" | "width"> &
-    Partial<Pick<WorkbarState, "tabs" | "activeTabId" | "mruTabIds" | "collapsed" | "width">>,
-): WorkbarState {
-  const right = state.docks.right;
-  return {
-    ...state,
-    tabs: right.tabs,
-    activeTabId: right.activeTabId,
-    mruTabIds: right.mruTabIds,
-    collapsed: right.collapsed,
-    width: state.rightWidth,
   };
 }
 

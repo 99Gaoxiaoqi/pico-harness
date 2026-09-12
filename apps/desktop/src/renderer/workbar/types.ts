@@ -15,9 +15,7 @@ export const WORKBAR_TOOL_KINDS = [
 
 export type WorkbarToolKind = (typeof WORKBAR_TOOL_KINDS)[number];
 
-/** Legacy kinds are accepted only while App and v1 storage migrate to the v2 registry. */
-export type LegacyWorkbarTabKind = "overview" | "context";
-export type WorkbarTabKind = WorkbarToolKind | LegacyWorkbarTabKind;
+export type WorkbarTabKind = WorkbarToolKind;
 export type PersistedWorkbarTabKind = Exclude<WorkbarToolKind, "side-chat" | "terminal">;
 
 /** Renderer-only metadata. Domain resources stay bound outside the workbar state. */
@@ -44,13 +42,6 @@ export interface WorkbarState {
   readonly focusedDock: WorkbarDock;
   readonly rightWidth: number;
   readonly bottomHeight: number;
-
-  /** @deprecated Right-Dock compatibility aliases for the current App integration. */
-  readonly tabs: readonly WorkbarTab[];
-  readonly activeTabId: string | null;
-  readonly mruTabIds: readonly string[];
-  readonly collapsed: boolean;
-  readonly width: number;
 }
 
 export type WorkbarAction =
@@ -87,13 +78,11 @@ export interface WorkbarDockStateOptions {
   readonly launcherOpen?: boolean;
 }
 
-export interface WorkbarStateOptions extends WorkbarDockStateOptions {
+export interface WorkbarStateOptions {
   readonly docks?: Partial<Readonly<Record<WorkbarDock, WorkbarDockStateOptions>>>;
   readonly focusedDock?: WorkbarDock;
   readonly rightWidth?: number;
   readonly bottomHeight?: number;
-  /** @deprecated Use rightWidth. */
-  readonly width?: number;
 }
 
 export function isWorkbarDock(value: unknown): value is WorkbarDock {
@@ -105,7 +94,7 @@ export function isWorkbarToolKind(value: unknown): value is WorkbarToolKind {
 }
 
 export function isWorkbarTabKind(value: unknown): value is WorkbarTabKind {
-  return isWorkbarToolKind(value) || value === "overview" || value === "context";
+  return isWorkbarToolKind(value);
 }
 
 export function isPersistedWorkbarTabKind(value: unknown): value is PersistedWorkbarTabKind {
