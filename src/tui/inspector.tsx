@@ -1,43 +1,20 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
-import {
-  EvidenceArchive,
-  MAX_EVIDENCE_PAGE_LIMIT_BYTES,
-  parseEvidenceUri,
-} from "../context/evidence-archive.js";
-import type { RuntimeEvidenceReference } from "../engine/tool-result-contract.js";
-import { resolvePicoPaths } from "../paths/pico-paths.js";
 import type { TranscriptToolCallProjection as TuiToolCallProjection } from "../presentation/transcript-event-store.js";
 import type { DialogRequest } from "./dialog-arbiter.js";
 import { truncateTerminalText } from "./terminal-width.js";
 
 const DEFAULT_PAGE_BYTES = 16 * 1024;
 const MIN_PAGE_BYTES = 256;
-const MAX_PAGE_BYTES = MAX_EVIDENCE_PAGE_LIMIT_BYTES;
+const MAX_PAGE_BYTES = 64 * 1024;
 
-export type InspectorSource = InlineInspectorSource | EvidenceInspectorSource;
+export type InspectorSource = InlineInspectorSource;
 
 export interface InlineInspectorSource {
   kind: "inline";
   title: string;
   content: string;
   availability: "complete" | "unavailable";
-}
-
-export interface EvidenceInspectorContext {
-  /** 拥有当前 canonical ToolResult 的 session；fork 可引用 source-session Evidence。 */
-  currentSessionId: string;
-  /** 由当前 workspace 推导的 Evidence 根目录。 */
-  evidenceBaseDir: string;
-}
-
-export interface EvidenceInspectorSource {
-  kind: "evidence";
-  title: string;
-  uri: string;
-  ref: RuntimeEvidenceReference;
-  currentSessionId: string;
-  evidenceBaseDir: string;
 }
 
 export interface InspectorPageRequest {
@@ -55,7 +32,6 @@ export interface InspectorPage {
   truncated: boolean;
   /** 宿主可直接交给剪贴板动作。 */
   copyText: string;
-  evidenceUri?: string;
   availability?: "complete" | "unavailable";
 }
 
@@ -119,7 +95,7 @@ export interface InspectorDialogContentProps {
   compact?: boolean;
   onClose: () => void;
   onCopy?: (text: string) => void | Promise<void>;
-  /** 可注入 Session 层分页器；默认使用 EvidenceArchive 的安全分页 API。 */
+  /** 可注入分页器，便于测试内联预览的分页行为。 */
   loadPage?: typeof readInspectorPage;
 }
 
@@ -297,69 +273,16 @@ export function createInlineInspectorSource(title: string, content: string): Inl
   return { kind: "inline", title, content, availability: "complete" };
 }
 
-export function createEvidenceInspectorContext(input: {
-  workDir: string;
-  sessionId: string;
-  evidenceBaseDir?: string;
-}): EvidenceInspectorContext {
-  if (!input.sessionId.trim()) throw new Error("Inspector sessionId must not be empty");
-  return Object.freeze({
-    currentSessionId: input.sessionId,
-    evidenceBaseDir: input.evidenceBaseDir ?? resolvePicoPaths(input.workDir).workspace.evidence,
-  });
-}
-
-function createEvidenceInspectorSource(input: {
-  title: string;
-  uri: string;
-  ref: RuntimeEvidenceReference;
-  context: EvidenceInspectorContext;
-}): EvidenceInspectorSource | undefined {
-  let parsed: RuntimeEvidenceReference;
-  try {
-    parsed = {
-      ...parseEvidenceUri(input.uri),
-      kind: "tool-exchange",
-    };
-  } catch {
-    return undefined;
-  }
-  if (
-    parsed.sessionId !== input.ref.sessionId ||
-    parsed.contentHash !== input.ref.contentHash ||
-    parsed.kind !== input.ref.kind ||
-    parsed.schemaVersion !== input.ref.schemaVersion
-  ) {
-    return undefined;
-  }
-  return Object.freeze({
-    kind: "evidence",
-    title: input.title,
-    uri: input.uri,
-    ref: Object.freeze({ ...input.ref }),
-    currentSessionId: input.context.currentSessionId,
-    evidenceBaseDir: input.context.evidenceBaseDir,
-  });
-}
-
 /** 把权威 ToolResult envelope 转为 Inspector 数据源。 */
 export function createToolInspectorSource(
   tool: TuiToolCallProjection,
-  context: EvidenceInspectorContext,
 ): InspectorSource | undefined {
   const title = `${tool.name} result`;
   const envelope = tool.resultEnvelope;
   if (tool.resultAvailability === "evidence" && envelope?.evidence) {
-    const evidence = createEvidenceInspectorSource({
-      title,
-      uri: envelope.evidence.uri,
-      ref: envelope.evidence.ref,
-      context,
-    });
-    if (evidence) return evidence;
     return createUnavailableInspectorSource(
       title,
-      `${tool.summary ?? "Evidence result"}\nEvidence is unavailable for the current session.`,
+      `${envelope.projection.text || tool.summary || "Evidence result"}\n\nLegacy Evidence metadata (content cannot be read): ${envelope.evidence.uri}`,
     );
   }
   if (tool.resultAvailability === "unavailable") {
@@ -381,43 +304,14 @@ export async function readInspectorPage(
 ): Promise<InspectorPage> {
   const offsetBytes = normalizeOffset(request.offsetBytes);
   const limitBytes = normalizeLimit(request.limitBytes);
-  if (source.kind === "inline") {
-    const buffer = Buffer.from(source.content, "utf8");
-    const page = readBufferPage(buffer, offsetBytes, limitBytes);
-    return {
-      title: source.title,
-      ...page,
-      truncated: !page.eof,
-      copyText: page.content,
-      availability: source.availability,
-    };
-  }
-
-  const parsed = parseEvidenceUri(source.uri);
-  if (
-    parsed.sessionId !== source.ref.sessionId ||
-    parsed.contentHash !== source.ref.contentHash ||
-    parsed.schemaVersion !== source.ref.schemaVersion
-  ) {
-    throw new Error("Evidence URI does not match its canonical reference");
-  }
-  const page = await new EvidenceArchive({
-    baseDir: source.evidenceBaseDir,
-  }).readEvidencePage(source.ref, { offsetBytes, limitBytes });
-  if (page.kind !== "tool-exchange") {
-    throw new Error("Evidence reference is not a ToolResult exchange");
-  }
+  const buffer = Buffer.from(source.content, "utf8");
+  const page = readBufferPage(buffer, offsetBytes, limitBytes);
   return {
     title: source.title,
-    content: page.content,
-    offsetBytes: page.offsetBytes,
-    nextOffsetBytes: page.endOffsetBytes,
-    totalBytes: page.totalBytes,
-    eof: !page.truncated,
-    truncated: page.truncated,
+    ...page,
+    truncated: !page.eof,
     copyText: page.content,
-    evidenceUri: source.uri,
-    availability: "complete",
+    availability: source.availability,
   };
 }
 

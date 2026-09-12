@@ -98,9 +98,8 @@ export class EvidenceArchiveIntegrityError extends Error {
 }
 
 /**
- * Legacy Evidence 只读档案(ADR 26 §2.4,票 E3):写入路径已退役,本类仅服务
- * SQLite 纪元存量 `storage:"evidence"` 事件的预览/诊断分页回读(桌面 Inspector、
- * `session.evidence.read` 诊断 RPC)。不再产生任何 blob 或 evidence_records 行。
+ * Legacy Evidence 只读档案(ADR 26 §2.4,票 E3):写入路径与用户可见回读面已退役。
+ * 本类仅供内部存量资源完整性校验，不再产生 blob 或 evidence_records 行。
  */
 export class EvidenceArchive {
   private readonly storageRoot: string;

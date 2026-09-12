@@ -359,7 +359,7 @@ function renderDefaultItem(
               <p className="conversation-execution-meta">
                 {item.result.rawSizeBytes} bytes · {item.result.status} ·
                 <code>{item.result.sha256.slice(0, 12)}</code>
-                {item.result.evidence ? " · Evidence" : ""}
+                {item.result.evidence ? " · 旧 Evidence 元数据" : ""}
               </p>
             )}
             {item.detail && <p className="conversation-execution-detail">{item.detail}</p>}

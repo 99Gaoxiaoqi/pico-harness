@@ -157,32 +157,6 @@ function runtimeToolResultEnvelope(value: unknown): RuntimeToolResultEnvelope | 
   return value as unknown as RuntimeToolResultEnvelope;
 }
 
-export function toolEvidencePage(value: unknown, expectedUri: string): ToolEvidencePage {
-  if (
-    !isRecord(value) ||
-    value.evidenceUri !== expectedUri ||
-    typeof value.content !== "string" ||
-    typeof value.offsetBytes !== "number" ||
-    typeof value.endOffsetBytes !== "number" ||
-    typeof value.totalBytes !== "number" ||
-    typeof value.truncated !== "boolean" ||
-    (value.nextOffsetBytes !== undefined && typeof value.nextOffsetBytes !== "number")
-  ) {
-    throw new Error("Evidence 分页响应格式无效");
-  }
-  return {
-    evidenceUri: expectedUri,
-    content: value.content,
-    offsetBytes: value.offsetBytes,
-    endOffsetBytes: value.endOffsetBytes,
-    totalBytes: value.totalBytes,
-    truncated: value.truncated,
-    ...(typeof value.nextOffsetBytes === "number"
-      ? { nextOffsetBytes: value.nextOffsetBytes }
-      : {}),
-  };
-}
-
 function progressState(value: unknown): ConversationProgressState {
   return value === "done" || value === "failed" || value === "waiting" ? value : "active";
 }
@@ -694,14 +668,4 @@ export function parseGoalItem(value: unknown): ConversationItemView | undefined 
             ? "waiting"
             : "active",
   };
-}
-
-export interface ToolEvidencePage {
-  readonly evidenceUri: string;
-  readonly content: string;
-  readonly offsetBytes: number;
-  readonly endOffsetBytes: number;
-  readonly totalBytes: number;
-  readonly truncated: boolean;
-  readonly nextOffsetBytes?: number;
 }

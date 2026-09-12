@@ -16,7 +16,6 @@ import {
   boundedNonEmptyStringParam,
   exactParamShape,
   exactResultShape,
-  finiteNumberParam,
   nonNegativeIntegerParam,
   positiveIntegerParam,
   resultArray,
@@ -624,24 +623,6 @@ export type TranscriptMethodMap = {
       readonly nextCursor?: RuntimeTranscriptAdvanceCursor;
     };
   };
-  readonly "session.evidence.read": {
-    readonly params: WorkspaceParams & {
-      readonly sessionId: SessionId;
-      readonly evidenceUri: string;
-      readonly offsetBytes?: number;
-      readonly limitBytes?: number;
-    };
-    readonly result: {
-      readonly evidenceUri: string;
-      readonly content: string;
-      readonly offsetBytes: number;
-      readonly endOffsetBytes: number;
-      readonly totalBytes: number;
-      readonly limitBytes: number;
-      readonly truncated: boolean;
-      readonly nextOffsetBytes?: number;
-    };
-  };
 };
 
 export const transcriptParamValidators = {
@@ -674,10 +655,6 @@ export const transcriptParamValidators = {
       limit: positiveIntegerParam,
       maxBytes: positiveIntegerParam,
     },
-  ),
-  "session.evidence.read": exactParamShape(
-    { workspacePath: stringParam, sessionId: stringParam, evidenceUri: stringParam },
-    { offsetBytes: finiteNumberParam, limitBytes: finiteNumberParam },
   ),
 } satisfies Readonly<Record<keyof TranscriptMethodMap, RuntimeParamValidator>>;
 
@@ -722,17 +699,5 @@ export const transcriptResultValidators = {
       fragments: resultArray(transcriptItemFragmentResult),
       nextCursor: transcriptAdvanceCursorResult,
     },
-  ),
-  "session.evidence.read": resultShape(
-    {
-      evidenceUri: resultString,
-      content: resultString,
-      offsetBytes: resultNonNegativeInteger,
-      endOffsetBytes: resultNonNegativeInteger,
-      totalBytes: resultNonNegativeInteger,
-      limitBytes: resultNonNegativeInteger,
-      truncated: resultBoolean,
-    },
-    { nextOffsetBytes: resultNonNegativeInteger },
   ),
 } satisfies Readonly<Record<keyof TranscriptMethodMap, RuntimeResultRule>>;

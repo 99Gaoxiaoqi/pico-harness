@@ -23,7 +23,6 @@ import type { DesktopBridge, DesktopResult } from "../preload/contract.js";
 import { ConversationLoadTracker } from "./conversation-load-tracker.js";
 import { mergeHydratedConversationItems } from "./conversation/items.js";
 import {
-  type ToolEvidencePage,
   approvalFromPlanControlSnapshot,
   conversationItemsFromReplica,
   overlayRuntimeItem,
@@ -31,7 +30,6 @@ import {
   parseGoalItem,
   resolveApprovalState,
   resolvePromptState,
-  toolEvidencePage,
 } from "./conversation/runtime-projection.js";
 import type { ComposerBehavior } from "./conversation/types.js";
 import { previewData } from "./fixture.js";
@@ -297,13 +295,6 @@ export interface RuntimeActions {
   reload(): Promise<void>;
   loadSession(ref: WorkspaceSessionRef): Promise<void>;
   loadEarlierSession(ref: WorkspaceSessionRef): Promise<void>;
-  readToolEvidence(input: {
-    readonly workspacePath: string;
-    readonly sessionId: string;
-    readonly evidenceUri: string;
-    readonly offsetBytes?: number;
-    readonly limitBytes?: number;
-  }): Promise<ToolEvidencePage | undefined>;
   sendMessage(input: {
     readonly workspacePath: string;
     readonly sessionId?: string;
@@ -1717,21 +1708,6 @@ export function useRuntimeStore(): RuntimeStore {
           if (preview) return;
           await loadConversation(bridge, workspacePath, sessionId);
         });
-      },
-      async readToolEvidence(input) {
-        if (preview) return undefined;
-        let page: ToolEvidencePage | undefined;
-        await perform("read-tool-evidence", async (bridge) => {
-          const value = await invoke(bridge, "session.evidence.read", {
-            workspacePath: input.workspacePath,
-            sessionId: input.sessionId,
-            evidenceUri: input.evidenceUri,
-            ...(input.offsetBytes !== undefined ? { offsetBytes: input.offsetBytes } : {}),
-            ...(input.limitBytes !== undefined ? { limitBytes: input.limitBytes } : {}),
-          });
-          page = toolEvidencePage(value, input.evidenceUri);
-        });
-        return page;
       },
       async sendMessage(input) {
         const workspacePath = input.workspacePath;
