@@ -66,7 +66,7 @@ export type RuntimeDiagnosticsReport = {
 
 export type RuntimeResourceDiagnosticEntry = {
   readonly kind: string;
-  readonly origin: "claude-compat" | "legacy" | "pico-native" | "runtime-state";
+  readonly origin: "claude-compat" | "pico-native" | "runtime-state";
   readonly path: string;
   readonly status: "missing" | "present" | "unsafe";
   readonly authority: boolean;
@@ -148,7 +148,7 @@ const runtimeResourceDiagnosticsResult = exactResultShape(
       exactResultShape(
         {
           kind: resultString,
-          origin: resultOneOf(["claude-compat", "legacy", "pico-native", "runtime-state"]),
+          origin: resultOneOf(["claude-compat", "pico-native", "runtime-state"]),
           path: resultString,
           status: resultOneOf(["missing", "present", "unsafe"]),
           authority: resultBoolean,
