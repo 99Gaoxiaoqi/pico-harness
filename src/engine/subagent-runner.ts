@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Message, ToolCall, ToolDefinition } from "../schema/message.js";
 import type { LLMProvider } from "../provider/interface.js";
-import type { RetryInfo } from "../provider/retry.js";
+import type { RateLimitFailure, RetryInfo } from "../provider/retry.js";
 import { isAbortError } from "../provider/errors.js";
 import type { Compactor } from "../context/compactor.js";
 import type { RecoveryManager } from "../context/recovery.js";
@@ -53,8 +53,12 @@ export interface SubagentExecutionRuntime {
   source: "ephemeral" | "profile" | "parent";
   /** 该 Provider 写入用量的 Session；显式路由与父路由都应指向主 Session。 */
   usageSession?: Session;
-  /** 仅兼容继承父 Provider 的旧路径；显式路由 Runtime 默认不做跨路由 fallback。 */
-  onRateLimited?: (reporter: Reporter, signal?: AbortSignal) => LLMProvider | undefined;
+  /** 继承父 Provider 时共用同一凭证轮换器；显式路由不做跨路由 fallback。 */
+  onRateLimited?: (
+    failure: RateLimitFailure,
+    reporter: Reporter,
+    signal?: AbortSignal,
+  ) => LLMProvider | undefined;
 }
 
 /** 子代理 summary 低于此字数则触发一轮扩写(对齐 Kimi Code SUMMARY_MIN_LENGTH) */

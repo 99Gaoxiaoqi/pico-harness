@@ -21,7 +21,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import type { LLMProvider, LLMProviderRequestOptions } from "../provider/interface.js";
 import { ContextOverflowError, isAbortError } from "../provider/errors.js";
-import { generateWithRetry, type RetryInfo } from "../provider/retry.js";
+import { generateWithRetry, type RateLimitFailure, type RetryInfo } from "../provider/retry.js";
 import {
   type Message,
   type ToolCall,
@@ -483,10 +483,9 @@ export interface AgentEngineOptions {
    * generateWithRetry 遇到 429 限流时触发:标记当前 key 限流、
    * 切换到下一个可用 key 重建 provider。返回新 provider(已切 key),
    * 或返回 undefined 表示无多凭证可轮换(回退同 key 指数退避)。
-   * 仅当配置了 LLM_API_KEYS(多 key)时由调用方注入;单 key 时为 undefined,
-   * 重试行为与原有一致(向后兼容)。
+   * 仅当配置了多 key 时由调用方注入；单 key 时为 undefined。
    */
-  rebuildProvider?: () => LLMProvider | undefined;
+  rebuildProvider?: (failure: RateLimitFailure) => LLMProvider | undefined;
   /** 主会话 Hook 生命周期；子代 verifier/agent 不注入以防递归。 */
   hookService?: HookService;
   /** 宿主在 committed ToolResult 边界执行的 Hook；不得在工具执行期读取 raw 输出。 */
@@ -560,7 +559,7 @@ export class AgentEngine {
   /** 非工具停止后续接回调(ROADMAP 3.7):host 可决定让 Agent 接着跑 */
   private readonly shouldContinueAfterStop?: AgentEngineOptions["shouldContinueAfterStop"];
   /** 凭证轮换回调(4.2):429 时切换 key 重建 provider;无多 key 时为 undefined */
-  private readonly rebuildProvider?: () => LLMProvider | undefined;
+  private readonly rebuildProvider?: (failure: RateLimitFailure) => LLMProvider | undefined;
   private readonly hookService?: HookService;
   private readonly postToolResultHook?: AgentEngineOptions["postToolResultHook"];
   private readonly onRunComplete?: AgentEngineOptions["onRunComplete"];
@@ -632,8 +631,12 @@ export class AgentEngine {
     );
   }
 
-  private rotateProvider(reporter: Reporter, signal?: AbortSignal): LLMProvider | undefined {
-    const provider = this.rebuildProvider?.();
+  private rotateProvider(
+    failure: RateLimitFailure,
+    reporter: Reporter,
+    signal?: AbortSignal,
+  ): LLMProvider | undefined {
+    const provider = this.rebuildProvider?.(failure);
     if (!provider) return undefined;
     this.provider = provider;
     return providerForReporter(provider, reporter, signal);
@@ -1098,7 +1101,7 @@ export class AgentEngine {
         {
           signal,
           onRetry: this.makeRetryReporter(span, reporter),
-          onRateLimited: () => this.rotateProvider(reporter, signal),
+          onRateLimited: (failure) => this.rotateProvider(failure, reporter, signal),
           ...(promptCacheRequest.shardSeed
             ? { promptCacheShardSeed: promptCacheRequest.shardSeed }
             : {}),
@@ -2548,7 +2551,7 @@ export class AgentEngine {
         ? { resolvedModelRoute: this.modelRouteId ?? this.provider.modelName }
         : {}),
       source: "parent",
-      onRateLimited: (reporter, signal) => this.rotateProvider(reporter, signal),
+      onRateLimited: (failure, reporter, signal) => this.rotateProvider(failure, reporter, signal),
     };
   }
 }

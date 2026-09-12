@@ -72,7 +72,11 @@ test("runtime provider assembly keeps credential rotation behind the assembly bo
 
   assert.deepEqual(createdKeys, ["key-1"]);
   assert.ok(assembly.rebuildProvider);
-  const rebuilt = assembly.rebuildProvider();
+  const rebuilt = assembly.rebuildProvider({
+    failedProvider: assembly.provider,
+    failedCredential: "key-1",
+    error: new Error("rate limited"),
+  });
   assert.ok(rebuilt);
   assert.deepEqual(createdKeys, ["key-1", "key-2"]);
 });

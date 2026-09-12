@@ -71,7 +71,7 @@ export async function generateSubagentResponse(
           : {}),
         ...requestOptions,
         ...(runtime.onRateLimited
-          ? { onRateLimited: () => runtime.onRateLimited?.(reporter, signal) }
+          ? { onRateLimited: (failure) => runtime.onRateLimited?.(failure, reporter, signal) }
           : {}),
       },
     );
@@ -97,7 +97,7 @@ export async function generateSubagentResponse(
             : {}),
           ...requestOptions,
           ...(runtime.onRateLimited
-            ? { onRateLimited: () => runtime.onRateLimited?.(reporter, signal) }
+            ? { onRateLimited: (failure) => runtime.onRateLimited?.(failure, reporter, signal) }
             : {}),
         },
       );
