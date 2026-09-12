@@ -57,8 +57,8 @@ export interface RuntimeRunExecutorInput {
   readonly prestartedUserInput?: PrestartedRuntimeUserInput;
   /**
    * ADR 29 续跑声明(可选):声明本次 run 是某个 interrupted run 的续跑。
-   * 调用方须先 store.claimContinuation 成功;三元组写入 run.started 的
-   * data.continuationOf(与 prestartedRun 互斥:prestarted 事实已定形)。
+   * startContinuation 已将 claim 与 run.started 原子落盘；三元组仅在内存组装期传递
+   * (与 prestartedRun 互斥:prestarted 事实已定形)。
    */
   readonly continuationOf?: RuntimeRunContinuationOf;
   /**

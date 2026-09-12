@@ -422,17 +422,6 @@ export type RuntimeContinuationStartOutcome =
     }
   | { readonly status: "rejected"; readonly reason: RuntimeContinuationClaimRejection };
 
-/** 旧两事务 API 的兼容结果；实现已 fail-closed，新代码不得调用。 */
-export type RuntimeContinuationClaimOutcome =
-  | {
-      readonly status: "claimed";
-      readonly claim: RuntimeContinuationClaim;
-      /** true=本次为孤儿 claim 幂等改绑(旧 target 从未起跑,锚点换绑到新 target)。 */
-      readonly rebound?: boolean;
-    }
-  | { readonly status: "already_claimed"; readonly claim: RuntimeContinuationClaim }
-  | { readonly status: "rejected"; readonly reason: RuntimeContinuationClaimRejection };
-
 export function createRuntimeEventId(prefix = "runtime-event"): string {
   return `${prefix}:${randomUUID()}`;
 }
