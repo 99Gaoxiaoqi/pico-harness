@@ -159,8 +159,8 @@ test("production host binds Graph root and installs detached exact execution", a
       }
       if (host.agentGraph?.kind === "operator") await operatorGate;
       return {
-        sessionId: options.session!,
-        sessionSelection: { mode: "resume" as const, sessionId: options.session! },
+        sessionId: options.sessionSelection.sessionId,
+        sessionSelection: options.sessionSelection,
         workDir: options.dir!,
         finalMessage: "done",
         usage: { promptTokens: 0, completionTokens: 0, costCNY: 0 },

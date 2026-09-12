@@ -496,7 +496,7 @@ export function createProductionRuntimeServices(
         {
           prompt: input.prompt,
           dir: runWorkDir,
-          session: targetSessionId,
+          sessionSelection: { mode: "resume", sessionId: targetSessionId },
           provider: route.provider,
           baseURL: route.baseURL,
           apiKey: route.apiKey,
@@ -1076,7 +1076,10 @@ export function createProductionRuntimeServices(
           const runtimeOptions = {
             prompt,
             dir: workspacePath,
-            session: targetSessionId,
+            sessionSelection: {
+              mode: sessionId === undefined ? ("new" as const) : ("resume" as const),
+              sessionId: targetSessionId,
+            },
             provider: route.provider,
             baseURL: route.baseURL,
             apiKey: route.apiKey,
@@ -2423,6 +2426,7 @@ export function assembleProductionDaemonHost(
         {
           prompt: job.prompt,
           dir: job.workspacePath,
+          sessionSelection: { mode: "new", sessionId: createCliSessionId() },
           provider: route.provider,
           baseURL: route.baseURL,
           model: route.model,

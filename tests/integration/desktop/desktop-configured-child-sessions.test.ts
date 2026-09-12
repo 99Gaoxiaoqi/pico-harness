@@ -317,6 +317,7 @@ test("real configured executor persists its child admission before model output 
     {
       prompt: "Delegate reading",
       dir: workDir,
+      sessionSelection: { mode: "new", sessionId: "desktop-configured-parent" },
       modelRouteId: route.id,
       provider: "openai",
       model: route.model,

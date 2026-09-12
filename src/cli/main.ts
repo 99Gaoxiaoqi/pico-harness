@@ -57,11 +57,10 @@ Options:
   --thinking <off|low|medium|high>   Override the model's default reasoning level
   --dir <path>                       Workspace directory (default: current directory)
   --model <provider/model|name>      Configured model route or unique model name
-  -S, --session <id>                 Resume a session by id
+  -S, --resume <id>                  Resume a session by id
   -c, --continue                     Continue the latest session in this project
       --graph                        Start with persistent Agent Graph scheduling enabled
       --swarm                        Start with autonomous Swarm orchestration (exclusive with --graph)
-  --resume <id>                      Resume a session by id
   --fork <id>                        Fork a saved session into a new session
       --daemon-stop                  Stop the resident local daemon gracefully
   -h, --help                         Show this help without starting the TUI
@@ -98,7 +97,6 @@ interface ParsedCliValues {
   thinking?: string;
   dir?: string;
   model?: string;
-  session?: string;
   continue?: boolean;
   graph?: boolean;
   swarm?: boolean;
@@ -141,11 +139,11 @@ export async function runCli(args: readonly string[], runtime: CliRuntime): Prom
     // --continue/--fork/-S 启动会话三式全支持；--graph 经
     // session.settings.update 应用。
     const clientSessionId =
-      sessionSelection &&
-      (sessionSelection.mode === "resume" || sessionSelection.mode === "continue")
+      sessionSelection.mode === "resume" || sessionSelection.mode === "continue"
         ? sessionSelection.sessionId
         : undefined;
-    const forkFrom = sessionSelection?.mode === "fork" ? sessionSelection.sessionId : undefined;
+    const forkFrom =
+      sessionSelection.mode === "fork" ? sessionSelection.sourceSessionId : undefined;
     await runtime.startClientRepl({
       workDir,
       ...(clientSessionId ? { sessionId: clientSessionId } : {}),
@@ -178,11 +176,10 @@ function parseCliOptions(args: readonly string[]): ParsedCliOptions {
         thinking: { type: "string" },
         dir: { type: "string" },
         model: { type: "string" },
-        session: { type: "string", short: "S" },
         continue: { type: "boolean", short: "c" },
         graph: { type: "boolean" },
         swarm: { type: "boolean" },
-        resume: { type: "string" },
+        resume: { type: "string", short: "S" },
         fork: { type: "string" },
         "daemon-stop": { type: "boolean" },
         help: { type: "boolean", short: "h" },

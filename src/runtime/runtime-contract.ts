@@ -37,16 +37,8 @@ export interface RunAgentCliOptions extends RuntimeRunOptions {
   /** 默认 foreground；daemon/Cron 必须显式提供完整 background policy。 */
   execution?: RuntimeExecution;
   dir?: string;
-  /** 兼容旧 --session:按指定 id 恢复会话 */
-  session?: string;
-  /** Continue the latest session in the current project. */
-  continueSession?: boolean;
-  /** Resume a specific session. */
-  resumeSession?: string;
-  /** 从指定会话派生一个新会话 */
-  forkSession?: string;
-  /** 已解析的 session 选择结果(TUI/宿主可复用,避免每轮重新生成 id) */
-  sessionSelection?: CliSessionSelection;
+  /** Host-resolved canonical Session selection. */
+  sessionSelection: CliSessionSelection;
   provider?: ProviderKind;
   baseURL?: string;
   apiKey?: string;

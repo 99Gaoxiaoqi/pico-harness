@@ -75,6 +75,7 @@ test("cli dispatch: 已删除的兼容旗标按未知参数拒绝", async () => 
     ["--mcp-config", ["--mcp-config", "mcp.json"]],
     ["--add-dir", ["--add-dir", "D:\\extra"]],
     ["--fork-session", ["--fork-session", "source"]],
+    ["--session", ["--session", "source"]],
   ] as const) {
     const harness = harnessWithRuntime();
     assert.equal(await harness.run([...args]), 1, `${option} 应被拒绝`);
@@ -97,7 +98,7 @@ test("cli dispatch: 会话旗标三式传递（-S resume / --continue / --fork�
     "--continue 解析出的 sessionId 直接采纳",
   );
 
-  harness.setSessionSelection({ mode: "fork", sessionId: "src1" });
+  harness.setSessionSelection({ mode: "fork", sessionId: "target1", sourceSessionId: "src1" });
   await harness.run([]);
   assert.equal(
     harness.clientCalls.at(-1)!.forkFrom,
@@ -134,7 +135,14 @@ test("cli dispatch: help/version 快速路径不起 TUI", async () => {
   assert.equal(await harness.run(["--help"]), 0);
   const help = harness.stdout.join("");
   assert.ok(!help.includes("--local"), "help 不再列出 --local");
-  for (const removed of ["--client", "--provider", "--mcp-config", "--add-dir", "--fork-session"]) {
+  for (const removed of [
+    "--client",
+    "--provider",
+    "--mcp-config",
+    "--add-dir",
+    "--fork-session",
+    "--session",
+  ]) {
     assert.ok(!help.includes(removed), `help 不应列出已删除的 ${removed}`);
   }
   assert.equal(harness.clientCalls.length, 0);

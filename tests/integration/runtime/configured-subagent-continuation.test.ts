@@ -70,6 +70,7 @@ test("agent_spawn continues its completed child with durable history and rejects
   const input = {
     prompt: "Delegate then continue the same reader",
     dir: workDir,
+    sessionSelection: { mode: "new" as const, sessionId: "configured-continuation-parent" },
     modelRouteId: route.id,
     provider: route.provider,
     model: route.model,
@@ -269,7 +270,11 @@ test("agent_spawn continues its completed child with durable history and rejects
 
     let foreignCalls = 0;
     await new AgentRuntime().execute(
-      { ...input, prompt: "Attempt to continue an unrelated child" },
+      {
+        ...input,
+        prompt: "Attempt to continue an unrelated child",
+        sessionSelection: { mode: "new", sessionId: "configured-continuation-foreign" },
+      },
       {
         picoHome,
         modelRouter,

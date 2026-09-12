@@ -461,12 +461,12 @@ test("session resolver: list/find/--continue/-S/--resume/--fork against the SQLi
     assert.deepEqual(continued, { mode: "continue", sessionId: newer });
 
     // -S <id> / --resume <id>: published sessions resolve; missing sessions reject.
-    const resumed = await resolveCliSession({ workDir, picoHome, session: older });
+    const resumed = await resolveCliSession({ workDir, picoHome, resumeSession: older });
     assert.deepEqual(resumed, { mode: "resume", sessionId: older });
     const explicitResume = await resolveCliSession({ workDir, picoHome, resumeSession: newer });
     assert.deepEqual(explicitResume, { mode: "resume", sessionId: newer });
     await assert.rejects(
-      () => resolveCliSession({ workDir, picoHome, session: "missing" }),
+      () => resolveCliSession({ workDir, picoHome, resumeSession: "missing" }),
       /无法恢复 session missing: RuntimeEvent 日志中不存在/,
     );
 
