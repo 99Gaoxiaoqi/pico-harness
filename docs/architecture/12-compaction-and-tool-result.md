@@ -265,7 +265,7 @@ for (const entry of entries) {
 
 用 `length:body;` 格式（字节长度前缀 + 分隔符）防止前缀碰撞，字节长度而非字符长度防止多字节字符漏检。重放时重新计算并比对——如果被覆盖的事件内容发生了任何变化，digest 不匹配，抛出 `RuntimeEventReadModelIntegrityError`。
 
-版本前缀 `sha256-content:v1:` 让重放端能区分新旧格式，向后兼容历史 checkpoint。
+重放端只接受带版本前缀的 `sha256-content:v1:` 内容哈希；无前缀的旧 checkpoint 会被明确拒绝。
 
 ### fail-open：失败不等于崩溃
 

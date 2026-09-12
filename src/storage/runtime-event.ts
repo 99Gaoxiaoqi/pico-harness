@@ -868,10 +868,7 @@ function assertSha256(value: unknown, field: string): asserts value is string {
 }
 
 function assertCheckpointSourceDigest(value: unknown, field: string): asserts value is string {
-  if (
-    typeof value !== "string" ||
-    !/^(?:[a-f0-9]{64}|sha256-content:v1:[a-f0-9]{64})$/u.test(value)
-  ) {
+  if (typeof value !== "string" || !/^sha256-content:v1:[a-f0-9]{64}$/u.test(value)) {
     throw new RuntimeEventIntegrityError(
       `Runtime event ${field} must be a supported SHA-256 digest`,
     );
