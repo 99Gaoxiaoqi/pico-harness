@@ -25,6 +25,8 @@ export interface HookExecutor {
 }
 
 export interface HookDecisionProvider {
+  /** Declare whether this tool needs local admission; an absent declaration is conservative. */
+  requiresLocalToolAdmission?(toolName: string): boolean;
   evaluate<E extends HookEvent>(
     event: E,
     payload: HookEventPayloadMap[E],
@@ -76,6 +78,25 @@ export class HookService {
 
   replaceSnapshot(snapshot: HookSnapshot): void {
     this.snapshot = snapshot;
+  }
+
+  /** Provider-executed tools cannot run input-dependent local hooks before their side effects. */
+  requiresLocalToolAdmission(toolName: string): boolean {
+    if (
+      (this.options.decisionProviders ?? []).some(
+        (provider) => provider.requiresLocalToolAdmission?.(toolName) ?? true,
+      )
+    )
+      return true;
+    // Inspect only the active snapshot and scope, without executing hooks or fabricating input.
+    // Conditions deliberately remain unevaluated: the provider has not chosen the real input yet.
+    return this.snapshot.handlers.PreToolUse.some(
+      (entry) =>
+        agentSourceMatchesScope(entry.source, this.agentComponentScope.getStore()) &&
+        entry.handler.enabled !== false &&
+        (entry.trusted || !isExecutable(entry.handler)) &&
+        matcherMatches(entry.matcher, { tool_name: toolName }),
+    );
   }
 
   /** 将 Agent component Hook 限定在对应子代理的异步调用链内。 */

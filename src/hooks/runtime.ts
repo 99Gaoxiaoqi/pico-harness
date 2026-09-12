@@ -98,6 +98,16 @@ export async function createSessionHookRuntime(
   let componentSourceQueue = Promise.resolve();
   const candidateRules = new WeakMap<LoadHookSnapshotResult, readonly HookifyRule[]>();
   const decisionProvider: HookDecisionProvider = {
+    // Only `all` Hookify events can match web_search; query conditions cannot be preflighted.
+    requiresLocalToolAdmission(toolName) {
+      return rules.some(
+        (rule) =>
+          rule.enabled &&
+          (rule.event === "all" ||
+            (rule.event === "bash" && /^(?:bash|shell)$/i.test(toolName)) ||
+            (rule.event === "file" && /(?:file|write|edit|patch)/i.test(toolName))),
+      );
+    },
     evaluate(event, payload) {
       return evaluateHookifyRules(rules, event, payload);
     },
