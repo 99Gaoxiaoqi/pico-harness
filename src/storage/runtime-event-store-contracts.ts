@@ -11,7 +11,7 @@ import type { RuntimeEvent, RuntimeRunStartedEvent } from "./runtime-event.js";
  */
 
 export const RUNTIME_EVENT_STORE_MAX_PAGE_SIZE = 250;
-export const RUNTIME_TRANSCRIPT_PROJECTOR_VERSION = 4 as const;
+export const RUNTIME_TRANSCRIPT_PROJECTOR_VERSION = 5 as const;
 
 export interface RuntimeSessionManifest {
   readonly schemaVersion: 2;

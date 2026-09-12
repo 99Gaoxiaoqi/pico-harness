@@ -58,6 +58,7 @@ export interface CreateConfiguredSubagentExecutorOptions {
   readonly childDependencies?: Pick<
     RunAgentCliDependencies,
     | "env"
+    | "webSearchSettings"
     | "picoHome"
     | "providerFactory"
     | "providerDecorator"

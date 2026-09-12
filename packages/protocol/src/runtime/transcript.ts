@@ -31,7 +31,7 @@ import {
 } from "./validation.js";
 import type { RuntimeParamRule, RuntimeParamValidator, RuntimeResultRule } from "./validation.js";
 
-export const TRANSCRIPT_PROJECTOR_VERSION = 4 as const;
+export const TRANSCRIPT_PROJECTOR_VERSION = 5 as const;
 
 export type RuntimeTranscriptWatermark = JsonObject & {
   readonly historyEpoch: string;
@@ -192,6 +192,8 @@ export type RuntimeConversationItem = (
       readonly id: string;
       readonly kind: "assistantMessage";
       readonly content: string;
+      /** Actual provider-executed search records and returned sources, never inferred from prose. */
+      readonly webSearch?: JsonObject;
       /** Present when the durable answer can be tied to one Runtime model turn. */
       readonly runId?: RunId;
       readonly turnId?: string;
@@ -480,7 +482,9 @@ const runtimeConversationItemResult: RuntimeResultRule = (value, path) => {
     return;
   }
   if (kind === "assistantMessage" || kind === "thinking") {
-    exactItem({ content: resultString }, { runId: resultString, turnId: resultString });
+    exactItem({ content: resultString }, { runId: resultString, turnId: resultString,
+      ...(kind === "assistantMessage" ? { webSearch: resultJsonObject } : {}),
+    });
     return;
   }
   if (kind === "skill") {
