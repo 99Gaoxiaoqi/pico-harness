@@ -30,8 +30,8 @@ import type { SqliteSchemaScope } from "./sqlite-schema.js";
  * migration 3(ADR 29):continuation claim 表。`runtime_continuation_claims` 是
  * 中断 run 的确定性续跑锚——(source_session_id, source_run_id) UNIQUE 保证一个
  * source run 至多被 claim 一次(C1);source_high_water/source_prefix_digest 冻结
- * claim 时刻的源前缀完整性;claim 由 store 单 BEGIN IMMEDIATE 事务写入
- * (claimContinuation),与源账本读取同事务快照。
+ * claim 时刻的源前缀完整性，并由 startContinuation 在单个 BEGIN IMMEDIATE
+ * 事务内与 target run.started 一起写入。
  *
  * migration 4(EventLog foundation):初始 EventLog 存储面。
  * owner fence / run seal 是不可丢弃的协调投影；partial、tool journal、transcript、

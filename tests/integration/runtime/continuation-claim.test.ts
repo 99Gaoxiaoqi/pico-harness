@@ -213,13 +213,9 @@ test("continuation 原子事务拒绝 owner takeover 前的陈旧 fence", async 
   assert.deepEqual(await scene.store.readRun(scene.session.id, "target-stale-owner"), []);
 });
 
-test("旧两事务路径与伪造 continuationOf 均被拒绝", async (context) => {
+test("伪造 continuationOf 无法绕过原子续跑入口", async (context) => {
   const scene = await createScene(context, "legacy-fail-closed");
   const source = await interrupted(scene);
-  await assert.rejects(
-    scene.store.claimContinuation(scene.session.id, source.runId, "legacy-target"),
-    /Standalone continuation claims are disabled/u,
-  );
   await assert.rejects(
     RuntimeRun.start({
       capability: scene.session.runtimeEventCapability!,

@@ -55,7 +55,6 @@ import {
   type PrepareRuntimeToolOperationInput,
   type PrepareRuntimeToolOperationResult,
   type RuntimeContinuationClaim,
-  type RuntimeContinuationClaimOutcome,
   type RuntimeContinuationStartOutcome,
   type RuntimeEventStoreAppendResult,
   type RuntimeEventStoreEntry,
@@ -948,17 +947,6 @@ export class SqliteRuntimeEventStore {
       }
       return undefined;
     });
-  }
-
-  async claimContinuation(
-    _sourceSessionId: string,
-    _sourceRunId: string,
-    _targetRunId: string,
-    _options: { readonly now?: () => Date } = {},
-  ): Promise<RuntimeContinuationClaimOutcome> {
-    throw new RuntimeEventStoreIntegrityError(
-      "Standalone continuation claims are disabled; use startContinuation atomically",
-    );
   }
 
   /**
