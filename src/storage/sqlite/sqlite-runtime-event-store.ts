@@ -3430,7 +3430,10 @@ function transcriptMutationsForEvent(
         },
       });
     }
-    if (message.role === "assistant" && content) {
+    const webSearch = message.role === "assistant"
+      ? asJsonRecord(message.providerData?.["picoWebSearch"])
+      : undefined;
+    if (message.role === "assistant" && (content || webSearch)) {
       const itemId = `message:${event.turnId}:assistant`;
       mutations.push({
         op: "upsert",
@@ -3441,6 +3444,7 @@ function transcriptMutationsForEvent(
           id: itemId,
           kind: "assistantMessage",
           content,
+          ...(webSearch ? { webSearch } : {}),
           runId: event.runId,
           turnId: event.turnId,
         },

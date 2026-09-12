@@ -5,6 +5,15 @@ import {
   ConfiguredSubagentOutputNotFoundError,
 } from "./configured-subagent-output-store.js";
 import { WebSearchTool } from "../tools/web.js";
+import { UserConfigStore } from "../input/user-config-store.js";
+import { resolveNativeWebSearchCapability } from "../provider/model-web-search.js";
+import {
+  DEFAULT_WEB_SEARCH_SETTINGS,
+  guardNativeSearchRequests,
+  routeRuntimeWebSearch,
+  webSearchUnavailableReason,
+  type RuntimeWebSearchSettings,
+} from "./web-search.js";
 import {
   ConfiguredAgentListTool,
   ConfiguredAgentSpawnTool,
@@ -313,6 +322,8 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   providerFactory?: RunAgentProviderFactory;
   /** Host-owned request policy wrapper applied after plugin provider capabilities. */
   providerDecorator?: (provider: LLMProvider) => LLMProvider;
+  /** Trusted parent Run snapshot; children cannot widen its configured search source. */
+  webSearchSettings?: RuntimeWebSearchSettings;
   /** 前台宿主持有的完整可信模型目录；子代理不得自行读取 endpoint 或凭证。 */
   modelRouter?: ModelRouter;
   toolDisclosure?: ToolDisclosure;
@@ -904,6 +915,14 @@ export async function executeAgentRuntime(
   const picoConfig = dependencies.isolatedHeadless
     ? createIsolatedPicoConfig(workDir)
     : await loadPicoProjectConfig(workDir);
+  const webSearchSettings = Object.freeze({
+    ...(dependencies.webSearchSettings ??
+      (dependencies.isolatedHeadless
+        ? DEFAULT_WEB_SEARCH_SETTINGS
+        : (await new UserConfigStore({ picoHome }).read()).config.defaults?.webSearch ??
+          DEFAULT_WEB_SEARCH_SETTINGS)),
+  });
+  let searchUnavailableReason: string | undefined;
   const claudeCompatibility = picoConfig.compatibility.claude;
   const configuredAdditionalDirectories = picoConfig.additionalDirectories;
   const sessionSelection = options.sessionSelection;
@@ -1489,8 +1508,16 @@ export async function executeAgentRuntime(
     const { providerFactory, providerDependencies, subagentModelRouter, parentModelRouteId } =
       modelAssembly;
     const contextRuntime = buildContextRuntime(kind, providerConfig.model);
-    const trackedProvider = modelAssembly.provider;
-    const rebuildProvider = modelAssembly.rebuildProvider;
+    const nativeSearchNetworkAllowed = () => backgroundPolicy
+      ? backgroundPolicy.snapshot.toolNetworkPolicy === "allow"
+      : currentBoundaryAllowsNetwork();
+    const trackedProvider = guardNativeSearchRequests(modelAssembly.provider, nativeSearchNetworkAllowed);
+    const rebuildProvider = modelAssembly.rebuildProvider
+      ? (failure: Parameters<NonNullable<typeof modelAssembly.rebuildProvider>>[0]) => {
+          const rebuilt = modelAssembly.rebuildProvider!(failure);
+          return rebuilt ? guardNativeSearchRequests(rebuilt, nativeSearchNetworkAllowed) : undefined;
+        }
+      : undefined;
     if (memoryRepository && (await memoryExtractionAllowed()).allowed) {
       atomicMemoryRuntime = new AtomicMemoryRuntime({
         workDir,
@@ -2099,6 +2126,11 @@ export async function executeAgentRuntime(
           : {}),
       }).buildLayers();
       const turnTailParts = composed.turnTail ? [composed.turnTail] : [];
+      if (searchUnavailableReason) {
+        turnTailParts.push(`[WEB SEARCH] ${searchUnavailableReason} 不得声称已经完成联网搜索。`);
+      } else if (webSearchSettings.enabled && webSearchSettings.source === "model" && !nativeSearchNetworkAllowed()) {
+        turnTailParts.push("[WEB SEARCH] 原生搜索受当前任务网络权限限制。确有需要时通过 request_sandbox_boundary 请求网络权限；获批后才会向模型提供原生搜索工具。后台受限域名策略不支持原生搜索。");
+      }
       if (
         activeExecutionPlanId &&
         executionCoordinator &&
@@ -2344,6 +2376,7 @@ export async function executeAgentRuntime(
               childDependencies: {
                 env: runtimeEnv,
                 picoHome,
+                webSearchSettings,
                 providerFactory,
                 providerDecorator,
                 approvalNotifier,
@@ -2358,6 +2391,11 @@ export async function executeAgentRuntime(
         capabilityUnavailableReason: (definition: SubagentCapabilityDefinition) =>
           !configuredExecutor
             ? "Persistent child executor unavailable"
+            : definition.profile === "web_research" && !webSearchSettings.enabled
+              ? "联网搜索已关闭"
+              : definition.profile === "web_research" && webSearchSettings.source === "external" &&
+                  webSearchUnavailableReason(webSearchSettings, undefined, runtimeEnv)
+                ? webSearchUnavailableReason(webSearchSettings, undefined, runtimeEnv)
             : definition.workspace === "isolated-worktree" &&
                 !runtimeState.taskHostRuntime?.supervisor &&
                 !dependencies.configuredSubagentExecutor
@@ -2558,6 +2596,18 @@ export async function executeAgentRuntime(
       dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
     }
 
+    searchUnavailableReason = routeRuntimeWebSearch(
+      registry,
+      webSearchSettings,
+      providerConfig.capabilities?.nativeWebSearch ?? resolveNativeWebSearchCapability({
+        provider: kind,
+        model: providerConfig.model,
+        baseURL: providerConfig.baseURL,
+      }),
+      runtimeEnv,
+    );
+    if (registry.getTool("web_search")) baselineToolNames.push("web_search");
+    dependencies.toolStatusSink?.(toolStatusFromRegistry(registry));
     toolDisclosure.setBaselineTools(baselineToolNames);
 
     // 阶段 4：在当前 Session 内串行执行一次 RuntimeRun。
