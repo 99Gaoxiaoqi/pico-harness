@@ -8,7 +8,6 @@ import {
   type LoadHookSnapshotOptions,
   type LoadHookSnapshotResult,
 } from "../config.js";
-import { resolveReferencedScripts } from "./command-shell.js";
 import type { HookOutput, HookSnapshot, HookSource } from "../types.js";
 import { raceWithDeadline } from "../../util/race-with-deadline.js";
 
@@ -56,7 +55,7 @@ export interface HookConfigReloaderOptions extends LoadHookSnapshotOptions {
 }
 
 /**
- * 仅监视已知配置/脚本的父目录，不做全工作区 recursive watch。
+ * 仅监视已知配置与状态文件的父目录，不做全工作区 recursive watch。
  * 加载完成后一次性交换快照，在途 dispatch 仍持有旧对象。
  */
 export class HookConfigReloader {
@@ -484,21 +483,6 @@ export class HookConfigReloader {
   ): Promise<HookWatchBaseline | undefined> {
     if (!this.isActive(generation)) return undefined;
     const exactPaths = new Set(result.watchedPaths.map((path) => resolve(path)));
-    for (const eventHandlers of Object.values(result.snapshot.handlers)) {
-      for (const entry of eventHandlers) {
-        const references = await (
-          this.options.trustStore
-            ? this.options.trustStore.referencedScripts(this.options.workDir, entry.handler)
-            : resolveReferencedScripts(entry.handler, this.options.workDir)
-        ).catch(() => undefined);
-        if (!this.isActive(generation)) return undefined;
-        // Unsupported indirect invocations are already fail-closed as pending and cannot be trusted.
-        if (!references) continue;
-        for (const path of references.watchPaths) {
-          exactPaths.add(resolve(path));
-        }
-      }
-    }
     const wantedDirectories = await existingWatchDirectories([...exactPaths]);
     if (!this.isActive(generation)) return undefined;
     const fingerprints = new Map<string, string>();

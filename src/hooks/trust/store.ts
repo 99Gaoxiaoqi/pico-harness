@@ -4,9 +4,7 @@ import { dirname, join, normalize, resolve } from "node:path";
 import { resolvePicoHome } from "../../paths/pico-paths.js";
 import {
   resolveCommandHookExecution,
-  resolveReferencedScripts,
   type HookShell,
-  type ReferencedScriptResolution,
   type ResolvedCommandHookInvocation,
 } from "../config/command-shell.js";
 import type { HookHandler, HookSource, ResolvedHookHandler } from "../types.js";
@@ -16,7 +14,16 @@ import {
   writePrivateFileAtomic,
 } from "./secure-file.js";
 
-const STORE_VERSION = 1;
+const STORE_VERSION = 2;
+const HOOK_SOURCE_KINDS: ReadonlySet<string> = new Set([
+  "user",
+  "project",
+  "local",
+  "skill",
+  "agent",
+  "managed",
+  "plugin",
+]);
 
 export type HookTrustStatus = "active" | "pending";
 
@@ -50,7 +57,6 @@ export interface HookTrustFingerprint {
   workspace: string;
   source: { kind: HookSource["kind"]; path: string; componentId?: string };
   definitionHash: string;
-  scriptHashes: Readonly<Record<string, string>>;
 }
 
 export interface HookTrustRecord extends HookTrustFingerprint {
@@ -71,7 +77,7 @@ export interface HookTrustStoreOptions {
   env?: Readonly<NodeJS.ProcessEnv>;
 }
 
-/** executable handler 信任库；定义或脚本字节改变即匹配不上旧记录。 */
+/** executable handler 信任库；来源或规范化定义改变即匹配不上既有记录。 */
 export class HookTrustStore {
   readonly filePath: string;
   private readonly environment: Readonly<NodeJS.ProcessEnv>;
@@ -119,14 +125,6 @@ export class HookTrustStore {
     return (await this.resolveFingerprint(subject)).fingerprint;
   }
 
-  /** Resolve watcher paths with the exact environment owned by this trust authority. */
-  async referencedScripts(
-    workspace: string,
-    handler: HookHandler,
-  ): Promise<ReferencedScriptResolution> {
-    return await resolveReferencedScripts(handler, workspace, this.environment);
-  }
-
   /**
    * Return the exact command resolution whose fingerprint still has an active trust record.
    * The executor must use this invocation directly instead of resolving the logical alias again.
@@ -159,9 +157,6 @@ export class HookTrustStore {
       subject.handler.type === "command"
         ? await resolveCommandHookExecution(subject.handler, workspace, this.environment, shell)
         : undefined;
-    // shell 化后命令是配置字节（definitionHash 已覆盖），无文件可钉死——
-    // scriptHashes 恒空。旧记录（含 scriptHashes）指纹失配回 pending，属一次性迁移。
-    const scriptHashes: Readonly<Record<string, string>> = {};
     const source = {
       kind: subject.source.kind,
       path: sourcePath,
@@ -169,9 +164,9 @@ export class HookTrustStore {
         ? {}
         : { componentId: subject.source.componentId }),
     };
-    const id = hash(stableStringify({ workspace, source, definitionHash, scriptHashes }));
+    const id = hash(stableStringify({ workspace, source, definitionHash }));
     return {
-      fingerprint: { id, workspace, source, definitionHash, scriptHashes },
+      fingerprint: { id, workspace, source, definitionHash },
       ...(commandExecution ? { commandExecution } : {}),
     };
   }
@@ -180,17 +175,17 @@ export class HookTrustStore {
     await ensurePrivateDirectory(dirname(this.filePath));
     if ((await assertRegularNonSymlink(this.filePath)) === "missing") return [];
     const parsed: unknown = JSON.parse(await readFile(this.filePath, "utf8"));
-    if (!isRecord(parsed) || parsed.version !== STORE_VERSION || !Array.isArray(parsed.records)) {
-      throw new Error("trusted-hooks.json schema 无效");
+    if (
+      !isRecord(parsed) ||
+      !hasOnlyKeys(parsed, ["version", "records"]) ||
+      parsed.version !== STORE_VERSION ||
+      !Array.isArray(parsed.records)
+    ) {
+      throw new Error(
+        `trusted-hooks.json schema 无效：仅支持 v${STORE_VERSION}，旧格式不会自动迁移`,
+      );
     }
-    const records = parsed.records.map(parseRecord);
-    // 一次性迁移（shell 化）：旧静态信任记录带非空 scriptHashes（可执行文件身份
-    // + 引用文件哈希），新指纹恒为空对象，旧 id 永远失配——属死数据，直接剪除。
-    const live = records.filter((record) => Object.keys(record.scriptHashes).length === 0);
-    if (live.length !== records.length) {
-      await this.writeRecords(live);
-    }
-    return live;
+    return parsed.records.map(parseRecord);
   }
 
   private async writeRecords(records: readonly HookTrustRecord[]): Promise<void> {
@@ -202,16 +197,18 @@ export class HookTrustStore {
 function parseRecord(input: unknown): HookTrustRecord {
   if (
     !isRecord(input) ||
+    !hasOnlyKeys(input, ["id", "workspace", "source", "definitionHash", "trustedAt"]) ||
     typeof input.id !== "string" ||
     typeof input.workspace !== "string" ||
     !isRecord(input.source) ||
-    typeof input.source.kind !== "string" ||
+    !hasOnlyKeys(input.source, ["kind", "path", "componentId"]) ||
+    !isHookSourceKind(input.source.kind) ||
     typeof input.source.path !== "string" ||
+    (input.source.componentId !== undefined && typeof input.source.componentId !== "string") ||
     typeof input.definitionHash !== "string" ||
-    !isStringRecord(input.scriptHashes) ||
     typeof input.trustedAt !== "string"
   ) {
-    throw new Error("trusted-hooks.json record 无效");
+    throw new Error(`trusted-hooks.json v${STORE_VERSION} record 无效`);
   }
   return input as unknown as HookTrustRecord;
 }
@@ -259,8 +256,12 @@ function isRecord(input: unknown): input is Record<string, unknown> {
   return typeof input === "object" && input !== null && !Array.isArray(input);
 }
 
-function isStringRecord(input: unknown): input is Record<string, string> {
-  return isRecord(input) && Object.values(input).every((value) => typeof value === "string");
+function hasOnlyKeys(input: Record<string, unknown>, allowed: readonly string[]): boolean {
+  return Object.keys(input).every((key) => allowed.includes(key));
+}
+
+function isHookSourceKind(input: unknown): input is HookSource["kind"] {
+  return typeof input === "string" && HOOK_SOURCE_KINDS.has(input);
 }
 
 function isErrno(error: unknown, code: string): boolean {

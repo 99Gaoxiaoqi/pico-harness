@@ -1,6 +1,6 @@
 import { accessSync, constants, existsSync } from "node:fs";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
-import type { CommandHookHandler, HookHandler } from "../types.js";
+import type { CommandHookHandler } from "../types.js";
 
 /**
  * Command Hook 威胁模型（2026-08-17 对齐 Claude Code 哲学重构）。
@@ -10,22 +10,16 @@ import type { CommandHookHandler, HookHandler } from "../types.js";
  * 绑定。代价是公司标配的脏环境（PATH 里的未展开字面量等）让 hook 静默死亡。
  *
  * 新模型的信任判断：
- * 1. hook 命令来自用户配置（user/project/local hooks.json）= 用户意图，
- *    命令本身不是攻击面；信任锚 = 配置字节指纹审批（trusted-hooks.json）
+ * 1. hook 命令来自 Pico 原生配置或宿主明确注入的受信来源 = 用户/宿主意图，
+ *    命令本身不是攻击面；信任锚 = 规范化 handler 定义指纹审批（trusted-hooks.json）
  *    + workspace trust（撤销信任后 dispatch 边界失效）。
  * 2. 命令是任意 shell 字符串，运行时交给 shell 解释（对齐 Claude Code：
  *    spawn 显式 shell 二进制 + `-c`，不用 node 的 shell:true 选项）。
- *    审计粒度从"文件字节钉死"降为"配置字节审批"——已确认的取舍。
+ *    审计粒度从"文件字节钉死"降为"handler 定义审批"——已确认的取舍。
  * 3. 环境消毒保留：剥离 base env 的 loader 注入变量（LD_PRELOAD 等）防第三
  *    方篡改被批准命令的行为；handler.env 的变量名作为显式授权交给进程沙箱，
  *    但全局禁止的动态加载/启动注入变量仍不会进入受限目标进程。
  */
-
-export interface ReferencedScriptResolution {
-  readonly paths: readonly string[];
-  readonly watchPaths: readonly string[];
-  readonly executablePaths: readonly string[];
-}
 
 export interface CommandHookInvocation {
   readonly command: string;
@@ -77,9 +71,6 @@ export function sanitizeCommandHookEnvironment(
   return result;
 }
 
-/** Backward-compatible export for the executor import used before the boundary was generalized. */
-export const sanitizePackageInvocationEnvironment = sanitizeCommandHookEnvironment;
-
 /**
  * 解析 hook 命令的执行绑定：shell 选择 + 环境消毒 + 命令行拼装。
  * 不做任何 PATH/可执行文件解析——那是 shell 运行时的职责。
@@ -115,38 +106,6 @@ function buildCommandString(kind: HookShellKind, command: string, args: readonly
   if (args.length === 0) return command;
   const quoted = [command, ...args].map((word) => quoteShellWord(kind, word)).join(" ");
   return kind === "pwsh" || kind === "powershell" ? `& ${quoted}` : quoted;
-}
-
-/**
- * shell 化后 command handler 没有可钉死的脚本文件；保留接口形状供 reloader
- * 与信任库消费（watch 路径只剩配置文件与信任库本身，由上游负责）。
- */
-export async function resolveReferencedScripts(
-  handler: HookHandler,
-  workspace: string,
-  environment: Readonly<NodeJS.ProcessEnv> = process.env,
-): Promise<ReferencedScriptResolution> {
-  void handler;
-  void workspace;
-  void environment;
-  return { paths: [], watchPaths: [], executablePaths: [] };
-}
-
-/** 兼容导出：shell 化后无静态候选路径。 */
-export function resolveReferencedScriptCandidates(
-  handler: HookHandler,
-  workspace: string,
-): readonly string[] {
-  void handler;
-  void workspace;
-  return [];
-}
-
-export async function existingReferencedScripts(
-  handler: HookHandler,
-  workspace: string,
-): Promise<readonly string[]> {
-  return (await resolveReferencedScripts(handler, workspace)).paths;
 }
 
 export interface ResolveHookShellOptions {
