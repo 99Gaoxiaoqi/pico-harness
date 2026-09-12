@@ -196,12 +196,9 @@ export type {
   RuntimePluginDiagnostic,
 } from "./runtime/capabilities.js";
 
-export { TRANSCRIPT_PROJECTOR_VERSION, isRuntimeTranscriptCursor } from "./runtime/transcript.js";
+export { TRANSCRIPT_PROJECTOR_VERSION } from "./runtime/transcript.js";
 
 export type {
-  RuntimeTranscriptDirection,
-  RuntimeTranscriptCursor,
-  RuntimeTranscriptFragment,
   RuntimeTranscriptWatermark,
   RuntimeTranscriptItemRecord,
   RuntimeTranscriptItemFragment,

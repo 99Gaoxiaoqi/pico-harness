@@ -3,10 +3,9 @@
  * 代数，迟到的旧加载响应不得覆盖新加载的结果（切换会话、恢复重连后并发加载
  * 的视图竞态）。
  *
- * 边界说明（D12 重评结论）：transcript 的分页/游标算法只在 daemon 服务层一处
- * （src/daemon/desktop-transcript.ts 的 selectPage / encodeCursor）；本模块
- * 不做任何分页计算，只承担"过期响应丢弃"这一视图层职责，随移动端移除后
- * D12 双实现实质消解，护栏从 runtime.ts 裸 ref 收编为单一职责模块。
+ * 边界说明（D12 重评结论）：transcript 的分页/游标算法由 SQLite storage
+ * projection 唯一实现；本模块不做任何分页计算，只承担"过期响应丢弃"这一
+ * 视图层职责，护栏从 runtime.ts 裸 ref 收编为单一职责模块。
  */
 export interface ConversationLoadGeneration {
   readonly key: string;

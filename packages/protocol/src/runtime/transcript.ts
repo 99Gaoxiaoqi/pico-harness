@@ -33,33 +33,6 @@ import {
 } from "./validation.js";
 import type { RuntimeParamRule, RuntimeParamValidator, RuntimeResultRule } from "./validation.js";
 
-export type RuntimeTranscriptDirection = "older" | "newer";
-
-/**
- * Stable transcript page boundary captured against one fixed high-watermark.
- * `position`/`ordinal` map to the store record sequence/chunk index; byteOffset
- * continues an oversized record without replacing the durable ordering key.
- */
-export type RuntimeTranscriptCursor = JsonObject & {
-  readonly revision: string;
-  readonly throughTranscriptSequence: number;
-  readonly position: number;
-  readonly ordinal: number;
-  readonly byteOffset: number;
-  readonly direction: RuntimeTranscriptDirection;
-};
-
-/** One UTF-8-safe byte range of a serialized RuntimeConversationItem. */
-export type RuntimeTranscriptFragment = JsonObject & {
-  readonly itemId: string;
-  readonly position: number;
-  readonly ordinal: number;
-  readonly byteOffset: number;
-  readonly byteLength: number;
-  readonly totalBytes: number;
-  readonly json: string;
-};
-
 export const TRANSCRIPT_PROJECTOR_VERSION = 4 as const;
 
 export type RuntimeTranscriptWatermark = JsonObject & {
@@ -183,35 +156,6 @@ export type RuntimeSessionSubscriptionFrame = RuntimeSessionSubscriptionEnvelope
         readonly reason: "client_closed" | "slow_consumer" | "host_shutdown";
       })
   );
-
-export function isRuntimeTranscriptCursor(value: unknown): value is RuntimeTranscriptCursor {
-  if (!isJsonObject(value)) return false;
-  const keys = Object.keys(value);
-  return (
-    keys.length === 6 &&
-    keys.every((key) =>
-      [
-        "revision",
-        "throughTranscriptSequence",
-        "position",
-        "ordinal",
-        "byteOffset",
-        "direction",
-      ].includes(key),
-    ) &&
-    typeof value["revision"] === "string" &&
-    value["revision"].length > 0 &&
-    Number.isSafeInteger(value["throughTranscriptSequence"]) &&
-    (value["throughTranscriptSequence"] as number) > 0 &&
-    Number.isSafeInteger(value["position"]) &&
-    (value["position"] as number) >= 0 &&
-    Number.isSafeInteger(value["ordinal"]) &&
-    (value["ordinal"] as number) >= 0 &&
-    Number.isSafeInteger(value["byteOffset"]) &&
-    (value["byteOffset"] as number) >= 0 &&
-    (value["direction"] === "older" || value["direction"] === "newer")
-  );
-}
 
 export type RuntimeToolResultEnvelope = JsonObject & {
   readonly version: 1;

@@ -1,6 +1,7 @@
 import { parseDesktopToolApproval } from "../runtime-projections/approval.js";
 import { subagentMetadata } from "./subagent-navigation.js";
 import {
+  TRANSCRIPT_PROJECTOR_VERSION,
   type RuntimeActiveOverlayEntry,
   type RuntimeConversationItem,
   type RuntimePlanControlSnapshot,
@@ -18,23 +19,6 @@ import { workspaceSessionKey } from "../workspace-session.js";
 import { conversationItemKey } from "./items.js";
 import { subagentProgressState } from "./subagent-state.js";
 import type { ConversationItemView, ConversationProgressState } from "./types.js";
-
-export type RuntimeTranscriptCursor = {
-  readonly revision: string;
-  readonly throughTranscriptSequence: number;
-  readonly position: number;
-  readonly ordinal: number;
-  readonly byteOffset: number;
-  readonly direction: "older" | "newer";
-};
-
-export type RuntimeTranscriptFragment = {
-  readonly itemId: string;
-  readonly byteOffset: number;
-  readonly byteLength: number;
-  readonly totalBytes: number;
-  readonly json: string;
-};
 
 export function approvalFromPlanProjection(
   value: unknown,
@@ -481,114 +465,41 @@ export function pendingToolApprovalFromTranscript(
   );
 }
 
-interface ParsedConversation extends ConversationView {
-  readonly nextCursor?: RuntimeTranscriptCursor;
-}
-
-function transcriptCursor(value: unknown): RuntimeTranscriptCursor | undefined {
-  if (!isRecord(value)) return undefined;
+function isTranscriptPageCursor(value: unknown): boolean {
+  if (!isRecord(value)) return false;
   const cursor = value as Record<string, unknown>;
-  if (
-    Object.keys(cursor).length !== 6 ||
-    typeof cursor.revision !== "string" ||
-    !cursor.revision ||
-    !Number.isSafeInteger(cursor.throughTranscriptSequence) ||
-    (cursor.throughTranscriptSequence as number) < 1 ||
-    !Number.isSafeInteger(cursor.position) ||
-    (cursor.position as number) < 0 ||
-    !Number.isSafeInteger(cursor.ordinal) ||
-    (cursor.ordinal as number) < 0 ||
-    !Number.isSafeInteger(cursor.byteOffset) ||
-    (cursor.byteOffset as number) < 0 ||
-    (cursor.direction !== "older" && cursor.direction !== "newer")
-  ) {
-    return undefined;
-  }
-  return cursor as RuntimeTranscriptCursor;
+  return (
+    Object.keys(cursor).length === 6 &&
+    typeof cursor.historyEpoch === "string" &&
+    Boolean(cursor.historyEpoch) &&
+    cursor.projectorVersion === TRANSCRIPT_PROJECTOR_VERSION &&
+    Number.isSafeInteger(cursor.throughSequence) &&
+    (cursor.throughSequence as number) >= 0 &&
+    Number.isSafeInteger(cursor.positionSequence) &&
+    (cursor.positionSequence as number) >= 0 &&
+    Number.isSafeInteger(cursor.positionOrdinal) &&
+    (cursor.positionOrdinal as number) >= 0 &&
+    Number.isSafeInteger(cursor.byteOffset) &&
+    (cursor.byteOffset as number) >= 0
+  );
 }
 
 export function parseConversation(
   value: unknown,
   workspacePath: string,
   sessionId: string,
-  fragmentParts?: Map<string, RuntimeTranscriptFragment[]>,
-): ParsedConversation {
+): ConversationView {
   const result = isRecord(value) ? value : {};
-  const nextCursor = transcriptCursor(result.nextCursor);
-  const nextBefore = stringValue(result.nextBefore) || undefined;
   return {
     workspacePath,
     sessionId,
-    items: [
-      ...assembleConversationFragments(result.fragments, fragmentParts),
-      ...recordArray(result.items),
-    ]
+    items: recordArray(result.items)
       .map(conversationItem)
       .filter((item): item is ConversationItemView => item !== undefined),
-    revision: stringValue(result.revision) || undefined,
-    // ConversationView keeps the legacy field as the UI's "has earlier" flag.
-    // The request path below uses the structured cursor whenever it is present.
-    nextBefore: nextBefore ?? (nextCursor ? "structured-cursor" : undefined),
-    ...(nextCursor ? { nextCursor } : {}),
+    hasEarlier: isTranscriptPageCursor(result.nextCursor),
     queuedCount: recordArray(result.queuedInputs).length,
     discoveryItem: discoveryItemFromProjection(result.discoveryProjection),
   };
-}
-
-export function assembleConversationFragments(
-  value: unknown,
-  fragmentParts: Map<string, RuntimeTranscriptFragment[]> | undefined,
-): JsonRecord[] {
-  if (!fragmentParts) return [];
-  const completed: JsonRecord[] = [];
-  for (const candidate of recordArray(value)) {
-    const itemId = stringValue(candidate.itemId);
-    const json = stringValue(candidate.json);
-    const byteOffset = numberValue(candidate.byteOffset);
-    const byteLength = numberValue(candidate.byteLength);
-    const totalBytes = numberValue(candidate.totalBytes);
-    if (!itemId || !json || byteOffset < 0 || byteLength < 1 || totalBytes < 1) continue;
-    const fragment = { itemId, json, byteOffset, byteLength, totalBytes };
-    if (
-      byteLength !== new TextEncoder().encode(json).byteLength ||
-      byteOffset + byteLength > totalBytes
-    ) {
-      throw new Error("Session transcript fragment byte range is invalid");
-    }
-    const prior = fragmentParts.get(itemId) ?? [];
-    for (const part of prior) {
-      if (part.totalBytes !== totalBytes) {
-        throw new Error("Session transcript fragments disagree on total bytes");
-      }
-      const sameRange = part.byteOffset === byteOffset && part.byteLength === byteLength;
-      if (sameRange && part.json !== json) {
-        throw new Error("Session transcript fragments disagree on range content");
-      }
-      const overlaps =
-        part.byteOffset < byteOffset + byteLength && byteOffset < part.byteOffset + part.byteLength;
-      if (overlaps && !sameRange) {
-        throw new Error("Session transcript fragment ranges overlap");
-      }
-    }
-    const duplicate = prior.some(
-      (part) => part.byteOffset === byteOffset && part.byteLength === byteLength,
-    );
-    const parts = [...prior, ...(duplicate ? [] : [fragment])].toSorted(
-      (left, right) => left.byteOffset - right.byteOffset,
-    );
-    fragmentParts.set(itemId, parts);
-    let offset = 0;
-    for (const part of parts) {
-      if (part.byteOffset !== offset) break;
-      offset += part.byteLength;
-    }
-    if (offset !== totalBytes) continue;
-    const parsed: unknown = JSON.parse(parts.map((part) => part.json).join(""));
-    if (!isRecord(parsed) || parsed.id !== itemId) continue;
-    completed.push(parsed);
-    fragmentParts.delete(itemId);
-  }
-  return completed;
 }
 
 function discoveryItemFromProjection(value: unknown): ConversationItemView | undefined {

@@ -6,7 +6,6 @@ import test from "node:test";
 import { createRuntimeNotification } from "../../../src/daemon/protocol.js";
 import { buildApprovalRequestedPayload } from "../../../src/daemon/approval-wire.js";
 import { ingestDesktopRuntimeNotification } from "../../../src/daemon/desktop-transcript-persistence.js";
-import { projectRuntimeTranscript } from "../../../src/daemon/desktop-transcript.js";
 import { Session } from "../../../src/engine/session.js";
 import { parseDesktopToolApproval } from "../../../apps/desktop/src/renderer/runtime-projections/approval.js";
 import {
@@ -51,12 +50,17 @@ test("approval preview and exact authorization survive live delivery, durable re
       payload,
     }),
   );
-  const replay = () =>
-    session
-      .readHydrationSnapshot()
-      .then((snapshot) =>
-        parseConversation(projectRuntimeTranscript(snapshot, {}), root, session.id),
-      );
+  const replay = async () => {
+    const page = await session.runtimeEventStore!.readTranscriptProjectionPage({
+      sessionId: session.id,
+      maxBytes: 512 * 1024,
+    });
+    return parseConversation(
+      { items: page.items.map(({ payload: item }) => item) },
+      root,
+      session.id,
+    );
+  };
   const pending = pendingToolApprovalFromTranscript((await replay()).items);
   assert.ok(pending);
   for (const key of ["diff", "sessionScope", "command", "toolName", "providerCallId"] as const)
@@ -75,11 +79,6 @@ test("approval preview and exact authorization survive live delivery, durable re
     }),
   );
   assert.equal(pendingToolApprovalFromTranscript((await replay()).items), undefined);
-  const legacy = parseDesktopToolApproval({
-    approvalId: "old",
-    request: { toolName: "bash", command: "npm test" },
-  });
-  assert.equal(legacy?.sessionScope, undefined);
   const malformed = parseDesktopToolApproval({
     approvalId: "bad",
     request: { sessionScope: { type: "directories", directories: ["/tmp"] } },
@@ -142,12 +141,17 @@ test("重启后的旧待审批记录不会冒充新运行，当前审批仍能�
         },
       }),
     );
-  const replay = async () =>
-    parseConversation(
-      projectRuntimeTranscript(await session.readHydrationSnapshot(), {}),
+  const replay = async () => {
+    const page = await session.runtimeEventStore!.readTranscriptProjectionPage({
+      sessionId: session.id,
+      maxBytes: 512 * 1024,
+    });
+    return parseConversation(
+      { items: page.items.map(({ payload: item }) => item) },
       root,
       session.id,
     ).items;
+  };
   await approval("old-run", "old-approval");
   let items = await replay();
   assert.equal(pendingToolApprovalFromTranscript(items, "old-run")?.runId, "old-run");

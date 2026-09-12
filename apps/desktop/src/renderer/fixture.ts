@@ -163,7 +163,6 @@ export const previewData: AppData = {
     [previewSessionKey]: {
       sessionId: "session-atlas",
       workspacePath: previewWorkspacePath,
-      revision: "preview.1",
       queuedCount: 0,
       settings: {
         modelRouteId: "openai/gpt-5.4",

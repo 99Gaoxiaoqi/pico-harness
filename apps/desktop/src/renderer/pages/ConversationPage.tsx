@@ -1323,7 +1323,7 @@ export function ConversationPage() {
           </div>
         ) : (
           <>
-            {sessionRef && conversation?.nextBefore && (
+            {sessionRef && conversation?.hasEarlier && (
               <div className="conversation-history-pagination">
                 <Button
                   variant="quiet"

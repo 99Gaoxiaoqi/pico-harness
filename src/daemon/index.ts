@@ -7,7 +7,6 @@ export * from "./desktop-interaction-store.js";
 export * from "./desktop-memory-request-handlers.js";
 export * from "./desktop-atomic-memory-service.js";
 export * from "./desktop-runtime-service.js";
-export * from "./desktop-transcript.js";
 export * from "./endpoint.js";
 export * from "./instance-lock.js";
 export * from "./ipc-auth.js";
