@@ -4,7 +4,6 @@ export type ReasoningCapabilitySource =
   | "config"
   | "provider_metadata"
   | "model_rule"
-  | "legacy_boolean"
   | "unknown";
 
 export type ReasoningLevel = string;
@@ -33,7 +32,7 @@ export type ReasoningProtocolOptions = Partial<
   Readonly<Record<ProviderProtocol, ReasoningRequestPatch>>
 >;
 
-/** JSON-configurable model reasoning metadata. A boolean remains accepted for legacy configs. */
+/** JSON-configurable model reasoning metadata. */
 export interface ModelReasoningCapabilityConfig {
   enabled: boolean;
   defaultLevel?: ReasoningLevel;
@@ -41,7 +40,7 @@ export interface ModelReasoningCapabilityConfig {
   providerOptionsByLevel?: Readonly<Record<ReasoningLevel, ReasoningProtocolOptions>>;
 }
 
-export type ModelReasoningCapabilityInput = boolean | ModelReasoningCapabilityConfig;
+export type ModelReasoningCapabilityInput = ModelReasoningCapabilityConfig;
 
 export interface ResolvedModelReasoningCapability {
   /** Whether the model is known to reason. "unknown" never invents controls. */
@@ -54,7 +53,7 @@ export interface ResolvedModelReasoningCapability {
 }
 
 export interface ResolveModelReasoningCapabilityOptions {
-  /** Project configuration has highest priority when it is structured or explicitly false. */
+  /** Explicit route configuration has highest priority. */
   config?: ModelReasoningCapabilityInput;
   /** Optional metadata returned by a provider model catalog. */
   providerMetadata?: ModelReasoningCapabilityInput;
@@ -122,11 +121,7 @@ const DEEPSEEK_V4_REASONING = modelRule(["off", "high", "max"], "max", {
   },
 });
 
-/**
- * Resolve model reasoning controls without treating a legacy `reasoning: true` as proof that
- * low/medium/high controls exist. Structured config and provider metadata are authoritative;
- * family rules fill known catalogs, while an ordinary true value only records fixed support.
- */
+/** Structured config and provider metadata are authoritative; family rules fill known catalogs. */
 export function resolveModelReasoningCapability(
   _protocol: ProviderProtocol,
   model: string,
@@ -144,9 +139,6 @@ export function resolveModelReasoningCapability(
   if (providerMetadata) return providerMetadata;
 
   if (rule) return rule;
-
-  const legacy = legacyCapability(options.config ?? options.providerMetadata);
-  if (legacy) return legacy;
 
   return {
     enabled: "unknown",
@@ -237,20 +229,13 @@ function authoritativeCapability(
   source: "config" | "provider_metadata",
   fallback?: ResolvedModelReasoningCapability,
 ): ResolvedModelReasoningCapability | undefined {
-  if (input === false) return fixedCapability(false, source);
-  if (typeof input !== "object") return undefined;
+  if (!input) return undefined;
   return normalizeStructuredCapability(input, source, fallback);
-}
-
-function legacyCapability(
-  input: ModelReasoningCapabilityInput | undefined,
-): ResolvedModelReasoningCapability | undefined {
-  return input === true ? fixedCapability(true, "legacy_boolean") : undefined;
 }
 
 function fixedCapability(
   enabled: boolean,
-  source: "config" | "provider_metadata" | "legacy_boolean",
+  source: "config" | "provider_metadata",
 ): ResolvedModelReasoningCapability {
   return { enabled, levels: [], providerOptionsByLevel: {}, source };
 }
