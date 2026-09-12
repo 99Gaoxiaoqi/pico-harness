@@ -6,6 +6,10 @@ import test from "node:test";
 import { DesktopAtomicMemoryService } from "../../../src/daemon/desktop-atomic-memory-service.js";
 import { globalSessionManager } from "../../../src/engine/session.js";
 import {
+  forgetSessionSettings,
+  getOrCreateSessionSettings,
+} from "../../../src/input/session-settings.js";
+import {
   memorySessionKey,
   type MemoryExtractionModel,
 } from "../../../src/memory/atomic/runtime-contracts.js";
@@ -219,6 +223,19 @@ test("the second turn in one Session extracts atomic memory only when its model 
     runtimePort: createEngineRuntimePort(),
   });
   const session = sessionLease.session;
+  getOrCreateSessionSettings(
+    {
+      sessionId,
+      cwd: workspace,
+      picoHome: fixture.picoHome,
+      provider: "openai",
+      model: "test",
+      modelRouteId: "test/test",
+      collaborationMode: "agent",
+      permissionMode: "ask",
+    },
+    { persistence: session },
+  );
   const runtimeState = await createSessionRuntime({
     session,
     sessionLease,
@@ -227,6 +244,7 @@ test("the second turn in one Session extracts atomic memory only when its model 
   });
   context.after(async () => {
     await runtimeState.dispose();
+    forgetSessionSettings(sessionId, workspace, fixture.picoHome);
     const released = globalSessionManager.delete(sessionId, workspace, {
       picoHome: fixture.picoHome,
     });
