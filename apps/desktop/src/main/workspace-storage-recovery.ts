@@ -1,4 +1,4 @@
-import { parseRuntimeResult, RUNTIME_ERROR_CODES, type RuntimeResult } from "@pico/protocol";
+import { parseRuntimeResult, type RuntimeResult } from "@pico/protocol";
 import type { RuntimeClientAdapter } from "./runtime-client-adapter.js";
 
 /** One native confirmation per workspace; repair tokens are never exposed to the renderer. */
@@ -8,23 +8,10 @@ export function createDesktopWorkspaceStorageRecovery(options: {
 }): (workspacePath: string) => Promise<boolean> {
   const pending = new Map<string, Promise<boolean>>();
   const recover = async (workspacePath: string): Promise<boolean> => {
-    let prepared: RuntimeResult<"workspace.storageRepair.prepare">;
-    try {
-      prepared = parseRuntimeResult(
-        "workspace.storageRepair.prepare",
-        await options.runtime.request("workspace.storageRepair.prepare", { workspacePath }),
-      );
-    } catch (error) {
-      // An older resident daemon must still be able to open healthy workspaces.
-      if (
-        typeof error === "object" &&
-        error !== null &&
-        "code" in error &&
-        error.code === RUNTIME_ERROR_CODES.METHOD_NOT_FOUND
-      )
-        return false;
-      throw error;
-    }
+    const prepared: RuntimeResult<"workspace.storageRepair.prepare"> = parseRuntimeResult(
+      "workspace.storageRepair.prepare",
+      await options.runtime.request("workspace.storageRepair.prepare", { workspacePath }),
+    );
     const { candidate } = prepared;
     if (!candidate) return true;
     let confirmed = false;

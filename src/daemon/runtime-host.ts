@@ -24,9 +24,8 @@ export interface LocalDaemonHostOptions {
  * Internal production lifetime owner. The executor remains dependency-injected;
  * this host never imports or silently falls back to the foreground AgentRuntime.
  *
- * 3-D Phase 5（2026-08-16）：旧传输（endpoint/instance-lock/LocalRuntimeDaemon）
- * 已退役——本类只编排 service + cron runtime 生命周期与 shutdown fence 链，
- * 单例与传输由 kernel 的 flock 选主与 NDJSON endpoint 承担。
+ * This class only coordinates service and cron lifecycles plus the shutdown fence;
+ * Runtime Host owns election, registration and transport.
  */
 export class LocalDaemonHost {
   readonly ownerId: string;

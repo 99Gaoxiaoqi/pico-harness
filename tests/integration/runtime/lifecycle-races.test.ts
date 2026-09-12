@@ -5,15 +5,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate as waitForImmediate, setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
+import { RUNTIME_ERROR_CODES } from "@pico/protocol";
 import {
   cleanupDesktopWorkbarResources,
-  createDesktopDaemonShutdownFence,
   createDesktopTerminalCleanupFence,
   DesktopTerminalGenerationController,
   isDesktopRuntimeInvocationAllowed,
-  resumeDesktopTerminalGenerationWithUpgrade,
-  type DesktopDaemonShutdownFenceOptions,
+  type DesktopTerminalCleanupFenceOptions,
 } from "../../../apps/desktop/src/main/daemon-controller.js";
+import { RuntimeClientError } from "../../../apps/desktop/src/main/runtime-client-adapter.js";
 import {
   installLocalDaemonShutdownHandlers,
   LocalDaemonHost,
@@ -571,7 +571,7 @@ test("Daemon stop fails loudly when a Cron runtime cannot close", async (context
     registrationStore,
     execute: async () => undefined,
   });
-  // 注：旧传输单例锁保留断言随 Phase 5 旧 socket 退役移除；保留关闭失败传播。
+  // 关闭失败必须继续向上传播。
   const host = new LocalDaemonHost({
     registrationStore,
     service,
@@ -640,57 +640,6 @@ test("Daemon signal handlers consume a rejecting stop promise", async (context) 
   assert.equal(forcedExitCode, 130);
   assert.deepEqual(unhandledRejections, []);
   assert.equal(process.listeners("SIGTERM").includes(installed), false);
-});
-
-test("Desktop daemon shutdown fence times out once and clears a completed timer", async () => {
-  const timedOutStop = deferred();
-  const timeoutTimers = manualTimers();
-  let timeoutQuitCount = 0;
-  const timeoutErrors: unknown[] = [];
-  const timedOutFence = createDesktopDaemonShutdownFence(
-    { ownsProcess: true, stop: () => timedOutStop.promise },
-    () => timeoutQuitCount++,
-    (error) => timeoutErrors.push(error),
-    timeoutTimers.options,
-  );
-  let timeoutPrevented = 0;
-  timedOutFence({ preventDefault: () => timeoutPrevented++ });
-  timedOutFence({ preventDefault: () => timeoutPrevented++ });
-  await waitForImmediate();
-  assert.equal(timeoutPrevented, 2);
-  assert.equal(timeoutTimers.delay, 7);
-
-  timeoutTimers.fire();
-  assert.equal(timeoutQuitCount, 1);
-  assert.equal(timeoutErrors.length, 1);
-  assert.match(String(timeoutErrors[0]), /7ms/u);
-
-  timedOutStop.resolve();
-  await waitForImmediate();
-  assert.equal(timeoutQuitCount, 1);
-  assert.equal(timeoutErrors.length, 1);
-
-  const completedStop = deferred();
-  const completedTimers = manualTimers();
-  let completedQuitCount = 0;
-  const completedErrors: unknown[] = [];
-  const completedFence = createDesktopDaemonShutdownFence(
-    { ownsProcess: true, stop: () => completedStop.promise },
-    () => completedQuitCount++,
-    (error) => completedErrors.push(error),
-    completedTimers.options,
-  );
-  completedFence({ preventDefault: () => undefined });
-  await waitForImmediate();
-  completedStop.resolve();
-  await waitForImmediate();
-
-  assert.equal(completedQuitCount, 1);
-  assert.deepEqual(completedErrors, []);
-  assert.equal(completedTimers.cleared, true);
-  completedTimers.fire();
-  assert.equal(completedQuitCount, 1);
-  assert.deepEqual(completedErrors, []);
 });
 
 test("Desktop terminal cleanup fence blocks repeated quit until terminal groups are released", async () => {
@@ -895,35 +844,20 @@ test("Desktop cleanup 失败保持 sealed，open 重试成功后才 resume", asy
   assert.equal(controller.isCreateAllowed(), true);
 });
 
-test("Desktop 只在 resume 方法缺失时优雅接管旧 daemon", async () => {
-  const order: string[] = [];
-  let resumeAttempts = 0;
-  await resumeDesktopTerminalGenerationWithUpgrade({
-    resume: async () => {
-      order.push(`resume-${++resumeAttempts}`);
-      if (resumeAttempts === 1) throw new Error("method-not-found");
-    },
-    shutdownLegacyHost: async () => {
-      order.push("shutdown");
-    },
-    reconnect: async () => {
-      order.push("reconnect");
-    },
-    isMethodNotFound: (error) => String(error).includes("method-not-found"),
-  });
-  assert.deepEqual(order, ["resume-1", "shutdown", "reconnect", "resume-2"]);
-
-  await assert.rejects(
-    resumeDesktopTerminalGenerationWithUpgrade({
-      resume: async () => {
-        throw new Error("permission-denied");
-      },
-      shutdownLegacyHost: async () => assert.fail("非 method-not-found 不得关停 daemon"),
-      reconnect: async () => assert.fail("非 method-not-found 不得重连"),
-      isMethodNotFound: () => false,
-    }),
-    /permission-denied/u,
+test("Desktop terminal generation propagates terminal.resume method-not-found", async () => {
+  const controller = new DesktopTerminalGenerationController();
+  const methodNotFound = new RuntimeClientError(
+    RUNTIME_ERROR_CODES.METHOD_NOT_FOUND,
+    "terminal.resume method-not-found",
+    false,
   );
+  await assert.rejects(
+    controller.open(async () => {
+      throw methodNotFound;
+    }),
+    (error: unknown) => error === methodNotFound,
+  );
+  assert.equal(controller.isCreateAllowed(), false, "resume 失败后必须保持 sealed");
 });
 
 test("Hook reloader stop fences an in-flight reload and supports a fresh generation", async (context) => {
@@ -1405,7 +1339,7 @@ async function completesWithin(
 }
 
 function manualTimers(): {
-  readonly options: DesktopDaemonShutdownFenceOptions;
+  readonly options: DesktopTerminalCleanupFenceOptions;
   readonly delay: number | undefined;
   readonly cleared: boolean;
   fire(): void;

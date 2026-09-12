@@ -14,10 +14,8 @@ import {
 import { credentialRefForProvider } from "../../../src/provider/credential-vault.js";
 import { WorkspaceTaskRuntime } from "../../../src/runtime/workspace-runtime.js";
 
-// 注：本文件原含旧传输单例锁（instance-lock）保留语义的断言，随 3-D Phase 5
-// 旧 socket 退役移除（LocalDaemonHost 不再持锁；单例由 kernel flock 承担）。
-// 保留的全部断言是 cron 生命周期编排语义：关闭失败传播、fence 排空、有界
-// stop、重注册对账——这些在 kernel 承载的 candidate 装配里原样生效。
+// 本文件覆盖 cron 生命周期编排语义：关闭失败传播、fence 排空、有界 stop、
+// 重注册对账——这些在 Runtime Host candidate 装配里原样生效。
 
 test("Cron unregister close failure remains owned while later refreshes stay usable", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-daemon-cron-unregister-failure-"));

@@ -1,20 +1,12 @@
 import {
-  parseRuntimeHostCandidateArguments,
   resolveExistingStorageRoot,
-  resolveStorageRoot,
   RuntimeHostKernel,
   tryAcquireInteractiveRootOwner,
+  type RuntimeHostCandidateOptions,
   type RuntimeHostComposition,
   type RuntimeHostCompositionContext,
 } from "@pico/runtime-host";
 import { globalSessionManager } from "../engine/session.js";
-import { logger } from "../observability/logger.js";
-import { resolveCanonicalPicoHome, resolveLocalDaemonEndpoint } from "./endpoint.js";
-import {
-  LocalDaemonAlreadyRunningError,
-  LocalDaemonInstanceLock,
-  type LocalDaemonInstanceLockOptions,
-} from "./instance-lock.js";
 import {
   assembleProductionDaemonHost,
   createProductionRuntimeServices,
@@ -33,62 +25,20 @@ import { SessionSubscriptionRegistry } from "./session-subscription-owner.js";
 import { SqliteSessionContinuitySource } from "./sqlite-session-continuity-source.js";
 
 /**
- * 3-B-3 daemon candidate：把 daemon main 从"旧传输单例宿主"迁移为 runtime-host
- * candidate 模式（flock 选主 + registration 发现）。启动序列：
+ * Pico daemon 的唯一启动形态是 Runtime Host candidate：
  *
- *   1. 升级守卫：先抢旧 instance-lock（含 ping 探测）。旧版本 daemon 只持此锁、
- *      不持 flock——若不在此拦截，新旧两个 daemon 会各听各的传输、双跑 cron。
- *      守卫失败 = 旧 daemon 仍在运行，明确退出（exit 3），绝不并存。
- *   2. flock 选主（runtime-host 交互根）——唯一 winner 进入下一步，loser exit 2。
- *   3. RuntimeHostKernel.start + daemon composition（production services 全量装配，
- *      复用 LocalDaemonHost services-only 的 cron 编排与 shutdown fence 链）。
- *
- * 守卫锁持有到进程关停：close() 在 fence 证明资源安全释放后才放锁（fail-closed，
- * 与旧 daemon 的 releaseInstanceLockWhenSafe 同语义）。
+ *   1. 校验调用方提供的 storage root identity；
+ *   2. 以 flock 选主，唯一 winner 启动 kernel，loser 退出；
+ *   3. 装配 production services，并在关停时排空 cron 与 Session ownership。
  */
 
-export interface PicoDaemonCandidateOptions {
-  /** runtime-host 交互根路径（storage root marker 所在目录）。 */
-  rootPath: string;
-  /** 严格校验 rootId（connectOrSpawn spawn 路径传入）；无参自举时省略。 */
-  expectedRootId?: string;
-  idleGraceMs?: number;
-  handshakeTimeoutMs?: number;
-  operationDeadlineMs?: number;
+export interface PicoDaemonCandidateOptions extends RuntimeHostCandidateOptions {
   env?: ProductionLocalDaemonHostOptions["env"];
-  lockOptions?: Omit<LocalDaemonInstanceLockOptions, "endpoint">;
 }
 
 export type PicoDaemonCandidateResult =
-  | { kind: "legacy_daemon_running"; message: string }
   | { kind: "loser" }
   | { kind: "winner"; host: RuntimeHostKernel };
-
-/**
- * 兼容两种启动形态：connectOrSpawn 的严格 kernel CLI（--root/--expected-root-id
- * 成对），以及无参自举（旧 LaunchAgent / 手动 `node main.js`）——后者以 canonical
- * PICO_HOME 为交互根推导一切。
- */
-export function parsePicoDaemonCandidateArguments(
-  args: readonly string[],
-): PicoDaemonCandidateOptions {
-  if (args.length === 0) {
-    const rootPath = resolveCanonicalPicoHome();
-    return { rootPath };
-  }
-  const parsed = parseRuntimeHostCandidateArguments(args);
-  return {
-    rootPath: parsed.rootPath,
-    expectedRootId: parsed.expectedRootId,
-    ...(parsed.idleGraceMs === undefined ? {} : { idleGraceMs: parsed.idleGraceMs }),
-    ...(parsed.handshakeTimeoutMs === undefined
-      ? {}
-      : { handshakeTimeoutMs: parsed.handshakeTimeoutMs }),
-    ...(parsed.operationDeadlineMs === undefined
-      ? {}
-      : { operationDeadlineMs: parsed.operationDeadlineMs }),
-  };
-}
 
 export async function startPicoDaemonRuntimeHostCandidate(
   options: PicoDaemonCandidateOptions,
@@ -98,66 +48,31 @@ export async function startPicoDaemonRuntimeHostCandidate(
   ensurePicoRuntimeHostSessionContinuityOperationsRegistered();
   ensurePicoRuntimeHostShutdownOperationRegistered();
 
-  // 1) 升级守卫：旧单例锁 + ping。
-  const env = options.env ?? (process.env as Record<string, string | undefined>);
-  const legacyEndpoint = resolveLocalDaemonEndpoint({ env });
-  let legacyLock: LocalDaemonInstanceLock;
-  try {
-    legacyLock = await LocalDaemonInstanceLock.acquire({
-      endpoint: legacyEndpoint,
-      ...(options.lockOptions ?? {}),
-    });
-  } catch (error) {
-    if (error instanceof LocalDaemonAlreadyRunningError) {
-      return {
-        kind: "legacy_daemon_running",
-        message:
-          "检测到旧版本 Runtime daemon 仍在运行（单例锁存活）。请先停止旧 daemon 后再启动新版本。",
-      };
-    }
-    throw error;
-  }
-
-  // 2) flock 选主。
-  const capability = options.expectedRootId
-    ? await resolveExistingStorageRoot({
-        path: options.rootPath,
-        kind: "interactive",
-        expectedRootId: options.expectedRootId,
-      })
-    : await resolveStorageRoot({ path: options.rootPath, kind: "interactive" });
+  const capability = await resolveExistingStorageRoot({
+    path: options.rootPath,
+    kind: "interactive",
+    expectedRootId: options.expectedRootId,
+  });
   const owner = await tryAcquireInteractiveRootOwner(capability);
-  if (!owner) {
-    await legacyLock.release().catch(() => undefined);
-    return { kind: "loser" };
-  }
+  if (!owner) return { kind: "loser" };
 
-  // 3) kernel + daemon composition。
-  try {
-    const host = await RuntimeHostKernel.start({
-      owner,
-      ...(options.idleGraceMs === undefined ? {} : { idleGraceMs: options.idleGraceMs }),
-      ...(options.handshakeTimeoutMs === undefined
-        ? {}
-        : { handshakeTimeoutMs: options.handshakeTimeoutMs }),
-      ...(options.operationDeadlineMs === undefined
-        ? {}
-        : { operationDeadlineMs: options.operationDeadlineMs }),
-      compositionFactory: (context) =>
-        createPicoDaemonComposition(context, { env: options.env }, legacyLock),
-    });
-    return { kind: "winner", host };
-  } catch (error) {
-    // kernel.start 失败时自身已回收 owner；这里补放守卫锁。
-    await legacyLock.release().catch(() => undefined);
-    throw error;
-  }
+  const host = await RuntimeHostKernel.start({
+    owner,
+    ...(options.idleGraceMs === undefined ? {} : { idleGraceMs: options.idleGraceMs }),
+    ...(options.handshakeTimeoutMs === undefined
+      ? {}
+      : { handshakeTimeoutMs: options.handshakeTimeoutMs }),
+    ...(options.operationDeadlineMs === undefined
+      ? {}
+      : { operationDeadlineMs: options.operationDeadlineMs }),
+    compositionFactory: (context) => createPicoDaemonComposition(context, { env: options.env }),
+  });
+  return { kind: "winner", host };
 }
 
 async function createPicoDaemonComposition(
   context: RuntimeHostCompositionContext,
   options: ProductionLocalDaemonHostOptions,
-  legacyLock: LocalDaemonInstanceLock,
 ): Promise<RuntimeHostComposition> {
   // daemon 是用户级常驻服务（cron 调度必须存活）：持有一个长期 residency 阻止
   // idle 自退。注意不能用 retainUntilProcessExit——那是不可逆闩，会让 kernel 的
@@ -195,8 +110,8 @@ async function createPicoDaemonComposition(
 
   return {
     // runtime.shutdown：常驻 daemon 的优雅关停入口（等效 SIGTERM 路径——
-    // 触发 kernel requestDrain → 排空 → composition.close → 守卫锁释放 →
-    // residency 释放 → 进程退出）。必须等成功响应刷入 transport 后再请求
+    // 触发 kernel requestDrain → 排空 → composition.close → residency 释放 →
+    // 进程退出）。必须等成功响应刷入 transport 后再请求
     // drain；否则 kernel 可能在客户端读到响应前销毁连接并暴露 read_eof。
     handlers: {
       ...bridge.handlers,
@@ -220,7 +135,7 @@ async function createPicoDaemonComposition(
     releaseConnection: bridge.releaseConnection,
     beginDrain() {
       services.desktopService.beginDrain();
-      // drain 期间停事件推送；cron 停止由 close() 统一收口（与旧 daemon 停机序一致）。
+      // drain 期间停事件推送；cron 停止由 close() 统一收口。
       bridge.beginDrain();
     },
     async recover() {
@@ -231,16 +146,12 @@ async function createPicoDaemonComposition(
       try {
         unsubscribeSessionNotifications();
         await bridge.close();
-        // 完整 shutdown fence 链（cron ownership + service.close + 锁保留语义）。
+        // 完整 shutdown fence 链（cron ownership + service.close）。
         await daemonHost.stop();
         // SessionManager 的历史缓存可在请求结束后继续持有 durable OwnerLease。
-        // Runtime Host 已停止 admission，此处必须排空缓存后才能释放升级守卫锁，
-        // 否则旧进程会在 socket 消失后与新 daemon 并存，并阻塞同一 Session 接管。
+        // Runtime Host 已停止 admission，此处必须排空缓存后进程才能退出，避免阻塞
+        // 后继 Host 对同一 Session 的接管。
         await globalSessionManager.clearAndDrain();
-        await legacyLock.release();
-      } catch (error) {
-        logger.error({ error }, "Pico daemon candidate 关停失败，保留升级守卫锁（fail-closed）");
-        throw error;
       } finally {
         // 无论成败都放掉常驻 residency：成功路径让 kernel 完成收尾；失败路径也已
         // 过 shutdown deadline 语义（由 kernel 决定升级为强杀）。

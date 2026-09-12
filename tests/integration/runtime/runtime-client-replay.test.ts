@@ -41,10 +41,9 @@ ensurePicoRuntimeHostSessionContinuityOperationsRegistered();
 ensurePicoRuntimeHostShutdownOperationRegistered();
 
 /**
- * 客户端订阅环的 replay overflow 恢复栅栏（3-D Phase 5 迁移到 kernel 承载）：
- * in-process kernel + fake service（同 composition-bridge 测试装配），客户端走
- * 真实 LocalRuntimeClient（kernel 模式）。host 重启对应旧测试的 daemon
- * stop/start——连接断开后订阅环重连重订，overflow 页触发恢复栅栏，栅栏期间的
+ * 客户端订阅环的 replay overflow 恢复栅栏：in-process kernel + fake service
+ * （同 composition-bridge 测试装配），客户端走真实 LocalRuntimeClient。
+ * Host restart 后订阅环重连重订，overflow 页触发恢复栅栏，栅栏期间的
  * durable 事件不丢（栅栏解除后重放补齐）。
  */
 
@@ -164,8 +163,8 @@ test("Runtime client keeps a recovery fence after replay overflow", async (conte
   const delivered: string[] = [];
   await client.subscribe({ workspacePath }, (event) => delivered.push(event.eventId));
 
-  // host 重启（= 旧测试的 daemon stop/start）：kernel.close 会消费 owner lease，
-  // 重启需重新选主。连接断开 → 订阅环重连重订。
+  // Host restart：kernel.close 会消费 owner lease，重启需重新选主。
+  // 连接断开 → 订阅环重连重订。
   service.injectOverflow = true;
   await kernel.close();
   await owner.close().catch(() => undefined);

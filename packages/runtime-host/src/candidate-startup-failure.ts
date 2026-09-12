@@ -6,12 +6,11 @@ import { StorageRootAuthorityError } from "./control/root-authority.js";
  * 对象交给 connectOrSpawn——永久性失败立即刹车返回，不再空转烧完选举窗口。
  *
  * 永久/非永久的边界是"同一窗口内重试是否永远无效"：存储根身份类错误是确定
- * 性的（marker 与 expectedRootId 对不上，重拉候选也一样）；legacy 守卫拒绝
- * 与内部启动失败不是（旧 daemon 会退、环境会变），只上报不刹车。
+ * 性的（marker 与 expectedRootId 对不上，重拉候选也一样）；内部启动失败不是，
+ * 只上报不刹车。
  */
 export type CandidateStartupFailureReason =
   | "storage_root_incompatible"
-  | "legacy_daemon_running"
   | "internal_startup_failure";
 
 export interface CandidateStartupFailure {
@@ -19,9 +18,8 @@ export interface CandidateStartupFailure {
 }
 
 const EXIT_CODE_BY_REASON: Readonly<Record<CandidateStartupFailureReason, number>> = {
-  // sysexits: EX_DATAERR。与 flock loser(2)/legacy 守卫拒绝(3) 错开。
+  // sysexits: EX_DATAERR。与 flock loser(2) 错开。
   storage_root_incompatible: 65,
-  legacy_daemon_running: 3,
   // sysexits: EX_SOFTWARE。历史值 1 的升级：让客户端能区分"候选启动失败"
   // 与其他非协议退出（V8 崩溃等随机码）。
   internal_startup_failure: 70,
