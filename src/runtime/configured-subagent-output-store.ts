@@ -20,7 +20,7 @@ export class ConfiguredSubagentOutputNotFoundError extends Error {
 export interface ChildRecord {
   readonly version: 1;
   readonly profile?: string;
-  readonly parentWorkspacePath?: string;
+  readonly parentWorkspacePath: string;
   readonly agentName?: string;
   readonly parentSessionId: string;
   readonly parentRunId: string;
@@ -256,14 +256,14 @@ export function childRecord(event: RuntimeEvent): ChildRecord | undefined {
     if (!validIdentity(value[key])) return undefined;
   for (const key of ["runId", "turnId"])
     if (value[key] !== undefined && !validIdentity(value[key])) return undefined;
+  if (typeof value["parentWorkspacePath"] !== "string" || !isAbsolute(value["parentWorkspacePath"]))
+    return undefined;
   if (typeof value["workDir"] !== "string" || !isAbsolute(value["workDir"])) return undefined;
   const patch = value["patch"];
   return {
     version: 1,
     ...(typeof value["profile"] === "string" ? { profile: value["profile"] } : {}),
-    ...(typeof value["parentWorkspacePath"] === "string" && isAbsolute(value["parentWorkspacePath"])
-      ? { parentWorkspacePath: value["parentWorkspacePath"] }
-      : {}),
+    parentWorkspacePath: value["parentWorkspacePath"],
     ...(typeof value["agentName"] === "string" ? { agentName: value["agentName"] } : {}),
     parentSessionId: value["parentSessionId"] as string,
     parentRunId: value["parentRunId"] as string,

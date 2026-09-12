@@ -42,6 +42,7 @@ test("root agent_output reads only admitted children and reopens canonical histo
   const admittedRecord = {
     version: 1,
     parentSessionId: "parent",
+    parentWorkspacePath: workDir,
     parentRunId: "parent-run",
     parentToolCallId: "spawn-call",
     childSessionId: "child",

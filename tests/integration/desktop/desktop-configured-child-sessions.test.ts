@@ -110,11 +110,10 @@ test("session list hides admitted children across workspaces and outcomes while 
     },
     { ownerFence: ownerFences.get(`${parentPath}\0parent`)! },
   );
-  for (const [id, workDir, status, legacy] of [
-    ["shared", parentPath, "completed", true],
-    ["isolated", childPath, "completed", false],
-    ["legacy-isolated", childPath, "failed", true],
-    ["cancelled", childPath, "cancelled", false],
+  for (const [id, workDir, status] of [
+    ["shared", parentPath, "completed"],
+    ["isolated", childPath, "completed"],
+    ["cancelled", childPath, "cancelled"],
   ] as const) {
     await create(workDir, id);
     const store = workDir === parentPath ? parent : isolated;
@@ -136,6 +135,7 @@ test("session list hides admitted children across workspaces and outcomes while 
               picoConfiguredChild: {
                 version: 1,
                 parentSessionId: "parent",
+                parentWorkspacePath: parentPath,
                 parentRunId: "parent-run",
                 parentToolCallId: "spawn",
                 childSessionId: id,
@@ -144,7 +144,6 @@ test("session list hides admitted children across workspaces and outcomes while 
                 status: "started",
                 runId: `${id}-run`,
                 turnId: `${id}-turn`,
-                ...(!legacy ? { parentWorkspacePath: parentPath } : {}),
               },
             },
           },
@@ -179,6 +178,54 @@ test("session list hides admitted children across workspaces and outcomes while 
       agentName: "Reader",
     });
   }
+  await create(childPath, "missing-parent-path");
+  const malformedFence = ownerFences.get(`${childPath}\0missing-parent-path`)!;
+  await isolated.append(
+    {
+      ...base("missing-parent-path", "start"),
+      kind: "run.started",
+      data: { workDir: childPath },
+    },
+    { ownerFence: malformedFence },
+  );
+  await isolated.append(
+    {
+      ...base("missing-parent-path", "admit"),
+      kind: "message.committed",
+      data: {
+        message: {
+          role: "assistant",
+          content: "malformed child admission",
+          providerData: {
+            picoHiddenFromTranscript: true,
+            picoConfiguredChild: {
+              version: 1,
+              parentSessionId: "parent",
+              parentRunId: "parent-run",
+              parentToolCallId: "spawn",
+              childSessionId: "missing-parent-path",
+              workDir: childPath,
+              agentName: "Reader",
+              status: "started",
+              runId: "missing-parent-path-run",
+              turnId: "missing-parent-path-turn",
+            },
+          },
+        },
+      },
+    },
+    { ownerFence: malformedFence },
+  );
+  const malformed = parseRuntimeResult(
+    "session.get",
+    await desktop.handle(
+      createRuntimeRequest("session.get", {
+        workspacePath: childPath,
+        sessionId: "missing-parent-path",
+      }),
+    ),
+  );
+  assert.equal(malformed.session.parentSession, undefined);
   // Forks can inherit admission text, but its child ID is still the source ID.
   await create(parentPath, "fork");
   const copied = (
@@ -209,7 +256,10 @@ test("session list hides admitted children across workspaces and outcomes while 
         createRuntimeRequest("session.list", { workspacePath: childPath, includeArchived }),
       ),
     );
-    assert.deepEqual(childList.sessions, []);
+    assert.deepEqual(
+      childList.sessions.map((session) => session.sessionId),
+      ["missing-parent-path"],
+    );
   }
   await parent.deleteSession("parent");
   const orphan = parseRuntimeResult(
@@ -218,7 +268,11 @@ test("session list hides admitted children across workspaces and outcomes while 
       createRuntimeRequest("session.get", { workspacePath: parentPath, sessionId: "shared" }),
     ),
   );
-  assert.equal(orphan.session.parentSession, undefined);
+  assert.deepEqual(orphan.session.parentSession, {
+    sessionId: "parent",
+    workspacePath: parentPath,
+    agentName: "Reader",
+  });
   const remaining = parseRuntimeResult(
     "session.list",
     await desktop.handle(createRuntimeRequest("session.list", { workspacePath: parentPath })),

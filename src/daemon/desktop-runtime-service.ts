@@ -2691,7 +2691,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       );
     }
     const parentSession = await this.withWorkspaceSessionStore(workspacePath, (store) =>
-      configuredSubagentParent(store, sessionId, workspacePath, this.picoHome),
+      configuredSubagentParent(store, sessionId),
     );
     return { ...sessionPayload(entry), ...(parentSession ? { parentSession } : {}) };
   }
