@@ -1,11 +1,7 @@
-// 自定义子代理角色加载器:从 .pico/agents.yaml 读取用户声明的角色。
+// 自定义 Agent Profile 加载器：从 .pico/agents.yaml 读取用户声明的角色，
+// 供 Agent Graph 的 new_agent 节点与目录展示复用。
 //
-// 路线 A(配置预定义):对标 kimi-code profile/load.ts,但极简化——
-// 无 extends 继承、无 nunjucks 模板,YAML 直读。
-// 让终端用户(非开发者)通过配置文件声明自定义子代理角色(身份 prompt +
-// 工具集 + 行为参数),模型经 delegate_task 的 agent_name 参数调用。
-//
-// 防滥用(对标 hermes 四道闸,简化版):
+// 防滥用：
 // - 工具白名单:tools 必须是已知工具名子集,未知名加载时拒绝
 // - maxTurns 上限:超过 50 拒绝(防无限跑)
 // - name 唯一:重名后者覆盖前者 + warn
@@ -14,10 +10,10 @@ import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import * as yaml from "js-yaml";
 import { logger } from "../observability/logger.js";
-import { MAX_SUBAGENT_TURNS } from "./subagent-spec.js";
 import type { HookTrustAuthority } from "../hooks/trust/store.js";
 
 const MAX_AGENT_PROFILE_FILE_BYTES = 512 * 1024;
+const MAX_SUBAGENT_TURNS = 50;
 
 /** 允许在 Pico 原生 agents.yaml 的 tools 里声明的工具名白名单 */
 export const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set([
@@ -41,17 +37,17 @@ export const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set([
 
 /** 一个自定义子代理角色定义 */
 export interface AgentProfile {
-  /** 唯一名(模型按此名调 delegate_task 的 agent_name) */
+  /** 唯一名；Graph new_agent 的 agent_id 用它选择 Profile。 */
   readonly name: string;
-  /** 给模型看的"何时使用此角色",注入 delegate_task 工具描述 */
+  /** 给模型和桌面目录展示的角色用途。 */
   readonly description: string;
   /** 自定义 system prompt(身份/职责/红线) */
   readonly systemPrompt: string;
-  /** true=完全覆盖默认探路者骨架;省略/false=追加到默认之后。默认 false。 */
+  /** true=完全覆盖默认角色骨架；省略/false=追加到默认之后。 */
   readonly systemPromptOverride?: boolean;
-  /** 该角色最大轮次。省略=用 runSub 默认值(10)。上限 50。 */
+  /** 该角色最大轮次，上限 50。 */
   readonly maxTurns?: number;
-  /** 子代理模型路由(provider/model)；省略或 inherit 时继承主会话。 */
+  /** Agent 模型路由(provider/model)；省略或 inherit 时继承主会话。 */
   readonly modelRouteId?: string | "inherit";
   /** 子代理原生思考档位；最终由所选模型能力校验。 */
   readonly thinkingEffort?: string;

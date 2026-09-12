@@ -13,7 +13,7 @@ flowchart TB
     M --> D{回答或行动}
     D -- 回答 --> O[最终回答]
     D -- 普通工具 --> S[Tool Scheduler]
-    D -- required 委派 --> W[隔离 worker]
+    D -- implementation --> W[隔离 worker]
 
     subgraph EXEC[执行层]
         S --> R[安全执行]

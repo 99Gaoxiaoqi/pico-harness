@@ -324,45 +324,6 @@ test("architecture gate flags canonical primitive redefinition outside the canon
   ]);
 });
 
-test("architecture gate blocks delegation-manager from importing graph/runtime, single-file only", async (context) => {
-  // DelegationManager 只负责普通委派与 plan settle，不得 import graph/runtime。
-  const fixtureRoot = await mkdtemp(join(tmpdir(), "pico-delegation-leak-"));
-  context.after(() => rm(fixtureRoot, { recursive: true, force: true }));
-  await Promise.all(
-    ["src/tools", "src/agent-graph/core", "apps", "packages"].map((path) =>
-      mkdir(join(fixtureRoot, path), { recursive: true }),
-    ),
-  );
-  await writeFile(
-    join(fixtureRoot, "src/agent-graph/core/contracts.ts"),
-    "export interface AgentGraph { readonly id: string }\n",
-    "utf8",
-  );
-  await writeFile(
-    join(fixtureRoot, "src/tools/delegation-manager.ts"),
-    ['import type { AgentGraph } from "../agent-graph/core/contracts.js";', ""].join("\n"),
-    "utf8",
-  );
-  await writeFile(
-    join(fixtureRoot, "src/tools/other.ts"),
-    'import type { AgentGraph } from "../agent-graph/core/contracts.js";\n',
-    "utf8",
-  );
-
-  const violations = scanArchitectureBoundaries({ repositoryRoot: fixtureRoot });
-  assert.deepEqual(
-    violations.map(({ rule, source, target }) => ({ rule, source, target })),
-    [
-      {
-        rule: "delegation-manager-scheduling-leak",
-        source: "src/tools/delegation-manager.ts",
-        target: "src/agent-graph/core/contracts.ts",
-      },
-    ],
-    "DelegationManager 的 Graph import 必须被拒绝",
-  );
-});
-
 async function createArchitectureFixture(
   context: TestContext,
   prefix: string,

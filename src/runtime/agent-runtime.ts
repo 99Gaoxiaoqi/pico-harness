@@ -19,7 +19,10 @@ import {
   configuredSubagentExecutionBoundary,
   createConfiguredSubagentExecutor,
 } from "./configured-subagent-executor.js";
-import { TOOL_CONSTRUCTORS, buildSubagentSafetyMiddleware } from "../tools/delegation-registry.js";
+import {
+  CHILD_AGENT_TOOL_CONSTRUCTORS,
+  buildChildAgentSafetyMiddleware,
+} from "../tools/child-agent-policy.js";
 import { type AtomicMemoryLifecycle } from "./atomic-memory-lifecycle.js";
 import { createAgentSwarmStatusTool } from "../tools/agent-swarm-status-tool.js";
 import { AGENT_SWARM_SUPERVISOR_TOOL_NAMES } from "../agent-graph/core/tool-names.js";
@@ -53,7 +56,7 @@ import { SkillLoader, type Skill } from "../context/skill.js";
 import { ToolDisclosure } from "../tools/tool-disclosure.js";
 import { createCodeModeTool } from "../tools/code-mode-tool.js";
 import { codeCellAdmissionFor } from "../tools/code-cell-admission.js";
-import { isToolSupportedForHost, type ToolHostKind } from "../tools/tool-surface.js";
+import type { ToolHostKind } from "../tools/tool-surface.js";
 import { type ProviderKind } from "../provider/factory.js";
 import { ContextOverflowError, isAbortError } from "../provider/errors.js";
 import type { ProviderConfig } from "../provider/config.js";
@@ -77,15 +80,6 @@ import {
   type AgentOutputCommitPort,
   type GraphOperatorActivationContext,
 } from "../tools/agent-output-tool.js";
-import { DelegationManager, DelegateStatusTool } from "../tools/delegation-manager.js";
-import { createSubagentRegistryFactory } from "../tools/delegation-registry.js";
-import type { AgentProfile } from "../tools/agent-profile.js";
-import { loadAgentCatalog, type AgentExternalCatalogSource } from "../agents/catalog.js";
-import {
-  DelegateTaskTool,
-  type DelegatePlanStepCoordinator,
-  SpawnSubagentTool,
-} from "../tools/subagent.js";
 import { CostTracker, type CostTrackerOptions } from "../observability/tracker.js";
 import { ensureSessionUsageBaseline } from "../observability/usage-baseline.js";
 import type { ModelRouter } from "../provider/model-router.js";
@@ -121,7 +115,6 @@ import type {
   PersistedSessionSettings,
   PersistedSessionSettingsWrite,
 } from "../engine/session-runtime.js";
-import type { SubagentModelCatalog } from "./subagent-model-catalog.js";
 import type { MiddlewareFunc } from "../tools/registry.js";
 import {
   McpConnectionManager,
@@ -160,7 +153,6 @@ import {
 } from "../safety/permission-profile.js";
 import { canonicalizeSandboxBoundaryExpansion } from "../safety/sandbox-boundary-path.js";
 import { resolveCliSession, type CliSessionSelection } from "../cli/session-resolver.js";
-import type { WorktreeSupervisor } from "../tasks/worktree-supervisor.js";
 import { SqliteRuntimeControlStore } from "../storage/sqlite/sqlite-runtime-control-store.js";
 import { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import {
@@ -340,7 +332,7 @@ export interface RunAgentCliDependencies extends RuntimeHost {
   askUserHandler?: AskUserHandler;
   /** Host-owned approval state, required when decisions are settled outside the TUI process. */
   approvalManager?: ApprovalManager;
-  /** Receives the complete registry after late delegation/MCP registration. */
+  /** Receives the complete registry after late Agent/MCP registration. */
   toolStatusSink?: (tools: readonly SessionToolStatus[]) => void;
   mcpStatusSink?: (snapshot: McpStatusSnapshot) => void;
   /** TUI 宿主持有的 MCP manager；注入时本轮只换 registry，不重连或关闭 server。 */
@@ -1491,24 +1483,10 @@ export async function executeAgentRuntime(
       ...(dependencies.providerFactory ? { providerFactory: dependencies.providerFactory } : {}),
       providerDecorator,
       ...(effectiveOptions.modelRouteId ? { modelRouteId: effectiveOptions.modelRouteId } : {}),
-      ...(effectiveOptions.thinkingEffort !== undefined
-        ? { thinkingEffort: effectiveOptions.thinkingEffort }
-        : {}),
       ...(dependencies.modelRouter ? { modelRouter: dependencies.modelRouter } : {}),
-      background: backgroundPolicy !== undefined,
-      claudeCompatibility: {
-        enabled: claudeCompatibility.enabled,
-        modelAliases: claudeCompatibility.modelAliases,
-      },
     });
-    const {
-      providerFactory,
-      providerDependencies,
-      subagentModelRouter,
-      parentModelRouteId,
-      subagentModelCatalog,
-      resolveSubagentModelRuntime,
-    } = modelAssembly;
+    const { providerFactory, providerDependencies, subagentModelRouter, parentModelRouteId } =
+      modelAssembly;
     const contextRuntime = buildContextRuntime(kind, providerConfig.model);
     const trackedProvider = modelAssembly.provider;
     const rebuildProvider = modelAssembly.rebuildProvider;
@@ -1745,8 +1723,7 @@ export async function executeAgentRuntime(
         ? { toolResultRedactionSecrets: dependencies.toolResultRedactionSecrets }
         : {}),
     });
-    const { goalManager, todoStore, toolDisclosure, backgroundManager, delegationManager } =
-      runtimeState;
+    const { goalManager, todoStore, toolDisclosure, backgroundManager } = runtimeState;
     // Host-required tools are a baseline, not discoveries inherited from an old Turn.
     const baselineToolNames: string[] = [];
     const sessionTaskAuthority = {
@@ -2210,16 +2187,12 @@ export async function executeAgentRuntime(
       runtimePort: createEngineRuntimePort(),
       workspaceRoots,
       usageSession: session,
-      // turn 边界通知：子代理执行容量闸按轮换新——每 turn 满血配速，跨 turn
-      // 在跑 child 不占新预算，多轮委派的会话不会被累积在飞子代理堵死。
-      onTurnBoundary: () => delegationManager.resetTurnState(),
       ...(effectiveOptions.thinkingEffort !== undefined
         ? { thinkingEffort: effectiveOptions.thinkingEffort }
         : {}),
       ...(effectiveOptions.modelRouteId !== undefined
         ? { modelRouteId: effectiveOptions.modelRouteId }
         : {}),
-      ...(resolveSubagentModelRuntime ? { resolveSubagentModelRuntime } : {}),
       planMode: effectiveOptions.planMode ?? false,
       collaborationMode,
       planHandoff,
@@ -2346,60 +2319,6 @@ export async function executeAgentRuntime(
           }
         }
       });
-    }
-    if (!sideConversation) {
-      registerDelegationTools(
-        registry,
-        engine,
-        workDir,
-        dependencies.isolatedHeadless
-          ? []
-          : await loadProfiles(workDir, {
-              externalSources: pluginSnapshot?.agentSources,
-              includeClaudeProjectResources:
-                claudeCompatibility.enabled && claudeCompatibility.projectResources,
-              includeClaudeUserResources:
-                claudeCompatibility.enabled && claudeCompatibility.userResources,
-              env: runtimeEnv,
-              picoHome,
-            }),
-        delegationManager,
-        workspaceRoots,
-        // 主会话的 mode 只控制主 Agent 权限。worker/explore 是独立的不可信执行边界，
-        // 必须始终使用 worktree + OS 沙箱，不得因 ask/auto 模式退化为无沙箱 Bash。
-        {
-          config: { ...picoConfig.sandbox, network: "deny" },
-          scratchRoot: join(picoHome, "sandboxes", session.id, "subagents"),
-        },
-        session.id,
-        !ownsRuntimeState,
-        runtimeState.taskHostRuntime?.supervisor,
-        reporter,
-        skillLoaderFactory,
-        activeHookService,
-        subagentModelCatalog,
-        runtimeEnv,
-        runtimeState.codeIntelligence,
-        activeHookService
-          ? async (profile) => {
-              if (!profile.sourcePath || profile.hooks === undefined) return async () => undefined;
-              return await runtimeState.activateComponentHookLease({
-                kind: "agent",
-                path: profile.sourcePath,
-                componentId: profile.name,
-                inlineHooks: profile.hooks,
-                ...(profile.hookTrustAuthority
-                  ? { trustAuthority: profile.hookTrustAuthority }
-                  : {}),
-              });
-            }
-          : undefined,
-        activeExecutionPlanId
-          ? createDelegatePlanStepCoordinator(() => planRegistryOptions!.coordinator())
-          : undefined,
-        hostKind,
-        permissionMode() === "full-access" && collaborationMode() !== "plan",
-      );
     }
     if (
       !backgroundPolicy &&
@@ -2601,7 +2520,7 @@ export async function executeAgentRuntime(
         scratchRoot: join(picoHome, "sandboxes", session.id, "subagents"),
       };
       for (const name of definition.tools) {
-        const create = TOOL_CONSTRUCTORS[name];
+        const create = CHILD_AGENT_TOOL_CONSTRUCTORS[name];
         if (!create) throw new Error(`Unsupported child capability tool: ${name}`);
         registry.unregisterForHostPolicy(name);
         registry.register(
@@ -2616,7 +2535,7 @@ export async function executeAgentRuntime(
         );
       }
       registry.useSafety(
-        buildSubagentSafetyMiddleware(definition.workspace === "shared" ? "explore" : "worker", {
+        buildChildAgentSafetyMiddleware(definition.workspace === "shared" ? "explore" : "worker", {
           workDir,
           workspaceRoots,
           processSandbox,
@@ -3162,145 +3081,6 @@ function pruneRegistryToCommandAllowlist(
   const allowed = new Set(normalized);
   for (const tool of registry.getAvailableTools()) {
     if (!allowed.has(tool.name)) registry.unregisterForHostPolicy(tool.name);
-  }
-}
-
-/** 加载原生 Profile 与 Claude 兼容输入合并后的统一 Agent 目录。 */
-async function loadProfiles(
-  workDir: string,
-  options: {
-    externalSources?: readonly AgentExternalCatalogSource[];
-    includeClaudeProjectResources: boolean;
-    includeClaudeUserResources: boolean;
-    env: Readonly<Record<string, string | undefined>>;
-    picoHome?: string;
-  },
-): Promise<AgentProfile[]> {
-  try {
-    return await loadAgentCatalog({ workDir, includeBuiltins: true, ...options });
-  } catch {
-    return [];
-  }
-}
-
-function createDelegatePlanStepCoordinator(
-  factory: () => PlanCoordinator,
-): DelegatePlanStepCoordinator {
-  return {
-    async markStarted(stepId: string) {
-      const coordinator = factory();
-      const projection = await coordinator.project();
-      const execution = projection.execution;
-      if (!execution || execution.status !== "active") return;
-      const step = execution.steps.find((s) => s.id === stepId);
-      if (!step || step.status !== "pending") return;
-      try {
-        await coordinator.updateStep({
-          operationId: `delegate-step-start:${stepId}:${Date.now()}`,
-          expectedSessionSequence: projection.sessionSequence,
-          planId: execution.planId,
-          stepId,
-          status: "in_progress",
-        });
-      } catch {
-        // Dependency gating rejected the transition — silently skip
-      }
-    },
-    async markSettled(stepId: string, completed: boolean) {
-      const coordinator = factory();
-      const projection = await coordinator.project();
-      const execution = projection.execution;
-      if (!execution || execution.status !== "active") return;
-      const step = execution.steps.find((s) => s.id === stepId);
-      if (!step || step.status !== "in_progress") return;
-      try {
-        await coordinator.updateStep({
-          operationId: `delegate-step-settle:${stepId}:${Date.now()}`,
-          expectedSessionSequence: projection.sessionSequence,
-          planId: execution.planId,
-          stepId,
-          status: completed ? "completed" : "pending",
-        });
-      } catch {
-        // CAS conflict or state changed — best-effort, don't hide delegation result
-      }
-    },
-  };
-}
-
-function registerDelegationTools(
-  registry: ToolRegistry,
-  engine: AgentEngine,
-  workDir: string,
-  profiles: AgentProfile[],
-  manager: DelegationManager,
-  workspaceRoots: WorkspaceRoots,
-  processSandbox: {
-    config?: Partial<WorkspaceSandboxConfig>;
-    scratchRoot?: string;
-    generation?: number;
-  },
-  ownerSessionId: string,
-  allowAsyncCompletion: boolean,
-  worktreeSupervisor?: WorktreeSupervisor,
-  reporter?: Reporter,
-  skillLoaderFactory?: (workDir: string) => SkillLoader,
-  hookService?: HookService,
-  modelCatalog?: SubagentModelCatalog,
-  env?: Readonly<Record<string, string | undefined>>,
-  codeIntelligence?: SessionRuntime["codeIntelligence"],
-  activateAgentHooks?: (profile: AgentProfile) => Promise<() => void | Promise<void>>,
-  planStepCoordinator?: DelegatePlanStepCoordinator,
-  hostKind: ToolHostKind = "desktop",
-  allowHostNetwork = false,
-): void {
-  const registryFactory = createSubagentRegistryFactory({
-    workDir,
-    workspaceRoots,
-    runner: engine,
-    manager,
-    processSandbox,
-    ownerSessionId,
-    allowAsyncCompletion,
-    ...(skillLoaderFactory ? { skillLoaderFactory } : {}),
-    ...(hookService ? { hookService } : {}),
-    ...(modelCatalog ? { modelCatalog } : {}),
-    ...(env ? { env } : {}),
-    ...(codeIntelligence ? { codeIntelligence } : {}),
-    ...(activateAgentHooks ? { activateAgentHooks } : {}),
-    ...(worktreeSupervisor ? { worktreeSupervisor } : {}),
-    ...(profiles.length > 0 ? { profiles } : {}),
-    allowHostNetwork,
-  });
-  const delegateTaskOptions = {
-    workDir,
-    ...(profiles.length > 0 ? { profiles } : {}),
-    ...(worktreeSupervisor ? { worktreeSupervisor } : {}),
-    ...(reporter ? { reporter } : {}),
-    ownerSessionId,
-    allowAsyncCompletion,
-    ...(activateAgentHooks ? { activateAgentHooks } : {}),
-    ...(hookService ? { hookService } : {}),
-    ...(modelCatalog ? { modelCatalog } : {}),
-    ...(planStepCoordinator ? { planStepCoordinator } : {}),
-  };
-  // 委派工具走 surface 亲和性声明：background/headless 宿主不注册
-  // （原 UNSAFE_BACKGROUND_TOOLS / HEADLESS_TOOL_NAMES 的注册侧防线）。
-  if (isToolSupportedForHost("delegate_task", hostKind)) {
-    registry.register(new DelegateTaskTool(engine, registryFactory, manager, delegateTaskOptions));
-  }
-  if (isToolSupportedForHost("delegate_status", hostKind)) {
-    registry.register(new DelegateStatusTool(manager));
-  }
-  if (isToolSupportedForHost("spawn_subagent", hostKind)) {
-    registry.register(
-      new SpawnSubagentTool(
-        engine,
-        registryFactory({ mode: "explore", role: "leaf", depth: 0, maxSpawnDepth: 1 }),
-        // 按调用时取 manager 当前 turn 实例（turn 重置会换实例，构造期捕获会失效）。
-        { childRunLimiter: () => manager.childRunLimiter },
-      ),
-    );
   }
 }
 

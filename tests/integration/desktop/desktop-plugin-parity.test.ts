@@ -125,10 +125,12 @@ test("Desktop catalog and session activation share one Plugin snapshot", async (
   });
 
   const prompts: string[] = [];
+  const executions: unknown[] = [];
   const runtime = new WorkspaceRuntimeService({
     env,
-    execute: async ({ prompt }) => {
+    execute: async ({ prompt, execution }) => {
       prompts.push(prompt);
+      executions.push(execution);
       return { ok: true };
     },
   });
@@ -211,6 +213,11 @@ test("Desktop catalog and session activation share one Plugin snapshot", async (
   assert.equal(prompts.length, 2);
   assert.match(prompts[0]!, /Follow the plugin skill instructions/u);
   assert.match(prompts[1]!, /plugin-agent/u);
+  assert.deepEqual(executions[1], {
+    orchestrationMode: "swarm",
+    allowedTools: ["update_agent_graph", "yield_agent_graph", "agent_output"],
+    resumeExistingSession: true,
+  });
 
   await desktop.close();
   assert.equal(disposeCount, 1, "Desktop service owns and disposes the shared snapshot once");

@@ -28,9 +28,6 @@ import {
 } from "../../../src/context/evidence-archive.js";
 import { EvidenceBlobStore } from "../../../src/context/evidence-blob-store.js";
 import { buildDefaultToolRegistry } from "../../../src/tools/default-registry.js";
-import { DelegationManager } from "../../../src/tools/delegation-manager.js";
-import { createSubagentRegistryFactory } from "../../../src/tools/delegation-registry.js";
-import type { AgentRunner } from "../../../src/tools/subagent.js";
 import {
   seedRuntimeToolExchange,
   seedSubagentReportEvidence,
@@ -488,34 +485,11 @@ test("legacy evidence refs paginate UTF-8 without loss; read_evidence is retired
     { code: "ENOENT" },
   );
 
-  // 票 E3:read_evidence 工具退役——默认注册表与子代理注册表都不再注册。
+  // 票 E3:read_evidence 工具退役——默认注册表不再注册。
   const registry = buildDefaultToolRegistry(fixture.root);
   const names = registry.getAvailableTools().map((definition) => definition.name);
   assert.equal(names.includes("read_evidence"), false);
   assert.equal(names.includes("read_artifact"), false);
-
-  const workerDir = join(fixture.root, "worker");
-  await mkdir(workerDir, { recursive: true });
-  const runner: AgentRunner = {
-    async runSub() {
-      return { status: "completed", summary: "unused", evidenceRefs: [] };
-    },
-  };
-  const subagentRegistry = createSubagentRegistryFactory({
-    workDir: fixture.root,
-    runner,
-    manager: new DelegationManager(),
-  })({
-    mode: "explore",
-    role: "leaf",
-    depth: 0,
-    maxSpawnDepth: 0,
-    workDir: workerDir,
-  });
-  assert.equal(
-    subagentRegistry.getAvailableTools().some((definition) => definition.name === "read_evidence"),
-    false,
-  );
 });
 
 async function evidenceFixture(context: TestContext, prefix: string): Promise<EvidenceFixture> {

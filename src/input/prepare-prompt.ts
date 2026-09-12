@@ -25,7 +25,7 @@ export async function preparePromptForMessage(
     cwd: workDir,
     skills: (name) => skillLoader.viewBody(name),
     agents: (name) =>
-      `请优先考虑使用子代理能力处理 @agent:${name} 指定的工作。可用时调用 spawn_subagent 或 delegate_task,并把任务交给 ${name}。`,
+      `请使用当前 Agent 能力处理 @agent:${name} 指定的工作：已配置子代理先经 agent_list 选择并调用 agent_spawn；Agent Profile 则通过 Graph 的 new_agent/agent_id 交给 ${name}。`,
   });
   const images = extracted.paths.map((path) => loadImage(path, workDir));
   const preparedPrompt = expanded.prompt.trim() || (images.length > 0 ? "请查看这张图片。" : "");

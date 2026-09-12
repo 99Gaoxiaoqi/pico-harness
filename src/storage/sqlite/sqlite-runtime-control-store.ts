@@ -779,7 +779,7 @@ export class SqliteRuntimeControlStore {
           attemptId: attempt.attemptId,
           policy: job.completionPolicy,
           status: "interrupted",
-          payload: interruptedCompletionPayload(job, completionId, reason, now),
+          payload: interruptedCompletionPayload(job, reason),
           createdAt: now,
         });
         interrupted.push(job);
@@ -2525,32 +2525,8 @@ function normalizeCronPrompt(prompt: string): string {
   return normalized;
 }
 
-function interruptedCompletionPayload(
-  job: JobRecord,
-  completionId: string,
-  reason: string,
-  completionSeq: number,
-): Record<string, unknown> {
-  const base = { reason, executionClass: job.executionClass };
-  if (job.type !== "local_agent" || !job.ownerSessionId) return base;
-  const activityIds = Array.isArray(job.data?.["activityIds"])
-    ? job.data["activityIds"].filter((value): value is string => typeof value === "string")
-    : [];
-  const error = `子代理运行时 lease 过期，已中断：${reason}`;
-  return {
-    ...base,
-    delegationCompletion: {
-      completionId,
-      jobId: job.jobId,
-      ownerSessionId: job.ownerSessionId,
-      completionSeq,
-      activityIds,
-      completionPolicy: job.completionPolicy,
-      status: "error",
-      outputSummary: error,
-      error: reason,
-    },
-  };
+function interruptedCompletionPayload(job: JobRecord, reason: string): Record<string, unknown> {
+  return { reason, executionClass: job.executionClass };
 }
 
 function daemonRunRecoveryEvent(run: DaemonRunRecord): RuntimeEventRecord {

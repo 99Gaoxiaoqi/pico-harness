@@ -14,8 +14,6 @@ import type { LLMProvider } from "../../../src/provider/interface.js";
 import type { Message } from "../../../src/schema/message.js";
 import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
 import type { RuntimeToolResultRecordedEvent } from "../../../src/storage/runtime-event.js";
-import { DelegationManager } from "../../../src/tools/delegation-manager.js";
-import { createSubagentRegistryFactory } from "../../../src/tools/delegation-registry.js";
 import { NO_FILE_SIDE_EFFECTS, type BaseTool } from "../../../src/tools/registry.js";
 import { ToolRegistry } from "../../../src/tools/registry-impl.js";
 import { ToolDisclosure } from "../../../src/tools/tool-disclosure.js";
@@ -319,16 +317,7 @@ test("subagent Runtime ToolResult persists full inline before the transcript pro
     runtimePort,
     reporter: new SilentReporter(),
   });
-  const subagentRegistry = createSubagentRegistryFactory({
-    workDir: fixture.workDir,
-    runner: engine,
-    manager: new DelegationManager(),
-  })({
-    mode: "explore",
-    role: "leaf",
-    depth: 0,
-    maxSpawnDepth: 0,
-  });
+  const subagentRegistry = new ToolRegistry();
   subagentRegistry.register(outputTool(toolName, rawOutput));
 
   const parentRun = await runtimePort.startRun({

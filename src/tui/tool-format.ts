@@ -17,8 +17,7 @@ export function compactToolName(name: string): string {
   if (name === "edit_file") return "edit";
   if (name === "search_tools") return "search";
   if (name === "web_search") return "web";
-  if (name === "delegate_task") return "agents";
-  if (name === "delegate_status") return "agents";
+  if (name === "agent_spawn") return "agent";
   return name;
 }
 
@@ -71,7 +70,7 @@ function targetValue(name: string, parsed: Record<string, unknown>): string | un
   if (name === "grep") return stringField(parsed, "pattern") ?? stringField(parsed, "path");
   if (name === "glob") return stringField(parsed, "pattern") ?? stringField(parsed, "glob");
   if (name === "web_search" || name === "search_tools") return stringField(parsed, "query");
-  if (name === "delegate_task") return stringField(parsed, "goal") ?? stringField(parsed, "task");
+  if (name === "agent_spawn") return stringField(parsed, "task");
 
   for (const key of TARGET_KEYS) {
     const value = stringField(parsed, key);

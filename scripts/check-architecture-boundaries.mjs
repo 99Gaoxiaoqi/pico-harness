@@ -140,17 +140,6 @@ function isPureTypeImport(declaration) {
 }
 
 function classifyViolation(importer, target, declaration, repositoryRoot, fromArea, toArea) {
-  // DelegationManager 只负责普通委派与 plan settle，不得依赖 Graph 或 Runtime。
-  const importerRelative = normalizeRelativePath(importer, repositoryRoot);
-  if (importerRelative === "src/tools/delegation-manager.ts") {
-    const targetRelative = normalizeRelativePath(target, repositoryRoot);
-    if (
-      targetRelative.startsWith("src/agent-graph/") ||
-      targetRelative.startsWith("src/runtime/")
-    ) {
-      return "delegation-manager-scheduling-leak";
-    }
-  }
   // fromArea/toArea override the raw areas for neutral files whose effective area is
   // derived from their re-exports (see effectiveSourceArea).
   const from = fromArea ?? sourceArea(importer, repositoryRoot);

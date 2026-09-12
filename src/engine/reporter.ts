@@ -19,12 +19,7 @@ export type SubagentActivityStatus =
   | "failed"
   | "timed_out"
   | "cancelled";
-export type AssistantResponseSuppressionReason =
-  | "required-delegation"
-  | "delegation-first-retry"
-  | "explore-synthesis-retry"
-  | "internal-control"
-  | "network-retry";
+export type AssistantResponseSuppressionReason = "internal-control" | "network-retry";
 
 /** 宿主可见的子代理活动快照；activityId 只用于更新同一张卡片。 */
 export interface SubagentActivityEvent {

@@ -137,8 +137,8 @@ DAG 调度全部从 RuntimeEventStore 派生，不建立第二个 canonical stor
   幂等保证不重复 dispatch）。
 - `plan.step.recovered` 事件用于崩溃恢复——当 `run.terminal` 证明某个 run 已终止但该 run
   启动的 step 仍未 settled 时，recover 将 step 回退为 pending（不自动重派）。
-- `delegate_task` 工具的 `plan_step_id` 参数让工具层自动管理 step 状态（dispatch →
-  in_progress，完成 → completed），无需模型手动调 update_plan。
+- Agent Graph 把 Operator 的 claim、执行与结果收口持久化；Plan step 仍由 Plan
+  协议自身的 `update_plan` / 恢复流程推进，不依赖另一套内存委派状态。
 
 ## 路径模型
 

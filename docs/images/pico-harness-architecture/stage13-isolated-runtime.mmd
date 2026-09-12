@@ -5,12 +5,11 @@ flowchart TB
         T[TUI 宿主] --> M[主 Agent]
         M --> Q{任务类型}
         Q -- 本地工具 --> L[Tool Scheduler]
-        Q -- required 委派 --> B[Delegation Barrier]
+        Q -- 子 Agent 任务 --> D[agent_spawn / Agent Graph]
         L --> O[Observation]
     end
 
     subgraph WORKER[隔离 worker]
-        B --> D[delegate_task]
         D --> W1[独立分支 / worktree]
         W1 --> W2[OS 沙箱与网络策略]
         W2 --> W3[子代理执行]
@@ -38,7 +37,7 @@ flowchart TB
     classDef storage fill:#fff4e6,stroke:#e67700,color:#1a1a1a
 
     class A input
-    class T,M,B,W3,G,R1,R2,R3 process
+    class T,M,W3,G,R1,R2,R3 process
     class Q decision
     class L,D,W1,W2,R4 action
     class O,W4 output

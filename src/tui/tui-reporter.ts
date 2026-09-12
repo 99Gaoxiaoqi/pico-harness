@@ -80,7 +80,7 @@ export interface TuiReporterOptions {
 export class TuiReporter implements Reporter {
   private currentStream: { entryId: string; streamId: string } | null = null;
   private currentReasoningStream: { entryId: string; streamId: string } | null = null;
-  /** 本轮刚完成的模型正文；若随后确认是 required 委派，则从主 transcript 定向撤销。 */
+  /** 本轮刚完成的模型正文；若随后收到控制型抑制事件，则从主 transcript 定向撤销。 */
   private currentTurnAssistantEntryId: string | null = null;
   /**
    * EventStore 内部 tool ID 的待完成索引。Provider call ID 仅作
@@ -276,9 +276,6 @@ export class TuiReporter implements Reporter {
     durableStart?: CanonicalTranscriptToolStart,
   ): void {
     this.completeReasoningStream();
-    if (isRequiredDelegation(toolName, args)) {
-      this.suppressCurrentTurnAssistantResponse("required-delegation");
-    }
     this.appendPhase("tool-use");
     const normalizedProviderCallId = normalizeIdentity(providerCallId);
     if (normalizedProviderCallId === undefined) {
@@ -815,23 +812,6 @@ export class TuiReporter implements Reporter {
         // 队列可排空，让 shutdown 的 flushPersistence 观察真实错误。
       });
   }
-}
-
-function isRequiredDelegation(toolName: string, rawArgs: string): boolean {
-  if (toolName !== "delegate_task") return false;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(rawArgs);
-  } catch {
-    return true;
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return true;
-  const input = parsed as Record<string, unknown>;
-  if (input["completion_policy"] === "optional" || input["completion_policy"] === "detached") {
-    return false;
-  }
-  if (input["completion_policy"] === "required") return true;
-  return input["background"] !== true;
 }
 
 function normalizeIdentity(value: string | undefined): string | undefined {

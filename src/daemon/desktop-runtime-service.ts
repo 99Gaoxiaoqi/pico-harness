@@ -2583,7 +2583,7 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
         const preset = await this.configuredSubagentCatalog.resolve(input.subagentId);
         return {
           prompt: [
-            "请把下面任务委派给指定子 Agent 执行。必须调用 agent_spawn。",
+            "请用指定子 Agent 执行下面任务。必须调用 agent_spawn。",
             JSON.stringify({ subagent_id: preset.id, task: input.task }, null, 2),
           ].join("\n"),
           execution: { allowedTools: ["agent_spawn", "agent_output"] },
@@ -2607,7 +2607,10 @@ export class DesktopRuntimeService implements DisposableLocalRuntimeService {
       }
       return {
         prompt: renderAgentDispatchPrompt(profile, input.task),
-        execution: { allowedTools: ["delegate_task"] },
+        execution: {
+          orchestrationMode: "swarm",
+          allowedTools: ["update_agent_graph", "yield_agent_graph", "agent_output"],
+        },
       };
     }
     const skillName = requireText(input["name"], "input.name");

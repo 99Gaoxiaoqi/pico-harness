@@ -1,6 +1,6 @@
-# PiCO 子智能体：从配置与委派，到持久会话、续用和权限边界
+# PiCO 子智能体：从配置到持久会话、续用和权限边界
 
-> 当前实现说明。核对日期：2026-09-09；代码基线：`7d825c48`。面向开发者与需要理解产品边界的读者。本文以配置型 `agent_spawn` 为主线，单独说明旧委派工具与 Graph 的差异；未实现的能力不计入当前行为。
+> 当前实现说明。面向开发者与需要理解产品边界的读者。本文以配置型 `agent_spawn` 为主线，并说明它与 Agent Graph 的边界；未实现的能力不计入当前行为。
 
 ![PiCO 子智能体概念封面：主智能体协调本地阅读、网络研究和隔离开发](images/pico-subagents/cover.png)
 
@@ -68,7 +68,7 @@ _图 2：列出配置与实际启动之间可能发生编辑或停用，因此�
 
 Local Read 是本地只读能力的默认名字，不是子智能体的统一名称。用户可以将某份配置命名为“代码审查员”，其实际边界仍由 `profile` 决定。
 
-共享目录也不意味着工具相同：网络研究型没有文件读取工具；本地只读型没有网络、Shell 和写入工具。配置型子智能体没有再次委派的工具，因此这条执行链不会生成孙智能体。
+共享目录也不意味着工具相同：网络研究型没有文件读取工具；本地只读型没有网络、Shell 和写入工具。配置型子智能体没有再次启动子智能体的工具，因此这条执行链不会生成孙智能体。
 
 实现型需要可用的 worktree 执行宿主。执行器等待独立任务完成后收集相对基线的 Git 补丁，返回补丁路径、worktree 路径、分支与摘要。它不会在这条流程里自动把补丁合并回父工作区。**worktree 提供 Git 工作目录隔离，具体文件、进程与网络限制仍取决于工具和沙箱策略；它不等于独立操作系统。**
 
@@ -174,7 +174,7 @@ _图 5：两条入口共享执行能力边界；各入口的模型选择与父�
 1. 不能通过请求传入不同能力覆盖子会话的持久身份；身份已确认但能力快照缺失或未知时拒绝执行。
 2. 有效权限强制为 `ask`，编排模式为 `default`，Swarm 授权为 `none`；普通续聊传入完全访问或 Swarm 不会扩权。
 3. 新建子 Session 会在 Provider 与工具装配前持久它的 `ExecutionBoundary` 上限；续用时在设置恢复前后都复核。缺失、bypass、external 或比能力定义更宽的持久边界都 fail closed，Session network grant 与普通扩权流程不能抬高这个上限。
-4. 配置型子任务不加载普通插件快照、不加入额外工作目录，也不获得再次委派或 `request_sandbox_boundary` 工具。
+4. 配置型子任务不加载普通插件快照、不加入额外工作目录，也不获得再次启动子智能体或 `request_sandbox_boundary` 工具。
 5. 工具注册表按能力白名单裁剪；后续请求级 allowlist 只能进一步限制可用工具，不能把已移除工具加回来。
 6. 手动续用独立 worktree 子任务会明确拒绝；不能利用普通会话入口绕过专用续用的类型限制。
 
@@ -192,20 +192,17 @@ _图 5：两条入口共享执行能力边界；各入口的模型选择与父�
 
 因此，手动续聊后子会话有了新的 Run，原父任务记录可能仍指向上一次由它发起的 Run。此时主智能体再次使用专用续用会因记录不匹配被拒绝。当前没有自动认领手动运行并同步父记录的实现，也不能保证简单读一次 `agent_output` 就会更新这个关系。
 
-## 9. 为什么还有其他子智能体入口
+## 9. 配置型子会话与 Agent Graph
 
-代码里同时存在多条委派路径，讨论能力时需要说清工具名。
+当前有两条明确的 Agent 路径，讨论能力时需要说清工具名。
 
-| 入口             | 定位               | 当前需要区分的能力                                           |
-| ---------------- | ------------------ | ------------------------------------------------------------ |
-| `agent_spawn`    | 配置型持久子任务   | 前台等待，Preset 选择，子会话导航，同工作区续用              |
-| `spawn_subagent` | 兼容的只读探索入口 | 接受 `task_prompt`，使用受限探索执行路径                     |
-| `delegate_task`  | 有边界的任务委派   | 批量并行、explore/worker、不同完成策略；嵌套受角色与深度限制 |
-| Graph            | 持久任务图编排     | 异步调度 operator，保存 profile snapshot，管理依赖与执行状态 |
+| 入口                         | 定位             | 当前需要区分的能力                                       |
+| ---------------------------- | ---------------- | -------------------------------------------------------- |
+| `agent_list` / `agent_spawn` | 配置型持久子任务 | Preset 选择、子会话导航、同工作区续用                    |
+| `agent_output`               | 配置型结果回读   | 按精确 child Session/Run 身份读取结果                    |
+| Agent Graph                  | 持久任务图编排   | 调度 operator，保存 profile snapshot，管理依赖与执行状态 |
 
-例如，`delegate_task` 的 `required`、`optional`、`detached` 有不同的等待与完成通知语义；Graph operator 的工具由保存的 profile snapshot 加控制用途的 `agent_output` 组成。它们不能直接套用到配置型 `agent_spawn`。
-
-桌面端的 Agent 输入也存在分流：带 `subagentId` 时构造要求主模型调用 `agent_spawn` 的提示，并限制为相关工具；不带该字段的旧 Agent 入口使用旧角色目录和 `delegate_task`。因此 Markdown/YAML 角色配置、设置中的 Preset 与所有名为“Agent”的界面入口，并不是同一种持久子会话机制。
+Graph operator 的工具由保存的 profile snapshot 加控制用途的 `agent_output` 组成；配置型 `agent_spawn` 则由 Preset/内置 capability 冻结能力。桌面端带 `subagentId` 时走 `agent_spawn`，选择 Markdown/YAML Agent Profile 时走 Graph `new_agent` / `agent_id`。两者都保留独立持久 Session/Run，但调度协议不同。
 
 同名 `agent_output` 也要结合宿主理解：本文讨论的是根会话中的子任务结果读取工具；Graph operator 使用的是其编排协议中的另一种用途。看到名字相同，不代表控制面相同。
 
@@ -237,9 +234,9 @@ node --import tsx --test \
 | 工具参数与结果协议     | [`configured-subagent-tools.ts`](../src/tools/configured-subagent-tools.ts)、[`configured-subagent-output.ts`](../src/tools/configured-subagent-output.ts)                                                                                                                       |
 | 持久子任务执行与补丁   | [`configured-subagent-executor.ts`](../src/runtime/configured-subagent-executor.ts)                                                                                                                                                                                              |
 | 专用续用校验与回读     | [`configured-subagent-continuation.ts`](../src/runtime/configured-subagent-continuation.ts)、[`configured-subagent-output-store.ts`](../src/runtime/configured-subagent-output-store.ts)                                                                                         |
-| 统一能力恢复与执行约束 | [`configured-subagent-session.ts`](../src/runtime/configured-subagent-session.ts)、[`agent-runtime.ts`](../src/runtime/agent-runtime.ts)、[`delegation-registry.ts`](../src/tools/delegation-registry.ts)                                                                        |
+| 统一能力恢复与执行约束 | [`configured-subagent-session.ts`](../src/runtime/configured-subagent-session.ts)、[`agent-runtime.ts`](../src/runtime/agent-runtime.ts)、[`child-agent-policy.ts`](../src/tools/child-agent-policy.ts)                                                                          |
 | 卡片、事件投影与导航   | [`ConversationTranscript.tsx`](../apps/desktop/src/renderer/conversation/ConversationTranscript.tsx)、[`transcript-event-store.ts`](../src/presentation/transcript-event-store.ts)、[`subagent-navigation.ts`](../apps/desktop/src/renderer/conversation/subagent-navigation.ts) |
-| 原有委派与 Graph       | [`subagent.ts`](../src/tools/subagent.ts)、[`agent-graph-host.ts`](../src/runtime/agent-graph-host.ts)                                                                                                                                                                           |
+| Agent Graph            | [`agent-graph-host.ts`](../src/runtime/agent-graph-host.ts)、[`agent-graph-tools.ts`](../src/tools/agent-graph-tools.ts)                                                                                                                                                         |
 
 继续扩展时，应分别解决三个问题：自定义工具组合如何验证，独立 worktree 续用如何保持补丁基线与生命周期，以及手动运行如何被父任务重新接管。它们分别涉及能力模型、隔离执行和父子记账，不能仅靠增加一个按钮完成。
 

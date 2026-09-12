@@ -2,24 +2,16 @@ import { randomUUID } from "node:crypto";
 import { existsSync, renameSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { rm } from "node:fs/promises";
-import { PlanCoordinator } from "../plan/coordinator.js";
 import { TodoStore } from "../context/todo-store.js";
 import { GoalManager } from "../engine/goal-manager.js";
 import { globalSessionManager, type Session, type SessionManager } from "../engine/session.js";
 import type { SessionManagerLease } from "../engine/session-manager.js";
 import { SteerQueue } from "../engine/steer-queue.js";
-import type { Message } from "../schema/message.js";
 import { FileIndex } from "../input/file-index.js";
 import { logger } from "../observability/logger.js";
 import { TaskRegistry } from "../tasks/task-registry.js";
 import type { TaskHostRuntime } from "../tasks/task-runtime.js";
-import type { CompletionOutboxRecord } from "../tasks/runtime-types.js";
 import { BackgroundManager } from "../tools/background-manager.js";
-import {
-  DelegationManager,
-  formatDelegationCompletions,
-  type DelegationCompletionEnvelope,
-} from "../tools/delegation-manager.js";
 import { ToolDisclosure } from "../tools/tool-disclosure.js";
 import {
   CodeIntelligenceManager,
@@ -77,8 +69,6 @@ export interface SessionRuntimeOptions {
   lspServers?: readonly LspServerConfig[];
   processSandbox?: SessionProcessSandboxConfig;
   taskHostRuntime?: TaskHostRuntime;
-  /** Durable completion outbox 的活态发现间隔。 */
-  completionPollIntervalMs?: number;
   sessionStartSource?: "startup" | "resume";
   /** 后台/Cron 显式关闭前台 HookService，继续走严格 command-only policy。 */
   hooks?: false;
@@ -104,8 +94,6 @@ export interface SessionRuntime {
   readonly taskRegistry: TaskRegistry;
   readonly taskHostRuntime?: TaskHostRuntime;
   readonly backgroundManager: BackgroundManager;
-  readonly delegationManager: DelegationManager;
-  readonly delegationCompletionQueue: DelegationCompletionWakeQueue;
   readonly hookRewakeQueue: HookRewakeQueue;
   readonly fileIndex: FileIndex;
   readonly steerQueue: SteerQueue;
@@ -136,174 +124,6 @@ export interface SessionRuntime {
   drainHookEvents(): Promise<void>;
   assertCompatible(session: Session): void;
   dispose(): Promise<void>;
-}
-
-export function createDelegationCompletionMessage(
-  completion: DelegationCompletionEnvelope,
-): Message {
-  return {
-    role: "user",
-    content: formatDelegationCompletions([completion]),
-    providerData: {
-      picoKind: "subagent_completion",
-      picoHiddenFromTranscript: true,
-      picoCompletionId: completion.completionId,
-      picoCompletionSeq: completion.completionSeq,
-      picoCompletionOwnerSessionId: completion.ownerSessionId,
-      picoCompletionJobId: completion.jobId,
-      picoCompletionActivityIds: [...completion.activityIds],
-      picoCompletionPolicy: completion.completionPolicy,
-      picoCompletionStatus: completion.status,
-    },
-  };
-}
-
-export interface DelegationCompletionWakeQueueOptions {
-  deliver: (completion: DelegationCompletionEnvelope) => void | Promise<void>;
-}
-
-/**
- * 将可续跑 completion 按 completionSeq 去重并合并为一次待消费 wake。
- * seen 序号在消费后仍保留，迟到或重复通知不会再次驱动主 Agent。
- */
-export class DelegationCompletionWakeQueue {
-  private readonly seenCompletionIds = new Set<string>();
-  private readonly pendingCompletions = new Map<number, DelegationCompletionEnvelope>();
-  private readonly subscribers = new Set<() => void>();
-  private readonly deliver: DelegationCompletionWakeQueueOptions["deliver"];
-  private closed = false;
-
-  constructor(options: DelegationCompletionWakeQueueOptions) {
-    this.deliver = options.deliver;
-  }
-
-  enqueue(completion: DelegationCompletionEnvelope): boolean {
-    if (
-      this.closed ||
-      this.seenCompletionIds.has(completion.completionId) ||
-      !shouldWakeForCompletion(completion)
-    ) {
-      return false;
-    }
-
-    this.seenCompletionIds.add(completion.completionId);
-    const shouldNotify = this.pendingCompletions.size === 0;
-    let queueSequence = completion.completionSeq;
-    while (this.pendingCompletions.has(queueSequence)) queueSequence++;
-    this.pendingCompletions.set(queueSequence, completion);
-    if (shouldNotify) {
-      for (const subscriber of this.subscribers) subscriber();
-    }
-    return true;
-  }
-
-  pendingCompletionSeqs(): readonly number[] {
-    return [...this.pendingCompletions.keys()].sort((left, right) => left - right);
-  }
-
-  /**
-   * 拿到 TUI 空闲执行权后才把对应 completion 写入 Session。
-   * 先 deliver 再删除：若 Session 写入失败，未写入项仍可在下一次空闲边界重试。
-   */
-  async deliverPendingCompletionSeqs(
-    sequences: readonly number[],
-  ): Promise<readonly DelegationCompletionEnvelope[]> {
-    const delivered: DelegationCompletionEnvelope[] = [];
-    for (const sequence of sequences) {
-      const completion = this.pendingCompletions.get(sequence);
-      if (!completion) continue;
-      await this.deliver(completion);
-      this.pendingCompletions.delete(sequence);
-      delivered.push(completion);
-    }
-    return delivered;
-  }
-
-  get hasPending(): boolean {
-    return this.pendingCompletions.size > 0;
-  }
-
-  subscribe(subscriber: () => void): () => void {
-    if (this.closed) return () => undefined;
-    this.subscribers.add(subscriber);
-    return () => this.subscribers.delete(subscriber);
-  }
-
-  close(): void {
-    this.closed = true;
-    this.pendingCompletions.clear();
-    this.subscribers.clear();
-  }
-}
-
-export interface DelegationWakeCoordinatorOptions {
-  queue: DelegationCompletionWakeQueue;
-  isIdle: () => boolean;
-  resume: (
-    completionSeqs: readonly number[],
-    deliverCompletions: () => Promise<readonly DelegationCompletionEnvelope[]>,
-  ) => Promise<void>;
-  onError?: (error: unknown) => void;
-  schedule?: (callback: () => void) => void;
-}
-
-/** 空闲时消费一批 completion 并续跑一次；运行期间的新 completion 留给下一批。 */
-export class DelegationWakeCoordinator {
-  private readonly unsubscribe: () => void;
-  private readonly schedule: (callback: () => void) => void;
-  private scheduled = false;
-  private running = false;
-  private disposed = false;
-
-  constructor(private readonly options: DelegationWakeCoordinatorOptions) {
-    this.schedule = options.schedule ?? queueMicrotask;
-    this.unsubscribe = options.queue.subscribe(() => this.request());
-    if (options.queue.hasPending) this.request();
-  }
-
-  notifyIdle(): void {
-    this.request();
-  }
-
-  dispose(): void {
-    this.disposed = true;
-    this.unsubscribe();
-  }
-
-  private request(): void {
-    if (this.disposed || this.scheduled) return;
-    this.scheduled = true;
-    this.schedule(() => {
-      this.scheduled = false;
-      void this.resumePending();
-    });
-  }
-
-  private async resumePending(): Promise<void> {
-    if (this.disposed || this.running || !this.options.isIdle()) return;
-    const completionSeqs = this.options.queue.pendingCompletionSeqs();
-    if (completionSeqs.length === 0) return;
-
-    this.running = true;
-    let deliveredCompletions: readonly DelegationCompletionEnvelope[] | undefined;
-    try {
-      await this.options.resume(completionSeqs, async () => {
-        if (deliveredCompletions) return deliveredCompletions;
-        deliveredCompletions =
-          await this.options.queue.deliverPendingCompletionSeqs(completionSeqs);
-        return deliveredCompletions;
-      });
-    } catch (error) {
-      // 已 deliver 的 completion 保留在 Session，续跑失败不自动重试，避免无限唤醒；
-      // 尚未 deliver 说明空闲保留失败，继续留在队列等待下一次 idle 通知。
-      this.options.onError?.(error);
-    } finally {
-      this.running = false;
-      // 仅在本批已交付时主动调度运行期间新到的 completion；保留失败由下一次 idle 唤醒，
-      // 避免 isIdle 仍为 true 的异常实现形成微任务自旋。
-      if (deliveredCompletions !== undefined && this.options.queue.hasPending) this.request();
-    }
-  }
 }
 
 export interface HookRewakeEntry {
@@ -421,11 +241,6 @@ export class HookRewakeCoordinator {
   }
 }
 
-function shouldWakeForCompletion(completion: DelegationCompletionEnvelope): boolean {
-  if (completion.completionPolicy === "optional") return true;
-  return completion.status !== "completed";
-}
-
 export async function createSessionRuntime(
   options: SessionRuntimeOptions,
 ): Promise<SessionRuntime> {
@@ -451,9 +266,6 @@ async function createPinnedSessionRuntime(
   const workDir = resolve(session.workDir);
   const sessionId = session.id;
   const picoHome = resolvePicoHome({ picoHome: session.picoHome });
-  const completionPollIntervalMs = options.taskHostRuntime
-    ? positiveDuration(options.completionPollIntervalMs ?? 250, "completionPollIntervalMs")
-    : undefined;
 
   const taskRegistry = options.taskHostRuntime?.taskRegistry ?? new TaskRegistry();
   const goalManager = new GoalManager();
@@ -476,38 +288,6 @@ async function createPinnedSessionRuntime(
   }
 
   const steerQueue = new SteerQueue();
-  const jobService = options.taskHostRuntime?.jobService;
-  const delegationCompletionQueue = new DelegationCompletionWakeQueue({
-    deliver: async (completion) => {
-      if (jobService) {
-        const pending = jobService
-          .pendingCompletions({ ownerSessionId: sessionId, limit: 1_000 })
-          .find((candidate) => candidate.completionId === completion.completionId);
-        // Durable outbox 是新 completion 的权威源。如果消息已经入会话且
-        // outbox 已 ack，这是崩溃恢复的 resume-only wake，不得重复注入。
-        if (!pending) {
-          const alreadyCommitted = session
-            .getHistory()
-            .some(
-              (message) =>
-                message.providerData?.["picoKind"] === "subagent_completion" &&
-                message.providerData?.["picoCompletionId"] === completion.completionId,
-            );
-          if (alreadyCommitted) return;
-          throw new Error(
-            `Delegation completion ${completion.completionId} has no pending durable outbox record`,
-          );
-        }
-        await session.commitMessageOnce(
-          completion.completionId,
-          createDelegationCompletionMessage(completion),
-        );
-        jobService.markCompletionDelivered(completion.completionId);
-        return;
-      }
-      await session.commitMessages(createDelegationCompletionMessage(completion));
-    },
-  });
   const hookRewakeQueue = new HookRewakeQueue(async (entries) => {
     await session.commitMessages({
       role: "user",
@@ -519,34 +299,6 @@ async function createPinnedSessionRuntime(
       },
     });
   });
-  let completionPollTimer: ReturnType<typeof setInterval> | undefined;
-  if (jobService) {
-    if (completionPollIntervalMs === undefined) {
-      throw new Error("taskHostRuntime 缺少 completion poll 配置");
-    }
-    const scanDurableCompletions = (): void => {
-      try {
-        for (const completion of jobService.pendingCompletions({
-          ownerSessionId: sessionId,
-          limit: 1_000,
-        })) {
-          const envelope = delegationEnvelopeFromOutbox(completion, sessionId);
-          if (envelope) delegationCompletionQueue.enqueue(envelope);
-        }
-      } catch (error) {
-        logger.warn(
-          { sessionId, error: String(error) },
-          "[runtime-store] 扫描 durable completion outbox 失败",
-        );
-      }
-    };
-    scanDurableCompletions();
-    completionPollTimer = setInterval(scanDurableCompletions, completionPollIntervalMs);
-    completionPollTimer.unref?.();
-    for (const completion of unconsumedDelegationCompletions(session.getHistory(), sessionId)) {
-      delegationCompletionQueue.enqueue(completion);
-    }
-  }
   const hookRuntime =
     options.hooks === false || options.hookService
       ? undefined
@@ -581,13 +333,6 @@ async function createPinnedSessionRuntime(
       taskRegistry,
       ownerSessionId: sessionId,
     }),
-    delegationManager: new DelegationManager({
-      taskRegistry,
-      onCompletion: (completion) => delegationCompletionQueue.enqueue(completion),
-      onPlanStepSettled: (planStepId, status) =>
-        settlePlanStepFromDelegation(session, planStepId, status),
-    }),
-    delegationCompletionQueue,
     hookRewakeQueue,
     fileIndex: FileIndex.create({ cwd: workDir }),
     steerQueue,
@@ -595,175 +340,11 @@ async function createPinnedSessionRuntime(
     codeIntelligenceEnabled,
     unbindGoalManager,
     releaseSessionPin,
-    stopDelegationCompletionPolling: () => {
-      if (completionPollTimer) clearInterval(completionPollTimer);
-      completionPollTimer = undefined;
-    },
     sessionStartSource: options.sessionStartSource ?? "startup",
     ...(hookRuntime ? { hookRuntime } : {}),
     ...(options.hookService ? { hookService: options.hookService } : {}),
     ...(options.processSandbox ? { processSandbox: options.processSandbox } : {}),
   });
-}
-
-function delegationEnvelopeFromOutbox(
-  completion: CompletionOutboxRecord,
-  ownerSessionId: string,
-): DelegationCompletionEnvelope | undefined {
-  const payload = completion.payload?.["delegationCompletion"];
-  if (!isRecord(payload)) return undefined;
-  const completionId = payload["completionId"];
-  const jobId = payload["jobId"];
-  const completionSeq = payload["completionSeq"];
-  const completionPolicy = payload["completionPolicy"];
-  const status = payload["status"];
-  const outputSummary = payload["outputSummary"];
-  const activityIds = payload["activityIds"];
-  const payloadOwner = payload["ownerSessionId"];
-  if (
-    completionId !== completion.completionId ||
-    typeof jobId !== "string" ||
-    payloadOwner !== ownerSessionId ||
-    (completionPolicy !== "required" &&
-      completionPolicy !== "optional" &&
-      completionPolicy !== "detached") ||
-    (status !== "completed" &&
-      status !== "partial" &&
-      status !== "error" &&
-      status !== "timed_out" &&
-      status !== "cancelled") ||
-    typeof outputSummary !== "string" ||
-    !Array.isArray(activityIds) ||
-    !activityIds.every((value) => typeof value === "string")
-  ) {
-    return undefined;
-  }
-  return {
-    completionId,
-    jobId,
-    ownerSessionId,
-    completionSeq:
-      typeof completionSeq === "number" && Number.isSafeInteger(completionSeq)
-        ? completionSeq
-        : completion.createdAt,
-    activityIds,
-    completionPolicy,
-    status,
-    outputSummary,
-    ...(typeof payload["error"] === "string" ? { error: payload["error"] } : {}),
-  };
-}
-
-/**
- * 恢复“Session 已持久化 + outbox 已 ack，但 Agent 还没真正续跑”的窄崩溃窗口。
- * 只查看最近一条 assistant 响应之后的隐藏 completion；一旦看到新的显式
- * 用户输入就停止，避免越过独立的用户轮次自动续跑。
- */
-function unconsumedDelegationCompletions(
-  history: readonly Message[],
-  ownerSessionId: string,
-): readonly DelegationCompletionEnvelope[] {
-  const recovered: DelegationCompletionEnvelope[] = [];
-  for (let index = history.length - 1; index >= 0; index--) {
-    const message = history[index]!;
-    if (message.role === "assistant") break;
-    if (
-      message.role === "user" &&
-      message.toolCallId === undefined &&
-      message.providerData?.["picoHiddenFromTranscript"] !== true
-    ) {
-      break;
-    }
-    if (message.providerData?.["picoKind"] !== "subagent_completion") continue;
-    const completion = delegationEnvelopeFromCommittedMessage(message, ownerSessionId);
-    if (completion) recovered.unshift(completion);
-  }
-  return recovered;
-}
-
-function delegationEnvelopeFromCommittedMessage(
-  message: Message,
-  ownerSessionId: string,
-): DelegationCompletionEnvelope | undefined {
-  const data = message.providerData;
-  if (!data) return undefined;
-  const completionId = data["picoCompletionId"];
-  const completionSeq = data["picoCompletionSeq"];
-  const payloadOwner = data["picoCompletionOwnerSessionId"];
-  const jobId = data["picoCompletionJobId"];
-  const activityIds = data["picoCompletionActivityIds"];
-  const completionPolicy = data["picoCompletionPolicy"];
-  const status = data["picoCompletionStatus"];
-  if (
-    typeof completionId !== "string" ||
-    typeof completionSeq !== "number" ||
-    !Number.isSafeInteger(completionSeq) ||
-    payloadOwner !== ownerSessionId ||
-    typeof jobId !== "string" ||
-    !Array.isArray(activityIds) ||
-    !activityIds.every((value) => typeof value === "string") ||
-    (completionPolicy !== "required" &&
-      completionPolicy !== "optional" &&
-      completionPolicy !== "detached") ||
-    (status !== "completed" &&
-      status !== "partial" &&
-      status !== "error" &&
-      status !== "timed_out" &&
-      status !== "cancelled")
-  ) {
-    return undefined;
-  }
-  return {
-    completionId,
-    completionSeq,
-    ownerSessionId,
-    jobId,
-    activityIds,
-    completionPolicy,
-    status,
-    outputSummary: message.content,
-  };
-}
-
-async function settlePlanStepFromDelegation(
-  session: Session,
-  planStepId: string,
-  status: string,
-): Promise<void> {
-  const store = session.runtimeEventStore;
-  if (!store) return;
-  const completed = status === "completed" || status === "partial";
-  // Retry loop for CAS conflicts when multiple delegations settle concurrently
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const coordinator = new PlanCoordinator(store, {
-      sessionId: session.id,
-      invocationId: `plan-step-settle:${planStepId}`,
-      runId: `plan-step-settle:${planStepId}`,
-      turnId: `plan-step-settle:${planStepId}`,
-      writeGuard: session,
-    });
-    const projection = await coordinator.project();
-    const execution = projection.execution;
-    if (!execution || (execution.status !== "active" && execution.status !== "interrupted")) return;
-    const step = execution.steps.find((s) => s.id === planStepId);
-    if (!step || step.status !== "in_progress") return;
-    try {
-      await coordinator.updateStep({
-        operationId: `plan-step-settle:${planStepId}:${Date.now()}:${attempt}`,
-        expectedSessionSequence: projection.sessionSequence,
-        planId: execution.planId,
-        stepId: planStepId,
-        status: completed ? "completed" : "pending",
-      });
-      return; // success
-    } catch {
-      // CAS conflict — retry with fresh projection
-    }
-  }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 interface DefaultSessionRuntimeOptions {
@@ -774,8 +355,6 @@ interface DefaultSessionRuntimeOptions {
   taskRegistry: TaskRegistry;
   taskHostRuntime?: TaskHostRuntime;
   backgroundManager: BackgroundManager;
-  delegationManager: DelegationManager;
-  delegationCompletionQueue: DelegationCompletionWakeQueue;
   hookRewakeQueue: HookRewakeQueue;
   fileIndex: FileIndex;
   steerQueue: SteerQueue;
@@ -783,7 +362,6 @@ interface DefaultSessionRuntimeOptions {
   codeIntelligenceEnabled: boolean;
   unbindGoalManager: () => void;
   releaseSessionPin: () => void;
-  stopDelegationCompletionPolling: () => void;
   sessionStartSource: "startup" | "resume";
   hookRuntime?: SessionHookRuntime;
   hookService?: HookService;
@@ -800,8 +378,6 @@ class DefaultSessionRuntime implements SessionRuntime {
   readonly taskRegistry: TaskRegistry;
   readonly taskHostRuntime?: TaskHostRuntime;
   readonly backgroundManager: BackgroundManager;
-  readonly delegationManager: DelegationManager;
-  readonly delegationCompletionQueue: DelegationCompletionWakeQueue;
   readonly hookRewakeQueue: HookRewakeQueue;
   readonly fileIndex: FileIndex;
   readonly steerQueue: SteerQueue;
@@ -819,7 +395,6 @@ class DefaultSessionRuntime implements SessionRuntime {
   private readonly unsubscribeWorktreeHooks?: () => void;
   private readonly unbindGoalManager: () => void;
   private readonly releaseSessionPin: () => void;
-  private readonly stopDelegationCompletionPolling: () => void;
   private readonly session: Session;
   private disposePromise?: Promise<void>;
   private codeIntelligenceTransition: Promise<void> = Promise.resolve();
@@ -837,8 +412,6 @@ class DefaultSessionRuntime implements SessionRuntime {
     this.taskRegistry = options.taskRegistry;
     this.taskHostRuntime = options.taskHostRuntime;
     this.backgroundManager = options.backgroundManager;
-    this.delegationManager = options.delegationManager;
-    this.delegationCompletionQueue = options.delegationCompletionQueue;
     this.hookRewakeQueue = options.hookRewakeQueue;
     this.fileIndex = options.fileIndex;
     this.steerQueue = options.steerQueue;
@@ -846,7 +419,6 @@ class DefaultSessionRuntime implements SessionRuntime {
     this.codeIntelligenceEnabled = options.codeIntelligenceEnabled;
     this.unbindGoalManager = options.unbindGoalManager;
     this.releaseSessionPin = options.releaseSessionPin;
-    this.stopDelegationCompletionPolling = options.stopDelegationCompletionPolling;
     this.sessionStartSource = options.sessionStartSource;
     this.hookRuntime = options.hookRuntime;
     this.processSandbox = options.processSandbox;
@@ -928,13 +500,9 @@ class DefaultSessionRuntime implements SessionRuntime {
           scratchRoot,
           generation: this.processSandbox.generation ?? 0,
           ...(this.processSandbox.readRoots ? { readRoots: this.processSandbox.readRoots } : {}),
-          ...(this.processSandbox.writeRoots
-            ? { writeRoots: this.processSandbox.writeRoots }
-            : {}),
+          ...(this.processSandbox.writeRoots ? { writeRoots: this.processSandbox.writeRoots } : {}),
           ...(this.processSandbox.readFiles ? { readFiles: this.processSandbox.readFiles } : {}),
-          ...(this.processSandbox.writeFiles
-            ? { writeFiles: this.processSandbox.writeFiles }
-            : {}),
+          ...(this.processSandbox.writeFiles ? { writeFiles: this.processSandbox.writeFiles } : {}),
           ...(this.processSandbox?.config ? { config: this.processSandbox.config } : {}),
         }),
       );
@@ -1040,7 +608,6 @@ class DefaultSessionRuntime implements SessionRuntime {
       }
     };
 
-    await attempt(() => this.stopDelegationCompletionPolling());
     await attempt(() => this.unsubscribeTaskHooks());
     await attempt(() => this.unsubscribeWorktreeHooks?.());
     await attempt(() => this.clearComponentHooks());
@@ -1053,7 +620,6 @@ class DefaultSessionRuntime implements SessionRuntime {
       runningTasks = this.backgroundManager.list().filter((task) => task.status === "running");
     });
     const ownedCleanup = await Promise.allSettled([
-      this.delegationManager.dispose(),
       this.withCodeIntelligenceTransition(() => this.codeIntelligenceManager.close()),
       ...runningTasks.map((task) => this.backgroundManager.stop(task.taskId)),
     ]);
@@ -1070,7 +636,6 @@ class DefaultSessionRuntime implements SessionRuntime {
     // Finalizers are terminal ownership transitions. They must all run even when
     // an earlier owned resource failed to close; callers generally discard this
     // runtime after dispose() settles and cannot safely retry a retained pin.
-    await attempt(() => this.delegationCompletionQueue.close());
     await attempt(() => this.hookRewakeQueue.close());
     await attempt(() => this.unbindGoalManager());
     await attempt(() => this.releaseSessionPin());
@@ -1181,9 +746,4 @@ function detachSessionSandboxRoot(picoHome: string, sessionId: string): void {
       logger.warn({ detached, error: String(error) }, "[沙箱] 会话隔离目录后台清理失败"),
     );
   });
-}
-
-function positiveDuration(value: number, name: string): number {
-  if (!Number.isFinite(value) || value <= 0) throw new Error(`${name} 必须为正数`);
-  return value;
 }

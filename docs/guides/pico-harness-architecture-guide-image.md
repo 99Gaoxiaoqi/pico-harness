@@ -130,7 +130,7 @@ Engine 残留一次性状态，又能保证连续对话不会失忆。
 
 - Workspace Trust：读取项目级配置、Skill、Hook、MCP 或 LSP 之前，先确认真实工作区受信。
 - Hardline Guard：不可逆的极端危险命令直接阻断。
-- Full-access / Plan / Worker Boundary：主会话的完全访问权限（`full-access`）按当前 OS 用户权限放权；Plan 只允许保守只读；`delegate_task` 的可写 worker 无论主会话模式如何，都进入独立 worktree 和 OS 沙箱。共享工作区的配置型子智能体则是只读边界，不应与可写 worker 混为一类。
+- Full-access / Plan / Worker Boundary：主会话的完全访问权限（`full-access`）按当前 OS 用户权限放权；Plan 只允许保守只读；配置型 `implementation` 子任务进入独立 worktree 和 OS 沙箱。共享工作区的配置型子智能体则是只读边界，不应与可写 worker 混为一类。
 - Hooks：允许项目通过 PreToolUse 和 PostToolUse 扩展规则；输入被 Hook 改写后重新经过 Hardline / Plan 检查。
 - Permission / Approval：请求批准（`ask`）与帮我批准（`auto`）按各自策略决定允许、询问还是拒绝；需要用户确认时暂停执行，等待当前前台宿主审批。
 - File History：写入前保存原内容，或者为无法精确预测的 Bash 写入建立变化 Journal。
@@ -141,7 +141,7 @@ Engine 残留一次性状态，又能保证连续对话不会失忆。
 Language Server；LSP 不可用时快速降级为渐进式 Repo Map。定义、引用、符号、诊断、调用
 层级和仓库地图六类工具默认不全部塞进模型上下文，而是通过 `search_tools` 按需披露。
 
-更大的变化是 `delegate_task` 已经从“后台任务”演进成主 Agent 的核心编排工具。用户明确要求并行、子代理或分工时，主 Agent 首轮优先委派；默认 `required` 委派会形成硬等待边界，所有 worker 收口前主 Provider 不继续下一轮。worker 的结果会被聚合成总结，超长最终报告写入 `subagent-report` Evidence，再由主 Agent 做统一判断、必要验证和最终回答。
+多 Agent 现在使用两条明确路径：`agent_list` / `agent_spawn` / `agent_output` 负责配置型持久子会话，Agent Graph 负责带依赖的持久 Operator 调度。两条路径都以独立 Session/RuntimeRun 记录执行，主 Agent 根据有界结果统一判断、必要验证并最终回答。
 
 ### 第六步：结果重新成为模型的观察
 

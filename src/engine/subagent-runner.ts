@@ -9,7 +9,6 @@ import { SkillLoader } from "../context/skill.js";
 import { logger } from "../observability/logger.js";
 import { truncate } from "../observability/trace.js";
 import type { Registry } from "../tools/registry.js";
-import type { SubagentRunOptions, SubagentResult } from "../tools/subagent.js";
 import { ToolScheduler } from "../tools/tool-scheduler.js";
 import { ToolAccesses } from "../tools/tool-access.js";
 import { SUBAGENT_OUTPUT_BUDGET } from "../tools/subagent-budget.js";
@@ -29,6 +28,21 @@ import {
   buildEphemeralToolResult,
   redactToolResult,
 } from "./tool-result-builder.js";
+
+export interface SubagentResult {
+  status: "completed" | "partial" | "error";
+  summary: string;
+  evidenceRefs: string[];
+  error?: string;
+}
+
+export interface SubagentRunOptions {
+  maxTurns?: number;
+  systemPrompt?: string;
+  systemPromptOverride?: boolean;
+  signal?: AbortSignal;
+  workDir?: string;
+}
 
 export interface SubagentExecutionRuntime {
   provider: LLMProvider;
@@ -130,7 +144,7 @@ export class SubagentRunner {
     const initialTools = snapshotToolDefinitions(readOnlyRegistry.getAvailableTools());
     const initialToolNames = new Set(initialTools.map((tool) => tool.name));
     const boundStep = readOnlyRegistry.captureStep?.(randomUUID(), [...initialToolNames]);
-    // 委派层会传入 host/worktree 的可信运行目录；不从任务 context 或模型输出猜测根目录。
+    // 调用方会传入 host/worktree 的可信运行目录；不从任务 context 或模型输出猜测根目录。
     const runtimeWorkspaceRoot = opts.workDir ?? this.options.workDir;
     const canViewSkills = initialToolNames.has("skill_view");
     const skillIndex = canViewSkills
@@ -144,7 +158,7 @@ export class SubagentRunner {
     // 子智能体专属 System Prompt:严厉警告必须用工具,不许凭空猜测。
     // 若工作区配置了 Skills,只注入 name/description 索引;正文仍由 skill_view 按需读取。
     // 支持调用方自定义:默认追加拼接(对标 kimi-code ROLE_ADDITIONAL),
-    // systemPromptOverride=true 时完全覆盖(对标 hermes ephemeral_system_prompt)。
+    // systemPromptOverride=true 时完全覆盖默认骨架。
     const subSystemPrompt = buildSubagentSystemPrompt(
       initialTools,
       skillIndex,
@@ -163,11 +177,6 @@ export class SubagentRunner {
     // maxTurns 可由调用方覆盖(默认 10)。最后一轮始终预留为 tools=[] 收口，
     // 不通过提高上限隐藏控制流问题。
     const maxSubTurns = Math.max(1, opts.maxTurns ?? 10);
-    const depth = opts.depth ?? 0;
-    const maxSpawnDepth = opts.maxSpawnDepth ?? 2;
-    if (depth > maxSpawnDepth) {
-      throw new Error(`子智能体超过最大委派深度 ${maxSpawnDepth}`);
-    }
     let turnCount = 0;
 
     for (;;) {
@@ -545,12 +554,12 @@ function buildSubagentPartialSummary(contextHistory: readonly Message[]): string
 /**
  * 构造子代理的 system prompt。
  *
- * 自定义语义(对标 kimi-code ROLE_ADDITIONAL + hermes ephemeral_system_prompt):
+ * 自定义语义：
  * - 未传 opts.systemPrompt:返回默认的"探路者"骨架(向后兼容)。
  * - 传 opts.systemPrompt 且 opts.systemPromptOverride !== true:默认骨架 + 追加拼接
  *   自定义片段。保留基本纪律 + 调用方追加要求(对标 kimi-code 的 ROLE_ADDITIONAL)。
  * - opts.systemPromptOverride === true 且有 systemPrompt:完全覆盖默认骨架
- *   (对标 hermes 的 ephemeral_system_prompt 替换语义),给需要完全定制的场景。
+ *   给需要完全定制的场景。
  */
 function buildSubagentSystemPrompt(
   tools: readonly ToolDefinition[],
