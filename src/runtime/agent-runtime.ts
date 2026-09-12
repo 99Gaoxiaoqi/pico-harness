@@ -138,10 +138,7 @@ import {
   type SessionSettings,
 } from "../input/session-settings.js";
 import { createIsolatedPicoConfig, loadPicoProjectConfig } from "../input/pico-config.js";
-import {
-  hasExplicitNetworkIntent,
-  type WorkspaceSandboxConfig,
-} from "../safety/workspace-sandbox.js";
+import { hasExplicitNetworkIntent } from "../safety/workspace-sandbox.js";
 import { createSandboxPolicy, normalizeRoots } from "../safety/process-sandbox/index.js";
 import { compileRuntimeProcessSandbox } from "../safety/runtime-process-sandbox.js";
 import {
