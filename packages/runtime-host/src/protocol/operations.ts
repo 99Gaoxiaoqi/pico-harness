@@ -49,9 +49,6 @@ export function registerHostOperationSpecs(specs: Record<string, AnyOperationSpe
   }
 }
 
-/** Backward-compatible alias kept for existing integration tests. */
-export const registerHostOperationSpecsForTesting = registerHostOperationSpecs;
-
 export function knownOperationKeys(): readonly string[] {
   return [...Object.keys(HOST_OPERATION_SPECS), ...Object.keys(DYNAMIC_OPERATION_SPECS)];
 }
@@ -71,7 +68,7 @@ export type OperationSpecMap = typeof HOST_OPERATION_SPECS;
 export type OperationKey = keyof OperationSpecMap;
 
 // 线上协议只有 bootstrap 两个操作；test-only 动态注册的操作在运行时加入
-// spec 注册表（见 registerHostOperationSpecsForTesting），类型面用该 union 表达，
+// spec 注册表（见 registerHostOperationSpecs），类型面用该 union 表达，
 // 使帧/分发类型覆盖动态操作而不加宽生产 OperationKey。
 export type KnownOperationKey = OperationKey | (string & {});
 

@@ -7,7 +7,7 @@ import { test } from "node:test";
 import {
   connectResolvedRuntimeHost,
   prepareStorageRootControlDirectory,
-  registerHostOperationSpecsForTesting,
+  registerHostOperationSpecs,
   resolveStorageRoot,
   RUNTIME_HOST_MAX_FRAME_BYTES,
   RuntimeHostKernel,
@@ -37,7 +37,7 @@ const pushOperationSpec: AnyOperationSpec = {
   decodeInput: (value) => value,
   decodeOutput: (value) => value,
 };
-registerHostOperationSpecsForTesting({ [PUSH_OPERATION]: pushOperationSpec });
+registerHostOperationSpecs({ [PUSH_OPERATION]: pushOperationSpec });
 
 type PushSink = (event: Record<string, unknown>) => Promise<void>;
 

@@ -7,7 +7,7 @@ import { test } from "node:test";
 import {
   connectResolvedRuntimeHost,
   prepareStorageRootControlDirectory,
-  registerHostOperationSpecsForTesting,
+  registerHostOperationSpecs,
   resolveStorageRoot,
   RuntimeHostKernel,
   RuntimeHostOperationError,
@@ -35,7 +35,7 @@ const hangOperationSpec: AnyOperationSpec = {
   decodeInput: (value) => value,
   decodeOutput: (value) => value,
 };
-registerHostOperationSpecsForTesting({ [HANG_OPERATION]: hangOperationSpec });
+registerHostOperationSpecs({ [HANG_OPERATION]: hangOperationSpec });
 
 interface HangHooks {
   /** Called when the hung handler starts; receives the deadline AbortSignal. */
