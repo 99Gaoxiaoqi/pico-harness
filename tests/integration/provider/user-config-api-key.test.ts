@@ -15,57 +15,28 @@ import { loadEffectiveModelRuntime } from "../../../src/provider/effective-model
 import { createProvider } from "../../../src/provider/factory.js";
 import { assertPrivatePermissions } from "../helpers/private-file-mode.js";
 
-test("durable user defaults migrate to canonical independent axes and write them back", async (context) => {
-  const root = await mkdtemp(join(tmpdir(), "pico-user-config-legacy-mode-"));
+test("durable and live user defaults reject the removed combined mode field", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-user-config-split-mode-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(root, { recursive: true });
   const store = new UserConfigStore({ picoHome: root });
 
-  await writeFile(
-    store.filePath,
-    `${JSON.stringify({ version: 1, defaults: { mode: "default" }, providers: {} })}\n`,
-  );
-  const legacyDefault = await store.read();
-  assert.deepEqual(legacyDefault.config.defaults, {
-    collaborationMode: "agent",
-    permissionMode: "ask",
-  });
-
-  await writeFile(
-    store.filePath,
-    `${JSON.stringify({ version: 1, defaults: { mode: "plan" }, providers: {} })}\n`,
-  );
-  const legacyPlan = await store.read();
-  assert.deepEqual(legacyPlan.config.defaults, {
-    collaborationMode: "plan",
-    permissionMode: "ask",
-  });
-
-  await writeFile(
-    store.filePath,
-    `${JSON.stringify({ version: 1, defaults: { mode: "yolo" }, providers: {} })}\n`,
-  );
-  const legacyYolo = await store.read();
-  assert.deepEqual(legacyYolo.config.defaults, {
-    collaborationMode: "agent",
-    permissionMode: "full-access",
-  });
-  assert.throws(
-    () =>
-      parseUserConfig(
-        { version: 1, defaults: { mode: "full-access" }, providers: {} },
-        "rpc",
-      ),
-    /persisted-file migration field/u,
-  );
+  for (const mode of ["ask", "plan", "auto", "full-access", "default", "yolo"]) {
+    const legacy = { version: 1, defaults: { mode }, providers: {} };
+    assert.throws(() => parseUserConfig(legacy, "rpc"), /defaults\.mode is not supported/u);
+    await writeFile(store.filePath, `${JSON.stringify(legacy)}\n`);
+    await assert.rejects(store.read(), /defaults\.mode is not supported/u);
+  }
   await assert.rejects(
     store.write(
       { version: 1, defaults: { mode: "yolo" }, providers: {} } as unknown as PicoUserConfig,
-      { expectedRevision: legacyYolo.revision },
+      { expectedRevision: "irrelevant" },
     ),
-    /persisted-file migration field/u,
+    /defaults\.mode is not supported/u,
   );
 
+  await rm(store.filePath);
+  const empty = await store.read();
   const written = await store.write(
     {
       version: 1,
@@ -76,7 +47,7 @@ test("durable user defaults migrate to canonical independent axes and write them
       },
       providers: {},
     },
-    { expectedRevision: legacyYolo.revision },
+    { expectedRevision: empty.revision },
   );
   assert.deepEqual(written.config.defaults, {
     collaborationMode: "plan",

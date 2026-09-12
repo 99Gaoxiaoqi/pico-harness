@@ -23,22 +23,8 @@ export interface BackgroundAutonomousPolicySnapshotData {
   createdAt: number;
 }
 
-/** 读取旧版账本时接受的历史字段；新写入一律使用 toolNetwork* 字段。 */
-interface LegacyToolNetworkPolicyFields {
-  networkPolicy?: unknown;
-  allowedNetworkHosts?: unknown;
-}
-
 export class BackgroundAutonomousPolicySnapshotError extends Error {
   override readonly name = "BackgroundAutonomousPolicySnapshotError";
-}
-
-export interface ParseBackgroundAutonomousPolicySnapshotOptions {
-  /**
-   * 旧账本可能在后台 MCP 支持前保存过 mcp__ 工具，但没有配置指纹。
-   * 读取时移除这些当时本就不可执行的工具；新写入仍严格要求指纹。
-   */
-  allowLegacyMcpWithoutFingerprint?: boolean;
 }
 
 /**
@@ -47,49 +33,17 @@ export interface ParseBackgroundAutonomousPolicySnapshotOptions {
  */
 export function parseBackgroundAutonomousPolicySnapshot(
   value: unknown,
-  options: ParseBackgroundAutonomousPolicySnapshotOptions = {},
-): BackgroundAutonomousPolicySnapshotData {
-  return parsePolicySnapshot(value, options, false);
-}
-
-/** Durable Cron-row decoder only. Creation and live execution use the strict parser above. */
-export function parsePersistedBackgroundAutonomousPolicySnapshot(
-  value: unknown,
-  options: ParseBackgroundAutonomousPolicySnapshotOptions = {},
-): BackgroundAutonomousPolicySnapshotData {
-  return parsePolicySnapshot(value, options, true);
-}
-
-function parsePolicySnapshot(
-  value: unknown,
-  options: ParseBackgroundAutonomousPolicySnapshotOptions,
-  allowLegacyMode: boolean,
 ): BackgroundAutonomousPolicySnapshotData {
   if (!isRecord(value)) throw invalid("policySnapshot 必须是对象");
-
-  const legacy = value as LegacyToolNetworkPolicyFields;
-  const canonicalPolicy = value["toolNetworkPolicy"];
-  const legacyPolicy = legacy.networkPolicy;
-  if (
-    canonicalPolicy !== undefined &&
-    legacyPolicy !== undefined &&
-    canonicalPolicy !== legacyPolicy
-  ) {
-    throw invalid("toolNetworkPolicy 与旧版 networkPolicy 冲突");
+  if ("networkPolicy" in value || "allowedNetworkHosts" in value) {
+    throw invalid("旧版 networkPolicy/allowedNetworkHosts 字段不受支持");
   }
-  const toolNetworkPolicy = canonicalPolicy ?? legacyPolicy;
-  const canonicalHosts = value["allowedToolNetworkHosts"];
-  const legacyHosts = legacy.allowedNetworkHosts;
-  if (canonicalHosts !== undefined && legacyHosts !== undefined) {
-    throw invalid("不得同时声明 allowedToolNetworkHosts 与旧版 allowedNetworkHosts");
-  }
-  const rawHosts = canonicalHosts ?? legacyHosts;
+  const toolNetworkPolicy = value["toolNetworkPolicy"];
+  const rawHosts = value["allowedToolNetworkHosts"];
   const allowedTools = value["allowedTools"];
 
-  const rawMode = value["mode"];
-  const mode = rawMode === "full-access" || (allowLegacyMode && rawMode === "yolo");
   if (
-    !mode ||
+    value["mode"] !== "full-access" ||
     value["backgroundEnabled"] !== true ||
     value["trustedWorkspace"] !== true ||
     (toolNetworkPolicy !== "disabled" &&
@@ -117,8 +71,7 @@ function parsePolicySnapshot(
     throw invalid("mcpConfigFingerprint 必须是小写 SHA-256");
   }
   const hasMcpTools = allowedTools.some((tool) => tool.startsWith("mcp__"));
-  const legacyMcpWithoutFingerprint = hasMcpTools && mcpConfigFingerprint === undefined;
-  if (legacyMcpWithoutFingerprint && !options.allowLegacyMcpWithoutFingerprint) {
+  if (hasMcpTools && mcpConfigFingerprint === undefined) {
     throw invalid("后台 MCP 工具必须绑定 .pico/mcp.json 的 SHA-256 指纹");
   }
   if (!hasMcpTools && mcpConfigFingerprint !== undefined) {
@@ -144,13 +97,7 @@ function parsePolicySnapshot(
     toolNetworkPolicy,
     ...(allowedToolNetworkHosts ? { allowedToolNetworkHosts } : {}),
     ...(typeof mcpConfigFingerprint === "string" ? { mcpConfigFingerprint } : {}),
-    allowedTools: [
-      ...new Set(
-        legacyMcpWithoutFingerprint
-          ? allowedTools.filter((tool) => !tool.startsWith("mcp__"))
-          : allowedTools,
-      ),
-    ],
+    allowedTools: [...new Set(allowedTools)],
     hardlineVersion: value["hardlineVersion"],
     hookVersion: value["hookVersion"],
     createdAt: value["createdAt"],

@@ -4,10 +4,7 @@ import { resolve } from "node:path";
 import type { SQLInputValue, StatementSync } from "node:sqlite";
 import { parseAnyCredentialRef } from "../../provider/credential-vault.js";
 import { generateRuntimeId } from "../../tasks/runtime-store-contracts.js";
-import {
-  parseBackgroundAutonomousPolicySnapshot,
-  parsePersistedBackgroundAutonomousPolicySnapshot,
-} from "../../safety/background-autonomous-policy-schema.js";
+import { parseBackgroundAutonomousPolicySnapshot } from "../../safety/background-autonomous-policy-schema.js";
 import {
   DAEMON_RUN_STATUSES,
   isTerminalJobStatus,
@@ -2319,10 +2316,7 @@ function rowToCronJob(row: Row): CronJobRecord {
     timeZone: textField(row, "time_zone"),
     prompt: textField(row, "prompt"),
     enabled: numberField(row, "enabled") === 1,
-    policySnapshot: parsePersistedBackgroundAutonomousPolicySnapshot(
-      jsonField(row, "policy_snapshot_json"),
-      { allowLegacyMcpWithoutFingerprint: true },
-    ),
+    policySnapshot: parseBackgroundAutonomousPolicySnapshot(jsonField(row, "policy_snapshot_json")),
     credentialRef:
       credentialRef === undefined ? undefined : parseAnyCredentialRef(credentialRef).ref,
     modelRouteId: optionalTextField(row, "model_route_id"),
