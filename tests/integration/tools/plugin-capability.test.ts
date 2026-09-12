@@ -48,6 +48,24 @@ test("plugin capability manifest is declarative and rejects executable-shaped fi
   assert.equal(resolved.skills.length, 0);
 });
 
+test("root plugin.json is not treated as a Pico plugin manifest", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-plugin-root-manifest-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(
+    join(root, "plugin.json"),
+    JSON.stringify({
+      name: "retired-root-manifest",
+      capabilities: [{ id: "provider", version: "1" }],
+    }),
+  );
+
+  const resolved = await resolvePluginContributions(root);
+  assert.equal(resolved.plugin.manifestSource, "manifestless");
+  assert.notEqual(resolved.plugin.name, "retired-root-manifest");
+  assert.deepEqual(resolved.manifest.capabilities, undefined);
+  assert.deepEqual(resolved.diagnostics, []);
+});
+
 test("capability registry only resolves trusted host factories and fails closed", () => {
   const empty = createBuiltinPluginCapabilityRegistry();
   assert.equal(empty.has("provider"), false);
