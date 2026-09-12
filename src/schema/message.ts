@@ -134,6 +134,8 @@ export interface ToolResult {
 
 /** 工具元信息:供模型理解工具有什么用 (对应 JSON Schema) */
 export interface ToolDefinition {
+  /** Provider-owned execution; never run through the local tool loop. */
+  providerTool?: { kind: "openai-web-search" | "anthropic-web-search" };
   name: string;
   description: string;
   /** JSON Schema 描述的输入参数 */

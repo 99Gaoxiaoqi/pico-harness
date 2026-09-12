@@ -1,5 +1,5 @@
-import { createAnthropic } from "@ai-sdk/anthropic";
-import { createOpenAI } from "@ai-sdk/openai";
+import { anthropic, createAnthropic } from "@ai-sdk/anthropic";
+import { openai, createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { createOpenResponses } from "@ai-sdk/open-responses";
 import { generateText, streamText, jsonSchema, type LanguageModelUsage, type ToolSet } from "ai";
@@ -12,7 +12,7 @@ import {
   type LLMProvider,
   type LLMProviderRequestOptions,
 } from "./interface.js";
-import { toAiSdkMessages, fromAiSdkContent } from "./ai-sdk-messages.js";
+import { toAiSdkMessages, fromAiSdkContent, restoreResponsesWebSearch } from "./ai-sdk-messages.js";
 import { OpenAIRequestPolicy } from "./openai-request-policy.js";
 import { applyAnthropicCacheControl } from "./anthropic-cache.js";
 import { applyReasoningRequestPatch } from "./reasoning-capability.js";
@@ -77,16 +77,32 @@ export class AiSdkProvider implements LLMProvider {
   ): Promise<Message> {
     const signal = providerRequestSignal(options?.signal, options?.timeoutMs);
     const definitions = snapshotToolDefinitions(availableTools);
+    const deepseek =
+      this.wire === "responses" && new URL(this.config.baseURL).hostname === "api.deepseek.com";
     const tools: ToolSet = Object.fromEntries(
-      definitions.map((t) => [
-        t.name,
-        {
-          description: t.description,
-          inputSchema: jsonSchema(t.inputSchema),
-          // Deliberately no execute: all execution and approval happen in Pico's Loop.
-        },
-      ]),
+      definitions.map((definition) => {
+        const kind = definition.providerTool?.kind;
+        if (kind) {
+          if (definition.name !== "web_search")
+            throw new Error("模型原生搜索工具必须命名为 web_search");
+          if (deepseek) throw new Error("DeepSeek 官方 Responses 当前不支持模型原生搜索");
+          if (kind === "openai-web-search" && this.wire === "responses")
+            return [definition.name, openai.tools.webSearch({})];
+          if (kind === "anthropic-web-search" && this.wire === "claude")
+            return [definition.name, anthropic.tools.webSearch_20250305({})];
+          throw new Error("模型原生搜索工具与当前 Provider 协议不匹配");
+        }
+        return [
+          definition.name,
+          {
+            description: definition.description,
+            inputSchema: jsonSchema(definition.inputSchema),
+            // No execute: Pico owns local tools; provider-native tools run on the server.
+          },
+        ];
+      }),
     );
+    const responseOutput: unknown[] = [];
     let nonStreamingUsage: unknown;
     const transport: typeof fetch = async (_url, init) => {
       let body = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -130,7 +146,11 @@ export class AiSdkProvider implements LLMProvider {
       }
       const rate = this.config.onRateLimitInfo && parseRateLimitHeaders(response.headers);
       if (rate) this.config.onRateLimitInfo?.(rate);
-      if (!body.stream) nonStreamingUsage = record(await response.clone().json())?.usage;
+      if (!body.stream) {
+        const raw = record(await response.clone().json());
+        nonStreamingUsage = raw?.usage;
+        if (Array.isArray(raw?.output)) responseOutput.push(...raw.output);
+      }
       // Some compatible gateways omit the final SSE blank line. Let the SDK parse the
       // final event too, without adding another protocol/event parser in Pico.
       if (body.stream && response.body) {
@@ -151,8 +171,6 @@ export class AiSdkProvider implements LLMProvider {
       return response;
     };
     const apiKey = this.config.auth === "none" ? "anonymous" : this.config.apiKey;
-    const deepseek =
-      this.wire === "responses" && new URL(this.config.baseURL).hostname === "api.deepseek.com";
     const model =
       this.wire === "claude"
         ? createAnthropic({ apiKey, fetch: transport })(this.config.model)
@@ -172,7 +190,7 @@ export class AiSdkProvider implements LLMProvider {
             : createOpenAI({ apiKey, fetch: transport }).responses(this.config.model);
     const request = {
       model,
-      messages: toAiSdkMessages(messages, this.wire),
+      messages: toAiSdkMessages(messages, this.wire, { responsesWebSearchAnchors: true }),
       allowSystemInMessages: true,
       tools,
       ...(this.wire === "claude" ? { maxOutputTokens: this.profile.maxOutputTokens } : {}),
@@ -192,7 +210,7 @@ export class AiSdkProvider implements LLMProvider {
         const result = await generateText(request);
         if (result.finishReason === "error") throw new Error("Model response failed");
         return {
-          ...fromAiSdkContent(result.content, this.wire),
+          ...fromAiSdkContent(result.content, this.wire, responseOutput),
           usage: translateUsage(
             result.steps.at(-1)!.usage,
             this.wire,
@@ -206,6 +224,7 @@ export class AiSdkProvider implements LLMProvider {
       for await (const chunk of result.stream) {
         if (chunk.type === "raw") {
           const raw = record(chunk.rawValue);
+          if (raw?.type === "response.output_item.done" && raw.item) responseOutput.push(raw.item);
           const value =
             record(raw?.usage) ??
             record(record(raw?.message)?.usage) ??
@@ -225,7 +244,7 @@ export class AiSdkProvider implements LLMProvider {
       signal.throwIfAborted();
       if (!finished) throw new Error("Model stream ended before completion");
       return {
-        ...fromAiSdkContent(await result.content, this.wire),
+        ...fromAiSdkContent(await result.content, this.wire, responseOutput),
         usage: translateUsage((await result.steps).at(-1)!.usage, this.wire, rawUsage),
       };
     } catch (error) {
@@ -263,6 +282,7 @@ export class AiSdkProvider implements LLMProvider {
     const effort = this.config.thinkingEffort ?? "off";
     if (this.wire === "responses") {
       body = this.chatPolicy.finalizeRequestBody(body, messages, tools, options);
+      body = restoreResponsesWebSearch(body, messages);
       body.store = false;
       delete body.previous_response_id;
       body = capability

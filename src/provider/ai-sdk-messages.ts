@@ -50,8 +50,13 @@ function savedContent(message: Message, wire: AiSdkWire): SavedContent | undefin
 }
 
 /** Preserve the transcript order; Pico's user/toolCallId observations become SDK tool messages. */
-export function toAiSdkMessages(messages: readonly Message[], wire: AiSdkWire): ModelMessage[] {
+export function toAiSdkMessages(
+  messages: readonly Message[],
+  wire: AiSdkWire,
+  options?: { responsesWebSearchAnchors?: boolean },
+): ModelMessage[] {
   const result: ModelMessage[] = [];
+  const searchAnchors = wire === "responses" && options?.responsesWebSearchAnchors === true;
   const toolNames = new Map<string, string>();
   for (const message of messages) {
     if (message.role === "system") {
@@ -112,10 +117,39 @@ export function toAiSdkMessages(messages: readonly Message[], wire: AiSdkWire): 
           });
         }
       }
-      for (const part of content) {
-        if (part.type === "tool-call") toolNames.set(part.toolCallId, part.toolName);
+      for (let index = 0; index < content.length; index++) {
+        const part = content[index]!;
+        if (part.type === "tool-call") {
+          toolNames.set(part.toolCallId, part.toolName);
+          // SDK skips hosted search with store:false. This text item carries only an
+          // ordering anchor; restoreResponsesWebSearch restores the raw item before dispatch.
+          if (searchAnchors && record(part.providerOptions?.openai?.picoWebSearchItem)) {
+            content[index] = {
+              type: "text",
+              text: "[provider search]",
+              providerOptions: {
+                openai: { itemId: part.toolCallId },
+              },
+            };
+          }
+        }
       }
-      result.push({ role: "assistant", content });
+      const rawSearchIds = new Set(
+        (saved?.content ?? [])
+          .filter(
+            (part) =>
+              part.type === "tool-call" && record(part.providerOptions?.openai?.picoWebSearchItem),
+          )
+          .map((part) => (part.type === "tool-call" ? part.toolCallId : "")),
+      );
+      result.push({
+        role: "assistant",
+        content: searchAnchors
+          ? content.filter(
+              (part) => part.type !== "tool-result" || !rawSearchIds.has(part.toolCallId),
+            )
+          : content,
+      });
       if (saved?.toolResults.length) {
         result.push({ role: "tool", content: structuredClone(saved.toolResults) });
         for (const part of saved.toolResults) toolNames.delete(part.toolCallId);
@@ -126,10 +160,21 @@ export function toAiSdkMessages(messages: readonly Message[], wire: AiSdkWire): 
 }
 
 /** Convert final generateText/streamText content, retaining replay metadata only, never request data. */
-export function fromAiSdkContent(content: readonly unknown[], wire: AiSdkWire): Message {
+export function fromAiSdkContent(
+  content: readonly unknown[],
+  wire: AiSdkWire,
+  responseOutput: readonly unknown[] = [],
+): Message {
   const message: Message = { role: "assistant", content: "" };
   const parts: AssistantParts = [];
   const toolResults: ToolResultPart[] = [];
+  const calls: Record<string, unknown>[] = [];
+  const sources = new Map<string, Record<string, unknown>>();
+  const addSource = (value: unknown) => {
+    const source = record(value);
+    if (typeof source?.url !== "string") return;
+    sources.set(source.url, { ...sources.get(source.url), ...source });
+  };
   for (const value of content) {
     const part = record(value);
     if (!part) continue;
@@ -158,6 +203,17 @@ export function fromAiSdkContent(content: readonly unknown[], wire: AiSdkWire): 
                 : JSON.stringify(part.input ?? {}),
           });
         }
+        if (part.providerExecuted === true && part.toolName === "web_search") {
+          calls.push({
+            toolCallId: part.toolCallId,
+            toolName: part.toolName,
+            input: part.input ?? {},
+            status: "pending",
+          });
+        }
+        const rawSearch = responseOutput
+          .map(record)
+          .find((item) => item?.type === "web_search_call" && item.id === part.toolCallId);
         parts.push({
           type: "tool-call",
           toolCallId: part.toolCallId,
@@ -167,6 +223,17 @@ export function fromAiSdkContent(content: readonly unknown[], wire: AiSdkWire): 
             ? { providerExecuted: part.providerExecuted }
             : {}),
           ...options,
+          ...(rawSearch
+            ? {
+                providerOptions: {
+                  ...options.providerOptions,
+                  openai: {
+                    ...options.providerOptions?.openai,
+                    picoWebSearchItem: JSON.parse(JSON.stringify(rawSearch)),
+                  },
+                },
+              }
+            : {}),
         });
         break;
       }
@@ -183,15 +250,33 @@ export function fromAiSdkContent(content: readonly unknown[], wire: AiSdkWire): 
           toolName: part.toolName,
           output:
             part.type === "tool-error"
-              ? {
-                  type: "error-text",
-                  value: output instanceof Error ? output.message : String(output),
-                }
+              ? record(output) && !(output instanceof Error)
+                ? { type: "error-json", value: JSON.parse(JSON.stringify(output)) }
+                : {
+                    type: "error-text",
+                    value: output instanceof Error ? output.message : String(output),
+                  }
               : typeof output === "string"
                 ? { type: "text", value: output }
                 : { type: "json", value: JSON.parse(JSON.stringify(output ?? null)) },
           ...options,
         };
+        const searchCall = calls.find((call) => call.toolCallId === part.toolCallId);
+        if (searchCall) {
+          searchCall.status = part.type === "tool-error" ? "error" : "completed";
+          searchCall[part.type === "tool-error" ? "error" : "output"] =
+            output instanceof Error ? output.message : output;
+          const found = Array.isArray(output) ? output : record(output)?.sources;
+          if (Array.isArray(found))
+            for (const source of found) {
+              const item = record(source);
+              if (item)
+                addSource({
+                  url: item.url,
+                  ...(typeof item.title === "string" ? { title: item.title } : {}),
+                });
+            }
+        }
         if (part.providerExecuted === true) parts.push(result);
         else toolResults.push(result);
         // A result already supplied by the SDK must not execute again in Pico.
@@ -212,6 +297,9 @@ export function fromAiSdkContent(content: readonly unknown[], wire: AiSdkWire): 
         }
         break;
       }
+      case "source":
+        if (part.sourceType === "url") addSource(JSON.parse(JSON.stringify(part)));
+        break;
       case "custom":
         if (typeof part.kind === "string" && part.kind.includes(".")) {
           parts.push({ type: "custom", kind: part.kind as `${string}.${string}`, ...options });
@@ -219,8 +307,22 @@ export function fromAiSdkContent(content: readonly unknown[], wire: AiSdkWire): 
         break;
     }
   }
+  // The SDK emits a result even for an unsuccessful Responses search item.
+  // Completion is proven by the native item status, not by HTTP 200 or a result wrapper.
+  for (const value of responseOutput) {
+    const item = record(value);
+    if (item?.type !== "web_search_call" || item.status === "completed") continue;
+    const call = calls.find((candidate) => candidate.toolCallId === item.id);
+    if (call) {
+      call.status = item.status === "failed" ? "error" : "pending";
+      if (item.status === "failed") call.error = "provider-search-failed";
+    }
+  }
   if (message.toolCalls?.length === 0) delete message.toolCalls;
   message.providerData = {
+    ...(calls.length || sources.size
+      ? { picoWebSearch: { calls, sources: [...sources.values()] } }
+      : {}),
     picoAiSdk: {
       wire,
       content: parts,
@@ -229,4 +331,35 @@ export function fromAiSdkContent(content: readonly unknown[], wire: AiSdkWire): 
     } satisfies SavedContent,
   };
   return message;
+}
+
+/** Restore saved items only while their message projection is unchanged, preserving input order. */
+export function restoreResponsesWebSearch(
+  body: Record<string, unknown>,
+  messages: readonly Message[],
+): Record<string, unknown> {
+  if (!Array.isArray(body.input)) return body;
+  const items = new Map<string, Record<string, unknown>>();
+  for (const message of messages) {
+    for (const part of savedContent(message, "responses")?.content ?? []) {
+      if (
+        part.type !== "tool-call" ||
+        part.providerExecuted !== true ||
+        part.toolName !== "web_search"
+      )
+        continue;
+      const item = record(part.providerOptions?.openai?.picoWebSearchItem);
+      if (item?.type === "web_search_call" && item.id === part.toolCallId)
+        items.set(part.toolCallId, item);
+    }
+  }
+  return {
+    ...body,
+    input: body.input.map((value: unknown) => {
+      const part = record(value);
+      return part?.role === "assistant" && typeof part.id === "string" && items.has(part.id)
+        ? structuredClone(items.get(part.id)!)
+        : value;
+    }),
+  };
 }
