@@ -3,11 +3,8 @@ import { access, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import {
-  createRuntimeRequest,
-  DesktopRuntimeService,
-  WorkspaceRuntimeService,
-} from "../../../src/daemon/index.js";
+import { createRuntimeRequest } from "../../../packages/protocol/src/index.js";
+import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
 import { globalSessionManager } from "../../../src/engine/session.js";
 import { PluginRuntimeSnapshotRegistry } from "../../../src/plugins/plugin-runtime-snapshot-registry.js";
 import type { PluginRuntimeSnapshot } from "../../../src/plugins/plugin-runtime-snapshot.js";

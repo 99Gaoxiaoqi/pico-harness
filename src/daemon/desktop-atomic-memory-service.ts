@@ -16,8 +16,8 @@ import type {
   RuntimeNotificationMap,
   RuntimeParams,
   RuntimeResult,
-} from "./protocol.js";
-import { RUNTIME_ERROR_CODES, RuntimeProtocolError } from "./protocol.js";
+} from "@pico/protocol";
+import { RUNTIME_ERROR_CODES, RuntimeProtocolError } from "@pico/protocol";
 
 export interface DesktopAtomicMemoryServiceOptions {
   readonly picoHome: string;

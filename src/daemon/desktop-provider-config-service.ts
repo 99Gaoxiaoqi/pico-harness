@@ -52,7 +52,7 @@ import {
   type JsonObject,
   type JsonValue,
   type RuntimeProviderInput,
-} from "./protocol.js";
+} from "@pico/protocol";
 
 /** Host dependencies that remain outside Provider configuration ownership. */
 export interface DesktopProviderConfigServiceOptions {

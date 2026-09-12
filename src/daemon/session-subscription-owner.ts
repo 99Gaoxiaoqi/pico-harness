@@ -10,7 +10,7 @@ import type {
   RuntimeTranscriptAdvanceCursor,
   RuntimeTranscriptPageCursor,
   RuntimeTranscriptWatermark,
-} from "./protocol.js";
+} from "@pico/protocol";
 import type { DesktopReporterEvent } from "./desktop-reporter.js";
 
 const MAX_PENDING_FRAMES = 512;

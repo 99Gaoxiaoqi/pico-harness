@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createRuntimeNotification } from "../../../src/daemon/protocol.js";
+import { createRuntimeNotification } from "../../../packages/protocol/src/index.js";
 import { buildApprovalRequestedPayload } from "../../../src/daemon/approval-wire.js";
 import { ingestDesktopRuntimeNotification } from "../../../src/daemon/desktop-transcript-persistence.js";
 import { Session } from "../../../src/engine/session.js";

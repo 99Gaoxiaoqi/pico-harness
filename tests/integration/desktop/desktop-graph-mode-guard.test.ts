@@ -3,15 +3,14 @@ import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-
 import {
   createRuntimeNotification,
   createRuntimeRequest,
-  DesktopRuntimeService,
   RuntimeProtocolError,
   RUNTIME_ERROR_CODES,
-  WorkspaceRuntimeService,
-} from "../../../src/daemon/index.js";
+} from "../../../packages/protocol/src/index.js";
+
+import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
 import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
 import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
 import { SqliteAgentGraphControlStore } from "../../../src/storage/sqlite/sqlite-agent-graph-control-store.js";

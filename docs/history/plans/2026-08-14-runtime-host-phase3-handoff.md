@@ -91,7 +91,7 @@
 **第二批（已完成）**：
 
 - **production-host 重构**：抽出 `createProductionRuntimeServices()`（返回 service/desktopService/registrationStore/validateAutomation 等 + `attachHost()` late-binding——automations 的 host 引用改为 `requireHost()`，接口 `ProductionHostControl`）。`createProductionLocalDaemonHost` 变薄装配（解构 + cronRuntimeFactory + LocalDaemonHost）。3-B-3 直接复用 `createProductionRuntimeServices` 喂给 composition。
-- **spec 委托 @pico/protocol 校验**：`runtime-host-operations.ts` 的 decodeInput/decodeOutput 改委托 `parseStrictRuntimeParams` / `parseDesktopRuntimeResult`（单源校验，删掉手写第二套字段校验）；usage.get 无 result 规则，保留结构检查 + 64KB 字节上限。行为与手写版等价（bridge 测试 6/6 验证）。
+- **spec 委托 @pico/protocol 校验**：`runtime-host-operations.ts` 的 decodeInput/decodeOutput 改委托 `parseStrictRuntimeParams` / `parseRuntimeResult`（单源校验，删掉手写第二套字段校验）；usage.get 无 result 规则，保留结构检查 + 64KB 字节上限。行为与手写版等价（bridge 测试 6/6 验证）。
 - **编译期 handler 契约**：新增 `PicoBridgeHandlerMap`（从 spec map 推导 input/output/错误码），composition handlers `satisfies` 它——handler 与 spec 不一致编译期报错（替代 `as unknown as` 裸转）。
 
 **验证**：22/22 runtime-host 测试 + bridge 6/6 + 根 typecheck 0 + 架构门禁 0。`desktop-plugin-parity` 测试 3 在 Windows 上预存失败（断言硬编码 `/workspace/...` Unix 路径，registry 内部 resolve 成 `D:\workspace\...`），与本次改动无关。

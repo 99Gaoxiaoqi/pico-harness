@@ -14,9 +14,9 @@ import {
   tryAcquireInteractiveRootOwner,
   type RuntimeHostConnection,
 } from "@pico/runtime-host";
+import { createTypedRuntimeRequest } from "@pico/protocol";
 import {
   createRuntimeHostCompositionFactory,
-  createTypedRuntimeRequest,
   DesktopRuntimeService,
   ensurePicoRuntimeHostEventOperationsRegistered,
   ensurePicoRuntimeHostOperationsRegistered,

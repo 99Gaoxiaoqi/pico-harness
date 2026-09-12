@@ -7,11 +7,10 @@ import { setImmediate as waitForImmediate } from "node:timers/promises";
 import { test } from "node:test";
 import {
   createRuntimeRequest,
-  DesktopRuntimeService,
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
-  WorkspaceRuntimeService,
-} from "../../../src/daemon/index.js";
+} from "../../../packages/protocol/src/index.js";
+import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
 import { globalSessionManager } from "../../../src/engine/session.js";
 import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
 import type { PluginRuntimeSnapshotRegistry } from "../../../src/plugins/plugin-runtime-snapshot-registry.js";

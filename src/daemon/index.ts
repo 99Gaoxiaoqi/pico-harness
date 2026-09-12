@@ -7,7 +7,6 @@ export * from "./desktop-interaction-store.js";
 export * from "./desktop-memory-request-handlers.js";
 export * from "./desktop-atomic-memory-service.js";
 export * from "./desktop-runtime-service.js";
-export * from "./protocol.js";
 export * from "./runtime-host.js";
 export * from "./runtime-host-candidate.js";
 export * from "./runtime-host-composition.js";

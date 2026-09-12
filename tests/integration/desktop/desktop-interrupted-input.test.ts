@@ -3,11 +3,8 @@ import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import {
-  createRuntimeRequest,
-  DesktopRuntimeService,
-  WorkspaceRuntimeService,
-} from "../../../src/daemon/index.js";
+import { createRuntimeRequest } from "../../../packages/protocol/src/index.js";
+import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
 import { globalSessionManager } from "../../../src/engine/session.js";
 import { materializeRuntimeHistory } from "../../../src/engine/session-runtime-read-model.js";
 import { RuntimeRun } from "../../../src/runtime/runtime-run.js";

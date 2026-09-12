@@ -8,7 +8,7 @@ import {
   parseRuntimeResult,
   type RuntimeParams,
   type RuntimeResult,
-} from "./protocol.js";
+} from "@pico/protocol";
 import type { DesktopConversationStateStoreLike } from "./desktop-conversation-state.js";
 import { canonicalizeWorkspacePath } from "./workspace-registry.js";
 import { projectDesktopRewindFingerprints } from "./desktop-review.js";

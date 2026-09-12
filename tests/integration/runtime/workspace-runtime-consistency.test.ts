@@ -5,12 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  canonicalizeWorkspacePath,
   createRuntimeRequest,
-  resolveGitBranch,
-  WorkspaceRegistrationStore,
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
+} from "../../../packages/protocol/src/index.js";
+import {
+  canonicalizeWorkspacePath,
+  resolveGitBranch,
+  WorkspaceRegistrationStore,
   WorkspaceRuntimeService,
 } from "../../../src/daemon/index.js";
 import type { WorkspaceTaskRuntime } from "../../../src/runtime/workspace-runtime.js";

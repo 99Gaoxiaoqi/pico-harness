@@ -4,12 +4,8 @@ import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { RuntimeResult } from "@pico/protocol";
-import {
-  createRuntimeRequest,
-  DesktopRuntimeService,
-  WorkspaceRuntimeService,
-} from "../../../src/daemon/index.js";
+import { createRuntimeRequest, type RuntimeResult } from "@pico/protocol";
+import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
 import { EffectiveConfigResolver } from "../../../src/input/effective-config.js";
 import {
   OPENCODE_FREE_PROVIDER,

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  parseDesktopRuntimeResult,
   parseRuntimeResult,
   parseStrictRuntimeParams,
   RUNTIME_ERROR_CODES,
@@ -18,7 +17,7 @@ test("session.get accepts durable parent navigation while preserving legacy sess
     createdAt: 1,
     updatedAt: 2,
   };
-  assert.deepEqual(parseDesktopRuntimeResult("session.get", { session }), { session });
+  assert.deepEqual(parseRuntimeResult("session.get", { session }), { session });
   const linked = {
     ...session,
     parentSession: {
@@ -27,7 +26,7 @@ test("session.get accepts durable parent navigation while preserving legacy sess
       agentName: "Local Read",
     },
   };
-  assert.deepEqual(parseDesktopRuntimeResult("session.get", { session: linked }), {
+  assert.deepEqual(parseRuntimeResult("session.get", { session: linked }), {
     session: linked,
   });
   for (const parentSession of [
@@ -36,7 +35,7 @@ test("session.get accepts durable parent navigation while preserving legacy sess
     { sessionId: "", workspacePath: "/parent-project" },
   ]) {
     assert.throws(() =>
-      parseDesktopRuntimeResult("session.get", { session: { ...session, parentSession } }),
+      parseRuntimeResult("session.get", { session: { ...session, parentSession } }),
     );
   }
 });
@@ -78,7 +77,7 @@ test("rewind.apply keeps one strict v2 request/result contract", () => {
 
 test("Runtime result boundary rejects malformed responses for previously unchecked methods", () => {
   assert.throws(
-    () => parseDesktopRuntimeResult("config.get", { config: [], version: "1" }),
+    () => parseRuntimeResult("config.get", { config: [], version: "1" }),
     (error: unknown) => {
       assert.ok(error instanceof RuntimeProtocolError);
       assert.equal(error.code, RUNTIME_ERROR_CODES.INVALID_REQUEST);
@@ -89,7 +88,7 @@ test("Runtime result boundary rejects malformed responses for previously uncheck
 
 test("Runtime result boundary accepts the declared config.get response", () => {
   const result = { config: { model: "demo" }, version: 1 } as const;
-  assert.deepEqual(parseDesktopRuntimeResult("config.get", result), result);
+  assert.deepEqual(parseRuntimeResult("config.get", result), result);
 });
 
 test("daemon-only Runtime methods use the same fail-closed result decoder", () => {
@@ -165,5 +164,5 @@ test("session continuity accepts projected tool identity metadata", () => {
     queuedInputs: [],
   } as const;
 
-  assert.deepEqual(parseDesktopRuntimeResult("session.subscription.open", result), result);
+  assert.deepEqual(parseRuntimeResult("session.subscription.open", result), result);
 });

@@ -10,11 +10,11 @@ import {
   resolveRootControlNamespace,
   resolveStorageRoot,
 } from "@pico/runtime-host";
+import type { RuntimeNotification } from "@pico/protocol";
 import {
   LocalRuntimeClient,
   RuntimeClientError,
   type LocalRuntimeClientOptions,
-  type RuntimeNotification,
 } from "../../../src/daemon/index.js";
 import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
 import { sessionOwnerLeaseDirectory } from "../../../src/storage/session-owner-lease.js";

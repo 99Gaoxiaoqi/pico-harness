@@ -8,7 +8,7 @@ import {
   type JsonValue,
   type RuntimeMethod,
   type RuntimeRequest,
-} from "./protocol.js";
+} from "@pico/protocol";
 import {
   createRuntimeHostEventBridge,
   type RuntimeHostEventBridge,

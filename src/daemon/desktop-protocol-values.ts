@@ -4,7 +4,7 @@ import {
   isJsonValue,
   type JsonObject,
   type JsonValue,
-} from "./protocol.js";
+} from "@pico/protocol";
 
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

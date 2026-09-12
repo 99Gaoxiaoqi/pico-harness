@@ -5,7 +5,7 @@ import {
   DESKTOP_RUNTIME_METHODS,
   isMemoryRuntimeNotification,
   isRuntimeMethod,
-  parseDesktopRuntimeResult,
+  parseRuntimeResult,
   parseStrictRuntimeParams,
   RUNTIME_ERROR_CODES,
   RUNTIME_METHODS,
@@ -118,37 +118,37 @@ test("memory settings expose only current extraction and recall switches", () =>
   }
 
   const settings = { enabled: true, autoExtract: false, recallEnabled: true, version: 2 };
-  assert.deepEqual(parseDesktopRuntimeResult("memory.settings.get", { settings }), { settings });
+  assert.deepEqual(parseRuntimeResult("memory.settings.get", { settings }), { settings });
   assertProtocolError(
     () =>
-      parseDesktopRuntimeResult("memory.settings.get", {
+      parseRuntimeResult("memory.settings.get", {
         settings: { ...settings, autoPropose: false },
       }),
     RUNTIME_ERROR_CODES.INVALID_REQUEST,
   );
   assertProtocolError(
-    () => parseDesktopRuntimeResult("memory.settings.get", { settings, reviewBudget: {} }),
+    () => parseRuntimeResult("memory.settings.get", { settings, reviewBudget: {} }),
     RUNTIME_ERROR_CODES.INVALID_REQUEST,
   );
 });
 
 test("memory results expose direct atomic Items and reject legacy envelopes", () => {
   const item = runtimeItem();
-  assert.deepEqual(parseDesktopRuntimeResult("memory.get", { item }), { item });
-  assert.deepEqual(parseDesktopRuntimeResult("memory.list", { items: [item] }), {
+  assert.deepEqual(parseRuntimeResult("memory.get", { item }), { item });
+  assert.deepEqual(parseRuntimeResult("memory.list", { items: [item] }), {
     items: [item],
   });
-  assert.deepEqual(
-    parseDesktopRuntimeResult("memory.delete", { itemId: item.itemId, deleted: true }),
-    { itemId: item.itemId, deleted: true },
-  );
+  assert.deepEqual(parseRuntimeResult("memory.delete", { itemId: item.itemId, deleted: true }), {
+    itemId: item.itemId,
+    deleted: true,
+  });
   assertProtocolError(
-    () => parseDesktopRuntimeResult("memory.get", { fact: item }),
+    () => parseRuntimeResult("memory.get", { fact: item }),
     RUNTIME_ERROR_CODES.INVALID_REQUEST,
   );
   assertProtocolError(
     () =>
-      parseDesktopRuntimeResult("memory.get", {
+      parseRuntimeResult("memory.get", {
         item: { ...item, atomic: { itemId: item.itemId } },
       }),
     RUNTIME_ERROR_CODES.INVALID_REQUEST,

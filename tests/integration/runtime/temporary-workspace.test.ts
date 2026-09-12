@@ -4,13 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
-  parseDesktopRuntimeResult,
+  parseRuntimeResult,
   parseStrictRuntimeParams,
   RUNTIME_ERROR_CODES,
   RuntimeProtocolError,
   type WorkspaceStatusResult,
 } from "../../../packages/protocol/src/index.js";
-import { createRuntimeRequest } from "../../../src/daemon/protocol.js";
+import { createRuntimeRequest } from "../../../packages/protocol/src/index.js";
 import { DesktopRuntimeService } from "../../../src/daemon/desktop-runtime-service.js";
 import {
   TemporaryWorkspaceAuthority,
@@ -28,15 +28,15 @@ test("temporary workspace protocol is strict and requires the temporary marker",
   );
 
   const status = temporaryStatus("/state/temporary-workspace");
-  assert.deepEqual(parseDesktopRuntimeResult("workspace.temporary.ensure", status), status);
+  assert.deepEqual(parseRuntimeResult("workspace.temporary.ensure", status), status);
   const { temporary: _temporary, ...ordinary } = status;
   assert.throws(
-    () => parseDesktopRuntimeResult("workspace.temporary.ensure", ordinary),
+    () => parseRuntimeResult("workspace.temporary.ensure", ordinary),
     RuntimeProtocolError,
   );
   assert.throws(
     () =>
-      parseDesktopRuntimeResult("workspace.temporary.ensure", {
+      parseRuntimeResult("workspace.temporary.ensure", {
         ...status,
         temporary: false,
       }),
@@ -44,7 +44,7 @@ test("temporary workspace protocol is strict and requires the temporary marker",
   );
   assert.throws(
     () =>
-      parseDesktopRuntimeResult("workspace.temporary.ensure", {
+      parseRuntimeResult("workspace.temporary.ensure", {
         ...status,
         registered: false,
       }),
@@ -52,7 +52,7 @@ test("temporary workspace protocol is strict and requires the temporary marker",
   );
   assert.throws(
     () =>
-      parseDesktopRuntimeResult("workspace.temporary.ensure", {
+      parseRuntimeResult("workspace.temporary.ensure", {
         ...status,
         secret: "must-not-cross-ipc",
       }),

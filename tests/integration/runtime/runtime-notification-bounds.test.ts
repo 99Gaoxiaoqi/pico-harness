@@ -6,9 +6,9 @@ import { test } from "node:test";
 import {
   encodeRuntimeFrame,
   LOCAL_RUNTIME_PROTOCOL_VERSION,
-} from "../../../src/daemon/protocol.js";
+} from "../../../packages/protocol/src/index.js";
 import { WorkspaceRuntimeService } from "../../../src/daemon/workspace-runtime-service.js";
-import { createRuntimeNotification } from "../../../src/daemon/protocol.js";
+import { createRuntimeNotification } from "../../../packages/protocol/src/index.js";
 
 test("oversized durable notifications are bounded before entering replay", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-runtime-notification-bounds-"));

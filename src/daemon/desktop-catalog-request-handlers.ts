@@ -16,7 +16,7 @@ import {
   type JsonValue,
   type RuntimeMcpServerInput,
   type RuntimeScopedMcpServer,
-} from "./protocol.js";
+} from "@pico/protocol";
 import type { PluginRuntimeSnapshotRegistry } from "../plugins/plugin-runtime-snapshot-registry.js";
 import type { WorkspaceTrustStore } from "../security/workspace-trust.js";
 import type { McpServerConfig } from "../mcp/types.js";

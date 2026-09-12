@@ -10,7 +10,7 @@ import {
   wakeIdFor,
 } from "../../../src/agent-graph/core/ids.js";
 import { createProductionRuntimeServices } from "../../../src/daemon/production-host.js";
-import { createRuntimeRequest } from "../../../src/daemon/protocol.js";
+import { createRuntimeRequest } from "../../../packages/protocol/src/index.js";
 import { globalSessionManager } from "../../../src/engine/session.js";
 import {
   AgentRuntime,

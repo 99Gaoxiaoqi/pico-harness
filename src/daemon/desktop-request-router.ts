@@ -1,4 +1,4 @@
-import type { JsonValue, RuntimeMethod, RuntimeRequest } from "./protocol.js";
+import type { JsonValue, RuntimeMethod, RuntimeRequest } from "@pico/protocol";
 
 type Awaitable<T> = T | Promise<T>;
 

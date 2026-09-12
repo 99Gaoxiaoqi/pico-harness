@@ -1,4 +1,4 @@
-import type { JsonValue, RuntimeRequest } from "./protocol.js";
+import type { JsonValue, RuntimeRequest } from "@pico/protocol";
 import type { DesktopRequestHandlers } from "./desktop-request-router.js";
 
 type WorkbarMethod =

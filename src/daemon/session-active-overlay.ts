@@ -1,4 +1,4 @@
-import type { RuntimeActiveOverlayEntry } from "./protocol.js";
+import type { RuntimeActiveOverlayEntry } from "@pico/protocol";
 
 export const ACTIVE_OVERLAY_FLUSH_INTERVAL_MS = 80;
 export const ACTIVE_OVERLAY_FLUSH_BYTES = 8 * 1024;

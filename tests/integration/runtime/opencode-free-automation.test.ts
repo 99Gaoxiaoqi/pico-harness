@@ -5,8 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
-import type { RuntimeResult } from "@pico/protocol";
-import { createRuntimeRequest } from "../../../src/daemon/index.js";
+import { createRuntimeRequest, type RuntimeResult } from "@pico/protocol";
 import {
   assembleProductionDaemonHost,
   createProductionRuntimeServices,

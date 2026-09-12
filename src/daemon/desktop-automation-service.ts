@@ -26,7 +26,7 @@ import {
   RuntimeProtocolError,
   type RuntimeJob,
   type RuntimeRun,
-} from "./protocol.js";
+} from "@pico/protocol";
 
 export interface DesktopAutomationSecurity {
   readonly policySnapshot: AutonomousPolicySnapshot;

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   DESKTOP_RUNTIME_METHODS,
-  parseDesktopRuntimeResult,
+  parseRuntimeResult,
   parseStrictRuntimeParams,
   RuntimeProtocolError,
 } from "@pico/protocol";
@@ -67,7 +67,7 @@ test("workbar data methods reject unknown and oversized parameters", () => {
       wakeId: "wake-1",
     },
   );
-  assert.deepEqual(parseDesktopRuntimeResult("session.graph.retryWake", { retried: true }), {
+  assert.deepEqual(parseRuntimeResult("session.graph.retryWake", { retried: true }), {
     retried: true,
   });
   assert.ok(DESKTOP_RUNTIME_METHODS.includes("session.graph.retryWake"));
@@ -150,7 +150,7 @@ test("review, terminal and side chat contracts are renderer allowlisted and stri
       }),
     RuntimeProtocolError,
   );
-  parseDesktopRuntimeResult("terminal.attach", {
+  parseRuntimeResult("terminal.attach", {
     terminal: {
       terminalId: "terminal",
       workspacePath: "/workspace",
@@ -170,7 +170,7 @@ test("review, terminal and side chat contracts are renderer allowlisted and stri
   });
   assert.throws(
     () =>
-      parseDesktopRuntimeResult("terminal.attach", {
+      parseRuntimeResult("terminal.attach", {
         terminal: {
           terminalId: "terminal",
           workspacePath: "/workspace",

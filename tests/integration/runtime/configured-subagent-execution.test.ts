@@ -1,5 +1,5 @@
 import { ingestDesktopRuntimeNotification } from "../../../src/daemon/desktop-transcript-persistence.js";
-import { createRuntimeNotification } from "../../../src/daemon/protocol.js";
+import { createRuntimeNotification } from "../../../packages/protocol/src/index.js";
 import { parseConversation } from "../../../apps/desktop/src/renderer/conversation/runtime-projection.js";
 import {
   subagentParent,

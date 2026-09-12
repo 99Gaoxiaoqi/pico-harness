@@ -3,7 +3,7 @@ import type {
   RuntimeNotification,
   RuntimeNotificationPage,
   RuntimeRequest,
-} from "./protocol.js";
+} from "@pico/protocol";
 
 export interface RuntimeNotificationCursor {
   /** Exclusive event ID cursor. Omit it to read from the oldest retained event. */

@@ -6,7 +6,7 @@ import {
   unsupportedProviderPresets,
 } from "../../../apps/desktop/src/renderer/provider-presets.js";
 import { createProvider } from "../../../src/provider/factory.js";
-import { parseStrictRuntimeParams } from "../../../src/daemon/protocol.js";
+import { parseStrictRuntimeParams } from "../../../packages/protocol/src/index.js";
 
 // This verifies the catalog-to-wire boundary locally. It does not call a model
 // service or claim that a user's key has access to the suggested models.

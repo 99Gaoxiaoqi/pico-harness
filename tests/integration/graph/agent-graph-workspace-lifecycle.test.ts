@@ -5,8 +5,9 @@ import { join } from "node:path";
 import { setImmediate as waitForImmediate } from "node:timers/promises";
 import test, { type TestContext } from "node:test";
 
+import { createRuntimeRequest } from "../../../packages/protocol/src/index.js";
 import type { AgentGraphApplicationService } from "../../../src/agent-graph/service.js";
-import { createRuntimeRequest, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
+import { WorkspaceRuntimeService } from "../../../src/daemon/index.js";
 import type { WorkspaceTaskRuntime } from "../../../src/runtime/workspace-runtime.js";
 
 test("workspace owns one Graph application and closes it after Runtime drain but before stores", async (context) => {

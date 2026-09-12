@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import type { Session } from "../engine/session.js";
 import { fileHistoryChanges, type FileHistoryChanges } from "../safety/file-history.js";
-import { RUNTIME_ERROR_CODES, RuntimeProtocolError } from "./protocol.js";
+import { RUNTIME_ERROR_CODES, RuntimeProtocolError } from "@pico/protocol";
 
 export interface DesktopCheckpointProjection {
   readonly sessionId: string;

@@ -1,4 +1,4 @@
-import { RuntimeProtocolError, type RuntimeParams, type RuntimeResult } from "./protocol.js";
+import { RuntimeProtocolError, type RuntimeParams, type RuntimeResult } from "@pico/protocol";
 import {
   mapRuntimeErrorCode,
   RUNTIME_HOST_BRIDGE_SESSION_SUBSCRIPTION_CLOSE,

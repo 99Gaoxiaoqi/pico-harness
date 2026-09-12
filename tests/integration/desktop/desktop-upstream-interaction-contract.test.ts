@@ -5,18 +5,17 @@ import { join } from "node:path";
 import test from "node:test";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { parseStrictRuntimeParams } from "../../../packages/protocol/src/runtime.js";
+import {
+  createRuntimeRequest,
+  parseStrictRuntimeParams,
+} from "../../../packages/protocol/src/index.js";
 import { ConversationInteractionSlot } from "../../../apps/desktop/src/renderer/conversation/ConversationInteractionSlot.js";
 import { groupConversationItemsIntoTurns } from "../../../apps/desktop/src/renderer/conversation/ConversationTranscript.js";
 import {
   omitApprovalAuditItems,
   removeSupersededActiveTools,
 } from "../../../apps/desktop/src/renderer/conversation/items.js";
-import {
-  createRuntimeRequest,
-  DesktopRuntimeService,
-  WorkspaceRuntimeService,
-} from "../../../src/daemon/index.js";
+import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
 import { globalSessionManager } from "../../../src/engine/session.js";
 import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";

@@ -31,7 +31,7 @@ import {
   type RuntimeNotification,
   type RuntimeNotificationPage,
   type RuntimeRequest,
-} from "../../../src/daemon/protocol.js";
+} from "../../../packages/protocol/src/index.js";
 
 // 注：runtime.shutdown 的 spec 与 composition handler 必须成对（动态注册表
 // 进程级——客户端连接时也会注册；本测试的 composition 对齐 candidate 补 handler）。

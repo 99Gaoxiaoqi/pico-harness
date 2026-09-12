@@ -28,7 +28,7 @@ import {
   type RuntimeNotificationPage,
   type RuntimeRequest,
   type WorkspaceStatusResult,
-} from "./protocol.js";
+} from "@pico/protocol";
 import type {
   DisposableLocalRuntimeService,
   RuntimeNotificationCursor,

@@ -7,7 +7,7 @@ import { mergeConversationItemGroups } from "../../../apps/desktop/src/renderer/
 import { parseConversation } from "../../../apps/desktop/src/renderer/conversation/runtime-projection.js";
 import { applyTimelineNotification } from "../../../apps/desktop/src/renderer/timeline.js";
 import { DesktopReporter } from "../../../src/daemon/desktop-reporter.js";
-import type { RuntimeNotification } from "../../../src/daemon/protocol.js";
+import type { RuntimeNotification } from "../../../packages/protocol/src/index.js";
 import { publishDesktopReporterEvent } from "../../../src/daemon/production-host.js";
 import type { WorkspaceRuntimeService } from "../../../src/daemon/workspace-runtime-service.js";
 import { ScopedSubagentActivityReporter } from "../../../src/tools/subagent-activity-reporter.js";

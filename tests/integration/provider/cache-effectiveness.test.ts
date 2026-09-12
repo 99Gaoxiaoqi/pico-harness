@@ -3,13 +3,10 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { createRuntimeRequest } from "../../../packages/protocol/src/index.js";
 import { FULL_COMPACTION_SUMMARY_MARKER } from "../../../src/context/compaction-markers.js";
 import { parseUsage } from "../../../apps/desktop/src/renderer/usage/runtime-projection.js";
-import {
-  createRuntimeRequest,
-  DesktopRuntimeService,
-  WorkspaceRuntimeService,
-} from "../../../src/daemon/index.js";
+import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
 import {
   capturePreparedProviderRequest,
   diagnosePreparedProviderRequest,
