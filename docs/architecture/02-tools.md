@@ -193,8 +193,8 @@ L4 逐行去缩进 + 缩进重对齐
 
 - 前台 `HookService` 支持完整事件集和 `command/http/mcp_tool/prompt/agent`。
 - 普通 handler 故障 fail-open；父级 Abort 必须中止全部子执行。
-- Pico 原生配置位于 `$PICO_HOME/hooks.json` 与 `.pico/hooks.json`；旧本机 Hook 文件和 legacy settings 只读兼容。
-- 可执行 handler 经工作区、定义和脚本字节哈希绑定信任。
+- Pico 原生配置位于 `$PICO_HOME/hooks.json` 与 `.pico/hooks.json`，只接受 canonical `event → matcher group → handlers` 结构；历史本机 Hook 文件和 settings wrapper 不读取、不迁移。
+- 可执行 handler 经真实工作区、来源与规范化定义哈希绑定信任。
 - 后台/Cron 继续使用 command-only、network-deny、fail-closed strict runner。
 
 ---

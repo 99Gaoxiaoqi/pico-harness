@@ -577,7 +577,7 @@ function extendHookPolicy(
   const trustedReadRoots = [
     resolved.source.path,
     ...(typeof runtimeRoot === "string" ? [runtimeRoot] : []),
-    // Hook 配置已经用户字节指纹批准；它的主可执行文件是可接受的最小
+    // Hook handler 定义已经用户指纹批准；它的主可执行文件是可接受的最小
     // 运行时 authority。这与模型提供的任意 shell 片段不同，后者仍不能扩权。
     ...runtimeReadRoots(invocation.command, invocation.env),
     ...shellRuntimeReadRoots(invocation.commandString, invocation.env),

@@ -590,12 +590,6 @@ async function canonicalPath(path: string): Promise<string> {
   }
 }
 
-export {
-  existingReferencedScripts,
-  resolveReferencedScriptCandidates,
-  resolveReferencedScripts,
-} from "./config/command-shell.js";
-
 export function stableStringify(input: unknown): string {
   return JSON.stringify(sortValue(input));
 }

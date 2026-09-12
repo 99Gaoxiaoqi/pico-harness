@@ -588,7 +588,7 @@ export class StrictBackgroundHookRunner {
       };
       const timer = setTimeout(
         () => fail("Hook 超时，已按 fail-closed 阻断。"),
-        handler.timeoutMs ?? handler.timeout ?? DEFAULT_HOOK_TIMEOUT_MS,
+        handler.timeoutMs ?? DEFAULT_HOOK_TIMEOUT_MS,
       );
       const capture = (target: "stdout" | "stderr", chunk: Buffer) => {
         if (settled) return;
