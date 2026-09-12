@@ -467,16 +467,15 @@ export type WorkbarMethodMap = {
       readonly sessionId: SessionId;
       readonly checkpointId: CheckpointId;
       readonly expectedFingerprint: string;
-      /** 回滚范围（fork mode）；缺省 both（向后兼容旧客户端）。 */
-      readonly mode?: RuntimeRewindMode;
-      /** 同一确认动作的稳定键；缺省时 daemon 按精确请求派生兼容键。 */
-      readonly idempotencyKey?: string;
+      /** 回滚范围（fork mode）。 */
+      readonly mode: RuntimeRewindMode;
+      /** 同一确认动作的稳定键。 */
+      readonly idempotencyKey: string;
     };
     readonly result: {
       readonly applied: boolean;
       readonly sessionId: SessionId;
-      /** v2 旧 daemon 未返回该字段；存在时必须与请求源 Session 一致。 */
-      readonly sourceSessionId?: SessionId;
+      readonly sourceSessionId: SessionId;
     };
   };
   /** 单文件恢复（/changes）：checkpoint 维度的逐文件 diff + 当前指纹（preview）。 */
@@ -722,18 +721,14 @@ export const workbarParamValidators = {
     sessionId: stringParam,
     checkpointId: stringParam,
   }),
-  "rewind.apply": exactParamShape(
-    {
-      workspacePath: stringParam,
-      sessionId: stringParam,
-      checkpointId: stringParam,
-      expectedFingerprint: stringParam,
-    },
-    {
-      mode: oneOfParam(["code", "conversation", "both"]),
-      idempotencyKey: boundedNonEmptyStringParam(512),
-    },
-  ),
+  "rewind.apply": exactParamShape({
+    workspacePath: stringParam,
+    sessionId: stringParam,
+    checkpointId: stringParam,
+    expectedFingerprint: stringParam,
+    mode: oneOfParam(["code", "conversation", "both"]),
+    idempotencyKey: boundedNonEmptyStringParam(512),
+  }),
   "rewind.changes": exactParamShape({
     workspacePath: stringParam,
     sessionId: stringParam,
@@ -843,10 +838,11 @@ export const workbarResultValidators = {
     changes: resultArray(runtimeChangeResult),
     fingerprint: resultString,
   }),
-  "rewind.apply": exactResultShape(
-    { applied: resultBoolean, sessionId: resultString },
-    { sourceSessionId: resultNonEmptyString },
-  ),
+  "rewind.apply": exactResultShape({
+    applied: resultBoolean,
+    sessionId: resultString,
+    sourceSessionId: resultNonEmptyString,
+  }),
   "rewind.changes": exactResultShape(
     {
       checkpointId: resultString,

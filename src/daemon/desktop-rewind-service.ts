@@ -58,12 +58,12 @@ export class DesktopRewindService {
       ...params,
       workspacePath: canonical,
     });
-    const idempotencyKey = `rewind.apply:${params.idempotencyKey ?? `auto:${requestFingerprint}`}`;
+    const idempotencyKey = `rewind.apply:${params.idempotencyKey}`;
     const pendingKey = `${canonical}\0${idempotencyKey}`;
     const completed = this.completed.get(pendingKey);
     if (completed) {
       if (completed.requestFingerprint !== requestFingerprint) {
-        throw rewindConflict(params, idempotencyKey, "已绑定不同的 rewind 请求");
+        throw rewindConflict(params, "已绑定不同的 rewind 请求");
       }
       return completed.result;
     }
@@ -73,7 +73,7 @@ export class DesktopRewindService {
     );
     if (stored) {
       if (stored.requestFingerprint !== requestFingerprint) {
-        throw rewindConflict(params, idempotencyKey, "已绑定不同的 rewind 请求");
+        throw rewindConflict(params, "已绑定不同的 rewind 请求");
       }
       return parseRuntimeResult("rewind.apply", stored.result);
     }
@@ -81,7 +81,7 @@ export class DesktopRewindService {
     const pending = this.pending.get(pendingKey);
     if (pending) {
       if (pending.requestFingerprint !== requestFingerprint) {
-        throw rewindConflict(params, idempotencyKey, "正在处理不同的 rewind 请求");
+        throw rewindConflict(params, "正在处理不同的 rewind 请求");
       }
       return pending.promise;
     }
@@ -106,7 +106,7 @@ export class DesktopRewindService {
       claimed.operationId !== desktopRewindOperationId(canonical, idempotencyKey) ||
       (params.mode === "code" && claimed.targetSessionId !== params.sessionId)
     ) {
-      throw rewindConflict(params, idempotencyKey, "已绑定不同的 rewind 请求");
+      throw rewindConflict(params, "已绑定不同的 rewind 请求");
     }
 
     const operation = this.applyOnce(
@@ -159,7 +159,7 @@ export class DesktopRewindService {
       canonical,
       params.sessionId,
       async (session) => {
-        const mode = params.mode ?? "both";
+        const mode = params.mode;
         if (mode !== "code" && !session.getRuntimeStateSnapshot().settings) {
           throw new RuntimeProtocolError(
             RUNTIME_ERROR_CODES.RESET_REQUIRED,
@@ -220,17 +220,16 @@ export class DesktopRewindService {
 
 function rewindConflict(
   params: RuntimeParams<"rewind.apply">,
-  idempotencyKey: string,
   message: string,
 ): RuntimeProtocolError {
   return new RuntimeProtocolError(
     RUNTIME_ERROR_CODES.CONFLICT,
-    `idempotencyKey ${params.idempotencyKey ?? idempotencyKey} ${message}`,
+    `idempotencyKey ${params.idempotencyKey} ${message}`,
   );
 }
 
 function desktopRewindRequestFingerprint(params: RuntimeParams<"rewind.apply">): string {
-  const mode = params.mode ?? "both";
+  const mode = params.mode;
   return createHash("sha256")
     .update(
       JSON.stringify({

@@ -2234,17 +2234,22 @@ export function useRuntimeStore(): RuntimeStore {
         const { workspacePath, sessionId } = ref;
         if (!workspacePath || !fingerprint) return;
         await perform("rewind-apply", async (bridge) => {
-          if (!preview)
-            await invoke(bridge, "rewind.apply", {
+          let targetSessionId = sessionId;
+          if (!preview) {
+            const result = await invoke(bridge, "rewind.apply", {
               workspacePath,
               sessionId,
               checkpointId,
               expectedFingerprint: fingerprint,
+              mode: "both",
+              idempotencyKey: globalThis.crypto.randomUUID(),
             });
+            targetSessionId = stringValue(result.sessionId) || sessionId;
+          }
           setMessage("已回到检查点。Runtime 已使用预览指纹重新验证。");
           if (!preview) {
             await loadWorkspace(bridge, workspacePath);
-            await loadConversation(bridge, workspacePath, sessionId);
+            await loadConversation(bridge, workspacePath, targetSessionId);
           }
         });
       },

@@ -1131,7 +1131,7 @@ test("rewind fork keeps the current cumulative boundary instead of its historica
   }
 });
 
-for (const variant of ["conversation", "omitted-both"] as const) {
+for (const variant of ["conversation", "both"] as const) {
   test(`rewind.apply ${variant} replays one durable idempotent result`, async () => {
     const fixture = await createFixture(`idempotent-${variant}`);
     const targetSessionId = `rewind-idempotent-${variant}-target`;
@@ -1171,7 +1171,7 @@ for (const variant of ["conversation", "omitted-both"] as const) {
         await desktop.handle(
           createRuntimeRequest("rewind.apply", {
             ...baseParams,
-            ...(variant === "conversation" ? { mode: "conversation" as const } : {}),
+            mode: variant,
           }),
         ),
       );
@@ -1180,9 +1180,7 @@ for (const variant of ["conversation", "omitted-both"] as const) {
         await desktop.handle(
           createRuntimeRequest("rewind.apply", {
             ...baseParams,
-            ...(variant === "conversation"
-              ? { mode: "conversation" as const }
-              : { mode: "both" as const }),
+            mode: variant,
           }),
         ),
       );
@@ -1193,7 +1191,7 @@ for (const variant of ["conversation", "omitted-both"] as const) {
         sourceSessionId: fixture.session.id,
       });
       assert.deepEqual(await sessionIds(fixture), [fixture.session.id, targetSessionId].toSorted());
-      const restoresCode = variant === "omitted-both";
+      const restoresCode = variant === "both";
       assert.equal(
         await readFile(fixture.firstFile, "utf8"),
         restoresCode ? "a-before\n" : "a-after\n",
@@ -1217,9 +1215,7 @@ for (const variant of ["conversation", "omitted-both"] as const) {
         await desktop.handle(
           createRuntimeRequest("rewind.apply", {
             ...baseParams,
-            ...(variant === "conversation"
-              ? { mode: "conversation" as const }
-              : { mode: "both" as const }),
+            mode: variant,
           }),
         ),
       );
