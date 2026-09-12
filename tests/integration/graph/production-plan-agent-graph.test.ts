@@ -19,6 +19,7 @@ import {
 import { createEngineRuntimePort } from "../../../src/runtime/engine-runtime-port-adapter.js";
 import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
+import { compileRuntimePermissionProfile } from "../../../src/safety/permission-profile.js";
 
 for (const recoverAfterFinish of [false, true]) {
   test(
@@ -59,6 +60,21 @@ for (const recoverAfterFinish of [false, true]) {
           if (wake) {
             assert.ok(dependencies.prestartedRun);
             wakeRuns.push(dependencies.prestartedRun.runId);
+          }
+          if (binding?.kind === "operator") {
+            const snapshot = dependencies.runtimeSession?.getRuntimeStateSnapshot();
+            assert.deepEqual(snapshot?.settings, {
+              provider: "openai",
+              model: "coder",
+              modelRouteId: "test/coder",
+              collaborationMode: "agent",
+              permissionMode: "ask",
+              orchestrationMode: "default",
+              thinkingEffort: "off",
+              thinkingEffortExplicit: false,
+              additionalDirectories: [],
+            });
+            assert.equal(snapshot?.boundary?.kind, "managed");
           }
           let turn = 0;
           return super.execute(options, {
@@ -248,6 +264,10 @@ for (const recoverAfterFinish of [false, true]) {
             thinkingEffortExplicit: false,
             additionalDirectories: [],
           },
+          boundary: compileRuntimePermissionProfile({
+            collaborationMode: "agent",
+            permissionMode: "ask",
+          }),
         });
         await session.flushPersistence();
         lease.release();

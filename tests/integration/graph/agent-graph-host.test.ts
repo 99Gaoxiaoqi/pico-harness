@@ -304,6 +304,101 @@ test("workspace Graph host executes an exact operator with owner-fenced output a
   }
 });
 
+test("workspace Graph host durably initializes operator settings before exact-run admission", async () => {
+  let executed = false;
+  const fixture = await createHostFixture(
+    async (input) => {
+      executed = true;
+      const events = await input.session.runtimeEventStore!.readSession(input.session.id);
+      const stateIndex = events.findIndex(
+        (event) =>
+          event.kind === "session.state.committed" &&
+          event.data.patch.settings !== undefined &&
+          event.data.patch.boundary !== undefined,
+      );
+      const runStartedIndex = events.findIndex(
+        (event) => event.kind === "run.started" && event.runId === input.prestartedRun.runId,
+      );
+      assert.ok(stateIndex >= 0, "operator settings and boundary must commit in one durable event");
+      assert.ok(stateIndex < runStartedIndex, "runtime state must commit before run admission");
+      assert.deepEqual(input.session.getRuntimeStateSnapshot().settings, {
+        provider: "openai",
+        model: "operator-model",
+        modelRouteId: "test/operator-model",
+        collaborationMode: "agent",
+        permissionMode: "ask",
+        orchestrationMode: "default",
+        thinkingEffort: "off",
+        thinkingEffortExplicit: false,
+        additionalDirectories: [],
+      });
+      const runtimeRun = await attachHostedRuntimeRun(input);
+      await runtimeRun.finish("completed");
+      input.onTerminal();
+    },
+    {},
+    { resolveOperatorSessionSettings: currentOperatorSettings },
+  );
+  try {
+    await scheduleOperator(
+      fixture,
+      graphIdFor(fixture.owner.session.id, 1),
+      "intent-operator-bootstrap",
+    );
+    assert.equal(executed, true);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("workspace Graph host rejects a partially initialized operator without compatibility fallback", async () => {
+  let executions = 0;
+  const fixture = await createHostFixture(
+    async () => {
+      executions++;
+    },
+    {},
+    { resolveOperatorSessionSettings: currentOperatorSettings },
+  );
+  let childLease: Awaited<ReturnType<SessionManager["getOrCreatePinned"]>> | undefined;
+  try {
+    const graphId = graphIdFor(fixture.owner.session.id, 1);
+    const childSessionId = `graph-session_${deterministicFingerprint([graphId, "researcher", 1]).slice("sha256:".length, 39)}`;
+    childLease = await fixture.manager.getOrCreatePinned(
+      childSessionId,
+      fixture.owner.session.workDir,
+      {
+        persistence: true,
+        picoHome: fixture.owner.session.picoHome,
+        runtimePort: createEngineRuntimePort(),
+      },
+    );
+    childLease.session.updateRuntimeState({
+      boundary: compileRuntimePermissionProfile({
+        collaborationMode: "agent",
+        permissionMode: "ask",
+      }),
+    });
+    await childLease.session.flushPersistence();
+
+    await scheduleOperator(fixture, graphId, "intent-partial-bootstrap");
+    assert.equal(executions, 0);
+    assert.equal(
+      (await childLease.session.runtimeEventStore!.readSession(childSessionId)).some(
+        (event) => event.kind === "run.started",
+      ),
+      false,
+    );
+    assert.match(
+      fixture.host.store.listGraphDiagnostics(graphId, { unresolvedOnly: true })[0]?.message ?? "",
+      /incomplete current runtime state/u,
+    );
+  } finally {
+    childLease?.release();
+    await fixture.close();
+  }
+});
+
 test("workspace Graph host executes one exact root wake and observes its terminal replay", async () => {
   const executions: Parameters<CreateAgentGraphWorkspaceHostOptions["execute"]>[0][] = [];
   const fixture = await createHostFixture(async (input) => {
@@ -846,10 +941,26 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   return { promise, resolve };
 }
 
+function currentOperatorSettings() {
+  return {
+    provider: "openai" as const,
+    model: "operator-model",
+    modelRouteId: "test/operator-model",
+    collaborationMode: "agent" as const,
+    orchestrationMode: "default" as const,
+    thinkingEffort: "off",
+    thinkingEffortExplicit: false,
+    additionalDirectories: [],
+  };
+}
+
 async function createHostFixture(
   execute: CreateAgentGraphWorkspaceHostOptions["execute"],
   stopOptions: Pick<CreateAgentGraphWorkspaceHostOptions, "requestStop"> = {},
-  workspaceOptions: Pick<CreateAgentGraphWorkspaceHostOptions, "resolveOperatorWorkspace"> = {},
+  workspaceOptions: Pick<
+    CreateAgentGraphWorkspaceHostOptions,
+    "resolveOperatorWorkspace" | "resolveOperatorSessionSettings"
+  > = {},
 ): Promise<{
   readonly host: ReturnType<typeof createAgentGraphWorkspaceHost>;
   readonly owner: Awaited<ReturnType<SessionManager["getOrCreatePinned"]>>;

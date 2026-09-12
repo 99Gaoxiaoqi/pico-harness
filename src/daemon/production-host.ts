@@ -691,6 +691,41 @@ export function createProductionRuntimeServices(
             configuredSubagentCatalog,
             operatorProfileCatalog,
           ),
+          resolveOperatorSessionSettings: async ({ workDir, profileSnapshot }) => {
+            assertValidAgentGraphOperatorProfileSnapshot(profileSnapshot);
+            const route = await resolveDesktopModelRoute(
+              workDir,
+              credentialVault,
+              userConfigStore,
+              effectiveConfigResolver,
+              profileSnapshot.modelRouteId,
+              env,
+            );
+            if (route.modelRouteId !== profileSnapshot.modelRouteId) {
+              throw new Error(
+                "Graph Operator model route no longer resolves to its frozen identity",
+              );
+            }
+            const thinkingEffort = profileSnapshot.subagentPreset
+              ? subagentThinkingLevel(
+                  route.capabilities.reasoningProfile,
+                  profileSnapshot.thinkingEffort,
+                )
+              : coordinateReasoningLevel(
+                  route.capabilities.reasoningProfile,
+                  profileSnapshot.thinkingEffort,
+                ).level;
+            return {
+              provider: route.provider,
+              model: route.model,
+              modelRouteId: route.modelRouteId,
+              collaborationMode: "agent",
+              orchestrationMode: "default",
+              thinkingEffort: thinkingEffort ?? "off",
+              thinkingEffortExplicit: profileSnapshot.thinkingEffort !== undefined,
+              additionalDirectories: [],
+            };
+          },
           sessionManager: globalSessionManager,
           sessionOptions: {
             persistence: true,

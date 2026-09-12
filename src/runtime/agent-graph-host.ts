@@ -2,6 +2,7 @@ import { reconcilePlanExecution } from "./plan-execution-recovery.js";
 import { PlanCoordinator } from "../plan/coordinator.js";
 import type { Session, SessionOptions } from "../engine/session.js";
 import type { SessionManager } from "../engine/session-manager.js";
+import type { PersistedSessionSettingsWrite } from "../engine/session-runtime.js";
 import {
   createAgentGraphApplicationService,
   type AgentGraphApplicationService,
@@ -88,6 +89,13 @@ export interface CreateAgentGraphWorkspaceHostOptions {
   readonly sessionManager: SessionManager;
   readonly sessionOptions?: SessionOptions;
   readonly operatorProfileCatalog?: AgentGraphOperatorProfileCatalog;
+  /** Resolve a complete current settings snapshot before production exact-run admission. */
+  readonly resolveOperatorSessionSettings?: (input: {
+    readonly workDir: string;
+    readonly profileSnapshot: AgentGraphProfileSnapshot;
+  }) =>
+    | Omit<PersistedSessionSettingsWrite, "permissionMode">
+    | Promise<Omit<PersistedSessionSettingsWrite, "permissionMode">>;
   execute(input: ExecuteHostedAgentGraphRunInput): Promise<void>;
   readonly resolveOperatorWorkspace?: (
     input: ResolveAgentGraphOperatorWorkspaceInput,
@@ -200,6 +208,10 @@ export function createAgentGraphWorkspaceHost(
       if (claim && provision) {
         const graph = store.getGraph(claim.graphId);
         if (!graph) throw new Error(`Graph does not exist: ${claim.graphId}`);
+        const settings = await options.resolveOperatorSessionSettings?.({
+          workDir: input.workDir,
+          profileSnapshot: provision.profileSnapshot,
+        });
         await bindAgentGraphOperatorExecutionBoundary({
           sessionManager: options.sessionManager,
           rootSessionId: graph.rootSessionId,
@@ -211,6 +223,14 @@ export function createAgentGraphWorkspaceHost(
             ...options.sessionOptions,
             runtimeStorageRoot: options.storageRoot,
           },
+          ...(settings
+            ? {
+                createChildSettings: ({ permissionMode }) => ({
+                  ...settings,
+                  permissionMode,
+                }),
+              }
+            : {}),
         });
       }
     },
