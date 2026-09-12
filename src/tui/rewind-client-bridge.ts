@@ -13,40 +13,34 @@ import { createChangesPanelModel, type ChangesPanelModel } from "./changes-panel
  * / FileHistoryDiffStat；daemon 正向映射见 desktop-runtime-service.ts 的
  * listRewindPoints/runtimeChange（label=userPrompt、created→added）。此处逆向：
  * added→created；modified/renamed→modified（daemon 从不产生 renamed，防御收口）。
- * 快照 summary 的 RPC 加宽字段（changedFileCount/additions/deletions/incomplete）
- * 逐字段安全读取，必填展示字段给中性默认。
+ * rewind.list 已由 Runtime 协议验证；这里仅把当前必填 summary 字段映射成 TUI 模型。
  */
-
-interface RewindListResult {
-  readonly checkpoints?: readonly Record<string, unknown>[];
-}
-
 export function snapshotSummariesFromRewindList(result: unknown): FileHistorySnapshotSummary[] {
-  const checkpoints =
-    typeof result === "object" &&
-    result !== null &&
-    Array.isArray((result as RewindListResult).checkpoints)
-      ? (result as RewindListResult).checkpoints!
-      : [];
-  return checkpoints.map((checkpoint) => {
-    const label = readString(checkpoint["label"]) ?? "";
-    const changedFileCount = readNumber(checkpoint["changedFileCount"]);
-    const addedLines = readNumber(checkpoint["additions"]);
-    const removedLines = readNumber(checkpoint["deletions"]);
+  if (typeof result !== "object" || result === null || !("checkpoints" in result)) {
+    throw new Error("rewind.list 缺少 checkpoints");
+  }
+  const checkpoints = (result as { readonly checkpoints: unknown }).checkpoints;
+  if (!Array.isArray(checkpoints)) throw new Error("rewind.list checkpoints 必须是数组");
+  return checkpoints.map((value, index) => {
+    if (typeof value !== "object" || value === null) {
+      throw new Error(`rewind.list checkpoints[${index}] 必须是对象`);
+    }
+    const checkpoint = value as Record<string, unknown>;
     return {
-      messageId: readString(checkpoint["checkpointId"]) ?? "",
-      timestamp:
-        typeof checkpoint["createdAt"] === "number" && Number.isFinite(checkpoint["createdAt"])
-          ? new Date(checkpoint["createdAt"]).toISOString()
-          : new Date().toISOString(),
-      userPrompt: label,
-      trackedFileCount: 0,
+      messageId: requiredString(checkpoint["checkpointId"], `checkpoints[${index}].checkpointId`),
+      timestamp: new Date(
+        requiredNumber(checkpoint["createdAt"], `checkpoints[${index}].createdAt`),
+      ).toISOString(),
+      userPrompt: requiredString(checkpoint["label"], `checkpoints[${index}].label`),
+      changedFileCount: requiredNumber(
+        checkpoint["changedFileCount"],
+        `checkpoints[${index}].changedFileCount`,
+      ),
       backedUpFileCount: 0,
       deletedFileCount: 0,
       messageIndex: 0,
-      ...(changedFileCount !== undefined ? { changedFileCount } : {}),
-      ...(addedLines !== undefined ? { addedLines } : {}),
-      ...(removedLines !== undefined ? { removedLines } : {}),
+      addedLines: requiredNumber(checkpoint["additions"], `checkpoints[${index}].additions`),
+      removedLines: requiredNumber(checkpoint["deletions"], `checkpoints[${index}].deletions`),
       ...(checkpoint["incomplete"] === true ? { incomplete: true } : {}),
     };
   });
@@ -154,4 +148,16 @@ function readString(value: unknown): string | undefined {
 
 function readNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function requiredString(value: unknown, path: string): string {
+  const parsed = readString(value);
+  if (parsed === undefined) throw new Error(`rewind.list ${path} 必须是字符串`);
+  return parsed;
+}
+
+function requiredNumber(value: unknown, path: string): number {
+  const parsed = readNumber(value);
+  if (parsed === undefined) throw new Error(`rewind.list ${path} 必须是有限数字`);
+  return parsed;
 }

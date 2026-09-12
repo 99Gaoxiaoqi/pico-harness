@@ -9,7 +9,7 @@ export interface FileHistorySnapshotSummary {
   messageId: string;
   timestamp: string;
   userPrompt: string;
-  trackedFileCount: number;
+  changedFileCount: number;
   backedUpFileCount: number;
   deletedFileCount: number;
   changeSummary?: string;
@@ -17,7 +17,6 @@ export interface FileHistorySnapshotSummary {
   transcriptIndex?: number;
   collaborationMode?: "agent" | "plan";
   permissionMode?: "ask" | "auto" | "full-access";
-  changedFileCount?: number;
   addedLines?: number;
   removedLines?: number;
   changedFiles?: string[];
@@ -68,11 +67,11 @@ export function listFileHistorySnapshotSummaries(session: Session): FileHistoryS
       messageId: snapshot.messageId,
       timestamp: snapshot.timestamp.toISOString(),
       userPrompt: snapshot.userPrompt,
-      trackedFileCount: relevantPaths.size,
+      changedFileCount: relevantPaths.size,
       backedUpFileCount,
       deletedFileCount,
       changeSummary: formatSnapshotChangeSummary({
-        trackedFileCount: relevantPaths.size,
+        changedFileCount: relevantPaths.size,
         backedUpFileCount,
         deletedFileCount,
       }),
@@ -99,7 +98,6 @@ export async function listRewindPointSummaries(
       const stat = await session.getRewindPointChangeStat(summary.messageId);
       return {
         ...summary,
-        trackedFileCount: stat.changedFileCount,
         changedFileCount: stat.changedFileCount,
         addedLines: stat.addedLines,
         removedLines: stat.removedLines,
@@ -124,8 +122,7 @@ export function formatFileHistorySnapshots(
       [
         `- ${summary.userPrompt}`,
         `timestamp=${summary.timestamp}`,
-        `files=${summary.trackedFileCount}`,
-        `tracked=${summary.trackedFileCount}`,
+        `files=${summary.changedFileCount}`,
         `backups=${summary.backedUpFileCount}`,
         `deleted=${summary.deletedFileCount}`,
         `coverage=${summary.incomplete ? "incomplete" : "complete"}`,
@@ -189,12 +186,12 @@ function findSnapshot(session: Session, messageId: string): FileHistorySnapshot 
 }
 
 export function formatSnapshotChangeSummary(input: {
-  trackedFileCount: number;
+  changedFileCount: number;
   backedUpFileCount: number;
   deletedFileCount: number;
 }): string {
   const unchangedFileCount =
-    input.trackedFileCount - input.backedUpFileCount - input.deletedFileCount;
+    input.changedFileCount - input.backedUpFileCount - input.deletedFileCount;
   const parts: string[] = [];
   if (input.backedUpFileCount > 0) {
     parts.push(`${input.backedUpFileCount} 个文件有备份`);

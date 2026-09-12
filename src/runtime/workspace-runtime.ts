@@ -142,11 +142,6 @@ export class WorkspaceTaskRuntime {
   private ownershipReleasePending = false;
   private ownershipReleasePromise: Promise<void> = Promise.resolve();
 
-  /** Compatibility name used by the daemon's generic canonical-workspace registry. */
-  get workspacePath(): string {
-    return this.workspace;
-  }
-
   private constructor(
     workspace: string,
     taskHostRuntime: TaskHostRuntime | undefined,

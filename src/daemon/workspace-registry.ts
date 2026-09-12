@@ -3,7 +3,7 @@ import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 
 export interface WorkspaceRuntime {
-  readonly workspacePath: string;
+  readonly workspace: string;
   close(): Promise<void> | void;
   /** Whether bounded close returned while this runtime still owns live execution resources. */
   hasPendingOwnership(): boolean;

@@ -448,6 +448,10 @@ export type WorkbarMethodMap = {
         readonly checkpointId: CheckpointId;
         readonly label: string;
         readonly createdAt: number;
+        readonly changedFileCount: number;
+        readonly additions: number;
+        readonly deletions: number;
+        readonly incomplete?: boolean;
       })[];
     };
   };
@@ -826,11 +830,17 @@ export const workbarResultValidators = {
   "changes.apply": exactResultShape({ applied: resultBoolean, fingerprint: resultString }),
   "rewind.list": exactResultShape({
     checkpoints: resultArray(
-      resultShape({
-        checkpointId: resultString,
-        label: resultString,
-        createdAt: resultFiniteNumber,
-      }),
+      resultShape(
+        {
+          checkpointId: resultString,
+          label: resultString,
+          createdAt: resultFiniteNumber,
+          changedFileCount: resultNonNegativeInteger,
+          additions: resultNonNegativeInteger,
+          deletions: resultNonNegativeInteger,
+        },
+        { incomplete: resultBoolean },
+      ),
     ),
   }),
   "rewind.preview": exactResultShape({
