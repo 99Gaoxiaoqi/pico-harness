@@ -44,7 +44,7 @@ export interface SessionSettings {
   provider: ProviderKind;
   collaborationMode: CollaborationMode;
   /** Orchestration axis: "default" = direct execution, "graph" / "swarm" = coordinated execution. */
-  orchestrationMode?: "default" | "graph" | "swarm";
+  orchestrationMode: "default" | "graph" | "swarm";
   model: string;
   /** Stable providerID/modelID identity. Endpoint and credentials stay in ModelRouter. */
   modelRouteId?: string;
@@ -498,7 +498,7 @@ export function formatSessionStatus(settings: SessionSettings): string {
   return [
     `Collaboration mode: ${settings.collaborationMode}`,
     `Permission mode: ${settings.permissionMode}`,
-    `Orchestration: ${settings.orchestrationMode ?? "default"}`,
+    `Orchestration: ${settings.orchestrationMode}`,
     `Model: ${settings.model}`,
     `Model route: ${settings.modelRouteId ?? "unconfigured"}`,
     `Thinking effort: ${settings.thinkingEffort}`,
@@ -634,7 +634,7 @@ export function snapshotSessionSettings(settings: SessionSettings): PersistedSes
     model: settings.model,
     modelRouteId,
     collaborationMode: settings.collaborationMode,
-    orchestrationMode: settings.orchestrationMode ?? "default",
+    orchestrationMode: settings.orchestrationMode,
     permissionMode: settings.permissionMode,
     thinkingEffort: settings.thinkingEffort,
     thinkingEffortExplicit: settings.thinkingEffortExplicit,
@@ -662,7 +662,7 @@ function applyPersistedSessionSettings(
   settings.model = persisted.model;
   settings.modelRouteId = persisted.modelRouteId;
   settings.collaborationMode = persisted.collaborationMode;
-  settings.orchestrationMode = persisted.orchestrationMode ?? "default";
+  settings.orchestrationMode = persisted.orchestrationMode;
   settings.permissionMode = persisted.permissionMode;
   settings.thinkingEffort = persisted.thinkingEffort;
   settings.thinkingEffortExplicit = persisted.thinkingEffortExplicit;

@@ -12,8 +12,9 @@ import {
 import { booleanValue, isRecord, numberValue, recordArray, stringValue } from "./values.js";
 
 export function parseSessionSettings(value: unknown): SessionSettingsView | undefined {
-  const result = isRecord(value) ? value : {};
-  const settings = isRecord(result.settings) ? result.settings : result;
+  if (!isRecord(value) || !isRecord(value.settings)) return undefined;
+  const settings = value.settings;
+  const modelRouteId = stringValue(settings.modelRouteId);
   const model = stringValue(settings.model);
   const collaborationMode =
     settings.collaborationMode === "plan" || settings.collaborationMode === "agent"
@@ -26,24 +27,36 @@ export function parseSessionSettings(value: unknown): SessionSettingsView | unde
       ? settings.permissionMode
       : undefined;
   const orchestrationMode =
+    settings.orchestrationMode === "default" ||
+    settings.orchestrationMode === "graph" ||
     settings.orchestrationMode === "swarm"
-      ? "swarm"
-      : settings.orchestrationMode === "graph"
-        ? "graph"
-        : "default";
-  if (!model || !collaborationMode || !permissionMode) {
+      ? settings.orchestrationMode
+      : undefined;
+  const thinkingEffort = stringValue(settings.thinkingEffort);
+  const rawReasoningLevels = settings.reasoningLevels;
+  const reasoningLevels = Array.isArray(rawReasoningLevels)
+    ? rawReasoningLevels.filter((level): level is string => typeof level === "string")
+    : undefined;
+  if (
+    !modelRouteId ||
+    !model ||
+    !collaborationMode ||
+    !orchestrationMode ||
+    !permissionMode ||
+    !thinkingEffort ||
+    !reasoningLevels ||
+    reasoningLevels.length !== (Array.isArray(rawReasoningLevels) ? rawReasoningLevels.length : 0)
+  ) {
     return undefined;
   }
   return {
-    modelRouteId: stringValue(settings.modelRouteId) || undefined,
+    modelRouteId,
     model,
     collaborationMode,
     orchestrationMode,
     permissionMode,
-    thinkingEffort: stringValue(settings.thinkingEffort, "off"),
-    reasoningLevels: Array.isArray(settings.reasoningLevels)
-      ? settings.reasoningLevels.map((level) => stringValue(level)).filter(Boolean)
-      : [],
+    thinkingEffort,
+    reasoningLevels,
   };
 }
 

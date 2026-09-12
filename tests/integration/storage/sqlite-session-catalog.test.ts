@@ -131,6 +131,7 @@ const FULL_SETTINGS = {
   modelRouteId: "claude/claude-sonnet-4",
   collaborationMode: "agent",
   permissionMode: "ask",
+  orchestrationMode: "default",
   thinkingEffort: "medium",
   thinkingEffortExplicit: false,
   additionalDirectories: [],

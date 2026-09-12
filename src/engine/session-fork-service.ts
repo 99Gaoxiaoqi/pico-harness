@@ -1130,7 +1130,7 @@ function filterForkSettings(
     model: settings.model,
     modelRouteId: settings.modelRouteId,
     collaborationMode: interaction.collaborationMode,
-    orchestrationMode: settings.orchestrationMode ?? "default",
+    orchestrationMode: settings.orchestrationMode,
     permissionMode: interaction.permissionMode,
     thinkingEffort: settings.thinkingEffort,
     thinkingEffortExplicit: settings.thinkingEffortExplicit,

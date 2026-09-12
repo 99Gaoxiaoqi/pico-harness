@@ -163,6 +163,7 @@ test("reasoning 状态显示已配置档位的中文说明", () => {
     provider: "openai",
     collaborationMode: "agent",
     permissionMode: "full-access",
+    orchestrationMode: "default",
     model: "gpt-5.4",
     modelRouteId: route.id,
     thinkingEffort: "off",

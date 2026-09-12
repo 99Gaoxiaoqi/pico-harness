@@ -254,7 +254,7 @@ export function projectRuntimeSessionUsage(events: readonly RuntimeEvent[]): Ses
     if (fields.has("cacheRead")) {
       usage.totalCacheReadReports++;
       if (canonical.cacheReadTokens > 0) {
-        usage.totalCacheHitCalls = (usage.totalCacheHitCalls ?? 0) + 1;
+        usage.totalCacheHitCalls++;
       }
     }
     if (fields.has("cacheWrite")) usage.totalCacheWriteReports++;

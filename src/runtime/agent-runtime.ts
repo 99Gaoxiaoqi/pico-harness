@@ -1110,7 +1110,7 @@ export async function executeAgentRuntime(
       dependencies.prestartedRun,
       resumeExistingSession,
     );
-    const requestedMode = options.orchestrationMode ?? settings.orchestrationMode ?? "default";
+    const requestedMode = options.orchestrationMode ?? settings.orchestrationMode;
     const agentSwarmAuthorization = dependencies.configuredSubagentChild
       ? "none"
       : (inheritedAuthorization ??
@@ -2776,7 +2776,7 @@ function configuredChildSettingsWithPermissionMode(
     model: settings.model,
     modelRouteId: settings.modelRouteId,
     collaborationMode: "agent",
-    orchestrationMode: settings.orchestrationMode ?? "default",
+    orchestrationMode: settings.orchestrationMode,
     permissionMode,
     thinkingEffort: settings.thinkingEffort,
     thinkingEffortExplicit: settings.thinkingEffortExplicit,

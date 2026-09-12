@@ -17,8 +17,10 @@ import { materializeRuntimeHistoryEntries } from "../../../src/engine/session-ru
 import { materializeRuntimeHistoryEntries as runtimeMaterializeHistoryEntries } from "../../../src/engine/session-runtime-read-model.js";
 import {
   SESSION_RUNTIME_STATE_VERSION,
+  createEmptyUsageSnapshot,
   normalizeSessionRuntimeStatePatch,
   normalizeSessionRuntimeStateWritePatch,
+  normalizeSessionUsageSnapshot,
 } from "../../../src/engine/session-runtime.js";
 import { Session } from "../../../src/engine/session.js";
 import {
@@ -69,6 +71,7 @@ test("Session runtime state rejects pre-route settings and unknown persisted fie
     modelRouteId: "test/test-model",
     collaborationMode: "agent" as const,
     permissionMode: "ask" as const,
+    orchestrationMode: "default" as const,
     thinkingEffort: "off",
     thinkingEffortExplicit: false,
     additionalDirectories: [],
@@ -219,6 +222,7 @@ test("durable Session settings accept only v3 split axes", () => {
     provider: "openai",
     model: "test-model",
     modelRouteId: "test/test-model",
+    orchestrationMode: "default" as const,
     thinkingEffort: "off",
     thinkingEffortExplicit: false,
     additionalDirectories: [],
@@ -234,6 +238,12 @@ test("durable Session settings accept only v3 split axes", () => {
     base,
     { ...base, collaborationMode: "agent" },
     { ...base, permissionMode: "ask" },
+    {
+      ...base,
+      collaborationMode: "agent",
+      permissionMode: "ask",
+      orchestrationMode: undefined,
+    },
     { ...base, collaborationMode: "plan", permissionMode: "ask", prePlanMode: "auto" },
   ]) {
     assert.equal(normalizeSessionRuntimeStatePatch({ settings }), undefined);
@@ -246,9 +256,15 @@ test("durable Session settings accept only v3 split axes", () => {
       ...base,
       collaborationMode: "plan",
       permissionMode: "ask",
-      orchestrationMode: "default",
     },
   );
+});
+
+test("Session usage requires the current cache-hit counter", () => {
+  const usage = createEmptyUsageSnapshot();
+  assert.deepEqual(normalizeSessionUsageSnapshot(usage), usage);
+  const { totalCacheHitCalls: _removed, ...missingCounter } = usage;
+  assert.equal(normalizeSessionUsageSnapshot(missingCounter), undefined);
 });
 
 test("Session runtime state accepts canonical cache sharding and rejects retired fields", () => {

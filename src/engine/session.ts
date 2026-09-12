@@ -228,7 +228,7 @@ export class Session
   totalUsageReports = 0;
   totalInputReports = 0;
   totalCacheReadReports = 0;
-  totalCacheHitCalls: number | null = 0;
+  totalCacheHitCalls = 0;
   totalCacheWriteReports = 0;
   totalReasoningReports = 0;
   totalEstimatedCostReports = 0;
@@ -630,7 +630,7 @@ export class Session
     if (reported.has("input")) this.totalInputReports++;
     if (reported.has("cacheRead")) {
       this.totalCacheReadReports++;
-      if (this.totalCacheHitCalls !== null && (canonical?.cacheReadTokens ?? 0) > 0) {
+      if ((canonical?.cacheReadTokens ?? 0) > 0) {
         this.totalCacheHitCalls++;
       }
     }

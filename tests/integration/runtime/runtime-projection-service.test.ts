@@ -204,6 +204,7 @@ test("RuntimeProjectionService outputs are deepStrictEqual with the underlying p
           modelRouteId: "test/test-model",
           collaborationMode: "agent",
           permissionMode: "ask",
+          orchestrationMode: "default",
           thinkingEffort: "off",
           thinkingEffortExplicit: false,
           additionalDirectories: [],

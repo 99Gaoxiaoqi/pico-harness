@@ -30,7 +30,7 @@ export interface PersistedSessionSettings {
   /** Canonical permission axis. */
   permissionMode: PersistedPermissionMode;
   /** Canonical orchestration axis: "default" = direct execution, "graph" / "swarm" = coordinated execution. */
-  orchestrationMode?: "default" | "graph" | "swarm";
+  orchestrationMode: "default" | "graph" | "swarm";
   /** Current model reasoning level. */
   thinkingEffort: string;
   thinkingEffortExplicit: boolean;
@@ -55,7 +55,7 @@ export interface SessionUsageSnapshot {
   totalInputReports: number;
   totalCacheReadReports: number;
   /** Calls whose provider-reported cache read token count was greater than zero. */
-  totalCacheHitCalls: number | null;
+  totalCacheHitCalls: number;
   totalCacheWriteReports: number;
   totalReasoningReports: number;
   totalEstimatedCostReports: number;
@@ -314,7 +314,6 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
   if (forkFrom !== undefined && !isNonBlankString(forkFrom)) return undefined;
   if (sideConversation !== undefined && typeof sideConversation !== "boolean") return undefined;
   if (
-    orchestrationMode !== undefined &&
     orchestrationMode !== "default" &&
     orchestrationMode !== "graph" &&
     orchestrationMode !== "swarm"
@@ -330,7 +329,7 @@ function normalizePersistedSessionSettings(value: unknown): PersistedSessionSett
     modelRouteId,
     collaborationMode,
     permissionMode,
-    orchestrationMode: orchestrationMode ?? "default",
+    orchestrationMode,
     thinkingEffort,
     thinkingEffortExplicit,
     additionalDirectories: [...new Set(additionalDirectories)],
@@ -384,8 +383,8 @@ export function normalizeSessionUsageSnapshot(value: unknown): SessionUsageSnaps
   for (const key of reportKeys) {
     if (!isNonNegativeInteger(value[key])) return undefined;
   }
-  const totalCacheHitCalls = value["totalCacheHitCalls"] ?? null;
-  if (totalCacheHitCalls !== null && !isNonNegativeInteger(totalCacheHitCalls)) return undefined;
+  const totalCacheHitCalls = value["totalCacheHitCalls"];
+  if (!isNonNegativeInteger(totalCacheHitCalls)) return undefined;
 
   return {
     totalPromptTokens: value["totalPromptTokens"] as number,
