@@ -43,11 +43,29 @@ Storage Doctor 集成测试 4/4 已通过。
 各旧路径保留兼容导出。三路集成后，根 typecheck、23/23 定向集成测试、`check:architecture`
 （0 条逆依赖）和 `git diff --check` 均通过。
 
-下一批并行迁移将 Desktop Automation/Cron 产品服务迁入 Pico Host，并将 TUI 资源命令分派迁入
+上一批已将 Desktop Automation/Cron 产品服务迁入 Pico Host，并将 TUI 资源命令分派迁入
 CLI（仅保留 Protocol RPC 与 CLI 命令契约）；Provider 配置与凭据解析仍经 daemon 的最小端口注入。
 根 typecheck、21/21 相关集成测试、`check:architecture`（0 条逆依赖）和 `git diff --check` 均通过。
 
-本轮最终完成度审计已通过：根 typecheck（含所有包构建）、`check:architecture`（0 条逆依赖）、
+2026-09-14 本批在三个独立 worktree 并行实现，随后在独立集成分支统一补齐公开出口：
+
+- Desktop 资源目录（Skill、Agent、MCP）迁入 Pico Host；配置只通过 `compatibility.claude`
+  只读端口注入，Plugin 仅消费来源快照，logger 显式注入，生产请求分派已直连包入口。
+- 子代理工具工厂、Hook verifier 注册表及安全 middleware 迁入 Pico Host；Workspace boundary
+  middleware 复用现有 Host 模块。保留只读工具面、敏感路径/越界拒绝和三路诊断日志。
+- CLI settings 命令和四个公共 command helpers 迁入 CLI，resources 复用同一 helpers；设置端口
+  仅包含会话设置、预设与输入能力，不再引用具体 TUI runtime。
+- 干净构建暴露了 Storage 先于 Core、Runtime 隐式依赖未构建 Protocol 的问题：根开发/构建/测试/
+  typecheck 入口统一复用 `build:packages`；Runtime preset 改用已有 Core 契约，工具 ID 校验
+  不再依赖 Protocol。移开八个包的 dist 缓存后，顺序构建及根 typecheck 通过。
+
+本批 47/47 定向集成测试通过，覆盖 CLI 命令、目录/Plugin、Automation 请求分派、子代理执行与
+续接、Hook 和工具安全边界；架构门禁、Runtime typecheck 与 `git diff --check` 通过。
+所有旧路径保留兼容出口或最小自动装配。下一批候选是尚未迁出的 CLI model/session/workspace/
+automation 命令；Provider 配置服务、Desktop Runtime service 与 configured-subagent-executor
+仍留在外层，需按各自真实依赖进一步拆分，不能视为本批已完成。
+
+当前公共门禁已通过：根 typecheck（含所有包构建）、`check:architecture`（0 条逆依赖）、
 `git diff --check` 均通过；生产源码没有残留的旧 Atomic Memory 或 StorageDoctor 深路径导入。
 Markdown 依赖图已按 manifest 校正；冻结的 architecture JSON/HTML/visual-check 仍保留其概念关联，
 不得将其中 Protocol→Core 关联当作实际 package dependency。
