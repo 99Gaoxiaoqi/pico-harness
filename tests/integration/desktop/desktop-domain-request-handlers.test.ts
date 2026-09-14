@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { createDesktopAutomationRequestHandlers } from "../../../src/daemon/desktop-automation-request-handlers.js";
 import { createDesktopCatalogRequestHandlers } from "../../../src/daemon/desktop-catalog-request-handlers.js";
-import type { DesktopAutomationService } from "../../../src/daemon/desktop-automation-service.js";
+import type { DesktopAutomationService } from "@pico/pico-host/desktop-automation-service";
 import { createTypedRuntimeRequest } from "../../../packages/protocol/src/index.js";
 import { UserMcpConfigStore } from "../../../src/mcp/user-config-store.js";
 

@@ -100,7 +100,7 @@ import type { SessionSubscriptionRegistry } from "@pico/pico-host/session-subscr
 import { PersistentActiveOverlay } from "@pico/pico-host/session-active-overlay";
 import { DesktopRuntimeService } from "./desktop-runtime-service.js";
 import type { PlanControlResponse } from "@pico/pico-host/plan-control-port";
-import { DesktopAutomationService } from "./desktop-automation-service.js";
+import { DesktopAutomationService } from "@pico/pico-host/desktop-automation-service";
 import { buildApprovalRequestedPayload } from "@pico/pico-host";
 import {
   createRuntimeNotification,

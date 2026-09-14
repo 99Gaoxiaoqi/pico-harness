@@ -395,6 +395,10 @@
       "types": "./dist/desktop-automation-request-handlers.d.ts",
       "import": "./dist/desktop-automation-request-handlers.js"
     },
+    "./desktop-automation-service": {
+      "types": "./dist/desktop-automation-service.d.ts",
+      "import": "./dist/desktop-automation-service.js"
+    },
     "./local-runtime-client": {
       "types": "./dist/local-runtime-client.d.ts",
       "import": "./dist/local-runtime-client.js"
