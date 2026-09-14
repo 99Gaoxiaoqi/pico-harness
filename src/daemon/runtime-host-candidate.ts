@@ -13,7 +13,7 @@ import {
   type PicoDaemonCandidateResult,
   type PicoDaemonCompositionServices,
 } from "@pico/pico-host/runtime-host-candidate";
-import { SqliteSessionContinuitySource } from "./sqlite-session-continuity-source.js";
+import { SqliteSessionContinuitySource } from "@pico/pico-host/sqlite-session-continuity-source";
 
 /**
  * Pico daemon 的唯一启动形态是 Runtime Host candidate：

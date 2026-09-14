@@ -41,6 +41,7 @@ export * from "./plan-control-port.js";
 export * from "./workspace-run-lifecycle.js";
 export * from "./agent-graph-launch-state.js";
 export * from "./session-active-overlay.js";
+export * from "./sqlite-session-continuity-source.js";
 export * from "./session-runtime-lifecycle.js";
 export * from "./skill-catalog.js";
 export * from "./prompt-composer.js";
