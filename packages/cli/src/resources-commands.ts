@@ -1,12 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { RuntimeMethod, RuntimeParams, RuntimeResult, RuntimeUserInput } from "@pico/protocol";
-import type {
-  SlashArgumentCandidate,
-  SlashArgumentCompleter,
-  SlashCommand,
-} from "./command-contracts.js";
-
-const ARGUMENT_COMPLETER_CACHE_TTL_MS = 5_000;
+import { cachedArgumentCompleter, rpcCommand } from "./command-helpers.js";
 
 /** Runtime client surface consumed by CLI resource-command RPC projections. */
 export interface ClientCommandRuntime {
@@ -380,33 +374,6 @@ export function createResourcesCommands(deps: ClientCommandRegistryDeps) {
         }
       },
     }),
-  };
-}
-
-function rpcCommand(spec: SlashCommand): SlashCommand {
-  return { ...spec, kind: spec.kind ?? "local" };
-}
-
-function cachedArgumentCompleter<T>(
-  load: () => Promise<T>,
-  project: (loaded: T) => readonly SlashArgumentCandidate[],
-): SlashArgumentCompleter {
-  let cache: { at: number; candidates: readonly SlashArgumentCandidate[] } | undefined;
-  return async (query) => {
-    if (cache === undefined || Date.now() - cache.at > ARGUMENT_COMPLETER_CACHE_TTL_MS) {
-      try {
-        cache = { at: Date.now(), candidates: project(await load()) };
-      } catch {
-        return [];
-      }
-    }
-    const lowered = query.toLowerCase();
-    if (!lowered) return cache.candidates;
-    return cache.candidates.filter((candidate) =>
-      `${candidate.value} ${candidate.label ?? ""} ${candidate.description ?? ""}`
-        .toLowerCase()
-        .includes(lowered),
-    );
   };
 }
 
