@@ -7,12 +7,13 @@ import { type InputProcessResult, type LocalCommandResult } from "../input/types
 import { type ClientSessionRuntime } from "./client-session-runtime.js";
 import type { ClientCommandRegistryDeps } from "./commands/types.js";
 export type { ClientCommandRegistryDeps } from "./commands/types.js";
-import { createModelCommands } from "./commands/model-commands.js";
+import { createModelCommands } from "@pico/cli/model-commands";
 import { createSettingsCommands } from "@pico/cli/settings-commands";
-import { createSessionCommands } from "./commands/session-commands.js";
+import { createSessionCommands } from "@pico/cli/session-commands";
 import { createResourcesCommands } from "@pico/cli/resources-commands";
-import { createWorkspaceCommands } from "./commands/workspace-commands.js";
-import { createAutomationCommands } from "./commands/automation-commands.js";
+import { createWorkspaceCommands } from "@pico/cli/workspace-commands";
+import { createAutomationCommands } from "@pico/cli/automation-commands";
+import { createAutomationCommandServices } from "./commands/automation-commands.js";
 
 export interface ClientInputOutcome {
   readonly kind: "local" | "unknown" | "sent" | "rejected";
@@ -27,7 +28,7 @@ export function createClientCommandRegistry(deps: ClientCommandRegistryDeps): Co
   const session = createSessionCommands(deps);
   const resources = createResourcesCommands(deps);
   const workspace = createWorkspaceCommands(deps);
-  const automation = createAutomationCommands(deps);
+  const automation = createAutomationCommands(createAutomationCommandServices(deps));
   return new CommandRegistry([
     ...createBuiltinCommands().filter((command) => command.name !== "skill"),
     model.model,
