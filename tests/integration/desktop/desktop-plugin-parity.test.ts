@@ -15,7 +15,7 @@ import {
   createTrustedDesktopAutomation,
   type DesktopAutomationAuthorityDependencies,
   type DesktopAutomationService,
-} from "../../../src/daemon/desktop-automation-service.js";
+} from "@pico/pico-host/desktop-automation-service";
 import { writeDesktopModelRouting } from "../../fixtures/desktop-model-routing.js";
 
 test("Desktop catalog and session activation share one Plugin snapshot", async (context) => {

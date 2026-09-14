@@ -67,6 +67,7 @@ export * from "./desktop-rewind-service.js";
 export * from "./desktop-workbar-git-review-service.js";
 export * from "./subagent-connections.js";
 export * from "./desktop-automation-request-handlers.js";
+export * from "./desktop-automation-service.js";
 export * from "./local-runtime-client.js";
 export * from "./desktop-subagent-settings-service.js";
 export * from "./file-history.js";
