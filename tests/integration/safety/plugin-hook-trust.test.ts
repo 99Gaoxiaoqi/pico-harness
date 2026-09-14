@@ -5,9 +5,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { createSessionHookRuntime } from "../../../src/hooks/runtime.js";
 import { resolvePicoPaths } from "../../../src/paths/pico-paths.js";
-import { PluginManagementService } from "../../../src/plugins/plugin-management-service.js";
-import { resolvePluginScopeRoots } from "../../../src/plugins/plugin-manager.js";
-import { loadPluginRuntimeSnapshot } from "../../../src/plugins/plugin-runtime-snapshot.js";
+import { PluginManagementService } from "@pico/pico-host/plugins/plugin-management-service";
+import { resolvePluginScopeRoots } from "@pico/pico-host/plugins/plugin-manager";
+import { loadPluginRuntimeSnapshot } from "@pico/pico-host/plugins/plugin-runtime-snapshot";
 import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
 
 test("materialized plugin Hook requires current workspace trust and is revoked on dispose", async (context) => {
