@@ -7,6 +7,142 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./product-compactor": {
+      "types": "./dist/product-compactor.d.ts",
+      "import": "./dist/product-compactor.js"
+    },
+    "./product-full-compactor": {
+      "types": "./dist/product-full-compactor.d.ts",
+      "import": "./dist/product-full-compactor.js"
+    },
+    "./product-prompt-composer": {
+      "types": "./dist/product-prompt-composer.d.ts",
+      "import": "./dist/product-prompt-composer.js"
+    },
+    "./product-skill-catalog": {
+      "types": "./dist/product-skill-catalog.d.ts",
+      "import": "./dist/product-skill-catalog.js"
+    },
+    "./product-todo-store": {
+      "types": "./dist/product-todo-store.d.ts",
+      "import": "./dist/product-todo-store.js"
+    },
+    "./product-tool-registry": {
+      "types": "./dist/product-tool-registry.d.ts",
+      "import": "./dist/product-tool-registry.js"
+    },
+    "./default-registry": {
+      "types": "./dist/default-registry.d.ts",
+      "import": "./dist/default-registry.js"
+    },
+    "./agent-output-tool": {
+      "types": "./dist/agent-output-tool.d.ts",
+      "import": "./dist/agent-output-tool.js"
+    },
+    "./plan-tools": {
+      "types": "./dist/plan-tools.d.ts",
+      "import": "./dist/plan-tools.js"
+    },
+    "./goal-tools": {
+      "types": "./dist/goal-tools.d.ts",
+      "import": "./dist/goal-tools.js"
+    },
+    "./session-task-tools": {
+      "types": "./dist/session-task-tools.d.ts",
+      "import": "./dist/session-task-tools.js"
+    },
+    "./memory-trigger-tools": {
+      "types": "./dist/memory-trigger-tools.d.ts",
+      "import": "./dist/memory-trigger-tools.js"
+    },
+    "./session-permissions": {
+      "types": "./dist/session-permissions.d.ts",
+      "import": "./dist/session-permissions.js"
+    },
+    "./product-approval-diff": {
+      "types": "./dist/product-approval-diff.d.ts",
+      "import": "./dist/product-approval-diff.js"
+    },
+    "./atomic-memory-runtime": {
+      "types": "./dist/atomic-memory-runtime.d.ts",
+      "import": "./dist/atomic-memory-runtime.js"
+    },
+    "./runtime-assembly": {
+      "types": "./dist/runtime-assembly.d.ts",
+      "import": "./dist/runtime-assembly.js"
+    },
+    "./configured-subagent-continuation": {
+      "types": "./dist/configured-subagent-continuation.d.ts",
+      "import": "./dist/configured-subagent-continuation.js"
+    },
+    "./product-plan-execution-recovery": {
+      "types": "./dist/product-plan-execution-recovery.d.ts",
+      "import": "./dist/product-plan-execution-recovery.js"
+    },
+    "./agent-graph-runtime-adapter": {
+      "types": "./dist/agent-graph-runtime-adapter.d.ts",
+      "import": "./dist/agent-graph-runtime-adapter.js"
+    },
+    "./product-agent-graph-exact-run-port": {
+      "types": "./dist/product-agent-graph-exact-run-port.d.ts",
+      "import": "./dist/product-agent-graph-exact-run-port.js"
+    },
+    "./product-agent-graph-host": {
+      "types": "./dist/product-agent-graph-host.d.ts",
+      "import": "./dist/product-agent-graph-host.js"
+    },
+    "./product-runtime-event-store": {
+      "types": "./dist/product-runtime-event-store.d.ts",
+      "import": "./dist/product-runtime-event-store.js"
+    },
+    "./product-prompt-cache-prewarm": {
+      "types": "./dist/product-prompt-cache-prewarm.d.ts",
+      "import": "./dist/product-prompt-cache-prewarm.js"
+    },
+    "./provider/*": {
+      "types": "./dist/provider/*.d.ts",
+      "import": "./dist/provider/*.js"
+    },
+    "./input/*": {
+      "types": "./dist/input/*.d.ts",
+      "import": "./dist/input/*.js"
+    },
+    "./session": {
+      "types": "./dist/session.d.ts",
+      "import": "./dist/session.js"
+    },
+    "./session-manager": {
+      "types": "./dist/session-manager.d.ts",
+      "import": "./dist/session-manager.js"
+    },
+    "./session-manager-state": {
+      "types": "./dist/session-manager-state.d.ts",
+      "import": "./dist/session-manager-state.js"
+    },
+    "./session-fork-service": {
+      "types": "./dist/session-fork-service.d.ts",
+      "import": "./dist/session-fork-service.js"
+    },
+    "./session-fork-runtime-port": {
+      "types": "./dist/session-fork-runtime-port.d.ts",
+      "import": "./dist/session-fork-runtime-port.js"
+    },
+    "./engine-runtime-port": {
+      "types": "./dist/engine-runtime-port.d.ts",
+      "import": "./dist/engine-runtime-port.js"
+    },
+    "./owner-lease": {
+      "types": "./dist/owner-lease.d.ts",
+      "import": "./dist/owner-lease.js"
+    },
+    "./engine-runtime-port-adapter": {
+      "types": "./dist/engine-runtime-port-adapter.d.ts",
+      "import": "./dist/engine-runtime-port-adapter.js"
+    },
+    "./session-fork-runtime-port-adapter": {
+      "types": "./dist/session-fork-runtime-port-adapter.d.ts",
+      "import": "./dist/session-fork-runtime-port-adapter.js"
+    },
     "./trace": {
       "types": "./dist/trace.d.ts",
       "import": "./dist/trace.js"
@@ -592,6 +728,10 @@
     "dist"
   ],
   "dependencies": {
+    "@ai-sdk/anthropic": "4.0.39",
+    "@ai-sdk/openai": "4.0.42",
+    "@ai-sdk/openai-compatible": "3.0.30",
+    "@ai-sdk/open-responses": "2.0.28",
     "pathe": "^2.0.3",
     "@ai-sdk/code-mode": "1.0.42",
     "ai": "7.0.85",
