@@ -67,14 +67,14 @@ test("压缩不改账本、只追加 checkpoint（读模型变化）", () => {
 
 test("D9 正向不变量：连接决策在监督器与共享 client，外壳只渲染推送相位", () => {
   // P0 机械态债已消除（3-C，2026-08-15）：连接探活/降级/恢复广播收口在主进程
-  // runtime-supervisor，重连/重生/重试在共享 client（src/daemon/client.ts 的
+  // runtime-supervisor，重连/重生/重试在共享 client（Pico Host 的
   // RuntimeSubscription 重连环 + KERNEL_RETRY_SAFE_METHODS 幂等重试）——全仓
   // 唯一的连接状态机。渲染层不再自维护 ConnectionState，只消费 unavailable/
   // recovered 推送事件展示 AppRuntimePhase（fail-stuck 随 recovered 自动
   // re-bootstrap 消除）。
   const desktopModel = readSource("apps/desktop/src/renderer/model.ts");
   const supervisor = readSource("apps/desktop/src/main/runtime-supervisor.ts");
-  const daemonClient = readSource("src/daemon/client.ts");
+  const daemonClient = readSource("packages/pico-host/src/local-runtime-client.ts");
   // 负向：外壳自维护状态机定义已移除。
   assert.doesNotMatch(
     desktopModel,
