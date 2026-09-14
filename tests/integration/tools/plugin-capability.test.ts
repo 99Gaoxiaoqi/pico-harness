@@ -8,18 +8,18 @@ import {
   defineTrustedPluginCapabilityFactory,
   PluginCapabilityActivationScope,
   PluginCapabilityRegistry,
-} from "../../../src/plugins/plugin-capability.js";
-import type { PluginManagementService } from "../../../src/plugins/plugin-management-service.js";
-import { resolvePluginContributions } from "../../../src/plugins/plugin-resolver.js";
+} from "@pico/pico-host/plugins/plugin-capability";
+import type { PluginManagementService } from "@pico/pico-host/plugins/plugin-management-service";
+import { resolvePluginContributions } from "@pico/pico-host/plugins/plugin-resolver";
 import {
   loadPluginRuntimeSnapshot,
   type PluginRuntimeSnapshotOptions,
-} from "../../../src/plugins/plugin-runtime-snapshot.js";
+} from "@pico/pico-host/plugins/plugin-runtime-snapshot";
 import type {
   PluginContributionSet,
   PluginManifest,
   ResolvedPluginIdentity,
-} from "../../../src/plugins/plugin-types.js";
+} from "@pico/pico-host/plugins/plugin-types";
 
 test("plugin capability manifest is declarative and rejects executable-shaped fields", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "pico-plugin-capability-manifest-"));

@@ -6,9 +6,9 @@ import { test } from "node:test";
 import { createRuntimeRequest } from "../../../packages/protocol/src/index.js";
 import { DesktopRuntimeService, WorkspaceRuntimeService } from "../../../src/daemon/index.js";
 import { globalSessionManager } from "../../../src/engine/session.js";
-import { PluginRuntimeSnapshotRegistry } from "../../../src/plugins/plugin-runtime-snapshot-registry.js";
-import type { PluginRuntimeSnapshot } from "../../../src/plugins/plugin-runtime-snapshot.js";
-import { PluginCapabilityRegistry } from "../../../src/plugins/plugin-capability.js";
+import { PluginRuntimeSnapshotRegistry } from "@pico/pico-host/plugins/plugin-runtime-snapshot-registry";
+import type { PluginRuntimeSnapshot } from "@pico/pico-host/plugins/plugin-runtime-snapshot";
+import { PluginCapabilityRegistry } from "@pico/pico-host/plugins/plugin-capability";
 import { createProductionLocalDaemonHost } from "../../../src/daemon/production-host.js";
 import { WorkspaceTrustStore } from "../../../src/security/workspace-trust.js";
 import {
