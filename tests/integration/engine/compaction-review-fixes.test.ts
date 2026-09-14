@@ -21,7 +21,7 @@ import { Session } from "../../../src/engine/session.js";
 import { RuntimeRun } from "../../../src/runtime/runtime-run.js";
 import { FULL_COMPACTION_SUMMARY_MARKER } from "../../../src/context/compaction-markers.js";
 import { computeCheckpointSourceDigest } from "../../../src/context/runtime-compaction-checkpoint.js";
-import { compactSubagentContext } from "../../../src/engine/subagent-context.js";
+import { compactSubagentContext } from "../../../packages/runtime/src/subagent-context.js";
 import { Compactor, sanitizeToolPairs } from "../../../src/context/compactor.js";
 import { CHARS_PER_TOKEN, estimateModelInputTokens } from "../../../src/context/context-budget.js";
 import type { Message } from "../../../src/schema/message.js";
