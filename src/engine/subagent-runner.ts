@@ -28,7 +28,11 @@ import type { EngineRuntimePort } from "./runtime-port.js";
 import { SilentReporter } from "@pico/runtime/silent-reporter";
 import type { Session } from "./session.js";
 import type { BudgetDecision } from "@pico/runtime";
-import { generateSubagentResponse, buildSubagentEvidenceSnapshot } from "./subagent-context.js";
+import {
+  generateSubagentResponse,
+  buildSubagentEvidenceSnapshot,
+  type SubagentResponseRuntime,
+} from "@pico/runtime/subagent-context";
 import {
   buildRuntimeToolResultInput,
   buildEphemeralToolResult,
@@ -50,7 +54,7 @@ export interface SubagentRunOptions {
   workDir?: string;
 }
 
-export interface SubagentExecutionRuntime {
+export interface SubagentExecutionRuntime extends SubagentResponseRuntime {
   provider: LLMProvider;
   compactor?: Compactor;
   thinkingEffort: string;
@@ -243,6 +247,7 @@ export class SubagentRunner {
           this.options.onRetry,
           signal,
           retainFinalizeToolPrefix ? { toolChoice: "none" } : undefined,
+          logger,
         );
       } catch (error) {
         signal?.throwIfAborted();
@@ -329,6 +334,7 @@ export class SubagentRunner {
               runtime.provider.requestCapabilities?.toolChoiceNoneWithTools === true
                 ? { toolChoice: "none" }
                 : undefined,
+              logger,
             );
             const continuationDecision = this.options.budget.consumeResponse(
               runtime,
