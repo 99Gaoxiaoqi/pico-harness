@@ -38,7 +38,7 @@ import {
 import {
   type ActiveAutomationReference,
   type AutomationProviderReference,
-} from "./desktop-automation-service.js";
+} from "@pico/pico-host/desktop-automation-service";
 import {
   errorMessage,
   isJsonRecord,
