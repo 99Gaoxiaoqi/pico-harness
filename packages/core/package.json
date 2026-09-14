@@ -7,6 +7,10 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./keybindings-schema": {
+      "types": "./dist/keybindings-schema.d.ts",
+      "import": "./dist/keybindings-schema.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
