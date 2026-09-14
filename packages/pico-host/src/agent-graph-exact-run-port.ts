@@ -21,8 +21,8 @@ export interface AgentGraphExactRunSession {
   readonly id: string;
   readonly workDir: string;
   readonly hasPendingTasks: boolean;
-  readonly runtimeEventCapability?: object;
-  readonly runtimeEventStore?: Pick<SqliteRuntimeEventStore, "storageRoot">;
+  readonly runtimeEventCapability?: object | undefined;
+  readonly runtimeEventStore?: Pick<SqliteRuntimeEventStore, "storageRoot"> | undefined;
 }
 
 export interface AgentGraphExactRunSessionLease {

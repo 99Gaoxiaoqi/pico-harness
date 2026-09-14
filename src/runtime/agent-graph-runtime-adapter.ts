@@ -1,26 +1,2 @@
-// 兼容旧入口；Graph Runtime adapter 属于 Runtime，Session 由 Port 注入。
-export {
-  AGENT_GRAPH_HANDOFF_MAX_RECORD_BYTES,
-  AGENT_GRAPH_HANDOFF_MAX_RECORDS,
-  AGENT_GRAPH_HANDOFF_MAX_TOTAL_BYTES,
-  AgentGraphRuntimeAdapter,
-  type AgentGraphExactRunIndeterminateReason,
-  type AgentGraphExactRunInspection,
-  type AgentGraphExactRunPort,
-  type AgentGraphManagedSession,
-  type AgentGraphOutputLedgerPort,
-  type AgentGraphRecordStorePort,
-  type AgentGraphRuntimeAdapterOptions,
-  type AgentGraphSessionLease,
-  type AgentGraphSessionManagerPort,
-  type AgentGraphSessionOptions,
-  type CommittedAgentOutputSource,
-  type EnsureAgentGraphOperatorProvisionInput,
-  type EnsuredAgentGraphOperatorSession,
-  type ResolvedAgentGraphHandoff,
-  type ResolvedAgentGraphHandoffRecord,
-  type ResolvedAgentGraphResource,
-  type StartExactAgentGraphRunInput,
-  type StartOrObserveAgentGraphActivationInput,
-  type StartOrObserveAgentGraphActivationResult,
-} from "@pico/runtime";
+/** @deprecated 复用宿主包的产品装配。 */
+export * from "@pico/pico-host/agent-graph-runtime-adapter";
