@@ -4,12 +4,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { AgentEngine } from "../../../src/engine/loop.js";
+import { AgentEngine } from "@pico/pico-host/agent-engine";
+import { AgentEngine as CompatibilityAgentEngine } from "../../../src/engine/loop.js";
+import { AgentEngine as RuntimeAgentEngine } from "@pico/runtime/agent-engine";
 import { Session } from "../../../src/engine/session.js";
 import type { LLMProvider } from "../../../src/provider/interface.js";
 import { ToolRegistry } from "../../../src/tools/registry-impl.js";
 
 test("AgentEngine still rejects a live same-Session re-entrant run", async () => {
+  assert.equal(CompatibilityAgentEngine, AgentEngine);
+  assert.equal(Object.getPrototypeOf(AgentEngine.prototype), RuntimeAgentEngine.prototype);
   const workDir = await mkdtemp(join(tmpdir(), "pico-agent-engine-live-reentry-"));
   const session = new Session("agent-engine-live-reentry", workDir, { persistence: false });
   let providerCalls = 0;

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { AgentEngine } from "../../../src/engine/loop.js";
+import { AgentEngine } from "@pico/pico-host/agent-engine";
 import { ToolRegistry } from "../../../src/tools/registry-impl.js";
 import { MAX_TOOL_RESULT_BYTES } from "../../../src/tools/tool-result-observation.js";
 import type { LLMProvider } from "../../../src/provider/interface.js";
