@@ -2,6 +2,7 @@ import { realpathSync, statSync } from "node:fs";
 import { realpath as realpathAsync, stat as statAsync } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { ToolCall } from "@pico/core";
+import type { RequestMiddleware } from "./tool-registry-contract.js";
 import { bashCommandFromArgs, extractBashWritePaths } from "@pico/runtime/bash-paths";
 import {
   canReadPath,
@@ -12,6 +13,22 @@ import {
 } from "@pico/core/permission-profile";
 
 const OUTSIDE_WORKSPACE_MESSAGE = "路径不在当前工作区。请先运行 /add-dir <directory> 授权该目录。";
+
+export function buildWorkspaceBoundaryMiddleware(roots: WorkspaceRoots): RequestMiddleware {
+  return async (call) => {
+    for (const access of workspaceAccessesFromCall(call)) {
+      try {
+        await roots.assertAllowed(access.path, { access: access.access });
+      } catch (error) {
+        return {
+          allowed: false,
+          reason: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }
+    return { allowed: true };
+  };
+}
 
 export interface AddDirectoryResult {
   added: boolean;
