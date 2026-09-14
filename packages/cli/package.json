@@ -35,6 +35,10 @@
       "types": "./dist/rewind-presentation.d.ts",
       "import": "./dist/rewind-presentation.js"
     },
+    "./resources-commands": {
+      "types": "./dist/resources-commands.d.ts",
+      "import": "./dist/resources-commands.js"
+    },
     "./terminal-reporter": {
       "types": "./dist/terminal-reporter.d.ts",
       "import": "./dist/terminal-reporter.js"
@@ -59,6 +63,7 @@
   "dependencies": {
     "@pico/core": "*",
     "@pico/pico-host": "*",
+    "@pico/protocol": "*",
     "@pico/storage": "*",
     "picocolors": "^1.1.1"
   },
