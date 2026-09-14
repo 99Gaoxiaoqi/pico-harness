@@ -7,6 +7,10 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./provider/*": {
+      "types": "./dist/provider/*.d.ts",
+      "import": "./dist/provider/*.js"
+    },
     "./trace": {
       "types": "./dist/trace.d.ts",
       "import": "./dist/trace.js"
