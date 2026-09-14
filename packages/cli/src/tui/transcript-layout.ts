@@ -1,0 +1,147 @@
+import type { TuiEntry } from "./tui-reporter.js";
+import { groupToolEntries } from "./tool-grouping.js";
+import { buildToolCardVisualRows } from "./tool-card.js";
+import { buildLogoPanelRows } from "./logo-panel.js";
+import { buildErrorEntryRows } from "./message-row.js";
+import { buildSubagentActivityCardRows } from "./subagent-activity-card.js";
+import { TerminalMarkdownModel } from "./terminal-markdown-model.js";
+export { terminalWidth, visualRows } from "./terminal-width.js";
+import { visualRows } from "./terminal-width.js";
+
+export interface TranscriptLayoutOptions {
+  wrapWidth: number;
+  expandedToolKey?: (string | null) | undefined;
+  approvalRows?: number | undefined;
+}
+
+export interface TranscriptLayoutItem {
+  key: string;
+  entry: TuiEntry;
+  /** 当前可由 transcript 快捷键展开的最近工具。 */
+  focusedTool: boolean;
+  rows: number;
+  separatorRows: number;
+}
+
+export interface TranscriptLayout {
+  entries: TuiEntry[];
+  items: TranscriptLayoutItem[];
+  wrapWidth: number;
+  contentRows: number;
+  approvalRows: number;
+  totalRows: number;
+}
+
+export function buildTranscriptLayout(
+  sourceEntries: readonly TuiEntry[],
+  options: TranscriptLayoutOptions,
+): TranscriptLayout {
+  const entries = groupToolEntries(sourceEntries.slice());
+  const keys = entries.map((entry, index) => transcriptEntryKey(entry, index));
+  const focusedToolKey = findLatestToolKey(entries, keys);
+  const items = entries.map((entry, index) => {
+    const key = keys[index]!;
+    const focusedTool = key === focusedToolKey;
+    const separatorRows = entry.kind === "user" && index > 0 ? 1 : 0;
+    return {
+      key,
+      entry,
+      focusedTool,
+      separatorRows,
+      rows:
+        separatorRows +
+        entryRows(
+          entry,
+          options.wrapWidth,
+          focusedTool && key === options.expandedToolKey,
+          index === entries.length - 1,
+          focusedTool,
+        ),
+    };
+  });
+  const contentRows = items.reduce((total, item) => total + item.rows, 0);
+  const approvalRows = normalizeRows(options.approvalRows);
+
+  return {
+    entries,
+    items,
+    wrapWidth: normalizeWrapWidth(options.wrapWidth),
+    contentRows,
+    approvalRows,
+    totalRows: contentRows + approvalRows,
+  };
+}
+
+function findLatestToolKey(entries: readonly TuiEntry[], keys: readonly string[]): string | null {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    if (entries[index]?.kind === "tool") return keys[index] ?? null;
+  }
+  return null;
+}
+
+export function transcriptEntryKey(entry: TuiEntry, index: number): string {
+  if (entry.uiEntryId) return entry.uiEntryId;
+  if (entry.kind === "tool") return `tool:${index}:${entry.name}:${entry.args}`;
+  return `${entry.kind}:${index}`;
+}
+
+function entryRows(
+  entry: TuiEntry,
+  wrapWidth: number,
+  expanded: boolean,
+  isLast: boolean,
+  focusedTool: boolean,
+): number {
+  // 兼容旧会话中仅用于 spinner 的空 thinking 占位；新 reasoning 条目按正文计高。
+  if (entry.kind === "thinking") {
+    return entry.content ? new TerminalMarkdownModel(entry.content).measure(wrapWidth) + 1 : 0;
+  }
+  if (entry.kind === "tool") {
+    return buildToolCardVisualRows({
+      ...entry,
+      expanded,
+      isLast,
+      wrapWidth,
+      canToggle: focusedTool,
+    }).length;
+  }
+  if (entry.kind === "logo")
+    return buildLogoPanelRows({ ...entry, renderWidth: wrapWidth }).length + 1;
+  if (entry.kind === "error") return buildErrorEntryRows(entry, wrapWidth).length + 1;
+  if (entry.kind === "subagent-activity") {
+    return buildSubagentActivityCardRows(entry, wrapWidth).length + 1;
+  }
+  if (entry.kind === "skill") {
+    const label = `Skill activated: ${entry.name}${entry.args ? ` ${entry.args}` : ""}`;
+    return visualRows(label, wrapWidth).length + 1;
+  }
+  if (entry.kind === "plan") {
+    return visualRows([entry.title, entry.detail].filter(Boolean).join("\n"), wrapWidth).length + 1;
+  }
+  if (entry.kind === "approval" || entry.kind === "prompt" || entry.kind === "changes") {
+    return visualRows([entry.title, entry.detail].filter(Boolean).join("\n"), wrapWidth).length + 1;
+  }
+  if (entry.kind === "run-boundary") {
+    if (entry.status === "failed" && entry.error) {
+      return (
+        buildErrorEntryRows({ kind: "error", message: entry.error, retryable: true }, wrapWidth)
+          .length + 1
+      );
+    }
+    return 1;
+  }
+  if (entry.kind === "assistant") {
+    return new TerminalMarkdownModel(entry.content).measure(wrapWidth) + 1;
+  }
+  return "content" in entry ? visualRows(entry.content, wrapWidth).length + 1 : 1;
+}
+
+function normalizeWrapWidth(width: number): number {
+  if (!Number.isFinite(width) || width < 1) return 80;
+  return Math.max(1, Math.floor(width));
+}
+
+function normalizeRows(rows: number | undefined): number {
+  if (rows === undefined || !Number.isFinite(rows) || rows < 0) return 0;
+  return Math.floor(rows);
+}
