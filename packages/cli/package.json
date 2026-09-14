@@ -19,6 +19,10 @@
       "types": "./dist/command-contracts.d.ts",
       "import": "./dist/command-contracts.js"
     },
+    "./entry-dispatch": {
+      "types": "./dist/entry-dispatch.d.ts",
+      "import": "./dist/entry-dispatch.js"
+    },
     "./hook-management-commands": {
       "types": "./dist/hook-management-commands.d.ts",
       "import": "./dist/hook-management-commands.js"

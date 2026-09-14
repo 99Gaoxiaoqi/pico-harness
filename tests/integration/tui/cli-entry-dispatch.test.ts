@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { runCli, type CliRuntime } from "../../../src/cli/main.js";
+import { runCli, type CliRuntime } from "@pico/cli/entry-dispatch";
+import { runCli as legacyRunCli } from "../../../src/cli/main.js";
 import type { ClientReplOptions } from "../../../src/tui/client-repl.js";
 import type { CliStartupSession } from "../../../src/cli/session-args.js";
 
@@ -14,6 +15,7 @@ interface DispatchHarness {
   readonly stderr: string[];
   readonly stdout: string[];
   clientCalls: ClientReplOptions[];
+  readonly daemonStopCalls: number;
   setSessionSelection(selection: CliStartupSession["sessionSelection"]): void;
   run(args: string[]): Promise<number>;
 }
@@ -22,6 +24,7 @@ function harnessWithRuntime(): DispatchHarness {
   const stderr: string[] = [];
   const stdout: string[] = [];
   const clientCalls: ClientReplOptions[] = [];
+  let daemonStopCalls = 0;
   let sessionSelection: CliStartupSession["sessionSelection"] = {
     mode: "new",
     sessionId: "console:x",
@@ -38,17 +41,34 @@ function harnessWithRuntime(): DispatchHarness {
     startClientRepl: async (options) => {
       clientCalls.push(options);
     },
+    stopLocalDaemon: async () => {
+      daemonStopCalls++;
+    },
   };
   return {
     stderr,
     stdout,
     clientCalls,
+    get daemonStopCalls() {
+      return daemonStopCalls;
+    },
     setSessionSelection: (selection) => {
       sessionSelection = selection;
     },
     run: (args) => runCli(args, runtime),
   };
 }
+
+test("cli dispatch: 旧入口保持同一实现的兼容导出", () => {
+  assert.equal(legacyRunCli, runCli);
+});
+
+test("cli dispatch: --daemon-stop 仅委派给进程宿主", async () => {
+  const harness = harnessWithRuntime();
+  assert.equal(await harness.run(["--daemon-stop"]), 0);
+  assert.equal(harness.daemonStopCalls, 1);
+  assert.equal(harness.clientCalls.length, 0);
+});
 
 test("cli dispatch: 默认（无旗标）走客户端瘦 TUI", async () => {
   const harness = harnessWithRuntime();
