@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createProvider, type ProviderKind } from "../../../src/provider/factory.js";
+import { createProvider, type ProviderKind } from "@pico/pico-host/provider/factory";
 import { resolveModelRouteCapabilities } from "../../../src/provider/model-capabilities.js";
 import { ContextOverflowError, LLMStatusError } from "../../../src/provider/errors.js";
 import { AgentEngine } from "../../../src/engine/loop.js";

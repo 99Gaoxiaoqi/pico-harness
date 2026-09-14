@@ -3,16 +3,16 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { EffectiveConfigResolver } from "../../../src/input/effective-config.js";
-import { loadPicoProjectConfig } from "../../../src/input/pico-config.js";
+import { EffectiveConfigResolver } from "@pico/pico-host/input/effective-config";
+import { loadPicoProjectConfig } from "@pico/pico-host/input/pico-config";
 import {
   parseUserConfig,
   UserConfigStore,
   type PicoUserConfig,
-} from "../../../src/input/user-config-store.js";
-import type { CredentialVault } from "../../../src/provider/credential-vault.js";
-import { loadEffectiveModelRuntime } from "../../../src/provider/effective-model-runtime.js";
-import { createProvider } from "../../../src/provider/factory.js";
+} from "@pico/pico-host/input/user-config-store";
+import type { CredentialVault } from "@pico/pico-host/provider/credential-vault";
+import { loadEffectiveModelRuntime } from "@pico/pico-host/provider/effective-model-runtime";
+import { createProvider } from "@pico/pico-host/provider/factory";
 import { assertPrivatePermissions } from "../helpers/private-file-mode.js";
 
 test("durable and live user defaults reject the removed combined mode field", async (context) => {
