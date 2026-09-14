@@ -4,7 +4,7 @@ import {
   DISABLE_MOUSE_TRACKING,
   ENABLE_MOUSE_TRACKING,
   setTerminalMouseTrackingMode,
-} from "./terminal-grid.js";
+} from "@pico/cli/terminal-grid";
 
 export { DISABLE_MOUSE_TRACKING, ENABLE_MOUSE_TRACKING };
 

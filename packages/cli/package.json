@@ -39,6 +39,10 @@
       "types": "./dist/terminal-reporter.d.ts",
       "import": "./dist/terminal-reporter.js"
     },
+    "./terminal-grid": {
+      "types": "./dist/terminal-grid.d.ts",
+      "import": "./dist/terminal-grid.js"
+    },
     "./session-resolver": {
       "types": "./dist/session-resolver.d.ts",
       "import": "./dist/session-resolver.js"
