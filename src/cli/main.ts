@@ -9,7 +9,6 @@ import "../tui/preload-env.js";
 import { readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseArgs } from "node:util";
 import {
   readHostRegistration,
   resolveRootControlNamespace,
@@ -19,234 +18,14 @@ import { LocalRuntimeClient } from "@pico/pico-host/local-runtime-client";
 import { resolveCanonicalPicoHome } from "../paths/pico-paths.js";
 import { sleepForRetry } from "@pico/runtime/provider-retry";
 import { primeTokenizer } from "@pico/runtime";
-import { isValidThinkingEffort, type ThinkingEffort } from "../provider/thinking.js";
 import { ensureWorkspaceTrusted } from "@pico/pico-host/workspace-trust";
-import { startClientRepl, type ClientReplOptions } from "../tui/client-repl.js";
-import {
-  resolveCliStartupSession,
-  resolveCliWorkDir,
-  type CliStartupSession,
-  type ResolveCliStartupSessionOptions,
-} from "@pico/cli/session-args";
+import { startClientRepl } from "../tui/client-repl.js";
+import { resolveCliStartupSession, resolveCliWorkDir } from "@pico/cli/session-args";
 import { createTerminalWorkspaceTrustPrompt } from "@pico/cli/workspace-trust-prompt";
+import { runCli, type CliRuntime } from "@pico/cli/entry-dispatch";
 
-const RETIRED_OPTIONS = new Set([
-  "--tui",
-  "--prompt",
-  "--serve",
-  "--port",
-  "--acp",
-  "--feishu",
-  "--mode",
-  "--plan",
-  "--trace",
-  "--image",
-  "--list-snapshots",
-  "--rewind",
-  "--rewind-mode",
-  "--rollback",
-  "--steer",
-  "--local",
-]);
-
-const HELP_TEXT = `Usage: pico [options]
-
-Start the interactive Pico TUI in the current directory.
-
-Options:
-  --thinking <off|low|medium|high>   Override the model's default reasoning level
-  --dir <path>                       Workspace directory (default: current directory)
-  --model <provider/model|name>      Configured model route or unique model name
-  -S, --resume <id>                  Resume a session by id
-  -c, --continue                     Continue the latest session in this project
-      --graph                        Start with persistent Agent Graph scheduling enabled
-      --swarm                        Start with autonomous Swarm orchestration (exclusive with --graph)
-  --fork <id>                        Fork a saved session into a new session
-      --daemon-stop                  Stop the resident local daemon gracefully
-  -h, --help                         Show this help without starting the TUI
-  -V, --version                      Show the installed version
-`;
-
-export interface CliRuntime {
-  env: Readonly<Record<string, string | undefined>>;
-  version: string;
-  writeStdout(text: string): void;
-  writeStderr(text: string): void;
-  primeTokenizer(): Promise<void>;
-  resolveCliWorkDir(dir: string | undefined): Promise<string>;
-  ensureWorkspaceTrusted(workDir: string): Promise<void>;
-  resolveCliStartupSession(
-    args: readonly string[],
-    options?: ResolveCliStartupSessionOptions,
-  ): Promise<CliStartupSession>;
-  startClientRepl(options: ClientReplOptions): Promise<void>;
-}
-
-interface ParsedCliOptions {
-  thinkingEffort?: ThinkingEffort;
-  dir?: string;
-  model?: string;
-  graph: boolean;
-  swarm: boolean;
-  help: boolean;
-  version: boolean;
-  daemonStop: boolean;
-}
-
-interface ParsedCliValues {
-  thinking?: string;
-  dir?: string;
-  model?: string;
-  continue?: boolean;
-  graph?: boolean;
-  swarm?: boolean;
-  resume?: string;
-  fork?: string;
-  "daemon-stop"?: boolean;
-  help?: boolean;
-  version?: boolean;
-}
-
-class CliUsageError extends Error {}
-
-export async function runCli(args: readonly string[], runtime: CliRuntime): Promise<number> {
-  try {
-    const options = parseCliOptions(args);
-    if (options.help) {
-      runtime.writeStdout(HELP_TEXT);
-      return 0;
-    }
-    if (options.version) {
-      runtime.writeStdout(`${runtime.version}\n`);
-      return 0;
-    }
-    if (options.daemonStop) {
-      return await stopLocalDaemon(runtime);
-    }
-
-    // 只先解析真实路径；信任门通过前不读项目 session / config / Skills，
-    // 也不启动 Provider、LSP、MCP 或 Hook。
-    const workDir = await runtime.resolveCliWorkDir(options.dir);
-    await runtime.ensureWorkspaceTrusted(workDir);
-    await runtime.primeTokenizer();
-    const { sessionSelection } = await runtime.resolveCliStartupSession(args, {
-      trustedWorkDir: workDir,
-    });
-
-    // 3-D Phase 5（2026-08-16）：交互进程内路径退役——TUI 唯一形态是 daemon
-    // 瘦客户端（connectOrSpawn 拉起/连上常驻 daemon），本进程零引擎装配。
-    // 模型路由归 daemon（BYOK 旗标经 --model/--thinking 合并）；
-    // --continue/--fork/-S 启动会话三式全支持；--graph 经
-    // session.settings.update 应用。
-    const clientSessionId =
-      sessionSelection.mode === "resume" || sessionSelection.mode === "continue"
-        ? sessionSelection.sessionId
-        : undefined;
-    const forkFrom =
-      sessionSelection.mode === "fork" ? sessionSelection.sourceSessionId : undefined;
-    await runtime.startClientRepl({
-      workDir,
-      ...(clientSessionId ? { sessionId: clientSessionId } : {}),
-      ...(forkFrom ? { forkFrom } : {}),
-      ...(options.model !== undefined ? { model: options.model } : {}),
-      ...(options.thinkingEffort !== undefined ? { thinkingEffort: options.thinkingEffort } : {}),
-      ...(options.graph ? { graphMode: true } : {}),
-      ...(options.swarm ? { swarmMode: true } : {}),
-    });
-    return 0;
-  } catch (error) {
-    runtime.writeStderr(`${formatCliError(error)}\n`);
-    return 1;
-  }
-}
-
-function parseCliOptions(args: readonly string[]): ParsedCliOptions {
-  const retired = findRetiredOption(args);
-  if (retired) {
-    throw new CliUsageError(
-      `启动参数 ${retired} 已退役。Pico 现在只提供交互式 TUI 入口；直接运行 pico，或用 pico --help 查看仍支持的参数。`,
-    );
-  }
-
-  let values: ParsedCliValues;
-  try {
-    const parsed = parseArgs({
-      args: [...args],
-      options: {
-        thinking: { type: "string" },
-        dir: { type: "string" },
-        model: { type: "string" },
-        continue: { type: "boolean", short: "c" },
-        graph: { type: "boolean" },
-        swarm: { type: "boolean" },
-        resume: { type: "string", short: "S" },
-        fork: { type: "string" },
-        "daemon-stop": { type: "boolean" },
-        help: { type: "boolean", short: "h" },
-        version: { type: "boolean", short: "V" },
-      },
-    });
-    values = parsed.values as ParsedCliValues;
-  } catch (error) {
-    throw normalizeParseArgsError(error);
-  }
-
-  if (values.graph && values.swarm) {
-    throw new CliUsageError("--graph 与 --swarm 不能同时使用，请选择一种编排模式。");
-  }
-
-  const thinkingEffort =
-    values.thinking === undefined ? undefined : parseCliThinkingEffort(values.thinking);
-
-  return {
-    ...(thinkingEffort !== undefined ? { thinkingEffort } : {}),
-    ...(typeof values.dir === "string" ? { dir: values.dir } : {}),
-    ...(typeof values.model === "string" ? { model: values.model } : {}),
-    graph: values.graph === true,
-    swarm: values.swarm === true,
-    help: values.help === true,
-    version: values.version === true,
-    daemonStop: values["daemon-stop"] === true,
-  };
-}
-
-function parseCliThinkingEffort(raw: string): ThinkingEffort {
-  const normalized = raw.trim().toLowerCase();
-  if (!isValidThinkingEffort(normalized)) {
-    throw new CliUsageError(`--thinking 只接受 off、low、medium 或 high；收到 ${raw || "(空值)"}`);
-  }
-  return normalized;
-}
-
-function findRetiredOption(args: readonly string[]): string | undefined {
-  for (const arg of args) {
-    if (!arg.startsWith("--")) continue;
-    const option = arg.split("=", 1)[0];
-    if (option && RETIRED_OPTIONS.has(option)) return option;
-  }
-  return undefined;
-}
-
-function normalizeParseArgsError(error: unknown): CliUsageError {
-  if (!(error instanceof Error)) return new CliUsageError(String(error));
-  const code = "code" in error ? String(error.code) : "";
-  if (code === "ERR_PARSE_ARGS_UNKNOWN_OPTION") {
-    const option = error.message.match(/'([^']+)'/u)?.[1] ?? "(无法识别)";
-    return new CliUsageError(`未知启动参数: ${option}。请运行 pico --help 查看可用参数。`);
-  }
-  if (code === "ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL") {
-    const positional = error.message.match(/'([^']+)'/u)?.[1] ?? "(无法识别)";
-    return new CliUsageError(
-      `不支持位置参数: ${positional}。Pico 现在只提供交互式 TUI 入口；请运行 pico --help。`,
-    );
-  }
-  return new CliUsageError(`${error.message}。请运行 pico --help 查看可用参数。`);
-}
-
-function formatCliError(error: unknown): string {
-  if (error instanceof CliUsageError) return error.message;
-  return `TUI 启动失败: ${error instanceof Error ? error.message : String(error)}`;
-}
+/** @deprecated CLI 分派已迁至 @pico/cli。 */
+export { runCli, type CliRuntime } from "@pico/cli/entry-dispatch";
 
 async function loadPackageVersion(): Promise<string> {
   const packagePath = new URL("../../package.json", import.meta.url);
@@ -264,12 +43,12 @@ async function loadPackageVersion(): Promise<string> {
  * 客户端只在成功响应刷出、registration 消失且原进程退出后返回；这里再次读取
  * registration，避免 CLI 在状态根并发变化时误报。
  */
-async function stopLocalDaemon(runtime: CliRuntime): Promise<number> {
+async function stopLocalDaemon(runtime: CliRuntime): Promise<void> {
   const picoHome = resolveCanonicalPicoHome({ env: runtime.env });
   const registration = await readLocalDaemonRegistration(picoHome);
   if (!registration) {
     runtime.writeStdout("本机 Runtime daemon 未在运行。\n");
-    return 0;
+    return;
   }
   const client = new LocalRuntimeClient({ runtimeHostRootPath: picoHome });
   try {
@@ -282,7 +61,7 @@ async function stopLocalDaemon(runtime: CliRuntime): Promise<number> {
     const current = await readLocalDaemonRegistration(picoHome);
     if (!current || current.pid !== registration.pid || !(await isProcessAlive(registration.pid))) {
       runtime.writeStdout("本机 Runtime daemon 已优雅停止。\n");
-      return 0;
+      return;
     }
     await sleepForRetry(200);
   }
@@ -338,6 +117,9 @@ async function executeEntrypoint(): Promise<void> {
     },
     resolveCliStartupSession,
     startClientRepl,
+    stopLocalDaemon: async () => {
+      await stopLocalDaemon(runtime);
+    },
   };
   process.exitCode = await runCli(process.argv.slice(2), runtime);
 }

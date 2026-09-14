@@ -1,5 +1,6 @@
 export * from "./command-availability.js";
 export * from "./command-contracts.js";
+export * from "./entry-dispatch.js";
 export * from "./hook-management-commands.js";
 export * from "./keybindings-schema.js";
 export * from "./rewind-presentation.js";
