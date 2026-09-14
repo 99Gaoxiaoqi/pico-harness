@@ -1,7 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 const snapshotPath = new URL("./model-pricing/snapshot.json", import.meta.url);
-const target = new URL("../src/observability/model-pricing.generated.ts", import.meta.url);
+const target = new URL("../packages/pico-host/src/model-pricing.generated.ts", import.meta.url);
 let snapshot = JSON.parse(await readFile(snapshotPath, "utf8"));
 const defaults = {
   openai: "https://api.openai.com/v1",
