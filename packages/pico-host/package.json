@@ -7,6 +7,26 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./global-approval-manager": {
+      "types": "./dist/global-approval-manager.d.ts",
+      "import": "./dist/global-approval-manager.js"
+    },
+    "./logger": {
+      "types": "./dist/logger.d.ts",
+      "import": "./dist/logger.js"
+    },
+    "./transcript-event-store": {
+      "types": "./dist/transcript-event-store.d.ts",
+      "import": "./dist/transcript-event-store.js"
+    },
+    "./transcript-tool-result-hydration": {
+      "types": "./dist/transcript-tool-result-hydration.d.ts",
+      "import": "./dist/transcript-tool-result-hydration.js"
+    },
+    "./transcript-durability": {
+      "types": "./dist/transcript-durability.d.ts",
+      "import": "./dist/transcript-durability.js"
+    },
     "./background-autonomous-policy": {
       "types": "./dist/background-autonomous-policy.d.ts",
       "import": "./dist/background-autonomous-policy.js"
@@ -540,6 +560,8 @@
     "dist"
   ],
   "dependencies": {
+    "pino": "^10.1.0",
+    "pino-pretty": "^13.1.3",
     "@pico/core": "*",
     "@pico/protocol": "*",
     "@pico/runtime": "*",
