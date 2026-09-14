@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { parseStrictRuntimeParams, type RuntimeResult } from "@pico/protocol";
 import { configResultValidators } from "../../../packages/protocol/src/runtime/config.js";
-import { DesktopProviderConfigService } from "../../../src/daemon/desktop-provider-config-service.js";
+import { DesktopProviderConfigService } from "@pico/pico-host/desktop-provider-config-service";
 import { parseModelProviderConfigs } from "../../../src/input/pico-config.js";
 import { parseUserConfig, UserConfigStore } from "../../../src/input/user-config-store.js";
 import { loadModelRouter } from "../../../src/provider/model-router.js";

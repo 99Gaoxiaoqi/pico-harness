@@ -7,7 +7,7 @@ import { ApprovalManager, type ApprovalResult } from "../../../src/approval/mana
 import {
   DesktopInteractionBroker,
   DesktopInteractionVersionConflictError,
-} from "../../../src/daemon/desktop-interaction-broker.js";
+} from "@pico/pico-host/desktop-interaction-broker";
 import {
   FileDesktopInteractionStore,
   type DesktopInteractionStore,
