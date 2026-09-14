@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createDesktopAutomationRequestHandlers } from "../../../src/daemon/desktop-automation-request-handlers.js";
-import { createDesktopCatalogRequestHandlers } from "../../../src/daemon/desktop-catalog-request-handlers.js";
+import { createDesktopCatalogRequestHandlers } from "@pico/pico-host/desktop-catalog-request-handlers";
 import type { DesktopAutomationService } from "@pico/pico-host/desktop-automation-service";
 import { createTypedRuntimeRequest } from "../../../packages/protocol/src/index.js";
 import { UserMcpConfigStore } from "../../../src/mcp/user-config-store.js";
